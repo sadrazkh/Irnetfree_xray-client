@@ -1,0 +1,88 @@
+{
+  "name": "irnetfree",
+  "version": "1.0.0",
+  "description": "IRNetFree — a clean, modern desktop VPN client for Xray configs (proxy, tunnel, routing, ping & IP check)",
+  "main": "src/main/main.js",
+  "author": "IRNetFree",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "get-xray": "node scripts/download-xray.js",
+    "gen-icons": "node scripts/gen-icons.js",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:mac:x64": "electron-builder --mac --x64",
+    "dist:mac:arm64": "electron-builder --mac --arm64",
+    "dist:linux": "electron-builder --linux",
+    "pack": "electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.irnetfree.client",
+    "productName": "IRNetFree",
+    "copyright": "Copyright © IRNetFree",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "bin",
+        "to": "bin",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "requireAdministrator",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "IRNetFree",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "artifactName": "IRNetFree-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "IRNetFree-Portable-${version}.${ext}"
+    },
+    "mac": {
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.utilities",
+      "darkModeSupport": true,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null,
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ]
+    },
+    "dmg": {
+      "artifactName": "IRNetFree-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "category": "Network",
+      "synopsis": "Desktop VPN client for Xray configs",
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb", "arch": ["x64"] }
+      ],
+      "artifactName": "IRNetFree-${version}-${arch}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}

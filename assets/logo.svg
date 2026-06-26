@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f8cff"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
+    </linearGradient>
+    <linearGradient id="gd" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#161d27"/>
+      <stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- rounded background -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#gd)"/>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="none" stroke="url(#g)" stroke-width="6" opacity="0.5"/>
+
+  <!-- shield -->
+  <g filter="url(#glow)">
+    <path d="M256 92 L392 142 V268 C392 350 332 404 256 432 C180 404 120 350 120 268 V142 Z"
+          fill="none" stroke="url(#g)" stroke-width="16" stroke-linejoin="round"/>
+  </g>
+
+  <!-- globe / network meridians inside shield -->
+  <g stroke="url(#g)" stroke-width="9" fill="none" stroke-linecap="round" opacity="0.95">
+    <circle cx="256" cy="262" r="78"/>
+    <ellipse cx="256" cy="262" rx="34" ry="78"/>
+    <line x1="178" y1="262" x2="334" y2="262"/>
+    <line x1="190" y1="218" x2="322" y2="218"/>
+    <line x1="190" y1="306" x2="322" y2="306"/>
+  </g>
+
+  <!-- network nodes -->
+  <g fill="#2dd4bf">
+    <circle cx="256" cy="184" r="11"/>
+    <circle cx="334" cy="262" r="11"/>
+    <circle cx="178" cy="262" r="11"/>
+    <circle cx="256" cy="340" r="11"/>
+  </g>
+</svg>

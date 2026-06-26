@@ -1,0 +1,59 @@
+name: Build & Release
+
+# Builds IRNetFree for Windows, macOS (Intel + Apple Silicon) and Linux, then
+# publishes the artifacts to a GitHub Release.
+#
+# Trigger: push a version tag, e.g.
+#   git tag v1.0.0
+#   git push origin v1.0.0
+# (You can also run it manually from the Actions tab.)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            build: npm run dist:win
+          - os: macos-latest
+            build: npm run dist:mac
+          - os: ubuntu-latest
+            build: npm run dist:linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Linux packaging tools
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y fakeroot dpkg rpm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate icons
+        run: npm run gen-icons
+
+      - name: Build and publish
+        env:
+          # Provided automatically by GitHub Actions — used to upload the
+          # release assets. No manual secret needed.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ${{ matrix.build }} -- --publish always

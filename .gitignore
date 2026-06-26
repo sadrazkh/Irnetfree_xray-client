@@ -1,0 +1,9 @@
+node_modules/
+dist/
+bin/xray
+bin/xray.exe
+bin/*.zip
+bin/geoip.dat
+bin/geosite.dat
+*.log
+.DS_Store
