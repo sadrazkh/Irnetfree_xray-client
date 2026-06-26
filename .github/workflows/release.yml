@@ -28,11 +28,11 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            build: npm run dist:win
+            build: npx electron-builder --win --publish never
           - os: macos-latest
-            build: npm run dist:mac
+            build: npx electron-builder --mac --publish never
           - os: ubuntu-latest
-            build: npm run dist:linux
+            build: npx electron-builder --linux --publish never
 
     steps:
       - name: Checkout
@@ -63,10 +63,14 @@ jobs:
         run: npm run gen-icons
 
       - name: Build
-        shell: bash
         env:
           # Let appimagetool run without a FUSE mount (CI has no /dev/fuse).
           APPIMAGE_EXTRACT_AND_RUN: '1'
+        # electron-builder is called directly (not via `npm run … --`) so the
+        # `--publish never` flag is parsed consistently on every runner shell.
+        # `--publish never` is REQUIRED: on a tag build electron-builder would
+        # otherwise try to auto-publish and fail because no GH_TOKEN is set
+        # here (publishing is handled by the dedicated step below).
         run: ${{ matrix.build }}
 
       - name: Upload build artifacts
