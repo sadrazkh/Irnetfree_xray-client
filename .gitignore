@@ -7,3 +7,8 @@ bin/geoip.dat
 bin/geosite.dat
 *.log
 .DS_Store
+node_modules/
+dist/
+bin/geoip.dat
+bin/geosite.dat
+bin/xray.exe
