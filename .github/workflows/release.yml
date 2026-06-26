@@ -1,17 +1,19 @@
 name: Build & Release
 
 # Builds IRNetFree for Windows, macOS (Intel + Apple Silicon) and Linux, then
-# publishes the artifacts to a GitHub Release.
+# attaches every installer to the GitHub Release for the pushed tag.
 #
 # Trigger: push a version tag, e.g.
-#   git tag v1.0.0
-#   git push origin v1.0.0
-# (You can also run it manually from the Actions tab.)
+#   git tag v0.5.0
+#   git push origin v0.5.0
+# (You can also run it manually from the Actions tab — it will only build,
+#  without publishing, when there is no tag.)
 
 on:
   push:
     tags:
       - 'v*'
+      - '[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
 
 permissions:
@@ -43,7 +45,16 @@ jobs:
 
       - name: Install Linux packaging tools
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y fakeroot dpkg rpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot dpkg
+          # AppImage needs FUSE; install whichever package the runner provides.
+          sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2 || true
+
+      - name: Sync version to tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
 
       - name: Install dependencies
         run: npm install
@@ -51,9 +62,33 @@ jobs:
       - name: Generate icons
         run: npm run gen-icons
 
-      - name: Build and publish
+      - name: Build
+        shell: bash
         env:
-          # Provided automatically by GitHub Actions — used to upload the
-          # release assets. No manual secret needed.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ${{ matrix.build }} -- --publish always
+          # Let appimagetool run without a FUSE mount (CI has no /dev/fuse).
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: ${{ matrix.build }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: IRNetFree-${{ matrix.os }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: ignore
+
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+            dist/*.AppImage
+            dist/*.deb
+          fail_on_unmatched_files: false
