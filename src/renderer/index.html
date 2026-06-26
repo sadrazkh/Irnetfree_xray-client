@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
+  <title>IRNetFree</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- custom titlebar -->
+  <header class="titlebar">
+    <div class="tb-left">
+      <img class="tb-logo" src="../../assets/icon.png" alt="IRNetFree" />
+      <span class="tb-title">IR<b>NetFree</b></span>
+    </div>
+    <div class="tb-drag"></div>
+    <div class="tb-right">
+      <button class="tb-btn lang-btn" id="btnLang" title="Language">EN</button>
+      <button class="tb-btn" id="btnMin" data-i18n-title="tb.min">&#x2013;</button>
+      <button class="tb-btn" id="btnHide" data-i18n-title="tb.hide">&#x25A1;</button>
+      <button class="tb-btn tb-close" id="btnClose" data-i18n-title="tb.close">&#x2715;</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- sidebar -->
+    <nav class="sidebar">
+      <button class="nav-item active" data-view="home">
+        <span class="nav-ico">⏻</span><span data-i18n="nav.home">اتصال</span>
+      </button>
+      <button class="nav-item" data-view="servers">
+        <span class="nav-ico">🗂</span><span data-i18n="nav.servers">سرورها</span>
+      </button>
+      <button class="nav-item" data-view="subs">
+        <span class="nav-ico">🔗</span><span data-i18n="nav.subs">ساب‌ها</span>
+      </button>
+      <button class="nav-item" data-view="chain">
+        <span class="nav-ico">⛓</span><span data-i18n="nav.chain">زنجیره</span>
+      </button>
+      <button class="nav-item" data-view="routing">
+        <span class="nav-ico">🧭</span><span data-i18n="nav.routing">روتینگ</span>
+      </button>
+      <button class="nav-item" data-view="settings">
+        <span class="nav-ico">⚙</span><span data-i18n="nav.settings">تنظیمات</span>
+      </button>
+      <button class="nav-item" data-view="logs">
+        <span class="nav-ico">📜</span><span data-i18n="nav.logs">لاگ‌ها</span>
+      </button>
+      <div class="sidebar-spacer"></div>
+      <div class="conn-pill" id="connPill"><span class="dot"></span><span id="connPillText" data-i18n="pill.disconnected">قطع</span></div>
+    </nav>
+
+    <!-- main content -->
+    <main class="content">
+
+      <!-- HOME / CONNECT -->
+      <section class="view active" id="view-home">
+        <div class="connect-hero">
+          <button class="power-btn" id="powerBtn" aria-label="connect">
+            <svg viewBox="0 0 24 24" class="power-ico"><path d="M12 3v9" /><path d="M7 6.5a8 8 0 1 0 10 0" /></svg>
+          </button>
+          <div class="connect-state" id="connState" data-i18n="state.disconnected">قطع شده</div>
+          <div class="connect-server" id="connServer" data-i18n="conn.noServer">سروری انتخاب نشده</div>
+          <div class="connect-geo" id="connGeo" hidden>
+            <span class="geo-flag" id="geoFlag"></span>
+            <span class="geo-text" id="geoText"></span>
+          </div>
+
+          <!-- unified server picker -->
+          <div class="picker" id="serverPicker">
+            <button class="picker-current" id="pickerBtn">
+              <span class="proto-badge" id="pickerProto" hidden></span>
+              <span class="picker-name" id="pickerName" data-i18n="picker.choose">سرور را انتخاب کن</span>
+              <span class="picker-ping" id="pickerPing"></span>
+              <span class="picker-caret">▾</span>
+            </button>
+            <div class="picker-menu" id="pickerMenu" hidden></div>
+          </div>
+
+          <div class="stat-row">
+            <div class="stat-card">
+              <div class="stat-label" data-i18n="stat.tcp">پینگ TCP</div>
+              <div class="stat-value" id="statTcp">—</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label" data-i18n="stat.real">تأخیر واقعی</div>
+              <div class="stat-value" id="statReal">—</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label" data-i18n="stat.ip">IP خروجی</div>
+              <div class="stat-value" id="statIp">—</div>
+            </div>
+          </div>
+
+          <div class="traffic-row" id="trafficRow">
+            <div class="traffic-card">
+              <span class="traffic-ico down">▼</span>
+              <div>
+                <div class="traffic-speed" id="downSpeed">0 B/s</div>
+                <div class="traffic-total" id="downTotal">0 B</div>
+              </div>
+            </div>
+            <div class="traffic-card">
+              <span class="traffic-ico up">▲</span>
+              <div>
+                <div class="traffic-speed" id="upSpeed">0 B/s</div>
+                <div class="traffic-total" id="upTotal">0 B</div>
+              </div>
+            </div>
+            <button class="traffic-card mode-card" id="modeCard" title="">
+              <span class="traffic-ico mode" id="modeIco">⚡</span>
+              <div>
+                <div class="traffic-speed" id="modeLabel" data-i18n="mode.proxy">پروکسی</div>
+                <div class="traffic-total" id="modeSub" data-i18n="mode.proxySub">SOCKS/HTTP</div>
+              </div>
+              <span class="mode-card-caret">⇄</span>
+            </button>
+          </div>
+
+          <!-- session usage totals -->
+          <div class="session-card" id="sessionCard">
+            <div class="session-title" data-i18n="session.title">مصرف این نشست</div>
+            <div class="session-grid">
+              <div><div class="session-label" data-i18n="session.down">دانلود کل</div><div class="session-val" id="sessDown">0 B</div></div>
+              <div><div class="session-label" data-i18n="session.up">آپلود کل</div><div class="session-val" id="sessUp">0 B</div></div>
+              <div><div class="session-label" data-i18n="session.sum">مجموع</div><div class="session-val sum" id="sessSum">0 B</div></div>
+            </div>
+          </div>
+
+          <div class="hero-actions">
+            <button class="btn ghost" id="btnQuickPing" data-i18n="btn.quickPing">تست پینگ</button>
+            <button class="btn ghost" id="btnCheckIp" data-i18n="btn.checkIp">بررسی IP</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- SERVERS -->
+      <section class="view" id="view-servers">
+        <div class="view-head">
+          <h2 data-i18n="servers.title">سرورها</h2>
+          <div class="head-actions">
+            <button class="btn ghost" id="btnPingAll" data-i18n="btn.pingAll">تست همه</button>
+            <button class="btn ghost" id="btnClearServers" data-i18n="btn.clearAll">حذف همه</button>
+            <button class="btn ghost" id="btnWgOpen" data-i18n="btn.addWg">+ WireGuard</button>
+            <button class="btn primary" id="btnAddOpen" data-i18n="btn.add">+ افزودن</button>
+          </div>
+        </div>
+
+        <div class="import-box" id="importBox" hidden>
+          <textarea id="importText" class="textarea" rows="4" data-i18n-ph="import.ph"></textarea>
+          <div class="import-actions">
+            <button class="btn primary" id="btnImport" data-i18n="btn.import">وارد کردن</button>
+            <button class="btn ghost" id="btnImportCancel" data-i18n="btn.cancel">انصراف</button>
+            <span class="import-hint" id="importHint"></span>
+          </div>
+        </div>
+
+        <!-- WireGuard manual add -->
+        <div class="import-box" id="wgBox" hidden>
+          <div class="wg-title" data-i18n="wg.title">افزودن WireGuard</div>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="wg.name">نام</label>
+              <input type="text" id="wgName" class="input" data-i18n-ph="wg.namePh" /></div>
+            <div><label class="field-label" data-i18n="wg.endpoint">Endpoint (host:port)</label>
+              <input type="text" id="wgEndpoint" class="input" placeholder="example.com:51820" /></div>
+          </div>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="wg.privateKey">Private Key</label>
+              <input type="text" id="wgPrivate" class="input" dir="ltr" /></div>
+            <div><label class="field-label" data-i18n="wg.publicKey">Peer Public Key</label>
+              <input type="text" id="wgPublic" class="input" dir="ltr" /></div>
+          </div>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="wg.address">Address (محلی /32)</label>
+              <input type="text" id="wgAddress" class="input" dir="ltr" placeholder="10.0.0.2/32" /></div>
+            <div><label class="field-label" data-i18n="wg.allowed">Allowed IPs</label>
+              <input type="text" id="wgAllowed" class="input" dir="ltr" placeholder="0.0.0.0/0, ::/0" /></div>
+          </div>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="wg.psk">Pre-shared Key (اختیاری)</label>
+              <input type="text" id="wgPsk" class="input" dir="ltr" /></div>
+            <div><label class="field-label" data-i18n="wg.mtu">MTU</label>
+              <input type="number" id="wgMtu" class="input" value="1420" /></div>
+          </div>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="wg.reserved">Reserved (اختیاری، مثل 0,0,0)</label>
+              <input type="text" id="wgReserved" class="input" dir="ltr" placeholder="0,0,0" /></div>
+            <div></div>
+          </div>
+          <p class="hint" data-i18n="wg.addrHint">«Address» باید آدرس محلی خودت در کانفیگ WireGuard باشد و حتماً /32 (مثل 10.8.0.2/32). برای دسترسی به رنج دیتابیس، رنج را در «Allowed IPs» بگذار (مثل 192.168.60.0/24) یا 0.0.0.0/0 را نگه دار.</p>
+          <div class="import-actions">
+            <button class="btn primary" id="btnWgAdd" data-i18n="btn.addWgGo">افزودن</button>
+            <button class="btn ghost" id="btnWgCancel" data-i18n="btn.cancel">انصراف</button>
+            <span class="import-hint" id="wgHint"></span>
+          </div>
+        </div>
+
+        <div class="server-list" id="serverList"></div>
+        <div class="empty" id="serverEmpty" data-i18n="servers.empty">هنوز سروری اضافه نشده. روی «افزودن» بزن.</div>
+      </section>
+
+      <!-- SUBSCRIPTIONS -->
+      <section class="view" id="view-subs">
+        <div class="view-head">
+          <h2 data-i18n="subs.title">ساب‌اسکریپشن‌ها</h2>
+          <div class="head-actions">
+            <button class="btn ghost" id="btnRefreshAll" data-i18n="btn.refreshAll">به‌روزرسانی همه</button>
+            <button class="btn primary" id="btnSubAddOpen" data-i18n="btn.addSub">+ افزودن ساب</button>
+          </div>
+        </div>
+
+        <div class="import-box" id="subAddBox" hidden>
+          <input type="text" id="subUrl" class="input" data-i18n-ph="sub.urlPh" />
+          <input type="text" id="subName" class="input" data-i18n-ph="sub.namePh" style="margin-top:10px" />
+          <div class="import-actions">
+            <button class="btn primary" id="btnSubAdd" data-i18n="btn.addFetch">افزودن و دریافت</button>
+            <button class="btn ghost" id="btnSubAddCancel" data-i18n="btn.cancel">انصراف</button>
+            <span class="import-hint" id="subAddHint"></span>
+          </div>
+        </div>
+
+        <div class="card auto-update-card">
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="autoupdate.title">به‌روزرسانی خودکار</div>
+              <div class="switch-sub" data-i18n="autoupdate.sub">ساب‌ها در فاصله‌ی مشخص خودکار تازه می‌شن</div></div>
+            <label class="switch"><input type="checkbox" id="optAutoUpdate" /><span class="slider"></span></label>
+          </div>
+          <div class="inline-field">
+            <label class="field-label" data-i18n="interval.label">فاصله (دقیقه)</label>
+            <input type="number" id="autoInterval" class="input small" min="5" value="60" />
+          </div>
+        </div>
+
+        <div class="sub-list" id="subList"></div>
+        <div class="empty" id="subEmpty" data-i18n="subs.empty">هنوز ساب‌اسکریپشنی اضافه نشده.</div>
+      </section>
+
+      <!-- CHAIN -->
+      <section class="view" id="view-chain">
+        <div class="view-head">
+          <h2 data-i18n="chain.title">زنجیره پروکسی</h2>
+          <div class="head-actions">
+            <button class="btn primary" id="btnAddChain" data-i18n="chain.new">+ زنجیره جدید</button>
+          </div>
+        </div>
+
+        <p class="hint" data-i18n="chain.intro">هر زنجیره مثل یک کانفیگ ساخته می‌شود: یک نام بده، چند سرور را به‌ترتیب بچین، و از صفحهٔ «اتصال» یا در «روتینگ ویژه» مثل یک کانفیگ ازش استفاده کن.</p>
+        <p class="hint" data-i18n="chain.wgHint">برای دسترسی به دیتابیس وقتی WireGuard مستقیم کار نمی‌کند: یک کانفیگ را اول بگذار و WireGuard را آخرِ زنجیره؛ سپس در «روتینگ ویژه» رنج IP دیتابیس را به این زنجیره بفرست.</p>
+
+        <div id="chainsWrap"></div>
+        <div class="empty" id="chainsEmpty" data-i18n="chain.noneYet">هنوز زنجیره‌ای ساخته نشده. روی «زنجیره جدید» بزن.</div>
+      </section>
+
+      <!-- ROUTING -->
+      <section class="view" id="view-routing">
+        <div class="view-head"><h2 data-i18n="routing.title">روتینگ</h2></div>
+        <div class="card">
+          <label class="field-label" data-i18n="routing.modeLabel">حالت روتینگ</label>
+          <div class="seg" id="routingSeg">
+            <button data-mode="global" class="seg-btn active" data-i18n="routing.global">گلوبال (همه از پروکسی)</button>
+            <button data-mode="bypass-ir" class="seg-btn" data-i18n="routing.bypassIr">دور زدن ایران</button>
+            <button data-mode="bypass-cn" class="seg-btn" data-i18n="routing.bypassCn">دور زدن چین</button>
+            <button data-mode="direct" class="seg-btn" data-i18n="routing.direct">مستقیم</button>
+          </div>
+          <p class="hint" data-i18n="routing.hint">در حالت «دور زدن ایران»، ترافیک داخلی مستقیم می‌ره و بقیه از پروکسی.</p>
+          <p class="hint geo-note" id="routingGeoNote" data-i18n="routing.geoNote"></p>
+        </div>
+
+        <div class="card">
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="ads.title">مسدودسازی تبلیغات</div>
+              <div class="switch-sub" data-i18n="ads.sub">دامنه‌های تبلیغاتی بلاک می‌شن</div></div>
+            <label class="switch"><input type="checkbox" id="optBlockAds" /><span class="slider"></span></label>
+          </div>
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="sniff.title">Sniffing</div>
+              <div class="switch-sub" data-i18n="sniff.sub">تشخیص دامنه برای روتینگ دقیق‌تر</div></div>
+            <label class="switch"><input type="checkbox" id="optSniff" /><span class="slider"></span></label>
+          </div>
+        </div>
+
+        <!-- Advanced graphical routing -->
+        <div class="card">
+          <div class="switch-row">
+            <div>
+              <div class="switch-title" data-i18n="adv.title">روتینگ پیشرفته (گرافیکی)</div>
+              <div class="switch-sub" data-i18n="adv.sub">هر دسته از ترافیک را به یک کانفیگ یا زنجیرهٔ دلخواه بفرست</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="optAdvanced" /><span class="slider"></span></label>
+          </div>
+
+          <div id="advBody">
+            <p class="hint" data-i18n="adv.hint">قانون‌ها از بالا به پایین بررسی می‌شوند؛ هر درخواست با اولین قانونِ منطبق هدایت می‌شود.</p>
+
+            <div class="adv-rules" id="advRules"></div>
+            <button class="btn ghost adv-add" id="btnAddRule" data-i18n="adv.addRule">+ افزودن قانون</button>
+
+            <div class="adv-default">
+              <span class="adv-def-label" data-i18n="adv.default">بقیهٔ ترافیک از:</span>
+              <select id="advDefault" class="select adv-target"></select>
+            </div>
+
+            <button class="btn primary" id="btnSaveAdv" data-i18n="adv.save">ذخیره روتینگ پیشرفته</button>
+            <span class="saved-hint" id="advSavedHint"></span>
+          </div>
+        </div>
+
+        <div class="card" id="simpleRulesCard">
+          <label class="field-label" data-i18n="rules.label">قوانین سفارشی</label>
+          <p class="hint" data-i18n="rules.hint">هر خط: domain|ip|port , مقدار , خروجی(proxy/direct/block)</p>
+          <textarea id="customRules" class="textarea" rows="4"
+            placeholder="domain, geosite:google, proxy&#10;ip, 8.8.8.8, direct&#10;port, 443, proxy"></textarea>
+          <button class="btn primary" id="btnSaveRules" data-i18n="btn.saveRules">ذخیره قوانین</button>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view" id="view-settings">
+        <div class="view-head"><h2 data-i18n="settings.title">تنظیمات</h2></div>
+
+        <div class="card">
+          <div class="grid2">
+            <div>
+              <label class="field-label" data-i18n="set.socks">پورت SOCKS</label>
+              <input type="number" id="socksPort" class="input" />
+            </div>
+            <div>
+              <label class="field-label" data-i18n="set.http">پورت HTTP</label>
+              <input type="number" id="httpPort" class="input" />
+            </div>
+          </div>
+          <div class="grid2">
+            <div>
+              <label class="field-label" data-i18n="set.dns">DNS (با کاما)</label>
+              <input type="text" id="dnsInput" class="input" placeholder="1.1.1.1,8.8.8.8" />
+            </div>
+            <div>
+              <label class="field-label" data-i18n="set.logLevel">سطح لاگ</label>
+              <select id="logLevel" class="select">
+                <option value="none">none</option>
+                <option value="error">error</option>
+                <option value="warning">warning</option>
+                <option value="info">info</option>
+                <option value="debug">debug</option>
+              </select>
+            </div>
+          </div>
+          <div class="grid2">
+            <div>
+              <label class="field-label" data-i18n="set.lang">زبان / Language</label>
+              <select id="langSelect" class="select">
+                <option value="fa">فارسی</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+            <div></div>
+          </div>
+        </div>
+
+        <!-- Required runtime files -->
+        <div class="card">
+          <label class="field-label" data-i18n="comp.title">فایل‌های موردنیاز</label>
+          <p class="hint" data-i18n="comp.hint"></p>
+          <div class="comp-list" id="compList"></div>
+        </div>
+
+        <div class="card">
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="sysproxy.title">پروکسی سیستمی</div>
+              <div class="switch-sub" data-i18n="sysproxy.sub">هنگام اتصال، پروکسی ویندوز تنظیم بشه</div></div>
+            <label class="switch"><input type="checkbox" id="optSysProxy" /><span class="slider"></span></label>
+          </div>
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="tun.title">حالت TUN (تانل کل سیستم)</div>
+              <div class="switch-sub" data-i18n="tun.sub">همه‌ی ترافیک سیستم از تانل رد می‌شه (نیازمند tun2socks و دسترسی ادمین)</div></div>
+            <label class="switch"><input type="checkbox" id="optTun" /><span class="slider"></span></label>
+          </div>
+          <div class="tun-status" id="tunStatus"></div>
+          <button class="btn ghost admin-btn" id="btnRunAdmin" data-i18n="tun.runAdmin" hidden>اجرای مجدد با دسترسی ادمین</button>
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="lan.title">اجازه به شبکه محلی (LAN)</div>
+              <div class="switch-sub" data-i18n="lan.sub">دستگاه‌های دیگه هم بتونن وصل بشن</div></div>
+            <label class="switch"><input type="checkbox" id="optAllowLan" /><span class="slider"></span></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <label class="field-label" data-i18n="xray.label">مسیر هسته Xray</label>
+          <div class="xray-status" id="xrayStatus" data-i18n="xray.checking">در حال بررسی…</div>
+          <div class="row-gap">
+            <button class="btn ghost" id="btnLocateXray" data-i18n="btn.locate">انتخاب فایل xray</button>
+            <button class="btn ghost" id="btnOpenData" data-i18n="btn.openData">پوشه داده‌ها</button>
+            <button class="btn ghost" id="btnDownloadHelp" data-i18n="btn.help">راهنمای دانلود</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <button class="btn primary" id="btnSaveSettings" data-i18n="btn.save">ذخیره تنظیمات</button>
+          <span class="saved-hint" id="savedHint"></span>
+        </div>
+      </section>
+
+      <!-- LOGS -->
+      <section class="view" id="view-logs">
+        <div class="view-head">
+          <h2 data-i18n="logs.title">لاگ‌ها</h2>
+          <button class="btn ghost" id="btnClearLogs" data-i18n="btn.clearLogs">پاک کردن</button>
+        </div>
+        <pre class="logbox" id="logBox"></pre>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- edit server modal -->
+  <div class="modal-overlay" id="editModal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <span class="modal-title" data-i18n="edit.title">ویرایش سرور</span>
+        <button class="tb-btn" id="editClose">&#x2715;</button>
+      </div>
+      <div class="modal-body" id="editBody">
+        <div class="grid2">
+          <div><label class="field-label" data-i18n="edit.name">نام</label>
+            <input type="text" id="edName" class="input" /></div>
+          <div><label class="field-label" id="edAddrLabel" data-i18n="edit.address">آدرس</label>
+            <input type="text" id="edAddress" class="input" dir="ltr" /></div>
+        </div>
+        <div class="grid2">
+          <div><label class="field-label" id="edPortLabel" data-i18n="edit.port">پورت</label>
+            <input type="number" id="edPort" class="input" dir="ltr" /></div>
+          <div id="edCredWrap"><label class="field-label" id="edCredLabel" data-i18n="edit.uuid">شناسه</label>
+            <input type="text" id="edCred" class="input" dir="ltr" /></div>
+        </div>
+        <!-- transport row (hidden for ss/wireguard) -->
+        <div class="grid2" id="edTransportRow">
+          <div><label class="field-label" data-i18n="edit.network">ترنسپورت</label>
+            <select id="edNetwork" class="select">
+              <option value="tcp">tcp</option><option value="ws">ws</option>
+              <option value="grpc">grpc</option><option value="h2">h2</option>
+              <option value="xhttp">xhttp</option><option value="kcp">kcp</option>
+            </select></div>
+          <div><label class="field-label" data-i18n="edit.security">امنیت</label>
+            <select id="edSecurity" class="select">
+              <option value="none">none</option><option value="tls">tls</option>
+              <option value="reality">reality</option>
+            </select></div>
+        </div>
+        <div class="grid2" id="edTlsRow">
+          <div><label class="field-label" data-i18n="edit.sni">SNI</label>
+            <input type="text" id="edSni" class="input" dir="ltr" /></div>
+          <div><label class="field-label" data-i18n="edit.host">Host</label>
+            <input type="text" id="edHost" class="input" dir="ltr" /></div>
+        </div>
+        <div class="grid2" id="edPathRow">
+          <div><label class="field-label" data-i18n="edit.path">Path / ServiceName</label>
+            <input type="text" id="edPath" class="input" dir="ltr" /></div>
+          <div><label class="field-label" data-i18n="edit.fp">Fingerprint</label>
+            <input type="text" id="edFp" class="input" dir="ltr" placeholder="chrome" /></div>
+        </div>
+        <div class="grid2" id="edRealityRow" hidden>
+          <div><label class="field-label" data-i18n="edit.pbk">Public Key (pbk)</label>
+            <input type="text" id="edPbk" class="input" dir="ltr" /></div>
+          <div><label class="field-label" data-i18n="edit.sid">Short ID (sid)</label>
+            <input type="text" id="edSid" class="input" dir="ltr" /></div>
+        </div>
+        <label class="switch-row inline-switch" id="edInsecureRow">
+          <span class="switch-title" data-i18n="edit.allowInsecure">Allow Insecure</span>
+          <span class="switch"><input type="checkbox" id="edInsecure" /><span class="slider"></span></span>
+        </label>
+        <!-- wireguard extras -->
+        <div id="edWgExtra" hidden>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="wg.publicKey">Peer Public Key</label>
+              <input type="text" id="edWgPub" class="input" dir="ltr" /></div>
+            <div><label class="field-label" data-i18n="wg.address">Address</label>
+              <input type="text" id="edWgAddr" class="input" dir="ltr" /></div>
+          </div>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="wg.psk">Pre-shared Key</label>
+              <input type="text" id="edWgPsk" class="input" dir="ltr" /></div>
+            <div><label class="field-label" data-i18n="wg.mtu">MTU</label>
+              <input type="number" id="edWgMtu" class="input" dir="ltr" /></div>
+          </div>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="wg.reserved">Reserved</label>
+              <input type="text" id="edWgReserved" class="input" dir="ltr" /></div>
+            <div><label class="field-label" data-i18n="wg.allowed">Allowed IPs</label>
+              <input type="text" id="edWgAllowed" class="input" dir="ltr" placeholder="0.0.0.0/0, ::/0" /></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="editSave" data-i18n="btn.save">ذخیره</button>
+        <button class="btn ghost" id="editCancel" data-i18n="btn.cancel">انصراف</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- connection-mode modal -->
+  <div class="modal-overlay" id="modeModal" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <span class="modal-title" data-i18n="mode.pick">حالت اتصال</span>
+        <button class="tb-btn" id="modeClose">&#x2715;</button>
+      </div>
+      <div class="modal-body mode-body">
+        <button class="mode-option" data-mode="proxy">
+          <span class="mode-opt-ico">⚡</span>
+          <span class="mode-opt-text">
+            <span class="mode-opt-title" data-i18n="mode.proxy">پروکسی</span>
+            <span class="mode-opt-desc" data-i18n="mode.proxyDesc">سبک و سریع؛ فقط برنامه‌هایی که از پروکسی سیستمی/SOCKS استفاده می‌کنند تونل می‌شوند.</span>
+          </span>
+          <span class="mode-opt-check">✓</span>
+        </button>
+        <button class="mode-option" data-mode="tun">
+          <span class="mode-opt-ico">🛡</span>
+          <span class="mode-opt-text">
+            <span class="mode-opt-title" data-i18n="mode.tun">TUN (کل سیستم)</span>
+            <span class="mode-opt-desc" data-i18n="mode.tunDesc">تمام ترافیک کل سیستم از تونل عبور می‌کند (نیازمند tun2socks و دسترسی ادمین).</span>
+          </span>
+          <span class="mode-opt-check">✓</span>
+        </button>
+        <div class="mode-note" id="modeNote"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- toast -->
+  <div class="toast" id="toast"></div>
+
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
