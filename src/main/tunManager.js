@@ -373,41 +373,70 @@ class TunManager {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-tun-'));
     const logFile = path.join(work, 'tun2socks.log');
     const pidFile = path.join(work, 'tun2socks.pid');
-    const dev = MAC_TUN_DEV;
+    const devFile = path.join(work, 'tun2socks.dev');
+    const reqDev = MAC_TUN_DEV;
     const dns1 = this.dnsServers[0] || '1.1.1.1';
     const dns2 = this.dnsServers[1] || '';
     const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`; // single-quote for bash
 
     const bypassAdd = ips.map(ip => `route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1 || true`).join('\n');
     const dnsLine = service
-      ? `networksetup -setdnsservers ${sh(service)} ${dns1}${dns2 ? ' ' + dns2 : ''} || true`
+      ? `networksetup -setdnsservers ${sh(service)} ${dns1}${dns2 ? ' ' + dns2 : ''} 2>/dev/null || true`
       : 'true';
 
+    // NOTE: no `set -e` — we validate the critical steps explicitly so a
+    // benign non-zero (e.g. grep with no match) can't abort the whole script,
+    // and so failures print the tun2socks log to stderr for diagnosis.
     const setup = [
       '#!/bin/bash',
-      'set -e',
       `BIN=${sh(bin)}`,
-      `DEV=${sh(dev)}`,
+      `REQ_DEV=${sh(reqDev)}`,
       `LOG=${sh(logFile)}`,
       `PIDFILE=${sh(pidFile)}`,
-      // 1) launch tun2socks as root, detached, capturing its pid + logs
-      `nohup "$BIN" -device "$DEV" -proxy ${sh(`socks5://127.0.0.1:${socksPort}`)} -loglevel warning >"$LOG" 2>&1 &`,
+      `DEVFILE=${sh(devFile)}`,
+      // snapshot existing utun interfaces (single space-separated line)
+      'BEFORE=" $(ifconfig -l 2>/dev/null) "',
+      // 1) launch tun2socks as root, detached, capturing its pid + logs.
+      //    `warn` matches the (working) Windows log level.
+      `nohup "$BIN" -device "$REQ_DEV" -proxy ${sh(`socks5://127.0.0.1:${socksPort}`)} -loglevel warn >"$LOG" 2>&1 &`,
       'echo $! > "$PIDFILE"',
-      // 2) wait for the utun device to appear
-      'for i in $(seq 1 40); do ifconfig "$DEV" >/dev/null 2>&1 && break; sleep 0.3; done',
-      'ifconfig "$DEV" >/dev/null 2>&1 || { echo "utun-not-ready"; exit 11; }',
+      // 2) wait for a NEW utun device (tun2socks may pick the next free unit
+      //    instead of the exact name we requested).
+      'ACTUAL=""',
+      'i=0',
+      'while [ $i -lt 50 ]; do',
+      '  for u in $(ifconfig -l 2>/dev/null); do',
+      '    case "$u" in',
+      '      utun*)',
+      '        case "$BEFORE" in',
+      '          *" $u "*) ;;',
+      '          *) ACTUAL="$u"; break;;',
+      '        esac;;',
+      '    esac',
+      '  done',
+      '  if [ -n "$ACTUAL" ]; then break; fi',
+      '  i=$((i+1))',
+      '  sleep 0.3',
+      'done',
+      'if [ -z "$ACTUAL" ]; then',
+      '  echo "ERR: tun2socks did not create a utun device" >&2',
+      '  echo "----- tun2socks log -----" >&2',
+      '  cat "$LOG" >&2 2>/dev/null',
+      '  exit 11',
+      'fi',
+      'echo "$ACTUAL" > "$DEVFILE"',
       // 3) point-to-point address on the tunnel
-      `ifconfig "$DEV" ${TUN_ADDR} ${TUN_GW} up`,
-      `ifconfig "$DEV" mtu 1500 || true`,
+      `ifconfig "$ACTUAL" ${TUN_ADDR} ${TUN_GW} up || { echo "ERR: ifconfig failed" >&2; exit 12; }`,
+      `ifconfig "$ACTUAL" mtu 1500 2>/dev/null`,
       // 4) bypass routes for the proxy server itself (avoid loopback)
       bypassAdd || 'true',
       // 5) split-default routes through the tunnel (override default, keep it
       //    intact). Delete first so a leftover route from a crashed session
-      //    doesn't abort the (set -e) script.
-      `route -n delete -net 0.0.0.0/1 ${TUN_GW} >/dev/null 2>&1 || true`,
-      `route -n delete -net 128.0.0.0/1 ${TUN_GW} >/dev/null 2>&1 || true`,
-      `route -n add -net 0.0.0.0/1 ${TUN_GW}`,
-      `route -n add -net 128.0.0.0/1 ${TUN_GW}`,
+      //    doesn't error out.
+      `route -n delete -net 0.0.0.0/1 ${TUN_GW} >/dev/null 2>&1`,
+      `route -n delete -net 128.0.0.0/1 ${TUN_GW} >/dev/null 2>&1`,
+      `route -n add -net 0.0.0.0/1 ${TUN_GW} || { echo "ERR: route 0/1 failed" >&2; exit 13; }`,
+      `route -n add -net 128.0.0.0/1 ${TUN_GW} || { echo "ERR: route 128/1 failed" >&2; exit 13; }`,
       // 6) DNS through the tunnel (leak prevention)
       dnsLine,
       'exit 0',
@@ -422,24 +451,32 @@ class TunManager {
       await this.runScriptPrivileged(setupPath);
     } catch (e) {
       const m = (e.message || '').toString();
+      // Make the tun2socks output visible in the app log for diagnosis.
+      let logTail = '';
+      try { logTail = fs.readFileSync(logFile, 'utf8').trim(); } catch {}
+      if (logTail) {
+        for (const line of logTail.split(/\r?\n/).slice(-12)) {
+          if (line.trim()) this.onLog('[tun] ' + line.trim(), 'error');
+        }
+      }
+      try { fs.rmSync(work, { recursive: true, force: true }); } catch {}
       if (/User canceled|-128/i.test(m)) {
         throw new Error(this.msg(
           'برای حالت TUN باید اجازه دسترسی (رمز عبور) بدهید',
           'TUN mode needs your permission (administrator password)'));
       }
-      if (/utun-not-ready/.test(m)) {
-        throw new Error(this.msg(
-          'آداپتور TUN آماده نشد — لاگ‌ها را بررسی کنید',
-          'TUN adapter did not become ready — check the logs'));
-      }
-      throw new Error(this.msg('راه‌اندازی TUN ناموفق بود: ', 'TUN setup failed: ') + m);
+      const detail = (logTail || m).split(/\r?\n/).filter(Boolean).slice(-3).join(' | ');
+      throw new Error(this.msg('راه‌اندازی TUN ناموفق بود: ', 'TUN setup failed: ') + detail);
     }
 
-    // Read back the tun2socks pid (running as root)
+    // Read back the tun2socks pid (running as root) and the real device name.
     let macPid = null;
     try { macPid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10) || null; } catch {}
+    let dev = reqDev;
+    try { dev = (fs.readFileSync(devFile, 'utf8').trim()) || reqDev; } catch {}
+    this.onLog(`TUN device: ${dev}`, 'info');
 
-    this.macState = { work, logFile, pidFile, macPid, service, savedDns, bypassIps: ips, dev };
+    this.macState = { work, logFile, pidFile, macPid, service, savedDns, bypassIps: ips, dev, reqDev };
     this.bypassIps = ips.slice();
     this.active = true;
 
@@ -483,8 +520,9 @@ class TunManager {
     const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
     const lines = ['#!/bin/bash'];
     if (st.macPid) lines.push(`kill ${st.macPid} 2>/dev/null || true`);
-    // belt-and-suspenders: also kill any tun2socks bound to our device
-    lines.push(`pkill -f ${sh(`-device ${st.dev || MAC_TUN_DEV}`)} 2>/dev/null || true`);
+    // belt-and-suspenders: also kill any tun2socks we launched. Match on the
+    // REQUESTED device name (that is what appears in the process args).
+    lines.push(`pkill -f ${sh(`-device ${st.reqDev || MAC_TUN_DEV}`)} 2>/dev/null || true`);
     lines.push(`route -n delete -net 0.0.0.0/1 ${TUN_GW} 2>/dev/null || true`);
     lines.push(`route -n delete -net 128.0.0.0/1 ${TUN_GW} 2>/dev/null || true`);
     for (const ip of (st.bypassIps || this.bypassIps || [])) {
