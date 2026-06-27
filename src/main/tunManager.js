@@ -28,7 +28,10 @@ const os = require('os');
 const dns = require('dns').promises;
 
 const ADAPTER = 'XrayTun';
-const MAC_TUN_DEV = 'utun123';   // requested utun unit on macOS
+// macOS: let the kernel assign the next free utun unit. Forcing a specific
+// unit (e.g. utun123) fails when it's taken/out of range and tun2socks exits
+// before any device appears. We detect the actual device it created instead.
+const MAC_TUN_DEV = 'utun';
 const TUN_ADDR = '10.255.0.2';
 const TUN_MASK = '255.255.255.0';
 const TUN_GW = '10.255.0.1';
@@ -379,7 +382,7 @@ class TunManager {
     const dns2 = this.dnsServers[1] || '';
     const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`; // single-quote for bash
 
-    const bypassAdd = ips.map(ip => `route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1 || true`).join('\n');
+    const bypassAdd = ips.map(ip => `route -n add -inet -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1 || true`).join('\n');
     const dnsLine = service
       ? `networksetup -setdnsservers ${sh(service)} ${dns1}${dns2 ? ' ' + dns2 : ''} 2>/dev/null || true`
       : 'true';
@@ -396,10 +399,14 @@ class TunManager {
       `DEVFILE=${sh(devFile)}`,
       // snapshot existing utun interfaces (single space-separated line)
       'BEFORE=" $(ifconfig -l 2>/dev/null) "',
-      // 1) launch tun2socks as root, detached, capturing its pid + logs.
+      // 1) launch tun2socks as root, FULLY detached so it outlives the elevated
+      //    `do shell script` session (otherwise macOS reaps the backgrounded
+      //    job when osascript returns → device appears then dies, no traffic).
+      //    `</dev/null` + `disown` detach stdin and the job table entry.
       //    `warn` matches the (working) Windows log level.
-      `nohup "$BIN" -device "$REQ_DEV" -proxy ${sh(`socks5://127.0.0.1:${socksPort}`)} -loglevel warn >"$LOG" 2>&1 &`,
+      `nohup "$BIN" -device "$REQ_DEV" -proxy ${sh(`socks5://127.0.0.1:${socksPort}`)} -loglevel warn >"$LOG" 2>&1 </dev/null &`,
       'echo $! > "$PIDFILE"',
+      'disown 2>/dev/null || true',
       // 2) wait for a NEW utun device (tun2socks may pick the next free unit
       //    instead of the exact name we requested).
       'ACTUAL=""',
@@ -425,18 +432,21 @@ class TunManager {
       '  exit 11',
       'fi',
       'echo "$ACTUAL" > "$DEVFILE"',
-      // 3) point-to-point address on the tunnel
+      // 3) point-to-point address on the tunnel (local 10.255.0.2, peer
+      //    10.255.0.1 — cosmetic; routing is pinned to the interface below).
       `ifconfig "$ACTUAL" ${TUN_ADDR} ${TUN_GW} up || { echo "ERR: ifconfig failed" >&2; exit 12; }`,
       `ifconfig "$ACTUAL" mtu 1500 2>/dev/null`,
       // 4) bypass routes for the proxy server itself (avoid loopback)
       bypassAdd || 'true',
-      // 5) split-default routes through the tunnel (override default, keep it
-      //    intact). Delete first so a leftover route from a crashed session
-      //    doesn't error out.
-      `route -n delete -net 0.0.0.0/1 ${TUN_GW} >/dev/null 2>&1`,
-      `route -n delete -net 128.0.0.0/1 ${TUN_GW} >/dev/null 2>&1`,
-      `route -n add -net 0.0.0.0/1 ${TUN_GW} || { echo "ERR: route 0/1 failed" >&2; exit 13; }`,
-      `route -n add -net 128.0.0.0/1 ${TUN_GW} || { echo "ERR: route 128/1 failed" >&2; exit 13; }`,
+      // 5) split-default routes through the tunnel, pinned to the INTERFACE (not
+      //    the peer IP). On a macOS utun the peer 10.255.0.1 is not a resolvable
+      //    next-hop, so `route add -net 0/1 10.255.0.1` black-holes; `-interface`
+      //    is the correct form. Two /1 routes override the default without
+      //    deleting it. Delete first so a leftover route can't error out.
+      `route -n delete -inet -net 0.0.0.0/1 -interface "$ACTUAL" >/dev/null 2>&1`,
+      `route -n delete -inet -net 128.0.0.0/1 -interface "$ACTUAL" >/dev/null 2>&1`,
+      `route -n add -inet -net 0.0.0.0/1 -interface "$ACTUAL" || { echo "ERR: route 0/1 failed" >&2; exit 13; }`,
+      `route -n add -inet -net 128.0.0.0/1 -interface "$ACTUAL" || { echo "ERR: route 128/1 failed" >&2; exit 13; }`,
       // 6) DNS through the tunnel (leak prevention)
       dnsLine,
       'exit 0',
@@ -518,11 +528,21 @@ class TunManager {
     const st = this.macState || {};
     const dns1 = (st.savedDns && st.savedDns.length) ? st.savedDns.join(' ') : 'Empty';
     const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    const dev = st.dev || '';
     const lines = ['#!/bin/bash'];
     if (st.macPid) lines.push(`kill ${st.macPid} 2>/dev/null || true`);
     // belt-and-suspenders: also kill any tun2socks we launched. Match on the
-    // REQUESTED device name (that is what appears in the process args).
+    // device flag we pass at launch (`-device utun`).
     lines.push(`pkill -f ${sh(`-device ${st.reqDev || MAC_TUN_DEV}`)} 2>/dev/null || true`);
+    // Delete the split-default routes using the SAME (interface-pinned) form we
+    // added them with — otherwise they leak and break all networking after
+    // disconnect until reboot.
+    if (dev) {
+      lines.push(`route -n delete -inet -net 0.0.0.0/1 -interface ${sh(dev)} 2>/dev/null || true`);
+      lines.push(`route -n delete -inet -net 128.0.0.0/1 -interface ${sh(dev)} 2>/dev/null || true`);
+    }
+    // legacy cleanup: also try the old peer-IP form in case a route from a
+    // previous app version is still installed.
     lines.push(`route -n delete -net 0.0.0.0/1 ${TUN_GW} 2>/dev/null || true`);
     lines.push(`route -n delete -net 128.0.0.0/1 ${TUN_GW} 2>/dev/null || true`);
     for (const ip of (st.bypassIps || this.bypassIps || [])) {
@@ -616,6 +636,11 @@ class TunManager {
     if (plat === 'darwin' && process.getuid && process.getuid() === 0) {
       const st = this.macState || {};
       try { if (st.macPid) execFileSync('kill', [String(st.macPid)]); } catch {}
+      if (st.dev) {
+        try { execFileSync('route', ['-n', 'delete', '-inet', '-net', '0.0.0.0/1', '-interface', st.dev]); } catch {}
+        try { execFileSync('route', ['-n', 'delete', '-inet', '-net', '128.0.0.0/1', '-interface', st.dev]); } catch {}
+      }
+      // legacy peer-IP form, in case an old route is still present
       try { execFileSync('route', ['-n', 'delete', '-net', '0.0.0.0/1', TUN_GW]); } catch {}
       try { execFileSync('route', ['-n', 'delete', '-net', '128.0.0.0/1', TUN_GW]); } catch {}
       for (const ip of (st.bypassIps || [])) {

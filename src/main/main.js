@@ -2,7 +2,8 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const os = require('os');
+const { spawn, execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, applyServerEdits } = require('./parser');
 const { buildConfig, buildTestConfig } = require('./configBuilder');
@@ -14,6 +15,8 @@ const { SubscriptionManager } = require('./subscription');
 const { TunManager } = require('./tunManager');
 const { StatsPoller } = require('./stats');
 const { Downloader } = require('./downloader');
+const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
+const https = require('https');
 
 let mainWindow = null;
 let tray = null;
@@ -23,8 +26,13 @@ let subs = null;
 let tun = null;
 let stats = null;
 let downloader = null;
+let procWatcher = null;
 let userBinDir = null;
 let isQuitting = false;
+let xrayReloading = false;   // true while the proc-routing watcher restarts xray
+
+// GitHub repo used for the in-app update check (see app:checkUpdate).
+const GITHUB_REPO = 'sadrazkh/Irnetfree_xray-client';
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -43,8 +51,10 @@ const DEFAULT_SETTINGS = {
   customRules: [],
   // advanced (graphical) routing — per-rule outbound selection
   advancedRouting: false,
-  routeRules: [],      // [{ id, type:'ip'|'domain'|'port', value, target }]
+  routeRules: [],      // [{ id, type:'ip'|'domain'|'port'|'process', value, target }]
   routeDefault: '',    // fallback target (server id | 'chain' | 'direct' | 'block')
+  // process routing: keep routes updated while connected (briefly reloads xray)
+  procRouteWatch: false,
   theme: 'dark'
 };
 
@@ -88,6 +98,54 @@ function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+/* ----------------------------- LAN sharing ----------------------------- */
+// When "Allow LAN" is on, the SOCKS/HTTP inbounds already listen on 0.0.0.0
+// (see configBuilder). But on Windows the firewall still blocks inbound on
+// those ports, so other devices can't connect — we add allow rules here.
+const LAN_RULES = { socks: 'IRNetFree LAN SOCKS', http: 'IRNetFree LAN HTTP' };
+
+function netsh(args) {
+  return new Promise((resolve, reject) => {
+    execFile('netsh', args, { windowsHide: true }, (err, so, se) => {
+      if (err) return reject(new Error((se || err.message || '').toString().trim()));
+      resolve((so || '').toString());
+    });
+  });
+}
+
+async function removeLanFirewall() {
+  if (process.platform !== 'win32') return;
+  for (const name of Object.values(LAN_RULES)) {
+    try { await netsh(['advfirewall', 'firewall', 'delete', 'rule', `name=${name}`]); } catch {}
+  }
+}
+
+/** Open inbound TCP for the proxy ports. Needs admin; returns {ok,error}. */
+async function addLanFirewall(socksPort, httpPort) {
+  if (process.platform !== 'win32') return { ok: true };
+  await removeLanFirewall();
+  try {
+    await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${LAN_RULES.socks}`,
+      'dir=in', 'action=allow', 'protocol=TCP', `localport=${socksPort}`]);
+    await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${LAN_RULES.http}`,
+      'dir=in', 'action=allow', 'protocol=TCP', `localport=${httpPort}`]);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/** First non-internal IPv4 address (the address LAN clients point their proxy at). */
+function lanIp() {
+  const ifs = os.networkInterfaces();
+  for (const name of Object.keys(ifs)) {
+    for (const ni of ifs[name] || []) {
+      if (ni.family === 'IPv4' && !ni.internal) return ni.address;
+    }
+  }
+  return null;
 }
 
 function createWindow() {
@@ -142,9 +200,55 @@ function createTray() {
 }
 
 /* ----------------------------- core actions ----------------------------- */
-async function doConnect(serverId) {
+
+/** Process names referenced by advanced routing 'process' rules. */
+function activeProcNames(settings) {
+  if (!settings || !settings.advancedRouting) return [];
+  return [...new Set((settings.routeRules || [])
+    .filter(r => r && r.type === 'process' && r.value)
+    .map(r => String(r.value)))];
+}
+
+function loadProcCache() { return store.get('procIpCache', {}) || {}; }
+function saveProcCache(c) { store.set('procIpCache', c); }
+
+/**
+ * Return a settings copy in which every 'process' route rule is rewritten into
+ * a concrete 'ip' rule (live connections of that process unioned with the
+ * persisted per-process cache). The stored rules keep type:'process'.
+ */
+async function effectiveSettings() {
+  const s = getSettings();
+  const names = activeProcNames(s);
+  if (!names.length) return s;
+  const cache = loadProcCache();
+  pruneProcCache(cache);
+  let ipsByName = {};
+  try {
+    const r = await collectProcessIps(names, cache);
+    ipsByName = r.ips;
+    saveProcCache(cache);
+  } catch (e) {
+    send('log', { line: 'Process routing resolve failed: ' + e.message, level: 'warn' });
+  }
+  const rules = (s.routeRules || []).map(r => {
+    if (r && r.type === 'process' && r.value) {
+      const list = ipsByName[r.value] || (cache[r.value] && cache[r.value].ips) || [];
+      return { type: 'ip', value: list.join(','), target: r.target };
+    }
+    return r;
+  });
+  return Object.assign({}, s, { routeRules: rules });
+}
+
+/**
+ * Build the connection plan + xray config for a target id, using already
+ * process-resolved settings. Returns { plan, label, entryAddrs, config, geoWarn }.
+ * `entryAddrs` are the addresses the machine dials *directly* (must be bypassed
+ * under TUN so the tunnel doesn't loop on itself). No side effects.
+ */
+function buildActive(serverId, settings) {
   const servers = store.get('servers', []);
-  const settings = getSettings();
   const byId = (id) => servers.find(s => s.id === id);
   const serversById = {};
   for (const s of servers) serversById[s.id] = s;
@@ -159,8 +263,6 @@ async function doConnect(serverId) {
   for (const c of chains) chainsById[c.id] = membersOf(c);
   const legacyChain = (store.get('chain', []) || []).map(byId).filter(Boolean);
 
-  // Resolve the connection plan + the addresses the machine dials *directly*
-  // (those must be bypassed under TUN so the tunnel doesn't loop on itself).
   let plan, label;
   let entryAddrs = [];
 
@@ -225,6 +327,14 @@ async function doConnect(serverId) {
   }
 
   const config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
+  return { plan, label, entryAddrs, config, geoWarn };
+}
+
+async function doConnect(serverId) {
+  const settings = await effectiveSettings();
+  const byId = (id) => store.get('servers', []).find(s => s.id === id);
+
+  const { label, entryAddrs, config, geoWarn } = buildActive(serverId, settings);
 
   send('status', { state: 'connecting', serverId });
 
@@ -271,19 +381,80 @@ async function doConnect(serverId) {
     }
   }
 
+  // LAN sharing: open the firewall on Windows + report the address other
+  // devices should point their proxy at.
+  let lan = null;
+  if (settings.allowLan) {
+    lan = { ip: lanIp(), socksPort: settings.socksPort, httpPort: settings.httpPort };
+    const fw = await addLanFirewall(settings.socksPort, settings.httpPort);
+    if (process.platform === 'win32') {
+      if (fw.ok) send('log', { line: `LAN sharing on — firewall opened for ports ${settings.socksPort}/${settings.httpPort}`, level: 'info' });
+      else send('log', { line: 'LAN firewall rule failed (run as admin to allow it): ' + fw.error, level: 'warn' });
+    }
+  } else {
+    await removeLanFirewall();
+  }
+
   // Start live traffic stats
   stats.setBin(xray.resolveBin());
   stats.apiPort = settings.apiPort;
   stats.start(1000);
 
-  send('status', { state: 'connected', serverId, server: byId(serverId) || null, label, tun: tun.active, tunError, geoWarn });
+  // Keep process routes fresh while connected (opt-in; briefly reloads xray).
+  startProcWatcher();
+
+  send('status', { state: 'connected', serverId, server: byId(serverId) || null, label, tun: tun.active, tunError, geoWarn, lan });
   return true;
 }
 
+/**
+ * Rebuild + restart ONLY xray for the currently active target. Used by the
+ * process-routing watcher when a routed app reaches new destinations. Leaves
+ * TUN / system proxy / stats in place — xray-core has no hot routing reload, so
+ * a brief xray restart is the only way to apply changed routing rules.
+ */
+async function rebuildActiveConfig() {
+  const serverId = store.get('activeServerId', null);
+  if (!serverId || !xray.running) return;
+  const settings = await effectiveSettings();
+  const { config } = buildActive(serverId, settings);
+  // Suppress the transient 'stopped' status from the old instance so the UI
+  // doesn't flash "disconnected" during the reload.
+  xrayReloading = true;
+  try {
+    await xray.start(config);   // start() stops the old instance first
+  } finally {
+    xrayReloading = false;
+  }
+  stats.setBin(xray.resolveBin());
+  send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
+}
+
+function startProcWatcher() {
+  stopProcWatcher();
+  const s = getSettings();
+  if (!s.advancedRouting || !s.procRouteWatch || !activeProcNames(s).length) return;
+  procWatcher = new ProcWatcher({
+    getNames: () => activeProcNames(getSettings()),
+    loadCache: loadProcCache,
+    saveCache: saveProcCache,
+    onGrow: () => rebuildActiveConfig(),
+    onLog: (line, level) => send('log', { line, level }),
+    intervalMs: 20000
+  });
+  procWatcher.start();
+}
+
+function stopProcWatcher() {
+  if (procWatcher) { procWatcher.stop(); procWatcher = null; }
+}
+
 async function doDisconnect() {
+  stopProcWatcher();
   if (stats) stats.stop();
   try { await tun.stop(); } catch {}
   try { await setSystemProxy(false, {}); } catch {}
+  try { await removeLanFirewall(); } catch {}
   if (xray) await xray.stop();
   store.set('activeServerId', null);
   updateTray(false);
@@ -518,6 +689,7 @@ function registerIpc() {
       // refresh stats binary + xray path in case xray was (re)installed
       if (component === 'xray') {
         xray.binPath = null;
+        xray._version = null;
         stats.setBin(xray.resolveBin());
       }
       return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: tun.isAvailable(), xrayReady: xray.binExists() };
@@ -538,6 +710,95 @@ function registerIpc() {
     store.set('xrayPath', res.filePaths[0]);
     return { ok: true, path: res.filePaths[0], ready: xray.binExists() };
   });
+
+  // xray-core version string (e.g. "1.8.24")
+  ipcMain.handle('xray:version', async () => {
+    try { return { ok: true, version: await xray.version() }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  // App version + GitHub "is there a newer release?" check.
+  ipcMain.handle('app:checkUpdate', async () => {
+    const current = app.getVersion();
+    try {
+      const rel = await getJSON(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
+      const latest = String(rel.tag_name || '').replace(/^v/i, '').trim();
+      if (!latest) return { ok: false, current, error: 'no release found' };
+      return {
+        ok: true,
+        current,
+        latest,
+        hasUpdate: cmpVersion(latest, current) > 0,
+        url: rel.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`
+      };
+    } catch (e) {
+      return { ok: false, current, error: e.message };
+    }
+  });
+
+  // Running processes that currently have outbound TCP connections (for the
+  // process-routing picker).
+  ipcMain.handle('proc:list', async () => {
+    try { return { ok: true, processes: await listProcesses() }; }
+    catch (e) { return { ok: false, error: e.message, processes: [] }; }
+  });
+
+  // Clear the learned per-process IP cache (stale / shared IPs).
+  ipcMain.handle('proc:clearCache', () => {
+    store.set('procIpCache', {});
+    return { ok: true };
+  });
+
+  // Delete the files the app downloaded into the writable bin (userData/bin).
+  // Does NOT touch a user-located xray (store.xrayPath) or the bundled bin.
+  ipcMain.handle('assets:remove', async () => {
+    if (xray.running || tun.active) {
+      return { ok: false, error: 'disconnect first', assets: assetStatus() };
+    }
+    const dir = userBin();
+    const names = ['xray', 'xray.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
+    const removed = [];
+    for (const n of names) {
+      const p = path.join(dir, n);
+      try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); removed.push(n); } } catch {}
+    }
+    // re-resolve xray (falls back to a user-located path or bundled bin if any)
+    xray.binPath = store.get('xrayPath', null);
+    xray._version = null;
+    stats.setBin(xray.resolveBin());
+    send('log', { line: 'Removed downloaded files: ' + (removed.join(', ') || '(none)'), level: 'info' });
+    return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: tun.isAvailable() };
+  });
+}
+
+/** Minimal redirect-following JSON GET (GitHub API). */
+function getJSON(url, depth = 0) {
+  return new Promise((resolve, reject) => {
+    if (depth > 6) return reject(new Error('too many redirects'));
+    https.get(url, { headers: { 'User-Agent': 'IRNetFree' } }, (res) => {
+      if (res.statusCode >= 300 && res.headers.location) {
+        res.resume();
+        return resolve(getJSON(res.headers.location, depth + 1));
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+    }).on('error', reject);
+  });
+}
+
+/** Compare dotted versions: 1 if a>b, -1 if a<b, 0 if equal. */
+function cmpVersion(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x > y) return 1;
+    if (x < y) return -1;
+  }
+  return 0;
 }
 
 /* ----------------------------- lifecycle ----------------------------- */
@@ -554,7 +815,12 @@ app.whenReady().then(() => {
     dataDir: dir,
     extraBinDirs: [ubin],
     onLog: (line, level) => send('log', { line, level }),
-    onStatus: (state, info) => send('xray-status', { state, info })
+    onStatus: (state, info) => {
+      // The proc-routing watcher restarts xray in place; don't surface the
+      // old instance's 'stopped' as a disconnect.
+      if (xrayReloading && state === 'stopped') return;
+      send('xray-status', { state, info });
+    }
   });
 
   subs = new SubscriptionManager({

@@ -151,7 +151,41 @@ const I18N = {
     'tun.runAdmin': 'اجرا با دسترسی ادمین',
 
     't.advOn': 'روتینگ ویژه فعال شد', 't.advOff': 'روتینگ ویژه غیرفعال شد',
-    't.advSaved': 'روتینگ ویژه ذخیره شد', 't.adminFailed': 'اجرا با دسترسی ادمین ناموفق بود'
+    't.advSaved': 'روتینگ ویژه ذخیره شد', 't.adminFailed': 'اجرا با دسترسی ادمین ناموفق بود',
+
+    'adv.type.process': 'پروسه',
+    'xray.version': 'نسخهٔ هسته',
+
+    'about.title': 'درباره و به‌روزرسانی', 'about.version': 'نسخه برنامه',
+    'about.check': 'بررسی به‌روزرسانی', 'about.download': 'دانلود نسخه جدید',
+    'about.checking': 'در حال بررسی…', 'about.checkFailed': 'بررسی ناموفق بود',
+    'about.newVersion': 'نسخهٔ جدید موجود است:', 'about.current': 'نسخهٔ فعلی',
+    'about.upToDate': '✓ برنامه به‌روز است', 'about.opening': 'صفحهٔ دانلود باز شد',
+
+    'files.title': 'فایل‌های موردنیاز',
+    'files.intro': 'برای اجرای برنامه چند فایل لازم است که هنوز دانلود نشده‌اند. اجازه می‌دهی الان دانلود شوند؟',
+    'files.download': 'دانلود کن', 'files.later': 'بعداً',
+
+    'proc.watch.title': 'به‌روز نگه‌داشتن مسیر پروسه‌ها',
+    'proc.watch.sub': 'وقتی پروسه به مقصد جدیدی وصل شود، مسیرها به‌روز می‌شوند (هسته کوتاه ری‌لود می‌شود)',
+    'proc.note': 'روتینگ پروسه بر اساس IP مقصدهای مشاهده‌شده‌ی آن برنامه کار می‌کند (xray امکان تطبیق مستقیم پروسه را ندارد). برنامه‌های دیگری که به همان IPها وصل شوند هم تأثیر می‌گیرند؛ برای برنامه‌هایی با سرور ثابت بهترین نتیجه را دارد.',
+    'proc.clearCache': 'پاک‌سازی IPهای یادگرفته‌شده', 'proc.cacheCleared': 'حافظهٔ IP پروسه‌ها پاک شد',
+    'proc.pick': 'یک پروسه انتخاب کن', 'proc.refresh': 'تازه‌سازی لیست پروسه‌ها',
+    'proc.reconnectApply': 'برای اعمال، دوباره وصل شو',
+
+    'tun.relaunchConfirm': 'حالت TUN به دسترسی ادمین نیاز دارد. برنامه بسته و دوباره با دسترسی ادمین اجرا شود؟',
+
+    'lan.reconnect': 'برای اعمال اشتراک LAN، دوباره وصل شو',
+    'lan.address': 'آدرس برای دستگاه‌های دیگر',
+    'lan.on': 'اشتراک LAN فعال است',
+    'lan.willShare': 'هنگام اتصال، این دستگاه به‌عنوان پروکسی در شبکه محلی به اشتراک گذاشته می‌شود (روی ویندوز برای باز شدن فایروال به دسترسی ادمین نیاز است).',
+
+    'comp.removeAll': 'حذف فایل‌های دانلودشده',
+    'comp.removeHint': 'فقط فایل‌هایی که برنامه دانلود کرده (در پوشهٔ داده‌ها) پاک می‌شوند؛ هستهٔ همراهِ نصب دست‌نخورده می‌ماند.',
+    'comp.removeConfirm': 'همهٔ فایل‌های دانلودشده (هسته Xray، tun2socks، wintun، فایل‌های geo) از پوشهٔ داده‌ها حذف شوند؟',
+    'comp.removeBusy': 'اول قطع کن، بعد حذف',
+    'comp.removed': 'فایل‌های دانلودشده حذف شد', 'comp.removeNone': 'فایلی برای حذف نبود',
+    'comp.removeFailed': 'حذف ناموفق بود'
   },
 
   en: {
@@ -301,7 +335,41 @@ const I18N = {
     'tun.runAdmin': 'Relaunch as admin',
 
     't.advOn': 'Advanced routing enabled', 't.advOff': 'Advanced routing disabled',
-    't.advSaved': 'Advanced routing saved', 't.adminFailed': 'Relaunch as admin failed'
+    't.advSaved': 'Advanced routing saved', 't.adminFailed': 'Relaunch as admin failed',
+
+    'adv.type.process': 'Process',
+    'xray.version': 'Core version',
+
+    'about.title': 'About & Update', 'about.version': 'App version',
+    'about.check': 'Check for updates', 'about.download': 'Download new version',
+    'about.checking': 'Checking…', 'about.checkFailed': 'Check failed',
+    'about.newVersion': 'New version available:', 'about.current': 'current',
+    'about.upToDate': '✓ You are up to date', 'about.opening': 'Opened the download page',
+
+    'files.title': 'Required files',
+    'files.intro': 'Some files needed to run the app are not downloaded yet. Download them now?',
+    'files.download': 'Download', 'files.later': 'Later',
+
+    'proc.watch.title': 'Keep process routes updated',
+    'proc.watch.sub': 'When the process reaches a new destination, routes update (xray briefly reloads)',
+    'proc.note': 'Process routing works by the destination IPs observed for that app (xray cannot match a process directly). Other apps hitting the same IPs are affected too; best for apps with a stable server.',
+    'proc.clearCache': 'Clear learned IPs', 'proc.cacheCleared': 'Process IP cache cleared',
+    'proc.pick': 'Pick a process', 'proc.refresh': 'Refresh process list',
+    'proc.reconnectApply': 'Reconnect to apply',
+
+    'tun.relaunchConfirm': 'TUN mode needs administrator rights. Close and relaunch the app as admin now?',
+
+    'lan.reconnect': 'Reconnect to apply LAN sharing',
+    'lan.address': 'Address for other devices',
+    'lan.on': 'LAN sharing is active',
+    'lan.willShare': 'On connect, this machine is shared as a proxy on your local network (on Windows, opening the firewall needs admin).',
+
+    'comp.removeAll': 'Remove downloaded files',
+    'comp.removeHint': 'Only files the app downloaded (in the data folder) are removed; a core bundled with the install stays.',
+    'comp.removeConfirm': 'Remove all downloaded files (Xray core, tun2socks, wintun, geo files) from the data folder?',
+    'comp.removeBusy': 'Disconnect first, then remove',
+    'comp.removed': 'Downloaded files removed', 'comp.removeNone': 'Nothing to remove',
+    'comp.removeFailed': 'Remove failed'
   }
 };
 

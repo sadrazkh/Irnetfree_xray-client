@@ -127,23 +127,39 @@ body {
   border-radius: var(--radius); padding: 14px; text-align: center;
 }
 .stat-label { font-size: 11px; color: var(--muted); }
-.stat-value { font-size: 18px; font-weight: 700; margin-top: 6px; }
+.stat-value {
+  font-size: 18px; font-weight: 700; margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 .hero-actions { display: flex; gap: 10px; margin-top: 26px; align-items: center; flex-wrap: wrap; justify-content: center; }
 
 /* live traffic widget */
 .traffic-row { display: flex; gap: 14px; margin-top: 16px; width: 100%; max-width: 560px; }
 .traffic-card {
-  flex: 1; display: flex; align-items: center; gap: 12px;
+  /* equal, fixed-basis cards so a changing value (e.g. 512 B → 1.0 KB) never
+     resizes the card or shifts the row */
+  flex: 1 1 0; min-width: 0;
+  display: flex; align-items: center; gap: 12px;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 12px 14px;
 }
-.traffic-ico { font-size: 18px; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; }
+.traffic-card > div { min-width: 0; flex: 1; }
+.traffic-ico { font-size: 18px; width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 9px; }
 .traffic-ico.down { color: var(--accent-2); background: rgba(45,212,191,.12); }
 .traffic-ico.up { color: var(--accent); background: rgba(79,140,255,.12); }
 .traffic-ico.mode { color: var(--yellow); background: rgba(210,153,34,.12); }
-.traffic-speed { font-size: 15px; font-weight: 700; }
-.traffic-total { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.traffic-speed {
+  font-size: 15px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.traffic-total {
+  font-size: 11px; color: var(--muted); margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* ---------------- buttons / inputs ---------------- */
 .btn {
@@ -360,8 +376,13 @@ body {
 }
 .session-title { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
 .session-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.session-grid > div { min-width: 0; }
 .session-label { font-size: 11px; color: var(--muted); }
-.session-val { font-size: 17px; font-weight: 700; margin-top: 5px; }
+.session-val {
+  font-size: 17px; font-weight: 700; margin-top: 5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .session-val.sum { color: var(--accent-2); }
 
 /* ---------------- runtime components list ---------------- */
@@ -538,6 +559,40 @@ body {
 .chain-min.warn { color: var(--yellow); }
 .chain-min:empty { display: none; }
 .chain-nodes-empty { color: var(--muted); font-size: 13px; }
+
+/* xray core version + component version chip */
+.xray-version { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.comp-ver { font-size: 11px; color: var(--accent-2); font-weight: 700; margin-inline-start: 4px; }
+
+/* about / update card */
+.about-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; }
+.about-label { font-size: 13px; color: var(--muted); }
+.about-val { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.update-status { font-size: 12px; color: var(--muted); margin: 8px 0; min-height: 16px; }
+.update-status.ok { color: var(--green); }
+.update-status.warn { color: var(--yellow); }
+
+/* required-files modal */
+.files-list { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
+.files-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px;
+}
+.files-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.files-dot.missing { background: var(--red); box-shadow: 0 0 7px var(--red); }
+.files-name { font-size: 13px; font-weight: 600; }
+.files-progress { font-size: 12px; color: var(--accent-2); min-height: 16px; margin-top: 6px; }
+.files-progress:empty { display: none; }
+
+/* process-routing options panel */
+.proc-opts {
+  border-top: 1px solid var(--border); padding-top: 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.proc-opts[hidden] { display: none; }
+.adv-rule .adv-proc { flex: 1; min-width: 0; }
+.adv-proc-refresh { flex: 0 0 auto; }
+.adv-proc-refresh:hover { color: var(--accent-2); border-color: var(--accent-2); }
 
 /* scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
