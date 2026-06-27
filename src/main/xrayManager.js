@@ -81,6 +81,28 @@ class XrayManager {
     return !!this.resolveBin();
   }
 
+  /** xray-core version string (e.g. "1.8.24"), cached. Empty if unavailable. */
+  version() {
+    return new Promise((resolve) => {
+      if (this._version) return resolve(this._version);
+      const bin = this.resolveBin();
+      if (!bin) return resolve('');
+      let out = '';
+      const proc = spawn(bin, ['version'], { cwd: path.dirname(bin), windowsHide: true, env: this.spawnEnv() });
+      proc.stdout.on('data', d => { out += d.toString('utf8'); });
+      proc.stderr.on('data', d => { out += d.toString('utf8'); });
+      const finish = () => {
+        // first line looks like: "Xray 1.8.24 (Xray, ...) ..."
+        const m = out.match(/Xray[^\d]*(\d+\.\d+\.\d+)/i);
+        this._version = m ? m[1] : (out.split(/\r?\n/)[0] || '').trim();
+        resolve(this._version);
+      };
+      proc.on('error', () => resolve(''));
+      proc.on('exit', finish);
+      setTimeout(() => { try { proc.kill(); } catch {} finish(); }, 4000);
+    });
+  }
+
   /** Write config to disk. */
   writeConfig(config, file) {
     const target = file || this.currentConfigPath;

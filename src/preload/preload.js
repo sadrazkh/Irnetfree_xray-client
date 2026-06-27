@@ -46,13 +46,22 @@ contextBridge.exposeInMainWorld('api', {
   // xray binary
   locateXray: () => ipcRenderer.invoke('xray:locate'),
   openDataDir: () => ipcRenderer.invoke('open:dataDir'),
+  xrayVersion: () => ipcRenderer.invoke('xray:version'),
+
+  // app version / update check
+  checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
+
+  // process-based routing
+  listProcesses: () => ipcRenderer.invoke('proc:list'),
+  clearProcCache: () => ipcRenderer.invoke('proc:clearCache'),
 
   // relaunch elevated (Windows) for TUN mode
   relaunchAdmin: () => ipcRenderer.invoke('app:relaunchAdmin'),
 
-  // runtime components (download / integrate / update)
+  // runtime components (download / integrate / update / remove)
   assetsStatus: () => ipcRenderer.invoke('assets:status'),
   downloadAsset: (component) => ipcRenderer.invoke('assets:download', component),
+  removeAssets: () => ipcRenderer.invoke('assets:remove'),
 
   // window
   minimize: () => ipcRenderer.send('win:minimize'),

@@ -223,8 +223,18 @@ class Downloader {
   macPrepareBinary(dest, exec) {
     try { execFileSync('xattr', ['-dr', 'com.apple.quarantine', dest]); } catch {}
     if (exec) {
+      // Apple Silicon REFUSES to exec an unsigned binary (SIGKILL "Killed: 9")
+      // with no useful error — which later masquerades as "tun2socks did not
+      // create a utun device". An ad-hoc signature is enough to run a CLI
+      // binary, so a codesign failure here must be fatal, not a warning.
       try { execFileSync('codesign', ['--force', '--sign', '-', dest]); }
-      catch (e) { this.log('codesign skipped for ' + path.basename(dest) + ': ' + (e.message || e), 'warn'); }
+      catch (e) {
+        const isArm = os.arch() === 'arm64';
+        const msg = 'codesign failed for ' + path.basename(dest) + ': ' + (e.message || e) +
+          (isArm ? ' — on Apple Silicon the binary cannot run unsigned. Install Xcode Command Line Tools (xcode-select --install) and retry.' : '');
+        if (isArm) { this.log(msg, 'error'); throw new Error(msg); }
+        this.log(msg, 'warn');
+      }
     }
   }
 

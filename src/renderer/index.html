@@ -301,6 +301,19 @@
               <select id="advDefault" class="select adv-target"></select>
             </div>
 
+            <!-- process-routing options (only relevant when a process rule exists) -->
+            <div class="proc-opts" id="procOpts" hidden>
+              <div class="switch-row">
+                <div>
+                  <div class="switch-title" data-i18n="proc.watch.title">به‌روز نگه‌داشتن مسیر پروسه‌ها</div>
+                  <div class="switch-sub" data-i18n="proc.watch.sub">وقتی پروسه به مقصد جدیدی وصل شود، مسیرها به‌روز می‌شوند (هسته کوتاه ری‌لود می‌شود)</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="optProcWatch" /><span class="slider"></span></label>
+              </div>
+              <p class="hint" data-i18n="proc.note">روتینگ پروسه بر اساس IP مقصدهای مشاهده‌شده‌ی آن برنامه کار می‌کند (xray امکان تطبیق مستقیم پروسه را ندارد). برنامه‌های دیگری که به همان IPها وصل شوند هم تأثیر می‌گیرند؛ برای برنامه‌هایی با سرور ثابت بهترین نتیجه را دارد.</p>
+              <button class="btn ghost" id="btnClearProcCache" data-i18n="proc.clearCache">پاک‌سازی IPهای یادگرفته‌شده</button>
+            </div>
+
             <button class="btn primary" id="btnSaveAdv" data-i18n="adv.save">ذخیره روتینگ پیشرفته</button>
             <span class="saved-hint" id="advSavedHint"></span>
           </div>
@@ -363,6 +376,10 @@
           <label class="field-label" data-i18n="comp.title">فایل‌های موردنیاز</label>
           <p class="hint" data-i18n="comp.hint"></p>
           <div class="comp-list" id="compList"></div>
+          <div class="row-gap">
+            <button class="btn danger" id="btnRemoveFiles" data-i18n="comp.removeAll">حذف فایل‌های دانلودشده</button>
+          </div>
+          <p class="hint" data-i18n="comp.removeHint">فقط فایل‌هایی که برنامه دانلود کرده (در پوشهٔ داده‌ها) پاک می‌شوند.</p>
         </div>
 
         <div class="card">
@@ -383,11 +400,13 @@
               <div class="switch-sub" data-i18n="lan.sub">دستگاه‌های دیگه هم بتونن وصل بشن</div></div>
             <label class="switch"><input type="checkbox" id="optAllowLan" /><span class="slider"></span></label>
           </div>
+          <div class="tun-status" id="lanInfo"></div>
         </div>
 
         <div class="card">
           <label class="field-label" data-i18n="xray.label">مسیر هسته Xray</label>
           <div class="xray-status" id="xrayStatus" data-i18n="xray.checking">در حال بررسی…</div>
+          <div class="xray-version" id="xrayVersion"></div>
           <div class="row-gap">
             <button class="btn ghost" id="btnLocateXray" data-i18n="btn.locate">انتخاب فایل xray</button>
             <button class="btn ghost" id="btnOpenData" data-i18n="btn.openData">پوشه داده‌ها</button>
@@ -398,6 +417,20 @@
         <div class="card">
           <button class="btn primary" id="btnSaveSettings" data-i18n="btn.save">ذخیره تنظیمات</button>
           <span class="saved-hint" id="savedHint"></span>
+        </div>
+
+        <!-- About / Update -->
+        <div class="card">
+          <label class="field-label" data-i18n="about.title">درباره و به‌روزرسانی</label>
+          <div class="about-row">
+            <span class="about-label" data-i18n="about.version">نسخه برنامه</span>
+            <span class="about-val" id="appVersion">—</span>
+          </div>
+          <div class="update-status" id="updateStatus"></div>
+          <div class="row-gap">
+            <button class="btn ghost" id="btnCheckUpdate" data-i18n="about.check">بررسی به‌روزرسانی</button>
+            <button class="btn primary" id="btnDownloadUpdate" data-i18n="about.download" hidden>دانلود نسخه جدید</button>
+          </div>
         </div>
       </section>
 
@@ -526,6 +559,57 @@
       </div>
     </div>
   </div>
+
+  <!-- first-run / missing required files modal -->
+  <div class="modal-overlay" id="filesModal" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <span class="modal-title" data-i18n="files.title">فایل‌های موردنیاز</span>
+        <button class="tb-btn" id="filesClose">&#x2715;</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint" data-i18n="files.intro">برای اجرای برنامه چند فایل لازم است که هنوز دانلود نشده‌اند. اجازه می‌دهی الان دانلود شوند؟</p>
+        <div class="files-list" id="filesList"></div>
+        <div class="files-progress" id="filesProgress"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="filesDownload" data-i18n="files.download">دانلود کن</button>
+        <button class="btn ghost" id="filesLater" data-i18n="files.later">بعداً</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- geo suggestion lists for advanced routing (type to filter or pick) -->
+  <datalist id="geoipList">
+    <option value="geoip:ir"></option>
+    <option value="geoip:cn"></option>
+    <option value="geoip:us"></option>
+    <option value="geoip:private"></option>
+    <option value="geoip:telegram"></option>
+    <option value="geoip:google"></option>
+    <option value="geoip:cloudflare"></option>
+    <option value="geoip:facebook"></option>
+    <option value="geoip:twitter"></option>
+    <option value="geoip:netflix"></option>
+  </datalist>
+  <datalist id="geositeList">
+    <option value="geosite:category-ads-all"></option>
+    <option value="geosite:ir"></option>
+    <option value="geosite:category-ir"></option>
+    <option value="geosite:cn"></option>
+    <option value="geosite:google"></option>
+    <option value="geosite:youtube"></option>
+    <option value="geosite:telegram"></option>
+    <option value="geosite:twitter"></option>
+    <option value="geosite:facebook"></option>
+    <option value="geosite:instagram"></option>
+    <option value="geosite:netflix"></option>
+    <option value="geosite:spotify"></option>
+    <option value="geosite:openai"></option>
+    <option value="geosite:github"></option>
+    <option value="geosite:category-porn"></option>
+    <option value="geosite:private"></option>
+  </datalist>
 
   <!-- toast -->
   <div class="toast" id="toast"></div>

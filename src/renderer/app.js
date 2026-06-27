@@ -16,6 +16,10 @@ const state = {
   tunAvailable: false,
   elevated: false,         // running as Administrator (Windows) — needed for TUN
   assets: {},
+  version: '',             // app version (from main)
+  platform: 'win32',       // process.platform
+  procList: [],            // running processes for the routing picker
+  lan: null,               // { ip, socksPort, httpPort } when LAN sharing active
   chain: [],               // legacy: ordered server ids (first hop → exit)
   chains: [],              // [{ id, name, members:[serverId,...] }] — first-class chains
   editingId: null,         // server being edited in the modal
@@ -43,7 +47,9 @@ function fmtBytes(n) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
   while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return (i === 0 ? n : n.toFixed(1)) + ' ' + units[i];
+  // Bytes are whole; everything else keeps ONE decimal so the text width stays
+  // stable as values cross B↔KB↔MB (prevents the traffic cards from resizing).
+  return (i === 0 ? Math.round(n) : n.toFixed(1)) + ' ' + units[i];
 }
 function fmtSpeed(n) { return fmtBytes(n) + '/s'; }
 
@@ -106,6 +112,7 @@ function setLang(lang) {
   updateTunStatus();
   setModeWidget();
   refreshConnLabels();
+  if ($('#xrayVersion')) $('#xrayVersion').textContent = state.xrayVersion ? (t('xray.version') + ': ' + state.xrayVersion) : '';
   saveSettings({ lang });
 }
 
@@ -120,6 +127,8 @@ async function init() {
   state.tunAvailable = !!data.tunAvailable;
   state.elevated = !!data.elevated;
   state.assets = data.assets || {};
+  state.version = data.version || '';
+  state.platform = data.platform || (data.assets && data.assets.platform) || 'win32';
   state.chain = (data.chain || []).filter(id => state.servers.some(s => s.id === id));
   state.chains = (data.chains || []).map(c => ({
     id: c.id, name: c.name || 'Chain',
@@ -139,6 +148,25 @@ async function init() {
   updateXrayStatus(data.xrayReady);
   updateTunStatus();
   setModeWidget();
+  updateLanInfo();
+
+  // app version + xray-core version
+  $('#appVersion').textContent = 'v' + (state.version || '?');
+  refreshXrayVersion();
+
+  // prompt to download required files on first run / when essentials are missing
+  maybePromptMissingFiles();
+}
+
+/* ----------------------------- xray-core version ----------------------------- */
+async function refreshXrayVersion() {
+  const el = $('#xrayVersion');
+  try {
+    const res = await window.api.xrayVersion();
+    state.xrayVersion = (res && res.ok) ? res.version : '';
+  } catch { state.xrayVersion = ''; }
+  if (el) el.textContent = state.xrayVersion ? (t('xray.version') + ': ' + state.xrayVersion) : '';
+  renderComponents();
 }
 
 /* ----------------------------- settings UI ----------------------------- */
@@ -218,6 +246,28 @@ $$('#routingSeg .seg-btn').forEach(btn => {
 });
 $('#optBlockAds').onchange = () => saveSettings();
 $('#optSniff').onchange = () => saveSettings();
+$('#optAllowLan').onchange = async () => {
+  await saveSettings();
+  updateLanInfo();
+  if (state.connected) toast(t('lan.reconnect'), '');
+};
+
+/** Show the address LAN clients should point their proxy at (when sharing). */
+function updateLanInfo() {
+  const el = $('#lanInfo');
+  if (!el) return;
+  if (!state.settings.allowLan) { el.textContent = ''; el.className = 'tun-status'; return; }
+  if (state.connected && state.lan && state.lan.ip) {
+    el.textContent = `${t('lan.address')}: ${state.lan.ip}:${state.lan.httpPort} (HTTP) • ${state.lan.ip}:${state.lan.socksPort} (SOCKS)`;
+    el.className = 'tun-status ok';
+  } else if (state.connected) {
+    el.textContent = t('lan.on');
+    el.className = 'tun-status ok';
+  } else {
+    el.textContent = t('lan.willShare');
+    el.className = 'tun-status';
+  }
+}
 $('#btnSaveRules').onclick = async () => {
   const rules = textToCustomRules($('#customRules').value);
   await saveSettings({ customRules: rules });
@@ -564,6 +614,10 @@ function hideGeo() { $('#connGeo').hidden = true; }
 async function connect(id) {
   if (state.connecting) return;
   if (state.connected && state.activeServerId === id) return disconnect();
+  // TUN wanted but not elevated (Windows): offer to relaunch as admin first.
+  if (state.settings.tunMode && state.tunAvailable && !state.elevated && state.platform === 'win32') {
+    if (await promptRelaunchAdmin()) return;
+  }
   selectServer(id);
   state.connecting = true;
   setConnUI('connecting', id);
@@ -638,8 +692,10 @@ window.api.onStatus((d) => {
     state.connected = true;
     state.connecting = false;
     state.activeServerId = d.serverId;
+    state.lan = d.lan || null;
     setConnUI('connected', d.serverId);
     setModeWidget();
+    updateLanInfo();
     renderServers();
     renderPicker();
     if (d.tunError) {
@@ -656,11 +712,13 @@ window.api.onStatus((d) => {
   } else if (d.state === 'disconnected') {
     state.connected = false;
     state.connecting = false;
+    state.lan = null;
     setConnUI('disconnected');
     $('#statIp').textContent = '—';
     hideGeo();
     resetTraffic();
     setModeWidget();
+    updateLanInfo();
     renderServers();
     renderPicker();
   }
@@ -727,12 +785,13 @@ function renderComponents() {
   for (const c of COMPONENTS) {
     if (c.winOnly && !isWin) continue;
     const present = c.has ? c.has(a) : !!a[c.key];
+    const ver = (c.key === 'xray' && present && state.xrayVersion) ? ` <span class="comp-ver">v${escapeHtml(state.xrayVersion)}</span>` : '';
     const row = document.createElement('div');
     row.className = 'comp-row';
     row.innerHTML = `
       <div class="comp-info">
         <span class="comp-dot ${present ? 'ok' : 'missing'}"></span>
-        <span class="comp-name">${escapeHtml(t(c.label))}</span>
+        <span class="comp-name">${escapeHtml(t(c.label))}${ver}</span>
         <span class="comp-state ${present ? 'ok' : 'missing'}">${present ? t('comp.installed') : t('comp.missing')}</span>
       </div>
       <button class="btn ${present ? 'ghost' : 'primary'} comp-btn">${present ? t('btn.update') : t('btn.download')}</button>`;
@@ -756,6 +815,7 @@ async function downloadComponent(key, btn) {
     renderComponents();
     updateXrayStatus(res.xrayReady);
     updateTunStatus();
+    if (key === 'xray') refreshXrayVersion();
     toast(t('t.downloaded'), 'ok');
   } else {
     state.assets = res.assets || state.assets;
@@ -765,17 +825,158 @@ async function downloadComponent(key, btn) {
 }
 
 window.api.onAssetProgress((d) => {
-  // surface coarse progress through the toast
+  // surface coarse progress through the toast + the files modal if open
   toast(`${t('t.downloading')} ${d.component}: ${d.pct}%`);
+  const fp = $('#filesProgress');
+  if (fp && !$('#filesModal').hidden) fp.textContent = `${t('t.downloading')} ${d.component}: ${d.pct}%`;
 });
 
-/* ----------------------------- TUN mode ----------------------------- */
-$('#optTun').onchange = async () => {
-  if ($('#optTun').checked && !state.tunAvailable) {
-    toast(t('t.tunNeedFiles'), 'err');
+/* remove all downloaded runtime files */
+$('#btnRemoveFiles').onclick = async () => {
+  if (state.connected) return toast(t('comp.removeBusy'), 'err');
+  if (!window.confirm(t('comp.removeConfirm'))) return;
+  const res = await window.api.removeAssets();
+  if (res && res.ok) {
+    state.assets = res.assets || state.assets;
+    state.tunAvailable = !!res.tunAvailable;
+    renderComponents();
+    updateXrayStatus(res.xrayReady);
+    updateTunStatus();
+    refreshXrayVersion();
+    const n = (res.removed || []).length;
+    toast(n ? `${t('comp.removed')} (${n})` : t('comp.removeNone'), n ? 'ok' : '');
+  } else {
+    toast(t('comp.removeFailed') + (res && res.error ? ': ' + res.error : ''), 'err');
   }
+};
+
+/* ----------------------------- app update check ----------------------------- */
+let updateInfo = null;
+$('#btnCheckUpdate').onclick = async () => {
+  const st = $('#updateStatus');
+  const btn = $('#btnCheckUpdate');
+  btn.disabled = true;
+  st.textContent = t('about.checking');
+  st.className = 'update-status';
+  try {
+    const res = await window.api.checkUpdate();
+    if (!res || !res.ok) {
+      st.textContent = t('about.checkFailed') + (res && res.error ? ': ' + res.error : '');
+      st.className = 'update-status warn';
+    } else if (res.hasUpdate) {
+      updateInfo = res;
+      st.textContent = `${t('about.newVersion')} ${res.latest} (${t('about.current')} ${res.current})`;
+      st.className = 'update-status ok';
+      $('#btnDownloadUpdate').hidden = false;
+    } else {
+      st.textContent = t('about.upToDate') + ' (v' + res.current + ')';
+      st.className = 'update-status ok';
+      $('#btnDownloadUpdate').hidden = true;
+    }
+  } catch (e) {
+    st.textContent = t('about.checkFailed') + ': ' + e.message;
+    st.className = 'update-status warn';
+  } finally {
+    btn.disabled = false;
+  }
+};
+$('#btnDownloadUpdate').onclick = () => {
+  const url = (updateInfo && updateInfo.url) || 'https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest';
+  window.api.openExternal(url);
+  toast(t('about.opening'));
+};
+
+/* ----------------------------- first-run required files modal ----------------------------- */
+function missingEssentials() {
+  const a = state.assets || {};
+  const isWin = state.platform === 'win32';
+  const want = state.settings.tunMode;   // tun files only matter if TUN is on
+  const list = [];
+  if (!a.xray) list.push('xray');
+  if (!(a.geoip && a.geosite)) list.push('geo');
+  if (want && !a.tun2socks) list.push('tun2socks');
+  if (want && isWin && !a.wintun) list.push('wintun');
+  return list;
+}
+
+function maybePromptMissingFiles() {
+  const missing = missingEssentials();
+  // Only auto-prompt when the core (xray) is missing — geo/tun are optional and
+  // already surfaced in Settings → Required files.
+  if (!missing.includes('xray')) return;
+  openFilesModal(missing);
+}
+
+const COMP_LABEL = { xray: 'comp.xray', geo: 'comp.geo', tun2socks: 'comp.tun2socks', wintun: 'comp.wintun' };
+
+function openFilesModal(missing) {
+  const listEl = $('#filesList');
+  listEl.innerHTML = '';
+  for (const key of missing) {
+    const row = document.createElement('div');
+    row.className = 'files-row';
+    row.innerHTML = `<span class="files-dot missing"></span><span class="files-name">${escapeHtml(t(COMP_LABEL[key] || key))}</span>`;
+    listEl.appendChild(row);
+  }
+  $('#filesProgress').textContent = '';
+  $('#filesModal').dataset.missing = missing.join(',');
+  $('#filesModal').hidden = false;
+}
+function closeFilesModal() { $('#filesModal').hidden = true; }
+$('#filesClose').onclick = closeFilesModal;
+$('#filesLater').onclick = closeFilesModal;
+$('#filesModal').onclick = (e) => { if (e.target === $('#filesModal')) closeFilesModal(); };
+
+$('#filesDownload').onclick = async () => {
+  const missing = ($('#filesModal').dataset.missing || '').split(',').filter(Boolean);
+  const btn = $('#filesDownload');
+  btn.disabled = true;
+  for (const key of missing) {
+    $('#filesProgress').textContent = `${t('t.downloading')} ${t(COMP_LABEL[key] || key)}…`;
+    const res = await window.api.downloadAsset(key);
+    if (res && res.ok) {
+      state.assets = res.assets || state.assets;
+      state.tunAvailable = !!res.tunAvailable;
+    } else {
+      $('#filesProgress').textContent = t('t.downloadFailed') + ': ' + ((res && res.error) || '');
+      btn.disabled = false;
+      renderComponents();
+      updateXrayStatus(state.assets.xray);
+      return;
+    }
+  }
+  btn.disabled = false;
+  renderComponents();
+  updateXrayStatus(state.assets.xray);
+  updateTunStatus();
+  refreshXrayVersion();
+  closeFilesModal();
+  toast(t('t.downloaded'), 'ok');
+};
+
+/* ----------------------------- TUN mode ----------------------------- */
+/**
+ * TUN needs Administrator on Windows. When the user wants TUN but we're not
+ * elevated, offer to close and relaunch elevated right away. Returns true if a
+ * relaunch was started (the app is quitting), so callers should stop.
+ */
+async function promptRelaunchAdmin() {
+  if (state.platform !== 'win32' || state.elevated) return false;
+  const ok = window.confirm(t('tun.relaunchConfirm'));
+  if (!ok) return false;
+  const res = await window.api.relaunchAdmin();
+  if (!res || !res.ok) { toast((res && res.error) || t('t.adminFailed'), 'err'); return false; }
+  return true;
+}
+
+$('#optTun').onchange = async () => {
+  const on = $('#optTun').checked;
+  if (on && !state.tunAvailable) toast(t('t.tunNeedFiles'), 'err');
   await saveSettings();
   updateTunStatus();
+  if (on && state.tunAvailable && !state.elevated && state.platform === 'win32') {
+    if (await promptRelaunchAdmin()) return;
+  }
   if (state.connected) toast(t('t.tunReconnect'), '');
 };
 
@@ -1249,7 +1450,30 @@ function renderChains() {
 }
 
 /* ----------------------------- advanced (graphical) routing ----------------------------- */
-const RULE_TYPES = ['ip', 'domain', 'port'];
+const RULE_TYPES = ['ip', 'domain', 'port', 'process'];
+
+/** Fetch the running-process list for the routing picker, then re-render. */
+async function loadProcList() {
+  try {
+    const res = await window.api.listProcesses();
+    state.procList = (res && res.ok) ? (res.processes || []) : [];
+  } catch { state.procList = []; }
+  renderAdvanced();
+}
+
+/** <option>s for a process <select>, ensuring the current value is present. */
+function processOptions(selected) {
+  const opts = [`<option value="">${escapeHtml(t('proc.pick'))}</option>`];
+  for (const p of state.procList) {
+    const label = p.count ? `${p.name} (${p.count})` : p.name;
+    opts.push(`<option value="${escapeHtml(p.name)}"${p.name === selected ? ' selected' : ''}>${escapeHtml(label)}</option>`);
+  }
+  // current value that's no longer running
+  if (selected && !state.procList.some(p => p.name === selected)) {
+    opts.push(`<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}</option>`);
+  }
+  return opts.join('');
+}
 
 function targetOptions(selected) {
   // [{ value, label }] — servers + named chains + direct/block
@@ -1279,19 +1503,37 @@ function renderAdvanced() {
   if (!rules.length) {
     wrap.innerHTML = `<div class="empty small">${escapeHtml(t('adv.empty'))}</div>`;
   }
+  let hasProc = false;
   rules.forEach((r, idx) => {
+    if (r.type === 'process') hasProc = true;
     const row = document.createElement('div');
     row.className = 'adv-rule';
     const typeOpts = RULE_TYPES.map(tp =>
       `<option value="${tp}"${tp === r.type ? ' selected' : ''}>${escapeHtml(t('adv.type.' + tp))}</option>`).join('');
+    // process rules use a dropdown of running processes; ip/domain get a
+    // datalist of common geoip/geosite tokens so the user can pick instead of
+    // memorizing them; others a plain free-text value.
+    const listAttr = r.type === 'ip' ? ' list="geoipList"' : r.type === 'domain' ? ' list="geositeList"' : '';
+    const valueCell = r.type === 'process'
+      ? `<select class="select adv-value adv-proc">${processOptions(r.value)}</select>
+         <button class="icon-btn adv-proc-refresh" title="${escapeHtml(t('proc.refresh'))}">⟳</button>`
+      : `<input class="input adv-value"${listAttr} dir="ltr" placeholder="${escapeHtml(t('adv.valuePh'))}" value="${escapeHtml(r.value || '')}" />`;
     row.innerHTML = `
       <select class="select adv-type">${typeOpts}</select>
-      <input class="input adv-value" dir="ltr" placeholder="${escapeHtml(t('adv.valuePh'))}" value="${escapeHtml(r.value || '')}" />
+      ${valueCell}
       <span class="adv-arrow">→</span>
       <select class="select adv-target">${targetOptions(r.target)}</select>
       <button class="icon-btn adv-del" title="remove">🗑</button>`;
-    row.querySelector('.adv-type').onchange = (e) => { rules[idx].type = e.target.value; };
-    row.querySelector('.adv-value').oninput = (e) => { rules[idx].value = e.target.value; };
+    row.querySelector('.adv-type').onchange = (e) => {
+      rules[idx].type = e.target.value;
+      if (e.target.value === 'process' && !state.procList.length) loadProcList();
+      else renderAdvanced();
+    };
+    const valEl = row.querySelector('.adv-value');
+    if (r.type === 'process') valEl.onchange = (e) => { rules[idx].value = e.target.value; };
+    else valEl.oninput = (e) => { rules[idx].value = e.target.value; };
+    const refresh = row.querySelector('.adv-proc-refresh');
+    if (refresh) refresh.onclick = () => loadProcList();
     row.querySelector('.adv-target').onchange = (e) => { rules[idx].target = e.target.value; };
     row.querySelector('.adv-del').onclick = () => { rules.splice(idx, 1); renderAdvanced(); };
     wrap.appendChild(row);
@@ -1300,6 +1542,14 @@ function renderAdvanced() {
   // default target select
   const def = state.settings.routeDefault || (state.servers[0] && state.servers[0].id) || 'direct';
   defSel.innerHTML = targetOptions(def);
+
+  // process-routing options panel (only when a process rule exists)
+  const procOpts = $('#procOpts');
+  if (procOpts) {
+    procOpts.hidden = !hasProc;
+    const watch = $('#optProcWatch');
+    if (watch) watch.checked = !!state.settings.procRouteWatch;
+  }
 }
 
 $('#optAdvanced').onchange = async () => {
@@ -1321,6 +1571,21 @@ $('#btnAddRule').onclick = () => {
   rules.push({ type: 'ip', value: '', target: firstTarget });
   renderAdvanced();
 };
+
+/* process-routing options */
+$('#optProcWatch').onchange = async () => {
+  await saveSettings({ procRouteWatch: $('#optProcWatch').checked });
+  if (state.connected) toast(t('proc.reconnectApply'), '');
+};
+$('#btnClearProcCache').onclick = async () => {
+  await window.api.clearProcCache();
+  toast(t('proc.cacheCleared'), 'ok');
+};
+// load the running-process list when opening Routing (for the process picker)
+const routingNav = document.querySelector('.nav-item[data-view="routing"]');
+if (routingNav) routingNav.addEventListener('click', () => {
+  if ((state.settings.routeRules || []).some(r => r && r.type === 'process')) loadProcList();
+});
 
 $('#btnSaveAdv').onclick = async () => {
   // collect from current state (kept in sync by the row handlers) + default select
@@ -1397,6 +1662,10 @@ $$('#modeModal .mode-option').forEach(opt => {
     updateTunStatus();
     renderModeOptions();
     toast(wantTun ? t('mode.tun') : t('mode.proxy'), 'ok');
+    if (wantTun && state.tunAvailable && !state.elevated && state.platform === 'win32') {
+      closeModeModal();
+      if (await promptRelaunchAdmin()) return;
+    }
     if (state.connected) toast(t('t.tunReconnect'), '');
     setTimeout(closeModeModal, 220);
   };
