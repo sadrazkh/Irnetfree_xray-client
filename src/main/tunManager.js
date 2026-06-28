@@ -357,6 +357,13 @@ class TunManager {
       'tun2socks پیدا نشد — آن را در پوشه bin بگذارید (از «فایل‌های موردنیاز» دانلود کن)',
       'tun2socks not found — put it in the bin folder (download it from "Required files")'));
 
+    // A previously-downloaded binary may be quarantined/unsigned — on Apple
+    // Silicon that means it is SIGKILL'd at exec ("Killed: 9"), which then looks
+    // like "tun2socks did not create a utun device". Re-sign it (ad-hoc) and
+    // strip quarantine here so even old downloads run.
+    try { execFileSync('xattr', ['-dr', 'com.apple.quarantine', bin], { stdio: 'ignore' }); } catch {}
+    try { execFileSync('codesign', ['--force', '--sign', '-', bin], { stdio: 'ignore' }); } catch {}
+
     if (Array.isArray(dnsServers) && dnsServers.length) this.dnsServers = dnsServers.slice(0, 2);
 
     const route = await this.getDefaultRouteMac();
@@ -382,7 +389,7 @@ class TunManager {
     const dns2 = this.dnsServers[1] || '';
     const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`; // single-quote for bash
 
-    const bypassAdd = ips.map(ip => `route -n add -inet -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1 || true`).join('\n');
+    const bypassAdd = ips.map(ip => `route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1 || true`).join('\n');
     const dnsLine = service
       ? `networksetup -setdnsservers ${sh(service)} ${dns1}${dns2 ? ' ' + dns2 : ''} 2>/dev/null || true`
       : 'true';
@@ -446,10 +453,10 @@ class TunManager {
       //    next-hop, so `route add -net 0/1 10.255.0.1` black-holes; `-interface`
       //    is the correct form. Two /1 routes override the default without
       //    deleting it. Delete first so a leftover route can't error out.
-      `route -n delete -inet -net 0.0.0.0/1 -interface "$ACTUAL" >/dev/null 2>&1`,
-      `route -n delete -inet -net 128.0.0.0/1 -interface "$ACTUAL" >/dev/null 2>&1`,
-      `route -n add -inet -net 0.0.0.0/1 -interface "$ACTUAL" || { echo "ERR: route 0/1 failed" >&2; exit 13; }`,
-      `route -n add -inet -net 128.0.0.0/1 -interface "$ACTUAL" || { echo "ERR: route 128/1 failed" >&2; exit 13; }`,
+      `route -n delete -net 0.0.0.0/1 -interface "$ACTUAL" >/dev/null 2>&1`,
+      `route -n delete -net 128.0.0.0/1 -interface "$ACTUAL" >/dev/null 2>&1`,
+      `OUT=$(route -n add -net 0.0.0.0/1 -interface "$ACTUAL" 2>&1) || { echo "ERR: route 0/1 failed: $OUT" >&2; exit 13; }`,
+      `OUT=$(route -n add -net 128.0.0.0/1 -interface "$ACTUAL" 2>&1) || { echo "ERR: route 128/1 failed: $OUT" >&2; exit 13; }`,
       // 6) DNS through the tunnel (leak prevention)
       dnsLine,
       'exit 0',
@@ -541,8 +548,8 @@ class TunManager {
     // added them with — otherwise they leak and break all networking after
     // disconnect until reboot.
     if (dev) {
-      lines.push(`route -n delete -inet -net 0.0.0.0/1 -interface ${sh(dev)} 2>/dev/null || true`);
-      lines.push(`route -n delete -inet -net 128.0.0.0/1 -interface ${sh(dev)} 2>/dev/null || true`);
+      lines.push(`route -n delete -net 0.0.0.0/1 -interface ${sh(dev)} 2>/dev/null || true`);
+      lines.push(`route -n delete -net 128.0.0.0/1 -interface ${sh(dev)} 2>/dev/null || true`);
     }
     // legacy cleanup: also try the old peer-IP form in case a route from a
     // previous app version is still installed.
@@ -640,8 +647,8 @@ class TunManager {
       const st = this.macState || {};
       try { if (st.macPid) execFileSync('kill', [String(st.macPid)]); } catch {}
       if (st.dev) {
-        try { execFileSync('route', ['-n', 'delete', '-inet', '-net', '0.0.0.0/1', '-interface', st.dev]); } catch {}
-        try { execFileSync('route', ['-n', 'delete', '-inet', '-net', '128.0.0.0/1', '-interface', st.dev]); } catch {}
+        try { execFileSync('route', ['-n', 'delete', '-net', '0.0.0.0/1', '-interface', st.dev]); } catch {}
+        try { execFileSync('route', ['-n', 'delete', '-net', '128.0.0.0/1', '-interface', st.dev]); } catch {}
       }
       // legacy peer-IP form, in case an old route is still present
       try { execFileSync('route', ['-n', 'delete', '-net', '0.0.0.0/1', TUN_GW]); } catch {}
