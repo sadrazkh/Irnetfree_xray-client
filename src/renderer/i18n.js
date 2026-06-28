@@ -185,7 +185,27 @@ const I18N = {
     'comp.removeConfirm': 'همهٔ فایل‌های دانلودشده (هسته Xray، tun2socks، wintun، فایل‌های geo) از پوشهٔ داده‌ها حذف شوند؟',
     'comp.removeBusy': 'اول قطع کن، بعد حذف',
     'comp.removed': 'فایل‌های دانلودشده حذف شد', 'comp.removeNone': 'فایلی برای حذف نبود',
-    'comp.removeFailed': 'حذف ناموفق بود'
+    'comp.removeFailed': 'حذف ناموفق بود',
+
+    'tb.max': 'بزرگ‌نمایی / بازگردانی',
+    'lan.noIp': 'آدرس IP محلی پیدا نشد (به شبکه وصل هستی؟)',
+
+    'dns.custom': 'سفارشی…', 'dns.set': 'DNS تنظیم شد',
+
+    'kill.title': 'کیل سوییچ (Kill switch)',
+    'kill.sub': 'اگر اتصال ناگهانی قطع شد، کل اینترنت بسته می‌شود تا نشتی نباشد (ویندوز، نیازمند ادمین)',
+    'kill.ready': '✓ کیل سوییچ آماده است (هنگام قطع ناگهانی، اینترنت بسته می‌شود)',
+    'kill.needAdmin': '⚠ کیل سوییچ برای بستن فایروال به دسترسی ادمین نیاز دارد — برنامه را با ادمین اجرا کن',
+    'kill.winOnly': '⚠ کیل سوییچ فعلاً فقط روی ویندوز کار می‌کند',
+    'kill.blocked': '⛔ کیل سوییچ فعال شد — اینترنت بسته است',
+    'kill.reconnect': 'اتصال مجدد', 'kill.disarm': 'باز کردن اینترنت',
+    'kill.opened': 'اینترنت باز شد',
+
+    'sub.data': 'حجم مصرف', 'sub.time': 'زمان باقی‌مانده',
+    'sub.left': 'مانده', 'sub.expired': 'منقضی شده', 'sub.unlimited': 'نامحدود',
+    'sub.days': 'روز', 'sub.hours': 'ساعت', 'sub.mins': 'دقیقه',
+
+    'ss.search': 'جستجوی کانفیگ…', 'ss.none': 'موردی پیدا نشد'
   },
 
   en: {
@@ -369,7 +389,27 @@ const I18N = {
     'comp.removeConfirm': 'Remove all downloaded files (Xray core, tun2socks, wintun, geo files) from the data folder?',
     'comp.removeBusy': 'Disconnect first, then remove',
     'comp.removed': 'Downloaded files removed', 'comp.removeNone': 'Nothing to remove',
-    'comp.removeFailed': 'Remove failed'
+    'comp.removeFailed': 'Remove failed',
+
+    'tb.max': 'Maximize / Restore',
+    'lan.noIp': 'No local IP found (are you on a network?)',
+
+    'dns.custom': 'Custom…', 'dns.set': 'DNS set',
+
+    'kill.title': 'Kill switch',
+    'kill.sub': 'If the connection drops unexpectedly, block all internet so nothing leaks (Windows, needs admin)',
+    'kill.ready': '✓ Kill switch ready (internet is blocked on an unexpected drop)',
+    'kill.needAdmin': '⚠ Kill switch needs admin to control the firewall — relaunch the app as admin',
+    'kill.winOnly': '⚠ Kill switch currently works on Windows only',
+    'kill.blocked': '⛔ Kill switch engaged — internet is blocked',
+    'kill.reconnect': 'Reconnect', 'kill.disarm': 'Unblock internet',
+    'kill.opened': 'Internet unblocked',
+
+    'sub.data': 'Data used', 'sub.time': 'Time left',
+    'sub.left': 'left', 'sub.expired': 'Expired', 'sub.unlimited': 'unlimited',
+    'sub.days': 'days', 'sub.hours': 'h', 'sub.mins': 'min',
+
+    'ss.search': 'Search configs…', 'ss.none': 'No matches'
   }
 };
 

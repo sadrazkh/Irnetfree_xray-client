@@ -53,6 +53,49 @@ function fmtBytes(n) {
 }
 function fmtSpeed(n) { return fmtBytes(n) + '/s'; }
 
+/** Human duration from seconds (days / hours / minutes). */
+function fmtDuration(sec) {
+  sec = Math.max(0, sec);
+  const d = Math.floor(sec / 86400);
+  if (d >= 1) return d + ' ' + t('sub.days');
+  const h = Math.floor(sec / 3600);
+  if (h >= 1) return h + ' ' + t('sub.hours');
+  return Math.floor(sec / 60) + ' ' + t('sub.mins');
+}
+
+/** Data-usage + expiry progress bars for a subscription (from Subscription-Userinfo). */
+function subUsageHtml(sub) {
+  const u = sub.usage;
+  if (!u) return '';
+  let html = '';
+  const used = (u.upload || 0) + (u.download || 0);
+  if (u.total && u.total > 0) {
+    const pct = Math.min(100, Math.round(used / u.total * 100));
+    const cls = pct >= 90 ? 'bad' : pct >= 70 ? 'mid' : 'good';
+    html += `
+      <div class="sub-usage">
+        <div class="sub-usage-row"><span>${escapeHtml(t('sub.data'))}</span><span dir="ltr">${fmtBytes(used)} / ${fmtBytes(u.total)} · ${pct}%</span></div>
+        <div class="usage-bar"><div class="usage-fill ${cls}" style="width:${pct}%"></div></div>
+      </div>`;
+  } else if (used > 0) {
+    html += `<div class="sub-usage"><div class="sub-usage-row"><span>${escapeHtml(t('sub.data'))}</span><span dir="ltr">${fmtBytes(used)} · ${escapeHtml(t('sub.unlimited'))}</span></div></div>`;
+  }
+  if (u.expire && u.expire > 0) {
+    const remSec = u.expire - Date.now() / 1000;
+    const remDays = remSec / 86400;
+    const expired = remSec <= 0;
+    const pct = expired ? 0 : Math.min(100, Math.round(Math.min(remDays, 30) / 30 * 100));
+    const cls = expired || remDays < 3 ? 'bad' : remDays < 7 ? 'mid' : 'good';
+    const label = expired ? t('sub.expired') : `${fmtDuration(remSec)} ${t('sub.left')}`;
+    html += `
+      <div class="sub-usage">
+        <div class="sub-usage-row"><span>${escapeHtml(t('sub.time'))}</span><span dir="ltr">${escapeHtml(label)}</span></div>
+        <div class="usage-bar"><div class="usage-fill ${cls}" style="width:${pct}%"></div></div>
+      </div>`;
+  }
+  return html;
+}
+
 function timeAgo(ts) {
   if (!ts) return t('t.never');
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -91,7 +134,7 @@ $$('.nav-item').forEach(btn => {
 
 /* window controls */
 $('#btnMin').onclick = () => window.api.minimize();
-$('#btnHide').onclick = () => window.api.hide();
+$('#btnMax').onclick = () => window.api.maximize();   // maximize/restore (was wrongly hiding the app)
 $('#btnClose').onclick = () => window.api.close();
 
 /* language toggle */
@@ -149,6 +192,7 @@ async function init() {
   updateTunStatus();
   setModeWidget();
   updateLanInfo();
+  updateKillStatus();
 
   // app version + xray-core version
   $('#appVersion').textContent = 'v' + (state.version || '?');
@@ -180,6 +224,7 @@ function applySettingsToUI() {
   $('#optSysProxy').checked = !!s.systemProxy;
   $('#optTun').checked = !!s.tunMode;
   $('#optAllowLan').checked = !!s.allowLan;
+  $('#optKillSwitch').checked = !!s.killSwitch;
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
@@ -187,6 +232,16 @@ function applySettingsToUI() {
   $('#customRules').value = customRulesToText(s.customRules || []);
 
   $$('#routingSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === (s.routingMode || 'global')));
+  syncDnsPreset();
+}
+
+/** Reflect the current DNS value in the preset dropdown (or "custom"). */
+function syncDnsPreset() {
+  const sel = $('#dnsPreset');
+  if (!sel) return;
+  const cur = ($('#dnsInput').value || '').replace(/\s/g, '');
+  const match = Array.from(sel.options).find(o => o.value && o.value.replace(/\s/g, '') === cur);
+  sel.value = match ? match.value : '';
 }
 
 function customRulesToText(rules) {
@@ -222,6 +277,7 @@ async function saveSettings(extra = {}) {
     systemProxy: $('#optSysProxy').checked,
     tunMode: $('#optTun').checked,
     allowLan: $('#optAllowLan').checked,
+    killSwitch: $('#optKillSwitch').checked,
     blockAds: $('#optBlockAds').checked,
     enableSniffing: $('#optSniff').checked
   }, extra);
@@ -246,6 +302,33 @@ $$('#routingSeg .seg-btn').forEach(btn => {
 });
 $('#optBlockAds').onchange = () => saveSettings();
 $('#optSniff').onchange = () => saveSettings();
+
+/* DNS presets — pick a provider to fill the input, or type a custom value */
+$('#dnsPreset').onchange = () => {
+  const v = $('#dnsPreset').value;
+  if (v) { $('#dnsInput').value = v; saveSettings(); toast(t('dns.set'), 'ok'); }
+};
+$('#dnsInput').oninput = () => syncDnsPreset();
+
+/* kill switch toggle */
+$('#optKillSwitch').onchange = async () => {
+  await saveSettings();
+  updateKillStatus();
+  // kill switch uses the Windows firewall → needs admin (same as TUN)
+  if ($('#optKillSwitch').checked && state.platform === 'win32' && !state.elevated) {
+    if (await promptRelaunchAdmin()) return;
+  }
+};
+
+function updateKillStatus() {
+  const el = $('#killStatus');
+  if (!el) return;
+  if (!state.settings.killSwitch) { el.textContent = ''; el.className = 'tun-status'; return; }
+  if (state.platform !== 'win32') { el.textContent = t('kill.winOnly'); el.className = 'tun-status warn'; return; }
+  if (!state.elevated) { el.textContent = t('kill.needAdmin'); el.className = 'tun-status warn'; return; }
+  el.textContent = t('kill.ready'); el.className = 'tun-status ok';
+}
+
 $('#optAllowLan').onchange = async () => {
   await saveSettings();
   updateLanInfo();
@@ -253,19 +336,21 @@ $('#optAllowLan').onchange = async () => {
 };
 
 /** Show the address LAN clients should point their proxy at (when sharing). */
-function updateLanInfo() {
+async function updateLanInfo() {
   const el = $('#lanInfo');
   if (!el) return;
   if (!state.settings.allowLan) { el.textContent = ''; el.className = 'tun-status'; return; }
-  if (state.connected && state.lan && state.lan.ip) {
-    el.textContent = `${t('lan.address')}: ${state.lan.ip}:${state.lan.httpPort} (HTTP) • ${state.lan.ip}:${state.lan.socksPort} (SOCKS)`;
-    el.className = 'tun-status ok';
-  } else if (state.connected) {
-    el.textContent = t('lan.on');
+  // when connected the live values come from the status event; otherwise ask main
+  let info = (state.connected && state.lan && state.lan.ip) ? state.lan : null;
+  if (!info) { try { info = await window.api.lanInfo(); } catch { info = null; } }
+  if (info && info.ip) {
+    el.innerHTML = `${escapeHtml(t('lan.address'))}: ` +
+      `<b dir="ltr">${escapeHtml(info.ip)}:${info.httpPort}</b> (HTTP) • ` +
+      `<b dir="ltr">${escapeHtml(info.ip)}:${info.socksPort}</b> (SOCKS)`;
     el.className = 'tun-status ok';
   } else {
-    el.textContent = t('lan.willShare');
-    el.className = 'tun-status';
+    el.textContent = t('lan.noIp');
+    el.className = 'tun-status warn';
   }
 }
 $('#btnSaveRules').onclick = async () => {
@@ -684,6 +769,14 @@ function setConnUI(stateStr, id) {
     cs.textContent = t('state.disconnected');
     pillText.textContent = t('pill.disconnected');
   }
+
+  // tint the titlebar + logo badge by connection state
+  const tb = $('#titlebar');
+  if (tb) {
+    tb.classList.toggle('conn-on', stateStr === 'connected');
+    tb.classList.toggle('conn-wait', stateStr === 'connecting');
+    tb.classList.toggle('conn-off', stateStr !== 'connected' && stateStr !== 'connecting');
+  }
 }
 
 /* status events from main */
@@ -733,6 +826,29 @@ window.api.onXrayStatus((d) => {
     toast(t('t.disconnected'), 'err');
   }
 });
+
+/* ----------------------------- kill switch ----------------------------- */
+window.api.onKillSwitch((d) => {
+  state.killEngaged = !!(d && d.engaged);
+  const banner = $('#killBanner');
+  if (banner) banner.hidden = !state.killEngaged;
+  if (state.killEngaged) toast(t('kill.blocked'), 'err');
+});
+$('#killDisarm').onclick = async () => {
+  // full teardown so the machine returns to normal direct internet
+  // (removes the firewall block AND any leftover TUN routes / system proxy)
+  await window.api.disconnect();
+  state.killEngaged = false;
+  $('#killBanner').hidden = true;
+  toast(t('kill.opened'), 'ok');
+};
+$('#killReconnect').onclick = async () => {
+  const id = state.activeServerId || state.selectedServerId || (state.servers[0] && state.servers[0].id);
+  await window.api.disconnect();
+  state.killEngaged = false;
+  $('#killBanner').hidden = true;
+  if (id) connect(id);
+};
 
 /* ----------------------------- logs ----------------------------- */
 const MAX_LOG_LINES = 500;
@@ -1025,6 +1141,7 @@ function renderSubs() {
         <div class="sub-name">${escapeHtml(sub.name)}</div>
         <div class="sub-url">${escapeHtml(sub.url)}</div>
         <div class="sub-meta">${sub.serverCount || 0} ${t('sub.servers')} • ${t('sub.lastUpdate')}: ${timeAgo(sub.lastUpdated)}</div>
+        ${subUsageHtml(sub)}
       </div>
       <div class="sub-actions">
         <label class="switch" data-i18n-title="autoupdate.title" title="auto">
@@ -1374,6 +1491,7 @@ function renderChains() {
       </div>
       <div class="chain-min ${ready ? '' : 'warn'}">${escapeHtml(ready ? '' : t('chain.empty'))}</div>
       <label class="field-label">${escapeHtml(t('chain.available'))}</label>
+      <input class="input chain-pool-search" dir="auto" placeholder="${escapeHtml(t('ss.search'))}" />
       <div class="chain-pool"></div>`;
 
     // name edit
@@ -1430,13 +1548,16 @@ function renderChains() {
 
     // available pool (servers not already in THIS chain)
     const pool = card.querySelector('.chain-pool');
+    const poolSearch = card.querySelector('.chain-pool-search');
     const available = state.servers.filter(s => !chain.members.includes(s.id));
     if (!available.length) {
       pool.innerHTML = `<div class="empty small">${escapeHtml(t('chain.poolEmpty'))}</div>`;
+      if (poolSearch) poolSearch.hidden = true;
     }
     for (const s of available) {
       const row = document.createElement('button');
       row.className = 'pool-item';
+      row.dataset.name = s.name;
       row.innerHTML = `
         <span class="proto-badge proto-${s.protocol}">${s.protocol}</span>
         <span class="pi-name">${escapeHtml(s.name)}</span>
@@ -1444,6 +1565,13 @@ function renderChains() {
       row.onclick = () => { chain.members.push(s.id); persistChains(); };
       pool.appendChild(row);
     }
+    // filter the pool as you type (handles long config lists)
+    if (poolSearch) poolSearch.oninput = () => {
+      const f = poolSearch.value.toLowerCase();
+      pool.querySelectorAll('.pool-item').forEach(it => {
+        it.style.display = (it.dataset.name || '').toLowerCase().includes(f) ? '' : 'none';
+      });
+    };
 
     wrap.appendChild(card);
   });
@@ -1488,12 +1616,71 @@ function targetOptions(selected) {
   ).join('');
 }
 
+/** [{value,label}] of routing targets — servers + ready chains + direct/block. */
+function targetOptionList() {
+  const opts = state.servers.map(s => ({ value: s.id, label: s.name }));
+  for (const c of state.chains) if (chainReady(c)) opts.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name });
+  opts.push({ value: 'direct', label: t('adv.direct') });
+  opts.push({ value: 'block', label: t('adv.block') });
+  return opts;
+}
+
+let advDefaultSel = null;
+
+/**
+ * A searchable, scrollable dropdown (same feel as the home picker) for choosing
+ * a routing target. Returns the element; call .getValue() to read the choice.
+ */
+function makeSearchSelect({ options, value, onChange }) {
+  const wrap = document.createElement('div');
+  wrap.className = 'ss';
+  const cur = document.createElement('button');
+  cur.type = 'button';
+  cur.className = 'ss-current';
+  const menu = document.createElement('div');
+  menu.className = 'ss-menu';
+  menu.hidden = true;
+  const search = document.createElement('input');
+  search.className = 'input ss-search';
+  search.placeholder = t('ss.search');
+  const list = document.createElement('div');
+  list.className = 'ss-list';
+  menu.appendChild(search); menu.appendChild(list);
+  wrap.appendChild(cur); wrap.appendChild(menu);
+
+  let current = value;
+  const labelFor = (v) => { const o = options.find(x => x.value === v); return o ? o.label : '—'; };
+  const renderCur = () => { cur.innerHTML = `<span class="ss-cur-label">${escapeHtml(labelFor(current))}</span><span class="ss-caret">▾</span>`; };
+  const close = () => { menu.hidden = true; };
+  const renderList = (f) => {
+    f = (f || '').toLowerCase();
+    list.innerHTML = '';
+    const items = options.filter(o => o.label.toLowerCase().includes(f) || String(o.value).toLowerCase().includes(f));
+    if (!items.length) { list.innerHTML = `<div class="ss-empty">${escapeHtml(t('ss.none'))}</div>`; return; }
+    for (const o of items) {
+      const it = document.createElement('div');
+      it.className = 'ss-item' + (o.value === current ? ' active' : '');
+      it.textContent = o.label;
+      it.onclick = () => { current = o.value; renderCur(); close(); if (onChange) onChange(current); };
+      list.appendChild(it);
+    }
+  };
+  const open = () => { menu.hidden = false; search.value = ''; renderList(''); setTimeout(() => search.focus(), 0); };
+  cur.onclick = (e) => { e.stopPropagation(); menu.hidden ? open() : close(); };
+  search.oninput = () => renderList(search.value);
+  search.onclick = (e) => e.stopPropagation();
+  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) close(); });
+  renderCur();
+  wrap.getValue = () => current;
+  return wrap;
+}
+
 function renderAdvanced() {
   const wrap = $('#advRules');
   const body = $('#advBody');
   const optAdv = $('#optAdvanced');
-  const defSel = $('#advDefault');
-  if (!wrap || !optAdv || !defSel) return;
+  const defMount = $('#advDefaultMount');
+  if (!wrap || !optAdv || !defMount) return;
 
   optAdv.checked = !!state.settings.advancedRouting;
   if (body) body.hidden = !state.settings.advancedRouting;
@@ -1522,7 +1709,7 @@ function renderAdvanced() {
       <select class="select adv-type">${typeOpts}</select>
       ${valueCell}
       <span class="adv-arrow">→</span>
-      <select class="select adv-target">${targetOptions(r.target)}</select>
+      <span class="adv-target-mount"></span>
       <button class="icon-btn adv-del" title="remove">🗑</button>`;
     row.querySelector('.adv-type').onchange = (e) => {
       rules[idx].type = e.target.value;
@@ -1534,14 +1721,19 @@ function renderAdvanced() {
     else valEl.oninput = (e) => { rules[idx].value = e.target.value; };
     const refresh = row.querySelector('.adv-proc-refresh');
     if (refresh) refresh.onclick = () => loadProcList();
-    row.querySelector('.adv-target').onchange = (e) => { rules[idx].target = e.target.value; };
+    // searchable target dropdown (handles long config lists)
+    row.querySelector('.adv-target-mount').appendChild(
+      makeSearchSelect({ options: targetOptionList(), value: r.target, onChange: (v) => { rules[idx].target = v; } })
+    );
     row.querySelector('.adv-del').onclick = () => { rules.splice(idx, 1); renderAdvanced(); };
     wrap.appendChild(row);
   });
 
-  // default target select
+  // default target — searchable dropdown
   const def = state.settings.routeDefault || (state.servers[0] && state.servers[0].id) || 'direct';
-  defSel.innerHTML = targetOptions(def);
+  defMount.innerHTML = '';
+  advDefaultSel = makeSearchSelect({ options: targetOptionList(), value: def, onChange: (v) => { state.settings.routeDefault = v; } });
+  defMount.appendChild(advDefaultSel);
 
   // process-routing options panel (only when a process rule exists)
   const procOpts = $('#procOpts');
@@ -1592,7 +1784,7 @@ $('#btnSaveAdv').onclick = async () => {
   const rules = (state.settings.routeRules || [])
     .map(r => ({ type: r.type, value: (r.value || '').trim(), target: r.target }))
     .filter(r => r.value && r.target);
-  const routeDefault = $('#advDefault').value;
+  const routeDefault = advDefaultSel ? advDefaultSel.getValue() : (state.settings.routeDefault || 'direct');
   await saveSettings({ routeRules: rules, routeDefault, advancedRouting: $('#optAdvanced').checked });
   state.settings.routeRules = rules;
   renderAdvanced();

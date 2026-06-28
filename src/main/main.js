@@ -30,6 +30,7 @@ let procWatcher = null;
 let userBinDir = null;
 let isQuitting = false;
 let xrayReloading = false;   // true while the proc-routing watcher restarts xray
+let userDisconnecting = false; // true during an intentional disconnect (kill switch ignores it)
 
 // GitHub repo used for the in-app update check (see app:checkUpdate).
 const GITHUB_REPO = 'sadrazkh/Irnetfree_xray-client';
@@ -55,6 +56,8 @@ const DEFAULT_SETTINGS = {
   routeDefault: '',    // fallback target (server id | 'chain' | 'direct' | 'block')
   // process routing: keep routes updated while connected (briefly reloads xray)
   procRouteWatch: false,
+  // kill switch: block all internet if the VPN drops unexpectedly (Windows)
+  killSwitch: false,
   theme: 'dark'
 };
 
@@ -137,15 +140,57 @@ async function addLanFirewall(socksPort, httpPort) {
   }
 }
 
-/** First non-internal IPv4 address (the address LAN clients point their proxy at). */
-function lanIp() {
+const TUN_LOCAL_IP = '10.255.0.2';   // our own TUN adapter address — never a LAN IP
+
+/** Candidate LAN IPv4 addresses (skips loopback, our TUN adapter, APIPA). */
+function lanCandidates() {
   const ifs = os.networkInterfaces();
+  const out = [];
   for (const name of Object.keys(ifs)) {
     for (const ni of ifs[name] || []) {
-      if (ni.family === 'IPv4' && !ni.internal) return ni.address;
+      if (ni.family !== 'IPv4' || ni.internal) continue;
+      if (ni.address === TUN_LOCAL_IP) continue;
+      if (ni.address.startsWith('169.254.')) continue;   // APIPA / link-local
+      out.push(ni.address);
     }
   }
-  return null;
+  return out;
+}
+
+/** Best LAN IPv4 (the address other devices point their proxy at). */
+function lanIp() {
+  const c = lanCandidates();
+  // prefer common home/office private ranges over odd virtual adapters
+  const score = (a) => a.startsWith('192.168.') ? 3
+    : /^172\.(1[6-9]|2\d|3[01])\./.test(a) ? 2
+    : a.startsWith('10.') ? 1 : 0;
+  c.sort((x, y) => score(y) - score(x));
+  return c[0] || null;
+}
+
+/* ----------------------------- kill switch ----------------------------- */
+// Blocks ALL outbound traffic (Windows firewall) if the VPN drops unexpectedly,
+// so nothing leaks. The user must disarm (or reconnect) to restore internet.
+const KILL_RULE = 'IRNetFree KillSwitch';
+let killEngaged = false;
+
+async function armKillSwitch() {
+  if (process.platform !== 'win32') return { ok: false, error: 'windows only' };
+  try {
+    await netsh(['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`]).catch(() => {});
+    await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${KILL_RULE}`,
+      'dir=out', 'action=block', 'protocol=any', 'remoteip=any']);
+    killEngaged = true;
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function disarmKillSwitch() {
+  killEngaged = false;
+  if (process.platform !== 'win32') return;
+  try { await netsh(['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`]); } catch {}
 }
 
 function createWindow() {
@@ -331,6 +376,9 @@ function buildActive(serverId, settings) {
 }
 
 async function doConnect(serverId) {
+  // clear any kill-switch block from a previous unexpected drop
+  await disarmKillSwitch();
+  send('killswitch', { engaged: false });
   const settings = await effectiveSettings();
   const byId = (id) => store.get('servers', []).find(s => s.id === id);
 
@@ -346,7 +394,15 @@ async function doConnect(serverId) {
     throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error);
   }
 
-  await xray.start(config);
+  // Suppress the old instance's 'stopped' while switching servers so it isn't
+  // mistaken for an unexpected drop (which would trip the kill switch) or flash
+  // "disconnected" in the UI.
+  xrayReloading = true;
+  try {
+    await xray.start(config);
+  } finally {
+    xrayReloading = false;
+  }
 
   store.set('activeServerId', serverId);
 
@@ -403,6 +459,7 @@ async function doConnect(serverId) {
   // Keep process routes fresh while connected (opt-in; briefly reloads xray).
   startProcWatcher();
 
+  updateOverlay('on');
   send('status', { state: 'connected', serverId, server: byId(serverId) || null, label, tun: tun.active, tunError, geoWarn, lan });
   return true;
 }
@@ -450,20 +507,70 @@ function stopProcWatcher() {
 }
 
 async function doDisconnect() {
+  userDisconnecting = true;        // intentional — don't trip the kill switch
   stopProcWatcher();
   if (stats) stats.stop();
   try { await tun.stop(); } catch {}
   try { await setSystemProxy(false, {}); } catch {}
   try { await removeLanFirewall(); } catch {}
+  try { await disarmKillSwitch(); } catch {}
+  send('killswitch', { engaged: false });
   if (xray) await xray.stop();
   store.set('activeServerId', null);
   updateTray(false);
+  updateOverlay('off');
   send('status', { state: 'disconnected' });
+  userDisconnecting = false;
 }
 
 function updateTray(connected, name) {
   if (!tray) return;
   tray.setToolTip(connected ? `IRNetFree — ${name}` : 'IRNetFree — disconnected');
+}
+
+/* ----- taskbar overlay badge (green ✓ when connected, red ✕ when off) ----- */
+let _overlayCache = {};
+function makeStateIcon(kind) {
+  if (_overlayCache[kind]) return _overlayCache[kind];
+  const W = 16, H = 16;
+  const buf = Buffer.alloc(W * H * 4); // BGRA, starts fully transparent
+  const set = (x, y, b, g, r, a) => {
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    const i = (y * W + x) * 4;
+    buf[i] = b; buf[i + 1] = g; buf[i + 2] = r; buf[i + 3] = a;
+  };
+  const col = kind === 'on' ? [80, 185, 63] : [73, 81, 248]; // B,G,R (green / red)
+  const cx = 7.5, cy = 7.5, rad = 7.3;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const d = Math.hypot(x - cx, y - cy);
+      if (d <= rad) set(x, y, col[0], col[1], col[2], d > rad - 1 ? 170 : 255);
+    }
+  }
+  const line = (x0, y0, x1, y1) => {
+    const steps = Math.ceil(Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0)) * 3);
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
+      set(x, y, 255, 255, 255, 255);
+      set(x + 1, y, 255, 255, 255, 255);
+      set(x, y + 1, 255, 255, 255, 255);
+    }
+  };
+  if (kind === 'on') { line(4, 8, 6.5, 11); line(6.5, 11, 12, 4.5); }     // ✓
+  else { line(4.5, 4.5, 11.5, 11.5); line(11.5, 4.5, 4.5, 11.5); }        // ✕
+  const img = nativeImage.createFromBitmap(buf, { width: W, height: H });
+  _overlayCache[kind] = img;
+  return img;
+}
+
+/** Badge the Windows taskbar icon with the connection state. */
+function updateOverlay(stateStr) {
+  if (!mainWindow || mainWindow.isDestroyed() || process.platform !== 'win32') return;
+  try {
+    if (stateStr === 'on') mainWindow.setOverlayIcon(makeStateIcon('on'), 'Connected');
+    else mainWindow.setOverlayIcon(makeStateIcon('off'), 'Disconnected');
+  } catch {}
 }
 
 function getSettings() {
@@ -619,6 +726,10 @@ function registerIpc() {
       if (next.autoUpdateSubs) subs.startAuto(next.autoUpdateInterval);
       else subs.stopAuto();
     }
+    // turning the kill switch off should immediately restore internet
+    if ('killSwitch' in partial && !next.killSwitch && killEngaged) {
+      disarmKillSwitch().then(() => send('killswitch', { engaged: false }));
+    }
     return next;
   });
 
@@ -675,6 +786,11 @@ function registerIpc() {
 
   // window controls
   ipcMain.on('win:minimize', () => mainWindow.minimize());
+  ipcMain.on('win:maximize', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+  });
   ipcMain.on('win:hide', () => mainWindow.hide());
   ipcMain.on('win:close', () => { mainWindow.hide(); });
   ipcMain.on('app:quit', () => { isQuitting = true; app.quit(); });
@@ -749,6 +865,16 @@ function registerIpc() {
     return { ok: true };
   });
 
+  // LAN sharing address (for the live IP:port display when the toggle is on).
+  ipcMain.handle('net:lanInfo', () => {
+    const s = getSettings();
+    return { ip: lanIp(), all: lanCandidates(), socksPort: s.socksPort, httpPort: s.httpPort };
+  });
+
+  // Kill switch: manual disarm (restore internet) + status query.
+  ipcMain.handle('killswitch:disarm', async () => { await disarmKillSwitch(); return { ok: true }; });
+  ipcMain.handle('killswitch:status', () => ({ engaged: killEngaged }));
+
   // Delete the files the app downloaded into the writable bin (userData/bin).
   // Does NOT touch a user-located xray (store.xrayPath) or the bundled bin.
   ipcMain.handle('assets:remove', async () => {
@@ -819,6 +945,18 @@ app.whenReady().then(() => {
       // The proc-routing watcher restarts xray in place; don't surface the
       // old instance's 'stopped' as a disconnect.
       if (xrayReloading && state === 'stopped') return;
+      // Unexpected drop (xray died without us asking) while we believe we're
+      // connected → engage the kill switch if enabled.
+      if (state === 'stopped' && !userDisconnecting && store.get('activeServerId', null)) {
+        updateOverlay('off');
+        if (getSettings().killSwitch) {
+          armKillSwitch().then((r) => {
+            send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
+            if (r && r.ok) send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
+            else if (process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
+          });
+        }
+      }
       send('xray-status', { state, info });
     }
   });
@@ -849,9 +987,14 @@ app.whenReady().then(() => {
     onProgress: (component, pct) => send('asset-progress', { component, pct })
   });
 
+  // Clear any leftover kill-switch firewall block from a previous crash so the
+  // user is never permanently blocked.
+  disarmKillSwitch().catch(() => {});
+
   registerIpc();
   createWindow();
   createTray();
+  mainWindow.once('ready-to-show', () => updateOverlay('off'));
 
   // kick off auto-update for subscriptions if enabled
   const st = getSettings();
@@ -864,9 +1007,12 @@ app.whenReady().then(() => {
 
 app.on('before-quit', async (e) => {
   if (!isQuitting) return;
+  userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
   try { if (stats) stats.stop(); } catch {}
   try { if (tun) await tun.stop(); } catch {}
   try { await setSystemProxy(false, {}); } catch {}
+  try { await removeLanFirewall(); } catch {}
+  try { await disarmKillSwitch(); } catch {}
   try { if (xray) await xray.stop(); } catch {}
 });
 
@@ -874,11 +1020,15 @@ app.on('window-all-closed', () => {
   // keep running in tray; quit only on explicit request
 });
 
-// Ensure system proxy + TUN routes are cleared on a hard exit (Windows only).
+// Ensure system proxy + TUN routes + kill-switch block are cleared on a hard
+// exit (Windows only) — otherwise a kill-switch block would outlive the app and
+// leave the machine with no internet.
 process.on('exit', () => {
   if (process.platform !== 'win32') return;
   try { require('child_process').execFileSync(
     'reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '0', '/f'],
     { windowsHide: true }); } catch {}
   try { if (tun) tun.cleanupSync(); } catch {}
+  try { require('child_process').execFileSync('netsh',
+    ['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`], { windowsHide: true }); } catch {}
 });

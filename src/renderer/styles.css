@@ -34,9 +34,45 @@ body {
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
   padding: 0 10px;
+  transition: background .3s, border-color .3s;
 }
 .tb-left { display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
-.tb-logo { width: 20px; height: 20px; border-radius: 5px; }
+.tb-logo-wrap { position: relative; display: inline-flex; }
+.tb-logo { width: 20px; height: 20px; border-radius: 5px; transition: box-shadow .3s; }
+/* connection-state badge on the logo */
+.tb-logo-badge {
+  position: absolute; right: -3px; bottom: -3px;
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 2px solid var(--bg-2);
+  display: grid; place-items: center;
+  font-size: 7px; line-height: 1; font-weight: 900; color: #fff;
+  transition: background .3s;
+}
+
+/* connected → green logo + green toolbar */
+.titlebar.conn-on {
+  background: linear-gradient(180deg, rgba(63,185,80,.16), rgba(63,185,80,.04));
+  border-bottom-color: var(--green);
+}
+.titlebar.conn-on .tb-title b { color: var(--green); }
+.titlebar.conn-on .tb-logo { box-shadow: 0 0 0 2px rgba(63,185,80,.5), 0 0 10px rgba(63,185,80,.4); }
+.titlebar.conn-on .tb-logo-badge { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.titlebar.conn-on .tb-logo-badge::before { content: '\2713'; }   /* ✓ */
+
+/* disconnected → blue toolbar + red ✕ badge on the logo */
+.titlebar.conn-off {
+  background: linear-gradient(180deg, rgba(79,140,255,.14), rgba(79,140,255,.03));
+  border-bottom-color: var(--accent);
+}
+.titlebar.conn-off .tb-title b { color: var(--accent); }
+.titlebar.conn-off .tb-logo { box-shadow: 0 0 0 2px rgba(79,140,255,.45); }
+.titlebar.conn-off .tb-logo-badge { background: var(--red); box-shadow: 0 0 6px rgba(248,81,73,.6); }
+.titlebar.conn-off .tb-logo-badge::before { content: '\2715'; }   /* ✕ */
+
+/* connecting → neutral/amber while it negotiates */
+.titlebar.conn-wait { background: linear-gradient(180deg, rgba(210,153,34,.14), transparent); border-bottom-color: var(--yellow); }
+.titlebar.conn-wait .tb-logo-badge { background: var(--yellow); }
+.titlebar.conn-wait .tb-logo-badge::before { content: '\2026'; }  /* … */
 .logo-dot {
   width: 12px; height: 12px; border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
@@ -268,6 +304,16 @@ body {
 .sub-url { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: ltr; text-align: right; }
 .sub-meta { font-size: 11px; color: var(--muted); margin-top: 3px; }
 .sub-actions { display: flex; gap: 6px; align-items: center; }
+
+/* subscription usage (data + time) progress bars */
+.sub-usage { margin-top: 8px; }
+.sub-usage-row { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.sub-usage-row span:last-child { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--text); }
+.usage-bar { height: 6px; border-radius: 6px; background: var(--bg); overflow: hidden; border: 1px solid var(--border); }
+.usage-fill { height: 100%; border-radius: 6px; transition: width .4s ease; }
+.usage-fill.good { background: linear-gradient(90deg, var(--accent), var(--green)); }
+.usage-fill.mid { background: linear-gradient(90deg, var(--accent), var(--yellow)); }
+.usage-fill.bad { background: linear-gradient(90deg, var(--yellow), var(--red)); }
 
 /* tun status line */
 .tun-status { font-size: 12px; color: var(--muted); margin: 4px 0 6px; min-height: 16px; }
@@ -511,6 +557,40 @@ body {
 .adv-def-label { color: var(--muted); font-size: 13px; flex: 0 0 auto; }
 .adv-default .adv-target { flex: 1; min-width: 0; width: auto; }
 
+/* searchable target dropdown (advanced routing) */
+.adv-rule .adv-target-mount { width: 175px; flex: 0 0 auto; }
+.adv-default .adv-target-mount { flex: 1; min-width: 0; }
+.ss { position: relative; width: 100%; }
+.ss-current {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 10px; padding: 9px 11px; cursor: pointer; font-family: inherit; font-size: 13px;
+  transition: .12s;
+}
+.ss-current:hover { border-color: var(--accent); }
+.ss-cur-label { flex: 1; min-width: 0; text-align: start; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ss-caret { color: var(--muted); font-size: 11px; flex: 0 0 auto; }
+.ss-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 50;
+  min-width: 210px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: var(--shadow); padding: 6px;
+}
+.ss-menu[hidden] { display: none; }
+.ss-search { margin-bottom: 6px; padding: 8px 10px; font-size: 12px; }
+.ss-list { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.ss-item {
+  padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ss-item:hover { background: var(--panel); }
+.ss-item.active { background: rgba(79,140,255,.14); box-shadow: inset 0 0 0 1px var(--accent); }
+.ss-empty { padding: 10px; color: var(--muted); font-size: 12px; text-align: center; }
+
+/* chain available-pool: searchable + scrollable for long config lists */
+.chain-pool { max-height: 250px; overflow-y: auto; }
+.chain-pool-search { margin: 8px 0; }
+
 /* relaunch-as-admin button */
 .admin-btn { margin-top: 10px; }
 .admin-btn:hover { color: var(--yellow); border-color: var(--yellow); }
@@ -593,6 +673,19 @@ body {
 .adv-rule .adv-proc { flex: 1; min-width: 0; }
 .adv-proc-refresh { flex: 0 0 auto; }
 .adv-proc-refresh:hover { color: var(--accent-2); border-color: var(--accent-2); }
+
+/* kill-switch banner */
+.kill-banner {
+  position: fixed; left: 50%; bottom: 70px; transform: translateX(-50%);
+  z-index: 150; display: flex; align-items: center; gap: 16px;
+  background: var(--panel-2); border: 1px solid var(--red);
+  box-shadow: 0 8px 30px rgba(0,0,0,.45), 0 0 0 1px rgba(248,81,73,.3);
+  border-radius: 12px; padding: 12px 16px; max-width: 92vw;
+}
+.kill-banner[hidden] { display: none; }
+.kill-banner-text { color: var(--red); font-weight: 700; font-size: 13px; }
+.kill-banner-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.kill-banner-actions .btn { padding: 7px 12px; font-size: 12px; }
 
 /* scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
