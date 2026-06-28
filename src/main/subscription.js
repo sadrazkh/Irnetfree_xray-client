@@ -17,7 +17,7 @@ const { parseMany } = require('./parser');
 
 function uid() { return crypto.randomBytes(8).toString('hex'); }
 
-/** Fetch a URL following redirects; resolves with the body string. */
+/** Fetch a URL following redirects; resolves with { body, headers }. */
 function fetchUrl(url, timeout = 15000, redirects = 5) {
   return new Promise((resolve, reject) => {
     let mod;
@@ -43,7 +43,7 @@ function fetchUrl(url, timeout = 15000, redirects = 5) {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (c) => (body += c));
-      res.on('end', () => resolve(body));
+      res.on('end', () => resolve({ body, headers: res.headers }));
     });
     req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
     req.on('error', (e) => reject(e));
@@ -51,14 +51,34 @@ function fetchUrl(url, timeout = 15000, redirects = 5) {
 }
 
 /**
- * Download + parse a subscription. Returns { servers, errors }.
+ * Parse the standard `Subscription-Userinfo` header that many panels send:
+ *   upload=455; download=1234; total=10737418240; expire=1700000000
+ * Returns { upload, download, total, expire } (bytes / unix-seconds) or null.
+ */
+function parseUserinfo(h) {
+  if (!h) return null;
+  const out = {};
+  for (const part of String(h).split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const k = part.slice(0, idx).trim().toLowerCase();
+    const v = part.slice(idx + 1).trim();
+    if (/^\d+$/.test(v)) out[k] = Number(v);
+  }
+  if (!('upload' in out || 'download' in out || 'total' in out || 'expire' in out)) return null;
+  return { upload: out.upload || 0, download: out.download || 0, total: out.total || 0, expire: out.expire || 0 };
+}
+
+/**
+ * Download + parse a subscription. Returns { servers, errors, usage }.
  * Each server gets subId attached.
  */
 async function fetchSubscription(url, subId) {
-  const body = await fetchUrl(url);
+  const { body, headers } = await fetchUrl(url);
   const { servers, errors } = parseMany(body);
   for (const s of servers) s.subId = subId;
-  return { servers, errors };
+  const usage = parseUserinfo(headers['subscription-userinfo']);
+  return { servers, errors, usage };
 }
 
 class SubscriptionManager {
@@ -100,7 +120,7 @@ class SubscriptionManager {
     const sub = subs.find(s => s.id === subId);
     if (!sub) throw new Error('subscription not found');
 
-    const { servers: fresh, errors } = await fetchSubscription(sub.url, subId);
+    const { servers: fresh, errors, usage } = await fetchSubscription(sub.url, subId);
 
     // keep manually-added servers (no subId) + servers from OTHER subs
     const others = this.opts.getServers().filter(s => s.subId !== subId);
@@ -108,6 +128,7 @@ class SubscriptionManager {
 
     sub.lastUpdated = Date.now();
     sub.serverCount = fresh.length;
+    sub.usage = usage || null;   // { upload, download, total, expire } or null
     this.opts.setSubs(subs);
 
     if (this.opts.onUpdate) this.opts.onUpdate(sub, { added: fresh.length, errors: errors.length });

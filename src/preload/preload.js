@@ -63,8 +63,14 @@ contextBridge.exposeInMainWorld('api', {
   downloadAsset: (component) => ipcRenderer.invoke('assets:download', component),
   removeAssets: () => ipcRenderer.invoke('assets:remove'),
 
+  // LAN sharing info + kill switch
+  lanInfo: () => ipcRenderer.invoke('net:lanInfo'),
+  disarmKillSwitch: () => ipcRenderer.invoke('killswitch:disarm'),
+  killSwitchStatus: () => ipcRenderer.invoke('killswitch:status'),
+
   // window
   minimize: () => ipcRenderer.send('win:minimize'),
+  maximize: () => ipcRenderer.send('win:maximize'),
   hide: () => ipcRenderer.send('win:hide'),
   close: () => ipcRenderer.send('win:close'),
   quit: () => ipcRenderer.send('app:quit'),
@@ -76,5 +82,6 @@ contextBridge.exposeInMainWorld('api', {
   onXrayStatus: (cb) => ipcRenderer.on('xray-status', (e, d) => cb(d)),
   onStats: (cb) => ipcRenderer.on('stats', (e, d) => cb(d)),
   onSubsUpdated: (cb) => ipcRenderer.on('subs-updated', (e, d) => cb(d)),
-  onAssetProgress: (cb) => ipcRenderer.on('asset-progress', (e, d) => cb(d))
+  onAssetProgress: (cb) => ipcRenderer.on('asset-progress', (e, d) => cb(d)),
+  onKillSwitch: (cb) => ipcRenderer.on('killswitch', (e, d) => cb(d))
 });
