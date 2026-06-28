@@ -367,6 +367,21 @@ function pingLabel(id) {
   return { txt: tcp.ok ? tcp.ms + 'ms' : t('t.error'), cls: pingClass(tcp.ok ? tcp.ms : -1) };
 }
 
+/** Label for any ping result ({ ok, ms } or undefined). */
+function pingResultLabel(res) {
+  if (!res) return { txt: '—', cls: '' };
+  return { txt: res.ok ? res.ms + 'ms' : t('t.error'), cls: pingClass(res.ok ? res.ms : -1) };
+}
+
+/** Update every TCP + Real ping badge for an id from state.pings (everywhere). */
+function applyPingDisplays(id) {
+  const p = state.pings[id] || {};
+  const tl = pingResultLabel(p.tcp);
+  const rl = pingResultLabel(p.real);
+  $$(`[data-ping="${id}"]`).forEach(el => { el.textContent = tl.txt; el.className = (el.dataset.pbase || 'srv-ping') + (tl.cls ? ' ' + tl.cls : ''); });
+  $$(`[data-ping-real="${id}"]`).forEach(el => { el.textContent = rl.txt; el.className = (el.dataset.pbase || 'srv-ping') + (rl.cls ? ' ' + rl.cls : ''); });
+}
+
 function renderServers() {
   const list = $('#serverList');
   list.innerHTML = '';
@@ -378,7 +393,8 @@ function renderServers() {
     const isSel = s.id === state.selectedServerId;
     card.className = 'server-card' + (isActive ? ' active' : '') + (isSel ? ' selected' : '');
 
-    const pl = pingLabel(s.id);
+    const tl = pingResultLabel((state.pings[s.id] || {}).tcp);
+    const rl = pingResultLabel((state.pings[s.id] || {}).real);
     const selBadge = isSel ? `<span class="sel-badge">✓ ${escapeHtml(t('srv.selected'))}</span>` : '';
 
     card.innerHTML = `
@@ -387,7 +403,10 @@ function renderServers() {
         <div class="srv-name">${escapeHtml(s.name)} ${selBadge}</div>
         <div class="srv-addr">${escapeHtml(s.address)}:${s.port}</div>
       </div>
-      <div class="srv-ping ${pl.cls}" data-ping="${s.id}">${pl.txt}</div>
+      <div class="srv-pings">
+        <span class="ping-cell" title="${escapeHtml(t('ping.tcp'))}"><span class="ping-ico">⚡</span><span class="srv-ping ${tl.cls}" data-pbase="srv-ping" data-ping="${s.id}">${tl.txt}</span></span>
+        <span class="ping-cell" title="${escapeHtml(t('ping.real'))}"><span class="ping-ico">⏱</span><span class="srv-ping ${rl.cls}" data-pbase="srv-ping" data-ping-real="${s.id}">${rl.txt}</span></span>
+      </div>
       <div class="srv-actions">
         <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
         <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="edit">✎</button>
@@ -485,11 +504,14 @@ function renderPicker() {
   menu.appendChild(header);
 
   const addRow = (id, badgeHtml, name, pingId, isSpecial) => {
-    const pl = pingId ? pingLabel(pingId) : null;
+    const tl = pingId ? pingResultLabel((state.pings[pingId] || {}).tcp) : null;
+    const rl = pingId ? pingResultLabel((state.pings[pingId] || {}).real) : null;
     const row = document.createElement('div');
     row.className = 'picker-item' + (isSpecial ? ' picker-special' : '') + (id === selId ? ' active' : '');
     const pingPart = pingId
-      ? `<span class="pi-ping ${pl.cls}" data-ping="${id}">${pl.txt}</span><button class="pi-ping-btn" title="ping">⚡</button>`
+      ? `<span class="pi-ping-ico" title="${escapeHtml(t('ping.tcp'))}">⚡</span><span class="pi-ping ${tl.cls}" data-pbase="pi-ping" data-ping="${id}">${tl.txt}</span>` +
+        `<span class="pi-ping-ico" title="${escapeHtml(t('ping.real'))}">⏱</span><span class="pi-ping ${rl.cls}" data-pbase="pi-ping" data-ping-real="${id}">${rl.txt}</span>` +
+        `<button class="pi-ping-btn" title="ping">⚡</button>`
       : '';
     row.innerHTML = `${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}`;
     row.onclick = () => { selectServer(id); closePicker(); };
@@ -507,14 +529,9 @@ function renderPicker() {
   }
 }
 
-/** Ping every server + ready chain shown in the picker (TCP handshake). */
+/** Ping every server + ready chain shown in the picker (TCP + real delay). */
 async function pingAllVisible() {
-  const ids = [...state.servers.map(s => s.id), ...state.chains.filter(chainReady).map(c => c.id)];
-  if (!ids.length) return;
-  toast(t('t.pingingAll'));
-  await Promise.all(ids.map(id => pingServer(id)));
-  renderPicker();
-  toast(t('t.testDone'), 'ok');
+  await pingMany([...state.servers.map(s => s.id), ...state.chains.filter(chainReady).map(c => c.id)]);
 }
 
 function openPicker() { if (state.servers.length || anyChainReady() || advancedReady()) $('#pickerMenu').hidden = false; }
@@ -628,38 +645,74 @@ $('#btnClearServers').onclick = async () => {
 };
 
 /* ----------------------------- ping ----------------------------- */
-async function pingServer(id) {
-  // there can be several badges for one id (server card, picker row, chain card)
-  const els = $$(`[data-ping="${id}"]`);
-  const setCls = (el, extra) => { const base = el.classList[0] || 'srv-ping'; el.className = base + (extra ? ' ' + extra : ''); };
-  els.forEach(el => { el.textContent = '...'; setCls(el, ''); });
-  const tcp = await window.api.pingTcp(id);
-  state.pings[id] = Object.assign(state.pings[id] || {}, { tcp });
-  els.forEach(el => { el.textContent = tcp.ok ? tcp.ms + 'ms' : t('t.error'); setCls(el, pingClass(tcp.ok ? tcp.ms : -1)); });
-  if (id === state.selectedServerId) renderPicker();
-  return tcp;
+// A config's TCP ping can be open even when the config is dead; the REAL delay
+// actually dials through the config (a throwaway xray) and times a request — so
+// a real-delay number is proof the config truly works. We measure & show BOTH
+// everywhere (server cards, picker rows, chain cards).
+function setPingPending(id) {
+  $$(`[data-ping="${id}"], [data-ping-real="${id}"]`).forEach(el => {
+    el.textContent = '...'; el.className = (el.dataset.pbase || 'srv-ping');
+  });
 }
 
-$('#btnPingAll').onclick = async () => {
+/** Ping ONE target: TCP (fast) then Real delay (through the config). */
+async function pingServer(id) {
+  setPingPending(id);
+  const tcp = await window.api.pingTcp(id);
+  state.pings[id] = Object.assign(state.pings[id] || {}, { tcp });
+  applyPingDisplays(id);
+  const real = await window.api.pingReal(id);
+  state.pings[id] = Object.assign(state.pings[id] || {}, { real });
+  applyPingDisplays(id);
+  if (id === state.selectedServerId) renderPicker();
+  return { tcp, real };
+}
+
+async function pingTcpOnly(id) {
+  const tcp = await window.api.pingTcp(id);
+  state.pings[id] = Object.assign(state.pings[id] || {}, { tcp });
+  applyPingDisplays(id);
+  return tcp;
+}
+async function pingRealOnly(id) {
+  const real = await window.api.pingReal(id);
+  state.pings[id] = Object.assign(state.pings[id] || {}, { real });
+  applyPingDisplays(id);
+  return real;
+}
+
+/** Ping many: TCP for all in parallel (fast), then Real delay sequentially
+ * (each spins a throwaway xray, so don't launch them all at once). */
+async function pingMany(ids) {
+  ids = [...new Set(ids.filter(Boolean))];
+  if (!ids.length) return;
   toast(t('t.pingingAll'));
-  await Promise.all(state.servers.map(s => pingServer(s.id)));
+  ids.forEach(setPingPending);
+  await Promise.all(ids.map(pingTcpOnly));
+  for (const id of ids) await pingRealOnly(id);
   renderPicker();
   toast(t('t.testDone'), 'ok');
-};
+}
 
-/* quick ping (home) */
-$('#btnQuickPing').onclick = async () => {
-  const id = state.selectedServerId;
-  if (!id) return toast(t('t.noServerSel'), 'err');
+$('#btnPingAll').onclick = () => pingMany(state.servers.map(s => s.id));
+
+/* quick ping (home) — fills the TCP ping + Real delay cards for one target */
+async function quickPing(id) {
+  if (!id || id === ADV_ID) return;
   $('#statTcp').textContent = '...';
   $('#statReal').textContent = '...';
   const tcp = await window.api.pingTcp(id);
   $('#statTcp').textContent = tcp.ok ? tcp.ms + 'ms' : t('t.error');
   const real = await window.api.pingReal(id);
   $('#statReal').textContent = real.ok ? real.ms + 'ms' : t('t.error');
-  state.pings[id] = { tcp, real };
-  renderServers();
+  state.pings[id] = Object.assign(state.pings[id] || {}, { tcp, real });
+  applyPingDisplays(id);
   renderPicker();
+}
+$('#btnQuickPing').onclick = () => {
+  const id = state.selectedServerId;
+  if (!id) return toast(t('t.noServerSel'), 'err');
+  quickPing(id);
 };
 
 /* IP check + geo description. `retries` re-tries on failure because a freshly
@@ -799,6 +852,9 @@ window.api.onStatus((d) => {
     }
     if (d.geoWarn) toast(d.geoWarn, 'warn');
     setTimeout(() => checkIp(3, true), 1200);
+    // auto-measure TCP ping + real delay for the active config so the home
+    // cards show real numbers (real delay = proof the config actually works)
+    setTimeout(() => quickPing(d.serverId), 700);
   } else if (d.state === 'connecting') {
     state.connecting = true;
     setConnUI('connecting', d.serverId);
@@ -1468,14 +1524,18 @@ function renderChains() {
     const card = document.createElement('div');
     card.className = 'card chain-card';
 
-    const pl = pingLabel(chain.id);
+    const tl = pingResultLabel((state.pings[chain.id] || {}).tcp);
+    const rl = pingResultLabel((state.pings[chain.id] || {}).real);
     const ready = chain.members.length >= 2;
 
     card.innerHTML = `
       <div class="chain-card-head">
         <span class="proto-badge proto-chain">⛓</span>
         <input class="input chain-name" value="${escapeHtml(chain.name)}" />
-        <span class="chain-ping ${pl.cls}" data-ping="${chain.id}">${pl.txt}</span>
+        <span class="chain-pings">
+          <span class="pi-ping-ico" title="${escapeHtml(t('ping.tcp'))}">⚡</span><span class="chain-ping ${tl.cls}" data-pbase="chain-ping" data-ping="${chain.id}">${tl.txt}</span>
+          <span class="pi-ping-ico" title="${escapeHtml(t('ping.real'))}">⏱</span><span class="chain-ping ${rl.cls}" data-pbase="chain-ping" data-ping-real="${chain.id}">${rl.txt}</span>
+        </span>
         <div class="chain-card-actions">
           <button class="icon-btn ch-ping" title="ping">⚡</button>
           <button class="icon-btn ch-connect" title="connect"${ready ? '' : ' disabled'}>▶</button>
