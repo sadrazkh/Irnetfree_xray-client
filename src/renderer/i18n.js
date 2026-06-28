@@ -205,7 +205,9 @@ const I18N = {
     'sub.left': 'مانده', 'sub.expired': 'منقضی شده', 'sub.unlimited': 'نامحدود',
     'sub.days': 'روز', 'sub.hours': 'ساعت', 'sub.mins': 'دقیقه',
 
-    'ss.search': 'جستجوی کانفیگ…', 'ss.none': 'موردی پیدا نشد'
+    'ss.search': 'جستجوی کانفیگ…', 'ss.none': 'موردی پیدا نشد',
+
+    'ping.tcp': 'پینگ TCP (شبکه)', 'ping.real': 'تأخیر واقعی (از داخل کانفیگ — اثبات کارکرد)'
   },
 
   en: {
@@ -409,7 +411,9 @@ const I18N = {
     'sub.left': 'left', 'sub.expired': 'Expired', 'sub.unlimited': 'unlimited',
     'sub.days': 'days', 'sub.hours': 'h', 'sub.mins': 'min',
 
-    'ss.search': 'Search configs…', 'ss.none': 'No matches'
+    'ss.search': 'Search configs…', 'ss.none': 'No matches',
+
+    'ping.tcp': 'TCP ping (network)', 'ping.real': 'Real delay (through the config — proof it works)'
   }
 };
 

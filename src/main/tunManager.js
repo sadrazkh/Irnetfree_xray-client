@@ -392,6 +392,11 @@ class TunManager {
     // and so failures print the tun2socks log to stderr for diagnosis.
     const setup = [
       '#!/bin/bash',
+      // Ignore hangups so tun2socks keeps running after this privileged shell
+      // exits. SIG_IGN is inherited by the child, so the daemon survives WITHOUT
+      // `nohup` — which fails under `osascript do shell script` with
+      // "nohup: can't detach from console: Inappropriate ioctl for device".
+      "trap '' HUP",
       `BIN=${sh(bin)}`,
       `REQ_DEV=${sh(reqDev)}`,
       `LOG=${sh(logFile)}`,
@@ -399,14 +404,12 @@ class TunManager {
       `DEVFILE=${sh(devFile)}`,
       // snapshot existing utun interfaces (single space-separated line)
       'BEFORE=" $(ifconfig -l 2>/dev/null) "',
-      // 1) launch tun2socks as root, FULLY detached so it outlives the elevated
-      //    `do shell script` session (otherwise macOS reaps the backgrounded
-      //    job when osascript returns → device appears then dies, no traffic).
-      //    `</dev/null` + `disown` detach stdin and the job table entry.
+      // 1) launch tun2socks as root, backgrounded with all FDs redirected so it
+      //    keeps running after the privileged shell returns (no controlling tty
+      //    under osascript, and HUP is trapped above → no SIGHUP reaches it).
       //    `warn` matches the (working) Windows log level.
-      `nohup "$BIN" -device "$REQ_DEV" -proxy ${sh(`socks5://127.0.0.1:${socksPort}`)} -loglevel warn >"$LOG" 2>&1 </dev/null &`,
+      `"$BIN" -device "$REQ_DEV" -proxy ${sh(`socks5://127.0.0.1:${socksPort}`)} -loglevel warn >"$LOG" 2>&1 </dev/null &`,
       'echo $! > "$PIDFILE"',
-      'disown 2>/dev/null || true',
       // 2) wait for a NEW utun device (tun2socks may pick the next free unit
       //    instead of the exact name we requested).
       'ACTUAL=""',
