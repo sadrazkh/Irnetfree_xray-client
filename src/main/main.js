@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn, execFile } = require('child_process');
 
-const { parseMany, parseLink, makeWireguardServer, applyServerEdits } = require('./parser');
+const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits } = require('./parser');
 const { buildConfig, buildTestConfig } = require('./configBuilder');
 const { XrayManager, getFreePort } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
@@ -322,7 +322,25 @@ function buildActive(serverId, settings) {
     if (serversById[tg]) entryAddrs.push(serversById[tg].address);
   };
 
-  if (serverId === '__advanced__') {
+  if (serverId === '__pool__') {
+    const targetExists = (tg) => {
+      if (String(tg).indexOf('chain:') === 0) {
+        const m = chainsById[String(tg).slice('chain:'.length)];
+        return !!(m && m.length >= 2);
+      }
+      return !!serversById[tg];
+    };
+    const entries = getPool()
+      .filter(e => e.enabled && e.socksPort && targetExists(e.target))
+      .map(e => ({ id: e.id, name: e.name, target: e.target, socksPort: e.socksPort, httpPort: e.httpPort }));
+    if (!entries.length) throw new Error(settings.lang === 'en'
+      ? 'Enable at least one valid proxy in the pool (with a port and an existing target).'
+      : 'حداقل یک پروکسیِ معتبر در استخر را فعال کن (با پورت و یک مقصدِ موجود).');
+    const primary = entries[0].target;
+    plan = { mode: 'pool', entries, primary, serversById, chainsById, chain: legacyChain };
+    label = (settings.lang === 'en' ? '🧩 Proxy Pool' : '🧩 استخر پروکسی') + ` (${entries.length})`;
+    for (const e of entries) addEntryForTarget(e.target);
+  } else if (serverId === '__advanced__') {
     const rules = Array.isArray(settings.routeRules) ? settings.routeRules : [];
     const def = settings.routeDefault || (servers[0] && servers[0].id) || 'direct';
     plan = { mode: 'advanced', serversById, chainsById, chain: legacyChain, rules, def };
@@ -359,12 +377,12 @@ function buildActive(serverId, settings) {
   const geoSt = assetStatus();
   const geoAssets = !!(geoSt.geoip && geoSt.geosite);
   let geoWarn = null;
-  const usesGeo =
+  const usesGeo = plan.mode === 'pool' ? false : (
     (plan.mode === 'advanced' &&
       ((settings.routeRules || []).some(r => r && /^(geoip|geosite):/i.test(String(r.value || ''))))) ||
     (plan.mode !== 'advanced' &&
       (settings.routingMode === 'bypass-ir' || settings.routingMode === 'bypass-cn' ||
-        (settings.blockAds && plan.mode !== 'advanced')));
+        (settings.blockAds && plan.mode !== 'advanced'))));
   if (!geoAssets && usesGeo) {
     geoWarn = settings.lang === 'en'
       ? 'Geo files (geoip/geosite) are missing — geo-based rules were skipped. Download them under Settings → Required files.'
@@ -577,6 +595,26 @@ function getSettings() {
   return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}));
 }
 
+/**
+ * Proxy pool entries: [{ id, name, target, socksPort, httpPort, enabled }].
+ * `target` is a server id or 'chain:<chainId>'. Each enabled entry becomes its
+ * own local SOCKS/HTTP inbound routed to that exit (see buildPoolConfig).
+ */
+function getPool() {
+  const raw = store.get('pool', []);
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(e => e && e.id)
+    .map(e => ({
+      id: String(e.id),
+      name: String(e.name || 'Proxy').trim() || 'Proxy',
+      target: String(e.target || ''),
+      socksPort: parseInt(e.socksPort, 10) || 0,
+      httpPort: parseInt(e.httpPort, 10) || 0,
+      enabled: e.enabled !== false
+    }));
+}
+
 /** Named proxy chains: [{ id, name, members:[serverId,...] }]. */
 function getChains() {
   const chains = store.get('chains', null);
@@ -597,6 +635,7 @@ function registerIpc() {
     activeServerId: store.get('activeServerId', null),
     chain: store.get('chain', []),
     chains: getChains(),
+    pool: getPool(),
     xrayReady: xray.binExists(),
     tunAvailable: tun.isAvailable(),
     elevated: tun.isElevated(),
@@ -629,6 +668,14 @@ function registerIpc() {
     return { server, servers: existing };
   });
 
+  ipcMain.handle('servers:addProxy', (e, fields) => {
+    const server = makeProxyServer(fields || {});
+    const existing = store.get('servers', []);
+    existing.push(server);
+    store.set('servers', existing);
+    return { server, servers: existing };
+  });
+
   ipcMain.handle('servers:update', (e, { id, fields }) => {
     const servers = store.get('servers', []);
     const idx = servers.findIndex(s => s.id === id);
@@ -654,6 +701,26 @@ function registerIpc() {
           .map(c => ({ id: c.id, name: String(c.name || 'Chain').trim() || 'Chain', members: Array.isArray(c.members) ? c.members.filter(Boolean) : [] }))
       : [];
     store.set('chains', valid);
+    return valid;
+  });
+
+  // Proxy pool (multi-config): each enabled entry becomes its own local
+  // SOCKS/HTTP port routed to its own exit.
+  ipcMain.handle('pool:list', () => getPool());
+  ipcMain.handle('pool:set', (e, entries) => {
+    const valid = Array.isArray(entries)
+      ? entries
+          .filter(c => c && c.id)
+          .map(c => ({
+            id: String(c.id),
+            name: String(c.name || 'Proxy').trim() || 'Proxy',
+            target: String(c.target || ''),
+            socksPort: parseInt(c.socksPort, 10) || 0,
+            httpPort: parseInt(c.httpPort, 10) || 0,
+            enabled: c.enabled !== false
+          }))
+      : [];
+    store.set('pool', valid);
     return valid;
   });
 

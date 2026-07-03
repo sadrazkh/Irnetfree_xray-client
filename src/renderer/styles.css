@@ -607,6 +607,28 @@ body {
 /* general proto-chain / advanced badge colors (chain cards, picker, routing) */
 .proto-badge.proto-chain { background: rgba(45,212,191,.18); color: #5fe0cf; }
 .proto-badge.proto-advanced { background: rgba(187,134,252,.18); color: #cda9ff; }
+.proto-badge.proto-pool { background: rgba(245,158,11,.18); color: #f0b45a; }
+.proto-socks { background: rgba(236,110,173,.18); color: #f19dc8; }
+.proto-http { background: rgba(148,163,184,.18); color: #b6c2d4; }
+.picker-special .proto-badge.proto-pool { background: rgba(245,158,11,.18); color: #f0b45a; }
+
+/* ----- proxy pool (multi-config) ----- */
+.pool-card { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.pool-card.disabled { opacity: .6; }
+.pool-card-head { display: flex; align-items: center; gap: 10px; }
+.pool-card-head .pool-name { flex: 1; min-width: 0; }
+.pool-enable-sw { flex: 0 0 auto; }
+.pool-del { flex: 0 0 auto; }
+.pool-card-body { display: grid; grid-template-columns: 1.6fr 1fr 1fr; gap: 12px; align-items: end; }
+.pool-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pool-field .field-label { margin: 0; }
+.pool-target-field .ss { width: 100%; }
+.pool-warn { font-size: 12px; min-height: 4px; color: var(--muted); }
+.pool-warn.warn { color: var(--yellow); }
+@media (max-width: 720px) {
+  .pool-card-body { grid-template-columns: 1fr 1fr; }
+  .pool-target-field { grid-column: 1 / -1; }
+}
 
 /* clickable connection-mode card on home */
 .mode-card {

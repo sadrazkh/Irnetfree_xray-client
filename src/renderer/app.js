@@ -22,6 +22,7 @@ const state = {
   lan: null,               // { ip, socksPort, httpPort } when LAN sharing active
   chain: [],               // legacy: ordered server ids (first hop → exit)
   chains: [],              // [{ id, name, members:[serverId,...] }] — first-class chains
+  pool: [],                // [{ id, name, target, socksPort, httpPort, enabled }] — multi-proxy pool
   editingId: null,         // server being edited in the modal
   pings: {} // id -> { tcp, real }
 };
@@ -151,6 +152,7 @@ function setLang(lang) {
   renderSubs();
   renderComponents();
   renderChains();
+  renderPool();
   updateXrayStatus(state.assets.xray);
   updateTunStatus();
   setModeWidget();
@@ -177,6 +179,10 @@ async function init() {
     id: c.id, name: c.name || 'Chain',
     members: (c.members || []).filter(id => state.servers.some(s => s.id === id))
   }));
+  state.pool = (data.pool || []).map(e => ({
+    id: e.id, name: e.name || 'Proxy', target: e.target || '',
+    socksPort: e.socksPort || 0, httpPort: e.httpPort || 0, enabled: e.enabled !== false
+  }));
 
   window.i18n.applyI18n(state.settings.lang || 'fa');
   $('#btnLang').textContent = (state.settings.lang || 'fa') === 'fa' ? 'EN' : 'فا';
@@ -187,6 +193,7 @@ async function init() {
   renderSubs();
   renderComponents();
   renderChains();
+  renderPool();
   renderAdvanced();
   updateXrayStatus(data.xrayReady);
   updateTunStatus();
@@ -427,12 +434,33 @@ function renderServers() {
 
 /* ----------------------------- unified picker (home) ----------------------------- */
 const ADV_ID = '__advanced__';
+const POOL_ID = '__pool__';
 function chainById(id) { return state.chains.find(c => c.id === id); }
 function isChainId(id) { return !!chainById(id); }
 function chainMembers(c) { return ((c && c.members) || []).map(srvById).filter(Boolean); }
 function chainReady(c) { return chainMembers(c).length >= 2; }
 function anyChainReady() { return state.chains.some(chainReady); }
-function isPseudo(id) { return id === ADV_ID || isChainId(id); }
+function isPseudo(id) { return id === ADV_ID || id === POOL_ID || isChainId(id); }
+
+/** A pool target ('chain:<id>' or a server id) that currently resolves. */
+function poolTargetValid(target) {
+  if (!target) return false;
+  if (String(target).startsWith('chain:')) return chainReady(chainById(String(target).slice(6)));
+  return !!srvById(target);
+}
+function poolTargetLabel(target) {
+  if (String(target).startsWith('chain:')) {
+    const c = chainById(String(target).slice(6));
+    return '⛓ ' + (c ? c.name : '—');
+  }
+  const s = srvById(target);
+  return s ? s.name : '—';
+}
+/** Enabled pool entries with a valid target + port (connectable). */
+function poolEnabledValid() {
+  return state.pool.filter(e => e.enabled && e.socksPort && poolTargetValid(e.target));
+}
+function poolReady() { return poolEnabledValid().length > 0; }
 function advancedReady() {
   return !!state.settings.advancedRouting &&
     (((state.settings.routeRules || []).length > 0) || !!state.settings.routeDefault);
@@ -442,8 +470,8 @@ function selectServer(id) {
   state.selectedServerId = id;
   renderServers();
   renderPicker();
-  // immediate ping feedback for the chosen target (skip for advanced routing)
-  if (id && id !== ADV_ID && !state.pings[id]) pingServer(id);
+  // immediate ping feedback for the chosen target (chains ping too; skip adv/pool)
+  if (id && id !== ADV_ID && id !== POOL_ID && !state.pings[id]) pingServer(id);
 }
 
 function renderPicker() {
@@ -455,11 +483,12 @@ function renderPicker() {
   // drop a stale pseudo selection if its feature is no longer available
   if (isChainId(state.selectedServerId) && !chainReady(chainById(state.selectedServerId))) state.selectedServerId = null;
   if (state.selectedServerId === ADV_ID && !advancedReady()) state.selectedServerId = null;
+  if (state.selectedServerId === POOL_ID && !poolReady()) state.selectedServerId = null;
 
   const selId = state.selectedServerId;
   const sel = state.servers.find(s => s.id === selId);
   const selChain = chainById(selId);
-  const hasAny = state.servers.length || anyChainReady() || advancedReady();
+  const hasAny = state.servers.length || anyChainReady() || advancedReady() || poolReady();
 
   if (!hasAny) {
     btnProto.hidden = true;
@@ -478,6 +507,12 @@ function renderPicker() {
     btnProto.textContent = '🧭';
     btnProto.className = 'proto-badge proto-advanced';
     btnName.textContent = t('picker.advanced');
+    btnPing.textContent = '';
+  } else if (selId === POOL_ID) {
+    btnProto.hidden = false;
+    btnProto.textContent = '🧩';
+    btnProto.className = 'proto-badge proto-pool';
+    btnName.textContent = t('picker.pool') + ' (' + poolEnabledValid().length + ')';
     btnPing.textContent = '';
   } else if (sel) {
     btnProto.hidden = false;
@@ -520,6 +555,7 @@ function renderPicker() {
     menu.appendChild(row);
   };
 
+  if (poolReady()) addRow(POOL_ID, '<span class="proto-badge proto-pool">🧩</span>', t('picker.pool') + ' (' + poolEnabledValid().length + ')', null, true);
   if (advancedReady()) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
   for (const c of state.chains) {
     if (chainReady(c)) addRow(c.id, '<span class="proto-badge proto-chain">⛓</span>', c.name, c.id, true);
@@ -534,7 +570,7 @@ async function pingAllVisible() {
   await pingMany([...state.servers.map(s => s.id), ...state.chains.filter(chainReady).map(c => c.id)]);
 }
 
-function openPicker() { if (state.servers.length || anyChainReady() || advancedReady()) $('#pickerMenu').hidden = false; }
+function openPicker() { if (state.servers.length || anyChainReady() || advancedReady() || poolReady()) $('#pickerMenu').hidden = false; }
 function closePicker() { $('#pickerMenu').hidden = true; }
 $('#pickerBtn').onclick = (e) => {
   e.stopPropagation();
@@ -580,7 +616,7 @@ async function smartImport(text) {
   }
 
   if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
-  renderServers(); renderPicker(); renderSubs(); renderChains();
+  renderServers(); renderPicker(); renderSubs(); renderChains(); renderPool();
 
   const parts = [];
   if (subCount) parts.push(`${subCount} ${t('t.subAddedShort')} • ${subAdded} ${t('sub.servers')}`);
@@ -629,6 +665,7 @@ async function deleteServer(id) {
   renderServers();
   renderPicker();
   renderChains();
+  renderPool();
 }
 
 $('#btnClearServers').onclick = async () => {
@@ -641,6 +678,7 @@ $('#btnClearServers').onclick = async () => {
   renderServers();
   renderPicker();
   renderChains();
+  renderPool();
   toast(t('t.allServersDeleted'));
 };
 
@@ -698,7 +736,7 @@ $('#btnPingAll').onclick = () => pingMany(state.servers.map(s => s.id));
 
 /* quick ping (home) — fills the TCP ping + Real delay cards for one target */
 async function quickPing(id) {
-  if (!id || id === ADV_ID) return;
+  if (!id || id === ADV_ID || id === POOL_ID) return;
   $('#statTcp').textContent = '...';
   $('#statReal').textContent = '...';
   const tcp = await window.api.pingTcp(id);
@@ -801,6 +839,10 @@ function setConnUI(stateStr, id) {
     srv.textContent = '⛓ ' + effChain.name + (names.length ? ' (' + names.join(' → ') + ')' : '');
   } else if (effId === ADV_ID) {
     srv.textContent = '🧭 ' + t('picker.advanced');
+  } else if (effId === POOL_ID) {
+    const list = poolEnabledValid();
+    srv.textContent = '🧩 ' + t('picker.pool') + ' — ' +
+      (list.map(e => `${e.name}:${e.socksPort}`).join(' · ') || '—');
   } else {
     const server = state.servers.find(s => s.id === effId);
     srv.textContent = server ? `${server.name} — ${server.address}:${server.port}` : t('conn.noServer');
@@ -1226,7 +1268,7 @@ $('#btnSubAdd').onclick = async () => {
     state.subscriptions = await window.api.listSubs();
     state.servers = res.servers;
     if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
-    renderSubs(); renderServers(); renderPicker(); renderChains();
+    renderSubs(); renderServers(); renderPicker(); renderChains(); renderPool();
     $('#subUrl').value = ''; $('#subName').value = '';
     $('#subAddBox').hidden = true;
     $('#subAddHint').textContent = '';
@@ -1243,7 +1285,7 @@ async function refreshSub(id) {
     const res = await window.api.refreshSub(id);
     state.subscriptions = res.subs;
     state.servers = res.servers;
-    renderSubs(); renderServers(); renderPicker(); renderChains();
+    renderSubs(); renderServers(); renderPicker(); renderChains(); renderPool();
     toast(`${t('t.updated')} — ${res.added} ${t('sub.servers')}`, 'ok');
   } catch (e) {
     toast(t('t.failed') + ': ' + e.message, 'err');
@@ -1254,7 +1296,7 @@ async function removeSub(id) {
   const res = await window.api.removeSub(id);
   state.subscriptions = res.subs;
   state.servers = res.servers;
-  renderSubs(); renderServers(); renderPicker(); renderChains();
+  renderSubs(); renderServers(); renderPicker(); renderChains(); renderPool();
   toast(t('t.subRemoved'));
 }
 
@@ -1264,7 +1306,7 @@ $('#btnRefreshAll').onclick = async () => {
   const res = await window.api.refreshAllSubs();
   state.subscriptions = res.subs;
   state.servers = res.servers;
-  renderSubs(); renderServers(); renderPicker(); renderChains();
+  renderSubs(); renderServers(); renderPicker(); renderChains(); renderPool();
   const okCount = res.results.filter(r => r.ok).length;
   toast(`${okCount}/${res.results.length} ${t('t.updated')}`, 'ok');
 };
@@ -1279,7 +1321,7 @@ $('#autoInterval').onchange = () => {
 window.api.onSubsUpdated((d) => {
   state.subscriptions = d.subs;
   state.servers = d.servers;
-  renderSubs(); renderServers(); renderPicker(); renderChains();
+  renderSubs(); renderServers(); renderPicker(); renderChains(); renderPool();
 });
 
 /* ----------------------------- edit server modal ----------------------------- */
@@ -1304,6 +1346,11 @@ function readServerFields(s) {
   } else if (s.protocol === 'shadowsocks') {
     const srv = ob.settings && ob.settings.servers && ob.settings.servers[0];
     if (srv) { f.cred = srv.password || ''; f.method = srv.method || ''; }
+  } else if (s.protocol === 'socks' || s.protocol === 'http') {
+    const srv = ob.settings && ob.settings.servers && ob.settings.servers[0];
+    const u = srv && srv.users && srv.users[0];
+    f.pxUser = u ? (u.user || '') : '';
+    f.pxPass = u ? (u.pass || '') : '';
   } else if (s.protocol === 'wireguard') {
     f.cred = (ob.settings && ob.settings.secretKey) || '';
     const peer = ob.settings && ob.settings.peers && ob.settings.peers[0];
@@ -1376,12 +1423,21 @@ function openEdit(id) {
   // toggle protocol-specific sections
   const isWg = proto === 'wireguard';
   const isSs = proto === 'shadowsocks';
+  const isProxy = proto === 'socks' || proto === 'http';
   show('#edTransportRow', isStd);
   show('#edTlsRow', isStd);
   show('#edPathRow', isStd);
   show('#edInsecureRow', isStd);
   show('#edWgExtra', isWg);
+  show('#edProxyRow', isProxy);
+  // socks/http carry no single "credential" field — user/pass live in edProxyRow
+  show('#edCredWrap', !isProxy);
   $('#edRealityRow').hidden = !(isStd && $('#edSecurity').value === 'reality');
+
+  if (isProxy) {
+    $('#edProxyUser').value = f.pxUser || '';
+    $('#edProxyPass').value = f.pxPass || '';
+  }
 
   if (isWg) {
     $('#edWgPub').value = f.wgPub || '';
@@ -1442,12 +1498,15 @@ $('#editSave').onclick = async () => {
     fields.mtu = $('#edWgMtu').value;
     fields.reserved = $('#edWgReserved').value.trim();
     fields.allowedIPs = $('#edWgAllowed').value.trim();
+  } else if (proto === 'socks' || proto === 'http') {
+    fields.username = $('#edProxyUser').value.trim();
+    fields.password = $('#edProxyPass').value.trim();
   }
 
   const res = await window.api.updateServer(id, fields);
   if (res.ok) {
     state.servers = res.servers;
-    renderServers(); renderPicker(); renderChains();
+    renderServers(); renderPicker(); renderChains(); renderPool();
     closeEdit();
     toast(t('t.serverUpdated'), 'ok');
   } else {
@@ -1460,6 +1519,7 @@ $('#btnWgOpen').onclick = () => {
   const box = $('#wgBox');
   box.hidden = !box.hidden;
   $('#importBox').hidden = true;
+  $('#proxyBox').hidden = true;
 };
 $('#btnWgCancel').onclick = () => { $('#wgBox').hidden = true; };
 
@@ -1492,6 +1552,34 @@ $('#btnWgAdd').onclick = async () => {
   toast(t('t.wgAdded'), 'ok');
 };
 
+/* ----------------------------- SOCKS / HTTP proxy add ----------------------------- */
+$('#btnProxyOpen').onclick = () => {
+  const box = $('#proxyBox');
+  box.hidden = !box.hidden;
+  $('#importBox').hidden = true;
+  $('#wgBox').hidden = true;
+};
+$('#btnProxyCancel').onclick = () => { $('#proxyBox').hidden = true; };
+
+$('#btnProxyAdd').onclick = async () => {
+  const fields = {
+    type: $('#pxType').value,
+    name: $('#pxName').value.trim(),
+    address: $('#pxHost').value.trim(),
+    port: $('#pxPort').value,
+    username: $('#pxUser').value.trim(),
+    password: $('#pxPass').value.trim()
+  };
+  if (!fields.address || !fields.port) return toast(t('t.proxyMissing'), 'err');
+  const res = await window.api.addProxy(fields);
+  state.servers = res.servers;
+  if (!state.selectedServerId) state.selectedServerId = res.server.id;
+  renderServers(); renderPicker(); renderChains(); renderPool();
+  $('#proxyBox').hidden = true;
+  ['pxName', 'pxHost', 'pxPort', 'pxUser', 'pxPass'].forEach(id => { $('#' + id).value = ''; });
+  toast(t('t.proxyAdded'), 'ok');
+};
+
 /* ----------------------------- proxy chains (named, first-class) ----------------------------- */
 function srvById(id) { return state.servers.find(s => s.id === id); }
 
@@ -1504,6 +1592,7 @@ async function persistChains() {
   renderChains();
   renderPicker();   // chains become selectable on home once they have ≥2 hops
   renderAdvanced(); // refresh routing target dropdowns that include chains
+  renderPool();     // pool target dropdowns include chains too
 }
 
 $('#btnAddChain').onclick = () => {
@@ -1632,6 +1721,123 @@ function renderChains() {
         it.style.display = (it.dataset.name || '').toLowerCase().includes(f) ? '' : 'none';
       });
     };
+
+    wrap.appendChild(card);
+  });
+}
+
+/* ----------------------------- proxy pool (multi-config) ----------------------------- */
+function newPoolId() { return 'px-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+/** Every local port already claimed (settings + pool entries) — avoid clashes. */
+function usedPoolPorts() {
+  const set = new Set();
+  const sp = parseInt(state.settings.socksPort, 10); if (sp) set.add(sp);
+  const hp = parseInt(state.settings.httpPort, 10); if (hp) set.add(hp);
+  for (const e of state.pool) {
+    if (e.socksPort) set.add(parseInt(e.socksPort, 10));
+    if (e.httpPort) set.add(parseInt(e.httpPort, 10));
+  }
+  return set;
+}
+/** Next free local port at/after `start` (default 60001). */
+function nextPoolPort(start) {
+  const used = usedPoolPorts();
+  let p = start || 60001;
+  while (used.has(p) && p < 65535) p++;
+  return p;
+}
+
+/** [{value,label}] pool targets — servers + ready chains (no direct/block). */
+function poolTargetOptions() {
+  const opts = state.servers.map(s => ({ value: s.id, label: s.name }));
+  for (const c of state.chains) if (chainReady(c)) opts.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name });
+  return opts;
+}
+
+async function persistPool() {
+  state.pool = state.pool.map(e => ({
+    id: e.id, name: e.name, target: e.target,
+    socksPort: parseInt(e.socksPort, 10) || 0, httpPort: parseInt(e.httpPort, 10) || 0,
+    enabled: !!e.enabled
+  }));
+  await window.api.setPool(state.pool);
+  renderPool();
+  renderPicker();   // the 🧩 pool entry becomes selectable once ≥1 entry is valid
+}
+
+$('#btnAddPool').onclick = () => {
+  const socks = nextPoolPort(60001);
+  const http = nextPoolPort(socks + 1);
+  const n = state.pool.length + 1;
+  const target = (state.servers[0] && state.servers[0].id) || '';
+  state.pool.push({
+    id: newPoolId(),
+    name: (window.i18n.lang === 'en' ? 'Proxy ' : 'پروکسی ') + n,
+    target, socksPort: socks, httpPort: http, enabled: true
+  });
+  persistPool();
+};
+
+$('#btnPoolConnect').onclick = () => {
+  if (!poolReady()) return toast(t('pool.needOne'), 'err');
+  connect(POOL_ID);
+};
+
+function renderPool() {
+  const wrap = $('#poolWrap');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  const empty = $('#poolEmpty');
+  if (empty) empty.hidden = state.pool.length > 0;
+  const opts = poolTargetOptions();
+
+  state.pool.forEach((entry) => {
+    const card = document.createElement('div');
+    card.className = 'card pool-card' + (entry.enabled ? '' : ' disabled');
+    const valid = poolTargetValid(entry.target);
+
+    card.innerHTML = `
+      <div class="pool-card-head">
+        <span class="proto-badge proto-pool">🧩</span>
+        <input class="input pool-name" value="${escapeHtml(entry.name)}" />
+        <label class="switch pool-enable-sw" title="${escapeHtml(t('pool.enable'))}">
+          <input type="checkbox" class="pool-enable" ${entry.enabled ? 'checked' : ''} /><span class="slider"></span>
+        </label>
+        <button class="icon-btn pool-del" title="delete">🗑</button>
+      </div>
+      <div class="pool-card-body">
+        <div class="pool-field pool-target-field">
+          <label class="field-label">${escapeHtml(t('pool.target'))}</label>
+          <span class="pool-target-mount"></span>
+        </div>
+        <div class="pool-field">
+          <label class="field-label">${escapeHtml(t('pool.socksPort'))}</label>
+          <input type="number" class="input pool-socks" dir="ltr" value="${entry.socksPort || ''}" />
+        </div>
+        <div class="pool-field">
+          <label class="field-label">${escapeHtml(t('pool.httpPort'))}</label>
+          <input type="number" class="input pool-http" dir="ltr" value="${entry.httpPort || ''}" placeholder="—" />
+        </div>
+      </div>
+      <div class="pool-warn ${valid ? '' : 'warn'}">${escapeHtml(valid ? '' : t('pool.invalidTarget'))}</div>`;
+
+    const nameInput = card.querySelector('.pool-name');
+    nameInput.onchange = () => { entry.name = nameInput.value.trim() || entry.name; persistPool(); };
+    card.querySelector('.pool-enable').onchange = (e) => { entry.enabled = e.target.checked; persistPool(); };
+    card.querySelector('.pool-del').onclick = () => {
+      state.pool = state.pool.filter(x => x.id !== entry.id);
+      if (!poolReady() && state.selectedServerId === POOL_ID) state.selectedServerId = null;
+      persistPool();
+    };
+    const socksIn = card.querySelector('.pool-socks');
+    socksIn.onchange = () => { entry.socksPort = parseInt(socksIn.value, 10) || 0; persistPool(); };
+    const httpIn = card.querySelector('.pool-http');
+    httpIn.onchange = () => { entry.httpPort = parseInt(httpIn.value, 10) || 0; persistPool(); };
+
+    card.querySelector('.pool-target-mount').appendChild(
+      makeSearchSelect({ options: opts, value: entry.target, onChange: (v) => { entry.target = v; persistPool(); } })
+    );
 
     wrap.appendChild(card);
   });
