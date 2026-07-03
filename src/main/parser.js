@@ -276,6 +276,87 @@ function parseShadowsocks(link) {
   return mkServer(name || address, 'shadowsocks', address, port, link, outbound);
 }
 
+/* --------------------------- SOCKS / HTTP proxy --------------------------- */
+/**
+ * Build a SOCKS/HTTP proxy outbound. `proto` is 'socks' or 'http'.
+ * Credentials are optional (many public SOCKS proxies are open).
+ */
+function buildProxyOutbound(proto, address, port, user, pass) {
+  const server = { address, port: parseInt(port, 10) || (proto === 'http' ? 8080 : 1080) };
+  if ((user && user.length) || (pass && pass.length)) {
+    server.users = [{ user: user || '', pass: pass || '' }];
+  }
+  return {
+    protocol: proto === 'http' ? 'http' : 'socks',
+    settings: { servers: [server] },
+    streamSettings: { network: 'tcp' }
+  };
+}
+
+/**
+ * Parse a socks share link. Tolerant of several shapes:
+ *   socks://host:port#name
+ *   socks://user:pass@host:port#name
+ *   socks://base64(user:pass)@host:port#name
+ *   socks://base64(user:pass@host:port)#name
+ * `socks5://` is treated the same as `socks://`.
+ */
+function parseSocks(link) {
+  const scheme = link.startsWith('socks5://') ? 'socks5://' : 'socks://';
+  const body = link.slice(scheme.length);
+  const hashIdx = body.indexOf('#');
+  const name = hashIdx === -1 ? '' : safeDecodeURIComponent(body.slice(hashIdx + 1));
+  let main = hashIdx === -1 ? body : body.slice(0, hashIdx);
+  const qIdx = main.indexOf('?');
+  if (qIdx !== -1) main = main.slice(0, qIdx);   // ignore any query params
+
+  let user = '', pass = '', address, portStr;
+
+  const splitCreds = (raw) => {
+    const ci = raw.indexOf(':');
+    if (ci === -1) { user = raw; pass = ''; }
+    else { user = raw.slice(0, ci); pass = raw.slice(ci + 1); }
+  };
+
+  if (main.includes('@')) {
+    const atIdx = main.lastIndexOf('@');
+    const userInfo = main.slice(0, atIdx);
+    const hostPart = main.slice(atIdx + 1);
+    // userInfo may be plain "user:pass" or a base64 of it
+    const decoded = userInfo.includes(':') ? userInfo : (b64decode(userInfo) || userInfo);
+    splitCreds(decoded);
+    [address, portStr] = splitHostPort(hostPart);
+  } else {
+    // whole thing may be base64(user:pass@host:port) or just host:port
+    const decoded = b64decode(main);
+    if (decoded && decoded.includes('@')) {
+      const atIdx = decoded.lastIndexOf('@');
+      splitCreds(decoded.slice(0, atIdx));
+      [address, portStr] = splitHostPort(decoded.slice(atIdx + 1));
+    } else {
+      [address, portStr] = splitHostPort(main);
+    }
+  }
+  const port = parseInt(portStr, 10) || 1080;
+  const outbound = buildProxyOutbound('socks', address, port, safeDecodeURIComponent(user), safeDecodeURIComponent(pass));
+  return mkServer(name || address, 'socks', address, port, link, outbound);
+}
+
+/**
+ * Create a SOCKS/HTTP proxy server record from a UI form (no share link).
+ * fields: { name, type:'socks'|'http', address, port, username, password }
+ */
+function makeProxyServer(fields) {
+  const type = (fields.type === 'http') ? 'http' : 'socks';
+  const address = String(fields.address || '').trim();
+  const port = parseInt(fields.port, 10) || (type === 'http' ? 8080 : 1080);
+  const user = String(fields.username || '').trim();
+  const pass = String(fields.password || '').trim();
+  const outbound = buildProxyOutbound(type, address, port, user, pass);
+  const raw = `${type}://${address}:${port}`;
+  return mkServer(fields.name || address || type.toUpperCase(), type, address, port, raw, outbound);
+}
+
 /* --------------------------- WireGuard --------------------------- */
 /**
  * Build a WireGuard outbound from plain fields.
@@ -427,6 +508,17 @@ function applyServerEdits(server, f) {
       if (f.password) srv.password = f.password;
       if (f.method) srv.method = f.method;
     }
+  } else if (proto === 'socks' || proto === 'http') {
+    const srv = ob.settings && ob.settings.servers && ob.settings.servers[0];
+    if (srv) {
+      srv.address = addr; srv.port = port;
+      if (f.username != null || f.password != null) {
+        const u = (f.username || '').trim();
+        const p = (f.password || '').trim();
+        if (u || p) srv.users = [{ user: u, pass: p }];
+        else delete srv.users;
+      }
+    }
   } else if (proto === 'wireguard') {
     const st = ob.settings;
     const peer = st && st.peers && st.peers[0];
@@ -514,6 +606,7 @@ function parseLink(link) {
   if (l.startsWith('vmess://')) return parseVmess(l);
   if (l.startsWith('trojan://')) return parseTrojan(l);
   if (l.startsWith('ss://')) return parseShadowsocks(l);
+  if (l.startsWith('socks://') || l.startsWith('socks5://')) return parseSocks(l);
   if (l.startsWith('wireguard://') || l.startsWith('wg://')) return parseWireguard(l);
   throw new Error('Unsupported or invalid link: ' + l.slice(0, 12) + '...');
 }
@@ -528,16 +621,16 @@ function parseMany(text) {
   let body = String(text || '').trim();
 
   // If it has no scheme but decodes to links, treat as subscription base64.
-  if (!/^(vless|vmess|trojan|ss|wireguard|wg):\/\//im.test(body)) {
+  if (!/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//im.test(body)) {
     const decoded = b64decode(body);
-    if (/^(vless|vmess|trojan|ss|wireguard|wg):\/\//im.test(decoded)) body = decoded;
+    if (/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//im.test(decoded)) body = decoded;
   }
 
   const lines = body.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const servers = [];
   const errors = [];
   for (const line of lines) {
-    if (!/^(vless|vmess|trojan|ss|wireguard|wg):\/\//i.test(line)) continue;
+    if (!/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//i.test(line)) continue;
     try {
       servers.push(parseLink(line));
     } catch (e) {
@@ -549,5 +642,5 @@ function parseMany(text) {
 
 module.exports = {
   parseLink, parseMany, b64decode,
-  buildStreamSettings, buildWireguardOutbound, makeWireguardServer, applyServerEdits
+  buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits
 };

@@ -190,6 +190,10 @@ function buildConfig(planArg, settings) {
     ? { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false }
     : { enabled: false };
 
+  // Proxy pool: many local inbounds, each on its own port, each routed to its
+  // own config/chain. Handled separately (its own inbound set).
+  if (plan.mode === 'pool') return buildPoolConfig(plan, s, listen, sniffing);
+
   let outbounds, rules;
 
   if (plan.mode === 'advanced') {
@@ -272,6 +276,95 @@ function buildConfig(planArg, settings) {
 }
 
 /**
+ * Build a "proxy pool" config: a single xray instance exposing MANY local
+ * inbounds, each on its own SOCKS (and optional HTTP) port, each routed to its
+ * own config/chain. This is what powers "run one exit on 60001, another on
+ * 60002, …" — several proxies live at once.
+ *
+ * plan = {
+ *   mode: 'pool',
+ *   entries: [{ id, name, target, socksPort, httpPort }],  // target: serverId | 'chain:<id>'
+ *   primary,                                                // target for the standard ports (system proxy / TUN)
+ *   serversById, chainsById, chain
+ * }
+ *
+ * The standard SOCKS/HTTP ports (settings.socksPort/httpPort) are ALSO opened and
+ * routed to `primary`, so the system proxy, TUN and the IP check keep working
+ * exactly as in single-config mode; the per-entry ports are extra exits on top.
+ */
+function buildPoolConfig(plan, s, listen, sniffing) {
+  const reg = makeRegistry(plan);
+  const inbounds = [];
+  const usedPorts = new Set();
+
+  // api first so its rule can sit at the very top
+  const rules = [{ type: 'field', inboundTag: ['api'], outboundTag: 'api' }];
+
+  const addInbound = (tag, port, proto) => {
+    port = parseInt(port, 10);
+    if (!port || port < 1 || port > 65535 || usedPorts.has(port)) return false;
+    usedPorts.add(port);
+    if (proto === 'http') {
+      inbounds.push({ tag, port, listen, protocol: 'http', settings: {}, sniffing });
+    } else {
+      inbounds.push({ tag, port, listen, protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing });
+    }
+    return true;
+  };
+
+  const perInboundRules = [];
+
+  // 1) standard ports -> primary exit (system proxy / TUN / IP check use these)
+  const primaryTag = reg.tagFor(plan.primary);
+  const stdTags = [];
+  if (addInbound('socks-in', s.socksPort, 'socks')) stdTags.push('socks-in');
+  if (addInbound('http-in', s.httpPort, 'http')) stdTags.push('http-in');
+  if (stdTags.length) perInboundRules.push({ type: 'field', inboundTag: stdTags, outboundTag: primaryTag });
+
+  // 2) one inbound (socks + optional http) per pool entry -> its own exit
+  for (const e of plan.entries || []) {
+    if (!e) continue;
+    const tag = reg.tagFor(e.target);
+    const inTags = [];
+    if (addInbound('ps-' + e.id, e.socksPort, 'socks')) inTags.push('ps-' + e.id);
+    if (e.httpPort && addInbound('ph-' + e.id, e.httpPort, 'http')) inTags.push('ph-' + e.id);
+    if (inTags.length) perInboundRules.push({ type: 'field', inboundTag: inTags, outboundTag: tag });
+  }
+
+  // api inbound (for live traffic stats)
+  inbounds.push({ tag: 'api', port: s.apiPort, listen: '127.0.0.1', protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } });
+
+  reg.add(Object.assign({}, FREEDOM));
+  reg.add(Object.assign({}, BLACKHOLE));
+  const outbounds = (reg.outs || []).map(sanitizeWgOutbound);
+
+  // Private/LAN always direct (bypass), THEN per-inbound routing, THEN a
+  // catch-all to the primary exit so nothing is ever left unrouted.
+  rules.push({ type: 'field', ip: PRIVATE_IPS.slice(), outboundTag: 'direct' });
+  rules.push(...perInboundRules);
+  rules.push({ type: 'field', port: '0-65535', outboundTag: primaryTag });
+
+  const wgChained = outbounds.some(o =>
+    o && o.protocol === 'wireguard' && o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy);
+  const level0 = { statsUserUplink: true, statsUserDownlink: true };
+  if (wgChained) level0.bufferSize = 0;
+
+  return {
+    log: { loglevel: s.logLevel },
+    api: { tag: 'api', services: ['StatsService'] },
+    stats: {},
+    policy: {
+      levels: { '0': level0 },
+      system: { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true }
+    },
+    dns: { servers: s.dns, queryStrategy: 'UseIP' },
+    inbounds,
+    outbounds,
+    routing: { domainStrategy: 'IPIfNonMatch', rules }
+  };
+}
+
+/**
  * Build a *test* config used only to measure real proxy latency.
  * `target` may be a single server object OR an array of servers (a chain).
  */
@@ -323,4 +416,4 @@ function splitList(v) {
   return String(v == null ? '' : v).split(',').map(x => x.trim()).filter(Boolean);
 }
 
-module.exports = { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds };

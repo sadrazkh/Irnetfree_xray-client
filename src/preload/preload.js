@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   importServers: (text) => ipcRenderer.invoke('servers:import', text),
   addServer: (link) => ipcRenderer.invoke('servers:add', link),
   addWireguard: (fields) => ipcRenderer.invoke('servers:addWireguard', fields),
+  addProxy: (fields) => ipcRenderer.invoke('servers:addProxy', fields),
   updateServer: (id, fields) => ipcRenderer.invoke('servers:update', { id, fields }),
   deleteServer: (id) => ipcRenderer.invoke('servers:delete', id),
   clearServers: () => ipcRenderer.invoke('servers:clear'),
@@ -21,6 +22,10 @@ contextBridge.exposeInMainWorld('api', {
   // named proxy chains (first-class configs)
   listChains: () => ipcRenderer.invoke('chains:list'),
   setChains: (chains) => ipcRenderer.invoke('chains:set', chains),
+
+  // proxy pool (multi-config: several exits on several local ports at once)
+  listPool: () => ipcRenderer.invoke('pool:list'),
+  setPool: (entries) => ipcRenderer.invoke('pool:set', entries),
 
   // subscriptions
   listSubs: () => ipcRenderer.invoke('subs:list'),
