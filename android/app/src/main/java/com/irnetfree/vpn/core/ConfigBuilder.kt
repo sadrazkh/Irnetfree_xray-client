@@ -135,8 +135,8 @@ object ConfigBuilder {
         private fun chainTag(list: List<ServerConfig>?, tag: String): String {
             val arr = list?.filter { it.outbound.length() > 0 } ?: emptyList()
             return when {
-                arr.size >= 2 -> { buildChainOutboundsStatic(arr, tag).forEach { add(it) }; tag }
-                arr.size == 1 -> { add(cloneOut(arr[0].outbound, tag)); tag }
+                arr.size >= 2 -> { ConfigBuilder.buildChainOutboundsStatic(arr, tag).forEach { add(it) }; tag }
+                arr.size == 1 -> { add(ConfigBuilder.cloneOut(arr[0].outbound, tag)); tag }
                 else -> "direct"
             }
         }
@@ -146,7 +146,7 @@ object ConfigBuilder {
             if (target == "block") return "block"
             if (target.startsWith("chain:")) return chainTag(chainsById[target.substring(6)], "out-chain-" + target.substring(6))
             val s = serversById[target]
-            if (s != null && s.outbound.length() > 0) { val tag = "out-$target"; add(cloneOut(s.outbound, tag)); return tag }
+            if (s != null && s.outbound.length() > 0) { val tag = "out-$target"; add(ConfigBuilder.cloneOut(s.outbound, tag)); return tag }
             return "direct"
         }
     }
@@ -183,7 +183,7 @@ object ConfigBuilder {
             .put("routing", JSONObject().put("domainStrategy", "IPIfNonMatch").put("rules", rules))
     }
 
-    private fun cloneOut(outbound: JSONObject, tag: String): JSONObject =
+    internal fun cloneOut(outbound: JSONObject, tag: String): JSONObject =
         JSONObject(outbound.toString()).put("tag", tag)
 
     private fun dialThrough(outbound: JSONObject, viaTag: String) {
@@ -201,7 +201,7 @@ object ConfigBuilder {
     private fun rule(inbound: List<String>, out: String): JSONObject =
         JSONObject().put("type", "field").put("inboundTag", JSONArray(inbound)).put("outboundTag", out)
 
-    // static helper so Registry (nested) can reuse chain building
-    private fun buildChainOutboundsStatic(members: List<ServerConfig>, exitTag: String): List<JSONObject> =
+    // helper so Registry (nested) can reuse chain building
+    internal fun buildChainOutboundsStatic(members: List<ServerConfig>, exitTag: String): List<JSONObject> =
         buildChainOutbounds(members, exitTag)
 }

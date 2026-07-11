@@ -54,16 +54,16 @@ private fun App(store: Store) {
         containerColor = Color.Transparent,
         bottomBar = {
             NavigationBar(containerColor = Color(0xFF12161d)) {
-                Tab.entries.forEach { tb ->
+                Tab.values().forEach { tb ->
                     NavigationBarItem(
                         selected = tab == tb,
                         onClick = { tab = tb },
                         icon = {
                             Icon(
                                 when (tb) {
-                                    Tab.CONNECT -> Icons.Filled.Power
-                                    Tab.SERVERS -> Icons.Filled.Dns
-                                    Tab.POOL -> Icons.Filled.Extension
+                                    Tab.CONNECT -> Icons.Filled.PlayArrow
+                                    Tab.SERVERS -> Icons.Filled.List
+                                    Tab.POOL -> Icons.Filled.Star
                                 }, null
                             )
                         },
@@ -132,7 +132,7 @@ private fun ConnectTab(store: Store, bump: () -> Unit) {
             colors = ButtonDefaults.buttonColors(
                 containerColor = if (state == ConnState.CONNECTED) Color(0xFF17604b) else Color(0xFF1e2a44)
             )
-        ) { Icon(Icons.Filled.Power, null, Modifier.size(56.dp)) }
+        ) { Icon(Icons.Filled.PlayArrow, null, Modifier.size(56.dp)) }
 
         Spacer(Modifier.height(28.dp))
 
