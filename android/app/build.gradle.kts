@@ -84,6 +84,9 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     // Xray core (AndroidLibXrayLite). Fetched into app/libs by scripts/fetch-libs.sh.
-    // Resolved via the flatDir repo declared in settings.gradle.kts.
-    implementation(":libv2ray@aar")
+    // Added ONLY when present so the app still builds an installable APK if the
+    // fetch was skipped; the core is called via reflection (XrayCore.kt), so the
+    // exact upstream API version can't break compilation.
+    val libv2ray = file("libs/libv2ray.aar")
+    if (libv2ray.exists()) implementation(files(libv2ray))
 }
