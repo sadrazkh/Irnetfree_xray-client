@@ -153,7 +153,7 @@ class XrayVpnService : VpnService() {
         return Notification.Builder(this, CHANNEL)
             .setContentTitle("IRNetFree")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_vpn_ic)
+            .setSmallIcon(com.irnetfree.vpn.R.drawable.ic_stat_vpn)
             .setOngoing(true)
             .setContentIntent(pi)
             .build()

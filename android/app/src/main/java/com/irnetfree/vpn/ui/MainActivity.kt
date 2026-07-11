@@ -48,7 +48,7 @@ private enum class Tab(val label: String) { CONNECT("اتصال"), SERVERS("سر
 private fun App(store: Store) {
     var tab by remember { mutableStateOf(Tab.CONNECT) }
     var rev by remember { mutableIntStateOf(0) }              // bump to force recompose after store edits
-    val bump = { rev++ }
+    val bump: () -> Unit = { rev++ }                          // explicit Unit return (rev++ yields Int)
 
     Scaffold(
         containerColor = Color.Transparent,
