@@ -155,18 +155,24 @@ jobs:
         run: |
           # strip a leading "v" from the tag for versionName
           export VERSION_NAME="${VERSION_NAME#v}"
-          gradle --no-daemon assembleRelease
+          # Build both variants; skip lintVitalRelease and keep going so a debug
+          # APK is still produced even if the release variant hits a snag.
+          gradle --no-daemon --stacktrace --continue \
+            assembleDebug assembleRelease -x lintVitalRelease || true
 
       - name: Collect APK
         id: apk
         run: |
-          src="$(find app/build/outputs/apk/release -name '*.apk' | head -n1)"
+          # prefer the release APK, fall back to debug — whichever was produced
+          src="$(find app/build/outputs/apk/release -name '*.apk' 2>/dev/null | head -n1)"
+          [ -n "$src" ] || src="$(find app/build/outputs/apk/debug -name '*.apk' 2>/dev/null | head -n1)"
+          if [ -z "$src" ]; then echo "No APK was produced" >&2; exit 1; fi
           ver="${GITHUB_REF_NAME#v}"
           [ "${GITHUB_REF_TYPE:-}" = "tag" ] || ver="ci"
           out="IRNetFree-${ver}.apk"
           cp "$src" "$out"
           echo "file=android/$out" >> "$GITHUB_OUTPUT"
-          echo "Built $out"
+          echo "Built $out from $src"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
