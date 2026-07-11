@@ -27,13 +27,17 @@ if [ -z "$tag" ]; then
 else
   url="$(curl -fsSL "$api/tags/$tag" | grep -oE '"browser_download_url": *"[^"]*\.aar"' | head -n1 | cut -d'"' -f4)"
 fi
+# Non-fatal: the app is built against the core via reflection, so a missing/failed
+# libv2ray.aar still yields an installable APK (the tunnel just won't start until
+# the core is present). We only warn instead of aborting the whole build.
 if [ -z "$url" ]; then
-  echo "ERROR: could not find libv2ray.aar asset in AndroidLibXrayLite releases." >&2
-  exit 1
+  echo "WARN: could not find libv2ray.aar asset in AndroidLibXrayLite releases — building without the core." >&2
+elif curl -fSL "$url" -o "$libs/libv2ray.aar"; then
+  echo "    saved -> app/libs/libv2ray.aar ($url)"
+else
+  echo "WARN: failed to download libv2ray.aar — building without the core." >&2
+  rm -f "$libs/libv2ray.aar"
 fi
-echo "    $url"
-curl -fSL "$url" -o "$libs/libv2ray.aar"
-echo "    saved -> app/libs/libv2ray.aar"
 
 fetch_so() {
   local abi="$1" var="$2"

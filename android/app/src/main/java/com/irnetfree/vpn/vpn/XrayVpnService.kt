@@ -50,7 +50,15 @@ class XrayVpnService : VpnService() {
 
         try {
             // 1) Xray core (socks inbound at 127.0.0.1:socksPort)
-            xray = XrayCore(protectFd = { fd -> protect(fd) }).also { it.start(config, primary) }
+            if (!XrayCore.available) {
+                fail("Xray core (libv2ray) is not bundled in this APK build. See README → Android.")
+                stopAll(); return
+            }
+            xray = XrayCore(protectFd = { fd -> protect(fd) })
+            if (!xray!!.start(config, primary)) {
+                fail("Xray core failed to start (config/API). Check logs.")
+                stopAll(); return
+            }
 
             // 2) TUN interface — route everything through us
             val builder = Builder()
@@ -67,9 +75,20 @@ class XrayVpnService : VpnService() {
             val fd = builder.establish() ?: return fail("TUN establish failed")
             tun = fd
 
-            // 3) hev-socks5-tunnel: TUN fd -> local SOCKS
+            // 3) hev-socks5-tunnel: TUN fd -> local SOCKS. The native lib is
+            //    optional at build time; if it's missing we stop cleanly with a
+            //    clear message instead of a silent no-traffic tunnel.
+            if (!TProxyService.available) {
+                fail("Tunnel core (libhev-socks5-tunnel.so) is not bundled in this APK. See README → Android.")
+                stopAll()
+                return
+            }
             val cfgPath = writeTun2socksConfig(socksPort)
-            TProxyService.TProxyStartService(cfgPath, fd.fd)
+            // TProxyStartService runs the packet loop; run it off the main thread.
+            Thread({
+                try { TProxyService.TProxyStartService(cfgPath, fd.fd) }
+                catch (t: Throwable) { Log.e(TAG, "tun2socks loop ended", t) }
+            }, "tun2socks").start()
             tunnelRunning = true
 
             VpnState.set(ConnState.CONNECTED, label)
