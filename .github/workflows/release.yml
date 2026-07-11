@@ -159,8 +159,10 @@ jobs:
           # APK is still produced even if the release variant hits a snag.
           # Capture output so failures can be surfaced (build-log step below).
           set -o pipefail
+          # lint is disabled in build.gradle (checkReleaseBuilds=false), so we must
+          # NOT reference lintVitalRelease here (the task no longer exists).
           gradle --no-daemon --stacktrace --continue \
-            assembleDebug assembleRelease -x lintVitalRelease 2>&1 | tee build-log.txt || true
+            assembleDebug assembleRelease 2>&1 | tee build-log.txt || true
 
       - name: Upload build log to Release (diagnostics)
         if: always() && startsWith(github.ref, 'refs/tags/')
