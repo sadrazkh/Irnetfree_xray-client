@@ -87,8 +87,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
+    // StateFlow used by VpnState — make sure coroutines is on the compile classpath.
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Xray core (AndroidLibXrayLite). Fetched into app/libs by scripts/fetch-libs.sh.
     // Added ONLY when present so the app still builds an installable APK if the
