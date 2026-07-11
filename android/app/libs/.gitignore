@@ -1,0 +1,4 @@
+# Native binaries are fetched by scripts/fetch-libs.sh (and by CI). Never commit them.
+*.aar
+*.jar
+!.gitignore

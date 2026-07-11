@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">IRNetFree</string>
+    <string name="notif_channel">VPN status</string>
+</resources>
