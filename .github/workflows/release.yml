@@ -157,8 +157,18 @@ jobs:
           export VERSION_NAME="${VERSION_NAME#v}"
           # Build both variants; skip lintVitalRelease and keep going so a debug
           # APK is still produced even if the release variant hits a snag.
+          # Capture output so failures can be surfaced (build-log step below).
+          set -o pipefail
           gradle --no-daemon --stacktrace --continue \
-            assembleDebug assembleRelease -x lintVitalRelease || true
+            assembleDebug assembleRelease -x lintVitalRelease 2>&1 | tee build-log.txt || true
+
+      - name: Upload build log to Release (diagnostics)
+        if: always() && startsWith(github.ref, 'refs/tags/')
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android/build-log.txt
+          fail_on_unmatched_files: false
 
       - name: Collect APK
         id: apk
