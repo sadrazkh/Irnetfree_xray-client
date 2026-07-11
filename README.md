@@ -26,6 +26,7 @@ Windows · macOS (Intel + Apple Silicon) · Linux
   - [روتینگ پیشرفته گرافیکی](#۳-روتینگ-پیشرفته-گرافیکی-advanced)
   - [روتینگ بر اساس پروسه](#۴-روتینگ-بر-اساس-پروسه-process)
 - [زنجیره پروکسی](#-زنجیره-پروکسی-proxy-chains)
+- [استخر پروکسی (چند کانفیگ هم‌زمان)](#-استخر-پروکسی-multi-proxy-pool)
 - [DNS](#-dns)
 - [اشتراک در شبکه محلی (LAN)](#-اشتراک-در-شبکه-محلی-lan)
 - [کیل‌سوییچ](#-کیلسوییچ-kill-switch)
@@ -36,6 +37,8 @@ Windows · macOS (Intel + Apple Silicon) · Linux
 - [ظاهر و رابط کاربری](#-ظاهر-و-رابط-کاربری-ui)
 - [مرجع تنظیمات](#-مرجع-تنظیمات-settings-reference)
 - [ساخت نسخه نصبی](#-ساخت-نسخه-نصبی-build)
+- [نسخه اندروید](#-نسخه-اندروید-android)
+- [انتشار خودکار (GitHub Actions)](#-انتشار-خودکار-github-actions-release)
 - [ساختار پروژه](#-ساختار-پروژه-project-structure)
 - [امنیت](#-امنیت-security)
 - [عیب‌یابی](#-عیبیابی-troubleshooting)
@@ -46,10 +49,11 @@ Windows · macOS (Intel + Apple Silicon) · Linux
 
 | دسته | توضیح |
 |---|---|
-| **پروتکل‌ها** | VLESS (با Reality / XTLS‑Vision)، VMess، Trojan، Shadowsocks، **WireGuard** |
-| **افزودن کانفیگ** | لینک تکی، چند لینک هم‌زمان، متن base64، لینک ساب‌اسکریپشن، فرم دستی WireGuard، و **چسباندن سریع با Ctrl+V** در هر جای برنامه |
+| **پروتکل‌ها** | VLESS (با Reality / XTLS‑Vision)، VMess، Trojan، Shadowsocks، **WireGuard**، و **SOCKS5 / HTTP پروکسی** |
+| **افزودن کانفیگ** | لینک تکی، چند لینک هم‌زمان، متن base64، لینک ساب‌اسکریپشن، فرم دستی WireGuard، **فرم دستی SOCKS/HTTP**، لینک `socks://`، و **چسباندن سریع با Ctrl+V** در هر جای برنامه |
 | **ساب‌اسکریپشن** | افزودن، به‌روزرسانی دستی/خودکار، و نمایش **حجم مصرف و زمان باقی‌مانده با پروگرس‌بار** |
 | **پروکسی محلی** | SOCKS5 + HTTP inbound با پورت‌های قابل تنظیم |
+| **استخر پروکسی (Multi‑Proxy)** | اجرای **چند کانفیگ/زنجیره/ساکس هم‌زمان**، هرکدام روی پورت محلی جدا (مثلاً 60001، 60002 …) — سازگار با هر دو حالت پروکسی و TUN |
 | **پروکسی سیستمی** | تنظیم خودکار پروکسی سیستم‌عامل هنگام اتصال |
 | **حالت TUN** | تونل کردن **کل ترافیک سیستم** با tun2socks (Windows/macOS/Linux) |
 | **روتینگ** | ساده (گلوبال/دور زدن ایران/چین/مستقیم) + قوانین سفارشی + **روتینگ پیشرفته گرافیکی** |
@@ -116,7 +120,9 @@ ss://...#Shadowsocks-1
 
 **۴) لینک ساب‌اسکریپشن:** هر خطی که با `http(s)://` شروع شود به‌عنوان ساب اضافه و دریافت می‌شود (به بخش بعد).
 
-**۵) WireGuard دستی:** دکمه‌ی «+ WireGuard» → فرم را پر کنید.
+**۵) SOCKS/HTTP پروکسی:** یا لینک `socks://user:pass@host:port#name` (و `socks5://`) را در «افزودن» بچسبانید، یا دکمه‌ی **«+ SOCKS/HTTP»** را بزنید و فرم را پر کنید (نوع، host، پورت، و در صورت نیاز نام‌کاربری/رمز). این پروکسی مثل هر کانفیگ دیگری قابل انتخاب، پینگ، زنجیره و استفاده در استخر است.
+
+**۶) WireGuard دستی:** دکمه‌ی «+ WireGuard» → فرم را پر کنید.
 > 💡 فیلد **Endpoint** باید آدرس عمومی سرور به شکل `host:port` باشد (مثل `de.example.com:51820`)، نه آدرس محلی تونل. فیلد **Address** آدرس محلی شما و حتماً `/32` است (مثل `10.8.0.2/32`). برای دسترسی به یک رنج خاص، آن را در **Allowed IPs** بگذارید (مثل `192.168.60.0/24`) یا `0.0.0.0/0` را نگه دارید.
 
 > ⚡ **میان‌بر:** هرجای برنامه (بیرون از کادرهای متنی) **Ctrl+V** بزنید تا کانفیگ یا لینک ساب از کلیپ‌بورد فوراً اضافه شود.
@@ -217,6 +223,28 @@ port, 443, proxy
 ```
 IP   10.20.0.0/16   →  ⛓ DB-Chain   (Config → WireGuard)
 ```
+
+---
+
+## 🧩 استخر پروکسی (Multi‑Proxy Pool)
+
+گاهی می‌خواهید **چند خروجی هم‌زمان** داشته باشید — مثلاً یک برنامه از سرور آلمان، یکی از سرور آمریکا و یکی از یک زنجیره — هرکدام روی **پورت محلی جدا**. تب **استخر پروکسی** دقیقاً همین کار را می‌کند:
+
+- روی **«+ پروکسی جدید»** بزنید تا یک ردیف اضافه شود؛ برای هر ردیف:
+  - **خروجی:** یک کانفیگ یا زنجیره (منوی قابل‌جستجو).
+  - **پورت SOCKS:** پورت محلی این خروجی (خودکار از `60001` به بالا پیشنهاد می‌شود).
+  - **پورت HTTP:** اختیاری.
+  - سوییچ **فعال/غیرفعال**.
+- سپس از دکمه‌ی **«اتصال استخر»** یا از صفحه‌ی اتصال گزینه‌ی 🧩 وصل شوید. یک نمونه‌ی Xray بالا می‌آید و **همه‌ی پورت‌ها هم‌زمان** فعال می‌شوند.
+- در برنامه‌های خود، هرکدام را به پورت دلخواه وصل کنید:
+  ```
+  App A → SOCKS 127.0.0.1:60001   (خروجی: DE‑Server)
+  App B → SOCKS 127.0.0.1:60002   (خروجی: US‑Chain)
+  ```
+
+**سازگاری با پروکسی و TUN:** پورت‌های استاندارد (SOCKS/HTTP تنظیمات) هم باز می‌شوند و به **«اولین پروکسیِ فعالِ استخر»** (به‌عنوان خروجی اصلی) وصل‌اند؛ بنابراین **پروکسی سیستمی، حالت TUN و بررسی IP** دقیقاً مثل حالت تک‌کانفیگ کار می‌کنند و پورت‌های استخر خروجی‌های *اضافه* روی آن هستند. در حالت TUN، IP سرورِ همه‌ی خروجی‌های استخر برای جلوگیری از حلقه، bypass می‌شوند.
+
+> ⚠️ پورت‌ها نباید تکراری باشند (برنامه هنگام تخصیص خودکار این را رعایت می‌کند). اگر یک پورت اشغال باشد، Xray هنگام اتصال خطای واضح می‌دهد.
 
 ---
 
@@ -360,14 +388,65 @@ npm run dist:linux    # AppImage + deb
 
 ---
 
+## 🤖 نسخه اندروید (Android)
+
+نسخه‌ی اندروید یک **اپ نیتیو جدا (Kotlin + Jetpack Compose)** در پوشه‌ی [`android/`](android) است (کلاینت دسکتاپ Electron روی اندروید اجرا نمی‌شود). این اپ همان منطق کانفیگ‌سازیِ دسکتاپ را دارد (تک‌کانفیگ، **زنجیره**، **استخر پروکسی**، **SOCKS/HTTP**، روتینگ) و ترافیک را با **`VpnService` + `hev-socks5-tunnel`** به هسته‌ی **xray-core** (از طریق `libv2ray`) تونل می‌کند.
+
+**ساخت محلی:**
+```bash
+cd android
+bash scripts/fetch-libs.sh   # دانلود libv2ray.aar (لازم برای کامپایل) + در صورت تنظیم، .soی tun2socks
+gradle wrapper               # یک‌بار، اگر ./gradlew نداری (Wrapper در گیت نگه‌داری نمی‌شود)
+./gradlew assembleRelease    # خروجی: app/build/outputs/apk/release/*.apk
+# یا برای دیباگ:
+./gradlew assembleDebug
+```
+> در Android Studio کافی است پوشه‌ی `android/` را باز کنی (Sync خودش وابستگی‌ها را می‌گیرد؛ فقط `fetch-libs.sh` را یک‌بار اجرا کن تا `libv2ray.aar` سر جایش باشد).
+
+- **حداقل نسخه:** Android 8.0 (API 26). **هدف:** API 34.
+- دو مؤلفه‌ی نیتیو (`libv2ray.aar` و `libhev-socks5-tunnel.so`) در گیت نگه‌داری **نمی‌شوند**؛ اسکریپت `fetch-libs.sh` (و CI) آن‌ها را از ریلیزهای بالادست دانلود می‌کند.
+- امضای ریلیز: اگر رازهای keystore در گیت‌هاب تنظیم شده باشند، APKِ **امضاشده** ساخته می‌شود؛ در غیر این صورت APKِ **دیباگ** برای تست تولید می‌شود (به بخش بعد).
+
+> ⚠️ رفتار واقعیِ تونل روی **دستگاه/شبیه‌ساز** باید تست شود؛ نسخه‌ی دقیق `libv2ray` باید با امضای API در سرویس VPN بخواند (در صورت تغییر API بالادست، فقط `XrayVpnService.kt` نیاز به تطبیق دارد).
+
+---
+
+## 🚀 انتشار خودکار (GitHub Actions Release)
+
+با **push کردن یک تگ** به شکل `v*` (مثلاً `v0.9.0`)، ورک‌فلو [`.github/workflows/release.yml`](.github/workflows/release.yml) هم **دسکتاپ** و هم **APK اندروید** را می‌سازد و همه را به همان **GitHub Release** پیوست می‌کند:
+
+```bash
+git tag v0.9.0
+git push origin v0.9.0
+```
+
+خروجی‌های ریلیز:
+- ویندوز: `IRNetFree-Setup-<v>.exe` و `IRNetFree-Portable-<v>.exe`
+- لینوکس: `IRNetFree-<v>-x86_64.AppImage` و `.deb`
+- **اندروید: `IRNetFree-<v>.apk`**
+- (مک روی یک ranner جدا اگر فعال باشد)
+
+**امضای اندروید (اختیاری ولی توصیه‌شده):** برای APKِ امضاشده‌ی release، این رازها را در گیت‌هاب (`Settings → Secrets and variables → Actions`) بگذارید:
+
+| Secret | توضیح |
+|---|---|
+| `ANDROID_KEYSTORE_BASE64` | فایل keystore به‌صورت base64 (`base64 -w0 my.keystore`) |
+| `ANDROID_KEYSTORE_PASSWORD` | رمز keystore |
+| `ANDROID_KEY_ALIAS` | نام alias کلید |
+| `ANDROID_KEY_PASSWORD` | رمز کلید |
+
+اگر این رازها نباشند، CI به‌جای شکست، **APKِ دیباگ** را می‌سازد و پیوست می‌کند تا همیشه یک فایلِ قابل‌نصب داشته باشید.
+
+---
+
 ## 📁 ساختار پروژه (Project Structure)
 
 ```
 src/
   main/
     main.js          # فرآیند اصلی Electron، IPC، چرخه‌ی عمر، LAN/کیل‌سوییچ/overlay
-    parser.js        # تبدیل لینک‌ها به outbound اکس‌ری
-    configBuilder.js # ساخت config.json کامل (inbounds + routing)
+    parser.js        # تبدیل لینک‌ها (vless/vmess/trojan/ss/socks/wireguard) به outbound اکس‌ری
+    configBuilder.js # ساخت config.json کامل (inbounds + routing + حالت pool چندپورتی)
     xrayManager.js   # مدیریت پروسه‌ی xray-core (start/stop/test/version)
     subscription.js  # ساب‌اسکریپشن + خواندن حجم/زمان از هدر Subscription-Userinfo
     tunManager.js    # حالت TUN (Windows wintun / macOS utun / Linux)
@@ -381,6 +460,14 @@ src/
   renderer/          # رابط کاربری (index.html / app.js / styles.css / i18n.js)
 scripts/
   download-xray.js   # دانلودر هسته
+android/             # اپ نیتیو اندروید (Kotlin + Compose)
+  app/src/main/java/com/irnetfree/vpn/
+    core/            # LinkParser, ConfigBuilder (پورت‌شده از JS، شامل pool/socks), Models, Store
+    vpn/             # XrayVpnService (VpnService + libv2ray + hev-socks5-tunnel)
+    ui/              # صفحه‌های Compose (سرورها / استخر / اتصال)
+  scripts/fetch-libs.sh   # دانلود libv2ray.aar + libhev-socks5-tunnel .so
+.github/workflows/
+  release.yml        # ساخت دسکتاپ + APK اندروید روی تگ و پیوست به Release
 ```
 
 ---

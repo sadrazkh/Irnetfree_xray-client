@@ -1,0 +1,8 @@
+<resources>
+    <!-- Compose drives the UI; this base theme only needs to be a Material one. -->
+    <style name="Theme.IRNetFree" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#0d1117</item>
+        <item name="android:navigationBarColor">#0d1117</item>
+        <item name="android:windowBackground">#0d1117</item>
+    </style>
+</resources>
