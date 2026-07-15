@@ -10,6 +10,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "server": "node src/server/server.js",
     "get-xray": "node scripts/download-xray.js",
     "gen-icons": "node scripts/gen-icons.js",
     "dist": "electron-builder",
