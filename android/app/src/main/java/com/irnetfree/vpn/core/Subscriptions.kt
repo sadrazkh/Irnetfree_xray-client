@@ -1,30 +1,50 @@
 package com.irnetfree.vpn.core
 
-import java.net.HttpURLConnection
-import java.net.URL
+import okhttp3.ConnectionSpec
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 
-/** Fetches a subscription URL and parses it into servers + usage info. */
+/**
+ * Fetches a subscription URL and parses it into servers + usage info.
+ *
+ * Uses OkHttp with permissive TLS (MODERN + COMPATIBLE + CLEARTEXT) because
+ * Android's default HttpURLConnection fails the TLS handshake with many sub
+ * panels (older ciphers / TLS quirks). A v2rayNG-style User-Agent makes panels
+ * return the base64 config list AND the Subscription-Userinfo usage header.
+ */
 object Subscriptions {
 
     data class Usage(val upload: Long, val download: Long, val total: Long, val expire: Long)
     data class Result(val servers: List<ServerConfig>, val usage: Usage?, val errors: List<String>)
 
+    private val client: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(35, TimeUnit.SECONDS)
+            .followRedirects(true).followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS, ConnectionSpec.CLEARTEXT))
+            .build()
+    }
+
     /** Blocking network call — run on Dispatchers.IO. */
     fun fetch(url: String): Result {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15000; readTimeout = 15000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "IRNetFree/Android")
-            setRequestProperty("Accept", "*/*")
-        }
-        try {
-            val code = conn.responseCode
-            if (code !in 200..299) throw RuntimeException("HTTP $code")
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
+        val req = Request.Builder()
+            .url(url.trim())
+            .header("User-Agent", "v2rayNG/1.9.5")
+            .header("Accept", "*/*")
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
+            val body = resp.body?.string() ?: ""
+            if (body.isBlank()) throw RuntimeException("empty response")
             val (servers, errors) = LinkParser.parseMany(body)
-            val usage = parseUserInfo(conn.getHeaderField("Subscription-Userinfo") ?: conn.getHeaderField("subscription-userinfo"))
+            // OkHttp header lookup is case-insensitive.
+            val usage = parseUserInfo(resp.header("subscription-userinfo"))
             return Result(servers, usage, errors)
-        } finally { conn.disconnect() }
+        }
     }
 
     // "upload=1234; download=5678; total=100000; expire=1699999999"
