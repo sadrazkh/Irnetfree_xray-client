@@ -435,7 +435,7 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
         TopBar("ساب‌اسکریپشن‌ها") {}
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
             Fld("آدرس ساب (https://…)", url) { url = it }; Fld("نام (اختیاری)", name) { name = it }
-            Button(enabled = !busy, onClick = { if (url.isNotBlank()) { val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim()); store.subs.add(sub); store.saveSubs(); url = ""; name = ""; refresh(sub) } }, Modifier.fillMaxWidth()) { Text("افزودن و دریافت") }
+            Button(onClick = { if (url.isNotBlank()) { val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim()); store.subs.add(sub); store.saveSubs(); url = ""; name = ""; refresh(sub) } }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("افزودن و دریافت") }
             if (msg.isNotEmpty()) Text(msg, color = if (msg.startsWith("خطا")) BAD else GREEN, fontSize = 12.sp)
             Spacer(Modifier.height(8.dp))
             if (store.subs.isEmpty()) EmptyHint("هنوز ساب اضافه نشده.")
