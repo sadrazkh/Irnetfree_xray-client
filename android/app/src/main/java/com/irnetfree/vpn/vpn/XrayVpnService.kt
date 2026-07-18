@@ -10,12 +10,10 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
-import com.irnetfree.vpn.core.AppSettings
 import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.Store
 import com.irnetfree.vpn.ui.MainActivity
-import hev.htproxy.TProxyService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,18 +22,17 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.File
 
 /**
- * Whole-device tunnel: Xray (libv2ray) with a local SOCKS inbound + hev
- * tun2socks forwarding the VpnService TUN to it. Xray's own sockets are
- * protect()-ed so they bypass the tunnel (no loop).
+ * Whole-device tunnel. The VpnService establishes the TUN and hands its fd
+ * straight to xray-core (AndroidLibXrayLite CoreController.startLoop), which does
+ * tun2socks internally. This app's package is excluded from the VPN so xray's own
+ * sockets bypass the tunnel (no protect callback needed in the modern API).
  */
 class XrayVpnService : VpnService() {
 
     private var tun: ParcelFileDescriptor? = null
     private var xray: XrayCore? = null
-    private var tunnelRunning = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var statsJob: Job? = null
 
@@ -49,8 +46,6 @@ class XrayVpnService : VpnService() {
 
     private fun startTunnel(intent: Intent) {
         val config = intent.getStringExtra(EXTRA_CONFIG) ?: return fail("empty config")
-        val socksPort = intent.getIntExtra(EXTRA_SOCKS, 10808)
-        val primary = intent.getStringExtra(EXTRA_PRIMARY) ?: "127.0.0.1:1"
         val dns = intent.getStringArrayListExtra(EXTRA_DNS) ?: arrayListOf("1.1.1.1", "8.8.8.8")
         val label = intent.getStringExtra(EXTRA_LABEL) ?: "IRNetFree"
         val ipv6 = intent.getBooleanExtra(EXTRA_IPV6, false)
@@ -64,10 +59,9 @@ class XrayVpnService : VpnService() {
 
         try {
             if (!XrayCore.available) { fail("Xray core (libv2ray) is not bundled in this build."); stopAll(); return }
-            xray = XrayCore(protectFd = { fd -> protect(fd) }, onStatus = { _, s -> if (!s.isNullOrBlank()) VpnState.addLog(s) })
-            if (!xray!!.start(config, primary)) { fail("Xray core failed to start (config/API)."); stopAll(); return }
-            VpnState.addLog("Xray core started")
 
+            // 1) TUN interface — everything routes through us; our own app is
+            //    excluded so xray's sockets bypass the tunnel.
             val builder = Builder()
                 .setSession(label)
                 .setMtu(TUN_MTU)
@@ -80,14 +74,14 @@ class XrayVpnService : VpnService() {
 
             val fd = builder.establish() ?: return fail("TUN establish failed")
             tun = fd
+            VpnState.addLog("TUN up (fd=${fd.fd})")
 
-            if (!TProxyService.available) { fail("Tunnel core (libhev-socks5-tunnel.so) is not bundled."); stopAll(); return }
-            val cfgPath = writeTun2socksConfig(socksPort, ipv6)
-            TProxyService.TProxyStartService(cfgPath, fd.fd)   // JNI runs its own thread
-            tunnelRunning = true
-            VpnState.addLog("tun2socks started (socks=$socksPort)")
+            // 2) hand the TUN fd to xray-core (internal tun2socks)
+            xray = XrayCore(onStatus = { _, s -> if (!s.isNullOrBlank()) VpnState.addLog(s) })
+            if (!xray!!.start(config, fd.fd)) { fail("Xray core failed to start — see logs (بیشتر → لاگ‌ها)."); stopAll(); return }
 
             VpnState.set(ConnState.CONNECTED, label)
+            VpnState.addLog("Connected")
             updateNotification(label, true)
             startStatsLoop()
             Log.i(TAG, "tunnel up: $label")
@@ -97,39 +91,24 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    /** allow = tunnel only these apps; disallow = tunnel all but these; off = all (minus us). */
+    /** allow = tunnel only these apps; disallow = all but these; off = all (minus us). */
     private fun applyPerApp(b: Builder, mode: String, apps: List<String>) {
-        when (mode) {
-            "allow" -> for (p in apps) runCatching { b.addAllowedApplication(p) }
-            "disallow" -> { for (p in apps) runCatching { b.addDisallowedApplication(p) }; runCatching { b.addDisallowedApplication(packageName) } }
+        when {
+            mode == "allow" && apps.isNotEmpty() -> for (p in apps) runCatching { b.addAllowedApplication(p) }
+            mode == "disallow" -> { for (p in apps) runCatching { b.addDisallowedApplication(p) }; runCatching { b.addDisallowedApplication(packageName) } }
             else -> runCatching { b.addDisallowedApplication(packageName) }
         }
-    }
-
-    private fun writeTun2socksConfig(socksPort: Int, ipv6: Boolean): String {
-        val yaml = buildString {
-            append("tunnel:\n  mtu: $TUN_MTU\n")
-            append("  ipv4: $TUN_ADDR4\n")
-            if (ipv6) append("  ipv6: '$TUN_ADDR6'\n")
-            append("socks5:\n  port: $socksPort\n  address: 127.0.0.1\n  udp: 'udp'\n")
-            append("misc:\n  task-stack-size: 20480\n  connect-timeout: 5000\n  read-write-timeout: 60000\n  log-level: warn\n")
-        }
-        val f = File(filesDir, "tun2socks.yml"); f.writeText(yaml); return f.absolutePath
     }
 
     private fun startStatsLoop() {
         statsJob?.cancel()
         statsJob = scope.launch {
-            var lastTx = 0L; var lastRx = 0L; var first = true
-            while (isActive && tunnelRunning) {
-                val st = runCatching { TProxyService.TProxyGetStats() }.getOrNull()
-                if (st != null && st.size >= 4) {
-                    val tx = st[1]; val rx = st[3]   // [tx_pkts, tx_bytes, rx_pkts, rx_bytes]
-                    val txSpeed = if (first) 0 else (tx - lastTx).coerceAtLeast(0)
-                    val rxSpeed = if (first) 0 else (rx - lastRx).coerceAtLeast(0)
-                    lastTx = tx; lastRx = rx; first = false
-                    VpnState.setTraffic(Traffic(tx, rx, txSpeed, rxSpeed))
-                }
+            var up = 0L; var down = 0L; var first = true
+            while (isActive) {
+                val (u, d) = xray?.queryTraffic() ?: (0L to 0L)
+                val su: Long; val sd: Long
+                if (first) { first = false; su = 0; sd = 0 } else { up += u; down += d; su = u; sd = d }
+                VpnState.setTraffic(Traffic(up, down, su, sd))
                 delay(1000)
             }
         }
@@ -137,7 +116,6 @@ class XrayVpnService : VpnService() {
 
     private fun stopAll() {
         statsJob?.cancel(); statsJob = null
-        if (tunnelRunning) { runCatching { TProxyService.TProxyStopService() }; tunnelRunning = false }
         runCatching { xray?.stop() }; xray = null
         runCatching { tun?.close() }; tun = null
         VpnState.set(ConnState.DISCONNECTED, "")
@@ -188,8 +166,8 @@ class XrayVpnService : VpnService() {
 
         const val ACTION_CONNECT = "com.irnetfree.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.irnetfree.vpn.DISCONNECT"
-        const val EXTRA_CONFIG = "config"; const val EXTRA_SOCKS = "socks"; const val EXTRA_DNS = "dns"
-        const val EXTRA_LABEL = "label"; const val EXTRA_PRIMARY = "primary"; const val EXTRA_IPV6 = "ipv6"
+        const val EXTRA_CONFIG = "config"; const val EXTRA_DNS = "dns"
+        const val EXTRA_LABEL = "label"; const val EXTRA_IPV6 = "ipv6"
         const val EXTRA_PERAPP_MODE = "perAppMode"; const val EXTRA_PERAPPS = "perApps"
 
         fun connect(ctx: Context, store: Store) {
@@ -199,8 +177,6 @@ class XrayVpnService : VpnService() {
             val i = Intent(ctx, XrayVpnService::class.java).apply {
                 action = ACTION_CONNECT
                 putExtra(EXTRA_CONFIG, config)
-                putExtra(EXTRA_SOCKS, s.socksPort)
-                putExtra(EXTRA_PRIMARY, primaryHostPort(store, plan))
                 putStringArrayListExtra(EXTRA_DNS, ArrayList(s.dns))
                 putExtra(EXTRA_LABEL, store.selectionLabel())
                 putExtra(EXTRA_IPV6, s.ipv6)
@@ -212,17 +188,6 @@ class XrayVpnService : VpnService() {
 
         fun disconnect(ctx: Context) {
             ctx.startService(Intent(ctx, XrayVpnService::class.java).setAction(ACTION_DISCONNECT))
-        }
-
-        private fun primaryHostPort(store: Store, plan: ConnectionPlan): String {
-            val first = store.entryAddresses(plan).firstOrNull() ?: return "127.0.0.1:1"
-            val server = when (plan) {
-                is ConnectionPlan.Single -> plan.server
-                is ConnectionPlan.Chain -> plan.members.firstOrNull()
-                is ConnectionPlan.Pool -> plan.serversById.values.firstOrNull { it.address == first }
-                is ConnectionPlan.Advanced -> plan.serversById.values.firstOrNull { it.address == first }
-            }
-            return first + ":" + (server?.port ?: 443)
         }
     }
 }
