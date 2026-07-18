@@ -5,7 +5,9 @@ import kotlinx.coroutines.flow.StateFlow
 
 enum class ConnState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
-/** Process-wide connection state, observed by the UI. */
+data class Traffic(val txBytes: Long = 0, val rxBytes: Long = 0, val txSpeed: Long = 0, val rxSpeed: Long = 0)
+
+/** Process-wide connection state + live traffic, observed by the UI. */
 object VpnState {
     private val _state = MutableStateFlow(ConnState.DISCONNECTED)
     val state: StateFlow<ConnState> = _state
@@ -16,11 +18,21 @@ object VpnState {
     private val _lastError = MutableStateFlow("")
     val lastError: StateFlow<String> = _lastError
 
+    private val _traffic = MutableStateFlow(Traffic())
+    val traffic: StateFlow<Traffic> = _traffic
+
+    private val _log = MutableStateFlow<List<String>>(emptyList())
+    val log: StateFlow<List<String>> = _log
+
     fun set(s: ConnState, label: String? = null, error: String? = null) {
         _state.value = s
         if (label != null) _label.value = label
-        if (error != null) _lastError.value = error
+        if (error != null && error.isNotBlank()) { _lastError.value = error; addLog("⚠ $error") }
+        if (s == ConnState.DISCONNECTED) _traffic.value = Traffic()
     }
+    fun setTraffic(t: Traffic) { _traffic.value = t }
+    fun addLog(line: String) { _log.value = (_log.value + line).takeLast(300) }
+    fun clearLog() { _log.value = emptyList() }
 
     val isActive: Boolean get() = _state.value == ConnState.CONNECTED || _state.value == ConnState.CONNECTING
 }

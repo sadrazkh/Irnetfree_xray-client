@@ -20,7 +20,10 @@ object TProxyService {
         catch (t: Throwable) { false }
     }
 
+    // The JNI (hev-jni.c) runs hev_socks5_tunnel_main on its OWN pthread, so
+    // TProxyStartService returns immediately — no need to wrap it in a thread.
     external fun TProxyStartService(configPath: String, fd: Int)
     external fun TProxyStopService()
+    /** [tx_packets, tx_bytes, rx_packets, rx_bytes] */
     external fun TProxyGetStats(): LongArray
 }

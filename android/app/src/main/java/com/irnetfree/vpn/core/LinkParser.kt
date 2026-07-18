@@ -12,7 +12,7 @@ import java.net.URLDecoder
  */
 object LinkParser {
 
-    private val SCHEME_RE = Regex("^(vless|vmess|trojan|ss|socks|socks5)://", RegexOption.IGNORE_CASE)
+    private val SCHEME_RE = Regex("^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg)://", RegexOption.IGNORE_CASE)
 
     fun parseMany(text: String): Pair<List<ServerConfig>, List<String>> {
         var body = text.trim()
@@ -42,6 +42,7 @@ object LinkParser {
             l.startsWith("trojan://", true) -> parseTrojan(l)
             l.startsWith("ss://", true) -> parseShadowsocks(l)
             l.startsWith("socks://", true) || l.startsWith("socks5://", true) -> parseSocks(l)
+            l.startsWith("wireguard://", true) || l.startsWith("wg://", true) -> parseWireguard(l)
             else -> throw IllegalArgumentException("Unsupported link")
         }
     }
@@ -200,6 +201,75 @@ object LinkParser {
         val port = portStr.toIntOrNull() ?: 1080
         val ob = proxyOutbound("socks", address, port, dec(user), dec(pass))
         return ServerConfig(newId("s"), name.ifBlank { address }, "socks", address, port, ob)
+    }
+
+    /* ------------------------- WireGuard ------------------------- */
+
+    private fun splitCommas(v: String?): List<String> =
+        (v ?: "").split(Regex("[,\\s]+")).map { it.trim() }.filter { it.isNotEmpty() }
+
+    /** Xray requires the interface address to be /32 (IPv4) or /128 (IPv6). */
+    private fun normalizeWgAddresses(list: List<String>): List<String> = list
+        .map { it.trim() }.filter { it.isNotEmpty() }
+        .map { a ->
+            val v6 = a.contains(":")
+            val host = if (a.indexOf('/') == -1) a else a.substring(0, a.indexOf('/'))
+            host + (if (v6) "/128" else "/32")
+        }
+
+    fun buildWireguardOutbound(
+        privateKey: String, publicKey: String, endpoint: String,
+        address: String, presharedKey: String, mtu: String?, reserved: String?, allowedIPs: String?
+    ): JSONObject {
+        var localAddrs = normalizeWgAddresses(splitCommas(address))
+        if (localAddrs.isEmpty()) localAddrs = listOf("10.0.0.2/32")
+        val allowed = splitCommas(allowedIPs).ifEmpty { listOf("0.0.0.0/0", "::/0") }
+        val peer = JSONObject()
+            .put("publicKey", publicKey.trim())
+            .put("endpoint", endpoint.trim())
+            .put("allowedIPs", JSONArray(allowed))
+        if (presharedKey.isNotBlank()) peer.put("preSharedKey", presharedKey.trim())
+        val settings = JSONObject()
+            .put("secretKey", privateKey.trim())
+            .put("address", JSONArray(localAddrs))
+            .put("peers", JSONArray().put(peer))
+            .put("mtu", mtu?.toIntOrNull() ?: 1420)
+        val res = splitCommas(reserved).mapNotNull { it.toIntOrNull() }
+        if (res.isNotEmpty()) settings.put("reserved", JSONArray(res))
+        return JSONObject().put("protocol", "wireguard").put("settings", settings)
+            .put("streamSettings", JSONObject().put("sockopt", JSONObject()))
+    }
+
+    private fun parseWireguard(link: String): ServerConfig {
+        val scheme = if (link.startsWith("wireguard://", true)) "wireguard://" else "wg://"
+        val body = link.substring(scheme.length)
+        val (main, name) = splitHash(body)
+        val (beforeQ, q) = splitQuery(main)
+        val at = beforeQ.lastIndexOf('@')
+        val privateKey = dec(if (at == -1) "" else beforeQ.substring(0, at))
+        val (address, portStr) = splitHostPort(if (at == -1) beforeQ else beforeQ.substring(at + 1))
+        val port = portStr.toIntOrNull() ?: 51820
+        val ob = buildWireguardOutbound(
+            privateKey = privateKey,
+            publicKey = q["publickey"] ?: q["publicKey"] ?: q["peer"] ?: "",
+            endpoint = "$address:$port",
+            address = q["address"] ?: q["ip"] ?: "",
+            presharedKey = q["presharedkey"] ?: q["presharedKey"] ?: q["psk"] ?: "",
+            mtu = q["mtu"], reserved = q["reserved"], allowedIPs = q["allowedips"] ?: q["allowedIPs"]
+        )
+        return ServerConfig(newId("s"), name.ifBlank { address }, "wireguard", address, port, ob, link)
+    }
+
+    /** Manual WireGuard from a form. `endpoint` is host:port of the public server. */
+    fun makeWireguardServer(
+        name: String, endpoint: String, privateKey: String, publicKey: String,
+        address: String, allowedIPs: String, presharedKey: String, mtu: String?, reserved: String?
+    ): ServerConfig {
+        val (host, portStr) = splitHostPort(endpoint)
+        val port = portStr.toIntOrNull() ?: 51820
+        val ep = if (endpoint.contains(":")) endpoint else "$host:$port"
+        val ob = buildWireguardOutbound(privateKey, publicKey, ep, address, presharedKey, mtu, reserved, allowedIPs)
+        return ServerConfig(newId("s"), name.ifBlank { host.ifBlank { "WireGuard" } }, "wireguard", host, port, ob, "wireguard://$host:$port")
     }
 
     /* ------------------------- shared stream builder ------------------------- */
