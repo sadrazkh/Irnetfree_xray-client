@@ -92,6 +92,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     // StateFlow used by VpnState — make sure coroutines is on the compile classpath.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // QR code scanning (camera) — self-contained scanner activity + permission.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     // Xray core (AndroidLibXrayLite). Fetched into app/libs by scripts/fetch-libs.sh.
     // Added ONLY when present so the app still builds an installable APK if the

@@ -1,5 +1,7 @@
 package com.irnetfree.vpn.ui
 
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
@@ -13,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -42,6 +45,8 @@ import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.vpn.ConnState
 import com.irnetfree.vpn.vpn.VpnState
 import com.irnetfree.vpn.vpn.XrayVpnService
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -308,12 +313,30 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     var msg by remember { mutableStateOf("") }
     var sheet by remember { mutableStateOf<String?>(null) }   // "import" | "wg" | "proxy"
     val pings = remember { mutableStateMapOf<String, String>() }
+    val ctx = LocalContext.current
+
+    fun importNow(text: String) {
+        val (parsed, errs) = LinkParser.parseMany(text)
+        store.servers.addAll(parsed); store.saveServers()
+        if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
+        msg = "${parsed.size} افزوده شد" + if (errs.isNotEmpty()) " (${errs.size} خطا)" else ""
+    }
+    val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
+        val t = res.contents
+        if (!t.isNullOrBlank()) { importNow(t); sheet = null; bump() }
+    }
+    fun launchQr() = qrLauncher.launch(ScanOptions().setOrientationLocked(false).setBeepEnabled(false).setPrompt("QR کانفیگ را مقابل دوربین بگیر"))
+    fun pasteClip() {
+        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val t = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString()
+        if (!t.isNullOrBlank()) importText = t else msg = "کلیپ‌بورد خالی است"
+    }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         TopBar("سرورها") {
             IconButton(onClick = { sheet = "import" }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) }
         }
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp)) {
             OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("جستجو…") },
                 leadingIcon = { Icon(Icons.Filled.Search, null) }, singleLine = true, shape = RoundedCornerShape(14.dp), colors = tfColors())
             Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -334,14 +357,33 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     }
 
     when (sheet) {
-        "import" -> InputSheet("افزودن کانفیگ", "لینک(ها): vless/vmess/trojan/ss/socks/wireguard یا base64 ساب", importText, { importText = it }, onDismiss = { sheet = null }, multiline = true) {
-            val (parsed, errs) = LinkParser.parseMany(importText)
-            store.servers.addAll(parsed); store.saveServers()
-            if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
-            msg = "${parsed.size} افزوده شد" + if (errs.isNotEmpty()) " (${errs.size} خطا)" else ""; importText = ""; sheet = null; bump()
+        "import" -> AddLinkSheet(importText, { importText = it }, onPaste = { pasteClip() }, onScan = { launchQr() },
+            onDismiss = { sheet = null }) {
+            if (importText.isNotBlank()) { importNow(importText) }
+            importText = ""; sheet = null; bump()
         }
         "wg" -> WgSheet(store, { sheet = null }) { sheet = null; bump() }
         "proxy" -> ProxySheet(store, { sheet = null }) { sheet = null; bump() }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun AddLinkSheet(value: String, onValue: (String) -> Unit, onPaste: () -> Unit, onScan: () -> Unit, onDismiss: () -> Unit, onSubmit: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().imePadding().padding(16.dp).padding(bottom = 16.dp)) {
+            Text("افزودن کانفیگ", color = TXT, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text("لینک vless/vmess/trojan/ss/socks/wireguard یا آدرس/متن base64 ساب", color = MUTED, fontSize = 11.sp)
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(value, onValue, Modifier.fillMaxWidth(), placeholder = { Text("اینجا بچسبان یا تایپ کن…", fontSize = 12.sp) }, minLines = 3, maxLines = 8, shape = RoundedCornerShape(14.dp), colors = tfColors())
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onPaste, modifier = Modifier.weight(1f)) { Icon(Icons.Filled.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("چسباندن") }
+                OutlinedButton(onClick = onScan, modifier = Modifier.weight(1f)) { Icon(Icons.Filled.QrCodeScanner, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("اسکن QR") }
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = onSubmit, modifier = Modifier.fillMaxWidth()) { Text("افزودن") }
+        }
     }
 }
 
@@ -372,22 +414,11 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
 
 /* ---- add sheets ---- */
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun InputSheet(title: String, hint: String, value: String, onValue: (String) -> Unit, onDismiss: () -> Unit, multiline: Boolean = false, onSubmit: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
-        Column(Modifier.fillMaxWidth().padding(16.dp).padding(bottom = 16.dp)) {
-            Text(title, color = TXT, fontWeight = FontWeight.Bold); Spacer(Modifier.height(10.dp))
-            OutlinedTextField(value, onValue, Modifier.fillMaxWidth(), placeholder = { Text(hint, fontSize = 12.sp) }, minLines = if (multiline) 3 else 1, maxLines = if (multiline) 6 else 1, shape = RoundedCornerShape(14.dp), colors = tfColors())
-            Spacer(Modifier.height(12.dp)); Button(onClick = onSubmit, Modifier.fillMaxWidth()) { Text("افزودن") }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun WgSheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
     var name by remember { mutableStateOf("") }; var ep by remember { mutableStateOf("") }; var priv by remember { mutableStateOf("") }; var pub by remember { mutableStateOf("") }
     var addr by remember { mutableStateOf("") }; var allowed by remember { mutableStateOf("0.0.0.0/0, ::/0") }; var psk by remember { mutableStateOf("") }; var mtu by remember { mutableStateOf("1420") }; var reserved by remember { mutableStateOf("") }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
-        Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()).padding(16.dp).padding(bottom = 16.dp)) {
+        Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 16.dp)) {
             Text("افزودن WireGuard", color = TXT, fontWeight = FontWeight.Bold)
             Fld("نام", name) { name = it }; Fld("Endpoint (host:port)", ep) { ep = it }; Fld("Private Key", priv) { priv = it }; Fld("Peer Public Key", pub) { pub = it }
             Fld("Address (محلی /32)", addr) { addr = it }; Fld("Allowed IPs", allowed) { allowed = it }; Fld("PSK (اختیاری)", psk) { psk = it }; Fld("MTU", mtu) { mtu = it }; Fld("Reserved (اختیاری)", reserved) { reserved = it }
@@ -401,7 +432,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
 @Composable private fun ProxySheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
     var type by remember { mutableStateOf("socks") }; var name by remember { mutableStateOf("") }; var host by remember { mutableStateOf("") }; var port by remember { mutableStateOf("") }; var user by remember { mutableStateOf("") }; var pass by remember { mutableStateOf("") }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
-        Column(Modifier.fillMaxWidth().padding(16.dp).padding(bottom = 16.dp)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 16.dp)) {
             Text("افزودن SOCKS / HTTP", color = TXT, fontWeight = FontWeight.Bold)
             Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(type == "socks", { type = "socks" }, { Text("SOCKS5") }); FilterChip(type == "http", { type = "http" }, { Text("HTTP") })
@@ -433,7 +464,7 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
     }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         TopBar("ساب‌اسکریپشن‌ها") {}
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp)) {
             Fld("آدرس ساب (https://…)", url) { url = it }; Fld("نام (اختیاری)", name) { name = it }
             Button(onClick = { if (url.isNotBlank()) { val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim()); store.subs.add(sub); store.saveSubs(); url = ""; name = ""; refresh(sub) } }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("افزودن و دریافت") }
             if (msg.isNotEmpty()) Text(msg, color = if (msg.startsWith("خطا")) BAD else GREEN, fontSize = 12.sp)
@@ -467,7 +498,7 @@ private fun PoolScreen(store: Store, bump: () -> Unit) {
                 store.pool.add(PoolEntry(newId("px"), "پروکسی ${store.pool.size + 1}", store.servers.firstOrNull()?.id ?: "", sp, hp, true)); store.savePool(); bump()
             }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) }
         }
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp)) {
             Text("چند خروجی هم‌زمان روی پورت‌های جدا (اولین موردِ فعال = خروجی اصلیِ تونل).", color = MUTED, fontSize = 12.sp)
             Button(onClick = { store.saveSelection(Store.POOL_ID); bump() }, Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Text("انتخاب استخر برای اتصال") }
             if (store.pool.isEmpty()) EmptyHint("هنوز پروکسی‌ای نیست.")
@@ -620,7 +651,7 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             IconButton(onClick = back) { Icon(Icons.Filled.ArrowBack, "back", tint = TXT) }
             Text(title, color = TXT, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); actions()
         }
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp), content = content)
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp), content = content)
     }
 }
 @Composable private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
