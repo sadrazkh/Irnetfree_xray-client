@@ -6,12 +6,19 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -19,11 +26,17 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.irnetfree.vpn.IRApp
 import com.irnetfree.vpn.core.*
 import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.vpn.ConnState
@@ -33,62 +46,99 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val BG = Color(0xFF0D1117)
-private val CARD = Color(0xFF161B22)
-private val ACCENT = Color(0xFF4F8CFF)
-private val ACCENT2 = Color(0xFF2DD4BF)
+/* ---------------- palette ---------------- */
+private val BG = Color(0xFF0A0E17)
+private val BG2 = Color(0xFF0E1420)
+private val CARD = Color(0xFF141A24)
+private val CARD2 = Color(0xFF1B2330)
+private val STROKE = Color(0xFF232D3B)
+private val PRIMARY = Color(0xFF5B8DEF)
+private val GREEN = Color(0xFF34D399)
+private val AMBER = Color(0xFFE3B85A)
+private val TXT = Color(0xFFE6EDF3)
 private val MUTED = Color(0xFF8B98A9)
 private val BAD = Color(0xFFF07178)
-private val WARN = Color(0xFFE3B85A)
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: Store
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        store = Store(this)
-        setContent {
-            MaterialTheme(colorScheme = darkColorScheme(primary = ACCENT, secondary = ACCENT2, background = BG, surface = CARD)) {
-                Surface(Modifier.fillMaxSize(), color = BG) { App(store) }
-            }
+        runCatching { enableEdgeToEdge() }
+        // Surface a crash from the previous run BEFORE loading the real UI, so a
+        // deterministic crash can still be read/reported.
+        val crash = IRApp.readCrash(application)
+        if (crash != null) { setContent { AppTheme { CrashScreen(crash) { IRApp.clearCrash(application); recreate() } } }; return }
+        try {
+            store = Store(this)
+            setContent { AppTheme { App(store) } }
+        } catch (e: Throwable) {
+            setContent { AppTheme { CrashScreen("onCreate failed:\n" + e.stackTraceToString()) { finish() } } }
         }
     }
 }
 
-/* ----------------------------- helpers ----------------------------- */
-fun fmtBytes(n: Long): String {
-    var v = n.toDouble(); val u = arrayOf("B", "KB", "MB", "GB", "TB"); var i = 0
-    while (v >= 1024 && i < u.size - 1) { v /= 1024; i++ }
-    return (if (i == 0) v.toLong().toString() else String.format("%.1f", v)) + " " + u[i]
+@Composable
+private fun AppTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = darkColorScheme(
+            primary = PRIMARY, secondary = GREEN, background = BG, surface = CARD,
+            onPrimary = Color.White, onBackground = TXT, onSurface = TXT
+        )
+    ) {
+        Surface(Modifier.fillMaxSize(), color = BG) { content() }
+    }
 }
-fun fmtSpeed(n: Long) = fmtBytes(n) + "/s"
 
-private enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    CONNECT("اتصال", Icons.Filled.PlayArrow),
-    SERVERS("سرورها", Icons.Filled.List),
-    SUBS("ساب‌ها", Icons.Filled.Share),
-    POOL("استخر", Icons.Filled.Star),
-    MORE("بیشتر", Icons.Filled.Settings)
+@Composable
+private fun CrashScreen(text: String, onClear: () -> Unit) {
+    Column(Modifier.fillMaxSize().statusBarsPadding().padding(16.dp)) {
+        Text("خطای برنامه (این متن را برایم بفرست)", color = BAD, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        SelectionContainer {
+            Text(text, color = TXT, fontSize = 11.sp, modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()))
+        }
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = onClear, modifier = Modifier.fillMaxWidth()) { Text("پاک کردن و تلاش دوباره") }
+    }
+}
+
+/* ---------------- nav ---------------- */
+private enum class Tab(val label: String, val icon: ImageVector) {
+    HOME("خانه", Icons.Filled.Home),
+    SERVERS("سرورها", Icons.Filled.Dns),
+    SUBS("ساب‌ها", Icons.Filled.CloudDownload),
+    POOL("استخر", Icons.Filled.Hub),
+    MORE("بیشتر", Icons.Filled.Menu)
 }
 
 @Composable
 private fun App(store: Store) {
-    var tab by remember { mutableStateOf(Tab.CONNECT) }
-    var more by remember { mutableStateOf<String?>(null) }   // sub-screen in MORE
+    var tab by remember { mutableStateOf(Tab.HOME) }
+    var more by remember { mutableStateOf<String?>(null) }
     var rev by remember { mutableIntStateOf(0) }
     val bump: () -> Unit = { rev++ }
 
-    Scaffold(containerColor = Color.Transparent, bottomBar = {
-        NavigationBar(containerColor = Color(0xFF12161D)) {
-            Tab.values().forEach { tb ->
-                NavigationBarItem(selected = tab == tb, onClick = { tab = tb; more = null },
-                    icon = { Icon(tb.icon, null) }, label = { Text(tb.label) })
+    Scaffold(
+        containerColor = BG,
+        bottomBar = {
+            NavigationBar(containerColor = BG2, tonalElevation = 0.dp) {
+                Tab.values().forEach { tb ->
+                    NavigationBarItem(
+                        selected = tab == tb, onClick = { tab = tb; more = null },
+                        icon = { Icon(tb.icon, null) }, label = { Text(tb.label, fontSize = 11.sp) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = PRIMARY, selectedTextColor = PRIMARY,
+                            indicatorColor = CARD2, unselectedIconColor = MUTED, unselectedTextColor = MUTED
+                        )
+                    )
+                }
             }
         }
-    }) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize()) {
+    ) { pad ->
+        Box(Modifier.padding(bottom = pad.calculateBottomPadding()).fillMaxSize()) {
             key(rev) {
                 when (tab) {
-                    Tab.CONNECT -> ConnectScreen(store, bump)
+                    Tab.HOME -> HomeScreen(store, bump)
                     Tab.SERVERS -> ServersScreen(store, bump)
                     Tab.SUBS -> SubsScreen(store, bump)
                     Tab.POOL -> PoolScreen(store, bump)
@@ -97,7 +147,7 @@ private fun App(store: Store) {
                         "routing" -> RoutingScreen(store, bump) { more = null }
                         "settings" -> SettingsScreen(store, bump) { more = null }
                         "logs" -> LogsScreen { more = null }
-                        else -> MoreMenu { more = it }
+                        else -> MoreMenu(store) { more = it }
                     }
                 }
             }
@@ -105,9 +155,9 @@ private fun App(store: Store) {
     }
 }
 
-/* ============================= CONNECT ============================= */
+/* ================================ HOME ================================ */
 @Composable
-private fun ConnectScreen(store: Store, bump: () -> Unit) {
+private fun HomeScreen(store: Store, bump: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val state by VpnState.state.collectAsState()
@@ -115,6 +165,7 @@ private fun ConnectScreen(store: Store, bump: () -> Unit) {
     val traffic by VpnState.traffic.collectAsState()
     var ip by remember { mutableStateOf("—") }
     var ping by remember { mutableStateOf("—") }
+    var pickerOpen by remember { mutableStateOf(false) }
 
     val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         if (res.resultCode == android.app.Activity.RESULT_OK) doConnect(ctx, store)
@@ -125,50 +176,77 @@ private fun ConnectScreen(store: Store, bump: () -> Unit) {
         if (prep != null) vpnPrepare.launch(prep) else doConnect(ctx, store)
     }
 
-    Column(Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
-        Spacer(Modifier.height(16.dp))
-        Text("IRNetFree", style = MaterialTheme.typography.headlineSmall)
-        Text(when (state) {
-            ConnState.CONNECTED -> "متصل"; ConnState.CONNECTING -> "در حال اتصال…"; ConnState.ERROR -> "خطا"; else -> "قطع" },
-            color = if (state == ConnState.CONNECTED) ACCENT2 else MUTED)
+    val ringColor by animateColorAsState(when (state) {
+        ConnState.CONNECTED -> GREEN; ConnState.CONNECTING -> AMBER; ConnState.ERROR -> BAD; else -> PRIMARY
+    }, label = "ring")
+
+    Column(
+        Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("IR", color = TXT, fontWeight = FontWeight.Black, fontSize = 20.sp)
+            Text("NetFree", color = PRIMARY, fontWeight = FontWeight.Black, fontSize = 20.sp)
+            Spacer(Modifier.weight(1f))
+            StatusPill(state)
+        }
         Spacer(Modifier.height(24.dp))
-        Button(onClick = { onPower() }, modifier = Modifier.size(150.dp), shape = CircleShape,
-            colors = ButtonDefaults.buttonColors(containerColor = if (state == ConnState.CONNECTED) Color(0xFF17604B) else Color(0xFF1E2A44))) {
-            Icon(if (state == ConnState.CONNECTED) Icons.Filled.Stop else Icons.Filled.PlayArrow, null, Modifier.size(56.dp))
+
+        // big power button with gradient ring
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(210.dp)) {
+            Box(Modifier.size(210.dp).clip(CircleShape)
+                .background(Brush.radialGradient(listOf(ringColor.copy(alpha = 0.18f), Color.Transparent))))
+            Box(Modifier.size(168.dp).clip(CircleShape).border(2.dp, ringColor.copy(alpha = 0.5f), CircleShape)
+                .background(Brush.verticalGradient(listOf(CARD2, CARD)))
+                .clickable { onPower() }, contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(if (state == ConnState.CONNECTED) Icons.Filled.PowerSettingsNew else Icons.Filled.PowerSettingsNew,
+                        null, tint = ringColor, modifier = Modifier.size(56.dp))
+                    Spacer(Modifier.height(6.dp))
+                    Text(when (state) {
+                        ConnState.CONNECTED -> "متصل"; ConnState.CONNECTING -> "در حال اتصال…"; ConnState.ERROR -> "خطا"; else -> "قطع"
+                    }, color = ringColor, fontWeight = FontWeight.Bold)
+                }
+            }
         }
         Spacer(Modifier.height(20.dp))
-        Text("خروجی انتخابی", color = MUTED, style = MaterialTheme.typography.labelMedium)
-        Spacer(Modifier.height(6.dp))
-        SelectionPicker(store, bump)
-        Text(store.selectionLabel(), color = Color(0xFFB6C2D4), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Spacer(Modifier.height(18.dp))
-        // stats
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            StatCell("IP خروجی", ip); StatCell("پینگ", ping)
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            StatCell("▼ دانلود", fmtSpeed(traffic.rxSpeed)); StatCell("▲ آپلود", fmtSpeed(traffic.txSpeed))
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            StatCell("مجموع دانلود", fmtBytes(traffic.rxBytes)); StatCell("مجموع آپلود", fmtBytes(traffic.txBytes))
+
+        // selected config card -> opens picker
+        Card(Modifier.fillMaxWidth().clickable { pickerOpen = true }, colors = CardDefaults.cardColors(containerColor = CARD),
+            shape = RoundedCornerShape(16.dp)) {
+            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Bolt, null, tint = PRIMARY)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("خروجی انتخابی", color = MUTED, fontSize = 12.sp)
+                    Text(store.selectionLabel(), color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Icon(Icons.Filled.UnfoldMore, null, tint = MUTED)
+            }
         }
         Spacer(Modifier.height(14.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = {
+
+        // stat cards
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            StatCard(Modifier.weight(1f), Icons.Filled.SouthWest, "دانلود", fmtSpeed(traffic.rxSpeed), fmtBytes(traffic.rxBytes), GREEN)
+            StatCard(Modifier.weight(1f), Icons.Filled.NorthEast, "آپلود", fmtSpeed(traffic.txSpeed), fmtBytes(traffic.txBytes), PRIMARY)
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            InfoCard(Modifier.weight(1f), "IP خروجی", ip) {
+                ip = "…"; scope.launch { val r = withContext(Dispatchers.IO) { Diagnostics.ipInfo() }; ip = if (r.ok) "${flag(r.countryCode)} ${r.ip}" else "خطا" }
+            }
+            InfoCard(Modifier.weight(1f), "پینگ", ping) {
                 val sel = store.selection
                 val srv = store.serverById(sel) ?: store.chainById(sel.removePrefix("chain:"))?.let { store.chainMembers(it).firstOrNull() }
-                if (srv == null) return@OutlinedButton
-                ping = "…"
-                scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(srv.address, srv.port) }; ping = if (ms >= 0) "${ms}ms" else "خطا" }
-            }) { Text("تست پینگ") }
-            OutlinedButton(onClick = {
-                ip = "…"
-                scope.launch { val r = withContext(Dispatchers.IO) { Diagnostics.ipInfo() }; ip = if (r.ok) "${r.countryCode} ${r.ip}" else "خطا" }
-            }) { Text("بررسی IP") }
+                if (srv != null) { ping = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(srv.address, srv.port) }; ping = if (ms >= 0) "${ms}ms" else "خطا" } }
+            }
         }
-        if (state == ConnState.ERROR && err.isNotBlank()) { Spacer(Modifier.height(12.dp)); Text(err, color = BAD, style = MaterialTheme.typography.bodySmall) }
+        if (state == ConnState.ERROR && err.isNotBlank()) { Spacer(Modifier.height(12.dp)); Text(err, color = BAD, fontSize = 12.sp) }
+        Spacer(Modifier.height(16.dp))
     }
+
+    if (pickerOpen) SelectionSheet(store, { pickerOpen = false }) { pickerOpen = false; bump() }
 }
 
 private fun doConnect(ctx: android.content.Context, store: Store) {
@@ -176,355 +254,317 @@ private fun doConnect(ctx: android.content.Context, store: Store) {
     catch (e: Exception) { VpnState.set(ConnState.ERROR, error = e.message ?: "connect failed") }
 }
 
-@Composable private fun StatCell(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(label, color = MUTED, style = MaterialTheme.typography.labelSmall)
-        Text(value, style = MaterialTheme.typography.titleSmall)
+@Composable private fun StatusPill(state: ConnState) {
+    val (c, t) = when (state) {
+        ConnState.CONNECTED -> GREEN to "متصل"; ConnState.CONNECTING -> AMBER to "اتصال…"; ConnState.ERROR -> BAD to "خطا"; else -> MUTED to "قطع"
+    }
+    Row(Modifier.clip(RoundedCornerShape(50)).background(c.copy(alpha = 0.15f)).padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(c)); Spacer(Modifier.width(6.dp)); Text(t, color = c, fontSize = 12.sp)
     }
 }
 
-@Composable
-private fun SelectionPicker(store: Store, bump: () -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    val options = buildList {
-        if (store.poolEnabledValid().isNotEmpty()) add(Store.POOL_ID to "🧩 استخر پروکسی (${store.poolEnabledValid().size})")
-        if (store.advancedReady()) add(Store.ADV_ID to "🧭 روتینگ ویژه")
-        store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }
-        store.servers.forEach { add(it.id to "${it.protocol} · ${it.name}") }
-    }
-    Box {
-        OutlinedButton(onClick = { open = true }) {
-            Text(options.firstOrNull { it.first == store.selection }?.second ?: "انتخاب کن", maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Icon(Icons.Filled.ArrowDropDown, null)
-        }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            if (options.isEmpty()) DropdownMenuItem(text = { Text("سروری اضافه نشده") }, onClick = { open = false })
-            options.forEach { (id, lbl) -> DropdownMenuItem(text = { Text(lbl) }, onClick = { store.saveSelection(id); open = false; bump() }) }
+@Composable private fun StatCard(modifier: Modifier, icon: ImageVector, label: String, speed: String, total: String, tint: Color) {
+    Card(modifier, colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) { Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(label, color = MUTED, fontSize = 12.sp) }
+            Spacer(Modifier.height(6.dp)); Text(speed, color = TXT, fontWeight = FontWeight.Bold); Text(total, color = MUTED, fontSize = 11.sp)
         }
     }
 }
+@Composable private fun InfoCard(modifier: Modifier, label: String, value: String, onClick: () -> Unit) {
+    Card(modifier.clickable { onClick() }, colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.padding(14.dp)) { Text(label, color = MUTED, fontSize = 12.sp); Spacer(Modifier.height(4.dp)); Text(value, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+    }
+}
 
-/* ============================= SERVERS ============================= */
-@Composable
-private fun ServersScreen(store: Store, bump: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    var importText by remember { mutableStateOf("") }
-    var msg by remember { mutableStateOf("") }
-    var showWg by remember { mutableStateOf(false) }
-    var showProxy by remember { mutableStateOf(false) }
-    val pings = remember { mutableStateMapOf<String, String>() }
-
-    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
-        Text("سرورها", style = MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(10.dp))
-        OutlinedTextField(importText, { importText = it }, Modifier.fillMaxWidth(),
-            label = { Text("لینک(های) کانفیگ / socks:// / وایرگارد / base64 ساب") }, minLines = 2, maxLines = 6)
-        Spacer(Modifier.height(8.dp))
-        FlowButtons {
-            Button(onClick = {
-                val (parsed, errs) = LinkParser.parseMany(importText)
-                store.servers.addAll(parsed); store.saveServers()
-                if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
-                msg = "${parsed.size} افزوده شد" + if (errs.isNotEmpty()) " (${errs.size} خطا)" else ""
-                importText = ""; bump()
-            }) { Text("وارد کردن") }
-            OutlinedButton(onClick = { showWg = !showWg; showProxy = false }) { Text("+ WireGuard") }
-            OutlinedButton(onClick = { showProxy = !showProxy; showWg = false }) { Text("+ SOCKS/HTTP") }
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun SelectionSheet(store: Store, onDismiss: () -> Unit, onPick: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
+        val options = buildList {
+            if (store.poolEnabledValid().isNotEmpty()) add(Store.POOL_ID to "🧩 استخر پروکسی (${store.poolEnabledValid().size})")
+            if (store.advancedReady()) add(Store.ADV_ID to "🧭 روتینگ ویژه")
+            store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }
+            store.servers.forEach { add(it.id to "${badge(it.protocol)} ${it.name}") }
         }
-        if (msg.isNotEmpty()) Text(msg, color = ACCENT2, style = MaterialTheme.typography.bodySmall)
-
-        if (showWg) WgForm(store) { showWg = false; bump() }
-        if (showProxy) ProxyForm(store) { showProxy = false; bump() }
-
-        Spacer(Modifier.height(12.dp))
-        if (store.servers.isEmpty()) Text("هنوز سروری نیست.", color = MUTED)
-        store.servers.toList().forEach { s ->
-            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD)) {
-                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(s.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${s.protocol} · ${s.address}:${s.port}", color = MUTED, style = MaterialTheme.typography.bodySmall)
-                        pings[s.id]?.let { Text("پینگ: $it", color = ACCENT2, style = MaterialTheme.typography.labelSmall) }
-                    }
-                    IconButton(onClick = { pings[s.id] = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }; pings[s.id] = if (ms >= 0) "${ms}ms" else "خطا" } }) { Icon(Icons.Filled.Bolt, "ping") }
-                    IconButton(onClick = { store.saveSelection(s.id); bump() }) { Icon(Icons.Filled.CheckCircle, null, tint = if (store.selection == s.id) ACCENT2 else MUTED) }
-                    IconButton(onClick = { store.deleteServer(s.id); bump() }) { Icon(Icons.Filled.Delete, null, tint = BAD) }
+        Column(Modifier.fillMaxWidth().heightIn(max = 460.dp).verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+            Text("انتخاب خروجی", color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
+            if (options.isEmpty()) Text("سروری اضافه نشده", color = MUTED, modifier = Modifier.padding(16.dp))
+            options.forEach { (id, lbl) ->
+                Row(Modifier.fillMaxWidth().clickable { store.saveSelection(id); onPick() }.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(lbl, color = TXT, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (store.selection == id) Icon(Icons.Filled.CheckCircle, null, tint = GREEN)
                 }
             }
         }
     }
 }
 
-@Composable private fun WgForm(store: Store, done: () -> Unit) {
-    var name by remember { mutableStateOf("") }; var ep by remember { mutableStateOf("") }
-    var priv by remember { mutableStateOf("") }; var pub by remember { mutableStateOf("") }
-    var addr by remember { mutableStateOf("") }; var allowed by remember { mutableStateOf("0.0.0.0/0, ::/0") }
-    var psk by remember { mutableStateOf("") }; var mtu by remember { mutableStateOf("1420") }; var reserved by remember { mutableStateOf("") }
-    Card(Modifier.fillMaxWidth().padding(vertical = 8.dp), colors = CardDefaults.cardColors(containerColor = CARD)) {
-        Column(Modifier.padding(12.dp)) {
-            Text("افزودن WireGuard", style = MaterialTheme.typography.titleSmall)
-            Fld("نام", name) { name = it }; Fld("Endpoint (host:port)", ep) { ep = it }
-            Fld("Private Key", priv) { priv = it }; Fld("Peer Public Key", pub) { pub = it }
-            Fld("Address (محلی /32)", addr) { addr = it }; Fld("Allowed IPs", allowed) { allowed = it }
-            Fld("Pre-shared Key (اختیاری)", psk) { psk = it }; Fld("MTU", mtu) { mtu = it }; Fld("Reserved (اختیاری)", reserved) { reserved = it }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    if (ep.isBlank() || priv.isBlank() || pub.isBlank()) return@Button
-                    val s = LinkParser.makeWireguardServer(name, ep, priv, pub, addr, allowed, psk, mtu, reserved)
-                    store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done()
-                }) { Text("افزودن") }
-                OutlinedButton(onClick = done) { Text("انصراف") }
+/* ================================ SERVERS ================================ */
+@Composable
+private fun ServersScreen(store: Store, bump: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var importText by remember { mutableStateOf("") }
+    var q by remember { mutableStateOf("") }
+    var msg by remember { mutableStateOf("") }
+    var sheet by remember { mutableStateOf<String?>(null) }   // "import" | "wg" | "proxy"
+    val pings = remember { mutableStateMapOf<String, String>() }
+
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        TopBar("سرورها") {
+            IconButton(onClick = { sheet = "import" }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) }
+        }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+            OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("جستجو…") },
+                leadingIcon = { Icon(Icons.Filled.Search, null) }, singleLine = true, shape = RoundedCornerShape(14.dp), colors = tfColors())
+            Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistChip(onClick = { sheet = "import" }, label = { Text("+ لینک/ساب") })
+                AssistChip(onClick = { sheet = "wg" }, label = { Text("+ WireGuard") })
+                AssistChip(onClick = { sheet = "proxy" }, label = { Text("+ SOCKS/HTTP") })
             }
+            if (msg.isNotEmpty()) Text(msg, color = GREEN, fontSize = 12.sp)
+            if (store.servers.isEmpty()) EmptyHint("هنوز سروری نیست — از دکمه‌ی + اضافه کن.")
+            store.servers.filter { it.name.contains(q, true) || it.address.contains(q, true) }.forEach { s ->
+                ConfigCard(s, selected = store.selection == s.id, ping = pings[s.id],
+                    onSelect = { store.saveSelection(s.id); bump() },
+                    onPing = { pings[s.id] = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }; pings[s.id] = if (ms >= 0) "${ms}ms" else "خطا" } },
+                    onDelete = { store.deleteServer(s.id); bump() })
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+
+    when (sheet) {
+        "import" -> InputSheet("افزودن کانفیگ", "لینک(ها): vless/vmess/trojan/ss/socks/wireguard یا base64 ساب", importText, { importText = it }, onDismiss = { sheet = null }, multiline = true) {
+            val (parsed, errs) = LinkParser.parseMany(importText)
+            store.servers.addAll(parsed); store.saveServers()
+            if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
+            msg = "${parsed.size} افزوده شد" + if (errs.isNotEmpty()) " (${errs.size} خطا)" else ""; importText = ""; sheet = null; bump()
+        }
+        "wg" -> WgSheet(store, { sheet = null }) { sheet = null; bump() }
+        "proxy" -> ProxySheet(store, { sheet = null }) { sheet = null; bump() }
+    }
+}
+
+@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, ping: String?, onSelect: () -> Unit, onPing: () -> Unit, onDelete: () -> Unit) {
+    Card(Modifier.fillMaxWidth().padding(vertical = 5.dp).clickable { onSelect() },
+        colors = CardDefaults.cardColors(containerColor = if (selected) CARD2 else CARD), shape = RoundedCornerShape(14.dp),
+        border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, GREEN) else null) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            ProtoBadge(s.protocol)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(s.name, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${s.address}:${s.port}", color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (ping != null) Text(ping, color = if (ping == "خطا") BAD else GREEN, fontSize = 12.sp, modifier = Modifier.padding(end = 6.dp))
+            IconButton(onClick = onPing) { Icon(Icons.Filled.NetworkCheck, "ping", tint = MUTED) }
+            IconButton(onClick = onDelete) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD) }
         }
     }
 }
 
-@Composable private fun ProxyForm(store: Store, done: () -> Unit) {
-    var type by remember { mutableStateOf("socks") }; var name by remember { mutableStateOf("") }
-    var host by remember { mutableStateOf("") }; var port by remember { mutableStateOf("") }
-    var user by remember { mutableStateOf("") }; var pass by remember { mutableStateOf("") }
-    Card(Modifier.fillMaxWidth().padding(vertical = 8.dp), colors = CardDefaults.cardColors(containerColor = CARD)) {
-        Column(Modifier.padding(12.dp)) {
-            Text("افزودن پروکسی SOCKS / HTTP", style = MaterialTheme.typography.titleSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(type == "socks", { type = "socks" }, { Text("SOCKS5") })
-                FilterChip(type == "http", { type = "http" }, { Text("HTTP") })
-            }
-            Fld("نام", name) { name = it }; Fld("Host", host) { host = it }; Fld("پورت", port) { port = it }
-            Fld("Username (اختیاری)", user) { user = it }; Fld("Password (اختیاری)", pass) { pass = it }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    if (host.isBlank() || port.isBlank()) return@Button
-                    val s = LinkParser.makeProxyServer(type, name, host, port.toIntOrNull() ?: 1080, user, pass)
-                    store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done()
-                }) { Text("افزودن") }
-                OutlinedButton(onClick = done) { Text("انصراف") }
-            }
+@Composable private fun ProtoBadge(proto: String) {
+    val c = when (proto) { "vless" -> PRIMARY; "vmess" -> GREEN; "trojan" -> AMBER; "shadowsocks" -> Color(0xFFCDA9FF); "wireguard" -> Color(0xFF84E1BC); "socks" -> Color(0xFFF19DC8); else -> MUTED }
+    Box(Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(c.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
+        Text(badge(proto), color = c, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+/* ---- add sheets ---- */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun InputSheet(title: String, hint: String, value: String, onValue: (String) -> Unit, onDismiss: () -> Unit, multiline: Boolean = false, onSubmit: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().padding(16.dp).padding(bottom = 16.dp)) {
+            Text(title, color = TXT, fontWeight = FontWeight.Bold); Spacer(Modifier.height(10.dp))
+            OutlinedTextField(value, onValue, Modifier.fillMaxWidth(), placeholder = { Text(hint, fontSize = 12.sp) }, minLines = if (multiline) 3 else 1, maxLines = if (multiline) 6 else 1, shape = RoundedCornerShape(14.dp), colors = tfColors())
+            Spacer(Modifier.height(12.dp)); Button(onClick = onSubmit, Modifier.fillMaxWidth()) { Text("افزودن") }
         }
     }
 }
 
-/* ============================= SUBS ============================= */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun WgSheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
+    var name by remember { mutableStateOf("") }; var ep by remember { mutableStateOf("") }; var priv by remember { mutableStateOf("") }; var pub by remember { mutableStateOf("") }
+    var addr by remember { mutableStateOf("") }; var allowed by remember { mutableStateOf("0.0.0.0/0, ::/0") }; var psk by remember { mutableStateOf("") }; var mtu by remember { mutableStateOf("1420") }; var reserved by remember { mutableStateOf("") }
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()).padding(16.dp).padding(bottom = 16.dp)) {
+            Text("افزودن WireGuard", color = TXT, fontWeight = FontWeight.Bold)
+            Fld("نام", name) { name = it }; Fld("Endpoint (host:port)", ep) { ep = it }; Fld("Private Key", priv) { priv = it }; Fld("Peer Public Key", pub) { pub = it }
+            Fld("Address (محلی /32)", addr) { addr = it }; Fld("Allowed IPs", allowed) { allowed = it }; Fld("PSK (اختیاری)", psk) { psk = it }; Fld("MTU", mtu) { mtu = it }; Fld("Reserved (اختیاری)", reserved) { reserved = it }
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = { if (ep.isNotBlank() && priv.isNotBlank() && pub.isNotBlank()) { val s = LinkParser.makeWireguardServer(name, ep, priv, pub, addr, allowed, psk, mtu, reserved); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() } }, Modifier.fillMaxWidth()) { Text("افزودن") }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun ProxySheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
+    var type by remember { mutableStateOf("socks") }; var name by remember { mutableStateOf("") }; var host by remember { mutableStateOf("") }; var port by remember { mutableStateOf("") }; var user by remember { mutableStateOf("") }; var pass by remember { mutableStateOf("") }
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().padding(16.dp).padding(bottom = 16.dp)) {
+            Text("افزودن SOCKS / HTTP", color = TXT, fontWeight = FontWeight.Bold)
+            Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(type == "socks", { type = "socks" }, { Text("SOCKS5") }); FilterChip(type == "http", { type = "http" }, { Text("HTTP") })
+            }
+            Fld("نام", name) { name = it }; Fld("Host", host) { host = it }; Fld("پورت", port) { port = it }; Fld("Username (اختیاری)", user) { user = it }; Fld("Password (اختیاری)", pass) { pass = it }
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = { if (host.isNotBlank() && port.isNotBlank()) { val s = LinkParser.makeProxyServer(type, name, host, port.toIntOrNull() ?: 1080, user, pass); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() } }, Modifier.fillMaxWidth()) { Text("افزودن") }
+        }
+    }
+}
+
+/* ================================ SUBS ================================ */
 @Composable
 private fun SubsScreen(store: Store, bump: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var url by remember { mutableStateOf("") }; var name by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }; var msg by remember { mutableStateOf("") }
-
+    var url by remember { mutableStateOf("") }; var name by remember { mutableStateOf("") }; var busy by remember { mutableStateOf(false) }; var msg by remember { mutableStateOf("") }
     fun refresh(sub: Subscription) {
         busy = true; msg = "در حال دریافت…"
         scope.launch {
             try {
                 val r = withContext(Dispatchers.IO) { Subscriptions.fetch(sub.url) }
                 store.servers.removeAll { it.subId == sub.id }
-                val tagged = r.servers.map { it.copy(subId = sub.id) }
-                store.servers.addAll(tagged); store.saveServers()
+                val tagged = r.servers.map { it.copy(subId = sub.id) }; store.servers.addAll(tagged); store.saveServers()
                 val idx = store.subs.indexOfFirst { it.id == sub.id }
-                if (idx >= 0) store.subs[idx] = sub.copy(serverCount = tagged.size, lastUpdated = System.currentTimeMillis(),
-                    upload = r.usage?.upload ?: 0, download = r.usage?.download ?: 0, total = r.usage?.total ?: 0, expire = r.usage?.expire ?: 0)
+                if (idx >= 0) store.subs[idx] = sub.copy(serverCount = tagged.size, lastUpdated = System.currentTimeMillis(), upload = r.usage?.upload ?: 0, download = r.usage?.download ?: 0, total = r.usage?.total ?: 0, expire = r.usage?.expire ?: 0)
                 store.saveSubs(); msg = "${tagged.size} سرور به‌روز شد"
             } catch (e: Exception) { msg = "خطا: ${e.message}" } finally { busy = false; bump() }
         }
     }
-
-    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
-        Text("ساب‌اسکریپشن‌ها", style = MaterialTheme.typography.titleLarge)
-        Fld("آدرس ساب (https://…)", url) { url = it }; Fld("نام (اختیاری)", name) { name = it }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(enabled = !busy, onClick = {
-                if (url.isBlank()) return@Button
-                val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim())
-                store.subs.add(sub); store.saveSubs(); url = ""; name = ""; refresh(sub)
-            }) { Text("افزودن و دریافت") }
-            if (msg.isNotEmpty()) Text(msg, color = if (msg.startsWith("خطا")) BAD else ACCENT2, modifier = Modifier.align(Alignment.CenterVertically))
-        }
-        Spacer(Modifier.height(12.dp))
-        if (store.subs.isEmpty()) Text("هنوز ساب اضافه نشده.", color = MUTED)
-        store.subs.toList().forEach { sub ->
-            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD)) {
-                Column(Modifier.padding(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        TopBar("ساب‌اسکریپشن‌ها") {}
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+            Fld("آدرس ساب (https://…)", url) { url = it }; Fld("نام (اختیاری)", name) { name = it }
+            Button(enabled = !busy, onClick = { if (url.isNotBlank()) { val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim()); store.subs.add(sub); store.saveSubs(); url = ""; name = ""; refresh(sub) } }, Modifier.fillMaxWidth()) { Text("افزودن و دریافت") }
+            if (msg.isNotEmpty()) Text(msg, color = if (msg.startsWith("خطا")) BAD else GREEN, fontSize = 12.sp)
+            Spacer(Modifier.height(8.dp))
+            if (store.subs.isEmpty()) EmptyHint("هنوز ساب اضافه نشده.")
+            store.subs.forEach { sub ->
+                Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.CloudDownload, null, tint = PRIMARY); Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(sub.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${sub.serverCount} سرور", color = MUTED, style = MaterialTheme.typography.bodySmall)
-                            if (sub.total > 0) Text("مصرف: ${fmtBytes(sub.upload + sub.download)} / ${fmtBytes(sub.total)}", color = MUTED, style = MaterialTheme.typography.labelSmall)
+                            Text(sub.name, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${sub.serverCount} سرور" + if (sub.total > 0) " · ${fmtBytes(sub.upload + sub.download)}/${fmtBytes(sub.total)}" else "", color = MUTED, fontSize = 12.sp)
                         }
-                        IconButton(onClick = { refresh(sub) }) { Icon(Icons.Filled.Refresh, "refresh") }
-                        IconButton(onClick = {
-                            store.servers.removeAll { it.subId == sub.id }; store.saveServers()
-                            store.subs.removeAll { it.id == sub.id }; store.saveSubs(); bump()
-                        }) { Icon(Icons.Filled.Delete, null, tint = BAD) }
+                        IconButton(onClick = { refresh(sub) }) { Icon(Icons.Filled.Refresh, "refresh", tint = MUTED) }
+                        IconButton(onClick = { store.servers.removeAll { it.subId == sub.id }; store.saveServers(); store.subs.removeAll { it.id == sub.id }; store.saveSubs(); bump() }) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD) }
                     }
                 }
             }
+            Spacer(Modifier.height(16.dp))
         }
     }
 }
 
-/* ============================= POOL ============================= */
+/* ================================ POOL ================================ */
 @Composable
 private fun PoolScreen(store: Store, bump: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("استخر پروکسی", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            Button(onClick = {
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        TopBar("استخر پروکسی") {
+            IconButton(onClick = {
                 val used = usedPorts(store); var sp = 60001; while (used.contains(sp)) sp++; var hp = sp + 1; while (used.contains(hp)) hp++
-                store.pool.add(PoolEntry(newId("px"), "پروکسی ${store.pool.size + 1}", store.servers.firstOrNull()?.id ?: "", sp, hp, true))
-                store.savePool(); bump()
-            }) { Text("+ جدید") }
+                store.pool.add(PoolEntry(newId("px"), "پروکسی ${store.pool.size + 1}", store.servers.firstOrNull()?.id ?: "", sp, hp, true)); store.savePool(); bump()
+            }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) }
         }
-        Text("چند خروجی هم‌زمان روی پورت‌های جدا (اولین موردِ فعال = خروجی اصلی).", color = MUTED, style = MaterialTheme.typography.bodySmall)
-        Button(onClick = { store.saveSelection(Store.POOL_ID); bump() }, Modifier.padding(top = 6.dp)) { Text("انتخاب استخر برای اتصال") }
-        Spacer(Modifier.height(8.dp))
-        if (store.pool.isEmpty()) Text("هنوز پروکسی‌ای نیست.", color = MUTED)
-        store.pool.toList().forEachIndexed { idx, e ->
-            val valid = store.poolTargetValid(e.target)
-            Card(Modifier.fillMaxWidth().padding(vertical = 6.dp), colors = CardDefaults.cardColors(containerColor = CARD)) {
-                Column(Modifier.padding(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(e.name, Modifier.weight(1f))
-                        Switch(e.enabled, { store.pool[idx] = e.copy(enabled = it); store.savePool(); bump() })
-                        IconButton(onClick = { store.pool.removeAt(idx); store.savePool(); bump() }) { Icon(Icons.Filled.Delete, null, tint = BAD) }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+            Text("چند خروجی هم‌زمان روی پورت‌های جدا (اولین موردِ فعال = خروجی اصلیِ تونل).", color = MUTED, fontSize = 12.sp)
+            Button(onClick = { store.saveSelection(Store.POOL_ID); bump() }, Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Text("انتخاب استخر برای اتصال") }
+            if (store.pool.isEmpty()) EmptyHint("هنوز پروکسی‌ای نیست.")
+            store.pool.toList().forEachIndexed { idx, e ->
+                Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+                    Column(Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(e.name, color = TXT, modifier = Modifier.weight(1f)); Switch(e.enabled, { store.pool[idx] = e.copy(enabled = it); store.savePool(); bump() })
+                            IconButton(onClick = { store.pool.removeAt(idx); store.savePool(); bump() }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
+                        }
+                        DropPick("خروجی", targetOptions(store), e.target) { store.pool[idx] = e.copy(target = it); store.savePool(); bump() }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            NumFld("SOCKS", e.socksPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(socksPort = it); store.savePool() }
+                            NumFld("HTTP", e.httpPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(httpPort = it); store.savePool() }
+                        }
+                        if (!store.poolTargetValid(e.target)) Text("⚠ خروجی نامعتبر", color = AMBER, fontSize = 12.sp)
                     }
-                    TargetPicker(store, e.target) { store.pool[idx] = e.copy(target = it); store.savePool(); bump() }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        NumFld("SOCKS", e.socksPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(socksPort = it); store.savePool() }
-                        NumFld("HTTP", e.httpPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(httpPort = it); store.savePool() }
-                    }
-                    if (!valid) Text("⚠ خروجی نامعتبر", color = WARN, style = MaterialTheme.typography.bodySmall)
                 }
             }
+            Spacer(Modifier.height(16.dp))
         }
     }
 }
 
-@Composable private fun TargetPicker(store: Store, current: String, onPick: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    val options = buildList {
-        store.servers.forEach { add(it.id to it.name) }
-        store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }
-    }
-    Box {
-        OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
-            Text(options.firstOrNull { it.first == current }?.second ?: "انتخاب خروجی", Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis); Icon(Icons.Filled.ArrowDropDown, null)
-        }
-        DropdownMenu(open, { open = false }) { options.forEach { (id, l) -> DropdownMenuItem(text = { Text(l) }, onClick = { onPick(id); open = false }) } }
-    }
-}
-
-/* ============================= CHAINS ============================= */
+/* ================================ CHAINS ================================ */
 @Composable
 private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
-    ScreenHeader("زنجیره پروکسی", back) {
-        Button(onClick = { store.chains.add(ChainConfig(newId("chain"), "زنجیره ${store.chains.size + 1}", emptyList())); store.saveChains(); bump() }) { Text("+ جدید") }
-    }
-    Column(Modifier.fillMaxSize().padding(16.dp).padding(top = 56.dp).verticalScroll(rememberScrollState())) {
-        if (store.chains.isEmpty()) Text("هنوز زنجیره‌ای نیست.", color = MUTED)
+    Screen("زنجیره پروکسی", back, { IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), "زنجیره ${store.chains.size + 1}", emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) } }) {
+        if (store.chains.isEmpty()) EmptyHint("هنوز زنجیره‌ای نیست.")
         store.chains.toList().forEachIndexed { idx, c ->
             val members = store.chainMembers(c)
-            Card(Modifier.fillMaxWidth().padding(vertical = 6.dp), colors = CardDefaults.cardColors(containerColor = CARD)) {
-                Column(Modifier.padding(12.dp)) {
+            Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+                Column(Modifier.padding(14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("⛓ ${c.name}", Modifier.weight(1f))
-                        if (store.chainReady(c)) IconButton(onClick = { store.saveSelection("chain:${c.id}"); bump() }) { Icon(Icons.Filled.CheckCircle, null, tint = if (store.selection == "chain:${c.id}") ACCENT2 else MUTED) }
-                        IconButton(onClick = { store.chains.removeAt(idx); store.saveChains(); bump() }) { Icon(Icons.Filled.Delete, null, tint = BAD) }
+                        Text("⛓ ${c.name}", color = TXT, modifier = Modifier.weight(1f))
+                        if (store.chainReady(c)) IconButton(onClick = { store.saveSelection("chain:${c.id}"); bump() }) { Icon(Icons.Filled.CheckCircle, null, tint = if (store.selection == "chain:${c.id}") GREEN else MUTED) }
+                        IconButton(onClick = { store.chains.removeAt(idx); store.saveChains(); bump() }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
                     }
-                    Text("مسیر: " + (members.joinToString(" → ") { it.name }.ifEmpty { "خالی — حداقل ۲ سرور اضافه کن" }), color = MUTED, style = MaterialTheme.typography.bodySmall)
-                    // add member
-                    var open by remember { mutableStateOf(false) }
-                    Box {
-                        OutlinedButton(onClick = { open = true }) { Text("+ افزودن سرور به زنجیره"); Icon(Icons.Filled.ArrowDropDown, null) }
-                        DropdownMenu(open, { open = false }) {
-                            store.servers.filter { !c.members.contains(it.id) }.forEach { s ->
-                                DropdownMenuItem(text = { Text(s.name) }, onClick = { store.chains[idx] = c.copy(members = c.members + s.id); store.saveChains(); open = false; bump() })
-                            }
-                        }
-                    }
-                    members.forEachIndexed { mi, s ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("${mi + 1}. ${s.name}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                            IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filter { it != s.id }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, null, tint = BAD) }
-                        }
-                    }
+                    Text("مسیر: " + (members.joinToString(" → ") { it.name }.ifEmpty { "خالی — حداقل ۲ سرور" }), color = MUTED, fontSize = 12.sp)
+                    members.forEachIndexed { mi, s -> Row(verticalAlignment = Alignment.CenterVertically) { Text("${mi + 1}. ${s.name}", color = TXT, fontSize = 13.sp, modifier = Modifier.weight(1f)); IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filter { it != s.id }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, null, tint = BAD) } } }
+                    DropPick("+ افزودن سرور", store.servers.filter { !c.members.contains(it.id) }.map { it.id to it.name }, "") { if (it.isNotEmpty()) { store.chains[idx] = c.copy(members = c.members + it); store.saveChains(); bump() } }
                 }
             }
         }
     }
 }
 
-/* ============================= ROUTING ============================= */
+/* ================================ ROUTING ================================ */
 @Composable
 private fun RoutingScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     var s by remember { mutableStateOf(store.settings) }
     fun save(n: AppSettings) { s = n; store.saveSettings(n); bump() }
-    ScreenHeader("روتینگ", back) {}
-    Column(Modifier.fillMaxSize().padding(16.dp).padding(top = 56.dp).verticalScroll(rememberScrollState())) {
-        Text("حالت روتینگ ساده", style = MaterialTheme.typography.titleSmall)
+    Screen("روتینگ", back, {}) {
+        Text("حالت روتینگ", color = TXT, fontWeight = FontWeight.Bold)
         listOf("global" to "گلوبال (همه از پروکسی)", "bypass-ir" to "دور زدن ایران", "bypass-cn" to "دور زدن چین", "direct" to "مستقیم").forEach { (v, l) ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(s.routingMode == v, { save(s.copy(routingMode = v)) }); Text(l)
-            }
+            Row(Modifier.fillMaxWidth().clickable { save(s.copy(routingMode = v)) }, verticalAlignment = Alignment.CenterVertically) { RadioButton(s.routingMode == v, { save(s.copy(routingMode = v)) }); Text(l, color = TXT) }
         }
-        Text("دور زدن ایران/چین به فایل‌های geo نیاز دارد (در این نسخه بندل نشده — فعلاً مثل گلوبال عمل می‌کند).", color = WARN, style = MaterialTheme.typography.labelSmall)
         SwitchRow("مسدودسازی تبلیغات", s.blockAds) { save(s.copy(blockAds = it)) }
         SwitchRow("Sniffing", s.enableSniffing) { save(s.copy(enableSniffing = it)) }
-        Divider(Modifier.padding(vertical = 10.dp))
+        HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
         SwitchRow("روتینگ ویژه (پیشرفته)", s.advancedRouting) { save(s.copy(advancedRouting = it)) }
         if (s.advancedRouting) {
-            Text("هر قانون: نوع، مقدار، مقصد. در «اتصال» گزینه 🧭 را انتخاب کن.", color = MUTED, style = MaterialTheme.typography.bodySmall)
+            Text("در «خانه» گزینه 🧭 را انتخاب کن.", color = MUTED, fontSize = 12.sp)
             s.routeRules.forEachIndexed { i, r ->
-                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD)) {
+                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
                     Column(Modifier.padding(10.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            TypeDrop(r.type) { nt -> save(s.copy(routeRules = s.routeRules.toMutableList().also { it[i] = r.copy(type = nt) })) }
-                            Spacer(Modifier.weight(1f))
-                            IconButton(onClick = { save(s.copy(routeRules = s.routeRules.filterIndexed { x, _ -> x != i })) }) { Icon(Icons.Filled.Delete, null, tint = BAD) }
+                            DropPick("نوع", listOf("domain" to "دامنه", "ip" to "IP", "port" to "پورت"), r.type) { nt -> save(s.copy(routeRules = s.routeRules.toMutableList().also { it[i] = r.copy(type = nt) })) }
+                            Spacer(Modifier.weight(1f)); IconButton(onClick = { save(s.copy(routeRules = s.routeRules.filterIndexed { x, _ -> x != i })) }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
                         }
-                        OutlinedTextField(r.value, { save(s.copy(routeRules = s.routeRules.toMutableList().also { m -> m[i] = r.copy(value = it) })) }, Modifier.fillMaxWidth(), label = { Text("مقدار (مثلاً domain:example.com یا 1.2.3.0/24 یا 443)") }, singleLine = true)
-                        TargetDrop(store, r.target) { save(s.copy(routeRules = s.routeRules.toMutableList().also { m -> m[i] = r.copy(target = it) })) }
+                        OutlinedTextField(r.value, { save(s.copy(routeRules = s.routeRules.toMutableList().also { m -> m[i] = r.copy(value = it) })) }, Modifier.fillMaxWidth(), placeholder = { Text("مقدار (geosite:google / 1.2.3.0/24 / 443)", fontSize = 11.sp) }, singleLine = true, colors = tfColors())
+                        DropPick("مقصد", targetOptionsFull(store), r.target) { save(s.copy(routeRules = s.routeRules.toMutableList().also { m -> m[i] = r.copy(target = it) })) }
                     }
                 }
             }
-            Button(onClick = { save(s.copy(routeRules = s.routeRules + RouteRule("domain", "", store.servers.firstOrNull()?.id ?: "direct"))) }) { Text("+ افزودن قانون") }
-            Spacer(Modifier.height(6.dp)); Text("بقیه‌ی ترافیک از:", color = MUTED)
-            TargetDrop(store, s.routeDefault) { save(s.copy(routeDefault = it)) }
+            Button(onClick = { save(s.copy(routeRules = s.routeRules + RouteRule("domain", "", store.servers.firstOrNull()?.id ?: "direct"))) }, Modifier.fillMaxWidth()) { Text("+ افزودن قانون") }
+            Spacer(Modifier.height(8.dp)); Text("بقیه‌ی ترافیک از:", color = MUTED)
+            DropPick("پیش‌فرض", targetOptionsFull(store), s.routeDefault) { save(s.copy(routeDefault = it)) }
         }
     }
 }
 
-@Composable private fun TypeDrop(current: String, onPick: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    Box { OutlinedButton(onClick = { open = true }) { Text(when (current) { "ip" -> "IP"; "port" -> "پورت"; else -> "دامنه" }) }
-        DropdownMenu(open, { open = false }) { listOf("domain" to "دامنه", "ip" to "IP", "port" to "پورت").forEach { (v, l) -> DropdownMenuItem(text = { Text(l) }, onClick = { onPick(v); open = false }) } } }
-}
-@Composable private fun TargetDrop(store: Store, current: String, onPick: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    val opts = buildList { add("proxy" to "پروکسی (سرور اول)"); add("direct" to "مستقیم"); add("block" to "بلاک"); store.servers.forEach { add(it.id to it.name) }; store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") } }
-    Box { OutlinedButton(onClick = { open = true }, Modifier.fillMaxWidth()) { Text(opts.firstOrNull { it.first == current }?.second ?: "مقصد", Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis); Icon(Icons.Filled.ArrowDropDown, null) }
-        DropdownMenu(open, { open = false }) { opts.forEach { (v, l) -> DropdownMenuItem(text = { Text(l) }, onClick = { onPick(v); open = false }) } } }
-}
-
-/* ============================= SETTINGS ============================= */
+/* ================================ SETTINGS ================================ */
 @Composable
 private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     var s by remember { mutableStateOf(store.settings) }
     fun save(n: AppSettings) { s = n; store.saveSettings(n); bump() }
-    ScreenHeader("تنظیمات", back) {}
-    Column(Modifier.fillMaxSize().padding(16.dp).padding(top = 56.dp).verticalScroll(rememberScrollState())) {
-        Text("پورت‌ها و DNS", style = MaterialTheme.typography.titleSmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            NumFld("SOCKS", s.socksPort, Modifier.weight(1f)) { save(s.copy(socksPort = it)) }
-            NumFld("HTTP", s.httpPort, Modifier.weight(1f)) { save(s.copy(httpPort = it)) }
-        }
-        OutlinedTextField(s.dns.joinToString(","), { save(s.copy(dns = it.split(",").map { d -> d.trim() }.filter { d -> d.isNotEmpty() })) }, Modifier.fillMaxWidth(), label = { Text("DNS (با کاما)") }, singleLine = true)
-        var logOpen by remember { mutableStateOf(false) }
-        Box { OutlinedButton(onClick = { logOpen = true }) { Text("سطح لاگ: ${s.logLevel}") }
-            DropdownMenu(logOpen, { logOpen = false }) { listOf("none", "error", "warning", "info", "debug").forEach { l -> DropdownMenuItem(text = { Text(l) }, onClick = { save(s.copy(logLevel = l)); logOpen = false }) } } }
+    Screen("تنظیمات", back, {}) {
+        Text("پورت‌ها و DNS", color = TXT, fontWeight = FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { NumFld("SOCKS", s.socksPort, Modifier.weight(1f)) { save(s.copy(socksPort = it)) }; NumFld("HTTP", s.httpPort, Modifier.weight(1f)) { save(s.copy(httpPort = it)) } }
+        OutlinedTextField(s.dns.joinToString(","), { save(s.copy(dns = it.split(",").map { d -> d.trim() }.filter { d -> d.isNotEmpty() })) }, Modifier.fillMaxWidth(), label = { Text("DNS (با کاما)") }, singleLine = true, colors = tfColors())
+        DropPick("سطح لاگ", listOf("none", "error", "warning", "info", "debug").map { it to it }, s.logLevel) { save(s.copy(logLevel = it)) }
         SwitchRow("IPv6", s.ipv6) { save(s.copy(ipv6 = it)) }
-        Divider(Modifier.padding(vertical = 10.dp))
-        Text("روتینگ بر اساس اپ (Per-App)", style = MaterialTheme.typography.titleSmall)
-        listOf("off" to "خاموش (همه‌ی سیستم)", "allow" to "فقط این اپ‌ها تونل شوند", "disallow" to "همه به‌جز این اپ‌ها").forEach { (v, l) ->
-            Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(s.perAppMode == v, { save(s.copy(perAppMode = v)) }); Text(l) }
+        HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
+        Text("روتینگ بر اساس اپ (Per-App)", color = TXT, fontWeight = FontWeight.Bold)
+        listOf("off" to "خاموش (همه‌ی سیستم)", "allow" to "فقط این اپ‌ها", "disallow" to "همه به‌جز این اپ‌ها").forEach { (v, l) ->
+            Row(Modifier.fillMaxWidth().clickable { save(s.copy(perAppMode = v)) }, verticalAlignment = Alignment.CenterVertically) { RadioButton(s.perAppMode == v, { save(s.copy(perAppMode = v)) }); Text(l, color = TXT) }
         }
         if (s.perAppMode != "off") AppPicker(s.perApps) { save(s.copy(perApps = it)) }
     }
@@ -532,67 +572,81 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 
 @Composable private fun AppPicker(selected: List<String>, onChange: (List<String>) -> Unit) {
     val ctx = LocalContext.current
-    val apps = remember {
-        val pm = ctx.packageManager
-        pm.getInstalledApplications(0).filter { pm.getLaunchIntentForPackage(it.packageName) != null }
-            .map { it.packageName to (pm.getApplicationLabel(it).toString()) }.sortedBy { it.second }
-    }
+    val apps = remember { runCatching { val pm = ctx.packageManager; pm.getInstalledApplications(0).filter { pm.getLaunchIntentForPackage(it.packageName) != null }.map { it.packageName to pm.getApplicationLabel(it).toString() }.sortedBy { it.second } }.getOrElse { emptyList() } }
     var q by remember { mutableStateOf("") }
-    OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), label = { Text("جستجوی اپ") }, singleLine = true)
-    Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
-        apps.filter { it.second.contains(q, true) || it.first.contains(q, true) }.take(200).forEach { (pkg, label) ->
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(selected.contains(pkg), { c -> onChange(if (c) selected + pkg else selected - pkg) })
-                Text(label, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+    OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("جستجوی اپ") }, singleLine = true, colors = tfColors())
+    Column {
+        apps.filter { it.second.contains(q, true) || it.first.contains(q, true) }.take(150).forEach { (pkg, label) ->
+            Row(Modifier.fillMaxWidth().clickable { onChange(if (selected.contains(pkg)) selected - pkg else selected + pkg) }, verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(selected.contains(pkg), { c -> onChange(if (c) selected + pkg else selected - pkg) }); Text(label, color = TXT, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
 }
 
-/* ============================= LOGS / MORE ============================= */
+/* ================================ LOGS / MORE ================================ */
 @Composable private fun LogsScreen(back: () -> Unit) {
     val log by VpnState.log.collectAsState()
-    ScreenHeader("لاگ‌ها", back) { OutlinedButton(onClick = { VpnState.clearLog() }) { Text("پاک کردن") } }
-    Column(Modifier.fillMaxSize().padding(12.dp).padding(top = 56.dp).verticalScroll(rememberScrollState())) {
-        if (log.isEmpty()) Text("لاگی نیست.", color = MUTED)
-        log.forEach { Text(it, style = MaterialTheme.typography.labelSmall, color = Color(0xFFB6C2D4)) }
+    Screen("لاگ‌ها", back, { IconButton(onClick = { VpnState.clearLog() }) { Icon(Icons.Filled.DeleteSweep, "clear", tint = MUTED) } }) {
+        if (log.isEmpty()) EmptyHint("لاگی نیست.")
+        SelectionContainer { Column { log.forEach { Text(it, color = Color(0xFFB6C2D4), fontSize = 11.sp) } } }
     }
 }
 
-@Composable private fun MoreMenu(open: (String) -> Unit) {
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("بیشتر", style = MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(8.dp))
-        listOf("chains" to "⛓ زنجیره پروکسی", "routing" to "🧭 روتینگ", "settings" to "⚙ تنظیمات", "logs" to "📜 لاگ‌ها").forEach { (k, l) ->
-            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { open(k) }, colors = CardDefaults.cardColors(containerColor = CARD)) {
-                Text(l, Modifier.padding(16.dp))
+@Composable private fun MoreMenu(store: Store, open: (String) -> Unit) {
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        TopBar("بیشتر") {}
+        Column(Modifier.padding(horizontal = 16.dp)) {
+            listOf(Triple("chains", "زنجیره پروکسی", Icons.Filled.Link), Triple("routing", "روتینگ", Icons.Filled.CallSplit), Triple("settings", "تنظیمات", Icons.Filled.Settings), Triple("logs", "لاگ‌ها", Icons.Filled.Article)).forEach { (k, l, ic) ->
+                Card(Modifier.fillMaxWidth().padding(vertical = 5.dp).clickable { open(k) }, colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Icon(ic, null, tint = PRIMARY); Spacer(Modifier.width(12.dp)); Text(l, color = TXT, modifier = Modifier.weight(1f)); Icon(Icons.Filled.ChevronLeft, null, tint = MUTED) }
+                }
             }
+            val crash = IRApp.readCrash(LocalContext.current.applicationContext as android.app.Application)
+            if (crash != null) Text("یک کرش ثبت شده (تنظیمات→لاگ نیست، در حافظه است).", color = AMBER, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
         }
     }
 }
 
-/* ============================= small shared UI ============================= */
-@Composable private fun ScreenHeader(title: String, back: () -> Unit, actions: @Composable () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = back) { Icon(Icons.Filled.ArrowBack, "back") }
-        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-        actions()
+/* ================================ shared ================================ */
+@Composable private fun TopBar(title: String, actions: @Composable RowScope.() -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, color = TXT, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); actions()
+    }
+}
+@Composable private fun Screen(title: String, back: () -> Unit, actions: @Composable RowScope.() -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = back) { Icon(Icons.Filled.ArrowBack, "back", tint = TXT) }
+            Text(title, color = TXT, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); actions()
+        }
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp), content = content)
     }
 }
 @Composable private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Text(label, Modifier.weight(1f)); Switch(checked, onChange) }
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { Text(label, color = TXT, modifier = Modifier.weight(1f)); Switch(checked, onChange) }
 }
 @Composable private fun Fld(label: String, value: String, onChange: (String) -> Unit) {
-    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 3.dp), label = { Text(label) }, singleLine = true)
+    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 3.dp), label = { Text(label) }, singleLine = true, colors = tfColors())
 }
 @Composable private fun NumFld(label: String, value: Int, modifier: Modifier = Modifier, onChange: (Int) -> Unit) {
-    OutlinedTextField(value.takeIf { it > 0 }?.toString() ?: "", { onChange(it.toIntOrNull() ?: 0) }, modifier, label = { Text(label) }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+    OutlinedTextField(value.takeIf { it > 0 }?.toString() ?: "", { onChange(it.toIntOrNull() ?: 0) }, modifier, label = { Text(label) }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = tfColors())
 }
-@Composable private fun FlowButtons(content: @Composable () -> Unit) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) { content() }
+@Composable private fun DropPick(label: String, options: List<Pair<String, String>>, current: String, onPick: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box(Modifier.padding(vertical = 4.dp)) {
+        OutlinedButton(onClick = { open = true }, Modifier.fillMaxWidth()) { Text((options.firstOrNull { it.first == current }?.second ?: label), Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis); Icon(Icons.Filled.ArrowDropDown, null) }
+        DropdownMenu(open, { open = false }) { options.forEach { (v, l) -> DropdownMenuItem(text = { Text(l) }, onClick = { onPick(v); open = false }) } }
+    }
 }
-private fun usedPorts(store: Store): Set<Int> {
-    val s = HashSet<Int>(); s.add(store.settings.socksPort); s.add(store.settings.httpPort)
-    store.pool.forEach { if (it.socksPort > 0) s.add(it.socksPort); if (it.httpPort > 0) s.add(it.httpPort) }
-    return s
-}
+@Composable private fun EmptyHint(text: String) { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { Text(text, color = MUTED) } }
+@Composable private fun tfColors() = OutlinedTextFieldDefaults.colors(focusedBorderColor = PRIMARY, unfocusedBorderColor = STROKE, focusedTextColor = TXT, unfocusedTextColor = TXT, cursorColor = PRIMARY)
+
+private fun targetOptions(store: Store): List<Pair<String, String>> = buildList { store.servers.forEach { add(it.id to it.name) }; store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") } }
+private fun targetOptionsFull(store: Store): List<Pair<String, String>> = buildList { add("proxy" to "پروکسی (سرور اول)"); add("direct" to "مستقیم"); add("block" to "بلاک"); addAll(targetOptions(store)) }
+private fun usedPorts(store: Store): Set<Int> { val s = HashSet<Int>(); s.add(store.settings.socksPort); s.add(store.settings.httpPort); store.pool.forEach { if (it.socksPort > 0) s.add(it.socksPort); if (it.httpPort > 0) s.add(it.httpPort) }; return s }
+
+fun fmtBytes(n: Long): String { var v = n.toDouble(); val u = arrayOf("B", "KB", "MB", "GB", "TB"); var i = 0; while (v >= 1024 && i < u.size - 1) { v /= 1024; i++ }; return (if (i == 0) v.toLong().toString() else String.format("%.1f", v)) + " " + u[i] }
+fun fmtSpeed(n: Long) = fmtBytes(n) + "/s"
+private fun badge(p: String) = when (p) { "vless" -> "VLESS"; "vmess" -> "VMESS"; "trojan" -> "TROJAN"; "shadowsocks" -> "SS"; "wireguard" -> "WG"; "socks" -> "SOCKS"; "http" -> "HTTP"; else -> p.uppercase() }
+private fun flag(cc: String): String { if (cc.length != 2) return "🏳"; val base = 0x1F1E6; return String(Character.toChars(base + (cc[0].uppercaseChar() - 'A'))) + String(Character.toChars(base + (cc[1].uppercaseChar() - 'A'))) }

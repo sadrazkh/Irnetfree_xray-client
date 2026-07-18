@@ -59,7 +59,8 @@ class XrayVpnService : VpnService() {
 
         VpnState.set(ConnState.CONNECTING, label)
         VpnState.addLog("Connecting: $label")
-        startForeground(NOTIF_ID, buildNotification(label, false))
+        runCatching { startForeground(NOTIF_ID, buildNotification(label, false)) }
+            .onFailure { VpnState.addLog("startForeground failed: ${it.message}") }
 
         try {
             if (!XrayCore.available) { fail("Xray core (libv2ray) is not bundled in this build."); stopAll(); return }
@@ -163,7 +164,10 @@ class XrayVpnService : VpnService() {
             .setSmallIcon(com.irnetfree.vpn.R.drawable.ic_stat_vpn)
             .setOngoing(true)
             .setContentIntent(open)
-        if (connected) b.addAction(Notification.Action.Builder(null as android.graphics.drawable.Icon?, "قطع", disconnect).build())
+        if (connected) {
+            val icon = android.graphics.drawable.Icon.createWithResource(this, com.irnetfree.vpn.R.drawable.ic_stat_vpn)
+            b.addAction(Notification.Action.Builder(icon, "قطع", disconnect).build())
+        }
         return b.build()
     }
     private fun updateNotification(text: String, connected: Boolean) {
