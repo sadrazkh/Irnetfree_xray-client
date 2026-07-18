@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -157,6 +158,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     var ping by remember { mutableStateOf("—") }
     var delay by remember { mutableStateOf("—") }
     var pickerOpen by remember { mutableStateOf(false) }
+    var homeSheet by remember { mutableStateOf<String?>(null) }
 
     val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         if (res.resultCode == android.app.Activity.RESULT_OK) doConnect(ctx, store)
@@ -179,7 +181,9 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("IR", color = TXT, fontWeight = FontWeight.Black, fontSize = 20.sp)
             Text("NetFree", color = PRIMARY, fontWeight = FontWeight.Black, fontSize = 20.sp)
-            Spacer(Modifier.weight(1f)); StatusPill(state)
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = { homeSheet = "import" }) { Icon(Icons.Filled.AddCircle, "add config", tint = PRIMARY) }
+            StatusPill(state)
         }
         Spacer(Modifier.height(24.dp))
         Box(contentAlignment = Alignment.Center, modifier = Modifier.size(210.dp)) {
@@ -234,6 +238,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         Spacer(Modifier.height(16.dp))
     }
     if (pickerOpen) SelectionSheet(store, { pickerOpen = false }) { pickerOpen = false; bump() }
+    AddConfigSheets(store, homeSheet, { homeSheet = it }, bump)
 }
 
 private fun doConnect(ctx: Context, store: Store) {
@@ -287,28 +292,9 @@ private fun doConnect(ctx: Context, store: Store) {
 @Composable
 private fun ServersScreen(store: Store, bump: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var importText by remember { mutableStateOf("") }
     var q by remember { mutableStateOf("") }
-    var msg by remember { mutableStateOf("") }
     var sheet by remember { mutableStateOf<String?>(null) }
     val pings = remember { mutableStateMapOf<String, String>() }
-    val ctx = LocalContext.current
-
-    fun importNow(text: String) {
-        val (parsed, errs) = LinkParser.parseMany(text)
-        store.servers.addAll(parsed); store.saveServers()
-        if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
-        msg = "${parsed.size} added" + if (errs.isNotEmpty()) " (${errs.size} errors)" else ""
-    }
-    val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
-        val t = res.contents; if (!t.isNullOrBlank()) { importNow(t); sheet = null; bump() }
-    }
-    fun launchQr() = qrLauncher.launch(ScanOptions().setOrientationLocked(false).setBeepEnabled(false).setPrompt("Point the camera at the config QR"))
-    fun pasteClip() {
-        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val t = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString()
-        if (!t.isNullOrBlank()) importText = t else msg = "Clipboard is empty"
-    }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         TopBar("Servers") { IconButton(onClick = { sheet = "import" }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) } }
@@ -319,7 +305,6 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                 AssistChip(onClick = { sheet = "wg" }, label = { Text("+ WireGuard") })
                 AssistChip(onClick = { sheet = "proxy" }, label = { Text("+ SOCKS/HTTP") })
             }
-            if (msg.isNotEmpty()) Text(msg, color = GREEN, fontSize = 12.sp)
             if (store.servers.isEmpty()) EmptyHint("No servers yet — tap + to add one.")
             store.servers.filter { it.name.contains(q, true) || it.address.contains(q, true) }.forEach { s ->
                 ConfigCard(s, store.selection == s.id, pings[s.id],
@@ -330,12 +315,36 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
             Spacer(Modifier.height(16.dp))
         }
     }
+    AddConfigSheets(store, sheet, { sheet = it }, bump)
+}
+
+/** Shared add-config flow (paste / QR / manual) usable from Home and Servers. */
+@Composable
+private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) -> Unit, bump: () -> Unit) {
+    val ctx = LocalContext.current
+    var importText by remember { mutableStateOf("") }
+    fun importNow(text: String) {
+        val (parsed, errs) = LinkParser.parseMany(text)
+        store.servers.addAll(parsed); store.saveServers()
+        if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
+        Toast.makeText(ctx, "${parsed.size} added" + if (errs.isNotEmpty()) " (${errs.size} errors)" else "", Toast.LENGTH_SHORT).show()
+    }
+    val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
+        val t = res.contents; if (!t.isNullOrBlank()) { importNow(t); setSheet(null); bump() }
+    }
+    fun launchQr() = qrLauncher.launch(ScanOptions().setOrientationLocked(false).setBeepEnabled(false).setPrompt("Point the camera at the config QR"))
+    fun pasteClip() {
+        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val t = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString()
+        if (!t.isNullOrBlank()) importText = t else Toast.makeText(ctx, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+    }
     when (sheet) {
-        "import" -> AddLinkSheet(importText, { importText = it }, { pasteClip() }, { launchQr() }, { sheet = null }) {
-            if (importText.isNotBlank()) importNow(importText); importText = ""; sheet = null; bump()
+        "import" -> AddLinkSheet(importText, { importText = it }, { pasteClip() }, { launchQr() }, { setSheet(null) }) {
+            if (importText.isNotBlank()) importNow(importText); importText = ""; setSheet(null); bump()
         }
-        "wg" -> WgSheet(store, { sheet = null }) { sheet = null; bump() }
-        "proxy" -> ProxySheet(store, { sheet = null }) { sheet = null; bump() }
+        "wg" -> WgSheet(store, { setSheet(null) }) { setSheet(null); bump() }
+        "proxy" -> ProxySheet(store, { setSheet(null) }) { setSheet(null); bump() }
+        else -> {}
     }
 }
 
