@@ -19,23 +19,20 @@ libs="$here/app/libs"
 jni="$here/app/src/main/jniLibs"
 mkdir -p "$libs"
 
-echo "==> Fetching libv2ray.aar (Xray core)"
-tag="${LIBV2RAY_TAG:-}"
-api="https://api.github.com/repos/2dust/AndroidLibXrayLite/releases"
-if [ -z "$tag" ]; then
-  url="$(curl -fsSL "$api/latest" | grep -oE '"browser_download_url": *"[^"]*\.aar"' | head -n1 | cut -d'"' -f4)"
+# Download libv2ray.aar directly from a pinned release asset. We deliberately do
+# NOT hit the GitHub API (unauthenticated API is rate-limited to 60/h per IP and
+# CI runners share IPs, which was killing the build with a 403). A release-asset
+# download redirects to a CDN and is not rate-limited. Override the tag with
+# LIBV2RAY_TAG=vX.Y.Z if you want a different core version.
+TAG="${LIBV2RAY_TAG:-v26.7.11}"
+url="https://github.com/2dust/AndroidLibXrayLite/releases/download/${TAG}/libv2ray.aar"
+echo "==> Fetching libv2ray.aar (Xray core, $TAG)"
+if curl -fSL --retry 3 --retry-delay 2 "$url" -o "$libs/libv2ray.aar"; then
+  echo "    saved -> app/libs/libv2ray.aar"
 else
-  url="$(curl -fsSL "$api/tags/$tag" | grep -oE '"browser_download_url": *"[^"]*\.aar"' | head -n1 | cut -d'"' -f4)"
-fi
-# Non-fatal: the app is built against the core via reflection, so a missing/failed
-# libv2ray.aar still yields an installable APK (the tunnel just won't start until
-# the core is present). We only warn instead of aborting the whole build.
-if [ -z "$url" ]; then
-  echo "WARN: could not find libv2ray.aar asset in AndroidLibXrayLite releases — building without the core." >&2
-elif curl -fSL "$url" -o "$libs/libv2ray.aar"; then
-  echo "    saved -> app/libs/libv2ray.aar ($url)"
-else
-  echo "WARN: failed to download libv2ray.aar — building without the core." >&2
+  # Non-fatal: the app is built against the core via reflection, so a failed
+  # download still yields an installable APK (tunnel won't start without it).
+  echo "WARN: failed to download libv2ray.aar from $url — building without the core." >&2
   rm -f "$libs/libv2ray.aar"
 fi
 
