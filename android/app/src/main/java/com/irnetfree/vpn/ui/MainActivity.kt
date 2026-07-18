@@ -564,7 +564,19 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
                         Icon(Icons.Filled.CloudDownload, null, tint = PRIMARY); Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(sub.name, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${sub.serverCount} servers" + if (sub.total > 0) " · ${fmtBytes(sub.upload + sub.download)}/${fmtBytes(sub.total)}" else "", color = MUTED, fontSize = 12.sp)
+                            Text("${sub.serverCount} servers", color = MUTED, fontSize = 12.sp)
+                            if (sub.total > 0) {
+                                val used = sub.upload + sub.download
+                                val pct = (used.toDouble() / sub.total * 100).toInt().coerceIn(0, 100)
+                                val barColor = if (pct >= 90) BAD else if (pct >= 70) AMBER else GREEN
+                                Spacer(Modifier.height(4.dp))
+                                Text("${fmtBytes(used)} / ${fmtBytes(sub.total)} · $pct%", color = MUTED, fontSize = 11.sp)
+                                LinearProgressIndicator(progress = pct / 100f, modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)), color = barColor, trackColor = STROKE)
+                            }
+                            if (sub.expire > 0) {
+                                val daysLeft = (sub.expire * 1000L - System.currentTimeMillis()) / 86_400_000L
+                                Text(if (daysLeft >= 0) "$daysLeft days left" else "Expired", color = if (daysLeft < 0) BAD else if (daysLeft <= 3) AMBER else MUTED, fontSize = 11.sp)
+                            }
                         }
                         IconButton(onClick = { refresh(sub) }) { Icon(Icons.Filled.Refresh, "refresh", tint = MUTED) }
                         IconButton(onClick = { store.servers.removeAll { it.subId == sub.id }; store.saveServers(); store.subs.removeAll { it.id == sub.id }; store.saveSubs(); bump() }) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD) }
