@@ -121,15 +121,38 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Fetch native libs (libv2ray + tun2socks)
-        env:
-          # Optional: point these at prebuilt libhev-socks5-tunnel.so URLs to
-          # bundle the runtime tunnel. Without them the APK still builds; the
-          # TUN just won't start until the .so is present.
-          HEV_SO_URL_ARM64_V8A: ${{ vars.HEV_SO_URL_ARM64_V8A }}
-          HEV_SO_URL_ARMEABI_V7A: ${{ vars.HEV_SO_URL_ARMEABI_V7A }}
-          HEV_SO_URL_X86_64: ${{ vars.HEV_SO_URL_X86_64 }}
+      - name: Set up NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Fetch native libs (libv2ray)
         run: bash scripts/fetch-libs.sh
+
+      - name: Build tun2socks (hev-socks5-tunnel from source)
+        id: hev
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            set -e
+            HEV_TAG=2.16.0
+            work="$RUNNER_TEMP/hev"
+            rm -rf "$work"; mkdir -p "$work"; cd "$work"
+            echo "== cloning hev-socks5-tunnel $HEV_TAG =="
+            git clone --recursive --depth 1 --branch "$HEV_TAG" https://github.com/heiher/hev-socks5-tunnel jni
+            echo "== ndk-build (arm64-v8a armeabi-v7a x86_64) =="
+            ndk-build -j"$(nproc)" APP_ABI="arm64-v8a armeabi-v7a x86_64" APP_PLATFORM=android-29
+            echo "== copying .so into jniLibs =="
+            for abi in arm64-v8a armeabi-v7a x86_64; do
+              dst="$GITHUB_WORKSPACE/android/app/src/main/jniLibs/$abi"
+              mkdir -p "$dst"
+              cp "$work/libs/$abi/libhev-socks5-tunnel.so" "$dst/"
+              ls -la "$dst/libhev-socks5-tunnel.so"
+            done
+            echo "== hev tun2socks built OK =="
+          } 2>&1 | tee "$GITHUB_WORKSPACE/android/hev-build.txt"
 
       - name: Decode release keystore (if configured)
         id: keystore
@@ -169,7 +192,9 @@ jobs:
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          files: android/build-log.txt
+          files: |
+            android/build-log.txt
+            android/hev-build.txt
           fail_on_unmatched_files: false
 
       - name: Collect APK
