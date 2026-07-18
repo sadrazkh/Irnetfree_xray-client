@@ -298,10 +298,19 @@ object ConfigBuilder {
         val p = fragStr.split(",").map { it.trim() }
         return JSONObject().put("tag", tag).put("protocol", "freedom")
             .put("settings", JSONObject().put("domainStrategy", "AsIs")
-                .put("fragment", JSONObject()
+                .put("fragment", JSONObject()   // xray rejects LengthMin=0 -> clamp length min to >=1
                     .put("packets", p.getOrNull(0)?.takeIf { it.isNotEmpty() } ?: "tlshello")
-                    .put("length", p.getOrNull(1)?.takeIf { it.isNotEmpty() } ?: "100-200")
-                    .put("interval", p.getOrNull(2)?.takeIf { it.isNotEmpty() } ?: "10-20")))
+                    .put("length", fragRange(p.getOrNull(1), "100-200", 1))
+                    .put("interval", fragRange(p.getOrNull(2), "10-20", 0))))
+    }
+    private fun fragRange(v: String?, def: String, floor: Int): String {
+        if (v.isNullOrEmpty()) return def
+        val parts = v.split("-")
+        var min = parts.getOrNull(0)?.toIntOrNull() ?: return def
+        var max = parts.getOrNull(1)?.toIntOrNull() ?: min
+        if (min < floor) min = floor
+        if (max < min) max = min
+        return "$min-$max"
     }
 
     private fun cloneOut(outbound: JSONObject, tag: String): JSONObject = JSONObject(outbound.toString()).put("tag", tag)

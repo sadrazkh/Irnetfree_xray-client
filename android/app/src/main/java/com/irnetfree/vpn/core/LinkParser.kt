@@ -277,7 +277,7 @@ object LinkParser {
 
     /* ------------------------- shared stream builder ------------------------- */
 
-    private fun buildStream(q: Map<String, String?>): JSONObject {
+    internal fun buildStream(q: Map<String, String?>): JSONObject {
         val net = (q["type"] ?: q["network"] ?: "tcp").lowercase()
         val security = (q["security"] ?: "none").lowercase()
         val stream = JSONObject().put("network", net).put("security", security)

@@ -550,6 +550,12 @@ function applyServerEdits(server, f) {
     }
   }
 
+  // TLS fragmentation (packets,length,interval). Empty clears it.
+  if (f.fragment != null) {
+    const fr = String(f.fragment).trim();
+    if (fr) ob._fragment = fr; else delete ob._fragment;
+  }
+
   return out;
 }
 

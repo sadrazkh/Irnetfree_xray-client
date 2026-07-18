@@ -257,10 +257,12 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 ping = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(srv.address, srv.port) }; ping = if (ms >= 0) "${ms}ms" else "fail" }
             }, modifier = Modifier.weight(1f)) { Text("Ping " + if (ping != "—") ping else "") }
             OutlinedButton(onClick = {
-                latency = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.httpLatency() }; latency = if (ms >= 0) "${ms}ms" else "fail" }
+                val sp = if (state == ConnState.CONNECTED) store.settings.socksPort else null
+                latency = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.httpLatency(sp) }; latency = if (ms >= 0) "${ms}ms" else "fail" }
             }, modifier = Modifier.weight(1f)) { Text("Test") }
             OutlinedButton(onClick = {
-                ip = "…"; scope.launch { val r = withContext(Dispatchers.IO) { Diagnostics.ipInfo() }; ip = if (r.ok) "${flag(r.countryCode)} ${r.ip}" else "fail" }
+                val sp = if (state == ConnState.CONNECTED) store.settings.socksPort else null
+                ip = "…"; scope.launch { val r = withContext(Dispatchers.IO) { Diagnostics.ipInfo(sp) }; ip = if (r.ok) "${flag(r.countryCode)} ${r.ip}" else "fail" }
             }, modifier = Modifier.weight(1f)) { Text("IP") }
         }
         Text("«Test» measures real latency through the tunnel; «IP» shows your exit IP — both prove it works.", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
@@ -324,6 +326,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     val scope = rememberCoroutineScope()
     var q by remember { mutableStateOf("") }
     var sheet by remember { mutableStateOf<String?>(null) }
+    var editId by remember { mutableStateOf<String?>(null) }
     val pings = remember { mutableStateMapOf<String, String>() }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -340,12 +343,19 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                 ConfigCard(s, store.selection == s.id, pings[s.id],
                     onSelect = { store.saveSelection(s.id); bump() },
                     onPing = { pings[s.id] = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }; pings[s.id] = if (ms >= 0) "${ms}ms" else "fail" } },
+                    onEdit = { editId = s.id },
                     onDelete = { store.deleteServer(s.id); bump() })
             }
             Spacer(Modifier.height(16.dp))
         }
     }
     AddConfigSheets(store, sheet, { sheet = it }, bump)
+    val editing = editId?.let { store.serverById(it) }
+    if (editing != null) EditConfigSheet(editing, onDismiss = { editId = null }) { updated ->
+        val idx = store.servers.indexOfFirst { it.id == updated.id }
+        if (idx >= 0) { store.servers[idx] = updated; store.saveServers() }
+        editId = null; bump()
+    }
 }
 
 /** Shared add-config flow (paste / QR / manual) usable from Home and Servers. */
@@ -353,14 +363,42 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
 private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) -> Unit, bump: () -> Unit) {
     val ctx = LocalContext.current
     var importText by remember { mutableStateOf("") }
-    fun importNow(text: String) {
-        val (parsed, errs) = LinkParser.parseMany(text)
-        store.servers.addAll(parsed); store.saveServers()
-        if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
-        Toast.makeText(ctx, "${parsed.size} added" + if (errs.isNotEmpty()) " (${errs.size} errors)" else "", Toast.LENGTH_SHORT).show()
+    val scope = rememberCoroutineScope()
+    fun addSubAndFetch(url: String) {
+        val sub = Subscription(newId("sub"), url.trim().take(30), url.trim())
+        store.subs.add(sub); store.saveSubs()
+        Toast.makeText(ctx, "Fetching subscription…", Toast.LENGTH_SHORT).show()
+        scope.launch {
+            try {
+                val r = withContext(Dispatchers.IO) { Subscriptions.fetch(sub.url) }
+                store.servers.removeAll { it.subId == sub.id }
+                val tagged = r.servers.map { it.copy(subId = sub.id) }
+                store.servers.addAll(tagged); store.saveServers()
+                if (tagged.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
+                val idx = store.subs.indexOfFirst { it.id == sub.id }
+                if (idx >= 0) store.subs[idx] = sub.copy(serverCount = tagged.size, lastUpdated = System.currentTimeMillis(),
+                    upload = r.usage?.upload ?: 0, download = r.usage?.download ?: 0, total = r.usage?.total ?: 0, expire = r.usage?.expire ?: 0)
+                store.saveSubs(); Toast.makeText(ctx, "Subscription: ${tagged.size} servers added", Toast.LENGTH_SHORT).show(); bump()
+            } catch (e: Exception) { Toast.makeText(ctx, "Subscription error: ${e.message}", Toast.LENGTH_LONG).show(); bump() }
+        }
+    }
+    // Auto-detect: http(s) lines -> subscriptions (fetched); the rest -> config(s).
+    fun smartImport(text: String) {
+        val lines = text.split(Regex("\\r?\\n")).map { it.trim() }.filter { it.isNotEmpty() }
+        val isUrl = { s: String -> s.startsWith("http://", true) || s.startsWith("https://", true) }
+        val urls = lines.filter(isUrl)
+        val rest = lines.filterNot(isUrl).joinToString("\n")
+        urls.forEach { addSubAndFetch(it) }
+        if (rest.isNotBlank()) {
+            val (parsed, errs) = LinkParser.parseMany(rest)
+            store.servers.addAll(parsed); store.saveServers()
+            if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
+            if (urls.isEmpty()) Toast.makeText(ctx, "${parsed.size} config(s) added" + if (errs.isNotEmpty()) " (${errs.size} errors)" else "", Toast.LENGTH_SHORT).show()
+        } else if (urls.isEmpty()) Toast.makeText(ctx, "Nothing recognized", Toast.LENGTH_SHORT).show()
+        bump()
     }
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
-        val t = res.contents; if (!t.isNullOrBlank()) { importNow(t); setSheet(null); bump() }
+        val t = res.contents; if (!t.isNullOrBlank()) { smartImport(t); setSheet(null); bump() }
     }
     fun launchQr() = qrLauncher.launch(ScanOptions().setOrientationLocked(false).setBeepEnabled(false).setPrompt("Point the camera at the config QR"))
     fun pasteClip() {
@@ -370,7 +408,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     }
     when (sheet) {
         "import" -> AddLinkSheet(importText, { importText = it }, { pasteClip() }, { launchQr() }, { setSheet(null) }) {
-            if (importText.isNotBlank()) importNow(importText); importText = ""; setSheet(null); bump()
+            if (importText.isNotBlank()) smartImport(importText); importText = ""; setSheet(null); bump()
         }
         "wg" -> WgSheet(store, { setSheet(null) }) { setSheet(null); bump() }
         "proxy" -> ProxySheet(store, { setSheet(null) }) { setSheet(null); bump() }
@@ -397,18 +435,19 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     }
 }
 
-@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, ping: String?, onSelect: () -> Unit, onPing: () -> Unit, onDelete: () -> Unit) {
+@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, ping: String?, onSelect: () -> Unit, onPing: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
     Card(Modifier.fillMaxWidth().padding(vertical = 5.dp).clickable { onSelect() }, colors = CardDefaults.cardColors(containerColor = if (selected) CARD2 else CARD), shape = RoundedCornerShape(14.dp),
         border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, GREEN) else null) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             ProtoBadge(s.protocol); Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(s.name, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${s.address}:${s.port}", color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            if (ping != null) Text(ping, color = if (ping == "fail") BAD else GREEN, fontSize = 12.sp, modifier = Modifier.padding(end = 6.dp))
-            IconButton(onClick = onPing) { Icon(Icons.Filled.NetworkCheck, "ping", tint = MUTED) }
-            IconButton(onClick = onDelete) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD) }
+            if (ping != null) Text(ping, color = if (ping == "fail") BAD else GREEN, fontSize = 12.sp)
+            IconButton(onClick = onPing, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.NetworkCheck, "ping", tint = MUTED, modifier = Modifier.size(20.dp)) }
+            IconButton(onClick = onEdit, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.Edit, "edit", tint = MUTED, modifier = Modifier.size(20.dp)) }
+            IconButton(onClick = onDelete, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD, modifier = Modifier.size(20.dp)) }
         }
     }
 }
@@ -442,6 +481,53 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             Fld("Name", name) { name = it }; Fld("Host", host) { host = it }; Fld("Port", port) { port = it }; Fld("Username (optional)", user) { user = it }; Fld("Password (optional)", pass) { pass = it }
             Spacer(Modifier.height(10.dp))
             Button(onClick = { if (host.isNotBlank() && port.isNotBlank()) { val s = LinkParser.makeProxyServer(type, name, host, port.toIntOrNull() ?: 1080, user, pass); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() } }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun EditConfigSheet(server: ServerConfig, onDismiss: () -> Unit, onSave: (ServerConfig) -> Unit) {
+    val f = remember(server.id) { ServerEditor.read(server) }
+    var name by remember { mutableStateOf(f.name) }; var address by remember { mutableStateOf(f.address) }; var port by remember { mutableStateOf(f.port) }
+    var cred by remember { mutableStateOf(f.cred) }; var network by remember { mutableStateOf(f.network) }; var security by remember { mutableStateOf(f.security) }
+    var sni by remember { mutableStateOf(f.sni) }; var host by remember { mutableStateOf(f.host) }; var path by remember { mutableStateOf(f.path) }; var fp by remember { mutableStateOf(f.fp) }
+    var pbk by remember { mutableStateOf(f.pbk) }; var sid by remember { mutableStateOf(f.sid) }; var allowInsecure by remember { mutableStateOf(f.allowInsecure) }; var method by remember { mutableStateOf(f.method) }
+    var pUser by remember { mutableStateOf(f.proxyUser) }; var pPass by remember { mutableStateOf(f.proxyPass) }
+    var wgPub by remember { mutableStateOf(f.wgPub) }; var wgAddr by remember { mutableStateOf(f.wgAddr) }; var wgPsk by remember { mutableStateOf(f.wgPsk) }
+    var wgMtu by remember { mutableStateOf(f.wgMtu) }; var wgReserved by remember { mutableStateOf(f.wgReserved) }; var wgAllowed by remember { mutableStateOf(f.wgAllowed) }
+    var fragment by remember { mutableStateOf(f.fragment) }
+    val isStd = server.protocol == "vless" || server.protocol == "vmess" || server.protocol == "trojan"
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 16.dp)) {
+            Text("Edit · ${badge(server.protocol)}", color = TXT, fontWeight = FontWeight.Bold)
+            Fld("Name", name) { name = it }; Fld("Address", address) { address = it }; Fld("Port", port) { port = it }
+            when (server.protocol) {
+                "vless", "vmess" -> Fld("UUID", cred) { cred = it }
+                "trojan" -> Fld("Password", cred) { cred = it }
+                "shadowsocks" -> { Fld("Password", cred) { cred = it }; Fld("Method", method) { method = it } }
+                "socks", "http" -> { Fld("Username (optional)", pUser) { pUser = it }; Fld("Password (optional)", pPass) { pPass = it } }
+                "wireguard" -> Fld("Private Key", cred) { cred = it }
+            }
+            if (isStd) {
+                DropPick("Transport", listOf("tcp" to "tcp", "ws" to "ws", "grpc" to "grpc", "h2" to "h2", "xhttp" to "xhttp", "kcp" to "kcp"), network) { network = it }
+                DropPick("Security", listOf("none" to "none", "tls" to "tls", "reality" to "reality"), security) { security = it }
+                Fld("SNI", sni) { sni = it }; Fld("Host", host) { host = it }; Fld("Path / ServiceName", path) { path = it }; Fld("Fingerprint", fp) { fp = it }
+                if (security == "reality") { Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it } }
+                SwitchRow("Allow Insecure", allowInsecure) { allowInsecure = it }
+            }
+            if (server.protocol == "wireguard") {
+                Fld("Peer Public Key", wgPub) { wgPub = it }; Fld("Address (/32)", wgAddr) { wgAddr = it }; Fld("PSK", wgPsk) { wgPsk = it }
+                Fld("MTU", wgMtu) { wgMtu = it }; Fld("Reserved", wgReserved) { wgReserved = it }; Fld("Allowed IPs", wgAllowed) { wgAllowed = it }
+            }
+            HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
+            Fld("Fragment (packets,length,interval — empty = off)", fragment) { fragment = it }
+            Text("e.g. tlshello,100-200,10-20", color = MUTED, fontSize = 11.sp)
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = {
+                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment)
+                onSave(ServerEditor.apply(server, nf))
+            }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
     }
 }

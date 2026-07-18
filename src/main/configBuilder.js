@@ -452,9 +452,26 @@ function makeFragmentOutbound(tag, fragStr) {
     protocol: 'freedom',
     settings: {
       domainStrategy: 'AsIs',
-      fragment: { packets: p[0] || 'tlshello', length: p[1] || '100-200', interval: p[2] || '10-20' }
+      // xray rejects LengthMin=0, so clamp length min to >=1; keep packets/interval sane.
+      fragment: {
+        packets: (p[0] && p[0].length) ? p[0] : 'tlshello',
+        length: fragRange(p[1], '100-200', 1),
+        interval: fragRange(p[2], '10-20', 0)
+      }
     }
   };
+}
+
+// Normalize a "min-max" (or single) numeric range; clamp min to `floor`.
+function fragRange(v, def, floor) {
+  if (!v) return def;
+  const parts = String(v).split('-').map(x => parseInt(x, 10));
+  let min = parts[0];
+  if (!Number.isFinite(min)) return def;
+  let max = (parts.length > 1 && Number.isFinite(parts[1])) ? parts[1] : min;
+  if (min < floor) min = floor;
+  if (max < min) max = min;
+  return min + '-' + max;
 }
 
 module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds };
