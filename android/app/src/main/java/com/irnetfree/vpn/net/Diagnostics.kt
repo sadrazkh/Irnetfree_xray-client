@@ -31,17 +31,34 @@ object Diagnostics {
         } catch (e: Exception) { -1 }
     }
 
-    /** Egress IP + geo. When the VPN is up this reflects the exit (whole-device tunnel). */
+    /**
+     * Egress IP + geo. When the VPN is up this reflects the exit (whole-device
+     * tunnel). Uses HTTPS providers (HTTP is blocked by default on Android 9+),
+     * with a fallback so a single provider being down doesn't break the check.
+     */
     fun ipInfo(): IpInfo {
-        return try {
-            val c = (URL("http://ip-api.com/json/?fields=status,message,country,countryCode,isp,query").openConnection() as HttpURLConnection).apply {
-                connectTimeout = 8000; readTimeout = 8000; setRequestProperty("User-Agent", "IRNetFree/Android")
-            }
-            val body = c.inputStream.bufferedReader().use { it.readText() }
-            c.disconnect()
-            val o = JSONObject(body)
-            if (o.optString("status") != "success") return IpInfo(false, error = o.optString("message", "failed"))
-            IpInfo(true, o.optString("query"), o.optString("country"), o.optString("countryCode"), o.optString("isp"))
-        } catch (e: Exception) { IpInfo(false, error = e.message ?: "error") }
+        ipwhois()?.let { if (it.ok) return it }
+        ipapiCo()?.let { if (it.ok) return it }
+        return IpInfo(false, error = "all IP providers failed")
+    }
+
+    private fun ipwhois(): IpInfo? = try {
+        val o = JSONObject(httpGet("https://ipwho.is/"))
+        if (!o.optBoolean("success", true)) IpInfo(false, error = o.optString("message", "failed"))
+        else IpInfo(true, o.optString("ip"), o.optString("country"), o.optString("country_code"),
+            o.optJSONObject("connection")?.optString("isp") ?: "")
+    } catch (e: Exception) { null }
+
+    private fun ipapiCo(): IpInfo? = try {
+        val o = JSONObject(httpGet("https://ipapi.co/json/"))
+        IpInfo(true, o.optString("ip"), o.optString("country_name"), o.optString("country_code"), o.optString("org"))
+    } catch (e: Exception) { null }
+
+    private fun httpGet(url: String, timeout: Int = 8000): String {
+        val c = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = timeout; readTimeout = timeout; instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "IRNetFree/Android"); setRequestProperty("Accept", "application/json")
+        }
+        try { return c.inputStream.bufferedReader().use { it.readText() } } finally { c.disconnect() }
     }
 }
