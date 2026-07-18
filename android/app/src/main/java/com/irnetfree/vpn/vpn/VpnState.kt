@@ -24,11 +24,15 @@ object VpnState {
     private val _log = MutableStateFlow<List<String>>(emptyList())
     val log: StateFlow<List<String>> = _log
 
+    private val _connectedSince = MutableStateFlow(0L)
+    val connectedSince: StateFlow<Long> = _connectedSince
+
     fun set(s: ConnState, label: String? = null, error: String? = null) {
         _state.value = s
         if (label != null) _label.value = label
         if (error != null && error.isNotBlank()) { _lastError.value = error; addLog("⚠ $error") }
-        if (s == ConnState.DISCONNECTED) _traffic.value = Traffic()
+        if (s == ConnState.CONNECTED) { if (_connectedSince.value == 0L) _connectedSince.value = System.currentTimeMillis() }
+        if (s == ConnState.DISCONNECTED) { _connectedSince.value = 0L; _traffic.value = Traffic() }
     }
     fun setTraffic(t: Traffic) { _traffic.value = t }
     fun addLog(line: String) { _log.value = (_log.value + line).takeLast(300) }

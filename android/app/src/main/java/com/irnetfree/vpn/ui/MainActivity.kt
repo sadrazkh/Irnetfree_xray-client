@@ -12,6 +12,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -34,7 +39,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -49,6 +56,7 @@ import com.irnetfree.vpn.vpn.XrayVpnService
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -156,14 +164,22 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     val traffic by VpnState.traffic.collectAsState()
     var ip by remember { mutableStateOf("—") }
     var ping by remember { mutableStateOf("—") }
-    var delay by remember { mutableStateOf("—") }
+    var latency by remember { mutableStateOf("—") }
     var pickerOpen by remember { mutableStateOf(false) }
     var homeSheet by remember { mutableStateOf<String?>(null) }
+    val haptic = LocalHapticFeedback.current
+    val connectedSince by VpnState.connectedSince.collectAsState()
+    var elapsed by remember { mutableStateOf(0L) }
+    LaunchedEffect(connectedSince) {
+        while (connectedSince > 0) { elapsed = System.currentTimeMillis() - connectedSince; delay(1000) }
+        elapsed = 0L
+    }
 
     val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         if (res.resultCode == android.app.Activity.RESULT_OK) doConnect(ctx, store)
     }
     fun onPower() {
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         if (state == ConnState.CONNECTED || state == ConnState.CONNECTING) { XrayVpnService.disconnect(ctx); return }
         val prep: Intent? = VpnService.prepare(ctx)
         if (prep != null) vpnPrepare.launch(prep) else doConnect(ctx, store)
@@ -176,6 +192,9 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     val ringColor by animateColorAsState(when (state) {
         ConnState.CONNECTED -> GREEN; ConnState.CONNECTING -> AMBER; ConnState.ERROR -> BAD; else -> PRIMARY
     }, label = "ring")
+    val pulse by rememberInfiniteTransition(label = "pulse").animateFloat(0.10f, 0.32f,
+        infiniteRepeatable(tween(1000), RepeatMode.Reverse), label = "glow")
+    val glow = if (state == ConnState.CONNECTING || state == ConnState.CONNECTED) pulse else 0.14f
 
     Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -187,24 +206,35 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         }
         Spacer(Modifier.height(24.dp))
         Box(contentAlignment = Alignment.Center, modifier = Modifier.size(210.dp)) {
-            Box(Modifier.size(210.dp).clip(CircleShape).background(Brush.radialGradient(listOf(ringColor.copy(alpha = 0.18f), Color.Transparent))))
+            Box(Modifier.size(210.dp).clip(CircleShape).background(Brush.radialGradient(listOf(ringColor.copy(alpha = glow), Color.Transparent))))
             Box(Modifier.size(168.dp).clip(CircleShape).border(2.dp, ringColor.copy(alpha = 0.5f), CircleShape)
                 .background(Brush.verticalGradient(listOf(CARD2, CARD))).clickable { onPower() }, contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Filled.PowerSettingsNew, null, tint = ringColor, modifier = Modifier.size(56.dp))
-                    Spacer(Modifier.height(6.dp))
-                    Text(when (state) { ConnState.CONNECTED -> "Connected"; ConnState.CONNECTING -> "Connecting…"; ConnState.ERROR -> "Error"; else -> "Tap to connect" },
-                        color = ringColor, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                if (state == ConnState.CONNECTING) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = ringColor, strokeWidth = 3.dp, modifier = Modifier.size(44.dp))
+                        Spacer(Modifier.height(8.dp)); Text("Connecting…", color = ringColor, fontSize = 12.sp)
+                    }
+                } else {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Filled.PowerSettingsNew, null, tint = ringColor, modifier = Modifier.size(56.dp))
+                        Spacer(Modifier.height(6.dp))
+                        Text(when (state) { ConnState.CONNECTED -> "Connected"; ConnState.ERROR -> "Error"; else -> "Tap to connect" },
+                            color = ringColor, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        if (state == ConnState.CONNECTED) Text(fmtDuration(elapsed), color = MUTED, fontSize = 12.sp)
+                    }
                 }
             }
         }
         Spacer(Modifier.height(20.dp))
+        val selSrv = store.serverById(store.selection)
         Card(Modifier.fillMaxWidth().clickable { pickerOpen = true }, colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(16.dp)) {
-            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Bolt, null, tint = PRIMARY); Spacer(Modifier.width(12.dp))
+            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (selSrv != null) ProtoBadge(selSrv.protocol) else Icon(Icons.Filled.Bolt, null, tint = PRIMARY, modifier = Modifier.size(40.dp))
+                Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Selected", color = MUTED, fontSize = 12.sp)
-                    Text(store.selectionLabel(), color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Selected exit", color = MUTED, fontSize = 12.sp)
+                    Text(if (selSrv != null) selSrv.name else store.selectionLabel(), color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (selSrv != null) Text("${selSrv.address}:${selSrv.port}", color = MUTED, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Icon(Icons.Filled.UnfoldMore, null, tint = MUTED)
             }
@@ -217,7 +247,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             InfoCard(Modifier.weight(1f), "Egress IP", ip)
-            InfoCard(Modifier.weight(1f), "Real delay", delay)
+            InfoCard(Modifier.weight(1f), "Real delay", latency)
         }
         Spacer(Modifier.height(12.dp))
         // clear test buttons
@@ -227,7 +257,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 ping = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(srv.address, srv.port) }; ping = if (ms >= 0) "${ms}ms" else "fail" }
             }, modifier = Modifier.weight(1f)) { Text("Ping " + if (ping != "—") ping else "") }
             OutlinedButton(onClick = {
-                delay = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.httpLatency() }; delay = if (ms >= 0) "${ms}ms" else "fail" }
+                latency = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.httpLatency() }; latency = if (ms >= 0) "${ms}ms" else "fail" }
             }, modifier = Modifier.weight(1f)) { Text("Test") }
             OutlinedButton(onClick = {
                 ip = "…"; scope.launch { val r = withContext(Dispatchers.IO) { Diagnostics.ipInfo() }; ip = if (r.ok) "${flag(r.countryCode)} ${r.ip}" else "fail" }
@@ -645,5 +675,8 @@ private fun usedPorts(store: Store): Set<Int> { val s = HashSet<Int>(); s.add(st
 
 fun fmtBytes(n: Long): String { var v = n.toDouble(); val u = arrayOf("B", "KB", "MB", "GB", "TB"); var i = 0; while (v >= 1024 && i < u.size - 1) { v /= 1024; i++ }; return (if (i == 0) v.toLong().toString() else String.format("%.1f", v)) + " " + u[i] }
 fun fmtSpeed(n: Long) = fmtBytes(n) + "/s"
+private fun fmtDuration(ms: Long): String {
+    val s = (ms / 1000).coerceAtLeast(0); return "%02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
+}
 private fun badge(p: String) = when (p) { "vless" -> "VLESS"; "vmess" -> "VMESS"; "trojan" -> "TROJAN"; "shadowsocks" -> "SS"; "wireguard" -> "WG"; "socks" -> "SOCKS"; "http" -> "HTTP"; else -> p.uppercase() }
 private fun flag(cc: String): String { if (cc.length != 2) return "🏳"; val base = 0x1F1E6; return String(Character.toChars(base + (cc[0].uppercaseChar() - 'A'))) + String(Character.toChars(base + (cc[1].uppercaseChar() - 'A'))) }
