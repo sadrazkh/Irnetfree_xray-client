@@ -150,6 +150,9 @@ function parseVless(link) {
     streamSettings: stream
   };
 
+  // TLS fragmentation, read straight from the share link (&fragment=p,l,i)
+  if (q.fragment) outbound._fragment = q.fragment;
+
   return mkServer(name || address, 'vless', address, port, link, outbound);
 }
 
@@ -195,6 +198,8 @@ function parseVmess(link) {
     streamSettings: stream
   };
 
+  if (v.fragment) outbound._fragment = String(v.fragment);
+
   return mkServer(v.ps || address, 'vmess', address, port, link, outbound);
 }
 
@@ -225,6 +230,8 @@ function parseTrojan(link) {
     },
     streamSettings: stream
   };
+
+  if (q.fragment) outbound._fragment = q.fragment;
 
   return mkServer(name || address, 'trojan', address, port, link, outbound);
 }

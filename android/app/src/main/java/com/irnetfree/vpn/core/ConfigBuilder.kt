@@ -236,7 +236,8 @@ object ConfigBuilder {
         return outbounds
     }
 
-    private fun assemble(s: AppSettings, inbounds: JSONArray, outbounds: JSONArray, rules: JSONArray): JSONObject {
+    private fun assemble(s: AppSettings, inbounds: JSONArray, outboundsIn: JSONArray, rules: JSONArray): JSONObject {
+        val outbounds = applyFragments(outboundsIn)
         // WireGuard dialed THROUGH another outbound needs bufferSize 0 (see Xray #2850)
         var wgChained = false
         for (i in 0 until outbounds.length()) {
@@ -271,6 +272,36 @@ object ConfigBuilder {
             .put("inbounds", JSONArray().put(JSONObject().put("tag", "socks-in").put("port", socksPort)
                 .put("listen", "127.0.0.1").put("protocol", "socks").put("settings", JSONObject().put("auth", "noauth").put("udp", false))))
             .put("outbounds", JSONArray().put(out).put(JSONObject().put("tag", "direct").put("protocol", "freedom")))
+    }
+
+    /** TLS fragmentation: outbounds marked with `_fragment` dial through a freedom
+     *  `fragment` outbound (skipping chain inner hops that already dial-through). */
+    private fun applyFragments(outbounds: JSONArray): JSONArray {
+        val byStr = HashMap<String, String>()
+        val extra = JSONArray()
+        for (i in 0 until outbounds.length()) {
+            val o = outbounds.getJSONObject(i)
+            val frag = o.optString("_fragment", "")
+            if (frag.isEmpty()) continue
+            o.remove("_fragment")
+            val ss = o.optJSONObject("streamSettings") ?: JSONObject().also { o.put("streamSettings", it) }
+            val sockopt = ss.optJSONObject("sockopt") ?: JSONObject().also { ss.put("sockopt", it) }
+            if (sockopt.has("dialerProxy")) continue
+            var tag = byStr[frag]
+            if (tag == null) { tag = "fragment-" + (byStr.size + 1); byStr[frag] = tag; extra.put(makeFragmentOutbound(tag, frag)) }
+            sockopt.put("dialerProxy", tag)
+        }
+        for (i in 0 until extra.length()) outbounds.put(extra.getJSONObject(i))
+        return outbounds
+    }
+    private fun makeFragmentOutbound(tag: String, fragStr: String): JSONObject {
+        val p = fragStr.split(",").map { it.trim() }
+        return JSONObject().put("tag", tag).put("protocol", "freedom")
+            .put("settings", JSONObject().put("domainStrategy", "AsIs")
+                .put("fragment", JSONObject()
+                    .put("packets", p.getOrNull(0)?.takeIf { it.isNotEmpty() } ?: "tlshello")
+                    .put("length", p.getOrNull(1)?.takeIf { it.isNotEmpty() } ?: "100-200")
+                    .put("interval", p.getOrNull(2)?.takeIf { it.isNotEmpty() } ?: "10-20")))
     }
 
     private fun cloneOut(outbound: JSONObject, tag: String): JSONObject = JSONObject(outbound.toString()).put("tag", tag)

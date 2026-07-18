@@ -247,6 +247,7 @@ function buildConfig(planArg, settings) {
 
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
   outbounds = (outbounds || []).map(sanitizeWgOutbound);
+  outbounds = applyFragments(outbounds);
 
   // WireGuard dialed THROUGH another outbound (chain) needs the dialer pipe
   // buffer disabled, otherwise UDP/TCP conversion corrupts packets ("unknown
@@ -336,7 +337,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
 
   reg.add(Object.assign({}, FREEDOM));
   reg.add(Object.assign({}, BLACKHOLE));
-  const outbounds = (reg.outs || []).map(sanitizeWgOutbound);
+  const outbounds = applyFragments((reg.outs || []).map(sanitizeWgOutbound));
 
   // Private/LAN always direct (bypass), THEN per-inbound routing, THEN a
   // catch-all to the primary exit so nothing is ever left unrouted.
@@ -414,6 +415,46 @@ function normalizeCustomRules(custom, geo) {
 function splitList(v) {
   if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean);
   return String(v == null ? '' : v).split(',').map(x => x.trim()).filter(Boolean);
+}
+
+/**
+ * TLS fragmentation: any outbound carrying a `_fragment` marker (set by the
+ * parser from the link's `&fragment=packets,length,interval`) is made to dial
+ * THROUGH a `freedom` outbound with a `fragment` setting. Outbounds that already
+ * dial through something (chain inner hops) are left alone. Returns the outbound
+ * list with the extra fragment outbounds appended; `_fragment` is stripped.
+ */
+function applyFragments(outbounds) {
+  const byStr = {};   // fragmentStr -> tag
+  const extra = [];
+  for (const o of outbounds) {
+    if (!o || !o._fragment) continue;
+    const frag = String(o._fragment);
+    delete o._fragment;
+    const ss = o.streamSettings || (o.streamSettings = {});
+    const sockopt = ss.sockopt || (ss.sockopt = {});
+    if (sockopt.dialerProxy) continue;   // chained hop — don't override
+    let tag = byStr[frag];
+    if (!tag) {
+      tag = 'fragment-' + (Object.keys(byStr).length + 1);
+      byStr[frag] = tag;
+      extra.push(makeFragmentOutbound(tag, frag));
+    }
+    sockopt.dialerProxy = tag;
+  }
+  return extra.length ? outbounds.concat(extra) : outbounds;
+}
+
+function makeFragmentOutbound(tag, fragStr) {
+  const p = String(fragStr).split(',').map(s => s.trim());
+  return {
+    tag,
+    protocol: 'freedom',
+    settings: {
+      domainStrategy: 'AsIs',
+      fragment: { packets: p[0] || 'tlshello', length: p[1] || '100-200', interval: p[2] || '10-20' }
+    }
+  };
 }
 
 module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds };

@@ -85,6 +85,7 @@ object LinkParser {
                 JSONObject().put("address", address).put("port", port)
                     .put("users", JSONArray().put(users)))))
             .put("streamSettings", buildStream(q))
+        q["fragment"]?.let { ob.put("_fragment", it) }   // TLS fragmentation from the link
         return ServerConfig(newId("s"), name.ifBlank { address }, "vless", address, port, ob)
     }
 
@@ -116,6 +117,7 @@ object LinkParser {
                 JSONObject().put("address", address).put("port", port)
                     .put("users", JSONArray().put(user)))))
             .put("streamSettings", buildStream(q))
+        if (v.has("fragment")) ob.put("_fragment", v.optString("fragment"))
         return ServerConfig(newId("s"), v.optString("ps", address), "vmess", address, port, ob)
     }
 
@@ -134,6 +136,7 @@ object LinkParser {
             .put("settings", JSONObject().put("servers", JSONArray().put(
                 JSONObject().put("address", address).put("port", port).put("password", password))))
             .put("streamSettings", buildStream(q))
+        q["fragment"]?.let { ob.put("_fragment", it) }
         return ServerConfig(newId("s"), name.ifBlank { address }, "trojan", address, port, ob)
     }
 
