@@ -39,6 +39,26 @@ object Diagnostics {
         } catch (e: Exception) { -1 }
     }
 
+    /**
+     * Upload latency: time (ms) to POST `sizeBytes` THROUGH the given SOCKS port,
+     * or -1 on failure. Lower = faster upload. Used to compare configs (upload is
+     * often the slow/broken side even when download latency looks fine).
+     */
+    fun uploadTest(socksPort: Int, sizeBytes: Int = 800_000, timeout: Int = 15000): Long {
+        val proxy = proxyFor(socksPort) ?: return -1
+        return try {
+            val c = open("https://speed.cloudflare.com/__up", timeout, proxy)
+            c.requestMethod = "POST"; c.doOutput = true; c.setFixedLengthStreamingMode(sizeBytes)
+            c.setRequestProperty("Content-Type", "application/octet-stream")
+            val t0 = System.nanoTime()
+            val buf = ByteArray(16384)
+            c.outputStream.use { os -> var sent = 0; while (sent < sizeBytes) { val n = minOf(buf.size, sizeBytes - sent); os.write(buf, 0, n); sent += n }; os.flush() }
+            c.responseCode
+            c.disconnect()
+            (System.nanoTime() - t0) / 1_000_000
+        } catch (e: Exception) { -1 }
+    }
+
     /** Egress IP + geo. Pass the SOCKS port when connected to see the exit IP. */
     fun ipInfo(socksPort: Int? = null): IpInfo {
         val p = proxyFor(socksPort)

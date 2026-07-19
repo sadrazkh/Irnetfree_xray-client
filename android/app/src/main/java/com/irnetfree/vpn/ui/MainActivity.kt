@@ -52,6 +52,7 @@ import com.irnetfree.vpn.core.*
 import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.vpn.ConnState
 import com.irnetfree.vpn.vpn.VpnState
+import com.irnetfree.vpn.vpn.XrayTester
 import com.irnetfree.vpn.vpn.XrayVpnService
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -327,10 +328,31 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     var q by remember { mutableStateOf("") }
     var sheet by remember { mutableStateOf<String?>(null) }
     var editId by remember { mutableStateOf<String?>(null) }
-    val pings = remember { mutableStateMapOf<String, String>() }
+    val tests = remember { mutableStateMapOf<String, String>() }
+    fun runTest(s: ServerConfig) {
+        tests[s.id] = "testing…"
+        scope.launch {
+            val ping = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }
+            val r = withContext(Dispatchers.IO) { XrayTester.test(s) }
+            tests[s.id] = "⚡${msLabel(ping)}  ↓${msLabel(r.downloadMs)} ↑${msLabel(r.uploadMs)}"
+        }
+    }
+    fun testAll() {
+        scope.launch {
+            for (s in store.servers.toList()) {
+                tests[s.id] = "testing…"
+                val ping = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }
+                val r = withContext(Dispatchers.IO) { XrayTester.test(s) }
+                tests[s.id] = "⚡${msLabel(ping)}  ↓${msLabel(r.downloadMs)} ↑${msLabel(r.uploadMs)}"
+            }
+        }
+    }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        TopBar("Servers") { IconButton(onClick = { sheet = "import" }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) } }
+        TopBar("Servers") {
+            IconButton(onClick = { testAll() }) { Icon(Icons.Filled.Speed, "test all", tint = PRIMARY) }
+            IconButton(onClick = { sheet = "import" }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) }
+        }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp)) {
             OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search…") }, leadingIcon = { Icon(Icons.Filled.Search, null) }, singleLine = true, shape = RoundedCornerShape(14.dp), colors = tfColors())
             Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -340,9 +362,9 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
             }
             if (store.servers.isEmpty()) EmptyHint("No servers yet — tap + to add one.")
             store.servers.filter { it.name.contains(q, true) || it.address.contains(q, true) }.forEach { s ->
-                ConfigCard(s, store.selection == s.id, pings[s.id],
+                ConfigCard(s, store.selection == s.id, tests[s.id],
                     onSelect = { store.saveSelection(s.id); bump() },
-                    onPing = { pings[s.id] = "…"; scope.launch { val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }; pings[s.id] = if (ms >= 0) "${ms}ms" else "fail" } },
+                    onTest = { runTest(s) },
                     onEdit = { editId = s.id },
                     onDelete = { store.deleteServer(s.id); bump() })
             }
@@ -435,7 +457,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     }
 }
 
-@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, ping: String?, onSelect: () -> Unit, onPing: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
+@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, result: String?, onSelect: () -> Unit, onTest: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
     Card(Modifier.fillMaxWidth().padding(vertical = 5.dp).clickable { onSelect() }, colors = CardDefaults.cardColors(containerColor = if (selected) CARD2 else CARD), shape = RoundedCornerShape(14.dp),
         border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, GREEN) else null) {
         Row(Modifier.padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -443,9 +465,9 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             Column(Modifier.weight(1f)) {
                 Text(s.name, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${s.address}:${s.port}", color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (result != null) Text(result, color = if (result.contains("×") || result == "testing…") MUTED else GREEN, fontSize = 12.sp, maxLines = 1)
             }
-            if (ping != null) Text(ping, color = if (ping == "fail") BAD else GREEN, fontSize = 12.sp)
-            IconButton(onClick = onPing, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.NetworkCheck, "ping", tint = MUTED, modifier = Modifier.size(20.dp)) }
+            IconButton(onClick = onTest, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.Speed, "test", tint = PRIMARY, modifier = Modifier.size(20.dp)) }
             IconButton(onClick = onEdit, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.Edit, "edit", tint = MUTED, modifier = Modifier.size(20.dp)) }
             IconButton(onClick = onDelete, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD, modifier = Modifier.size(20.dp)) }
         }
@@ -776,5 +798,6 @@ fun fmtSpeed(n: Long) = fmtBytes(n) + "/s"
 private fun fmtDuration(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0); return "%02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
 }
+private fun msLabel(ms: Long) = if (ms >= 0) "${ms}ms" else "×"
 private fun badge(p: String) = when (p) { "vless" -> "VLESS"; "vmess" -> "VMESS"; "trojan" -> "TROJAN"; "shadowsocks" -> "SS"; "wireguard" -> "WG"; "socks" -> "SOCKS"; "http" -> "HTTP"; else -> p.uppercase() }
 private fun flag(cc: String): String { if (cc.length != 2) return "🏳"; val base = 0x1F1E6; return String(Character.toChars(base + (cc[0].uppercaseChar() - 'A'))) + String(Character.toChars(base + (cc[1].uppercaseChar() - 'A'))) }
