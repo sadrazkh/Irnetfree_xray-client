@@ -373,6 +373,8 @@ function buildTestConfig(target, socksPort) {
   const proxyOutbounds = Array.isArray(target)
     ? buildChainOutbounds(target, 'proxy')
     : [cloneOut(target.outbound, 'proxy')];
+  // apply TLS fragment (if the config carries one) so the test matches reality
+  const outbounds = applyFragments(proxyOutbounds).concat([{ tag: 'direct', protocol: 'freedom' }]);
   return {
     log: { loglevel: 'none' },
     inbounds: [{
@@ -382,10 +384,7 @@ function buildTestConfig(target, socksPort) {
       protocol: 'socks',
       settings: { auth: 'noauth', udp: false }
     }],
-    outbounds: [
-      ...proxyOutbounds,
-      { tag: 'direct', protocol: 'freedom' }
-    ]
+    outbounds
   };
 }
 

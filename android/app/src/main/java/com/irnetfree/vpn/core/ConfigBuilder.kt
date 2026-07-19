@@ -263,15 +263,15 @@ object ConfigBuilder {
             .put("routing", JSONObject().put("domainStrategy", "IPIfNonMatch").put("rules", rules))
     }
 
-    /** A minimal test config: one socks inbound -> the given server/chain. */
+    /** A minimal test config: one socks inbound -> the given server (with fragment). */
     fun buildTestConfig(server: ServerConfig, socksPort: Int): JSONObject {
-        val out = cloneOut(server.outbound, "proxy")
-        finalizeOutbounds(JSONArray().put(out))
+        val outs = applyFragments(finalizeOutbounds(JSONArray().put(cloneOut(server.outbound, "proxy"))))
+        outs.put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
         return JSONObject()
             .put("log", JSONObject().put("loglevel", "none"))
             .put("inbounds", JSONArray().put(JSONObject().put("tag", "socks-in").put("port", socksPort)
                 .put("listen", "127.0.0.1").put("protocol", "socks").put("settings", JSONObject().put("auth", "noauth").put("udp", false))))
-            .put("outbounds", JSONArray().put(out).put(JSONObject().put("tag", "direct").put("protocol", "freedom")))
+            .put("outbounds", outs)
     }
 
     /** TLS fragmentation: outbounds marked with `_fragment` dial through a freedom
