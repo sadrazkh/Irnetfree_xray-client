@@ -226,7 +226,8 @@ const I18N = {
 
     'ss.search': 'جستجوی کانفیگ…', 'ss.none': 'موردی پیدا نشد',
 
-    'ping.tcp': 'پینگ TCP (شبکه)', 'ping.real': 'تأخیر واقعی (از داخل کانفیگ — اثبات کارکرد)'
+    'ping.tcp': 'پینگ TCP (شبکه)', 'ping.real': 'تأخیر دانلود (از داخل کانفیگ — اثبات کارکرد)',
+    'ping.upload': 'تأخیر آپلود (از داخل کانفیگ) — کانفیگِ کندِ آپلود را پیدا کن'
   },
 
   en: {
@@ -451,7 +452,8 @@ const I18N = {
 
     'ss.search': 'Search configs…', 'ss.none': 'No matches',
 
-    'ping.tcp': 'TCP ping (network)', 'ping.real': 'Real delay (through the config — proof it works)'
+    'ping.tcp': 'TCP ping (network)', 'ping.real': 'Download latency (through the config — proof it works)',
+    'ping.upload': 'Upload latency (through the config) — find slow-upload configs'
   }
 };
 

@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld('api', {
   // diagnostics
   pingTcp: (id) => ipcRenderer.invoke('ping:tcp', id),
   pingReal: (id) => ipcRenderer.invoke('ping:real', id),
+  pingUpload: (id) => ipcRenderer.invoke('ping:upload', id),
   checkIp: (viaProxy) => ipcRenderer.invoke('ip:check', viaProxy),
 
   // xray binary

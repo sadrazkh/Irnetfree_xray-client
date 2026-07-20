@@ -83,6 +83,51 @@ function httpThroughProxy(socksPort, opts = {}) {
 }
 
 /**
+ * Upload latency THROUGH the proxy: pushes `size` bytes over the SOCKS tunnel and
+ * times how long until they're all flushed to the network (honouring TCP
+ * backpressure via 'drain'). Lower = faster upload. This surfaces configs whose
+ * upload is slow/broken even when their download latency looks fine.
+ */
+function uploadThroughProxy(socksPort, opts = {}) {
+  const host = opts.host || 'httpbin.org';
+  const port = opts.port || 80;
+  const path = opts.path || '/post';
+  const size = opts.size || 1500000;   // ~1.5 MB
+  const timeout = opts.timeout || 20000;
+
+  return new Promise(async (resolve) => {
+    let socket;
+    try { socket = await socks5Connect('127.0.0.1', socksPort, host, port, timeout); }
+    catch (e) { return resolve({ ok: false, ms: -1, error: e.message }); }
+
+    let done = false;
+    const finish = (r) => { if (done) return; done = true; try { socket.destroy(); } catch {} resolve(r); };
+    const to = setTimeout(() => finish({ ok: false, ms: -1, error: 'timeout' }), timeout);
+    const start = Date.now();
+
+    socket.on('error', (e) => { clearTimeout(to); finish({ ok: false, ms: -1, error: e.code || e.message }); });
+    socket.write(
+      `POST ${path} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: XrayClient\r\n` +
+      `Content-Type: application/octet-stream\r\nContent-Length: ${size}\r\nConnection: close\r\n\r\n`
+    );
+
+    const chunk = Buffer.alloc(65536);
+    let sent = 0;
+    const pump = () => {
+      while (sent < size) {
+        const n = Math.min(chunk.length, size - sent);
+        const ok = socket.write(n === chunk.length ? chunk : chunk.subarray(0, n));
+        sent += n;
+        if (!ok) { socket.once('drain', pump); return; }
+      }
+      clearTimeout(to);
+      finish({ ok: true, ms: Date.now() - start });   // all bytes flushed = upload done
+    };
+    pump();
+  });
+}
+
+/**
  * Minimal SOCKS5 CONNECT handshake (no auth). Resolves with a connected socket
  * already tunnelled to target host:port.
  */
@@ -238,4 +283,4 @@ function parseJsonLoose(body) {
   try { return JSON.parse(body.slice(start, end + 1)); } catch { return null; }
 }
 
-module.exports = { tcpPing, httpThroughProxy, ipInfo, socks5Connect };
+module.exports = { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, socks5Connect };

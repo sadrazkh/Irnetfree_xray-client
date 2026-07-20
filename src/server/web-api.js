@@ -81,6 +81,7 @@
     // diagnostics
     pingTcp: (id) => invoke('ping:tcp', id),
     pingReal: (id) => invoke('ping:real', id),
+    pingUpload: (id) => invoke('ping:upload', id),
     checkIp: (viaProxy) => invoke('ip:check', viaProxy),
 
     // xray binary / assets

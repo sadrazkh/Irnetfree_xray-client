@@ -59,6 +59,8 @@ import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /* ---------------- palette ---------------- */
@@ -329,24 +331,23 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     var sheet by remember { mutableStateOf<String?>(null) }
     var editId by remember { mutableStateOf<String?>(null) }
     val tests = remember { mutableStateMapOf<String, String>() }
-    fun runTest(s: ServerConfig) {
-        tests[s.id] = "testing…"
-        scope.launch {
+    val testMutex = remember { Mutex() }
+    // One test at a time; the UI shows the current phase (download vs upload).
+    suspend fun testOne(s: ServerConfig) = testMutex.withLock {
+        tests[s.id] = "starting…"
+        val h = withContext(Dispatchers.IO) { XrayTester.start(s) }
+        if (h == null) { tests[s.id] = "× core error"; return@withLock }
+        try {
             val ping = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }
-            val r = withContext(Dispatchers.IO) { XrayTester.test(s) }
-            tests[s.id] = "⚡${msLabel(ping)}  ↓${msLabel(r.downloadMs)} ↑${msLabel(r.uploadMs)}"
-        }
+            tests[s.id] = "⚡${msLabel(ping)}  ↓ testing download…"
+            val down = withContext(Dispatchers.IO) { Diagnostics.httpLatency(h.port) }
+            tests[s.id] = "⚡${msLabel(ping)}  ↓${msLabel(down)}  ↑ testing upload…"
+            val up = withContext(Dispatchers.IO) { Diagnostics.uploadTest(h.port) }
+            tests[s.id] = "⚡${msLabel(ping)}  ↓${msLabel(down)}  ↑${msLabel(up)}"
+        } finally { withContext(Dispatchers.IO) { XrayTester.stop(h) } }
     }
-    fun testAll() {
-        scope.launch {
-            for (s in store.servers.toList()) {
-                tests[s.id] = "testing…"
-                val ping = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }
-                val r = withContext(Dispatchers.IO) { XrayTester.test(s) }
-                tests[s.id] = "⚡${msLabel(ping)}  ↓${msLabel(r.downloadMs)} ↑${msLabel(r.uploadMs)}"
-            }
-        }
-    }
+    fun runTest(s: ServerConfig) { scope.launch { testOne(s) } }
+    fun testAll() { scope.launch { for (s in store.servers.toList()) testOne(s) } }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         TopBar("Servers") {
@@ -465,7 +466,10 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             Column(Modifier.weight(1f)) {
                 Text(s.name, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${s.address}:${s.port}", color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (result != null) Text(result, color = if (result.contains("×") || result == "testing…") MUTED else GREEN, fontSize = 12.sp, maxLines = 1)
+                if (result != null) {
+                    val rc = when { result.contains("testing") || result == "starting…" -> AMBER; result.contains("×") -> BAD; else -> GREEN }
+                    Text(result, color = rc, fontSize = 12.sp, maxLines = 1, fontWeight = FontWeight.Medium)
+                }
             }
             IconButton(onClick = onTest, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.Speed, "test", tint = PRIMARY, modifier = Modifier.size(20.dp)) }
             IconButton(onClick = onEdit, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.Edit, "edit", tint = MUTED, modifier = Modifier.size(20.dp)) }
