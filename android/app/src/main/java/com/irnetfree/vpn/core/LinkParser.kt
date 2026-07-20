@@ -86,6 +86,7 @@ object LinkParser {
                     .put("users", JSONArray().put(users)))))
             .put("streamSettings", buildStream(q))
         q["fragment"]?.let { ob.put("_fragment", it) }   // TLS fragmentation from the link
+        q["noise"]?.let { ob.put("_noise", it) }         // anti-DPI / fake ClientHello injection
         return ServerConfig(newId("s"), name.ifBlank { address }, "vless", address, port, ob)
     }
 
@@ -118,6 +119,7 @@ object LinkParser {
                     .put("users", JSONArray().put(user)))))
             .put("streamSettings", buildStream(q))
         if (v.has("fragment")) ob.put("_fragment", v.optString("fragment"))
+        if (v.has("noise")) ob.put("_noise", v.optString("noise"))
         return ServerConfig(newId("s"), v.optString("ps", address), "vmess", address, port, ob)
     }
 
@@ -137,6 +139,7 @@ object LinkParser {
                 JSONObject().put("address", address).put("port", port).put("password", password))))
             .put("streamSettings", buildStream(q))
         q["fragment"]?.let { ob.put("_fragment", it) }
+        q["noise"]?.let { ob.put("_noise", it) }
         return ServerConfig(newId("s"), name.ifBlank { address }, "trojan", address, port, ob)
     }
 

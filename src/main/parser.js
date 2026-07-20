@@ -152,6 +152,8 @@ function parseVless(link) {
 
   // TLS fragmentation, read straight from the share link (&fragment=p,l,i)
   if (q.fragment) outbound._fragment = q.fragment;
+  // Anti-DPI noise / fake ClientHello injection (&noise=type:packet:delay;...)
+  if (q.noise) outbound._noise = q.noise;
 
   return mkServer(name || address, 'vless', address, port, link, outbound);
 }
@@ -199,6 +201,7 @@ function parseVmess(link) {
   };
 
   if (v.fragment) outbound._fragment = String(v.fragment);
+  if (v.noise) outbound._noise = String(v.noise);
 
   return mkServer(v.ps || address, 'vmess', address, port, link, outbound);
 }
@@ -232,6 +235,7 @@ function parseTrojan(link) {
   };
 
   if (q.fragment) outbound._fragment = q.fragment;
+  if (q.noise) outbound._noise = q.noise;
 
   return mkServer(name || address, 'trojan', address, port, link, outbound);
 }
@@ -554,6 +558,11 @@ function applyServerEdits(server, f) {
   if (f.fragment != null) {
     const fr = String(f.fragment).trim();
     if (fr) ob._fragment = fr; else delete ob._fragment;
+  }
+  // Anti-DPI noise / fake ClientHello injection. Empty clears it.
+  if (f.noise != null) {
+    const nz = String(f.noise).trim();
+    if (nz) ob._noise = nz; else delete ob._noise;
   }
 
   return out;

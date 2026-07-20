@@ -274,34 +274,68 @@ object ConfigBuilder {
             .put("outbounds", outs)
     }
 
-    /** TLS fragmentation: outbounds marked with `_fragment` dial through a freedom
-     *  `fragment` outbound (skipping chain inner hops that already dial-through). */
+    /** DPI-evasion dialer: outbounds marked with `_fragment` (TLS fragmentation)
+     *  and/or `_noise` (fake ClientHello / decoy packet injection) dial through a
+     *  freedom outbound carrying the matching settings (skipping chain inner hops
+     *  that already dial-through). */
     private fun applyFragments(outbounds: JSONArray): JSONArray {
-        val byStr = HashMap<String, String>()
+        val byKey = HashMap<String, String>()
         val extra = JSONArray()
         for (i in 0 until outbounds.length()) {
             val o = outbounds.getJSONObject(i)
             val frag = o.optString("_fragment", "")
-            if (frag.isEmpty()) continue
-            o.remove("_fragment")
+            val noise = o.optString("_noise", "")
+            if (frag.isEmpty() && noise.isEmpty()) continue
+            o.remove("_fragment"); o.remove("_noise")
             val ss = o.optJSONObject("streamSettings") ?: JSONObject().also { o.put("streamSettings", it) }
             val sockopt = ss.optJSONObject("sockopt") ?: JSONObject().also { ss.put("sockopt", it) }
             if (sockopt.has("dialerProxy")) continue
-            var tag = byStr[frag]
-            if (tag == null) { tag = "fragment-" + (byStr.size + 1); byStr[frag] = tag; extra.put(makeFragmentOutbound(tag, frag)) }
+            val key = "$frag $noise"
+            var tag = byKey[key]
+            if (tag == null) { tag = "dpi-" + (byKey.size + 1); byKey[key] = tag; extra.put(makeFragmentOutbound(tag, frag, noise)) }
             sockopt.put("dialerProxy", tag)
         }
         for (i in 0 until extra.length()) outbounds.put(extra.getJSONObject(i))
         return outbounds
     }
-    private fun makeFragmentOutbound(tag: String, fragStr: String): JSONObject {
-        val p = fragStr.split(",").map { it.trim() }
-        return JSONObject().put("tag", tag).put("protocol", "freedom")
-            .put("settings", JSONObject().put("domainStrategy", "AsIs")
-                .put("fragment", JSONObject()   // xray rejects LengthMin=0 -> clamp length min to >=1
-                    .put("packets", p.getOrNull(0)?.takeIf { it.isNotEmpty() } ?: "tlshello")
-                    .put("length", fragRange(p.getOrNull(1), "100-200", 1))
-                    .put("interval", fragRange(p.getOrNull(2), "10-20", 0))))
+    private fun makeFragmentOutbound(tag: String, fragStr: String, noiseStr: String): JSONObject {
+        val settings = JSONObject().put("domainStrategy", "AsIs")
+        if (fragStr.isNotEmpty()) {
+            val p = fragStr.split(",").map { it.trim() }
+            settings.put("fragment", JSONObject()   // xray rejects LengthMin=0 -> clamp length min to >=1
+                .put("packets", p.getOrNull(0)?.takeIf { it.isNotEmpty() } ?: "tlshello")
+                .put("length", fragRange(p.getOrNull(1), "100-200", 1))
+                .put("interval", fragRange(p.getOrNull(2), "10-20", 0)))
+        }
+        if (noiseStr.isNotEmpty()) {
+            val noises = parseNoises(noiseStr)
+            if (noises.length() > 0) settings.put("noises", noises)
+        }
+        return JSONObject().put("tag", tag).put("protocol", "freedom").put("settings", settings)
+    }
+    // Named presets (also accepted from the link's &noise= value).
+    private val noisePresets = mapOf(
+        "random" to "rand:50-100:0",
+        "faketls" to "rand:100-200:0;rand:40-80:10-20",
+        "fakehello" to "rand:100-200:0;rand:40-80:10-20"
+    )
+    /** Parse a noise spec (`type:packet:delay;…`, or a preset keyword) into xray `noises`. */
+    private fun parseNoises(spec: String): JSONArray {
+        var s = spec.trim()
+        if (s.isEmpty()) return JSONArray()
+        noisePresets[s.lowercase()]?.let { s = it }
+        val out = JSONArray()
+        for (entry in s.split(";")) {
+            val e = entry.trim()
+            if (e.isEmpty()) continue
+            val parts = e.split(":")
+            val type = parts.getOrNull(0)?.trim()?.lowercase() ?: ""
+            val packet = parts.getOrNull(1)?.trim() ?: ""
+            val delay = parts.getOrNull(2)?.trim()?.takeIf { it.isNotEmpty() } ?: "0"
+            if (type !in listOf("rand", "str", "base64", "hex") || packet.isEmpty()) continue
+            out.put(JSONObject().put("type", type).put("packet", packet).put("delay", delay))
+        }
+        return out
     }
     private fun fragRange(v: String?, def: String, floor: Int): String {
         if (v.isNullOrEmpty()) return def

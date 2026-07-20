@@ -54,6 +54,10 @@ const I18N = {
 
     'edit.fragment': 'Fragment (packets,length,interval — خالی = خاموش)',
     'edit.frontHint': 'CDN fronting: «آدرس» = دامنه/IP سرویس CDN، «SNI» = یک دامنهٔ فرانتِ مجاز روی همان CDN، «Host» = بک‌اند واقعی شما.',
+    'edit.noise': 'Noise (ضد DPI / ClientHello جعلی)',
+    'edit.noiseCustom': 'اسپک نویز (type:packet:delay؛ …)',
+    'edit.noiseHint': 'بسته‌های فریب قبل از دست‌دادن واقعی TLS فرستاده می‌شوند تا DPI را گمراه کنند. type = rand/str/base64/hex.',
+    'noise.off': 'خاموش', 'noise.random': 'تصادفی', 'noise.faketls': 'ClientHello جعلی', 'noise.custom': 'سفارشی…',
     'chain.title': 'زنجیره پروکسی', 'chain.enable': 'فعال‌سازی زنجیره',
     'chain.hint': 'ترافیک به‌ترتیب از این سرورها عبور می‌کند. با کشیدن و رها کردن، ترتیب را تغییر بده.',
     'chain.client': '💻 شما', 'chain.internet': '🌐 اینترنت',
@@ -281,6 +285,10 @@ const I18N = {
 
     'edit.fragment': 'Fragment (packets,length,interval — empty = off)',
     'edit.frontHint': 'CDN fronting: Address = CDN service domain/IP, SNI = an allowed front domain on that CDN, Host = your real backend.',
+    'edit.noise': 'Noise (anti-DPI / fake ClientHello)',
+    'edit.noiseCustom': 'Noise spec (type:packet:delay; …)',
+    'edit.noiseHint': 'Decoy packets sent before the real TLS handshake to confuse DPI. type = rand/str/base64/hex.',
+    'noise.off': 'Off', 'noise.random': 'Random', 'noise.faketls': 'Fake ClientHello', 'noise.custom': 'Custom…',
     'chain.title': 'Proxy chain', 'chain.enable': 'Enable chain',
     'chain.hint': 'Traffic passes through these servers in order. Drag and drop to reorder.',
     'chain.client': '💻 You', 'chain.internet': '🌐 Internet',
