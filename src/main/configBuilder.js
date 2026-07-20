@@ -417,48 +417,86 @@ function splitList(v) {
 }
 
 /**
- * TLS fragmentation: any outbound carrying a `_fragment` marker (set by the
- * parser from the link's `&fragment=packets,length,interval`) is made to dial
- * THROUGH a `freedom` outbound with a `fragment` setting. Outbounds that already
- * dial through something (chain inner hops) are left alone. Returns the outbound
- * list with the extra fragment outbounds appended; `_fragment` is stripped.
+ * DPI-evasion dialer: any outbound carrying a `_fragment` (TLS fragmentation)
+ * and/or `_noise` (fake ClientHello / decoy packet injection) marker is made to
+ * dial THROUGH a `freedom` outbound that carries the matching `fragment` and/or
+ * `noises` settings. Outbounds that already dial through something (chain inner
+ * hops) are left alone. Returns the outbound list with the extra freedom
+ * outbounds appended; the markers are stripped.
  */
 function applyFragments(outbounds) {
-  const byStr = {};   // fragmentStr -> tag
+  const byKey = {};   // "frag|noise" -> tag
   const extra = [];
   for (const o of outbounds) {
-    if (!o || !o._fragment) continue;
-    const frag = String(o._fragment);
-    delete o._fragment;
+    if (!o || (!o._fragment && !o._noise)) continue;
+    const frag = o._fragment ? String(o._fragment) : '';
+    const noise = o._noise ? String(o._noise) : '';
+    delete o._fragment; delete o._noise;
     const ss = o.streamSettings || (o.streamSettings = {});
     const sockopt = ss.sockopt || (ss.sockopt = {});
     if (sockopt.dialerProxy) continue;   // chained hop — don't override
-    let tag = byStr[frag];
+    const key = frag + '|' + noise;
+    let tag = byKey[key];
     if (!tag) {
-      tag = 'fragment-' + (Object.keys(byStr).length + 1);
-      byStr[frag] = tag;
-      extra.push(makeFragmentOutbound(tag, frag));
+      tag = 'dpi-' + (Object.keys(byKey).length + 1);
+      byKey[key] = tag;
+      extra.push(makeFragmentOutbound(tag, frag, noise));
     }
     sockopt.dialerProxy = tag;
   }
   return extra.length ? outbounds.concat(extra) : outbounds;
 }
 
-function makeFragmentOutbound(tag, fragStr) {
-  const p = String(fragStr).split(',').map(s => s.trim());
-  return {
-    tag,
-    protocol: 'freedom',
-    settings: {
-      domainStrategy: 'AsIs',
-      // xray rejects LengthMin=0, so clamp length min to >=1; keep packets/interval sane.
-      fragment: {
-        packets: (p[0] && p[0].length) ? p[0] : 'tlshello',
-        length: fragRange(p[1], '100-200', 1),
-        interval: fragRange(p[2], '10-20', 0)
-      }
-    }
-  };
+function makeFragmentOutbound(tag, fragStr, noiseStr) {
+  const settings = { domainStrategy: 'AsIs' };
+  if (fragStr) {
+    const p = String(fragStr).split(',').map(s => s.trim());
+    // xray rejects LengthMin=0, so clamp length min to >=1; keep packets/interval sane.
+    settings.fragment = {
+      packets: (p[0] && p[0].length) ? p[0] : 'tlshello',
+      length: fragRange(p[1], '100-200', 1),
+      interval: fragRange(p[2], '10-20', 0)
+    };
+  }
+  if (noiseStr) {
+    const noises = parseNoises(noiseStr);
+    if (noises.length) settings.noises = noises;
+  }
+  return { tag, protocol: 'freedom', settings };
+}
+
+// Named presets (also accepted from the link's &noise= value).
+const NOISE_PRESETS = {
+  random: 'rand:50-100:0',
+  // fake ClientHello: a ~handshake-sized decoy record, then jittered filler
+  faketls: 'rand:100-200:0;rand:40-80:10-20',
+  fakehello: 'rand:100-200:0;rand:40-80:10-20'
+};
+
+/**
+ * Parse a noise spec into xray `noises` objects.
+ * Spec: entries separated by `;`, each `type:packet:delay`.
+ *   type   = rand | str | base64 | hex
+ *   packet = length/length-range (rand/hex) | literal (str) | base64 (base64)
+ *   delay  = ms number or range (optional, default "0")
+ * A bare preset keyword (random/faketls/fakehello) is expanded first.
+ */
+function parseNoises(spec) {
+  let s = String(spec == null ? '' : spec).trim();
+  if (!s) return [];
+  if (NOISE_PRESETS[s.toLowerCase()]) s = NOISE_PRESETS[s.toLowerCase()];
+  const out = [];
+  for (const entry of s.split(';')) {
+    const e = entry.trim();
+    if (!e) continue;
+    const parts = e.split(':');
+    const type = (parts[0] || '').trim().toLowerCase();
+    const packet = (parts[1] || '').trim();
+    const delay = (parts[2] || '0').trim() || '0';
+    if (!['rand', 'str', 'base64', 'hex'].includes(type) || !packet) continue;
+    out.push({ type, packet, delay });
+  }
+  return out;
 }
 
 // Normalize a "min-max" (or single) numeric range; clamp min to `floor`.

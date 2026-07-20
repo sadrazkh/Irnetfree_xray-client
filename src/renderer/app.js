@@ -1352,7 +1352,8 @@ function readServerFields(s) {
     network: st.network || 'tcp', security: st.security || 'none',
     sni: '', host: '', path: '', fp: '', pbk: '', sid: '', alpn: '',
     allowInsecure: false, cred: '', method: '',
-    fragment: ob._fragment || ''
+    fragment: ob._fragment || '',
+    noise: ob._noise || ''
   };
 
   if (s.protocol === 'vless' || s.protocol === 'vmess') {
@@ -1405,6 +1406,36 @@ function readServerFields(s) {
   return f;
 }
 
+// Anti-DPI noise: preset keywords the dropdown maps to; anything else is Custom.
+const NOISE_PRESET_KEYS = ['random', 'faketls', 'fakehello'];
+
+// Populate the noise <select> + custom text field from a stored spec.
+function setNoiseFields(noise) {
+  const sel = $('#edNoise'); const custom = $('#edNoiseCustom');
+  if (!sel) return;
+  const nz = String(noise || '').trim();
+  const key = nz.toLowerCase();
+  if (!nz) { sel.value = 'off'; if (custom) custom.value = ''; }
+  else if (NOISE_PRESET_KEYS.includes(key)) { sel.value = key === 'fakehello' ? 'faketls' : key; if (custom) custom.value = ''; }
+  else { sel.value = 'custom'; if (custom) custom.value = nz; }
+  syncNoiseCustom();
+}
+
+// Read the effective noise spec from the dropdown (+ custom field when Custom).
+function readNoiseField() {
+  const sel = $('#edNoise'); if (!sel) return '';
+  const v = sel.value;
+  if (v === 'off') return '';
+  if (v === 'custom') return ($('#edNoiseCustom').value || '').trim();
+  return v; // preset keyword, expanded at build time
+}
+
+// Show the custom spec input only when the dropdown is set to Custom.
+function syncNoiseCustom() {
+  const sel = $('#edNoise'); if (!sel) return;
+  show('#edNoiseCustomRow', sel.value === 'custom');
+}
+
 function openEdit(id) {
   const s = state.servers.find(x => x.id === id);
   if (!s) return;
@@ -1426,6 +1457,7 @@ function openEdit(id) {
   $('#edPbk').value = f.pbk || '';
   $('#edSid').value = f.sid || '';
   $('#edFragment').value = f.fragment || '';
+  setNoiseFields(f.noise || '');
   $('#edInsecure').checked = !!f.allowInsecure;
 
   // credential label per protocol
@@ -1481,6 +1513,7 @@ function closeEdit() { $('#editModal').hidden = true; state.editingId = null; ed
 $('#editClose').onclick = closeEdit;
 $('#editCancel').onclick = closeEdit;
 $('#editModal').onclick = (e) => { if (e.target === $('#editModal')) closeEdit(); };
+if ($('#edNoise')) $('#edNoise').onchange = syncNoiseCustom;
 
 $('#editSave').onclick = async () => {
   const id = state.editingId;
@@ -1490,7 +1523,8 @@ $('#editSave').onclick = async () => {
     name: $('#edName').value,
     address: $('#edAddress').value,
     port: $('#edPort').value,
-    fragment: $('#edFragment').value.trim()   // '' clears it
+    fragment: $('#edFragment').value.trim(),  // '' clears it
+    noise: readNoiseField()                   // '' clears it
   };
   const cred = $('#edCred').value.trim();
   if (proto === 'vless' || proto === 'vmess') { if (cred) fields.uuid = cred; }

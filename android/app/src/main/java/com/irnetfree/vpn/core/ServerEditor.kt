@@ -20,7 +20,7 @@ object ServerEditor {
         var proxyUser: String = "", var proxyPass: String = "",
         var wgPub: String = "", var wgAddr: String = "", var wgPsk: String = "",
         var wgMtu: String = "1420", var wgReserved: String = "", var wgAllowed: String = "0.0.0.0/0, ::/0",
-        var fragment: String = ""
+        var fragment: String = "", var noise: String = ""
     )
 
     fun read(s: ServerConfig): Fields {
@@ -29,6 +29,7 @@ object ServerEditor {
         val st = ob.optJSONObject("streamSettings") ?: JSONObject()
         f.network = st.optString("network", "tcp"); f.security = st.optString("security", "none")
         f.fragment = ob.optString("_fragment", "")
+        f.noise = ob.optString("_noise", "")
 
         when (s.protocol) {
             "vless", "vmess" -> vnextUser(ob)?.let { f.cred = it.optString("id") }
@@ -78,6 +79,7 @@ object ServerEditor {
             else -> s.outbound
         }
         if (f.fragment.isNotBlank()) ob.put("_fragment", f.fragment.trim())
+        if (f.noise.isNotBlank()) ob.put("_noise", f.noise.trim())
         return s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = ob)
     }
 

@@ -617,7 +617,18 @@
         <div class="grid2" id="edFragmentRow">
           <div><label class="field-label" data-i18n="edit.fragment">Fragment (packets,length,interval — خالی = خاموش)</label>
             <input type="text" id="edFragment" class="input" dir="ltr" placeholder="tlshello,100-200,10-20" /></div>
-          <div></div>
+          <div><label class="field-label" data-i18n="edit.noise">Noise (anti-DPI / fake ClientHello)</label>
+            <select id="edNoise" class="select">
+              <option value="off" data-i18n="noise.off">Off</option>
+              <option value="random" data-i18n="noise.random">Random</option>
+              <option value="faketls" data-i18n="noise.faketls">Fake ClientHello</option>
+              <option value="custom" data-i18n="noise.custom">Custom…</option>
+            </select></div>
+        </div>
+        <div id="edNoiseCustomRow" hidden>
+          <label class="field-label" data-i18n="edit.noiseCustom">Noise spec (type:packet:delay; …)</label>
+          <input type="text" id="edNoiseCustom" class="input" dir="ltr" placeholder="rand:50-100:0;base64:FgMBAAA=:10-20" />
+          <p class="hint" data-i18n="edit.noiseHint">Decoy packets sent before the real TLS handshake to confuse DPI. type = rand/str/base64/hex.</p>
         </div>
       </div>
       <div class="modal-foot">

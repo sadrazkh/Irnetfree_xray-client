@@ -522,6 +522,14 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     var wgPub by remember { mutableStateOf(f.wgPub) }; var wgAddr by remember { mutableStateOf(f.wgAddr) }; var wgPsk by remember { mutableStateOf(f.wgPsk) }
     var wgMtu by remember { mutableStateOf(f.wgMtu) }; var wgReserved by remember { mutableStateOf(f.wgReserved) }; var wgAllowed by remember { mutableStateOf(f.wgAllowed) }
     var fragment by remember { mutableStateOf(f.fragment) }
+    val noisePresetKeys = listOf("random", "faketls", "fakehello")
+    var noisePreset by remember { mutableStateOf(when {
+        f.noise.isBlank() -> "off"
+        f.noise.lowercase() in noisePresetKeys -> if (f.noise.lowercase() == "fakehello") "faketls" else f.noise.lowercase()
+        else -> "custom"
+    }) }
+    var noiseCustom by remember { mutableStateOf(if (noisePreset == "custom") f.noise else "") }
+    val effectiveNoise = when (noisePreset) { "off" -> ""; "custom" -> noiseCustom.trim(); else -> noisePreset }
     val isStd = server.protocol == "vless" || server.protocol == "vmess" || server.protocol == "trojan"
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
@@ -553,9 +561,15 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
             Fld("Fragment (packets,length,interval — empty = off)", fragment) { fragment = it }
             Text("e.g. tlshello,100-200,10-20", color = MUTED, fontSize = 11.sp)
+            Spacer(Modifier.height(8.dp))
+            DropPick("Noise (anti-DPI / fake ClientHello)", listOf("off" to "Off", "random" to "Random", "faketls" to "Fake ClientHello", "custom" to "Custom…"), noisePreset) { noisePreset = it }
+            if (noisePreset == "custom") {
+                Fld("Noise spec (type:packet:delay; …)", noiseCustom) { noiseCustom = it }
+                Text("Decoy packets before the real handshake. type = rand/str/base64/hex.", color = MUTED, fontSize = 11.sp)
+            }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
-                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment)
+                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise)
                 onSave(ServerEditor.apply(server, nf))
             }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
