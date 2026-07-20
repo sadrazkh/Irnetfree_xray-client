@@ -559,11 +559,21 @@
           <div><label class="field-label" data-i18n="edit.host">Host</label>
             <input type="text" id="edHost" class="input" dir="ltr" /></div>
         </div>
+        <p class="hint" data-i18n="edit.frontHint">CDN fronting: «آدرس» = دامنه/IP سرویس CDN، «SNI» = یک دامنهٔ فرانتِ مجاز روی همان CDN، «Host» = بک‌اند واقعی شما.</p>
         <div class="grid2" id="edPathRow">
           <div><label class="field-label" data-i18n="edit.path">Path / ServiceName</label>
             <input type="text" id="edPath" class="input" dir="ltr" /></div>
-          <div><label class="field-label" data-i18n="edit.fp">Fingerprint</label>
-            <input type="text" id="edFp" class="input" dir="ltr" placeholder="chrome" /></div>
+          <div><label class="field-label" data-i18n="edit.fp">Fingerprint (uTLS)</label>
+            <select id="edFp" class="select">
+              <option value="chrome">chrome</option>
+              <option value="firefox">firefox</option>
+              <option value="safari">safari</option>
+              <option value="ios">ios</option>
+              <option value="android">android</option>
+              <option value="edge">edge</option>
+              <option value="random">random</option>
+              <option value="randomized">randomized</option>
+            </select></div>
         </div>
         <div class="grid2" id="edRealityRow" hidden>
           <div><label class="field-label" data-i18n="edit.pbk">Public Key (pbk)</label>
