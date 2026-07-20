@@ -18,7 +18,7 @@ const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerE
 const { buildConfig, buildTestConfig } = require('../main/configBuilder');
 const { XrayManager, getFreePort } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
-const { tcpPing, httpThroughProxy, ipInfo } = require('../main/netutils');
+const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../main/netutils');
 const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
 const { TunManager } = require('../main/tunManager');
@@ -484,6 +484,19 @@ function createService(opts = {}) {
         const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
         test = await xray.startTest(cfg);
         return await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
+      } catch (err) { return { ok: false, error: err.message }; }
+      finally { if (test) test.cleanup(); }
+    },
+    'ping:upload': async (id) => {
+      const { server, chain } = resolveTarget(id);
+      if (!server) return { ok: false, error: 'not found' };
+      if (!xray.binExists()) return { ok: false, error: 'xray binary missing' };
+      let test;
+      try {
+        const port = await getFreePort();
+        const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
+        test = await xray.startTest(cfg);
+        return await uploadThroughProxy(port, {});
       } catch (err) { return { ok: false, error: err.message }; }
       finally { if (test) test.cleanup(); }
     },

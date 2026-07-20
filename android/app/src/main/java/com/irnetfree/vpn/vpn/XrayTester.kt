@@ -1,38 +1,33 @@
 package com.irnetfree.vpn.vpn
 
-import android.util.Log
 import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ServerConfig
-import com.irnetfree.vpn.net.Diagnostics
 import java.net.ServerSocket
 
 /**
  * Per-config testing: spins up a THROWAWAY xray instance (tunFd=0, so just a
- * local SOCKS inbound + the config's outbound) on a free port, measures real
- * download + UPLOAD latency THROUGH that config, then tears it down. This is how
- * you compare configs — upload is often the slow side even when ping is fine.
+ * local SOCKS inbound + the config's outbound) on a free port. The caller then
+ * measures download / UPLOAD latency THROUGH that port (via Diagnostics) and
+ * calls [stop]. Split into start/stop so the UI can show the current phase
+ * ("testing download" vs "testing upload") between measurements.
  *
- * Tests are serialized (one throwaway at a time). Runtime: call from Dispatchers.IO.
+ * Callers must serialize tests (one throwaway at a time) — see the UI Mutex.
  */
 object XrayTester {
-    data class Result(val downloadMs: Long, val uploadMs: Long)
+    class Handle(val core: XrayCore, val port: Int)
 
-    private val lock = Any()
-
-    fun test(server: ServerConfig): Result = synchronized(lock) {
-        if (!XrayCore.available) return Result(-1, -1)
-        val port = freePort() ?: return Result(-1, -1)
-        val config = try { ConfigBuilder.buildTestConfig(server, port).toString() } catch (e: Throwable) { return Result(-1, -1) }
+    /** Start a throwaway xray for [server]; returns a handle, or null on failure. */
+    fun start(server: ServerConfig): Handle? {
+        if (!XrayCore.available) return null
+        val port = freePort() ?: return null
+        val config = try { ConfigBuilder.buildTestConfig(server, port).toString() } catch (e: Throwable) { return null }
         val core = XrayCore()
-        if (!core.start(config, 0)) return Result(-1, -1)
-        return try {
-            Thread.sleep(600)                     // let xray bind the inbound
-            val down = Diagnostics.httpLatency(port)
-            val up = if (down >= 0) Diagnostics.uploadTest(port) else -1
-            Result(down, up)
-        } catch (e: Throwable) { Log.w("XrayTester", "test failed: ${e.message}"); Result(-1, -1) }
-        finally { runCatching { core.stop() } }
+        if (!core.start(config, 0)) return null
+        try { Thread.sleep(600) } catch (e: InterruptedException) {}   // let xray bind the inbound
+        return Handle(core, port)
     }
+
+    fun stop(h: Handle) { runCatching { h.core.stop() } }
 
     private fun freePort(): Int? = try { ServerSocket(0).use { it.localPort } } catch (e: Exception) { null }
 }

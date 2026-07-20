@@ -9,7 +9,7 @@ const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerE
 const { buildConfig, buildTestConfig } = require('./configBuilder');
 const { XrayManager, getFreePort } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
-const { tcpPing, httpThroughProxy, ipInfo } = require('./netutils');
+const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('./netutils');
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
 const { TunManager } = require('./tunManager');
@@ -835,6 +835,25 @@ function registerIpc() {
       test = await xray.startTest(cfg);
       const result = await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
       return result;
+    } catch (err) {
+      return { ok: false, error: err.message };
+    } finally {
+      if (test) test.cleanup();
+    }
+  });
+
+  // Upload delay: throwaway xray on a free port, push ~1.5MB through it and time
+  // the flush. Surfaces configs with slow/broken UPLOAD (download can look fine).
+  ipcMain.handle('ping:upload', async (e, id) => {
+    const { server, chain } = resolveTarget(id);
+    if (!server) return { ok: false, error: 'not found' };
+    if (!xray.binExists()) return { ok: false, error: 'xray binary missing' };
+    let test;
+    try {
+      const port = await getFreePort();
+      const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
+      test = await xray.startTest(cfg);
+      return await uploadThroughProxy(port, {});
     } catch (err) {
       return { ok: false, error: err.message };
     } finally {

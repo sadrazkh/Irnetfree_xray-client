@@ -385,8 +385,10 @@ function applyPingDisplays(id) {
   const p = state.pings[id] || {};
   const tl = pingResultLabel(p.tcp);
   const rl = pingResultLabel(p.real);
+  const ul = pingResultLabel(p.upload);
   $$(`[data-ping="${id}"]`).forEach(el => { el.textContent = tl.txt; el.className = (el.dataset.pbase || 'srv-ping') + (tl.cls ? ' ' + tl.cls : ''); });
   $$(`[data-ping-real="${id}"]`).forEach(el => { el.textContent = rl.txt; el.className = (el.dataset.pbase || 'srv-ping') + (rl.cls ? ' ' + rl.cls : ''); });
+  $$(`[data-ping-up="${id}"]`).forEach(el => { el.textContent = ul.txt; el.className = (el.dataset.pbase || 'srv-ping') + (ul.cls ? ' ' + ul.cls : ''); });
 }
 
 function renderServers() {
@@ -402,6 +404,7 @@ function renderServers() {
 
     const tl = pingResultLabel((state.pings[s.id] || {}).tcp);
     const rl = pingResultLabel((state.pings[s.id] || {}).real);
+    const ul = pingResultLabel((state.pings[s.id] || {}).upload);
     const selBadge = isSel ? `<span class="sel-badge">✓ ${escapeHtml(t('srv.selected'))}</span>` : '';
 
     card.innerHTML = `
@@ -412,7 +415,8 @@ function renderServers() {
       </div>
       <div class="srv-pings">
         <span class="ping-cell" title="${escapeHtml(t('ping.tcp'))}"><span class="ping-ico">⚡</span><span class="srv-ping ${tl.cls}" data-pbase="srv-ping" data-ping="${s.id}">${tl.txt}</span></span>
-        <span class="ping-cell" title="${escapeHtml(t('ping.real'))}"><span class="ping-ico">⏱</span><span class="srv-ping ${rl.cls}" data-pbase="srv-ping" data-ping-real="${s.id}">${rl.txt}</span></span>
+        <span class="ping-cell" title="${escapeHtml(t('ping.real'))}"><span class="ping-ico">↓</span><span class="srv-ping ${rl.cls}" data-pbase="srv-ping" data-ping-real="${s.id}">${rl.txt}</span></span>
+        <span class="ping-cell" title="${escapeHtml(t('ping.upload'))}"><span class="ping-ico">↑</span><span class="srv-ping ${ul.cls}" data-pbase="srv-ping" data-ping-up="${s.id}">${ul.txt}</span></span>
       </div>
       <div class="srv-actions">
         <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
@@ -541,11 +545,13 @@ function renderPicker() {
   const addRow = (id, badgeHtml, name, pingId, isSpecial) => {
     const tl = pingId ? pingResultLabel((state.pings[pingId] || {}).tcp) : null;
     const rl = pingId ? pingResultLabel((state.pings[pingId] || {}).real) : null;
+    const ul = pingId ? pingResultLabel((state.pings[pingId] || {}).upload) : null;
     const row = document.createElement('div');
     row.className = 'picker-item' + (isSpecial ? ' picker-special' : '') + (id === selId ? ' active' : '');
     const pingPart = pingId
       ? `<span class="pi-ping-ico" title="${escapeHtml(t('ping.tcp'))}">⚡</span><span class="pi-ping ${tl.cls}" data-pbase="pi-ping" data-ping="${id}">${tl.txt}</span>` +
-        `<span class="pi-ping-ico" title="${escapeHtml(t('ping.real'))}">⏱</span><span class="pi-ping ${rl.cls}" data-pbase="pi-ping" data-ping-real="${id}">${rl.txt}</span>` +
+        `<span class="pi-ping-ico" title="${escapeHtml(t('ping.real'))}">↓</span><span class="pi-ping ${rl.cls}" data-pbase="pi-ping" data-ping-real="${id}">${rl.txt}</span>` +
+        `<span class="pi-ping-ico" title="${escapeHtml(t('ping.upload'))}">↑</span><span class="pi-ping ${ul.cls}" data-pbase="pi-ping" data-ping-up="${id}">${ul.txt}</span>` +
         `<button class="pi-ping-btn" title="ping">⚡</button>`
       : '';
     row.innerHTML = `${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}`;
@@ -688,22 +694,33 @@ $('#btnClearServers').onclick = async () => {
 // a real-delay number is proof the config truly works. We measure & show BOTH
 // everywhere (server cards, picker rows, chain cards).
 function setPingPending(id) {
-  $$(`[data-ping="${id}"], [data-ping-real="${id}"]`).forEach(el => {
+  $$(`[data-ping="${id}"], [data-ping-real="${id}"], [data-ping-up="${id}"]`).forEach(el => {
     el.textContent = '...'; el.className = (el.dataset.pbase || 'srv-ping');
   });
 }
 
-/** Ping ONE target: TCP (fast) then Real delay (through the config). */
+// Mark ONLY the cell of the phase currently being measured, so it's obvious
+// whether the download (⏱/↓) or the upload (↑) test is running right now.
+function setPhasePending(id, attr) {
+  $$(`[${attr}="${id}"]`).forEach(el => { el.textContent = '...'; el.className = (el.dataset.pbase || 'srv-ping'); });
+}
+
+/** Ping ONE target: TCP, then real DOWNLOAD delay, then UPLOAD delay. */
 async function pingServer(id) {
   setPingPending(id);
   const tcp = await window.api.pingTcp(id);
   state.pings[id] = Object.assign(state.pings[id] || {}, { tcp });
   applyPingDisplays(id);
+  setPhasePending(id, 'data-ping-real');           // ← testing download now
   const real = await window.api.pingReal(id);
   state.pings[id] = Object.assign(state.pings[id] || {}, { real });
   applyPingDisplays(id);
+  setPhasePending(id, 'data-ping-up');             // ← testing upload now
+  const upload = await window.api.pingUpload(id);
+  state.pings[id] = Object.assign(state.pings[id] || {}, { upload });
+  applyPingDisplays(id);
   if (id === state.selectedServerId) renderPicker();
-  return { tcp, real };
+  return { tcp, real, upload };
 }
 
 async function pingTcpOnly(id) {
