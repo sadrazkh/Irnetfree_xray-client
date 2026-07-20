@@ -564,6 +564,11 @@ function applyServerEdits(server, f) {
     const nz = String(f.noise).trim();
     if (nz) ob._noise = nz; else delete ob._noise;
   }
+  // Per-config core selection. 'xray' (default) or empty clears it.
+  if (f.engine != null) {
+    const eng = String(f.engine).trim();
+    if (eng && eng !== 'xray') out.engine = eng; else delete out.engine;
+  }
 
   return out;
 }

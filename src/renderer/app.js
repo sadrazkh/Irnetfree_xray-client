@@ -1353,7 +1353,8 @@ function readServerFields(s) {
     sni: '', host: '', path: '', fp: '', pbk: '', sid: '', alpn: '',
     allowInsecure: false, cred: '', method: '',
     fragment: ob._fragment || '',
-    noise: ob._noise || ''
+    noise: ob._noise || '',
+    engine: s.engine || 'xray'
   };
 
   if (s.protocol === 'vless' || s.protocol === 'vmess') {
@@ -1458,6 +1459,7 @@ function openEdit(id) {
   $('#edSid').value = f.sid || '';
   $('#edFragment').value = f.fragment || '';
   setNoiseFields(f.noise || '');
+  if ($('#edEngine')) $('#edEngine').value = f.engine || 'xray';
   $('#edInsecure').checked = !!f.allowInsecure;
 
   // credential label per protocol
@@ -1524,7 +1526,8 @@ $('#editSave').onclick = async () => {
     address: $('#edAddress').value,
     port: $('#edPort').value,
     fragment: $('#edFragment').value.trim(),  // '' clears it
-    noise: readNoiseField()                   // '' clears it
+    noise: readNoiseField(),                  // '' clears it
+    engine: $('#edEngine') ? $('#edEngine').value : 'xray'
   };
   const cred = $('#edCred').value.trim();
   if (proto === 'vless' || proto === 'vmess') { if (cred) fields.uuid = cred; }
