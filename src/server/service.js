@@ -274,25 +274,26 @@ function createService(opts = {}) {
     }
 
     const config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
-    return { plan, label, entryAddrs, config, geoWarn };
+    const engine = (plan.mode === 'single' && plan.server && plan.server.engine) || undefined;
+    return { plan, label, entryAddrs, config, geoWarn, engine };
   }
 
   /* ----------------------------- connect / disconnect ----------------------------- */
   async function doConnect(serverId) {
     const settings = await effectiveSettings();
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
-    const { label, entryAddrs, config, geoWarn } = buildActive(serverId, settings);
+    const { label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
     send('status', { state: 'connecting', serverId });
 
-    const check = await xray.validate(config);
+    const check = await xray.validate(config, engine);
     if (!check.ok) {
       send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
       throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error);
     }
 
     xrayReloading = true;
-    try { await xray.start(config); } finally { xrayReloading = false; }
+    try { await xray.start(config, engine); } finally { xrayReloading = false; }
     store.set('activeServerId', serverId);
 
     if (settings.systemProxy) {
@@ -330,9 +331,9 @@ function createService(opts = {}) {
     const serverId = store.get('activeServerId', null);
     if (!serverId || !xray.running) return;
     const settings = await effectiveSettings();
-    const { config } = buildActive(serverId, settings);
+    const { config, engine } = buildActive(serverId, settings);
     xrayReloading = true;
-    try { await xray.start(config); } finally { xrayReloading = false; }
+    try { await xray.start(config, engine); } finally { xrayReloading = false; }
     stats.setBin(xray.resolveBin());
     send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
   }

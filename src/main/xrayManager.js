@@ -11,6 +11,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { DEFAULT_ENGINE, engineExe } = require('./engines');
 const net = require('net');
 
 class XrayManager {
@@ -37,11 +38,25 @@ class XrayManager {
     ].filter(Boolean);
   }
 
-  /** Find the xray executable. */
-  resolveBin() {
+  /**
+   * Find a core executable. With no engine (or the default 'xray') this resolves
+   * the stock xray binary and caches it on `this.binPath`. For an alternate
+   * engine it resolves that engine's binary from the bin dirs (no caching), and
+   * returns null if it isn't installed — callers fall back to the default.
+   */
+  resolveBin(engineId = DEFAULT_ENGINE) {
+    if (engineId !== DEFAULT_ENGINE) {
+      const exe = engineExe(engineId);
+      for (const d of this.binDirs()) {
+        const c = path.join(d, exe);
+        if (fs.existsSync(c)) return c;
+      }
+      return null;
+    }
+
     if (this.binPath && fs.existsSync(this.binPath)) return this.binPath;
 
-    const exe = os.platform() === 'win32' ? 'xray.exe' : 'xray';
+    const exe = engineExe(DEFAULT_ENGINE);
     const candidates = [
       process.env.XRAY_PATH,
       this.binPath,
@@ -52,6 +67,15 @@ class XrayManager {
       if (fs.existsSync(c)) { this.binPath = c; return c; }
     }
     return null;
+  }
+
+  /** Resolve an engine's binary, falling back to the default core if missing. */
+  resolveEngineBin(engineId) {
+    if (!engineId || engineId === DEFAULT_ENGINE) return this.resolveBin(DEFAULT_ENGINE);
+    const bin = this.resolveBin(engineId);
+    if (bin) return bin;
+    this.onLog(`Engine '${engineId}' binary (${engineExe(engineId)}) not found in bin/ — using default Xray core`, 'warn');
+    return this.resolveBin(DEFAULT_ENGINE);
   }
 
   /** Directory that holds geoip.dat / geosite.dat (for XRAY_LOCATION_ASSET). */
@@ -115,9 +139,9 @@ class XrayManager {
    * Returns { ok:true } or { ok:false, error } with the real core message,
    * so the UI can show *why* a chain / advanced-routing config was rejected.
    */
-  validate(config) {
+  validate(config, engineId) {
     return new Promise((resolve) => {
-      const bin = this.resolveBin();
+      const bin = this.resolveEngineBin(engineId);
       if (!bin) return resolve({ ok: false, error: 'xray binary not found' });
       let cfgPath;
       try { cfgPath = path.join(this.dataDir, `test-cfg-${Date.now()}.json`); fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2), 'utf8'); }
@@ -144,18 +168,18 @@ class XrayManager {
     });
   }
 
-  /** Start xray with the given config object. */
-  async start(config) {
+  /** Start the core with the given config object, on the given engine. */
+  async start(config, engineId) {
     if (this.running) await this.stop();
 
-    const bin = this.resolveBin();
+    const bin = this.resolveEngineBin(engineId);
     if (!bin) {
       this.onStatus('error', { message: 'xray binary not found. Put xray.exe in the bin/ folder.' });
       throw new Error('xray binary not found');
     }
 
     const cfgPath = this.writeConfig(config);
-    this.onLog(`Starting xray with ${path.basename(cfgPath)}`, 'info');
+    this.onLog(`Starting ${path.basename(bin)} with ${path.basename(cfgPath)}`, 'info');
 
     this.proc = spawn(bin, ['run', '-c', cfgPath], {
       cwd: path.dirname(bin),

@@ -390,7 +390,10 @@ function buildActive(serverId, settings) {
   }
 
   const config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
-  return { plan, label, entryAddrs, config, geoWarn };
+  // Per-config core selection: honour a single server's chosen engine. Chains /
+  // pool / advanced always run on the default Xray core.
+  const engine = (plan.mode === 'single' && plan.server && plan.server.engine) || undefined;
+  return { plan, label, entryAddrs, config, geoWarn, engine };
 }
 
 async function doConnect(serverId) {
@@ -400,13 +403,13 @@ async function doConnect(serverId) {
   const settings = await effectiveSettings();
   const byId = (id) => store.get('servers', []).find(s => s.id === id);
 
-  const { label, entryAddrs, config, geoWarn } = buildActive(serverId, settings);
+  const { label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
   send('status', { state: 'connecting', serverId });
 
   // Validate first so chain / advanced-routing mistakes surface as a clear
   // message instead of a config that crashes xray right after "connected".
-  const check = await xray.validate(config);
+  const check = await xray.validate(config, engine);
   if (!check.ok) {
     send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
     throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error);
@@ -417,7 +420,7 @@ async function doConnect(serverId) {
   // "disconnected" in the UI.
   xrayReloading = true;
   try {
-    await xray.start(config);
+    await xray.start(config, engine);
   } finally {
     xrayReloading = false;
   }
@@ -492,12 +495,12 @@ async function rebuildActiveConfig() {
   const serverId = store.get('activeServerId', null);
   if (!serverId || !xray.running) return;
   const settings = await effectiveSettings();
-  const { config } = buildActive(serverId, settings);
+  const { config, engine } = buildActive(serverId, settings);
   // Suppress the transient 'stopped' status from the old instance so the UI
   // doesn't flash "disconnected" during the reload.
   xrayReloading = true;
   try {
-    await xray.start(config);   // start() stops the old instance first
+    await xray.start(config, engine);   // start() stops the old instance first
   } finally {
     xrayReloading = false;
   }

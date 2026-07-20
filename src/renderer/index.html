@@ -613,6 +613,15 @@
               <input type="text" id="edWgAllowed" class="input" dir="ltr" placeholder="0.0.0.0/0, ::/0" /></div>
           </div>
         </div>
+        <!-- Per-config core / engine (all protocols) -->
+        <div class="grid2" id="edEngineRow">
+          <div><label class="field-label" data-i18n="edit.engine">Core / Engine</label>
+            <select id="edEngine" class="select">
+              <option value="xray" data-i18n="engine.xray">Xray (default)</option>
+              <option value="xray-spoof" data-i18n="engine.spoof">Spoof core (fake ClientHello / SNI)</option>
+            </select></div>
+          <div class="engine-hint"><p class="hint" data-i18n="edit.engineHint">Only this config runs on the chosen core. The spoof core needs its binary in bin/; falls back to Xray if missing.</p></div>
+        </div>
         <!-- TLS fragmentation (all protocols) -->
         <div class="grid2" id="edFragmentRow">
           <div><label class="field-label" data-i18n="edit.fragment">Fragment (packets,length,interval — خالی = خاموش)</label>
