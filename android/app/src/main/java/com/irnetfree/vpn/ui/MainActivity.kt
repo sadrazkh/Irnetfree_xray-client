@@ -538,7 +538,11 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             if (isStd) {
                 DropPick("Transport", listOf("tcp" to "tcp", "ws" to "ws", "grpc" to "grpc", "h2" to "h2", "xhttp" to "xhttp", "kcp" to "kcp"), network) { network = it }
                 DropPick("Security", listOf("none" to "none", "tls" to "tls", "reality" to "reality"), security) { security = it }
-                Fld("SNI", sni) { sni = it }; Fld("Host", host) { host = it }; Fld("Path / ServiceName", path) { path = it }; Fld("Fingerprint", fp) { fp = it }
+                Fld("SNI (fronting: an allowed domain on the CDN)", sni) { sni = it }
+                Fld("Host header (real backend)", host) { host = it }
+                Text("CDN fronting: set Address=CDN, SNI=allowed front domain, Host=your real host.", color = MUTED, fontSize = 11.sp)
+                Fld("Path / ServiceName", path) { path = it }
+                DropPick("uTLS Fingerprint", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized"), fp) { fp = it }
                 if (security == "reality") { Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it } }
                 SwitchRow("Allow Insecure", allowInsecure) { allowInsecure = it }
             }

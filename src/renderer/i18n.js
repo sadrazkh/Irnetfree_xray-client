@@ -53,6 +53,7 @@ const I18N = {
     'edit.pbk': 'Public Key (pbk)', 'edit.sid': 'Short ID (sid)', 'edit.allowInsecure': 'Allow Insecure',
 
     'edit.fragment': 'Fragment (packets,length,interval — خالی = خاموش)',
+    'edit.frontHint': 'CDN fronting: «آدرس» = دامنه/IP سرویس CDN، «SNI» = یک دامنهٔ فرانتِ مجاز روی همان CDN، «Host» = بک‌اند واقعی شما.',
     'chain.title': 'زنجیره پروکسی', 'chain.enable': 'فعال‌سازی زنجیره',
     'chain.hint': 'ترافیک به‌ترتیب از این سرورها عبور می‌کند. با کشیدن و رها کردن، ترتیب را تغییر بده.',
     'chain.client': '💻 شما', 'chain.internet': '🌐 اینترنت',
@@ -279,6 +280,7 @@ const I18N = {
     'edit.pbk': 'Public Key (pbk)', 'edit.sid': 'Short ID (sid)', 'edit.allowInsecure': 'Allow Insecure',
 
     'edit.fragment': 'Fragment (packets,length,interval — empty = off)',
+    'edit.frontHint': 'CDN fronting: Address = CDN service domain/IP, SNI = an allowed front domain on that CDN, Host = your real backend.',
     'chain.title': 'Proxy chain', 'chain.enable': 'Enable chain',
     'chain.hint': 'Traffic passes through these servers in order. Drag and drop to reorder.',
     'chain.client': '💻 You', 'chain.internet': '🌐 Internet',
