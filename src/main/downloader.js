@@ -6,6 +6,7 @@
  *
  * Components:
  *   - xray      : XTLS/Xray-core (zip → xray.exe + geoip.dat + geosite.dat)
+ *   - sing-box  : SagerNet/sing-box (zip/tar.gz → sing-box.exe) — alternate core
  *   - geo       : geoip.dat + geosite.dat only (Loyalsoldier rules, direct .dat)
  *   - tun2socks : xjasonlyu/tun2socks (zip → tun2socks.exe)
  *   - wintun    : wintun.dll (wintun.net zip, Windows only)
@@ -71,6 +72,11 @@ function unzip(zipPath, destDir) {
   }
 }
 
+/** Extract a .tar.gz (used by sing-box's non-Windows releases). */
+function untar(tgzPath, destDir) {
+  execFileSync('tar', ['-xzf', tgzPath, '-C', destDir], { stdio: 'ignore' });
+}
+
 /** Recursively find the first file whose basename matches (case-insensitive). */
 function findFile(dir, name) {
   const want = name.toLowerCase();
@@ -117,11 +123,41 @@ class Downloader {
   async download(component) {
     switch (component) {
       case 'xray': return this.getXray();
+      case 'sing-box': return this.getSingbox();
       case 'geo': return this.getGeo();
       case 'tun2socks': return this.getTun2socks();
       case 'wintun': return this.getWintun();
       default: throw new Error('unknown component: ' + component);
     }
+  }
+
+  /** Regex matching this platform's sing-box release asset (version varies). */
+  singboxAssetPattern() {
+    const arch = os.arch() === 'arm64' ? 'arm64' : 'amd64';
+    if (os.platform() === 'win32') return new RegExp(`sing-box-.*-windows-${arch}\\.zip$`, 'i');
+    if (os.platform() === 'darwin') return new RegExp(`sing-box-.*-darwin-${arch}\\.tar\\.gz$`, 'i');
+    return new RegExp(`sing-box-.*-linux-${arch}\\.tar\\.gz$`, 'i');
+  }
+
+  async getSingbox() {
+    this.log('Fetching latest sing-box release info…');
+    const rel = await getJSON('https://api.github.com/repos/SagerNet/sing-box/releases/latest');
+    const pat = this.singboxAssetPattern();
+    const asset = (rel.assets || []).find(a => pat.test(a.name));
+    if (!asset) throw new Error('sing-box asset not found for this platform');
+    const work = tmpDir('singbox');
+    const archive = path.join(work, asset.name);
+    this.log(`Downloading ${asset.name} (${rel.tag_name})…`);
+    await downloadFile(asset.browser_download_url, archive, (p) => this.onProgress('sing-box', p));
+    this.log('Extracting sing-box…');
+    if (/\.zip$/i.test(asset.name)) unzip(archive, work); else untar(archive, work);
+    const exeName = os.platform() === 'win32' ? 'sing-box.exe' : 'sing-box';
+    const exe = findFile(work, exeName);
+    if (!exe) throw new Error('sing-box binary not found in archive');
+    const placed = this.place(exe, exeName, true);
+    this.cleanup(work);
+    this.log('✓ sing-box integrated: ' + placed);
+    return { ok: true, files: [placed] };
   }
 
   async getXray() {

@@ -618,9 +618,9 @@
           <div><label class="field-label" data-i18n="edit.engine">Core / Engine</label>
             <select id="edEngine" class="select">
               <option value="xray" data-i18n="engine.xray">Xray (default)</option>
-              <option value="xray-spoof" data-i18n="engine.spoof">Spoof core (fake ClientHello / SNI)</option>
+              <option value="sing-box" data-i18n="engine.singbox">sing-box (fake ClientHello / uTLS)</option>
             </select></div>
-          <div class="engine-hint"><p class="hint" data-i18n="edit.engineHint">Only this config runs on the chosen core. The spoof core needs its binary in bin/; falls back to Xray if missing.</p></div>
+          <div class="engine-hint"><p class="hint" data-i18n="edit.engineHint">Only this config runs on the chosen core. sing-box needs its binary in bin/; falls back to Xray if missing.</p></div>
         </div>
         <!-- TLS fragmentation (all protocols) -->
         <div class="grid2" id="edFragmentRow">
