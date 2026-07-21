@@ -90,6 +90,12 @@ function translateOutbound(server, tag) {
   const tls = translateTls(ss, server_addr);
   if (tls) out.tls = tls;
 
+  // Reject transports sing-box can't express so the caller falls back to Xray
+  // instead of silently dialing plain TCP (which would just fail to connect).
+  const net = (ss.network || 'tcp').toLowerCase();
+  if (!['tcp', 'raw', 'ws', 'grpc', 'http', 'h2'].includes(net)) {
+    throw new UnsupportedEngineConfig(`sing-box: '${net}' transport not supported (use Xray)`);
+  }
   const transport = translateTransport(ss);
   if (transport) out.transport = transport;
 

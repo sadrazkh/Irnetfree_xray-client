@@ -582,6 +582,14 @@ function rebuildStream(ob, f) {
     .some(k => f[k] != null && f[k] !== '');
   if (!touched) return;
 
+  // Fields the edit form doesn't expose but must survive a rebuild (otherwise
+  // editing anything would silently break the config): reality spiderX, xhttp
+  // mode, kcp seed/headerType, grpc multiMode.
+  const rs = cur.realitySettings || {};
+  const xs = cur.xhttpSettings || {};
+  const ks = cur.kcpSettings || {};
+  const gs = cur.grpcSettings || {};
+
   const q = {
     type: f.network || cur.network || 'tcp',
     security: f.security || cur.security || 'none',
@@ -593,9 +601,20 @@ function rebuildStream(ob, f) {
     pbk: f.pbk,
     sid: f.sid,
     alpn: f.alpn,
-    allowInsecure: f.allowInsecure ? '1' : '0'
+    allowInsecure: f.allowInsecure ? '1' : '0',
+    // preserved passthroughs
+    spx: rs.spiderX || '',
+    mode: xs.mode || (gs.multiMode ? 'multi' : ''),
+    seed: ks.seed || '',
+    headerType: (ks.header && ks.header.type) || ''
   };
-  ob.streamSettings = buildStreamSettings(q);
+  const rebuilt = buildStreamSettings(q);
+
+  // Carry over any transport `extra`/advanced sub-keys the builder doesn't model
+  // (e.g. xhttp scMaxEachPostBytes / uplink method / padding) so they persist.
+  if (rebuilt.xhttpSettings && xs.extra) rebuilt.xhttpSettings.extra = xs.extra;
+
+  ob.streamSettings = rebuilt;
 }
 
 /* ------------------------------ helpers ------------------------------ */

@@ -547,11 +547,12 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             if (isStd) {
                 DropPick("Transport", listOf("tcp" to "tcp", "ws" to "ws", "grpc" to "grpc", "h2" to "h2", "xhttp" to "xhttp", "kcp" to "kcp"), network) { network = it }
                 DropPick("Security", listOf("none" to "none", "tls" to "tls", "reality" to "reality"), security) { security = it }
-                Fld("SNI (fronting: an allowed domain on the CDN)", sni) { sni = it }
-                Fld("Host header (real backend)", host) { host = it }
-                Text("CDN fronting: set Address=CDN, SNI=allowed front domain, Host=your real host.", color = MUTED, fontSize = 11.sp)
+                Text("🛡  SNI spoofing (fake handshake)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                Fld("Spoof SNI — fake domain", sni) { sni = it }
+                Fld("Host — real backend (empty if not fronting)", host) { host = it }
+                Text("Spoof SNI = the domain shown in the TLS handshake; set an allowed/CDN domain. Host = your real backend.", color = MUTED, fontSize = 11.sp)
                 Fld("Path / ServiceName", path) { path = it }
-                DropPick("uTLS Fingerprint", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized"), fp) { fp = it }
+                DropPick("Fake ClientHello (browser fingerprint / uTLS)", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized"), fp) { fp = it }
                 if (security == "reality") { Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it } }
                 SwitchRow("Allow Insecure", allowInsecure) { allowInsecure = it }
             }
@@ -560,13 +561,14 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
                 Fld("MTU", wgMtu) { wgMtu = it }; Fld("Reserved", wgReserved) { wgReserved = it }; Fld("Allowed IPs", wgAllowed) { wgAllowed = it }
             }
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
+            Text("⚙  Advanced — DPI evasion (optional)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
             DropPick("Core / Engine", listOf("xray" to "Xray (default)", "sing-box" to "sing-box (fake ClientHello / uTLS)"), engine) { engine = it }
-            Text("Only this config runs on the chosen core. sing-box is bundled for arm64 devices; falls back to Xray otherwise.", color = MUTED, fontSize = 11.sp)
+            Text("Only this config runs on the chosen core. sing-box is bundled for arm64; other transports (xhttp/kcp) fall back to Xray.", color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(8.dp))
             Fld("Fragment (packets,length,interval — empty = off)", fragment) { fragment = it }
             Text("e.g. tlshello,100-200,10-20", color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(8.dp))
-            DropPick("Noise (anti-DPI / fake ClientHello)", listOf("off" to "Off", "random" to "Random", "faketls" to "Fake ClientHello", "custom" to "Custom…"), noisePreset) { noisePreset = it }
+            DropPick("Noise (decoy packets before handshake)", listOf("off" to "Off", "random" to "Random", "faketls" to "Fake ClientHello", "custom" to "Custom…"), noisePreset) { noisePreset = it }
             if (noisePreset == "custom") {
                 Fld("Noise spec (type:packet:delay; …)", noiseCustom) { noiseCustom = it }
                 Text("Decoy packets before the real handshake. type = rand/str/base64/hex.", color = MUTED, fontSize = 11.sp)
