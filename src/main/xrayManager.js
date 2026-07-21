@@ -11,7 +11,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { DEFAULT_ENGINE, engineExe } = require('./engines');
+const { DEFAULT_ENGINE, engineExe, engineRunArgs, engineTestArgs } = require('./engines');
 const net = require('net');
 
 class XrayManager {
@@ -69,13 +69,19 @@ class XrayManager {
     return null;
   }
 
-  /** Resolve an engine's binary, falling back to the default core if missing. */
-  resolveEngineBin(engineId) {
-    if (!engineId || engineId === DEFAULT_ENGINE) return this.resolveBin(DEFAULT_ENGINE);
-    const bin = this.resolveBin(engineId);
-    if (bin) return bin;
-    this.onLog(`Engine '${engineId}' binary (${engineExe(engineId)}) not found in bin/ — using default Xray core`, 'warn');
-    return this.resolveBin(DEFAULT_ENGINE);
+  /**
+   * Resolve the effective engine to run a config on: the requested one if its
+   * binary is installed, otherwise the default Xray core (logged). Returns
+   * { id, bin } so callers use the argv/format of the core they'll ACTUALLY run.
+   */
+  resolveEngine(engineId) {
+    const wantId = engineId || DEFAULT_ENGINE;
+    if (wantId !== DEFAULT_ENGINE) {
+      const bin = this.resolveBin(wantId);
+      if (bin) return { id: wantId, bin };
+      this.onLog(`Engine '${wantId}' binary (${engineExe(wantId)}) not found in bin/ — using default Xray core`, 'warn');
+    }
+    return { id: DEFAULT_ENGINE, bin: this.resolveBin(DEFAULT_ENGINE) };
   }
 
   /** Directory that holds geoip.dat / geosite.dat (for XRAY_LOCATION_ASSET). */
@@ -141,14 +147,14 @@ class XrayManager {
    */
   validate(config, engineId) {
     return new Promise((resolve) => {
-      const bin = this.resolveEngineBin(engineId);
-      if (!bin) return resolve({ ok: false, error: 'xray binary not found' });
+      const { id, bin } = this.resolveEngine(engineId);
+      if (!bin) return resolve({ ok: false, error: 'core binary not found' });
       let cfgPath;
       try { cfgPath = path.join(this.dataDir, `test-cfg-${Date.now()}.json`); fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2), 'utf8'); }
       catch (e) { return resolve({ ok: false, error: e.message }); }
 
       let out = '';
-      const proc = spawn(bin, ['run', '-test', '-c', cfgPath], { cwd: path.dirname(bin), windowsHide: true, env: this.spawnEnv() });
+      const proc = spawn(bin, engineTestArgs(id, cfgPath), { cwd: path.dirname(bin), windowsHide: true, env: this.spawnEnv() });
       const grab = (d) => { out += d.toString('utf8'); };
       proc.stdout.on('data', grab);
       proc.stderr.on('data', grab);
@@ -172,7 +178,7 @@ class XrayManager {
   async start(config, engineId) {
     if (this.running) await this.stop();
 
-    const bin = this.resolveEngineBin(engineId);
+    const { id, bin } = this.resolveEngine(engineId);
     if (!bin) {
       this.onStatus('error', { message: 'xray binary not found. Put xray.exe in the bin/ folder.' });
       throw new Error('xray binary not found');
@@ -181,7 +187,7 @@ class XrayManager {
     const cfgPath = this.writeConfig(config);
     this.onLog(`Starting ${path.basename(bin)} with ${path.basename(cfgPath)}`, 'info');
 
-    this.proc = spawn(bin, ['run', '-c', cfgPath], {
+    this.proc = spawn(bin, engineRunArgs(id, cfgPath), {
       cwd: path.dirname(bin),
       windowsHide: true,
       env: this.spawnEnv()

@@ -16,6 +16,8 @@ const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits } = require('../main/parser');
 const { buildConfig, buildTestConfig } = require('../main/configBuilder');
+const { buildSingboxConfig } = require('../main/singboxBuilder');
+const { engineFormat } = require('../main/engines');
 const { XrayManager, getFreePort } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../main/netutils');
@@ -273,8 +275,20 @@ function createService(opts = {}) {
         : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
     }
 
-    const config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
-    const engine = (plan.mode === 'single' && plan.server && plan.server.engine) || undefined;
+    const wantEngine = (plan.mode === 'single' && plan.server && plan.server.engine) || undefined;
+    let engine = xray.resolveEngine(wantEngine).id;
+    let config;
+    if (engineFormat(engine) === 'sing-box') {
+      try {
+        config = buildSingboxConfig(plan.server, settings);
+      } catch (e) {
+        send('log', { line: `sing-box: ${e.message} — using Xray`, level: 'warn' });
+        engine = 'xray';
+      }
+    }
+    if (!config) {
+      config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
+    }
     return { plan, label, entryAddrs, config, geoWarn, engine };
   }
 

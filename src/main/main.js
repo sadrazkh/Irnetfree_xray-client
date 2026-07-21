@@ -7,6 +7,8 @@ const { spawn, execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits } = require('./parser');
 const { buildConfig, buildTestConfig } = require('./configBuilder');
+const { buildSingboxConfig } = require('./singboxBuilder');
+const { engineFormat } = require('./engines');
 const { XrayManager, getFreePort } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('./netutils');
@@ -89,6 +91,7 @@ function assetStatus() {
   const win = process.platform === 'win32';
   return {
     xray: xray ? xray.binExists() : has(win ? 'xray.exe' : 'xray'),
+    'sing-box': has(win ? 'sing-box.exe' : 'sing-box'),
     tun2socks: has(win ? 'tun2socks.exe' : 'tun2socks'),
     wintun: win ? has('wintun.dll') : true,
     geoip: has('geoip.dat'),
@@ -389,10 +392,24 @@ function buildActive(serverId, settings) {
       : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
   }
 
-  const config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
   // Per-config core selection: honour a single server's chosen engine. Chains /
-  // pool / advanced always run on the default Xray core.
-  const engine = (plan.mode === 'single' && plan.server && plan.server.engine) || undefined;
+  // pool / advanced always run on the default Xray core. The EFFECTIVE engine
+  // (after fallback when the binary is missing) decides the config format.
+  const wantEngine = (plan.mode === 'single' && plan.server && plan.server.engine) || undefined;
+  let engine = xray.resolveEngine(wantEngine).id;
+
+  let config;
+  if (engineFormat(engine) === 'sing-box') {
+    try {
+      config = buildSingboxConfig(plan.server, settings);
+    } catch (e) {
+      send('log', { line: `sing-box: ${e.message} — using Xray`, level: 'warn' });
+      engine = 'xray';
+    }
+  }
+  if (!config) {
+    config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
+  }
   return { plan, label, entryAddrs, config, geoWarn, engine };
 }
 

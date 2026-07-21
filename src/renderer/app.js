@@ -1002,6 +1002,7 @@ $('#btnDownloadHelp').onclick = () => {
 /* ----------------------------- required components ----------------------------- */
 const COMPONENTS = [
   { key: 'xray', label: 'comp.xray' },
+  { key: 'sing-box', label: 'comp.singbox', has: (a) => !!a['sing-box'] },
   { key: 'geo', label: 'comp.geo', has: (a) => a.geoip && a.geosite },
   { key: 'tun2socks', label: 'comp.tun2socks' },
   { key: 'wintun', label: 'comp.wintun', winOnly: true }
