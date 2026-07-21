@@ -20,7 +20,8 @@ object ServerEditor {
         var proxyUser: String = "", var proxyPass: String = "",
         var wgPub: String = "", var wgAddr: String = "", var wgPsk: String = "",
         var wgMtu: String = "1420", var wgReserved: String = "", var wgAllowed: String = "0.0.0.0/0, ::/0",
-        var fragment: String = "", var noise: String = ""
+        var fragment: String = "", var noise: String = "",
+        var engine: String = "xray"                 // 'xray' (default) | 'sing-box'
     )
 
     fun read(s: ServerConfig): Fields {
@@ -30,6 +31,7 @@ object ServerEditor {
         f.network = st.optString("network", "tcp"); f.security = st.optString("security", "none")
         f.fragment = ob.optString("_fragment", "")
         f.noise = ob.optString("_noise", "")
+        f.engine = s.engine ?: "xray"
 
         when (s.protocol) {
             "vless", "vmess" -> vnextUser(ob)?.let { f.cred = it.optString("id") }
@@ -80,7 +82,8 @@ object ServerEditor {
         }
         if (f.fragment.isNotBlank()) ob.put("_fragment", f.fragment.trim())
         if (f.noise.isNotBlank()) ob.put("_noise", f.noise.trim())
-        return s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = ob)
+        val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" }
+        return s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = ob, engine = engine)
     }
 
     private fun streamQ(f: Fields): Map<String, String?> = mapOf(

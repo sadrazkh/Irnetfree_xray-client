@@ -17,12 +17,15 @@ data class ServerConfig(
     val port: Int,
     val outbound: JSONObject,
     val raw: String = "",
-    val subId: String? = null
+    val subId: String? = null,
+    // Per-config core: null/"xray" = default Xray core, "sing-box" = sing-box.
+    val engine: String? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("name", name); put("protocol", protocol)
         put("address", address); put("port", port); put("outbound", outbound)
         put("raw", raw); if (subId != null) put("subId", subId)
+        if (engine != null) put("engine", engine)
     }
 
     companion object {
@@ -34,7 +37,8 @@ data class ServerConfig(
             port = o.optInt("port"),
             outbound = o.optJSONObject("outbound") ?: JSONObject(),
             raw = o.optString("raw"),
-            subId = if (o.has("subId") && !o.isNull("subId")) o.optString("subId") else null
+            subId = if (o.has("subId") && !o.isNull("subId")) o.optString("subId") else null,
+            engine = if (o.has("engine") && !o.isNull("engine")) o.optString("engine") else null
         )
     }
 }

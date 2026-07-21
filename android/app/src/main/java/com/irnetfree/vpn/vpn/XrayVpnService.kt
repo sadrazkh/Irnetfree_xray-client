@@ -11,6 +11,8 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.irnetfree.vpn.core.ConfigBuilder
+import com.irnetfree.vpn.core.ConnectionPlan
+import com.irnetfree.vpn.core.SingboxConfig
 import com.irnetfree.vpn.core.Store
 import com.irnetfree.vpn.ui.MainActivity
 import hev.htproxy.TProxyService
@@ -35,6 +37,7 @@ class XrayVpnService : VpnService() {
 
     private var tun: ParcelFileDescriptor? = null
     private var xray: XrayCore? = null
+    private var singbox: SingboxCore? = null
     private var tunnelRunning = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var statsJob: Job? = null
@@ -55,6 +58,7 @@ class XrayVpnService : VpnService() {
         val ipv6 = intent.getBooleanExtra(EXTRA_IPV6, false)
         val perAppMode = intent.getStringExtra(EXTRA_PERAPP_MODE) ?: "off"
         val perApps = intent.getStringArrayListExtra(EXTRA_PERAPPS) ?: arrayListOf()
+        val engine = intent.getStringExtra(EXTRA_ENGINE) ?: "xray"
 
         VpnState.set(ConnState.CONNECTING, label)
         VpnState.addLog("Connecting: $label")
@@ -62,12 +66,21 @@ class XrayVpnService : VpnService() {
             .onFailure { VpnState.addLog("startForeground failed: ${it.message}") }
 
         try {
-            if (!XrayCore.available) { fail("Xray core (libv2ray) is not bundled."); stopAll(); return }
-
-            // 1) Xray core with local SOCKS inbound (tunFd=0 => run inbounds only)
-            xray = XrayCore(onStatus = { _, s -> if (!s.isNullOrBlank()) VpnState.addLog(s) })
-            if (!xray!!.start(config, 0)) { fail("Xray core failed to start — see logs (More → Logs)."); stopAll(); return }
-            VpnState.addLog("Xray core started (socks=$socksPort)")
+            // 1) Proxy core with a local SOCKS inbound (no internal tun). The core
+            //    is chosen per-config: sing-box (subprocess) or Xray (in-process).
+            if (engine == "sing-box") {
+                if (!SingboxCore.available(this)) { fail("sing-box core is not bundled for this device."); stopAll(); return }
+                val sb = SingboxCore()
+                val started = sb.start(this, config) { s -> VpnState.addLog(s) }
+                if (!started) { fail("sing-box core failed to start — see logs (More → Logs)."); stopAll(); return }
+                singbox = sb
+                VpnState.addLog("sing-box core started (socks=$socksPort)")
+            } else {
+                if (!XrayCore.available) { fail("Xray core (libv2ray) is not bundled."); stopAll(); return }
+                xray = XrayCore(onStatus = { _, s -> if (!s.isNullOrBlank()) VpnState.addLog(s) })
+                if (!xray!!.start(config, 0)) { fail("Xray core failed to start — see logs (More → Logs)."); stopAll(); return }
+                VpnState.addLog("Xray core started (socks=$socksPort)")
+            }
 
             // 2) TUN — exclude our own app so xray's sockets bypass the tunnel
             val builder = Builder()
@@ -142,6 +155,7 @@ class XrayVpnService : VpnService() {
         statsJob?.cancel(); statsJob = null
         if (tunnelRunning) { runCatching { TProxyService.TProxyStopService() }; tunnelRunning = false }
         runCatching { xray?.stop() }; xray = null
+        runCatching { singbox?.stop() }; singbox = null
         runCatching { tun?.close() }; tun = null
         VpnState.set(ConnState.DISCONNECTED, "")
         stopForegroundCompat(); stopSelf()
@@ -192,16 +206,28 @@ class XrayVpnService : VpnService() {
         const val ACTION_CONNECT = "com.irnetfree.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.irnetfree.vpn.DISCONNECT"
         const val EXTRA_CONFIG = "config"; const val EXTRA_SOCKS = "socks"; const val EXTRA_DNS = "dns"
-        const val EXTRA_LABEL = "label"; const val EXTRA_IPV6 = "ipv6"
+        const val EXTRA_LABEL = "label"; const val EXTRA_IPV6 = "ipv6"; const val EXTRA_ENGINE = "engine"
         const val EXTRA_PERAPP_MODE = "perAppMode"; const val EXTRA_PERAPPS = "perApps"
 
         fun connect(ctx: Context, store: Store) {
             val plan = store.buildPlan()
             val s = store.settings
-            val config = ConfigBuilder.build(plan, s, geoAssets = false).toString()
+
+            // Per-config core: only a single server can pick sing-box, and only
+            // when its binary is bundled for this device — otherwise use Xray.
+            var engine = "xray"
+            val single = plan as? ConnectionPlan.Single
+            val config: String = if (single != null && single.server.engine == "sing-box" && SingboxCore.available(ctx)) {
+                try { engine = "sing-box"; SingboxConfig.build(single.server, s).toString() }
+                catch (e: Throwable) { engine = "xray"; VpnState.addLog("sing-box: ${e.message} — using Xray"); ConfigBuilder.build(plan, s, geoAssets = false).toString() }
+            } else {
+                ConfigBuilder.build(plan, s, geoAssets = false).toString()
+            }
+
             val i = Intent(ctx, XrayVpnService::class.java).apply {
                 action = ACTION_CONNECT
                 putExtra(EXTRA_CONFIG, config)
+                putExtra(EXTRA_ENGINE, engine)
                 putExtra(EXTRA_SOCKS, s.socksPort)
                 putStringArrayListExtra(EXTRA_DNS, ArrayList(s.dns))
                 putExtra(EXTRA_LABEL, store.selectionLabel())

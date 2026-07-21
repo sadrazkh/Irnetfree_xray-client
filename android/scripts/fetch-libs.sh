@@ -53,4 +53,36 @@ fetch_so "arm64-v8a"   "HEV_SO_URL_ARM64_V8A"
 fetch_so "armeabi-v7a" "HEV_SO_URL_ARMEABI_V7A"
 fetch_so "x86_64"      "HEV_SO_URL_X86_64"
 
+# sing-box CLI (the optional alternate per-config core). The official release
+# ships an Android-built `sing-box` ELF; we bundle it as libsingbox.so so Android
+# will extract it to the (executable) nativeLibraryDir and the app can exec it.
+# arm64 only by default (each binary is ~58 MB — bundling all ABIs would bloat
+# the APK); other ABIs simply fall back to Xray. Override the version with
+# SINGBOX_TAG, or add ABIs via SINGBOX_ABIS="arm64-v8a:arm64 x86_64:amd64 ...".
+fetch_singbox() {
+  local abi="$1" goarch="$2" tag="$3"
+  local ver="${tag#v}"
+  local name="sing-box-${ver}-android-${goarch}"
+  local url="https://github.com/SagerNet/sing-box/releases/download/${tag}/${name}.tar.gz"
+  local tmp; tmp="$(mktemp -d)"
+  echo "    $abi <- $name.tar.gz"
+  if curl -fSL --retry 3 --retry-delay 2 "$url" -o "$tmp/sb.tar.gz" && tar -xzf "$tmp/sb.tar.gz" -C "$tmp"; then
+    mkdir -p "$jni/$abi"
+    cp "$tmp/$name/sing-box" "$jni/$abi/libsingbox.so"
+    echo "    saved -> jniLibs/$abi/libsingbox.so"
+  else
+    echo "    (skip $abi: sing-box download failed — engine falls back to Xray)"
+  fi
+  rm -rf "$tmp"
+}
+
+echo "==> Fetching sing-box (optional alternate core)"
+# Pinned (like libv2ray) so we never hit the rate-limited GitHub API on shared CI
+# runners. Bump SINGBOX_TAG to update the bundled sing-box.
+SINGBOX_TAG="${SINGBOX_TAG:-v1.13.14}"
+echo "    sing-box $SINGBOX_TAG"
+for pair in ${SINGBOX_ABIS:-"arm64-v8a:arm64"}; do
+  fetch_singbox "${pair%%:*}" "${pair##*:}" "$SINGBOX_TAG"
+done
+
 echo "Done."
