@@ -561,6 +561,15 @@
             <input type="text" id="edHost" class="input" dir="ltr" /></div>
         </div>
         <p class="hint" id="edSpoofHint">The SNI is the domain sent in the TLS handshake.</p>
+        <label class="switch-row inline-switch" id="edHideSniRow">
+          <span class="switch-title" id="edHideSniLabel">🕵 Hide SNI from DPI (fragment)</span>
+          <span class="switch"><input type="checkbox" id="edHideSni" /><span class="slider"></span></span>
+        </label>
+        <div id="edFakeSniWrap">
+          <label class="field-label" id="edFakeSniLabel">Fake SNI decoy (experimental)</label>
+          <input type="text" id="edFakeSni" class="input" dir="ltr" placeholder="e.g. www.google.com" />
+          <p class="hint" id="edFakeSniHint">Injects a fake ClientHello with this domain before the real handshake.</p>
+        </div>
         <div class="grid2" id="edPathRow">
           <div><label class="field-label" data-i18n="edit.path">Path / ServiceName</label>
             <input type="text" id="edPath" class="input" dir="ltr" /></div>

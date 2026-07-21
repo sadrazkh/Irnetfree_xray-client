@@ -285,20 +285,21 @@ object ConfigBuilder {
             val o = outbounds.getJSONObject(i)
             val frag = o.optString("_fragment", "")
             val noise = o.optString("_noise", "")
-            if (frag.isEmpty() && noise.isEmpty()) continue
-            o.remove("_fragment"); o.remove("_noise")
+            val fakeSni = o.optString("_fakesni", "")
+            if (frag.isEmpty() && noise.isEmpty() && fakeSni.isEmpty()) continue
+            o.remove("_fragment"); o.remove("_noise"); o.remove("_fakesni")
             val ss = o.optJSONObject("streamSettings") ?: JSONObject().also { o.put("streamSettings", it) }
             val sockopt = ss.optJSONObject("sockopt") ?: JSONObject().also { ss.put("sockopt", it) }
             if (sockopt.has("dialerProxy")) continue
-            val key = "$frag $noise"
+            val key = "$frag|$noise|$fakeSni"
             var tag = byKey[key]
-            if (tag == null) { tag = "dpi-" + (byKey.size + 1); byKey[key] = tag; extra.put(makeFragmentOutbound(tag, frag, noise)) }
+            if (tag == null) { tag = "dpi-" + (byKey.size + 1); byKey[key] = tag; extra.put(makeFragmentOutbound(tag, frag, noise, fakeSni)) }
             sockopt.put("dialerProxy", tag)
         }
         for (i in 0 until extra.length()) outbounds.put(extra.getJSONObject(i))
         return outbounds
     }
-    private fun makeFragmentOutbound(tag: String, fragStr: String, noiseStr: String): JSONObject {
+    private fun makeFragmentOutbound(tag: String, fragStr: String, noiseStr: String, fakeSni: String): JSONObject {
         val settings = JSONObject().put("domainStrategy", "AsIs")
         if (fragStr.isNotEmpty()) {
             val p = fragStr.split(",").map { it.trim() }
@@ -307,11 +308,33 @@ object ConfigBuilder {
                 .put("length", fragRange(p.getOrNull(1), "100-200", 1))
                 .put("interval", fragRange(p.getOrNull(2), "10-20", 0)))
         }
-        if (noiseStr.isNotEmpty()) {
-            val noises = parseNoises(noiseStr)
-            if (noises.length() > 0) settings.put("noises", noises)
-        }
+        val noises = if (noiseStr.isNotEmpty()) parseNoises(noiseStr) else JSONArray()
+        // Decoy: prepend a synthetic ClientHello carrying a FAKE SNI (best-effort).
+        if (fakeSni.isNotEmpty()) {
+            val hello = JSONObject().put("type", "base64").put("packet", fakeClientHelloB64(fakeSni)).put("delay", "0")
+            val merged = JSONArray().put(hello)
+            for (i in 0 until noises.length()) merged.put(noises.getJSONObject(i))
+            if (merged.length() > 0) settings.put("noises", merged)
+        } else if (noises.length() > 0) settings.put("noises", noises)
         return JSONObject().put("tag", tag).put("protocol", "freedom").put("settings", settings)
+    }
+    /** Minimal TLS 1.2 ClientHello record carrying `sni`, base64-encoded (decoy). */
+    private fun fakeClientHelloB64(sni: String): String {
+        fun u16(n: Int) = byteArrayOf(((n shr 8) and 0xff).toByte(), (n and 0xff).toByte())
+        fun u24(n: Int) = byteArrayOf(((n shr 16) and 0xff).toByte(), ((n shr 8) and 0xff).toByte(), (n and 0xff).toByte())
+        val host = sni.toByteArray(Charsets.UTF_8)
+        val rnd = java.security.SecureRandom()
+        val random = ByteArray(32).also { rnd.nextBytes(it) }
+        val session = ByteArray(32).also { rnd.nextBytes(it) }
+        val ciphers = byteArrayOf(0x13, 0x01, 0x13, 0x02, 0x13, 0x03, 0xc0.toByte(), 0x2b, 0xc0.toByte(), 0x2f, 0x00, 0xff.toByte())
+        val sniName = byteArrayOf(0x00) + u16(host.size) + host
+        val sniList = u16(sniName.size) + sniName
+        val sniExt = byteArrayOf(0x00, 0x00) + u16(sniList.size) + sniList
+        val body = byteArrayOf(0x03, 0x03) + random + byteArrayOf(0x20) + session +
+            u16(ciphers.size) + ciphers + byteArrayOf(0x01, 0x00) + u16(sniExt.size) + sniExt
+        val handshake = byteArrayOf(0x01) + u24(body.size) + body
+        val record = byteArrayOf(0x16, 0x03, 0x01) + u16(handshake.size) + handshake
+        return android.util.Base64.encodeToString(record, android.util.Base64.NO_WRAP)
     }
     // Named presets (also accepted from the link's &noise= value).
     private val noisePresets = mapOf(
