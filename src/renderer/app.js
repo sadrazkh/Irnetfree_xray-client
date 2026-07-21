@@ -1487,6 +1487,7 @@ function openEdit(id) {
   // socks/http carry no single "credential" field — user/pass live in edProxyRow
   show('#edCredWrap', !isProxy);
   $('#edRealityRow').hidden = !(isStd && $('#edSecurity').value === 'reality');
+  updateSpoofLabels();
 
   if (isProxy) {
     $('#edProxyUser').value = f.pxUser || '';
@@ -1507,10 +1508,42 @@ function openEdit(id) {
 
 function show(sel, on) { const el = $(sel); if (el) el.hidden = !on; }
 
+/**
+ * Make the SNI section speak the truth for the current security+transport, so
+ * the user knows exactly what to type (and the "two SNIs" confusion is gone):
+ *  - REALITY  → SNI must match the server's serverNames (not a free fake)
+ *  - TLS + ws/grpc/xhttp/h2 (frontable) → Front SNI (censor+CDN see this) + Host = real backend
+ *  - TLS + tcp → SNI must match the server certificate
+ *  - none → no TLS SNI at all (section hidden)
+ */
+function updateSpoofLabels() {
+  const isStd = editOriginal && ['vless', 'vmess', 'trojan'].includes(editOriginal.protocol);
+  const sec = $('#edSecurity').value || 'none';
+  const net = $('#edNetwork').value || 'tcp';
+  const on = isStd && (sec === 'tls' || sec === 'reality');
+  show('#edSpoofHead', on); show('#edTlsRow', on);
+  const hintEl = $('#edSpoofHint'); if (hintEl) hintEl.hidden = !on;
+  if (!on) return;
+
+  const frontable = ['ws', 'grpc', 'xhttp', 'splithttp', 'h2', 'http'].includes(net);
+  let head, sni, hint, showHost;
+  if (sec === 'reality') { head = 'spoof.realityTitle'; sni = 'spoof.realitySni'; hint = 'spoof.realityHint'; showHost = false; }
+  else if (frontable) { head = 'spoof.frontTitle'; sni = 'spoof.frontSni'; hint = 'spoof.frontHint'; showHost = true; }
+  else { head = 'spoof.tlsTitle'; sni = 'spoof.tlsSni'; hint = 'spoof.tlsHint'; showHost = false; }
+
+  $('#edSpoofHeadText').textContent = t(head);
+  $('#edSniLabel').textContent = t(sni);
+  $('#edHostLabel').textContent = t('spoof.frontHost');
+  $('#edSpoofHint').textContent = t(hint);
+  const hostWrap = $('#edHostWrap'); if (hostWrap) hostWrap.style.display = showHost ? '' : 'none';
+}
+
 $('#edSecurity').onchange = () => {
   const isStd = editOriginal && ['vless', 'vmess', 'trojan'].includes(editOriginal.protocol);
   $('#edRealityRow').hidden = !(isStd && $('#edSecurity').value === 'reality');
+  updateSpoofLabels();
 };
+$('#edNetwork').onchange = () => updateSpoofLabels();
 
 function closeEdit() { $('#editModal').hidden = true; state.editingId = null; editOriginal = null; }
 $('#editClose').onclick = closeEdit;
