@@ -425,29 +425,30 @@ function splitList(v) {
  * outbounds appended; the markers are stripped.
  */
 function applyFragments(outbounds) {
-  const byKey = {};   // "frag|noise" -> tag
+  const byKey = {};   // "frag|noise|fakesni" -> tag
   const extra = [];
   for (const o of outbounds) {
-    if (!o || (!o._fragment && !o._noise)) continue;
+    if (!o || (!o._fragment && !o._noise && !o._fakesni)) continue;
     const frag = o._fragment ? String(o._fragment) : '';
     const noise = o._noise ? String(o._noise) : '';
-    delete o._fragment; delete o._noise;
+    const fakesni = o._fakesni ? String(o._fakesni) : '';
+    delete o._fragment; delete o._noise; delete o._fakesni;
     const ss = o.streamSettings || (o.streamSettings = {});
     const sockopt = ss.sockopt || (ss.sockopt = {});
     if (sockopt.dialerProxy) continue;   // chained hop — don't override
-    const key = frag + '|' + noise;
+    const key = frag + '|' + noise + '|' + fakesni;
     let tag = byKey[key];
     if (!tag) {
       tag = 'dpi-' + (Object.keys(byKey).length + 1);
       byKey[key] = tag;
-      extra.push(makeFragmentOutbound(tag, frag, noise));
+      extra.push(makeFragmentOutbound(tag, frag, noise, fakesni));
     }
     sockopt.dialerProxy = tag;
   }
   return extra.length ? outbounds.concat(extra) : outbounds;
 }
 
-function makeFragmentOutbound(tag, fragStr, noiseStr) {
+function makeFragmentOutbound(tag, fragStr, noiseStr, fakeSni) {
   const settings = { domainStrategy: 'AsIs' };
   if (fragStr) {
     const p = String(fragStr).split(',').map(s => s.trim());
@@ -458,11 +459,37 @@ function makeFragmentOutbound(tag, fragStr, noiseStr) {
       interval: fragRange(p[2], '10-20', 0)
     };
   }
-  if (noiseStr) {
-    const noises = parseNoises(noiseStr);
-    if (noises.length) settings.noises = noises;
-  }
+  const noises = noiseStr ? parseNoises(noiseStr) : [];
+  // Decoy: inject a synthetic ClientHello carrying a FAKE SNI before the real
+  // handshake, so DPI sees the allowed name first. (Best-effort — needs a core
+  // that tolerates it; falls back to harmless noise otherwise.)
+  if (fakeSni) noises.unshift({ type: 'base64', packet: fakeClientHelloB64(fakeSni), delay: '0' });
+  if (noises.length) settings.noises = noises;
   return { tag, protocol: 'freedom', settings };
+}
+
+// Build a minimal TLS 1.2 ClientHello record carrying `sni` in the SNI
+// extension, base64-encoded (used as a decoy "fake ClientHello").
+function fakeClientHelloB64(sni) {
+  const crypto = require('crypto');
+  const u16 = (n) => Buffer.from([(n >> 8) & 0xff, n & 0xff]);
+  const u24 = (n) => Buffer.from([(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]);
+  const host = Buffer.from(String(sni), 'utf8');
+  const sniName = Buffer.concat([Buffer.from([0x00]), u16(host.length), host]);      // name_type + len + host
+  const sniList = Buffer.concat([u16(sniName.length), sniName]);
+  const sniExt = Buffer.concat([Buffer.from([0x00, 0x00]), u16(sniList.length), sniList]);
+  const ciphers = Buffer.from([0x13, 0x01, 0x13, 0x02, 0x13, 0x03, 0xc0, 0x2b, 0xc0, 0x2f, 0x00, 0xff]);
+  const body = Buffer.concat([
+    Buffer.from([0x03, 0x03]),                    // client_version TLS 1.2
+    crypto.randomBytes(32),                       // random
+    Buffer.from([0x20]), crypto.randomBytes(32),  // session_id (len 32)
+    u16(ciphers.length), ciphers,
+    Buffer.from([0x01, 0x00]),                    // compression: null
+    u16(sniExt.length), sniExt                    // extensions
+  ]);
+  const handshake = Buffer.concat([Buffer.from([0x01]), u24(body.length), body]);
+  const record = Buffer.concat([Buffer.from([0x16, 0x03, 0x01]), u16(handshake.length), handshake]);
+  return record.toString('base64');
 }
 
 // Named presets (also accepted from the link's &noise= value).

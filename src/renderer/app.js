@@ -1355,6 +1355,7 @@ function readServerFields(s) {
     allowInsecure: false, cred: '', method: '',
     fragment: ob._fragment || '',
     noise: ob._noise || '',
+    fakeSni: ob._fakesni || '',
     engine: s.engine || 'xray'
   };
 
@@ -1460,6 +1461,7 @@ function openEdit(id) {
   $('#edSid').value = f.sid || '';
   $('#edFragment').value = f.fragment || '';
   setNoiseFields(f.noise || '');
+  if ($('#edFakeSni')) $('#edFakeSni').value = f.fakeSni || '';
   if ($('#edEngine')) $('#edEngine').value = f.engine || 'xray';
   $('#edInsecure').checked = !!f.allowInsecure;
 
@@ -1522,6 +1524,7 @@ function updateSpoofLabels() {
   const net = $('#edNetwork').value || 'tcp';
   const on = isStd && (sec === 'tls' || sec === 'reality');
   show('#edSpoofHead', on); show('#edTlsRow', on);
+  show('#edHideSniRow', on); show('#edFakeSniWrap', on);
   const hintEl = $('#edSpoofHint'); if (hintEl) hintEl.hidden = !on;
   if (!on) return;
 
@@ -1536,7 +1539,18 @@ function updateSpoofLabels() {
   $('#edHostLabel').textContent = t('spoof.frontHost');
   $('#edSpoofHint').textContent = t(hint);
   const hostWrap = $('#edHostWrap'); if (hostWrap) hostWrap.style.display = showHost ? '' : 'none';
+
+  // bypass controls (all TLS/reality): Hide-SNI toggle reflects the fragment
+  // state; the fake-SNI decoy is the experimental patched-core path.
+  $('#edHideSniLabel').textContent = t('spoof.hideSni');
+  $('#edFakeSniLabel').textContent = t('spoof.fakeSni');
+  $('#edFakeSniHint').textContent = t('spoof.fakeSniHint');
+  $('#edHideSni').checked = !!($('#edFragment').value || '').trim();
 }
+
+// The default SNI-hiding fragment (patterniha-style: fragment the ClientHello
+// so DPI can't read the SNI). Editable later in Advanced → Fragment.
+const HIDE_SNI_FRAGMENT = 'tlshello,100-200,10-20';
 
 $('#edSecurity').onchange = () => {
   const isStd = editOriginal && ['vless', 'vmess', 'trojan'].includes(editOriginal.protocol);
@@ -1544,6 +1558,12 @@ $('#edSecurity').onchange = () => {
   updateSpoofLabels();
 };
 $('#edNetwork').onchange = () => updateSpoofLabels();
+// Hide-SNI toggle drives the (advanced) Fragment field with a sensible default.
+if ($('#edHideSni')) $('#edHideSni').onchange = () => {
+  const frag = $('#edFragment');
+  if ($('#edHideSni').checked) { if (!frag.value.trim()) frag.value = HIDE_SNI_FRAGMENT; }
+  else frag.value = '';
+};
 
 function closeEdit() { $('#editModal').hidden = true; state.editingId = null; editOriginal = null; }
 $('#editClose').onclick = closeEdit;
@@ -1561,6 +1581,7 @@ $('#editSave').onclick = async () => {
     port: $('#edPort').value,
     fragment: $('#edFragment').value.trim(),  // '' clears it
     noise: readNoiseField(),                  // '' clears it
+    fakeSni: $('#edFakeSni') ? $('#edFakeSni').value.trim() : '',
     engine: $('#edEngine') ? $('#edEngine').value : 'xray'
   };
   const cred = $('#edCred').value.trim();

@@ -564,6 +564,11 @@ function applyServerEdits(server, f) {
     const nz = String(f.noise).trim();
     if (nz) ob._noise = nz; else delete ob._noise;
   }
+  // Fake/decoy SNI domain injected as a fake ClientHello. Empty clears it.
+  if (f.fakeSni != null) {
+    const fs = String(f.fakeSni).trim();
+    if (fs) ob._fakesni = fs; else delete ob._fakesni;
+  }
   // Per-config core selection. 'xray' (default) or empty clears it.
   if (f.engine != null) {
     const eng = String(f.engine).trim();
