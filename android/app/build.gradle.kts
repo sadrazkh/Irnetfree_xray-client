@@ -74,6 +74,10 @@ android {
 
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+        // The sing-box CLI ships as libsingbox.so in jniLibs; it must be extracted
+        // to the (executable) nativeLibraryDir at install so it can be exec'd —
+        // legacy packaging sets extractNativeLibs=true and stores libs uncompressed.
+        jniLibs { useLegacyPackaging = true }
     }
     // libv2ray.aar lives in app/libs (fetched by scripts/fetch-libs.sh)
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")

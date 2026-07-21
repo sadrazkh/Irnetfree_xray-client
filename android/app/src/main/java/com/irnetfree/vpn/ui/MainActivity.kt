@@ -530,6 +530,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     }) }
     var noiseCustom by remember { mutableStateOf(if (noisePreset == "custom") f.noise else "") }
     val effectiveNoise = when (noisePreset) { "off" -> ""; "custom" -> noiseCustom.trim(); else -> noisePreset }
+    var engine by remember { mutableStateOf(f.engine) }
     val isStd = server.protocol == "vless" || server.protocol == "vmess" || server.protocol == "trojan"
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
@@ -559,6 +560,9 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
                 Fld("MTU", wgMtu) { wgMtu = it }; Fld("Reserved", wgReserved) { wgReserved = it }; Fld("Allowed IPs", wgAllowed) { wgAllowed = it }
             }
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
+            DropPick("Core / Engine", listOf("xray" to "Xray (default)", "sing-box" to "sing-box (fake ClientHello / uTLS)"), engine) { engine = it }
+            Text("Only this config runs on the chosen core. sing-box is bundled for arm64 devices; falls back to Xray otherwise.", color = MUTED, fontSize = 11.sp)
+            Spacer(Modifier.height(8.dp))
             Fld("Fragment (packets,length,interval — empty = off)", fragment) { fragment = it }
             Text("e.g. tlshello,100-200,10-20", color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(8.dp))
@@ -569,7 +573,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
-                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise)
+                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise, engine)
                 onSave(ServerEditor.apply(server, nf))
             }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
