@@ -536,7 +536,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 16.dp)) {
             Text("Edit · ${badge(server.protocol)}", color = TXT, fontWeight = FontWeight.Bold)
-            Fld("Name", name) { name = it }; Fld("Address", address) { address = it }; Fld("Port", port) { port = it }
+            Fld("Name", name) { name = it }; Fld("Address — real server/IP (connection goes here)", address) { address = it }; Fld("Port", port) { port = it }
             when (server.protocol) {
                 "vless", "vmess" -> Fld("UUID", cred) { cred = it }
                 "trojan" -> Fld("Password", cred) { cred = it }
@@ -547,10 +547,22 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             if (isStd) {
                 DropPick("Transport", listOf("tcp" to "tcp", "ws" to "ws", "grpc" to "grpc", "h2" to "h2", "xhttp" to "xhttp", "kcp" to "kcp"), network) { network = it }
                 DropPick("Security", listOf("none" to "none", "tls" to "tls", "reality" to "reality"), security) { security = it }
-                Text("🛡  SNI spoofing (fake handshake)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
-                Fld("Spoof SNI — fake domain", sni) { sni = it }
-                Fld("Host — real backend (empty if not fronting)", host) { host = it }
-                Text("Spoof SNI = the domain shown in the TLS handshake; set an allowed/CDN domain. Host = your real backend.", color = MUTED, fontSize = 11.sp)
+                // Context-aware SNI section: it means different things for
+                // reality / CDN-fronting / plain-TLS, so say the right thing.
+                val frontable = network in listOf("ws", "grpc", "xhttp", "splithttp", "h2", "http")
+                if (security == "tls" || security == "reality") {
+                    val head = if (security == "reality") "🛡  REALITY (mimic a real site)" else if (frontable) "🛡  CDN fronting / SNI spoofing" else "🛡  TLS"
+                    val sniLabel = when { security == "reality" -> "SNI — must match server's serverNames"; frontable -> "Front SNI — allowed domain (censor + CDN see this)"; else -> "SNI — must match the server certificate" }
+                    val sniHint = when {
+                        security == "reality" -> "REALITY is not fronting: the SNI must be the exact site your server mimics (serverNames), e.g. www.google.com. Connection still goes to Address."
+                        frontable -> "Address = the CDN you connect to. Front SNI = an allowed domain on that CDN (censor + CDN see it). Host = your real backend. Enable Fragment below to hide the SNI from DPI."
+                        else -> "Connection goes to Address; the SNI is sent in the handshake and must match the server certificate (or Allow Insecure)."
+                    }
+                    Text(head, color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                    Fld(sniLabel, sni) { sni = it }
+                    if (security == "tls" && frontable) Fld("Host — your real backend (behind the CDN)", host) { host = it }
+                    Text(sniHint, color = MUTED, fontSize = 11.sp)
+                }
                 Fld("Path / ServiceName", path) { path = it }
                 DropPick("Fake ClientHello (browser fingerprint / uTLS)", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized"), fp) { fp = it }
                 if (security == "reality") { Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it } }

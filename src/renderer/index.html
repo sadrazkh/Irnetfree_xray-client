@@ -553,14 +553,14 @@
               <option value="reality">reality</option>
             </select></div>
         </div>
-        <div class="edit-section" id="edSpoofHead"><span data-i18n="edit.spoofTitle">🛡 SNI spoofing (fake handshake)</span></div>
+        <div class="edit-section" id="edSpoofHead"><span id="edSpoofHeadText">🛡 SNI spoofing</span></div>
         <div class="grid2" id="edTlsRow">
-          <div><label class="field-label" data-i18n="edit.sni">Spoof SNI — fake domain</label>
+          <div><label class="field-label" id="edSniLabel">SNI</label>
             <input type="text" id="edSni" class="input" dir="ltr" placeholder="e.g. www.google.com" /></div>
-          <div><label class="field-label" data-i18n="edit.host">Host — real backend</label>
+          <div id="edHostWrap"><label class="field-label" id="edHostLabel">Host</label>
             <input type="text" id="edHost" class="input" dir="ltr" /></div>
         </div>
-        <p class="hint" data-i18n="edit.frontHint">The Spoof SNI is the domain sent (visible) in the TLS handshake — set it to an allowed/CDN domain. Host is your real backend. Leave Host empty if not fronting.</p>
+        <p class="hint" id="edSpoofHint">The SNI is the domain sent in the TLS handshake.</p>
         <div class="grid2" id="edPathRow">
           <div><label class="field-label" data-i18n="edit.path">Path / ServiceName</label>
             <input type="text" id="edPath" class="input" dir="ltr" /></div>
