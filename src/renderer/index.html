@@ -553,17 +553,18 @@
               <option value="reality">reality</option>
             </select></div>
         </div>
+        <div class="edit-section" id="edSpoofHead"><span data-i18n="edit.spoofTitle">🛡 SNI spoofing (fake handshake)</span></div>
         <div class="grid2" id="edTlsRow">
-          <div><label class="field-label" data-i18n="edit.sni">SNI</label>
-            <input type="text" id="edSni" class="input" dir="ltr" /></div>
-          <div><label class="field-label" data-i18n="edit.host">Host</label>
+          <div><label class="field-label" data-i18n="edit.sni">Spoof SNI — fake domain</label>
+            <input type="text" id="edSni" class="input" dir="ltr" placeholder="e.g. www.google.com" /></div>
+          <div><label class="field-label" data-i18n="edit.host">Host — real backend</label>
             <input type="text" id="edHost" class="input" dir="ltr" /></div>
         </div>
-        <p class="hint" data-i18n="edit.frontHint">CDN fronting: «آدرس» = دامنه/IP سرویس CDN، «SNI» = یک دامنهٔ فرانتِ مجاز روی همان CDN، «Host» = بک‌اند واقعی شما.</p>
+        <p class="hint" data-i18n="edit.frontHint">The Spoof SNI is the domain sent (visible) in the TLS handshake — set it to an allowed/CDN domain. Host is your real backend. Leave Host empty if not fronting.</p>
         <div class="grid2" id="edPathRow">
           <div><label class="field-label" data-i18n="edit.path">Path / ServiceName</label>
             <input type="text" id="edPath" class="input" dir="ltr" /></div>
-          <div><label class="field-label" data-i18n="edit.fp">Fingerprint (uTLS)</label>
+          <div><label class="field-label" data-i18n="edit.fp">Fake ClientHello (browser fingerprint)</label>
             <select id="edFp" class="select">
               <option value="chrome">chrome</option>
               <option value="firefox">firefox</option>
@@ -613,6 +614,7 @@
               <input type="text" id="edWgAllowed" class="input" dir="ltr" placeholder="0.0.0.0/0, ::/0" /></div>
           </div>
         </div>
+        <div class="edit-section" id="edAdvHead"><span data-i18n="edit.advTitle">⚙ Advanced — DPI evasion (optional)</span></div>
         <!-- Per-config core / engine (all protocols) -->
         <div class="grid2" id="edEngineRow">
           <div><label class="field-label" data-i18n="edit.engine">Core / Engine</label>

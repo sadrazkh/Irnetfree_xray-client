@@ -230,6 +230,10 @@ body {
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
 .grid2:last-child { margin-bottom: 0; }
 .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+.edit-section {
+  margin: 16px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--accent);
+  color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .3px;
+}
 .hint code, code { background: var(--bg); padding: 2px 6px; border-radius: 6px; font-size: 12px; }
 .row-gap { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
 

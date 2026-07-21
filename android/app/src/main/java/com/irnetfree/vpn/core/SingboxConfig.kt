@@ -83,6 +83,12 @@ object SingboxConfig {
         }
 
         translateTls(ss, server.address)?.let { out.put("tls", it) }
+        // Reject transports sing-box can't express so the caller falls back to Xray
+        // instead of silently dialing plain TCP (which would just fail to connect).
+        val net = ss.optString("network", "tcp").lowercase()
+        if (net !in listOf("tcp", "raw", "ws", "grpc", "http", "h2")) {
+            throw Unsupported("sing-box: '$net' transport not supported (use Xray)")
+        }
         translateTransport(ss)?.let { out.put("transport", it) }
         // NOTE: fragment (`_fragment`) is intentionally ignored — mainline sing-box
         // has no TLS-fragment option; uTLS covers the fake-ClientHello need.

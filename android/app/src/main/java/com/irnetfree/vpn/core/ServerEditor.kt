@@ -21,7 +21,11 @@ object ServerEditor {
         var wgPub: String = "", var wgAddr: String = "", var wgPsk: String = "",
         var wgMtu: String = "1420", var wgReserved: String = "", var wgAllowed: String = "0.0.0.0/0, ::/0",
         var fragment: String = "", var noise: String = "",
-        var engine: String = "xray"                 // 'xray' (default) | 'sing-box'
+        var engine: String = "xray",                // 'xray' (default) | 'sing-box'
+        // preserved passthroughs the edit form doesn't expose (so editing anything
+        // doesn't silently drop them): reality spiderX, xhttp mode/extra, kcp bits.
+        var spx: String = "", var xmode: String = "", var seed: String = "",
+        var headerType: String = "", var xhttpExtra: JSONObject? = null
     )
 
     fun read(s: ServerConfig): Fields {
@@ -52,9 +56,11 @@ object ServerEditor {
         }
         // transport / tls details
         st.optJSONObject("wsSettings")?.let { f.path = it.optString("path"); f.host = it.optJSONObject("headers")?.optString("Host") ?: "" }
-        st.optJSONObject("grpcSettings")?.let { f.path = it.optString("serviceName") }
+        st.optJSONObject("grpcSettings")?.let { f.path = it.optString("serviceName"); if (it.optBoolean("multiMode")) f.xmode = "multi" }
+        st.optJSONObject("xhttpSettings")?.let { f.path = it.optString("path"); f.host = it.optString("host"); f.xmode = it.optString("mode"); f.xhttpExtra = it.optJSONObject("extra") }
+        st.optJSONObject("kcpSettings")?.let { f.seed = it.optString("seed"); f.headerType = it.optJSONObject("header")?.optString("type") ?: "" }
         st.optJSONObject("tlsSettings")?.let { f.sni = it.optString("serverName"); f.allowInsecure = it.optBoolean("allowInsecure"); f.fp = it.optString("fingerprint", "chrome"); f.alpn = arr(it.optJSONArray("alpn")).joinToString(",") }
-        st.optJSONObject("realitySettings")?.let { f.sni = it.optString("serverName"); f.fp = it.optString("fingerprint", "chrome"); f.pbk = it.optString("publicKey"); f.sid = it.optString("shortId") }
+        st.optJSONObject("realitySettings")?.let { f.sni = it.optString("serverName"); f.fp = it.optString("fingerprint", "chrome"); f.pbk = it.optString("publicKey"); f.sid = it.optString("shortId"); f.spx = it.optString("spiderX") }
         return f
     }
 
@@ -80,6 +86,8 @@ object ServerEditor {
             "wireguard" -> LinkParser.buildWireguardOutbound(f.cred.trim(), f.wgPub.trim(), "$addr:$port", f.wgAddr.trim(), f.wgPsk.trim(), f.wgMtu, f.wgReserved, f.wgAllowed)
             else -> s.outbound
         }
+        // carry over xhttp `extra` (padding / post-bytes / method) the builder doesn't model
+        f.xhttpExtra?.let { ob.optJSONObject("streamSettings")?.optJSONObject("xhttpSettings")?.put("extra", it) }
         if (f.fragment.isNotBlank()) ob.put("_fragment", f.fragment.trim())
         if (f.noise.isNotBlank()) ob.put("_noise", f.noise.trim())
         val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" }
@@ -89,7 +97,9 @@ object ServerEditor {
     private fun streamQ(f: Fields): Map<String, String?> = mapOf(
         "type" to f.network, "security" to f.security, "sni" to f.sni, "host" to f.host,
         "path" to f.path, "serviceName" to f.path, "fp" to f.fp, "pbk" to f.pbk, "sid" to f.sid,
-        "alpn" to f.alpn, "allowInsecure" to if (f.allowInsecure) "1" else "0")
+        "alpn" to f.alpn, "allowInsecure" to if (f.allowInsecure) "1" else "0",
+        // preserved passthroughs (see Fields)
+        "spx" to f.spx, "mode" to f.xmode, "seed" to f.seed, "headerType" to f.headerType)
 
     private fun vnextUser(ob: JSONObject) = ob.optJSONObject("settings")?.optJSONArray("vnext")?.optJSONObject(0)?.optJSONArray("users")?.optJSONObject(0)
     private fun serverObj(ob: JSONObject) = ob.optJSONObject("settings")?.optJSONArray("servers")?.optJSONObject(0)
