@@ -31,11 +31,23 @@ object SingboxConfig {
             .put(translateOutbound(server))
             .put(JSONObject().put("type", "direct").put("tag", "direct"))
 
+        // Explicit DNS via `direct`. sing-box is a Go binary and on Android can't
+        // read the system resolver, so without this the server domain never
+        // resolves and nothing connects. (This is the usual "works on Xray, not on
+        // sing-box" cause.) Resolving via `direct` also keeps it off the tunnel.
+        val dnsServer = s.dns.firstOrNull()?.takeIf { it.isNotBlank() } ?: "1.1.1.1"
+        val dns = JSONObject()
+            .put("servers", JSONArray().put(JSONObject()
+                .put("type", "udp").put("tag", "dns-direct").put("server", dnsServer)))
+            .put("final", "dns-direct")
+
         return JSONObject()
             .put("log", JSONObject().put("level", logLevel(s.logLevel)).put("timestamp", false))
+            .put("dns", dns)
             .put("inbounds", inbounds)
             .put("outbounds", outbounds)
-            .put("route", JSONObject().put("final", "proxy"))
+            // resolve outbound server domains via dns-direct (no resolve→proxy loop)
+            .put("route", JSONObject().put("final", "proxy").put("default_domain_resolver", "dns-direct"))
     }
 
     private fun logLevel(x: String): String {

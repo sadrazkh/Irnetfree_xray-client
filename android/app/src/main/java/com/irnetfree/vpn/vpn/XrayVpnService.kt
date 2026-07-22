@@ -71,15 +71,15 @@ class XrayVpnService : VpnService() {
             if (engine == "sing-box") {
                 if (!SingboxCore.available(this)) { fail("sing-box core is not bundled for this device."); stopAll(); return }
                 val sb = SingboxCore()
-                val started = sb.start(this, config) { s -> VpnState.addLog(s) }
+                val started = sb.start(this, config, socksPort) { s -> VpnState.addLog(s) }
                 if (!started) { fail("sing-box core failed to start — see logs (More → Logs)."); stopAll(); return }
                 singbox = sb
-                VpnState.addLog("sing-box core started (socks=$socksPort)")
+                VpnState.addLog("✓ Running on sing-box core (socks=$socksPort)")
             } else {
                 if (!XrayCore.available) { fail("Xray core (libv2ray) is not bundled."); stopAll(); return }
                 xray = XrayCore(onStatus = { _, s -> if (!s.isNullOrBlank()) VpnState.addLog(s) })
                 if (!xray!!.start(config, 0)) { fail("Xray core failed to start — see logs (More → Logs)."); stopAll(); return }
-                VpnState.addLog("Xray core started (socks=$socksPort)")
+                VpnState.addLog("✓ Running on Xray core (socks=$socksPort)")
             }
 
             // 2) TUN — exclude our own app so xray's sockets bypass the tunnel
