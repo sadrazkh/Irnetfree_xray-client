@@ -30,14 +30,26 @@ function buildSingboxConfig(server, settings) {
     { type: 'http', tag: 'http-in', listen, listen_port: s.httpPort }
   ];
 
+  // Explicit DNS via the `direct` outbound. sing-box is a Go binary and on
+  // Android can't read the system resolver, so without this the server domain
+  // fails to resolve and nothing connects. Resolving through `direct` also keeps
+  // the lookup off the tunnel (no chicken-and-egg with the proxy).
+  const dnsServer = (Array.isArray(s.dns) && s.dns[0]) ? s.dns[0] : '1.1.1.1';
+
   return {
     log: { level: singboxLogLevel(s.logLevel), timestamp: false },
+    dns: {
+      servers: [{ type: 'udp', tag: 'dns-direct', server: dnsServer }],
+      final: 'dns-direct'
+    },
     inbounds,
     outbounds: [
       outbound,
       { type: 'direct', tag: 'direct' }
     ],
-    route: { final: 'proxy' }
+    // Resolve outbound server domains with dns-direct (an IP server, reached
+    // without the proxy) so there's no resolve→proxy→resolve loop.
+    route: { final: 'proxy', default_domain_resolver: 'dns-direct' }
   };
 }
 
