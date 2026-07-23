@@ -330,20 +330,20 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     var q by remember { mutableStateOf("") }
     var sheet by remember { mutableStateOf<String?>(null) }
     var editId by remember { mutableStateOf<String?>(null) }
-    val tests = remember { mutableStateMapOf<String, String>() }
+    val tests = remember { mutableStateMapOf<String, TestState>() }
     val testMutex = remember { Mutex() }
-    // One test at a time; the UI shows the current phase (download vs upload).
+    // One test at a time; `phase` marks which metric is currently measuring.
     suspend fun testOne(s: ServerConfig) = testMutex.withLock {
-        tests[s.id] = "starting…"
+        tests[s.id] = TestState(phase = "tcp")
         val h = withContext(Dispatchers.IO) { XrayTester.start(s) }
-        if (h == null) { tests[s.id] = "× core error"; return@withLock }
+        if (h == null) { tests[s.id] = TestState(error = "core error"); return@withLock }
         try {
             val ping = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }
-            tests[s.id] = "⚡${msLabel(ping)}  ↓ testing download…"
+            tests[s.id] = TestState(tcp = ping, phase = "down")
             val down = withContext(Dispatchers.IO) { Diagnostics.httpLatency(h.port) }
-            tests[s.id] = "⚡${msLabel(ping)}  ↓${msLabel(down)}  ↑ testing upload…"
+            tests[s.id] = TestState(tcp = ping, down = down, phase = "up")
             val up = withContext(Dispatchers.IO) { Diagnostics.uploadTest(h.port) }
-            tests[s.id] = "⚡${msLabel(ping)}  ↓${msLabel(down)}  ↑${msLabel(up)}"
+            tests[s.id] = TestState(tcp = ping, down = down, up = up)
         } finally { withContext(Dispatchers.IO) { XrayTester.stop(h) } }
     }
     fun runTest(s: ServerConfig) { scope.launch { testOne(s) } }
@@ -458,23 +458,50 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     }
 }
 
-@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, result: String?, onSelect: () -> Unit, onTest: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
+/** One test's measurements. `phase` = the metric currently measuring. */
+data class TestState(val tcp: Long? = null, val down: Long? = null, val up: Long? = null, val phase: String = "", val error: String? = null)
+
+private fun fmtLat(ms: Long?): String = when {
+    ms == null -> "—"; ms < 0 -> "×"; ms >= 1000 -> String.format("%.1fs", ms / 1000.0); else -> "$ms"
+}
+private fun latColor(ms: Long?): Color = when {
+    ms == null -> MUTED; ms < 0 -> BAD; ms < 300 -> GREEN; ms < 900 -> AMBER; else -> BAD
+}
+
+@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, result: TestState?, onSelect: () -> Unit, onTest: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
     Card(Modifier.fillMaxWidth().padding(vertical = 5.dp).clickable { onSelect() }, colors = CardDefaults.cardColors(containerColor = if (selected) CARD2 else CARD), shape = RoundedCornerShape(14.dp),
         border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, GREEN) else null) {
-        Row(Modifier.padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            // at-a-glance quality dot (from TCP ping)
+            Box(Modifier.size(8.dp).clip(CircleShape).background(if (result?.tcp != null) latColor(result.tcp) else MUTED.copy(alpha = 0.3f)))
+            Spacer(Modifier.width(10.dp))
             ProtoBadge(s.protocol); Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(s.name, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${s.address}:${s.port}", color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (result != null) {
-                    val rc = when { result.contains("testing") || result == "starting…" -> AMBER; result.contains("×") -> BAD; else -> GREEN }
-                    Text(result, color = rc, fontSize = 12.sp, maxLines = 1, fontWeight = FontWeight.Medium)
+                    if (result.error != null) {
+                        Text("× ${result.error}", color = BAD, fontSize = 12.sp, maxLines = 1)
+                    } else Row(Modifier.padding(top = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StatChip("⚡", result.tcp, result.phase == "tcp")
+                        StatChip("↓", result.down, result.phase == "down")
+                        StatChip("↑", result.up, result.phase == "up")
+                    }
                 }
             }
             IconButton(onClick = onTest, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.Speed, "test", tint = PRIMARY, modifier = Modifier.size(20.dp)) }
             IconButton(onClick = onEdit, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.Edit, "edit", tint = MUTED, modifier = Modifier.size(20.dp)) }
             IconButton(onClick = onDelete, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD, modifier = Modifier.size(20.dp)) }
         }
+    }
+}
+
+/** A compact latency chip: dim icon + value, amber pulse while its phase measures. */
+@Composable private fun StatChip(icon: String, ms: Long?, testing: Boolean) {
+    Row(Modifier.clip(RoundedCornerShape(7.dp)).background(BG2).padding(horizontal = 7.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(icon, color = MUTED, fontSize = 10.sp)
+        Spacer(Modifier.width(3.dp))
+        Text(if (testing) "…" else fmtLat(ms), color = if (testing) AMBER else latColor(ms), fontSize = 12.sp, fontWeight = FontWeight.Bold)
     }
 }
 @Composable private fun ProtoBadge(proto: String) {
