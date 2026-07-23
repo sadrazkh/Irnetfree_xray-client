@@ -286,12 +286,23 @@ body {
 .srv-ping { font-size: 13px; font-weight: 700; min-width: 64px; text-align: center; }
 .ping-good { color: var(--green); } .ping-mid { color: var(--yellow); } .ping-bad { color: var(--red); }
 
-/* dual ping (TCP + real delay) on server cards */
-.srv-pings { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; min-width: 86px; }
-.ping-cell { display: flex; align-items: center; justify-content: flex-end; gap: 5px; font-variant-numeric: tabular-nums; }
-.ping-ico { font-size: 11px; opacity: .55; flex: 0 0 auto; }
-.srv-pings .srv-ping { min-width: 52px; text-align: end; }
-/* dual ping in picker rows + chain cards */
+/* compact latency stats — server cards + picker rows */
+.stat-group { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.stat {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px;
+  border-radius: 8px; background: var(--bg); font-variant-numeric: tabular-nums;
+}
+.stat i { font-style: normal; font-size: 10px; opacity: .4; line-height: 1; }
+.stat-v { font-size: 12px; font-weight: 700; min-width: 28px; text-align: end; color: var(--muted); }
+.stat-v.ping-good { color: var(--green); } .stat-v.ping-mid { color: var(--yellow); } .stat-v.ping-bad { color: var(--red); }
+
+/* at-a-glance quality dot (driven by TCP ping) */
+.q-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--muted); opacity: .3; transition: .2s; }
+.q-dot.ping-good { background: var(--green); opacity: 1; box-shadow: 0 0 7px rgba(52,211,153,.5); }
+.q-dot.ping-mid { background: var(--yellow); opacity: 1; }
+.q-dot.ping-bad { background: var(--red); opacity: 1; }
+
+/* chain cards still use the older inline pings */
 .pi-ping-ico { font-size: 11px; opacity: .55; margin-inline-start: 6px; flex: 0 0 auto; }
 .chain-pings { display: flex; align-items: center; gap: 3px; }
 .srv-actions { display: flex; gap: 6px; }

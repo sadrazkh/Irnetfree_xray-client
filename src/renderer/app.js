@@ -367,17 +367,22 @@ $('#btnSaveRules').onclick = async () => {
 };
 
 /* ----------------------------- servers ----------------------------- */
+// Compact latency: drop the "ms", show seconds for slow results, × for failure.
+function fmtMs(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '×';
+  return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : String(ms);
+}
 function pingLabel(id) {
   const p = state.pings[id] || {};
   const tcp = p.tcp;
   if (!tcp) return { txt: '—', cls: '' };
-  return { txt: tcp.ok ? tcp.ms + 'ms' : t('t.error'), cls: pingClass(tcp.ok ? tcp.ms : -1) };
+  return { txt: tcp.ok ? fmtMs(tcp.ms) : '×', cls: pingClass(tcp.ok ? tcp.ms : -1) };
 }
 
 /** Label for any ping result ({ ok, ms } or undefined). */
 function pingResultLabel(res) {
   if (!res) return { txt: '—', cls: '' };
-  return { txt: res.ok ? res.ms + 'ms' : t('t.error'), cls: pingClass(res.ok ? res.ms : -1) };
+  return { txt: res.ok ? fmtMs(res.ms) : '×', cls: pingClass(res.ok ? res.ms : -1) };
 }
 
 /** Update every TCP + Real ping badge for an id from state.pings (everywhere). */
@@ -389,6 +394,8 @@ function applyPingDisplays(id) {
   $$(`[data-ping="${id}"]`).forEach(el => { el.textContent = tl.txt; el.className = (el.dataset.pbase || 'srv-ping') + (tl.cls ? ' ' + tl.cls : ''); });
   $$(`[data-ping-real="${id}"]`).forEach(el => { el.textContent = rl.txt; el.className = (el.dataset.pbase || 'srv-ping') + (rl.cls ? ' ' + rl.cls : ''); });
   $$(`[data-ping-up="${id}"]`).forEach(el => { el.textContent = ul.txt; el.className = (el.dataset.pbase || 'srv-ping') + (ul.cls ? ' ' + ul.cls : ''); });
+  // quality dot: colour only, no text (TCP result drives it)
+  $$(`[data-ping-dot="${id}"]`).forEach(el => { el.className = 'q-dot' + (tl.cls ? ' ' + tl.cls : ''); });
 }
 
 function renderServers() {
@@ -408,15 +415,16 @@ function renderServers() {
     const selBadge = isSel ? `<span class="sel-badge">✓ ${escapeHtml(t('srv.selected'))}</span>` : '';
 
     card.innerHTML = `
+      <span class="q-dot ${tl.cls}" data-ping-dot="${s.id}"></span>
       <span class="proto-badge proto-${s.protocol}">${s.protocol}</span>
       <div class="srv-info">
         <div class="srv-name">${escapeHtml(s.name)} ${selBadge}</div>
         <div class="srv-addr">${escapeHtml(s.address)}:${s.port}</div>
       </div>
-      <div class="srv-pings">
-        <span class="ping-cell" title="${escapeHtml(t('ping.tcp'))}"><span class="ping-ico">⚡</span><span class="srv-ping ${tl.cls}" data-pbase="srv-ping" data-ping="${s.id}">${tl.txt}</span></span>
-        <span class="ping-cell" title="${escapeHtml(t('ping.real'))}"><span class="ping-ico">↓</span><span class="srv-ping ${rl.cls}" data-pbase="srv-ping" data-ping-real="${s.id}">${rl.txt}</span></span>
-        <span class="ping-cell" title="${escapeHtml(t('ping.upload'))}"><span class="ping-ico">↑</span><span class="srv-ping ${ul.cls}" data-pbase="srv-ping" data-ping-up="${s.id}">${ul.txt}</span></span>
+      <div class="stat-group">
+        <span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>⚡</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${s.id}">${tl.txt}</b></span>
+        <span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${s.id}">${rl.txt}</b></span>
+        <span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${s.id}">${ul.txt}</b></span>
       </div>
       <div class="srv-actions">
         <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
@@ -549,12 +557,15 @@ function renderPicker() {
     const row = document.createElement('div');
     row.className = 'picker-item' + (isSpecial ? ' picker-special' : '') + (id === selId ? ' active' : '');
     const pingPart = pingId
-      ? `<span class="pi-ping-ico" title="${escapeHtml(t('ping.tcp'))}">⚡</span><span class="pi-ping ${tl.cls}" data-pbase="pi-ping" data-ping="${id}">${tl.txt}</span>` +
-        `<span class="pi-ping-ico" title="${escapeHtml(t('ping.real'))}">↓</span><span class="pi-ping ${rl.cls}" data-pbase="pi-ping" data-ping-real="${id}">${rl.txt}</span>` +
-        `<span class="pi-ping-ico" title="${escapeHtml(t('ping.upload'))}">↑</span><span class="pi-ping ${ul.cls}" data-pbase="pi-ping" data-ping-up="${id}">${ul.txt}</span>` +
+      ? `<span class="stat-group">` +
+          `<span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>⚡</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${id}">${tl.txt}</b></span>` +
+          `<span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${id}">${rl.txt}</b></span>` +
+          `<span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${id}">${ul.txt}</b></span>` +
+        `</span>` +
         `<button class="pi-ping-btn" title="ping">⚡</button>`
       : '';
-    row.innerHTML = `${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}`;
+    const dot = pingId ? `<span class="q-dot ${tl.cls}" data-ping-dot="${id}"></span>` : '<span class="q-dot"></span>';
+    row.innerHTML = `${dot}${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}`;
     row.onclick = () => { selectServer(id); closePicker(); };
     const pb = row.querySelector('.pi-ping-btn');
     if (pb) pb.onclick = (e) => { e.stopPropagation(); pingServer(id); };
