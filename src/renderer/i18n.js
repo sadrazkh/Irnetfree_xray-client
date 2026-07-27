@@ -171,6 +171,11 @@ const I18N = {
     't.tunNeedFiles': 'برای حالت TUN باید tun2socks و wintun.dll دانلود شوند',
     't.tunReconnect': 'برای اعمال حالت TUN، دوباره وصل شو',
 
+    /* saved data (store.json) could not be read or written */
+    'store.saveFailed': '⚠ ذخیره روی دیسک ناموفق بود — تغییر اخیر ماندگار نشد. جزئیات در لاگ‌ها.',
+    'store.recovered': '⚠ فایل داده‌ها خراب بود و از روی نسخه‌ی ذخیره‌نشده بازیابی شد. یک کپی از فایل خراب نگه داشته شد — به لاگ‌ها نگاه کن.',
+    'store.lost': '⚠ فایل داده‌ها خوانده نشد و برنامه با مقادیر پیش‌فرض بالا آمد. کپی فایل خراب نگه داشته شده — مسیرش در لاگ‌هاست.',
+
     /* settings that are baked into the running tunnel (see settingsMeta.js) */
     'apply.title': 'اعمال تنظیمات',
     'apply.intro': 'این تنظیمات ذخیره شدند، اما تا وقتی اتصال دوباره برقرار نشود روی ترافیک فعلی اثری ندارند:',
@@ -443,6 +448,11 @@ const I18N = {
     't.serversAdded': 'servers added', 't.errors': 'errors',
     't.tunNeedFiles': 'TUN mode needs tun2socks and wintun.dll downloaded',
     't.tunReconnect': 'Reconnect to apply TUN mode',
+
+    /* saved data (store.json) could not be read or written */
+    'store.saveFailed': '⚠ Could not save to disk — your last change was not persisted. See Logs.',
+    'store.recovered': '⚠ The data file was corrupt and was recovered from the unsaved copy. The bad file was kept — see Logs.',
+    'store.lost': '⚠ The data file could not be read, so defaults were loaded. The unreadable file was kept — its path is in Logs.',
 
     /* settings that are baked into the running tunnel (see settingsMeta.js) */
     'apply.title': 'Apply settings',

@@ -33,12 +33,12 @@ const state = {
 };
 
 /* ----------------------------- helpers ----------------------------- */
-function toast(msg, kind = '') {
+function toast(msg, kind = '', ms = 2600) {
   const el = $('#toast');
   el.textContent = msg;
   el.className = 'toast show ' + kind;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { el.className = 'toast'; }, 2600);
+  toast._t = setTimeout(() => { el.className = 'toast'; }, ms);
 }
 
 function pingClass(ms) {
@@ -213,6 +213,9 @@ async function init() {
   // app version + xray-core version
   $('#appVersion').textContent = 'v' + (state.version || '?');
   refreshXrayVersion();
+
+  // the store failed to load before this window existed, so it is delivered here
+  if (data.storeError) reportStoreError(Object.assign({ kind: 'load' }, data.storeError));
 
   // prompt to download required files on first run / when essentials are missing
   maybePromptMissingFiles();
@@ -1080,6 +1083,29 @@ window.api.onXrayStatus((d) => {
   }
 });
 
+/* ----------------------------- saved data ----------------------------- */
+/**
+ * The store file holds every server, subscription and chain, so a read or write
+ * failure is never just a log line — it is shown, and kept on screen long enough
+ * to actually read. Main writes the details (including where the unreadable file
+ * was preserved) to the log, which is why these point at the Logs page.
+ */
+function reportStoreError(d) {
+  if (!d) return;
+  if (d.kind === 'save') {
+    appendLog('Could not write saved data to disk: ' + (d.reason || ''), 'error');
+    return toast(t('store.saveFailed'), 'err', 9000);
+  }
+  // A load error happens before this window exists, so main's own log line was
+  // emitted with nobody listening — write the details here instead, otherwise
+  // the toast would point at a Logs page that never got them.
+  appendLog('Saved data could not be read: ' + (d.reason || ''), 'error');
+  if (d.backup) appendLog('The unreadable file was kept at: ' + d.backup, 'warn');
+  if (d.recovered) appendLog('Recovered from the unsaved copy (store.json.tmp)', 'warn');
+  toast(d.recovered ? t('store.recovered') : t('store.lost'), 'err', 12000);
+}
+window.api.onStoreError(reportStoreError);
+
 /* ----------------------------- kill switch ----------------------------- */
 window.api.onKillSwitch((d) => {
   state.killEngaged = !!(d && d.engaged);
@@ -1105,15 +1131,16 @@ $('#killReconnect').onclick = async () => {
 
 /* ----------------------------- logs ----------------------------- */
 const MAX_LOG_LINES = 500;
-window.api.onLog((d) => {
+function appendLog(text, level = 'log') {
   const box = $('#logBox');
   const line = document.createElement('div');
-  line.className = 'log-' + (d.level || 'log');
-  line.textContent = d.line;
+  line.className = 'log-' + level;
+  line.textContent = text;
   box.appendChild(line);
   while (box.childNodes.length > MAX_LOG_LINES) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
-});
+}
+window.api.onLog((d) => appendLog(d.line, d.level || 'log'));
 $('#btnClearLogs').onclick = () => { $('#logBox').innerHTML = ''; };
 
 /* ----------------------------- xray binary ----------------------------- */
