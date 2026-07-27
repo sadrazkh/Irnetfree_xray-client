@@ -88,6 +88,20 @@ function createService(opts = {}) {
 
   const store = new Store(path.join(dataDir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
+  }, {
+    // Losing the store means losing every saved server — never let that pass
+    // unnoticed. A load error also travels through app:init, since no browser is
+    // listening yet at this point.
+    onError: (kind, info) => {
+      const line = kind === 'load'
+        ? `Saved data could not be read: ${info.reason}` +
+          (info.recovered ? ' — recovered from the unsaved copy' : '') +
+          (info.backup ? ` (the unreadable file was kept at ${info.backup})` : '')
+        : `Could not write saved data to disk: ${info.reason}`;
+      console.error('  ! ' + line);
+      send('log', { line, level: 'error' });
+      send('store-error', Object.assign({ kind }, info));
+    }
   });
 
   function binDirs() { return [userBinDir, bundledBinDir]; }
@@ -480,7 +494,8 @@ function createService(opts = {}) {
       assets: assetStatus(),
       platform: process.platform,
       version: appVersion,
-      pendingReconnect: pendingKeys()
+      pendingReconnect: pendingKeys(),
+      storeError: store.loadError
     }),
 
     'servers:import': (text) => {

@@ -760,7 +760,10 @@ function registerIpc() {
     platform: process.platform,
     version: app.getVersion(),
     // survives a renderer reload: the banner must not disappear on refresh
-    pendingReconnect: pendingKeys()
+    pendingReconnect: pendingKeys(),
+    // set when the saved data was unreadable at startup (the window did not
+    // exist yet, so the store-error event could not have been delivered)
+    storeError: store.loadError
   }));
 
   ipcMain.handle('servers:import', (e, text) => {
@@ -1144,6 +1147,19 @@ app.whenReady().then(() => {
   const dir = dataDir();
   store = new Store(path.join(dir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
+  }, {
+    // Losing the store means losing every saved server — never let that pass
+    // unnoticed. A load error also reaches the renderer through app:init, since
+    // the window does not exist yet at this point.
+    onError: (kind, info) => {
+      const line = kind === 'load'
+        ? `Saved data could not be read: ${info.reason}` +
+          (info.recovered ? ' — recovered from the unsaved copy' : '') +
+          (info.backup ? ` (the unreadable file was kept at ${info.backup})` : '')
+        : `Could not write saved data to disk: ${info.reason}`;
+      send('log', { line, level: 'error' });
+      send('store-error', Object.assign({ kind }, info));
+    }
   });
 
   const ubin = userBin();

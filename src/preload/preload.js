@@ -92,5 +92,7 @@ contextBridge.exposeInMainWorld('api', {
   onStats: (cb) => ipcRenderer.on('stats', (e, d) => cb(d)),
   onSubsUpdated: (cb) => ipcRenderer.on('subs-updated', (e, d) => cb(d)),
   onAssetProgress: (cb) => ipcRenderer.on('asset-progress', (e, d) => cb(d)),
-  onKillSwitch: (cb) => ipcRenderer.on('killswitch', (e, d) => cb(d))
+  onKillSwitch: (cb) => ipcRenderer.on('killswitch', (e, d) => cb(d)),
+  // saved data could not be read, or could not be written to disk
+  onStoreError: (cb) => ipcRenderer.on('store-error', (e, d) => cb(d))
 });
