@@ -170,6 +170,28 @@ const I18N = {
     't.serversAdded': 'سرور اضافه شد', 't.errors': 'خطا',
     't.tunNeedFiles': 'برای حالت TUN باید tun2socks و wintun.dll دانلود شوند',
     't.tunReconnect': 'برای اعمال حالت TUN، دوباره وصل شو',
+
+    /* settings that are baked into the running tunnel (see settingsMeta.js) */
+    'apply.title': 'اعمال تنظیمات',
+    'apply.intro': 'این تنظیمات ذخیره شدند، اما تا وقتی اتصال دوباره برقرار نشود روی ترافیک فعلی اثری ندارند:',
+    'apply.killNote': '⛔ کیل‌سوییچ روشن است: از لحظه‌ی قطع تا برقراری دوباره‌ی تونل، اینترنت کاملاً بسته می‌ماند تا هیچ ترافیکی بیرون درز نکند.',
+    'apply.gapNote': 'اتصال چند ثانیه قطع می‌شود.',
+    'apply.now': 'اعمال و اتصال مجدد',
+    'apply.later': 'بعداً',
+    'apply.dismiss': 'بستن',
+    'apply.bannerText': 'اعمال نشده تا اتصال مجدد',
+    'apply.done': 'تنظیمات اعمال شد',
+    'apply.failed': 'اعمال تنظیمات ناموفق بود',
+    'apply.stillBlocked': 'اینترنت هنوز توسط کیل‌سوییچ بسته است — از بنر پایین بازش کن',
+
+    /* human names for those settings, used in the apply dialog */
+    'set.socksPort': 'پورت SOCKS', 'set.httpPort': 'پورت HTTP', 'set.apiPort': 'پورت API',
+    'set.allowLan': 'اشتراک در شبکه محلی',   /* set.dns / set.logLevel: reused from the settings form above */
+    'set.enableSniffing': 'Sniffing', 'set.routingMode': 'حالت روتینگ', 'set.blockAds': 'مسدودسازی تبلیغات',
+    'set.customRules': 'قوانین سفارشی', 'set.advancedRouting': 'روتینگ ویژه',
+    'set.routeRules': 'قوانین روتینگ', 'set.routeDefault': 'مقصد پیش‌فرض روتینگ',
+    'set.procRouteWatch': 'پایش روتینگ برنامه‌ها',
+    'set.systemProxy': 'پروکسی سیستمی', 'set.tunMode': 'حالت TUN',
     't.downloading': 'در حال دانلود', 't.downloaded': 'دانلود و یکپارچه شد', 't.downloadFailed': 'دانلود ناموفق',
     't.xraySet': 'هسته Xray تنظیم شد', 't.xrayDownPage': 'صفحه دانلود Xray-core باز شد',
     't.never': 'هرگز', 't.secAgo': 'ثانیه پیش', 't.minAgo': 'دقیقه پیش', 't.hrAgo': 'ساعت پیش', 't.dayAgo': 'روز پیش',
@@ -421,6 +443,28 @@ const I18N = {
     't.serversAdded': 'servers added', 't.errors': 'errors',
     't.tunNeedFiles': 'TUN mode needs tun2socks and wintun.dll downloaded',
     't.tunReconnect': 'Reconnect to apply TUN mode',
+
+    /* settings that are baked into the running tunnel (see settingsMeta.js) */
+    'apply.title': 'Apply settings',
+    'apply.intro': 'These settings were saved, but they have no effect on your current traffic until the tunnel is rebuilt:',
+    'apply.killNote': '⛔ The kill switch is on: the internet stays fully blocked from the moment the tunnel goes down until it is back, so nothing can leak.',
+    'apply.gapNote': 'The connection will drop for a few seconds.',
+    'apply.now': 'Apply & reconnect',
+    'apply.later': 'Later',
+    'apply.dismiss': 'Dismiss',
+    'apply.bannerText': 'Not applied until you reconnect',
+    'apply.done': 'Settings applied',
+    'apply.failed': 'Could not apply the settings',
+    'apply.stillBlocked': 'The internet is still blocked by the kill switch — unblock it from the banner below',
+
+    /* human names for those settings, used in the apply dialog */
+    'set.socksPort': 'SOCKS port', 'set.httpPort': 'HTTP port', 'set.apiPort': 'API port',
+    'set.allowLan': 'LAN sharing',           /* set.dns / set.logLevel: reused from the settings form above */
+    'set.enableSniffing': 'Sniffing', 'set.routingMode': 'Routing mode', 'set.blockAds': 'Ad blocking',
+    'set.customRules': 'Custom rules', 'set.advancedRouting': 'Advanced routing',
+    'set.routeRules': 'Routing rules', 'set.routeDefault': 'Routing default target',
+    'set.procRouteWatch': 'Process-route watcher',
+    'set.systemProxy': 'System proxy', 'set.tunMode': 'TUN mode',
     't.downloading': 'Downloading', 't.downloaded': 'Downloaded & integrated', 't.downloadFailed': 'Download failed',
     't.xraySet': 'Xray core set', 't.xrayDownPage': 'Xray-core download page opened',
     't.never': 'never', 't.secAgo': 's ago', 't.minAgo': 'm ago', 't.hrAgo': 'h ago', 't.dayAgo': 'd ago',

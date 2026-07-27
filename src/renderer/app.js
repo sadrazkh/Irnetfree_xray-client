@@ -24,6 +24,11 @@ const state = {
   chains: [],              // [{ id, name, members:[serverId,...] }] — first-class chains
   pool: [],                // [{ id, name, target, socksPort, httpPort, enabled }] — multi-proxy pool
   editingId: null,         // server being edited in the modal
+  // Settings saved while connected that the live tunnel is NOT using yet.
+  // Owned by main (it knows what the running config was built from) — the
+  // renderer only mirrors it.
+  pendingReconnect: [],
+  pendingDismissed: false, // user chose "later"; keep the banner out of the way
   pings: {} // id -> { tcp, real }
 };
 
@@ -174,6 +179,9 @@ async function init() {
   state.assets = data.assets || {};
   state.version = data.version || '';
   state.platform = data.platform || (data.assets && data.assets.platform) || 'win32';
+  // main only reports pending keys while something is actually connected, so a
+  // fresh launch always starts empty
+  state.pendingReconnect = data.pendingReconnect || [];
   state.chain = (data.chain || []).filter(id => state.servers.some(s => s.id === id));
   state.chains = (data.chains || []).map(c => ({
     id: c.id, name: c.name || 'Chain',
@@ -200,6 +208,7 @@ async function init() {
   setModeWidget();
   updateLanInfo();
   updateKillStatus();
+  renderPendingBanner();
 
   // app version + xray-core version
   $('#appVersion').textContent = 'v' + (state.version || '?');
@@ -274,7 +283,19 @@ function textToCustomRules(text) {
   return out;
 }
 
-async function saveSettings(extra = {}) {
+/**
+ * Persist the settings form.
+ *
+ * Most of these settings are baked into the running xray config (or applied as a
+ * connect-time side effect), so while connected they do NOTHING until the tunnel
+ * is rebuilt. Main reports exactly which ones are in that state; we then ask the
+ * user instead of leaving the UI claiming a change that isn't live — that gap is
+ * how traffic ends up leaking under rules the user thinks they replaced.
+ *
+ * `silent: true` skips the prompt (the caller shows its own), but the pending
+ * state is still recorded so the banner stays accurate.
+ */
+async function saveSettings(extra = {}, { silent = false } = {}) {
   const dns = $('#dnsInput').value.split(',').map(s => s.trim()).filter(Boolean);
   const partial = Object.assign({
     socksPort: parseInt($('#socksPort').value, 10) || 10808,
@@ -288,8 +309,102 @@ async function saveSettings(extra = {}) {
     blockAds: $('#optBlockAds').checked,
     enableSniffing: $('#optSniff').checked
   }, extra);
-  state.settings = await window.api.setSettings(partial);
+
+  const res = await window.api.setSettings(partial);
+  // main returns { settings, pendingReconnect }; tolerate the older bare shape
+  state.settings = (res && res.settings) ? res.settings : res;
+  setPending((res && res.pendingReconnect) || []);
+
+  if (!silent && state.pendingReconnect.length) await promptApplySettings();
+  return state.pendingReconnect;
 }
+
+/* ------------------- settings that need a reconnect ------------------- */
+
+/** Record which settings are saved-but-not-live and refresh the banner. */
+function setPending(keys) {
+  const next = Array.isArray(keys) ? keys : [];
+  // a genuinely new change should bring the banner back even after "later"
+  if (next.length > state.pendingReconnect.length) state.pendingDismissed = false;
+  state.pendingReconnect = next;
+  if (!next.length) state.pendingDismissed = false;
+  renderPendingBanner();
+}
+
+/** Human-readable names for the changed settings, for the dialog + banner. */
+function pendingLabels() {
+  return state.pendingReconnect.map(k => t('set.' + k)).filter(Boolean);
+}
+
+function renderPendingBanner() {
+  const banner = $('#pendingBanner');
+  if (!banner) return;
+  const show = state.pendingReconnect.length > 0 && state.connected && !state.pendingDismissed;
+  banner.hidden = !show;
+  if (!show) return;
+  const names = pendingLabels();
+  const sep = (state.settings.lang || 'fa') === 'en' ? ', ' : '، ';
+  const shown = names.slice(0, 3).join(sep);
+  $('#pendingBannerText').textContent =
+    '⚠ ' + t('apply.bannerText') + ': ' + shown + (names.length > 3 ? ' +' + (names.length - 3) : '');
+}
+
+/**
+ * Ask whether to rebuild the connection now. Resolves once the user picks; the
+ * settings are already saved either way — the only question is when they go live.
+ */
+function promptApplySettings() {
+  return new Promise((resolve) => {
+    const modal = $('#applyModal');
+    if (!modal || !state.connected || !state.pendingReconnect.length) return resolve(false);
+
+    $('#applyList').innerHTML = pendingLabels()
+      .map(n => `<li>${escapeHtml(n)}</li>`).join('');
+    // the kill switch turns the reconnect gap into a full internet block —
+    // say so, because the user is about to lose connectivity on purpose
+    $('#applyKillNote').hidden = !state.settings.killSwitch;
+    modal.hidden = false;
+
+    const done = (v) => {
+      modal.hidden = true;
+      $('#applyNow').onclick = null;
+      $('#applyLater').onclick = null;
+      $('#applyClose').onclick = null;
+      resolve(v);
+    };
+    // "Later" only closes the dialog — the banner stays up as the reminder that
+    // the saved settings are not live yet. Only the banner's own Dismiss hides it.
+    const later = () => { renderPendingBanner(); done(false); };
+
+    $('#applyNow').onclick = async () => { done(true); await applySettingsNow(); };
+    $('#applyLater').onclick = later;
+    $('#applyClose').onclick = later;
+  });
+}
+
+/** Tear the tunnel down and rebuild it so the pending settings take effect. */
+async function applySettingsNow() {
+  $('#pendingBanner').hidden = true;
+  try {
+    const res = await window.api.applySettings();
+    if (res && res.ok) {
+      setPending([]);
+      toast(t('apply.done'), 'ok');
+      return true;
+    }
+    // a failed reconnect with the kill switch armed leaves the internet blocked
+    // ON PURPOSE — onKillSwitch shows the disarm banner, so just explain why.
+    toast((res && res.error) || t('apply.failed'), 'err');
+    if (res && res.killSwitchEngaged) toast(t('apply.stillBlocked'), 'warn');
+  } catch (e) {
+    toast(t('apply.failed') + ': ' + e.message, 'err');
+  }
+  renderPendingBanner();
+  return false;
+}
+
+$('#pendingApply').onclick = () => applySettingsNow();
+$('#pendingDismiss').onclick = () => { state.pendingDismissed = true; renderPendingBanner(); };
 
 $('#btnSaveSettings').onclick = async () => {
   await saveSettings();
@@ -317,7 +432,7 @@ $('#dnsPreset').onchange = () => {
 };
 $('#dnsInput').oninput = () => syncDnsPreset();
 
-/* kill switch toggle */
+/* kill switch toggle — read live when a drop happens, so it needs no reconnect */
 $('#optKillSwitch').onchange = async () => {
   await saveSettings();
   updateKillStatus();
@@ -337,9 +452,9 @@ function updateKillStatus() {
 }
 
 $('#optAllowLan').onchange = async () => {
+  // the reconnect prompt (saveSettings) already explains that it isn't live yet
   await saveSettings();
   updateLanInfo();
-  if (state.connected) toast(t('lan.reconnect'), '');
 };
 
 /** Show the address LAN clients should point their proxy at (when sharing). */
@@ -909,6 +1024,8 @@ window.api.onStatus((d) => {
     state.connecting = false;
     state.activeServerId = d.serverId;
     state.lan = d.lan || null;
+    // a fresh connect is built from the current settings — nothing is stale
+    setPending(d.pendingReconnect || []);
     setConnUI('connected', d.serverId);
     setModeWidget();
     updateLanInfo();
@@ -932,12 +1049,21 @@ window.api.onStatus((d) => {
     state.connected = false;
     state.connecting = false;
     state.lan = null;
+    setPending([]);          // nothing live to be out of sync with
     setConnUI('disconnected');
     $('#statIp').textContent = '—';
     hideGeo();
     resetTraffic();
     setModeWidget();
     updateLanInfo();
+    renderServers();
+    renderPicker();
+  } else if (d.state === 'error') {
+    // e.g. a settings reconnect whose new config the core rejected
+    state.connected = false;
+    state.connecting = false;
+    setConnUI('error');
+    renderPendingBanner();
     renderServers();
     renderPicker();
   }
@@ -947,6 +1073,7 @@ window.api.onXrayStatus((d) => {
   if (d.state === 'stopped' && state.connected) {
     state.connected = false;
     setConnUI('disconnected');
+    renderPendingBanner();
     renderServers();
     renderPicker();
     toast(t('t.disconnected'), 'err');
@@ -1215,12 +1342,14 @@ async function promptRelaunchAdmin() {
 $('#optTun').onchange = async () => {
   const on = $('#optTun').checked;
   if (on && !state.tunAvailable) toast(t('t.tunNeedFiles'), 'err');
-  await saveSettings();
+  // save silently first: relaunching as admin restarts the app, so asking about a
+  // reconnect before that question is answered would be pointless
+  await saveSettings({}, { silent: true });
   updateTunStatus();
   if (on && state.tunAvailable && !state.elevated && state.platform === 'win32') {
     if (await promptRelaunchAdmin()) return;
   }
-  if (state.connected) toast(t('t.tunReconnect'), '');
+  if (state.pendingReconnect.length) await promptApplySettings();
 };
 
 function updateTunStatus() {
@@ -2155,8 +2284,8 @@ $('#btnAddRule').onclick = () => {
 
 /* process-routing options */
 $('#optProcWatch').onchange = async () => {
+  // saveSettings offers the reconnect when this is changed while connected
   await saveSettings({ procRouteWatch: $('#optProcWatch').checked });
-  if (state.connected) toast(t('proc.reconnectApply'), '');
 };
 $('#btnClearProcCache').onclick = async () => {
   await window.api.clearProcCache();
@@ -2238,7 +2367,9 @@ $$('#modeModal .mode-option').forEach(opt => {
     const wantTun = opt.dataset.mode === 'tun';
     if (wantTun && !state.tunAvailable) { toast(t('t.tunNeedFiles'), 'err'); return; }
     $('#optTun').checked = wantTun;
-    await saveSettings({ tunMode: wantTun });
+    // silent: the admin relaunch question comes first (it restarts the app), and
+    // this modal has to close before the apply dialog opens on top of it
+    await saveSettings({ tunMode: wantTun }, { silent: true });
     setModeWidget();
     updateTunStatus();
     renderModeOptions();
@@ -2247,8 +2378,8 @@ $$('#modeModal .mode-option').forEach(opt => {
       closeModeModal();
       if (await promptRelaunchAdmin()) return;
     }
-    if (state.connected) toast(t('t.tunReconnect'), '');
-    setTimeout(closeModeModal, 220);
+    closeModeModal();
+    if (state.pendingReconnect.length) await promptApplySettings();
   };
 });
 

@@ -27,6 +27,7 @@ const { TunManager } = require('../main/tunManager');
 const { StatsPoller } = require('../main/stats');
 const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
+const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -81,6 +82,9 @@ function createService(opts = {}) {
   let xrayReloading = false;
   let userDisconnecting = false;
   let procWatcher = null;
+  // Settings the LIVE tunnel was built from (null when disconnected) — see
+  // ../main/settingsMeta.js.
+  let appliedSettings = null;
 
   const store = new Store(path.join(dataDir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
@@ -306,9 +310,13 @@ function createService(opts = {}) {
       throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error);
     }
 
+    // save/restore rather than clear — reapplyConnection() wraps the whole
+    // teardown+reconnect in the same flag
+    const prevReloading = xrayReloading;
     xrayReloading = true;
-    try { await xray.start(config, engine); } finally { xrayReloading = false; }
+    try { await xray.start(config, engine); } finally { xrayReloading = prevReloading; }
     store.set('activeServerId', serverId);
+    appliedSettings = snapshotApplied(getSettings());
 
     if (settings.systemProxy) {
       try {
@@ -337,8 +345,49 @@ function createService(opts = {}) {
     stats.start(1000);
 
     startProcWatcher();
-    send('status', { state: 'connected', serverId, server: byId(serverId) || null, label, tun: tun.active, tunError, geoWarn, lan });
+    send('status', {
+      state: 'connected', serverId, server: byId(serverId) || null, label,
+      tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
+    });
     return true;
+  }
+
+  /** Reconnect-relevant settings changed since the live tunnel was built. */
+  function pendingKeys() {
+    return pendingReconnectKeys(appliedSettings, getSettings());
+  }
+
+  /**
+   * Rebuild the connection so settings baked into it take effect (xray-core has
+   * no hot reload). The headless build has no Windows firewall kill switch, so
+   * this is a plain teardown + reconnect.
+   */
+  async function reapplyConnection() {
+    const serverId = store.get('activeServerId', null);
+    if (!serverId || !xray || !xray.running) return { ok: false, error: 'not connected' };
+
+    send('status', { state: 'connecting', serverId });
+
+    const prevReloading = xrayReloading;
+    xrayReloading = true;              // intentional restart, not a drop
+    try {
+      stopProcWatcher();
+      if (stats) stats.stop();
+      try { await tun.stop(); } catch {}
+      try { await setSystemProxy(false, {}); } catch {}
+      if (xray) await xray.stop();
+    } finally {
+      xrayReloading = prevReloading;
+    }
+
+    try {
+      await doConnect(serverId);
+    } catch (e) {
+      appliedSettings = null;
+      send('status', { state: 'error', message: e.message });
+      return { ok: false, error: e.message };
+    }
+    return { ok: true };
   }
 
   async function rebuildActiveConfig() {
@@ -346,8 +395,9 @@ function createService(opts = {}) {
     if (!serverId || !xray.running) return;
     const settings = await effectiveSettings();
     const { config, engine } = buildActive(serverId, settings);
+    const prevReloading = xrayReloading;
     xrayReloading = true;
-    try { await xray.start(config, engine); } finally { xrayReloading = false; }
+    try { await xray.start(config, engine); } finally { xrayReloading = prevReloading; }
     stats.setBin(xray.resolveBin());
     send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
   }
@@ -375,6 +425,7 @@ function createService(opts = {}) {
     try { await setSystemProxy(false, {}); } catch {}
     if (xray) await xray.stop();
     store.set('activeServerId', null);
+    appliedSettings = null;          // nothing live to be out of sync with
     send('status', { state: 'disconnected' });
     userDisconnecting = false;
   }
@@ -428,7 +479,8 @@ function createService(opts = {}) {
       elevated: tun.isElevated(),
       assets: assetStatus(),
       platform: process.platform,
-      version: appVersion
+      version: appVersion,
+      pendingReconnect: pendingKeys()
     }),
 
     'servers:import': (text) => {
@@ -479,14 +531,17 @@ function createService(opts = {}) {
     'disconnect': () => doDisconnect(),
 
     'settings:get': () => getSettings(),
+    // returns { settings, pendingReconnect } — see main.js / settingsMeta.js
     'settings:set': (partial) => {
       const next = Object.assign(getSettings(), partial);
       store.set('settings', next);
       if ('autoUpdateSubs' in partial || 'autoUpdateInterval' in partial) {
         if (next.autoUpdateSubs) subs.startAuto(next.autoUpdateInterval); else subs.stopAuto();
       }
-      return next;
+      return { settings: next, pendingReconnect: pendingKeys() };
     },
+    'settings:pending': () => pendingKeys(),
+    'settings:apply': () => reapplyConnection(),
 
     'ping:tcp': async (id) => { const { server } = resolveTarget(id); if (!server) return { ok: false, error: 'not found' }; return tcpPing(server.address, server.port); },
     'ping:real': async (id) => {

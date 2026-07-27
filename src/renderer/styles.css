@@ -721,6 +721,25 @@ body {
 .adv-proc-refresh:hover { color: var(--accent-2); border-color: var(--accent-2); }
 
 /* kill-switch banner */
+/* settings saved but not yet live (needs a reconnect) */
+.apply-list { margin: 10px 0 0; padding-inline-start: 20px; color: var(--text); font-size: 13px; }
+.apply-list li { margin: 3px 0; }
+.hint.warn { color: var(--yellow); }
+
+.pending-banner {
+  position: fixed; left: 50%; bottom: 70px; transform: translateX(-50%);
+  z-index: 140; display: flex; align-items: center; gap: 16px;
+  background: var(--panel-2); border: 1px solid var(--yellow);
+  box-shadow: 0 8px 30px rgba(0,0,0,.45);
+  border-radius: 12px; padding: 12px 16px; max-width: 92vw;
+}
+.pending-banner[hidden] { display: none; }
+.pending-banner-text { color: var(--yellow); font-weight: 700; font-size: 13px; }
+.pending-banner-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.pending-banner-actions .btn { padding: 7px 12px; font-size: 12px; }
+/* the kill-switch banner outranks it — stack instead of overlapping */
+.kill-banner:not([hidden]) ~ .pending-banner { bottom: 132px; }
+
 .kill-banner {
   position: fixed; left: 50%; bottom: 70px; transform: translateX(-50%);
   z-index: 150; display: flex; align-items: center; gap: 16px;

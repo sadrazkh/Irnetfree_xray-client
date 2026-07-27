@@ -39,9 +39,12 @@ contextBridge.exposeInMainWorld('api', {
   connect: (id) => ipcRenderer.invoke('connect', id),
   disconnect: () => ipcRenderer.invoke('disconnect'),
 
-  // settings
+  // settings — setSettings resolves to { settings, pendingReconnect: [keys] };
+  // applySettings tears the tunnel down and rebuilds it so those keys take effect.
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (partial) => ipcRenderer.invoke('settings:set', partial),
+  pendingReconnect: () => ipcRenderer.invoke('settings:pending'),
+  applySettings: () => ipcRenderer.invoke('settings:apply'),
 
   // diagnostics
   pingTcp: (id) => ipcRenderer.invoke('ping:tcp', id),

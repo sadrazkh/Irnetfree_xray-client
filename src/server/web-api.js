@@ -77,6 +77,8 @@
     // settings
     getSettings: () => invoke('settings:get'),
     setSettings: (partial) => invoke('settings:set', partial),
+    pendingReconnect: () => invoke('settings:pending'),
+    applySettings: () => invoke('settings:apply'),
 
     // diagnostics
     pingTcp: (id) => invoke('ping:tcp', id),
