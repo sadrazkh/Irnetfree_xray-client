@@ -201,22 +201,30 @@ function buildConfig(planArg, settings) {
     const advRules = [];
     for (const r of plan.rules || []) {
       if (!r) continue;
-      const tag = reg.tagFor(r.target);
       let vals = splitList(r.value);
       if (!vals.length) continue;
-      const rule = { type: 'field', outboundTag: tag };
+
+      let field, value;
       if (r.type === 'ip') {
         // drop geoip:* tokens when geo files are absent (xray would crash)
         if (!geo) vals = vals.filter(v => !/^geoip:/i.test(v));
         if (!vals.length) continue;
-        rule.ip = vals;
+        field = 'ip'; value = vals;
       } else if (r.type === 'domain') {
         if (!geo) vals = vals.filter(v => !/^geosite:/i.test(v));
         if (!vals.length) continue;
-        rule.domain = vals;
+        field = 'domain'; value = vals;
       } else if (r.type === 'port') {
-        rule.port = vals.join(',');
+        field = 'port'; value = vals.join(',');
       } else continue;
+
+      // Resolve the target only once the rule is known to survive: tagFor()
+      // REGISTERS the outbound(s), so doing it earlier leaves a dead outbound
+      // behind for every dropped rule — writing an unused server's address and
+      // credentials into config.json (and materializing a whole chain for a
+      // `chain:` target).
+      const rule = { type: 'field', outboundTag: reg.tagFor(r.target) };
+      rule[field] = value;
       advRules.push(rule);
     }
     const defTag = reg.tagFor(plan.def);
@@ -411,9 +419,19 @@ function normalizeCustomRules(custom, geo) {
   return out;
 }
 
+/**
+ * Split a rule value into tokens. Both `,` and `|` separate — the settings page
+ * writes custom rules as `domain, a.com|b.com, proxy`, so a value that reaches
+ * here as a raw string (headless RPC, a hand-edited store, an older save) must
+ * split on `|` too. Neither character is legal inside a domain, an IP/CIDR or a
+ * port range, so accepting both is a superset with no ambiguity.
+ * ConfigBuilder.kt splits on the same pair.
+ */
+const SEPARATORS = /[|,]/;
+
 function splitList(v) {
   if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean);
-  return String(v == null ? '' : v).split(',').map(x => x.trim()).filter(Boolean);
+  return String(v == null ? '' : v).split(SEPARATORS).map(x => x.trim()).filter(Boolean);
 }
 
 /**
