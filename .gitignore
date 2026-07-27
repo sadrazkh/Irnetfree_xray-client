@@ -1,14 +1,25 @@
 node_modules/
 dist/
+
+# Runtime cores and geo data: downloaded by `npm run get-xray` or the in-app
+# downloader, never committed. The files in bin/ that ARE tracked on purpose —
+# tun2socks.exe, wintun.dll, LICENSE-wintun.txt and the xray_no_window helpers —
+# are deliberately not matched here.
 bin/xray
 bin/xray.exe
+bin/sing-box
+bin/sing-box.exe
 bin/*.zip
-bin/geoip.dat
-bin/geosite.dat
+bin/*.tar.gz
+bin/*.dat
+
+# Residue from unpacking the Xray-core release archive into bin/: it also
+# contains upstream's own README and MPL licence, which are not ours to commit.
+bin/LICENSE
+bin/README.md
+
+# Scratch config dumps kept while debugging routing (_adv.json, _chain.json, …)
+/_*.json
+
 *.log
 .DS_Store
-node_modules/
-dist/
-bin/geoip.dat
-bin/geosite.dat
-bin/xray.exe
