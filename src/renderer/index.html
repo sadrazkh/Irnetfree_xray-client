@@ -738,12 +738,41 @@
     <option value="geosite:private"></option>
   </datalist>
 
+  <!-- settings changed while connected: they are saved but NOT live until a reconnect -->
+  <div class="modal-overlay" id="applyModal" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <span class="modal-title" data-i18n="apply.title">اعمال تنظیمات</span>
+        <button class="tb-btn" id="applyClose">&#x2715;</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint" data-i18n="apply.intro">این تنظیمات تا وقتی اتصال دوباره برقرار نشود اعمال نمی‌شوند:</p>
+        <ul class="apply-list" id="applyList"></ul>
+        <p class="hint warn" id="applyKillNote" hidden data-i18n="apply.killNote">کیل‌سوییچ روشن است: در فاصله‌ی قطع تا اتصال مجدد، اینترنت کاملاً بسته می‌ماند تا چیزی بیرون درز نکند.</p>
+        <p class="hint" id="applyGapNote" data-i18n="apply.gapNote">اتصال چند ثانیه قطع می‌شود.</p>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="applyNow" data-i18n="apply.now">اعمال و اتصال مجدد</button>
+        <button class="btn ghost" id="applyLater" data-i18n="apply.later">بعداً</button>
+      </div>
+    </div>
+  </div>
+
   <!-- kill-switch banner (shown when internet is blocked after an unexpected drop) -->
   <div class="kill-banner" id="killBanner" hidden>
     <span class="kill-banner-text" data-i18n="kill.blocked">⛔ کیل سوییچ فعال شد — اینترنت بسته است</span>
     <div class="kill-banner-actions">
       <button class="btn" id="killReconnect" data-i18n="kill.reconnect">اتصال مجدد</button>
       <button class="btn ghost" id="killDisarm" data-i18n="kill.disarm">باز کردن اینترنت</button>
+    </div>
+  </div>
+
+  <!-- persistent reminder while saved-but-not-applied settings exist -->
+  <div class="pending-banner" id="pendingBanner" hidden>
+    <span class="pending-banner-text" id="pendingBannerText"></span>
+    <div class="pending-banner-actions">
+      <button class="btn" id="pendingApply" data-i18n="apply.now">اعمال و اتصال مجدد</button>
+      <button class="btn ghost" id="pendingDismiss" data-i18n="apply.dismiss">بستن</button>
     </div>
   </div>
 

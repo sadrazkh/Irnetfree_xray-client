@@ -18,6 +18,7 @@ const { TunManager } = require('./tunManager');
 const { StatsPoller } = require('./stats');
 const { Downloader } = require('./downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
+const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const https = require('https');
 
 let mainWindow = null;
@@ -33,6 +34,10 @@ let userBinDir = null;
 let isQuitting = false;
 let xrayReloading = false;   // true while the proc-routing watcher restarts xray
 let userDisconnecting = false; // true during an intentional disconnect (kill switch ignores it)
+// Snapshot of the settings the LIVE tunnel was actually built from (null when
+// disconnected). Diffing it against the current settings is what tells the user
+// "you changed this, but it won't take effect until you reconnect".
+let appliedSettings = null;
 
 // GitHub repo used for the in-app update check (see app:checkUpdate).
 const GITHUB_REPO = 'sadrazkh/Irnetfree_xray-client';
@@ -413,10 +418,18 @@ function buildActive(serverId, settings) {
   return { plan, label, entryAddrs, config, geoWarn, engine };
 }
 
-async function doConnect(serverId) {
+/**
+ * @param {string} serverId
+ * @param {{ holdKillSwitch?: boolean }} [opts] `holdKillSwitch` keeps an already
+ *   armed kill-switch block in place instead of clearing it up front — used by
+ *   reapplyConnection() so the gap between the old and the new tunnel can't leak.
+ */
+async function doConnect(serverId, opts = {}) {
   // clear any kill-switch block from a previous unexpected drop
-  await disarmKillSwitch();
-  send('killswitch', { engaged: false });
+  if (!opts.holdKillSwitch) {
+    await disarmKillSwitch();
+    send('killswitch', { engaged: false });
+  }
   const settings = await effectiveSettings();
   const byId = (id) => store.get('servers', []).find(s => s.id === id);
 
@@ -434,15 +447,20 @@ async function doConnect(serverId) {
 
   // Suppress the old instance's 'stopped' while switching servers so it isn't
   // mistaken for an unexpected drop (which would trip the kill switch) or flash
-  // "disconnected" in the UI.
+  // "disconnected" in the UI. Save/restore rather than clear: reapplyConnection()
+  // wraps the whole teardown+reconnect in the same flag.
+  const prevReloading = xrayReloading;
   xrayReloading = true;
   try {
     await xray.start(config, engine);
   } finally {
-    xrayReloading = false;
+    xrayReloading = prevReloading;
   }
 
   store.set('activeServerId', serverId);
+  // Everything below is a connect-time side effect, so from here on the live
+  // tunnel matches these settings exactly — record what it was built from.
+  appliedSettings = snapshotApplied(getSettings());
 
   if (settings.systemProxy) {
     try {
@@ -498,8 +516,82 @@ async function doConnect(serverId) {
   startProcWatcher();
 
   updateOverlay('on');
-  send('status', { state: 'connected', serverId, server: byId(serverId) || null, label, tun: tun.active, tunError, geoWarn, lan });
+  send('status', {
+    state: 'connected', serverId, server: byId(serverId) || null, label,
+    tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
+  });
   return true;
+}
+
+/** Reconnect-relevant settings the user changed since the live tunnel was built. */
+function pendingKeys() {
+  return pendingReconnectKeys(appliedSettings, getSettings());
+}
+
+/**
+ * Apply settings that are baked into the running tunnel, by tearing the
+ * connection down and building it again from the current settings. xray-core has
+ * no hot reload, so this is the only honest way to apply them.
+ *
+ * When the kill switch is on, the firewall block is armed BEFORE the teardown and
+ * lifted only once the new tunnel is up: the gap between the two is exactly when
+ * traffic would otherwise escape unproxied, which is what the kill switch exists
+ * to prevent. If the reconnect fails the block deliberately STAYS engaged — the
+ * UI shows the disarm banner, so restoring the internet is the user's call.
+ */
+async function reapplyConnection() {
+  const serverId = store.get('activeServerId', null);
+  if (!serverId || !xray || !xray.running) return { ok: false, error: 'not connected' };
+
+  const lang = getSettings().lang === 'en' ? 'en' : 'fa';
+  let armed = false;
+  if (getSettings().killSwitch) {
+    const r = await armKillSwitch();
+    armed = !!(r && r.ok);
+    send('killswitch', { engaged: armed, error: r && r.error });
+    if (armed) send('log', { line: 'Kill switch engaged for a settings reconnect — internet blocked until the tunnel is back', level: 'warn' });
+    else if (process.platform === 'win32') send('log', { line: 'Kill switch could not be armed for the reconnect (run as admin): ' + (r && r.error), level: 'warn' });
+  }
+
+  send('status', { state: 'connecting', serverId });
+
+  // The restart is intentional — don't let it look like an unexpected drop (which
+  // would arm the kill switch a second time and log a scary line).
+  const prevReloading = xrayReloading;
+  xrayReloading = true;
+  try {
+    stopProcWatcher();
+    if (stats) stats.stop();
+    try { await tun.stop(); } catch {}
+    try { await setSystemProxy(false, {}); } catch {}
+    try { await removeLanFirewall(); } catch {}
+    if (xray) await xray.stop();
+  } finally {
+    xrayReloading = prevReloading;
+  }
+
+  try {
+    await doConnect(serverId, { holdKillSwitch: armed });
+  } catch (e) {
+    appliedSettings = null;
+    if (armed) {
+      send('log', { line: 'Reconnect failed — the internet stays blocked by the kill switch: ' + e.message, level: 'error' });
+      send('killswitch', { engaged: true });
+    }
+    send('status', { state: 'error', message: e.message });
+    return {
+      ok: false,
+      killSwitchEngaged: armed,
+      error: (lang === 'en' ? 'Reconnect failed: ' : 'اتصال مجدد ناموفق بود: ') + e.message
+    };
+  }
+
+  if (armed) {
+    await disarmKillSwitch();
+    send('killswitch', { engaged: false });
+    send('log', { line: 'Kill switch released — tunnel is back up', level: 'info' });
+  }
+  return { ok: true };
 }
 
 /**
@@ -515,12 +607,16 @@ async function rebuildActiveConfig() {
   const { config, engine } = buildActive(serverId, settings);
   // Suppress the transient 'stopped' status from the old instance so the UI
   // doesn't flash "disconnected" during the reload.
+  const prevReloading = xrayReloading;
   xrayReloading = true;
   try {
     await xray.start(config, engine);   // start() stops the old instance first
   } finally {
-    xrayReloading = false;
+    xrayReloading = prevReloading;
   }
+  // NOTE: appliedSettings is deliberately left alone. This path rebuilds only the
+  // xray config; the connect-time side effects (system proxy, TUN, LAN firewall)
+  // are untouched, so a pending change to those is still genuinely pending.
   stats.setBin(xray.resolveBin());
   send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
 }
@@ -555,6 +651,7 @@ async function doDisconnect() {
   send('killswitch', { engaged: false });
   if (xray) await xray.stop();
   store.set('activeServerId', null);
+  appliedSettings = null;          // nothing live to be out of sync with
   updateTray(false);
   updateOverlay('off');
   send('status', { state: 'disconnected' });
@@ -661,7 +758,9 @@ function registerIpc() {
     elevated: tun.isElevated(),
     assets: assetStatus(),
     platform: process.platform,
-    version: app.getVersion()
+    version: app.getVersion(),
+    // survives a renderer reload: the banner must not disappear on refresh
+    pendingReconnect: pendingKeys()
   }));
 
   ipcMain.handle('servers:import', (e, text) => {
@@ -805,6 +904,11 @@ function registerIpc() {
   ipcMain.handle('disconnect', () => doDisconnect());
 
   ipcMain.handle('settings:get', () => getSettings());
+  /**
+   * Persist settings and report which of them the live tunnel is NOT yet using.
+   * Returns { settings, pendingReconnect } — the renderer offers to reconnect
+   * when `pendingReconnect` is non-empty instead of pretending the change is live.
+   */
   ipcMain.handle('settings:set', (e, partial) => {
     const next = Object.assign(getSettings(), partial);
     store.set('settings', next);
@@ -817,8 +921,10 @@ function registerIpc() {
     if ('killSwitch' in partial && !next.killSwitch && killEngaged) {
       disarmKillSwitch().then(() => send('killswitch', { engaged: false }));
     }
-    return next;
+    return { settings: next, pendingReconnect: pendingKeys() };
   });
+  ipcMain.handle('settings:pending', () => pendingKeys());
+  ipcMain.handle('settings:apply', () => reapplyConnection());
 
   // Resolve a ping/test target: a single server OR a named chain's entry hop.
   function resolveTarget(id) {
