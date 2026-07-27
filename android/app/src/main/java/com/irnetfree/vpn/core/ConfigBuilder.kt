@@ -13,6 +13,14 @@ import org.json.JSONObject
  */
 object ConfigBuilder {
 
+    /**
+     * Rule values separate on either `,` or `|` (the settings page writes
+     * `domain, a.com|b.com, proxy`). Neither character is legal inside a domain,
+     * an IP/CIDR or a port range. Kept identical to `SEPARATORS` in
+     * src/main/configBuilder.js — advanced AND custom rules use it on both sides.
+     */
+    private val SEPARATORS = Regex("[|,]")
+
     private val PRIVATE_IPS = listOf(
         "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
         "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
@@ -67,17 +75,32 @@ object ConfigBuilder {
         val advRules = JSONArray()
         for (r in plan.rules) {
             if (r.value.isBlank()) continue
-            val tag = reg.tagFor(r.target)
-            var vals = r.value.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            var vals = r.value.split(SEPARATORS).map { it.trim() }.filter { it.isNotEmpty() }
             if (vals.isEmpty()) continue
-            val rule = fieldRule().put("outboundTag", tag)
+
+            val ruleField: String
+            val ruleValue: Any
             when (r.type) {
-                "ip" -> { if (!geo) vals = vals.filter { !it.startsWith("geoip:", true) }; if (vals.isEmpty()) continue; rule.put("ip", JSONArray(vals)) }
-                "domain" -> { if (!geo) vals = vals.filter { !it.startsWith("geosite:", true) }; if (vals.isEmpty()) continue; rule.put("domain", JSONArray(vals)) }
-                "port" -> rule.put("port", vals.joinToString(","))
+                "ip" -> {
+                    if (!geo) vals = vals.filter { !it.startsWith("geoip:", true) }
+                    if (vals.isEmpty()) continue
+                    ruleField = "ip"; ruleValue = JSONArray(vals)
+                }
+                "domain" -> {
+                    if (!geo) vals = vals.filter { !it.startsWith("geosite:", true) }
+                    if (vals.isEmpty()) continue
+                    ruleField = "domain"; ruleValue = JSONArray(vals)
+                }
+                "port" -> { ruleField = "port"; ruleValue = vals.joinToString(",") }
                 else -> continue
             }
-            advRules.put(rule)
+
+            // Resolve the target only once the rule is known to survive: tagFor()
+            // REGISTERS the outbound(s), so doing it earlier leaves a dead outbound
+            // behind for every dropped rule — writing an unused server's address and
+            // credentials into the config (and materializing a whole chain for a
+            // "chain:" target). Mirrors configBuilder.js.
+            advRules.put(fieldRule().put("outboundTag", reg.tagFor(r.target)).put(ruleField, ruleValue))
         }
         val defTag = reg.tagFor(plan.def)
         reg.add(freedom()); reg.add(blackhole())
@@ -193,7 +216,7 @@ object ConfigBuilder {
     private fun addCustomRules(rules: JSONArray, custom: List<RouteRule>, geo: Boolean) {
         for (r in custom) {
             if (r.value.isBlank() || r.target.isBlank()) continue
-            var vals = r.value.split(Regex("[|,]")).map { it.trim() }.filter { it.isNotEmpty() }
+            var vals = r.value.split(SEPARATORS).map { it.trim() }.filter { it.isNotEmpty() }
             val rule = fieldRule().put("outboundTag", r.target)
             when (r.type) {
                 "domain" -> { if (!geo) vals = vals.filter { !it.startsWith("geosite:", true) }; if (vals.isEmpty()) continue; rule.put("domain", JSONArray(vals)) }

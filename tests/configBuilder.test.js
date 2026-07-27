@@ -134,6 +134,21 @@ test('custom rules sit before the catch-all so they actually take effect', () =>
   assert.equal(idx, c.routing.rules.length - 2, 'custom rule must be the last rule before the catch-all');
 });
 
+test('rule values split on both "," and "|"', () => {
+  // the settings page writes `domain, a.com|b.com, proxy`, so a value arriving
+  // here as a raw string must split the same way ConfigBuilder.kt does
+  const custom = buildConfig(single(), settings({
+    blockAds: false,
+    customRules: [{ outboundTag: 'direct', domain: 'a.com|b.com, c.com' }]
+  }));
+  assert.deepEqual(custom.routing.rules.find(r => r.domain).domain, ['a.com', 'b.com', 'c.com']);
+
+  const adv = buildConfig(advancedPlan({
+    rules: [{ type: 'ip', value: '1.1.1.1|2.2.2.2', target: 'sv-vless' }]
+  }), settings({ blockAds: false }));
+  assert.deepEqual(adv.routing.rules[1].ip, ['1.1.1.1', '2.2.2.2']);
+});
+
 test('a custom rule with no domain/ip/port is dropped', () => {
   const c = buildConfig(single(), settings({ customRules: [{ outboundTag: 'direct' }, { domain: 'x.com' }] }));
   assert.deepEqual(ruleTags(c), ['api', 'block', 'direct', 'proxy']);
@@ -265,20 +280,36 @@ test('advanced: geoAssets:false drops geo tokens and any rule left empty', () =>
   assert.equal(c.routing.rules.some(r => r.domain), false);
 });
 
-// KNOWN BUG (desktop + Android): buildConfig calls reg.tagFor(r.target) BEFORE it
-// decides whether the rule survives, so a rule that gets dropped (empty value, or
-// every geo token stripped because the .dat files are missing) still registers its
-// target's outbound. The result is a dead outbound nothing routes to — harmless to
-// xray, but it writes an unused server's address and credentials into config.json,
-// and for a `chain:` target it materializes the whole chain.
-// Fix: move the tagFor() call below the `continue` checks in both
-// src/main/configBuilder.js and android/.../core/ConfigBuilder.kt.
-test('advanced: a dropped rule leaves no orphan outbound behind', { todo: true }, () => {
-  const c = buildConfig(advancedPlan({
-    rules: [{ type: 'domain', value: 'geosite:cn', target: 'sv-trojan' }]
-  }), settings({ blockAds: false, geoAssets: false }));
+// reg.tagFor() REGISTERS the target's outbound, so it must not run for a rule
+// that is about to be dropped — otherwise an unused server's address and
+// credentials get written into config.json (and a `chain:` target materializes
+// its whole chain) for a rule that routes nothing.
+test('advanced: a dropped rule leaves no orphan outbound behind', () => {
+  const cases = {
+    'all geo tokens stripped': { type: 'domain', value: 'geosite:cn', target: 'sv-trojan' },
+    'blank value': { type: 'domain', value: '  ', target: 'sv-trojan' },
+    'unknown rule type': { type: 'nonsense', value: 'a.com', target: 'sv-trojan' }
+  };
+  for (const [name, rule] of Object.entries(cases)) {
+    const c = buildConfig(advancedPlan({ rules: [rule] }), settings({ blockAds: false, geoAssets: false }));
+    assert.deepEqual(c.outbounds.map(o => o.tag), ['direct', 'block'], name);
+  }
+});
 
-  assert.equal(c.outbounds.some(o => o.tag === 'out-sv-trojan'), false);
+test('advanced: a dropped chain rule does not materialize the chain', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [{ type: 'ip', value: 'geoip:ir', target: 'chain:c1' }]
+  }), settings({ blockAds: false, geoAssets: false }));
+  assert.deepEqual(c.outbounds.map(o => o.tag), ['direct', 'block']);
+});
+
+test('advanced: a surviving rule still registers its outbound', () => {
+  // the guard above must not swing too far the other way
+  const c = buildConfig(advancedPlan({
+    rules: [{ type: 'ip', value: 'geoip:ir, 5.5.5.5', target: 'sv-trojan' }]
+  }), settings({ blockAds: false, geoAssets: false }));
+  assert.deepEqual(c.outbounds.map(o => o.tag), ['out-sv-trojan', 'direct', 'block']);
+  assert.equal(c.routing.rules[1].outboundTag, 'out-sv-trojan');
 });
 
 /* ----------------------------- proxy pool ----------------------------- */
