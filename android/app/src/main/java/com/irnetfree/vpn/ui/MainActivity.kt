@@ -41,6 +41,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -330,6 +335,8 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     var q by remember { mutableStateOf("") }
     var sheet by remember { mutableStateOf<String?>(null) }
     var editId by remember { mutableStateOf<String?>(null) }
+    var qrServer by remember { mutableStateOf<ServerConfig?>(null) }
+    val ctx = LocalContext.current
     val tests = remember { mutableStateMapOf<String, TestState>() }
     val testMutex = remember { Mutex() }
     // One test at a time; `phase` marks which metric is currently measuring.
@@ -366,11 +373,14 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                 ConfigCard(s, store.selection == s.id, tests[s.id],
                     onSelect = { store.saveSelection(s.id); bump() },
                     onTest = { runTest(s) },
+                    onCopy = { copyLink(ctx, s) },
+                    onQr = { qrServer = s },
                     onEdit = { editId = s.id },
                     onDelete = { store.deleteServer(s.id); bump() })
             }
             Spacer(Modifier.height(16.dp))
         }
+        qrServer?.let { QrDialog(it) { qrServer = null } }
     }
     AddConfigSheets(store, sheet, { sheet = it }, bump)
     val editing = editId?.let { store.serverById(it) }
@@ -468,7 +478,7 @@ private fun latColor(ms: Long?): Color = when {
     ms == null -> MUTED; ms < 0 -> BAD; ms < 300 -> GREEN; ms < 900 -> AMBER; else -> BAD
 }
 
-@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, result: TestState?, onSelect: () -> Unit, onTest: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
+@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, result: TestState?, onSelect: () -> Unit, onTest: () -> Unit, onCopy: () -> Unit, onQr: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
     Card(Modifier.fillMaxWidth().padding(vertical = 5.dp).clickable { onSelect() }, colors = CardDefaults.cardColors(containerColor = if (selected) CARD2 else CARD), shape = RoundedCornerShape(14.dp),
         border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, GREEN) else null) {
         Row(Modifier.padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -489,11 +499,48 @@ private fun latColor(ms: Long?): Color = when {
                     }
                 }
             }
-            IconButton(onClick = onTest, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.Speed, "test", tint = PRIMARY, modifier = Modifier.size(20.dp)) }
-            IconButton(onClick = onEdit, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.Edit, "edit", tint = MUTED, modifier = Modifier.size(20.dp)) }
-            IconButton(onClick = onDelete, modifier = Modifier.size(38.dp)) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD, modifier = Modifier.size(20.dp)) }
+            IconButton(onClick = onTest, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.Speed, "test", tint = PRIMARY, modifier = Modifier.size(19.dp)) }
+            IconButton(onClick = onCopy, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.ContentCopy, "copy", tint = MUTED, modifier = Modifier.size(18.dp)) }
+            IconButton(onClick = onQr, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.QrCode2, "QR", tint = MUTED, modifier = Modifier.size(19.dp)) }
+            IconButton(onClick = onEdit, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.Edit, "edit", tint = MUTED, modifier = Modifier.size(19.dp)) }
+            IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD, modifier = Modifier.size(19.dp)) }
         }
     }
+}
+
+/** QR + copy for a config link that carries ALL settings (incl. patterniha). */
+@Composable private fun QrDialog(s: ServerConfig, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val link = remember(s.id) { LinkParser.buildShareLink(s) }
+    val bmp = remember(link) { qrBitmap(link, 640) }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(16.dp), color = CARD) {
+            Column(Modifier.padding(18.dp).widthIn(max = 320.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Share config", color = TXT, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(12.dp))
+                if (bmp != null) Image(bmp.asImageBitmap(), "QR", Modifier.size(232.dp).clip(RoundedCornerShape(10.dp)).background(Color.White).padding(8.dp))
+                else Text("Link too long for a QR — use Copy.", color = MUTED, fontSize = 12.sp)
+                Spacer(Modifier.height(10.dp))
+                Text(link, color = MUTED, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { copyLink(ctx, s); onDismiss() }, modifier = Modifier.fillMaxWidth()) { Text("Copy link") }
+            }
+        }
+    }
+}
+
+private fun qrBitmap(text: String, size: Int): android.graphics.Bitmap? = try {
+    val hints = mapOf(com.google.zxing.EncodeHintType.MARGIN to 1)
+    val m = com.google.zxing.MultiFormatWriter().encode(text, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints)
+    val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.RGB_565)
+    for (x in 0 until size) for (y in 0 until size) bmp.setPixel(x, y, if (m.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+    bmp
+} catch (e: Exception) { null }
+
+private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
+    val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+    cm.setPrimaryClip(android.content.ClipData.newPlainText("config", LinkParser.buildShareLink(s)))
+    android.widget.Toast.makeText(ctx, "Copied ✓", android.widget.Toast.LENGTH_SHORT).show()
 }
 
 /** A compact latency chip: dim icon + value, amber pulse while its phase measures. */

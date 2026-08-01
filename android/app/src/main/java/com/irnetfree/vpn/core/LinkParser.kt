@@ -87,7 +87,9 @@ object LinkParser {
             .put("streamSettings", buildStream(q))
         q["fragment"]?.let { ob.put("_fragment", it) }   // TLS fragmentation from the link
         q["noise"]?.let { ob.put("_noise", it) }         // anti-DPI / fake ClientHello injection
-        return ServerConfig(newId("s"), name.ifBlank { address }, "vless", address, port, ob)
+        q["fakeSni"]?.let { ob.put("_fakesni", it) }
+        return ServerConfig(newId("s"), name.ifBlank { address }, "vless", address, port, ob,
+            engine = q["engine"]?.takeIf { it != "xray" })
     }
 
     private fun parseVmess(link: String): ServerConfig {
@@ -106,7 +108,9 @@ object LinkParser {
             "fp" to v.optString("fp", "chrome"),
             "alpn" to v.optString("alpn"),
             "serviceName" to v.optString("path"),
-            "headerType" to v.optString("type", "none")
+            "headerType" to v.optString("type", "none"),
+            "cipherSuites" to v.optString("cipherSuites"),
+            "finalMask" to (if (v.has("finalMask")) v.optString("finalMask") else v.optString("finalmask"))
         )
         val user = JSONObject()
             .put("id", v.optString("id"))
@@ -120,7 +124,9 @@ object LinkParser {
             .put("streamSettings", buildStream(q))
         if (v.has("fragment")) ob.put("_fragment", v.optString("fragment"))
         if (v.has("noise")) ob.put("_noise", v.optString("noise"))
-        return ServerConfig(newId("s"), v.optString("ps", address), "vmess", address, port, ob)
+        if (v.has("fakesni")) ob.put("_fakesni", v.optString("fakesni"))
+        return ServerConfig(newId("s"), v.optString("ps", address), "vmess", address, port, ob,
+            engine = v.optString("engine").takeIf { it.isNotBlank() && it != "xray" })
     }
 
     private fun parseTrojan(link: String): ServerConfig {
@@ -140,7 +146,9 @@ object LinkParser {
             .put("streamSettings", buildStream(q))
         q["fragment"]?.let { ob.put("_fragment", it) }
         q["noise"]?.let { ob.put("_noise", it) }
-        return ServerConfig(newId("s"), name.ifBlank { address }, "trojan", address, port, ob)
+        q["fakeSni"]?.let { ob.put("_fakesni", it) }
+        return ServerConfig(newId("s"), name.ifBlank { address }, "trojan", address, port, ob,
+            engine = q["engine"]?.takeIf { it != "xray" })
     }
 
     private fun parseShadowsocks(link: String): ServerConfig {
@@ -410,5 +418,73 @@ object LinkParser {
         var t = s.trim().replace('-', '+').replace('_', '/')
         while (t.length % 4 != 0) t += "="
         return try { String(Base64.decode(t, Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { "" }
+    }
+
+    /* ------------------- build share link (carries ALL settings) ------------------- */
+    private fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+    private fun jarr(a: JSONArray?): List<String> = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
+    private fun b64e(s: String) = Base64.encodeToString(s.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+    private fun qstr(m: Map<String, String>) = m.filterValues { it.isNotBlank() }.entries.joinToString("&") { "${it.key}=${enc(it.value)}" }
+
+    /** streamSettings -> flat query params (inverse of buildStream). */
+    private fun streamToQuery(st: JSONObject, q: MutableMap<String, String>) {
+        val net = st.optString("network", "tcp"); q["type"] = net; q["security"] = st.optString("security", "none")
+        when (net) {
+            "ws" -> st.optJSONObject("wsSettings")?.let { q["path"] = it.optString("path"); it.optJSONObject("headers")?.optString("Host")?.takeIf { h -> h.isNotBlank() }?.let { h -> q["host"] = h } }
+            "grpc" -> st.optJSONObject("grpcSettings")?.let { q["serviceName"] = it.optString("serviceName"); if (it.optBoolean("multiMode")) q["mode"] = "multi" }
+            "h2", "http" -> st.optJSONObject("httpSettings")?.let { q["path"] = it.optString("path"); q["host"] = jarr(it.optJSONArray("host")).joinToString(",") }
+            "xhttp" -> st.optJSONObject("xhttpSettings")?.let { q["path"] = it.optString("path"); q["host"] = it.optString("host"); it.optString("mode").takeIf { m -> m.isNotBlank() }?.let { m -> q["mode"] = m } }
+            "kcp" -> st.optJSONObject("kcpSettings")?.let { q["headerType"] = it.optJSONObject("header")?.optString("type") ?: "none"; it.optString("seed").takeIf { sd -> sd.isNotBlank() }?.let { sd -> q["seed"] = sd } }
+            "tcp" -> st.optJSONObject("tcpSettings")?.optJSONObject("header")?.takeIf { it.optString("type") == "http" }?.let { h -> q["headerType"] = "http"; val rq = h.optJSONObject("request"); q["path"] = rq?.optJSONArray("path")?.optString(0) ?: ""; q["host"] = rq?.optJSONObject("headers")?.optJSONArray("Host")?.optString(0) ?: "" }
+        }
+        st.optJSONObject("tlsSettings")?.let { q["sni"] = it.optString("serverName"); q["fp"] = it.optString("fingerprint"); if (it.optBoolean("allowInsecure")) q["allowInsecure"] = "1"; jarr(it.optJSONArray("alpn")).joinToString(",").takeIf { a -> a.isNotBlank() }?.let { a -> q["alpn"] = a }; it.optString("cipherSuites").takeIf { c -> c.isNotBlank() }?.let { c -> q["cipherSuites"] = c } }
+        st.optJSONObject("realitySettings")?.let { q["sni"] = it.optString("serverName"); q["fp"] = it.optString("fingerprint"); q["pbk"] = it.optString("publicKey"); q["sid"] = it.optString("shortId"); it.optString("spiderX").takeIf { x -> x.isNotBlank() }?.let { x -> q["spx"] = x } }
+        st.optJSONObject("finalmask")?.let { q["finalMask"] = it.toString() }
+    }
+
+    private fun srv0(ob: JSONObject) = ob.optJSONObject("settings")?.optJSONArray("servers")?.optJSONObject(0) ?: JSONObject()
+    private fun user0(ob: JSONObject) = ob.optJSONObject("settings")?.optJSONArray("vnext")?.optJSONObject(0)?.optJSONArray("users")?.optJSONObject(0) ?: JSONObject()
+
+    /** Serialize a server (with ALL its settings) back into a shareable link. */
+    fun buildShareLink(s: ServerConfig): String {
+        val ob = s.outbound
+        val name = if (s.name.isNotBlank()) "#" + enc(s.name) else ""
+        val st = ob.optJSONObject("streamSettings") ?: JSONObject()
+        val extras = LinkedHashMap<String, String>()
+        ob.optString("_fragment").takeIf { it.isNotBlank() }?.let { extras["fragment"] = it }
+        ob.optString("_noise").takeIf { it.isNotBlank() }?.let { extras["noise"] = it }
+        ob.optString("_fakesni").takeIf { it.isNotBlank() }?.let { extras["fakeSni"] = it }
+        s.engine?.takeIf { it.isNotBlank() && it != "xray" }?.let { extras["engine"] = it }
+        return when (s.protocol) {
+            "vless" -> {
+                val u = user0(ob); val q = LinkedHashMap<String, String>()
+                q["encryption"] = u.optString("encryption", "none"); u.optString("flow").takeIf { it.isNotBlank() }?.let { q["flow"] = it }
+                streamToQuery(st, q); q.putAll(extras)
+                "vless://${u.optString("id")}@${s.address}:${s.port}?${qstr(q)}$name"
+            }
+            "trojan" -> {
+                val srv = srv0(ob); val q = LinkedHashMap<String, String>(); streamToQuery(st, q); q.putAll(extras)
+                "trojan://${enc(srv.optString("password"))}@${s.address}:${s.port}?${qstr(q)}$name"
+            }
+            "vmess" -> {
+                val u = user0(ob); val p = LinkedHashMap<String, String>(); streamToQuery(st, p)
+                val v = JSONObject().put("v", "2").put("ps", s.name).put("add", s.address).put("port", s.port.toString())
+                    .put("id", u.optString("id")).put("aid", u.optInt("alterId", 0).toString()).put("scy", u.optString("security", "auto"))
+                    .put("net", p["type"] ?: "tcp").put("type", p["headerType"] ?: "none").put("host", p["host"] ?: "")
+                    .put("path", p["path"] ?: (p["serviceName"] ?: "")).put("tls", if (p["security"] == "tls") "tls" else "")
+                    .put("sni", p["sni"] ?: "").put("fp", p["fp"] ?: "").put("alpn", p["alpn"] ?: "")
+                p["cipherSuites"]?.let { v.put("cipherSuites", it) }; p["finalMask"]?.let { v.put("finalMask", it) }
+                extras["fragment"]?.let { v.put("fragment", it) }; extras["noise"]?.let { v.put("noise", it) }
+                extras["fakeSni"]?.let { v.put("fakesni", it) }; extras["engine"]?.let { v.put("engine", it) }
+                "vmess://" + b64e(v.toString())
+            }
+            "shadowsocks" -> { val srv = srv0(ob); "ss://${b64e("${srv.optString("method")}:${srv.optString("password")}")}@${s.address}:${s.port}$name" }
+            "socks", "http" -> {
+                val srv = srv0(ob); val c = srv.optJSONArray("users")?.optJSONObject(0)
+                val auth = if (c != null) b64e("${c.optString("user")}:${c.optString("pass")}") + "@" else ""
+                "${s.protocol}://$auth${s.address}:${s.port}$name"
+            }
+            else -> s.raw   // wireguard / unknown -> imported link
+        }
     }
 }
