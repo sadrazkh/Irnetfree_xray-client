@@ -14,7 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits } = require('../main/parser');
+const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink } = require('../main/parser');
 const { buildConfig, buildTestConfig } = require('../main/configBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
@@ -518,6 +518,7 @@ function createService(opts = {}) {
     'servers:delete': (id) => { const servers = store.get('servers', []).filter(s => s.id !== id); store.set('servers', servers); return servers; },
     'servers:clear': () => { store.set('servers', []); return []; },
     'servers:list': () => store.get('servers', []),
+    'servers:link': (id) => { const s = store.get('servers', []).find(x => x.id === id); return s ? buildShareLink(s) : ''; },
 
     'chain:get': () => store.get('chain', []),
     'chain:set': (ids) => { const v = Array.isArray(ids) ? ids : []; store.set('chain', v); return v; },

@@ -546,6 +546,8 @@ function renderServers() {
       </div>
       <div class="srv-actions">
         <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
+        <button class="icon-btn copy-srv" data-i18n-title="btn.copy" title="copy">⧉</button>
+        <button class="icon-btn qr-srv" data-i18n-title="btn.qr" title="QR">▦</button>
         <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="edit">✎</button>
         <button class="icon-btn connect-srv" title="▶">▶</button>
         <button class="icon-btn del-srv" title="🗑">🗑</button>
@@ -555,6 +557,8 @@ function renderServers() {
     card.querySelector('.srv-info').onclick = () => selectServer(s.id);
     card.querySelector('.proto-badge').onclick = () => selectServer(s.id);
     card.querySelector('.ping-srv').onclick = (e) => { e.stopPropagation(); pingServer(s.id); };
+    card.querySelector('.copy-srv').onclick = (e) => { e.stopPropagation(); copyServerLink(s.id); };
+    card.querySelector('.qr-srv').onclick = (e) => { e.stopPropagation(); showServerQr(s.id); };
     card.querySelector('.edit-srv').onclick = (e) => { e.stopPropagation(); openEdit(s.id); };
     card.querySelector('.connect-srv').onclick = (e) => { e.stopPropagation(); connect(s.id); };
     card.querySelector('.del-srv').onclick = (e) => { e.stopPropagation(); deleteServer(s.id); };
@@ -1607,6 +1611,36 @@ function syncNoiseCustom() {
   const sel = $('#edNoise'); if (!sel) return;
   show('#edNoiseCustomRow', sel.value === 'custom');
 }
+
+/* --------------------- copy / QR share link (carries ALL settings) --------------------- */
+async function copyServerLink(id) {
+  try {
+    const link = await window.api.serverLink(id);
+    if (!link) return toast('—', 'err');
+    await copyText(link);
+    toast(t('t.copied') || 'Copied ✓', 'ok');
+  } catch (e) { toast('copy failed', 'err'); }
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); }
+  catch { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+}
+async function showServerQr(id) {
+  const link = await window.api.serverLink(id);
+  if (!link) return toast('—', 'err');
+  const box = $('#qrImage'); box.innerHTML = '';
+  try {
+    const qr = qrcode(0, 'L'); qr.addData(link); qr.make();
+    box.innerHTML = qr.createImgTag(4, 6);
+  } catch (e) {
+    box.innerHTML = '<p class="hint" style="padding:24px 8px">' + (t('qr.tooBig') || 'Link too long for a QR — use Copy.') + '</p>';
+  }
+  $('#qrLink').value = link;
+  $('#qrModal').hidden = false;
+}
+if ($('#qrClose')) $('#qrClose').onclick = () => { $('#qrModal').hidden = true; };
+if ($('#qrModal')) $('#qrModal').onclick = (e) => { if (e.target === $('#qrModal')) $('#qrModal').hidden = true; };
+if ($('#qrCopy')) $('#qrCopy').onclick = () => { copyText($('#qrLink').value); toast(t('t.copied') || 'Copied ✓', 'ok'); };
 
 function openEdit(id) {
   const s = state.servers.find(x => x.id === id);

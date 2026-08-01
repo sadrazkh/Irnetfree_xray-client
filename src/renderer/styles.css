@@ -513,6 +513,12 @@ body {
 .modal-title { font-size: 16px; font-weight: 700; }
 .modal-body { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .modal-body .grid2 { margin-bottom: 0; }
+/* QR share modal */
+.qr-body { align-items: center; }
+.qr-image { background: #fff; padding: 10px; border-radius: 12px; line-height: 0; min-height: 60px; display: grid; place-items: center; }
+.qr-image img { display: block; width: 224px; height: 224px; image-rendering: pixelated; }
+.qr-body #qrLink { width: 100%; font-size: 11px; resize: none; }
+.qr-body .btn { width: 100%; }
 .modal-foot { display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--border); }
 .inline-switch { display: flex; align-items: center; justify-content: space-between; border: none; padding: 0; }
 

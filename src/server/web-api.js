@@ -51,6 +51,7 @@
     deleteServer: (id) => invoke('servers:delete', id),
     clearServers: () => invoke('servers:clear'),
     listServers: () => invoke('servers:list'),
+    serverLink: (id) => invoke('servers:link', id),
 
     // chains
     getChain: () => invoke('chain:get'),

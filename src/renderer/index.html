@@ -789,6 +789,21 @@
   <!-- toast -->
   <div class="toast" id="toast"></div>
 
+  <div class="modal-overlay" id="qrModal" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <span class="modal-title" data-i18n="qr.title">اشتراک کانفیگ</span>
+        <button class="tb-btn" id="qrClose">&#x2715;</button>
+      </div>
+      <div class="modal-body qr-body">
+        <div id="qrImage" class="qr-image"></div>
+        <p class="hint" data-i18n="qr.hint">این لینک همهٔ تنظیمات (شامل patterniha) را دارد. اسکن کن یا کپی و در کلاینت دیگر وارد کن.</p>
+        <textarea id="qrLink" class="input" readonly rows="3" dir="ltr"></textarea>
+        <button class="btn primary" id="qrCopy" data-i18n="qr.copy">کپی لینک</button>
+      </div>
+    </div>
+  </div>
+  <script src="vendor/qrcode.js"></script>
   <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
