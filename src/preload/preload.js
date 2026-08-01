@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('api', {
   deleteServer: (id) => ipcRenderer.invoke('servers:delete', id),
   clearServers: () => ipcRenderer.invoke('servers:clear'),
   listServers: () => ipcRenderer.invoke('servers:list'),
+  serverLink: (id) => ipcRenderer.invoke('servers:link', id),
 
   // proxy chain (legacy single chain)
   getChain: () => ipcRenderer.invoke('chain:get'),

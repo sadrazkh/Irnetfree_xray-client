@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn, execFile } = require('child_process');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits } = require('./parser');
+const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink } = require('./parser');
 const { buildConfig, buildTestConfig } = require('./configBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
@@ -879,6 +879,11 @@ function registerIpc() {
   });
 
   ipcMain.handle('servers:list', () => store.get('servers', []));
+  // Serialize a server (with ALL its settings) back into a shareable link.
+  ipcMain.handle('servers:link', (e, id) => {
+    const s = store.get('servers', []).find(x => x.id === id);
+    return s ? buildShareLink(s) : '';
+  });
 
   /* ----- subscriptions ----- */
   ipcMain.handle('subs:list', () => subs.list());

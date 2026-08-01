@@ -36,6 +36,9 @@ const I18N = {
     'servers.empty': 'هنوز سروری اضافه نشده. روی «افزودن» بزن.',
     'srv.selected': 'انتخاب‌شده',
     'btn.edit': 'ویرایش', 'btn.addWg': '+ وایرگارد', 'btn.addWgGo': 'افزودن',
+    'btn.copy': 'کپی لینک', 'btn.qr': 'کد QR',
+    'qr.title': 'اشتراک کانفیگ', 'qr.copy': 'کپی لینک', 'qr.tooBig': 'لینک برای QR خیلی بلند است — از کپی استفاده کن.',
+    'qr.hint': 'این لینک همهٔ تنظیمات (شامل patterniha: finalMask/cipherSuites/unsafe) را دارد. اسکن کن یا کپی و در کلاینت دیگر وارد کن.',
 
     'wg.title': 'افزودن WireGuard', 'wg.name': 'نام', 'wg.namePh': 'نام دلخواه',
     'wg.endpoint': 'Endpoint (host:port)', 'wg.privateKey': 'کلید خصوصی',
@@ -160,7 +163,7 @@ const I18N = {
     'tun.ready': '✓ حالت TUN آماده است (هنگام اتصال، کل سیستم تانل می‌شود — اجرا با دسترسی ادمین).',
     'tun.off': 'حالت TUN در دسترس است ولی خاموش.',
 
-    't.settingsSaved': 'تنظیمات ذخیره شد', 't.rulesSaved': 'قوانین ذخیره شد',
+    't.settingsSaved': 'تنظیمات ذخیره شد', 't.rulesSaved': 'قوانین ذخیره شد', 't.copied': 'کپی شد ✓',
     't.routingMode': 'حالت روتینگ', 't.noServerSel': 'سروری انتخاب نشده',
     't.addServerFirst': 'اول یک سرور اضافه کن', 't.pingingAll': 'در حال تست همه سرورها…',
     't.testDone': 'تست تمام شد', 't.allServersDeleted': 'همه سرورها حذف شدند',
@@ -318,6 +321,9 @@ const I18N = {
     'servers.empty': 'No servers yet. Click “Add”.',
     'srv.selected': 'Selected',
     'btn.edit': 'Edit', 'btn.addWg': '+ WireGuard', 'btn.addWgGo': 'Add',
+    'btn.copy': 'Copy link', 'btn.qr': 'QR code',
+    'qr.title': 'Share config', 'qr.copy': 'Copy link', 'qr.tooBig': 'Link too long for a QR — use Copy.',
+    'qr.hint': 'This link carries EVERY setting (incl. patterniha: finalMask/cipherSuites/unsafe). Scan it or copy into another client.',
 
     'wg.title': 'Add WireGuard', 'wg.name': 'Name', 'wg.namePh': 'Custom name',
     'wg.endpoint': 'Endpoint (host:port)', 'wg.privateKey': 'Private Key',
@@ -442,7 +448,7 @@ const I18N = {
     'tun.ready': '✓ TUN mode ready (on connect the whole system is tunneled — run as admin).',
     'tun.off': 'TUN mode is available but off.',
 
-    't.settingsSaved': 'Settings saved', 't.rulesSaved': 'Rules saved',
+    't.settingsSaved': 'Settings saved', 't.rulesSaved': 'Rules saved', 't.copied': 'Copied ✓',
     't.routingMode': 'Routing mode', 't.noServerSel': 'No server selected',
     't.addServerFirst': 'Add a server first', 't.pingingAll': 'Testing all servers…',
     't.testDone': 'Test finished', 't.allServersDeleted': 'All servers removed',

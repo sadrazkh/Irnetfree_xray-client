@@ -196,8 +196,11 @@ function parseVless(link) {
   if (q.fragment) outbound._fragment = q.fragment;
   // Anti-DPI noise / fake ClientHello injection (&noise=type:packet:delay;...)
   if (q.noise) outbound._noise = q.noise;
+  if (q.fakeSni) outbound._fakesni = q.fakeSni;
 
-  return mkServer(name || address, 'vless', address, port, link, outbound);
+  const srv = mkServer(name || address, 'vless', address, port, link, outbound);
+  if (q.engine && q.engine !== 'xray') srv.engine = q.engine;
+  return srv;
 }
 
 /* ----------------------------- VMess ----------------------------- */
@@ -222,7 +225,9 @@ function parseVmess(link) {
     fp: v.fp || 'chrome',
     alpn: v.alpn || '',
     serviceName: v.path || '',
-    headerType: v.type || 'none'
+    headerType: v.type || 'none',
+    cipherSuites: v.cipherSuites || '',
+    finalMask: v.finalMask || v.finalmask || ''
   };
   const stream = buildStreamSettings(q);
 
@@ -244,8 +249,11 @@ function parseVmess(link) {
 
   if (v.fragment) outbound._fragment = String(v.fragment);
   if (v.noise) outbound._noise = String(v.noise);
+  if (v.fakesni) outbound._fakesni = String(v.fakesni);
 
-  return mkServer(v.ps || address, 'vmess', address, port, link, outbound);
+  const srv = mkServer(v.ps || address, 'vmess', address, port, link, outbound);
+  if (v.engine && v.engine !== 'xray') srv.engine = String(v.engine);
+  return srv;
 }
 
 /* ----------------------------- Trojan ----------------------------- */
@@ -278,8 +286,11 @@ function parseTrojan(link) {
 
   if (q.fragment) outbound._fragment = q.fragment;
   if (q.noise) outbound._noise = q.noise;
+  if (q.fakeSni) outbound._fakesni = q.fakeSni;
 
-  return mkServer(name || address, 'trojan', address, port, link, outbound);
+  const srv = mkServer(name || address, 'trojan', address, port, link, outbound);
+  if (q.engine && q.engine !== 'xray') srv.engine = q.engine;
+  return srv;
 }
 
 /* --------------------------- Shadowsocks --------------------------- */
@@ -737,7 +748,83 @@ function parseMany(text) {
   return { servers, errors };
 }
 
+/* ===================== build share link (export) ===================== */
+const enc = (v) => encodeURIComponent(String(v));
+
+// streamSettings -> flat query params (inverse of buildStreamSettings), so a
+// copied/QR'd link carries EVERY setting (incl. patterniha finalMask/cipherSuites).
+function streamToQuery(st) {
+  const q = {};
+  if (!st) return q;
+  const net = st.network || 'tcp';
+  q.type = net;
+  q.security = st.security || 'none';
+  if (net === 'ws' && st.wsSettings) { q.path = st.wsSettings.path || ''; q.host = (st.wsSettings.headers && (st.wsSettings.headers.Host || st.wsSettings.headers.host)) || ''; }
+  else if (net === 'grpc' && st.grpcSettings) { q.serviceName = st.grpcSettings.serviceName || ''; if (st.grpcSettings.multiMode) q.mode = 'multi'; }
+  else if ((net === 'h2' || net === 'http') && st.httpSettings) { q.path = st.httpSettings.path || ''; q.host = (st.httpSettings.host || []).join(','); }
+  else if (net === 'xhttp' && st.xhttpSettings) { q.path = st.xhttpSettings.path || ''; q.host = st.xhttpSettings.host || ''; if (st.xhttpSettings.mode) q.mode = st.xhttpSettings.mode; }
+  else if (net === 'kcp' && st.kcpSettings) { q.headerType = (st.kcpSettings.header && st.kcpSettings.header.type) || 'none'; if (st.kcpSettings.seed) q.seed = st.kcpSettings.seed; }
+  else if (net === 'tcp' && st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.type === 'http') {
+    q.headerType = 'http'; const rq = st.tcpSettings.header.request || {};
+    q.path = (rq.path && rq.path[0]) || ''; q.host = (rq.headers && rq.headers.Host && rq.headers.Host[0]) || '';
+  }
+  const tls = st.tlsSettings, rl = st.realitySettings;
+  if (tls) { q.sni = tls.serverName || ''; q.fp = tls.fingerprint || ''; if (tls.allowInsecure) q.allowInsecure = '1'; if (tls.alpn) q.alpn = Array.isArray(tls.alpn) ? tls.alpn.join(',') : tls.alpn; if (tls.cipherSuites) q.cipherSuites = tls.cipherSuites; }
+  if (rl) { q.sni = rl.serverName || ''; q.fp = rl.fingerprint || ''; q.pbk = rl.publicKey || ''; q.sid = rl.shortId || ''; if (rl.spiderX) q.spx = rl.spiderX; }
+  if (st.finalmask) q.finalMask = JSON.stringify(st.finalmask);
+  return q;
+}
+
+const qs = (o) => Object.keys(o).filter(k => o[k] !== undefined && o[k] !== null && o[k] !== '').map(k => `${k}=${enc(o[k])}`).join('&');
+
+/** Serialize a server (with ALL its settings) back into a shareable link. */
+function buildShareLink(server) {
+  const ob = server.outbound || {};
+  const proto = server.protocol;
+  const name = server.name ? '#' + enc(server.name) : '';
+  const extras = {};
+  if (ob._fragment) extras.fragment = ob._fragment;
+  if (ob._noise) extras.noise = ob._noise;
+  if (ob._fakesni) extras.fakeSni = ob._fakesni;
+  if (server.engine && server.engine !== 'xray') extras.engine = server.engine;
+
+  if (proto === 'vless') {
+    const u = ob.settings.vnext[0].users[0];
+    const q = Object.assign({ encryption: u.encryption || 'none' }, streamToQuery(ob.streamSettings), extras);
+    if (u.flow) q.flow = u.flow;
+    return `vless://${u.id}@${server.address}:${server.port}?${qs(q)}${name}`;
+  }
+  if (proto === 'trojan') {
+    const srv = ob.settings.servers[0];
+    const q = Object.assign({}, streamToQuery(ob.streamSettings), extras);
+    return `trojan://${enc(srv.password)}@${server.address}:${server.port}?${qs(q)}${name}`;
+  }
+  if (proto === 'vmess') {
+    const u = ob.settings.vnext[0].users[0]; const p = streamToQuery(ob.streamSettings);
+    const v = { v: '2', ps: server.name || '', add: server.address, port: String(server.port), id: u.id, aid: String(u.alterId || 0), scy: u.security || 'auto',
+      net: p.type || 'tcp', type: p.headerType || 'none', host: p.host || '', path: p.path || p.serviceName || '', tls: p.security === 'tls' ? 'tls' : '', sni: p.sni || '', fp: p.fp || '', alpn: p.alpn || '' };
+    if (p.cipherSuites) v.cipherSuites = p.cipherSuites;
+    if (p.finalMask) v.finalMask = p.finalMask;
+    if (extras.fragment) v.fragment = extras.fragment;
+    if (extras.noise) v.noise = extras.noise;
+    if (extras.fakeSni) v.fakesni = extras.fakeSni;
+    if (extras.engine) v.engine = extras.engine;
+    return 'vmess://' + Buffer.from(JSON.stringify(v)).toString('base64');
+  }
+  if (proto === 'shadowsocks') {
+    const srv = ob.settings.servers[0];
+    return `ss://${Buffer.from(`${srv.method}:${srv.password}`).toString('base64')}@${server.address}:${server.port}${name}`;
+  }
+  if (proto === 'socks' || proto === 'http') {
+    const srv = ob.settings.servers[0]; const c = srv.users && srv.users[0];
+    const auth = c ? Buffer.from(`${c.user || ''}:${c.pass || ''}`).toString('base64') + '@' : '';
+    return `${proto}://${auth}${server.address}:${server.port}${name}`;
+  }
+  return server.raw || '';   // wireguard / unknown: fall back to the imported link
+}
+
 module.exports = {
   parseLink, parseMany, b64decode,
-  buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits
+  buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits,
+  buildShareLink
 };
