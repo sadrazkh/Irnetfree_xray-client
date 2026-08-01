@@ -558,6 +558,8 @@ private fun latColor(ms: Long?): Color = when {
     var noiseCustom by remember { mutableStateOf(if (noisePreset == "custom") f.noise else "") }
     val effectiveNoise = when (noisePreset) { "off" -> ""; "custom" -> noiseCustom.trim(); else -> noisePreset }
     var fakeSni by remember { mutableStateOf(f.fakeSni) }
+    var cipherSuites by remember { mutableStateOf(f.cipherSuites) }
+    var finalMask by remember { mutableStateOf(f.finalMask) }
     var engine by remember { mutableStateOf(f.engine) }
     val isStd = server.protocol == "vless" || server.protocol == "vmess" || server.protocol == "trojan"
 
@@ -598,9 +600,14 @@ private fun latColor(ms: Long?): Color = when {
                     Fld("Fake SNI decoy — experimental (empty = off)", fakeSni) { fakeSni = it }
                 }
                 Fld("Path / ServiceName", path) { path = it }
-                DropPick("Fake ClientHello (browser fingerprint / uTLS)", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized"), fp) { fp = it }
+                DropPick("Fake ClientHello (browser fingerprint / uTLS)", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized", "unsafe" to "unsafe (custom cipherSuites)"), fp) { fp = it }
                 if (security == "reality") { Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it } }
                 SwitchRow("Allow Insecure", allowInsecure) { allowInsecure = it }
+                // patterniha custom-TLS
+                Text("🧩  patterniha — finalMask / cipherSuites", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                Fld("cipherSuites (use with fingerprint = unsafe)", cipherSuites) { cipherSuites = it }
+                Fld("finalMask (JSON)", finalMask) { finalMask = it }
+                Text("Address = a clean Cloudflare IP, fingerprint = unsafe, paste cipherSuites + finalMask. Array lengths/delays auto-normalized.", color = MUTED, fontSize = 11.sp)
             }
             if (server.protocol == "wireguard") {
                 Fld("Peer Public Key", wgPub) { wgPub = it }; Fld("Address (/32)", wgAddr) { wgAddr = it }; Fld("PSK", wgPsk) { wgPsk = it }
@@ -621,7 +628,7 @@ private fun latColor(ms: Long?): Color = when {
             }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
-                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise, fakeSni, engine, f.spx, f.xmode, f.seed, f.headerType, f.xhttpExtra)
+                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise, fakeSni, cipherSuites, finalMask, engine, f.spx, f.xmode, f.seed, f.headerType, f.xhttpExtra)
                 onSave(ServerEditor.apply(server, nf))
             }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }

@@ -583,6 +583,7 @@
               <option value="edge">edge</option>
               <option value="random">random</option>
               <option value="randomized">randomized</option>
+              <option value="unsafe">unsafe (custom cipherSuites)</option>
             </select></div>
         </div>
         <div class="grid2" id="edRealityRow" hidden>
@@ -649,6 +650,15 @@
           <label class="field-label" data-i18n="edit.noiseCustom">Noise spec (type:packet:delay; …)</label>
           <input type="text" id="edNoiseCustom" class="input" dir="ltr" placeholder="rand:50-100:0;base64:FgMBAAA=:10-20" />
           <p class="hint" data-i18n="edit.noiseHint">Decoy packets sent before the real TLS handshake to confuse DPI. type = rand/str/base64/hex.</p>
+        </div>
+        <!-- patterniha custom-TLS (only meaningful for TLS configs) -->
+        <div id="edPattWrap">
+          <div class="edit-section"><span data-i18n="edit.pattTitle">🧩 patterniha — finalMask / cipherSuites</span></div>
+          <label class="field-label" data-i18n="edit.cipherSuites">cipherSuites (use with fingerprint = unsafe)</label>
+          <input type="text" id="edCipherSuites" class="input" dir="ltr" placeholder="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:…" />
+          <label class="field-label" data-i18n="edit.finalMask" style="margin-top:8px;display:block">finalMask (JSON)</label>
+          <textarea id="edFinalMask" class="input" dir="ltr" rows="3" spellcheck="false" placeholder='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["5","94","1"],"delays":["0"],"maxSplit":"0"}}]}'></textarea>
+          <p class="hint" data-i18n="edit.pattHint">patterniha method: set Address to a clean Cloudflare IP, fingerprint = unsafe, then paste cipherSuites and finalMask. Array lengths/delays are auto-normalized to run on the bundled core.</p>
         </div>
       </div>
       <div class="modal-foot">

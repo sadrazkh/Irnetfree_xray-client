@@ -325,6 +325,8 @@ object LinkParser {
                 .put("allowInsecure", q["allowInsecure"] == "1" || q["allowInsecure"] == "true")
                 .put("fingerprint", q["fp"] ?: "chrome")
             q["alpn"]?.takeIf { it.isNotEmpty() }?.let { tls.put("alpn", JSONArray().apply { it.split(",").forEach { a -> put(a) } }) }
+            // patterniha custom TLS: `unsafe` fingerprint + pinned cipherSuites
+            q["cipherSuites"]?.takeIf { it.isNotBlank() }?.let { tls.put("cipherSuites", it.trim()) }
             stream.put("tlsSettings", tls)
         } else if (security == "reality") {
             stream.put("realitySettings", JSONObject()
@@ -334,7 +336,37 @@ object LinkParser {
                 .put("shortId", q["sid"] ?: "")
                 .put("spiderX", q["spx"] ?: ""))
         }
+        // finalMask: raw JSON (plural lengths/delays arrays normalized to the
+        // core's singular length/delay range so it runs on the bundled core).
+        q["finalMask"]?.takeIf { it.isNotBlank() }?.let { normalizeFinalMask(it)?.let { fm -> stream.put("finalmask", fm) } }
         return stream
+    }
+
+    /** Parse + normalize a finalMask JSON (plural lengths/delays -> singular range). */
+    fun normalizeFinalMask(raw: String): JSONObject? {
+        val obj = try { JSONObject(raw) } catch (e: Exception) { return null }
+        fun rangeOf(a: JSONArray): String? {
+            var mn = Int.MAX_VALUE; var mx = Int.MIN_VALUE
+            for (i in 0 until a.length()) {
+                val parts = a.optString(i).split("-")
+                parts.getOrNull(0)?.toIntOrNull()?.let { if (it < mn) mn = it }
+                (parts.getOrNull(parts.size - 1)?.toIntOrNull())?.let { if (it > mx) mx = it }
+            }
+            if (mn == Int.MAX_VALUE) return null
+            if (mn < 1) mn = 1; if (mx < mn) mx = mn
+            return if (mn == mx) "$mn" else "$mn-$mx"
+        }
+        fun fixMasks(arr: JSONArray?) {
+            if (arr == null) return
+            for (i in 0 until arr.length()) {
+                val s = arr.optJSONObject(i)?.optJSONObject("settings") ?: continue
+                s.optJSONArray("lengths")?.let { rangeOf(it)?.let { r -> s.put("length", r) }; s.remove("lengths") }
+                s.optJSONArray("delays")?.let { s.put("delay", it.optString(0, "0")); s.remove("delays") }
+            }
+        }
+        fixMasks(obj.optJSONArray("tcp"))
+        fixMasks(obj.optJSONArray("udp"))
+        return obj
     }
 
     /* ------------------------- helpers ------------------------- */
