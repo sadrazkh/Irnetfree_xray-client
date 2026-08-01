@@ -21,6 +21,7 @@ object ServerEditor {
         var wgPub: String = "", var wgAddr: String = "", var wgPsk: String = "",
         var wgMtu: String = "1420", var wgReserved: String = "", var wgAllowed: String = "0.0.0.0/0, ::/0",
         var fragment: String = "", var noise: String = "", var fakeSni: String = "",
+        var cipherSuites: String = "", var finalMask: String = "",   // patterniha
         var engine: String = "xray",                // 'xray' (default) | 'sing-box'
         // preserved passthroughs the edit form doesn't expose (so editing anything
         // doesn't silently drop them): reality spiderX, xhttp mode/extra, kcp bits.
@@ -62,6 +63,8 @@ object ServerEditor {
         st.optJSONObject("kcpSettings")?.let { f.seed = it.optString("seed"); f.headerType = it.optJSONObject("header")?.optString("type") ?: "" }
         st.optJSONObject("tlsSettings")?.let { f.sni = it.optString("serverName"); f.allowInsecure = it.optBoolean("allowInsecure"); f.fp = it.optString("fingerprint", "chrome"); f.alpn = arr(it.optJSONArray("alpn")).joinToString(",") }
         st.optJSONObject("realitySettings")?.let { f.sni = it.optString("serverName"); f.fp = it.optString("fingerprint", "chrome"); f.pbk = it.optString("publicKey"); f.sid = it.optString("shortId"); f.spx = it.optString("spiderX") }
+        st.optJSONObject("tlsSettings")?.optString("cipherSuites")?.takeIf { it.isNotBlank() }?.let { f.cipherSuites = it }
+        st.optJSONObject("finalmask")?.let { f.finalMask = it.toString() }
         return f
     }
 
@@ -100,6 +103,7 @@ object ServerEditor {
         "type" to f.network, "security" to f.security, "sni" to f.sni, "host" to f.host,
         "path" to f.path, "serviceName" to f.path, "fp" to f.fp, "pbk" to f.pbk, "sid" to f.sid,
         "alpn" to f.alpn, "allowInsecure" to if (f.allowInsecure) "1" else "0",
+        "cipherSuites" to f.cipherSuites, "finalMask" to f.finalMask,
         // preserved passthroughs (see Fields)
         "spx" to f.spx, "mode" to f.xmode, "seed" to f.seed, "headerType" to f.headerType)
 

@@ -1523,6 +1523,8 @@ function readServerFields(s) {
     fragment: ob._fragment || '',
     noise: ob._noise || '',
     fakeSni: ob._fakesni || '',
+    cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
+    finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
     engine: s.engine || 'xray'
   };
 
@@ -1629,6 +1631,8 @@ function openEdit(id) {
   $('#edFragment').value = f.fragment || '';
   setNoiseFields(f.noise || '');
   if ($('#edFakeSni')) $('#edFakeSni').value = f.fakeSni || '';
+  if ($('#edCipherSuites')) $('#edCipherSuites').value = f.cipherSuites || '';
+  if ($('#edFinalMask')) $('#edFinalMask').value = f.finalMask || '';
   if ($('#edEngine')) $('#edEngine').value = f.engine || 'xray';
   $('#edInsecure').checked = !!f.allowInsecure;
 
@@ -1650,6 +1654,7 @@ function openEdit(id) {
   show('#edTransportRow', isStd);
   show('#edTlsRow', isStd);
   show('#edPathRow', isStd);
+  show('#edPattWrap', isStd);
   show('#edInsecureRow', isStd);
   show('#edWgExtra', isWg);
   show('#edProxyRow', isProxy);
@@ -1767,6 +1772,9 @@ $('#editSave').onclick = async () => {
     fields.pbk = $('#edPbk').value.trim();
     fields.sid = $('#edSid').value.trim();
     fields.allowInsecure = $('#edInsecure').checked;
+    // patterniha custom-TLS: cipherSuites + finalMask ('' clears them)
+    fields.cipherSuites = $('#edCipherSuites') ? $('#edCipherSuites').value.trim() : '';
+    fields.finalMask = $('#edFinalMask') ? $('#edFinalMask').value.trim() : '';
     // preserve alpn from original (no field for it)
     const orig = readServerFields(editOriginal);
     if (orig.alpn) fields.alpn = orig.alpn;

@@ -101,6 +101,8 @@ function buildStreamSettings(q) {
       fingerprint: q.fp || 'chrome'
     };
     if (q.alpn) stream.tlsSettings.alpn = q.alpn.split(',');
+    // patterniha-style custom TLS: `unsafe` fingerprint lets you pin cipherSuites.
+    if (q.cipherSuites) stream.tlsSettings.cipherSuites = String(q.cipherSuites).trim();
   } else if (security === 'reality') {
     stream.realitySettings = {
       serverName: q.sni || '',
@@ -111,7 +113,47 @@ function buildStreamSettings(q) {
     };
   }
 
+  // finalMask (ClientHello fragmentation / masking) — a raw JSON object the user
+  // pastes; normalized so both the plural (lengths/delays arrays) and singular
+  // forms work on the bundled core.
+  if (q.finalMask) {
+    const fm = normalizeFinalMask(q.finalMask);
+    if (fm) stream.finalmask = fm;
+  }
+
   return stream;
+}
+
+/**
+ * Parse + normalize a finalMask JSON. The patterniha UI uses plural arrays
+ * (`lengths`, `delays`) where the n-th element is the n-th fragment's size; the
+ * bundled xray core wants the singular `length`/`delay` range, so we collapse
+ * the array to its min-max range (still splits the ClientHello / hides the SNI).
+ * Returns the normalized object, or null on invalid JSON.
+ */
+function normalizeFinalMask(raw) {
+  let obj;
+  try { obj = typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+  if (!obj || typeof obj !== 'object') return null;
+  const rangeOf = (arr) => {
+    let mn = Infinity, mx = -Infinity;
+    for (const v of arr) { const p = String(v).split('-').map(n => parseInt(n, 10)); if (Number.isFinite(p[0])) mn = Math.min(mn, p[0]); mx = Math.max(mx, p[p.length - 1]); }
+    if (!Number.isFinite(mn)) return null;
+    mn = Math.max(1, mn); mx = Math.max(mn, mx);
+    return mn === mx ? String(mn) : `${mn}-${mx}`;
+  };
+  const fixMasks = (a) => Array.isArray(a) ? a.map(m => {
+    const s = m && m.settings;
+    if (s) {
+      if (Array.isArray(s.lengths)) { const r = rangeOf(s.lengths); if (r) s.length = r; delete s.lengths; }
+      if (Array.isArray(s.delays)) { s.delay = String(s.delays[0] != null ? s.delays[0] : '0'); delete s.delays; }
+    }
+    return m;
+  }) : a;
+  if (obj.tcp) obj.tcp = fixMasks(obj.tcp);
+  if (obj.udp) obj.udp = fixMasks(obj.udp);
+  return obj;
 }
 
 /* ----------------------------- VLESS ----------------------------- */
@@ -583,7 +625,7 @@ function rebuildStream(ob, f) {
   if (!ob.streamSettings) return;
   const cur = ob.streamSettings;
   // Only rebuild if the user touched transport/security fields.
-  const touched = ['network', 'security', 'sni', 'path', 'host', 'allowInsecure', 'fp', 'pbk', 'sid', 'serviceName', 'alpn']
+  const touched = ['network', 'security', 'sni', 'path', 'host', 'allowInsecure', 'fp', 'pbk', 'sid', 'serviceName', 'alpn', 'cipherSuites', 'finalMask']
     .some(k => f[k] != null && f[k] !== '');
   if (!touched) return;
 
@@ -611,7 +653,11 @@ function rebuildStream(ob, f) {
     spx: rs.spiderX || '',
     mode: xs.mode || (gs.multiMode ? 'multi' : ''),
     seed: ks.seed || '',
-    headerType: (ks.header && ks.header.type) || ''
+    headerType: (ks.header && ks.header.type) || '',
+    // patterniha: cipherSuites (tls) + finalMask (stream). Edited value wins,
+    // else keep whatever the config already had.
+    cipherSuites: f.cipherSuites != null ? f.cipherSuites : ((cur.tlsSettings && cur.tlsSettings.cipherSuites) || ''),
+    finalMask: f.finalMask != null ? f.finalMask : (cur.finalmask ? JSON.stringify(cur.finalmask) : '')
   };
   const rebuilt = buildStreamSettings(q);
 
