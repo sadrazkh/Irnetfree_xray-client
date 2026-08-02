@@ -27,12 +27,19 @@ object VpnState {
     private val _connectedSince = MutableStateFlow(0L)
     val connectedSince: StateFlow<Long> = _connectedSince
 
+    /** Post-connect verdict shown on Home: is traffic really working, and if not, where it breaks. */
+    private val _health = MutableStateFlow<Health?>(null)
+    val health: StateFlow<Health?> = _health
+    data class Health(val ok: Boolean, val text: String)
+    fun setHealth(ok: Boolean, text: String) { _health.value = Health(ok, text) }
+
     fun set(s: ConnState, label: String? = null, error: String? = null) {
         _state.value = s
         if (label != null) _label.value = label
         if (error != null && error.isNotBlank()) { _lastError.value = error; addLog("⚠ $error") }
         if (s == ConnState.CONNECTED) { if (_connectedSince.value == 0L) _connectedSince.value = System.currentTimeMillis() }
-        if (s == ConnState.DISCONNECTED) { _connectedSince.value = 0L; _traffic.value = Traffic() }
+        if (s == ConnState.DISCONNECTED) { _connectedSince.value = 0L; _traffic.value = Traffic(); _health.value = null }
+        if (s == ConnState.CONNECTING) _health.value = null
     }
     fun setTraffic(t: Traffic) { _traffic.value = t }
     fun addLog(line: String) { _log.value = (_log.value + line).takeLast(300) }
