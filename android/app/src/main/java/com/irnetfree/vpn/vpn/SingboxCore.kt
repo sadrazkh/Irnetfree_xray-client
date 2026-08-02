@@ -55,17 +55,27 @@ class SingboxCore {
 
             // Wait until the socks port is actually accepting connections (or the
             // process dies / times out). Only then is the tunnel really usable.
-            val deadline = System.currentTimeMillis() + 6000
-            while (System.currentTimeMillis() < deadline) {
-                if (!p.isAlive) {
-                    onLog("sing-box exited (code ${runCatching { p.exitValue() }.getOrNull()}) — ${tail.ifBlank { "no output; check the config" }}")
-                    return false
+            // The probing MUST happen off the caller's thread: start() is reached
+            // from onStartCommand() (main thread), where Android rejects any socket
+            // — even to loopback — with NetworkOnMainThreadException. That made a
+            // perfectly healthy sing-box look like it never came up.
+            val ready = java.util.concurrent.atomic.AtomicBoolean(false)
+            val died = java.util.concurrent.atomic.AtomicBoolean(false)
+            val prober = Thread {
+                val deadline = System.currentTimeMillis() + 6000
+                while (System.currentTimeMillis() < deadline) {
+                    if (!p.isAlive) { died.set(true); return@Thread }
+                    if (portOpen(socksPort)) { ready.set(true); return@Thread }
+                    try { Thread.sleep(200) } catch (i: InterruptedException) { return@Thread }
                 }
-                if (portOpen(socksPort)) { onLog("sing-box: socks ready on 127.0.0.1:$socksPort"); Log.i(TAG, "sing-box ready"); return true }
-                try { Thread.sleep(200) } catch (_: InterruptedException) {}
             }
-            onLog("sing-box: socks port $socksPort did not open in time — ${tail.ifBlank { "no output" }}")
-            false
+            prober.start()
+            runCatching { prober.join(7000) }
+            when {
+                ready.get() -> { onLog("sing-box: socks ready on 127.0.0.1:$socksPort"); Log.i(TAG, "sing-box ready"); true }
+                died.get() -> { onLog("sing-box exited (code ${runCatching { p.exitValue() }.getOrNull()}) — ${tail.ifBlank { "no output; check the config" }}"); false }
+                else -> { onLog("sing-box: socks port $socksPort did not open in time — ${tail.ifBlank { "no output" }}"); false }
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "sing-box start failed", t)
             onLog("sing-box error: ${t.message ?: t}")

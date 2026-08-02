@@ -80,13 +80,11 @@ class XrayVpnService : VpnService() {
                 if (!XrayCore.available) { fail("Xray core (libv2ray) is not bundled."); stopAll(); return }
                 xray = XrayCore(onStatus = { _, s -> if (!s.isNullOrBlank()) VpnState.addLog(s) })
                 if (!xray!!.start(config, 0)) { fail("Xray core failed to start — see logs (More → Logs)."); stopAll(); return }
-                // startLoop() returning true only means the core booted; make sure it
-                // is really listening before we point the tunnel at it.
-                if (!waitForPort(socksPort)) {
-                    fail("Xray started but its SOCKS port $socksPort never opened — see logs.")
-                    stopAll(); return
-                }
-                VpnState.addLog("✓ Running on Xray core (socks=$socksPort ready)")
+                // startLoop() returning true only means the core booted; confirm it
+                // is really listening. NEVER abort on this — it is a diagnostic, and
+                // a probe that is wrong (as it was) must not take the tunnel down.
+                if (waitForPort(socksPort)) VpnState.addLog("✓ Running on Xray core (socks=$socksPort ready)")
+                else VpnState.addLog("⚠ Xray is up but SOCKS $socksPort didn't answer the probe — continuing anyway.")
             }
 
             // 2) TUN — exclude our own app so xray's sockets bypass the tunnel
@@ -141,14 +139,30 @@ class XrayVpnService : VpnService() {
         val f = File(filesDir, "tun2socks.yml"); f.writeText(yaml); return f.absolutePath
     }
 
-    /** Block until 127.0.0.1:port accepts a connection (or we give up). */
+    /**
+     * Block until 127.0.0.1:port accepts a connection (or we give up).
+     *
+     * The probe MUST run off the main thread: startTunnel() is called from
+     * onStartCommand(), and Android throws NetworkOnMainThreadException for any
+     * socket there — even to loopback — so probing inline always "failed" and
+     * made a perfectly healthy core look dead.
+     */
     private fun waitForPort(port: Int, timeoutMs: Long = 5000): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            try { java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 300); return true } }
-            catch (e: Exception) { try { Thread.sleep(150) } catch (i: InterruptedException) { return false } }
+        val ok = java.util.concurrent.atomic.AtomicBoolean(false)
+        val t = Thread {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 300) }
+                    ok.set(true); return@Thread
+                } catch (e: Exception) {
+                    try { Thread.sleep(150) } catch (i: InterruptedException) { return@Thread }
+                }
+            }
         }
-        return false
+        t.start()
+        runCatching { t.join(timeoutMs + 1500) }
+        return ok.get()
     }
 
     /**
