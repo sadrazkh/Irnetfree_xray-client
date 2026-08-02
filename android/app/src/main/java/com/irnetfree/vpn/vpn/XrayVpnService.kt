@@ -13,6 +13,7 @@ import android.util.Log
 import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.SingboxConfig
+import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.core.Store
 import com.irnetfree.vpn.ui.MainActivity
 import hev.htproxy.TProxyService
@@ -79,7 +80,13 @@ class XrayVpnService : VpnService() {
                 if (!XrayCore.available) { fail("Xray core (libv2ray) is not bundled."); stopAll(); return }
                 xray = XrayCore(onStatus = { _, s -> if (!s.isNullOrBlank()) VpnState.addLog(s) })
                 if (!xray!!.start(config, 0)) { fail("Xray core failed to start — see logs (More → Logs)."); stopAll(); return }
-                VpnState.addLog("✓ Running on Xray core (socks=$socksPort)")
+                // startLoop() returning true only means the core booted; make sure it
+                // is really listening before we point the tunnel at it.
+                if (!waitForPort(socksPort)) {
+                    fail("Xray started but its SOCKS port $socksPort never opened — see logs.")
+                    stopAll(); return
+                }
+                VpnState.addLog("✓ Running on Xray core (socks=$socksPort ready)")
             }
 
             // 2) TUN — exclude our own app so xray's sockets bypass the tunnel
@@ -108,6 +115,7 @@ class XrayVpnService : VpnService() {
             VpnState.addLog("Connected")
             updateNotification(label, true)
             startStatsLoop()
+            selfCheck(socksPort)
             Log.i(TAG, "tunnel up: $label")
         } catch (e: Throwable) {
             Log.e(TAG, "startTunnel failed", e)
@@ -131,6 +139,51 @@ class XrayVpnService : VpnService() {
             append("misc:\n  task-stack-size: 20480\n  connect-timeout: 5000\n  read-write-timeout: 60000\n  log-level: warn\n")
         }
         val f = File(filesDir, "tun2socks.yml"); f.writeText(yaml); return f.absolutePath
+    }
+
+    /** Block until 127.0.0.1:port accepts a connection (or we give up). */
+    private fun waitForPort(port: Int, timeoutMs: Long = 5000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try { java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 300); return true } }
+            catch (e: Exception) { try { Thread.sleep(150) } catch (i: InterruptedException) { return false } }
+        }
+        return false
+    }
+
+    /**
+     * After connecting, say IN THE LOG where a failure actually is — this app is
+     * excluded from its own VPN, so it can't test the tunnel directly, but it can
+     * split the problem: reach the internet THROUGH the core's SOCKS port, then
+     * report whether the tunnel is carrying any packets at all.
+     *   core fails      -> the config/server is at fault
+     *   core OK, tx = 0 -> nothing is entering the TUN (VPN/route/per-app problem)
+     *   core OK, tx > 0 but rx = 0 -> packets enter but nothing comes back
+     */
+    private fun selfCheck(socksPort: Int) {
+        scope.launch {
+            val ms = Diagnostics.httpLatency(socksPort)
+            if (ms < 0) {
+                VpnState.addLog("✗ Self-check: the core could NOT reach the internet — the server/config is the problem (not the tunnel).")
+                VpnState.setHealth(false, "Server unreachable — try another config")
+                return@launch
+            }
+            val ip = runCatching { Diagnostics.ipInfo(socksPort) }.getOrNull()
+            val where = ip?.takeIf { it.ok }?.let { " · exit ${it.ip} ${it.country}" } ?: ""
+            VpnState.addLog("✓ Self-check: core reaches the internet (${ms}ms)$where")
+            VpnState.setHealth(true, "Working${if (where.isBlank()) "" else " ·"} ${ip?.takeIf { it.ok }?.let { "${it.country} ${it.ip}" } ?: "${ms}ms"}")
+            delay(12_000)
+            if (!tunnelRunning) return@launch
+            val st = runCatching { TProxyService.TProxyGetStats() }.getOrNull()
+            val tx = if (st != null && st.size >= 4) st[1] else -1
+            val rx = if (st != null && st.size >= 4) st[3] else -1
+            when {
+                tx < 0 -> VpnState.addLog("? Tunnel stats unavailable (tun2socks may not be running).")
+                tx == 0L -> { VpnState.addLog("✗ Tunnel: no packets entered the TUN in 12s — other apps aren't being routed into the VPN."); VpnState.setHealth(false, "Apps aren't reaching the tunnel") }
+                rx == 0L -> { VpnState.addLog("✗ Tunnel: sent $tx B but received 0 — packets enter the TUN but nothing returns."); VpnState.setHealth(false, "Tunnel stalled — no data returning") }
+                else -> VpnState.addLog("✓ Tunnel carrying traffic (↑$tx B ↓$rx B).")
+            }
+        }
     }
 
     private fun startStatsLoop() {

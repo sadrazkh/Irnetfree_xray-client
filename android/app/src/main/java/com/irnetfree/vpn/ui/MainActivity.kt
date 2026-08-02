@@ -177,6 +177,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     var homeSheet by remember { mutableStateOf<String?>(null) }
     val haptic = LocalHapticFeedback.current
     val connectedSince by VpnState.connectedSince.collectAsState()
+    val health by VpnState.health.collectAsState()
     var elapsed by remember { mutableStateOf(0L) }
     LaunchedEffect(connectedSince) {
         while (connectedSince > 0) { elapsed = System.currentTimeMillis() - connectedSince; delay(1000) }
@@ -231,6 +232,18 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                         if (state == ConnState.CONNECTED) Text(fmtDuration(elapsed), color = MUTED, fontSize = 12.sp)
                     }
                 }
+            }
+        }
+        // Post-connect verdict: says plainly whether traffic really works, and if
+        // not, whether the server or the tunnel is at fault.
+        health?.let { h ->
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                .background((if (h.ok) GREEN else BAD).copy(alpha = 0.12f)).padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(if (h.ok) "✓" else "✗", color = if (h.ok) GREEN else BAD, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(8.dp))
+                Text(h.text, color = if (h.ok) GREEN else BAD, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
         Spacer(Modifier.height(20.dp))
