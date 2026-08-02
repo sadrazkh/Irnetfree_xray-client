@@ -573,8 +573,9 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
 @Composable private fun WgSheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
     var name by remember { mutableStateOf("") }; var ep by remember { mutableStateOf("") }; var priv by remember { mutableStateOf("") }; var pub by remember { mutableStateOf("") }
     var addr by remember { mutableStateOf("") }; var allowed by remember { mutableStateOf("0.0.0.0/0, ::/0") }; var psk by remember { mutableStateOf("") }; var mtu by remember { mutableStateOf("1420") }; var reserved by remember { mutableStateOf("") }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
-        Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 16.dp)) {
+    val wgSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = wgSheetState, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
             Text("Add WireGuard", color = TXT, fontWeight = FontWeight.Bold)
             Fld("Name", name) { name = it }; Fld("Endpoint (host:port)", ep) { ep = it }; Fld("Private Key", priv) { priv = it }; Fld("Peer Public Key", pub) { pub = it }
             Fld("Address (local /32)", addr) { addr = it }; Fld("Allowed IPs", allowed) { allowed = it }; Fld("PSK (optional)", psk) { psk = it }; Fld("MTU", mtu) { mtu = it }; Fld("Reserved (optional)", reserved) { reserved = it }
@@ -623,8 +624,13 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
     var engine by remember { mutableStateOf(f.engine) }
     val isStd = server.protocol == "vless" || server.protocol == "vmess" || server.protocol == "trojan"
 
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
-        Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 16.dp)) {
+    // Open FULLY expanded: a partially-expanded sheet swallows the drag as a sheet
+    // gesture instead of scrolling the content, which made everything below the
+    // fold (fingerprint, patterniha…) unreachable — it looked like those fields
+    // didn't exist. Fill the height so the inner scroll owns the gesture.
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
             Text("Edit · ${badge(server.protocol)}", color = TXT, fontWeight = FontWeight.Bold)
             Fld("Name", name) { name = it }; Fld("Address — real server/IP (connection goes here)", address) { address = it }; Fld("Port", port) { port = it }
             when (server.protocol) {
