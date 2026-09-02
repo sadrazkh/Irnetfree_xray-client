@@ -139,6 +139,11 @@ rule in every plan (single/chain/advanced/pool). Any DNS packet that enters Xray
 from the TUN — is answered by the internal resolver. Plain UDP DNS never leaves through the proxy again.
 
 **Settings** (all reconnect-relevant, added to `RECONNECT_KEYS` + i18n):
+- `dnsManaged: true` — the master switch for everything in this phase. **On**: internal DNS built as above,
+  `dns-out` hijack of :53, TUN adapter DNS = tunnel peer. **Off** (legacy behaviour): `dns.servers` is the
+  user's `dnsRemote` list as given (UDP IPs or DoH URLs), no direct resolver, no hijack rule, TUN adapter DNS
+  = the IPs from `dnsRemote` (URLs skipped; falls back to 1.1.1.1). The Settings page shows the switch with
+  the note "off = DNS goes wherever your apps/OS send it; leak protection is weaker".
 - `dnsRemote: ['https://1.1.1.1/dns-query','https://8.8.8.8/dns-query']` replaces `dns`; the existing
   `dns` array is migrated: known IPs map to their DoH URL (1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 9.9.9.9,
   94.140.14.14, 208.67.222.222), anything else is kept as UDP.
@@ -192,7 +197,7 @@ Generated config (`buildTunConfig({ socksPort, excludeIps, ipv6, strict, stack, 
 |---|---|
 | off | TUN as above (v4+v6 default routes, TUN DNS = peer, Xray hijack). Already no plain-DNS and no v6 bypass. |
 | standard | **Adapter DNS override**: every connected physical IPv4/IPv6 adapter's DNS set to the TUN peer for the session; the original (DHCP / static list) is recorded in `userData/tun-state.json` and restored on disconnect, quit, `process.on('exit')`, and at next launch if the file is still present (crash repair). Windows via one PowerShell script (`Get-DnsClientServerAddress` / `Set-DnsClientServerAddress`), macOS via `networksetup` for every service. |
-| strict | + sing-box `strict_route:true` (WFP: block :53 off-TUN, block v6 off-TUN, permit only TUN + sing-box). + Windows allow-list: one `New-NetFirewallRule -Group IRNetFree -Direction Outbound -Action Block -InterfaceAlias <each physical adapter> -Protocol TCP/UDP -RemoteAddress <ranges>` where `<ranges>` = 0.0.0.0–255.255.255.255 minus {server entry IPs, 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8, 224/4}. Removed with `Remove-NetFirewallRule -Group IRNetFree` on disconnect/quit/exit and at launch. macOS strict = strict_route only (no pf rules this round; documented). |
+| strict | + sing-box `strict_route:true` (WFP: block :53 off-TUN, block v6 off-TUN, permit only TUN + sing-box). + Windows allow-list: one `New-NetFirewallRule -Group IRNetFree -Direction Outbound -Action Block -InterfaceAlias <each physical adapter> -Protocol TCP/UDP -RemoteAddress <ranges>` where `<ranges>` = 0.0.0.0–255.255.255.255 minus {server entry IPs, 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8, 224/4}. Removed with `Remove-NetFirewallRule -Group IRNetFree` on disconnect/quit/exit and at launch. macOS strict = strict_route + the `pf` anchor described in §4b (experimental, unverified). |
 
 Range-complement computation is a pure function with tests. All Windows shell work for connect and for
 teardown is batched into one PowerShell invocation each (today: 6–8 sequential spawns).
@@ -270,11 +275,35 @@ follow. Verified with a screenshot of every page in both themes.
 hijack rule, geoAssets flag), `MainActivity.kt` (DNS field and rule-value field losing focus/commas),
 `XrayVpnService.kt` (geo assets). Not in this round.
 
+## 4b. macOS parity (applies to every phase)
+
+The owner's requirement: *every* option — PattN core, finalmask/fingerprint/cipherSuites, dual cores,
+chains/pool/advanced, DNS management, guard levels — must work on macOS, not only Windows. Concretely:
+
+- **Cores**: `Downloader.getXray('xray-pattn')` maps darwin to `Xray-macos-64.zip` /
+  `Xray-macos-arm64-v8a.zip` (the fork publishes both); the binary goes through the existing
+  `macPrepareBinary` (quarantine strip + ad-hoc codesign, fatal on Apple Silicon if codesign fails).
+  sing-box for darwin (`sing-box-*-darwin-{amd64,arm64}.tar.gz`) likewise. Nothing in the engine picker,
+  edit form or Required-files list is platform-gated except `wintun.dll`.
+- **DPI options** are core-level (finalmask, fp, cs) — identical on macOS by construction; the tests run
+  on every platform in CI (`ubuntu`, `macos`, `windows` matrix for `npm test`).
+- **TUN**: sing-box `auto_route` on darwin creates the utun and routes itself; we only launch it as root
+  through `runScriptPrivileged` and set the DNS with `networksetup`. The user-facing behaviour (mode card,
+  server switch, guard *standard*) is the same as Windows.
+- **Guard strict / kill switch on macOS**: implemented as a `pf` anchor (`/etc/pf.anchors/irnetfree`):
+  strict = block out on non-utun interfaces except to the server IPs and RFC1918; kill switch = block all
+  out except loopback. Rule generation is a pure function with tests; loading/unloading goes through the
+  privileged script helper. Because no Mac is available in this round it ships **behind an "experimental"
+  label** in Settings and is the first thing to verify on a real Mac.
+- **What stays Windows-only**: nothing user-visible. Internals: `netsh`/PowerShell scripts are the Windows
+  implementation of the same `leakGuard` interface; `pf`/`networksetup` are the macOS one.
+
 ## 5. Settings added / changed
 
 | Key | Default | Reconnect? | Phase |
 |---|---|---|---|
 | `defaultEngine` | `'xray'` | yes | 1 |
+| `dnsManaged` | `true` | yes | 2 |
 | `dnsRemote` (replaces `dns`) | DoH 1.1.1.1 + 8.8.8.8 | yes | 2 |
 | `dnsDirect` | Shecan UDP | yes | 2 |
 | `ipv6` | `false` | yes | 2 |
