@@ -12,16 +12,38 @@
  * injected, so no test needs a real NIC or a real timer.
  */
 
+/** fe80::/10 — regenerated on every adapter recreation, never a routing fact. */
+function isLinkLocalV6(address) {
+  return /^fe[89ab]/i.test(String(address || ''));
+}
+
 /**
  * A stable signature of the machine's routable addresses. Interface order and
  * internal (loopback) addresses are ignored, so a re-enumeration that returns
  * the same network in a different order is NOT a change.
+ *
+ * Two more things are deliberately outside the signature:
+ *
+ *  - Any interface `ignoreInterface(name)` claims. The app creates its OWN
+ *    adapter in TUN mode, and rebuilding the tunnel destroys and recreates it —
+ *    so counting it would make every recovery produce the change that triggers
+ *    the next one, forever. The predicate is a parameter rather than baked in
+ *    because this function stays pure and directly testable; the watcher passes
+ *    the one its owner injected (see NetWatcher#fp).
+ *  - IPv6 link-local addresses. Windows hands a recreated adapter a fresh GUID
+ *    and therefore a fresh fe80:: address, which says nothing about routing.
+ *
+ * @param {object} interfaces os.networkInterfaces()-shaped object
+ * @param {(name: string) => boolean} [ignoreInterface] defaults to ignoring nothing
  */
-function fingerprint(interfaces) {
+function fingerprint(interfaces, ignoreInterface) {
+  const skip = typeof ignoreInterface === 'function' ? ignoreInterface : () => false;
   const parts = [];
   for (const name of Object.keys(interfaces || {})) {
+    if (skip(name)) continue;
     for (const ni of (interfaces[name] || [])) {
       if (!ni || ni.internal) continue;
+      if (isLinkLocalV6(ni.address)) continue;
       parts.push(`${name}|${ni.family}|${ni.address}`);
     }
   }
@@ -33,6 +55,8 @@ class NetWatcher {
    * @param {object} opts
    *   read()            -> os.networkInterfaces()-shaped object
    *   onChange(reason)  -> 'interfaces' | 'resume' | 'online'; may return a promise
+   *   ignoreInterface(name) -> true for interfaces that are none of our business
+   *                            (the owner passes the adapters IT creates)
    *   debounceMs        -> how long the network must hold still before we act
    *   intervalMs        -> poll period
    *   setTimer/clearTimer -> injectable setInterval/clearInterval
@@ -40,6 +64,7 @@ class NetWatcher {
   constructor(opts = {}) {
     this.read = opts.read || (() => ({}));
     this.onChange = opts.onChange || (() => {});
+    this.ignoreInterface = opts.ignoreInterface || (() => false);
     this.debounceMs = opts.debounceMs == null ? 2500 : opts.debounceMs;
     this.intervalMs = opts.intervalMs || 3000;
     this.setTimer = opts.setTimer || ((fn, ms) => setInterval(fn, ms));
@@ -53,12 +78,36 @@ class NetWatcher {
     this.gen = 0;             // bumped by stop(); an older run's result is ignored
   }
 
+  /** The current network, as this watcher chooses to see it. */
+  fp() {
+    return fingerprint(this.read(), this.ignoreInterface);
+  }
+
   start() {
     if (this.timer) return;
-    this.last = fingerprint(this.read());
+    this.last = this.fp();
     this.pending = null;
     this.settledFor = 0;
     this.timer = this.setTimer(() => this.tick(), this.intervalMs);
+  }
+
+  /**
+   * Adopt the network as it is right now as the baseline, and forget a change
+   * that was only half-observed.
+   *
+   * The owner calls this when a recovery finishes: the tunnel it just rebuilt was
+   * built for THIS network, so nothing about it is news. Without it, everything
+   * seen during the teardown — an adapter down, a route gone — is still sitting
+   * in `pending` and settles into a trigger for a rebuild that already happened.
+   *
+   * `queued` and `busy` are deliberately untouched: a trigger that arrived during
+   * the recovery is a real change the rebuild in flight did NOT cover, and
+   * dropping it here would leave the tunnel dead with nothing left to fire again.
+   */
+  rebaseline() {
+    this.last = this.fp();
+    this.pending = null;
+    this.settledFor = 0;
   }
 
   /**
@@ -79,7 +128,7 @@ class NetWatcher {
 
   /** One poll. Fires onChange only once the new fingerprint has held still. */
   tick() {
-    const fp = fingerprint(this.read());
+    const fp = this.fp();
     if (fp === this.last) { this.pending = null; this.settledFor = 0; return; }
     if (fp !== this.pending) { this.pending = fp; this.settledFor = 0; return; }  // still moving
     this.settledFor += this.intervalMs;
@@ -93,7 +142,7 @@ class NetWatcher {
   /** An out-of-band signal (power resume, browser 'online'). */
   poke(reason) {
     if (!this.timer) return;                 // not watching: nothing to recover
-    this.last = fingerprint(this.read());    // adopt the current network as the baseline
+    this.last = this.fp();                   // adopt the current network as the baseline
     this.fire(reason || 'poke');
   }
 
