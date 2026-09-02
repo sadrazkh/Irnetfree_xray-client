@@ -622,7 +622,7 @@ function createService(opts = {}) {
       return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: tun.isAvailable() };
     },
 
-    'xray:version': async () => { try { return { ok: true, version: await xray.version() }; } catch (e) { return { ok: false, error: e.message }; } },
+    'xray:version': async (engineId) => { try { return { ok: true, version: await xray.version(engineId || 'xray') }; } catch (e) { return { ok: false, error: e.message }; } },
     'xray:locate': () => ({ ok: false, error: 'not available in server mode' }),
     'app:checkUpdate': () => ({ ok: false, current: appVersion, error: 'update check is desktop-only' }),
 

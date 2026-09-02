@@ -1056,10 +1056,10 @@ function registerIpc() {
     return { ok: true, path: res.filePaths[0], ready: xray.binExists() };
   });
 
-  // xray-core version string (e.g. "1.8.24")
-  ipcMain.handle('xray:version', async () => {
-    try { return { ok: true, version: await xray.version() }; }
-    catch (e) { return { ok: false, error: e.message }; }
+  // core version string for an engine (e.g. "26.9.1")
+  ipcMain.handle('xray:version', async (e, engineId) => {
+    try { return { ok: true, version: await xray.version(engineId || 'xray') }; }
+    catch (err) { return { ok: false, error: err.message }; }
   });
 
   // App version + GitHub "is there a newer release?" check.
