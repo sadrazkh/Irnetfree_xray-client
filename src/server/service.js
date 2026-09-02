@@ -396,7 +396,19 @@ function createService(opts = {}) {
     // teardown+reconnect in the same flag
     const prevReloading = xrayReloading;
     xrayReloading = true;
-    try { await xray.start(config, runEngine); } finally { xrayReloading = prevReloading; }
+    try {
+      await xray.start(config, runEngine);
+    } catch (e) {
+      // start() watches for 1.2 s to catch a config that crashes the core on
+      // startup. A disconnect landing inside that grace KILLS the process, so
+      // the watcher reports "xray exited on startup" — a failure the operator
+      // caused on purpose, dressed as a config error. Propagating it surfaces an
+      // error to the client for something it asked for itself, and makes
+      // runRecovery() log a retry for a tunnel nobody wants. Abandonment, not an
+      // error: answer like every other gate below.
+      if (stale()) return abandoned;
+      throw e;
+    } finally { xrayReloading = prevReloading; }
     // The critical one. doDisconnect() has already stopped the core this just
     // started, so writing activeServerId back here would resurrect the very
     // intent that was cancelled — and every side effect below would follow it.
@@ -469,6 +481,15 @@ function createService(opts = {}) {
     const serverId = store.get('activeServerId', null);
     if (!serverId || !xray || !xray.running) return { ok: false, error: 'not connected' };
 
+    // The teardown below is several awaits long and doConnect()'s own token
+    // cannot cover it — that token is taken AFTER the teardown, so it would be
+    // the newest generation and see nothing. A `disconnect` RPC landing in this
+    // window (it is accepted at any time) bumps connGen, clears activeServerId
+    // and emits 'disconnected', and the rebuild would then quietly write the
+    // serverId captured above back, bring TUN up and report connected: the
+    // operator's disconnect undone.
+    const gen = connGen;
+
     send('status', { state: 'connecting', serverId });
 
     const prevReloading = xrayReloading;
@@ -482,6 +503,11 @@ function createService(opts = {}) {
     } finally {
       xrayReloading = prevReloading;
     }
+
+    // A disconnect (or a newer connect) overtook the teardown. Everything this
+    // function would rebuild belongs to an intent that no longer exists, so stop
+    // here — before doConnect() takes a token that could not detect it.
+    if (gen !== connGen) return { ok: false, stale: true };
 
     let r;
     try {
@@ -563,16 +589,13 @@ function createService(opts = {}) {
     try {
       await runRecovery(reason, attempt);
     } finally {
-      if (gen === recoverGen) {
-        recovering = false;
-        // The tunnel now standing was built for the network as it is at THIS
-        // moment, so nothing seen during the teardown (our own TUN adapter going
-        // away, the old adapter's addresses) is news. Without this, a
-        // half-observed change from the teardown window settles into a trigger
-        // for a rebuild that has already happened. A trigger the watcher
-        // genuinely queued is left alone.
-        if (netWatcher) netWatcher.rebaseline();
-      }
+      // Release the lock and nothing else. The watcher's own baseline is not
+      // ours to move: its ignoreInterface predicate already keeps the
+      // fingerprint stable across the rebuild, so there is nothing half-seen
+      // left to forgive — while a GENUINE change landing in the tail of this
+      // recovery is still only pending, and adopting it here would leave the
+      // tunnel built for a gateway that is gone with nothing left to notice.
+      if (gen === recoverGen) recovering = false;
     }
     // The lock was reset under us (a disconnect): whatever comes next is not ours
     // to start, and the activeServerId guard would refuse it anyway.
