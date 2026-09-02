@@ -143,7 +143,7 @@ function createService(opts = {}) {
   });
 
   const stats = new StatsPoller({
-    binPath: xray.resolveBin(),
+    binPath: xray.resolveEngine().bin,
     apiPort: getSettings().apiPort,
     onStats: (s) => send('stats', s)
   });
@@ -350,7 +350,7 @@ function createService(opts = {}) {
     let lan = null;
     if (settings.allowLan) lan = { ip: lanIp(), socksPort: settings.socksPort, httpPort: settings.httpPort };
 
-    stats.setBin(xray.resolveBin());
+    stats.setBin(xray.resolveEngine().bin);
     stats.apiPort = settings.apiPort;
     stats.start(1000);
 
@@ -408,7 +408,7 @@ function createService(opts = {}) {
     const prevReloading = xrayReloading;
     xrayReloading = true;
     try { await xray.start(config, engine); } finally { xrayReloading = prevReloading; }
-    stats.setBin(xray.resolveBin());
+    stats.setBin(xray.resolveEngine().bin);
     send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
   }
 
@@ -588,16 +588,16 @@ function createService(opts = {}) {
     'assets:download': async (component) => {
       try {
         const res = await downloader.download(component);
-        if (component === 'xray') { xray.binPath = null; xray._version = null; stats.setBin(xray.resolveBin()); }
+        if (component === 'xray' || component === 'xray-pattn') { xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.resolveEngine().bin); }
         return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: tun.isAvailable(), xrayReady: xray.binExists() };
       } catch (err) { send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' }); return { ok: false, error: err.message, assets: assetStatus() }; }
     },
     'assets:remove': async () => {
       if (xray.running || tun.active) return { ok: false, error: 'disconnect first', assets: assetStatus() };
-      const names = ['xray', 'xray.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
+      const names = ['xray', 'xray.exe', 'xray-pattn', 'xray-pattn.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
       const removed = [];
       for (const n of names) { const p = path.join(userBinDir, n); try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); removed.push(n); } } catch {} }
-      xray.binPath = store.get('xrayPath', null); xray._version = null; stats.setBin(xray.resolveBin());
+      xray.binPath = store.get('xrayPath', null); xray.forgetVersions(); stats.setBin(xray.resolveEngine().bin);
       return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: tun.isAvailable() };
     },
 

@@ -501,7 +501,7 @@ async function doConnect(serverId, opts = {}) {
   }
 
   // Start live traffic stats
-  stats.setBin(xray.resolveBin());
+  stats.setBin(xray.resolveEngine().bin);
   stats.apiPort = settings.apiPort;
   stats.start(1000);
 
@@ -610,7 +610,7 @@ async function rebuildActiveConfig() {
   // NOTE: appliedSettings is deliberately left alone. This path rebuilds only the
   // xray config; the connect-time side effects (system proxy, TUN, LAN firewall)
   // are untouched, so a pending change to those is still genuinely pending.
-  stats.setBin(xray.resolveBin());
+  stats.setBin(xray.resolveEngine().bin);
   send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
 }
 
@@ -1016,10 +1016,10 @@ function registerIpc() {
     try {
       const res = await downloader.download(component);
       // refresh stats binary + xray path in case xray was (re)installed
-      if (component === 'xray') {
+      if (component === 'xray' || component === 'xray-pattn') {
         xray.binPath = null;
-        xray._version = null;
-        stats.setBin(xray.resolveBin());
+        xray.forgetVersions();
+        stats.setBin(xray.resolveEngine().bin);
       }
       return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: tun.isAvailable(), xrayReady: xray.binExists() };
     } catch (err) {
@@ -1095,7 +1095,7 @@ function registerIpc() {
       return { ok: false, error: 'disconnect first', assets: assetStatus() };
     }
     const dir = userBin();
-    const names = ['xray', 'xray.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
+    const names = ['xray', 'xray.exe', 'xray-pattn', 'xray-pattn.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
     const removed = [];
     for (const n of names) {
       const p = path.join(dir, n);
@@ -1103,8 +1103,8 @@ function registerIpc() {
     }
     // re-resolve xray (falls back to a user-located path or bundled bin if any)
     xray.binPath = store.get('xrayPath', null);
-    xray._version = null;
-    stats.setBin(xray.resolveBin());
+    xray.forgetVersions();
+    stats.setBin(xray.resolveEngine().bin);
     send('log', { line: 'Removed downloaded files: ' + (removed.join(', ') || '(none)'), level: 'info' });
     return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: tun.isAvailable() };
   });
@@ -1202,7 +1202,7 @@ app.whenReady().then(() => {
   });
 
   stats = new StatsPoller({
-    binPath: xray.resolveBin(),
+    binPath: xray.resolveEngine().bin,
     apiPort: getSettings().apiPort,
     onStats: (s) => send('stats', s)
   });
