@@ -1606,7 +1606,6 @@ function readServerFields(s) {
     allowInsecure: false, cred: '', method: '',
     fragment: ob._fragment || '',
     noise: ob._noise || '',
-    fakeSni: ob._fakesni || '',
     cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
     finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
     engine: s.engine || 'xray'
@@ -1744,7 +1743,6 @@ function openEdit(id) {
   $('#edSid').value = f.sid || '';
   $('#edFragment').value = f.fragment || '';
   setNoiseFields(f.noise || '');
-  if ($('#edFakeSni')) $('#edFakeSni').value = f.fakeSni || '';
   if ($('#edCipherSuites')) $('#edCipherSuites').value = f.cipherSuites || '';
   if ($('#edFinalMask')) $('#edFinalMask').value = f.finalMask || '';
   if ($('#edEngine')) $('#edEngine').value = f.engine || 'xray';
@@ -1810,7 +1808,7 @@ function updateSpoofLabels() {
   const net = $('#edNetwork').value || 'tcp';
   const on = isStd && (sec === 'tls' || sec === 'reality');
   show('#edSpoofHead', on); show('#edTlsRow', on);
-  show('#edHideSniRow', on); show('#edFakeSniWrap', on);
+  show('#edHideSniRow', on);
   const hintEl = $('#edSpoofHint'); if (hintEl) hintEl.hidden = !on;
   if (!on) return;
 
@@ -1826,11 +1824,9 @@ function updateSpoofLabels() {
   $('#edSpoofHint').textContent = t(hint);
   const hostWrap = $('#edHostWrap'); if (hostWrap) hostWrap.style.display = showHost ? '' : 'none';
 
-  // bypass controls (all TLS/reality): Hide-SNI toggle reflects the fragment
-  // state; the fake-SNI decoy is the experimental patched-core path.
+  // bypass controls (all TLS/reality): the Hide-SNI toggle reflects the
+  // fragment state.
   $('#edHideSniLabel').textContent = t('spoof.hideSni');
-  $('#edFakeSniLabel').textContent = t('spoof.fakeSni');
-  $('#edFakeSniHint').textContent = t('spoof.fakeSniHint');
   $('#edHideSni').checked = !!($('#edFragment').value || '').trim();
 }
 
@@ -1867,7 +1863,6 @@ $('#editSave').onclick = async () => {
     port: $('#edPort').value,
     fragment: $('#edFragment').value.trim(),  // '' clears it
     noise: readNoiseField(),                  // '' clears it
-    fakeSni: $('#edFakeSni') ? $('#edFakeSni').value.trim() : '',
     engine: $('#edEngine') ? $('#edEngine').value : 'xray'
   };
   const cred = $('#edCred').value.trim();
@@ -1902,6 +1897,14 @@ $('#editSave').onclick = async () => {
   } else if (proto === 'socks' || proto === 'http') {
     fields.username = $('#edProxyUser').value.trim();
     fields.password = $('#edProxyPass').value.trim();
+  }
+
+  // finalmask goes to the core untouched, so catch bad JSON here rather than
+  // letting xray refuse the whole config at connect time
+  const fmText = $('#edFinalMask') ? $('#edFinalMask').value.trim() : '';
+  if (fmText) {
+    try { JSON.parse(fmText); }
+    catch { return toast(t('edit.finalMaskBad'), 'err'); }
   }
 
   const res = await window.api.updateServer(id, fields);
