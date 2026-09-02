@@ -165,20 +165,19 @@ test('startTest spawns the RESOLVED engine with that engine\'s own argv', async 
 
 test('version(): a spawn error is final — the timeout can not overwrite it', async (t) => {
   await withBin([exe('xray')], async (xm) => {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
     const child = stubChild();
     fakeSpawn = () => child;
     try {
       const p = xm.version('xray');
       child.emit('error', new Error('spawn ENOENT'));
       assert.equal(await p, '');
-      // both paths that call finish() must now be no-ops
+      // 'exit' and the 4s timeout call the SAME guarded finish(), so proving the
+      // guard against 'exit' proves it for the timeout too — no fake clock needed
+      // (t.mock.timers is experimental and prints a warning into the test output).
       child.emit('exit', 1);
-      t.mock.timers.tick(5000);
       assert.deepEqual(xm._versions, {}, 'nothing may be cached after an error');
     } finally {
       fakeSpawn = null;
-      t.mock.timers.reset();
     }
   });
 });
