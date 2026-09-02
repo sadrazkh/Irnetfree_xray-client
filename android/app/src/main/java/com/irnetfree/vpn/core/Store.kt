@@ -20,6 +20,26 @@ class Store(context: Context) {
     var settings: AppSettings = loadSettings()
     var selection: String = prefs.getString("selection", "") ?: ""
 
+    init { migrateServers() }
+
+    /**
+     * One-time upgrade of the saved servers to the shape the current parser and
+     * config builder expect (see LinkParser.migrateStoredServer). Runs once, when
+     * the store is created, and writes back — so it costs one pass over the list
+     * per launch at most, and every later read sees the migrated records.
+     */
+    private fun migrateServers() {
+        if (servers.isEmpty()) return
+        var changed = false
+        for (i in servers.indices) {
+            val m = LinkParser.migrateStoredServer(servers[i])
+            // migrateStoredServer hands back the very same object when there is
+            // nothing to do, so this stays false on every launch after the first.
+            if (m !== servers[i]) { servers[i] = m; changed = true }
+        }
+        if (changed) saveServers()
+    }
+
     fun saveServers() = prefs.edit().putString("servers", JSONArray(servers.map { it.toJson() }).toString()).apply()
     fun saveChains() = prefs.edit().putString("chains", JSONArray(chains.map { it.toJson() }).toString()).apply()
     fun savePool() = prefs.edit().putString("pool", JSONArray(pool.map { it.toJson() }).toString()).apply()
