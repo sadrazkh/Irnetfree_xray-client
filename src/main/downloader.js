@@ -6,6 +6,8 @@
  *
  * Components:
  *   - xray      : XTLS/Xray-core (zip → xray.exe + geoip.dat + geosite.dat)
+ *   - xray-pattn: patterniha/Xray-core fork — same asset names, placed as
+ *                 xray-pattn.exe so it coexists with the official core
  *   - sing-box  : SagerNet/sing-box (zip/tar.gz → sing-box.exe) — alternate core
  *   - geo       : geoip.dat + geosite.dat only (Loyalsoldier rules, direct .dat)
  *   - tun2socks : xjasonlyu/tun2socks (zip → tun2socks.exe)
@@ -20,6 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
+const { engine, engineExe } = require('./engines');
 
 const GEO_BASE = 'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download';
 const WINTUN_URL = 'https://www.wintun.net/builds/wintun-0.14.1.zip';
@@ -111,6 +114,13 @@ class Downloader {
 
   log(msg, level = 'info') { this.onLog('[download] ' + msg, level); }
 
+  /** GitHub "latest release" endpoint for an Xray-format engine. */
+  static releaseApiUrl(engineId) {
+    const e = engine(engineId);
+    if (e.format !== 'xray' || e.id !== engineId) throw new Error('not an Xray-format engine: ' + engineId);
+    return `https://api.github.com/repos/${e.repo}/releases/latest`;
+  }
+
   xrayAssetName() {
     const arch = os.arch();
     if (os.platform() === 'win32') return arch === 'arm64' ? 'Xray-windows-arm64-v8a.zip' : 'Xray-windows-64.zip';
@@ -128,7 +138,8 @@ class Downloader {
   /** Download + integrate one component. Returns { ok, files } or throws. */
   async download(component) {
     switch (component) {
-      case 'xray': return this.getXray();
+      case 'xray': return this.getXray('xray');
+      case 'xray-pattn': return this.getXray('xray-pattn');
       case 'sing-box': return this.getSingbox();
       case 'geo': return this.getGeo();
       case 'tun2socks': return this.getTun2socks();
@@ -166,29 +177,35 @@ class Downloader {
     return { ok: true, files: [placed] };
   }
 
-  async getXray() {
-    this.log('Fetching latest Xray-core release info…');
-    const rel = await getJSON('https://api.github.com/repos/XTLS/Xray-core/releases/latest');
+  /**
+   * Download an Xray-format core. Both the official core and the patterniha fork
+   * publish the same asset names; the binary is placed under the engine's own exe
+   * name so they coexist. Geo files inside the archive are placed too.
+   */
+  async getXray(engineId = 'xray') {
+    const eng = engine(engineId);
+    this.log(`Fetching latest ${eng.label} release info…`);
+    const rel = await getJSON(Downloader.releaseApiUrl(engineId));
     const want = this.xrayAssetName();
     const asset = (rel.assets || []).find(a => a.name === want);
     if (!asset) throw new Error('asset not found: ' + want);
-    const work = tmpDir('xray');
+    const work = tmpDir(engineId);
     const zip = path.join(work, want);
-    this.log(`Downloading ${want} (${rel.tag_name})…`);
-    await downloadFile(asset.browser_download_url, zip, (p) => this.onProgress('xray', p));
-    this.log('Extracting xray…');
+    this.log(`Downloading ${want} (${eng.label} ${rel.tag_name})…`);
+    await downloadFile(asset.browser_download_url, zip, (p) => this.onProgress(engineId, p));
+    this.log(`Extracting ${eng.label}…`);
     unzip(zip, work);
-    const exeName = os.platform() === 'win32' ? 'xray.exe' : 'xray';
-    const exe = findFile(work, exeName);
+    const inArchive = os.platform() === 'win32' ? 'xray.exe' : 'xray';   // upstream's name inside the zip
+    const exe = findFile(work, inArchive);
     if (!exe) throw new Error('xray binary not found in archive');
     const out = [];
-    out.push(this.place(exe, exeName, true));
+    out.push(this.place(exe, engineExe(engineId), true));
     for (const dat of ['geoip.dat', 'geosite.dat']) {
       const f = findFile(work, dat);
       if (f) out.push(this.place(f, dat));
     }
     this.cleanup(work);
-    this.log('✓ Xray integrated: ' + out.join(', '));
+    this.log(`✓ ${eng.label} integrated: ` + out.join(', '));
     return { ok: true, files: out };
   }
 
