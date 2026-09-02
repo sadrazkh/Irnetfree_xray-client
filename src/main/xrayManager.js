@@ -78,8 +78,13 @@ class XrayManager {
    * binary is installed; otherwise any other Xray-format core (they run the same
    * config — logged, so the user sees which one actually ran); otherwise the
    * default id with bin:null. Callers use the argv/format of the core returned.
+   *
+   * `opts.quiet` skips the fallback warning. Internal lookups that only want
+   * *some* core's path (e.g. the stats poller's binary, re-resolved on every
+   * connect / config rebuild / asset change) pass it, so a user who installed
+   * only the fork isn't told over and over that the official core is missing.
    */
-  resolveEngine(engineId) {
+  resolveEngine(engineId, opts = {}) {
     const wantId = engineId || DEFAULT_ENGINE;
     const wantBin = this.resolveBin(wantId);
     if (wantBin) return { id: wantId, bin: wantBin };
@@ -87,11 +92,21 @@ class XrayManager {
       if (id === wantId) continue;
       const bin = this.resolveBin(id);
       if (bin) {
-        this.onLog(`Engine '${wantId}' binary (${engineExe(wantId)}) not found in bin/ — using ${id}`, 'warn');
+        if (!opts.quiet) {
+          this.onLog(`Engine '${wantId}' binary (${engineExe(wantId)}) not found in bin/ — using ${id}`, 'warn');
+        }
         return { id, bin };
       }
     }
     return { id: DEFAULT_ENGINE, bin: null };
+  }
+
+  /**
+   * Path of *any* installed Xray-format core, without logging a fallback —
+   * for internal consumers (the stats poller) that just need an executable.
+   */
+  anyBin() {
+    return this.resolveEngine(undefined, { quiet: true }).bin;
   }
 
   /** Directory that holds geoip.dat / geosite.dat (for XRAY_LOCATION_ASSET). */
@@ -141,7 +156,9 @@ class XrayManager {
         this._versions[engineId] = m ? m[1] : (out.split(/\r?\n/)[0] || '').trim();
         resolve(this._versions[engineId]);
       };
-      proc.on('error', () => resolve(''));
+      // mark done so the 4s timeout below can't run finish() after this and
+      // cache a version parsed from output the failed spawn never produced
+      proc.on('error', () => { done = true; resolve(''); });
       proc.on('exit', finish);
       setTimeout(() => { try { proc.kill(); } catch {} finish(); }, 4000);
     });
@@ -304,12 +321,12 @@ class XrayManager {
    * Returns the temp socks port (caller must measure & then call killTest).
    */
   async startTest(testConfig, engineId) {
-    const { bin } = this.resolveEngine(engineId);
+    const { id, bin } = this.resolveEngine(engineId);
     if (!bin) throw new Error('xray binary not found');
     const cfgPath = path.join(this.dataDir, `test-${Date.now()}.json`);
     fs.writeFileSync(cfgPath, JSON.stringify(testConfig, null, 2), 'utf8');
 
-    const proc = spawn(bin, ['run', '-c', cfgPath], { cwd: path.dirname(bin), windowsHide: true, env: this.spawnEnv() });
+    const proc = spawn(bin, engineRunArgs(id, cfgPath), { cwd: path.dirname(bin), windowsHide: true, env: this.spawnEnv() });
     // give it a moment to bind
     await delay(500);
     return {
