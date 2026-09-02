@@ -723,10 +723,16 @@ document.addEventListener('click', (e) => {
 $('#btnAddOpen').onclick = () => { $('#importBox').hidden = !$('#importBox').hidden; };
 $('#btnImportCancel').onclick = () => { $('#importBox').hidden = true; $('#importText').value = ''; };
 
+// v2rayN-style HTTP proxy share link (`http://[b64creds@]host:port#name`): no
+// path, no query. Everything else that starts with http(s):// is a subscription.
+// Keep in sync with HTTP_PROXY_LINK in src/main/parser.js.
+const HTTP_PROXY_LINK = /^http:\/\/(?:[^/?#\s@]+@)?[^/?#\s@]+:\d{1,5}(?:#\S*)?$/i;
+
 /**
  * Smart import: figures out what was pasted and routes it correctly.
  *  - http(s) lines  -> added & fetched as subscriptions (auto-update capable)
  *  - vless/vmess/…  -> imported as servers
+ *  - http proxy link -> imported as a server (see HTTP_PROXY_LINK above)
  *  - base64 blob    -> decoded & imported as servers (handled by parseMany)
  * Mixed input works too (URLs become subs, the rest become servers).
  */
@@ -734,8 +740,9 @@ async function smartImport(text) {
   text = String(text || '').trim();
   if (!text) return;
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const urlLines = lines.filter(l => /^https?:\/\//i.test(l));
-  const configText = lines.filter(l => !/^https?:\/\//i.test(l)).join('\n');
+  const isSubUrl = (l) => /^https?:\/\//i.test(l) && !HTTP_PROXY_LINK.test(l);
+  const urlLines = lines.filter(isSubUrl);
+  const configText = lines.filter(l => !isSubUrl(l)).join('\n');
 
   let subCount = 0, subAdded = 0, srvAdded = 0, errCount = 0;
 
