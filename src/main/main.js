@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -931,6 +931,8 @@ function registerIpc() {
     assets: assetStatus(),
     platform: process.platform,
     version: app.getVersion(),
+    // what the desktop asks for — the renderer needs it for theme: 'system'
+    systemDark: nativeTheme.shouldUseDarkColors,
     // survives a renderer reload: the banner must not disappear on refresh
     pendingReconnect: pendingKeys(),
     // set when the saved data was unreadable at startup (the window did not
@@ -1409,6 +1411,9 @@ app.whenReady().then(() => {
   registerIpc();
   createWindow();
   createTray();
+
+  // the OS flipped light/dark — the renderer only reacts when theme is 'system'
+  nativeTheme.on('updated', () => send('system-theme', { dark: nativeTheme.shouldUseDarkColors }));
 
   // waking from sleep is the other way the network changes under us
   try {

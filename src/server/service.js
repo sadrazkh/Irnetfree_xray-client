@@ -666,6 +666,9 @@ function createService(opts = {}) {
       assets: assetStatus(),
       platform: process.platform,
       version: appVersion,
+      // a headless server has no desktop theme, so theme: 'system' behaves as
+      // dark here unless the user picks light explicitly
+      systemDark: true,
       pendingReconnect: pendingKeys(),
       storeError: store.loadError
     }),
