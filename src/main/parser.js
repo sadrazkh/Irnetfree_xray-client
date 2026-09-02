@@ -102,7 +102,8 @@ function buildStreamSettings(q) {
     };
     if (q.alpn) stream.tlsSettings.alpn = q.alpn.split(',');
     // patterniha-style custom TLS: `unsafe` fingerprint lets you pin cipherSuites.
-    if (q.cipherSuites) stream.tlsSettings.cipherSuites = String(q.cipherSuites).trim();
+    const cs = q.cs || q.cipherSuites;
+    if (cs && String(cs).trim()) stream.tlsSettings.cipherSuites = String(cs).trim();
   } else if (security === 'reality') {
     stream.realitySettings = {
       serverName: q.sni || '',
@@ -113,47 +114,27 @@ function buildStreamSettings(q) {
     };
   }
 
-  // finalMask (ClientHello fragmentation / masking) — a raw JSON object the user
-  // pastes; normalized so both the plural (lengths/delays arrays) and singular
-  // forms work on the bundled core.
-  if (q.finalMask) {
-    const fm = normalizeFinalMask(q.finalMask);
+  // finalMask (transport-level masking: fragment, noise, header-custom, …).
+  // Stored VERBATIM: the core takes the plural `lengths`/`delays` arrays, and an
+  // earlier version of this code rewrote them into the singular form, which the
+  // current core rejects. `fm` is the standard share-link name; `finalMask` is
+  // the long form we used to emit.
+  const fmRaw = q.fm || q.finalMask;
+  if (fmRaw) {
+    const fm = parseFinalMask(fmRaw);
     if (fm) stream.finalmask = fm;
   }
 
   return stream;
 }
 
-/**
- * Parse + normalize a finalMask JSON. The patterniha UI uses plural arrays
- * (`lengths`, `delays`) where the n-th element is the n-th fragment's size; the
- * bundled xray core wants the singular `length`/`delay` range, so we collapse
- * the array to its min-max range (still splits the ClientHello / hides the SNI).
- * Returns the normalized object, or null on invalid JSON.
- */
-function normalizeFinalMask(raw) {
-  let obj;
-  try { obj = typeof raw === 'string' ? JSON.parse(raw) : raw; }
-  catch { return null; }
-  if (!obj || typeof obj !== 'object') return null;
-  const rangeOf = (arr) => {
-    let mn = Infinity, mx = -Infinity;
-    for (const v of arr) { const p = String(v).split('-').map(n => parseInt(n, 10)); if (Number.isFinite(p[0])) mn = Math.min(mn, p[0]); mx = Math.max(mx, p[p.length - 1]); }
-    if (!Number.isFinite(mn)) return null;
-    mn = Math.max(1, mn); mx = Math.max(mn, mx);
-    return mn === mx ? String(mn) : `${mn}-${mx}`;
-  };
-  const fixMasks = (a) => Array.isArray(a) ? a.map(m => {
-    const s = m && m.settings;
-    if (s) {
-      if (Array.isArray(s.lengths)) { const r = rangeOf(s.lengths); if (r) s.length = r; delete s.lengths; }
-      if (Array.isArray(s.delays)) { s.delay = String(s.delays[0] != null ? s.delays[0] : '0'); delete s.delays; }
-    }
-    return m;
-  }) : a;
-  if (obj.tcp) obj.tcp = fixMasks(obj.tcp);
-  if (obj.udp) obj.udp = fixMasks(obj.udp);
-  return obj;
+/** Parse a finalMask value (JSON string or object). Returns null when unusable. */
+function parseFinalMask(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  try {
+    const o = JSON.parse(String(raw));
+    return (o && typeof o === 'object') ? o : null;
+  } catch { return null; }
 }
 
 /* ----------------------------- VLESS ----------------------------- */
@@ -196,7 +177,6 @@ function parseVless(link) {
   if (q.fragment) outbound._fragment = q.fragment;
   // Anti-DPI noise / fake ClientHello injection (&noise=type:packet:delay;...)
   if (q.noise) outbound._noise = q.noise;
-  if (q.fakeSni) outbound._fakesni = q.fakeSni;
 
   const srv = mkServer(name || address, 'vless', address, port, link, outbound);
   if (q.engine && q.engine !== 'xray') srv.engine = q.engine;
@@ -226,8 +206,8 @@ function parseVmess(link) {
     alpn: v.alpn || '',
     serviceName: v.path || '',
     headerType: v.type || 'none',
-    cipherSuites: v.cipherSuites || '',
-    finalMask: v.finalMask || v.finalmask || ''
+    cipherSuites: v.cs || v.cipherSuites || '',
+    finalMask: v.fm || v.finalMask || v.finalmask || ''
   };
   const stream = buildStreamSettings(q);
 
@@ -249,7 +229,6 @@ function parseVmess(link) {
 
   if (v.fragment) outbound._fragment = String(v.fragment);
   if (v.noise) outbound._noise = String(v.noise);
-  if (v.fakesni) outbound._fakesni = String(v.fakesni);
 
   const srv = mkServer(v.ps || address, 'vmess', address, port, link, outbound);
   if (v.engine && v.engine !== 'xray') srv.engine = String(v.engine);
@@ -286,7 +265,6 @@ function parseTrojan(link) {
 
   if (q.fragment) outbound._fragment = q.fragment;
   if (q.noise) outbound._noise = q.noise;
-  if (q.fakeSni) outbound._fakesni = q.fakeSni;
 
   const srv = mkServer(name || address, 'trojan', address, port, link, outbound);
   if (q.engine && q.engine !== 'xray') srv.engine = q.engine;
@@ -690,11 +668,6 @@ function applyServerEdits(server, f) {
     const nz = String(f.noise).trim();
     if (nz) ob._noise = nz; else delete ob._noise;
   }
-  // Fake/decoy SNI domain injected as a fake ClientHello. Empty clears it.
-  if (f.fakeSni != null) {
-    const fs = String(f.fakeSni).trim();
-    if (fs) ob._fakesni = fs; else delete ob._fakesni;
-  }
   // Per-config core selection. 'xray' (default) or empty clears it.
   if (f.engine != null) {
     const eng = String(f.engine).trim();
@@ -852,9 +825,9 @@ function streamToQuery(st) {
     q.path = (rq.path && rq.path[0]) || ''; q.host = (rq.headers && rq.headers.Host && rq.headers.Host[0]) || '';
   }
   const tls = st.tlsSettings, rl = st.realitySettings;
-  if (tls) { q.sni = tls.serverName || ''; q.fp = tls.fingerprint || ''; if (tls.allowInsecure) q.allowInsecure = '1'; if (tls.alpn) q.alpn = Array.isArray(tls.alpn) ? tls.alpn.join(',') : tls.alpn; if (tls.cipherSuites) q.cipherSuites = tls.cipherSuites; }
+  if (tls) { q.sni = tls.serverName || ''; q.fp = tls.fingerprint || ''; if (tls.allowInsecure) q.allowInsecure = '1'; if (tls.alpn) q.alpn = Array.isArray(tls.alpn) ? tls.alpn.join(',') : tls.alpn; if (tls.cipherSuites) q.cs = tls.cipherSuites; }
   if (rl) { q.sni = rl.serverName || ''; q.fp = rl.fingerprint || ''; q.pbk = rl.publicKey || ''; q.sid = rl.shortId || ''; if (rl.spiderX) q.spx = rl.spiderX; }
-  if (st.finalmask) q.finalMask = JSON.stringify(st.finalmask);
+  if (st.finalmask) q.fm = JSON.stringify(st.finalmask);
   return q;
 }
 
@@ -868,7 +841,6 @@ function buildShareLink(server) {
   const extras = {};
   if (ob._fragment) extras.fragment = ob._fragment;
   if (ob._noise) extras.noise = ob._noise;
-  if (ob._fakesni) extras.fakeSni = ob._fakesni;
   if (server.engine && server.engine !== 'xray') extras.engine = server.engine;
 
   if (proto === 'vless') {
@@ -886,11 +858,10 @@ function buildShareLink(server) {
     const u = ob.settings.vnext[0].users[0]; const p = streamToQuery(ob.streamSettings);
     const v = { v: '2', ps: server.name || '', add: server.address, port: String(server.port), id: u.id, aid: String(u.alterId || 0), scy: u.security || 'auto',
       net: p.type || 'tcp', type: p.headerType || 'none', host: p.host || '', path: p.path || p.serviceName || '', tls: p.security === 'tls' ? 'tls' : '', sni: p.sni || '', fp: p.fp || '', alpn: p.alpn || '' };
-    if (p.cipherSuites) v.cipherSuites = p.cipherSuites;
-    if (p.finalMask) v.finalMask = p.finalMask;
+    if (p.cs) v.cs = p.cs;
+    if (p.fm) v.fm = p.fm;
     if (extras.fragment) v.fragment = extras.fragment;
     if (extras.noise) v.noise = extras.noise;
-    if (extras.fakeSni) v.fakesni = extras.fakeSni;
     if (extras.engine) v.engine = extras.engine;
     return 'vmess://' + Buffer.from(JSON.stringify(v)).toString('base64');
   }

@@ -493,20 +493,6 @@ test('malformed noise entries are dropped', () => {
   ]);
 });
 
-test('fakeSni prepends a real ClientHello record carrying the decoy name', () => {
-  const s = vlessWithMarkers('sv-sni', { _fakesni: 'www.wikipedia.org' });
-  const c = buildConfig(single(s), settings());
-
-  const noises = outboundTagged(c, 'dpi-1').settings.noises;
-  assert.equal(noises[0].type, 'base64');
-
-  const rec = Buffer.from(noises[0].packet, 'base64');
-  assert.deepEqual([...rec.subarray(0, 3)], [0x16, 0x03, 0x01], 'not a TLS handshake record');
-  assert.equal(rec.readUInt16BE(3), rec.length - 5, 'record length header is wrong');
-  assert.equal(rec[5], 0x01, 'not a ClientHello');
-  assert.ok(rec.includes(Buffer.from('www.wikipedia.org')), 'decoy SNI missing from the record');
-});
-
 test('a chained inner hop is not given a second dialer', () => {
   const hop = vlessWithMarkers('sv-hop', { _fragment: 'tlshello,100-200,10-20' });
   const exit = vlessWithMarkers('sv-exit', { _fragment: 'tlshello,100-200,10-20' });
