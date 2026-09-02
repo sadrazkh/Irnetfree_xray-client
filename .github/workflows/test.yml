@@ -1,0 +1,25 @@
+name: Tests
+
+# Unit tests on every push and PR, on all three desktop platforms — the parser,
+# config builder and engine choice must behave identically everywhere.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    name: node --test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # 22+: `node --test "tests/*.test.js"` needs glob support (added in Node 21).
+          node-version: '22'
+      # No `npm ci` on purpose — the tests use only Node core modules.
+      - run: npm test
