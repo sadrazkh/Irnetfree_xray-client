@@ -39,6 +39,30 @@ const TUN_GW = '10.255.0.1';
 // deleting it, so cleanup is clean and the real gateway stays intact.
 const SPLIT_ROUTES = ['0.0.0.0', '128.0.0.0'];
 
+/**
+ * Is this network interface one WE create for TUN mode?
+ *
+ * It lives here, next to the names above, because this file is the only place
+ * that knows them. The network watcher must not count our own adapter as part of
+ * the machine's network: rebuilding the tunnel destroys and recreates it (on
+ * Windows with a fresh GUID, on macOS possibly under a different utun unit), so
+ * every recovery would otherwise look like the network change that triggers the
+ * next one — a single Wi-Fi switch would rebuild forever.
+ *
+ * Deliberately broad on macOS: the kernel picks the utun unit, so we cannot know
+ * in advance which one is ours. The cost is that a change on someone else's utun
+ * (another VPN, iCloud Private Relay) does not trigger a recovery on its own —
+ * far cheaper than an unbreakable rebuild loop, and a genuine change there almost
+ * always moves the physical interface too.
+ */
+function isOwnTunInterface(name) {
+  const n = String(name == null ? '' : name);
+  if (!n) return false;
+  if (n === ADAPTER) return true;         // Windows: the wintun adapter we name
+  if (/^utun\d*$/i.test(n)) return true;  // macOS: MAC_TUN_DEV + the unit the kernel picks
+  return n === 'tun0';                    // Linux: startLinux()'s fixed device
+}
+
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { windowsHide: true }, (err, stdout, stderr) => {
@@ -662,4 +686,4 @@ class TunManager {
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-module.exports = { TunManager };
+module.exports = { TunManager, isOwnTunInterface };

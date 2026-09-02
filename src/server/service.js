@@ -14,7 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink } = require('../main/parser');
+const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { buildConfig, buildTestConfig } = require('../main/configBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
@@ -25,11 +25,12 @@ const { setSystemProxy } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../main/netutils');
 const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
-const { TunManager } = require('../main/tunManager');
+const { TunManager, isOwnTunInterface } = require('../main/tunManager');
 const { StatsPoller } = require('../main/stats');
 const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
+const { NetWatcher } = require('../main/netWatcher');
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -53,6 +54,9 @@ const DEFAULT_SETTINGS = {
   routeDefault: '',
   procRouteWatch: false,
   killSwitch: false,
+  // recover automatically when the machine's network changes (read live, so it
+  // needs no reconnect to take effect)
+  autoReconnectOnNetworkChange: true,
   theme: 'dark',
   defaultEngine: 'xray',
   lang: 'fa'
@@ -87,6 +91,18 @@ function createService(opts = {}) {
   let xrayReloading = false;
   let userDisconnecting = false;
   let procWatcher = null;
+  let netWatcher = null;
+  let recoverTimer = null;
+  let recovering = false;        // a network-change recovery is in flight
+  let recoverQueued = null;      // reason of a trigger that arrived during that recovery
+  let recoverGen = 0;            // bumped by doDisconnect(); an older recovery no longer owns `recovering`
+  const RECOVER_BACKOFF_MS = [2000, 5000, 15000];
+  // Bumped by doDisconnect() and by every doConnect(). doConnect awaits several
+  // times and the operator can hit disconnect in any of those gaps: from that
+  // moment the older call no longer speaks for the service, so it must not emit a
+  // status or start a watcher. Comparing the token captured at entry against this
+  // is how it finds out (see doConnect).
+  let connGen = 0;
   // Settings the LIVE tunnel was built from (null when disconnected) — see
   // ../main/settingsMeta.js.
   let appliedSettings = null;
@@ -108,6 +124,8 @@ function createService(opts = {}) {
       send('store-error', Object.assign({ kind }, info));
     }
   });
+
+  migrateServers();
 
   function binDirs() { return [userBinDir, bundledBinDir]; }
   function assetStatus() {
@@ -158,6 +176,25 @@ function createService(opts = {}) {
 
   /* ----------------------------- settings / data ----------------------------- */
   function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {})); }
+
+  /**
+   * One-time upgrade of the saved servers to the shape the current parser and
+   * config builder expect (see migrateStoredServer). Runs at startup and writes
+   * back, so it costs one pass over the list per launch at most — every later read
+   * of `servers` sees the migrated records without repeating the work.
+   *
+   * Silent on purpose: it has to run before anything reads `servers`, and at that
+   * point createService() has not returned, so no onEvent listener exists yet.
+   */
+  function migrateServers() {
+    const servers = store.get('servers', []);
+    if (!Array.isArray(servers) || !servers.length) return;
+    const migrated = servers.map(migrateStoredServer);
+    // migrateStoredServer returns the very same object when there is nothing to
+    // do, so this is false on every launch after the first.
+    if (!migrated.some((s, i) => s !== servers[i])) return;
+    store.set('servers', migrated);
+  }
 
   function getChains() {
     const chains = store.get('chains', null);
@@ -312,14 +349,32 @@ function createService(opts = {}) {
   }
 
   /* ----------------------------- connect / disconnect ----------------------------- */
+  /**
+   * @returns {Promise<{ ok: boolean, tunError?: string|null, stale?: boolean }>}
+   *   `stale: true` means a disconnect (or a newer connect) overtook this call
+   *   before it finished: nothing was emitted and nothing was started, and the
+   *   caller must not treat it as either a success or a failure worth retrying.
+   */
   async function doConnect(serverId) {
+    // Every await below is a window in which the operator can hit disconnect.
+    // doDisconnect() then stops the core and clears activeServerId, but THIS call
+    // would carry on to start both watchers again and emit 'connected' — leaving
+    // the panel claiming a tunnel that no longer exists, with two leaked watchers
+    // behind it and a recovery retry that the activeServerId guard silently
+    // drops, so nothing ever corrects the display. The token says whose turn it is.
+    const gen = ++connGen;
+    const stale = () => gen !== connGen;
+    const abandoned = { ok: false, stale: true };
+
     const settings = await effectiveSettings();
+    if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
     const { label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
     send('status', { state: 'connecting', serverId });
 
     const check = await xray.validateWithFallback(config, engine);
+    if (stale()) return abandoned;
     if (!check.ok) {
       send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
       // The official core refuses plaintext VLESS/Trojan to public addresses and the
@@ -341,7 +396,23 @@ function createService(opts = {}) {
     // teardown+reconnect in the same flag
     const prevReloading = xrayReloading;
     xrayReloading = true;
-    try { await xray.start(config, runEngine); } finally { xrayReloading = prevReloading; }
+    try {
+      await xray.start(config, runEngine);
+    } catch (e) {
+      // start() watches for 1.2 s to catch a config that crashes the core on
+      // startup. A disconnect landing inside that grace KILLS the process, so
+      // the watcher reports "xray exited on startup" — a failure the operator
+      // caused on purpose, dressed as a config error. Propagating it surfaces an
+      // error to the client for something it asked for itself, and makes
+      // runRecovery() log a retry for a tunnel nobody wants. Abandonment, not an
+      // error: answer like every other gate below.
+      if (stale()) return abandoned;
+      throw e;
+    } finally { xrayReloading = prevReloading; }
+    // The critical one. doDisconnect() has already stopped the core this just
+    // started, so writing activeServerId back here would resurrect the very
+    // intent that was cancelled — and every side effect below would follow it.
+    if (stale()) return abandoned;
     store.set('activeServerId', serverId);
     appliedSettings = snapshotApplied(getSettings());
 
@@ -351,6 +422,7 @@ function createService(opts = {}) {
         send('log', { line: 'System proxy enabled', level: 'info' });
       } catch (e) { send('log', { line: 'System proxy failed: ' + e.message, level: 'error' }); }
     }
+    if (stale()) return abandoned;
 
     let tunError = null;
     if (settings.tunMode) {
@@ -362,6 +434,10 @@ function createService(opts = {}) {
         catch (e) { tunError = e.message; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }
       }
     }
+    // tun.start() is the longest await here (a privileged shell round trip) — the
+    // likeliest place for a disconnect to land. Past this line nothing awaits, so
+    // this is the last gate before the watchers and the 'connected' status.
+    if (stale()) return abandoned;
 
     // headless LAN info: which address forwarded clients point at
     let lan = null;
@@ -372,11 +448,23 @@ function createService(opts = {}) {
     stats.start(1000);
 
     startProcWatcher();
+    // Watch for the machine's network moving under the live tunnel. Every reconnect
+    // comes through here too (a settings apply, or our own recovery), so keep a
+    // watcher that is already running: its baseline is the network the tunnel was
+    // built for, and a change it noticed mid-rebuild is still queued on it —
+    // replacing it here would adopt the NEW network as normal and leave a tunnel
+    // built for the old one with nothing left to notice.
+    if (!netWatcher) startNetWatcher();
     send('status', {
       state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
       tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
     });
-    return true;
+    // `tunError` is the one failure this function does NOT throw for: TUN is a
+    // best-effort upgrade and we stay connected proxy-only without it. Callers
+    // that must know whether the WHOLE system is tunnelled (the network-change
+    // recovery) can only find out from here — the status event above is fire and
+    // forget. The clients ignore this value; they only await the call.
+    return { ok: true, tunError };
   }
 
   /** Reconnect-relevant settings changed since the live tunnel was built. */
@@ -393,6 +481,15 @@ function createService(opts = {}) {
     const serverId = store.get('activeServerId', null);
     if (!serverId || !xray || !xray.running) return { ok: false, error: 'not connected' };
 
+    // The teardown below is several awaits long and doConnect()'s own token
+    // cannot cover it — that token is taken AFTER the teardown, so it would be
+    // the newest generation and see nothing. A `disconnect` RPC landing in this
+    // window (it is accepted at any time) bumps connGen, clears activeServerId
+    // and emits 'disconnected', and the rebuild would then quietly write the
+    // serverId captured above back, bring TUN up and report connected: the
+    // operator's disconnect undone.
+    const gen = connGen;
+
     send('status', { state: 'connecting', serverId });
 
     const prevReloading = xrayReloading;
@@ -407,14 +504,25 @@ function createService(opts = {}) {
       xrayReloading = prevReloading;
     }
 
+    // A disconnect (or a newer connect) overtook the teardown. Everything this
+    // function would rebuild belongs to an intent that no longer exists, so stop
+    // here — before doConnect() takes a token that could not detect it.
+    if (gen !== connGen) return { ok: false, stale: true };
+
+    let r;
     try {
-      await doConnect(serverId);
+      r = await doConnect(serverId);
     } catch (e) {
       appliedSettings = null;
       send('status', { state: 'error', message: e.message });
       return { ok: false, error: e.message };
     }
-    return { ok: true };
+    // A disconnect overtook the connect: it emitted nothing and started nothing,
+    // so neither may we.
+    if (r && r.stale) return { ok: false, stale: true };
+    // Pass doConnect()'s one non-throwing failure through: the tunnel is up but
+    // TUN is not, so this is not a complete reconnect for whoever asked for one.
+    return { ok: true, tunError: (r && r.tunError) || null };
   }
 
   async function rebuildActiveConfig() {
@@ -448,9 +556,179 @@ function createService(opts = {}) {
   }
   function stopProcWatcher() { if (procWatcher) { procWatcher.stop(); procWatcher = null; } }
 
+  /**
+   * The machine's network changed under a live tunnel. xray does not die when that
+   * happens — it just stops passing traffic, and under TUN the bypass routes still
+   * point at the old gateway — so nothing else would notice. Rebuild the connection
+   * from current settings. (Mirrors main.js; the headless build has no kill switch,
+   * so reapplyConnection() here is a plain teardown + rebuild.)
+   *
+   * Only one recovery runs at a time (see `recovering`): a watcher trigger and an
+   * already-scheduled backoff retry would otherwise have two reapplyConnection()
+   * calls tearing down and starting the same core against each other. A trigger
+   * that arrives during a recovery is remembered rather than dropped — the rebuild
+   * in flight was made for the network we have already left, and the watcher has
+   * long since adopted the new one as its baseline, so nothing would fire again.
+   */
+  async function recoverFromNetworkChange(reason, attempt = 0) {
+    // The INTENT to be connected is the saved active server, not xray.running: an
+    // attempt that failed leaves the core stopped, and that is exactly the state
+    // the next retry exists for. doDisconnect() clears the id, so a deliberate
+    // disconnect still ends the retries.
+    if (!store.get('activeServerId', null)) return;
+    if (!getSettings().autoReconnectOnNetworkChange) return;
+    if (recovering) { recoverQueued = reason; return; }
+
+    // `recovering` is a lock with no timeout behind it: tunManager.run() waits on
+    // a privileged shell that can hang. A run that never returns would park every
+    // future trigger for the life of the process, so the lock is stamped with a
+    // generation that doDisconnect() bumps — that is the reset, and it is why the
+    // release below is conditional.
+    const gen = recoverGen;
+    recovering = true;
+    try {
+      await runRecovery(reason, attempt);
+    } finally {
+      // Release the lock and nothing else. The watcher's own baseline is not
+      // ours to move: its ignoreInterface predicate already keeps the
+      // fingerprint stable across the rebuild, so there is nothing half-seen
+      // left to forgive — while a GENUINE change landing in the tail of this
+      // recovery is still only pending, and adopting it here would leave the
+      // tunnel built for a gateway that is gone with nothing left to notice.
+      if (gen === recoverGen) recovering = false;
+    }
+    // The lock was reset under us (a disconnect): whatever comes next is not ours
+    // to start, and the activeServerId guard would refuse it anyway.
+    if (gen !== recoverGen) return;
+
+    // A newer network arrived while we were rebuilding for the old one: start over
+    // for it, from the first backoff step.
+    const queued = recoverQueued;
+    if (queued == null) return;
+    recoverQueued = null;
+    await recoverFromNetworkChange(queued, 0);
+  }
+
+  /** One recovery attempt. Only ever called through recoverFromNetworkChange(). */
+  async function runRecovery(reason, attempt) {
+    const serverId = store.get('activeServerId', null);
+    // Whatever backoff step was waiting belongs to a rebuild this attempt is about
+    // to redo. Leaving it armed would start a second, competing chain.
+    clearTimeout(recoverTimer);
+    recoverTimer = null;
+
+    send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
+    send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
+
+    // Pick the rebuild path by what the core is ACTUALLY doing. Both paths answer
+    // in the same { ok, tunError, error } shape. (No kill switch here, so the
+    // direct path needs none of main.js's hold/release around it.)
+    let res;
+    try {
+      // A previous attempt already stopped the core, so there is nothing to tear
+      // down and reapplyConnection() would refuse — connect straight away.
+      res = (xray && xray.running) ? await reapplyConnection() : await doConnect(serverId);
+    } catch (e) {
+      // doConnect() throws where reapplyConnection() returns { ok: false }.
+      res = { ok: false, error: (e && e.message) || String(e) };
+    }
+
+    // The operator disconnected (or connected somewhere else) while we were
+    // rebuilding. The rebuild abandoned itself without emitting anything; a log
+    // line or a retry here would be about a tunnel nobody asked for any more.
+    if (res && res.stale) return;
+
+    // doConnect() does not throw when TUN was asked for and did not come up: it
+    // reports tunError and carries on proxy-only. Calling that a restored
+    // connection would tell the user the whole system is tunnelled when it is not —
+    // so it counts as a failed attempt and the backoff retries it. But only a TUN
+    // that COULD have worked is worth retrying: with tun2socks/wintun simply not
+    // installed the failure is a configuration problem no rebuild can fix, and
+    // retrying it would spend the whole backoff — four complete teardown+rebuild
+    // cycles — on every single network change. The proxy is up either way, so that
+    // case is accepted here (doConnect() already logged the missing files, and its
+    // 'connected' status carried the tunError to the UI).
+    //
+    // Missing privileges are permanent in exactly the same way: a service running
+    // unprivileged fails with "TUN mode requires root" on every attempt, and no
+    // rebuild can grant it — retrying just costs ~25 s of torn-down proxy on every
+    // network change. isElevated() is the question "could this ever have worked",
+    // so it belongs in the same judgement.
+    const tunRetryable = !!(res && res.tunError) && tun.isAvailable() && tun.isElevated();
+
+    if (res && res.ok && !tunRetryable) {
+      send('log', {
+        line: res.tunError
+          ? 'Connection restored after the network change — proxy only, TUN is unavailable: ' + res.tunError
+          : 'Connection restored after the network change',
+        level: res.tunError ? 'warn' : 'info'
+      });
+      return;
+    }
+    if (res && res.tunError) {
+      send('log', { line: 'Reconnected without the system-wide tunnel: ' + res.tunError, level: 'error' });
+    }
+    const delay = RECOVER_BACKOFF_MS[attempt];
+    if (delay == null) {
+      // "Nothing came back" and "everything came back except TUN" are different
+      // failures: on the second, xray is running and the proxy ports carry traffic,
+      // so painting the UI red would be a lie. `proxyUp` is what tells them apart.
+      const proxyUp = !!(res && res.ok);
+      send('log', {
+        line: proxyUp
+          ? 'Could not bring the system-wide tunnel back after the network change — giving up (the proxy is still up)'
+          : 'Could not reconnect after the network change — giving up',
+        level: 'error'
+      });
+      send('status', { state: 'reconnect-failed', reason, proxyUp, tunError: (res && res.tunError) || null });
+      return;
+    }
+    send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
+    recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt + 1), delay);
+    if (recoverTimer.unref) recoverTimer.unref();
+  }
+
+  function startNetWatcher() {
+    stopNetWatcher();
+    netWatcher = new NetWatcher({
+      read: () => os.networkInterfaces(),
+      // Our own TUN adapter is not part of "the machine's network": a rebuild
+      // destroys and recreates it, so counting it would make every recovery
+      // manufacture the change that triggers the next one.
+      ignoreInterface: isOwnTunInterface,
+      // The watcher cannot report a failure of its own (it only awaits the promise
+      // to know when it may fire again), so the handler logs its own errors —
+      // otherwise a throw in here would vanish without a trace.
+      onChange: (why) => recoverFromNetworkChange(why).catch((e) => {
+        send('log', { line: 'Network recovery failed: ' + ((e && e.message) || e), level: 'error' });
+      })
+    });
+    netWatcher.start();
+  }
+
+  function stopNetWatcher() {
+    clearTimeout(recoverTimer);
+    recoverTimer = null;
+    // A trigger parked behind a recovery in flight has nothing left to recover.
+    // `recovering` itself is deliberately NOT cleared HERE: startNetWatcher()
+    // calls this first, and a recovery's own reconnect can reach it — releasing
+    // the lock there would let a second recovery start alongside the one still
+    // going. doDisconnect() is where the reset belongs, and it does it explicitly.
+    recoverQueued = null;
+    if (netWatcher) { netWatcher.stop(); netWatcher = null; }
+  }
+
   async function doDisconnect() {
     userDisconnecting = true;
+    // Anything already in flight stops speaking for the service from this line
+    // on: a doConnect() past xray.start() must not emit 'connected' or restart
+    // the watchers, and a recovery that hung (a stuck privileged shell) must not
+    // keep its lock and park every future trigger.
+    connGen++;
+    recoverGen++;
+    recovering = false;
     stopProcWatcher();
+    stopNetWatcher();                // nothing live to recover any more
     if (stats) stats.stop();
     try { await tun.stop(); } catch {}
     try { await setSystemProxy(false, {}); } catch {}
@@ -511,6 +789,9 @@ function createService(opts = {}) {
       assets: assetStatus(),
       platform: process.platform,
       version: appVersion,
+      // a headless server has no desktop theme, so theme: 'system' behaves as
+      // dark here unless the user picks light explicitly
+      systemDark: true,
       pendingReconnect: pendingKeys(),
       storeError: store.loadError
     }),
@@ -524,6 +805,12 @@ function createService(opts = {}) {
     'servers:add': (link) => { const server = parseLink(link); const e = store.get('servers', []); e.push(server); store.set('servers', e); return server; },
     'servers:addWireguard': (fields) => { const server = makeWireguardServer(fields || {}); const e = store.get('servers', []); e.push(server); store.set('servers', e); return { server, servers: e }; },
     'servers:addProxy': (fields) => { const server = makeProxyServer(fields || {}); const e = store.get('servers', []); e.push(server); store.set('servers', e); return { server, servers: e }; },
+    // headless: no native dialog; the browser picks the file itself
+    'wg:pickConf': () => ({ ok: false, error: 'not available in server mode' }),
+    'wg:parseConf': (text) => {
+      try { return { ok: true, fields: parseWireguardConf(text) }; }
+      catch (err) { return { ok: false, error: err.message }; }
+    },
     'servers:update': ({ id, fields }) => {
       const servers = store.get('servers', []);
       const idx = servers.findIndex(s => s.id === id);
@@ -634,6 +921,22 @@ function createService(opts = {}) {
     'proc:clearCache': () => { store.set('procIpCache', {}); return { ok: true }; },
 
     'net:lanInfo': () => { const s = getSettings(); return { ip: lanIp(), all: lanCandidates(), socksPort: s.socksPort, httpPort: s.httpPort }; },
+    // Deliberately a no-op — do NOT mirror main.js's netWatcher.poke() here.
+    //
+    // On the desktop the renderer runs on the same machine as the tunnel, so the
+    // browser's 'online' event genuinely means "this machine's network came
+    // back". Headless, the renderer runs in the OPERATOR'S browser and the tunnel
+    // runs on the VPS: the event says the operator's laptop woke up, switched
+    // Wi-Fi or had its lid closed — nothing whatsoever about the server's
+    // network. Poking the watcher would tear the VPS tunnel down and rebuild it
+    // every time the operator opens their laptop.
+    //
+    // The server's own network changes are still caught: netWatcher polls
+    // os.networkInterfaces() on the VPS, which is the only trustworthy source
+    // here. The handler is kept (rather than deleted) so web-api.js can go on
+    // mirroring the preload API one-to-one and the shared renderer needs no
+    // feature detection.
+    'net:online': () => {},
     'killswitch:disarm': () => ({ ok: true }),
     'killswitch:status': () => ({ engaged: false }),
 
@@ -656,6 +959,7 @@ function createService(opts = {}) {
   async function shutdown() {
     if (isQuitting) return; isQuitting = true;
     userDisconnecting = true;
+    try { stopNetWatcher(); } catch {}
     try { if (stats) stats.stop(); } catch {}
     try { if (tun) await tun.stop(); } catch {}
     try { await setSystemProxy(false, {}); } catch {}

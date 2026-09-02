@@ -36,6 +36,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -56,6 +57,7 @@ import com.irnetfree.vpn.IRApp
 import com.irnetfree.vpn.core.*
 import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.vpn.ConnState
+import com.irnetfree.vpn.vpn.GeoAssets
 import com.irnetfree.vpn.vpn.VpnState
 import com.irnetfree.vpn.vpn.XrayTester
 import com.irnetfree.vpn.vpn.XrayVpnService
@@ -618,7 +620,6 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
     }) }
     var noiseCustom by remember { mutableStateOf(if (noisePreset == "custom") f.noise else "") }
     val effectiveNoise = when (noisePreset) { "off" -> ""; "custom" -> noiseCustom.trim(); else -> noisePreset }
-    var fakeSni by remember { mutableStateOf(f.fakeSni) }
     var cipherSuites by remember { mutableStateOf(f.cipherSuites) }
     var finalMask by remember { mutableStateOf(f.finalMask) }
     var engine by remember { mutableStateOf(f.engine) }
@@ -662,8 +663,6 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
                     SwitchRow("🕵 Hide SNI from DPI (fragment / patterniha)", fragment.isNotBlank()) {
                         fragment = if (it) (if (fragment.isBlank()) "tlshello,100-200,10-20" else fragment) else ""
                     }
-                    // Experimental decoy: a fake ClientHello with this domain (needs a compatible core).
-                    Fld("Fake SNI decoy — experimental (empty = off)", fakeSni) { fakeSni = it }
                 }
                 Fld("Path / ServiceName", path) { path = it }
                 DropPick("Fake ClientHello (browser fingerprint / uTLS)", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized", "unsafe" to "unsafe (custom cipherSuites)"), fp) { fp = it }
@@ -673,7 +672,7 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
                 Text("🧩  patterniha — finalMask / cipherSuites", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
                 Fld("cipherSuites (use with fingerprint = unsafe)", cipherSuites) { cipherSuites = it }
                 Fld("finalMask (JSON)", finalMask) { finalMask = it }
-                Text("Address = a clean Cloudflare IP, fingerprint = unsafe, paste cipherSuites + finalMask. Array lengths/delays auto-normalized.", color = MUTED, fontSize = 11.sp)
+                Text("Address = a clean Cloudflare IP, fingerprint = unsafe, paste cipherSuites + finalMask. Paste the JSON exactly; the app does not rewrite it.", color = MUTED, fontSize = 11.sp)
             }
             if (server.protocol == "wireguard") {
                 Fld("Peer Public Key", wgPub) { wgPub = it }; Fld("Address (/32)", wgAddr) { wgAddr = it }; Fld("PSK", wgPsk) { wgPsk = it }
@@ -694,7 +693,7 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
             }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
-                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise, fakeSni, cipherSuites, finalMask, engine, f.spx, f.xmode, f.seed, f.headerType, f.xhttpExtra)
+                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise, cipherSuites, finalMask, engine, f.spx, f.xmode, f.seed, f.headerType, f.xhttpExtra)
                 onSave(ServerEditor.apply(server, nf))
             }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
@@ -816,14 +815,24 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 /* ================================ ROUTING ================================ */
 @Composable
 private fun RoutingScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
+    val ctx = LocalContext.current
     var s by remember { mutableStateOf(store.settings) }
+    // Without geoip.dat/geosite.dat the core drops every geo rule, so the two
+    // bypass modes and Block ads would do exactly nothing. Show that instead.
+    val geo = remember { GeoAssets.available(ctx) }
     fun save(n: AppSettings) { s = n; store.saveSettings(n); bump() }
     Screen("Routing", back, {}) {
         Text("Routing mode", color = TXT, fontWeight = FontWeight.Bold)
-        listOf("global" to "Global (all via proxy)", "bypass-ir" to "Bypass Iran", "bypass-cn" to "Bypass China", "direct" to "Direct").forEach { (v, l) ->
-            Row(Modifier.fillMaxWidth().clickable { save(s.copy(routingMode = v)) }, verticalAlignment = Alignment.CenterVertically) { RadioButton(s.routingMode == v, { save(s.copy(routingMode = v)) }); Text(l, color = TXT) }
+        listOf(Triple("global", "Global (all via proxy)", false), Triple("bypass-ir", "Bypass Iran", true),
+            Triple("bypass-cn", "Bypass China", true), Triple("direct", "Direct", false)).forEach { (v, l, needsGeo) ->
+            val on = geo || !needsGeo
+            Row(Modifier.fillMaxWidth().clickable(enabled = on) { save(s.copy(routingMode = v)) }, verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(s.routingMode == v, { save(s.copy(routingMode = v)) }, enabled = on)
+                Text(if (on) l else "$l — unavailable", color = if (on) TXT else MUTED)
+            }
         }
-        SwitchRow("Block ads", s.blockAds) { save(s.copy(blockAds = it)) }
+        if (!geo) Text("Bypass Iran, Bypass China and Block ads need the routing data files (geoip.dat / geosite.dat), which this build doesn't include — those rules would be dropped and the traffic would go through the proxy anyway.", color = MUTED, fontSize = 12.sp)
+        SwitchRow("Block ads" + (if (geo) "" else " — unavailable"), s.blockAds && geo, enabled = geo) { save(s.copy(blockAds = it)) }
         SwitchRow("Sniffing", s.enableSniffing) { save(s.copy(enableSniffing = it)) }
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
         SwitchRow("Advanced routing", s.advancedRouting) { save(s.copy(advancedRouting = it)) }
@@ -836,7 +845,13 @@ private fun RoutingScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
                             DropPick("Type", listOf("domain" to "Domain", "ip" to "IP", "port" to "Port"), r.type) { nt -> save(s.copy(routeRules = s.routeRules.toMutableList().also { it[i] = r.copy(type = nt) })) }
                             Spacer(Modifier.weight(1f)); IconButton(onClick = { save(s.copy(routeRules = s.routeRules.filterIndexed { x, _ -> x != i })) }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
                         }
-                        OutlinedTextField(r.value, { save(s.copy(routeRules = s.routeRules.toMutableList().also { m -> m[i] = r.copy(value = it) })) }, Modifier.fillMaxWidth(), placeholder = { Text("value (geosite:google / 1.2.3.0/24 / 443)", fontSize = 11.sp) }, singleLine = true, colors = tfColors())
+                        // Saved when editing ends, not per keystroke: save() rebuilds
+                        // the screen, which used to steal focus after every character.
+                        DraftField(r.value, Modifier.fillMaxWidth(), placeholder = { Text("value (geosite:google / 1.2.3.0/24 / 443)", fontSize = 11.sp) }) { nv ->
+                            val m = s.routeRules.toMutableList()
+                            // the rule may have been deleted/moved by the save that rebuilt us
+                            if (i < m.size && m[i] == r) { m[i] = r.copy(value = nv); save(s.copy(routeRules = m)) }
+                        }
                         DropPick("Target", targetOptionsFull(store), r.target) { save(s.copy(routeRules = s.routeRules.toMutableList().also { m -> m[i] = r.copy(target = it) })) }
                     }
                 }
@@ -856,7 +871,12 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     Screen("Settings", back, {}) {
         Text("Ports & DNS", color = TXT, fontWeight = FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { NumFld("SOCKS", s.socksPort, Modifier.weight(1f)) { save(s.copy(socksPort = it)) }; NumFld("HTTP", s.httpPort, Modifier.weight(1f)) { save(s.copy(httpPort = it)) } }
-        OutlinedTextField(s.dns.joinToString(","), { save(s.copy(dns = it.split(",").map { d -> d.trim() }.filter { d -> d.isNotEmpty() })) }, Modifier.fillMaxWidth(), label = { Text("DNS (comma-separated)") }, singleLine = true, colors = tfColors())
+        // Typed freely, parsed only when the user leaves the field: parsing per
+        // keystroke ate the comma (and the focus) after the first server.
+        DraftField(s.dns.joinToString(","), Modifier.fillMaxWidth(), label = { Text("DNS (comma-separated)") }) { raw ->
+            val list = raw.split(",").map { d -> d.trim() }.filter { d -> d.isNotEmpty() }
+            save(s.copy(dns = list.ifEmpty { AppSettings().dns }))   // empty field = keep the defaults
+        }
         DropPick("Log level", listOf("none", "error", "warning", "info", "debug").map { it to it }, s.logLevel) { save(s.copy(logLevel = it)) }
         SwitchRow("IPv6", s.ipv6) { save(s.copy(ipv6 = it)) }
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
@@ -917,8 +937,31 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp), content = content)
     }
 }
-@Composable private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { Text(label, color = TXT, modifier = Modifier.weight(1f)); Switch(checked, onChange) }
+@Composable private fun SwitchRow(label: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { Text(label, color = if (enabled) TXT else MUTED, modifier = Modifier.weight(1f)); Switch(checked, onChange, enabled = enabled) }
+}
+/**
+ * A text field that types into a local draft and only reports it when editing
+ * ends — focus leaves, or the field is removed from the screen.
+ *
+ * Every screen persists through save(), which calls bump(); bump() changes
+ * `rev` and key(rev) rebuilds the whole screen, so committing on each keystroke
+ * tore the field down under the user's finger: focus and the keyboard were lost
+ * after every character, and a half-typed DNS list ("1.1.1.1,") was normalised
+ * back before the second server could be typed.
+ *
+ * `sent` remembers what was last handed over, so a commit that itself causes
+ * the rebuild is not repeated on dispose. The draft starts from `value`, so a
+ * legitimate rebuild (another setting saved) shows the stored text again.
+ */
+@Composable private fun DraftField(value: String, modifier: Modifier = Modifier, label: @Composable (() -> Unit)? = null,
+                                   placeholder: @Composable (() -> Unit)? = null, onCommit: (String) -> Unit) {
+    var text by remember { mutableStateOf(value) }
+    var sent by remember { mutableStateOf(value) }
+    val commit = { if (text != sent) { sent = text; onCommit(text) } }
+    DisposableEffect(Unit) { onDispose { commit() } }
+    OutlinedTextField(text, { text = it }, modifier.onFocusChanged { st -> if (!st.isFocused) commit() },
+        label = label, placeholder = placeholder, singleLine = true, colors = tfColors())
 }
 @Composable private fun Fld(label: String, value: String, onChange: (String) -> Unit) {
     OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 3.dp), label = { Text(label) }, singleLine = true, colors = tfColors())
@@ -938,7 +981,9 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 
 private fun targetOptions(store: Store): List<Pair<String, String>> = buildList { store.servers.forEach { add(it.id to it.name) }; store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") } }
 private fun targetOptionsFull(store: Store): List<Pair<String, String>> = buildList { add("proxy" to "Proxy (first server)"); add("direct" to "Direct"); add("block" to "Block"); addAll(targetOptions(store)) }
-private fun usedPorts(store: Store): Set<Int> { val s = HashSet<Int>(); s.add(store.settings.socksPort); s.add(store.settings.httpPort); store.pool.forEach { if (it.socksPort > 0) s.add(it.socksPort); if (it.httpPort > 0) s.add(it.httpPort) }; return s }
+// apiPort belongs here too: it is the core's own metrics/API listener, and a
+// pool entry handed that port makes the config fail to build.
+private fun usedPorts(store: Store): Set<Int> { val s = HashSet<Int>(); s.add(store.settings.socksPort); s.add(store.settings.httpPort); s.add(store.settings.apiPort); store.pool.forEach { if (it.socksPort > 0) s.add(it.socksPort); if (it.httpPort > 0) s.add(it.httpPort) }; return s }
 
 fun fmtBytes(n: Long): String { var v = n.toDouble(); val u = arrayOf("B", "KB", "MB", "GB", "TB"); var i = 0; while (v >= 1024 && i < u.size - 1) { v /= 1024; i++ }; return (if (i == 0) v.toLong().toString() else String.format("%.1f", v)) + " " + u[i] }
 fun fmtSpeed(n: Long) = fmtBytes(n) + "/s"

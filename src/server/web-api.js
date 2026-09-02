@@ -47,6 +47,8 @@
     addServer: (link) => invoke('servers:add', link),
     addWireguard: (fields) => invoke('servers:addWireguard', fields),
     addProxy: (fields) => invoke('servers:addProxy', fields),
+    pickWireguardConf: () => invoke('wg:pickConf'),
+    parseWireguardConf: (text) => invoke('wg:parseConf', text),
     updateServer: (id, fields) => invoke('servers:update', { id, fields }),
     deleteServer: (id) => invoke('servers:delete', id),
     clearServers: () => invoke('servers:clear'),
@@ -108,6 +110,9 @@
     disarmKillSwitch: () => invoke('killswitch:disarm'),
     killSwitchStatus: () => invoke('killswitch:status'),
 
+    // the OS/browser says an adapter came back — the service re-checks the tunnel
+    netOnline: () => sendOnly('net:online'),
+
     // window controls — no-ops on the server, kept for API parity
     minimize: () => sendOnly('win:minimize'),
     maximize: () => sendOnly('win:maximize'),
@@ -124,6 +129,7 @@
     onSubsUpdated: (cb) => on('subs-updated', cb),
     onAssetProgress: (cb) => on('asset-progress', cb),
     onKillSwitch: (cb) => on('killswitch', cb),
+    onSystemTheme: (cb) => on('system-theme', cb),
     onStoreError: (cb) => on('store-error', cb)
   };
 })();

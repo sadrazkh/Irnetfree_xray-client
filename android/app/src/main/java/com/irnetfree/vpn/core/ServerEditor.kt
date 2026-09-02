@@ -20,7 +20,7 @@ object ServerEditor {
         var proxyUser: String = "", var proxyPass: String = "",
         var wgPub: String = "", var wgAddr: String = "", var wgPsk: String = "",
         var wgMtu: String = "1420", var wgReserved: String = "", var wgAllowed: String = "0.0.0.0/0, ::/0",
-        var fragment: String = "", var noise: String = "", var fakeSni: String = "",
+        var fragment: String = "", var noise: String = "",
         var cipherSuites: String = "", var finalMask: String = "",   // patterniha
         var engine: String = "xray",                // 'xray' (default) | 'sing-box'
         // preserved passthroughs the edit form doesn't expose (so editing anything
@@ -36,7 +36,6 @@ object ServerEditor {
         f.network = st.optString("network", "tcp"); f.security = st.optString("security", "none")
         f.fragment = ob.optString("_fragment", "")
         f.noise = ob.optString("_noise", "")
-        f.fakeSni = ob.optString("_fakesni", "")
         f.engine = s.engine ?: "xray"
 
         when (s.protocol) {
@@ -94,7 +93,6 @@ object ServerEditor {
         f.xhttpExtra?.let { ob.optJSONObject("streamSettings")?.optJSONObject("xhttpSettings")?.put("extra", it) }
         if (f.fragment.isNotBlank()) ob.put("_fragment", f.fragment.trim())
         if (f.noise.isNotBlank()) ob.put("_noise", f.noise.trim())
-        if (f.fakeSni.isNotBlank()) ob.put("_fakesni", f.fakeSni.trim())
         val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" }
         return s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = ob, engine = engine)
     }

@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('api', {
   addServer: (link) => ipcRenderer.invoke('servers:add', link),
   addWireguard: (fields) => ipcRenderer.invoke('servers:addWireguard', fields),
   addProxy: (fields) => ipcRenderer.invoke('servers:addProxy', fields),
+  pickWireguardConf: () => ipcRenderer.invoke('wg:pickConf'),
+  parseWireguardConf: (text) => ipcRenderer.invoke('wg:parseConf', text),
   updateServer: (id, fields) => ipcRenderer.invoke('servers:update', { id, fields }),
   deleteServer: (id) => ipcRenderer.invoke('servers:delete', id),
   clearServers: () => ipcRenderer.invoke('servers:clear'),
@@ -78,6 +80,9 @@ contextBridge.exposeInMainWorld('api', {
   disarmKillSwitch: () => ipcRenderer.invoke('killswitch:disarm'),
   killSwitchStatus: () => ipcRenderer.invoke('killswitch:status'),
 
+  // the OS/browser says an adapter came back — main re-checks the tunnel at once
+  netOnline: () => ipcRenderer.send('net:online'),
+
   // window
   minimize: () => ipcRenderer.send('win:minimize'),
   maximize: () => ipcRenderer.send('win:maximize'),
@@ -94,6 +99,7 @@ contextBridge.exposeInMainWorld('api', {
   onSubsUpdated: (cb) => ipcRenderer.on('subs-updated', (e, d) => cb(d)),
   onAssetProgress: (cb) => ipcRenderer.on('asset-progress', (e, d) => cb(d)),
   onKillSwitch: (cb) => ipcRenderer.on('killswitch', (e, d) => cb(d)),
+  onSystemTheme: (cb) => ipcRenderer.on('system-theme', (e, d) => cb(d)),
   // saved data could not be read, or could not be written to disk
   onStoreError: (cb) => ipcRenderer.on('store-error', (e, d) => cb(d))
 });

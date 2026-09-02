@@ -284,11 +284,19 @@ class XrayVpnService : VpnService() {
             // when its binary is bundled for this device — otherwise use Xray.
             var engine = "xray"
             val single = plan as? ConnectionPlan.Single
+
+            // Geo rules only work when the core can read geoip.dat/geosite.dat.
+            // Ask reality instead of hardcoding a flag, so the day those files
+            // ship the bypass/block-ads rules start working on their own.
+            val geo = GeoAssets.available(ctx)
+            if (!geo && (s.routingMode == "bypass-ir" || s.routingMode == "bypass-cn" || s.blockAds))
+                VpnState.addLog("No geoip.dat/geosite.dat in this build — geo routing rules are skipped.")
+
             val config: String = if (single != null && single.server.engine == "sing-box" && SingboxCore.available(ctx)) {
                 try { engine = "sing-box"; SingboxConfig.build(single.server, s).toString() }
-                catch (e: Throwable) { engine = "xray"; VpnState.addLog("sing-box: ${e.message} — using Xray"); ConfigBuilder.build(plan, s, geoAssets = false).toString() }
+                catch (e: Throwable) { engine = "xray"; VpnState.addLog("sing-box: ${e.message} — using Xray"); ConfigBuilder.build(plan, s, geoAssets = geo).toString() }
             } else {
-                ConfigBuilder.build(plan, s, geoAssets = false).toString()
+                ConfigBuilder.build(plan, s, geoAssets = geo).toString()
             }
 
             val i = Intent(ctx, XrayVpnService::class.java).apply {
@@ -309,4 +317,35 @@ class XrayVpnService : VpnService() {
             ctx.startService(Intent(ctx, XrayVpnService::class.java).setAction(ACTION_DISCONNECT))
         }
     }
+}
+
+/**
+ * The single answer to "can the core resolve geosite:/geoip: rules?".
+ *
+ * Xray needs the routing data files geoip.dat / geosite.dat; this build ships
+ * none (android/scripts/fetch-libs.sh fetches libv2ray, the tun2socks .so and
+ * sing-box only), so every geo rule would be dropped and "Bypass Iran",
+ * "Bypass China" and "Block ads" would silently do nothing. We therefore look
+ * for the files instead of hardcoding a flag: both the config builder and the
+ * Routing screen ask here, so shipping (or later downloading) the files into
+ * the app's files dir or the APK assets turns those options on by itself.
+ *
+ * Downloading the files is deliberately NOT done here — that is a separate
+ * feature; this only reports what is present.
+ */
+object GeoAssets {
+    private const val GEOIP = "geoip.dat"
+    private const val GEOSITE = "geosite.dat"
+
+    /** True only when BOTH data files are actually there and non-empty. */
+    fun available(ctx: Context): Boolean = inFilesDir(ctx) || inApkAssets(ctx)
+
+    private fun inFilesDir(ctx: Context): Boolean = runCatching {
+        File(ctx.filesDir, GEOIP).length() > 0L && File(ctx.filesDir, GEOSITE).length() > 0L
+    }.getOrDefault(false)
+
+    private fun inApkAssets(ctx: Context): Boolean = runCatching {
+        val names = ctx.assets.list("")?.toList() ?: emptyList()
+        names.contains(GEOIP) && names.contains(GEOSITE)
+    }.getOrDefault(false)
 }

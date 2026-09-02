@@ -45,26 +45,35 @@ object ConfigBuilder {
         proxyOuts.forEach { outbounds.put(it) }
         outbounds.put(freedom()).put(blackhole())
 
+        // RULE ORDER IS LOAD-BEARING — xray applies the FIRST rule that matches.
+        // The order below is exactly the one src/main/configBuilder.js builds
+        // (buildRoutingRules() -> pop the catch-all -> append the custom rules ->
+        // re-append the catch-all):
+        //   ad-block, private-IP bypass, the routingMode geo rules, the CUSTOM
+        //   rules, then the catch-all.
+        // Do NOT hoist the custom rules above the geo rules: with
+        // routingMode 'bypass-ir' a custom `domain, mysite.ir, proxy` MUST lose to
+        // `geosite:category-ir -> direct` — that is what the desktop does, and the
+        // two clients have to route the same account the same way.
+        // Pinned by tests/configBuilder.test.js ("custom rules sit before the
+        // catch-all", which asserts a custom rule is the LAST rule before it).
         val rules = JSONArray()
-        rules.put(apiRule())
         if (s.blockAds && geoAssets) rules.put(fieldRule().put("domain", JSONArray().put("geosite:category-ads-all")).put("outboundTag", "block"))
         rules.put(fieldRule().put("ip", JSONArray(PRIVATE_IPS)).put("outboundTag", "direct"))
-        // custom rules come before the mode catch-all
-        addCustomRules(rules, s.customRules, geoAssets)
+        var catchAllTag = "proxy"
         when (s.routingMode) {
             "bypass-ir" -> if (geoAssets) {
                 rules.put(fieldRule().put("domain", JSONArray().put("geosite:category-ir").put("regexp:.*\\.ir$")).put("outboundTag", "direct"))
                 rules.put(fieldRule().put("ip", JSONArray().put("geoip:ir")).put("outboundTag", "direct"))
-                rules.put(fieldRule().put("port", "0-65535").put("outboundTag", "proxy"))
-            } else rules.put(fieldRule().put("port", "0-65535").put("outboundTag", "proxy"))
+            }
             "bypass-cn" -> if (geoAssets) {
                 rules.put(fieldRule().put("domain", JSONArray().put("geosite:cn")).put("outboundTag", "direct"))
                 rules.put(fieldRule().put("ip", JSONArray().put("geoip:cn")).put("outboundTag", "direct"))
-                rules.put(fieldRule().put("port", "0-65535").put("outboundTag", "proxy"))
-            } else rules.put(fieldRule().put("port", "0-65535").put("outboundTag", "proxy"))
-            "direct" -> rules.put(fieldRule().put("port", "0-65535").put("outboundTag", "direct"))
-            else -> rules.put(fieldRule().put("port", "0-65535").put("outboundTag", "proxy"))
+            }
+            "direct" -> { catchAllTag = "direct" }
         }
+        addCustomRules(rules, s.customRules, geoAssets)
+        rules.put(fieldRule().put("port", "0-65535").put("outboundTag", catchAllTag))
         return assemble(s, standardInbounds(s, listen, sniffing), finalizeOutbounds(outbounds), rules)
     }
 
@@ -106,7 +115,6 @@ object ConfigBuilder {
         reg.add(freedom()); reg.add(blackhole())
 
         val rules = JSONArray()
-        rules.put(apiRule())
         if (s.blockAds && geo) rules.put(fieldRule().put("domain", JSONArray().put("geosite:category-ads-all")).put("outboundTag", "block"))
         for (i in 0 until advRules.length()) rules.put(advRules.getJSONObject(i))
         rules.put(fieldRule().put("ip", JSONArray(PRIVATE_IPS)).put("outboundTag", "direct"))
@@ -120,7 +128,11 @@ object ConfigBuilder {
     private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject): JSONObject {
         val reg = Registry(plan.serversById, plan.chainsById)
         val inbounds = JSONArray()
+        // The metrics listener binds apiPort itself, outside the inbound list, so
+        // reserve it up front: a pool entry must never take it (xray refuses to
+        // start on a duplicate bind). Mirrors buildPoolConfig() in configBuilder.js.
         val used = HashSet<Int>()
+        used.add(s.apiPort)
         val perInbound = JSONArray()
 
         fun addInbound(tag: String, port: Int, http: Boolean): Boolean {
@@ -145,11 +157,11 @@ object ConfigBuilder {
             if (e.httpPort > 0 && addInbound("ph-" + e.id, e.httpPort, true)) inTags.add("ph-" + e.id)
             if (inTags.isNotEmpty()) perInbound.put(rule(inTags, tag))
         }
-        inbounds.put(apiInbound(s))
 
         reg.add(freedom()); reg.add(blackhole())
+        // Private/LAN bypass first, THEN the per-inbound routing, THEN a catch-all
+        // to the primary exit so nothing is ever left unrouted (configBuilder.js).
         val rules = JSONArray()
-        rules.put(apiRule())
         rules.put(fieldRule().put("ip", JSONArray(PRIVATE_IPS)).put("outboundTag", "direct"))
         for (i in 0 until perInbound.length()) rules.put(perInbound.getJSONObject(i))
         rules.put(fieldRule().put("port", "0-65535").put("outboundTag", primaryTag))
@@ -233,11 +245,16 @@ object ConfigBuilder {
             .put("protocol", "socks").put("settings", JSONObject().put("auth", "noauth").put("udp", true)).put("sniffing", sniffing))
         .put(JSONObject().put("tag", "http-in").put("port", s.httpPort).put("listen", listen)
             .put("protocol", "http").put("settings", JSONObject()).put("sniffing", sniffing))
-        .put(apiInbound(s))
 
-    private fun apiInbound(s: AppSettings): JSONObject = JSONObject()
-        .put("tag", "api").put("port", s.apiPort).put("listen", "127.0.0.1")
-        .put("protocol", "dokodemo-door").put("settings", JSONObject().put("address", "127.0.0.1"))
+    /**
+     * Live traffic counters over HTTP (GET /debug/vars) instead of the gRPC-only
+     * StatsService. It is a top-level listener, NOT an inbound, so no inbound and
+     * no `inboundTag: ["api"]` routing rule exists any more — nothing can collide
+     * with it and it reports EVERY outbound tag (pool/advanced plans have no
+     * outbound called 'proxy'). Kept on 127.0.0.1 even when allowLan is on.
+     */
+    private fun metricsListener(s: AppSettings): JSONObject = JSONObject()
+        .put("tag", "metrics").put("listen", "127.0.0.1:${s.apiPort}")
 
     /** Fix any WireGuard interface address that isn't /32 (/128); return outbounds. */
     private fun finalizeOutbounds(outbounds: JSONArray): JSONArray {
@@ -274,7 +291,8 @@ object ConfigBuilder {
         if (wgChained) level0.put("bufferSize", 0)
         return JSONObject()
             .put("log", JSONObject().put("loglevel", s.logLevel))
-            .put("api", JSONObject().put("tag", "api").put("services", JSONArray().put("StatsService")))
+            .put("metrics", metricsListener(s))
+            // stats + policy stay: the counters metrics reports only exist because of them
             .put("stats", JSONObject())
             .put("policy", JSONObject()
                 .put("levels", JSONObject().put("0", level0))
@@ -308,21 +326,20 @@ object ConfigBuilder {
             val o = outbounds.getJSONObject(i)
             val frag = o.optString("_fragment", "")
             val noise = o.optString("_noise", "")
-            val fakeSni = o.optString("_fakesni", "")
-            if (frag.isEmpty() && noise.isEmpty() && fakeSni.isEmpty()) continue
-            o.remove("_fragment"); o.remove("_noise"); o.remove("_fakesni")
+            if (frag.isEmpty() && noise.isEmpty()) continue
+            o.remove("_fragment"); o.remove("_noise")
             val ss = o.optJSONObject("streamSettings") ?: JSONObject().also { o.put("streamSettings", it) }
             val sockopt = ss.optJSONObject("sockopt") ?: JSONObject().also { ss.put("sockopt", it) }
             if (sockopt.has("dialerProxy")) continue
-            val key = "$frag|$noise|$fakeSni"
+            val key = "$frag|$noise"
             var tag = byKey[key]
-            if (tag == null) { tag = "dpi-" + (byKey.size + 1); byKey[key] = tag; extra.put(makeFragmentOutbound(tag, frag, noise, fakeSni)) }
+            if (tag == null) { tag = "dpi-" + (byKey.size + 1); byKey[key] = tag; extra.put(makeFragmentOutbound(tag, frag, noise)) }
             sockopt.put("dialerProxy", tag)
         }
         for (i in 0 until extra.length()) outbounds.put(extra.getJSONObject(i))
         return outbounds
     }
-    private fun makeFragmentOutbound(tag: String, fragStr: String, noiseStr: String, fakeSni: String): JSONObject {
+    private fun makeFragmentOutbound(tag: String, fragStr: String, noiseStr: String): JSONObject {
         val settings = JSONObject().put("domainStrategy", "AsIs")
         if (fragStr.isNotEmpty()) {
             val p = fragStr.split(",").map { it.trim() }
@@ -332,32 +349,8 @@ object ConfigBuilder {
                 .put("interval", fragRange(p.getOrNull(2), "10-20", 0)))
         }
         val noises = if (noiseStr.isNotEmpty()) parseNoises(noiseStr) else JSONArray()
-        // Decoy: prepend a synthetic ClientHello carrying a FAKE SNI (best-effort).
-        if (fakeSni.isNotEmpty()) {
-            val hello = JSONObject().put("type", "base64").put("packet", fakeClientHelloB64(fakeSni)).put("delay", "0")
-            val merged = JSONArray().put(hello)
-            for (i in 0 until noises.length()) merged.put(noises.getJSONObject(i))
-            if (merged.length() > 0) settings.put("noises", merged)
-        } else if (noises.length() > 0) settings.put("noises", noises)
+        if (noises.length() > 0) settings.put("noises", noises)
         return JSONObject().put("tag", tag).put("protocol", "freedom").put("settings", settings)
-    }
-    /** Minimal TLS 1.2 ClientHello record carrying `sni`, base64-encoded (decoy). */
-    private fun fakeClientHelloB64(sni: String): String {
-        fun u16(n: Int) = byteArrayOf(((n shr 8) and 0xff).toByte(), (n and 0xff).toByte())
-        fun u24(n: Int) = byteArrayOf(((n shr 16) and 0xff).toByte(), ((n shr 8) and 0xff).toByte(), (n and 0xff).toByte())
-        val host = sni.toByteArray(Charsets.UTF_8)
-        val rnd = java.security.SecureRandom()
-        val random = ByteArray(32).also { rnd.nextBytes(it) }
-        val session = ByteArray(32).also { rnd.nextBytes(it) }
-        val ciphers = byteArrayOf(0x13, 0x01, 0x13, 0x02, 0x13, 0x03, 0xc0.toByte(), 0x2b, 0xc0.toByte(), 0x2f, 0x00, 0xff.toByte())
-        val sniName = byteArrayOf(0x00) + u16(host.size) + host
-        val sniList = u16(sniName.size) + sniName
-        val sniExt = byteArrayOf(0x00, 0x00) + u16(sniList.size) + sniList
-        val body = byteArrayOf(0x03, 0x03) + random + byteArrayOf(0x20) + session +
-            u16(ciphers.size) + ciphers + byteArrayOf(0x01, 0x00) + u16(sniExt.size) + sniExt
-        val handshake = byteArrayOf(0x01) + u24(body.size) + body
-        val record = byteArrayOf(0x16, 0x03, 0x01) + u16(handshake.size) + handshake
-        return android.util.Base64.encodeToString(record, android.util.Base64.NO_WRAP)
     }
     // Named presets (also accepted from the link's &noise= value).
     private val noisePresets = mapOf(
@@ -402,6 +395,5 @@ object ConfigBuilder {
     private fun freedom() = JSONObject().put("tag", "direct").put("protocol", "freedom").put("settings", JSONObject().put("domainStrategy", "UseIP"))
     private fun blackhole() = JSONObject().put("tag", "block").put("protocol", "blackhole").put("settings", JSONObject().put("response", JSONObject().put("type", "http")))
     private fun fieldRule() = JSONObject().put("type", "field")
-    private fun apiRule() = fieldRule().put("inboundTag", JSONArray().put("api")).put("outboundTag", "api")
     private fun rule(inbound: List<String>, out: String) = fieldRule().put("inboundTag", JSONArray(inbound)).put("outboundTag", out)
 }

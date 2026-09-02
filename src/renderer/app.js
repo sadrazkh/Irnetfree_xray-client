@@ -31,6 +31,7 @@ const state = {
   // renderer only mirrors it.
   pendingReconnect: [],
   pendingDismissed: false, // user chose "later"; keep the banner out of the way
+  wasReconnecting: false,  // main is rebuilding after a network change (toast on success)
   pings: {} // id -> { tcp, real }
 };
 
@@ -123,6 +124,18 @@ function flagEmoji(cc) {
   );
 }
 
+/* ----------------------------- theme ----------------------------- */
+/** 'dark' | 'light' | 'system' -> the attribute the CSS keys off. */
+function applyTheme(pref, systemDark) {
+  const dark = pref === 'system' ? systemDark !== false : pref !== 'light';
+  const theme = dark ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', theme);
+  // Remember the RESOLVED theme (not the preference) so theme-boot.js can paint
+  // it from <head> on the next launch, before app:init has answered. Storage is
+  // best-effort: a failure here only costs the flash it exists to avoid.
+  try { localStorage.setItem('irnetfree.theme', theme); } catch {}
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -151,6 +164,19 @@ $('#langSelect').onchange = () => setLang($('#langSelect').value);
 
 /* default core — saves itself (readSettingsForm() deliberately leaves it out) */
 $('#defaultEngine').onchange = () => saveSettings({ defaultEngine: $('#defaultEngine').value });
+
+/* theme — renderer-only, applied immediately then persisted */
+$('#themeSelect').onchange = () => {
+  const theme = $('#themeSelect').value;
+  applyTheme(theme, state.systemDark);
+  saveSettings({ theme });
+};
+
+/* the OS switched between light and dark while the app is open */
+window.api.onSystemTheme((d) => {
+  state.systemDark = !!(d && d.dark);
+  if ((state.settings.theme || 'dark') === 'system') applyTheme('system', state.systemDark);
+});
 
 function setLang(lang) {
   window.i18n.applyI18n(lang);
@@ -199,6 +225,9 @@ async function init() {
 
   window.i18n.applyI18n(state.settings.lang || 'fa');
   $('#btnLang').textContent = (state.settings.lang || 'fa') === 'fa' ? 'EN' : 'فا';
+
+  state.systemDark = data.systemDark !== false;
+  applyTheme(state.settings.theme || 'dark', state.systemDark);
 
   applySettingsToUI();
   renderServers();
@@ -250,10 +279,12 @@ function applySettingsToUI() {
   $('#logLevel').value = s.logLevel || 'warning';
   $('#langSelect').value = s.lang || 'fa';
   $('#defaultEngine').value = s.defaultEngine || 'xray';
+  $('#themeSelect').value = s.theme || 'dark';
   $('#optSysProxy').checked = !!s.systemProxy;
   $('#optTun').checked = !!s.tunMode;
   $('#optAllowLan').checked = !!s.allowLan;
   $('#optKillSwitch').checked = !!s.killSwitch;
+  $('#optNetAuto').checked = s.autoReconnectOnNetworkChange !== false;
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
@@ -410,6 +441,10 @@ async function applySettingsNow() {
       toast(t('apply.done'), 'ok');
       return true;
     }
+    // The user disconnected (or connected elsewhere) while the rebuild was in
+    // flight, so it abandoned itself. Nothing failed — they changed their mind,
+    // and the 'disconnected' status has already repainted the UI. Stay quiet.
+    if (res && res.stale) { renderPendingBanner(); return false; }
     // a failed reconnect with the kill switch armed leaves the internet blocked
     // ON PURPOSE — onKillSwitch shows the disarm banner, so just explain why.
     toast((res && res.error) || t('apply.failed'), 'err');
@@ -459,6 +494,9 @@ $('#optKillSwitch').onchange = async () => {
     if (await promptRelaunchAdmin()) return;
   }
 };
+
+/* auto-reconnect toggle — read live at recovery time, so it needs no reconnect */
+$('#optNetAuto').onchange = () => saveSettings({ autoReconnectOnNetworkChange: $('#optNetAuto').checked });
 
 function updateKillStatus() {
   const el = $('#killStatus');
@@ -757,6 +795,17 @@ const HTTP_PROXY_LINK = /^http:\/\/(?:(?:[A-Za-z0-9+/=]+|[^/?#\s@]+)@)?[^/?#\s@]
 async function smartImport(text) {
   text = String(text || '').trim();
   if (!text) return;
+  // A pasted WireGuard .conf is one multi-line config, not a list of links —
+  // hand the whole blob to parseMany (main-side) before the per-line split.
+  if (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text)) {
+    const res = await window.api.importServers(text);
+    state.servers = res.servers;
+    if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
+    renderServers(); renderPicker(); renderChains(); renderPool();
+    const failed = (res.errors || []).length;
+    toast(failed ? `${t('t.failed')}: ${res.errors[0].error}` : t('t.wgAdded'), failed ? 'err' : 'ok');
+    return;
+  }
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const isSubUrl = (l) => /^https?:\/\//i.test(l) && !HTTP_PROXY_LINK.test(l);
   const urlLines = lines.filter(isSubUrl);
@@ -809,8 +858,11 @@ document.addEventListener('paste', (e) => {
   const cd = e.clipboardData || window.clipboardData;
   const text = cd && cd.getData('text');
   if (!text || !text.trim()) return;
-  if (!/^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|wireguard:\/\/|wg:\/\/)/im.test(text.trim()) &&
-      !/[A-Za-z0-9+/=]{24,}/.test(text.trim())) return; // ignore unrelated clipboard text
+  // ignore unrelated clipboard text; a .conf blob counts as importable too
+  const looksImportable = /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|socks:\/\/|socks5:\/\/|wireguard:\/\/|wg:\/\/)/im.test(text.trim())
+    || /[A-Za-z0-9+/=]{24,}/.test(text.trim())
+    || (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text));
+  if (!looksImportable) return;
   e.preventDefault();
   toast(t('t.pasteDetected'));
   smartImport(text.trim());
@@ -1068,6 +1120,8 @@ window.api.onStatus((d) => {
     setPending(d.pendingReconnect || []);
     state.activeEngine = d.engine || '';
     setConnUI('connected', d.serverId);
+    // only say "reconnected" when we actually were recovering from a network change
+    if (state.wasReconnecting) { toast(t('net.reconnected'), 'ok'); state.wasReconnecting = false; }
     setModeWidget();
     updateLanInfo();
     renderServers();
@@ -1086,9 +1140,13 @@ window.api.onStatus((d) => {
   } else if (d.state === 'connecting') {
     state.connecting = true;
     setConnUI('connecting', d.serverId);
+    // the rebuild reapplyConnection() runs is still part of the recovery — keep
+    // saying so instead of flashing a bare "Connecting…"
+    if (state.wasReconnecting) $('#connState').textContent = t('state.reconnecting');
   } else if (d.state === 'disconnected') {
     state.connected = false;
     state.connecting = false;
+    state.wasReconnecting = false;   // no live tunnel left to recover
     state.lan = null;
     state.activeEngine = '';
     setPending([]);          // nothing live to be out of sync with
@@ -1100,6 +1158,34 @@ window.api.onStatus((d) => {
     updateLanInfo();
     renderServers();
     renderPicker();
+  } else if (d.state === 'reconnecting') {
+    // the machine's network moved under the tunnel; main is rebuilding it
+    // There is no tunnel right now — the rebuild tore it down. Leaving
+    // `connected` true made the power button offer "disconnect" and the pill say
+    // connected while the pill text said reconnecting; the two must agree.
+    state.connected = false;
+    state.connecting = true;
+    state.wasReconnecting = true;
+    setConnUI('connecting', d.serverId || state.activeServerId);
+    $('#connState').textContent = t('state.reconnecting');
+  } else if (d.state === 'reconnect-failed') {
+    // every retry is spent — the user has to act
+    state.connecting = false;
+    state.wasReconnecting = false;
+    if (d.proxyUp) {
+      // The tunnel itself came back and only TUN did not: xray is running and the
+      // proxy ports work, so the red error state would be wrong. Stay connected
+      // and say what is actually missing.
+      state.connected = true;
+      setConnUI('connected', state.activeServerId);
+      toast(t('net.tunFailed'), 'warn', 8000);
+      if (d.tunError) appendLog('Reconnect gave up on TUN: ' + d.tunError, 'warn');
+      updateAdminBtn(true);
+    } else {
+      state.connected = false;
+      setConnUI('error');
+      toast(t('net.failed'), 'err', 8000);
+    }
   } else if (d.state === 'error') {
     // e.g. a settings reconnect whose new config the core rejected
     state.connected = false;
@@ -1582,7 +1668,6 @@ function readServerFields(s) {
     allowInsecure: false, cred: '', method: '',
     fragment: ob._fragment || '',
     noise: ob._noise || '',
-    fakeSni: ob._fakesni || '',
     cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
     finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
     engine: s.engine || 'xray'
@@ -1720,7 +1805,6 @@ function openEdit(id) {
   $('#edSid').value = f.sid || '';
   $('#edFragment').value = f.fragment || '';
   setNoiseFields(f.noise || '');
-  if ($('#edFakeSni')) $('#edFakeSni').value = f.fakeSni || '';
   if ($('#edCipherSuites')) $('#edCipherSuites').value = f.cipherSuites || '';
   if ($('#edFinalMask')) $('#edFinalMask').value = f.finalMask || '';
   if ($('#edEngine')) $('#edEngine').value = f.engine || 'xray';
@@ -1786,7 +1870,7 @@ function updateSpoofLabels() {
   const net = $('#edNetwork').value || 'tcp';
   const on = isStd && (sec === 'tls' || sec === 'reality');
   show('#edSpoofHead', on); show('#edTlsRow', on);
-  show('#edHideSniRow', on); show('#edFakeSniWrap', on);
+  show('#edHideSniRow', on);
   const hintEl = $('#edSpoofHint'); if (hintEl) hintEl.hidden = !on;
   if (!on) return;
 
@@ -1802,11 +1886,9 @@ function updateSpoofLabels() {
   $('#edSpoofHint').textContent = t(hint);
   const hostWrap = $('#edHostWrap'); if (hostWrap) hostWrap.style.display = showHost ? '' : 'none';
 
-  // bypass controls (all TLS/reality): Hide-SNI toggle reflects the fragment
-  // state; the fake-SNI decoy is the experimental patched-core path.
+  // bypass controls (all TLS/reality): the Hide-SNI toggle reflects the
+  // fragment state.
   $('#edHideSniLabel').textContent = t('spoof.hideSni');
-  $('#edFakeSniLabel').textContent = t('spoof.fakeSni');
-  $('#edFakeSniHint').textContent = t('spoof.fakeSniHint');
   $('#edHideSni').checked = !!($('#edFragment').value || '').trim();
 }
 
@@ -1843,7 +1925,6 @@ $('#editSave').onclick = async () => {
     port: $('#edPort').value,
     fragment: $('#edFragment').value.trim(),  // '' clears it
     noise: readNoiseField(),                  // '' clears it
-    fakeSni: $('#edFakeSni') ? $('#edFakeSni').value.trim() : '',
     engine: $('#edEngine') ? $('#edEngine').value : 'xray'
   };
   const cred = $('#edCred').value.trim();
@@ -1880,6 +1961,14 @@ $('#editSave').onclick = async () => {
     fields.password = $('#edProxyPass').value.trim();
   }
 
+  // finalmask goes to the core untouched, so catch bad JSON here rather than
+  // letting xray refuse the whole config at connect time
+  const fmText = $('#edFinalMask') ? $('#edFinalMask').value.trim() : '';
+  if (fmText) {
+    try { JSON.parse(fmText); }
+    catch { return toast(t('edit.finalMaskBad'), 'err'); }
+  }
+
   const res = await window.api.updateServer(id, fields);
   if (res.ok) {
     state.servers = res.servers;
@@ -1899,6 +1988,84 @@ $('#btnWgOpen').onclick = () => {
   $('#proxyBox').hidden = true;
 };
 $('#btnWgCancel').onclick = () => { $('#wgBox').hidden = true; };
+
+/* Load a WireGuard .conf into the form. Electron opens a native dialog; the
+   headless build has no dialog, so fall back to a hidden file input. */
+$('#btnWgPickConf').onclick = async () => {
+  let text = '';
+  try {
+    const res = await window.api.pickWireguardConf();
+    if (res && res.ok) text = res.text;
+    else if (res && res.canceled) return;
+  } catch {}
+  if (!text) text = await pickLocalFile('.conf,.txt');
+  if (!text) return;
+  await fillWgFormFromConf(text);
+};
+
+/**
+ * Browser fallback: a throwaway <input type="file"> resolved to its text.
+ * Resolves '' when nothing was picked — a cancelled dialog fires no 'change' at
+ * all, and a promise that never settles would hang the caller's await forever.
+ */
+function pickLocalFile(accept) {
+  return new Promise((resolve) => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = accept;
+
+    let settled = false;
+    function finish(text) {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('focus', onWindowFocus);
+      resolve(text);
+    }
+    // Last resort for engines that fire neither 'change' nor 'cancel': the picker
+    // is modal, so the window getting focus back means it closed. The delay lets
+    // a real 'change'/'cancel' (which arrive right after focus) win the race.
+    function onWindowFocus() { setTimeout(() => finish(''), 1500); }
+
+    inp.addEventListener('cancel', () => finish(''));
+    inp.addEventListener('change', () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return finish('');
+      const fr = new FileReader();
+      fr.onload = () => finish(String(fr.result || ''));
+      fr.onerror = () => finish('');
+      fr.readAsText(f);
+    });
+    window.addEventListener('focus', onWindowFocus, { once: true });
+    inp.click();
+  });
+}
+
+/** Fill the WireGuard form from .conf text. Parsing happens in main. */
+async function fillWgFormFromConf(text) {
+  // The call answers { ok: false } for a conf it could not parse, but the bridge
+  // itself REJECTS when the RPC fails (the headless one throws on a non-JSON
+  // response). Both mean the same thing to the user, so both land on the hint —
+  // otherwise a reject here would be an unhandled promise rejection.
+  let res;
+  try {
+    res = await window.api.parseWireguardConf(text);
+  } catch (e) {
+    $('#wgConfHint').textContent = (e && e.message) || t('wg.confFailed');
+    return;
+  }
+  if (!res || !res.ok) { $('#wgConfHint').textContent = (res && res.error) || t('wg.confFailed'); return; }
+  const f = res.fields;
+  $('#wgName').value = f.name || '';
+  $('#wgEndpoint').value = f.endpoint || '';
+  $('#wgPrivate').value = f.privateKey || '';
+  $('#wgPublic').value = f.publicKey || '';
+  $('#wgAddress').value = f.address || '';
+  $('#wgAllowed').value = f.allowedIPs || '0.0.0.0/0, ::/0';
+  $('#wgPsk').value = f.presharedKey || '';
+  $('#wgMtu').value = f.mtu || 1420;
+  $('#wgReserved').value = f.reserved || '';
+  $('#wgConfHint').textContent = t('wg.confLoaded');
+}
 
 $('#btnWgAdd').onclick = async () => {
   const fields = {
@@ -2514,3 +2681,9 @@ $$('#modeModal .mode-option').forEach(opt => {
 });
 
 init();
+
+// The OS reconnected an adapter — nudge main to re-check the tunnel. This page
+// is shared with the headless panel, where "online" means the OPERATOR'S laptop
+// came back and says nothing about the server's network; service.js deliberately
+// makes its net:online handler a no-op for that reason.
+window.addEventListener('online', () => { try { window.api.netOnline(); } catch {} });
