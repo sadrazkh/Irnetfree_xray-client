@@ -51,6 +51,7 @@ Windows · macOS (Intel + Apple Silicon) · Linux
 | دسته | توضیح |
 |---|---|
 | **پروتکل‌ها** | VLESS (با Reality / XTLS‑Vision)، VMess، Trojan، Shadowsocks، **WireGuard**، و **SOCKS5 / HTTP پروکسی** |
+| **دو هسته‌ی Xray** | هسته‌ی رسمی (`XTLS/Xray-core`) و fork پترنیها (`patterniha/Xray-core`، کانفیگ‌های بدون TLS به آدرس عمومی را رد نمی‌کند). انتخاب per-config در فرم ویرایش، «هسته‌ی پیش‌فرض» در تنظیمات، هر دو از «فایل‌های موردنیاز» دانلود/به‌روزرسانی می‌شوند. اگر هسته‌ی رسمی کانفیگی را با خطای «without TLS» رد کند و PattN نصب باشد، خودکار روی PattN اجرا می‌شود. |
 | **افزودن کانفیگ** | لینک تکی، چند لینک هم‌زمان، متن base64، لینک ساب‌اسکریپشن، فرم دستی WireGuard، **فرم دستی SOCKS/HTTP**، لینک `socks://`، و **چسباندن سریع با Ctrl+V** در هر جای برنامه |
 | **ساب‌اسکریپشن** | افزودن، به‌روزرسانی دستی/خودکار، و نمایش **حجم مصرف و زمان باقی‌مانده با پروگرس‌بار** |
 | **پروکسی محلی** | SOCKS5 + HTTP inbound با پورت‌های قابل تنظیم |
@@ -305,6 +306,7 @@ IP   10.20.0.0/16   →  ⛓ DB-Chain   (Config → WireGuard)
 | مؤلفه | کاربرد |
 |---|---|
 | **هسته Xray** | اجرای اصلی پروکسی/تونل (نسخه‌اش هم نمایش داده می‌شود) |
+| **هسته Xray-PattN** | fork پترنیها؛ برای کانفیگ‌های VLESS/Trojan بدون TLS (مثل ws روی پورت 80 پشت CDN) که هسته‌ی رسمی رد می‌کند |
 | **tun2socks** | حالت TUN |
 | **wintun.dll** | حالت TUN (فقط ویندوز) |
 | **geoip + geosite** | روتینگ مبتنی بر کشور/دسته (دور زدن ایران/چین، بلاک تبلیغات، قوانین `geoip:`/`geosite:`) |
@@ -666,6 +668,9 @@ src/
     parser.js        # تبدیل لینک‌ها (vless/vmess/trojan/ss/socks/wireguard) به outbound اکس‌ری
     configBuilder.js # ساخت config.json کامل (inbounds + routing + حالت pool چندپورتی)
     xrayManager.js   # مدیریت پروسه‌ی xray-core (start/stop/test/version)
+    engines.js       # رجیستری هسته‌ها: xray (رسمی)، xray-pattn (پترنیها)، sing-box
+    engineChoice.js  # کدام هسته یک plan را اجرا می‌کند (انتخاب کانفیگ / هسته‌ی پیش‌فرض)
+    assets.js        # وضعیت فایل‌های موردنیاز (مشترک دسکتاپ و headless)
     subscription.js  # ساب‌اسکریپشن + خواندن حجم/زمان از هدر Subscription-Userinfo
     tunManager.js    # حالت TUN (Windows wintun / macOS utun / Linux)
     procRouter.js    # کشف پروسه‌ها و IPهایشان برای روتینگ پراسس
@@ -691,6 +696,7 @@ android/             # اپ نیتیو اندروید (Kotlin + Compose)
   scripts/fetch-libs.sh   # دانلود libv2ray.aar + libhev-socks5-tunnel .so
 .github/workflows/
   release.yml        # ساخت دسکتاپ + APK اندروید روی تگ و پیوست به Release
+  test.yml           # اجرای تست‌های واحد روی لینوکس/ویندوز/مک در هر push و PR
 ```
 
 ---
