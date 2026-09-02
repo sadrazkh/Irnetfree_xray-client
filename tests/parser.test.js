@@ -15,7 +15,7 @@ const {
   buildStreamSettings, buildWireguardOutbound,
   makeWireguardServer, makeProxyServer, applyServerEdits,
   parseWireguardConf, isWireguardConf,
-  buildShareLink, isHttpProxyLink
+  buildShareLink, isHttpProxyLink, migrateStoredServer
 } = require('../src/main/parser');
 
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
@@ -620,4 +620,130 @@ test('the dead fakeSni marker is gone', () => {
   const s = parseLink('vless://u@a.example.com:443?security=tls&fakeSni=www.google.com');
   assert.equal(s.outbound._fakesni, undefined, 'freedom noises are UDP-only — this never worked on TLS');
   assert.equal(/fakeSni/.test(buildShareLink(s)), false);
+});
+
+/* --------------------- migrating servers from an older store --------------------- */
+
+// The two shapes the previous parser wrote and that are still sitting in users'
+// store.json. See migrateStoredServer().
+const legacyServer = () => ({
+  id: 'srv-1',
+  name: 'Old',
+  protocol: 'vless',
+  address: 'a.example.com',
+  port: 443,
+  outbound: {
+    protocol: 'vless',
+    _fakesni: 'www.google.com',
+    settings: { vnext: [{ address: 'a.example.com', port: 443, users: [{ id: 'u' }] }] },
+    streamSettings: {
+      network: 'tcp',
+      security: 'tls',
+      finalmask: {
+        tcp: [{ type: 'fragment', settings: { packets: 'tlshello', length: '3-8', delay: '10-20', maxSplit: '3-6' } }]
+      }
+    }
+  }
+});
+
+test('migrateStoredServer: the dead _fakesni marker is stripped', () => {
+  const out = migrateStoredServer(legacyServer());
+  assert.equal('_fakesni' in out.outbound, false, 'nothing strips it any more — it would land in config.json verbatim');
+  // everything else about the outbound survives
+  assert.equal(out.outbound.protocol, 'vless');
+  assert.deepEqual(out.outbound.settings, legacyServer().outbound.settings);
+  assert.equal(out.id, 'srv-1');
+  assert.equal(out.name, 'Old');
+});
+
+test('migrateStoredServer: a singular finalmask fragment is converted back to plural', () => {
+  const fm = migrateStoredServer(legacyServer()).outbound.streamSettings.finalmask;
+  assert.deepEqual(fm, {
+    tcp: [{ type: 'fragment', settings: { packets: 'tlshello', lengths: ['3-8'], delays: ['10-20'], maxSplit: '3-6' } }]
+  }, 'the current core takes lengths/delays arrays and rejects length/delay');
+  assert.equal('length' in fm.tcp[0].settings, false);
+  assert.equal('delay' in fm.tcp[0].settings, false);
+});
+
+test('migrateStoredServer: udp masks are converted too', () => {
+  const s = legacyServer();
+  s.outbound.streamSettings.finalmask = { udp: [{ type: 'noise', settings: { length: '1-3', delay: '0' } }] };
+  const fm = migrateStoredServer(s).outbound.streamSettings.finalmask;
+  assert.deepEqual(fm.udp, [{ type: 'noise', settings: { lengths: ['1-3'], delays: ['0'] } }]);
+});
+
+test('migrateStoredServer: only one of the two keys may need converting', () => {
+  const s = legacyServer();
+  s.outbound.streamSettings.finalmask = { tcp: [{ settings: { lengths: ['3-5'], delay: '10-20' } }] };
+  const st = migrateStoredServer(s).outbound.streamSettings.finalmask.tcp[0].settings;
+  assert.deepEqual(st, { lengths: ['3-5'], delays: ['10-20'] });
+});
+
+test('migrateStoredServer: a numeric singular value still becomes a string array', () => {
+  const s = legacyServer();
+  s.outbound.streamSettings.finalmask = { tcp: [{ settings: { length: 5 } }] };
+  assert.deepEqual(migrateStoredServer(s).outbound.streamSettings.finalmask.tcp[0].settings, { lengths: ['5'] });
+});
+
+test('migrateStoredServer: an already-plural finalmask is left exactly as it is', () => {
+  const s = legacyServer();
+  delete s.outbound._fakesni;
+  s.outbound.streamSettings.finalmask = JSON.parse(FM);
+  const out = migrateStoredServer(s);
+  assert.deepEqual(out.outbound.streamSettings.finalmask, JSON.parse(FM));
+  assert.equal(out, s, 'nothing to do: the very same object comes back, so no needless store write');
+});
+
+test('migrateStoredServer: a freshly parsed server needs no migration', () => {
+  const s = parseLink(`vless://u@a.example.com:443?security=tls&fm=${encodeURIComponent(FM)}#N`);
+  assert.equal(migrateStoredServer(s), s);
+});
+
+test('migrateStoredServer: does not mutate its input', () => {
+  const s = legacyServer();
+  const before = JSON.parse(JSON.stringify(s));
+  migrateStoredServer(s);
+  assert.deepEqual(s, before, 'a pure function — the caller decides whether to persist');
+});
+
+test('migrateStoredServer: both markers on one server are handled together', () => {
+  const out = migrateStoredServer(legacyServer());
+  assert.equal('_fakesni' in out.outbound, false);
+  assert.deepEqual(out.outbound.streamSettings.finalmask.tcp[0].settings.lengths, ['3-8']);
+});
+
+test('migrateStoredServer: a server with no outbound comes back untouched', () => {
+  const s = { id: 'x', name: 'No outbound', protocol: 'vless' };
+  assert.equal(migrateStoredServer(s), s);
+});
+
+test('migrateStoredServer: odd shapes never throw', () => {
+  // store.json is a plain file a user can hand-edit — anything can be in here.
+  const odd = [
+    undefined, null, 0, '', 'server', [],
+    { outbound: null },
+    { outbound: 'nope' },
+    { outbound: [] },
+    { outbound: { streamSettings: null } },
+    { outbound: { streamSettings: 'nope' } },
+    { outbound: { streamSettings: { finalmask: null } } },
+    { outbound: { streamSettings: { finalmask: 'nope' } } },
+    { outbound: { streamSettings: { finalmask: [] } } },
+    { outbound: { streamSettings: { finalmask: { tcp: 'nope' } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [null, 3, 'x'] } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [{ settings: null }] } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [{ settings: [] }] } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [{ settings: { length: null } }] } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [{ settings: { delay: {} } }] } } } }
+  ];
+  for (const s of odd) {
+    assert.doesNotThrow(() => migrateStoredServer(s), `threw on ${JSON.stringify(s)}`);
+    assert.equal(migrateStoredServer(s), s, `needlessly rewrote ${JSON.stringify(s)}`);
+  }
+});
+
+test('migrateStoredServer: an array settings object is not mistaken for a singular length', () => {
+  // [] has a `length` property — reading it blindly would invent lengths:["0"].
+  const s = { outbound: { streamSettings: { finalmask: { tcp: [{ settings: [] }] } } } };
+  assert.equal(migrateStoredServer(s), s);
 });

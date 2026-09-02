@@ -890,9 +890,105 @@ function buildShareLink(server) {
   return server.raw || '';   // unknown protocol: fall back to the imported link
 }
 
+/* ================== migrating servers from an older store ================== */
+
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * A singular finalmask value back into the plural array the core wants.
+ * Returns null for anything that is not a value we wrote (so the caller leaves
+ * that entry alone rather than inventing one).
+ */
+function pluralValue(v) {
+  if (typeof v === 'string') return v === '' ? null : [v];
+  if (typeof v === 'number' && Number.isFinite(v)) return [String(v)];
+  return null;
+}
+
+/**
+ * One finalmask entry ({ type, settings }). Returns a NEW entry when the
+ * singular keys had to be converted, or null when there is nothing to do.
+ */
+function pluralMask(mask) {
+  if (!isPlainObject(mask) || !isPlainObject(mask.settings)) return null;
+  const s = mask.settings;
+  // `lengths` already there = this entry was never collapsed; leave it whole.
+  const lengths = Array.isArray(s.lengths) ? null : pluralValue(s.length);
+  const delays = Array.isArray(s.delays) ? null : pluralValue(s.delay);
+  if (!lengths && !delays) return null;
+  const settings = Object.assign({}, s);
+  if (lengths) { settings.lengths = lengths; delete settings.length; }
+  if (delays) { settings.delays = delays; delete settings.delay; }
+  return Object.assign({}, mask, { settings });
+}
+
+/**
+ * A whole finalmask ({ tcp: [...], udp: [...] }). New object when anything
+ * changed, null otherwise.
+ */
+function pluralFinalMask(fm) {
+  if (!isPlainObject(fm)) return null;
+  let out = null;
+  for (const key of ['tcp', 'udp']) {
+    const list = fm[key];
+    if (!Array.isArray(list)) continue;
+    let listOut = null;
+    for (let i = 0; i < list.length; i++) {
+      const m = pluralMask(list[i]);
+      if (!m) continue;
+      if (!listOut) listOut = list.slice();
+      listOut[i] = m;
+    }
+    if (!listOut) continue;
+    if (!out) out = Object.assign({}, fm);
+    out[key] = listOut;
+  }
+  return out;
+}
+
+/**
+ * Bring a server saved by an older version up to the shape the current code
+ * expects. Pure: the input is never mutated, and when there is nothing to do
+ * the very same object comes back (so a caller can skip the store write).
+ *
+ * Two shapes the previous parser wrote are still sitting in users' store.json:
+ *
+ *  - `outbound._fakesni`, the fake-ClientHello decoy marker. configBuilder used
+ *    to consume and delete it while assembling the dialer outbound; it no longer
+ *    knows the key at all, so a leftover marker now travels straight into the
+ *    generated config.json.
+ *  - a finalmask fragment collapsed to the SINGULAR `length` / `delay` form. The
+ *    old parser rewrote the standard plural `lengths` / `delays` arrays into a
+ *    min-max range; the current core takes only the plural arrays and rejects
+ *    the singular ones, so those saved configs do not start until they are
+ *    converted back. (Only the collapse direction is reversible — the original
+ *    per-fragment sizes are gone, so `length: "3-8"` becomes `lengths: ["3-8"]`,
+ *    one fragment covering the whole range.)
+ *
+ * store.json is a plain file the user can hand-edit, so every step here is
+ * shape-checked and nothing throws. A mask carrying BOTH forms was never
+ * written by either parser; the plural one wins and the entry is left alone.
+ */
+function migrateStoredServer(server) {
+  if (!isPlainObject(server) || !isPlainObject(server.outbound)) return server;
+  const ob = server.outbound;
+
+  const dropFakeSni = Object.prototype.hasOwnProperty.call(ob, '_fakesni');
+  const st = ob.streamSettings;
+  const fm = isPlainObject(st) ? pluralFinalMask(st.finalmask) : null;
+  if (!dropFakeSni && !fm) return server;
+
+  const outbound = Object.assign({}, ob);
+  if (dropFakeSni) delete outbound._fakesni;
+  if (fm) outbound.streamSettings = Object.assign({}, st, { finalmask: fm });
+  return Object.assign({}, server, { outbound });
+}
+
 module.exports = {
   parseLink, parseMany, b64decode, isHttpProxyLink,
   buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits,
   parseWireguardConf, isWireguardConf,
-  buildShareLink
+  buildShareLink, migrateStoredServer
 };
