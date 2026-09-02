@@ -14,6 +14,21 @@ object LinkParser {
 
     private val SCHEME_RE = Regex("^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg)://", RegexOption.IGNORE_CASE)
 
+    /**
+     * v2rayN shares an HTTP proxy exactly like a SOCKS one —
+     * `http://[b64(user:pass)@]host:port#name` — which is also the shape of a plain
+     * subscription URL's origin. A proxy link therefore has NO path and NO query.
+     * The userinfo is either a standard-alphabet base64 blob (which may contain '/')
+     * or a plain `user:pass`; the host never contains a '/', so a subscription URL
+     * with an '@' in its path still fails to match.
+     * (Kept byte-identical to HTTP_PROXY_LINK in src/main/parser.js.)
+     */
+    private val HTTP_PROXY_LINK = Regex(
+        "^http://(?:(?:[A-Za-z0-9+/=]+|[^/?#\\s@]+)@)?[^/?#\\s@]+:\\d{1,5}(?:#\\S*)?\$",
+        RegexOption.IGNORE_CASE)
+
+    fun isHttpProxyLink(s: String?): Boolean = HTTP_PROXY_LINK.matches((s ?: "").trim())
+
     fun parseMany(text: String): Pair<List<ServerConfig>, List<String>> {
         var body = text.trim()
         if (!SCHEME_RE.containsMatchIn(body)) {
@@ -24,7 +39,7 @@ object LinkParser {
         val errors = ArrayList<String>()
         for (raw in body.split(Regex("\\r?\\n"))) {
             val line = raw.trim()
-            if (line.isEmpty() || !SCHEME_RE.containsMatchIn(line)) continue
+            if (line.isEmpty() || (!SCHEME_RE.containsMatchIn(line) && !isHttpProxyLink(line))) continue
             try {
                 out.add(parseLink(line))
             } catch (e: Exception) {
@@ -41,8 +56,11 @@ object LinkParser {
             l.startsWith("vmess://", true) -> parseVmess(l)
             l.startsWith("trojan://", true) -> parseTrojan(l)
             l.startsWith("ss://", true) -> parseShadowsocks(l)
-            l.startsWith("socks://", true) || l.startsWith("socks5://", true) -> parseSocks(l)
+            l.startsWith("socks://", true) || l.startsWith("socks5://", true) -> parseProxyLink(l, "socks")
             l.startsWith("wireguard://", true) || l.startsWith("wg://", true) -> parseWireguard(l)
+            // case-insensitive to match HTTP_PROXY_LINK (and parseMany's line filter),
+            // so an uppercase scheme imports instead of being reported as an error
+            l.startsWith("http://", true) && isHttpProxyLink(l) -> parseProxyLink(l, "http")
             else -> throw IllegalArgumentException("Unsupported link")
         }
     }
@@ -87,9 +105,8 @@ object LinkParser {
             .put("streamSettings", buildStream(q))
         q["fragment"]?.let { ob.put("_fragment", it) }   // TLS fragmentation from the link
         q["noise"]?.let { ob.put("_noise", it) }         // anti-DPI / fake ClientHello injection
-        q["fakeSni"]?.let { ob.put("_fakesni", it) }
         return ServerConfig(newId("s"), name.ifBlank { address }, "vless", address, port, ob,
-            engine = q["engine"]?.takeIf { it != "xray" })
+            engine = q["engine"]?.takeIf { it.isNotBlank() && it != "xray" })
     }
 
     private fun parseVmess(link: String): ServerConfig {
@@ -109,8 +126,9 @@ object LinkParser {
             "alpn" to v.optString("alpn"),
             "serviceName" to v.optString("path"),
             "headerType" to v.optString("type", "none"),
-            "cipherSuites" to v.optString("cipherSuites"),
-            "finalMask" to (if (v.has("finalMask")) v.optString("finalMask") else v.optString("finalmask"))
+            // `cs` / `fm` are the standard short keys; the long ones are the form we used to emit
+            "cipherSuites" to v.optString("cs").ifBlank { v.optString("cipherSuites") },
+            "finalMask" to v.optString("fm").ifBlank { v.optString("finalMask").ifBlank { v.optString("finalmask") } }
         )
         val user = JSONObject()
             .put("id", v.optString("id"))
@@ -124,7 +142,6 @@ object LinkParser {
             .put("streamSettings", buildStream(q))
         if (v.has("fragment")) ob.put("_fragment", v.optString("fragment"))
         if (v.has("noise")) ob.put("_noise", v.optString("noise"))
-        if (v.has("fakesni")) ob.put("_fakesni", v.optString("fakesni"))
         return ServerConfig(newId("s"), v.optString("ps", address), "vmess", address, port, ob,
             engine = v.optString("engine").takeIf { it.isNotBlank() && it != "xray" })
     }
@@ -146,9 +163,8 @@ object LinkParser {
             .put("streamSettings", buildStream(q))
         q["fragment"]?.let { ob.put("_fragment", it) }
         q["noise"]?.let { ob.put("_noise", it) }
-        q["fakeSni"]?.let { ob.put("_fakesni", it) }
         return ServerConfig(newId("s"), name.ifBlank { address }, "trojan", address, port, ob,
-            engine = q["engine"]?.takeIf { it != "xray" })
+            engine = q["engine"]?.takeIf { it.isNotBlank() && it != "xray" })
     }
 
     private fun parseShadowsocks(link: String): ServerConfig {
@@ -184,9 +200,13 @@ object LinkParser {
         return ServerConfig(newId("s"), name.ifBlank { address }, "shadowsocks", address, port, ob)
     }
 
-    private fun parseSocks(link: String): ServerConfig {
-        val scheme = if (link.startsWith("socks5://", true)) "socks5://" else "socks://"
-        val body = link.substring(scheme.length)
+    /**
+     * A socks:// / socks5:// / http:// proxy link (mirrors parser.js parseProxyLink).
+     * Tolerant of `host:port`, `user:pass@host:port`, `base64(user:pass)@host:port`
+     * and a fully base64 `base64(user:pass@host:port)` body.
+     */
+    private fun parseProxyLink(link: String, proto: String): ServerConfig {
+        val body = link.substring(link.indexOf("://") + 3)
         val (mainWithHash, name) = splitHash(body)
         var main = mainWithHash
         val qi = main.indexOf('?'); if (qi != -1) main = main.substring(0, qi)
@@ -212,9 +232,9 @@ object LinkParser {
                 val hp = splitHostPort(main); address = hp.first; portStr = hp.second
             }
         }
-        val port = portStr.toIntOrNull() ?: 1080
-        val ob = proxyOutbound("socks", address, port, dec(user), dec(pass))
-        return ServerConfig(newId("s"), name.ifBlank { address }, "socks", address, port, ob)
+        val port = portStr.toIntOrNull() ?: (if (proto == "http") 8080 else 1080)
+        val ob = proxyOutbound(proto, address, port, dec(user), dec(pass))
+        return ServerConfig(newId("s"), name.ifBlank { address }, proto, address, port, ob)
     }
 
     /* ------------------------- WireGuard ------------------------- */
@@ -333,8 +353,10 @@ object LinkParser {
                 .put("allowInsecure", q["allowInsecure"] == "1" || q["allowInsecure"] == "true")
                 .put("fingerprint", q["fp"] ?: "chrome")
             q["alpn"]?.takeIf { it.isNotEmpty() }?.let { tls.put("alpn", JSONArray().apply { it.split(",").forEach { a -> put(a) } }) }
-            // patterniha custom TLS: `unsafe` fingerprint + pinned cipherSuites
-            q["cipherSuites"]?.takeIf { it.isNotBlank() }?.let { tls.put("cipherSuites", it.trim()) }
+            // patterniha custom TLS: `unsafe` fingerprint + pinned cipherSuites.
+            // `cs` is the standard share-link name, `cipherSuites` the long legacy one.
+            val cs = q["cs"]?.takeIf { it.isNotBlank() } ?: q["cipherSuites"]
+            cs?.takeIf { it.isNotBlank() }?.let { tls.put("cipherSuites", it.trim()) }
             stream.put("tlsSettings", tls)
         } else if (security == "reality") {
             stream.put("realitySettings", JSONObject()
@@ -344,38 +366,19 @@ object LinkParser {
                 .put("shortId", q["sid"] ?: "")
                 .put("spiderX", q["spx"] ?: ""))
         }
-        // finalMask: raw JSON (plural lengths/delays arrays normalized to the
-        // core's singular length/delay range so it runs on the bundled core).
-        q["finalMask"]?.takeIf { it.isNotBlank() }?.let { normalizeFinalMask(it)?.let { fm -> stream.put("finalmask", fm) } }
+        // finalMask (transport-level masking: fragment, noise, header-custom, …).
+        // Stored VERBATIM: the core takes the plural `lengths`/`delays` arrays, and an
+        // earlier version of this code rewrote them into the singular form, which the
+        // current core rejects. `fm` is the standard share-link name; `finalMask` is
+        // the long form we used to emit.
+        val fmRaw = q["fm"]?.takeIf { it.isNotBlank() } ?: q["finalMask"]
+        fmRaw?.takeIf { it.isNotBlank() }?.let { raw -> parseFinalMask(raw)?.let { fm -> stream.put("finalmask", fm) } }
         return stream
     }
 
-    /** Parse + normalize a finalMask JSON (plural lengths/delays -> singular range). */
-    fun normalizeFinalMask(raw: String): JSONObject? {
-        val obj = try { JSONObject(raw) } catch (e: Exception) { return null }
-        fun rangeOf(a: JSONArray): String? {
-            var mn = Int.MAX_VALUE; var mx = Int.MIN_VALUE
-            for (i in 0 until a.length()) {
-                val parts = a.optString(i).split("-")
-                parts.getOrNull(0)?.toIntOrNull()?.let { if (it < mn) mn = it }
-                (parts.getOrNull(parts.size - 1)?.toIntOrNull())?.let { if (it > mx) mx = it }
-            }
-            if (mn == Int.MAX_VALUE) return null
-            if (mn < 1) mn = 1; if (mx < mn) mx = mn
-            return if (mn == mx) "$mn" else "$mn-$mx"
-        }
-        fun fixMasks(arr: JSONArray?) {
-            if (arr == null) return
-            for (i in 0 until arr.length()) {
-                val s = arr.optJSONObject(i)?.optJSONObject("settings") ?: continue
-                s.optJSONArray("lengths")?.let { rangeOf(it)?.let { r -> s.put("length", r) }; s.remove("lengths") }
-                s.optJSONArray("delays")?.let { s.put("delay", it.optString(0, "0")); s.remove("delays") }
-            }
-        }
-        fixMasks(obj.optJSONArray("tcp"))
-        fixMasks(obj.optJSONArray("udp"))
-        return obj
-    }
+    /** Parse a finalMask JSON string, untouched. Returns null when it is unusable. */
+    fun parseFinalMask(raw: String): JSONObject? =
+        try { JSONObject(raw) } catch (e: Exception) { null }
 
     /* ------------------------- helpers ------------------------- */
 
@@ -437,9 +440,9 @@ object LinkParser {
             "kcp" -> st.optJSONObject("kcpSettings")?.let { q["headerType"] = it.optJSONObject("header")?.optString("type") ?: "none"; it.optString("seed").takeIf { sd -> sd.isNotBlank() }?.let { sd -> q["seed"] = sd } }
             "tcp" -> st.optJSONObject("tcpSettings")?.optJSONObject("header")?.takeIf { it.optString("type") == "http" }?.let { h -> q["headerType"] = "http"; val rq = h.optJSONObject("request"); q["path"] = rq?.optJSONArray("path")?.optString(0) ?: ""; q["host"] = rq?.optJSONObject("headers")?.optJSONArray("Host")?.optString(0) ?: "" }
         }
-        st.optJSONObject("tlsSettings")?.let { q["sni"] = it.optString("serverName"); q["fp"] = it.optString("fingerprint"); if (it.optBoolean("allowInsecure")) q["allowInsecure"] = "1"; jarr(it.optJSONArray("alpn")).joinToString(",").takeIf { a -> a.isNotBlank() }?.let { a -> q["alpn"] = a }; it.optString("cipherSuites").takeIf { c -> c.isNotBlank() }?.let { c -> q["cipherSuites"] = c } }
+        st.optJSONObject("tlsSettings")?.let { q["sni"] = it.optString("serverName"); q["fp"] = it.optString("fingerprint"); if (it.optBoolean("allowInsecure")) q["allowInsecure"] = "1"; jarr(it.optJSONArray("alpn")).joinToString(",").takeIf { a -> a.isNotBlank() }?.let { a -> q["alpn"] = a }; it.optString("cipherSuites").takeIf { c -> c.isNotBlank() }?.let { c -> q["cs"] = c } }
         st.optJSONObject("realitySettings")?.let { q["sni"] = it.optString("serverName"); q["fp"] = it.optString("fingerprint"); q["pbk"] = it.optString("publicKey"); q["sid"] = it.optString("shortId"); it.optString("spiderX").takeIf { x -> x.isNotBlank() }?.let { x -> q["spx"] = x } }
-        st.optJSONObject("finalmask")?.let { q["finalMask"] = it.toString() }
+        st.optJSONObject("finalmask")?.let { q["fm"] = it.toString() }
     }
 
     private fun srv0(ob: JSONObject) = ob.optJSONObject("settings")?.optJSONArray("servers")?.optJSONObject(0) ?: JSONObject()
@@ -453,7 +456,6 @@ object LinkParser {
         val extras = LinkedHashMap<String, String>()
         ob.optString("_fragment").takeIf { it.isNotBlank() }?.let { extras["fragment"] = it }
         ob.optString("_noise").takeIf { it.isNotBlank() }?.let { extras["noise"] = it }
-        ob.optString("_fakesni").takeIf { it.isNotBlank() }?.let { extras["fakeSni"] = it }
         s.engine?.takeIf { it.isNotBlank() && it != "xray" }?.let { extras["engine"] = it }
         return when (s.protocol) {
             "vless" -> {
@@ -473,9 +475,9 @@ object LinkParser {
                     .put("net", p["type"] ?: "tcp").put("type", p["headerType"] ?: "none").put("host", p["host"] ?: "")
                     .put("path", p["path"] ?: (p["serviceName"] ?: "")).put("tls", if (p["security"] == "tls") "tls" else "")
                     .put("sni", p["sni"] ?: "").put("fp", p["fp"] ?: "").put("alpn", p["alpn"] ?: "")
-                p["cipherSuites"]?.let { v.put("cipherSuites", it) }; p["finalMask"]?.let { v.put("finalMask", it) }
+                p["cs"]?.let { v.put("cs", it) }; p["fm"]?.let { v.put("fm", it) }
                 extras["fragment"]?.let { v.put("fragment", it) }; extras["noise"]?.let { v.put("noise", it) }
-                extras["fakeSni"]?.let { v.put("fakesni", it) }; extras["engine"]?.let { v.put("engine", it) }
+                extras["engine"]?.let { v.put("engine", it) }
                 "vmess://" + b64e(v.toString())
             }
             "shadowsocks" -> { val srv = srv0(ob); "ss://${b64e("${srv.optString("method")}:${srv.optString("password")}")}@${s.address}:${s.port}$name" }
@@ -486,5 +488,74 @@ object LinkParser {
             }
             else -> s.raw   // wireguard / unknown -> imported link
         }
+    }
+
+    /* ================ migrating servers from an older store ================ */
+
+    /**
+     * A singular finalmask value as the single element of its plural array.
+     * Anything we never wrote (an object, a boolean, an empty string) gives null,
+     * so the caller leaves that entry alone rather than inventing one.
+     */
+    private fun pluralValue(v: Any?): String? = when (v) {
+        is String -> if (v.isEmpty()) null else v
+        is Number -> v.toString()
+        else -> null
+    }
+
+    /**
+     * Rewrite the singular `length`/`delay` keys of a finalmask into the plural
+     * `lengths`/`delays` arrays the current core wants, IN PLACE — the caller owns
+     * `fm`. Returns true when anything actually changed. A `lengths` array that is
+     * already there means the entry was never collapsed, so it is left whole; a
+     * mask carrying both forms (never written by either parser) keeps the plural.
+     */
+    private fun pluralizeFinalMask(fm: JSONObject): Boolean {
+        var changed = false
+        for (key in listOf("tcp", "udp")) {
+            val list = fm.optJSONArray(key) ?: continue
+            for (i in 0 until list.length()) {
+                val s = list.optJSONObject(i)?.optJSONObject("settings") ?: continue
+                if (s.optJSONArray("lengths") == null) {
+                    val lv = pluralValue(s.opt("length"))
+                    if (lv != null) { s.put("lengths", JSONArray().put(lv)); s.remove("length"); changed = true }
+                }
+                if (s.optJSONArray("delays") == null) {
+                    val dv = pluralValue(s.opt("delay"))
+                    if (dv != null) { s.put("delays", JSONArray().put(dv)); s.remove("delay"); changed = true }
+                }
+            }
+        }
+        return changed
+    }
+
+    /**
+     * Bring a server saved by an older version up to the shape the current code
+     * expects. Pure: the input is never mutated, and when there is nothing to do
+     * the very same object comes back, so a caller can skip the store write.
+     *
+     * Two shapes the previous parser wrote are still sitting in users' stores:
+     *  - `outbound._fakesni`, the fake-ClientHello decoy marker. It was built out of
+     *    the freedom outbound's `noises`, which are UDP-only, so it never did
+     *    anything on a TLS/TCP connection — it is dead weight in config.json now.
+     *  - a finalmask fragment collapsed to the SINGULAR `length`/`delay` form. The
+     *    current core takes only the plural arrays. (Only the collapse direction is
+     *    reversible — `length: "3-8"` becomes `lengths: ["3-8"]`, one fragment
+     *    covering the whole range.)
+     *
+     * The store is a plain file a user can hand-edit, so every step is shape-checked
+     * and nothing throws.
+     */
+    fun migrateStoredServer(s: ServerConfig): ServerConfig {
+        val dropFakeSni = s.outbound.has("_fakesni")
+        val hasMask = s.outbound.optJSONObject("streamSettings")?.optJSONObject("finalmask") != null
+        if (!dropFakeSni && !hasMask) return s
+        // work on a deep copy, so the stored outbound is never touched
+        val outbound = try { JSONObject(s.outbound.toString()) } catch (e: Exception) { return s }
+        var changed = dropFakeSni
+        if (dropFakeSni) outbound.remove("_fakesni")
+        val fm = outbound.optJSONObject("streamSettings")?.optJSONObject("finalmask")
+        if (fm != null && pluralizeFinalMask(fm)) changed = true
+        return if (changed) s.copy(outbound = outbound) else s
     }
 }
