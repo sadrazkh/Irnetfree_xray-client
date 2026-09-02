@@ -46,3 +46,11 @@ test('redirects are followed', async () => {
     assert.equal(fs.readFileSync(dest, 'utf8'), 'ok');
   } finally { srv.close(); }
 });
+
+const { Downloader } = require('../src/main/downloader');
+
+test('each Xray engine downloads from its own GitHub repo', () => {
+  assert.equal(Downloader.releaseApiUrl('xray'), 'https://api.github.com/repos/XTLS/Xray-core/releases/latest');
+  assert.equal(Downloader.releaseApiUrl('xray-pattn'), 'https://api.github.com/repos/patterniha/Xray-core/releases/latest');
+  assert.throws(() => Downloader.releaseApiUrl('sing-box'), /not an Xray-format engine/);
+});
