@@ -143,6 +143,12 @@ function uploadThroughProxy(socksPort, opts = {}) {
  * next. Reading in flowing mode and unshift()ing the remainder does not work —
  * the stream is still flowing with no 'data' listener attached, so those bytes
  * are re-emitted into the void before the caller can subscribe.
+ *
+ * A peer that hangs up mid-handshake has to settle the promise too: allowHalfOpen
+ * is false, so Node auto-destroys the socket on FIN, and _destroy() clears the
+ * socket timeout — 'timeout' never fires. Without the 'close' handler below the
+ * promise stayed pending forever, and ping:real / ping:upload / ip:check spun
+ * their badge for good instead of reporting a failure.
  */
 function socks5Connect(proxyHost, proxyPort, destHost, destPort, timeout = 8000) {
   return new Promise((resolve, reject) => {
@@ -150,11 +156,14 @@ function socks5Connect(proxyHost, proxyPort, destHost, destPort, timeout = 8000)
     let stage = 0;                  // 0 = method selection, 1 = CONNECT reply
     let want = 2;                   // bytes the reply in flight still owes us
     let buf = Buffer.alloc(0);
+    let settled = false;            // one settle only, whichever path gets there first
     socket.setTimeout(timeout);
-    const fail = (msg) => { socket.destroy(); reject(new Error(msg)); };
+    const fail = (msg) => { if (settled) return; settled = true; socket.destroy(); reject(new Error(msg)); };
+    const onClose = () => fail('socks connection closed');
 
     socket.once('timeout', () => fail('socks timeout'));
-    socket.once('error', (e) => reject(e));
+    socket.once('error', (e) => { if (settled) return; settled = true; reject(e); });
+    socket.once('close', onClose);
 
     socket.connect(proxyPort, proxyHost, () => {
       // greeting: VER=5, NMETHODS=1, METHOD=0 (no auth)
@@ -196,6 +205,8 @@ function socks5Connect(proxyHost, proxyPort, destHost, destPort, timeout = 8000)
 
         socket.setTimeout(0);
         socket.removeListener('readable', onReadable);   // back to unread, un-flowing
+        socket.removeListener('close', onClose);         // the caller owns the close from here
+        settled = true;
         return resolve(socket);
       }
     });
