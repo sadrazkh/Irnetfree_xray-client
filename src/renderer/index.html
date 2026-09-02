@@ -577,11 +577,6 @@
           <span class="switch-title" id="edHideSniLabel">🕵 Hide SNI from DPI (fragment)</span>
           <span class="switch"><input type="checkbox" id="edHideSni" /><span class="slider"></span></span>
         </label>
-        <div id="edFakeSniWrap">
-          <label class="field-label" id="edFakeSniLabel">Fake SNI decoy (experimental)</label>
-          <input type="text" id="edFakeSni" class="input" dir="ltr" placeholder="e.g. www.google.com" />
-          <p class="hint" id="edFakeSniHint">Injects a fake ClientHello with this domain before the real handshake.</p>
-        </div>
         <div class="grid2" id="edPathRow">
           <div><label class="field-label" data-i18n="edit.path">Path / ServiceName</label>
             <input type="text" id="edPath" class="input" dir="ltr" /></div>
@@ -666,12 +661,12 @@
         </div>
         <!-- patterniha custom-TLS (only meaningful for TLS configs) -->
         <div id="edPattWrap">
-          <div class="edit-section"><span data-i18n="edit.pattTitle">🧩 patterniha — finalMask / cipherSuites</span></div>
-          <label class="field-label" data-i18n="edit.cipherSuites">cipherSuites (use with fingerprint = unsafe)</label>
-          <input type="text" id="edCipherSuites" class="input" dir="ltr" placeholder="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:…" />
-          <label class="field-label" data-i18n="edit.finalMask" style="margin-top:8px;display:block">finalMask (JSON)</label>
-          <textarea id="edFinalMask" class="input" dir="ltr" rows="3" spellcheck="false" placeholder='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["5","94","1"],"delays":["0"],"maxSplit":"0"}}]}'></textarea>
-          <p class="hint" data-i18n="edit.pattHint">patterniha method: set Address to a clean Cloudflare IP, fingerprint = unsafe, then paste cipherSuites and finalMask. Array lengths/delays are auto-normalized to run on the bundled core.</p>
+          <div class="edit-section"><span data-i18n="edit.pattTitle">🧩 finalmask / cipherSuites</span></div>
+          <label class="field-label" data-i18n="edit.cipherSuites">cipherSuites (با fingerprint = unsafe)</label>
+          <input type="text" id="edCipherSuites" class="input" dir="ltr" placeholder="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256" />
+          <label class="field-label" data-i18n="edit.finalMask" style="margin-top:8px;display:block">finalmask (JSON — همان چیزی که در لینک با fm می‌آید)</label>
+          <textarea id="edFinalMask" class="input" dir="ltr" rows="3" spellcheck="false" placeholder='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5","6-8"],"delays":["10-20"],"maxSplit":"3-6"}}]}'></textarea>
+          <p class="hint" data-i18n="edit.pattHint">دقیقاً همان JSON را بچسبان؛ برنامه دست‌کاری‌اش نمی‌کند. برای روش پترنیها: Address یک IP تمیز کلودفلر، fingerprint = unsafe، بعد cipherSuites و finalmask.</p>
         </div>
       </div>
       <div class="modal-foot">
