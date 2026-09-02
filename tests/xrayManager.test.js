@@ -163,6 +163,27 @@ test('startTest spawns the RESOLVED engine with that engine\'s own argv', async 
   }
 });
 
+test('startTest resolves quietly — a batch ping must not repeat the fallback warning', async () => {
+  // Only the fork is installed, so every latency test on a default-'xray' setup
+  // falls back. "Ping all" over 40 servers used to log 40 identical warnings.
+  await withBin([exe('xray-pattn')], async (xm, dir, logs) => {
+    fakeSpawn = () => stubChild();
+    try {
+      const a = await xm.startTest({ inbounds: [] }, 'xray');
+      const b = await xm.startTest({ inbounds: [] }, 'xray');
+      a.cleanup(); b.cleanup();
+      assert.deepEqual(logs, [], 'the latency-test path must not warn, once per server or at all');
+
+      // the connect path still tells the user which core actually ran
+      assert.equal(xm.resolveEngine('xray').id, 'xray-pattn');
+      assert.equal(logs.length, 1);
+      assert.match(logs.at(-1), /not found.*using xray-pattn/);
+    } finally {
+      fakeSpawn = null;
+    }
+  });
+});
+
 test('version(): a spawn error is final — the timeout can not overwrite it', async (t) => {
   await withBin([exe('xray')], async (xm) => {
     const child = stubChild();

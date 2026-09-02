@@ -38,6 +38,27 @@ function getJSON(url) {
   });
 }
 
+/** The only hosts plain http:// is allowed for — the tests' local server. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+/**
+ * Pick the transport for a download URL, refusing cleartext.
+ * What lands here is an EXECUTABLE (xray / sing-box / tun2socks) that the app
+ * then runs, so http:// is only a local-test seam. This is checked per hop:
+ * a redirect onto a plain-http URL must not reopen it either.
+ */
+function pickModule(u) {
+  let parsed;
+  try { parsed = new URL(u); } catch { throw new Error('invalid download URL: ' + u); }
+  if (parsed.protocol === 'https:') return https;
+  if (parsed.protocol !== 'http:') throw new Error('unsupported download protocol: ' + parsed.protocol);
+  // URL strips the brackets of an IPv6 literal, so [::1] arrives as ::1
+  if (!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error('refusing to download over plain http: ' + u);
+  }
+  return http;
+}
+
 function downloadFile(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
@@ -46,7 +67,8 @@ function downloadFile(url, dest, onProgress) {
     const fail = (err) => { file.close(() => { try { fs.unlinkSync(dest); } catch {} reject(err); }); };
     const req = (u, depth) => {
       if (depth > 6) return fail(new Error('too many redirects'));
-      const mod = u.startsWith('http:') ? http : https;   // http only for local tests
+      let mod;
+      try { mod = pickModule(u); } catch (e) { return fail(e); }
       mod.get(u, { headers: { 'User-Agent': 'IRNetFree' } }, (res) => {
         if (res.statusCode >= 300 && res.headers.location) { res.resume(); req(res.headers.location, depth + 1); return; }
         if (res.statusCode !== 200) { res.resume(); return fail(new Error('HTTP ' + res.statusCode)); }

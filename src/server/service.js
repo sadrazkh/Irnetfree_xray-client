@@ -329,9 +329,11 @@ function createService(opts = {}) {
           ? ' — this config has no TLS; the official core refuses it. Install Xray-PattN under Settings → Required files.'
           : ' — این کانفیگ TLS ندارد و هستهٔ رسمی آن را رد می‌کند. Xray-PattN را از تنظیمات → فایل‌های موردنیاز نصب کن.')
         : '';
-      const err = new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
-      err.needEngine = check.plaintextRejected ? 'xray-pattn' : undefined;
-      throw err;
+      // Only Error.message survives the bridge (web-api.js rebuilds it with
+      // new Error(data.error)), so the hint IS the signal: the renderer keys off
+      // the (untranslated) product name in it. A property set here would be
+      // dropped in transit — don't add one.
+      throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
     }
     const runEngine = check.engine;
 
