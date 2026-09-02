@@ -6,6 +6,9 @@
         content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
   <title>IRNetFree</title>
   <link rel="stylesheet" href="styles.css" />
+  <!-- Applies the remembered theme before the first paint, so a light-theme user
+       does not see a dark flash while app:init is still in flight. -->
+  <script src="theme-boot.js"></script>
 </head>
 <body>
   <!-- custom titlebar -->
@@ -166,6 +169,10 @@
         <!-- WireGuard manual add -->
         <div class="import-box" id="wgBox" hidden>
           <div class="wg-title" data-i18n="wg.title">افزودن WireGuard</div>
+          <div class="row-gap" style="margin-bottom:12px">
+            <button class="btn ghost" id="btnWgPickConf" data-i18n="wg.pickConf">انتخاب فایل .conf</button>
+            <span class="import-hint" id="wgConfHint"></span>
+          </div>
           <div class="grid2">
             <div><label class="field-label" data-i18n="wg.name">نام</label>
               <input type="text" id="wgName" class="input" data-i18n-ph="wg.namePh" /></div>
@@ -443,6 +450,17 @@
               <p class="hint" data-i18n="set.defaultEngineHint"></p>
             </div>
           </div>
+          <div class="grid2">
+            <div>
+              <label class="field-label" data-i18n="set.theme">تم</label>
+              <select id="themeSelect" class="select">
+                <option value="dark" data-i18n="theme.dark">تیره</option>
+                <option value="light" data-i18n="theme.light">روشن</option>
+                <option value="system" data-i18n="theme.system">مثل سیستم</option>
+              </select>
+            </div>
+            <div></div>
+          </div>
         </div>
 
         <!-- Required runtime files -->
@@ -481,6 +499,11 @@
             <label class="switch"><input type="checkbox" id="optKillSwitch" /><span class="slider"></span></label>
           </div>
           <div class="tun-status" id="killStatus"></div>
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="netauto.title">اتصال مجدد خودکار هنگام تغییر شبکه</div>
+              <div class="switch-sub" data-i18n="netauto.sub">اگر اینترنت عوض شد (وای‌فای/کابل/بیدارشدن از خواب)، تونل خودکار بازسازی می‌شود</div></div>
+            <label class="switch"><input type="checkbox" id="optNetAuto" /><span class="slider"></span></label>
+          </div>
         </div>
 
         <div class="card">
@@ -572,11 +595,6 @@
           <span class="switch-title" id="edHideSniLabel">🕵 Hide SNI from DPI (fragment)</span>
           <span class="switch"><input type="checkbox" id="edHideSni" /><span class="slider"></span></span>
         </label>
-        <div id="edFakeSniWrap">
-          <label class="field-label" id="edFakeSniLabel">Fake SNI decoy (experimental)</label>
-          <input type="text" id="edFakeSni" class="input" dir="ltr" placeholder="e.g. www.google.com" />
-          <p class="hint" id="edFakeSniHint">Injects a fake ClientHello with this domain before the real handshake.</p>
-        </div>
         <div class="grid2" id="edPathRow">
           <div><label class="field-label" data-i18n="edit.path">Path / ServiceName</label>
             <input type="text" id="edPath" class="input" dir="ltr" /></div>
@@ -661,12 +679,12 @@
         </div>
         <!-- patterniha custom-TLS (only meaningful for TLS configs) -->
         <div id="edPattWrap">
-          <div class="edit-section"><span data-i18n="edit.pattTitle">🧩 patterniha — finalMask / cipherSuites</span></div>
-          <label class="field-label" data-i18n="edit.cipherSuites">cipherSuites (use with fingerprint = unsafe)</label>
-          <input type="text" id="edCipherSuites" class="input" dir="ltr" placeholder="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:…" />
-          <label class="field-label" data-i18n="edit.finalMask" style="margin-top:8px;display:block">finalMask (JSON)</label>
-          <textarea id="edFinalMask" class="input" dir="ltr" rows="3" spellcheck="false" placeholder='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["5","94","1"],"delays":["0"],"maxSplit":"0"}}]}'></textarea>
-          <p class="hint" data-i18n="edit.pattHint">patterniha method: set Address to a clean Cloudflare IP, fingerprint = unsafe, then paste cipherSuites and finalMask. Array lengths/delays are auto-normalized to run on the bundled core.</p>
+          <div class="edit-section"><span data-i18n="edit.pattTitle">🧩 finalmask / cipherSuites</span></div>
+          <label class="field-label" data-i18n="edit.cipherSuites">cipherSuites (با fingerprint = unsafe)</label>
+          <input type="text" id="edCipherSuites" class="input" dir="ltr" placeholder="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256" />
+          <label class="field-label" data-i18n="edit.finalMask" style="margin-top:8px;display:block">finalmask (JSON — همان چیزی که در لینک با fm می‌آید)</label>
+          <textarea id="edFinalMask" class="input" dir="ltr" rows="3" spellcheck="false" placeholder='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5","6-8"],"delays":["10-20"],"maxSplit":"3-6"}}]}'></textarea>
+          <p class="hint" data-i18n="edit.pattHint">دقیقاً همان JSON را بچسبان؛ برنامه دست‌کاری‌اش نمی‌کند. برای روش پترنیها: Address یک IP تمیز کلودفلر، fingerprint = unsafe، بعد cipherSuites و finalmask.</p>
         </div>
       </div>
       <div class="modal-foot">

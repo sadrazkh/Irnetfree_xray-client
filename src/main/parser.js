@@ -102,7 +102,8 @@ function buildStreamSettings(q) {
     };
     if (q.alpn) stream.tlsSettings.alpn = q.alpn.split(',');
     // patterniha-style custom TLS: `unsafe` fingerprint lets you pin cipherSuites.
-    if (q.cipherSuites) stream.tlsSettings.cipherSuites = String(q.cipherSuites).trim();
+    const cs = q.cs || q.cipherSuites;
+    if (cs && String(cs).trim()) stream.tlsSettings.cipherSuites = String(cs).trim();
   } else if (security === 'reality') {
     stream.realitySettings = {
       serverName: q.sni || '',
@@ -113,47 +114,27 @@ function buildStreamSettings(q) {
     };
   }
 
-  // finalMask (ClientHello fragmentation / masking) — a raw JSON object the user
-  // pastes; normalized so both the plural (lengths/delays arrays) and singular
-  // forms work on the bundled core.
-  if (q.finalMask) {
-    const fm = normalizeFinalMask(q.finalMask);
+  // finalMask (transport-level masking: fragment, noise, header-custom, …).
+  // Stored VERBATIM: the core takes the plural `lengths`/`delays` arrays, and an
+  // earlier version of this code rewrote them into the singular form, which the
+  // current core rejects. `fm` is the standard share-link name; `finalMask` is
+  // the long form we used to emit.
+  const fmRaw = q.fm || q.finalMask;
+  if (fmRaw) {
+    const fm = parseFinalMask(fmRaw);
     if (fm) stream.finalmask = fm;
   }
 
   return stream;
 }
 
-/**
- * Parse + normalize a finalMask JSON. The patterniha UI uses plural arrays
- * (`lengths`, `delays`) where the n-th element is the n-th fragment's size; the
- * bundled xray core wants the singular `length`/`delay` range, so we collapse
- * the array to its min-max range (still splits the ClientHello / hides the SNI).
- * Returns the normalized object, or null on invalid JSON.
- */
-function normalizeFinalMask(raw) {
-  let obj;
-  try { obj = typeof raw === 'string' ? JSON.parse(raw) : raw; }
-  catch { return null; }
-  if (!obj || typeof obj !== 'object') return null;
-  const rangeOf = (arr) => {
-    let mn = Infinity, mx = -Infinity;
-    for (const v of arr) { const p = String(v).split('-').map(n => parseInt(n, 10)); if (Number.isFinite(p[0])) mn = Math.min(mn, p[0]); mx = Math.max(mx, p[p.length - 1]); }
-    if (!Number.isFinite(mn)) return null;
-    mn = Math.max(1, mn); mx = Math.max(mn, mx);
-    return mn === mx ? String(mn) : `${mn}-${mx}`;
-  };
-  const fixMasks = (a) => Array.isArray(a) ? a.map(m => {
-    const s = m && m.settings;
-    if (s) {
-      if (Array.isArray(s.lengths)) { const r = rangeOf(s.lengths); if (r) s.length = r; delete s.lengths; }
-      if (Array.isArray(s.delays)) { s.delay = String(s.delays[0] != null ? s.delays[0] : '0'); delete s.delays; }
-    }
-    return m;
-  }) : a;
-  if (obj.tcp) obj.tcp = fixMasks(obj.tcp);
-  if (obj.udp) obj.udp = fixMasks(obj.udp);
-  return obj;
+/** Parse a finalMask value (JSON string or object). Returns null when unusable. */
+function parseFinalMask(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  try {
+    const o = JSON.parse(String(raw));
+    return (o && typeof o === 'object') ? o : null;
+  } catch { return null; }
 }
 
 /* ----------------------------- VLESS ----------------------------- */
@@ -196,7 +177,6 @@ function parseVless(link) {
   if (q.fragment) outbound._fragment = q.fragment;
   // Anti-DPI noise / fake ClientHello injection (&noise=type:packet:delay;...)
   if (q.noise) outbound._noise = q.noise;
-  if (q.fakeSni) outbound._fakesni = q.fakeSni;
 
   const srv = mkServer(name || address, 'vless', address, port, link, outbound);
   if (q.engine && q.engine !== 'xray') srv.engine = q.engine;
@@ -226,8 +206,8 @@ function parseVmess(link) {
     alpn: v.alpn || '',
     serviceName: v.path || '',
     headerType: v.type || 'none',
-    cipherSuites: v.cipherSuites || '',
-    finalMask: v.finalMask || v.finalmask || ''
+    cipherSuites: v.cs || v.cipherSuites || '',
+    finalMask: v.fm || v.finalMask || v.finalmask || ''
   };
   const stream = buildStreamSettings(q);
 
@@ -249,7 +229,6 @@ function parseVmess(link) {
 
   if (v.fragment) outbound._fragment = String(v.fragment);
   if (v.noise) outbound._noise = String(v.noise);
-  if (v.fakesni) outbound._fakesni = String(v.fakesni);
 
   const srv = mkServer(v.ps || address, 'vmess', address, port, link, outbound);
   if (v.engine && v.engine !== 'xray') srv.engine = String(v.engine);
@@ -286,7 +265,6 @@ function parseTrojan(link) {
 
   if (q.fragment) outbound._fragment = q.fragment;
   if (q.noise) outbound._noise = q.noise;
-  if (q.fakeSni) outbound._fakesni = q.fakeSni;
 
   const srv = mkServer(name || address, 'trojan', address, port, link, outbound);
   if (q.engine && q.engine !== 'xray') srv.engine = q.engine;
@@ -498,8 +476,64 @@ function splitCommas(v) {
 }
 
 /**
+ * The text form of a WireGuard config (what every provider hands out and what a
+ * `.conf` file contains). Both sections are required — an [Interface] alone is a
+ * server config, not something we can dial.
+ */
+function isWireguardConf(text) {
+  const t = String(text || '');
+  return /^\s*\[interface\]/im.test(t) && /^\s*\[peer\]/im.test(t);
+}
+
+/**
+ * Parse a WireGuard `.conf` into the field shape makeWireguardServer() takes.
+ * Keys are case-insensitive; `#`/`;` comments and CRLF are tolerated. Only the
+ * FIRST [Peer] is used — a multi-peer config is a router setup, not a client.
+ * Throws naming the missing field, so the UI can say which one.
+ */
+function parseWireguardConf(text) {
+  let section = '';
+  const iface = {}, peer = {};
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.replace(/[#;].*$/, '').trim();
+    if (!line) continue;
+    const sec = line.match(/^\[(\w+)\]$/);
+    if (sec) { section = sec[1].toLowerCase(); continue; }
+    const eq = line.indexOf('=');
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim().toLowerCase();
+    const val = line.slice(eq + 1).trim();
+    if (section === 'interface') { if (!(key in iface)) iface[key] = val; }
+    else if (section === 'peer') { if (!(key in peer)) peer[key] = val; }   // first peer wins
+  }
+
+  const privateKey = iface.privatekey || '';
+  const publicKey = peer.publickey || '';
+  const endpoint = peer.endpoint || '';
+  if (!privateKey) throw new Error('WireGuard config: PrivateKey is missing');
+  if (!publicKey) throw new Error('WireGuard config: PublicKey is missing');
+  if (!endpoint) throw new Error('WireGuard config: Endpoint is missing');
+
+  const [host] = splitHostPort(endpoint);
+  return {
+    name: host || 'WireGuard',
+    endpoint,
+    privateKey,
+    publicKey,
+    address: iface.address || '',
+    // Absent AllowedIPs stays '' so buildWireguardOutbound applies its own
+    // default (0.0.0.0/0, ::/0) instead of an empty — unroutable — list.
+    allowedIPs: peer.allowedips || '',
+    presharedKey: peer.presharedkey || '',
+    mtu: iface.mtu || '',
+    reserved: iface.reserved || '',
+    dns: iface.dns || ''   // captured for a future setting; unused by the outbound today
+  };
+}
+
+/**
  * Parse a wireguard:// or wg:// share link. Tolerant of several variants:
- *   wireguard://<privkey>@host:port?publickey=..&address=..&presharedkey=..&mtu=..&reserved=..#name
+ *   wireguard://<privkey>@host:port?publickey=..&address=..&allowedips=..&presharedkey=..&mtu=..&reserved=..#name
  */
 function parseWireguard(link) {
   const scheme = link.startsWith('wireguard://') ? 'wireguard://' : 'wg://';
@@ -523,6 +557,9 @@ function parseWireguard(link) {
     publicKey: q.publickey || q.publicKey || q.peer || '',
     endpoint: `${address}:${port}`,
     address: q.address || q.ip || '',
+    // Left undefined when absent so buildWireguardOutbound keeps its own default
+    // (0.0.0.0/0, ::/0) rather than seeing an explicit empty list.
+    allowedIPs: q.allowedips || q.allowedIPs || undefined,
     presharedKey: q.presharedkey || q.presharedKey || q.psk || '',
     mtu: q.mtu,
     reserved: q.reserved
@@ -630,11 +667,6 @@ function applyServerEdits(server, f) {
   if (f.noise != null) {
     const nz = String(f.noise).trim();
     if (nz) ob._noise = nz; else delete ob._noise;
-  }
-  // Fake/decoy SNI domain injected as a fake ClientHello. Empty clears it.
-  if (f.fakeSni != null) {
-    const fs = String(f.fakeSni).trim();
-    if (fs) ob._fakesni = fs; else delete ob._fakesni;
   }
   // Per-config core selection. 'xray' (default) or empty clears it.
   if (f.engine != null) {
@@ -745,6 +777,13 @@ function parseLink(link) {
 function parseMany(text) {
   let body = String(text || '').trim();
 
+  // A pasted .conf is ONE config spanning many lines — handle it before the
+  // per-line loop, which would otherwise see [Interface] and skip everything.
+  if (isWireguardConf(body)) {
+    try { return { servers: [makeWireguardServer(parseWireguardConf(body))], errors: [] }; }
+    catch (e) { return { servers: [], errors: [{ line: '[Interface]…', error: e.message }] }; }
+  }
+
   // If it has no scheme but decodes to links, treat as subscription base64.
   if (!/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//im.test(body)) {
     const decoded = b64decode(body);
@@ -786,9 +825,9 @@ function streamToQuery(st) {
     q.path = (rq.path && rq.path[0]) || ''; q.host = (rq.headers && rq.headers.Host && rq.headers.Host[0]) || '';
   }
   const tls = st.tlsSettings, rl = st.realitySettings;
-  if (tls) { q.sni = tls.serverName || ''; q.fp = tls.fingerprint || ''; if (tls.allowInsecure) q.allowInsecure = '1'; if (tls.alpn) q.alpn = Array.isArray(tls.alpn) ? tls.alpn.join(',') : tls.alpn; if (tls.cipherSuites) q.cipherSuites = tls.cipherSuites; }
+  if (tls) { q.sni = tls.serverName || ''; q.fp = tls.fingerprint || ''; if (tls.allowInsecure) q.allowInsecure = '1'; if (tls.alpn) q.alpn = Array.isArray(tls.alpn) ? tls.alpn.join(',') : tls.alpn; if (tls.cipherSuites) q.cs = tls.cipherSuites; }
   if (rl) { q.sni = rl.serverName || ''; q.fp = rl.fingerprint || ''; q.pbk = rl.publicKey || ''; q.sid = rl.shortId || ''; if (rl.spiderX) q.spx = rl.spiderX; }
-  if (st.finalmask) q.finalMask = JSON.stringify(st.finalmask);
+  if (st.finalmask) q.fm = JSON.stringify(st.finalmask);
   return q;
 }
 
@@ -802,7 +841,6 @@ function buildShareLink(server) {
   const extras = {};
   if (ob._fragment) extras.fragment = ob._fragment;
   if (ob._noise) extras.noise = ob._noise;
-  if (ob._fakesni) extras.fakeSni = ob._fakesni;
   if (server.engine && server.engine !== 'xray') extras.engine = server.engine;
 
   if (proto === 'vless') {
@@ -820,11 +858,10 @@ function buildShareLink(server) {
     const u = ob.settings.vnext[0].users[0]; const p = streamToQuery(ob.streamSettings);
     const v = { v: '2', ps: server.name || '', add: server.address, port: String(server.port), id: u.id, aid: String(u.alterId || 0), scy: u.security || 'auto',
       net: p.type || 'tcp', type: p.headerType || 'none', host: p.host || '', path: p.path || p.serviceName || '', tls: p.security === 'tls' ? 'tls' : '', sni: p.sni || '', fp: p.fp || '', alpn: p.alpn || '' };
-    if (p.cipherSuites) v.cipherSuites = p.cipherSuites;
-    if (p.finalMask) v.finalMask = p.finalMask;
+    if (p.cs) v.cs = p.cs;
+    if (p.fm) v.fm = p.fm;
     if (extras.fragment) v.fragment = extras.fragment;
     if (extras.noise) v.noise = extras.noise;
-    if (extras.fakeSni) v.fakesni = extras.fakeSni;
     if (extras.engine) v.engine = extras.engine;
     return 'vmess://' + Buffer.from(JSON.stringify(v)).toString('base64');
   }
@@ -837,11 +874,121 @@ function buildShareLink(server) {
     const auth = c ? Buffer.from(`${c.user || ''}:${c.pass || ''}`).toString('base64') + '@' : '';
     return `${proto}://${auth}${server.address}:${server.port}${name}`;
   }
-  return server.raw || '';   // wireguard / unknown: fall back to the imported link
+  if (proto === 'wireguard') {
+    const st = ob.settings || {};
+    const peer = (st.peers && st.peers[0]) || {};
+    const q = {
+      publickey: peer.publicKey || '',
+      address: (st.address || []).join(','),
+      allowedips: (peer.allowedIPs || []).join(','),
+      presharedkey: peer.preSharedKey || '',
+      mtu: st.mtu ? String(st.mtu) : '',
+      reserved: (st.reserved || []).join(',')
+    };
+    return `wireguard://${enc(st.secretKey || '')}@${server.address}:${server.port}?${qs(q)}${name}`;
+  }
+  return server.raw || '';   // unknown protocol: fall back to the imported link
+}
+
+/* ================== migrating servers from an older store ================== */
+
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * A singular finalmask value back into the plural array the core wants.
+ * Returns null for anything that is not a value we wrote (so the caller leaves
+ * that entry alone rather than inventing one).
+ */
+function pluralValue(v) {
+  if (typeof v === 'string') return v === '' ? null : [v];
+  if (typeof v === 'number' && Number.isFinite(v)) return [String(v)];
+  return null;
+}
+
+/**
+ * One finalmask entry ({ type, settings }). Returns a NEW entry when the
+ * singular keys had to be converted, or null when there is nothing to do.
+ */
+function pluralMask(mask) {
+  if (!isPlainObject(mask) || !isPlainObject(mask.settings)) return null;
+  const s = mask.settings;
+  // `lengths` already there = this entry was never collapsed; leave it whole.
+  const lengths = Array.isArray(s.lengths) ? null : pluralValue(s.length);
+  const delays = Array.isArray(s.delays) ? null : pluralValue(s.delay);
+  if (!lengths && !delays) return null;
+  const settings = Object.assign({}, s);
+  if (lengths) { settings.lengths = lengths; delete settings.length; }
+  if (delays) { settings.delays = delays; delete settings.delay; }
+  return Object.assign({}, mask, { settings });
+}
+
+/**
+ * A whole finalmask ({ tcp: [...], udp: [...] }). New object when anything
+ * changed, null otherwise.
+ */
+function pluralFinalMask(fm) {
+  if (!isPlainObject(fm)) return null;
+  let out = null;
+  for (const key of ['tcp', 'udp']) {
+    const list = fm[key];
+    if (!Array.isArray(list)) continue;
+    let listOut = null;
+    for (let i = 0; i < list.length; i++) {
+      const m = pluralMask(list[i]);
+      if (!m) continue;
+      if (!listOut) listOut = list.slice();
+      listOut[i] = m;
+    }
+    if (!listOut) continue;
+    if (!out) out = Object.assign({}, fm);
+    out[key] = listOut;
+  }
+  return out;
+}
+
+/**
+ * Bring a server saved by an older version up to the shape the current code
+ * expects. Pure: the input is never mutated, and when there is nothing to do
+ * the very same object comes back (so a caller can skip the store write).
+ *
+ * Two shapes the previous parser wrote are still sitting in users' store.json:
+ *
+ *  - `outbound._fakesni`, the fake-ClientHello decoy marker. configBuilder used
+ *    to consume and delete it while assembling the dialer outbound; it no longer
+ *    knows the key at all, so a leftover marker now travels straight into the
+ *    generated config.json.
+ *  - a finalmask fragment collapsed to the SINGULAR `length` / `delay` form. The
+ *    old parser rewrote the standard plural `lengths` / `delays` arrays into a
+ *    min-max range; the current core takes only the plural arrays and rejects
+ *    the singular ones, so those saved configs do not start until they are
+ *    converted back. (Only the collapse direction is reversible — the original
+ *    per-fragment sizes are gone, so `length: "3-8"` becomes `lengths: ["3-8"]`,
+ *    one fragment covering the whole range.)
+ *
+ * store.json is a plain file the user can hand-edit, so every step here is
+ * shape-checked and nothing throws. A mask carrying BOTH forms was never
+ * written by either parser; the plural one wins and the entry is left alone.
+ */
+function migrateStoredServer(server) {
+  if (!isPlainObject(server) || !isPlainObject(server.outbound)) return server;
+  const ob = server.outbound;
+
+  const dropFakeSni = Object.prototype.hasOwnProperty.call(ob, '_fakesni');
+  const st = ob.streamSettings;
+  const fm = isPlainObject(st) ? pluralFinalMask(st.finalmask) : null;
+  if (!dropFakeSni && !fm) return server;
+
+  const outbound = Object.assign({}, ob);
+  if (dropFakeSni) delete outbound._fakesni;
+  if (fm) outbound.streamSettings = Object.assign({}, st, { finalmask: fm });
+  return Object.assign({}, server, { outbound });
 }
 
 module.exports = {
   parseLink, parseMany, b64decode, isHttpProxyLink,
   buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits,
-  buildShareLink
+  parseWireguardConf, isWireguardConf,
+  buildShareLink, migrateStoredServer
 };

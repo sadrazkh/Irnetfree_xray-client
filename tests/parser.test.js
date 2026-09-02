@@ -14,7 +14,8 @@ const {
   parseLink, parseMany, b64decode,
   buildStreamSettings, buildWireguardOutbound,
   makeWireguardServer, makeProxyServer, applyServerEdits,
-  buildShareLink, isHttpProxyLink
+  parseWireguardConf, isWireguardConf,
+  buildShareLink, isHttpProxyLink, migrateStoredServer
 } = require('../src/main/parser');
 
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
@@ -343,6 +344,76 @@ test('makeWireguardServer: derives host/port from the endpoint', () => {
   assert.equal(s.outbound.settings.peers[0].endpoint, 'wg.home.net:51821');
 });
 
+/* --------------------------- WireGuard .conf --------------------------- */
+
+const WG_CONF = `[Interface]
+PrivateKey = yYYF82v2u8vPXOsOokPZiEOZG664yNpHuXcmaVNMKvg=
+Address = 10.1.142.13/32
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = FI/C4wFN+0e31jVk8sFJwxyMu7Hvav4vbWptZ//pnIE=
+AllowedIPs = 10.0.0.1/32, 0.0.0.0/0, ::/0
+Endpoint = ir.vrt-server.org:11040
+PersistentKeepalive = 10`;
+
+test('isWireguardConf recognises the INI form, not a link or a sub blob', () => {
+  assert.equal(isWireguardConf(WG_CONF), true);
+  assert.equal(isWireguardConf('  \n[interface]\nPrivateKey = k\n[Peer]\nPublicKey = p\nEndpoint = h:1'), true);
+  assert.equal(isWireguardConf('wireguard://k@h:51820'), false);
+  assert.equal(isWireguardConf('vless://u@a.com:443'), false);
+  assert.equal(isWireguardConf('[Interface]\nPrivateKey = k'), false, 'a [Peer] section is required');
+});
+
+test('parseWireguardConf reads every field the form takes', () => {
+  const f = parseWireguardConf(WG_CONF);
+  assert.equal(f.privateKey, 'yYYF82v2u8vPXOsOokPZiEOZG664yNpHuXcmaVNMKvg=');
+  assert.equal(f.publicKey, 'FI/C4wFN+0e31jVk8sFJwxyMu7Hvav4vbWptZ//pnIE=');
+  assert.equal(f.endpoint, 'ir.vrt-server.org:11040');
+  assert.equal(f.address, '10.1.142.13/32');
+  assert.equal(f.allowedIPs, '10.0.0.1/32, 0.0.0.0/0, ::/0');
+  assert.equal(f.name, 'ir.vrt-server.org');
+});
+
+test('parseWireguardConf: keys are case-insensitive, comments and CRLF tolerated', () => {
+  const f = parseWireguardConf('[interface]\r\n# a comment\r\nprivatekey=K\r\naddress=10.0.0.2/32\r\nMTU = 1380\r\n\r\n[peer]\r\npublickey=P\r\nendpoint=h.example:51820\r\npresharedkey=PSK\r\n');
+  assert.equal(f.privateKey, 'K');
+  assert.equal(f.publicKey, 'P');
+  assert.equal(f.mtu, '1380');
+  assert.equal(f.presharedKey, 'PSK');
+  assert.equal(f.allowedIPs, '', 'absent AllowedIPs stays empty so the builder applies its default');
+});
+
+test('parseWireguardConf rejects a config that cannot connect', () => {
+  assert.throws(() => parseWireguardConf('[Interface]\nPrivateKey = K\n[Peer]\nPublicKey = P'), /Endpoint/);
+  assert.throws(() => parseWireguardConf('[Interface]\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = P\nEndpoint = h:1'), /PrivateKey/);
+  assert.throws(() => parseWireguardConf('[Interface]\nPrivateKey = K\n[Peer]\nEndpoint = h:1'), /PublicKey/);
+});
+
+test('parseMany imports a pasted .conf as one server', () => {
+  const { servers, errors } = parseMany(WG_CONF);
+  assert.equal(errors.length, 0);
+  assert.equal(servers.length, 1);
+  const s = servers[0];
+  assert.equal(s.protocol, 'wireguard');
+  assert.equal(s.address, 'ir.vrt-server.org');
+  assert.equal(s.port, 11040);
+  assert.deepEqual(s.outbound.settings.address, ['10.1.142.13/32']);
+  assert.deepEqual(s.outbound.settings.peers[0].allowedIPs, ['10.0.0.1/32', '0.0.0.0/0', '::/0']);
+});
+
+test('a wireguard server exports a real share link, not its raw text', () => {
+  const s = parseMany(WG_CONF).servers[0];
+  const link = buildShareLink(s);
+  assert.match(link, /^wireguard:\/\//);
+  const back = parseLink(link);
+  assert.equal(back.address, 'ir.vrt-server.org');
+  assert.equal(back.port, 11040);
+  assert.equal(back.outbound.settings.secretKey, s.outbound.settings.secretKey);
+  assert.equal(back.outbound.settings.peers[0].publicKey, s.outbound.settings.peers[0].publicKey);
+  assert.deepEqual(back.outbound.settings.peers[0].allowedIPs, ['10.0.0.1/32', '0.0.0.0/0', '::/0']);
+});
+
 /* ----------------------------- parseMany ----------------------------- */
 
 test('parseMany: newline separated links', () => {
@@ -445,15 +516,13 @@ test('applyServerEdits: wireguard peer/interface fields', () => {
 test('applyServerEdits: anti-DPI markers set and clear', () => {
   const s = parseLink('vless://u@a.example.com:443');
 
-  const on = applyServerEdits(s, { fragment: 'tlshello,10-20,5', noise: 'faketls', fakeSni: 'www.google.com' });
+  const on = applyServerEdits(s, { fragment: 'tlshello,10-20,5', noise: 'faketls' });
   assert.equal(on.outbound._fragment, 'tlshello,10-20,5');
   assert.equal(on.outbound._noise, 'faketls');
-  assert.equal(on.outbound._fakesni, 'www.google.com');
 
-  const off = applyServerEdits(on, { fragment: '', noise: '  ', fakeSni: '' });
+  const off = applyServerEdits(on, { fragment: '', noise: '  ' });
   assert.equal('_fragment' in off.outbound, false);
   assert.equal('_noise' in off.outbound, false);
-  assert.equal('_fakesni' in off.outbound, false);
 });
 
 test('applyServerEdits: per-config engine set and cleared', () => {
@@ -486,4 +555,195 @@ test('buildStreamSettings: allowInsecure accepts "1" and "true"', () => {
 
 test('buildStreamSettings: tls serverName falls back to host when sni is absent', () => {
   assert.equal(buildStreamSettings({ security: 'tls', host: 'h.example.com' }).tlsSettings.serverName, 'h.example.com');
+});
+
+/* --------------------------- finalmask / cs / fp --------------------------- */
+
+const FM = '{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5","6-8"],"delays":["10-20"],"maxSplit":"3-6"}}]}';
+
+test('vless: fm= is stored verbatim — no key rewriting', () => {
+  const s = parseLink(`vless://u@a.example.com:443?security=tls&fm=${encodeURIComponent(FM)}#FM`);
+  const fm = s.outbound.streamSettings.finalmask;
+  assert.deepEqual(fm, JSON.parse(FM), 'the core takes plural lengths/delays; rewriting them breaks it');
+});
+
+test('vless: cs= and fp=unsafe are read into tlsSettings', () => {
+  const s = parseLink('vless://u@a.example.com:443?security=tls&fp=unsafe&cs=TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256');
+  assert.equal(s.outbound.streamSettings.tlsSettings.fingerprint, 'unsafe');
+  assert.equal(s.outbound.streamSettings.tlsSettings.cipherSuites, 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256');
+});
+
+test('the legacy long parameter names still import', () => {
+  const s = parseLink(`vless://u@a.example.com:443?security=tls&finalMask=${encodeURIComponent(FM)}&cipherSuites=X`);
+  assert.deepEqual(s.outbound.streamSettings.finalmask, JSON.parse(FM));
+  assert.equal(s.outbound.streamSettings.tlsSettings.cipherSuites, 'X');
+});
+
+test('invalid fm JSON is ignored rather than poisoning the config', () => {
+  const s = parseLink('vless://u@a.example.com:443?security=tls&fm=%7Bnot-json');
+  assert.equal(s.outbound.streamSettings.finalmask, undefined);
+});
+
+test('share links export fm= and cs=, never the legacy names', () => {
+  const s = parseLink(`vless://u@a.example.com:443?security=tls&sni=a.com&fm=${encodeURIComponent(FM)}&cs=SUITE&fp=unsafe#N`);
+  const link = buildShareLink(s);
+  assert.match(link, /[?&]fm=/);
+  assert.match(link, /[?&]cs=SUITE/);
+  assert.match(link, /[?&]fp=unsafe/);
+  assert.equal(/finalMask=|cipherSuites=/.test(link), false);
+  assert.deepEqual(parseLink(link).outbound.streamSettings.finalmask, JSON.parse(FM));
+});
+
+test('vmess carries fm and cs through its base64 payload', () => {
+  const link = 'vmess://' + Buffer.from(JSON.stringify({
+    v: '2', ps: 'VM', add: 'vm.example.com', port: '443', id: 'uuid', net: 'ws',
+    tls: 'tls', path: '/p', fm: FM, cs: 'SUITE', fp: 'unsafe'
+  }), 'utf8').toString('base64');
+  const s = parseLink(link);
+  assert.deepEqual(s.outbound.streamSettings.finalmask, JSON.parse(FM));
+  assert.equal(s.outbound.streamSettings.tlsSettings.cipherSuites, 'SUITE');
+  const back = parseLink(buildShareLink(s));
+  assert.deepEqual(back.outbound.streamSettings.finalmask, JSON.parse(FM));
+});
+
+test('applyServerEdits sets and clears finalMask and cipherSuites', () => {
+  const s = parseLink('vless://u@a.example.com:443?security=tls&sni=a.com');
+  const on = applyServerEdits(s, { security: 'tls', sni: 'a.com', finalMask: FM, cipherSuites: 'SUITE', fp: 'unsafe' });
+  assert.deepEqual(on.outbound.streamSettings.finalmask, JSON.parse(FM));
+  assert.equal(on.outbound.streamSettings.tlsSettings.cipherSuites, 'SUITE');
+  const off = applyServerEdits(on, { security: 'tls', sni: 'a.com', finalMask: '', cipherSuites: '', fp: 'chrome' });
+  assert.equal(off.outbound.streamSettings.finalmask, undefined);
+  assert.equal(off.outbound.streamSettings.tlsSettings.cipherSuites, undefined);
+});
+
+test('the dead fakeSni marker is gone', () => {
+  const s = parseLink('vless://u@a.example.com:443?security=tls&fakeSni=www.google.com');
+  assert.equal(s.outbound._fakesni, undefined, 'freedom noises are UDP-only — this never worked on TLS');
+  assert.equal(/fakeSni/.test(buildShareLink(s)), false);
+});
+
+/* --------------------- migrating servers from an older store --------------------- */
+
+// The two shapes the previous parser wrote and that are still sitting in users'
+// store.json. See migrateStoredServer().
+const legacyServer = () => ({
+  id: 'srv-1',
+  name: 'Old',
+  protocol: 'vless',
+  address: 'a.example.com',
+  port: 443,
+  outbound: {
+    protocol: 'vless',
+    _fakesni: 'www.google.com',
+    settings: { vnext: [{ address: 'a.example.com', port: 443, users: [{ id: 'u' }] }] },
+    streamSettings: {
+      network: 'tcp',
+      security: 'tls',
+      finalmask: {
+        tcp: [{ type: 'fragment', settings: { packets: 'tlshello', length: '3-8', delay: '10-20', maxSplit: '3-6' } }]
+      }
+    }
+  }
+});
+
+test('migrateStoredServer: the dead _fakesni marker is stripped', () => {
+  const out = migrateStoredServer(legacyServer());
+  assert.equal('_fakesni' in out.outbound, false, 'nothing strips it any more — it would land in config.json verbatim');
+  // everything else about the outbound survives
+  assert.equal(out.outbound.protocol, 'vless');
+  assert.deepEqual(out.outbound.settings, legacyServer().outbound.settings);
+  assert.equal(out.id, 'srv-1');
+  assert.equal(out.name, 'Old');
+});
+
+test('migrateStoredServer: a singular finalmask fragment is converted back to plural', () => {
+  const fm = migrateStoredServer(legacyServer()).outbound.streamSettings.finalmask;
+  assert.deepEqual(fm, {
+    tcp: [{ type: 'fragment', settings: { packets: 'tlshello', lengths: ['3-8'], delays: ['10-20'], maxSplit: '3-6' } }]
+  }, 'the current core takes lengths/delays arrays and rejects length/delay');
+  assert.equal('length' in fm.tcp[0].settings, false);
+  assert.equal('delay' in fm.tcp[0].settings, false);
+});
+
+test('migrateStoredServer: udp masks are converted too', () => {
+  const s = legacyServer();
+  s.outbound.streamSettings.finalmask = { udp: [{ type: 'noise', settings: { length: '1-3', delay: '0' } }] };
+  const fm = migrateStoredServer(s).outbound.streamSettings.finalmask;
+  assert.deepEqual(fm.udp, [{ type: 'noise', settings: { lengths: ['1-3'], delays: ['0'] } }]);
+});
+
+test('migrateStoredServer: only one of the two keys may need converting', () => {
+  const s = legacyServer();
+  s.outbound.streamSettings.finalmask = { tcp: [{ settings: { lengths: ['3-5'], delay: '10-20' } }] };
+  const st = migrateStoredServer(s).outbound.streamSettings.finalmask.tcp[0].settings;
+  assert.deepEqual(st, { lengths: ['3-5'], delays: ['10-20'] });
+});
+
+test('migrateStoredServer: a numeric singular value still becomes a string array', () => {
+  const s = legacyServer();
+  s.outbound.streamSettings.finalmask = { tcp: [{ settings: { length: 5 } }] };
+  assert.deepEqual(migrateStoredServer(s).outbound.streamSettings.finalmask.tcp[0].settings, { lengths: ['5'] });
+});
+
+test('migrateStoredServer: an already-plural finalmask is left exactly as it is', () => {
+  const s = legacyServer();
+  delete s.outbound._fakesni;
+  s.outbound.streamSettings.finalmask = JSON.parse(FM);
+  const out = migrateStoredServer(s);
+  assert.deepEqual(out.outbound.streamSettings.finalmask, JSON.parse(FM));
+  assert.equal(out, s, 'nothing to do: the very same object comes back, so no needless store write');
+});
+
+test('migrateStoredServer: a freshly parsed server needs no migration', () => {
+  const s = parseLink(`vless://u@a.example.com:443?security=tls&fm=${encodeURIComponent(FM)}#N`);
+  assert.equal(migrateStoredServer(s), s);
+});
+
+test('migrateStoredServer: does not mutate its input', () => {
+  const s = legacyServer();
+  const before = JSON.parse(JSON.stringify(s));
+  migrateStoredServer(s);
+  assert.deepEqual(s, before, 'a pure function — the caller decides whether to persist');
+});
+
+test('migrateStoredServer: both markers on one server are handled together', () => {
+  const out = migrateStoredServer(legacyServer());
+  assert.equal('_fakesni' in out.outbound, false);
+  assert.deepEqual(out.outbound.streamSettings.finalmask.tcp[0].settings.lengths, ['3-8']);
+});
+
+test('migrateStoredServer: a server with no outbound comes back untouched', () => {
+  const s = { id: 'x', name: 'No outbound', protocol: 'vless' };
+  assert.equal(migrateStoredServer(s), s);
+});
+
+test('migrateStoredServer: odd shapes never throw', () => {
+  // store.json is a plain file a user can hand-edit — anything can be in here.
+  const odd = [
+    undefined, null, 0, '', 'server', [],
+    { outbound: null },
+    { outbound: 'nope' },
+    { outbound: [] },
+    { outbound: { streamSettings: null } },
+    { outbound: { streamSettings: 'nope' } },
+    { outbound: { streamSettings: { finalmask: null } } },
+    { outbound: { streamSettings: { finalmask: 'nope' } } },
+    { outbound: { streamSettings: { finalmask: [] } } },
+    { outbound: { streamSettings: { finalmask: { tcp: 'nope' } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [null, 3, 'x'] } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [{ settings: null }] } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [{ settings: [] }] } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [{ settings: { length: null } }] } } } },
+    { outbound: { streamSettings: { finalmask: { tcp: [{ settings: { delay: {} } }] } } } }
+  ];
+  for (const s of odd) {
+    assert.doesNotThrow(() => migrateStoredServer(s), `threw on ${JSON.stringify(s)}`);
+    assert.equal(migrateStoredServer(s), s, `needlessly rewrote ${JSON.stringify(s)}`);
+  }
+});
+
+test('migrateStoredServer: an array settings object is not mistaken for a singular length', () => {
+  // [] has a `length` property — reading it blindly would invent lengths:["0"].
+  const s = { outbound: { streamSettings: { finalmask: { tcp: [{ settings: [] }] } } } };
+  assert.equal(migrateStoredServer(s), s);
 });
