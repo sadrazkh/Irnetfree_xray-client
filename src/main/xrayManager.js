@@ -11,8 +11,11 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { DEFAULT_ENGINE, engineExe, engineRunArgs, engineTestArgs } = require('./engines');
+const { DEFAULT_ENGINE, engineExe, engineRunArgs, engineTestArgs, engineLabel, xrayEngines } = require('./engines');
 const net = require('net');
+
+/** Upstream's plaintext-outbound refusal (infra/conf/xray.go); the patterniha fork lifts it. */
+const PLAINTEXT_REJECT = /without TLS.*prohibited/i;
 
 class XrayManager {
   constructor(opts = {}) {
@@ -25,6 +28,7 @@ class XrayManager {
     this.onStatus = opts.onStatus || (() => {}); // ('running'|'stopped'|'error', info)
     this.proc = null;
     this.running = false;
+    this._versions = {};                  // engineId -> version string
     this.currentConfigPath = path.join(this.dataDir, 'config.json');
   }
 
@@ -70,18 +74,24 @@ class XrayManager {
   }
 
   /**
-   * Resolve the effective engine to run a config on: the requested one if its
-   * binary is installed, otherwise the default Xray core (logged). Returns
-   * { id, bin } so callers use the argv/format of the core they'll ACTUALLY run.
+   * Resolve the effective engine to run a config on. The requested one if its
+   * binary is installed; otherwise any other Xray-format core (they run the same
+   * config — logged, so the user sees which one actually ran); otherwise the
+   * default id with bin:null. Callers use the argv/format of the core returned.
    */
   resolveEngine(engineId) {
     const wantId = engineId || DEFAULT_ENGINE;
-    if (wantId !== DEFAULT_ENGINE) {
-      const bin = this.resolveBin(wantId);
-      if (bin) return { id: wantId, bin };
-      this.onLog(`Engine '${wantId}' binary (${engineExe(wantId)}) not found in bin/ — using default Xray core`, 'warn');
+    const wantBin = this.resolveBin(wantId);
+    if (wantBin) return { id: wantId, bin: wantBin };
+    for (const id of xrayEngines()) {
+      if (id === wantId) continue;
+      const bin = this.resolveBin(id);
+      if (bin) {
+        this.onLog(`Engine '${wantId}' binary (${engineExe(wantId)}) not found in bin/ — using ${id}`, 'warn');
+        return { id, bin };
+      }
     }
-    return { id: DEFAULT_ENGINE, bin: this.resolveBin(DEFAULT_ENGINE) };
+    return { id: DEFAULT_ENGINE, bin: null };
   }
 
   /** Directory that holds geoip.dat / geosite.dat (for XRAY_LOCATION_ASSET). */
@@ -107,31 +117,38 @@ class XrayManager {
     return env;
   }
 
-  binExists() {
-    return !!this.resolveBin();
+  /** Is a core installed? With no id: any Xray-format core (they run the same config). */
+  binExists(engineId) {
+    if (engineId) return !!this.resolveBin(engineId);
+    return xrayEngines().some(id => !!this.resolveBin(id));
   }
 
-  /** xray-core version string (e.g. "1.8.24"), cached. Empty if unavailable. */
-  version() {
+  /** Core version string (e.g. "26.9.1") for an engine, cached per engine. Empty if unavailable. */
+  version(engineId = DEFAULT_ENGINE) {
     return new Promise((resolve) => {
-      if (this._version) return resolve(this._version);
-      const bin = this.resolveBin();
+      if (this._versions[engineId]) return resolve(this._versions[engineId]);
+      const bin = this.resolveBin(engineId);
       if (!bin) return resolve('');
       let out = '';
       const proc = spawn(bin, ['version'], { cwd: path.dirname(bin), windowsHide: true, env: this.spawnEnv() });
       proc.stdout.on('data', d => { out += d.toString('utf8'); });
       proc.stderr.on('data', d => { out += d.toString('utf8'); });
+      let done = false;
       const finish = () => {
-        // first line looks like: "Xray 1.8.24 (Xray, ...) ..."
+        if (done) return; done = true;
+        // first line looks like: "Xray 26.9.1 (Xray, Penetrates Everything.) ..."
         const m = out.match(/Xray[^\d]*(\d+\.\d+\.\d+)/i);
-        this._version = m ? m[1] : (out.split(/\r?\n/)[0] || '').trim();
-        resolve(this._version);
+        this._versions[engineId] = m ? m[1] : (out.split(/\r?\n/)[0] || '').trim();
+        resolve(this._versions[engineId]);
       };
       proc.on('error', () => resolve(''));
       proc.on('exit', finish);
       setTimeout(() => { try { proc.kill(); } catch {} finish(); }, 4000);
     });
   }
+
+  /** Forget cached versions (after a download / removal). */
+  forgetVersions() { this._versions = {}; }
 
   /** Write config to disk. */
   writeConfig(config, file) {
@@ -172,6 +189,30 @@ class XrayManager {
       // safety timeout — don't hang the UI if -test never returns
       setTimeout(() => { if (!settled) { try { proc.kill(); } catch {} finish({ ok: true }); } }, 6000);
     });
+  }
+
+  /**
+   * Validate on the requested engine. If the OFFICIAL core rejects the config
+   * only because it is plaintext VLESS/Trojan to a public address and the
+   * patterniha fork is installed, validate on the fork instead — that is the one
+   * thing the fork exists for. Returns { ok, engine, error?, fellBack?,
+   * plaintextRejected? } so the caller knows which core to start and can tell
+   * the user to install the fork when it is missing.
+   */
+  async validateWithFallback(config, engineId) {
+    const first = this.resolveEngine(engineId);
+    const r = await this.validate(config, first.id);
+    if (r.ok) return { ok: true, engine: first.id };
+    const plaintextRejected = PLAINTEXT_REJECT.test(r.error || '');
+    if (first.id === 'xray' && plaintextRejected && this.resolveBin('xray-pattn')) {
+      const again = await this.validate(config, 'xray-pattn');
+      if (again.ok) {
+        this.onLog(`Official core rejects this plaintext config — running it on ${engineLabel('xray-pattn')}`, 'warn');
+        return { ok: true, engine: 'xray-pattn', fellBack: true };
+      }
+      return { ok: false, engine: 'xray-pattn', error: again.error, plaintextRejected: false };
+    }
+    return { ok: false, engine: first.id, error: r.error, plaintextRejected };
   }
 
   /** Start the core with the given config object, on the given engine. */
@@ -262,8 +303,8 @@ class XrayManager {
    * real latency through the server, then kill it.
    * Returns the temp socks port (caller must measure & then call killTest).
    */
-  async startTest(testConfig) {
-    const bin = this.resolveBin();
+  async startTest(testConfig, engineId) {
+    const { bin } = this.resolveEngine(engineId);
     if (!bin) throw new Error('xray binary not found');
     const cfgPath = path.join(this.dataDir, `test-${Date.now()}.json`);
     fs.writeFileSync(cfgPath, JSON.stringify(testConfig, null, 2), 'utf8');
@@ -320,4 +361,4 @@ function getFreePort() {
   });
 }
 
-module.exports = { XrayManager, getFreePort };
+module.exports = { XrayManager, getFreePort, PLAINTEXT_REJECT };
