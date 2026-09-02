@@ -166,6 +166,10 @@
         <!-- WireGuard manual add -->
         <div class="import-box" id="wgBox" hidden>
           <div class="wg-title" data-i18n="wg.title">افزودن WireGuard</div>
+          <div class="row-gap" style="margin-bottom:12px">
+            <button class="btn ghost" id="btnWgPickConf" data-i18n="wg.pickConf">انتخاب فایل .conf</button>
+            <span class="import-hint" id="wgConfHint"></span>
+          </div>
           <div class="grid2">
             <div><label class="field-label" data-i18n="wg.name">نام</label>
               <input type="text" id="wgName" class="input" data-i18n-ph="wg.namePh" /></div>

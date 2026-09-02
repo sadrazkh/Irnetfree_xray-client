@@ -14,7 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer } = require('../main/parser');
+const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { buildConfig, buildTestConfig } = require('../main/configBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
@@ -679,6 +679,12 @@ function createService(opts = {}) {
     'servers:add': (link) => { const server = parseLink(link); const e = store.get('servers', []); e.push(server); store.set('servers', e); return server; },
     'servers:addWireguard': (fields) => { const server = makeWireguardServer(fields || {}); const e = store.get('servers', []); e.push(server); store.set('servers', e); return { server, servers: e }; },
     'servers:addProxy': (fields) => { const server = makeProxyServer(fields || {}); const e = store.get('servers', []); e.push(server); store.set('servers', e); return { server, servers: e }; },
+    // headless: no native dialog; the browser picks the file itself
+    'wg:pickConf': () => ({ ok: false, error: 'not available in server mode' }),
+    'wg:parseConf': (text) => {
+      try { return { ok: true, fields: parseWireguardConf(text) }; }
+      catch (err) { return { ok: false, error: err.message }; }
+    },
     'servers:update': ({ id, fields }) => {
       const servers = store.get('servers', []);
       const idx = servers.findIndex(s => s.id === id);

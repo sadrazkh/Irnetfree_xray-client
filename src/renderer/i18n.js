@@ -47,6 +47,9 @@ const I18N = {
     'wg.allowed': 'Allowed IPs (رنج‌های مجاز)',
     'wg.endpointHost': 'آدرس سرور (Endpoint host)',
     'wg.endpointPort': 'پورت سرور (Endpoint port)',
+    'wg.pickConf': 'انتخاب فایل .conf',
+    'wg.confLoaded': 'فایل خوانده شد — فیلدها پر شدند',
+    'wg.confFailed': 'فایل WireGuard خوانده نشد',
     'wg.addrHint': '«Address» باید آدرس محلی خودت در کانفیگ WireGuard باشد و حتماً /32 (مثل 10.8.0.2/32). برای دسترسی به رنج دیتابیس، رنج را در «Allowed IPs» بگذار (مثل 192.168.60.0/24) یا 0.0.0.0/0 را نگه دار.',
 
     'edit.title': 'ویرایش سرور', 'edit.name': 'نام', 'edit.address': 'Address — سرور/IP واقعی (اتصال اینجا می‌رود)', 'edit.port': 'پورت',
@@ -343,6 +346,9 @@ const I18N = {
     'wg.allowed': 'Allowed IPs',
     'wg.endpointHost': 'Server address (Endpoint host)',
     'wg.endpointPort': 'Server port (Endpoint port)',
+    'wg.pickConf': 'Choose .conf file',
+    'wg.confLoaded': 'File read — fields filled in',
+    'wg.confFailed': 'Could not read the WireGuard file',
     'wg.addrHint': '“Address” is your own local IP from the WireGuard config and must be /32 (e.g. 10.8.0.2/32). To reach a database range, put the range in “Allowed IPs” (e.g. 192.168.60.0/24) or keep 0.0.0.0/0.',
 
     'edit.title': 'Edit server', 'edit.name': 'Name', 'edit.address': 'Address — real server/IP (connection goes here)', 'edit.port': 'Port',
