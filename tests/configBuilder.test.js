@@ -23,23 +23,46 @@ const single = (server) => ({ mode: 'single', server: server || VLESS_WS_TLS });
 
 /* ----------------------------- inbounds ----------------------------- */
 
-test('single: inbounds are socks / http / api on the configured ports', () => {
+test('single: inbounds are socks / http only — metrics replaces the api inbound', () => {
   const c = buildConfig(single(), settings({ socksPort: 1080, httpPort: 1081, apiPort: 1085 }));
 
   assert.deepEqual(c.inbounds.map(i => [i.tag, i.port, i.protocol]), [
     ['socks-in', 1080, 'socks'],
-    ['http-in', 1081, 'http'],
-    ['api', 1085, 'dokodemo-door']
+    ['http-in', 1081, 'http']
   ]);
   assert.deepEqual(c.inbounds[0].settings, { auth: 'noauth', udp: true });
+  // the stats endpoint is a listener, not an inbound, so nothing can collide with it
+  assert.deepEqual(c.metrics, { tag: 'metrics', listen: '127.0.0.1:1085' });
+  assert.equal(c.api, undefined);
+  // the counters still have to be collected
+  assert.deepEqual(c.stats, {});
+  assert.equal(c.policy.system.statsOutboundUplink, true);
+  assert.equal(c.policy.system.statsOutboundDownlink, true);
 });
 
-test('allowLan flips the socks/http listen address but never the api one', () => {
+test('no plan emits an api routing rule any more', () => {
+  const plans = [
+    single(),
+    { mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] },
+    advancedPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-vless' }] }),
+    poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }])
+  ];
+  for (const p of plans) {
+    const c = buildConfig(p, settings());
+    assert.equal(c.routing.rules.some(r => r.outboundTag === 'api'), false, p.mode);
+    assert.equal(c.inbounds.some(i => i.tag === 'api'), false, p.mode);
+    assert.equal(c.metrics.listen, '127.0.0.1:10085', p.mode);
+  }
+});
+
+test('allowLan flips the socks/http listen address', () => {
   const off = buildConfig(single(), settings({ allowLan: false }));
-  assert.deepEqual(off.inbounds.map(i => i.listen), ['127.0.0.1', '127.0.0.1', '127.0.0.1']);
+  assert.deepEqual(off.inbounds.map(i => i.listen), ['127.0.0.1', '127.0.0.1']);
 
   const on = buildConfig(single(), settings({ allowLan: true }));
-  assert.deepEqual(on.inbounds.map(i => i.listen), ['0.0.0.0', '0.0.0.0', '127.0.0.1']);
+  assert.deepEqual(on.inbounds.map(i => i.listen), ['0.0.0.0', '0.0.0.0']);
+  // the metrics listener is never exposed to the LAN
+  assert.equal(on.metrics.listen, '127.0.0.1:10085');
 });
 
 test('enableSniffing toggles destOverride on the proxy inbounds', () => {
@@ -58,9 +81,9 @@ test('dns and log level come from settings', () => {
 
 /* ----------------------------- simple routing ----------------------------- */
 
-test('global mode: api, ads, private bypass, then catch-all to proxy', () => {
+test('global mode: ads, private bypass, then catch-all to proxy', () => {
   const c = buildConfig(single(), settings({ routingMode: 'global', blockAds: true }));
-  assert.deepEqual(ruleTags(c), ['api', 'block', 'direct', 'proxy']);
+  assert.deepEqual(ruleTags(c), ['block', 'direct', 'proxy']);
 
   const last = c.routing.rules.at(-1);
   assert.deepEqual(last, { type: 'field', port: '0-65535', outboundTag: 'proxy' });
@@ -73,15 +96,15 @@ test('direct mode sends the catch-all to direct', () => {
 
 test('bypass-ir adds domain + ip direct rules before the catch-all', () => {
   const c = buildConfig(single(), settings({ routingMode: 'bypass-ir', blockAds: false }));
-  assert.deepEqual(ruleTags(c), ['api', 'direct', 'direct', 'direct', 'proxy']);
-  assert.deepEqual(c.routing.rules[2].domain, ['geosite:category-ir', 'regexp:.*\\.ir$']);
-  assert.deepEqual(c.routing.rules[3].ip, ['geoip:ir']);
+  assert.deepEqual(ruleTags(c), ['direct', 'direct', 'direct', 'proxy']);
+  assert.deepEqual(c.routing.rules[1].domain, ['geosite:category-ir', 'regexp:.*\\.ir$']);
+  assert.deepEqual(c.routing.rules[2].ip, ['geoip:ir']);
 });
 
 test('bypass-cn adds the china geo rules', () => {
   const c = buildConfig(single(), settings({ routingMode: 'bypass-cn', blockAds: false }));
-  assert.deepEqual(c.routing.rules[2].domain, ['geosite:cn']);
-  assert.deepEqual(c.routing.rules[3].ip, ['geoip:cn']);
+  assert.deepEqual(c.routing.rules[1].domain, ['geosite:cn']);
+  assert.deepEqual(c.routing.rules[2].ip, ['geoip:cn']);
 });
 
 test('the private-range bypass never depends on geoip.dat', () => {
@@ -101,12 +124,12 @@ test('the private-range bypass never depends on geoip.dat', () => {
 
 test('geoAssets:false drops the ad-block rule', () => {
   const c = buildConfig(single(), settings({ blockAds: true, geoAssets: false }));
-  assert.deepEqual(ruleTags(c), ['api', 'direct', 'proxy']);
+  assert.deepEqual(ruleTags(c), ['direct', 'proxy']);
 });
 
 test('geoAssets:false degrades bypass-ir to plain global routing', () => {
   const c = buildConfig(single(), settings({ routingMode: 'bypass-ir', blockAds: false, geoAssets: false }));
-  assert.deepEqual(ruleTags(c), ['api', 'direct', 'proxy']);
+  assert.deepEqual(ruleTags(c), ['direct', 'proxy']);
   assert.equal(c.routing.rules.at(-1).outboundTag, 'proxy');
 });
 
@@ -146,12 +169,12 @@ test('rule values split on both "," and "|"', () => {
   const adv = buildConfig(advancedPlan({
     rules: [{ type: 'ip', value: '1.1.1.1|2.2.2.2', target: 'sv-vless' }]
   }), settings({ blockAds: false }));
-  assert.deepEqual(adv.routing.rules[1].ip, ['1.1.1.1', '2.2.2.2']);
+  assert.deepEqual(adv.routing.rules[0].ip, ['1.1.1.1', '2.2.2.2']);
 });
 
 test('a custom rule with no domain/ip/port is dropped', () => {
   const c = buildConfig(single(), settings({ customRules: [{ outboundTag: 'direct' }, { domain: 'x.com' }] }));
-  assert.deepEqual(ruleTags(c), ['api', 'block', 'direct', 'proxy']);
+  assert.deepEqual(ruleTags(c), ['block', 'direct', 'proxy']);
 });
 
 /* ----------------------------- chains ----------------------------- */
@@ -221,8 +244,8 @@ test('advanced: rule targets become deduplicated outbounds', () => {
   }), settings({ blockAds: false }));
 
   assert.deepEqual(c.outbounds.map(o => o.tag), ['out-sv-vless', 'out-sv-trojan', 'direct', 'block']);
-  assert.deepEqual(c.routing.rules[1].domain, ['a.com', 'b.com']);
-  assert.equal(c.routing.rules[3].port, '80,443');
+  assert.deepEqual(c.routing.rules[0].domain, ['a.com', 'b.com']);
+  assert.equal(c.routing.rules[2].port, '80,443');
   assert.equal(c.routing.rules.at(-1).outboundTag, 'direct');
 });
 
@@ -232,7 +255,7 @@ test('advanced: a chain: target expands into namespaced chain outbounds', () => 
   }), settings({ blockAds: false }));
 
   assert.deepEqual(c.outbounds.map(o => o.tag), ['out-chain-c1-h0', 'out-chain-c1', 'direct', 'block']);
-  assert.equal(c.routing.rules[1].outboundTag, 'out-chain-c1');
+  assert.equal(c.routing.rules[0].outboundTag, 'out-chain-c1');
 });
 
 test('advanced: a one-member chain collapses to a single outbound', () => {
@@ -253,7 +276,7 @@ test('advanced: unknown / empty targets fall back to direct', () => {
     def: 'also-missing'
   }), settings({ blockAds: false }));
 
-  assert.deepEqual(ruleTags(c), ['api', 'direct', 'direct', 'block', 'direct', 'direct']);
+  assert.deepEqual(ruleTags(c), ['direct', 'direct', 'block', 'direct', 'direct']);
 });
 
 test('advanced: rules with no usable values are skipped entirely', () => {
@@ -264,7 +287,7 @@ test('advanced: rules with no usable values are skipped entirely', () => {
       null
     ]
   }), settings({ blockAds: false }));
-  assert.deepEqual(ruleTags(c), ['api', 'direct', 'direct']);
+  assert.deepEqual(ruleTags(c), ['direct', 'direct']);
 });
 
 test('advanced: geoAssets:false drops geo tokens and any rule left empty', () => {
@@ -309,7 +332,7 @@ test('advanced: a surviving rule still registers its outbound', () => {
     rules: [{ type: 'ip', value: 'geoip:ir, 5.5.5.5', target: 'sv-trojan' }]
   }), settings({ blockAds: false, geoAssets: false }));
   assert.deepEqual(c.outbounds.map(o => o.tag), ['out-sv-trojan', 'direct', 'block']);
-  assert.equal(c.routing.rules[1].outboundTag, 'out-sv-trojan');
+  assert.equal(c.routing.rules[0].outboundTag, 'out-sv-trojan');
 });
 
 /* ----------------------------- proxy pool ----------------------------- */
@@ -332,8 +355,7 @@ test('pool: standard ports keep serving the primary exit', () => {
 
   assert.deepEqual(c.inbounds.map(i => [i.tag, i.port]), [
     ['socks-in', 10808], ['http-in', 10809],
-    ['ps-e1', 60001], ['ph-e1', 60002],
-    ['api', 10085]
+    ['ps-e1', 60001], ['ph-e1', 60002]
   ]);
 
   const stdRule = c.routing.rules.find(r => Array.isArray(r.inboundTag) && r.inboundTag.includes('socks-in'));
@@ -360,7 +382,7 @@ test('pool: duplicate and out-of-range ports are skipped', () => {
 
   const ports = c.inbounds.map(i => i.port);
   assert.equal(new Set(ports).size, ports.length, 'duplicate port bound twice');
-  assert.deepEqual(c.inbounds.map(i => i.tag), ['socks-in', 'http-in', 'ps-ok', 'api']);
+  assert.deepEqual(c.inbounds.map(i => i.tag), ['socks-in', 'http-in', 'ps-ok']);
 });
 
 test('pool: a chain: entry gets its own chain outbounds', () => {
@@ -369,7 +391,7 @@ test('pool: a chain: entry gets its own chain outbounds', () => {
   assert.ok(c.outbounds.some(o => o.tag === 'out-chain-c1'));
 });
 
-test('pool: a pool port equal to apiPort is skipped so the api inbound keeps its port', () => {
+test('pool: a pool port equal to apiPort is skipped so the metrics listener keeps its port', () => {
   const c = buildConfig(poolPlan([
     { id: 'clash', target: 'sv-trojan', socksPort: 10085 },   // == apiPort
     { id: 'ok', target: 'sv-trojan', socksPort: 60001 }
@@ -377,8 +399,9 @@ test('pool: a pool port equal to apiPort is skipped so the api inbound keeps its
 
   const ports = c.inbounds.map(i => i.port);
   assert.equal(new Set(ports).size, ports.length, 'a port is bound twice');
-  assert.deepEqual(c.inbounds.map(i => i.tag), ['socks-in', 'http-in', 'ps-ok', 'api']);
-  assert.equal(c.inbounds.find(i => i.tag === 'api').port, 10085);
+  assert.deepEqual(c.inbounds.map(i => i.tag), ['socks-in', 'http-in', 'ps-ok']);
+  assert.equal(ports.includes(10085), false, 'a pool inbound stole the metrics port');
+  assert.equal(c.metrics.listen, '127.0.0.1:10085');
 });
 
 /* ----------------------------- WireGuard ----------------------------- */
@@ -540,12 +563,15 @@ test('buildTestConfig: the fragment dialer is applied so the ping matches realit
 
 /* ----------------------------- buildRoutingRules ----------------------------- */
 
-test('buildRoutingRules: the api rule is always first', () => {
+test('buildRoutingRules: private/LAN bypass precedes the catch-all, which is last', () => {
   for (const mode of ['global', 'bypass-ir', 'bypass-cn', 'direct']) {
     for (const geo of [true, false]) {
       const rules = buildRoutingRules(mode, true, geo);
-      assert.deepEqual(rules[0], { type: 'field', inboundTag: ['api'], outboundTag: 'api' }, `${mode}/${geo}`);
+      const priv = rules.findIndex(r => r.ip && r.ip.includes('127.0.0.0/8'));
+      assert.ok(priv > -1, `${mode}/${geo}: no private bypass`);
+      assert.ok(priv < rules.length - 1, `${mode}/${geo}: private bypass must not be last`);
       assert.equal(rules.at(-1).port, '0-65535', `${mode}/${geo}: no catch-all`);
+      assert.equal(rules.some(r => r.outboundTag === 'api'), false, `${mode}/${geo}: api rule leaked`);
     }
   }
 });
