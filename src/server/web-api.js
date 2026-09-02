@@ -127,6 +127,7 @@
     onSubsUpdated: (cb) => on('subs-updated', cb),
     onAssetProgress: (cb) => on('asset-progress', cb),
     onKillSwitch: (cb) => on('killswitch', cb),
+    onSystemTheme: (cb) => on('system-theme', cb),
     onStoreError: (cb) => on('store-error', cb)
   };
 })();
