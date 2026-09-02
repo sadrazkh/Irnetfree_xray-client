@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 18+ core only (no npm runtime deps), Electron 31 for desktop, `node --test` for tests, PowerShell/netsh untouched in this plan.
 
-**Model per task:** see `docs/superpowers/plans/2026-09-02-model-assignment.md` (haiku for ★, sonnet for ★★, opus for ★★★; tasks 9, 13, 14 are ★★★).
+**Model per task:** see `docs/superpowers/plans/2026-09-02-model-assignment.md` — every task here is Opus-implemented (run the orchestrating session on Opus too); tasks 9, 13, 14 get one Fable review pass at the end.
 
 ## Global Constraints
 
