@@ -47,6 +47,8 @@
     addServer: (link) => invoke('servers:add', link),
     addWireguard: (fields) => invoke('servers:addWireguard', fields),
     addProxy: (fields) => invoke('servers:addProxy', fields),
+    pickWireguardConf: () => invoke('wg:pickConf'),
+    parseWireguardConf: (text) => invoke('wg:parseConf', text),
     updateServer: (id, fields) => invoke('servers:update', { id, fields }),
     deleteServer: (id) => invoke('servers:delete', id),
     clearServers: () => invoke('servers:clear'),

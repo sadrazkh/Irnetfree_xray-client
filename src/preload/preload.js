@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('api', {
   addServer: (link) => ipcRenderer.invoke('servers:add', link),
   addWireguard: (fields) => ipcRenderer.invoke('servers:addWireguard', fields),
   addProxy: (fields) => ipcRenderer.invoke('servers:addProxy', fields),
+  pickWireguardConf: () => ipcRenderer.invoke('wg:pickConf'),
+  parseWireguardConf: (text) => ipcRenderer.invoke('wg:parseConf', text),
   updateServer: (id, fields) => ipcRenderer.invoke('servers:update', { id, fields }),
   deleteServer: (id) => ipcRenderer.invoke('servers:delete', id),
   clearServers: () => ipcRenderer.invoke('servers:clear'),
