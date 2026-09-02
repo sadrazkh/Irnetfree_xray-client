@@ -672,7 +672,7 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
                 Text("🧩  patterniha — finalMask / cipherSuites", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
                 Fld("cipherSuites (use with fingerprint = unsafe)", cipherSuites) { cipherSuites = it }
                 Fld("finalMask (JSON)", finalMask) { finalMask = it }
-                Text("Address = a clean Cloudflare IP, fingerprint = unsafe, paste cipherSuites + finalMask. Array lengths/delays auto-normalized.", color = MUTED, fontSize = 11.sp)
+                Text("Address = a clean Cloudflare IP, fingerprint = unsafe, paste cipherSuites + finalMask. Paste the JSON exactly; the app does not rewrite it.", color = MUTED, fontSize = 11.sp)
             }
             if (server.protocol == "wireguard") {
                 Fld("Peer Public Key", wgPub) { wgPub = it }; Fld("Address (/32)", wgAddr) { wgAddr = it }; Fld("PSK", wgPsk) { wgPsk = it }

@@ -492,6 +492,17 @@ async function doConnect(serverId, opts = {}) {
   xrayReloading = true;
   try {
     await xray.start(config, runEngine);
+  } catch (e) {
+    // start() watches for 1.2 s to catch a config that crashes the core on
+    // startup. A disconnect landing inside that grace KILLS the process, so the
+    // watcher reports "xray exited on startup" — a failure the user caused on
+    // purpose, dressed as a config error. Propagating it paints an error toast
+    // through the IPC handler, and through reapplyConnection() it emits
+    // killswitch { engaged: true } AFTER doDisconnect() already disarmed the
+    // block, so the banner claims the internet is blocked while the firewall is
+    // open. Abandonment, not an error: answer like every other gate below.
+    if (stale()) return abandoned;
+    throw e;
   } finally {
     xrayReloading = prevReloading;
   }
@@ -605,6 +616,17 @@ async function reapplyConnection() {
   const serverId = store.get('activeServerId', null);
   if (!serverId || !xray || !xray.running) return { ok: false, error: 'not connected' };
 
+  // The teardown below is several awaits long and doConnect()'s own token cannot
+  // cover it — that token is taken AFTER the teardown, so it is the newest
+  // generation by definition and sees nothing. A disconnect landing in this
+  // window bumps connGen, clears activeServerId and emits 'disconnected', and
+  // the rebuild would then quietly write the serverId captured above back, bring
+  // TUN up and report connected: the user's disconnect undone. It is also the
+  // likeliest window there is — the tray's Disconnect item is live throughout,
+  // and with the kill switch on, the banner this function arms below offers
+  // "Unblock internet", whose button calls exactly that.
+  const gen = connGen;
+
   const lang = getSettings().lang === 'en' ? 'en' : 'fa';
   let armed = false;
   if (getSettings().killSwitch) {
@@ -631,6 +653,13 @@ async function reapplyConnection() {
   } finally {
     xrayReloading = prevReloading;
   }
+
+  // A disconnect (or a newer connect) overtook the teardown. Everything this
+  // function would rebuild belongs to an intent that no longer exists, so stop
+  // here — before doConnect() takes a token that could not detect it. The kill
+  // switch is the newer operation's too: doDisconnect() disarms it itself, and
+  // releasing it here could unblock a machine that operation chose to keep shut.
+  if (gen !== connGen) return { ok: false, stale: true };
 
   let r;
   try {
@@ -746,15 +775,13 @@ async function recoverFromNetworkChange(reason, attempt = 0) {
   try {
     await runRecovery(reason, attempt);
   } finally {
-    if (gen === recoverGen) {
-      recovering = false;
-      // The tunnel now standing was built for the network as it is at THIS moment,
-      // so nothing seen during the teardown (our own TUN adapter going away, the
-      // old adapter's addresses) is news. Without this, a half-observed change
-      // from the teardown window settles into a trigger for a rebuild that has
-      // already happened. A trigger the watcher genuinely queued is left alone.
-      if (netWatcher) netWatcher.rebaseline();
-    }
+    // Release the lock and nothing else. The watcher's own baseline is not ours
+    // to move: its ignoreInterface predicate already keeps the fingerprint stable
+    // across the rebuild, so there is nothing half-seen left to forgive — while a
+    // GENUINE change landing in the tail of this recovery is still only pending,
+    // and adopting it here would leave the tunnel built for a gateway that is
+    // gone with nothing left to notice.
+    if (gen === recoverGen) recovering = false;
   }
   // The lock was reset under us (a disconnect): whatever comes next is not ours
   // to start, and the activeServerId guard would refuse it anyway.
@@ -792,7 +819,11 @@ async function runRecovery(reason, attempt) {
       // during exactly the gap the block exists to cover.
       const held = killEngaged;
       res = await doConnect(serverId, { holdKillSwitch: held });
-      if (held) {
+      // Only release the block for a tunnel that actually came back. When the
+      // connect abandoned itself the newer operation owns the kill switch —
+      // doDisconnect() disarms it itself — and announcing "tunnel is back up"
+      // here would be a restoration that never happened.
+      if (held && !(res && res.stale)) {
         await disarmKillSwitch();
         send('killswitch', { engaged: false });
         send('log', { line: 'Kill switch released — tunnel is back up', level: 'info' });

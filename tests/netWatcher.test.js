@@ -118,6 +118,53 @@ test('a change that lands mid-recovery is deferred, not dropped', async () => {
 });
 
 /**
+ * The other half of the same promise, and the reason the watcher owns no
+ * "adopt the network as it is now" call.
+ *
+ * A recovery does not end the moment the new tunnel carries traffic: on Windows
+ * TUN the tail after tun.start() has read the gateway — waitForAdapter, four
+ * netsh calls, two route adds, the LAN firewall rule, the kill-switch disarm —
+ * runs for seconds. A genuine change that lands in THAT window has been seen
+ * once and is still only `pending`: it is 3-6 s (one poll plus the debounce)
+ * from settling. Treating "the recovery finished" as "so this is the network
+ * now" would adopt it as the baseline and it would never fire again — the
+ * tunnel stays built for the previous gateway, the UI still says connected, and
+ * nothing is left to notice. It must survive the recovery and fire when it
+ * settles, exactly as it would have with no recovery in flight at all.
+ */
+test('a genuine change seen in a recovery\'s tail still fires once it settles', async () => {
+  const fired = [];
+  const releases = [];
+  let tick = null, i = 0;
+  const reads = [wifi, eth, wifi2];
+  const w = new NetWatcher({
+    read: () => reads[Math.min(i, reads.length - 1)],
+    onChange: (why) => { fired.push(why); return new Promise((r) => releases.push(r)); },
+    debounceMs: 2500, intervalMs: 3000,
+    setTimer: (fn) => { tick = fn; return 't'; }, clearTimer: () => { tick = null; }
+  });
+  w.start();
+  tick();
+  i = 1; tick(); tick();                  // wifi → eth settles: recovery #1 starts
+  assert.deepEqual(fired, ['interfaces']);
+  assert.equal(w.busy, true);
+
+  i = 2; tick();                          // a REAL change lands in the recovery's tail
+  assert.notEqual(w.pending, null, 'seen once — half-observed, the debounce is running');
+  assert.deepEqual(fired, ['interfaces'], 'and rightly silent so far');
+
+  releases.shift()();                     // recovery #1 finishes
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(w.busy, false, 'the lock is released');
+  assert.deepEqual(fired, ['interfaces'], 'a half-observed change is still not a trigger');
+  assert.notEqual(w.pending, null, 'and finishing a recovery must not forget it');
+
+  tick();                                 // it holds still: the debounce elapses
+  assert.deepEqual(fired, ['interfaces', 'interfaces'],
+    'the change the recovery did not cover must still fire');
+});
+
+/**
  * An onChange that never settles must not deafen the watcher permanently: stop()
  * is the reset, so stop()/start() always revives it.
  */
@@ -246,35 +293,6 @@ test('a TUN rebuild is not a network change, but a real one still is', () => {
   assert.deepEqual(h.fired, ['interfaces'], 'a real network change still fires exactly once');
   h.tick(); h.tick();
   assert.deepEqual(h.fired, ['interfaces'], 'and only once');
-});
-
-/**
- * Belt and braces for the same loop: anything half-seen during the teardown
- * window is dropped when the recovery finishes, because the tunnel that just
- * came back was built for the network as it is NOW.
- */
-test('rebaseline() adopts the current network and forgets a half-seen change', () => {
-  const h = harness([wifi, eth]);
-  h.w.start();
-  h.tick();
-  h.advance();
-  h.tick();                          // eth seen once — pending, debounce running
-  assert.notEqual(h.w.pending, null);
-  h.w.rebaseline();                  // the recovery finished: this IS the network now
-  assert.equal(h.w.pending, null);
-  assert.equal(h.w.settledFor, 0);
-  h.tick(); h.tick();
-  assert.deepEqual(h.fired, [], 'the network we just rebuilt for is not a change');
-});
-
-test('rebaseline() does not drop a trigger that is already queued behind a recovery', () => {
-  const h = harness([wifi], { debounceMs: 0 });
-  h.w.start();
-  h.w.busy = true;
-  h.w.queued = 'interfaces';
-  h.w.rebaseline();
-  assert.equal(h.w.queued, 'interfaces', 'a real deferred trigger must survive');
-  assert.equal(h.w.busy, true, 'and the recovery lock is not ours to release');
 });
 
 test('stop() clears the timer and start() is idempotent', () => {
