@@ -9,6 +9,7 @@ const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerE
 const { buildConfig, buildTestConfig } = require('./configBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
+const { assetStatus: scanAssets } = require('./assets');
 const { XrayManager, getFreePort } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('./netutils');
@@ -91,18 +92,10 @@ function bundledBinDir() {
 
 /** Presence of each runtime component (checks writable + bundled dirs). */
 function assetStatus() {
-  const dirs = [userBin(), bundledBinDir()];
-  const has = (name) => dirs.some(d => fs.existsSync(path.join(d, name)));
-  const win = process.platform === 'win32';
-  return {
-    xray: xray ? xray.binExists() : has(win ? 'xray.exe' : 'xray'),
-    'sing-box': has(win ? 'sing-box.exe' : 'sing-box'),
-    tun2socks: has(win ? 'tun2socks.exe' : 'tun2socks'),
-    wintun: win ? has('wintun.dll') : true,
-    geoip: has('geoip.dat'),
-    geosite: has('geosite.dat'),
-    platform: process.platform
-  };
+  const st = scanAssets([userBin(), bundledBinDir()]);
+  // a user-located xray (store.xrayPath / XRAY_PATH) counts too
+  if (xray) st.xray = st.xray || xray.binExists('xray');
+  return st;
 }
 
 function send(channel, payload) {

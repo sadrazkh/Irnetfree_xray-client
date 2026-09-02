@@ -38,10 +38,10 @@ function engine(id) {
   return ENGINES[id] || ENGINES[DEFAULT_ENGINE];
 }
 
-/** Executable file name for an engine on the current platform. */
-function engineExe(id) {
+/** Executable file name for an engine on a platform (default: the current one). */
+function engineExe(id, platform = process.platform) {
   const e = engine(id);
-  return e.exe[process.platform] || e.exe.default;
+  return e.exe[platform] || e.exe.default;
 }
 
 /** Config format an engine consumes ('xray' | 'sing-box'). */
