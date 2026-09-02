@@ -99,7 +99,9 @@ function readBody(req) {
 /* ----------------------------- request router ----------------------------- */
 const server = http.createServer(async (req, res) => {
   // DNS-rebinding guard: without a token only loopback Host values are served.
-  if (!hostAllowed(req.headers.host, { token: TOKEN, noAuth: args.noAuth })) {
+  // --no-auth waives the token, not this guard: on a loopback bind the Host set
+  // is enforced anyway (see guard.js), so pass the bind's loopback-ness in.
+  if (!hostAllowed(req.headers.host, { token: TOKEN, noAuth: args.noAuth, loopbackBind: isLoopback })) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     return res.end('forbidden host');
   }
