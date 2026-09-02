@@ -13,7 +13,8 @@ const assert = require('node:assert/strict');
 const {
   parseLink, parseMany, b64decode,
   buildStreamSettings, buildWireguardOutbound,
-  makeWireguardServer, makeProxyServer, applyServerEdits
+  makeWireguardServer, makeProxyServer, applyServerEdits,
+  buildShareLink, isHttpProxyLink
 } = require('../src/main/parser');
 
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
@@ -209,6 +210,38 @@ test('makeProxyServer: builds socks/http from form fields', () => {
   const socks = makeProxyServer({ type: 'socks', address: '10.0.0.9' });
   assert.equal(socks.port, 1080);                       // protocol default
   assert.equal(socks.outbound.settings.servers[0].users, undefined);
+});
+
+test('http proxy share link round-trips (v2rayN shape)', () => {
+  const s = makeProxyServer({ name: 'Corp', type: 'http', address: 'proxy.corp', port: '3128', username: 'u', password: 'p' });
+  const link = buildShareLink(s);
+  assert.match(link, /^http:\/\/[A-Za-z0-9+/=]+@proxy\.corp:3128#Corp$/);
+  const back = parseLink(link);
+  assert.equal(back.protocol, 'http');
+  assert.equal(back.name, 'Corp');
+  assert.deepEqual(back.outbound.settings.servers[0], { address: 'proxy.corp', port: 3128, users: [{ user: 'u', pass: 'p' }] });
+
+  const open = parseLink('http://10.0.0.9:8080#Open');
+  assert.equal(open.outbound.protocol, 'http');
+  assert.equal(open.outbound.settings.servers[0].users, undefined);
+});
+
+test('isHttpProxyLink: only host:port shapes, never subscription URLs', () => {
+  assert.equal(isHttpProxyLink('http://1.2.3.4:8080'), true);
+  assert.equal(isHttpProxyLink('http://dXNlcjpwYXNz@1.2.3.4:8080#Corp'), true);
+  assert.equal(isHttpProxyLink('http://panel.example.com/sub/abc123'), false);
+  assert.equal(isHttpProxyLink('http://1.2.3.4:8080/?token=x'), false);
+  assert.equal(isHttpProxyLink('https://1.2.3.4:8080'), false);
+  assert.equal(isHttpProxyLink('http://1.2.3.4'), false);
+});
+
+test('parseMany imports http proxy links and skips subscription URLs', () => {
+  const { servers } = parseMany([
+    'http://dXNlcjpwYXNz@1.2.3.4:8080#Corp',
+    'http://panel.example.com/sub/abc123',
+    'vless://u1@a.example.com:443#A'
+  ].join('\n'));
+  assert.deepEqual(servers.map(s => s.protocol), ['http', 'vless']);
 });
 
 /* ---------------------------- WireGuard ---------------------------- */

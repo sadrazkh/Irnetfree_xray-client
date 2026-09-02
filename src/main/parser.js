@@ -358,15 +358,23 @@ function buildProxyOutbound(proto, address, port, user, pass) {
 }
 
 /**
- * Parse a socks share link. Tolerant of several shapes:
- *   socks://host:port#name
- *   socks://user:pass@host:port#name
- *   socks://base64(user:pass)@host:port#name
- *   socks://base64(user:pass@host:port)#name
- * `socks5://` is treated the same as `socks://`.
+ * v2rayN shares an HTTP proxy exactly like a SOCKS one —
+ * `http://[b64(user:pass)@]host:port#name` — which is also the shape of a plain
+ * subscription URL's origin. A proxy link therefore has NO path and NO query.
+ * (Kept in sync with the copy in src/renderer/app.js smartImport.)
  */
-function parseSocks(link) {
-  const scheme = link.startsWith('socks5://') ? 'socks5://' : 'socks://';
+const HTTP_PROXY_LINK = /^http:\/\/(?:[^/?#\s@]+@)?[^/?#\s@]+:\d{1,5}(?:#\S*)?$/i;
+function isHttpProxyLink(s) { return HTTP_PROXY_LINK.test(String(s || '').trim()); }
+
+/**
+ * Parse a socks:// / socks5:// / http:// proxy link. Tolerant of several shapes:
+ *   scheme://host:port#name
+ *   scheme://user:pass@host:port#name
+ *   scheme://base64(user:pass)@host:port#name
+ *   scheme://base64(user:pass@host:port)#name
+ */
+function parseProxyLink(link, proto) {
+  const scheme = link.slice(0, link.indexOf('://') + 3);
   const body = link.slice(scheme.length);
   const hashIdx = body.indexOf('#');
   const name = hashIdx === -1 ? '' : safeDecodeURIComponent(body.slice(hashIdx + 1));
@@ -401,10 +409,13 @@ function parseSocks(link) {
       [address, portStr] = splitHostPort(main);
     }
   }
-  const port = parseInt(portStr, 10) || 1080;
-  const outbound = buildProxyOutbound('socks', address, port, safeDecodeURIComponent(user), safeDecodeURIComponent(pass));
-  return mkServer(name || address, 'socks', address, port, link, outbound);
+  const port = parseInt(portStr, 10) || (proto === 'http' ? 8080 : 1080);
+  const outbound = buildProxyOutbound(proto, address, port, safeDecodeURIComponent(user), safeDecodeURIComponent(pass));
+  return mkServer(name || address, proto, address, port, link, outbound);
 }
+
+function parseSocks(link) { return parseProxyLink(link, 'socks'); }
+function parseHttpProxy(link) { return parseProxyLink(link, 'http'); }
 
 /**
  * Create a SOCKS/HTTP proxy server record from a UI form (no share link).
@@ -716,6 +727,7 @@ function parseLink(link) {
   if (l.startsWith('ss://')) return parseShadowsocks(l);
   if (l.startsWith('socks://') || l.startsWith('socks5://')) return parseSocks(l);
   if (l.startsWith('wireguard://') || l.startsWith('wg://')) return parseWireguard(l);
+  if (l.startsWith('http://') && isHttpProxyLink(l)) return parseHttpProxy(l);
   throw new Error('Unsupported or invalid link: ' + l.slice(0, 12) + '...');
 }
 
@@ -738,7 +750,7 @@ function parseMany(text) {
   const servers = [];
   const errors = [];
   for (const line of lines) {
-    if (!/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//i.test(line)) continue;
+    if (!/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//i.test(line) && !isHttpProxyLink(line)) continue;
     try {
       servers.push(parseLink(line));
     } catch (e) {
@@ -824,7 +836,7 @@ function buildShareLink(server) {
 }
 
 module.exports = {
-  parseLink, parseMany, b64decode,
+  parseLink, parseMany, b64decode, isHttpProxyLink,
   buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits,
   buildShareLink
 };
