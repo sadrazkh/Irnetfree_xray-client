@@ -285,6 +285,12 @@ const I18N = {
     'kill.reconnect': 'اتصال مجدد', 'kill.disarm': 'باز کردن اینترنت',
     'kill.opened': 'اینترنت باز شد',
 
+    'netauto.title': 'اتصال مجدد خودکار هنگام تغییر شبکه',
+    'netauto.sub': 'اگر اینترنت عوض شد (وای‌فای/کابل/بیدارشدن از خواب)، تونل خودکار بازسازی می‌شود',
+    'state.reconnecting': 'شبکه عوض شد — اتصال مجدد…',
+    'net.reconnected': 'اتصال بعد از تغییر شبکه برقرار شد',
+    'net.failed': 'شبکه عوض شد و اتصال مجدد ناموفق بود',
+
     'sub.data': 'حجم مصرف', 'sub.time': 'زمان باقی‌مانده',
     'sub.left': 'مانده', 'sub.expired': 'منقضی شده', 'sub.unlimited': 'نامحدود',
     'sub.days': 'روز', 'sub.hours': 'ساعت', 'sub.mins': 'دقیقه',
@@ -575,6 +581,12 @@ const I18N = {
     'kill.blocked': '⛔ Kill switch engaged — internet is blocked',
     'kill.reconnect': 'Reconnect', 'kill.disarm': 'Unblock internet',
     'kill.opened': 'Internet unblocked',
+
+    'netauto.title': 'Reconnect automatically when the network changes',
+    'netauto.sub': 'If your internet changes (Wi-Fi/ethernet/wake from sleep) the tunnel is rebuilt automatically',
+    'state.reconnecting': 'Network changed — reconnecting…',
+    'net.reconnected': 'Reconnected after the network change',
+    'net.failed': 'The network changed and reconnecting failed',
 
     'sub.data': 'Data used', 'sub.time': 'Time left',
     'sub.left': 'left', 'sub.expired': 'Expired', 'sub.unlimited': 'unlimited',

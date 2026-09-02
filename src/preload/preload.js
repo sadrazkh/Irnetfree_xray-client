@@ -78,6 +78,9 @@ contextBridge.exposeInMainWorld('api', {
   disarmKillSwitch: () => ipcRenderer.invoke('killswitch:disarm'),
   killSwitchStatus: () => ipcRenderer.invoke('killswitch:status'),
 
+  // the OS/browser says an adapter came back — main re-checks the tunnel at once
+  netOnline: () => ipcRenderer.send('net:online'),
+
   // window
   minimize: () => ipcRenderer.send('win:minimize'),
   maximize: () => ipcRenderer.send('win:maximize'),

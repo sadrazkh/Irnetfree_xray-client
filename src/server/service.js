@@ -30,6 +30,7 @@ const { StatsPoller } = require('../main/stats');
 const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
+const { NetWatcher } = require('../main/netWatcher');
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -53,6 +54,9 @@ const DEFAULT_SETTINGS = {
   routeDefault: '',
   procRouteWatch: false,
   killSwitch: false,
+  // recover automatically when the machine's network changes (read live, so it
+  // needs no reconnect to take effect)
+  autoReconnectOnNetworkChange: true,
   theme: 'dark',
   defaultEngine: 'xray',
   lang: 'fa'
@@ -87,6 +91,9 @@ function createService(opts = {}) {
   let xrayReloading = false;
   let userDisconnecting = false;
   let procWatcher = null;
+  let netWatcher = null;
+  let recoverTimer = null;
+  const RECOVER_BACKOFF_MS = [2000, 5000, 15000];
   // Settings the LIVE tunnel was built from (null when disconnected) — see
   // ../main/settingsMeta.js.
   let appliedSettings = null;
@@ -372,6 +379,13 @@ function createService(opts = {}) {
     stats.start(1000);
 
     startProcWatcher();
+    // Watch for the machine's network moving under the live tunnel. Every reconnect
+    // comes through here too (a settings apply, or our own recovery), so keep a
+    // watcher that is already running: its baseline is the network the tunnel was
+    // built for, and a change it noticed mid-rebuild is still queued on it —
+    // replacing it here would adopt the NEW network as normal and leave a tunnel
+    // built for the old one with nothing left to notice.
+    if (!netWatcher) startNetWatcher();
     send('status', {
       state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
       tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
@@ -448,9 +462,61 @@ function createService(opts = {}) {
   }
   function stopProcWatcher() { if (procWatcher) { procWatcher.stop(); procWatcher = null; } }
 
+  /**
+   * The machine's network changed under a live tunnel. xray does not die when that
+   * happens — it just stops passing traffic, and under TUN the bypass routes still
+   * point at the old gateway — so nothing else would notice. Rebuild the connection
+   * from current settings. (Mirrors main.js; the headless build has no kill switch,
+   * so reapplyConnection() here is a plain teardown + rebuild.)
+   */
+  async function recoverFromNetworkChange(reason, attempt = 0) {
+    if (!store.get('activeServerId', null) || !xray || !xray.running) return;
+    if (!getSettings().autoReconnectOnNetworkChange) return;
+
+    send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
+    send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
+
+    const res = await reapplyConnection();
+    if (res && res.ok) {
+      send('log', { line: 'Connection restored after the network change', level: 'info' });
+      return;
+    }
+    const delay = RECOVER_BACKOFF_MS[attempt];
+    if (delay == null) {
+      send('log', { line: 'Could not reconnect after the network change — giving up', level: 'error' });
+      send('status', { state: 'reconnect-failed', reason });
+      return;
+    }
+    send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
+    clearTimeout(recoverTimer);
+    recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt + 1), delay);
+    if (recoverTimer.unref) recoverTimer.unref();
+  }
+
+  function startNetWatcher() {
+    stopNetWatcher();
+    netWatcher = new NetWatcher({
+      read: () => os.networkInterfaces(),
+      // The watcher cannot report a failure of its own (it only awaits the promise
+      // to know when it may fire again), so the handler logs its own errors —
+      // otherwise a throw in here would vanish without a trace.
+      onChange: (why) => recoverFromNetworkChange(why).catch((e) => {
+        send('log', { line: 'Network recovery failed: ' + ((e && e.message) || e), level: 'error' });
+      })
+    });
+    netWatcher.start();
+  }
+
+  function stopNetWatcher() {
+    clearTimeout(recoverTimer);
+    recoverTimer = null;
+    if (netWatcher) { netWatcher.stop(); netWatcher = null; }
+  }
+
   async function doDisconnect() {
     userDisconnecting = true;
     stopProcWatcher();
+    stopNetWatcher();                // nothing live to recover any more
     if (stats) stats.stop();
     try { await tun.stop(); } catch {}
     try { await setSystemProxy(false, {}); } catch {}
@@ -634,6 +700,9 @@ function createService(opts = {}) {
     'proc:clearCache': () => { store.set('procIpCache', {}); return { ok: true }; },
 
     'net:lanInfo': () => { const s = getSettings(); return { ip: lanIp(), all: lanCandidates(), socksPort: s.socksPort, httpPort: s.httpPort }; },
+    // The browser saw the OS come back online — the fast path into the watcher
+    // (polling alone would take a couple of ticks plus the debounce to notice).
+    'net:online': () => { if (netWatcher) netWatcher.poke('online'); },
     'killswitch:disarm': () => ({ ok: true }),
     'killswitch:status': () => ({ engaged: false }),
 
@@ -656,6 +725,7 @@ function createService(opts = {}) {
   async function shutdown() {
     if (isQuitting) return; isQuitting = true;
     userDisconnecting = true;
+    try { stopNetWatcher(); } catch {}
     try { if (stats) stats.stop(); } catch {}
     try { if (tun) await tun.stop(); } catch {}
     try { await setSystemProxy(false, {}); } catch {}

@@ -49,6 +49,8 @@ class NetWatcher {
     this.pending = null;      // fingerprint seen while the network is still moving
     this.settledFor = 0;      // ms the pending fingerprint has held
     this.busy = false;        // a recovery is in flight
+    this.queued = null;       // reason of a trigger that arrived during that recovery
+    this.gen = 0;             // bumped by stop(); an older run's result is ignored
   }
 
   start() {
@@ -59,12 +61,20 @@ class NetWatcher {
     this.timer = this.setTimer(() => this.tick(), this.intervalMs);
   }
 
+  /**
+   * Also the reset for a recovery that never finished: without releasing `busy`
+   * here, a hung onChange would leave the watcher permanently deaf and not even
+   * stop()/start() could revive it.
+   */
   stop() {
+    this.pending = null;
+    this.settledFor = 0;
+    this.busy = false;
+    this.queued = null;
+    this.gen++;               // whatever was in flight no longer speaks for us
     if (!this.timer) return;
     this.clearTimer(this.timer);
     this.timer = null;
-    this.pending = null;
-    this.settledFor = 0;
   }
 
   /** One poll. Fires onChange only once the new fingerprint has held still. */
@@ -87,14 +97,32 @@ class NetWatcher {
     this.fire(reason || 'poke');
   }
 
-  /** Run onChange, ignoring further triggers until it settles. */
+  /**
+   * Run onChange, holding off further triggers until it settles.
+   *
+   * A trigger that arrives DURING a recovery is remembered, not dropped: the
+   * rebuild in flight was made for the network we have already left, so throwing
+   * the newer trigger away would leave the tunnel dead with nothing left to fire
+   * again (tick() has already adopted the new fingerprint as its baseline).
+   */
   fire(reason) {
-    if (this.busy) return;
+    if (this.busy) { this.queued = reason; return; }
     this.busy = true;
+    const gen = this.gen;
     let r;
-    try { r = this.onChange(reason); } catch { this.busy = false; return; }
-    if (r && typeof r.then === 'function') r.then(() => { this.busy = false; }, () => { this.busy = false; });
-    else this.busy = false;
+    try { r = this.onChange(reason); } catch { this.settle(gen); return; }
+    if (r && typeof r.then === 'function') r.then(() => this.settle(gen), () => this.settle(gen));
+    else this.settle(gen);
+  }
+
+  /** A recovery finished: release the lock and run whatever arrived meanwhile. */
+  settle(gen) {
+    if (gen !== this.gen) return;    // a stop() happened while this run was in flight
+    this.busy = false;
+    const queued = this.queued;
+    if (queued == null) return;
+    this.queued = null;
+    this.fire(queued);
   }
 }
 
