@@ -32,7 +32,9 @@ const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta'
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
   httpPort: 10809,
-  allowLan: true,            // headless: listen on 0.0.0.0 so forwarded ports are reachable
+  allowLan: false,           // loopback only, like the desktop. `ssh -L` reaches a loopback
+                             // bind fine; 0.0.0.0 would make the auth-less SOCKS port an
+                             // open relay on a VPS. The user opts in under Settings → LAN.
   routingMode: 'global',
   blockAds: true,
   enableSniffing: true,
