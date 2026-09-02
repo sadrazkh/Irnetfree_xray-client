@@ -7,24 +7,27 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { NetWatcher, fingerprint } = require('../src/main/netWatcher');
+// The regression test below uses the REAL predicate the app injects, so a rename
+// of the adapter in tunManager.js cannot silently reopen the recovery loop.
+const { isOwnTunInterface } = require('../src/main/tunManager');
 
 const wifi = { 'Wi-Fi': [{ family: 'IPv4', internal: false, address: '192.168.1.20' }] };
 const wifi2 = { 'Wi-Fi': [{ family: 'IPv4', internal: false, address: '192.168.1.99' }] };
 const eth = { Ethernet: [{ family: 'IPv4', internal: false, address: '10.0.0.5' }] };
 
 /** A watcher whose clock is a queue of callbacks this test fires by hand. */
-function harness(reads) {
+function harness(reads, opts = {}) {
   const fired = [];
   let tick = null;
   let i = 0;
-  const w = new NetWatcher({
+  const w = new NetWatcher(Object.assign({
     read: () => reads[Math.min(i, reads.length - 1)],
     onChange: (why) => fired.push(why),
     debounceMs: 2500,
     intervalMs: 3000,
     setTimer: (fn) => { tick = fn; return 'timer'; },
     clearTimer: () => { tick = null; }
-  });
+  }, opts));
   return {
     w, fired,
     advance: (n = 1) => { i = Math.min(i + n, reads.length - 1); },
@@ -164,6 +167,114 @@ test('a recovery that settles after stop() cannot unlock a newer one', async () 
   await Promise.resolve(); await Promise.resolve();
   assert.equal(w.busy, false);
   assert.deepEqual(fired, ['resume', 'online']);
+});
+
+/* --------------------- the app's own TUN adapter --------------------- */
+// A TUN rebuild removes and recreates OUR adapter, which is non-internal and so
+// used to land in the fingerprint. Every recovery therefore produced the change
+// that triggered the next one: one Wi-Fi switch = a permanent rebuild loop.
+
+const tun4 = { family: 'IPv4', internal: false, address: '10.255.0.2' };
+const tunLl = { family: 'IPv6', internal: false, address: 'fe80::1a2b:3c4d:5e6f:7a8b%14' };
+const tunLl2 = { family: 'IPv6', internal: false, address: 'fe80::9911:2233:4455:6677%21' };
+const wifi4 = { family: 'IPv4', internal: false, address: '192.168.1.20' };
+const eth4 = { family: 'IPv4', internal: false, address: '10.0.0.5' };
+
+test('the names the app creates for TUN are recognised on every platform', () => {
+  assert.equal(isOwnTunInterface('XrayTun'), true, 'Windows adapter');
+  assert.equal(isOwnTunInterface('utun'), true, 'macOS, before the kernel picks a unit');
+  assert.equal(isOwnTunInterface('utun4'), true, 'macOS');
+  assert.equal(isOwnTunInterface('utun12'), true, 'macOS, two digits');
+  assert.equal(isOwnTunInterface('tun0'), true, 'Linux');
+  assert.equal(isOwnTunInterface('Wi-Fi'), false);
+  assert.equal(isOwnTunInterface('Ethernet'), false);
+  assert.equal(isOwnTunInterface('tun1'), false, 'someone else\'s tun device is real network news');
+  assert.equal(isOwnTunInterface(''), false);
+  assert.equal(isOwnTunInterface(undefined), false);
+});
+
+test('fingerprint ignores the interfaces the caller says to ignore', () => {
+  const withTun = { 'Wi-Fi': [wifi4], XrayTun: [tun4] };
+  assert.notEqual(fingerprint(withTun), fingerprint({ 'Wi-Fi': [wifi4] }),
+    'without the predicate the TUN adapter still counts');
+  assert.equal(fingerprint(withTun, isOwnTunInterface), fingerprint({ 'Wi-Fi': [wifi4] }, isOwnTunInterface));
+  // default = ignore nothing, so the existing single-argument callers are unchanged
+  assert.equal(fingerprint(withTun, () => false), fingerprint(withTun));
+});
+
+test('fingerprint drops IPv6 link-local addresses', () => {
+  // fe80::/10 is regenerated whenever an adapter is recreated and never says
+  // anything about routing, so it must not be part of the signature.
+  const a = { 'Wi-Fi': [wifi4, tunLl] };
+  const b = { 'Wi-Fi': [wifi4, tunLl2] };
+  assert.equal(fingerprint(a), fingerprint(b), 'a new link-local is not a network change');
+  assert.equal(fingerprint(a), fingerprint({ 'Wi-Fi': [wifi4] }));
+  assert.equal(fingerprint({ A: [{ family: 'IPv6', internal: false, address: 'febf::1' }] }), '',
+    'the whole fe80::/10 block, not just fe80::/16');
+  // a routable IPv6 address is still real news
+  assert.notEqual(fingerprint({ A: [{ family: 'IPv6', internal: false, address: '2001:db8::1' }] }), '');
+});
+
+/**
+ * The regression: reapplyConnection() destroys and recreates the TUN adapter, and
+ * the teardown window is longer than the debounce. Without the ignore predicate
+ * the watcher reads "the TUN adapter vanished" as a network change, fires, and
+ * the recovery it triggers vanishes the adapter again — forever. Only the genuine
+ * Wi-Fi → Ethernet switch at the end may fire.
+ */
+test('a TUN rebuild is not a network change, but a real one still is', () => {
+  const reads = [
+    { 'Wi-Fi': [wifi4], XrayTun: [tun4, tunLl] },    // baseline: connected, TUN up
+    { 'Wi-Fi': [wifi4] },                            // tun.stop(): the adapter is gone
+    { 'Wi-Fi': [wifi4], XrayTun: [tun4, tunLl2] },   // back, fresh GUID → fresh link-local
+    { 'Wi-Fi': [wifi4] },                            // and the next rebuild tears it down again
+    { 'Wi-Fi': [wifi4], XrayTun: [tun4, tunLl] },    // …and back
+    { Ethernet: [eth4], XrayTun: [tun4, tunLl] }     // GENUINE: Wi-Fi → Ethernet
+  ];
+  const h = harness(reads, { ignoreInterface: isOwnTunInterface });
+  h.w.start();
+  h.tick();
+  for (let step = 1; step <= 4; step++) {
+    h.advance();
+    h.tick(); h.tick(); h.tick();                    // well past the debounce
+    assert.deepEqual(h.fired, [], `the TUN adapter moving must not fire (step ${step})`);
+  }
+  h.advance();                                        // the cable goes in
+  h.tick();                                           // seen — debounce starts
+  assert.deepEqual(h.fired, []);
+  h.tick();                                           // settled
+  assert.deepEqual(h.fired, ['interfaces'], 'a real network change still fires exactly once');
+  h.tick(); h.tick();
+  assert.deepEqual(h.fired, ['interfaces'], 'and only once');
+});
+
+/**
+ * Belt and braces for the same loop: anything half-seen during the teardown
+ * window is dropped when the recovery finishes, because the tunnel that just
+ * came back was built for the network as it is NOW.
+ */
+test('rebaseline() adopts the current network and forgets a half-seen change', () => {
+  const h = harness([wifi, eth]);
+  h.w.start();
+  h.tick();
+  h.advance();
+  h.tick();                          // eth seen once — pending, debounce running
+  assert.notEqual(h.w.pending, null);
+  h.w.rebaseline();                  // the recovery finished: this IS the network now
+  assert.equal(h.w.pending, null);
+  assert.equal(h.w.settledFor, 0);
+  h.tick(); h.tick();
+  assert.deepEqual(h.fired, [], 'the network we just rebuilt for is not a change');
+});
+
+test('rebaseline() does not drop a trigger that is already queued behind a recovery', () => {
+  const h = harness([wifi], { debounceMs: 0 });
+  h.w.start();
+  h.w.busy = true;
+  h.w.queued = 'interfaces';
+  h.w.rebaseline();
+  assert.equal(h.w.queued, 'interfaces', 'a real deferred trigger must survive');
+  assert.equal(h.w.busy, true, 'and the recovery lock is not ours to release');
 });
 
 test('stop() clears the timer and start() is idempotent', () => {

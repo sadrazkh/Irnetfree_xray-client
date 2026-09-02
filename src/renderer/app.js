@@ -441,6 +441,10 @@ async function applySettingsNow() {
       toast(t('apply.done'), 'ok');
       return true;
     }
+    // The user disconnected (or connected elsewhere) while the rebuild was in
+    // flight, so it abandoned itself. Nothing failed — they changed their mind,
+    // and the 'disconnected' status has already repainted the UI. Stay quiet.
+    if (res && res.stale) { renderPendingBanner(); return false; }
     // a failed reconnect with the kill switch armed leaves the internet blocked
     // ON PURPOSE — onKillSwitch shows the disarm banner, so just explain why.
     toast((res && res.error) || t('apply.failed'), 'err');
@@ -1156,6 +1160,10 @@ window.api.onStatus((d) => {
     renderPicker();
   } else if (d.state === 'reconnecting') {
     // the machine's network moved under the tunnel; main is rebuilding it
+    // There is no tunnel right now — the rebuild tore it down. Leaving
+    // `connected` true made the power button offer "disconnect" and the pill say
+    // connected while the pill text said reconnecting; the two must agree.
+    state.connected = false;
     state.connecting = true;
     state.wasReconnecting = true;
     setConnUI('connecting', d.serverId || state.activeServerId);
@@ -2674,5 +2682,8 @@ $$('#modeModal .mode-option').forEach(opt => {
 
 init();
 
-// the OS reconnected an adapter — nudge main to re-check the tunnel
+// The OS reconnected an adapter — nudge main to re-check the tunnel. This page
+// is shared with the headless panel, where "online" means the OPERATOR'S laptop
+// came back and says nothing about the server's network; service.js deliberately
+// makes its net:online handler a no-op for that reason.
 window.addEventListener('online', () => { try { window.api.netOnline(); } catch {} });
