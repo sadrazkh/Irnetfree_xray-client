@@ -79,10 +79,11 @@ class XrayManager {
    * config — logged, so the user sees which one actually ran); otherwise the
    * default id with bin:null. Callers use the argv/format of the core returned.
    *
-   * `opts.quiet` skips the fallback warning. Internal lookups that only want
-   * *some* core's path (e.g. the stats poller's binary, re-resolved on every
-   * connect / config rebuild / asset change) pass it, so a user who installed
-   * only the fork isn't told over and over that the official core is missing.
+   * `opts.quiet` skips the fallback warning. Repeated lookups pass it, so a user
+   * who installed only one core isn't told over and over that the other is
+   * missing: the stats poller's binary (re-resolved on every connect / config
+   * rebuild / asset change) and the latency test (once per server in "ping all").
+   * The connect path stays loud — there, knowing which core ran is worth a line.
    */
   resolveEngine(engineId, opts = {}) {
     const wantId = engineId || DEFAULT_ENGINE;
@@ -319,9 +320,12 @@ class XrayManager {
    * Spin up a throwaway xray instance on a free local SOCKS port to measure
    * real latency through the server, then kill it.
    * Returns the temp socks port (caller must measure & then call killTest).
+   *
+   * Resolves QUIETLY: "ping all" runs this once per server, so a fallback would
+   * otherwise log the same warning dozens of times in a row.
    */
   async startTest(testConfig, engineId) {
-    const { id, bin } = this.resolveEngine(engineId);
+    const { id, bin } = this.resolveEngine(engineId, { quiet: true });
     if (!bin) throw new Error('xray binary not found');
     const cfgPath = path.join(this.dataDir, `test-${Date.now()}.json`);
     fs.writeFileSync(cfgPath, JSON.stringify(testConfig, null, 2), 'utf8');
