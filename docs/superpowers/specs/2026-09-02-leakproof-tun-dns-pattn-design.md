@@ -7,12 +7,25 @@ Date: 2026-09-02 · Scope: desktop (Windows first, macOS compatible), headless s
 A code review plus a comparison against v2rayN / PattN / current Xray-core turned up four things the
 app gets wrong today, all of which the owner has hit in practice:
 
-1. **Modern Xray-core refuses plaintext configs.** `infra/conf/xray.go:validateOutboundTransportSecurity`
+1. **Xray-core is about to refuse plaintext configs.** `infra/conf/xray.go:validateOutboundTransportSecurity`
    rejects VLESS/Trojan with `security=none` to a public address ("vless without TLS or other encryption is
-   prohibited unless the server address is a private IP or domain"). No escape hatch exists. The app always
-   downloads the *latest* core, so every `vless+ws` CDN config on port 80 fails to start. patterniha's fork
-   (`patterniha/Xray-core`, releases `v26.x` with the same asset names as upstream) only comments that
-   check out. PattN itself is a v2rayN fork (GUI), not a core.
+   prohibited unless the server address is a private IP or domain" / "trojan without TLS is prohibited …").
+   No escape hatch exists. patterniha's fork (`patterniha/Xray-core`) is upstream *main* with that one check
+   commented out. PattN itself is a v2rayN fork (GUI), not a core.
+
+   **Correction, verified 2026-09-02 (this replaces the original claim that the check is live today).**
+   The check exists only on upstream's `main` branch. Upstream's latest *release* is **v26.3.27
+   (2026-03-27)** and `infra/conf/xray.go` at that tag does **not** contain the function — a plaintext
+   `vless+ws` config on port 80 runs fine on it. The fork publishes its own tags (`v26.8.28`, `v26.9.1`)
+   built from upstream main. So today the dual-core work is:
+   - **dormant safety net** — `validateWithFallback` triggers nothing until upstream ships a release built
+     from main, at which point every plaintext CDN config would otherwise break overnight;
+   - **useful now for a different reason** — the fork's binary is built from upstream main, so it carries
+     main-branch fixes and features that the six-month-old official release does not.
+
+   Consequence for the plan: phase 1 is correct and worth keeping, but it does **not** fix a
+   user-visible breakage today, and nothing in the UI should claim it does. `PLAINTEXT_REJECT`
+   (`/without TLS.*prohibited/i`) matches both upstream error strings, confirmed against main.
 2. **fragment/noise moved into `finalmask`** (Xray ≥ 26.3.27). The standard shape is plural
    (`lengths: ["3-5","6-8"]`, `delays: ["10-20"]`, `maxSplit`); share links carry `fm=` (URL-encoded compact
    JSON) and `cs=` (cipherSuites); `fp=unsafe` is upstream. The app reads non-standard `finalMask=` /
