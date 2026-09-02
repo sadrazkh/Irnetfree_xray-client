@@ -516,15 +516,13 @@ test('applyServerEdits: wireguard peer/interface fields', () => {
 test('applyServerEdits: anti-DPI markers set and clear', () => {
   const s = parseLink('vless://u@a.example.com:443');
 
-  const on = applyServerEdits(s, { fragment: 'tlshello,10-20,5', noise: 'faketls', fakeSni: 'www.google.com' });
+  const on = applyServerEdits(s, { fragment: 'tlshello,10-20,5', noise: 'faketls' });
   assert.equal(on.outbound._fragment, 'tlshello,10-20,5');
   assert.equal(on.outbound._noise, 'faketls');
-  assert.equal(on.outbound._fakesni, 'www.google.com');
 
-  const off = applyServerEdits(on, { fragment: '', noise: '  ', fakeSni: '' });
+  const off = applyServerEdits(on, { fragment: '', noise: '  ' });
   assert.equal('_fragment' in off.outbound, false);
   assert.equal('_noise' in off.outbound, false);
-  assert.equal('_fakesni' in off.outbound, false);
 });
 
 test('applyServerEdits: per-config engine set and cleared', () => {
@@ -557,4 +555,69 @@ test('buildStreamSettings: allowInsecure accepts "1" and "true"', () => {
 
 test('buildStreamSettings: tls serverName falls back to host when sni is absent', () => {
   assert.equal(buildStreamSettings({ security: 'tls', host: 'h.example.com' }).tlsSettings.serverName, 'h.example.com');
+});
+
+/* --------------------------- finalmask / cs / fp --------------------------- */
+
+const FM = '{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5","6-8"],"delays":["10-20"],"maxSplit":"3-6"}}]}';
+
+test('vless: fm= is stored verbatim — no key rewriting', () => {
+  const s = parseLink(`vless://u@a.example.com:443?security=tls&fm=${encodeURIComponent(FM)}#FM`);
+  const fm = s.outbound.streamSettings.finalmask;
+  assert.deepEqual(fm, JSON.parse(FM), 'the core takes plural lengths/delays; rewriting them breaks it');
+});
+
+test('vless: cs= and fp=unsafe are read into tlsSettings', () => {
+  const s = parseLink('vless://u@a.example.com:443?security=tls&fp=unsafe&cs=TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256');
+  assert.equal(s.outbound.streamSettings.tlsSettings.fingerprint, 'unsafe');
+  assert.equal(s.outbound.streamSettings.tlsSettings.cipherSuites, 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256');
+});
+
+test('the legacy long parameter names still import', () => {
+  const s = parseLink(`vless://u@a.example.com:443?security=tls&finalMask=${encodeURIComponent(FM)}&cipherSuites=X`);
+  assert.deepEqual(s.outbound.streamSettings.finalmask, JSON.parse(FM));
+  assert.equal(s.outbound.streamSettings.tlsSettings.cipherSuites, 'X');
+});
+
+test('invalid fm JSON is ignored rather than poisoning the config', () => {
+  const s = parseLink('vless://u@a.example.com:443?security=tls&fm=%7Bnot-json');
+  assert.equal(s.outbound.streamSettings.finalmask, undefined);
+});
+
+test('share links export fm= and cs=, never the legacy names', () => {
+  const s = parseLink(`vless://u@a.example.com:443?security=tls&sni=a.com&fm=${encodeURIComponent(FM)}&cs=SUITE&fp=unsafe#N`);
+  const link = buildShareLink(s);
+  assert.match(link, /[?&]fm=/);
+  assert.match(link, /[?&]cs=SUITE/);
+  assert.match(link, /[?&]fp=unsafe/);
+  assert.equal(/finalMask=|cipherSuites=/.test(link), false);
+  assert.deepEqual(parseLink(link).outbound.streamSettings.finalmask, JSON.parse(FM));
+});
+
+test('vmess carries fm and cs through its base64 payload', () => {
+  const link = 'vmess://' + Buffer.from(JSON.stringify({
+    v: '2', ps: 'VM', add: 'vm.example.com', port: '443', id: 'uuid', net: 'ws',
+    tls: 'tls', path: '/p', fm: FM, cs: 'SUITE', fp: 'unsafe'
+  }), 'utf8').toString('base64');
+  const s = parseLink(link);
+  assert.deepEqual(s.outbound.streamSettings.finalmask, JSON.parse(FM));
+  assert.equal(s.outbound.streamSettings.tlsSettings.cipherSuites, 'SUITE');
+  const back = parseLink(buildShareLink(s));
+  assert.deepEqual(back.outbound.streamSettings.finalmask, JSON.parse(FM));
+});
+
+test('applyServerEdits sets and clears finalMask and cipherSuites', () => {
+  const s = parseLink('vless://u@a.example.com:443?security=tls&sni=a.com');
+  const on = applyServerEdits(s, { security: 'tls', sni: 'a.com', finalMask: FM, cipherSuites: 'SUITE', fp: 'unsafe' });
+  assert.deepEqual(on.outbound.streamSettings.finalmask, JSON.parse(FM));
+  assert.equal(on.outbound.streamSettings.tlsSettings.cipherSuites, 'SUITE');
+  const off = applyServerEdits(on, { security: 'tls', sni: 'a.com', finalMask: '', cipherSuites: '', fp: 'chrome' });
+  assert.equal(off.outbound.streamSettings.finalmask, undefined);
+  assert.equal(off.outbound.streamSettings.tlsSettings.cipherSuites, undefined);
+});
+
+test('the dead fakeSni marker is gone', () => {
+  const s = parseLink('vless://u@a.example.com:443?security=tls&fakeSni=www.google.com');
+  assert.equal(s.outbound._fakesni, undefined, 'freedom noises are UDP-only — this never worked on TLS');
+  assert.equal(/fakeSni/.test(buildShareLink(s)), false);
 });
