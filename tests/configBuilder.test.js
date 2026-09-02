@@ -369,6 +369,18 @@ test('pool: a chain: entry gets its own chain outbounds', () => {
   assert.ok(c.outbounds.some(o => o.tag === 'out-chain-c1'));
 });
 
+test('pool: a pool port equal to apiPort is skipped so the api inbound keeps its port', () => {
+  const c = buildConfig(poolPlan([
+    { id: 'clash', target: 'sv-trojan', socksPort: 10085 },   // == apiPort
+    { id: 'ok', target: 'sv-trojan', socksPort: 60001 }
+  ]), settings({ apiPort: 10085 }));
+
+  const ports = c.inbounds.map(i => i.port);
+  assert.equal(new Set(ports).size, ports.length, 'a port is bound twice');
+  assert.deepEqual(c.inbounds.map(i => i.tag), ['socks-in', 'http-in', 'ps-ok', 'api']);
+  assert.equal(c.inbounds.find(i => i.tag === 'api').port, 10085);
+});
+
 /* ----------------------------- WireGuard ----------------------------- */
 
 test('wireguard: a wrong interface mask is coerced to /32 at build time', () => {
