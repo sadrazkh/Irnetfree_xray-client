@@ -18,6 +18,7 @@ const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerE
 const { buildConfig, buildTestConfig } = require('../main/configBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
+const { assetStatus: scanAssets } = require('../main/assets');
 const { XrayManager, getFreePort } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../main/netutils');
@@ -106,16 +107,9 @@ function createService(opts = {}) {
 
   function binDirs() { return [userBinDir, bundledBinDir]; }
   function assetStatus() {
-    const has = (name) => binDirs().some(d => fs.existsSync(path.join(d, name)));
-    const win = process.platform === 'win32';
-    return {
-      xray: xray ? xray.binExists() : has(win ? 'xray.exe' : 'xray'),
-      tun2socks: has(win ? 'tun2socks.exe' : 'tun2socks'),
-      wintun: win ? has('wintun.dll') : true,
-      geoip: has('geoip.dat'),
-      geosite: has('geosite.dat'),
-      platform: process.platform
-    };
+    const st = scanAssets(binDirs());
+    if (xray) st.xray = st.xray || xray.binExists('xray');
+    return st;
   }
 
   const xray = new XrayManager({
