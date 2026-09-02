@@ -498,8 +498,64 @@ function splitCommas(v) {
 }
 
 /**
+ * The text form of a WireGuard config (what every provider hands out and what a
+ * `.conf` file contains). Both sections are required — an [Interface] alone is a
+ * server config, not something we can dial.
+ */
+function isWireguardConf(text) {
+  const t = String(text || '');
+  return /^\s*\[interface\]/im.test(t) && /^\s*\[peer\]/im.test(t);
+}
+
+/**
+ * Parse a WireGuard `.conf` into the field shape makeWireguardServer() takes.
+ * Keys are case-insensitive; `#`/`;` comments and CRLF are tolerated. Only the
+ * FIRST [Peer] is used — a multi-peer config is a router setup, not a client.
+ * Throws naming the missing field, so the UI can say which one.
+ */
+function parseWireguardConf(text) {
+  let section = '';
+  const iface = {}, peer = {};
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.replace(/[#;].*$/, '').trim();
+    if (!line) continue;
+    const sec = line.match(/^\[(\w+)\]$/);
+    if (sec) { section = sec[1].toLowerCase(); continue; }
+    const eq = line.indexOf('=');
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim().toLowerCase();
+    const val = line.slice(eq + 1).trim();
+    if (section === 'interface') { if (!(key in iface)) iface[key] = val; }
+    else if (section === 'peer') { if (!(key in peer)) peer[key] = val; }   // first peer wins
+  }
+
+  const privateKey = iface.privatekey || '';
+  const publicKey = peer.publickey || '';
+  const endpoint = peer.endpoint || '';
+  if (!privateKey) throw new Error('WireGuard config: PrivateKey is missing');
+  if (!publicKey) throw new Error('WireGuard config: PublicKey is missing');
+  if (!endpoint) throw new Error('WireGuard config: Endpoint is missing');
+
+  const [host] = splitHostPort(endpoint);
+  return {
+    name: host || 'WireGuard',
+    endpoint,
+    privateKey,
+    publicKey,
+    address: iface.address || '',
+    // Absent AllowedIPs stays '' so buildWireguardOutbound applies its own
+    // default (0.0.0.0/0, ::/0) instead of an empty — unroutable — list.
+    allowedIPs: peer.allowedips || '',
+    presharedKey: peer.presharedkey || '',
+    mtu: iface.mtu || '',
+    reserved: iface.reserved || '',
+    dns: iface.dns || ''   // captured for a future setting; unused by the outbound today
+  };
+}
+
+/**
  * Parse a wireguard:// or wg:// share link. Tolerant of several variants:
- *   wireguard://<privkey>@host:port?publickey=..&address=..&presharedkey=..&mtu=..&reserved=..#name
+ *   wireguard://<privkey>@host:port?publickey=..&address=..&allowedips=..&presharedkey=..&mtu=..&reserved=..#name
  */
 function parseWireguard(link) {
   const scheme = link.startsWith('wireguard://') ? 'wireguard://' : 'wg://';
@@ -523,6 +579,9 @@ function parseWireguard(link) {
     publicKey: q.publickey || q.publicKey || q.peer || '',
     endpoint: `${address}:${port}`,
     address: q.address || q.ip || '',
+    // Left undefined when absent so buildWireguardOutbound keeps its own default
+    // (0.0.0.0/0, ::/0) rather than seeing an explicit empty list.
+    allowedIPs: q.allowedips || q.allowedIPs || undefined,
     presharedKey: q.presharedkey || q.presharedKey || q.psk || '',
     mtu: q.mtu,
     reserved: q.reserved
@@ -745,6 +804,13 @@ function parseLink(link) {
 function parseMany(text) {
   let body = String(text || '').trim();
 
+  // A pasted .conf is ONE config spanning many lines — handle it before the
+  // per-line loop, which would otherwise see [Interface] and skip everything.
+  if (isWireguardConf(body)) {
+    try { return { servers: [makeWireguardServer(parseWireguardConf(body))], errors: [] }; }
+    catch (e) { return { servers: [], errors: [{ line: '[Interface]…', error: e.message }] }; }
+  }
+
   // If it has no scheme but decodes to links, treat as subscription base64.
   if (!/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//im.test(body)) {
     const decoded = b64decode(body);
@@ -837,11 +903,25 @@ function buildShareLink(server) {
     const auth = c ? Buffer.from(`${c.user || ''}:${c.pass || ''}`).toString('base64') + '@' : '';
     return `${proto}://${auth}${server.address}:${server.port}${name}`;
   }
-  return server.raw || '';   // wireguard / unknown: fall back to the imported link
+  if (proto === 'wireguard') {
+    const st = ob.settings || {};
+    const peer = (st.peers && st.peers[0]) || {};
+    const q = {
+      publickey: peer.publicKey || '',
+      address: (st.address || []).join(','),
+      allowedips: (peer.allowedIPs || []).join(','),
+      presharedkey: peer.preSharedKey || '',
+      mtu: st.mtu ? String(st.mtu) : '',
+      reserved: (st.reserved || []).join(',')
+    };
+    return `wireguard://${enc(st.secretKey || '')}@${server.address}:${server.port}?${qs(q)}${name}`;
+  }
+  return server.raw || '';   // unknown protocol: fall back to the imported link
 }
 
 module.exports = {
   parseLink, parseMany, b64decode, isHttpProxyLink,
   buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits,
+  parseWireguardConf, isWireguardConf,
   buildShareLink
 };
