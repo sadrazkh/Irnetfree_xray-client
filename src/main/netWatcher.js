@@ -50,6 +50,18 @@ function fingerprint(interfaces, ignoreInterface) {
   return parts.sort().join(',');
 }
 
+/**
+ * There is deliberately NO "adopt the network as it is right now" call for the
+ * owner to make when a recovery finishes. `ignoreInterface` already keeps the
+ * fingerprint stable across a rebuild — the app's own adapter is skipped whether
+ * it is up or down — so nothing half-seen during the teardown is left to forgive.
+ * A genuine change, on the other hand, can land in the TAIL of a successful
+ * recovery (after tun.start() read the gateway, while the routes, the firewall
+ * rule and the kill-switch disarm still run) and is then one poll plus a debounce
+ * from settling: adopting it as the baseline would drop it, leaving the tunnel
+ * built for a gateway that is gone, the UI saying connected, and nothing left to
+ * notice. Whatever the recovery did not cover must still be allowed to settle.
+ */
 class NetWatcher {
   /**
    * @param {object} opts
@@ -89,25 +101,6 @@ class NetWatcher {
     this.pending = null;
     this.settledFor = 0;
     this.timer = this.setTimer(() => this.tick(), this.intervalMs);
-  }
-
-  /**
-   * Adopt the network as it is right now as the baseline, and forget a change
-   * that was only half-observed.
-   *
-   * The owner calls this when a recovery finishes: the tunnel it just rebuilt was
-   * built for THIS network, so nothing about it is news. Without it, everything
-   * seen during the teardown — an adapter down, a route gone — is still sitting
-   * in `pending` and settles into a trigger for a rebuild that already happened.
-   *
-   * `queued` and `busy` are deliberately untouched: a trigger that arrived during
-   * the recovery is a real change the rebuild in flight did NOT cover, and
-   * dropping it here would leave the tunnel dead with nothing left to fire again.
-   */
-  rebaseline() {
-    this.last = this.fp();
-    this.pending = null;
-    this.settledFor = 0;
   }
 
   /**

@@ -38,7 +38,7 @@ const I18N = {
     'btn.edit': 'ویرایش', 'btn.addWg': '+ وایرگارد', 'btn.addWgGo': 'افزودن',
     'btn.copy': 'کپی لینک', 'btn.qr': 'کد QR',
     'qr.title': 'اشتراک کانفیگ', 'qr.copy': 'کپی لینک', 'qr.tooBig': 'لینک برای QR خیلی بلند است — از کپی استفاده کن.',
-    'qr.hint': 'این لینک همهٔ تنظیمات (شامل patterniha: finalMask/cipherSuites/unsafe) را دارد. اسکن کن یا کپی و در کلاینت دیگر وارد کن.',
+    'qr.hint': 'این لینک همهٔ تنظیمات (شامل patterniha: fm/cs/unsafe) را دارد. اسکن کن یا کپی و در کلاینت دیگر وارد کن.',
 
     'wg.title': 'افزودن WireGuard', 'wg.name': 'نام', 'wg.namePh': 'نام دلخواه',
     'wg.endpoint': 'Endpoint (host:port)', 'wg.privateKey': 'کلید خصوصی',
@@ -340,7 +340,7 @@ const I18N = {
     'btn.edit': 'Edit', 'btn.addWg': '+ WireGuard', 'btn.addWgGo': 'Add',
     'btn.copy': 'Copy link', 'btn.qr': 'QR code',
     'qr.title': 'Share config', 'qr.copy': 'Copy link', 'qr.tooBig': 'Link too long for a QR — use Copy.',
-    'qr.hint': 'This link carries EVERY setting (incl. patterniha: finalMask/cipherSuites/unsafe). Scan it or copy into another client.',
+    'qr.hint': 'This link carries EVERY setting (incl. patterniha: fm/cs/unsafe). Scan it or copy into another client.',
 
     'wg.title': 'Add WireGuard', 'wg.name': 'Name', 'wg.namePh': 'Custom name',
     'wg.endpoint': 'Endpoint (host:port)', 'wg.privateKey': 'Private Key',
