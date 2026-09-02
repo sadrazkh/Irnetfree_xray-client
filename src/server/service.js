@@ -18,6 +18,8 @@ const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerE
 const { buildConfig, buildTestConfig } = require('../main/configBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
+const { chooseEngine, testEngineFor } = require('../main/engineChoice');
+const { assetStatus: scanAssets } = require('../main/assets');
 const { XrayManager, getFreePort } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../main/netutils');
@@ -32,7 +34,9 @@ const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta'
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
   httpPort: 10809,
-  allowLan: true,            // headless: listen on 0.0.0.0 so forwarded ports are reachable
+  allowLan: false,           // loopback only, like the desktop. `ssh -L` reaches a loopback
+                             // bind fine; 0.0.0.0 would make the auth-less SOCKS port an
+                             // open relay on a VPS. The user opts in under Settings → LAN.
   routingMode: 'global',
   blockAds: true,
   enableSniffing: true,
@@ -50,6 +54,7 @@ const DEFAULT_SETTINGS = {
   procRouteWatch: false,
   killSwitch: false,
   theme: 'dark',
+  defaultEngine: 'xray',
   lang: 'fa'
 };
 
@@ -106,16 +111,9 @@ function createService(opts = {}) {
 
   function binDirs() { return [userBinDir, bundledBinDir]; }
   function assetStatus() {
-    const has = (name) => binDirs().some(d => fs.existsSync(path.join(d, name)));
-    const win = process.platform === 'win32';
-    return {
-      xray: xray ? xray.binExists() : has(win ? 'xray.exe' : 'xray'),
-      tun2socks: has(win ? 'tun2socks.exe' : 'tun2socks'),
-      wintun: win ? has('wintun.dll') : true,
-      geoip: has('geoip.dat'),
-      geosite: has('geosite.dat'),
-      platform: process.platform
-    };
+    const st = scanAssets(binDirs());
+    if (xray) st.xray = st.xray || xray.binExists('xray');
+    return st;
   }
 
   const xray = new XrayManager({
@@ -147,7 +145,7 @@ function createService(opts = {}) {
   });
 
   const stats = new StatsPoller({
-    binPath: xray.resolveBin(),
+    binPath: xray.anyBin(),
     apiPort: getSettings().apiPort,
     onStats: (s) => send('stats', s)
   });
@@ -293,8 +291,11 @@ function createService(opts = {}) {
         : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
     }
 
-    const wantEngine = (plan.mode === 'single' && plan.server && plan.server.engine) || undefined;
-    let engine = xray.resolveEngine(wantEngine).id;
+    // Per-config core selection (see engineChoice.js): a single server's own
+    // choice, else the default engine; multi-server plans run on PattN when any
+    // member needs it. The EFFECTIVE engine (after fallback when the binary is
+    // missing) decides the config format.
+    let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
     let config;
     if (engineFormat(engine) === 'sing-box') {
       try {
@@ -318,17 +319,29 @@ function createService(opts = {}) {
 
     send('status', { state: 'connecting', serverId });
 
-    const check = await xray.validate(config, engine);
+    const check = await xray.validateWithFallback(config, engine);
     if (!check.ok) {
       send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
-      throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error);
+      // The official core refuses plaintext VLESS/Trojan to public addresses and the
+      // fork that accepts them is not installed — say so, the renderer offers the download.
+      const hint = check.plaintextRejected
+        ? (settings.lang === 'en'
+          ? ' — this config has no TLS; the official core refuses it. Install Xray-PattN under Settings → Required files.'
+          : ' — این کانفیگ TLS ندارد و هستهٔ رسمی آن را رد می‌کند. Xray-PattN را از تنظیمات → فایل‌های موردنیاز نصب کن.')
+        : '';
+      // Only Error.message survives the bridge (web-api.js rebuilds it with
+      // new Error(data.error)), so the hint IS the signal: the renderer keys off
+      // the (untranslated) product name in it. A property set here would be
+      // dropped in transit — don't add one.
+      throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
     }
+    const runEngine = check.engine;
 
     // save/restore rather than clear — reapplyConnection() wraps the whole
     // teardown+reconnect in the same flag
     const prevReloading = xrayReloading;
     xrayReloading = true;
-    try { await xray.start(config, engine); } finally { xrayReloading = prevReloading; }
+    try { await xray.start(config, runEngine); } finally { xrayReloading = prevReloading; }
     store.set('activeServerId', serverId);
     appliedSettings = snapshotApplied(getSettings());
 
@@ -354,13 +367,13 @@ function createService(opts = {}) {
     let lan = null;
     if (settings.allowLan) lan = { ip: lanIp(), socksPort: settings.socksPort, httpPort: settings.httpPort };
 
-    stats.setBin(xray.resolveBin());
+    stats.setBin(xray.anyBin());
     stats.apiPort = settings.apiPort;
     stats.start(1000);
 
     startProcWatcher();
     send('status', {
-      state: 'connected', serverId, server: byId(serverId) || null, label,
+      state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
       tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
     });
     return true;
@@ -411,8 +424,12 @@ function createService(opts = {}) {
     const { config, engine } = buildActive(serverId, settings);
     const prevReloading = xrayReloading;
     xrayReloading = true;
-    try { await xray.start(config, engine); } finally { xrayReloading = prevReloading; }
-    stats.setBin(xray.resolveBin());
+    try {
+      const check = await xray.validateWithFallback(config, engine);
+      if (!check.ok) throw new Error(check.error);
+      await xray.start(config, check.engine);   // start() stops the old instance first
+    } finally { xrayReloading = prevReloading; }
+    stats.setBin(xray.anyBin());
     send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
   }
 
@@ -568,7 +585,8 @@ function createService(opts = {}) {
       try {
         const port = await getFreePort();
         const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-        test = await xray.startTest(cfg);
+        const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
+        test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
         return await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
       } catch (err) { return { ok: false, error: err.message }; }
       finally { if (test) test.cleanup(); }
@@ -581,7 +599,8 @@ function createService(opts = {}) {
       try {
         const port = await getFreePort();
         const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-        test = await xray.startTest(cfg);
+        const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
+        test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
         return await uploadThroughProxy(port, {});
       } catch (err) { return { ok: false, error: err.message }; }
       finally { if (test) test.cleanup(); }
@@ -592,20 +611,22 @@ function createService(opts = {}) {
     'assets:download': async (component) => {
       try {
         const res = await downloader.download(component);
-        if (component === 'xray') { xray.binPath = null; xray._version = null; stats.setBin(xray.resolveBin()); }
+        // binPath caches ONLY the official core (and holds a user-located path),
+        // so downloading the fork must not clear it.
+        if (component === 'xray' || component === 'xray-pattn') { if (component === 'xray') xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.anyBin()); }
         return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: tun.isAvailable(), xrayReady: xray.binExists() };
       } catch (err) { send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' }); return { ok: false, error: err.message, assets: assetStatus() }; }
     },
     'assets:remove': async () => {
       if (xray.running || tun.active) return { ok: false, error: 'disconnect first', assets: assetStatus() };
-      const names = ['xray', 'xray.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
+      const names = ['xray', 'xray.exe', 'xray-pattn', 'xray-pattn.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
       const removed = [];
       for (const n of names) { const p = path.join(userBinDir, n); try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); removed.push(n); } } catch {} }
-      xray.binPath = store.get('xrayPath', null); xray._version = null; stats.setBin(xray.resolveBin());
+      xray.binPath = store.get('xrayPath', null); xray.forgetVersions(); stats.setBin(xray.anyBin());
       return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: tun.isAvailable() };
     },
 
-    'xray:version': async () => { try { return { ok: true, version: await xray.version() }; } catch (e) { return { ok: false, error: e.message }; } },
+    'xray:version': async (engineId) => { try { return { ok: true, version: await xray.version(engineId || 'xray') }; } catch (e) { return { ok: false, error: e.message }; } },
     'xray:locate': () => ({ ok: false, error: 'not available in server mode' }),
     'app:checkUpdate': () => ({ ok: false, current: appVersion, error: 'update check is desktop-only' }),
 

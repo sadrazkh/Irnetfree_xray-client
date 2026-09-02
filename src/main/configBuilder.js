@@ -304,7 +304,9 @@ function buildConfig(planArg, settings) {
 function buildPoolConfig(plan, s, listen, sniffing) {
   const reg = makeRegistry(plan);
   const inbounds = [];
-  const usedPorts = new Set();
+  // The api inbound is pushed last but must win: reserve its port up front so a
+  // pool entry cannot take it (xray refuses to start on a duplicate bind).
+  const usedPorts = new Set([parseInt(s.apiPort, 10)]);
 
   // api first so its rule can sit at the very top
   const rules = [{ type: 'field', inboundTag: ['api'], outboundTag: 'api' }];

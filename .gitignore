@@ -23,3 +23,7 @@ bin/README.md
 
 *.log
 .DS_Store
+
+# The patterniha fork lands next to the official core in bin/ (see engines.js).
+bin/xray-pattn
+bin/xray-pattn.exe
