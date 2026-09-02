@@ -620,7 +620,6 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
     }) }
     var noiseCustom by remember { mutableStateOf(if (noisePreset == "custom") f.noise else "") }
     val effectiveNoise = when (noisePreset) { "off" -> ""; "custom" -> noiseCustom.trim(); else -> noisePreset }
-    var fakeSni by remember { mutableStateOf(f.fakeSni) }
     var cipherSuites by remember { mutableStateOf(f.cipherSuites) }
     var finalMask by remember { mutableStateOf(f.finalMask) }
     var engine by remember { mutableStateOf(f.engine) }
@@ -664,8 +663,6 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
                     SwitchRow("🕵 Hide SNI from DPI (fragment / patterniha)", fragment.isNotBlank()) {
                         fragment = if (it) (if (fragment.isBlank()) "tlshello,100-200,10-20" else fragment) else ""
                     }
-                    // Experimental decoy: a fake ClientHello with this domain (needs a compatible core).
-                    Fld("Fake SNI decoy — experimental (empty = off)", fakeSni) { fakeSni = it }
                 }
                 Fld("Path / ServiceName", path) { path = it }
                 DropPick("Fake ClientHello (browser fingerprint / uTLS)", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized", "unsafe" to "unsafe (custom cipherSuites)"), fp) { fp = it }
@@ -696,7 +693,7 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
             }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
-                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise, fakeSni, cipherSuites, finalMask, engine, f.spx, f.xmode, f.seed, f.headerType, f.xhttpExtra)
+                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise, cipherSuites, finalMask, engine, f.spx, f.xmode, f.seed, f.headerType, f.xhttpExtra)
                 onSave(ServerEditor.apply(server, nf))
             }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
