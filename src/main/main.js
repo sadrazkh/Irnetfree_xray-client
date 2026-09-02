@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn, execFile } = require('child_process');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink } = require('./parser');
+const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer } = require('./parser');
 const { buildConfig, buildTestConfig } = require('./configBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
@@ -35,6 +35,8 @@ let downloader = null;
 let procWatcher = null;
 let netWatcher = null;
 let recoverTimer = null;
+let recovering = false;        // a network-change recovery is in flight
+let recoverQueued = null;      // reason of a trigger that arrived during that recovery
 const RECOVER_BACKOFF_MS = [2000, 5000, 15000];
 let userBinDir = null;
 let isQuitting = false;
@@ -540,7 +542,12 @@ async function doConnect(serverId, opts = {}) {
     state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
     tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
   });
-  return true;
+  // `tunError` is the one failure this function does NOT throw for: TUN is a
+  // best-effort upgrade and we stay connected proxy-only without it. Callers
+  // that must know whether the WHOLE system is tunnelled (the network-change
+  // recovery) can only find out from here — the status event above is fire and
+  // forget. The renderer ignores this value; it only awaits the call.
+  return { ok: true, tunError };
 }
 
 /** Reconnect-relevant settings the user changed since the live tunnel was built. */
@@ -590,8 +597,9 @@ async function reapplyConnection() {
     xrayReloading = prevReloading;
   }
 
+  let r;
   try {
-    await doConnect(serverId, { holdKillSwitch: armed });
+    r = await doConnect(serverId, { holdKillSwitch: armed });
   } catch (e) {
     appliedSettings = null;
     if (armed) {
@@ -611,7 +619,9 @@ async function reapplyConnection() {
     send('killswitch', { engaged: false });
     send('log', { line: 'Kill switch released — tunnel is back up', level: 'info' });
   }
-  return { ok: true };
+  // Pass doConnect()'s one non-throwing failure through: the tunnel is up but
+  // TUN is not, so this is not a complete reconnect for whoever asked for one.
+  return { ok: true, tunError: (r && r.tunError) || null };
 }
 
 /**
@@ -668,18 +678,83 @@ function stopProcWatcher() {
  * point at the old gateway — so nothing else would notice. Rebuild the connection
  * from current settings; reapplyConnection() already holds the kill-switch block
  * across the gap, so this cannot leak.
+ *
+ * Only one recovery runs at a time (see `recovering`): a watcher trigger and an
+ * already-scheduled backoff retry would otherwise have two reapplyConnection()
+ * calls tearing down and starting the same core against each other. A trigger
+ * that arrives during a recovery is remembered rather than dropped — the rebuild
+ * in flight was made for the network we have already left, and the watcher has
+ * long since adopted the new one as its baseline, so nothing would fire again.
  */
 async function recoverFromNetworkChange(reason, attempt = 0) {
-  if (!store.get('activeServerId', null) || !xray || !xray.running) return;
+  // The INTENT to be connected is the saved active server, not xray.running: an
+  // attempt that failed leaves the core stopped, and that is exactly the state
+  // the next retry exists for. doDisconnect() clears the id, so a deliberate
+  // disconnect still ends the retries.
+  if (!store.get('activeServerId', null)) return;
   if (!getSettings().autoReconnectOnNetworkChange) return;
+  if (recovering) { recoverQueued = reason; return; }
+
+  recovering = true;
+  try {
+    await runRecovery(reason, attempt);
+  } finally {
+    recovering = false;
+  }
+
+  // A newer network arrived while we were rebuilding for the old one: start over
+  // for it, from the first backoff step.
+  const queued = recoverQueued;
+  if (queued == null) return;
+  recoverQueued = null;
+  await recoverFromNetworkChange(queued, 0);
+}
+
+/** One recovery attempt. Only ever called through recoverFromNetworkChange(). */
+async function runRecovery(reason, attempt) {
+  const serverId = store.get('activeServerId', null);
+  // Whatever backoff step was waiting belongs to a rebuild this attempt is about
+  // to redo. Leaving it armed would start a second, competing chain.
+  clearTimeout(recoverTimer);
+  recoverTimer = null;
 
   send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
   send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
 
-  const res = await reapplyConnection();
-  if (res && res.ok) {
+  // Pick the rebuild path by what the core is ACTUALLY doing. Both paths answer
+  // in the same { ok, tunError, error } shape.
+  let res;
+  try {
+    if (xray && xray.running) {
+      res = await reapplyConnection();
+    } else {
+      // A previous attempt already stopped the core, so there is nothing to tear
+      // down. Keep any kill-switch block that attempt deliberately left engaged —
+      // doConnect() clears it up front otherwise, which would open the machine up
+      // during exactly the gap the block exists to cover.
+      const held = killEngaged;
+      res = await doConnect(serverId, { holdKillSwitch: held });
+      if (held) {
+        await disarmKillSwitch();
+        send('killswitch', { engaged: false });
+        send('log', { line: 'Kill switch released — tunnel is back up', level: 'info' });
+      }
+    }
+  } catch (e) {
+    // doConnect() throws where reapplyConnection() returns { ok: false }.
+    res = { ok: false, error: (e && e.message) || String(e) };
+  }
+
+  if (res && res.ok && !res.tunError) {
     send('log', { line: 'Connection restored after the network change', level: 'info' });
     return;
+  }
+  // doConnect() does not throw when TUN was asked for and did not come up: it
+  // reports tunError and carries on proxy-only. Calling that a restored
+  // connection would tell the user the whole system is tunnelled when it is not —
+  // so it counts as a failed attempt and the backoff retries it.
+  if (res && res.tunError) {
+    send('log', { line: 'Reconnected without the system-wide tunnel: ' + res.tunError, level: 'error' });
   }
   const delay = RECOVER_BACKOFF_MS[attempt];
   if (delay == null) {
@@ -688,7 +763,6 @@ async function recoverFromNetworkChange(reason, attempt = 0) {
     return;
   }
   send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
-  clearTimeout(recoverTimer);
   recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt + 1), delay);
   if (recoverTimer.unref) recoverTimer.unref();
 }
@@ -710,6 +784,11 @@ function startNetWatcher() {
 function stopNetWatcher() {
   clearTimeout(recoverTimer);
   recoverTimer = null;
+  // A trigger parked behind a recovery in flight has nothing left to recover.
+  // `recovering` itself is deliberately NOT cleared: the run that owns it
+  // releases it in its own finally, and forcing it false here would let a second
+  // recovery start alongside the one still going.
+  recoverQueued = null;
   if (netWatcher) { netWatcher.stop(); netWatcher = null; }
 }
 
@@ -804,6 +883,25 @@ function getPool() {
       httpPort: parseInt(e.httpPort, 10) || 0,
       enabled: e.enabled !== false
     }));
+}
+
+/**
+ * One-time upgrade of the saved servers to the shape the current parser and
+ * config builder expect (see migrateStoredServer). Runs at startup and writes
+ * back, so it costs one pass over the list per launch at most — every later read
+ * of `servers` sees the migrated records without repeating the work.
+ *
+ * Silent on purpose: it has to run before anything reads `servers`, and at that
+ * point there is no window to send a log line to.
+ */
+function migrateServers() {
+  const servers = store.get('servers', []);
+  if (!Array.isArray(servers) || !servers.length) return;
+  const migrated = servers.map(migrateStoredServer);
+  // migrateStoredServer returns the very same object when there is nothing to
+  // do, so this is false on every launch after the first.
+  if (!migrated.some((s, i) => s !== servers[i])) return;
+  store.set('servers', migrated);
 }
 
 /** Named proxy chains: [{ id, name, members:[serverId,...] }]. */
@@ -1248,6 +1346,8 @@ app.whenReady().then(() => {
       send('store-error', Object.assign({ kind }, info));
     }
   });
+
+  migrateServers();
 
   const ubin = userBin();
 
