@@ -2055,7 +2055,6 @@ function usedPoolPorts() {
   const set = new Set();
   const sp = parseInt(state.settings.socksPort, 10); if (sp) set.add(sp);
   const hp = parseInt(state.settings.httpPort, 10); if (hp) set.add(hp);
-  const ap = parseInt(state.settings.apiPort, 10); if (ap) set.add(ap);   // api inbound (configBuilder reserves it too)
   for (const e of state.pool) {
     if (e.socksPort) set.add(parseInt(e.socksPort, 10));
     if (e.httpPort) set.add(parseInt(e.httpPort, 10));
@@ -2272,6 +2271,10 @@ function renderAdvanced() {
 
   optAdv.checked = !!state.settings.advancedRouting;
   if (body) body.hidden = !state.settings.advancedRouting;
+  // custom rules only apply to the simple modes (configBuilder ignores them under
+  // advanced routing) — don't show an editor for something that has no effect
+  const simple = $('#simpleRulesCard');
+  if (simple) simple.hidden = !!state.settings.advancedRouting;
 
   const rules = state.settings.routeRules || [];
   wrap.innerHTML = '';
