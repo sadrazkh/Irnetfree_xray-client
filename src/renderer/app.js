@@ -1200,6 +1200,11 @@ function renderComponents() {
     btn.onclick = () => downloadComponent(c.key, btn);
     list.appendChild(row);
   }
+
+  // the Routing page's "download geo files" note is a static hint today and
+  // shows even when both files are installed — tie it to the real state
+  const note = $('#routingGeoNote');
+  if (note) note.hidden = !!(a.geoip && a.geosite);
 }
 
 async function downloadComponent(key, btn) {
