@@ -762,6 +762,17 @@ const HTTP_PROXY_LINK = /^http:\/\/(?:(?:[A-Za-z0-9+/=]+|[^/?#\s@]+)@)?[^/?#\s@]
 async function smartImport(text) {
   text = String(text || '').trim();
   if (!text) return;
+  // A pasted WireGuard .conf is one multi-line config, not a list of links —
+  // hand the whole blob to parseMany (main-side) before the per-line split.
+  if (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text)) {
+    const res = await window.api.importServers(text);
+    state.servers = res.servers;
+    if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
+    renderServers(); renderPicker(); renderChains(); renderPool();
+    const failed = (res.errors || []).length;
+    toast(failed ? `${t('t.failed')}: ${res.errors[0].error}` : t('t.wgAdded'), failed ? 'err' : 'ok');
+    return;
+  }
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const isSubUrl = (l) => /^https?:\/\//i.test(l) && !HTTP_PROXY_LINK.test(l);
   const urlLines = lines.filter(isSubUrl);
@@ -814,8 +825,11 @@ document.addEventListener('paste', (e) => {
   const cd = e.clipboardData || window.clipboardData;
   const text = cd && cd.getData('text');
   if (!text || !text.trim()) return;
-  if (!/^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|wireguard:\/\/|wg:\/\/)/im.test(text.trim()) &&
-      !/[A-Za-z0-9+/=]{24,}/.test(text.trim())) return; // ignore unrelated clipboard text
+  // ignore unrelated clipboard text; a .conf blob counts as importable too
+  const looksImportable = /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|socks:\/\/|socks5:\/\/|wireguard:\/\/|wg:\/\/)/im.test(text.trim())
+    || /[A-Za-z0-9+/=]{24,}/.test(text.trim())
+    || (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text));
+  if (!looksImportable) return;
   e.preventDefault();
   toast(t('t.pasteDetected'));
   smartImport(text.trim());
@@ -1926,6 +1940,55 @@ $('#btnWgOpen').onclick = () => {
   $('#proxyBox').hidden = true;
 };
 $('#btnWgCancel').onclick = () => { $('#wgBox').hidden = true; };
+
+/* Load a WireGuard .conf into the form. Electron opens a native dialog; the
+   headless build has no dialog, so fall back to a hidden file input. */
+$('#btnWgPickConf').onclick = async () => {
+  let text = '';
+  try {
+    const res = await window.api.pickWireguardConf();
+    if (res && res.ok) text = res.text;
+    else if (res && res.canceled) return;
+  } catch {}
+  if (!text) text = await pickLocalFile('.conf,.txt');
+  if (!text) return;
+  fillWgFormFromConf(text);
+};
+
+/** Browser fallback: a throwaway <input type="file"> resolved to its text. */
+function pickLocalFile(accept) {
+  return new Promise((resolve) => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = accept;
+    inp.onchange = () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return resolve('');
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result || ''));
+      fr.onerror = () => resolve('');
+      fr.readAsText(f);
+    };
+    inp.click();
+  });
+}
+
+/** Fill the WireGuard form from .conf text. Parsing happens in main. */
+async function fillWgFormFromConf(text) {
+  const res = await window.api.parseWireguardConf(text);
+  if (!res || !res.ok) { $('#wgConfHint').textContent = (res && res.error) || t('wg.confFailed'); return; }
+  const f = res.fields;
+  $('#wgName').value = f.name || '';
+  $('#wgEndpoint').value = f.endpoint || '';
+  $('#wgPrivate').value = f.privateKey || '';
+  $('#wgPublic').value = f.publicKey || '';
+  $('#wgAddress').value = f.address || '';
+  $('#wgAllowed').value = f.allowedIPs || '0.0.0.0/0, ::/0';
+  $('#wgPsk').value = f.presharedKey || '';
+  $('#wgMtu').value = f.mtu || 1420;
+  $('#wgReserved').value = f.reserved || '';
+  $('#wgConfHint').textContent = t('wg.confLoaded');
+}
 
 $('#btnWgAdd').onclick = async () => {
   const fields = {

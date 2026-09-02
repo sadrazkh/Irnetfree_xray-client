@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn, execFile } = require('child_process');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer } = require('./parser');
+const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
 const { buildConfig, buildTestConfig } = require('./configBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
@@ -968,6 +968,22 @@ function registerIpc() {
     existing.push(server);
     store.set('servers', existing);
     return { server, servers: existing };
+  });
+
+  // Read a WireGuard .conf the user picks, and parse .conf text into form fields.
+  ipcMain.handle('wg:pickConf', async () => {
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select a WireGuard configuration',
+      properties: ['openFile'],
+      filters: [{ name: 'WireGuard', extensions: ['conf', 'txt'] }]
+    });
+    if (res.canceled || !res.filePaths[0]) return { ok: false, canceled: true };
+    try { return { ok: true, text: fs.readFileSync(res.filePaths[0], 'utf8') }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
+  ipcMain.handle('wg:parseConf', (e, text) => {
+    try { return { ok: true, fields: parseWireguardConf(text) }; }
+    catch (err) { return { ok: false, error: err.message }; }
   });
 
   ipcMain.handle('servers:update', (e, { id, fields }) => {
