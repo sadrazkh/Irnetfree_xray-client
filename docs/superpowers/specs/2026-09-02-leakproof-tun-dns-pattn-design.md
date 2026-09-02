@@ -275,6 +275,64 @@ follow. Verified with a screenshot of every page in both themes.
 hijack rule, geoAssets flag), `MainActivity.kt` (DNS field and rule-value field losing focus/commas),
 `XrayVpnService.kt` (geo assets). Not in this round.
 
+## 4a. Phase 3b — surviving a network change
+
+**Reported symptom:** when the machine's internet changes (Wi‑Fi ↔ ethernet, hotspot, reconnect after an
+outage, a new IP from DHCP), other clients pick the connection back up within seconds; IRNetFree "gets
+confused" and shows instability.
+
+**Root cause — four separate defects, all confirmed in the code:**
+
+1. **Nothing watches the network.** There is no `powerMonitor` listener, no `net.isOnline`, no interface
+   poll anywhere in `src/`. The app never learns that anything changed.
+2. **The TUN bypass routes are pinned to a gateway captured once.** `tunManager.js:172` reads the default
+   gateway at connect time into `this.savedGateway` and never refreshes it. After a network change the
+   `/32` route for the server IP still points at the *old* gateway, so xray's own connection to the server
+   is black-holed — the tunnel is completely dead while the UI still says "connected".
+3. **A network change does not kill xray-core**, it only breaks its sockets. So the `onStatus('stopped')`
+   path in `main.js:1192` never fires: no kill switch, no error, no reconnect. The app silently stops
+   passing traffic and gives the user no signal at all.
+4. **There is no reconnect policy.** Even when xray *does* die, the app arms the kill switch and stops
+   there. Recovery is always a manual disconnect + connect.
+
+**Design.** A new `src/main/netWatcher.js` — a pure-ish module with an injectable clock and interface
+reader, so it is unit-testable without touching a real NIC:
+
+```js
+new NetWatcher({
+  read: () => os.networkInterfaces(),   // injectable
+  onChange: (why) => …,                 // 'interfaces' | 'resume' | 'online'
+  debounceMs: 2500, intervalMs: 3000
+})
+```
+- **Signals:** a 3 s poll of `os.networkInterfaces()` reduced to a stable fingerprint (non-internal IPv4/IPv6
+  addresses + interface names, sorted), plus Electron's `powerMonitor` `resume` / `unlock-screen` and the
+  renderer's `online` event forwarded over IPC. The headless service uses the poll only.
+- **Debounce:** a change fires `onChange` once, `debounceMs` after the fingerprint *stops* moving, so a
+  flapping adapter cannot start a restart loop. A restart already in flight suppresses the next one.
+- **Recovery, in `main.js` / `service.js` (mirrored):** on `onChange` while connected →
+  set status `reconnecting`, re-resolve the server addresses, then reuse the existing
+  `reapplyConnection()` — it already tears the tunnel down and rebuilds it from current settings, already
+  holds the kill-switch block across the gap, and already restarts the proc-route watcher. The TUN layer is
+  restarted as part of that, which is what picks up the new gateway (defect 2). Backoff: 2 s, 5 s, 15 s,
+  then stop and surface a "network changed — could not reconnect" banner with a Retry button.
+- **Setting** `autoReconnectOnNetworkChange: true` (reconnect-relevant: no — it is read live), shown in
+  Settings with the note that a reconnect takes a few seconds and that the kill switch keeps the gap sealed.
+- **Health probe, not just topology:** after a reconnect the existing `Diagnostics`-style check runs once
+  through the local SOCKS port; if it fails, the next backoff step runs. This is what makes "other clients
+  reconnect the moment access opens" true for us too — the poll keeps retrying while the network is up but
+  the path is not.
+
+**What phase 3 already fixes for free:** sing-box's `auto_detect_interface` rebinds outbound sockets to the
+new default NIC and its `auto_route` re-lays the routes, so defect 2 largely disappears once the TUN layer
+is sing-box. Defects 1, 3 and 4 are independent of the TUN backend and are needed in **proxy mode** too —
+this phase is not made redundant by phase 3.
+
+**Tests:** fingerprint stability (same interfaces in a different order → no change), debounce (three changes
+inside the window → one `onChange`), suppression while a restart is in flight, backoff sequence, and the
+give-up transition. Manual on Windows: connect, switch Wi‑Fi networks, confirm traffic resumes without user
+action and that the log names the reason.
+
 ## 4b. macOS parity (applies to every phase)
 
 The owner's requirement: *every* option — PattN core, finalmask/fingerprint/cipherSuites, dual cores,
