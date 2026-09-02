@@ -24,9 +24,30 @@ test('without a token only loopback Host values are accepted', () => {
   assert.equal(hostAllowed('', {}), false);
 });
 
-test('a token (or --no-auth) lifts the Host restriction', () => {
+test('a token lifts the Host restriction on any bind', () => {
   assert.equal(hostAllowed('203.0.113.9:6969', { token: 'abc' }), true);
-  assert.equal(hostAllowed('203.0.113.9:6969', { noAuth: true }), true);
+  assert.equal(hostAllowed('203.0.113.9:6969', { token: 'abc', loopbackBind: true }), true);
+});
+
+test('--no-auth does NOT lift the Host restriction on a loopback bind', () => {
+  // On a loopback bind the server never auto-generates a token and authed()
+  // passes whenever TOKEN is falsy — so --no-auth changes nothing about
+  // authentication there. Its only remaining effect would be to switch off the
+  // rebinding guard, which is the one thing it must not do.
+  const opts = { noAuth: true, loopbackBind: true };
+  assert.equal(hostAllowed('attacker.example:6969', opts), false);
+  // the honest Host values still work, ports still ignored (ssh -L)
+  for (const h of ['127.0.0.1:6969', 'localhost:8080', '[::1]:6969', 'localhost']) {
+    assert.equal(hostAllowed(h, opts), true, h);
+  }
+});
+
+test('--no-auth on a non-loopback bind still accepts any Host', () => {
+  // The user bound to a public interface and explicitly opted out of a token:
+  // the Host is whatever name they reach the box by, so there is nothing to check.
+  const opts = { noAuth: true, loopbackBind: false };
+  assert.equal(hostAllowed('203.0.113.9:6969', opts), true);
+  assert.equal(hostAllowed('panel.example:6969', opts), true);
 });
 
 test('browser requests must come from the panel’s own origin', () => {

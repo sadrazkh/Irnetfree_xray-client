@@ -11,7 +11,9 @@
  *    must be the panel's own origin.
  *  - DNS rebinding: a page on attacker.example that resolves to 127.0.0.1 makes
  *    the browser send `Host: attacker.example`, which would also let it READ
- *    responses. Without a token we only accept loopback Host values.
+ *    responses. Without a token we only accept loopback Host values — and on a
+ *    loopback bind that holds even under `--no-auth`, which is about tokens, not
+ *    about trusting whatever Host a browser was told to send.
  */
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
@@ -25,13 +27,22 @@ function hostnameOf(hostHeader) {
 }
 
 /**
- * A token is the authentication when one is set (public bind); --no-auth is the
- * user's explicit choice to run open. Otherwise only loopback hosts are valid —
- * the port is deliberately ignored so an `ssh -L 8080:127.0.0.1:6969` forward
- * still works.
+ * A token is real authentication, so it lifts the Host restriction on any bind.
+ *
+ * `--no-auth` only lifts it when the bind is genuinely non-loopback. On a
+ * loopback bind the server never required a token in the first place (it only
+ * auto-generates one for a public bind, and the token check passes whenever no
+ * token is set), so there `--no-auth` turns off nothing but this rebinding
+ * guard — which is exactly what it must not do.
+ *
+ * Otherwise only loopback hosts are valid — the port is deliberately ignored so
+ * an `ssh -L 8080:127.0.0.1:6969` forward still works. `loopbackBind` is passed
+ * in by the caller (this stays a pure function) and defaults to the safe
+ * assumption that we are on loopback.
  */
-function hostAllowed(hostHeader, { token, noAuth } = {}) {
-  if (token || noAuth) return true;
+function hostAllowed(hostHeader, { token, noAuth, loopbackBind = true } = {}) {
+  if (token) return true;
+  if (noAuth && !loopbackBind) return true;
   return LOOPBACK.has(hostnameOf(hostHeader));
 }
 
