@@ -18,6 +18,7 @@ const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerE
 const { buildConfig, buildTestConfig } = require('../main/configBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
+const { chooseEngine, testEngineFor } = require('../main/engineChoice');
 const { assetStatus: scanAssets } = require('../main/assets');
 const { XrayManager, getFreePort } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
@@ -53,6 +54,7 @@ const DEFAULT_SETTINGS = {
   procRouteWatch: false,
   killSwitch: false,
   theme: 'dark',
+  defaultEngine: 'xray',
   lang: 'fa'
 };
 
@@ -289,8 +291,11 @@ function createService(opts = {}) {
         : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
     }
 
-    const wantEngine = (plan.mode === 'single' && plan.server && plan.server.engine) || undefined;
-    let engine = xray.resolveEngine(wantEngine).id;
+    // Per-config core selection (see engineChoice.js): a single server's own
+    // choice, else the default engine; multi-server plans run on PattN when any
+    // member needs it. The EFFECTIVE engine (after fallback when the binary is
+    // missing) decides the config format.
+    let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
     let config;
     if (engineFormat(engine) === 'sing-box') {
       try {
@@ -314,17 +319,27 @@ function createService(opts = {}) {
 
     send('status', { state: 'connecting', serverId });
 
-    const check = await xray.validate(config, engine);
+    const check = await xray.validateWithFallback(config, engine);
     if (!check.ok) {
       send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
-      throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error);
+      // The official core refuses plaintext VLESS/Trojan to public addresses and the
+      // fork that accepts them is not installed — say so, the renderer offers the download.
+      const hint = check.plaintextRejected
+        ? (settings.lang === 'en'
+          ? ' — this config has no TLS; the official core refuses it. Install Xray-PattN under Settings → Required files.'
+          : ' — این کانفیگ TLS ندارد و هستهٔ رسمی آن را رد می‌کند. Xray-PattN را از تنظیمات → فایل‌های موردنیاز نصب کن.')
+        : '';
+      const err = new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
+      err.needEngine = check.plaintextRejected ? 'xray-pattn' : undefined;
+      throw err;
     }
+    const runEngine = check.engine;
 
     // save/restore rather than clear — reapplyConnection() wraps the whole
     // teardown+reconnect in the same flag
     const prevReloading = xrayReloading;
     xrayReloading = true;
-    try { await xray.start(config, engine); } finally { xrayReloading = prevReloading; }
+    try { await xray.start(config, runEngine); } finally { xrayReloading = prevReloading; }
     store.set('activeServerId', serverId);
     appliedSettings = snapshotApplied(getSettings());
 
@@ -356,7 +371,7 @@ function createService(opts = {}) {
 
     startProcWatcher();
     send('status', {
-      state: 'connected', serverId, server: byId(serverId) || null, label,
+      state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
       tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
     });
     return true;
@@ -407,7 +422,11 @@ function createService(opts = {}) {
     const { config, engine } = buildActive(serverId, settings);
     const prevReloading = xrayReloading;
     xrayReloading = true;
-    try { await xray.start(config, engine); } finally { xrayReloading = prevReloading; }
+    try {
+      const check = await xray.validateWithFallback(config, engine);
+      if (!check.ok) throw new Error(check.error);
+      await xray.start(config, check.engine);   // start() stops the old instance first
+    } finally { xrayReloading = prevReloading; }
     stats.setBin(xray.resolveEngine().bin);
     send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
   }
@@ -564,7 +583,8 @@ function createService(opts = {}) {
       try {
         const port = await getFreePort();
         const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-        test = await xray.startTest(cfg);
+        const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
+        test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
         return await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
       } catch (err) { return { ok: false, error: err.message }; }
       finally { if (test) test.cleanup(); }
@@ -577,7 +597,8 @@ function createService(opts = {}) {
       try {
         const port = await getFreePort();
         const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-        test = await xray.startTest(cfg);
+        const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
+        test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
         return await uploadThroughProxy(port, {});
       } catch (err) { return { ok: false, error: err.message }; }
       finally { if (test) test.cleanup(); }

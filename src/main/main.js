@@ -9,6 +9,7 @@ const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerE
 const { buildConfig, buildTestConfig } = require('./configBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
+const { chooseEngine, testEngineFor } = require('./engineChoice');
 const { assetStatus: scanAssets } = require('./assets');
 const { XrayManager, getFreePort } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
@@ -66,7 +67,8 @@ const DEFAULT_SETTINGS = {
   procRouteWatch: false,
   // kill switch: block all internet if the VPN drops unexpectedly (Windows)
   killSwitch: false,
-  theme: 'dark'
+  theme: 'dark',
+  defaultEngine: 'xray'
 };
 
 function dataDir() {
@@ -390,11 +392,11 @@ function buildActive(serverId, settings) {
       : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
   }
 
-  // Per-config core selection: honour a single server's chosen engine. Chains /
-  // pool / advanced always run on the default Xray core. The EFFECTIVE engine
-  // (after fallback when the binary is missing) decides the config format.
-  const wantEngine = (plan.mode === 'single' && plan.server && plan.server.engine) || undefined;
-  let engine = xray.resolveEngine(wantEngine).id;
+  // Per-config core selection (see engineChoice.js): a single server's own
+  // choice, else the default engine; multi-server plans run on PattN when any
+  // member needs it. The EFFECTIVE engine (after fallback when the binary is
+  // missing) decides the config format.
+  let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
 
   let config;
   if (engineFormat(engine) === 'sing-box') {
@@ -432,11 +434,21 @@ async function doConnect(serverId, opts = {}) {
 
   // Validate first so chain / advanced-routing mistakes surface as a clear
   // message instead of a config that crashes xray right after "connected".
-  const check = await xray.validate(config, engine);
+  const check = await xray.validateWithFallback(config, engine);
   if (!check.ok) {
     send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
-    throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error);
+    // The official core refuses plaintext VLESS/Trojan to public addresses and the
+    // fork that accepts them is not installed — say so, the renderer offers the download.
+    const hint = check.plaintextRejected
+      ? (settings.lang === 'en'
+        ? ' — this config has no TLS; the official core refuses it. Install Xray-PattN under Settings → Required files.'
+        : ' — این کانفیگ TLS ندارد و هستهٔ رسمی آن را رد می‌کند. Xray-PattN را از تنظیمات → فایل‌های موردنیاز نصب کن.')
+      : '';
+    const err = new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
+    err.needEngine = check.plaintextRejected ? 'xray-pattn' : undefined;
+    throw err;
   }
+  const runEngine = check.engine;
 
   // Suppress the old instance's 'stopped' while switching servers so it isn't
   // mistaken for an unexpected drop (which would trip the kill switch) or flash
@@ -445,7 +457,7 @@ async function doConnect(serverId, opts = {}) {
   const prevReloading = xrayReloading;
   xrayReloading = true;
   try {
-    await xray.start(config, engine);
+    await xray.start(config, runEngine);
   } finally {
     xrayReloading = prevReloading;
   }
@@ -510,7 +522,7 @@ async function doConnect(serverId, opts = {}) {
 
   updateOverlay('on');
   send('status', {
-    state: 'connected', serverId, server: byId(serverId) || null, label,
+    state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
     tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
   });
   return true;
@@ -603,7 +615,9 @@ async function rebuildActiveConfig() {
   const prevReloading = xrayReloading;
   xrayReloading = true;
   try {
-    await xray.start(config, engine);   // start() stops the old instance first
+    const check = await xray.validateWithFallback(config, engine);
+    if (!check.ok) throw new Error(check.error);
+    await xray.start(config, check.engine);   // start() stops the old instance first
   } finally {
     xrayReloading = prevReloading;
   }
@@ -959,7 +973,8 @@ function registerIpc() {
     try {
       const port = await getFreePort();
       const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-      test = await xray.startTest(cfg);
+      const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
+      test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
       const result = await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
       return result;
     } catch (err) {
@@ -979,7 +994,8 @@ function registerIpc() {
     try {
       const port = await getFreePort();
       const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-      test = await xray.startTest(cfg);
+      const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
+      test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
       return await uploadThroughProxy(port, {});
     } catch (err) {
       return { ok: false, error: err.message };
