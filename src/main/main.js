@@ -513,7 +513,7 @@ async function doConnect(serverId, opts = {}) {
   }
 
   // Start live traffic stats
-  stats.setBin(xray.resolveEngine().bin);
+  stats.setBin(xray.anyBin());
   stats.apiPort = settings.apiPort;
   stats.start(1000);
 
@@ -624,7 +624,7 @@ async function rebuildActiveConfig() {
   // NOTE: appliedSettings is deliberately left alone. This path rebuilds only the
   // xray config; the connect-time side effects (system proxy, TUN, LAN firewall)
   // are untouched, so a pending change to those is still genuinely pending.
-  stats.setBin(xray.resolveEngine().bin);
+  stats.setBin(xray.anyBin());
   send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
 }
 
@@ -1031,11 +1031,13 @@ function registerIpc() {
   ipcMain.handle('assets:download', async (e, component) => {
     try {
       const res = await downloader.download(component);
-      // refresh stats binary + xray path in case xray was (re)installed
+      // refresh stats binary + xray path in case a core was (re)installed.
+      // binPath caches ONLY the official core — and holds the path the user
+      // picked with "Locate xray…" — so downloading the fork must not clear it.
       if (component === 'xray' || component === 'xray-pattn') {
-        xray.binPath = null;
+        if (component === 'xray') xray.binPath = null;
         xray.forgetVersions();
-        stats.setBin(xray.resolveEngine().bin);
+        stats.setBin(xray.anyBin());
       }
       return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: tun.isAvailable(), xrayReady: xray.binExists() };
     } catch (err) {
@@ -1120,7 +1122,7 @@ function registerIpc() {
     // re-resolve xray (falls back to a user-located path or bundled bin if any)
     xray.binPath = store.get('xrayPath', null);
     xray.forgetVersions();
-    stats.setBin(xray.resolveEngine().bin);
+    stats.setBin(xray.anyBin());
     send('log', { line: 'Removed downloaded files: ' + (removed.join(', ') || '(none)'), level: 'info' });
     return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: tun.isAvailable() };
   });
@@ -1218,7 +1220,7 @@ app.whenReady().then(() => {
   });
 
   stats = new StatsPoller({
-    binPath: xray.resolveEngine().bin,
+    binPath: xray.anyBin(),
     apiPort: getSettings().apiPort,
     onStats: (s) => send('stats', s)
   });

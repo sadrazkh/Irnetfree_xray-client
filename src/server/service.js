@@ -145,7 +145,7 @@ function createService(opts = {}) {
   });
 
   const stats = new StatsPoller({
-    binPath: xray.resolveEngine().bin,
+    binPath: xray.anyBin(),
     apiPort: getSettings().apiPort,
     onStats: (s) => send('stats', s)
   });
@@ -365,7 +365,7 @@ function createService(opts = {}) {
     let lan = null;
     if (settings.allowLan) lan = { ip: lanIp(), socksPort: settings.socksPort, httpPort: settings.httpPort };
 
-    stats.setBin(xray.resolveEngine().bin);
+    stats.setBin(xray.anyBin());
     stats.apiPort = settings.apiPort;
     stats.start(1000);
 
@@ -427,7 +427,7 @@ function createService(opts = {}) {
       if (!check.ok) throw new Error(check.error);
       await xray.start(config, check.engine);   // start() stops the old instance first
     } finally { xrayReloading = prevReloading; }
-    stats.setBin(xray.resolveEngine().bin);
+    stats.setBin(xray.anyBin());
     send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
   }
 
@@ -609,7 +609,9 @@ function createService(opts = {}) {
     'assets:download': async (component) => {
       try {
         const res = await downloader.download(component);
-        if (component === 'xray' || component === 'xray-pattn') { xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.resolveEngine().bin); }
+        // binPath caches ONLY the official core (and holds a user-located path),
+        // so downloading the fork must not clear it.
+        if (component === 'xray' || component === 'xray-pattn') { if (component === 'xray') xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.anyBin()); }
         return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: tun.isAvailable(), xrayReady: xray.binExists() };
       } catch (err) { send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' }); return { ok: false, error: err.message, assets: assetStatus() }; }
     },
@@ -618,7 +620,7 @@ function createService(opts = {}) {
       const names = ['xray', 'xray.exe', 'xray-pattn', 'xray-pattn.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
       const removed = [];
       for (const n of names) { const p = path.join(userBinDir, n); try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); removed.push(n); } } catch {} }
-      xray.binPath = store.get('xrayPath', null); xray.forgetVersions(); stats.setBin(xray.resolveEngine().bin);
+      xray.binPath = store.get('xrayPath', null); xray.forgetVersions(); stats.setBin(xray.anyBin());
       return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: tun.isAvailable() };
     },
 
