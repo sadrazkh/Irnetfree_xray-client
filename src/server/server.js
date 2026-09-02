@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { createService } = require('./service');
+const { hostAllowed, originAllowed } = require('./guard');
 
 /* ----------------------------- CLI args ----------------------------- */
 function parseArgs(argv) {
@@ -97,12 +98,20 @@ function readBody(req) {
 
 /* ----------------------------- request router ----------------------------- */
 const server = http.createServer(async (req, res) => {
+  // DNS-rebinding guard: without a token only loopback Host values are served.
+  // --no-auth waives the token, not this guard: on a loopback bind the Host set
+  // is enforced anyway (see guard.js), so pass the bind's loopback-ness in.
+  if (!hostAllowed(req.headers.host, { token: TOKEN, noAuth: args.noAuth, loopbackBind: isLoopback })) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    return res.end('forbidden host');
+  }
   const url = new URL(req.url, 'http://localhost');
   const pathname = url.pathname;
 
   // RPC: POST /rpc {channel, arg}
   if (pathname === '/rpc' && req.method === 'POST') {
     if (!authed(req, url)) return sendJson(res, 401, { error: 'unauthorized' });
+    if (!originAllowed(req.headers)) return sendJson(res, 403, { error: 'cross-origin request refused' });
     try {
       const { channel, arg } = JSON.parse(await readBody(req) || '{}');
       const result = await service.invoke(channel, arg);
@@ -113,6 +122,7 @@ const server = http.createServer(async (req, res) => {
   // Server-Sent Events: GET /events
   if (pathname === '/events') {
     if (!authed(req, url)) return sendJson(res, 401, { error: 'unauthorized' });
+    if (!originAllowed(req.headers)) return sendJson(res, 403, { error: 'cross-origin request refused' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.write('retry: 3000\n\n');
     sseClients.add(res);

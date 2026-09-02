@@ -6,6 +6,8 @@
  *
  * Components:
  *   - xray      : XTLS/Xray-core (zip → xray.exe + geoip.dat + geosite.dat)
+ *   - xray-pattn: patterniha/Xray-core fork — same asset names, placed as
+ *                 xray-pattn.exe so it coexists with the official core
  *   - sing-box  : SagerNet/sing-box (zip/tar.gz → sing-box.exe) — alternate core
  *   - geo       : geoip.dat + geosite.dat only (Loyalsoldier rules, direct .dat)
  *   - tun2socks : xjasonlyu/tun2socks (zip → tun2socks.exe)
@@ -15,10 +17,12 @@
  */
 
 const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
+const { engine, engineExe } = require('./engines');
 
 const GEO_BASE = 'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download';
 const WINTUN_URL = 'https://www.wintun.net/builds/wintun-0.14.1.zip';
@@ -34,23 +38,50 @@ function getJSON(url) {
   });
 }
 
+/** The only hosts plain http:// is allowed for — the tests' local server. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+/**
+ * Pick the transport for a download URL, refusing cleartext.
+ * What lands here is an EXECUTABLE (xray / sing-box / tun2socks) that the app
+ * then runs, so http:// is only a local-test seam. This is checked per hop:
+ * a redirect onto a plain-http URL must not reopen it either.
+ */
+function pickModule(u) {
+  let parsed;
+  try { parsed = new URL(u); } catch { throw new Error('invalid download URL: ' + u); }
+  if (parsed.protocol === 'https:') return https;
+  if (parsed.protocol !== 'http:') throw new Error('unsupported download protocol: ' + parsed.protocol);
+  // URL strips the brackets of an IPv6 literal, so [::1] arrives as ::1
+  if (!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error('refusing to download over plain http: ' + u);
+  }
+  return http;
+}
+
 function downloadFile(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
+    // Never leave a half-written (or empty, still-open) file behind: a 403 from
+    // GitHub's rate limiter used to strand a zero-byte *.tmp with its handle open.
+    const fail = (err) => { file.close(() => { try { fs.unlinkSync(dest); } catch {} reject(err); }); };
     const req = (u, depth) => {
-      if (depth > 6) return reject(new Error('too many redirects'));
-      https.get(u, { headers: { 'User-Agent': 'IRNetFree' } }, (res) => {
-        if (res.statusCode >= 300 && res.headers.location) { req(res.headers.location, depth + 1); return; }
-        if (res.statusCode !== 200) { reject(new Error('HTTP ' + res.statusCode)); return; }
+      if (depth > 6) return fail(new Error('too many redirects'));
+      let mod;
+      try { mod = pickModule(u); } catch (e) { return fail(e); }
+      mod.get(u, { headers: { 'User-Agent': 'IRNetFree' } }, (res) => {
+        if (res.statusCode >= 300 && res.headers.location) { res.resume(); req(res.headers.location, depth + 1); return; }
+        if (res.statusCode !== 200) { res.resume(); return fail(new Error('HTTP ' + res.statusCode)); }
         const total = parseInt(res.headers['content-length'] || '0', 10);
         let got = 0;
         res.on('data', (c) => {
           got += c.length;
           if (onProgress && total) onProgress(Math.min(100, Math.round((got / total) * 100)));
         });
+        res.on('error', fail);
         res.pipe(file);
         file.on('finish', () => file.close(() => resolve(dest)));
-      }).on('error', (e) => { try { fs.unlinkSync(dest); } catch {} reject(e); });
+      }).on('error', fail);
     };
     req(url, 0);
   });
@@ -105,6 +136,13 @@ class Downloader {
 
   log(msg, level = 'info') { this.onLog('[download] ' + msg, level); }
 
+  /** GitHub "latest release" endpoint for an Xray-format engine. */
+  static releaseApiUrl(engineId) {
+    const e = engine(engineId);
+    if (e.format !== 'xray' || e.id !== engineId) throw new Error('not an Xray-format engine: ' + engineId);
+    return `https://api.github.com/repos/${e.repo}/releases/latest`;
+  }
+
   xrayAssetName() {
     const arch = os.arch();
     if (os.platform() === 'win32') return arch === 'arm64' ? 'Xray-windows-arm64-v8a.zip' : 'Xray-windows-64.zip';
@@ -122,7 +160,8 @@ class Downloader {
   /** Download + integrate one component. Returns { ok, files } or throws. */
   async download(component) {
     switch (component) {
-      case 'xray': return this.getXray();
+      case 'xray': return this.getXray('xray');
+      case 'xray-pattn': return this.getXray('xray-pattn');
       case 'sing-box': return this.getSingbox();
       case 'geo': return this.getGeo();
       case 'tun2socks': return this.getTun2socks();
@@ -160,29 +199,35 @@ class Downloader {
     return { ok: true, files: [placed] };
   }
 
-  async getXray() {
-    this.log('Fetching latest Xray-core release info…');
-    const rel = await getJSON('https://api.github.com/repos/XTLS/Xray-core/releases/latest');
+  /**
+   * Download an Xray-format core. Both the official core and the patterniha fork
+   * publish the same asset names; the binary is placed under the engine's own exe
+   * name so they coexist. Geo files inside the archive are placed too.
+   */
+  async getXray(engineId = 'xray') {
+    const eng = engine(engineId);
+    this.log(`Fetching latest ${eng.label} release info…`);
+    const rel = await getJSON(Downloader.releaseApiUrl(engineId));
     const want = this.xrayAssetName();
     const asset = (rel.assets || []).find(a => a.name === want);
     if (!asset) throw new Error('asset not found: ' + want);
-    const work = tmpDir('xray');
+    const work = tmpDir(engineId);
     const zip = path.join(work, want);
-    this.log(`Downloading ${want} (${rel.tag_name})…`);
-    await downloadFile(asset.browser_download_url, zip, (p) => this.onProgress('xray', p));
-    this.log('Extracting xray…');
+    this.log(`Downloading ${want} (${eng.label} ${rel.tag_name})…`);
+    await downloadFile(asset.browser_download_url, zip, (p) => this.onProgress(engineId, p));
+    this.log(`Extracting ${eng.label}…`);
     unzip(zip, work);
-    const exeName = os.platform() === 'win32' ? 'xray.exe' : 'xray';
-    const exe = findFile(work, exeName);
+    const inArchive = os.platform() === 'win32' ? 'xray.exe' : 'xray';   // upstream's name inside the zip
+    const exe = findFile(work, inArchive);
     if (!exe) throw new Error('xray binary not found in archive');
     const out = [];
-    out.push(this.place(exe, exeName, true));
+    out.push(this.place(exe, engineExe(engineId), true));
     for (const dat of ['geoip.dat', 'geosite.dat']) {
       const f = findFile(work, dat);
       if (f) out.push(this.place(f, dat));
     }
     this.cleanup(work);
-    this.log('✓ Xray integrated: ' + out.join(', '));
+    this.log(`✓ ${eng.label} integrated: ` + out.join(', '));
     return { ok: true, files: out };
   }
 
@@ -277,4 +322,4 @@ class Downloader {
   cleanup(dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
 }
 
-module.exports = { Downloader };
+module.exports = { Downloader, downloadFile };

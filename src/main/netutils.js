@@ -130,43 +130,84 @@ function uploadThroughProxy(socksPort, opts = {}) {
 /**
  * Minimal SOCKS5 CONNECT handshake (no auth). Resolves with a connected socket
  * already tunnelled to target host:port.
+ *
+ * TCP gives no message framing, so a reply can arrive split across segments, or
+ * with the first bytes of the tunnelled stream glued on. Indexing `data[1]` of
+ * whichever chunk showed up first used to reject a healthy proxy as "auth
+ * rejected" / "connect failed code undefined", which painted a working config
+ * with a red x on its ping badge.
+ *
+ * The handshake therefore reads in PAUSED mode ('readable' + read(n)) and asks
+ * for exactly the bytes each reply still owes. Anything past the reply is never
+ * read at all: it stays in the socket's own buffer and reaches whoever attaches
+ * next. Reading in flowing mode and unshift()ing the remainder does not work —
+ * the stream is still flowing with no 'data' listener attached, so those bytes
+ * are re-emitted into the void before the caller can subscribe.
+ *
+ * A peer that hangs up mid-handshake has to settle the promise too: allowHalfOpen
+ * is false, so Node auto-destroys the socket on FIN, and _destroy() clears the
+ * socket timeout — 'timeout' never fires. Without the 'close' handler below the
+ * promise stayed pending forever, and ping:real / ping:upload / ip:check spun
+ * their badge for good instead of reporting a failure.
  */
 function socks5Connect(proxyHost, proxyPort, destHost, destPort, timeout = 8000) {
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
-    let stage = 0;
+    let stage = 0;                  // 0 = method selection, 1 = CONNECT reply
+    let want = 2;                   // bytes the reply in flight still owes us
+    let buf = Buffer.alloc(0);
+    let settled = false;            // one settle only, whichever path gets there first
     socket.setTimeout(timeout);
+    const fail = (msg) => { if (settled) return; settled = true; socket.destroy(); reject(new Error(msg)); };
+    const onClose = () => fail('socks connection closed');
 
-    socket.once('timeout', () => { socket.destroy(); reject(new Error('socks timeout')); });
-    socket.once('error', (e) => reject(e));
+    socket.once('timeout', () => fail('socks timeout'));
+    socket.once('error', (e) => { if (settled) return; settled = true; reject(e); });
+    socket.once('close', onClose);
 
     socket.connect(proxyPort, proxyHost, () => {
       // greeting: VER=5, NMETHODS=1, METHOD=0 (no auth)
       socket.write(Buffer.from([0x05, 0x01, 0x00]));
     });
 
-    socket.on('data', (data) => {
-      if (stage === 0) {
-        if (data[0] !== 0x05 || data[1] !== 0x00) {
-          socket.destroy(); return reject(new Error('socks auth rejected'));
+    socket.on('readable', function onReadable() {
+      for (;;) {
+        if (buf.length < want) {
+          const chunk = socket.read(want - buf.length);
+          if (chunk === null) return;                    // wait for the next 'readable'
+          buf = Buffer.concat([buf, chunk]);
+          if (buf.length < want) return;
         }
-        stage = 1;
-        // CONNECT request, ATYP=3 (domain)
-        const hostBuf = Buffer.from(destHost, 'utf8');
-        const req = Buffer.concat([
-          Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]),
-          hostBuf,
-          Buffer.from([(destPort >> 8) & 0xff, destPort & 0xff])
-        ]);
-        socket.write(req);
-      } else if (stage === 1) {
-        if (data[1] !== 0x00) {
-          socket.destroy(); return reject(new Error('socks connect failed code ' + data[1]));
+
+        if (stage === 0) {                               // VER METHOD
+          if (buf[0] !== 0x05 || buf[1] !== 0x00) return fail('socks auth rejected');
+          stage = 1;
+          buf = Buffer.alloc(0);
+          want = 4;                                      // VER REP RSV ATYP
+          // CONNECT request, ATYP=3 (domain)
+          const hostBuf = Buffer.from(destHost, 'utf8');
+          socket.write(Buffer.concat([
+            Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]),
+            hostBuf,
+            Buffer.from([(destPort >> 8) & 0xff, destPort & 0xff])
+          ]));
+          continue;
         }
-        stage = 2;
+
+        if (buf[1] !== 0x00) return fail('socks connect failed code ' + buf[1]);
+        const atyp = buf[3];
+        const need = atyp === 0x01 ? 10                              // IPv4 + port
+          : atyp === 0x04 ? 22                                       // IPv6 + port
+          : atyp === 0x03 ? (buf.length >= 5 ? 5 + buf[4] + 2 : 5)   // domain: length byte first
+          : -1;
+        if (need === -1) return fail('socks bad address type ' + atyp);
+        if (need > buf.length) { want = need; continue; }
+
         socket.setTimeout(0);
-        socket.removeAllListeners('data');
-        resolve(socket);
+        socket.removeListener('readable', onReadable);   // back to unread, un-flowing
+        socket.removeListener('close', onClose);         // the caller owns the close from here
+        settled = true;
+        return resolve(socket);
       }
     });
   });

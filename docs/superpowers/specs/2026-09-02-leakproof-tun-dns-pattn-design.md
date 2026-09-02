@@ -7,12 +7,25 @@ Date: 2026-09-02 · Scope: desktop (Windows first, macOS compatible), headless s
 A code review plus a comparison against v2rayN / PattN / current Xray-core turned up four things the
 app gets wrong today, all of which the owner has hit in practice:
 
-1. **Modern Xray-core refuses plaintext configs.** `infra/conf/xray.go:validateOutboundTransportSecurity`
+1. **Xray-core is about to refuse plaintext configs.** `infra/conf/xray.go:validateOutboundTransportSecurity`
    rejects VLESS/Trojan with `security=none` to a public address ("vless without TLS or other encryption is
-   prohibited unless the server address is a private IP or domain"). No escape hatch exists. The app always
-   downloads the *latest* core, so every `vless+ws` CDN config on port 80 fails to start. patterniha's fork
-   (`patterniha/Xray-core`, releases `v26.x` with the same asset names as upstream) only comments that
-   check out. PattN itself is a v2rayN fork (GUI), not a core.
+   prohibited unless the server address is a private IP or domain" / "trojan without TLS is prohibited …").
+   No escape hatch exists. patterniha's fork (`patterniha/Xray-core`) is upstream *main* with that one check
+   commented out. PattN itself is a v2rayN fork (GUI), not a core.
+
+   **Correction, verified 2026-09-02 (this replaces the original claim that the check is live today).**
+   The check exists only on upstream's `main` branch. Upstream's latest *release* is **v26.3.27
+   (2026-03-27)** and `infra/conf/xray.go` at that tag does **not** contain the function — a plaintext
+   `vless+ws` config on port 80 runs fine on it. The fork publishes its own tags (`v26.8.28`, `v26.9.1`)
+   built from upstream main. So today the dual-core work is:
+   - **dormant safety net** — `validateWithFallback` triggers nothing until upstream ships a release built
+     from main, at which point every plaintext CDN config would otherwise break overnight;
+   - **useful now for a different reason** — the fork's binary is built from upstream main, so it carries
+     main-branch fixes and features that the six-month-old official release does not.
+
+   Consequence for the plan: phase 1 is correct and worth keeping, but it does **not** fix a
+   user-visible breakage today, and nothing in the UI should claim it does. `PLAINTEXT_REJECT`
+   (`/without TLS.*prohibited/i`) matches both upstream error strings, confirmed against main.
 2. **fragment/noise moved into `finalmask`** (Xray ≥ 26.3.27). The standard shape is plural
    (`lengths: ["3-5","6-8"]`, `delays: ["10-20"]`, `maxSplit`); share links carry `fm=` (URL-encoded compact
    JSON) and `cs=` (cipherSuites); `fp=unsafe` is upstream. The app reads non-standard `finalMask=` /
@@ -274,6 +287,64 @@ follow. Verified with a screenshot of every page in both themes.
 `LinkParser.kt` (fm/cs, WG conf, drop fakesni), `ConfigBuilder.kt` (custom-rule order, dns section,
 hijack rule, geoAssets flag), `MainActivity.kt` (DNS field and rule-value field losing focus/commas),
 `XrayVpnService.kt` (geo assets). Not in this round.
+
+## 4a. Phase 3b — surviving a network change
+
+**Reported symptom:** when the machine's internet changes (Wi‑Fi ↔ ethernet, hotspot, reconnect after an
+outage, a new IP from DHCP), other clients pick the connection back up within seconds; IRNetFree "gets
+confused" and shows instability.
+
+**Root cause — four separate defects, all confirmed in the code:**
+
+1. **Nothing watches the network.** There is no `powerMonitor` listener, no `net.isOnline`, no interface
+   poll anywhere in `src/`. The app never learns that anything changed.
+2. **The TUN bypass routes are pinned to a gateway captured once.** `tunManager.js:172` reads the default
+   gateway at connect time into `this.savedGateway` and never refreshes it. After a network change the
+   `/32` route for the server IP still points at the *old* gateway, so xray's own connection to the server
+   is black-holed — the tunnel is completely dead while the UI still says "connected".
+3. **A network change does not kill xray-core**, it only breaks its sockets. So the `onStatus('stopped')`
+   path in `main.js:1192` never fires: no kill switch, no error, no reconnect. The app silently stops
+   passing traffic and gives the user no signal at all.
+4. **There is no reconnect policy.** Even when xray *does* die, the app arms the kill switch and stops
+   there. Recovery is always a manual disconnect + connect.
+
+**Design.** A new `src/main/netWatcher.js` — a pure-ish module with an injectable clock and interface
+reader, so it is unit-testable without touching a real NIC:
+
+```js
+new NetWatcher({
+  read: () => os.networkInterfaces(),   // injectable
+  onChange: (why) => …,                 // 'interfaces' | 'resume' | 'online'
+  debounceMs: 2500, intervalMs: 3000
+})
+```
+- **Signals:** a 3 s poll of `os.networkInterfaces()` reduced to a stable fingerprint (non-internal IPv4/IPv6
+  addresses + interface names, sorted), plus Electron's `powerMonitor` `resume` / `unlock-screen` and the
+  renderer's `online` event forwarded over IPC. The headless service uses the poll only.
+- **Debounce:** a change fires `onChange` once, `debounceMs` after the fingerprint *stops* moving, so a
+  flapping adapter cannot start a restart loop. A restart already in flight suppresses the next one.
+- **Recovery, in `main.js` / `service.js` (mirrored):** on `onChange` while connected →
+  set status `reconnecting`, re-resolve the server addresses, then reuse the existing
+  `reapplyConnection()` — it already tears the tunnel down and rebuilds it from current settings, already
+  holds the kill-switch block across the gap, and already restarts the proc-route watcher. The TUN layer is
+  restarted as part of that, which is what picks up the new gateway (defect 2). Backoff: 2 s, 5 s, 15 s,
+  then stop and surface a "network changed — could not reconnect" banner with a Retry button.
+- **Setting** `autoReconnectOnNetworkChange: true` (reconnect-relevant: no — it is read live), shown in
+  Settings with the note that a reconnect takes a few seconds and that the kill switch keeps the gap sealed.
+- **Health probe, not just topology:** after a reconnect the existing `Diagnostics`-style check runs once
+  through the local SOCKS port; if it fails, the next backoff step runs. This is what makes "other clients
+  reconnect the moment access opens" true for us too — the poll keeps retrying while the network is up but
+  the path is not.
+
+**What phase 3 already fixes for free:** sing-box's `auto_detect_interface` rebinds outbound sockets to the
+new default NIC and its `auto_route` re-lays the routes, so defect 2 largely disappears once the TUN layer
+is sing-box. Defects 1, 3 and 4 are independent of the TUN backend and are needed in **proxy mode** too —
+this phase is not made redundant by phase 3.
+
+**Tests:** fingerprint stability (same interfaces in a different order → no change), debounce (three changes
+inside the window → one `onChange`), suppression while a restart is in flight, backoff sequence, and the
+give-up transition. Manual on Windows: connect, switch Wi‑Fi networks, confirm traffic resumes without user
+action and that the log names the reason.
 
 ## 4b. macOS parity (applies to every phase)
 

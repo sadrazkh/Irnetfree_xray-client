@@ -56,7 +56,7 @@ contextBridge.exposeInMainWorld('api', {
   // xray binary
   locateXray: () => ipcRenderer.invoke('xray:locate'),
   openDataDir: () => ipcRenderer.invoke('open:dataDir'),
-  xrayVersion: () => ipcRenderer.invoke('xray:version'),
+  xrayVersion: (engineId) => ipcRenderer.invoke('xray:version', engineId),
 
   // app version / update check
   checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),

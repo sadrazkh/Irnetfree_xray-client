@@ -10,6 +10,7 @@ const state = {
   subscriptions: [],
   settings: {},
   activeServerId: null,   // currently connected server
+  activeEngine: '',       // core the live connection runs on
   selectedServerId: null, // chosen in the picker (target for connect)
   connected: false,
   connecting: false,
@@ -17,6 +18,7 @@ const state = {
   elevated: false,         // running as Administrator (Windows) — needed for TUN
   assets: {},
   version: '',             // app version (from main)
+  coreVersions: {},        // engineId -> version string
   platform: 'win32',       // process.platform
   procList: [],            // running processes for the routing picker
   lan: null,               // { ip, socksPort, httpPort } when LAN sharing active
@@ -147,6 +149,9 @@ $('#btnClose').onclick = () => window.api.close();
 $('#btnLang').onclick = () => setLang(window.i18n.lang === 'fa' ? 'en' : 'fa');
 $('#langSelect').onchange = () => setLang($('#langSelect').value);
 
+/* default core — saves itself (readSettingsForm() deliberately leaves it out) */
+$('#defaultEngine').onchange = () => saveSettings({ defaultEngine: $('#defaultEngine').value });
+
 function setLang(lang) {
   window.i18n.applyI18n(lang);
   $('#btnLang').textContent = lang === 'fa' ? 'EN' : 'فا';
@@ -158,7 +163,7 @@ function setLang(lang) {
   renderComponents();
   renderChains();
   renderPool();
-  updateXrayStatus(state.assets.xray);
+  updateXrayStatus(anyXrayCore());
   updateTunStatus();
   setModeWidget();
   refreshConnLabels();
@@ -221,13 +226,17 @@ async function init() {
   maybePromptMissingFiles();
 }
 
-/* ----------------------------- xray-core version ----------------------------- */
+/* ----------------------------- core versions ----------------------------- */
+const XRAY_ENGINES = ['xray', 'xray-pattn'];
 async function refreshXrayVersion() {
+  for (const id of XRAY_ENGINES) {
+    try {
+      const res = await window.api.xrayVersion(id);
+      state.coreVersions[id] = (res && res.ok) ? res.version : '';
+    } catch { state.coreVersions[id] = ''; }
+  }
+  state.xrayVersion = state.coreVersions.xray || state.coreVersions['xray-pattn'] || '';
   const el = $('#xrayVersion');
-  try {
-    const res = await window.api.xrayVersion();
-    state.xrayVersion = (res && res.ok) ? res.version : '';
-  } catch { state.xrayVersion = ''; }
   if (el) el.textContent = state.xrayVersion ? (t('xray.version') + ': ' + state.xrayVersion) : '';
   renderComponents();
 }
@@ -240,6 +249,7 @@ function applySettingsToUI() {
   $('#dnsInput').value = (s.dns || ['1.1.1.1', '8.8.8.8']).join(',');
   $('#logLevel').value = s.logLevel || 'warning';
   $('#langSelect').value = s.lang || 'fa';
+  $('#defaultEngine').value = s.defaultEngine || 'xray';
   $('#optSysProxy').checked = !!s.systemProxy;
   $('#optTun').checked = !!s.tunMode;
   $('#optAllowLan').checked = !!s.allowLan;
@@ -286,24 +296,12 @@ function textToCustomRules(text) {
   return out;
 }
 
-/**
- * Persist the settings form.
- *
- * Most of these settings are baked into the running xray config (or applied as a
- * connect-time side effect), so while connected they do NOTHING until the tunnel
- * is rebuilt. Main reports exactly which ones are in that state; we then ask the
- * user instead of leaving the UI claiming a change that isn't live — that gap is
- * how traffic ends up leaking under rules the user thinks they replaced.
- *
- * `silent: true` skips the prompt (the caller shows its own), but the pending
- * state is still recorded so the banner stays accurate.
- */
-async function saveSettings(extra = {}, { silent = false } = {}) {
-  const dns = $('#dnsInput').value.split(',').map(s => s.trim()).filter(Boolean);
-  const partial = Object.assign({
+/** The Settings page form → settings partial. Only the "Save settings" button uses it. */
+function readSettingsForm() {
+  return {
     socksPort: parseInt($('#socksPort').value, 10) || 10808,
     httpPort: parseInt($('#httpPort').value, 10) || 10809,
-    dns,
+    dns: dnsFromInput(),
     logLevel: $('#logLevel').value,
     systemProxy: $('#optSysProxy').checked,
     tunMode: $('#optTun').checked,
@@ -311,8 +309,25 @@ async function saveSettings(extra = {}, { silent = false } = {}) {
     killSwitch: $('#optKillSwitch').checked,
     blockAds: $('#optBlockAds').checked,
     enableSniffing: $('#optSniff').checked
-  }, extra);
+  };
+}
+function dnsFromInput() {
+  return $('#dnsInput').value.split(',').map(s => s.trim()).filter(Boolean);
+}
 
+/**
+ * Persist a settings partial — ONLY the keys the caller changed. Reading the
+ * whole Settings form here used to persist abandoned edits from other pages.
+ *
+ * Most settings are baked into the running xray config (or applied as a
+ * connect-time side effect), so while connected they do NOTHING until the tunnel
+ * is rebuilt. Main reports exactly which ones are in that state; we then ask the
+ * user instead of leaving the UI claiming a change that isn't live.
+ *
+ * `silent: true` skips the prompt (the caller shows its own), but the pending
+ * state is still recorded so the banner stays accurate.
+ */
+async function saveSettings(partial = {}, { silent = false } = {}) {
   const res = await window.api.setSettings(partial);
   // main returns { settings, pendingReconnect }; tolerate the older bare shape
   state.settings = (res && res.settings) ? res.settings : res;
@@ -410,7 +425,7 @@ $('#pendingApply').onclick = () => applySettingsNow();
 $('#pendingDismiss').onclick = () => { state.pendingDismissed = true; renderPendingBanner(); };
 
 $('#btnSaveSettings').onclick = async () => {
-  await saveSettings();
+  await saveSettings(readSettingsForm());
   $('#savedHint').textContent = t('saved');
   setTimeout(() => ($('#savedHint').textContent = ''), 1800);
   toast(t('t.settingsSaved'), 'ok');
@@ -425,19 +440,19 @@ $$('#routingSeg .seg-btn').forEach(btn => {
     toast(t('t.routingMode') + ': ' + btn.textContent, 'ok');
   };
 });
-$('#optBlockAds').onchange = () => saveSettings();
-$('#optSniff').onchange = () => saveSettings();
+$('#optBlockAds').onchange = () => saveSettings({ blockAds: $('#optBlockAds').checked });
+$('#optSniff').onchange = () => saveSettings({ enableSniffing: $('#optSniff').checked });
 
 /* DNS presets — pick a provider to fill the input, or type a custom value */
 $('#dnsPreset').onchange = () => {
   const v = $('#dnsPreset').value;
-  if (v) { $('#dnsInput').value = v; saveSettings(); toast(t('dns.set'), 'ok'); }
+  if (v) { $('#dnsInput').value = v; saveSettings({ dns: dnsFromInput() }); toast(t('dns.set'), 'ok'); }
 };
 $('#dnsInput').oninput = () => syncDnsPreset();
 
 /* kill switch toggle — read live when a drop happens, so it needs no reconnect */
 $('#optKillSwitch').onchange = async () => {
-  await saveSettings();
+  await saveSettings({ killSwitch: $('#optKillSwitch').checked });
   updateKillStatus();
   // kill switch uses the Windows firewall → needs admin (same as TUN)
   if ($('#optKillSwitch').checked && state.platform === 'win32' && !state.elevated) {
@@ -456,7 +471,7 @@ function updateKillStatus() {
 
 $('#optAllowLan').onchange = async () => {
   // the reconnect prompt (saveSettings) already explains that it isn't live yet
-  await saveSettings();
+  await saveSettings({ allowLan: $('#optAllowLan').checked });
   updateLanInfo();
 };
 
@@ -723,10 +738,19 @@ document.addEventListener('click', (e) => {
 $('#btnAddOpen').onclick = () => { $('#importBox').hidden = !$('#importBox').hidden; };
 $('#btnImportCancel').onclick = () => { $('#importBox').hidden = true; $('#importText').value = ''; };
 
+// v2rayN-style HTTP proxy share link (`http://[b64creds@]host:port#name`): no
+// path, no query. Everything else that starts with http(s):// is a subscription.
+// The userinfo is either a standard-alphabet base64 blob (which may contain '/')
+// or a plain `user:pass`; the host never contains a '/', so a subscription URL
+// with an '@' in its path still fails to match.
+// Keep in sync with HTTP_PROXY_LINK in src/main/parser.js.
+const HTTP_PROXY_LINK = /^http:\/\/(?:(?:[A-Za-z0-9+/=]+|[^/?#\s@]+)@)?[^/?#\s@]+:\d{1,5}(?:#\S*)?$/i;
+
 /**
  * Smart import: figures out what was pasted and routes it correctly.
  *  - http(s) lines  -> added & fetched as subscriptions (auto-update capable)
  *  - vless/vmess/…  -> imported as servers
+ *  - http proxy link -> imported as a server (see HTTP_PROXY_LINK above)
  *  - base64 blob    -> decoded & imported as servers (handled by parseMany)
  * Mixed input works too (URLs become subs, the rest become servers).
  */
@@ -734,8 +758,9 @@ async function smartImport(text) {
   text = String(text || '').trim();
   if (!text) return;
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const urlLines = lines.filter(l => /^https?:\/\//i.test(l));
-  const configText = lines.filter(l => !/^https?:\/\//i.test(l)).join('\n');
+  const isSubUrl = (l) => /^https?:\/\//i.test(l) && !HTTP_PROXY_LINK.test(l);
+  const urlLines = lines.filter(isSubUrl);
+  const configText = lines.filter(l => !isSubUrl(l)).join('\n');
 
   let subCount = 0, subAdded = 0, srvAdded = 0, errCount = 0;
 
@@ -953,6 +978,8 @@ async function connect(id) {
     state.connecting = false;
     setConnUI('error');
     toast(t('t.connectFailed') + ': ' + e.message, 'err');
+    // the official core refused a plaintext config and the fork is not installed
+    if (/Xray-PattN/.test(e.message) && !(state.assets && state.assets['xray-pattn'])) openFilesModal(['xray-pattn']);
   }
 }
 
@@ -998,6 +1025,12 @@ function setConnUI(stateStr, id) {
     srv.textContent = server ? `${server.name} — ${server.address}:${server.port}` : t('conn.noServer');
   }
 
+  // which of the two Xray cores (or sing-box) the live tunnel actually runs on —
+  // the backend may have fallen back to the fork for a plaintext config
+  if (stateStr === 'connected' && state.activeEngine) {
+    srv.textContent += ` · ${t('conn.engine')}: ${state.activeEngine === 'xray-pattn' ? t('engine.pattn') : state.activeEngine === 'sing-box' ? 'sing-box' : t('engine.official')}`;
+  }
+
   if (stateStr === 'connecting') {
     power.classList.add('connecting');
     cs.textContent = t('state.connecting');
@@ -1033,6 +1066,7 @@ window.api.onStatus((d) => {
     state.lan = d.lan || null;
     // a fresh connect is built from the current settings — nothing is stale
     setPending(d.pendingReconnect || []);
+    state.activeEngine = d.engine || '';
     setConnUI('connected', d.serverId);
     setModeWidget();
     updateLanInfo();
@@ -1056,6 +1090,7 @@ window.api.onStatus((d) => {
     state.connected = false;
     state.connecting = false;
     state.lan = null;
+    state.activeEngine = '';
     setPending([]);          // nothing live to be out of sync with
     setConnUI('disconnected');
     $('#statIp').textContent = '—';
@@ -1148,6 +1183,17 @@ window.api.onLog((d) => appendLog(d.line, d.level || 'log'));
 $('#btnClearLogs').onclick = () => { $('#logBox').innerHTML = ''; };
 
 /* ----------------------------- xray binary ----------------------------- */
+/**
+ * Is ANY Xray-format core installed? The official core and the PattN fork run
+ * the exact same config, so either one makes the app usable — a fork-only user
+ * must not be told "Xray core not found".
+ */
+function anyXrayCore() {
+  const a = state.assets || {};
+  return !!(a.xray || a['xray-pattn']);
+}
+
+/** @param {boolean} ready any Xray-format core installed (see anyXrayCore) */
 function updateXrayStatus(ready) {
   const el = $('#xrayStatus');
   if (ready) {
@@ -1170,7 +1216,8 @@ $('#btnDownloadHelp').onclick = () => {
 
 /* ----------------------------- required components ----------------------------- */
 const COMPONENTS = [
-  { key: 'xray', label: 'comp.xray' },
+  { key: 'xray', label: 'comp.xray', ver: 'xray' },
+  { key: 'xray-pattn', label: 'comp.xrayPattn', ver: 'xray-pattn' },
   { key: 'sing-box', label: 'comp.singbox', has: (a) => !!a['sing-box'] },
   { key: 'geo', label: 'comp.geo', has: (a) => a.geoip && a.geosite },
   { key: 'tun2socks', label: 'comp.tun2socks' },
@@ -1186,7 +1233,8 @@ function renderComponents() {
   for (const c of COMPONENTS) {
     if (c.winOnly && !isWin) continue;
     const present = c.has ? c.has(a) : !!a[c.key];
-    const ver = (c.key === 'xray' && present && state.xrayVersion) ? ` <span class="comp-ver">v${escapeHtml(state.xrayVersion)}</span>` : '';
+    const v = c.ver && present ? state.coreVersions[c.ver] : '';
+    const ver = v ? ` <span class="comp-ver">v${escapeHtml(v)}</span>` : '';
     const row = document.createElement('div');
     row.className = 'comp-row';
     row.innerHTML = `
@@ -1200,6 +1248,11 @@ function renderComponents() {
     btn.onclick = () => downloadComponent(c.key, btn);
     list.appendChild(row);
   }
+
+  // the Routing page's "download geo files" note is a static hint today and
+  // shows even when both files are installed — tie it to the real state
+  const note = $('#routingGeoNote');
+  if (note) note.hidden = !!(a.geoip && a.geosite);
 }
 
 async function downloadComponent(key, btn) {
@@ -1216,7 +1269,7 @@ async function downloadComponent(key, btn) {
     renderComponents();
     updateXrayStatus(res.xrayReady);
     updateTunStatus();
-    if (key === 'xray') refreshXrayVersion();
+    if (key === 'xray' || key === 'xray-pattn') refreshXrayVersion();
     toast(t('t.downloaded'), 'ok');
   } else {
     state.assets = res.assets || state.assets;
@@ -1293,7 +1346,7 @@ function missingEssentials() {
   const isWin = state.platform === 'win32';
   const want = state.settings.tunMode;   // tun files only matter if TUN is on
   const list = [];
-  if (!a.xray) list.push('xray');
+  if (!anyXrayCore()) list.push('xray');
   if (!(a.geoip && a.geosite)) list.push('geo');
   if (want && !a.tun2socks) list.push('tun2socks');
   if (want && isWin && !a.wintun) list.push('wintun');
@@ -1308,7 +1361,10 @@ function maybePromptMissingFiles() {
   openFilesModal(missing);
 }
 
-const COMP_LABEL = { xray: 'comp.xray', geo: 'comp.geo', tun2socks: 'comp.tun2socks', wintun: 'comp.wintun' };
+const COMP_LABEL = {
+  xray: 'comp.xray', 'xray-pattn': 'comp.xrayPattn',
+  geo: 'comp.geo', tun2socks: 'comp.tun2socks', wintun: 'comp.wintun'
+};
 
 function openFilesModal(missing) {
   const listEl = $('#filesList');
@@ -1342,13 +1398,13 @@ $('#filesDownload').onclick = async () => {
       $('#filesProgress').textContent = t('t.downloadFailed') + ': ' + ((res && res.error) || '');
       btn.disabled = false;
       renderComponents();
-      updateXrayStatus(state.assets.xray);
+      updateXrayStatus(anyXrayCore());
       return;
     }
   }
   btn.disabled = false;
   renderComponents();
-  updateXrayStatus(state.assets.xray);
+  updateXrayStatus(anyXrayCore());
   updateTunStatus();
   refreshXrayVersion();
   closeFilesModal();
@@ -1375,7 +1431,7 @@ $('#optTun').onchange = async () => {
   if (on && !state.tunAvailable) toast(t('t.tunNeedFiles'), 'err');
   // save silently first: relaunching as admin restarts the app, so asking about a
   // reconnect before that question is answered would be pointless
-  await saveSettings({}, { silent: true });
+  await saveSettings({ tunMode: on }, { silent: true });
   updateTunStatus();
   if (on && state.tunAvailable && !state.elevated && state.platform === 'win32') {
     if (await promptRelaunchAdmin()) return;
@@ -2055,6 +2111,7 @@ function usedPoolPorts() {
   const set = new Set();
   const sp = parseInt(state.settings.socksPort, 10); if (sp) set.add(sp);
   const hp = parseInt(state.settings.httpPort, 10); if (hp) set.add(hp);
+  const ap = parseInt(state.settings.apiPort, 10); if (ap) set.add(ap);   // api inbound (configBuilder reserves it too)
   for (const e of state.pool) {
     if (e.socksPort) set.add(parseInt(e.socksPort, 10));
     if (e.httpPort) set.add(parseInt(e.httpPort, 10));
@@ -2271,6 +2328,10 @@ function renderAdvanced() {
 
   optAdv.checked = !!state.settings.advancedRouting;
   if (body) body.hidden = !state.settings.advancedRouting;
+  // custom rules only apply to the simple modes (configBuilder ignores them under
+  // advanced routing) — don't show an editor for something that has no effect
+  const simple = $('#simpleRulesCard');
+  if (simple) simple.hidden = !!state.settings.advancedRouting;
 
   const rules = state.settings.routeRules || [];
   wrap.innerHTML = '';
