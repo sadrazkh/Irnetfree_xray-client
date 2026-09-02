@@ -15,6 +15,7 @@
  */
 
 const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -37,20 +38,25 @@ function getJSON(url) {
 function downloadFile(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
+    // Never leave a half-written (or empty, still-open) file behind: a 403 from
+    // GitHub's rate limiter used to strand a zero-byte *.tmp with its handle open.
+    const fail = (err) => { file.close(() => { try { fs.unlinkSync(dest); } catch {} reject(err); }); };
     const req = (u, depth) => {
-      if (depth > 6) return reject(new Error('too many redirects'));
-      https.get(u, { headers: { 'User-Agent': 'IRNetFree' } }, (res) => {
-        if (res.statusCode >= 300 && res.headers.location) { req(res.headers.location, depth + 1); return; }
-        if (res.statusCode !== 200) { reject(new Error('HTTP ' + res.statusCode)); return; }
+      if (depth > 6) return fail(new Error('too many redirects'));
+      const mod = u.startsWith('http:') ? http : https;   // http only for local tests
+      mod.get(u, { headers: { 'User-Agent': 'IRNetFree' } }, (res) => {
+        if (res.statusCode >= 300 && res.headers.location) { res.resume(); req(res.headers.location, depth + 1); return; }
+        if (res.statusCode !== 200) { res.resume(); return fail(new Error('HTTP ' + res.statusCode)); }
         const total = parseInt(res.headers['content-length'] || '0', 10);
         let got = 0;
         res.on('data', (c) => {
           got += c.length;
           if (onProgress && total) onProgress(Math.min(100, Math.round((got / total) * 100)));
         });
+        res.on('error', fail);
         res.pipe(file);
         file.on('finish', () => file.close(() => resolve(dest)));
-      }).on('error', (e) => { try { fs.unlinkSync(dest); } catch {} reject(e); });
+      }).on('error', fail);
     };
     req(url, 0);
   });
@@ -277,4 +283,4 @@ class Downloader {
   cleanup(dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
 }
 
-module.exports = { Downloader };
+module.exports = { Downloader, downloadFile };
