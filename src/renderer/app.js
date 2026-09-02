@@ -730,8 +730,11 @@ $('#btnImportCancel').onclick = () => { $('#importBox').hidden = true; $('#impor
 
 // v2rayN-style HTTP proxy share link (`http://[b64creds@]host:port#name`): no
 // path, no query. Everything else that starts with http(s):// is a subscription.
+// The userinfo is either a standard-alphabet base64 blob (which may contain '/')
+// or a plain `user:pass`; the host never contains a '/', so a subscription URL
+// with an '@' in its path still fails to match.
 // Keep in sync with HTTP_PROXY_LINK in src/main/parser.js.
-const HTTP_PROXY_LINK = /^http:\/\/(?:[^/?#\s@]+@)?[^/?#\s@]+:\d{1,5}(?:#\S*)?$/i;
+const HTTP_PROXY_LINK = /^http:\/\/(?:(?:[A-Za-z0-9+/=]+|[^/?#\s@]+)@)?[^/?#\s@]+:\d{1,5}(?:#\S*)?$/i;
 
 /**
  * Smart import: figures out what was pasted and routes it correctly.

@@ -226,13 +226,74 @@ test('http proxy share link round-trips (v2rayN shape)', () => {
   assert.equal(open.outbound.settings.servers[0].users, undefined);
 });
 
+// Buffer.toString('base64') uses the STANDARD alphabet, so credentials can
+// encode to a blob containing '/'. The link must still be recognised as a proxy
+// link, otherwise smartImport files it as a subscription.
+test('http proxy share link round-trips when the base64 credentials contain "/"', () => {
+  const s = makeProxyServer({ name: 'Corp', type: 'http', address: 'proxy.corp', port: '3128', username: 'user', password: 'secret?' });
+  const link = buildShareLink(s);
+  assert.ok(link.includes('/@'), 'fixture must produce a base64 blob ending in "/": ' + link);
+  assert.equal(isHttpProxyLink(link), true);
+
+  const back = parseLink(link);
+  assert.equal(back.protocol, 'http');
+  assert.equal(back.name, 'Corp');
+  assert.deepEqual(back.outbound.settings.servers[0], { address: 'proxy.corp', port: 3128, users: [{ user: 'user', pass: 'secret?' }] });
+
+  // and it must reach parseMany as a server, not be skipped as a subscription
+  const { servers, errors } = parseMany(link);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(servers.map(x => x.protocol), ['http']);
+});
+
 test('isHttpProxyLink: only host:port shapes, never subscription URLs', () => {
   assert.equal(isHttpProxyLink('http://1.2.3.4:8080'), true);
   assert.equal(isHttpProxyLink('http://dXNlcjpwYXNz@1.2.3.4:8080#Corp'), true);
+  assert.equal(isHttpProxyLink('http://dXNlcjpzZWNyZXQ/@proxy.corp:3128#Corp'), true);
   assert.equal(isHttpProxyLink('http://panel.example.com/sub/abc123'), false);
+  assert.equal(isHttpProxyLink('http://panel.example.com/sub@x/y'), false);
   assert.equal(isHttpProxyLink('http://1.2.3.4:8080/?token=x'), false);
   assert.equal(isHttpProxyLink('https://1.2.3.4:8080'), false);
   assert.equal(isHttpProxyLink('http://1.2.3.4'), false);
+});
+
+// HTTP_PROXY_LINK is /i, so parseLink's scheme guard must be too — otherwise an
+// uppercase link passes parseMany's filter and then throws instead of importing.
+test('parseLink accepts an uppercase http:// scheme (matching the /i regex)', () => {
+  assert.equal(isHttpProxyLink('HTTP://1.2.3.4:8080#Up'), true);
+
+  const s = parseLink('HTTP://1.2.3.4:8080#Up');
+  assert.equal(s.protocol, 'http');
+  assert.equal(s.address, '1.2.3.4');
+  assert.equal(s.port, 8080);
+
+  const { servers, errors } = parseMany('HTTP://1.2.3.4:8080#Up');
+  assert.deepEqual(errors, []);
+  assert.deepEqual(servers.map(x => x.protocol), ['http']);
+});
+
+// HTTP_PROXY_LINK is deliberately duplicated: the renderer cannot require
+// main-process modules. Nothing else guards the two copies against drifting
+// apart, which would make the main process and the UI classify links
+// differently with no failing test.
+test('HTTP_PROXY_LINK is identical in src/main/parser.js and src/renderer/app.js', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+
+  const extract = (rel) => {
+    const file = path.join(__dirname, '..', rel);
+    const m = fs.readFileSync(file, 'utf8').match(/^const HTTP_PROXY_LINK = (\/.+\/[a-z]*);$/m);
+    assert.ok(m, `no "const HTTP_PROXY_LINK = /…/;" literal found in ${rel}`);
+    return m[1];
+  };
+
+  const mainCopy = extract('src/main/parser.js');
+  const rendererCopy = extract('src/renderer/app.js');
+  assert.equal(
+    rendererCopy, mainCopy,
+    'HTTP_PROXY_LINK drifted between src/main/parser.js and src/renderer/app.js — ' +
+    `main: ${mainCopy} | renderer: ${rendererCopy}. Keep the two copies byte-identical.`
+  );
 });
 
 test('parseMany imports http proxy links and skips subscription URLs', () => {
