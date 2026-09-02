@@ -90,7 +90,7 @@
     // xray binary / assets
     locateXray: () => invoke('xray:locate'),
     openDataDir: () => invoke('open:dataDir'),
-    xrayVersion: () => invoke('xray:version'),
+    xrayVersion: (engineId) => invoke('xray:version', engineId),
     checkUpdate: () => invoke('app:checkUpdate'),
     assetsStatus: () => invoke('assets:status'),
     downloadAsset: (component) => invoke('assets:download', component),

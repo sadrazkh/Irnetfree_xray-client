@@ -10,6 +10,7 @@ const state = {
   subscriptions: [],
   settings: {},
   activeServerId: null,   // currently connected server
+  activeEngine: '',       // core the live connection runs on
   selectedServerId: null, // chosen in the picker (target for connect)
   connected: false,
   connecting: false,
@@ -17,6 +18,7 @@ const state = {
   elevated: false,         // running as Administrator (Windows) — needed for TUN
   assets: {},
   version: '',             // app version (from main)
+  coreVersions: {},        // engineId -> version string
   platform: 'win32',       // process.platform
   procList: [],            // running processes for the routing picker
   lan: null,               // { ip, socksPort, httpPort } when LAN sharing active
@@ -147,6 +149,9 @@ $('#btnClose').onclick = () => window.api.close();
 $('#btnLang').onclick = () => setLang(window.i18n.lang === 'fa' ? 'en' : 'fa');
 $('#langSelect').onchange = () => setLang($('#langSelect').value);
 
+/* default core — saves itself (readSettingsForm() deliberately leaves it out) */
+$('#defaultEngine').onchange = () => saveSettings({ defaultEngine: $('#defaultEngine').value });
+
 function setLang(lang) {
   window.i18n.applyI18n(lang);
   $('#btnLang').textContent = lang === 'fa' ? 'EN' : 'فا';
@@ -221,13 +226,17 @@ async function init() {
   maybePromptMissingFiles();
 }
 
-/* ----------------------------- xray-core version ----------------------------- */
+/* ----------------------------- core versions ----------------------------- */
+const XRAY_ENGINES = ['xray', 'xray-pattn'];
 async function refreshXrayVersion() {
+  for (const id of XRAY_ENGINES) {
+    try {
+      const res = await window.api.xrayVersion(id);
+      state.coreVersions[id] = (res && res.ok) ? res.version : '';
+    } catch { state.coreVersions[id] = ''; }
+  }
+  state.xrayVersion = state.coreVersions.xray || state.coreVersions['xray-pattn'] || '';
   const el = $('#xrayVersion');
-  try {
-    const res = await window.api.xrayVersion();
-    state.xrayVersion = (res && res.ok) ? res.version : '';
-  } catch { state.xrayVersion = ''; }
   if (el) el.textContent = state.xrayVersion ? (t('xray.version') + ': ' + state.xrayVersion) : '';
   renderComponents();
 }
@@ -240,6 +249,7 @@ function applySettingsToUI() {
   $('#dnsInput').value = (s.dns || ['1.1.1.1', '8.8.8.8']).join(',');
   $('#logLevel').value = s.logLevel || 'warning';
   $('#langSelect').value = s.lang || 'fa';
+  $('#defaultEngine').value = s.defaultEngine || 'xray';
   $('#optSysProxy').checked = !!s.systemProxy;
   $('#optTun').checked = !!s.tunMode;
   $('#optAllowLan').checked = !!s.allowLan;
@@ -960,6 +970,8 @@ async function connect(id) {
     state.connecting = false;
     setConnUI('error');
     toast(t('t.connectFailed') + ': ' + e.message, 'err');
+    // the official core refused a plaintext config and the fork is not installed
+    if (/Xray-PattN/.test(e.message) && !(state.assets && state.assets['xray-pattn'])) openFilesModal(['xray-pattn']);
   }
 }
 
@@ -1005,6 +1017,12 @@ function setConnUI(stateStr, id) {
     srv.textContent = server ? `${server.name} — ${server.address}:${server.port}` : t('conn.noServer');
   }
 
+  // which of the two Xray cores (or sing-box) the live tunnel actually runs on —
+  // the backend may have fallen back to the fork for a plaintext config
+  if (stateStr === 'connected' && state.activeEngine) {
+    srv.textContent += ` · ${t('conn.engine')}: ${state.activeEngine === 'xray-pattn' ? t('engine.pattn') : state.activeEngine === 'sing-box' ? 'sing-box' : t('engine.official')}`;
+  }
+
   if (stateStr === 'connecting') {
     power.classList.add('connecting');
     cs.textContent = t('state.connecting');
@@ -1040,6 +1058,7 @@ window.api.onStatus((d) => {
     state.lan = d.lan || null;
     // a fresh connect is built from the current settings — nothing is stale
     setPending(d.pendingReconnect || []);
+    state.activeEngine = d.engine || '';
     setConnUI('connected', d.serverId);
     setModeWidget();
     updateLanInfo();
@@ -1063,6 +1082,7 @@ window.api.onStatus((d) => {
     state.connected = false;
     state.connecting = false;
     state.lan = null;
+    state.activeEngine = '';
     setPending([]);          // nothing live to be out of sync with
     setConnUI('disconnected');
     $('#statIp').textContent = '—';
@@ -1177,7 +1197,8 @@ $('#btnDownloadHelp').onclick = () => {
 
 /* ----------------------------- required components ----------------------------- */
 const COMPONENTS = [
-  { key: 'xray', label: 'comp.xray' },
+  { key: 'xray', label: 'comp.xray', ver: 'xray' },
+  { key: 'xray-pattn', label: 'comp.xrayPattn', ver: 'xray-pattn' },
   { key: 'sing-box', label: 'comp.singbox', has: (a) => !!a['sing-box'] },
   { key: 'geo', label: 'comp.geo', has: (a) => a.geoip && a.geosite },
   { key: 'tun2socks', label: 'comp.tun2socks' },
@@ -1193,7 +1214,8 @@ function renderComponents() {
   for (const c of COMPONENTS) {
     if (c.winOnly && !isWin) continue;
     const present = c.has ? c.has(a) : !!a[c.key];
-    const ver = (c.key === 'xray' && present && state.xrayVersion) ? ` <span class="comp-ver">v${escapeHtml(state.xrayVersion)}</span>` : '';
+    const v = c.ver && present ? state.coreVersions[c.ver] : '';
+    const ver = v ? ` <span class="comp-ver">v${escapeHtml(v)}</span>` : '';
     const row = document.createElement('div');
     row.className = 'comp-row';
     row.innerHTML = `
@@ -1228,7 +1250,7 @@ async function downloadComponent(key, btn) {
     renderComponents();
     updateXrayStatus(res.xrayReady);
     updateTunStatus();
-    if (key === 'xray') refreshXrayVersion();
+    if (key === 'xray' || key === 'xray-pattn') refreshXrayVersion();
     toast(t('t.downloaded'), 'ok');
   } else {
     state.assets = res.assets || state.assets;
@@ -1305,7 +1327,7 @@ function missingEssentials() {
   const isWin = state.platform === 'win32';
   const want = state.settings.tunMode;   // tun files only matter if TUN is on
   const list = [];
-  if (!a.xray) list.push('xray');
+  if (!(a.xray || a['xray-pattn'])) list.push('xray');
   if (!(a.geoip && a.geosite)) list.push('geo');
   if (want && !a.tun2socks) list.push('tun2socks');
   if (want && isWin && !a.wintun) list.push('wintun');
@@ -1320,7 +1342,10 @@ function maybePromptMissingFiles() {
   openFilesModal(missing);
 }
 
-const COMP_LABEL = { xray: 'comp.xray', geo: 'comp.geo', tun2socks: 'comp.tun2socks', wintun: 'comp.wintun' };
+const COMP_LABEL = {
+  xray: 'comp.xray', 'xray-pattn': 'comp.xrayPattn',
+  geo: 'comp.geo', tun2socks: 'comp.tun2socks', wintun: 'comp.wintun'
+};
 
 function openFilesModal(missing) {
   const listEl = $('#filesList');

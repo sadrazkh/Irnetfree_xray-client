@@ -434,7 +434,14 @@
                 <option value="en">English</option>
               </select>
             </div>
-            <div></div>
+            <div>
+              <label class="field-label" data-i18n="set.defaultEngine">هستهٔ پیش‌فرض</label>
+              <select id="defaultEngine" class="select">
+                <option value="xray" data-i18n="engine.official">Xray (رسمی)</option>
+                <option value="xray-pattn" data-i18n="engine.pattn">Xray-PattN (patterniha)</option>
+              </select>
+              <p class="hint" data-i18n="set.defaultEngineHint"></p>
+            </div>
           </div>
         </div>
 
@@ -629,7 +636,8 @@
         <div class="grid2" id="edEngineRow">
           <div><label class="field-label" data-i18n="edit.engine">Core / Engine</label>
             <select id="edEngine" class="select">
-              <option value="xray" data-i18n="engine.xray">Xray (default)</option>
+              <option value="xray" data-i18n="engine.official">Xray (official)</option>
+              <option value="xray-pattn" data-i18n="engine.pattn">Xray-PattN (patterniha)</option>
               <option value="sing-box" data-i18n="engine.singbox">sing-box (fake ClientHello / uTLS)</option>
             </select></div>
           <div class="engine-hint"><p class="hint" data-i18n="edit.engineHint">Only this config runs on the chosen core. sing-box needs its binary in bin/; falls back to Xray if missing.</p></div>

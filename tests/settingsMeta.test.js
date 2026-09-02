@@ -39,6 +39,7 @@ function baseSettings(over) {
     procRouteWatch: false,
     killSwitch: false,
     theme: 'dark',
+    defaultEngine: 'xray',
     lang: 'fa'
   }, over || {});
 }
@@ -90,7 +91,8 @@ test('every reconnect-relevant key is detected when it changes', () => {
     advancedRouting: true,
     routeRules: [{ type: 'ip', value: '10.0.0.0/8', target: 'srv' }],
     routeDefault: 'direct', procRouteWatch: true,
-    systemProxy: false, tunMode: true
+    systemProxy: false, tunMode: true,
+    defaultEngine: 'xray-pattn'
   };
   // the fixture must cover the whole list, or this test silently stops guarding
   assert.deepEqual(Object.keys(changes).sort(), [...RECONNECT_KEYS].sort());
