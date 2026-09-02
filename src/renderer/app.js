@@ -286,24 +286,12 @@ function textToCustomRules(text) {
   return out;
 }
 
-/**
- * Persist the settings form.
- *
- * Most of these settings are baked into the running xray config (or applied as a
- * connect-time side effect), so while connected they do NOTHING until the tunnel
- * is rebuilt. Main reports exactly which ones are in that state; we then ask the
- * user instead of leaving the UI claiming a change that isn't live — that gap is
- * how traffic ends up leaking under rules the user thinks they replaced.
- *
- * `silent: true` skips the prompt (the caller shows its own), but the pending
- * state is still recorded so the banner stays accurate.
- */
-async function saveSettings(extra = {}, { silent = false } = {}) {
-  const dns = $('#dnsInput').value.split(',').map(s => s.trim()).filter(Boolean);
-  const partial = Object.assign({
+/** The Settings page form → settings partial. Only the "Save settings" button uses it. */
+function readSettingsForm() {
+  return {
     socksPort: parseInt($('#socksPort').value, 10) || 10808,
     httpPort: parseInt($('#httpPort').value, 10) || 10809,
-    dns,
+    dns: dnsFromInput(),
     logLevel: $('#logLevel').value,
     systemProxy: $('#optSysProxy').checked,
     tunMode: $('#optTun').checked,
@@ -311,8 +299,25 @@ async function saveSettings(extra = {}, { silent = false } = {}) {
     killSwitch: $('#optKillSwitch').checked,
     blockAds: $('#optBlockAds').checked,
     enableSniffing: $('#optSniff').checked
-  }, extra);
+  };
+}
+function dnsFromInput() {
+  return $('#dnsInput').value.split(',').map(s => s.trim()).filter(Boolean);
+}
 
+/**
+ * Persist a settings partial — ONLY the keys the caller changed. Reading the
+ * whole Settings form here used to persist abandoned edits from other pages.
+ *
+ * Most settings are baked into the running xray config (or applied as a
+ * connect-time side effect), so while connected they do NOTHING until the tunnel
+ * is rebuilt. Main reports exactly which ones are in that state; we then ask the
+ * user instead of leaving the UI claiming a change that isn't live.
+ *
+ * `silent: true` skips the prompt (the caller shows its own), but the pending
+ * state is still recorded so the banner stays accurate.
+ */
+async function saveSettings(partial = {}, { silent = false } = {}) {
   const res = await window.api.setSettings(partial);
   // main returns { settings, pendingReconnect }; tolerate the older bare shape
   state.settings = (res && res.settings) ? res.settings : res;
@@ -410,7 +415,7 @@ $('#pendingApply').onclick = () => applySettingsNow();
 $('#pendingDismiss').onclick = () => { state.pendingDismissed = true; renderPendingBanner(); };
 
 $('#btnSaveSettings').onclick = async () => {
-  await saveSettings();
+  await saveSettings(readSettingsForm());
   $('#savedHint').textContent = t('saved');
   setTimeout(() => ($('#savedHint').textContent = ''), 1800);
   toast(t('t.settingsSaved'), 'ok');
@@ -425,19 +430,19 @@ $$('#routingSeg .seg-btn').forEach(btn => {
     toast(t('t.routingMode') + ': ' + btn.textContent, 'ok');
   };
 });
-$('#optBlockAds').onchange = () => saveSettings();
-$('#optSniff').onchange = () => saveSettings();
+$('#optBlockAds').onchange = () => saveSettings({ blockAds: $('#optBlockAds').checked });
+$('#optSniff').onchange = () => saveSettings({ enableSniffing: $('#optSniff').checked });
 
 /* DNS presets — pick a provider to fill the input, or type a custom value */
 $('#dnsPreset').onchange = () => {
   const v = $('#dnsPreset').value;
-  if (v) { $('#dnsInput').value = v; saveSettings(); toast(t('dns.set'), 'ok'); }
+  if (v) { $('#dnsInput').value = v; saveSettings({ dns: dnsFromInput() }); toast(t('dns.set'), 'ok'); }
 };
 $('#dnsInput').oninput = () => syncDnsPreset();
 
 /* kill switch toggle — read live when a drop happens, so it needs no reconnect */
 $('#optKillSwitch').onchange = async () => {
-  await saveSettings();
+  await saveSettings({ killSwitch: $('#optKillSwitch').checked });
   updateKillStatus();
   // kill switch uses the Windows firewall → needs admin (same as TUN)
   if ($('#optKillSwitch').checked && state.platform === 'win32' && !state.elevated) {
@@ -456,7 +461,7 @@ function updateKillStatus() {
 
 $('#optAllowLan').onchange = async () => {
   // the reconnect prompt (saveSettings) already explains that it isn't live yet
-  await saveSettings();
+  await saveSettings({ allowLan: $('#optAllowLan').checked });
   updateLanInfo();
 };
 
@@ -1387,7 +1392,7 @@ $('#optTun').onchange = async () => {
   if (on && !state.tunAvailable) toast(t('t.tunNeedFiles'), 'err');
   // save silently first: relaunching as admin restarts the app, so asking about a
   // reconnect before that question is answered would be pointless
-  await saveSettings({}, { silent: true });
+  await saveSettings({ tunMode: on }, { silent: true });
   updateTunStatus();
   if (on && state.tunAvailable && !state.elevated && state.platform === 'win32') {
     if (await promptRelaunchAdmin()) return;
