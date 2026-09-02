@@ -35,7 +35,6 @@ const PRIVATE_IPS = [
  */
 function buildRoutingRules(mode, blockAds, geo) {
   const rules = [];
-  rules.push({ type: 'field', inboundTag: ['api'], outboundTag: 'api' });
   if (blockAds && geo) {
     rules.push({ type: 'field', domain: ['geosite:category-ads-all'], outboundTag: 'block' });
   }
@@ -236,7 +235,6 @@ function buildConfig(planArg, settings) {
     // internal range (e.g. 10.20.0.0/16) would be caught by the private bypass
     // and go direct instead of through the chosen config/chain (e.g. WireGuard).
     rules = [
-      { type: 'field', inboundTag: ['api'], outboundTag: 'api' },
       ...(s.blockAds && geo ? [{ type: 'field', domain: ['geosite:category-ads-all'], outboundTag: 'block' }] : []),
       ...advRules,
       { type: 'field', ip: PRIVATE_IPS.slice(), outboundTag: 'direct' },
@@ -267,7 +265,11 @@ function buildConfig(planArg, settings) {
 
   return {
     log: { loglevel: s.logLevel },
-    api: { tag: 'api', services: ['StatsService'] },
+    // Live traffic counters over HTTP (GET /debug/vars) instead of the gRPC-only
+    // StatsService: one cheap request per second instead of spawning `xray api
+    // statsquery`, and it reports EVERY outbound tag — the pool and advanced
+    // plans have no outbound called 'proxy', so the old query always read 0.
+    metrics: { tag: 'metrics', listen: `127.0.0.1:${s.apiPort}` },
     stats: {},
     policy: {
       levels: { '0': level0 },
@@ -276,8 +278,7 @@ function buildConfig(planArg, settings) {
     dns: { servers: s.dns, queryStrategy: 'UseIP' },
     inbounds: [
       { tag: 'socks-in', port: s.socksPort, listen, protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing },
-      { tag: 'http-in', port: s.httpPort, listen, protocol: 'http', settings: {}, sniffing },
-      { tag: 'api', port: s.apiPort, listen: '127.0.0.1', protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } }
+      { tag: 'http-in', port: s.httpPort, listen, protocol: 'http', settings: {}, sniffing }
     ],
     outbounds,
     routing: { domainStrategy: 'IPIfNonMatch', rules }
@@ -304,12 +305,12 @@ function buildConfig(planArg, settings) {
 function buildPoolConfig(plan, s, listen, sniffing) {
   const reg = makeRegistry(plan);
   const inbounds = [];
-  // The api inbound is pushed last but must win: reserve its port up front so a
-  // pool entry cannot take it (xray refuses to start on a duplicate bind).
+  // The metrics listener binds apiPort itself, outside the inbound list: reserve
+  // it up front so a pool entry cannot take it (xray refuses to start on a
+  // duplicate bind).
   const usedPorts = new Set([parseInt(s.apiPort, 10)]);
 
-  // api first so its rule can sit at the very top
-  const rules = [{ type: 'field', inboundTag: ['api'], outboundTag: 'api' }];
+  const rules = [];
 
   const addInbound = (tag, port, proto) => {
     port = parseInt(port, 10);
@@ -342,9 +343,6 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     if (inTags.length) perInboundRules.push({ type: 'field', inboundTag: inTags, outboundTag: tag });
   }
 
-  // api inbound (for live traffic stats)
-  inbounds.push({ tag: 'api', port: s.apiPort, listen: '127.0.0.1', protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } });
-
   reg.add(Object.assign({}, FREEDOM));
   reg.add(Object.assign({}, BLACKHOLE));
   const outbounds = applyFragments((reg.outs || []).map(sanitizeWgOutbound));
@@ -362,7 +360,9 @@ function buildPoolConfig(plan, s, listen, sniffing) {
 
   return {
     log: { loglevel: s.logLevel },
-    api: { tag: 'api', services: ['StatsService'] },
+    // See buildConfig: the metrics endpoint reports every outbound tag, which is
+    // what makes the traffic meter work for a pool (exits are 'out-<serverId>').
+    metrics: { tag: 'metrics', listen: `127.0.0.1:${s.apiPort}` },
     stats: {},
     policy: {
       levels: { '0': level0 },
