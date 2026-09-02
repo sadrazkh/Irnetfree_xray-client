@@ -555,21 +555,43 @@ function createService(opts = {}) {
       res = { ok: false, error: (e && e.message) || String(e) };
     }
 
-    if (res && res.ok && !res.tunError) {
-      send('log', { line: 'Connection restored after the network change', level: 'info' });
-      return;
-    }
     // doConnect() does not throw when TUN was asked for and did not come up: it
     // reports tunError and carries on proxy-only. Calling that a restored
     // connection would tell the user the whole system is tunnelled when it is not —
-    // so it counts as a failed attempt and the backoff retries it.
+    // so it counts as a failed attempt and the backoff retries it. But only a TUN
+    // that COULD have worked is worth retrying: with tun2socks/wintun simply not
+    // installed the failure is a configuration problem no rebuild can fix, and
+    // retrying it would spend the whole backoff — four complete teardown+rebuild
+    // cycles — on every single network change. The proxy is up either way, so that
+    // case is accepted here (doConnect() already logged the missing files, and its
+    // 'connected' status carried the tunError to the UI).
+    const tunRetryable = !!(res && res.tunError) && tun.isAvailable();
+
+    if (res && res.ok && !tunRetryable) {
+      send('log', {
+        line: res.tunError
+          ? 'Connection restored after the network change — proxy only, TUN is unavailable: ' + res.tunError
+          : 'Connection restored after the network change',
+        level: res.tunError ? 'warn' : 'info'
+      });
+      return;
+    }
     if (res && res.tunError) {
       send('log', { line: 'Reconnected without the system-wide tunnel: ' + res.tunError, level: 'error' });
     }
     const delay = RECOVER_BACKOFF_MS[attempt];
     if (delay == null) {
-      send('log', { line: 'Could not reconnect after the network change — giving up', level: 'error' });
-      send('status', { state: 'reconnect-failed', reason });
+      // "Nothing came back" and "everything came back except TUN" are different
+      // failures: on the second, xray is running and the proxy ports carry traffic,
+      // so painting the UI red would be a lie. `proxyUp` is what tells them apart.
+      const proxyUp = !!(res && res.ok);
+      send('log', {
+        line: proxyUp
+          ? 'Could not bring the system-wide tunnel back after the network change — giving up (the proxy is still up)'
+          : 'Could not reconnect after the network change — giving up',
+        level: 'error'
+      });
+      send('status', { state: 'reconnect-failed', reason, proxyUp, tunError: (res && res.tunError) || null });
       return;
     }
     send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
