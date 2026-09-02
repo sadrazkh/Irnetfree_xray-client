@@ -128,7 +128,12 @@ function flagEmoji(cc) {
 /** 'dark' | 'light' | 'system' -> the attribute the CSS keys off. */
 function applyTheme(pref, systemDark) {
   const dark = pref === 'system' ? systemDark !== false : pref !== 'light';
-  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  const theme = dark ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', theme);
+  // Remember the RESOLVED theme (not the preference) so theme-boot.js can paint
+  // it from <head> on the next launch, before app:init has answered. Storage is
+  // best-effort: a failure here only costs the flash it exists to avoid.
+  try { localStorage.setItem('irnetfree.theme', theme); } catch {}
 }
 
 function escapeHtml(s) {
@@ -1157,11 +1162,22 @@ window.api.onStatus((d) => {
     $('#connState').textContent = t('state.reconnecting');
   } else if (d.state === 'reconnect-failed') {
     // every retry is spent — the user has to act
-    state.connected = false;
     state.connecting = false;
     state.wasReconnecting = false;
-    setConnUI('error');
-    toast(t('net.failed'), 'err', 8000);
+    if (d.proxyUp) {
+      // The tunnel itself came back and only TUN did not: xray is running and the
+      // proxy ports work, so the red error state would be wrong. Stay connected
+      // and say what is actually missing.
+      state.connected = true;
+      setConnUI('connected', state.activeServerId);
+      toast(t('net.tunFailed'), 'warn', 8000);
+      if (d.tunError) appendLog('Reconnect gave up on TUN: ' + d.tunError, 'warn');
+      updateAdminBtn(true);
+    } else {
+      state.connected = false;
+      setConnUI('error');
+      toast(t('net.failed'), 'err', 8000);
+    }
   } else if (d.state === 'error') {
     // e.g. a settings reconnect whose new config the core rejected
     state.connected = false;
@@ -1976,30 +1992,59 @@ $('#btnWgPickConf').onclick = async () => {
   } catch {}
   if (!text) text = await pickLocalFile('.conf,.txt');
   if (!text) return;
-  fillWgFormFromConf(text);
+  await fillWgFormFromConf(text);
 };
 
-/** Browser fallback: a throwaway <input type="file"> resolved to its text. */
+/**
+ * Browser fallback: a throwaway <input type="file"> resolved to its text.
+ * Resolves '' when nothing was picked — a cancelled dialog fires no 'change' at
+ * all, and a promise that never settles would hang the caller's await forever.
+ */
 function pickLocalFile(accept) {
   return new Promise((resolve) => {
     const inp = document.createElement('input');
     inp.type = 'file';
     inp.accept = accept;
-    inp.onchange = () => {
+
+    let settled = false;
+    function finish(text) {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('focus', onWindowFocus);
+      resolve(text);
+    }
+    // Last resort for engines that fire neither 'change' nor 'cancel': the picker
+    // is modal, so the window getting focus back means it closed. The delay lets
+    // a real 'change'/'cancel' (which arrive right after focus) win the race.
+    function onWindowFocus() { setTimeout(() => finish(''), 1500); }
+
+    inp.addEventListener('cancel', () => finish(''));
+    inp.addEventListener('change', () => {
       const f = inp.files && inp.files[0];
-      if (!f) return resolve('');
+      if (!f) return finish('');
       const fr = new FileReader();
-      fr.onload = () => resolve(String(fr.result || ''));
-      fr.onerror = () => resolve('');
+      fr.onload = () => finish(String(fr.result || ''));
+      fr.onerror = () => finish('');
       fr.readAsText(f);
-    };
+    });
+    window.addEventListener('focus', onWindowFocus, { once: true });
     inp.click();
   });
 }
 
 /** Fill the WireGuard form from .conf text. Parsing happens in main. */
 async function fillWgFormFromConf(text) {
-  const res = await window.api.parseWireguardConf(text);
+  // The call answers { ok: false } for a conf it could not parse, but the bridge
+  // itself REJECTS when the RPC fails (the headless one throws on a non-JSON
+  // response). Both mean the same thing to the user, so both land on the hint —
+  // otherwise a reject here would be an unhandled promise rejection.
+  let res;
+  try {
+    res = await window.api.parseWireguardConf(text);
+  } catch (e) {
+    $('#wgConfHint').textContent = (e && e.message) || t('wg.confFailed');
+    return;
+  }
   if (!res || !res.ok) { $('#wgConfHint').textContent = (res && res.error) || t('wg.confFailed'); return; }
   const f = res.fields;
   $('#wgName').value = f.name || '';
