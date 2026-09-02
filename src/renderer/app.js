@@ -31,6 +31,7 @@ const state = {
   // renderer only mirrors it.
   pendingReconnect: [],
   pendingDismissed: false, // user chose "later"; keep the banner out of the way
+  wasReconnecting: false,  // main is rebuilding after a network change (toast on success)
   pings: {} // id -> { tcp, real }
 };
 
@@ -254,6 +255,7 @@ function applySettingsToUI() {
   $('#optTun').checked = !!s.tunMode;
   $('#optAllowLan').checked = !!s.allowLan;
   $('#optKillSwitch').checked = !!s.killSwitch;
+  $('#optNetAuto').checked = s.autoReconnectOnNetworkChange !== false;
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
@@ -459,6 +461,9 @@ $('#optKillSwitch').onchange = async () => {
     if (await promptRelaunchAdmin()) return;
   }
 };
+
+/* auto-reconnect toggle — read live at recovery time, so it needs no reconnect */
+$('#optNetAuto').onchange = () => saveSettings({ autoReconnectOnNetworkChange: $('#optNetAuto').checked });
 
 function updateKillStatus() {
   const el = $('#killStatus');
@@ -1068,6 +1073,8 @@ window.api.onStatus((d) => {
     setPending(d.pendingReconnect || []);
     state.activeEngine = d.engine || '';
     setConnUI('connected', d.serverId);
+    // only say "reconnected" when we actually were recovering from a network change
+    if (state.wasReconnecting) { toast(t('net.reconnected'), 'ok'); state.wasReconnecting = false; }
     setModeWidget();
     updateLanInfo();
     renderServers();
@@ -1086,9 +1093,13 @@ window.api.onStatus((d) => {
   } else if (d.state === 'connecting') {
     state.connecting = true;
     setConnUI('connecting', d.serverId);
+    // the rebuild reapplyConnection() runs is still part of the recovery — keep
+    // saying so instead of flashing a bare "Connecting…"
+    if (state.wasReconnecting) $('#connState').textContent = t('state.reconnecting');
   } else if (d.state === 'disconnected') {
     state.connected = false;
     state.connecting = false;
+    state.wasReconnecting = false;   // no live tunnel left to recover
     state.lan = null;
     state.activeEngine = '';
     setPending([]);          // nothing live to be out of sync with
@@ -1100,6 +1111,19 @@ window.api.onStatus((d) => {
     updateLanInfo();
     renderServers();
     renderPicker();
+  } else if (d.state === 'reconnecting') {
+    // the machine's network moved under the tunnel; main is rebuilding it
+    state.connecting = true;
+    state.wasReconnecting = true;
+    setConnUI('connecting', d.serverId || state.activeServerId);
+    $('#connState').textContent = t('state.reconnecting');
+  } else if (d.state === 'reconnect-failed') {
+    // every retry is spent — the user has to act
+    state.connected = false;
+    state.connecting = false;
+    state.wasReconnecting = false;
+    setConnUI('error');
+    toast(t('net.failed'), 'err', 8000);
   } else if (d.state === 'error') {
     // e.g. a settings reconnect whose new config the core rejected
     state.connected = false;
@@ -2514,3 +2538,6 @@ $$('#modeModal .mode-option').forEach(opt => {
 });
 
 init();
+
+// the OS reconnected an adapter — nudge main to re-check the tunnel
+window.addEventListener('online', () => { try { window.api.netOnline(); } catch {} });

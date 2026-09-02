@@ -108,6 +108,9 @@
     disarmKillSwitch: () => invoke('killswitch:disarm'),
     killSwitchStatus: () => invoke('killswitch:status'),
 
+    // the OS/browser says an adapter came back — the service re-checks the tunnel
+    netOnline: () => sendOnly('net:online'),
+
     // window controls — no-ops on the server, kept for API parity
     minimize: () => sendOnly('win:minimize'),
     maximize: () => sendOnly('win:maximize'),

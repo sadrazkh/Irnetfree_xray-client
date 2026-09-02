@@ -21,6 +21,7 @@ const { StatsPoller } = require('./stats');
 const { Downloader } = require('./downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
+const { NetWatcher } = require('./netWatcher');
 const https = require('https');
 
 let mainWindow = null;
@@ -32,6 +33,9 @@ let tun = null;
 let stats = null;
 let downloader = null;
 let procWatcher = null;
+let netWatcher = null;
+let recoverTimer = null;
+const RECOVER_BACKOFF_MS = [2000, 5000, 15000];
 let userBinDir = null;
 let isQuitting = false;
 let xrayReloading = false;   // true while the proc-routing watcher restarts xray
@@ -67,6 +71,9 @@ const DEFAULT_SETTINGS = {
   procRouteWatch: false,
   // kill switch: block all internet if the VPN drops unexpectedly (Windows)
   killSwitch: false,
+  // recover automatically when the machine's network changes (read live, so it
+  // needs no reconnect to take effect)
+  autoReconnectOnNetworkChange: true,
   theme: 'dark',
   defaultEngine: 'xray'
 };
@@ -520,6 +527,13 @@ async function doConnect(serverId, opts = {}) {
 
   // Keep process routes fresh while connected (opt-in; briefly reloads xray).
   startProcWatcher();
+  // Watch for the machine's network moving under the live tunnel. Every reconnect
+  // comes through here too (a settings apply, or our own recovery), so keep a
+  // watcher that is already running: its baseline is the network the tunnel was
+  // built for, and a change it noticed mid-rebuild is still queued on it —
+  // replacing it here would adopt the NEW network as normal and leave a tunnel
+  // built for the old one with nothing left to notice.
+  if (!netWatcher) startNetWatcher();
 
   updateOverlay('on');
   send('status', {
@@ -648,9 +662,61 @@ function stopProcWatcher() {
   if (procWatcher) { procWatcher.stop(); procWatcher = null; }
 }
 
+/**
+ * The machine's network changed under a live tunnel. xray does not die when that
+ * happens — it just stops passing traffic, and under TUN the bypass routes still
+ * point at the old gateway — so nothing else would notice. Rebuild the connection
+ * from current settings; reapplyConnection() already holds the kill-switch block
+ * across the gap, so this cannot leak.
+ */
+async function recoverFromNetworkChange(reason, attempt = 0) {
+  if (!store.get('activeServerId', null) || !xray || !xray.running) return;
+  if (!getSettings().autoReconnectOnNetworkChange) return;
+
+  send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
+  send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
+
+  const res = await reapplyConnection();
+  if (res && res.ok) {
+    send('log', { line: 'Connection restored after the network change', level: 'info' });
+    return;
+  }
+  const delay = RECOVER_BACKOFF_MS[attempt];
+  if (delay == null) {
+    send('log', { line: 'Could not reconnect after the network change — giving up', level: 'error' });
+    send('status', { state: 'reconnect-failed', reason });
+    return;
+  }
+  send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
+  clearTimeout(recoverTimer);
+  recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt + 1), delay);
+  if (recoverTimer.unref) recoverTimer.unref();
+}
+
+function startNetWatcher() {
+  stopNetWatcher();
+  netWatcher = new NetWatcher({
+    read: () => os.networkInterfaces(),
+    // The watcher cannot report a failure of its own (it only awaits the promise
+    // to know when it may fire again), so the handler logs its own errors —
+    // otherwise a throw in here would vanish without a trace.
+    onChange: (why) => recoverFromNetworkChange(why).catch((e) => {
+      send('log', { line: 'Network recovery failed: ' + ((e && e.message) || e), level: 'error' });
+    })
+  });
+  netWatcher.start();
+}
+
+function stopNetWatcher() {
+  clearTimeout(recoverTimer);
+  recoverTimer = null;
+  if (netWatcher) { netWatcher.stop(); netWatcher = null; }
+}
+
 async function doDisconnect() {
   userDisconnecting = true;        // intentional — don't trip the kill switch
   stopProcWatcher();
+  stopNetWatcher();                // nothing live to recover any more
   if (stats) stats.stop();
   try { await tun.stop(); } catch {}
   try { await setSystemProxy(false, {}); } catch {}
@@ -1103,6 +1169,10 @@ function registerIpc() {
     return { ip: lanIp(), all: lanCandidates(), socksPort: s.socksPort, httpPort: s.httpPort };
   });
 
+  // The renderer saw the OS come back online — the fast path into the watcher
+  // (polling alone would take a couple of ticks plus the debounce to notice).
+  ipcMain.on('net:online', () => { if (netWatcher) netWatcher.poke('online'); });
+
   // Kill switch: manual disarm (restore internet) + status query.
   ipcMain.handle('killswitch:disarm', async () => { await disarmKillSwitch(); return { ok: true }; });
   ipcMain.handle('killswitch:status', () => ({ engaged: killEngaged }));
@@ -1239,6 +1309,13 @@ app.whenReady().then(() => {
   registerIpc();
   createWindow();
   createTray();
+
+  // waking from sleep is the other way the network changes under us
+  try {
+    const { powerMonitor } = require('electron');
+    powerMonitor.on('resume', () => { if (netWatcher) netWatcher.poke('resume'); });
+  } catch {}
+
   mainWindow.once('ready-to-show', () => updateOverlay('off'));
 
   // kick off auto-update for subscriptions if enabled
@@ -1253,6 +1330,7 @@ app.whenReady().then(() => {
 app.on('before-quit', async (e) => {
   if (!isQuitting) return;
   userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
+  try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { if (tun) await tun.stop(); } catch {}
   try { await setSystemProxy(false, {}); } catch {}
