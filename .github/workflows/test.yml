@@ -23,3 +23,31 @@ jobs:
           node-version: '22'
       # No `npm ci` on purpose — the tests use only Node core modules.
       - run: npm test
+
+  android:
+    # The Android app is a hand-written port of src/main/parser.js and
+    # configBuilder.js, and nobody working on it can compile Kotlin locally
+    # (no JDK, no Gradle, and the wrapper is not committed). Without this job a
+    # broken port only surfaces when someone pushes a release tag. Compile only —
+    # no signing, no APK upload; release.yml still owns the shipped build.
+    name: compile android
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Fetch native libs (libv2ray)
+        run: bash scripts/fetch-libs.sh
+      - name: Compile
+        # assembleDebug, not assembleRelease: the point is "does the Kotlin
+        # compile and link against libv2ray", not producing an artifact.
+        run: gradle --no-daemon assembleDebug
