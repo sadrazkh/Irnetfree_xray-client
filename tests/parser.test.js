@@ -14,6 +14,7 @@ const {
   parseLink, parseMany, b64decode,
   buildStreamSettings, buildWireguardOutbound,
   makeWireguardServer, makeProxyServer, applyServerEdits,
+  parseWireguardConf, isWireguardConf,
   buildShareLink, isHttpProxyLink
 } = require('../src/main/parser');
 
@@ -341,6 +342,76 @@ test('makeWireguardServer: derives host/port from the endpoint', () => {
   assert.equal(s.address, 'wg.home.net');
   assert.equal(s.port, 51821);
   assert.equal(s.outbound.settings.peers[0].endpoint, 'wg.home.net:51821');
+});
+
+/* --------------------------- WireGuard .conf --------------------------- */
+
+const WG_CONF = `[Interface]
+PrivateKey = yYYF82v2u8vPXOsOokPZiEOZG664yNpHuXcmaVNMKvg=
+Address = 10.1.142.13/32
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = FI/C4wFN+0e31jVk8sFJwxyMu7Hvav4vbWptZ//pnIE=
+AllowedIPs = 10.0.0.1/32, 0.0.0.0/0, ::/0
+Endpoint = ir.vrt-server.org:11040
+PersistentKeepalive = 10`;
+
+test('isWireguardConf recognises the INI form, not a link or a sub blob', () => {
+  assert.equal(isWireguardConf(WG_CONF), true);
+  assert.equal(isWireguardConf('  \n[interface]\nPrivateKey = k\n[Peer]\nPublicKey = p\nEndpoint = h:1'), true);
+  assert.equal(isWireguardConf('wireguard://k@h:51820'), false);
+  assert.equal(isWireguardConf('vless://u@a.com:443'), false);
+  assert.equal(isWireguardConf('[Interface]\nPrivateKey = k'), false, 'a [Peer] section is required');
+});
+
+test('parseWireguardConf reads every field the form takes', () => {
+  const f = parseWireguardConf(WG_CONF);
+  assert.equal(f.privateKey, 'yYYF82v2u8vPXOsOokPZiEOZG664yNpHuXcmaVNMKvg=');
+  assert.equal(f.publicKey, 'FI/C4wFN+0e31jVk8sFJwxyMu7Hvav4vbWptZ//pnIE=');
+  assert.equal(f.endpoint, 'ir.vrt-server.org:11040');
+  assert.equal(f.address, '10.1.142.13/32');
+  assert.equal(f.allowedIPs, '10.0.0.1/32, 0.0.0.0/0, ::/0');
+  assert.equal(f.name, 'ir.vrt-server.org');
+});
+
+test('parseWireguardConf: keys are case-insensitive, comments and CRLF tolerated', () => {
+  const f = parseWireguardConf('[interface]\r\n# a comment\r\nprivatekey=K\r\naddress=10.0.0.2/32\r\nMTU = 1380\r\n\r\n[peer]\r\npublickey=P\r\nendpoint=h.example:51820\r\npresharedkey=PSK\r\n');
+  assert.equal(f.privateKey, 'K');
+  assert.equal(f.publicKey, 'P');
+  assert.equal(f.mtu, '1380');
+  assert.equal(f.presharedKey, 'PSK');
+  assert.equal(f.allowedIPs, '', 'absent AllowedIPs stays empty so the builder applies its default');
+});
+
+test('parseWireguardConf rejects a config that cannot connect', () => {
+  assert.throws(() => parseWireguardConf('[Interface]\nPrivateKey = K\n[Peer]\nPublicKey = P'), /Endpoint/);
+  assert.throws(() => parseWireguardConf('[Interface]\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = P\nEndpoint = h:1'), /PrivateKey/);
+  assert.throws(() => parseWireguardConf('[Interface]\nPrivateKey = K\n[Peer]\nEndpoint = h:1'), /PublicKey/);
+});
+
+test('parseMany imports a pasted .conf as one server', () => {
+  const { servers, errors } = parseMany(WG_CONF);
+  assert.equal(errors.length, 0);
+  assert.equal(servers.length, 1);
+  const s = servers[0];
+  assert.equal(s.protocol, 'wireguard');
+  assert.equal(s.address, 'ir.vrt-server.org');
+  assert.equal(s.port, 11040);
+  assert.deepEqual(s.outbound.settings.address, ['10.1.142.13/32']);
+  assert.deepEqual(s.outbound.settings.peers[0].allowedIPs, ['10.0.0.1/32', '0.0.0.0/0', '::/0']);
+});
+
+test('a wireguard server exports a real share link, not its raw text', () => {
+  const s = parseMany(WG_CONF).servers[0];
+  const link = buildShareLink(s);
+  assert.match(link, /^wireguard:\/\//);
+  const back = parseLink(link);
+  assert.equal(back.address, 'ir.vrt-server.org');
+  assert.equal(back.port, 11040);
+  assert.equal(back.outbound.settings.secretKey, s.outbound.settings.secretKey);
+  assert.equal(back.outbound.settings.peers[0].publicKey, s.outbound.settings.peers[0].publicKey);
+  assert.deepEqual(back.outbound.settings.peers[0].allowedIPs, ['10.0.0.1/32', '0.0.0.0/0', '::/0']);
 });
 
 /* ----------------------------- parseMany ----------------------------- */
