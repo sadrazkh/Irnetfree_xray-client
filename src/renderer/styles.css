@@ -15,6 +15,33 @@
   --shadow: 0 8px 30px rgba(0,0,0,.35);
 }
 
+/* Light theme: the surface/text ramp is replaced outright. The accent, state
+   and protocol colours keep their hue — a screenshot of either theme is
+   recognisable — but move to a darker tone of the same colour, because the
+   bright ones are unreadable on a white panel (the teal #2dd4bf, which carries
+   the info log lines and the session total, is 1.7:1 there). */
+[data-theme="light"] {
+  --bg: #f6f8fa;
+  --bg-2: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --border: #d6dde6;
+  --text: #1b2430;
+  --muted: #5b6875;
+  --accent: #2f6fe4;
+  --accent-2: #0f766e;
+  --green: #1a7f37;
+  --red: #cf222e;
+  --yellow: #9a6700;
+  --shadow: 0 8px 30px rgba(15,23,32,.10);
+}
+[data-theme="light"] .logbox { background: #ffffff; color: #1b2430; }
+[data-theme="light"] .log-log { color: #5b6875; }
+[data-theme="light"] ::-webkit-scrollbar-thumb { background: #cdd6e0; border-color: var(--bg); }
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #b6c2d0; }
+[data-theme="light"] .titlebar.conn-off { background: linear-gradient(180deg, rgba(79,140,255,.10), transparent); }
+[data-theme="light"] .titlebar.conn-on { background: linear-gradient(180deg, rgba(63,185,80,.12), transparent); }
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
 body {
@@ -759,6 +786,28 @@ body {
 .kill-banner-text { color: var(--red); font-weight: 700; font-size: 13px; }
 .kill-banner-actions { display: flex; gap: 8px; flex: 0 0 auto; }
 .kill-banner-actions .btn { padding: 7px 12px; font-size: 12px; }
+
+/* ---------------- light theme: the colours that are not variables ----------------
+   These override rules written above them, so they have to live at the end of
+   the file: source order is what wins when the specificity ties (the badge
+   colours are also set by `.picker-special .proto-badge.proto-chain`). */
+/* protocol badges: the dark-theme text is a pastel on a .18 tint of itself —
+   on white that is ~1.6:1, so each one drops to a darker tone of its own hue */
+[data-theme="light"] .proto-vless { color: #1f4fa8; }
+[data-theme="light"] .proto-vmess,
+[data-theme="light"] .proto-badge.proto-chain { color: #0f766e; }
+[data-theme="light"] .proto-trojan,
+[data-theme="light"] .proto-badge.proto-pool { color: #8a5a00; }
+[data-theme="light"] .proto-shadowsocks,
+[data-theme="light"] .proto-badge.proto-advanced { color: #6b3fa0; }
+[data-theme="light"] .proto-wireguard { color: #146c51; }
+[data-theme="light"] .proto-socks { color: #a3306f; }
+[data-theme="light"] .proto-http { color: #475569; }
+/* a near-black hover border belongs to the dark theme */
+[data-theme="light"] .server-card:hover { border-color: #b6c2d0; }
+/* the banners carry their own dark drop shadow instead of var(--shadow) */
+[data-theme="light"] .pending-banner { box-shadow: var(--shadow); }
+[data-theme="light"] .kill-banner { box-shadow: var(--shadow), 0 0 0 1px rgba(207,34,46,.25); }
 
 /* scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

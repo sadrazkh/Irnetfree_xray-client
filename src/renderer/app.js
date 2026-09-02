@@ -124,6 +124,13 @@ function flagEmoji(cc) {
   );
 }
 
+/* ----------------------------- theme ----------------------------- */
+/** 'dark' | 'light' | 'system' -> the attribute the CSS keys off. */
+function applyTheme(pref, systemDark) {
+  const dark = pref === 'system' ? systemDark !== false : pref !== 'light';
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -152,6 +159,19 @@ $('#langSelect').onchange = () => setLang($('#langSelect').value);
 
 /* default core — saves itself (readSettingsForm() deliberately leaves it out) */
 $('#defaultEngine').onchange = () => saveSettings({ defaultEngine: $('#defaultEngine').value });
+
+/* theme — renderer-only, applied immediately then persisted */
+$('#themeSelect').onchange = () => {
+  const theme = $('#themeSelect').value;
+  applyTheme(theme, state.systemDark);
+  saveSettings({ theme });
+};
+
+/* the OS switched between light and dark while the app is open */
+window.api.onSystemTheme((d) => {
+  state.systemDark = !!(d && d.dark);
+  if ((state.settings.theme || 'dark') === 'system') applyTheme('system', state.systemDark);
+});
 
 function setLang(lang) {
   window.i18n.applyI18n(lang);
@@ -200,6 +220,9 @@ async function init() {
 
   window.i18n.applyI18n(state.settings.lang || 'fa');
   $('#btnLang').textContent = (state.settings.lang || 'fa') === 'fa' ? 'EN' : 'فا';
+
+  state.systemDark = data.systemDark !== false;
+  applyTheme(state.settings.theme || 'dark', state.systemDark);
 
   applySettingsToUI();
   renderServers();
@@ -251,6 +274,7 @@ function applySettingsToUI() {
   $('#logLevel').value = s.logLevel || 'warning';
   $('#langSelect').value = s.lang || 'fa';
   $('#defaultEngine').value = s.defaultEngine || 'xray';
+  $('#themeSelect').value = s.theme || 'dark';
   $('#optSysProxy').checked = !!s.systemProxy;
   $('#optTun').checked = !!s.tunMode;
   $('#optAllowLan').checked = !!s.allowLan;
