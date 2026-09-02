@@ -16,7 +16,7 @@ const { setSystemProxy } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('./netutils');
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
-const { TunManager } = require('./tunManager');
+const { TunManager, isOwnTunInterface } = require('./tunManager');
 const { StatsPoller } = require('./stats');
 const { Downloader } = require('./downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
@@ -37,7 +37,14 @@ let netWatcher = null;
 let recoverTimer = null;
 let recovering = false;        // a network-change recovery is in flight
 let recoverQueued = null;      // reason of a trigger that arrived during that recovery
+let recoverGen = 0;            // bumped by doDisconnect(); an older recovery no longer owns `recovering`
 const RECOVER_BACKOFF_MS = [2000, 5000, 15000];
+// Bumped by doDisconnect() and by every doConnect(). doConnect awaits half a
+// dozen times and the user can press the power button in any of those gaps: from
+// that moment the older call no longer speaks for the app, so it must not emit a
+// status or start a watcher. Comparing the token captured at entry against this
+// is how it finds out (see doConnect).
+let connGen = 0;
 let userBinDir = null;
 let isQuitting = false;
 let xrayReloading = false;   // true while the proc-routing watcher restarts xray
@@ -427,14 +434,30 @@ function buildActive(serverId, settings) {
  * @param {{ holdKillSwitch?: boolean }} [opts] `holdKillSwitch` keeps an already
  *   armed kill-switch block in place instead of clearing it up front — used by
  *   reapplyConnection() so the gap between the old and the new tunnel can't leak.
+ * @returns {Promise<{ ok: boolean, tunError?: string|null, stale?: boolean }>}
+ *   `stale: true` means a disconnect (or a newer connect) overtook this call
+ *   before it finished: nothing was emitted and nothing was started, and the
+ *   caller must not treat it as either a success or a failure worth retrying.
  */
 async function doConnect(serverId, opts = {}) {
+  // Every await below is a window in which the user can hit the power button.
+  // doDisconnect() then stops the core and clears activeServerId, but THIS call
+  // would carry on to start both watchers again and emit 'connected' — leaving
+  // the UI claiming a tunnel that no longer exists, with two leaked watchers
+  // behind it and a recovery retry that the activeServerId guard silently drops,
+  // so nothing ever corrects the display. The token says whose turn it is.
+  const gen = ++connGen;
+  const stale = () => gen !== connGen;
+  const abandoned = { ok: false, stale: true };
+
   // clear any kill-switch block from a previous unexpected drop
   if (!opts.holdKillSwitch) {
     await disarmKillSwitch();
+    if (stale()) return abandoned;
     send('killswitch', { engaged: false });
   }
   const settings = await effectiveSettings();
+  if (stale()) return abandoned;
   const byId = (id) => store.get('servers', []).find(s => s.id === id);
 
   const { label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
@@ -444,6 +467,7 @@ async function doConnect(serverId, opts = {}) {
   // Validate first so chain / advanced-routing mistakes surface as a clear
   // message instead of a config that crashes xray right after "connected".
   const check = await xray.validateWithFallback(config, engine);
+  if (stale()) return abandoned;
   if (!check.ok) {
     send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
     // The official core refuses plaintext VLESS/Trojan to public addresses and the
@@ -471,6 +495,10 @@ async function doConnect(serverId, opts = {}) {
   } finally {
     xrayReloading = prevReloading;
   }
+  // The critical one. doDisconnect() has already stopped the core it just
+  // started, so writing activeServerId back here would resurrect the very intent
+  // the user cancelled — and every side effect below would follow it.
+  if (stale()) return abandoned;
 
   store.set('activeServerId', serverId);
   // Everything below is a connect-time side effect, so from here on the live
@@ -485,6 +513,7 @@ async function doConnect(serverId, opts = {}) {
       send('log', { line: 'System proxy failed: ' + e.message, level: 'error' });
     }
   }
+  if (stale()) return abandoned;
 
   updateTray(true, label);
 
@@ -507,6 +536,9 @@ async function doConnect(serverId, opts = {}) {
       }
     }
   }
+  // tun.start() is the longest await here (a PowerShell round trip on Windows, a
+  // password prompt on macOS) — the likeliest place for a disconnect to land.
+  if (stale()) return abandoned;
 
   // LAN sharing: open the firewall on Windows + report the address other
   // devices should point their proxy at.
@@ -521,6 +553,9 @@ async function doConnect(serverId, opts = {}) {
   } else {
     await removeLanFirewall();
   }
+  // Last gate before the irreversible half: the watchers and the 'connected'
+  // status. Past this line nothing awaits, so nothing can overtake us.
+  if (stale()) return abandoned;
 
   // Start live traffic stats
   stats.setBin(xray.anyBin());
@@ -614,6 +649,12 @@ async function reapplyConnection() {
     };
   }
 
+  // A disconnect overtook the connect: it emitted nothing and started nothing, so
+  // neither may we. The newer operation owns the kill switch as well —
+  // doDisconnect() disarms it itself, and releasing it here could unblock the
+  // machine at a moment that operation chose to keep blocked.
+  if (r && r.stale) return { ok: false, stale: true };
+
   if (armed) {
     await disarmKillSwitch();
     send('killswitch', { engaged: false });
@@ -695,12 +736,29 @@ async function recoverFromNetworkChange(reason, attempt = 0) {
   if (!getSettings().autoReconnectOnNetworkChange) return;
   if (recovering) { recoverQueued = reason; return; }
 
+  // `recovering` is a lock with no timeout behind it: tunManager.run() waits on
+  // PowerShell, and macOS waits on a password prompt the user may simply ignore.
+  // A run that never returns would park every future trigger for the life of the
+  // process, so the lock is stamped with a generation that doDisconnect() bumps —
+  // that is the reset, and it is why the release below is conditional.
+  const gen = recoverGen;
   recovering = true;
   try {
     await runRecovery(reason, attempt);
   } finally {
-    recovering = false;
+    if (gen === recoverGen) {
+      recovering = false;
+      // The tunnel now standing was built for the network as it is at THIS moment,
+      // so nothing seen during the teardown (our own TUN adapter going away, the
+      // old adapter's addresses) is news. Without this, a half-observed change
+      // from the teardown window settles into a trigger for a rebuild that has
+      // already happened. A trigger the watcher genuinely queued is left alone.
+      if (netWatcher) netWatcher.rebaseline();
+    }
   }
+  // The lock was reset under us (a disconnect): whatever comes next is not ours
+  // to start, and the activeServerId guard would refuse it anyway.
+  if (gen !== recoverGen) return;
 
   // A newer network arrived while we were rebuilding for the old one: start over
   // for it, from the first backoff step.
@@ -745,6 +803,11 @@ async function runRecovery(reason, attempt) {
     res = { ok: false, error: (e && e.message) || String(e) };
   }
 
+  // The user disconnected (or connected somewhere else) while we were rebuilding.
+  // The rebuild abandoned itself without emitting anything; a log line or a
+  // retry here would be about a tunnel nobody asked for any more.
+  if (res && res.stale) return;
+
   // doConnect() does not throw when TUN was asked for and did not come up: it
   // reports tunError and carries on proxy-only. Calling that a restored
   // connection would tell the user the whole system is tunnelled when it is not —
@@ -755,7 +818,13 @@ async function runRecovery(reason, attempt) {
   // cycles — on every single network change. The proxy is up either way, so that
   // case is accepted here (doConnect() already logged the missing files, and its
   // 'connected' status carried the tunError to the UI).
-  const tunRetryable = !!(res && res.tunError) && tun.isAvailable();
+  //
+  // Missing privileges are permanent in exactly the same way: a non-admin Windows
+  // user with tun2socks installed fails with "TUN mode needs Administrator
+  // rights" on every attempt, and no rebuild can grant them — retrying just costs
+  // them ~25 s of torn-down proxy on every network change. isElevated() is the
+  // question "could this ever have worked", so it belongs in the same judgement.
+  const tunRetryable = !!(res && res.tunError) && tun.isAvailable() && tun.isElevated();
 
   if (res && res.ok && !tunRetryable) {
     send('log', {
@@ -793,6 +862,10 @@ function startNetWatcher() {
   stopNetWatcher();
   netWatcher = new NetWatcher({
     read: () => os.networkInterfaces(),
+    // Our own TUN adapter is not part of "the machine's network": a rebuild
+    // destroys and recreates it, so counting it would make every recovery
+    // manufacture the change that triggers the next one.
+    ignoreInterface: isOwnTunInterface,
     // The watcher cannot report a failure of its own (it only awaits the promise
     // to know when it may fire again), so the handler logs its own errors —
     // otherwise a throw in here would vanish without a trace.
@@ -807,15 +880,23 @@ function stopNetWatcher() {
   clearTimeout(recoverTimer);
   recoverTimer = null;
   // A trigger parked behind a recovery in flight has nothing left to recover.
-  // `recovering` itself is deliberately NOT cleared: the run that owns it
-  // releases it in its own finally, and forcing it false here would let a second
-  // recovery start alongside the one still going.
+  // `recovering` itself is deliberately NOT cleared HERE: startNetWatcher() calls
+  // this first, and a recovery's own reconnect can reach it — releasing the lock
+  // there would let a second recovery start alongside the one still going.
+  // doDisconnect() is where the reset belongs, and it does it explicitly.
   recoverQueued = null;
   if (netWatcher) { netWatcher.stop(); netWatcher = null; }
 }
 
 async function doDisconnect() {
   userDisconnecting = true;        // intentional — don't trip the kill switch
+  // Anything already in flight stops speaking for the app from this line on: a
+  // doConnect() past xray.start() must not emit 'connected' or restart the
+  // watchers, and a recovery that hung (a stuck PowerShell, an ignored macOS
+  // password prompt) must not keep its lock and park every future trigger.
+  connGen++;
+  recoverGen++;
+  recovering = false;
   stopProcWatcher();
   stopNetWatcher();                // nothing live to recover any more
   if (stats) stats.stop();
