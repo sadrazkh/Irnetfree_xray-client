@@ -6,6 +6,9 @@
         content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
   <title>IRNetFree</title>
   <link rel="stylesheet" href="styles.css" />
+  <!-- Applies the remembered theme before the first paint, so a light-theme user
+       does not see a dark flash while app:init is still in flight. -->
+  <script src="theme-boot.js"></script>
 </head>
 <body>
   <!-- custom titlebar -->
