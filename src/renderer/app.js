@@ -163,7 +163,7 @@ function setLang(lang) {
   renderComponents();
   renderChains();
   renderPool();
-  updateXrayStatus(state.assets.xray);
+  updateXrayStatus(anyXrayCore());
   updateTunStatus();
   setModeWidget();
   refreshConnLabels();
@@ -1183,6 +1183,17 @@ window.api.onLog((d) => appendLog(d.line, d.level || 'log'));
 $('#btnClearLogs').onclick = () => { $('#logBox').innerHTML = ''; };
 
 /* ----------------------------- xray binary ----------------------------- */
+/**
+ * Is ANY Xray-format core installed? The official core and the PattN fork run
+ * the exact same config, so either one makes the app usable — a fork-only user
+ * must not be told "Xray core not found".
+ */
+function anyXrayCore() {
+  const a = state.assets || {};
+  return !!(a.xray || a['xray-pattn']);
+}
+
+/** @param {boolean} ready any Xray-format core installed (see anyXrayCore) */
 function updateXrayStatus(ready) {
   const el = $('#xrayStatus');
   if (ready) {
@@ -1335,7 +1346,7 @@ function missingEssentials() {
   const isWin = state.platform === 'win32';
   const want = state.settings.tunMode;   // tun files only matter if TUN is on
   const list = [];
-  if (!(a.xray || a['xray-pattn'])) list.push('xray');
+  if (!anyXrayCore()) list.push('xray');
   if (!(a.geoip && a.geosite)) list.push('geo');
   if (want && !a.tun2socks) list.push('tun2socks');
   if (want && isWin && !a.wintun) list.push('wintun');
@@ -1387,13 +1398,13 @@ $('#filesDownload').onclick = async () => {
       $('#filesProgress').textContent = t('t.downloadFailed') + ': ' + ((res && res.error) || '');
       btn.disabled = false;
       renderComponents();
-      updateXrayStatus(state.assets.xray);
+      updateXrayStatus(anyXrayCore());
       return;
     }
   }
   btn.disabled = false;
   renderComponents();
-  updateXrayStatus(state.assets.xray);
+  updateXrayStatus(anyXrayCore());
   updateTunStatus();
   refreshXrayVersion();
   closeFilesModal();
