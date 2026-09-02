@@ -15,10 +15,24 @@
 const ENGINES = {
   xray: {
     id: 'xray',
-    label: 'Xray (default)',
+    label: 'Xray (official)',
     format: 'xray',
+    repo: 'XTLS/Xray-core',                            // GitHub releases the binary comes from
     exe: { win32: 'xray.exe', default: 'xray' },
     // CLI shape (argv builders) for this core.
+    runArgs: (cfg) => ['run', '-c', cfg],
+    testArgs: (cfg) => ['run', '-test', '-c', cfg]
+  },
+  // patterniha's fork: upstream + one change — it does not refuse plaintext
+  // VLESS/Trojan to public addresses (upstream's validateOutboundTransportSecurity).
+  // Same config format, same argv, same release asset names; only the exe name
+  // differs so both can live in bin/ side by side.
+  'xray-pattn': {
+    id: 'xray-pattn',
+    label: 'Xray-PattN (patterniha)',
+    format: 'xray',
+    repo: 'patterniha/Xray-core',
+    exe: { win32: 'xray-pattn.exe', default: 'xray-pattn' },
     runArgs: (cfg) => ['run', '-c', cfg],
     testArgs: (cfg) => ['run', '-test', '-c', cfg]
   },
@@ -38,10 +52,10 @@ function engine(id) {
   return ENGINES[id] || ENGINES[DEFAULT_ENGINE];
 }
 
-/** Executable file name for an engine on the current platform. */
-function engineExe(id) {
+/** Executable file name for an engine on the given (default: current) platform. */
+function engineExe(id, platform = process.platform) {
   const e = engine(id);
-  return e.exe[process.platform] || e.exe.default;
+  return e.exe[platform] || e.exe.default;
 }
 
 /** Config format an engine consumes ('xray' | 'sing-box'). */
@@ -62,7 +76,17 @@ function engineList() {
   return Object.values(ENGINES).map(e => ({ id: e.id, label: e.label }));
 }
 
+/** Ids of the engines that consume the Xray JSON format, default first. */
+function xrayEngines() {
+  return Object.values(ENGINES).filter(e => e.format === 'xray').map(e => e.id);
+}
+
+/** Human label for status lines and logs. */
+function engineLabel(id) {
+  return engine(id).label;
+}
+
 module.exports = {
   ENGINES, DEFAULT_ENGINE,
-  engine, engineExe, engineFormat, engineRunArgs, engineTestArgs, engineList
+  engine, engineExe, engineFormat, engineRunArgs, engineTestArgs, engineList, xrayEngines, engineLabel
 };
