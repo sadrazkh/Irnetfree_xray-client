@@ -52,6 +52,7 @@ Cheapest execution: one Opus session runs tasks 1–16 (parallel batches {1,3,7,
 |---|---|---|---|---|
 | 2 — DNS + routing (DoH, `:53` hijack, direct resolvers, `dnsManaged`, `ipv6`, live repro with a real config) | ★★★★ | **Fable** | Opus spec / Fable code | rule order and resolver choice decide whether traffic leaks or bypass works; the repro needs judgement |
 | 3 — sing-box TUN + leak guard (firewall, adapter-DNS override + crash repair, mac pf/`networksetup`, server switch) | ★★★★ | **Fable** | Opus spec / Fable code | privileged, persistent side effects; mac written blind; the "no leak" promise lives here |
+| 3b — surviving a network change (`netWatcher.js`, debounce, backoff, auto-reconnect) | ★★ (watcher) · ★★★ (reconnect wiring in main.js + service.js) | Opus | **Fable** on the reconnect wiring only | the watcher is a pure, unit-testable module; the recovery path re-uses `reapplyConnection()` and touches the connect path, so it gets a Fable review pass. Can ship before phase 3. |
 | 4 — standard finalmask / `fm` / `cs` / `fp=unsafe` | ★★★ (parser + builder) · ★★ (edit form) | Opus | **Fable** on parser/builder only | exact upstream JSON; a wrong key makes the core refuse the config — but the shapes are pinned verbatim in the spec, so Opus + Fable review is enough |
 | 5 — stats via `metrics.listen` | ★★ | Opus | Opus | |
 | 6 — WireGuard `.conf` import / export | ★★ | Opus | Opus | |
