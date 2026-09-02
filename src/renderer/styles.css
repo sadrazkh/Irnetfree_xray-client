@@ -553,6 +553,7 @@ body {
 .chain-pool { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .pool-item {
   display: flex; align-items: center; gap: 10px; width: 100%;
+  flex: 0 0 auto;   /* .chain-pool is a flex column with max-height: never shrink rows, scroll instead */
   background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
   padding: 10px 14px; cursor: pointer; color: var(--text); font-family: inherit; font-size: 13px;
   transition: .12s;
@@ -610,6 +611,7 @@ body {
 .ss-search { margin-bottom: 6px; padding: 8px 10px; font-size: 12px; }
 .ss-list { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .ss-item {
+  flex: 0 0 auto;   /* .ss-list is a flex column with max-height: never shrink rows, scroll instead */
   padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
