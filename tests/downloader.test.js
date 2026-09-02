@@ -47,6 +47,22 @@ test('redirects are followed', async () => {
   } finally { srv.close(); }
 });
 
+test('a redirect onto a non-loopback http:// URL is refused, not downloaded', async () => {
+  // These downloads are EXECUTABLES (xray / sing-box / tun2socks). Plain http is
+  // a local-test seam only; a redirect hop must not reopen it.
+  const { srv, port } = await serve((req, res) => {
+    res.writeHead(302, { Location: 'http://mirror.invalid/xray.zip' });
+    res.end();
+  });
+  const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-dl-')), 'xray.zip');
+  try {
+    await assert.rejects(downloadFile(`http://127.0.0.1:${port}/xray.zip`, dest), /plain http/i);
+    assert.equal(fs.existsSync(dest), false, 'nothing may be left on disk');
+    // and the same rule applies to the URL we are handed in the first place
+    await assert.rejects(downloadFile('http://mirror.invalid/xray.zip', dest), /plain http/i);
+  } finally { srv.close(); }
+});
+
 const { Downloader } = require('../src/main/downloader');
 
 test('each Xray engine downloads from its own GitHub repo', () => {
