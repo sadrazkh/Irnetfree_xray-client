@@ -361,9 +361,12 @@ function buildProxyOutbound(proto, address, port, user, pass) {
  * v2rayN shares an HTTP proxy exactly like a SOCKS one —
  * `http://[b64(user:pass)@]host:port#name` — which is also the shape of a plain
  * subscription URL's origin. A proxy link therefore has NO path and NO query.
+ * The userinfo is either a standard-alphabet base64 blob (which may contain '/')
+ * or a plain `user:pass`; the host never contains a '/', so a subscription URL
+ * with an '@' in its path still fails to match.
  * (Kept in sync with the copy in src/renderer/app.js smartImport.)
  */
-const HTTP_PROXY_LINK = /^http:\/\/(?:[^/?#\s@]+@)?[^/?#\s@]+:\d{1,5}(?:#\S*)?$/i;
+const HTTP_PROXY_LINK = /^http:\/\/(?:(?:[A-Za-z0-9+/=]+|[^/?#\s@]+)@)?[^/?#\s@]+:\d{1,5}(?:#\S*)?$/i;
 function isHttpProxyLink(s) { return HTTP_PROXY_LINK.test(String(s || '').trim()); }
 
 /**
@@ -727,7 +730,9 @@ function parseLink(link) {
   if (l.startsWith('ss://')) return parseShadowsocks(l);
   if (l.startsWith('socks://') || l.startsWith('socks5://')) return parseSocks(l);
   if (l.startsWith('wireguard://') || l.startsWith('wg://')) return parseWireguard(l);
-  if (l.startsWith('http://') && isHttpProxyLink(l)) return parseHttpProxy(l);
+  // case-insensitive to match HTTP_PROXY_LINK's /i (and parseMany's line filter),
+  // so an uppercase scheme imports instead of being reported as an error
+  if (/^http:\/\//i.test(l) && isHttpProxyLink(l)) return parseHttpProxy(l);
   throw new Error('Unsupported or invalid link: ' + l.slice(0, 12) + '...');
 }
 
