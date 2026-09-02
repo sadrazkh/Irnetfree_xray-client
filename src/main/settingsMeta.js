@@ -30,7 +30,9 @@ const RECONNECT_KEYS = [
   'routingMode', 'blockAds', 'customRules',
   'advancedRouting', 'routeRules', 'routeDefault', 'procRouteWatch',
   // connect-time side effects
-  'systemProxy', 'tunMode'
+  'systemProxy', 'tunMode',
+  // which core the config is validated on and started with
+  'defaultEngine'
 ];
 
 /**
