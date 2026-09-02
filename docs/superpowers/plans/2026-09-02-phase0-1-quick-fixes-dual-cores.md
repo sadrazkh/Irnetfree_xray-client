@@ -8,6 +8,8 @@
 
 **Tech Stack:** Node 18+ core only (no npm runtime deps), Electron 31 for desktop, `node --test` for tests, PowerShell/netsh untouched in this plan.
 
+**Model per task:** see `docs/superpowers/plans/2026-09-02-model-assignment.md` (haiku for ★, sonnet for ★★, opus for ★★★; tasks 9, 13, 14 are ★★★).
+
 ## Global Constraints
 
 - Runtime code uses only Node core modules; `package.json` dependencies stay empty (spec §1 / README "هیچ وابستگی npm").
