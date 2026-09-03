@@ -320,6 +320,14 @@ function updateGuardRows() {
     $('#guardNeedsTun').hidden = tunOn;
     // the pf anchor behind "strict" has never run on a real Mac (phase 3)
     $('#guardMacNote').hidden = (state.assets || {}).platform !== 'darwin';
+    // Strict blocks everything that does not go through the tunnel — and a
+    // "direct" route is exactly that. Say so where the two are chosen, not in a
+    // log line the user reads after their bank stops loading.
+    const s = state.settings || {};
+    const bypasses = s.advancedRouting
+      ? (s.routeRules || []).some(r => r && r.target === 'direct') || s.routeDefault === 'direct'
+      : ['bypass-ir', 'bypass-cn', 'direct'].includes(s.routingMode || 'global');
+    $('#guardStrictRouting').hidden = !(tunOn && $('#optLeakGuard').value === 'strict' && bypasses);
   }
   const udpRow = $('#udpBlockRow');
   if (udpRow) {
@@ -512,6 +520,7 @@ $$('#routingSeg .seg-btn').forEach(btn => {
     $$('#routingSeg .seg-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     await saveSettings({ routingMode: btn.dataset.mode });
+    updateGuardRows();   // whether the strict guard now contradicts the routing
     toast(t('t.routingMode') + ': ' + btn.textContent, 'ok');
   };
 });
@@ -534,7 +543,7 @@ $('#optIpv6').onchange = () => saveSettings({ ipv6: $('#optIpv6').checked });
 
 /* TUN backend / leak guard / proxy-mode UDP block — each saves only its own key */
 $('#optTunBackend').onchange = () => saveSettings({ tunBackend: $('#optTunBackend').value });
-$('#optLeakGuard').onchange = () => saveSettings({ leakGuard: $('#optLeakGuard').value });
+$('#optLeakGuard').onchange = () => { saveSettings({ leakGuard: $('#optLeakGuard').value }); updateGuardRows(); };
 $('#optBlockUdpProxy').onchange = () => saveSettings({ blockUdpInProxyMode: $('#optBlockUdpProxy').checked });
 
 /* kill switch toggle — read live when a drop happens, so it needs no reconnect */
@@ -2795,6 +2804,7 @@ $('#btnSaveAdv').onclick = async () => {
   const routeDefault = advDefaultSel ? advDefaultSel.getValue() : (state.settings.routeDefault || 'direct');
   await saveSettings({ routeRules: rules, routeDefault, advancedRouting: $('#optAdvanced').checked });
   state.settings.routeRules = rules;
+  updateGuardRows();   // a `direct` target here contradicts the strict guard too
   renderAdvanced();
   renderPicker();
   $('#advSavedHint').textContent = t('saved');

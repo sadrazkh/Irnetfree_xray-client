@@ -7,6 +7,18 @@ const path = require('node:path');
 const http = require('node:http');
 const { downloadFile } = require('../src/main/downloader');
 
+// Every test needs a directory to download into. They used to be left behind —
+// nine per run, hundreds on a machine that runs the suite all day.
+const tmpDirs = [];
+function tmpFile(name) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-dl-'));
+  tmpDirs.push(dir);
+  return path.join(dir, name);
+}
+test.after(() => {
+  for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
+});
+
 function serve(handler) {
   return new Promise((resolve) => {
     const srv = http.createServer(handler);
@@ -16,7 +28,7 @@ function serve(handler) {
 
 test('a non-200 response rejects and leaves no temp file behind', async () => {
   const { srv, port } = await serve((req, res) => { res.writeHead(403); res.end('rate limited'); });
-  const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-dl-')), 'geoip.dat.tmp');
+  const dest = tmpFile('geoip.dat.tmp');
   try {
     await assert.rejects(downloadFile(`http://127.0.0.1:${port}/geoip.dat`, dest), /HTTP 403/);
     assert.equal(fs.existsSync(dest), false, 'temp file must be removed');
@@ -26,7 +38,7 @@ test('a non-200 response rejects and leaves no temp file behind', async () => {
 test('a 200 response is written in full and reports progress', async () => {
   const body = Buffer.alloc(100000, 7);
   const { srv, port } = await serve((req, res) => { res.writeHead(200, { 'Content-Length': body.length }); res.end(body); });
-  const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-dl-')), 'file.bin');
+  const dest = tmpFile('file.bin');
   const seen = [];
   try {
     await downloadFile(`http://127.0.0.1:${port}/file.bin`, dest, (p) => seen.push(p));
@@ -40,7 +52,7 @@ test('redirects are followed', async () => {
     if (req.url === '/a') { res.writeHead(302, { Location: `http://127.0.0.1:${port}/b` }); return res.end(); }
     res.writeHead(200); res.end('ok');
   });
-  const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-dl-')), 'r.txt');
+  const dest = tmpFile('r.txt');
   try {
     await downloadFile(`http://127.0.0.1:${port}/a`, dest);
     assert.equal(fs.readFileSync(dest, 'utf8'), 'ok');
@@ -54,7 +66,7 @@ test('a redirect onto a non-loopback http:// URL is refused, not downloaded', as
     res.writeHead(302, { Location: 'http://mirror.invalid/xray.zip' });
     res.end();
   });
-  const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-dl-')), 'xray.zip');
+  const dest = tmpFile('xray.zip');
   try {
     await assert.rejects(downloadFile(`http://127.0.0.1:${port}/xray.zip`, dest), /plain http/i);
     assert.equal(fs.existsSync(dest), false, 'nothing may be left on disk');

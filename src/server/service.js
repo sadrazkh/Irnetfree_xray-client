@@ -661,7 +661,12 @@ function createService(opts = {}) {
       // only thing we can do about it without a tunnel. Windows only; a failure
       // is logged and nothing more — the proxy itself is up and working.
       try {
-        await leakGuard.engageUdpBlock({ excludes: entryAddrs });
+        // entryAddrs are what the user typed — a hostname there would be no
+      // exclusion at all, and a UDP-transport server addressed by name would be
+      // the first thing this block cut off. Resolve them the way the TUN layer
+      // does before they become firewall holes.
+      const udpExcludes = await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []);
+      await leakGuard.engageUdpBlock({ excludes: udpExcludes });
         guardEngaged = true;
       } catch (e) {
         guardError = e.message;
