@@ -73,10 +73,19 @@ test('enableSniffing toggles destOverride on the proxy inbounds', () => {
   assert.deepEqual(off.inbounds[0].sniffing, { enabled: false });
 });
 
-test('dns and log level come from settings', () => {
-  const c = buildConfig(single(), settings({ dns: ['9.9.9.9'], logLevel: 'debug' }));
-  assert.deepEqual(c.dns, { servers: ['9.9.9.9'], queryStrategy: 'UseIP' });
+test('dns and log level come from settings (unmanaged: the list verbatim)', () => {
+  const c = buildConfig(single(), settings({ dnsRemote: ['9.9.9.9'], logLevel: 'debug' }));
+  assert.deepEqual(c.dns, { servers: ['9.9.9.9'], queryStrategy: 'UseIPv4' });
   assert.equal(c.log.loglevel, 'debug');
+  assert.equal(c.outbounds.some(o => o.tag === 'dns-out'), false);
+});
+
+test('ipv6 off keeps the direct outbound on IPv4; on lets it use both', () => {
+  const off = buildConfig(single(), settings());
+  assert.equal(outboundTagged(off, 'direct').settings.domainStrategy, 'UseIPv4');
+  const on = buildConfig(single(), settings({ ipv6: true }));
+  assert.equal(outboundTagged(on, 'direct').settings.domainStrategy, 'UseIP');
+  assert.equal(on.dns.queryStrategy, 'UseIP');
 });
 
 /* ----------------------------- simple routing ----------------------------- */
@@ -560,4 +569,117 @@ test('buildRoutingRules: private/LAN bypass precedes the catch-all, which is las
       assert.equal(rules.some(r => r.outboundTag === 'api'), false, `${mode}/${geo}: api rule leaked`);
     }
   }
+});
+
+/* ----------------------------- managed DNS ----------------------------- */
+
+const MANAGED = { dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: ['178.22.122.100'] };
+const DNS_RULES_GLOBAL = [
+  { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
+  { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }
+];
+
+test('managed single: the DNS rules come FIRST, then the usual list', () => {
+  const c = buildConfig(single(), settings(Object.assign({ blockAds: false }, MANAGED)));
+  assert.deepEqual(c.routing.rules.slice(0, 2), DNS_RULES_GLOBAL);
+  // the rest is exactly what the unmanaged config produces
+  const plain = buildConfig(single(), settings({ blockAds: false }));
+  assert.deepEqual(c.routing.rules.slice(2), plain.routing.rules);
+  assert.deepEqual(c.dns.tag, 'dns-internal');
+  assert.ok(c.outbounds.some(o => o.tag === 'dns-out' && o.protocol === 'dns'));
+});
+
+test('the hijack precedes the private-IP bypass, or a query to the tunnel peer would go direct', () => {
+  const c = buildConfig(single(), settings(MANAGED));
+  const hijack = c.routing.rules.findIndex(r => r.outboundTag === 'dns-out');
+  const priv = c.routing.rules.findIndex(r => r.ip && r.ip.includes('10.0.0.0/8'));
+  assert.ok(hijack > -1 && priv > -1);
+  assert.ok(hijack < priv);
+});
+
+test('managed bypass-ir: the in-country resolver rides direct and the domestic rules still follow', () => {
+  const c = buildConfig(single(), settings(Object.assign({ routingMode: 'bypass-ir', blockAds: false }, MANAGED)));
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100'], outboundTag: 'direct' });
+  assert.deepEqual(c.routing.rules[1], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' });
+  assert.equal(c.routing.rules[2].outboundTag, 'dns-out');
+  assert.equal(c.dns.servers[0].address, '178.22.122.100');
+  assert.deepEqual(c.dns.servers[0].expectedIPs, ['geoip:ir']);
+});
+
+test('managed bypass-ir without geo files carries no geo token at all', () => {
+  const c = buildConfig(single(), settings(Object.assign({ routingMode: 'bypass-ir', geoAssets: false }, MANAGED)));
+  assert.equal(JSON.stringify(c).includes('geosite:'), false);
+  assert.equal(JSON.stringify(c).includes('geoip:'), false);
+});
+
+test('managed direct mode: the resolver’s traffic goes direct too', () => {
+  const c = buildConfig(single(), settings(Object.assign({ routingMode: 'direct' }, MANAGED)));
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'direct' });
+});
+
+test('managed chain: same rules, exit is the chain’s proxy tag', () => {
+  const c = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] }, settings(Object.assign({ blockAds: false }, MANAGED)));
+  assert.deepEqual(c.routing.rules.slice(0, 2), DNS_RULES_GLOBAL);
+  assert.deepEqual(c.outbounds.map(o => o.tag), ['proxy-h0', 'proxy', 'direct', 'block', 'dns-out']);
+});
+
+test('managed advanced: the resolver follows the default target, before the user rules', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }],
+    def: 'sv-vless'
+  }), settings(Object.assign({ blockAds: false }, MANAGED)));
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'out-sv-vless' });
+  assert.equal(c.routing.rules[1].outboundTag, 'dns-out');
+  assert.deepEqual(c.routing.rules[2].domain, ['a.com']);
+  assert.ok(c.outbounds.some(o => o.tag === 'dns-out'));
+});
+
+test('managed advanced: a category-ir → direct rule gets the in-country resolver', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }],
+    def: 'sv-vless'
+  }), settings(Object.assign({ blockAds: false }, MANAGED)));
+  assert.equal(c.dns.servers[0].address, '178.22.122.100');
+  assert.deepEqual(c.routing.rules[0].ip, ['178.22.122.100']);
+});
+
+// main.js picks the plan mode from the connect target, not from
+// settings.advancedRouting, so the store may carry advanced rules the plan
+// being built does not use — and the other way round. The plan decides.
+test('managed advanced: the resolver follows the plan’s rules, not the rules saved in settings', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }],
+    def: 'sv-vless'
+  }), settings(Object.assign({
+    blockAds: false,
+    advancedRouting: true,
+    routeRules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }]
+  }, MANAGED)));
+  assert.equal(typeof c.dns.servers[0], 'string', 'no in-country resolver without a direct category-ir rule in the plan');
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'out-sv-vless' });
+});
+
+test('managed single: saved advanced rules bring no resolver along; routingMode decides', () => {
+  const saved = { advancedRouting: true, routeRules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }] };
+  const global = buildConfig(single(), settings(Object.assign({ routingMode: 'global' }, saved, MANAGED)));
+  assert.equal(typeof global.dns.servers[0], 'string');
+  assert.deepEqual(global.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' });
+  const ir = buildConfig(single(), settings(Object.assign({ routingMode: 'bypass-ir' }, saved, MANAGED)));
+  assert.equal(ir.dns.servers[0].address, '178.22.122.100');
+});
+
+test('managed pool: the resolver follows the primary exit; per-inbound rules are untouched', () => {
+  const c = buildConfig(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings(MANAGED));
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'out-sv-vless' });
+  assert.equal(c.routing.rules[1].outboundTag, 'dns-out');
+  const e1 = c.routing.rules.find(r => r.inboundTag && r.inboundTag.includes('ps-e1'));
+  assert.equal(e1.outboundTag, 'out-sv-trojan');
+  assert.ok(c.outbounds.some(o => o.tag === 'dns-out'));
+  assert.equal(c.dns.tag, 'dns-internal');
+});
+
+test('buildTestConfig is untouched by DNS management (no hijack, no tag)', () => {
+  const c = buildTestConfig(VLESS_WS_TLS, 47130);
+  assert.equal(c.dns, undefined);
+  assert.equal(c.outbounds.some(o => o.tag === 'dns-out'), false);
 });
