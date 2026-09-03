@@ -719,6 +719,9 @@ function applyServerEdits(server, f) {
     const eng = String(f.engine).trim();
     if (eng && eng !== 'xray') out.engine = eng; else delete out.engine;
   }
+  // The certificate pin learnt on first use (certPin.js). The form only shows
+  // it; clearing it makes the next connect read the certificate again.
+  if (f.clearCertPin) { delete out.certPin; delete out.certPinAt; }
 
   return out;
 }
