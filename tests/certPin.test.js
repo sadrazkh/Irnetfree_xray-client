@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { X509Certificate } = require('node:crypto');
 
-const { fetchLeafPin, pinOf, normalizePin, directServers, pinTargets, PinWatch, PIN_MISMATCH } = require('../src/main/certPin');
+const { fetchLeafPin, pinOf, normalizePin, directServers, pinTargets, staleCertPins, PinWatch, PIN_MISMATCH } = require('../src/main/certPin');
 
 const FIXTURE = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'selfsigned.json'), 'utf8'));
 const CERT = FIXTURE.certificate.join('\n');
@@ -187,4 +187,50 @@ test('PinWatch: an uncorrelated line with several candidates clears them all rat
   assert.deepEqual(w.live, []);
   w.clear();
   assert.equal(w.onLine(MISMATCH), null);
+});
+
+/* ------------------------- the branch review's findings ------------------------- */
+
+// H4. The core names a pin mismatch only at log level `info`, and the app runs
+// at `warning` — PinWatch alone can therefore never fire, and a server whose
+// certificate rotated would stop connecting for ever with nothing said. Asking
+// the servers before the dial works at any log level.
+test('staleCertPins names the pinned servers that now present something else', async () => {
+  const srv = (id, port, certPin) => ({
+    id, name: id.toUpperCase(), address: 'h', port, certPin,
+    outbound: { streamSettings: { security: 'tls', tlsSettings: {} } }
+  });
+  const A = 'a'.repeat(64), B = 'b'.repeat(64), C = 'c'.repeat(64), Z = 'z0'.repeat(32).replace(/z/g, 'e');
+  const same = srv('a', 1, A);
+  const rotated = srv('b', 2, B);
+  const unreachable = srv('c', 3, C);
+  const probe = async ({ port }) => {
+    if (port === 1) return A;
+    if (port === 2) return Z;          // the server presents another certificate
+    throw new Error('connect ECONNREFUSED');
+  };
+  assert.deepEqual(await staleCertPins([same, rotated, unreachable], probe), [rotated],
+    'only a certificate we actually saw, and that differs — unreachable is not changed');
+  assert.deepEqual(await staleCertPins([], probe), []);
+  assert.deepEqual(await staleCertPins([{ id: 'd', address: 'h', port: 4 }], probe), [], 'no pin, nothing to check');
+});
+
+test('staleCertPins compares pins the way the core does: hex, case- and separator-insensitive', async () => {
+  const s = {
+    id: 'a', name: 'A', address: 'h', port: 1,
+    certPin: 'AB:11:BF:7A:C8:77:BA:A5:39:29:4F:5A:3C:86:4B:8E:D4:3E:6F:E3:A9:A8:23:0F:C2:DB:7F:FF:85:C2:7F:DE',
+    outbound: { streamSettings: { security: 'tls', tlsSettings: {} } }
+  };
+  const lower = 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde';
+  assert.deepEqual(await staleCertPins([s], async () => lower), [], 'the same certificate, written differently');
+});
+
+test('staleCertPins asks with the SNI the config uses, not just the address', async () => {
+  const asked = [];
+  const s = {
+    id: 'a', name: 'A', address: '1.2.3.4', port: 443, certPin: 'a'.repeat(64),
+    outbound: { streamSettings: { security: 'tls', tlsSettings: { serverName: 'front.example.com' } } }
+  };
+  await staleCertPins([s], async (o) => { asked.push(o); return 'a'.repeat(64); });
+  assert.deepEqual(asked, [{ host: '1.2.3.4', port: 443, servername: 'front.example.com' }]);
 });
