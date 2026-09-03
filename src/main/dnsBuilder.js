@@ -31,6 +31,8 @@ const net = require('net');
 
 const DNS_TAG = 'dns-internal';
 const HIJACK_TAG = 'dns-out';
+/** Refuse every query type except A (1) and AAAA (28). */
+const HIJACK_REFUSE_NON_IP = { action: 'return', rCode: 5, qType: '0,2-27,29-65535' };
 
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
 const URL_SCHEME = /^[a-z+]+:\/\//i;
@@ -225,10 +227,13 @@ function buildDnsPlan(settings, opts) {
 
   return {
     dns: { tag: DNS_TAG, queryStrategy, servers },
-    // nonIPQuery pinned: older cores default to "skip", which forwards a
-    // PTR/SRV/TXT query to its original destination through a direct dial —
-    // under TUN that is the tunnel peer, so it would loop back into the hijack.
-    hijackOutbound: { tag: HIJACK_TAG, protocol: 'dns', settings: { nonIPQuery: 'reject' } },
+    // Every non-A/AAAA query (PTR/SRV/TXT/HTTPS…) is answered REFUSED (rCode 5)
+    // instead of being forwarded to its original destination through a direct
+    // dial — under TUN that is the tunnel peer, so it would loop back into the
+    // hijack. The `rules` form is what both cores accept without a deprecation
+    // warning (26.3.27 and PattN 26.9.1 verified); `nonIPQuery` is being removed
+    // on main and cannot be mixed with `rules`.
+    hijackOutbound: { tag: HIJACK_TAG, protocol: 'dns', settings: { rules: [HIJACK_REFUSE_NON_IP] } },
     rules,
     directResolverIps
   };

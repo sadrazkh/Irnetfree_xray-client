@@ -13,7 +13,9 @@ const { spawnSync } = require('child_process');
 const { buildConfig } = require('../src/main/configBuilder');
 const F = require('../tests/fixtures');
 
-const exe = path.join(__dirname, '..', 'bin', process.platform === 'win32' ? 'xray.exe' : 'xray');
+// IRNF_XRAY_EXE points the run at another core (e.g. the PattN fork in the
+// app's userData bin) so both cores can be checked against the same shapes.
+const exe = process.env.IRNF_XRAY_EXE || path.join(__dirname, '..', 'bin', process.platform === 'win32' ? 'xray.exe' : 'xray');
 if (!fs.existsSync(exe)) { console.error('no core at ' + exe + ' — run: npm run get-xray'); process.exit(2); }
 
 const single = { mode: 'single', server: F.VLESS_WS_TLS };
