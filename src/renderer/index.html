@@ -200,9 +200,11 @@
           <div class="grid2">
             <div><label class="field-label" data-i18n="wg.reserved">Reserved (اختیاری، مثل 0,0,0)</label>
               <input type="text" id="wgReserved" class="input" dir="ltr" placeholder="0,0,0" /></div>
-            <div></div>
+            <div><label class="field-label" data-i18n="wg.dns">DNS</label>
+              <input type="text" id="wgDns" class="input" dir="ltr" placeholder="192.168.60.1, tes.systems" /></div>
           </div>
           <p class="hint" data-i18n="wg.addrHint">«Address» باید آدرس محلی خودت در کانفیگ WireGuard باشد و حتماً /32 (مثل 10.8.0.2/32). برای دسترسی به رنج دیتابیس، رنج را در «Allowed IPs» بگذار (مثل 192.168.60.0/24) یا 0.0.0.0/0 را نگه دار.</p>
+          <p class="hint" data-i18n="wg.dnsHint">اگر کانفیگ شرکتی خط DNS دارد همان را بگذار (مثل 192.168.60.1). دامنه‌های جست‌وجو را هم می‌توانی با کاما اضافه کنی (tes.systems) تا نام‌های داخلی مستقیم از همین DNS پرسیده شوند.</p>
           <div class="import-actions">
             <button class="btn primary" id="btnWgAdd" data-i18n="btn.addWgGo">افزودن</button>
             <button class="btn ghost" id="btnWgCancel" data-i18n="btn.cancel">انصراف</button>
@@ -671,6 +673,11 @@
               <input type="text" id="edWgReserved" class="input" dir="ltr" /></div>
             <div><label class="field-label" data-i18n="wg.allowed">Allowed IPs</label>
               <input type="text" id="edWgAllowed" class="input" dir="ltr" placeholder="0.0.0.0/0, ::/0" /></div>
+          </div>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="wg.dns">DNS</label>
+              <input type="text" id="edWgDns" class="input" dir="ltr" placeholder="192.168.60.1, tes.systems" /></div>
+            <div></div>
           </div>
         </div>
         <div class="edit-section" id="edAdvHead"><span data-i18n="edit.advTitle">⚙ Advanced — DPI evasion (optional)</span></div>

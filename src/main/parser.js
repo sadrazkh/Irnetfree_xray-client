@@ -9,6 +9,7 @@
  */
 
 const crypto = require('crypto');
+const net = require('net');
 
 function uid() {
   return crypto.randomBytes(8).toString('hex');
@@ -476,6 +477,28 @@ function splitCommas(v) {
 }
 
 /**
+ * wg-quick's `DNS =` line holds resolver IPs and, optionally, search domains
+ * ("DNS = 192.168.60.1, tes.systems"). Split them: only an IP can be a
+ * resolver, only a name can be a search domain.
+ */
+function splitDnsField(value) {
+  const dns = [], dnsDomains = [];
+  for (const v of splitCommas(value || '')) {
+    if (net.isIP(v)) dns.push(v);
+    else if (v) dnsDomains.push(v.replace(/^\.+/, '').toLowerCase());
+  }
+  return { dns, dnsDomains };
+}
+
+/** Attach the WireGuard DNS lists to a record, omitting empty ones. */
+function withWgDns(server, value) {
+  const { dns, dnsDomains } = splitDnsField(value);
+  if (dns.length) server.dns = dns;
+  if (dnsDomains.length) server.dnsDomains = dnsDomains;
+  return server;
+}
+
+/**
  * The text form of a WireGuard config (what every provider hands out and what a
  * `.conf` file contains). Both sections are required — an [Interface] alone is a
  * server config, not something we can dial.
@@ -527,7 +550,9 @@ function parseWireguardConf(text) {
     presharedKey: peer.presharedkey || '',
     mtu: iface.mtu || '',
     reserved: iface.reserved || '',
-    dns: iface.dns || ''   // captured for a future setting; unused by the outbound today
+    // Kept verbatim: this fills a form field, and the form is what
+    // makeWireguardServer() receives — it does the splitting.
+    dns: iface.dns || ''
   };
 }
 
@@ -565,7 +590,7 @@ function parseWireguard(link) {
     reserved: q.reserved
   });
 
-  return mkServer(name || address, 'wireguard', address, port, link, outbound);
+  return withWgDns(mkServer(name || address, 'wireguard', address, port, link, outbound), q.dns || '');
 }
 
 /**
@@ -577,7 +602,10 @@ function makeWireguardServer(fields) {
   const endpoint = fields.endpoint || `${host}:${port}`;
   const outbound = buildWireguardOutbound(Object.assign({}, fields, { endpoint }));
   const raw = 'wireguard://' + (host || '') + ':' + port;
-  return mkServer(fields.name || host || 'WireGuard', 'wireguard', host || '', port, raw, outbound);
+  return withWgDns(
+    mkServer(fields.name || host || 'WireGuard', 'wireguard', host || '', port, raw, outbound),
+    fields.dns
+  );
 }
 
 /* ------------------------------ editing ------------------------------ */
@@ -650,7 +678,15 @@ function applyServerEdits(server, f) {
       }
     }
     if (f.privateKey) st.secretKey = f.privateKey.trim();
-    if (f.address) st.address = normalizeWgAddresses(splitCommas(f.address));
+    // The endpoint host (f.address) and the interface address (f.localAddress)
+    // are different things; one key for both is what wrote "10.10.10.42/32"
+    // into peer.endpoint and broke every edited WireGuard server.
+    if (f.localAddress) st.address = normalizeWgAddresses(splitCommas(f.localAddress));
+    if (f.dns != null) {
+      const { dns, dnsDomains } = splitDnsField(f.dns);
+      if (dns.length) out.dns = dns; else delete out.dns;
+      if (dnsDomains.length) out.dnsDomains = dnsDomains; else delete out.dnsDomains;
+    }
     if (f.mtu) st.mtu = parseInt(f.mtu, 10) || st.mtu;
     if (f.reserved != null) {
       const r = splitCommas(f.reserved).map(n => parseInt(n, 10) || 0);
@@ -883,7 +919,8 @@ function buildShareLink(server) {
       allowedips: (peer.allowedIPs || []).join(','),
       presharedkey: peer.preSharedKey || '',
       mtu: st.mtu ? String(st.mtu) : '',
-      reserved: (st.reserved || []).join(',')
+      reserved: (st.reserved || []).join(','),
+      dns: [...(server.dns || []), ...(server.dnsDomains || [])].join(',')
     };
     return `wireguard://${enc(st.secretKey || '')}@${server.address}:${server.port}?${qs(q)}${name}`;
   }
@@ -949,6 +986,32 @@ function pluralFinalMask(fm) {
 }
 
 /**
+ * An edited WireGuard server whose endpoint was overwritten with the interface
+ * address ("10.10.10.42/32:42421" — a host can never contain a slash). The
+ * real host survives in `raw` (wireguard://host:port from a .conf import, or
+ * the share link), so recover it there. Returns null when there is nothing to
+ * repair, or when nothing usable is left to repair it with.
+ */
+function repairWgEndpoint(server) {
+  if (server.protocol !== 'wireguard') return null;
+  const ob = server.outbound;
+  const peer = ob.settings && ob.settings.peers && ob.settings.peers[0];
+  const broken = String(server.address || '').includes('/')
+    || String((peer && peer.endpoint) || '').includes('/');
+  if (!broken) return null;
+
+  const raw = String(server.raw || '');
+  if (!/^(wireguard|wg):\/\//i.test(raw)) return null;
+  let body = raw.slice(raw.indexOf('://') + 3);
+  body = body.split('#')[0].split('?')[0];
+  const at = body.lastIndexOf('@');
+  const [host, portStr] = splitHostPort(at === -1 ? body : body.slice(at + 1));
+  if (!host || host.includes('/')) return null;
+  const port = parseInt(portStr, 10) || server.port;
+  return { host, port };
+}
+
+/**
  * Bring a server saved by an older version up to the shape the current code
  * expects. Pure: the input is never mutated, and when there is nothing to do
  * the very same object comes back (so a caller can skip the store write).
@@ -966,6 +1029,8 @@ function pluralFinalMask(fm) {
  *    converted back. (Only the collapse direction is reversible — the original
  *    per-fragment sizes are gone, so `length: "3-8"` becomes `lengths: ["3-8"]`,
  *    one fragment covering the whole range.)
+ *  - a WireGuard `peer.endpoint` overwritten with the interface address by the
+ *    edit form. See repairWgEndpoint().
  *
  * store.json is a plain file the user can hand-edit, so every step here is
  * shape-checked and nothing throws. A mask carrying BOTH forms was never
@@ -978,12 +1043,22 @@ function migrateStoredServer(server) {
   const dropFakeSni = Object.prototype.hasOwnProperty.call(ob, '_fakesni');
   const st = ob.streamSettings;
   const fm = isPlainObject(st) ? pluralFinalMask(st.finalmask) : null;
-  if (!dropFakeSni && !fm) return server;
+  const wg = repairWgEndpoint(server);
+  if (!dropFakeSni && !fm && !wg) return server;
 
   const outbound = Object.assign({}, ob);
   if (dropFakeSni) delete outbound._fakesni;
   if (fm) outbound.streamSettings = Object.assign({}, st, { finalmask: fm });
-  return Object.assign({}, server, { outbound });
+  if (wg) {
+    const wgSt = outbound.settings;
+    // A hand-edited store may have no peers at all; repairing address/port is
+    // still worth doing, and inventing a peer list would not be.
+    if (isPlainObject(wgSt) && Array.isArray(wgSt.peers) && isPlainObject(wgSt.peers[0])) {
+      const peers = wgSt.peers.map((p, i) => i === 0 ? Object.assign({}, p, { endpoint: `${wg.host}:${wg.port}` }) : p);
+      outbound.settings = Object.assign({}, wgSt, { peers });
+    }
+  }
+  return Object.assign({}, server, wg ? { address: wg.host, port: wg.port } : null, { outbound });
 }
 
 module.exports = {

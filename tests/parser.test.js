@@ -344,6 +344,40 @@ test('makeWireguardServer: derives host/port from the endpoint', () => {
   assert.equal(s.outbound.settings.peers[0].endpoint, 'wg.home.net:51821');
 });
 
+test('makeWireguardServer: a corporate DNS line splits into resolvers and search domains', () => {
+  // wg-quick puts both on one line; only an IP can be a resolver and only a
+  // name can be a search domain, so guessing by shape is the whole rule.
+  const s = makeWireguardServer({
+    endpoint: 'cobra.tes.ca:42421', privateKey: 'k', publicKey: 'p',
+    address: '10.10.10.42/32', dns: '192.168.60.1, tes.systems'
+  });
+  assert.deepEqual(s.dns, ['192.168.60.1']);
+  assert.deepEqual(s.dnsDomains, ['tes.systems']);
+});
+
+test('makeWireguardServer: no DNS line leaves the record exactly the shape it had', () => {
+  const s = makeWireguardServer({ endpoint: 'wg.home.net:51821', privateKey: 'k', publicKey: 'p' });
+  assert.equal('dns' in s, false, 'an empty list would still read as "this server has DNS"');
+  assert.equal('dnsDomains' in s, false);
+});
+
+test('a wireguard share link carries the DNS line back out and in again', () => {
+  const s = makeWireguardServer({
+    name: 'Corp', endpoint: 'cobra.tes.ca:42421', privateKey: 'k', publicKey: 'p',
+    address: '10.10.10.42/32', dns: '192.168.60.1, 10.10.10.1, tes.systems, hawk.tes.systems'
+  });
+  const back = parseLink(buildShareLink(s));
+  assert.deepEqual(back.dns, ['192.168.60.1', '10.10.10.1']);
+  assert.deepEqual(back.dnsDomains, ['tes.systems', 'hawk.tes.systems']);
+});
+
+test('a wireguard share link with no DNS does not grow the keys', () => {
+  const s = makeWireguardServer({ endpoint: 'wg.home.net:51821', privateKey: 'k', publicKey: 'p' });
+  const link = buildShareLink(s);
+  assert.equal(/dns=/.test(link), false, 'qs() drops empty values — an empty dns= must not appear');
+  assert.equal('dns' in parseLink(link), false);
+});
+
 /* --------------------------- WireGuard .conf --------------------------- */
 
 const WG_CONF = `[Interface]
@@ -373,6 +407,9 @@ test('parseWireguardConf reads every field the form takes', () => {
   assert.equal(f.address, '10.1.142.13/32');
   assert.equal(f.allowedIPs, '10.0.0.1/32, 0.0.0.0/0, ::/0');
   assert.equal(f.name, 'ir.vrt-server.org');
+  // The DNS line names the resolver a corporate tunnel expects you to use;
+  // dropping it here means no internal name can ever be looked up.
+  assert.equal(f.dns, '1.1.1.1, 8.8.8.8');
 });
 
 test('parseWireguardConf: keys are case-insensitive, comments and CRLF tolerated', () => {
@@ -511,6 +548,26 @@ test('applyServerEdits: wireguard peer/interface fields', () => {
   assert.deepEqual(out.outbound.settings.peers[0].allowedIPs, ['10.0.0.0/8', '192.168.0.0/16']);
   assert.equal(out.outbound.settings.mtu, 1280);
   assert.deepEqual(out.outbound.settings.reserved, [9, 8, 7]);
+
+  // The endpoint host and the interface address are two different things. One
+  // key doing both jobs is what wrote "10.10.10.42/32:42421" into peer.endpoint
+  // and left the core saying "lookup 10.10.10.42/32: no such host".
+  const corp = applyServerEdits(s, { address: 'cobra.tes.ca', port: '42421', localAddress: '10.10.10.42/32' });
+  assert.equal(corp.outbound.settings.peers[0].endpoint, 'cobra.tes.ca:42421');
+  assert.equal(corp.address, 'cobra.tes.ca');
+  assert.deepEqual(corp.outbound.settings.address, ['10.10.10.42/32']);
+});
+
+test('applyServerEdits: wireguard DNS is set from one line and cleared by an empty one', () => {
+  const s = parseLink('wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32');
+
+  const on = applyServerEdits(s, { dns: '192.168.60.1, tes.systems' });
+  assert.deepEqual(on.dns, ['192.168.60.1']);
+  assert.deepEqual(on.dnsDomains, ['tes.systems']);
+
+  const off = applyServerEdits(on, { dns: '' });
+  assert.equal('dns' in off, false, 'an emptied field means "no resolver", not "an empty list"');
+  assert.equal('dnsDomains' in off, false);
 });
 
 test('applyServerEdits: anti-DPI markers set and clear', () => {
@@ -746,4 +803,71 @@ test('migrateStoredServer: an array settings object is not mistaken for a singul
   // [] has a `length` property — reading it blindly would invent lengths:["0"].
   const s = { outbound: { streamSettings: { finalmask: { tcp: [{ settings: [] }] } } } };
   assert.equal(migrateStoredServer(s), s);
+});
+
+/* ---------- a wireguard endpoint overwritten by the interface address ---------- */
+
+// What the old edit form saved: one `address` key fed both the endpoint host and
+// the interface address, so the endpoint became "10.10.10.42/32:42421" and the
+// core refused to start. The real host is still in `raw`.
+const brokenWgServer = (raw) => ({
+  id: 'wg-1', name: 'Corp', protocol: 'wireguard',
+  address: '10.10.10.42/32', port: 42421,
+  raw: raw != null ? raw : 'wireguard://cobra.tes.ca:42421',
+  outbound: {
+    protocol: 'wireguard',
+    settings: {
+      secretKey: 'K',
+      address: ['10.10.10.42/32'],
+      peers: [{ publicKey: 'P', endpoint: '10.10.10.42/32:42421' }]
+    }
+  }
+});
+
+test('migrateStoredServer: a wireguard endpoint eaten by the interface address is put back', () => {
+  const out = migrateStoredServer(brokenWgServer());
+  assert.equal(out.address, 'cobra.tes.ca');
+  assert.equal(out.port, 42421);
+  assert.equal(out.outbound.settings.peers[0].endpoint, 'cobra.tes.ca:42421');
+  assert.deepEqual(out.outbound.settings.address, ['10.10.10.42/32'], 'the interface address was never wrong');
+  assert.equal(out.outbound.settings.peers[0].publicKey, 'P');
+  assert.equal(out.outbound.settings.secretKey, 'K');
+});
+
+test('migrateStoredServer: repairing a wireguard endpoint is idempotent', () => {
+  const once = migrateStoredServer(brokenWgServer());
+  assert.equal(migrateStoredServer(once), once, 'a second boot must not rewrite the store again');
+});
+
+test('migrateStoredServer: a healthy wireguard server is not touched', () => {
+  const s = parseLink('wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32');
+  assert.equal(migrateStoredServer(s), s);
+});
+
+test('migrateStoredServer: a wireguard server whose host cannot be recovered is left alone', () => {
+  const s = brokenWgServer('');
+  assert.doesNotThrow(() => migrateStoredServer(s));
+  assert.equal(migrateStoredServer(s), s, 'better a visibly broken record than an invented host');
+});
+
+test('migrateStoredServer: the host is recovered from a full share link too', () => {
+  const out = migrateStoredServer(brokenWgServer('wireguard://SECRETKEY@cobra.tes.ca:42421?publickey=P&address=10.10.10.42%2F32#Corp'));
+  assert.equal(out.address, 'cobra.tes.ca');
+  assert.equal(out.port, 42421);
+  assert.equal(out.outbound.settings.peers[0].endpoint, 'cobra.tes.ca:42421');
+});
+
+test('migrateStoredServer: a hand-edited wireguard record with no peers still repairs, and never throws', () => {
+  // store.json is a plain file — the repair must not assume the peer list is there.
+  const s = { protocol: 'wireguard', address: '10.10.10.42/32', port: 42421, raw: 'wireguard://cobra.tes.ca:42421', outbound: { protocol: 'wireguard' } };
+  const out = migrateStoredServer(s);
+  assert.equal(out.address, 'cobra.tes.ca');
+  assert.equal('settings' in out.outbound, false, 'a missing peer list is not something to invent');
+});
+
+test('migrateStoredServer: does not mutate a broken wireguard server either', () => {
+  const s = brokenWgServer();
+  const before = JSON.parse(JSON.stringify(s));
+  migrateStoredServer(s);
+  assert.deepEqual(s, before);
 });
