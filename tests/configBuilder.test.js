@@ -719,6 +719,26 @@ test('resolverBypassIps: the direct resolver addresses the TUN layer must route 
   assert.deepEqual(resolverBypassIps(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED))), []);
 });
 
+// xray's router resolves a hostname under IPIfNonMatch only when NO rule matched
+// on the first pass — and every plan ends with a port:0-65535 catch-all, which
+// always matches. So an `ip:` rule (geoip:ir, the private-LAN bypass, a corporate
+// range) never fired for a browser connection that carries a hostname. IPOnDemand
+// resolves exactly when an ip condition is evaluated. Only with managed DNS: the
+// legacy list may be a dead plain-UDP resolver, and a lookup that times out
+// before every connection is worse than an unmatched rule.
+test('managed DNS: ip rules must fire for hostnames, so the router resolves on demand', () => {
+  const plans = {
+    single: single(),
+    chain: { mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] },
+    advanced: advancedPlan({ rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-trojan' }], def: 'sv-vless' }),
+    pool: poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }])
+  };
+  for (const [name, plan] of Object.entries(plans)) {
+    assert.equal(buildConfig(plan, settings(MANAGED)).routing.domainStrategy, 'IPOnDemand', name);
+    assert.equal(buildConfig(plan, settings({ dnsManaged: false })).routing.domainStrategy, 'IPIfNonMatch', name + ' unmanaged');
+  }
+});
+
 test('buildTestConfig is untouched by DNS management (no hijack, no tag)', () => {
   const c = buildTestConfig(VLESS_WS_TLS, 47130);
   assert.equal(c.dns, undefined);

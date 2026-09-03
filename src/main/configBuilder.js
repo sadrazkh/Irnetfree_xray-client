@@ -246,6 +246,21 @@ function dnsSettingsFor(s, plan) {
   return Object.assign({}, s, { advancedRouting: false });
 }
 
+/**
+ * How the router treats a hostname destination. xray resolves it under
+ * IPIfNonMatch only when NO rule matched on the first pass — and every plan
+ * ends with a port:0-65535 catch-all, which always matches — so an `ip:` rule
+ * (geoip:ir, the private-LAN bypass, a corporate range behind a WireGuard)
+ * never fired for a browser connection carrying a name. IPOnDemand resolves
+ * exactly when an ip condition is evaluated: one lookup per new name, through
+ * the managed DoH, cached by the core; a failed lookup just leaves the rule
+ * unmatched and the name intact for the exit. Not for the legacy DNS list —
+ * a dead plain-UDP resolver there would make every connection wait it out.
+ */
+function routingStrategy(s) {
+  return s.dnsManaged === false ? 'IPIfNonMatch' : 'IPOnDemand';
+}
+
 const SETTINGS_DEFAULTS = {
   socksPort: 10808,
   httpPort: 10809,
@@ -399,7 +414,7 @@ function buildConfig(planArg, settings) {
       { tag: 'http-in', port: s.httpPort, listen, protocol: 'http', settings: {}, sniffing }
     ],
     outbounds,
-    routing: { domainStrategy: 'IPIfNonMatch', rules }
+    routing: { domainStrategy: routingStrategy(s), rules }
   };
 }
 
@@ -493,7 +508,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     dns: dnsPlan.dns,
     inbounds,
     outbounds,
-    routing: { domainStrategy: 'IPIfNonMatch', rules }
+    routing: { domainStrategy: routingStrategy(s), rules }
   };
 }
 
