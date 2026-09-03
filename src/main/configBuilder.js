@@ -422,6 +422,7 @@ function buildConfig(planArg, settings) {
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
   outbounds = (outbounds || []).map(sanitizeWgOutbound);
   outbounds = applyFragments(outbounds);
+  bindDirectDials(outbounds, s.directInterface);
 
   // WireGuard dialed THROUGH another outbound (chain) needs the dialer pipe
   // buffer disabled, otherwise UDP/TCP conversion corrupts packets ("unknown
@@ -516,6 +517,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: s.geoAssets !== false, exitTag: primaryTag });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
   const outbounds = applyFragments((reg.outs || []).map(sanitizeWgOutbound));
+  bindDirectDials(outbounds, s.directInterface);
 
   // Resolver rules first (see buildConfig), then private/LAN direct, THEN
   // per-inbound routing, THEN a catch-all to the primary exit so nothing is
@@ -640,6 +642,35 @@ function applyFragments(outbounds) {
     sockopt.dialerProxy = tag;
   }
   return extra.length ? outbounds.concat(extra) : outbounds;
+}
+
+/**
+ * Under TUN the OS default route IS the tunnel, so a dial Xray makes itself —
+ * `direct` to a public address, the `dpi-*` dialers, a single proxy, the first
+ * hop of a chain, a WireGuard endpoint — re-enters the TUN and loops back into
+ * the SOCKS inbound (phase-2 review H1: why bypass-ir / bypass-cn / `direct`
+ * routing never worked under TUN). `sockopt.interface` binds the socket to
+ * the physical NIC instead (Windows IP_UNICAST_IF, macOS IP_BOUND_IF, Linux
+ * SO_BINDTODEVICE); measured on this machine: a bound freedom dial left with
+ * the ISP's public IP while the default route was the TUN.
+ *
+ * "Dials itself" = protocol not dns/blackhole AND no `sockopt.dialerProxy`:
+ * a hop behind another hop dials through it, and binding it would be wrong.
+ * Runs after applyFragments so the dpi dialers exist. `name` comes from
+ * main.js (`settings.directInterface`, read from the OS before the tunnel is
+ * up, only under tunMode); anything but a non-blank string leaves every
+ * outbound exactly as it was, which the golden tests pin. Not applied to
+ * buildTestConfig — a ping runs without TUN.
+ */
+function bindDirectDials(outbounds, name) {
+  if (typeof name !== 'string' || !name.trim()) return outbounds;
+  for (const o of outbounds) {
+    if (!o || o.protocol === 'dns' || o.protocol === 'blackhole') continue;
+    const ss = o.streamSettings || (o.streamSettings = {});
+    if (ss.sockopt && ss.sockopt.dialerProxy) continue;
+    ss.sockopt = Object.assign({}, ss.sockopt, { interface: name });
+  }
+  return outbounds;
 }
 
 function makeFragmentOutbound(tag, fragStr, noiseStr) {

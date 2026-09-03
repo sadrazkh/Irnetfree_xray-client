@@ -20,6 +20,10 @@ function assetStatus(dirs, platform = process.platform) {
   for (const id of Object.keys(ENGINES)) out[id] = has(engineExe(id, platform));
   out.tun2socks = has(win ? 'tun2socks.exe' : 'tun2socks');
   out.wintun = win ? has('wintun.dll') : true;
+  // Can TUN mode run at all: either backend (sing-box preferred, tun2socks the
+  // fallback), each needing wintun on Windows. The renderer reads this one
+  // flag; `tun2socks` / `wintun` above keep their per-file meaning.
+  out.tunReady = (out['sing-box'] && out.wintun) || (out.tun2socks && out.wintun);
   out.geoip = has('geoip.dat');
   out.geosite = has('geosite.dat');
   return out;

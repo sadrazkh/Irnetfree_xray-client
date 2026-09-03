@@ -187,6 +187,7 @@ class TunSingbox {
     this.interfaceName = TUN_IF;
     this.dnsPeer = TUN_PEER4;
     this.dnsPeer6 = TUN_PEER6;
+    this.excludeIps = [];      // the resolved bypass list of the live tunnel (the leak guard's firewall excludes)
     this.proc = null;
     this.active = false;
     this.stopping = false;     // an exit we asked for is not an error
@@ -327,6 +328,7 @@ class TunSingbox {
 
     // 1) the server's own addresses stay off the tunnel (route_exclude_address)
     const ips = await this.bypassIps(bypassAddrs);
+    this.excludeIps = ips;
     const { cfgFile } = this.writeConfig(socksPort, ips, opts, TUN_IF);
 
     // 2) launch sing-box: it creates the adapter and lays the routes
@@ -398,6 +400,7 @@ class TunSingbox {
     const dns = this.adapterDns(dnsServers, opts);
 
     const ips = await this.bypassIps(bypassAddrs);
+    this.excludeIps = ips;
     // darwin: no interface_name — sing-tun only accepts utun<N> and picks the
     // next free unit itself; the script below detects which one appeared.
     const { work, cfgFile } = this.writeConfig(socksPort, ips, opts, null);
@@ -501,6 +504,7 @@ class TunSingbox {
       throw new Error('TUN mode requires root (run with sudo)');
     }
     const ips = await this.bypassIps(bypassAddrs);
+    this.excludeIps = ips;
     const { cfgFile } = this.writeConfig(socksPort, ips, opts, TUN_IF);
     const died = await this.launch(bin, cfgFile, { cwd: path.dirname(bin) });
     if (died) {
@@ -531,6 +535,7 @@ class TunSingbox {
   async stop() {
     if (!this.active && !this.proc && !this.macState) return;
     this.active = false;
+    this.excludeIps = [];
     if (this.platform === 'darwin') {
       await this.stopMac().catch((e) => this.onLog('TUN stop: ' + (e.message || e), 'warn'));
       this.onLog('TUN mode stopped.', 'info');

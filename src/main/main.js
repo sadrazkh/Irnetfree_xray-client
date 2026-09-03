@@ -19,6 +19,7 @@ const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('./net
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
+const { TunSingbox } = require('./tunSingbox');
 const { StatsPoller } = require('./stats');
 const { Downloader } = require('./downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
@@ -57,6 +58,10 @@ let userDisconnecting = false; // true during an intentional disconnect (kill sw
 // disconnected). Diffing it against the current settings is what tells the user
 // "you changed this, but it won't take effect until you reconnect".
 let appliedSettings = null;
+// The physical interface the LIVE connection's direct dials are bound to (see
+// doConnect); null when not under TUN. rebuildActiveConfig() reuses it rather
+// than asking the OS again — with the tunnel up, the default route IS the tunnel.
+let liveDirectInterface = null;
 
 // GitHub repo used for the in-app update check (see app:checkUpdate).
 const GITHUB_REPO = 'sadrazkh/Irnetfree_xray-client';
@@ -79,6 +84,13 @@ const DEFAULT_SETTINGS = {
   apiPort: 10085,
   systemProxy: true,
   tunMode: false,
+  // TUN backend: sing-box (auto_route, v4+v6) when installed, else tun2socks
+  tunBackend: 'sing-box',
+  // leak guard under TUN: 'off' | 'standard' (adapter DNS override) | 'strict'
+  // (+ strict_route and a firewall for everything off the tunnel)
+  leakGuard: 'standard',
+  // proxy mode only: block outbound UDP except :53 on physical adapters (WebRTC)
+  blockUdpInProxyMode: false,
   autoUpdateSubs: true,
   autoUpdateInterval: 60,
   customRules: [],
@@ -124,6 +136,27 @@ function assetStatus() {
   // a user-located xray (store.xrayPath / XRAY_PATH) counts too
   if (xray) st.xray = st.xray || xray.binExists('xray');
   return st;
+}
+
+/**
+ * The TUN layer for a connect: sing-box unless the user chose tun2socks or
+ * sing-box (with wintun next to it, on Windows) is not installed — then
+ * tun2socks, and the log says why. Built per connect (`tunBackend` is
+ * reconnect-relevant) and kept on `tun` for stop / recovery / quit. The status
+ * paths that only ask isAvailable() / isElevated() build a throwaway one with
+ * `quiet`, so the fallback line is logged once per connect, not per poll.
+ */
+function makeTun(settings, { quiet = false } = {}) {
+  const opts = { binDir: bundledBinDir(), extraDirs: [userBin()], onLog: (line, level) => send('log', { line, level }), lang: settings.lang };
+  const sb = new TunSingbox(opts);
+  const legacy = new TunManager(opts);
+  if (settings.tunBackend === 'tun2socks') return legacy;
+  if (sb.isAvailable()) return sb;
+  if (legacy.isAvailable()) {
+    if (!quiet) send('log', { line: 'sing-box not installed — TUN falls back to tun2socks', level: 'warn' });
+    return legacy;
+  }
+  return sb;   // neither: the sing-box error message names what to install
 }
 
 function send(channel, payload) {
@@ -526,13 +559,40 @@ async function doConnect(serverId, opts = {}) {
     if (stale()) return abandoned;
     send('killswitch', { engaged: false });
   }
-  const settings = await effectiveSettings();
+  let settings = await effectiveSettings();
   if (stale()) return abandoned;
   const byId = (id) => store.get('servers', []).find(s => s.id === id);
 
   // allowInsecure is gone from the core: pin the certificate on first use instead.
   await ensureCertPins(serverId, settings);
   if (stale()) return abandoned;
+
+  // The TUN layer for this connect — the backend setting plus what is
+  // installed. A LIVE instance is never replaced: switching servers keeps the
+  // running tunnel (tun.start() is a no-op while active); a new choice takes
+  // effect through reapplyConnection() / doDisconnect(), which stop it first.
+  if (!tun || !tun.active) tun = makeTun(settings);
+
+  // Under TUN the OS default route is the tunnel, so every dial Xray makes
+  // itself (direct, the anti-DPI dialers, the first hop of a chain) must be
+  // bound to the physical NIC or it re-enters the TUN and loops. Read BEFORE
+  // tun.start() — with the tunnel up the default route is the tunnel itself,
+  // which is also why a live tunnel keeps the name it was built with. Re-derived
+  // on every (re)connect, so a network change picks up the new NIC. Never
+  // persisted: effectiveSettings() is the source, the store never sees it.
+  if (settings.tunMode) {
+    let name = (tun.active && liveDirectInterface) || null;
+    if (!name) {
+      const phys = await tun.physicalInterface().catch(() => null);
+      if (stale()) return abandoned;
+      name = (phys && phys.name && !isOwnTunInterface(phys.name)) ? phys.name : null;
+    }
+    if (name) settings = Object.assign({}, settings, { directInterface: name });
+    else send('log', { line: 'Could not find the physical network interface — direct traffic under TUN may loop', level: 'warn' });
+    liveDirectInterface = name;
+  } else {
+    liveDirectInterface = null;
+  }
 
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
@@ -603,28 +663,32 @@ async function doConnect(serverId, opts = {}) {
 
   updateTray(true, label);
 
-  // TUN mode (system-wide tunnel via tun2socks). Requires admin + tun2socks.exe.
+  // TUN mode (system-wide tunnel via sing-box, or tun2socks as the fallback —
+  // see makeTun). Requires admin + the backend's files.
   let tunError = null;
   if (settings.tunMode) {
     if (!tun.isAvailable()) {
       tunError = settings.lang === 'en'
-        ? 'TUN needs tun2socks + wintun in the bin folder.'
-        : 'حالت TUN به فایل‌های tun2socks و wintun در پوشه bin نیاز دارد.';
-      send('log', { line: 'TUN requested but tun2socks/wintun not found — connected proxy-only', level: 'error' });
+        ? 'TUN needs sing-box (or tun2socks) and wintun in the bin folder.'
+        : 'حالت TUN به sing-box (یا tun2socks) و wintun در پوشه bin نیاز دارد.';
+      send('log', { line: 'TUN requested but sing-box/tun2socks (with wintun) not found — connected proxy-only', level: 'error' });
     } else {
       try {
         tun.lang = settings.lang || 'fa';
         // Managed DNS: the adapter's resolver is the tunnel's own peer, so every
         // query the OS sends there enters the TUN and is answered by dns-out.
-        // (The physical adapters keep their own resolvers until the phase-3
-        // guard overrides them.) A sing-box-format config carries no hijack, so
-        // the adapter gets a resolver the proxy can reach instead.
+        // The peer is the backend's: 172.19.0.2 for sing-box, 10.255.0.1 for
+        // tun2socks. (The physical adapters keep their own resolvers until the
+        // phase-3 guard overrides them.) A sing-box-format config carries no
+        // hijack, so the adapter gets a resolver the proxy can reach instead.
         // The in-country resolver is dialled `direct` — under TUN that would
-        // re-enter the tunnel through the split routes, so it needs a bypass
-        // route exactly like the server addresses.
+        // re-enter the tunnel, so it needs a bypass route exactly like the
+        // server addresses (the direct outbound is also bound to the NIC).
         const hijacks = engineFormat(runEngine) !== 'sing-box';
+        const dnsPeer = tun.dnsPeer || TUN_GW;
         await tun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)],
-          adapterDnsServers(settings, hijacks ? TUN_GW : null));
+          adapterDnsServers(settings, hijacks ? dnsPeer : null),
+          { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict' });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
       } catch (e) {
         tunError = e.message;
@@ -788,7 +852,10 @@ async function reapplyConnection() {
 async function rebuildActiveConfig() {
   const serverId = store.get('activeServerId', null);
   if (!serverId || !xray.running) return;
-  const settings = await effectiveSettings();
+  let settings = await effectiveSettings();
+  // Keep the binding the live connection was built with (see doConnect): the
+  // tunnel stays up across this reload, and asking the OS now would name it.
+  if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
   const { config, engine } = buildActive(serverId, settings);
   // Suppress the transient 'stopped' status from the old instance so the UI
   // doesn't flash "disconnected" during the reload.
@@ -1016,7 +1083,9 @@ async function doDisconnect() {
   stopProcWatcher();
   stopNetWatcher();                // nothing live to recover any more
   if (stats) stats.stop();
-  try { await tun.stop(); } catch {}
+  // `tun` is the instance doConnect() started (makeTun), whichever backend it
+  // chose — the same one before-quit and the exit hook tear down.
+  try { if (tun) await tun.stop(); } catch {}
   try { await setSystemProxy(false, {}); } catch {}
   try { await removeLanFirewall(); } catch {}
   try { await disarmKillSwitch(); } catch {}
@@ -1025,6 +1094,7 @@ async function doDisconnect() {
   store.set('activeServerId', null);
   pinWatch.clear();
   appliedSettings = null;          // nothing live to be out of sync with
+  liveDirectInterface = null;
   updateTray(false);
   updateOverlay('off');
   send('status', { state: 'disconnected' });
@@ -1156,8 +1226,8 @@ function registerIpc() {
     chains: getChains(),
     pool: getPool(),
     xrayReady: xray.binExists(),
-    tunAvailable: tun.isAvailable(),
-    elevated: tun.isElevated(),
+    tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(),
+    elevated: makeTun(getSettings(), { quiet: true }).isElevated(),
     assets: assetStatus(),
     platform: process.platform,
     version: app.getVersion(),
@@ -1269,7 +1339,7 @@ function registerIpc() {
   // Relaunch the app elevated (Windows) so TUN mode can configure routes.
   ipcMain.handle('app:relaunchAdmin', () => {
     if (process.platform !== 'win32') return { ok: false, error: 'only on Windows' };
-    if (tun.isElevated()) return { ok: false, error: 'already elevated' };
+    if (makeTun(getSettings(), { quiet: true }).isElevated()) return { ok: false, error: 'already elevated' };
     try {
       const exe = process.execPath;
       const args = process.argv.slice(1);
@@ -1452,7 +1522,7 @@ function registerIpc() {
         xray.forgetVersions();
         stats.setBin(xray.anyBin());
       }
-      return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: tun.isAvailable(), xrayReady: xray.binExists() };
+      return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(), xrayReady: xray.binExists() };
     } catch (err) {
       send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' });
       return { ok: false, error: err.message, assets: assetStatus() };
@@ -1526,7 +1596,7 @@ function registerIpc() {
   // Delete the files the app downloaded into the writable bin (userData/bin).
   // Does NOT touch a user-located xray (store.xrayPath) or the bundled bin.
   ipcMain.handle('assets:remove', async () => {
-    if (xray.running || tun.active) {
+    if (xray.running || (tun && tun.active)) {
       return { ok: false, error: 'disconnect first', assets: assetStatus() };
     }
     const dir = userBin();
@@ -1541,7 +1611,7 @@ function registerIpc() {
     xray.forgetVersions();
     stats.setBin(xray.anyBin());
     send('log', { line: 'Removed downloaded files: ' + (removed.join(', ') || '(none)'), level: 'info' });
-    return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: tun.isAvailable() };
+    return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable() };
   });
 }
 
@@ -1633,11 +1703,9 @@ app.whenReady().then(() => {
     onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) })
   });
 
-  tun = new TunManager({
-    binDir: bundledBinDir(),
-    extraDirs: [ubin],
-    onLog: (line, level) => send('log', { line, level })
-  });
+  // A placeholder until the first connect picks the backend for real (see
+  // makeTun / doConnect) — so quit and the exit hook always have an instance.
+  tun = makeTun(getSettings(), { quiet: true });
 
   stats = new StatsPoller({
     binPath: xray.anyBin(),
@@ -1684,7 +1752,7 @@ app.on('before-quit', async (e) => {
   userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
-  try { if (tun) await tun.stop(); } catch {}
+  try { if (tun) await tun.stop(); } catch {}   // the instance doConnect() started
   try { await setSystemProxy(false, {}); } catch {}
   try { await removeLanFirewall(); } catch {}
   try { await disarmKillSwitch(); } catch {}
@@ -1703,7 +1771,7 @@ process.on('exit', () => {
   try { require('child_process').execFileSync(
     'reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '0', '/f'],
     { windowsHide: true }); } catch {}
-  try { if (tun) tun.cleanupSync(); } catch {}
+  try { if (tun) tun.cleanupSync(); } catch {}   // the instance doConnect() started (either backend)
   try { require('child_process').execFileSync('netsh',
     ['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`], { windowsHide: true }); } catch {}
 });
