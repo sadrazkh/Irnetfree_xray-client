@@ -65,6 +65,21 @@ class TunManager {
   /** Pick the message in the user's language (fa default). */
   msg(fa, en) { return this.lang === 'en' ? en : fa; }
 
+  /**
+   * The resolved bypass addresses of the live tunnel, under the name the
+   * sing-box backend uses (its `bypassIps` is a METHOD; here it is the array
+   * of /32 routes kept for cleanup — callers use this getter, never that).
+   */
+  get excludeIps() { return this.bypassIps.slice(); }
+
+  /**
+   * The physical NIC the machine's default route uses. The connect path binds
+   * Xray's own dials to it before the tunnel goes up (see configBuilder's
+   * bindDirectDials) — this backend needs it just as much as sing-box does:
+   * its /1 split routes are exactly what a `direct` dial would loop back into.
+   */
+  physicalInterface() { return platform.physicalInterface(); }
+
   dirs() {
     return [
       ...this.extraDirs,
