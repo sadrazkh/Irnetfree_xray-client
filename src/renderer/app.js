@@ -189,6 +189,7 @@ function setLang(lang) {
   renderComponents();
   renderChains();
   renderPool();
+  renderAdvanced(); // rule/target labels and the AllowedIPs notes are built with t()
   updateXrayStatus(anyXrayCore());
   updateTunStatus();
   setModeWidget();
@@ -2509,6 +2510,89 @@ function makeSearchSelect({ options, value, onChange }) {
   return wrap;
 }
 
+/**
+ * The WireGuard a routing target ends in, if any: the server itself, or the
+ * last member of a chain. Anything else (direct, block, a VLESS…) → null.
+ */
+function wgOfTarget(target) {
+  if (!target || target === 'direct' || target === 'block') return null;
+  let s = null;
+  if (String(target).startsWith('chain:')) {
+    const members = chainMembers(state.chains.find(x => 'chain:' + x.id === target));
+    s = members[members.length - 1] || null;
+  } else s = srvById(target);
+  return s && s.protocol === 'wireguard' ? s : null;
+}
+
+/** The peer's AllowedIPs, trimmed. */
+function wgAllowedIPs(s) {
+  const ob = (s && s.outbound) || {};
+  const peer = ob.settings && ob.settings.peers && ob.settings.peers[0];
+  return ((peer && peer.allowedIPs) || []).map(a => String(a).trim()).filter(Boolean);
+}
+
+/** AllowedIPs worth suggesting: the split ranges, never the full-tunnel entries. */
+function wgSuggestedRanges(s) { return wgAllowedIPs(s).filter(a => !/\/0$/.test(a)); }
+
+/**
+ * The dashed note under a routing row whose target ends in a WireGuard: the
+ * ranges its AllowedIPs already names, and where its internal names resolve.
+ * `onUse` fills the row's value with those ranges — omit it for the default
+ * target, which has no value to fill (then only the notes are shown).
+ * Returns null when the target is not a WireGuard, or has nothing to say.
+ */
+function wgSuggestEl(s, opts) {
+  if (!s) return null;
+  const { value, onUse } = opts || {};
+  const ranges = wgSuggestedRanges(s);
+  const dns = (s.dns || []).filter(Boolean);
+  const showRanges = !!onUse && ranges.length > 0;
+  // only /0 entries: the tunnel takes everything, so there is no range to offer
+  const fullTunnel = wgAllowedIPs(s).length > 0 && !ranges.length;
+  if (!showRanges && !fullTunnel && !dns.length) return null;
+
+  const el = document.createElement('div');
+  el.className = 'adv-suggest';
+  const list = ranges.join(', ');
+  const bare = (v) => String(v || '').replace(/\s+/g, '');
+  let html = '';
+  if (showRanges) {
+    html += `<span>🧭 ${escapeHtml(t('adv.sugRanges'))}: <code>${escapeHtml(list)}</code></span>`;
+    html += bare(value) === bare(list)
+      ? `<span class="adv-suggest-applied">✓ ${escapeHtml(t('adv.sugApplied'))}</span>`
+      : `<button class="btn ghost adv-suggest-use">${escapeHtml(t('adv.sugUse'))}</button>`;
+  }
+  if (fullTunnel) html += `<div class="adv-suggest-line">${escapeHtml(t('adv.sugFullTunnel'))}</div>`;
+  if (dns.length) {
+    // task 2 resolves internal names through whichever target owns that DNS
+    const addr = `<code>${escapeHtml(dns.join(', '))}</code>`;
+    html += `<div class="adv-suggest-line">${escapeHtml(t('adv.sugDns')).replace('{dns}', () => addr)}</div>`;
+    if (!(s.dnsDomains || []).length) {
+      html += `<div class="adv-suggest-line">${escapeHtml(t('adv.sugDomains'))}</div>`;
+    }
+  }
+  el.innerHTML = html;
+  const use = el.querySelector('.adv-suggest-use');
+  if (use) use.onclick = () => onUse(list);
+  return el;
+}
+
+/**
+ * Refresh only the note under the default target, so re-rendering it does not
+ * disturb the dropdown the user just picked from.
+ */
+function renderDefaultSuggest() {
+  const body = $('#advBody');
+  const defRow = body && body.querySelector('.adv-default');
+  if (!defRow) return;
+  body.querySelectorAll('.adv-suggest-default').forEach(n => n.remove());
+  const def = state.settings.routeDefault || (state.servers[0] && state.servers[0].id) || 'direct';
+  const el = wgSuggestEl(wgOfTarget(def), {});
+  if (!el) return;
+  el.classList.add('adv-suggest-default');
+  defRow.insertAdjacentElement('afterend', el);
+}
+
 function renderAdvanced() {
   const wrap = $('#advRules');
   const body = $('#advBody');
@@ -2561,17 +2645,33 @@ function renderAdvanced() {
     if (refresh) refresh.onclick = () => loadProcList();
     // searchable target dropdown (handles long config lists)
     row.querySelector('.adv-target-mount').appendChild(
-      makeSearchSelect({ options: targetOptionList(), value: r.target, onChange: (v) => { rules[idx].target = v; } })
+      makeSearchSelect({
+        options: targetOptionList(), value: r.target,
+        // re-render so the AllowedIPs note follows the new target (the dropdown
+        // has already closed itself by the time onChange runs)
+        onChange: (v) => { rules[idx].target = v; renderAdvanced(); }
+      })
     );
     row.querySelector('.adv-del').onclick = () => { rules.splice(idx, 1); renderAdvanced(); };
     wrap.appendChild(row);
+    // when the target ends in a WireGuard, offer its ranges and say where its
+    // internal names resolve
+    const sug = wgSuggestEl(wgOfTarget(r.target), {
+      value: r.value,
+      onUse: (list) => { rules[idx].type = 'ip'; rules[idx].value = list; renderAdvanced(); }
+    });
+    if (sug) wrap.appendChild(sug);
   });
 
   // default target — searchable dropdown
   const def = state.settings.routeDefault || (state.servers[0] && state.servers[0].id) || 'direct';
   defMount.innerHTML = '';
-  advDefaultSel = makeSearchSelect({ options: targetOptionList(), value: def, onChange: (v) => { state.settings.routeDefault = v; } });
+  advDefaultSel = makeSearchSelect({
+    options: targetOptionList(), value: def,
+    onChange: (v) => { state.settings.routeDefault = v; renderDefaultSuggest(); }
+  });
   defMount.appendChild(advDefaultSel);
+  renderDefaultSuggest();
 
   // process-routing options panel (only when a process rule exists)
   const procOpts = $('#procOpts');
