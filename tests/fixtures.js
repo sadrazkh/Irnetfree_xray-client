@@ -57,6 +57,17 @@ const WG_BAD_MASK = server('sv-wg', 'WireGuard', 'wireguard', 'd.example.com', 5
   streamSettings: { sockopt: {} }
 });
 
+/** A corporate WireGuard: split ranges, an internal resolver, a search domain (phase 2b). */
+const WG_CORP = Object.assign(server('sv-wgcorp', 'Corp WG', 'wireguard', 'vpnhost.example', 51821, {
+  protocol: 'wireguard',
+  settings: {
+    secretKey: 'privkey', address: ['10.66.10.42/32'],
+    peers: [{ publicKey: 'pubkey', endpoint: 'vpnhost.example:51821', allowedIPs: ['192.168.0.0/16', '10.0.0.0/8'] }],
+    mtu: 1420
+  },
+  streamSettings: { sockopt: {} }
+}), { dns: ['192.168.160.1'], dnsDomains: ['acme-corp.example'] });
+
 /** Same VLESS config, but carrying the TLS-fragment + noise anti-DPI markers. */
 function vlessWithMarkers(id, markers) {
   const s = JSON.parse(JSON.stringify(VLESS_WS_TLS));
@@ -101,5 +112,5 @@ function outboundTagged(config, tag) {
 
 module.exports = {
   server, settings, ruleTags, outboundTagged, vlessWithMarkers,
-  VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK
+  VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK, WG_CORP
 };
