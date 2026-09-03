@@ -510,3 +510,21 @@ test('darwin start: no default route → a clear error before anything privilege
     assert.equal(ran, false);
   });
 });
+
+/* --------------------------- phase 3 review fixes --------------------------- */
+
+// scripts/mac-selfcheck.sh carries a copy of this config so the owner can check
+// it on a Mac with sing-box alone. A copy drifts; this is what notices.
+test('the macOS self-check script checks the config this module actually builds', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const script = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'mac-selfcheck.sh'), 'utf8');
+  const m = script.match(/cat > "\$CFG" <<'JSON'\n([\s\S]*?)\nJSON\n/);
+  assert.ok(m, 'the heredoc that holds the config is gone — update this test with it');
+  const embedded = JSON.parse(m[1]);
+  // darwin gets no interface_name (sing-tun only accepts utun<N>, so the kernel
+  // picks the unit) — the script says so in a comment, and buildTunConfig takes
+  // null for exactly that case.
+  const built = buildTunConfig({ socksPort: embedded.outbounds[0].server_port, interfaceName: null });
+  assert.deepEqual(embedded, built);
+});
