@@ -65,8 +65,16 @@ for (const [pn, plan] of Object.entries(plans)) {
 
 // One-off shapes the matrix does not reach: entry forms the free-text inputs
 // accept, every advanced default, the anti-DPI dialer next to dns-out, a
-// WireGuard outbound, LAN listening with custom rules.
+// WireGuard outbound, LAN listening with custom rules, a corporate WireGuard's
+// resolver (a server object with plain-CIDR expectedIPs and `domain:` entries,
+// routed through the chain / the exit by an inboundTag+ip rule).
 const managed = dnsModes.managed;
+const advancedWgChain = {
+  mode: 'advanced', serversById: { 'sv-vless': F.VLESS_WS_TLS, 'sv-wgcorp': F.WG_CORP },
+  chainsById: { c1: [F.VLESS_WS_TLS, F.WG_CORP] }, chain: [],
+  rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:c1' }],
+  def: 'sv-vless'
+};
 const shapes = {
   'single-managed-udpRemote-bypass-ir': [single, { routingMode: 'bypass-ir', dnsManaged: true, dnsRemote: ['1.1.1.1', '8.8.8.8'] }],
   'single-managed-hostPort-bypass-ir': [single, { routingMode: 'bypass-ir', dnsManaged: true, dnsRemote: ['1.1.1.1:5353'], dnsDirect: ['178.22.122.100:5353'] }],
@@ -82,6 +90,8 @@ const shapes = {
   'advanced-defBlock': [Object.assign({}, advanced, { def: 'block' }), managed],
   'advanced-defChain': [Object.assign({}, advanced, { def: 'chain:c1' }), managed],
   'advanced-cnDirect': [Object.assign({}, advanced, { rules: [{ type: 'domain', value: 'geosite:cn', target: 'direct' }] }), managed],
+  'advanced-wgChainDns': [advancedWgChain, managed],
+  'single-wgDns-domains': [{ mode: 'single', server: F.WG_CORP }, managed],
   'pool-bypass-ir': [pool, Object.assign({ routingMode: 'bypass-ir' }, managed)]
 };
 for (const [name, [plan, over]] of Object.entries(shapes)) {
