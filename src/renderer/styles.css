@@ -274,6 +274,14 @@ body {
 .seg-btn:hover { color: var(--text); }
 .seg-btn.active { background: var(--panel-2); color: var(--text); border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79,140,255,.15); }
 
+/* a labelled control that lives between switch rows (TUN backend, leak guard) */
+.setting-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.setting-row:last-child { border-bottom: none; }
+.setting-row .field-label { margin-bottom: 6px; }
+/* the row does not apply in the current mode: dimmed, but its note stays readable */
+.setting-row.disabled, .switch-row.disabled { opacity: .6; }
+.setting-row.disabled .hint.warn, .switch-row.disabled .hint.warn { opacity: 1; }
+
 /* switch */
 .switch-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .switch-row:last-child { border-bottom: none; }
