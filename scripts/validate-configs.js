@@ -5,6 +5,10 @@
  * emits (dns.tag, the dns outbound, expectedIPs, DoH strings, inboundTag
  * rules) — the unit tests only pin our own output. Needs bin/xray(.exe)
  * (`npm run get-xray`).
+ *
+ * With IRNF_SINGBOX_EXE set, every TUN config tunSingbox.buildTunConfig can
+ * emit is run through `sing-box check` as well (parse + build only — `check`
+ * never creates an adapter) and counted into the same total.
  */
 const fs = require('fs');
 const os = require('os');
@@ -113,5 +117,35 @@ for (const [name, [plan, over]] of Object.entries(shapes)) {
   console.log('     ' + ((r.stdout || '') + (r.stderr || '')).trim().split(/\r?\n/).slice(-3).join('\n     '));
 }
 
-console.log(`\n${total - failed}/${total} configs accepted by ${path.basename(exe)}`);
+// sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
+// entry → /32 and /128), plus the darwin shape — no interface_name, because
+// sing-tun there only accepts utun<N> and names the device itself.
+let sbTotal = 0, sbFailed = 0;
+const sb = process.env.IRNF_SINGBOX_EXE;
+if (sb) {
+  if (!fs.existsSync(sb)) { console.error('no sing-box at ' + sb); process.exit(2); }
+  const { buildTunConfig } = require('../src/main/tunSingbox');
+  const cases = [];
+  for (const ipv6 of [false, true]) {
+    for (const strict of [false, true]) {
+      for (const excludeIps of [[], ['1.2.3.4', '2001:db8::1']]) {
+        cases.push([`tun-v6${ipv6}-strict${strict}-exclude${excludeIps.length}`, { socksPort: 10808, ipv6, strict, excludeIps }]);
+      }
+    }
+  }
+  cases.push(['tun-darwin-noname', { socksPort: 10808, excludeIps: ['1.2.3.4'], interfaceName: null }]);
+  for (const [name, args] of cases) {
+    total++; sbTotal++;
+    const file = path.join(work, `${name}.json`);
+    fs.writeFileSync(file, JSON.stringify(buildTunConfig(args), null, 2));
+    const r = spawnSync(sb, ['check', '-c', file], { encoding: 'utf8', timeout: 15000, windowsHide: true });
+    if (r.status === 0) { console.log('ok   ' + path.basename(file)); continue; }
+    failed++; sbFailed++;
+    console.log('FAIL ' + path.basename(file));
+    console.log('     ' + ((r.stdout || '') + (r.stderr || '')).trim().split(/\r?\n/).slice(-3).join('\n     '));
+  }
+}
+
+const by = path.basename(exe) + (sb ? ` + ${path.basename(sb)} (${sbTotal - sbFailed}/${sbTotal} TUN configs)` : '');
+console.log(`\n${total - failed}/${total} configs accepted by ${by}`);
 process.exit(failed ? 1 : 0);

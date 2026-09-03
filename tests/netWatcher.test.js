@@ -228,7 +228,8 @@ const wifi4 = { family: 'IPv4', internal: false, address: '192.168.1.20' };
 const eth4 = { family: 'IPv4', internal: false, address: '10.0.0.5' };
 
 test('the names the app creates for TUN are recognised on every platform', () => {
-  assert.equal(isOwnTunInterface('XrayTun'), true, 'Windows adapter');
+  assert.equal(isOwnTunInterface('XrayTun'), true, 'Windows adapter (tun2socks)');
+  assert.equal(isOwnTunInterface('IRNetFree'), true, 'Windows/Linux adapter (sing-box)');
   assert.equal(isOwnTunInterface('utun'), true, 'macOS, before the kernel picks a unit');
   assert.equal(isOwnTunInterface('utun4'), true, 'macOS');
   assert.equal(isOwnTunInterface('utun12'), true, 'macOS, two digits');
