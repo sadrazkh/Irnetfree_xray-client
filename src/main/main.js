@@ -11,6 +11,7 @@ const { adapterDnsServers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
 const { chooseEngine, testEngineFor } = require('./engineChoice');
+const { fetchLeafPin, pinTargets, directServers, PinWatch } = require('./certPin');
 const { assetStatus: scanAssets } = require('./assets');
 const { XrayManager, getFreePort } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
@@ -36,6 +37,7 @@ let stats = null;
 let downloader = null;
 let procWatcher = null;
 let netWatcher = null;
+const pinWatch = new PinWatch();   // the live plan's pinned servers, for the core's mismatch line
 let recoverTimer = null;
 let recovering = false;        // a network-change recovery is in flight
 let recoverQueued = null;      // reason of a trigger that arrived during that recovery
@@ -314,12 +316,11 @@ async function effectiveSettings() {
 }
 
 /**
- * Build the connection plan + xray config for a target id, using already
- * process-resolved settings. Returns { plan, label, entryAddrs, config, geoWarn }.
+ * The connection plan for a target id: { plan, label, entryAddrs }.
  * `entryAddrs` are the addresses the machine dials *directly* (must be bypassed
  * under TUN so the tunnel doesn't loop on itself). No side effects.
  */
-function buildActive(serverId, settings) {
+function buildPlan(serverId, settings) {
   const servers = store.get('servers', []);
   const byId = (id) => servers.find(s => s.id === id);
   const serversById = {};
@@ -398,6 +399,16 @@ function buildActive(serverId, settings) {
     entryAddrs = [server.address];
   }
   entryAddrs = [...new Set(entryAddrs.filter(Boolean))];
+  return { plan, label, entryAddrs };
+}
+
+/**
+ * Build the connection plan + xray config for a target id, using already
+ * process-resolved settings. Returns { plan, label, entryAddrs, config, geoWarn,
+ * engine }. No side effects.
+ */
+function buildActive(serverId, settings) {
+  const { plan, label, entryAddrs } = buildPlan(serverId, settings);
 
   // Are the geo databases installed? If not, geosite:/geoip: rules would make
   // xray refuse to start — buildConfig drops them and we warn the user.
@@ -438,6 +449,57 @@ function buildActive(serverId, settings) {
 }
 
 /**
+ * allowInsecure is gone from the core (see certPin.js): before the plan is
+ * built, read and store the certificate of every server the plan dials
+ * directly that asked for it and has no pin yet — one dial each, in parallel,
+ * 5 s at most. A failed probe is logged and the core then verifies the
+ * certificate itself; its own error is the user's signal. A server behind
+ * another hop cannot be probed from here.
+ */
+async function ensureCertPins(serverId, settings) {
+  let plan;
+  try { plan = buildPlan(serverId, settings).plan; } catch { return; }   // buildActive reports it
+  const { probe, behind } = pinTargets(plan);
+  for (const s of behind) {
+    send('log', { line: `${s.name} sits behind a proxy; its certificate cannot be pinned automatically — connect to it directly once to pin it`, level: 'warn' });
+  }
+  if (!probe.length) return;
+  const learned = {};
+  await Promise.all(probe.map(async (s) => {
+    const tlsSettings = s.outbound.streamSettings.tlsSettings;
+    try {
+      const pin = await fetchLeafPin({ host: s.address, port: s.port, servername: tlsSettings.serverName || s.address });
+      learned[s.id] = pin;
+      send('log', { line: `Certificate pinned on first use for ${s.name}: ${pin}`, level: 'info' });
+    } catch (e) {
+      send('log', { line: `Could not read the certificate of ${s.name} to pin it (${e.message}) — the core will verify it itself`, level: 'warn' });
+    }
+  }));
+  if (!Object.keys(learned).length) return;
+  const certPinAt = new Date().toISOString();
+  store.set('servers', store.get('servers', []).map(s => learned[s.id] ? Object.assign({}, s, { certPin: learned[s.id], certPinAt }) : s));
+}
+
+/**
+ * The core reports a pinned certificate that no longer matches at log level
+ * info only, once the dial's retries are spent (certPin.js). Clear the stale
+ * pin so the next connect pins the new one — and only that: a changed
+ * certificate deserves a look before it is trusted again, so no reconnect.
+ */
+function healCertPin(line) {
+  const hit = pinWatch.onLine(line);
+  if (!hit) return;
+  const ids = new Set(hit.map(s => s.id));
+  store.set('servers', store.get('servers', []).map(s => {
+    if (!ids.has(s.id)) return s;
+    const out = Object.assign({}, s);
+    delete out.certPin; delete out.certPinAt;
+    return out;
+  }));
+  for (const s of hit) send('log', { line: `Certificate changed for ${s.name} — pin cleared, reconnect to pin the new one`, level: 'warn' });
+}
+
+/**
  * @param {string} serverId
  * @param {{ holdKillSwitch?: boolean }} [opts] `holdKillSwitch` keeps an already
  *   armed kill-switch block in place instead of clearing it up front — used by
@@ -467,6 +529,10 @@ async function doConnect(serverId, opts = {}) {
   const settings = await effectiveSettings();
   if (stale()) return abandoned;
   const byId = (id) => store.get('servers', []).find(s => s.id === id);
+
+  // allowInsecure is gone from the core: pin the certificate on first use instead.
+  await ensureCertPins(serverId, settings);
+  if (stale()) return abandoned;
 
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
@@ -520,6 +586,7 @@ async function doConnect(serverId, opts = {}) {
   if (stale()) return abandoned;
 
   store.set('activeServerId', serverId);
+  pinWatch.setLive(directServers(plan));
   // Everything below is a connect-time side effect, so from here on the live
   // tunnel matches these settings exactly — record what it was built from.
   appliedSettings = snapshotApplied(getSettings());
@@ -956,6 +1023,7 @@ async function doDisconnect() {
   send('killswitch', { engaged: false });
   if (xray) await xray.stop();
   store.set('activeServerId', null);
+  pinWatch.clear();
   appliedSettings = null;          // nothing live to be out of sync with
   updateTray(false);
   updateOverlay('off');
@@ -1536,7 +1604,7 @@ app.whenReady().then(() => {
     binPath: store.get('xrayPath', null),
     dataDir: dir,
     extraBinDirs: [ubin],
-    onLog: (line, level) => send('log', { line, level }),
+    onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
     onStatus: (state, info) => {
       // The proc-routing watcher restarts xray in place; don't surface the
       // old instance's 'stopped' as a disconnect.

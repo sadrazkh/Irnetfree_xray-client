@@ -78,6 +78,8 @@ const I18N = {
     'spoof.tlsSni': 'SNI — باید با گواهیِ سرور بخواند',
     'spoof.tlsHint': 'اتصال به «Address» می‌رود؛ SNI در هندشیک فرستاده می‌شود و باید با گواهی سرور بخواند (یا Allow Insecure را روشن کن).',
     'edit.pbk': 'Public Key (pbk)', 'edit.sid': 'Short ID (sid)', 'edit.allowInsecure': 'Allow Insecure',
+    'edit.insecureHint': 'هسته دیگر «بدون بررسی گواهی» را نمی‌پذیرد. با این گزینه، گواهی سرور در اولین اتصال خوانده و پین می‌شود و از آن به بعد فقط همان پذیرفته می‌شود.',
+    'edit.certPin': 'گواهی پین‌شده', 'edit.certPinClear': 'پاک کردن پین',
 
     'edit.fragment': 'Fragment (packets,length,interval — خالی = خاموش)',
     'edit.frontHint': 'SNI جعلی = دامنه‌ای که در دست‌دادن TLS دیده می‌شود؛ یک دامنهٔ مجاز/CDN بگذار. Host = بک‌اند واقعی تو. اگر فرانتینگ نمی‌کنی Host را خالی بگذار.',
@@ -397,6 +399,8 @@ const I18N = {
     'spoof.tlsSni': 'SNI — must match the server certificate',
     'spoof.tlsHint': 'The connection goes to Address; the SNI is sent in the handshake and must match the server certificate (or enable Allow Insecure).',
     'edit.pbk': 'Public Key (pbk)', 'edit.sid': 'Short ID (sid)', 'edit.allowInsecure': 'Allow Insecure',
+    'edit.insecureHint': 'The core no longer accepts "skip certificate check". With this on, the server’s certificate is read on the first connection and pinned; only that certificate is accepted afterwards.',
+    'edit.certPin': 'Pinned certificate', 'edit.certPinClear': 'Clear pin',
 
     'edit.fragment': 'Fragment (packets,length,interval — empty = off)',
     'edit.frontHint': 'Spoof SNI = the domain shown in the TLS handshake — set it to an allowed/CDN domain. Host = your real backend. Leave Host empty if not fronting.',

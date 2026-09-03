@@ -1672,6 +1672,7 @@ window.api.onSubsUpdated((d) => {
 
 /* ----------------------------- edit server modal ----------------------------- */
 let editOriginal = null;
+let editClearPin = false;   // "clear pin" pressed in the open edit form
 
 function readServerFields(s) {
   const ob = s.outbound || {};
@@ -1685,7 +1686,8 @@ function readServerFields(s) {
     noise: ob._noise || '',
     cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
     finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
-    engine: s.engine || 'xray'
+    engine: s.engine || 'xray',
+    certPin: s.certPin || ''
   };
 
   if (s.protocol === 'vless' || s.protocol === 'vmess') {
@@ -1826,6 +1828,12 @@ function openEdit(id) {
   if ($('#edFinalMask')) $('#edFinalMask').value = f.finalMask || '';
   if ($('#edEngine')) $('#edEngine').value = f.engine || 'xray';
   $('#edInsecure').checked = !!f.allowInsecure;
+  // The certificate pinned on first use stands in for "allow insecure" now
+  // (certPin.js). Shown abbreviated, the full hash in the tooltip; clearing it
+  // makes the next connect read the certificate again.
+  editClearPin = false;
+  $('#edCertPin').textContent = f.certPin ? f.certPin.slice(0, 6) + '…' + f.certPin.slice(-4) : '';
+  $('#edCertPin').title = f.certPin || '';
 
   // credential label per protocol
   const credLabel = $('#edCredLabel');
@@ -1847,6 +1855,8 @@ function openEdit(id) {
   show('#edPathRow', isStd);
   show('#edPattWrap', isStd);
   show('#edInsecureRow', isStd);
+  show('#edInsecureHint', isStd);
+  show('#edCertPinRow', isStd && !!f.certPin);
   show('#edWgExtra', isWg);
   show('#edProxyRow', isProxy);
   // socks/http carry no single "credential" field — user/pass live in edProxyRow
@@ -1927,7 +1937,10 @@ if ($('#edHideSni')) $('#edHideSni').onchange = () => {
   else frag.value = '';
 };
 
-function closeEdit() { $('#editModal').hidden = true; state.editingId = null; editOriginal = null; }
+function closeEdit() { $('#editModal').hidden = true; state.editingId = null; editOriginal = null; editClearPin = false; }
+
+// The pin goes when the form is saved; until then the row just disappears.
+$('#edCertPinClear').onclick = () => { editClearPin = true; show('#edCertPinRow', false); };
 $('#editClose').onclick = closeEdit;
 $('#editCancel').onclick = closeEdit;
 $('#editModal').onclick = (e) => { if (e.target === $('#editModal')) closeEdit(); };
@@ -1961,6 +1974,7 @@ $('#editSave').onclick = async () => {
     fields.pbk = $('#edPbk').value.trim();
     fields.sid = $('#edSid').value.trim();
     fields.allowInsecure = $('#edInsecure').checked;
+    if (editClearPin) fields.clearCertPin = true;
     // patterniha custom-TLS: cipherSuites + finalMask ('' clears them)
     fields.cipherSuites = $('#edCipherSuites') ? $('#edCipherSuites').value.trim() : '';
     fields.finalMask = $('#edFinalMask') ? $('#edFinalMask').value.trim() : '';

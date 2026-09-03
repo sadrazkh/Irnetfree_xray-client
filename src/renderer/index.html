@@ -647,6 +647,12 @@
           <span class="switch-title" data-i18n="edit.allowInsecure">Allow Insecure</span>
           <span class="switch"><input type="checkbox" id="edInsecure" /><span class="slider"></span></span>
         </label>
+        <div class="hint" id="edInsecureHint" data-i18n="edit.insecureHint"></div>
+        <!-- the certificate pinned on first use (certPin.js): read-only, clearable -->
+        <div class="hint" id="edCertPinRow" dir="ltr" hidden>
+          <span data-i18n="edit.certPin">Pinned certificate</span>: <code id="edCertPin"></code>
+          <button type="button" class="btn ghost" id="edCertPinClear" data-i18n="edit.certPinClear" style="padding:3px 10px;font-size:12px;margin-inline-start:8px">Clear pin</button>
+        </div>
         <!-- socks/http proxy credentials -->
         <div class="grid2" id="edProxyRow" hidden>
           <div><label class="field-label" data-i18n="proxy.user">نام کاربری (اختیاری)</label>

@@ -12,6 +12,7 @@
  */
 
 const { buildDnsPlan } = require('./dnsBuilder');
+const { normalizePin } = require('./certPin');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -59,9 +60,29 @@ function buildRoutingRules(mode, blockAds, geo) {
   return rules;
 }
 
-function cloneOut(outbound, tag) {
+/**
+ * A server's outbound as the config will carry it. `server` is the record the
+ * outbound belongs to — its certificate pin, if any, goes into tlsSettings.
+ */
+function cloneOut(outbound, tag, server) {
   const o = JSON.parse(JSON.stringify(outbound));
   o.tag = tag;
+  return applyCertPin(o, server);
+}
+
+/**
+ * allowInsecure is gone from the core (both cores reject it at config load):
+ * never emit it, true or false. A record that learnt its server's certificate
+ * on first use (certPin.js) pins it instead — the core then accepts that
+ * certificate and no other; without a pin it verifies the chain as usual and
+ * its own error is the user's signal.
+ */
+function applyCertPin(o, server) {
+  const tls = o && o.streamSettings && o.streamSettings.tlsSettings;
+  if (!tls) return o;
+  delete tls.allowInsecure;
+  const pin = normalizePin(server && server.certPin);
+  if (pin) tls.pinnedPeerCertSha256 = pin;
   return o;
 }
 
@@ -114,7 +135,7 @@ function buildChainOutbounds(servers, exitTag) {
   const outs = [];
   for (let i = 0; i <= last; i++) {
     const tag = i === last ? exitTag : `${exitTag}-h${i}`;
-    const ob = cloneOut(list[i].outbound, tag);
+    const ob = cloneOut(list[i].outbound, tag, list[i]);
     if (i > 0) dialThrough(ob, `${exitTag}-h${i - 1}`);
     outs.push(ob);
   }
@@ -138,7 +159,7 @@ function makeRegistry(plan) {
   function chainTag(list, tag) {
     const arr = (list || []).filter(s => s && s.outbound);
     if (arr.length >= 2) { buildChainOutbounds(arr, tag).forEach(add); return tag; }
-    if (arr.length === 1) { add(cloneOut(arr[0].outbound, tag)); return tag; }
+    if (arr.length === 1) { add(cloneOut(arr[0].outbound, tag, arr[0])); return tag; }
     return 'direct';
   }
 
@@ -152,7 +173,7 @@ function makeRegistry(plan) {
       return chainTag(list, 'out-chain-' + cid);
     }
     const s = (plan.serversById || {})[target];
-    if (s && s.outbound) { const tag = 'out-' + target; add(cloneOut(s.outbound, tag)); return tag; }
+    if (s && s.outbound) { const tag = 'out-' + target; add(cloneOut(s.outbound, tag, s)); return tag; }
     return 'direct';
   }
 
@@ -378,7 +399,7 @@ function buildConfig(planArg, settings) {
   } else {
     const proxyOutbounds = plan.mode === 'chain'
       ? buildChainOutbounds(plan.chain, 'proxy')
-      : [cloneOut(plan.server.outbound, 'proxy')];
+      : [cloneOut(plan.server.outbound, 'proxy', plan.server)];
     outbounds = [...proxyOutbounds, freedom(s), Object.assign({}, BLACKHOLE)];
     exitTag = s.routingMode === 'direct' ? 'direct' : 'proxy';
     // The exit carries the resolver — unless it is `direct` (routingMode
@@ -536,7 +557,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
 function buildTestConfig(target, socksPort) {
   const proxyOutbounds = Array.isArray(target)
     ? buildChainOutbounds(target, 'proxy')
-    : [cloneOut(target.outbound, 'proxy')];
+    : [cloneOut(target.outbound, 'proxy', target)];
   // apply TLS fragment (if the config carries one) so the test matches reality
   const outbounds = applyFragments(proxyOutbounds).concat([{ tag: 'direct', protocol: 'freedom' }]);
   return {
