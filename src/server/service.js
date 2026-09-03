@@ -20,6 +20,7 @@ const { adapterDnsServers } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor } = require('../main/engineChoice');
+const { fetchLeafPin, pinTargets, directServers, PinWatch } = require('../main/certPin');
 const { assetStatus: scanAssets } = require('../main/assets');
 const { XrayManager, getFreePort } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
@@ -100,6 +101,7 @@ function createService(opts = {}) {
   let userDisconnecting = false;
   let procWatcher = null;
   let netWatcher = null;
+  const pinWatch = new PinWatch();   // the live plan's pinned servers, for the core's mismatch line
   let recoverTimer = null;
   let recovering = false;        // a network-change recovery is in flight
   let recoverQueued = null;      // reason of a trigger that arrived during that recovery
@@ -147,7 +149,7 @@ function createService(opts = {}) {
     binPath: store.get('xrayPath', null),
     dataDir,
     extraBinDirs: [userBinDir],
-    onLog: (line, level) => send('log', { line, level }),
+    onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
     onStatus: (state, info) => {
       if (xrayReloading && state === 'stopped') return;
       if (state === 'stopped' && !userDisconnecting && store.get('activeServerId', null)) {
@@ -265,9 +267,9 @@ function createService(opts = {}) {
   }
 
   /* ----------------------------- plan / config ----------------------------- */
-  // Mirrors main.js buildActive(). Kept in sync deliberately (duplicated so the
-  // desktop app stays untouched).
-  function buildActive(serverId, settings) {
+  // Mirrors main.js buildPlan() / buildActive(). Kept in sync deliberately
+  // (duplicated so the desktop app stays untouched).
+  function buildPlan(serverId, settings) {
     const servers = store.get('servers', []);
     const byId = (id) => servers.find(s => s.id === id);
     const serversById = {};
@@ -334,6 +336,11 @@ function createService(opts = {}) {
       entryAddrs = [server.address];
     }
     entryAddrs = [...new Set(entryAddrs.filter(Boolean))];
+    return { plan, label, entryAddrs };
+  }
+
+  function buildActive(serverId, settings) {
+    const { plan, label, entryAddrs } = buildPlan(serverId, settings);
 
     const geoSt = assetStatus();
     const geoAssets = !!(geoSt.geoip && geoSt.geosite);
@@ -367,6 +374,57 @@ function createService(opts = {}) {
     return { plan, label, entryAddrs, config, geoWarn, engine };
   }
 
+  /**
+   * allowInsecure is gone from the core (see certPin.js): before the plan is
+   * built, read and store the certificate of every server the plan dials
+   * directly that asked for it and has no pin yet — one dial each, in parallel,
+   * 5 s at most. A failed probe is logged and the core then verifies the
+   * certificate itself; its own error is the user's signal. A server behind
+   * another hop cannot be probed from here.
+   */
+  async function ensureCertPins(serverId, settings) {
+    let plan;
+    try { plan = buildPlan(serverId, settings).plan; } catch { return; }   // buildActive reports it
+    const { probe, behind } = pinTargets(plan);
+    for (const s of behind) {
+      send('log', { line: `${s.name} sits behind a proxy; its certificate cannot be pinned automatically — connect to it directly once to pin it`, level: 'warn' });
+    }
+    if (!probe.length) return;
+    const learned = {};
+    await Promise.all(probe.map(async (s) => {
+      const tlsSettings = s.outbound.streamSettings.tlsSettings;
+      try {
+        const pin = await fetchLeafPin({ host: s.address, port: s.port, servername: tlsSettings.serverName || s.address });
+        learned[s.id] = pin;
+        send('log', { line: `Certificate pinned on first use for ${s.name}: ${pin}`, level: 'info' });
+      } catch (e) {
+        send('log', { line: `Could not read the certificate of ${s.name} to pin it (${e.message}) — the core will verify it itself`, level: 'warn' });
+      }
+    }));
+    if (!Object.keys(learned).length) return;
+    const certPinAt = new Date().toISOString();
+    store.set('servers', store.get('servers', []).map(s => learned[s.id] ? Object.assign({}, s, { certPin: learned[s.id], certPinAt }) : s));
+  }
+
+  /**
+   * The core reports a pinned certificate that no longer matches at log level
+   * info only, once the dial's retries are spent (certPin.js). Clear the stale
+   * pin so the next connect pins the new one — and only that: a changed
+   * certificate deserves a look before it is trusted again, so no reconnect.
+   */
+  function healCertPin(line) {
+    const hit = pinWatch.onLine(line);
+    if (!hit) return;
+    const ids = new Set(hit.map(s => s.id));
+    store.set('servers', store.get('servers', []).map(s => {
+      if (!ids.has(s.id)) return s;
+      const out = Object.assign({}, s);
+      delete out.certPin; delete out.certPinAt;
+      return out;
+    }));
+    for (const s of hit) send('log', { line: `Certificate changed for ${s.name} — pin cleared, reconnect to pin the new one`, level: 'warn' });
+  }
+
   /* ----------------------------- connect / disconnect ----------------------------- */
   /**
    * @returns {Promise<{ ok: boolean, tunError?: string|null, stale?: boolean }>}
@@ -388,6 +446,11 @@ function createService(opts = {}) {
     const settings = await effectiveSettings();
     if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
+
+    // allowInsecure is gone from the core: pin the certificate on first use instead.
+    await ensureCertPins(serverId, settings);
+    if (stale()) return abandoned;
+
     const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
     send('status', { state: 'connecting', serverId });
@@ -433,6 +496,7 @@ function createService(opts = {}) {
     // intent that was cancelled — and every side effect below would follow it.
     if (stale()) return abandoned;
     store.set('activeServerId', serverId);
+    pinWatch.setLive(directServers(plan));
     appliedSettings = snapshotApplied(getSettings());
 
     if (settings.systemProxy) {
@@ -762,6 +826,7 @@ function createService(opts = {}) {
     try { await setSystemProxy(false, {}); } catch {}
     if (xray) await xray.stop();
     store.set('activeServerId', null);
+    pinWatch.clear();
     appliedSettings = null;          // nothing live to be out of sync with
     send('status', { state: 'disconnected' });
     userDisconnecting = false;
