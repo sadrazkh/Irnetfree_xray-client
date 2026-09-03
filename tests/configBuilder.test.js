@@ -972,3 +972,110 @@ test('pinning never touches the stored record: the link keeps allowInsecure for 
   assert.equal(JSON.stringify(s), before);
   assert.equal(s.outbound.streamSettings.tlsSettings.allowInsecure, true);
 });
+
+/* ------------------------ direct-outbound binding (TUN) ------------------------ */
+// Under TUN the OS default route is the tunnel, so every outbound that dials the
+// network ITSELF must be bound to the physical NIC (sockopt.interface) or its
+// dial re-enters the TUN and loops. main.js derives `directInterface` at connect
+// time, only under tunMode; without it nothing here may change.
+
+const sockoptOf = (c, tag) => (outboundTagged(c, tag).streamSettings || {}).sockopt || {};
+const BOUND = { directInterface: 'Wi-Fi' };
+
+test('golden guard: without directInterface no sockopt.interface appears anywhere', () => {
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const plans = [
+    single(), single(frag), single(WG_BAD_MASK), single(WG_CORP),
+    { mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] },
+    { mode: 'chain', chain: [VLESS_WS_TLS, WG_BAD_MASK] },
+    advancedPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c1' }], def: 'sv-vless' }),
+    poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001, httpPort: 60002 }])
+  ];
+  for (const p of plans) {
+    for (const s of [settings(), managed(), settings({ directInterface: '' }), settings({ directInterface: '   ' }), settings({ directInterface: null }), settings({ directInterface: 7 })]) {
+      const text = JSON.stringify(buildConfig(p, s));
+      assert.equal(text.includes('"interface"'), false, `${p.mode}: ${JSON.stringify(s.directInterface)} bound something`);
+    }
+  }
+  assert.equal(JSON.stringify(buildTestConfig(frag, 47150)).includes('"interface"'), false, 'a ping runs without TUN');
+  assert.equal(JSON.stringify(buildTestConfig([VLESS_WS_TLS, TROJAN_TCP_TLS], 47151)).includes('"interface"'), false);
+});
+
+test('single: proxy, direct and the dpi dialer are bound; block and dns-out are not', () => {
+  const s = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const c = buildConfig(single(s), managed(BOUND));
+  assert.equal(sockoptOf(c, 'direct').interface, 'Wi-Fi');
+  assert.equal(sockoptOf(c, 'dpi-1').interface, 'Wi-Fi', 'the dialer is what touches the wire');
+  // the proxy dials THROUGH dpi-1, so binding it would be wrong
+  assert.deepEqual(sockoptOf(c, 'proxy'), { dialerProxy: 'dpi-1' });
+  assert.equal('streamSettings' in outboundTagged(c, 'block'), false);
+  assert.equal('streamSettings' in outboundTagged(c, 'dns-out'), false);
+  // a plain proxy with no dialer dials itself
+  const plain = buildConfig(single(), managed(BOUND));
+  assert.deepEqual(sockoptOf(plain, 'proxy'), { interface: 'Wi-Fi' });
+  assert.equal(outboundTagged(plain, 'proxy').streamSettings.security, 'tls', 'the rest of streamSettings is untouched');
+});
+
+test('chain: the first hop is bound, the hop behind it keeps dialing through it', () => {
+  const c = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] }, settings(BOUND));
+  assert.deepEqual(sockoptOf(c, 'proxy-h0'), { interface: 'Wi-Fi' });
+  assert.deepEqual(sockoptOf(c, 'proxy'), { dialerProxy: 'proxy-h0' });
+  assert.deepEqual(sockoptOf(c, 'direct'), { interface: 'Wi-Fi' });
+});
+
+test('advanced: every top-level outbound is bound; a chain hop behind a hop is not', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [
+      { type: 'domain', value: 'a.com', target: 'sv-trojan' },
+      { type: 'ip', value: '10.20.0.0/16', target: 'chain:c1' },
+      { type: 'ip', value: '10.30.0.0/16', target: 'sv-wg' }
+    ],
+    def: 'sv-vless'
+  }), managed(BOUND));
+  for (const tag of ['out-sv-trojan', 'out-chain-c1-h0', 'out-sv-wg', 'out-sv-vless', 'direct']) {
+    assert.equal(sockoptOf(c, tag).interface, 'Wi-Fi', tag);
+  }
+  assert.deepEqual(sockoptOf(c, 'out-chain-c1'), { dialerProxy: 'out-chain-c1-h0' });
+  assert.equal('streamSettings' in outboundTagged(c, 'block'), false);
+  assert.equal('streamSettings' in outboundTagged(c, 'dns-out'), false);
+});
+
+test('pool: every exit and direct are bound; block and dns-out are not', () => {
+  const c = buildConfig(poolPlan([
+    { id: 'e1', target: 'sv-trojan', socksPort: 60001 },
+    { id: 'e2', target: 'chain:c1', socksPort: 60003 }
+  ]), managed(BOUND));
+  for (const tag of ['out-sv-vless', 'out-sv-trojan', 'out-chain-c1-h0', 'direct']) {
+    assert.equal(sockoptOf(c, tag).interface, 'Wi-Fi', tag);
+  }
+  assert.deepEqual(sockoptOf(c, 'out-chain-c1'), { dialerProxy: 'out-chain-c1-h0' });
+  assert.equal('streamSettings' in outboundTagged(c, 'block'), false);
+  assert.equal('streamSettings' in outboundTagged(c, 'dns-out'), false);
+});
+
+test('WireGuard dialled directly is bound (its empty sockopt kept); behind a chain it is not', () => {
+  const direct = buildConfig(single(WG_BAD_MASK), settings(BOUND));
+  assert.deepEqual(sockoptOf(direct, 'proxy'), { interface: 'Wi-Fi' });
+  const chained = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, WG_BAD_MASK] }, settings(BOUND));
+  assert.deepEqual(sockoptOf(chained, 'proxy'), { dialerProxy: 'proxy-h0' });
+  assert.deepEqual(sockoptOf(chained, 'proxy-h0'), { interface: 'Wi-Fi' });
+  assert.equal(chained.policy.levels['0'].bufferSize, 0, 'the chained-WireGuard rule still fires');
+});
+
+test('binding does not depend on managed DNS, and the interface name is taken as given', () => {
+  const c = buildConfig(single(), settings({ dnsManaged: false, directInterface: 'Ethernet 2' }));
+  assert.deepEqual(sockoptOf(c, 'proxy'), { interface: 'Ethernet 2' });
+  assert.deepEqual(sockoptOf(c, 'direct'), { interface: 'Ethernet 2' });
+  assert.equal(c.outbounds.some(o => o.tag === 'dns-out'), false);
+  const mac = buildConfig(single(), settings({ directInterface: 'en0' }));
+  assert.equal(sockoptOf(mac, 'direct').interface, 'en0');
+});
+
+test('binding never touches the stored record', () => {
+  const s = JSON.parse(JSON.stringify(WG_BAD_MASK));
+  const before = JSON.stringify(s);
+  buildConfig(single(s), settings(BOUND));
+  buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, s] }, settings(BOUND));
+  assert.equal(JSON.stringify(s), before);
+  assert.equal(VLESS_WS_TLS.outbound.streamSettings.sockopt, undefined);
+});
