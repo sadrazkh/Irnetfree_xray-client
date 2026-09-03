@@ -15,7 +15,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, resolverBypassIps } = require('../main/configBuilder');
 const { adapterDnsServers } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
@@ -388,7 +388,7 @@ function createService(opts = {}) {
     const settings = await effectiveSettings();
     if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
-    const { label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+    const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
     send('status', { state: 'connecting', serverId });
 
@@ -449,10 +449,16 @@ function createService(opts = {}) {
         tunError = settings.lang === 'en' ? 'TUN needs tun2socks in the bin folder.' : 'حالت TUN به فایل tun2socks در پوشه bin نیاز دارد.';
         send('log', { line: 'TUN requested but tun2socks not found — connected proxy-only', level: 'error' });
       } else {
-        // Managed DNS: the adapter's resolver is the tunnel's own peer, so
-        // every system query enters the TUN and is answered by dns-out. Nothing
-        // leaves the machine as plain UDP to the ISP.
-        try { tun.lang = settings.lang || 'fa'; await tun.start(settings.socksPort, entryAddrs, adapterDnsServers(settings, TUN_GW)); send('log', { line: 'TUN mode active (whole system)', level: 'info' }); }
+        // Managed DNS: the adapter's resolver is the tunnel's own peer, so every
+        // query the OS sends there enters the TUN and is answered by dns-out.
+        // (The physical adapters keep their own resolvers until the phase-3
+        // guard overrides them.) A sing-box-format config carries no hijack, so
+        // the adapter gets a resolver the proxy can reach instead.
+        // The in-country resolver is dialled `direct` — under TUN that would
+        // re-enter the tunnel through the split routes, so it needs a bypass
+        // route exactly like the server addresses.
+        const hijacks = engineFormat(runEngine) !== 'sing-box';
+        try { tun.lang = settings.lang || 'fa'; await tun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)], adapterDnsServers(settings, hijacks ? TUN_GW : null)); send('log', { line: 'TUN mode active (whole system)', level: 'info' }); }
         catch (e) { tunError = e.message; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }
       }
     }

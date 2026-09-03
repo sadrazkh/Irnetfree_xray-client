@@ -32,7 +32,10 @@ test('global: remote DoH only, hijack on, queries routed to the exit', () => {
     queryStrategy: 'UseIPv4',
     servers: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']
   });
-  assert.deepEqual(p.hijackOutbound, { tag: 'dns-out', protocol: 'dns' });
+  // nonIPQuery is pinned: older cores default to "skip", which forwards
+  // PTR/SRV/TXT queries to their original destination — under TUN that is the
+  // tunnel peer, so the packet would loop straight back into the hijack.
+  assert.deepEqual(p.hijackOutbound, { tag: 'dns-out', protocol: 'dns', settings: { nonIPQuery: 'reject' } });
   assert.deepEqual(p.rules, [
     { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
     { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }
@@ -126,6 +129,36 @@ test('a DoH URL with an IP host is routable by that IP', () => {
   assert.deepEqual(p.directResolverIps, ['178.22.122.100']);
 });
 
+test('a host:port entry becomes the {address, port} object the core accepts', () => {
+  // 26.3.27 refuses "178.22.122.100:5353" as a server string ("first path
+  // segment in URL cannot contain colon"); the object form is accepted.
+  const p = buildDnsPlan(base({ routingMode: 'bypass-ir', dnsDirect: ['178.22.122.100:5353'], dnsRemote: ['1.1.1.1:5353', 'https://8.8.8.8/dns-query'] }), opts());
+  assert.deepEqual(p.dns.servers[0], {
+    address: '178.22.122.100', port: 5353,
+    domains: ['geosite:category-ir', 'regexp:.*\\.ir$'], expectedIPs: ['geoip:ir'], skipFallback: true
+  });
+  assert.deepEqual(p.dns.servers[1], { address: '1.1.1.1', port: 5353 });
+  assert.equal(p.dns.servers[2], 'https://8.8.8.8/dns-query');
+  assert.deepEqual(p.directResolverIps, ['178.22.122.100']);
+});
+
+test('IPv6 entries: bracketed host:port is split, a bare address is left alone and gets its direct rule', () => {
+  const p = buildDnsPlan(base({ routingMode: 'bypass-ir', ipv6: true, dnsDirect: ['2a00:1450::1'], dnsRemote: ['[2001:4860:4860::8888]:5353'] }), opts());
+  assert.equal(p.dns.servers[0].address, '2a00:1450::1');
+  assert.deepEqual(p.dns.servers[1], { address: '2001:4860:4860::8888', port: 5353 });
+  assert.deepEqual(p.directResolverIps, ['2a00:1450::1']);
+  assert.deepEqual(p.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['2a00:1450::1'], outboundTag: 'direct' });
+});
+
+test('a private-range remote resolver is dialled direct: a LAN resolver is not reachable through the proxy', () => {
+  const p = buildDnsPlan(base({ dnsRemote: ['192.168.1.1', 'https://1.1.1.1/dns-query'] }), opts());
+  assert.deepEqual(p.dns.servers, ['192.168.1.1', 'https://1.1.1.1/dns-query']);
+  assert.deepEqual(p.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.1.1'], outboundTag: 'direct' });
+  assert.deepEqual(p.directResolverIps, ['192.168.1.1']);
+  // a public remote resolver is NOT in that list — it must ride the exit
+  assert.deepEqual(buildDnsPlan(base(), opts()).directResolverIps, []);
+});
+
 test('dropUdpDirect (strict guard): UDP direct resolvers are dropped, DoH ones kept', () => {
   const p = buildDnsPlan(base({ routingMode: 'bypass-ir', dnsDirect: ['178.22.122.100', 'https://free.shecan.ir/dns-query'] }), opts({ dropUdpDirect: true }));
   assert.equal(p.dns.servers.filter(s => typeof s === 'object').length, 1);
@@ -137,6 +170,21 @@ test('blank and duplicate entries are ignored; at least one remote server always
   assert.deepEqual(p.dns.servers, ['https://1.1.1.1/dns-query']);
   const none = buildDnsPlan(base({ dnsRemote: [] }), opts());
   assert.deepEqual(none.dns.servers, DNS_DEFAULT_REMOTE);
+});
+
+/* ----------------------------- the TUN adapter ----------------------------- */
+
+test('adapterDnsServers: the tunnel peer when the core hijacks, the plain list when it cannot', () => {
+  assert.deepEqual(adapterDnsServers(base(), '10.255.0.1'), ['10.255.0.1']);
+  // no hijack target (a sing-box-format config carries no dns-out): managed
+  // or not, the adapter needs a resolver the proxy can actually reach
+  assert.deepEqual(adapterDnsServers(base(), null), ['1.1.1.1', '8.8.8.8']);
+  assert.deepEqual(adapterDnsServers(base({ dnsRemote: ['9.9.9.9', 'https://1.1.1.1/dns-query'] }), null), ['9.9.9.9']);
+  assert.deepEqual(adapterDnsServers(base({ dnsManaged: false, dnsRemote: ['9.9.9.9'] }), '10.255.0.1'), ['9.9.9.9']);
+});
+
+test('adapterDnsServers: a host:port entry cannot be an adapter resolver and is skipped', () => {
+  assert.deepEqual(adapterDnsServers(base({ dnsManaged: false, dnsRemote: ['1.1.1.1:5353', '9.9.9.9'] }), '10.255.0.1'), ['9.9.9.9']);
 });
 
 /* ----------------------------- unmanaged (legacy) ----------------------------- */

@@ -185,28 +185,44 @@ const BLACKHOLE = { tag: 'block', protocol: 'blackhole', settings: { response: {
  * routingMode alone.
  */
 function dnsSettingsFor(s, plan) {
-  return plan.mode === 'advanced'
-    ? Object.assign({}, s, { advancedRouting: true, routeRules: plan.rules || [] })
-    : Object.assign({}, s, { advancedRouting: false });
+  if (plan.mode === 'advanced') return Object.assign({}, s, { advancedRouting: true, routeRules: plan.rules || [] });
+  // Pool emits no bypass rules, so an in-country resolver would only hand the
+  // primary exit an Iranian IP to dial from abroad — routingMode is not its.
+  if (plan.mode === 'pool') return Object.assign({}, s, { advancedRouting: false, routingMode: 'global' });
+  return Object.assign({}, s, { advancedRouting: false });
+}
+
+const SETTINGS_DEFAULTS = {
+  socksPort: 10808,
+  httpPort: 10809,
+  allowLan: false,
+  routingMode: 'global',
+  blockAds: true,
+  enableSniffing: true,
+  dnsManaged: true,
+  dnsRemote: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query'],
+  dnsDirect: ['178.22.122.100', '185.51.200.2'],
+  ipv6: false,
+  logLevel: 'warning',
+  apiPort: 10085,
+  customRules: [],
+  geoAssets: true   // geoip.dat/geosite.dat present? false -> skip geo rules
+};
+
+/**
+ * The resolver addresses the TUN layer must route past the tunnel. Under TUN
+ * every `direct` dial to a public address matches the split routes and
+ * re-enters the tunnel, so the in-country resolver's UDP query would loop into
+ * the hijack. Same defaults and plan view as buildConfig, so the two agree.
+ */
+function resolverBypassIps(planArg, settings) {
+  const s = Object.assign({}, SETTINGS_DEFAULTS, settings || {});
+  const plan = normalizePlan(planArg);
+  return buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: s.geoAssets !== false }).directResolverIps;
 }
 
 function buildConfig(planArg, settings) {
-  const s = Object.assign({
-    socksPort: 10808,
-    httpPort: 10809,
-    allowLan: false,
-    routingMode: 'global',
-    blockAds: true,
-    enableSniffing: true,
-    dnsManaged: true,
-    dnsRemote: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query'],
-    dnsDirect: ['178.22.122.100', '185.51.200.2'],
-    ipv6: false,
-    logLevel: 'warning',
-    apiPort: 10085,
-    customRules: [],
-    geoAssets: true   // geoip.dat/geosite.dat present? false -> skip geo rules
-  }, settings || {});
+  const s = Object.assign({}, SETTINGS_DEFAULTS, settings || {});
   const geo = s.geoAssets !== false;
 
   const plan = normalizePlan(planArg);
@@ -253,7 +269,11 @@ function buildConfig(planArg, settings) {
       advRules.push(rule);
     }
     const defTag = reg.tagFor(plan.def);
-    exitTag = defTag;
+    // The resolver's exit. A `block` default is a legitimate allow-list, but
+    // the blackhole can never answer a DoH query: use the first proxy the
+    // rules name, else direct.
+    exitTag = defTag !== 'block' ? defTag
+      : (advRules.map(r => r.outboundTag).find(t => t !== 'direct' && t !== 'block') || 'direct');
     reg.add(freedom(s));
     reg.add(Object.assign({}, BLACKHOLE));
     outbounds = reg.outs;
@@ -568,4 +588,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps };

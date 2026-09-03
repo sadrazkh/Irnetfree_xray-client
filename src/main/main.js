@@ -6,7 +6,7 @@ const os = require('os');
 const { spawn, execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig } = require('./configBuilder');
+const { buildConfig, buildTestConfig, resolverBypassIps } = require('./configBuilder');
 const { adapterDnsServers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
@@ -468,7 +468,7 @@ async function doConnect(serverId, opts = {}) {
   if (stale()) return abandoned;
   const byId = (id) => store.get('servers', []).find(s => s.id === id);
 
-  const { label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+  const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
   send('status', { state: 'connecting', serverId });
 
@@ -547,10 +547,17 @@ async function doConnect(serverId, opts = {}) {
     } else {
       try {
         tun.lang = settings.lang || 'fa';
-        // Managed DNS: the adapter's resolver is the tunnel's own peer, so
-        // every system query enters the TUN and is answered by dns-out. Nothing
-        // leaves the machine as plain UDP to the ISP.
-        await tun.start(settings.socksPort, entryAddrs, adapterDnsServers(settings, TUN_GW));
+        // Managed DNS: the adapter's resolver is the tunnel's own peer, so every
+        // query the OS sends there enters the TUN and is answered by dns-out.
+        // (The physical adapters keep their own resolvers until the phase-3
+        // guard overrides them.) A sing-box-format config carries no hijack, so
+        // the adapter gets a resolver the proxy can reach instead.
+        // The in-country resolver is dialled `direct` — under TUN that would
+        // re-enter the tunnel through the split routes, so it needs a bypass
+        // route exactly like the server addresses.
+        const hijacks = engineFormat(runEngine) !== 'sing-box';
+        await tun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)],
+          adapterDnsServers(settings, hijacks ? TUN_GW : null));
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
       } catch (e) {
         tunError = e.message;
