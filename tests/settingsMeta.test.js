@@ -33,6 +33,9 @@ function baseSettings(over) {
     apiPort: 10085,
     systemProxy: true,
     tunMode: false,
+    tunBackend: 'sing-box',
+    leakGuard: 'standard',
+    blockUdpInProxyMode: false,
     autoUpdateSubs: true,
     autoUpdateInterval: 60,
     customRules: [],
@@ -95,6 +98,7 @@ test('every reconnect-relevant key is detected when it changes', () => {
     routeRules: [{ type: 'ip', value: '10.0.0.0/8', target: 'srv' }],
     routeDefault: 'direct', procRouteWatch: true,
     systemProxy: false, tunMode: true,
+    tunBackend: 'tun2socks', leakGuard: 'strict', blockUdpInProxyMode: true,
     defaultEngine: 'xray-pattn'
   };
   // the fixture must cover the whole list, or this test silently stops guarding

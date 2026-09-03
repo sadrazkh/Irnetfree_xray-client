@@ -19,15 +19,21 @@
  *   point-to-point address, adds split-default + bypass routes and tunnel DNS.
  *   Privileged commands run directly when root, otherwise through a single
  *   `osascript` administrator prompt. Linux is best-effort.
+ *
+ * This is the legacy backend: tunSingbox.js (sing-box, auto_route, v4+v6) is
+ * preferred when installed. The command/route/DNS helpers both share live in
+ * tunPlatform.js; the methods below delegate to them so the surface here is
+ * unchanged.
  */
 
-const { spawn, execFile, execFileSync } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const dns = require('dns').promises;
+const platform = require('./tunPlatform');
+const { run, delay, sh, isOwnTunInterface } = platform;
 
-const ADAPTER = 'XrayTun';
+const ADAPTER = platform.TUN2SOCKS_ADAPTER;   // 'XrayTun'
 // macOS: let the kernel assign the next free utun unit. Forcing a specific
 // unit (e.g. utun123) fails when it's taken/out of range and tun2socks exits
 // before any device appears. We detect the actual device it created instead.
@@ -38,39 +44,6 @@ const TUN_GW = '10.255.0.1';
 // Split-default routes (two /1 routes) override the OS default route without
 // deleting it, so cleanup is clean and the real gateway stays intact.
 const SPLIT_ROUTES = ['0.0.0.0', '128.0.0.0'];
-
-/**
- * Is this network interface one WE create for TUN mode?
- *
- * It lives here, next to the names above, because this file is the only place
- * that knows them. The network watcher must not count our own adapter as part of
- * the machine's network: rebuilding the tunnel destroys and recreates it (on
- * Windows with a fresh GUID, on macOS possibly under a different utun unit), so
- * every recovery would otherwise look like the network change that triggers the
- * next one — a single Wi-Fi switch would rebuild forever.
- *
- * Deliberately broad on macOS: the kernel picks the utun unit, so we cannot know
- * in advance which one is ours. The cost is that a change on someone else's utun
- * (another VPN, iCloud Private Relay) does not trigger a recovery on its own —
- * far cheaper than an unbreakable rebuild loop, and a genuine change there almost
- * always moves the physical interface too.
- */
-function isOwnTunInterface(name) {
-  const n = String(name == null ? '' : name);
-  if (!n) return false;
-  if (n === ADAPTER) return true;         // Windows: the wintun adapter we name
-  if (/^utun\d*$/i.test(n)) return true;  // macOS: MAC_TUN_DEV + the unit the kernel picks
-  return n === 'tun0';                    // Linux: startLinux()'s fixed device
-}
-
-function run(cmd, args) {
-  return new Promise((resolve, reject) => {
-    execFile(cmd, args, { windowsHide: true }, (err, stdout, stderr) => {
-      if (err) return reject(new Error((stderr || err.message).toString().trim()));
-      resolve((stdout || '').toString());
-    });
-  });
-}
 
 class TunManager {
   constructor(opts = {}) {
@@ -91,6 +64,21 @@ class TunManager {
 
   /** Pick the message in the user's language (fa default). */
   msg(fa, en) { return this.lang === 'en' ? en : fa; }
+
+  /**
+   * The resolved bypass addresses of the live tunnel, under the name the
+   * sing-box backend uses (its `bypassIps` is a METHOD; here it is the array
+   * of /32 routes kept for cleanup — callers use this getter, never that).
+   */
+  get excludeIps() { return this.bypassIps.slice(); }
+
+  /**
+   * The physical NIC the machine's default route uses. The connect path binds
+   * Xray's own dials to it before the tunnel goes up (see configBuilder's
+   * bindDirectDials) — this backend needs it just as much as sing-box does:
+   * its /1 split routes are exactly what a `direct` dial would loop back into.
+   */
+  physicalInterface() { return platform.physicalInterface(); }
 
   dirs() {
     return [
@@ -116,63 +104,34 @@ class TunManager {
     return true;
   }
 
-  /**
-   * Whether TUN mode can be activated without a separate "relaunch elevated"
-   * step.
-   *  - Windows: true only when the process is already Administrator.
-   *  - macOS:   true when root OR when we can escalate per-operation through
-   *             `osascript` (a one-time password prompt at connect time).
-   *  - Linux:   true only when running as root.
-   */
-  isElevated() {
-    const plat = os.platform();
-    if (plat === 'darwin') {
-      try { if (process.getuid && process.getuid() === 0) return true; } catch {}
-      // osascript is always present on macOS → we can prompt for privileges.
-      return true;
-    }
-    if (plat !== 'win32') {
-      try { return !!(process.getuid && process.getuid() === 0); } catch { return false; }
-    }
-    try {
-      // `net session` only succeeds when elevated.
-      execFileSync('net', ['session'], { stdio: 'ignore', windowsHide: true });
-      return true;
-    } catch {
-      return false;
-    }
-  }
+  /* --- shared helpers (tunPlatform.js), kept as methods so the surface is unchanged --- */
+
+  /** Whether TUN mode can be activated without a separate "relaunch elevated" step. */
+  isElevated() { return platform.isElevated(); }
 
   /** Resolve one or many hostnames/IPs to all their IPv4 addresses. */
-  async resolveServerIps(serverAddress) {
-    const inputs = Array.isArray(serverAddress) ? serverAddress : [serverAddress];
-    const all = [];
-    for (const addr of inputs) {
-      if (!addr) continue;
-      if (/^\d+\.\d+\.\d+\.\d+$/.test(addr)) { all.push(addr); continue; }
-      try {
-        const res = await dns.lookup(addr, { family: 4, all: true });
-        for (const r of res) if (r.address) all.push(r.address);
-      } catch { /* unresolved — skip */ }
-    }
-    return [...new Set(all)];
-  }
+  resolveServerIps(serverAddress) { return platform.resolveServerIps(serverAddress); }
 
   /** Discover the current default gateway + interface index (Windows). */
-  async getDefaultGatewayWin() {
-    const ps = "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1; " +
-      "Write-Output ($r.NextHop + '|' + $r.InterfaceIndex)";
-    const out = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
-    const [nextHop, ifIndex] = out.split('|');
-    return { nextHop: nextHop && nextHop.trim(), ifIndex: ifIndex && ifIndex.trim() };
-  }
+  getDefaultGatewayWin() { return platform.getDefaultGatewayWin(); }
 
   /** Get the interface index of our TUN adapter once it exists. */
-  async getTunIfIndex() {
-    const ps = `(Get-NetAdapter -Name '${ADAPTER}' -ErrorAction SilentlyContinue).ifIndex`;
-    const out = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
-    return out ? out.split(/\s+/)[0].trim() : null;
-  }
+  getTunIfIndex() { return platform.getTunIfIndex(ADAPTER); }
+
+  /** Wait until the adapter exists AND its admin/connect state is up. */
+  waitForAdapter(name, timeout) { return platform.waitForAdapter(name, timeout); }
+
+  /** Run a privileged shell script: directly if root, else via an osascript prompt. */
+  runScriptPrivileged(scriptPath) { return platform.runScriptPrivileged(scriptPath); }
+
+  /** Parse `route -n get default` → { gateway, interface }. */
+  getDefaultRouteMac() { return platform.getDefaultRouteMac(); }
+
+  /** Map a BSD device (en0) to its networksetup service name ("Wi-Fi"). */
+  serviceForDeviceMac(device) { return platform.serviceForDeviceMac(device); }
+
+  /** Current DNS servers for a service, or [] if set to automatic/DHCP. */
+  getServiceDnsMac(service) { return platform.getServiceDnsMac(service); }
 
   /* ----------------------------- Windows ----------------------------- */
   async startWindows(socksPort, serverAddress, dnsServers) {
@@ -298,20 +257,6 @@ class TunManager {
     this.onLog(this.msg('حالت TUN فعال شد (کل سیستم).', 'TUN mode active (whole system).'), 'info');
   }
 
-  /** Wait until the adapter exists AND its admin/connect state is up. */
-  async waitForAdapter(name, timeout) {
-    const deadline = Date.now() + timeout;
-    while (Date.now() < deadline) {
-      try {
-        const ps = `(Get-NetAdapter -Name '${name}' -ErrorAction SilentlyContinue).Status`;
-        const out = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
-        if (out && /Up/i.test(out)) return true;
-      } catch {}
-      await delay(400);
-    }
-    return false;
-  }
-
   async cleanupRoutesWindows() {
     for (const net of SPLIT_ROUTES) {
       await run('route', ['delete', net, 'mask', '128.0.0.0', TUN_GW]).catch(() => {});
@@ -324,56 +269,6 @@ class TunManager {
   }
 
   /* ----------------------------- macOS ----------------------------- */
-
-  /** Run a privileged shell script: directly if root, else via an osascript
-   * GUI prompt (`do shell script ... with administrator privileges`). */
-  async runScriptPrivileged(scriptPath) {
-    const isRoot = !!(process.getuid && process.getuid() === 0);
-    if (isRoot) {
-      return run('/bin/bash', [scriptPath]);
-    }
-    // AppleScript string: escape backslashes and double quotes; the path may
-    // contain spaces (e.g. ".../Application Support/IRNetFree/...").
-    const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const cmd = `do shell script "/bin/bash \\"${esc(scriptPath)}\\"" with administrator privileges`;
-    return run('osascript', ['-e', cmd]);
-  }
-
-  /** Parse `route -n get default` → { gateway, interface }. */
-  async getDefaultRouteMac() {
-    let out = '';
-    try { out = await run('route', ['-n', 'get', 'default']); } catch { out = ''; }
-    const gw = (out.match(/gateway:\s*([^\s]+)/) || [])[1] || '';
-    const dev = (out.match(/interface:\s*([^\s]+)/) || [])[1] || '';
-    return { gateway: gw.trim(), device: dev.trim() };
-  }
-
-  /** Map a BSD device (en0) to its networksetup service name ("Wi-Fi"). */
-  async serviceForDeviceMac(device) {
-    if (!device) return null;
-    let out = '';
-    try { out = await run('networksetup', ['-listnetworkserviceorder']); } catch { return null; }
-    // Blocks look like:
-    //   (1) Wi-Fi
-    //   (Hardware Port: Wi-Fi, Device: en0)
-    const lines = out.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (new RegExp(`Device:\\s*${device}\\)`).test(lines[i])) {
-        const name = (lines[i - 1] || '').replace(/^\(\d+\)\s*/, '').trim();
-        if (name) return name;
-      }
-    }
-    return null;
-  }
-
-  /** Current DNS servers for a service, or [] if set to automatic/DHCP. */
-  async getServiceDnsMac(service) {
-    if (!service) return [];
-    let out = '';
-    try { out = await run('networksetup', ['-getdnsservers', service]); } catch { return []; }
-    if (/aren't any|any DNS Servers/i.test(out)) return [];
-    return out.split('\n').map(s => s.trim()).filter(s => /^\d+\.\d+\.\d+\.\d+$/.test(s) || s.includes(':'));
-  }
 
   async startMac(socksPort, serverAddress, dnsServers) {
     const bin = this.tun2socksPath();
@@ -411,7 +306,6 @@ class TunManager {
     const reqDev = MAC_TUN_DEV;
     const dns1 = this.dnsServers[0] || '1.1.1.1';
     const dns2 = this.dnsServers[1] || '';
-    const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`; // single-quote for bash
 
     const bypassAdd = ips.map(ip => `route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1 || true`).join('\n');
     const dnsLine = service
@@ -561,7 +455,6 @@ class TunManager {
     this.stopMacLogTail();
     const st = this.macState || {};
     const dns1 = (st.savedDns && st.savedDns.length) ? st.savedDns.join(' ') : 'Empty';
-    const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
     const dev = st.dev || '';
     const lines = ['#!/bin/bash'];
     if (st.macPid) lines.push(`kill ${st.macPid} 2>/dev/null || true`);
@@ -684,6 +577,7 @@ class TunManager {
   }
 }
 
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-
+// isOwnTunInterface lives in tunPlatform.js now (it knows both backends'
+// adapter names); re-exported so main.js / service.js / the tests keep their
+// import.
 module.exports = { TunManager, isOwnTunInterface, TUN_GW };

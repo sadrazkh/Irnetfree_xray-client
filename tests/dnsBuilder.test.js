@@ -32,10 +32,10 @@ test('global: remote DoH only, hijack on, queries routed to the exit', () => {
     queryStrategy: 'UseIPv4',
     servers: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']
   });
-  // nonIPQuery is pinned: older cores default to "skip", which forwards
-  // PTR/SRV/TXT queries to their original destination — under TUN that is the
-  // tunnel peer, so the packet would loop straight back into the hijack.
-  assert.deepEqual(p.hijackOutbound, { tag: 'dns-out', protocol: 'dns', settings: { nonIPQuery: 'reject' } });
+  // Non-IP queries (PTR/SRV/TXT…) are REFUSED: forwarded to their original
+  // destination they would loop back into the hijack under TUN. The `rules`
+  // form is the one both cores accept without a deprecation warning.
+  assert.deepEqual(p.hijackOutbound, { tag: 'dns-out', protocol: 'dns', settings: { rules: [{ action: 'return', rCode: 5, qType: '0,2-27,29-65535' }] } });
   assert.deepEqual(p.rules, [
     { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
     { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }

@@ -901,3 +901,33 @@ test('migrateStoredServer: a hand-edited string dns is normalised into the lists
   assert.equal(migrateStoredServer(s).dns !== s.dns, true, 'input never mutated');
   assert.equal(typeof s.dns, 'string');
 });
+
+/* ----------------------------- certificate pin (see certPin.js) ----------------------------- */
+
+const PIN = 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde';
+const pinned = () => Object.assign(
+  parseLink('vless://uuid-a@a.example.com:443?type=ws&security=tls&sni=a.example.com&allowInsecure=1#Pinned'),
+  { certPin: PIN, certPinAt: '2026-09-03T12:00:00.000Z' });
+
+test('applyServerEdits: clearCertPin drops the pin and its timestamp; any other edit keeps them', () => {
+  const s = pinned();
+  const kept = applyServerEdits(s, { name: 'Renamed', sni: 'other.example.com', allowInsecure: true });
+  assert.equal(kept.certPin, PIN);
+  assert.equal(kept.certPinAt, '2026-09-03T12:00:00.000Z');
+  assert.equal(kept.outbound.streamSettings.tlsSettings.allowInsecure, true);
+
+  const cleared = applyServerEdits(s, { clearCertPin: true });
+  assert.equal('certPin' in cleared, false);
+  assert.equal('certPinAt' in cleared, false);
+  assert.equal(cleared.name, 'Pinned', 'nothing else changed');
+  assert.equal(s.certPin, PIN, 'input never mutated');
+  assert.equal('certPin' in applyServerEdits(s, { clearCertPin: false }), true);
+});
+
+test('share links keep allowInsecure=1 (other clients still understand it); the pin stays on the record', () => {
+  const link = buildShareLink(pinned());
+  assert.match(link, /[?&]allowInsecure=1/);
+  assert.equal(/certPin|pinnedPeerCertSha256/i.test(link), false);
+  assert.equal(parseLink(link).outbound.streamSettings.tlsSettings.allowInsecure, true);
+  assert.equal('certPin' in parseLink(link), false, 'a fresh import starts unpinned');
+});
