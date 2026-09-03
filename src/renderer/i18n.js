@@ -51,6 +51,8 @@ const I18N = {
     'wg.confLoaded': 'فایل خوانده شد — فیلدها پر شدند',
     'wg.confFailed': 'فایل WireGuard خوانده نشد',
     'wg.addrHint': '«Address» باید آدرس محلی خودت در کانفیگ WireGuard باشد و حتماً /32 (مثل 10.8.0.2/32). برای دسترسی به رنج دیتابیس، رنج را در «Allowed IPs» بگذار (مثل 192.168.60.0/24) یا 0.0.0.0/0 را نگه دار.',
+    'wg.dns': 'DNS (اختیاری)',
+    'wg.dnsHint': 'اگر کانفیگ شرکتی خط DNS دارد همان را بگذار (مثل 192.168.60.1). دامنه‌های جست‌وجو را هم می‌توانی با کاما اضافه کنی (tes.systems) تا نام‌های داخلی مستقیم از همین DNS پرسیده شوند.',
 
     'edit.title': 'ویرایش سرور', 'edit.name': 'نام', 'edit.address': 'Address — سرور/IP واقعی (اتصال اینجا می‌رود)', 'edit.port': 'پورت',
     'edit.uuid': 'شناسه (UUID)', 'edit.password': 'رمز عبور',
@@ -361,6 +363,8 @@ const I18N = {
     'wg.confLoaded': 'File read — fields filled in',
     'wg.confFailed': 'Could not read the WireGuard file',
     'wg.addrHint': '“Address” is your own local IP from the WireGuard config and must be /32 (e.g. 10.8.0.2/32). To reach a database range, put the range in “Allowed IPs” (e.g. 192.168.60.0/24) or keep 0.0.0.0/0.',
+    'wg.dns': 'DNS (optional)',
+    'wg.dnsHint': 'If the corporate config has a DNS line, put it here (e.g. 192.168.60.1). You can add search domains after a comma (tes.systems) so internal names are asked of this resolver directly.',
 
     'edit.title': 'Edit server', 'edit.name': 'Name', 'edit.address': 'Address — real server/IP (connection goes here)', 'edit.port': 'Port',
     'edit.uuid': 'UUID', 'edit.password': 'Password',

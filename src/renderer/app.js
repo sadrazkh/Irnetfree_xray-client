@@ -1710,6 +1710,8 @@ function readServerFields(s) {
     f.wgMtu = (ob.settings && ob.settings.mtu) || 1420;
     f.wgReserved = (ob.settings && ob.settings.reserved || []).join(',');
     f.wgAllowed = (peer && peer.allowedIPs || []).join(', ');
+    // One field, as wg-quick writes it: resolvers first, then search domains.
+    f.wgDns = [...(s.dns || []), ...(s.dnsDomains || [])].join(', ');
   }
 
   // transport details
@@ -1863,6 +1865,7 @@ function openEdit(id) {
     $('#edWgMtu').value = f.wgMtu || 1420;
     $('#edWgReserved').value = f.wgReserved || '';
     $('#edWgAllowed').value = f.wgAllowed || '';
+    $('#edWgDns').value = f.wgDns || '';
   }
 
   $('#editModal').hidden = false;
@@ -1965,7 +1968,11 @@ $('#editSave').onclick = async () => {
     if (orig.alpn) fields.alpn = orig.alpn;
   } else if (proto === 'wireguard') {
     fields.publicKey = $('#edWgPub').value.trim();
-    fields.address = $('#edWgAddr').value.trim();
+    // `address` above is the ENDPOINT host (#edAddress); the interface address
+    // is its own key. Sending both under `address` is what overwrote the
+    // endpoint with "10.10.10.42/32" and stopped the core from starting.
+    fields.localAddress = $('#edWgAddr').value.trim();
+    fields.dns = $('#edWgDns').value.trim();
     fields.presharedKey = $('#edWgPsk').value.trim();
     fields.mtu = $('#edWgMtu').value;
     fields.reserved = $('#edWgReserved').value.trim();
@@ -2078,6 +2085,7 @@ async function fillWgFormFromConf(text) {
   $('#wgPsk').value = f.presharedKey || '';
   $('#wgMtu').value = f.mtu || 1420;
   $('#wgReserved').value = f.reserved || '';
+  $('#wgDns').value = f.dns || '';
   $('#wgConfHint').textContent = t('wg.confLoaded');
 }
 
@@ -2091,7 +2099,8 @@ $('#btnWgAdd').onclick = async () => {
     allowedIPs: $('#wgAllowed').value.trim(),
     presharedKey: $('#wgPsk').value.trim(),
     mtu: $('#wgMtu').value,
-    reserved: $('#wgReserved').value.trim()
+    reserved: $('#wgReserved').value.trim(),
+    dns: $('#wgDns').value.trim()
   };
   if (!fields.endpoint || !fields.privateKey || !fields.publicKey) {
     return toast(t('t.wgMissing'), 'err');
@@ -2105,7 +2114,7 @@ $('#btnWgAdd').onclick = async () => {
   if (!state.selectedServerId) state.selectedServerId = res.server.id;
   renderServers(); renderPicker(); renderChains();
   $('#wgBox').hidden = true;
-  ['wgName', 'wgEndpoint', 'wgPrivate', 'wgPublic', 'wgAddress', 'wgAllowed', 'wgPsk', 'wgReserved'].forEach(id => { $('#' + id).value = ''; });
+  ['wgName', 'wgEndpoint', 'wgPrivate', 'wgPublic', 'wgAddress', 'wgAllowed', 'wgPsk', 'wgReserved', 'wgDns'].forEach(id => { $('#' + id).value = ''; });
   $('#wgMtu').value = 1420;
   toast(t('t.wgAdded'), 'ok');
 };
