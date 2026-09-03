@@ -633,8 +633,17 @@ function createService(opts = {}) {
             level: settings.leakGuard,
             peer4: tun.dnsPeer || TUN_GW,
             peer6: settings.ipv6 ? tun.dnsPeer6 : null,
-            tunAlias: tun.interfaceName || 'XrayTun',
-            backend: tun.backendId || null
+            // macOS: the strict level's pf anchor has to name the REAL tunnel
+            // device (the utun the backend was given at start), not the Windows
+            // adapter name — a ruleset that cannot name the tunnel would block
+            // the machine's whole network.
+            tunAlias: (process.platform === 'darwin' && tun.macState && tun.macState.dev) || tun.interfaceName || 'XrayTun',
+            backend: tun.backendId || null,
+            // What may still leave through the physical adapters at the strict
+            // level: the tunnel's own bypass list (the resolved server entry IPs
+            // and the direct resolvers). Read AFTER start — that is when the
+            // backend has resolved them.
+            excludes: tun.excludeIps || []
           });
           guardEngaged = true;
         } catch (e) {
@@ -645,6 +654,18 @@ function createService(opts = {}) {
           guardError = e.message;
           send('log', { line: 'Leak guard failed: ' + e.message + ' — the tunnel is up, but the physical adapters keep their own DNS', level: 'error' });
         }
+      }
+    } else if (settings.blockUdpInProxyMode) {
+      // Proxy mode carries no UDP at all, so WebRTC's question to a STUN server
+      // goes around the proxy and comes back with the real address. This is the
+      // only thing we can do about it without a tunnel. Windows only; a failure
+      // is logged and nothing more — the proxy itself is up and working.
+      try {
+        await leakGuard.engageUdpBlock({ excludes: entryAddrs });
+        guardEngaged = true;
+      } catch (e) {
+        guardError = e.message;
+        send('log', { line: 'UDP block failed: ' + e.message + ' — WebRTC can still reveal your address in proxy mode', level: 'error' });
       }
     }
     // tun.start() is the longest await here (a privileged shell round trip) — the
