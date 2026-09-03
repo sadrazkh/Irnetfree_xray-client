@@ -51,6 +51,42 @@ const VIRTUAL_RE = 'Wintun|TAP|Loopback|Hyper-V|VMware|VirtualBox|Bluetooth';
 
 const PS_FLAGS = ['-NoProfile', '-NonInteractive'];
 
+/**
+ * Every firewall rule we make carries this group, and the group is the only
+ * handle we ever remove by — so one `Remove-NetFirewallRule -Group` clears the
+ * strict rules and the proxy-mode UDP block together, and cannot touch anything
+ * else. In particular it cannot touch main.js's kill switch: that is a `netsh`
+ * rule NAMED 'IRNetFree KillSwitch' and netsh rules carry no group, so neither
+ * side can remove the other's. The two are independent on purpose — the kill
+ * switch is armed on an unexpected drop and stays until the user says otherwise.
+ */
+const FW_GROUP = 'IRNetFree';
+
+/**
+ * What may still leave a physical adapter under the strict guard, on top of the
+ * server entry IPs and the resolver bypass addresses the caller passes in: the
+ * private ranges (the LAN, the router, the printer), link-local, loopback,
+ * CGNAT, multicast, and the tunnel's own subnet. Everything else is blocked, so
+ * an app that binds to the physical NIC on purpose — WebRTC/STUN, a client with
+ * its own routes, anything dialling while the TUN is down for a moment — has
+ * nowhere to go but the tunnel.
+ */
+const GUARD_EXCLUDES = [
+  '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16',
+  '127.0.0.0/8', '224.0.0.0/4', '100.64.0.0/10', '172.19.0.0/30'
+];
+
+/** Every UDP remote port except 53. The address ranges narrow it further. */
+const UDP_KEEP_PORTS = ['1-52', '54-65535'];
+
+/* pf, on macOS: our rules live in one anchor, in files only root can write. */
+const PF_ANCHOR = 'irnetfree';
+const PF_ANCHOR_FILE = '/etc/pf.anchors/irnetfree';
+const PF_MAIN_FILE = '/etc/pf.anchors/irnetfree.conf';
+const PF_MARK = 'IRNF_PF_WAS';
+/** An address or CIDR, either family — never a hostname, never a shell word. */
+const PF_ADDR_RE = /^[0-9a-fA-F.:]+(\/\d{1,3})?$/;
+
 /* ----------------------------- small shared bits ----------------------------- */
 
 /** Single-quote a value for PowerShell (a quote inside doubles itself). */
@@ -65,6 +101,77 @@ function addrList(v) {
 
 const aliasOf = (a) => (a && typeof a === 'object' ? a.alias : a);
 const nameOf = (s) => (s && typeof s === 'object' ? s.name : s);
+
+/* ----------------------------- address maths ----------------------------- */
+
+const IP_MAX = 4294967295;
+
+function ipToInt(s) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(s == null ? '' : s).trim());
+  if (!m) return null;
+  let n = 0;
+  for (let i = 1; i <= 4; i++) {
+    const o = Number(m[i]);
+    if (o > 255) return null;
+    n = n * 256 + o;
+  }
+  return n;
+}
+
+function intToIp(n) {
+  return [Math.floor(n / 16777216) % 256, Math.floor(n / 65536) % 256, Math.floor(n / 256) % 256, n % 256].join('.');
+}
+
+/**
+ * `[first, last]` for `1.2.3.4`, `1.2.3.0/24` or `1.2.3.4-1.2.3.9`; null for
+ * anything this layer cannot block — a v6 address (sing-box's `strict_route`
+ * blocks v6 off-TUN by itself), a hostname we never resolved, junk out of a
+ * hand-edited setting. A host address with a prefix is taken as its network,
+ * which is what `192.168.8.63/24` obviously means.
+ */
+function parseRange(entry) {
+  const s = String(entry == null ? '' : entry).trim();
+  if (!s || s.includes(':')) return null;
+  const dash = s.indexOf('-');
+  if (dash > 0) {
+    const a = ipToInt(s.slice(0, dash));
+    const b = ipToInt(s.slice(dash + 1));
+    return (a == null || b == null || b < a) ? null : [a, b];
+  }
+  const slash = s.indexOf('/');
+  if (slash < 0) {
+    const a = ipToInt(s);
+    return a == null ? null : [a, a];
+  }
+  const a = ipToInt(s.slice(0, slash));
+  const bits = Number(s.slice(slash + 1));
+  if (a == null || !/^\d{1,2}$/.test(s.slice(slash + 1)) || bits > 32) return null;
+  const size = Math.pow(2, 32 - bits);
+  const lo = Math.floor(a / size) * size;
+  return [lo, lo + size - 1];
+}
+
+/**
+ * Everything in 0.0.0.0–255.255.255.255 that `excludes` does NOT cover, as
+ * `start-end` strings — the form `New-NetFirewallRule -RemoteAddress` takes.
+ *
+ * A block rule is written as its own complement because the Windows firewall
+ * has no "block everything except", and an ALLOW rule would not do: allow rules
+ * do not beat other block rules, and a rule with an empty address list means
+ * "any", i.e. the whole machine. Overlapping and adjacent excludes merge on the
+ * way through, so the caller can hand over its lists unsorted and unmerged.
+ */
+function rangeComplement(excludes) {
+  const spans = (excludes || []).map(parseRange).filter(Boolean).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const out = [];
+  let next = 0;
+  for (const [lo, hi] of spans) {
+    if (lo > next) out.push(`${intToIp(next)}-${intToIp(lo - 1)}`);
+    if (hi + 1 > next) next = hi + 1;
+  }
+  if (next <= IP_MAX) out.push(`${intToIp(next)}-${intToIp(IP_MAX)}`);
+  return out;
+}
 
 /* ----------------------------- Windows scripts ----------------------------- */
 
@@ -189,11 +296,100 @@ function winOrphanLines() {
   ];
 }
 
+/* --------------------- Windows: the strict firewall rules --------------------- */
+
+/** One outbound block rule in our group. `extra` is the part that differs. */
+function winBlockRule(display, extra) {
+  return `New-NetFirewallRule -Group ${psQuote(FW_GROUP)} -DisplayName ${psQuote(display)}`
+    + ' -Direction Outbound -Action Block -Enabled True -Profile Any'
+    + ` ${extra} | Out-Null`;
+}
+
+/**
+ * The whole group, gone. Removing by GROUP is what keeps this from ever
+ * touching the kill switch (a netsh rule with a name and no group), and what
+ * lets one call clear the strict rules and the UDP block together.
+ * `-ErrorAction SilentlyContinue` because "no rules matched" is an error, and
+ * removing rules that are not there is the normal case.
+ */
+function winGroupRemoveScript() {
+  return `Remove-NetFirewallRule -Group ${psQuote(FW_GROUP)} -ErrorAction SilentlyContinue`;
+}
+
+/**
+ * Strict: every physical adapter blocks outbound TCP and UDP to everything
+ * except the excludes (see rangeComplement). The tunnel adapter is not named,
+ * so the tunnel itself is untouched; the server's entry IP is a hole in the
+ * block, so sing-box/Xray can still reach it from the physical NIC.
+ *
+ * The removal goes first so re-engaging — a server switch under TUN — replaces
+ * the rules instead of stacking a second set of them.
+ *
+ * With no ranges nothing is emitted at all: an empty `-RemoteAddress` means
+ * "Any" to New-NetFirewallRule, so the "block nothing" case would silently
+ * become "block the whole machine".
+ */
+function winStrictApplyScript({ adapters, ranges } = {}) {
+  const list = (ranges || []).filter(Boolean);
+  const lines = ["$ErrorActionPreference = 'Stop'", winGroupRemoveScript()];
+  if (list.length) {
+    for (const a of adapters || []) {
+      const alias = aliasOf(a);
+      for (const proto of ['TCP', 'UDP']) {
+        lines.push(winBlockRule(`${FW_GROUP} strict ${proto} ${alias}`,
+          `-InterfaceAlias ${psQuote(alias)} -Protocol ${proto} -RemoteAddress @(${psList(list)})`));
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Proxy mode's UDP block: WebRTC asks a STUN server on the internet for the
+ * machine's real address over UDP, and the system proxy does not carry UDP at
+ * all — so that question, and the answer, go around the proxy. This blocks it.
+ *
+ * Port 53 stays open (the resolver), and so does the whole LAN: the ranges are
+ * the same public-internet complement the strict level uses, which is what
+ * keeps DHCP renewals (unicast to the router on port 67), mDNS, SSDP and a
+ * printer working. A rule that blocked every UDP port but 53 everywhere would
+ * take the machine's DHCP lease with it a few hours into a session.
+ */
+function winUdpBlockApplyScript({ adapters, ranges } = {}) {
+  const list = (ranges || []).filter(Boolean);
+  const lines = ["$ErrorActionPreference = 'Stop'", winGroupRemoveScript()];
+  if (list.length) {
+    for (const a of adapters || []) {
+      const alias = aliasOf(a);
+      lines.push(winBlockRule(`${FW_GROUP} udp ${alias}`,
+        `-InterfaceAlias ${psQuote(alias)} -Protocol UDP`
+        + ` -RemotePort @(${psList(UDP_KEEP_PORTS)}) -RemoteAddress @(${psList(list)})`));
+    }
+  }
+  return lines.join('\n');
+}
+
 const winApplyScript = (adapters, peer4, peer6) => winApplyLines(adapters, peer4, peer6).join('\n');
 const winRestoreScript = (adapters) => winRestoreLines(adapters).join('\n');
 const winOrphanKillScript = () => winOrphanLines().join('\n');
+
+/**
+ * Everything a teardown does on Windows, in ONE spawn: the orphan tunnel of a
+ * dead session (crash repair only), then our firewall rules, then the
+ * resolvers. The firewall comes before the DNS restore so the restore is never
+ * the thing left blocked, and the rules go even when the adapters cannot be put
+ * back — a block rule that outlives the app is a machine with no internet.
+ */
+function winReleaseScript(adapters, opts = {}) {
+  return [
+    ...(opts.orphans ? winOrphanLines() : []),
+    ...(opts.firewall ? [winGroupRemoveScript()] : []),
+    ...winRestoreLines(adapters)
+  ].join('\n');
+}
+
 /** Crash repair, one spawn: kill what is left of the old session, then restore. */
-const winRepairScript = (adapters) => [...winOrphanLines(), ...winRestoreLines(adapters)].join('\n');
+const winRepairScript = (adapters) => winReleaseScript(adapters, { orphans: true });
 
 /* ----------------------------- macOS scripts ----------------------------- */
 
@@ -268,11 +464,111 @@ function macOrphanLines() {
   ];
 }
 
+/* ----------------------------- macOS: the pf anchor ----------------------------- */
+
+/**
+ * The strict guard on macOS, as a pf ruleset for our own anchor.
+ *
+ * `set skip on lo0` (the obvious first line) is an OPTION, and pf takes options
+ * only in the MAIN ruleset — inside an anchor it is a parse error, so loopback
+ * gets a pass rule instead, which is the same thing for outbound traffic.
+ *
+ * Returns null when the tunnel device cannot be named: without
+ * `pass out quick on <utunN>` this ruleset is "block everything", i.e. a
+ * machine with no network at all. Neither backend hands us the device name on
+ * Windows terms, so it is checked against the shape macOS actually creates.
+ *
+ * UNVERIFIED on a real Mac — the UI labels the level experimental there.
+ */
+function macPfAnchorText({ tunDevice, excludes } = {}) {
+  const dev = String(tunDevice == null ? '' : tunDevice).trim();
+  if (!/^utun\d+$/.test(dev)) return null;
+  const list = [];
+  for (const e of [...(excludes || []), ...GUARD_EXCLUDES]) {
+    const s = String(e == null ? '' : e).trim();
+    // A hostname would make pfctl resolve it at load time (and a shell word
+    // would end up in a file we run as root) — addresses only.
+    if (!s || !PF_ADDR_RE.test(s) || list.includes(s)) continue;
+    list.push(s);
+  }
+  return [
+    `# IRNetFree strict guard — generated, loaded into anchor "${PF_ANCHOR}"`,
+    'pass out quick on lo0 all',
+    `pass out quick on ${dev} all`,
+    `pass out quick to { ${list.join(', ')} }`,
+    'block out quick inet all',
+    'block out quick inet6 all',
+    ''
+  ].join('\n');
+}
+
+/**
+ * Write the anchor and load it. Two things it deliberately does NOT do:
+ *
+ *  - edit `/etc/pf.conf`. If the running ruleset has no `anchor "irnetfree"`
+ *    line, a COPY of pf.conf plus that one line is loaded instead — and the
+ *    copy lives in the root-owned anchors directory, because a file in
+ *    world-writable /tmp fed to `pfctl` as root is a local privilege
+ *    escalation waiting for someone to notice it.
+ *  - enable pf when it is already enabled. `pfctl -E` bumps a reference count
+ *    that only a matching `-X <token>` releases; taking one every session and
+ *    never giving it back would pin pf on for other software. The marker line
+ *    tells the caller which case it was, and release() disables pf only when
+ *    this run is what enabled it.
+ */
+function macPfApplyLines(anchorText) {
+  const body = String(anchorText == null ? '' : anchorText).replace(/\n+$/, '').split('\n');
+  return [
+    'umask 077',
+    'mkdir -p /etc/pf.anchors',
+    `cat > ${PF_ANCHOR_FILE} <<'IRNF_ANCHOR'`,
+    ...body,
+    'IRNF_ANCHOR',
+    "if pfctl -s info 2>/dev/null | head -n 1 | grep -q 'Status: Enabled'; then",
+    `  echo '${PF_MARK}=enabled'`,
+    'else',
+    `  echo '${PF_MARK}=disabled'`,
+    '  pfctl -E >/dev/null 2>&1 || FAIL=1',
+    'fi',
+    `if ! pfctl -sr 2>/dev/null | grep -q 'anchor "${PF_ANCHOR}"'; then`,
+    `  { cat /etc/pf.conf; echo 'anchor "${PF_ANCHOR}"'; } > ${PF_MAIN_FILE} || FAIL=1`,
+    `  pfctl -f ${PF_MAIN_FILE} || FAIL=1`,
+    'fi',
+    `pfctl -a ${PF_ANCHOR} -f ${PF_ANCHOR_FILE} || FAIL=1`
+  ];
+}
+
+/**
+ * Flush our anchor and take its files with it — never `pfctl -F all`, which
+ * would flush the whole machine's ruleset. The anchor line may stay in the
+ * running ruleset: it then references an anchor with no rules, which filters
+ * nothing, and the next engage reuses it.
+ */
+function macPfRemoveLines(opts = {}) {
+  return [
+    `pfctl -a ${PF_ANCHOR} -F all 2>/dev/null || true`,
+    `rm -f ${PF_ANCHOR_FILE} ${PF_MAIN_FILE}`,
+    ...(opts.disable ? ['pfctl -d 2>/dev/null || true'] : [])
+  ];
+}
+
 const macApplyScript = (services, peer4, peer6) => macScript(macApplyLines(services, peer4, peer6));
 const macRestoreScript = (services) => macScript(macRestoreLines(services));
 const macOrphanKillScript = () => macScript(macOrphanLines());
+const macPfApplyScript = (anchorText) => macScript(macPfApplyLines(anchorText));
+const macPfRemoveScript = (opts) => macScript(macPfRemoveLines(opts));
+
+/** The macOS teardown, in ONE privileged script — one password prompt. */
+function macReleaseScript(services, opts = {}) {
+  return macScript([
+    ...(opts.orphans ? macOrphanLines() : []),
+    ...(opts.firewall ? macPfRemoveLines({ disable: !!opts.disablePf }) : []),
+    ...macRestoreLines(services)
+  ]);
+}
+
 /** Crash repair in ONE privileged script, so the launch asks for one password. */
-const macRepairScript = (services) => macScript([...macOrphanLines(), ...macRestoreLines(services)]);
+const macRepairScript = (services) => macReleaseScript(services, { orphans: true });
 
 /* ----------------------------- the guard ----------------------------- */
 
@@ -293,6 +589,7 @@ class LeakGuard {
     this.runScriptPrivileged = opts.runScriptPrivileged || platform.runScriptPrivileged;
     this.runSync = opts.runSync || execFileSync;
     this.platform = opts.platform || os.platform();
+    this._udpNoteLogged = false;
     // engage / release / repairAtLaunch all read-modify-delete one file. The
     // launch repair is deliberately not awaited (a macOS password prompt must
     // not hold up the window), so it can still be running when the user presses
@@ -354,12 +651,18 @@ class LeakGuard {
   }
 
   /**
-   * Point every physical adapter at the tunnel peer for this session.
-   * `level: 'off'` (and Linux, which has no portable resolver to rewrite) does
-   * nothing. Throws when the override itself fails — the caller keeps the
-   * tunnel, logs it and carries on.
+   * Point every physical adapter at the tunnel peer for this session, and — at
+   * `level: 'strict'` — firewall everything that is not the tunnel off those
+   * adapters. `level: 'off'` (and Linux, which has no portable resolver to
+   * rewrite) does nothing. Throws when the override itself fails — the caller
+   * keeps the tunnel, logs it and carries on.
+   *
+   * `excludes` are the addresses that must still reach the network directly:
+   * the resolved server entry IPs and the resolver bypass addresses of the live
+   * tunnel (`tun.excludeIps`). Without the entry IPs among them a strict block
+   * would cut the tunnel it exists to protect.
    */
-  engage({ level, peer4, peer6, tunAlias, backend } = {}) {
+  engage({ level, peer4, peer6, tunAlias, backend, excludes } = {}) {
     return this._queue(async () => {
       if (!level || level === 'off') return { engaged: false, adapters: 0 };
       if (!peer4) {
@@ -372,27 +675,51 @@ class LeakGuard {
         return { engaged: false, adapters: 0 };
       }
 
+      const strict = level === 'strict';
       const state = {
         version: 1,
         at: new Date().toISOString(),
         backend: backend || null,
         peer4,
         peer6: peer6 || null,
-        tunAlias: tunAlias || null
+        tunAlias: tunAlias || null,
+        strict: false,
+        udpBlock: false
       };
 
       let count = 0;
       let apply = null;
+      let block = null;
+      // Worked out before the state file is written: on macOS a tunnel device
+      // we cannot name means no anchor at all, and the file must not claim one.
+      const anchor = (strict && this.platform === 'darwin')
+        ? macPfAnchorText({ tunDevice: tunAlias, excludes })
+        : null;
       if (this.platform === 'win32') {
         const adapters = parseWinSnapshot(await this._powershell(winSnapshotScript(tunAlias)));
         count = adapters.length;
         state.win = { adapters };
+        state.strict = strict;
         apply = () => this._powershell(winApplyScript(adapters, peer4, peer6));
+        if (strict) {
+          const ranges = rangeComplement([...(excludes || []), ...GUARD_EXCLUDES]);
+          block = () => this._powershell(winStrictApplyScript({ adapters, ranges }));
+        }
       } else {
         const services = parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()]));
         count = services.length;
         state.mac = { services };
+        state.strict = !!anchor;
         apply = () => this._privileged('apply', macApplyScript(services, peer4, peer6));
+        if (anchor) {
+          state.pfEnabledByUs = false;
+          block = async () => {
+            const out = await this._privileged('pf', macPfApplyScript(anchor));
+            // Only OUR pfctl -E gets a pfctl -d at the end of the session.
+            state.pfEnabledByUs = new RegExp(`${PF_MARK}=disabled`).test(String(out == null ? '' : out));
+            this.writeState(state);
+          };
+        }
       }
       if (!count) {
         this.onLog('Leak guard: no physical adapter is up — nothing to point at the tunnel', 'warn');
@@ -404,8 +731,81 @@ class LeakGuard {
       this.writeState(state);
       await apply();
       this.onLog(`Leak guard: DNS of ${count} adapters → ${[peer4, peer6].filter(Boolean).join(' ')}`, 'info');
+      if (strict) {
+        if (block) {
+          await block();
+          // Not an aside: at this level a bypass rule ("send .ir direct") no
+          // longer reaches anything, because direct dials leave through the
+          // physical adapter this just blocked.
+          this.onLog(`Leak guard (strict): ${count} adapters now block every outbound address but the tunnel's`
+            + ' — traffic your rules send direct is blocked too', 'warn');
+        } else {
+          this.onLog('Leak guard (strict): could not name the tunnel device, so the pf block was skipped'
+            + ' — the DNS override is on, the rest of the traffic is not guarded', 'warn');
+        }
+      }
       return { engaged: true, adapters: count };
     });
+  }
+
+  /**
+   * Proxy mode only: block outbound UDP to the internet (except DNS) on every
+   * physical adapter, so WebRTC cannot ask a STUN server for the real address
+   * behind a proxy that carries no UDP at all. TUN mode has no use for it — the
+   * tunnel already takes UDP — and the strict guard's rules cover the same
+   * ground.
+   *
+   * The adapters are snapshotted here rather than passed in: the caller has no
+   * way to enumerate them (that is a generated script, and it is this module
+   * that owns them). They are NOT recorded in the state file — nothing here
+   * touches a resolver, and a recorded adapter is one whose DNS release() would
+   * reset.
+   */
+  engageUdpBlock({ excludes } = {}) {
+    return this._queue(async () => {
+      if (this.platform !== 'win32') {
+        if (!this._udpNoteLogged) {
+          this._udpNoteLogged = true;
+          this.onLog('Blocking UDP in proxy mode is not available on this platform yet'
+            + ' — WebRTC can still reveal your address; TUN mode covers it', 'warn');
+        }
+        return { engaged: false, adapters: 0 };
+      }
+      const adapters = parseWinSnapshot(await this._powershell(winSnapshotScript(null)));
+      if (!adapters.length) {
+        this.onLog('Leak guard: no physical adapter is up — no UDP block to apply', 'warn');
+        return { engaged: false, adapters: 0 };
+      }
+      // A state file already here belongs to a session whose DNS override is
+      // still live (a repair that could not run, most likely) — its record of
+      // the originals is the only copy there is. Add to it, never replace it.
+      const prev = this.readState();
+      const state = Object.assign({
+        version: 1, backend: null, peer4: null, peer6: null, tunAlias: null, strict: false, win: { adapters: [] }
+      }, prev || {}, { at: new Date().toISOString(), udpBlock: true });
+
+      this.writeState(state);
+      await this._powershell(winUdpBlockApplyScript({
+        adapters, ranges: rangeComplement([...(excludes || []), ...GUARD_EXCLUDES])
+      }));
+      this.onLog(`Blocked outbound UDP to the internet (except DNS) on ${adapters.length} adapters`
+        + ' — WebRTC cannot leak your address', 'info');
+      return { engaged: true, adapters: adapters.length };
+    });
+  }
+
+  /** What a release actually undid, for the log. */
+  _releasedLine(st, n, repair) {
+    const rules = st.strict ? 'firewall rules' : (st.udpBlock ? 'the UDP block' : null);
+    if (repair) {
+      if (!n) return `Removed ${rules || 'what a previous session left behind'} left from a previous session`;
+      const head = `Restored DNS of ${n} adapters left from a previous session`;
+      return rules ? `${head}, and removed its ${rules}` : head;
+    }
+    const parts = [];
+    if (n) parts.push(`DNS of ${n} adapters restored`);
+    if (rules) parts.push(`${rules} removed`);
+    return parts.length ? `Leak guard released: ${parts.join(', ')}` : 'Leak guard released';
   }
 
   /**
@@ -419,15 +819,18 @@ class LeakGuard {
       if (!st) return { released: false, adapters: 0 };
       const n = countTargets(st);
       const orphans = !!opts.orphans;
+      // Exactly what this session made: the state file says whether the strict
+      // rules or the UDP block are out there. Both live in one firewall group,
+      // so one removal clears either.
+      const firewall = !!(st.strict || st.udpBlock);
       try {
         if (this.platform === 'darwin') {
           const services = (st.mac && st.mac.services) || [];
           this._logKills(await this._privileged('restore',
-            orphans ? macRepairScript(services) : macRestoreScript(services)));
+            macReleaseScript(services, { orphans, firewall, disablePf: !!st.pfEnabledByUs })));
         } else {
           const adapters = (st.win && st.win.adapters) || [];
-          this._logKills(await this._powershell(
-            orphans ? winRepairScript(adapters) : winRestoreScript(adapters)));
+          this._logKills(await this._powershell(winReleaseScript(adapters, { orphans, firewall })));
         }
       } catch (e) {
         this.onLog(`Leak guard could not put the adapters' DNS back (${(e && e.message) || e}) — `
@@ -435,9 +838,7 @@ class LeakGuard {
         return { released: false, adapters: n, error: (e && e.message) || String(e) };
       }
       this.clearState();
-      this.onLog(opts.repair
-        ? `Restored DNS of ${n} adapters left from a previous session`
-        : `Leak guard released: DNS of ${n} adapters restored`, 'info');
+      this.onLog(this._releasedLine(st, n, !!opts.repair), 'info');
       return { released: true, adapters: n };
     });
   }
@@ -453,10 +854,11 @@ class LeakGuard {
     try {
       const st = this.readState();
       if (!st) return false;
+      const firewall = !!(st.strict || st.udpBlock);
       if (this.platform === 'win32') {
         const adapters = (st.win && st.win.adapters) || [];
-        if (!adapters.length) { this.clearState(); return false; }
-        this.runSync('powershell', [...PS_FLAGS, '-Command', winRestoreScript(adapters)],
+        if (!adapters.length && !firewall) { this.clearState(); return false; }
+        this.runSync('powershell', [...PS_FLAGS, '-Command', winReleaseScript(adapters, { firewall })],
           { timeout: 5000, stdio: 'ignore', windowsHide: true });
         this.clearState();
         return true;
@@ -464,10 +866,10 @@ class LeakGuard {
       if (this.platform === 'darwin') {
         if (!(process.getuid && process.getuid() === 0)) return false;
         const services = (st.mac && st.mac.services) || [];
-        if (!services.length) { this.clearState(); return false; }
+        if (!services.length && !firewall) { this.clearState(); return false; }
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-lg-'));
         const file = path.join(dir, 'restore.sh');
-        fs.writeFileSync(file, macRestoreScript(services), { mode: 0o700 });
+        fs.writeFileSync(file, macReleaseScript(services, { firewall, disablePf: !!st.pfEnabledByUs }), { mode: 0o700 });
         try {
           this.runSync('/bin/bash', [file], { timeout: 5000, stdio: 'ignore' });
           this.clearState();
@@ -499,8 +901,10 @@ class LeakGuard {
 }
 
 module.exports = {
-  LeakGuard, STATE_FILE,
-  psQuote, parseWinSnapshot, parseMacSnapshot,
+  LeakGuard, STATE_FILE, FW_GROUP, GUARD_EXCLUDES,
+  psQuote, parseWinSnapshot, parseMacSnapshot, rangeComplement,
   winSnapshotScript, winApplyScript, winRestoreScript, winOrphanKillScript, winRepairScript,
-  macSnapshotScript, macApplyScript, macRestoreScript, macOrphanKillScript, macRepairScript
+  winStrictApplyScript, winGroupRemoveScript, winUdpBlockApplyScript, winReleaseScript,
+  macSnapshotScript, macApplyScript, macRestoreScript, macOrphanKillScript, macRepairScript,
+  macPfAnchorText, macPfApplyScript, macPfRemoveScript, macReleaseScript
 };
