@@ -178,6 +178,14 @@ function wgResolvers(server, outboundTag) {
   return dns.slice(0, 2).map(address => ({ address, outboundTag, expectedIPs: expectedIPs.slice(), domains: domains.slice() }));
 }
 
+/** A WireGuard whose AllowedIPs is not the whole internet: it carries only those ranges. */
+function isSplitTunnelWg(server) {
+  if (!server || server.protocol !== 'wireguard') return false;
+  const peer = server.outbound && server.outbound.settings && server.outbound.settings.peers && server.outbound.settings.peers[0];
+  const allowed = ((peer && peer.allowedIPs) || []).map(a => String(a).trim()).filter(Boolean);
+  return allowed.length > 0 && !allowed.some(a => /\/0$/.test(a));
+}
+
 /**
  * The server a routing target ends at: a chain's last hop, a server looked up
  * by id, or the server object / chain array itself. `direct`, `block` and an
@@ -197,17 +205,20 @@ function targetServer(target, plan) {
  * The target resolvers for `entries` = [{ target, tag }]: every outbound the
  * plan routes to, with the tag its outbound already got (reg.tagFor REGISTERS
  * outbounds, so the caller passes the tags it has rather than asking again).
- * Deduplicated by resolver address, first entry wins.
+ * Deduplicated by resolver address: first entry wins, except that a chain to
+ * the same WireGuard replaces the direct dial — its UDP endpoint is what the
+ * chain exists to avoid.
  */
 function targetResolversFor(entries, plan) {
   const out = [];
-  const seen = new Set();
+  const at = new Map();   // address → index in out
+  const viaChain = (tag) => /^out-chain/.test(String(tag));
   for (const e of entries || []) {
     if (!e) continue;
     for (const r of wgResolvers(targetServer(e.target, plan), e.tag)) {
-      if (seen.has(r.address)) continue;
-      seen.add(r.address);
-      out.push(r);
+      const i = at.get(r.address);
+      if (i === undefined) { at.set(r.address, out.length); out.push(r); continue; }
+      if (viaChain(r.outboundTag) && !viaChain(out[i].outboundTag)) out[i] = r;
     }
   }
   return out;
@@ -256,6 +267,7 @@ function dnsSettingsFor(s, plan) {
  * the managed DoH, cached by the core; a failed lookup just leaves the rule
  * unmatched and the name intact for the exit. Not for the legacy DNS list —
  * a dead plain-UDP resolver there would make every connection wait it out.
+ * The pool is the exception (see buildPoolConfig).
  */
 function routingStrategy(s) {
   return s.dnsManaged === false ? 'IPIfNonMatch' : 'IPOnDemand';
@@ -345,9 +357,11 @@ function buildConfig(planArg, settings) {
     targets.push({ target: plan.def, tag: defTag });
     // The resolver's exit. A `block` default is a legitimate allow-list, but
     // the blackhole can never answer a DoH query: use the first proxy the
-    // rules name, else direct.
-    exitTag = defTag !== 'block' ? defTag
-      : (advRules.map(r => r.outboundTag).find(t => t !== 'direct' && t !== 'block') || 'direct');
+    // rules name whose tunnel can carry it — a split-tunnel WireGuard drops
+    // anything outside its AllowedIPs, so DoH to 1.1.1.1 would die inside it
+    // — else direct.
+    const carrier = targets.find(x => x.tag !== 'direct' && x.tag !== 'block' && !isSplitTunnelWg(targetServer(x.target, plan)));
+    exitTag = defTag !== 'block' ? defTag : (carrier ? carrier.tag : 'direct');
     reg.add(freedom(s));
     reg.add(Object.assign({}, BLACKHOLE));
     outbounds = reg.outs;
@@ -508,7 +522,10 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     dns: dnsPlan.dns,
     inbounds,
     outbounds,
-    routing: { domainStrategy: routingStrategy(s), rules }
+    // IPIfNonMatch on purpose: the pool emits no user ip rule (only the private
+    // bypass), and on demand every entry's hostname connections would wait on
+    // the PRIMARY's DoH — a dead primary costing the others ~8 s per new name.
+    routing: { domainStrategy: 'IPIfNonMatch', rules }
   };
 }
 

@@ -92,6 +92,8 @@ const shapes = {
   'advanced-cnDirect': [Object.assign({}, advanced, { rules: [{ type: 'domain', value: 'geosite:cn', target: 'direct' }] }), managed],
   'advanced-wgChainDns': [advancedWgChain, managed],
   'single-wgDns-domains': [{ mode: 'single', server: F.WG_CORP }, managed],
+  'advanced-wgDefault': [Object.assign({}, advancedWgChain, { def: 'chain:c1' }), managed],
+  'advanced-wgBlockDefault': [Object.assign({}, advancedWgChain, { def: 'block' }), managed],
   'pool-bypass-ir': [pool, Object.assign({ routingMode: 'bypass-ir' }, managed)]
 };
 for (const [name, [plan, over]] of Object.entries(shapes)) {

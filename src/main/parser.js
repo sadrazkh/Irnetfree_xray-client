@@ -9,7 +9,7 @@
  */
 
 const crypto = require('crypto');
-const net = require('net');
+const { isIP } = require('net');
 
 function uid() {
   return crypto.randomBytes(8).toString('hex');
@@ -484,10 +484,20 @@ function splitCommas(v) {
 function splitDnsField(value) {
   const dns = [], dnsDomains = [];
   for (const v of splitCommas(value || '')) {
-    if (net.isIP(v)) dns.push(v);
-    else if (v) dnsDomains.push(v.replace(/^\.+/, '').toLowerCase());
+    if (!v) continue;
+    if (isResolverEntry(v)) dns.push(v);
+    else dnsDomains.push(v.replace(/^\.+/, '').toLowerCase());
   }
   return { dns, dnsDomains };
+}
+
+/** An IP, "ip:port" or "[v6]:port" — the forms dnsBuilder takes as a resolver. */
+function isResolverEntry(v) {
+  if (isIP(v)) return true;
+  const m6 = v.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
+  if (m6) return isIP(m6[1]) === 6;
+  const m4 = v.match(/^([^:/]+):\d{1,5}$/);
+  return !!m4 && isIP(m4[1]) === 4;
 }
 
 /** Attach the WireGuard DNS lists to a record, omitting empty ones. */
@@ -920,7 +930,7 @@ function buildShareLink(server) {
       presharedkey: peer.preSharedKey || '',
       mtu: st.mtu ? String(st.mtu) : '',
       reserved: (st.reserved || []).join(','),
-      dns: [...(server.dns || []), ...(server.dnsDomains || [])].join(',')
+      dns: [...asList(server.dns), ...asList(server.dnsDomains)].join(',')
     };
     return `wireguard://${enc(st.secretKey || '')}@${server.address}:${server.port}?${qs(q)}${name}`;
   }
@@ -931,6 +941,50 @@ function buildShareLink(server) {
 
 function isPlainObject(v) {
   return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** A list field from a hand-editable store: anything that is not an array is empty. */
+function asList(v) { return Array.isArray(v) ? v : []; }
+
+/**
+ * `dns` / `dnsDomains` must be arrays of strings. store.json is hand-editable,
+ * so a string is split like the form field and anything else is dropped.
+ * Returns null when both are already well-formed (or absent).
+ */
+function repairWgDnsFields(server) {
+  const ok = (v) => Array.isArray(v) && v.every(x => typeof x === 'string');
+  const hasDns = 'dns' in server, hasDom = 'dnsDomains' in server;
+  if ((!hasDns || ok(server.dns)) && (!hasDom || ok(server.dnsDomains))) return null;
+  const fix = { dns: ok(server.dns) ? server.dns : [], dnsDomains: ok(server.dnsDomains) ? server.dnsDomains : [] };
+  for (const v of [server.dns, server.dnsDomains]) {
+    if (typeof v !== 'string') continue;
+    const sp = splitDnsField(v);
+    fix.dns = fix.dns.concat(sp.dns);
+    fix.dnsDomains = fix.dnsDomains.concat(sp.dnsDomains);
+  }
+  return fix;
+}
+
+/** A list field from a hand-editable store: anything that is not an array is empty. */
+function asList(v) { return Array.isArray(v) ? v : []; }
+
+/**
+ * `dns` / `dnsDomains` must be arrays of strings. store.json is hand-editable,
+ * so a string is split like the form field and anything else is dropped.
+ * Returns null when both are already well-formed (or absent).
+ */
+function repairWgDnsFields(server) {
+  const ok = (v) => Array.isArray(v) && v.every(x => typeof x === 'string');
+  const hasDns = 'dns' in server, hasDom = 'dnsDomains' in server;
+  if ((!hasDns || ok(server.dns)) && (!hasDom || ok(server.dnsDomains))) return null;
+  const fix = { dns: ok(server.dns) ? server.dns : [], dnsDomains: ok(server.dnsDomains) ? server.dnsDomains : [] };
+  for (const v of [server.dns, server.dnsDomains]) {
+    if (typeof v !== 'string') continue;
+    const sp = splitDnsField(v);
+    fix.dns = fix.dns.concat(sp.dns);
+    fix.dnsDomains = fix.dnsDomains.concat(sp.dnsDomains);
+  }
+  return fix;
 }
 
 /**
@@ -1044,7 +1098,8 @@ function migrateStoredServer(server) {
   const st = ob.streamSettings;
   const fm = isPlainObject(st) ? pluralFinalMask(st.finalmask) : null;
   const wg = repairWgEndpoint(server);
-  if (!dropFakeSni && !fm && !wg) return server;
+  const dnsFix = repairWgDnsFields(server);
+  if (!dropFakeSni && !fm && !wg && !dnsFix) return server;
 
   const outbound = Object.assign({}, ob);
   if (dropFakeSni) delete outbound._fakesni;
@@ -1058,12 +1113,18 @@ function migrateStoredServer(server) {
       outbound.settings = Object.assign({}, wgSt, { peers });
     }
   }
-  return Object.assign({}, server, wg ? { address: wg.host, port: wg.port } : null, { outbound });
+  const out = Object.assign({}, server, wg ? { address: wg.host, port: wg.port } : null, { outbound });
+  if (dnsFix) {
+    delete out.dns; delete out.dnsDomains;
+    if (dnsFix.dns.length) out.dns = dnsFix.dns;
+    if (dnsFix.dnsDomains.length) out.dnsDomains = dnsFix.dnsDomains;
+  }
+  return out;
 }
 
 module.exports = {
   parseLink, parseMany, b64decode, isHttpProxyLink,
   buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits,
-  parseWireguardConf, isWireguardConf,
+  parseWireguardConf, isWireguardConf, splitDnsField, splitDnsField,
   buildShareLink, migrateStoredServer
 };

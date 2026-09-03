@@ -85,6 +85,12 @@ function serverEntry(entry) {
   return port ? { address: host, port } : e;
 }
 
+/** A CIDR that only an AAAA answer could ever fall in. */
+function isV6Range(c) { return String(c).includes(':') && !/^geoip:/i.test(String(c)); }
+
+/** A CIDR that only an AAAA answer could ever fall in. */
+function isV6Range(c) { return String(c).includes(':') && !/^geoip:/i.test(String(c)); }
+
 function cleanList(list) {
   const out = [];
   for (const raw of Array.isArray(list) ? list : []) {
@@ -191,7 +197,12 @@ function buildDnsPlan(settings, opts) {
     const ent = serverEntry(t.address);
     const srv = typeof ent === 'object' ? ent : { address: ent };
     if (Array.isArray(t.domains) && t.domains.length) srv.domains = t.domains.slice();
-    if (Array.isArray(t.expectedIPs) && t.expectedIPs.length) srv.expectedIPs = t.expectedIPs.slice();
+    if (Array.isArray(t.expectedIPs) && t.expectedIPs.length) {
+      // while the core asks for A records only, an IPv6 range could never
+      // match — left in, it would reject every answer the resolver gives
+      const exp = s.ipv6 ? t.expectedIPs.slice() : t.expectedIPs.filter(c => !isV6Range(c));
+      if (exp.length) srv.expectedIPs = exp;
+    }
     servers.push(srv);
     // One rule per ip, the first target named wins. A hostname address has no
     // ip to route by: its query rides the exit like any other (and a corporate
