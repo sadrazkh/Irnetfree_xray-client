@@ -25,22 +25,62 @@ const DNS_DEFAULT_DIRECT_IR = ['178.22.122.100', '185.51.200.2'];
 /** AliDNS for the China bypass — not user-configurable (the setting is Iran-centric). */
 const DNS_DEFAULT_DIRECT_CN = ['223.5.5.5'];
 
+const net = require('net');
+
 const DNS_TAG = 'dns-internal';
 const HIJACK_TAG = 'dns-out';
 
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+const URL_SCHEME = /^[a-z+]+:\/\//i;
 
 function isDohUrl(s) {
   return /^https(\+local)?:\/\//i.test(String(s || '').trim());
 }
 
-/** "8.8.8.8" → "8.8.8.8"; "https://1.1.1.1/dns-query" → "1.1.1.1"; a hostname → null. */
+/**
+ * "host:port" / "[v6]:port" → { host, port }; anything else keeps port null.
+ * A bare IPv6 address has more than one colon and is never split.
+ */
+function splitHostPort(e) {
+  const m6 = e.match(/^\[([^\]]+)\]:(\d{1,5})$/);
+  if (m6) return { host: m6[1], port: Number(m6[2]) };
+  const m4 = e.match(/^([^:/]+):(\d{1,5})$/);
+  if (m4) return { host: m4[1], port: Number(m4[2]) };
+  return { host: e, port: null };
+}
+
+/**
+ * The address the core will dial for an entry, if it is a literal IP:
+ * "8.8.8.8" → "8.8.8.8"; "1.1.1.1:5353" → "1.1.1.1"; "https://1.1.1.1/dns-query"
+ * → "1.1.1.1"; a hostname (bare or in a URL) → null.
+ */
 function resolverIp(entry) {
   const e = String(entry || '').trim();
-  if (IPV4.test(e)) return e;
-  const m = e.match(/^[a-z+]+:\/\/([^/:?#]+)/i);
-  if (m && IPV4.test(m[1])) return m[1];
-  return null;
+  const m = e.match(/^[a-z+]+:\/\/(\[[^\]]+\]|[^/:?#]+)/i);
+  const host = m ? m[1].replace(/^\[|\]$/g, '') : splitHostPort(e).host;
+  return net.isIP(host) ? host : null;
+}
+
+/** RFC1918 / loopback / link-local / CGNAT v4, ULA / link-local / loopback v6. */
+function isPrivateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+      || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
+  }
+  return /^(fc|fd|fe80:|::1$)/i.test(ip);
+}
+
+/**
+ * A resolver entry in the shape the core accepts. A URL or a bare address is
+ * a string; "host:port" must become { address, port } — 26.3.27 rejects the
+ * string form ("first path segment in URL cannot contain colon").
+ */
+function serverEntry(entry) {
+  const e = String(entry).trim();
+  if (URL_SCHEME.test(e)) return e;
+  const { host, port } = splitHostPort(e);
+  return port ? { address: host, port } : e;
 }
 
 function cleanList(list) {
@@ -89,7 +129,7 @@ function buildDnsPlan(settings, opts) {
 
   if (s.dnsManaged === false) {
     // Legacy behaviour: the user's servers as given, nothing intercepted.
-    return { dns: { queryStrategy, servers: remote }, hijackOutbound: null, rules: [], directResolverIps: [] };
+    return { dns: { queryStrategy, servers: remote.map(serverEntry) }, hijackOutbound: null, rules: [], directResolverIps: [] };
   }
 
   const servers = [];
@@ -110,7 +150,8 @@ function buildDnsPlan(settings, opts) {
     const expected = region === 'ir' ? ['geoip:ir'] : ['geoip:cn'];
 
     for (const address of direct.slice(0, 2)) {
-      const srv = { address, domains: domains.slice() };
+      const ent = serverEntry(address);
+      const srv = Object.assign(typeof ent === 'object' ? ent : { address: ent }, { domains: domains.slice() });
       if (o.geoAssets) srv.expectedIPs = expected.slice();
       srv.skipFallback = true;   // never ask the domestic resolver about the rest of the world
       servers.push(srv);
@@ -119,7 +160,13 @@ function buildDnsPlan(settings, opts) {
     }
   }
 
-  for (const r of remote) servers.push(r);
+  for (const r of remote) {
+    servers.push(serverEntry(r));
+    // A LAN / private-range resolver (a router, a corporate DNS) is only
+    // reachable off the tunnel; the exit rule below would send it nowhere.
+    const ip = resolverIp(r);
+    if (ip && isPrivateIp(ip) && !directResolverIps.includes(ip)) directResolverIps.push(ip);
+  }
 
   // Rule order matters: the resolver's own traffic is tagged with dns.tag and
   // must be decided BEFORE the port-53 hijack, or its UDP query to the
@@ -131,21 +178,26 @@ function buildDnsPlan(settings, opts) {
 
   return {
     dns: { tag: DNS_TAG, queryStrategy, servers },
-    hijackOutbound: { tag: HIJACK_TAG, protocol: 'dns' },
+    // nonIPQuery pinned: older cores default to "skip", which forwards a
+    // PTR/SRV/TXT query to its original destination through a direct dial —
+    // under TUN that is the tunnel peer, so it would loop back into the hijack.
+    hijackOutbound: { tag: HIJACK_TAG, protocol: 'dns', settings: { nonIPQuery: 'reject' } },
     rules,
     directResolverIps
   };
 }
 
 /**
- * What the TUN adapter's DNS servers should be. Managed: the tunnel's own peer
- * address — every query then enters the TUN and is hijacked by dns-out.
- * Unmanaged: the plain-IP entries of the remote list (URLs cannot be adapter
- * DNS servers), falling back to public resolvers.
+ * What the TUN adapter's DNS servers should be. Managed, with a peer to hand
+ * the queries to: the tunnel's own address — every query then enters the TUN
+ * and is hijacked by dns-out. Otherwise (unmanaged, or a config without the
+ * hijack — the sing-box format has none — so `tunnelPeer` is null): the
+ * plain-IP entries of the remote list (a URL or a host:port cannot be an
+ * adapter DNS server), falling back to public resolvers the proxy can reach.
  */
 function adapterDnsServers(settings, tunnelPeer) {
   const s = settings || {};
-  if (s.dnsManaged !== false) return [tunnelPeer];
+  if (s.dnsManaged !== false && tunnelPeer) return [tunnelPeer];
   const ips = cleanList(s.dnsRemote != null ? s.dnsRemote : s.dns).filter(v => IPV4.test(v));
   return ips.length ? ips.slice(0, 2) : ['1.1.1.1', '8.8.8.8'];
 }

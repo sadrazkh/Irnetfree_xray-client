@@ -13,7 +13,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps } = require('../src/main/configBuilder');
 const {
   settings, ruleTags, outboundTagged, vlessWithMarkers,
   VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK
@@ -676,6 +676,47 @@ test('managed pool: the resolver follows the primary exit; per-inbound rules are
   assert.equal(e1.outboundTag, 'out-sv-trojan');
   assert.ok(c.outbounds.some(o => o.tag === 'dns-out'));
   assert.equal(c.dns.tag, 'dns-internal');
+});
+
+// Pool emits no bypass rules at all, so an in-country resolver would only hand
+// the primary exit an Iranian IP to dial from abroad (geo-fenced sites refuse
+// it) — and its UDP query would ride `direct`. routingMode is not the pool's.
+test('managed pool ignores routingMode: no in-country resolver for rules it never emits', () => {
+  const c = buildConfig(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED)));
+  assert.equal(typeof c.dns.servers[0], 'string');
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'out-sv-vless' });
+  assert.equal(JSON.stringify(c.routing.rules).includes('178.22.122.100'), false);
+});
+
+// An allow-list (rules → server, default → block) is a legitimate setup; the
+// resolver's DoH must still leave somewhere, and the blackhole is the one
+// outbound that can never answer. Use the first proxy the rules name.
+test('managed advanced with a block default: the resolver exits through the first proxy the rules use', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [{ type: 'domain', value: 'a.com', target: 'direct' }, { type: 'domain', value: 'b.com', target: 'sv-trojan' }],
+    def: 'block'
+  }), settings(Object.assign({ blockAds: false }, MANAGED)));
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'out-sv-trojan' });
+  // the catch-all is still the blackhole the user asked for
+  assert.equal(c.routing.rules[c.routing.rules.length - 1].outboundTag, 'block');
+  const onlyDirect = buildConfig(advancedPlan({
+    rules: [{ type: 'domain', value: 'a.com', target: 'direct' }],
+    def: 'block'
+  }), settings(Object.assign({ blockAds: false }, MANAGED)));
+  assert.deepEqual(onlyDirect.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'direct' });
+});
+
+// Under TUN every `direct` dial to a public address re-enters the tunnel via
+// the split routes; the TUN layer must give the in-country resolver a bypass
+// route exactly like the server addresses. This is the list it needs.
+test('resolverBypassIps: the direct resolver addresses the TUN layer must route past the tunnel', () => {
+  assert.deepEqual(resolverBypassIps(single(), settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED))), ['178.22.122.100']);
+  assert.deepEqual(resolverBypassIps(single(), settings(Object.assign({ routingMode: 'global' }, MANAGED))), []);
+  assert.deepEqual(resolverBypassIps(single(), settings({ routingMode: 'bypass-ir', dnsManaged: false })), []);
+  assert.deepEqual(resolverBypassIps(advancedPlan({
+    rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }], def: 'sv-vless'
+  }), settings(MANAGED)), ['178.22.122.100']);
+  assert.deepEqual(resolverBypassIps(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED))), []);
 });
 
 test('buildTestConfig is untouched by DNS management (no hijack, no tag)', () => {
