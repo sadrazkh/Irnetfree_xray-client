@@ -15,7 +15,7 @@ const {
   buildStreamSettings, buildWireguardOutbound,
   makeWireguardServer, makeProxyServer, applyServerEdits,
   parseWireguardConf, isWireguardConf,
-  buildShareLink, isHttpProxyLink, migrateStoredServer
+  buildShareLink, isHttpProxyLink, migrateStoredServer, splitDnsField
 } = require('../src/main/parser');
 
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
@@ -870,4 +870,34 @@ test('migrateStoredServer: does not mutate a broken wireguard server either', ()
   const before = JSON.parse(JSON.stringify(s));
   migrateStoredServer(s);
   assert.deepEqual(s, before);
+});
+
+/* --------------------------- phase 2b review fixes --------------------------- */
+
+test('splitDnsField: a resolver with a port is a resolver, not a search domain', () => {
+  // dnsBuilder accepts "ip:port" and "[v6]:port"; the field must not misfile
+  // them as search domains (an inert `domain:192.168.60.1:5353` and NO resolver)
+  assert.deepEqual(splitDnsField('192.168.60.1:5353, tes.systems'), { dns: ['192.168.60.1:5353'], dnsDomains: ['tes.systems'] });
+  assert.deepEqual(splitDnsField('[fd00::53]:53, fd00::54'), { dns: ['[fd00::53]:53', 'fd00::54'], dnsDomains: [] });
+  assert.deepEqual(splitDnsField('.Corp.Example, , 1.1.1.1'), { dns: ['1.1.1.1'], dnsDomains: ['corp.example'] });
+  assert.deepEqual(splitDnsField('host:99999'), { dns: [], dnsDomains: ['host:99999'] }, 'a name with a port is still a name');
+  assert.deepEqual(splitDnsField(''), { dns: [], dnsDomains: [] });
+});
+
+test('migrateStoredServer: a hand-edited string dns is normalised into the lists; junk is dropped', () => {
+  const s = {
+    id: 'x', name: 'wg', protocol: 'wireguard', address: 'h', port: 1, raw: '',
+    dns: '192.168.60.1, tes.systems',
+    outbound: { protocol: 'wireguard', settings: { peers: [{ endpoint: 'h:1' }] } }
+  };
+  const out = migrateStoredServer(s);
+  assert.notEqual(out, s);
+  assert.deepEqual(out.dns, ['192.168.60.1']);
+  assert.deepEqual(out.dnsDomains, ['tes.systems']);
+  assert.equal(migrateStoredServer(out), out, 'nothing left to do the second time');
+  const junk = migrateStoredServer(Object.assign({}, s, { dns: 42, dnsDomains: {} }));
+  assert.equal('dns' in junk, false);
+  assert.equal('dnsDomains' in junk, false);
+  assert.equal(migrateStoredServer(s).dns !== s.dns, true, 'input never mutated');
+  assert.equal(typeof s.dns, 'string');
 });

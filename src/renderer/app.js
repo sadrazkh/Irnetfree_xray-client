@@ -893,7 +893,7 @@ async function deleteServer(id) {
     state.chains = state.chains.map(c => ({ ...c, members: (c.members || []).filter(x => x !== id) }));
     await window.api.setChains(state.chains);
   }
-  renderServers();
+  renderServers(); renderAdvanced();
   renderPicker();
   renderChains();
   renderPool();
@@ -1712,7 +1712,7 @@ function readServerFields(s) {
     f.wgReserved = (ob.settings && ob.settings.reserved || []).join(',');
     f.wgAllowed = (peer && peer.allowedIPs || []).join(', ');
     // One field, as wg-quick writes it: resolvers first, then search domains.
-    f.wgDns = [...(s.dns || []), ...(s.dnsDomains || [])].join(', ');
+    f.wgDns = [...(Array.isArray(s.dns) ? s.dns : []), ...(Array.isArray(s.dnsDomains) ? s.dnsDomains : [])].join(', ');
   }
 
   // transport details
@@ -1974,6 +1974,9 @@ $('#editSave').onclick = async () => {
     // endpoint with "10.10.10.42/32" and stopped the core from starting.
     fields.localAddress = $('#edWgAddr').value.trim();
     fields.dns = $('#edWgDns').value.trim();
+    // the endpoint field must hold the PUBLIC host — the interface address
+    // pasted here is exactly how the record used to get corrupted
+    if (!String(fields.address).trim() || String(fields.address).includes('/')) return toast(t('t.wgBadEndpoint'), 'err');
     fields.presharedKey = $('#edWgPsk').value.trim();
     fields.mtu = $('#edWgMtu').value;
     fields.reserved = $('#edWgReserved').value.trim();
@@ -1994,7 +1997,7 @@ $('#editSave').onclick = async () => {
   const res = await window.api.updateServer(id, fields);
   if (res.ok) {
     state.servers = res.servers;
-    renderServers(); renderPicker(); renderChains(); renderPool();
+    renderServers(); renderPicker(); renderChains(); renderPool(); renderAdvanced();
     closeEdit();
     toast(t('t.serverUpdated'), 'ok');
   } else {
@@ -2113,7 +2116,7 @@ $('#btnWgAdd').onclick = async () => {
   const res = await window.api.addWireguard(fields);
   state.servers = res.servers;
   if (!state.selectedServerId) state.selectedServerId = res.server.id;
-  renderServers(); renderPicker(); renderChains();
+  renderServers(); renderPicker(); renderChains(); renderAdvanced();
   $('#wgBox').hidden = true;
   ['wgName', 'wgEndpoint', 'wgPrivate', 'wgPublic', 'wgAddress', 'wgAllowed', 'wgPsk', 'wgReserved', 'wgDns'].forEach(id => { $('#' + id).value = ''; });
   $('#wgMtu').value = 1420;
@@ -2545,11 +2548,14 @@ function wgSuggestEl(s, opts) {
   if (!s) return null;
   const { value, onUse } = opts || {};
   const ranges = wgSuggestedRanges(s);
-  const dns = (s.dns || []).filter(Boolean);
+  const dns = (Array.isArray(s.dns) ? s.dns : []).filter(Boolean);
   const showRanges = !!onUse && ranges.length > 0;
   // only /0 entries: the tunnel takes everything, so there is no range to offer
-  const fullTunnel = wgAllowedIPs(s).length > 0 && !ranges.length;
-  if (!showRanges && !fullTunnel && !dns.length) return null;
+  const fullTunnel = !!onUse && wgAllowedIPs(s).length > 0 && !ranges.length;
+  // as the DEFAULT, a split-tunnel WireGuard drops every destination outside
+  // its ranges — the warning that matters there
+  const splitDefault = !onUse && ranges.length > 0;
+  if (!showRanges && !fullTunnel && !splitDefault && !dns.length) return null;
 
   const el = document.createElement('div');
   el.className = 'adv-suggest';
@@ -2563,11 +2569,15 @@ function wgSuggestEl(s, opts) {
       : `<button class="btn ghost adv-suggest-use">${escapeHtml(t('adv.sugUse'))}</button>`;
   }
   if (fullTunnel) html += `<div class="adv-suggest-line">${escapeHtml(t('adv.sugFullTunnel'))}</div>`;
+  if (splitDefault) {
+    const r = `<code>${escapeHtml(list)}</code>`;
+    html += `<div class="adv-suggest-line">⚠ ${escapeHtml(t('adv.sugSplitDefault')).replace('{ranges}', () => r)}</div>`;
+  }
   if (dns.length) {
     // task 2 resolves internal names through whichever target owns that DNS
     const addr = `<code>${escapeHtml(dns.join(', '))}</code>`;
     html += `<div class="adv-suggest-line">${escapeHtml(t('adv.sugDns')).replace('{dns}', () => addr)}</div>`;
-    if (!(s.dnsDomains || []).length) {
+    if (!(Array.isArray(s.dnsDomains) ? s.dnsDomains : []).length) {
       html += `<div class="adv-suggest-line">${escapeHtml(t('adv.sugDomains'))}</div>`;
     }
   }

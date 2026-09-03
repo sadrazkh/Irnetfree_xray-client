@@ -730,8 +730,7 @@ test('managed DNS: ip rules must fire for hostnames, so the router resolves on d
   const plans = {
     single: single(),
     chain: { mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] },
-    advanced: advancedPlan({ rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-trojan' }], def: 'sv-vless' }),
-    pool: poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }])
+    advanced: advancedPlan({ rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-trojan' }], def: 'sv-vless' })
   };
   for (const [name, plan] of Object.entries(plans)) {
     assert.equal(buildConfig(plan, settings(MANAGED)).routing.domainStrategy, 'IPOnDemand', name);
@@ -847,4 +846,49 @@ test('wgResolvers: expectedIPs come from AllowedIPs minus the full-tunnel entrie
   assert.deepEqual(wgResolvers(Object.assign({}, WG_CORP, { dns: [] }), 'out-x'), []);
   assert.deepEqual(wgResolvers(Object.assign({}, VLESS_WS_TLS, { dns: ['1.2.3.4'] }), 'out-x'), []);
   assert.deepEqual(wgResolvers(null, 'out-x'), []);
+});
+
+/* --------------------------- phase 2b review fixes --------------------------- */
+
+// The pool emits no user ip rule (only the private bypass), and on demand every
+// entry's hostname connections would wait on the PRIMARY's DoH — a dead primary
+// costing the other entries ~8 s per new name. Entries stay independent.
+test('pool keeps IPIfNonMatch: its entries must not wait on the primary’s DNS for every hostname', () => {
+  const c = buildConfig(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings(MANAGED));
+  assert.equal(c.routing.domainStrategy, 'IPIfNonMatch');
+});
+
+const CORP_IDS = { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-wgcorp': WG_CORP };
+const exitRuleOf = (c) => c.routing.rules.find(r => r.inboundTag && !r.ip).outboundTag;
+
+// A split-tunnel WireGuard drops anything outside its AllowedIPs, so DoH to
+// 1.1.1.1 would die inside it: 8 s per internal name before the corporate
+// resolver is even asked. The fallback exit must skip such a target.
+test('managed advanced, block default: the resolver never exits through a split-tunnel WireGuard', () => {
+  const split = (over) => advancedPlan(Object.assign({
+    serversById: CORP_IDS, chainsById: { c1: [VLESS_WS_TLS, WG_CORP] },
+    rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:c1' }], def: 'block'
+  }, over || {}));
+  assert.equal(exitRuleOf(buildConfig(split(), settings(MANAGED))), 'direct');
+  const withProxy = buildConfig(split({
+    rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:c1' }, { type: 'domain', value: 'b.com', target: 'sv-trojan' }]
+  }), settings(MANAGED));
+  assert.equal(exitRuleOf(withProxy), 'out-sv-trojan');
+  // the corporate resolver still rides its own chain, first
+  assert.deepEqual(withProxy.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: 'out-chain-c1' });
+  // a full-tunnel WireGuard can carry DoH, so it is an acceptable exit
+  const full = buildConfig(split({ chainsById: { c1: [VLESS_WS_TLS, WG_BAD_MASK] } }), settings(MANAGED));
+  assert.equal(exitRuleOf(full), 'out-chain-c1');
+});
+
+test('the same resolver reached directly and through a chain: the chain carries the query', () => {
+  // the WireGuard's UDP endpoint is what the chain exists to avoid; rule order
+  // must not decide which one the resolver uses
+  const c = buildConfig(advancedPlan({
+    serversById: CORP_IDS, chainsById: { c1: [VLESS_WS_TLS, WG_CORP] },
+    rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-wgcorp' }, { type: 'ip', value: '192.168.0.0/16', target: 'chain:c1' }],
+    def: 'sv-vless'
+  }), settings(MANAGED));
+  assert.equal(c.routing.rules[0].outboundTag, 'out-chain-c1');
+  assert.equal(c.dns.servers.filter(x => x && x.address === '192.168.60.1').length, 1);
 });

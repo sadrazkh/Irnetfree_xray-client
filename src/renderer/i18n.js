@@ -248,6 +248,7 @@ const I18N = {
     'adv.sugUse': 'استفاده',
     'adv.sugApplied': 'اعمال شده',
     'adv.sugFullTunnel': 'AllowedIPs این WireGuard کل ترافیک است (0.0.0.0/0)؛ رنجی برای پیشنهاد ندارد — رنج شرکت را خودت بنویس.',
+    'adv.sugSplitDefault': 'این WireGuard فقط رنج‌های {ranges} را می‌برد؛ به‌عنوان «پیش‌فرض»، هر مقصد دیگری داخل تونل دور ریخته می‌شود. برای اینترنت عادی سرور دیگری را پیش‌فرض کن.',
     'adv.sugDns': 'نام‌های داخلی از طریق همین مقصد و با DNS {dns} resolve می‌شوند.',
     'adv.sugDomains': 'برای این‌که نام‌های داخلی اول از همین DNS پرسیده شوند، دامنه‌های جست‌وجو را در تنظیمات سرور اضافه کن (مثل tes.systems).',
 
@@ -566,6 +567,7 @@ const I18N = {
     'adv.sugUse': 'Use',
     'adv.sugApplied': 'applied',
     'adv.sugFullTunnel': 'This WireGuard’s AllowedIPs is the whole internet (0.0.0.0/0); nothing to suggest — type the company ranges yourself.',
+    'adv.sugSplitDefault': 'This WireGuard only carries {ranges}; as the default, every other destination is dropped inside the tunnel. Make another server the default for ordinary traffic.',
     'adv.sugDns': 'Internal names resolve through this target via {dns}.',
     'adv.sugDomains': 'To have internal names asked of that DNS first, add search domains on the server (e.g. tes.systems).',
 

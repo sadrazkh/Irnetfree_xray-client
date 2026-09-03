@@ -117,3 +117,19 @@ Share link: `wireguard://…?dns=192.168.60.1,tes.systems` round-trips both (IPs
 
 T1 first (defines the fields). Then T2 ∥ T3. Fable whole-branch review, fix round, merge to `main`,
 tag v0.13.0, push.
+
+## Recorded trade-offs (from the branch review, 2026-09-03)
+
+- **`IPOnDemand` under managed DNS** (`routingStrategy`). Every hostname connection that reaches an
+  `ip` rule (the private-LAN bypass is in every plan) is resolved through the managed list before it is
+  routed. Measured on the real core: when the DoH path through the exit is dead, that is 4 s per server ×
+  2 = ~8 s per new name, after which the name still reaches the catch-all intact (correct, just slow).
+  Before this branch the connection went to the exit immediately — and `geoip:ir`, the private bypass and
+  the corporate range never matched a browser connection at all. Pool mode keeps `IPIfNonMatch` so its
+  entries do not wait on the primary's DoH. TUN mode is not newly affected (the OS lookup already went
+  through the hijack; the router's lookup hits the cache).
+- **Process rules widen.** A `process` rule is rewritten into learned-IP `ip` rules; on demand, a browser
+  connection whose name resolves to one of those IPs now takes the process rule's target too (TUN mode
+  already did this for IP destinations). Release-note item.
+- **`expectedIPs` from AllowedIPs** rejects a split-horizon name the corporate resolver answers with a
+  PUBLIC address; such a name then gets no answer rather than the default target. By design.

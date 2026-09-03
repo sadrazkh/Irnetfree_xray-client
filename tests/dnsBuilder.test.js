@@ -301,3 +301,15 @@ test('isDohUrl', () => {
   assert.equal(isDohUrl('1.1.1.1'), false);
   assert.equal(isDohUrl('tcp://1.1.1.1'), false);
 });
+
+/* --------------------------- phase 2b review fixes --------------------------- */
+
+test('target resolver: IPv6 ranges leave expectedIPs while ipv6 is off — no A answer could ever match them', () => {
+  const t = { address: '192.168.60.1', outboundTag: 'out-x', expectedIPs: ['fd00::/8', '10.0.0.0/8'] };
+  const v4 = buildDnsPlan(base(), opts({ targetResolvers: [t] }));
+  assert.deepEqual(v4.dns.servers.at(-1).expectedIPs, ['10.0.0.0/8']);
+  const only6 = buildDnsPlan(base(), opts({ targetResolvers: [Object.assign({}, t, { expectedIPs: ['fd00::/8'] })] }));
+  assert.equal('expectedIPs' in only6.dns.servers.at(-1), false, 'an empty filter must not reject everything');
+  const v6 = buildDnsPlan(base({ ipv6: true }), opts({ targetResolvers: [t] }));
+  assert.deepEqual(v6.dns.servers.at(-1).expectedIPs, ['fd00::/8', '10.0.0.0/8']);
+});
