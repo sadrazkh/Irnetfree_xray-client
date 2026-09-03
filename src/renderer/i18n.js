@@ -140,7 +140,15 @@ const I18N = {
 
     'settings.title': 'تنظیمات',
     'set.socks': 'پورت SOCKS', 'set.http': 'پورت HTTP',
-    'set.dns': 'DNS (با کاما)', 'set.logLevel': 'سطح لاگ',
+    'set.dnsRemote': 'DNS خارجی (از داخل تونل)', 'set.dnsDirect': 'DNS داخلی (دور زدن ایران)',
+    'set.dnsManaged': 'مدیریت DNS توسط برنامه', 'set.ipv6': 'IPv6',
+    'dns.remoteHint': 'برای همه‌ی دنیا؛ از داخل تونل می‌رود. DoH (https://…) توصیه می‌شود چون سرورهایی که UDP را می‌بندند دیگر DNS را نمی‌شکنند.',
+    'dns.directHint': 'فقط در حالت «دور زدن ایران» استفاده می‌شود: دامنه‌های ایرانی از این‌جا و مستقیم resolve می‌شوند و جواب باید IP ایرانی باشد. IP بدهید (شکن، الکترو…)؛ یک آدرس DoH با نام دامنه از داخل تونل می‌رود.',
+    'dnsm.title': 'مدیریت DNS توسط برنامه',
+    'dnsm.sub': 'روشن: هر DNS ای که به هسته برسد همین‌جا جواب داده می‌شود و در حالت TUN، DNS سیستم از تونل می‌رود. محافظت کامل در برابر نشتی (کارت‌های شبکه‌ی فیزیکی، IPv6) با گارد نشتی می‌آید. خاموش: DNS هر جا که سیستم/برنامه‌ها بفرستند می‌رود؛ محافظت ضعیف‌تر است.',
+    'ipv6.title': 'IPv6',
+    'ipv6.sub': 'خاموش (پیش‌فرض): فقط جواب‌های IPv4 استفاده می‌شود تا برنامه‌ها سراغ آدرسی نروند که تونل ندارد.',
+    'set.logLevel': 'سطح لاگ',
     'set.lang': 'زبان / Language',
     'set.theme': 'تم',
     'theme.dark': 'تیره', 'theme.light': 'روشن', 'theme.system': 'مثل سیستم',
@@ -202,7 +210,7 @@ const I18N = {
 
     /* human names for those settings, used in the apply dialog */
     'set.socksPort': 'پورت SOCKS', 'set.httpPort': 'پورت HTTP', 'set.apiPort': 'پورت API',
-    'set.allowLan': 'اشتراک در شبکه محلی',   /* set.dns / set.logLevel: reused from the settings form above */
+    'set.allowLan': 'اشتراک در شبکه محلی',   /* set.dnsRemote / set.dnsDirect / set.dnsManaged / set.ipv6 / set.logLevel: reused from the settings form above */
     'set.enableSniffing': 'Sniffing', 'set.routingMode': 'حالت روتینگ', 'set.blockAds': 'مسدودسازی تبلیغات',
     'set.customRules': 'قوانین سفارشی', 'set.advancedRouting': 'روتینگ ویژه',
     'set.routeRules': 'قوانین روتینگ', 'set.routeDefault': 'مقصد پیش‌فرض روتینگ',
@@ -442,7 +450,15 @@ const I18N = {
 
     'settings.title': 'Settings',
     'set.socks': 'SOCKS port', 'set.http': 'HTTP port',
-    'set.dns': 'DNS (comma-separated)', 'set.logLevel': 'Log level',
+    'set.dnsRemote': 'Remote DNS (through the tunnel)', 'set.dnsDirect': 'Domestic DNS (bypass Iran)',
+    'set.dnsManaged': 'DNS managed by the app', 'set.ipv6': 'IPv6',
+    'dns.remoteHint': 'For the rest of the world, sent through the tunnel. DoH (https://…) is recommended: a server that drops UDP can no longer break DNS.',
+    'dns.directHint': 'Used only in "Bypass Iran": Iranian domains are resolved here, directly, and the answer must be an Iranian IP. Give an IP (Shecan, Electro…); a DoH address with a hostname goes through the tunnel.',
+    'dnsm.title': 'DNS managed by the app',
+    'dnsm.sub': 'On: every DNS query that reaches the core is answered here, and in TUN mode the system’s DNS goes through the tunnel. Full leak protection (physical adapters, IPv6) comes with the leak guard. Off: DNS goes wherever your apps/OS send it; protection is weaker.',
+    'ipv6.title': 'IPv6',
+    'ipv6.sub': 'Off (default): only IPv4 answers are used, so apps never try an address the tunnel does not carry.',
+    'set.logLevel': 'Log level',
     'set.lang': 'زبان / Language',
     'set.theme': 'Theme',
     'theme.dark': 'Dark', 'theme.light': 'Light', 'theme.system': 'Match system',
@@ -504,7 +520,7 @@ const I18N = {
 
     /* human names for those settings, used in the apply dialog */
     'set.socksPort': 'SOCKS port', 'set.httpPort': 'HTTP port', 'set.apiPort': 'API port',
-    'set.allowLan': 'LAN sharing',           /* set.dns / set.logLevel: reused from the settings form above */
+    'set.allowLan': 'LAN sharing',           /* set.dnsRemote / set.dnsDirect / set.dnsManaged / set.ipv6 / set.logLevel: reused from the settings form above */
     'set.enableSniffing': 'Sniffing', 'set.routingMode': 'Routing mode', 'set.blockAds': 'Ad blocking',
     'set.customRules': 'Custom rules', 'set.advancedRouting': 'Advanced routing',
     'set.routeRules': 'Routing rules', 'set.routeDefault': 'Routing default target',

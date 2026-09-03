@@ -6,7 +6,8 @@ const os = require('os');
 const { spawn, execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig } = require('./configBuilder');
+const { buildConfig, buildTestConfig, resolverBypassIps } = require('./configBuilder');
+const { adapterDnsServers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
 const { chooseEngine, testEngineFor } = require('./engineChoice');
@@ -16,11 +17,12 @@ const { setSystemProxy } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('./netutils');
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
-const { TunManager, isOwnTunInterface } = require('./tunManager');
+const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
 const { StatsPoller } = require('./stats');
 const { Downloader } = require('./downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
+const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher } = require('./netWatcher');
 const https = require('https');
 
@@ -64,7 +66,13 @@ const DEFAULT_SETTINGS = {
   routingMode: 'global',
   blockAds: true,
   enableSniffing: true,
-  dns: ['1.1.1.1', '8.8.8.8'],
+  // name resolution (see dnsBuilder.js): remote over DoH through the tunnel,
+  // an in-country resolver for bypass modes, every port-53 packet answered by
+  // the core. `dnsManaged:false` restores the old "use these servers" behaviour.
+  dnsManaged: true,
+  dnsRemote: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query'],
+  dnsDirect: ['178.22.122.100', '185.51.200.2'],
+  ipv6: false,
   logLevel: 'warning',
   apiPort: 10085,
   systemProxy: true,
@@ -460,7 +468,7 @@ async function doConnect(serverId, opts = {}) {
   if (stale()) return abandoned;
   const byId = (id) => store.get('servers', []).find(s => s.id === id);
 
-  const { label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+  const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
   send('status', { state: 'connecting', serverId });
 
@@ -539,7 +547,17 @@ async function doConnect(serverId, opts = {}) {
     } else {
       try {
         tun.lang = settings.lang || 'fa';
-        await tun.start(settings.socksPort, entryAddrs, settings.dns);
+        // Managed DNS: the adapter's resolver is the tunnel's own peer, so every
+        // query the OS sends there enters the TUN and is answered by dns-out.
+        // (The physical adapters keep their own resolvers until the phase-3
+        // guard overrides them.) A sing-box-format config carries no hijack, so
+        // the adapter gets a resolver the proxy can reach instead.
+        // The in-country resolver is dialled `direct` — under TUN that would
+        // re-enter the tunnel through the split routes, so it needs a bypass
+        // route exactly like the server addresses.
+        const hijacks = engineFormat(runEngine) !== 'sing-box';
+        await tun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)],
+          adapterDnsServers(settings, hijacks ? TUN_GW : null));
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
       } catch (e) {
         tunError = e.message;
@@ -1038,6 +1056,16 @@ function migrateServers() {
   store.set('servers', migrated);
 }
 
+/**
+ * Convert a pre-phase-2 `dns` setting into `dnsRemote` / `dnsDirect`. Runs
+ * before anything reads settings, writes only when something changed.
+ */
+function migrateSettingsStore() {
+  const raw = store.get('settings', null);
+  const { settings, changed } = migrateSettings(raw);
+  if (changed) store.set('settings', settings);
+}
+
 /** Named proxy chains: [{ id, name, members:[serverId,...] }]. */
 function getChains() {
   const chains = store.get('chains', null);
@@ -1500,6 +1528,7 @@ app.whenReady().then(() => {
   });
 
   migrateServers();
+  migrateSettingsStore();
 
   const ubin = userBin();
 

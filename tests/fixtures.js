@@ -75,7 +75,13 @@ function settings(over) {
     routingMode: 'global',
     blockAds: true,
     enableSniffing: true,
-    dns: ['1.1.1.1', '8.8.8.8'],
+    // The routing-order tests below keep DNS management OFF so the rule lists
+    // stay readable; the resolver plan itself is pinned in dnsBuilder.test.js
+    // and by the "managed" tests here, which prepend it explicitly.
+    dnsManaged: false,
+    dnsRemote: ['1.1.1.1', '8.8.8.8'],
+    dnsDirect: [],
+    ipv6: false,
     logLevel: 'warning',
     apiPort: 10085,
     customRules: [],

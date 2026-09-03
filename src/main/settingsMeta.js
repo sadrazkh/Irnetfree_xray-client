@@ -25,7 +25,7 @@
 const RECONNECT_KEYS = [
   // local inbounds / core config
   'socksPort', 'httpPort', 'apiPort', 'allowLan',
-  'dns', 'logLevel', 'enableSniffing',
+  'dnsManaged', 'dnsRemote', 'dnsDirect', 'ipv6', 'logLevel', 'enableSniffing',
   // routing
   'routingMode', 'blockAds', 'customRules',
   'advancedRouting', 'routeRules', 'routeDefault', 'procRouteWatch',

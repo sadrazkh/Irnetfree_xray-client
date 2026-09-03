@@ -174,7 +174,28 @@ record the actual cause in the PR. The DNS change above is expected to fix the s
 Tests: dns section per routing mode × ipv6; hijack rule position in all four plans; migration of `dns` →
 `dnsRemote`; strict-level UDP-direct dropping.
 
+**Known limit after phase 2 (found in its review, fixed in phase 3).** Under the tun2socks backend every
+`direct` dial from Xray to a public address matches the `/1` split routes and re-enters the tunnel
+(wintun → tun2socks → `socks-in` → Xray again), so bypass-ir / bypass-cn / `direct` routing loop under TUN.
+This predates phase 2 (a second root cause for "bypass Iran does nothing" — on `main` the domestic sites
+either hung or went through the proxy). Phase 2 gives the in-country resolver a bypass route like the server
+addresses (`resolverBypassIps`), so lookups work; the *content* dial still loops under TUN. Phase 3 must fix
+it structurally — see the first bullet there. In system-proxy mode nothing loops and bypass works.
+
 ### Phase 3 — sing-box TUN and leak guard
+
+**First: `direct` must not re-enter the TUN.** The sing-box config below sends *everything* from the TUN to
+`socks-out`, so Xray's `direct` outbound (and its in-country DoH/UDP resolver traffic) would still loop.
+Two acceptable designs, to be decided by a live test on Windows before the rest of the phase:
+1. Bind Xray's `direct` outbound to the physical interface — `streamSettings.sockopt.interface: '<name>'`
+   (Xray supports it on Windows via `IP_UNICAST_IF`, on macOS via `IP_BOUND_IF`). The name comes from the
+   default-route lookup already done for the bypass routes and is re-derived on every (re)connect, so the
+   network-change recovery keeps it right. `buildConfig` takes it as `settings.directInterface`.
+2. Move the geo decision into sing-box (`route.rules` with `geoip`/`geosite` rule-sets → its own `direct`
+   outbound, bound with `auto_detect_interface`), leaving Xray only proxied traffic — duplicates the
+   routing model and needs the rule-sets downloaded.
+Option 1 is the recommendation: one line in the config, no second routing model. Keep `resolverBypassIps`
+either way (harmless, and the tun2socks fallback needs it).
 
 **New `src/main/tunSingbox.js`** (implements the same `start(socksPort, entryAddrs, opts)/stop()/active`
 surface as `TunManager`, selected by setting `tunBackend: 'sing-box' | 'tun2socks'`, default `sing-box`).
