@@ -892,3 +892,83 @@ test('the same resolver reached directly and through a chain: the chain carries 
   assert.equal(c.routing.rules[0].outboundTag, 'out-chain-c1');
   assert.equal(c.dns.servers.filter(x => x && x.address === '192.168.60.1').length, 1);
 });
+
+/* ----------------------------- certificate pinning (allowInsecure is gone) ----------------------------- */
+
+const PIN = 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde';
+/** The fixture as an Iranian link imports it (allowInsecure=1), optionally with a stored pin. */
+function insecure(server, over) {
+  const s = JSON.parse(JSON.stringify(server));
+  s.outbound.streamSettings.tlsSettings.allowInsecure = true;
+  return Object.assign(s, over || {});
+}
+const tlsOf = (c, tag) => outboundTagged(c, tag).streamSettings.tlsSettings;
+
+test('allowInsecure is never emitted — the core rejects it whether true or false', () => {
+  for (const s of [VLESS_WS_TLS, insecure(VLESS_WS_TLS)]) {
+    const tls = tlsOf(buildConfig(single(s), settings()), 'proxy');
+    assert.equal('allowInsecure' in tls, false);
+    assert.equal('pinnedPeerCertSha256' in tls, false, 'no pin on the record → the core verifies normally');
+    assert.equal(tls.serverName, 'a.example.com', 'the rest of tlsSettings is untouched');
+    assert.equal(tls.fingerprint, 'chrome');
+  }
+});
+
+test('a record with a pin emits pinnedPeerCertSha256 in the canonical form, in place of allowInsecure', () => {
+  const colons = PIN.toUpperCase().match(/../g).join(':');
+  for (const stored of [PIN, colons]) {
+    const tls = tlsOf(buildConfig(single(insecure(VLESS_WS_TLS, { certPin: stored })), settings()), 'proxy');
+    assert.equal(tls.pinnedPeerCertSha256, PIN);
+    assert.equal('allowInsecure' in tls, false);
+  }
+});
+
+test('a junk certPin is ignored rather than handed to the core', () => {
+  const tls = tlsOf(buildConfig(single(insecure(VLESS_WS_TLS, { certPin: 'not-a-hash' })), settings()), 'proxy');
+  assert.equal('pinnedPeerCertSha256' in tls, false);
+});
+
+test('the pin follows its server: a chain’s first hop, an advanced target, a pool exit, a chain: target', () => {
+  const first = insecure(VLESS_WS_TLS, { certPin: PIN });
+  const chain = buildConfig({ mode: 'chain', chain: [first, TROJAN_TCP_TLS] }, settings());
+  assert.equal(tlsOf(chain, 'proxy-h0').pinnedPeerCertSha256, PIN);
+  assert.equal('pinnedPeerCertSha256' in tlsOf(chain, 'proxy'), false, 'the exit has no pin of its own');
+  assert.equal('allowInsecure' in tlsOf(chain, 'proxy'), false);
+
+  const exit = insecure(TROJAN_TCP_TLS, { certPin: PIN });
+  const adv = buildConfig(advancedPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': exit },
+    chainsById: { c1: [VLESS_WS_TLS, exit] },
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'domain', value: 'b.com', target: 'chain:c1' }],
+    def: 'sv-vless'
+  }), settings());
+  assert.equal(tlsOf(adv, 'out-sv-trojan').pinnedPeerCertSha256, PIN);
+  assert.equal(tlsOf(adv, 'out-chain-c1').pinnedPeerCertSha256, PIN, 'the same server as a chain exit');
+  assert.equal('pinnedPeerCertSha256' in tlsOf(adv, 'out-chain-c1-h0'), false);
+  assert.equal('pinnedPeerCertSha256' in tlsOf(adv, 'out-sv-vless'), false);
+
+  const pool = buildConfig({
+    mode: 'pool', entries: [{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }], primary: 'sv-vless',
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': exit }, chainsById: {}, chain: []
+  }, settings());
+  assert.equal(tlsOf(pool, 'out-sv-trojan').pinnedPeerCertSha256, PIN);
+});
+
+test('buildTestConfig carries the pin, so a ping does not fail where a connect works', () => {
+  const pinned = insecure(VLESS_WS_TLS, { certPin: PIN });
+  assert.equal(tlsOf(buildTestConfig(pinned, 47140), 'proxy').pinnedPeerCertSha256, PIN);
+  assert.equal('allowInsecure' in tlsOf(buildTestConfig(insecure(VLESS_WS_TLS), 47141), 'proxy'), false);
+  const chain = buildTestConfig([pinned, TROJAN_TCP_TLS], 47142);
+  assert.equal(tlsOf(chain, 'proxy-h0').pinnedPeerCertSha256, PIN);
+  assert.equal('allowInsecure' in tlsOf(chain, 'proxy'), false);
+});
+
+test('pinning never touches the stored record: the link keeps allowInsecure for export', () => {
+  const s = insecure(VLESS_WS_TLS, { certPin: PIN });
+  const before = JSON.stringify(s);
+  buildConfig(single(s), settings());
+  buildTestConfig(s, 47143);
+  buildConfig({ mode: 'chain', chain: [s, TROJAN_TCP_TLS] }, settings());
+  assert.equal(JSON.stringify(s), before);
+  assert.equal(s.outbound.streamSettings.tlsSettings.allowInsecure, true);
+});
