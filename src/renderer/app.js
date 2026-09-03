@@ -275,7 +275,10 @@ function applySettingsToUI() {
   const s = state.settings;
   $('#socksPort').value = s.socksPort ?? 10808;
   $('#httpPort').value = s.httpPort ?? 10809;
-  $('#dnsInput').value = (s.dns || ['1.1.1.1', '8.8.8.8']).join(',');
+  $('#dnsRemoteInput').value = (s.dnsRemote || []).join(', ');
+  $('#dnsDirectInput').value = (s.dnsDirect || []).join(', ');
+  $('#optDnsManaged').checked = s.dnsManaged !== false;
+  $('#optIpv6').checked = !!s.ipv6;
   $('#logLevel').value = s.logLevel || 'warning';
   $('#langSelect').value = s.lang || 'fa';
   $('#defaultEngine').value = s.defaultEngine || 'xray';
@@ -292,14 +295,15 @@ function applySettingsToUI() {
   $('#customRules').value = customRulesToText(s.customRules || []);
 
   $$('#routingSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === (s.routingMode || 'global')));
-  syncDnsPreset();
+  syncPreset('#dnsRemotePreset', '#dnsRemoteInput');
+  syncPreset('#dnsDirectPreset', '#dnsDirectInput');
 }
 
-/** Reflect the current DNS value in the preset dropdown (or "custom"). */
-function syncDnsPreset() {
-  const sel = $('#dnsPreset');
+/** Reflect an input's value in its preset dropdown (or "custom"). */
+function syncPreset(selSel, inputSel) {
+  const sel = $(selSel);
   if (!sel) return;
-  const cur = ($('#dnsInput').value || '').replace(/\s/g, '');
+  const cur = ($(inputSel).value || '').replace(/\s/g, '');
   const match = Array.from(sel.options).find(o => o.value && o.value.replace(/\s/g, '') === cur);
   sel.value = match ? match.value : '';
 }
@@ -332,7 +336,10 @@ function readSettingsForm() {
   return {
     socksPort: parseInt($('#socksPort').value, 10) || 10808,
     httpPort: parseInt($('#httpPort').value, 10) || 10809,
-    dns: dnsFromInput(),
+    dnsRemote: listFromInput('#dnsRemoteInput'),
+    dnsDirect: listFromInput('#dnsDirectInput'),
+    dnsManaged: $('#optDnsManaged').checked,
+    ipv6: $('#optIpv6').checked,
     logLevel: $('#logLevel').value,
     systemProxy: $('#optSysProxy').checked,
     tunMode: $('#optTun').checked,
@@ -342,8 +349,8 @@ function readSettingsForm() {
     enableSniffing: $('#optSniff').checked
   };
 }
-function dnsFromInput() {
-  return $('#dnsInput').value.split(',').map(s => s.trim()).filter(Boolean);
+function listFromInput(sel) {
+  return $(sel).value.split(',').map(s => s.trim()).filter(Boolean);
 }
 
 /**
@@ -479,11 +486,18 @@ $('#optBlockAds').onchange = () => saveSettings({ blockAds: $('#optBlockAds').ch
 $('#optSniff').onchange = () => saveSettings({ enableSniffing: $('#optSniff').checked });
 
 /* DNS presets — pick a provider to fill the input, or type a custom value */
-$('#dnsPreset').onchange = () => {
-  const v = $('#dnsPreset').value;
-  if (v) { $('#dnsInput').value = v; saveSettings({ dns: dnsFromInput() }); toast(t('dns.set'), 'ok'); }
+$('#dnsRemotePreset').onchange = () => {
+  const v = $('#dnsRemotePreset').value;
+  if (v) { $('#dnsRemoteInput').value = v.split(',').join(', '); saveSettings({ dnsRemote: listFromInput('#dnsRemoteInput') }); toast(t('dns.set'), 'ok'); }
 };
-$('#dnsInput').oninput = () => syncDnsPreset();
+$('#dnsRemoteInput').oninput = () => syncPreset('#dnsRemotePreset', '#dnsRemoteInput');
+$('#dnsDirectPreset').onchange = () => {
+  const v = $('#dnsDirectPreset').value;
+  if (v) { $('#dnsDirectInput').value = v.split(',').join(', '); saveSettings({ dnsDirect: listFromInput('#dnsDirectInput') }); toast(t('dns.set'), 'ok'); }
+};
+$('#dnsDirectInput').oninput = () => syncPreset('#dnsDirectPreset', '#dnsDirectInput');
+$('#optDnsManaged').onchange = () => saveSettings({ dnsManaged: $('#optDnsManaged').checked });
+$('#optIpv6').onchange = () => saveSettings({ ipv6: $('#optIpv6').checked });
 
 /* kill switch toggle — read live when a drop happens, so it needs no reconnect */
 $('#optKillSwitch').onchange = async () => {
