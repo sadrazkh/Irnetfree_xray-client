@@ -595,6 +595,7 @@ async function updateLanInfo() {
 $('#btnSaveRules').onclick = async () => {
   const rules = textToCustomRules($('#customRules').value);
   await saveSettings({ customRules: rules });
+  await warnAboutGeoCodes(rules);
   toast(t('t.rulesSaved') + ' (' + rules.length + ')', 'ok');
 };
 
@@ -2796,6 +2797,24 @@ if (routingNav) routingNav.addEventListener('click', () => {
   if ((state.settings.routeRules || []).some(r => r && r.type === 'process')) loadProcList();
 });
 
+/**
+ * Ask the core whether the geo codes in these rules exist in the installed data
+ * files, and say which do not.
+ *
+ * One unknown code — `geosite:ir`, which the app itself used to suggest, is not
+ * in geosite.dat at all — makes the core refuse the ENTIRE config, and its
+ * message ("code not found in geosite.dat: IR") reads like the geo files are
+ * missing. Catching it where the rule is written is the difference between a
+ * typo and a connection that will not come up.
+ */
+async function warnAboutGeoCodes(rules) {
+  if (!window.api || !window.api.checkGeoRules) return;
+  let res = null;
+  try { res = await window.api.checkGeoRules(rules); } catch { return; }
+  if (!res || !res.checked || !res.bad || !res.bad.length) return;
+  toast(t('adv.geoBad').replace('{codes}', res.bad.join('، ')), 'err');
+}
+
 $('#btnSaveAdv').onclick = async () => {
   // collect from current state (kept in sync by the row handlers) + default select
   const rules = (state.settings.routeRules || [])
@@ -2810,6 +2829,7 @@ $('#btnSaveAdv').onclick = async () => {
   $('#advSavedHint').textContent = t('saved');
   setTimeout(() => ($('#advSavedHint').textContent = ''), 1800);
   toast(t('t.advSaved') + ' (' + rules.length + ')', 'ok');
+  await warnAboutGeoCodes(rules);
 };
 
 /* ----------------------------- live traffic stats ----------------------------- */
