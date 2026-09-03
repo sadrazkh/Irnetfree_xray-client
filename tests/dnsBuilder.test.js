@@ -172,6 +172,91 @@ test('blank and duplicate entries are ignored; at least one remote server always
   assert.deepEqual(none.dns.servers, DNS_DEFAULT_REMOTE);
 });
 
+/* ----------------------------- target resolvers ----------------------------- */
+
+// A corporate WireGuard names a resolver only its tunnel can reach. The core
+// must ask that resolver THROUGH the target outbound — and only for the names
+// the public resolver cannot answer, so browsing history never leaves for the
+// company and public names never crawl through the chain.
+const CORP = { address: '192.168.60.1', outboundTag: 'out-chain-c1', expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'], domains: ['domain:tes.systems'] };
+
+test('target resolver: appended after the remote list, as a fallback the public NXDOMAIN falls through to', () => {
+  const p = buildDnsPlan(base(), opts({ targetResolvers: [CORP] }));
+  assert.deepEqual(p.dns.servers, [
+    'https://1.1.1.1/dns-query',
+    'https://8.8.8.8/dns-query',
+    { address: '192.168.60.1', domains: ['domain:tes.systems'], expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'] }
+  ]);
+  // No skipFallback: the in-country resolver gets it because it must never be
+  // asked about the rest of the world; the corporate one is the other way
+  // round — it must remain a fallback for every name the public resolver does
+  // not know, or an internal name without a search domain is never resolved.
+  assert.equal('skipFallback' in p.dns.servers[2], false);
+});
+
+test('target resolver: its query leaves through the target, after the direct rule and before the exit rule', () => {
+  const p = buildDnsPlan(base({ routingMode: 'bypass-ir' }), opts({ targetResolvers: [CORP] }));
+  assert.deepEqual(p.rules, [
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100', '185.51.200.2'], outboundTag: 'direct' },
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: 'out-chain-c1' },
+    { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
+    { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }
+  ]);
+});
+
+test('target resolver: empty expectedIPs / domains leave no keys behind', () => {
+  const p = buildDnsPlan(base(), opts({ targetResolvers: [{ address: '192.168.60.1', outboundTag: 'out-sv-wg', expectedIPs: [], domains: [] }] }));
+  assert.deepEqual(p.dns.servers.at(-1), { address: '192.168.60.1' });
+  const bare = buildDnsPlan(base(), opts({ targetResolvers: [{ address: '192.168.60.1', outboundTag: 'out-sv-wg' }] }));
+  assert.deepEqual(bare.dns.servers.at(-1), { address: '192.168.60.1' });
+});
+
+test('target resolver: never dialled direct, even though it is a private-range address', () => {
+  // The private-range rule for the REMOTE list must not catch it: it is
+  // reachable through the target, not off the tunnel.
+  const p = buildDnsPlan(base(), opts({ targetResolvers: [CORP] }));
+  assert.deepEqual(p.directResolverIps, []);
+  assert.equal(p.rules.some(r => r.outboundTag === 'direct'), false);
+  // and a LAN resolver in the remote list still goes direct on its own
+  const both = buildDnsPlan(base({ dnsRemote: ['192.168.1.1', 'https://1.1.1.1/dns-query'] }), opts({ targetResolvers: [CORP] }));
+  assert.deepEqual(both.directResolverIps, ['192.168.1.1']);
+  assert.deepEqual(both.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.1.1'], outboundTag: 'direct' });
+  assert.deepEqual(both.rules[1], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: 'out-chain-c1' });
+});
+
+test('target resolver: ip:port becomes the object form and the rule uses the bare ip; a hostname gets no rule', () => {
+  const p = buildDnsPlan(base(), opts({ targetResolvers: [{ address: '192.168.60.1:5353', outboundTag: 'out-sv-wg', expectedIPs: ['10.0.0.0/8'] }] }));
+  assert.deepEqual(p.dns.servers.at(-1), { address: '192.168.60.1', port: 5353, expectedIPs: ['10.0.0.0/8'] });
+  assert.deepEqual(p.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: 'out-sv-wg' });
+
+  const host = buildDnsPlan(base(), opts({ targetResolvers: [{ address: 'https://dns.corp.example/dns-query', outboundTag: 'out-sv-wg' }] }));
+  assert.deepEqual(host.dns.servers.at(-1), { address: 'https://dns.corp.example/dns-query' });
+  // nothing to route by ip: the query rides the exit like any other
+  assert.deepEqual(host.rules, [
+    { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
+    { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }
+  ]);
+});
+
+test('target resolver: two entries with one ip → one rule (first target wins), both servers kept', () => {
+  // The servers may differ in domains / expectedIPs, so both stay; the routing
+  // decision for that ip can only be one outbound.
+  const p = buildDnsPlan(base(), opts({ targetResolvers: [
+    { address: '192.168.60.1', outboundTag: 'out-chain-c1', domains: ['domain:tes.systems'] },
+    { address: '192.168.60.1', outboundTag: 'out-sv-wg', domains: ['domain:hawk.local'] }
+  ] }));
+  assert.equal(p.dns.servers.length, 4);
+  assert.deepEqual(p.rules.filter(r => r.ip), [
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: 'out-chain-c1' }
+  ]);
+});
+
+test('target resolver: ignored when DNS is unmanaged — the legacy path is the user’s list verbatim', () => {
+  const p = buildDnsPlan(base({ dnsManaged: false, dnsRemote: ['9.9.9.9'] }), opts({ targetResolvers: [CORP] }));
+  assert.deepEqual(p.dns, { queryStrategy: 'UseIPv4', servers: ['9.9.9.9'] });
+  assert.deepEqual(p.rules, []);
+});
+
 /* ----------------------------- the TUN adapter ----------------------------- */
 
 test('adapterDnsServers: the tunnel peer when the core hijacks, the plain list when it cannot', () => {

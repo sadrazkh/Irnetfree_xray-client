@@ -14,7 +14,9 @@
  *   - in bypass modes, an in-country UDP resolver pinned to domestic domains,
  *     with `expectedIPs` so a poisoned answer is discarded, reached DIRECT;
  *   - a `dns` outbound that answers ANY port-53 packet entering the core, so
- *     system DNS in TUN mode never leaves the machine in plain text.
+ *     system DNS in TUN mode never leaves the machine in plain text;
+ *   - a resolver can also follow a routing target: a corporate WireGuard's
+ *     internal DNS is asked through that WireGuard's own outbound.
  *
  * Everything here is pure; configBuilder splices the result into each plan.
  */
@@ -116,7 +118,11 @@ function directRegion(s) {
 
 /**
  * @param {object} settings  dnsManaged, dnsRemote, dnsDirect, ipv6, routingMode, advancedRouting, routeRules
- * @param {object} opts      geoAssets (bool), exitTag (string), dropUdpDirect (bool, phase-3 strict guard)
+ * @param {object} opts      geoAssets (bool), exitTag (string), dropUdpDirect (bool, phase-3 strict guard),
+ *                           targetResolvers: [{ address, outboundTag, expectedIPs?, domains? }] — resolvers
+ *                           that belong to a routing target (a corporate WireGuard's DNS) and must be asked
+ *                           through that target's outbound; `address` takes the same forms as the lists,
+ *                           `domains` is already in the core's rule syntax (`domain:tes.systems`).
  */
 function buildDnsPlan(settings, opts) {
   const s = settings || {};
@@ -168,11 +174,41 @@ function buildDnsPlan(settings, opts) {
     if (ip && isPrivateIp(ip) && !directResolverIps.includes(ip)) directResolverIps.push(ip);
   }
 
+  // Resolvers that belong to a routing target (a corporate WireGuard's
+  // internal DNS). They go LAST: the public resolver answers everything it
+  // knows and only its NXDOMAIN falls through to the target's server, so
+  // public names never travel through the tunnel to the company. `domains`
+  // (the search domains) hands those names to the target's server FIRST —
+  // no public round trip, and the internal name is never shown outside —
+  // and `expectedIPs` (from AllowedIPs) discards an answer the tunnel could
+  // not carry anyway. No skipFallback: unlike the in-country resolver, this
+  // one must remain a fallback for every name nobody else knows.
+  // Their queries must leave through the target — never `direct`, so they are
+  // deliberately kept out of directResolverIps although they are private-range.
+  const targetRules = [];
+  for (const t of Array.isArray(o.targetResolvers) ? o.targetResolvers : []) {
+    if (!t || !t.address || !t.outboundTag) continue;
+    const ent = serverEntry(t.address);
+    const srv = typeof ent === 'object' ? ent : { address: ent };
+    if (Array.isArray(t.domains) && t.domains.length) srv.domains = t.domains.slice();
+    if (Array.isArray(t.expectedIPs) && t.expectedIPs.length) srv.expectedIPs = t.expectedIPs.slice();
+    servers.push(srv);
+    // One rule per ip, the first target named wins. A hostname address has no
+    // ip to route by: its query rides the exit like any other (and a corporate
+    // hostname will not resolve there — an ip is what the .conf gives anyway).
+    const ip = resolverIp(t.address);
+    if (ip && !targetRules.some(r => r.ip[0] === ip)) {
+      targetRules.push({ type: 'field', inboundTag: [DNS_TAG], ip: [ip], outboundTag: t.outboundTag });
+    }
+  }
+
   // Rule order matters: the resolver's own traffic is tagged with dns.tag and
   // must be decided BEFORE the port-53 hijack, or its UDP query to the
-  // in-country server would be captured by dns-out and loop.
+  // in-country server would be captured by dns-out and loop. Direct resolver
+  // → target resolvers → everything else to the exit → the hijack.
   const rules = [];
   if (directResolverIps.length) rules.push({ type: 'field', inboundTag: [DNS_TAG], ip: directResolverIps.slice(), outboundTag: 'direct' });
+  rules.push(...targetRules);
   rules.push({ type: 'field', inboundTag: [DNS_TAG], outboundTag: o.exitTag });
   rules.push({ type: 'field', port: '53', network: 'tcp,udp', outboundTag: HIJACK_TAG });
 

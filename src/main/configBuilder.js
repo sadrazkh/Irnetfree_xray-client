@@ -159,6 +159,60 @@ function makeRegistry(plan) {
   return { outs, add, tagFor };
 }
 
+/**
+ * Resolvers a routing target brings with it. A WireGuard server that names a
+ * DNS in its config (a corporate VPN) can resolve names nobody else knows —
+ * but only when asked THROUGH that tunnel. A chain contributes its last hop.
+ * Shape: what buildDnsPlan's `targetResolvers` takes.
+ */
+function wgResolvers(server, outboundTag) {
+  if (!server || server.protocol !== 'wireguard' || !Array.isArray(server.dns)) return [];
+  const dns = server.dns.map(d => String(d == null ? '' : d).trim()).filter(Boolean);
+  if (!dns.length) return [];
+  const peer = server.outbound && server.outbound.settings && server.outbound.settings.peers && server.outbound.settings.peers[0];
+  // AllowedIPs minus the full-tunnel entries; empty → any answer is acceptable
+  const expectedIPs = ((peer && peer.allowedIPs) || []).map(a => String(a).trim()).filter(a => a && !/\/0$/.test(a));
+  const domains = (Array.isArray(server.dnsDomains) ? server.dnsDomains : [])
+    .map(d => String(d == null ? '' : d).trim().replace(/^\.+/, '')).filter(Boolean)
+    .map(d => 'domain:' + d);
+  return dns.slice(0, 2).map(address => ({ address, outboundTag, expectedIPs: expectedIPs.slice(), domains: domains.slice() }));
+}
+
+/**
+ * The server a routing target ends at: a chain's last hop, a server looked up
+ * by id, or the server object / chain array itself. `direct`, `block` and an
+ * unknown target end nowhere. Same member filter as makeRegistry's chainTag.
+ */
+function targetServer(target, plan) {
+  const last = (list) => (list || []).filter(s => s && s.outbound).at(-1) || null;
+  if (!target || target === 'direct' || target === 'block') return null;
+  if (Array.isArray(target)) return last(target);
+  if (typeof target === 'object') return target;
+  if (target === 'chain') return last(plan.chain);
+  if (target.indexOf('chain:') === 0) return last((plan.chainsById || {})[target.slice('chain:'.length)]);
+  return (plan.serversById || {})[target] || null;
+}
+
+/**
+ * The target resolvers for `entries` = [{ target, tag }]: every outbound the
+ * plan routes to, with the tag its outbound already got (reg.tagFor REGISTERS
+ * outbounds, so the caller passes the tags it has rather than asking again).
+ * Deduplicated by resolver address, first entry wins.
+ */
+function targetResolversFor(entries, plan) {
+  const out = [];
+  const seen = new Set();
+  for (const e of entries || []) {
+    if (!e) continue;
+    for (const r of wgResolvers(targetServer(e.target, plan), e.tag)) {
+      if (seen.has(r.address)) continue;
+      seen.add(r.address);
+      out.push(r);
+    }
+  }
+  return out;
+}
+
 function normalizePlan(plan) {
   if (Array.isArray(plan)) return { mode: 'chain', chain: plan };
   if (plan && plan.mode) return plan;
@@ -236,6 +290,9 @@ function buildConfig(planArg, settings) {
   if (plan.mode === 'pool') return buildPoolConfig(plan, s, listen, sniffing);
 
   let outbounds, rules, exitTag;
+  // Every target the plan routes to, with its outbound tag — the resolver a
+  // corporate WireGuard carries must be asked through THAT outbound.
+  const targets = [];
 
   if (plan.mode === 'advanced') {
     const reg = makeRegistry(plan);
@@ -267,8 +324,10 @@ function buildConfig(planArg, settings) {
       const rule = { type: 'field', outboundTag: reg.tagFor(r.target) };
       rule[field] = value;
       advRules.push(rule);
+      targets.push({ target: r.target, tag: rule.outboundTag });
     }
     const defTag = reg.tagFor(plan.def);
+    targets.push({ target: plan.def, tag: defTag });
     // The resolver's exit. A `block` default is a legitimate allow-list, but
     // the blackhole can never answer a DoH query: use the first proxy the
     // rules name, else direct.
@@ -293,6 +352,10 @@ function buildConfig(planArg, settings) {
       : [cloneOut(plan.server.outbound, 'proxy')];
     outbounds = [...proxyOutbounds, freedom(s), Object.assign({}, BLACKHOLE)];
     exitTag = s.routingMode === 'direct' ? 'direct' : 'proxy';
+    // The exit carries the resolver — unless it is `direct` (routingMode
+    // direct): a corporate resolver asked off its tunnel simply fails, so it
+    // is not offered at all.
+    if (exitTag !== 'direct') targets.push({ target: plan.mode === 'chain' ? plan.chain : plan.server, tag: exitTag });
     // custom rules go BEFORE the catch-all so they actually take effect
     const base = buildRoutingRules(s.routingMode, s.blockAds, geo);
     const tail = base.pop(); // the final port:0-65535 catch-all
@@ -302,7 +365,7 @@ function buildConfig(planArg, settings) {
   // Name resolution (see dnsBuilder.js). Its rules go FIRST: the port-53 hijack
   // must beat the private-IP bypass, or a query to the tunnel peer 10.255.0.1
   // would be sent "direct" into nowhere instead of being answered.
-  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: geo, exitTag });
+  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: geo, exitTag, targetResolvers: targetResolversFor(targets, plan) });
   if (dnsPlan.hijackOutbound) outbounds.push(dnsPlan.hijackOutbound);
   rules = [...dnsPlan.rules, ...rules];
 
@@ -588,4 +651,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, wgResolvers };
