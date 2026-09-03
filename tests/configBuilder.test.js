@@ -606,6 +606,55 @@ test('managed bypass-ir: the in-country resolver rides direct and the domestic r
   assert.deepEqual(c.dns.servers[0].expectedIPs, ['geoip:ir']);
 });
 
+/*
+ * The strict leak guard drops the plain-UDP in-country resolver at build time:
+ * sing-box's strict_route blocks port 53 off the tunnel, so a query to
+ * 178.22.122.100:53 dialled `direct` would time out on every domestic name
+ * instead of resolving it. DoH survives (port 443) and geoip still routes the
+ * answer, so the bypass keeps working. Only under TUN — in proxy mode nothing
+ * blocks :53 and the resolver is the fast path it always was.
+ */
+test('strict under TUN drops the UDP direct resolver — and its bypass route with it', () => {
+  const strict = { tunMode: true, leakGuard: 'strict', routingMode: 'bypass-ir' };
+  const c = buildConfig(single(), settings(Object.assign({}, MANAGED, strict)));
+  assert.equal(JSON.stringify(c.dns).includes('178.22.122.100'), false, 'the UDP resolver is gone');
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
+    'with nothing to send direct, the resolver rule is the plain one');
+  assert.deepEqual(resolverBypassIps(single(), settings(Object.assign({}, MANAGED, strict))), [],
+    'nothing to bypass, so nothing punches a hole in the firewall either');
+
+  // a DoH direct resolver is untouched: it rides port 443, which strict allows
+  const doh = { dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: ['https://178.22.122.100/dns-query'] };
+  const d = buildConfig(single(), settings(Object.assign({}, doh, strict)));
+  assert.equal(d.dns.servers[0].address, 'https://178.22.122.100/dns-query');
+  assert.deepEqual(resolverBypassIps(single(), settings(Object.assign({}, doh, strict))), ['178.22.122.100']);
+});
+
+test('strict without TUN, and TUN without strict, change nothing', () => {
+  const base = settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED));
+  const golden = JSON.stringify(buildConfig(single(), base));
+  for (const s of [
+    { leakGuard: 'strict' },                        // proxy mode: nothing blocks :53
+    { tunMode: true, leakGuard: 'standard' },
+    { tunMode: true, leakGuard: 'off' },
+    { tunMode: true }
+  ]) {
+    assert.equal(JSON.stringify(buildConfig(single(), Object.assign({}, base, s))), golden, JSON.stringify(s));
+    assert.deepEqual(resolverBypassIps(single(), Object.assign({}, base, s)), ['178.22.122.100']);
+  }
+});
+
+test('strict under TUN drops the UDP resolver an advanced plan asked for', () => {
+  const strict = Object.assign({ tunMode: true, leakGuard: 'strict', blockAds: false }, MANAGED);
+  const plan = advancedPlan({
+    rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }],
+    def: 'sv-vless'
+  });
+  assert.equal(buildConfig(plan, settings(MANAGED)).dns.servers[0].address, '178.22.122.100', 'without strict it is there');
+  assert.equal(JSON.stringify(buildConfig(plan, settings(strict))).includes('178.22.122.100'), false);
+  assert.deepEqual(resolverBypassIps(plan, settings(strict)), []);
+});
+
 test('managed bypass-ir without geo files carries no geo token at all', () => {
   const c = buildConfig(single(), settings(Object.assign({ routingMode: 'bypass-ir', geoAssets: false }, MANAGED)));
   assert.equal(JSON.stringify(c).includes('geosite:'), false);

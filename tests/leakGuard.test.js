@@ -15,11 +15,13 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
-  LeakGuard, STATE_FILE,
+  LeakGuard, STATE_FILE, GUARD_EXCLUDES, rangeComplement,
   winSnapshotScript, parseWinSnapshot, winApplyScript, winRestoreScript,
-  winOrphanKillScript, winRepairScript,
+  winOrphanKillScript, winRepairScript, winReleaseScript,
+  winStrictApplyScript, winGroupRemoveScript, winUdpBlockApplyScript,
   macSnapshotScript, parseMacSnapshot, macApplyScript, macRestoreScript,
-  macOrphanKillScript, macRepairScript
+  macOrphanKillScript, macRepairScript, macReleaseScript,
+  macPfAnchorText, macPfApplyScript, macPfRemoveScript
 } = require('../src/main/leakGuard');
 
 const PEER4 = '172.19.0.2';
@@ -501,4 +503,418 @@ test('operations are serialized: a repair in flight cannot delete the file a new
   await engaging;
   assert.equal(fs.existsSync(h.statePath), true, 'the live session\'s originals survived the repair');
   assert.deepEqual(h.state().win.adapters, parseWinSnapshot(WIN_SNAP));
+});
+
+/* ============================ level: strict ============================ */
+/*
+ * Standard stops DNS from leaving through the physical adapters; strict stops
+ * everything that is not the tunnel. The scripts below are the only review
+ * these lines get before they run as Administrator — none of them is executed
+ * here (the owner's own tunnel is live on this machine, and a wrong outbound
+ * block would cut it).
+ */
+
+/** The complement of the default exclude set, worked out by hand once. */
+const DEFAULT_RANGES = [
+  '0.0.0.0-9.255.255.255',          // ends where 10/8 begins
+  '11.0.0.0-100.63.255.255',        // ends where the CGNAT 100.64/10 begins
+  '100.128.0.0-126.255.255.255',    // ends where 127/8 begins
+  '128.0.0.0-169.253.255.255',      // ends where link-local 169.254/16 begins
+  '169.255.0.0-172.15.255.255',     // ends where 172.16/12 begins (the TUN subnet is inside it)
+  '172.32.0.0-192.167.255.255',     // ends where 192.168/16 begins
+  '192.169.0.0-223.255.255.255',    // ends where multicast 224/4 begins
+  '240.0.0.0-255.255.255.255'       // the reserved tail
+];
+
+const psRanges = (list) => list.map(r => `'${r}'`).join(',');
+
+test('rangeComplement: nothing excluded is the whole address space', () => {
+  assert.deepEqual(rangeComplement([]), ['0.0.0.0-255.255.255.255']);
+  assert.deepEqual(rangeComplement(null), ['0.0.0.0-255.255.255.255']);
+});
+
+test('rangeComplement: one host splits the space in two', () => {
+  assert.deepEqual(rangeComplement(['5.6.7.8']), ['0.0.0.0-5.6.7.7', '5.6.7.9-255.255.255.255']);
+  assert.deepEqual(rangeComplement(['5.6.7.8/32']), ['0.0.0.0-5.6.7.7', '5.6.7.9-255.255.255.255']);
+});
+
+test('rangeComplement: an exclude at either edge shortens instead of splitting', () => {
+  assert.deepEqual(rangeComplement(['0.0.0.0/8']), ['1.0.0.0-255.255.255.255']);
+  assert.deepEqual(rangeComplement(['255.255.255.255']), ['0.0.0.0-255.255.255.254']);
+  assert.deepEqual(rangeComplement(['0.0.0.0/0']), [], 'everything excluded is nothing to block');
+});
+
+test('rangeComplement: overlapping, adjacent and unsorted excludes merge into one hole', () => {
+  // the two adjacent halves of 10/8, given in the wrong order, with an overlap inside them
+  assert.deepEqual(rangeComplement(['10.128.0.0/9', '10.0.0.0/9', '10.1.2.3']),
+    ['0.0.0.0-9.255.255.255', '11.0.0.0-255.255.255.255']);
+  assert.deepEqual(rangeComplement(['1.0.0.0/8', '1.1.0.0/16']),
+    ['0.0.0.0-0.255.255.255', '2.0.0.0-255.255.255.255'], 'a range inside another adds no hole');
+  assert.deepEqual(rangeComplement(['1.2.3.4', '1.2.3.4']), ['0.0.0.0-1.2.3.3', '1.2.3.5-255.255.255.255']);
+});
+
+test('rangeComplement takes a host address with a prefix as its network', () => {
+  assert.deepEqual(rangeComplement(['192.168.8.63/24']),
+    ['0.0.0.0-192.168.7.255', '192.168.9.0-255.255.255.255']);
+});
+
+test('rangeComplement ignores what it cannot block instead of throwing', () => {
+  // a v6 server address (strict_route blocks v6 off-TUN by itself), a hostname
+  // we never resolved, junk from a hand-edited setting
+  assert.deepEqual(rangeComplement(['2606:4700::1111', 'vpn.example.com', '', null, '999.1.1.1', '1.2.3.4/33', 5]),
+    ['0.0.0.0-255.255.255.255']);
+  assert.deepEqual(rangeComplement(['vpn.example.com', '9.9.9.9']),
+    ['0.0.0.0-9.9.9.8', '9.9.9.10-255.255.255.255'], 'the addresses among them still count');
+});
+
+test('rangeComplement: the default guard set leaves exactly these eight ranges', () => {
+  assert.deepEqual(GUARD_EXCLUDES, [
+    '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16',
+    '127.0.0.0/8', '224.0.0.0/4', '100.64.0.0/10', '172.19.0.0/30'
+  ]);
+  assert.deepEqual(rangeComplement(GUARD_EXCLUDES), DEFAULT_RANGES);
+  // the server's entry IP is the hole that keeps the tunnel reachable
+  assert.deepEqual(rangeComplement(['5.6.7.8', ...GUARD_EXCLUDES]).slice(0, 2),
+    ['0.0.0.0-5.6.7.7', '5.6.7.9-9.255.255.255']);
+});
+
+/* ----------------------------- Windows: the strict rules ----------------------------- */
+
+test('winStrictApplyScript blocks both protocols on every adapter, everywhere but the excludes', () => {
+  const rule = (proto, alias) =>
+    `New-NetFirewallRule -Group 'IRNetFree' -DisplayName 'IRNetFree strict ${proto} ${alias}'`
+    + ' -Direction Outbound -Action Block -Enabled True -Profile Any'
+    + ` -InterfaceAlias '${alias}' -Protocol ${proto} -RemoteAddress @(${psRanges(DEFAULT_RANGES)}) | Out-Null`;
+  assert.equal(winStrictApplyScript({ adapters: [{ alias: 'Wi-Fi' }, { alias: "Bob's Ethernet" }], ranges: DEFAULT_RANGES }), [
+    "$ErrorActionPreference = 'Stop'",
+    // re-engaging (a server switch under TUN) must not stack a second set of rules
+    "Remove-NetFirewallRule -Group 'IRNetFree' -ErrorAction SilentlyContinue",
+    rule('TCP', 'Wi-Fi'),
+    rule('UDP', 'Wi-Fi'),
+    rule('TCP', "Bob''s Ethernet"),
+    rule('UDP', "Bob''s Ethernet")
+  ].join('\n'));
+});
+
+test('winStrictApplyScript with nothing to block is only the removal', () => {
+  const bare = ["$ErrorActionPreference = 'Stop'", "Remove-NetFirewallRule -Group 'IRNetFree' -ErrorAction SilentlyContinue"].join('\n');
+  assert.equal(winStrictApplyScript({ adapters: [], ranges: DEFAULT_RANGES }), bare);
+  // an EMPTY -RemoteAddress means "Any" to New-NetFirewallRule, which would
+  // block the whole machine instead of nothing — no ranges, no rule.
+  assert.equal(winStrictApplyScript({ adapters: [{ alias: 'Wi-Fi' }], ranges: [] }), bare);
+  assert.equal(winStrictApplyScript({}), bare);
+});
+
+test('winGroupRemoveScript takes the group and never a rule name — the kill switch is not ours to touch', () => {
+  assert.equal(winGroupRemoveScript(), "Remove-NetFirewallRule -Group 'IRNetFree' -ErrorAction SilentlyContinue");
+  // main.js's kill switch is a netsh rule NAMED 'IRNetFree KillSwitch' with no
+  // group, so -Group cannot reach it — and nothing we generate names it either.
+  // Its own `netsh delete rule name=…` cannot reach ours for the same reason.
+  const generated = [
+    winGroupRemoveScript(),
+    winStrictApplyScript({ adapters: [{ alias: 'Wi-Fi' }], ranges: DEFAULT_RANGES }),
+    winUdpBlockApplyScript({ adapters: [{ alias: 'Wi-Fi' }], ranges: DEFAULT_RANGES }),
+    winReleaseScript([], { firewall: true })
+  ];
+  for (const s of generated) {
+    assert.equal(/KillSwitch/.test(s), false);
+    assert.equal(/netsh/.test(s), false);
+    assert.equal(/Remove-NetFirewallRule (?!-Group)/.test(s), false, 'removal is by group, only ever by group');
+  }
+});
+
+test('winUdpBlockApplyScript blocks UDP to the internet except DNS, per adapter', () => {
+  const rule = (alias) =>
+    `New-NetFirewallRule -Group 'IRNetFree' -DisplayName 'IRNetFree udp ${alias}'`
+    + ' -Direction Outbound -Action Block -Enabled True -Profile Any'
+    + ` -InterfaceAlias '${alias}' -Protocol UDP -RemotePort @('1-52','54-65535')`
+    + ` -RemoteAddress @(${psRanges(DEFAULT_RANGES)}) | Out-Null`;
+  assert.equal(winUdpBlockApplyScript({ adapters: [{ alias: 'Wi-Fi' }, { alias: 'Ethernet' }], ranges: DEFAULT_RANGES }), [
+    "$ErrorActionPreference = 'Stop'",
+    "Remove-NetFirewallRule -Group 'IRNetFree' -ErrorAction SilentlyContinue",
+    rule('Wi-Fi'),
+    rule('Ethernet')
+  ].join('\n'));
+  // The LAN is outside the ranges on purpose: a rule that blocked every UDP
+  // port but 53 would also kill the DHCP renewal (unicast to the router, port
+  // 67) and take the machine's address with it hours into a session.
+  assert.equal(/'192\.168\.|'10\.0\.0\.0/.test(winUdpBlockApplyScript({ adapters: [{ alias: 'Wi-Fi' }], ranges: DEFAULT_RANGES })), false);
+  assert.equal(winUdpBlockApplyScript({ adapters: [{ alias: 'Wi-Fi' }], ranges: [] }),
+    ["$ErrorActionPreference = 'Stop'", "Remove-NetFirewallRule -Group 'IRNetFree' -ErrorAction SilentlyContinue"].join('\n'));
+});
+
+test('winReleaseScript: the firewall group goes before the DNS restore, and only when we made rules', () => {
+  const adapters = [{ alias: 'Wi-Fi', v4: ['192.168.8.1'], dhcp4: true }];
+  assert.equal(winReleaseScript(adapters), winRestoreScript(adapters), 'a standard session made no rules');
+  assert.equal(winReleaseScript(adapters, { firewall: true }),
+    winGroupRemoveScript() + '\n' + winRestoreScript(adapters));
+  assert.equal(winReleaseScript(adapters, { orphans: true, firewall: true }),
+    winOrphanKillScript() + '\n' + winGroupRemoveScript() + '\n' + winRestoreScript(adapters));
+  assert.equal(winReleaseScript(adapters, { orphans: true }), winRepairScript(adapters));
+});
+
+/* ----------------------------- macOS: the pf anchor ----------------------------- */
+
+test('macPfAnchorText passes the tunnel and the excludes, then blocks both families', () => {
+  assert.equal(macPfAnchorText({ tunDevice: 'utun4', excludes: ['5.6.7.8', '178.22.122.100', '5.6.7.8'] }), [
+    '# IRNetFree strict guard — generated, loaded into anchor "irnetfree"',
+    // `set skip on lo0` would be an OPTION, and pf takes options only in the
+    // main ruleset — inside an anchor it is a parse error. A pass rule does the
+    // same job for outbound traffic and is legal here.
+    'pass out quick on lo0 all',
+    'pass out quick on utun4 all',
+    'pass out quick to { 5.6.7.8, 178.22.122.100, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8, 224.0.0.0/4, 100.64.0.0/10, 172.19.0.0/30 }',
+    'block out quick inet all',
+    'block out quick inet6 all',
+    ''
+  ].join('\n'));
+});
+
+test('macPfAnchorText refuses to generate a ruleset it cannot let the tunnel through', () => {
+  assert.match(macPfAnchorText({ tunDevice: 'utun9' }), /pass out quick on utun9 all\npass out quick to \{ 10\.0\.0\.0\/8, /);
+  // No device name means no pass rule for the tunnel, i.e. a machine with no
+  // network at all. Generate nothing rather than something catastrophic.
+  assert.equal(macPfAnchorText({ tunDevice: '', excludes: ['5.6.7.8'] }), null);
+  assert.equal(macPfAnchorText({ tunDevice: 'IRNetFree' }), null, 'the Windows adapter name is not a utun device');
+  assert.equal(macPfAnchorText({ tunDevice: 'utun4; rm -rf /' }), null);
+  assert.equal(macPfAnchorText({}), null);
+});
+
+test('macPfApplyScript writes the anchor, loads it and reports whether pf was already on', () => {
+  const anchor = macPfAnchorText({ tunDevice: 'utun4', excludes: [] });
+  assert.equal(macPfApplyScript(anchor), [
+    '#!/bin/bash',
+    'FAIL=0',
+    'umask 077',
+    'mkdir -p /etc/pf.anchors',
+    "cat > /etc/pf.anchors/irnetfree <<'IRNF_ANCHOR'",
+    ...anchor.split('\n').slice(0, -1),
+    'IRNF_ANCHOR',
+    // the answer goes into the state file, so release() only turns pf off again
+    // when it was off before us
+    "if pfctl -s info 2>/dev/null | head -n 1 | grep -q 'Status: Enabled'; then",
+    "  echo 'IRNF_PF_WAS=enabled'",
+    'else',
+    "  echo 'IRNF_PF_WAS=disabled'",
+    '  pfctl -E >/dev/null 2>&1 || FAIL=1',
+    'fi',
+    // /etc/pf.conf is never edited: the anchor line is appended to a COPY, and
+    // that copy lives in the root-owned anchors dir (a world-writable /tmp file
+    // fed to pfctl as root is a local privilege escalation waiting to happen).
+    'if ! pfctl -sr 2>/dev/null | grep -q \'anchor "irnetfree"\'; then',
+    '  { cat /etc/pf.conf; echo \'anchor "irnetfree"\'; } > /etc/pf.anchors/irnetfree.conf || FAIL=1',
+    '  pfctl -f /etc/pf.anchors/irnetfree.conf || FAIL=1',
+    'fi',
+    'pfctl -a irnetfree -f /etc/pf.anchors/irnetfree || FAIL=1',
+    'exit $FAIL',
+    ''
+  ].join('\n'));
+});
+
+test('macPfRemoveScript flushes the anchor and only disables pf when we enabled it', () => {
+  const lines = [
+    'pfctl -a irnetfree -F all 2>/dev/null || true',
+    'rm -f /etc/pf.anchors/irnetfree /etc/pf.anchors/irnetfree.conf'
+  ];
+  assert.equal(macPfRemoveScript(), ['#!/bin/bash', 'FAIL=0', ...lines, 'exit $FAIL', ''].join('\n'));
+  assert.equal(macPfRemoveScript({ disable: true }),
+    ['#!/bin/bash', 'FAIL=0', ...lines, 'pfctl -d 2>/dev/null || true', 'exit $FAIL', ''].join('\n'));
+});
+
+test('macReleaseScript: the pf anchor goes before the DNS restore, in one password prompt', () => {
+  const services = [{ name: 'Wi-Fi', dns: [] }];
+  const body = (s) => s.split('\n').slice(2, -2);
+  assert.equal(macReleaseScript(services), macRestoreScript(services), 'a standard session loaded no anchor');
+  assert.deepEqual(body(macReleaseScript(services, { firewall: true, disablePf: true })),
+    [...body(macPfRemoveScript({ disable: true })), ...body(macRestoreScript(services))]);
+  assert.deepEqual(body(macReleaseScript(services, { orphans: true, firewall: true })),
+    [...body(macOrphanKillScript()), ...body(macPfRemoveScript()), ...body(macRestoreScript(services))]);
+  assert.equal(macReleaseScript(services, { orphans: true }), macRepairScript(services));
+});
+
+/* ----------------------------- the class, at strict ----------------------------- */
+
+test('engage (win32, strict): DNS first, then the firewall — and the state file before both', async () => {
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
+  const r = await h.guard.engage({
+    level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree', backend: 'sing-box',
+    excludes: ['5.6.7.8', '178.22.122.100']
+  });
+  assert.equal(r.engaged, true);
+  assert.equal(r.adapters, 2);
+  assert.equal(h.calls.length, 3);
+  const adapters = parseWinSnapshot(WIN_SNAP);
+  assert.equal(h.calls[0].script, winSnapshotScript('IRNetFree'));
+  assert.equal(h.calls[1].script, winApplyScript(adapters, PEER4, null), 'the standard step still runs first');
+  assert.equal(h.calls[2].script, winStrictApplyScript({
+    adapters, ranges: rangeComplement(['5.6.7.8', '178.22.122.100', ...GUARD_EXCLUDES])
+  }));
+  assert.equal(h.calls[2].stateExists, true);
+  assert.match(h.calls[2].script, /'0\.0\.0\.0-5\.6\.7\.7','5\.6\.7\.9-9\.255\.255\.255'/, 'the entry IP is a hole in the block');
+
+  const st = h.state();
+  assert.equal(st.strict, true);
+  assert.equal(st.udpBlock, false);
+  assert.deepEqual(st.win.adapters, adapters);
+  assert.deepEqual(h.logs, [
+    [`Leak guard: DNS of 2 adapters → ${PEER4}`, 'info'],
+    ['Leak guard (strict): 2 adapters now block every outbound address but the tunnel\'s — traffic your rules send direct is blocked too', 'warn']
+  ]);
+});
+
+test('engage (win32, standard): no firewall rule is even mentioned', async () => {
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
+  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree', excludes: ['5.6.7.8'] });
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls.some(c => /NetFirewallRule/.test(c.script)), false);
+  assert.equal(h.state().strict, false);
+});
+
+test('engage (win32, strict): a failing firewall step keeps the state file — the DNS is already ours', async () => {
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1])
+    ? WIN_SNAP
+    : (/NetFirewallRule/.test(args[args.length - 1]) ? new Error('Access is denied.') : '')));
+  await assert.rejects(() => h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree' }), /Access is denied/);
+  assert.equal(fs.existsSync(h.statePath), true);
+  assert.equal(h.state().strict, true, 'release() must still remove whatever half of it was created');
+});
+
+test('release (win32, strict): the block is lifted BEFORE the resolvers go back', async () => {
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree', excludes: ['5.6.7.8'] });
+  h.calls.length = 0; h.logs.length = 0;
+
+  const r = await h.guard.release();
+  assert.deepEqual(r, { released: true, adapters: 2 });
+  assert.equal(h.calls.length, 1, 'one spawn for both halves');
+  assert.equal(h.calls[0].script, winReleaseScript(parseWinSnapshot(WIN_SNAP), { firewall: true }));
+  assert.ok(h.calls[0].script.indexOf('Remove-NetFirewallRule') < h.calls[0].script.indexOf('Set-DnsClientServerAddress'));
+  assert.equal(fs.existsSync(h.statePath), false);
+  assert.deepEqual(h.logs, [['Leak guard released: DNS of 2 adapters restored, firewall rules removed', 'info']]);
+});
+
+test('repairAtLaunch (win32, strict): the orphan, the rules and the DNS in one script', async () => {
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree' });
+  h.calls.length = 0; h.logs.length = 0;
+
+  await h.guard.repairAtLaunch();
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].script, winReleaseScript(parseWinSnapshot(WIN_SNAP), { orphans: true, firewall: true }));
+  assert.equal(fs.existsSync(h.statePath), false);
+  assert.equal(h.logs[1][0], 'Restored DNS of 2 adapters left from a previous session, and removed its firewall rules');
+});
+
+test('releaseSync (win32, strict): the exit hook takes the rules with it', async () => {
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree' });
+  h.calls.length = 0;
+  assert.equal(h.guard.releaseSync(), true);
+  assert.equal(h.calls[0].sync, true);
+  assert.equal(h.calls[0].script, winReleaseScript(parseWinSnapshot(WIN_SNAP), { firewall: true }));
+  assert.equal(fs.existsSync(h.statePath), false);
+});
+
+test('engage (darwin, strict): the anchor is loaded after the DNS, and pf is left as it was found', async () => {
+  const h = harness('darwin', (cmd, args) => {
+    if (cmd === '/bin/bash') return 'Wi-Fi\t192.168.8.1';
+    return /pfctl/.test(fs.readFileSync(args[0], 'utf8')) ? 'IRNF_PF_WAS=enabled\n' : '';
+  });
+  const r = await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'utun4', excludes: ['5.6.7.8'] });
+  assert.equal(r.engaged, true);
+  assert.equal(h.calls.length, 3);
+  assert.equal(h.calls[1].script, macApplyScript([{ name: 'Wi-Fi', dns: ['192.168.8.1'] }], PEER4, null));
+  assert.equal(h.calls[2].script, macPfApplyScript(macPfAnchorText({ tunDevice: 'utun4', excludes: ['5.6.7.8'] })));
+  assert.equal(h.state().strict, true);
+  assert.equal(h.state().pfEnabledByUs, false, 'pf was already on — release() must not turn it off');
+
+  h.calls.length = 0;
+  await h.guard.release();
+  assert.equal(h.calls.length, 1, 'one password prompt for the whole teardown');
+  assert.equal(h.calls[0].script, macReleaseScript([{ name: 'Wi-Fi', dns: ['192.168.8.1'] }], { firewall: true, disablePf: false }));
+});
+
+test('engage (darwin, strict): pf that WE enabled is recorded, and turned off again on release', async () => {
+  const h = harness('darwin', (cmd) => (cmd === '/bin/bash' ? 'Wi-Fi\t' : 'IRNF_PF_WAS=disabled\n'));
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'utun4' });
+  assert.equal(h.state().pfEnabledByUs, true);
+  h.calls.length = 0;
+  await h.guard.release();
+  assert.equal(h.calls[0].script, macReleaseScript([{ name: 'Wi-Fi', dns: [] }], { firewall: true, disablePf: true }));
+  assert.match(h.calls[0].script, /pfctl -d/);
+});
+
+test('engage (darwin, strict): an unnamed tunnel device gets DNS only, never a block-everything ruleset', async () => {
+  const h = harness('darwin', (cmd) => (cmd === '/bin/bash' ? 'Wi-Fi\t' : ''));
+  const r = await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree' });
+  assert.equal(r.engaged, true);
+  assert.equal(h.calls.length, 2, 'the snapshot and the DNS apply — no pfctl');
+  assert.equal(h.state().strict, false);
+  assert.match(h.logs[h.logs.length - 1][0], /could not name the tunnel device/i);
+});
+
+/* ----------------------------- the proxy-mode UDP block ----------------------------- */
+
+test('engageUdpBlock (win32): one rule per adapter, and a state file that says so', async () => {
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
+  const r = await h.guard.engageUdpBlock({ excludes: ['5.6.7.8', 'vpn.example.com'] });
+  assert.deepEqual(r, { engaged: true, adapters: 2 });
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[0].script, winSnapshotScript(null), 'no tunnel of ours to skip in proxy mode');
+  assert.equal(h.calls[1].script, winUdpBlockApplyScript({
+    adapters: parseWinSnapshot(WIN_SNAP), ranges: rangeComplement(['5.6.7.8', 'vpn.example.com', ...GUARD_EXCLUDES])
+  }));
+  assert.equal(h.calls[1].stateExists, true);
+
+  const st = h.state();
+  assert.equal(st.udpBlock, true);
+  assert.equal(st.strict, false);
+  assert.deepEqual(st.win.adapters, [],
+    'nothing here touched a resolver — recording the adapters would make release() reset DNS we never set');
+  assert.deepEqual(h.logs, [['Blocked outbound UDP to the internet (except DNS) on 2 adapters — WebRTC cannot leak your address', 'info']]);
+});
+
+test('release after the UDP block: the group goes, no DNS is touched', async () => {
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
+  await h.guard.engageUdpBlock({});
+  h.calls.length = 0; h.logs.length = 0;
+
+  const r = await h.guard.release();
+  assert.equal(r.released, true);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].script, winReleaseScript([], { firewall: true }));
+  assert.equal(/Set-DnsClientServerAddress/.test(h.calls[0].script), false);
+  assert.equal(fs.existsSync(h.statePath), false);
+  assert.deepEqual(h.logs, [['Leak guard released: the UDP block removed', 'info']]);
+});
+
+test('engageUdpBlock keeps a live DNS override that a failed repair left behind', async () => {
+  // The repair could not restore the adapters (no admin), so its record is the
+  // only copy of the originals. A proxy-mode connect must add to it, not clobber it.
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
+  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' });
+  await h.guard.engageUdpBlock({});
+  const st = h.state();
+  assert.deepEqual(st.win.adapters, parseWinSnapshot(WIN_SNAP));
+  assert.equal(st.udpBlock, true);
+  assert.equal(st.peer4, PEER4);
+});
+
+test('engageUdpBlock (darwin/linux): says it cannot, once, and touches nothing', async () => {
+  for (const plat of ['darwin', 'linux']) {
+    const h = harness(plat, () => '');
+    assert.deepEqual(await h.guard.engageUdpBlock({}), { engaged: false, adapters: 0 });
+    assert.deepEqual(await h.guard.engageUdpBlock({}), { engaged: false, adapters: 0 });
+    assert.equal(h.calls.length, 0);
+    assert.equal(fs.existsSync(h.statePath), false);
+    assert.equal(h.logs.length, 1, 'the same warning twice in a session is noise');
+    assert.match(h.logs[0][0], /not available/i);
+  }
+});
+
+test('engageUdpBlock (win32): no physical adapter is nothing to block', async () => {
+  const h = harness('win32', () => '[]');
+  assert.deepEqual(await h.guard.engageUdpBlock({}), { engaged: false, adapters: 0 });
+  assert.equal(h.calls.length, 1);
+  assert.equal(fs.existsSync(h.statePath), false);
 });
