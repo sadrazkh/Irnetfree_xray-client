@@ -147,6 +147,7 @@ test('the surface task 2 wires in', () => {
   assert.equal(tun.dnsPeer, '172.19.0.2');
   assert.equal(tun.dnsPeer6, 'fdfe:dcba:9876::2');
   assert.equal(tun.active, false);
+  assert.deepEqual(tun.excludeIps, [], 'the resolved bypass list, for the firewall excludes (task 3b)');
   assert.equal(tun.msg('فا', 'en'), 'فا');
   tun.lang = 'en';
   assert.equal(tun.msg('فا', 'en'), 'en');
@@ -206,6 +207,7 @@ test('win32 start: spawns `sing-box run -c <cfg>` from its own dir, waits for th
     assert.deepEqual(JSON.parse(fs.readFileSync(cfgFile, 'utf8')),
       buildTunConfig({ socksPort: 10808, excludeIps: ['1.2.3.4', '2001:db8::1'], ipv6: true, strict: true }),
       'the config on disk is buildTunConfig of the resolved, de-duplicated bypass list');
+    assert.deepEqual(tun.excludeIps, ['1.2.3.4', '2001:db8::1'], 'exposed for the firewall excludes');
 
     const lines = execLines();
     assert.ok(lines.some(l => /^powershell .*Get-NetAdapter -Name 'IRNetFree' -ErrorAction SilentlyContinue\)\.Status$/.test(l)), 'waited for the adapter');
@@ -227,6 +229,7 @@ test('win32 start: spawns `sing-box run -c <cfg>` from its own dir, waits for th
     await stopping;
     assert.equal(tun.active, false);
     assert.equal(tun.proc, null);
+    assert.deepEqual(tun.excludeIps, [], 'cleared on stop');
     assert.equal(fs.existsSync(path.dirname(cfgFile)), false, 'temp config dir removed on stop');
     assert.ok(!logs.some(([lvl, l]) => lvl === 'error' && /exited/.test(l)), 'an exit WE asked for is not an error');
   });
@@ -450,6 +453,7 @@ test('darwin start: config without interface_name, scripts through one privilege
       const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
       assert.equal('interface_name' in cfg.inbounds[0], false, 'darwin: sing-box names the utun');
       assert.deepEqual(cfg.inbounds[0].route_exclude_address, ['1.2.3.4/32']);
+      assert.deepEqual(tun.excludeIps, ['1.2.3.4']);
       assert.ok(setup.includes(`BIN='${path.join(dir, 'sing-box')}'`));
       assert.ok(setup.includes("networksetup -setdnsservers 'Wi-Fi' 172.19.0.2 2>/dev/null || true"));
       assert.equal(tun.macState.macPid, 31337);
@@ -460,6 +464,7 @@ test('darwin start: config without interface_name, scripts through one privilege
       await tun.stop();
       assert.equal(tun.active, false);
       assert.equal(tun.macState, null);
+      assert.deepEqual(tun.excludeIps, []);
       const [downName, down] = scripts[1];
       assert.equal(downName, 'teardown.sh');
       assert.equal(down, buildMacTeardownScript({ pid: 31337, cfgFile, service: 'Wi-Fi', savedDns: ['9.9.9.9'] }));
