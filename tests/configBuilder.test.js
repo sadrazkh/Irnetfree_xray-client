@@ -13,10 +13,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, wgResolvers } = require('../src/main/configBuilder');
 const {
   settings, ruleTags, outboundTagged, vlessWithMarkers,
-  VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK
+  VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK, WG_CORP
 } = require('./fixtures');
 
 const single = (server) => ({ mode: 'single', server: server || VLESS_WS_TLS });
@@ -719,8 +719,176 @@ test('resolverBypassIps: the direct resolver addresses the TUN layer must route 
   assert.deepEqual(resolverBypassIps(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED))), []);
 });
 
+// xray's router resolves a hostname under IPIfNonMatch only when NO rule matched
+// on the first pass — and every plan ends with a port:0-65535 catch-all, which
+// always matches. So an `ip:` rule (geoip:ir, the private-LAN bypass, a corporate
+// range) never fired for a browser connection that carries a hostname. IPOnDemand
+// resolves exactly when an ip condition is evaluated. Only with managed DNS: the
+// legacy list may be a dead plain-UDP resolver, and a lookup that times out
+// before every connection is worse than an unmatched rule.
+test('managed DNS: ip rules must fire for hostnames, so the router resolves on demand', () => {
+  const plans = {
+    single: single(),
+    chain: { mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] },
+    advanced: advancedPlan({ rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-trojan' }], def: 'sv-vless' })
+  };
+  for (const [name, plan] of Object.entries(plans)) {
+    assert.equal(buildConfig(plan, settings(MANAGED)).routing.domainStrategy, 'IPOnDemand', name);
+    assert.equal(buildConfig(plan, settings({ dnsManaged: false })).routing.domainStrategy, 'IPIfNonMatch', name + ' unmanaged');
+  }
+});
+
 test('buildTestConfig is untouched by DNS management (no hijack, no tag)', () => {
   const c = buildTestConfig(VLESS_WS_TLS, 47130);
   assert.equal(c.dns, undefined);
   assert.equal(c.outbounds.some(o => o.tag === 'dns-out'), false);
+});
+
+/* ----------------------------- DNS follows the target ----------------------------- */
+
+// The owner's setup: client → VLESS → corporate WireGuard as a chain, one rule
+// sending the company ranges to it. Internal names are known only to the
+// company resolver the .conf names — which is reachable ONLY through that
+// tunnel. The resolver must be in the list, and its query must leave through
+// the chain, not the VLESS the exit rule points at.
+const CORP_SERVER = { address: '192.168.60.1', domains: ['domain:tes.systems'], expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'] };
+const CORP_RULE = (tag) => ({ type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: tag });
+
+function corpPlan(over) {
+  return advancedPlan(Object.assign({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-wgcorp': WG_CORP },
+    chainsById: { c1: [VLESS_WS_TLS, WG_CORP] },
+    rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:c1' }],
+    def: 'sv-vless'
+  }, over || {}));
+}
+const managed = (over) => settings(Object.assign({ blockAds: false }, MANAGED, over || {}));
+
+test('advanced: a chain ending in a corporate WireGuard brings its resolver, asked through the chain', () => {
+  const c = buildConfig(corpPlan(), managed());
+  assert.deepEqual(c.dns.servers, ['https://1.1.1.1/dns-query', CORP_SERVER]);
+  assert.deepEqual(c.routing.rules[0], CORP_RULE('out-chain-c1'));
+  assert.deepEqual(c.routing.rules[1], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'out-sv-vless' });
+  assert.equal(c.routing.rules[2].outboundTag, 'dns-out');
+  // the user's own rule still follows, to the same chain
+  assert.deepEqual(c.routing.rules[3], { type: 'field', ip: ['192.168.0.0/16'], outboundTag: 'out-chain-c1' });
+});
+
+test('advanced: the WireGuard itself as a rule target, or the chain as the default, each name their own tag', () => {
+  const direct = buildConfig(corpPlan({ rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-wgcorp' }] }), managed());
+  assert.deepEqual(direct.routing.rules[0], CORP_RULE('out-sv-wgcorp'));
+
+  const def = buildConfig(corpPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }], def: 'chain:c1' }), managed());
+  assert.deepEqual(def.routing.rules[0], CORP_RULE('out-chain-c1'));
+  assert.deepEqual(def.routing.rules[1], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'out-chain-c1' });
+});
+
+test('advanced with a block default: the resolver rule still names the WireGuard, the exit the redirected proxy', () => {
+  const c = buildConfig(corpPlan({
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'ip', value: '10.0.0.0/8', target: 'sv-wgcorp' }],
+    def: 'block'
+  }), managed());
+  assert.deepEqual(c.routing.rules[0], CORP_RULE('out-sv-wgcorp'));
+  assert.deepEqual(c.routing.rules[1], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'out-sv-trojan' });
+  assert.equal(c.routing.rules.at(-1).outboundTag, 'block');
+});
+
+test('single / chain: the exit carries the resolver when a corporate WireGuard is the last hop', () => {
+  const one = buildConfig(single(WG_CORP), managed());
+  assert.deepEqual(one.dns.servers.at(-1), CORP_SERVER);
+  assert.deepEqual(one.routing.rules[0], CORP_RULE('proxy'));
+  assert.deepEqual(one.routing.rules[1], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' });
+
+  const last = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, WG_CORP] }, managed());
+  assert.deepEqual(last.dns.servers.at(-1), CORP_SERVER);
+  assert.deepEqual(last.routing.rules[0], CORP_RULE('proxy'));
+
+  // the WireGuard as a middle hop exits somewhere else: its resolver is not on the way
+  const middle = buildConfig({ mode: 'chain', chain: [WG_CORP, VLESS_WS_TLS] }, managed());
+  assert.deepEqual(middle.dns.servers, ['https://1.1.1.1/dns-query']);
+  assert.deepEqual(middle.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' });
+});
+
+test('routingMode direct: the exit is off the tunnel, so the corporate resolver is not offered', () => {
+  const c = buildConfig(single(WG_CORP), managed({ routingMode: 'direct' }));
+  assert.deepEqual(c.dns.servers, ['https://1.1.1.1/dns-query']);
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'direct' });
+});
+
+test('pool: a corporate WireGuard entry brings no resolver', () => {
+  const plan = poolPlan([{ id: 'e1', target: 'sv-wgcorp', socksPort: 60001 }], 'sv-wgcorp');
+  plan.serversById['sv-wgcorp'] = WG_CORP;
+  const c = buildConfig(plan, managed());
+  assert.deepEqual(c.dns.servers, ['https://1.1.1.1/dns-query']);
+  assert.equal(JSON.stringify(c.routing.rules).includes('192.168.60.1'), false);
+});
+
+test('advanced: two rules to the same chain → one corporate server, one rule', () => {
+  const c = buildConfig(corpPlan({
+    rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:c1' }, { type: 'ip', value: '10.0.0.0/8', target: 'chain:c1' }]
+  }), managed());
+  assert.equal(c.dns.servers.filter(s => s.address === '192.168.60.1').length, 1);
+  assert.equal(c.routing.rules.filter(r => r.ip && r.ip.includes('192.168.60.1')).length, 1);
+});
+
+test('resolverBypassIps: the corporate resolver is not routed past the tunnel — it rides the target', () => {
+  assert.deepEqual(resolverBypassIps(corpPlan(), managed()), []);
+  assert.deepEqual(resolverBypassIps(corpPlan({ rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }] }), managed()), ['178.22.122.100']);
+});
+
+test('wgResolvers: expectedIPs come from AllowedIPs minus the full-tunnel entries; no dns → nothing', () => {
+  assert.deepEqual(wgResolvers(WG_CORP, 'out-x'), [
+    { address: '192.168.60.1', outboundTag: 'out-x', expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'], domains: ['domain:tes.systems'] }
+  ]);
+  const full = Object.assign({}, WG_BAD_MASK, { dns: ['10.13.13.1'] });   // allowedIPs 0.0.0.0/0, ::/0
+  assert.deepEqual(wgResolvers(full, 'out-x'), [{ address: '10.13.13.1', outboundTag: 'out-x', expectedIPs: [], domains: [] }]);
+  assert.deepEqual(wgResolvers(WG_BAD_MASK, 'out-x'), []);
+  assert.deepEqual(wgResolvers(Object.assign({}, WG_CORP, { dns: [] }), 'out-x'), []);
+  assert.deepEqual(wgResolvers(Object.assign({}, VLESS_WS_TLS, { dns: ['1.2.3.4'] }), 'out-x'), []);
+  assert.deepEqual(wgResolvers(null, 'out-x'), []);
+});
+
+/* --------------------------- phase 2b review fixes --------------------------- */
+
+// The pool emits no user ip rule (only the private bypass), and on demand every
+// entry's hostname connections would wait on the PRIMARY's DoH — a dead primary
+// costing the other entries ~8 s per new name. Entries stay independent.
+test('pool keeps IPIfNonMatch: its entries must not wait on the primary’s DNS for every hostname', () => {
+  const c = buildConfig(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings(MANAGED));
+  assert.equal(c.routing.domainStrategy, 'IPIfNonMatch');
+});
+
+const CORP_IDS = { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-wgcorp': WG_CORP };
+const exitRuleOf = (c) => c.routing.rules.find(r => r.inboundTag && !r.ip).outboundTag;
+
+// A split-tunnel WireGuard drops anything outside its AllowedIPs, so DoH to
+// 1.1.1.1 would die inside it: 8 s per internal name before the corporate
+// resolver is even asked. The fallback exit must skip such a target.
+test('managed advanced, block default: the resolver never exits through a split-tunnel WireGuard', () => {
+  const split = (over) => advancedPlan(Object.assign({
+    serversById: CORP_IDS, chainsById: { c1: [VLESS_WS_TLS, WG_CORP] },
+    rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:c1' }], def: 'block'
+  }, over || {}));
+  assert.equal(exitRuleOf(buildConfig(split(), settings(MANAGED))), 'direct');
+  const withProxy = buildConfig(split({
+    rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:c1' }, { type: 'domain', value: 'b.com', target: 'sv-trojan' }]
+  }), settings(MANAGED));
+  assert.equal(exitRuleOf(withProxy), 'out-sv-trojan');
+  // the corporate resolver still rides its own chain, first
+  assert.deepEqual(withProxy.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: 'out-chain-c1' });
+  // a full-tunnel WireGuard can carry DoH, so it is an acceptable exit
+  const full = buildConfig(split({ chainsById: { c1: [VLESS_WS_TLS, WG_BAD_MASK] } }), settings(MANAGED));
+  assert.equal(exitRuleOf(full), 'out-chain-c1');
+});
+
+test('the same resolver reached directly and through a chain: the chain carries the query', () => {
+  // the WireGuard's UDP endpoint is what the chain exists to avoid; rule order
+  // must not decide which one the resolver uses
+  const c = buildConfig(advancedPlan({
+    serversById: CORP_IDS, chainsById: { c1: [VLESS_WS_TLS, WG_CORP] },
+    rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-wgcorp' }, { type: 'ip', value: '192.168.0.0/16', target: 'chain:c1' }],
+    def: 'sv-vless'
+  }), settings(MANAGED));
+  assert.equal(c.routing.rules[0].outboundTag, 'out-chain-c1');
+  assert.equal(c.dns.servers.filter(x => x && x.address === '192.168.60.1').length, 1);
 });
