@@ -34,12 +34,15 @@ function buildSingboxConfig(server, settings) {
   // Android can't read the system resolver, so without this the server domain
   // fails to resolve and nothing connects. Resolving through `direct` also keeps
   // the lookup off the tunnel (no chicken-and-egg with the proxy).
-  const dnsServer = (Array.isArray(s.dns) && s.dns[0]) ? s.dns[0] : '1.1.1.1';
+  // First remote resolver, in sing-box's own shape (DoH → https, IP → udp).
+  const remote = Array.isArray(s.dnsRemote) ? s.dnsRemote : (Array.isArray(s.dns) ? s.dns : []);
+  const first = String((remote.find(v => v && String(v).trim()) || '1.1.1.1')).trim();
+  const dnsServer = singboxDnsServer(first);
 
   return {
     log: { level: singboxLogLevel(s.logLevel), timestamp: false },
     dns: {
-      servers: [{ type: 'udp', tag: 'dns-direct', server: dnsServer }],
+      servers: [dnsServer],
       final: 'dns-direct'
     },
     inbounds,
@@ -181,6 +184,18 @@ function normalizeAlpn(v) {
 function prune(o) {
   for (const k of Object.keys(o)) if (o[k] === undefined) delete o[k];
   return o;
+}
+
+/** One resolver entry → a sing-box 1.12+ DNS server object. */
+function singboxDnsServer(entry) {
+  const m = entry.match(/^https(?:\+local)?:\/\/([^/:?#]+)(?::(\d+))?(\/[^?#]*)?/i);
+  if (m) {
+    const srv = { type: 'https', tag: 'dns-direct', server: m[1] };
+    if (m[2]) srv.server_port = parseInt(m[2], 10);
+    if (m[3]) srv.path = m[3];
+    return srv;
+  }
+  return { type: 'udp', tag: 'dns-direct', server: entry };
 }
 
 module.exports = { buildSingboxConfig, translateOutbound, UnsupportedEngineConfig };

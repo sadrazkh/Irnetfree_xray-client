@@ -408,19 +408,18 @@
           </div>
           <div class="grid2">
             <div>
-              <label class="field-label" data-i18n="set.dns">DNS (با کاما)</label>
-              <select id="dnsPreset" class="select" style="margin-bottom:8px">
+              <label class="field-label" data-i18n="set.dnsRemote">DNS خارجی (از داخل تونل)</label>
+              <select id="dnsRemotePreset" class="select" style="margin-bottom:8px">
                 <option value="" data-i18n="dns.custom">سفارشی…</option>
-                <option value="1.1.1.1,1.0.0.1">Cloudflare — 1.1.1.1</option>
-                <option value="8.8.8.8,8.8.4.4">Google — 8.8.8.8</option>
-                <option value="9.9.9.9,149.112.112.112">Quad9 — 9.9.9.9</option>
-                <option value="94.140.14.14,94.140.15.15">AdGuard</option>
-                <option value="208.67.222.222,208.67.220.220">OpenDNS</option>
-                <option value="178.22.122.100,185.51.200.2">Shecan (شکن)</option>
-                <option value="78.157.42.100,78.157.42.101">Electro (الکترو)</option>
-                <option value="10.202.10.202,10.202.10.102">begzar (بگذر)</option>
+                <option value="https://1.1.1.1/dns-query,https://1.0.0.1/dns-query">Cloudflare — DoH</option>
+                <option value="https://8.8.8.8/dns-query,https://8.8.4.4/dns-query">Google — DoH</option>
+                <option value="https://9.9.9.9/dns-query,https://149.112.112.112/dns-query">Quad9 — DoH</option>
+                <option value="https://94.140.14.14/dns-query,https://94.140.15.15/dns-query">AdGuard — DoH</option>
+                <option value="1.1.1.1,1.0.0.1">Cloudflare — UDP</option>
+                <option value="8.8.8.8,8.8.4.4">Google — UDP</option>
               </select>
-              <input type="text" id="dnsInput" class="input" dir="ltr" placeholder="1.1.1.1,8.8.8.8" />
+              <input type="text" id="dnsRemoteInput" class="input" dir="ltr" placeholder="https://1.1.1.1/dns-query, https://8.8.8.8/dns-query" />
+              <p class="hint" data-i18n="dns.remoteHint"></p>
             </div>
             <div>
               <label class="field-label" data-i18n="set.logLevel">سطح لاگ</label>
@@ -432,6 +431,31 @@
                 <option value="debug">debug</option>
               </select>
             </div>
+          </div>
+          <div class="grid2">
+            <div>
+              <label class="field-label" data-i18n="set.dnsDirect">DNS داخلی (برای دور زدن ایران)</label>
+              <select id="dnsDirectPreset" class="select" style="margin-bottom:8px">
+                <option value="" data-i18n="dns.custom">سفارشی…</option>
+                <option value="178.22.122.100,185.51.200.2">Shecan (شکن)</option>
+                <option value="78.157.42.100,78.157.42.101">Electro (الکترو)</option>
+                <option value="10.202.10.202,10.202.10.102">begzar (بگذر)</option>
+                <option value="10.202.10.10,10.202.10.11">403.online</option>
+              </select>
+              <input type="text" id="dnsDirectInput" class="input" dir="ltr" placeholder="178.22.122.100, 185.51.200.2" />
+              <p class="hint" data-i18n="dns.directHint"></p>
+            </div>
+            <div></div>
+          </div>
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="dnsm.title">مدیریت DNS توسط برنامه</div>
+              <div class="switch-sub" data-i18n="dnsm.sub"></div></div>
+            <label class="switch"><input type="checkbox" id="optDnsManaged" /><span class="slider"></span></label>
+          </div>
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="ipv6.title">IPv6</div>
+              <div class="switch-sub" data-i18n="ipv6.sub"></div></div>
+            <label class="switch"><input type="checkbox" id="optIpv6" /><span class="slider"></span></label>
           </div>
           <div class="grid2">
             <div>

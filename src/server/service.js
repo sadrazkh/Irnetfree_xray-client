@@ -15,7 +15,8 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, resolverBypassIps } = require('../main/configBuilder');
+const { adapterDnsServers } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor } = require('../main/engineChoice');
@@ -25,11 +26,12 @@ const { setSystemProxy } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../main/netutils');
 const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
-const { TunManager, isOwnTunInterface } = require('../main/tunManager');
+const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
 const { StatsPoller } = require('../main/stats');
 const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
+const { migrateSettings } = require('../main/settingsMigrate');
 const { NetWatcher } = require('../main/netWatcher');
 
 const DEFAULT_SETTINGS = {
@@ -41,7 +43,13 @@ const DEFAULT_SETTINGS = {
   routingMode: 'global',
   blockAds: true,
   enableSniffing: true,
-  dns: ['1.1.1.1', '8.8.8.8'],
+  // name resolution (see dnsBuilder.js): remote over DoH through the tunnel,
+  // an in-country resolver for bypass modes, every port-53 packet answered by
+  // the core. `dnsManaged:false` restores the old "use these servers" behaviour.
+  dnsManaged: true,
+  dnsRemote: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query'],
+  dnsDirect: ['178.22.122.100', '185.51.200.2'],
+  ipv6: false,
   logLevel: 'warning',
   apiPort: 10085,
   systemProxy: false,        // headless: no desktop session to set a system proxy for
@@ -126,6 +134,7 @@ function createService(opts = {}) {
   });
 
   migrateServers();
+  migrateSettingsStore();
 
   function binDirs() { return [userBinDir, bundledBinDir]; }
   function assetStatus() {
@@ -194,6 +203,16 @@ function createService(opts = {}) {
     // do, so this is false on every launch after the first.
     if (!migrated.some((s, i) => s !== servers[i])) return;
     store.set('servers', migrated);
+  }
+
+  /**
+   * Convert a pre-phase-2 `dns` setting into `dnsRemote` / `dnsDirect`. Runs
+   * before anything reads settings, writes only when something changed.
+   */
+  function migrateSettingsStore() {
+    const raw = store.get('settings', null);
+    const { settings, changed } = migrateSettings(raw);
+    if (changed) store.set('settings', settings);
   }
 
   function getChains() {
@@ -369,7 +388,7 @@ function createService(opts = {}) {
     const settings = await effectiveSettings();
     if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
-    const { label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+    const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
     send('status', { state: 'connecting', serverId });
 
@@ -430,7 +449,16 @@ function createService(opts = {}) {
         tunError = settings.lang === 'en' ? 'TUN needs tun2socks in the bin folder.' : 'حالت TUN به فایل tun2socks در پوشه bin نیاز دارد.';
         send('log', { line: 'TUN requested but tun2socks not found — connected proxy-only', level: 'error' });
       } else {
-        try { tun.lang = settings.lang || 'fa'; await tun.start(settings.socksPort, entryAddrs, settings.dns); send('log', { line: 'TUN mode active (whole system)', level: 'info' }); }
+        // Managed DNS: the adapter's resolver is the tunnel's own peer, so every
+        // query the OS sends there enters the TUN and is answered by dns-out.
+        // (The physical adapters keep their own resolvers until the phase-3
+        // guard overrides them.) A sing-box-format config carries no hijack, so
+        // the adapter gets a resolver the proxy can reach instead.
+        // The in-country resolver is dialled `direct` — under TUN that would
+        // re-enter the tunnel through the split routes, so it needs a bypass
+        // route exactly like the server addresses.
+        const hijacks = engineFormat(runEngine) !== 'sing-box';
+        try { tun.lang = settings.lang || 'fa'; await tun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)], adapterDnsServers(settings, hijacks ? TUN_GW : null)); send('log', { line: 'TUN mode active (whole system)', level: 'info' }); }
         catch (e) { tunError = e.message; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }
       }
     }

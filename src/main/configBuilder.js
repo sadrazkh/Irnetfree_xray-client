@@ -11,6 +11,8 @@
  * normalizePlan() converts those into the structured form above.
  */
 
+const { buildDnsPlan } = require('./dnsBuilder');
+
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
  * LAN/loopback bypass works even when the geoip.dat file is missing (otherwise
@@ -164,23 +166,63 @@ function normalizePlan(plan) {
   return plan || { mode: 'single' };
 }
 
-const FREEDOM = { tag: 'direct', protocol: 'freedom', settings: { domainStrategy: 'UseIP' } };
+/**
+ * The direct outbound. IPv4-only unless the user turned IPv6 on: with no v6
+ * route in the tunnel, an AAAA answer would just make the app try an address
+ * it cannot reach.
+ */
+function freedom(s) {
+  return { tag: 'direct', protocol: 'freedom', settings: { domainStrategy: s.ipv6 ? 'UseIP' : 'UseIPv4' } };
+}
 const BLACKHOLE = { tag: 'block', protocol: 'blackhole', settings: { response: { type: 'http' } } };
 
+/**
+ * The settings buildDnsPlan should see for THIS plan. The store carries the
+ * user's saved advanced rules whether or not the plan being built uses them —
+ * main.js picks the mode from the connect target, not from `advancedRouting` —
+ * so the plan, not the store, decides whether an in-country resolver is
+ * wanted: an advanced plan contributes its own rules, every other plan follows
+ * routingMode alone.
+ */
+function dnsSettingsFor(s, plan) {
+  if (plan.mode === 'advanced') return Object.assign({}, s, { advancedRouting: true, routeRules: plan.rules || [] });
+  // Pool emits no bypass rules, so an in-country resolver would only hand the
+  // primary exit an Iranian IP to dial from abroad — routingMode is not its.
+  if (plan.mode === 'pool') return Object.assign({}, s, { advancedRouting: false, routingMode: 'global' });
+  return Object.assign({}, s, { advancedRouting: false });
+}
+
+const SETTINGS_DEFAULTS = {
+  socksPort: 10808,
+  httpPort: 10809,
+  allowLan: false,
+  routingMode: 'global',
+  blockAds: true,
+  enableSniffing: true,
+  dnsManaged: true,
+  dnsRemote: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query'],
+  dnsDirect: ['178.22.122.100', '185.51.200.2'],
+  ipv6: false,
+  logLevel: 'warning',
+  apiPort: 10085,
+  customRules: [],
+  geoAssets: true   // geoip.dat/geosite.dat present? false -> skip geo rules
+};
+
+/**
+ * The resolver addresses the TUN layer must route past the tunnel. Under TUN
+ * every `direct` dial to a public address matches the split routes and
+ * re-enters the tunnel, so the in-country resolver's UDP query would loop into
+ * the hijack. Same defaults and plan view as buildConfig, so the two agree.
+ */
+function resolverBypassIps(planArg, settings) {
+  const s = Object.assign({}, SETTINGS_DEFAULTS, settings || {});
+  const plan = normalizePlan(planArg);
+  return buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: s.geoAssets !== false }).directResolverIps;
+}
+
 function buildConfig(planArg, settings) {
-  const s = Object.assign({
-    socksPort: 10808,
-    httpPort: 10809,
-    allowLan: false,
-    routingMode: 'global',
-    blockAds: true,
-    enableSniffing: true,
-    dns: ['1.1.1.1', '8.8.8.8'],
-    logLevel: 'warning',
-    apiPort: 10085,
-    customRules: [],
-    geoAssets: true   // geoip.dat/geosite.dat present? false -> skip geo rules
-  }, settings || {});
+  const s = Object.assign({}, SETTINGS_DEFAULTS, settings || {});
   const geo = s.geoAssets !== false;
 
   const plan = normalizePlan(planArg);
@@ -193,7 +235,7 @@ function buildConfig(planArg, settings) {
   // own config/chain. Handled separately (its own inbound set).
   if (plan.mode === 'pool') return buildPoolConfig(plan, s, listen, sniffing);
 
-  let outbounds, rules;
+  let outbounds, rules, exitTag;
 
   if (plan.mode === 'advanced') {
     const reg = makeRegistry(plan);
@@ -227,7 +269,12 @@ function buildConfig(planArg, settings) {
       advRules.push(rule);
     }
     const defTag = reg.tagFor(plan.def);
-    reg.add(Object.assign({}, FREEDOM));
+    // The resolver's exit. A `block` default is a legitimate allow-list, but
+    // the blackhole can never answer a DoH query: use the first proxy the
+    // rules name, else direct.
+    exitTag = defTag !== 'block' ? defTag
+      : (advRules.map(r => r.outboundTag).find(t => t !== 'direct' && t !== 'block') || 'direct');
+    reg.add(freedom(s));
     reg.add(Object.assign({}, BLACKHOLE));
     outbounds = reg.outs;
     // NOTE: user rules come BEFORE the private-IP bypass on purpose. This is
@@ -244,12 +291,20 @@ function buildConfig(planArg, settings) {
     const proxyOutbounds = plan.mode === 'chain'
       ? buildChainOutbounds(plan.chain, 'proxy')
       : [cloneOut(plan.server.outbound, 'proxy')];
-    outbounds = [...proxyOutbounds, Object.assign({}, FREEDOM), Object.assign({}, BLACKHOLE)];
+    outbounds = [...proxyOutbounds, freedom(s), Object.assign({}, BLACKHOLE)];
+    exitTag = s.routingMode === 'direct' ? 'direct' : 'proxy';
     // custom rules go BEFORE the catch-all so they actually take effect
     const base = buildRoutingRules(s.routingMode, s.blockAds, geo);
     const tail = base.pop(); // the final port:0-65535 catch-all
     rules = [...base, ...normalizeCustomRules(s.customRules, geo), tail];
   }
+
+  // Name resolution (see dnsBuilder.js). Its rules go FIRST: the port-53 hijack
+  // must beat the private-IP bypass, or a query to the tunnel peer 10.255.0.1
+  // would be sent "direct" into nowhere instead of being answered.
+  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: geo, exitTag });
+  if (dnsPlan.hijackOutbound) outbounds.push(dnsPlan.hijackOutbound);
+  rules = [...dnsPlan.rules, ...rules];
 
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
   outbounds = (outbounds || []).map(sanitizeWgOutbound);
@@ -275,7 +330,7 @@ function buildConfig(planArg, settings) {
       levels: { '0': level0 },
       system: { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true }
     },
-    dns: { servers: s.dns, queryStrategy: 'UseIP' },
+    dns: dnsPlan.dns,
     inbounds: [
       { tag: 'socks-in', port: s.socksPort, listen, protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing },
       { tag: 'http-in', port: s.httpPort, listen, protocol: 'http', settings: {}, sniffing }
@@ -343,12 +398,16 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     if (inTags.length) perInboundRules.push({ type: 'field', inboundTag: inTags, outboundTag: tag });
   }
 
-  reg.add(Object.assign({}, FREEDOM));
+  reg.add(freedom(s));
   reg.add(Object.assign({}, BLACKHOLE));
+  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: s.geoAssets !== false, exitTag: primaryTag });
+  if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
   const outbounds = applyFragments((reg.outs || []).map(sanitizeWgOutbound));
 
-  // Private/LAN always direct (bypass), THEN per-inbound routing, THEN a
-  // catch-all to the primary exit so nothing is ever left unrouted.
+  // Resolver rules first (see buildConfig), then private/LAN direct, THEN
+  // per-inbound routing, THEN a catch-all to the primary exit so nothing is
+  // ever left unrouted.
+  rules.push(...dnsPlan.rules);
   rules.push({ type: 'field', ip: PRIVATE_IPS.slice(), outboundTag: 'direct' });
   rules.push(...perInboundRules);
   rules.push({ type: 'field', port: '0-65535', outboundTag: primaryTag });
@@ -368,7 +427,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
       levels: { '0': level0 },
       system: { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true }
     },
-    dns: { servers: s.dns, queryStrategy: 'UseIP' },
+    dns: dnsPlan.dns,
     inbounds,
     outbounds,
     routing: { domainStrategy: 'IPIfNonMatch', rules }
@@ -529,4 +588,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps };

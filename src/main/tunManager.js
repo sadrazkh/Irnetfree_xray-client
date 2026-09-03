@@ -686,4 +686,4 @@ class TunManager {
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-module.exports = { TunManager, isOwnTunInterface };
+module.exports = { TunManager, isOwnTunInterface, TUN_GW };
