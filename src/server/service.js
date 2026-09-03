@@ -29,6 +29,8 @@ const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
 const { TunSingbox } = require('../main/tunSingbox');
+const tunPlatform = require('../main/tunPlatform');
+const { LeakGuard } = require('../main/leakGuard');
 const { StatsPoller } = require('../main/stats');
 const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
@@ -215,6 +217,29 @@ function createService(opts = {}) {
     onLog: (line, level) => send('log', { line, level }),
     onProgress: (component, pct) => send('asset-progress', { component, pct })
   });
+
+  // The leak guard and its crash repair. A `tun-state.json` left in the data dir
+  // means the last session died with every physical adapter still pointing at a
+  // tunnel that is gone — the machine has no working DNS until the originals go
+  // back — and the tunnel process it started may still be running with its
+  // routes in place. Deliberately NOT awaited: createService() is synchronous
+  // and the restore is a shell round trip. Every operation on the state file is
+  // serialized inside the guard, so a connect that starts while the repair is
+  // still running cannot lose its own record.
+  const leakGuard = new LeakGuard({
+    userData: dataDir,
+    onLog: (line, level) => send('log', { line, level }),
+    run: tunPlatform.run,
+    runScriptPrivileged: tunPlatform.runScriptPrivileged,
+    platform: process.platform
+  });
+  leakGuard.repairAtLaunch().catch((e) => send('log', { line: 'Leak guard repair failed: ' + e.message, level: 'error' }));
+
+  // A hard `kill -9` of the headless server runs no shutdown path at all, so the
+  // override would outlive it. This is the same sync, best-effort cleanup the
+  // desktop app does on exit (macOS only when already root — nothing can answer
+  // a password prompt here); anything it cannot do is repaired at the next launch.
+  process.on('exit', () => { try { leakGuard.releaseSync(); } catch {} });
 
   /* ----------------------------- settings / data ----------------------------- */
   function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {})); }
@@ -568,6 +593,8 @@ function createService(opts = {}) {
     // TUN mode (system-wide tunnel via sing-box, or tun2socks as the fallback —
     // see makeTun). Requires root/admin + the backend's files.
     let tunError = null;
+    let guardError = null;
+    let guardEngaged = false;
     if (settings.tunMode) {
       if (!tun.isAvailable()) {
         tunError = settings.lang === 'en'
@@ -594,11 +621,42 @@ function createService(opts = {}) {
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
         } catch (e) { tunError = e.message; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }
       }
+      // The leak guard (standard): the TUN adapter's own resolver is ours, but
+      // Windows asks the resolvers of EVERY connected adapter in parallel and
+      // macOS resolves per network service — so until we take them, the physical
+      // adapters still hand every name to the ISP. Only for a tunnel that
+      // actually came up: with no tunnel there is nothing to point them at, and
+      // doing it anyway would leave the machine unable to resolve at all.
+      if (tun.active && settings.leakGuard !== 'off') {
+        try {
+          await leakGuard.engage({
+            level: settings.leakGuard,
+            peer4: tun.dnsPeer || TUN_GW,
+            peer6: settings.ipv6 ? tun.dnsPeer6 : null,
+            tunAlias: tun.interfaceName || 'XrayTun',
+            backend: tun.backendId || null
+          });
+          guardEngaged = true;
+        } catch (e) {
+          // Not fatal — the tunnel is up and carrying traffic, the adapters just
+          // kept their own resolvers. Deliberately NOT tunError: that one means
+          // "no tunnel", and the network-change recovery retries the whole
+          // connection on it.
+          guardError = e.message;
+          send('log', { line: 'Leak guard failed: ' + e.message + ' — the tunnel is up, but the physical adapters keep their own DNS', level: 'error' });
+        }
+      }
     }
     // tun.start() is the longest await here (a privileged shell round trip) — the
     // likeliest place for a disconnect to land. Past this line nothing awaits, so
     // this is the last gate before the watchers and the 'connected' status.
-    if (stale()) return abandoned;
+    if (stale()) {
+      // doDisconnect() ran its release() before this call wrote the state file,
+      // so the override it just applied would outlive the tunnel it points at —
+      // the machine would be left unable to resolve anything. Undo it here.
+      if (guardEngaged) await leakGuard.release().catch(() => {});
+      return abandoned;
+    }
 
     // headless LAN info: which address forwarded clients point at
     let lan = null;
@@ -618,7 +676,7 @@ function createService(opts = {}) {
     if (!netWatcher) startNetWatcher();
     send('status', {
       state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
-      tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
+      tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys()
     });
     // `tunError` is the one failure this function does NOT throw for: TUN is a
     // best-effort upgrade and we stay connected proxy-only without it. Callers
@@ -658,6 +716,11 @@ function createService(opts = {}) {
     try {
       stopProcWatcher();
       if (stats) stats.stop();
+      // Give the adapters their own resolvers back BEFORE the tunnel goes, and
+      // let doConnect() engage the guard again on the new one. Holding the
+      // override across the gap would point every adapter at a peer that stops
+      // routing the moment tun.stop() runs.
+      try { if (leakGuard) await leakGuard.release(); } catch {}
       try { await tun.stop(); } catch {}
       try { await setSystemProxy(false, {}); } catch {}
       if (xray) await xray.stop();
@@ -894,6 +957,9 @@ function createService(opts = {}) {
     stopProcWatcher();
     stopNetWatcher();                // nothing live to recover any more
     if (stats) stats.stop();
+    // The adapters point at real resolvers again BEFORE the tunnel goes: in
+    // between they would be pointing at an address that no longer routes anywhere.
+    try { if (leakGuard) await leakGuard.release(); } catch {}
     // `tun` is the instance doConnect() started (makeTun), whichever backend
     // it chose — the same one shutdown() tears down.
     try { if (tun) await tun.stop(); } catch {}
@@ -1129,6 +1195,7 @@ function createService(opts = {}) {
     userDisconnecting = true;
     try { stopNetWatcher(); } catch {}
     try { if (stats) stats.stop(); } catch {}
+    try { if (leakGuard) await leakGuard.release(); } catch {}   // adapters first, then the tunnel
     try { if (tun) await tun.stop(); } catch {}   // the instance doConnect() started
     try { await setSystemProxy(false, {}); } catch {}
     try { if (xray) await xray.stop(); } catch {}
