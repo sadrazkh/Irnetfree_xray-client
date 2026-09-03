@@ -22,6 +22,7 @@ const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor } = require('../main/engineChoice');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, PinWatch } = require('../main/certPin');
 const { assetStatus: scanAssets } = require('../main/assets');
+const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('../main/geoCheck');
 const { XrayManager, getFreePort } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../main/netutils');
@@ -591,7 +592,10 @@ function createService(opts = {}) {
         ? (settings.lang === 'en'
           ? ' — this config has no TLS; the official core refuses it. Install Xray-PattN under Settings → Required files.'
           : ' — این کانفیگ TLS ندارد و هستهٔ رسمی آن را رد می‌کند. Xray-PattN را از تنظیمات → فایل‌های موردنیاز نصب کن.')
-        : '';
+        : ''
+      // A geo code the data files do not carry refuses the whole config, and
+      // the core's own line reads like the files are missing (see geoCheck.js).
+      + geoCodeHint(check.error, settings.lang === 'en' ? 'en' : 'fa');
       // Only Error.message survives the bridge (web-api.js rebuilds it with
       // new Error(data.error)), so the hint IS the signal: the renderer keys off
       // the (untranslated) product name in it. A property set here would be
@@ -1191,6 +1195,17 @@ function createService(opts = {}) {
 
     'settings:get': () => getSettings(),
     // returns { settings, pendingReconnect } — see main.js / settingsMeta.js
+    /**
+     * Which geo codes in these rules the installed data files do not carry —
+     * the core is the only authority on that (see geoCheck.js). Called when
+     * routing rules are saved, so a typo is caught there instead of taking the
+     * next connection down with it.
+     */
+    'routing:checkGeo': async (rules) => {
+      const tokens = geoTokensOf(rules);
+      if (!tokens.length) return { checked: true, bad: [] };
+      return checkGeoTokens(tokens, (cfg) => xray.validate(cfg));
+    },
     'settings:set': (partial) => {
       const next = Object.assign(getSettings(), partial);
       store.set('settings', next);

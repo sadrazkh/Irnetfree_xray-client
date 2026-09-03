@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (partial) => ipcRenderer.invoke('settings:set', partial),
   pendingReconnect: () => ipcRenderer.invoke('settings:pending'),
+  checkGeoRules: (rules) => ipcRenderer.invoke('routing:checkGeo', rules),
   applySettings: () => ipcRenderer.invoke('settings:apply'),
 
   // diagnostics
