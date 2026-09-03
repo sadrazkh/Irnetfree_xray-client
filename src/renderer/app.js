@@ -286,6 +286,9 @@ function applySettingsToUI() {
   $('#themeSelect').value = s.theme || 'dark';
   $('#optSysProxy').checked = !!s.systemProxy;
   $('#optTun').checked = !!s.tunMode;
+  $('#optTunBackend').value = s.tunBackend || 'sing-box';
+  $('#optLeakGuard').value = s.leakGuard || 'standard';
+  $('#optBlockUdpProxy').checked = !!s.blockUdpInProxyMode;
   $('#optAllowLan').checked = !!s.allowLan;
   $('#optKillSwitch').checked = !!s.killSwitch;
   $('#optNetAuto').checked = s.autoReconnectOnNetworkChange !== false;
@@ -298,6 +301,40 @@ function applySettingsToUI() {
   $$('#routingSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === (s.routingMode || 'global')));
   syncPreset('#dnsRemotePreset', '#dnsRemoteInput');
   syncPreset('#dnsDirectPreset', '#dnsDirectInput');
+  updateGuardRows();
+}
+
+/**
+ * The leak guard only exists inside the tunnel, and the proxy-mode UDP block only
+ * exists outside it — so each row is dimmed and disabled in the mode where it does
+ * nothing, with a note saying why instead of a control that silently has no effect.
+ * Driven by the TUN *switch*, not by the live connection: this is the setting the
+ * next connect will be built from.
+ */
+function updateGuardRows() {
+  const tunOn = !!($('#optTun') && $('#optTun').checked);
+  const guardRow = $('#leakGuardRow');
+  if (guardRow) {
+    guardRow.classList.toggle('disabled', !tunOn);
+    $('#optLeakGuard').disabled = !tunOn;
+    $('#guardNeedsTun').hidden = tunOn;
+    // the pf anchor behind "strict" has never run on a real Mac (phase 3)
+    $('#guardMacNote').hidden = (state.assets || {}).platform !== 'darwin';
+    // Strict blocks everything that does not go through the tunnel — and a
+    // "direct" route is exactly that. Say so where the two are chosen, not in a
+    // log line the user reads after their bank stops loading.
+    const s = state.settings || {};
+    const bypasses = s.advancedRouting
+      ? (s.routeRules || []).some(r => r && r.target === 'direct') || s.routeDefault === 'direct'
+      : ['bypass-ir', 'bypass-cn', 'direct'].includes(s.routingMode || 'global');
+    $('#guardStrictRouting').hidden = !(tunOn && $('#optLeakGuard').value === 'strict' && bypasses);
+  }
+  const udpRow = $('#udpBlockRow');
+  if (udpRow) {
+    udpRow.classList.toggle('disabled', tunOn);
+    $('#optBlockUdpProxy').disabled = tunOn;
+    $('#udpBlockNote').hidden = !tunOn;
+  }
 }
 
 /** Reflect an input's value in its preset dropdown (or "custom"). */
@@ -344,6 +381,9 @@ function readSettingsForm() {
     logLevel: $('#logLevel').value,
     systemProxy: $('#optSysProxy').checked,
     tunMode: $('#optTun').checked,
+    tunBackend: $('#optTunBackend').value,
+    leakGuard: $('#optLeakGuard').value,
+    blockUdpInProxyMode: $('#optBlockUdpProxy').checked,
     allowLan: $('#optAllowLan').checked,
     killSwitch: $('#optKillSwitch').checked,
     blockAds: $('#optBlockAds').checked,
@@ -480,6 +520,7 @@ $$('#routingSeg .seg-btn').forEach(btn => {
     $$('#routingSeg .seg-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     await saveSettings({ routingMode: btn.dataset.mode });
+    updateGuardRows();   // whether the strict guard now contradicts the routing
     toast(t('t.routingMode') + ': ' + btn.textContent, 'ok');
   };
 });
@@ -499,6 +540,11 @@ $('#dnsDirectPreset').onchange = () => {
 $('#dnsDirectInput').oninput = () => syncPreset('#dnsDirectPreset', '#dnsDirectInput');
 $('#optDnsManaged').onchange = () => saveSettings({ dnsManaged: $('#optDnsManaged').checked });
 $('#optIpv6').onchange = () => saveSettings({ ipv6: $('#optIpv6').checked });
+
+/* TUN backend / leak guard / proxy-mode UDP block — each saves only its own key */
+$('#optTunBackend').onchange = () => saveSettings({ tunBackend: $('#optTunBackend').value });
+$('#optLeakGuard').onchange = () => { saveSettings({ leakGuard: $('#optLeakGuard').value }); updateGuardRows(); };
+$('#optBlockUdpProxy').onchange = () => saveSettings({ blockUdpInProxyMode: $('#optBlockUdpProxy').checked });
 
 /* kill switch toggle — read live when a drop happens, so it needs no reconnect */
 $('#optKillSwitch').onchange = async () => {
@@ -1321,7 +1367,7 @@ const COMPONENTS = [
   { key: 'xray-pattn', label: 'comp.xrayPattn', ver: 'xray-pattn' },
   { key: 'sing-box', label: 'comp.singbox', has: (a) => !!a['sing-box'] },
   { key: 'geo', label: 'comp.geo', has: (a) => a.geoip && a.geosite },
-  { key: 'tun2socks', label: 'comp.tun2socks' },
+  { key: 'tun2socks', label: 'comp.tun2socksLegacy' },
   { key: 'wintun', label: 'comp.wintun', winOnly: true }
 ];
 
@@ -1354,6 +1400,12 @@ function renderComponents() {
   // shows even when both files are installed — tie it to the real state
   const note = $('#routingGeoNote');
   if (note) note.hidden = !!(a.geoip && a.geosite);
+
+  // What TUN needs, from the one flag that knows both backends (assets.tunReady:
+  // sing-box OR tun2socks, plus wintun on Windows). Older mains do not send it —
+  // then say nothing rather than guess from a single component.
+  const tunNote = $('#compTunNote');
+  if (tunNote) tunNote.hidden = typeof a.tunReady !== 'boolean' || a.tunReady;
 }
 
 async function downloadComponent(key, btn) {
@@ -1541,6 +1593,9 @@ $('#optTun').onchange = async () => {
 };
 
 function updateTunStatus() {
+  // the guard/UDP rows follow the TUN switch, and every caller here has just
+  // flipped it (settings switch, mode modal, a component download)
+  updateGuardRows();
   const el = $('#tunStatus');
   if (!el) return;
   if (!state.tunAvailable) {
@@ -1672,6 +1727,7 @@ window.api.onSubsUpdated((d) => {
 
 /* ----------------------------- edit server modal ----------------------------- */
 let editOriginal = null;
+let editClearPin = false;   // "clear pin" pressed in the open edit form
 
 function readServerFields(s) {
   const ob = s.outbound || {};
@@ -1685,7 +1741,8 @@ function readServerFields(s) {
     noise: ob._noise || '',
     cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
     finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
-    engine: s.engine || 'xray'
+    engine: s.engine || 'xray',
+    certPin: s.certPin || ''
   };
 
   if (s.protocol === 'vless' || s.protocol === 'vmess') {
@@ -1826,6 +1883,12 @@ function openEdit(id) {
   if ($('#edFinalMask')) $('#edFinalMask').value = f.finalMask || '';
   if ($('#edEngine')) $('#edEngine').value = f.engine || 'xray';
   $('#edInsecure').checked = !!f.allowInsecure;
+  // The certificate pinned on first use stands in for "allow insecure" now
+  // (certPin.js). Shown abbreviated, the full hash in the tooltip; clearing it
+  // makes the next connect read the certificate again.
+  editClearPin = false;
+  $('#edCertPin').textContent = f.certPin ? f.certPin.slice(0, 6) + '…' + f.certPin.slice(-4) : '';
+  $('#edCertPin').title = f.certPin || '';
 
   // credential label per protocol
   const credLabel = $('#edCredLabel');
@@ -1847,6 +1910,8 @@ function openEdit(id) {
   show('#edPathRow', isStd);
   show('#edPattWrap', isStd);
   show('#edInsecureRow', isStd);
+  show('#edInsecureHint', isStd);
+  show('#edCertPinRow', isStd && !!f.certPin);
   show('#edWgExtra', isWg);
   show('#edProxyRow', isProxy);
   // socks/http carry no single "credential" field — user/pass live in edProxyRow
@@ -1927,7 +1992,10 @@ if ($('#edHideSni')) $('#edHideSni').onchange = () => {
   else frag.value = '';
 };
 
-function closeEdit() { $('#editModal').hidden = true; state.editingId = null; editOriginal = null; }
+function closeEdit() { $('#editModal').hidden = true; state.editingId = null; editOriginal = null; editClearPin = false; }
+
+// The pin goes when the form is saved; until then the row just disappears.
+$('#edCertPinClear').onclick = () => { editClearPin = true; show('#edCertPinRow', false); };
 $('#editClose').onclick = closeEdit;
 $('#editCancel').onclick = closeEdit;
 $('#editModal').onclick = (e) => { if (e.target === $('#editModal')) closeEdit(); };
@@ -1961,6 +2029,7 @@ $('#editSave').onclick = async () => {
     fields.pbk = $('#edPbk').value.trim();
     fields.sid = $('#edSid').value.trim();
     fields.allowInsecure = $('#edInsecure').checked;
+    if (editClearPin) fields.clearCertPin = true;
     // patterniha custom-TLS: cipherSuites + finalMask ('' clears them)
     fields.cipherSuites = $('#edCipherSuites') ? $('#edCipherSuites').value.trim() : '';
     fields.finalMask = $('#edFinalMask') ? $('#edFinalMask').value.trim() : '';
@@ -2735,6 +2804,7 @@ $('#btnSaveAdv').onclick = async () => {
   const routeDefault = advDefaultSel ? advDefaultSel.getValue() : (state.settings.routeDefault || 'direct');
   await saveSettings({ routeRules: rules, routeDefault, advancedRouting: $('#optAdvanced').checked });
   state.settings.routeRules = rules;
+  updateGuardRows();   // a `direct` target here contradicts the strict guard too
   renderAdvanced();
   renderPicker();
   $('#advSavedHint').textContent = t('saved');

@@ -606,6 +606,55 @@ test('managed bypass-ir: the in-country resolver rides direct and the domestic r
   assert.deepEqual(c.dns.servers[0].expectedIPs, ['geoip:ir']);
 });
 
+/*
+ * The strict leak guard drops the plain-UDP in-country resolver at build time:
+ * sing-box's strict_route blocks port 53 off the tunnel, so a query to
+ * 178.22.122.100:53 dialled `direct` would time out on every domestic name
+ * instead of resolving it. DoH survives (port 443) and geoip still routes the
+ * answer, so the bypass keeps working. Only under TUN — in proxy mode nothing
+ * blocks :53 and the resolver is the fast path it always was.
+ */
+test('strict under TUN drops the UDP direct resolver — and its bypass route with it', () => {
+  const strict = { tunMode: true, leakGuard: 'strict', routingMode: 'bypass-ir' };
+  const c = buildConfig(single(), settings(Object.assign({}, MANAGED, strict)));
+  assert.equal(JSON.stringify(c.dns).includes('178.22.122.100'), false, 'the UDP resolver is gone');
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
+    'with nothing to send direct, the resolver rule is the plain one');
+  assert.deepEqual(resolverBypassIps(single(), settings(Object.assign({}, MANAGED, strict))), [],
+    'nothing to bypass, so nothing punches a hole in the firewall either');
+
+  // a DoH direct resolver is untouched: it rides port 443, which strict allows
+  const doh = { dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: ['https://178.22.122.100/dns-query'] };
+  const d = buildConfig(single(), settings(Object.assign({}, doh, strict)));
+  assert.equal(d.dns.servers[0].address, 'https://178.22.122.100/dns-query');
+  assert.deepEqual(resolverBypassIps(single(), settings(Object.assign({}, doh, strict))), ['178.22.122.100']);
+});
+
+test('strict without TUN, and TUN without strict, change nothing', () => {
+  const base = settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED));
+  const golden = JSON.stringify(buildConfig(single(), base));
+  for (const s of [
+    { leakGuard: 'strict' },                        // proxy mode: nothing blocks :53
+    { tunMode: true, leakGuard: 'standard' },
+    { tunMode: true, leakGuard: 'off' },
+    { tunMode: true }
+  ]) {
+    assert.equal(JSON.stringify(buildConfig(single(), Object.assign({}, base, s))), golden, JSON.stringify(s));
+    assert.deepEqual(resolverBypassIps(single(), Object.assign({}, base, s)), ['178.22.122.100']);
+  }
+});
+
+test('strict under TUN drops the UDP resolver an advanced plan asked for', () => {
+  const strict = Object.assign({ tunMode: true, leakGuard: 'strict', blockAds: false }, MANAGED);
+  const plan = advancedPlan({
+    rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }],
+    def: 'sv-vless'
+  });
+  assert.equal(buildConfig(plan, settings(MANAGED)).dns.servers[0].address, '178.22.122.100', 'without strict it is there');
+  assert.equal(JSON.stringify(buildConfig(plan, settings(strict))).includes('178.22.122.100'), false);
+  assert.deepEqual(resolverBypassIps(plan, settings(strict)), []);
+});
+
 test('managed bypass-ir without geo files carries no geo token at all', () => {
   const c = buildConfig(single(), settings(Object.assign({ routingMode: 'bypass-ir', geoAssets: false }, MANAGED)));
   assert.equal(JSON.stringify(c).includes('geosite:'), false);
@@ -891,4 +940,191 @@ test('the same resolver reached directly and through a chain: the chain carries 
   }), settings(MANAGED));
   assert.equal(c.routing.rules[0].outboundTag, 'out-chain-c1');
   assert.equal(c.dns.servers.filter(x => x && x.address === '192.168.60.1').length, 1);
+});
+
+/* ----------------------------- certificate pinning (allowInsecure is gone) ----------------------------- */
+
+const PIN = 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde';
+/** The fixture as an Iranian link imports it (allowInsecure=1), optionally with a stored pin. */
+function insecure(server, over) {
+  const s = JSON.parse(JSON.stringify(server));
+  s.outbound.streamSettings.tlsSettings.allowInsecure = true;
+  return Object.assign(s, over || {});
+}
+const tlsOf = (c, tag) => outboundTagged(c, tag).streamSettings.tlsSettings;
+
+test('allowInsecure is never emitted — the core rejects it whether true or false', () => {
+  for (const s of [VLESS_WS_TLS, insecure(VLESS_WS_TLS)]) {
+    const tls = tlsOf(buildConfig(single(s), settings()), 'proxy');
+    assert.equal('allowInsecure' in tls, false);
+    assert.equal('pinnedPeerCertSha256' in tls, false, 'no pin on the record → the core verifies normally');
+    assert.equal(tls.serverName, 'a.example.com', 'the rest of tlsSettings is untouched');
+    assert.equal(tls.fingerprint, 'chrome');
+  }
+});
+
+test('a record with a pin emits pinnedPeerCertSha256 in the canonical form, in place of allowInsecure', () => {
+  const colons = PIN.toUpperCase().match(/../g).join(':');
+  for (const stored of [PIN, colons]) {
+    const tls = tlsOf(buildConfig(single(insecure(VLESS_WS_TLS, { certPin: stored })), settings()), 'proxy');
+    assert.equal(tls.pinnedPeerCertSha256, PIN);
+    assert.equal('allowInsecure' in tls, false);
+  }
+});
+
+test('a junk certPin is ignored rather than handed to the core', () => {
+  const tls = tlsOf(buildConfig(single(insecure(VLESS_WS_TLS, { certPin: 'not-a-hash' })), settings()), 'proxy');
+  assert.equal('pinnedPeerCertSha256' in tls, false);
+});
+
+test('the pin follows its server: a chain’s first hop, an advanced target, a pool exit, a chain: target', () => {
+  const first = insecure(VLESS_WS_TLS, { certPin: PIN });
+  const chain = buildConfig({ mode: 'chain', chain: [first, TROJAN_TCP_TLS] }, settings());
+  assert.equal(tlsOf(chain, 'proxy-h0').pinnedPeerCertSha256, PIN);
+  assert.equal('pinnedPeerCertSha256' in tlsOf(chain, 'proxy'), false, 'the exit has no pin of its own');
+  assert.equal('allowInsecure' in tlsOf(chain, 'proxy'), false);
+
+  const exit = insecure(TROJAN_TCP_TLS, { certPin: PIN });
+  const adv = buildConfig(advancedPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': exit },
+    chainsById: { c1: [VLESS_WS_TLS, exit] },
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'domain', value: 'b.com', target: 'chain:c1' }],
+    def: 'sv-vless'
+  }), settings());
+  assert.equal(tlsOf(adv, 'out-sv-trojan').pinnedPeerCertSha256, PIN);
+  assert.equal(tlsOf(adv, 'out-chain-c1').pinnedPeerCertSha256, PIN, 'the same server as a chain exit');
+  assert.equal('pinnedPeerCertSha256' in tlsOf(adv, 'out-chain-c1-h0'), false);
+  assert.equal('pinnedPeerCertSha256' in tlsOf(adv, 'out-sv-vless'), false);
+
+  const pool = buildConfig({
+    mode: 'pool', entries: [{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }], primary: 'sv-vless',
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': exit }, chainsById: {}, chain: []
+  }, settings());
+  assert.equal(tlsOf(pool, 'out-sv-trojan').pinnedPeerCertSha256, PIN);
+});
+
+test('buildTestConfig carries the pin, so a ping does not fail where a connect works', () => {
+  const pinned = insecure(VLESS_WS_TLS, { certPin: PIN });
+  assert.equal(tlsOf(buildTestConfig(pinned, 47140), 'proxy').pinnedPeerCertSha256, PIN);
+  assert.equal('allowInsecure' in tlsOf(buildTestConfig(insecure(VLESS_WS_TLS), 47141), 'proxy'), false);
+  const chain = buildTestConfig([pinned, TROJAN_TCP_TLS], 47142);
+  assert.equal(tlsOf(chain, 'proxy-h0').pinnedPeerCertSha256, PIN);
+  assert.equal('allowInsecure' in tlsOf(chain, 'proxy'), false);
+});
+
+test('pinning never touches the stored record: the link keeps allowInsecure for export', () => {
+  const s = insecure(VLESS_WS_TLS, { certPin: PIN });
+  const before = JSON.stringify(s);
+  buildConfig(single(s), settings());
+  buildTestConfig(s, 47143);
+  buildConfig({ mode: 'chain', chain: [s, TROJAN_TCP_TLS] }, settings());
+  assert.equal(JSON.stringify(s), before);
+  assert.equal(s.outbound.streamSettings.tlsSettings.allowInsecure, true);
+});
+
+/* ------------------------ direct-outbound binding (TUN) ------------------------ */
+// Under TUN the OS default route is the tunnel, so every outbound that dials the
+// network ITSELF must be bound to the physical NIC (sockopt.interface) or its
+// dial re-enters the TUN and loops. main.js derives `directInterface` at connect
+// time, only under tunMode; without it nothing here may change.
+
+const sockoptOf = (c, tag) => (outboundTagged(c, tag).streamSettings || {}).sockopt || {};
+const BOUND = { directInterface: 'Wi-Fi' };
+
+test('golden guard: without directInterface no sockopt.interface appears anywhere', () => {
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const plans = [
+    single(), single(frag), single(WG_BAD_MASK), single(WG_CORP),
+    { mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] },
+    { mode: 'chain', chain: [VLESS_WS_TLS, WG_BAD_MASK] },
+    advancedPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c1' }], def: 'sv-vless' }),
+    poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001, httpPort: 60002 }])
+  ];
+  for (const p of plans) {
+    for (const s of [settings(), managed(), settings({ directInterface: '' }), settings({ directInterface: '   ' }), settings({ directInterface: null }), settings({ directInterface: 7 })]) {
+      const text = JSON.stringify(buildConfig(p, s));
+      assert.equal(text.includes('"interface"'), false, `${p.mode}: ${JSON.stringify(s.directInterface)} bound something`);
+    }
+  }
+  assert.equal(JSON.stringify(buildTestConfig(frag, 47150)).includes('"interface"'), false, 'a ping runs without TUN');
+  assert.equal(JSON.stringify(buildTestConfig([VLESS_WS_TLS, TROJAN_TCP_TLS], 47151)).includes('"interface"'), false);
+});
+
+test('single: proxy, direct and the dpi dialer are bound; block and dns-out are not', () => {
+  const s = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const c = buildConfig(single(s), managed(BOUND));
+  assert.equal(sockoptOf(c, 'direct').interface, 'Wi-Fi');
+  assert.equal(sockoptOf(c, 'dpi-1').interface, 'Wi-Fi', 'the dialer is what touches the wire');
+  // the proxy dials THROUGH dpi-1, so binding it would be wrong
+  assert.deepEqual(sockoptOf(c, 'proxy'), { dialerProxy: 'dpi-1' });
+  assert.equal('streamSettings' in outboundTagged(c, 'block'), false);
+  assert.equal('streamSettings' in outboundTagged(c, 'dns-out'), false);
+  // a plain proxy with no dialer dials itself
+  const plain = buildConfig(single(), managed(BOUND));
+  assert.deepEqual(sockoptOf(plain, 'proxy'), { interface: 'Wi-Fi' });
+  assert.equal(outboundTagged(plain, 'proxy').streamSettings.security, 'tls', 'the rest of streamSettings is untouched');
+});
+
+test('chain: the first hop is bound, the hop behind it keeps dialing through it', () => {
+  const c = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] }, settings(BOUND));
+  assert.deepEqual(sockoptOf(c, 'proxy-h0'), { interface: 'Wi-Fi' });
+  assert.deepEqual(sockoptOf(c, 'proxy'), { dialerProxy: 'proxy-h0' });
+  assert.deepEqual(sockoptOf(c, 'direct'), { interface: 'Wi-Fi' });
+});
+
+test('advanced: every top-level outbound is bound; a chain hop behind a hop is not', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [
+      { type: 'domain', value: 'a.com', target: 'sv-trojan' },
+      { type: 'ip', value: '10.20.0.0/16', target: 'chain:c1' },
+      { type: 'ip', value: '10.30.0.0/16', target: 'sv-wg' }
+    ],
+    def: 'sv-vless'
+  }), managed(BOUND));
+  for (const tag of ['out-sv-trojan', 'out-chain-c1-h0', 'out-sv-wg', 'out-sv-vless', 'direct']) {
+    assert.equal(sockoptOf(c, tag).interface, 'Wi-Fi', tag);
+  }
+  assert.deepEqual(sockoptOf(c, 'out-chain-c1'), { dialerProxy: 'out-chain-c1-h0' });
+  assert.equal('streamSettings' in outboundTagged(c, 'block'), false);
+  assert.equal('streamSettings' in outboundTagged(c, 'dns-out'), false);
+});
+
+test('pool: every exit and direct are bound; block and dns-out are not', () => {
+  const c = buildConfig(poolPlan([
+    { id: 'e1', target: 'sv-trojan', socksPort: 60001 },
+    { id: 'e2', target: 'chain:c1', socksPort: 60003 }
+  ]), managed(BOUND));
+  for (const tag of ['out-sv-vless', 'out-sv-trojan', 'out-chain-c1-h0', 'direct']) {
+    assert.equal(sockoptOf(c, tag).interface, 'Wi-Fi', tag);
+  }
+  assert.deepEqual(sockoptOf(c, 'out-chain-c1'), { dialerProxy: 'out-chain-c1-h0' });
+  assert.equal('streamSettings' in outboundTagged(c, 'block'), false);
+  assert.equal('streamSettings' in outboundTagged(c, 'dns-out'), false);
+});
+
+test('WireGuard dialled directly is bound (its empty sockopt kept); behind a chain it is not', () => {
+  const direct = buildConfig(single(WG_BAD_MASK), settings(BOUND));
+  assert.deepEqual(sockoptOf(direct, 'proxy'), { interface: 'Wi-Fi' });
+  const chained = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, WG_BAD_MASK] }, settings(BOUND));
+  assert.deepEqual(sockoptOf(chained, 'proxy'), { dialerProxy: 'proxy-h0' });
+  assert.deepEqual(sockoptOf(chained, 'proxy-h0'), { interface: 'Wi-Fi' });
+  assert.equal(chained.policy.levels['0'].bufferSize, 0, 'the chained-WireGuard rule still fires');
+});
+
+test('binding does not depend on managed DNS, and the interface name is taken as given', () => {
+  const c = buildConfig(single(), settings({ dnsManaged: false, directInterface: 'Ethernet 2' }));
+  assert.deepEqual(sockoptOf(c, 'proxy'), { interface: 'Ethernet 2' });
+  assert.deepEqual(sockoptOf(c, 'direct'), { interface: 'Ethernet 2' });
+  assert.equal(c.outbounds.some(o => o.tag === 'dns-out'), false);
+  const mac = buildConfig(single(), settings({ directInterface: 'en0' }));
+  assert.equal(sockoptOf(mac, 'direct').interface, 'en0');
+});
+
+test('binding never touches the stored record', () => {
+  const s = JSON.parse(JSON.stringify(WG_BAD_MASK));
+  const before = JSON.stringify(s);
+  buildConfig(single(s), settings(BOUND));
+  buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, s] }, settings(BOUND));
+  assert.equal(JSON.stringify(s), before);
+  assert.equal(VLESS_WS_TLS.outbound.streamSettings.sockopt, undefined);
 });

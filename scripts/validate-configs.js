@@ -5,6 +5,10 @@
  * emits (dns.tag, the dns outbound, expectedIPs, DoH strings, inboundTag
  * rules) — the unit tests only pin our own output. Needs bin/xray(.exe)
  * (`npm run get-xray`).
+ *
+ * With IRNF_SINGBOX_EXE set, every TUN config tunSingbox.buildTunConfig can
+ * emit is run through `sing-box check` as well (parse + build only — `check`
+ * never creates an adapter) and counted into the same total.
  */
 const fs = require('fs');
 const os = require('os');
@@ -13,7 +17,9 @@ const { spawnSync } = require('child_process');
 const { buildConfig } = require('../src/main/configBuilder');
 const F = require('../tests/fixtures');
 
-const exe = path.join(__dirname, '..', 'bin', process.platform === 'win32' ? 'xray.exe' : 'xray');
+// IRNF_XRAY_EXE points the run at another core (e.g. the PattN fork in the
+// app's userData bin) so both cores can be checked against the same shapes.
+const exe = process.env.IRNF_XRAY_EXE || path.join(__dirname, '..', 'bin', process.platform === 'win32' ? 'xray.exe' : 'xray');
 if (!fs.existsSync(exe)) { console.error('no core at ' + exe + ' — run: npm run get-xray'); process.exit(2); }
 
 const single = { mode: 'single', server: F.VLESS_WS_TLS };
@@ -94,7 +100,19 @@ const shapes = {
   'single-wgDns-domains': [{ mode: 'single', server: F.WG_CORP }, managed],
   'advanced-wgDefault': [Object.assign({}, advancedWgChain, { def: 'chain:c1' }), managed],
   'advanced-wgBlockDefault': [Object.assign({}, advancedWgChain, { def: 'block' }), managed],
-  'pool-bypass-ir': [pool, Object.assign({ routingMode: 'bypass-ir' }, managed)]
+  'pool-bypass-ir': [pool, Object.assign({ routingMode: 'bypass-ir' }, managed)],
+  // a certificate pinned on first use (certPin.js) → tlsSettings.pinnedPeerCertSha256
+  'single-certPin': [{ mode: 'single', server: Object.assign({}, F.VLESS_WS_TLS, { certPin: 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde' }) }, managed],
+  'chain-certPin-firstHop': [{ mode: 'chain', chain: [Object.assign({}, F.VLESS_WS_TLS, { certPin: 'AB:11:BF:7A:C8:77:BA:A5:39:29:4F:5A:3C:86:4B:8E:D4:3E:6F:E3:A9:A8:23:0F:C2:DB:7F:FF:85:C2:7F:DE' }), F.TROJAN_TCP_TLS] }, managed],
+  // Under TUN every outbound that dials itself is bound to the physical NIC
+  // (sockopt.interface — the core checks the field is well-formed, the NIC is
+  // looked up at dial time; see configBuilder.bindDirectDials). One per plan
+  // kind; the single carries the anti-DPI dialer so a bound dpi-* is covered.
+  'single-bound-fragment': [{ mode: 'single', server: F.vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' }) }, Object.assign({ routingMode: 'bypass-ir', directInterface: 'Wi-Fi' }, managed)],
+  'single-bound-wireguard': [{ mode: 'single', server: F.WG_BAD_MASK }, Object.assign({ directInterface: 'Wi-Fi' }, managed)],
+  'chain-bound-wgExit': [{ mode: 'chain', chain: [F.VLESS_WS_TLS, F.WG_BAD_MASK] }, Object.assign({ directInterface: 'Wi-Fi' }, managed)],
+  'advanced-bound-wgChain': [advancedWgChain, Object.assign({ directInterface: 'Wi-Fi' }, managed)],
+  'pool-bound': [pool, Object.assign({ directInterface: 'Wi-Fi' }, managed)]
 };
 for (const [name, [plan, over]] of Object.entries(shapes)) {
   total++;
@@ -111,5 +129,35 @@ for (const [name, [plan, over]] of Object.entries(shapes)) {
   console.log('     ' + ((r.stdout || '') + (r.stderr || '')).trim().split(/\r?\n/).slice(-3).join('\n     '));
 }
 
-console.log(`\n${total - failed}/${total} configs accepted by ${path.basename(exe)}`);
+// sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
+// entry → /32 and /128), plus the darwin shape — no interface_name, because
+// sing-tun there only accepts utun<N> and names the device itself.
+let sbTotal = 0, sbFailed = 0;
+const sb = process.env.IRNF_SINGBOX_EXE;
+if (sb) {
+  if (!fs.existsSync(sb)) { console.error('no sing-box at ' + sb); process.exit(2); }
+  const { buildTunConfig } = require('../src/main/tunSingbox');
+  const cases = [];
+  for (const ipv6 of [false, true]) {
+    for (const strict of [false, true]) {
+      for (const excludeIps of [[], ['1.2.3.4', '2001:db8::1']]) {
+        cases.push([`tun-v6${ipv6}-strict${strict}-exclude${excludeIps.length}`, { socksPort: 10808, ipv6, strict, excludeIps }]);
+      }
+    }
+  }
+  cases.push(['tun-darwin-noname', { socksPort: 10808, excludeIps: ['1.2.3.4'], interfaceName: null }]);
+  for (const [name, args] of cases) {
+    total++; sbTotal++;
+    const file = path.join(work, `${name}.json`);
+    fs.writeFileSync(file, JSON.stringify(buildTunConfig(args), null, 2));
+    const r = spawnSync(sb, ['check', '-c', file], { encoding: 'utf8', timeout: 15000, windowsHide: true });
+    if (r.status === 0) { console.log('ok   ' + path.basename(file)); continue; }
+    failed++; sbFailed++;
+    console.log('FAIL ' + path.basename(file));
+    console.log('     ' + ((r.stdout || '') + (r.stderr || '')).trim().split(/\r?\n/).slice(-3).join('\n     '));
+  }
+}
+
+const by = path.basename(exe) + (sb ? ` + ${path.basename(sb)} (${sbTotal - sbFailed}/${sbTotal} TUN configs)` : '');
+console.log(`\n${total - failed}/${total} configs accepted by ${by}`);
 process.exit(failed ? 1 : 0);

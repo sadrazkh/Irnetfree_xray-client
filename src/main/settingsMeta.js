@@ -31,6 +31,9 @@ const RECONNECT_KEYS = [
   'advancedRouting', 'routeRules', 'routeDefault', 'procRouteWatch',
   // connect-time side effects
   'systemProxy', 'tunMode',
+  // which TUN backend runs, how hard the leak guard holds, the proxy-mode UDP
+  // block — all decided when the tunnel is built (phase 3)
+  'tunBackend', 'leakGuard', 'blockUdpInProxyMode',
   // which core the config is validated on and started with
   'defaultEngine'
 ];

@@ -12,6 +12,7 @@
  */
 
 const { buildDnsPlan } = require('./dnsBuilder');
+const { normalizePin } = require('./certPin');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -59,9 +60,29 @@ function buildRoutingRules(mode, blockAds, geo) {
   return rules;
 }
 
-function cloneOut(outbound, tag) {
+/**
+ * A server's outbound as the config will carry it. `server` is the record the
+ * outbound belongs to — its certificate pin, if any, goes into tlsSettings.
+ */
+function cloneOut(outbound, tag, server) {
   const o = JSON.parse(JSON.stringify(outbound));
   o.tag = tag;
+  return applyCertPin(o, server);
+}
+
+/**
+ * allowInsecure is gone from the core (both cores reject it at config load):
+ * never emit it, true or false. A record that learnt its server's certificate
+ * on first use (certPin.js) pins it instead — the core then accepts that
+ * certificate and no other; without a pin it verifies the chain as usual and
+ * its own error is the user's signal.
+ */
+function applyCertPin(o, server) {
+  const tls = o && o.streamSettings && o.streamSettings.tlsSettings;
+  if (!tls) return o;
+  delete tls.allowInsecure;
+  const pin = normalizePin(server && server.certPin);
+  if (pin) tls.pinnedPeerCertSha256 = pin;
   return o;
 }
 
@@ -114,7 +135,7 @@ function buildChainOutbounds(servers, exitTag) {
   const outs = [];
   for (let i = 0; i <= last; i++) {
     const tag = i === last ? exitTag : `${exitTag}-h${i}`;
-    const ob = cloneOut(list[i].outbound, tag);
+    const ob = cloneOut(list[i].outbound, tag, list[i]);
     if (i > 0) dialThrough(ob, `${exitTag}-h${i - 1}`);
     outs.push(ob);
   }
@@ -138,7 +159,7 @@ function makeRegistry(plan) {
   function chainTag(list, tag) {
     const arr = (list || []).filter(s => s && s.outbound);
     if (arr.length >= 2) { buildChainOutbounds(arr, tag).forEach(add); return tag; }
-    if (arr.length === 1) { add(cloneOut(arr[0].outbound, tag)); return tag; }
+    if (arr.length === 1) { add(cloneOut(arr[0].outbound, tag, arr[0])); return tag; }
     return 'direct';
   }
 
@@ -152,7 +173,7 @@ function makeRegistry(plan) {
       return chainTag(list, 'out-chain-' + cid);
     }
     const s = (plan.serversById || {})[target];
-    if (s && s.outbound) { const tag = 'out-' + target; add(cloneOut(s.outbound, tag)); return tag; }
+    if (s && s.outbound) { const tag = 'out-' + target; add(cloneOut(s.outbound, tag, s)); return tag; }
     return 'direct';
   }
 
@@ -249,6 +270,19 @@ const BLACKHOLE = { tag: 'block', protocol: 'blackhole', settings: { response: {
  * wanted: an advanced plan contributes its own rules, every other plan follows
  * routingMode alone.
  */
+/**
+ * Under the STRICT leak guard the in-country resolver's plain-UDP query cannot
+ * leave the machine: sing-box's `strict_route` blocks port 53 off the tunnel,
+ * and a `direct` dial is exactly that — it leaves through the physical adapter.
+ * Dropping the UDP entries at build time turns a timeout on every domestic name
+ * into an immediate fall through to the DoH resolvers; a DoH direct resolver
+ * rides port 443 and stays, and geoip still routes the answers, so `bypass-ir`
+ * keeps working. Only under TUN — in proxy mode nothing blocks :53.
+ */
+function dropsUdpDirect(s) {
+  return !!(s && s.tunMode && s.leakGuard === 'strict');
+}
+
 function dnsSettingsFor(s, plan) {
   if (plan.mode === 'advanced') return Object.assign({}, s, { advancedRouting: true, routeRules: plan.rules || [] });
   // Pool emits no bypass rules, so an in-country resolver would only hand the
@@ -299,7 +333,11 @@ const SETTINGS_DEFAULTS = {
 function resolverBypassIps(planArg, settings) {
   const s = Object.assign({}, SETTINGS_DEFAULTS, settings || {});
   const plan = normalizePlan(planArg);
-  return buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: s.geoAssets !== false }).directResolverIps;
+  // Same options as buildConfig, so the bypass list never names a resolver the
+  // config no longer has — a stale entry here is a hole in the strict guard's
+  // firewall (the TUN backend hands this list to it as an exclude).
+  return buildDnsPlan(dnsSettingsFor(s, plan),
+    { geoAssets: s.geoAssets !== false, dropUdpDirect: dropsUdpDirect(s) }).directResolverIps;
 }
 
 function buildConfig(planArg, settings) {
@@ -378,7 +416,7 @@ function buildConfig(planArg, settings) {
   } else {
     const proxyOutbounds = plan.mode === 'chain'
       ? buildChainOutbounds(plan.chain, 'proxy')
-      : [cloneOut(plan.server.outbound, 'proxy')];
+      : [cloneOut(plan.server.outbound, 'proxy', plan.server)];
     outbounds = [...proxyOutbounds, freedom(s), Object.assign({}, BLACKHOLE)];
     exitTag = s.routingMode === 'direct' ? 'direct' : 'proxy';
     // The exit carries the resolver — unless it is `direct` (routingMode
@@ -394,13 +432,15 @@ function buildConfig(planArg, settings) {
   // Name resolution (see dnsBuilder.js). Its rules go FIRST: the port-53 hijack
   // must beat the private-IP bypass, or a query to the tunnel peer 10.255.0.1
   // would be sent "direct" into nowhere instead of being answered.
-  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: geo, exitTag, targetResolvers: targetResolversFor(targets, plan) });
+  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
+    { geoAssets: geo, exitTag, dropUdpDirect: dropsUdpDirect(s), targetResolvers: targetResolversFor(targets, plan) });
   if (dnsPlan.hijackOutbound) outbounds.push(dnsPlan.hijackOutbound);
   rules = [...dnsPlan.rules, ...rules];
 
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
   outbounds = (outbounds || []).map(sanitizeWgOutbound);
   outbounds = applyFragments(outbounds);
+  bindDirectDials(outbounds, s.directInterface);
 
   // WireGuard dialed THROUGH another outbound (chain) needs the dialer pipe
   // buffer disabled, otherwise UDP/TCP conversion corrupts packets ("unknown
@@ -492,9 +532,11 @@ function buildPoolConfig(plan, s, listen, sniffing) {
 
   reg.add(freedom(s));
   reg.add(Object.assign({}, BLACKHOLE));
-  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: s.geoAssets !== false, exitTag: primaryTag });
+  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
+    { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
   const outbounds = applyFragments((reg.outs || []).map(sanitizeWgOutbound));
+  bindDirectDials(outbounds, s.directInterface);
 
   // Resolver rules first (see buildConfig), then private/LAN direct, THEN
   // per-inbound routing, THEN a catch-all to the primary exit so nothing is
@@ -536,7 +578,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
 function buildTestConfig(target, socksPort) {
   const proxyOutbounds = Array.isArray(target)
     ? buildChainOutbounds(target, 'proxy')
-    : [cloneOut(target.outbound, 'proxy')];
+    : [cloneOut(target.outbound, 'proxy', target)];
   // apply TLS fragment (if the config carries one) so the test matches reality
   const outbounds = applyFragments(proxyOutbounds).concat([{ tag: 'direct', protocol: 'freedom' }]);
   return {
@@ -619,6 +661,35 @@ function applyFragments(outbounds) {
     sockopt.dialerProxy = tag;
   }
   return extra.length ? outbounds.concat(extra) : outbounds;
+}
+
+/**
+ * Under TUN the OS default route IS the tunnel, so a dial Xray makes itself —
+ * `direct` to a public address, the `dpi-*` dialers, a single proxy, the first
+ * hop of a chain, a WireGuard endpoint — re-enters the TUN and loops back into
+ * the SOCKS inbound (phase-2 review H1: why bypass-ir / bypass-cn / `direct`
+ * routing never worked under TUN). `sockopt.interface` binds the socket to
+ * the physical NIC instead (Windows IP_UNICAST_IF, macOS IP_BOUND_IF, Linux
+ * SO_BINDTODEVICE); measured on this machine: a bound freedom dial left with
+ * the ISP's public IP while the default route was the TUN.
+ *
+ * "Dials itself" = protocol not dns/blackhole AND no `sockopt.dialerProxy`:
+ * a hop behind another hop dials through it, and binding it would be wrong.
+ * Runs after applyFragments so the dpi dialers exist. `name` comes from
+ * main.js (`settings.directInterface`, read from the OS before the tunnel is
+ * up, only under tunMode); anything but a non-blank string leaves every
+ * outbound exactly as it was, which the golden tests pin. Not applied to
+ * buildTestConfig — a ping runs without TUN.
+ */
+function bindDirectDials(outbounds, name) {
+  if (typeof name !== 'string' || !name.trim()) return outbounds;
+  for (const o of outbounds) {
+    if (!o || o.protocol === 'dns' || o.protocol === 'blackhole') continue;
+    const ss = o.streamSettings || (o.streamSettings = {});
+    if (ss.sockopt && ss.sockopt.dialerProxy) continue;
+    ss.sockopt = Object.assign({}, ss.sockopt, { interface: name });
+  }
+  return outbounds;
 }
 
 function makeFragmentOutbound(tag, fragStr, noiseStr) {

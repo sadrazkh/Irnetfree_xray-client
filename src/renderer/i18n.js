@@ -78,6 +78,8 @@ const I18N = {
     'spoof.tlsSni': 'SNI — باید با گواهیِ سرور بخواند',
     'spoof.tlsHint': 'اتصال به «Address» می‌رود؛ SNI در هندشیک فرستاده می‌شود و باید با گواهی سرور بخواند (یا Allow Insecure را روشن کن).',
     'edit.pbk': 'Public Key (pbk)', 'edit.sid': 'Short ID (sid)', 'edit.allowInsecure': 'Allow Insecure',
+    'edit.insecureHint': 'هسته دیگر «بدون بررسی گواهی» را نمی‌پذیرد. با این گزینه، گواهی سرور در اولین اتصال خوانده و پین می‌شود و از آن به بعد فقط همان پذیرفته می‌شود.',
+    'edit.certPin': 'گواهی پین‌شده', 'edit.certPinClear': 'پاک کردن پین',
 
     'edit.fragment': 'Fragment (packets,length,interval — خالی = خاموش)',
     'edit.frontHint': 'SNI جعلی = دامنه‌ای که در دست‌دادن TLS دیده می‌شود؛ یک دامنهٔ مجاز/CDN بگذار. Host = بک‌اند واقعی تو. اگر فرانتینگ نمی‌کنی Host را خالی بگذار.',
@@ -119,7 +121,7 @@ const I18N = {
     't.proxyMissing': 'آدرس و پورت لازم است', 't.proxyAdded': 'پروکسی اضافه شد',
 
     'mode.pick': 'حالت اتصال', 'mode.proxyDesc': 'سبک و سریع؛ فقط برنامه‌هایی که از پروکسی سیستمی/SOCKS استفاده می‌کنند تونل می‌شوند.',
-    'mode.tunDesc': 'تمام ترافیک کل سیستم از تونل عبور می‌کند (نیازمند tun2socks و دسترسی ادمین).',
+    'mode.tunDesc': 'تمام ترافیک کل سیستم از تونل عبور می‌کند (نیازمند sing-box (یا tun2socks) و دسترسی ادمین).',
 
     'subs.title': 'ساب‌اسکریپشن‌ها',
     'btn.refreshAll': 'به‌روزرسانی همه', 'btn.addSub': '+ افزودن ساب',
@@ -155,13 +157,28 @@ const I18N = {
     'set.theme': 'تم',
     'theme.dark': 'تیره', 'theme.light': 'روشن', 'theme.system': 'مثل سیستم',
     'sysproxy.title': 'پروکسی سیستمی', 'sysproxy.sub': 'هنگام اتصال، پروکسی ویندوز تنظیم بشه',
-    'tun.title': 'حالت TUN (تانل کل سیستم)', 'tun.sub': 'همه‌ی ترافیک سیستم از تانل رد می‌شه (نیازمند tun2socks و دسترسی ادمین)',
+    'tun.title': 'حالت TUN (تانل کل سیستم)', 'tun.sub': 'همه‌ی ترافیک سیستم از تانل رد می‌شه (نیازمند sing-box (یا tun2socks) و دسترسی ادمین)',
+    /* کدام برنامه تونل را می‌سازد، و گارد نشتی چقدر سخت می‌گیرد (فاز ۳) */
+    'tun.backendSingbox': 'sing-box — پیشنهادی: خودش روت‌های v4 و v6 را می‌گذارد و هنگام خروج پاک می‌کند',
+    'tun.backendTun2socks': 'tun2socks — قدیمی',
+    'tun.backendHint': 'اگر sing-box نصب باشد از آن استفاده می‌شود، وگرنه tun2socks؛ در لاگ‌ها نوشته می‌شود کدام.',
+    'guard.off': 'خاموش — فقط TUN',
+    'guard.standard': 'استاندارد — DNS همه‌ی کارت‌های شبکه تا پایان نشست از تونل می‌رود؛ هنگام خروج و بعد از کرش برگردانده می‌شود',
+    'guard.strict': 'سخت‌گیرانه — علاوه بر آن، هر چه از تونل نمی‌رود بسته می‌شود: نه DNS معمولی، نه IPv6، نه UDP بیرون از تونل (WebRTC)',
+    'guard.hint': 'استاندارد جلوی نشتی DNS از کارت‌های شبکه‌ی فیزیکی و از IPv6 را می‌گیرد. سخت‌گیرانه کل ترافیک بیرون از تونل را هم می‌بندد — امن‌تر است ولی می‌تواند بازی و تماس تصویری را بشکند.',
+    'guard.macExperimental': 'روی مک سطح «سخت‌گیرانه» آزمایشی است — با یک anchor از pf کار می‌کند که هنوز روی مک واقعی آزمایش نشده.',
+    'guard.strictRouting': '⚠ روتینگ فعلی بخشی از ترافیک را «مستقیم» می‌فرستد، ولی سطح سخت‌گیرانه هر چیزی را که از تونل نرود می‌بندد — سایت‌های ایرانی و مقصدهای مستقیم باز نمی‌شوند. یا سطح را «استاندارد» کن یا روتینگ را روی «گلوبال».',
+    'guard.needsTun': 'فقط در حالت TUN — در حالت پروکسی، برنامه‌هایی که پروکسی سیستمی را نمی‌خوانند و WebRTC و UDP در هر صورت از آن رد می‌شوند.',
+    'udpblock.title': 'بستن UDP در حالت پروکسی',
+    'udpblock.sub': 'جلوی WebRTC/STUN را می‌گیرد تا وقتی در حالت TUN نیستی IP واقعی‌ات لو نرود. بازی‌ها و تماس‌هایی که UDP لازم دارند از کار می‌افتند.',
+    'udpblock.needsProxy': 'در حالت TUN لازم نیست — خودِ TUN، UDP را هم از تونل می‌برد.',
     'lan.title': 'اجازه به شبکه محلی (LAN)', 'lan.sub': 'دستگاه‌های دیگه هم بتونن وصل بشن',
 
     'comp.title': 'فایل‌های موردنیاز', 'comp.hint': 'اگر فایلی نبود با یک کلیک دانلود و یکپارچه می‌شود — بدون نیاز به ساخت دوباره برنامه.',
-    'comp.xray': 'هسته Xray', 'comp.tun2socks': 'tun2socks (حالت TUN)',
-    'comp.singbox': 'هستهٔ sing-box (اختیاری، ضد DPI)',
+    'comp.xray': 'هسته Xray', 'comp.tun2socksLegacy': 'tun2socks (حالت TUN — قدیمی)',
+    'comp.singbox': 'هستهٔ sing-box (بک‌اندِ حالت TUN، ضد DPI)',
     'comp.wintun': 'wintun.dll (حالت TUN)', 'comp.geo': 'فایل‌های روتینگ (geoip + geosite)',
+    'comp.tunNote': '⚠ حالت TUN به sing-box (یا tun2socks) نیاز دارد و روی ویندوز به wintun.dll — از همین‌جا دانلودشان کن.',
     'comp.installed': 'نصب‌شده', 'comp.missing': 'موجود نیست',
     'btn.download': 'دانلود', 'btn.update': 'به‌روزرسانی', 'btn.downloading': 'در حال دانلود…',
 
@@ -173,7 +190,7 @@ const I18N = {
 
     'logs.title': 'لاگ‌ها', 'btn.clearLogs': 'پاک کردن',
 
-    'tun.unavailable': '⚠ tun2socks یا wintun.dll پیدا نشد — حالت TUN غیرفعال است. از «فایل‌های موردنیاز» دانلودشان کن.',
+    'tun.unavailable': '⚠ sing-box (یا tun2socks) یا wintun.dll پیدا نشد — حالت TUN غیرفعال است. از «فایل‌های موردنیاز» دانلودشان کن.',
     'tun.ready': '✓ حالت TUN آماده است (هنگام اتصال، کل سیستم تانل می‌شود — اجرا با دسترسی ادمین).',
     'tun.off': 'حالت TUN در دسترس است ولی خاموش.',
 
@@ -189,7 +206,7 @@ const I18N = {
     't.updating': 'در حال به‌روزرسانی…', 't.updated': 'به‌روز شد', 't.failed': 'ناموفق',
     't.subRemoved': 'ساب حذف شد', 't.noSubs': 'ساب‌اسکریپشنی موجود نیست',
     't.serversAdded': 'سرور اضافه شد', 't.errors': 'خطا',
-    't.tunNeedFiles': 'برای حالت TUN باید tun2socks و wintun.dll دانلود شوند',
+    't.tunNeedFiles': 'برای حالت TUN باید sing-box (یا tun2socks) و wintun.dll دانلود شوند',
     't.tunReconnect': 'برای اعمال حالت TUN، دوباره وصل شو',
 
     /* saved data (store.json) could not be read or written */
@@ -218,6 +235,9 @@ const I18N = {
     'set.routeRules': 'قوانین روتینگ', 'set.routeDefault': 'مقصد پیش‌فرض روتینگ',
     'set.procRouteWatch': 'پایش روتینگ برنامه‌ها',
     'set.systemProxy': 'پروکسی سیستمی', 'set.tunMode': 'حالت TUN',
+    /* هم برچسب کنترل در تنظیمات‌اند، هم نامی که پنجره‌ی «اعمال تنظیمات» نشان می‌دهد */
+    'set.tunBackend': 'بک‌اندِ TUN', 'set.leakGuard': 'گارد نشتی',
+    'set.blockUdpInProxyMode': 'بستن UDP در حالت پروکسی',
     'set.defaultEngine': 'هستهٔ پیش‌فرض',
     'set.defaultEngineHint': 'کانفیگ‌هایی که هسته‌ی مشخصی انتخاب نکرده‌اند، و زنجیره/استخر/روتینگ پیشرفته، روی این هسته اجرا می‌شوند. اگر عضوی PattN بخواهد، کل plan روی PattN می‌رود.',
     'comp.xrayPattn': 'هستهٔ Xray-PattN (fork پترنیها — کانفیگ بدون TLS را می‌پذیرد)',
@@ -287,7 +307,7 @@ const I18N = {
 
     'comp.removeAll': 'حذف فایل‌های دانلودشده',
     'comp.removeHint': 'فقط فایل‌هایی که برنامه دانلود کرده (در پوشهٔ داده‌ها) پاک می‌شوند؛ هستهٔ همراهِ نصب دست‌نخورده می‌ماند.',
-    'comp.removeConfirm': 'همهٔ فایل‌های دانلودشده (هسته Xray، tun2socks، wintun، فایل‌های geo) از پوشهٔ داده‌ها حذف شوند؟',
+    'comp.removeConfirm': 'همهٔ فایل‌های دانلودشده (هسته Xray، sing-box، tun2socks، wintun، فایل‌های geo) از پوشهٔ داده‌ها حذف شوند؟',
     'comp.removeBusy': 'اول قطع کن، بعد حذف',
     'comp.removed': 'فایل‌های دانلودشده حذف شد', 'comp.removeNone': 'فایلی برای حذف نبود',
     'comp.removeFailed': 'حذف ناموفق بود',
@@ -397,6 +417,8 @@ const I18N = {
     'spoof.tlsSni': 'SNI — must match the server certificate',
     'spoof.tlsHint': 'The connection goes to Address; the SNI is sent in the handshake and must match the server certificate (or enable Allow Insecure).',
     'edit.pbk': 'Public Key (pbk)', 'edit.sid': 'Short ID (sid)', 'edit.allowInsecure': 'Allow Insecure',
+    'edit.insecureHint': 'The core no longer accepts "skip certificate check". With this on, the server’s certificate is read on the first connection and pinned; only that certificate is accepted afterwards.',
+    'edit.certPin': 'Pinned certificate', 'edit.certPinClear': 'Clear pin',
 
     'edit.fragment': 'Fragment (packets,length,interval — empty = off)',
     'edit.frontHint': 'Spoof SNI = the domain shown in the TLS handshake — set it to an allowed/CDN domain. Host = your real backend. Leave Host empty if not fronting.',
@@ -438,7 +460,7 @@ const I18N = {
     't.proxyMissing': 'Host and port are required', 't.proxyAdded': 'Proxy added',
 
     'mode.pick': 'Connection mode', 'mode.proxyDesc': 'Light and fast; only apps that use the system/SOCKS proxy are tunneled.',
-    'mode.tunDesc': 'All system traffic goes through the tunnel (needs tun2socks + admin).',
+    'mode.tunDesc': 'All system traffic goes through the tunnel (needs sing-box (or tun2socks) + admin).',
 
     'subs.title': 'Subscriptions',
     'btn.refreshAll': 'Refresh all', 'btn.addSub': '+ Add sub',
@@ -474,13 +496,28 @@ const I18N = {
     'set.theme': 'Theme',
     'theme.dark': 'Dark', 'theme.light': 'Light', 'theme.system': 'Match system',
     'sysproxy.title': 'System proxy', 'sysproxy.sub': 'Set the Windows proxy when connecting',
-    'tun.title': 'TUN mode (system-wide tunnel)', 'tun.sub': 'All system traffic goes through the tunnel (needs tun2socks + admin)',
+    'tun.title': 'TUN mode (system-wide tunnel)', 'tun.sub': 'All system traffic goes through the tunnel (needs sing-box (or tun2socks) + admin)',
+    /* which program builds the tunnel, and how hard the leak guard holds (phase 3) */
+    'tun.backendSingbox': 'sing-box — recommended: routes v4+v6 itself, cleans up on exit',
+    'tun.backendTun2socks': 'tun2socks — legacy',
+    'tun.backendHint': 'sing-box is used when it is installed; otherwise tun2socks, and the log says so.',
+    'guard.off': 'Off — TUN only',
+    'guard.standard': 'Standard — every network adapter’s DNS goes through the tunnel for the session; restored on exit and after a crash',
+    'guard.strict': 'Strict — also blocks everything that is not the tunnel: no plain DNS, no IPv6, no UDP off the tunnel (WebRTC)',
+    'guard.hint': 'Standard stops DNS leaking out of the physical adapters and over IPv6. Strict also blocks every packet that does not go through the tunnel — safer, but it can break games and video calls.',
+    'guard.macExperimental': 'On macOS the strict level is experimental — it uses a pf anchor that has not been verified on a real Mac yet.',
+    'guard.strictRouting': '⚠ Your routing sends some traffic direct, but the strict level blocks everything that does not go through the tunnel — direct destinations (Iranian sites in “Bypass Iran”) will not load. Use the standard level, or switch routing to Global.',
+    'guard.needsTun': 'Only in TUN mode — in proxy mode apps that ignore the system proxy, WebRTC and UDP bypass it anyway.',
+    'udpblock.title': 'Block UDP in proxy mode',
+    'udpblock.sub': 'Stops WebRTC/STUN from revealing your real IP when you are not in TUN mode. Breaks games and calls that need UDP.',
+    'udpblock.needsProxy': 'TUN mode covers UDP already.',
     'lan.title': 'Allow LAN', 'lan.sub': 'Let other devices connect too',
 
     'comp.title': 'Required files', 'comp.hint': 'Missing files are downloaded and integrated with one click — no rebuild needed.',
-    'comp.xray': 'Xray core', 'comp.singbox': 'sing-box core (optional, anti-DPI)',
-    'comp.tun2socks': 'tun2socks (TUN mode)',
+    'comp.xray': 'Xray core', 'comp.singbox': 'sing-box core (TUN backend, anti-DPI)',
+    'comp.tun2socksLegacy': 'tun2socks (TUN mode — legacy)',
     'comp.wintun': 'wintun.dll (TUN mode)', 'comp.geo': 'Routing files (geoip + geosite)',
+    'comp.tunNote': '⚠ TUN mode needs sing-box (or tun2socks), plus wintun.dll on Windows — download them here.',
     'comp.installed': 'Installed', 'comp.missing': 'Missing',
     'btn.download': 'Download', 'btn.update': 'Update', 'btn.downloading': 'Downloading…',
 
@@ -492,7 +529,7 @@ const I18N = {
 
     'logs.title': 'Logs', 'btn.clearLogs': 'Clear',
 
-    'tun.unavailable': '⚠ tun2socks or wintun.dll not found — TUN mode disabled. Download them under “Required files”.',
+    'tun.unavailable': '⚠ sing-box (or tun2socks) or wintun.dll not found — TUN mode disabled. Download them under “Required files”.',
     'tun.ready': '✓ TUN mode ready (on connect the whole system is tunneled — run as admin).',
     'tun.off': 'TUN mode is available but off.',
 
@@ -508,7 +545,7 @@ const I18N = {
     't.updating': 'Updating…', 't.updated': 'Updated', 't.failed': 'Failed',
     't.subRemoved': 'Subscription removed', 't.noSubs': 'No subscriptions',
     't.serversAdded': 'servers added', 't.errors': 'errors',
-    't.tunNeedFiles': 'TUN mode needs tun2socks and wintun.dll downloaded',
+    't.tunNeedFiles': 'TUN mode needs sing-box (or tun2socks) and wintun.dll downloaded',
     't.tunReconnect': 'Reconnect to apply TUN mode',
 
     /* saved data (store.json) could not be read or written */
@@ -537,6 +574,9 @@ const I18N = {
     'set.routeRules': 'Routing rules', 'set.routeDefault': 'Routing default target',
     'set.procRouteWatch': 'Process-route watcher',
     'set.systemProxy': 'System proxy', 'set.tunMode': 'TUN mode',
+    /* both the control labels in Settings and the names the apply dialog lists */
+    'set.tunBackend': 'TUN backend', 'set.leakGuard': 'Leak guard',
+    'set.blockUdpInProxyMode': 'Block UDP in proxy mode',
     'set.defaultEngine': 'Default core',
     'set.defaultEngineHint': 'Configs without their own core choice, and chains / pool / advanced routing, run on this core. If any member asks for PattN the whole plan runs on PattN.',
     'comp.xrayPattn': 'Xray-PattN core (patterniha fork — accepts plaintext configs)',
@@ -606,7 +646,7 @@ const I18N = {
 
     'comp.removeAll': 'Remove downloaded files',
     'comp.removeHint': 'Only files the app downloaded (in the data folder) are removed; a core bundled with the install stays.',
-    'comp.removeConfirm': 'Remove all downloaded files (Xray core, tun2socks, wintun, geo files) from the data folder?',
+    'comp.removeConfirm': 'Remove all downloaded files (Xray core, sing-box, tun2socks, wintun, geo files) from the data folder?',
     'comp.removeBusy': 'Disconnect first, then remove',
     'comp.removed': 'Downloaded files removed', 'comp.removeNone': 'Nothing to remove',
     'comp.removeFailed': 'Remove failed',

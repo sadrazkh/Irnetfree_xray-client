@@ -494,6 +494,7 @@
           <label class="field-label" data-i18n="comp.title">فایل‌های موردنیاز</label>
           <p class="hint" data-i18n="comp.hint"></p>
           <div class="comp-list" id="compList"></div>
+          <p class="hint warn" id="compTunNote" data-i18n="comp.tunNote"></p>
           <div class="row-gap">
             <button class="btn danger" id="btnRemoveFiles" data-i18n="comp.removeAll">حذف فایل‌های دانلودشده</button>
           </div>
@@ -508,11 +509,40 @@
           </div>
           <div class="switch-row">
             <div><div class="switch-title" data-i18n="tun.title">حالت TUN (تانل کل سیستم)</div>
-              <div class="switch-sub" data-i18n="tun.sub">همه‌ی ترافیک سیستم از تانل رد می‌شه (نیازمند tun2socks و دسترسی ادمین)</div></div>
+              <div class="switch-sub" data-i18n="tun.sub">همه‌ی ترافیک سیستم از تانل رد می‌شه (نیازمند sing-box (یا tun2socks) و دسترسی ادمین)</div></div>
             <label class="switch"><input type="checkbox" id="optTun" /><span class="slider"></span></label>
           </div>
           <div class="tun-status" id="tunStatus"></div>
           <button class="btn ghost admin-btn" id="btnRunAdmin" data-i18n="tun.runAdmin" hidden>اجرای مجدد با دسترسی ادمین</button>
+          <!-- which program builds the tunnel; changing it needs a reconnect -->
+          <div class="setting-row" id="tunBackendRow">
+            <label class="field-label" for="optTunBackend" data-i18n="set.tunBackend">بک‌اندِ TUN</label>
+            <select id="optTunBackend" class="select">
+              <option value="sing-box" data-i18n="tun.backendSingbox">sing-box</option>
+              <option value="tun2socks" data-i18n="tun.backendTun2socks">tun2socks</option>
+            </select>
+            <p class="hint" data-i18n="tun.backendHint"></p>
+          </div>
+          <!-- how hard the guard holds; TUN mode only (see updateGuardRows) -->
+          <div class="setting-row" id="leakGuardRow">
+            <label class="field-label" for="optLeakGuard" data-i18n="set.leakGuard">گارد نشتی</label>
+            <select id="optLeakGuard" class="select">
+              <option value="off" data-i18n="guard.off">خاموش</option>
+              <option value="standard" data-i18n="guard.standard">استاندارد</option>
+              <option value="strict" data-i18n="guard.strict">سخت‌گیرانه</option>
+            </select>
+            <p class="hint" data-i18n="guard.hint"></p>
+            <p class="hint warn" id="guardMacNote" data-i18n="guard.macExperimental" hidden></p>
+            <p class="hint warn" id="guardStrictRouting" data-i18n="guard.strictRouting" hidden></p>
+            <p class="hint warn" id="guardNeedsTun" data-i18n="guard.needsTun" hidden></p>
+          </div>
+          <!-- the proxy-mode counterpart: TUN already carries UDP, so it is the other way round -->
+          <div class="switch-row" id="udpBlockRow">
+            <div><div class="switch-title" data-i18n="udpblock.title">بستن UDP در حالت پروکسی</div>
+              <div class="switch-sub" data-i18n="udpblock.sub"></div>
+              <div class="hint warn" id="udpBlockNote" data-i18n="udpblock.needsProxy" hidden></div></div>
+            <label class="switch"><input type="checkbox" id="optBlockUdpProxy" /><span class="slider"></span></label>
+          </div>
           <div class="switch-row">
             <div><div class="switch-title" data-i18n="lan.title">اجازه به شبکه محلی (LAN)</div>
               <div class="switch-sub" data-i18n="lan.sub">دستگاه‌های دیگه هم بتونن وصل بشن</div></div>
@@ -647,6 +677,12 @@
           <span class="switch-title" data-i18n="edit.allowInsecure">Allow Insecure</span>
           <span class="switch"><input type="checkbox" id="edInsecure" /><span class="slider"></span></span>
         </label>
+        <div class="hint" id="edInsecureHint" data-i18n="edit.insecureHint"></div>
+        <!-- the certificate pinned on first use (certPin.js): read-only, clearable -->
+        <div class="hint" id="edCertPinRow" dir="ltr" hidden>
+          <span data-i18n="edit.certPin">Pinned certificate</span>: <code id="edCertPin"></code>
+          <button type="button" class="btn ghost" id="edCertPinClear" data-i18n="edit.certPinClear" style="padding:3px 10px;font-size:12px;margin-inline-start:8px">Clear pin</button>
+        </div>
         <!-- socks/http proxy credentials -->
         <div class="grid2" id="edProxyRow" hidden>
           <div><label class="field-label" data-i18n="proxy.user">نام کاربری (اختیاری)</label>

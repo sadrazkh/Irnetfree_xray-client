@@ -20,6 +20,7 @@ const { adapterDnsServers } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor } = require('../main/engineChoice');
+const { fetchLeafPin, pinTargets, directServers, staleCertPins, PinWatch } = require('../main/certPin');
 const { assetStatus: scanAssets } = require('../main/assets');
 const { XrayManager, getFreePort } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
@@ -27,6 +28,9 @@ const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../ma
 const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
+const { TunSingbox } = require('../main/tunSingbox');
+const tunPlatform = require('../main/tunPlatform');
+const { LeakGuard } = require('../main/leakGuard');
 const { StatsPoller } = require('../main/stats');
 const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
@@ -54,6 +58,13 @@ const DEFAULT_SETTINGS = {
   apiPort: 10085,
   systemProxy: false,        // headless: no desktop session to set a system proxy for
   tunMode: false,
+  // TUN backend: sing-box (auto_route, v4+v6) when installed, else tun2socks
+  tunBackend: 'sing-box',
+  // leak guard under TUN: 'off' | 'standard' (adapter DNS override) | 'strict'
+  // (+ strict_route and a firewall for everything off the tunnel)
+  leakGuard: 'standard',
+  // proxy mode only: block outbound UDP except :53 on physical adapters (WebRTC)
+  blockUdpInProxyMode: false,
   autoUpdateSubs: true,
   autoUpdateInterval: 60,
   customRules: [],
@@ -100,6 +111,7 @@ function createService(opts = {}) {
   let userDisconnecting = false;
   let procWatcher = null;
   let netWatcher = null;
+  const pinWatch = new PinWatch();   // the live plan's pinned servers, for the core's mismatch line
   let recoverTimer = null;
   let recovering = false;        // a network-change recovery is in flight
   let recoverQueued = null;      // reason of a trigger that arrived during that recovery
@@ -114,6 +126,10 @@ function createService(opts = {}) {
   // Settings the LIVE tunnel was built from (null when disconnected) — see
   // ../main/settingsMeta.js.
   let appliedSettings = null;
+  // The physical interface the LIVE connection's direct dials are bound to (see
+  // doConnect); null when not under TUN. rebuildActiveConfig() reuses it rather
+  // than asking the OS again — with the tunnel up, the default route IS the tunnel.
+  let liveDirectInterface = null;
 
   const store = new Store(path.join(dataDir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
@@ -143,11 +159,32 @@ function createService(opts = {}) {
     return st;
   }
 
+  /**
+   * The TUN layer for a connect: sing-box unless the user chose tun2socks or
+   * sing-box (with wintun next to it, on Windows) is not installed — then
+   * tun2socks, and the log says why. Built per connect (`tunBackend` is
+   * reconnect-relevant) and kept on `tun` for stop / recovery / shutdown. The
+   * status paths that only ask isAvailable() / isElevated() build a throwaway
+   * one with `quiet`, so the fallback line is logged once per connect, not per poll.
+   */
+  function makeTun(settings, { quiet = false } = {}) {
+    const opts = { binDir: bundledBinDir, extraDirs: [userBinDir], onLog: (line, level) => send('log', { line, level }), lang: settings.lang };
+    const sb = new TunSingbox(opts);
+    const legacy = new TunManager(opts);
+    if (settings.tunBackend === 'tun2socks') return legacy;
+    if (sb.isAvailable()) return sb;
+    if (legacy.isAvailable()) {
+      if (!quiet) send('log', { line: 'sing-box not installed — TUN falls back to tun2socks', level: 'warn' });
+      return legacy;
+    }
+    return sb;   // neither: the sing-box error message names what to install
+  }
+
   const xray = new XrayManager({
     binPath: store.get('xrayPath', null),
     dataDir,
     extraBinDirs: [userBinDir],
-    onLog: (line, level) => send('log', { line, level }),
+    onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
     onStatus: (state, info) => {
       if (xrayReloading && state === 'stopped') return;
       if (state === 'stopped' && !userDisconnecting && store.get('activeServerId', null)) {
@@ -165,11 +202,17 @@ function createService(opts = {}) {
     onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) })
   });
 
-  const tun = new TunManager({
-    binDir: bundledBinDir,
-    extraDirs: [userBinDir],
-    onLog: (line, level) => send('log', { line, level })
-  });
+  // A placeholder until the first connect picks the backend for real (see
+  // makeTun / doConnect) — so shutdown always has an instance.
+  let tun = makeTun(getSettings(), { quiet: true });
+  /**
+   * Every TUN backend a connect has started. `tun` alone is not enough: a
+   * second connect can replace it while the first is still inside start(), and
+   * the tunnel that first call brings up would then hold the machine's default
+   * routes with nothing left pointing at it. Disconnect, quit and the exit hook
+   * sweep this set, so no tunnel can outlive the process.
+   */
+  const startedTuns = new Set();
 
   const stats = new StatsPoller({
     binPath: xray.anyBin(),
@@ -181,6 +224,36 @@ function createService(opts = {}) {
     destDir: userBinDir,
     onLog: (line, level) => send('log', { line, level }),
     onProgress: (component, pct) => send('asset-progress', { component, pct })
+  });
+
+  // The leak guard and its crash repair. A `tun-state.json` left in the data dir
+  // means the last session died with every physical adapter still pointing at a
+  // tunnel that is gone — the machine has no working DNS until the originals go
+  // back — and the tunnel process it started may still be running with its
+  // routes in place. Deliberately NOT awaited: createService() is synchronous
+  // and the restore is a shell round trip. Every operation on the state file is
+  // serialized inside the guard, so a connect that starts while the repair is
+  // still running cannot lose its own record.
+  const leakGuard = new LeakGuard({
+    userData: dataDir,
+    onLog: (line, level) => send('log', { line, level }),
+    run: tunPlatform.run,
+    runScriptPrivileged: tunPlatform.runScriptPrivileged,
+    platform: process.platform
+  });
+  leakGuard.repairAtLaunch().catch((e) => send('log', { line: 'Leak guard repair failed: ' + e.message, level: 'error' }));
+
+  // A hard `kill -9` of the headless server runs no shutdown path at all, so the
+  // override would outlive it. This is the same sync, best-effort cleanup the
+  // desktop app does on exit (macOS only when already root — nothing can answer
+  // a password prompt here); anything it cannot do is repaired at the next launch.
+  // The DNS override AND the tunnel itself: restoring the resolvers while the
+  // backend keeps the machine's default routes would leave it with a working
+  // resolver it cannot reach (and the state file, the launch repair's only
+  // record, is gone by then).
+  process.on('exit', () => {
+    try { leakGuard.releaseSync(); } catch {}
+    cleanupAllTunsSync();
   });
 
   /* ----------------------------- settings / data ----------------------------- */
@@ -265,9 +338,9 @@ function createService(opts = {}) {
   }
 
   /* ----------------------------- plan / config ----------------------------- */
-  // Mirrors main.js buildActive(). Kept in sync deliberately (duplicated so the
-  // desktop app stays untouched).
-  function buildActive(serverId, settings) {
+  // Mirrors main.js buildPlan() / buildActive(). Kept in sync deliberately
+  // (duplicated so the desktop app stays untouched).
+  function buildPlan(serverId, settings) {
     const servers = store.get('servers', []);
     const byId = (id) => servers.find(s => s.id === id);
     const serversById = {};
@@ -334,6 +407,11 @@ function createService(opts = {}) {
       entryAddrs = [server.address];
     }
     entryAddrs = [...new Set(entryAddrs.filter(Boolean))];
+    return { plan, label, entryAddrs };
+  }
+
+  function buildActive(serverId, settings) {
+    const { plan, label, entryAddrs } = buildPlan(serverId, settings);
 
     const geoSt = assetStatus();
     const geoAssets = !!(geoSt.geoip && geoSt.geosite);
@@ -367,6 +445,79 @@ function createService(opts = {}) {
     return { plan, label, entryAddrs, config, geoWarn, engine };
   }
 
+  /**
+   * allowInsecure is gone from the core (see certPin.js): before the plan is
+   * built, read and store the certificate of every server the plan dials
+   * directly that asked for it and has no pin yet — one dial each, in parallel,
+   * 5 s at most. A failed probe is logged and the core then verifies the
+   * certificate itself; its own error is the user's signal. A server behind
+   * another hop cannot be probed from here.
+   */
+  async function ensureCertPins(serverId, settings) {
+    let plan;
+    try { plan = buildPlan(serverId, settings).plan; } catch { return; }   // buildActive reports it
+    const { probe, behind } = pinTargets(plan);
+    for (const s of behind) {
+      send('log', { line: `${s.name} sits behind a proxy; its certificate cannot be pinned automatically — connect to it directly once to pin it`, level: 'warn' });
+    }
+    // A certificate that rotated since it was pinned makes the core refuse every
+    // dial to that server, and it says so only at log level `info` — which the
+    // app does not run at, so healCertPin() below never hears it and the server
+    // is dead for good. Asking the servers ourselves works at any log level: a
+    // pin that no longer matches is dropped here, and the probe below (which
+    // picks up every directly-dialled server without a pin) learns the new one
+    // on this same connect.
+    const stale = await staleCertPins(directServers(plan), fetchLeafPin).catch(() => []);
+    if (stale.length) {
+      const ids = new Set(stale.map(x => x.id));
+      store.set('servers', store.get('servers', []).map(x => {
+        if (!ids.has(x.id)) return x;
+        const out = Object.assign({}, x);
+        delete out.certPin; delete out.certPinAt;
+        return out;
+      }));
+      for (const x of stale) {
+        send('log', { line: `Certificate changed for ${x.name} — the old pin is gone; the one it presents now will be pinned instead`, level: 'warn' });
+        delete x.certPin; delete x.certPinAt;   // the plan holds the same objects
+      }
+    }
+    for (const x of stale) if (!probe.includes(x)) probe.push(x);
+    if (!probe.length) return;
+    const learned = {};
+    await Promise.all(probe.map(async (s) => {
+      const tlsSettings = s.outbound.streamSettings.tlsSettings;
+      try {
+        const pin = await fetchLeafPin({ host: s.address, port: s.port, servername: tlsSettings.serverName || s.address });
+        learned[s.id] = pin;
+        send('log', { line: `Certificate pinned on first use for ${s.name}: ${pin}`, level: 'info' });
+      } catch (e) {
+        send('log', { line: `Could not read the certificate of ${s.name} to pin it (${e.message}) — the core will verify it itself`, level: 'warn' });
+      }
+    }));
+    if (!Object.keys(learned).length) return;
+    const certPinAt = new Date().toISOString();
+    store.set('servers', store.get('servers', []).map(s => learned[s.id] ? Object.assign({}, s, { certPin: learned[s.id], certPinAt }) : s));
+  }
+
+  /**
+   * The core reports a pinned certificate that no longer matches at log level
+   * info only, once the dial's retries are spent (certPin.js). Clear the stale
+   * pin so the next connect pins the new one — and only that: a changed
+   * certificate deserves a look before it is trusted again, so no reconnect.
+   */
+  function healCertPin(line) {
+    const hit = pinWatch.onLine(line);
+    if (!hit) return;
+    const ids = new Set(hit.map(s => s.id));
+    store.set('servers', store.get('servers', []).map(s => {
+      if (!ids.has(s.id)) return s;
+      const out = Object.assign({}, s);
+      delete out.certPin; delete out.certPinAt;
+      return out;
+    }));
+    for (const s of hit) send('log', { line: `Certificate changed for ${s.name} — pin cleared, reconnect to pin the new one`, level: 'warn' });
+  }
+
   /* ----------------------------- connect / disconnect ----------------------------- */
   /**
    * @returns {Promise<{ ok: boolean, tunError?: string|null, stale?: boolean }>}
@@ -385,9 +536,47 @@ function createService(opts = {}) {
     const stale = () => gen !== connGen;
     const abandoned = { ok: false, stale: true };
 
-    const settings = await effectiveSettings();
+    let settings = await effectiveSettings();
     if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
+
+    // allowInsecure is gone from the core: pin the certificate on first use instead.
+    await ensureCertPins(serverId, settings);
+    if (stale()) return abandoned;
+
+    // The TUN layer for this connect — the backend setting plus what is
+    // installed. A LIVE instance is never replaced: switching servers keeps the
+    // running tunnel (tun.start() is a no-op while active); a new choice takes
+    // effect through reapplyConnection() / doDisconnect(), which stop it first.
+    if (!tun || !tun.active) tun = makeTun(settings);
+    // The instance THIS call works with. `tun` is module-level and a second
+    // connect can replace it while this one is still inside tun.start(); the
+    // tunnel we started would then be unreachable by every teardown path.
+    // Ours stays in hand, and startedTuns is what disconnect/quit/exit sweep.
+    const myTun = tun;
+    startedTuns.add(myTun);
+
+    // Under TUN the OS default route is the tunnel, so every dial Xray makes
+    // itself (direct, the anti-DPI dialers, the first hop of a chain) must be
+    // bound to the physical NIC or it re-enters the TUN and loops. Read BEFORE
+    // tun.start() — with the tunnel up the default route is the tunnel itself,
+    // which is also why a live tunnel keeps the name it was built with. Re-derived
+    // on every (re)connect, so a network change picks up the new NIC. Never
+    // persisted: effectiveSettings() is the source, the store never sees it.
+    if (settings.tunMode) {
+      let name = (tun.active && liveDirectInterface) || null;
+      if (!name) {
+        const phys = await tun.physicalInterface().catch(() => null);
+        if (stale()) return abandoned;
+        name = (phys && phys.name && !isOwnTunInterface(phys.name)) ? phys.name : null;
+      }
+      if (name) settings = Object.assign({}, settings, { directInterface: name });
+      else send('log', { line: 'Could not find the physical network interface — direct traffic under TUN may loop', level: 'warn' });
+      liveDirectInterface = name;
+    } else {
+      liveDirectInterface = null;
+    }
+
     const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
 
     send('status', { state: 'connecting', serverId });
@@ -433,6 +622,7 @@ function createService(opts = {}) {
     // intent that was cancelled — and every side effect below would follow it.
     if (stale()) return abandoned;
     store.set('activeServerId', serverId);
+    pinWatch.setLive(directServers(plan));
     appliedSettings = snapshotApplied(getSettings());
 
     if (settings.systemProxy) {
@@ -443,29 +633,116 @@ function createService(opts = {}) {
     }
     if (stale()) return abandoned;
 
+    // TUN mode (system-wide tunnel via sing-box, or tun2socks as the fallback —
+    // see makeTun). Requires root/admin + the backend's files.
     let tunError = null;
+    let guardError = null;
+    let guardEngaged = false;
     if (settings.tunMode) {
-      if (!tun.isAvailable()) {
-        tunError = settings.lang === 'en' ? 'TUN needs tun2socks in the bin folder.' : 'حالت TUN به فایل tun2socks در پوشه bin نیاز دارد.';
-        send('log', { line: 'TUN requested but tun2socks not found — connected proxy-only', level: 'error' });
+      if (!myTun.isAvailable()) {
+        tunError = settings.lang === 'en'
+          ? 'TUN needs sing-box (or tun2socks) and wintun in the bin folder.'
+          : 'حالت TUN به sing-box (یا tun2socks) و wintun در پوشه bin نیاز دارد.';
+        send('log', { line: 'TUN requested but sing-box/tun2socks (with wintun) not found — connected proxy-only', level: 'error' });
       } else {
         // Managed DNS: the adapter's resolver is the tunnel's own peer, so every
         // query the OS sends there enters the TUN and is answered by dns-out.
-        // (The physical adapters keep their own resolvers until the phase-3
-        // guard overrides them.) A sing-box-format config carries no hijack, so
-        // the adapter gets a resolver the proxy can reach instead.
+        // The peer is the backend's: 172.19.0.2 for sing-box, 10.255.0.1 for
+        // tun2socks. (The physical adapters keep their own resolvers until the
+        // phase-3 guard overrides them.) A sing-box-format config carries no
+        // hijack, so the adapter gets a resolver the proxy can reach instead.
         // The in-country resolver is dialled `direct` — under TUN that would
-        // re-enter the tunnel through the split routes, so it needs a bypass
-        // route exactly like the server addresses.
+        // re-enter the tunnel, so it needs a bypass route exactly like the
+        // server addresses (the direct outbound is also bound to the NIC).
         const hijacks = engineFormat(runEngine) !== 'sing-box';
-        try { tun.lang = settings.lang || 'fa'; await tun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)], adapterDnsServers(settings, hijacks ? TUN_GW : null)); send('log', { line: 'TUN mode active (whole system)', level: 'info' }); }
-        catch (e) { tunError = e.message; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }
+        const dnsPeer = myTun.dnsPeer || TUN_GW;
+        // A tunnel that is already up was built for the PREVIOUS server: its
+        // route exclusions — and, at the strict level, the firewall holes cut
+        // from them — still name that server's address, so the new one would
+        // be blocked by our own guard. Tear it down and build it for this
+        // connect; the kill switch (when armed) seals the gap.
+        if (myTun.active) {
+          try { await leakGuard.release(); } catch {}
+          try { await myTun.stop(); } catch {}
+        }
+        try {
+          myTun.lang = settings.lang || 'fa';
+          await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)],
+            adapterDnsServers(settings, hijacks ? dnsPeer : null),
+            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict' });   // tun2socks ignores the 4th
+          send('log', { line: 'TUN mode active (whole system)', level: 'info' });
+        if (settings.leakGuard === 'strict' && myTun.backendId !== 'sing-box') {
+          send('log', { line: 'Strict guard on the tun2socks backend: no strict_route and no IPv6 route — install sing-box for the guard the setting promises', level: 'warn' });
+        }
+        } catch (e) { tunError = e.message; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }
+      }
+      // The leak guard (standard): the TUN adapter's own resolver is ours, but
+      // Windows asks the resolvers of EVERY connected adapter in parallel and
+      // macOS resolves per network service — so until we take them, the physical
+      // adapters still hand every name to the ISP. Only for a tunnel that
+      // actually came up: with no tunnel there is nothing to point them at, and
+      // doing it anyway would leave the machine unable to resolve at all.
+      if (myTun.active && settings.leakGuard !== 'off') {
+        try {
+          await leakGuard.engage({
+            level: settings.leakGuard,
+            peer4: myTun.dnsPeer || TUN_GW,
+            peer6: settings.ipv6 ? myTun.dnsPeer6 : null,
+            // macOS: the strict level's pf anchor has to name the REAL tunnel
+            // device (the utun the backend was given at start), not the Windows
+            // adapter name — a ruleset that cannot name the tunnel would block
+            // the machine's whole network.
+            tunAlias: (process.platform === 'darwin' && myTun.macState && myTun.macState.dev) || myTun.interfaceName || 'XrayTun',
+            backend: myTun.backendId || null,
+            // What may still leave through the physical adapters at the strict
+            // level: the tunnel's own bypass list (the resolved server entry IPs
+            // and the direct resolvers). Read AFTER start — that is when the
+            // backend has resolved them.
+            excludes: myTun.excludeIps || []
+          });
+          guardEngaged = true;
+        } catch (e) {
+          // Not fatal — the tunnel is up and carrying traffic, the adapters just
+          // kept their own resolvers. Deliberately NOT tunError: that one means
+          // "no tunnel", and the network-change recovery retries the whole
+          // connection on it.
+          guardError = e.message;
+          send('log', { line: 'Leak guard failed: ' + e.message + ' — the tunnel is up, but the physical adapters keep their own DNS', level: 'error' });
+        }
+      }
+    } else if (settings.blockUdpInProxyMode) {
+      // Proxy mode carries no UDP at all, so WebRTC's question to a STUN server
+      // goes around the proxy and comes back with the real address. This is the
+      // only thing we can do about it without a tunnel. Windows only; a failure
+      // is logged and nothing more — the proxy itself is up and working.
+      try {
+        // entryAddrs are what the user typed — a hostname there would be no
+      // exclusion at all, and a UDP-transport server addressed by name would be
+      // the first thing this block cut off. Resolve them the way the TUN layer
+      // does before they become firewall holes.
+      const udpExcludes = await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []);
+      await leakGuard.engageUdpBlock({ excludes: udpExcludes });
+        guardEngaged = true;
+      } catch (e) {
+        guardError = e.message;
+        send('log', { line: 'UDP block failed: ' + e.message + ' — WebRTC can still reveal your address in proxy mode', level: 'error' });
       }
     }
     // tun.start() is the longest await here (a privileged shell round trip) — the
     // likeliest place for a disconnect to land. Past this line nothing awaits, so
     // this is the last gate before the watchers and the 'connected' status.
-    if (stale()) return abandoned;
+    if (stale()) {
+      // Everything this call started belongs to an intent that no longer
+      // exists. The release is unconditional: engage() can also throw AFTER
+      // writing the state file, and a release with nothing to undo is a no-op.
+      // The tunnel goes too — the disconnect's own tun.stop() may well have run
+      // BEFORE this call's start() finished, which would leave the backend
+      // holding the machine's default routes while the client is told
+      // "disconnected".
+      await leakGuard.release().catch(() => {});
+      if (myTun && myTun.active) { try { await myTun.stop(); } catch {} }
+      return abandoned;
+    }
 
     // headless LAN info: which address forwarded clients point at
     let lan = null;
@@ -485,7 +762,7 @@ function createService(opts = {}) {
     if (!netWatcher) startNetWatcher();
     send('status', {
       state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
-      tun: tun.active, tunError, geoWarn, lan, pendingReconnect: pendingKeys()
+      tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys()
     });
     // `tunError` is the one failure this function does NOT throw for: TUN is a
     // best-effort upgrade and we stay connected proxy-only without it. Callers
@@ -525,7 +802,12 @@ function createService(opts = {}) {
     try {
       stopProcWatcher();
       if (stats) stats.stop();
-      try { await tun.stop(); } catch {}
+      // Give the adapters their own resolvers back BEFORE the tunnel goes, and
+      // let doConnect() engage the guard again on the new one. Holding the
+      // override across the gap would point every adapter at a peer that stops
+      // routing the moment tun.stop() runs.
+      try { if (leakGuard) await leakGuard.release(); } catch {}
+      await stopAllTuns();
       try { await setSystemProxy(false, {}); } catch {}
       if (xray) await xray.stop();
     } finally {
@@ -556,7 +838,10 @@ function createService(opts = {}) {
   async function rebuildActiveConfig() {
     const serverId = store.get('activeServerId', null);
     if (!serverId || !xray.running) return;
-    const settings = await effectiveSettings();
+    let settings = await effectiveSettings();
+    // Keep the binding the live connection was built with (see doConnect): the
+    // tunnel stays up across this reload, and asking the OS now would name it.
+    if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
     const { config, engine } = buildActive(serverId, settings);
     const prevReloading = xrayReloading;
     xrayReloading = true;
@@ -746,6 +1031,25 @@ function createService(opts = {}) {
     if (netWatcher) { netWatcher.stop(); netWatcher = null; }
   }
 
+  /**
+   * Stop every TUN backend a connect has started, not just the current one — an
+   * overlapping connect can leave an older instance holding the machine's
+   * routes with nothing else pointing at it (see startedTuns).
+   */
+  async function stopAllTuns() {
+    const all = new Set(startedTuns);
+    if (tun) all.add(tun);
+    startedTuns.clear();
+    for (const t of all) { try { await t.stop(); } catch {} }
+  }
+
+  /** The same sweep for the exit hook, where nothing can be awaited. */
+  function cleanupAllTunsSync() {
+    const all = new Set(startedTuns);
+    if (tun) all.add(tun);
+    for (const t of all) { try { t.cleanupSync(); } catch {} }
+  }
+
   async function doDisconnect() {
     userDisconnecting = true;
     // Anything already in flight stops speaking for the service from this line
@@ -758,11 +1062,18 @@ function createService(opts = {}) {
     stopProcWatcher();
     stopNetWatcher();                // nothing live to recover any more
     if (stats) stats.stop();
-    try { await tun.stop(); } catch {}
+    // The adapters point at real resolvers again BEFORE the tunnel goes: in
+    // between they would be pointing at an address that no longer routes anywhere.
+    try { if (leakGuard) await leakGuard.release(); } catch {}
+    // `tun` is the instance doConnect() started (makeTun), whichever backend
+    // it chose — the same one shutdown() tears down.
+    await stopAllTuns();
     try { await setSystemProxy(false, {}); } catch {}
     if (xray) await xray.stop();
     store.set('activeServerId', null);
+    pinWatch.clear();
     appliedSettings = null;          // nothing live to be out of sync with
+    liveDirectInterface = null;
     send('status', { state: 'disconnected' });
     userDisconnecting = false;
   }
@@ -812,8 +1123,8 @@ function createService(opts = {}) {
       chains: getChains(),
       pool: getPool(),
       xrayReady: xray.binExists(),
-      tunAvailable: tun.isAvailable(),
-      elevated: tun.isElevated(),
+      tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(),
+      elevated: makeTun(getSettings(), { quiet: true }).isElevated(),
       assets: assetStatus(),
       platform: process.platform,
       version: appVersion,
@@ -929,16 +1240,16 @@ function createService(opts = {}) {
         // binPath caches ONLY the official core (and holds a user-located path),
         // so downloading the fork must not clear it.
         if (component === 'xray' || component === 'xray-pattn') { if (component === 'xray') xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.anyBin()); }
-        return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: tun.isAvailable(), xrayReady: xray.binExists() };
+        return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(), xrayReady: xray.binExists() };
       } catch (err) { send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' }); return { ok: false, error: err.message, assets: assetStatus() }; }
     },
     'assets:remove': async () => {
-      if (xray.running || tun.active) return { ok: false, error: 'disconnect first', assets: assetStatus() };
+      if (xray.running || (tun && tun.active)) return { ok: false, error: 'disconnect first', assets: assetStatus() };
       const names = ['xray', 'xray.exe', 'xray-pattn', 'xray-pattn.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
       const removed = [];
       for (const n of names) { const p = path.join(userBinDir, n); try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); removed.push(n); } } catch {} }
       xray.binPath = store.get('xrayPath', null); xray.forgetVersions(); stats.setBin(xray.anyBin());
-      return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: tun.isAvailable() };
+      return { ok: true, removed, assets: assetStatus(), xrayReady: xray.binExists(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable() };
     },
 
     'xray:version': async (engineId) => { try { return { ok: true, version: await xray.version(engineId || 'xray') }; } catch (e) { return { ok: false, error: e.message }; } },
@@ -989,7 +1300,8 @@ function createService(opts = {}) {
     userDisconnecting = true;
     try { stopNetWatcher(); } catch {}
     try { if (stats) stats.stop(); } catch {}
-    try { if (tun) await tun.stop(); } catch {}
+    try { if (leakGuard) await leakGuard.release(); } catch {}   // adapters first, then the tunnel
+    await stopAllTuns();   // every instance a connect started, not just the last
     try { await setSystemProxy(false, {}); } catch {}
     try { if (xray) await xray.stop(); } catch {}
   }
