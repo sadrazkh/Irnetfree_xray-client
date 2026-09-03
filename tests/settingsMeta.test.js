@@ -25,7 +25,10 @@ function baseSettings(over) {
     routingMode: 'global',
     blockAds: true,
     enableSniffing: true,
-    dns: ['1.1.1.1', '8.8.8.8'],
+    dnsManaged: true,
+    dnsRemote: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query'],
+    dnsDirect: ['178.22.122.100', '185.51.200.2'],
+    ipv6: false,
     logLevel: 'warning',
     apiPort: 10085,
     systemProxy: true,
@@ -85,7 +88,7 @@ test('unchanged settings report nothing pending', () => {
 test('every reconnect-relevant key is detected when it changes', () => {
   const changes = {
     socksPort: 1080, httpPort: 1081, apiPort: 1085, allowLan: true,
-    dns: ['9.9.9.9'], logLevel: 'debug', enableSniffing: false,
+    dnsManaged: false, dnsRemote: ['https://9.9.9.9/dns-query'], dnsDirect: ['78.157.42.100'], ipv6: true, logLevel: 'debug', enableSniffing: false,
     routingMode: 'bypass-ir', blockAds: false,
     customRules: [{ outboundTag: 'direct', domain: ['x.com'] }],
     advancedRouting: true,
@@ -154,9 +157,9 @@ test('snapshotApplied deep-copies, so later mutation cannot hide a change', () =
   // main.js hands getSettings() straight to the snapshot; the store hands out the
   // same array reference elsewhere, so an in-place edit must not touch the snapshot
   live.routeRules[0].target = 'b';
-  live.dns.push('8.8.4.4');
+  live.dnsRemote.push('https://8.8.4.4/dns-query');
 
-  assert.deepEqual(pendingReconnectKeys(snap, live), ['dns', 'routeRules']);
+  assert.deepEqual(pendingReconnectKeys(snap, live), ['dnsRemote', 'routeRules']);
 });
 
 /* ------------------------------ i18n drift ------------------------------ */
