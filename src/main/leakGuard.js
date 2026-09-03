@@ -73,7 +73,10 @@ const FW_GROUP = 'IRNetFree';
  */
 const GUARD_EXCLUDES = [
   '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16',
-  '127.0.0.0/8', '224.0.0.0/4', '100.64.0.0/10', '172.19.0.0/30'
+  '127.0.0.0/8', '224.0.0.0/4', '100.64.0.0/10', '172.19.0.0/30',
+  // The DHCP limited broadcast. Blocking it takes the machine's lease with it a
+  // few hours into a session — long after anyone would connect the two.
+  '255.255.255.255/32'
 ];
 
 /** Every UDP remote port except 53. The address ranges narrow it further. */
@@ -448,7 +451,9 @@ function macRestoreLines(services) {
   return [
     ...(services || []).map(s => {
       const dns = addrList(s && s.dns);
-      return `networksetup -setdnsservers ${sh(nameOf(s))} ${dns.length ? dns.join(' ') : 'Empty'} || FAIL=1`;
+      // The addresses are quoted too: they came off the machine, and this
+      // script runs as root.
+      return `networksetup -setdnsservers ${sh(nameOf(s))} ${dns.length ? dns.map(sh).join(' ') : 'Empty'} || FAIL=1`;
     }),
     ...MAC_FLUSH
   ];
@@ -571,6 +576,26 @@ function macReleaseScript(services, opts = {}) {
 const macRepairScript = (services) => macReleaseScript(services, { orphans: true });
 
 /* ----------------------------- the guard ----------------------------- */
+
+/**
+ * A snapshot with the tunnel's own resolvers taken out of it.
+ *
+ * What we are about to write must never come back as what was there before. On
+ * macOS the tunnel sets the service's DNS before the guard ever looks; on
+ * Windows a second engage — a server switch under TUN — reads back the peer the
+ * first one wrote. Restoring THAT would pin every adapter to an address that
+ * routes nowhere the moment the tunnel stops, and the state file is deleted on
+ * a successful restore, so nothing would be left to undo it with. A family left
+ * empty here is read as "it was on DHCP", so the worst this can do is restore
+ * too little.
+ */
+function withoutPeers(list, peers) {
+  const drop = new Set((peers || []).filter(Boolean).map(p => String(p).toLowerCase()));
+  const keep = (arr) => addrList(arr).filter(a => !drop.has(String(a).toLowerCase()));
+  return (list || []).map(e => (e && e.dns !== undefined)
+    ? Object.assign({}, e, { dns: keep(e.dns) })
+    : Object.assign({}, e, { v4: keep(e.v4), v6: keep(e.v6) }));
+}
 
 function countTargets(st) {
   if (!st) return 0;
@@ -695,8 +720,15 @@ class LeakGuard {
       const anchor = (strict && this.platform === 'darwin')
         ? macPfAnchorText({ tunDevice: tunAlias, excludes })
         : null;
+      // An override of ours that is already live — a server switch under TUN
+      // re-engages without an intervening release — keeps the originals it
+      // recorded. They are the machine's own resolvers, and they exist nowhere
+      // else; re-reading the adapters now would only find our peer.
+      const live = this.readState();
       if (this.platform === 'win32') {
-        const adapters = parseWinSnapshot(await this._powershell(winSnapshotScript(tunAlias)));
+        const adapters = (live && live.win && live.win.adapters && live.win.adapters.length)
+          ? live.win.adapters
+          : withoutPeers(parseWinSnapshot(await this._powershell(winSnapshotScript(tunAlias))), [peer4, peer6]);
         count = adapters.length;
         state.win = { adapters };
         state.strict = strict;
@@ -706,7 +738,9 @@ class LeakGuard {
           block = () => this._powershell(winStrictApplyScript({ adapters, ranges }));
         }
       } else {
-        const services = parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()]));
+        const services = (live && live.mac && live.mac.services && live.mac.services.length)
+          ? live.mac.services
+          : withoutPeers(parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()])), [peer4, peer6]);
         count = services.length;
         state.mac = { services };
         state.strict = !!anchor;
@@ -901,7 +935,7 @@ class LeakGuard {
 }
 
 module.exports = {
-  LeakGuard, STATE_FILE, FW_GROUP, GUARD_EXCLUDES,
+  LeakGuard, STATE_FILE, FW_GROUP, GUARD_EXCLUDES, withoutPeers,
   psQuote, parseWinSnapshot, parseMacSnapshot, rangeComplement,
   winSnapshotScript, winApplyScript, winRestoreScript, winOrphanKillScript, winRepairScript,
   winStrictApplyScript, winGroupRemoveScript, winUdpBlockApplyScript, winReleaseScript,

@@ -178,4 +178,36 @@ class PinWatch {
   }
 }
 
-module.exports = { fetchLeafPin, pinOf, normalizePin, directServers, wantsPin, pinTargets, PinWatch, PIN_MISMATCH };
+/**
+ * The pinned servers whose certificate has CHANGED since it was pinned.
+ *
+ * The core names a pin mismatch only at log level `info`, and the app runs at
+ * `warning` — so PinWatch alone can never fire, and a server whose certificate
+ * rotated would simply stop connecting for ever. Asking the server before the
+ * dial costs one TLS handshake (the same one the pin came from) and works at
+ * any log level.
+ *
+ * A server we could not reach is left alone: unreachable is not changed.
+ * Nothing here TRUSTS a new certificate — it only reports which pins are stale,
+ * so the caller can drop them and say so, and the next connect pins what the
+ * user has then had a chance to think about.
+ *
+ * @param {object[]} servers  stored records
+ * @param {(o: {host: string, port: number, servername: string}) => Promise<string>} probe
+ */
+async function staleCertPins(servers, probe = fetchLeafPin) {
+  const pinned = (servers || []).filter(s => s && s.certPin && s.address && s.port);
+  const out = [];
+  await Promise.all(pinned.map(async (s) => {
+    const st = (s.outbound && s.outbound.streamSettings) || {};
+    const tls = st.tlsSettings || {};
+    try {
+      const live = await probe({ host: s.address, port: s.port, servername: tls.serverName || s.address });
+      const seen = normalizePin(live);
+      if (seen && seen !== normalizePin(s.certPin)) out.push(s);
+    } catch { /* unreachable: not a verdict about the certificate */ }
+  }));
+  return out;
+}
+
+module.exports = { fetchLeafPin, pinOf, normalizePin, directServers, wantsPin, pinTargets, staleCertPins, PinWatch, PIN_MISMATCH };

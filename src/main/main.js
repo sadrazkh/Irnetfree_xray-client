@@ -11,7 +11,7 @@ const { adapterDnsServers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
 const { chooseEngine, testEngineFor } = require('./engineChoice');
-const { fetchLeafPin, pinTargets, directServers, PinWatch } = require('./certPin');
+const { fetchLeafPin, pinTargets, directServers, staleCertPins, PinWatch } = require('./certPin');
 const { assetStatus: scanAssets } = require('./assets');
 const { XrayManager, getFreePort } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
@@ -36,6 +36,14 @@ let xray = null;
 let store = null;
 let subs = null;
 let tun = null;
+/**
+ * Every TUN backend a connect has started. `tun` alone is not enough: a second
+ * connect can replace it while the first is still inside start(), and the
+ * tunnel that first call brings up would then hold the machine's default routes
+ * with nothing left pointing at it. Disconnect, quit and the exit hook sweep
+ * this set, so no tunnel can outlive the app.
+ */
+const startedTuns = new Set();
 let leakGuard = null;
 let stats = null;
 let downloader = null;
@@ -499,6 +507,29 @@ async function ensureCertPins(serverId, settings) {
   for (const s of behind) {
     send('log', { line: `${s.name} sits behind a proxy; its certificate cannot be pinned automatically — connect to it directly once to pin it`, level: 'warn' });
   }
+  // A certificate that rotated since it was pinned makes the core refuse every
+  // dial to that server, and it says so only at log level `info` — which the
+  // app does not run at, so healCertPin() below never hears it and the server
+  // is dead for good. Asking the servers ourselves works at any log level: a
+  // pin that no longer matches is dropped here, and the probe below (which
+  // picks up every directly-dialled server without a pin) learns the new one on
+  // this same connect.
+  const stale = await staleCertPins(directServers(plan), fetchLeafPin).catch(() => []);
+  if (stale.length) {
+    const ids = new Set(stale.map(s => s.id));
+    store.set('servers', store.get('servers', []).map(s => {
+      if (!ids.has(s.id)) return s;
+      const out = Object.assign({}, s);
+      delete out.certPin; delete out.certPinAt;
+      return out;
+    }));
+    for (const s of stale) {
+      send('log', { line: `Certificate changed for ${s.name} — the old pin is gone; the one it presents now will be pinned instead`, level: 'warn' });
+      delete s.certPin; delete s.certPinAt;   // the plan holds the same objects
+    }
+  }
+  if (!probe.length && !stale.length) return;
+  for (const s of stale) if (!probe.includes(s)) probe.push(s);
   if (!probe.length) return;
   const learned = {};
   await Promise.all(probe.map(async (s) => {
@@ -575,6 +606,12 @@ async function doConnect(serverId, opts = {}) {
   // running tunnel (tun.start() is a no-op while active); a new choice takes
   // effect through reapplyConnection() / doDisconnect(), which stop it first.
   if (!tun || !tun.active) tun = makeTun(settings);
+  // The instance THIS call works with. `tun` is module-level and a second
+  // connect can replace it while this one is still inside tun.start(); the
+  // tunnel we started would then be unreachable by every teardown path.
+  // Ours stays in hand, and startedTuns is what disconnect/quit/exit sweep.
+  const myTun = tun;
+  startedTuns.add(myTun);
 
   // Under TUN the OS default route is the tunnel, so every dial Xray makes
   // itself (direct, the anti-DPI dialers, the first hop of a chain) must be
@@ -672,14 +709,14 @@ async function doConnect(serverId, opts = {}) {
   let guardError = null;
   let guardEngaged = false;
   if (settings.tunMode) {
-    if (!tun.isAvailable()) {
+    if (!myTun.isAvailable()) {
       tunError = settings.lang === 'en'
         ? 'TUN needs sing-box (or tun2socks) and wintun in the bin folder.'
         : 'حالت TUN به sing-box (یا tun2socks) و wintun در پوشه bin نیاز دارد.';
       send('log', { line: 'TUN requested but sing-box/tun2socks (with wintun) not found — connected proxy-only', level: 'error' });
     } else {
       try {
-        tun.lang = settings.lang || 'fa';
+        myTun.lang = settings.lang || 'fa';
         // Managed DNS: the adapter's resolver is the tunnel's own peer, so every
         // query the OS sends there enters the TUN and is answered by dns-out.
         // The peer is the backend's: 172.19.0.2 for sing-box, 10.255.0.1 for
@@ -690,11 +727,23 @@ async function doConnect(serverId, opts = {}) {
         // re-enter the tunnel, so it needs a bypass route exactly like the
         // server addresses (the direct outbound is also bound to the NIC).
         const hijacks = engineFormat(runEngine) !== 'sing-box';
-        const dnsPeer = tun.dnsPeer || TUN_GW;
-        await tun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)],
+        const dnsPeer = myTun.dnsPeer || TUN_GW;
+        // A tunnel that is already up was built for the PREVIOUS server: its
+        // route exclusions — and, at the strict level, the firewall holes cut
+        // from them — still name that server's address, so the new one would
+        // be blocked by our own guard. Tear it down and build it for this
+        // connect; the kill switch (when armed) seals the gap.
+        if (myTun.active) {
+          try { await leakGuard.release(); } catch {}
+          try { await myTun.stop(); } catch {}
+        }
+        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)],
           adapterDnsServers(settings, hijacks ? dnsPeer : null),
           { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict' });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
+        if (settings.leakGuard === 'strict' && myTun.backendId !== 'sing-box') {
+          send('log', { line: 'Strict guard on the tun2socks backend: no strict_route and no IPv6 route — install sing-box for the guard the setting promises', level: 'warn' });
+        }
       } catch (e) {
         tunError = e.message;
         send('log', { line: 'TUN start failed: ' + e.message, level: 'error' });
@@ -706,23 +755,23 @@ async function doConnect(serverId, opts = {}) {
     // adapters still hand every name to the ISP. Only for a tunnel that
     // actually came up: with no tunnel there is nothing to point them at, and
     // doing it anyway would leave the machine unable to resolve at all.
-    if (tun.active && settings.leakGuard !== 'off') {
+    if (myTun.active && settings.leakGuard !== 'off') {
       try {
         await leakGuard.engage({
           level: settings.leakGuard,
-          peer4: tun.dnsPeer || TUN_GW,
-          peer6: settings.ipv6 ? tun.dnsPeer6 : null,
+          peer4: myTun.dnsPeer || TUN_GW,
+          peer6: settings.ipv6 ? myTun.dnsPeer6 : null,
           // macOS: the strict level's pf anchor has to name the REAL tunnel
           // device (the utun the backend was given at start), not the Windows
           // adapter name — a ruleset that cannot name the tunnel would block
           // the machine's whole network.
-          tunAlias: (process.platform === 'darwin' && tun.macState && tun.macState.dev) || tun.interfaceName || 'XrayTun',
-          backend: tun.backendId || null,
+          tunAlias: (process.platform === 'darwin' && myTun.macState && myTun.macState.dev) || myTun.interfaceName || 'XrayTun',
+          backend: myTun.backendId || null,
           // What may still leave through the physical adapters at the strict
           // level: the tunnel's own bypass list (the resolved server entry IPs
           // and the direct resolvers). Read AFTER start — that is when the
           // backend has resolved them.
-          excludes: tun.excludeIps || []
+          excludes: myTun.excludeIps || []
         });
         guardEngaged = true;
       } catch (e) {
@@ -755,10 +804,14 @@ async function doConnect(serverId, opts = {}) {
   // tun.start() is the longest await here (a PowerShell round trip on Windows, a
   // password prompt on macOS) — the likeliest place for a disconnect to land.
   if (stale()) {
-    // doDisconnect() ran its release() before this call wrote the state file, so
-    // the override it just applied would outlive the tunnel it points at — the
-    // machine would be left unable to resolve anything. Undo it here.
-    if (guardEngaged) await leakGuard.release().catch(() => {});
+    // Everything this call started belongs to an intent that no longer
+    // exists. The release is unconditional: engage() can also throw AFTER
+    // writing the state file, and a release with nothing to undo is a no-op.
+    // The tunnel goes too — doDisconnect()'s own tun.stop() may well have run
+    // BEFORE this call's start() finished, which would leave the backend
+    // holding the machine's default routes while the UI says 'disconnected'.
+    await leakGuard.release().catch(() => {});
+    if (myTun && myTun.active) { try { await myTun.stop(); } catch {} }
     return abandoned;
   }
 
@@ -862,7 +915,7 @@ async function reapplyConnection() {
     // across the gap would point every adapter at a peer that stops routing the
     // moment tun.stop() runs; the kill switch armed above is what seals the gap.
     try { if (leakGuard) await leakGuard.release(); } catch {}
-    try { await tun.stop(); } catch {}
+    await stopAllTuns();
     try { await setSystemProxy(false, {}); } catch {}
     try { await removeLanFirewall(); } catch {}
     if (xray) await xray.stop();
@@ -1138,6 +1191,25 @@ function stopNetWatcher() {
   if (netWatcher) { netWatcher.stop(); netWatcher = null; }
 }
 
+/**
+ * Stop every TUN backend a connect has started, not just the current one — an
+ * overlapping connect can leave an older instance holding the machine's routes
+ * with nothing else pointing at it (see startedTuns).
+ */
+async function stopAllTuns() {
+  const all = new Set(startedTuns);
+  if (tun) all.add(tun);
+  startedTuns.clear();
+  for (const t of all) { try { await t.stop(); } catch {} }
+}
+
+/** The same sweep for the exit hook, where nothing can be awaited. */
+function cleanupAllTunsSync() {
+  const all = new Set(startedTuns);
+  if (tun) all.add(tun);
+  for (const t of all) { try { t.cleanupSync(); } catch {} }
+}
+
 async function doDisconnect() {
   userDisconnecting = true;        // intentional — don't trip the kill switch
   // Anything already in flight stops speaking for the app from this line on: a
@@ -1155,7 +1227,7 @@ async function doDisconnect() {
   try { if (leakGuard) await leakGuard.release(); } catch {}
   // `tun` is the instance doConnect() started (makeTun), whichever backend it
   // chose — the same one before-quit and the exit hook tear down.
-  try { if (tun) await tun.stop(); } catch {}
+  await stopAllTuns();
   try { await setSystemProxy(false, {}); } catch {}
   try { await removeLanFirewall(); } catch {}
   try { await disarmKillSwitch(); } catch {}
@@ -1840,7 +1912,7 @@ app.on('before-quit', async (e) => {
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { if (leakGuard) await leakGuard.release(); } catch {}   // adapters first, then the tunnel
-  try { if (tun) await tun.stop(); } catch {}   // the instance doConnect() started
+  await stopAllTuns();   // every instance a connect started, not just the last
   try { await setSystemProxy(false, {}); } catch {}
   try { await removeLanFirewall(); } catch {}
   try { await disarmKillSwitch(); } catch {}
@@ -1863,7 +1935,7 @@ process.on('exit', () => {
   try { require('child_process').execFileSync(
     'reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '0', '/f'],
     { windowsHide: true }); } catch {}
-  try { if (tun) tun.cleanupSync(); } catch {}   // the instance doConnect() started (either backend)
+  cleanupAllTunsSync();   // every backend a connect started, either kind
   try { require('child_process').execFileSync('netsh',
     ['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`], { windowsHide: true }); } catch {}
 });

@@ -15,7 +15,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
-  LeakGuard, STATE_FILE, GUARD_EXCLUDES, rangeComplement,
+  LeakGuard, STATE_FILE, GUARD_EXCLUDES, rangeComplement, withoutPeers,
   winSnapshotScript, parseWinSnapshot, winApplyScript, winRestoreScript,
   winOrphanKillScript, winRepairScript, winReleaseScript,
   winStrictApplyScript, winGroupRemoveScript, winUdpBlockApplyScript,
@@ -241,7 +241,8 @@ test('macRestoreScript puts the recorded servers back, "Empty" where there were 
   assert.equal(macRestoreScript(services), [
     '#!/bin/bash',
     'FAIL=0',
-    "networksetup -setdnsservers 'Wi-Fi' 192.168.8.1 2606:4700::1111 || FAIL=1",
+    // quoted: the addresses came off the machine and this runs as root
+    "networksetup -setdnsservers 'Wi-Fi' '192.168.8.1' '2606:4700::1111' || FAIL=1",
     "networksetup -setdnsservers 'Ethernet' Empty || FAIL=1",
     'dscacheutil -flushcache 2>/dev/null || true',
     'killall -HUP mDNSResponder 2>/dev/null || true',
@@ -523,7 +524,9 @@ const DEFAULT_RANGES = [
   '169.255.0.0-172.15.255.255',     // ends where 172.16/12 begins (the TUN subnet is inside it)
   '172.32.0.0-192.167.255.255',     // ends where 192.168/16 begins
   '192.169.0.0-223.255.255.255',    // ends where multicast 224/4 begins
-  '240.0.0.0-255.255.255.255'       // the reserved tail
+  // the reserved tail, stopping one short: 255.255.255.255 is the DHCP limited
+  // broadcast, and a machine that cannot renew its lease loses its address
+  '240.0.0.0-255.255.255.254'
 ];
 
 const psRanges = (list) => list.map(r => `'${r}'`).join(',');
@@ -570,7 +573,8 @@ test('rangeComplement ignores what it cannot block instead of throwing', () => {
 test('rangeComplement: the default guard set leaves exactly these eight ranges', () => {
   assert.deepEqual(GUARD_EXCLUDES, [
     '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16',
-    '127.0.0.0/8', '224.0.0.0/4', '100.64.0.0/10', '172.19.0.0/30'
+    '127.0.0.0/8', '224.0.0.0/4', '100.64.0.0/10', '172.19.0.0/30',
+    '255.255.255.255/32'
   ]);
   assert.deepEqual(rangeComplement(GUARD_EXCLUDES), DEFAULT_RANGES);
   // the server's entry IP is the hole that keeps the tunnel reachable
@@ -663,7 +667,7 @@ test('macPfAnchorText passes the tunnel and the excludes, then blocks both famil
     // same job for outbound traffic and is legal here.
     'pass out quick on lo0 all',
     'pass out quick on utun4 all',
-    'pass out quick to { 5.6.7.8, 178.22.122.100, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8, 224.0.0.0/4, 100.64.0.0/10, 172.19.0.0/30 }',
+    'pass out quick to { 5.6.7.8, 178.22.122.100, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8, 224.0.0.0/4, 100.64.0.0/10, 172.19.0.0/30, 255.255.255.255/32 }',
     'block out quick inet all',
     'block out quick inet6 all',
     ''
@@ -917,4 +921,72 @@ test('engageUdpBlock (win32): no physical adapter is nothing to block', async ()
   assert.deepEqual(await h.guard.engageUdpBlock({}), { engaged: false, adapters: 0 });
   assert.equal(h.calls.length, 1);
   assert.equal(fs.existsSync(h.statePath), false);
+});
+
+/* ------------------------- the branch review's findings ------------------------- */
+
+// C1 (critical). engage() used to take a fresh snapshot every time. On a second
+// engage — a server switch under TUN, which never releases in between — what it
+// reads back is the peer the FIRST engage wrote. Restoring that pins every
+// adapter to an address that routes nowhere once the tunnel stops, and the state
+// file is deleted on a successful restore, so nothing is left to undo it.
+test('engage twice keeps the first session’s originals instead of re-reading our own peer', async () => {
+  let snaps = 0;
+  const h = harness('win32', (cmd, args) => {
+    if (!String(args[args.length - 1]).includes('ConvertTo-Json')) return '';
+    snaps++;
+    return snaps === 1 ? WIN_SNAP : JSON.stringify([{ alias: 'Wi-Fi', v4: [PEER4], v6: [], dhcp4: false, dhcp6: true }]);
+  });
+  const opts = { level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' };
+  await h.guard.engage(opts);
+  await h.guard.engage(opts);
+  assert.equal(snaps, 1, 'the live session is snapshotted once, not once per connect');
+  assert.deepEqual(h.state().win.adapters, JSON.parse(WIN_SNAP));
+  assert.equal(h.guard.readState().win.adapters.some(a => a.v4.includes(PEER4)), false);
+});
+
+// The same protection from the other side, for the snapshot that has no earlier
+// record to fall back on: on macOS the tunnel sets the service's DNS before the
+// guard ever looks, so the peer is already there the first time.
+test('the tunnel’s own resolvers are never recorded as an adapter’s originals', () => {
+  assert.deepEqual(
+    withoutPeers([{ alias: 'Wi-Fi', v4: [PEER4], v6: [PEER6], dhcp4: false, dhcp6: false },
+                  { alias: 'Ethernet', v4: ['9.9.9.9', PEER4], v6: [], dhcp4: false, dhcp6: true }], [PEER4, PEER6]),
+    [{ alias: 'Wi-Fi', v4: [], v6: [], dhcp4: false, dhcp6: false },
+     { alias: 'Ethernet', v4: ['9.9.9.9'], v6: [], dhcp4: false, dhcp6: true }]);
+  // a family left empty is restored by the reset, so the peer cannot be pinned
+  const restore = winRestoreScript(withoutPeers([{ alias: 'Wi-Fi', v4: [PEER4], v6: [], dhcp4: false, dhcp6: true }], [PEER4]));
+  assert.equal(restore.includes(PEER4), false, 'the peer never reaches a restore command');
+  assert.match(restore, /-ResetServerAddresses/);
+  // macOS records the same way, under its own key
+  assert.deepEqual(withoutPeers([{ name: 'Wi-Fi', dns: [PEER4] }, { name: 'Bridge', dns: ['8.8.8.8', PEER4] }], [PEER4]),
+    [{ name: 'Wi-Fi', dns: [] }, { name: 'Bridge', dns: ['8.8.8.8'] }]);
+});
+
+test('macOS: a service already carrying the peer is engaged as empty and restored to Empty', async () => {
+  const h = harness('darwin', (cmd) => (cmd === 'privileged' ? '' : `Wi-Fi\t${PEER4}\nBridge\t8.8.8.8 ${PEER4}\n`));
+  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'utun4' });
+  assert.deepEqual(h.state().mac.services, [{ name: 'Wi-Fi', dns: [] }, { name: 'Bridge', dns: ['8.8.8.8'] }]);
+  assert.match(macRestoreScript(h.state().mac.services), /-setdnsservers 'Wi-Fi' Empty/);
+});
+
+// M3. DHCP renewal is a unicast to the router, but the DISCOVER/REQUEST that
+// follows a lease loss is broadcast to 255.255.255.255 — blocking it takes the
+// machine's address with it, hours after anyone would connect the two.
+test('the strict block leaves the DHCP limited broadcast alone', () => {
+  assert.equal(rangeComplement(GUARD_EXCLUDES).some(r => r.endsWith('-255.255.255.255')), false);
+  assert.ok(GUARD_EXCLUDES.includes('255.255.255.255/32'));
+});
+
+// L1. A recorded resolver is data read off the machine, and the restore script
+// runs as root.
+test('recorded resolvers are quoted before they reach a root shell', () => {
+  const evil = "1.1.1.1'; touch /tmp/pwned; echo '";
+  const script = macRestoreScript([{ name: 'Wi-Fi', dns: [evil] }]);
+  // The address is data read off the machine and this script runs as root, so
+  // it must arrive as ONE shell word: the quote it carries comes back escaped
+  // (sh()), never raw, and the line still ends the way every other one does.
+  assert.equal(script.includes(evil), false, 'the payload is never interpolated raw');
+  assert.equal(script.split(String.fromCharCode(92) + "'").length - 1, 2, 'both quotes escaped');
+  assert.match(script, /networksetup -setdnsservers 'Wi-Fi' .* \|\| FAIL=1/);
 });
