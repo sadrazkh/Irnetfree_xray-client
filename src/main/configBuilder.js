@@ -270,6 +270,19 @@ const BLACKHOLE = { tag: 'block', protocol: 'blackhole', settings: { response: {
  * wanted: an advanced plan contributes its own rules, every other plan follows
  * routingMode alone.
  */
+/**
+ * Under the STRICT leak guard the in-country resolver's plain-UDP query cannot
+ * leave the machine: sing-box's `strict_route` blocks port 53 off the tunnel,
+ * and a `direct` dial is exactly that — it leaves through the physical adapter.
+ * Dropping the UDP entries at build time turns a timeout on every domestic name
+ * into an immediate fall through to the DoH resolvers; a DoH direct resolver
+ * rides port 443 and stays, and geoip still routes the answers, so `bypass-ir`
+ * keeps working. Only under TUN — in proxy mode nothing blocks :53.
+ */
+function dropsUdpDirect(s) {
+  return !!(s && s.tunMode && s.leakGuard === 'strict');
+}
+
 function dnsSettingsFor(s, plan) {
   if (plan.mode === 'advanced') return Object.assign({}, s, { advancedRouting: true, routeRules: plan.rules || [] });
   // Pool emits no bypass rules, so an in-country resolver would only hand the
@@ -320,7 +333,11 @@ const SETTINGS_DEFAULTS = {
 function resolverBypassIps(planArg, settings) {
   const s = Object.assign({}, SETTINGS_DEFAULTS, settings || {});
   const plan = normalizePlan(planArg);
-  return buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: s.geoAssets !== false }).directResolverIps;
+  // Same options as buildConfig, so the bypass list never names a resolver the
+  // config no longer has — a stale entry here is a hole in the strict guard's
+  // firewall (the TUN backend hands this list to it as an exclude).
+  return buildDnsPlan(dnsSettingsFor(s, plan),
+    { geoAssets: s.geoAssets !== false, dropUdpDirect: dropsUdpDirect(s) }).directResolverIps;
 }
 
 function buildConfig(planArg, settings) {
@@ -415,7 +432,8 @@ function buildConfig(planArg, settings) {
   // Name resolution (see dnsBuilder.js). Its rules go FIRST: the port-53 hijack
   // must beat the private-IP bypass, or a query to the tunnel peer 10.255.0.1
   // would be sent "direct" into nowhere instead of being answered.
-  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: geo, exitTag, targetResolvers: targetResolversFor(targets, plan) });
+  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
+    { geoAssets: geo, exitTag, dropUdpDirect: dropsUdpDirect(s), targetResolvers: targetResolversFor(targets, plan) });
   if (dnsPlan.hijackOutbound) outbounds.push(dnsPlan.hijackOutbound);
   rules = [...dnsPlan.rules, ...rules];
 
@@ -514,7 +532,8 @@ function buildPoolConfig(plan, s, listen, sniffing) {
 
   reg.add(freedom(s));
   reg.add(Object.assign({}, BLACKHOLE));
-  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan), { geoAssets: s.geoAssets !== false, exitTag: primaryTag });
+  const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
+    { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
   const outbounds = applyFragments((reg.outs || []).map(sanitizeWgOutbound));
   bindDirectDials(outbounds, s.directInterface);
