@@ -81,6 +81,7 @@
     getSettings: () => invoke('settings:get'),
     setSettings: (partial) => invoke('settings:set', partial),
     pendingReconnect: () => invoke('settings:pending'),
+    checkGeoRules: (rules) => invoke('routing:checkGeo', rules),
     applySettings: () => invoke('settings:apply'),
 
     // diagnostics

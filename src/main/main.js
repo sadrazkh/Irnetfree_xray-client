@@ -13,6 +13,7 @@ const { engineFormat } = require('./engines');
 const { chooseEngine, testEngineFor } = require('./engineChoice');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, PinWatch } = require('./certPin');
 const { assetStatus: scanAssets } = require('./assets');
+const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
 const { XrayManager, getFreePort } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('./netutils');
@@ -650,7 +651,10 @@ async function doConnect(serverId, opts = {}) {
       ? (settings.lang === 'en'
         ? ' — this config has no TLS; the official core refuses it. Install Xray-PattN under Settings → Required files.'
         : ' — این کانفیگ TLS ندارد و هستهٔ رسمی آن را رد می‌کند. Xray-PattN را از تنظیمات → فایل‌های موردنیاز نصب کن.')
-      : '';
+      : ''
+      // A geo code the data files do not carry refuses the whole config, and
+      // the core's own line reads like the files are missing (see geoCheck.js).
+      + geoCodeHint(check.error, settings.lang === 'en' ? 'en' : 'fa');
     // Only Error.message survives the IPC boundary, so the hint IS the signal:
     // the renderer keys off the (untranslated) product name in it. A property
     // set here would be dropped in transit — don't add one.
@@ -1562,6 +1566,17 @@ function registerIpc() {
       disarmKillSwitch().then(() => send('killswitch', { engaged: false }));
     }
     return { settings: next, pendingReconnect: pendingKeys() };
+  });
+  /**
+   * Which geo codes in these rules the installed data files do not carry. The
+   * core is the only authority on that (the codes change with every release),
+   * so this asks it — see geoCheck.js. Called when routing rules are saved, so
+   * a typo is caught there instead of taking the next connection down with it.
+   */
+  ipcMain.handle('routing:checkGeo', async (e, rules) => {
+    const tokens = geoTokensOf(rules);
+    if (!tokens.length) return { checked: true, bad: [] };
+    return checkGeoTokens(tokens, (cfg) => xray.validate(cfg));
   });
   ipcMain.handle('settings:pending', () => pendingKeys());
   ipcMain.handle('settings:apply', () => reapplyConnection());
