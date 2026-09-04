@@ -13,7 +13,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, wgResolvers } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, wgResolvers, wgEndpointHosts } = require('../src/main/configBuilder');
 const {
   settings, ruleTags, outboundTagged, vlessWithMarkers,
   VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK, WG_CORP
@@ -1127,4 +1127,91 @@ test('binding never touches the stored record', () => {
   buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, s] }, settings(BOUND));
   assert.equal(JSON.stringify(s), before);
   assert.equal(VLESS_WS_TLS.outbound.streamSettings.sockopt, undefined);
+});
+
+/* --------------------- WireGuard endpoints as addresses --------------------- */
+
+/** WG_CORP with another endpoint, for the "already an address" cases. */
+function wgAt(endpoint) {
+  const s = JSON.parse(JSON.stringify(WG_CORP));
+  s.outbound.settings.peers[0].endpoint = endpoint;
+  return s;
+}
+
+// The patterniha fork does not resolve a WireGuard peer's endpoint with Xray's
+// own DNS: dialled directly it asks the OS resolver ("Unable to update bind:
+// lookup <host>: no such host") and through a chain it hands the bare hostname
+// to the next hop. Either way a config whose endpoint is a name — every
+// .conf-imported corporate WireGuard — never brings its tunnel up on that core,
+// while everything else keeps working. Resolving the endpoint before the config
+// is written makes both cores behave the same and takes the tunnel's own
+// bootstrap off the DNS it is supposed to carry.
+test('a WireGuard endpoint hostname is replaced by the address the connect resolved', () => {
+  const c = buildConfig(single(WG_CORP), settings({ wgEndpointIps: { 'cobra.example': '203.0.113.7' } }));
+  assert.equal(outboundTagged(c, 'proxy').settings.peers[0].endpoint, '203.0.113.7:42421');
+  // the stored record keeps its hostname — the address is re-resolved next time
+  assert.equal(WG_CORP.outbound.settings.peers[0].endpoint, 'cobra.example:42421');
+});
+
+test('an endpoint is left alone when nothing resolved it, and an IPv6 address is bracketed', () => {
+  const plain = buildConfig(single(WG_CORP), settings());
+  assert.equal(outboundTagged(plain, 'proxy').settings.peers[0].endpoint, 'cobra.example:42421');
+  const other = buildConfig(single(WG_CORP), settings({ wgEndpointIps: { 'elsewhere.example': '1.2.3.4' } }));
+  assert.equal(outboundTagged(other, 'proxy').settings.peers[0].endpoint, 'cobra.example:42421');
+  const v6 = buildConfig(single(WG_CORP), settings({ wgEndpointIps: { 'cobra.example': '2001:db8::1' } }));
+  assert.equal(outboundTagged(v6, 'proxy').settings.peers[0].endpoint, '[2001:db8::1]:42421');
+});
+
+test('every plan shape resolves it: a chain hop, an advanced target, a pool entry', () => {
+  const map = { wgEndpointIps: { 'cobra.example': '203.0.113.7' } };
+  const chain = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, WG_CORP] }, settings(map));
+  assert.equal(outboundTagged(chain, 'proxy').settings.peers[0].endpoint, '203.0.113.7:42421');
+  const adv = buildConfig(advancedPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-wgcorp': WG_CORP },
+    rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-wgcorp' }], def: 'sv-vless'
+  }), settings(map));
+  assert.equal(outboundTagged(adv, 'out-sv-wgcorp').settings.peers[0].endpoint, '203.0.113.7:42421');
+  const poolWg = Object.assign(poolPlan([{ id: 'e1', target: 'sv-wgcorp', socksPort: 60001 }], 'sv-wgcorp'),
+    { serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-wgcorp': WG_CORP } });
+  const pool = buildConfig(poolWg, settings(map));
+  assert.equal(outboundTagged(pool, 'out-sv-wgcorp').settings.peers[0].endpoint, '203.0.113.7:42421');
+});
+
+test('wgEndpointHosts: the names a connect has to resolve before it builds the config', () => {
+  assert.deepEqual(wgEndpointHosts({ mode: 'single', server: WG_CORP }), ['cobra.example']);
+  assert.deepEqual(wgEndpointHosts({ mode: 'chain', chain: [VLESS_WS_TLS, WG_CORP] }), ['cobra.example']);
+  assert.deepEqual(wgEndpointHosts(advancedPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-wgcorp': WG_CORP, 'sv-wg': WG_BAD_MASK },
+    chainsById: { c1: [VLESS_WS_TLS, WG_CORP] },
+    rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'chain:c1' }], def: 'sv-wg'
+  })), ['cobra.example', 'd.example.com']);
+  // an endpoint that is already an address needs nothing
+  assert.deepEqual(wgEndpointHosts({ mode: 'single', server: wgAt('198.51.100.9:51820') }), []);
+  assert.deepEqual(wgEndpointHosts({ mode: 'single', server: wgAt('[2001:db8::1]:51820') }), []);
+  assert.deepEqual(wgEndpointHosts({ mode: 'single', server: VLESS_WS_TLS }), []);
+});
+
+// Measured on this machine with both cores: a WireGuard peer whose AllowedIPs
+// is a SPLIT list ("192.168.0.0/16, 10.0.0.0/8" — what every corporate .conf
+// carries) gets no traffic at all on the patterniha fork; not even a handshake
+// leaves. Widen it to the whole address space and the fork behaves exactly like
+// the official core. Nothing is lost by that: `allowedIPs` here is not a
+// firewall, it only says what this outbound may carry, and WE decide what
+// reaches it — the routing rules, built from the very same list. The record
+// keeps the real ranges, which is what the routing suggestion and the DNS
+// expectedIPs read.
+test('a WireGuard peer carries whatever is routed to it, whatever its AllowedIPs said', () => {
+  const c = buildConfig(single(WG_CORP), settings());
+  assert.deepEqual(outboundTagged(c, 'proxy').settings.peers[0].allowedIPs, ['0.0.0.0/0', '::/0']);
+  // the stored record is untouched: the chip and the resolver still see the ranges
+  assert.deepEqual(WG_CORP.outbound.settings.peers[0].allowedIPs, ['192.168.0.0/16', '10.0.0.0/8']);
+  assert.deepEqual(wgResolvers(WG_CORP, 'out-x')[0].expectedIPs, ['192.168.0.0/16', '10.0.0.0/8']);
+  // and in every shape that can carry one
+  const chain = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, WG_CORP] }, settings());
+  assert.deepEqual(outboundTagged(chain, 'proxy').settings.peers[0].allowedIPs, ['0.0.0.0/0', '::/0']);
+  const adv = buildConfig(advancedPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-wgcorp': WG_CORP },
+    rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-wgcorp' }], def: 'sv-vless'
+  }), settings());
+  assert.deepEqual(outboundTagged(adv, 'out-sv-wgcorp').settings.peers[0].allowedIPs, ['0.0.0.0/0', '::/0']);
 });
