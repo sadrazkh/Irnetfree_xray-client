@@ -10,7 +10,7 @@ const { buildConfig, buildTestConfig, resolverBypassIps, wgEndpointHosts } = req
 const { adapterDnsServers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
-const { chooseEngine, testEngineFor } = require('./engineChoice');
+const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('./engineChoice');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, PinWatch } = require('./certPin');
 const { assetStatus: scanAssets } = require('./assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
@@ -23,7 +23,7 @@ const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
 const { TunSingbox } = require('./tunSingbox');
 const tunPlatform = require('./tunPlatform');
 const { LeakGuard } = require('./leakGuard');
-const { StatsPoller } = require('./stats');
+const { StatsPoller, SilenceWatch } = require('./stats');
 const { Downloader } = require('./downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
@@ -108,6 +108,9 @@ const DEFAULT_SETTINGS = {
   customRules: [],
   // advanced (graphical) routing — per-rule outbound selection
   advancedRouting: false,
+  // apply routingMode (bypass Iran/China…) UNDER the advanced rules as well —
+  // off keeps the old behaviour, where advanced routing ignored the mode
+  advancedUseMode: false,
   routeRules: [],      // [{ id, type:'ip'|'domain'|'port'|'process', value, target }]
   routeDefault: '',    // fallback target (server id | 'chain' | 'direct' | 'block')
   // process routing: keep routes updated while connected (briefly reloads xray)
@@ -570,12 +573,21 @@ function healCertPin(line) {
 /**
  * The settings for this connect, with every WireGuard peer endpoint that is a
  * NAME resolved to an address (see configBuilder.wgEndpointHosts for why).
- * A name we cannot resolve is left as it is — the official core still copes,
- * and its own error is clearer than anything invented here.
+ * A name we cannot resolve is left as it is — the core's own error is clearer
+ * than anything invented here.
+ *
+ * Only for the core that needs it (see engineChoice.needsWgEndpointIp): this
+ * resolves through the MACHINE's resolver, which on a filtered connection is
+ * the answer the app exists to avoid trusting. The official core does its own
+ * lookup over DoH and must keep doing it.
  */
 async function withWgEndpointIps(serverId, settings) {
   let hosts = [];
-  try { hosts = wgEndpointHosts(buildPlan(serverId, settings).plan); } catch { return settings; }
+  try {
+    const { plan } = buildPlan(serverId, settings);
+    if (!needsWgEndpointIp(xray.resolveEngine(chooseEngine(plan, settings.defaultEngine), { quiet: true }).id)) return settings;
+    hosts = wgEndpointHosts(plan);
+  } catch { return settings; }
   if (!hosts.length) return settings;
   const map = {};
   await Promise.all(hosts.map(async (h) => {
@@ -587,6 +599,44 @@ async function withWgEndpointIps(serverId, settings) {
   if (!named.length) return settings;
   send('log', { line: 'WireGuard endpoint: ' + named.map(h => `${h} → ${map[h]}`).join(', '), level: 'info' });
   return Object.assign({}, settings, { wgEndpointIps: map });
+}
+
+/**
+ * Arm the "this tunnel is talking to nobody" watch for the WireGuard outbounds
+ * of the config we are about to run, and forget the previous connection's.
+ */
+let wgSilence = null;
+function watchWgSilence(config) {
+  const wg = (config && config.outbounds || []).filter(o => o && o.protocol === 'wireguard');
+  wgSilence = wg.length
+    ? { watch: new SilenceWatch(wg.map(o => o.tag)), by: new Map(wg.map(o => [o.tag, wgEndpointOf(o)])) }
+    : null;
+}
+
+/** The peer address a WireGuard outbound dials, for the message below. */
+function wgEndpointOf(o) {
+  const peer = o.settings && o.settings.peers && o.settings.peers[0];
+  return (peer && peer.endpoint) || '';
+}
+
+/**
+ * A WireGuard that has sent and never been answered, said out loud once.
+ *
+ * Without this the user sees only that "the company sites do not open" while
+ * every other route works — the core reports the failed handshake at [Debug],
+ * which nobody runs — and the obvious conclusion is that routing is broken.
+ */
+function reportSilentTunnels(vars) {
+  if (!wgSilence) return;
+  for (const tag of wgSilence.watch.check(vars)) {
+    const ep = wgSilence.by.get(tag);
+    send('log', {
+      line: getSettings().lang === 'en'
+        ? `WireGuard ${ep || tag}: traffic is being routed into this tunnel and nothing is coming back — the peer is not completing the handshake. Check the endpoint, its port, and whether the hop in front of it carries UDP.`
+        : `وایرگارد ${ep || tag}: ترافیک به این تونل فرستاده می‌شود ولی هیچ پاسخی برنمی‌گردد — یعنی handshake با peer کامل نمی‌شود. endpoint و پورتش را چک کن و این‌که هاپِ قبل از آن UDP را عبور می‌دهد یا نه.`,
+      level: 'warn'
+    });
+  }
 }
 
 /**
@@ -872,6 +922,7 @@ async function doConnect(serverId, opts = {}) {
   // Start live traffic stats
   stats.setBin(xray.anyBin());
   stats.apiPort = settings.apiPort;
+  watchWgSilence(config);
   stats.start(1000);
 
   // Keep process routes fresh while connected (opt-in; briefly reloads xray).
@@ -1022,6 +1073,7 @@ async function rebuildActiveConfig() {
     const check = await xray.validateWithFallback(config, engine);
     if (!check.ok) throw new Error(check.error);
     await xray.start(config, check.engine);   // start() stops the old instance first
+    watchWgSilence(config);   // the plan may have changed under the live tunnel
   } finally {
     xrayReloading = prevReloading;
   }
@@ -1900,7 +1952,8 @@ app.whenReady().then(() => {
   stats = new StatsPoller({
     binPath: xray.anyBin(),
     apiPort: getSettings().apiPort,
-    onStats: (s) => send('stats', s)
+    onStats: (s) => send('stats', s),
+    onRaw: (vars) => reportSilentTunnels(vars)
   });
 
   downloader = new Downloader({

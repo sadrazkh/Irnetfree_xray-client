@@ -49,11 +49,15 @@ let failed = 0, total = 0;
 for (const [pn, plan] of Object.entries(plans)) {
   for (const [dn, dns] of Object.entries(dnsModes)) {
     for (const geoAssets of [true, false]) {
-      for (const routingMode of (pn === 'advanced' || pn === 'pool' ? ['global'] : routing)) {
+      // The advanced plan gets every routing mode too now that it can apply one
+      // under its own rules (`advancedUseMode`) — those geo rules have to be
+      // accepted by the core like any other.
+      for (const routingMode of (pn === 'pool' ? ['global'] : routing)) {
+        const useMode = pn === 'advanced' && routingMode !== 'global';
         for (const ipv6 of [false, true]) {
           total++;
-          const cfg = buildConfig(plan, F.settings(Object.assign({ routingMode, geoAssets, ipv6 }, dns)));
-          const file = path.join(work, `${pn}-${dn}-${routingMode}-geo${geoAssets}-v6${ipv6}.json`);
+          const cfg = buildConfig(plan, F.settings(Object.assign({ routingMode, geoAssets, ipv6, advancedUseMode: useMode }, dns)));
+          const file = path.join(work, `${pn}-${dn}-${routingMode}${useMode ? '-usemode' : ''}-geo${geoAssets}-v6${ipv6}.json`);
           fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
           const r = spawnSync(exe, ['run', '-test', '-c', file], {
             env: Object.assign({}, process.env, { XRAY_LOCATION_ASSET: assetDir, V2RAY_LOCATION_ASSET: assetDir }),
