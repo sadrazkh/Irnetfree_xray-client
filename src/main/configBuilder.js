@@ -11,6 +11,7 @@
  * normalizePlan() converts those into the structured form above.
  */
 
+const net = require('net');
 const { buildDnsPlan } = require('./dnsBuilder');
 const { normalizePin } = require('./certPin');
 
@@ -86,12 +87,85 @@ function applyCertPin(o, server) {
   return o;
 }
 
+/** "host:port" / "[v6]:port" → { host, port }; anything else → null. */
+function splitEndpoint(ep) {
+  const e = String(ep == null ? '' : ep).trim();
+  const m6 = e.match(/^\[([^\]]+)\]:(\d{1,5})$/);
+  if (m6) return { host: m6[1], port: m6[2] };
+  const m4 = e.match(/^([^:]+):(\d{1,5})$/);
+  return m4 ? { host: m4[1], port: m4[2] } : null;
+}
+
+/**
+ * The WireGuard peer endpoints in a plan that are names rather than addresses.
+ *
+ * They have to be resolved before the config is written, because the cores do
+ * not agree on who resolves them. The official core asks its own DNS; the
+ * patterniha fork does not — dialled directly it asks the OS resolver ("Unable
+ * to update bind: lookup <host>: no such host") and through a chain it hands the
+ * bare hostname to the next hop. So a `.conf`-imported corporate WireGuard,
+ * whose endpoint is always a name, silently never comes up on that core: every
+ * other route keeps working, only the tunnel is dead. Handing the core an
+ * address makes both behave the same, and takes the tunnel's own bootstrap off
+ * the DNS that tunnel is supposed to carry.
+ */
+function wgEndpointHosts(planArg) {
+  const plan = normalizePlan(planArg);
+  const out = [];
+  const visit = (s) => {
+    const ob = s && s.outbound;
+    if (!ob || ob.protocol !== 'wireguard') return;
+    for (const p of (ob.settings && ob.settings.peers) || []) {
+      const ep = splitEndpoint(p && p.endpoint);
+      if (!ep || net.isIP(ep.host) || out.includes(ep.host)) continue;
+      out.push(ep.host);
+    }
+  };
+  if (plan.server) visit(plan.server);
+  for (const s of plan.chain || []) visit(s);
+  for (const s of Object.values(plan.serversById || {})) visit(s);
+  for (const list of Object.values(plan.chainsById || {})) for (const s of list || []) visit(s);
+  return out;
+}
+
+/** Put the resolved address in the peer's endpoint, keeping its port. */
+function applyWgEndpointIps(o, map) {
+  if (!o || o.protocol !== 'wireguard' || !map || !o.settings) return o;
+  for (const p of o.settings.peers || []) {
+    const ep = splitEndpoint(p && p.endpoint);
+    const ip = ep && map[ep.host];
+    if (!ip) continue;
+    p.endpoint = (net.isIPv6(ip) ? `[${ip}]` : ip) + ':' + ep.port;
+  }
+  return o;
+}
+
 /**
  * Coerce a WireGuard outbound's interface address to /32 (or /128 for IPv6).
  * xray refuses to start otherwise — this protects configs that were saved with
  * a wrong mask (e.g. someone put 192.168.x.0/16 in the Address field).
  */
+/**
+ * What a WireGuard peer in the CONFIG may carry: everything.
+ *
+ * The patterniha fork moves no traffic at all through a peer whose AllowedIPs
+ * is a split list — the shape every corporate `.conf` has, and not so much as a
+ * handshake leaves (measured against both cores; the official one carries it).
+ * Widening costs nothing here: `allowedIPs` is not a firewall, it only says what
+ * this outbound may carry, and what reaches it is decided by the routing rules —
+ * which are built from the very same ranges. The stored record keeps them, so
+ * the routing suggestion and the resolver's expectedIPs are unaffected.
+ */
+function widenWgAllowedIps(o) {
+  if (!o || o.protocol !== 'wireguard' || !o.settings) return o;
+  for (const p of o.settings.peers || []) {
+    if (p) p.allowedIPs = ['0.0.0.0/0', '::/0'];
+  }
+  return o;
+}
+
 function sanitizeWgOutbound(o) {
+  widenWgAllowedIps(o);
   if (!o || o.protocol !== 'wireguard' || !o.settings || !Array.isArray(o.settings.address)) return o;
   o.settings.address = o.settings.address
     .map(a => String(a || '').trim())
@@ -438,7 +512,7 @@ function buildConfig(planArg, settings) {
   rules = [...dnsPlan.rules, ...rules];
 
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
-  outbounds = (outbounds || []).map(sanitizeWgOutbound);
+  outbounds = (outbounds || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   outbounds = applyFragments(outbounds);
   bindDirectDials(outbounds, s.directInterface);
 
@@ -535,7 +609,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
     { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
-  const outbounds = applyFragments((reg.outs || []).map(sanitizeWgOutbound));
+  const outbounds = applyFragments((reg.outs || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps)));
   bindDirectDials(outbounds, s.directInterface);
 
   // Resolver rules first (see buildConfig), then private/LAN direct, THEN
@@ -754,4 +828,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, wgResolvers };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, wgResolvers, wgEndpointHosts };
