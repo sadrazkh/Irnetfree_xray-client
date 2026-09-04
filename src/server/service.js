@@ -15,7 +15,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig, resolverBypassIps } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, resolverBypassIps, wgEndpointHosts } = require('../main/configBuilder');
 const { adapterDnsServers } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
@@ -526,6 +526,28 @@ function createService(opts = {}) {
    *   before it finished: nothing was emitted and nothing was started, and the
    *   caller must not treat it as either a success or a failure worth retrying.
    */
+  /**
+   * The settings for this connect, with every WireGuard peer endpoint that is a
+   * NAME resolved to an address (see configBuilder.wgEndpointHosts for why).
+   * A name we cannot resolve is left as it is — the official core still copes,
+   * and its own error is clearer than anything invented here.
+   */
+  async function withWgEndpointIps(serverId, settings) {
+    let hosts = [];
+    try { hosts = wgEndpointHosts(buildPlan(serverId, settings).plan); } catch { return settings; }
+    if (!hosts.length) return settings;
+    const map = {};
+    await Promise.all(hosts.map(async (h) => {
+      const ips = await tunPlatform.resolveServerIps(h).catch(() => []);
+      if (ips.length) map[h] = ips[0];
+      else send('log', { line: `Could not resolve the WireGuard endpoint ${h} — leaving it to the core`, level: 'warn' });
+    }));
+    const named = Object.keys(map);
+    if (!named.length) return settings;
+    send('log', { line: 'WireGuard endpoint: ' + named.map(h => `${h} → ${map[h]}`).join(', '), level: 'info' });
+    return Object.assign({}, settings, { wgEndpointIps: map });
+  }
+
   async function doConnect(serverId) {
     // Every await below is a window in which the operator can hit disconnect.
     // doDisconnect() then stops the core and clears activeServerId, but THIS call
@@ -543,6 +565,17 @@ function createService(opts = {}) {
 
     // allowInsecure is gone from the core: pin the certificate on first use instead.
     await ensureCertPins(serverId, settings);
+    if (stale()) return abandoned;
+
+    // A WireGuard peer's endpoint is a NAME in every .conf a company hands out,
+    // and the two cores disagree about who resolves it: the official one asks its
+    // own DNS, the patterniha fork asks the OS resolver ("Unable to update bind:
+    // lookup <host>: no such host") or hands the bare name to the next hop of the
+    // chain. On that core the tunnel then never comes up — everything else still
+    // works, which is what makes it so hard to see. Resolve it here, once, and
+    // give the core an address: same behaviour on both, and the tunnel no longer
+    // bootstraps through the DNS it is itself supposed to carry.
+    settings = await withWgEndpointIps(serverId, settings);
     if (stale()) return abandoned;
 
     // The TUN layer for this connect — the backend setting plus what is
