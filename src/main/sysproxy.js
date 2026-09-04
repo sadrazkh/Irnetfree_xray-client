@@ -54,29 +54,67 @@ function refreshWindows() {
 }
 
 /* --------------------------- macOS --------------------------- */
-async function macServices() {
-  const out = await run('networksetup', ['-listallnetworkservices']);
-  return out.split('\n').slice(1).map(s => s.replace(/^\*/, '').trim()).filter(Boolean);
+
+/**
+ * Service names out of `networksetup -listallnetworkservices`. The output opens
+ * with a legend — "An asterisk (*) denotes that a network service is
+ * disabled." — and lists a disabled service with that asterisk in front. The
+ * legend goes and the asterisk comes off, so what is left are the names
+ * networksetup takes as arguments. Matched by content, not by position: the
+ * old `slice(1)` would have eaten the first real service had the legend ever
+ * been missing. Pure, so a test pins it — nobody here has a Mac to watch it.
+ */
+function parseMacServices(out) {
+  return String(out == null ? '' : out).split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(s => s && !/^An asterisk \(\*\) denotes/i.test(s))
+    .map(s => s.replace(/^\*\s*/, ''));
 }
 
-async function enableMac(host, socksPort, httpPort) {
-  const services = await macServices();
+async function macServices(exec) {
+  return parseMacServices(await exec('networksetup', ['-listallnetworkservices']));
+}
+
+/**
+ * SOCKS, HTTP and HTTPS proxy on every network service. A service that refuses
+ * is skipped, but when NONE took the setting the call fails — which is what
+ * happens for a user who is not an administrator, since networksetup demands
+ * that for writes. Every error used to be swallowed per command, so that case
+ * ended in a "System proxy enabled" log line over a machine whose proxy had
+ * not changed at all. `exec` is injectable for the tests.
+ */
+async function enableMac(host, socksPort, httpPort, exec = run) {
+  const services = await macServices(exec);
+  let applied = 0;
+  let lastError = null;
   for (const svc of services) {
-    await run('networksetup', ['-setsocksfirewallproxy', svc, host, String(socksPort)]).catch(() => {});
-    await run('networksetup', ['-setsocksfirewallproxystate', svc, 'on']).catch(() => {});
-    await run('networksetup', ['-setwebproxy', svc, host, String(httpPort)]).catch(() => {});
-    await run('networksetup', ['-setwebproxystate', svc, 'on']).catch(() => {});
-    await run('networksetup', ['-setsecurewebproxy', svc, host, String(httpPort)]).catch(() => {});
-    await run('networksetup', ['-setsecurewebproxystate', svc, 'on']).catch(() => {});
+    try {
+      await exec('networksetup', ['-setsocksfirewallproxy', svc, host, String(socksPort)]);
+      await exec('networksetup', ['-setsocksfirewallproxystate', svc, 'on']);
+      await exec('networksetup', ['-setwebproxy', svc, host, String(httpPort)]);
+      await exec('networksetup', ['-setwebproxystate', svc, 'on']);
+      await exec('networksetup', ['-setsecurewebproxy', svc, host, String(httpPort)]);
+      await exec('networksetup', ['-setsecurewebproxystate', svc, 'on']);
+      applied++;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  if (!applied) {
+    if (!services.length) throw new Error('networksetup lists no network service to set the proxy on');
+    throw new Error('networksetup refused the proxy on every network service'
+      + (lastError && lastError.message ? ` (${lastError.message})` : '')
+      + ' — on macOS changing the system proxy needs an administrator account');
   }
 }
 
-async function disableMac() {
-  const services = await macServices();
+/** Best-effort, as before: a disable must never be the thing that fails a disconnect. */
+async function disableMac(exec = run) {
+  const services = await macServices(exec);
   for (const svc of services) {
-    await run('networksetup', ['-setsocksfirewallproxystate', svc, 'off']).catch(() => {});
-    await run('networksetup', ['-setwebproxystate', svc, 'off']).catch(() => {});
-    await run('networksetup', ['-setsecurewebproxystate', svc, 'off']).catch(() => {});
+    await exec('networksetup', ['-setsocksfirewallproxystate', svc, 'off']).catch(() => {});
+    await exec('networksetup', ['-setwebproxystate', svc, 'off']).catch(() => {});
+    await exec('networksetup', ['-setsecurewebproxystate', svc, 'off']).catch(() => {});
   }
 }
 
@@ -110,4 +148,4 @@ async function setSystemProxy(enabled, opts = {}) {
   }
 }
 
-module.exports = { setSystemProxy };
+module.exports = { setSystemProxy, parseMacServices, enableMac, disableMac };
