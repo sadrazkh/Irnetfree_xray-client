@@ -143,18 +143,25 @@ class Downloader {
     return `https://api.github.com/repos/${e.repo}/releases/latest`;
   }
 
-  xrayAssetName() {
-    const arch = os.arch();
-    if (os.platform() === 'win32') return arch === 'arm64' ? 'Xray-windows-arm64-v8a.zip' : 'Xray-windows-64.zip';
-    if (os.platform() === 'darwin') return arch === 'arm64' ? 'Xray-macos-arm64-v8a.zip' : 'Xray-macos-64.zip';
+  /*
+   * The three release-asset pickers take the platform and arch as parameters
+   * (defaulting to this machine's) so the tests can pin the macOS names on any
+   * CI box: an Xray release carries `Xray-macos-64.zip` and
+   * `Xray-macos-arm64-v8a.zip`, tun2socks `tun2socks-darwin-{amd64,arm64}.zip`,
+   * sing-box `sing-box-<ver>-darwin-{amd64,arm64}.tar.gz` — none of which any
+   * developer here can download on the machine it is meant for.
+   */
+  xrayAssetName(platform = os.platform(), arch = os.arch()) {
+    if (platform === 'win32') return arch === 'arm64' ? 'Xray-windows-arm64-v8a.zip' : 'Xray-windows-64.zip';
+    if (platform === 'darwin') return arch === 'arm64' ? 'Xray-macos-arm64-v8a.zip' : 'Xray-macos-64.zip';
     return arch === 'arm64' ? 'Xray-linux-arm64-v8a.zip' : 'Xray-linux-64.zip';
   }
 
-  tun2socksAssetName() {
-    const arch = os.arch() === 'arm64' ? 'arm64' : 'amd64';
-    if (os.platform() === 'win32') return `tun2socks-windows-${arch}.zip`;
-    if (os.platform() === 'darwin') return `tun2socks-darwin-${arch}.zip`;
-    return `tun2socks-linux-${arch}.zip`;
+  tun2socksAssetName(platform = os.platform(), arch = os.arch()) {
+    const a = arch === 'arm64' ? 'arm64' : 'amd64';
+    if (platform === 'win32') return `tun2socks-windows-${a}.zip`;
+    if (platform === 'darwin') return `tun2socks-darwin-${a}.zip`;
+    return `tun2socks-linux-${a}.zip`;
   }
 
   /** Download + integrate one component. Returns { ok, files } or throws. */
@@ -170,12 +177,12 @@ class Downloader {
     }
   }
 
-  /** Regex matching this platform's sing-box release asset (version varies). */
-  singboxAssetPattern() {
-    const arch = os.arch() === 'arm64' ? 'arm64' : 'amd64';
-    if (os.platform() === 'win32') return new RegExp(`sing-box-.*-windows-${arch}\\.zip$`, 'i');
-    if (os.platform() === 'darwin') return new RegExp(`sing-box-.*-darwin-${arch}\\.tar\\.gz$`, 'i');
-    return new RegExp(`sing-box-.*-linux-${arch}\\.tar\\.gz$`, 'i');
+  /** Regex matching a platform's sing-box release asset (version varies). */
+  singboxAssetPattern(platform = os.platform(), arch = os.arch()) {
+    const a = arch === 'arm64' ? 'arm64' : 'amd64';
+    if (platform === 'win32') return new RegExp(`sing-box-.*-windows-${a}\\.zip$`, 'i');
+    if (platform === 'darwin') return new RegExp(`sing-box-.*-darwin-${a}\\.tar\\.gz$`, 'i');
+    return new RegExp(`sing-box-.*-linux-${a}\\.tar\\.gz$`, 'i');
   }
 
   async getSingbox() {
