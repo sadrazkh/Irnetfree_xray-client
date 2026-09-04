@@ -62,6 +62,21 @@ function buildRoutingRules(mode, blockAds, geo) {
 }
 
 /**
+ * The country-bypass part of a simple routing mode, on its own.
+ *
+ * Advanced routing lays its own private-range rule and ends with the user's own
+ * default target, so a mode contributes only what sits between the two: the
+ * "send this country direct" pair. `global` and `direct` contribute nothing —
+ * their whole content IS the catch-all, which the advanced default owns.
+ */
+function modeBypassRules(mode, geo) {
+  const base = buildRoutingRules(mode, false, geo);
+  base.pop();     // the port:0-65535 catch-all — the advanced default owns it
+  base.shift();   // the private-range bypass — the caller already laid one
+  return base;
+}
+
+/**
  * A server's outbound as the config will carry it. `server` is the record the
  * outbound belongs to — its certificate pin, if any, goes into tlsSettings.
  */
@@ -255,13 +270,24 @@ function makeRegistry(plan) {
 }
 
 /**
+ * Is this stored record a WireGuard config? The OUTBOUND is the truth; the
+ * record's top-level `protocol` is a copy kept for the list UI, and a record
+ * that lost it (an old store, a hand-edited import) must not silently lose its
+ * corporate resolver with it.
+ */
+function isWgServer(server) {
+  return !!server && (server.protocol === 'wireguard' ||
+    !!(server.outbound && server.outbound.protocol === 'wireguard'));
+}
+
+/**
  * Resolvers a routing target brings with it. A WireGuard server that names a
  * DNS in its config (a corporate VPN) can resolve names nobody else knows —
  * but only when asked THROUGH that tunnel. A chain contributes its last hop.
  * Shape: what buildDnsPlan's `targetResolvers` takes.
  */
 function wgResolvers(server, outboundTag) {
-  if (!server || server.protocol !== 'wireguard' || !Array.isArray(server.dns)) return [];
+  if (!isWgServer(server) || !Array.isArray(server.dns)) return [];
   const dns = server.dns.map(d => String(d == null ? '' : d).trim()).filter(Boolean);
   if (!dns.length) return [];
   const peer = server.outbound && server.outbound.settings && server.outbound.settings.peers && server.outbound.settings.peers[0];
@@ -275,7 +301,7 @@ function wgResolvers(server, outboundTag) {
 
 /** A WireGuard whose AllowedIPs is not the whole internet: it carries only those ranges. */
 function isSplitTunnelWg(server) {
-  if (!server || server.protocol !== 'wireguard') return false;
+  if (!isWgServer(server)) return false;
   const peer = server.outbound && server.outbound.settings && server.outbound.settings.peers && server.outbound.settings.peers[0];
   const allowed = ((peer && peer.allowedIPs) || []).map(a => String(a).trim()).filter(Boolean);
   return allowed.length > 0 && !allowed.some(a => /\/0$/.test(a));
@@ -386,6 +412,7 @@ const SETTINGS_DEFAULTS = {
   httpPort: 10809,
   allowLan: false,
   routingMode: 'global',
+  advancedUseMode: false,   // advanced routing also applies routingMode
   blockAds: true,
   enableSniffing: true,
   dnsManaged: true,
@@ -481,10 +508,16 @@ function buildConfig(planArg, settings) {
     // "special routing" — explicit rules must win, otherwise a database on an
     // internal range (e.g. 10.20.0.0/16) would be caught by the private bypass
     // and go direct instead of through the chosen config/chain (e.g. WireGuard).
+    // `advancedUseMode`: apply the simple routing mode UNDER the user's rules.
+    // Without it an advanced plan has no way to say "…and bypass Iran too" —
+    // the user had to hand-write geosite:category-ir rules or give up one of
+    // the two features. Under the user's rules on purpose: an explicit
+    // corporate rule must still win over a country bypass.
     rules = [
       ...(s.blockAds && geo ? [{ type: 'field', domain: ['geosite:category-ads-all'], outboundTag: 'block' }] : []),
       ...advRules,
       { type: 'field', ip: PRIVATE_IPS.slice(), outboundTag: 'direct' },
+      ...(s.advancedUseMode ? modeBypassRules(s.routingMode, geo) : []),
       { type: 'field', port: '0-65535', outboundTag: defTag }
     ];
   } else {

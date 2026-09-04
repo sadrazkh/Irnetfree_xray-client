@@ -267,6 +267,64 @@ test('advanced: a chain: target expands into namespaced chain outbounds', () => 
   assert.equal(c.routing.rules[0].outboundTag, 'out-chain-c1');
 });
 
+/* --------- advanced routing + a simple routing mode on top (v0.15) --------- */
+
+test('advanced: without advancedUseMode the routing mode is ignored, as before', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [{ type: 'ip', value: '10.20.0.0/16', target: 'sv-wg' }], def: 'sv-vless'
+  }), settings({ routingMode: 'bypass-ir', blockAds: false }));
+
+  assert.equal(c.routing.rules.some(r => (r.domain || []).includes('geosite:category-ir')), false);
+  assert.equal(c.routing.rules.some(r => (r.ip || []).includes('geoip:ir')), false);
+});
+
+test('advanced: advancedUseMode lays the bypass under the user rules and above the default', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [{ type: 'ip', value: '10.20.0.0/16', target: 'sv-wg' }], def: 'sv-vless'
+  }), settings({ routingMode: 'bypass-ir', advancedUseMode: true, blockAds: false }));
+
+  const rules = c.routing.rules;
+  const user = rules.findIndex(r => (r.ip || []).includes('10.20.0.0/16'));
+  const priv = rules.findIndex(r => (r.ip || []).includes('192.168.0.0/16'));
+  const site = rules.findIndex(r => (r.domain || []).includes('geosite:category-ir'));
+  const gip = rules.findIndex(r => (r.ip || []).includes('geoip:ir'));
+
+  assert.ok(user > -1 && priv > -1 && site > -1 && gip > -1, 'every rule is present');
+  // the corporate rule still wins; the country bypass sits under it, and the
+  // catch-all still goes to the advanced default (NOT to 'proxy')
+  assert.ok(user < priv && priv < site && site < gip, `order was ${JSON.stringify(rules.map(r => r.outboundTag))}`);
+  assert.equal(rules[site].outboundTag, 'direct');
+  assert.equal(rules[gip].outboundTag, 'direct');
+  assert.equal(rules.at(-1).port, '0-65535');
+  assert.equal(rules.at(-1).outboundTag, 'out-sv-vless');
+});
+
+test('advanced: advancedUseMode with the global mode adds no geo rules', () => {
+  const c = buildConfig(advancedPlan({ def: 'sv-vless' }),
+    settings({ routingMode: 'global', advancedUseMode: true, blockAds: false }));
+
+  assert.equal(c.routing.rules.some(r => (r.ip || []).includes('geoip:ir')), false);
+  assert.equal(c.routing.rules.at(-1).outboundTag, 'out-sv-vless');
+});
+
+test('advanced: advancedUseMode never routes the catch-all away from the default', () => {
+  // 'direct' mode ends the simple list with a direct catch-all — under advanced
+  // routing the default target is the user's, so that tail must be dropped.
+  const c = buildConfig(advancedPlan({ def: 'sv-vless' }),
+    settings({ routingMode: 'direct', advancedUseMode: true, blockAds: false }));
+
+  assert.equal(c.routing.rules.at(-1).outboundTag, 'out-sv-vless');
+  assert.equal(c.routing.rules.filter(r => r.port === '0-65535').length, 1);
+});
+
+test('advanced: advancedUseMode drops the geo rules when the geo files are missing', () => {
+  const c = buildConfig(advancedPlan({ def: 'sv-vless' }),
+    settings({ routingMode: 'bypass-ir', advancedUseMode: true, blockAds: false, geoAssets: false }));
+
+  assert.equal(c.routing.rules.some(r => JSON.stringify(r).includes('geosite:')), false);
+  assert.equal(c.routing.rules.some(r => JSON.stringify(r).includes('geoip:')), false);
+});
+
 test('advanced: a one-member chain collapses to a single outbound', () => {
   const c = buildConfig(advancedPlan({
     chainsById: { solo: [VLESS_WS_TLS] },
@@ -895,6 +953,32 @@ test('wgResolvers: expectedIPs come from AllowedIPs minus the full-tunnel entrie
   assert.deepEqual(wgResolvers(Object.assign({}, WG_CORP, { dns: [] }), 'out-x'), []);
   assert.deepEqual(wgResolvers(Object.assign({}, VLESS_WS_TLS, { dns: ['1.2.3.4'] }), 'out-x'), []);
   assert.deepEqual(wgResolvers(null, 'out-x'), []);
+});
+
+test('wgResolvers: a record whose top-level protocol is missing still counts as WireGuard', () => {
+  // The outbound is the truth — the top-level field is a copy of it kept for
+  // the list UI. A record that lost it (an old store, a hand-edited import)
+  // used to lose its corporate resolver SILENTLY: every internal name then
+  // resolved over the public DoH and the company sites simply did not open.
+  const noProto = JSON.parse(JSON.stringify(WG_CORP));
+  delete noProto.protocol;
+  assert.deepEqual(wgResolvers(noProto, 'out-x'), wgResolvers(WG_CORP, 'out-x'));
+  assert.equal(wgResolvers(noProto, 'out-x').length, 1);
+});
+
+test('a split-tunnel WireGuard is recognised without the top-level protocol too', () => {
+  // isSplitTunnelWg decides which outbound may carry the resolver's own DoH
+  // query: a split tunnel drops it, so the exit must be something else.
+  const noProto = JSON.parse(JSON.stringify(WG_CORP));
+  delete noProto.protocol;
+  const c = buildConfig(advancedPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-wgcorp': noProto },
+    rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-wgcorp' }, { type: 'domain', value: 'a.com', target: 'sv-vless' }],
+    def: 'block'
+  }), settings({ dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'] }));
+
+  const exitRule = c.routing.rules.find(r => r.inboundTag && !r.ip);
+  assert.equal(exitRule.outboundTag, 'out-sv-vless', 'the split tunnel must not be asked to carry the public resolver');
 });
 
 /* --------------------------- phase 2b review fixes --------------------------- */

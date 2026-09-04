@@ -366,6 +366,17 @@
               <span id="advDefaultMount" class="adv-target-mount"></span>
             </div>
 
+            <!-- also apply the simple routing mode (bypass Iran/China) under the rules -->
+            <div class="switch-row">
+              <div>
+                <div class="switch-title" data-i18n="adv.useMode.title">حالت روتینگ ساده هم اعمال شود</div>
+                <div class="switch-sub" data-i18n="adv.useMode.sub">همان حالتی که بالای همین صفحه انتخاب کرده‌ای</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="optAdvUseMode" /><span class="slider"></span></label>
+            </div>
+            <p class="hint" id="advUseModeHint" data-i18n="adv.useMode.hint">قانون‌های خودت همیشه اول بررسی می‌شوند؛ این گزینه فقط زیرِ آن‌ها اضافه می‌شود.</p>
+            <p class="hint" id="advUseModeNow" hidden></p>
+
             <!-- process-routing options (only relevant when a process rule exists) -->
             <div class="proc-opts" id="procOpts" hidden>
               <div class="switch-row">

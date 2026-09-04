@@ -45,4 +45,22 @@ function testEngineFor(engineId) {
   return engineId === 'xray-pattn' ? 'xray-pattn' : 'xray';
 }
 
-module.exports = { chooseEngine, planServers, testEngineFor };
+/**
+ * Does this core have to be handed a WireGuard peer endpoint as an ADDRESS?
+ *
+ * The official core resolves a peer endpoint NAME with its own resolver — the
+ * managed DoH one, reached through the tunnel. Substituting an address there
+ * would swap a censorship-resistant lookup for whatever the machine's own
+ * resolver answers, which on a filtered connection is exactly the wrong answer
+ * and would break a tunnel that works today.
+ *
+ * The patterniha fork does not use Xray's DNS for that bind at all: dialled
+ * directly it asks the OS resolver ("Unable to update bind: lookup <host>: no
+ * such host") and through a chain it hands the bare name to the next hop. There
+ * an address is the only thing that works, so it — and only it — gets one.
+ */
+function needsWgEndpointIp(engineId) {
+  return engineId === 'xray-pattn';
+}
+
+module.exports = { chooseEngine, planServers, testEngineFor, needsWgEndpointIp };
