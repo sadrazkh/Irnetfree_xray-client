@@ -106,7 +106,9 @@ function cleanList(list) {
  * Which in-country resolver set a plan needs, if any: 'ir' | 'cn' | null.
  * Simple modes follow routingMode; advanced routing needs one only when a
  * domain rule sends the matching geosite list DIRECT (a rule that sends
- * category-ir through a config wants the exit's view of DNS, not Iran's).
+ * category-ir through a config wants the exit's view of DNS, not Iran's) —
+ * or when the plan applies a simple routing mode on top (`advancedUseMode`),
+ * in which case it wants exactly what that mode wants.
  */
 function directRegion(s) {
   if (s.advancedRouting) {
@@ -117,7 +119,8 @@ function directRegion(s) {
       if (v.includes('geosite:category-ir')) return 'ir';
       if (v.includes('geosite:cn')) region = region || 'cn';
     }
-    return region;
+    if (region || !s.advancedUseMode) return region;
+    // else fall through to the routing mode the plan also applies
   }
   if (s.routingMode === 'bypass-ir') return 'ir';
   if (s.routingMode === 'bypass-cn') return 'cn';
