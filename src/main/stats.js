@@ -43,6 +43,9 @@ class StatsPoller {
     this.binPath = opts.binPath;
     this.apiPort = opts.apiPort || 10085;
     this.onStats = opts.onStats || (() => {});
+    // the whole parsed body, for callers that need per-outbound counters and
+    // not just the sum (see SilenceWatch)
+    this.onRaw = opts.onRaw || (() => {});
     this.timer = null;
     this.last = { up: 0, down: 0, t: 0 };
     this.totals = { up: 0, down: 0 };
@@ -63,7 +66,10 @@ class StatsPoller {
         res.setEncoding('utf8');
         res.on('data', (c) => { body += c; });
         res.on('end', () => {
-          try { resolve(sumOutbounds(JSON.parse(body))); } catch { resolve(null); }
+          let parsed;
+          try { parsed = JSON.parse(body); } catch { return resolve(null); }
+          try { this.onRaw(parsed); } catch { /* a watcher must never stop the meter */ }
+          resolve(sumOutbounds(parsed));
         });
       });
       req.on('error', () => resolve(null));
@@ -100,4 +106,47 @@ class StatsPoller {
   }
 }
 
-module.exports = { StatsPoller, sumOutbounds };
+/**
+ * Watches named outbounds for the one failure the core will not report at the
+ * default log level: bytes go out and nothing ever comes back.
+ *
+ * A WireGuard whose handshake never completes looks exactly like that — the
+ * core writes a handshake initiation every five seconds and the downlink stays
+ * at zero — and the only line it prints about it is [Debug]. To the user the
+ * tunnel is simply "not working" while every other route is fine, which is
+ * indistinguishable from a routing mistake and gets reported as one.
+ *
+ * Deliberately conservative: a tag must have sent a real amount and received
+ * NOTHING AT ALL, for several consecutive ticks, and it is named once — a
+ * tunnel that answers even one byte is working as far as this is concerned.
+ */
+class SilenceWatch {
+  /**
+   * @param {string[]} tags        outbound tags to watch
+   * @param {object} [opts]        { minUp: bytes before judging, ticks: consecutive observations }
+   */
+  constructor(tags, opts = {}) {
+    this.tags = new Set(tags || []);
+    this.minUp = opts.minUp == null ? 4096 : opts.minUp;
+    this.ticks = opts.ticks == null ? 3 : opts.ticks;
+    this.runs = new Map();      // tag → consecutive silent observations
+    this.reported = new Set();
+  }
+
+  /** Tags that have just crossed the threshold. Each is returned at most once. */
+  check(vars) {
+    const out = (vars && vars.stats && vars.stats.outbound) || {};
+    const hit = [];
+    for (const tag of this.tags) {
+      const c = out[tag];
+      if (!c) continue;
+      if (num(c.downlink) > 0 || num(c.uplink) < this.minUp) { this.runs.set(tag, 0); continue; }
+      const n = (this.runs.get(tag) || 0) + 1;
+      this.runs.set(tag, n);
+      if (n >= this.ticks && !this.reported.has(tag)) { this.reported.add(tag); hit.push(tag); }
+    }
+    return hit;
+  }
+}
+
+module.exports = { StatsPoller, sumOutbounds, SilenceWatch };

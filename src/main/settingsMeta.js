@@ -28,7 +28,7 @@ const RECONNECT_KEYS = [
   'dnsManaged', 'dnsRemote', 'dnsDirect', 'ipv6', 'logLevel', 'enableSniffing',
   // routing
   'routingMode', 'blockAds', 'customRules',
-  'advancedRouting', 'routeRules', 'routeDefault', 'procRouteWatch',
+  'advancedRouting', 'advancedUseMode', 'routeRules', 'routeDefault', 'procRouteWatch',
   // connect-time side effects
   'systemProxy', 'tunMode',
   // which TUN backend runs, how hard the leak guard holds, the proxy-mode UDP

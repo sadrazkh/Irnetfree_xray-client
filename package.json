@@ -14,6 +14,7 @@
     "server": "node src/server/server.js",
     "get-xray": "node scripts/download-xray.js",
     "validate": "node scripts/validate-configs.js",
+    "probe:wg": "node scripts/probe-wg-chain.js",
     "selfcheck:mac": "bash scripts/mac-selfcheck.sh",
     "gen-icons": "node scripts/gen-icons.js",
     "dist": "electron-builder",

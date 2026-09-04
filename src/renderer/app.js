@@ -324,9 +324,13 @@ function updateGuardRows() {
     // "direct" route is exactly that. Say so where the two are chosen, not in a
     // log line the user reads after their bank stops loading.
     const s = state.settings || {};
+    const modeBypasses = ['bypass-ir', 'bypass-cn', 'direct'].includes(s.routingMode || 'global');
     const bypasses = s.advancedRouting
-      ? (s.routeRules || []).some(r => r && r.target === 'direct') || s.routeDefault === 'direct'
-      : ['bypass-ir', 'bypass-cn', 'direct'].includes(s.routingMode || 'global');
+      // an advanced plan can send traffic direct through its own rules, and —
+      // since v0.15 — through the routing mode it applies underneath them
+      ? (s.routeRules || []).some(r => r && r.target === 'direct') || s.routeDefault === 'direct' ||
+        (!!s.advancedUseMode && modeBypasses)
+      : modeBypasses;
     $('#guardStrictRouting').hidden = !(tunOn && $('#optLeakGuard').value === 'strict' && bypasses);
   }
   const udpRow = $('#udpBlockRow');
@@ -521,6 +525,7 @@ $$('#routingSeg .seg-btn').forEach(btn => {
     btn.classList.add('active');
     await saveSettings({ routingMode: btn.dataset.mode });
     updateGuardRows();   // whether the strict guard now contradicts the routing
+    renderAdvanced();    // the advanced card names the mode it applies
     toast(t('t.routingMode') + ': ' + btn.textContent, 'ok');
   };
 });
@@ -2682,6 +2687,20 @@ function renderAdvanced() {
 
   optAdv.checked = !!state.settings.advancedRouting;
   if (body) body.hidden = !state.settings.advancedRouting;
+
+  // "…and apply the routing mode too": show which mode that currently is, so
+  // the switch is not a promise the user has to go and verify somewhere else.
+  const useMode = $('#optAdvUseMode');
+  if (useMode) {
+    useMode.checked = !!state.settings.advancedUseMode;
+    const now = $('#advUseModeNow');
+    if (now) {
+      const mode = state.settings.routingMode || 'global';
+      const btn = document.querySelector(`#routingSeg .seg-btn[data-mode="${mode}"]`);
+      now.hidden = !useMode.checked;
+      now.textContent = t('adv.useMode.now').replace('{mode}', (btn && btn.textContent.trim()) || mode);
+    }
+  }
   // custom rules only apply to the simple modes (configBuilder ignores them under
   // advanced routing) — don't show an editor for something that has no effect
   const simple = $('#simpleRulesCard');
@@ -2775,6 +2794,15 @@ $('#optAdvanced').onchange = async () => {
   toast(on ? t('t.advOn') : t('t.advOff'), 'ok');
 };
 
+// Saved on its own rather than with the Save button: it changes nothing about
+// the rules, and leaving it pending would make the mode note lie about what the
+// next connect will do.
+$('#optAdvUseMode').onchange = async () => {
+  await saveSettings({ advancedUseMode: $('#optAdvUseMode').checked });
+  updateGuardRows();   // a country bypass under the rules is a direct route too
+  renderAdvanced();
+};
+
 $('#btnAddRule').onclick = () => {
   const rules = state.settings.routeRules || (state.settings.routeRules = []);
   const firstTarget = (state.servers[0] && state.servers[0].id) || 'direct';
@@ -2821,7 +2849,11 @@ $('#btnSaveAdv').onclick = async () => {
     .map(r => ({ type: r.type, value: (r.value || '').trim(), target: r.target }))
     .filter(r => r.value && r.target);
   const routeDefault = advDefaultSel ? advDefaultSel.getValue() : (state.settings.routeDefault || 'direct');
-  await saveSettings({ routeRules: rules, routeDefault, advancedRouting: $('#optAdvanced').checked });
+  await saveSettings({
+    routeRules: rules, routeDefault,
+    advancedRouting: $('#optAdvanced').checked,
+    advancedUseMode: $('#optAdvUseMode').checked
+  });
   state.settings.routeRules = rules;
   updateGuardRows();   // a `direct` target here contradicts the strict guard too
   renderAdvanced();

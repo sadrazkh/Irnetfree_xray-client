@@ -114,6 +114,22 @@ test('advanced: geosite:cn → direct brings the Chinese resolver; other geosite
   assert.equal(typeof notDirect.dns.servers[0], 'string', 'only direct targets need an in-country answer');
 });
 
+test('advanced + advancedUseMode: the routing mode brings its in-country resolver', () => {
+  const p = buildDnsPlan(base({
+    advancedRouting: true, advancedUseMode: true, routingMode: 'bypass-ir',
+    routeRules: [{ type: 'ip', value: '10.20.0.0/16', target: 'out-sv-a' }]
+  }), opts({ exitTag: 'out-sv-a' }));
+  assert.equal(p.dns.servers[0].address, '178.22.122.100');
+});
+
+test('advanced without advancedUseMode still ignores the routing mode', () => {
+  const p = buildDnsPlan(base({
+    advancedRouting: true, routingMode: 'bypass-ir',
+    routeRules: [{ type: 'ip', value: '10.20.0.0/16', target: 'out-sv-a' }]
+  }), opts({ exitTag: 'out-sv-a' }));
+  assert.equal(typeof p.dns.servers[0], 'string', 'no in-country resolver was asked for');
+});
+
 /* ----------------------------- resolver shapes ----------------------------- */
 
 test('a DoH direct resolver is not routable by IP: no direct rule for it, no hijack loop', () => {
