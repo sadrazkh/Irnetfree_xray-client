@@ -9,6 +9,22 @@ const I18N = {
     'nav.home': 'اتصال', 'nav.servers': 'سرورها', 'nav.subs': 'ساب‌ها',
     'nav.chain': 'زنجیره', 'nav.routing': 'روتینگ', 'nav.settings': 'تنظیمات', 'nav.logs': 'لاگ‌ها',
     'tb.min': 'کوچک', 'tb.hide': 'مخفی', 'tb.close': 'بستن',
+    'tb.online': 'ONLINE', 'tb.offline': 'OFFLINE', 'tb.wait': 'LINKING',
+    'ui.modeHint': 'بین نمای ساده و حرفه‌ای جابه‌جا شو',
+    'ui.simple': 'ساده', 'ui.advanced': 'حرفه‌ای',
+    'ui.toSimple': 'نمای ساده — بخش‌های حرفه‌ای پنهان شدند (هیچ‌کدام برای وصل‌شدن لازم نیستند)',
+    'ui.toAdvanced': 'نمای حرفه‌ای — همه‌چیز پیداست',
+
+    'path.title': 'مسیر ترافیک', 'path.live': 'لاگ زنده',
+    'path.device': 'این دستگاه', 'path.internet': 'اینترنت',
+    'path.noServer': 'سروری انتخاب نشده', 'path.offline': 'قطع',
+    'path.rest': 'بقیهٔ ترافیک', 'path.direct': 'مستقیم', 'path.block': 'بلاک',
+    'path.rules': '{n} قانون', 'path.andMore': '+{n} قانون دیگر',
+
+    'ins.title': 'اینسپکتور', 'ins.protection': 'محافظت', 'ins.ports': 'پورت‌های محلی',
+    'ins.tun': 'تانل TUN', 'ins.kill': 'کیل‌سوییچ', 'ins.guard': 'محافظ نشتی',
+    'ins.ipv6': 'IPv6', 'ins.core': 'هسته', 'ins.routing': 'روتینگ',
+    'ins.on': 'روشن', 'ins.off': 'خاموش',
 
     'pill.connected': 'متصل', 'pill.disconnected': 'قطع', 'pill.connecting': 'اتصال…', 'pill.error': 'خطا',
     'state.connected': 'متصل', 'state.disconnected': 'قطع شده',
@@ -16,6 +32,9 @@ const I18N = {
     'conn.noServer': 'سروری انتخاب نشده',
 
     'stat.tcp': 'پینگ TCP', 'stat.real': 'تأخیر واقعی', 'stat.ip': 'IP خروجی',
+    'stat.down': 'دانلود', 'stat.up': 'آپلود',
+    'routing.base': 'پایه', 'routing.filters': 'فیلترها',
+    'routing.baseNote': 'قانون‌های سفارشی روی این پایه سوار می‌شوند',
     'geo.unknown': 'موقعیت نامشخص',
 
     'traffic.down': 'دانلود', 'traffic.up': 'آپلود',
@@ -354,6 +373,22 @@ const I18N = {
     'nav.home': 'Connect', 'nav.servers': 'Servers', 'nav.subs': 'Subs',
     'nav.chain': 'Chain', 'nav.routing': 'Routing', 'nav.settings': 'Settings', 'nav.logs': 'Logs',
     'tb.min': 'Minimize', 'tb.hide': 'Hide', 'tb.close': 'Close',
+    'tb.online': 'ONLINE', 'tb.offline': 'OFFLINE', 'tb.wait': 'LINKING',
+    'ui.modeHint': 'Switch between the simple and the advanced view',
+    'ui.simple': 'SIMPLE', 'ui.advanced': 'ADVANCED',
+    'ui.toSimple': 'Simple view — the professional surfaces are hidden (none of them is needed to connect)',
+    'ui.toAdvanced': 'Advanced view — everything is visible',
+
+    'path.title': 'Traffic path', 'path.live': 'Live log',
+    'path.device': 'This device', 'path.internet': 'Internet',
+    'path.noServer': 'No server selected', 'path.offline': 'Offline',
+    'path.rest': 'Everything else', 'path.direct': 'Direct', 'path.block': 'Blocked',
+    'path.rules': '{n} rules', 'path.andMore': '+{n} more',
+
+    'ins.title': 'Inspector', 'ins.protection': 'Protection', 'ins.ports': 'Local ports',
+    'ins.tun': 'TUN tunnel', 'ins.kill': 'Kill switch', 'ins.guard': 'Leak guard',
+    'ins.ipv6': 'IPv6', 'ins.core': 'Core', 'ins.routing': 'Routing',
+    'ins.on': 'on', 'ins.off': 'off',
 
     'pill.connected': 'Connected', 'pill.disconnected': 'Off', 'pill.connecting': 'Connecting…', 'pill.error': 'Error',
     'state.connected': 'Connected', 'state.disconnected': 'Disconnected',
@@ -361,6 +396,9 @@ const I18N = {
     'conn.noServer': 'No server selected',
 
     'stat.tcp': 'TCP ping', 'stat.real': 'Real delay', 'stat.ip': 'Egress IP',
+    'stat.down': 'Download', 'stat.up': 'Upload',
+    'routing.base': 'Base', 'routing.filters': 'Filters',
+    'routing.baseNote': 'Custom rules stack on top of this base',
     'geo.unknown': 'Unknown location',
 
     'traffic.down': 'Download', 'traffic.up': 'Upload',

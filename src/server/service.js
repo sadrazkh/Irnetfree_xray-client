@@ -80,6 +80,10 @@ const DEFAULT_SETTINGS = {
   // recover automatically when the machine's network changes (read live, so it
   // needs no reconnect to take effect)
   autoReconnectOnNetworkChange: true,
+  // which surfaces the window shows: 'simple' hides chains, the pool, the log
+  // page and the custom-rule editor. A view preference only — renderer-owned,
+  // never baked into a config, so it needs no reconnect.
+  uiMode: '',
   theme: 'dark',
   defaultEngine: 'xray',
   lang: 'fa'
