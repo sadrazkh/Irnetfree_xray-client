@@ -224,9 +224,21 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
   min-width: 30px;
   text-align: end;
   direction: ltr;
-  color: var(--ink3);
 }
-.traffic-ico, .stat-group, .stat, .mode-card-caret { display: none; }
+/* the RESTING colour only. :where() holds it at zero specificity so the
+   quality classes applyPingDisplays adds — .ping-good / .ping-mid / .ping-bad
+   — still win; declared plainly here they would out-rank them, because this
+   sheet loads after the one that defines them. */
+:where(.stat-v) { color: var(--ink3); }
+/* The home readouts do not want the old decorations. SCOPED TO THIS VIEW:
+   `.stat-group` / `.stat` are also what renderServers builds the three-value
+   ping group from in every server row, and hiding those globally is what made
+   the servers list show no latency at all — the numbers were measured and then
+   painted invisible. */
+#view-home .traffic-ico,
+#view-home .stat-group,
+#view-home .stat,
+#view-home .mode-card-caret { display: none; }
 .session-card {
   grid-column: 1 / -1;
   padding: 15px 17px;
@@ -341,7 +353,8 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
 .picker-item.selected .pi-name { color: var(--accentInk); }
 .picker-special .pi-name { color: var(--info); }
 .pi-name { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pi-ping { font-family: var(--mono); font-size: 12px; font-weight: 700; min-width: 46px; text-align: center; direction: ltr; color: var(--ink3); }
+.pi-ping { font-family: var(--mono); font-size: 12px; font-weight: 700; min-width: 46px; text-align: center; direction: ltr; }
+:where(.pi-ping) { color: var(--ink3); }   /* resting only — see .stat-v above */
 .pi-ping-btn { padding: 3px 5px; font-size: 12px; }
 .pi-ping-ico { font-size: 12px; }
 
