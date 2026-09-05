@@ -1,0 +1,285 @@
+/* =========================================================================
+   IRNetFree — lists
+
+   Part of the renderer stylesheet, split by surface so several people (or
+   agents) can work on different screens without editing the same file.
+   styles.css owns the tokens, the shell and the shared primitives; this
+   file owns only the servers, subscriptions, chain-builder and proxy-pool screens.
+
+   The two house rules still apply: LOGICAL PROPERTIES ONLY (the app runs
+   RTL in Persian) and TOKENS ONLY (no literal colours — the skin picks
+   them, see skins.css).
+
+   ONE SPACING SCALE. Four screens, one rhythm: every gap and every pad below
+   is one of these numbers, and each number means the same thing wherever it
+   appears.
+
+      4   between the buttons of one icon cluster
+      6   between the lines of one stack; between a label and the control it names
+      8   between the parts of one chip (badge · name · ✕); between form buttons
+     10   between the siblings of a set: rows of a list, nodes of a chain
+     12   between the regions of a row (text ↔ readings ↔ actions)
+     14   block padding of a list row; a card's head above its rule
+     16   inline padding of a list row; a card's rule below its head; card to
+          card; two blocks sharing one line of a card
+     18   inside a card: its padding, and one block of it away from the next
+
+   Two consequences worth stating: a row is a set of targets rather than a line
+   of text, so every action cluster in one is at least 30px tall and never
+   closer than 12px to the text beside it; and the two lines of a row's text
+   stack get a real 1.5 line-height, so a name and an address never touch.
+   ========================================================================= */
+
+/* ----------------------------- shared by the four screens ----------------------------- */
+
+/* An icon cluster in a row is a set of targets, not a row of glyphs. .icon-btn
+   is 28px on its own padding; these give it a 30px square without adding a
+   pixel to the row, because the text stack beside it is taller than that. */
+.srv-actions .icon-btn,
+.sub-actions .icon-btn,
+.chain-card-actions .icon-btn,
+.pool-card-head .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+}
+
+/* The quality dot that opens a server row (and a picker row): colour is its
+   whole message — applyPingDisplays rewrites the class to ping-good/mid/bad
+   and nothing else. The resting grey is declared at zero specificity so those
+   classes, which live in styles.css and land first, still win. */
+.q-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r1);
+  background: currentColor;
+}
+:where(.q-dot) { color: var(--dim); }
+
+/* The chain builder and the pool are the same kind of screen — a .card with a
+   modifier, opening on a head band over a hairline — so they are spaced by one
+   rule rather than by two that drift. The head's numbers are measured against
+   the card's own 18px: 14 above the rule, 16 below it. */
+.chain-card, .pool-card { padding: 18px; margin-block-end: 16px; }
+.chain-card-head, .pool-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  row-gap: 10px;
+  flex-wrap: wrap;
+  padding-block-end: 14px;
+  margin-block-end: 16px;
+  border-block-end: 1px solid var(--line);
+}
+
+/* ----------------------------- servers ----------------------------- */
+
+.server-list { display: flex; flex-direction: column; gap: 10px; }
+.server-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+  /* The leading edge carries STATE, not decoration: transparent at rest, so a
+     list of servers is a list of plain cards, and accent only on the active
+     one. Reserving the width keeps the row from shifting when it lights up. */
+  border-inline-start: 3px solid transparent;
+  transition: background 140ms ease-out, border-color 140ms ease-out;
+}
+.server-card:hover { background: var(--soft); }
+.server-card.active { border-inline-start-color: var(--accent); background: var(--accentSoft); }
+.srv-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; line-height: 1.5; }
+.srv-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srv-addr { font-size: 11px; color: var(--ink3); direction: ltr; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* measured values in list rows: fixed columns so a row never reflows when a
+   result lands, and never collapses while it reads "…" */
+.srv-ping { font-family: var(--mono); font-size: 12px; font-weight: 700; min-width: 62px; text-align: center; direction: ltr; }
+.srv-actions { display: flex; align-items: center; gap: 4px; }
+.sel-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: var(--accent);
+  text-transform: uppercase;
+  margin-inline-start: 6px;
+  white-space: nowrap;
+}
+/* the add / import / WireGuard / proxy forms: a panel of their own, so a form
+   that drops open is a box and not a stack of controls loose above the list */
+.import-box {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  margin-block-end: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+}
+.import-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.import-hint { font-size: 11px; color: var(--dim); line-height: 1.6; }
+/* a titled rule between two groups of the edit modal. The 6 rides on the modal
+   body's own 12px gap to make the 18 that separates blocks of a card. */
+.edit-section {
+  margin-block-start: 6px;
+  padding-block-start: 14px;
+  border-block-start: 1px solid var(--line);
+  font-weight: 600;
+  color: var(--ink2);
+}
+.qr-body { display: grid; place-items: center; gap: 12px; padding: 18px; }
+.qr-body .hint { margin: 0; text-align: center; }
+/* A QR has to read as black on white to scan at all — these two literals are
+   the code itself, not theme colours, and stay put in every skin. */
+.qr-image { width: 232px; height: 232px; background: #fff; padding: 12px; border-radius: var(--r4); }
+
+/* ----------------------------- subscriptions ----------------------------- */
+
+.sub-list { display: flex; flex-direction: column; gap: 10px; }
+.sub-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+}
+.sub-ico { font-size: 17px; line-height: 1; color: var(--ink3); }
+.sub-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; line-height: 1.5; }
+.sub-name { font-size: 13px; font-weight: 600; }
+.sub-url { font-size: 11px; color: var(--ink3); direction: ltr; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub-meta { font-size: 11px; color: var(--dim); }
+.sub-actions { display: flex; align-items: center; gap: 4px; }
+/* the meters are a region of the row, not another line of it: 6 of their own on
+   top of the stack's 6 is the 12 that separates regions everywhere else */
+.sub-usage { display: flex; flex-direction: column; gap: 6px; margin-block-start: 6px; }
+.sub-usage-row { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--ink3); font-family: var(--mono); }
+.usage-bar { height: 4px; background: var(--line); border-radius: var(--r1); overflow: hidden; }
+.usage-fill { height: 100%; background: var(--accent); border-radius: var(--r1); }
+/* the auto-update strip: a switch and an interval on one line of the card */
+.auto-update-card { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.auto-update-card .switch-row { flex: 1 1 320px; min-width: 0; padding-block: 0; border-block-end: 0; }
+.auto-update-card .inline-field .field-label { margin-block-end: 0; white-space: nowrap; }
+.auto-update-card .inline-field .input { width: 96px; }
+.update-status { font-size: 11px; line-height: 1.6; }
+:where(.update-status) { color: var(--ink3); }
+
+/* ----------------------------- chain ----------------------------- */
+
+.chain-name { flex: 1 1 200px; min-width: 0; font-size: 13px; font-weight: 600; }
+.chain-card-actions { display: flex; align-items: center; gap: 4px; }
+/* client → [nodes] → internet. A node and the arrow beside it are siblings of
+   one set wherever they sit, so the stage and the nodes inside it space alike. */
+.chain-flow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* a basis rather than 0 so that on a narrow window the whole stage drops to its
+   own line instead of being squeezed into the space client/internet leave */
+.chain-nodes { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 1 1 240px; min-width: 0; }
+/* an empty stage is a slot waiting for a node, not a missing paragraph */
+.chain-nodes-empty, .chain-empty {
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  border: 1px dashed var(--softline);
+  border-radius: var(--r5);
+}
+.chain-nodes-empty { flex: 1; min-width: 0; text-align: center; }
+/* The stage is built of one chip. The fixed ends (client, internet) are a plain
+   panel; the members you can drag are recessed into --soft and say so with the
+   cursor. app.js gives a member BOTH classes, so .chain-node has to come after
+   .flow-node here or the two read identically. */
+.flow-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r5);
+  font-size: 12px;
+}
+.chain-node {
+  background: var(--soft);
+  border-color: var(--softline);
+  cursor: grab;
+  user-select: none;
+  transition: background 140ms ease-out, border-color 140ms ease-out, opacity 140ms ease-out;
+}
+.chain-node:hover { border-color: var(--dim); }
+.chain-node:active { cursor: grabbing; }
+.chain-node.dragging { opacity: .4; border-color: var(--accent); cursor: grabbing; }
+.cn-name { font-size: 12px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  color: var(--ink3);
+  font-size: 13px;
+  line-height: 1;
+  background: none;
+  border: 0;
+  border-radius: var(--r2);
+  cursor: pointer;
+}
+.cn-remove:hover { color: var(--danger); background: var(--dangerSoft); }
+.flow-arrow, .adv-arrow { color: var(--dim); font-size: 13px; }
+/* "available servers": its own block under the flow, with the label far enough
+   below the stage that the two never read as one list */
+.chain-card > .field-label { margin-block-start: 18px; margin-block-end: 6px; }
+.chain-pool-search { max-width: 260px; margin-block-end: 10px; }
+.chain-pool { display: flex; flex-direction: column; gap: 10px; }
+.chain-pings { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.chain-ping + .pi-ping-ico { margin-inline-start: 6px; }
+.chain-ping { font-family: var(--mono); font-size: 12px; font-weight: 700; min-width: 44px; text-align: center; direction: ltr; }
+:where(.chain-ping) { color: var(--ink3); }
+.chain-min { font-family: var(--mono); font-size: 12px; font-weight: 600; line-height: 1.6; margin-block-start: 12px; }
+:where(.chain-min) { color: var(--accentInk); }
+.chain-min:empty { display: none; }
+.ch-connect, .ch-del { font-size: 12px; }
+
+/* ----------------------------- pool ----------------------------- */
+
+/* three fields on one line while they fit, a stack when they do not */
+.pool-card-body { display: flex; flex-wrap: wrap; gap: 12px 16px; }
+.pool-item { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* the same class is a clickable row in the chain builder's "available servers" */
+button.pool-item {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-radius: var(--r4);
+  text-align: start;
+  font-size: 12px;
+  transition: background 140ms ease-out, border-color 140ms ease-out;
+}
+button.pool-item:hover { border-color: var(--accentLine); background: var(--panel); }
+.pool-name { flex: 1 1 160px; min-width: 0; }
+.pool-field { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* a field-label is a block label everywhere else; on one of these lines it sits
+   beside its control, so its bottom margin would push it half a line up */
+.pool-field .field-label { margin-block-end: 0; white-space: nowrap; }
+.pool-field .input { flex: 0 0 96px; width: 96px; }
+.pool-target-field { flex: 1 1 240px; min-width: 0; }
+/* the target is a searchable select, which is inline-block and 150px wide by
+   itself; in this row it takes the line and ellipsises rather than overflow */
+.pool-target-mount { flex: 1 1 auto; min-width: 0; }
+.pool-target-mount .ss { display: block; width: 100%; min-width: 0; }
+.pool-enable-sw { flex: 0 0 auto; }
+.pool-add { font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--ink3); }
+button.pool-item:hover .pool-add { color: var(--accent); }
+.pool-del { color: var(--ink3); }
+.pool-warn { font-size: 11px; color: var(--warn); line-height: 1.6; margin-block-start: 12px; }
+.pool-warn:empty { display: none; }

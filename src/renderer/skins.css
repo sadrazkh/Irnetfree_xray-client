@@ -1,0 +1,252 @@
+/* =========================================================================
+   IRNetFree — skins
+
+   Three looks over ONE layout. A skin may re-declare tokens and a small set of
+   shape rules (rail width, corner radii, the shape of a switch or the connect
+   button); it may not change structure, because every screen and every hook in
+   app.js is shared. Chosen in Settings; `data-skin` lives on <html> next to
+   `data-theme`, and the default — no attribute — is Cockpit.
+
+     cockpit  the instrument panel (default; its tokens live in styles.css)
+     console  1a: signal teal, a labelled rail, pill switches, a round dial
+     legacy   the look the app had up to v0.15.0
+
+   Each skin declares BOTH themes. Light is never an inversion of dark: its
+   accent is darkened so 12px text on white still clears 4.5:1.
+   ========================================================================= */
+
+/* ------------------------------- console (1a) ------------------------------- */
+
+[data-skin="console"] {
+  --bg: #0e1013;
+  --chrome: #12151a;
+  --rail: #0b0d10;
+  --panel: #14181d;
+  --log: #0b0d10;
+  --line: #21262c;
+  --soft: #1b2026;
+  --softline: #2a3037;
+  --ink: #f3f5f7;
+  --ink2: #9aa1a9;
+  --ink3: #7d848c;
+  --dim: #666d75;
+  --accent: #2fd6bf;
+  --accentInk: #8ee9dc;
+  --onAccent: #05201c;
+  --accentSoft: rgba(47, 214, 191, .12);
+  --accentLine: rgba(47, 214, 191, .34);
+  --ok: #2fd6bf;
+  --info: #7fb4ff;
+  --warn: #e0b060;
+  --danger: #ff6b6b;
+  --okSoft: rgba(47, 214, 191, .12);
+  --dangerSoft: rgba(255, 107, 107, .13);
+  --shadow: 0 24px 60px rgba(0, 0, 0, .45);
+  /* softer corners than the cockpit's instrument edges */
+  --r1: 3px; --r2: 5px; --r3: 6px; --r4: 7px; --r5: 8px; --r6: 10px;
+  --railw: 96px;
+}
+
+[data-skin="console"][data-theme="light"] {
+  --bg: #f7f9fa;
+  --chrome: #eef1f4;
+  --rail: #e8ecef;
+  --panel: #ffffff;
+  --log: #eef1f4;
+  --line: #dde3e8;
+  --soft: #eff2f5;
+  --softline: #d3dae0;
+  --ink: #111820;
+  --ink2: #57616b;
+  --ink3: #6d777f;
+  --dim: #8a939b;
+  --accent: #0f8478;
+  --accentInk: #0b6b61;
+  --onAccent: #ffffff;
+  --accentSoft: rgba(15, 132, 120, .10);
+  --accentLine: rgba(15, 132, 120, .30);
+  --ok: #0f8478;
+  --info: #2a63b8;
+  --warn: #7d5510;   /* darkened: 12px log text on --log needs >= 4.5:1 */
+  --danger: #c0392b;
+  --okSoft: rgba(15, 132, 120, .10);
+  --dangerSoft: rgba(192, 57, 43, .10);
+  --shadow: 0 20px 46px rgba(20, 30, 40, .14);
+}
+
+/* a full-width accent strip above the window — 1a's status signal */
+[data-skin="console"] body::before {
+  content: "";
+  position: fixed;
+  inset-block-start: 0;
+  inset-inline: 0;
+  height: 6px;
+  z-index: 300;
+  background: linear-gradient(90deg, var(--accent), var(--info));
+  pointer-events: none;
+}
+/* the strip sits inside the bar, so the bar — and the layout token that
+   sizes everything below it — grow by exactly its height */
+[data-skin="console"] { --tbh: 52px; }
+[data-skin="console"] .titlebar { padding-block-start: 6px; }
+
+/* the rail carries its labels again */
+[data-skin="console"] .sidebar { align-items: stretch; padding-inline: 8px; }
+[data-skin="console"] .nav-item {
+  width: auto;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-block: 11px;
+}
+[data-skin="console"] .nav-item > span:not(.nav-ico) {
+  position: static;
+  width: auto;
+  height: auto;
+  clip-path: none;
+  font-size: 11px;
+  font-weight: 500;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+[data-skin="console"] .nav-item.active > span:not(.nav-ico) { font-weight: 600; }
+[data-skin="console"] .conn-pill { writing-mode: horizontal-tb; }
+
+/* a dial, not a key */
+[data-skin="console"] .power-btn {
+  width: 168px;
+  height: 168px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--accentLine);
+  color: var(--accent);
+  box-shadow: 0 0 0 10px var(--accentSoft);
+}
+[data-skin="console"] .power-btn.connected { background: var(--accent); color: var(--onAccent); }
+[data-skin="console"] .connect-panel { flex-basis: 260px; }
+
+/* pill switches */
+[data-skin="console"] .switch { width: 40px; height: 22px; flex-basis: 40px; }
+[data-skin="console"] .slider { border-radius: 11px; }
+[data-skin="console"] .slider::before { width: 18px; height: 18px; border-radius: 50%; }
+[data-skin="console"] .switch input:checked + .slider::before { inset-inline-start: 20px; }
+
+/* square dots become round */
+[data-skin="console"] .tb-dot,
+[data-skin="console"] .comp-dot,
+[data-skin="console"] .files-dot,
+[data-skin="console"] .conn-pill .dot { border-radius: 50%; }
+
+/* --------------------------- legacy (up to v0.15.0) --------------------------- */
+
+[data-skin="legacy"] {
+  --bg: #0d1117;
+  --chrome: #131a23;
+  --rail: #131a23;
+  --panel: #161d27;
+  --log: #0b1017;
+  --line: #232c38;
+  --soft: #1b2430;
+  --softline: #2b3644;
+  --ink: #e6edf3;
+  --ink2: #aeb9c5;
+  --ink3: #8b97a5;
+  --dim: #6d7987;
+  --accent: #4f8cff;
+  --accentInk: #8fb6ff;
+  --onAccent: #06111f;
+  --accentSoft: rgba(79, 140, 255, .13);
+  --accentLine: rgba(79, 140, 255, .34);
+  --ok: #2dd4bf;
+  --info: #4f8cff;
+  --warn: #eab308;
+  --danger: #f87171;
+  --okSoft: rgba(45, 212, 191, .13);
+  --dangerSoft: rgba(248, 113, 113, .13);
+  --shadow: 0 18px 44px rgba(0, 0, 0, .5);
+  /* the old look was round */
+  --r1: 4px; --r2: 6px; --r3: 8px; --r4: 10px; --r5: 12px; --r6: 14px;
+  --railw: 96px;
+}
+
+[data-skin="legacy"][data-theme="light"] {
+  --bg: #f6f8fa;
+  --chrome: #ffffff;
+  --rail: #ffffff;
+  --panel: #ffffff;
+  --log: #f0f3f6;
+  --line: #d8dee6;
+  --soft: #eef2f6;
+  --softline: #cdd6e0;
+  --ink: #1b2430;
+  --ink2: #47535f;
+  --ink3: #5f6b78;
+  --dim: #8a949f;
+  --accent: #2f6fe4;
+  --accentInk: #24559f;
+  --onAccent: #ffffff;
+  --accentSoft: rgba(47, 111, 228, .10);
+  --accentLine: rgba(47, 111, 228, .30);
+  --ok: #0f766e;
+  --info: #2f6fe4;
+  --warn: #745b0c;   /* darkened: 12px log text on --log needs >= 4.5:1 */
+  --danger: #c0392b;
+  --okSoft: rgba(15, 118, 110, .12);
+  --dangerSoft: rgba(192, 57, 43, .10);
+  --shadow: 0 16px 40px rgba(20, 30, 40, .12);
+}
+
+/* the old sidebar: wide, labelled, icon beside the text */
+[data-skin="legacy"] .sidebar { align-items: stretch; padding-inline: 10px; }
+[data-skin="legacy"] .nav-item {
+  width: auto;
+  height: auto;
+  display: flex;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: var(--r3);
+}
+[data-skin="legacy"] .nav-item > span:not(.nav-ico) {
+  position: static;
+  width: auto;
+  height: auto;
+  clip-path: none;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[data-skin="legacy"] .conn-pill { writing-mode: horizontal-tb; }
+
+/* the round power button the app had for its whole life before v1.0 */
+[data-skin="legacy"] .power-btn {
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--ok));
+  border: 0;
+  color: #fff;
+  box-shadow: 0 10px 30px var(--accentSoft);
+}
+[data-skin="legacy"] .power-btn.connected { background: linear-gradient(135deg, var(--ok), var(--accent)); }
+[data-skin="legacy"] .connect-panel { flex-basis: 250px; }
+
+[data-skin="legacy"] .switch { width: 44px; height: 24px; flex-basis: 44px; }
+[data-skin="legacy"] .slider { border-radius: 12px; }
+[data-skin="legacy"] .slider::before { width: 18px; height: 18px; border-radius: 50%; inset-block-start: 3px; }
+[data-skin="legacy"] .switch input:checked + .slider::before { inset-inline-start: 23px; }
+
+[data-skin="legacy"] .tb-dot,
+[data-skin="legacy"] .comp-dot,
+[data-skin="legacy"] .files-dot,
+[data-skin="legacy"] .conn-pill .dot { border-radius: 50%; }
+
+/* the instrument-panel typographic tics belong to the cockpit only */
+[data-skin="legacy"] .tb-title,
+[data-skin="legacy"] .sec-label,
+[data-skin="legacy"] .base-label,
+[data-skin="legacy"] .session-title { text-transform: none; letter-spacing: 0; font-family: var(--ui); }
+[data-skin="legacy"] .tb-mode { font-family: var(--ui); letter-spacing: 0; }

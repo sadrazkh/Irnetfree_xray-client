@@ -1,0 +1,407 @@
+/* =========================================================================
+   IRNetFree — home screen
+
+   Part of the renderer stylesheet, split by surface so several people (or
+   agents) can work on different screens without editing the same file.
+   styles.css owns the tokens, the shell and the shared primitives; this
+   file owns only the connect screen: the traffic path, the connect panel, the readouts, the live-log tail and the server picker.
+
+   The two house rules still apply: LOGICAL PROPERTIES ONLY (the app runs
+   RTL in Persian) and TOKENS ONLY (no literal colours — the skin picks
+   them, see skins.css).
+   ========================================================================= */
+
+/* ======================= HOME — the cockpit ======================= */
+
+.connect-hero { display: flex; flex-direction: column; gap: 24px; }
+
+/* --- traffic path --------------------------------------------------- */
+
+.path-panel {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 20px 22px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+  overflow-x: auto;
+}
+.path-node {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 13px 17px;
+  min-width: 118px;
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-radius: var(--r6);
+  flex: 0 0 auto;
+}
+.path-node.exit { background: var(--accentSoft); border-color: var(--accentLine); }
+.path-ico { font-size: 20px; line-height: 1; }
+.path-name { font-size: 12px; font-weight: 600; color: var(--ink2); }
+.path-meta { font-family: var(--mono); font-size: 11px; color: var(--ink3); direction: ltr; }
+.path-link {
+  flex: 1 1 60px;
+  min-width: 56px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-inline: 10px;
+}
+.path-link::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--softline);
+}
+.path-link.live::after { background: linear-gradient(90deg, var(--accent), var(--ok)); }
+.path-cap {
+  position: absolute;
+  inset-block-end: calc(50% + 10px);
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink3);
+  white-space: nowrap;
+  direction: ltr;
+}
+/* the rule fan-out: one line per advanced rule, built once (not per tick) */
+.path-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-inline: 14px;
+}
+.path-rule {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 11px;
+  color: var(--ink3);
+  min-width: 0;
+}
+.path-rule .pr-idx {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--dim);
+  flex: 0 0 auto;
+}
+.path-rule .pr-cond {
+  font-family: var(--mono);
+  direction: ltr;
+  color: var(--ink2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.path-rule .pr-arrow { color: var(--dim); flex: 0 0 auto; }
+.path-rule .pr-to {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: var(--r2);
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  color: var(--ink2);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.path-rule .pr-to.to-direct { color: var(--ok); }
+.path-rule .pr-to.to-block { color: var(--danger); }
+.path-rule .pr-to.to-proxy { color: var(--accentInk); border-color: var(--accentLine); background: var(--accentSoft); }
+.path-rule.is-default .pr-cond { color: var(--ink3); font-family: var(--ui); }
+
+/* --- connect panel + readouts --------------------------------------- */
+
+.connect-row { display: flex; gap: 16px; align-items: stretch; flex-wrap: wrap; }
+.connect-panel {
+  flex: 0 0 230px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 22px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+}
+.power-btn {
+  width: 118px; height: 118px;
+  border-radius: var(--r6);
+  border: 1px solid var(--accentLine);
+  background: var(--accent);
+  color: var(--onAccent);
+  display: grid;
+  place-items: center;
+  transition: filter 200ms ease-out, background 200ms ease-out, border-color 200ms ease-out;
+}
+.power-btn:hover { filter: brightness(.94); }
+.power-btn.connected { background: var(--soft); border-color: var(--softline); color: var(--accent); }
+.power-btn.connecting { background: var(--soft); border-color: var(--warn); color: var(--warn); }
+.power-btn.connecting .power-ico { animation: pulse 1.4s ease-in-out infinite; }
+.power-ico { width: 46px; height: 46px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.connect-state { font-size: 13px; font-weight: 700; text-align: center; }
+.connect-meta {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink3);
+  text-align: center;
+  direction: ltr;
+}
+
+.readouts {
+  flex: 1 1 420px;
+  min-width: 280px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+.readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 17px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+  min-width: 0;
+  text-align: start;
+  transition: background 140ms ease-out, border-color 140ms ease-out;
+}
+button.readout:hover { background: var(--soft); border-color: var(--softline); }
+.rd-label { font-size: 12px; font-weight: 500; color: var(--ink3); white-space: nowrap; }
+.rd-val {
+  font-size: 20px;
+  font-weight: 600;
+  direction: ltr;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.rd-sub { font-family: var(--mono); font-size: 11px; color: var(--dim); direction: ltr; }
+.rd-down .rd-val { color: var(--ok); }
+.rd-up .rd-val { color: var(--info); }
+.rd-wide { grid-column: 1 / -1; }
+
+/* The old traffic/stat/session containers keep their classes so nothing that
+   references them breaks. Only the WRAPPERS dissolve, so each card becomes a
+   grid item of .readouts — the cards themselves stay real boxes. */
+.stat-row, .traffic-row { display: contents; }
+.stat-label { font-size: 12px; font-weight: 500; color: var(--ink3); white-space: nowrap; }
+.traffic-total { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-inline-start: 7px; }
+.session-label { font-size: 11px; color: var(--dim); }
+.stat-value, .traffic-speed { font-size: 20px; font-weight: 600; direction: ltr; }
+.session-val { font-weight: 600; direction: ltr; }
+/* NOT a readout: `.stat-v` is the per-config ping value inside a list row
+   (applyPingDisplays resets the class to whatever `data-pbase` says, so this
+   is what a measured latency looks like everywhere it appears). A fixed
+   min-width keeps the column from jumping between "…" and a result. */
+.stat-v {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 30px;
+  text-align: end;
+  direction: ltr;
+  color: var(--ink3);
+}
+.traffic-ico, .stat-group, .stat, .mode-card-caret { display: none; }
+.session-card {
+  grid-column: 1 / -1;
+  padding: 15px 17px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+}
+.session-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink3);
+  margin-bottom: 10px;
+}
+.session-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.session-val { font-family: var(--mono); font-size: 15px; color: var(--ink2); }
+.session-val.sum { color: var(--accentInk); }
+.mode-card { cursor: pointer; }
+.mode { color: var(--accentInk); }
+
+.connect-server, .connect-srv { font-size: 12px; color: var(--ink3); }
+.connect-geo { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink3); }
+.geo-flag { font-size: 15px; }
+.geo-text { color: var(--ink2); }
+
+.hero-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* --- home live log --------------------------------------------------- */
+
+.home-log {
+  padding: 14px 16px;
+  background: var(--log);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 2;
+  color: var(--ink3);
+  direction: ltr;
+  max-height: 132px;
+  overflow: hidden;
+}
+.home-log .ll { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.home-log .lv { color: var(--ok); }
+.home-log .lv.warn { color: var(--warn); }
+.home-log .lv.error { color: var(--danger); }
+
+/* ----------------------------- server picker ----------------------------- */
+
+.picker { position: relative; }
+.picker-current {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+  text-align: start;
+  transition: border-color 140ms ease-out, background 140ms ease-out;
+}
+.picker-current:hover { background: var(--soft); border-color: var(--softline); }
+.picker-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-ping { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--warn); }
+.picker-caret { color: var(--ink3); font-size: 11px; }
+.picker-menu {
+  position: absolute;
+  inset-inline: 0;
+  inset-block-start: calc(100% + 6px);
+  z-index: 40;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--softline);
+  border-radius: var(--r6);
+  box-shadow: var(--shadow);
+  padding: 6px;
+}
+.picker-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px 5px;
+}
+.picker-head-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--dim);
+  flex: 1;
+}
+.picker-pingall { font-size: 11px; }
+.picker-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 0;
+  background: none;
+  border-radius: var(--r4);
+  text-align: start;
+  transition: background 140ms ease-out;
+}
+.picker-item:hover { background: var(--soft); }
+.picker-item.selected { background: var(--accentSoft); }
+.picker-item.selected .pi-name { color: var(--accentInk); }
+.picker-special .pi-name { color: var(--info); }
+.pi-name { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pi-ping { font-family: var(--mono); font-size: 12px; font-weight: 700; min-width: 46px; text-align: center; direction: ltr; color: var(--ink3); }
+.pi-ping-btn { padding: 3px 5px; font-size: 12px; }
+.pi-ping-ico { font-size: 12px; }
+
+/* searchable select (routing targets, chain/pool pickers) */
+.ss { position: relative; display: inline-block; min-width: 150px; }
+.ss-current {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-radius: var(--r4);
+  text-align: start;
+  font-size: 12px;
+  font-weight: 600;
+}
+.ss-current:hover { border-color: var(--dim); }
+.ss-cur-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-caret { color: var(--ink3); font-size: 10px; }
+.ss-menu {
+  position: absolute;
+  inset-inline-start: 0;
+  inset-block-start: calc(100% + 5px);
+  z-index: 50;
+  min-width: 240px;
+  background: var(--panel);
+  border: 1px solid var(--softline);
+  border-radius: var(--r5);
+  box-shadow: var(--shadow);
+  padding: 6px;
+}
+.ss-search { margin-bottom: 6px; }
+.ss-list { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.ss-item {
+  border: 0;
+  background: none;
+  text-align: start;
+  padding: 8px 9px;
+  border-radius: var(--r3);
+  font-size: 12px;
+  color: var(--ink2);
+  transition: background 140ms ease-out;
+}
+.ss-item:hover { background: var(--soft); color: var(--ink); }
+.ss-item.selected { background: var(--accentSoft); color: var(--accentInk); font-weight: 600; }
+.ss-empty { padding: 12px; text-align: center; color: var(--dim); font-size: 11px; }
+
+/* Each hop's own throughput, written by applyPathTraffic on the stats tick.
+   Sits at the end of its row/node so the numbers line up in a column. */
+.pr-traffic {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  direction: ltr;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  padding-inline-start: 10px;
+}
+.path-node .pr-traffic { margin-inline-start: 0; padding-inline-start: 0; }
+.path-rule .pr-cond.is-label { font-family: var(--ui); color: var(--ink3); }
