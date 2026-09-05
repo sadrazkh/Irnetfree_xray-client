@@ -202,3 +202,24 @@ test('version(): a spawn error is final — the timeout can not overwrite it', a
     }
   });
 });
+
+/* --------------- a core that cannot be spawned must not kill us --------------- */
+
+test('startTest rejects when the core cannot be spawned instead of crashing the app', async () => {
+  // Reproduces the real failure: spawn() succeeds as a call, then the child
+  // emits 'error' because the binary is missing or not executable. With no
+  // listener Node re-throws that as an uncaught exception, which took the whole
+  // process down — a latency test against a half-installed core was enough.
+  await withBin([exe('xray')], async (xm) => {
+    const child = stubChild();
+    fakeSpawn = () => child;
+    try {
+      const p = xm.startTest({ inbounds: [], outbounds: [] }, 'xray');
+      const err = Object.assign(new Error('spawn xray ENOENT'), { code: 'ENOENT' });
+      setTimeout(() => child.emit('error', err), 10);
+      await assert.rejects(() => p, /ENOENT/);
+    } finally {
+      fakeSpawn = null;
+    }
+  });
+});

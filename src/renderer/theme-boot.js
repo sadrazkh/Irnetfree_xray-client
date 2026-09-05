@@ -21,5 +21,11 @@
     if (last === 'dark' || last === 'light') {
       document.documentElement.setAttribute('data-theme', last);
     }
+    // same for the chosen look — a console/legacy user should not see the
+    // cockpit's orange flash on every launch
+    var skin = localStorage.getItem('irnetfree.skin');
+    if (skin === 'console' || skin === 'legacy') {
+      document.documentElement.setAttribute('data-skin', skin);
+    }
   } catch {}
 })();
