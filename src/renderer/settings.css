@@ -1,0 +1,277 @@
+/* =========================================================================
+   IRNetFree — settings & logs
+
+   Part of the renderer stylesheet, split by surface so several people (or
+   agents) can work on different screens without editing the same file.
+   styles.css owns the tokens, the shell and the shared primitives; this
+   file owns only the settings screen and the log viewer.
+
+   The two house rules still apply: LOGICAL PROPERTIES ONLY (the app runs
+   RTL in Persian) and TOKENS ONLY (no literal colours — the skin picks
+   them, see skins.css).
+
+   Settings is the longest page in the app (~9500px of cards) and the markup
+   gives it no headings to break the run. The rhythm below stands in for
+   them, and it is deliberately a short scale:
+
+     4    inside a stack — the gap between two lines that belong together
+     8    between rows of one list, and around a status line
+     12   inside a row — dot to text, text to its section rule
+     16   a row's own padding, and the gap between a row and its button
+     20   the height of a reserved single line
+
+   Everything reads at line-height 1.5–1.6, so no two lines touch.
+   ========================================================================= */
+
+/* ----------------------------- settings ----------------------------- */
+
+/* A definition pair: label at the start, value at the end, a hairline
+   between consecutive pairs. The rule sits on the *top* of the second row
+   and later, so a list of one — which is what the About card is today —
+   carries no stray line under it. */
+.about-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.about-row + .about-row { border-block-start: 1px solid var(--line); }
+.about-label { color: var(--ink3); }
+.about-val {
+  font-family: var(--mono);
+  color: var(--ink2);
+  direction: ltr;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
+/* The component rows say whether the core, sing-box, tun2socks and the geo
+   files are on disk — the most load-bearing block on the page. Reading
+   order is dot → name (+ version) → state, then the action button.
+
+   .comp-info is a grid rather than a flex row because app.js puts the dot
+   *inside* it: as a bare inline span, width/height did not apply and the
+   dot had no box at all. The grid gives it a cell of its own on the first
+   line and hangs the state under the name. */
+.comp-list { display: flex; flex-direction: column; gap: 8px; }
+.comp-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-block: 12px;
+  padding-inline: 16px;
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-radius: var(--r5);
+}
+.comp-info {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 4px;
+}
+.comp-dot {
+  grid-column: 1;
+  grid-row: 1;
+  width: 8px;
+  height: 8px;
+  /* centred on the first line of the name, not on the whole name block:
+     (13px × 1.5 line box − 8px dot) ÷ 2 ≈ 6. A name that wraps at a narrow
+     window keeps its dot beside the first line. */
+  align-self: start;
+  margin-block-start: 6px;
+  border-radius: var(--r1);
+  background: var(--dim);
+}
+.comp-dot.ok { background: var(--ok); }
+.comp-dot.missing { background: var(--danger); }
+.comp-name {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.comp-state {
+  grid-column: 2;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink3);
+}
+/* app.js puts .ok / .missing on the state, but those two live in styles.css
+   and this sheet loads after it — same specificity, later wins, and the
+   state came out grey whatever it said. Name them here so installed reads
+   green and missing reads red. */
+.comp-state.ok { color: var(--ok); }
+.comp-state.missing { color: var(--danger); }
+/* a version, or the path a core was found at: one line, clipped, never a
+   reason for the row to grow. --ink3 rather than --dim: 11px of --dim on
+   --soft is 2.7:1 in every skin, which is not readable text. */
+.comp-ver {
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink3);
+  direction: ltr;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* the label swaps to "downloading…" on click; a floor keeps the row from
+   reflowing under the cursor */
+.comp-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  min-width: 96px;
+  text-align: center;
+}
+
+.files-list { display: flex; flex-direction: column; gap: 4px; }
+.files-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-block: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.files-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r1);
+  background: var(--dim);
+}
+.files-dot.ok { background: var(--ok); }
+.files-dot.missing { background: var(--danger); }
+.files-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* One line of monospaced percentage that changes several times a second.
+   It is a block under the list, not a cell in a row, so the jump it causes
+   is vertical: hold the line open while it is still empty, and give the
+   digits a fixed advance and a floor so the modal never twitches. */
+.files-progress {
+  min-height: 20px;
+  min-width: 20ch;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 20px;
+  color: var(--accentInk);
+  font-variant-numeric: tabular-nums;
+  direction: ltr;
+}
+
+.admin-btn { margin-block-start: 12px; }
+
+/* Status lines under a switch or a field. app.js clears them to '' when the
+   feature is off, so they must take up no room at all when empty. */
+.xray-status, .tun-status {
+  padding-block: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink3);
+}
+.xray-status:empty, .tun-status:empty { display: none; }
+/* same cascade story as .comp-state: this sheet loads after the .ok / .warn
+   / .missing helpers, so the state colours have to be said here */
+.xray-status.ok, .tun-status.ok { color: var(--ok); }
+.xray-status.warn, .tun-status.warn { color: var(--warn); }
+.xray-status.missing, .tun-status.missing { color: var(--danger); }
+/* same reasoning as .comp-ver: the core's version string is small print, but
+   it is still print */
+.xray-version {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink3);
+  direction: ltr;
+  overflow-wrap: anywhere;
+}
+.xray-version:empty { display: none; }
+
+/* A section title inside a card — the only heading these boxes get, so it
+   carries the rule that a heading would. */
+.wg-title {
+  margin-block-start: 4px;
+  padding-block-end: 12px;
+  border-block-end: 1px solid var(--line);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: -.01em;
+  color: var(--ink);
+}
+
+/* What was changed and is waiting for a reconnect. A <ul> of <li>, and it
+   has to read as a list: one item per line, each on its own accent spine.
+   A spine rather than a bullet, because it stays aligned when an item wraps
+   and it does not care what --r1 is in the current skin. */
+.apply-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink2);
+}
+.apply-list li {
+  padding-block: 4px;
+  padding-inline-start: 12px;
+  border-inline-start: 2px solid var(--accentLine);
+  overflow-wrap: anywhere;
+}
+
+/* ----------------------------- logs ----------------------------- */
+
+/* The box fills exactly what the shell leaves it:
+     46 title bar + 30 content padding + 36 view head + 20 head margin
+      + 34 content padding = 166.
+   The old 230 left ~64px of dead panel under the box. */
+.logbox {
+  /* it is a <pre>: the UA's 1em block margin pushed 12px of the box past the
+     bottom of the scroller and made the whole page scroll by that much */
+  margin: 0;
+  height: calc(100vh - 166px);
+  min-height: 220px;
+  overflow-y: auto;
+  padding-block: 12px;
+  padding-inline: 16px;
+  background: var(--log);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink3);
+  direction: ltr;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+/* One entry per <div>. The hanging indent keeps a wrapped 200-character line
+   reading as a single entry, and the transparent spine reserves the room the
+   two loud levels colour in — so nothing shifts when a warning arrives.
+   Level is carried by colour *and* by that spine, which is what keeps the
+   four levels apart on the light theme and in every skin. */
+.log-info, .log-log, .log-warn, .log-error {
+  padding-block: 2px;
+  padding-inline-start: 12px;
+  border-inline-start: 2px solid transparent;
+  text-indent: -12px;
+}
+.log-info { color: var(--ink3); }
+.log-log { color: var(--ink2); }
+.log-warn { color: var(--warn); border-inline-start-color: var(--warn); }
+/* no --dangerSoft wash behind the text: measured over the three skins it costs
+   the light themes ~0.6 of contrast and drops --danger on --log from 4.8:1 to
+   4.2:1. The spine says "error" just as loudly and costs nothing. */
+.log-error { color: var(--danger); border-inline-start-color: var(--danger); }

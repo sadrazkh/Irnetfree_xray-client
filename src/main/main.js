@@ -124,6 +124,8 @@ const DEFAULT_SETTINGS = {
   // page and the custom-rule editor. A view preference only — renderer-owned,
   // never baked into a config, so it needs no reconnect.
   uiMode: '',
+  // which of the three looks the window wears (renderer-only, like theme)
+  skin: 'cockpit',
   theme: 'dark',
   defaultEngine: 'xray'
 };

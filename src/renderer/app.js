@@ -126,6 +126,19 @@ function flagEmoji(cc) {
 
 /* ----------------------------- theme ----------------------------- */
 /** 'dark' | 'light' | 'system' -> the attribute the CSS keys off. */
+/**
+ * Which of the three looks the window wears. A skin only re-declares tokens and
+ * a few shapes (see skins.css) — the layout, the markup and every hook are the
+ * same in all three, so switching is instant and cannot break a screen.
+ * Remembered the same way the theme is, so the first paint is already right.
+ */
+function applySkin(skin) {
+  const s = skin === 'console' || skin === 'legacy' ? skin : 'cockpit';
+  document.documentElement.setAttribute('data-skin', s);
+  try { localStorage.setItem('irnetfree.skin', s); } catch { /* only costs a flash */ }
+  return s;
+}
+
 function applyTheme(pref, systemDark) {
   const dark = pref === 'system' ? systemDark !== false : pref !== 'light';
   const theme = dark ? 'dark' : 'light';
@@ -173,6 +186,11 @@ $('#themeSelect').onchange = () => {
   const theme = $('#themeSelect').value;
   applyTheme(theme, state.systemDark);
   saveSettings({ theme });
+};
+
+$('#skinSelect').onchange = () => {
+  const skin = applySkin($('#skinSelect').value);
+  saveSettings({ skin });
 };
 
 /* the OS switched between light and dark while the app is open */
@@ -237,6 +255,7 @@ async function init() {
 
   state.systemDark = data.systemDark !== false;
   applyTheme(state.settings.theme || 'dark', state.systemDark);
+  applySkin(state.settings.skin || 'cockpit');
 
   // the view preference, before anything paints, so a simple-mode user never
   // sees the pro surfaces flash past
@@ -299,6 +318,7 @@ function applySettingsToUI() {
   $('#langSelect').value = s.lang || 'fa';
   $('#defaultEngine').value = s.defaultEngine || 'xray';
   $('#themeSelect').value = s.theme || 'dark';
+  $('#skinSelect').value = s.skin || 'cockpit';
   $('#optSysProxy').checked = !!s.systemProxy;
   $('#optTun').checked = !!s.tunMode;
   $('#optTunBackend').value = s.tunBackend || 'sing-box';
@@ -745,6 +765,8 @@ function selectServer(id) {
   state.selectedServerId = id;
   renderServers();
   renderPicker();
+  // the path draws the SELECTED config's route, so it follows this choice
+  refreshConnLabels();
   // immediate ping feedback for the chosen target (chains ping too; skip adv/pool)
   if (id && id !== ADV_ID && id !== POOL_ID && !state.pings[id]) pingServer(id);
 }
@@ -1278,72 +1300,115 @@ function targetLabel(target) {
   return s ? s.name : '—';
 }
 
+
+/** The outbound tag configBuilder will have given a routing target. */
+function outboundTagFor(target) {
+  if (!target || target === 'direct') return 'direct';
+  if (target === 'block') return 'block';
+  if (target === 'chain') return 'out-chain';
+  if (String(target).indexOf('chain:') === 0) return 'out-chain-' + String(target).slice(6);
+  return 'out-' + target;
+}
+
+/** First of `tags` the core actually reported, so single/chain ('proxy') and
+ *  advanced ('out-…') plans can share one lookup. */
+function pickTag(per, tags) {
+  for (const tg of tags) if (per && per[tg]) return tg;
+  return tags[0];
+}
+
+/** A traffic caption element bound to an outbound tag. */
+function trafficSpan(tags) {
+  const el = document.createElement('span');
+  el.className = 'pr-traffic';
+  el.dataset.tags = tags.join(',');
+  el.textContent = '—';
+  return el;
+}
+
 /**
- * What is going where, drawn once.
+ * What is going where.
  *
- * Called on a status change and whenever routing settings are saved — NEVER on
- * a stats tick. The two throughput figures inside it are the SAME elements the
- * meter already writes to (#downSpeed / #upSpeed are moved here by reference),
- * so the per-second update stays a pair of textContent writes and this function
- * does no work at all between connects.
+ * Two things it must get right, both of which it used to get wrong:
+ *
+ *  1. It follows the CONFIG THAT IS SELECTED, not the settings. Advanced rules
+ *     are drawn only when the advanced entry is the one being connected —
+ *     picking a single server used to still show the rule fan-out, which is
+ *     why the picture looked unrelated to the choice above it.
+ *  2. Every hop carries ITS OWN traffic, read per outbound from the core's
+ *     counters, so "how much went through this config" is answerable at a
+ *     glance instead of being one grand total for everything at once.
+ *
+ * Built on a status change and on a settings save — NEVER on a stats tick. The
+ * per-second update is applyPathTraffic(), which only writes text into the
+ * captions this function created.
  */
 function renderTrafficPath(stateStr) {
   const host = $('#trafficPath');
   if (!host) return;
   const s = state.settings || {};
   const live = stateStr === 'connected';
+  // While a tunnel is up, draw what is ACTUALLY running. While idle, draw what
+  // the picker is pointing at — `activeServerId` survives in the store as
+  // "last connected", so preferring it when disconnected made the diagram
+  // ignore the config the user had just chosen.
+  const busy = stateStr === 'connected' || stateStr === 'connecting';
+  const id = busy
+    ? (state.activeServerId || state.selectedServerId)
+    : (state.selectedServerId || state.activeServerId);
+  const chain = chainById(id);
   const frag = document.createDocumentFragment();
 
   frag.appendChild(pathNode('🖥', t('path.device'), s.tunMode ? 'TUN' : 'SOCKS/HTTP'));
 
-  // Advanced routing: say what goes where instead of pretending there is one
-  // path. Capped at four lines — a user with thirty rules does not want thirty
-  // rows on the home screen, and the routing page is one click away.
-  const advRules = s.advancedRouting ? (s.routeRules || []).filter(r => r && r.value && r.target) : [];
-  if (advRules.length) {
+  if (id === ADV_ID) {
+    // the fan-out: one line per rule, each with its own figures
     frag.appendChild(pathLink(live, 'pathCapIn'));
     const rules = document.createElement('div');
     rules.className = 'path-rules';
+    const list = (s.routeRules || []).filter(r => r && r.value && r.target);
     const SHOWN = 4;
-    for (const r of advRules.slice(0, SHOWN)) {
-      const row = document.createElement('div');
-      row.className = 'path-rule';
-      const to = targetLabel(r.target);
-      const kind = r.target === 'direct' ? ' to-direct' : r.target === 'block' ? ' to-block' : ' to-proxy';
-      row.innerHTML = `<span class="pr-idx"></span><span class="pr-cond"></span>
-        <span class="pr-arrow">→</span><span class="pr-to${kind}"></span>`;
-      row.querySelector('.pr-idx').textContent = String(advRules.indexOf(r) + 1).padStart(2, '0');
-      row.querySelector('.pr-cond').textContent = r.value;
-      row.querySelector('.pr-to').textContent = to;
-      rules.appendChild(row);
-    }
-    if (advRules.length > SHOWN) {
+    list.slice(0, SHOWN).forEach((r, i) => {
+      rules.appendChild(pathRule(String(i + 1).padStart(2, '0'), r.value, r.target));
+    });
+    if (list.length > SHOWN) {
       const more = document.createElement('div');
       more.className = 'path-rule';
       more.innerHTML = '<span class="pr-idx">··</span><span class="pr-cond"></span>';
-      more.querySelector('.pr-cond').textContent = t('path.andMore').replace('{n}', advRules.length - SHOWN);
+      more.querySelector('.pr-cond').textContent = t('path.andMore').replace('{n}', list.length - SHOWN);
       rules.appendChild(more);
     }
-    const def = document.createElement('div');
-    def.className = 'path-rule is-default';
-    const dTo = targetLabel(s.routeDefault || 'direct');
-    const dKind = s.routeDefault === 'direct' ? ' to-direct' : s.routeDefault === 'block' ? ' to-block' : ' to-proxy';
-    def.innerHTML = `<span class="pr-idx">↓</span><span class="pr-cond"></span>
-      <span class="pr-arrow">→</span><span class="pr-to${dKind}"></span>`;
-    def.querySelector('.pr-cond').textContent = t('path.rest');
-    def.querySelector('.pr-to').textContent = dTo;
+    const def = pathRule('↓', t('path.rest'), s.routeDefault || 'direct');
+    def.classList.add('is-default');
+    def.querySelector('.pr-cond').classList.add('is-label');
     rules.appendChild(def);
+    frag.appendChild(rules);
+  } else if (chain) {
+    // every hop, in order, with the exit carrying the figures
+    const members = chainMembers(chain);
+    members.forEach((m, i) => {
+      frag.appendChild(pathLink(live, i === 0 ? 'pathCapIn' : null));
+      const node = pathNode('🛡', m.name, (m.protocol || '').toUpperCase(),
+        live && i === members.length - 1 ? 'exit' : '');
+      if (i === members.length - 1) node.appendChild(trafficSpan(['proxy', outboundTagFor(chain.id ? 'chain:' + chain.id : 'chain')]));
+      frag.appendChild(node);
+    });
+    if (!members.length) frag.appendChild(pathNode('🛡', chain.name, '', ''));
+  } else if (id === POOL_ID) {
+    frag.appendChild(pathLink(live, 'pathCapIn'));
+    const rules = document.createElement('div');
+    rules.className = 'path-rules';
+    for (const e of poolEnabledValid()) {
+      rules.appendChild(pathRule(String(e.socksPort), e.name, e.target));
+    }
     frag.appendChild(rules);
   } else {
     frag.appendChild(pathLink(live, 'pathCapIn'));
-    const id = state.activeServerId || state.selectedServerId;
-    const srv = (state.servers || []).find(x => x.id === id);
-    const chain = chainById(id);
-    const name = chain ? '⛓ ' + chain.name
-      : id === POOL_ID ? '🧩 ' + t('picker.pool')
-        : srv ? srv.name : t('path.noServer');
-    const meta = srv ? (srv.protocol || '').toUpperCase() : '';
-    frag.appendChild(pathNode('🛡', name, meta, live ? 'exit' : ''));
+    const srv = srvById(id);
+    const node = pathNode('🛡', srv ? srv.name : t('path.noServer'),
+      srv ? (srv.protocol || '').toUpperCase() : '', live ? 'exit' : '');
+    node.appendChild(trafficSpan(['proxy', outboundTagFor(id)]));
+    frag.appendChild(node);
     frag.appendChild(pathLink(live));
   }
 
@@ -1353,6 +1418,37 @@ function renderTrafficPath(stateStr) {
   const ip = ipEl && ipEl.textContent !== '—' ? ipEl.textContent : '';
   frag.appendChild(pathNode('🌐', t('path.internet'), live ? ip : t('path.offline')));
   host.replaceChildren(frag);
+  applyPathTraffic(lastPerOutbound);
+}
+
+/** One "condition → target" line, with its own traffic caption. */
+function pathRule(idx, cond, target) {
+  const row = document.createElement('div');
+  row.className = 'path-rule';
+  const kind = target === 'direct' ? ' to-direct' : target === 'block' ? ' to-block' : ' to-proxy';
+  row.innerHTML = `<span class="pr-idx"></span><span class="pr-cond"></span>
+    <span class="pr-arrow">→</span><span class="pr-to${kind}"></span>`;
+  row.querySelector('.pr-idx').textContent = idx;
+  row.querySelector('.pr-cond').textContent = cond;
+  row.querySelector('.pr-to').textContent = targetLabel(target);
+  row.appendChild(trafficSpan([outboundTagFor(target)]));
+  return row;
+}
+
+/**
+ * Fill every caption from the core's per-outbound counters. Text only — the
+ * diagram itself is never rebuilt here, which is what keeps the per-second
+ * tick as cheap as it was before the diagram existed.
+ */
+let lastPerOutbound = {};
+function applyPathTraffic(per) {
+  lastPerOutbound = per || {};
+  for (const el of $$('#trafficPath .pr-traffic')) {
+    const tag = pickTag(lastPerOutbound, (el.dataset.tags || '').split(','));
+    const v = lastPerOutbound[tag];
+    el.textContent = v ? `↓${fmtBytes(v.down)} ↑${fmtBytes(v.up)}` : '—';
+    el.title = v ? `↓${fmtSpeed(v.downSpeed)} ↑${fmtSpeed(v.upSpeed)}` : '';
+  }
 }
 
 /** The always-visible right column. Pure reads of state — no polling. */
@@ -3149,6 +3245,9 @@ window.api.onStats((s) => {
   // never rebuilt here.
   const cap = $('#pathCapIn');
   if (cap) cap.textContent = `↓${fmtSpeed(s.downSpeed)}  ↑${fmtSpeed(s.upSpeed)}`;
+  // and each hop's own figures, so the path answers "how much went through
+  // THIS config" instead of showing one total for everything at once
+  if (s.per) applyPathTraffic(s.per);
 });
 
 function resetTraffic() {

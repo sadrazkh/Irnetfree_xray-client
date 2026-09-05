@@ -48,6 +48,7 @@ class StatsPoller {
     this.onRaw = opts.onRaw || (() => {});
     this.timer = null;
     this.last = { up: 0, down: 0, t: 0 };
+    this.lastPer = {};          // tag -> previous totals, for per-outbound speed
     this.totals = { up: 0, down: 0 };
   }
 
@@ -69,7 +70,7 @@ class StatsPoller {
           let parsed;
           try { parsed = JSON.parse(body); } catch { return resolve(null); }
           try { this.onRaw(parsed); } catch { /* a watcher must never stop the meter */ }
-          resolve(sumOutbounds(parsed));
+          resolve(Object.assign(sumOutbounds(parsed), { per: byOutbound(parsed) }));
         });
       });
       req.on('error', () => resolve(null));
@@ -80,6 +81,7 @@ class StatsPoller {
   start(intervalMs = 1000) {
     this.stop();
     this.last = { up: 0, down: 0, t: Date.now() };
+    this.lastPer = {};
     this.timer = setInterval(async () => {
       const cur = await this.query();
       if (!cur) return;
@@ -89,12 +91,26 @@ class StatsPoller {
       const upSpeed = Math.max(0, (cur.up - this.last.up) / dt);
       const downSpeed = Math.max(0, (cur.down - this.last.down) / dt);
 
+      // per-outbound totals and their own per-second deltas, so the home path
+      // can say how much went through EACH config rather than one grand total
+      const per = {};
+      for (const [tag, v] of Object.entries(cur.per || {})) {
+        const prev = this.lastPer[tag] || { up: 0, down: 0 };
+        per[tag] = {
+          up: v.up, down: v.down,
+          upSpeed: Math.max(0, (v.up - prev.up) / dt),
+          downSpeed: Math.max(0, (v.down - prev.down) / dt)
+        };
+      }
+      this.lastPer = cur.per || {};
+
       this.totals = { up: cur.up, down: cur.down };
       this.last = { up: cur.up, down: cur.down, t: now };
 
       this.onStats({
         upSpeed, downSpeed,
-        totalUp: cur.up, totalDown: cur.down
+        totalUp: cur.up, totalDown: cur.down,
+        per
       });
     }, intervalMs);
     if (this.timer.unref) this.timer.unref();
@@ -103,7 +119,30 @@ class StatsPoller {
   stop() {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     this.last = { up: 0, down: 0, t: 0 };
+    this.lastPer = {};
   }
+}
+
+/**
+ * The same counters, kept apart per outbound instead of summed.
+ *
+ * The home screen draws the path traffic actually takes — with advanced routing
+ * that is several outbounds at once — and "how much went through THIS config"
+ * is the question it exists to answer. `direct` is included (traffic that went
+ * past the tunnel is exactly what a split-routing user wants to see) even
+ * though sumOutbounds leaves it out of the proxy total; `block`, `dns-out` and
+ * the anti-DPI dialers are not traffic anybody chose and stay out.
+ */
+function byOutbound(vars) {
+  const out = vars && vars.stats && vars.stats.outbound;
+  if (!out || typeof out !== 'object') return {};
+  const res = {};
+  for (const tag of Object.keys(out)) {
+    if (tag === 'block' || tag === 'dns-out' || tag.startsWith('dpi-')) continue;
+    const c = out[tag] || {};
+    res[tag] = { up: num(c.uplink), down: num(c.downlink) };
+  }
+  return res;
 }
 
 /**
@@ -149,4 +188,4 @@ class SilenceWatch {
   }
 }
 
-module.exports = { StatsPoller, sumOutbounds, SilenceWatch };
+module.exports = { StatsPoller, sumOutbounds, byOutbound, SilenceWatch };

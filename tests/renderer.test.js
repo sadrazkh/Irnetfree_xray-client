@@ -20,7 +20,10 @@ const path = require('path');
 const R = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', f), 'utf8');
 const HTML = R('index.html');
 const APP = R('app.js');
-const CSS = R('styles.css');
+// the stylesheet is split by surface (styles/home/lists/routing/settings/skins);
+// the contract is against all of it, so read them as one
+const CSS_FILES = ['styles.css', 'home.css', 'lists.css', 'routing.css', 'settings.css', 'skins.css'];
+const CSS = CSS_FILES.map(R).join(String.fromCharCode(10));
 const I18N = R('i18n.js');
 
 const htmlIds = new Set([...HTML.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));

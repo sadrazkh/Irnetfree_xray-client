@@ -6,7 +6,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { sumOutbounds, SilenceWatch } = require('../src/main/stats');
+const { sumOutbounds, SilenceWatch, byOutbound } = require('../src/main/stats');
 
 const vars = (outbound) => ({ stats: { outbound } });
 
@@ -72,4 +72,29 @@ test('SilenceWatch ignores outbounds it was not asked about, and a missing one',
   assert.deepEqual(w.check(vars({ 'out-other': { uplink: 9999, downlink: 0 } })), []);
   assert.deepEqual(w.check(vars({})), []);
   assert.deepEqual(new SilenceWatch([], {}).check(vars({ 'out-wg': { uplink: 9999, downlink: 0 } })), []);
+});
+
+/* ---------------- per-outbound figures (the home traffic path) ---------------- */
+
+test('byOutbound keeps each proxying tag apart and drops the rest', () => {
+  assert.deepEqual(byOutbound(vars({
+    'out-sv-a': { uplink: 100, downlink: 900 },
+    'out-chain-c1': { uplink: 5, downlink: 50 },
+    direct: { uplink: 7, downlink: 70 },
+    block: { uplink: 1, downlink: 0 },
+    'dns-out': { uplink: 2, downlink: 3 },
+    'dpi-1': { uplink: 4, downlink: 4 }
+  })), {
+    'out-sv-a': { up: 100, down: 900 },
+    'out-chain-c1': { up: 5, down: 50 },
+    // direct is not "the proxy", but the path diagram still has to show what
+    // went past the tunnel — so it is reported, just not summed
+    direct: { up: 7, down: 70 }
+  });
+});
+
+test('byOutbound survives a body with no outbound section', () => {
+  assert.deepEqual(byOutbound({}), {});
+  assert.deepEqual(byOutbound(vars({})), {});
+  assert.deepEqual(byOutbound(vars({ 'out-x': {} })), { 'out-x': { up: 0, down: 0 } });
 });
