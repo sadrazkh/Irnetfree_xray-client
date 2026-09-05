@@ -235,6 +235,10 @@
 }
 .cn-remove:hover { color: var(--danger); background: var(--dangerSoft); }
 .flow-arrow, .adv-arrow { color: var(--dim); font-size: 13px; }
+/* The markup hard-codes "→". In an RTL chain the first hop sits rightmost, so
+   the unmirrored glyph points back at where the traffic came from. Mirror the
+   glyph, not the layout. */
+[dir="rtl"] .flow-arrow { display: inline-block; transform: scaleX(-1); }
 /* "available servers": its own block under the flow, with the label far enough
    below the stage that the two never read as one list */
 .chain-card > .field-label { margin-block-start: 18px; margin-block-end: 6px; }

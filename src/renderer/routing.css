@@ -31,37 +31,41 @@
   --rt-4: 16px;
   --rt-5: 20px;
   --rt-6: 28px;
-  /* the chain's gutter: the spine runs down its middle, the index chip rides
-     on it, and the rules (and their notes) start at its far edge. --rt-edge is
-     the rail every chain item carries on its inline-start; the spine and the
-     chip are offset by it, because an absolutely positioned child is placed
-     against the padding box and would otherwise sit --rt-edge off centre. */
-  --rt-gutter: 40px;
+  /* The chain's gutter is not a number of its own: it is the index chip with a
+     --rt-2 either side, so the chip clears the row by exactly one group step
+     and the spine lands on the middle of it. --rt-edge is the rail every chain
+     item carries on its inline-start; the spine and the chip are offset by it,
+     because an absolutely positioned child is placed against the PADDING box
+     and would otherwise sit --rt-edge off centre. */
+  --rt-node: 28px;
+  --rt-gutter: calc(var(--rt-node) + 2 * var(--rt-2));
   --rt-spine: 2px;
-  --rt-node: 26px;
   --rt-edge: 3px;
-  /* one height for every control in a row or a strip, one width for the type
-     select and one for an icon button — that is what makes a stack of rules
-     read as a column instead of five separate bars */
+  /* One height for every control in a row or a strip, one width for the type
+     select, one for an icon button, and one smallest-useful width for a field
+     or a dropdown — that is what makes a stack of rules read as a column
+     instead of five separate bars. */
   --rt-ctl: 34px;
   --rt-type: 116px;
   --rt-icon: 30px;
+  --rt-field: 200px;
 }
 
 /* BASE strip — the preset every custom rule stacks on. It has to read as ONE
    control bar: label, buttons and trailing note all stand --rt-ctl tall, so
-   nothing sits half a line off its neighbour. */
+   nothing sits half a line off its neighbour. Its three parts are --rt-3 apart
+   and the four buttons inside the segment --rt-2, the same two steps a rule row
+   uses. It is a bar and not a panel, so its block padding is one step down. */
 .base-strip {
   display: flex;
   align-items: center;
   gap: var(--rt-3);
-  row-gap: var(--rt-2);
   flex-wrap: wrap;
   padding: var(--rt-3) var(--rt-4);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r6);
-  margin-bottom: var(--rt-4);
+  margin-block-end: var(--rt-4);
 }
 .base-label {
   display: inline-flex;
@@ -84,7 +88,7 @@
   margin-inline-start: auto;
   padding-inline-start: var(--rt-4);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.7;
   color: var(--ink3);
 }
 .base-strip .seg { background: none; border: 0; padding: 0; gap: var(--rt-2); flex-wrap: wrap; }
@@ -120,7 +124,8 @@
   container-type: inline-size;
   container-name: routecol;
 }
-.routing-side { flex: 0 0 250px; min-width: 0; }
+/* the filters rail is the same width as the inspector on the other side */
+.routing-side { flex: 0 0 var(--inspw); min-width: 0; }
 /* Stacked, and both columns take the full width. The width has to be stated:
    the cross size of a stretched-off flex item is shrink-to-fit, and a
    shrink-to-fit box under inline-size containment measures zero. */
@@ -139,6 +144,7 @@
   flex-direction: column;
   gap: var(--rt-2);
   position: relative;
+  margin-block-start: var(--rt-4);
   padding-inline-start: var(--rt-gutter);
 }
 /* a new rule starts a new group; the note under a rule belongs to that rule and
@@ -146,18 +152,21 @@
 .adv-rule + .adv-rule,
 .adv-suggest + .adv-rule { margin-block-start: var(--rt-2); }
 
-/* the head of the chain, drawn only when there is a chain to head — the empty
-   state must not get a stray tick above it */
-.adv-rules:has(.adv-rule)::before {
+/* The head of the chain: a cap across the gutter where the spine starts, as
+   wide as the index chips it sits above. */
+.adv-rules::before {
   content: "";
   position: absolute;
   inset-block-start: 0;
-  inset-inline-start: calc((var(--rt-gutter) - var(--rt-3)) / 2);
-  width: var(--rt-3);
+  inset-inline-start: var(--rt-2);
+  width: var(--rt-node);
   height: var(--rt-spine);
   border-radius: var(--r1);
   background: var(--accent);
 }
+/* …but there is nothing to head when the chain is empty, and a tick floating
+   over the empty-state box would only look like a mistake */
+.adv-rules:not(:has(.adv-rule))::before { content: none; }
 
 .adv-rule {
   position: relative;
@@ -176,9 +185,10 @@
 .adv-rule:hover { background: var(--soft); }
 .adv-rule:first-child { border-inline-start-color: var(--accent); }
 
-/* the index: a chip centred on the spine at every row height — half of 100% of
-   the row, whatever the row turned out to be, so a wrapped two-line row keeps
-   its number beside the middle of it */
+/* The index: a chip that rides ON the spine, filled with the card's own colour
+   so the line passes behind it. It is placed at half the row's height rather
+   than at a fixed offset from the top, so a row that has wrapped to two lines
+   still has its number beside the middle of it. */
 .adv-rule::before {
   counter-increment: rule;
   content: counter(rule, decimal-leading-zero);
@@ -230,7 +240,7 @@
   font-weight: 600;
 }
 .adv-value {
-  flex: 4 1 200px;
+  flex: 4 1 var(--rt-field);
   min-width: 0;
   height: var(--rt-ctl);
   font-family: var(--mono);
@@ -251,13 +261,15 @@
 /* the glyph in the markup is a fixed →; in Persian the row runs the other way,
    so mirror it rather than have it point back at the condition */
 [dir="rtl"] .adv-arrow { transform: scaleX(-1); }
-.adv-target-mount { flex: 3 1 190px; min-width: 0; }
+.adv-target-mount { flex: 3 1 var(--rt-field); min-width: 0; }
 /* the searchable select is shrink-to-fit by default, which lets a long chain
    name push the delete button off the row — inside a rule it takes the width
    it is given and ellipsises instead */
 .adv-target-mount .ss { display: block; width: 100%; min-width: 0; }
 .adv-del { flex: 0 0 var(--rt-icon); width: var(--rt-icon); margin-inline-start: var(--rt-2); }
-.adv-add { margin-block-start: var(--rt-3); }
+/* the add button and the terminator keep the chain's inline-start edge, so the
+   gutter stays clear for the spine — which visibly stops above them */
+.adv-add { margin-block-start: var(--rt-3); margin-inline-start: var(--rt-gutter); }
 
 /* the dashed "everything else" row: a terminator, so it stands a step further
    from the chain than the rules stand from each other */
@@ -265,9 +277,9 @@
   display: flex;
   align-items: center;
   gap: var(--rt-3);
-  row-gap: var(--rt-2);
   flex-wrap: wrap;
   margin-block-start: var(--rt-6);
+  margin-inline-start: var(--rt-gutter);
   padding: var(--rt-4);
   background: var(--bg);
   border: 1px dashed var(--softline);
@@ -275,7 +287,10 @@
 }
 .adv-def-label { font-size: 13px; font-weight: 600; color: var(--ink2); }
 .adv-def-label::before { content: "↓ "; color: var(--dim); }
-.adv-default .adv-target-mount { flex: 0 1 260px; }
+.adv-default .adv-target-mount { flex: 0 1 var(--rt-field); }
+/* the terminator ends the block: what follows it starts a new one */
+.adv-default + .switch-row,
+.adv-suggest-default + .switch-row { margin-block-start: var(--rt-5); }
 
 /* the WireGuard note under a rule. No inline margin of its own: the chain's
    gutter already indents it, so it lines up under the RULE it belongs to
@@ -285,7 +300,6 @@
   display: flex;
   align-items: center;
   gap: var(--rt-2);
-  row-gap: var(--rt-2);
   flex-wrap: wrap;
   margin-inline: 0;
   padding: var(--rt-3);
@@ -301,15 +315,19 @@
 }
 /* the ranges line arrives as a bare <span> and shares its line with the "use"
    button; every .adv-suggest-line is a sentence of its own and takes a line */
-.adv-suggest > span { flex: 1 1 220px; min-width: 0; }
+.adv-suggest > span { flex: 1 1 var(--rt-field); min-width: 0; }
 .adv-suggest-line { flex: 1 1 100%; min-width: 0; }
+/* a Latin, left-to-right value quoted inside a Persian sentence: isolate it or
+   the bidi algorithm reorders the list around the punctuation. A 60-character
+   range list wraps, so the chip is drawn per fragment and carries no border —
+   a broken outline reads as damage, a highlight does not. */
 .adv-suggest code {
   font-family: var(--mono);
   color: var(--ink2);
   background: var(--panel);
-  border: 1px solid var(--line);
   border-radius: var(--r2);
   padding-inline: var(--rt-1);
+  box-decoration-break: clone;
   direction: ltr;
   unicode-bidi: isolate;
   overflow-wrap: anywhere;
@@ -318,13 +336,12 @@
 .adv-suggest .adv-suggest-applied {
   flex: 0 0 auto;
   color: var(--ok);
-  font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
 }
 /* the same note under the DEFAULT target sits outside the chain, so it gets its
-   own spacing instead of the chain's gap */
-.adv-suggest-default { margin-block-start: var(--rt-2); }
+   own spacing instead of the chain's gap — and follows the terminator inwards */
+.adv-suggest-default { margin-block-start: var(--rt-2); margin-inline-start: var(--rt-gutter); }
 
 .proc-opts {
   margin-block-start: var(--rt-5);
@@ -336,9 +353,12 @@
 /* Narrow column: below this the five controls no longer fit on one line, so the
    break is placed on purpose instead of left to the flex algorithm. The value
    is given the rest of its line, which pushes the whole target group — arrow,
-   dropdown, delete — down to a line of its own. (700px of column is 620px of
-   chain once the card's padding and the gutter are taken off.) */
-@container routecol (max-width: 700px) {
+   dropdown, delete — down to a line of its own.
+
+   775px is where the widest row — a process rule, which carries a refresh
+   button as well — stops fitting on one line. Breaking every row at the same
+   width keeps the chain a column of equal rows instead of a mixture. */
+@container routecol (max-width: 775px) {
   .adv-rule { padding: var(--rt-3); }
   .adv-value { flex: 1 1 calc(100% - var(--rt-type) - var(--rt-2)); }
   /* a process row carries one control more — its refresh stays beside the
