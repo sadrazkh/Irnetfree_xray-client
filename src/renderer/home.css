@@ -401,6 +401,10 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
   transition: background 140ms ease-out;
 }
 .ss-item:hover { background: var(--soft); color: var(--ink); }
+/* makeSearchSelect marks the current option `active`; `selected` is kept so a
+   caller using either word gets the same highlight. Styling only `.selected`
+   meant the chosen routing target was never marked in its own dropdown. */
+.ss-item.active,
 .ss-item.selected { background: var(--accentSoft); color: var(--accentInk); font-weight: 600; }
 .ss-empty { padding: 12px; text-align: center; color: var(--dim); font-size: 11px; }
 
