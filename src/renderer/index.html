@@ -5,7 +5,15 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
   <title>IRNetFree</title>
+  <!-- Split by surface so different screens can be worked on independently.
+       Order matters: styles.css owns the tokens and the shell, the screen
+       sheets build on them, and skins.css re-declares tokens last. -->
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="home.css" />
+  <link rel="stylesheet" href="lists.css" />
+  <link rel="stylesheet" href="routing.css" />
+  <link rel="stylesheet" href="settings.css" />
+  <link rel="stylesheet" href="skins.css" />
   <!-- Applies the remembered theme before the first paint, so a light-theme user
        does not see a dark flash while app:init is still in flight. -->
   <script src="theme-boot.js"></script>
@@ -532,7 +540,15 @@
                 <option value="system" data-i18n="theme.system">مثل سیستم</option>
               </select>
             </div>
-            <div></div>
+            <div>
+              <label class="field-label" data-i18n="set.skin">ظاهر برنامه</label>
+              <select id="skinSelect" class="select">
+                <option value="cockpit" data-i18n="skin.cockpit">کاکپیت (پیش‌فرض)</option>
+                <option value="console" data-i18n="skin.console">کنسول</option>
+                <option value="legacy" data-i18n="skin.legacy">کلاسیک (نسخه‌های پیشین)</option>
+              </select>
+              <p class="hint" data-i18n="skin.hint">چیدمان یکی است؛ فقط رنگ‌ها، شکل‌ها و نوار کناری فرق می‌کنند. با هر دو تمِ تیره و روشن کار می‌کند.</p>
+            </div>
           </div>
         </div>
 

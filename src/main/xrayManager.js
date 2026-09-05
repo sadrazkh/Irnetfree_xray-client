@@ -331,8 +331,25 @@ class XrayManager {
     fs.writeFileSync(cfgPath, JSON.stringify(testConfig, null, 2), 'utf8');
 
     const proc = spawn(bin, engineRunArgs(id, cfgPath), { cwd: path.dirname(bin), windowsHide: true, env: this.spawnEnv() });
-    // give it a moment to bind
-    await delay(500);
+
+    // A child that cannot be started emits 'error', and an 'error' with no
+    // listener is re-thrown by Node as an uncaught exception — which killed the
+    // whole app. A core that is missing, half-downloaded or not executable is
+    // an ordinary thing (the user can delete it while we run), so it has to
+    // come back as a rejected promise, like validate() already does.
+    const failed = new Promise((_, reject) => {
+      proc.once('error', (err) => {
+        try { fs.unlinkSync(cfgPath); } catch { /* nothing to clean */ }
+        reject(err);
+      });
+    });
+    // If the child dies AFTER we have handed the caller its handle, nobody is
+    // waiting on `failed` any more — mark it handled so a late failure is not
+    // an unhandled rejection, which is the same crash by another route. The
+    // caller finds out the ordinary way: the test through it times out.
+    failed.catch(() => {});
+    // give it a moment to bind — and lose the race if it never starts
+    await Promise.race([delay(500), failed]);
     return {
       proc,
       cleanup: () => {
