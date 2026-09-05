@@ -908,7 +908,10 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r6);
-  border-inline-start: 3px solid var(--softline);
+  /* The leading edge carries STATE, not decoration: transparent at rest, so a
+     list of servers is a list of plain cards, and accent only on the active
+     one. Reserving the width keeps the row from shifting when it lights up. */
+  border-inline-start: 3px solid transparent;
   transition: background 140ms ease-out, border-color 140ms ease-out;
 }
 .server-card:hover { background: var(--soft); }
