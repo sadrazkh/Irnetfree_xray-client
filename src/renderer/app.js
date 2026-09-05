@@ -143,14 +143,17 @@ function escapeHtml(s) {
 }
 
 /* ----------------------------- navigation ----------------------------- */
+function showView(view) {
+  const btn = document.querySelector(`.nav-item[data-view="${view}"]`);
+  if (!btn) return;
+  $$('.nav-item').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  $$('.view').forEach(v => v.classList.remove('active'));
+  const v = $('#view-' + view);
+  if (v) v.classList.add('active');
+}
 $$('.nav-item').forEach(btn => {
-  btn.addEventListener('click', () => {
-    $$('.nav-item').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const view = btn.dataset.view;
-    $$('.view').forEach(v => v.classList.remove('active'));
-    $('#view-' + view).classList.add('active');
-  });
+  btn.addEventListener('click', () => showView(btn.dataset.view));
 });
 
 /* window controls */
@@ -194,6 +197,11 @@ function setLang(lang) {
   updateTunStatus();
   setModeWidget();
   refreshConnLabels();
+  // the chrome carries three strings that are not data-i18n nodes: the mode
+  // badge, the path diagram's own labels and the inspector's on/off words
+  applyUiMode(state.settings.uiMode || defaultUiMode());
+  renderTrafficPath(state.connected ? 'connected' : state.connecting ? 'connecting' : 'disconnected');
+  renderInspector();
   if ($('#xrayVersion')) $('#xrayVersion').textContent = state.xrayVersion ? (t('xray.version') + ': ' + state.xrayVersion) : '';
   saveSettings({ lang });
 }
@@ -230,6 +238,10 @@ async function init() {
   state.systemDark = data.systemDark !== false;
   applyTheme(state.settings.theme || 'dark', state.systemDark);
 
+  // the view preference, before anything paints, so a simple-mode user never
+  // sees the pro surfaces flash past
+  applyUiMode(state.settings.uiMode || defaultUiMode());
+
   applySettingsToUI();
   renderServers();
   renderPicker();
@@ -238,6 +250,9 @@ async function init() {
   renderChains();
   renderPool();
   renderAdvanced();
+  // first paint: name the selected config instead of leaving the markup's
+  // "no server selected" placeholder standing next to a filled picker
+  refreshConnLabels();
   updateXrayStatus(data.xrayReady);
   updateTunStatus();
   setModeWidget();
@@ -415,6 +430,12 @@ async function saveSettings(partial = {}, { silent = false } = {}) {
   // main returns { settings, pendingReconnect }; tolerate the older bare shape
   state.settings = (res && res.settings) ? res.settings : res;
   setPending((res && res.pendingReconnect) || []);
+
+  // The home diagram and the inspector are built from settings, so this is the
+  // one place they can go stale. Rebuilding here — on a user action — is what
+  // keeps them off the per-second stats path entirely.
+  renderTrafficPath(state.connected ? 'connected' : state.connecting ? 'connecting' : 'disconnected');
+  renderInspector();
 
   if (!silent && state.pendingReconnect.length) await promptApplySettings();
   return state.pendingReconnect;
@@ -1174,6 +1195,190 @@ function setConnUI(stateStr, id) {
     tb.classList.toggle('conn-wait', stateStr === 'connecting');
     tb.classList.toggle('conn-off', stateStr !== 'connected' && stateStr !== 'connecting');
   }
+  const tbState = $('#tbState');
+  if (tbState) {
+    tbState.textContent = stateStr === 'connected' ? t('tb.online')
+      : stateStr === 'connecting' ? t('tb.wait') : t('tb.offline');
+  }
+  startUptime(stateStr === 'connected');
+  renderTrafficPath(stateStr);
+  renderInspector();
+}
+
+/* ------------------------- title-bar uptime clock ------------------------- */
+
+/**
+ * How long the tunnel has been up. One setInterval that only formats a number
+ * — it starts when the tunnel comes up and is cleared the moment it goes down,
+ * so a disconnected app has no timer running at all.
+ */
+let uptimeTimer = null;
+let uptimeFrom = 0;
+function startUptime(on) {
+  const el = $('#tbUptime');
+  const meta = $('#connMeta');
+  if (!on) {
+    if (uptimeTimer) { clearInterval(uptimeTimer); uptimeTimer = null; }
+    uptimeFrom = 0;
+    if (el) el.textContent = '';
+    if (meta) meta.textContent = state.xrayVersion ? 'core ' + state.xrayVersion : '';
+    return;
+  }
+  if (uptimeTimer) return;              // already counting this connection
+  uptimeFrom = Date.now();
+  const tick = () => {
+    const s = Math.max(0, Math.floor((Date.now() - uptimeFrom) / 1000));
+    const hh = String(Math.floor(s / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    const clock = `${hh}:${mm}:${ss}`;
+    if (el) el.textContent = clock;
+    if (meta) meta.textContent = (state.xrayVersion ? 'core ' + state.xrayVersion + '\n' : '') + 'uptime ' + clock;
+  };
+  tick();
+  uptimeTimer = setInterval(tick, 1000);
+}
+
+/* ---------------------------- the traffic path ---------------------------- */
+
+/** A node in the path diagram. */
+function pathNode(ico, name, meta, cls) {
+  const el = document.createElement('div');
+  el.className = 'path-node' + (cls ? ' ' + cls : '');
+  el.innerHTML = `<span class="path-ico">${ico}</span>
+    <span class="path-name"></span>
+    <span class="path-meta"></span>`;
+  el.querySelector('.path-name').textContent = name;
+  el.querySelector('.path-meta').textContent = meta || '';
+  return el;
+}
+
+function pathLink(live, capId) {
+  const el = document.createElement('div');
+  el.className = 'path-link' + (live ? ' live' : '');
+  if (capId) {
+    const cap = document.createElement('span');
+    cap.className = 'path-cap';
+    cap.id = capId;
+    el.appendChild(cap);
+  }
+  return el;
+}
+
+/** Short label for a routing target, in the user's language. */
+function targetLabel(target) {
+  if (!target || target === 'direct') return t('path.direct');
+  if (target === 'block') return t('path.block');
+  if (target === 'chain') return '⛓';
+  if (String(target).indexOf('chain:') === 0) {
+    const c = (state.chains || []).find(x => x.id === String(target).slice(6));
+    return '⛓ ' + (c ? c.name : '—');
+  }
+  const s = (state.servers || []).find(x => x.id === target);
+  return s ? s.name : '—';
+}
+
+/**
+ * What is going where, drawn once.
+ *
+ * Called on a status change and whenever routing settings are saved — NEVER on
+ * a stats tick. The two throughput figures inside it are the SAME elements the
+ * meter already writes to (#downSpeed / #upSpeed are moved here by reference),
+ * so the per-second update stays a pair of textContent writes and this function
+ * does no work at all between connects.
+ */
+function renderTrafficPath(stateStr) {
+  const host = $('#trafficPath');
+  if (!host) return;
+  const s = state.settings || {};
+  const live = stateStr === 'connected';
+  const frag = document.createDocumentFragment();
+
+  frag.appendChild(pathNode('🖥', t('path.device'), s.tunMode ? 'TUN' : 'SOCKS/HTTP'));
+
+  // Advanced routing: say what goes where instead of pretending there is one
+  // path. Capped at four lines — a user with thirty rules does not want thirty
+  // rows on the home screen, and the routing page is one click away.
+  const advRules = s.advancedRouting ? (s.routeRules || []).filter(r => r && r.value && r.target) : [];
+  if (advRules.length) {
+    frag.appendChild(pathLink(live, 'pathCapIn'));
+    const rules = document.createElement('div');
+    rules.className = 'path-rules';
+    const SHOWN = 4;
+    for (const r of advRules.slice(0, SHOWN)) {
+      const row = document.createElement('div');
+      row.className = 'path-rule';
+      const to = targetLabel(r.target);
+      const kind = r.target === 'direct' ? ' to-direct' : r.target === 'block' ? ' to-block' : ' to-proxy';
+      row.innerHTML = `<span class="pr-idx"></span><span class="pr-cond"></span>
+        <span class="pr-arrow">→</span><span class="pr-to${kind}"></span>`;
+      row.querySelector('.pr-idx').textContent = String(advRules.indexOf(r) + 1).padStart(2, '0');
+      row.querySelector('.pr-cond').textContent = r.value;
+      row.querySelector('.pr-to').textContent = to;
+      rules.appendChild(row);
+    }
+    if (advRules.length > SHOWN) {
+      const more = document.createElement('div');
+      more.className = 'path-rule';
+      more.innerHTML = '<span class="pr-idx">··</span><span class="pr-cond"></span>';
+      more.querySelector('.pr-cond').textContent = t('path.andMore').replace('{n}', advRules.length - SHOWN);
+      rules.appendChild(more);
+    }
+    const def = document.createElement('div');
+    def.className = 'path-rule is-default';
+    const dTo = targetLabel(s.routeDefault || 'direct');
+    const dKind = s.routeDefault === 'direct' ? ' to-direct' : s.routeDefault === 'block' ? ' to-block' : ' to-proxy';
+    def.innerHTML = `<span class="pr-idx">↓</span><span class="pr-cond"></span>
+      <span class="pr-arrow">→</span><span class="pr-to${dKind}"></span>`;
+    def.querySelector('.pr-cond').textContent = t('path.rest');
+    def.querySelector('.pr-to').textContent = dTo;
+    rules.appendChild(def);
+    frag.appendChild(rules);
+  } else {
+    frag.appendChild(pathLink(live, 'pathCapIn'));
+    const id = state.activeServerId || state.selectedServerId;
+    const srv = (state.servers || []).find(x => x.id === id);
+    const chain = chainById(id);
+    const name = chain ? '⛓ ' + chain.name
+      : id === POOL_ID ? '🧩 ' + t('picker.pool')
+        : srv ? srv.name : t('path.noServer');
+    const meta = srv ? (srv.protocol || '').toUpperCase() : '';
+    frag.appendChild(pathNode('🛡', name, meta, live ? 'exit' : ''));
+    frag.appendChild(pathLink(live));
+  }
+
+  // the exit IP is whatever the last check found — read from the readout that
+  // already holds it rather than keeping a second copy in sync
+  const ipEl = $('#statIp');
+  const ip = ipEl && ipEl.textContent !== '—' ? ipEl.textContent : '';
+  frag.appendChild(pathNode('🌐', t('path.internet'), live ? ip : t('path.offline')));
+  host.replaceChildren(frag);
+}
+
+/** The always-visible right column. Pure reads of state — no polling. */
+function renderInspector() {
+  const s = state.settings || {};
+  const on = t('ins.on'), off = t('ins.off');
+  const set = (id, text, cls) => {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove('on', 'off');
+    if (cls) el.classList.add(cls);
+  };
+  set('#insTun', s.tunMode ? on : off, s.tunMode ? 'on' : 'off');
+  set('#insKill', s.killSwitch ? on : off, s.killSwitch ? 'on' : 'off');
+  set('#insGuard', s.tunMode ? (s.leakGuard || 'standard') : off, s.tunMode ? 'on' : 'off');
+  set('#insIpv6', s.ipv6 ? on : off, s.ipv6 ? 'on' : 'off');
+  set('#insSocks', String(s.socksPort || '—'));
+  set('#insHttp', String(s.httpPort || '—'));
+  set('#insCore', state.activeEngine || (s.defaultEngine === 'xray-pattn' ? 'xray-pattn' : 'xray'));
+  const insRouting = $('#insRouting');
+  if (insRouting) {
+    insRouting.textContent = s.advancedRouting
+      ? t('path.rules').replace('{n}', (s.routeRules || []).length)
+      : (s.routingMode || 'global');
+  }
 }
 
 /* status events from main */
@@ -1332,8 +1537,73 @@ function appendLog(text, level = 'log') {
   while (box.childNodes.length > MAX_LOG_LINES) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
 }
-window.api.onLog((d) => appendLog(d.line, d.level || 'log'));
+/**
+ * The tail of the same log, on the home screen. Four lines, no scrolling, no
+ * second buffer — it mirrors what appendLog just wrote and drops the oldest.
+ */
+const HOME_LOG_LINES = 4;
+function appendHomeLog(text, level) {
+  const box = $('#homeLog');
+  if (!box) return;
+  const line = document.createElement('span');
+  line.className = 'll';
+  const lv = document.createElement('span');
+  lv.className = 'lv' + (level === 'warn' || level === 'error' ? ' ' + level : '');
+  lv.textContent = level + ' ';
+  line.appendChild(lv);
+  line.appendChild(document.createTextNode(text));
+  box.appendChild(line);
+  while (box.childNodes.length > HOME_LOG_LINES) box.removeChild(box.firstChild);
+}
+
+window.api.onLog((d) => {
+  appendLog(d.line, d.level || 'log');
+  appendHomeLog(d.line, d.level || 'log');
+});
 $('#btnClearLogs').onclick = () => { $('#logBox').innerHTML = ''; };
+
+/* ------------------------- simple / advanced view ------------------------- */
+
+/**
+ * Which surfaces are on show. A view preference and nothing more: everything
+ * `simple` hides is reachable again in one click, and nothing hidden is needed
+ * to get connected — that is the rule the mode has to keep.
+ *
+ * The default is decided once, from what the user already has: somebody with a
+ * chain, a pool entry or a routing rule is already a pro user and must not find
+ * their tools missing after an update; a fresh install starts clean.
+ */
+function defaultUiMode() {
+  const s = state.settings || {};
+  const hasPro = (state.chains || []).length > 0 || (state.pool || []).length > 0 ||
+    (s.routeRules || []).length > 0 || !!s.advancedRouting;
+  return hasPro ? 'advanced' : 'simple';
+}
+
+function applyUiMode(mode) {
+  const m = mode === 'simple' ? 'simple' : 'advanced';
+  document.body.dataset.uiMode = m;
+  const btn = $('#btnUiMode');
+  if (btn) btn.textContent = 'MODE: ' + (m === 'simple' ? t('ui.simple') : t('ui.advanced')).toUpperCase();
+  // a hidden view must never stay the visible one
+  if (m === 'simple') {
+    const cur = document.querySelector('.nav-item.active');
+    if (cur && cur.classList.contains('pro-only')) showView('home');
+  }
+}
+
+$('#btnUiMode').onclick = async () => {
+  const next = (state.settings.uiMode || defaultUiMode()) === 'simple' ? 'advanced' : 'simple';
+  await saveSettings({ uiMode: next });
+  applyUiMode(next);
+  toast(next === 'simple' ? t('ui.toSimple') : t('ui.toAdvanced'), 'ok');
+};
+
+// the inspector repeats the two actions people reach for most
+const insPing = $('#btnInsPing');
+if (insPing) insPing.onclick = () => $('#btnQuickPing').click();
+const insIp = $('#btnInsIp');
+if (insIp) insIp.onclick = () => $('#btnCheckIp').click();
 
 /* ----------------------------- xray binary ----------------------------- */
 /**
@@ -2874,6 +3144,11 @@ window.api.onStats((s) => {
   $('#sessDown').textContent = fmtBytes(s.totalDown);
   $('#sessUp').textContent = fmtBytes(s.totalUp);
   $('#sessSum').textContent = fmtBytes((Number(s.totalDown) || 0) + (Number(s.totalUp) || 0));
+  // the throughput caption floating over the path's first link. One textContent
+  // write per second onto a node the path already built — the diagram itself is
+  // never rebuilt here.
+  const cap = $('#pathCapIn');
+  if (cap) cap.textContent = `↓${fmtSpeed(s.downSpeed)}  ↑${fmtSpeed(s.upSpeed)}`;
 });
 
 function resetTraffic() {

@@ -18,10 +18,18 @@
         <img class="tb-logo" src="../../assets/icon.png" alt="IRNetFree" />
         <span class="tb-logo-badge"></span>
       </span>
-      <span class="tb-title">IR<b>NetFree</b></span>
+      <span class="tb-title">IR<b>NETFREE</b></span>
+    </div>
+    <span class="tb-sep"></span>
+    <!-- state · uptime, both monospaced so the digits do not jump each second -->
+    <div class="tb-status">
+      <span class="tb-dot"></span>
+      <span class="tb-state" id="tbState" data-i18n="tb.offline">OFFLINE</span>
+      <span class="tb-uptime" id="tbUptime"></span>
     </div>
     <div class="tb-drag"></div>
     <div class="tb-right">
+      <button class="tb-mode" id="btnUiMode" data-i18n-title="ui.modeHint">MODE: ADVANCED</button>
       <button class="tb-btn lang-btn" id="btnLang" title="Language">EN</button>
       <button class="tb-btn" id="btnMin" data-i18n-title="tb.min">&#x2013;</button>
       <button class="tb-btn" id="btnMax" data-i18n-title="tb.max">&#x25A1;</button>
@@ -31,32 +39,34 @@
 
   <div class="layout">
     <!-- sidebar -->
+    <!-- icon rail: the label stays in the DOM for i18n and screen readers, and
+         is repeated as a tooltip, so a 64px column keeps its meaning -->
     <nav class="sidebar">
-      <button class="nav-item active" data-view="home">
+      <button class="nav-item active" data-view="home" data-i18n-title="nav.home">
         <span class="nav-ico">⏻</span><span data-i18n="nav.home">اتصال</span>
       </button>
-      <button class="nav-item" data-view="servers">
+      <button class="nav-item" data-view="servers" data-i18n-title="nav.servers">
         <span class="nav-ico">🗂</span><span data-i18n="nav.servers">سرورها</span>
       </button>
-      <button class="nav-item" data-view="subs">
+      <button class="nav-item" data-view="subs" data-i18n-title="nav.subs">
         <span class="nav-ico">🔗</span><span data-i18n="nav.subs">ساب‌ها</span>
       </button>
-      <button class="nav-item" data-view="chain">
+      <button class="nav-item pro-only" data-view="chain" data-i18n-title="nav.chain">
         <span class="nav-ico">⛓</span><span data-i18n="nav.chain">زنجیره</span>
       </button>
-      <button class="nav-item" data-view="pool">
+      <button class="nav-item pro-only" data-view="pool" data-i18n-title="nav.pool">
         <span class="nav-ico">🧩</span><span data-i18n="nav.pool">استخر پروکسی</span>
       </button>
-      <button class="nav-item" data-view="routing">
+      <button class="nav-item" data-view="routing" data-i18n-title="nav.routing">
         <span class="nav-ico">🧭</span><span data-i18n="nav.routing">روتینگ</span>
       </button>
-      <button class="nav-item" data-view="settings">
-        <span class="nav-ico">⚙</span><span data-i18n="nav.settings">تنظیمات</span>
-      </button>
-      <button class="nav-item" data-view="logs">
+      <button class="nav-item pro-only" data-view="logs" data-i18n-title="nav.logs">
         <span class="nav-ico">📜</span><span data-i18n="nav.logs">لاگ‌ها</span>
       </button>
       <div class="sidebar-spacer"></div>
+      <button class="nav-item" data-view="settings" data-i18n-title="nav.settings">
+        <span class="nav-ico">⚙</span><span data-i18n="nav.settings">تنظیمات</span>
+      </button>
       <div class="conn-pill" id="connPill"><span class="dot"></span><span id="connPillText" data-i18n="pill.disconnected">قطع</span></div>
     </nav>
 
@@ -66,17 +76,15 @@
       <!-- HOME / CONNECT -->
       <section class="view active" id="view-home">
         <div class="connect-hero">
-          <button class="power-btn" id="powerBtn" aria-label="connect">
-            <svg viewBox="0 0 24 24" class="power-ico"><path d="M12 3v9" /><path d="M7 6.5a8 8 0 1 0 10 0" /></svg>
-          </button>
-          <div class="connect-state" id="connState" data-i18n="state.disconnected">قطع شده</div>
-          <div class="connect-server" id="connServer" data-i18n="conn.noServer">سروری انتخاب نشده</div>
-          <div class="connect-geo" id="connGeo" hidden>
-            <span class="geo-flag" id="geoFlag"></span>
-            <span class="geo-text" id="geoText"></span>
-          </div>
 
-          <!-- unified server picker -->
+          <!-- where traffic actually goes. Built once per connect / routing
+               change, never on a stats tick — see renderTrafficPath(). -->
+          <div class="sec">
+            <span class="sec-label" data-i18n="path.title">مسیر ترافیک</span>
+          </div>
+          <div class="path-panel" id="trafficPath"></div>
+
+          <!-- which config, and its ping -->
           <div class="picker" id="serverPicker">
             <button class="picker-current" id="pickerBtn">
               <span class="proto-badge" id="pickerProto" hidden></span>
@@ -87,55 +95,71 @@
             <div class="picker-menu" id="pickerMenu" hidden></div>
           </div>
 
-          <div class="stat-row">
-            <div class="stat-card">
-              <div class="stat-label" data-i18n="stat.tcp">پینگ TCP</div>
-              <div class="stat-value" id="statTcp">—</div>
+          <div class="connect-row">
+            <div class="connect-panel">
+              <button class="power-btn" id="powerBtn" aria-label="connect">
+                <svg viewBox="0 0 24 24" class="power-ico"><path d="M12 3v9" /><path d="M7 6.5a8 8 0 1 0 10 0" /></svg>
+              </button>
+              <div class="connect-state" id="connState" data-i18n="state.disconnected">قطع شده</div>
+              <div class="connect-meta" id="connMeta"></div>
+              <div class="connect-server" id="connServer" data-i18n="conn.noServer">سروری انتخاب نشده</div>
+              <div class="connect-geo" id="connGeo" hidden>
+                <span class="geo-flag" id="geoFlag"></span>
+                <span class="geo-text" id="geoText"></span>
+              </div>
             </div>
-            <div class="stat-card">
-              <div class="stat-label" data-i18n="stat.real">تأخیر واقعی</div>
-              <div class="stat-value" id="statReal">—</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-label" data-i18n="stat.ip">IP خروجی</div>
-              <div class="stat-value" id="statIp">—</div>
+
+            <div class="readouts">
+              <div class="stat-row">
+                <div class="stat-card readout rd-down">
+                  <div class="stat-label" data-i18n="stat.down">دانلود</div>
+                  <div><span class="stat-value traffic-speed" id="downSpeed">0 B/s</span>
+                    <span class="rd-sub traffic-total" id="downTotal">0 B</span></div>
+                </div>
+                <div class="stat-card readout rd-up">
+                  <div class="stat-label" data-i18n="stat.up">آپلود</div>
+                  <div><span class="stat-value traffic-speed" id="upSpeed">0 B/s</span>
+                    <span class="rd-sub traffic-total" id="upTotal">0 B</span></div>
+                </div>
+                <div class="stat-card readout">
+                  <div class="stat-label" data-i18n="stat.tcp">پینگ TCP</div>
+                  <div class="stat-value rd-val" id="statTcp">—</div>
+                </div>
+                <div class="stat-card readout">
+                  <div class="stat-label" data-i18n="stat.real">تأخیر واقعی</div>
+                  <div class="stat-value rd-val" id="statReal">—</div>
+                </div>
+                <div class="stat-card readout">
+                  <div class="stat-label" data-i18n="stat.ip">IP خروجی</div>
+                  <div class="stat-value rd-val" id="statIp">—</div>
+                </div>
+              </div>
+              <div class="traffic-row" id="trafficRow">
+                <button class="traffic-card mode-card readout" id="modeCard" title="">
+                  <span class="traffic-ico mode" id="modeIco">⚡</span>
+                  <div class="stat-label traffic-speed" id="modeLabel" data-i18n="mode.proxy">پروکسی</div>
+                  <div class="rd-val traffic-total" id="modeSub" data-i18n="mode.proxySub">SOCKS/HTTP</div>
+                  <span class="mode-card-caret">⇄</span>
+                </button>
+              </div>
+
+              <!-- session usage totals -->
+              <div class="session-card" id="sessionCard">
+                <div class="session-title" data-i18n="session.title">مصرف این نشست</div>
+                <div class="session-grid">
+                  <div><div class="session-label" data-i18n="session.down">دانلود کل</div><div class="session-val" id="sessDown">0 B</div></div>
+                  <div><div class="session-label" data-i18n="session.up">آپلود کل</div><div class="session-val" id="sessUp">0 B</div></div>
+                  <div><div class="session-label" data-i18n="session.sum">مجموع</div><div class="session-val sum" id="sessSum">0 B</div></div>
+                </div>
+              </div>
             </div>
           </div>
 
-          <div class="traffic-row" id="trafficRow">
-            <div class="traffic-card">
-              <span class="traffic-ico down">▼</span>
-              <div>
-                <div class="traffic-speed" id="downSpeed">0 B/s</div>
-                <div class="traffic-total" id="downTotal">0 B</div>
-              </div>
-            </div>
-            <div class="traffic-card">
-              <span class="traffic-ico up">▲</span>
-              <div>
-                <div class="traffic-speed" id="upSpeed">0 B/s</div>
-                <div class="traffic-total" id="upTotal">0 B</div>
-              </div>
-            </div>
-            <button class="traffic-card mode-card" id="modeCard" title="">
-              <span class="traffic-ico mode" id="modeIco">⚡</span>
-              <div>
-                <div class="traffic-speed" id="modeLabel" data-i18n="mode.proxy">پروکسی</div>
-                <div class="traffic-total" id="modeSub" data-i18n="mode.proxySub">SOCKS/HTTP</div>
-              </div>
-              <span class="mode-card-caret">⇄</span>
-            </button>
+          <!-- the tail of the core's own log, for the people who want to see it -->
+          <div class="sec pro-only">
+            <span class="sec-label" data-i18n="path.live">لاگ زنده</span>
           </div>
-
-          <!-- session usage totals -->
-          <div class="session-card" id="sessionCard">
-            <div class="session-title" data-i18n="session.title">مصرف این نشست</div>
-            <div class="session-grid">
-              <div><div class="session-label" data-i18n="session.down">دانلود کل</div><div class="session-val" id="sessDown">0 B</div></div>
-              <div><div class="session-label" data-i18n="session.up">آپلود کل</div><div class="session-val" id="sessUp">0 B</div></div>
-              <div><div class="session-label" data-i18n="session.sum">مجموع</div><div class="session-val sum" id="sessSum">0 B</div></div>
-            </div>
-          </div>
+          <div class="home-log pro-only" id="homeLog"></div>
 
           <div class="hero-actions">
             <button class="btn ghost" id="btnQuickPing" data-i18n="btn.quickPing">تست پینگ</button>
@@ -320,30 +344,23 @@
       <!-- ROUTING -->
       <section class="view" id="view-routing">
         <div class="view-head"><h2 data-i18n="routing.title">روتینگ</h2></div>
-        <div class="card">
-          <label class="field-label" data-i18n="routing.modeLabel">حالت روتینگ</label>
+
+        <!-- BASE: the preset every custom rule stacks on top of -->
+        <div class="base-strip">
+          <span class="base-label" data-i18n="routing.base">پایه</span>
           <div class="seg" id="routingSeg">
             <button data-mode="global" class="seg-btn active" data-i18n="routing.global">گلوبال (همه از پروکسی)</button>
             <button data-mode="bypass-ir" class="seg-btn" data-i18n="routing.bypassIr">دور زدن ایران</button>
             <button data-mode="bypass-cn" class="seg-btn" data-i18n="routing.bypassCn">دور زدن چین</button>
             <button data-mode="direct" class="seg-btn" data-i18n="routing.direct">مستقیم</button>
           </div>
-          <p class="hint" data-i18n="routing.hint">در حالت «دور زدن ایران»، ترافیک داخلی مستقیم می‌ره و بقیه از پروکسی.</p>
-          <p class="hint geo-note" id="routingGeoNote" data-i18n="routing.geoNote"></p>
+          <span class="base-note" data-i18n="routing.baseNote">قانون‌های سفارشی روی این پایه سوار می‌شوند</span>
         </div>
+        <p class="hint" data-i18n="routing.hint">در حالت «دور زدن ایران»، ترافیک داخلی مستقیم می‌ره و بقیه از پروکسی.</p>
+        <p class="hint geo-note" id="routingGeoNote" data-i18n="routing.geoNote"></p>
 
-        <div class="card">
-          <div class="switch-row">
-            <div><div class="switch-title" data-i18n="ads.title">مسدودسازی تبلیغات</div>
-              <div class="switch-sub" data-i18n="ads.sub">دامنه‌های تبلیغاتی بلاک می‌شن</div></div>
-            <label class="switch"><input type="checkbox" id="optBlockAds" /><span class="slider"></span></label>
-          </div>
-          <div class="switch-row">
-            <div><div class="switch-title" data-i18n="sniff.title">Sniffing</div>
-              <div class="switch-sub" data-i18n="sniff.sub">تشخیص دامنه برای روتینگ دقیق‌تر</div></div>
-            <label class="switch"><input type="checkbox" id="optSniff" /><span class="slider"></span></label>
-          </div>
-        </div>
+        <div class="routing-cols">
+        <div class="routing-main">
 
         <!-- Advanced graphical routing -->
         <div class="card">
@@ -395,13 +412,32 @@
           </div>
         </div>
 
-        <div class="card" id="simpleRulesCard">
+        <div class="card pro-only" id="simpleRulesCard">
           <label class="field-label" data-i18n="rules.label">قوانین سفارشی</label>
           <p class="hint" data-i18n="rules.hint">هر خط: domain|ip|port , مقدار , خروجی(proxy/direct/block)</p>
           <textarea id="customRules" class="textarea" rows="4"
             placeholder="domain, geosite:google, proxy&#10;ip, 8.8.8.8, direct&#10;port, 443, proxy"></textarea>
           <button class="btn primary" id="btnSaveRules" data-i18n="btn.saveRules">ذخیره قوانین</button>
         </div>
+
+        </div><!-- /routing-main -->
+
+        <aside class="routing-side">
+          <div class="sec"><span class="sec-label" data-i18n="routing.filters">فیلترها</span></div>
+          <div class="card">
+            <div class="switch-row">
+              <div><div class="switch-title" data-i18n="ads.title">مسدودسازی تبلیغات</div>
+                <div class="switch-sub" data-i18n="ads.sub">دامنه‌های تبلیغاتی بلاک می‌شن</div></div>
+              <label class="switch"><input type="checkbox" id="optBlockAds" /><span class="slider"></span></label>
+            </div>
+            <div class="switch-row">
+              <div><div class="switch-title" data-i18n="sniff.title">Sniffing</div>
+                <div class="switch-sub" data-i18n="sniff.sub">تشخیص دامنه برای روتینگ دقیق‌تر</div></div>
+              <label class="switch"><input type="checkbox" id="optSniff" /><span class="slider"></span></label>
+            </div>
+          </div>
+        </aside>
+        </div><!-- /routing-cols -->
       </section>
 
       <!-- SETTINGS -->
@@ -614,6 +650,38 @@
       </section>
 
     </main>
+
+    <!-- Inspector: what the tunnel is doing right now, always in view. Every
+         value here is already known to the renderer — it is filled from the
+         same state the settings page renders from, never polled. -->
+    <aside class="inspector pro-only" id="inspector">
+      <div class="sec"><span class="sec-label" data-i18n="ins.title">اینسپکتور</span></div>
+
+      <div class="ins-group">
+        <div class="ins-head" data-i18n="ins.protection">محافظت</div>
+        <div class="ins-row"><span class="ins-label" data-i18n="ins.tun">TUN</span><span class="ins-val" id="insTun">—</span></div>
+        <div class="ins-row"><span class="ins-label" data-i18n="ins.kill">Kill switch</span><span class="ins-val" id="insKill">—</span></div>
+        <div class="ins-row"><span class="ins-label" data-i18n="ins.guard">Leak guard</span><span class="ins-val" id="insGuard">—</span></div>
+        <div class="ins-row"><span class="ins-label" data-i18n="ins.ipv6">IPv6</span><span class="ins-val" id="insIpv6">—</span></div>
+      </div>
+
+      <div class="ins-div"></div>
+
+      <div class="ins-group">
+        <div class="ins-head" data-i18n="ins.ports">پورت‌های محلی</div>
+        <div class="ins-row"><span class="ins-label">SOCKS</span><span class="ins-val" id="insSocks">—</span></div>
+        <div class="ins-row"><span class="ins-label">HTTP</span><span class="ins-val" id="insHttp">—</span></div>
+        <div class="ins-row"><span class="ins-label" data-i18n="ins.core">هسته</span><span class="ins-val" id="insCore">—</span></div>
+        <div class="ins-row"><span class="ins-label" data-i18n="ins.routing">روتینگ</span><span class="ins-val accent" id="insRouting">—</span></div>
+      </div>
+
+      <div class="ins-div"></div>
+
+      <div class="ins-actions">
+        <button class="btn small" id="btnInsPing" data-i18n="btn.quickPing">تست پینگ</button>
+        <button class="btn small" id="btnInsIp" data-i18n="btn.checkIp">بررسی IP</button>
+      </div>
+    </aside>
   </div>
 
   <!-- edit server modal -->
