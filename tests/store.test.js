@@ -192,3 +192,37 @@ test('an interrupted write cannot corrupt the saved store', () => {
     assert.deepEqual(next.get('servers'), servers);
   });
 });
+
+/* --------------------------- coalesced writes --------------------------- */
+
+/** withDir() for an async body: the directory outlives the awaits. */
+async function withDirAsync(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-store-'));
+  const file = path.join(dir, 'store.json');
+  try { return await fn({ dir, file }); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('setLazy coalesces writes; flush() and save() write what it holds', async () => {
+  // The process-IP cache is rewritten every 20 s for the life of a tunnel,
+  // and every save() serialises the whole store, fsyncs and renames.
+  await withDirAsync(async ({ file }) => {
+    const s = new Store(file, DEFAULTS);
+    s.setLazy('procIpCache', { a: 1 }, 30);
+    s.setLazy('procIpCache', { a: 2 }, 30);
+    assert.equal(fs.existsSync(file), false, 'nothing written yet');
+    await new Promise(r => setTimeout(r, 80));
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).procIpCache, { a: 2 }, 'one write, the last value');
+
+    s.setLazy('procIpCache', { a: 3 }, 30);
+    assert.equal(s.flush(), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).procIpCache, { a: 3 });
+    assert.equal(s.flush(), true, 'nothing held: a no-op');
+
+    s.setLazy('procIpCache', { a: 4 }, 30);
+    s.set('servers', []);                          // an ordinary save carries the lazy value too
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).procIpCache, { a: 4 });
+    const mtime = fs.statSync(file).mtimeMs;
+    await new Promise(r => setTimeout(r, 80));
+    assert.equal(fs.statSync(file).mtimeMs, mtime, 'and no second write follows it');
+  });
+});

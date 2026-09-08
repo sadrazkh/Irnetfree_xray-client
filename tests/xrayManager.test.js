@@ -15,7 +15,7 @@ let fakeSpawn = null;
 const spawns = [];
 cp.spawn = (...args) => { spawns.push(args); return fakeSpawn ? fakeSpawn(...args) : realSpawn(...args); };
 
-const { XrayManager, PLAINTEXT_REJECT } = require('../src/main/xrayManager');
+const { XrayManager, getFreePorts, PLAINTEXT_REJECT } = require('../src/main/xrayManager');
 const { ENGINES } = require('../src/main/engines');
 
 /** Stand-in for a spawned core, so no real binary has to exist / run. */
@@ -222,4 +222,94 @@ test('startTest rejects when the core cannot be spawned instead of crashing the 
       fakeSpawn = null;
     }
   });
+});
+
+/* --------------------------- the validation cache --------------------------- */
+
+const exit0 = () => { const p = stubChild(); setImmediate(() => p.emit('exit', 0)); return p; };
+
+test('validate: an identical config on the same core is not spawned twice; forgetVersions() clears it', async () => {
+  // A reconnect after a network change rebuilds the identical config, and
+  // `-test` costs 1-6 s of the connect each time.
+  await withBin([exe('xray')], async (xm) => {
+    const before = spawns.length;
+    fakeSpawn = exit0;
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true });
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true, cached: true });
+      assert.equal(spawns.length - before, 1, 'one -test run for two identical validations');
+      // a different config is a different fact
+      await xm.validate(Object.assign({}, cfg, { log: { loglevel: 'warning' } }), 'xray');
+      assert.equal(spawns.length - before, 2);
+      xm.forgetVersions();
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true });
+      assert.equal(spawns.length - before, 3, 'a re-downloaded core forgets every pass');
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: a rejected config is never cached', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const before = spawns.length;
+    fakeSpawn = () => { const p = stubChild(); setImmediate(() => { p.stderr.emit('data', Buffer.from('Failed to start: bad thing')); p.emit('exit', 1); }); return p; };
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      assert.equal((await xm.validate(cfg, 'xray')).ok, false);
+      assert.equal((await xm.validate(cfg, 'xray')).ok, false);
+      assert.equal(spawns.length - before, 2);
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: an old core that does not know -test passes UNVERIFIED and is not cached', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const before = spawns.length;
+    fakeSpawn = () => { const p = stubChild(); setImmediate(() => { p.stderr.emit('data', Buffer.from('flag provided but not defined: -test')); p.emit('exit', 2); }); return p; };
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true, unverified: true });
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true, unverified: true });
+      assert.equal(spawns.length - before, 2);
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: the key follows the core file — a replaced binary is checked again', async () => {
+  await withBin([exe('xray')], async (xm, dir) => {
+    const before = spawns.length;
+    fakeSpawn = exit0;
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      await xm.validate(cfg, 'xray');
+      const bin = path.join(dir, exe('xray'));
+      const t = new Date(Date.now() + 5000);
+      fs.utimesSync(bin, t, t);                       // "re-downloaded": a new mtime
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true });
+      assert.equal(spawns.length - before, 2);
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('getFreePorts hands out n distinct loopback ports', async () => {
+  const ports = await getFreePorts(5);
+  assert.equal(ports.length, 5);
+  assert.equal(new Set(ports).size, 5, 'distinct: ' + ports.join(','));
+  for (const p of ports) assert.ok(p > 0 && p < 65536);
+  assert.deepEqual(await getFreePorts(0), []);
+});
+
+test('binDirs never yields a relative directory outside Electron', () => {
+  // process.resourcesPath is undefined in plain Node; the old
+  // path.join(undefined || '', 'bin') was the relative `bin`, which resolved
+  // against the spawned child's cwd and made every headless latency test ENOENT.
+  const saved = process.resourcesPath;
+  delete process.resourcesPath;
+  try {
+    const xm = new XrayManager({ dataDir: os.tmpdir() });
+    for (const d of xm.binDirs()) assert.ok(path.isAbsolute(d), 'relative bin dir: ' + d);
+    assert.ok(xm.binDirs().some(d => d === path.join(__dirname, '..', 'bin')), 'the bundled bin/ is still there');
+  } finally {
+    if (saved !== undefined) process.resourcesPath = saved;
+  }
 });

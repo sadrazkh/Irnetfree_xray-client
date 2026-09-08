@@ -6,7 +6,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { sumOutbounds, SilenceWatch, byOutbound } = require('../src/main/stats');
+const { sumOutbounds, SilenceWatch, byOutbound, StatsPoller } = require('../src/main/stats');
 
 const vars = (outbound) => ({ stats: { outbound } });
 
@@ -97,4 +97,41 @@ test('byOutbound survives a body with no outbound section', () => {
   assert.deepEqual(byOutbound({}), {});
   assert.deepEqual(byOutbound(vars({})), {});
   assert.deepEqual(byOutbound(vars({ 'out-x': {} })), { 'out-x': { up: 0, down: 0 } });
+});
+
+/* --------------------------- cadence --------------------------- */
+
+test('retime changes the cadence and keeps the baseline (no phantom speed spike)', async () => {
+  // The window goes to the tray: polling drops to every five seconds. The
+  // bytes that arrived meanwhile must read as a rate over the MEASURED gap,
+  // never as a burst over a reset baseline.
+  const seen = [];
+  const p = new StatsPoller({ onStats: (s) => seen.push(s) });
+  let up = 1000;
+  p.query = async () => ({ up, down: 0, per: {} });
+  p.start(10);
+  await new Promise(r => setTimeout(r, 35));
+  assert.ok(seen.length >= 1, 'polled at the fast cadence');
+  up = 2000;
+  p.retime(30);
+  assert.equal(p.intervalMs, 30);
+  const before = seen.length;
+  await new Promise(r => setTimeout(r, 50));
+  p.stop();
+  assert.ok(seen.length > before, 'polled at the slow cadence');
+  const last = seen[seen.length - 1];
+  assert.equal(last.totalUp, 2000);
+  // 1000 new bytes over at least the slow gap: far below what a reset baseline would report
+  assert.ok(last.upSpeed > 0 && last.upSpeed <= 1000 / 0.03, 'speed against the kept baseline: ' + last.upSpeed);
+  assert.equal(p.timer, null, 'stopped');
+});
+
+test('retime before start() only records the cadence; the same value is a no-op', () => {
+  const p = new StatsPoller({});
+  p.retime(5000);
+  assert.equal(p.intervalMs, 5000);
+  assert.equal(p.timer, null);
+  p.retime(5000);
+  p.retime(0);
+  assert.equal(p.intervalMs, 5000);
 });

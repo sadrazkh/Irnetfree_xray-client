@@ -195,6 +195,23 @@ class PinWatch {
  * @param {object[]} servers  stored records
  * @param {(o: {host: string, port: number, servername: string}) => Promise<string>} probe
  */
+/** A pin is re-verified against the live server at most this often. */
+const RECHECK_AFTER_MS = 6 * 3600 * 1000;
+
+/**
+ * Should this record's pin be checked against the server now? A rotation is a
+ * weekly-to-yearly event; the check is a TLS dial per server on every connect
+ * and every network-change recovery, so a pin looked at within the window is
+ * left alone. No pin, nothing to re-check.
+ */
+function recheckDue(server, now, maxAgeMs) {
+  if (!server || !server.certPin) return false;
+  const t = now == null ? Date.now() : now;
+  const max = maxAgeMs == null ? RECHECK_AFTER_MS : maxAgeMs;
+  const at = Number(server.certPinCheckedAt) || 0;
+  return t - at >= max;
+}
+
 async function staleCertPins(servers, probe = fetchLeafPin) {
   const pinned = (servers || []).filter(s => s && s.certPin && s.address && s.port);
   const out = [];
@@ -210,4 +227,4 @@ async function staleCertPins(servers, probe = fetchLeafPin) {
   return out;
 }
 
-module.exports = { fetchLeafPin, pinOf, normalizePin, directServers, wantsPin, pinTargets, staleCertPins, PinWatch, PIN_MISMATCH };
+module.exports = { fetchLeafPin, pinOf, normalizePin, directServers, wantsPin, pinTargets, staleCertPins, recheckDue, RECHECK_AFTER_MS, PinWatch, PIN_MISMATCH };

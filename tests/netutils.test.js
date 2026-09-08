@@ -13,7 +13,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const net = require('node:net');
 
-const { socks5Connect } = require('../src/main/netutils');
+const { socks5Connect, pLimit } = require('../src/main/netutils');
 
 /** A SOCKS5 server that writes its replies in deliberately awkward pieces. */
 function fakeSocks(onConnected) {
@@ -154,4 +154,22 @@ test('a failed CONNECT reply rejects with its code', async () => {
   try {
     await assert.rejects(socks5Connect('127.0.0.1', srv.address().port, 'example.com', 80, 2000), /socks connect failed code 5/);
   } finally { srv.close(); }
+});
+
+/* --------------------------- pLimit --------------------------- */
+
+test('pLimit never runs more than n at once, keeps order, and passes rejections through', async () => {
+  const limit = pLimit(2);
+  let active = 0, peak = 0;
+  const job = (v) => limit(async () => {
+    active++; peak = Math.max(peak, active);
+    await new Promise(r => setTimeout(r, 5));
+    active--;
+    if (v === 4) throw new Error('four');
+    return v;
+  });
+  const out = await Promise.allSettled([1, 2, 3, 4, 5].map(job));
+  assert.deepEqual(out.map(r => r.status === 'fulfilled' ? r.value : r.reason.message), [1, 2, 3, 'four', 5]);
+  assert.equal(peak, 2);
+  assert.equal(active, 0);
 });

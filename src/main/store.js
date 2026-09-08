@@ -61,6 +61,8 @@ class Store {
     this.loadError = null;
     /** Set when the last save failed: the error message. */
     this.saveError = null;
+    /** A write setLazy() is holding back, or null. */
+    this.lazyTimer = null;
     this.load();
   }
 
@@ -130,11 +132,36 @@ class Store {
   all() { return this.data; }
 
   /**
+   * Like set(), but the write is coalesced: any number of calls inside
+   * `delayMs` produce one save. For values nobody needs on disk this instant —
+   * the process-IP cache is rewritten every 20 s for the life of a tunnel,
+   * and every save() serialises the whole store, fsyncs and renames.
+   * Any ordinary save() in between carries the value (see save()).
+   */
+  setLazy(key, value, delayMs = 500) {
+    this.data[key] = value;
+    if (this.lazyTimer) return true;
+    this.lazyTimer = setTimeout(() => { this.lazyTimer = null; this.save(); }, delayMs);
+    if (this.lazyTimer.unref) this.lazyTimer.unref();
+    return true;
+  }
+
+  /** Write whatever setLazy() is still holding. Synchronous, for exit paths. */
+  flush() {
+    if (!this.lazyTimer) return true;
+    clearTimeout(this.lazyTimer);
+    this.lazyTimer = null;
+    return this.save();
+  }
+
+  /**
    * Persist atomically: full write to `.tmp`, fsync, then rename over the real
    * file. Returns true on success; on failure the previously saved file is left
    * untouched and `saveError` is set.
    */
   save() {
+    // this write carries anything setLazy() was holding — no second write follows
+    if (this.lazyTimer) { clearTimeout(this.lazyTimer); this.lazyTimer = null; }
     const json = JSON.stringify(this.data, null, 2);
     try {
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true });

@@ -13,7 +13,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts } = require('../src/main/configBuilder');
 const {
   settings, ruleTags, outboundTagged, vlessWithMarkers,
   VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK, WG_CORP
@@ -1352,4 +1352,44 @@ test('a WireGuard peer carries whatever is routed to it, whatever its AllowedIPs
     rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-wgcorp' }], def: 'sv-vless'
   }), settings());
   assert.deepEqual(outboundTagged(adv, 'out-sv-wgcorp').settings.peers[0].allowedIPs, ['0.0.0.0/0', '::/0']);
+});
+
+/* --------------------------- the multi-target latency test --------------------------- */
+
+test('buildMultiTestConfig: one inbound per target, routed to its own outbound, no tag collisions', () => {
+  // "Test all" used to spawn a core per server; one core serves them all,
+  // each on its own loopback port, each routed to its own outbound.
+  const c = buildMultiTestConfig(
+    [VLESS_WS_TLS, [TROJAN_TCP_TLS, SS_TCP], vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' })],
+    [40001, 40002, 40003]);
+  assert.deepEqual(c.inbounds.map(i => [i.tag, i.port, i.listen, i.protocol]), [
+    ['test-in-0', 40001, '127.0.0.1', 'socks'],
+    ['test-in-1', 40002, '127.0.0.1', 'socks'],
+    ['test-in-2', 40003, '127.0.0.1', 'socks']
+  ]);
+  assert.deepEqual(c.inbounds[0].settings, { auth: 'noauth', udp: false });
+  assert.deepEqual(c.routing.rules, [
+    { type: 'field', inboundTag: ['test-in-0'], outboundTag: 'test-out-0' },
+    { type: 'field', inboundTag: ['test-in-1'], outboundTag: 'test-out-1' },
+    { type: 'field', inboundTag: ['test-in-2'], outboundTag: 'test-out-2' }
+  ]);
+  const tags = c.outbounds.map(o => o.tag);
+  assert.equal(new Set(tags).size, tags.length, 'every outbound tag unique: ' + tags.join(','));
+  // the chain: exit tagged for its inbound, hop chained under the same prefix
+  assert.ok(tags.includes('test-out-1') && tags.includes('test-out-1-h0'));
+  assert.equal(outboundTagged(c, 'test-out-1').streamSettings.sockopt.dialerProxy, 'test-out-1-h0');
+  // the fragment dialer exists and the fragmented target dials through it
+  const dpi = tags.find(t => t.startsWith('dpi-'));
+  assert.ok(dpi, 'a dpi dialer for the fragmented target');
+  assert.equal(outboundTagged(c, 'test-out-2').streamSettings.sockopt.dialerProxy, dpi);
+  assert.equal(c.log.loglevel, 'none');
+  assert.equal(tags[tags.length - 1], 'direct');
+  assert.equal(c.dns, undefined, 'no DNS plan: a ping runs without TUN');
+});
+
+test('buildMultiTestConfig with nothing to test is an empty, valid shape', () => {
+  const c = buildMultiTestConfig([], []);
+  assert.deepEqual(c.inbounds, []);
+  assert.deepEqual(c.routing.rules, []);
+  assert.deepEqual(c.outbounds.map(o => o.tag), ['direct']);
 });

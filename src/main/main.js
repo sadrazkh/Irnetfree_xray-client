@@ -6,17 +6,17 @@ const os = require('os');
 const { spawn, execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('./configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('./configBuilder');
 const { adapterDnsServers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
 const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('./engineChoice');
-const { fetchLeafPin, pinTargets, directServers, staleCertPins, PinWatch } = require('./certPin');
+const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('./certPin');
 const { assetStatus: scanAssets } = require('./assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
-const { XrayManager, getFreePort } = require('./xrayManager');
+const { XrayManager, getFreePort, getFreePorts } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
-const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('./netutils');
+const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
@@ -54,6 +54,15 @@ let stats = null;
 // of a connection is a lot of disk for a counter.
 let usage = null;
 let usageStore = null;
+// One poll of the core's counters a second while the numbers are on screen;
+// one every five while the window is hidden or minimised. The poller keeps
+// its baseline across the change (stats.retime), so speeds stay honest and the
+// usage meter loses nothing — only 3,600 requests an hour nobody was reading.
+const STATS_VISIBLE_MS = 1000, STATS_HIDDEN_MS = 5000;
+function statsCadence() {
+  const shown = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized();
+  return shown ? STATS_VISIBLE_MS : STATS_HIDDEN_MS;
+}
 let lastUsageSend = 0;
 let downloader = null;
 let procWatcher = null;
@@ -309,6 +318,11 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
+  // the traffic meter follows the window: fast while shown, slow while hidden
+  for (const ev of ['show', 'hide', 'minimize', 'restore', 'focus']) {
+    mainWindow.on(ev, () => { if (stats) stats.retime(statsCadence()); });
+  }
+
   mainWindow.on('close', (e) => {
     if (!isQuitting) {
       e.preventDefault();
@@ -351,7 +365,9 @@ function activeProcNames(settings) {
 }
 
 function loadProcCache() { return store.get('procIpCache', {}) || {}; }
-function saveProcCache(c) { store.set('procIpCache', c); }
+// Coalesced: the watcher rewrites this every 20 s for the life of a tunnel,
+// and a save() rewrites the whole store (every server, fsync, rename) for it.
+function saveProcCache(c) { store.setLazy('procIpCache', c); }
 
 /**
  * Return a settings copy in which every 'process' route rule is rewritten into
@@ -537,13 +553,20 @@ async function ensureCertPins(serverId, settings) {
   // pin that no longer matches is dropped here, and the probe below (which
   // picks up every directly-dialled server without a pin) learns the new one on
   // this same connect.
-  const stale = await staleCertPins(directServers(plan), fetchLeafPin).catch(() => []);
-  if (stale.length) {
-    const ids = new Set(stale.map(s => s.id));
+  //
+  // Only the pins that are DUE (certPin.recheckDue): a rotation is a rare
+  // event and the check is a TLS dial per server on every connect and every
+  // network-change recovery. Whatever was asked is stamped, stale or not.
+  const now = Date.now();
+  const due = directServers(plan).filter(s => recheckDue(s, now));
+  const stale = due.length ? await staleCertPins(due, fetchLeafPin).catch(() => []) : [];
+  if (due.length) {
+    const dueIds = new Set(due.map(s => s.id));
+    const staleIds = new Set(stale.map(s => s.id));
     store.set('servers', store.get('servers', []).map(s => {
-      if (!ids.has(s.id)) return s;
-      const out = Object.assign({}, s);
-      delete out.certPin; delete out.certPinAt;
+      if (!dueIds.has(s.id)) return s;
+      const out = Object.assign({}, s, { certPinCheckedAt: now });
+      if (staleIds.has(s.id)) { delete out.certPin; delete out.certPinAt; }
       return out;
     }));
     for (const s of stale) {
@@ -567,7 +590,8 @@ async function ensureCertPins(serverId, settings) {
   }));
   if (!Object.keys(learned).length) return;
   const certPinAt = new Date().toISOString();
-  store.set('servers', store.get('servers', []).map(s => learned[s.id] ? Object.assign({}, s, { certPin: learned[s.id], certPinAt }) : s));
+  // A pin learned now was, by definition, checked now.
+  store.set('servers', store.get('servers', []).map(s => learned[s.id] ? Object.assign({}, s, { certPin: learned[s.id], certPinAt, certPinCheckedAt: Date.now() }) : s));
 }
 
 /**
@@ -976,7 +1000,7 @@ async function doConnect(serverId, opts = {}) {
   // and a whole session is credited twice. The plan must be set before the
   // first tick, or those bytes belong to nobody.
   if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
-  stats.start(1000);
+  stats.start(statsCadence());
 
   // Keep process routes fresh while connected (opt-in; briefly reloads xray).
   startProcWatcher();
@@ -1829,6 +1853,46 @@ function registerIpc() {
     }
   });
 
+  // Real delay for MANY targets: one throwaway core per engine, up to
+  // REAL_BATCH targets each (a config with 200 inbounds is slow to start and
+  // one bad member would take the batch down), REAL_PARALLEL requests in
+  // flight so the test site is not hammered. Returns a result per id.
+  const REAL_BATCH = 20, REAL_PARALLEL = 6;
+  ipcMain.handle('ping:realMany', async (e, ids) => {
+    const out = {};
+    const list = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
+    if (!xray.binExists()) { for (const id of list) out[id] = { ok: false, error: 'xray binary missing' }; return out; }
+    const byEngine = new Map();
+    for (const id of list) {
+      const { server, chain } = resolveTarget(id);
+      if (!server) { out[id] = { ok: false, error: 'not found' }; continue; }
+      const isChain = chain && chain.length >= 2;
+      const plan = isChain ? { mode: 'chain', chain } : { mode: 'single', server };
+      const eng = testEngineFor(chooseEngine(plan, getSettings().defaultEngine));
+      if (!byEngine.has(eng)) byEngine.set(eng, []);
+      byEngine.get(eng).push({ id, target: isChain ? chain : server });
+    }
+    const limit = pLimit(REAL_PARALLEL);
+    for (const [eng, targets] of byEngine) {
+      for (let i = 0; i < targets.length; i += REAL_BATCH) {
+        const batch = targets.slice(i, i + REAL_BATCH);
+        let test = null;
+        try {
+          const ports = await getFreePorts(batch.length);
+          test = await xray.startTest(buildMultiTestConfig(batch.map(b => b.target), ports), eng);
+          await Promise.all(batch.map((b, k) => limit(async () => {
+            out[b.id] = await httpThroughProxy(ports[k], { host: 'cp.cloudflare.com', port: 80, path: '/' });
+          })));
+        } catch (err) {
+          for (const b of batch) if (!out[b.id]) out[b.id] = { ok: false, error: err.message };
+        } finally {
+          if (test) test.cleanup();
+        }
+      }
+    }
+    return out;
+  });
+
   // IP info — direct or through the active proxy
   ipcMain.handle('ip:check', async (e, viaProxy) => {
     if (viaProxy) {
@@ -2144,6 +2208,7 @@ app.whenReady().then(() => {
  */
 async function teardownForQuit() {
   userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
+  try { if (store) store.flush(); } catch {}   // whatever setLazy() still holds
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
@@ -2197,6 +2262,7 @@ app.on('window-all-closed', () => {
 // exit (Windows only) — otherwise a kill-switch block would outlive the app and
 // leave the machine with no internet.
 process.on('exit', () => {
+  try { if (store) store.flush(); } catch {}   // a coalesced write must not die with the process
   // The DNS override outlives the app if nobody puts it back, so it goes before
   // the win32 gate below: on macOS (when we are already root) this is the last
   // chance to restore it without a password prompt nobody can answer here.

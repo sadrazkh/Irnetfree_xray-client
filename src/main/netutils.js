@@ -324,4 +324,20 @@ function parseJsonLoose(body) {
   try { return JSON.parse(body.slice(start, end + 1)); } catch { return null; }
 }
 
-module.exports = { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, socks5Connect };
+/** At most n of the wrapped calls in flight at once; the rest queue in order. */
+function pLimit(n) {
+  let active = 0;
+  const queue = [];
+  const run = async (fn, resolve, reject) => {
+    active++;
+    try { resolve(await fn()); } catch (e) { reject(e); } finally {
+      active--;
+      if (queue.length) { const [f, r, j] = queue.shift(); run(f, r, j); }
+    }
+  };
+  return (fn) => new Promise((resolve, reject) => {
+    if (active < n) run(fn, resolve, reject); else queue.push([fn, resolve, reject]);
+  });
+}
+
+module.exports = { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, socks5Connect, pLimit };

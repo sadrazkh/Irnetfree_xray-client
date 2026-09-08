@@ -87,6 +87,7 @@
     // diagnostics
     pingTcp: (id) => invoke('ping:tcp', id),
     pingReal: (id) => invoke('ping:real', id),
+    pingRealMany: (ids) => invoke('ping:realMany', ids),
     pingUpload: (id) => invoke('ping:upload', id),
     checkIp: (viaProxy) => invoke('ip:check', viaProxy),
 

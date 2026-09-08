@@ -47,6 +47,7 @@ class StatsPoller {
     // not just the sum (see SilenceWatch)
     this.onRaw = opts.onRaw || (() => {});
     this.timer = null;
+    this.intervalMs = 1000;
     this.last = { up: 0, down: 0, t: 0 };
     this.lastPer = {};          // tag -> previous totals, for per-outbound speed
     this.totals = { up: 0, down: 0 };
@@ -80,40 +81,62 @@ class StatsPoller {
 
   start(intervalMs = 1000) {
     this.stop();
+    this.intervalMs = intervalMs;
     this.last = { up: 0, down: 0, t: Date.now() };
     this.lastPer = {};
-    this.timer = setInterval(async () => {
-      const cur = await this.query();
-      if (!cur) return;
-      const now = Date.now();
-      const dt = (now - this.last.t) / 1000 || 1;
+    this.arm();
+  }
 
-      const upSpeed = Math.max(0, (cur.up - this.last.up) / dt);
-      const downSpeed = Math.max(0, (cur.down - this.last.down) / dt);
-
-      // per-outbound totals and their own per-second deltas, so the home path
-      // can say how much went through EACH config rather than one grand total
-      const per = {};
-      for (const [tag, v] of Object.entries(cur.per || {})) {
-        const prev = this.lastPer[tag] || { up: 0, down: 0 };
-        per[tag] = {
-          up: v.up, down: v.down,
-          upSpeed: Math.max(0, (v.up - prev.up) / dt),
-          downSpeed: Math.max(0, (v.down - prev.down) / dt)
-        };
-      }
-      this.lastPer = cur.per || {};
-
-      this.totals = { up: cur.up, down: cur.down };
-      this.last = { up: cur.up, down: cur.down, t: now };
-
-      this.onStats({
-        upSpeed, downSpeed,
-        totalUp: cur.up, totalDown: cur.down,
-        per
-      });
-    }, intervalMs);
+  arm() {
+    this.timer = setInterval(() => this.tick(), this.intervalMs);
     if (this.timer.unref) this.timer.unref();
+  }
+
+  /**
+   * Change the cadence without losing the baseline. Speeds divide by the
+   * MEASURED gap, so a slower tick reads the same bytes over a longer dt — not
+   * a burst — and the usage meter works on deltas, so nothing is lost or
+   * counted twice. Used to poll less while the window is hidden: a poll a
+   * second is 3,600 requests and JSON parses an hour for numbers nobody sees.
+   */
+  retime(intervalMs) {
+    if (!intervalMs || intervalMs === this.intervalMs) return;
+    this.intervalMs = intervalMs;
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.arm();
+  }
+
+  async tick() {
+    const cur = await this.query();
+    if (!cur) return;
+    const now = Date.now();
+    const dt = (now - this.last.t) / 1000 || 1;
+
+    const upSpeed = Math.max(0, (cur.up - this.last.up) / dt);
+    const downSpeed = Math.max(0, (cur.down - this.last.down) / dt);
+
+    // per-outbound totals and their own per-second deltas, so the home path
+    // can say how much went through EACH config rather than one grand total
+    const per = {};
+    for (const [tag, v] of Object.entries(cur.per || {})) {
+      const prev = this.lastPer[tag] || { up: 0, down: 0 };
+      per[tag] = {
+        up: v.up, down: v.down,
+        upSpeed: Math.max(0, (v.up - prev.up) / dt),
+        downSpeed: Math.max(0, (v.down - prev.down) / dt)
+      };
+    }
+    this.lastPer = cur.per || {};
+
+    this.totals = { up: cur.up, down: cur.down };
+    this.last = { up: cur.up, down: cur.down, t: now };
+
+    this.onStats({
+      upSpeed, downSpeed,
+      totalUp: cur.up, totalDown: cur.down,
+      per
+    });
   }
 
   stop() {

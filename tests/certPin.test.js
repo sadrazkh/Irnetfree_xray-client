@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { X509Certificate } = require('node:crypto');
 
-const { fetchLeafPin, pinOf, normalizePin, directServers, pinTargets, staleCertPins, PinWatch, PIN_MISMATCH } = require('../src/main/certPin');
+const { fetchLeafPin, pinOf, normalizePin, directServers, pinTargets, staleCertPins, recheckDue, RECHECK_AFTER_MS, PinWatch, PIN_MISMATCH } = require('../src/main/certPin');
 
 const FIXTURE = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'selfsigned.json'), 'utf8'));
 const CERT = FIXTURE.certificate.join('\n');
@@ -233,4 +233,21 @@ test('staleCertPins asks with the SNI the config uses, not just the address', as
   };
   await staleCertPins([s], async (o) => { asked.push(o); return 'a'.repeat(64); });
   assert.deepEqual(asked, [{ host: '1.2.3.4', port: 443, servername: 'front.example.com' }]);
+});
+
+test('recheckDue: a pin checked within the window is left alone; older, missing or unpinned is due', () => {
+  // The stale check is a TLS dial per pinned server on every connect and every
+  // recovery; a rotation is rare, so a pin seen recently is not asked again.
+  const now = 1_000_000_000_000;
+  const fresh = { certPin: 'ab', certPinCheckedAt: now - RECHECK_AFTER_MS + 1 };
+  const old = { certPin: 'ab', certPinCheckedAt: now - RECHECK_AFTER_MS - 1 };
+  const never = { certPin: 'ab' };
+  const unpinned = { certPinCheckedAt: now };
+  assert.equal(recheckDue(fresh, now), false);
+  assert.equal(recheckDue(old, now), true);
+  assert.equal(recheckDue(never, now), true);
+  assert.equal(recheckDue(unpinned, now), false, 'nothing to re-check without a pin');
+  assert.equal(recheckDue(null, now), false);
+  assert.equal(recheckDue(fresh, now, 0), true, 'a zero window asks every time');
+  assert.equal(RECHECK_AFTER_MS, 6 * 3600 * 1000);
 });

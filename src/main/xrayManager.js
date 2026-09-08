@@ -11,6 +11,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { DEFAULT_ENGINE, engineExe, engineRunArgs, engineTestArgs, engineLabel, xrayEngines } = require('./engines');
 const net = require('net');
 
@@ -29,6 +30,8 @@ class XrayManager {
     this.proc = null;
     this.running = false;
     this._versions = {};                  // engineId -> version string
+    /** Validations that PASSED, keyed by core file + geo files + config bytes (see validationKey). */
+    this._validated = new Map();
     this.currentConfigPath = path.join(this.dataDir, 'config.json');
   }
 
@@ -37,7 +40,11 @@ class XrayManager {
     return [
       ...this.extraBinDirs,
       path.join(this.dataDir || '', '..', 'bin'),
-      path.join(process.resourcesPath || '', 'bin'),
+      // Only under Electron. In plain Node (the headless server) resourcesPath
+      // is undefined and this entry was the RELATIVE `bin` — which existsSync()
+      // found from the repo root and spawn() then resolved against the child's
+      // own cwd (`bin`), so every latency test died with ENOENT.
+      ...(process.resourcesPath ? [path.join(process.resourcesPath, 'bin')] : []),
       path.join(__dirname, '..', '..', 'bin')
     ].filter(Boolean);
   }
@@ -166,7 +173,7 @@ class XrayManager {
   }
 
   /** Forget cached versions (after a download / removal). */
-  forgetVersions() { this._versions = {}; }
+  forgetVersions() { this._versions = {}; this._validated.clear(); }
 
   /** Write config to disk. */
   writeConfig(config, file) {
@@ -180,10 +187,31 @@ class XrayManager {
    * Returns { ok:true } or { ok:false, error } with the real core message,
    * so the UI can show *why* a chain / advanced-routing config was rejected.
    */
+  /**
+   * What a validation is a fact about: this core file (path + mtime, so a core
+   * re-downloaded in place is a new fact), the geo files it loads (a config
+   * with geosite rules is refused without them and accepted once they arrive —
+   * their mtimes, `0` when absent), and the config bytes.
+   */
+  validationKey(id, bin, config) {
+    const mt = (p) => { try { return String(fs.statSync(p).mtimeMs); } catch { return '0'; } };
+    const ad = this.assetDir();
+    const geo = ad ? `${mt(path.join(ad, 'geoip.dat'))}/${mt(path.join(ad, 'geosite.dat'))}` : '0/0';
+    const digest = crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex');
+    return `${id}|${bin}|${mt(bin)}|${geo}|${digest}`;
+  }
+
   validate(config, engineId) {
     return new Promise((resolve) => {
       const { id, bin } = this.resolveEngine(engineId);
       if (!bin) return resolve({ ok: false, error: 'core binary not found' });
+      // A config the core already accepted, on this core file with these geo
+      // files, is not run through -test again: a reconnect after a network
+      // change rebuilds the identical config, and -test costs 1-6 s of the
+      // connect each time. Only a real pass is remembered — never a rejection,
+      // never the safety timeout, never an old core that does not know -test.
+      const key = this.validationKey(id, bin, config);
+      if (this._validated.has(key)) return resolve({ ok: true, cached: true });
       let cfgPath;
       try { cfgPath = path.join(this.dataDir, `test-cfg-${Date.now()}.json`); fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2), 'utf8'); }
       catch (e) { return resolve({ ok: false, error: e.message }); }
@@ -194,18 +222,27 @@ class XrayManager {
       proc.stdout.on('data', grab);
       proc.stderr.on('data', grab);
       let settled = false;
-      const finish = (res) => { if (settled) return; settled = true; try { fs.unlinkSync(cfgPath); } catch {} resolve(res); };
+      const finish = (res) => {
+        if (settled) return;
+        settled = true;
+        try { fs.unlinkSync(cfgPath); } catch {}
+        if (res.ok && !res.unverified) {
+          this._validated.set(key, true);
+          if (this._validated.size > 64) this._validated.delete(this._validated.keys().next().value);
+        }
+        resolve(res);
+      };
       proc.on('error', (err) => finish({ ok: false, error: err.message }));
       proc.on('exit', (code) => {
         if (code === 0) return finish({ ok: true });
         // Older xray builds may not know the -test flag; don't false-reject.
         if (/flag provided but not defined|not defined:.*test|unknown (flag|command)/i.test(out)) {
-          return finish({ ok: true });
+          return finish({ ok: true, unverified: true });
         }
         finish({ ok: false, error: extractXrayError(out) || `xray -test exited with code ${code}` });
       });
       // safety timeout — don't hang the UI if -test never returns
-      setTimeout(() => { if (!settled) { try { proc.kill(); } catch {} finish({ ok: true }); } }, 6000);
+      setTimeout(() => { if (!settled) { try { proc.kill(); } catch {} finish({ ok: true, unverified: true }); } }, 6000);
     });
   }
 
@@ -399,4 +436,22 @@ function getFreePort() {
   });
 }
 
-module.exports = { XrayManager, getFreePort, PLAINTEXT_REJECT };
+/**
+ * n distinct free loopback ports, held open together until all are known —
+ * asking getFreePort() n times can hand the same port back twice.
+ */
+function getFreePorts(n) {
+  return new Promise((resolve, reject) => {
+    const servers = [], ports = [];
+    const closeAll = () => servers.forEach((s) => { try { s.close(); } catch { /* closing */ } });
+    const next = () => {
+      if (ports.length >= n) { closeAll(); return resolve(ports); }
+      const srv = net.createServer();
+      srv.once('error', (e) => { closeAll(); reject(e); });
+      srv.listen(0, '127.0.0.1', () => { servers.push(srv); ports.push(srv.address().port); next(); });
+    };
+    next();
+  });
+}
+
+module.exports = { XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT };

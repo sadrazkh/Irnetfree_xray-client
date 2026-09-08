@@ -15,17 +15,17 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('../main/configBuilder');
 const { adapterDnsServers } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('../main/engineChoice');
-const { fetchLeafPin, pinTargets, directServers, staleCertPins, PinWatch } = require('../main/certPin');
+const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
 const { assetStatus: scanAssets } = require('../main/assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('../main/geoCheck');
-const { XrayManager, getFreePort } = require('../main/xrayManager');
+const { XrayManager, getFreePort, getFreePorts } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
-const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../main/netutils');
+const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('../main/netutils');
 const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
@@ -383,7 +383,9 @@ function createService(opts = {}) {
     return [...new Set((settings.routeRules || []).filter(r => r && r.type === 'process' && r.value).map(r => String(r.value)))];
   }
   const loadProcCache = () => store.get('procIpCache', {}) || {};
-  const saveProcCache = (c) => store.set('procIpCache', c);
+  // Coalesced: the watcher rewrites this every 20 s for the life of a tunnel,
+  // and a save() rewrites the whole store (every server, fsync, rename) for it.
+  const saveProcCache = (c) => store.setLazy('procIpCache', c);
 
   async function effectiveSettings() {
     const s = getSettings();
@@ -534,13 +536,20 @@ function createService(opts = {}) {
     // pin that no longer matches is dropped here, and the probe below (which
     // picks up every directly-dialled server without a pin) learns the new one
     // on this same connect.
-    const stale = await staleCertPins(directServers(plan), fetchLeafPin).catch(() => []);
-    if (stale.length) {
-      const ids = new Set(stale.map(x => x.id));
+    //
+    // Only the pins that are DUE (certPin.recheckDue): a rotation is a rare
+    // event and the check is a TLS dial per server on every connect and every
+    // network-change recovery. Whatever was asked is stamped, stale or not.
+    const now = Date.now();
+    const due = directServers(plan).filter(x => recheckDue(x, now));
+    const stale = due.length ? await staleCertPins(due, fetchLeafPin).catch(() => []) : [];
+    if (due.length) {
+      const dueIds = new Set(due.map(x => x.id));
+      const staleIds = new Set(stale.map(x => x.id));
       store.set('servers', store.get('servers', []).map(x => {
-        if (!ids.has(x.id)) return x;
-        const out = Object.assign({}, x);
-        delete out.certPin; delete out.certPinAt;
+        if (!dueIds.has(x.id)) return x;
+        const out = Object.assign({}, x, { certPinCheckedAt: now });
+        if (staleIds.has(x.id)) { delete out.certPin; delete out.certPinAt; }
         return out;
       }));
       for (const x of stale) {
@@ -563,7 +572,8 @@ function createService(opts = {}) {
     }));
     if (!Object.keys(learned).length) return;
     const certPinAt = new Date().toISOString();
-    store.set('servers', store.get('servers', []).map(s => learned[s.id] ? Object.assign({}, s, { certPin: learned[s.id], certPinAt }) : s));
+    // A pin learned now was, by definition, checked now.
+    store.set('servers', store.get('servers', []).map(s => learned[s.id] ? Object.assign({}, s, { certPin: learned[s.id], certPinAt, certPinCheckedAt: Date.now() }) : s));
   }
 
   /**
@@ -1263,6 +1273,9 @@ function createService(opts = {}) {
   }
 
   /* ----------------------------- IPC-equivalent dispatcher ----------------------------- */
+  // ping:realMany — one throwaway core per engine for up to REAL_BATCH targets,
+  // REAL_PARALLEL requests in flight (see main.js for the reasoning)
+  const REAL_BATCH = 20, REAL_PARALLEL = 6;
   const handlers = {
     'app:init': () => ({
       servers: store.get('servers', []),
@@ -1394,6 +1407,38 @@ function createService(opts = {}) {
       } catch (err) { return { ok: false, error: err.message }; }
       finally { if (test) test.cleanup(); }
     },
+    'ping:realMany': async (ids) => {
+      const out = {};
+      const list = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
+      if (!xray.binExists()) { for (const id of list) out[id] = { ok: false, error: 'xray binary missing' }; return out; }
+      const byEngine = new Map();
+      for (const id of list) {
+        const { server, chain } = resolveTarget(id);
+        if (!server) { out[id] = { ok: false, error: 'not found' }; continue; }
+        const isChain = chain && chain.length >= 2;
+        const plan = isChain ? { mode: 'chain', chain } : { mode: 'single', server };
+        const eng = testEngineFor(chooseEngine(plan, getSettings().defaultEngine));
+        if (!byEngine.has(eng)) byEngine.set(eng, []);
+        byEngine.get(eng).push({ id, target: isChain ? chain : server });
+      }
+      const limit = pLimit(REAL_PARALLEL);
+      for (const [eng, targets] of byEngine) {
+        for (let i = 0; i < targets.length; i += REAL_BATCH) {
+          const batch = targets.slice(i, i + REAL_BATCH);
+          let test = null;
+          try {
+            const ports = await getFreePorts(batch.length);
+            test = await xray.startTest(buildMultiTestConfig(batch.map(b => b.target), ports), eng);
+            await Promise.all(batch.map((b, k) => limit(async () => {
+              out[b.id] = await httpThroughProxy(ports[k], { host: 'cp.cloudflare.com', port: 80, path: '/' });
+            })));
+          } catch (err) {
+            for (const b of batch) if (!out[b.id]) out[b.id] = { ok: false, error: err.message };
+          } finally { if (test) test.cleanup(); }
+        }
+      }
+      return out;
+    },
     'ip:check': async (viaProxy) => { if (viaProxy) { const s = getSettings(); return ipInfo(s.socksPort); } return ipInfo(null); },
 
     'assets:status': () => assetStatus(),
@@ -1471,6 +1516,7 @@ function createService(opts = {}) {
   async function shutdown() {
     if (isQuitting) return; isQuitting = true;
     userDisconnecting = true;
+    try { store.flush(); } catch {}   // whatever setLazy() still holds
     try { stopNetWatcher(); } catch {}
     try { if (stats) stats.stop(); } catch {}
     try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
