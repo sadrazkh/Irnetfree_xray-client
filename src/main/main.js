@@ -24,6 +24,7 @@ const { TunSingbox } = require('./tunSingbox');
 const tunPlatform = require('./tunPlatform');
 const { LeakGuard } = require('./leakGuard');
 const { StatsPoller, SilenceWatch } = require('./stats');
+const { UsageMeter, grandTotal } = require('./usage');
 const { Downloader } = require('./downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
@@ -47,6 +48,13 @@ let tun = null;
 const startedTuns = new Set();
 let leakGuard = null;
 let stats = null;
+// Lifetime traffic per config. Its own small file, not a key in store.json:
+// a save rewrites the WHOLE store, and a user with a large subscription has
+// hundreds of KB of servers in there — rewriting that every 30s for the life
+// of a connection is a lot of disk for a counter.
+let usage = null;
+let usageStore = null;
+let lastUsageSend = 0;
 let downloader = null;
 let procWatcher = null;
 let netWatcher = null;
@@ -963,6 +971,11 @@ async function doConnect(serverId, opts = {}) {
   stats.setBin(xray.anyBin());
   stats.apiPort = settings.apiPort;
   watchWgSilence(config);
+  // A fresh core starts its counters at zero, so the meter has to be told —
+  // otherwise the first poll of the new session reads as growth on the old one
+  // and a whole session is credited twice. The plan must be set before the
+  // first tick, or those bytes belong to nobody.
+  if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
   stats.start(1000);
 
   // Keep process routes fresh while connected (opt-in; briefly reloads xray).
@@ -1038,6 +1051,9 @@ async function reapplyConnection() {
   try {
     stopProcWatcher();
     if (stats) stats.stop();
+    // Flush before the counters go away, then reset: the next core starts at
+    // zero and must not be read as growth on this one.
+    if (usage) { usage.tick(null); if (usage.dirty) { usageStore.set('totals', usage.totals); usage.markSaved(); } usage.reset(); }
     // HOLD the guard across the gap; do NOT give the adapters their own
     // resolvers back. This is the leak the owner reported: releasing here left
     // every lookup going to the ISP — and at the strict level the outbound
@@ -1124,7 +1140,8 @@ async function rebuildActiveConfig() {
   // Keep the binding the live connection was built with (see doConnect): the
   // tunnel stays up across this reload, and asking the OS now would name it.
   if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
-  const { config, engine } = buildActive(serverId, settings);
+  // `plan` too: the usage meter needs it to attribute the new core's bytes
+  const { plan, config, engine } = buildActive(serverId, settings);
   // Suppress the transient 'stopped' status from the old instance so the UI
   // doesn't flash "disconnected" during the reload.
   const prevReloading = xrayReloading;
@@ -1134,6 +1151,9 @@ async function rebuildActiveConfig() {
     if (!check.ok) throw new Error(check.error);
     await xray.start(config, check.engine);   // start() stops the old instance first
     watchWgSilence(config);   // the plan may have changed under the live tunnel
+    // this restarts the core WITHOUT stopping the poller, so the meter has to
+    // hear about it here too — same reason as the connect path
+    if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
   } finally {
     xrayReloading = prevReloading;
   }
@@ -1385,6 +1405,10 @@ async function doDisconnect() {
   stopProcWatcher();
   stopNetWatcher();                // nothing live to recover any more
   if (stats) stats.stop();
+  // Flush before the counters go away, then reset: the next core starts at
+  // zero and must not be read as growth on this one.
+  if (usage) { usage.tick(null); if (usage.dirty) { usageStore.set('totals', usage.totals); usage.markSaved(); } usage.reset(); }
+  if (usage) send('usage', { totals: usage.totals });   // settle the UI on the final figure
   // The adapters point at real resolvers again BEFORE the tunnel goes: in
   // between they would be pointing at an address that no longer routes anywhere.
   try { if (leakGuard) await leakGuard.release(); } catch {}
@@ -1540,6 +1564,8 @@ function registerIpc() {
     systemDark: nativeTheme.shouldUseDarkColors,
     // survives a renderer reload: the banner must not disappear on refresh
     pendingReconnect: pendingKeys(),
+    // lifetime traffic per config, so a renderer reload does not lose it
+    usage: usage ? usage.totals : {},
     // set when the saved data was unreadable at startup (the window did not
     // exist yet, so the store-error event could not have been delivered)
     storeError: store.loadError
@@ -1908,6 +1934,7 @@ function registerIpc() {
   // Kill switch: manual disarm (restore internet) + status query.
   ipcMain.handle('killswitch:disarm', async () => { await disarmKillSwitch(); return { ok: true }; });
   ipcMain.handle('killswitch:status', () => ({ engaged: killEngaged }));
+  ipcMain.handle('usage:get', () => ({ totals: usage ? usage.totals : {}, grand: grandTotal(usage ? usage.totals : {}) }));
   // Reconnect on demand: the same leak-free path the network-change recovery
   // uses, so the guard is held across the gap rather than released.
   ipcMain.handle('vpn:reconnect', async () => {
@@ -1995,6 +2022,9 @@ app.whenReady().then(() => {
 
   migrateServers();
   migrateSettingsStore();
+  // Lifetime traffic per config, in its own small file (see the declaration).
+  usageStore = new Store(path.join(dir, 'usage.json'), { totals: {} });
+  usage = new UsageMeter({ totals: usageStore.get('totals', {}) });
 
   const ubin = userBin();
 
@@ -2038,7 +2068,17 @@ app.whenReady().then(() => {
   stats = new StatsPoller({
     binPath: xray.anyBin(),
     apiPort: getSettings().apiPort,
-    onStats: (s) => send('stats', s),
+    onStats: (s) => {
+      send('stats', s);
+      if (!usage) return;
+      usage.tick(s.per);
+      // Two cadences on purpose: the live per-second figures already ride
+      // `s.per`, so the LIFETIME total only needs to reach the UI every few
+      // seconds, and only needs to reach the disk every thirty.
+      const now = Date.now();
+      if (usage.dirty && now - lastUsageSend >= 5000) { lastUsageSend = now; send('usage', { totals: usage.totals }); }
+      if (usage.dueForSave(now)) { usageStore.set('totals', usage.totals); usage.markSaved(now); }
+    },
     onRaw: (vars) => reportSilentTunnels(vars)
   });
 
@@ -2106,6 +2146,7 @@ async function teardownForQuit() {
   userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
+  try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
   try { if (leakGuard) await leakGuard.release(); } catch {}   // adapters first, then the tunnel
   await stopAllTuns();   // every instance a connect started, not just the last
   try { await setSystemProxy(false, {}); } catch {}

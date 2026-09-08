@@ -32,6 +32,8 @@ const state = {
   pendingReconnect: [],
   pendingDismissed: false, // user chose "later"; keep the banner out of the way
   wasReconnecting: false,  // main is rebuilding after a network change (toast on success)
+  // lifetime traffic per config id — survives disconnect and restart
+  usage: {},
   pings: {} // id -> { tcp, real }
 };
 
@@ -240,6 +242,7 @@ async function init() {
   // main only reports pending keys while something is actually connected, so a
   // fresh launch always starts empty
   state.pendingReconnect = data.pendingReconnect || [];
+  state.usage = data.usage || {};
   state.chain = (data.chain || []).filter(id => state.servers.some(s => s.id === id));
   state.chains = (data.chains || []).map(c => ({
     id: c.id, name: c.name || 'Chain',
@@ -688,6 +691,17 @@ function applyPingDisplays(id) {
  * Hand-added configs come first: they are the ones a user curates by hand, and
  * the only ones that survive every refresh.
  */
+/**
+ * How much has EVER gone through a config, in one short string. Empty when
+ * nothing has, so a config that has never been used carries no column at all
+ * rather than a row of zeroes.
+ */
+function usageLabel(id) {
+  const u = (state.usage || {})[id];
+  if (!u || (!u.down && !u.up)) return '';
+  return `↓${escapeHtml(fmtBytes(u.down))}<span class="u-sep">·</span>↑${escapeHtml(fmtBytes(u.up))}`;
+}
+
 function serverGroups() {
   const byId = new Map((state.subscriptions || []).map(x => [x.id, x]));
   const manual = [];
@@ -755,6 +769,7 @@ function renderServers() {
         <span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${s.id}">${rl.txt}</b></span>
         <span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${s.id}">${ul.txt}</b></span>
       </div>
+      <span class="srv-usage" title="${escapeHtml(t('srv.usage'))}">${usageLabel(s.id)}</span>
       <div class="srv-actions">
         <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
         <button class="icon-btn copy-srv" data-i18n-title="btn.copy" title="copy">⧉</button>
@@ -3322,6 +3337,17 @@ $('#btnSaveAdv').onclick = async () => {
 };
 
 /* ----------------------------- live traffic stats ----------------------------- */
+// Lifetime totals arrive every few seconds — the per-second figures ride the
+// stats event, so this one does not need that resolution. Re-render only the
+// two lists that show it.
+if (window.api.onUsage) {
+  window.api.onUsage((d) => {
+    state.usage = (d && d.totals) || {};
+    renderServers();
+    renderPicker();
+  });
+}
+
 window.api.onStats((s) => {
   $('#downSpeed').textContent = fmtSpeed(s.downSpeed);
   $('#upSpeed').textContent = fmtSpeed(s.upSpeed);

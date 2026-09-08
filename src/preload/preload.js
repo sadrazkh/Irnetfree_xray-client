@@ -99,6 +99,8 @@ contextBridge.exposeInMainWorld('api', {
   onStatus: (cb) => ipcRenderer.on('status', (e, d) => cb(d)),
   onXrayStatus: (cb) => ipcRenderer.on('xray-status', (e, d) => cb(d)),
   onStats: (cb) => ipcRenderer.on('stats', (e, d) => cb(d)),
+  onUsage: (cb) => ipcRenderer.on('usage', (e, d) => cb(d)),
+  getUsage: () => ipcRenderer.invoke('usage:get'),
   onSubsUpdated: (cb) => ipcRenderer.on('subs-updated', (e, d) => cb(d)),
   onAssetProgress: (cb) => ipcRenderer.on('asset-progress', (e, d) => cb(d)),
   onKillSwitch: (cb) => ipcRenderer.on('killswitch', (e, d) => cb(d)),

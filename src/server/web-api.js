@@ -129,6 +129,8 @@
     onStatus: (cb) => on('status', cb),
     onXrayStatus: (cb) => on('xray-status', cb),
     onStats: (cb) => on('stats', cb),
+    onUsage: (cb) => on('usage', cb),
+    getUsage: () => invoke('usage:get'),
     onSubsUpdated: (cb) => on('subs-updated', cb),
     onAssetProgress: (cb) => on('asset-progress', cb),
     onKillSwitch: (cb) => on('killswitch', cb),
