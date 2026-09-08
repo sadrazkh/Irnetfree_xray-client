@@ -60,6 +60,46 @@
 }
 :where(.q-dot) { color: var(--dim); }
 
+/* THE ARROW. styles.css sets `appearance: none` on .select and reserves 26px
+   of padding at its inline end for a chevron it never draws, so a dropdown and
+   a text field are the same object on screen. The recipe is settled in
+   settings.css — read the long note there; these are the same six lines for
+   the list screens and the server editor, so a <select> means the same thing
+   on every screen this app has. Keep the two copies in step (or hoist them
+   into styles.css, where .select itself lives).
+
+   Two linear-gradients meeting as a triangle, because a data-URI arrow would
+   have to carry a literal hex — six of them, one per skin × theme — and a
+   <select> renders no ::after to hang a glyph on. */
+:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) .select {
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink3) 50%),
+    linear-gradient(135deg, var(--ink3) 50%, transparent 50%);
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  background-position: calc(100% - 18px) calc(50% - 1px), calc(100% - 13px) calc(50% - 1px);
+}
+/* background-position has no logical form, so RTL gets its own line */
+[dir="rtl"] :is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) .select {
+  background-position: 8px calc(50% - 1px), 13px calc(50% - 1px);
+}
+:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) .select:hover,
+:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) .select:focus {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--accent) 50%),
+    linear-gradient(135deg, var(--accent) 50%, transparent 50%);
+}
+/* and the same two states every field on the settings screen answers with:
+   hover firms the edge, focus takes the accent and a soft ring */
+:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) :is(.input, .select, .textarea):hover {
+  border-color: var(--dim);
+}
+:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) :is(.input, .select, .textarea):focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accentSoft);
+}
+
 /* The chain builder and the pool are the same kind of screen — a .card with a
    modifier, opening on a head band over a hairline — so they are spaced by one
    rule rather than by two that drift. The head's numbers are measured against
