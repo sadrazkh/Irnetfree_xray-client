@@ -217,6 +217,7 @@ function setLang(lang) {
   updateTunStatus();
   setModeWidget();
   refreshConnLabels();
+  renderSettingCards();   // option labels are translated strings
   // the chrome carries three strings that are not data-i18n nodes: the mode
   // badge, the path diagram's own labels and the inspector's on/off words
   applyUiMode(state.settings.uiMode || defaultUiMode());
@@ -337,6 +338,7 @@ function applySettingsToUI() {
   $('#customRules').value = customRulesToText(s.customRules || []);
 
   $$('#routingSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === (s.routingMode || 'global')));
+  renderSettingCards();   // the cards mirror the selects, so they follow every load
   syncPreset('#dnsRemotePreset', '#dnsRemoteInput');
   syncPreset('#dnsDirectPreset', '#dnsDirectInput');
   updateGuardRows();
@@ -349,6 +351,63 @@ function applySettingsToUI() {
  * Driven by the TUN *switch*, not by the live connection: this is the setting the
  * next connect will be built from.
  */
+/**
+ * A <select> whose options are CHOICES WITH CONSEQUENCES, drawn as cards.
+ *
+ * Two of these menus carry whole sentences as option labels — the leak guard's
+ * are 110 characters — and no width makes a dropdown a good home for that.
+ * Worse, `appearance: none` had them rendering as flat boxes, so the page was a
+ * column of identical rectangles hiding the most consequential choices there
+ * are.
+ *
+ * The <select> stays, and stays authoritative: every existing read of `.value`,
+ * every `onchange`, and the reconnect dialog that watches these keys keep
+ * working untouched. The cards only set the value and dispatch `change`.
+ *
+ * The label is split on the em dash the strings already use — "Standard — every
+ * adapter's DNS…" becomes a title and a description — so there is still ONE
+ * copy of each string, and translating the select translates the cards.
+ */
+function renderOptionCards(selectId, hostId, icons) {
+  const sel = $(selectId);
+  const host = $(hostId);
+  if (!sel || !host) return;
+  host.innerHTML = '';
+  for (const opt of [...sel.options]) {
+    const raw = opt.textContent.trim();
+    const cut = raw.indexOf('—');
+    const title = cut > 0 ? raw.slice(0, cut).trim() : raw;
+    const desc = cut > 0 ? raw.slice(cut + 1).trim() : '';
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'opt-card' + (opt.value === sel.value ? ' active' : '');
+    card.dataset.value = opt.value;
+    card.disabled = sel.disabled;
+    card.innerHTML = `<span class="opt-card-ico">${icons[opt.value] || '•'}</span>
+      <span class="opt-card-text"><span class="opt-card-title"></span><span class="opt-card-desc"></span></span>
+      <span class="opt-card-check">✓</span>`;
+    card.querySelector('.opt-card-title').textContent = title;
+    card.querySelector('.opt-card-desc').textContent = desc;
+    card.onclick = () => {
+      if (sel.disabled || sel.value === opt.value) return;
+      sel.value = opt.value;
+      // exactly the event picking from the menu would have raised
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      renderOptionCards(selectId, hostId, icons);
+    };
+    host.appendChild(card);
+  }
+}
+
+const GUARD_ICONS = { off: '⚪', standard: '🛡', strict: '🔒' };
+const BACKEND_ICONS = { 'sing-box': '📦', tun2socks: '🧩' };
+
+/** Both card groups, from whatever the selects currently hold. */
+function renderSettingCards() {
+  renderOptionCards('#optLeakGuard', '#leakGuardCards', GUARD_ICONS);
+  renderOptionCards('#optTunBackend', '#tunBackendCards', BACKEND_ICONS);
+}
+
 function updateGuardRows() {
   const tunOn = !!($('#optTun') && $('#optTun').checked);
   const guardRow = $('#leakGuardRow');
@@ -371,6 +430,8 @@ function updateGuardRows() {
       : modeBypasses;
     $('#guardStrictRouting').hidden = !(tunOn && $('#optLeakGuard').value === 'strict' && bypasses);
   }
+  // the cards carry the row's disabled state too
+  renderSettingCards();
   const udpRow = $('#udpBlockRow');
   if (udpRow) {
     udpRow.classList.toggle('disabled', tunOn);

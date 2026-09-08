@@ -581,20 +581,25 @@
           <!-- which program builds the tunnel; changing it needs a reconnect -->
           <div class="setting-row" id="tunBackendRow">
             <label class="field-label" for="optTunBackend" data-i18n="set.tunBackend">بک‌اندِ TUN</label>
-            <select id="optTunBackend" class="select">
+            <!-- The <select> stays the source of truth — everything reads and
+                 writes .value, and the reconnect dialog watches it — and the
+                 cards below are a face for it that dispatch `change` on it. -->
+            <select id="optTunBackend" class="select vis-hidden">
               <option value="sing-box" data-i18n="tun.backendSingbox">sing-box</option>
               <option value="tun2socks" data-i18n="tun.backendTun2socks">tun2socks</option>
             </select>
+            <div class="opt-cards" id="tunBackendCards"></div>
             <p class="hint" data-i18n="tun.backendHint"></p>
           </div>
           <!-- how hard the guard holds; TUN mode only (see updateGuardRows) -->
           <div class="setting-row" id="leakGuardRow">
             <label class="field-label" for="optLeakGuard" data-i18n="set.leakGuard">گارد نشتی</label>
-            <select id="optLeakGuard" class="select">
+            <select id="optLeakGuard" class="select vis-hidden">
               <option value="off" data-i18n="guard.off">خاموش</option>
               <option value="standard" data-i18n="guard.standard">استاندارد</option>
               <option value="strict" data-i18n="guard.strict">سخت‌گیرانه</option>
             </select>
+            <div class="opt-cards" id="leakGuardCards"></div>
             <p class="hint" data-i18n="guard.hint"></p>
             <p class="hint warn" id="guardMacNote" data-i18n="guard.macExperimental" hidden></p>
             <p class="hint warn" id="guardStrictRouting" data-i18n="guard.strictRouting" hidden></p>

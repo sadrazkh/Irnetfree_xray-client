@@ -498,3 +498,70 @@
    the light themes ~0.6 of contrast and drops --danger on --log from 4.8:1 to
    4.2:1. The spine says "error" just as loudly and costs nothing. */
 .log-error { color: var(--danger); border-inline-start-color: var(--danger); }
+
+/* =========================================================================
+   Choices with consequences, as cards
+
+   Two of this page's menus carry whole sentences as option labels — the leak
+   guard's are 110 characters — and no <select> width is a good home for that.
+   The select is still there and still authoritative (see renderOptionCards);
+   it is just moved out of sight, and these are its face.
+   ========================================================================= */
+
+/* Out of sight but NOT out of the accessibility tree or the form: the select
+   is still what holds the value. `display: none` would drop it from the tab
+   order and from any label association. */
+.vis-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.opt-cards {
+  display: grid;
+  gap: 8px;
+  grid-column: 1 / -1;      /* the whole width of .setting-row's grid */
+}
+
+.opt-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: start;
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-radius: var(--r5);
+  transition: background 140ms ease-out, border-color 140ms ease-out;
+}
+.opt-card:hover { border-color: var(--dim); }
+.opt-card:disabled { opacity: .5; cursor: not-allowed; }
+.opt-card:disabled:hover { border-color: var(--softline); }
+
+.opt-card.active {
+  background: var(--accentSoft);
+  border-color: var(--accent);
+}
+
+.opt-card-ico { font-size: 17px; line-height: 1.35; flex: 0 0 auto; }
+.opt-card-text { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+.opt-card-title { font-size: 13px; font-weight: 600; color: var(--ink2); }
+.opt-card.active .opt-card-title { color: var(--accentInk); font-weight: 700; }
+/* The description is the whole point of the card, so it wraps rather than
+   ellipsising — a truncated warning is worse than none. */
+.opt-card-desc { font-size: 11px; line-height: 1.6; color: var(--ink3); }
+.opt-card-desc:empty { display: none; }
+
+/* the tick marks the choice, and only the choice */
+.opt-card-check {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  flex: 0 0 auto;
+  visibility: hidden;
+}
+.opt-card.active .opt-card-check { visibility: visible; }
