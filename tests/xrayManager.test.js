@@ -223,3 +223,70 @@ test('startTest rejects when the core cannot be spawned instead of crashing the 
     }
   });
 });
+
+/* --------------------------- the validation cache --------------------------- */
+
+const exit0 = () => { const p = stubChild(); setImmediate(() => p.emit('exit', 0)); return p; };
+
+test('validate: an identical config on the same core is not spawned twice; forgetVersions() clears it', async () => {
+  // A reconnect after a network change rebuilds the identical config, and
+  // `-test` costs 1-6 s of the connect each time.
+  await withBin([exe('xray')], async (xm) => {
+    const before = spawns.length;
+    fakeSpawn = exit0;
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true });
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true, cached: true });
+      assert.equal(spawns.length - before, 1, 'one -test run for two identical validations');
+      // a different config is a different fact
+      await xm.validate(Object.assign({}, cfg, { log: { loglevel: 'warning' } }), 'xray');
+      assert.equal(spawns.length - before, 2);
+      xm.forgetVersions();
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true });
+      assert.equal(spawns.length - before, 3, 'a re-downloaded core forgets every pass');
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: a rejected config is never cached', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const before = spawns.length;
+    fakeSpawn = () => { const p = stubChild(); setImmediate(() => { p.stderr.emit('data', Buffer.from('Failed to start: bad thing')); p.emit('exit', 1); }); return p; };
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      assert.equal((await xm.validate(cfg, 'xray')).ok, false);
+      assert.equal((await xm.validate(cfg, 'xray')).ok, false);
+      assert.equal(spawns.length - before, 2);
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: an old core that does not know -test passes UNVERIFIED and is not cached', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const before = spawns.length;
+    fakeSpawn = () => { const p = stubChild(); setImmediate(() => { p.stderr.emit('data', Buffer.from('flag provided but not defined: -test')); p.emit('exit', 2); }); return p; };
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true, unverified: true });
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true, unverified: true });
+      assert.equal(spawns.length - before, 2);
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: the key follows the core file — a replaced binary is checked again', async () => {
+  await withBin([exe('xray')], async (xm, dir) => {
+    const before = spawns.length;
+    fakeSpawn = exit0;
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      await xm.validate(cfg, 'xray');
+      const bin = path.join(dir, exe('xray'));
+      const t = new Date(Date.now() + 5000);
+      fs.utimesSync(bin, t, t);                       // "re-downloaded": a new mtime
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true });
+      assert.equal(spawns.length - before, 2);
+    } finally { fakeSpawn = null; }
+  });
+});
