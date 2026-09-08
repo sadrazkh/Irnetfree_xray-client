@@ -2009,12 +2009,20 @@ app.whenReady().then(() => {
   if (st.autoUpdateSubs) subs.startAuto(st.autoUpdateInterval);
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    // macOS: the Dock icon was clicked. Closing the window HIDES it (see
+    // createWindow), so getAllWindows() is never empty here and the click did
+    // nothing — the tray menu was the only way back. Show the window we have.
+    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); return; }
+    createWindow();
   });
 });
 
-app.on('before-quit', async (e) => {
-  if (!isQuitting) return;
+/**
+ * The teardown every exit shares: the adapters' resolvers first, then the
+ * tunnel, the system proxy, the firewall rules and the core. Each step is
+ * best-effort so one failure cannot keep the rest from running.
+ */
+async function teardownForQuit() {
   userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
@@ -2024,6 +2032,40 @@ app.on('before-quit', async (e) => {
   try { await removeLanFirewall(); } catch {}
   try { await disarmKillSwitch(); } catch {}
   try { if (xray) await xray.stop(); } catch {}
+}
+
+// A macOS password prompt nobody answers must not hold the quit for ever: past
+// this the process goes, and the next launch repairs what is left (leakGuard).
+const QUIT_TEARDOWN_MS = 20000;
+let quitTeardown = null;   // the teardown in flight, or 'done'
+
+/**
+ * Every way out lands here: the tray's Quit and the elevated relaunch (both set
+ * isQuitting first), and — on macOS — Cmd+Q, Dock → Quit and a logout or
+ * shutdown, which the OS starts with isQuitting still false.
+ *
+ * Two things the old handler got wrong, both visible only on macOS:
+ *  - It returned unless isQuitting was set, so an OS-initiated quit ran no
+ *    teardown — and the window's close handler, which hides instead of closing,
+ *    then cancelled the quit outright: Cmd+Q only hid the window, and a logout
+ *    or shutdown got no teardown either. Whoever force-quit (or was logged out)
+ *    at that point left the system proxy pointing at a port nothing listens on.
+ *  - Electron does not wait for an async listener: it went on closing windows
+ *    while the awaits were still pending. Windows has the synchronous
+ *    `process.on('exit')` hook below; macOS has no such fallback for the proxy
+ *    or the tunnel (both need a privileged prompt), so the quit has to wait.
+ * The first pass therefore holds the quit, runs the teardown once, bounded, and
+ * asks to quit again; the second pass lets Electron finish.
+ */
+app.on('before-quit', (e) => {
+  isQuitting = true;         // the close handler may let the window go now
+  if (quitTeardown === 'done') return;
+  e.preventDefault();
+  if (quitTeardown) return;  // already running — it calls app.quit() when it ends
+  let timer = null;
+  const deadline = new Promise((resolve) => { timer = setTimeout(resolve, QUIT_TEARDOWN_MS); });
+  quitTeardown = Promise.race([teardownForQuit().catch(() => {}), deadline])
+    .then(() => { clearTimeout(timer); quitTeardown = 'done'; app.quit(); });
 });
 
 app.on('window-all-closed', () => {
