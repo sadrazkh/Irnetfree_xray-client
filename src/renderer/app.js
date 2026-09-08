@@ -677,12 +677,62 @@ function applyPingDisplays(id) {
   $$(`[data-ping-dot="${id}"]`).forEach(el => { el.className = 'q-dot' + (tl.cls ? ' ' + tl.cls : ''); });
 }
 
+/**
+ * The servers list, GROUPED BY WHERE EACH CONFIG CAME FROM.
+ *
+ * Subscription servers already carry `subId` (subscription.js sets it so a
+ * refresh can replace them), but the list showed one flat run of cards — with
+ * two subscriptions and a few hand-added configs there was no way to tell what
+ * belonged to what, or which of them the next refresh was about to replace.
+ *
+ * Hand-added configs come first: they are the ones a user curates by hand, and
+ * the only ones that survive every refresh.
+ */
+function serverGroups() {
+  const byId = new Map((state.subscriptions || []).map(x => [x.id, x]));
+  const manual = [];
+  const groups = new Map();          // subId -> { name, items }
+  for (const s of state.servers) {
+    if (!s.subId) { manual.push(s); continue; }
+    if (!groups.has(s.subId)) {
+      const sub = byId.get(s.subId);
+      // A subscription can be deleted while its servers stay behind. Name the
+      // group honestly rather than tipping them into the hand-added pile, where
+      // the next refresh would look like it had lost them.
+      groups.set(s.subId, { name: sub ? sub.name : t('srv.subGone'), items: [] });
+    }
+    groups.get(s.subId).items.push(s);
+  }
+  const out = [];
+  if (manual.length) out.push({ id: '', name: t('srv.manual'), items: manual });
+  for (const [id, g] of groups) out.push({ id, name: g.name, items: g.items });
+  return out;
+}
+
 function renderServers() {
   const list = $('#serverList');
   list.innerHTML = '';
   $('#serverEmpty').hidden = state.servers.length > 0;
 
-  for (const s of state.servers) {
+  const groups = serverGroups();
+  // no headings when there is nothing to tell apart
+  const labelled = groups.length > 1 || !!(groups[0] && groups[0].id);
+  for (const g of groups) {
+  let host = list;
+  if (labelled) {
+    const wrap = document.createElement('div');
+    wrap.className = 'srv-group';
+    const head = document.createElement('div');
+    head.className = 'srv-group-head';
+    head.innerHTML = `<span class="srv-group-ico">${g.id ? '🔗' : '✎'}</span>
+      <span class="srv-group-name"></span><span class="srv-group-count"></span>`;
+    head.querySelector('.srv-group-name').textContent = g.name;
+    head.querySelector('.srv-group-count').textContent = String(g.items.length);
+    wrap.appendChild(head);
+    list.appendChild(wrap);
+    host = wrap;
+  }
+  for (const s of g.items) {
     const card = document.createElement('div');
     const isActive = s.id === state.activeServerId && state.connected;
     const isSel = s.id === state.selectedServerId;
@@ -723,7 +773,8 @@ function renderServers() {
     card.querySelector('.edit-srv').onclick = (e) => { e.stopPropagation(); openEdit(s.id); };
     card.querySelector('.connect-srv').onclick = (e) => { e.stopPropagation(); connect(s.id); };
     card.querySelector('.del-srv').onclick = (e) => { e.stopPropagation(); deleteServer(s.id); };
-    list.appendChild(card);
+    host.appendChild(card);
+    }
   }
 }
 
@@ -3318,7 +3369,14 @@ function renderModeOptions() {
     if (isTun) opt.classList.toggle('disabled', !state.tunAvailable);
   });
   const note = $('#modeNote');
+  const fix = $('#modeGetFiles');
   if (!note) return;
+  // TUN is the default now, so "the backend is missing" is the FIRST thing a
+  // fresh install meets. Saying it in a grey line and connecting proxy-only is
+  // how that became "it says connected but only the browser is tunnelled":
+  // say it as a warning, and put the fix one click away.
+  note.classList.toggle('bad', !state.tunAvailable);
+  if (fix) fix.hidden = state.tunAvailable;
   if (!state.tunAvailable) note.textContent = t('tun.unavailable');
   else if (state.settings.tunMode && !state.elevated) note.textContent = t('tun.needAdmin');
   else note.textContent = '';
@@ -3326,6 +3384,13 @@ function renderModeOptions() {
 function openModeModal() { renderModeOptions(); $('#modeModal').hidden = false; }
 function closeModeModal() { $('#modeModal').hidden = true; }
 $('#modeCard').onclick = openModeModal;
+// straight to the place the missing backend is downloaded from
+$('#modeGetFiles').onclick = () => {
+  closeModeModal();
+  showView('settings');
+  const c = $('#compList');
+  if (c) c.scrollIntoView({ block: 'center' });
+};
 $('#modeClose').onclick = closeModeModal;
 $('#modeModal').onclick = (e) => { if (e.target === $('#modeModal')) closeModeModal(); };
 $$('#modeModal .mode-option').forEach(opt => {

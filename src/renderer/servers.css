@@ -1,0 +1,114 @@
+/* =========================================================================
+   IRNetFree — the servers list's grouping and selection
+
+   Split out of lists.css because it arrived while that file was being worked
+   on elsewhere; it belongs there once both settle. Everything here is about
+   two questions the flat list could not answer:
+
+     "where did this config come from?"   → the group headings
+     "which one is actually selected?"    → .server-card.selected
+
+   The two states are DIFFERENT and both have to be legible at once: `.active`
+   is "this is the tunnel that is up right now", `.selected` is "this is what
+   the connect button will use". They are usually the same config, and when
+   they are not, that is exactly the moment the user needs to see it.
+
+   Tokens only (three skins re-declare them) and logical properties only
+   (Persian runs RTL).
+   ========================================================================= */
+
+/* ----------------------------- groups ----------------------------- */
+
+.srv-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.srv-group:last-child { margin-bottom: 0; }
+
+.srv-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-block: 2px;
+  margin-bottom: 2px;
+}
+.srv-group-ico { font-size: 13px; color: var(--ink3); flex: 0 0 auto; }
+.srv-group-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* the count sits in its own chip so a long subscription name can ellipsise
+   without pushing the number off the row */
+.srv-group-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink3);
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-radius: var(--r2);
+  padding: 1px 7px;
+  flex: 0 0 auto;
+}
+/* a rule running off the heading to the end of the row, so the group reads as
+   a band rather than a stray line of text */
+.srv-group-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* ----------------------------- selection ----------------------------- */
+
+/*
+ * The selected config was marked in the markup all along — `.server-card`
+ * gets `selected`, and the same click path runs from the servers page and from
+ * the home picker — but nothing styled it, so choosing one looked like it had
+ * done nothing. Hence "it is not clear which one is selected".
+ */
+.server-card.selected {
+  border-inline-start-color: var(--accentLine);
+  background: var(--soft);
+}
+.server-card.selected .srv-name {
+  font-weight: 700;
+  color: var(--ink);
+}
+/* Connected wins over merely selected: it keeps the full accent edge and tint
+   from lists.css, and its name goes accent so the two states never read the
+   same at a glance. */
+.server-card.active .srv-name { color: var(--accentInk); font-weight: 700; }
+
+.sel-badge { white-space: nowrap; }
+
+/* ----------------------------- lifetime usage ----------------------------- */
+
+/*
+ * How much has gone through this config in total, across every session — not
+ * just the one that is running. Absent until there is something to show, so a
+ * fresh config does not carry an empty column.
+ */
+.srv-usage {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink3);
+  direction: ltr;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.srv-usage:empty { display: none; }
+.srv-usage .u-sep { color: var(--dim); padding-inline: 3px; }
+
+/* ----------------------------- the mode picker ----------------------------- */
+
+/* the warning under the two options, when the backend for one of them is
+   missing — TUN is the default now, so this is a first-run surface */
+.mode-note.bad { color: var(--danger); line-height: 1.7; }
+.mode-fix { width: 100%; margin-top: 4px; }

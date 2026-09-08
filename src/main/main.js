@@ -95,7 +95,12 @@ const DEFAULT_SETTINGS = {
   logLevel: 'warning',
   apiPort: 10085,
   systemProxy: true,
-  tunMode: false,
+  // Whole-system tunnelling is the point of the app, so it is the default.
+  // It needs a backend (sing-box, or the legacy tun2socks) and admin rights;
+  // when either is missing the connect refuses with a message that says what
+  // to install rather than silently falling back to proxy-only, which looked
+  // like it had worked while half the machine was still outside the tunnel.
+  tunMode: true,
   // TUN backend: sing-box (auto_route, v4+v6) when installed, else tun2socks
   tunBackend: 'sing-box',
   // leak guard under TUN: 'off' | 'standard' (adapter DNS override) | 'strict'

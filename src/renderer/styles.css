@@ -633,7 +633,22 @@ button { cursor: pointer; background: none; border: 0; color: inherit; }
 .mode-opt-text { flex: 1; min-width: 0; }
 .mode-opt-title { font-size: 13px; font-weight: 600; }
 .mode-opt-desc { font-size: 11px; color: var(--ink3); line-height: 1.6; margin-top: 3px; }
-.mode-opt-check { color: var(--accent); font-weight: 700; }
+/* The tick belongs to the CHOSEN option only. It used to render on both — the
+   markup carries one per option and nothing hid the other — so the picker
+   showed two ticks and said nothing about which mode was actually on. The
+   code marks the choice with `.active`; `.selected` is accepted too so either
+   word works. */
+.mode-opt-check { color: var(--accent); font-weight: 700; visibility: hidden; }
+.mode-option.active .mode-opt-check,
+.mode-option.selected .mode-opt-check { visibility: visible; }
+.mode-option.active {
+  background: var(--accentSoft);
+  border-color: var(--accent);
+}
+.mode-option.active .mode-opt-title { color: var(--accentInk); font-weight: 700; }
+/* a mode whose backend is not installed cannot be chosen — say so by looking it */
+.mode-option.disabled { opacity: .55; }
+.mode-option.disabled:hover { border-color: var(--softline); }
 
 .toast {
   position: fixed;
