@@ -306,3 +306,112 @@ test('stop() clears the timer and start() is idempotent', () => {
   h.tick();                        // no-op, nothing should throw
   assert.deepEqual(h.fired, []);
 });
+
+/* ------------- the network that goes and comes back the same ------------- */
+/*
+ * The owner's own words: "when the net goes and comes back". The comparison the
+ * watcher used to make was fingerprint-against-baseline at the moment of the
+ * poll, so a network that LEFT and returned to the very same addresses — the
+ * commonest shape of all, a Wi-Fi drop that re-associates on the same DHCP
+ * lease, a router reboot, a cable pulled and pushed back — was read as "nothing
+ * happened". Meanwhile every socket xray held died with the link, so the tunnel
+ * is gone and the UI still says connected, with nothing left to notice.
+ */
+
+const gone = {};                                    // no routable address at all
+const wifiPlusEth = {
+  'Wi-Fi': [{ family: 'IPv4', internal: false, address: '192.168.1.20' }],
+  Ethernet: [{ family: 'IPv4', internal: false, address: '10.0.0.5' }]
+};
+
+test('a network that leaves the baseline and returns to it is still a change', () => {
+  const h = harness([wifi, eth, wifi]);
+  h.w.start();
+  h.tick();                       // baseline
+  h.advance(); h.tick();          // it moved — seen once, still settling
+  assert.deepEqual(h.fired, []);
+  h.advance(); h.tick();          // and it is back on the SAME address as before
+  assert.deepEqual(h.fired, [], 'not on the tick it returns — it may still be moving');
+  h.tick();                       // it holds still
+  assert.deepEqual(h.fired, ['interfaces'],
+    'the link went away and came back: every socket the core held died with it');
+  h.tick(); h.tick();
+  assert.deepEqual(h.fired, ['interfaces'], 'and it is one change, not one per poll');
+});
+
+test('a network that never moves never fires, however long it is watched', () => {
+  const h = harness([wifi]);
+  h.w.start();
+  for (let i = 0; i < 10; i++) h.tick();
+  assert.deepEqual(h.fired, [], 'a quiet network must not manufacture a rebuild');
+});
+
+/**
+ * Wi-Fi off, a flight-mode toggle, the moment between "the old lease is gone"
+ * and "the new one is here". Rebuilding onto no network at all cannot work: it
+ * tears the tunnel down, fails, and spends the whole backoff — four complete
+ * teardown+rebuild cycles — before the machine is even reachable. The trigger is
+ * not dropped, it is HELD: the return is what gets rebuilt onto.
+ */
+test('losing the network entirely defers the rebuild until an address is back', () => {
+  const h = harness([wifi, gone, gone, wifi2]);
+  h.w.start();
+  h.tick();
+  h.advance(); h.tick(); h.tick(); h.tick();
+  assert.deepEqual(h.fired, [], 'there is nothing to rebuild onto while the machine is offline');
+  h.advance(); h.tick(); h.tick();
+  assert.deepEqual(h.fired, [], 'still offline');
+  h.advance(); h.tick();          // an address is back — seen once
+  assert.deepEqual(h.fired, []);
+  h.tick();                       // and it holds
+  assert.deepEqual(h.fired, ['interfaces'], 'the rebuild happens when there is a network for it');
+});
+
+/* --------------------- other software's virtual adapters --------------------- */
+/*
+ * A false positive is not free: every one of them is a full teardown and rebuild
+ * of the tunnel. Docker Desktop starting, WSL waking, a VM booting — each adds a
+ * host-only adapter with an address, and each used to read as "the machine moved
+ * to a different network".
+ */
+
+const wsl = { family: 'IPv4', internal: false, address: '172.28.176.1' };
+const vmnet8 = { family: 'IPv4', internal: false, address: '192.168.153.1' };
+
+test('fingerprint ignores the host-only adapters other software brings up', () => {
+  const base = { 'Wi-Fi': [wifi4] };
+  for (const name of [
+    'vEthernet (WSL (Hyper-V firewall))', 'vEthernet (Default Switch)', 'vEthernet (nat)',
+    'VMware Network Adapter VMnet8', 'VirtualBox Host-Only Network',
+    'Bluetooth Network Connection', 'Npcap Loopback Adapter', 'docker0',
+    'br-8a41c0de99f2', 'veth3f1a9b'
+  ]) {
+    assert.equal(fingerprint(Object.assign({ [name]: [wsl] }, base)), fingerprint(base),
+      `${name} coming up is not the machine changing network`);
+  }
+  // A Hyper-V EXTERNAL switch is the opposite case: the physical NIC is bridged
+  // into it and the machine's real address lives there, so it must still count.
+  assert.notEqual(fingerprint({ 'vEthernet (External)': [vmnet8] }), fingerprint({}));
+});
+
+test('a VM starting up does not trigger a rebuild, but the Wi-Fi moving still does', () => {
+  const withVm = Object.assign({ 'VMware Network Adapter VMnet8': [vmnet8] }, wifi);
+  const withVmOnEth = Object.assign({ 'VMware Network Adapter VMnet8': [vmnet8] }, eth);
+  const h = harness([wifi, withVm, withVmOnEth]);
+  h.w.start();
+  h.tick();
+  h.advance(); h.tick(); h.tick(); h.tick();
+  assert.deepEqual(h.fired, [], 'the VM adapter appearing is not news');
+  h.advance(); h.tick(); h.tick();
+  assert.deepEqual(h.fired, ['interfaces'], 'the real switch underneath it still is');
+});
+
+test('a second real adapter appearing IS a change', () => {
+  // Plugging the ethernet cable in while on Wi-Fi moves the default route and
+  // leaves a NIC with the ISP's DNS that the guard has never overridden.
+  const h = harness([wifi, wifiPlusEth]);
+  h.w.start();
+  h.tick();
+  h.advance(); h.tick(); h.tick();
+  assert.deepEqual(h.fired, ['interfaces']);
+});
