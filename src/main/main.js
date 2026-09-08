@@ -11,7 +11,7 @@ const { adapterDnsServers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
 const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('./engineChoice');
-const { fetchLeafPin, pinTargets, directServers, staleCertPins, PinWatch } = require('./certPin');
+const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('./certPin');
 const { assetStatus: scanAssets } = require('./assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
 const { XrayManager, getFreePort } = require('./xrayManager');
@@ -537,13 +537,20 @@ async function ensureCertPins(serverId, settings) {
   // pin that no longer matches is dropped here, and the probe below (which
   // picks up every directly-dialled server without a pin) learns the new one on
   // this same connect.
-  const stale = await staleCertPins(directServers(plan), fetchLeafPin).catch(() => []);
-  if (stale.length) {
-    const ids = new Set(stale.map(s => s.id));
+  //
+  // Only the pins that are DUE (certPin.recheckDue): a rotation is a rare
+  // event and the check is a TLS dial per server on every connect and every
+  // network-change recovery. Whatever was asked is stamped, stale or not.
+  const now = Date.now();
+  const due = directServers(plan).filter(s => recheckDue(s, now));
+  const stale = due.length ? await staleCertPins(due, fetchLeafPin).catch(() => []) : [];
+  if (due.length) {
+    const dueIds = new Set(due.map(s => s.id));
+    const staleIds = new Set(stale.map(s => s.id));
     store.set('servers', store.get('servers', []).map(s => {
-      if (!ids.has(s.id)) return s;
-      const out = Object.assign({}, s);
-      delete out.certPin; delete out.certPinAt;
+      if (!dueIds.has(s.id)) return s;
+      const out = Object.assign({}, s, { certPinCheckedAt: now });
+      if (staleIds.has(s.id)) { delete out.certPin; delete out.certPinAt; }
       return out;
     }));
     for (const s of stale) {
@@ -567,7 +574,8 @@ async function ensureCertPins(serverId, settings) {
   }));
   if (!Object.keys(learned).length) return;
   const certPinAt = new Date().toISOString();
-  store.set('servers', store.get('servers', []).map(s => learned[s.id] ? Object.assign({}, s, { certPin: learned[s.id], certPinAt }) : s));
+  // A pin learned now was, by definition, checked now.
+  store.set('servers', store.get('servers', []).map(s => learned[s.id] ? Object.assign({}, s, { certPin: learned[s.id], certPinAt, certPinCheckedAt: Date.now() }) : s));
 }
 
 /**
