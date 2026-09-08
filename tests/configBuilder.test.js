@@ -13,7 +13,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, wgResolvers, wgEndpointHosts } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts } = require('../src/main/configBuilder');
 const {
   settings, ruleTags, outboundTagged, vlessWithMarkers,
   VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK, WG_CORP
@@ -719,6 +719,19 @@ test('managed bypass-ir without geo files carries no geo token at all', () => {
   assert.equal(JSON.stringify(c).includes('geoip:'), false);
 });
 
+// Without the geo files bypass-ir IS global routing (see "geoAssets:false
+// degrades bypass-ir to plain global routing"), so the domestic resolver has
+// nothing left to serve — and it is the only thing in the config that would
+// still speak cleartext UDP to an Iranian server. It goes, and with it the hole
+// the TUN layer would have punched for it.
+test('managed bypass-ir without geo files keeps no domestic resolver, and nothing is excluded from the tunnel for one', () => {
+  const s = settings(Object.assign({ routingMode: 'bypass-ir', geoAssets: false }, MANAGED));
+  const c = buildConfig(single(), s);
+  assert.equal(JSON.stringify(c).includes('178.22.122.100'), false, 'no Iranian resolver in the config');
+  assert.deepEqual(c.routing.rules.slice(0, 2), DNS_RULES_GLOBAL, 'no direct rule for a resolver that is not there');
+  assert.deepEqual(resolverBypassIps(single(), s), [], 'and no route/firewall hole for one either');
+});
+
 test('managed direct mode: the resolver’s traffic goes direct too', () => {
   const c = buildConfig(single(), settings(Object.assign({ routingMode: 'direct' }, MANAGED)));
   assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'direct' });
@@ -824,6 +837,47 @@ test('resolverBypassIps: the direct resolver addresses the TUN layer must route 
     rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }], def: 'sv-vless'
   }), settings(MANAGED)), ['178.22.122.100']);
   assert.deepEqual(resolverBypassIps(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED))), []);
+});
+
+/**
+ * The same list, read out of the config that is actually running instead of
+ * rebuilt from the plan. Every entry becomes a route exclusion and, at the
+ * strict level, a hole in a firewall that otherwise blocks everything off the
+ * tunnel — so a name here that the config does not have is a hole for nothing,
+ * and a name missing here is a resolver whose query loops back into the hijack.
+ * Rebuilding cannot guarantee either: buildActive() hands buildConfig a
+ * `geoAssets` flag it computes from the files on disk and which the settings
+ * object never carries, so the two derivations can disagree exactly when the
+ * geo files are missing.
+ */
+test('resolverBypassIpsOf: the same answer, taken from the built config', () => {
+  const cases = [
+    [single(), settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED))],
+    [single(), settings(Object.assign({ routingMode: 'global' }, MANAGED))],
+    [single(), settings(Object.assign({ routingMode: 'bypass-ir', dnsRemote: ['192.168.1.1', 'https://1.1.1.1/dns-query'] }, MANAGED))],
+    [single(), settings({ routingMode: 'bypass-ir', dnsManaged: false })],
+    [advancedPlan({ rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }], def: 'sv-vless' }), settings(MANAGED)],
+    [corpPlan({ rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }] }), managed()],
+    [poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED))],
+    [single(), settings(Object.assign({ routingMode: 'bypass-ir', tunMode: true, leakGuard: 'strict' }, MANAGED))]
+  ];
+  for (const [plan, s] of cases) {
+    assert.deepEqual(resolverBypassIpsOf(buildConfig(plan, s)), resolverBypassIps(plan, s), JSON.stringify(s.routingMode));
+  }
+});
+
+test('resolverBypassIpsOf: no hole for a resolver the geo-less config never built', () => {
+  const s = settings(Object.assign({ routingMode: 'bypass-ir' }, MANAGED));
+  // what buildActive() really does: the flag goes to buildConfig and nowhere else
+  const config = buildConfig(single(), Object.assign({}, s, { geoAssets: false }));
+  assert.deepEqual(resolverBypassIpsOf(config), []);
+  assert.deepEqual(resolverBypassIps(single(), s), ['178.22.122.100'], 'the plan-derived list cannot see the missing files');
+});
+
+test('resolverBypassIpsOf: a config with no routing section, or another core’s format, is simply empty', () => {
+  assert.deepEqual(resolverBypassIpsOf(null), []);
+  assert.deepEqual(resolverBypassIpsOf({}), []);
+  assert.deepEqual(resolverBypassIpsOf({ route: { final: 'proxy' }, dns: { servers: [] } }), [], 'a sing-box config');
 });
 
 // xray's router resolves a hostname under IPIfNonMatch only when NO rule matched

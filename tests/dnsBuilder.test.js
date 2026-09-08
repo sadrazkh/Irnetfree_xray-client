@@ -74,13 +74,42 @@ test('bypass-ir: the direct resolver is pinned to Iranian domains and answers', 
   assert.deepEqual(p.directResolverIps, ['178.22.122.100', '185.51.200.2']);
 });
 
-test('bypass-ir without geo files: no geosite/geoip tokens anywhere', () => {
+/**
+ * Without geoip.dat/geosite.dat the router emits NO country bypass at all —
+ * `buildRoutingRules` skips the whole bypass-ir branch and every byte goes
+ * through the proxy (configBuilder.test.js: "geoAssets:false degrades bypass-ir
+ * to plain global routing"). A domestic resolver kept anyway hands an Iranian
+ * server, in cleartext UDP, exactly the names the traffic then hides — a leak
+ * that buys nothing. Measured before the fix with scripts/probe-dns-leak.js:
+ * `snapp.ir` and `bmi.ir` arrived at the domestic resolver while every
+ * connection took `taking detour [proxy]`.
+ */
+test('bypass-ir without geo files: no in-country resolver at all — the router has no bypass to match', () => {
   const p = buildDnsPlan(base({ routingMode: 'bypass-ir' }), opts({ geoAssets: false }));
-  const srv = p.dns.servers[0];
-  assert.deepEqual(srv.domains, ['regexp:.*\\.ir$']);
-  assert.equal('expectedIPs' in srv, false, 'geoip:ir needs geoip.dat');
+  assert.deepEqual(p.dns.servers, ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']);
+  assert.deepEqual(p.directResolverIps, []);
+  assert.deepEqual(p.rules, [
+    { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
+    { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }
+  ]);
   assert.equal(JSON.stringify(p).includes('geosite:'), false);
   assert.equal(JSON.stringify(p).includes('geoip:'), false);
+});
+
+test('without geo files bypass-cn, advancedUseMode and a geosite→direct rule lose the resolver too', () => {
+  const noGeo = opts({ geoAssets: false });
+  assert.deepEqual(buildDnsPlan(base({ routingMode: 'bypass-cn' }), noGeo).directResolverIps, []);
+  // the geosite token that justified the resolver is the one the router drops
+  const adv = buildDnsPlan(base({
+    advancedRouting: true, routeRules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }]
+  }), opts({ geoAssets: false, exitTag: 'out-sv-a' }));
+  assert.deepEqual(adv.directResolverIps, []);
+  assert.equal(typeof adv.dns.servers[0], 'string');
+  const useMode = buildDnsPlan(base({
+    advancedRouting: true, advancedUseMode: true, routingMode: 'bypass-ir',
+    routeRules: [{ type: 'ip', value: '10.20.0.0/16', target: 'out-sv-a' }]
+  }), opts({ geoAssets: false, exitTag: 'out-sv-a' }));
+  assert.deepEqual(useMode.directResolverIps, []);
 });
 
 test('bypass-cn uses the Chinese resolver and lists', () => {

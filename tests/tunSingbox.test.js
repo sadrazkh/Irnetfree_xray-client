@@ -252,6 +252,59 @@ test('win32 start: two v4 servers → set + add index=2; no v6 line without ipv6
   });
 });
 
+/**
+ * The v6 half of the "smart multi-homed name resolution" leak.
+ *
+ * buildTunConfig keeps the v6 address (and therefore the v6 default route) even
+ * with ipv6:false — the comment there says why: so v6 can never bypass the TUN.
+ * But the adapter was then left with NO v6 resolver, which leaves the machine's
+ * only IPv6 resolvers on the physical adapters: the ISP's. Windows asks every
+ * adapter's resolvers in parallel, and an ISP resolver reached over a link-local
+ * v6 address is on-link — it never meets the tunnel's default route at all.
+ *
+ * The peer answers on either family: scripts/probe-dns-leak.js shows the
+ * port-53 hijack taking `[udp:[::1]:53]` and `[tcp:[::1]:53]` and answering
+ * both, so pointing the adapter's v6 side at the peer costs nothing and closes
+ * the family the leak guard's `peer6` does not cover while ipv6 is off.
+ */
+test('win32 start: the tunnel peer is the adapter resolver on BOTH families, ipv6 setting or not', async () => {
+  for (const ipv6 of [false, true]) {
+    await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
+      tun.isElevated = () => true;
+      fakeSpawn = killable();
+      canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+      await tun.start(10808, ['1.2.3.4'], [TUN_PEER4], { ipv6 });
+      const netsh = execs.filter(([c]) => c === 'netsh').map(([, a]) => a);
+      assert.deepEqual(netsh, [
+        ['interface', 'ip', 'set', 'dnsservers', 'name=IRNetFree', 'static', TUN_PEER4, 'primary', 'validate=no'],
+        ['interface', 'ipv6', 'set', 'dnsservers', 'name=IRNetFree', 'static', TUN_PEER6, 'primary', 'validate=no']
+      ], `ipv6:${ipv6}`);
+      await tun.stop();
+    });
+  }
+});
+
+/**
+ * The other way round: a config whose core has no port-53 hijack (the sing-box
+ * format) gets plain public resolvers instead of the peer — and then the peer is
+ * an address nothing answers on. Handing it out as the v6 resolver would be a
+ * v6 black hole, so it is only ever offered next to its own v4 half.
+ */
+test('win32 start: without the tunnel peer on v4 there is no invented v6 peer, even with ipv6 on', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
+    tun.isElevated = () => true;
+    fakeSpawn = killable();
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    await tun.start(10808, ['1.2.3.4'], ['1.1.1.1', '8.8.8.8'], { ipv6: true });
+    const netsh = execs.filter(([c]) => c === 'netsh').map(([, a]) => a);
+    assert.deepEqual(netsh, [
+      ['interface', 'ip', 'set', 'dnsservers', 'name=IRNetFree', 'static', '1.1.1.1', 'primary', 'validate=no'],
+      ['interface', 'ip', 'add', 'dnsservers', 'name=IRNetFree', '8.8.8.8', 'index=2', 'validate=no']
+    ]);
+    await tun.stop();
+  });
+});
+
 test('win32 start: no servers given → the tunnel peer; a v6 server given → used instead of the peer', async () => {
   await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
     tun.isElevated = () => true;
@@ -455,7 +508,10 @@ test('darwin start: config without interface_name, scripts through one privilege
       assert.deepEqual(cfg.inbounds[0].route_exclude_address, ['1.2.3.4/32']);
       assert.deepEqual(tun.excludeIps, ['1.2.3.4']);
       assert.ok(setup.includes(`BIN='${path.join(dir, 'sing-box')}'`));
-      assert.ok(setup.includes("networksetup -setdnsservers 'Wi-Fi' 172.19.0.2 2>/dev/null || true"));
+      // Both families, ipv6:false and all: macOS resolves per network service,
+      // so a service left with only a v4 tunnel resolver keeps asking its v6
+      // ones — see adapterDns.
+      assert.ok(setup.includes(`networksetup -setdnsservers 'Wi-Fi' ${TUN_PEER4} ${TUN_PEER6} 2>/dev/null || true`));
       assert.equal(tun.macState.macPid, 31337);
       assert.equal(tun.macState.dev, 'utun9');
       assert.deepEqual(tun.macState.savedDns, ['9.9.9.9']);

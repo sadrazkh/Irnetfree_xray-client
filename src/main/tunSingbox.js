@@ -229,15 +229,32 @@ class TunSingbox {
 
   /* ----------------------------- shared steps ----------------------------- */
 
-  /** Split the caller's adapter resolvers by family; the tunnel peer fills a gap. */
+  /**
+   * Split the caller's adapter resolvers by family; the tunnel peer fills a gap.
+   *
+   * The v6 side follows the v4 side rather than the `ipv6` setting. When the v4
+   * resolver is our own peer, the core hijacks port 53 on either family (the
+   * probe watches it answer `[udp:[::1]:53]` and `[tcp:[::1]:53]`) and the
+   * adapter always has a v6 address and default route — see buildTunConfig,
+   * which keeps them precisely so v6 cannot bypass the tunnel. Leaving the v6
+   * resolver empty there left the machine's ONLY IPv6 resolvers on the physical
+   * adapters: the ISP's, and a link-local one is on-link, so it never meets the
+   * tunnel's default route. When the v4 side is NOT the peer (an unmanaged list,
+   * or a core whose config format carries no hijack) the peer answers nothing,
+   * and offering it on v6 would be a black hole — so it is not offered.
+   *
+   * `opts` is kept for callers; the ipv6 flag no longer decides anything here.
+   */
   adapterDns(dnsServers, opts) {
+    void opts;
     const list = (Array.isArray(dnsServers) ? dnsServers : [dnsServers])
       .map(s => String(s == null ? '' : s).trim()).filter(Boolean);
     const v4 = list.filter(s => !s.includes(':')).slice(0, 2);
     const v6 = list.filter(s => s.includes(':')).slice(0, 2);
+    const peered = !v4.length || v4.includes(TUN_PEER4);
     return {
       v4: v4.length ? v4 : [TUN_PEER4],
-      v6: v6.length ? v6 : (opts.ipv6 ? [TUN_PEER6] : [])
+      v6: v6.length ? v6 : (peered ? [TUN_PEER6] : [])
     };
   }
 
