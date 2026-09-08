@@ -22,10 +22,10 @@
       document.documentElement.setAttribute('data-theme', last);
     }
     // Same for the chosen look. Nothing remembered means a first run, and the
-    // default is 'legacy' — paint that rather than letting the bare
+    // default is 'console' — paint that rather than letting the bare
     // stylesheet's cockpit tokens show for a frame.
     var skin = localStorage.getItem('irnetfree.skin');
-    if (skin !== 'cockpit' && skin !== 'console') skin = 'legacy';
+    if (skin !== 'cockpit' && skin !== 'legacy') skin = 'console';
     document.documentElement.setAttribute('data-skin', skin);
   } catch {}
 })();

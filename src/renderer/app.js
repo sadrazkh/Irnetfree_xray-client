@@ -135,7 +135,7 @@ function flagEmoji(cc) {
  * Remembered the same way the theme is, so the first paint is already right.
  */
 function applySkin(skin) {
-  const s = ['cockpit', 'console', 'legacy'].includes(skin) ? skin : 'legacy';
+  const s = ['cockpit', 'console', 'legacy'].includes(skin) ? skin : 'console';
   document.documentElement.setAttribute('data-skin', s);
   try { localStorage.setItem('irnetfree.skin', s); } catch { /* only costs a flash */ }
   return s;
@@ -258,7 +258,7 @@ async function init() {
 
   state.systemDark = data.systemDark !== false;
   applyTheme(state.settings.theme || 'dark', state.systemDark);
-  applySkin(state.settings.skin || 'legacy');
+  applySkin(state.settings.skin || 'console');
 
   // the view preference, before anything paints, so a simple-mode user never
   // sees the pro surfaces flash past
@@ -321,7 +321,7 @@ function applySettingsToUI() {
   $('#langSelect').value = s.lang || 'fa';
   $('#defaultEngine').value = s.defaultEngine || 'xray';
   $('#themeSelect').value = s.theme || 'dark';
-  $('#skinSelect').value = s.skin || 'legacy';
+  $('#skinSelect').value = s.skin || 'console';
   $('#optSysProxy').checked = !!s.systemProxy;
   $('#optTun').checked = !!s.tunMode;
   $('#optTunBackend').value = s.tunBackend || 'sing-box';

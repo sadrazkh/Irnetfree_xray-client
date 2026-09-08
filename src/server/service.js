@@ -91,7 +91,7 @@ const DEFAULT_SETTINGS = {
   // never baked into a config, so it needs no reconnect.
   uiMode: '',
   // which of the three looks the window wears (renderer-only, like theme)
-  skin: 'legacy',
+  skin: 'console',
   theme: 'dark',
   defaultEngine: 'xray',
   lang: 'fa'

@@ -5,11 +5,12 @@
    shape rules (rail width, corner radii, the shape of a switch or the connect
    button); it may not change structure, because every screen and every hook in
    app.js is shared. Chosen in Settings; `data-skin` lives on <html> next to
-   `data-theme`. The DEFAULT is legacy; the bare stylesheet's tokens are
+   `data-theme`. The DEFAULT is console; the bare stylesheet's tokens are
    Cockpit's, so an unset attribute still renders, but the app always sets one.
 
      cockpit  the instrument panel (its tokens live in styles.css)
-     console  1a: signal teal, a labelled rail, pill switches, a round dial
+     console  1a: signal teal, a labelled rail, pill switches, a round dial —
+              the default
      legacy   the look the app had up to v0.15.0
 
    Each skin declares BOTH themes. Light is never an inversion of dark: its
