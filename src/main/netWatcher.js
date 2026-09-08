@@ -18,6 +18,40 @@ function isLinkLocalV6(address) {
 }
 
 /**
+ * Adapters that belong to SOFTWARE on this machine rather than to the network
+ * the machine is attached to. Docker Desktop starting, WSL waking, a VM booting
+ * or a Bluetooth phone pairing each brings one up with an address — and a false
+ * positive here is not free: it is a complete teardown and rebuild of the
+ * tunnel, tens of seconds with no tunnel at all, once per event.
+ *
+ * The list is deliberately narrow, because a false NEGATIVE is worse (a dead
+ * tunnel nothing is left to notice). Every entry names a host-only or NAT
+ * adapter whose address is invented by the software that created it and says
+ * nothing about the machine's route to the internet. `vEthernet (External)` is
+ * the counter-example and is NOT here: with a Hyper-V external switch the
+ * physical NIC is bridged into it and the machine's real address lives there.
+ */
+const HOST_VIRTUAL_RE = [
+  /^vEthernet \((WSL|Default Switch|nat)\b/i,        // Hyper-V's own internal switches
+  /^VMware Network Adapter VMnet\d/i,                // host-only (VMnet1) and NAT (VMnet8)
+  /^VirtualBox Host-Only Network/i,
+  /^Bluetooth Network Connection/i,
+  /^Npcap Loopback Adapter/i,
+  /^Loopback Pseudo-Interface/i,
+  /^docker\d/i,
+  /^br-[0-9a-f]{8,}$/i,                              // a docker bridge network
+  // A container's end of a veth pair. Case-SENSITIVE and anchored on purpose:
+  // case-insensitively, `veth[0-9a-f]` also matches "vEthernet (External)" —
+  // the one Hyper-V switch that does carry the machine's real address.
+  /^veth[0-9a-f]{4,}$/
+];
+
+function isHostVirtualInterface(name) {
+  const s = String(name == null ? '' : name);
+  return HOST_VIRTUAL_RE.some(re => re.test(s));
+}
+
+/**
  * A stable signature of the machine's routable addresses. Interface order and
  * internal (loopback) addresses are ignored, so a re-enumeration that returns
  * the same network in a different order is NOT a change.
@@ -32,6 +66,10 @@ function isLinkLocalV6(address) {
  *    the one its owner injected (see NetWatcher#fp).
  *  - IPv6 link-local addresses. Windows hands a recreated adapter a fresh GUID
  *    and therefore a fresh fe80:: address, which says nothing about routing.
+ *  - The host-only adapters of other software (see HOST_VIRTUAL_RE). Unlike the
+ *    predicate above this one is not the caller's choice: no caller wants a VM
+ *    booting to tear its tunnel down, and the app's own injected predicate knows
+ *    only about the app's own adapter.
  *
  * @param {object} interfaces os.networkInterfaces()-shaped object
  * @param {(name: string) => boolean} [ignoreInterface] defaults to ignoring nothing
@@ -40,7 +78,7 @@ function fingerprint(interfaces, ignoreInterface) {
   const skip = typeof ignoreInterface === 'function' ? ignoreInterface : () => false;
   const parts = [];
   for (const name of Object.keys(interfaces || {})) {
-    if (skip(name)) continue;
+    if (skip(name) || isHostVirtualInterface(name)) continue;
     for (const ni of (interfaces[name] || [])) {
       if (!ni || ni.internal) continue;
       if (isLinkLocalV6(ni.address)) continue;
@@ -85,6 +123,7 @@ class NetWatcher {
     this.last = null;         // fingerprint of the last settled network
     this.pending = null;      // fingerprint seen while the network is still moving
     this.settledFor = 0;      // ms the pending fingerprint has held
+    this.moved = false;       // the network has LEFT the baseline since the last fire
     this.busy = false;        // a recovery is in flight
     this.queued = null;       // reason of a trigger that arrived during that recovery
     this.gen = 0;             // bumped by stop(); an older run's result is ignored
@@ -100,6 +139,7 @@ class NetWatcher {
     this.last = this.fp();
     this.pending = null;
     this.settledFor = 0;
+    this.moved = false;
     this.timer = this.setTimer(() => this.tick(), this.intervalMs);
   }
 
@@ -111,6 +151,7 @@ class NetWatcher {
   stop() {
     this.pending = null;
     this.settledFor = 0;
+    this.moved = false;
     this.busy = false;
     this.queued = null;
     this.gen++;               // whatever was in flight no longer speaks for us
@@ -119,23 +160,48 @@ class NetWatcher {
     this.timer = null;
   }
 
-  /** One poll. Fires onChange only once the new fingerprint has held still. */
+  /**
+   * One poll. Fires onChange only once the network has held still — but the
+   * question it settles is "did the network LEAVE the baseline at any point",
+   * not "does it differ from the baseline right now".
+   *
+   * Those are not the same question, and the difference is the owner's own
+   * complaint: "when the net goes and comes back". The commonest shape of a
+   * network change is a link that drops and re-associates on the SAME DHCP
+   * lease — a Wi-Fi blip, a router reboot, a cable pulled and pushed back, a
+   * wake from sleep onto the network the machine went to sleep on. Comparing
+   * only the current fingerprint to the baseline reads all of those as "nothing
+   * happened", while every socket the core held died with the link: the tunnel
+   * is dead, the UI still says connected, and no later poll will ever notice
+   * because the fingerprint is exactly the one recorded as normal.
+   */
   tick() {
     const fp = this.fp();
-    if (fp === this.last) { this.pending = null; this.settledFor = 0; return; }
+    // Seen even once away from the baseline: the link moved, whatever it does next.
+    if (fp !== this.last) this.moved = true;
     if (fp !== this.pending) { this.pending = fp; this.settledFor = 0; return; }  // still moving
     this.settledFor += this.intervalMs;
     if (this.settledFor < this.debounceMs) return;
+    const moved = this.moved;
     this.last = fp;
     this.pending = null;
     this.settledFor = 0;
-    this.fire('interfaces');
+    // No routable address at all — Wi-Fi off, flight mode, the gap between two
+    // DHCP leases. There is nothing to rebuild ONTO: the rebuild would tear the
+    // tunnel down, fail, and spend the whole backoff (four teardown+rebuild
+    // cycles) before the machine is reachable again. So the trigger is HELD,
+    // not dropped — `moved` stays set, and the return of an address fires it.
+    if (!fp) return;
+    this.moved = false;
+    if (moved) this.fire('interfaces');
   }
 
   /** An out-of-band signal (power resume, browser 'online'). */
   poke(reason) {
     if (!this.timer) return;                 // not watching: nothing to recover
     this.last = this.fp();                   // adopt the current network as the baseline
+    // The recovery this fires covers everything up to now, baseline included.
+    this.moved = false;
     this.fire(reason || 'poke');
   }
 
@@ -168,4 +234,4 @@ class NetWatcher {
   }
 }
 
-module.exports = { NetWatcher, fingerprint };
+module.exports = { NetWatcher, fingerprint, isHostVirtualInterface };

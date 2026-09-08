@@ -297,6 +297,23 @@ const WIN_SNAP = JSON.stringify([
   { alias: 'Ethernet', v4: ['178.22.122.100'], v6: [], dhcp4: false, dhcp6: true }
 ]);
 
+/**
+ * The state file a session that never shut down cleanly leaves behind.
+ *
+ * The repair tests write it themselves rather than manufacturing one with
+ * engage(): a guard that has engaged in THIS process owns the file, and
+ * repairAtLaunch refuses to touch it (see 'repairAtLaunch never undoes a
+ * session this process engaged'). Only a file that predates the process is a
+ * previous session's, and that is what this makes.
+ */
+function crashedSession(h, extra = {}) {
+  fs.writeFileSync(h.statePath, JSON.stringify(Object.assign({
+    version: 1, at: new Date().toISOString(), backend: 'sing-box',
+    peer4: PEER4, peer6: null, tunAlias: 'IRNetFree',
+    level: 'standard', excludes: [], strict: false, udpBlock: false
+  }, extra), null, 2));
+}
+
 test('engage: level "off" changes nothing and leaves no state file', async () => {
   const h = harness('win32', () => WIN_SNAP);
   const r = await h.guard.engage({ level: 'off', peer4: PEER4, tunAlias: 'IRNetFree' });
@@ -422,8 +439,7 @@ test('repairAtLaunch (win32): kills the orphan tunnel, restores the DNS, clears 
   const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1])
     ? WIN_SNAP
     : 'killed sing-box (pid 4242)\r\n'));
-  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' });
-  h.calls.length = 0; h.logs.length = 0;
+  crashedSession(h, { win: { adapters: parseWinSnapshot(WIN_SNAP) } });
 
   const r = await h.guard.repairAtLaunch();
   assert.deepEqual(r, { repaired: true, adapters: 2 });
@@ -439,8 +455,7 @@ test('repairAtLaunch (win32): kills the orphan tunnel, restores the DNS, clears 
 
 test('repairAtLaunch (darwin): one privileged script does both', async () => {
   const h = harness('darwin', (cmd) => (cmd === '/bin/bash' ? 'Wi-Fi\t192.168.8.1' : 'killed sing-box (pid 77)\n'));
-  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'utun4' });
-  h.calls.length = 0; h.logs.length = 0;
+  crashedSession(h, { tunAlias: 'utun4', mac: { services: [{ name: 'Wi-Fi', dns: ['192.168.8.1'] }] } });
 
   await h.guard.repairAtLaunch();
   assert.equal(h.calls.length, 1);
@@ -799,8 +814,7 @@ test('release (win32, strict): the block is lifted BEFORE the resolvers go back'
 
 test('repairAtLaunch (win32, strict): the orphan, the rules and the DNS in one script', async () => {
   const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
-  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree' });
-  h.calls.length = 0; h.logs.length = 0;
+  crashedSession(h, { level: 'strict', strict: true, win: { adapters: parseWinSnapshot(WIN_SNAP) } });
 
   await h.guard.repairAtLaunch();
   assert.equal(h.calls.length, 1);
@@ -862,7 +876,9 @@ test('engage (darwin, strict): an unnamed tunnel device gets DNS only, never a b
 test('engageUdpBlock (win32): one rule per adapter, and a state file that says so', async () => {
   const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? WIN_SNAP : ''));
   const r = await h.guard.engageUdpBlock({ excludes: ['5.6.7.8', 'vpn.example.com'] });
-  assert.deepEqual(r, { engaged: true, adapters: 2 });
+  assert.equal(r.engaged, true);
+  assert.equal(r.adapters, 2);
+  assert.ok(r.token, 'this session has a receipt too — release() is the same call either way');
   assert.equal(h.calls.length, 2);
   assert.equal(h.calls[0].script, winSnapshotScript(null), 'no tunnel of ours to skip in proxy mode');
   assert.equal(h.calls[1].script, winUdpBlockApplyScript({
@@ -940,7 +956,12 @@ test('engage twice keeps the first session’s originals instead of re-reading o
   const opts = { level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' };
   await h.guard.engage(opts);
   await h.guard.engage(opts);
-  assert.equal(snaps, 1, 'the live session is snapshotted once, not once per connect');
+  // The second engage DOES look again — that is how an adapter which has come
+  // up since gets the override too (see 'engage over a live session adopts an
+  // adapter that has come up since'). What it must never do is let what it
+  // reads back overwrite an original it already holds: every alias below still
+  // carries the resolver the machine had before we touched anything.
+  assert.equal(snaps, 2);
   assert.deepEqual(h.state().win.adapters, JSON.parse(WIN_SNAP));
   assert.equal(h.guard.readState().win.adapters.some(a => a.v4.includes(PEER4)), false);
 });
@@ -976,6 +997,297 @@ test('macOS: a service already carrying the peer is engaged as empty and restore
 test('the strict block leaves the DHCP limited broadcast alone', () => {
   assert.equal(rangeComplement(GUARD_EXCLUDES).some(r => r.endsWith('-255.255.255.255')), false);
   assert.ok(GUARD_EXCLUDES.includes('255.255.255.255/32'));
+});
+
+/* ========================= the reconnect gap ========================= */
+/*
+ * The owner's report: the VPN gets confused when the network changes, and a
+ * reconnect must not leak anything in the gap between the old tunnel going down
+ * and the new one coming up.
+ *
+ * What makes that gap leak is the ordering above the guard — release, tear the
+ * tunnel down, rebuild, engage again — which puts every physical adapter back on
+ * the ISP's resolver, and takes the strict firewall down with it, for the whole
+ * length of a rebuild. The primitives below are what a leak-free ordering needs:
+ * a session RECEIPT, so an overtaken connect cannot undo the guard of the one
+ * that overtook it; a re-engage that MERGES rather than replaces; and a hold
+ * that widens the firewall for the next server without ever letting go.
+ */
+
+const winPs = (h) => h.calls.filter(c => c.cmd === 'powershell').map(c => c.script);
+const winAnswer = (snap) => (cmd, args) => (/ConvertTo-Json/.test(args[args.length - 1]) ? snap : '');
+
+/**
+ * The residual race the phase-3 review carried forward: "two OVERLAPPING
+ * connects can drop the override on a live tunnel — leak, not breakage".
+ *
+ * doConnect() releases the guard unconditionally when it finds itself stale.
+ * But by then the connect that overtook it may already have engaged the guard
+ * for a tunnel that is up and carrying traffic — so the loser's release points
+ * every adapter back at the ISP, removes the strict firewall, and deletes the
+ * state file, while the UI says connected and the tunnel keeps running. The
+ * receipt is what tells the two apart.
+ */
+test('release: a receipt from an overtaken connect cannot undo the live session', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  const opts = { level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' };
+  const first = await h.guard.engage(opts);
+  assert.ok(first.token, 'engage hands back a receipt for the session it created');
+  const second = await h.guard.engage(opts);
+  assert.notEqual(second.token, first.token, 'a second engage is a second session');
+  h.calls.length = 0; h.logs.length = 0;
+
+  const late = await h.guard.release({ token: first.token });
+  assert.equal(late.released, false);
+  assert.equal(late.stale, true);
+  assert.equal(h.calls.length, 0, 'not one adapter is touched');
+  assert.equal(fs.existsSync(h.statePath), true, 'and the live session keeps the only record of the originals');
+
+  const own = await h.guard.release({ token: second.token });
+  assert.equal(own.released, true, 'the session that owns the override can still release it');
+  assert.equal(fs.existsSync(h.statePath), false);
+});
+
+/**
+ * The same race with the receipt left in the caller's pocket — which is what
+ * main.js does today, at the `if (stale())` cleanup in doConnect(). Recorded as
+ * a test because the fix is only half in this file: the receipt exists now, but
+ * it protects nothing until the caller presents it.
+ */
+test('WITHOUT a receipt the overlap still drops the override on a live tunnel', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  const opts = { level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' };
+  await h.guard.engage(opts);                     // connect A engages
+  const b = await h.guard.engage(opts);           // connect B overtakes it and re-engages
+  await h.guard.release();                        // A notices it is stale and "cleans up"
+
+  assert.equal(fs.existsSync(h.statePath), false,
+    'B\'s tunnel is up and carrying traffic, and every adapter is back on the ISP\'s resolver');
+  assert.deepEqual(await h.guard.release({ token: b.token }), { released: false, adapters: 0 },
+    'with nothing left for B to put back when it finally does disconnect');
+});
+
+test('release with no receipt is still the unconditional teardown', async () => {
+  // Disconnect, quit and the exit hook mean it whoever engaged: they are the
+  // user's own intent, not one connect racing another.
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' });
+  assert.equal((await h.guard.release()).released, true);
+  assert.equal(fs.existsSync(h.statePath), false);
+  // and a receipt for a session that is already gone is not an error either
+  assert.deepEqual(await h.guard.release({ token: 'irnf-1' }), { released: false, adapters: 0 });
+});
+
+/**
+ * A NIC that was down when the guard engaged never got the override. Today the
+ * only thing that fixes it is the release + re-snapshot of a full reconnect — so
+ * an ordering that holds the guard across the gap would leave the new adapter on
+ * the ISP's resolver for the whole session. Plugging the ethernet cable in while
+ * connected over Wi-Fi is exactly that case, and it is also a network change, so
+ * the two land together.
+ */
+test('engage over a live session adopts an adapter that has come up since', async () => {
+  const LATER = JSON.stringify([
+    // Wi-Fi reads back OUR peer now — the first engage put it there.
+    { alias: 'Wi-Fi', v4: [PEER4], v6: [], dhcp4: false, dhcp6: true },
+    { alias: 'Ethernet', v4: [PEER4], v6: [], dhcp4: false, dhcp6: true },
+    // and this one was plugged in after the tunnel came up: never overridden.
+    { alias: 'Ethernet 2', v4: ['192.168.5.1'], v6: [], dhcp4: true, dhcp6: true }
+  ]);
+  let snaps = 0;
+  const h = harness('win32', (cmd, args) => {
+    if (!/ConvertTo-Json/.test(args[args.length - 1])) return '';
+    return ++snaps === 1 ? WIN_SNAP : LATER;
+  });
+  const opts = { level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' };
+  await h.guard.engage(opts);
+  h.calls.length = 0;
+  await h.guard.engage(opts);
+
+  const adapters = h.state().win.adapters;
+  assert.deepEqual(adapters.map(a => a.alias), ['Wi-Fi', 'Ethernet', 'Ethernet 2']);
+  assert.deepEqual(adapters[0].v4, ['192.168.8.1'], 'the first session\'s originals are kept, not re-read');
+  assert.deepEqual(adapters[1].v4, ['178.22.122.100']);
+  assert.deepEqual(adapters[2], { alias: 'Ethernet 2', v4: ['192.168.5.1'], v6: [], dhcp4: true, dhcp6: true },
+    'and the newcomer\'s own resolvers are recorded before it is touched');
+  assert.match(winPs(h).join('\n'), /Set-DnsClientServerAddress -InterfaceAlias 'Ethernet 2'/,
+    'the newcomer gets the override too — otherwise it hands every name to the ISP');
+});
+
+test('engage over a live session keeps an adapter that has gone away', async () => {
+  // The USB NIC was unplugged mid-session. Its record must survive: if it comes
+  // back before the release it is ours again, and the restore already skips an
+  // adapter that no longer exists.
+  let snaps = 0;
+  const h = harness('win32', (cmd, args) => {
+    if (!/ConvertTo-Json/.test(args[args.length - 1])) return '';
+    return ++snaps === 1 ? WIN_SNAP : JSON.stringify([{ alias: 'Wi-Fi', v4: [PEER4], v6: [], dhcp4: false, dhcp6: true }]);
+  });
+  const opts = { level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' };
+  await h.guard.engage(opts);
+  await h.guard.engage(opts);
+  assert.deepEqual(h.state().win.adapters.map(a => a.alias), ['Wi-Fi', 'Ethernet']);
+  assert.deepEqual(h.state().win.adapters[1].v4, ['178.22.122.100']);
+});
+
+/**
+ * Dropping from strict to standard without an intervening release leaves the
+ * block rules on every physical adapter AND a state file that no longer mentions
+ * them — so release() will not remove them either. Those rules block everything
+ * that is not the tunnel, and the tunnel is what is about to go away: the machine
+ * is left with no internet at all, and nothing in the app knows why.
+ */
+test('engage at standard over a live strict session takes the strict rules with it', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree', excludes: ['203.0.113.9'] });
+  assert.equal(h.state().strict, true);
+  h.calls.length = 0;
+
+  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' });
+  assert.equal(h.state().strict, false);
+  assert.match(winPs(h).join('\n'), /Remove-NetFirewallRule -Group 'IRNetFree'/,
+    'the rules the state file no longer tracks must go now, while we still know they exist');
+  assert.equal(/New-NetFirewallRule/.test(winPs(h).join('\n')), false, 'and none are put back');
+});
+
+test('engage (standard) over a live UDP block keeps the flag that gets the rules removed', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  await h.guard.engageUdpBlock({});
+  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' });
+  assert.equal(h.state().udpBlock, true,
+    'the DNS override does not touch the firewall, so the UDP rules are still out there');
+  h.calls.length = 0;
+  await h.guard.release();
+  assert.match(winPs(h).join('\n'), /Remove-NetFirewallRule -Group 'IRNetFree'/);
+});
+
+test('engage (strict) over a live UDP block replaces those rules and says so', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  await h.guard.engageUdpBlock({});
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree', excludes: [] });
+  const st = h.state();
+  assert.equal(st.strict, true);
+  assert.equal(st.udpBlock, false, 'the strict apply removes the whole group first — those rules are gone');
+});
+
+/* --------------------------- holding across the gap --------------------------- */
+
+test('holdForReconnect (win32, strict): the override stays, the firewall admits the next server too', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree', excludes: ['203.0.113.9'] });
+  assert.deepEqual(h.state().excludes, ['203.0.113.9'], 'engage records what it cut the holes from');
+  h.calls.length = 0; h.logs.length = 0;
+
+  const r = await h.guard.holdForReconnect({ excludes: ['198.51.100.7'] });
+  assert.equal(r.held, true);
+  assert.equal(fs.existsSync(h.statePath), true, 'nothing is released — that is the entire point');
+  assert.equal(h.calls.length, 1, 'one PowerShell run, and it is the firewall');
+  assert.equal(h.calls[0].script, winStrictApplyScript({
+    adapters: parseWinSnapshot(WIN_SNAP),
+    ranges: rangeComplement(['203.0.113.9', '198.51.100.7', ...GUARD_EXCLUDES])
+  }));
+  assert.equal(/Set-DnsClientServerAddress/.test(h.calls[0].script), false,
+    'the adapters keep pointing at the tunnel peer — during the gap that resolves nothing, which is the safe answer');
+  assert.deepEqual(h.state().excludes, ['203.0.113.9', '198.51.100.7']);
+  assert.deepEqual(h.state().win.adapters, parseWinSnapshot(WIN_SNAP), 'and the originals are untouched');
+});
+
+test('holdForReconnect (win32, standard): there is nothing to widen, and nothing is released', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' });
+  h.calls.length = 0;
+  assert.equal((await h.guard.holdForReconnect({ excludes: ['198.51.100.7'] })).held, true);
+  assert.equal(h.calls.length, 0, 'the DNS override is the whole guard at this level');
+  assert.equal(fs.existsSync(h.statePath), true);
+});
+
+test('holdForReconnect with nothing engaged is a no-op', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  assert.deepEqual(await h.guard.holdForReconnect({ excludes: ['1.2.3.4'] }), { held: false, adapters: 0 });
+  assert.equal(h.calls.length, 0);
+  assert.equal(fs.existsSync(h.statePath), false);
+});
+
+test('holdForReconnect (darwin, strict): the anchor is reloaded with both servers in it', async () => {
+  const h = harness('darwin', (cmd) => (cmd === 'privileged' ? 'IRNF_PF_WAS=enabled' : 'Wi-Fi\t192.168.8.1\n'));
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'utun4', excludes: ['203.0.113.9'] });
+  h.calls.length = 0;
+  assert.equal((await h.guard.holdForReconnect({ excludes: ['198.51.100.7'] })).held, true);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].script,
+    macPfApplyScript(macPfAnchorText({ tunDevice: 'utun4', excludes: ['203.0.113.9', '198.51.100.7'] })));
+  assert.equal(/setdnsservers/.test(h.calls[0].script), false);
+});
+
+test('the widened holes are narrowed again by the engage on the other side of the gap', async () => {
+  // Holding is not a licence to keep the old server's hole open forever: the
+  // re-engage rewrites the rules from the NEW tunnel's exclusions alone.
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree', excludes: ['203.0.113.9'] });
+  await h.guard.holdForReconnect({ excludes: ['198.51.100.7'] });
+  h.calls.length = 0;
+  await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree', excludes: ['198.51.100.7'] });
+  assert.deepEqual(h.state().excludes, ['198.51.100.7']);
+  assert.match(winPs(h).join('\n'),
+    new RegExp(rangeComplement(['198.51.100.7', ...GUARD_EXCLUDES]).map(r => `'${r}'`).join(',')));
+});
+
+/**
+ * The whole point, end to end at this layer: a complete reconnect in which the
+ * guard is never let go. Engage for the old tunnel, hold across the gap, engage
+ * for the new one. If a single `-ResetServerAddresses` appears anywhere in the
+ * scripts these three calls produce, some adapter went back to the ISP's
+ * resolver while there was no tunnel — which is the leak the owner asked about.
+ */
+test('a reconnect with the guard held: no restore is ever run and the record survives', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  const s = await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree', excludes: ['203.0.113.9'] });
+  await h.guard.holdForReconnect({ excludes: ['198.51.100.7'], token: s.token });
+  // — the old tunnel goes down and the new one comes up here —
+  const again = await h.guard.engage({ level: 'strict', peer4: PEER4, tunAlias: 'IRNetFree', excludes: ['198.51.100.7'] });
+
+  assert.equal(again.engaged, true);
+  assert.equal(fs.existsSync(h.statePath), true, 'the file never went away, so nothing was ever unguarded');
+  const scripts = winPs(h).join('\n');
+  assert.equal(/-ResetServerAddresses/.test(scripts), false,
+    'not one adapter was handed back to the ISP at any point in the reconnect');
+  assert.deepEqual(h.state().win.adapters, parseWinSnapshot(WIN_SNAP), 'and the originals are still the originals');
+  assert.deepEqual(h.state().excludes, ['198.51.100.7'], 'with the old server\'s hole closed again on the far side');
+});
+
+/**
+ * M5, carried out of the phase-3 review: repairAtLaunch is fired and not awaited
+ * (a macOS password prompt must not hold up the window), so it can still be
+ * pending when the user presses Connect. The queue makes the two orderly, but
+ * orderly is not enough — a repair that runs AFTER an engage would restore the
+ * live session's adapters and delete the record of its originals. A state file
+ * is only a previous session's while this process has engaged nothing.
+ */
+test('repairAtLaunch never undoes a session this process engaged', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  // what a crash left behind
+  fs.writeFileSync(h.statePath, JSON.stringify({
+    version: 1, peer4: PEER4, strict: false, win: { adapters: [{ alias: 'Wi-Fi', v4: ['192.168.8.1'], v6: [] }] }
+  }));
+  await h.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' });
+  h.calls.length = 0; h.logs.length = 0;
+
+  const r = await h.guard.repairAtLaunch();
+  assert.equal(r.repaired, false);
+  assert.equal(h.calls.length, 0, 'nothing is restored under a live tunnel');
+  assert.equal(fs.existsSync(h.statePath), true);
+  assert.deepEqual(h.logs, []);
+});
+
+test('repairAtLaunch still repairs when the app has engaged nothing yet', async () => {
+  const h = harness('win32', winAnswer(WIN_SNAP));
+  fs.writeFileSync(h.statePath, JSON.stringify({
+    version: 1, peer4: PEER4, strict: false, win: { adapters: [{ alias: 'Wi-Fi', v4: ['192.168.8.1'], v6: [] }] }
+  }));
+  const r = await h.guard.repairAtLaunch();
+  assert.equal(r.repaired, true);
+  assert.equal(r.adapters, 1);
+  assert.equal(fs.existsSync(h.statePath), false);
 });
 
 // L1. A recorded resolver is data read off the machine, and the restore script

@@ -21,6 +21,23 @@
  * leaves a complete record of what to put back. Every "my internet broke after
  * the VPN died" report is a guard that had no such file.
  *
+ * "Afterwards" pointedly does NOT include a reconnect. A network change, a
+ * server switch and a settings apply all tear the tunnel down and build it
+ * again, and releasing the guard for the length of that rebuild would put every
+ * adapter back on the ISP's resolver — and take the strict firewall with it —
+ * for exactly as long as it takes to protect the machine again. So there is
+ * `holdForReconnect()`: the override stays, and only the firewall's holes are
+ * widened to admit the server the next tunnel is about to dial. During the gap
+ * the adapters point at a peer that routes nowhere, so names simply do not
+ * resolve. That is the safe answer, and it is the whole design.
+ *
+ * The other half of the same problem is ownership. Two connects can overlap,
+ * and the one that loses still runs its cleanup: without a way to tell whose
+ * override is on the machine, the loser's release undoes the winner's guard on
+ * a tunnel that is up and carrying traffic. So `engage()` hands back a receipt
+ * and `release({ token })` refuses to act on a stale one. A release with no
+ * receipt is the user's own intent — disconnect, quit, exit — and always runs.
+ *
  * Nothing here runs a command directly: `run`, `runScriptPrivileged` and
  * `runSync` are injected (tunPlatform.js supplies the real ones), so the tests
  * pin the generated script text — the only review these lines get before they
@@ -597,11 +614,71 @@ function withoutPeers(list, peers) {
     : Object.assign({}, e, { v4: keep(e.v4), v6: keep(e.v6) }));
 }
 
+/**
+ * The live record, plus whatever has come up since.
+ *
+ * A re-engage over an override of ours must KEEP the originals it already holds:
+ * re-reading an adapter we have already pointed at the tunnel would record our
+ * own peer as its "original" (the phase-3 review's C1 — a machine left with no
+ * DNS and no record to repair it with).
+ *
+ * But it must not stop there. An adapter that was down at the first engage, or
+ * plugged in since, has never been overridden: it still hands every name to the
+ * ISP, and the resolvers it reports right now genuinely ARE its originals. That
+ * is not an edge case — plugging the ethernet cable in while connected over
+ * Wi-Fi is both "a new adapter" and "a network change", so the two always
+ * arrive together. So: keep what we hold, then add what is new.
+ *
+ * An adapter that has gone away keeps its record. The restore already skips one
+ * that no longer exists, and if it comes back before the release it is ours.
+ */
+function mergeTargets(live, fresh, keyOf) {
+  const out = (live || []).slice();
+  const known = new Set(out.map(e => String(keyOf(e) == null ? '' : keyOf(e)).toLowerCase()));
+  for (const e of fresh || []) {
+    const k = String(keyOf(e) == null ? '' : keyOf(e)).toLowerCase();
+    if (!k || known.has(k)) continue;
+    known.add(k);
+    out.push(e);
+  }
+  return out;
+}
+
 function countTargets(st) {
   if (!st) return 0;
   return ((st.win && st.win.adapters) || []).length + ((st.mac && st.mac.services) || []).length;
 }
 
+/**
+ * THE ORDER A CALLER MUST USE. These primitives cannot make a reconnect
+ * leak-free on their own — the sequence lives in the caller (main.js /
+ * service.js), and getting it wrong is what the owner reported. It is:
+ *
+ *   reconnect (network change, settings apply, server switch)
+ *     1. guard.holdForReconnect({ excludes: <resolved entry IPs of the server
+ *        about to be dialled>, token })   ← NEVER release() here
+ *     2. stop the tunnel and the core
+ *     3. start the core, start the tunnel
+ *     4. guard.engage({ ..., excludes: tun.excludeIps })  ← same call as a
+ *        first connect; it keeps the originals and narrows the holes back
+ *
+ *   a connect that finds itself overtaken
+ *     guard.release({ token })   ← with the receipt ITS OWN engage returned, so
+ *     it cannot undo the guard of the connect that overtook it
+ *
+ *   disconnect / quit / exit
+ *     guard.release()            ← no receipt: unconditional, that is the point
+ *
+ * The invariant, in one line: BETWEEN THE FIRST CONNECT AND A DELIBERATE
+ * DISCONNECT THE STATE FILE MUST NEVER BE ABSENT. Every moment it is missing is
+ * a moment the machine's own resolvers are back and, at the strict level, the
+ * firewall is open — with no tunnel, because that is why we are reconnecting.
+ *
+ * The cost of holding is honest and must be shown, not hidden: while the tunnel
+ * is down, name resolution fails and (at strict) so does everything else. If the
+ * retries are given up on, the guard is STILL engaged, and the UI owes the user
+ * a way out — the same shape as the kill-switch banner.
+ */
 class LeakGuard {
   /**
    * @param {{ userData: string, onLog?: Function, run?: Function,
@@ -621,7 +698,24 @@ class LeakGuard {
     // Connect — and its delete would then throw away the LIVE session's
     // originals. One queue, and that whole class of race is gone.
     this._chain = Promise.resolve();
+    // Ordering is not ownership. Two overlapping connects both reach a release,
+    // in order, and the loser's release still undoes the winner's live override
+    // — the phase-3 review's carried "can drop the override on a live tunnel:
+    // leak, not breakage". So every engage takes a RECEIPT, and a release that
+    // presents an old one is refused. A release with no receipt at all is the
+    // user's own intent (disconnect, quit, the exit hook) and always runs.
+    this._token = null;
+    this._tokenSeq = 0;
+    // Set SYNCHRONOUSLY by engage, before anything can be queued behind it:
+    // repairAtLaunch reads it to know whether a state file is a previous
+    // session's or this one's.
+    this._ownSession = false;
   }
+
+  _nextToken() { return `irnf-guard-${++this._tokenSeq}`; }
+
+  /** True when this caller may undo the override that is live now. */
+  _owns(token) { return !token || !this._token || token === this._token; }
 
   /** Serialize against every other operation on the state file. */
   _queue(fn) {
@@ -688,6 +782,13 @@ class LeakGuard {
    * would cut the tunnel it exists to protect.
    */
   engage({ level, peer4, peer6, tunAlias, backend, excludes } = {}) {
+    // Claimed before the call is even queued: repairAtLaunch is fired and not
+    // awaited, so it can land after this one and must not read the file we are
+    // about to write as "a previous session's".
+    if (level && level !== 'off' && (this.platform === 'win32' || this.platform === 'darwin')) {
+      this._ownSession = true;
+    }
+    const token = this._nextToken();
     return this._queue(async () => {
       if (!level || level === 'off') return { engaged: false, adapters: 0 };
       if (!peer4) {
@@ -708,6 +809,10 @@ class LeakGuard {
         peer4,
         peer6: peer6 || null,
         tunAlias: tunAlias || null,
+        level,
+        // What the firewall holes were cut from, so a later holdForReconnect can
+        // widen them without the caller having to remember the old server's IPs.
+        excludes: addrList(excludes),
         strict: false,
         udpBlock: false
       };
@@ -720,15 +825,18 @@ class LeakGuard {
       const anchor = (strict && this.platform === 'darwin')
         ? macPfAnchorText({ tunDevice: tunAlias, excludes })
         : null;
-      // An override of ours that is already live — a server switch under TUN
-      // re-engages without an intervening release — keeps the originals it
-      // recorded. They are the machine's own resolvers, and they exist nowhere
-      // else; re-reading the adapters now would only find our peer.
+      // An override of ours that is already live — a server switch under TUN, or
+      // a reconnect that deliberately never let go — keeps the originals it
+      // recorded. They are the machine's own resolvers, they exist nowhere else,
+      // and re-reading those adapters now would only find our own peer.
       const live = this.readState();
+      const liveStrict = !!(live && live.strict);
+      const liveUdp = !!(live && live.udpBlock);
       if (this.platform === 'win32') {
-        const adapters = (live && live.win && live.win.adapters && live.win.adapters.length)
-          ? live.win.adapters
-          : withoutPeers(parseWinSnapshot(await this._powershell(winSnapshotScript(tunAlias))), [peer4, peer6]);
+        const adapters = mergeTargets(
+          (live && live.win && live.win.adapters) || [],
+          withoutPeers(parseWinSnapshot(await this._powershell(winSnapshotScript(tunAlias))), [peer4, peer6]),
+          (a) => a.alias);
         count = adapters.length;
         state.win = { adapters };
         state.strict = strict;
@@ -738,19 +846,24 @@ class LeakGuard {
           block = () => this._powershell(winStrictApplyScript({ adapters, ranges }));
         }
       } else {
-        const services = (live && live.mac && live.mac.services && live.mac.services.length)
-          ? live.mac.services
-          : withoutPeers(parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()])), [peer4, peer6]);
+        const services = mergeTargets(
+          (live && live.mac && live.mac.services) || [],
+          withoutPeers(parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()])), [peer4, peer6]),
+          (s) => s.name);
         count = services.length;
         state.mac = { services };
         state.strict = !!anchor;
         apply = () => this._privileged('apply', macApplyScript(services, peer4, peer6));
         if (anchor) {
-          state.pfEnabledByUs = false;
+          // Carried over: if the FIRST engage of this session turned pf on, the
+          // second one finds it already on and would record "not ours",
+          // leaving pf enabled for other software after we are gone.
+          state.pfEnabledByUs = !!(live && live.pfEnabledByUs);
           block = async () => {
             const out = await this._privileged('pf', macPfApplyScript(anchor));
             // Only OUR pfctl -E gets a pfctl -d at the end of the session.
-            state.pfEnabledByUs = new RegExp(`${PF_MARK}=disabled`).test(String(out == null ? '' : out));
+            state.pfEnabledByUs = state.pfEnabledByUs
+              || new RegExp(`${PF_MARK}=disabled`).test(String(out == null ? '' : out));
             this.writeState(state);
           };
         }
@@ -760,9 +873,27 @@ class LeakGuard {
         return { engaged: false, adapters: 0 };
       }
 
+      // Rules a previous engage left that this level does NOT put back. Strict
+      // blocks everything that is not the tunnel, so leaving them is not
+      // harmless — it is the strict guard still running under a user who turned
+      // it off, and a state file that has stopped mentioning them, so not even
+      // the release would clear them. They go here, while the OLD file is still
+      // on disk claiming them: a crash in between is still repairable.
+      if (liveStrict && !block) {
+        if (this.platform === 'win32') await this._powershell(winGroupRemoveScript());
+        else await this._privileged('pf', macPfRemoveScript({ disable: !!(live && live.pfEnabledByUs) }));
+        this.onLog('Leak guard: the previous session\'s firewall rules removed — this level does not use them', 'info');
+      }
+      // The proxy-mode UDP block is a different matter: it blocks UDP off the
+      // physical adapters, which a tunnel does not care about either way. It is
+      // still OUT THERE though, so the file must keep saying so or release()
+      // would orphan it. A strict apply removes the whole group and takes it.
+      state.udpBlock = liveUdp && !block && !liveStrict;
+
       // The originals go to disk BEFORE the first adapter changes: everything
       // after this line is undoable, by us or by the next launch.
       this.writeState(state);
+      this._token = token;
       await apply();
       this.onLog(`Leak guard: DNS of ${count} adapters → ${[peer4, peer6].filter(Boolean).join(' ')}`, 'info');
       if (strict) {
@@ -778,7 +909,56 @@ class LeakGuard {
             + ' — the DNS override is on, the rest of the traffic is not guarded', 'warn');
         }
       }
-      return { engaged: true, adapters: count };
+      return { engaged: true, adapters: count, token };
+    });
+  }
+
+  /**
+   * Hold the guard across a reconnect.
+   *
+   * The gap between the old tunnel going down and the new one coming up is the
+   * whole of a rebuild — a core restart, an adapter that takes seconds to appear,
+   * on a bad day half a minute. Releasing the guard first and engaging again
+   * afterwards puts every physical adapter back on the ISP's resolver for that
+   * whole window and takes the strict firewall down with it: the machine is
+   * unprotected for exactly as long as it takes to protect it again. That is the
+   * leak the owner asked about, and the answer is not to release at all.
+   *
+   * What DOES have to change across the gap is the strict firewall's holes: they
+   * were cut for the old tunnel's server addresses, and the core is about to
+   * dial a new one from the physical NIC. So this widens them to cover both —
+   * the union, never a release — and the engage on the far side narrows them
+   * back to the new tunnel's own list. `excludes` are the addresses the next
+   * connect must be able to reach directly (its resolved server entry IPs).
+   *
+   * The DNS override is deliberately NOT touched. During the gap it points at a
+   * tunnel peer that routes nowhere, so name resolution fails — which is the
+   * safe answer. The alternative is the ISP answering every query the machine
+   * makes while its user believes they are on a VPN.
+   */
+  holdForReconnect({ excludes, token } = {}) {
+    return this._queue(async () => {
+      if (!this._owns(token)) return { held: false, adapters: 0, stale: true };
+      const st = this.readState();
+      if (!st) return { held: false, adapters: 0 };
+      const merged = [...new Set([...addrList(st.excludes), ...addrList(excludes)])];
+      st.excludes = merged;
+      st.at = new Date().toISOString();
+      this.writeState(st);
+      const n = countTargets(st);
+      if (!st.strict) return { held: true, adapters: n };   // the override is the whole guard here
+      if (this.platform === 'win32') {
+        await this._powershell(winStrictApplyScript({
+          adapters: (st.win && st.win.adapters) || [],
+          ranges: rangeComplement([...merged, ...GUARD_EXCLUDES])
+        }));
+      } else {
+        const anchor = macPfAnchorText({ tunDevice: st.tunAlias, excludes: merged });
+        // No anchor means the live session never had one (engage says so in its
+        // log): there is nothing to widen, and nothing to take away either.
+        if (anchor) await this._privileged('pf', macPfApplyScript(anchor));
+      }
+      return { held: true, adapters: n };
     });
   }
 
@@ -796,6 +976,8 @@ class LeakGuard {
    * reset.
    */
   engageUdpBlock({ excludes } = {}) {
+    if (this.platform === 'win32') this._ownSession = true;
+    const token = this._nextToken();
     return this._queue(async () => {
       if (this.platform !== 'win32') {
         if (!this._udpNoteLogged) {
@@ -819,12 +1001,13 @@ class LeakGuard {
       }, prev || {}, { at: new Date().toISOString(), udpBlock: true });
 
       this.writeState(state);
+      this._token = token;
       await this._powershell(winUdpBlockApplyScript({
         adapters, ranges: rangeComplement([...(excludes || []), ...GUARD_EXCLUDES])
       }));
       this.onLog(`Blocked outbound UDP to the internet (except DNS) on ${adapters.length} adapters`
         + ' — WebRTC cannot leak your address', 'info');
-      return { engaged: true, adapters: adapters.length };
+      return { engaged: true, adapters: adapters.length, token };
     });
   }
 
@@ -846,9 +1029,18 @@ class LeakGuard {
    * Put the recorded resolvers back and forget the session. Idempotent: with no
    * state file there is nothing to undo. A failed restore KEEPS the file, so the
    * next launch tries again rather than losing the originals.
+   *
+   * `opts.token` is the receipt engage() handed out. Present it and the release
+   * only happens if the override on disk is still the one that receipt names:
+   * an overtaken connect cleaning up after itself must not put the adapters of
+   * the connect that overtook it back on the ISP's resolver, on a tunnel that
+   * is up and carrying traffic, with the UI saying connected. A release with NO
+   * receipt is the user's own intent — disconnect, quit, the exit hook — and is
+   * always unconditional.
    */
   release(opts = {}) {
     return this._queue(async () => {
+      if (!this._owns(opts.token)) return { released: false, adapters: 0, stale: true };
       const st = this.readState();
       if (!st) return { released: false, adapters: 0 };
       const n = countTargets(st);
@@ -872,6 +1064,8 @@ class LeakGuard {
         return { released: false, adapters: n, error: (e && e.message) || String(e) };
       }
       this.clearState();
+      this._token = null;
+      this._ownSession = false;
       this.onLog(this._releasedLine(st, n, !!opts.repair), 'info');
       return { released: true, adapters: n };
     });
@@ -927,6 +1121,13 @@ class LeakGuard {
    * routes in place — that goes first, in the same script as the DNS restore.
    */
   async repairAtLaunch() {
+    // A state file belongs to a PREVIOUS session only while this one has
+    // engaged nothing. The call is fired and not awaited (a macOS password
+    // prompt must not hold up the window), so it can still be pending when the
+    // user presses Connect — and "restoring" then would put the adapters of the
+    // live tunnel back on the ISP's resolver and delete the only record of what
+    // they were. The queue makes the two orderly; this makes them correct.
+    if (this._ownSession) return { repaired: false, adapters: 0 };
     if (!this.readState()) return { repaired: false, adapters: 0 };
     this.onLog('A previous session did not shut down cleanly — putting the network back', 'warn');
     const r = await this.release({ repair: true, orphans: true });
