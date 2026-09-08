@@ -6,7 +6,7 @@ const os = require('os');
 const { spawn, execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, resolverBypassIps, wgEndpointHosts } = require('./configBuilder');
+const { buildConfig, buildTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('./configBuilder');
 const { adapterDnsServers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
@@ -801,6 +801,7 @@ async function doConnect(serverId, opts = {}) {
   let tunError = null;
   let guardError = null;
   let guardEngaged = false;
+  let guardToken = null;      // receipt for this connect's guard session
   if (settings.tunMode) {
     if (!myTun.isAvailable()) {
       tunError = settings.lang === 'en'
@@ -827,10 +828,27 @@ async function doConnect(serverId, opts = {}) {
         // be blocked by our own guard. Tear it down and build it for this
         // connect; the kill switch (when armed) seals the gap.
         if (myTun.active) {
-          try { await leakGuard.release(); } catch {}
+          // HOLD, never release. Releasing here put the adapters back on the
+          // ISP's resolvers — and at the strict level took the firewall block
+          // with them — for the whole rebuild, with no tunnel, which is the
+          // very reason we are rebuilding. Holding keeps the override where it
+          // is and only widens the firewall's holes to cover the server about
+          // to be dialled; the engage below narrows them back again. The order
+          // is a contract; it is written out above `class LeakGuard`.
+          try {
+            await leakGuard.holdForReconnect({
+              excludes: await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []),
+              token: guardToken
+            });
+          } catch {}
           try { await myTun.stop(); } catch {}
         }
-        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)],
+        // Read from the config that is actually about to run, not rebuilt from
+        // the plan: `geoAssets` never travelled in `settings`, so the rebuilt
+        // list could name a resolver the config does not have (or miss one it
+        // does) — a hole in the exclusions either way, and wrong entirely for a
+        // sing-box-format config, whose plan is not the one running.
+        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config)],
           adapterDnsServers(settings, hijacks ? dnsPeer : null),
           { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict' });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
@@ -850,10 +868,14 @@ async function doConnect(serverId, opts = {}) {
     // doing it anyway would leave the machine unable to resolve at all.
     if (myTun.active && settings.leakGuard !== 'off') {
       try {
-        await leakGuard.engage({
+        const res = await leakGuard.engage({
           level: settings.leakGuard,
           peer4: myTun.dnsPeer || TUN_GW,
-          peer6: settings.ipv6 ? myTun.dnsPeer6 : null,
+          // NOT gated on the ipv6 setting. The tunnel peer answers on either
+          // family, and gating it left every physical adapter holding its ISP's
+          // IPv6 resolvers — which are on-link, so they never meet the tunnel's
+          // default route and leak every name a v6-capable app looks up.
+          peer6: myTun.dnsPeer6 || null,
           // macOS: the strict level's pf anchor has to name the REAL tunnel
           // device (the utun the backend was given at start), not the Windows
           // adapter name — a ruleset that cannot name the tunnel would block
@@ -867,6 +889,10 @@ async function doConnect(serverId, opts = {}) {
           excludes: myTun.excludeIps || []
         });
         guardEngaged = true;
+        // The receipt for THIS session. A connect that is later overtaken
+        // presents it to release(), so it can only undo its own guard — never
+        // the one belonging to the connect that overtook it.
+        guardToken = (res && res.token) || guardToken;
       } catch (e) {
         // Not fatal — the tunnel is up and carrying traffic, the adapters just
         // kept their own resolvers. Deliberately NOT tunError: that one means
@@ -898,12 +924,15 @@ async function doConnect(serverId, opts = {}) {
   // password prompt on macOS) — the likeliest place for a disconnect to land.
   if (stale()) {
     // Everything this call started belongs to an intent that no longer
-    // exists. The release is unconditional: engage() can also throw AFTER
+    // exists. The release carries THIS call's receipt: without one it would
+    // also undo the guard of the connect that overtook us — on a tunnel that
+    // is up and carrying traffic — and delete the state file with it, leaving
+    // nothing to restore at the real disconnect. engage() can also throw AFTER
     // writing the state file, and a release with nothing to undo is a no-op.
     // The tunnel goes too — doDisconnect()'s own tun.stop() may well have run
     // BEFORE this call's start() finished, which would leave the backend
     // holding the machine's default routes while the UI says 'disconnected'.
-    await leakGuard.release().catch(() => {});
+    await leakGuard.release({ token: guardToken }).catch(() => {});
     if (myTun && myTun.active) { try { await myTun.stop(); } catch {} }
     return abandoned;
   }
@@ -1004,11 +1033,31 @@ async function reapplyConnection() {
   try {
     stopProcWatcher();
     if (stats) stats.stop();
-    // Give the adapters their own resolvers back BEFORE the tunnel goes, and let
-    // doConnect() engage the guard again on the new one. Holding the override
-    // across the gap would point every adapter at a peer that stops routing the
-    // moment tun.stop() runs; the kill switch armed above is what seals the gap.
-    try { if (leakGuard) await leakGuard.release(); } catch {}
+    // HOLD the guard across the gap; do NOT give the adapters their own
+    // resolvers back. This is the leak the owner reported: releasing here left
+    // every lookup going to the ISP — and at the strict level the outbound
+    // block gone too — for the whole rebuild, which is 5-30s per attempt and
+    // over a minute across the backoff. The kill switch was supposed to seal
+    // it, but it is off by default and Windows-only.
+    //
+    // Holding does mean names stop resolving while the tunnel is down: the
+    // adapters point at a peer that routes nowhere. That is the correct
+    // failure — closed, not open — and if the retries are given up on, the
+    // banner offers the way out (see runRecovery).
+    try {
+      if (leakGuard) {
+        // The same server is being rebuilt, so its entry addresses are already
+        // in the held state's exclude list — hold merges rather than replaces,
+        // so passing them again is cheap and idempotent under retries. Built
+        // from the plan rather than a captured variable: this function has only
+        // the serverId.
+        let entries = [];
+        try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
+        await leakGuard.holdForReconnect({
+          excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
+        });
+      }
+    } catch {}
     await stopAllTuns();
     try { await setSystemProxy(false, {}); } catch {}
     try { await removeLanFirewall(); } catch {}
@@ -1248,7 +1297,21 @@ async function runRecovery(reason, attempt) {
         : 'Could not reconnect after the network change — giving up',
       level: 'error'
     });
-    send('status', { state: 'reconnect-failed', reason, proxyUp, tunError: (res && res.tunError) || null });
+    // The guard is STILL engaged, on purpose: it was held across every attempt
+    // so the ISP never answered a lookup. Giving up therefore leaves the
+    // machine unable to resolve — and at the strict level unable to reach
+    // anything. That is the safe failure, but it must be SAID, or a leak has
+    // simply been traded for a mystery. `guardHeld` drives a banner whose
+    // button calls guard:release.
+    let guardHeld = false;
+    try { guardHeld = !!(leakGuard && leakGuard.readState()); } catch { /* no state, nothing held */ }
+    if (guardHeld) {
+      send('log', {
+        line: 'Your adapters are still pointed at the tunnel, so nothing is leaking — but names will not resolve until you reconnect or restore them from the banner',
+        level: 'warn'
+      });
+    }
+    send('status', { state: 'reconnect-failed', reason, proxyUp, guardHeld, tunError: (res && res.tunError) || null });
     return;
   }
   send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
@@ -1840,6 +1903,18 @@ function registerIpc() {
   // Kill switch: manual disarm (restore internet) + status query.
   ipcMain.handle('killswitch:disarm', async () => { await disarmKillSwitch(); return { ok: true }; });
   ipcMain.handle('killswitch:status', () => ({ engaged: killEngaged }));
+  // Reconnect on demand: the same leak-free path the network-change recovery
+  // uses, so the guard is held across the gap rather than released.
+  ipcMain.handle('vpn:reconnect', async () => {
+    if (!store.get('activeServerId', null)) return { ok: false, error: 'not connected' };
+    try { return await reapplyConnection(); } catch (e) { return { ok: false, error: e.message }; }
+  });
+  // The way out when a reconnect has been given up on and the guard is still
+  // holding: puts the adapters' own resolvers back, deliberately, on request.
+  ipcMain.handle('guard:release', async () => {
+    try { if (leakGuard) await leakGuard.release(); return { ok: true }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
 
   // Delete the files the app downloaded into the writable bin (userData/bin).
   // Does NOT touch a user-located xray (store.xrayPath) or the bundled bin.

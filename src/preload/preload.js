@@ -79,6 +79,8 @@ contextBridge.exposeInMainWorld('api', {
   // LAN sharing info + kill switch
   lanInfo: () => ipcRenderer.invoke('net:lanInfo'),
   disarmKillSwitch: () => ipcRenderer.invoke('killswitch:disarm'),
+  reconnect: () => ipcRenderer.invoke('vpn:reconnect'),
+  releaseGuard: () => ipcRenderer.invoke('guard:release'),
   killSwitchStatus: () => ipcRenderer.invoke('killswitch:status'),
 
   // the OS/browser says an adapter came back — main re-checks the tunnel at once

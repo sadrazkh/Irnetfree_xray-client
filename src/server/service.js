@@ -15,7 +15,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig, resolverBypassIps, wgEndpointHosts } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('../main/configBuilder');
 const { adapterDnsServers } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
@@ -730,6 +730,7 @@ function createService(opts = {}) {
     let tunError = null;
     let guardError = null;
     let guardEngaged = false;
+    let guardToken = null;      // receipt for this connect's guard session
     if (settings.tunMode) {
       if (!myTun.isAvailable()) {
         tunError = settings.lang === 'en'
@@ -754,12 +755,22 @@ function createService(opts = {}) {
         // be blocked by our own guard. Tear it down and build it for this
         // connect; the kill switch (when armed) seals the gap.
         if (myTun.active) {
-          try { await leakGuard.release(); } catch {}
+          // HOLD, never release — see the contract above `class LeakGuard`.
+          // Releasing here put the adapters back on the ISP's resolvers for the
+          // whole rebuild, with no tunnel; holding keeps the override and only
+          // widens the firewall's holes to the server about to be dialled.
+          try {
+            await leakGuard.holdForReconnect({
+              excludes: await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []),
+              token: guardToken
+            });
+          } catch {}
           try { await myTun.stop(); } catch {}
         }
         try {
           myTun.lang = settings.lang || 'fa';
-          await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIps(plan, settings)],
+          // from the running config, not rebuilt from the plan — see main.js
+          await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config)],
             adapterDnsServers(settings, hijacks ? dnsPeer : null),
             { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict' });   // tun2socks ignores the 4th
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
@@ -776,10 +787,12 @@ function createService(opts = {}) {
       // doing it anyway would leave the machine unable to resolve at all.
       if (myTun.active && settings.leakGuard !== 'off') {
         try {
-          await leakGuard.engage({
+          const res = await leakGuard.engage({
             level: settings.leakGuard,
             peer4: myTun.dnsPeer || TUN_GW,
-            peer6: settings.ipv6 ? myTun.dnsPeer6 : null,
+            // not gated on the ipv6 setting — see main.js: the peer answers on
+            // either family, and gating it left the ISP owning IPv6 resolution
+            peer6: myTun.dnsPeer6 || null,
             // macOS: the strict level's pf anchor has to name the REAL tunnel
             // device (the utun the backend was given at start), not the Windows
             // adapter name — a ruleset that cannot name the tunnel would block
@@ -793,6 +806,9 @@ function createService(opts = {}) {
             excludes: myTun.excludeIps || []
           });
           guardEngaged = true;
+          // the receipt for THIS session, so an overtaken connect can only ever
+          // undo its own guard
+          guardToken = (res && res.token) || guardToken;
         } catch (e) {
           // Not fatal — the tunnel is up and carrying traffic, the adapters just
           // kept their own resolvers. Deliberately NOT tunError: that one means
@@ -831,7 +847,7 @@ function createService(opts = {}) {
       // BEFORE this call's start() finished, which would leave the backend
       // holding the machine's default routes while the client is told
       // "disconnected".
-      await leakGuard.release().catch(() => {});
+      await leakGuard.release({ token: guardToken }).catch(() => {});
       if (myTun && myTun.active) { try { await myTun.stop(); } catch {} }
       return abandoned;
     }
@@ -895,11 +911,19 @@ function createService(opts = {}) {
     try {
       stopProcWatcher();
       if (stats) stats.stop();
-      // Give the adapters their own resolvers back BEFORE the tunnel goes, and
-      // let doConnect() engage the guard again on the new one. Holding the
-      // override across the gap would point every adapter at a peer that stops
-      // routing the moment tun.stop() runs.
-      try { if (leakGuard) await leakGuard.release(); } catch {}
+      // HOLD the guard across the gap. Releasing here sent every lookup to the
+      // ISP — and at the strict level took the outbound block with it — for the
+      // whole rebuild. Holding means names stop resolving while the tunnel is
+      // down, which is the correct failure: closed, not open.
+      try {
+        if (leakGuard) {
+          let entries = [];
+          try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
+          await leakGuard.holdForReconnect({
+            excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
+          });
+        }
+      } catch {}
       await stopAllTuns();
       try { await setSystemProxy(false, {}); } catch {}
       if (xray) await xray.stop();
@@ -1382,6 +1406,15 @@ function createService(opts = {}) {
     // feature detection.
     'net:online': () => {},
     'killswitch:disarm': () => ({ ok: true }),
+    // the same leak-free rebuild the network-change recovery uses
+    'vpn:reconnect': async () => {
+      if (!store.get('activeServerId', null)) return { ok: false, error: 'not connected' };
+      try { return await reapplyConnection(); } catch (e) { return { ok: false, error: e.message }; }
+    },
+    'guard:release': async () => {
+      try { if (leakGuard) await leakGuard.release(); return { ok: true }; }
+      catch (e) { return { ok: false, error: e.message }; }
+    },
     'killswitch:status': () => ({ engaged: false }),
 
     // desktop-only / no-op in server mode

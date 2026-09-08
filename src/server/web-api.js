@@ -109,6 +109,8 @@
     // LAN + kill switch
     lanInfo: () => invoke('net:lanInfo'),
     disarmKillSwitch: () => invoke('killswitch:disarm'),
+    reconnect: () => invoke('vpn:reconnect'),
+    releaseGuard: () => invoke('guard:release'),
     killSwitchStatus: () => invoke('killswitch:status'),
 
     // the OS/browser says an adapter came back — the service re-checks the tunnel

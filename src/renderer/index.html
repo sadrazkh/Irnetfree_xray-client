@@ -170,6 +170,7 @@
           <div class="home-log pro-only" id="homeLog"></div>
 
           <div class="hero-actions">
+            <button class="btn ghost" id="btnReconnect" data-i18n="btn.reconnect" hidden>اتصال مجدد</button>
             <button class="btn ghost" id="btnQuickPing" data-i18n="btn.quickPing">تست پینگ</button>
             <button class="btn ghost" id="btnCheckIp" data-i18n="btn.checkIp">بررسی IP</button>
           </div>
@@ -963,6 +964,17 @@
     <div class="kill-banner-actions">
       <button class="btn" id="killReconnect" data-i18n="kill.reconnect">اتصال مجدد</button>
       <button class="btn ghost" id="killDisarm" data-i18n="kill.disarm">باز کردن اینترنت</button>
+    </div>
+  </div>
+
+  <!-- Shown when the reconnect attempts were given up on and the leak guard is
+       STILL holding: nothing is leaking, but nothing resolves either, and the
+       user is owed a way out. -->
+  <div class="kill-banner" id="guardBanner" hidden>
+    <span class="kill-banner-text" data-i18n="guard.held">🔒 اتصال مجدد ناموفق بود. برای این‌که چیزی نشت نکند، دی‌ان‌اس روی تونل نگه داشته شده — تا وصل نشوی نام‌ها باز نمی‌شوند.</span>
+    <div class="kill-banner-actions">
+      <button class="btn" id="guardRetry" data-i18n="guard.retry">تلاش دوباره</button>
+      <button class="btn ghost" id="guardRelease" data-i18n="guard.release">اینترنتم را برگردان</button>
     </div>
   </div>
 

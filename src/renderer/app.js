@@ -1217,6 +1217,10 @@ function setConnUI(stateStr, id) {
     tb.classList.toggle('conn-wait', stateStr === 'connecting');
     tb.classList.toggle('conn-off', stateStr !== 'connected' && stateStr !== 'connecting');
   }
+  // Reconnect only makes sense over a live tunnel — there is nothing to
+  // rebuild otherwise, and the IPC would refuse it anyway.
+  const rc = $('#btnReconnect');
+  if (rc) rc.hidden = stateStr !== 'connected';
   const tbState = $('#tbState');
   if (tbState) {
     tbState.textContent = stateStr === 'connected' ? t('tb.online')
@@ -1540,6 +1544,12 @@ window.api.onStatus((d) => {
     // every retry is spent — the user has to act
     state.connecting = false;
     state.wasReconnecting = false;
+    // The guard was HELD across every attempt so the ISP never answered a
+    // lookup, and it is still holding. Nothing leaks, but nothing resolves
+    // either — say so and offer the way out, or a leak has been traded for
+    // a mystery.
+    const gb = $('#guardBanner');
+    if (gb) gb.hidden = !d.guardHeld;
     if (d.proxyUp) {
       // The tunnel itself came back and only TUN did not: xray is running and the
       // proxy ports work, so the red error state would be wrong. Stay connected
@@ -1614,6 +1624,36 @@ $('#killDisarm').onclick = async () => {
   $('#killBanner').hidden = true;
   toast(t('kill.opened'), 'ok');
 };
+/**
+ * Reconnect: the SAME leak-free rebuild the network-change recovery uses, so the
+ * guard is held across the gap rather than released. Disconnecting and
+ * connecting again would open exactly the window this exists to close.
+ */
+async function doReconnect() {
+  const btn = $('#btnReconnect');
+  if (btn) btn.disabled = true;
+  toast(t('t.reconnecting'));
+  try {
+    const r = await window.api.reconnect();
+    if (r && r.ok === false && r.error) toast(r.error, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+$('#btnReconnect').onclick = doReconnect;
+
+$('#guardRetry').onclick = async () => {
+  $('#guardBanner').hidden = true;
+  await doReconnect();
+};
+$('#guardRelease').onclick = async () => {
+  // Deliberate: puts the adapters' own resolvers back. From here on the machine
+  // resolves through its ISP again — which is why it takes an explicit click.
+  const r = await window.api.releaseGuard();
+  $('#guardBanner').hidden = true;
+  toast(r && r.ok === false ? (r.error || 'failed') : t('t.guardReleased'), r && r.ok === false ? 'err' : 'ok');
+};
+
 $('#killReconnect').onclick = async () => {
   const id = state.activeServerId || state.selectedServerId || (state.servers[0] && state.servers[0].id);
   await window.api.disconnect();
