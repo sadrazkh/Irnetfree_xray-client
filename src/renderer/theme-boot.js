@@ -21,11 +21,11 @@
     if (last === 'dark' || last === 'light') {
       document.documentElement.setAttribute('data-theme', last);
     }
-    // same for the chosen look — a console/legacy user should not see the
-    // cockpit's orange flash on every launch
+    // Same for the chosen look. Nothing remembered means a first run, and the
+    // default is 'legacy' — paint that rather than letting the bare
+    // stylesheet's cockpit tokens show for a frame.
     var skin = localStorage.getItem('irnetfree.skin');
-    if (skin === 'console' || skin === 'legacy') {
-      document.documentElement.setAttribute('data-skin', skin);
-    }
+    if (skin !== 'cockpit' && skin !== 'console') skin = 'legacy';
+    document.documentElement.setAttribute('data-skin', skin);
   } catch {}
 })();
