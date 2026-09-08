@@ -54,6 +54,15 @@ let stats = null;
 // of a connection is a lot of disk for a counter.
 let usage = null;
 let usageStore = null;
+// One poll of the core's counters a second while the numbers are on screen;
+// one every five while the window is hidden or minimised. The poller keeps
+// its baseline across the change (stats.retime), so speeds stay honest and the
+// usage meter loses nothing — only 3,600 requests an hour nobody was reading.
+const STATS_VISIBLE_MS = 1000, STATS_HIDDEN_MS = 5000;
+function statsCadence() {
+  const shown = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized();
+  return shown ? STATS_VISIBLE_MS : STATS_HIDDEN_MS;
+}
 let lastUsageSend = 0;
 let downloader = null;
 let procWatcher = null;
@@ -308,6 +317,11 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+
+  // the traffic meter follows the window: fast while shown, slow while hidden
+  for (const ev of ['show', 'hide', 'minimize', 'restore', 'focus']) {
+    mainWindow.on(ev, () => { if (stats) stats.retime(statsCadence()); });
+  }
 
   mainWindow.on('close', (e) => {
     if (!isQuitting) {
@@ -986,7 +1000,7 @@ async function doConnect(serverId, opts = {}) {
   // and a whole session is credited twice. The plan must be set before the
   // first tick, or those bytes belong to nobody.
   if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
-  stats.start(1000);
+  stats.start(statsCadence());
 
   // Keep process routes fresh while connected (opt-in; briefly reloads xray).
   startProcWatcher();
