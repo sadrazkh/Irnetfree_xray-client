@@ -10,68 +10,310 @@
    RTL in Persian) and TOKENS ONLY (no literal colours — the skin picks
    them, see skins.css).
 
-   Settings is the longest page in the app (~9500px of cards) and the markup
-   gives it no headings to break the run. The rhythm below stands in for
-   them, and it is deliberately a short scale:
+   Settings is the longest page in the app and the markup gives it no
+   headings at all: it is a stack of .card boxes that run from their first
+   label to their last button without a break. Everything under "the page"
+   below stands in for the headings that are not there —
 
-     4    inside a stack — the gap between two lines that belong together
-     8    between rows of one list, and around a status line
-     12   inside a row — dot to text, text to its section rule
-     16   a row's own padding, and the gap between a row and its button
+     a card's FIRST .field-label is its head, and gets the .wg-title spec;
+     every other direct child of a card is a BLOCK, separated by 16;
+     rows that carry their own hairline (.switch-row, .setting-row,
+     .about-row) touch, so a run of them reads as one list;
+     a status line is pulled up under the row it reports on.
+
+   ONE SPACING SCALE, and it is the same one lists.css uses — the two files
+   describe the same app and the numbers have to mean the same thing:
+
+      4   inside a stack — the gap between two lines that belong together
+      6   a label and the control it names; a note and the note under it
+      8   the two halves of one pair (a preset and the field it fills);
+          between the buttons of one cluster
+     10   between the siblings of a set: the rows of a list
+     12   inside a row — dot to text; a row's own block padding; a status
+          line's padding
+     14   a card's head above its rule; a list row's block padding
+     16   a card's rule below its head; one block of a card away from the
+          next; the two columns of a .grid2; a row's title away from the
+          control at its end
+     18   a card's own padding (styles.css)
      20   the height of a reserved single line
 
    Everything reads at line-height 1.5–1.6, so no two lines touch.
    ========================================================================= */
 
-/* ----------------------------- settings ----------------------------- */
+/* ----------------------------- settings: the page ----------------------------- */
 
-/* A definition pair: label at the start, value at the end, a hairline
-   between consecutive pairs. The rule sits on the *top* of the second row
-   and later, so a list of one — which is what the About card is today —
-   carries no stray line under it. */
-.about-row {
+/* The rhythm. A card is a stack of blocks 16 apart; the exceptions below are
+   the things that are not blocks — rows of one list, and the notes and status
+   lines that belong to the row above them. */
+#view-settings > .card > * + * { margin-block-start: 16px; }
+
+/* Rows of one list. Their own padding and hairline ARE the separation, so
+   adding 16 on top would break the run into a stack of loose bars. */
+#view-settings > .card > .switch-row + .switch-row,
+#view-settings > .card > .switch-row + .setting-row,
+#view-settings > .card > .setting-row + .switch-row,
+#view-settings > .card > .setting-row + .setting-row,
+#view-settings > .card > .about-row + .about-row { margin-block-start: 0; }
+
+/* A version string reports on the status line above it, not on the block
+   below — the two are one reading. */
+#view-settings > .card > .xray-status + .xray-version { margin-block-start: 0; }
+
+/* A section title inside a card — the only heading these boxes get, so it
+   carries the rule that a heading would.
+
+   .wg-title is the head of an .import-box on the servers screen. The settings
+   cards have no title ELEMENT at all, so their first .field-label stands in
+   for one (فایل‌های موردنیاز, مسیر هسته Xray, درباره و به‌روزرسانی): given the
+   same spec it reads as the head of the card instead of as the label of
+   whatever control happens to sit under it. */
+.wg-title,
+#view-settings > .card > .field-label:first-child {
+  display: block;
+  margin-block-start: 0;
+  padding-block-end: 14px;
+  border-block-end: 1px solid var(--line);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: -.01em;
+  color: var(--ink);
+}
+/* .import-box is a flex column with a 12 gap of its own, so 4 here makes the
+   same 16 the settings head sets outright. */
+.wg-title { margin-block-end: 4px; }
+#view-settings > .card > .field-label:first-child { margin-block-end: 16px; }
+
+/* A warning inside a card is a notice, not another paragraph of small print.
+   The spine is the same device .apply-list and the warn/error log lines use,
+   and unlike a wash behind the text it costs the light themes no contrast. */
+#view-settings .hint.warn {
+  padding-inline-start: 12px;
+  border-inline-start: 2px solid var(--warn);
+}
+
+/* The save button is ONE card near the bottom of a very long page: anywhere
+   above its own place in the flow it is simply off screen, and the page gives
+   no other way to commit a change. Float it — sticky keeps it against the
+   bottom of the scroller until the flow catches up with it, so it is always
+   one click away and still lands exactly where the markup puts it. */
+#view-settings > .card:has(> #btnSaveSettings) {
+  position: sticky;
+  inset-block-end: 12px;
+  z-index: 5;
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
-  padding-block: 8px;
-  font-size: 12px;
-  line-height: 1.6;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-block: 14px;
+  box-shadow: var(--shadow);
 }
-.about-row + .about-row { border-block-start: 1px solid var(--line); }
-.about-label { color: var(--ink3); }
-.about-val {
-  font-family: var(--mono);
-  color: var(--ink2);
-  direction: ltr;
-  text-align: end;
-  overflow-wrap: anywhere;
+/* a flex row, so the block rhythm above must not push its items down */
+#view-settings > .card:has(> #btnSaveSettings) > * + * { margin-block-start: 0; }
+
+/* ----------------------------- settings: rows ----------------------------- */
+
+/* .switch-row is the model every other row on this page follows: a title at
+   the start, its explanation under the title, the control at the end, one
+   hairline under the lot. These two only make the run consistent —
+   updateGuardRows dims a row where its setting does nothing, and dimming the
+   note that says WHY is exactly the wrong half to hide. Opacity is a group,
+   so the row itself has to stay opaque and the parts dim on their own. */
+#view-settings .switch-row.disabled { opacity: 1; }
+#view-settings .switch-row.disabled .switch-title,
+#view-settings .switch-row.disabled .switch-sub,
+#view-settings .switch-row.disabled .switch { opacity: .5; }
+
+/* Two settings on this page are a dropdown where everything around them is a
+   switch — the TUN backend and the leak guard. They are the same KIND of
+   thing, so they read the same way: a title at the start, the control at the
+   end, the notes under both, one hairline under the lot. styles.css leaves
+   .setting-row a bare flex line, which put the label, the select and up to
+   three warnings on ONE line, each squeezed to whatever the others left.
+
+   The control column is 1fr and not max-content, because these two menus are
+   the exception on the page: their options are whole sentences
+   ("استاندارد — DNS همه‌ی کارت‌های شبکه تا پایان نشست از تونل می‌رود…"), so
+   the width belongs to the control and the label needs only its own. */
+#view-settings .setting-row {
+  display: grid;
+  /* the title takes what it needs and gives the rest away, but it can be
+     squeezed: a longer translation wraps rather than pushing the menu off
+     the row, and the menu never drops below a readable 140. */
+  grid-template-columns: minmax(0, auto) minmax(140px, 1fr);
+  align-items: center;
+  column-gap: 16px;
+  row-gap: 6px;
+  padding-block: 12px;
+  border-block-end: 1px solid var(--line);
 }
+#view-settings .setting-row > .field-label {
+  grid-column: 1;
+  grid-row: 1;
+  margin-block-end: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--ink);
+}
+#view-settings .setting-row > .select {
+  grid-column: 2;
+  grid-row: 1;
+  width: 100%;
+  min-width: 0;
+}
+/* the notes run under the whole row, the way a .switch-sub does — and at the
+   switch's size, because that is what they are */
+#view-settings .setting-row > .hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+#view-settings .setting-row:last-child { border-block-end: 0; }
+#view-settings .setting-row.disabled > .field-label,
+#view-settings .setting-row.disabled > .select { opacity: .5; }
+
+/* A status line under a switch reports on THAT switch, but the markup puts it
+   after the row — below the hairline, where it reads as the opening line of
+   whatever comes next. Move the hairline down onto the status instead, and
+   only while the status has something to say: app.js empties these to '' and
+   :empty takes them out of the flow, and a run of rows must not lose a rule
+   when it does. */
+#view-settings .switch-row:has(+ .tun-status:not(:empty)),
+#view-settings .switch-row:has(+ .xray-status:not(:empty)) { border-block-end: 0; }
+#view-settings > .card > .switch-row + .tun-status,
+#view-settings > .card > .switch-row + .xray-status {
+  margin-block-start: 0;
+  padding-block-start: 0;
+  padding-block-end: 12px;
+  border-block-end: 1px solid var(--line);
+}
+
+/* ----------------------------- settings: fields ----------------------------- */
+
+/* A label and the control under it are one thing, not two stacked lines: 6
+   between them, and 16 between one pair and the next. Several .grid2 blocks
+   sit directly on top of each other in this markup with nothing between them,
+   which is what made the page read as a ragged column rather than a grid —
+   the rhythm above gives the blocks their 16, and `start` keeps a cell whose
+   control carries a hint from stretching the short cell beside it. */
+#view-settings .field-label { margin-block-end: 6px; }
+#view-settings .grid2 {
+  align-items: start;
+  column-gap: 16px;
+  row-gap: 12px;
+}
+/* Small print stays print: a measure, so a two-line note does not run the
+   whole width of a card and come back. 1.6 rather than the 1.7 styles.css
+   gives a .hint — this page is mostly notes, and 1.6 is the leading every
+   other line of text on it already uses. */
+#view-settings .hint { max-width: 72ch; line-height: 1.6; }
+
+/* THE ARROW. styles.css sets `appearance: none` on .select and reserves 26px
+   of padding at its inline end for a chevron — and then never draws one, so
+   every dropdown in the app renders as a text field you cannot type in. That
+   is the whole reason this page reads as "nothing but dropdowns" and yet has
+   no dropdowns you can see.
+
+   Two linear-gradients meeting as a triangle is the only way to draw it that
+   keeps the palette in the tokens: an SVG data-URI would have to carry a
+   literal hex (and three skins × two themes is six of them), and ::after is
+   not rendered on a <select> at all. The same six lines are in lists.css for
+   the servers screen and its editor — the pair has to be kept in step until
+   somebody hoists it into styles.css, where .select actually lives. */
+#view-settings .select {
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink3) 50%),
+    linear-gradient(135deg, var(--ink3) 50%, transparent 50%);
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  /* background-position has no logical form, so the two writing directions
+     are spelled out: a 10px-wide mark, 8px in from the inline end, sitting
+     1px above the middle so it reads as pointing down rather than sinking. */
+  background-position: calc(100% - 18px) calc(50% - 1px), calc(100% - 13px) calc(50% - 1px);
+}
+[dir="rtl"] #view-settings .select {
+  background-position: 8px calc(50% - 1px), 13px calc(50% - 1px);
+}
+#view-settings .select:hover,
+#view-settings .select:focus {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--accent) 50%),
+    linear-gradient(135deg, var(--accent) 50%, transparent 50%);
+}
+#view-settings .select:disabled { cursor: not-allowed; }
+
+/* A control has to answer the pointer. styles.css gives a field one state —
+   a focused border in --accentLine, which is a 30–38% wash of the accent and
+   at 1px is very nearly nothing. Hover firms the edge; focus takes the full
+   accent, doubles it with a 1px ring (so the edge reads at 2px without the
+   box changing size) and puts a soft halo outside that. It has to carry the
+   whole job: `.input:focus` in styles.css turns the shell's focus outline
+   off, so this IS the keyboard indicator. --accentSoft alone measured 1.14:1
+   against --panel on the light skins, which is why the 1px is there. */
+#view-settings .input:hover,
+#view-settings .select:hover,
+#view-settings .textarea:hover { border-color: var(--dim); }
+#view-settings .input:focus,
+#view-settings .select:focus,
+#view-settings .textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accentSoft);
+}
+
+/* A dropdown is as wide as the longest thing in it, not as wide as the column
+   it happens to sit in — width:100% on every field is what made a five-item
+   log-level menu 350px of empty. The exception is a preset that FILLS the
+   field under it: those two are one control in two parts and must line up.
+   A port is four digits and gets a port-sized box for the same reason. */
+#view-settings .grid2 .select { max-width: 320px; }
+#view-settings .grid2 .select:has(+ .input) { max-width: none; }
+#view-settings .grid2 .input[type="number"] { max-width: 160px; }
+
+/* ----------------------------- settings: components ----------------------------- */
 
 /* The component rows say whether the core, sing-box, tun2socks and the geo
-   files are on disk — the most load-bearing block on the page. Reading
-   order is dot → name (+ version) → state, then the action button.
+   files are on disk — the most load-bearing block on the page, and the only
+   one that is a TABLE: six rows, the same four things in the same four
+   places. Reading order is dot → name (+ version) → state → action, and all
+   of it on one line, so the state column can be read straight down.
 
    .comp-info is a grid rather than a flex row because app.js puts the dot
    *inside* it: as a bare inline span, width/height did not apply and the
-   dot had no box at all. The grid gives it a cell of its own on the first
-   line and hangs the state under the name. */
-.comp-list { display: flex; flex-direction: column; gap: 8px; }
+   dot had no box at all. The grid gives it a cell of its own, hands the
+   middle to the name, and pins the state to the end where the eye can run
+   down it. */
+.comp-list { display: flex; flex-direction: column; gap: 10px; }
 .comp-row {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding-block: 12px;
+  padding-block: 14px;
   padding-inline: 16px;
   background: var(--soft);
   border: 1px solid var(--softline);
+  /* The leading edge carries STATE, the same way a .server-card's does — it
+     is the dot again, run down the whole row, so the answer to "what is
+     missing?" is readable from the shape of the block before you read a word
+     of it. --accentLine was the first try and it measured 1.46:1 against
+     --soft on the light skins, which is not a signal. Reserving the width
+     keeps the row from shifting when a download lands. */
+  border-inline-start: 3px solid var(--softline);
   border-radius: var(--r5);
+  transition: background 140ms ease-out, border-color 140ms ease-out;
 }
+.comp-row:has(.comp-dot.ok) { border-inline-start-color: var(--ok); }
+.comp-row:has(.comp-dot.missing) { border-inline-start-color: var(--danger); }
+.comp-row:hover { background: var(--panel); }
 .comp-info {
   flex: 1;
   min-width: 0;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
   column-gap: 12px;
   row-gap: 4px;
 }
@@ -92,6 +334,7 @@
 .comp-dot.missing { background: var(--danger); }
 .comp-name {
   grid-column: 2;
+  grid-row: 1;
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -101,11 +344,16 @@
   font-weight: 600;
   line-height: 1.5;
 }
+/* the state column: at the end of the row, one line, never wrapping — six of
+   these stacked are the answer to "is everything installed?" */
 .comp-state {
-  grid-column: 2;
+  grid-column: 3;
+  grid-row: 1;
   font-size: 11px;
   line-height: 1.5;
   color: var(--ink3);
+  text-align: end;
+  white-space: nowrap;
 }
 /* app.js puts .ok / .missing on the state, but those two live in styles.css
    and this sheet loads after it — same specificity, later wins, and the
@@ -113,11 +361,19 @@
    green and missing reads red. */
 .comp-state.ok { color: var(--ok); }
 .comp-state.missing { color: var(--danger); }
-/* a version, or the path a core was found at: one line, clipped, never a
-   reason for the row to grow. --ink3 rather than --dim: 11px of --dim on
+/* A version, or the path a core was found at: a chip rather than a run of
+   small print, so the eye separates it from the name it sits beside. One
+   line, clipped, never a reason for the row to grow — a located core can
+   carry an absolute path in here. --ink3 rather than --dim: 11px of --dim on
    --soft is 2.7:1 in every skin, which is not readable text. */
 .comp-ver {
   min-width: 0;
+  max-width: 100%;
+  padding-block: 1px;
+  padding-inline: 6px;
+  background: var(--panel);
+  border: 1px solid var(--softline);
+  border-radius: var(--r2);
   font-size: 11px;
   font-weight: 500;
   color: var(--ink3);
@@ -135,7 +391,7 @@
   text-align: center;
 }
 
-.files-list { display: flex; flex-direction: column; gap: 4px; }
+.files-list { display: flex; flex-direction: column; gap: 6px; }
 .files-row {
   display: flex;
   align-items: center;
@@ -169,7 +425,32 @@
   direction: ltr;
 }
 
-.admin-btn { margin-block-start: 12px; }
+.admin-btn { margin-block-start: 16px; }
+
+/* ----------------------------- settings: about & status ----------------------------- */
+
+/* A definition pair: label at the start, value at the end, a hairline
+   between consecutive pairs. The rule sits on the *top* of the second row
+   and later, so a list of one — which is what the About card is today —
+   carries no stray line under it. */
+.about-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.about-row + .about-row { border-block-start: 1px solid var(--line); }
+.about-label { color: var(--ink3); }
+.about-val {
+  font-family: var(--mono);
+  color: var(--ink2);
+  direction: ltr;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
 
 /* Status lines under a switch or a field. app.js clears them to '' when the
    feature is off, so they must take up no room at all when empty. */
@@ -196,19 +477,6 @@
 }
 .xray-version:empty { display: none; }
 
-/* A section title inside a card — the only heading these boxes get, so it
-   carries the rule that a heading would. */
-.wg-title {
-  margin-block-start: 4px;
-  padding-block-end: 12px;
-  border-block-end: 1px solid var(--line);
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.5;
-  letter-spacing: -.01em;
-  color: var(--ink);
-}
-
 /* What was changed and is waiting for a reconnect. A <ul> of <li>, and it
    has to read as a list: one item per line, each on its own accent spine.
    A spine rather than a bullet, because it stays aligned when an item wraps
@@ -234,14 +502,17 @@
 /* ----------------------------- logs ----------------------------- */
 
 /* The box fills exactly what the shell leaves it:
-     46 title bar + 30 content padding + 36 view head + 20 head margin
-      + 34 content padding = 166.
-   The old 230 left ~64px of dead panel under the box. */
+     --tbh title bar + 30 content padding + 36 view head + 20 head margin
+      + 34 content padding = --tbh + 120.
+   The old 230 left ~64px of dead panel under the box. The title bar is the
+   token and not the 46 it was written as: the console skin adds a 6px signal
+   strip to it, and a literal 46 made the log box that much too tall and hung
+   its bottom edge off the window. */
 .logbox {
   /* it is a <pre>: the UA's 1em block margin pushed 12px of the box past the
      bottom of the scroller and made the whole page scroll by that much */
   margin: 0;
-  height: calc(100vh - 166px);
+  height: calc(100vh - var(--tbh) - 120px);
   min-height: 220px;
   overflow-y: auto;
   padding-block: 12px;
