@@ -16,6 +16,7 @@
 #   bash scripts/mac-selfcheck.sh                          # or: npm run selfcheck:mac
 #   bash scripts/mac-selfcheck.sh /Applications/IRNetFree.app   # also check the bundle's bin
 #   sudo bash scripts/mac-selfcheck.sh                     # adds the pf (firewall) answers
+#   IRNF_APP_NAME='My VPN' bash scripts/mac-selfcheck.sh   # a rebranded build's data dir
 #
 # Exit status: 1 when at least one check FAILed on a Mac; 0 otherwise (off macOS
 # nothing it sees is a verdict, so it always exits 0 there).
@@ -30,7 +31,20 @@ set -u
 # Kept in sync by hand with src/main/tunSingbox.js (TUN_PEER4 / TUN_PEER6).
 PEER4='172.19.0.2'
 PEER6='fdfe:dcba:9876::2'
-APP_SUPPORT="$HOME/Library/Application Support/IRNetFree"
+# Electron keeps userData under the PRODUCT name, so a rebranded build (a fork
+# with its own `build.productName`) stores its bin/ and tun-state.json somewhere
+# this script would never look. Read the name from package.json when the script
+# runs from a checkout — sed, not node: bash 3.2 and no toolchain assumed —
+# and let IRNF_APP_NAME override it for a build checked from elsewhere.
+APP_NAME="${IRNF_APP_NAME:-}"
+if [ -z "$APP_NAME" ]; then
+  PKG_JSON="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/package.json"
+  if [ -f "$PKG_JSON" ]; then
+    APP_NAME="$(sed -n 's/^[[:space:]]*"productName":[[:space:]]*"\([^"]*\)".*/\1/p' "$PKG_JSON" | head -n 1)"
+  fi
+fi
+[ -n "$APP_NAME" ] || APP_NAME='IRNetFree'
+APP_SUPPORT="$HOME/Library/Application Support/$APP_NAME"
 USER_BIN="$APP_SUPPORT/bin"
 STATE_FILE="$APP_SUPPORT/tun-state.json"
 ISSUES='https://github.com/sadrazkh/Irnetfree_xray-client/issues'
@@ -41,7 +55,7 @@ TMP_BASE="${TMP_BASE%/}"
 ARG="${1:-}"
 case "$ARG" in
   -h|--help)
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
 esac
@@ -85,6 +99,7 @@ printf 'IRNetFree — macOS self-check (read-only)\n'
 printf 'date  : %s\n' "$(date 2>/dev/null || echo '?')"
 printf 'system: %s %s (%s)\n' "$UNAME_S" "$(uname -r 2>/dev/null || echo '?')" "$ARCH"
 printf 'user  : %s (uid %s)\n' "${USER:-?}" "$(id -u 2>/dev/null || echo '?')"
+printf 'app   : %s\n' "$APP_NAME"
 printf 'data  : %s\n' "$APP_SUPPORT"
 
 section 'platform'
