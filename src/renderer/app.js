@@ -812,11 +812,14 @@ function renderServers() {
     const isActive = s.id === state.activeServerId && state.connected;
     const isSel = s.id === state.selectedServerId;
     card.className = 'server-card' + (isActive ? ' active' : '') + (isSel ? ' selected' : '');
+    card.dataset.srvId = s.id;
 
     const tl = pingResultLabel((state.pings[s.id] || {}).tcp);
     const rl = pingResultLabel((state.pings[s.id] || {}).real);
     const ul = pingResultLabel((state.pings[s.id] || {}).upload);
-    const selBadge = isSel ? `<span class="sel-badge">✓ ${escapeHtml(t('srv.selected'))}</span>` : '';
+    // always in the markup, hidden when not selected: refreshSelection() can
+    // then move it between cards without rebuilding either of them
+    const selBadge = `<span class="sel-badge"${isSel ? '' : ' hidden'}>✓ ${escapeHtml(t('srv.selected'))}</span>`;
 
     card.innerHTML = `
       <span class="q-dot ${tl.cls}" data-ping-dot="${s.id}"></span>
@@ -830,7 +833,7 @@ function renderServers() {
         <span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${s.id}">${rl.txt}</b></span>
         <span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${s.id}">${ul.txt}</b></span>
       </div>
-      <span class="srv-usage" title="${escapeHtml(t('srv.usage'))}">${usageLabel(s.id)}</span>
+      <span class="srv-usage" data-usage="${s.id}" title="${escapeHtml(t('srv.usage'))}">${usageLabel(s.id)}</span>
       <div class="srv-actions">
         <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
         <button class="icon-btn copy-srv" data-i18n-title="btn.copy" title="copy">⧉</button>
@@ -852,6 +855,26 @@ function renderServers() {
     host.appendChild(card);
     }
   }
+}
+
+/**
+ * Selection changed: toggle the class and the badge on the cards that exist.
+ * Rebuilding the whole list for one click reset the scroll position and,
+ * under a large subscription, cost hundreds of nodes per keystroke.
+ */
+function refreshSelection() {
+  const sel = state.selectedServerId;
+  $$('#serverList .server-card[data-srv-id]').forEach((card) => {
+    const on = card.dataset.srvId === sel;
+    card.classList.toggle('selected', on);
+    const badge = card.querySelector('.sel-badge');
+    if (badge) badge.hidden = !on;
+  });
+}
+
+/** Lifetime totals changed: rewrite the spans that show them, nothing else. */
+function applyUsageDisplays() {
+  $$('[data-usage]').forEach((el) => { el.innerHTML = usageLabel(el.dataset.usage); });
 }
 
 /* ----------------------------- unified picker (home) ----------------------------- */
@@ -890,7 +913,7 @@ function advancedReady() {
 
 function selectServer(id) {
   state.selectedServerId = id;
-  renderServers();
+  refreshSelection();
   renderPicker();
   // the path draws the SELECTED config's route, so it follows this choice
   refreshConnLabels();
@@ -3399,13 +3422,14 @@ $('#btnSaveAdv').onclick = async () => {
 
 /* ----------------------------- live traffic stats ----------------------------- */
 // Lifetime totals arrive every few seconds — the per-second figures ride the
-// stats event, so this one does not need that resolution. Re-render only the
-// two lists that show it.
+// stats event, so this one does not need that resolution. Rewrite the spans
+// that show them; the list itself is left standing (a rebuild every five
+// seconds under a 200-server subscription reset the scroll and cost 1,400
+// handler bindings for a number in a corner).
 if (window.api.onUsage) {
   window.api.onUsage((d) => {
     state.usage = (d && d.totals) || {};
-    renderServers();
-    renderPicker();
+    applyUsageDisplays();
   });
 }
 
