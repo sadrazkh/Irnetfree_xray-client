@@ -133,6 +133,28 @@ for (const [name, [plan, over]] of Object.entries(shapes)) {
   console.log('     ' + ((r.stdout || '') + (r.stderr || '')).trim().split(/\r?\n/).slice(-3).join('\n     '));
 }
 
+// The multi-target latency test (phase B): one core, an inbound per target
+// routed by inboundTag — a server, a chain and an anti-DPI dialer together.
+{
+  const { buildMultiTestConfig } = require('../src/main/configBuilder');
+  total++;
+  const cfg = buildMultiTestConfig(
+    [F.VLESS_WS_TLS, [F.TROJAN_TCP_TLS, F.SS_TCP], F.vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' })],
+    [41001, 41002, 41003]);
+  const file = path.join(work, 'multi-test.json');
+  fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+  const r = spawnSync(exe, ['run', '-test', '-c', file], {
+    env: Object.assign({}, process.env, { XRAY_LOCATION_ASSET: assetDir, V2RAY_LOCATION_ASSET: assetDir }),
+    encoding: 'utf8', timeout: 15000, windowsHide: true
+  });
+  if (r.status === 0) console.log('ok   ' + path.basename(file));
+  else {
+    failed++;
+    console.log('FAIL ' + path.basename(file));
+    console.log('     ' + ((r.stdout || '') + (r.stderr || '')).trim().split(/\r?\n/).slice(-3).join('\n     '));
+  }
+}
+
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
 // sing-tun there only accepts utun<N> and names the device itself.

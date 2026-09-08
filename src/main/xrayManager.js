@@ -40,7 +40,11 @@ class XrayManager {
     return [
       ...this.extraBinDirs,
       path.join(this.dataDir || '', '..', 'bin'),
-      path.join(process.resourcesPath || '', 'bin'),
+      // Only under Electron. In plain Node (the headless server) resourcesPath
+      // is undefined and this entry was the RELATIVE `bin` — which existsSync()
+      // found from the repo root and spawn() then resolved against the child's
+      // own cwd (`bin`), so every latency test died with ENOENT.
+      ...(process.resourcesPath ? [path.join(process.resourcesPath, 'bin')] : []),
       path.join(__dirname, '..', '..', 'bin')
     ].filter(Boolean);
   }
@@ -432,4 +436,22 @@ function getFreePort() {
   });
 }
 
-module.exports = { XrayManager, getFreePort, PLAINTEXT_REJECT };
+/**
+ * n distinct free loopback ports, held open together until all are known —
+ * asking getFreePort() n times can hand the same port back twice.
+ */
+function getFreePorts(n) {
+  return new Promise((resolve, reject) => {
+    const servers = [], ports = [];
+    const closeAll = () => servers.forEach((s) => { try { s.close(); } catch { /* closing */ } });
+    const next = () => {
+      if (ports.length >= n) { closeAll(); return resolve(ports); }
+      const srv = net.createServer();
+      srv.once('error', (e) => { closeAll(); reject(e); });
+      srv.listen(0, '127.0.0.1', () => { servers.push(srv); ports.push(srv.address().port); next(); });
+    };
+    next();
+  });
+}
+
+module.exports = { XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT };

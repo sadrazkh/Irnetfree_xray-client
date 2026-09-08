@@ -6,7 +6,7 @@ const os = require('os');
 const { spawn, execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('./configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('./configBuilder');
 const { adapterDnsServers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
@@ -14,9 +14,9 @@ const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('./engineChoi
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('./certPin');
 const { assetStatus: scanAssets } = require('./assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
-const { XrayManager, getFreePort } = require('./xrayManager');
+const { XrayManager, getFreePort, getFreePorts } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
-const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('./netutils');
+const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
@@ -1851,6 +1851,46 @@ function registerIpc() {
     } finally {
       if (test) test.cleanup();
     }
+  });
+
+  // Real delay for MANY targets: one throwaway core per engine, up to
+  // REAL_BATCH targets each (a config with 200 inbounds is slow to start and
+  // one bad member would take the batch down), REAL_PARALLEL requests in
+  // flight so the test site is not hammered. Returns a result per id.
+  const REAL_BATCH = 20, REAL_PARALLEL = 6;
+  ipcMain.handle('ping:realMany', async (e, ids) => {
+    const out = {};
+    const list = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
+    if (!xray.binExists()) { for (const id of list) out[id] = { ok: false, error: 'xray binary missing' }; return out; }
+    const byEngine = new Map();
+    for (const id of list) {
+      const { server, chain } = resolveTarget(id);
+      if (!server) { out[id] = { ok: false, error: 'not found' }; continue; }
+      const isChain = chain && chain.length >= 2;
+      const plan = isChain ? { mode: 'chain', chain } : { mode: 'single', server };
+      const eng = testEngineFor(chooseEngine(plan, getSettings().defaultEngine));
+      if (!byEngine.has(eng)) byEngine.set(eng, []);
+      byEngine.get(eng).push({ id, target: isChain ? chain : server });
+    }
+    const limit = pLimit(REAL_PARALLEL);
+    for (const [eng, targets] of byEngine) {
+      for (let i = 0; i < targets.length; i += REAL_BATCH) {
+        const batch = targets.slice(i, i + REAL_BATCH);
+        let test = null;
+        try {
+          const ports = await getFreePorts(batch.length);
+          test = await xray.startTest(buildMultiTestConfig(batch.map(b => b.target), ports), eng);
+          await Promise.all(batch.map((b, k) => limit(async () => {
+            out[b.id] = await httpThroughProxy(ports[k], { host: 'cp.cloudflare.com', port: 80, path: '/' });
+          })));
+        } catch (err) {
+          for (const b of batch) if (!out[b.id]) out[b.id] = { ok: false, error: err.message };
+        } finally {
+          if (test) test.cleanup();
+        }
+      }
+    }
+    return out;
   });
 
   // IP info — direct or through the active proxy

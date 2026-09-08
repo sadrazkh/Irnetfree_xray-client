@@ -725,6 +725,32 @@ function buildTestConfig(target, socksPort) {
   };
 }
 
+/**
+ * ONE throwaway core for MANY latency targets. Inbound i on ports[i] is routed
+ * to target i by inboundTag; a target may be a server or a chain (an array).
+ * "Test all" used to spawn a core per server, in sequence — sixty servers were
+ * sixty process starts. Tags carry the index so a chain's hops
+ * (`test-out-3-h0`) and the shared anti-DPI dialers cannot collide.
+ * Same shape as buildTestConfig otherwise: no DNS plan, no interface binding
+ * (a ping runs without TUN), fragments applied so the test matches reality.
+ */
+function buildMultiTestConfig(targets, ports) {
+  const inbounds = [], outbounds = [], rules = [];
+  (targets || []).forEach((target, i) => {
+    const inTag = `test-in-${i}`, outTag = `test-out-${i}`;
+    inbounds.push({ tag: inTag, port: ports[i], listen: '127.0.0.1', protocol: 'socks', settings: { auth: 'noauth', udp: false } });
+    const outs = Array.isArray(target) ? buildChainOutbounds(target, outTag) : [cloneOut(target.outbound, outTag, target)];
+    outbounds.push(...outs);
+    rules.push({ type: 'field', inboundTag: [inTag], outboundTag: outTag });
+  });
+  return {
+    log: { loglevel: 'none' },
+    inbounds,
+    outbounds: applyFragments(outbounds).concat([{ tag: 'direct', protocol: 'freedom' }]),
+    routing: { rules }
+  };
+}
+
 function normalizeCustomRules(custom, geo) {
   if (!Array.isArray(custom)) return [];
   const out = [];
@@ -885,4 +911,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts };

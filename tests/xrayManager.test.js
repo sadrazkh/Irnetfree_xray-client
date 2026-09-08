@@ -15,7 +15,7 @@ let fakeSpawn = null;
 const spawns = [];
 cp.spawn = (...args) => { spawns.push(args); return fakeSpawn ? fakeSpawn(...args) : realSpawn(...args); };
 
-const { XrayManager, PLAINTEXT_REJECT } = require('../src/main/xrayManager');
+const { XrayManager, getFreePorts, PLAINTEXT_REJECT } = require('../src/main/xrayManager');
 const { ENGINES } = require('../src/main/engines');
 
 /** Stand-in for a spawned core, so no real binary has to exist / run. */
@@ -289,4 +289,27 @@ test('validate: the key follows the core file — a replaced binary is checked a
       assert.equal(spawns.length - before, 2);
     } finally { fakeSpawn = null; }
   });
+});
+
+test('getFreePorts hands out n distinct loopback ports', async () => {
+  const ports = await getFreePorts(5);
+  assert.equal(ports.length, 5);
+  assert.equal(new Set(ports).size, 5, 'distinct: ' + ports.join(','));
+  for (const p of ports) assert.ok(p > 0 && p < 65536);
+  assert.deepEqual(await getFreePorts(0), []);
+});
+
+test('binDirs never yields a relative directory outside Electron', () => {
+  // process.resourcesPath is undefined in plain Node; the old
+  // path.join(undefined || '', 'bin') was the relative `bin`, which resolved
+  // against the spawned child's cwd and made every headless latency test ENOENT.
+  const saved = process.resourcesPath;
+  delete process.resourcesPath;
+  try {
+    const xm = new XrayManager({ dataDir: os.tmpdir() });
+    for (const d of xm.binDirs()) assert.ok(path.isAbsolute(d), 'relative bin dir: ' + d);
+    assert.ok(xm.binDirs().some(d => d === path.join(__dirname, '..', 'bin')), 'the bundled bin/ is still there');
+  } finally {
+    if (saved !== undefined) process.resourcesPath = saved;
+  }
 });

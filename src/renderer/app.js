@@ -1206,15 +1206,25 @@ async function pingRealOnly(id) {
   return real;
 }
 
-/** Ping many: TCP for all in parallel (fast), then Real delay sequentially
- * (each spins a throwaway xray, so don't launch them all at once). */
+/** Ping many: TCP for all in parallel, then real delay for all through ONE
+ * throwaway core per engine (see ping:realMany). Falls back to one core per
+ * target when the backend is older than this renderer. */
 async function pingMany(ids) {
   ids = [...new Set(ids.filter(Boolean))];
   if (!ids.length) return;
   toast(t('t.pingingAll'));
   ids.forEach(setPingPending);
   await Promise.all(ids.map(pingTcpOnly));
-  for (const id of ids) await pingRealOnly(id);
+  ids.forEach((id) => setPhasePending(id, 'data-ping-real'));
+  if (window.api.pingRealMany) {
+    const res = await window.api.pingRealMany(ids);
+    for (const id of ids) {
+      state.pings[id] = Object.assign(state.pings[id] || {}, { real: (res && res[id]) || { ok: false, error: 'no result' } });
+      applyPingDisplays(id);
+    }
+  } else {
+    for (const id of ids) await pingRealOnly(id);
+  }
   renderPicker();
   toast(t('t.testDone'), 'ok');
 }

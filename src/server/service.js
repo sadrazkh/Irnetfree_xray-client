@@ -15,7 +15,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('../main/configBuilder');
 const { adapterDnsServers } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
@@ -23,9 +23,9 @@ const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('../main/engi
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
 const { assetStatus: scanAssets } = require('../main/assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('../main/geoCheck');
-const { XrayManager, getFreePort } = require('../main/xrayManager');
+const { XrayManager, getFreePort, getFreePorts } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
-const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo } = require('../main/netutils');
+const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('../main/netutils');
 const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
@@ -1273,6 +1273,9 @@ function createService(opts = {}) {
   }
 
   /* ----------------------------- IPC-equivalent dispatcher ----------------------------- */
+  // ping:realMany — one throwaway core per engine for up to REAL_BATCH targets,
+  // REAL_PARALLEL requests in flight (see main.js for the reasoning)
+  const REAL_BATCH = 20, REAL_PARALLEL = 6;
   const handlers = {
     'app:init': () => ({
       servers: store.get('servers', []),
@@ -1403,6 +1406,38 @@ function createService(opts = {}) {
         return await uploadThroughProxy(port, {});
       } catch (err) { return { ok: false, error: err.message }; }
       finally { if (test) test.cleanup(); }
+    },
+    'ping:realMany': async (ids) => {
+      const out = {};
+      const list = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
+      if (!xray.binExists()) { for (const id of list) out[id] = { ok: false, error: 'xray binary missing' }; return out; }
+      const byEngine = new Map();
+      for (const id of list) {
+        const { server, chain } = resolveTarget(id);
+        if (!server) { out[id] = { ok: false, error: 'not found' }; continue; }
+        const isChain = chain && chain.length >= 2;
+        const plan = isChain ? { mode: 'chain', chain } : { mode: 'single', server };
+        const eng = testEngineFor(chooseEngine(plan, getSettings().defaultEngine));
+        if (!byEngine.has(eng)) byEngine.set(eng, []);
+        byEngine.get(eng).push({ id, target: isChain ? chain : server });
+      }
+      const limit = pLimit(REAL_PARALLEL);
+      for (const [eng, targets] of byEngine) {
+        for (let i = 0; i < targets.length; i += REAL_BATCH) {
+          const batch = targets.slice(i, i + REAL_BATCH);
+          let test = null;
+          try {
+            const ports = await getFreePorts(batch.length);
+            test = await xray.startTest(buildMultiTestConfig(batch.map(b => b.target), ports), eng);
+            await Promise.all(batch.map((b, k) => limit(async () => {
+              out[b.id] = await httpThroughProxy(ports[k], { host: 'cp.cloudflare.com', port: 80, path: '/' });
+            })));
+          } catch (err) {
+            for (const b of batch) if (!out[b.id]) out[b.id] = { ok: false, error: err.message };
+          } finally { if (test) test.cleanup(); }
+        }
+      }
+      return out;
     },
     'ip:check': async (viaProxy) => { if (viaProxy) { const s = getSettings(); return ipInfo(s.socksPort); } return ipInfo(null); },
 
