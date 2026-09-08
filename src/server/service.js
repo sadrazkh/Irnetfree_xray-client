@@ -383,7 +383,9 @@ function createService(opts = {}) {
     return [...new Set((settings.routeRules || []).filter(r => r && r.type === 'process' && r.value).map(r => String(r.value)))];
   }
   const loadProcCache = () => store.get('procIpCache', {}) || {};
-  const saveProcCache = (c) => store.set('procIpCache', c);
+  // Coalesced: the watcher rewrites this every 20 s for the life of a tunnel,
+  // and a save() rewrites the whole store (every server, fsync, rename) for it.
+  const saveProcCache = (c) => store.setLazy('procIpCache', c);
 
   async function effectiveSettings() {
     const s = getSettings();
@@ -1479,6 +1481,7 @@ function createService(opts = {}) {
   async function shutdown() {
     if (isQuitting) return; isQuitting = true;
     userDisconnecting = true;
+    try { store.flush(); } catch {}   // whatever setLazy() still holds
     try { stopNetWatcher(); } catch {}
     try { if (stats) stats.stop(); } catch {}
     try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}

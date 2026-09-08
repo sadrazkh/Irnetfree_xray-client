@@ -351,7 +351,9 @@ function activeProcNames(settings) {
 }
 
 function loadProcCache() { return store.get('procIpCache', {}) || {}; }
-function saveProcCache(c) { store.set('procIpCache', c); }
+// Coalesced: the watcher rewrites this every 20 s for the life of a tunnel,
+// and a save() rewrites the whole store (every server, fsync, rename) for it.
+function saveProcCache(c) { store.setLazy('procIpCache', c); }
 
 /**
  * Return a settings copy in which every 'process' route rule is rewritten into
@@ -2152,6 +2154,7 @@ app.whenReady().then(() => {
  */
 async function teardownForQuit() {
   userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
+  try { if (store) store.flush(); } catch {}   // whatever setLazy() still holds
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
@@ -2205,6 +2208,7 @@ app.on('window-all-closed', () => {
 // exit (Windows only) — otherwise a kill-switch block would outlive the app and
 // leave the machine with no internet.
 process.on('exit', () => {
+  try { if (store) store.flush(); } catch {}   // a coalesced write must not die with the process
   // The DNS override outlives the app if nobody puts it back, so it goes before
   // the win32 gate below: on macOS (when we are already root) this is the last
   // chance to restore it without a password prompt nobody can answer here.
