@@ -211,58 +211,10 @@
    other line of text on it already uses. */
 #view-settings .hint { max-width: 72ch; line-height: 1.6; }
 
-/* THE ARROW. styles.css sets `appearance: none` on .select and reserves 26px
-   of padding at its inline end for a chevron — and then never draws one, so
-   every dropdown in the app renders as a text field you cannot type in. That
-   is the whole reason this page reads as "nothing but dropdowns" and yet has
-   no dropdowns you can see.
-
-   Two linear-gradients meeting as a triangle is the only way to draw it that
-   keeps the palette in the tokens: an SVG data-URI would have to carry a
-   literal hex (and three skins × two themes is six of them), and ::after is
-   not rendered on a <select> at all. The same six lines are in lists.css for
-   the servers screen and its editor — the pair has to be kept in step until
-   somebody hoists it into styles.css, where .select actually lives. */
-#view-settings .select {
-  cursor: pointer;
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--ink3) 50%),
-    linear-gradient(135deg, var(--ink3) 50%, transparent 50%);
-  background-size: 5px 5px;
-  background-repeat: no-repeat;
-  /* background-position has no logical form, so the two writing directions
-     are spelled out: a 10px-wide mark, 8px in from the inline end, sitting
-     1px above the middle so it reads as pointing down rather than sinking. */
-  background-position: calc(100% - 18px) calc(50% - 1px), calc(100% - 13px) calc(50% - 1px);
-}
-[dir="rtl"] #view-settings .select {
-  background-position: 8px calc(50% - 1px), 13px calc(50% - 1px);
-}
-#view-settings .select:hover,
-#view-settings .select:focus {
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--accent) 50%),
-    linear-gradient(135deg, var(--accent) 50%, transparent 50%);
-}
-#view-settings .select:disabled { cursor: not-allowed; }
-
-/* A control has to answer the pointer. styles.css gives a field one state —
-   a focused border in --accentLine, which is a 30–38% wash of the accent and
-   at 1px is very nearly nothing. Hover firms the edge; focus takes the full
-   accent, doubles it with a 1px ring (so the edge reads at 2px without the
-   box changing size) and puts a soft halo outside that. It has to carry the
-   whole job: `.input:focus` in styles.css turns the shell's focus outline
-   off, so this IS the keyboard indicator. --accentSoft alone measured 1.14:1
-   against --panel on the light skins, which is why the 1px is there. */
-#view-settings .input:hover,
-#view-settings .select:hover,
-#view-settings .textarea:hover { border-color: var(--dim); }
-#view-settings .input:focus,
-#view-settings .select:focus,
-#view-settings .textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accentSoft);
-}
+/* The select arrow and the hover/focus ring now live beside `.select` itself
+   in styles.css, so every screen gets them — this file's scoped copies are
+   gone rather than kept, because an identical-but-more-specific override is
+   how a later change to the base rule silently stops applying here. */
 
 /* A dropdown is as wide as the longest thing in it, not as wide as the column
    it happens to sit in — width:100% on every field is what made a five-item

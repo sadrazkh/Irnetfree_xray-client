@@ -60,45 +60,10 @@
 }
 :where(.q-dot) { color: var(--dim); }
 
-/* THE ARROW. styles.css sets `appearance: none` on .select and reserves 26px
-   of padding at its inline end for a chevron it never draws, so a dropdown and
-   a text field are the same object on screen. The recipe is settled in
-   settings.css — read the long note there; these are the same six lines for
-   the list screens and the server editor, so a <select> means the same thing
-   on every screen this app has. Keep the two copies in step (or hoist them
-   into styles.css, where .select itself lives).
-
-   Two linear-gradients meeting as a triangle, because a data-URI arrow would
-   have to carry a literal hex — six of them, one per skin × theme — and a
-   <select> renders no ::after to hang a glyph on. */
-:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) .select {
-  cursor: pointer;
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--ink3) 50%),
-    linear-gradient(135deg, var(--ink3) 50%, transparent 50%);
-  background-size: 5px 5px;
-  background-repeat: no-repeat;
-  background-position: calc(100% - 18px) calc(50% - 1px), calc(100% - 13px) calc(50% - 1px);
-}
-/* background-position has no logical form, so RTL gets its own line */
-[dir="rtl"] :is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) .select {
-  background-position: 8px calc(50% - 1px), 13px calc(50% - 1px);
-}
-:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) .select:hover,
-:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) .select:focus {
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--accent) 50%),
-    linear-gradient(135deg, var(--accent) 50%, transparent 50%);
-}
-/* and the same two states every field on the settings screen answers with:
-   hover firms the edge, focus takes the accent and a soft ring */
-:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) :is(.input, .select, .textarea):hover {
-  border-color: var(--dim);
-}
-:is(#view-servers, #view-subs, #view-chain, #view-pool, #editModal) :is(.input, .select, .textarea):focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accentSoft);
-}
+/* The select arrow and the hover/focus ring now live beside `.select` itself
+   in styles.css, so every screen gets them — this file's scoped copies are
+   gone rather than kept, because an identical-but-more-specific override is
+   how a later change to the base rule silently stops applying here. */
 
 /* The chain builder and the pool are the same kind of screen — a .card with a
    modifier, opening on a head band over a hairline — so they are spaced by one
@@ -327,3 +292,115 @@ button.pool-item:hover .pool-add { color: var(--accent); }
 .pool-del { color: var(--ink3); }
 .pool-warn { font-size: 11px; color: var(--warn); line-height: 1.6; margin-block-start: 12px; }
 .pool-warn:empty { display: none; }
+
+/* =========================================================================
+   Grouping, selection and lifetime usage
+
+   Folded in from a short-lived servers.css: it existed only so two people
+   could work on this screen at once. Everything below answers one of two
+   questions the flat list could not:
+
+     "where did this config come from?"   the group headings
+     "which one is actually selected?"    .server-card.selected
+
+   `.active` and `.selected` are DIFFERENT and both have to read at once:
+   active is "this tunnel is up", selected is "this is what connect will
+   use". They are usually the same config, and the moment they are not is
+   exactly when the user needs to see it.
+   ========================================================================= */
+
+/* ----------------------------- groups ----------------------------- */
+
+.srv-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.srv-group:last-child { margin-bottom: 0; }
+
+.srv-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-block: 2px;
+  margin-bottom: 2px;
+}
+.srv-group-ico { font-size: 13px; color: var(--ink3); flex: 0 0 auto; }
+.srv-group-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* the count sits in its own chip so a long subscription name can ellipsise
+   without pushing the number off the row */
+.srv-group-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink3);
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-radius: var(--r2);
+  padding: 1px 7px;
+  flex: 0 0 auto;
+}
+/* a rule running off the heading to the end of the row, so the group reads as
+   a band rather than a stray line of text */
+.srv-group-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* ----------------------------- selection ----------------------------- */
+
+/*
+ * The selected config was marked in the markup all along — `.server-card`
+ * gets `selected`, and the same click path runs from the servers page and from
+ * the home picker — but nothing styled it, so choosing one looked like it had
+ * done nothing. Hence "it is not clear which one is selected".
+ */
+.server-card.selected {
+  border-inline-start-color: var(--accentLine);
+  background: var(--soft);
+}
+.server-card.selected .srv-name {
+  font-weight: 700;
+  color: var(--ink);
+}
+/* Connected wins over merely selected: it keeps the full accent edge and tint
+   from lists.css, and its name goes accent so the two states never read the
+   same at a glance. */
+.server-card.active .srv-name { color: var(--accentInk); font-weight: 700; }
+
+.sel-badge { white-space: nowrap; }
+
+/* ----------------------------- lifetime usage ----------------------------- */
+
+/*
+ * How much has gone through this config in total, across every session — not
+ * just the one that is running. Absent until there is something to show, so a
+ * fresh config does not carry an empty column.
+ */
+.srv-usage {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink3);
+  direction: ltr;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.srv-usage:empty { display: none; }
+.srv-usage .u-sep { color: var(--dim); padding-inline: 3px; }
+
+/* ----------------------------- the mode picker ----------------------------- */
+
+/* the warning under the two options, when the backend for one of them is
+   missing — TUN is the default now, so this is a first-run surface */
+.mode-note.bad { color: var(--danger); line-height: 1.7; }
+.mode-fix { width: 100%; margin-top: 4px; }

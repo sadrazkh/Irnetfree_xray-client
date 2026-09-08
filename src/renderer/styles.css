@@ -410,7 +410,55 @@ button { cursor: pointer; background: none; border: 0; color: inherit; }
 .input:focus, .select:focus, .textarea:focus { border-color: var(--accentLine); outline: none; }
 .input::placeholder, .textarea::placeholder { color: var(--dim); }
 .textarea { resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.7; }
-.select { appearance: none; padding-inline-end: 26px; }
+/*
+ * THE ARROW — and why it is here.
+ *
+ * `appearance: none` strips the native chevron, and the 26px reserved for a
+ * replacement went unused for the whole of v1.x: every <select> in the app
+ * rendered as a text field you cannot type in. That is why the settings page
+ * read as "nothing but dropdowns" while having no visible dropdown at all.
+ *
+ * Two linear-gradients meeting as a triangle, because the alternatives do not
+ * survive this codebase's rules: an SVG data-URI has to carry a literal hex
+ * (six of them, three skins × two themes) and Chromium renders no ::after on a
+ * <select>. `background-position` has no logical form, so RTL is spelled out.
+ *
+ * It lives beside `.select` itself so every screen gets it — the routing rules'
+ * type pickers were the ones still bare while two screen sheets carried their
+ * own copy.
+ */
+.select {
+  appearance: none;
+  padding-inline-end: 26px;
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink3) 50%),
+    linear-gradient(135deg, var(--ink3) 50%, transparent 50%);
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  background-position: calc(100% - 18px) calc(50% - 1px), calc(100% - 13px) calc(50% - 1px);
+}
+[dir="rtl"] .select {
+  background-position: 8px calc(50% - 1px), 13px calc(50% - 1px);
+}
+.select:hover,
+.select:focus {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--accent) 50%),
+    linear-gradient(135deg, var(--accent) 50%, transparent 50%);
+}
+
+/*
+ * A visible focus ring on every field. `:focus { outline: none }` below leaves
+ * a 1px border tinted with a 30% wash of the accent as the ONLY keyboard
+ * indicator, which is about 1.1:1 against the panel on the light themes —
+ * invisible. Two screens had already fixed this for themselves; it belongs to
+ * every field.
+ */
+.input:focus, .select:focus, .textarea:focus {
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accentSoft);
+}
+.input:hover, .select:hover, .textarea:hover { border-color: var(--dim); }
 
 .field-label {
   display: block;
