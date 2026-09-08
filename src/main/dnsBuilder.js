@@ -90,9 +90,6 @@ function serverEntry(entry) {
 /** A CIDR that only an AAAA answer could ever fall in. */
 function isV6Range(c) { return String(c).includes(':') && !/^geoip:/i.test(String(c)); }
 
-/** A CIDR that only an AAAA answer could ever fall in. */
-function isV6Range(c) { return String(c).includes(':') && !/^geoip:/i.test(String(c)); }
-
 function cleanList(list) {
   const out = [];
   for (const raw of Array.isArray(list) ? list : []) {
@@ -109,8 +106,18 @@ function cleanList(list) {
  * category-ir through a config wants the exit's view of DNS, not Iran's) —
  * or when the plan applies a simple routing mode on top (`advancedUseMode`),
  * in which case it wants exactly what that mode wants.
+ *
+ * `geoAssets` is the veto. Every justification above is a geo token — the
+ * routing mode's bypass pair, or a `geosite:` rule — and without geoip.dat /
+ * geosite.dat the router emits none of them: bypass-ir IS global routing, every
+ * byte goes through the proxy. Building the resolver anyway asked an Iranian
+ * server, over cleartext UDP off the tunnel, for exactly the names the traffic
+ * then hid — a leak with nothing bought for it, and one a fresh install (no geo
+ * files downloaded yet) hit by default. Seen on both cores with
+ * scripts/probe-dns-leak.js before this line existed.
  */
-function directRegion(s) {
+function directRegion(s, geoAssets) {
+  if (!geoAssets) return null;
   if (s.advancedRouting) {
     let region = null;
     for (const r of s.routeRules || []) {
@@ -152,24 +159,22 @@ function buildDnsPlan(settings, opts) {
   const servers = [];
   const directResolverIps = [];
 
-  const region = directRegion(s);
+  const region = directRegion(s, o.geoAssets);
   if (region) {
     let direct = region === 'cn' ? DNS_DEFAULT_DIRECT_CN.slice() : cleanList(s.dnsDirect);
     if (!direct.length) direct = (region === 'cn' ? DNS_DEFAULT_DIRECT_CN : DNS_DEFAULT_DIRECT_IR).slice();
     // strict guard: plain UDP is blocked off the tunnel, keep DoH only
     if (o.dropUdpDirect) direct = direct.filter(isDohUrl);
 
-    // Only the tokens the installed files can back. Without geo files the
-    // literal TLD regexp is all that is safe; expectedIPs needs geoip.dat.
-    const domains = region === 'ir'
-      ? (o.geoAssets ? ['geosite:category-ir', 'regexp:.*\\.ir$'] : ['regexp:.*\\.ir$'])
-      : (o.geoAssets ? ['geosite:cn'] : ['regexp:.*\\.cn$']);
+    // The tokens the installed files back. `directRegion` already refused the
+    // whole resolver without them, so both lists are always available here.
+    const domains = region === 'ir' ? ['geosite:category-ir', 'regexp:.*\\.ir$'] : ['geosite:cn'];
     const expected = region === 'ir' ? ['geoip:ir'] : ['geoip:cn'];
 
     for (const address of direct.slice(0, 2)) {
       const ent = serverEntry(address);
       const srv = Object.assign(typeof ent === 'object' ? ent : { address: ent }, { domains: domains.slice() });
-      if (o.geoAssets) srv.expectedIPs = expected.slice();
+      srv.expectedIPs = expected.slice();
       srv.skipFallback = true;   // never ask the domestic resolver about the rest of the world
       servers.push(srv);
       const ip = resolverIp(address);

@@ -12,7 +12,7 @@
  */
 
 const net = require('net');
-const { buildDnsPlan } = require('./dnsBuilder');
+const { buildDnsPlan, DNS_TAG } = require('./dnsBuilder');
 const { normalizePin } = require('./certPin');
 
 /**
@@ -441,6 +441,30 @@ function resolverBypassIps(planArg, settings) {
     { geoAssets: s.geoAssets !== false, dropUdpDirect: dropsUdpDirect(s) }).directResolverIps;
 }
 
+/**
+ * The same list, read out of the config that is actually RUNNING.
+ *
+ * Rebuilding it from the plan can only be as truthful as the settings object it
+ * is handed, and one input never travels in that object: `geoAssets`. main.js
+ * (and service.js) compute it from the files on disk inside buildActive() and
+ * pass it to buildConfig alone, so with the geo files missing the plan-derived
+ * list still names an in-country resolver the config no longer builds — a route
+ * exclusion, and at the strict level a firewall hole, for nothing. Reading the
+ * config's own `dns-internal → direct` rule cannot drift: it is the rule the
+ * core is obeying. A config in another core's format has no such rule and
+ * bypasses nothing, which is also the truthful answer for it.
+ */
+function resolverBypassIpsOf(config) {
+  const rules = (config && config.routing && config.routing.rules) || [];
+  const out = [];
+  for (const r of rules) {
+    if (!r || r.outboundTag !== 'direct' || !Array.isArray(r.ip)) continue;
+    if (!Array.isArray(r.inboundTag) || !r.inboundTag.includes(DNS_TAG)) continue;
+    for (const ip of r.ip) if (!out.includes(ip)) out.push(ip);
+  }
+  return out;
+}
+
 function buildConfig(planArg, settings) {
   const s = Object.assign({}, SETTINGS_DEFAULTS, settings || {});
   const geo = s.geoAssets !== false;
@@ -861,4 +885,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, wgResolvers, wgEndpointHosts };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts };
