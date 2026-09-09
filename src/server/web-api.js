@@ -84,6 +84,8 @@
     checkGeoRules: (rules) => invoke('routing:checkGeo', rules),
     applySettings: () => invoke('settings:apply'),
 
+    connectionDiagnostics: (probe) => invoke('diagnostics:connection', probe),
+    repairNetwork: () => invoke('network:repair'),
     // diagnostics
     pingTcp: (id) => invoke('ping:tcp', id),
     pingReal: (id) => invoke('ping:real', id),

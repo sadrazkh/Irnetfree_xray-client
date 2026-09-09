@@ -31,6 +31,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const platform = require('./tunPlatform');
+const macOwners = require('./macSessionLock');
 const { run, delay, sh, isOwnTunInterface } = platform;
 
 const ADAPTER = platform.TUN2SOCKS_ADAPTER;   // 'XrayTun'
@@ -60,6 +61,8 @@ class TunManager {
     this.lang = opts.lang || 'fa';   // user-facing error language
     this.macState = null;            // macOS TUN runtime state (pid, routes, dns)
     this.macLogTimer = null;
+    this.userData = opts.userData || null;
+    this.macOwnerKey = this.userData ? path.resolve(this.userData) : this;
   }
 
   /** Pick the message in the user's language (fa default). */
@@ -271,6 +274,7 @@ class TunManager {
   /* ----------------------------- macOS ----------------------------- */
 
   async startMac(socksPort, serverAddress, dnsServers) {
+    if (this.macState || this.hasPendingMacRecovery()) await this.recoverMacSessions();
     const bin = this.tun2socksPath();
     if (!bin) throw new Error(this.msg(
       'tun2socks پیدا نشد — آن را در پوشه bin بگذارید (از «فایل‌های موردنیاز» دانلود کن)',
@@ -299,17 +303,27 @@ class TunManager {
       `نتوانستم IP سرور (${serverAddress}) را resolve کنم — ممکن است حلقه ایجاد شود`,
       `Could not resolve server IP (${serverAddress}) — a routing loop may occur`), 'warn');
 
-    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-tun-'));
+    const base = this.userData ? path.join(this.userData, 'mac-legacy-tun-sessions') : os.tmpdir();
+    fs.mkdirSync(base, { recursive: true, mode: 0o700 });
+    const work = fs.mkdtempSync(path.join(base, 'irnf-tun-'));
     const logFile = path.join(work, 'tun2socks.log');
     const pidFile = path.join(work, 'tun2socks.pid');
     const devFile = path.join(work, 'tun2socks.dev');
+    const identityFile = path.join(work, 'tun2socks.identity');
+    const dnsFile = path.join(work, 'dns-changed');
+    const routesFile = path.join(work, 'bypass-added');
+    const teardownPath = path.join(work, 'teardown.sh');
     const reqDev = MAC_TUN_DEV;
     const dns1 = this.dnsServers[0] || '1.1.1.1';
     const dns2 = this.dnsServers[1] || '';
 
-    const bypassAdd = ips.map(ip => `route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1 || true`).join('\n');
+    for (const file of [logFile, pidFile, devFile, identityFile, routesFile]) fs.writeFileSync(file, '', { mode: 0o600 });
+    this.macState = { work, logFile, pidFile, devFile, identityFile, dnsFile, routesFile, service, savedDns, gateway: route.gateway, bypassIps: ips, reqDev, macPid: null, dev: '', identity: '', expectedCommand: `${bin} -device ${reqDev} -proxy socks5://127.0.0.1:${socksPort} -loglevel warn` };
+    this.saveMacSession();
+    fs.writeFileSync(teardownPath, this.macTeardownScript(), { mode: 0o700 });
+    const bypassAdd = ips.map(ip => `if route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1; then echo ${sh(ip)} >> ${sh(routesFile)} || exit 13; fi`).join('\n');
     const dnsLine = service
-      ? `networksetup -setdnsservers ${sh(service)} ${dns1}${dns2 ? ' ' + dns2 : ''} 2>/dev/null || true`
+      ? `touch ${sh(dnsFile)} || exit 14\nnetworksetup -setdnsservers ${sh(service)} ${[dns1, dns2].filter(Boolean).map(sh).join(' ')} || exit 14`
       : 'true';
 
     // NOTE: no `set -e` — we validate the critical steps explicitly so a
@@ -322,6 +336,8 @@ class TunManager {
       // `nohup` — which fails under `osascript do shell script` with
       // "nohup: can't detach from console: Inappropriate ioctl for device".
       "trap '' HUP",
+      `rollback() { code=$?; trap - EXIT; if [ "$code" -ne 0 ]; then /bin/bash ${sh(teardownPath)} || echo 'Tunnel rollback failed; recovery retained' >&2; fi; exit "$code"; }`,
+      'trap rollback EXIT',
       `BIN=${sh(bin)}`,
       `REQ_DEV=${sh(reqDev)}`,
       `LOG=${sh(logFile)}`,
@@ -334,12 +350,14 @@ class TunManager {
       //    under osascript, and HUP is trapped above → no SIGHUP reaches it).
       //    `warn` matches the (working) Windows log level.
       `"$BIN" -device "$REQ_DEV" -proxy ${sh(`socks5://127.0.0.1:${socksPort}`)} -loglevel warn >"$LOG" 2>&1 </dev/null &`,
-      'echo $! > "$PIDFILE"',
+      'echo $! > "$PIDFILE" || exit 10',
+      `ps -ww -p "$(cat "$PIDFILE")" -o lstart= > ${sh(identityFile)} || exit 10`,
       // 2) wait for a NEW utun device (tun2socks may pick the next free unit
       //    instead of the exact name we requested).
       'ACTUAL=""',
       'i=0',
       'while [ $i -lt 50 ]; do',
+      '  kill -0 "$(cat "$PIDFILE")" 2>/dev/null || break',
       '  for u in $(ifconfig -l 2>/dev/null); do',
       '    case "$u" in',
       '      utun*)',
@@ -359,7 +377,7 @@ class TunManager {
       '  cat "$LOG" >&2 2>/dev/null',
       '  exit 11',
       'fi',
-      'echo "$ACTUAL" > "$DEVFILE"',
+      'echo "$ACTUAL" > "$DEVFILE" || exit 12',
       // 3) point-to-point address on the tunnel (local 10.255.0.2, peer
       //    10.255.0.1 — cosmetic; routing is pinned to the interface below).
       `ifconfig "$ACTUAL" ${TUN_ADDR} ${TUN_GW} up || { echo "ERR: ifconfig failed" >&2; exit 12; }`,
@@ -377,6 +395,7 @@ class TunManager {
       `OUT=$(route -n add -net 128.0.0.0/1 -interface "$ACTUAL" 2>&1) || { echo "ERR: route 128/1 failed: $OUT" >&2; exit 13; }`,
       // 6) DNS through the tunnel (leak prevention)
       dnsLine,
+      'kill -0 "$(cat "$PIDFILE")" 2>/dev/null || exit 15',
       'exit 0',
       ''
     ].join('\n');
@@ -397,7 +416,9 @@ class TunManager {
           if (line.trim()) this.onLog('[tun] ' + line.trim(), 'error');
         }
       }
-      try { fs.rmSync(work, { recursive: true, force: true }); } catch {}
+      if (!fs.readFileSync(pidFile, 'utf8').trim() && !fs.existsSync(dnsFile)) {
+        fs.rmSync(work, { recursive: true, force: true }); this.macState = null;
+      }
       if (/User canceled|-128/i.test(m)) {
         throw new Error(this.msg(
           'برای حالت TUN باید اجازه دسترسی (رمز عبور) بدهید',
@@ -414,7 +435,11 @@ class TunManager {
     try { dev = (fs.readFileSync(devFile, 'utf8').trim()) || reqDev; } catch {}
     this.onLog(`TUN device: ${dev}`, 'info');
 
-    this.macState = { work, logFile, pidFile, macPid, service, savedDns, bypassIps: ips, dev, reqDev };
+    let identity = '';
+    try { identity = fs.readFileSync(identityFile, 'utf8').trim(); } catch {}
+    Object.assign(this.macState, { macPid, identity, dev });
+    if (!macPid || !identity || !/^utun\d+$/.test(dev)) throw new Error('Incomplete tunnel setup state; recovery required');
+    this.saveMacSession();
     this.bypassIps = ips.slice();
     this.active = true;
 
@@ -434,12 +459,12 @@ class TunManager {
         if (stat.size < pos) pos = 0;
         if (stat.size === pos) return;
         const fd = fs.openSync(logFile, 'r');
-        const len = stat.size - pos;
+        const len = Math.min(stat.size - pos, 64 * 1024);
         const buf = Buffer.alloc(len);
-        fs.readSync(fd, buf, 0, len, pos);
-        fs.closeSync(fd);
-        pos = stat.size;
-        for (const line of buf.toString('utf8').split(/\r?\n/)) {
+        let bytes;
+        try { bytes = fs.readSync(fd, buf, 0, len, pos); } finally { fs.closeSync(fd); }
+        pos += bytes;
+        for (const line of buf.subarray(0, bytes).toString('utf8').split(/\r?\n/)) {
           if (line.trim()) this.onLog('[tun] ' + line.trim(), 'warn');
         }
       } catch {}
@@ -451,44 +476,115 @@ class TunManager {
     if (this.macLogTimer) { clearInterval(this.macLogTimer); this.macLogTimer = null; }
   }
 
-  async stopMac() {
-    this.stopMacLogTail();
+  saveMacSession() {
+    if (!this.macState.ownerPid) this.macState.ownerPid = process.pid;
+    const file = path.join(this.macState.work, 'session.json');
+    fs.writeFileSync(file + '.tmp', JSON.stringify(this.macState), { mode: 0o600 });
+    fs.renameSync(file + '.tmp', file);
+  }
+
+  hasPendingMacRecovery() {
+    if (os.platform() !== 'darwin') return false;
+    if (this.macState) return true;
+    if (!this.userData) return false;
+    try { return fs.readdirSync(path.join(this.userData, 'mac-legacy-tun-sessions')).some(n => /^irnf-tun-/.test(n)); }
+    catch (e) { if (e.code === 'ENOENT') return false; throw e; }
+  }
+
+  async recoverMacSessions() {
+    if (os.platform() !== 'darwin') return 0;
+    const owner = macOwners.get(this.macOwnerKey);
+    if (owner && owner !== this) throw new Error('Another tunnel operation is live; disconnect it before recovery');
+    if (this.active) throw new Error('Disconnect the active tunnel before recovery');
+    let count = 0;
+    if (this.macState) { await this.stopMac(); count++; }
+    if (!this.userData) return count;
+    const base = path.resolve(this.userData, 'mac-legacy-tun-sessions');
+    let names;
+    try { names = fs.readdirSync(base); } catch (e) { if (e.code === 'ENOENT') return count; throw e; }
+    for (const name of names.filter(n => /^irnf-tun-/.test(n))) {
+      const work = path.join(base, name);
+      if (fs.lstatSync(work).isSymbolicLink()) throw new Error('Invalid tunnel recovery directory');
+      const file = path.join(work, 'session.json');
+      if (!fs.existsSync(file)) continue;
+      if (fs.lstatSync(file).isSymbolicLink()) throw new Error('Invalid tunnel recovery journal');
+      const st = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (Number.isInteger(st.ownerPid) && st.ownerPid > 1 && st.ownerPid !== process.pid) {
+        try {
+          process.kill(st.ownerPid, 0);
+          throw new Error('Another application instance may own this tunnel; close it before recovery');
+        } catch (e) { if (e.code !== 'ESRCH') throw e; }
+      }
+      if (path.resolve(st.work || '') !== work || !Array.isArray(st.savedDns) || !Array.isArray(st.bypassIps) || typeof st.gateway !== 'string' || typeof st.expectedCommand !== 'string') throw new Error('Invalid tunnel recovery session');
+      for (const key of ['logFile', 'pidFile', 'devFile', 'identityFile', 'dnsFile', 'routesFile']) {
+        if (typeof st[key] !== 'string' || path.dirname(path.resolve(st[key])) !== work) throw new Error('Invalid tunnel recovery path');
+        if (fs.existsSync(st[key]) && fs.lstatSync(st[key]).isSymbolicLink()) throw new Error('Invalid tunnel recovery artifact');
+      }
+      this.macState = st;
+      await this.stopMac(); count++;
+    }
+    return count;
+  }
+
+  macTeardownScript() {
     const st = this.macState || {};
-    const dns1 = (st.savedDns && st.savedDns.length) ? st.savedDns.join(' ') : 'Empty';
-    const dev = st.dev || '';
+    const dns1 = (st.savedDns && st.savedDns.length) ? st.savedDns.map(sh).join(' ') : 'Empty';
     const lines = ['#!/bin/bash'];
-    if (st.macPid) lines.push(`kill ${st.macPid} 2>/dev/null || true`);
-    // belt-and-suspenders: also kill any tun2socks we launched. Match on the
-    // device flag we pass at launch (`-device utun`).
-    lines.push(`pkill -f ${sh(`-device ${st.reqDev || MAC_TUN_DEV}`)} 2>/dev/null || true`);
+    if (st.pidFile) {
+      lines.push(
+        `PID=$(cat ${sh(st.pidFile)} 2>/dev/null)`,
+        `EXPECTED=$(cat ${sh(st.identityFile)} 2>/dev/null | sed "s/^[[:space:]]*//;s/[[:space:]]*$//")`,
+        `COMMAND=${sh(st.expectedCommand)}`,
+        'case "$PID" in ""|*[!0-9]*) PID="";; esac',
+        'owned() { [ "$(ps -ww -p "$PID" -o command=)" = "$COMMAND" ] && [ "$(ps -ww -p "$PID" -o lstart= | sed "s/^[[:space:]]*//;s/[[:space:]]*$//")" = "$EXPECTED" ]; }',
+        'if [ -n "$PID" ] && [ "$PID" -gt 1 ] && kill -0 "$PID" 2>/dev/null; then',
+        '  [ -n "$EXPECTED" ] || { echo "Missing tunnel identity; recovery retained" >&2; exit 21; }',
+        '  if owned; then',
+        '  kill -TERM "$PID" || exit 22',
+        '  i=0; while owned && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i+1)); done',
+        '  if owned; then kill -KILL "$PID" || exit 23; fi',
+        '  i=0; while owned && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i+1)); done',
+        '  if owned; then echo "TUN process is still running" >&2; exit 24; fi',
+        '  fi',
+        'fi');
+    }
     // Delete the split-default routes using the SAME (interface-pinned) form we
     // added them with — otherwise they leak and break all networking after
     // disconnect until reboot.
-    if (dev) {
-      lines.push(`route -n delete -net 0.0.0.0/1 -interface ${sh(dev)} 2>/dev/null || true`);
-      lines.push(`route -n delete -net 128.0.0.0/1 -interface ${sh(dev)} 2>/dev/null || true`);
+    // Interface routes disappear with the owned utun. Do not delete by a
+    // recycled device name after a crash: another VPN may own it by then.
+    for (const ip of (st.bypassIps || [])) {
+      lines.push(`if grep -Fxq -- ${sh(ip)} ${sh(st.routesFile)} 2>/dev/null; then route -n delete -host ${sh(ip)} ${sh(st.gateway)} 2>/dev/null || true; fi`);
     }
-    // legacy cleanup: also try the old peer-IP form in case a route from a
-    // previous app version is still installed.
-    lines.push(`route -n delete -net 0.0.0.0/1 ${TUN_GW} 2>/dev/null || true`);
-    lines.push(`route -n delete -net 128.0.0.0/1 ${TUN_GW} 2>/dev/null || true`);
-    for (const ip of (st.bypassIps || this.bypassIps || [])) {
-      lines.push(`route -n delete -host ${sh(ip)} 2>/dev/null || true`);
-    }
-    if (st.service) lines.push(`networksetup -setdnsservers ${sh(st.service)} ${dns1} 2>/dev/null || true`);
+    if (st.service) lines.push(`if [ -f ${sh(st.dnsFile)} ]; then networksetup -setdnsservers ${sh(st.service)} ${dns1} || exit 25; rm -f ${sh(st.dnsFile)}; fi`);
     lines.push('exit 0', '');
+    return lines.join('\n');
+  }
 
-    const work = st.work || fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-tun-'));
+  async stopMac() {
+    if (this.macStopPromise) return this.macStopPromise;
+    if (!this.macState) return;
+    this.macStopPromise = this.finishMacStop();
+    try { return await this.macStopPromise; } finally { this.macStopPromise = null; }
+  }
+
+  async finishMacStop() {
+    this.stopMacLogTail();
+    const work = this.macState.work;
     const teardownPath = path.join(work, 'teardown.sh');
     try {
-      fs.writeFileSync(teardownPath, lines.join('\n'), { mode: 0o700 });
+      if (fs.existsSync(teardownPath) && fs.lstatSync(teardownPath).isSymbolicLink()) throw new Error('Invalid tunnel teardown path');
+      fs.writeFileSync(teardownPath, this.macTeardownScript(), { mode: 0o700 });
       await this.runScriptPrivileged(teardownPath);
     } catch (e) {
       this.onLog('TUN teardown: ' + (e.message || e), 'warn');
+      throw e;
     }
-    try { fs.rmSync(work, { recursive: true, force: true }); } catch {}
+    fs.rmSync(work, { recursive: true, force: true });
     this.macState = null;
     this.bypassIps = [];
+    this.active = false;
+    if (!this.macStartPromise && macOwners.get(this.macOwnerKey) === this) macOwners.delete(this.macOwnerKey);
   }
 
   /* ----------------------------- Linux (best effort) ----------------------------- */
@@ -514,6 +610,20 @@ class TunManager {
 
   /* ----------------------------- public API ----------------------------- */
   async start(socksPort, serverAddress, dnsServers) {
+    if (os.platform() === 'darwin') {
+      if (this.macStartPromise) return this.macStartPromise;
+      const owner = macOwners.get(this.macOwnerKey);
+      if (owner && owner !== this) throw new Error('Another tunnel operation is live; disconnect it first');
+      macOwners.set(this.macOwnerKey, this);
+      this.macStartPromise = (async () => {
+        if (this.macStopPromise) await this.macStopPromise;
+        if (!this.active) await this.startMac(socksPort, serverAddress, dnsServers);
+      })();
+      try { return await this.macStartPromise; } finally {
+        this.macStartPromise = null;
+        if (!this.macState && !this.active && macOwners.get(this.macOwnerKey) === this) macOwners.delete(this.macOwnerKey);
+      }
+    }
     if (this.active) return;
     const plat = os.platform();
     if (plat === 'win32') return this.startWindows(socksPort, serverAddress, dnsServers);
@@ -522,13 +632,15 @@ class TunManager {
   }
 
   async stop() {
+    if (os.platform() === 'darwin' && this.macStartPromise) await this.macStartPromise.catch(() => {});
     if (!this.active && !this.proc && !this.macState) return;
-    this.active = false;
     const plat = os.platform();
+    if (plat !== 'darwin') this.active = false;
     if (plat === 'win32') {
       await this.cleanupRoutesWindows().catch(() => {});
     } else if (plat === 'darwin') {
-      await this.stopMac().catch((e) => this.onLog('TUN stop: ' + (e.message || e), 'warn'));
+      await this.stopMac();
+      this.active = false;
       this.onLog('TUN mode stopped.', 'info');
       return;
     }
@@ -561,18 +673,13 @@ class TunManager {
     // cannot show a password prompt during process exit). Graceful disconnect
     // / quit already runs the async, privileged teardown.
     if (plat === 'darwin' && process.getuid && process.getuid() === 0) {
-      const st = this.macState || {};
-      try { if (st.macPid) execFileSync('kill', [String(st.macPid)]); } catch {}
-      if (st.dev) {
-        try { execFileSync('route', ['-n', 'delete', '-net', '0.0.0.0/1', '-interface', st.dev]); } catch {}
-        try { execFileSync('route', ['-n', 'delete', '-net', '128.0.0.0/1', '-interface', st.dev]); } catch {}
-      }
-      // legacy peer-IP form, in case an old route is still present
-      try { execFileSync('route', ['-n', 'delete', '-net', '0.0.0.0/1', TUN_GW]); } catch {}
-      try { execFileSync('route', ['-n', 'delete', '-net', '128.0.0.0/1', TUN_GW]); } catch {}
-      for (const ip of (st.bypassIps || [])) {
-        try { execFileSync('route', ['-n', 'delete', '-host', ip]); } catch {}
-      }
+      if (!this.macState) return;
+      try {
+        const script = path.join(this.macState.work, 'teardown-sync.sh');
+        if (fs.existsSync(script) && fs.lstatSync(script).isSymbolicLink()) return;
+        fs.writeFileSync(script, this.macTeardownScript(), { mode: 0o700 });
+        execFileSync('/bin/bash', [script], { stdio: 'ignore', timeout: 12000 });
+      } catch {} // Keep the durable journal for verified recovery at next launch.
     }
   }
 }

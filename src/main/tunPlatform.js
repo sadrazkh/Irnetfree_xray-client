@@ -42,9 +42,9 @@ function isOwnTunInterface(name) {
   return n === 'tun0';                        // Linux: tunManager's startLinux() fixed device
 }
 
-function run(cmd, args) {
+function run(cmd, args, options = {}) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { windowsHide: true }, (err, stdout, stderr) => {
+    execFile(cmd, args, { windowsHide: true, timeout: options.timeout || 0 }, (err, stdout, stderr) => {
       if (err) return reject(new Error((stderr || err.message).toString().trim()));
       resolve((stdout || '').toString());
     });
@@ -176,10 +176,10 @@ async function serviceForDeviceMac(device) {
 }
 
 /** Current DNS servers for a service, or [] if set to automatic/DHCP. */
-async function getServiceDnsMac(service) {
+async function getServiceDnsMac(service, { strict = false } = {}) {
   if (!service) return [];
   let out = '';
-  try { out = await run('networksetup', ['-getdnsservers', service]); } catch { return []; }
+  try { out = await run('networksetup', ['-getdnsservers', service]); } catch (e) { if (strict) throw e; return []; }
   if (/aren't any|any DNS Servers/i.test(out)) return [];
   return out.split('\n').map(s => s.trim()).filter(s => /^\d+\.\d+\.\d+\.\d+$/.test(s) || s.includes(':'));
 }
