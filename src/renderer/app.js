@@ -64,6 +64,40 @@ function fmtBytes(n) {
 }
 function fmtSpeed(n) { return fmtBytes(n) + '/s'; }
 
+/* ----------------------------- speed sparkline ----------------------------- */
+// Sixty seconds of speed, two lines, one canvas. Drawn once per stats tick;
+// nothing in the DOM is created or measured for it, so it costs what a
+// 60-point polyline costs and no more. Declared up here, before the theme and
+// skin appliers that redraw it, so no caller can reach `hist` before it exists.
+const SPARK_N = 60;
+const hist = { down: [], up: [] };
+function pushHist(down, up) {
+  hist.down.push(Number(down) || 0);
+  hist.up.push(Number(up) || 0);
+  if (hist.down.length > SPARK_N) { hist.down.shift(); hist.up.shift(); }
+}
+function drawSpark() {
+  const c = $('#speedSpark');
+  if (!c || !c.getContext) return;
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  if (hist.down.length < 2) return;
+  const css = getComputedStyle(document.documentElement);
+  const max = Math.max(1, ...hist.down, ...hist.up);
+  for (const [arr, token] of [[hist.down, '--accent'], [hist.up, '--ok']]) {
+    ctx.beginPath();
+    ctx.strokeStyle = css.getPropertyValue(token).trim() || '#888';
+    ctx.lineWidth = 1.5;
+    arr.forEach((v, i) => {
+      const x = (i / (SPARK_N - 1)) * W;
+      const y = H - 1 - (v / max) * (H - 2);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+}
+
 /** Human duration from seconds (days / hours / minutes). */
 function fmtDuration(sec) {
   sec = Math.max(0, sec);
@@ -138,6 +172,7 @@ function applySkin(skin) {
   const s = ['cockpit', 'console', 'legacy'].includes(skin) ? skin : 'console';
   document.documentElement.setAttribute('data-skin', s);
   try { localStorage.setItem('irnetfree.skin', s); } catch { /* only costs a flash */ }
+  drawSpark();   // the sparkline's colours are the skin's tokens
   return s;
 }
 
@@ -149,6 +184,7 @@ function applyTheme(pref, systemDark) {
   // it from <head> on the next launch, before app:init has answered. Storage is
   // best-effort: a failure here only costs the flash it exists to avoid.
   try { localStorage.setItem('irnetfree.theme', theme); } catch {}
+  drawSpark();   // the sparkline's colours are the theme's tokens
 }
 
 function escapeHtml(s) {
@@ -3518,6 +3554,8 @@ if (window.api.onUsage) {
 window.api.onStats((s) => {
   $('#downSpeed').textContent = fmtSpeed(s.downSpeed);
   $('#upSpeed').textContent = fmtSpeed(s.upSpeed);
+  pushHist(s.downSpeed, s.upSpeed);
+  drawSpark();
   $('#downTotal').textContent = fmtBytes(s.totalDown);
   $('#upTotal').textContent = fmtBytes(s.totalUp);
   // session totals (cumulative since xray started for this connection)
@@ -3542,6 +3580,8 @@ function resetTraffic() {
   $('#sessDown').textContent = '0 B';
   $('#sessUp').textContent = '0 B';
   $('#sessSum').textContent = '0 B';
+  hist.down.length = 0; hist.up.length = 0;
+  drawSpark();
 }
 function setModeWidget() {
   // Reflect the CHOSEN mode (so users see/can change it before connecting).
