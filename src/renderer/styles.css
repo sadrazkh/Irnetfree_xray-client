@@ -581,6 +581,7 @@ button { cursor: pointer; background: none; border: 0; color: inherit; }
 .proto-socks, .proto-http { color: var(--ink3); }
 .proto-wireguard { color: var(--ok); border-color: var(--okSoft); background: var(--okSoft); }
 .proto-chain, .proto-pool, .proto-advanced { color: var(--info); }
+.proto-auto { color: var(--ok); }   /* the picker's "fastest server" action */
 
 .ping-good { color: var(--ok); }
 .ping-mid { color: var(--warn); }

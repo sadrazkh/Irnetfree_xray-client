@@ -913,6 +913,32 @@ async function clearUsageFor(id) {
 /* ----------------------------- unified picker (home) ----------------------------- */
 const ADV_ID = '__advanced__';
 const POOL_ID = '__pool__';
+/** The picker's "Auto" row: not a selection but an action — test, then connect to the fastest. */
+const AUTO_ID = '__auto__';
+
+/**
+ * The fastest tested server: real delay first (it proves the tunnel carries
+ * traffic), TCP handshake as the fallback for servers that only have that.
+ * null when nothing has been tested — the caller runs the test first.
+ */
+function bestServerId() {
+  const scored = state.servers.map((s) => {
+    const p = state.pings[s.id] || {};
+    const real = p.real && p.real.ok ? p.real.ms : null;
+    const tcp = p.tcp && p.tcp.ok ? p.tcp.ms : null;
+    return { id: s.id, key: real != null ? real : (tcp != null ? 100000 + tcp : null) };
+  }).filter(x => x.key != null).sort((a, b) => a.key - b.key);
+  return scored.length ? scored[0].id : null;
+}
+
+async function connectAuto() {
+  let best = bestServerId();
+  if (!best) { await pingMany(state.servers.map(s => s.id)); best = bestServerId(); }
+  if (!best) return toast(t('t.autoNone'), 'err');
+  const s = srvById(best);
+  toast(`${t('picker.auto')} → ${s ? s.name : best}`, 'ok');
+  return connect(best);
+}
 function chainById(id) { return state.chains.find(c => c.id === id); }
 function isChainId(id) { return !!chainById(id); }
 function chainMembers(c) { return ((c && c.members) || []).map(srvById).filter(Boolean); }
@@ -1040,6 +1066,16 @@ function renderPicker() {
     menu.appendChild(row);
   };
 
+  // "Auto": with two or more servers there is something to choose between.
+  // Not a selection (the selected target stays what it was) — a click tests
+  // and connects, and the picker then shows the server that won.
+  if (state.servers.length >= 2) {
+    const row = document.createElement('div');
+    row.className = 'picker-item picker-special';
+    row.innerHTML = `<span class="q-dot"></span><span class="proto-badge proto-auto">⚡</span><span class="pi-name">${escapeHtml(t('picker.auto'))}</span>`;
+    row.onclick = () => { closePicker(); connectAuto(); };
+    menu.appendChild(row);
+  }
   if (poolReady()) addRow(POOL_ID, '<span class="proto-badge proto-pool">🧩</span>', t('picker.pool') + ' (' + poolEnabledValid().length + ')', null, true);
   if (advancedReady()) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
   for (const c of state.chains) {
