@@ -4,7 +4,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { assetStatus } = require('../src/main/assets');
+const { assetStatus, downloadedFileNames } = require('../src/main/assets');
+const { ENGINES, engineExe } = require('../src/main/engines');
 
 function withDirs(fn) {
   const a = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-bin-a-'));
@@ -85,4 +86,20 @@ test('tunReady: off Windows either backend alone is enough; the old keys stay as
     assert.equal(assetStatus([a], 'linux').tunReady, true);
   });
   assert.equal(assetStatus([], 'darwin').tunReady, false);
+});
+
+test('downloadedFileNames covers every engine, both TUN backends and the geo files', () => {
+  // The literal list in main.js/service.js forgot sing-box for two releases:
+  // "remove downloaded files" left it on disk. Deriving it from the registry
+  // means a new core cannot be forgotten again.
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    const names = downloadedFileNames(platform);
+    for (const id of Object.keys(ENGINES)) {
+      assert.ok(names.includes(engineExe(id, platform)), `${platform}: ${id} missing`);
+    }
+    assert.ok(names.includes(platform === 'win32' ? 'tun2socks.exe' : 'tun2socks'));
+    assert.ok(names.includes('geoip.dat') && names.includes('geosite.dat'));
+    assert.equal(names.includes('wintun.dll'), platform === 'win32', 'wintun is Windows-only');
+    assert.equal(new Set(names).size, names.length, 'no duplicates');
+  }
 });

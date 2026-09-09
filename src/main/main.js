@@ -12,7 +12,7 @@ const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
 const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('./engineChoice');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('./certPin');
-const { assetStatus: scanAssets } = require('./assets');
+const { assetStatus: scanAssets, downloadedFileNames } = require('./assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
 const { XrayManager, getFreePort, getFreePorts } = require('./xrayManager');
 const { setSystemProxy } = require('./sysproxy');
@@ -2019,7 +2019,7 @@ function registerIpc() {
       return { ok: false, error: 'disconnect first', assets: assetStatus() };
     }
     const dir = userBin();
-    const names = ['xray', 'xray.exe', 'xray-pattn', 'xray-pattn.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
+    const names = downloadedFileNames();
     const removed = [];
     for (const n of names) {
       const p = path.join(dir, n);

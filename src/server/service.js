@@ -21,7 +21,7 @@ const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('../main/engineChoice');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
-const { assetStatus: scanAssets } = require('../main/assets');
+const { assetStatus: scanAssets, downloadedFileNames } = require('../main/assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('../main/geoCheck');
 const { XrayManager, getFreePort, getFreePorts } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
@@ -1453,7 +1453,7 @@ function createService(opts = {}) {
     },
     'assets:remove': async () => {
       if (xray.running || (tun && tun.active)) return { ok: false, error: 'disconnect first', assets: assetStatus() };
-      const names = ['xray', 'xray.exe', 'xray-pattn', 'xray-pattn.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
+      const names = downloadedFileNames();
       const removed = [];
       for (const n of names) { const p = path.join(userBinDir, n); try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); removed.push(n); } } catch {} }
       xray.binPath = store.get('xrayPath', null); xray.forgetVersions(); stats.setBin(xray.anyBin());

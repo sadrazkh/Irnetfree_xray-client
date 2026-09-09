@@ -29,4 +29,21 @@ function assetStatus(dirs, platform = process.platform) {
   return out;
 }
 
-module.exports = { assetStatus };
+/**
+ * Every file the downloader can put into userData/bin — what "remove
+ * downloaded files" deletes. Derived from the engine registry so a new core
+ * cannot be forgotten here; sing-box was, for two releases, and stayed on disk
+ * after the user asked for everything to go.
+ *
+ * @param {string} [platform] process.platform value (injectable for tests)
+ */
+function downloadedFileNames(platform = process.platform) {
+  const win = platform === 'win32';
+  const names = Object.keys(ENGINES).map(id => engineExe(id, platform));
+  names.push(win ? 'tun2socks.exe' : 'tun2socks');
+  if (win) names.push('wintun.dll');
+  names.push('geoip.dat', 'geosite.dat');
+  return names;
+}
+
+module.exports = { assetStatus, downloadedFileNames };
