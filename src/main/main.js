@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, nativeTheme, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -25,11 +25,16 @@ const tunPlatform = require('./tunPlatform');
 const { LeakGuard } = require('./leakGuard');
 const { StatsPoller, SilenceWatch } = require('./stats');
 const { UsageMeter, grandTotal } = require('./usage');
-const { Downloader } = require('./downloader');
+const { Downloader, downloadFile } = require('./downloader');
+const { pickUpdateAsset, parseSha256Sums, sha256File } = require('./appUpdate');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
+const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
+const { trayGroups } = require('./trayMenu');
+const { exportBundle, importBundle } = require('./backup');
+const { AssetUpdater, cmpVersion } = require('./assetUpdater');
 const https = require('https');
 
 let mainWindow = null;
@@ -65,6 +70,7 @@ function statsCadence() {
 }
 let lastUsageSend = 0;
 let downloader = null;
+let assetUpdater = null;   // the weekly geo/core refresh (assetUpdater.js)
 let procWatcher = null;
 let netWatcher = null;
 const pinWatch = new PinWatch();   // the live plan's pinned servers, for the core's mismatch line
@@ -142,6 +148,17 @@ const DEFAULT_SETTINGS = {
   // recover automatically when the machine's network changes (read live, so it
   // needs no reconnect to take effect)
   autoReconnectOnNetworkChange: true,
+  // desktop notifications for drops, recoveries and the kill switch (read live)
+  notifications: true,
+  // start with the OS, hidden in the tray (a logon task on Windows — see
+  // autostart.js) and connect to the last server on launch. Both off: each is
+  // a persistent change the user makes on purpose.
+  launchAtLogin: false,
+  autoConnect: false,
+  // weekly refresh of the downloaded files, never under a live tunnel:
+  // 'off' | 'geo' (the data files only — the default: they cannot break a
+  // working config) | 'all' (the installed cores too, when a release is newer)
+  autoUpdateAssets: 'geo',
   // which surfaces the window shows: 'simple' hides chains, the pool, the log
   // page and the custom-rule editor. A view preference only — renderer-owned,
   // never baked into a config, so it needs no reconnect.
@@ -206,6 +223,38 @@ function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+  // the tray marks the live server and lists what a subscription refresh brought
+  if (channel === 'status' || channel === 'subs-updated') refreshTray();
+}
+
+/**
+ * A desktop notification, for the handful of events that matter while the
+ * window is in the tray: the tunnel dropped, came back, was given up on, or
+ * the kill switch closed the internet. Off with one switch; silent; never
+ * throws — a missing notification centre must not touch the connect path.
+ */
+function notify(title, body) {
+  try {
+    if (!getSettings().notifications || !Notification.isSupported()) return;
+    new Notification({ title, body, silent: true }).show();
+  } catch { /* no notification centre on this desktop */ }
+}
+/** The user's language, for the few strings main.js shows itself. */
+function isEn() { return getSettings().lang === 'en'; }
+
+/**
+ * Register or remove the OS autostart. Windows: a logon task (autostart.js
+ * says why a login item cannot work for an elevated app). Resolves { ok,
+ * error } — never throws, so a refusal from the OS is a message, not a crash.
+ */
+function setAutostart(enabled) {
+  if (process.platform === 'win32') {
+    const args = enabled ? schtasksCreateArgs(autostartExe()) : schtasksDeleteArgs();
+    return new Promise((resolve) => execFile('schtasks', args, { windowsHide: true }, (err, so, se) =>
+      resolve({ ok: !err, error: err ? String(se || err.message).trim() : null })));
+  }
+  try { app.setLoginItemSettings({ openAtLogin: !!enabled, args: ['--hidden'] }); return Promise.resolve({ ok: true }); }
+  catch (e) { return Promise.resolve({ ok: false, error: e.message }); }
 }
 
 /* ----------------------------- LAN sharing ----------------------------- */
@@ -299,11 +348,14 @@ async function disarmKillSwitch() {
 }
 
 function createWindow() {
+  // `--hidden`: started by the OS at logon (autostart.js) — stay in the tray.
+  const startHidden = process.argv.includes('--hidden');
   mainWindow = new BrowserWindow({
     width: 1080,
     height: 720,
     minWidth: 900,
     minHeight: 600,
+    show: !startHidden,
     backgroundColor: '#0d1117',
     title: 'IRNetFree',
     icon: path.join(__dirname, '..', '..', 'assets', 'icon.png'),
@@ -343,15 +395,49 @@ function createTray() {
   }
   tray = new Tray(icon);
   tray.setToolTip('IRNetFree');
-  const menu = Menu.buildFromTemplate([
-    { label: 'نمایش / Show', click: () => { mainWindow.show(); } },
-    { type: 'separator' },
-    { label: 'قطع اتصال / Disconnect', click: () => doDisconnect() },
-    { type: 'separator' },
-    { label: 'خروج / Quit', click: () => { isQuitting = true; app.quit(); } }
-  ]);
-  tray.setContextMenu(menu);
+  refreshTray();
   tray.on('double-click', () => mainWindow.show());
+}
+
+/**
+ * The tray menu: show, the servers by subscription (one click connects, the
+ * live one marked), disconnect, quit. Rebuilt whenever the servers, the
+ * subscriptions, the connection or the language change — cheap, and the only
+ * way an Electron context menu can reflect state.
+ */
+function trayMenuTemplate() {
+  const en = isEn();
+  const active = store.get('activeServerId', null);
+  const item = (it) => ({
+    label: (it.id === active ? '● ' : '') + it.name,
+    click: () => doConnect(it.id).catch((e) => send('log', { line: 'Connect failed: ' + e.message, level: 'error' }))
+  });
+  const groups = trayGroups(store.get('servers', []), store.get('subscriptions', [])).map((g) => ({
+    label: g.label || (en ? 'Servers' : 'سرورها'),
+    submenu: g.items.map(item)
+  }));
+  return [
+    { label: en ? 'Show' : 'نمایش', click: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show(); } },
+    { type: 'separator' },
+    ...groups,
+    ...(groups.length ? [{ type: 'separator' }] : []),
+    { label: en ? 'Disconnect' : 'قطع اتصال', enabled: !!active, click: () => doDisconnect() },
+    { type: 'separator' },
+    { label: en ? 'Quit' : 'خروج', click: () => { isQuitting = true; app.quit(); } }
+  ];
+}
+
+/** Never lets a menu problem out: the tray existed before this menu and must outlive any bug in it. */
+function refreshTray() {
+  if (!tray) return;
+  try { tray.setContextMenu(Menu.buildFromTemplate(trayMenuTemplate())); }
+  catch (e) { send('log', { line: 'Tray menu: ' + e.message, level: 'warn' }); }
+}
+
+/** Every write of the servers list from the IPC handlers goes through here, so the tray follows it. */
+function setServers(list) {
+  store.set('servers', list);
+  refreshTray();
 }
 
 /* ----------------------------- core actions ----------------------------- */
@@ -825,6 +911,9 @@ async function doConnect(serverId, opts = {}) {
   if (stale()) return abandoned;
 
   store.set('activeServerId', serverId);
+  // `activeServerId` is cleared by a disconnect; this one survives it, for
+  // "connect to the last server" at the next launch.
+  store.set('lastServerId', serverId);
   pinWatch.setLive(directServers(plan));
   // Everything below is a connect-time side effect, so from here on the live
   // tunnel matches these settings exactly — record what it was built from.
@@ -1290,6 +1379,7 @@ async function runRecovery(reason, attempt) {
 
   send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
   send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
+  if (attempt === 0) notify('IRNetFree', isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد');
 
   // Pick the rebuild path by what the core is ACTUALLY doing. Both paths answer
   // in the same { ok, tunError, error } shape.
@@ -1349,6 +1439,7 @@ async function runRecovery(reason, attempt) {
         : 'Connection restored after the network change',
       level: res.tunError ? 'warn' : 'info'
     });
+    notify('IRNetFree', isEn() ? 'Connection restored' : 'اتصال دوباره برقرار شد');
     return;
   }
   if (res && res.tunError) {
@@ -1381,6 +1472,7 @@ async function runRecovery(reason, attempt) {
       });
     }
     send('status', { state: 'reconnect-failed', reason, proxyUp, guardHeld, tunError: (res && res.tunError) || null });
+    notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
     return;
   }
   send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
@@ -1628,7 +1720,7 @@ function registerIpc() {
     const { servers: parsed, errors } = parseMany(text);
     const existing = store.get('servers', []);
     const merged = existing.concat(parsed);
-    store.set('servers', merged);
+    setServers(merged);
     return { added: parsed.length, errors, servers: merged };
   });
 
@@ -1636,7 +1728,7 @@ function registerIpc() {
     const server = parseLink(link);
     const existing = store.get('servers', []);
     existing.push(server);
-    store.set('servers', existing);
+    setServers(existing);
     return server;
   });
 
@@ -1644,7 +1736,7 @@ function registerIpc() {
     const server = makeWireguardServer(fields || {});
     const existing = store.get('servers', []);
     existing.push(server);
-    store.set('servers', existing);
+    setServers(existing);
     return { server, servers: existing };
   });
 
@@ -1652,7 +1744,7 @@ function registerIpc() {
     const server = makeProxyServer(fields || {});
     const existing = store.get('servers', []);
     existing.push(server);
-    store.set('servers', existing);
+    setServers(existing);
     return { server, servers: existing };
   });
 
@@ -1677,7 +1769,7 @@ function registerIpc() {
     const idx = servers.findIndex(s => s.id === id);
     if (idx === -1) return { ok: false, error: 'not found', servers };
     servers[idx] = applyServerEdits(servers[idx], fields || {});
-    store.set('servers', servers);
+    setServers(servers);
     return { ok: true, server: servers[idx], servers };
   });
 
@@ -1743,12 +1835,12 @@ function registerIpc() {
   ipcMain.handle('servers:delete', (e, id) => {
     let servers = store.get('servers', []);
     servers = servers.filter(s => s.id !== id);
-    store.set('servers', servers);
+    setServers(servers);
     return servers;
   });
 
   ipcMain.handle('servers:clear', () => {
-    store.set('servers', []);
+    setServers([]);
     return [];
   });
 
@@ -1791,8 +1883,9 @@ function registerIpc() {
    * Returns { settings, pendingReconnect } — the renderer offers to reconnect
    * when `pendingReconnect` is non-empty instead of pretending the change is live.
    */
-  ipcMain.handle('settings:set', (e, partial) => {
-    const next = Object.assign(getSettings(), partial);
+  ipcMain.handle('settings:set', async (e, partial) => {
+    const prev = getSettings();
+    const next = Object.assign({}, prev, partial);
     store.set('settings', next);
     // react to auto-update changes live
     if ('autoUpdateSubs' in partial || 'autoUpdateInterval' in partial) {
@@ -1803,7 +1896,23 @@ function registerIpc() {
     if ('killSwitch' in partial && !next.killSwitch && killEngaged) {
       disarmKillSwitch().then(() => send('killswitch', { engaged: false }));
     }
-    return { settings: next, pendingReconnect: pendingKeys() };
+    if ('lang' in partial) refreshTray();   // the tray's own labels follow the language
+    // Start with the OS: a persistent change to the machine, made only when the
+    // switch itself moves — never on a plain "save" — and undone in the store
+    // when the OS refuses, so the switch cannot claim something that is not so.
+    let error = null;
+    if ('launchAtLogin' in partial && !!next.launchAtLogin !== !!prev.launchAtLogin) {
+      const r = await setAutostart(!!next.launchAtLogin);
+      if (r.ok) {
+        send('log', { line: next.launchAtLogin ? 'IRNetFree will start with the OS, in the tray' : 'IRNetFree will no longer start with the OS', level: 'info' });
+      } else {
+        error = r.error || 'autostart failed';
+        next.launchAtLogin = !!prev.launchAtLogin;
+        store.set('settings', next);
+        send('log', { line: 'Could not change "start with the OS": ' + error, level: 'error' });
+      }
+    }
+    return { settings: next, pendingReconnect: pendingKeys(), error };
   });
   /**
    * Which geo codes in these rules the installed data files do not carry. The
@@ -1989,15 +2098,65 @@ function registerIpc() {
       const rel = await getJSON(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
       const latest = String(rel.tag_name || '').replace(/^v/i, '').trim();
       if (!latest) return { ok: false, current, error: 'no release found' };
+      const asset = pickUpdateAsset(rel.assets);
       return {
         ok: true,
         current,
         latest,
         hasUpdate: cmpVersion(latest, current) > 0,
-        url: rel.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`
+        url: rel.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`,
+        // the installer for this machine, and the checksum files published beside it
+        asset: asset ? { name: asset.name, url: asset.browser_download_url, size: asset.size } : null,
+        sums: (rel.assets || []).filter(a => a && /^SHA256SUMS.*\.txt$/i.test(String(a.name))).map(a => a.browser_download_url)
       };
     } catch (e) {
       return { ok: false, current, error: e.message };
+    }
+  });
+
+  // Download the installer for this machine into the temp dir and hand it to
+  // the OS — but only a file whose SHA-256 matches what the release published.
+  // With no checksum published for it, the file is shown, never run: opening
+  // an unverified installer is exactly the step the user can take themselves.
+  // The app keeps running; the installer asks it to close when it is ready.
+  const RELEASE_ASSET_URL = new RegExp(`^https://github\\.com/${GITHUB_REPO.replace(/[.]/g, '\\.')}/releases/download/`, 'i');
+  ipcMain.handle('app:downloadUpdate', async (e, info) => {
+    const asset = info && info.asset;
+    if (!asset || !asset.url || !asset.name) return { ok: false, error: 'no installer for this platform' };
+    if (!RELEASE_ASSET_URL.test(String(asset.url))) return { ok: false, error: 'not a release asset of this app' };
+    const dir = path.join(app.getPath('temp'), 'IRNetFree-update');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, path.basename(String(asset.name)));
+    const discard = () => { try { fs.rmSync(file, { force: true }); } catch { /* nothing to discard */ } };
+    try {
+      await downloadFile(asset.url, file, (p) => send('asset-progress', { component: 'app', pct: p }));
+      let verified = false;
+      for (const url of Array.isArray(info.sums) ? info.sums : []) {
+        const sums = parseSha256Sums(await getBody(url).catch(() => ''));
+        const want = sums[path.basename(file)];
+        if (!want) continue;
+        const have = await sha256File(file);
+        if (have !== want) {
+          discard();
+          send('log', { line: `Update ${asset.name}: checksum mismatch — the download was discarded`, level: 'error' });
+          return { ok: false, error: 'checksum mismatch — the download was discarded' };
+        }
+        verified = true;
+        break;
+      }
+      if (!verified) {
+        send('log', { line: `Update ${asset.name} downloaded, but no checksum was published for it — it was not opened: ${file}`, level: 'warn' });
+        shell.showItemInFolder(file);
+        return { ok: true, file, verified: false };
+      }
+      send('log', { line: `Update ${asset.name} downloaded and its checksum verified — opening the installer`, level: 'info' });
+      if (process.platform !== 'win32') { try { fs.chmodSync(file, 0o755); } catch { /* a dmg needs no mode */ } }
+      const openErr = await shell.openPath(file);
+      if (openErr) return { ok: false, error: openErr };
+      return { ok: true, file, verified: true };
+    } catch (err) {
+      discard();
+      return { ok: false, error: err.message };
     }
   });
 
@@ -2039,6 +2198,31 @@ function registerIpc() {
     }
     return { ok: true, totals: usage ? usage.totals : {} };
   });
+  // Backup: everything the user has, as one JSON string the renderer saves.
+  ipcMain.handle('backup:export', () => JSON.stringify(exportBundle({
+    version: app.getVersion(),
+    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), settings: getSettings() },
+    usage: usage ? usage.totals : {}
+  }), null, 2));
+  // Restore: a merge by id (backup.js) — nothing on this machine is lost, and
+  // the imported servers go through the same migration a stored one does.
+  ipcMain.handle('backup:import', (e, text) => {
+    let bundle;
+    try { bundle = JSON.parse(String(text || '')); } catch { return { ok: false, error: 'not JSON' }; }
+    let r;
+    try {
+      r = importBundle(bundle, {
+        servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
+        chains: getChains(), pool: getPool(), settings: getSettings(), usage: usage ? usage.totals : {}
+      });
+    } catch (err) { return { ok: false, error: err.message }; }
+    store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, settings: r.next.settings });
+    if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
+    refreshTray();
+    send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries added`, level: 'info' });
+    return { ok: true, added: r.added };
+  });
+
   // Reconnect on demand: the same leak-free path the network-change recovery
   // uses, so the guard is held across the gap rather than released.
   ipcMain.handle('vpn:reconnect', async () => {
@@ -2075,34 +2259,27 @@ function registerIpc() {
 }
 
 /** Minimal redirect-following JSON GET (GitHub API). */
-function getJSON(url, depth = 0) {
+/** Redirect-following GET returning the body as text (GitHub API and release assets). */
+function getBody(url, depth = 0) {
   return new Promise((resolve, reject) => {
     if (depth > 6) return reject(new Error('too many redirects'));
     https.get(url, { headers: { 'User-Agent': 'IRNetFree' } }, (res) => {
       if (res.statusCode >= 300 && res.headers.location) {
         res.resume();
-        return resolve(getJSON(res.headers.location, depth + 1));
+        return resolve(getBody(res.headers.location, depth + 1));
       }
       if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
       let body = '';
       res.on('data', (c) => (body += c));
-      res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+      res.on('end', () => resolve(body));
     }).on('error', reject);
   });
 }
-
-/** Compare dotted versions: 1 if a>b, -1 if a<b, 0 if equal. */
-function cmpVersion(a, b) {
-  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
-  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
-  const len = Math.max(pa.length, pb.length);
-  for (let i = 0; i < len; i++) {
-    const x = pa[i] || 0, y = pb[i] || 0;
-    if (x > y) return 1;
-    if (x < y) return -1;
-  }
-  return 0;
+function getJSON(url) {
+  return getBody(url).then((body) => JSON.parse(body));
 }
+
+// cmpVersion lives in assetUpdater.js now (the weekly check needs it too).
 
 /* ----------------------------- lifecycle ----------------------------- */
 app.whenReady().then(() => {
@@ -2148,7 +2325,10 @@ app.whenReady().then(() => {
         if (getSettings().killSwitch) {
           armKillSwitch().then((r) => {
             send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
-            if (r && r.ok) send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
+            if (r && r.ok) {
+              send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
+              notify('IRNetFree', isEn() ? 'VPN dropped — internet blocked by the kill switch' : 'اتصال افتاد — اینترنت با کیل‌سوییچ بسته شد');
+            }
             else if (process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
           });
         }
@@ -2192,6 +2372,24 @@ app.whenReady().then(() => {
     onProgress: (component, pct) => send('asset-progress', { component, pct })
   });
 
+  // The weekly refresh of what the downloader put in place. Never while a
+  // tunnel is up; the same after-download steps the manual button takes.
+  assetUpdater = new AssetUpdater({
+    getSettings,
+    getCheckedAt: () => store.get('assetsCheckedAt', 0),
+    setCheckedAt: (t) => store.set('assetsCheckedAt', t),
+    download: async (c) => {
+      await downloader.download(c);
+      if (c !== 'geo') { if (c === 'xray') xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.anyBin()); }
+    },
+    installed: (id) => !!assetStatus()[id],
+    currentVersion: (id) => xray.version(id),
+    latestVersion: (id) => downloader.latestVersion(id),
+    busy: () => !!(xray.running || (tun && tun.active)),
+    onLog: (line, level) => send('log', { line, level })
+  });
+  assetUpdater.start();
+
   // Clear any leftover kill-switch firewall block from a previous crash so the
   // user is never permanently blocked.
   disarmKillSwitch().catch(() => {});
@@ -2226,7 +2424,17 @@ app.whenReady().then(() => {
     powerMonitor.on('resume', () => { if (netWatcher) netWatcher.poke('resume'); });
   } catch {}
 
-  mainWindow.once('ready-to-show', () => updateOverlay('off'));
+  mainWindow.once('ready-to-show', () => {
+    updateOverlay('off');
+    // Connect to the last server on launch — once the renderer exists, so the
+    // 'connecting' and 'connected' events have somewhere to land. Only a server
+    // that still exists; a failure is a log line, the app stays up.
+    const boot = getSettings();
+    const lastId = store.get('lastServerId', null);
+    if (boot.autoConnect && lastId && store.get('servers', []).some(s => s.id === lastId)) {
+      setTimeout(() => doConnect(lastId).catch((e) => send('log', { line: 'Auto-connect failed: ' + e.message, level: 'error' })), 1000);
+    }
+  });
 
   // kick off auto-update for subscriptions if enabled
   const st = getSettings();
@@ -2249,6 +2457,7 @@ app.whenReady().then(() => {
 async function teardownForQuit() {
   userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
   try { if (store) store.flush(); } catch {}   // whatever setLazy() still holds
+  try { if (assetUpdater) assetUpdater.stop(); } catch {}
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}

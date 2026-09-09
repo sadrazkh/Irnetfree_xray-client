@@ -64,6 +64,40 @@ function fmtBytes(n) {
 }
 function fmtSpeed(n) { return fmtBytes(n) + '/s'; }
 
+/* ----------------------------- speed sparkline ----------------------------- */
+// Sixty seconds of speed, two lines, one canvas. Drawn once per stats tick;
+// nothing in the DOM is created or measured for it, so it costs what a
+// 60-point polyline costs and no more. Declared up here, before the theme and
+// skin appliers that redraw it, so no caller can reach `hist` before it exists.
+const SPARK_N = 60;
+const hist = { down: [], up: [] };
+function pushHist(down, up) {
+  hist.down.push(Number(down) || 0);
+  hist.up.push(Number(up) || 0);
+  if (hist.down.length > SPARK_N) { hist.down.shift(); hist.up.shift(); }
+}
+function drawSpark() {
+  const c = $('#speedSpark');
+  if (!c || !c.getContext) return;
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  if (hist.down.length < 2) return;
+  const css = getComputedStyle(document.documentElement);
+  const max = Math.max(1, ...hist.down, ...hist.up);
+  for (const [arr, token] of [[hist.down, '--accent'], [hist.up, '--ok']]) {
+    ctx.beginPath();
+    ctx.strokeStyle = css.getPropertyValue(token).trim() || '#888';
+    ctx.lineWidth = 1.5;
+    arr.forEach((v, i) => {
+      const x = (i / (SPARK_N - 1)) * W;
+      const y = H - 1 - (v / max) * (H - 2);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+}
+
 /** Human duration from seconds (days / hours / minutes). */
 function fmtDuration(sec) {
   sec = Math.max(0, sec);
@@ -138,6 +172,7 @@ function applySkin(skin) {
   const s = ['cockpit', 'console', 'legacy'].includes(skin) ? skin : 'console';
   document.documentElement.setAttribute('data-skin', s);
   try { localStorage.setItem('irnetfree.skin', s); } catch { /* only costs a flash */ }
+  drawSpark();   // the sparkline's colours are the skin's tokens
   return s;
 }
 
@@ -149,6 +184,7 @@ function applyTheme(pref, systemDark) {
   // it from <head> on the next launch, before app:init has answered. Storage is
   // best-effort: a failure here only costs the flash it exists to avoid.
   try { localStorage.setItem('irnetfree.theme', theme); } catch {}
+  drawSpark();   // the sparkline's colours are the theme's tokens
 }
 
 function escapeHtml(s) {
@@ -331,6 +367,10 @@ function applySettingsToUI() {
   $('#optAllowLan').checked = !!s.allowLan;
   $('#optKillSwitch').checked = !!s.killSwitch;
   $('#optNetAuto').checked = s.autoReconnectOnNetworkChange !== false;
+  $('#optNotify').checked = s.notifications !== false;
+  $('#optLaunchAtLogin').checked = !!s.launchAtLogin;
+  $('#optAutoConnect').checked = !!s.autoConnect;
+  $('#optAutoUpdateAssets').value = ['off', 'geo', 'all'].includes(s.autoUpdateAssets) ? s.autoUpdateAssets : 'geo';
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
@@ -489,6 +529,9 @@ function readSettingsForm() {
     blockUdpInProxyMode: $('#optBlockUdpProxy').checked,
     allowLan: $('#optAllowLan').checked,
     killSwitch: $('#optKillSwitch').checked,
+    notifications: $('#optNotify').checked,
+    autoConnect: $('#optAutoConnect').checked,
+    autoUpdateAssets: $('#optAutoUpdateAssets').value,
     blockAds: $('#optBlockAds').checked,
     enableSniffing: $('#optSniff').checked
   };
@@ -511,8 +554,9 @@ function listFromInput(sel) {
  */
 async function saveSettings(partial = {}, { silent = false } = {}) {
   const res = await window.api.setSettings(partial);
-  // main returns { settings, pendingReconnect }; tolerate the older bare shape
+  // main returns { settings, pendingReconnect, error? }; tolerate the older bare shape
   state.settings = (res && res.settings) ? res.settings : res;
+  state.lastSettingsError = (res && res.error) || null;   // a key main refused (and reverted)
   setPending((res && res.pendingReconnect) || []);
 
   // The home diagram and the inspector are built from settings, so this is the
@@ -668,6 +712,17 @@ $('#optKillSwitch').onchange = async () => {
 
 /* auto-reconnect toggle — read live at recovery time, so it needs no reconnect */
 $('#optNetAuto').onchange = () => saveSettings({ autoReconnectOnNetworkChange: $('#optNetAuto').checked });
+$('#optNotify').onchange = () => saveSettings({ notifications: $('#optNotify').checked });
+$('#optAutoConnect').onchange = () => saveSettings({ autoConnect: $('#optAutoConnect').checked });
+$('#optAutoUpdateAssets').onchange = () => saveSettings({ autoUpdateAssets: $('#optAutoUpdateAssets').value });
+// Deliberately NOT in readSettingsForm(): a plain "save" must never re-run the
+// OS registration. Main refuses and reverts when the OS says no — the switch
+// then follows what was actually stored, and the reason is shown.
+$('#optLaunchAtLogin').onchange = async () => {
+  await saveSettings({ launchAtLogin: $('#optLaunchAtLogin').checked });
+  $('#optLaunchAtLogin').checked = !!state.settings.launchAtLogin;
+  if (state.lastSettingsError) toast(t('login.failed') + ': ' + state.lastSettingsError, 'err');
+};
 
 function updateKillStatus() {
   const el = $('#killStatus');
@@ -897,6 +952,32 @@ async function clearUsageFor(id) {
 /* ----------------------------- unified picker (home) ----------------------------- */
 const ADV_ID = '__advanced__';
 const POOL_ID = '__pool__';
+/** The picker's "Auto" row: not a selection but an action — test, then connect to the fastest. */
+const AUTO_ID = '__auto__';
+
+/**
+ * The fastest tested server: real delay first (it proves the tunnel carries
+ * traffic), TCP handshake as the fallback for servers that only have that.
+ * null when nothing has been tested — the caller runs the test first.
+ */
+function bestServerId() {
+  const scored = state.servers.map((s) => {
+    const p = state.pings[s.id] || {};
+    const real = p.real && p.real.ok ? p.real.ms : null;
+    const tcp = p.tcp && p.tcp.ok ? p.tcp.ms : null;
+    return { id: s.id, key: real != null ? real : (tcp != null ? 100000 + tcp : null) };
+  }).filter(x => x.key != null).sort((a, b) => a.key - b.key);
+  return scored.length ? scored[0].id : null;
+}
+
+async function connectAuto() {
+  let best = bestServerId();
+  if (!best) { await pingMany(state.servers.map(s => s.id)); best = bestServerId(); }
+  if (!best) return toast(t('t.autoNone'), 'err');
+  const s = srvById(best);
+  toast(`${t('picker.auto')} → ${s ? s.name : best}`, 'ok');
+  return connect(best);
+}
 function chainById(id) { return state.chains.find(c => c.id === id); }
 function isChainId(id) { return !!chainById(id); }
 function chainMembers(c) { return ((c && c.members) || []).map(srvById).filter(Boolean); }
@@ -1024,6 +1105,16 @@ function renderPicker() {
     menu.appendChild(row);
   };
 
+  // "Auto": with two or more servers there is something to choose between.
+  // Not a selection (the selected target stays what it was) — a click tests
+  // and connects, and the picker then shows the server that won.
+  if (state.servers.length >= 2) {
+    const row = document.createElement('div');
+    row.className = 'picker-item picker-special';
+    row.innerHTML = `<span class="q-dot"></span><span class="proto-badge proto-auto">⚡</span><span class="pi-name">${escapeHtml(t('picker.auto'))}</span>`;
+    row.onclick = () => { closePicker(); connectAuto(); };
+    menu.appendChild(row);
+  }
   if (poolReady()) addRow(POOL_ID, '<span class="proto-badge proto-pool">🧩</span>', t('picker.pool') + ' (' + poolEnabledValid().length + ')', null, true);
   if (advancedReady()) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
   for (const c of state.chains) {
@@ -2022,6 +2113,12 @@ async function downloadComponent(key, btn) {
 }
 
 window.api.onAssetProgress((d) => {
+  // the app's own installer reports into the About card, not the toast
+  if (d && d.component === 'app') {
+    const st = $('#updateStatus');
+    if (st) st.textContent = t('about.downloading') + ' ' + Math.round(Number(d.pct) || 0) + '%';
+    return;
+  }
   // surface coarse progress through the toast + the files modal if open
   toast(`${t('t.downloading')} ${d.component}: ${d.pct}%`);
   const fp = $('#filesProgress');
@@ -2048,6 +2145,37 @@ $('#btnRemoveFiles').onclick = async () => {
 };
 
 /* ----------------------------- app update check ----------------------------- */
+/* ----------------------------- backup / restore ----------------------------- */
+$('#btnBackupExport').onclick = async () => {
+  const text = await window.api.exportBackup();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  a.download = 'irnetfree-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast(t('backup.exported'), 'ok');
+};
+$('#btnBackupImport').onclick = () => $('#backupFile').click();
+$('#backupFile').onchange = async () => {
+  const f = $('#backupFile').files[0];
+  $('#backupFile').value = '';
+  if (!f) return;
+  const res = await window.api.importBackup(await f.text());
+  if (!res || !res.ok) return toast(t('backup.failed') + (res && res.error ? ': ' + res.error : ''), 'err');
+  // the store changed under the renderer: re-read it the way a launch does
+  const data = await window.api.init();
+  state.servers = data.servers || [];
+  state.subscriptions = data.subscriptions || [];
+  state.settings = data.settings || {};
+  state.chains = (data.chains || []).map(c => ({ id: c.id, name: c.name || 'Chain', members: (c.members || []).filter(id => state.servers.some(s => s.id === id)) }));
+  state.pool = (data.pool || []).map(e => ({ id: e.id, name: e.name || 'Proxy', target: e.target || '', socksPort: e.socksPort || 0, httpPort: e.httpPort || 0, enabled: e.enabled !== false }));
+  state.usage = data.usage || {};
+  state.pendingReconnect = data.pendingReconnect || [];
+  applySettingsToUI(); renderServers(); renderPicker(); renderSubs(); renderChains(); renderPool(); renderAdvanced(); renderPendingBanner();
+  const n = res.added;
+  toast(`${t('backup.done')}: ${n.servers} / ${n.subscriptions} / ${n.chains} / ${n.pool}`, 'ok');
+};
+
 let updateInfo = null;
 $('#btnCheckUpdate').onclick = async () => {
   const st = $('#updateStatus');
@@ -2077,10 +2205,27 @@ $('#btnCheckUpdate').onclick = async () => {
     btn.disabled = false;
   }
 };
-$('#btnDownloadUpdate').onclick = () => {
+$('#btnDownloadUpdate').onclick = async () => {
   const url = (updateInfo && updateInfo.url) || 'https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest';
-  window.api.openExternal(url);
-  toast(t('about.opening'));
+  // No installer named for this machine (or an older backend): the release page, as before.
+  if (!updateInfo || !updateInfo.asset || !window.api.downloadUpdate) {
+    window.api.openExternal(url);
+    toast(t('about.opening'));
+    return;
+  }
+  const btn = $('#btnDownloadUpdate'), st = $('#updateStatus');
+  btn.disabled = true;
+  st.textContent = t('about.downloading') + ' 0%';
+  st.className = 'update-status';
+  const res = await window.api.downloadUpdate({ asset: updateInfo.asset, sums: updateInfo.sums || [] });
+  btn.disabled = false;
+  if (!res || !res.ok) {
+    st.textContent = t('about.downloadFailed') + (res && res.error ? ': ' + res.error : '');
+    st.className = 'update-status warn';
+    return;
+  }
+  st.textContent = res.verified ? t('about.installerOpened') : t('about.downloadedUnverified');
+  st.className = 'update-status ok';
 };
 
 /* ----------------------------- first-run required files modal ----------------------------- */
@@ -2855,6 +3000,7 @@ function renderChains() {
           <span class="pi-ping-ico" title="${escapeHtml(t('ping.tcp'))}">⚡</span><span class="chain-ping ${tl.cls}" data-pbase="chain-ping" data-ping="${chain.id}">${tl.txt}</span>
           <span class="pi-ping-ico" title="${escapeHtml(t('ping.real'))}">⏱</span><span class="chain-ping ${rl.cls}" data-pbase="chain-ping" data-ping-real="${chain.id}">${rl.txt}</span>
         </span>
+        <span class="srv-usage" data-usage="chain:${chain.id}" title="${escapeHtml(t('srv.usage'))}">${usageLabel('chain:' + chain.id)}</span>
         <div class="chain-card-actions">
           <button class="icon-btn ch-ping" title="ping">⚡</button>
           <button class="icon-btn ch-connect" title="connect"${ready ? '' : ' disabled'}>▶</button>
@@ -3035,6 +3181,7 @@ function renderPool() {
         <label class="switch pool-enable-sw" title="${escapeHtml(t('pool.enable'))}">
           <input type="checkbox" class="pool-enable" ${entry.enabled ? 'checked' : ''} /><span class="slider"></span>
         </label>
+        <span class="srv-usage" data-usage="${escapeHtml(entry.target || '')}" title="${escapeHtml(t('srv.usage'))}">${usageLabel(entry.target)}</span>
         <button class="icon-btn pool-del" title="delete">🗑</button>
       </div>
       <div class="pool-card-body">
@@ -3464,6 +3611,8 @@ if (window.api.onUsage) {
 window.api.onStats((s) => {
   $('#downSpeed').textContent = fmtSpeed(s.downSpeed);
   $('#upSpeed').textContent = fmtSpeed(s.upSpeed);
+  pushHist(s.downSpeed, s.upSpeed);
+  drawSpark();
   $('#downTotal').textContent = fmtBytes(s.totalDown);
   $('#upTotal').textContent = fmtBytes(s.totalUp);
   // session totals (cumulative since xray started for this connection)
@@ -3488,6 +3637,8 @@ function resetTraffic() {
   $('#sessDown').textContent = '0 B';
   $('#sessUp').textContent = '0 B';
   $('#sessSum').textContent = '0 B';
+  hist.down.length = 0; hist.up.length = 0;
+  drawSpark();
 }
 function setModeWidget() {
   // Reflect the CHOSEN mode (so users see/can change it before connecting).

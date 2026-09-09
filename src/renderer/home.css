@@ -205,6 +205,15 @@
   gap: 12px;
   align-content: start;
 }
+/* the speed sparkline spans both readout columns; drawn by drawSpark() */
+.spark {
+  grid-column: 1 / -1;
+  display: block;
+  inline-size: 100%;
+  block-size: 40px;
+  border-radius: var(--r2);
+  background: var(--soft);
+}
 .readout {
   display: flex;
   align-items: baseline;

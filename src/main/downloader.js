@@ -238,6 +238,15 @@ class Downloader {
     return { ok: true, files: out };
   }
 
+  /** The latest release tag of an engine, without a leading v — for the weekly check (assetUpdater.js). */
+  async latestVersion(engineId) {
+    const url = engineId === 'sing-box'
+      ? 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
+      : Downloader.releaseApiUrl(engineId);
+    const rel = await getJSON(url);
+    return String(rel.tag_name || '').replace(/^v/i, '').trim();
+  }
+
   async getGeo() {
     const out = [];
     for (const dat of ['geoip.dat', 'geosite.dat']) {

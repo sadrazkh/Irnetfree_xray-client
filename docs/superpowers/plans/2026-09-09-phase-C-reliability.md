@@ -6,7 +6,7 @@
 
 **Architecture:** New pure modules with injected I/O (`selfTest.js`, `healthWatch.js`, the DoH resolver in `netutils.js`, the gateway reader in `tunPlatform.js`, `splitPlan.js`) carry the logic and are unit-tested; `main.js`/`service.js` wire them. The leak guard (`leakGuard.js`) and the two config builders change shape only where a test pins the new shape. Everything that needs a real adapter is marked **device-verified** with an exact checklist for the owner.
 
-**Tech Stack:** Node 18+ core, Electron 31, `node --test`, Xray 26.3.27 + PattN 26.9.1 for `npm run validate`, sing-box 1.13.14 (`IRNF_SINGBOX_EXE`) for `sing-box check`. Branch `feature/phase-C` from `main` (after B). Tag: v1.5.0.
+**Tech Stack:** Node 18+ core, Electron 31, `node --test`, Xray 26.3.27 + PattN 26.9.1 for `npm run validate`, sing-box 1.13.14 (`IRNF_SINGBOX_EXE`) for `sing-box check`. Branch `feature/phase-C` from `main`. Tag: v1.6.0 (D shipped first as v1.5.0).
 
 ## Global Constraints
 

@@ -39,6 +39,8 @@ const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = requir
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 const { migrateSettings } = require('../main/settingsMigrate');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
+const { exportBundle, importBundle } = require('../main/backup');
+const { AssetUpdater } = require('../main/assetUpdater');
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -86,6 +88,14 @@ const DEFAULT_SETTINGS = {
   // recover automatically when the machine's network changes (read live, so it
   // needs no reconnect to take effect)
   autoReconnectOnNetworkChange: true,
+  // desktop notifications for drops, recoveries and the kill switch (read live)
+  notifications: true,
+  // start with the OS (desktop-only) and connect to the last server on launch
+  launchAtLogin: false,
+  autoConnect: false,
+  // weekly refresh of the downloaded files, never under a live tunnel:
+  // 'off' | 'geo' (the data files only — the default) | 'all' (the cores too)
+  autoUpdateAssets: 'geo',
   // which surfaces the window shows: 'simple' hides chains, the pool, the log
   // page and the custom-rule editor. A view preference only — renderer-owned,
   // never baked into a config, so it needs no reconnect.
@@ -117,6 +127,9 @@ function createService(opts = {}) {
 
   const listeners = new Set();
   const send = (channel, payload) => { for (const cb of listeners) { try { cb(channel, payload); } catch {} } };
+  // No notification centre on a server; kept so the shared call sites mirror main.js one-to-one.
+  const notify = () => {};
+  const isEn = () => getSettings().lang === 'en';
 
   const appVersion = (() => {
     try { return require(path.join(__dirname, '..', '..', 'package.json')).version || '0.0.0'; } catch { return '0.0.0'; }
@@ -292,6 +305,23 @@ function createService(opts = {}) {
     onLog: (line, level) => send('log', { line, level }),
     onProgress: (component, pct) => send('asset-progress', { component, pct })
   });
+
+  // The weekly refresh of what the downloader put in place — same as main.js.
+  const assetUpdater = new AssetUpdater({
+    getSettings,
+    getCheckedAt: () => store.get('assetsCheckedAt', 0),
+    setCheckedAt: (t) => store.set('assetsCheckedAt', t),
+    download: async (c) => {
+      await downloader.download(c);
+      if (c !== 'geo') { if (c === 'xray') xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.anyBin()); }
+    },
+    installed: (id) => !!assetStatus()[id],
+    currentVersion: (id) => xray.version(id),
+    latestVersion: (id) => downloader.latestVersion(id),
+    busy: () => !!(xray.running || (tun && tun.active)),
+    onLog: (line, level) => send('log', { line, level })
+  });
+  assetUpdater.start();
 
   // The leak guard and its crash repair. A `tun-state.json` left in the data dir
   // means the last session died with every physical adapter still pointing at a
@@ -751,6 +781,7 @@ function createService(opts = {}) {
     // intent that was cancelled — and every side effect below would follow it.
     if (stale()) return abandoned;
     store.set('activeServerId', serverId);
+    store.set('lastServerId', serverId);   // survives a disconnect: "connect to the last server" at launch
     pinWatch.setLive(directServers(plan));
     appliedSettings = snapshotApplied(getSettings());
 
@@ -1107,6 +1138,7 @@ function createService(opts = {}) {
 
     send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
     send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
+    if (attempt === 0) notify('IRNetFree', isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد');
 
     // Pick the rebuild path by what the core is ACTUALLY doing. Both paths answer
     // in the same { ok, tunError, error } shape. (No kill switch here, so the
@@ -1151,6 +1183,7 @@ function createService(opts = {}) {
           : 'Connection restored after the network change',
         level: res.tunError ? 'warn' : 'info'
       });
+      notify('IRNetFree', isEn() ? 'Connection restored' : 'اتصال دوباره برقرار شد');
       return;
     }
     if (res && res.tunError) {
@@ -1169,6 +1202,7 @@ function createService(opts = {}) {
         level: 'error'
       });
       send('status', { state: 'reconnect-failed', reason, proxyUp, tunError: (res && res.tunError) || null });
+      notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
       return;
     }
     send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
@@ -1401,7 +1435,16 @@ function createService(opts = {}) {
       if ('autoUpdateSubs' in partial || 'autoUpdateInterval' in partial) {
         if (next.autoUpdateSubs) subs.startAuto(next.autoUpdateInterval); else subs.stopAuto();
       }
-      return { settings: next, pendingReconnect: pendingKeys() };
+      // "Start with the OS" is a desktop setting: on a server the process is a
+      // service already. Refuse it in the store so the switch cannot claim it.
+      let error = null;
+      if ('launchAtLogin' in partial && next.launchAtLogin) {
+        next.launchAtLogin = false;
+        store.set('settings', next);
+        error = 'desktop-only';
+        send('log', { line: '"Start with the OS" is a desktop setting — on a server, run IRNetFree as a service', level: 'warn' });
+      }
+      return { settings: next, pendingReconnect: pendingKeys(), error };
     },
     'settings:pending': () => pendingKeys(),
     'settings:apply': () => reapplyConnection(),
@@ -1491,6 +1534,7 @@ function createService(opts = {}) {
     'xray:version': async (engineId) => { try { return { ok: true, version: await xray.version(engineId || 'xray') }; } catch (e) { return { ok: false, error: e.message }; } },
     'xray:locate': () => ({ ok: false, error: 'not available in server mode' }),
     'app:checkUpdate': () => ({ ok: false, current: appVersion, error: 'update check is desktop-only' }),
+    'app:downloadUpdate': () => ({ ok: false, error: 'update download is desktop-only' }),
 
     'proc:list': async () => { try { return { ok: true, processes: await listProcesses() }; } catch (e) { return { ok: false, error: e.message, processes: [] }; } },
     'proc:clearCache': () => { store.set('procIpCache', {}); return { ok: true }; },
@@ -1535,6 +1579,28 @@ function createService(opts = {}) {
       return { ok: true, totals: usage ? usage.totals : {} };
     },
 
+    // Backup and restore — see backup.js; the same merge-by-id the desktop does.
+    'backup:export': () => JSON.stringify(exportBundle({
+      version: appVersion,
+      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), settings: getSettings() },
+      usage: usage ? usage.totals : {}
+    }), null, 2),
+    'backup:import': (text) => {
+      let bundle;
+      try { bundle = JSON.parse(String(text || '')); } catch { return { ok: false, error: 'not JSON' }; }
+      let r;
+      try {
+        r = importBundle(bundle, {
+          servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
+          chains: getChains(), pool: getPool(), settings: getSettings(), usage: usage ? usage.totals : {}
+        });
+      } catch (err) { return { ok: false, error: err.message }; }
+      store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, settings: r.next.settings });
+      if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
+      send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries added`, level: 'info' });
+      return { ok: true, added: r.added };
+    },
+
     // desktop-only / no-op in server mode
     'app:relaunchAdmin': () => ({ ok: false, error: 'not applicable on a server' }),
     'open:dataDir': () => dataDir,
@@ -1555,6 +1621,7 @@ function createService(opts = {}) {
     if (isQuitting) return; isQuitting = true;
     userDisconnecting = true;
     try { store.flush(); } catch {}   // whatever setLazy() still holds
+    try { assetUpdater.stop(); } catch {}
     try { stopNetWatcher(); } catch {}
     try { if (stats) stats.stop(); } catch {}
     try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
@@ -1567,6 +1634,15 @@ function createService(opts = {}) {
   // kick off auto-update if enabled
   const st = getSettings();
   if (st.autoUpdateSubs) subs.startAuto(st.autoUpdateInterval);
+
+  // Connect to the last server on launch — the headless server's main use.
+  // Only a server that still exists; a failure is a log line, the process stays up.
+  if (st.autoConnect) {
+    const lastId = store.get('lastServerId', null);
+    if (lastId && store.get('servers', []).some(s => s.id === lastId)) {
+      setTimeout(() => doConnect(lastId).catch((e) => send('log', { line: 'Auto-connect failed: ' + e.message, level: 'error' })), 1000);
+    }
+  }
 
   return { invoke, onEvent, shutdown, dataDir, getSettings, assetStatus, version: appVersion };
 }

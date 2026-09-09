@@ -136,6 +136,7 @@ const I18N = {
     'chain.addFromBelow': 'از پایین سرور اضافه کن…',
 
     'nav.pool': 'استخر پروکسی', 'picker.pool': 'استخر پروکسی',
+    'picker.auto': 'خودکار (سریع‌ترین)', 't.autoNone': 'هیچ سروری جواب نداد',
     'pool.title': 'استخر پروکسی (چند کانفیگ هم‌زمان)',
     'pool.connect': 'اتصال استخر', 'pool.new': '+ پروکسی جدید',
     'pool.intro': 'چند کانفیگ/زنجیره/ساکس را هم‌زمان اجرا کن؛ هر کدام روی پورت محلی خودش (مثلاً 60001، 60002 و …). هر برنامه را به پورت دلخواه وصل کن تا از خروجی همان کانفیگ عبور کند.',
@@ -208,6 +209,9 @@ const I18N = {
     'lan.title': 'اجازه به شبکه محلی (LAN)', 'lan.sub': 'دستگاه‌های دیگه هم بتونن وصل بشن',
 
     'comp.title': 'فایل‌های موردنیاز', 'comp.hint': 'اگر فایلی نبود با یک کلیک دانلود و یکپارچه می‌شود — بدون نیاز به ساخت دوباره برنامه.',
+    'assets.auto': 'به‌روزرسانی خودکار فایل‌ها', 'assets.auto.off': 'خاموش',
+    'assets.auto.geo': 'هفتگی — فقط فایل‌های geo', 'assets.auto.all': 'هفتگی — فایل‌های geo و هسته‌ها',
+    'assets.auto.hint': 'فقط وقتی وصل نیستید. فایل‌های geo داده‌اند و کانفیگی را خراب نمی‌کنند؛ هستهٔ جدید می‌تواند رفتار عوض کند، پس فقط با انتخاب خودتان',
     'comp.xray': 'هسته Xray', 'comp.tun2socksLegacy': 'tun2socks (حالت TUN — قدیمی)',
     'comp.singbox': 'هستهٔ sing-box (بک‌اندِ حالت TUN، ضد DPI)',
     'comp.wintun': 'wintun.dll (حالت TUN)', 'comp.geo': 'فایل‌های روتینگ (geoip + geosite)',
@@ -325,6 +329,12 @@ const I18N = {
     'about.checking': 'در حال بررسی…', 'about.checkFailed': 'بررسی ناموفق بود',
     'about.newVersion': 'نسخهٔ جدید موجود است:', 'about.current': 'نسخهٔ فعلی',
     'about.upToDate': '✓ برنامه به‌روز است', 'about.opening': 'صفحهٔ دانلود باز شد',
+    'about.downloading': 'در حال دانلود نصب‌کننده', 'about.downloadFailed': 'دانلود ناموفق',
+    'about.installerOpened': 'نصب‌کننده باز شد (checksum تأیید شد) — برای ادامه، برنامه را ببندید',
+    'about.downloadedUnverified': 'نصب‌کننده دانلود شد ولی برای این فایل checksum ای منتشر نشده بود — باز نشد؛ پوشه‌اش نشان داده شد',
+    'backup.hint': 'پشتیبان همهٔ سرورها، ساب‌ها، زنجیره‌ها، استخر، تنظیمات و مصرف را در یک فایل JSON می‌گذارد؛ بازیابی، آنچه را که هست نگه می‌دارد و فقط موارد تازه را اضافه می‌کند',
+    'backup.export': 'پشتیبان‌گیری (JSON)', 'backup.import': 'بازیابی از فایل', 'backup.exported': 'فایل پشتیبان ساخته شد',
+    'backup.done': 'بازیابی شد (سرور / ساب / زنجیره / استخر)', 'backup.failed': 'بازیابی ناموفق',
 
     'files.title': 'فایل‌های موردنیاز',
     'files.intro': 'برای اجرای برنامه چند فایل لازم است که هنوز دانلود نشده‌اند. اجازه می‌دهی الان دانلود شوند؟',
@@ -367,6 +377,10 @@ const I18N = {
 
     'netauto.title': 'اتصال مجدد خودکار هنگام تغییر شبکه',
     'netauto.sub': 'اگر اینترنت عوض شد (وای‌فای/کابل/بیدارشدن از خواب)، تونل خودکار بازسازی می‌شود',
+    'notify.title': 'اعلان سیستمی', 'notify.sub': 'هنگام قطع، اتصال مجدد یا فعال‌شدن کیل‌سوییچ یک اعلان کوتاه نشان داده می‌شود',
+    'login.title': 'اجرا با ویندوز', 'login.sub': 'برنامه هنگام ورود به سیستم، پنهان در سینی، اجرا می‌شود (روی ویندوز یک task زمان‌بندی‌شده با دسترسی ادمین ساخته می‌شود)',
+    'login.failed': 'اجرا با سیستم‌عامل تنظیم نشد',
+    'autoconn.title': 'اتصال خودکار', 'autoconn.sub': 'هنگام اجرا به آخرین سروری که وصل بودید وصل می‌شود',
     'state.reconnecting': 'شبکه عوض شد — اتصال مجدد…',
     'net.reconnected': 'اتصال بعد از تغییر شبکه برقرار شد',
     'net.failed': 'شبکه عوض شد و اتصال مجدد ناموفق بود',
@@ -514,6 +528,7 @@ const I18N = {
     'chain.addFromBelow': 'Add a server from below…',
 
     'nav.pool': 'Proxy Pool', 'picker.pool': 'Proxy Pool',
+    'picker.auto': 'Auto (fastest)', 't.autoNone': 'No server answered',
     'pool.title': 'Proxy Pool (several configs at once)',
     'pool.connect': 'Connect pool', 'pool.new': '+ New proxy',
     'pool.intro': 'Run several configs/chains/SOCKS at once — each on its own local port (e.g. 60001, 60002, …). Point any app at a port to send it through that config’s exit.',
@@ -586,6 +601,9 @@ const I18N = {
     'lan.title': 'Allow LAN', 'lan.sub': 'Let other devices connect too',
 
     'comp.title': 'Required files', 'comp.hint': 'Missing files are downloaded and integrated with one click — no rebuild needed.',
+    'assets.auto': 'Update files automatically', 'assets.auto.off': 'Off',
+    'assets.auto.geo': 'Weekly — geo files only', 'assets.auto.all': 'Weekly — geo files and cores',
+    'assets.auto.hint': 'Only while disconnected. Geo files are data and cannot break a config; a new core can change behaviour, so only if you choose it',
     'comp.xray': 'Xray core', 'comp.singbox': 'sing-box core (TUN backend, anti-DPI)',
     'comp.tun2socksLegacy': 'tun2socks (TUN mode — legacy)',
     'comp.wintun': 'wintun.dll (TUN mode)', 'comp.geo': 'Routing files (geoip + geosite)',
@@ -703,6 +721,12 @@ const I18N = {
     'about.checking': 'Checking…', 'about.checkFailed': 'Check failed',
     'about.newVersion': 'New version available:', 'about.current': 'current',
     'about.upToDate': '✓ You are up to date', 'about.opening': 'Opened the download page',
+    'about.downloading': 'Downloading the installer', 'about.downloadFailed': 'Download failed',
+    'about.installerOpened': 'Installer opened (checksum verified) — quit the app to continue',
+    'about.downloadedUnverified': 'Installer downloaded, but no checksum was published for it — not opened; its folder was shown',
+    'backup.hint': 'A backup puts every server, subscription, chain, pool entry, setting and usage figure in one JSON file; a restore keeps what is already here and adds only what is new',
+    'backup.export': 'Back up (JSON)', 'backup.import': 'Restore from file', 'backup.exported': 'Backup file created',
+    'backup.done': 'Restored (servers / subs / chains / pool)', 'backup.failed': 'Restore failed',
 
     'files.title': 'Required files',
     'files.intro': 'Some files needed to run the app are not downloaded yet. Download them now?',
@@ -745,6 +769,10 @@ const I18N = {
 
     'netauto.title': 'Reconnect automatically when the network changes',
     'netauto.sub': 'If your internet changes (Wi-Fi/ethernet/wake from sleep) the tunnel is rebuilt automatically',
+    'notify.title': 'System notifications', 'notify.sub': 'A short notification when the tunnel drops, reconnects, or the kill switch engages',
+    'login.title': 'Start with the OS', 'login.sub': 'Starts hidden in the tray at logon (on Windows via a scheduled task with administrator rights)',
+    'login.failed': 'Could not set up start with the OS',
+    'autoconn.title': 'Connect automatically', 'autoconn.sub': 'Connects to the last server you used when the app starts',
     'state.reconnecting': 'Network changed — reconnecting…',
     'net.reconnected': 'Reconnected after the network change',
     'net.failed': 'The network changed and reconnecting failed',

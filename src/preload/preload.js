@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // app version / update check
   checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
+  downloadUpdate: (info) => ipcRenderer.invoke('app:downloadUpdate', info),
 
   // process-based routing
   listProcesses: () => ipcRenderer.invoke('proc:list'),
@@ -103,6 +104,8 @@ contextBridge.exposeInMainWorld('api', {
   onUsage: (cb) => ipcRenderer.on('usage', (e, d) => cb(d)),
   getUsage: () => ipcRenderer.invoke('usage:get'),
   clearUsage: (id) => ipcRenderer.invoke('usage:clear', id == null ? null : id),
+  exportBackup: () => ipcRenderer.invoke('backup:export'),
+  importBackup: (text) => ipcRenderer.invoke('backup:import', text),
   onSubsUpdated: (cb) => ipcRenderer.on('subs-updated', (e, d) => cb(d)),
   onAssetProgress: (cb) => ipcRenderer.on('asset-progress', (e, d) => cb(d)),
   onKillSwitch: (cb) => ipcRenderer.on('killswitch', (e, d) => cb(d)),

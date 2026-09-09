@@ -142,6 +142,8 @@
                   <div class="stat-value rd-val" id="statIp">—</div>
                 </div>
               </div>
+              <!-- the last sixty seconds of speed, two lines, one canvas — no DOM per tick -->
+              <canvas id="speedSpark" class="spark" width="360" height="40" aria-hidden="true"></canvas>
               <div class="traffic-row" id="trafficRow">
                 <button class="traffic-card mode-card readout" id="modeCard" title="">
                   <span class="traffic-ico mode" id="modeIco">⚡</span>
@@ -560,6 +562,15 @@
           <p class="hint" data-i18n="comp.hint"></p>
           <div class="comp-list" id="compList"></div>
           <p class="hint warn" id="compTunNote" data-i18n="comp.tunNote"></p>
+          <div class="setting-row">
+            <label class="field-label" data-i18n="assets.auto">به‌روزرسانی خودکار فایل‌ها</label>
+            <select id="optAutoUpdateAssets" class="select">
+              <option value="off" data-i18n="assets.auto.off">خاموش</option>
+              <option value="geo" data-i18n="assets.auto.geo">هفتگی — فقط فایل‌های geo</option>
+              <option value="all" data-i18n="assets.auto.all">هفتگی — فایل‌های geo و هسته‌ها</option>
+            </select>
+            <p class="hint" data-i18n="assets.auto.hint">فقط وقتی وصل نیستید. فایل‌های geo داده‌اند و کانفیگی را خراب نمی‌کنند؛ هستهٔ جدید می‌تواند رفتار عوض کند، پس فقط با انتخاب خودتان</p>
+          </div>
           <div class="row-gap">
             <button class="btn danger" id="btnRemoveFiles" data-i18n="comp.removeAll">حذف فایل‌های دانلودشده</button>
           </div>
@@ -630,6 +641,21 @@
               <div class="switch-sub" data-i18n="netauto.sub">اگر اینترنت عوض شد (وای‌فای/کابل/بیدارشدن از خواب)، تونل خودکار بازسازی می‌شود</div></div>
             <label class="switch"><input type="checkbox" id="optNetAuto" /><span class="slider"></span></label>
           </div>
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="notify.title">اعلان سیستمی</div>
+              <div class="switch-sub" data-i18n="notify.sub">هنگام قطع، اتصال مجدد یا فعال‌شدن کیل‌سوییچ یک اعلان کوتاه نشان داده می‌شود</div></div>
+            <label class="switch"><input type="checkbox" id="optNotify" /><span class="slider"></span></label>
+          </div>
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="login.title">اجرا با ویندوز</div>
+              <div class="switch-sub" data-i18n="login.sub">برنامه هنگام ورود به سیستم، پنهان در سینی، اجرا می‌شود (روی ویندوز یک task زمان‌بندی‌شده با دسترسی ادمین ساخته می‌شود)</div></div>
+            <label class="switch"><input type="checkbox" id="optLaunchAtLogin" /><span class="slider"></span></label>
+          </div>
+          <div class="switch-row">
+            <div><div class="switch-title" data-i18n="autoconn.title">اتصال خودکار</div>
+              <div class="switch-sub" data-i18n="autoconn.sub">هنگام اجرا به آخرین سروری که وصل بودید وصل می‌شود</div></div>
+            <label class="switch"><input type="checkbox" id="optAutoConnect" /><span class="slider"></span></label>
+          </div>
         </div>
 
         <div class="card">
@@ -659,6 +685,12 @@
           <div class="row-gap">
             <button class="btn ghost" id="btnCheckUpdate" data-i18n="about.check">بررسی به‌روزرسانی</button>
             <button class="btn primary" id="btnDownloadUpdate" data-i18n="about.download" hidden>دانلود نسخه جدید</button>
+          </div>
+          <p class="hint" data-i18n="backup.hint">پشتیبان همهٔ سرورها، ساب‌ها، زنجیره‌ها، استخر، تنظیمات و مصرف را در یک فایل JSON می‌گذارد؛ بازیابی، آنچه را که هست نگه می‌دارد و فقط موارد تازه را اضافه می‌کند</p>
+          <div class="row-gap">
+            <button class="btn ghost" id="btnBackupExport" data-i18n="backup.export">پشتیبان‌گیری (JSON)</button>
+            <button class="btn ghost" id="btnBackupImport" data-i18n="backup.import">بازیابی از فایل</button>
+            <input type="file" id="backupFile" accept=".json,application/json" class="vis-hidden" tabindex="-1" aria-hidden="true" />
           </div>
         </div>
       </section>
