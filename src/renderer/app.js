@@ -2136,6 +2136,37 @@ $('#btnRemoveFiles').onclick = async () => {
 };
 
 /* ----------------------------- app update check ----------------------------- */
+/* ----------------------------- backup / restore ----------------------------- */
+$('#btnBackupExport').onclick = async () => {
+  const text = await window.api.exportBackup();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  a.download = 'irnetfree-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast(t('backup.exported'), 'ok');
+};
+$('#btnBackupImport').onclick = () => $('#backupFile').click();
+$('#backupFile').onchange = async () => {
+  const f = $('#backupFile').files[0];
+  $('#backupFile').value = '';
+  if (!f) return;
+  const res = await window.api.importBackup(await f.text());
+  if (!res || !res.ok) return toast(t('backup.failed') + (res && res.error ? ': ' + res.error : ''), 'err');
+  // the store changed under the renderer: re-read it the way a launch does
+  const data = await window.api.init();
+  state.servers = data.servers || [];
+  state.subscriptions = data.subscriptions || [];
+  state.settings = data.settings || {};
+  state.chains = (data.chains || []).map(c => ({ id: c.id, name: c.name || 'Chain', members: (c.members || []).filter(id => state.servers.some(s => s.id === id)) }));
+  state.pool = (data.pool || []).map(e => ({ id: e.id, name: e.name || 'Proxy', target: e.target || '', socksPort: e.socksPort || 0, httpPort: e.httpPort || 0, enabled: e.enabled !== false }));
+  state.usage = data.usage || {};
+  state.pendingReconnect = data.pendingReconnect || [];
+  applySettingsToUI(); renderServers(); renderPicker(); renderSubs(); renderChains(); renderPool(); renderAdvanced(); renderPendingBanner();
+  const n = res.added;
+  toast(`${t('backup.done')}: ${n.servers} / ${n.subscriptions} / ${n.chains} / ${n.pool}`, 'ok');
+};
+
 let updateInfo = null;
 $('#btnCheckUpdate').onclick = async () => {
   const st = $('#updateStatus');

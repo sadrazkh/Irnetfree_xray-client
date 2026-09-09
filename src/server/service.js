@@ -39,6 +39,7 @@ const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = requir
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 const { migrateSettings } = require('../main/settingsMigrate');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
+const { exportBundle, importBundle } = require('../main/backup');
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -1554,6 +1555,28 @@ function createService(opts = {}) {
         send('usage', { totals: usage.totals });
       }
       return { ok: true, totals: usage ? usage.totals : {} };
+    },
+
+    // Backup and restore — see backup.js; the same merge-by-id the desktop does.
+    'backup:export': () => JSON.stringify(exportBundle({
+      version: appVersion,
+      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), settings: getSettings() },
+      usage: usage ? usage.totals : {}
+    }), null, 2),
+    'backup:import': (text) => {
+      let bundle;
+      try { bundle = JSON.parse(String(text || '')); } catch { return { ok: false, error: 'not JSON' }; }
+      let r;
+      try {
+        r = importBundle(bundle, {
+          servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
+          chains: getChains(), pool: getPool(), settings: getSettings(), usage: usage ? usage.totals : {}
+        });
+      } catch (err) { return { ok: false, error: err.message }; }
+      store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, settings: r.next.settings });
+      if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
+      send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries added`, level: 'info' });
+      return { ok: true, added: r.added };
     },
 
     // desktop-only / no-op in server mode

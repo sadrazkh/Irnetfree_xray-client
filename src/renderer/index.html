@@ -677,6 +677,12 @@
             <button class="btn ghost" id="btnCheckUpdate" data-i18n="about.check">بررسی به‌روزرسانی</button>
             <button class="btn primary" id="btnDownloadUpdate" data-i18n="about.download" hidden>دانلود نسخه جدید</button>
           </div>
+          <p class="hint" data-i18n="backup.hint">پشتیبان همهٔ سرورها، ساب‌ها، زنجیره‌ها، استخر، تنظیمات و مصرف را در یک فایل JSON می‌گذارد؛ بازیابی، آنچه را که هست نگه می‌دارد و فقط موارد تازه را اضافه می‌کند</p>
+          <div class="row-gap">
+            <button class="btn ghost" id="btnBackupExport" data-i18n="backup.export">پشتیبان‌گیری (JSON)</button>
+            <button class="btn ghost" id="btnBackupImport" data-i18n="backup.import">بازیابی از فایل</button>
+            <input type="file" id="backupFile" accept=".json,application/json" class="vis-hidden" tabindex="-1" aria-hidden="true" />
+          </div>
         </div>
       </section>
 

@@ -32,6 +32,7 @@ const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
 const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
 const { trayGroups } = require('./trayMenu');
+const { exportBundle, importBundle } = require('./backup');
 const https = require('https');
 
 let mainWindow = null;
@@ -2140,6 +2141,31 @@ function registerIpc() {
     }
     return { ok: true, totals: usage ? usage.totals : {} };
   });
+  // Backup: everything the user has, as one JSON string the renderer saves.
+  ipcMain.handle('backup:export', () => JSON.stringify(exportBundle({
+    version: app.getVersion(),
+    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), settings: getSettings() },
+    usage: usage ? usage.totals : {}
+  }), null, 2));
+  // Restore: a merge by id (backup.js) — nothing on this machine is lost, and
+  // the imported servers go through the same migration a stored one does.
+  ipcMain.handle('backup:import', (e, text) => {
+    let bundle;
+    try { bundle = JSON.parse(String(text || '')); } catch { return { ok: false, error: 'not JSON' }; }
+    let r;
+    try {
+      r = importBundle(bundle, {
+        servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
+        chains: getChains(), pool: getPool(), settings: getSettings(), usage: usage ? usage.totals : {}
+      });
+    } catch (err) { return { ok: false, error: err.message }; }
+    store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, settings: r.next.settings });
+    if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
+    refreshTray();
+    send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries added`, level: 'info' });
+    return { ok: true, added: r.added };
+  });
+
   // Reconnect on demand: the same leak-free path the network-change recovery
   // uses, so the guard is held across the gap rather than released.
   ipcMain.handle('vpn:reconnect', async () => {

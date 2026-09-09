@@ -326,6 +326,9 @@ const I18N = {
     'about.checking': 'در حال بررسی…', 'about.checkFailed': 'بررسی ناموفق بود',
     'about.newVersion': 'نسخهٔ جدید موجود است:', 'about.current': 'نسخهٔ فعلی',
     'about.upToDate': '✓ برنامه به‌روز است', 'about.opening': 'صفحهٔ دانلود باز شد',
+    'backup.hint': 'پشتیبان همهٔ سرورها، ساب‌ها، زنجیره‌ها، استخر، تنظیمات و مصرف را در یک فایل JSON می‌گذارد؛ بازیابی، آنچه را که هست نگه می‌دارد و فقط موارد تازه را اضافه می‌کند',
+    'backup.export': 'پشتیبان‌گیری (JSON)', 'backup.import': 'بازیابی از فایل', 'backup.exported': 'فایل پشتیبان ساخته شد',
+    'backup.done': 'بازیابی شد (سرور / ساب / زنجیره / استخر)', 'backup.failed': 'بازیابی ناموفق',
 
     'files.title': 'فایل‌های موردنیاز',
     'files.intro': 'برای اجرای برنامه چند فایل لازم است که هنوز دانلود نشده‌اند. اجازه می‌دهی الان دانلود شوند؟',
@@ -709,6 +712,9 @@ const I18N = {
     'about.checking': 'Checking…', 'about.checkFailed': 'Check failed',
     'about.newVersion': 'New version available:', 'about.current': 'current',
     'about.upToDate': '✓ You are up to date', 'about.opening': 'Opened the download page',
+    'backup.hint': 'A backup puts every server, subscription, chain, pool entry, setting and usage figure in one JSON file; a restore keeps what is already here and adds only what is new',
+    'backup.export': 'Back up (JSON)', 'backup.import': 'Restore from file', 'backup.exported': 'Backup file created',
+    'backup.done': 'Restored (servers / subs / chains / pool)', 'backup.failed': 'Restore failed',
 
     'files.title': 'Required files',
     'files.intro': 'Some files needed to run the app are not downloaded yet. Download them now?',
