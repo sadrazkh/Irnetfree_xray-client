@@ -367,6 +367,7 @@ const I18N = {
 
     'netauto.title': 'اتصال مجدد خودکار هنگام تغییر شبکه',
     'netauto.sub': 'اگر اینترنت عوض شد (وای‌فای/کابل/بیدارشدن از خواب)، تونل خودکار بازسازی می‌شود',
+    'notify.title': 'اعلان سیستمی', 'notify.sub': 'هنگام قطع، اتصال مجدد یا فعال‌شدن کیل‌سوییچ یک اعلان کوتاه نشان داده می‌شود',
     'state.reconnecting': 'شبکه عوض شد — اتصال مجدد…',
     'net.reconnected': 'اتصال بعد از تغییر شبکه برقرار شد',
     'net.failed': 'شبکه عوض شد و اتصال مجدد ناموفق بود',
@@ -745,6 +746,7 @@ const I18N = {
 
     'netauto.title': 'Reconnect automatically when the network changes',
     'netauto.sub': 'If your internet changes (Wi-Fi/ethernet/wake from sleep) the tunnel is rebuilt automatically',
+    'notify.title': 'System notifications', 'notify.sub': 'A short notification when the tunnel drops, reconnects, or the kill switch engages',
     'state.reconnecting': 'Network changed — reconnecting…',
     'net.reconnected': 'Reconnected after the network change',
     'net.failed': 'The network changed and reconnecting failed',

@@ -86,6 +86,8 @@ const DEFAULT_SETTINGS = {
   // recover automatically when the machine's network changes (read live, so it
   // needs no reconnect to take effect)
   autoReconnectOnNetworkChange: true,
+  // desktop notifications for drops, recoveries and the kill switch (read live)
+  notifications: true,
   // which surfaces the window shows: 'simple' hides chains, the pool, the log
   // page and the custom-rule editor. A view preference only — renderer-owned,
   // never baked into a config, so it needs no reconnect.
@@ -117,6 +119,9 @@ function createService(opts = {}) {
 
   const listeners = new Set();
   const send = (channel, payload) => { for (const cb of listeners) { try { cb(channel, payload); } catch {} } };
+  // No notification centre on a server; kept so the shared call sites mirror main.js one-to-one.
+  const notify = () => {};
+  const isEn = () => getSettings().lang === 'en';
 
   const appVersion = (() => {
     try { return require(path.join(__dirname, '..', '..', 'package.json')).version || '0.0.0'; } catch { return '0.0.0'; }
@@ -1107,6 +1112,7 @@ function createService(opts = {}) {
 
     send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
     send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
+    if (attempt === 0) notify('IRNetFree', isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد');
 
     // Pick the rebuild path by what the core is ACTUALLY doing. Both paths answer
     // in the same { ok, tunError, error } shape. (No kill switch here, so the
@@ -1151,6 +1157,7 @@ function createService(opts = {}) {
           : 'Connection restored after the network change',
         level: res.tunError ? 'warn' : 'info'
       });
+      notify('IRNetFree', isEn() ? 'Connection restored' : 'اتصال دوباره برقرار شد');
       return;
     }
     if (res && res.tunError) {
@@ -1169,6 +1176,7 @@ function createService(opts = {}) {
         level: 'error'
       });
       send('status', { state: 'reconnect-failed', reason, proxyUp, tunError: (res && res.tunError) || null });
+      notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
       return;
     }
     send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });

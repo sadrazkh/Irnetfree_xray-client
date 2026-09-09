@@ -331,6 +331,7 @@ function applySettingsToUI() {
   $('#optAllowLan').checked = !!s.allowLan;
   $('#optKillSwitch').checked = !!s.killSwitch;
   $('#optNetAuto').checked = s.autoReconnectOnNetworkChange !== false;
+  $('#optNotify').checked = s.notifications !== false;
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
@@ -489,6 +490,7 @@ function readSettingsForm() {
     blockUdpInProxyMode: $('#optBlockUdpProxy').checked,
     allowLan: $('#optAllowLan').checked,
     killSwitch: $('#optKillSwitch').checked,
+    notifications: $('#optNotify').checked,
     blockAds: $('#optBlockAds').checked,
     enableSniffing: $('#optSniff').checked
   };
@@ -668,6 +670,7 @@ $('#optKillSwitch').onchange = async () => {
 
 /* auto-reconnect toggle — read live at recovery time, so it needs no reconnect */
 $('#optNetAuto').onchange = () => saveSettings({ autoReconnectOnNetworkChange: $('#optNetAuto').checked });
+$('#optNotify').onchange = () => saveSettings({ notifications: $('#optNotify').checked });
 
 function updateKillStatus() {
   const el = $('#killStatus');

@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, nativeTheme, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -142,6 +142,8 @@ const DEFAULT_SETTINGS = {
   // recover automatically when the machine's network changes (read live, so it
   // needs no reconnect to take effect)
   autoReconnectOnNetworkChange: true,
+  // desktop notifications for drops, recoveries and the kill switch (read live)
+  notifications: true,
   // which surfaces the window shows: 'simple' hides chains, the pool, the log
   // page and the custom-rule editor. A view preference only — renderer-owned,
   // never baked into a config, so it needs no reconnect.
@@ -207,6 +209,21 @@ function send(channel, payload) {
     mainWindow.webContents.send(channel, payload);
   }
 }
+
+/**
+ * A desktop notification, for the handful of events that matter while the
+ * window is in the tray: the tunnel dropped, came back, was given up on, or
+ * the kill switch closed the internet. Off with one switch; silent; never
+ * throws — a missing notification centre must not touch the connect path.
+ */
+function notify(title, body) {
+  try {
+    if (!getSettings().notifications || !Notification.isSupported()) return;
+    new Notification({ title, body, silent: true }).show();
+  } catch { /* no notification centre on this desktop */ }
+}
+/** The user's language, for the few strings main.js shows itself. */
+function isEn() { return getSettings().lang === 'en'; }
 
 /* ----------------------------- LAN sharing ----------------------------- */
 // When "Allow LAN" is on, the SOCKS/HTTP inbounds already listen on 0.0.0.0
@@ -1290,6 +1307,7 @@ async function runRecovery(reason, attempt) {
 
   send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
   send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
+  if (attempt === 0) notify('IRNetFree', isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد');
 
   // Pick the rebuild path by what the core is ACTUALLY doing. Both paths answer
   // in the same { ok, tunError, error } shape.
@@ -1349,6 +1367,7 @@ async function runRecovery(reason, attempt) {
         : 'Connection restored after the network change',
       level: res.tunError ? 'warn' : 'info'
     });
+    notify('IRNetFree', isEn() ? 'Connection restored' : 'اتصال دوباره برقرار شد');
     return;
   }
   if (res && res.tunError) {
@@ -1381,6 +1400,7 @@ async function runRecovery(reason, attempt) {
       });
     }
     send('status', { state: 'reconnect-failed', reason, proxyUp, guardHeld, tunError: (res && res.tunError) || null });
+    notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
     return;
   }
   send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
@@ -2148,7 +2168,10 @@ app.whenReady().then(() => {
         if (getSettings().killSwitch) {
           armKillSwitch().then((r) => {
             send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
-            if (r && r.ok) send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
+            if (r && r.ok) {
+              send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
+              notify('IRNetFree', isEn() ? 'VPN dropped — internet blocked by the kill switch' : 'اتصال افتاد — اینترنت با کیل‌سوییچ بسته شد');
+            }
             else if (process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
           });
         }
