@@ -968,28 +968,6 @@ function repairWgDnsFields(server) {
   return fix;
 }
 
-/** A list field from a hand-editable store: anything that is not an array is empty. */
-function asList(v) { return Array.isArray(v) ? v : []; }
-
-/**
- * `dns` / `dnsDomains` must be arrays of strings. store.json is hand-editable,
- * so a string is split like the form field and anything else is dropped.
- * Returns null when both are already well-formed (or absent).
- */
-function repairWgDnsFields(server) {
-  const ok = (v) => Array.isArray(v) && v.every(x => typeof x === 'string');
-  const hasDns = 'dns' in server, hasDom = 'dnsDomains' in server;
-  if ((!hasDns || ok(server.dns)) && (!hasDom || ok(server.dnsDomains))) return null;
-  const fix = { dns: ok(server.dns) ? server.dns : [], dnsDomains: ok(server.dnsDomains) ? server.dnsDomains : [] };
-  for (const v of [server.dns, server.dnsDomains]) {
-    if (typeof v !== 'string') continue;
-    const sp = splitDnsField(v);
-    fix.dns = fix.dns.concat(sp.dns);
-    fix.dnsDomains = fix.dnsDomains.concat(sp.dnsDomains);
-  }
-  return fix;
-}
-
 /**
  * A singular finalmask value back into the plural array the core wants.
  * Returns null for anything that is not a value we wrote (so the caller leaves
@@ -1128,6 +1106,6 @@ function migrateStoredServer(server) {
 module.exports = {
   parseLink, parseMany, b64decode, isHttpProxyLink,
   buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits,
-  parseWireguardConf, isWireguardConf, splitDnsField, splitDnsField,
+  parseWireguardConf, isWireguardConf, splitDnsField,
   buildShareLink, migrateStoredServer
 };

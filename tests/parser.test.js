@@ -931,3 +931,22 @@ test('share links keep allowInsecure=1 (other clients still understand it); the 
   assert.equal(parseLink(link).outbound.streamSettings.tlsSettings.allowInsecure, true);
   assert.equal('certPin' in parseLink(link), false, 'a fresh import starts unpinned');
 });
+
+/* --------------------------- no silent duplicates --------------------------- */
+
+test('parser.js declares each top-level function exactly once and exports each name once', () => {
+  // JavaScript keeps the LAST declaration and says nothing, so two copies of a
+  // helper drift apart in silence — `asList` and `repairWgDnsFields` were each
+  // defined twice, and `splitDnsField` was exported twice.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'parser.js'), 'utf8');
+
+  const names = [...src.matchAll(/^function ([A-Za-z0-9_$]+)\s*\(/gm)].map(m => m[1]);
+  assert.ok(names.length > 30, `expected the whole module, found ${names.length} functions`);
+  assert.deepEqual(names.filter((n, i) => names.indexOf(n) !== i), [], 'declared more than once');
+
+  const block = src.slice(src.indexOf('module.exports = {'));
+  const exported = [...block.matchAll(/([A-Za-z0-9_$]+)\s*[,}]/g)].map(m => m[1]);
+  assert.deepEqual(exported.filter((n, i) => exported.indexOf(n) !== i), [], 'exported more than once');
+});
