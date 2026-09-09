@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // app version / update check
   checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
+  downloadUpdate: (info) => ipcRenderer.invoke('app:downloadUpdate', info),
 
   // process-based routing
   listProcesses: () => ipcRenderer.invoke('proc:list'),

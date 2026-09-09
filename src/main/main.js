@@ -25,7 +25,8 @@ const tunPlatform = require('./tunPlatform');
 const { LeakGuard } = require('./leakGuard');
 const { StatsPoller, SilenceWatch } = require('./stats');
 const { UsageMeter, grandTotal } = require('./usage');
-const { Downloader } = require('./downloader');
+const { Downloader, downloadFile } = require('./downloader');
+const { pickUpdateAsset, parseSha256Sums, sha256File } = require('./appUpdate');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
@@ -2097,15 +2098,65 @@ function registerIpc() {
       const rel = await getJSON(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
       const latest = String(rel.tag_name || '').replace(/^v/i, '').trim();
       if (!latest) return { ok: false, current, error: 'no release found' };
+      const asset = pickUpdateAsset(rel.assets);
       return {
         ok: true,
         current,
         latest,
         hasUpdate: cmpVersion(latest, current) > 0,
-        url: rel.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`
+        url: rel.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`,
+        // the installer for this machine, and the checksum files published beside it
+        asset: asset ? { name: asset.name, url: asset.browser_download_url, size: asset.size } : null,
+        sums: (rel.assets || []).filter(a => a && /^SHA256SUMS.*\.txt$/i.test(String(a.name))).map(a => a.browser_download_url)
       };
     } catch (e) {
       return { ok: false, current, error: e.message };
+    }
+  });
+
+  // Download the installer for this machine into the temp dir and hand it to
+  // the OS — but only a file whose SHA-256 matches what the release published.
+  // With no checksum published for it, the file is shown, never run: opening
+  // an unverified installer is exactly the step the user can take themselves.
+  // The app keeps running; the installer asks it to close when it is ready.
+  const RELEASE_ASSET_URL = new RegExp(`^https://github\\.com/${GITHUB_REPO.replace(/[.]/g, '\\.')}/releases/download/`, 'i');
+  ipcMain.handle('app:downloadUpdate', async (e, info) => {
+    const asset = info && info.asset;
+    if (!asset || !asset.url || !asset.name) return { ok: false, error: 'no installer for this platform' };
+    if (!RELEASE_ASSET_URL.test(String(asset.url))) return { ok: false, error: 'not a release asset of this app' };
+    const dir = path.join(app.getPath('temp'), 'IRNetFree-update');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, path.basename(String(asset.name)));
+    const discard = () => { try { fs.rmSync(file, { force: true }); } catch { /* nothing to discard */ } };
+    try {
+      await downloadFile(asset.url, file, (p) => send('asset-progress', { component: 'app', pct: p }));
+      let verified = false;
+      for (const url of Array.isArray(info.sums) ? info.sums : []) {
+        const sums = parseSha256Sums(await getBody(url).catch(() => ''));
+        const want = sums[path.basename(file)];
+        if (!want) continue;
+        const have = await sha256File(file);
+        if (have !== want) {
+          discard();
+          send('log', { line: `Update ${asset.name}: checksum mismatch — the download was discarded`, level: 'error' });
+          return { ok: false, error: 'checksum mismatch — the download was discarded' };
+        }
+        verified = true;
+        break;
+      }
+      if (!verified) {
+        send('log', { line: `Update ${asset.name} downloaded, but no checksum was published for it — it was not opened: ${file}`, level: 'warn' });
+        shell.showItemInFolder(file);
+        return { ok: true, file, verified: false };
+      }
+      send('log', { line: `Update ${asset.name} downloaded and its checksum verified — opening the installer`, level: 'info' });
+      if (process.platform !== 'win32') { try { fs.chmodSync(file, 0o755); } catch { /* a dmg needs no mode */ } }
+      const openErr = await shell.openPath(file);
+      if (openErr) return { ok: false, error: openErr };
+      return { ok: true, file, verified: true };
+    } catch (err) {
+      discard();
+      return { ok: false, error: err.message };
     }
   });
 
@@ -2208,20 +2259,24 @@ function registerIpc() {
 }
 
 /** Minimal redirect-following JSON GET (GitHub API). */
-function getJSON(url, depth = 0) {
+/** Redirect-following GET returning the body as text (GitHub API and release assets). */
+function getBody(url, depth = 0) {
   return new Promise((resolve, reject) => {
     if (depth > 6) return reject(new Error('too many redirects'));
     https.get(url, { headers: { 'User-Agent': 'IRNetFree' } }, (res) => {
       if (res.statusCode >= 300 && res.headers.location) {
         res.resume();
-        return resolve(getJSON(res.headers.location, depth + 1));
+        return resolve(getBody(res.headers.location, depth + 1));
       }
       if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
       let body = '';
       res.on('data', (c) => (body += c));
-      res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+      res.on('end', () => resolve(body));
     }).on('error', reject);
   });
+}
+function getJSON(url) {
+  return getBody(url).then((body) => JSON.parse(body));
 }
 
 // cmpVersion lives in assetUpdater.js now (the weekly check needs it too).

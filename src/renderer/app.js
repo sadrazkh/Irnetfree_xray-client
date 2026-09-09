@@ -2113,6 +2113,12 @@ async function downloadComponent(key, btn) {
 }
 
 window.api.onAssetProgress((d) => {
+  // the app's own installer reports into the About card, not the toast
+  if (d && d.component === 'app') {
+    const st = $('#updateStatus');
+    if (st) st.textContent = t('about.downloading') + ' ' + Math.round(Number(d.pct) || 0) + '%';
+    return;
+  }
   // surface coarse progress through the toast + the files modal if open
   toast(`${t('t.downloading')} ${d.component}: ${d.pct}%`);
   const fp = $('#filesProgress');
@@ -2199,10 +2205,27 @@ $('#btnCheckUpdate').onclick = async () => {
     btn.disabled = false;
   }
 };
-$('#btnDownloadUpdate').onclick = () => {
+$('#btnDownloadUpdate').onclick = async () => {
   const url = (updateInfo && updateInfo.url) || 'https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest';
-  window.api.openExternal(url);
-  toast(t('about.opening'));
+  // No installer named for this machine (or an older backend): the release page, as before.
+  if (!updateInfo || !updateInfo.asset || !window.api.downloadUpdate) {
+    window.api.openExternal(url);
+    toast(t('about.opening'));
+    return;
+  }
+  const btn = $('#btnDownloadUpdate'), st = $('#updateStatus');
+  btn.disabled = true;
+  st.textContent = t('about.downloading') + ' 0%';
+  st.className = 'update-status';
+  const res = await window.api.downloadUpdate({ asset: updateInfo.asset, sums: updateInfo.sums || [] });
+  btn.disabled = false;
+  if (!res || !res.ok) {
+    st.textContent = t('about.downloadFailed') + (res && res.error ? ': ' + res.error : '');
+    st.className = 'update-status warn';
+    return;
+  }
+  st.textContent = res.verified ? t('about.installerOpened') : t('about.downloadedUnverified');
+  st.className = 'update-status ok';
 };
 
 /* ----------------------------- first-run required files modal ----------------------------- */

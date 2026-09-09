@@ -1534,6 +1534,7 @@ function createService(opts = {}) {
     'xray:version': async (engineId) => { try { return { ok: true, version: await xray.version(engineId || 'xray') }; } catch (e) { return { ok: false, error: e.message }; } },
     'xray:locate': () => ({ ok: false, error: 'not available in server mode' }),
     'app:checkUpdate': () => ({ ok: false, current: appVersion, error: 'update check is desktop-only' }),
+    'app:downloadUpdate': () => ({ ok: false, error: 'update download is desktop-only' }),
 
     'proc:list': async () => { try { return { ok: true, processes: await listProcesses() }; } catch (e) { return { ok: false, error: e.message, processes: [] }; } },
     'proc:clearCache': () => { store.set('procIpCache', {}); return { ok: true }; },

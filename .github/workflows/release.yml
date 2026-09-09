@@ -73,6 +73,19 @@ jobs:
         # here (publishing is handled by the dedicated step below).
         run: ${{ matrix.build }}
 
+      # The app verifies an in-app update against these before it opens the
+      # installer (src/main/appUpdate.js). One file per runner; the app reads
+      # every SHA256SUMS-*.txt on the release. shasum is on all three runners.
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          : > "SHA256SUMS-${{ matrix.os }}.txt"
+          for f in *.exe *.dmg *.zip *.AppImage *.deb; do
+            [ -f "$f" ] && shasum -a 256 "$f" >> "SHA256SUMS-${{ matrix.os }}.txt"
+          done
+          cat "SHA256SUMS-${{ matrix.os }}.txt"
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -83,6 +96,7 @@ jobs:
             dist/*.zip
             dist/*.AppImage
             dist/*.deb
+            dist/SHA256SUMS-*.txt
           if-no-files-found: ignore
 
       - name: Publish to GitHub Release
@@ -95,6 +109,7 @@ jobs:
             dist/*.zip
             dist/*.AppImage
             dist/*.deb
+            dist/SHA256SUMS-*.txt
           fail_on_unmatched_files: false
 
   android:
