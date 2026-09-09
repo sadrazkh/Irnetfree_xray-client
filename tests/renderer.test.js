@@ -114,3 +114,10 @@ test('both themes and both writing directions are still styled', () => {
   const logical = (CSS.match(/(?:margin|padding|border|inset)-inline/g) || []).length;
   assert.ok(logical >= 20, `expected logical properties throughout, found ${logical}`);
 });
+
+test('the markup carries no inline style attributes', () => {
+  // An inline style bypasses the tokens, the three skins and the RTL logical
+  // properties, and nothing else in this file can see it.
+  const inline = [...HTML.matchAll(/ style="([^"]*)"/g)].map((m) => m[1]);
+  assert.deepEqual(inline, []);
+});

@@ -749,3 +749,14 @@ body[data-ui-mode="simple"] .inspector { display: none; }
 .inactive { opacity: .5; }
 .del-srv, .edit-srv, .ping-srv, .copy-srv, .qr-srv,
 .sub-auto, .sub-refresh, .sub-del, .adv-suggest-default { }
+
+/* ----------------------------- spacing utilities -----------------------------
+   The only replacement for inline style= in the markup: an inline style bypasses
+   the tokens, the three skins and the RTL logical properties, and no test can
+   see it. tests/renderer.test.js keeps index.html free of them. */
+.u-mbe-8 { margin-block-end: 8px; }
+.u-mbe-12 { margin-block-end: 12px; }
+.u-mbs-8 { margin-block-start: 8px; }
+.u-mbs-10 { margin-block-start: 10px; }
+.u-block { display: block; }
+.btn.tiny { padding: 3px 10px; font-size: 12px; margin-inline-start: 8px; }
