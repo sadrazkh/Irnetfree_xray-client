@@ -29,7 +29,7 @@ const { Downloader } = require('./downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
-const { NetWatcher } = require('./netWatcher');
+const { NetWatcher, fingerprint } = require('./netWatcher');
 const https = require('https');
 
 let mainWindow = null;
@@ -703,6 +703,14 @@ async function doConnect(serverId, opts = {}) {
   const stale = () => gen !== connGen;
   const abandoned = { ok: false, stale: true };
 
+  // The watcher only starts once this connect has FINISHED (see the end of this
+  // function), so a network that moves while the tunnel is being built is
+  // invisible to it: the tunnel comes up bound to the old NIC and routed for the
+  // old gateway, the watcher then adopts the new network as its baseline, and
+  // nothing is left to notice. A connect that finds a watcher already running
+  // (a reconnect, a server switch) is covered by that watcher and takes no
+  // reading here.
+  const netBefore = netWatcher ? null : currentNetFingerprint();
 
   // clear any kill-switch block from a previous unexpected drop
   if (!opts.holdKillSwitch) {
@@ -1013,6 +1021,16 @@ async function doConnect(serverId, opts = {}) {
   // built for the old one with nothing left to notice.
   if (!netWatcher) startNetWatcher();
 
+  // The network moved while we were building for the old one. The watcher just
+  // adopted the NEW network as normal, so it will never fire for this; say so
+  // and rebuild. Deferred by a tick so the 'connected' status below goes out
+  // first and the recovery's own 'reconnecting' follows it in order.
+  if (netBefore != null && currentNetFingerprint() !== netBefore) {
+    send('log', { line: 'The network changed while connecting — rebuilding for the one we have now', level: 'warn' });
+    setTimeout(() => recoverFromNetworkChange('changed-during-connect').catch((e) => {
+      send('log', { line: 'Network recovery failed: ' + ((e && e.message) || e), level: 'error' });
+    }), 0);
+  }
 
   updateOverlay('on');
   send('status', {
@@ -1368,6 +1386,15 @@ async function runRecovery(reason, attempt) {
   send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
   recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt + 1), delay);
   if (recoverTimer.unref) recoverTimer.unref();
+}
+
+/**
+ * The machine's network as the watcher would see it right now — the same pure
+ * fingerprint, with the same predicate for our own adapters, so a reading taken
+ * before the watcher exists is comparable with the baseline it will adopt.
+ */
+function currentNetFingerprint() {
+  return fingerprint(os.networkInterfaces(), isOwnTunInterface);
 }
 
 function startNetWatcher() {

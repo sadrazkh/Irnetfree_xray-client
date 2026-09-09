@@ -38,7 +38,7 @@ const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 const { migrateSettings } = require('../main/settingsMigrate');
-const { NetWatcher } = require('../main/netWatcher');
+const { NetWatcher, fingerprint } = require('../main/netWatcher');
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -644,6 +644,12 @@ function createService(opts = {}) {
     const stale = () => gen !== connGen;
     const abandoned = { ok: false, stale: true };
 
+    // The watcher only starts once this connect has FINISHED (see the end of
+    // this function), so a network that moves while the tunnel is being built
+    // is invisible to it: the tunnel comes up built for the old network, the
+    // watcher then adopts the new one as its baseline, and nothing is left to
+    // notice. A connect that finds a watcher already running is covered by it.
+    const netBefore = netWatcher ? null : currentNetFingerprint();
 
     let settings = await effectiveSettings();
     if (stale()) return abandoned;
@@ -904,6 +910,16 @@ function createService(opts = {}) {
     // built for the old one with nothing left to notice.
     if (!netWatcher) startNetWatcher();
 
+    // The network moved while we were building for the old one. The watcher just
+    // adopted the NEW network as normal, so it will never fire for this; say so
+    // and rebuild. Deferred by a tick so the 'connected' status below goes out
+    // first and the recovery's own 'reconnecting' follows it in order.
+    if (netBefore != null && currentNetFingerprint() !== netBefore) {
+      send('log', { line: 'The network changed while connecting — rebuilding for the one we have now', level: 'warn' });
+      setTimeout(() => recoverFromNetworkChange('changed-during-connect').catch((e) => {
+        send('log', { line: 'Network recovery failed: ' + ((e && e.message) || e), level: 'error' });
+      }), 0);
+    }
 
     send('status', {
       state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
@@ -1176,6 +1192,15 @@ function createService(opts = {}) {
       })
     });
     netWatcher.start();
+  }
+
+  /**
+   * The machine's network as the watcher would see it right now — the same pure
+   * fingerprint, with the same predicate for our own adapters, so a reading
+   * taken before the watcher exists is comparable with the baseline it adopts.
+   */
+  function currentNetFingerprint() {
+    return fingerprint(os.networkInterfaces(), isOwnTunInterface);
   }
 
   function stopNetWatcher() {
