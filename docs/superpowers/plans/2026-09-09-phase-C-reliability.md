@@ -1622,4 +1622,4 @@ git commit -m "Linux gets the strict guard as an nftables table; on macOS the gu
 - `npm test` green, pristine; `npm run validate` green on both cores and with `IRNF_SINGBOX_EXE`; `node scripts/probe-dns-leak.js` 36/36; `npm run probe:wg` 2/2 (+ the split probe if C8 shipped).
 - Fable reviews: C1, C2, C3, C4 wiring (Opus-implemented); C5, C6, C8, C9 are Fable-implemented.
 - The owner runs the device checklists (C1 self-test in the three modes; C5 firewall rule count; C6 sing-box config under TUN).
-- Merge `feature/phase-C`, tag v1.5.0.
+- Merge `feature/phase-C`, tag v1.6.0.

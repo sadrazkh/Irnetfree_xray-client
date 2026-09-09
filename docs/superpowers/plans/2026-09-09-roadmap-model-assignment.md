@@ -7,8 +7,8 @@ session on ANY model can execute it without this conversation:
 |---|---|---|---|
 | A | `2026-09-09-phase-A-gaps.md` | close the gaps v1.3.0 left open, clean-ups | v1.3.1 |
 | B | `2026-09-09-phase-B-performance.md` | speed: list rendering, ping-all, validate cache, poll cadence | v1.4.0 |
-| C | `2026-09-09-phase-C-reliability.md` | leak self-test, health watch, DoH bootstrap, gateway watch, firewall holes, sing-box DNS, two-core chains, Linux/mac guard | v1.5.0 |
-| D | `2026-09-09-phase-D-features.md` | autostart, auto server, notifications, tray switch, self-update, scheduled asset updates, backup, sparkline, per-app TUN | v1.6.0 |
+| C | `2026-09-09-phase-C-reliability.md` | leak self-test, health watch, DoH bootstrap, gateway watch, firewall holes, sing-box DNS, two-core chains, Linux/mac guard | v1.6.0 |
+| D | `2026-09-09-phase-D-features.md` | autostart, auto server, notifications, tray switch, self-update, scheduled asset updates, backup, sparkline, per-app TUN | v1.5.0 — shipped 2026-09-09; D10 deferred |
 | E | `2026-09-09-phase-E-android.md` | Android parity: managed DNS, `dns=` links, advancedUseMode | v1.7.0 |
 
 خلاصهٔ فارسی: هر فاز یک فایل پلن جداست با تسک‌های کوچک، کدِ کامل، تست و کامیت. مدلِ هر تسک در جدول

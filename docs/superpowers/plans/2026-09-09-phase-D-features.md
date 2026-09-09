@@ -1000,4 +1000,4 @@ git commit -m "Under the sing-box TUN, chosen apps can go around the tunnel or b
 - `npm test` green, pristine; `npm run validate` green (and with `IRNF_SINGBOX_EXE`).
 - Fable reviews: D1, D5; D10 Fable-implemented.
 - Device checklists: D1 (task exists / gone), D4 (tray submenus), D5 (a real update on a test box), D10.
-- Merge `feature/phase-D`, tag v1.6.0. README: add a row per feature to the features table and a paragraph under the relevant section (autostart under "نصب و اجرا", Auto under "شروع سریع", backup under "نسخه و به‌روزرسانی", per-app under "حالت اتصال").
+- Merge `feature/phase-D`, tag v1.5.0 (done). README: add a row per feature to the features table and a paragraph under the relevant section (autostart under "نصب و اجرا", Auto under "شروع سریع", backup under "نسخه و به‌روزرسانی", per-app under "حالت اتصال").
