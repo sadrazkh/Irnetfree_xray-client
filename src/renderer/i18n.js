@@ -209,6 +209,9 @@ const I18N = {
     'lan.title': 'اجازه به شبکه محلی (LAN)', 'lan.sub': 'دستگاه‌های دیگه هم بتونن وصل بشن',
 
     'comp.title': 'فایل‌های موردنیاز', 'comp.hint': 'اگر فایلی نبود با یک کلیک دانلود و یکپارچه می‌شود — بدون نیاز به ساخت دوباره برنامه.',
+    'assets.auto': 'به‌روزرسانی خودکار فایل‌ها', 'assets.auto.off': 'خاموش',
+    'assets.auto.geo': 'هفتگی — فقط فایل‌های geo', 'assets.auto.all': 'هفتگی — فایل‌های geo و هسته‌ها',
+    'assets.auto.hint': 'فقط وقتی وصل نیستید. فایل‌های geo داده‌اند و کانفیگی را خراب نمی‌کنند؛ هستهٔ جدید می‌تواند رفتار عوض کند، پس فقط با انتخاب خودتان',
     'comp.xray': 'هسته Xray', 'comp.tun2socksLegacy': 'tun2socks (حالت TUN — قدیمی)',
     'comp.singbox': 'هستهٔ sing-box (بک‌اندِ حالت TUN، ضد DPI)',
     'comp.wintun': 'wintun.dll (حالت TUN)', 'comp.geo': 'فایل‌های روتینگ (geoip + geosite)',
@@ -595,6 +598,9 @@ const I18N = {
     'lan.title': 'Allow LAN', 'lan.sub': 'Let other devices connect too',
 
     'comp.title': 'Required files', 'comp.hint': 'Missing files are downloaded and integrated with one click — no rebuild needed.',
+    'assets.auto': 'Update files automatically', 'assets.auto.off': 'Off',
+    'assets.auto.geo': 'Weekly — geo files only', 'assets.auto.all': 'Weekly — geo files and cores',
+    'assets.auto.hint': 'Only while disconnected. Geo files are data and cannot break a config; a new core can change behaviour, so only if you choose it',
     'comp.xray': 'Xray core', 'comp.singbox': 'sing-box core (TUN backend, anti-DPI)',
     'comp.tun2socksLegacy': 'tun2socks (TUN mode — legacy)',
     'comp.wintun': 'wintun.dll (TUN mode)', 'comp.geo': 'Routing files (geoip + geosite)',

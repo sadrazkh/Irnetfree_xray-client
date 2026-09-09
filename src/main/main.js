@@ -33,6 +33,7 @@ const { NetWatcher, fingerprint } = require('./netWatcher');
 const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
 const { trayGroups } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
+const { AssetUpdater, cmpVersion } = require('./assetUpdater');
 const https = require('https');
 
 let mainWindow = null;
@@ -68,6 +69,7 @@ function statsCadence() {
 }
 let lastUsageSend = 0;
 let downloader = null;
+let assetUpdater = null;   // the weekly geo/core refresh (assetUpdater.js)
 let procWatcher = null;
 let netWatcher = null;
 const pinWatch = new PinWatch();   // the live plan's pinned servers, for the core's mismatch line
@@ -152,6 +154,10 @@ const DEFAULT_SETTINGS = {
   // a persistent change the user makes on purpose.
   launchAtLogin: false,
   autoConnect: false,
+  // weekly refresh of the downloaded files, never under a live tunnel:
+  // 'off' | 'geo' (the data files only — the default: they cannot break a
+  // working config) | 'all' (the installed cores too, when a release is newer)
+  autoUpdateAssets: 'geo',
   // which surfaces the window shows: 'simple' hides chains, the pool, the log
   // page and the custom-rule editor. A view preference only — renderer-owned,
   // never baked into a config, so it needs no reconnect.
@@ -2218,18 +2224,7 @@ function getJSON(url, depth = 0) {
   });
 }
 
-/** Compare dotted versions: 1 if a>b, -1 if a<b, 0 if equal. */
-function cmpVersion(a, b) {
-  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
-  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
-  const len = Math.max(pa.length, pb.length);
-  for (let i = 0; i < len; i++) {
-    const x = pa[i] || 0, y = pb[i] || 0;
-    if (x > y) return 1;
-    if (x < y) return -1;
-  }
-  return 0;
-}
+// cmpVersion lives in assetUpdater.js now (the weekly check needs it too).
 
 /* ----------------------------- lifecycle ----------------------------- */
 app.whenReady().then(() => {
@@ -2322,6 +2317,24 @@ app.whenReady().then(() => {
     onProgress: (component, pct) => send('asset-progress', { component, pct })
   });
 
+  // The weekly refresh of what the downloader put in place. Never while a
+  // tunnel is up; the same after-download steps the manual button takes.
+  assetUpdater = new AssetUpdater({
+    getSettings,
+    getCheckedAt: () => store.get('assetsCheckedAt', 0),
+    setCheckedAt: (t) => store.set('assetsCheckedAt', t),
+    download: async (c) => {
+      await downloader.download(c);
+      if (c !== 'geo') { if (c === 'xray') xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.anyBin()); }
+    },
+    installed: (id) => !!assetStatus()[id],
+    currentVersion: (id) => xray.version(id),
+    latestVersion: (id) => downloader.latestVersion(id),
+    busy: () => !!(xray.running || (tun && tun.active)),
+    onLog: (line, level) => send('log', { line, level })
+  });
+  assetUpdater.start();
+
   // Clear any leftover kill-switch firewall block from a previous crash so the
   // user is never permanently blocked.
   disarmKillSwitch().catch(() => {});
@@ -2389,6 +2402,7 @@ app.whenReady().then(() => {
 async function teardownForQuit() {
   userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
   try { if (store) store.flush(); } catch {}   // whatever setLazy() still holds
+  try { if (assetUpdater) assetUpdater.stop(); } catch {}
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}

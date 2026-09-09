@@ -40,6 +40,7 @@ const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta'
 const { migrateSettings } = require('../main/settingsMigrate');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
 const { exportBundle, importBundle } = require('../main/backup');
+const { AssetUpdater } = require('../main/assetUpdater');
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -92,6 +93,9 @@ const DEFAULT_SETTINGS = {
   // start with the OS (desktop-only) and connect to the last server on launch
   launchAtLogin: false,
   autoConnect: false,
+  // weekly refresh of the downloaded files, never under a live tunnel:
+  // 'off' | 'geo' (the data files only — the default) | 'all' (the cores too)
+  autoUpdateAssets: 'geo',
   // which surfaces the window shows: 'simple' hides chains, the pool, the log
   // page and the custom-rule editor. A view preference only — renderer-owned,
   // never baked into a config, so it needs no reconnect.
@@ -301,6 +305,23 @@ function createService(opts = {}) {
     onLog: (line, level) => send('log', { line, level }),
     onProgress: (component, pct) => send('asset-progress', { component, pct })
   });
+
+  // The weekly refresh of what the downloader put in place — same as main.js.
+  const assetUpdater = new AssetUpdater({
+    getSettings,
+    getCheckedAt: () => store.get('assetsCheckedAt', 0),
+    setCheckedAt: (t) => store.set('assetsCheckedAt', t),
+    download: async (c) => {
+      await downloader.download(c);
+      if (c !== 'geo') { if (c === 'xray') xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.anyBin()); }
+    },
+    installed: (id) => !!assetStatus()[id],
+    currentVersion: (id) => xray.version(id),
+    latestVersion: (id) => downloader.latestVersion(id),
+    busy: () => !!(xray.running || (tun && tun.active)),
+    onLog: (line, level) => send('log', { line, level })
+  });
+  assetUpdater.start();
 
   // The leak guard and its crash repair. A `tun-state.json` left in the data dir
   // means the last session died with every physical adapter still pointing at a
@@ -1599,6 +1620,7 @@ function createService(opts = {}) {
     if (isQuitting) return; isQuitting = true;
     userDisconnecting = true;
     try { store.flush(); } catch {}   // whatever setLazy() still holds
+    try { assetUpdater.stop(); } catch {}
     try { stopNetWatcher(); } catch {}
     try { if (stats) stats.stop(); } catch {}
     try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}

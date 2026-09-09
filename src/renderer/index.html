@@ -562,6 +562,15 @@
           <p class="hint" data-i18n="comp.hint"></p>
           <div class="comp-list" id="compList"></div>
           <p class="hint warn" id="compTunNote" data-i18n="comp.tunNote"></p>
+          <div class="setting-row">
+            <label class="field-label" data-i18n="assets.auto">به‌روزرسانی خودکار فایل‌ها</label>
+            <select id="optAutoUpdateAssets" class="select">
+              <option value="off" data-i18n="assets.auto.off">خاموش</option>
+              <option value="geo" data-i18n="assets.auto.geo">هفتگی — فقط فایل‌های geo</option>
+              <option value="all" data-i18n="assets.auto.all">هفتگی — فایل‌های geo و هسته‌ها</option>
+            </select>
+            <p class="hint" data-i18n="assets.auto.hint">فقط وقتی وصل نیستید. فایل‌های geo داده‌اند و کانفیگی را خراب نمی‌کنند؛ هستهٔ جدید می‌تواند رفتار عوض کند، پس فقط با انتخاب خودتان</p>
+          </div>
           <div class="row-gap">
             <button class="btn danger" id="btnRemoveFiles" data-i18n="comp.removeAll">حذف فایل‌های دانلودشده</button>
           </div>

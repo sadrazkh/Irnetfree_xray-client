@@ -370,6 +370,7 @@ function applySettingsToUI() {
   $('#optNotify').checked = s.notifications !== false;
   $('#optLaunchAtLogin').checked = !!s.launchAtLogin;
   $('#optAutoConnect').checked = !!s.autoConnect;
+  $('#optAutoUpdateAssets').value = ['off', 'geo', 'all'].includes(s.autoUpdateAssets) ? s.autoUpdateAssets : 'geo';
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
@@ -530,6 +531,7 @@ function readSettingsForm() {
     killSwitch: $('#optKillSwitch').checked,
     notifications: $('#optNotify').checked,
     autoConnect: $('#optAutoConnect').checked,
+    autoUpdateAssets: $('#optAutoUpdateAssets').value,
     blockAds: $('#optBlockAds').checked,
     enableSniffing: $('#optSniff').checked
   };
@@ -712,6 +714,7 @@ $('#optKillSwitch').onchange = async () => {
 $('#optNetAuto').onchange = () => saveSettings({ autoReconnectOnNetworkChange: $('#optNetAuto').checked });
 $('#optNotify').onchange = () => saveSettings({ notifications: $('#optNotify').checked });
 $('#optAutoConnect').onchange = () => saveSettings({ autoConnect: $('#optAutoConnect').checked });
+$('#optAutoUpdateAssets').onchange = () => saveSettings({ autoUpdateAssets: $('#optAutoUpdateAssets').value });
 // Deliberately NOT in readSettingsForm(): a plain "save" must never re-run the
 // OS registration. Main refuses and reverts when the OS says no — the switch
 // then follows what was actually stored, and the reason is shown.
