@@ -81,92 +81,10 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
   };
 }
 
-/**
- * The privileged macOS setup script. Pure, so a reviewer can read every line
- * without a Mac. NOTE: no `set -e` — the critical step (a new utun) is checked
- * explicitly so a benign non-zero cannot abort the script, and a failure
- * prints the sing-box log to stderr for diagnosis.
- */
-function buildMacSetupScript({ bin, cfgFile, logFile, pidFile, devFile, service, dnsServers = [] }) {
-  const dnsLine = (service && dnsServers.length)
-    ? `networksetup -setdnsservers ${sh(service)} ${dnsServers.join(' ')} 2>/dev/null || true`
-    : 'true';
-  return [
-    '#!/bin/bash',
-    // Ignore hangups so sing-box keeps running after this privileged shell
-    // exits. SIG_IGN is inherited by the child, so the daemon survives WITHOUT
-    // `nohup` — which fails under `osascript do shell script` with
-    // "nohup: can't detach from console: Inappropriate ioctl for device".
-    "trap '' HUP",
-    `BIN=${sh(bin)}`,
-    `CFG=${sh(cfgFile)}`,
-    `LOG=${sh(logFile)}`,
-    `PIDFILE=${sh(pidFile)}`,
-    `DEVFILE=${sh(devFile)}`,
-    // snapshot existing utun interfaces (single space-separated line)
-    'BEFORE=" $(ifconfig -l 2>/dev/null) "',
-    // 1) launch sing-box as root, backgrounded with all FDs redirected so it
-    //    keeps running after the privileged shell returns (no controlling tty
-    //    under osascript, and HUP is trapped above → no SIGHUP reaches it).
-    '"$BIN" run -c "$CFG" >"$LOG" 2>&1 </dev/null &',
-    'SBPID=$!',
-    'echo "$SBPID" > "$PIDFILE"',
-    // 2) wait for a NEW utun device: sing-box names the unit itself (sing-tun
-    //    on darwin only accepts utun<N>, so the config carries no name). Stop
-    //    waiting early when the process is already gone.
-    'ACTUAL=""',
-    'i=0',
-    'while [ $i -lt 50 ]; do',
-    '  for u in $(ifconfig -l 2>/dev/null); do',
-    '    case "$u" in',
-    '      utun*)',
-    '        case "$BEFORE" in',
-    '          *" $u "*) ;;',
-    '          *) ACTUAL="$u"; break;;',
-    '        esac;;',
-    '    esac',
-    '  done',
-    '  if [ -n "$ACTUAL" ]; then break; fi',
-    '  if ! kill -0 "$SBPID" 2>/dev/null; then break; fi',
-    '  i=$((i+1))',
-    '  sleep 0.3',
-    'done',
-    'if [ -z "$ACTUAL" ]; then',
-    '  echo "ERR: sing-box did not create a utun device" >&2',
-    '  echo "----- sing-box log -----" >&2',
-    '  cat "$LOG" >&2 2>/dev/null',
-    '  exit 11',
-    'fi',
-    'echo "$ACTUAL" > "$DEVFILE"',
-    // 3) NO ifconfig / route lines: auto_route set the address and the v4+v6
-    //    default routes, and removes them again on SIGTERM.
-    // 4) DNS through the tunnel (leak prevention)
-    dnsLine,
-    'exit 0',
-    ''
-  ].join('\n');
-}
-
-/** The privileged macOS teardown script. Pure. */
-function buildMacTeardownScript({ pid, cfgFile, service, savedDns }) {
-  const lines = ['#!/bin/bash'];
-  const p = parseInt(pid, 10) || 0;
-  if (p) {
-    // SIGTERM: sing-box removes its routes and the utun on the way out. Wait
-    // (bounded, 4 s) so a reconnect cannot race a tunnel that is still going.
-    lines.push(`kill ${p} 2>/dev/null || true`);
-    lines.push('i=0');
-    lines.push(`while [ $i -lt 20 ] && kill -0 ${p} 2>/dev/null; do i=$((i+1)); sleep 0.2; done`);
-  }
-  // belt-and-braces: any sing-box we launched on this config, by its argv
-  if (cfgFile) lines.push(`pkill -f ${sh(`sing-box run -c ${cfgFile}`)} 2>/dev/null || true`);
-  if (service) {
-    const dns = (savedDns && savedDns.length) ? savedDns.join(' ') : 'Empty';
-    lines.push(`networksetup -setdnsservers ${sh(service)} ${dns} 2>/dev/null || true`);
-  }
-  lines.push('exit 0', '');
-  return lines.join('\n');
-}
+const { buildMacSetupScript, buildMacTeardownScript } = require('./macTunScripts');
+// Keep overlapping Connect/Disconnect calls from recovering another live
+// instance's session in this process. Crash recovery starts with an empty map.
+const macOwners = require('./macSessionLock');
 
 /** Race a promise against a deadline; the timer never outlives the race. */
 function withTimeout(promise, ms, fallback) {
@@ -196,6 +114,10 @@ class TunSingbox {
     this.work = null;          // temp dir holding the config (and, on macOS, log/pid/scripts)
     this.macState = null;      // macOS runtime state (pid, device, saved DNS)
     this.macLogTimer = null;
+    this.macHealthTimer = null;
+    this.userData = opts.userData || null;
+    this.onUnexpectedExit = opts.onUnexpectedExit || (() => {});
+    this.macOwnerKey = this.userData ? path.resolve(this.userData) : this;
   }
 
   /** Pick the message in the user's language (fa default). */
@@ -268,7 +190,9 @@ class TunSingbox {
   }
 
   writeConfig(socksPort, excludeIps, opts, interfaceName) {
-    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-sb-'));
+    const base = this.platform === 'darwin' && this.userData ? path.join(this.userData, 'mac-tun-sessions') : os.tmpdir();
+    fs.mkdirSync(base, { recursive: true, mode: 0o700 });
+    const work = fs.mkdtempSync(path.join(base, 'irnf-sb-'));
     const cfgFile = path.join(work, 'sing-box.json');
     const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName });
     fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
@@ -394,6 +318,7 @@ class TunSingbox {
 
   /* ----------------------------- macOS (blind) ----------------------------- */
   async startMac(socksPort, bypassAddrs, dnsServers, opts) {
+    if (this.macState || this.hasPendingMacRecovery()) await this.recoverMacSessions();
     const bin = this.singboxPath();
     if (!bin) throw new Error(this.msg(
       'sing-box پیدا نشد — آن را در پوشه bin بگذارید (از «فایل‌های موردنیاز» دانلود کن)',
@@ -413,7 +338,8 @@ class TunSingbox {
     this.onLog(`Default gateway: ${route.gateway} (dev ${route.device})`, 'info');
 
     const service = await platform.serviceForDeviceMac(route.device);
-    const savedDns = service ? await platform.getServiceDnsMac(service) : [];
+    if (!service) throw new Error('No physical macOS network service found; TUN DNS cannot be configured');
+    const savedDns = await platform.getServiceDnsMac(service, { strict: true });
     const dns = this.adapterDns(dnsServers, opts);
 
     const ips = await this.bypassIps(bypassAddrs);
@@ -425,8 +351,16 @@ class TunSingbox {
     const pidFile = path.join(work, 'sing-box.pid');
     const devFile = path.join(work, 'sing-box.dev');
     const setupPath = path.join(work, 'setup.sh');
+    const identityFile = path.join(work, 'identity');
+    const dnsFile = path.join(work, 'dns-changed');
+    const teardownPath = path.join(work, 'teardown.sh');
+    // Pre-create root-written output files as the app user so they remain readable.
+    for (const file of [logFile, pidFile, devFile, identityFile]) fs.writeFileSync(file, '', { mode: 0o600 });
+    this.macState = { work, bin, cfgFile, logFile, pidFile, devFile, identityFile, dnsFile, service, savedDns, macPid: null, dev: '', ownerPid: process.pid };
+    this.saveMacSession();
+    fs.writeFileSync(teardownPath, buildMacTeardownScript(this.macState), { mode: 0o700 });
     fs.writeFileSync(setupPath, buildMacSetupScript({
-      bin, cfgFile, logFile, pidFile, devFile, service, dnsServers: [...dns.v4, ...dns.v6]
+      bin, cfgFile, logFile, pidFile, devFile, identityFile, dnsFile, teardownPath, service, dnsServers: [...dns.v4, ...dns.v6]
     }), { mode: 0o700 });
 
     this.onLog('Starting sing-box (you may be asked for your password)…', 'info');
@@ -436,13 +370,17 @@ class TunSingbox {
       const m = (e.message || '').toString();
       // Make the sing-box output visible in the app log for diagnosis.
       let logTail = '';
-      try { logTail = fs.readFileSync(logFile, 'utf8').trim(); } catch {}
+      try { logTail = this.readMacLogChunk(logFile).text.trim(); } catch {}
       if (logTail) {
         for (const line of logTail.split(/\r?\n/).slice(-12)) {
           if (line.trim()) this.onLog('[tun] ' + line.trim(), 'error');
         }
       }
-      this.removeWork();
+      // A cancelled prompt before launch is safe to discard. After any mutation
+      // the privileged rollback owns cleanup; keep the journal for verified recovery.
+      if (!fs.readFileSync(pidFile, 'utf8').trim() && !fs.existsSync(dnsFile)) {
+        this.removeWork(); this.macState = null;
+      }
       if (/User canceled|-128/i.test(m)) {
         throw new Error(this.msg(
           'برای حالت TUN باید اجازه دسترسی (رمز عبور) بدهید',
@@ -459,33 +397,88 @@ class TunSingbox {
     try { dev = fs.readFileSync(devFile, 'utf8').trim(); } catch {}
     this.onLog(`TUN device: ${dev || 'utun (unit unknown)'}`, 'info');
 
-    this.macState = { work, cfgFile, logFile, pidFile, macPid, service, savedDns, dev };
+    Object.assign(this.macState, { macPid, dev });
+    if (!macPid || !/^utun\d+$/.test(dev)) throw new Error('TUN setup returned incomplete process/interface state; recovery required');
+    this.saveMacSession();
+    this.stopping = false;
     this.active = true;
 
     // Surface sing-box logs into the app log by tailing the (root-owned) file.
     this.startMacLogTail(logFile);
+    this.startMacHealthCheck();
 
     this.onLog(this.msg('حالت TUN فعال شد (کل سیستم).', 'TUN mode active (whole system).'), 'info');
   }
 
-  /** Periodically tail new lines from the sing-box log file. */
+  saveMacSession() {
+    const file = path.join(this.macState.work, 'session.json');
+    fs.writeFileSync(file + '.tmp', JSON.stringify(this.macState), { mode: 0o600 });
+    fs.renameSync(file + '.tmp', file);
+  }
+
+  hasPendingMacRecovery() {
+    if (this.platform !== 'darwin') return false;
+    if (this.macState) return true;
+    if (!this.userData) return false;
+    const base = path.join(this.userData, 'mac-tun-sessions');
+    try { return fs.readdirSync(base).some(n => /^irnf-sb-/.test(n) && fs.existsSync(path.join(base, n, 'session.json'))); }
+    catch (e) { if (e.code === 'ENOENT') return false; throw e; }
+  }
+
+  async recoverMacSessions() {
+    if (this.platform !== 'darwin') return 0;
+    const owner = macOwners.get(this.macOwnerKey);
+    if (owner && owner !== this) throw new Error('Another tunnel operation is live; disconnect it before recovery');
+    if (this.active && !this.stopping) throw new Error('Disconnect the active tunnel before recovery');
+    let count = 0;
+    if (this.macState) { await this.stopMac(); count++; }
+    if (!this.userData) return count;
+    const base = path.resolve(this.userData, 'mac-tun-sessions');
+    let names;
+    try { names = fs.readdirSync(base); } catch (e) { if (e.code === 'ENOENT') return count; throw e; }
+    for (const name of names.filter(n => /^irnf-sb-/.test(n))) {
+      const work = path.join(base, name);
+      if (fs.lstatSync(work).isSymbolicLink()) throw new Error('Invalid tunnel recovery directory');
+      const file = path.join(work, 'session.json');
+      if (!fs.existsSync(file)) continue;
+      if (fs.lstatSync(file).isSymbolicLink()) throw new Error('Invalid tunnel recovery journal');
+      const st = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (Number.isInteger(st.ownerPid) && st.ownerPid > 1 && st.ownerPid !== process.pid) {
+        try {
+          process.kill(st.ownerPid, 0);
+          throw new Error('Another application instance may own this tunnel; close it before recovery');
+        } catch (e) { if (e.code !== 'ESRCH') throw e; }
+      }
+      // Reject redirected artifacts before writing or deleting anything.
+      if (path.resolve(st.work || '') !== work || !Array.isArray(st.savedDns) || typeof st.bin !== 'string') throw new Error('Invalid tunnel recovery session');
+      for (const key of ['cfgFile', 'logFile', 'pidFile', 'devFile', 'identityFile', 'dnsFile']) {
+        if (typeof st[key] !== 'string' || path.dirname(path.resolve(st[key])) !== work) throw new Error('Invalid tunnel recovery path');
+        if (fs.existsSync(st[key]) && fs.lstatSync(st[key]).isSymbolicLink()) throw new Error('Invalid tunnel recovery artifact');
+      }
+      this.macState = st; this.work = work;
+      await this.stopMac(); count++;
+    }
+    return count;
+  }
+
+  readMacLogChunk(logFile, pos = 0) {
+    const size = fs.statSync(logFile).size;
+    if (size < pos) pos = 0;
+    const start = Math.max(pos, size - 32768);
+    const buf = Buffer.alloc(size - start);
+    const fd = fs.openSync(logFile, 'r');
+    let bytes;
+    try { bytes = fs.readSync(fd, buf, 0, buf.length, start); } finally { fs.closeSync(fd); }
+    return { text: buf.subarray(0, bytes).toString('utf8'), pos: start + bytes };
+  }
+
   startMacLogTail(logFile) {
     this.stopMacLogTail();
     let pos = 0;
     this.macLogTimer = setInterval(() => {
       try {
-        const stat = fs.statSync(logFile);
-        if (stat.size < pos) pos = 0;
-        if (stat.size === pos) return;
-        const fd = fs.openSync(logFile, 'r');
-        const len = stat.size - pos;
-        const buf = Buffer.alloc(len);
-        fs.readSync(fd, buf, 0, len, pos);
-        fs.closeSync(fd);
-        pos = stat.size;
-        for (const line of buf.toString('utf8').split(/\r?\n/)) {
-          if (line.trim()) this.onLog('[tun] ' + line.trim(), 'warn');
-        }
+        const chunk = this.readMacLogChunk(logFile, pos); pos = chunk.pos;
+        for (const line of chunk.text.split(/\r?\n/)) if (line.trim()) this.onLog('[tun] ' + line.trim(), 'warn');
       } catch {}
     }, 1500);
     if (this.macLogTimer.unref) this.macLogTimer.unref();
@@ -495,22 +488,55 @@ class TunSingbox {
     if (this.macLogTimer) { clearInterval(this.macLogTimer); this.macLogTimer = null; }
   }
 
-  async stopMac() {
-    this.stopMacLogTail();
-    const st = this.macState || {};
-    const work = st.work || fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-sb-'));
-    const teardownPath = path.join(work, 'teardown.sh');
+  async checkMacHealth() {
+    const st = this.macState;
+    if (!st || !this.active || this.stopping || this.macHealthBusy) return;
+    this.macHealthBusy = true;
     try {
-      fs.writeFileSync(teardownPath, buildMacTeardownScript({
-        pid: st.macPid, cfgFile: st.cfgFile, service: st.service, savedDns: st.savedDns
-      }), { mode: 0o700 });
-      await platform.runScriptPrivileged(teardownPath);
+      const command = await platform.run('ps', ['-ww', '-p', String(st.macPid), '-o', 'command='], { timeout: 3000 });
+      const birth = await platform.run('ps', ['-ww', '-p', String(st.macPid), '-o', 'lstart='], { timeout: 3000 });
+      if (command.trim() !== `${st.bin} run -c ${st.cfgFile}` || birth.trim() !== fs.readFileSync(st.identityFile, 'utf8').trim()) throw new Error('Tunnel process exited or changed identity');
     } catch (e) {
-      this.onLog('TUN teardown: ' + (e.message || e), 'warn');
-    }
-    try { fs.rmSync(work, { recursive: true, force: true }); } catch {}
-    this.work = null;
-    this.macState = null;
+      if (this.macState !== st || this.stopping || !this.active) return;
+      this.active = false;
+      this.stopMacHealthCheck(); this.stopMacLogTail();
+      this.onLog('TUN process lost; network recovery required: ' + e.message, 'error');
+      Promise.resolve().then(() => this.onUnexpectedExit(e)).catch(err => this.onLog('TUN recovery callback: ' + err.message, 'error'));
+    } finally { this.macHealthBusy = false; }
+  }
+
+  startMacHealthCheck() {
+    this.stopMacHealthCheck();
+    this.macHealthTimer = setInterval(() => { void this.checkMacHealth(); }, 3000);
+    if (this.macHealthTimer.unref) this.macHealthTimer.unref();
+  }
+
+  stopMacHealthCheck() {
+    if (this.macHealthTimer) clearInterval(this.macHealthTimer);
+    this.macHealthTimer = null;
+  }
+
+  async stopMac() {
+    if (this.macStopPromise) return this.macStopPromise;
+    if (!this.macState) return;
+    const st = this.macState;
+    this.stopping = true;
+    this.stopMacLogTail(); this.stopMacHealthCheck();
+    this.macStopPromise = (async () => {
+      const teardownPath = path.join(st.work, 'teardown.sh');
+      try {
+        if (fs.existsSync(teardownPath) && fs.lstatSync(teardownPath).isSymbolicLink()) throw new Error('Invalid tunnel teardown path');
+        fs.writeFileSync(teardownPath, buildMacTeardownScript({ ...st, pid: st.macPid }), { mode: 0o700 });
+        await platform.runScriptPrivileged(teardownPath);
+        fs.rmSync(st.work, { recursive: true, force: true });
+        this.work = null; this.macState = null; this.active = false; this.excludeIps = [];
+        if (!this.macStartPromise && macOwners.get(this.macOwnerKey) === this) macOwners.delete(this.macOwnerKey);
+      } catch (e) {
+        this.onLog('TUN teardown failed; recovery state retained: ' + e.message, 'error');
+        throw e;
+      } finally { this.stopping = false; }
+    })();
+    try { return await this.macStopPromise; } finally { this.macStopPromise = null; }
   }
 
   /* ----------------------------- Linux (best effort) ----------------------------- */
@@ -542,6 +568,20 @@ class TunSingbox {
    * @param opts        { ipv6, strict }
    */
   async start(socksPort, bypassAddrs, dnsServers, opts = {}) {
+    if (this.platform === 'darwin') {
+      if (this.macStartPromise) return this.macStartPromise;
+      if (this.macStopPromise) await this.macStopPromise;
+      if (this.active) return;
+      const owner = macOwners.get(this.macOwnerKey);
+      if (owner && owner !== this) throw new Error('Another tunnel operation is live; disconnect it first');
+      macOwners.set(this.macOwnerKey, this);
+      this.macStartPromise = this.startMac(socksPort, bypassAddrs, dnsServers, opts || {});
+      try { return await this.macStartPromise; }
+      finally {
+        this.macStartPromise = null;
+        if (!this.macState && !this.active && macOwners.get(this.macOwnerKey) === this) macOwners.delete(this.macOwnerKey);
+      }
+    }
     if (this.active) return;
     const o = opts || {};
     if (this.platform === 'win32') return this.startWindows(socksPort, bypassAddrs, dnsServers, o);
@@ -550,14 +590,19 @@ class TunSingbox {
   }
 
   async stop() {
+    // A stop during the administrator prompt must wait until setup has either
+    // completed or rolled back, before deleting scripts or recovery files.
+    if (this.platform === 'darwin' && this.macStartPromise) {
+      try { await this.macStartPromise; } catch {} // still clean a partial setup
+    }
     if (!this.active && !this.proc && !this.macState) return;
-    this.active = false;
-    this.excludeIps = [];
     if (this.platform === 'darwin') {
-      await this.stopMac().catch((e) => this.onLog('TUN stop: ' + (e.message || e), 'warn'));
+      await this.stopMac();
       this.onLog('TUN mode stopped.', 'info');
       return;
     }
+    this.active = false;
+    this.excludeIps = [];
     const proc = this.proc;
     if (proc) {
       // sing-box removes its routes (and WFP filters) on the way out; nothing
@@ -591,12 +636,13 @@ class TunSingbox {
       // Only when already root: we cannot show a password prompt during process
       // exit. Graceful disconnect / quit already ran the async privileged teardown.
       if (!(process.getuid && process.getuid() === 0)) return;
-      const st = this.macState || {};
-      try { if (st.macPid) execFileSync('kill', [String(st.macPid)], { stdio: 'ignore' }); } catch {}
-      if (st.service) {
-        const dns = (st.savedDns && st.savedDns.length) ? st.savedDns : ['Empty'];
-        try { execFileSync('networksetup', ['-setdnsservers', st.service, ...dns], { stdio: 'ignore' }); } catch {}
-      }
+      const st = this.macState;
+      if (!st) return;
+      try {
+        const script = path.join(st.work, 'teardown-sync.sh');
+        fs.writeFileSync(script, buildMacTeardownScript({ ...st, pid: st.macPid }), { mode: 0o700 });
+        execFileSync('/bin/bash', [script], { stdio: 'ignore', timeout: 12000 });
+      } catch {} // The durable journal remains available on the next launch.
       return;
     }
     try { if (this.proc) this.proc.kill('SIGTERM'); } catch {}

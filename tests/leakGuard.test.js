@@ -170,15 +170,9 @@ test('winRepairScript is the orphan kill followed by the restore, in one spawn',
   assert.equal(winRepairScript(adapters), winOrphanKillScript() + '\n' + winRestoreScript(adapters));
 });
 
-test('macOrphanKillScript kills a stray tunnel by its argv', () => {
-  assert.equal(macOrphanKillScript(), [
-    '#!/bin/bash',
-    'FAIL=0',
-    'for p in $(pgrep -f \'sing-box run -c .*irnf-sb-\' 2>/dev/null); do echo "killed sing-box (pid $p)"; kill -TERM "$p" 2>/dev/null || true; done',
-    'for p in $(pgrep -f \'[-]device utun\' 2>/dev/null); do echo "killed tun2socks (pid $p)"; kill -TERM "$p" 2>/dev/null || true; done',
-    'exit $FAIL',
-    ''
-  ].join('\n'));
+test('macOS guard never kills processes without an owned backend session', () => {
+  assert.doesNotMatch(macOrphanKillScript(), /pgrep|pkill|kill -/);
+  assert.equal(macRepairScript([]), macRestoreScript([]));
 });
 
 /* ----------------------------- macOS ----------------------------- */
@@ -1301,4 +1295,26 @@ test('recorded resolvers are quoted before they reach a root shell', () => {
   assert.equal(script.includes(evil), false, 'the payload is never interpolated raw');
   assert.equal(script.split(String.fromCharCode(92) + "'").length - 1, 2, 'both quotes escaped');
   assert.match(script, /networksetup -setdnsservers 'Wi-Fi' .* \|\| FAIL=1/);
+});
+
+for (const dns of [['9.9.9.9', '149.112.112.112'], []]) {
+  test('macOS restores pre-TUN DNS including DHCP: ' + JSON.stringify(dns), async () => {
+    const h = harness('darwin', cmd => cmd === 'privileged' ? '' : 'Wi-Fi\t' + PEER4 + '\n');
+    await h.guard.engage({level:'standard', peer4:PEER4, originalMacServices:[{name:'Wi-Fi',dns}]});
+    assert.deepEqual(h.state().mac.services, [{name:'Wi-Fi',dns}]);
+    await h.guard.release();
+    assert.equal(h.calls.at(-1).script, macRestoreScript([{name:'Wi-Fi',dns}]));
+  });
+}
+test('macOS retains previous-session originals ahead of a reconnect snapshot', async () => {
+  const h = harness('darwin', cmd => cmd === 'privileged' ? '' : 'Wi-Fi\t' + PEER4 + '\n');
+  const opts = {level:'standard', peer4:PEER4};
+  await h.guard.engage({...opts, originalMacServices:[{name:'Wi-Fi',dns:['9.9.9.9']}]});
+  await h.guard.engage({...opts, originalMacServices:[{name:'Wi-Fi',dns:[PEER4]}]});
+  assert.deepEqual(h.state().mac.services, [{name:'Wi-Fi',dns:['9.9.9.9']}]);
+});
+test('macOS trusts a fresh uncontaminated service instead of stale setup DNS', async () => {
+  const h = harness('darwin', cmd => cmd === 'privileged' ? '' : 'Wi-Fi\t8.8.4.4\nEthernet\t' + PEER4 + '\n');
+  await h.guard.engage({level:'standard', peer4:PEER4, originalMacServices:[{name:'Wi-Fi',dns:['9.9.9.9']}]});
+  assert.deepEqual(h.state().mac.services, [{name:'Wi-Fi',dns:['8.8.4.4']},{name:'Ethernet',dns:[]}]);
 });

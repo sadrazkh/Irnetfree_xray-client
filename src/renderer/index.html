@@ -17,6 +17,7 @@
   <!-- Applies the remembered theme before the first paint, so a light-theme user
        does not see a dark flash while app:init is still in flight. -->
   <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="diagnostics.css">
 </head>
 <body>
   <!-- custom titlebar -->
@@ -174,6 +175,7 @@
           <div class="hero-actions">
             <button class="btn ghost" id="btnReconnect" data-i18n="btn.reconnect" hidden>اتصال مجدد</button>
             <button class="btn ghost" id="btnQuickPing" data-i18n="btn.quickPing">تست پینگ</button>
+            <button class="btn ghost" id="btnDiagnostics">عیب‌یابی / Diagnostics</button>
             <button class="btn ghost" id="btnCheckIp" data-i18n="btn.checkIp">بررسی IP</button>
           </div>
         </div>
@@ -1045,6 +1047,7 @@
   </div>
   <script src="vendor/qrcode.js"></script>
   <script src="i18n.js"></script>
+  <script src="diagnostics.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

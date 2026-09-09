@@ -1381,6 +1381,7 @@ async function checkIp(retries = 0, quiet = false) {
   }
   return info;
 }
+$('#btnDiagnostics').onclick = () => window.IRNFDiagnostics.open();
 $('#btnCheckIp').onclick = () => checkIp(1);
 
 function showGeo(info) {
@@ -1415,7 +1416,7 @@ async function connect(id) {
 }
 
 async function disconnect() {
-  await window.api.disconnect();
+  try { await window.api.disconnect(); } catch (e) { toast(e.message, 'err'); }
 }
 
 $('#powerBtn').onclick = () => {
@@ -1833,6 +1834,8 @@ window.api.onStatus((d) => {
       setConnUI('error');
       toast(t('net.failed'), 'err', 8000);
     }
+  } else if (d.state === 'cleanup-failed') {
+    toast(d.error, 'err');
   } else if (d.state === 'error') {
     // e.g. a settings reconnect whose new config the core rejected
     state.connected = false;
