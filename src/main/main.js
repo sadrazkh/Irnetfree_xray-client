@@ -31,6 +31,7 @@ const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
 const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
+const { trayGroups } = require('./trayMenu');
 const https = require('https');
 
 let mainWindow = null;
@@ -214,6 +215,8 @@ function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+  // the tray marks the live server and lists what a subscription refresh brought
+  if (channel === 'status' || channel === 'subs-updated') refreshTray();
 }
 
 /**
@@ -384,15 +387,49 @@ function createTray() {
   }
   tray = new Tray(icon);
   tray.setToolTip('IRNetFree');
-  const menu = Menu.buildFromTemplate([
-    { label: 'نمایش / Show', click: () => { mainWindow.show(); } },
-    { type: 'separator' },
-    { label: 'قطع اتصال / Disconnect', click: () => doDisconnect() },
-    { type: 'separator' },
-    { label: 'خروج / Quit', click: () => { isQuitting = true; app.quit(); } }
-  ]);
-  tray.setContextMenu(menu);
+  refreshTray();
   tray.on('double-click', () => mainWindow.show());
+}
+
+/**
+ * The tray menu: show, the servers by subscription (one click connects, the
+ * live one marked), disconnect, quit. Rebuilt whenever the servers, the
+ * subscriptions, the connection or the language change — cheap, and the only
+ * way an Electron context menu can reflect state.
+ */
+function trayMenuTemplate() {
+  const en = isEn();
+  const active = store.get('activeServerId', null);
+  const item = (it) => ({
+    label: (it.id === active ? '● ' : '') + it.name,
+    click: () => doConnect(it.id).catch((e) => send('log', { line: 'Connect failed: ' + e.message, level: 'error' }))
+  });
+  const groups = trayGroups(store.get('servers', []), store.get('subscriptions', [])).map((g) => ({
+    label: g.label || (en ? 'Servers' : 'سرورها'),
+    submenu: g.items.map(item)
+  }));
+  return [
+    { label: en ? 'Show' : 'نمایش', click: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show(); } },
+    { type: 'separator' },
+    ...groups,
+    ...(groups.length ? [{ type: 'separator' }] : []),
+    { label: en ? 'Disconnect' : 'قطع اتصال', enabled: !!active, click: () => doDisconnect() },
+    { type: 'separator' },
+    { label: en ? 'Quit' : 'خروج', click: () => { isQuitting = true; app.quit(); } }
+  ];
+}
+
+/** Never lets a menu problem out: the tray existed before this menu and must outlive any bug in it. */
+function refreshTray() {
+  if (!tray) return;
+  try { tray.setContextMenu(Menu.buildFromTemplate(trayMenuTemplate())); }
+  catch (e) { send('log', { line: 'Tray menu: ' + e.message, level: 'warn' }); }
+}
+
+/** Every write of the servers list from the IPC handlers goes through here, so the tray follows it. */
+function setServers(list) {
+  store.set('servers', list);
+  refreshTray();
 }
 
 /* ----------------------------- core actions ----------------------------- */
@@ -1675,7 +1712,7 @@ function registerIpc() {
     const { servers: parsed, errors } = parseMany(text);
     const existing = store.get('servers', []);
     const merged = existing.concat(parsed);
-    store.set('servers', merged);
+    setServers(merged);
     return { added: parsed.length, errors, servers: merged };
   });
 
@@ -1683,7 +1720,7 @@ function registerIpc() {
     const server = parseLink(link);
     const existing = store.get('servers', []);
     existing.push(server);
-    store.set('servers', existing);
+    setServers(existing);
     return server;
   });
 
@@ -1691,7 +1728,7 @@ function registerIpc() {
     const server = makeWireguardServer(fields || {});
     const existing = store.get('servers', []);
     existing.push(server);
-    store.set('servers', existing);
+    setServers(existing);
     return { server, servers: existing };
   });
 
@@ -1699,7 +1736,7 @@ function registerIpc() {
     const server = makeProxyServer(fields || {});
     const existing = store.get('servers', []);
     existing.push(server);
-    store.set('servers', existing);
+    setServers(existing);
     return { server, servers: existing };
   });
 
@@ -1724,7 +1761,7 @@ function registerIpc() {
     const idx = servers.findIndex(s => s.id === id);
     if (idx === -1) return { ok: false, error: 'not found', servers };
     servers[idx] = applyServerEdits(servers[idx], fields || {});
-    store.set('servers', servers);
+    setServers(servers);
     return { ok: true, server: servers[idx], servers };
   });
 
@@ -1790,12 +1827,12 @@ function registerIpc() {
   ipcMain.handle('servers:delete', (e, id) => {
     let servers = store.get('servers', []);
     servers = servers.filter(s => s.id !== id);
-    store.set('servers', servers);
+    setServers(servers);
     return servers;
   });
 
   ipcMain.handle('servers:clear', () => {
-    store.set('servers', []);
+    setServers([]);
     return [];
   });
 
@@ -1851,6 +1888,7 @@ function registerIpc() {
     if ('killSwitch' in partial && !next.killSwitch && killEngaged) {
       disarmKillSwitch().then(() => send('killswitch', { engaged: false }));
     }
+    if ('lang' in partial) refreshTray();   // the tray's own labels follow the language
     // Start with the OS: a persistent change to the machine, made only when the
     // switch itself moves — never on a plain "save" — and undone in the store
     // when the OS refuses, so the switch cannot claim something that is not so.
