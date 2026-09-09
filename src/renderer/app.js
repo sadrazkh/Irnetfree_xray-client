@@ -332,6 +332,8 @@ function applySettingsToUI() {
   $('#optKillSwitch').checked = !!s.killSwitch;
   $('#optNetAuto').checked = s.autoReconnectOnNetworkChange !== false;
   $('#optNotify').checked = s.notifications !== false;
+  $('#optLaunchAtLogin').checked = !!s.launchAtLogin;
+  $('#optAutoConnect').checked = !!s.autoConnect;
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
@@ -491,6 +493,7 @@ function readSettingsForm() {
     allowLan: $('#optAllowLan').checked,
     killSwitch: $('#optKillSwitch').checked,
     notifications: $('#optNotify').checked,
+    autoConnect: $('#optAutoConnect').checked,
     blockAds: $('#optBlockAds').checked,
     enableSniffing: $('#optSniff').checked
   };
@@ -513,8 +516,9 @@ function listFromInput(sel) {
  */
 async function saveSettings(partial = {}, { silent = false } = {}) {
   const res = await window.api.setSettings(partial);
-  // main returns { settings, pendingReconnect }; tolerate the older bare shape
+  // main returns { settings, pendingReconnect, error? }; tolerate the older bare shape
   state.settings = (res && res.settings) ? res.settings : res;
+  state.lastSettingsError = (res && res.error) || null;   // a key main refused (and reverted)
   setPending((res && res.pendingReconnect) || []);
 
   // The home diagram and the inspector are built from settings, so this is the
@@ -671,6 +675,15 @@ $('#optKillSwitch').onchange = async () => {
 /* auto-reconnect toggle — read live at recovery time, so it needs no reconnect */
 $('#optNetAuto').onchange = () => saveSettings({ autoReconnectOnNetworkChange: $('#optNetAuto').checked });
 $('#optNotify').onchange = () => saveSettings({ notifications: $('#optNotify').checked });
+$('#optAutoConnect').onchange = () => saveSettings({ autoConnect: $('#optAutoConnect').checked });
+// Deliberately NOT in readSettingsForm(): a plain "save" must never re-run the
+// OS registration. Main refuses and reverts when the OS says no — the switch
+// then follows what was actually stored, and the reason is shown.
+$('#optLaunchAtLogin').onchange = async () => {
+  await saveSettings({ launchAtLogin: $('#optLaunchAtLogin').checked });
+  $('#optLaunchAtLogin').checked = !!state.settings.launchAtLogin;
+  if (state.lastSettingsError) toast(t('login.failed') + ': ' + state.lastSettingsError, 'err');
+};
 
 function updateKillStatus() {
   const el = $('#killStatus');

@@ -88,6 +88,9 @@ const DEFAULT_SETTINGS = {
   autoReconnectOnNetworkChange: true,
   // desktop notifications for drops, recoveries and the kill switch (read live)
   notifications: true,
+  // start with the OS (desktop-only) and connect to the last server on launch
+  launchAtLogin: false,
+  autoConnect: false,
   // which surfaces the window shows: 'simple' hides chains, the pool, the log
   // page and the custom-rule editor. A view preference only — renderer-owned,
   // never baked into a config, so it needs no reconnect.
@@ -756,6 +759,7 @@ function createService(opts = {}) {
     // intent that was cancelled — and every side effect below would follow it.
     if (stale()) return abandoned;
     store.set('activeServerId', serverId);
+    store.set('lastServerId', serverId);   // survives a disconnect: "connect to the last server" at launch
     pinWatch.setLive(directServers(plan));
     appliedSettings = snapshotApplied(getSettings());
 
@@ -1409,7 +1413,16 @@ function createService(opts = {}) {
       if ('autoUpdateSubs' in partial || 'autoUpdateInterval' in partial) {
         if (next.autoUpdateSubs) subs.startAuto(next.autoUpdateInterval); else subs.stopAuto();
       }
-      return { settings: next, pendingReconnect: pendingKeys() };
+      // "Start with the OS" is a desktop setting: on a server the process is a
+      // service already. Refuse it in the store so the switch cannot claim it.
+      let error = null;
+      if ('launchAtLogin' in partial && next.launchAtLogin) {
+        next.launchAtLogin = false;
+        store.set('settings', next);
+        error = 'desktop-only';
+        send('log', { line: '"Start with the OS" is a desktop setting — on a server, run IRNetFree as a service', level: 'warn' });
+      }
+      return { settings: next, pendingReconnect: pendingKeys(), error };
     },
     'settings:pending': () => pendingKeys(),
     'settings:apply': () => reapplyConnection(),
@@ -1575,6 +1588,15 @@ function createService(opts = {}) {
   // kick off auto-update if enabled
   const st = getSettings();
   if (st.autoUpdateSubs) subs.startAuto(st.autoUpdateInterval);
+
+  // Connect to the last server on launch — the headless server's main use.
+  // Only a server that still exists; a failure is a log line, the process stays up.
+  if (st.autoConnect) {
+    const lastId = store.get('lastServerId', null);
+    if (lastId && store.get('servers', []).some(s => s.id === lastId)) {
+      setTimeout(() => doConnect(lastId).catch((e) => send('log', { line: 'Auto-connect failed: ' + e.message, level: 'error' })), 1000);
+    }
+  }
 
   return { invoke, onEvent, shutdown, dataDir, getSettings, assetStatus, version: appVersion };
 }

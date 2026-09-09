@@ -30,6 +30,7 @@ const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = requir
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
+const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
 const https = require('https');
 
 let mainWindow = null;
@@ -144,6 +145,11 @@ const DEFAULT_SETTINGS = {
   autoReconnectOnNetworkChange: true,
   // desktop notifications for drops, recoveries and the kill switch (read live)
   notifications: true,
+  // start with the OS, hidden in the tray (a logon task on Windows — see
+  // autostart.js) and connect to the last server on launch. Both off: each is
+  // a persistent change the user makes on purpose.
+  launchAtLogin: false,
+  autoConnect: false,
   // which surfaces the window shows: 'simple' hides chains, the pool, the log
   // page and the custom-rule editor. A view preference only — renderer-owned,
   // never baked into a config, so it needs no reconnect.
@@ -224,6 +230,21 @@ function notify(title, body) {
 }
 /** The user's language, for the few strings main.js shows itself. */
 function isEn() { return getSettings().lang === 'en'; }
+
+/**
+ * Register or remove the OS autostart. Windows: a logon task (autostart.js
+ * says why a login item cannot work for an elevated app). Resolves { ok,
+ * error } — never throws, so a refusal from the OS is a message, not a crash.
+ */
+function setAutostart(enabled) {
+  if (process.platform === 'win32') {
+    const args = enabled ? schtasksCreateArgs(autostartExe()) : schtasksDeleteArgs();
+    return new Promise((resolve) => execFile('schtasks', args, { windowsHide: true }, (err, so, se) =>
+      resolve({ ok: !err, error: err ? String(se || err.message).trim() : null })));
+  }
+  try { app.setLoginItemSettings({ openAtLogin: !!enabled, args: ['--hidden'] }); return Promise.resolve({ ok: true }); }
+  catch (e) { return Promise.resolve({ ok: false, error: e.message }); }
+}
 
 /* ----------------------------- LAN sharing ----------------------------- */
 // When "Allow LAN" is on, the SOCKS/HTTP inbounds already listen on 0.0.0.0
@@ -316,11 +337,14 @@ async function disarmKillSwitch() {
 }
 
 function createWindow() {
+  // `--hidden`: started by the OS at logon (autostart.js) — stay in the tray.
+  const startHidden = process.argv.includes('--hidden');
   mainWindow = new BrowserWindow({
     width: 1080,
     height: 720,
     minWidth: 900,
     minHeight: 600,
+    show: !startHidden,
     backgroundColor: '#0d1117',
     title: 'IRNetFree',
     icon: path.join(__dirname, '..', '..', 'assets', 'icon.png'),
@@ -842,6 +866,9 @@ async function doConnect(serverId, opts = {}) {
   if (stale()) return abandoned;
 
   store.set('activeServerId', serverId);
+  // `activeServerId` is cleared by a disconnect; this one survives it, for
+  // "connect to the last server" at the next launch.
+  store.set('lastServerId', serverId);
   pinWatch.setLive(directServers(plan));
   // Everything below is a connect-time side effect, so from here on the live
   // tunnel matches these settings exactly — record what it was built from.
@@ -1811,8 +1838,9 @@ function registerIpc() {
    * Returns { settings, pendingReconnect } — the renderer offers to reconnect
    * when `pendingReconnect` is non-empty instead of pretending the change is live.
    */
-  ipcMain.handle('settings:set', (e, partial) => {
-    const next = Object.assign(getSettings(), partial);
+  ipcMain.handle('settings:set', async (e, partial) => {
+    const prev = getSettings();
+    const next = Object.assign({}, prev, partial);
     store.set('settings', next);
     // react to auto-update changes live
     if ('autoUpdateSubs' in partial || 'autoUpdateInterval' in partial) {
@@ -1823,7 +1851,22 @@ function registerIpc() {
     if ('killSwitch' in partial && !next.killSwitch && killEngaged) {
       disarmKillSwitch().then(() => send('killswitch', { engaged: false }));
     }
-    return { settings: next, pendingReconnect: pendingKeys() };
+    // Start with the OS: a persistent change to the machine, made only when the
+    // switch itself moves — never on a plain "save" — and undone in the store
+    // when the OS refuses, so the switch cannot claim something that is not so.
+    let error = null;
+    if ('launchAtLogin' in partial && !!next.launchAtLogin !== !!prev.launchAtLogin) {
+      const r = await setAutostart(!!next.launchAtLogin);
+      if (r.ok) {
+        send('log', { line: next.launchAtLogin ? 'IRNetFree will start with the OS, in the tray' : 'IRNetFree will no longer start with the OS', level: 'info' });
+      } else {
+        error = r.error || 'autostart failed';
+        next.launchAtLogin = !!prev.launchAtLogin;
+        store.set('settings', next);
+        send('log', { line: 'Could not change "start with the OS": ' + error, level: 'error' });
+      }
+    }
+    return { settings: next, pendingReconnect: pendingKeys(), error };
   });
   /**
    * Which geo codes in these rules the installed data files do not carry. The
@@ -2249,7 +2292,17 @@ app.whenReady().then(() => {
     powerMonitor.on('resume', () => { if (netWatcher) netWatcher.poke('resume'); });
   } catch {}
 
-  mainWindow.once('ready-to-show', () => updateOverlay('off'));
+  mainWindow.once('ready-to-show', () => {
+    updateOverlay('off');
+    // Connect to the last server on launch — once the renderer exists, so the
+    // 'connecting' and 'connected' events have somewhere to land. Only a server
+    // that still exists; a failure is a log line, the app stays up.
+    const boot = getSettings();
+    const lastId = store.get('lastServerId', null);
+    if (boot.autoConnect && lastId && store.get('servers', []).some(s => s.id === lastId)) {
+      setTimeout(() => doConnect(lastId).catch((e) => send('log', { line: 'Auto-connect failed: ' + e.message, level: 'error' })), 1000);
+    }
+  });
 
   // kick off auto-update for subscriptions if enabled
   const st = getSettings();
