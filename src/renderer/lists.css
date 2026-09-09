@@ -170,6 +170,11 @@
 .sub-usage-row { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--ink3); font-family: var(--mono); }
 .usage-bar { height: 4px; background: var(--line); border-radius: var(--r1); overflow: hidden; }
 .usage-fill { height: 100%; background: var(--accent); border-radius: var(--r1); }
+/* How close the quota is, at a glance: the same thresholds subUsageHtml() puts
+   on the bar (>=90% bad, >=70% mid). One accent colour said 10% and 95% alike. */
+.usage-fill.good { background: var(--ok); }
+.usage-fill.mid { background: var(--warn); }
+.usage-fill.bad { background: var(--danger); }
 /* the auto-update strip: a switch and an interval on one line of the card */
 .auto-update-card { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .auto-update-card .switch-row { flex: 1 1 320px; min-width: 0; padding-block: 0; border-block-end: 0; }
@@ -393,6 +398,7 @@ button.pool-item:hover .pool-add { color: var(--accent); }
   color: var(--ink3);
   direction: ltr;
   white-space: nowrap;
+  cursor: pointer;   /* clicking the figure forgets it (clearUsageFor) */
   flex: 0 0 auto;
 }
 .srv-usage:empty { display: none; }

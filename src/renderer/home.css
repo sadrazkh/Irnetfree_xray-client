@@ -17,15 +17,25 @@
 
 /* --- traffic path --------------------------------------------------- */
 
+/*
+ * The panel REFLOWS, it does not scroll. It used to be a single non-wrapping
+ * row with `overflow-x: auto`, so narrowing the window (the minimum is 900px,
+ * and the rail eats up to 220px of it) left the diagram clipped behind a
+ * scrollbar nobody looks for. Wrapping is driven by the content — each part
+ * carries the width it actually needs — so it behaves the same in all three
+ * skins and at every window size, with no breakpoint to keep in sync.
+ */
 .path-panel {
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
-  gap: 0;
+  column-gap: 0;
+  row-gap: 14px;
   padding: 20px 22px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r6);
-  overflow-x: auto;
+  overflow-x: hidden;
 }
 .path-node {
   display: flex;
@@ -42,43 +52,63 @@
   flex: 0 0 auto;
 }
 .path-node.exit { background: var(--accentSoft); border-color: var(--accentLine); }
+/* When the row wraps, the destination should still read as the END of the
+   path rather than as a second box under the device. A no-op while everything
+   fits on one line, where the growing parts already push it to the edge. */
+.path-panel > .path-node:last-child { margin-inline-start: auto; }
 .path-ico { font-size: 20px; line-height: 1; }
 .path-name { font-size: 12px; font-weight: 600; color: var(--ink2); }
 .path-meta { font-family: var(--mono); font-size: 11px; color: var(--ink3); direction: ltr; }
+/*
+ * The link carries the throughput caption ABOVE its line, as a real flex item.
+ * It used to be absolutely positioned and centred on the line, which meant the
+ * link's width said nothing about the caption's: at 900px the line was 56px
+ * and "↓13.8 MB/s ↑250 B/s" is 115px, so the caption escaped 29px into the
+ * "This device" node next to it. In flow, the link can never be narrower than
+ * the numbers it has to show, so they cannot land on a neighbour.
+ */
 .path-link {
   flex: 1 1 60px;
-  min-width: 56px;
-  position: relative;
+  /* NOT a fixed min-width: `auto` is what makes the link at least as wide as
+     the caption inside it. A number here would let flexbox shrink the link
+     under the numbers again, which is the whole bug. */
+  min-width: auto;
   display: flex;
+  flex-direction: column;
   align-items: center;
+  justify-content: center;
+  gap: 5px;
   padding-inline: 10px;
 }
 .path-link::after {
   content: "";
   display: block;
-  width: 100%;
+  align-self: stretch;
+  min-width: 56px;      /* a captionless link still draws a line worth seeing */
   height: 2px;
   border-radius: 1px;
   background: var(--softline);
 }
 .path-link.live::after { background: linear-gradient(90deg, var(--accent), var(--ok)); }
 .path-cap {
-  position: absolute;
-  inset-block-end: calc(50% + 10px);
-  inset-inline-start: 50%;
-  transform: translateX(-50%);
   font-family: var(--mono);
   font-size: 11px;
   color: var(--ink3);
   white-space: nowrap;
   direction: ltr;
 }
+/* A link with no caption keeps the line vertically where a captioned one has
+   it, so the row of lines stays level across the diagram. */
+.path-link:not(:has(.path-cap))::after { margin-block-start: 21px; }
 /* the rule fan-out: one line per advanced rule, built once (not per tick) */
+/* The fan-out asks for 320px. Given less — a narrow window, a wide rail — it
+   wraps onto its own row instead of squeezing every rule into an ellipsis:
+   at 900px the condition column was losing 123px of text that way. */
 .path-rules {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  flex: 1 1 auto;
+  flex: 1 1 420px;
   min-width: 0;
   padding-inline: 14px;
 }

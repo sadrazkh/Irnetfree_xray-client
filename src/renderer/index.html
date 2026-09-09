@@ -183,6 +183,7 @@
           <h2 data-i18n="servers.title">سرورها</h2>
           <div class="head-actions">
             <button class="btn ghost" id="btnPingAll" data-i18n="btn.pingAll">تست همه</button>
+            <button class="btn ghost" id="btnClearUsage" data-i18n="btn.clearUsage">پاک‌کردن مصرف</button>
             <button class="btn ghost" id="btnClearServers" data-i18n="btn.clearAll">حذف همه</button>
             <button class="btn ghost" id="btnWgOpen" data-i18n="btn.addWg">+ WireGuard</button>
             <button class="btn ghost" id="btnProxyOpen" data-i18n="btn.addProxy">+ SOCKS/HTTP</button>
@@ -202,7 +203,7 @@
         <!-- WireGuard manual add -->
         <div class="import-box" id="wgBox" hidden>
           <div class="wg-title" data-i18n="wg.title">افزودن WireGuard</div>
-          <div class="row-gap" style="margin-bottom:12px">
+          <div class="row-gap u-mbe-12">
             <button class="btn ghost" id="btnWgPickConf" data-i18n="wg.pickConf">انتخاب فایل .conf</button>
             <span class="import-hint" id="wgConfHint"></span>
           </div>
@@ -293,7 +294,7 @@
 
         <div class="import-box" id="subAddBox" hidden>
           <input type="text" id="subUrl" class="input" data-i18n-ph="sub.urlPh" />
-          <input type="text" id="subName" class="input" data-i18n-ph="sub.namePh" style="margin-top:10px" />
+          <input type="text" id="subName" class="input u-mbs-10" data-i18n-ph="sub.namePh" />
           <div class="import-actions">
             <button class="btn primary" id="btnSubAdd" data-i18n="btn.addFetch">افزودن و دریافت</button>
             <button class="btn ghost" id="btnSubAddCancel" data-i18n="btn.cancel">انصراف</button>
@@ -467,7 +468,7 @@
           <div class="grid2">
             <div>
               <label class="field-label" data-i18n="set.dnsRemote">DNS خارجی (از داخل تونل)</label>
-              <select id="dnsRemotePreset" class="select" style="margin-bottom:8px">
+              <select id="dnsRemotePreset" class="select u-mbe-8">
                 <option value="" data-i18n="dns.custom">سفارشی…</option>
                 <option value="https://1.1.1.1/dns-query,https://1.0.0.1/dns-query">Cloudflare — DoH</option>
                 <option value="https://8.8.8.8/dns-query,https://8.8.4.4/dns-query">Google — DoH</option>
@@ -493,7 +494,7 @@
           <div class="grid2">
             <div>
               <label class="field-label" data-i18n="set.dnsDirect">DNS داخلی (برای دور زدن ایران)</label>
-              <select id="dnsDirectPreset" class="select" style="margin-bottom:8px">
+              <select id="dnsDirectPreset" class="select u-mbe-8">
                 <option value="" data-i18n="dns.custom">سفارشی…</option>
                 <option value="178.22.122.100,185.51.200.2">Shecan (شکن)</option>
                 <option value="78.157.42.100,78.157.42.101">Electro (الکترو)</option>
@@ -782,7 +783,7 @@
         <!-- the certificate pinned on first use (certPin.js): read-only, clearable -->
         <div class="hint" id="edCertPinRow" dir="ltr" hidden>
           <span data-i18n="edit.certPin">Pinned certificate</span>: <code id="edCertPin"></code>
-          <button type="button" class="btn ghost" id="edCertPinClear" data-i18n="edit.certPinClear" style="padding:3px 10px;font-size:12px;margin-inline-start:8px">Clear pin</button>
+          <button type="button" class="btn ghost tiny" id="edCertPinClear" data-i18n="edit.certPinClear">Clear pin</button>
         </div>
         <!-- socks/http proxy credentials -->
         <div class="grid2" id="edProxyRow" hidden>
@@ -850,7 +851,7 @@
           <div class="edit-section"><span data-i18n="edit.pattTitle">🧩 finalmask / cipherSuites</span></div>
           <label class="field-label" data-i18n="edit.cipherSuites">cipherSuites (با fingerprint = unsafe)</label>
           <input type="text" id="edCipherSuites" class="input" dir="ltr" placeholder="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256" />
-          <label class="field-label" data-i18n="edit.finalMask" style="margin-top:8px;display:block">finalmask (JSON — همان چیزی که در لینک با fm می‌آید)</label>
+          <label class="field-label u-mbs-8 u-block" data-i18n="edit.finalMask">finalmask (JSON — همان چیزی که در لینک با fm می‌آید)</label>
           <textarea id="edFinalMask" class="input" dir="ltr" rows="3" spellcheck="false" placeholder='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5","6-8"],"delays":["10-20"],"maxSplit":"3-6"}}]}'></textarea>
           <p class="hint" data-i18n="edit.pattHint">دقیقاً همان JSON را بچسبان؛ برنامه دست‌کاری‌اش نمی‌کند. برای روش پترنیها: Address یک IP تمیز کلودفلر، fingerprint = unsafe، بعد cipherSuites و finalmask.</p>
         </div>

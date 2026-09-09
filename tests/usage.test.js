@@ -474,3 +474,36 @@ test('forgetting a deleted config is the meter\'s job too', () => {
   assert.equal(m.prune(['sv-a']), false);
   assert.equal(m.dirty, false);
 });
+
+/* ----------------------------- forgetting a total ----------------------------- */
+
+test('UsageMeter.clear(id) forgets one config; clear() forgets everything; both mark dirty', () => {
+  // A total that is only gone in memory comes back at the next launch, so
+  // clearing has to reach the disk the same way counting does.
+  const m = new UsageMeter({ totals: { 'sv-a': { down: 10, up: 1 }, 'sv-b': { down: 20, up: 2 } } });
+  m.markSaved();
+  assert.equal(m.clear('sv-zzz'), false, 'unknown id: nothing to forget');
+  assert.equal(m.dirty, false, 'and nothing to write');
+  assert.equal(m.clear('sv-a'), true);
+  assert.deepEqual(Object.keys(m.totals), ['sv-b']);
+  assert.equal(m.dirty, true);
+  m.markSaved();
+  assert.equal(m.clear(), true);
+  assert.deepEqual(m.totals, {});
+  assert.equal(m.dirty, true);
+  assert.equal(m.clear(), false, 'already empty');
+});
+
+test('clearing a config does not disturb the live sample: the next tick counts from the current reading', () => {
+  // The core keeps counting through a clear. Whatever it has carried since the
+  // last poll belongs to the config; only what was there BEFORE is forgotten.
+  const m = new UsageMeter({ totals: {} });
+  m.setPlan({ mode: 'single', server: { id: 'sv-a', outbound: {} } }, 'sv-a');
+  m.tick({ proxy: { up: 0, down: 0 } });
+  m.tick({ proxy: { up: 100, down: 900 } });
+  const seen = (id) => ({ up: m.totals[id].up, down: m.totals[id].down });
+  assert.deepEqual(seen('sv-a'), { up: 100, down: 900 });
+  m.clear('sv-a');
+  m.tick({ proxy: { up: 150, down: 1000 } });
+  assert.deepEqual(seen('sv-a'), { up: 50, down: 100 }, 'only the new bytes');
+});

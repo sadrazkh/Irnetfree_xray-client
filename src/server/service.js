@@ -21,7 +21,7 @@ const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('../main/engineChoice');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
-const { assetStatus: scanAssets } = require('../main/assets');
+const { assetStatus: scanAssets, downloadedFileNames } = require('../main/assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('../main/geoCheck');
 const { XrayManager, getFreePort, getFreePorts } = require('../main/xrayManager');
 const { setSystemProxy } = require('../main/sysproxy');
@@ -38,7 +38,7 @@ const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 const { migrateSettings } = require('../main/settingsMigrate');
-const { NetWatcher } = require('../main/netWatcher');
+const { NetWatcher, fingerprint } = require('../main/netWatcher');
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -644,6 +644,13 @@ function createService(opts = {}) {
     const stale = () => gen !== connGen;
     const abandoned = { ok: false, stale: true };
 
+    // The watcher only starts once this connect has FINISHED (see the end of
+    // this function), so a network that moves while the tunnel is being built
+    // is invisible to it: the tunnel comes up built for the old network, the
+    // watcher then adopts the new one as its baseline, and nothing is left to
+    // notice. A connect that finds a watcher already running is covered by it.
+    const netBefore = netWatcher ? null : currentNetFingerprint();
+
     let settings = await effectiveSettings();
     if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
@@ -902,6 +909,18 @@ function createService(opts = {}) {
     // replacing it here would adopt the NEW network as normal and leave a tunnel
     // built for the old one with nothing left to notice.
     if (!netWatcher) startNetWatcher();
+
+    // The network moved while we were building for the old one. The watcher just
+    // adopted the NEW network as normal, so it will never fire for this; say so
+    // and rebuild. Deferred by a tick so the 'connected' status below goes out
+    // first and the recovery's own 'reconnecting' follows it in order.
+    if (netBefore != null && currentNetFingerprint() !== netBefore) {
+      send('log', { line: 'The network changed while connecting — rebuilding for the one we have now', level: 'warn' });
+      setTimeout(() => recoverFromNetworkChange('changed-during-connect').catch((e) => {
+        send('log', { line: 'Network recovery failed: ' + ((e && e.message) || e), level: 'error' });
+      }), 0);
+    }
+
     send('status', {
       state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
       tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys()
@@ -1173,6 +1192,15 @@ function createService(opts = {}) {
       })
     });
     netWatcher.start();
+  }
+
+  /**
+   * The machine's network as the watcher would see it right now — the same pure
+   * fingerprint, with the same predicate for our own adapters, so a reading
+   * taken before the watcher exists is comparable with the baseline it adopts.
+   */
+  function currentNetFingerprint() {
+    return fingerprint(os.networkInterfaces(), isOwnTunInterface);
   }
 
   function stopNetWatcher() {
@@ -1453,7 +1481,7 @@ function createService(opts = {}) {
     },
     'assets:remove': async () => {
       if (xray.running || (tun && tun.active)) return { ok: false, error: 'disconnect first', assets: assetStatus() };
-      const names = ['xray', 'xray.exe', 'xray-pattn', 'xray-pattn.exe', 'tun2socks', 'tun2socks.exe', 'wintun.dll', 'geoip.dat', 'geosite.dat'];
+      const names = downloadedFileNames();
       const removed = [];
       for (const n of names) { const p = path.join(userBinDir, n); try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); removed.push(n); } } catch {} }
       xray.binPath = store.get('xrayPath', null); xray.forgetVersions(); stats.setBin(xray.anyBin());
@@ -1496,6 +1524,16 @@ function createService(opts = {}) {
     },
     'killswitch:status': () => ({ engaged: false }),
     'usage:get': () => ({ totals: usage ? usage.totals : {}, grand: grandTotal(usage ? usage.totals : {}) }),
+    // Forget a lifetime total — one config, or all of them. Written through at
+    // once: an absence the next flush might not reach comes back at launch.
+    'usage:clear': (id) => {
+      if (usage && usage.clear(id == null ? null : String(id))) {
+        usageStore.set('totals', usage.totals);
+        usage.markSaved();
+        send('usage', { totals: usage.totals });
+      }
+      return { ok: true, totals: usage ? usage.totals : {} };
+    },
 
     // desktop-only / no-op in server mode
     'app:relaunchAdmin': () => ({ ok: false, error: 'not applicable on a server' }),

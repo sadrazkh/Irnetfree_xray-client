@@ -355,6 +355,27 @@ class UsageMeter {
     return true;
   }
 
+  /**
+   * Forget the running total of one config, or of every config — the user's
+   * own "start over" for a subscription that changed hands or a server that
+   * was only ever a test. `dirty` so the next flush writes the absence too:
+   * a total that is only gone in memory comes back at the next launch.
+   * @returns {boolean} whether anything was forgotten
+   */
+  clear(id) {
+    if (id == null) {
+      if (!Object.keys(this.totals).length) return false;
+      this.totals = {};
+    } else {
+      if (!Object.prototype.hasOwnProperty.call(this.totals, id)) return false;
+      const next = Object.assign({}, this.totals);
+      delete next[id];
+      this.totals = next;
+    }
+    this.dirty = true;
+    return true;
+  }
+
   /** The totals have been persisted as they stand. */
   markSaved(now) {
     this.dirty = false;

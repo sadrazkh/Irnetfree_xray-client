@@ -833,7 +833,7 @@ function renderServers() {
         <span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${s.id}">${rl.txt}</b></span>
         <span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${s.id}">${ul.txt}</b></span>
       </div>
-      <span class="srv-usage" data-usage="${s.id}" title="${escapeHtml(t('srv.usage'))}">${usageLabel(s.id)}</span>
+      <span class="srv-usage" data-usage="${s.id}" title="${escapeHtml(t('srv.usage'))} — ${escapeHtml(t('srv.usageClick'))}">${usageLabel(s.id)}</span>
       <div class="srv-actions">
         <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
         <button class="icon-btn copy-srv" data-i18n-title="btn.copy" title="copy">⧉</button>
@@ -852,6 +852,8 @@ function renderServers() {
     card.querySelector('.edit-srv').onclick = (e) => { e.stopPropagation(); openEdit(s.id); };
     card.querySelector('.connect-srv').onclick = (e) => { e.stopPropagation(); connect(s.id); };
     card.querySelector('.del-srv').onclick = (e) => { e.stopPropagation(); deleteServer(s.id); };
+    // the lifetime figure is its own clear button — nothing to clear when empty
+    card.querySelector('.srv-usage').onclick = (e) => { e.stopPropagation(); clearUsageFor(s.id); };
     host.appendChild(card);
     }
   }
@@ -875,6 +877,21 @@ function refreshSelection() {
 /** Lifetime totals changed: rewrite the spans that show them, nothing else. */
 function applyUsageDisplays() {
   $$('[data-usage]').forEach((el) => { el.innerHTML = usageLabel(el.dataset.usage); });
+}
+
+/**
+ * Forget what one config has ever carried, or all of them (`id` null). The
+ * user's own "start over": a subscription that changed hands, a server that
+ * was only ever a test. The configs themselves are untouched.
+ */
+async function clearUsageFor(id) {
+  if (!window.api.clearUsage) return;
+  if (id != null && !usageLabel(id)) return;             // nothing to clear
+  if (!window.confirm(t(id == null ? 'confirm.clearUsageAll' : 'confirm.clearUsageOne'))) return;
+  const res = await window.api.clearUsage(id);
+  state.usage = (res && res.totals) || {};
+  applyUsageDisplays();
+  toast(t('t.usageCleared'), 'ok');
 }
 
 /* ----------------------------- unified picker (home) ----------------------------- */
@@ -1230,6 +1247,7 @@ async function pingMany(ids) {
 }
 
 $('#btnPingAll').onclick = () => pingMany(state.servers.map(s => s.id));
+$('#btnClearUsage').onclick = () => clearUsageFor(null);
 
 /* quick ping (home) — fills the TCP ping + Real delay cards for one target */
 async function quickPing(id) {
