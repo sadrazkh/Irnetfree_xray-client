@@ -121,3 +121,37 @@ test('the markup carries no inline style attributes', () => {
   const inline = [...HTML.matchAll(/ style="([^"]*)"/g)].map((m) => m[1]);
   assert.deepEqual(inline, []);
 });
+
+/**
+ * The traffic path has to survive a narrow window. The owner's report was a
+ * throughput caption printed on top of the "This device" node: the caption was
+ * absolutely positioned and centred on a link that flexbox had shrunk to 56px,
+ * while the caption itself needed 115px, so it escaped onto its neighbour — and
+ * the panel scrolled sideways instead of reflowing, hiding the rest.
+ *
+ * Measured in the browser at 900px (the window's own minimum) across all three
+ * skins and all three path shapes after the fix: no overlap, no overflow, no
+ * scrollbar, nothing truncated. These assertions pin the properties that make
+ * that true, because none of them can be checked without a layout engine.
+ */
+test('the traffic path reflows instead of scrolling, and its caption cannot escape its link', () => {
+  const rule = (selector) => {
+    const i = CSS.indexOf(selector + ' {');
+    assert.ok(i !== -1, `no rule for ${selector}`);
+    return CSS.slice(i, CSS.indexOf('}', i));
+  };
+
+  const panel = rule('.path-panel');
+  assert.match(panel, /flex-wrap:\s*wrap/, 'the panel must wrap; a single row clips at 900px');
+  assert.doesNotMatch(panel, /overflow-x:\s*auto/, 'wrapping replaces the sideways scrollbar');
+
+  const link = rule('.path-link');
+  assert.match(link, /flex-direction:\s*column/, 'the caption sits above the line, in flow');
+  assert.match(link, /min-width:\s*auto/,
+    'a numeric min-width lets flexbox shrink the link under its own caption — the original bug');
+
+  // The caption must take part in layout: positioned out of flow, its width
+  // says nothing about the link's, and it lands on whatever is next to it.
+  const cap = rule('.path-cap');
+  assert.doesNotMatch(cap, /position:\s*absolute/);
+});
