@@ -398,6 +398,7 @@ button.pool-item:hover .pool-add { color: var(--accent); }
   color: var(--ink3);
   direction: ltr;
   white-space: nowrap;
+  cursor: pointer;   /* clicking the figure forgets it (clearUsageFor) */
   flex: 0 0 auto;
 }
 .srv-usage:empty { display: none; }

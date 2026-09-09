@@ -102,6 +102,7 @@ contextBridge.exposeInMainWorld('api', {
   onStats: (cb) => ipcRenderer.on('stats', (e, d) => cb(d)),
   onUsage: (cb) => ipcRenderer.on('usage', (e, d) => cb(d)),
   getUsage: () => ipcRenderer.invoke('usage:get'),
+  clearUsage: (id) => ipcRenderer.invoke('usage:clear', id == null ? null : id),
   onSubsUpdated: (cb) => ipcRenderer.on('subs-updated', (e, d) => cb(d)),
   onAssetProgress: (cb) => ipcRenderer.on('asset-progress', (e, d) => cb(d)),
   onKillSwitch: (cb) => ipcRenderer.on('killswitch', (e, d) => cb(d)),

@@ -132,6 +132,7 @@
     onStats: (cb) => on('stats', cb),
     onUsage: (cb) => on('usage', cb),
     getUsage: () => invoke('usage:get'),
+    clearUsage: (id) => invoke('usage:clear', id == null ? null : id),
     onSubsUpdated: (cb) => on('subs-updated', cb),
     onAssetProgress: (cb) => on('asset-progress', cb),
     onKillSwitch: (cb) => on('killswitch', cb),

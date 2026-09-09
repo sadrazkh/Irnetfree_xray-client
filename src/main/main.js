@@ -703,6 +703,7 @@ async function doConnect(serverId, opts = {}) {
   const stale = () => gen !== connGen;
   const abandoned = { ok: false, stale: true };
 
+
   // clear any kill-switch block from a previous unexpected drop
   if (!opts.holdKillSwitch) {
     await disarmKillSwitch();
@@ -1011,6 +1012,7 @@ async function doConnect(serverId, opts = {}) {
   // replacing it here would adopt the NEW network as normal and leave a tunnel
   // built for the old one with nothing left to notice.
   if (!netWatcher) startNetWatcher();
+
 
   updateOverlay('on');
   send('status', {
@@ -1999,6 +2001,17 @@ function registerIpc() {
   ipcMain.handle('killswitch:disarm', async () => { await disarmKillSwitch(); return { ok: true }; });
   ipcMain.handle('killswitch:status', () => ({ engaged: killEngaged }));
   ipcMain.handle('usage:get', () => ({ totals: usage ? usage.totals : {}, grand: grandTotal(usage ? usage.totals : {}) }));
+  // Forget a lifetime total on request — one config, or all of them. Written
+  // through at once: an absence the next flush might not reach is a number
+  // that comes back at the next launch.
+  ipcMain.handle('usage:clear', (e, id) => {
+    if (usage && usage.clear(id == null ? null : String(id))) {
+      usageStore.set('totals', usage.totals);
+      usage.markSaved();
+      send('usage', { totals: usage.totals });
+    }
+    return { ok: true, totals: usage ? usage.totals : {} };
+  });
   // Reconnect on demand: the same leak-free path the network-change recovery
   // uses, so the guard is held across the gap rather than released.
   ipcMain.handle('vpn:reconnect', async () => {

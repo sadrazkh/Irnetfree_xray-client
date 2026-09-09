@@ -644,6 +644,7 @@ function createService(opts = {}) {
     const stale = () => gen !== connGen;
     const abandoned = { ok: false, stale: true };
 
+
     let settings = await effectiveSettings();
     if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
@@ -902,6 +903,8 @@ function createService(opts = {}) {
     // replacing it here would adopt the NEW network as normal and leave a tunnel
     // built for the old one with nothing left to notice.
     if (!netWatcher) startNetWatcher();
+
+
     send('status', {
       state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
       tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys()
@@ -1496,6 +1499,16 @@ function createService(opts = {}) {
     },
     'killswitch:status': () => ({ engaged: false }),
     'usage:get': () => ({ totals: usage ? usage.totals : {}, grand: grandTotal(usage ? usage.totals : {}) }),
+    // Forget a lifetime total — one config, or all of them. Written through at
+    // once: an absence the next flush might not reach comes back at launch.
+    'usage:clear': (id) => {
+      if (usage && usage.clear(id == null ? null : String(id))) {
+        usageStore.set('totals', usage.totals);
+        usage.markSaved();
+        send('usage', { totals: usage.totals });
+      }
+      return { ok: true, totals: usage ? usage.totals : {} };
+    },
 
     // desktop-only / no-op in server mode
     'app:relaunchAdmin': () => ({ ok: false, error: 'not applicable on a server' }),
