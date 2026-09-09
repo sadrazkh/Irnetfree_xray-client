@@ -2907,6 +2907,7 @@ function renderChains() {
           <span class="pi-ping-ico" title="${escapeHtml(t('ping.tcp'))}">⚡</span><span class="chain-ping ${tl.cls}" data-pbase="chain-ping" data-ping="${chain.id}">${tl.txt}</span>
           <span class="pi-ping-ico" title="${escapeHtml(t('ping.real'))}">⏱</span><span class="chain-ping ${rl.cls}" data-pbase="chain-ping" data-ping-real="${chain.id}">${rl.txt}</span>
         </span>
+        <span class="srv-usage" data-usage="chain:${chain.id}" title="${escapeHtml(t('srv.usage'))}">${usageLabel('chain:' + chain.id)}</span>
         <div class="chain-card-actions">
           <button class="icon-btn ch-ping" title="ping">⚡</button>
           <button class="icon-btn ch-connect" title="connect"${ready ? '' : ' disabled'}>▶</button>
@@ -3087,6 +3088,7 @@ function renderPool() {
         <label class="switch pool-enable-sw" title="${escapeHtml(t('pool.enable'))}">
           <input type="checkbox" class="pool-enable" ${entry.enabled ? 'checked' : ''} /><span class="slider"></span>
         </label>
+        <span class="srv-usage" data-usage="${escapeHtml(entry.target || '')}" title="${escapeHtml(t('srv.usage'))}">${usageLabel(entry.target)}</span>
         <button class="icon-btn pool-del" title="delete">🗑</button>
       </div>
       <div class="pool-card-body">
