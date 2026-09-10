@@ -1375,7 +1375,9 @@ function createService(opts = {}) {
       liveDirectInterface = null;
       send('status', { state: 'disconnected' });
       } catch (e) {
-      send('status', { state: 'cleanup-failed', error: 'Network cleanup incomplete; use network recovery.' });
+      // A CODE, not a sentence: the desktop says this one in the user's language
+      // (net.cleanupFailed) and a headless consumer gets something it can branch on.
+      send('status', { state: 'cleanup-failed', error: 'cleanup-failed' });
       throw e;
     } finally { userDisconnecting = false; }
   }
