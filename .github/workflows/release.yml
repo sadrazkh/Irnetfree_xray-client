@@ -75,16 +75,28 @@ jobs:
 
       # The app verifies an in-app update against these before it opens the
       # installer (src/main/appUpdate.js). One file per runner; the app reads
-      # every SHA256SUMS-*.txt on the release. shasum is on all three runners.
+      # every SHA256SUMS-*.txt on the release.
+      #
+      # GitHub runs a `bash` step without a profile, and on the Windows runner
+      # that PATH has no perl `shasum` (v1.5.0 shipped with no Windows
+      # installer because this step failed on it). coreutils `sha256sum` is
+      # there on Windows and Linux; macOS has only `shasum`, so it is the
+      # fallback. The app's parser accepts both output forms.
+      #
+      # continue-on-error: the installers are the release; a missing checksum
+      # file only makes the in-app update show the file instead of opening it.
       - name: Checksums
         shell: bash
+        continue-on-error: true
         run: |
           cd dist
-          : > "SHA256SUMS-${{ matrix.os }}.txt"
+          out="SHA256SUMS-${{ matrix.os }}.txt"
+          : > "$out"
           for f in *.exe *.dmg *.zip *.AppImage *.deb; do
-            [ -f "$f" ] && shasum -a 256 "$f" >> "SHA256SUMS-${{ matrix.os }}.txt"
+            [ -f "$f" ] || continue
+            sha256sum "$f" >> "$out" 2>/dev/null || shasum -a 256 "$f" >> "$out"
           done
-          cat "SHA256SUMS-${{ matrix.os }}.txt"
+          cat "$out"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
