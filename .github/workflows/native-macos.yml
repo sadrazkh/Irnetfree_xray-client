@@ -32,6 +32,12 @@ jobs:
           node-version: '22'
       - run: npm ci
       - run: npm test
+      - name: Validate native request handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swiftc -parse-as-library native/macos/Shared.swift native/macos/ValidationTests.swift -o "$RUNNER_TEMP/native-validation"
+          "$RUNNER_TEMP/native-validation"
       - run: npm run gen-icons
       # This compiles both Swift executables with the target architecture,
       # downloads and checksum-verifies the pinned core, and packages them.
@@ -39,6 +45,8 @@ jobs:
       - name: Build installable beta
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # Only ad-hoc signing is used; this job has no signing secrets.
+          CSC_FOR_PULL_REQUEST: 'true'
         run: npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never
       - name: Verify packaged native components
         shell: bash
