@@ -765,7 +765,10 @@ $$('[data-native-service]').forEach(button => {
       output.textContent = known.includes(reply.status) ? t(`native.${reply.status}`) : t('native.unknown');
       if (reply.active === true) output.textContent += ' · ' + t('native.active');
     } catch (error) {
-      output.textContent = `${t('native.failed')} ${error.message || ''}`;
+      // The daemon's words are English and technical. They go on a line of their
+      // own, UNDER a sentence the user can read — never glued to the end of it.
+      output.replaceChildren(t('native.failed'));
+      if (error.message) output.append(document.createElement('br'), error.message);
       toast(t('native.failed'), 'err');
     } finally { buttons.forEach(item => { item.disabled = false; }); }
   };
@@ -1954,7 +1957,8 @@ window.api.onStatus((d) => {
       toast(t('net.failed'), 'err', 8000);
     }
   } else if (d.state === 'cleanup-failed') {
-    toast(d.error, 'err');
+    // The state IS the code; `d.error` carries it too, for a headless consumer.
+    toast(t('net.cleanupFailed'), 'err');
   } else if (d.state === 'error') {
     // e.g. a settings reconnect whose new config the core rejected
     state.connected = false;
