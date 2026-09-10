@@ -30,6 +30,7 @@ const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
 const { TunSingbox } = require('../main/tunSingbox');
+const { NativeMacTun } = require('../main/nativeMacTun');
 const { collectDiagnostics } = require('../main/connectionDiagnostics');
 const { stopTrackedTunnels, releaseGuardChecked } = require('../main/tunnelCleanup');
 const tunPlatform = require('../main/tunPlatform');
@@ -208,21 +209,23 @@ function createService(opts = {}) {
    * one with `quiet`, so the fallback line is logged once per connect, not per poll.
    */
   function makeTun(settings, { quiet = false } = {}) {
+  let selected;
     const opts = { binDir: bundledBinDir, extraDirs: [userBinDir], onLog: (line, level) => send('log', { line, level }), lang: settings.lang, userData: dataDir,
       onUnexpectedExit: () => {
-        if (userDisconnecting || isQuitting || tun !== sb) return;
+        if (userDisconnecting || isQuitting || tun !== selected) return;
         send('log', { line: 'The macOS tunnel exited unexpectedly; checking recovery', level: 'error' });
         recoverFromNetworkChange('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
       } };
-    const sb = new TunSingbox(opts);
+    if (process.platform === 'darwin' && settings.tunBackend === 'native-macos') return (selected = new NativeMacTun(opts));
+  const sb = new TunSingbox(opts);
     const legacy = new TunManager(opts);
-    if (settings.tunBackend === 'tun2socks') return legacy;
-    if (sb.isAvailable()) return sb;
+    if (settings.tunBackend === 'tun2socks') return (selected = legacy);
+    if (sb.isAvailable()) return (selected = sb);
     if (legacy.isAvailable()) {
       if (!quiet) send('log', { line: 'sing-box not installed — TUN falls back to tun2socks', level: 'warn' });
-      return legacy;
+      return (selected = legacy);
     }
-    return sb;   // neither: the sing-box error message names what to install
+    return (selected = sb);   // neither: the sing-box error message names what to install
   }
 
   const xray = new XrayManager({
@@ -739,6 +742,10 @@ function createService(opts = {}) {
     // Ours stays in hand, and startedTuns is what disconnect/quit/exit sweep.
     const myTun = tun;
     startedTuns.add(myTun);
+  if (settings.tunMode && myTun.prepare) {
+    await myTun.prepare({ strict: settings.leakGuard === 'strict' });
+    if (stale()) return abandoned;
+  }
 
     // Under TUN the OS default route is the tunnel, so every dial Xray makes
     // itself (direct, the anti-DPI dialers, the first hop of a chain) must be
@@ -857,7 +864,7 @@ function createService(opts = {}) {
           // whole rebuild, with no tunnel; holding keeps the override and only
           // widens the firewall's holes to the server about to be dialled.
           try {
-            await leakGuard.holdForReconnect({
+            if (!tun?.managesDns) await leakGuard.holdForReconnect({
               excludes: await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []),
               token: guardToken
             });
@@ -884,7 +891,7 @@ function createService(opts = {}) {
       // adapters still hand every name to the ISP. Only for a tunnel that
       // actually came up: with no tunnel there is nothing to point them at, and
       // doing it anyway would leave the machine unable to resolve at all.
-      if (myTun.active && settings.leakGuard !== 'off') {
+      if (myTun.active && !myTun.managesDns && settings.leakGuard !== 'off') {
         try {
           const res = await leakGuard.engage({
             originalMacServices: myTun.macState && myTun.macState.service
@@ -1386,13 +1393,24 @@ function createService(opts = {}) {
     }));
   }
 
-  async function repairNetwork() {
+  async function nativeService(command) {
+  if (!['status', 'register', 'unregister', 'settings'].includes(command)) throw new Error('Unsupported native service command');
+  const manager = new NativeMacTun();
+  if (command === 'unregister') {
+    await doDisconnect();
+    await manager.recoverMacSessions();
+  }
+  return manager.service(command);
+}
+
+async function repairNetwork() {
     if (networkRepairing) return { ok: false, error: 'Network recovery is already running' };
     networkRepairing = true;
     try {
       await macRepairPromise;
       await doDisconnect();
       if (process.platform === 'darwin') {
+        await new NativeMacTun().recoverMacSessions();
         const repair = new TunSingbox({ userData: dataDir });
         await repair.recoverMacSessions();
       await new TunManager({ userData: dataDir }).recoverMacSessions();
@@ -1408,6 +1426,7 @@ function createService(opts = {}) {
   const handlers = {
     'diagnostics:connection': connectionDiagnostics,
     'network:repair': repairNetwork,
+    'native:service': nativeService,
     'app:init': () => ({
       servers: store.get('servers', []),
       subscriptions: store.get('subscriptions', []),

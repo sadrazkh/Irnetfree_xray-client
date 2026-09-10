@@ -62,24 +62,44 @@ macOS strict PF guard remains experimental. Existing pre-journal versions do
 not have enough process identity to safely kill their orphan children
 automatically; inspect them rather than restoring broad process matching.
 
-## Separate native macOS phase
+## Native macOS beta implementation
 
-A native helper / NetworkExtension migration is deliberately not implemented
-in this cross-platform maintenance PR. It needs a Mac build environment,
-Developer ID signing, entitlements, notarization and real lifecycle tests.
+The packaged macOS 13+ app now includes an SMAppService LaunchDaemon and a
+narrow Swift XPC bridge. New packaged Mac installations select native-macos;
+existing settings keep their chosen backend. Windows defaults are unchanged.
+This is a native background service with a sing-box TUN, not a NetworkExtension
+packet-tunnel provider or an entry in the system VPN configuration panel.
 
-1. Prototype a narrow helper managed by SMAppService on supported macOS versions.
-   Use authenticated IPC for session start/stop/status, constrained executable
-   locations and validated configurations; never expose arbitrary root commands.
-   The helper owns cleanup even if the Electron UI is killed. Test install,
-   upgrade, uninstall, authorization cancellation and user-session boundaries.
-2. Independently evaluate NEPacketTunnelProvider for OS-managed VPN status and
-   lifecycle. Preserve the existing Xray/PattN plan semantics behind a defined
-   packet/core boundary; do not assume that sing-box translates multi-core
-   chains, WireGuard or per-process routing identically.
-3. Gate adoption on the same corporate-DNS, chain, routing and crash matrix,
-   packaged on both architectures. Keep the existing backend available until
-   that parity is demonstrated; make no Windows migration as part of this work.
+The service validates network inputs, authenticates the pinned bridge code
+signature, and executes only a checksum-pinned bundled sing-box copied into a
+root-owned directory. It journals DNS before changing it, restores DNS on stop,
+and expires the session after missing heartbeats from the app. A daemon restart
+recovers the journal. Failed cleanup retains state for a later retry.
+Xray/PattN still processes chain, WireGuard and advanced routing through the
+existing local SOCKS listener; their configuration builders are unchanged.
+Native mode explicitly rejects strict PF protection before starting the core.
+DNS restoration during reconnect is not a firewall kill switch.
+
+Settings provide status, registration, background-permission settings and
+unregistration. Unregistration stops and recovers the tunnel first. Manual
+network recovery also checks an already registered native service without
+registering a new one. Missing helpers or pending approval do not silently
+select another backend.
+
+### Install and test
+
+Download the architecture-specific DMG or ZIP from the Native macOS beta CI
+artifacts for this PR. These are ad-hoc signed test builds, not notarized public
+releases. Move IRNetFree.app to Applications before enabling its service. On
+macOS 13+, allow IRNetFree under System Settings > General > Login Items (the
+exact section name varies by macOS release), then connect using Native macOS.
+Developer ID signing/notarization remains a separate release requirement.
+
+Run the acceptance matrix above, especially Force Quit with a live tunnel,
+service disable/enable, sleep/wake, static DNS restore and corporate chain
+traffic. CI compile/package and mocked lifecycle tests cannot establish real
+network behavior on a Mac. Record failures with the sanitized diagnostics
+export; never include subscription credentials or WireGuard private keys.
 
 Primary references:
 - [Apple SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice)
