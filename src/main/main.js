@@ -21,6 +21,9 @@ const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
 const { TunSingbox } = require('./tunSingbox');
+const { NativeMacTun } = require('./nativeMacTun');
+const { collectDiagnostics } = require('./connectionDiagnostics');
+const { stopTrackedTunnels, releaseGuardChecked } = require('./tunnelCleanup');
 const tunPlatform = require('./tunPlatform');
 const { appsForTun } = require('./tunApps');
 const { LeakGuard } = require('./leakGuard');
@@ -98,6 +101,10 @@ let appliedSettings = null;
 // doConnect); null when not under TUN. rebuildActiveConfig() reuses it rather
 // than asking the OS again — with the tunnel up, the default route IS the tunnel.
 let liveDirectInterface = null;
+let liveDiagnostics = null;
+let macRepairPromise = Promise.resolve();
+let macRepairError = null;
+let networkRepairing = false;
 
 // GitHub repo used for the in-app update check (see app:checkUpdate).
 const GITHUB_REPO = 'sadrazkh/Irnetfree_xray-client';
@@ -126,7 +133,7 @@ const DEFAULT_SETTINGS = {
   // like it had worked while half the machine was still outside the tunnel.
   tunMode: true,
   // TUN backend: sing-box (auto_route, v4+v6) when installed, else tun2socks
-  tunBackend: 'sing-box',
+  tunBackend: process.platform === 'darwin' && app.isPackaged ? 'native-macos' : 'sing-box',
   // leak guard under TUN: 'off' | 'standard' (adapter DNS override) | 'strict'
   // (+ strict_route and a firewall for everything off the tunnel)
   leakGuard: 'standard',
@@ -214,16 +221,23 @@ function assetStatus() {
  * `quiet`, so the fallback line is logged once per connect, not per poll.
  */
 function makeTun(settings, { quiet = false } = {}) {
-  const opts = { binDir: bundledBinDir(), extraDirs: [userBin()], onLog: (line, level) => send('log', { line, level }), lang: settings.lang };
+  let selected;
+  const opts = { binDir: bundledBinDir(), extraDirs: [userBin()], onLog: (line, level) => send('log', { line, level }), lang: settings.lang, userData: app.getPath('userData'),
+    onUnexpectedExit: () => {
+      if (userDisconnecting || isQuitting || tun !== selected) return;
+      send('log', { line: 'The macOS tunnel exited unexpectedly; checking recovery', level: 'error' });
+      recoverFromNetworkChange('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
+    } };
+  if (process.platform === 'darwin' && settings.tunBackend === 'native-macos') return (selected = new NativeMacTun(opts));
   const sb = new TunSingbox(opts);
   const legacy = new TunManager(opts);
-  if (settings.tunBackend === 'tun2socks') return legacy;
-  if (sb.isAvailable()) return sb;
+  if (settings.tunBackend === 'tun2socks') return (selected = legacy);
+  if (sb.isAvailable()) return (selected = sb);
   if (legacy.isAvailable()) {
     if (!quiet) send('log', { line: 'sing-box not installed — TUN falls back to tun2socks', level: 'warn' });
-    return legacy;
+    return (selected = legacy);
   }
-  return sb;   // neither: the sing-box error message names what to install
+  return (selected = sb);   // neither: the sing-box error message names what to install
 }
 
 function send(channel, payload) {
@@ -786,6 +800,7 @@ function reportSilentTunnels(vars) {
  *   caller must not treat it as either a success or a failure worth retrying.
  */
 async function doConnect(serverId, opts = {}) {
+  if (networkRepairing) throw new Error('Network recovery is still running');
   // Every await below is a window in which the user can hit the power button.
   // doDisconnect() then stops the core and clears activeServerId, but THIS call
   // would carry on to start both watchers again and emit 'connected' — leaving
@@ -795,6 +810,11 @@ async function doConnect(serverId, opts = {}) {
   const gen = ++connGen;
   const stale = () => gen !== connGen;
   const abandoned = { ok: false, stale: true };
+  if (process.platform === 'darwin') {
+    await macRepairPromise;
+    if (stale()) return abandoned;
+    if (macRepairError) throw new Error('Network recovery is required before connecting');
+  }
 
   // The watcher only starts once this connect has FINISHED (see the end of this
   // function), so a network that moves while the tunnel is being built is
@@ -841,6 +861,10 @@ async function doConnect(serverId, opts = {}) {
   // Ours stays in hand, and startedTuns is what disconnect/quit/exit sweep.
   const myTun = tun;
   startedTuns.add(myTun);
+  if (settings.tunMode && myTun.prepare) {
+    await myTun.prepare({ strict: settings.leakGuard === 'strict' });
+    if (stale()) return abandoned;
+  }
 
   // Under TUN the OS default route is the tunnel, so every dial Xray makes
   // itself (direct, the anti-DPI dialers, the first hop of a chain) must be
@@ -898,6 +922,7 @@ async function doConnect(serverId, opts = {}) {
   xrayReloading = true;
   try {
     await xray.start(config, runEngine);
+    if (!stale()) liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));
   } catch (e) {
     // start() watches for 1.2 s to catch a config that crashes the core on
     // startup. A disconnect landing inside that grace KILLS the process, so the
@@ -978,12 +1003,13 @@ async function doConnect(serverId, opts = {}) {
           // to be dialled; the engage below narrows them back again. The order
           // is a contract; it is written out above `class LeakGuard`.
           try {
-            await leakGuard.holdForReconnect({
+            if (!tun?.managesDns) await leakGuard.holdForReconnect({
               excludes: await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []),
               token: guardToken
             });
           } catch {}
-          try { await myTun.stop(); } catch {}
+          if (process.platform === 'darwin') await myTun.stop();
+          else { try { await myTun.stop(); } catch {} }
         }
         // The per-app split, decided once and told to the user when it is
         // refused — a rule that is silently dropped looks exactly like a rule
@@ -1010,6 +1036,7 @@ async function doConnect(serverId, opts = {}) {
         }
       } catch (e) {
         tunError = e.message;
+        if (process.platform === 'darwin' && myTun.active) throw e;
         send('log', { line: 'TUN start failed: ' + e.message, level: 'error' });
       }
     }
@@ -1019,9 +1046,11 @@ async function doConnect(serverId, opts = {}) {
     // adapters still hand every name to the ISP. Only for a tunnel that
     // actually came up: with no tunnel there is nothing to point them at, and
     // doing it anyway would leave the machine unable to resolve at all.
-    if (myTun.active && settings.leakGuard !== 'off') {
+    if (myTun.active && !myTun.managesDns && settings.leakGuard !== 'off') {
       try {
         const res = await leakGuard.engage({
+          originalMacServices: myTun.macState && myTun.macState.service
+            ? [{ name: myTun.macState.service, dns: myTun.macState.savedDns }] : [],
           level: settings.leakGuard,
           peer4: myTun.dnsPeer || TUN_GW,
           // NOT gated on the ipv6 setting. The tunnel peer answers on either
@@ -1225,7 +1254,7 @@ async function reapplyConnection() {
         // the serverId.
         let entries = [];
         try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
-        await leakGuard.holdForReconnect({
+        if (!tun?.managesDns) await leakGuard.holdForReconnect({
           excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
         });
       }
@@ -1300,7 +1329,8 @@ async function rebuildActiveConfig() {
   try {
     const check = await xray.validateWithFallback(config, engine);
     if (!check.ok) throw new Error(check.error);
-    await xray.start(config, check.engine);   // start() stops the old instance first
+    await xray.start(config, check.engine);
+    liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first
     watchWgSilence(config);   // the plan may have changed under the live tunnel
     // this restarts the core WITHOUT stopping the poller, so the meter has to
     // hear about it here too — same reason as the connect path
@@ -1543,10 +1573,7 @@ function stopNetWatcher() {
  * with nothing else pointing at it (see startedTuns).
  */
 async function stopAllTuns() {
-  const all = new Set(startedTuns);
-  if (tun) all.add(tun);
-  startedTuns.clear();
-  for (const t of all) { try { await t.stop(); } catch {} }
+  await stopTrackedTunnels(startedTuns, tun);
 }
 
 /** The same sweep for the exit hook, where nothing can be awaited. */
@@ -1557,40 +1584,51 @@ function cleanupAllTunsSync() {
 }
 
 async function doDisconnect() {
-  userDisconnecting = true;        // intentional — don't trip the kill switch
-  // Anything already in flight stops speaking for the app from this line on: a
-  // doConnect() past xray.start() must not emit 'connected' or restart the
-  // watchers, and a recovery that hung (a stuck PowerShell, an ignored macOS
-  // password prompt) must not keep its lock and park every future trigger.
-  connGen++;
-  recoverGen++;
-  recovering = false;
-  stopProcWatcher();
-  stopNetWatcher();                // nothing live to recover any more
-  if (stats) stats.stop();
-  // Flush before the counters go away, then reset: the next core starts at
-  // zero and must not be read as growth on this one.
-  if (usage) { usage.tick(null); if (usage.dirty) { usageStore.set('totals', usage.totals); usage.markSaved(); } usage.reset(); }
-  if (usage) send('usage', { totals: usage.totals });   // settle the UI on the final figure
-  // The adapters point at real resolvers again BEFORE the tunnel goes: in
-  // between they would be pointing at an address that no longer routes anywhere.
-  try { if (leakGuard) await leakGuard.release(); } catch {}
-  // `tun` is the instance doConnect() started (makeTun), whichever backend it
-  // chose — the same one before-quit and the exit hook tear down.
-  await stopAllTuns();
-  try { await setSystemProxy(false, {}); } catch {}
-  try { await removeLanFirewall(); } catch {}
-  try { await disarmKillSwitch(); } catch {}
-  send('killswitch', { engaged: false });
-  if (xray) await xray.stop();
-  store.set('activeServerId', null);
-  pinWatch.clear();
-  appliedSettings = null;          // nothing live to be out of sync with
-  liveDirectInterface = null;
-  updateTray(false);
-  updateOverlay('off');
-  send('status', { state: 'disconnected' });
-  userDisconnecting = false;
+  userDisconnecting = true;
+  try {
+    // Anything already in flight stops speaking for the app from this line on: a
+    // doConnect() past xray.start() must not emit 'connected' or restart the
+    // watchers, and a recovery that hung (a stuck PowerShell, an ignored macOS
+    // password prompt) must not keep its lock and park every future trigger.
+    connGen++;
+    recoverGen++;
+    recovering = false;
+    stopProcWatcher();
+    stopNetWatcher();                // nothing live to recover any more
+    if (stats) stats.stop();
+    // Flush before the counters go away, then reset: the next core starts at
+    // zero and must not be read as growth on this one.
+    if (usage) { usage.tick(null); if (usage.dirty) { usageStore.set('totals', usage.totals); usage.markSaved(); } usage.reset(); }
+    if (usage) send('usage', { totals: usage.totals });   // settle the UI on the final figure
+    // The adapters point at real resolvers again BEFORE the tunnel goes: in
+    // between they would be pointing at an address that no longer routes anywhere.
+    if (process.platform === 'darwin') {
+      // Stop the owned process before removing the guard, retaining recovery on failure.
+      await stopAllTuns();
+      await releaseGuardChecked(leakGuard);
+    } else {
+      try { if (leakGuard) await leakGuard.release(); } catch {}
+    }
+    // `tun` is the instance doConnect() started (makeTun), whichever backend it
+    // chose — the same one before-quit and the exit hook tear down.
+    await stopAllTuns();
+    try { await setSystemProxy(false, {}); } catch {}
+    try { await removeLanFirewall(); } catch {}
+    try { await disarmKillSwitch(); } catch {}
+    send('killswitch', { engaged: false });
+    if (xray) await xray.stop();
+    store.set('activeServerId', null);
+    liveDiagnostics = null;
+    pinWatch.clear();
+    appliedSettings = null;          // nothing live to be out of sync with
+    liveDirectInterface = null;
+    updateTray(false);
+    updateOverlay('off');
+    send('status', { state: 'disconnected' });
+  } catch (e) {
+    send('status', { state: 'cleanup-failed', error: 'Network cleanup incomplete; use network recovery.' });
+    throw e;
+  } finally { userDisconnecting = false; }
 }
 
 function updateTray(connected, name) {
@@ -1708,7 +1746,46 @@ function getChains() {
 }
 
 /* ----------------------------- IPC handlers ----------------------------- */
+async function connectionDiagnostics(probe) {
+  return collectDiagnostics(Object.assign({}, liveDiagnostics || {}, {
+    coreRunning: !!(xray && xray.running), tunActive: !!(tun && tun.active), probe
+  }));
+}
+
+async function nativeService(command) {
+  if (!['status', 'register', 'unregister', 'settings'].includes(command)) throw new Error('Unsupported native service command');
+  const manager = new NativeMacTun();
+  if (command === 'unregister') {
+    await doDisconnect();
+    await manager.recoverMacSessions();
+  }
+  return manager.service(command);
+}
+
+async function repairNetwork() {
+  if (networkRepairing) return { ok: false, error: 'Network recovery is already running' };
+  networkRepairing = true;
+  try {
+    await macRepairPromise;
+    await doDisconnect();
+    if (process.platform === 'darwin') {
+      await new NativeMacTun().recoverMacSessions();
+      const repair = new TunSingbox({ userData: app.getPath('userData') });
+      await repair.recoverMacSessions();
+      await new TunManager({ userData: app.getPath('userData') }).recoverMacSessions();
+    }
+    await releaseGuardChecked(leakGuard);
+    macRepairError = null;
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: 'Network recovery incomplete. Retry and allow the macOS administrator prompt.' };
+  } finally { networkRepairing = false; }
+}
+
 function registerIpc() {
+  ipcMain.handle('diagnostics:connection', (e, probe) => connectionDiagnostics(probe));
+  ipcMain.handle('network:repair', () => repairNetwork());
+  ipcMain.handle('native:service', (e, command) => nativeService(command));
   ipcMain.handle('app:init', () => ({
     servers: store.get('servers', []),
     subscriptions: store.get('subscriptions', []),
@@ -2427,7 +2504,18 @@ app.whenReady().then(() => {
     runScriptPrivileged: tunPlatform.runScriptPrivileged,
     platform: process.platform
   });
-  leakGuard.repairAtLaunch().catch((e) => send('log', { line: 'Leak guard repair failed: ' + e.message, level: 'error' }));
+  if (process.platform === 'darwin') {
+    macRepairPromise = (async () => {
+      const repair = new TunSingbox({ userData: app.getPath('userData') });
+      await repair.recoverMacSessions();
+      await new TunManager({ userData: app.getPath('userData') }).recoverMacSessions();
+      const result = await leakGuard.repairAtLaunch();
+      if (leakGuard.readState()) throw new Error('Saved DNS recovery is incomplete');
+      return result;
+    })().catch(e => { macRepairError = e; send('log', { line: 'Network recovery required', level: 'error' }); });
+  } else {
+    leakGuard.repairAtLaunch().catch((e) => send('log', { line: 'Leak guard repair failed: ' + e.message, level: 'error' }));
+  }
 
   registerIpc();
   createWindow();
@@ -2479,8 +2567,13 @@ async function teardownForQuit() {
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
-  try { if (leakGuard) await leakGuard.release(); } catch {}   // adapters first, then the tunnel
-  await stopAllTuns();   // every instance a connect started, not just the last
+  if (process.platform === 'darwin') {
+    try { await stopAllTuns(); await releaseGuardChecked(leakGuard); }
+    catch { send('log', { line: 'Network cleanup pending; recovery retained for next launch', level: 'error' }); }
+  } else {
+    try { if (leakGuard) await leakGuard.release(); } catch {}
+    await stopAllTuns();
+  }
   try { await setSystemProxy(false, {}); } catch {}
   try { await removeLanFirewall(); } catch {}
   try { await disarmKillSwitch(); } catch {}

@@ -26,6 +26,8 @@
     "pack": "electron-builder --dir"
   },
   "build": {
+    "afterPack": "scripts/build-mac-native.js",
+    "afterSign": "scripts/verify-mac-native.js",
     "appId": "com.irnetfree.client",
     "productName": "IRNetFree",
     "copyright": "Copyright © IRNetFree",
@@ -69,7 +71,13 @@
       "darkModeSupport": true,
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
-      "identity": null,
+      "sign": "scripts/build-mac-native.js",
+      "minimumSystemVersion": "13.0",
+      "signIgnore": [
+        "Contents/MacOS/IRNetFreeNative$",
+        "Contents/MacOS/IRNetFreeTunnelService$",
+        "Contents/Resources/native/sing-box$"
+      ],
       "target": [
         { "target": "dmg", "arch": ["x64", "arm64"] },
         { "target": "zip", "arch": ["x64", "arm64"] }
