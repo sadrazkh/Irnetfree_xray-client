@@ -13,6 +13,16 @@
  *   3. We only set the adapter's DNS: the tunnel peer (172.19.0.2), so every
  *      query the OS sends there enters the TUN and reaches Xray's port-53
  *      hijack. No routes are laid by hand.
+ *   4. Optional per-app split (`apps`): sing-box's TUN can match traffic by
+ *      the packet's OWNING PROCESS on Windows, macOS and Linux — a `direct`
+ *      outbound plus a `process_name` route rule sends the chosen apps
+ *      around the tunnel (`exclude`) or makes them the only ones inside it
+ *      (`only`). Xray cannot do this itself (see procRouter.js's IP
+ *      approximation), so this is sing-box-only. A `port: 53` rule is always
+ *      inserted ahead of the process rule, unconditionally routed to
+ *      socks-out: the adapter's resolver is the tunnel peer, reachable only
+ *      through the TUN, so every app must keep resolving through it even
+ *      while its other traffic goes the other way — see buildTunConfig.
  *
  * Against tun2socks (tunManager.js) this fixes the two known holes: there is
  * a v6 default route (v6 no longer bypasses the tunnel), and once Xray's
@@ -51,6 +61,28 @@ function cidrOf(ip) {
 }
 
 /**
+ * `apps.names` normalisation — the builder is the last line of defence, so it
+ * does this itself rather than trust callers: trim, drop empties, dedupe
+ * keeping the first occurrence and the order.
+ *
+ * Anything that is not a string is DROPPED, not coerced: '[object Object]' in
+ * the rule would be a name nothing on the machine is called, while the log
+ * cheerfully reports that per-app routing is on.
+ */
+function normalizeAppNames(names) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of (Array.isArray(names) ? names : [])) {
+    if (typeof raw !== 'string') continue;
+    const s = raw.trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+/**
  * Pure. The shape below passed `sing-box check` on 1.13.14 with and without
  * strict, with and without exclusions.
  *
@@ -62,8 +94,27 @@ function cidrOf(ip) {
  *
  * `interfaceName: null` omits `interface_name`: on darwin sing-tun only accepts
  * `utun<N>` and picks the next free unit itself when no name is given.
+ *
+ * `apps`: `null | { mode: 'exclude' | 'only', names: string[] }`. `null`, an
+ * unrecognised `mode`, or no name left after normalisation (trim, drop
+ * empties, dedupe keeping the first occurrence and order) leaves the output
+ * byte-stable with `apps` absent — no `route.rules`, no `direct` outbound,
+ * `route.final` stays `'socks-out'`. With a usable name list a `direct`
+ * outbound is added and `route.rules` gets exactly two rules, in this order:
+ *   1. `{ port: 53, outbound: 'socks-out' }` — ALWAYS first, and always to
+ *      socks-out regardless of mode. The adapter's resolver is the tunnel
+ *      peer (172.19.0.2, TUN_PEER4), reachable only *through* the TUN. Without
+ *      this rule an excluded app's DNS query would be dialled `direct` to an
+ *      address nothing answers, and that app would lose name resolution
+ *      entirely. With it, every app resolves through the tunnel resolver and
+ *      only the excluded app's *traffic* goes around the tunnel (for `only`,
+ *      the reverse: only the named apps' traffic goes through the tunnel,
+ *      everyone's DNS still does).
+ *   2. `{ process_name: names, outbound: mode === 'exclude' ? 'direct' : 'socks-out' }`.
+ * `route.final` becomes `mode === 'exclude' ? 'socks-out' : 'direct'` — the
+ * unlisted apps get the opposite of what the listed ones get.
  */
-function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF } = {}) {
+function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null } = {}) {
   void ipv6;
   const inbound = { type: 'tun', tag: 'tun-in' };
   if (interfaceName) inbound.interface_name = interfaceName;
@@ -73,11 +124,32 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
   inbound.strict_route = !!strict;
   inbound.stack = stack;
   inbound.route_exclude_address = excludeIps.filter(Boolean).map(cidrOf);
+
+  const outbounds = [{ type: 'socks', tag: 'socks-out', server: '127.0.0.1', server_port: socksPort, version: '5' }];
+  const route = { final: 'socks-out', auto_detect_interface: true };
+
+  const mode = apps && (apps.mode === 'exclude' || apps.mode === 'only') ? apps.mode : null;
+  const names = mode ? normalizeAppNames(apps.names) : [];
+  if (mode && names.length) {
+    outbounds.push({ type: 'direct', tag: 'direct' });
+    route.final = mode === 'exclude' ? 'socks-out' : 'direct';
+    // DNS ALWAYS through the tunnel resolver first: the adapter's resolver is
+    // the tunnel peer (TUN_PEER4), reachable only through the TUN. Without
+    // this rule ahead of the process rule, an excluded app's DNS query would
+    // be dialled `direct` to an address nothing answers, and that app would
+    // lose name resolution entirely — so only its *traffic* goes around the
+    // tunnel (the reverse for `only`), never its DNS.
+    route.rules = [
+      { port: 53, outbound: 'socks-out' },
+      { process_name: names, outbound: mode === 'exclude' ? 'direct' : 'socks-out' }
+    ];
+  }
+
   return {
     log: { level: 'warn', timestamp: false },
     inbounds: [inbound],
-    outbounds: [{ type: 'socks', tag: 'socks-out', server: '127.0.0.1', server_port: socksPort, version: '5' }],
-    route: { final: 'socks-out', auto_detect_interface: true }
+    outbounds,
+    route
   };
 }
 
@@ -270,7 +342,7 @@ class TunSingbox {
   writeConfig(socksPort, excludeIps, opts, interfaceName) {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-sb-'));
     const cfgFile = path.join(work, 'sing-box.json');
-    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName });
+    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null });
     fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
     this.work = work;
     return { work, cfgFile };
@@ -539,7 +611,9 @@ class TunSingbox {
    * @param socksPort   Xray's local SOCKS inbound
    * @param bypassAddrs server entry addresses (+ resolver bypass IPs): kept off the tunnel
    * @param dnsServers  what the adapter's resolvers should be (the tunnel peer under managed DNS)
-   * @param opts        { ipv6, strict }
+   * @param opts        { ipv6, strict, apps } — `apps` is the per-app split
+   *                    (`null | { mode: 'exclude'|'only', names }`), decided by
+   *                    tunApps.js and baked into the config (see buildTunConfig)
    */
   async start(socksPort, bypassAddrs, dnsServers, opts = {}) {
     if (this.active) return;

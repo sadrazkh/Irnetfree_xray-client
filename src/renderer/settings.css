@@ -163,13 +163,25 @@
   width: 100%;
   min-width: 0;
 }
-/* the notes run under the whole row, the way a .switch-sub does — and at the
-   switch's size, because that is what they are */
-#view-settings .setting-row > .hint {
+/* The notes run under the whole row, the way a .switch-sub does — and at the
+   switch's size, because that is what they are. A note inside an opened block
+   is one of the row's notes too, so it is the same declaration (the span is a
+   no-op in the block's single column). */
+#view-settings .setting-row > .hint,
+#view-settings .setting-row > .row-stack > .hint {
   grid-column: 1 / -1;
   margin: 0;
   font-size: 11px;
   line-height: 1.5;
+}
+/* One choice on this page opens a whole block instead of a single control —
+   the per-app mode's list of app names, its picker and its hint. It runs under
+   both columns the way the notes do, rather than being squeezed into the
+   control column, and its parts stack instead of sharing a line. */
+#view-settings .setting-row > .row-stack {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
 }
 #view-settings .setting-row:last-child { border-block-end: 0; }
 #view-settings .setting-row.disabled > .field-label,

@@ -157,7 +157,9 @@ for (const [name, [plan, over]] of Object.entries(shapes)) {
 
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
-// sing-tun there only accepts utun<N> and names the device itself.
+// sing-tun there only accepts utun<N> and names the device itself — plus the
+// per-app split (task 10a): exclude, only, and exclude combined with
+// strict+v6+excludeIps to prove `apps` and everything else are independent.
 let sbTotal = 0, sbFailed = 0;
 const sb = process.env.IRNF_SINGBOX_EXE;
 if (sb) {
@@ -172,6 +174,9 @@ if (sb) {
     }
   }
   cases.push(['tun-darwin-noname', { socksPort: 10808, excludeIps: ['1.2.3.4'], interfaceName: null }]);
+  cases.push(['tun-apps-exclude', { socksPort: 10808, apps: { mode: 'exclude', names: ['chrome.exe', 'Telegram.exe'] } }]);
+  cases.push(['tun-apps-only', { socksPort: 10808, apps: { mode: 'only', names: ['chrome.exe'] } }]);
+  cases.push(['tun-apps-exclude-strict-v6', { socksPort: 10808, ipv6: true, strict: true, excludeIps: ['1.2.3.4'], apps: { mode: 'exclude', names: ['steam.exe'] } }]);
   for (const [name, args] of cases) {
     total++; sbTotal++;
     const file = path.join(work, `${name}.json`);

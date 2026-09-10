@@ -138,6 +138,64 @@ test('buildTunConfig: without an interface name the key is omitted (darwin: sing
   assert.deepEqual(Object.keys(inb), ['type', 'tag', 'address', 'mtu', 'auto_route', 'strict_route', 'stack', 'route_exclude_address']);
 });
 
+/* ------------------------------ buildTunConfig: apps (task 10a) ------------------------------ */
+
+test('buildTunConfig: apps off — null, mode neither exclude/only, or no usable name — is byte-stable with today\'s output', () => {
+  const base = JSON.stringify(buildTunConfig({ socksPort: 10808 }));
+  assert.equal(JSON.stringify(buildTunConfig({ socksPort: 10808, apps: null })), base, 'apps: null');
+  assert.equal(JSON.stringify(buildTunConfig({ socksPort: 10808, apps: { mode: 'exclude', names: [] } })), base, 'no names');
+  assert.equal(JSON.stringify(buildTunConfig({ socksPort: 10808, apps: { mode: 'exclude', names: ['', '  '] } })), base, 'only blank names');
+  assert.equal(JSON.stringify(buildTunConfig({ socksPort: 10808, apps: { mode: 'off', names: ['x.exe'] } })), base, 'unknown mode');
+});
+
+test('buildTunConfig: apps exclude — trims/dedupes names keeping first occurrence and order, DNS rule ahead of it', () => {
+  const cfg = buildTunConfig({ socksPort: 10808, apps: { mode: 'exclude', names: ['Telegram.exe', ' steam.exe ', 'Telegram.exe'] } });
+  assert.deepEqual(cfg.route.rules, [
+    { port: 53, outbound: 'socks-out' },
+    { process_name: ['Telegram.exe', 'steam.exe'], outbound: 'direct' }
+  ]);
+  assert.equal(cfg.route.final, 'socks-out');
+  assert.deepEqual(cfg.outbounds.map(o => o.tag), ['socks-out', 'direct']);
+});
+
+test('buildTunConfig: a name that is not a string is dropped, never stringified into the rule', () => {
+  // '[object Object]' / '42' would be a rule matching nothing while the log says
+  // per-app routing is on — the builder drops them instead of coercing them.
+  const cfg = buildTunConfig({ socksPort: 10808, apps: { mode: 'exclude', names: [{}, 42, 'chrome.exe'] } });
+  assert.deepEqual(cfg.route.rules[1].process_name, ['chrome.exe']);
+});
+
+test('buildTunConfig: apps only — the named apps are the only ones sent into the tunnel', () => {
+  const cfg = buildTunConfig({ socksPort: 10808, apps: { mode: 'only', names: ['chrome.exe'] } });
+  assert.deepEqual(cfg.route.rules, [
+    { port: 53, outbound: 'socks-out' },
+    { process_name: ['chrome.exe'], outbound: 'socks-out' }
+  ]);
+  assert.equal(cfg.route.final, 'direct');
+  assert.deepEqual(cfg.outbounds.map(o => o.tag), ['socks-out', 'direct']);
+});
+
+test('buildTunConfig: with apps active, route key order is final, auto_detect_interface, rules', () => {
+  const cfg = buildTunConfig({ socksPort: 10808, apps: { mode: 'exclude', names: ['chrome.exe'] } });
+  assert.deepEqual(Object.keys(cfg.route), ['final', 'auto_detect_interface', 'rules']);
+});
+
+test('writeConfig: opts.apps rides into buildTunConfig — rules present when set, absent when not', () => {
+  const tun = new TunSingbox({ extraDirs: [], onLog: () => {} });
+  const { cfgFile: withAppsFile } = tun.writeConfig(10808, [], { apps: { mode: 'exclude', names: ['chrome.exe'] } }, 'IRNetFree');
+  const withApps = JSON.parse(fs.readFileSync(withAppsFile, 'utf8'));
+  assert.deepEqual(withApps.route.rules, [
+    { port: 53, outbound: 'socks-out' },
+    { process_name: ['chrome.exe'], outbound: 'direct' }
+  ]);
+  tun.removeWork();
+
+  const { cfgFile: noAppsFile } = tun.writeConfig(10808, [], {}, 'IRNetFree');
+  const noApps = JSON.parse(fs.readFileSync(noAppsFile, 'utf8'));
+  assert.equal('rules' in noApps.route, false, 'no apps opt → no rules');
+  tun.removeWork();
+});
+
 /* ------------------------------ surface ------------------------------ */
 
 test('the surface task 2 wires in', () => {

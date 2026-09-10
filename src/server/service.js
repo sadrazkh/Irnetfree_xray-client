@@ -31,6 +31,7 @@ const { SubscriptionManager } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
 const { TunSingbox } = require('../main/tunSingbox');
 const tunPlatform = require('../main/tunPlatform');
+const { appsForTun } = require('../main/tunApps');
 const { LeakGuard } = require('../main/leakGuard');
 const { StatsPoller, SilenceWatch } = require('../main/stats');
 const { UsageMeter, grandTotal } = require('../main/usage');
@@ -74,6 +75,12 @@ const DEFAULT_SETTINGS = {
   leakGuard: 'standard',
   // proxy mode only: block outbound UDP except :53 on physical adapters (WebRTC)
   blockUdpInProxyMode: false,
+  // per-app split under the sing-box TUN (see tunApps.js): 'off' | 'exclude'
+  // (these apps go around the tunnel) | 'only' (only these apps use it), over
+  // process names as the OS shows them. Refused without sing-box, and refused
+  // at the strict guard level, which promises nothing leaves outside the tunnel.
+  tunAppMode: 'off',
+  tunApps: [],
   autoUpdateSubs: true,
   autoUpdateInterval: 60,
   customRules: [],
@@ -837,11 +844,22 @@ function createService(opts = {}) {
         }
         try {
           myTun.lang = settings.lang || 'fa';
+          // The per-app split, decided once and told to the user when it is
+          // refused — a rule that is silently dropped looks exactly like a rule
+          // that is working (see tunApps.js for the order of the reasons).
+          const { apps: tunApps, warn: tunAppsWarn } = appsForTun(settings, myTun.backendId);
+          if (tunAppsWarn) send('log', { line: tunAppsWarn, level: 'warn' });
           // from the running config, not rebuilt from the plan — see main.js
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config)],
             adapterDnsServers(settings, hijacks ? dnsPeer : null),
-            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict' });   // tun2socks ignores the 4th
+            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps });   // tun2socks ignores the 4th
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
+          if (tunApps) {
+            send('log', {
+              line: `Per-app routing: ${tunApps.mode === 'exclude' ? 'these apps go around the tunnel' : 'only these apps use the tunnel'} — ${tunApps.names.join(', ')}`,
+              level: 'info'
+            });
+          }
         if (settings.leakGuard === 'strict' && myTun.backendId !== 'sing-box') {
           send('log', { line: 'Strict guard on the tun2socks backend: no strict_route and no IPv6 route — install sing-box for the guard the setting promises', level: 'warn' });
         }
