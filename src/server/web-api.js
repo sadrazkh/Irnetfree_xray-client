@@ -86,6 +86,7 @@
 
     connectionDiagnostics: (probe) => invoke('diagnostics:connection', probe),
     repairNetwork: () => invoke('network:repair'),
+    nativeService: (command) => invoke('native:service', command),
     // diagnostics
     pingTcp: (id) => invoke('ping:tcp', id),
     pingReal: (id) => invoke('ping:real', id),

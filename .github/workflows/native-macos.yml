@@ -1,0 +1,65 @@
+name: Native macOS beta
+
+on:
+  pull_request:
+    paths:
+      - 'native/macos/**'
+      - 'scripts/*mac-native*'
+      - 'src/main/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'src/renderer/**'
+      - 'tests/*native*'
+      - 'tests/*Native*'
+      - '.github/workflows/native-macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Native macOS ${{ matrix.arch }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm test
+      - run: npm run gen-icons
+      # This compiles both Swift executables with the target architecture,
+      # downloads and checksum-verifies the pinned core, and packages them.
+      # No registration, elevation or tunnel/network changes run on CI.
+      - name: Build installable beta
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never
+      - name: Verify packaged native components
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r -d '' app; do
+            node scripts/verify-mac-native.js "$app" '${{ matrix.arch }}'
+            found=$((found + 1))
+          done < <(find dist -maxdepth 3 -name IRNetFree.app -type d -print0)
+          test "$found" -gt 0
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          shasum -a 256 *.dmg *.zip > 'SHA256SUMS-macos-${{ matrix.arch }}.txt'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IRNetFree-native-macos-${{ matrix.arch }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS-macos-*.txt
+          if-no-files-found: error
