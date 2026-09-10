@@ -158,6 +158,13 @@ test('buildTunConfig: apps exclude — trims/dedupes names keeping first occurre
   assert.deepEqual(cfg.outbounds.map(o => o.tag), ['socks-out', 'direct']);
 });
 
+test('buildTunConfig: a name that is not a string is dropped, never stringified into the rule', () => {
+  // '[object Object]' / '42' would be a rule matching nothing while the log says
+  // per-app routing is on — the builder drops them instead of coercing them.
+  const cfg = buildTunConfig({ socksPort: 10808, apps: { mode: 'exclude', names: [{}, 42, 'chrome.exe'] } });
+  assert.deepEqual(cfg.route.rules[1].process_name, ['chrome.exe']);
+});
+
 test('buildTunConfig: apps only — the named apps are the only ones sent into the tunnel', () => {
   const cfg = buildTunConfig({ socksPort: 10808, apps: { mode: 'only', names: ['chrome.exe'] } });
   assert.deepEqual(cfg.route.rules, [

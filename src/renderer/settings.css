@@ -163,9 +163,12 @@
   width: 100%;
   min-width: 0;
 }
-/* the notes run under the whole row, the way a .switch-sub does — and at the
-   switch's size, because that is what they are */
-#view-settings .setting-row > .hint {
+/* The notes run under the whole row, the way a .switch-sub does — and at the
+   switch's size, because that is what they are. A note inside an opened block
+   is one of the row's notes too, so it is the same declaration (the span is a
+   no-op in the block's single column). */
+#view-settings .setting-row > .hint,
+#view-settings .setting-row > .row-stack > .hint {
   grid-column: 1 / -1;
   margin: 0;
   font-size: 11px;
@@ -179,12 +182,6 @@
   grid-column: 1 / -1;
   display: grid;
   gap: 8px;
-}
-/* the block's own note is one of the row's notes, so it reads at that size */
-#view-settings .setting-row > .row-stack > .hint {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.5;
 }
 #view-settings .setting-row:last-child { border-block-end: 0; }
 #view-settings .setting-row.disabled > .field-label,
