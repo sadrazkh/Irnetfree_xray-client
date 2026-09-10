@@ -275,6 +275,7 @@ const I18N = {
     'set.systemProxy': 'پروکسی سیستمی', 'set.tunMode': 'حالت TUN',
     /* هم برچسب کنترل در تنظیمات‌اند، هم نامی که پنجره‌ی «اعمال تنظیمات» نشان می‌دهد */
     'set.tunBackend': 'بک‌اندِ TUN', 'set.leakGuard': 'گارد نشتی',
+    'set.tunAppMode': 'روتینگ به‌تفکیک برنامه زیر TUN', 'set.tunApps': 'برنامه‌های انتخاب‌شده',
     'set.blockUdpInProxyMode': 'بستن UDP در حالت پروکسی',
     'set.defaultEngine': 'هستهٔ پیش‌فرض',
     'set.defaultEngineHint': 'کانفیگ‌هایی که هسته‌ی مشخصی انتخاب نکرده‌اند، و زنجیره/استخر/روتینگ پیشرفته، روی این هسته اجرا می‌شوند. اگر عضوی PattN بخواهد، کل plan روی PattN می‌رود.',
@@ -667,6 +668,7 @@ const I18N = {
     'set.systemProxy': 'System proxy', 'set.tunMode': 'TUN mode',
     /* both the control labels in Settings and the names the apply dialog lists */
     'set.tunBackend': 'TUN backend', 'set.leakGuard': 'Leak guard',
+    'set.tunAppMode': 'Per-app routing under TUN', 'set.tunApps': 'Selected apps',
     'set.blockUdpInProxyMode': 'Block UDP in proxy mode',
     'set.defaultEngine': 'Default core',
     'set.defaultEngineHint': 'Configs without their own core choice, and chains / pool / advanced routing, run on this core. If any member asks for PattN the whole plan runs on PattN.',
