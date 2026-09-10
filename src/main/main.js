@@ -132,8 +132,11 @@ const DEFAULT_SETTINGS = {
   // to install rather than silently falling back to proxy-only, which looked
   // like it had worked while half the machine was still outside the tunnel.
   tunMode: true,
-  // TUN backend: sing-box (auto_route, v4+v6) when installed, else tun2socks
-  tunBackend: process.platform === 'darwin' && app.isPackaged ? 'native-macos' : 'sing-box',
+  // TUN backend: sing-box (auto_route, v4+v6) when installed, else tun2socks.
+  // 'native-macos' is opt-in only, on every platform and every build: its root
+  // LaunchDaemon is registered from Settings, never by a default that would
+  // change under a Mac user who never opened this page.
+  tunBackend: 'sing-box',
   // leak guard under TUN: 'off' | 'standard' (adapter DNS override) | 'strict'
   // (+ strict_route and a firewall for everything off the tunnel)
   leakGuard: 'standard',

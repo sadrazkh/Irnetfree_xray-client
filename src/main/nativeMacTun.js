@@ -98,8 +98,13 @@ class NativeMacTun {
     return result;
   }
   async ensureRegistered() {
-    let reply = await this.run('status', {});
-    if (reply.status === 'notRegistered') reply = await this.run('register', {});
+    // Registering installs a root LaunchDaemon: the user's decision, made once
+    // in Settings, never a side effect of pressing Connect. So this only reads
+    // the status — `nativeService('register')` is the single way in.
+    const reply = await this.run('status', {});
+    if (reply.status === 'notRegistered') {
+      throw new Error('Enable the macOS tunnel service first: Settings → TUN → macOS tunnel service → Enable service.');
+    }
     if (reply.status === 'requiresApproval') {
       throw new Error('Enable IRNetFree in System Settings → General → Login Items & Extensions (Allow in the Background), then reconnect.');
     }
