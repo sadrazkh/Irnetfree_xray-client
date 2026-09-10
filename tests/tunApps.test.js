@@ -25,6 +25,7 @@ function S(over) {
 
 const NO_APPS = 'Per-app routing is on but no app is listed — ignored';
 const NO_SINGBOX = 'Per-app routing needs the sing-box TUN backend — ignored';
+const NO_NATIVE = 'Per-app routing is not available on the native macOS service yet — choose the sing-box (compatibility) backend';
 const STRICT = 'Per-app routing is off under the strict guard: the guard promises nothing leaves outside the tunnel, and either mode would send some app around it';
 
 /* --------------------------- normalizeAppNames --------------------------- */
@@ -111,6 +112,28 @@ test('any backend that is not sing-box is refused — tun2socks cannot route by 
       `backend ${JSON.stringify(backend)}`
     );
   }
+});
+
+/**
+ * The native macOS service runs a sing-box TUN, so it calls itself 'sing-box'
+ * — but the app does not write that config: it hands the daemon a fixed set of
+ * fields (socks port, exclusions, DNS) with no room for a process rule. The
+ * refusal has to name the backend the user can actually switch to, or the rule
+ * is accepted, logged as applied, and silently dropped by the daemon.
+ */
+test('the native macOS service is refused with a reason of its own', () => {
+  for (const mode of ['exclude', 'only']) {
+    assert.deepEqual(
+      appsForTun(S({ tunAppMode: mode, tunApps: ['Google Chrome'] }), 'native-macos', 'darwin'),
+      { apps: null, warn: NO_NATIVE },
+      mode
+    );
+  }
+  // and the tun2socks reason is untouched — a different fix, a different backend
+  assert.deepEqual(
+    appsForTun(S({ tunAppMode: 'only', tunApps: ['chrome.exe'] }), 'tun2socks'),
+    { apps: null, warn: NO_SINGBOX }
+  );
 });
 
 test('the strict guard refuses BOTH modes, not just exclude', () => {
