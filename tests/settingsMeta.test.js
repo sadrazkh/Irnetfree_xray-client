@@ -36,6 +36,8 @@ function baseSettings(over) {
     tunBackend: 'sing-box',
     leakGuard: 'standard',
     blockUdpInProxyMode: false,
+    tunAppMode: 'off',
+    tunApps: [],
     autoUpdateSubs: true,
     autoUpdateInterval: 60,
     customRules: [],
@@ -100,6 +102,7 @@ test('every reconnect-relevant key is detected when it changes', () => {
     routeDefault: 'direct', procRouteWatch: true,
     systemProxy: false, tunMode: true,
     tunBackend: 'tun2socks', leakGuard: 'strict', blockUdpInProxyMode: true,
+    tunAppMode: 'exclude', tunApps: ['chrome.exe'],
     defaultEngine: 'xray-pattn'
   };
   // the fixture must cover the whole list, or this test silently stops guarding
