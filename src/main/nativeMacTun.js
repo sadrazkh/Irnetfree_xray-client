@@ -52,6 +52,10 @@ function runNative(executable, command, request = {}, { timeout = 95000, spawnIm
 class NativeMacTun {
   constructor(opts = {}) {
     this.platform = opts.platform || os.platform();
+    // SMAppService is macOS 13 = Darwin 22. The app itself runs on 10.15+, and
+    // so does the compatibility backend, so the floor belongs to THIS backend —
+    // not to the build, which must keep installing on older Macs.
+    this.darwinMajor = parseInt(String(opts.osRelease || os.release() || ''), 10);
     this.nativePath = opts.nativePath || path.resolve(process.resourcesPath || '', '..', 'MacOS', 'IRNetFreeNative');
     this.run = opts.run || ((command, request) => runNative(this.nativePath, command, request));
     this.exists = opts.exists || fs.existsSync;
@@ -78,7 +82,7 @@ class NativeMacTun {
     this.exitNotified = false;
   }
 
-  isAvailable() { return this.platform === 'darwin' && this.exists(this.nativePath); }
+  isAvailable() { return this.platform === 'darwin' && this.darwinMajor >= 22 && this.exists(this.nativePath); }
   isElevated() { return true; }
   physicalInterface() { return this.lookupInterface(); }
   hasPendingMacRecovery() { return this.pendingRecovery; }

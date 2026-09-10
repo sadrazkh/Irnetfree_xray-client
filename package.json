@@ -72,7 +72,6 @@
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "sign": "scripts/build-mac-native.js",
-      "minimumSystemVersion": "13.0",
       "signIgnore": [
         "Contents/MacOS/IRNetFreeNative$",
         "Contents/MacOS/IRNetFreeTunnelService$",

@@ -13,6 +13,17 @@ test('native packaging leaves non-Mac builders alone', async () => {
   await afterPack({ electronPlatformName: 'linux' });
 });
 
+/**
+ * The Swift daemon needs macOS 13, but the APP does not: Electron 31 runs on
+ * 10.15+ and so does the compatibility backend. Setting LSMinimumSystemVersion
+ * on the bundle would refuse to launch at all for everyone below 13 — the
+ * version floor belongs to NativeMacTun.isAvailable(), not to the installer.
+ */
+test('the bundle does not raise the minimum macOS for the compatibility backend', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(pkg.build.mac.minimumSystemVersion, undefined);
+});
+
 test('app signing preserves the pinned native binaries and signs the containing app', () => {
   const app = path.resolve('IRNetFree.app');
   const options = afterPack.signingOptions({ app, ignore: (file) => file.endsWith('.kext'), optionsForFile: () => ({ entitlements: 'test.plist' }) });

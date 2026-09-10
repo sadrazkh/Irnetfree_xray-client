@@ -8,6 +8,7 @@ function fixture(overrides = {}) {
   const calls = [];
   const tun = new NativeMacTun({
     platform: 'darwin', nativePath: '/Application/Contents/MacOS/IRNetFreeNative', exists: () => true,
+    osRelease: '23.5.0',
     resolveServerIps: async () => ['203.0.113.1', '2001:db8::1'],
     physicalInterface: async () => 'en0',
     run: async (command, payload) => {
@@ -25,6 +26,23 @@ test('native bridge confined to macOS and packaged binary', () => {
   assert.equal(fixture().tun.isAvailable(), true);
   assert.equal(fixture({ platform: 'win32' }).tun.isAvailable(), false);
   assert.equal(fixture({ exists: () => false }).tun.isAvailable(), false);
+});
+
+/**
+ * SMAppService is macOS 13. The app itself runs on 10.15+ and the compatibility
+ * backend with it, so the version is a property of THIS backend, not of the
+ * build — a Big Sur user must still get the sing-box TUN, and must not be told
+ * to enable a service the OS cannot register.
+ */
+test('the native backend needs macOS 13 (Darwin 22); older Macs keep the compatibility backend', () => {
+  assert.equal(fixture({ osRelease: '21.6.0' }).tun.isAvailable(), false, 'macOS 12');
+  assert.equal(fixture({ osRelease: '19.6.0' }).tun.isAvailable(), false, 'macOS 10.15');
+  assert.equal(fixture({ osRelease: '22.1.0' }).tun.isAvailable(), true, 'macOS 13');
+  assert.equal(fixture({ osRelease: '24.0.0' }).tun.isAvailable(), true, 'macOS 15');
+  // an unreadable release is not a licence to try: below the bar, like any other
+  for (const junk of ['unknown', 'darwin', '0']) {
+    assert.equal(fixture({ osRelease: junk }).tun.isAvailable(), false, junk);
+  }
 });
 
 test('native start sends constrained network request, owns DNS and heartbeats session', async () => {
