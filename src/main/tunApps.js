@@ -54,6 +54,35 @@ function normalizeAppNames(list) {
   return out;
 }
 
+// "already carries an extension" is a SHORT alphanumeric tail: 'foo.scr' has
+// one, 'OneDrive.Sync.Service' (whose image really is …Service.exe) does not.
+const HAS_EXT = /\.[A-Za-z0-9]{1,4}$/;
+
+/**
+ * The Windows safety net for a hand-typed name: 'chrome' → 'chrome.exe'.
+ *
+ * Task Manager's Processes tab hides the extension, so 'chrome' is exactly what
+ * a user reads off the screen and types in — while sing-box matches the image
+ * file's leaf name (`filepath.Base(ProcessPath)`), so that rule would never
+ * fire. Only on Windows: a mac/linux binary has no extension. The picker does
+ * not need this — it already offers the exact name (procRouter's `exeNameOf`) —
+ * but the box next to it takes free text.
+ *
+ * Deduped again afterwards, so 'chrome' + 'chrome.exe' is one name, not two.
+ */
+function withExeSuffix(names, platform) {
+  if (platform !== 'win32') return names;
+  const seen = new Set();
+  const out = [];
+  for (const name of names) {
+    const full = HAS_EXT.test(name) ? name : name + '.exe';
+    if (seen.has(full)) continue;
+    seen.add(full);
+    out.push(full);
+  }
+  return out;
+}
+
 /**
  * The per-app rule for this connection, or null with the reason it was refused.
  *
@@ -62,9 +91,10 @@ function normalizeAppNames(list) {
  *
  * @param {object|null|undefined} settings  the live settings object
  * @param {string|null|undefined} backendId the TUN backend about to run ('sing-box' | …)
+ * @param {string} platform  where the tunnel is about to run; passed in so it is testable
  * @returns {{ apps: { mode: 'exclude'|'only', names: string[] }|null, warn: string|null }}
  */
-function appsForTun(settings, backendId) {
+function appsForTun(settings, backendId, platform = process.platform) {
   const s = (settings && typeof settings === 'object') ? settings : {};
 
   const mode = s.tunAppMode;
@@ -83,7 +113,7 @@ function appsForTun(settings, backendId) {
       warn: 'Per-app routing is off under the strict guard: the guard promises nothing leaves outside the tunnel, and either mode would send some app around it'
     };
   }
-  return { apps: { mode, names }, warn: null };
+  return { apps: { mode, names: withExeSuffix(names, platform) }, warn: null };
 }
 
 module.exports = { normalizeAppNames, appsForTun };

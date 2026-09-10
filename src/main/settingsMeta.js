@@ -35,7 +35,10 @@ const RECONNECT_KEYS = [
   // block — all decided when the tunnel is built (phase 3)
   'tunBackend', 'leakGuard', 'blockUdpInProxyMode',
   // the per-app split: a process rule written into the sing-box TUN config at
-  // connect time, so changing either half needs the tunnel rebuilt (phase D)
+  // connect time, so changing either half needs the tunnel rebuilt (phase D).
+  // `tunApps` is compared as-is, so merely reordering the list asks for a
+  // reconnect — deliberate: the list is the user's own order, and a comparison
+  // that ignored it would have to sort a copy on every settings save.
   'tunAppMode', 'tunApps',
   // which core the config is validated on and started with
   'defaultEngine'

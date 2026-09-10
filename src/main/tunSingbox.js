@@ -64,12 +64,17 @@ function cidrOf(ip) {
  * `apps.names` normalisation — the builder is the last line of defence, so it
  * does this itself rather than trust callers: trim, drop empties, dedupe
  * keeping the first occurrence and the order.
+ *
+ * Anything that is not a string is DROPPED, not coerced: '[object Object]' in
+ * the rule would be a name nothing on the machine is called, while the log
+ * cheerfully reports that per-app routing is on.
  */
 function normalizeAppNames(names) {
   const seen = new Set();
   const out = [];
   for (const raw of (Array.isArray(names) ? names : [])) {
-    const s = String(raw || '').trim();
+    if (typeof raw !== 'string') continue;
+    const s = raw.trim();
     if (!s || seen.has(s)) continue;
     seen.add(s);
     out.push(s);
@@ -606,7 +611,9 @@ class TunSingbox {
    * @param socksPort   Xray's local SOCKS inbound
    * @param bypassAddrs server entry addresses (+ resolver bypass IPs): kept off the tunnel
    * @param dnsServers  what the adapter's resolvers should be (the tunnel peer under managed DNS)
-   * @param opts        { ipv6, strict }
+   * @param opts        { ipv6, strict, apps } — `apps` is the per-app split
+   *                    (`null | { mode: 'exclude'|'only', names }`), decided by
+   *                    tunApps.js and baked into the config (see buildTunConfig)
    */
   async start(socksPort, bypassAddrs, dnsServers, opts = {}) {
     if (this.active) return;
