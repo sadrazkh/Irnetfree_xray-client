@@ -1434,17 +1434,27 @@ function createService(opts = {}) {
   return manager.service(command);
 }
 
-async function repairNetwork() {
+  /**
+   * Undo what a CRASHED session left behind — never what a live one is using.
+   *
+   * It used to open with doDisconnect(), which made a button sitting between
+   * "Refresh state" and "Copy report" drop the VPN with no warning (and on
+   * Windows and Linux, where the darwin block below is skipped, that was the
+   * whole of what it did). Recovery is for an app that is not connected, so a
+   * connected one is a refusal — a code, so the renderer can say it in the
+   * user's own language.
+   */
+  async function repairNetwork() {
     if (networkRepairing) return { ok: false, error: 'Network recovery is already running' };
+    if (xray && xray.running) return { ok: false, error: 'connected' };
     networkRepairing = true;
     try {
       await macRepairPromise;
-      await doDisconnect();
       if (process.platform === 'darwin') {
         await new NativeMacTun().recoverMacSessions();
         const repair = new TunSingbox({ userData: dataDir });
         await repair.recoverMacSessions();
-      await new TunManager({ userData: dataDir }).recoverMacSessions();
+        await new TunManager({ userData: dataDir }).recoverMacSessions();
       }
       await releaseGuardChecked(leakGuard);
       macRepairError = null;
