@@ -577,3 +577,9 @@
   visibility: hidden;
 }
 .opt-card.active .opt-card-check { visibility: visible; }
+.native-service-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  grid-column: 1 / -1;      /* the whole width of .setting-row's grid, like .opt-cards */
+}
