@@ -123,8 +123,15 @@ class NativeMacTun {
       if (!this.isAvailable()) throw new Error('The native macOS service is missing from this application.');
       if (!Number.isInteger(socksPort) || socksPort < 1 || socksPort > 65535) throw new Error('Invalid SOCKS port.');
       if (!Array.isArray(dnsServers) || !dnsServers.length || dnsServers.some(ip => typeof ip !== 'string' || !isIP(ip))) throw new Error('Native macOS VPN requires DNS server IP addresses.');
-      await this.prepare(opts);
-      if (this.pendingRecovery) await this.stopInternal();
+      // The daemon outlives the app, and its DNS journal with it. A session it
+      // still holds has to be stopped — the daemon's stop is what puts the real
+      // resolvers back — or this start would journal the tunnel peer as the
+      // "original" and there would be nothing left to restore.
+      const ready = await this.prepare(opts);
+      if (ready.active || ready.recoveryPending || this.pendingRecovery) {
+        this.pendingRecovery = true;
+        await this.stopInternal();
+      }
       const excludeIps = await this.resolveServerIps(bypassAddrs, { ipv6: true });
       this.pendingRecovery = true;
       this.exitNotified = false;

@@ -364,6 +364,12 @@ function createService(opts = {}) {
   });
   if (process.platform === 'darwin') {
     macRepairPromise = (async () => {
+      // First, because it is the one recovery that can be holding the system's
+      // DNS right now: the root daemon outlives the app, so a force quit leaves
+      // it with a live session no journal of ours can undo. A no-op when the
+      // bridge is not there (isAvailable() false), which is every non-packaged
+      // build and the headless server.
+      await new NativeMacTun({ userData: dataDir }).recoverMacSessions();
       const repair = new TunSingbox({ userData: dataDir });
       await repair.recoverMacSessions();
       await new TunManager({ userData: dataDir }).recoverMacSessions();
