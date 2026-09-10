@@ -171,6 +171,21 @@
   font-size: 11px;
   line-height: 1.5;
 }
+/* One choice on this page opens a whole block instead of a single control —
+   the per-app mode's list of app names, its picker and its hint. It runs under
+   both columns the way the notes do, rather than being squeezed into the
+   control column, and its parts stack instead of sharing a line. */
+#view-settings .setting-row > .row-stack {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+}
+/* the block's own note is one of the row's notes, so it reads at that size */
+#view-settings .setting-row > .row-stack > .hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
 #view-settings .setting-row:last-child { border-block-end: 0; }
 #view-settings .setting-row.disabled > .field-label,
 #view-settings .setting-row.disabled > .select { opacity: .5; }

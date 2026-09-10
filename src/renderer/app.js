@@ -362,6 +362,9 @@ function applySettingsToUI() {
   $('#optSysProxy').checked = !!s.systemProxy;
   $('#optTun').checked = !!s.tunMode;
   $('#optTunBackend').value = s.tunBackend || 'sing-box';
+  $('#optTunAppMode').value = s.tunAppMode || 'off';
+  // stored as a list, typed as lines
+  $('#optTunApps').value = (Array.isArray(s.tunApps) ? s.tunApps : []).join('\n');
   $('#optLeakGuard').value = s.leakGuard || 'standard';
   $('#optBlockUdpProxy').checked = !!s.blockUdpInProxyMode;
   $('#optAllowLan').checked = !!s.allowLan;
@@ -382,6 +385,7 @@ function applySettingsToUI() {
   syncPreset('#dnsRemotePreset', '#dnsRemoteInput');
   syncPreset('#dnsDirectPreset', '#dnsDirectInput');
   updateGuardRows();
+  updateTunAppRows();
 }
 
 /**
@@ -441,11 +445,13 @@ function renderOptionCards(selectId, hostId, icons) {
 
 const GUARD_ICONS = { off: '⚪', standard: '🛡', strict: '🔒' };
 const BACKEND_ICONS = { 'sing-box': '📦', tun2socks: '🧩' };
+const TUNAPP_ICONS = { off: '⚪', exclude: '↩', only: '🎯' };
 
-/** Both card groups, from whatever the selects currently hold. */
+/** Every card group, from whatever the selects currently hold. */
 function renderSettingCards() {
   renderOptionCards('#optLeakGuard', '#leakGuardCards', GUARD_ICONS);
   renderOptionCards('#optTunBackend', '#tunBackendCards', BACKEND_ICONS);
+  renderOptionCards('#optTunAppMode', '#tunAppModeCards', TUNAPP_ICONS);
 }
 
 function updateGuardRows() {
@@ -478,6 +484,31 @@ function updateGuardRows() {
     $('#optBlockUdpProxy').disabled = tunOn;
     $('#udpBlockNote').hidden = !tunOn;
   }
+}
+
+/**
+ * The per-app row: the list only exists once a mode is chosen, and each warning
+ * appears only while it is actually true.
+ *
+ * Both warnings are about a choice made a few centimetres away, so they belong
+ * here and not in a log line read after the fact. Strict promises that nothing
+ * leaves outside the tunnel — which is precisely what "send these apps around
+ * it" asks for, so one of the two has to give. And only sing-box can see the
+ * process behind a packet; under tun2socks the list is simply not applied.
+ *
+ * Values come from the controls, not from state.settings, so the row is right
+ * the moment a card is clicked and still right after the save comes back.
+ */
+function updateTunAppRows() {
+  const row = $('#tunAppRow');
+  const backendRow = $('#tunBackendRow');
+  if (!row || !backendRow) return;
+  // same feature, same audience: whatever decides the backend row decides this one
+  row.hidden = backendRow.hidden;
+  const on = ($('#optTunAppMode').value || 'off') !== 'off';
+  $('#tunAppsBlock').hidden = !on;
+  $('#tunAppStrictNote').hidden = !(on && $('#optLeakGuard').value === 'strict');
+  $('#tunAppNeedsSingbox').hidden = !(on && $('#optTunBackend').value === 'tun2socks');
 }
 
 /** Reflect an input's value in its preset dropdown (or "custom"). */
@@ -525,6 +556,8 @@ function readSettingsForm() {
     systemProxy: $('#optSysProxy').checked,
     tunMode: $('#optTun').checked,
     tunBackend: $('#optTunBackend').value,
+    tunAppMode: $('#optTunAppMode').value,
+    tunApps: readTunApps(),
     leakGuard: $('#optLeakGuard').value,
     blockUdpInProxyMode: $('#optBlockUdpProxy').checked,
     allowLan: $('#optAllowLan').checked,
@@ -538,6 +571,21 @@ function readSettingsForm() {
 }
 function listFromInput(sel) {
   return $(sel).value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+/**
+ * The per-app textarea → the list that is stored: one name per line, trimmed,
+ * blank lines dropped, repeats dropped, typing order kept. A name repeated in
+ * a routing rule set is not an error the user should be told about — it is
+ * just the same name twice — so it is quietly folded away instead.
+ */
+function readTunApps() {
+  const apps = [];
+  for (const line of $('#optTunApps').value.split(/\r?\n/)) {
+    const name = line.trim();
+    if (name && !apps.includes(name)) apps.push(name);
+  }
+  return apps;
 }
 
 /**
@@ -695,10 +743,52 @@ $('#dnsDirectInput').oninput = () => syncPreset('#dnsDirectPreset', '#dnsDirectI
 $('#optDnsManaged').onchange = () => saveSettings({ dnsManaged: $('#optDnsManaged').checked });
 $('#optIpv6').onchange = () => saveSettings({ ipv6: $('#optIpv6').checked });
 
-/* TUN backend / leak guard / proxy-mode UDP block — each saves only its own key */
-$('#optTunBackend').onchange = () => saveSettings({ tunBackend: $('#optTunBackend').value });
-$('#optLeakGuard').onchange = () => { saveSettings({ leakGuard: $('#optLeakGuard').value }); updateGuardRows(); };
+/* TUN backend / leak guard / proxy-mode UDP block — each saves only its own key.
+   The backend and the guard both decide whether the per-app row's warnings are
+   true, so each of them refreshes that row too. */
+$('#optTunBackend').onchange = () => { saveSettings({ tunBackend: $('#optTunBackend').value }); updateTunAppRows(); };
+$('#optLeakGuard').onchange = () => { saveSettings({ leakGuard: $('#optLeakGuard').value }); updateGuardRows(); updateTunAppRows(); };
 $('#optBlockUdpProxy').onchange = () => saveSettings({ blockUdpInProxyMode: $('#optBlockUdpProxy').checked });
+
+/* per-app routing — the mode saves itself, the list is cleaned up before it is stored */
+$('#optTunAppMode').onchange = () => { saveSettings({ tunAppMode: $('#optTunAppMode').value }); updateTunAppRows(); };
+$('#optTunApps').onchange = () => saveTunApps();
+
+/** Store the app list, and show back exactly what was stored. */
+function saveTunApps() {
+  const apps = readTunApps();
+  $('#optTunApps').value = apps.join('\n');
+  return saveSettings({ tunApps: apps });
+}
+
+/**
+ * Pick a name instead of typing it. sing-box matches the executable's name as
+ * the OS reports it (`chrome.exe`), and that is exactly what this list is — the
+ * same one the advanced routing rules pick from, so a name chosen here is a
+ * name that matches.
+ */
+$('#btnTunAppsPick').onclick = async () => {
+  let res = null;
+  try { res = await window.api.listProcesses(); } catch { res = null; }
+  const procs = (res && res.ok) ? (res.processes || []) : [];
+  // nothing to offer: say so rather than opening an empty menu. The list the
+  // routing page already loaded is left alone — this failure says nothing about it.
+  if (!procs.length) { toast(t('tunapp.pickNone'), 'warn'); return; }
+  state.procList = procs;
+  const pick = $('#tunAppsPick');
+  pick.innerHTML = processOptions('');   // escapes every name it puts in
+  pick.value = '';
+  pick.hidden = false;
+};
+
+$('#tunAppsPick').onchange = () => {
+  const name = $('#tunAppsPick').value;
+  const ta = $('#optTunApps');
+  $('#tunAppsPick').hidden = true;      // picked or dismissed, the menu is done
+  if (!name) return;
+  ta.value = ta.value.trim() ? ta.value.trimEnd() + '\n' + name : name;
+  saveTunApps();                        // a duplicate name folds away in here
+};
 
 /* kill switch toggle — read live when a drop happens, so it needs no reconnect */
 $('#optKillSwitch').onchange = async () => {
