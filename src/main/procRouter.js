@@ -20,9 +20,21 @@
  * Limitations (surfaced in the UI): matches by destination IP, so other apps
  * hitting the same IPs are affected; short-lived/bursty connections may be
  * missed; visibility is limited to the user's own processes unless elevated.
+ *
+ * TWO NAMES PER PROCESS. Everything above keys on `name` — what the OS calls
+ * the process (Windows `ProcessName`, lsof's COMMAND, the kernel's `comm`) —
+ * and stored routing rules hold that value, so it never changes. But the
+ * sing-box TUN's per-app rule (see tunApps.js / tunSingbox.js) matches the
+ * image file's leaf name instead (`filepath.Base(ProcessPath)`, exactly, case
+ * and all), which is a different string on every platform we support:
+ * 'chrome' vs 'chrome.exe', 'Google\x20Chrome' vs 'Google Chrome',
+ * 'telegram-deskto' (comm is capped at 15 chars) vs 'telegram-desktop'. So each
+ * entry carries `exe` next to `name`, and the per-app picker offers THAT.
  */
 
 const { execFile } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const os = require('os');
 
 function run(cmd, args, timeout = 6000) {
@@ -56,57 +68,130 @@ function ipFromEndpoint(s) {
   return i > 0 ? s.slice(0, i) : s;
 }
 
+/* -------------------------------- the two names -------------------------------- */
+/** lsof escapes anything non-printable in COMMAND, spaces included: `\x20`. */
+function decodeLsofEscapes(s) {
+  return String(s).replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+// "already carries an extension" is a SHORT alphanumeric tail: 'foo.scr' has
+// one, 'OneDrive.Sync.Service' (whose image really is …Service.exe) does not.
+const HAS_EXT = /\.[A-Za-z0-9]{1,4}$/;
+
+/**
+ * The name sing-box's `process_name` rule matches, for one enumerated
+ * connection. Pure — `platform` is always passed in, never read from the host,
+ * so this is testable (and reviewable) for all three OSes anywhere.
+ *
+ * `exe` is the hint the OS gave us, if any: the image leaf on Windows, the
+ * resolved `/proc/<pid>/exe` on Linux. When there is none:
+ *   win32  — the ProcessName plus '.exe' (an elevated / other-session process
+ *            has no readable Path). Case comes from the ProcessName then, and
+ *            sing-box compares case-sensitively; that is the best guess there is.
+ *   other  — the name itself, with lsof's escapes decoded. Nothing is ever
+ *            appended: a mac/linux binary has no extension.
+ *
+ * @param {{name?: string, pid?: number, exe?: string}} entry
+ * @param {string} platform  'win32' | 'darwin' | 'linux' | …
+ * @returns {string}
+ */
+function exeNameOf(entry, platform) {
+  const e = entry || {};
+  const name = String(e.name == null ? '' : e.name).trim();
+  const hint = String(e.exe == null ? '' : e.exe).trim();
+  if (platform === 'win32') {
+    if (hint) return hint;
+    if (!name) return '';
+    return HAS_EXT.test(name) ? name : name + '.exe';
+  }
+  return decodeLsofEscapes(hint || name);
+}
+
+/** Basename of /proc/<pid>/exe, or '' (not Linux, process gone, another user's). */
+function linuxExeOfPid(pid) {
+  try { return path.basename(fs.readlinkSync('/proc/' + pid + '/exe')); } catch { return ''; }
+}
+
 /* ----------------------------- connection enumeration ----------------------------- */
-/** [{ name, pid, remote }] of established outbound TCP connections. */
+/** [{ name, pid, remote, exe }] of established outbound TCP connections. */
 async function connections() {
   if (os.platform() === 'win32') return winConnections();
   return unixConnections();
 }
 
-async function winConnections() {
-  // Get-NetTCPConnection needs no elevation for the user's own processes; pid→
-  // name mapping for SYSTEM/other-user processes may be blank (filtered out).
-  const ps =
-    "Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | " +
-    "ForEach-Object { $p=(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName; " +
-    "if ($p) { \"$p|$($_.OwningProcess)|$($_.RemoteAddress)\" } }";
-  const out = await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps]);
+/**
+ * Pure parser for the PowerShell line below: `name|pid|remote|imageLeaf`.
+ * A line without the 4th field (an older build's output) still parses; the
+ * image leaf is simply missing, and exeNameOf falls back.
+ */
+function parseWinConnections(text) {
   const conns = [];
-  for (const line of out.split(/\r?\n/)) {
+  for (const line of String(text || '').split(/\r?\n/)) {
     const parts = line.trim().split('|');
     if (parts.length < 3) continue;
     const name = (parts[0] || '').trim();
     if (!name) continue;
-    conns.push({ name, pid: parseInt(parts[1], 10) || 0, remote: (parts[2] || '').trim() });
+    const entry = { name, pid: parseInt(parts[1], 10) || 0, remote: (parts[2] || '').trim(), exe: (parts[3] || '').trim() };
+    entry.exe = exeNameOf(entry, 'win32');
+    conns.push(entry);
   }
   return conns;
 }
 
-async function unixConnections() {
-  // Prefer lsof (present on macOS by default). `+c 0` disables the 9-char
-  // command-name truncation so we get full process names.
-  const lo = await run('lsof', ['-nP', '-iTCP', '-sTCP:ESTABLISHED', '+c', '0']);
-  if (lo) {
-    const conns = [];
-    for (const line of lo.split(/\r?\n/)) {
-      if (!line.trim() || /^COMMAND\s/.test(line)) continue;
-      const cols = line.trim().split(/\s+/);
-      if (cols.length < 9) continue;
-      const name = cols[0];
-      const pid = parseInt(cols[1], 10) || 0;
-      const nameField = cols[cols.length - 1]; // NAME col: local->remote (no spaces)
-      const m = nameField.match(/->(\[?[0-9a-fA-F:.]+\]?):\d+$/);
-      if (!m) continue;
-      const ip = ipFromEndpoint(m[1]);
-      conns.push({ name, pid, remote: ip });
-    }
-    return conns;
-  }
-  // Linux fallback: ss -tnp (process column needs root for other users).
-  const ss = await run('ss', ['-tnp', 'state', 'established']);
-  if (!ss) return [];
+async function winConnections() {
+  // Get-NetTCPConnection needs no elevation for the user's own processes; pid→
+  // name mapping for SYSTEM/other-user processes may be blank (filtered out).
+  // `Path` is the image file — readable only for a process we can open, so it
+  // is emitted as a 4th field when we have it and left empty when we do not
+  // (a property failure there is silent: it never reaches stderr or the exit code).
+  const ps =
+    "Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | " +
+    "ForEach-Object { $proc=(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue); " +
+    "if ($proc) { $e = if ($proc.Path) { Split-Path -Leaf $proc.Path } else { '' }; " +
+    "\"$($proc.ProcessName)|$($_.OwningProcess)|$($_.RemoteAddress)|$e\" } }";
+  const out = await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps]);
+  return parseWinConnections(out);
+}
+
+/**
+ * Pure parser for `lsof -nP -iTCP -sTCP:ESTABLISHED +c 0`.
+ *
+ * The NAME column is `local->remote`; lsof prints the state after it
+ * (`(ESTABLISHED)`), so the endpoint is the last column that actually holds an
+ * arrow, not simply the last column.
+ *
+ * @param {string} text
+ * @param {string} platform   for the exe mapping — always passed in
+ * @param {(pid:number)=>string} exeOfPid  Linux only: /proc lookup (injectable)
+ */
+function parseLsof(text, platform = process.platform, exeOfPid = linuxExeOfPid) {
   const conns = [];
-  for (const line of ss.split(/\r?\n/)) {
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line.trim() || /^COMMAND\s/.test(line)) continue;
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 9) continue;
+    const name = cols[0];
+    const pid = parseInt(cols[1], 10) || 0;
+    const nameField = [...cols].reverse().find(c => c.includes('->')) || cols[cols.length - 1];
+    const m = nameField.match(/->(\[?[0-9a-fA-F:.]+\]?):\d+$/);
+    if (!m) continue;
+    const ip = ipFromEndpoint(m[1]);
+    const hint = platform === 'linux' ? exeOfPid(pid) : '';
+    conns.push({ name, pid, remote: ip, exe: exeNameOf({ name, pid, exe: hint }, platform) });
+  }
+  return conns;
+}
+
+/**
+ * Pure parser for `ss -tnp state established` (Linux fallback). `comm` is
+ * capped at 15 characters, so the untruncated name comes from /proc.
+ *
+ * @param {string} text
+ * @param {(pid:number)=>string} exeOfPid  injectable /proc lookup
+ */
+function parseSs(text, exeOfPid = linuxExeOfPid) {
+  const conns = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
     if (!line.trim() || /^State|^Recv-Q/.test(line)) continue;
     const cols = line.trim().split(/\s+/);
     // columns: Recv-Q Send-Q Local Peer [Process]  (State filtered out)
@@ -116,23 +201,44 @@ async function unixConnections() {
     const pm = line.match(/users:\(\("([^"]+)",pid=(\d+)/);
     const name = pm ? pm[1] : '';
     if (!name) continue;
-    conns.push({ name, pid: pm ? parseInt(pm[2], 10) : 0, remote: ip });
+    const pid = pm ? parseInt(pm[2], 10) : 0;
+    conns.push({ name, pid, remote: ip, exe: exeNameOf({ name, pid, exe: exeOfPid(pid) }, 'linux') });
   }
   return conns;
 }
 
+async function unixConnections() {
+  // Prefer lsof (present on macOS by default). `+c 0` disables the 9-char
+  // command-name truncation so we get full process names.
+  const lo = await run('lsof', ['-nP', '-iTCP', '-sTCP:ESTABLISHED', '+c', '0']);
+  if (lo) return parseLsof(lo, os.platform());
+  // Linux fallback: ss -tnp (process column needs root for other users).
+  const ss = await run('ss', ['-tnp', 'state', 'established']);
+  if (!ss) return [];
+  return parseSs(ss);
+}
+
 /* ----------------------------- public helpers ----------------------------- */
-/** Processes that currently own outbound TCP connections: [{name, pid, count}]. */
-async function listProcesses() {
-  const conns = await connections();
+/**
+ * One row per process out of a connection list: [{name, exe, pid, count}].
+ * Pure. Grouped by `name` (what the routing rules key on); `exe` is the first
+ * one seen for that name — every connection of one process reports the same
+ * image anyway — and never empty, so a caller always has something to offer.
+ */
+function aggregateProcesses(conns) {
   const byName = new Map();
-  for (const c of conns) {
-    if (!c.name) continue;
-    const cur = byName.get(c.name) || { name: c.name, pid: c.pid, count: 0 };
+  for (const c of (conns || [])) {
+    if (!c || !c.name) continue;
+    const cur = byName.get(c.name) || { name: c.name, exe: c.exe || c.name, pid: c.pid, count: 0 };
     cur.count++;
     byName.set(c.name, cur);
   }
   return [...byName.values()].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+}
+
+/** Processes that currently own outbound TCP connections: [{name, exe, pid, count}]. */
+async function listProcesses() {
+  return aggregateProcesses(await connections());
 }
 
 /** Current routable remote IPs for one process name (case-insensitive). */
@@ -238,5 +344,11 @@ module.exports = {
   resolveProcessIps,
   collectProcessIps,
   pruneProcCache,
-  ProcWatcher
+  ProcWatcher,
+  // pure, and exported for the tests: the OS output → the two names
+  exeNameOf,
+  parseWinConnections,
+  parseLsof,
+  parseSs,
+  aggregateProcesses
 };
