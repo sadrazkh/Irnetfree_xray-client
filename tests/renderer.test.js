@@ -73,6 +73,41 @@ test('every string on screen resolves in both languages', () => {
 });
 
 /**
+ * Per-app routing under the sing-box TUN (D10) — the row in the TUN card.
+ *
+ * Three things can go wrong silently here and nowhere else catches them: an id
+ * app.js drives that the markup never grew, a mode the config builder does not
+ * understand (the tunnel would then be built from a value nothing routes on),
+ * and `tunapp.pickNone` — the one string of this row that never reaches the
+ * markup, because it only ever appears in a toast, so the whole-markup i18n
+ * test above cannot see it.
+ */
+test('the TUN card carries the per-app routing controls, in both languages', () => {
+  for (const id of ['tunAppRow', 'optTunAppMode', 'tunAppModeCards', 'tunAppsBlock',
+    'optTunApps', 'tunAppsPick', 'btnTunAppsPick', 'tunAppStrictNote', 'tunAppNeedsSingbox']) {
+    assert.ok(htmlIds.has(id), `#${id} is missing from the TUN card`);
+  }
+
+  // it belongs to the tunnel's own card, between the backend and the guard
+  const between = HTML.slice(HTML.indexOf('id="tunBackendRow"'), HTML.indexOf('id="leakGuardRow"'));
+  assert.ok(between.includes('id="tunAppRow"'),
+    'the per-app row is not in the TUN card, after the backend row');
+
+  // exactly the modes the sing-box config builder understands
+  const from = HTML.slice(HTML.indexOf('id="optTunAppMode"'));
+  const select = from.slice(0, from.indexOf('</select>'));
+  const modes = [...select.matchAll(/<option value="([^"]*)"/g)].map((m) => m[1]);
+  assert.deepEqual(modes, ['off', 'exclude', 'only']);
+
+  const keys = new Set();
+  for (const m of HTML.matchAll(/data-i18n(?:-ph|-title)?="(tunapp\.[^"]+)"/g)) keys.add(m[1]);
+  for (const m of APP.matchAll(/\bt\(\s*'(tunapp\.[^']+)'/g)) keys.add(m[1]);
+  assert.ok(keys.size >= 10, `expected the whole row to be translated, found ${keys.size} keys`);
+  const bad = [...keys].filter((k) => (I18N.split(`'${k}':`).length - 1) !== 2).sort();
+  assert.deepEqual(bad, [], 'these keys are not defined exactly once in each of fa and en');
+});
+
+/**
  * Classes app.js puts on elements it creates. A stylesheet that no longer
  * styles one of them leaves a live control invisible or unreadable, which no
  * other test would catch. The baseline is what the shipped stylesheet already
