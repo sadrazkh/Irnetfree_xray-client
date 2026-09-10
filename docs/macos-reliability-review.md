@@ -64,7 +64,7 @@ automatically; inspect them rather than restoring broad process matching.
 
 ## Native macOS beta implementation
 
-The packaged macOS 13+ app now includes an SMAppService LaunchDaemon and a
+The packaged Mac app now includes an SMAppService LaunchDaemon and a
 narrow Swift XPC bridge. The native backend is opt-in: the default TUN backend
 stays sing-box on every platform and in every build, the service is registered
 only from Settings > TUN > macOS tunnel service > Enable service, and a connect

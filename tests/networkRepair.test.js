@@ -41,10 +41,15 @@ const SERVICE_REPAIR = repairNetwork(SERVICE, 'service.js');
 
 test('network recovery refuses while the core is running instead of disconnecting', () => {
   for (const [label, body] of [['main.js', MAIN_REPAIR], ['service.js', SERVICE_REPAIR]]) {
-    assert.match(body, /if \(xray && xray\.running\) return \{ ok: false, error: 'connected' \};/,
+    assert.match(body, /if \(xray && xray\.running && !cleanupFailed\) return \{ ok: false, error: 'connected' \};/,
       `${label}: nothing stops recovery from running against a live connection`);
-    assert.doesNotMatch(body, /doDisconnect/,
+    // The plain path still takes nothing down. The one disconnect recovery may
+    // run is the retry of a teardown that already threw — the app is in the
+    // cleanup-failed state, and the user came here from that very toast.
+    assert.equal([...body.matchAll(/doDisconnect/g)].length, 1,
       `${label}: recovery must not take the connection down — the user was never asked`);
+    assert.match(body, /if \(cleanupFailed\) \{ try \{ await doDisconnect\(\); \} catch \{[^{}]*\} \}/,
+      `${label}: the only disconnect in recovery must be the one a failed cleanup asked for`);
   }
 });
 
@@ -52,7 +57,7 @@ test('the refusal is decided before anything is torn down', () => {
   for (const [label, body] of [['main.js', MAIN_REPAIR], ['service.js', SERVICE_REPAIR]]) {
     const refusal = body.indexOf("error: 'connected'");
     assert.notEqual(refusal, -1, `${label}: there is no connected check to order`);
-    for (const after of ['recoverMacSessions', 'releaseGuardChecked']) {
+    for (const after of ['doDisconnect', 'recoverMacSessions', 'releaseGuardChecked']) {
       assert.ok(refusal < body.indexOf(after),
         `${label}: ${after} runs before the connected check`);
     }

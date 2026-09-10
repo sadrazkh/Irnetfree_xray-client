@@ -71,9 +71,9 @@
     const download = tel('button', 'diag.download', 'btn ghost');
     const repair = tel('button', 'diag.repair', 'btn ghost');
     // The only control here that changes anything. Hidden until a report says
-    // the core is stopped: recovery undoes what a CRASHED session left behind,
-    // and offering it beside three read-only buttons invited a silent teardown
-    // of a live VPN.
+    // recovery is allowed: it undoes what a CRASHED session left behind, and
+    // offering it beside three read-only buttons invited a silent teardown of a
+    // live VPN.
     repair.hidden = true;
     for (const button of [refresh, copy, download, repair]) button.type = 'button';
     actions.append(refresh, copy, download, repair);
@@ -109,14 +109,18 @@
         content.append(list, el('p', `${t('diag.default')}: ${routes.fallback || t('diag.unknown')}`));
         for (const path of routes.paths || []) content.append(el('p', `${path.id}: ${t('diag.client')} → ${(path.hops || []).join(' → ')}${path.complete ? '' : ' ' + t('diag.incomplete')}`));
       }
-      const running = (value.core || {}).status === 'running';
-      repair.hidden = running;
-      repairNote.dataset.i18n = running ? 'diag.repairConnected' : 'diag.repairScope';
+      // The report decides: a stopped core, or a disconnect whose cleanup threw
+      // (the core is up, the network half undone). Older reports carry no
+      // `recovery`, so fall back to what the core says.
+      const allowed = value.recovery ? !!value.recovery.allowed : (value.core || {}).status !== 'running';
+      repair.hidden = !allowed;
+      repairNote.dataset.i18n = allowed ? 'diag.repairScope' : 'diag.repairConnected';
       repairNote.textContent = t(repairNote.dataset.i18n);
     }
-    /** Disable the controls for the length of one request, and put back exactly
-     *  what each of them was — not "all enabled", which would hand the user a
-     *  button the report had deliberately disabled. */
+    /** Disable the controls for the length of one request, and put each of them
+     *  back exactly as it was rather than blanket-enabling: the report HIDES
+     *  `repair` instead of disabling it, so "all enabled" would be this
+     *  function guessing at state it does not own. */
     function freeze() {
       const previous = [refresh, test, repair].map(button => [button, button.disabled]);
       for (const [button] of previous) button.disabled = true;
@@ -155,7 +159,11 @@
       try {
         const result = await window.api.repairNetwork();
         if (result && result.ok === true) say('diag.repaired');
-        else say(result && result.error === 'connected' ? 'diag.repairConnected' : 'diag.repairFailed');
+        else if (result && result.error === 'connected') say('diag.repairConnected');
+        // A second click while the first recovery is still working is not a
+        // failure, and telling the user it was sends them to an admin prompt.
+        else if (result && result.error === 'Network recovery is already running') say('diag.repairBusy');
+        else say('diag.repairFailed');
       } catch { say('diag.repairFailed'); }
       finally { busy = false; thaw(); }
     };

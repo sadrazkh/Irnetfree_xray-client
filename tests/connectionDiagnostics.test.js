@@ -54,6 +54,24 @@ test('stopped core cannot probe or report stale routing as running', async () =>
   assert.equal(result.connectivity.status, 'core-stopped');
 });
 
+/**
+ * The report is what the dialog reads to decide whether to OFFER "Recover
+ * network" at all. A live core normally hides it — recovery undoes what a
+ * crashed session left behind. But a disconnect whose teardown threw leaves the
+ * core running AND the network half undone, and the cleanup-failed message sends
+ * the user to this very dialog: refusing there would be a dead end.
+ */
+test('the report says when recovery may run, and a failed cleanup is the exception', async () => {
+  const live = await collectDiagnostics({ coreRunning: true, config });
+  assert.equal(live.recovery.allowed, false);
+  const stopped = await collectDiagnostics({ coreRunning: false });
+  assert.equal(stopped.recovery.allowed, true);
+  const failed = await collectDiagnostics({ coreRunning: true, config, cleanupFailed: true });
+  assert.equal(failed.recovery.allowed, true);
+  // Not a truthiness test on the caller's word: only the flag itself opens it.
+  assert.equal((await collectDiagnostics({ coreRunning: true, config, cleanupFailed: 'yes' })).recovery.allowed, false);
+});
+
 test('invalid probe input never contacts network and raw errors are redacted', async () => {
   for (const target of [{ host: 'https://private.example', port: 80 }, { host: 'x', port: 65536 }, { host: 'x\nsecret', port: 80 }]) {
     assert.equal((await probeDestination(1080, target, { socks5Connect() { assert.fail(); } })).status, 'invalid-input');
