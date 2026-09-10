@@ -501,10 +501,7 @@ function updateGuardRows() {
  */
 function updateTunAppRows() {
   const row = $('#tunAppRow');
-  const backendRow = $('#tunBackendRow');
-  if (!row || !backendRow) return;
-  // same feature, same audience: whatever decides the backend row decides this one
-  row.hidden = backendRow.hidden;
+  if (!row) return;                     // the settings view is not built yet
   const on = ($('#optTunAppMode').value || 'off') !== 'off';
   $('#tunAppsBlock').hidden = !on;
   $('#tunAppStrictNote').hidden = !(on && $('#optLeakGuard').value === 'strict');
@@ -762,21 +759,27 @@ function saveTunApps() {
 }
 
 /**
- * Pick a name instead of typing it. sing-box matches the executable's name as
- * the OS reports it (`chrome.exe`), and that is exactly what this list is — the
- * same one the advanced routing rules pick from, so a name chosen here is a
- * name that matches.
+ * Pick a name instead of typing it. The list is the apps that currently have an
+ * open connection — not every running app — and what goes into the box is each
+ * one's `exe`: the image file's leaf name (`chrome.exe`, `Google Chrome`),
+ * which is the only string sing-box's `process_name` rule matches. The name the
+ * OS calls the process by ('chrome') is a different string that matches nothing
+ * here — the routing page's picker goes on storing that one, which is why the
+ * two ask processOptions() for different values.
  */
 $('#btnTunAppsPick').onclick = async () => {
   let res = null;
   try { res = await window.api.listProcesses(); } catch { res = null; }
+  // the enumeration itself failed: say what went wrong instead of claiming the
+  // machine is running nothing
+  if (res && res.error) { toast(res.error, 'err'); return; }
   const procs = (res && res.ok) ? (res.processes || []) : [];
   // nothing to offer: say so rather than opening an empty menu. The list the
   // routing page already loaded is left alone — this failure says nothing about it.
   if (!procs.length) { toast(t('tunapp.pickNone'), 'warn'); return; }
   state.procList = procs;
   const pick = $('#tunAppsPick');
-  pick.innerHTML = processOptions('');   // escapes every name it puts in
+  pick.innerHTML = processOptions('', { exe: true });   // escapes every name it puts in
   pick.value = '';
   pick.hidden = false;
 };
@@ -3323,18 +3326,28 @@ async function loadProcList() {
   renderAdvanced();
 }
 
-/** <option>s for a process <select>, ensuring the current value is present. */
-function processOptions(selected) {
-  const opts = [`<option value="">${escapeHtml(t('proc.pick'))}</option>`];
+/**
+ * <option>s for a process <select>, ensuring the current value is present.
+ *
+ * Two consumers, two different values off the same list. The advanced routing
+ * rules store the process NAME the OS reports ('chrome') — that is what the IP
+ * cache and the saved rules key on, and it must not change. The per-app TUN
+ * list needs the image file's leaf name ('chrome.exe'), because that is the
+ * only thing sing-box's `process_name` rule matches: `{ exe: true }`.
+ */
+function processOptions(selected, opts = {}) {
+  const valueOf = (p) => (opts && opts.exe ? (p.exe || p.name) : p.name);
+  const out = [`<option value="">${escapeHtml(t('proc.pick'))}</option>`];
   for (const p of state.procList) {
-    const label = p.count ? `${p.name} (${p.count})` : p.name;
-    opts.push(`<option value="${escapeHtml(p.name)}"${p.name === selected ? ' selected' : ''}>${escapeHtml(label)}</option>`);
+    const value = valueOf(p);
+    const label = p.count ? `${value} (${p.count})` : value;
+    out.push(`<option value="${escapeHtml(value)}"${value === selected ? ' selected' : ''}>${escapeHtml(label)}</option>`);
   }
   // current value that's no longer running
-  if (selected && !state.procList.some(p => p.name === selected)) {
-    opts.push(`<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}</option>`);
+  if (selected && !state.procList.some(p => valueOf(p) === selected)) {
+    out.push(`<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)}</option>`);
   }
-  return opts.join('');
+  return out.join('');
 }
 
 function targetOptions(selected) {
