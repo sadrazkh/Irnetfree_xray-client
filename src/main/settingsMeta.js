@@ -34,6 +34,9 @@ const RECONNECT_KEYS = [
   // which TUN backend runs, how hard the leak guard holds, the proxy-mode UDP
   // block — all decided when the tunnel is built (phase 3)
   'tunBackend', 'leakGuard', 'blockUdpInProxyMode',
+  // the per-app split: a process rule written into the sing-box TUN config at
+  // connect time, so changing either half needs the tunnel rebuilt (phase D)
+  'tunAppMode', 'tunApps',
   // which core the config is validated on and started with
   'defaultEngine'
 ];
