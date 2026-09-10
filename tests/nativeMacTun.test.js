@@ -96,6 +96,40 @@ test('a registered service still awaits background approval and never starts fal
   assert.equal(tun.active, false);
 });
 
+/**
+ * The daemon outlives the app. If it still holds a session — the app was force
+ * quit, or the previous stop never landed — its DNS journal is still applied,
+ * and `start` on top of that would journal the tunnel peer as the "original".
+ * So the status reply is read, not discarded: an active or recovery-pending
+ * daemon is stopped first, which is what restores the real resolvers.
+ */
+test('a session the daemon still holds is stopped before a new one starts', async () => {
+  const calls = [];
+  const { tun } = fixture({ run: async (command, payload) => {
+    calls.push(command);
+    if (command === 'status') return { ok: true, status: 'enabled', active: true };
+    if (command === 'stop') return { ok: true, active: false };
+    return { ok: true, active: true, device: 'utun12', sessionId: 'session-2' };
+  } });
+  await connect(tun);
+  assert.deepEqual(calls, ['status', 'stop', 'start']);
+  assert.equal(tun.sessionId, 'session-2');
+  await tun.stop();
+});
+
+test('a daemon reporting only recoveryPending is stopped before start too', async () => {
+  const calls = [];
+  const { tun } = fixture({ run: async command => {
+    calls.push(command);
+    if (command === 'status') return { ok: true, status: 'enabled', active: false, recoveryPending: true };
+    if (command === 'stop') return { ok: true, active: false };
+    return { ok: true, active: true, device: 'utun9', sessionId: 'session-3' };
+  } });
+  await connect(tun);
+  assert.deepEqual(calls, ['status', 'stop', 'start']);
+  await tun.stop();
+});
+
 test('stop failure preserves session for retry', async () => {
   const { tun } = fixture();
   await connect(tun);
