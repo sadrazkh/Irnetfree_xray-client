@@ -6,7 +6,7 @@
 
 **Architecture:** Each feature is a small pure module (`autostart.js`, `trayMenu.js`, `appUpdate.js`, `assetUpdater.js`, `backup.js`) plus wiring in both mirrors, or renderer-only (D2, D8, D9). D10 extends `buildTunConfig` with sing-box `process_name` route rules — the only honest per-app routing available to this app (Xray cannot match by process; see `procRouter.js`).
 
-**Tech Stack:** Node 18+ core, Electron 31 (`Notification`, `Tray`, `Menu`, `app.setLoginItemSettings`), `node --test`, sing-box 1.13.14 for `sing-box check`. Branch `feature/phase-D` from `main`. Shipped as v1.5.0 (D10 deferred — see the tag message).
+**Tech Stack:** Node 18+ core, Electron 31 (`Notification`, `Tray`, `Menu`, `app.setLoginItemSettings`), `node --test`, sing-box 1.13.14 for `sing-box check`. Branch `feature/phase-D` from `main`. Shipped as v1.5.0 (D10 deferred — see the tag message); D10 shipped as v1.6.0 on 2026-09-10, built by three parallel subagents (builder, wiring, UI) and merged.
 
 ## Global Constraints
 
