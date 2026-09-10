@@ -577,3 +577,8 @@
   visibility: hidden;
 }
 .opt-card.active .opt-card-check { visibility: visible; }
+.native-service-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

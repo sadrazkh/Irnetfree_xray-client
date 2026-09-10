@@ -365,6 +365,8 @@ function applySettingsToUI() {
   $('#optTunAppMode').value = s.tunAppMode || 'off';
   // stored as a list, typed as lines
   $('#optTunApps').value = (Array.isArray(s.tunApps) ? s.tunApps : []).join('\n');
+  $('#optTunBackend option[value="native-macos"]').hidden = state.platform !== 'darwin';
+  $('#nativeMacControls').hidden = state.platform !== 'darwin';
   $('#optLeakGuard').value = s.leakGuard || 'standard';
   $('#optBlockUdpProxy').checked = !!s.blockUdpInProxyMode;
   $('#optAllowLan').checked = !!s.allowLan;
@@ -418,6 +420,7 @@ function renderOptionCards(selectId, hostId, icons) {
   if (!sel || !host) return;
   host.innerHTML = '';
   for (const opt of [...sel.options]) {
+    if (opt.hidden) continue;
     const raw = opt.textContent.trim();
     const cut = raw.indexOf('—');
     const title = cut > 0 ? raw.slice(0, cut).trim() : raw;
@@ -444,7 +447,7 @@ function renderOptionCards(selectId, hostId, icons) {
 }
 
 const GUARD_ICONS = { off: '⚪', standard: '🛡', strict: '🔒' };
-const BACKEND_ICONS = { 'sing-box': '📦', tun2socks: '🧩' };
+const BACKEND_ICONS = { 'native-macos': '🍎', 'sing-box': '📦', tun2socks: '🧩' };
 const TUNAPP_ICONS = { off: '⚪', exclude: '↩', only: '🎯' };
 
 /** Every card group, from whatever the selects currently hold. */
@@ -456,13 +459,15 @@ function renderSettingCards() {
 
 function updateGuardRows() {
   const tunOn = !!($('#optTun') && $('#optTun').checked);
+  const nativeSelected = state.platform === 'darwin' && $('#optTunBackend').value === 'native-macos';
+  $('#nativeMacStrict').hidden = !nativeSelected;
   const guardRow = $('#leakGuardRow');
   if (guardRow) {
     guardRow.classList.toggle('disabled', !tunOn);
     $('#optLeakGuard').disabled = !tunOn;
     $('#guardNeedsTun').hidden = tunOn;
     // the pf anchor behind "strict" has never run on a real Mac (phase 3)
-    $('#guardMacNote').hidden = (state.assets || {}).platform !== 'darwin';
+    $('#guardMacNote').hidden = state.platform !== 'darwin' || nativeSelected;
     // Strict blocks everything that does not go through the tunnel — and a
     // "direct" route is exactly that. Say so where the two are chosen, not in a
     // log line the user reads after their bank stops loading.
@@ -743,7 +748,25 @@ $('#optIpv6').onchange = () => saveSettings({ ipv6: $('#optIpv6').checked });
 /* TUN backend / leak guard / proxy-mode UDP block — each saves only its own key.
    The backend and the guard both decide whether the per-app row's warnings are
    true, so each of them refreshes that row too. */
-$('#optTunBackend').onchange = () => { saveSettings({ tunBackend: $('#optTunBackend').value }); updateTunAppRows(); };
+$('#optTunBackend').onchange = () => { saveSettings({ tunBackend: $('#optTunBackend').value }); updateGuardRows(); updateTunAppRows(); };
+$$('[data-native-service]').forEach(button => {
+  button.onclick = async () => {
+    const buttons = $$('[data-native-service]');
+    buttons.forEach(item => { item.disabled = true; });
+    const output = $('#nativeMacStatus');
+    output.textContent = t('native.working');
+    try {
+      const reply = await window.api.nativeService(button.dataset.nativeService);
+      if (!reply || !reply.ok) throw new Error(reply?.error || t('native.failed'));
+      const known = ['enabled', 'requiresApproval', 'notRegistered', 'notFound'];
+      output.textContent = known.includes(reply.status) ? t(`native.${reply.status}`) : t('native.unknown');
+      if (reply.active === true) output.textContent += ' · ' + t('native.active');
+    } catch (error) {
+      output.textContent = `${t('native.failed')} ${error.message || ''}`;
+      toast(t('native.failed'), 'err');
+    } finally { buttons.forEach(item => { item.disabled = false; }); }
+  };
+});
 $('#optLeakGuard').onchange = () => { saveSettings({ leakGuard: $('#optLeakGuard').value }); updateGuardRows(); updateTunAppRows(); };
 $('#optBlockUdpProxy').onchange = () => saveSettings({ blockUdpInProxyMode: $('#optBlockUdpProxy').checked });
 
@@ -1474,6 +1497,7 @@ async function checkIp(retries = 0, quiet = false) {
   }
   return info;
 }
+$('#btnDiagnostics').onclick = () => window.IRNFDiagnostics.open();
 $('#btnCheckIp').onclick = () => checkIp(1);
 
 function showGeo(info) {
@@ -1508,7 +1532,7 @@ async function connect(id) {
 }
 
 async function disconnect() {
-  await window.api.disconnect();
+  try { await window.api.disconnect(); } catch (e) { toast(e.message, 'err'); }
 }
 
 $('#powerBtn').onclick = () => {
@@ -1926,6 +1950,8 @@ window.api.onStatus((d) => {
       setConnUI('error');
       toast(t('net.failed'), 'err', 8000);
     }
+  } else if (d.state === 'cleanup-failed') {
+    toast(d.error, 'err');
   } else if (d.state === 'error') {
     // e.g. a settings reconnect whose new config the core rejected
     state.connected = false;

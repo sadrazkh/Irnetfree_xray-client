@@ -50,6 +50,9 @@ contextBridge.exposeInMainWorld('api', {
   checkGeoRules: (rules) => ipcRenderer.invoke('routing:checkGeo', rules),
   applySettings: () => ipcRenderer.invoke('settings:apply'),
 
+  connectionDiagnostics: (probe) => ipcRenderer.invoke('diagnostics:connection', probe),
+  repairNetwork: () => ipcRenderer.invoke('network:repair'),
+  nativeService: (command) => ipcRenderer.invoke('native:service', command),
   // diagnostics
   pingTcp: (id) => ipcRenderer.invoke('ping:tcp', id),
   pingReal: (id) => ipcRenderer.invoke('ping:real', id),
