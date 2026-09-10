@@ -33,7 +33,7 @@ import ServiceManagement
             }
             guard ["status", "start", "stop", "heartbeat", "unregister"].contains(action) else { throw NativeFailure("Unknown action") }
             if service.status != .enabled {
-                finish(["ok": action == "status", "status": registration(), "active": false, "error": "Enable IRNetFree in System Settings > General > Login Items")
+                finish(["ok": action == "status", "status": registration(), "active": false, "error": "Enable IRNetFree in System Settings > General > Login Items"])
             }
             var request: [String: Any] = [:]
             if action != "status" {
@@ -72,3 +72,4 @@ import ServiceManagement
         } catch { finish(["ok": false, "status": registration(), "error": String(describing: error)]) }
     }
 }
+
