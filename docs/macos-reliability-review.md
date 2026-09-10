@@ -65,10 +65,15 @@ automatically; inspect them rather than restoring broad process matching.
 ## Native macOS beta implementation
 
 The packaged macOS 13+ app now includes an SMAppService LaunchDaemon and a
-narrow Swift XPC bridge. New packaged Mac installations select native-macos;
-existing settings keep their chosen backend. Windows defaults are unchanged.
+narrow Swift XPC bridge. The native backend is opt-in: the default TUN backend
+stays sing-box on every platform and in every build, the service is registered
+only from Settings > TUN > macOS tunnel service > Enable service, and a connect
+against an unregistered service refuses and names that switch instead of
+registering a root daemon on the user's behalf. Windows defaults are unchanged.
 This is a native background service with a sing-box TUN, not a NetworkExtension
 packet-tunnel provider or an entry in the system VPN configuration panel.
+The compatibility (sing-box) backend keeps working below macOS 13; only the
+native backend requires 13 or later.
 
 The service validates network inputs, authenticates the pinned bridge code
 signature, and executes only a checksum-pinned bundled sing-box copied into a

@@ -195,7 +195,7 @@ const I18N = {
     /* کدام برنامه تونل را می‌سازد، و گارد نشتی چقدر سخت می‌گیرد (فاز ۳) */
     'tun.backendNative': 'سرویس بومی مک — ساخت تونل و بازیابی DNS توسط سرویس سیستم؛ نیازمند macOS 13 یا جدیدتر',
     'native.title': 'سرویس تونل macOS',
-    'native.hint': 'برنامه را در Applications نصب کنید و سرویس را فعال کنید. اگر مجوز لازم بود، در تنظیمات سیستم اجازهٔ فعالیت پس‌زمینهٔ IRNetFree را بدهید. غیرفعال‌کردن سرویس اتصال را قطع می‌کند.',
+    'native.hint': 'تا وقتی سرویس را همین‌جا فعال نکنید، بک‌اند بومی مک وصل نمی‌شود؛ برنامه هرگز خودش سرویس را ثبت نمی‌کند. برنامه را در Applications نصب کنید و سرویس را فعال کنید. اگر مجوز لازم بود، در تنظیمات سیستم اجازهٔ فعالیت پس‌زمینهٔ IRNetFree را بدهید. غیرفعال‌کردن سرویس اتصال را قطع می‌کند.',
     'native.check': 'بررسی وضعیت',
     'native.enable': 'فعال‌کردن سرویس',
     'native.settings': 'تنظیمات مجوز مک',
@@ -616,7 +616,7 @@ const I18N = {
     /* which program builds the tunnel, and how hard the leak guard holds (phase 3) */
     'tun.backendNative': 'Native macOS service — system service owns the tunnel and restores DNS; requires macOS 13 or later',
     'native.title': 'macOS tunnel service',
-    'native.hint': 'Install the app in Applications and enable the service. If approval is required, allow IRNetFree background activity in System Settings. Disabling the service disconnects the VPN.',
+    'native.hint': 'The native macOS backend cannot connect until you enable the service here; the app never registers it for you. Install the app in Applications and enable the service. If approval is required, allow IRNetFree background activity in System Settings. Disabling the service disconnects the VPN.',
     'native.check': 'Check status',
     'native.enable': 'Enable service',
     'native.settings': 'Open macOS permissions',

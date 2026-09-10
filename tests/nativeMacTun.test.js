@@ -50,14 +50,31 @@ test('strict mode rejects before native commands; DNS invalid rejects before mut
   assert.equal(calls.length, 0);
 });
 
-test('service registration awaits background approval and never starts fallback', async () => {
+/**
+ * Registering the daemon installs a root LaunchDaemon. That is a decision the
+ * user makes in Settings, never a side effect of pressing Connect — so an
+ * unregistered service is a refusal that names the switch, and the bridge is
+ * asked for its status and nothing else.
+ */
+test('connect never registers the service; it points at the Settings switch', async () => {
   const calls = [];
   const { tun } = fixture({ run: async command => {
     calls.push(command);
     return { ok: true, status: command === 'status' ? 'notRegistered' : 'requiresApproval' };
   } });
+  await assert.rejects(connect(tun), /Enable the macOS tunnel service first/);
+  assert.deepEqual(calls, ['status']);
+  assert.equal(tun.active, false);
+});
+
+test('a registered service still awaits background approval and never starts fallback', async () => {
+  const calls = [];
+  const { tun } = fixture({ run: async command => {
+    calls.push(command);
+    return { ok: true, status: 'requiresApproval' };
+  } });
   await assert.rejects(connect(tun), /System Settings/);
-  assert.deepEqual(calls, ['status', 'register']);
+  assert.deepEqual(calls, ['status']);
   assert.equal(tun.active, false);
 });
 
