@@ -6,7 +6,7 @@
 
 **Architecture:** New pure modules with injected I/O (`selfTest.js`, `healthWatch.js`, the DoH resolver in `netutils.js`, the gateway reader in `tunPlatform.js`, `splitPlan.js`) carry the logic and are unit-tested; `main.js`/`service.js` wire them. The leak guard (`leakGuard.js`) and the two config builders change shape only where a test pins the new shape. Everything that needs a real adapter is marked **device-verified** with an exact checklist for the owner.
 
-**Tech Stack:** Node 18+ core, Electron 31, `node --test`, Xray 26.3.27 + PattN 26.9.1 for `npm run validate`, sing-box 1.13.14 (`IRNF_SINGBOX_EXE`) for `sing-box check`. Branch `feature/phase-C` from `main`. Tag: v1.6.0 (D shipped first as v1.5.0).
+**Tech Stack:** Node 18+ core, Electron 31, `node --test`, Xray 26.3.27 + PattN 26.9.1 for `npm run validate`, sing-box 1.13.14 (`IRNF_SINGBOX_EXE`) for `sing-box check`. Branch `feature/phase-C` from `main`. Tag: v1.7.0 (D shipped first as v1.5.0, its D10 as v1.6.0).
 
 ## Global Constraints
 
@@ -1622,4 +1622,4 @@ git commit -m "Linux gets the strict guard as an nftables table; on macOS the gu
 - `npm test` green, pristine; `npm run validate` green on both cores and with `IRNF_SINGBOX_EXE`; `node scripts/probe-dns-leak.js` 36/36; `npm run probe:wg` 2/2 (+ the split probe if C8 shipped).
 - Fable reviews: C1, C2, C3, C4 wiring (Opus-implemented); C5, C6, C8, C9 are Fable-implemented.
 - The owner runs the device checklists (C1 self-test in the three modes; C5 firewall rule count; C6 sing-box config under TUN).
-- Merge `feature/phase-C`, tag v1.6.0.
+- Merge `feature/phase-C`, tag v1.7.0.
