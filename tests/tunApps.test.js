@@ -160,6 +160,42 @@ test('sing-box, a non-strict guard and real names: the rule is handed over', () 
   );
 });
 
+/* --------------- appsForTun: the Windows extension safety net --------------- */
+
+test('on Windows a hand-typed name with no extension gets .exe — that is what sing-box matches', () => {
+  // Task Manager's Processes tab hides the extension, so 'chrome' is exactly
+  // what a user reads off the screen and types here; sing-box compares against
+  // the image file's leaf name, so that rule would never fire.
+  assert.deepEqual(
+    appsForTun(S({ tunAppMode: 'only', tunApps: ['chrome'] }), 'sing-box', 'win32').apps.names,
+    ['chrome.exe']
+  );
+  // a name that already carries one is left exactly as typed (any extension,
+  // not just .exe), and the suffix cannot introduce a duplicate
+  assert.deepEqual(
+    appsForTun(S({ tunAppMode: 'exclude', tunApps: ['chrome.exe', 'foo.scr', 'chrome'] }), 'sing-box', 'win32').apps.names,
+    ['chrome.exe', 'foo.scr']
+  );
+});
+
+test('nothing is appended off Windows — a mac/linux binary has no extension', () => {
+  for (const plat of ['darwin', 'linux']) {
+    assert.deepEqual(
+      appsForTun(S({ tunAppMode: 'only', tunApps: ['chrome', 'Google Chrome', 'foo.scr'] }), 'sing-box', plat).apps.names,
+      ['chrome', 'Google Chrome', 'foo.scr'],
+      plat
+    );
+  }
+});
+
+test('the platform defaults to the one this process runs on', () => {
+  const settings = S({ tunAppMode: 'only', tunApps: ['chrome'] });
+  assert.deepEqual(
+    appsForTun(settings, 'sing-box'),
+    appsForTun(settings, 'sing-box', process.platform)
+  );
+});
+
 test('the names handed over are a copy, so the store cannot be mutated through them', () => {
   const settings = S({ tunAppMode: 'only', tunApps: ['zoom.exe'] });
   const { apps } = appsForTun(settings, 'sing-box');

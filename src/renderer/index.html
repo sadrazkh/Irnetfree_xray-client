@@ -605,7 +605,8 @@
           </div>
           <!-- which apps go through the tunnel and which go around it: sing-box
                knows the process behind each packet, so it can split by app.
-               Same shape as the backend row (see updateTunAppRows). -->
+               Same shape as the backend row above; what shows and what hides
+               inside it is updateTunAppRows(). -->
           <div class="setting-row" id="tunAppRow">
             <label class="field-label" for="optTunAppMode" data-i18n="tunapp.title">روتینگ به‌تفکیک برنامه (فقط sing-box)</label>
             <select id="optTunAppMode" class="select vis-hidden">
@@ -616,9 +617,9 @@
             <div class="opt-cards" id="tunAppModeCards"></div>
             <!-- the list only exists once a mode is chosen -->
             <div class="row-stack" id="tunAppsBlock" hidden>
-              <textarea id="optTunApps" class="input" rows="4" spellcheck="false" data-i18n-ph="tunapp.ph"></textarea>
+              <textarea id="optTunApps" class="textarea" rows="4" dir="ltr" spellcheck="false" data-i18n-ph="tunapp.ph"></textarea>
               <div class="row-gap">
-                <button class="btn ghost" type="button" id="btnTunAppsPick" data-i18n="tunapp.pick">از برنامه‌های در حال اجرا</button>
+                <button class="btn ghost" type="button" id="btnTunAppsPick" data-i18n="tunapp.pick">از برنامه‌های متصل</button>
                 <select id="tunAppsPick" class="select" hidden></select>
               </div>
               <p class="hint" data-i18n="tunapp.hint"></p>
