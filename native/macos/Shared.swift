@@ -18,6 +18,12 @@ func encoded(_ value: [String: Any]) -> Data {
     (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{\"ok\":false}".utf8)
 }
 
+// Darwin inet_pton accepts scoped IPv6; keep the RPC grammar literal-only
+// and reject embedded NUL before crossing the C-string boundary.
+func literalIPCharacters(_ value: String) -> Bool {
+    !value.isEmpty && value.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) || $0 == 46 || $0 == 58 }
+}
+
 struct StartOptions {
     let port: Int
     let exclusions: [String]
@@ -45,6 +51,7 @@ struct StartOptions {
         let dns = request["dnsServers"] ?? ["172.19.0.2", "fdfe:dcba:9876::2"]
         guard let servers = dns as? [String], !servers.isEmpty, servers.count <= 8 else { throw NativeFailure("Invalid DNS servers") }
         for host in servers {
+            guard literalIPCharacters(host) else { throw NativeFailure("Invalid DNS address") }
             var v4 = in_addr(); var v6 = in6_addr()
             guard inet_pton(AF_INET, host, &v4) == 1 || inet_pton(AF_INET6, host, &v6) == 1 else { throw NativeFailure("Invalid DNS address") }
         }
@@ -53,6 +60,7 @@ struct StartOptions {
             let parts = address.split(separator: "/", omittingEmptySubsequences: false)
             guard parts.count <= 2, !parts.isEmpty else { throw NativeFailure("Invalid exclusion") }
             let host = String(parts[0])
+            guard literalIPCharacters(host) else { throw NativeFailure("Invalid exclusion address") }
             var v4 = in_addr(); var v6 = in6_addr()
             let bits: Int
             if inet_pton(AF_INET, host, &v4) == 1 { bits = 32 }
