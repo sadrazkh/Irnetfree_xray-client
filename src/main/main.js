@@ -1236,7 +1236,7 @@ async function reapplyConnection() {
         // the serverId.
         let entries = [];
         try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
-        await leakGuard.holdForReconnect({
+        if (!tun?.managesDns) await leakGuard.holdForReconnect({
           excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
         });
       }
