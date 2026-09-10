@@ -64,6 +64,44 @@ test('invalid probe input never contacts network and raw errors are redacted', a
   assert.deepEqual(result, { status: 'unreachable', via: 'local-socks', reason: 'timeout' });
 });
 
+/**
+ * The probe has two ways to be impossible, and they blame different people.
+ * A bad host or port is the user's to fix; a missing local SOCKS port is ours —
+ * the core has just started and liveDiagnostics has not been captured yet — and
+ * reporting that as "invalid input" sends the user off to correct a hostname
+ * that was never wrong.
+ */
+test('a probe with no live SOCKS port says so instead of blaming the destination', async () => {
+  for (const port of [undefined, null, 0, -1, 70000, '1080', 1.5]) {
+    const result = await probeDestination(port, { host: 'internal.example', port: 443 }, {
+      socks5Connect() { assert.fail('Must not probe without a listener'); }
+    });
+    assert.equal(result.status, 'no-live-socks', `socksPort ${JSON.stringify(port)}`);
+    assert.equal(result.via, 'local-socks');
+  }
+  // and a live listener with a bad destination is still the user's to fix
+  assert.equal((await probeDestination(1080, { host: 'x y', port: 443 }, {
+    socks5Connect() { assert.fail(); }
+  })).status, 'invalid-input');
+});
+
+/**
+ * Underscores are illegal in a public hostname and ordinary in a private one:
+ * internal and WireGuard-side names carry them, and this probe exists precisely
+ * to reach those. Refusing them made the corporate destination untestable.
+ */
+test('an underscore in a label is a destination, not a typo', async () => {
+  let asked;
+  const result = await probeDestination(1080, { host: 'wg_gateway.corp_intra', port: 445 }, {
+    socks5Connect: async (...args) => { asked = args; return { destroy() {} }; }
+  });
+  assert.equal(result.status, 'reachable');
+  assert.equal(asked[2], 'wg_gateway.corp_intra');
+  assert.equal((await probeDestination(1080, { host: '_', port: 445 }, {
+    socks5Connect: async () => ({ destroy() {} })
+  })).status, 'reachable');
+});
+
 test('sing-box detours and routing actions are explained and cycles are bounded', () => {
   const result = explainRoutes({ outbounds: [{ tag: 'exit', type: 'wireguard', detour: 'entry' }, { tag: 'entry', type: 'socks', detour: 'exit' }], route: { final: 'exit', rules: [{ action: 'hijack-dns' }, { action: 'reject' }] } });
   assert.deepEqual(result.rules.map(r => r.target), ['dns', 'block']);

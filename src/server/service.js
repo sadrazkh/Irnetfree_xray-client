@@ -219,7 +219,7 @@ function createService(opts = {}) {
    * one with `quiet`, so the fallback line is logged once per connect, not per poll.
    */
   function makeTun(settings, { quiet = false } = {}) {
-  let selected;
+    let selected;
     const opts = { binDir: bundledBinDir, extraDirs: [userBinDir], onLog: (line, level) => send('log', { line, level }), lang: settings.lang, userData: dataDir,
       onUnexpectedExit: () => {
         if (userDisconnecting || isQuitting || tun !== selected) return;
@@ -227,7 +227,7 @@ function createService(opts = {}) {
         recoverFromNetworkChange('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
       } };
     if (process.platform === 'darwin' && settings.tunBackend === 'native-macos') return (selected = new NativeMacTun(opts));
-  const sb = new TunSingbox(opts);
+    const sb = new TunSingbox(opts);
     const legacy = new TunManager(opts);
     if (settings.tunBackend === 'tun2socks') return (selected = legacy);
     if (sb.isAvailable()) return (selected = sb);
@@ -1427,14 +1427,14 @@ function createService(opts = {}) {
   }
 
   async function nativeService(command) {
-  if (!['status', 'register', 'unregister', 'settings'].includes(command)) throw new Error('Unsupported native service command');
-  const manager = new NativeMacTun();
-  if (command === 'unregister') {
-    await doDisconnect();
-    await manager.recoverMacSessions();
+    if (!['status', 'register', 'unregister', 'settings'].includes(command)) throw new Error('Unsupported native service command');
+    const manager = new NativeMacTun();
+    if (command === 'unregister') {
+      await doDisconnect();
+      await manager.recoverMacSessions();
+    }
+    return manager.service(command);
   }
-  return manager.service(command);
-}
 
   /**
    * Undo what a CRASHED session left behind — never what a live one is using.

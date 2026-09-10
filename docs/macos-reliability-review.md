@@ -89,22 +89,77 @@ Settings provide status, registration, background-permission settings and
 unregistration. Unregistration stops and recovers the tunnel first. Manual
 network recovery also checks an already registered native service without
 registering a new one. Missing helpers or pending approval do not silently
-select another backend.
+select another backend, and a connect against an unregistered service refuses
+rather than registering it.
+
+Per-app routing (the sing-box `process_name` split added in v1.6.0) is not
+available on this backend: the app does not write the daemon's configuration,
+it hands it a fixed request, so the rule is refused at connect time with a line
+naming the compatibility backend rather than accepted and dropped.
+
+### Trust model
+
+Any process running as the console user can ask the daemon to route all traffic
+to a local SOCKS port and to set system DNS, and it will do so without a
+prompt. That is the accepted model for a VPN helper — the alternative, an
+authorization prompt per connect, is what the helper exists to remove — and it
+is the same authority the user already grants the app itself. The bound on it
+is the shape of the request: the daemon accepts a SOCKS port, an exclusion list,
+DNS server addresses and two booleans, executes only a checksum-pinned bundled
+sing-box from a root-owned directory, and authenticates the pinned bridge code
+signature. No request can reach code execution, an arbitrary binary path, an
+arbitrary file write or a shell.
 
 ### Install and test
 
 Download the architecture-specific DMG or ZIP from the Native macOS beta CI
 artifacts for this PR. These are ad-hoc signed test builds, not notarized public
-releases. Move IRNetFree.app to Applications before enabling its service. On
-macOS 13+, allow IRNetFree under System Settings > General > Login Items (the
-exact section name varies by macOS release), then connect using Native macOS.
-Developer ID signing/notarization remains a separate release requirement.
+releases. The CI artifact is quarantined, so clear it before the first launch:
+
+    xattr -dr com.apple.quarantine IRNetFree.app
+
+Launch it from /Applications, never from the DMG or from Downloads: App
+Translocation runs the app from a randomised read-only path, and SMAppService
+registration fails from there. On macOS 13+, allow IRNetFree under System
+Settings > General > Login Items (the exact section name varies by macOS
+release), then connect using Native macOS. Developer ID signing/notarization
+remains a separate release requirement.
 
 Run the acceptance matrix above, especially Force Quit with a live tunnel,
 service disable/enable, sleep/wake, static DNS restore and corporate chain
 traffic. CI compile/package and mocked lifecycle tests cannot establish real
 network behavior on a Mac. Record failures with the sanitized diagnostics
 export; never include subscription credentials or WireGuard private keys.
+
+### Known items for the Mac iteration (Swift, not changed on Windows)
+
+Found in review; each needs a Mac to compile and test, so none of them was
+touched in the Windows fix wave. In rough order of consequence:
+
+- The restore loop stops at the first `networksetup` service that fails, so one
+  bad service leaves every later one still pointing at the tunnel. Attempt them
+  all, collect the failures, and back off rather than abandoning the sweep.
+- The heartbeat lease is measured with wall-clock `Date`. A sleep/wake or a
+  clock change can expire a live session or keep a dead one; use an uptime
+  clock (`mach_continuous_time` / `CLOCK_MONOTONIC`).
+- After an app upgrade the running daemon still pins the previous bridge's
+  cdhash, so the new bridge cannot talk to it. Compare `NativeBuild.bridgeSHA256`
+  against the bridge on disk and exit when idle — and let `unregister` through
+  when the daemon is unreachable, or the user cannot undo the install.
+- DNS is set on every enabled network service, not only the one carrying the
+  default route. Verify with a system VPN present before shipping.
+- `proc_listallpids` returns a byte count, not a number of pids; the result is
+  divided as though it were a count.
+- `ipv6` is accepted in the start request and never used.
+- `startupError` surfaces to the app as "existing session", which sends the user
+  to recovery for a failure that has nothing to do with a stale session.
+- The LaunchDaemon declares `ProcessType Interactive` for a root daemon.
+- `signingOptions` forces ad-hoc signing even when a Developer ID identity is
+  present, so a release build cannot be signed without editing the script.
+- A journaled "original" DNS equal to the tunnel peer is residue from a previous
+  session, not a user setting, and must not be restored as one.
+- The Mac release job now depends on a live download of the pinned sing-box
+  archive; a network hiccup or a moved asset breaks the release build.
 
 Primary references:
 - [Apple SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice)
