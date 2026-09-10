@@ -510,7 +510,10 @@ function updateTunAppRows() {
   const on = ($('#optTunAppMode').value || 'off') !== 'off';
   $('#tunAppsBlock').hidden = !on;
   $('#tunAppStrictNote').hidden = !(on && $('#optLeakGuard').value === 'strict');
-  $('#tunAppNeedsSingbox').hidden = !(on && $('#optTunBackend').value === 'tun2socks');
+  // Every backend that is not sing-box, not just tun2socks: the native macOS
+  // service runs a sing-box of its own, but the app never writes that config,
+  // so the rule would never reach it either.
+  $('#tunAppNeedsSingbox').hidden = !(on && $('#optTunBackend').value !== 'sing-box');
 }
 
 /** Reflect an input's value in its preset dropdown (or "custom"). */

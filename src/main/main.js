@@ -1017,7 +1017,11 @@ async function doConnect(serverId, opts = {}) {
         // The per-app split, decided once and told to the user when it is
         // refused — a rule that is silently dropped looks exactly like a rule
         // that is working (see tunApps.js for the order of the reasons).
-        const { apps: tunApps, warn: tunAppsWarn } = appsForTun(settings, myTun.backendId);
+        // The native macOS service calls itself 'sing-box' (a sing-box is what
+        // it runs), but the app never writes that config — it hands the daemon
+        // a fixed set of fields with no process rule in it. So the decision is
+        // told what this really is, not what the backend calls itself.
+        const { apps: tunApps, warn: tunAppsWarn } = appsForTun(settings, myTun.native ? 'native-macos' : myTun.backendId);
         if (tunAppsWarn) send('log', { line: tunAppsWarn, level: 'warn' });
         // Read from the config that is actually about to run, not rebuilt from
         // the plan: `geoAssets` never travelled in `settings`, so the rebuilt

@@ -14,8 +14,13 @@
  *
  *   1. the mode is off (or unrecognised)  — silent: nothing was asked for
  *   2. the mode is on but no app is named — the rule would mean nothing
- *   3. the backend is not sing-box        — tun2socks cannot route by process
- *   4. the leak guard is at 'strict'      — the guard promises that NOTHING
+ *   3. the backend is 'native-macos'      — the macOS service runs a sing-box
+ *      TUN, but the app does not write that config: it hands the daemon a fixed
+ *      set of fields with no room for a process rule, so the rule would be
+ *      accepted here and dropped there. Its own reason, because the fix is a
+ *      different one (switch to the compatibility backend).
+ *   4. the backend is not sing-box        — tun2socks cannot route by process
+ *   5. the leak guard is at 'strict'      — the guard promises that NOTHING
  *      leaves outside the tunnel. `exclude` walks the listed apps around it and
  *      `only` walks the whole rest of the system around it, so BOTH modes break
  *      that promise, not just `exclude`. The guard wins; it is the stronger
@@ -90,7 +95,10 @@ function withExeSuffix(names, platform) {
  * key, and a bad store must not be able to break a connect.
  *
  * @param {object|null|undefined} settings  the live settings object
- * @param {string|null|undefined} backendId the TUN backend about to run ('sing-box' | …)
+ * @param {string|null|undefined} backendId the TUN backend about to run, as the
+ *   connect path names it ('sing-box' | 'tun2socks' | 'native-macos' | …). NOT
+ *   `tun.backendId`: the native macOS service reports 'sing-box' there, because
+ *   a sing-box is what it runs — the caller passes 'native-macos' for it.
  * @param {string} platform  where the tunnel is about to run; passed in so it is testable
  * @returns {{ apps: { mode: 'exclude'|'only', names: string[] }|null, warn: string|null }}
  */
@@ -103,6 +111,12 @@ function appsForTun(settings, backendId, platform = process.platform) {
   const names = normalizeAppNames(s.tunApps);
   if (!names.length) {
     return { apps: null, warn: 'Per-app routing is on but no app is listed — ignored' };
+  }
+  if (backendId === 'native-macos') {
+    return {
+      apps: null,
+      warn: 'Per-app routing is not available on the native macOS service yet — choose the sing-box (compatibility) backend'
+    };
   }
   if (backendId !== 'sing-box') {
     return { apps: null, warn: 'Per-app routing needs the sing-box TUN backend — ignored' };
