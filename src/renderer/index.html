@@ -17,6 +17,7 @@
   <!-- Applies the remembered theme before the first paint, so a light-theme user
        does not see a dark flash while app:init is still in flight. -->
   <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="diagnostics.css">
 </head>
 <body>
   <!-- custom titlebar -->
@@ -174,6 +175,7 @@
           <div class="hero-actions">
             <button class="btn ghost" id="btnReconnect" data-i18n="btn.reconnect" hidden>اتصال مجدد</button>
             <button class="btn ghost" id="btnQuickPing" data-i18n="btn.quickPing">تست پینگ</button>
+            <button class="btn ghost" id="btnDiagnostics" data-i18n="btn.diagnostics">عیب‌یابی</button>
             <button class="btn ghost" id="btnCheckIp" data-i18n="btn.checkIp">بررسی IP</button>
           </div>
         </div>
@@ -597,11 +599,24 @@
                  writes .value, and the reconnect dialog watches it — and the
                  cards below are a face for it that dispatch `change` on it. -->
             <select id="optTunBackend" class="select vis-hidden">
+              <option value="native-macos" data-i18n="tun.backendNative" hidden>macOS native</option>
               <option value="sing-box" data-i18n="tun.backendSingbox">sing-box</option>
               <option value="tun2socks" data-i18n="tun.backendTun2socks">tun2socks</option>
             </select>
             <div class="opt-cards" id="tunBackendCards"></div>
             <p class="hint" data-i18n="tun.backendHint"></p>
+          </div>
+          <div class="setting-row" id="nativeMacControls" hidden>
+            <div class="field-label" data-i18n="native.title"></div>
+            <p class="hint" data-i18n="native.hint"></p>
+            <div class="native-service-actions">
+              <button type="button" class="btn ghost" data-native-service="status" data-i18n="native.check"></button>
+              <button type="button" class="btn ghost" data-native-service="register" data-i18n="native.enable"></button>
+              <button type="button" class="btn ghost" data-native-service="settings" data-i18n="native.settings"></button>
+              <button type="button" class="btn ghost" data-native-service="unregister" data-i18n="native.disable"></button>
+            </div>
+            <p class="hint" id="nativeMacStatus" role="status" aria-live="polite" data-i18n="native.unchecked"></p>
+            <p class="hint warn" id="nativeMacStrict" data-i18n="native.strict" hidden></p>
           </div>
           <!-- which apps go through the tunnel and which go around it: sing-box
                knows the process behind each packet, so it can split by app.
@@ -1069,6 +1084,7 @@
   </div>
   <script src="vendor/qrcode.js"></script>
   <script src="i18n.js"></script>
+  <script src="diagnostics.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -476,15 +476,10 @@ function macRestoreLines(services) {
   ];
 }
 
-/** The same orphan hunt as on Windows. `[-]device` keeps pgrep off its own argv. */
-function macOrphanLines() {
-  const hunt = (pattern, label) =>
-    `for p in $(pgrep -f ${sh(pattern)} 2>/dev/null); do echo "killed ${label} (pid $p)"; kill -TERM "$p" 2>/dev/null || true; done`;
-  return [
-    hunt('sing-box run -c .*irnf-sb-', 'sing-box'),
-    hunt('[-]device utun', 'tun2socks')
-  ];
-}
+/** macOS tunnel recovery belongs to the backend's persisted, verified session.
+ * A generic utun/argv match cannot establish ownership (other VPNs use both).
+ */
+function macOrphanLines() { return []; }
 
 /* ----------------------------- macOS: the pf anchor ----------------------------- */
 
@@ -606,6 +601,20 @@ const macRepairScript = (services) => macReleaseScript(services, { orphans: true
  * empty here is read as "it was on DHCP", so the worst this can do is restore
  * too little.
  */
+function macOriginalSnapshot(fresh, peers, originals) {
+  const peerSet = new Set(peers.filter(Boolean));
+  const known = new Map((Array.isArray(originals) ? originals : [])
+    .filter(s => s && typeof s.name === 'string' && Array.isArray(s.dns))
+    .map(s => [s.name, s]));
+  return withoutPeers(fresh.map(s => {
+    const original = known.get(s.name);
+    // Only replace the contaminated snapshot. A later externally changed DNS
+    // list is authoritative; persisted prior-session originals win in mergeTargets.
+    return original && s.dns.some(d => peerSet.has(d))
+      ? { name: s.name, dns: addrList(original.dns) } : s;
+  }), peers);
+}
+
 function withoutPeers(list, peers) {
   const drop = new Set((peers || []).filter(Boolean).map(p => String(p).toLowerCase()));
   const keep = (arr) => addrList(arr).filter(a => !drop.has(String(a).toLowerCase()));
@@ -781,7 +790,7 @@ class LeakGuard {
    * tunnel (`tun.excludeIps`). Without the entry IPs among them a strict block
    * would cut the tunnel it exists to protect.
    */
-  engage({ level, peer4, peer6, tunAlias, backend, excludes } = {}) {
+  engage({ level, peer4, peer6, tunAlias, backend, excludes, originalMacServices } = {}) {
     // Claimed before the call is even queued: repairAtLaunch is fired and not
     // awaited, so it can land after this one and must not read the file we are
     // about to write as "a previous session's".
@@ -848,7 +857,8 @@ class LeakGuard {
       } else {
         const services = mergeTargets(
           (live && live.mac && live.mac.services) || [],
-          withoutPeers(parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()])), [peer4, peer6]),
+          macOriginalSnapshot(parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()])),
+            [peer4, peer6], originalMacServices),
           (s) => s.name);
         count = services.length;
         state.mac = { services };

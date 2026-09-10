@@ -45,6 +45,9 @@
   --okSoft: rgba(74, 222, 155, .13);
   --dangerSoft: rgba(255, 107, 107, .13);
   --shadow: 0 24px 60px rgba(0, 0, 0, .5);
+  /* what dims the page behind anything modal — .modal-overlay and a <dialog>'s
+     ::backdrop, which cannot share a class but must look like one thing */
+  --scrim: rgba(0, 0, 0, .55);
   /* type */
   --mono: Consolas, "Cascadia Mono", "DejaVu Sans Mono", monospace;
   --ui: "Segoe UI", Tahoma, "Iran Sans", sans-serif;
@@ -633,7 +636,7 @@ button { cursor: pointer; background: none; border: 0; color: inherit; }
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(0, 0, 0, .55);
+  background: var(--scrim);
   display: grid;
   place-items: center;
   padding: 24px;
