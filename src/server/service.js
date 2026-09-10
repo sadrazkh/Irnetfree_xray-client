@@ -176,6 +176,8 @@ function createService(opts = {}) {
   let macRepairPromise = Promise.resolve();
   let macRepairError = null;
   let networkRepairing = false;
+  // A disconnect whose teardown threw; network recovery may then run even though the core is still up.
+  let cleanupFailed = false;
 
   const store = new Store(path.join(dataDir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
@@ -1373,10 +1375,12 @@ function createService(opts = {}) {
       pinWatch.clear();
       appliedSettings = null;          // nothing live to be out of sync with
       liveDirectInterface = null;
+      cleanupFailed = false;
       send('status', { state: 'disconnected' });
-      } catch (e) {
+    } catch (e) {
       // A CODE, not a sentence: the desktop says this one in the user's language
       // (net.cleanupFailed) and a headless consumer gets something it can branch on.
+      cleanupFailed = true;
       send('status', { state: 'cleanup-failed', error: 'cleanup-failed' });
       throw e;
     } finally { userDisconnecting = false; }
@@ -1422,7 +1426,7 @@ function createService(opts = {}) {
   const REAL_BATCH = 20, REAL_PARALLEL = 6;
   async function connectionDiagnostics(probe) {
     return collectDiagnostics(Object.assign({}, liveDiagnostics || {}, {
-      coreRunning: !!(xray && xray.running), tunActive: !!(tun && tun.active), probe
+      coreRunning: !!(xray && xray.running), tunActive: !!(tun && tun.active), cleanupFailed, probe
     }));
   }
 
@@ -1444,14 +1448,18 @@ function createService(opts = {}) {
    * Windows and Linux, where the darwin block below is skipped, that was the
    * whole of what it did). Recovery is for an app that is not connected, so a
    * connected one is a refusal — a code, so the renderer can say it in the
-   * user's own language.
+   * user's own language. The one exception is a disconnect whose teardown threw:
+   * the core is then still up AND the network half undone, and refusing there
+   * would leave the cleanup-failed toast pointing at a button that is never shown.
    */
   async function repairNetwork() {
     if (networkRepairing) return { ok: false, error: 'Network recovery is already running' };
-    if (xray && xray.running) return { ok: false, error: 'connected' };
+    if (xray && xray.running && !cleanupFailed) return { ok: false, error: 'connected' };
     networkRepairing = true;
     try {
       await macRepairPromise;
+      // The teardown that failed, once more, before the recoveries.
+      if (cleanupFailed) { try { await doDisconnect(); } catch { /* the recoveries below are the point */ } }
       if (process.platform === 'darwin') {
         await new NativeMacTun().recoverMacSessions();
         const repair = new TunSingbox({ userData: dataDir });
@@ -1460,6 +1468,7 @@ function createService(opts = {}) {
       }
       await releaseGuardChecked(leakGuard);
       macRepairError = null;
+      cleanupFailed = false;
       return { ok: true };
     } catch (e) {
       return { ok: false, error: 'Network recovery incomplete. Retry and allow the macOS administrator prompt.' };

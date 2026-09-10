@@ -95,6 +95,12 @@ test('the diagnostics dialog uses the shared controls and no hard-coded strings'
   assert.equal([...DIAG.matchAll(/el\('input', null, '([^']+)'\)/g)].map((m) => m[1]).length, 2);
   assert.doesNotMatch(DIAG, /el\('input', null, '(?!input')/, 'an unstyled input is white on white');
 
+  // el() writes its second argument verbatim; tel() sends it through t(). A
+  // quoted word there is therefore untranslated English on screen. The \b is
+  // load-bearing: without it the pattern matches the "el(" inside "tel(".
+  assert.doesNotMatch(DIAG, /\bel\('(?:p|h3|li|span|h2|button)', '[A-Za-z]/,
+    'a visible string written straight into el() never reaches t()');
+
   // Neither the direction nor the language is the dialog's to decide: it is a
   // panel of the page, and the page is RTL in Persian.
   assert.doesNotMatch(DIAG, /\.dir\s*=|\.lang\s*=/, 'the dialog must follow the page direction');

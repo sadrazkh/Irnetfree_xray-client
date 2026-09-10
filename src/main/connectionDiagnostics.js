@@ -109,6 +109,10 @@ async function collectDiagnostics(input = {}, deps = {}) {
     dns: { status: Array.isArray(servers) && servers.length ? 'configured-unverified' : 'unknown', resolverCount: Array.isArray(servers) ? servers.length : 0, scope: 'No system DNS change or independent DNS-leak test is performed.' },
     connectivity: { status: 'not-tested', via: 'local-socks' },
     routes: explainRoutes(config, input.plan),
+    // Whether "Recover network" is offered at all is the report's to say: a live
+    // core normally refuses it, but a disconnect whose cleanup threw leaves the
+    // core up AND the network half undone, and that one has to be recoverable.
+    recovery: { allowed: !running || input.cleanupFailed === true, scope: 'Recovery runs on a disconnected app, or after a disconnect whose cleanup failed.' },
     privacy: 'Server names, addresses, keys, rule values, destination and raw errors are omitted.'
   };
   if (input.probe) report.connectivity = running
