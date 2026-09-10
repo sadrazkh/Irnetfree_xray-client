@@ -6,7 +6,7 @@
 
 **Architecture:** `ConfigBuilder.kt` and `LinkParser.kt` are hand-written ports of `configBuilder.js`/`dnsBuilder.js` and `parser.js`; parity is by construction, pinned by reading the JS tests next to each Kotlin change. A new `DnsPlan.kt` mirrors `dnsBuilder.js` function for function. No local Kotlin toolchain exists: the compile gate is CI (`test.yml` → `compile android`), and the JS tests named in each task are the specification.
 
-**Tech Stack:** Kotlin, `org.json`, Android VpnService + libv2ray (XrayCore.kt) + hev-socks5-tunnel; CI on GitHub Actions (JDK 17, Gradle 8.7). Branch `feature/phase-E` from `main`. Tag: v1.8.0 (`android/app/build.gradle.kts` `versionName` default follows).
+**Tech Stack:** Kotlin, `org.json`, Android VpnService + libv2ray (XrayCore.kt) + hev-socks5-tunnel; CI on GitHub Actions (JDK 17, Gradle 8.7). Branch `feature/phase-E` from `main`. Tag: v1.9.0 (`android/app/build.gradle.kts` `versionName` default follows).
 
 ## Global Constraints
 
@@ -350,4 +350,4 @@ git push
 - `compile android` green on the branch for every commit; the release workflow's `Build Android APK` job green on a dry `workflow_dispatch`.
 - Fable review of E1 (`DnsPlan.kt` vs `dnsBuilder.js`, `assemble` rule order) and E3 (rule order).
 - The owner installs the CI APK on a device: with "bypass Iran" a `.ir` site resolves through the domestic resolver (Xray log at `debug` shows `dns-internal` → `178.22.122.100` direct) and everything else through DoH; `nslookup` from a terminal app on the phone gets an answer (the hijack).
-- Merge `feature/phase-E`, tag v1.8.0.
+- Merge `feature/phase-E`, tag v1.9.0.
