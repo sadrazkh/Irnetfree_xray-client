@@ -59,10 +59,13 @@ function explainRoutes(config, plan = {}) {
 }
 
 function validPort(value) { return Number.isInteger(value) && value > 0 && value <= 65535; }
+// Underscores are illegal in a public hostname and ordinary in a private one:
+// internal and WireGuard-side names carry them, and this probe exists to reach
+// exactly those. Everything else stays as strict as it was.
 function validHost(host) {
   if (typeof host !== 'string' || !host || Buffer.byteLength(host, 'utf8') > 253) return false;
   if (net.isIP(host)) return true;
-  return host.replace(/\.$/, '').split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
+  return host.replace(/\.$/, '').split('.').every(label => /^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$/i.test(label));
 }
 
 /** Explicit TCP-only check of a user-selected service (including private WG
@@ -70,7 +73,14 @@ function validHost(host) {
  * there is never a direct fallback, HTTP request or automatic public probe.
  */
 async function probeDestination(socksPort, target, deps = {}) {
-  if (!validPort(socksPort) || !target || !validHost(target.host) || !validPort(target.port)) {
+  // Two different impossibilities, and they blame different people. No local
+  // SOCKS port is ours — the core has just started and the live diagnostics
+  // have not been captured yet — and calling that "invalid input" sends the
+  // user off to correct a hostname that was never wrong.
+  if (!validPort(socksPort)) {
+    return { status: 'no-live-socks', via: 'local-socks', error: 'No local SOCKS listener is running yet. Connect, or refresh the state once the connection settles.' };
+  }
+  if (!target || !validHost(target.host) || !validPort(target.port)) {
     return { status: 'invalid-input', via: 'local-socks', error: 'Use a hostname or IP and a port from 1 to 65535.' };
   }
   const connect = deps.socks5Connect || socks5Connect;
