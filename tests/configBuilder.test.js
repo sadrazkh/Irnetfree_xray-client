@@ -478,10 +478,14 @@ test('wireguard: a wrong interface mask is coerced to /32 at build time', () => 
   assert.deepEqual(outboundTagged(c, 'proxy').settings.address, ['10.13.13.2/32']);
 });
 
-test('wireguard dialed through a chain disables the dialer buffer', () => {
-  // Xray-core #2850: without bufferSize 0 the tunnel silently passes no data.
+test('wireguard dialed through a chain keeps the default dialer buffer (v1.7.2)', () => {
+  // The `bufferSize: 0` of Xray-core #2850 is gone: level 0 is every connection
+  // of the config, so it throttled the WHOLE plan whenever a chained WireGuard
+  // was in it, and both cores pass scripts/probe-wg-chain.js without it.
+  // Pinned so nobody puts it back by habit.
   const chained = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, WG_BAD_MASK] }, settings());
-  assert.equal(chained.policy.levels['0'].bufferSize, 0);
+  assert.equal('bufferSize' in chained.policy.levels['0'], false);
+  assert.deepEqual(chained.policy.levels['0'], { statsUserUplink: true, statsUserDownlink: true });
 
   const standalone = buildConfig(single(WG_BAD_MASK), settings());
   assert.equal('bufferSize' in standalone.policy.levels['0'], false);
@@ -657,7 +661,7 @@ test('the hijack precedes the private-IP bypass, or a query to the tunnel peer w
 
 test('managed bypass-ir: the in-country resolver rides direct and the domestic rules still follow', () => {
   const c = buildConfig(single(), settings(Object.assign({ routingMode: 'bypass-ir', blockAds: false }, MANAGED)));
-  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100'], outboundTag: 'direct' });
+  assert.deepEqual(c.routing.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100'], port: '53', outboundTag: 'direct' });
   assert.deepEqual(c.routing.rules[1], { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' });
   assert.equal(c.routing.rules[2].outboundTag, 'dns-out');
   assert.equal(c.dns.servers[0].address, '178.22.122.100');
@@ -1246,7 +1250,7 @@ test('WireGuard dialled directly is bound (its empty sockopt kept); behind a cha
   const chained = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, WG_BAD_MASK] }, settings(BOUND));
   assert.deepEqual(sockoptOf(chained, 'proxy'), { dialerProxy: 'proxy-h0' });
   assert.deepEqual(sockoptOf(chained, 'proxy-h0'), { interface: 'Wi-Fi' });
-  assert.equal(chained.policy.levels['0'].bufferSize, 0, 'the chained-WireGuard rule still fires');
+  assert.equal('bufferSize' in chained.policy.levels['0'], false, 'no per-connection buffer cap for a chained WireGuard (v1.7.2)');
 });
 
 test('binding does not depend on managed DNS, and the interface name is taken as given', () => {

@@ -67,7 +67,7 @@ test('bypass-ir: the direct resolver is pinned to Iranian domains and answers', 
   // the resolver's OWN queries to the in-country server must go direct, and
   // must be decided before the port-53 hijack or they would loop into dns-out
   assert.deepEqual(p.rules, [
-    { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100', '185.51.200.2'], outboundTag: 'direct' },
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100', '185.51.200.2'], port: '53', outboundTag: 'direct' },
     { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
     { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }
   ]);
@@ -192,16 +192,46 @@ test('IPv6 entries: bracketed host:port is split, a bare address is left alone a
   assert.equal(p.dns.servers[0].address, '2a00:1450::1');
   assert.deepEqual(p.dns.servers[1], { address: '2001:4860:4860::8888', port: 5353 });
   assert.deepEqual(p.directResolverIps, ['2a00:1450::1']);
-  assert.deepEqual(p.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['2a00:1450::1'], outboundTag: 'direct' });
+  assert.deepEqual(p.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['2a00:1450::1'], port: '53', outboundTag: 'direct' });
 });
 
 test('a private-range remote resolver is dialled direct: a LAN resolver is not reachable through the proxy', () => {
   const p = buildDnsPlan(base({ dnsRemote: ['192.168.1.1', 'https://1.1.1.1/dns-query'] }), opts());
   assert.deepEqual(p.dns.servers, ['192.168.1.1', 'https://1.1.1.1/dns-query']);
-  assert.deepEqual(p.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.1.1'], outboundTag: 'direct' });
+  assert.deepEqual(p.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.1.1'], port: '53', outboundTag: 'direct' });
   assert.deepEqual(p.directResolverIps, ['192.168.1.1']);
   // a public remote resolver is NOT in that list — it must ride the exit
   assert.deepEqual(buildDnsPlan(base(), opts()).directResolverIps, []);
+});
+
+test('a public address in BOTH lists: its plain :53 query goes direct, its DoH still rides the exit', () => {
+  // The owner's store, verbatim: the in-country list holds 8.8.8.8 and 1.1.1.1,
+  // the remote one https://1.1.1.1/dns-query. Matched on ip alone, the direct
+  // rule also caught the DoH connection to 1.1.1.1:443 and sent it off the
+  // tunnel — from the machine's own address, over the ISP.
+  const p = buildDnsPlan(base({ routingMode: 'bypass-ir', dnsDirect: ['8.8.8.8', '1.1.1.1'], dnsRemote: ['https://1.1.1.1/dns-query', 'https://1.0.0.1/dns-query'] }), opts());
+  assert.deepEqual(p.rules, [
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['8.8.8.8', '1.1.1.1'], port: '53', outboundTag: 'direct' },
+    { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
+    { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }
+  ]);
+  assert.deepEqual(p.directResolverIps, ['8.8.8.8', '1.1.1.1'], 'the TUN bypass list is unchanged');
+});
+
+test('direct resolvers on different ports get one rule per port, in first-seen order', () => {
+  const p = buildDnsPlan(base({
+    routingMode: 'bypass-ir',
+    dnsDirect: ['178.22.122.100', '185.51.200.2:5353'],
+    dnsRemote: ['192.168.1.1', 'https://192.168.1.2/dns-query', 'https://192.168.1.3:8443/dns-query', 'quic+local://192.168.1.4']
+  }), opts());
+  assert.deepEqual(p.rules.slice(0, 4), [
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100', '192.168.1.1'], port: '53', outboundTag: 'direct' },
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['185.51.200.2'], port: '5353', outboundTag: 'direct' },
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.1.2'], port: '443', outboundTag: 'direct' },
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.1.3'], port: '8443', outboundTag: 'direct' }
+  ]);
+  assert.deepEqual(p.rules[4], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.1.4'], port: '853', outboundTag: 'direct' });
+  assert.deepEqual(p.directResolverIps, ['178.22.122.100', '185.51.200.2', '192.168.1.1', '192.168.1.2', '192.168.1.3', '192.168.1.4']);
 });
 
 test('dropUdpDirect (strict guard): UDP direct resolvers are dropped, DoH ones kept', () => {
@@ -249,7 +279,7 @@ test('target resolver: appended after the remote list, as a fallback the public 
 test('target resolver: its query leaves through the target, after the direct rule and before the exit rule', () => {
   const p = buildDnsPlan(base({ routingMode: 'bypass-ir' }), opts({ targetResolvers: [CORP] }));
   assert.deepEqual(p.rules, [
-    { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100', '185.51.200.2'], outboundTag: 'direct' },
+    { type: 'field', inboundTag: ['dns-internal'], ip: ['178.22.122.100', '185.51.200.2'], port: '53', outboundTag: 'direct' },
     { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: 'out-chain-c1' },
     { type: 'field', inboundTag: ['dns-internal'], outboundTag: 'proxy' },
     { type: 'field', port: '53', network: 'tcp,udp', outboundTag: 'dns-out' }
@@ -272,7 +302,7 @@ test('target resolver: never dialled direct, even though it is a private-range a
   // and a LAN resolver in the remote list still goes direct on its own
   const both = buildDnsPlan(base({ dnsRemote: ['192.168.1.1', 'https://1.1.1.1/dns-query'] }), opts({ targetResolvers: [CORP] }));
   assert.deepEqual(both.directResolverIps, ['192.168.1.1']);
-  assert.deepEqual(both.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.1.1'], outboundTag: 'direct' });
+  assert.deepEqual(both.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.1.1'], port: '53', outboundTag: 'direct' });
   assert.deepEqual(both.rules[1], { type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: 'out-chain-c1' });
 });
 

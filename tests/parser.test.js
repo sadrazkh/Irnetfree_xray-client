@@ -80,6 +80,19 @@ test('vless: grpc / h2 / xhttp / kcp transports', () => {
   assert.equal(xh.network, 'xhttp');
   assert.deepEqual(xh.xhttpSettings, { path: '/x', host: 'x.com', mode: 'packet-up' });
 
+  // `extra` — the link's JSON of the rest of xhttp (v2rayN / panel links carry
+  // it) — reaches the config as an object; before v1.7.2 it was dropped. The
+  // core ignores unknown keys inside it and its own host/path/mode win.
+  const extra = { scMaxEachPostBytes: '1000000', uplinkHTTPMethod: 'PUT', xPaddingBytes: '100-1000', xmux: { maxConcurrency: '16-32' } };
+  const xe = parseLink('vless://u@x.example.com:443?type=xhttp&path=%2F&host=x.com&mode=auto&extra=' + encodeURIComponent(JSON.stringify(extra)));
+  assert.deepEqual(xe.outbound.streamSettings.xhttpSettings, { path: '/', host: 'x.com', mode: 'auto', extra });
+  assert.deepEqual(JSON.parse(new URL(buildShareLink(xe)).searchParams.get('extra')), extra, 'the share link carries it back');
+  assert.equal('extra' in parseLink('vless://u@x.example.com:443?type=xhttp&extra=%5B1%5D').outbound.streamSettings.xhttpSettings, false, 'a non-object is dropped');
+  assert.equal('extra' in parseLink('vless://u@x.example.com:443?type=xhttp&extra=not-json').outbound.streamSettings.xhttpSettings, false, 'bad JSON is dropped, the link still imports');
+  assert.equal('extra' in parseLink('vless://u@x.example.com:443?type=xhttp&extra=').outbound.streamSettings.xhttpSettings, false);
+  const plain = parseLink('vless://u@x.example.com:443?type=xhttp&path=%2Fx&host=x.com&mode=packet-up');
+  assert.equal(new URL(buildShareLink(plain)).searchParams.has('extra'), false, 'no extra, no parameter');
+
   const kcp = parseLink('vless://u@k.example.com:443?type=kcp&headerType=srtp&seed=s1').outbound.streamSettings;
   assert.equal(kcp.network, 'kcp');
   assert.deepEqual(kcp.kcpSettings, { header: { type: 'srtp' }, seed: 's1' });

@@ -65,6 +65,24 @@ function resolverIp(entry) {
   return net.isIP(host) ? host : null;
 }
 
+/**
+ * The port the core dials for an entry: the URL's or the host:port's own,
+ * else the scheme's default — 443 for DoH, 853 for DNS over QUIC, 53 for
+ * everything plain.
+ */
+function resolverPort(entry) {
+  const e = String(entry || '').trim();
+  const m = e.match(/^([a-z+]+):\/\/(\[[^\]]+\]|[^/:?#]+)(?::(\d{1,5}))?/i);
+  if (m) {
+    if (m[3]) return Number(m[3]);
+    if (/^https/i.test(m[1])) return 443;
+    if (/^quic/i.test(m[1])) return 853;
+    return 53;
+  }
+  const { port } = splitHostPort(e);
+  return port || 53;
+}
+
 /** RFC1918 / loopback / link-local / CGNAT v4, ULA / link-local / loopback v6. */
 function isPrivateIp(ip) {
   if (net.isIPv4(ip)) {
@@ -158,6 +176,20 @@ function buildDnsPlan(settings, opts) {
 
   const servers = [];
   const directResolverIps = [];
+  // { ip, port } per resolver the core dials off the tunnel. The direct rule
+  // below matches BOTH, so a public address that is also a remote DoH server
+  // — 1.1.1.1 in the in-country list and https://1.1.1.1/dns-query in the
+  // remote one, a real store — keeps its DoH on the exit: only the plain :53
+  // query to it goes direct. Matched on ip alone, the DoH connection went off
+  // the tunnel too, from the machine's own address.
+  const directResolvers = [];
+  const addDirect = (entry) => {
+    const ip = resolverIp(entry);
+    if (!ip) return;
+    const port = resolverPort(entry);
+    if (!directResolvers.some(d => d.ip === ip && d.port === port)) directResolvers.push({ ip, port });
+    if (!directResolverIps.includes(ip)) directResolverIps.push(ip);
+  };
 
   const region = directRegion(s, o.geoAssets);
   if (region) {
@@ -177,8 +209,7 @@ function buildDnsPlan(settings, opts) {
       srv.expectedIPs = expected.slice();
       srv.skipFallback = true;   // never ask the domestic resolver about the rest of the world
       servers.push(srv);
-      const ip = resolverIp(address);
-      if (ip && !directResolverIps.includes(ip)) directResolverIps.push(ip);
+      addDirect(address);
     }
   }
 
@@ -187,7 +218,7 @@ function buildDnsPlan(settings, opts) {
     // A LAN / private-range resolver (a router, a corporate DNS) is only
     // reachable off the tunnel; the exit rule below would send it nowhere.
     const ip = resolverIp(r);
-    if (ip && isPrivateIp(ip) && !directResolverIps.includes(ip)) directResolverIps.push(ip);
+    if (ip && isPrivateIp(ip)) addDirect(r);
   }
 
   // Resolvers that belong to a routing target (a corporate WireGuard's
@@ -236,7 +267,17 @@ function buildDnsPlan(settings, opts) {
   for (let i = directResolverIps.length - 1; i >= 0; i--) {
     if (targetIps.has(directResolverIps[i])) directResolverIps.splice(i, 1);
   }
-  if (directResolverIps.length) rules.push({ type: 'field', inboundTag: [DNS_TAG], ip: directResolverIps.slice(), outboundTag: 'direct' });
+  // One direct rule per port, first port seen first: the in-country pair on
+  // :53 is one rule, a `host:port` entry its own, a private DoH URL its :443.
+  const directByPort = new Map();
+  for (const d of directResolvers) {
+    if (targetIps.has(d.ip)) continue;
+    if (!directByPort.has(d.port)) directByPort.set(d.port, []);
+    directByPort.get(d.port).push(d.ip);
+  }
+  for (const [port, ips] of directByPort) {
+    rules.push({ type: 'field', inboundTag: [DNS_TAG], ip: ips, port: String(port), outboundTag: 'direct' });
+  }
   rules.push(...targetRules);
   rules.push({ type: 'field', inboundTag: [DNS_TAG], outboundTag: o.exitTag });
   rules.push({ type: 'field', port: '53', network: 'tcp,udp', outboundTag: HIJACK_TAG });

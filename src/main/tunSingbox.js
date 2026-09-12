@@ -208,12 +208,61 @@ class TunSingbox {
     return this.dirs().map(d => path.join(d, exe)).find(p => fs.existsSync(p)) || null;
   }
 
-  /** sing-box present; on Windows wintun.dll in the SAME dir (sing-box loads it from its own). */
+  /**
+   * Where a wintun.dll for sing-box can come from: beside the binary first,
+   * else any known bin dir — the bundled one ships it beside tun2socks.
+   */
+  wintunSource() {
+    const bin = this.singboxPath();
+    if (!bin) return null;
+    const beside = path.join(path.dirname(bin), 'wintun.dll');
+    if (fs.existsSync(beside)) return beside;
+    return this.dirs().map(d => path.join(d, 'wintun.dll')).find(p => fs.existsSync(p)) || null;
+  }
+
+  /**
+   * sing-box present; on Windows a wintun.dll we can put beside it (see
+   * ensureWintun). The old rule — wintun in the SAME dir, or "not installed" —
+   * sent every machine whose sing-box came from the downloader (userData/bin)
+   * to tun2socks for good: the bundled wintun.dll lives beside tun2socks in
+   * resources/bin and nothing ever copied it over. The setting said sing-box,
+   * the user had installed sing-box, the log said tun2socks.
+   */
   isAvailable() {
     const bin = this.singboxPath();
     if (!bin) return false;
-    if (this.platform === 'win32') return fs.existsSync(path.join(path.dirname(bin), 'wintun.dll'));
+    if (this.platform === 'win32') return !!this.wintunSource();
     return true;
+  }
+
+  /**
+   * Make sure wintun.dll sits beside sing-box.exe, copying it there from another
+   * known dir when it does not. sing-box (wireguard-go's loader) opens
+   * wintun.dll with LOAD_LIBRARY_SEARCH_APPLICATION_DIR: only the directory of
+   * the executable counts — never the working directory, never another dir on
+   * the way. Returns the path beside the binary; null off Windows; throws when
+   * there is no wintun.dll anywhere to copy, or the copy itself fails.
+   */
+  ensureWintun() {
+    const bin = this.singboxPath();
+    if (!bin || this.platform !== 'win32') return null;
+    const beside = path.join(path.dirname(bin), 'wintun.dll');
+    if (fs.existsSync(beside)) return beside;
+    const src = this.wintunSource();
+    if (!src) {
+      throw new Error(this.msg(
+        'wintun.dll کنار sing-box.exe نیست — حالت TUN بدون آن اجرا نمی‌شود',
+        'wintun.dll is not next to sing-box.exe — TUN mode cannot run without it'));
+    }
+    try {
+      fs.copyFileSync(src, beside);
+    } catch (e) {
+      throw new Error(this.msg(
+        `کپی wintun.dll کنار sing-box.exe ناموفق بود (${e.message})`,
+        `Could not copy wintun.dll next to sing-box.exe (${e.message})`));
+    }
+    this.onLog(`wintun.dll copied beside sing-box: ${beside}`, 'info');
+    return beside;
   }
 
   isElevated() { return platform.isElevated(this.platform); }
@@ -327,11 +376,9 @@ class TunSingbox {
     if (!bin) throw new Error(this.msg(
       'sing-box.exe پیدا نشد — آن را در پوشه bin بگذارید (از «فایل‌های موردنیاز» دانلود کن)',
       'sing-box.exe not found — put it in the bin folder (download it from "Required files")'));
-    if (!fs.existsSync(path.join(path.dirname(bin), 'wintun.dll'))) {
-      throw new Error(this.msg(
-        'wintun.dll کنار sing-box.exe نیست — حالت TUN بدون آن اجرا نمی‌شود',
-        'wintun.dll is not next to sing-box.exe — TUN mode cannot run without it'));
-    }
+    // wintun.dll has to be beside the binary; a downloaded sing-box gets the
+    // bundled one copied over here (see ensureWintun).
+    this.ensureWintun();
     if (!this.isElevated()) {
       throw new Error(this.msg(
         'حالت TUN نیاز به دسترسی Administrator دارد — برنامه را با «Run as administrator» اجرا کنید',

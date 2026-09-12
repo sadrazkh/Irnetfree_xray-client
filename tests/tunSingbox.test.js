@@ -214,20 +214,57 @@ test('the surface task 2 wires in', () => {
   }
 });
 
-test('isAvailable: win32 needs wintun.dll NEXT TO sing-box.exe; darwin only the binary', async () => {
-  await withBin(['sing-box.exe'], 'win32', (tun) => assert.equal(tun.isAvailable(), false, 'no wintun'));
+test('isAvailable: win32 needs sing-box.exe and a wintun.dll it can put beside it; darwin only the binary', async () => {
+  await withBin(['sing-box.exe'], 'win32', (tun) => assert.equal(tun.isAvailable(), false, 'no wintun anywhere'));
   await withBin(['sing-box.exe', 'wintun.dll'], 'win32', (tun) => assert.equal(tun.isAvailable(), true));
   await withBin(['sing-box', 'wintun.dll'], 'win32', (tun) => assert.equal(tun.isAvailable(), false, 'win32 wants the .exe'));
   await withBin(['sing-box'], 'darwin', (tun) => assert.equal(tun.isAvailable(), true));
   await withBin(['sing-box.exe'], 'darwin', (tun) => assert.equal(tun.isAvailable(), false));
   await withBin([], 'linux', (tun) => assert.equal(tun.isAvailable(), false));
-  // wintun in ANOTHER known dir does not count: sing-box loads it from its own dir
+  // wintun in ANOTHER known dir counts: start() copies it beside sing-box. That
+  // is the layout every install with a downloaded sing-box (userData/bin) and
+  // the bundled wintun (resources/bin, beside tun2socks) has — v1.7.1 and
+  // earlier read it as "sing-box not installed" and ran tun2socks instead,
+  // whatever the setting said.
   const other = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-sb-other-'));
-  fs.writeFileSync(path.join(other, 'wintun.dll'), '');
+  fs.writeFileSync(path.join(other, 'wintun.dll'), 'dll');
   try {
-    await withBin(['sing-box.exe'], 'win32', (tun, dir) => {
+    await withBin(['sing-box.exe'], 'win32', (tun, dir, logs) => {
       tun.dirs = () => [dir, other];
-      assert.equal(tun.isAvailable(), false);
+      assert.equal(tun.isAvailable(), true);
+      assert.equal(tun.wintunSource(), path.join(other, 'wintun.dll'));
+      assert.equal(fs.existsSync(path.join(dir, 'wintun.dll')), false, 'isAvailable() only looks');
+      assert.equal(tun.ensureWintun(), path.join(dir, 'wintun.dll'));
+      assert.equal(fs.readFileSync(path.join(dir, 'wintun.dll'), 'utf8'), 'dll', 'copied beside the binary');
+      assert.equal(tun.wintunSource(), path.join(dir, 'wintun.dll'), 'beside wins from now on');
+      assert.ok(logs.some(([, l]) => /wintun\.dll copied beside sing-box/.test(l)));
+    });
+  } finally { fs.rmSync(other, { recursive: true, force: true }); }
+});
+
+test('ensureWintun: a no-op beside the binary, nothing to do off Windows, a clear error with no wintun anywhere', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', (tun, dir, logs) => {
+    assert.equal(tun.ensureWintun(), path.join(dir, 'wintun.dll'));
+    assert.equal(logs.length, 0, 'nothing copied, nothing logged');
+  });
+  await withBin(['sing-box'], 'darwin', (tun) => assert.equal(tun.ensureWintun(), null));
+  await withBin(['sing-box.exe'], 'win32', (tun) => assert.throws(() => tun.ensureWintun(), /wintun\.dll is not next to sing-box\.exe/));
+});
+
+test('win32 start: a wintun.dll from another known dir is copied beside sing-box before the spawn', async () => {
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-sb-other-'));
+  fs.writeFileSync(path.join(other, 'wintun.dll'), 'dll');
+  try {
+    await withBin(['sing-box.exe'], 'win32', async (tun, dir) => {
+      tun.dirs = () => [dir, other];
+      tun.isElevated = () => true;
+      fakeSpawn = () => stubChild();
+      canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+      await tun.start(10808, [], ['172.19.0.2'], {});
+      assert.equal(tun.active, true);
+      assert.equal(fs.readFileSync(path.join(dir, 'wintun.dll'), 'utf8'), 'dll');
+      assert.equal(spawns[0][0], path.join(dir, 'sing-box.exe'));
+      assert.deepEqual(spawns[0][2], { cwd: dir, windowsHide: true });
     });
   } finally { fs.rmSync(other, { recursive: true, force: true }); }
 });
@@ -422,10 +459,11 @@ test('win32 start: adapter never comes Up → stop + throw', async () => {
   });
 });
 
-test('win32 start: refuses without wintun next to the binary, and without elevation', async () => {
+test('win32 start: refuses without a wintun.dll anywhere, and without elevation', async () => {
   await withBin(['sing-box.exe'], 'win32', async (tun) => {
     tun.isElevated = () => true;
     await assert.rejects(() => tun.start(1, [], [], {}), /wintun\.dll/);
+    assert.equal(spawns.length, 0);
   });
   await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
     tun.isElevated = () => false;
