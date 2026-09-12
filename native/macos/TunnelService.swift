@@ -148,17 +148,18 @@ private final class TunnelState {
 
     func refreshDNS() throws {
         guard ready, journal != nil, !targetDNS.isEmpty else { return }
-        if Date() >= nextDNSEnumeration {
+        if dnsServiceIndex >= dnsServices.count {
+            guard Date() >= nextDNSEnumeration else { return }
             // Enumeration has its own tick. A failed OS command is retried on
             // the next scheduled scan, not on every two-second heartbeat tick.
             nextDNSEnumeration = Date().addingTimeInterval(30)
             dnsServices = try enabledNetworkServices(run("/usr/sbin/networksetup", ["-listallnetworkservices"], timeout: 2))
-            dnsServiceIndex = dnsServices.isEmpty ? 0 : dnsServiceIndex % dnsServices.count
+            dnsServiceIndex = 0
             return
         }
         guard !dnsServices.isEmpty else { return }
         let service = dnsServices[dnsServiceIndex]
-        dnsServiceIndex = (dnsServiceIndex + 1) % dnsServices.count
+        dnsServiceIndex += 1
         let observed = try networkServiceDNS(run("/usr/sbin/networksetup", ["-getdnsservers", service], timeout: 2))
         let plan = DNSRepairPlan(original: journal?.originalDNS[service], observed: observed, desired: targetDNS)
         if plan.needsWrite {
@@ -237,7 +238,7 @@ private final class TunnelState {
                 _ = try run("/usr/sbin/networksetup", ["-setdnsservers", service] + options.dnsServers)
             }
             guard alive() else { throw NativeFailure("Tunnel exited while setting DNS") }
-            targetDNS = options.dnsServers; dnsServices = services; dnsServiceIndex = 0
+            targetDNS = options.dnsServers; dnsServices = services; dnsServiceIndex = services.count
             nextDNSEnumeration = Date().addingTimeInterval(30); dnsRepairError = nil
             ready = true; deadline = Date().addingTimeInterval(20); try save()
         } catch {
