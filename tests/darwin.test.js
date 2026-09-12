@@ -72,7 +72,8 @@ test('darwin: the sing-box backend finds `sing-box`, ignores `sing-box.exe`, and
     touch(d, ['sing-box']);
     assert.equal(mac.singboxPath(), path.join(d, 'sing-box'));
     assert.equal(mac.isAvailable(), true, 'no wintun.dll asked for off Windows');
-    assert.equal(win.isAvailable(), false, 'Windows still wants wintun next to it');
+    win.dirs = () => [d];   // no other known dir to copy a wintun.dll from
+    assert.equal(win.isAvailable(), false, 'Windows still wants a wintun.dll it can put next to it');
     assert.equal(mac.isElevated(), true, 'the osascript prompt stands in for admin rights');
   } finally { rm(d); }
 });

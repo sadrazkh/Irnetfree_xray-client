@@ -919,7 +919,7 @@ function createService(opts = {}) {
             });
           }
         if (settings.leakGuard === 'strict' && myTun.backendId !== 'sing-box') {
-          send('log', { line: 'Strict guard on the tun2socks backend: no strict_route and no IPv6 route — install sing-box for the guard the setting promises', level: 'warn' });
+          send('log', { line: 'Strict guard on the tun2socks backend: no strict_route and IPv4-only firewall rules — install sing-box for the guard the setting promises', level: 'warn' });
         }
         } catch (e) { tunError = e.message;
         if (process.platform === 'darwin' && myTun.active) throw e; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }

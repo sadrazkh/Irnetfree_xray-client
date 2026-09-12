@@ -16,7 +16,7 @@ const path = require('node:path');
 
 const {
   LeakGuard, STATE_FILE, GUARD_EXCLUDES, rangeComplement, withoutPeers,
-  winSnapshotScript, parseWinSnapshot, winApplyScript, winRestoreScript,
+  winSnapshotScript, parseWinSnapshot, parseNetshDnsServers, winApplyScript, winRestoreScript,
   winOrphanKillScript, winRepairScript, winReleaseScript,
   winStrictApplyScript, winGroupRemoveScript, winUdpBlockApplyScript,
   macSnapshotScript, parseMacSnapshot, macApplyScript, macRestoreScript,
@@ -301,9 +301,11 @@ test('refresh repairs DHCP drift and journals a newly connected adapter before w
     { alias: 'Ethernet', v4: [PEER4], v6: [PEER6], dhcp4: false, dhcp6: false },
     { alias: 'USB Ethernet', v4: ['192.168.20.1'], v6: [], dhcp4: true, dhcp6: true }
   ]);
-  const before = h.calls.length;
+  // the harness answers netsh with nothing, so the cheap check falls through
+  const ps = () => h.calls.filter(c => c.cmd === 'powershell').length;
+  const before = ps();
   assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 2 });
-  assert.equal(h.calls.length, before + 2);
+  assert.equal(ps(), before + 2);
   assert.deepEqual(h.state().win.adapters.slice(0, 2), original);
   assert.deepEqual(h.state().win.adapters[2].v4, ['192.168.20.1']);
   assert.doesNotMatch(h.calls.at(-1).script, /Firewall|InterfaceAlias 'Ethernet'/);
@@ -319,11 +321,110 @@ test('refresh without drift is read-only, and stale receipts do not even snapsho
   const h = harness('win32', (cmd, args) => /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '');
   const { token } = await h.guard.engage({ level: 'strict', peer4: PEER4, peer6: PEER6 });
   snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: [PEER4], v6: [PEER6] }]);
-  const before = h.calls.length;
+  const ps = () => h.calls.filter(c => c.cmd === 'powershell').length;
+  const before = ps();
   assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0 });
-  assert.equal(h.calls.length, before + 1);
+  assert.equal(ps(), before + 1);
+  const all = h.calls.length;
   assert.equal((await h.guard.refresh({ token: 'old' })).skipped, true);
-  assert.equal(h.calls.length, before + 1);
+  assert.equal(h.calls.length, all, 'a stale receipt runs nothing, not even netsh');
+});
+
+/* ------------------------- refresh: the cheap half (netsh) ------------------------- */
+
+const netshBlock = (alias, label, addrs) => [
+  `Configuration for interface "${alias}"`,
+  ...addrs.map((a, i) => (i ? ' '.repeat(42) : `    ${label}:`.padEnd(42)) + a),
+  '    Register with which suffix:           Primary only',
+  ''
+].join('\r\n');
+const NETSH_V4 = ['',
+  netshBlock('IRNetFree', 'Statically Configured DNS Servers', [PEER4]),
+  netshBlock('Wi-Fi', 'Statically Configured DNS Servers', [PEER4]),
+  netshBlock('Ethernet', 'Statically Configured DNS Servers', [PEER4]),
+  netshBlock('Bluetooth Network Connection', 'DNS servers configured through DHCP', ['None'])
+].join('\r\n');
+const NETSH_V6 = ['',
+  netshBlock('Wi-Fi', 'Statically Configured DNS Servers', [PEER6]),
+  netshBlock('Ethernet', 'Statically Configured DNS Servers', [PEER6]),
+  netshBlock('Bluetooth Network Connection', 'DNS servers configured through DHCP', ['fec0:0:0:ffff::1%1', 'fec0:0:0:ffff::2%1'])
+].join('\r\n');
+
+test('parseNetshDnsServers: one block per quoted alias, addresses only, scope ids dropped, headings never matched', () => {
+  const v4 = parseNetshDnsServers(NETSH_V4);
+  assert.deepEqual([...v4.keys()], ['irnetfree', 'wi-fi', 'ethernet', 'bluetooth network connection']);
+  assert.deepEqual(v4.get('wi-fi'), [PEER4]);
+  assert.deepEqual(v4.get('bluetooth network connection'), [], '"None" is not an address');
+  const v6 = parseNetshDnsServers(NETSH_V6);
+  assert.deepEqual(v6.get('ethernet'), [PEER6]);
+  assert.deepEqual(v6.get('bluetooth network connection'), ['fec0:0:0:ffff::1', 'fec0:0:0:ffff::2'], 'continuation lines, %zone dropped');
+  // a localized heading is still a heading: only the quotes are matched
+  assert.deepEqual(parseNetshDnsServers('پیکربندی برای رابط "Wi-Fi"\r\n    سرورهای DNS:   10.255.0.1\r\n').get('wi-fi'), ['10.255.0.1']);
+  assert.equal(parseNetshDnsServers('').size, 0);
+  assert.equal(parseNetshDnsServers(null).size, 0);
+  assert.equal(parseNetshDnsServers('    10.255.0.1\r\n').size, 0, 'an address before any block belongs to nobody');
+});
+
+test('refresh: a netsh listing that still names the peers costs no PowerShell; a drift, `full` or an unreadable listing takes the snapshot', async () => {
+  let v4 = NETSH_V4, v6 = NETSH_V6, snapshot = WIN_SNAP;
+  const h = harness('win32', (cmd, args) => {
+    if (cmd === 'netsh') return args[1] === 'ipv6' ? v6 : v4;
+    return /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '';
+  });
+  const { token } = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6 });
+  assert.deepEqual(h.state().win.adapters.map(a => a.alias), ['Wi-Fi', 'Ethernet']);
+  const ps = () => h.calls.filter(c => c.cmd === 'powershell').length;
+  const netsh = () => h.calls.filter(c => c.cmd === 'netsh').map(c => c.args.join(' '));
+
+  let p = ps();
+  const n = netsh().length;
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
+  assert.equal(ps(), p, 'no PowerShell at all');
+  assert.deepEqual(netsh().slice(n), ['interface ipv4 show dnsservers', 'interface ipv6 show dnsservers']);
+
+  // the v6 family of an owned adapter drifted back to the router → the full
+  // path, which sees the same drift in the snapshot and repairs it
+  v6 = NETSH_V6.replace(`Statically Configured DNS Servers:    ${PEER6}`, 'DNS servers configured through DHCP:  fe80::1%22');
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [PEER4], v6: ['fe80::1'], dhcp4: true, dhcp6: true },
+    { alias: 'Ethernet', v4: [PEER4], v6: [PEER6], dhcp4: false, dhcp6: false }
+  ]);
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
+  assert.equal(ps(), p + 2, 'snapshot + apply');
+  assert.match(h.calls.at(-1).script, /InterfaceAlias 'Wi-Fi' -ServerAddresses 'fdfe:dcba:9876::2'/);
+  assert.doesNotMatch(h.calls.at(-1).script, /InterfaceAlias 'Ethernet'/);
+
+  // `full` skips the cheap half even when nothing drifted
+  v6 = NETSH_V6;
+  snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: [PEER4], v6: [PEER6] }, { alias: 'Ethernet', v4: [PEER4], v6: [PEER6] }]);
+  p = ps();
+  const before = netsh().length;
+  assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: false, adapters: 0 });
+  assert.equal(ps(), p + 1);
+  assert.equal(netsh().length, before);
+
+  // an adapter netsh no longer lists is gone, not drifted
+  v4 = NETSH_V4.replace(netshBlock('Ethernet', 'Statically Configured DNS Servers', [PEER4]), '');
+  v6 = NETSH_V6.replace(netshBlock('Ethernet', 'Statically Configured DNS Servers', [PEER6]), '');
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
+  assert.equal(ps(), p);
+
+  // an empty (unreadable) listing is not trusted: the snapshot decides
+  v4 = '';
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0 });
+  assert.equal(ps(), p + 1);
+
+  // a v4 drift alone is enough
+  v4 = NETSH_V4.replace(`Statically Configured DNS Servers:    ${PEER4}\r\n    Register with which suffix:           Primary only\r\n\r\nConfiguration for interface "Ethernet"`,
+    `DNS servers configured through DHCP:  192.168.8.1\r\n    Register with which suffix:           Primary only\r\n\r\nConfiguration for interface "Ethernet"`);
+  assert.deepEqual(parseNetshDnsServers(v4).get('wi-fi'), ['192.168.8.1']);
+  snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: ['192.168.8.1'], v6: [PEER6], dhcp4: true, dhcp6: true }]);
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
+  assert.equal(ps(), p + 2);
 });
 
 test('mac refresh preserves original DNS and changes only drifted services', async () => {

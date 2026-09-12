@@ -45,6 +45,19 @@ const TUN_GW = '10.255.0.1';
 // Split-default routes (two /1 routes) override the OS default route without
 // deleting it, so cleanup is clean and the real gateway stays intact.
 const SPLIT_ROUTES = ['0.0.0.0', '128.0.0.0'];
+// IPv6 on the same adapter (Windows): an address so the peer is on-link, the
+// peer as the adapter's v6 resolver, and the two /1 routes. The addresses are
+// the sing-box backend's (TUN_ADDR6 / TUN_PEER6 in tunSingbox.js), so the leak
+// guard sees one v6 peer whichever backend is live. Without them a dual-stack
+// machine kept its ISP's v6 default route and the router's v6 resolver beside
+// the tunnel: every v6 packet, and every query Windows fell back to when the
+// tunnel resolver was slow, left the machine outside it. Seen live on the
+// owner's laptop (a TXT lookup the hijack refused went to the router over
+// fe80::, and on to Google from the ISP's v6 prefix).
+const TUN_ADDR6 = 'fdfe:dcba:9876::1';
+const TUN_PREFIX6 = 126;
+const TUN_GW6 = 'fdfe:dcba:9876::2';
+const SPLIT_ROUTES6 = ['::/1', '8000::/1'];
 
 class TunManager {
   constructor(opts = {}) {
@@ -58,6 +71,10 @@ class TunManager {
     this.bypassIps = [];   // every /32 we added so we can remove them all
     this.tunIfIndex = null;
     this.dnsServers = ['1.1.1.1', '8.8.8.8'];
+    // The adapter's IPv6 resolver once the v6 side is up (Windows) — what the
+    // leak guard points every physical adapter's v6 family at. null until then,
+    // and null again if the v6 setup failed: the guard then leaves v6 alone.
+    this.dnsPeer6 = null;
     this.lang = opts.lang || 'fa';   // user-facing error language
     this.macState = null;            // macOS TUN runtime state (pid, routes, dns)
     this.macLogTimer = null;
@@ -236,6 +253,11 @@ class TunManager {
         this.dnsServers[1], 'index=2', 'validate=no']).catch(() => {});
     }
 
+    // 7b) IPv6 through the tunnel too — address, resolver, the two /1 routes
+    //     (see TUN_ADDR6). Best effort: a failure is logged, dnsPeer6 stays
+    //     null and the guard leaves the v6 family alone, exactly as before.
+    await this.setupIpv6Windows();
+
     // 8) split-default routes through TUN, pinned to the TUN interface index.
     //    Two /1 routes override the OS default without deleting it.
     let routed = false;
@@ -260,10 +282,45 @@ class TunManager {
     this.onLog(this.msg('حالت TUN فعال شد (کل سیستم).', 'TUN mode active (whole system).'), 'info');
   }
 
+  /**
+   * The v6 side of the adapter: on-link address, resolver, `::/1` + `8000::/1`
+   * pinned to the adapter with the peer as next hop. `store=active` — the
+   * adapter is gone with tun2socks, nothing of this belongs in the registry.
+   * The /1 prefixes are longer than the ISP's `::/0`, so they win without any
+   * metric games; LAN prefixes are longer still and stay on the LAN.
+   */
+  async setupIpv6Windows() {
+    this.dnsPeer6 = null;
+    try {
+      await run('netsh', ['interface', 'ipv6', 'add', 'address', `interface=${ADAPTER}`,
+        `address=${TUN_ADDR6}/${TUN_PREFIX6}`, 'store=active']);
+      await run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${ADAPTER}`,
+        'static', TUN_GW6, 'primary', 'validate=no']);
+      for (const net of SPLIT_ROUTES6) {
+        await run('netsh', ['interface', 'ipv6', 'add', 'route', `prefix=${net}`, `interface=${ADAPTER}`,
+          `nexthop=${TUN_GW6}`, 'metric=1', 'store=active']);
+      }
+      this.dnsPeer6 = TUN_GW6;
+      this.onLog(`IPv6 -> TUN too (${TUN_ADDR6}/${TUN_PREFIX6}, resolver ${TUN_GW6}, ${SPLIT_ROUTES6.join(' + ')})`, 'info');
+    } catch (e) {
+      this.onLog('IPv6 on the TUN adapter failed — v6 stays outside the tunnel: ' + e.message, 'warn');
+      await this.cleanupIpv6Windows();
+    }
+  }
+
+  async cleanupIpv6Windows() {
+    for (const net of SPLIT_ROUTES6) {
+      await run('netsh', ['interface', 'ipv6', 'delete', 'route', `prefix=${net}`, `interface=${ADAPTER}`,
+        `nexthop=${TUN_GW6}`]).catch(() => {});
+    }
+    this.dnsPeer6 = null;
+  }
+
   async cleanupRoutesWindows() {
     for (const net of SPLIT_ROUTES) {
       await run('route', ['delete', net, 'mask', '128.0.0.0', TUN_GW]).catch(() => {});
     }
+    await this.cleanupIpv6Windows();
     for (const ip of this.bypassIps) {
       await run('route', ['delete', ip]).catch(() => {});
     }
@@ -664,6 +721,11 @@ class TunManager {
       for (const net of SPLIT_ROUTES) {
         try { execFileSync('route', ['delete', net, 'mask', '128.0.0.0', TUN_GW], { windowsHide: true }); } catch {}
       }
+      for (const net of SPLIT_ROUTES6) {
+        try {
+          execFileSync('netsh', ['interface', 'ipv6', 'delete', 'route', `prefix=${net}`, `interface=${ADAPTER}`, `nexthop=${TUN_GW6}`], { windowsHide: true });
+        } catch {}
+      }
       for (const ip of this.bypassIps) {
         try { execFileSync('route', ['delete', ip], { windowsHide: true }); } catch {}
       }
@@ -687,4 +749,4 @@ class TunManager {
 // isOwnTunInterface lives in tunPlatform.js now (it knows both backends'
 // adapter names); re-exported so main.js / service.js / the tests keep their
 // import.
-module.exports = { TunManager, isOwnTunInterface, TUN_GW };
+module.exports = { TunManager, isOwnTunInterface, TUN_GW, TUN_GW6 };

@@ -573,13 +573,16 @@ function buildConfig(planArg, settings) {
   outbounds = applyFragments(outbounds);
   bindDirectDials(outbounds, s.directInterface);
 
-  // WireGuard dialed THROUGH another outbound (chain) needs the dialer pipe
-  // buffer disabled, otherwise UDP/TCP conversion corrupts packets ("unknown
-  // type packet") and the tunnel silently passes no data. See Xray-core #2850.
-  const wgChained = outbounds.some(o =>
-    o && o.protocol === 'wireguard' && o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy);
+  // No `bufferSize: 0` any more. It was set whenever a WireGuard was dialled
+  // through a chain (Xray-core #2850: the dialer pipe merged UDP packets and
+  // the tunnel passed nothing) — but a policy level is everyone's: level 0 is
+  // every connection of the config, and a pipe allowed to hold nothing makes
+  // each write wait for its reader, so the whole plan ran lock-stepped, both
+  // ways, for as long as the corporate chain was in it. Both cores carry the
+  // chained WireGuard with the default buffer now (scripts/probe-wg-chain.js:
+  // plain, TLS, 80 ms RTT, the fork's mask); IRNF_PROBE_BUF0=1 puts the old
+  // line back for a comparison.
   const level0 = { statsUserUplink: true, statsUserDownlink: true };
-  if (wgChained) level0.bufferSize = 0;
 
   return {
     log: { loglevel: s.logLevel },
@@ -677,10 +680,8 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   rules.push(...perInboundRules);
   rules.push({ type: 'field', port: '0-65535', outboundTag: primaryTag });
 
-  const wgChained = outbounds.some(o =>
-    o && o.protocol === 'wireguard' && o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy);
+  // See buildConfig: no per-connection buffer cap for a chained WireGuard.
   const level0 = { statsUserUplink: true, statsUserDownlink: true };
-  if (wgChained) level0.bufferSize = 0;
 
   return {
     log: { loglevel: s.logLevel },
