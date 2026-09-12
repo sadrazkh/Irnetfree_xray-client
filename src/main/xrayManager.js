@@ -288,6 +288,7 @@ class XrayManager {
       windowsHide: true,
       env: this.spawnEnv()
     });
+    const proc = this.proc;
 
     this.running = true;
     // keep the most recent lines so a crash-on-start can report the real reason
@@ -305,14 +306,20 @@ class XrayManager {
     this.proc.stderr.on('data', (d) => handleData(d, 'warn'));
 
     this.proc.on('exit', (code, signal) => {
+      if (earlyExit) earlyExit({ code, signal });
+      // stop() has a bounded wait. A late exit from the previous child must
+      // never clear the replacement child or trigger its recovery callback.
+      if (this.proc !== proc) return;
       this.running = false;
       this.proc = null;
-      if (earlyExit) earlyExit({ code, signal });
       this.onLog(`xray exited (code=${code} signal=${signal || '-'})`, code === 0 ? 'info' : 'error');
       this.onStatus('stopped', { code, signal });
     });
     this.proc.on('error', (err) => {
+      if (earlyExit) earlyExit({ code: null, error: err.message });
+      if (this.proc !== proc) return;
       this.running = false;
+      this.proc = null;
       this.onLog('xray spawn error: ' + err.message, 'error');
       this.onStatus('error', { message: err.message });
     });
@@ -326,13 +333,13 @@ class XrayManager {
     });
 
     if (crashed) {
-      const msg = extractXrayError(recent) || `xray exited on startup (code ${crashed.code})`;
-      this.onStatus('error', { message: msg });
+      const msg = crashed.error || extractXrayError(recent) || `xray exited on startup (code ${crashed.code})`;
+      if (!this.proc || this.proc === proc) this.onStatus('error', { message: msg });
       throw new Error(msg);
     }
 
-    if (this.running) this.onStatus('running', { pid: this.proc.pid });
-    return this.running;
+    if (this.running && this.proc === proc) this.onStatus('running', { pid: proc.pid });
+    return this.running && this.proc === proc;
   }
 
   async stop() {

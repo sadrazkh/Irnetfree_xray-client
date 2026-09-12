@@ -225,6 +225,13 @@ test('blank and duplicate entries are ignored; at least one remote server always
 // company and public names never crawl through the chain.
 const CORP = { address: '192.168.60.1', outboundTag: 'out-chain-c1', expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'], domains: ['domain:tes.systems'] };
 
+test('corporate target DNS cannot be overridden by a duplicate LAN/direct resolver', () => {
+  const p = buildDnsPlan(base({ dnsRemote: [CORP.address], dnsDirect: [CORP.address], routingMode: 'bypass-ir' }), opts({ targetResolvers: [CORP] }));
+  assert.deepEqual(p.directResolverIps, []);
+  assert.deepEqual(p.rules[0], { type: 'field', inboundTag: ['dns-internal'], ip: [CORP.address], outboundTag: CORP.outboundTag });
+  assert.equal(p.rules.some(r => r.outboundTag === 'direct'), false);
+});
+
 test('target resolver: appended after the remote list, as a fallback the public NXDOMAIN falls through to', () => {
   const p = buildDnsPlan(base(), opts({ targetResolvers: [CORP] }));
   assert.deepEqual(p.dns.servers, [

@@ -25,6 +25,11 @@ private final class TunnelState {
     var timer: DispatchSourceTimer?
     var startupError: String?
     var storageReady = false
+    var targetDNS: [String] = []
+    var dnsServices: [String] = []
+    var dnsServiceIndex = 0
+    var nextDNSEnumeration = Date.distantPast
+    var dnsRepairError: String?
     var journalURL: URL { root.appendingPathComponent("session.json") }
     var binaryURL: URL { root.appendingPathComponent("sing-box") }
 
@@ -48,6 +53,10 @@ private final class TunnelState {
             guard let self = self, self.journal != nil else { return }
             if !self.ready || Date() > self.deadline || !self.alive() {
                 do { try self.cleanup() } catch { self.recordError(error) }
+            } else if self.deadline.timeIntervalSinceNow > 5 {
+                // Keep each pass short so queued XPC heartbeats/stop requests
+                // are not held behind a full scan of every network service.
+                do { try self.refreshDNS() } catch { self.dnsRepairError = String(describing: error) }
             }
         }
         source.resume(); timer = source
@@ -111,6 +120,8 @@ private final class TunnelState {
 
     func cleanup() throws {
         ready = false
+        targetDNS = []; dnsServices = []; dnsServiceIndex = 0
+        nextDNSEnumeration = .distantPast; dnsRepairError = nil
         guard storageReady else { throw NativeFailure(startupError ?? "Native state directory is unavailable") }
         guard journal != nil || startupError == nil else { throw NativeFailure(startupError ?? "Native recovery journal cannot be read") }
         for pid in try ownedProcesses() {
@@ -135,6 +146,32 @@ private final class TunnelState {
         startupError = nil
     }
 
+    func refreshDNS() throws {
+        guard ready, journal != nil, !targetDNS.isEmpty else { return }
+        if Date() >= nextDNSEnumeration {
+            // Enumeration has its own tick. A failed OS command is retried on
+            // the next scheduled scan, not on every two-second heartbeat tick.
+            nextDNSEnumeration = Date().addingTimeInterval(30)
+            dnsServices = try enabledNetworkServices(run("/usr/sbin/networksetup", ["-listallnetworkservices"], timeout: 2))
+            dnsServiceIndex = dnsServices.isEmpty ? 0 : dnsServiceIndex % dnsServices.count
+            return
+        }
+        guard !dnsServices.isEmpty else { return }
+        let service = dnsServices[dnsServiceIndex]
+        dnsServiceIndex = (dnsServiceIndex + 1) % dnsServices.count
+        let observed = try networkServiceDNS(run("/usr/sbin/networksetup", ["-getdnsservers", service], timeout: 2))
+        let plan = DNSRepairPlan(original: journal?.originalDNS[service], observed: observed, desired: targetDNS)
+        if plan.needsWrite {
+            journal?.originalDNS[service] = plan.original
+            if journal?.changed.contains(service) != true { journal?.changed.append(service) }
+            // Persist both a new service's original DNS and mutation intent
+            // before networksetup. Failed writes remain recoverable at stop.
+            try save()
+            _ = try run("/usr/sbin/networksetup", ["-setdnsservers", service] + targetDNS, timeout: 2)
+        }
+        dnsRepairError = nil
+    }
+
     func status() -> [String: Any] {
         var value: [String: Any] = ["ok": true, "active": ready && alive(), "recoveryPending": journal != nil && !ready]
         if let entry = journal {
@@ -144,6 +181,7 @@ private final class TunnelState {
             if let error = entry.error { value["error"] = error }
         }
         if let error = startupError { value["error"] = error }
+        if let error = dnsRepairError { value["dnsProtectionError"] = error }
         return value
     }
 
@@ -166,11 +204,10 @@ private final class TunnelState {
         guard chmod(configURL.path, 0o600) == 0 else { throw NativeFailure("Cannot protect tunnel config") }
         let before = try run("/sbin/ifconfig", ["-a"])
         guard !before.contains("inet 172.19.0.1 ") else { throw NativeFailure("Tunnel address is already in use") }
-        let services = try run("/usr/sbin/networksetup", ["-listallnetworkservices"]).split(separator: "\n").dropFirst().map(String.init).filter { !$0.hasPrefix("*") && !$0.isEmpty }
+        let services = try enabledNetworkServices(run("/usr/sbin/networksetup", ["-listallnetworkservices"]))
         var original: [String: [String]] = [:]
         for service in services {
-            let text = try run("/usr/sbin/networksetup", ["-getdnsservers", service]).trimmingCharacters(in: .whitespacesAndNewlines)
-            original[service] = text.hasPrefix("There aren't any DNS Servers set") ? [] : text.split(separator: "\n").map(String.init)
+            original[service] = try networkServiceDNS(run("/usr/sbin/networksetup", ["-getdnsservers", service]))
         }
         journal = Journal(owner: owner, sessionId: UUID().uuidString, originalDNS: original, changed: [])
         try save()
@@ -200,6 +237,8 @@ private final class TunnelState {
                 _ = try run("/usr/sbin/networksetup", ["-setdnsservers", service] + options.dnsServers)
             }
             guard alive() else { throw NativeFailure("Tunnel exited while setting DNS") }
+            targetDNS = options.dnsServers; dnsServices = services; dnsServiceIndex = 0
+            nextDNSEnumeration = Date().addingTimeInterval(30); dnsRepairError = nil
             ready = true; deadline = Date().addingTimeInterval(20); try save()
         } catch {
             let failure = error

@@ -136,16 +136,16 @@ async function waitForAdapter(name, timeout) {
 
 /** Run a privileged shell script: directly if root, else via an osascript
  * GUI prompt (`do shell script ... with administrator privileges`). */
-async function runScriptPrivileged(scriptPath) {
+async function runScriptPrivileged(scriptPath, options = {}) {
   const isRoot = !!(process.getuid && process.getuid() === 0);
   if (isRoot) {
-    return run('/bin/bash', [scriptPath]);
+    return run('/bin/bash', [scriptPath], options);
   }
   // AppleScript string: escape backslashes and double quotes; the path may
   // contain spaces (e.g. ".../Application Support/IRNetFree/...").
   const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const cmd = `do shell script "/bin/bash \\"${esc(scriptPath)}\\"" with administrator privileges`;
-  return run('osascript', ['-e', cmd]);
+  return run('osascript', ['-e', cmd], options);
 }
 
 /** Parse `route -n get default` → { gateway, device } (macOS). */

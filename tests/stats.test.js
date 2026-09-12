@@ -6,6 +6,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 const { sumOutbounds, SilenceWatch, byOutbound, StatsPoller } = require('../src/main/stats');
 
 const vars = (outbound) => ({ stats: { outbound } });
@@ -134,4 +135,65 @@ test('retime before start() only records the cadence; the same value is a no-op'
   p.retime(5000);
   p.retime(0);
   assert.equal(p.intervalMs, 5000);
+});
+
+test('slow metrics ticks stay single-flight and cannot overwrite a restarted session', async () => {
+  const seen = [];
+  const p = new StatsPoller({ onStats: s => seen.push(s) });
+  const replies = [];
+  p.query = () => new Promise(resolve => replies.push(resolve));
+  const old = p.tick();
+  await p.tick();
+  await p.tick();
+  assert.equal(replies.length, 1, 'slow request is not multiplied each tick');
+  p.stop();
+  const current = p.tick();
+  replies[1]({ up: 10, down: 20 });
+  await current;
+  replies[0]({ up: 1000000, down: 2000000 });
+  await old;
+  assert.equal(seen.length, 1);
+  assert.equal(p.totals.up, 10, 'old core counters never reach the new baseline');
+});
+
+test('stop cancels an in-flight metrics socket without delivering raw watcher samples', async t => {
+  let response;
+  let received;
+  const requestReceived = new Promise(resolve => { received = resolve; });
+  const server = http.createServer((req, res) => { response = res; received(); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const samples = [];
+  const p = new StatsPoller({ apiPort: server.address().port, onRaw: s => samples.push(s) });
+  t.after(() => p.stop());
+  const pending = p.tick();
+  await requestReceived;
+  const closed = new Promise(resolve => response.on('close', resolve));
+  p.stop();
+  await pending;
+  await closed;
+  assert.deepEqual(samples, []);
+  assert.equal(p.inFlight, null);
+  assert.equal(p.cancelQuery, null);
+});
+
+test('aborted metrics response settles and the next tick can recover', async t => {
+  let calls = 0;
+  const server = http.createServer((req, res) => {
+    if (++calls === 1) {
+      res.writeHead(200, { 'Content-Length': 500 });
+      res.write('{');
+      setImmediate(() => res.destroy());
+    } else res.end(JSON.stringify(vars({ proxy: { uplink: 12, downlink: 34 } })));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const seen = [];
+  const p = new StatsPoller({ apiPort: server.address().port, onStats: s => seen.push(s) });
+  t.after(() => p.stop());
+  await p.tick();
+  assert.equal(p.inFlight, null);
+  await p.tick();
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].totalDown, 34);
 });

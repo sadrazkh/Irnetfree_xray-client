@@ -24,6 +24,45 @@ func literalIPCharacters(_ value: String) -> Bool {
     !value.isEmpty && value.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) || $0 == 46 || $0 == 58 }
 }
 
+// A refresh must preserve the pre-tunnel snapshot, even after DHCP or another
+// network manager changes DNS repeatedly during the same session.
+struct DNSRepairPlan {
+    let original: [String]
+    let needsWrite: Bool
+    init(original: [String]?, observed: [String], desired: [String]) {
+        self.original = original ?? observed
+        needsWrite = observed != desired
+    }
+}
+
+func enabledNetworkServices(_ output: String) throws -> [String] {
+    let services = output.split(separator: "\n").dropFirst().map(String.init).filter { !$0.hasPrefix("*") && !$0.isEmpty }
+    guard services.count <= 128 else { throw NativeFailure("Too many network services to monitor safely") }
+    return services
+}
+
+func networkServiceDNS(_ output: String) throws -> [String] {
+    let text = output.trimmingCharacters(in: .whitespacesAndNewlines)
+    if text.hasPrefix("There aren't any DNS Servers set") { return [] }
+    let servers = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    guard !servers.isEmpty else { throw NativeFailure("Cannot read network service DNS") }
+    for server in servers {
+        // A physical adapter can legitimately use link-local scoped DNS.
+        // Preserve the original scope for restore; only requested tunnel DNS
+        // uses the stricter literal-only RPC grammar.
+        let parts = server.split(separator: "%", omittingEmptySubsequences: false)
+        let host = String(parts[0])
+        guard parts.count <= 2, parts.count == 1 || (!parts[1].isEmpty && parts[1].utf8.allSatisfy {
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 || $0 == 46
+        }) else { throw NativeFailure("Cannot read network service DNS") }
+        var v4 = in_addr(); var v6 = in6_addr()
+        guard literalIPCharacters(host), (parts.count == 1 && inet_pton(AF_INET, host, &v4) == 1) || inet_pton(AF_INET6, host, &v6) == 1 else {
+            throw NativeFailure("Cannot read network service DNS")
+        }
+    }
+    return servers
+}
+
 struct StartOptions {
     let port: Int
     let exclusions: [String]

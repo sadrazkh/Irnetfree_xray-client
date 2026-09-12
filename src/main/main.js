@@ -27,6 +27,7 @@ const { stopTrackedTunnels, releaseGuardChecked } = require('./tunnelCleanup');
 const tunPlatform = require('./tunPlatform');
 const { appsForTun } = require('./tunApps');
 const { LeakGuard } = require('./leakGuard');
+const { DnsGuardWatch } = require('./dnsGuardWatch');
 const { StatsPoller, SilenceWatch } = require('./stats');
 const { UsageMeter, grandTotal } = require('./usage');
 const { Downloader, downloadFile } = require('./downloader');
@@ -56,6 +57,7 @@ let tun = null;
  */
 const startedTuns = new Set();
 let leakGuard = null;
+let dnsGuardWatch = null;
 let stats = null;
 // Lifetime traffic per config. Its own small file, not a key in store.json:
 // a save rewrites the WHOLE store, and a user with a large subscription has
@@ -1084,6 +1086,7 @@ async function doConnect(serverId, opts = {}) {
         // presents it to release(), so it can only undo its own guard — never
         // the one belonging to the connect that overtook it.
         guardToken = (res && res.token) || guardToken;
+        dnsGuardWatch?.start(guardToken);
       } catch (e) {
         // Not fatal — the tunnel is up and carrying traffic, the adapters just
         // kept their own resolvers. Deliberately NOT tunError: that one means
@@ -1582,6 +1585,7 @@ function stopNetWatcher() {
  * with nothing else pointing at it (see startedTuns).
  */
 async function stopAllTuns() {
+  dnsGuardWatch?.stop();
   await stopTrackedTunnels(startedTuns, tun);
 }
 
@@ -2531,6 +2535,11 @@ app.whenReady().then(() => {
     run: tunPlatform.run,
     runScriptPrivileged: tunPlatform.runScriptPrivileged,
     platform: process.platform
+  });
+  dnsGuardWatch = new DnsGuardWatch({
+    guard: leakGuard,
+    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading,
+    onError: () => send('log', { line: 'DNS guard refresh failed; check network protection or reconnect.', level: 'warn' })
   });
   if (process.platform === 'darwin') {
     macRepairPromise = (async () => {

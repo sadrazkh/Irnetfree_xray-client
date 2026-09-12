@@ -70,33 +70,50 @@ function fmtSpeed(n) { return fmtBytes(n) + '/s'; }
 // 60-point polyline costs and no more. Declared up here, before the theme and
 // skin appliers that redraw it, so no caller can reach `hist` before it exists.
 const SPARK_N = 60;
-const hist = { down: [], up: [] };
+const hist = { down: [], up: [], time: [] };
 function pushHist(down, up) {
-  hist.down.push(Number(down) || 0);
-  hist.up.push(Number(up) || 0);
-  if (hist.down.length > SPARK_N) { hist.down.shift(); hist.up.shift(); }
+  const speed = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+  hist.down.push(speed(down)); hist.up.push(speed(up)); hist.time.push(Date.now());
+  while (hist.time.length > 120 || (hist.time.length > 1 && hist.time[0] < Date.now() - 60000)) {
+    hist.down.shift(); hist.up.shift(); hist.time.shift();
+  }
 }
 function drawSpark() {
   const c = $('#speedSpark');
   if (!c || !c.getContext) return;
+  const box = c.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  const ratio = Math.min(window.devicePixelRatio || 1, 3);
+  const W = box.width, H = box.height;
+  c.width = Math.round(W * ratio); c.height = Math.round(H * ratio);
   const ctx = c.getContext('2d');
-  const W = c.width, H = c.height;
-  ctx.clearRect(0, 0, W, H);
-  if (hist.down.length < 2) return;
+  if (!ctx) return;
+  ctx.scale(ratio, ratio);
   const css = getComputedStyle(document.documentElement);
-  const max = Math.max(1, ...hist.down, ...hist.up);
-  for (const [arr, token] of [[hist.down, '--accent'], [hist.up, '--ok']]) {
-    ctx.beginPath();
-    ctx.strokeStyle = css.getPropertyValue(token).trim() || '#888';
-    ctx.lineWidth = 1.5;
-    arr.forEach((v, i) => {
-      const x = (i / (SPARK_N - 1)) * W;
-      const y = H - 1 - (v / max) * (H - 2);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
+  const peak = Math.max(1024, ...hist.down, ...hist.up);
+  const order = Math.pow(10, Math.floor(Math.log10(peak)));
+  const max = Math.ceil(peak / order) * order;
+  $('#chartScale').textContent = fmtSpeed(max);
+  const top = 20, bottom = H - 6, height = bottom - top;
+  ctx.strokeStyle = css.getPropertyValue('--line').trim(); ctx.lineWidth = 1;
+  ctx.setLineDash([3, 5]);
+  for (let n = 0; n <= 2; n++) { const y = top + height * n / 2; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+  ctx.setLineDash([]);
+  const now = hist.time.at(-1) || Date.now();
+  for (const [arr, token, dashed] of [[hist.down, '--accent', false], [hist.up, '--ok', true]]) {
+    if (!arr.length) continue;
+    const points = arr.map((v,i) => [Math.max(0, 1 - (now - hist.time[i]) / 60000) * W, bottom - (v / max) * height]);
+    const color = css.getPropertyValue(token).trim() || '#888';
+    ctx.beginPath(); points.forEach(([x,y],i) => i ? ctx.lineTo(x,y) : ctx.moveTo(x,y));
+    ctx.lineTo(points.at(-1)[0],bottom); ctx.lineTo(points[0][0],bottom); ctx.closePath();
+    const wash = ctx.createLinearGradient(0,top,0,bottom); wash.addColorStop(0,color); wash.addColorStop(1,'transparent');
+    ctx.globalAlpha = dashed ? .06 : .16; ctx.fillStyle = wash; ctx.fill(); ctx.globalAlpha = 1;
+    ctx.beginPath(); points.forEach(([x,y],i) => i ? ctx.lineTo(x,y) : ctx.moveTo(x,y));
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.setLineDash(dashed ? [5,3] : []); ctx.stroke(); ctx.setLineDash([]);
+    const [x,y] = points.at(-1); ctx.beginPath(); ctx.arc(Math.min(W-3,x),y,2.5,0,Math.PI*2); ctx.fillStyle=color; ctx.fill();
   }
 }
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(drawSpark).observe($('#speedSpark'));
 
 /** Human duration from seconds (days / hours / minutes). */
 function fmtDuration(sec) {
@@ -3773,7 +3790,7 @@ function resetTraffic() {
   $('#sessDown').textContent = '0 B';
   $('#sessUp').textContent = '0 B';
   $('#sessSum').textContent = '0 B';
-  hist.down.length = 0; hist.up.length = 0;
+  hist.down.length = 0; hist.up.length = 0; hist.time.length = 0;
   drawSpark();
 }
 function setModeWidget() {
