@@ -27,7 +27,7 @@
  *   IRNF_PROBE_TLS=1  the hop speaks TLS on a pinned self-signed certificate
  *   IRNF_PROBE_MASK=1 add the patterniha fork's finalmask fragmenter to the hop
  *   IRNF_PROBE_DELAY  one-way ms in front of the hop, so the chain has a round trip
- *   IRNF_PROBE_NOBUF=1 drop the bufferSize:0 the builder sets for a chained WireGuard
+ *   IRNF_PROBE_BUF0=1  put back the policy bufferSize:0 the builder set before v1.7.2, to compare
  */
 const fs = require('fs');
 const os = require('os');
@@ -42,8 +42,8 @@ const { buildConfig } = require('../src/main/configBuilder');
 const BASE = Number(process.env.IRNF_PROBE_PORT || 39700);
 const P = { hop: BASE + 1, wg: BASE + 2, socks: BASE + 10, dns: BASE + 20, web: BASE + 21, webTls: BASE + 22, relay: BASE + 30 };
 // IRNF_PROBE_DELAY puts a one-way delay in front of the hop, so the chain has
-// the round trip a real link has. IRNF_PROBE_NOBUF drops the bufferSize:0 the
-// builder sets for a chained WireGuard, to test whether it is the thing hurting.
+// the round trip a real link has. IRNF_PROBE_BUF0 puts back the bufferSize:0 the
+// builder set for a chained WireGuard until v1.7.2, to compare against it.
 const DELAY = Number(process.env.IRNF_PROBE_DELAY || 0);
 const HOP_DIAL = DELAY > 0 ? P.relay : P.hop;
 const CORP_IP = '192.168.45.7';
@@ -379,8 +379,8 @@ async function main() {
     dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: ['8.8.8.8'],
     ipv6: false, logLevel: 'warning', geoAssets: false
   });
-  if (process.env.IRNF_PROBE_NOBUF === '1' && cfg.policy && cfg.policy.levels && cfg.policy.levels['0']) {
-    delete cfg.policy.levels['0'].bufferSize;
+  if (process.env.IRNF_PROBE_BUF0 === '1' && cfg.policy && cfg.policy.levels && cfg.policy.levels['0']) {
+    cfg.policy.levels['0'].bufferSize = 0;
   }
   fs.writeFileSync(path.join(work, 'client.json'), JSON.stringify(cfg, null, 2));
 

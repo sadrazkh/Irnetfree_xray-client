@@ -52,6 +52,7 @@
  */
 
 const fs = require('fs');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -251,6 +252,37 @@ function parseWinSnapshot(json) {
     if (typeof a.dhcp4 === 'boolean') rec.dhcp4 = a.dhcp4;
     if (typeof a.dhcp6 === 'boolean') rec.dhcp6 = a.dhcp6;
     out.push(rec);
+  }
+  return out;
+}
+
+/**
+ * `netsh interface ipv4|ipv6 show dnsservers` → Map<alias (lower-case), [addresses]>.
+ *
+ * The cheap half of a refresh: one native process, tens of milliseconds,
+ * against the second or two of CPU every PowerShell start costs — which
+ * v1.7.1 paid every 30 s of a session for an answer that was "unchanged"
+ * nearly every time. Only the quoted alias of each block and the addresses in
+ * it are read; the headings are localized and never matched. IPv6 scope ids
+ * (`fe80::1%22`) are dropped so a peer compares equal to what was written.
+ */
+function parseNetshDnsServers(text) {
+  const out = new Map();
+  let cur = null;
+  for (const raw of String(text == null ? '' : text).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const head = line.match(/"([^"]*)"/);
+    if (head) {
+      cur = head[1].trim().toLowerCase();
+      if (cur && !out.has(cur)) out.set(cur, []);
+      continue;
+    }
+    if (!cur) continue;
+    for (const tok of line.split(/\s+/)) {
+      const ip = tok.replace(/%.*$/, '');
+      if (net.isIP(ip)) out.get(cur).push(ip.toLowerCase());
+    }
   }
   return out;
 }
@@ -929,8 +961,15 @@ class LeakGuard {
    * changing them; known adapters retain their pre-connect originals. An
    * unchanged snapshot causes no writes, cache flushes, or privileged prompts.
    * Firewall rules are intentionally not reloaded by this DNS-only operation.
+   *
+   * Windows pays for the snapshot in two halves. `netsh` lists every
+   * interface's resolvers in tens of milliseconds; when each adapter this
+   * session owns still names the peer(s), that is the whole tick. Only a
+   * drift — or `full`, which the watch sets on its first tick and every Nth
+   * after — takes the PowerShell snapshot that can also see an adapter that
+   * came up since (netsh cannot tell ours from the machine's).
    */
-  refresh({ token } = {}) {
+  refresh({ token, full = false } = {}) {
     return this._queue(async () => {
       // Unlike user Disconnect, a background refresh must have an exact live
       // receipt. An old timer must never reclaim DNS after release/reconnect.
@@ -942,6 +981,17 @@ class LeakGuard {
       const same = (a, b) => a.length === b.length && a.every(v => b.includes(v));
       let changed;
       if (this.platform === 'win32' && st.win) {
+        if (!full && (st.win.adapters || []).length) {
+          const owned = st.win.adapters.map(a => String(a.alias || '').toLowerCase()).filter(Boolean);
+          const lists = (map, alias, peer) => (map.get(alias) || []).includes(String(peer).toLowerCase());
+          const v4 = parseNetshDnsServers(await this.run('netsh', ['interface', 'ipv4', 'show', 'dnsservers'], options));
+          const v6 = st.peer6 ? parseNetshDnsServers(await this.run('netsh', ['interface', 'ipv6', 'show', 'dnsservers'], options)) : null;
+          // An alias netsh no longer lists is an adapter that is gone, not a
+          // drift; an empty listing is not trusted and falls through.
+          const drifted = owned.some(alias => (v4.has(alias) && !lists(v4, alias, st.peer4))
+            || (v6 && v6.has(alias) && !lists(v6, alias, st.peer6)));
+          if (v4.size && !drifted) return { refreshed: false, adapters: 0, quick: true };
+        }
         const fresh = parseWinSnapshot(await this._powershell(winSnapshotScript(st.tunAlias), options));
         changed = fresh.filter(a => !same(a.v4, [st.peer4]) || (st.peer6 && !same(a.v6, [st.peer6])));
         if (!changed.length) return { refreshed: false, adapters: 0 };
@@ -1164,7 +1214,7 @@ class LeakGuard {
 
 module.exports = {
   LeakGuard, STATE_FILE, FW_GROUP, GUARD_EXCLUDES, withoutPeers,
-  psQuote, parseWinSnapshot, parseMacSnapshot, rangeComplement,
+  psQuote, parseWinSnapshot, parseMacSnapshot, parseNetshDnsServers, rangeComplement,
   winSnapshotScript, winApplyScript, winRestoreScript, winOrphanKillScript, winRepairScript,
   winStrictApplyScript, winGroupRemoveScript, winUdpBlockApplyScript, winReleaseScript,
   macSnapshotScript, macApplyScript, macRestoreScript, macOrphanKillScript, macRepairScript,

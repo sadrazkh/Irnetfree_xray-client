@@ -44,6 +44,16 @@ function parseQuery(qs) {
   return out;
 }
 
+/** The xhttp `extra` query value as an object; null when absent or not one. */
+function parseXhttpExtra(raw) {
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'object') return Array.isArray(raw) ? null : raw;
+  try {
+    const v = JSON.parse(String(raw));
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+  } catch { return null; }
+}
+
 /**
  * Build a streamSettings object shared by vless/trojan from query params.
  */
@@ -86,6 +96,13 @@ function buildStreamSettings(q) {
       host: q.host || '',
       mode: q.mode || 'auto'
     };
+    // `extra`: the link's JSON of everything else xhttp takes — xmux, padding,
+    // scMaxEachPostBytes, the uplink method — as v2rayN and the panels emit
+    // it. It was dropped here, so a server owner's tuning never reached the
+    // core. The core reads it leniently (unknown keys are ignored) and its own
+    // host / path / mode always win over anything inside it, so it goes as is.
+    const extra = parseXhttpExtra(q.extra);
+    if (extra) stream.xhttpSettings.extra = extra;
   } else if (net === 'kcp' || net === 'mkcp') {
     stream.network = 'kcp';
     stream.kcpSettings = {
@@ -867,7 +884,12 @@ function streamToQuery(st) {
   if (net === 'ws' && st.wsSettings) { q.path = st.wsSettings.path || ''; q.host = (st.wsSettings.headers && (st.wsSettings.headers.Host || st.wsSettings.headers.host)) || ''; }
   else if (net === 'grpc' && st.grpcSettings) { q.serviceName = st.grpcSettings.serviceName || ''; if (st.grpcSettings.multiMode) q.mode = 'multi'; }
   else if ((net === 'h2' || net === 'http') && st.httpSettings) { q.path = st.httpSettings.path || ''; q.host = (st.httpSettings.host || []).join(','); }
-  else if (net === 'xhttp' && st.xhttpSettings) { q.path = st.xhttpSettings.path || ''; q.host = st.xhttpSettings.host || ''; if (st.xhttpSettings.mode) q.mode = st.xhttpSettings.mode; }
+  else if (net === 'xhttp' && st.xhttpSettings) {
+    q.path = st.xhttpSettings.path || ''; q.host = st.xhttpSettings.host || '';
+    if (st.xhttpSettings.mode) q.mode = st.xhttpSettings.mode;
+    const extra = st.xhttpSettings.extra;
+    if (extra && typeof extra === 'object' && !Array.isArray(extra) && Object.keys(extra).length) q.extra = JSON.stringify(extra);
+  }
   else if (net === 'kcp' && st.kcpSettings) { q.headerType = (st.kcpSettings.header && st.kcpSettings.header.type) || 'none'; if (st.kcpSettings.seed) q.seed = st.kcpSettings.seed; }
   else if (net === 'tcp' && st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.type === 'http') {
     q.headerType = 'http'; const rq = st.tcpSettings.header.request || {};
