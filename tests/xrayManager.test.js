@@ -313,3 +313,39 @@ test('binDirs never yields a relative directory outside Electron', () => {
     if (saved !== undefined) process.resourcesPath = saved;
   }
 });
+
+test('a late exit or error from an old core cannot stop its replacement', async () => {
+  await withBin([exe('xray')], async xm => {
+    const old = stubChild();
+    const current = stubChild();
+    const statuses = [];
+    xm.onStatus = status => statuses.push(status);
+    fakeSpawn = () => old;
+    try {
+      const starting = xm.start({ inbounds: [], outbounds: [] }, 'xray');
+      // Reproduce the state after bounded stop and replacement, without
+      // waiting for a real process to ignore a termination request.
+      xm.proc = current;
+      old.emit('exit', 0);
+      await assert.rejects(starting, /startup/);
+      old.emit('error', new Error('late old error'));
+      assert.equal(xm.proc, current);
+      assert.equal(xm.running, true);
+      assert.deepEqual(statuses, [], 'the replacement must not be reported stopped');
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('start rejects a spawn failure promptly and does not keep the failed child', async () => {
+  await withBin([exe('xray')], async xm => {
+    const child = stubChild();
+    fakeSpawn = () => child;
+    try {
+      const starting = xm.start({ inbounds: [], outbounds: [] }, 'xray');
+      child.emit('error', new Error('spawn ENOENT'));
+      await assert.rejects(starting, /ENOENT/);
+      assert.equal(xm.proc, null);
+      assert.equal(xm.running, false);
+    } finally { fakeSpawn = null; }
+  });
+});

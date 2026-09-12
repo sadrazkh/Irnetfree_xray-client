@@ -461,3 +461,15 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
 }
 .path-node .pr-traffic { margin-inline-start: 0; padding-inline-start: 0; }
 .path-rule .pr-cond.is-label { font-family: var(--ui); color: var(--ink3); }
+
+/* A readable, resolution-aware traffic plot with a shared rate scale. */
+.traffic-chart { grid-column: 1 / -1; margin: 0; padding: 14px 16px 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); min-inline-size: 0; }
+.traffic-chart-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; font-weight: 600; color: var(--ink); }
+.chart-legend { display: flex; gap: 14px; font-weight: 400; color: var(--ink3); font-size: 11px; }
+.chart-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend > span::before { content: ''; inline-size: 12px; border-block-start: 2px solid var(--accent); }
+.chart-legend > .chart-up::before { border-block-start: 2px dashed var(--ok); }
+.traffic-chart-plot { position: relative; margin-block-start: 6px; direction: ltr; }
+.traffic-chart .spark { block-size: 112px; background: transparent; border-radius: 0; }
+.chart-scale { position: absolute; inset-block-start: 0; inset-inline-start: 0; color: var(--dim); font: 10px var(--mono); pointer-events: none; }
+.chart-axis { display: flex; justify-content: space-between; direction: ltr; font-size: 10px; color: var(--dim); padding-block-start: 4px; }

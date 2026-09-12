@@ -228,6 +228,14 @@ function buildDnsPlan(settings, opts) {
   // in-country server would be captured by dns-out and loop. Direct resolver
   // → target resolvers → everything else to the exit → the hijack.
   const rules = [];
+  // A resolver imported from a routing target can also occur in the user's
+  // remote/direct lists. Its explicit target owns that IP: otherwise the
+  // earlier private-resolver exception sends corporate DNS onto the LAN.
+  // Remove the bypass too, so the OS cannot route these packets around TUN.
+  const targetIps = new Set(targetRules.flatMap(r => r.ip));
+  for (let i = directResolverIps.length - 1; i >= 0; i--) {
+    if (targetIps.has(directResolverIps[i])) directResolverIps.splice(i, 1);
+  }
   if (directResolverIps.length) rules.push({ type: 'field', inboundTag: [DNS_TAG], ip: directResolverIps.slice(), outboundTag: 'direct' });
   rules.push(...targetRules);
   rules.push({ type: 'field', inboundTag: [DNS_TAG], outboundTag: o.exitTag });

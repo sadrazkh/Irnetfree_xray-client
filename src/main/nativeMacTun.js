@@ -140,6 +140,7 @@ class NativeMacTun {
         throw new Error('Native macOS tunnel did not become ready. Use network recovery before reconnecting.');
       }
       this.sessionId = reply.sessionId;
+      this.dnsProtectionWarned = false;
       this.active = true;
       this.interfaceName = reply.device;
       this.excludeIps = excludeIps;
@@ -156,6 +157,10 @@ class NativeMacTun {
     try {
       const reply = await this.run('heartbeat', { sessionId });
       if (!reply.ok || reply.active !== true || reply.sessionId !== sessionId) throw new Error();
+      if (reply.dnsProtectionError && !this.dnsProtectionWarned) {
+        this.dnsProtectionWarned = true;
+        this.onLog('Native macOS DNS protection needs attention; check network settings or reconnect.', 'warn');
+      }
     } catch {
       if (this.active && !this.stopping && this.sessionId === sessionId && !this.exitNotified) {
         this.exitNotified = true;

@@ -144,7 +144,11 @@
                 </div>
               </div>
               <!-- the last sixty seconds of speed, two lines, one canvas — no DOM per tick -->
-              <canvas id="speedSpark" class="spark" width="360" height="40" aria-hidden="true"></canvas>
+              <figure class="traffic-chart" aria-labelledby="trafficChartTitle">
+                <figcaption class="traffic-chart-head"><span id="trafficChartTitle" data-i18n="chart.title"></span><span class="chart-legend"><span class="chart-down" data-i18n="stat.down"></span><span class="chart-up" data-i18n="stat.up"></span></span></figcaption>
+                <div class="traffic-chart-plot"><span id="chartScale" class="chart-scale" dir="ltr">1 KB/s</span><canvas id="speedSpark" class="spark" width="360" height="112" aria-hidden="true"></canvas></div>
+                <div class="chart-axis"><span data-i18n="chart.history"></span><span data-i18n="chart.now"></span></div>
+              </figure>
               <div class="traffic-row" id="trafficRow">
                 <button class="traffic-card mode-card readout" id="modeCard" title="">
                   <span class="traffic-ico mode" id="modeIco">⚡</span>
@@ -1085,6 +1089,7 @@
   <script src="vendor/qrcode.js"></script>
   <script src="i18n.js"></script>
   <script src="diagnostics.js"></script>
+  <script src="settingsExperience.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -51,6 +51,9 @@ class StatsPoller {
     this.last = { up: 0, down: 0, t: 0 };
     this.lastPer = {};          // tag -> previous totals, for per-outbound speed
     this.totals = { up: 0, down: 0 };
+    this.generation = 0;
+    this.inFlight = null;
+    this.cancelQuery = null;
   }
 
   /**
@@ -61,21 +64,45 @@ class StatsPoller {
   setBin(p) { this.binPath = p; }
 
   query() {
+    const generation = this.generation;
     return new Promise((resolve) => {
-      const req = http.get({ host: '127.0.0.1', port: this.apiPort, path: '/debug/vars', timeout: 3000 }, (res) => {
-        if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+      let settled = false;
+      let deadline;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        if (this.cancelQuery === cancel) this.cancelQuery = null;
+        resolve(value);
+      };
+      const cancel = () => { finish(null); req.destroy(); };
+      const req = http.get({ host: '127.0.0.1', port: this.apiPort, path: '/debug/vars', agent: false }, (res) => {
+        if (res.statusCode !== 200) return cancel();
         let body = '';
+        let bytes = 0;
         res.setEncoding('utf8');
-        res.on('data', (c) => { body += c; });
+        res.on('error', cancel);
+        res.on('aborted', cancel);
+        res.on('data', (c) => {
+          bytes += Buffer.byteLength(c);
+          // Metrics include runtime counters; allow ample room without letting
+          // an unexpected endpoint stream an unlimited body into the UI process.
+          if (bytes > 8 * 1024 * 1024) return cancel();
+          body += c;
+        });
         res.on('end', () => {
+          if (settled || generation !== this.generation) return finish(null);
           let parsed;
-          try { parsed = JSON.parse(body); } catch { return resolve(null); }
+          try { parsed = JSON.parse(body); } catch { return finish(null); }
           try { this.onRaw(parsed); } catch { /* a watcher must never stop the meter */ }
-          resolve(Object.assign(sumOutbounds(parsed), { per: byOutbound(parsed) }));
+          finish(Object.assign(sumOutbounds(parsed), { per: byOutbound(parsed) }));
         });
       });
-      req.on('error', () => resolve(null));
-      req.on('timeout', () => { req.destroy(); resolve(null); });
+      this.cancelQuery = cancel;
+      req.on('error', cancel);
+      // A wall-clock deadline also bounds a peer that keeps dripping bytes;
+      // socket inactivity timeouts alone never expire in that case.
+      deadline = setTimeout(cancel, 3000);
     });
   }
 
@@ -108,8 +135,14 @@ class StatsPoller {
   }
 
   async tick() {
-    const cur = await this.query();
-    if (!cur) return;
+    if (this.inFlight) return;
+    const generation = this.generation;
+    const pending = this.query();
+    this.inFlight = pending;
+    let cur;
+    try { cur = await pending; }
+    finally { if (this.inFlight === pending) this.inFlight = null; }
+    if (!cur || generation !== this.generation) return;
     const now = Date.now();
     const dt = (now - this.last.t) / 1000 || 1;
 
@@ -140,6 +173,9 @@ class StatsPoller {
   }
 
   stop() {
+    this.generation++;
+    if (this.cancelQuery) this.cancelQuery();
+    this.inFlight = null;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     this.last = { up: 0, down: 0, t: 0 };
     this.lastPer = {};

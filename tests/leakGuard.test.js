@@ -291,6 +291,56 @@ const WIN_SNAP = JSON.stringify([
   { alias: 'Ethernet', v4: ['178.22.122.100'], v6: [], dhcp4: false, dhcp6: true }
 ]);
 
+test('refresh repairs DHCP drift and journals a newly connected adapter before writing DNS', async () => {
+  let snapshot = WIN_SNAP;
+  const h = harness('win32', (cmd, args) => /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '');
+  const { token } = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6 });
+  const original = h.state().win.adapters;
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: ['192.168.8.254'], v6: ['fe80::2'], dhcp4: true, dhcp6: true },
+    { alias: 'Ethernet', v4: [PEER4], v6: [PEER6], dhcp4: false, dhcp6: false },
+    { alias: 'USB Ethernet', v4: ['192.168.20.1'], v6: [], dhcp4: true, dhcp6: true }
+  ]);
+  const before = h.calls.length;
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 2 });
+  assert.equal(h.calls.length, before + 2);
+  assert.deepEqual(h.state().win.adapters.slice(0, 2), original);
+  assert.deepEqual(h.state().win.adapters[2].v4, ['192.168.20.1']);
+  assert.doesNotMatch(h.calls.at(-1).script, /Firewall|InterfaceAlias 'Ethernet'/);
+  await h.guard.release({ token });
+  assert.match(h.calls.at(-1).script, /InterfaceAlias 'USB Ethernet' -ResetServerAddresses/);
+  const after = h.calls.length;
+  assert.equal((await h.guard.refresh({ token })).skipped, true);
+  assert.equal(h.calls.length, after);
+});
+
+test('refresh without drift is read-only, and stale receipts do not even snapshot', async () => {
+  let snapshot = WIN_SNAP;
+  const h = harness('win32', (cmd, args) => /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '');
+  const { token } = await h.guard.engage({ level: 'strict', peer4: PEER4, peer6: PEER6 });
+  snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: [PEER4], v6: [PEER6] }]);
+  const before = h.calls.length;
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0 });
+  assert.equal(h.calls.length, before + 1);
+  assert.equal((await h.guard.refresh({ token: 'old' })).skipped, true);
+  assert.equal(h.calls.length, before + 1);
+});
+
+test('mac refresh preserves original DNS and changes only drifted services', async () => {
+  let snapshot = 'Wi-Fi\t192.168.1.1\n';
+  const h = harness('darwin', cmd => cmd === '/bin/bash' ? snapshot : '');
+  const { token } = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6 });
+  snapshot = `Wi-Fi\t${PEER4} ${PEER6}\nUSB LAN\t192.168.2.1\n`;
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
+  assert.deepEqual(h.state().mac.services, [{ name: 'Wi-Fi', dns: ['192.168.1.1'] }, { name: 'USB LAN', dns: ['192.168.2.1'] }]);
+  assert.match(h.calls.at(-1).script, /-setdnsservers 'USB LAN'/);
+  assert.doesNotMatch(h.calls.at(-1).script, /-setdnsservers 'Wi-Fi'/);
+  snapshot = `Wi-Fi\t${PEER4} ${PEER6}\nUSB LAN\t${PEER4} ${PEER6}\n`;
+  const before = h.calls.length;
+  assert.equal((await h.guard.refresh({ token })).refreshed, false);
+  assert.equal(h.calls.length, before + 1, 'unchanged DNS never opens an administrator prompt');
+});
+
 /**
  * The state file a session that never shut down cleanly leaves behind.
  *

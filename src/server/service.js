@@ -36,6 +36,7 @@ const { stopTrackedTunnels, releaseGuardChecked } = require('../main/tunnelClean
 const tunPlatform = require('../main/tunPlatform');
 const { appsForTun } = require('../main/tunApps');
 const { LeakGuard } = require('../main/leakGuard');
+const { DnsGuardWatch } = require('../main/dnsGuardWatch');
 const { StatsPoller, SilenceWatch } = require('../main/stats');
 const { UsageMeter, grandTotal } = require('../main/usage');
 const { Downloader } = require('../main/downloader');
@@ -363,6 +364,11 @@ function createService(opts = {}) {
     run: tunPlatform.run,
     runScriptPrivileged: tunPlatform.runScriptPrivileged,
     platform: process.platform
+  });
+  const dnsGuardWatch = new DnsGuardWatch({
+    guard: leakGuard,
+    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading,
+    onError: () => send('log', { line: 'DNS guard refresh failed; check network protection or reconnect.', level: 'warn' })
   });
   if (process.platform === 'darwin') {
     macRepairPromise = (async () => {
@@ -950,6 +956,7 @@ function createService(opts = {}) {
           // the receipt for THIS session, so an overtaken connect can only ever
           // undo its own guard
           guardToken = (res && res.token) || guardToken;
+        dnsGuardWatch?.start(guardToken);
         } catch (e) {
           // Not fatal — the tunnel is up and carrying traffic, the adapters just
           // kept their own resolvers. Deliberately NOT tunError: that one means
@@ -1329,6 +1336,7 @@ function createService(opts = {}) {
    * routes with nothing else pointing at it (see startedTuns).
    */
   async function stopAllTuns() {
+  dnsGuardWatch?.stop();
     await stopTrackedTunnels(startedTuns, tun);
   }
 

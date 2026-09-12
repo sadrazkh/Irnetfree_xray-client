@@ -27,5 +27,19 @@ import Foundation
         let customOptions = try StartOptions(customDNS)
         precondition(customOptions.dnsServers == ["10.8.0.1", "2001:db8::53"])
         print("Native input validation tests passed")
+        let added = DNSRepairPlan(original: nil, observed: ["192.0.2.53"], desired: ["172.19.0.2"])
+        precondition(added.needsWrite && added.original == ["192.0.2.53"])
+        let drift = DNSRepairPlan(original: [], observed: ["192.0.2.53"], desired: ["172.19.0.2"])
+        precondition(drift.needsWrite && drift.original.isEmpty)
+        let stable = DNSRepairPlan(original: [], observed: ["172.19.0.2"], desired: ["172.19.0.2"])
+        precondition(!stable.needsWrite)
+        let services = try enabledNetworkServices("An asterisk denotes disabled services\nWi-Fi\n*Disabled\nUSB Ethernet\n")
+        precondition(services == ["Wi-Fi", "USB Ethernet"])
+        let automatic = try networkServiceDNS("There aren't any DNS Servers set on Wi-Fi.\n")
+        precondition(automatic.isEmpty)
+        let scoped = try networkServiceDNS("fe80::1%en0\n")
+        precondition(scoped == ["fe80::1%en0"])
+        do { _ = try networkServiceDNS("networksetup error"); fatalError("Accepted invalid DNS snapshot") } catch {}
+        print("Native DNS repair validation tests passed")
     }
 }
