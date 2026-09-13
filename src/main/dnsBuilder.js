@@ -228,8 +228,17 @@ function buildDnsPlan(settings, opts) {
   // (the search domains) hands those names to the target's server FIRST —
   // no public round trip, and the internal name is never shown outside —
   // and `expectedIPs` (from AllowedIPs) discards an answer the tunnel could
-  // not carry anyway. No skipFallback: unlike the in-country resolver, this
-  // one must remain a fallback for every name nobody else knows.
+  // not carry anyway.
+  //
+  // With search domains, `skipFallback` too, and that one is load-bearing. A
+  // resolver reachable only THROUGH the tunnel must never be the fallback for
+  // names the tunnel itself needs: on the owner's laptop the core asked the
+  // corporate server for its own WireGuard endpoint (`cobra.tes.ca`) and for
+  // `api.ipify.org` while the exit was down — each one a full round trip into
+  // a tunnel that was not there, and the endpoint lookup then killed the core
+  // outright (see engineChoice.js). Without search domains there is nothing
+  // else to match on, so such a resolver stays a fallback and keeps working
+  // the way it did.
   // Their queries must leave through the target — never `direct`, so they are
   // deliberately kept out of directResolverIps although they are private-range.
   const targetRules = [];
@@ -237,7 +246,10 @@ function buildDnsPlan(settings, opts) {
     if (!t || !t.address || !t.outboundTag) continue;
     const ent = serverEntry(t.address);
     const srv = typeof ent === 'object' ? ent : { address: ent };
-    if (Array.isArray(t.domains) && t.domains.length) srv.domains = t.domains.slice();
+    if (Array.isArray(t.domains) && t.domains.length) {
+      srv.domains = t.domains.slice();
+      srv.skipFallback = true;
+    }
     if (Array.isArray(t.expectedIPs) && t.expectedIPs.length) {
       // while the core asks for A records only, an IPv6 range could never
       // match — left in, it would reject every answer the resolver gives
@@ -311,7 +323,38 @@ function adapterDnsServers(settings, tunnelPeer) {
   return ips.length ? ips.slice(0, 2) : ['1.1.1.1', '8.8.8.8'];
 }
 
+/**
+ * What the leak guard must point the machine's PHYSICAL adapters at.
+ *
+ * When the core hijacks port 53 the answer is the tunnel's own peer: every
+ * query then enters the TUN, and if the tunnel goes, nothing resolves — closed,
+ * which is the point of the guard.
+ *
+ * When it does NOT hijack — managed DNS switched off, or a sing-box-format
+ * config, whose translator writes no hijack — that peer answers nothing at all.
+ * Pointing the adapters at it left the machine with no name resolution on any
+ * adapter but the tunnel's own, while the app reported it was protecting them:
+ * every lookup that Windows sent to a physical adapter's resolver (it asks them
+ * all) waited for a timeout. So they get exactly what the TUN adapter got —
+ * the user's own resolvers, reached through the tunnel like everything else.
+ *
+ * @param {string[]} adapterDns  what adapterDnsServers() returned for this connect
+ * @param {{peer4?: string, peer6?: string}} tunnel  the backend's own peers
+ */
+function guardPeers(adapterDns, tunnel) {
+  const list = (Array.isArray(adapterDns) ? adapterDns : [adapterDns])
+    .map(v => String(v == null ? '' : v).trim()).filter(Boolean);
+  const peer4 = (tunnel && tunnel.peer4) || null;
+  const peer6 = (tunnel && tunnel.peer6) || null;
+  // The hijacked case: adapterDnsServers returns the peer and nothing else.
+  if (!list.length || (list.length === 1 && list[0] === peer4)) return { peer4, peer6 };
+  return {
+    peer4: list.find(a => !a.includes(':')) || null,
+    peer6: list.find(a => a.includes(':')) || null
+  };
+}
+
 module.exports = {
-  buildDnsPlan, adapterDnsServers, isDohUrl, resolverIp,
+  buildDnsPlan, adapterDnsServers, guardPeers, isDohUrl, resolverIp, resolverPort,
   DNS_DEFAULT_REMOTE, DNS_DEFAULT_DIRECT_IR, DNS_DEFAULT_DIRECT_CN, DNS_TAG, HIJACK_TAG
 };
