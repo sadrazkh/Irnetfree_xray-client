@@ -45,22 +45,25 @@ function testEngineFor(engineId) {
   return engineId === 'xray-pattn' ? 'xray-pattn' : 'xray';
 }
 
-/**
- * Does this core have to be handed a WireGuard peer endpoint as an ADDRESS?
+/*
+ * Which core has to be handed a WireGuard peer endpoint as an ADDRESS?
  *
- * The official core resolves a peer endpoint NAME with its own resolver — the
- * managed DoH one, reached through the tunnel. Substituting an address there
- * would swap a censorship-resistant lookup for whatever the machine's own
- * resolver answers, which on a filtered connection is exactly the wrong answer
- * and would break a tunnel that works today.
+ * Every core, so there is no longer a function here to ask.
  *
- * The patterniha fork does not use Xray's DNS for that bind at all: dialled
- * directly it asks the OS resolver ("Unable to update bind: lookup <host>: no
- * such host") and through a chain it hands the bare name to the next hop. There
- * an address is the only thing that works, so it — and only it — gets one.
+ * This used to be the patterniha fork's business only: the fork cannot resolve
+ * a peer endpoint itself, while the official core asks its own DoH resolver,
+ * which is the censorship-resistant lookup this app exists to prefer. What that
+ * reasoning missed is the failure path. When the core's lookup does not answer
+ * — the exit is not up yet, DoH is unreachable, or the plan's own corporate
+ * resolver is asked for the endpoint of the tunnel that reaches it — Xray's
+ * WireGuard handler panics (`close of closed channel`, proxy/wireguard/bind.go)
+ * and the WHOLE core dies, taking every other route with it. Seen on the
+ * owner's laptop: an advanced plan whose chain ends at a corporate WireGuard,
+ * one connection to it, and the process was gone.
+ *
+ * So the app resolves the endpoint itself, before the core ever sees it, and
+ * does it through src/main/trustedDns.js rather than the machine's resolver —
+ * a DoH answer when the network's own is a fake-IP address. A name that cannot
+ * be resolved at all is still left to the core.
  */
-function needsWgEndpointIp(engineId) {
-  return engineId === 'xray-pattn';
-}
-
-module.exports = { chooseEngine, planServers, testEngineFor, needsWgEndpointIp };
+module.exports = { chooseEngine, planServers, testEngineFor };

@@ -299,6 +299,30 @@ function wgResolvers(server, outboundTag) {
   return dns.slice(0, 2).map(address => ({ address, outboundTag, expectedIPs: expectedIPs.slice(), domains: domains.slice() }));
 }
 
+/**
+ * Every resolver the WireGuard servers in a plan bring with them, whether or
+ * not this config ends up using them. The connect path needs it to say why the
+ * names inside a corporate network stopped resolving when managed DNS was
+ * switched off: with `dnsManaged:false` buildDnsPlan returns the user's own
+ * server list and nothing else, so these are silently absent.
+ */
+function wgResolverAddresses(planArg) {
+  const plan = normalizePlan(planArg);
+  const out = [];
+  const visit = (s) => {
+    if (!isWgServer(s) || !Array.isArray(s.dns)) return;
+    for (const d of s.dns) {
+      const v = String(d == null ? '' : d).trim();
+      if (v && !out.includes(v)) out.push(v);
+    }
+  };
+  if (plan.server) visit(plan.server);
+  for (const s of plan.chain || []) visit(s);
+  for (const s of Object.values(plan.serversById || {})) visit(s);
+  for (const list of Object.values(plan.chainsById || {})) for (const s of list || []) visit(s);
+  return out;
+}
+
 /** A WireGuard whose AllowedIPs is not the whole internet: it carries only those ranges. */
 function isSplitTunnelWg(server) {
   if (!isWgServer(server)) return false;
@@ -912,4 +936,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses };
