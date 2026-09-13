@@ -6,11 +6,12 @@ const os = require('os');
 const { spawn, execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts } = require('./configBuilder');
-const { adapterDnsServers } = require('./dnsBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts, wgResolverAddresses } = require('./configBuilder');
+const { adapterDnsServers, guardPeers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
-const { chooseEngine, testEngineFor, needsWgEndpointIp } = require('./engineChoice');
+const { chooseEngine, testEngineFor } = require('./engineChoice');
+const { resolveHost } = require('./trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('./certPin');
 const { assetStatus: scanAssets, downloadedFileNames } = require('./assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
@@ -730,28 +731,36 @@ function healCertPin(line) {
 /**
  * The settings for this connect, with every WireGuard peer endpoint that is a
  * NAME resolved to an address (see configBuilder.wgEndpointHosts for why).
- * A name we cannot resolve is left as it is — the core's own error is clearer
+ * A name nobody can resolve is left as it is — the core's own error is clearer
  * than anything invented here.
  *
- * Only for the core that needs it (see engineChoice.needsWgEndpointIp): this
- * resolves through the MACHINE's resolver, which on a filtered connection is
- * the answer the app exists to avoid trusting. The official core does its own
- * lookup over DoH and must keep doing it.
+ * For EVERY core, not just the fork any more: a core that has to resolve the
+ * endpoint itself and fails takes the whole process down with it (see
+ * engineChoice.js). The lookup goes through trustedDns, so a network that
+ * answers every name with a fake-IP address does not get to place the peer.
  */
 async function withWgEndpointIps(serverId, settings) {
   let hosts = [];
   try {
-    const { plan } = buildPlan(serverId, settings);
-    if (!needsWgEndpointIp(xray.resolveEngine(chooseEngine(plan, settings.defaultEngine), { quiet: true }).id)) return settings;
-    hosts = wgEndpointHosts(plan);
+    hosts = wgEndpointHosts(buildPlan(serverId, settings).plan);
   } catch { return settings; }
   if (!hosts.length) return settings;
   const map = {};
+  const notes = [];
   await Promise.all(hosts.map(async (h) => {
-    const ips = await tunPlatform.resolveServerIps(h).catch(() => []);
-    if (ips.length) map[h] = ips[0];
-    else send('log', { line: `Could not resolve the WireGuard endpoint ${h} — leaving it to the core`, level: 'warn' });
+    const r = await resolveHost(h, { ipv6: !!settings.ipv6, doh: settings.dnsRemote }).catch(() => null);
+    if (!r || !r.ips.length) {
+      send('log', { line: `Could not resolve the WireGuard endpoint ${h} — leaving it to the core`, level: 'warn' });
+      return;
+    }
+    map[h] = r.ips[0];
+    if (r.source === 'doh') {
+      notes.push(`this network answered ${h} with ${r.suspect.join(', ')}; using ${r.ips[0]} from DoH instead`);
+    } else if (r.source === 'os-suspect') {
+      notes.push(`${h} resolves to ${r.ips[0]}, which no public server can be — if the endpoint is not on this LAN, the network is answering for it`);
+    }
   }));
+  for (const n of notes) send('log', { line: 'WireGuard endpoint: ' + n, level: 'warn' });
   const named = Object.keys(map);
   if (!named.length) return settings;
   send('log', { line: 'WireGuard endpoint: ' + named.map(h => `${h} → ${map[h]}`).join(', '), level: 'info' });
@@ -895,6 +904,18 @@ async function doConnect(serverId, opts = {}) {
   }
 
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+  // Managed DNS off drops every resolver a routing target brings — a
+  // corporate WireGuard's own DNS above all. The names inside that network
+  // then never resolve, and nothing else in the log says why.
+  if (settings.dnsManaged === false) {
+    const corp = wgResolverAddresses(plan);
+    if (corp.length) {
+      send('log', {
+        line: `Managed DNS is off, so the resolver of your WireGuard (${corp.join(', ')}) is not in this config and names inside that network will not resolve — turn Settings → DNS → "DNS managed by the app" back on`,
+        level: 'warn'
+      });
+    }
+  }
 
   send('status', { state: 'connecting', serverId });
 
@@ -976,6 +997,11 @@ async function doConnect(serverId, opts = {}) {
   let guardError = null;
   let guardEngaged = false;
   let guardToken = null;      // receipt for this connect's guard session
+  // What the TUN adapter's own resolver was set to. The leak guard points the
+  // PHYSICAL adapters at the same thing (see dnsBuilder.guardPeers): when the
+  // core hijacks port 53 that is the tunnel peer, and when it does not, the
+  // peer answers nothing and the machine must not be sent to it.
+  let tunAdapterDns = null;
   if (settings.tunMode) {
     if (!myTun.isAvailable()) {
       tunError = settings.lang === 'en'
@@ -1032,8 +1058,14 @@ async function doConnect(serverId, opts = {}) {
         // list could name a resolver the config does not have (or miss one it
         // does) — a hole in the exclusions either way, and wrong entirely for a
         // sing-box-format config, whose plan is not the one running.
-        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config)],
-          adapterDnsServers(settings, hijacks ? dnsPeer : null),
+        tunAdapterDns = adapterDnsServers(settings, hijacks ? dnsPeer : null);
+        // The WireGuard endpoints this connect resolved itself are addresses the
+        // core will dial DIRECTLY (a peer dialled through a chain rides the hop
+        // and needs nothing here, but one dialled on its own would loop back
+        // into the tunnel it is building).
+        const wgEndpoints = Object.values(settings.wgEndpointIps || {});
+        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...wgEndpoints],
+          tunAdapterDns,
           { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
         if (tunApps) {
@@ -1063,12 +1095,11 @@ async function doConnect(serverId, opts = {}) {
           originalMacServices: myTun.macState && myTun.macState.service
             ? [{ name: myTun.macState.service, dns: myTun.macState.savedDns }] : [],
           level: settings.leakGuard,
-          peer4: myTun.dnsPeer || TUN_GW,
           // NOT gated on the ipv6 setting. The tunnel peer answers on either
           // family, and gating it left every physical adapter holding its ISP's
           // IPv6 resolvers — which are on-link, so they never meet the tunnel's
           // default route and leak every name a v6-capable app looks up.
-          peer6: myTun.dnsPeer6 || null,
+          ...guardPeers(tunAdapterDns, { peer4: myTun.dnsPeer || TUN_GW, peer6: myTun.dnsPeer6 || null }),
           // macOS: the strict level's pf anchor has to name the REAL tunnel
           // device (the utun the backend was given at start), not the Windows
           // adapter name — a ruleset that cannot name the tunnel would block
