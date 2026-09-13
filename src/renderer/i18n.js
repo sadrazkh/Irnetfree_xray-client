@@ -716,7 +716,7 @@ const I18N = {
     'dns.remoteHint': 'For the rest of the world, sent through the tunnel. DoH (https://…) is recommended: a server that drops UDP can no longer break DNS.',
     'dns.directHint': 'Used only in "Bypass Iran": Iranian domains are resolved here, directly, and the answer must be an Iranian IP. Give an IP (Shecan, Electro…); a DoH address with a hostname goes through the tunnel.',
     'dnsm.title': 'DNS managed by the app',
-    'dnsm.sub': 'On: every DNS query that reaches the core is answered here, and in TUN mode the system’s DNS goes through the tunnel. Full leak protection (physical adapters, IPv6) comes with the leak guard. Off: DNS goes wherever your apps/OS send it; protection is weaker. Off also leaves a corporate WireGuard's own resolver out of the config, so names inside that network do not resolve.',
+    'dnsm.sub': 'On: every DNS query that reaches the core is answered here, and in TUN mode the system’s DNS goes through the tunnel. Full leak protection (physical adapters, IPv6) comes with the leak guard. Off: DNS goes wherever your apps/OS send it; protection is weaker. Off also leaves the resolver of a corporate WireGuard out of the config, so names inside that network do not resolve.',
     'ipv6.title': 'IPv6',
     'ipv6.sub': 'Off (default): only IPv4 answers are used, so apps never try an address the tunnel does not carry.',
     'set.logLevel': 'Log level',
