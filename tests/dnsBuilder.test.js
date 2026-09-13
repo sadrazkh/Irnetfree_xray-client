@@ -8,7 +8,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  buildDnsPlan, adapterDnsServers, isDohUrl,
+  buildDnsPlan, adapterDnsServers, guardPeers, isDohUrl,
   DNS_DEFAULT_REMOTE, DNS_DEFAULT_DIRECT_IR, DNS_DEFAULT_DIRECT_CN
 } = require('../src/main/dnsBuilder');
 
@@ -262,18 +262,44 @@ test('corporate target DNS cannot be overridden by a duplicate LAN/direct resolv
   assert.equal(p.rules.some(r => r.outboundTag === 'direct'), false);
 });
 
-test('target resolver: appended after the remote list, as a fallback the public NXDOMAIN falls through to', () => {
+test('target resolver: appended after the remote list, pinned to its search domains and to nothing else', () => {
   const p = buildDnsPlan(base(), opts({ targetResolvers: [CORP] }));
   assert.deepEqual(p.dns.servers, [
     'https://1.1.1.1/dns-query',
     'https://8.8.8.8/dns-query',
-    { address: '192.168.60.1', domains: ['domain:tes.systems'], expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'] }
+    { address: '192.168.60.1', domains: ['domain:tes.systems'], expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'], skipFallback: true }
   ]);
-  // No skipFallback: the in-country resolver gets it because it must never be
-  // asked about the rest of the world; the corporate one is the other way
-  // round — it must remain a fallback for every name the public resolver does
-  // not know, or an internal name without a search domain is never resolved.
+  // skipFallback is load-bearing (v1.7.3): a resolver reachable only THROUGH
+  // the tunnel must never be the fallback for the names the tunnel itself
+  // needs. Without it the core asked the corporate server for its own
+  // WireGuard endpoint and, when that lookup failed, died on the spot.
+  assert.equal(p.dns.servers[2].skipFallback, true);
+});
+
+test('target resolver without search domains stays a fallback: there is nothing else to match it on', () => {
+  const p = buildDnsPlan(base(), opts({ targetResolvers: [Object.assign({}, CORP, { domains: [] })] }));
+  assert.deepEqual(p.dns.servers[2], { address: '192.168.60.1', expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'] });
   assert.equal('skipFallback' in p.dns.servers[2], false);
+});
+
+/* ------------------------------ guardPeers ------------------------------ */
+
+test('guardPeers: with the hijack the physical adapters get the tunnel peers', () => {
+  assert.deepEqual(guardPeers(['172.19.0.2'], { peer4: '172.19.0.2', peer6: 'fdfe:dcba:9876::2' }),
+    { peer4: '172.19.0.2', peer6: 'fdfe:dcba:9876::2' });
+  assert.deepEqual(guardPeers([], { peer4: '10.255.0.1', peer6: null }), { peer4: '10.255.0.1', peer6: null });
+  assert.deepEqual(guardPeers(null, { peer4: '10.255.0.1' }), { peer4: '10.255.0.1', peer6: null });
+});
+
+test('guardPeers: without the hijack (managed DNS off) they get what the TUN adapter got, never the dead peer', () => {
+  // The owner's store on 2026-09-13: dnsManaged:false, standard guard. The
+  // adapters were pointed at 10.255.0.1 — an address nothing answered once the
+  // core stopped hijacking port 53 — while the app said they were protected.
+  const list = adapterDnsServers({ dnsManaged: false, dnsRemote: ['https://1.1.1.1/dns-query', 'https://1.0.0.1/dns-query'] }, '10.255.0.1');
+  assert.deepEqual(list, ['1.1.1.1', '8.8.8.8']);
+  assert.deepEqual(guardPeers(list, { peer4: '10.255.0.1', peer6: 'fdfe:dcba:9876::2' }), { peer4: '1.1.1.1', peer6: null });
+  assert.deepEqual(guardPeers(['9.9.9.9', '2620:fe::fe'], { peer4: '172.19.0.2', peer6: 'fdfe:dcba:9876::2' }), { peer4: '9.9.9.9', peer6: '2620:fe::fe' });
+  assert.deepEqual(guardPeers(['2620:fe::fe'], { peer4: '172.19.0.2', peer6: null }), { peer4: null, peer6: '2620:fe::fe' }, 'no v4 resolver → the guard refuses rather than invents one');
 });
 
 test('target resolver: its query leaves through the target, after the direct rule and before the exit rule', () => {

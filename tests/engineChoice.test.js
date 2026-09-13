@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { chooseEngine, planServers, testEngineFor, needsWgEndpointIp } = require('../src/main/engineChoice');
+const { chooseEngine, planServers, testEngineFor } = require('../src/main/engineChoice');
 
 const S = (id, engine) => Object.assign({ id, outbound: { protocol: 'vless' } }, engine ? { engine } : {});
 const a = S('a'), b = S('b'), p = S('p', 'xray-pattn'), sb = S('sb', 'sing-box');
@@ -42,13 +42,12 @@ test('latency tests never run on sing-box', () => {
 
 /* --------- who has to be handed a WireGuard endpoint as an address --------- */
 
-test('only the patterniha fork needs the WireGuard endpoint pre-resolved', () => {
-  // The official core resolves a peer endpoint NAME through its own (DoH)
-  // resolver. Substituting an address there would replace a censorship-resistant
-  // lookup with whatever the machine's own resolver says — the one thing this
-  // app exists to avoid. The fork does not resolve it at all, so it gets one.
-  assert.equal(needsWgEndpointIp('xray-pattn'), true);
-  assert.equal(needsWgEndpointIp('xray'), false);
-  assert.equal(needsWgEndpointIp('sing-box'), false);
-  assert.equal(needsWgEndpointIp(undefined), false);
+test('every core is handed a WireGuard endpoint as an address: the gate is gone', () => {
+  // Until v1.7.3 only the patterniha fork got one; the official core was left to
+  // resolve the name itself, and when that lookup failed — the exit down, DoH
+  // unreachable, or the plan's corporate resolver asked for the endpoint of the
+  // tunnel that reaches it — proxy/wireguard panicked and the whole core died.
+  // The decision now lives in main.js/service.js (withWgEndpointIps, through
+  // trustedDns); nothing here may bring the per-engine gate back.
+  assert.equal('needsWgEndpointIp' in require('../src/main/engineChoice'), false);
 });

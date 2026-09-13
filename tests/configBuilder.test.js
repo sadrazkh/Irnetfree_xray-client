@@ -13,7 +13,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses } = require('../src/main/configBuilder');
 const {
   settings, ruleTags, outboundTagged, vlessWithMarkers,
   VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK, WG_CORP
@@ -916,7 +916,9 @@ test('buildTestConfig is untouched by DNS management (no hijack, no tag)', () =>
 // company resolver the .conf names — which is reachable ONLY through that
 // tunnel. The resolver must be in the list, and its query must leave through
 // the chain, not the VLESS the exit rule points at.
-const CORP_SERVER = { address: '192.168.60.1', domains: ['domain:tes.systems'], expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'] };
+// skipFallback (v1.7.3): pinned to its search domains, never the fallback for
+// the names the tunnel itself needs (dnsBuilder.test.js says why).
+const CORP_SERVER = { address: '192.168.60.1', domains: ['domain:tes.systems'], expectedIPs: ['192.168.0.0/16', '10.0.0.0/8'], skipFallback: true };
 const CORP_RULE = (tag) => ({ type: 'field', inboundTag: ['dns-internal'], ip: ['192.168.60.1'], outboundTag: tag });
 
 function corpPlan(over) {
@@ -999,6 +1001,17 @@ test('advanced: two rules to the same chain → one corporate server, one rule',
 test('resolverBypassIps: the corporate resolver is not routed past the tunnel — it rides the target', () => {
   assert.deepEqual(resolverBypassIps(corpPlan(), managed()), []);
   assert.deepEqual(resolverBypassIps(corpPlan({ rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }] }), managed()), ['178.22.122.100']);
+});
+
+test('wgResolverAddresses: every resolver the plan\x27s WireGuard servers bring, in every plan shape, deduplicated', () => {
+  // What the connect path names when managed DNS is off and these are dropped.
+  assert.deepEqual(wgResolverAddresses({ mode: 'single', server: WG_CORP }), WG_CORP.dns);
+  assert.deepEqual(wgResolverAddresses({ mode: 'chain', chain: [VLESS_WS_TLS, WG_CORP] }), WG_CORP.dns);
+  assert.deepEqual(wgResolverAddresses({ mode: 'advanced', serversById: { a: VLESS_WS_TLS }, chainsById: { c: [VLESS_WS_TLS, WG_CORP] }, rules: [], def: 'a' }), WG_CORP.dns);
+  assert.deepEqual(wgResolverAddresses({ mode: 'single', server: WG_BAD_MASK }), [], 'a WireGuard without dns brings nothing');
+  assert.deepEqual(wgResolverAddresses({ mode: 'single', server: VLESS_WS_TLS }), []);
+  const twice = { mode: 'advanced', serversById: { w: WG_CORP }, chainsById: { c: [VLESS_WS_TLS, WG_CORP] }, rules: [], def: 'w' };
+  assert.deepEqual(wgResolverAddresses(twice), WG_CORP.dns, 'named twice, listed once');
 });
 
 test('wgResolvers: expectedIPs come from AllowedIPs minus the full-tunnel entries; no dns → nothing', () => {
