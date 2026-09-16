@@ -135,3 +135,36 @@ test('Checksums step: with nothing to hash the file is still written, empty', (t
     r.cleanup();
   }
 });
+
+/* --------------------------- the Android SDK step --------------------------- */
+
+/**
+ * Both workflows must name the SDK packages they want.
+ *
+ * `android-actions/setup-android`'s default is `tools platform-tools`, and on
+ * 2026-09-16 Google removed the deprecated `tools` package from the SDK
+ * repository (the action's issues #537 and #538). Every Android job failed at
+ * SDK setup, before a line of this repo was read, and v1.7.5 shipped without
+ * an APK. An explicit list is the fix; the Gradle build fetches the platform
+ * and build-tools it needs by itself.
+ */
+test('the Android SDK step asks for an explicit package list, and never for `tools`', () => {
+  for (const name of ['release.yml', 'test.yml']) {
+    const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', name), 'utf8');
+    const lines = yml.split(/\r?\n/);
+    const at = lines.findIndex(l => /uses: android-actions\/setup-android@/.test(l));
+    assert.ok(at >= 0, `${name} has no setup-android step`);
+    // its `with:` block: the indented lines that follow, comments aside
+    const body = [];
+    for (let i = at + 1; i < lines.length; i++) {
+      if (/^\s*-\s/.test(lines[i]) || /^\S/.test(lines[i])) break;
+      body.push(lines[i]);
+    }
+    const packages = body.find(l => /^\s+packages:/.test(l));
+    assert.ok(packages, `${name}: the setup-android step must pass an explicit \`packages:\` — the default installs the removed \`tools\` package`);
+    const value = packages.split(':').slice(1).join(':').trim().replace(/^['"]|['"]$/g, '');
+    assert.ok(value.length, `${name}: \`packages:\` is empty`);
+    assert.equal(value.split(/\s+/).includes('tools'), false, `${name}: \`tools\` no longer exists in the SDK repository`);
+    assert.ok(value.split(/\s+/).includes('platform-tools'), `${name}: platform-tools is what the build needs installed`);
+  }
+});
