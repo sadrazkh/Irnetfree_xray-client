@@ -1,6 +1,8 @@
 package com.irnetfree.vpn.vpn
 
+import android.content.Context
 import android.util.Log
+import java.io.File
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 
@@ -69,5 +71,41 @@ class XrayCore(private val onStatus: (Long, String?) -> Unit = { _, _ -> }) {
         private const val TAG = "XrayCore"
         val available: Boolean by lazy { try { Class.forName("libv2ray.Libv2ray"); true } catch (t: Throwable) { false } }
         fun version(): String = try { Class.forName("libv2ray.Libv2ray").getMethod("checkVersionX").invoke(null) as? String ?: "" } catch (t: Throwable) { "" }
+
+        /**
+         * The routing data files (geoip.dat, geosite.dat) the core reads for every
+         * `geosite:` / `geoip:` rule and for the in-country resolver's `expectedIPs`.
+         *
+         * The APK carries them as assets (fetched into app/src/main/assets by
+         * android/scripts/fetch-libs.sh, beside libv2ray); assets are not files,
+         * so they are copied into the app's files dir once — again when the APK's
+         * copy differs in size, i.e. after an update — and the core is pointed at
+         * that dir (`Libv2ray.initCoreEnv`, `initV2Env` on older .aar versions).
+         * A build without the assets does nothing here and GeoAssets stays false.
+         */
+        fun prepareAssets(ctx: Context, log: (String) -> Unit = {}) {
+            try {
+                val names = ctx.assets.list("")?.toSet() ?: emptySet()
+                for (name in listOf(GeoAssets.GEOIP, GeoAssets.GEOSITE)) {
+                    if (name !in names) continue
+                    val dst = File(ctx.filesDir, name)
+                    val size = runCatching { ctx.assets.openFd(name).use { it.length } }.getOrDefault(-1L)
+                    if (dst.exists() && dst.length() > 0L && (size < 0L || dst.length() == size)) continue
+                    ctx.assets.open(name).use { input -> dst.outputStream().use { out -> input.copyTo(out) } }
+                    log("Routing data $name installed (${dst.length() / 1024} KB)")
+                }
+            } catch (t: Throwable) {
+                log("Routing data files could not be installed: ${t.message}")
+            }
+            // Tell the core where they are. Either method name, whichever this .aar has.
+            try {
+                val libv2ray = Class.forName("libv2ray.Libv2ray")
+                val init = runCatching { libv2ray.getMethod("initCoreEnv", String::class.java, String::class.java) }.getOrNull()
+                    ?: runCatching { libv2ray.getMethod("initV2Env", String::class.java, String::class.java) }.getOrNull()
+                init?.invoke(null, ctx.filesDir.absolutePath, "")
+            } catch (t: Throwable) {
+                Log.w(TAG, "core env init failed: ${t.cause?.message ?: t.message}")
+            }
+        }
     }
 }

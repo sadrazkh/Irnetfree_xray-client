@@ -85,4 +85,24 @@ for pair in ${SINGBOX_ABIS:-"arm64-v8a:arm64"}; do
   fetch_singbox "${pair%%:*}" "${pair##*:}" "$SINGBOX_TAG"
 done
 
+# The routing data files (geoip.dat / geosite.dat), the same Loyalsoldier build
+# the desktop downloader uses. Bundled as APK assets: without them every
+# geosite:/geoip: rule is dropped and "Bypass Iran", "Block ads" and the
+# in-country resolver silently do nothing (GeoAssets / XrayCore.prepareAssets).
+# Pinned to a release tag like the cores; bump GEO_TAG to refresh. A failed
+# download is non-fatal — the app then runs without geo rules, and says so.
+assets="$here/app/src/main/assets"
+mkdir -p "$assets"
+GEO_TAG="${GEO_TAG:-202609152354}"
+echo "==> Fetching geoip.dat / geosite.dat (Loyalsoldier/v2ray-rules-dat $GEO_TAG)"
+for dat in geoip.dat geosite.dat; do
+  url="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/${GEO_TAG}/${dat}"
+  if curl -fSL --retry 3 --retry-delay 2 "$url" -o "$assets/$dat"; then
+    echo "    saved -> app/src/main/assets/$dat ($(wc -c < "$assets/$dat") bytes)"
+  else
+    echo "WARN: failed to download $dat from $url — building without it (geo rules off)." >&2
+    rm -f "$assets/$dat"
+  fi
+done
+
 echo "Done."

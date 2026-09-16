@@ -60,3 +60,5 @@ jobs:
         # assembleDebug, not assembleRelease: the point is "does the Kotlin
         # compile and link against libv2ray", not producing an artifact.
         run: gradle --no-daemon assembleDebug
+      - name: Unit tests (the pure core against the desktop's pins)
+        run: gradle --no-daemon testDebugUnitTest
