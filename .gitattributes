@@ -1,3 +1,8 @@
 # Shell scripts must stay LF so `curl | bash` and Linux/macOS execution work.
 *.sh text eol=lf
 install.sh text eol=lf
+
+# Fonts are binary: autocrlf must never touch the bundled flag font, on any
+# checkout or CI runner (a converted byte makes it a font the browser rejects).
+*.woff2 binary
+*.woff binary

@@ -16,6 +16,29 @@
       on white still clears 4.5:1.
    ========================================================================= */
 
+/*
+ * Country flags, on Windows too.
+ *
+ * A flag is not a character: `flagEmoji()` in app.js turns an ISO-2 code into
+ * the two Regional Indicator letters the standard prescribes (GB → U+1F1EC
+ * U+1F1E7), and the FONT is what ligates them into a flag. Apple Color Emoji
+ * does; Noto Color Emoji does; Segoe UI Emoji deliberately carries no national
+ * flags at all, so every Windows user saw the two letters ("GB") where a Mac
+ * user saw a flag.
+ *
+ * Twemoji Country Flags is a COLRv1 font holding exactly those ligatures and
+ * nothing else — 78 KB, and `unicode-range` keeps it to the regional-indicator
+ * block, so it is only ever consulted for those code points and every other
+ * character still comes from the stacks below. Declared before :root because
+ * both type tokens name it first.
+ */
+@font-face {
+  font-family: "Twemoji Country Flags";
+  font-display: swap;
+  unicode-range: U+1F1E6-1F1FF;
+  src: url("vendor/TwemojiCountryFlags.woff2") format("woff2");
+}
+
 :root {
   /* surfaces */
   --bg: #0c0d0f;
@@ -48,9 +71,10 @@
   /* what dims the page behind anything modal — .modal-overlay and a <dialog>'s
      ::backdrop, which cannot share a class but must look like one thing */
   --scrim: rgba(0, 0, 0, .55);
-  /* type */
-  --mono: Consolas, "Cascadia Mono", "DejaVu Sans Mono", monospace;
-  --ui: "Segoe UI", Tahoma, "Iran Sans", sans-serif;
+  /* type — the flag font goes FIRST in both stacks and, being limited to the
+     regional-indicator block, changes nothing else (see @font-face above) */
+  --mono: "Twemoji Country Flags", Consolas, "Cascadia Mono", "DejaVu Sans Mono", monospace;
+  --ui: "Twemoji Country Flags", "Segoe UI", Tahoma, "Iran Sans", sans-serif;
   /* metrics */
   --r1: 2px; --r2: 3px; --r3: 4px; --r4: 5px; --r5: 6px; --r6: 8px;
   --railw: 64px;
