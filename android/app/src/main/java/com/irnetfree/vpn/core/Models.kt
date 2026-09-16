@@ -19,27 +19,59 @@ data class ServerConfig(
     val raw: String = "",
     val subId: String? = null,
     // Per-config core: null/"xray" = default Xray core, "sing-box" = sing-box.
-    val engine: String? = null
+    val engine: String? = null,
+    // A WireGuard's own resolvers and search domains (`DNS = 10.0.0.53, corp.local`
+    // in its .conf, `dns=` in its link): asked THROUGH that tunnel for the names
+    // inside it. See DnsPlan.TargetResolver / configBuilder.js wgResolvers.
+    val dns: List<String> = emptyList(),
+    val dnsDomains: List<String> = emptyList(),
+    // Certificate pinned on first use (CertPin.kt): the SHA-256 (hex) of the leaf
+    // certificate a TLS server presented, when its link asked for allowInsecure.
+    val certPin: String = "",
+    val certPinAt: String = "",
+    val certPinCheckedAt: Long = 0
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("name", name); put("protocol", protocol)
         put("address", address); put("port", port); put("outbound", outbound)
         put("raw", raw); if (subId != null) put("subId", subId)
         if (engine != null) put("engine", engine)
+        if (dns.isNotEmpty()) put("dns", JSONArray(dns))
+        if (dnsDomains.isNotEmpty()) put("dnsDomains", JSONArray(dnsDomains))
+        if (certPin.isNotEmpty()) { put("certPin", certPin); put("certPinAt", certPinAt); put("certPinCheckedAt", certPinCheckedAt) }
     }
 
     companion object {
-        fun fromJson(o: JSONObject): ServerConfig = ServerConfig(
-            id = o.optString("id", newId("s")),
-            name = o.optString("name"),
-            protocol = o.optString("protocol"),
-            address = o.optString("address"),
-            port = o.optInt("port"),
-            outbound = o.optJSONObject("outbound") ?: JSONObject(),
-            raw = o.optString("raw"),
-            subId = if (o.has("subId") && !o.isNull("subId")) o.optString("subId") else null,
-            engine = if (o.has("engine") && !o.isNull("engine")) o.optString("engine") else null
-        )
+        fun fromJson(o: JSONObject): ServerConfig {
+            // `dns` may be a list, or (a hand-edited store, an older record) the
+            // .conf's own comma-separated line — the desktop's repairWgDnsFields.
+            var dns = strList(o.optJSONArray("dns"))
+            var domains = strList(o.optJSONArray("dnsDomains"))
+            val dnsRaw = o.opt("dns")
+            if (dnsRaw is String && dnsRaw.isNotBlank()) {
+                val (d, dd) = LinkParser.splitDnsField(dnsRaw)
+                dns = d; if (domains.isEmpty()) domains = dd
+            }
+            return ServerConfig(
+                id = o.optString("id", newId("s")),
+                name = o.optString("name"),
+                protocol = o.optString("protocol"),
+                address = o.optString("address"),
+                port = o.optInt("port"),
+                outbound = o.optJSONObject("outbound") ?: JSONObject(),
+                raw = o.optString("raw"),
+                subId = if (o.has("subId") && !o.isNull("subId")) o.optString("subId") else null,
+                engine = if (o.has("engine") && !o.isNull("engine")) o.optString("engine") else null,
+                dns = dns,
+                dnsDomains = domains,
+                certPin = CertPin.normalizePin(o.optString("certPin")),
+                certPinAt = o.optString("certPinAt"),
+                certPinCheckedAt = o.optLong("certPinCheckedAt", 0)
+            )
+        }
+
+        fun strList(a: JSONArray?): List<String> =
+            if (a == null) emptyList() else (0 until a.length()).mapNotNull { a.opt(it) as? String }.map { it.trim() }.filter { it.isNotEmpty() }
     }
 }
 
@@ -110,12 +142,20 @@ data class AppSettings(
     val socksPort: Int = 10808,
     val httpPort: Int = 10809,
     val apiPort: Int = 10085,
-    val dns: List<String> = listOf("1.1.1.1", "8.8.8.8"),
+    // Name resolution (see DnsPlan.kt / desktop dnsBuilder.js): remote over DoH
+    // through the tunnel, an in-country resolver for bypass modes, every
+    // port-53 packet answered by the core. `dnsManaged:false` restores the old
+    // "use these servers" behaviour.
+    val dnsManaged: Boolean = true,
+    val dnsRemote: List<String> = DnsPlan.DEFAULT_REMOTE,
+    val dnsDirect: List<String> = DnsPlan.DEFAULT_DIRECT_IR,
     val routingMode: String = "global",   // global | bypass-ir | bypass-cn | direct
     val blockAds: Boolean = true,
     val enableSniffing: Boolean = true,
     val logLevel: String = "warning",
     val advancedRouting: Boolean = false,
+    // apply routingMode (bypass Iran/China…) UNDER the advanced rules as well
+    val advancedUseMode: Boolean = false,
     val routeRules: List<RouteRule> = emptyList(),
     val routeDefault: String = "proxy",
     val customRules: List<RouteRule> = emptyList(),
@@ -129,9 +169,10 @@ data class AppSettings(
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("socksPort", socksPort); put("httpPort", httpPort); put("apiPort", apiPort)
-        put("dns", JSONArray(dns)); put("routingMode", routingMode)
+        put("dnsManaged", dnsManaged); put("dnsRemote", JSONArray(dnsRemote)); put("dnsDirect", JSONArray(dnsDirect))
+        put("routingMode", routingMode)
         put("blockAds", blockAds); put("enableSniffing", enableSniffing); put("logLevel", logLevel)
-        put("advancedRouting", advancedRouting)
+        put("advancedRouting", advancedRouting); put("advancedUseMode", advancedUseMode)
         put("routeRules", JSONArray(routeRules.map { it.toJson() }))
         put("routeDefault", routeDefault)
         put("customRules", JSONArray(customRules.map { it.toJson() }))
@@ -140,20 +181,51 @@ data class AppSettings(
         put("lang", lang)
     }
     companion object {
+        /** The DoH endpoint of a public resolver the old store may have listed as a plain address. */
+        private val DOH_FOR = mapOf(
+            "1.1.1.1" to "https://1.1.1.1/dns-query", "1.0.0.1" to "https://1.0.0.1/dns-query",
+            "8.8.8.8" to "https://8.8.8.8/dns-query", "8.8.4.4" to "https://8.8.4.4/dns-query",
+            "9.9.9.9" to "https://9.9.9.9/dns-query", "149.112.112.112" to "https://149.112.112.112/dns-query",
+            "94.140.14.14" to "https://94.140.14.14/dns-query", "94.140.15.15" to "https://94.140.15.15/dns-query",
+            "208.67.222.222" to "https://208.67.222.222/dns-query", "208.67.220.220" to "https://208.67.220.220/dns-query"
+        )
+        /** Resolvers that only make sense as the in-country (direct) server. */
+        private val IRANIAN = setOf(
+            "178.22.122.100", "185.51.200.2",      // Shecan
+            "78.157.42.100", "78.157.42.101",      // Electro
+            "10.202.10.202", "10.202.10.102",      // Begzar
+            "10.202.10.10", "10.202.10.11"         // 403.online
+        )
+
         fun fromJson(o: JSONObject): AppSettings {
-            fun strList(a: JSONArray?): List<String> = if (a == null) emptyList() else (0 until a.length()).map { a.getString(it) }
+            fun strList(a: JSONArray?): List<String> = ServerConfig.strList(a)
             fun ruleList(a: JSONArray?): List<RouteRule> = if (a == null) emptyList() else (0 until a.length()).map { RouteRule.fromJson(a.getJSONObject(it)) }
-            val d = strList(o.optJSONArray("dns")).ifEmpty { listOf("1.1.1.1", "8.8.8.8") }
+            // A store from before the managed plan held one `dns` list of plain
+            // resolvers. Its known public ones become their DoH endpoints, the
+            // Iranian ones the in-country list, anything else is kept as is —
+            // the desktop's settingsMigrate.js, applied on read.
+            var remote = strList(o.optJSONArray("dnsRemote"))
+            var direct = strList(o.optJSONArray("dnsDirect"))
+            if (remote.isEmpty() && o.has("dns")) {
+                val old = strList(o.optJSONArray("dns"))
+                val r = ArrayList<String>(); val d = ArrayList<String>()
+                for (ip in old) { if (ip in IRANIAN) d.add(ip) else r.add(DOH_FOR[ip] ?: ip) }
+                remote = r
+                if (direct.isEmpty() && d.isNotEmpty()) direct = d
+            }
             return AppSettings(
                 socksPort = o.optInt("socksPort", 10808),
                 httpPort = o.optInt("httpPort", 10809),
                 apiPort = o.optInt("apiPort", 10085),
-                dns = d,
+                dnsManaged = o.optBoolean("dnsManaged", true),
+                dnsRemote = remote.ifEmpty { DnsPlan.DEFAULT_REMOTE },
+                dnsDirect = direct.ifEmpty { DnsPlan.DEFAULT_DIRECT_IR },
                 routingMode = o.optString("routingMode", "global"),
                 blockAds = o.optBoolean("blockAds", true),
                 enableSniffing = o.optBoolean("enableSniffing", true),
                 logLevel = o.optString("logLevel", "warning"),
                 advancedRouting = o.optBoolean("advancedRouting", false),
+                advancedUseMode = o.optBoolean("advancedUseMode", false),
                 routeRules = ruleList(o.optJSONArray("routeRules")),
                 routeDefault = o.optString("routeDefault", "proxy"),
                 customRules = ruleList(o.optJSONArray("customRules")),

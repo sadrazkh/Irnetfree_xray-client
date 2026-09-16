@@ -31,7 +31,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
-        versionName = System.getenv("VERSION_NAME") ?: "1.7.6"
+        versionName = System.getenv("VERSION_NAME") ?: "1.8.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
@@ -72,6 +72,14 @@ android {
         checkReleaseBuilds = false
     }
 
+    // JVM unit tests: a stray android.* call returns a default instead of
+    // throwing "not mocked", so the pure core can be tested off a device.
+    testOptions { unitTests.isReturnDefaultValues = true }
+
+    // The routing data files ride in assets/ uncompressed: XrayCore.prepareAssets
+    // sizes them through openFd() to know when an update changed them.
+    androidResources { noCompress.add("dat") }
+
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
         // The sing-box CLI ships as libsingbox.so in jniLibs; it must be extracted
@@ -101,6 +109,11 @@ dependencies {
     // Robust HTTP/TLS client for subscription fetching (Android's default
     // HttpURLConnection fails the TLS handshake with many sub panels).
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // JVM unit tests for the pure core (DnsPlan, ConfigBuilder, LinkParser…): the
+    // android.jar on the test classpath stubs org.json, so the real one is added.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 
     // Xray core (AndroidLibXrayLite). Fetched into app/libs by scripts/fetch-libs.sh.
     // Added ONLY when present so the app still builds an installable APK if the

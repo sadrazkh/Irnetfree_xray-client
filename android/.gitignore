@@ -10,3 +10,6 @@ keystore.properties
 .DS_Store
 captures/
 app/src/main/jniLibs/
+# routing data files are fetched into app/src/main/assets by scripts/fetch-libs.sh
+app/src/main/assets/geoip.dat
+app/src/main/assets/geosite.dat

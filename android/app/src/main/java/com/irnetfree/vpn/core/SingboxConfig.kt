@@ -35,7 +35,9 @@ object SingboxConfig {
         // read the system resolver, so without this the server domain never
         // resolves and nothing connects. (This is the usual "works on Xray, not on
         // sing-box" cause.) Resolving via `direct` also keeps it off the tunnel.
-        val dnsServer = s.dns.firstOrNull()?.takeIf { it.isNotBlank() } ?: "1.1.1.1"
+        // A plain address the sing-box `udp` server can take: the first literal
+        // resolver in the remote list (a DoH URL gives its address), else 1.1.1.1.
+        val dnsServer = s.dnsRemote.mapNotNull { DnsPlan.resolverIp(it) }.firstOrNull() ?: "1.1.1.1"
         val dns = JSONObject()
             .put("servers", JSONArray().put(JSONObject()
                 .put("type", "udp").put("tag", "dns-direct").put("server", dnsServer)))
