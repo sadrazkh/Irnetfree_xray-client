@@ -291,22 +291,51 @@ object LinkParser {
             presharedKey = q["presharedkey"] ?: q["presharedKey"] ?: q["psk"] ?: "",
             mtu = q["mtu"], reserved = q["reserved"], allowedIPs = q["allowedips"] ?: q["allowedIPs"]
         )
-        return ServerConfig(newId("s"), name.ifBlank { address }, "wireguard", address, port, ob, link)
+        val (dns, dnsDomains) = splitDnsField(q["dns"])
+        return ServerConfig(newId("s"), name.ifBlank { address }, "wireguard", address, port, ob, link, dns = dns, dnsDomains = dnsDomains)
     }
 
     /** Manual WireGuard from a form. `endpoint` is host:port of the public server. */
     fun makeWireguardServer(
         name: String, endpoint: String, privateKey: String, publicKey: String,
-        address: String, allowedIPs: String, presharedKey: String, mtu: String?, reserved: String?
+        address: String, allowedIPs: String, presharedKey: String, mtu: String?, reserved: String?,
+        dnsField: String? = null
     ): ServerConfig {
         val (host, portStr) = splitHostPort(endpoint)
         val port = portStr.toIntOrNull() ?: 51820
         val ep = if (endpoint.contains(":")) endpoint else "$host:$port"
         val ob = buildWireguardOutbound(privateKey, publicKey, ep, address, presharedKey, mtu, reserved, allowedIPs)
-        return ServerConfig(newId("s"), name.ifBlank { host.ifBlank { "WireGuard" } }, "wireguard", host, port, ob, "wireguard://$host:$port")
+        val (dns, dnsDomains) = splitDnsField(dnsField)
+        return ServerConfig(newId("s"), name.ifBlank { host.ifBlank { "WireGuard" } }, "wireguard", host, port, ob, "wireguard://$host:$port", dns = dns, dnsDomains = dnsDomains)
     }
 
     /* ------------------------- shared stream builder ------------------------- */
+
+    /** The xhttp `extra` query value as an object; null when absent or not one. */
+    fun parseXhttpExtra(raw: String?): JSONObject? {
+        val s = raw?.trim() ?: return null
+        if (s.isEmpty()) return null
+        return try { JSONObject(s) } catch (e: Exception) { null }
+    }
+
+    /** An IP, "ip:port" or "[v6]:port" — the forms DnsPlan takes as a resolver (parser.js isResolverEntry). */
+    fun isResolverEntry(v: String): Boolean {
+        if (DnsPlan.isIp(v)) return true
+        Regex("^\\[([^\\]]+)\\](?::\\d{1,5})?$").find(v)?.let { return DnsPlan.isIpv6(it.groupValues[1]) }
+        Regex("^([^:/]+):\\d{1,5}$").find(v)?.let { return DnsPlan.isIpv4(it.groupValues[1]) }
+        return false
+    }
+
+    /**
+     * `DNS = 10.0.0.53, corp.local` → resolvers and search domains. Mirrors
+     * parser.js splitDnsField: every entry that is not an address is a search
+     * domain, lower-cased, without a leading dot.
+     */
+    fun splitDnsField(value: String?): Pair<List<String>, List<String>> {
+        val dns = ArrayList<String>(); val domains = ArrayList<String>()
+        for (v in splitCommas(value)) { if (isResolverEntry(v)) dns.add(v) else domains.add(v.trimStart('.').lowercase()) }
+        return dns to domains
+    }
 
     internal fun buildStream(q: Map<String, String?>): JSONObject {
         val net = (q["type"] ?: q["network"] ?: "tcp").lowercase()
@@ -328,8 +357,13 @@ object LinkParser {
             }
             "xhttp", "splithttp" -> {
                 stream.put("network", "xhttp")
-                stream.put("xhttpSettings", JSONObject()
-                    .put("path", q["path"] ?: "/").put("host", q["host"] ?: "").put("mode", q["mode"] ?: "auto"))
+                val xs = JSONObject().put("path", q["path"] ?: "/").put("host", q["host"] ?: "").put("mode", q["mode"] ?: "auto")
+                // `extra`: the link's JSON of everything else xhttp takes — xmux,
+                // padding, scMaxEachPostBytes, the uplink method — as v2rayN and the
+                // panels emit it. The core reads it leniently (unknown keys ignored)
+                // and its own host / path / mode win over anything inside it.
+                parseXhttpExtra(q["extra"])?.let { xs.put("extra", it) }
+                stream.put("xhttpSettings", xs)
             }
             "kcp", "mkcp" -> {
                 stream.put("network", "kcp")
@@ -436,7 +470,7 @@ object LinkParser {
             "ws" -> st.optJSONObject("wsSettings")?.let { q["path"] = it.optString("path"); it.optJSONObject("headers")?.optString("Host")?.takeIf { h -> h.isNotBlank() }?.let { h -> q["host"] = h } }
             "grpc" -> st.optJSONObject("grpcSettings")?.let { q["serviceName"] = it.optString("serviceName"); if (it.optBoolean("multiMode")) q["mode"] = "multi" }
             "h2", "http" -> st.optJSONObject("httpSettings")?.let { q["path"] = it.optString("path"); q["host"] = jarr(it.optJSONArray("host")).joinToString(",") }
-            "xhttp" -> st.optJSONObject("xhttpSettings")?.let { q["path"] = it.optString("path"); q["host"] = it.optString("host"); it.optString("mode").takeIf { m -> m.isNotBlank() }?.let { m -> q["mode"] = m } }
+            "xhttp" -> st.optJSONObject("xhttpSettings")?.let { q["path"] = it.optString("path"); q["host"] = it.optString("host"); it.optString("mode").takeIf { m -> m.isNotBlank() }?.let { m -> q["mode"] = m }; it.optJSONObject("extra")?.takeIf { x -> x.length() > 0 }?.let { x -> q["extra"] = x.toString() } }
             "kcp" -> st.optJSONObject("kcpSettings")?.let { q["headerType"] = it.optJSONObject("header")?.optString("type") ?: "none"; it.optString("seed").takeIf { sd -> sd.isNotBlank() }?.let { sd -> q["seed"] = sd } }
             "tcp" -> st.optJSONObject("tcpSettings")?.optJSONObject("header")?.takeIf { it.optString("type") == "http" }?.let { h -> q["headerType"] = "http"; val rq = h.optJSONObject("request"); q["path"] = rq?.optJSONArray("path")?.optString(0) ?: ""; q["host"] = rq?.optJSONObject("headers")?.optJSONArray("Host")?.optString(0) ?: "" }
         }
@@ -486,7 +520,20 @@ object LinkParser {
                 val auth = if (c != null) b64e("${c.optString("user")}:${c.optString("pass")}") + "@" else ""
                 "${s.protocol}://$auth${s.address}:${s.port}$name"
             }
-            else -> s.raw   // wireguard / unknown -> imported link
+            "wireguard" -> {
+                val set = ob.optJSONObject("settings") ?: JSONObject()
+                val peer = set.optJSONArray("peers")?.optJSONObject(0) ?: JSONObject()
+                val q = LinkedHashMap<String, String>()
+                q["publickey"] = peer.optString("publicKey")
+                q["address"] = jarr(set.optJSONArray("address")).joinToString(",")
+                q["allowedips"] = jarr(peer.optJSONArray("allowedIPs")).joinToString(",")
+                q["presharedkey"] = peer.optString("preSharedKey")
+                q["mtu"] = if (set.has("mtu")) set.optInt("mtu").toString() else ""
+                q["reserved"] = jarr(set.optJSONArray("reserved")).joinToString(",")
+                q["dns"] = (s.dns + s.dnsDomains).joinToString(",")
+                "wireguard://${enc(set.optString("secretKey"))}@${s.address}:${s.port}?${qstr(q)}$name"
+            }
+            else -> s.raw   // unknown -> imported link
         }
     }
 

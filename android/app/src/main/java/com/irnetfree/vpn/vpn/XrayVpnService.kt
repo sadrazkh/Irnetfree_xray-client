@@ -10,9 +10,12 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import com.irnetfree.vpn.core.CertPin
 import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
+import com.irnetfree.vpn.core.DnsPlan
 import com.irnetfree.vpn.core.SingboxConfig
+import com.irnetfree.vpn.core.TrustedDns
 import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.core.Store
 import com.irnetfree.vpn.ui.MainActivity
@@ -78,6 +81,9 @@ class XrayVpnService : VpnService() {
                 VpnState.addLog("✓ Running on sing-box core (socks=$socksPort)")
             } else {
                 if (!XrayCore.available) { fail("Xray core (libv2ray) is not bundled."); stopAll(); return }
+                // The geo files the routing rules and the in-country resolver need,
+                // handed to the core before it starts (see XrayCore.prepareAssets).
+                XrayCore.prepareAssets(this) { s -> VpnState.addLog(s) }
                 xray = XrayCore(onStatus = { _, s -> if (!s.isNullOrBlank()) VpnState.addLog(s) })
                 if (!xray!!.start(config, 0)) { fail("Xray core failed to start — see logs (More → Logs)."); stopAll(); return }
                 // startLoop() returning true only means the core booted; confirm it
@@ -94,13 +100,18 @@ class XrayVpnService : VpnService() {
                 .addAddress(TUN_ADDR4, 30)
                 .addRoute("0.0.0.0", 0)
             if (ipv6) { builder.addAddress(TUN_ADDR6, 126); builder.addRoute("::", 0) }
+            // Managed DNS: the resolver handed to the OS is the tunnel PEER — an
+            // address inside the TUN's own route and not the device's, so every
+            // query enters the TUN, reaches the SOCKS inbound and is answered by
+            // dns-out (DnsPlan). The address itself no longer matters; with the
+            // plan off it is the user's own public resolvers, through the tunnel.
             dns.forEach { runCatching { builder.addDnsServer(it) } }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
             applyPerApp(builder, perAppMode, perApps)
 
             val fd = builder.establish() ?: return fail("TUN establish failed")
             tun = fd
-            VpnState.addLog("TUN up (fd=${fd.fd})")
+            VpnState.addLog("TUN up (fd=${fd.fd}) · resolver ${dns.joinToString(", ")}")
 
             // 3) hev tun2socks: TUN fd -> local SOCKS
             if (!TProxyService.available) { fail("Tunnel core (libhev-socks5-tunnel.so) missing."); stopAll(); return }
@@ -268,6 +279,8 @@ class XrayVpnService : VpnService() {
         private const val NOTIF_ID = 1
         private const val TUN_ADDR4 = "172.19.0.1"
         private const val TUN_ADDR6 = "fdfe:dcba:9876::1"
+        /** The tunnel peer the OS is told to resolve at under managed DNS: inside the TUN's route, not the device's own address. */
+        const val TUN_DNS4 = "172.19.0.2"
         private const val TUN_MTU = 1500
 
         const val ACTION_CONNECT = "com.irnetfree.vpn.CONNECT"
@@ -276,9 +289,38 @@ class XrayVpnService : VpnService() {
         const val EXTRA_LABEL = "label"; const val EXTRA_IPV6 = "ipv6"; const val EXTRA_ENGINE = "engine"
         const val EXTRA_PERAPP_MODE = "perAppMode"; const val EXTRA_PERAPPS = "perApps"
 
+        /**
+         * Build the plan and the config, then start the service. Runs its network
+         * steps (certificate pins, WireGuard endpoints) on a worker thread: they
+         * are TLS dials and DNS lookups, and the caller is the UI. The state is
+         * CONNECTING from the first line, so the screen already shows it.
+         */
         fun connect(ctx: Context, store: Store) {
-            val plan = store.buildPlan()
+            val plan = store.buildPlan()          // throws with a user-facing message; the caller reports it
+            val label = store.selectionLabel()
+            Thread {
+                try {
+                    val intent = prepare(ctx, store, plan, label)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent) else ctx.startService(intent)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "connect failed", e)
+                    VpnState.set(ConnState.ERROR, error = e.message ?: "connect failed")
+                }
+            }.also { it.isDaemon = true; it.name = "irnf-connect" }.start()
+        }
+
+        /** Everything before the service: pins, endpoints, the config. Blocks. */
+        fun prepare(ctx: Context, store: Store, plan0: ConnectionPlan, label: String): Intent {
             val s = store.settings
+
+            // Certificate pinning on first use (CertPin.kt): a server whose link
+            // asked for allowInsecure is dialled once, its leaf certificate hashed
+            // and stored; the config then pins it. The core refuses allowInsecure
+            // itself, so without this such a server never connected at all. The
+            // plan holds copies of the records, so it is rebuilt from the store
+            // afterwards and the pins learnt just now reach the config.
+            ensureCertPins(store, plan0)
+            val plan = store.buildPlan()
 
             // Per-config core: only a single server can pick sing-box, and only
             // when its binary is bundled for this device — otherwise use Xray.
@@ -290,27 +332,98 @@ class XrayVpnService : VpnService() {
             // ship the bypass/block-ads rules start working on their own.
             val geo = GeoAssets.available(ctx)
             if (!geo && (s.routingMode == "bypass-ir" || s.routingMode == "bypass-cn" || s.blockAds))
-                VpnState.addLog("No geoip.dat/geosite.dat in this build — geo routing rules are skipped.")
+                VpnState.addLog("No geoip.dat/geosite.dat on this device — geo routing rules are skipped.")
+
+            // Managed DNS off drops every resolver a routing target brings — a
+            // corporate WireGuard's own DNS above all. Say so, or nothing does.
+            if (!s.dnsManaged) {
+                val corp = ConfigBuilder.wgResolverAddresses(plan)
+                if (corp.isNotEmpty()) VpnState.addLog("⚠ Managed DNS is off, so the resolver of your WireGuard (${corp.joinToString(", ")}) is not in this config and names inside that network will not resolve — turn Settings → DNS managed by the app back on.")
+            }
+
+            // Every WireGuard endpoint that is a name gets an address here, through
+            // a resolver that does not believe a fake-IP network (TrustedDns.kt).
+            val wgIps = resolveWgEndpoints(plan, s)
 
             val config: String = if (single != null && single.server.engine == "sing-box" && SingboxCore.available(ctx)) {
                 try { engine = "sing-box"; SingboxConfig.build(single.server, s).toString() }
-                catch (e: Throwable) { engine = "xray"; VpnState.addLog("sing-box: ${e.message} — using Xray"); ConfigBuilder.build(plan, s, geoAssets = geo).toString() }
+                catch (e: Throwable) { engine = "xray"; VpnState.addLog("sing-box: ${e.message} — using Xray"); ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps).toString() }
             } else {
-                ConfigBuilder.build(plan, s, geoAssets = geo).toString()
+                ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps).toString()
             }
 
-            val i = Intent(ctx, XrayVpnService::class.java).apply {
+            // What the OS resolves at: the tunnel peer under managed DNS (every
+            // query enters the TUN and dns-out answers it), the user's own public
+            // resolvers otherwise. A sing-box-format config carries no hijack.
+            val hijacks = engine != "sing-box"
+            val adapterDns = DnsPlan.adapterDnsServers(s, if (hijacks) TUN_DNS4 else null)
+
+            return Intent(ctx, XrayVpnService::class.java).apply {
                 action = ACTION_CONNECT
                 putExtra(EXTRA_CONFIG, config)
                 putExtra(EXTRA_ENGINE, engine)
                 putExtra(EXTRA_SOCKS, s.socksPort)
-                putStringArrayListExtra(EXTRA_DNS, ArrayList(s.dns))
-                putExtra(EXTRA_LABEL, store.selectionLabel())
+                putStringArrayListExtra(EXTRA_DNS, ArrayList(adapterDns))
+                putExtra(EXTRA_LABEL, label)
                 putExtra(EXTRA_IPV6, s.ipv6)
                 putExtra(EXTRA_PERAPP_MODE, s.perAppMode)
                 putStringArrayListExtra(EXTRA_PERAPPS, ArrayList(s.perApps))
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i) else ctx.startService(i)
+        }
+
+        /** Pins learnt or dropped on this connect are written to the store and applied to the plan's own records. */
+        private fun ensureCertPins(store: Store, plan: ConnectionPlan) {
+            val targets = CertPin.pinTargets(plan)
+            for (b in targets.behind) VpnState.addLog("${b.name} sits behind a proxy; its certificate cannot be pinned automatically — connect to it directly once to pin it")
+            val now = System.currentTimeMillis()
+            // A pin re-checked at most every six hours: a rotated certificate makes
+            // the core refuse every dial and it says so only at log level info.
+            val due = CertPin.directServers(plan).filter { CertPin.recheckDue(it, now) }
+            val stale = ArrayList<String>()
+            for (srv in due) {
+                val sni = srv.outbound.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")?.optString("serverName")?.takeIf { it.isNotBlank() } ?: srv.address
+                val live = runCatching { CertPin.fetchLeafPin(srv.address, srv.port, sni) }.getOrNull() ?: continue   // unreachable is not a verdict
+                if (CertPin.normalizePin(live).isNotEmpty() && CertPin.normalizePin(live) != CertPin.normalizePin(srv.certPin)) stale.add(srv.id)
+            }
+            var changed = false
+            for (i in store.servers.indices) {
+                val srv = store.servers[i]
+                if (due.none { it.id == srv.id }) continue
+                store.servers[i] = if (srv.id in stale) srv.copy(certPin = "", certPinAt = "", certPinCheckedAt = now) else srv.copy(certPinCheckedAt = now)
+                changed = true
+            }
+            for (id in stale) VpnState.addLog("Certificate changed for ${store.serverById(id)?.name ?: id} — the old pin is gone; the one it presents now will be pinned instead")
+            val probe = ArrayList(targets.probe.map { it.id })
+            for (id in stale) if (id !in probe) probe.add(id)
+            for (id in probe) {
+                val srv = store.serverById(id) ?: continue
+                val sni = srv.outbound.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")?.optString("serverName")?.takeIf { it.isNotBlank() } ?: srv.address
+                try {
+                    val pin = CertPin.fetchLeafPin(srv.address, srv.port, sni)
+                    val i = store.servers.indexOfFirst { it.id == id }
+                    if (i >= 0) { store.servers[i] = srv.copy(certPin = pin, certPinAt = java.util.Date(now).toString(), certPinCheckedAt = now); changed = true }
+                    VpnState.addLog("Certificate pinned on first use for ${srv.name}: $pin")
+                } catch (e: Exception) {
+                    VpnState.addLog("Could not read the certificate of ${srv.name} to pin it (${e.message}) — the core will verify it itself")
+                }
+            }
+            if (changed) store.saveServers()
+        }
+
+        /** The WireGuard endpoint names of the plan resolved through TrustedDns; logged as the desktop does. */
+        private fun resolveWgEndpoints(plan: ConnectionPlan, s: com.irnetfree.vpn.core.AppSettings): Map<String, String> {
+            val map = HashMap<String, String>()
+            for (h in ConfigBuilder.wgEndpointHosts(plan)) {
+                val r = TrustedDns.resolveHost(h, ipv6 = s.ipv6, doh = s.dnsRemote)
+                if (r.ips.isEmpty()) { VpnState.addLog("Could not resolve the WireGuard endpoint $h — leaving it to the core"); continue }
+                map[h] = r.ips[0]
+                when (r.source) {
+                    "doh" -> VpnState.addLog("WireGuard endpoint: this network answered $h with ${r.suspect.joinToString(", ")}; using ${r.ips[0]} from DoH instead")
+                    "os-suspect" -> VpnState.addLog("WireGuard endpoint: $h resolves to ${r.ips[0]}, which no public server can be — if the endpoint is not on this LAN, the network is answering for it")
+                }
+            }
+            if (map.isNotEmpty()) VpnState.addLog("WireGuard endpoint: " + map.entries.joinToString(", ") { "${it.key} → ${it.value}" })
+            return map
         }
 
         fun disconnect(ctx: Context) {
@@ -322,29 +435,25 @@ class XrayVpnService : VpnService() {
 /**
  * The single answer to "can the core resolve geosite:/geoip: rules?".
  *
- * Xray needs the routing data files geoip.dat / geosite.dat; this build ships
- * none (android/scripts/fetch-libs.sh fetches libv2ray, the tun2socks .so and
- * sing-box only), so every geo rule would be dropped and "Bypass Iran",
- * "Bypass China" and "Block ads" would silently do nothing. We therefore look
- * for the files instead of hardcoding a flag: both the config builder and the
- * Routing screen ask here, so shipping (or later downloading) the files into
- * the app's files dir or the APK assets turns those options on by itself.
- *
- * Downloading the files is deliberately NOT done here — that is a separate
- * feature; this only reports what is present.
+ * Xray needs the routing data files geoip.dat / geosite.dat. The APK carries
+ * them as assets (android/scripts/fetch-libs.sh fetches them beside libv2ray);
+ * XrayCore.prepareAssets copies them into the app's files dir, which is where
+ * the core is told to look. Both the config builder and the Routing screen ask
+ * here, so a build without the files degrades honestly: the geo rules are
+ * dropped and the screen says so.
  */
 object GeoAssets {
-    private const val GEOIP = "geoip.dat"
-    private const val GEOSITE = "geosite.dat"
+    const val GEOIP = "geoip.dat"
+    const val GEOSITE = "geosite.dat"
 
     /** True only when BOTH data files are actually there and non-empty. */
     fun available(ctx: Context): Boolean = inFilesDir(ctx) || inApkAssets(ctx)
 
-    private fun inFilesDir(ctx: Context): Boolean = runCatching {
+    fun inFilesDir(ctx: Context): Boolean = runCatching {
         File(ctx.filesDir, GEOIP).length() > 0L && File(ctx.filesDir, GEOSITE).length() > 0L
     }.getOrDefault(false)
 
-    private fun inApkAssets(ctx: Context): Boolean = runCatching {
+    fun inApkAssets(ctx: Context): Boolean = runCatching {
         val names = ctx.assets.list("")?.toList() ?: emptyList()
         names.contains(GEOIP) && names.contains(GEOSITE)
     }.getOrDefault(false)
