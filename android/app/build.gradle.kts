@@ -76,8 +76,10 @@ android {
     // throwing "not mocked", so the pure core can be tested off a device.
     testOptions { unitTests.isReturnDefaultValues = true }
 
-    // The routing data files ride in assets/ uncompressed: XrayCore.prepareAssets
-    // sizes them through openFd() to know when an update changed them.
+    // Ask for the routing data files in assets/ to be stored as they are. The
+    // v1.8.0 release APK shows the packager deflated them anyway (+20 MB for
+    // 28 MB of data), so nothing depends on this: XrayCore.prepareAssets copies
+    // them by stream and re-copies on a new build, not on a size comparison.
     androidResources { noCompress.add("dat") }
 
     packaging {
