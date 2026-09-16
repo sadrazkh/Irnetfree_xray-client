@@ -96,7 +96,7 @@ object TrustedDns {
         } catch (e: Exception) { emptyList() } finally { runCatching { c?.disconnect() } }
     }
 
-    private fun dohLookup(host: String, ipv6: Boolean, doh: List<String>, timeoutMs: Int, query: (String, String, String) -> List<String>): List<String> {
+    private fun dohLookup(host: String, ipv6: Boolean, doh: List<String>, query: (String, String, String) -> List<String>): List<String> {
         val types = if (ipv6) listOf("A", "AAAA") else listOf("A")
         for (url in doh) {
             val out = ArrayList<String>()
@@ -134,7 +134,7 @@ object TrustedDns {
         val clean = osIps.filter { !isSuspect(it) }
         if (clean.isNotEmpty()) return Result(clean, "os", emptyList())
 
-        val fromDoh = dohLookup(h, ipv6, servers, timeoutMs, q)
+        val fromDoh = dohLookup(h, ipv6, servers, q)
         val cleanDoh = fromDoh.filter { !isSuspect(it) }
         if (cleanDoh.isNotEmpty()) return Result(cleanDoh, "doh", osIps)
         if (osIps.isNotEmpty()) return Result(osIps, "os-suspect", osIps)

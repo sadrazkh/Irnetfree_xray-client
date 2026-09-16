@@ -62,3 +62,20 @@ jobs:
         run: gradle --no-daemon assembleDebug
       - name: Unit tests (the pure core against the desktop's pins)
         run: gradle --no-daemon testDebugUnitTest
+      - name: Unit test results (fail when nothing ran)
+        # Gradle exits 0 for an empty test source set, and the console shows
+        # no per-test lines on success — so a misplaced test directory would
+        # pass this job silently. Count the testcases in the JUnit XML instead.
+        run: |
+          set -e
+          files=$(ls app/build/test-results/testDebugUnitTest/*.xml 2>/dev/null || true)
+          test -n "$files" || { echo "no JUnit result files"; exit 1; }
+          total=0
+          for f in $files; do
+            n=$(grep -o '<testcase ' "$f" | wc -l)
+            bad=$(grep -o '<failure' "$f" | wc -l)
+            echo "$(basename "$f" .xml): $n tests, $bad failures"
+            total=$((total + n))
+          done
+          echo "total: $total"
+          test "$total" -gt 0

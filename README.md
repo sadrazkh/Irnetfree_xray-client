@@ -1187,12 +1187,23 @@ rm -rf ~/.local/share/irnetfree     # داده‌ها/تنظیمات (اگر م�
 
 ## 🤖 نسخه اندروید (Android)
 
-نسخه‌ی اندروید یک **اپ نیتیو جدا (Kotlin + Jetpack Compose)** در پوشه‌ی [`android/`](android) است (کلاینت دسکتاپ Electron روی اندروید اجرا نمی‌شود). این اپ همان منطق کانفیگ‌سازیِ دسکتاپ را دارد (تک‌کانفیگ، **زنجیره**، **استخر پروکسی**، **SOCKS/HTTP**، روتینگ) و ترافیک را با **`VpnService` + `hev-socks5-tunnel`** به هسته‌ی **xray-core** (از طریق `libv2ray`) تونل می‌کند.
+نسخه‌ی اندروید یک **اپ نیتیو جدا (Kotlin + Jetpack Compose)** در پوشه‌ی [`android/`](android) است (کلاینت دسکتاپ Electron روی اندروید اجرا نمی‌شود). این اپ همان منطق کانفیگ‌سازیِ دسکتاپ را دارد (تک‌کانفیگ، **زنجیره**، **استخر پروکسی**، **SOCKS/HTTP**، روتینگ ساده/سفارشی/پیشرفته) و ترافیک را با **`VpnService` + `hev-socks5-tunnel`** به هسته‌ی **xray-core** (از طریق `libv2ray`) تونل می‌کند.
+
+از **v1.8.0** کانفیگی که اندروید می‌سازد با دسکتاپ هم‌قد است — همان کدهایی که در بخش‌های بالا شرح داده شد، به Kotlin برگردانده شده و تست‌های JVM همان assertهای دسکتاپ را روی آن اجرا می‌کنند:
+
+- **DNS مدیریت‌شده** (بخش [DNS](#-dns)): DoH از داخل تونل، resolver داخلی برای «دور زدن ایران/چین» با `expectedIPs` و `skipFallback`، پاسخ‌گویی هسته به هر بستهٔ پورت ۵۳، قانون direct به‌تفکیک پورت. تنظیمات: *Settings → DNS managed by the app* + دو فهرست resolver خارجی/داخلی. (`core/DnsPlan.kt`)
+- **پین‌کردن گواهی** به‌جای `allowInsecure` (بخش [پین‌کردن گواهی](#-پینکردن-گواهی-certificate-pinning)): هسته‌های فعلی `allowInsecure: true` را رد می‌کنند؛ اپ بار اول گواهی سرور را می‌خواند و از آن به بعد `pinnedPeerCertSha256` می‌فرستد. (`core/CertPin.kt`)
+- **وایرگارد شرکتی** (بخش [وایرگارد شرکتی](#-وایرگارد-شرکتی-corporate-wireguard)): خط `DNS =` در لینک، فرم دستی و ویرایشگر؛ resolver شرکت از داخل همان تونل/زنجیره پرسیده می‌شود؛ `AllowedIPs` دور resolver باز می‌شود؛ endpointی که **نام** است پیش از اجرای هسته توسط خود اپ resolve می‌شود (OS، و اگر پاسخ در بازهٔ مشکوکی مثل `198.18.0.0/15` بود، DoH). (`core/TrustedDns.kt`)
+- **روتینگ پیشرفته + حالت ساده** (*Routing → Apply the routing mode under these rules*)، همان `advancedUseMode` دسکتاپ.
+- **فایل‌های geo** (`geoip.dat` / `geosite.dat`) داخل APK هستند و هنگام اتصال کنار هسته کپی می‌شوند؛ بدون آن‌ها «دور زدن ایران» و «مسدودکردن تبلیغات» کار نمی‌کرد. `fetch-libs.sh` آن‌ها را از `Loyalsoldier/v2ray-rules-dat` (تگ `GEO_TAG`، پیش‌فرض `202609152354`) می‌گیرد؛ APK حدود **۲۸ مگابایت** بزرگ‌تر شده است.
+- `extra`ی xhttp، حذف `bufferSize: 0` و `UseIPv4` روی `freedom` — همان تغییرات v1.7.2 دسکتاپ.
+
+> رابط کاربری اندروید فعلاً **انگلیسی** است (فایل `MainActivity.kt` از ابتدا انگلیسی بود)؛ فارسی‌سازی آن کار جداگانه‌ای است.
 
 **ساخت محلی:**
 ```bash
 cd android
-bash scripts/fetch-libs.sh   # دانلود libv2ray.aar (لازم برای کامپایل) + در صورت تنظیم، .soی tun2socks
+bash scripts/fetch-libs.sh   # دانلود libv2ray.aar (لازم برای کامپایل) + geoip.dat/geosite.dat + در صورت تنظیم، .soی tun2socks
 gradle wrapper               # یک‌بار، اگر ./gradlew نداری (Wrapper در گیت نگه‌داری نمی‌شود)
 ./gradlew assembleRelease    # خروجی: app/build/outputs/apk/release/*.apk
 # یا برای دیباگ:
@@ -1201,7 +1212,8 @@ gradle wrapper               # یک‌بار، اگر ./gradlew نداری (Wrap
 > در Android Studio کافی است پوشه‌ی `android/` را باز کنی (Sync خودش وابستگی‌ها را می‌گیرد؛ فقط `fetch-libs.sh` را یک‌بار اجرا کن تا `libv2ray.aar` سر جایش باشد).
 
 - **حداقل نسخه:** Android 8.0 (API 26). **هدف:** API 34.
-- دو مؤلفه‌ی نیتیو (`libv2ray.aar` و `libhev-socks5-tunnel.so`) در گیت نگه‌داری **نمی‌شوند**؛ اسکریپت `fetch-libs.sh` (و CI) آن‌ها را از ریلیزهای بالادست دانلود می‌کند.
+- دو مؤلفه‌ی نیتیو (`libv2ray.aar` و `libhev-socks5-tunnel.so`) و دو فایل geo (`app/src/main/assets/geoip.dat` و `geosite.dat`) در گیت نگه‌داری **نمی‌شوند**؛ اسکریپت `fetch-libs.sh` (و CI) آن‌ها را از ریلیزهای بالادست دانلود می‌کند.
+- **تست‌های واحد (JVM، بدون دستگاه):** `./gradlew testDebugUnitTest` — سازندهٔ کانفیگ، پلن DNS، پارسر لینک و resolver مطمئن را در برابر همان assertهای تست‌های دسکتاپ می‌سنجد؛ در CI بعد از هر push اجرا می‌شود.
 - امضای ریلیز: اگر رازهای keystore در گیت‌هاب تنظیم شده باشند، APKِ **امضاشده** ساخته می‌شود؛ در غیر این صورت APKِ **دیباگ** برای تست تولید می‌شود (به بخش بعد).
 
 > ⚠️ رفتار واقعیِ تونل روی **دستگاه/شبیه‌ساز** باید تست شود؛ نسخه‌ی دقیق `libv2ray` باید با امضای API در سرویس VPN بخواند (در صورت تغییر API بالادست، فقط `XrayVpnService.kt` نیاز به تطبیق دارد).
@@ -1321,7 +1333,7 @@ android/             # اپ نیتیو اندروید (Kotlin + Compose)
   scripts/fetch-libs.sh   # دانلود libv2ray.aar + libhev-socks5-tunnel .so
 .github/workflows/
   release.yml        # ساخت دسکتاپ + APK اندروید روی تگ و پیوست به Release
-  test.yml           # تست‌های واحد روی لینوکس/ویندوز/مک + کامپایل اپ اندروید، در هر push و PR
+  test.yml           # تست‌های واحد روی لینوکس/ویندوز/مک + کامپایل و تست‌های JVM اپ اندروید، در هر push و PR
 ```
 
 ---
