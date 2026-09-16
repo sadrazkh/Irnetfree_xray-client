@@ -142,6 +142,15 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # An explicit package list, because the action's default is
+          # `tools platform-tools` and Google removed the deprecated `tools`
+          # package from the SDK repository (android-actions/setup-android
+          # #537, #538, filed 2026-09-15/16). Every Android job started
+          # failing at SDK setup on 2026-09-16 with no change of ours; the
+          # Gradle build downloads the platform and build-tools it needs by
+          # itself, so platform-tools is all this step has to install.
+          packages: platform-tools
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
