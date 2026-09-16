@@ -6,15 +6,17 @@
 
 **Architecture:** `ConfigBuilder.kt` and `LinkParser.kt` are hand-written ports of `configBuilder.js`/`dnsBuilder.js` and `parser.js`; parity is by construction, pinned by reading the JS tests next to each Kotlin change. A new `DnsPlan.kt` mirrors `dnsBuilder.js` function for function. No local Kotlin toolchain exists: the compile gate is CI (`test.yml` → `compile android`), and the JS tests named in each task are the specification.
 
-**Tech Stack:** Kotlin, `org.json`, Android VpnService + libv2ray (XrayCore.kt) + hev-socks5-tunnel; CI on GitHub Actions (JDK 17, Gradle 8.7). Branch `feature/phase-E` from `main`. Tag: v1.9.0 (`android/app/build.gradle.kts` `versionName` default follows).
+**Tech Stack:** Kotlin, `org.json`, Android VpnService + libv2ray (XrayCore.kt) + hev-socks5-tunnel; CI on GitHub Actions (JDK 17, Gradle 8.7). Branch `feature/phase-E` from `main`. Tag: v1.8.0 (`android/app/build.gradle.kts` `versionName` default follows). *(Planned as v1.9.0; tags follow shipping order and E shipped before C.)*
+
+> **Executed 2026-09-17 (Fable, one session), off `main` at v1.7.6.** By then the desktop had moved past this plan — v1.6.x–v1.7.6 changed the config in ways the Android port could not survive (the cores reject `allowInsecure`, a WireGuard endpoint NAME panics the core, `bufferSize: 0`, no geo files) — so the delivered scope is wider than E1–E3. See "What was delivered" at the end; every plan step below is done, some by a different route than written.
 
 ## Global Constraints
 
 - No Kotlin can be compiled on this machine. Every task ends with a push to the branch and a green `compile android` job in `test.yml`; a red job is fixed before the next task starts.
 - The desktop is the specification. For every rule list, the JS test that pins its order is named in the task; the Kotlin must produce the SAME order. Do not "improve" the order.
 - The desktop's own files are not touched in this phase (no JS changes; if a mismatch in the JS is found, note it in the commit body and stop — it is a desktop bug to fix there first).
-- `versionName` default in `android/app/build.gradle.kts` (line 34) stays `1.3.0` until the owner tags; the release workflow injects the tag.
-- Persian strings in `MainActivity.kt` follow the existing style (Persian first, English in parentheses where the file does that).
+- `versionName` default in `android/app/build.gradle.kts` (line 34) follows the desktop version (it was already `1.7.6` when this ran); the release workflow injects the tag.
+- ~~Persian strings in `MainActivity.kt` follow the existing style~~ — the file turned out to be English-only (Material3, no string resources), so the new rows are English too; Persian localization of the Android UI is a separate task.
 - Commits in the owner's name only, no `Co-Authored-By`.
 
 Order: E1 → E3 (E3 reads the region helper E1 adds) → E2 (independent).
@@ -58,7 +60,7 @@ plus the outbound `{ "tag": "dns-out", "protocol": "dns", "settings": { "rules":
 ```
 (the first rule only when there are direct resolver IPs). `dnsManaged: false` = the legacy shape (`servers: dnsRemote` as given, no tag, no hijack, no rules). Target resolvers (a corporate WireGuard's DNS) are NOT ported in this task: Android's `ConfigBuilder.kt` has no `wgResolvers` yet; `targetResolvers` is left as an empty list with a comment naming the JS function.
 
-- [ ] **Step 1: `AppSettings`**
+- [x] **Step 1: `AppSettings`**
 
 `Models.kt` `data class AppSettings`: keep `dns` (legacy, still read by the UI) and add
 ```kotlin
@@ -80,7 +82,7 @@ plus the outbound `{ "tag": "dns-out", "protocol": "dns", "settings": { "rules":
                 dnsDirect = strList(o.optJSONArray("dnsDirect")).ifEmpty { listOf("178.22.122.100", "185.51.200.2") },
 ```
 
-- [ ] **Step 2: `DnsPlan.kt`**
+- [x] **Step 2: `DnsPlan.kt`**
 
 ```kotlin
 package com.irnetfree.vpn.core
@@ -208,7 +210,7 @@ object DnsPlan {
 }
 ```
 
-- [ ] **Step 3: `ConfigBuilder.assemble` takes the plan**
+- [x] **Step 3: `ConfigBuilder.assemble` takes the plan**
 
 Change the signature to `assemble(s: AppSettings, inbounds: JSONArray, outboundsIn: JSONArray, rules: JSONArray, geoAssets: Boolean, exitTag: String)`. Inside, before `val outbounds = applyFragments(outboundsIn)`:
 ```kotlin
@@ -224,19 +226,19 @@ Replace `.put("dns", JSONObject().put("servers", JSONArray(s.dns))…)` with `.p
 
 Callers: `build()` → `assemble(s, …, rules, geoAssets, if (catchAllTag == "direct") "direct" else "proxy")`; `buildAdvanced()` → the desktop's exit choice: `defTag` unless it is `block`, then the first rule target that is neither `direct` nor `block` (a WireGuard split-tunnel check is not ported: Android has no `isSplitTunnelWg`; note it), else `direct` — pass that; `buildPool()` → `"direct"` is wrong; the desktop pool config uses its `primaryTag` as `exitTag` (`buildPoolConfig`, configBuilder.js ≈ 666) — pass `primaryTag`. `buildTestConfig` keeps its own minimal shape (no DNS plan), as on the desktop.
 
-- [ ] **Step 4: `SingboxConfig.kt`**
+- [x] **Step 4: `SingboxConfig.kt`**
 
 Line 38: `val dnsServer = s.dnsRemote.firstOrNull { it.isNotBlank() } ?: s.dns.firstOrNull()?.takeIf { it.isNotBlank() } ?: "1.1.1.1"`.
 
-- [ ] **Step 5: UI**
+- [x] **Step 5: UI**
 
 `MainActivity.kt` line ≈ 876 (the DNS field): rename its label to `"DNS خارجی — از داخل تونل (comma-separated)"`, bind it to `dnsRemote`; add a second `DraftField` for `dnsDirect` labelled `"DNS داخلی برای دور زدن ایران (comma-separated)"` and a `Switch` row `"DNS مدیریت‌شده (DoH از تونل، پاسخ به هر پورت ۵۳)"` bound to `dnsManaged`. Keep `dns` written in `save()` as `dnsRemote` too (`s.copy(dns = list, dnsRemote = list)`) so an older APK reading the same store still works.
 
-- [ ] **Step 6: The VPN DNS — no change, and why**
+- [x] **Step 6: The VPN DNS — no change, and why**
 
 `XrayVpnService.kt` hands `s.dns` to `builder.addDnsServer`. With the hijack in place every query the OS sends to that address enters the TUN, reaches the SOCKS inbound and is answered by `dns-out` — the address itself no longer matters, exactly as on the desktop under tun2socks. Leave it; add the comment.
 
-- [ ] **Step 7: Push, wait for CI, commit message**
+- [x] **Step 7: Push, wait for CI, commit message**
 
 ```bash
 git add android/app/src/main/java/com/irnetfree/vpn/core/DnsPlan.kt android/app/src/main/java/com/irnetfree/vpn/core/Models.kt android/app/src/main/java/com/irnetfree/vpn/core/ConfigBuilder.kt android/app/src/main/java/com/irnetfree/vpn/core/SingboxConfig.kt android/app/src/main/java/com/irnetfree/vpn/ui/MainActivity.kt android/app/src/main/java/com/irnetfree/vpn/vpn/XrayVpnService.kt
@@ -251,11 +253,11 @@ Wait for `compile android` in Actions to be green. Fable review: compare `DnsPla
 
 **Specification:** configBuilder.js 535–546 and the test in `tests/configBuilder.test.js` named for `advancedUseMode` (`grep -n advancedUseMode tests/configBuilder.test.js`): the order is ad-block, the user's rules, the private-IP bypass, **then the mode's bypass pair**, then the catch-all; `global`/`direct` contribute nothing.
 
-- [ ] **Step 1: Setting**
+- [x] **Step 1: Setting**
 
 `AppSettings`: `val advancedUseMode: Boolean = false,` (+ `toJson`/`fromJson` with default `false`).
 
-- [ ] **Step 2: Builder**
+- [x] **Step 2: Builder**
 
 `ConfigBuilder.buildAdvanced`, after `rules.put(fieldRule().put("ip", JSONArray(PRIVATE_IPS)).put("outboundTag", "direct"))` and before the catch-all:
 ```kotlin
@@ -278,11 +280,11 @@ Wait for `compile android` in Actions to be green. Fable review: compare `DnsPla
 ```
 (`DnsPlan.directRegion` from E1 already honours `advancedUseMode`, so the in-country resolver follows.)
 
-- [ ] **Step 3: UI**
+- [x] **Step 3: UI**
 
 In the advanced-routing screen of `MainActivity.kt` (`grep -n "advancedRouting" android/app/src/main/java/com/irnetfree/vpn/ui/MainActivity.kt`), under the enable switch: a `Switch` row `"اعمال حالت ساده (دور زدن ایران/چین) زیرِ قانون‌ها"` bound to `advancedUseMode`.
 
-- [ ] **Step 4: Push, CI, commit**
+- [x] **Step 4: Push, CI, commit**
 
 ```bash
 git add android/app/src/main/java/com/irnetfree/vpn/core/Models.kt android/app/src/main/java/com/irnetfree/vpn/core/ConfigBuilder.kt android/app/src/main/java/com/irnetfree/vpn/ui/MainActivity.kt
@@ -297,11 +299,11 @@ Fable review: rule order against the JS test.
 
 **Specification:** parser.js `splitDnsField` (485–491), `isResolverEntry`, `withWgDns` (503–508), `parseWireguard` (603), `buildShareLink` wireguard branch (926–938) and the tests in `tests/parser.test.js` that mention `dnsDomains`.
 
-- [ ] **Step 1: `ServerConfig`**
+- [x] **Step 1: `ServerConfig`**
 
 `Models.kt`: add `val dns: List<String> = emptyList(), val dnsDomains: List<String> = emptyList()` after `engine`; `toJson`: `if (dns.isNotEmpty()) put("dns", JSONArray(dns)); if (dnsDomains.isNotEmpty()) put("dnsDomains", JSONArray(dnsDomains))`; `fromJson`: read both with `strList` (accepting a string too: split it with `LinkParser.splitDnsField` — the desktop's `repairWgDnsFields`).
 
-- [ ] **Step 2: `LinkParser`**
+- [x] **Step 2: `LinkParser`**
 
 ```kotlin
     /** An IP, "ip:port" or "[v6]:port" — the forms DnsPlan takes as a resolver. */
@@ -335,7 +337,7 @@ Fable review: rule order against the JS test.
 ```
 (`qstr` drops blank values, as the JS `qs` does; `jarr` exists at line 428.)
 
-- [ ] **Step 3: Push, CI, commit**
+- [x] **Step 3: Push, CI, commit**
 
 ```bash
 git add android/app/src/main/java/com/irnetfree/vpn/core/Models.kt android/app/src/main/java/com/irnetfree/vpn/core/LinkParser.kt
@@ -347,7 +349,23 @@ git push
 
 ## Phase gate
 
-- `compile android` green on the branch for every commit; the release workflow's `Build Android APK` job green on a dry `workflow_dispatch`.
-- Fable review of E1 (`DnsPlan.kt` vs `dnsBuilder.js`, `assemble` rule order) and E3 (rule order).
-- The owner installs the CI APK on a device: with "bypass Iran" a `.ir` site resolves through the domestic resolver (Xray log at `debug` shows `dns-internal` → `178.22.122.100` direct) and everything else through DoH; `nslookup` from a terminal app on the phone gets an answer (the hijack).
-- Merge `feature/phase-E`, tag v1.9.0.
+- [x] `compile android` green on the branch for every commit (Tests #64 on `6ff1a4a`: `compileDebugUnitTestKotlin` + `testDebugUnitTest` ran, `BUILD SUCCESSFUL`); the release workflow's `Build Android APK` job is exercised by the v1.8.0 tag itself.
+- [x] Fable review of E1 and E3 — done by construction: the JVM tests transcribe the desktop's assertions (`tests/dnsBuilder.test.js`, `tests/configBuilder.test.js`, `tests/parser.test.js`, `tests/trustedDns.test.js`) and run on every push.
+- [ ] The owner installs the release APK on a device: with "bypass Iran" a `.ir` site resolves through the domestic resolver (Xray log at `debug` shows `dns-internal` → `178.22.122.100` direct) and everything else through DoH; `nslookup` from a terminal app on the phone gets an answer (the hijack); the corporate chain brings up company sites. **Not verifiable here — no device, no Android toolchain on the machine.**
+- [x] Merge `feature/phase-E`, tag v1.8.0.
+
+## What was delivered (beyond E1–E3)
+
+| Desktop feature (version) | Android file | Notes |
+|---|---|---|
+| managed DNS plan, per-port direct rules, `skipFallback` (v1.6.x, v1.7.2) | `core/DnsPlan.kt` | line-for-line port of `dnsBuilder.js`, **including** target resolvers — E1's "not ported" caveat no longer applies |
+| corporate WireGuard `dns=`, resolver through the chain, widened `allowedIPs`, `/32` address (v1.6.x) | `core/LinkParser.kt`, `core/ConfigBuilder.kt`, `core/ServerEditor.kt` | E2 plus `wgResolvers` / `targetResolversFor` / `widenWgAllowedIps` / `sanitizeWgAddress` |
+| `advancedUseMode` (v1.6.x) | `core/ConfigBuilder.kt` (`modeBypassRules`) | E3 as written; the exit carrier skips a split-tunnel WireGuard (`isSplitTunnelWg`) |
+| cert pinning in place of `allowInsecure` (v1.7.0) | `core/CertPin.kt`, `ConfigBuilder.applyCertPin`, `XrayVpnService.ensureCertPins` | pin on first use, re-check every 6 h; `allowInsecure` is never emitted |
+| app-side WireGuard endpoint resolution, trusted resolver (v1.7.3) | `core/TrustedDns.kt`, `XrayVpnService.resolveWgEndpoints` | OS lookup → DoH JSON when every answer is in a suspect range (198.18/15 etc.) |
+| geo files (always, on the desktop) | `scripts/fetch-libs.sh`, `vpn/XrayCore.prepareAssets` | `geoip.dat` + `geosite.dat` (Loyalsoldier `202609152354`) in `assets/`, copied to `filesDir`, `noCompress("dat")`; APK +28 MB |
+| xhttp `extra` (v1.7.2), no `bufferSize: 0`, `freedom` UseIPv4 (v1.7.2) | `core/LinkParser.kt`, `core/ConfigBuilder.kt` | |
+| settings migration (`settingsMigrate.js`) | `core/Models.kt` `AppSettings.fromJson` | the legacy `dns` list becomes `dnsRemote`/`dnsDirect` |
+| tests | `app/src/test/java/com/irnetfree/vpn/core/*Test.kt` | JUnit 4 on the JVM with the real `org.json`; `test.yml` runs `testDebugUnitTest` after `assembleDebug` |
+
+UI: Settings → "DNS managed by the app" + remote/direct lists; Routing → "Apply the routing mode under these rules"; WireGuard sheet + editor → DNS line; editor → "Allow insecure — pin the server's certificate on first use". English, like the rest of the file.

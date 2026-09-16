@@ -20,6 +20,7 @@ object ServerEditor {
         var proxyUser: String = "", var proxyPass: String = "",
         var wgPub: String = "", var wgAddr: String = "", var wgPsk: String = "",
         var wgMtu: String = "1420", var wgReserved: String = "", var wgAllowed: String = "0.0.0.0/0, ::/0",
+        var wgDns: String = "",                // `DNS = 10.0.0.53, corp.local`: resolvers + search domains
         var fragment: String = "", var noise: String = "",
         var cipherSuites: String = "", var finalMask: String = "",   // patterniha
         var engine: String = "xray",                // 'xray' (default) | 'sing-box'
@@ -53,6 +54,7 @@ object ServerEditor {
                     f.wgPub = p.optString("publicKey"); f.wgPsk = p.optString("preSharedKey")
                     f.wgAllowed = arr(p.optJSONArray("allowedIPs")).joinToString(", ")
                 }
+                f.wgDns = (s.dns + s.dnsDomains).joinToString(", ")
             }
         }
         // transport / tls details
@@ -94,7 +96,8 @@ object ServerEditor {
         if (f.fragment.isNotBlank()) ob.put("_fragment", f.fragment.trim())
         if (f.noise.isNotBlank()) ob.put("_noise", f.noise.trim())
         val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" }
-        return s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = ob, engine = engine)
+        val (dns, dnsDomains) = if (s.protocol == "wireguard") LinkParser.splitDnsField(f.wgDns) else (s.dns to s.dnsDomains)
+        return s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = ob, engine = engine, dns = dns, dnsDomains = dnsDomains)
     }
 
     private fun streamQ(f: Fields): Map<String, String?> = mapOf(

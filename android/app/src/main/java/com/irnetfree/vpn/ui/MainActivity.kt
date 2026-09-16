@@ -575,14 +575,17 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
 @Composable private fun WgSheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
     var name by remember { mutableStateOf("") }; var ep by remember { mutableStateOf("") }; var priv by remember { mutableStateOf("") }; var pub by remember { mutableStateOf("") }
     var addr by remember { mutableStateOf("") }; var allowed by remember { mutableStateOf("0.0.0.0/0, ::/0") }; var psk by remember { mutableStateOf("") }; var mtu by remember { mutableStateOf("1420") }; var reserved by remember { mutableStateOf("") }
+    var dnsLine by remember { mutableStateOf("") }
     val wgSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = wgSheetState, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
             Text("Add WireGuard", color = TXT, fontWeight = FontWeight.Bold)
             Fld("Name", name) { name = it }; Fld("Endpoint (host:port)", ep) { ep = it }; Fld("Private Key", priv) { priv = it }; Fld("Peer Public Key", pub) { pub = it }
             Fld("Address (local /32)", addr) { addr = it }; Fld("Allowed IPs", allowed) { allowed = it }; Fld("PSK (optional)", psk) { psk = it }; Fld("MTU", mtu) { mtu = it }; Fld("Reserved (optional)", reserved) { reserved = it }
+            Fld("DNS (optional) — the .conf's DNS line: resolver and search domains", dnsLine) { dnsLine = it }
+            Text("e.g. 192.168.60.1, corp.example — names under corp.example are asked of that resolver through this tunnel (needs DNS managed by the app).", color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(10.dp))
-            Button(onClick = { if (ep.isNotBlank() && priv.isNotBlank() && pub.isNotBlank()) { val s = LinkParser.makeWireguardServer(name, ep, priv, pub, addr, allowed, psk, mtu, reserved); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() } }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
+            Button(onClick = { if (ep.isNotBlank() && priv.isNotBlank() && pub.isNotBlank()) { val s = LinkParser.makeWireguardServer(name, ep, priv, pub, addr, allowed, psk, mtu, reserved, dnsLine); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() } }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
         }
     }
 }
@@ -611,6 +614,7 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
     var pUser by remember { mutableStateOf(f.proxyUser) }; var pPass by remember { mutableStateOf(f.proxyPass) }
     var wgPub by remember { mutableStateOf(f.wgPub) }; var wgAddr by remember { mutableStateOf(f.wgAddr) }; var wgPsk by remember { mutableStateOf(f.wgPsk) }
     var wgMtu by remember { mutableStateOf(f.wgMtu) }; var wgReserved by remember { mutableStateOf(f.wgReserved) }; var wgAllowed by remember { mutableStateOf(f.wgAllowed) }
+    var wgDns by remember { mutableStateOf(f.wgDns) }
     var fragment by remember { mutableStateOf(f.fragment) }
     val noisePresetKeys = listOf("random", "faketls", "fakehello")
     var noisePreset by remember { mutableStateOf(when {
@@ -667,7 +671,9 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
                 Fld("Path / ServiceName", path) { path = it }
                 DropPick("Fake ClientHello (browser fingerprint / uTLS)", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized", "unsafe" to "unsafe (custom cipherSuites)"), fp) { fp = it }
                 if (security == "reality") { Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it } }
-                SwitchRow("Allow Insecure", allowInsecure) { allowInsecure = it }
+                // The core no longer accepts allowInsecure: the switch means "pin the
+                // certificate this server presents on first use" (CertPin.kt).
+                SwitchRow("Allow insecure — pin the server's certificate on first use", allowInsecure) { allowInsecure = it }
                 // patterniha custom-TLS
                 Text("🧩  patterniha — finalMask / cipherSuites", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
                 Fld("cipherSuites (use with fingerprint = unsafe)", cipherSuites) { cipherSuites = it }
@@ -677,6 +683,7 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
             if (server.protocol == "wireguard") {
                 Fld("Peer Public Key", wgPub) { wgPub = it }; Fld("Address (/32)", wgAddr) { wgAddr = it }; Fld("PSK", wgPsk) { wgPsk = it }
                 Fld("MTU", wgMtu) { wgMtu = it }; Fld("Reserved", wgReserved) { wgReserved = it }; Fld("Allowed IPs", wgAllowed) { wgAllowed = it }
+                Fld("DNS — resolver and search domains (e.g. 192.168.60.1, corp.example)", wgDns) { wgDns = it }
             }
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
             Text("⚙  Advanced — DPI evasion (optional)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
@@ -693,7 +700,7 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
             }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
-                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, fragment, effectiveNoise, cipherSuites, finalMask, engine, f.spx, f.xmode, f.seed, f.headerType, f.xhttpExtra)
+                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, wgDns, fragment, effectiveNoise, cipherSuites, finalMask, engine, f.spx, f.xmode, f.seed, f.headerType, f.xhttpExtra)
                 onSave(ServerEditor.apply(server, nf))
             }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
@@ -838,6 +845,9 @@ private fun RoutingScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         SwitchRow("Advanced routing", s.advancedRouting) { save(s.copy(advancedRouting = it)) }
         if (s.advancedRouting) {
             Text("Pick 🧭 on the Home screen to use it.", color = MUTED, fontSize = 12.sp)
+            // The simple routing mode UNDER the user's rules: an explicit corporate
+            // rule still wins over a country bypass (configBuilder.js advancedUseMode).
+            SwitchRow("Apply the routing mode (Bypass Iran/China) under these rules" + (if (geo) "" else " — needs the geo files"), s.advancedUseMode && geo, enabled = geo) { save(s.copy(advancedUseMode = it)) }
             s.routeRules.forEachIndexed { i, r ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
                     Column(Modifier.padding(10.dp)) {
@@ -871,11 +881,19 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     Screen("Settings", back, {}) {
         Text("Ports & DNS", color = TXT, fontWeight = FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { NumFld("SOCKS", s.socksPort, Modifier.weight(1f)) { save(s.copy(socksPort = it)) }; NumFld("HTTP", s.httpPort, Modifier.weight(1f)) { save(s.copy(httpPort = it)) } }
+        // The managed resolver plan (DnsPlan.kt, the desktop's dnsBuilder.js).
         // Typed freely, parsed only when the user leaves the field: parsing per
         // keystroke ate the comma (and the focus) after the first server.
-        DraftField(s.dns.joinToString(","), Modifier.fillMaxWidth(), label = { Text("DNS (comma-separated)") }) { raw ->
+        SwitchRow("DNS managed by the app", s.dnsManaged) { save(s.copy(dnsManaged = it)) }
+        Text(if (s.dnsManaged) "On: every DNS query that reaches the core is answered here — the world over DoH through the tunnel, Iranian names by the in-country resolver, nothing in plain text off the tunnel. Needed for a corporate WireGuard's own resolver."
+             else "Off: the remote list is used as given, nothing is intercepted, and a corporate WireGuard's resolver is not in the config.", color = MUTED, fontSize = 11.sp)
+        DraftField(s.dnsRemote.joinToString(","), Modifier.fillMaxWidth(), label = { Text("Remote DNS — through the tunnel (DoH URLs, comma-separated)") }) { raw ->
             val list = raw.split(",").map { d -> d.trim() }.filter { d -> d.isNotEmpty() }
-            save(s.copy(dns = list.ifEmpty { AppSettings().dns }))   // empty field = keep the defaults
+            save(s.copy(dnsRemote = list.ifEmpty { DnsPlan.DEFAULT_REMOTE }))   // empty field = keep the defaults
+        }
+        DraftField(s.dnsDirect.joinToString(","), Modifier.fillMaxWidth(), label = { Text("In-country DNS — for Bypass Iran (comma-separated)") }) { raw ->
+            val list = raw.split(",").map { d -> d.trim() }.filter { d -> d.isNotEmpty() }
+            save(s.copy(dnsDirect = list.ifEmpty { DnsPlan.DEFAULT_DIRECT_IR }))
         }
         DropPick("Log level", listOf("none", "error", "warning", "info", "debug").map { it to it }, s.logLevel) { save(s.copy(logLevel = it)) }
         SwitchRow("IPv6", s.ipv6) { save(s.copy(ipv6 = it)) }
