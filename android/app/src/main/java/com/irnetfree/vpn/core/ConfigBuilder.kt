@@ -79,7 +79,7 @@ object ConfigBuilder {
         // applies advanced rules, so the DNS plan sees `advancedRouting: false`.
         val dnsSettings = s.copy(advancedRouting = false)
         return assemble(s, standardInbounds(s, listen, sniffing), outbounds, rules,
-            geoAssets, catchAllTag, dnsSettings, targetResolversFor(targets, plan), wgEndpointIps)
+            geoAssets, catchAllTag, dnsSettings, targetResolversFor(targets), wgEndpointIps)
     }
 
     /**
@@ -160,7 +160,7 @@ object ConfigBuilder {
 
         val dnsSettings = s.copy(advancedRouting = true, routeRules = plan.rules)
         return assemble(s, standardInbounds(s, listen, sniffing), JSONArray(reg.outs), rules,
-            geo, exitTag, dnsSettings, targetResolversFor(targets, plan), wgEndpointIps)
+            geo, exitTag, dnsSettings, targetResolversFor(targets), wgEndpointIps)
     }
 
     /* ----------------------------- pool ----------------------------- */
@@ -212,7 +212,7 @@ object ConfigBuilder {
         // Pool emits no bypass rules, so an in-country resolver would only hand
         // the primary exit an Iranian IP to dial from abroad — routingMode is not its.
         val dnsSettings = s.copy(advancedRouting = false, routingMode = "global")
-        return assemble(s, inbounds, JSONArray(reg.outs), rules, geo, primaryTag, dnsSettings, targetResolversFor(targets, plan), wgEndpointIps)
+        return assemble(s, inbounds, JSONArray(reg.outs), rules, geo, primaryTag, dnsSettings, targetResolversFor(targets), wgEndpointIps)
     }
 
     /* ----------------------------- chain / registry ----------------------------- */
@@ -320,7 +320,7 @@ object ConfigBuilder {
      * Deduplicated by resolver address: first entry wins, except that a chain to
      * the resolver beats a direct dial (configBuilder.targetResolversFor).
      */
-    private fun targetResolversFor(targets: List<Pair<Any?, String>>, plan: ConnectionPlan): List<DnsPlan.TargetResolver> {
+    private fun targetResolversFor(targets: List<Pair<Any?, String>>): List<DnsPlan.TargetResolver> {
         val out = ArrayList<DnsPlan.TargetResolver>()
         val at = HashMap<String, Int>()
         fun viaChain(tag: String) = tag.startsWith("out-chain")
