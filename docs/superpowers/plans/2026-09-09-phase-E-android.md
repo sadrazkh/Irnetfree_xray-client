@@ -363,7 +363,7 @@ git push
 | `advancedUseMode` (v1.6.x) | `core/ConfigBuilder.kt` (`modeBypassRules`) | E3 as written; the exit carrier skips a split-tunnel WireGuard (`isSplitTunnelWg`) |
 | cert pinning in place of `allowInsecure` (v1.7.0) | `core/CertPin.kt`, `ConfigBuilder.applyCertPin`, `XrayVpnService.ensureCertPins` | pin on first use, re-check every 6 h; `allowInsecure` is never emitted |
 | app-side WireGuard endpoint resolution, trusted resolver (v1.7.3) | `core/TrustedDns.kt`, `XrayVpnService.resolveWgEndpoints` | OS lookup → DoH JSON when every answer is in a suspect range (198.18/15 etc.) |
-| geo files (always, on the desktop) | `scripts/fetch-libs.sh`, `vpn/XrayCore.prepareAssets` | `geoip.dat` + `geosite.dat` (Loyalsoldier `202609152354`) in `assets/`, copied to `filesDir`, `noCompress("dat")`; APK +28 MB |
+| geo files (always, on the desktop) | `scripts/fetch-libs.sh`, `vpn/XrayCore.prepareAssets` | `geoip.dat` + `geosite.dat` (Loyalsoldier `202609152354`) in `assets/`, copied to `filesDir` once per installed build (a lastUpdateTime stamp); the release APK went 70.1 → 89.9 MB (28 MB of data, deflated by the packager) |
 | xhttp `extra` (v1.7.2), no `bufferSize: 0`, `freedom` UseIPv4 (v1.7.2) | `core/LinkParser.kt`, `core/ConfigBuilder.kt` | |
 | settings migration (`settingsMigrate.js`) | `core/Models.kt` `AppSettings.fromJson` | the legacy `dns` list becomes `dnsRemote`/`dnsDirect` |
 | tests | `app/src/test/java/com/irnetfree/vpn/core/*Test.kt` | JUnit 4 on the JVM with the real `org.json`; `test.yml` runs `testDebugUnitTest` after `assembleDebug` |

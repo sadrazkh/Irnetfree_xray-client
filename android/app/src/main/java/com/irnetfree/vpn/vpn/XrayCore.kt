@@ -78,22 +78,31 @@ class XrayCore(private val onStatus: (Long, String?) -> Unit = { _, _ -> }) {
          *
          * The APK carries them as assets (fetched into app/src/main/assets by
          * android/scripts/fetch-libs.sh, beside libv2ray); assets are not files,
-         * so they are copied into the app's files dir once — again when the APK's
-         * copy differs in size, i.e. after an update — and the core is pointed at
-         * that dir (`Libv2ray.initCoreEnv`, `initV2Env` on older .aar versions).
+         * so they are copied into the app's files dir once per installed build —
+         * a stamp file holds the package's lastUpdateTime, and a new APK (new
+         * data) copies again — and the core is pointed at that dir
+         * (`Libv2ray.initCoreEnv`, `initV2Env` on older .aar versions). The
+         * copy is a plain stream on purpose: the packager stores the .dat
+         * files deflated (the v1.8.0 APK grew by 20 MB for 28 MB of data), so
+         * neither openFd() nor a size comparison can tell an update apart.
          * A build without the assets does nothing here and GeoAssets stays false.
          */
         fun prepareAssets(ctx: Context, log: (String) -> Unit = {}) {
             try {
                 val names = ctx.assets.list("")?.toSet() ?: emptySet()
+                val stamp = File(ctx.filesDir, GeoAssets.STAMP)
+                val build = runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime }.getOrDefault(0L).toString()
+                val current = build != "0" && runCatching { stamp.readText().trim() }.getOrDefault("") == build
+                var copied = false
                 for (name in listOf(GeoAssets.GEOIP, GeoAssets.GEOSITE)) {
                     if (name !in names) continue
                     val dst = File(ctx.filesDir, name)
-                    val size = runCatching { ctx.assets.openFd(name).use { it.length } }.getOrDefault(-1L)
-                    if (dst.exists() && dst.length() > 0L && (size < 0L || dst.length() == size)) continue
+                    if (current && dst.exists() && dst.length() > 0L) continue
                     ctx.assets.open(name).use { input -> dst.outputStream().use { out -> input.copyTo(out) } }
+                    copied = true
                     log("Routing data $name installed (${dst.length() / 1024} KB)")
                 }
+                if (copied || !current) runCatching { stamp.writeText(build) }
             } catch (t: Throwable) {
                 log("Routing data files could not be installed: ${t.message}")
             }

@@ -445,6 +445,8 @@ class XrayVpnService : VpnService() {
 object GeoAssets {
     const val GEOIP = "geoip.dat"
     const val GEOSITE = "geosite.dat"
+    /** Holds the package's lastUpdateTime for which the two files were copied (XrayCore.prepareAssets). */
+    const val STAMP = "geo.stamp"
 
     /** True only when BOTH data files are actually there and non-empty. */
     fun available(ctx: Context): Boolean = inFilesDir(ctx) || inApkAssets(ctx)
