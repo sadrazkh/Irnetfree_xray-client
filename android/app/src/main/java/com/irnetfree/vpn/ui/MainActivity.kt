@@ -595,11 +595,17 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     var qrServer by remember { mutableStateOf<ServerConfig?>(null) }
     var confirmDelete by remember { mutableStateOf<ServerConfig?>(null) }
     var addMenu by remember { mutableStateOf(false) }
+    // Mirrors store.selection so picking a config repaints the two rows that
+    // changed instead of calling bump(), which rebuilds the screen through
+    // key(rev) in App and takes the scroll position with it — the list used to
+    // jump back to the top whenever you chose something near the bottom.
+    var selectedId by remember { mutableStateOf(store.selection) }
     val ctx = LocalContext.current
     val tests = remember { mutableStateMapOf<String, TestState>() }
     val testMutex = remember { Mutex() }
-    // The row that is open. Only ever one: two open cards and the list is a wall.
-    var openId by remember { mutableStateOf(store.selection) }
+    // The row whose actions are showing. Only ever one, and nothing to begin
+    // with: arriving at the list should show the list, not a card mid-flight.
+    var openId by remember { mutableStateOf("") }
 
     // One test at a time; `phase` marks which metric is currently measuring.
     suspend fun testOne(s: ServerConfig) = testMutex.withLock {
@@ -696,14 +702,11 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     list.forEach { s ->
                         ConfigCard(
                             s,
-                            selected = store.selection == s.id,
+                            selected = selectedId == s.id,
                             open = openId == s.id,
                             result = tests[s.id],
-                            onTap = {
-                                // Tap = use it and open it, which is the card 2c draws.
-                                // Tapping the open one again closes it.
-                                if (openId == s.id) openId = "" else { openId = s.id; store.saveSelection(s.id); bump() }
-                            },
+                            onSelect = { store.saveSelection(s.id); selectedId = s.id },
+                            onToggle = { openId = if (openId == s.id) "" else s.id },
                             onTest = { runTest(s) },
                             onCopy = { copyLink(ctx, s) },
                             onQr = { qrServer = s },
@@ -836,20 +839,31 @@ private fun latColor(ms: Long?): Color = when {
 }
 
 /**
- * One server. Closed it is a single line; open it carries its measurements and
- * its actions (design 2c).
+ * One server. Always the same row; selecting only changes its colours, and the
+ * actions open underneath it when you ask for them (design 2c).
  *
- * The leading glyph is the country flag out of the server's own name — a
- * subscription writes them there ("TCP 12 🇩🇪-Sadra|📊1.15TB") and the desktop
- * list shows the same thing. When there is none, the protocol stands in, which
- * is the other thing worth knowing at a glance.
+ * Three things this shape is careful about, each of them a complaint about the
+ * first attempt:
+ *
+ *  - SELECTING DOES NOT MOVE ANYTHING. The row keeps its height and its place;
+ *    only the border, the fill and the IN USE badge change. Nor does it rebuild
+ *    the screen: the list used to jump back to the top when you picked a config
+ *    near the bottom, because selecting called bump() and `key(rev)` in App
+ *    throws away the scroll position with everything else.
+ *  - THE PANEL DOES NOT OPEN BY ITSELF. Tapping a row selects it, full stop.
+ *    Test, copy, QR, edit and delete arrive only when you open the row — tap it
+ *    again, or tap the chevron — so choosing a config never re-flows the list
+ *    under your thumb.
+ *  - IN USE IS WRITTEN BESIDE THE NAME, closed or open, which is where the
+ *    design puts it and the only place it means anything at a glance.
  */
 @Composable private fun ConfigCard(
     s: ServerConfig,
     selected: Boolean,
     open: Boolean,
     result: TestState?,
-    onTap: () -> Unit,
+    onSelect: () -> Unit,
+    onToggle: () -> Unit,
     onTest: () -> Unit,
     onCopy: () -> Unit,
     onQr: () -> Unit,
@@ -859,19 +873,45 @@ private fun latColor(ms: Long?): Color = when {
     val (flag, label) = ServerLabel.split(s.name)
     val where = "${badge(s.protocol)} · ${s.address}" + if (s.port > 0) ":${s.port}" else ""
 
-    if (!open) {
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(if (open) 16.dp else 14.dp))
+            .background(if (selected) CARD_SEL else CARD)
+            .border(
+                if (selected) 1.5.dp else 1.dp,
+                if (selected) PRIMARY else STROKE,
+                RoundedCornerShape(if (open) 16.dp else 14.dp)
+            )
+    ) {
+        /* ---- the row itself: identical whether or not it is open ---- */
         Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(CARD)
-                .border(1.dp, if (selected) PRIMARY_DIM else STROKE, RoundedCornerShape(14.dp))
-                .clickable { onTap() }.padding(horizontal = 14.dp, vertical = 13.dp),
+            Modifier.fillMaxWidth()
+                // Tap to use it. Tapping the one already in use opens it, so the
+                // actions are one deliberate tap away and never a surprise.
+                .clickable { if (selected) onToggle() else onSelect() }
+                .padding(start = 14.dp, end = 6.dp, top = 13.dp, bottom = 13.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Leading(flag, s.protocol)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(label, color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        label, color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (selected) {
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            "IN USE", color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO,
+                            fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.em, maxLines = 1,
+                            modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(PRIMARY)
+                                .padding(horizontal = 5.dp, vertical = 3.dp)
+                        )
+                    }
+                }
                 Spacer(Modifier.height(5.dp))
-                Text(where, color = SUBTLE, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(where, color = if (selected) MUTED else SUBTLE, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Spacer(Modifier.width(8.dp))
             val r = result
@@ -881,43 +921,24 @@ private fun latColor(ms: Long?): Color = when {
                 r?.tcp != null -> Text(fmtLat(r.tcp), color = latColor(r.tcp), fontSize = 12.sp, fontFamily = MONO)
                 else -> Text("—", color = SUBTLE, fontSize = 12.sp, fontFamily = MONO)
             }
-        }
-        return
-    }
-
-    Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(CARD_SEL)
-            .border(1.dp, STROKE_SEL, RoundedCornerShape(16.dp))
-    ) {
-        Row(
-            Modifier.fillMaxWidth().clickable { onTap() }.padding(start = 14.dp, end = 14.dp, top = 14.dp, bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Leading(flag, s.protocol)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        label, color = TXT, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
-                    )
-                    if (selected) {
-                        Spacer(Modifier.width(7.dp))
-                        Text(
-                            "IN USE", color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO,
-                            fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.em,
-                            modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(PRIMARY).padding(horizontal = 5.dp, vertical = 3.dp)
-                        )
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-                Text(where, color = MUTED, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // The one affordance that says there is more in here, and opens it
+            // without changing which config is in use.
+            IconButton(onClick = onToggle, modifier = Modifier.size(34.dp)) {
+                Icon(
+                    if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    if (open) "close" else "actions",
+                    tint = if (selected) PRIMARY else MUTED2,
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
 
-        // What it measured. USED is not among them: this client keeps no
-        // per-config byte count, and a tile that can only ever say "—" is worse
-        // than the upload figure, which is the side that actually goes bad.
+        if (!open) return@Column
+
+        /* ---- what it measured ---- */
+        // USED is not among them: this client keeps no per-config byte count, and
+        // a tile that can only ever say "—" is worth less than the upload figure,
+        // which is the side that actually goes bad.
         Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Tile(Modifier.weight(1f), "TCP", result?.tcp, result?.phase == "tcp", latColor(result?.tcp))
             Tile(Modifier.weight(1f), "REAL", result?.down, result?.phase == "down", latColor(result?.down))
@@ -927,16 +948,18 @@ private fun latColor(ms: Long?): Color = when {
             Text(it, color = BAD, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp))
         }
 
-        HorizontalDivider(color = STROKE_SEL)
+        /* ---- and what you can do with it ---- */
+        HorizontalDivider(color = if (selected) STROKE_SEL else STROKE)
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+            val rule = if (selected) STROKE_SEL else STROKE
             CardAction("test", PRIMARY, Modifier.weight(1f), onTest)
-            ActionRule()
+            ActionRule(rule)
             CardAction("copy", TXT2, Modifier.weight(1f), onCopy)
-            ActionRule()
+            ActionRule(rule)
             CardAction("qr", TXT2, Modifier.weight(1f), onQr)
-            ActionRule()
+            ActionRule(rule)
             CardAction("edit", TXT2, Modifier.weight(1f), onEdit)
-            ActionRule()
+            ActionRule(rule)
             CardAction("del", BAD, Modifier.weight(1f), onDelete)
         }
     }
@@ -972,10 +995,9 @@ private fun latColor(ms: Long?): Color = when {
     )
 }
 
-@Composable private fun ActionRule() {
-    Box(Modifier.width(1.dp).fillMaxHeight().background(STROKE_SEL))
+@Composable private fun ActionRule(color: Color) {
+    Box(Modifier.width(1.dp).fillMaxHeight().background(color))
 }
-
 
 /** QR + copy for a config link that carries ALL settings (incl. patterniha). */
 @Composable private fun QrDialog(s: ServerConfig, onDismiss: () -> Unit) {
