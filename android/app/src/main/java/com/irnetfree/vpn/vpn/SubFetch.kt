@@ -8,27 +8,21 @@ import com.irnetfree.vpn.core.Subscriptions
 /**
  * Gets a subscription through a core, whether or not the tunnel is up.
  *
- * WHY THIS EXISTS, from the log line that finally said it:
+ * Two reasons a phone's own request to a panel can fail where the desktop's
+ * does not, and this handles the one that is about the PATH:
  *
- *   sub.irnetfree.info -> 2a06:98c1:3120::3, …, 188.114.99.0 (os);
- *   could not read the certificate (Handshake failed)
+ * This app excludes its own package from the VPN so the core's sockets can
+ * leave the device — which puts every request the app makes on the raw ISP
+ * network, even while the tunnel is up. The desktop's whole system sits inside
+ * the TUN, so its fetch of the same URL rides the tunnel. A panel the ISP
+ * blocks therefore loads on the laptop and not on the phone.
  *
- * Every address there is Cloudflare's, so the name resolved correctly — DNS was
- * never the problem, and neither was the certificate: that probe runs with
- * verification switched off and still got no certificate at all. Nothing
- * answered for the panel. The TLS connection was being broken before a
- * certificate could arrive, which is what SNI-triggered interference looks
- * like from inside the client: the ClientHello carrying `sub.irnetfree.info`
- * goes out in the clear and the connection dies.
+ * (The other reason — the phone's platform TLS lacking the TLS 1.3 a
+ * Cloudflare zone demands — is not about the path at all and is handled by
+ * IRApp.installTls13. It was the owner's actual bug, and no choice of path
+ * could have fixed it.)
  *
- * A browser gets away with it (encrypted ClientHello, or QUIC) and so does the
- * desktop client — but only because the desktop's whole system sits inside the
- * TUN, so its fetch was never on the raw network in the first place. The phone
- * has no such luck: this app excludes its own package from the VPN so the
- * core's sockets can leave the device, which puts every request it makes back
- * out on the network that is breaking them.
- *
- * So the fetch goes through a core, always:
+ * So the fetch goes through a core when it can:
  *
  *   - tunnel up  -> the running core's own SOCKS inbound
  *   - tunnel down -> a THROWAWAY core on a free port, exactly as a latency test

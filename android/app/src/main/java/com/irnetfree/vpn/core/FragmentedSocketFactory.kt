@@ -10,24 +10,17 @@ import javax.net.SocketFactory
  * segments — which, for a TLS connection, is the ClientHello.
  *
  * This is the same trick the app already offers inside a config as `fragment`,
- * applied to the app's own requests. It exists because of what a subscription
- * fetch runs into on a filtered network:
+ * applied to the app's own requests: a middlebox that matches on the SNI in
+ * the first packet cannot when no single segment holds the whole name.
  *
- *   sub.irnetfree.info -> 188.114.96.3 … (os);
- *   could not read the certificate (Handshake failed)
- *
- * The address is right (Cloudflare) and the probe that reported this had
- * certificate verification switched OFF, so nothing was forged — no
- * certificate arrived at all. The connection is killed while the handshake is
- * in flight, which is what matching on the SNI in the ClientHello looks like
- * from the client: the name travels in the clear in that first packet, a
- * middlebox reads it and injects a reset. A browser escapes because it encrypts
- * the ClientHello; this app cannot, but it can make sure the name is never
- * wholly inside any single segment.
- *
- * Costs nothing when it is not needed — only the first write is split, by a few
- * milliseconds — so it is used as an automatic retry rather than a setting for
- * the user to find.
+ * A note on its history, so nobody repeats it. This was written for the
+ * subscription fetch that failed with "Handshake failed" on the owner's phone,
+ * on the theory that the ClientHello was being killed for its SNI. It was not:
+ * the panel's Cloudflare zone requires TLS 1.3 and the phone's platform TLS
+ * only had 1.2 (IRApp.installTls13 is the fix). Splitting the ClientHello did
+ * nothing for that — nothing could, short of speaking TLS 1.3. It stays
+ * because it is cheap and correct for the case it was named after; it is a
+ * retry after an SSL failure, never the first attempt.
  */
 class FragmentedSocketFactory(
     private val chunkBytes: Int = 48,
