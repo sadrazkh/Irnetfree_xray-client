@@ -665,9 +665,10 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         val sub = Subscription(newId("sub"), url.trim().take(30), url.trim())
         store.subs.add(sub); store.saveSubs()
         Toast.makeText(ctx, "Fetching subscription…", Toast.LENGTH_SHORT).show()
+        val via = subProxyPort(store)
         scope.launch {
             try {
-                val r = withContext(Dispatchers.IO) { Subscriptions.fetch(sub.url) }
+                val r = withContext(Dispatchers.IO) { Subscriptions.fetch(sub.url, via) }
                 store.servers.removeAll { it.subId == sub.id }
                 val tagged = r.servers.map { it.copy(subId = sub.id) }
                 store.servers.addAll(tagged); store.saveServers()
@@ -734,6 +735,18 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
 
 /** One test's measurements. `phase` = the metric currently measuring. */
 data class TestState(val tcp: Long? = null, val down: Long? = null, val up: Long? = null, val phase: String = "", val error: String? = null)
+
+/**
+ * The SOCKS port to fetch a subscription through, or null to fetch directly.
+ *
+ * Our own package is excluded from the VPN, so an app request leaves over the
+ * raw ISP network even while the tunnel is up — which is why a panel that
+ * loads on the desktop (whose whole system is inside the TUN) could fail here
+ * with a TLS handshake error. When the core is running, its own inbound is the
+ * way back in.
+ */
+private fun subProxyPort(store: Store): Int? =
+    if (VpnState.state.value == ConnState.CONNECTED) store.settings.socksPort else null
 
 private fun fmtLat(ms: Long?): String = when {
     ms == null -> "—"; ms < 0 -> "×"; ms >= 1000 -> String.format("%.1fs", ms / 1000.0); else -> "$ms"
@@ -1023,9 +1036,10 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
     var url by remember { mutableStateOf("") }; var name by remember { mutableStateOf("") }; var busy by remember { mutableStateOf(false) }; var msg by remember { mutableStateOf("") }
     fun refresh(sub: Subscription) {
         busy = true; msg = "Fetching…"
+        val via = subProxyPort(store)
         scope.launch {
             try {
-                val r = withContext(Dispatchers.IO) { Subscriptions.fetch(sub.url) }
+                val r = withContext(Dispatchers.IO) { Subscriptions.fetch(sub.url, via) }
                 store.servers.removeAll { it.subId == sub.id }
                 val tagged = r.servers.map { it.copy(subId = sub.id) }; store.servers.addAll(tagged); store.saveServers()
                 val idx = store.subs.indexOfFirst { it.id == sub.id }
