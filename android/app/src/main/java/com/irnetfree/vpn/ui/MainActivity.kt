@@ -856,8 +856,7 @@ private fun latColor(ms: Long?): Color = when {
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val flag = flagIn(s.name)
-    val label = if (flag == null) s.name else s.name.replaceFirst(flag, "").trim().ifEmpty { s.name }
+    val (flag, label) = ServerLabel.split(s.name)
     val where = "${badge(s.protocol)} · ${s.address}" + if (s.port > 0) ":${s.port}" else ""
 
     if (!open) {
@@ -879,7 +878,7 @@ private fun latColor(ms: Long?): Color = when {
             when {
                 r?.phase?.isNotEmpty() == true -> Text("…", color = AMBER, fontSize = 12.sp, fontFamily = MONO)
                 r?.error != null -> Text("×", color = BAD, fontSize = 12.sp, fontFamily = MONO)
-                r?.tcp != null -> Text(fmtLat(r.tcp).removeSuffix("ms"), color = latColor(r.tcp), fontSize = 12.sp, fontFamily = MONO)
+                r?.tcp != null -> Text(fmtLat(r.tcp), color = latColor(r.tcp), fontSize = 12.sp, fontFamily = MONO)
                 else -> Text("—", color = SUBTLE, fontSize = 12.sp, fontFamily = MONO)
             }
         }
@@ -977,24 +976,6 @@ private fun latColor(ms: Long?): Color = when {
     Box(Modifier.width(1.dp).fillMaxHeight().background(STROKE_SEL))
 }
 
-/**
- * The first flag emoji in a string: two Regional Indicator code points in a row.
- * Subscription names carry them, which is where the list gets its flags from —
- * a config record has no country of its own.
- */
-private fun flagIn(name: String): String? {
-    var i = 0
-    while (i < name.length) {
-        val cp = name.codePointAt(i)
-        val w = Character.charCount(cp)
-        if (cp in 0x1F1E6..0x1F1FF && i + w < name.length) {
-            val next = name.codePointAt(i + w)
-            if (next in 0x1F1E6..0x1F1FF) return name.substring(i, i + w + Character.charCount(next))
-        }
-        i += w
-    }
-    return null
-}
 
 /** QR + copy for a config link that carries ALL settings (incl. patterniha). */
 @Composable private fun QrDialog(s: ServerConfig, onDismiss: () -> Unit) {
