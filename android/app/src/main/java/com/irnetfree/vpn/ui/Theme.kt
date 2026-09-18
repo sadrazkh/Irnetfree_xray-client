@@ -24,6 +24,11 @@ val BG2 = Color(0xFF0E1715)         // bottom bar, inset panels
 val CARD = Color(0xFF111A18)        // cards, sheets, dialogs
 val CARD2 = Color(0xFF1A2523)       // chips, pressed states, the ring's face
 val STROKE = Color(0xFF1D2B28)      // hairlines and card borders
+// The server list's selected/expanded card and the metric tiles inside it
+// (design 2c: the row you tap opens in place and carries its own actions).
+val CARD_SEL = Color(0xFF0F2019)    // an expanded, in-use card
+val STROKE_SEL = Color(0xFF2A5A4C)  // its border, and the rules between its actions
+val TILE = Color(0xFF0A1714)        // an inset panel inside a card
 
 /* ---------------- accents ---------------- */
 val PRIMARY = Color(0xFF35E0AC)     // mint: the brand, and "connected"
@@ -37,6 +42,7 @@ val BAD = Color(0xFFF07178)         // errors
 val TXT = Color(0xFFE4EFEC)         // primary text
 val TXT2 = Color(0xFFC9D8D4)        // secondary text
 val MUTED = Color(0xFF7D938E)       // labels, captions
+val SUBTLE = Color(0xFF8FA8A1)      // a list row's second line: quieter than text, louder than a label
 val MUTED2 = Color(0xFF5D746F)      // the quietest text the design uses
 
 /* ---------------- type ---------------- */
