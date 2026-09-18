@@ -45,6 +45,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.window.Dialog
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -527,13 +528,20 @@ private fun latColor(ms: Long?): Color = when {
 @Composable private fun QrDialog(s: ServerConfig, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     val link = remember(s.id) { LinkParser.buildShareLink(s) }
-    val bmp = remember(link) { qrBitmap(link, 640) }
+    val bmp = remember(link) { qrBitmap(link) }
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(16.dp), color = CARD) {
             Column(Modifier.padding(18.dp).widthIn(max = 320.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Share config", color = TXT, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(12.dp))
-                if (bmp != null) Image(bmp.asImageBitmap(), "QR", Modifier.size(232.dp).clip(RoundedCornerShape(10.dp)).background(Color.White).padding(8.dp))
+                // FilterQuality.None: the bitmap is one pixel per module, so nearest
+                // neighbour turns each into a crisp square. The default (bilinear) blurs
+                // the module edges a scanner has to threshold.
+                if (bmp != null) Image(
+                    bmp.asImageBitmap(), "QR",
+                    Modifier.size(248.dp).clip(RoundedCornerShape(10.dp)).background(Color.White).padding(6.dp),
+                    filterQuality = FilterQuality.None
+                )
                 else Text("Link too long for a QR — use Copy.", color = MUTED, fontSize = 12.sp)
                 Spacer(Modifier.height(10.dp))
                 Text(link, color = MUTED, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
@@ -544,12 +552,30 @@ private fun latColor(ms: Long?): Color = when {
     }
 }
 
-private fun qrBitmap(text: String, size: Int): android.graphics.Bitmap? = try {
-    val hints = mapOf(com.google.zxing.EncodeHintType.MARGIN to 1)
-    val m = com.google.zxing.MultiFormatWriter().encode(text, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints)
-    val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.RGB_565)
-    for (x in 0 until size) for (y in 0 until size) bmp.setPixel(x, y, if (m.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
-    bmp
+/**
+ * The share QR, one pixel per module — the UI scales it up (FilterQuality.None).
+ *
+ * Asking ZXing for a fixed 640px bitmap made a module a non-integer number of
+ * pixels, so it rounded and some modules came out a pixel wider than their
+ * neighbours; it also cost 409,600 setPixel calls on the composition thread, and
+ * Compose then resampled the result with its default bilinear filter. Three ways
+ * to soften the edges a scanner has to threshold. Width and height 0 make ZXing
+ * return the matrix at its own size (renderResult takes max(requested, matrix)),
+ * which has no resampling error to inherit.
+ *
+ * MARGIN is the 4 modules of quiet zone the QR spec requires; it was 1, and a
+ * scanner is entitled to refuse that.
+ */
+private fun qrBitmap(text: String): android.graphics.Bitmap? = try {
+    val hints = mapOf(
+        com.google.zxing.EncodeHintType.MARGIN to 4,
+        com.google.zxing.EncodeHintType.CHARACTER_SET to "UTF-8"
+    )
+    val m = com.google.zxing.qrcode.QRCodeWriter().encode(text, com.google.zxing.BarcodeFormat.QR_CODE, 0, 0, hints)
+    val w = m.width; val h = m.height
+    val px = IntArray(w * h)
+    for (y in 0 until h) { val row = y * w; for (x in 0 until w) px[row + x] = if (m.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE }
+    android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.RGB_565)
 } catch (e: Exception) { null }
 
 private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
