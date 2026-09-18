@@ -60,6 +60,7 @@ import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.vpn.ConnState
 import com.irnetfree.vpn.vpn.GeoAssets
 import com.irnetfree.vpn.vpn.VpnState
+import com.irnetfree.vpn.vpn.XrayPattnCore
 import com.irnetfree.vpn.vpn.XrayTester
 import com.irnetfree.vpn.vpn.XrayVpnService
 import com.journeyapps.barcodescanner.ScanContract
@@ -358,7 +359,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     // One test at a time; `phase` marks which metric is currently measuring.
     suspend fun testOne(s: ServerConfig) = testMutex.withLock {
         tests[s.id] = TestState(phase = "tcp")
-        val h = withContext(Dispatchers.IO) { XrayTester.start(s) }
+        val h = withContext(Dispatchers.IO) { XrayTester.start(ctx, s) }
         if (h == null) { tests[s.id] = TestState(error = "core error"); return@withLock }
         try {
             val ping = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }
@@ -713,8 +714,22 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
             }
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
             Text("⚙  Advanced — DPI evasion (optional)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
-            DropPick("Core / Engine", listOf("xray" to "Xray (default)", "sing-box" to "sing-box (fake ClientHello / uTLS)"), engine) { engine = it }
-            Text("Only this config runs on the chosen core. sing-box is bundled for arm64; other transports (xhttp/kcp) fall back to Xray.", color = MUTED, fontSize = 11.sp)
+            DropPick(
+                "Core / Engine",
+                listOf(
+                    "xray" to "Xray (default)",
+                    "xray-pattn" to "Xray-PattN (accepts plaintext VLESS/Trojan)",
+                    "sing-box" to "sing-box (fake ClientHello / uTLS)"
+                ),
+                engine
+            ) { engine = it }
+            Text(
+                "Only this config runs on the chosen core. Pick Xray-PattN when a config has no TLS " +
+                    "and the official core refuses it outright; a chain runs on PattN as soon as ONE of " +
+                    "its hops asks for it. Both extra cores are bundled for arm64 only — elsewhere the " +
+                    "config falls back to the in-process core.",
+                color = MUTED, fontSize = 11.sp
+            )
             Spacer(Modifier.height(8.dp))
             Fld("Fragment (packets,length,interval — empty = off)", fragment) { fragment = it }
             Text("e.g. tlshello,100-200,10-20", color = MUTED, fontSize = 11.sp)
@@ -902,6 +917,7 @@ private fun RoutingScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 /* ================================ SETTINGS ================================ */
 @Composable
 private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
+    val ctx = LocalContext.current
     var s by remember { mutableStateOf(store.settings) }
     fun save(n: AppSettings) { s = n; store.saveSettings(n); bump() }
     Screen("Settings", back, {}) {
@@ -923,6 +939,22 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         }
         DropPick("Log level", listOf("none", "error", "warning", "info", "debug").map { it to it }, s.logLevel) { save(s.copy(logLevel = it)) }
         SwitchRow("IPv6", s.ipv6) { save(s.copy(ipv6 = it)) }
+        HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
+        Text("Core", color = TXT, fontWeight = FontWeight.Bold)
+        // The default for configs that do not name a core of their own. A chain,
+        // pool or advanced plan has no single owner, so this is what decides it —
+        // unless one of its servers asks for PattN, which wins (EngineChoice.kt).
+        val pattnHere = remember { XrayPattnCore.available(ctx) }
+        DropPick(
+            "Default core",
+            listOf("xray" to "Xray (in-process, default)", "xray-pattn" to "Xray-PattN (bundled binary)"),
+            s.defaultEngine
+        ) { save(s.copy(defaultEngine = it)) }
+        Text(
+            if (!pattnHere) "Xray-PattN is not bundled for this device (arm64 only) — configs asking for it run on the in-process core instead."
+            else "PattN is upstream Xray plus one thing: it does not refuse a plaintext VLESS/Trojan config to a public address, which the official core rejects at load. Everything else behaves identically.",
+            color = MUTED, fontSize = 11.sp
+        )
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
         Text("Per-app routing", color = TXT, fontWeight = FontWeight.Bold)
         listOf("off" to "Off (whole system)", "allow" to "Only these apps", "disallow" to "All except these").forEach { (v, l) ->
