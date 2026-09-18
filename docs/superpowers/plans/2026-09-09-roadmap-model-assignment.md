@@ -7,9 +7,10 @@ session on ANY model can execute it without this conversation:
 |---|---|---|---|
 | A | `2026-09-09-phase-A-gaps.md` | close the gaps v1.3.0 left open, clean-ups | v1.3.1 |
 | B | `2026-09-09-phase-B-performance.md` | speed: list rendering, ping-all, validate cache, poll cadence | v1.4.0 |
-| C | `2026-09-09-phase-C-reliability.md` | leak self-test, health watch, DoH bootstrap, gateway watch, firewall holes, sing-box DNS, two-core chains, Linux/mac guard | v1.9.0 (was v1.8.0; E shipped first) |
+| C | `2026-09-09-phase-C-reliability.md` | leak self-test, health watch, DoH bootstrap, gateway watch, firewall holes, sing-box DNS, two-core chains, Linux/mac guard | v1.10.0 (was v1.8.0; E shipped as v1.8.0 and F as v1.9.0) |
 | D | `2026-09-09-phase-D-features.md` | autostart, auto server, notifications, tray switch, self-update, scheduled asset updates, backup, sparkline, per-app TUN | v1.5.0 — shipped 2026-09-09; D10 shipped 2026-09-10 as v1.6.0 |
 | E | `2026-09-09-phase-E-android.md` | Android parity: managed DNS, `dns=` links, advancedUseMode — and, by the time it ran, cert pinning, endpoint resolution, geo data, JVM tests | v1.8.0 — shipped 2026-09-17 (tags follow shipping order, so C moves to v1.9.0) |
+| F | (no plan file — asked for directly) | Android: the design doc applied, Xray-PattN as a second core, the share QR fixed on both clients | v1.9.0 — shipped 2026-09-18 |
 
 خلاصهٔ فارسی: هر فاز یک فایل پلن جداست با تسک‌های کوچک، کدِ کامل، تست و کامیت. مدلِ هر تسک در جدول
 پایین آمده؛ جلسه‌ای که پلن را اجرا می‌کند باید روی همان مدل باشد و برای تسک‌های ★★★ بعد از پیاده‌سازی
