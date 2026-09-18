@@ -236,16 +236,30 @@ jobs:
       - name: Collect APK
         id: apk
         run: |
-          # prefer the release APK, fall back to debug — whichever was produced
+          # Prefer the release APK, fall back to debug so a tag always has
+          # something installable — but SAY SO. v1.9.1 shipped a debug APK
+          # because assembleRelease had died of OutOfMemoryError and this step
+          # said nothing louder than one line in a 3000-line log.
           src="$(find app/build/outputs/apk/release -name '*.apk' 2>/dev/null | head -n1)"
-          [ -n "$src" ] || src="$(find app/build/outputs/apk/debug -name '*.apk' 2>/dev/null | head -n1)"
+          variant=release
+          if [ -z "$src" ]; then
+            src="$(find app/build/outputs/apk/debug -name '*.apk' 2>/dev/null | head -n1)"
+            variant=debug
+          fi
           if [ -z "$src" ]; then echo "No APK was produced" >&2; exit 1; fi
           ver="${GITHUB_REF_NAME#v}"
           [ "${GITHUB_REF_TYPE:-}" = "tag" ] || ver="ci"
           out="IRNetFree-${ver}.apk"
           cp "$src" "$out"
           echo "file=android/$out" >> "$GITHUB_OUTPUT"
+          echo "variant=$variant" >> "$GITHUB_OUTPUT"
           echo "Built $out from $src"
+          if [ "$variant" = debug ]; then
+            echo "::error::assembleRelease produced no APK — this release carries the DEBUG build. Check the Gradle output above (it was an OutOfMemoryError last time)."
+            echo "⚠ **The APK in this release is the debug build** — \`assembleRelease\` failed." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "APK: release variant, $(du -h "$out" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

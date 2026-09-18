@@ -168,3 +168,44 @@ test('the Android SDK step asks for an explicit package list, and never for `too
     assert.ok(value.split(/\s+/).includes('platform-tools'), `${name}: platform-tools is what the build needs installed`);
   }
 });
+
+/*
+ * The APK a tag actually ships.
+ *
+ * v1.9.1's Android job reported success and attached a DEBUG APK: 2 GB of
+ * Gradle heap was not enough for `collectReleaseDependencies`, assembleRelease
+ * died of OutOfMemoryError, and `assembleDebug assembleRelease … || true`
+ * swallowed it. The Collect step then found no release APK, silently fell back
+ * to the debug one it had built first, and said so in a single line of a very
+ * long log. The owner would have installed a debuggable build without knowing.
+ *
+ * The fallback itself is right — a tag with no APK at all is worse — so what is
+ * pinned here is that it cannot be silent, and that the build is given enough
+ * memory to not need it.
+ */
+test('a tag that ships the debug APK says so loudly', () => {
+  const lines = YML.split(/\r?\n/);
+  const at = lines.findIndex(l => /- name: Collect APK/.test(l));
+  assert.ok(at >= 0, 'release.yml has no Collect APK step');
+  const body = [];
+  for (let i = at + 1; i < lines.length; i++) {
+    if (/^\s{6}-\s/.test(lines[i])) break;
+    body.push(lines[i]);
+  }
+  const script = body.join('\n');
+  assert.match(script, /apk\/release/, 'the release variant must be preferred');
+  assert.match(script, /apk\/debug/, 'and debug kept as a fallback, so a tag always has an installable APK');
+  assert.match(script, /::error::/,
+    'falling back to the debug APK must raise a workflow error annotation — it shipped once without one');
+  assert.match(script, /GITHUB_STEP_SUMMARY/,
+    'and say which variant shipped in the run summary, where it is read without opening the log');
+});
+
+test('Gradle gets more heap than the build that ran out of it', () => {
+  const props = fs.readFileSync(path.join(__dirname, '..', 'android', 'gradle.properties'), 'utf8');
+  const m = props.match(/^org\.gradle\.jvmargs=.*?-Xmx(\d+)([mg])/mi);
+  assert.ok(m, 'android/gradle.properties sets no -Xmx');
+  const mb = m[2].toLowerCase() === 'g' ? Number(m[1]) * 1024 : Number(m[1]);
+  // 2048 MB is the value that failed collectReleaseDependencies on the v1.9.1 tag.
+  assert.ok(mb >= 3072, `-Xmx${m[1]}${m[2]} is not more than the 2048m that ran out of heap`);
+});
