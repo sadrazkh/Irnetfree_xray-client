@@ -9,6 +9,8 @@
 #
 # Env overrides:
 #   LIBV2RAY_TAG            pin a specific AndroidLibXrayLite tag (default: latest)
+#   PATTN_TAG               pin the patterniha/Xray-core release (default: pinned below)
+#   PATTN_ABIS              "<abi>:<asset.zip> ..." (default: arm64-v8a only)
 #   HEV_SO_URL_ARM64_V8A   URL to libhev-socks5-tunnel.so for arm64-v8a
 #   HEV_SO_URL_ARMEABI_V7A URL for armeabi-v7a
 #   HEV_SO_URL_X86_64      URL for x86_64
@@ -83,6 +85,42 @@ SINGBOX_TAG="${SINGBOX_TAG:-v1.13.14}"
 echo "    sing-box $SINGBOX_TAG"
 for pair in ${SINGBOX_ABIS:-"arm64-v8a:arm64"}; do
   fetch_singbox "${pair%%:*}" "${pair##*:}" "$SINGBOX_TAG"
+done
+
+# Xray-PattN (patterniha/Xray-core): the second Xray-format core, the one the
+# desktop offers per config. Same JSON, same argv as upstream — its one change
+# is that it does not refuse plaintext VLESS/Trojan to a public address, which
+# is why an Iranian config or a chain with one plaintext hop needs it. The fork
+# publishes an Android ELF in `Xray-android-<abi>.zip`, so it is bundled the
+# same way sing-box is: as a jniLib, the only place Android will execute a file
+# from. arm64 only by default (~40 MB each); other ABIs fall back to the
+# in-process core. Override with PATTN_TAG / PATTN_ABIS.
+fetch_pattn() {
+  local abi="$1" asset="$2" tag="$3" bin=""
+  local url="https://github.com/patterniha/Xray-core/releases/download/${tag}/${asset}"
+  local tmp; tmp="$(mktemp -d)"
+  echo "    $abi <- $asset"
+  if curl -fSL --retry 3 --retry-delay 2 "$url" -o "$tmp/xray.zip" && unzip -q -o "$tmp/xray.zip" -d "$tmp"; then
+    # The archive carries geo files and licences too; take the binary wherever
+    # upstream puts it (the desktop downloader searches for it the same way).
+    bin="$(find "$tmp" -type f -name xray | head -n1)"
+  fi
+  if [ -n "$bin" ]; then
+    mkdir -p "$jni/$abi"
+    cp "$bin" "$jni/$abi/libxraypattn.so"
+    echo "    saved -> jniLibs/$abi/libxraypattn.so"
+  else
+    echo "    (skip $abi: Xray-PattN download failed — configs asking for it fall back to the in-process core)"
+  fi
+  rm -rf "$tmp"
+}
+
+echo "==> Fetching Xray-PattN (the second Xray-format core)"
+# Pinned like the others so a shared CI runner never hits the rate-limited API.
+PATTN_TAG="${PATTN_TAG:-v26.9.13}"
+echo "    Xray-PattN $PATTN_TAG"
+for pair in ${PATTN_ABIS:-"arm64-v8a:Xray-android-arm64-v8a.zip"}; do
+  fetch_pattn "${pair%%:*}" "${pair##*:}" "$PATTN_TAG"
 done
 
 # The routing data files (geoip.dat / geosite.dat), the same Loyalsoldier build

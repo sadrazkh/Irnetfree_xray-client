@@ -18,7 +18,9 @@ data class ServerConfig(
     val outbound: JSONObject,
     val raw: String = "",
     val subId: String? = null,
-    // Per-config core: null/"xray" = default Xray core, "sing-box" = sing-box.
+    // Per-config core (EngineChoice.kt): null = follow the app-wide default,
+    // "xray" the in-process core, "xray-pattn" the bundled patterniha binary,
+    // "sing-box" the bundled sing-box binary (single configs only).
     val engine: String? = null,
     // A WireGuard's own resolvers and search domains (`DNS = 10.0.0.53, corp.local`
     // in its .conf, `dns=` in its link): asked THROUGH that tunnel for the names
@@ -156,6 +158,15 @@ data class AppSettings(
     val advancedRouting: Boolean = false,
     // apply routingMode (bypass Iran/China…) UNDER the advanced rules as well
     val advancedUseMode: Boolean = false,
+    // The core a config runs on when it does not name one of its own.
+    // "xray" = libv2ray in-process; "xray-pattn" = the bundled patterniha
+    // fork as a subprocess (EngineChoice.kt, the desktop's engineChoice.js).
+    val defaultEngine: String = EngineChoice.XRAY,
+    // Simple or advanced, the badge in the header. Advanced shows the chain,
+    // pool, routing and log screens behind More; simple hides them and leaves
+    // Connect one decision. Default true so an upgrade never hides work the
+    // owner already set up.
+    val advancedMode: Boolean = true,
     val routeRules: List<RouteRule> = emptyList(),
     val routeDefault: String = "proxy",
     val customRules: List<RouteRule> = emptyList(),
@@ -173,6 +184,8 @@ data class AppSettings(
         put("routingMode", routingMode)
         put("blockAds", blockAds); put("enableSniffing", enableSniffing); put("logLevel", logLevel)
         put("advancedRouting", advancedRouting); put("advancedUseMode", advancedUseMode)
+        put("defaultEngine", defaultEngine)
+        put("advancedMode", advancedMode)
         put("routeRules", JSONArray(routeRules.map { it.toJson() }))
         put("routeDefault", routeDefault)
         put("customRules", JSONArray(customRules.map { it.toJson() }))
@@ -226,6 +239,8 @@ data class AppSettings(
                 logLevel = o.optString("logLevel", "warning"),
                 advancedRouting = o.optBoolean("advancedRouting", false),
                 advancedUseMode = o.optBoolean("advancedUseMode", false),
+                defaultEngine = o.optString("defaultEngine", EngineChoice.XRAY).ifBlank { EngineChoice.XRAY },
+                advancedMode = o.optBoolean("advancedMode", true),
                 routeRules = ruleList(o.optJSONArray("routeRules")),
                 routeDefault = o.optString("routeDefault", "proxy"),
                 customRules = ruleList(o.optJSONArray("customRules")),

@@ -14,6 +14,7 @@ import com.irnetfree.vpn.core.CertPin
 import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.DnsPlan
+import com.irnetfree.vpn.core.EngineChoice
 import com.irnetfree.vpn.core.SingboxConfig
 import com.irnetfree.vpn.core.TrustedDns
 import com.irnetfree.vpn.net.Diagnostics
@@ -32,16 +33,22 @@ import java.io.File
 
 /**
  * Whole-device tunnel:
- *   1. Xray-core runs in-process with a local SOCKS inbound (tunFd=0, no internal tun).
+ *   1. A proxy core runs with a local SOCKS inbound and no internal tun. Which
+ *      core is EngineChoice's answer: Xray in-process (libv2ray, tunFd=0), or
+ *      one of the two bundled binaries as a subprocess — Xray-PattN, which
+ *      takes the very same config, or sing-box, which has its own format.
  *   2. VpnService establishes a TUN; our own app package is EXCLUDED from the VPN
- *      so xray's outbound sockets bypass the tunnel (no protect needed).
- *   3. hev-socks5-tunnel reads the TUN fd and forwards all packets to xray's SOCKS.
+ *      so the core's outbound sockets bypass the tunnel (no protect needed).
+ *   3. hev-socks5-tunnel reads the TUN fd and forwards all packets to that SOCKS
+ *      port — which is also how a subprocess core, with no handle on the TUN fd,
+ *      still carries the whole device.
  */
 class XrayVpnService : VpnService() {
 
     private var tun: ParcelFileDescriptor? = null
     private var xray: XrayCore? = null
     private var singbox: SingboxCore? = null
+    private var pattn: XrayPattnCore? = null
     private var tunnelRunning = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var statsJob: Job? = null
@@ -70,15 +77,26 @@ class XrayVpnService : VpnService() {
             .onFailure { VpnState.addLog("startForeground failed: ${it.message}") }
 
         try {
-            // 1) Proxy core with a local SOCKS inbound (no internal tun). The core
-            //    is chosen per-config: sing-box (subprocess) or Xray (in-process).
-            if (engine == "sing-box") {
+            // 1) Proxy core with a local SOCKS inbound (no internal tun).
+            //    EngineChoice already decided which, and prepare() already checked
+            //    it is bundled for this ABI; anything else here is a real failure.
+            if (engine == EngineChoice.SINGBOX) {
                 if (!SingboxCore.available(this)) { fail("sing-box core is not bundled for this device."); stopAll(); return }
                 val sb = SingboxCore()
                 val started = sb.start(this, config, socksPort) { s -> VpnState.addLog(s) }
                 if (!started) { fail("sing-box core failed to start — see logs (More → Logs)."); stopAll(); return }
                 singbox = sb
                 VpnState.addLog("✓ Running on sing-box core (socks=$socksPort)")
+            } else if (engine == EngineChoice.PATTN) {
+                if (!XrayPattnCore.available(this)) { fail("Xray-PattN is not bundled for this device."); stopAll(); return }
+                // Same geo files as the in-process core, in the same place —
+                // the subprocess is pointed at them with XRAY_LOCATION_ASSET.
+                XrayCore.prepareAssets(this) { s -> VpnState.addLog(s) }
+                val pn = XrayPattnCore()
+                val started = pn.start(this, config, socksPort) { s -> VpnState.addLog(s) }
+                if (!started) { fail("Xray-PattN failed to start — see logs (More → Logs)."); stopAll(); return }
+                pattn = pn
+                VpnState.addLog("✓ Running on Xray-PattN core (socks=$socksPort)")
             } else {
                 if (!XrayCore.available) { fail("Xray core (libv2ray) is not bundled."); stopAll(); return }
                 // The geo files the routing rules and the in-country resolver need,
@@ -234,6 +252,7 @@ class XrayVpnService : VpnService() {
         if (tunnelRunning) { runCatching { TProxyService.TProxyStopService() }; tunnelRunning = false }
         runCatching { xray?.stop() }; xray = null
         runCatching { singbox?.stop() }; singbox = null
+        runCatching { pattn?.stop() }; pattn = null
         runCatching { tun?.close() }; tun = null
         VpnState.set(ConnState.DISCONNECTED, "")
         stopForegroundCompat(); stopSelf()
@@ -322,9 +341,11 @@ class XrayVpnService : VpnService() {
             ensureCertPins(store, plan0)
             val plan = store.buildPlan()
 
-            // Per-config core: only a single server can pick sing-box, and only
-            // when its binary is bundled for this device — otherwise use Xray.
-            var engine = "xray"
+            // Which core, exactly as the desktop decides it (EngineChoice.kt):
+            // a single server takes its own choice, and a chain/pool/advanced plan
+            // runs on PattN as soon as ANY server in it asks for PattN. Whether
+            // that core is bundled for this ABI is asked separately below.
+            var engine = EngineChoice.chooseEngine(plan, s.defaultEngine)
             val single = plan as? ConnectionPlan.Single
 
             // Geo rules only work when the core can read geoip.dat/geosite.dat.
@@ -345,9 +366,21 @@ class XrayVpnService : VpnService() {
             // a resolver that does not believe a fake-IP network (TrustedDns.kt).
             val wgIps = resolveWgEndpoints(plan, s)
 
-            val config: String = if (single != null && single.server.engine == "sing-box" && SingboxCore.available(ctx)) {
-                try { engine = "sing-box"; SingboxConfig.build(single.server, s).toString() }
-                catch (e: Throwable) { engine = "xray"; VpnState.addLog("sing-box: ${e.message} — using Xray"); ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps).toString() }
+            // sing-box has its own config format and only ever runs a single
+            // server; PattN takes the very same JSON as the in-process core, so
+            // it needs nothing here beyond being present.
+            if (engine == EngineChoice.SINGBOX && (single == null || !SingboxCore.available(ctx))) {
+                if (single != null) VpnState.addLog("sing-box is not bundled for this device — using the in-process core.")
+                else VpnState.addLog("sing-box cannot run a chain, pool or advanced plan — using the in-process core.")
+                engine = EngineChoice.XRAY
+            }
+            if (engine == EngineChoice.PATTN && !XrayPattnCore.available(ctx)) {
+                VpnState.addLog("Xray-PattN is not bundled for this device (arm64 only) — using the in-process core. A config that needs plaintext VLESS/Trojan will be refused by it.")
+                engine = EngineChoice.XRAY
+            }
+            val config: String = if (engine == EngineChoice.SINGBOX && single != null) {
+                try { SingboxConfig.build(single.server, s).toString() }
+                catch (e: Throwable) { engine = EngineChoice.XRAY; VpnState.addLog("sing-box: ${e.message} — using the in-process core"); ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps).toString() }
             } else {
                 ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps).toString()
             }
@@ -355,7 +388,7 @@ class XrayVpnService : VpnService() {
             // What the OS resolves at: the tunnel peer under managed DNS (every
             // query enters the TUN and dns-out answers it), the user's own public
             // resolvers otherwise. A sing-box-format config carries no hijack.
-            val hijacks = engine != "sing-box"
+            val hijacks = engine != EngineChoice.SINGBOX
             val adapterDns = DnsPlan.adapterDnsServers(s, if (hijacks) TUN_DNS4 else null)
 
             return Intent(ctx, XrayVpnService::class.java).apply {

@@ -684,6 +684,21 @@ button { cursor: pointer; background: none; border: 0; color: inherit; }
 }
 .modal-title { flex: 1; font-size: 14px; font-weight: 600; }
 .modal-body { padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+
+/* Share-config QR. The code is an inline SVG (app.js), so it scales to this
+   box instead of overflowing the modal at its own pixel size. The white plate
+   is what a scanner needs behind the code on the dark skins — the SVG carries
+   its own 4-module quiet zone inside that. */
+.qr-body { align-items: stretch; }
+.qr-image {
+  align-self: center;
+  width: min(320px, 100%);
+  padding: 10px;
+  background: #fff;
+  border-radius: 12px;
+}
+.qr-image svg { display: block; width: 100%; height: auto; }
+.qr-image img { display: block; width: 100%; height: auto; image-rendering: pixelated; }
 .modal-foot {
   display: flex;
   justify-content: flex-end;
