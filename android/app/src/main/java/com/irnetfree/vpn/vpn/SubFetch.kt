@@ -49,27 +49,39 @@ object SubFetch {
     fun fetch(ctx: Context, store: Store, url: String, log: (String) -> Unit = {}): Outcome {
         // 1. The tunnel, if it is up: its inbound is already listening.
         if (VpnState.state.value == ConnState.CONNECTED) {
-            return Outcome(Subscriptions.fetch(url, store.settings.socksPort), "the tunnel")
+            return tagged("the tunnel") { Outcome(Subscriptions.fetch(url, store.settings.socksPort), "the tunnel") }
         }
 
         // 2. A throwaway core on a free port. Not being connected is the normal
         //    case for "add a subscription", so this is the path that matters.
         val server = borrowServer(store)
-        if (server != null) {
+        if (server == null) {
+            log("Subscription: not connected and no config to borrow a core from — trying the network directly")
+        } else {
             log("Subscription: not connected — fetching through a temporary ${server.name} core")
             val handle = XrayTester.start(ctx, server)
-            if (handle != null) {
+            if (handle == null) {
+                log("Subscription: the temporary ${server.name} core did not start — trying the network directly")
+            } else {
+                val via = "a temporary core (${server.name})"
                 try {
-                    return Outcome(Subscriptions.fetch(url, handle.port), "a temporary core (${server.name})")
+                    return tagged(via) { Outcome(Subscriptions.fetch(url, handle.port), via) }
                 } finally {
                     XrayTester.stop(handle)
                 }
             }
-            log("Subscription: the temporary core did not start — trying the network directly")
         }
 
-        // 3. Nothing to borrow.
-        return Outcome(Subscriptions.fetch(url, null), "your normal network")
+        // 3. Nothing to borrow, or nothing that would start.
+        val why = if (server == null) "your normal network (no config to borrow)" else "your normal network (the ${server.name} core would not start)"
+        return tagged(why) { Outcome(Subscriptions.fetch(url, null), why) }
+    }
+
+    /** Whatever went wrong, the message says which of the three paths it was on. */
+    private inline fun tagged(via: String, body: () -> Outcome): Outcome = try {
+        body()
+    } catch (e: Exception) {
+        throw RuntimeException("via $via: ${e.message ?: e.javaClass.simpleName}", e)
     }
 
     /**
