@@ -568,6 +568,24 @@ private fun doConnect(ctx: Context, store: Store) {
 }
 
 /* ================================ SERVERS ================================ */
+/**
+ * The config list, in the shape of design option 2c: one quiet line per server,
+ * and the one you tap opens in place to show what it measured and what you can
+ * do with it.
+ *
+ * The five icon buttons that used to sit on every row are gone. Thirteen
+ * servers meant sixty-five tap targets of about nine millimetres, four of them
+ * destructive, and the row's actual content — the name and the host — had
+ * whatever width was left. Now a row carries the three things you scan for
+ * (where it is, what it is, how fast it answered) and nothing you can hit by
+ * accident.
+ *
+ * Tapping a row selects it AND expands it, which is what 2c draws: the open
+ * card is the one marked IN USE. Selecting is free — it changes which config
+ * the next connect uses, never the tunnel that is already running.
+ *
+ * Subscriptions stay separated into their own sections, as they are on Windows.
+ */
 @Composable
 private fun ServersScreen(store: Store, bump: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -575,9 +593,13 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     var sheet by remember { mutableStateOf<String?>(null) }
     var editId by remember { mutableStateOf<String?>(null) }
     var qrServer by remember { mutableStateOf<ServerConfig?>(null) }
+    var confirmDelete by remember { mutableStateOf<ServerConfig?>(null) }
     val ctx = LocalContext.current
     val tests = remember { mutableStateMapOf<String, TestState>() }
     val testMutex = remember { Mutex() }
+    // The row that is open. Only ever one: two open cards and the list is a wall.
+    var openId by remember { mutableStateOf(store.selection) }
+
     // One test at a time; `phase` marks which metric is currently measuring.
     suspend fun testOne(s: ServerConfig) = testMutex.withLock {
         tests[s.id] = TestState(phase = "tcp")
@@ -594,23 +616,48 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     }
     fun runTest(s: ServerConfig) { scope.launch { testOne(s) } }
     fun testAll() { scope.launch { for (s in store.servers.toList()) testOne(s) } }
+    val testingAll = tests.values.any { it.phase.isNotEmpty() }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        TopBar("Servers") {
-            IconButton(onClick = { testAll() }) { Icon(Icons.Filled.Speed, "test all", tint = PRIMARY) }
-            IconButton(onClick = { sheet = "import" }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) }
+        /* ---- header: title, ping all, add ---- */
+        Row(
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Servers", color = TXT, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text(
+                if (testingAll) "testing…" else "ping all",
+                color = PRIMARY, fontSize = 10.sp, fontFamily = MONO,
+                modifier = Modifier.clip(RoundedCornerShape(50)).border(1.dp, PRIMARY_DIM, RoundedCornerShape(50))
+                    .clickable(enabled = !testingAll) { testAll() }
+                    .padding(horizontal = 10.dp, vertical = 7.dp)
+            )
+            Spacer(Modifier.width(12.dp))
+            Box(
+                Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(PRIMARY).clickable { sheet = "import" },
+                contentAlignment = Alignment.Center
+            ) { Text("+", color = ON_PRIMARY, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
         }
+        HorizontalDivider(color = BG2)
+
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp)) {
-            OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search…") }, leadingIcon = { Icon(Icons.Filled.Search, null) }, singleLine = true, shape = RoundedCornerShape(14.dp), colors = tfColors())
-            Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AssistChip(onClick = { sheet = "import" }, label = { Text("+ Link/Sub") })
-                AssistChip(onClick = { sheet = "wg" }, label = { Text("+ WireGuard") })
-                AssistChip(onClick = { sheet = "proxy" }, label = { Text("+ SOCKS/HTTP") })
+            Spacer(Modifier.height(14.dp))
+            OutlinedTextField(
+                q, { q = it }, Modifier.fillMaxWidth(),
+                placeholder = { Text("Search…", fontSize = 13.sp) },
+                leadingIcon = { Icon(Icons.Filled.Search, null, Modifier.size(18.dp)) },
+                singleLine = true, shape = RoundedCornerShape(14.dp), colors = tfColors()
+            )
+            Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AddPill("+ link / sub", Modifier.weight(1f)) { sheet = "import" }
+                AddPill("+ wireguard", Modifier.weight(1f)) { sheet = "wg" }
+                AddPill("+ socks", Modifier.weight(1f)) { sheet = "proxy" }
             }
+
             if (store.servers.isEmpty()) EmptyHint("No servers yet — tap + to add one.")
             // Grouped by where a config came from, as the desktop list is: what
             // you typed yourself first, then one section per subscription. With
-            // a subscription of 13 servers and a handful of your own, an
+            // a subscription of thirteen and a handful of your own, an
             // undifferentiated list makes your own impossible to find again.
             val shown = store.servers.filter { it.name.contains(q, true) || it.address.contains(q, true) }
             val groups = buildList {
@@ -625,27 +672,55 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                 if (orphans.isNotEmpty()) add("FROM A REMOVED SUBSCRIPTION" to orphans)
             }
             groups.forEach { (title, list) ->
-                Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(title, color = MUTED, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.width(8.dp))
-                    Text("${list.size}", color = MUTED2, fontSize = 9.sp, fontFamily = MONO,
-                        modifier = Modifier.clip(RoundedCornerShape(50)).background(CARD).padding(horizontal = 7.dp, vertical = 2.dp))
+                    Text(
+                        "${list.size}", color = MUTED2, fontSize = 9.sp, fontFamily = MONO,
+                        modifier = Modifier.clip(RoundedCornerShape(50)).background(CARD).padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
                     Spacer(Modifier.width(10.dp))
                     HorizontalDivider(color = STROKE)
                 }
-                list.forEach { s ->
-                    ConfigCard(s, store.selection == s.id, tests[s.id],
-                        onSelect = { store.saveSelection(s.id); bump() },
-                        onTest = { runTest(s) },
-                        onCopy = { copyLink(ctx, s) },
-                        onQr = { qrServer = s },
-                        onEdit = { editId = s.id },
-                        onDelete = { store.deleteServer(s.id); bump() })
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    list.forEach { s ->
+                        ConfigCard(
+                            s,
+                            selected = store.selection == s.id,
+                            open = openId == s.id,
+                            result = tests[s.id],
+                            onTap = {
+                                // Tap = use it and open it, which is the card 2c draws.
+                                // Tapping the open one again closes it.
+                                if (openId == s.id) openId = "" else { openId = s.id; store.saveSelection(s.id); bump() }
+                            },
+                            onTest = { runTest(s) },
+                            onCopy = { copyLink(ctx, s) },
+                            onQr = { qrServer = s },
+                            onEdit = { editId = s.id },
+                            onDelete = { confirmDelete = s }
+                        )
+                    }
                 }
             }
             Spacer(Modifier.height(16.dp))
         }
         qrServer?.let { QrDialog(it) { qrServer = null } }
+    }
+    // Delete is one tap away inside the card now, so it asks first.
+    confirmDelete?.let { victim ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            containerColor = CARD,
+            title = { Text("Delete this config?", color = TXT, fontSize = 16.sp) },
+            text = { Text(victim.name, color = MUTED, fontSize = 13.sp, fontFamily = MONO) },
+            confirmButton = {
+                TextButton(onClick = { store.deleteServer(victim.id); confirmDelete = null; bump() }) {
+                    Text("Delete", color = BAD)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel", color = MUTED) } }
+        )
     }
     AddConfigSheets(store, sheet, { sheet = it }, bump)
     val editing = editId?.let { store.serverById(it) }
@@ -654,6 +729,14 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
         if (idx >= 0) { store.servers[idx] = updated; store.saveServers() }
         editId = null; bump()
     }
+}
+
+@Composable private fun AddPill(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Text(
+        label, color = TXT2, fontSize = 11.sp, fontFamily = MONO, textAlign = TextAlign.Center, maxLines = 1,
+        modifier = modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, STROKE, RoundedCornerShape(12.dp))
+            .clickable { onClick() }.padding(vertical = 12.dp)
+    )
 }
 
 /** Shared add-config flow (paste / QR / manual) usable from Home and Servers. */
@@ -749,40 +832,165 @@ private fun latColor(ms: Long?): Color = when {
     ms == null -> MUTED; ms < 0 -> BAD; ms < 300 -> PRIMARY; ms < 900 -> AMBER; else -> BAD
 }
 
-@Composable private fun ConfigCard(s: ServerConfig, selected: Boolean, result: TestState?, onSelect: () -> Unit, onTest: () -> Unit, onCopy: () -> Unit, onQr: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
-    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onSelect() }, colors = CardDefaults.cardColors(containerColor = if (selected) PRIMARY_TINT else CARD), shape = RoundedCornerShape(14.dp),
-        border = BorderStroke(1.dp, if (selected) PRIMARY_DIM else STROKE)) {
-        Row(Modifier.padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            // at-a-glance quality dot (from TCP ping)
-            Box(Modifier.size(8.dp).clip(CircleShape).background(if (result?.tcp != null) latColor(result.tcp) else MUTED2))
+/**
+ * One server. Closed it is a single line; open it carries its measurements and
+ * its actions (design 2c).
+ *
+ * The leading glyph is the country flag out of the server's own name — a
+ * subscription writes them there ("TCP 12 🇩🇪-Sadra|📊1.15TB") and the desktop
+ * list shows the same thing. When there is none, the protocol stands in, which
+ * is the other thing worth knowing at a glance.
+ */
+@Composable private fun ConfigCard(
+    s: ServerConfig,
+    selected: Boolean,
+    open: Boolean,
+    result: TestState?,
+    onTap: () -> Unit,
+    onTest: () -> Unit,
+    onCopy: () -> Unit,
+    onQr: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val flag = flagIn(s.name)
+    val label = if (flag == null) s.name else s.name.replaceFirst(flag, "").trim().ifEmpty { s.name }
+    val where = "${badge(s.protocol)} · ${s.address}" + if (s.port > 0) ":${s.port}" else ""
+
+    if (!open) {
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(CARD)
+                .border(1.dp, if (selected) PRIMARY_DIM else STROKE, RoundedCornerShape(14.dp))
+                .clickable { onTap() }.padding(horizontal = 14.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Leading(flag, s.protocol)
             Spacer(Modifier.width(10.dp))
-            ProtoBadge(s.protocol); Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(label, color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(5.dp))
+                Text(where, color = SUBTLE, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(Modifier.width(8.dp))
+            val r = result
+            when {
+                r?.phase?.isNotEmpty() == true -> Text("…", color = AMBER, fontSize = 12.sp, fontFamily = MONO)
+                r?.error != null -> Text("×", color = BAD, fontSize = 12.sp, fontFamily = MONO)
+                r?.tcp != null -> Text(fmtLat(r.tcp).removeSuffix("ms"), color = latColor(r.tcp), fontSize = 12.sp, fontFamily = MONO)
+                else -> Text("—", color = SUBTLE, fontSize = 12.sp, fontFamily = MONO)
+            }
+        }
+        return
+    }
+
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(CARD_SEL)
+            .border(1.dp, STROKE_SEL, RoundedCornerShape(16.dp))
+    ) {
+        Row(
+            Modifier.fillMaxWidth().clickable { onTap() }.padding(start = 14.dp, end = 14.dp, top = 14.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Leading(flag, s.protocol)
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(s.name, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    Text(
+                        label, color = TXT, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
+                    )
                     if (selected) {
-                        Spacer(Modifier.width(6.dp))
-                        Text("SELECTED", color = PRIMARY, fontSize = 8.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            "IN USE", color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO,
+                            fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.em,
+                            modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(PRIMARY).padding(horizontal = 5.dp, vertical = 3.dp)
+                        )
                     }
                 }
-                Text("${s.address}:${s.port}", color = MUTED, fontSize = 11.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (result != null) {
-                    if (result.error != null) {
-                        Text("× ${result.error}", color = BAD, fontSize = 12.sp, maxLines = 1)
-                    } else Row(Modifier.padding(top = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        StatChip("⚡", result.tcp, result.phase == "tcp")
-                        StatChip("↓", result.down, result.phase == "down")
-                        StatChip("↑", result.up, result.phase == "up")
-                    }
-                }
+                Spacer(Modifier.height(6.dp))
+                Text(where, color = MUTED, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            IconButton(onClick = onTest, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.Speed, "test", tint = PRIMARY, modifier = Modifier.size(19.dp)) }
-            IconButton(onClick = onCopy, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.ContentCopy, "copy", tint = MUTED, modifier = Modifier.size(18.dp)) }
-            IconButton(onClick = onQr, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.QrCode2, "QR", tint = MUTED, modifier = Modifier.size(19.dp)) }
-            IconButton(onClick = onEdit, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.Edit, "edit", tint = MUTED, modifier = Modifier.size(19.dp)) }
-            IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD, modifier = Modifier.size(19.dp)) }
+        }
+
+        // What it measured. USED is not among them: this client keeps no
+        // per-config byte count, and a tile that can only ever say "—" is worse
+        // than the upload figure, which is the side that actually goes bad.
+        Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Tile(Modifier.weight(1f), "TCP", result?.tcp, result?.phase == "tcp", latColor(result?.tcp))
+            Tile(Modifier.weight(1f), "REAL", result?.down, result?.phase == "down", latColor(result?.down))
+            Tile(Modifier.weight(1f), "UP", result?.up, result?.phase == "up", latColor(result?.up))
+        }
+        result?.error?.let {
+            Text(it, color = BAD, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp))
+        }
+
+        HorizontalDivider(color = STROKE_SEL)
+        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+            CardAction("test", PRIMARY, Modifier.weight(1f), onTest)
+            ActionRule()
+            CardAction("copy", TXT2, Modifier.weight(1f), onCopy)
+            ActionRule()
+            CardAction("qr", TXT2, Modifier.weight(1f), onQr)
+            ActionRule()
+            CardAction("edit", TXT2, Modifier.weight(1f), onEdit)
+            ActionRule()
+            CardAction("del", BAD, Modifier.weight(1f), onDelete)
         }
     }
+}
+
+/** The country flag from the name, or the protocol as a chip when there is none. */
+@Composable private fun Leading(flag: String?, proto: String) {
+    if (flag != null) Text(flag, fontSize = 16.sp)
+    else Text(
+        badge(proto), color = protoColor(proto), fontSize = 8.sp, fontFamily = MONO, maxLines = 1,
+        modifier = Modifier.clip(RoundedCornerShape(5.dp))
+            .border(1.dp, protoColor(proto).copy(alpha = 0.35f), RoundedCornerShape(5.dp))
+            .padding(horizontal = 5.dp, vertical = 3.dp)
+    )
+}
+
+@Composable private fun Tile(modifier: Modifier, label: String, ms: Long?, measuring: Boolean, tint: Color) {
+    Column(modifier.clip(RoundedCornerShape(10.dp)).background(TILE).padding(9.dp)) {
+        Text(label, color = MUTED2, fontSize = 8.sp, fontFamily = MONO, letterSpacing = 0.08.em)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            if (measuring) "…" else fmtLat(ms),
+            color = if (measuring) AMBER else tint,
+            fontSize = 13.sp, fontFamily = MONO, fontWeight = FontWeight.Bold, maxLines = 1
+        )
+    }
+}
+
+@Composable private fun CardAction(label: String, tint: Color, modifier: Modifier, onClick: () -> Unit) {
+    Text(
+        label, color = tint, fontSize = 10.sp, fontFamily = MONO, textAlign = TextAlign.Center, maxLines = 1,
+        modifier = modifier.clickable { onClick() }.padding(vertical = 13.dp)
+    )
+}
+
+@Composable private fun ActionRule() {
+    Box(Modifier.width(1.dp).fillMaxHeight().background(STROKE_SEL))
+}
+
+/**
+ * The first flag emoji in a string: two Regional Indicator code points in a row.
+ * Subscription names carry them, which is where the list gets its flags from —
+ * a config record has no country of its own.
+ */
+private fun flagIn(name: String): String? {
+    var i = 0
+    while (i < name.length) {
+        val cp = name.codePointAt(i)
+        val w = Character.charCount(cp)
+        if (cp in 0x1F1E6..0x1F1FF && i + w < name.length) {
+            val next = name.codePointAt(i + w)
+            if (next in 0x1F1E6..0x1F1FF) return name.substring(i, i + w + Character.charCount(next))
+        }
+        i += w
+    }
+    return null
 }
 
 /** QR + copy for a config link that carries ALL settings (incl. patterniha). */
@@ -845,22 +1053,6 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
     android.widget.Toast.makeText(ctx, "Copied ✓", android.widget.Toast.LENGTH_SHORT).show()
 }
 
-/** A compact latency chip: dim icon + value, amber pulse while its phase measures. */
-@Composable private fun StatChip(icon: String, ms: Long?, testing: Boolean) {
-    Row(Modifier.clip(RoundedCornerShape(7.dp)).background(BG2).padding(horizontal = 7.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(icon, color = MUTED2, fontSize = 10.sp)
-        Spacer(Modifier.width(3.dp))
-        Text(if (testing) "…" else fmtLat(ms), color = if (testing) AMBER else latColor(ms), fontSize = 11.sp, fontFamily = MONO, fontWeight = FontWeight.Bold)
-    }
-}
-@Composable private fun ProtoBadge(proto: String) {
-    val c = protoColor(proto)
-    Text(
-        badge(proto), color = c, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.05.em, maxLines = 1,
-        modifier = Modifier.clip(RoundedCornerShape(5.dp)).border(1.dp, c.copy(alpha = 0.35f), RoundedCornerShape(5.dp))
-            .padding(horizontal = 6.dp, vertical = 4.dp)
-    )
-}
 
 /** One colour per protocol, used by the badge and anywhere a config is listed. */
 private fun protoColor(proto: String): Color = when (proto) {
