@@ -83,4 +83,24 @@ class SubscriptionsTest {
         // Anything we do not recognise still reaches the user unedited.
         assertEquals("HTTP 403", Subscriptions.explain(RuntimeException("HTTP 403"), null))
     }
+
+    /*
+     * The resolver order. TrustedDns believes the OS unless every answer is in a
+     * range no public server can be in; a censor that answers with a PUBLIC
+     * address of its own passes that test, and the handshake then fails against
+     * a machine that was never the panel — which is what the owner hit. For a
+     * subscription host the DoH answer wins, and the OS is only the fallback.
+     */
+    @Test fun aLiteralAddressIsNotLookedUpAtAll() {
+        val ips = Subscriptions.TrustedResolver.lookup("93.184.216.34")
+        assertEquals(listOf("93.184.216.34"), ips.map { it.hostAddress })
+    }
+
+    @Test fun theAddressUsedIsRememberedForTheFailureReport() {
+        Subscriptions.TrustedResolver.lookup("93.184.216.34")
+        val seen = synchronized(Subscriptions.TrustedResolver.lastSeen) {
+            Subscriptions.TrustedResolver.lastSeen["93.184.216.34"]
+        }
+        assertTrue("records what it handed out: $seen", seen != null && seen.contains("93.184.216.34"))
+    }
 }

@@ -677,7 +677,10 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
                 if (idx >= 0) store.subs[idx] = sub.copy(serverCount = tagged.size, lastUpdated = System.currentTimeMillis(),
                     upload = r.usage?.upload ?: 0, download = r.usage?.download ?: 0, total = r.usage?.total ?: 0, expire = r.usage?.expire ?: 0)
                 store.saveSubs(); Toast.makeText(ctx, "Subscription: ${tagged.size} servers added", Toast.LENGTH_SHORT).show(); bump()
-            } catch (e: Exception) { Toast.makeText(ctx, "Subscription error: ${e.message}", Toast.LENGTH_LONG).show(); bump() }
+            } catch (e: Exception) {
+                VpnState.addLog("Subscription ${sub.url}: ${e.message}")
+                Toast.makeText(ctx, "Subscription failed — see More → Logs", Toast.LENGTH_LONG).show(); bump()
+            }
         }
     }
     // Auto-detect: http(s) lines -> subscriptions (fetched); the rest -> config(s).
@@ -1045,7 +1048,10 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
                 val idx = store.subs.indexOfFirst { it.id == sub.id }
                 if (idx >= 0) store.subs[idx] = sub.copy(serverCount = tagged.size, lastUpdated = System.currentTimeMillis(), upload = r.usage?.upload ?: 0, download = r.usage?.download ?: 0, total = r.usage?.total ?: 0, expire = r.usage?.expire ?: 0)
                 store.saveSubs(); msg = "${tagged.size} servers updated"
-            } catch (e: Exception) { msg = "Error: ${e.message}" } finally { busy = false; bump() }
+            } catch (e: Exception) {
+                msg = "Error: ${e.message}"
+                VpnState.addLog("Subscription ${sub.url}: ${e.message}")
+            } finally { busy = false; bump() }
         }
     }
     // Auto update. `autoUpdateSubs` and `autoUpdateInterval` were in the settings
