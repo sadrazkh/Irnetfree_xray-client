@@ -127,13 +127,15 @@ class XrayPattnCore {
 
         fun available(ctx: Context): Boolean = binary(ctx) != null
 
-        /** The core's own version string, for the About/More screen. Blank if it cannot be asked. */
-        fun version(ctx: Context): String = try {
+        /** The core's own version string, for the More screen. Blank if it cannot be asked. */
+        fun version(ctx: Context): String {
             val bin = binary(ctx) ?: return ""
-            val p = ProcessBuilder(bin.absolutePath, "version").redirectErrorStream(true).start()
-            val out = p.inputStream.bufferedReader().use { it.readText() }
-            p.waitFor()
-            Regex("Xray[^\\n]*?(\\d+\\.\\d+\\.\\d+)").find(out)?.groupValues?.get(1) ?: ""
-        } catch (t: Throwable) { "" }
+            return try {
+                val p = ProcessBuilder(bin.absolutePath, "version").redirectErrorStream(true).start()
+                val out = p.inputStream.bufferedReader().use { it.readText() }
+                p.waitFor()
+                Regex("Xray[^\\n]*?(\\d+\\.\\d+\\.\\d+)").find(out)?.groupValues?.get(1) ?: ""
+            } catch (t: Throwable) { "" }
+        }
     }
 }
