@@ -17,28 +17,17 @@ import javax.net.ssl.SSLHandshakeException
 /**
  * Fetches a subscription URL and parses it into servers + usage info.
  *
- * Two things make this harder on a phone than on the desktop, and both caused
- * the same symptom — a TLS handshake that fails while the very same URL loads
- * on Windows:
+ * WHICH PATH a fetch takes is SubFetch's decision, not this file's: a phone
+ * that sends this request over its own network gets the ClientHello killed
+ * before a certificate arrives, so the request goes through a core — the
+ * running one, or a throwaway. All that is left here is the request itself and
+ * the two things that make a direct one as survivable as it can be:
  *
- *  1. THE TUNNEL. Our own package is excluded from the VPN (XrayVpnService
- *     applyPerApp) so the core's own sockets can leave the device; that
- *     exclusion applies to every socket this app opens, including this one. So
- *     a subscription fetch goes out over the raw ISP network even while the
- *     tunnel is up — where the desktop, whose whole system is inside the TUN,
- *     fetches the same URL through it. A middlebox that answers a censored
- *     panel's handshake then breaks the phone and not the laptop. When the
- *     tunnel is up we now dial through the core's own SOCKS inbound, which is
- *     what the desktop effectively does. Diagnostics.kt has had this note for
- *     the IP check since the beginning; the subscription fetch never got it.
- *
- *  2. THE RESOLVER. Off the tunnel, the name is resolved by the phone — and on
- *     a fake-IP network every name answers from 198.18.0.0/15, so the handshake
- *     goes to a machine that was never the panel. TrustedDns is asked instead:
- *     the OS first, a DoH server over HTTPS when every OS answer is in a range
- *     no public server can be in. (Through the SOCKS proxy this does not apply:
- *     OkHttp leaves the name unresolved for a SOCKS route on purpose, so the
- *     core resolves it at the far end, which is better still.)
+ *  - THE RESOLVER (TrustedResolver below). DoH first, the OS second.
+ *  - THE REPORT. A failure names the address reached and the certificate that
+ *    came back, because "handshake failed" cannot tell a censored panel from a
+ *    broken one. Through a SOCKS route neither applies: OkHttp leaves the name
+ *    unresolved on purpose, so the core resolves and dials it at the far end.
  *
  * TLS stays permissive (MODERN + COMPATIBLE + CLEARTEXT) because many panels
  * are old. A v2rayNG-style User-Agent makes them return the base64 config list
@@ -71,7 +60,11 @@ object Subscriptions {
         override fun lookup(hostname: String): List<InetAddress> {
             val doh = dohAddresses(hostname)
             val chosen = if (doh.isNotEmpty()) doh else TrustedDns.resolveHost(hostname, ipv6 = true).ips
+            // IPv4 first: OkHttp dials these in order, and a phone with a broken
+            // v6 path (or a router VPN carrying only v4) spends the timeout on the
+            // v6 addresses before reaching one that works. Both are kept.
             val ips = chosen.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
+                .sortedBy { it is java.net.Inet6Address }
             val via = if (doh.isNotEmpty()) "doh" else "os"
             // Nothing usable: the platform lookup, so this can only ever add
             // answers and never remove ones that already worked.
