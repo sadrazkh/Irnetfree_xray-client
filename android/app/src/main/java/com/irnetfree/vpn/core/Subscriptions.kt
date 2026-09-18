@@ -21,13 +21,16 @@ import javax.net.ssl.SSLHandshakeException
  * that sends this request over its own network gets the ClientHello killed
  * before a certificate arrives, so the request goes through a core — the
  * running one, or a throwaway. All that is left here is the request itself and
- * the two things that make a direct one as survivable as it can be:
+ * the three things that make a direct one as survivable as it can be:
  *
  *  - THE RESOLVER (TrustedResolver below). DoH first, the OS second.
+ *  - THE RETRY. An SSL failure is tried again with the ClientHello split across
+ *    TCP segments (FragmentedSocketFactory), which is the one thing a client
+ *    can do about a middlebox matching on the SNI without a tunnel to hide in.
  *  - THE REPORT. A failure names the address reached and the certificate that
  *    came back, because "handshake failed" cannot tell a censored panel from a
- *    broken one. Through a SOCKS route neither applies: OkHttp leaves the name
- *    unresolved on purpose, so the core resolves and dials it at the far end.
+ *    broken one. Through a SOCKS route none of it applies: OkHttp leaves the
+ *    name unresolved on purpose, so the core resolves and dials it at the far end.
  *
  * TLS stays permissive (MODERN + COMPATIBLE + CLEARTEXT) because many panels
  * are old. A v2rayNG-style User-Agent makes them return the base64 config list
@@ -86,7 +89,7 @@ object Subscriptions {
         }
     }
 
-    private fun clientFor(socksPort: Int?): OkHttpClient {
+    private fun clientFor(socksPort: Int?, fragment: Boolean = false): OkHttpClient {
         val b = OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
@@ -98,12 +101,16 @@ object Subscriptions {
             b.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort)))
         } else {
             b.dns(TrustedResolver)
+            // The raw socket under the TLS one: splitting its first write splits
+            // the ClientHello, so the SNI is not wholly inside any one segment.
+            if (fragment) b.socketFactory(FragmentedSocketFactory())
         }
         return b.build()
     }
 
     // One client per shape, so connections and the pool are reused across refreshes.
     private val direct: OkHttpClient by lazy { clientFor(null) }
+    private val fragmented: OkHttpClient by lazy { clientFor(null, fragment = true) }
     private var tunnelled: Pair<Int, OkHttpClient>? = null
     @Synchronized private fun client(socksPort: Int?): OkHttpClient {
         if (socksPort == null || socksPort <= 0) return direct
@@ -130,13 +137,24 @@ object Subscriptions {
     fun fetch(url: String, socksPort: Int? = null, call: (String, Int?) -> Result = ::attempt): Result {
         val viaTunnel = socksPort != null && socksPort > 0
         if (!viaTunnel) {
-            try { return call(url, null) } catch (e: Exception) { throw RuntimeException(explain(e, null) + whoAnswered(url, e), e) }
+            try { return call(url, null) } catch (plain: Exception) {
+                // A handshake that dies with no certificate is the SNI being read
+                // out of the ClientHello. Say it again in pieces before giving up.
+                if (plain is SSLException) {
+                    try { return attemptFragmented(url) } catch (frag: Exception) {
+                        throw RuntimeException(explain(plain, null) + "  Split ClientHello: " + explain(frag, null) + whoAnswered(url, plain), plain)
+                    }
+                }
+                throw RuntimeException(explain(plain, null) + whoAnswered(url, plain), plain)
+            }
         }
         return try {
             call(url, socksPort)
         } catch (tunnelFailure: Exception) {
             try {
-                call(url, null)
+                try { call(url, null) } catch (plain: Exception) {
+                    if (plain is SSLException) attemptFragmented(url) else throw plain
+                }
             } catch (directFailure: Exception) {
                 // Say both, in the order the user should act on them.
                 throw RuntimeException(
@@ -147,13 +165,18 @@ object Subscriptions {
         }
     }
 
-    private fun attempt(url: String, socksPort: Int?): Result {
+    /** The same request with the ClientHello split across segments. */
+    private fun attemptFragmented(url: String): Result = request(url, fragmented)
+
+    private fun attempt(url: String, socksPort: Int?): Result = request(url, client(socksPort))
+
+    private fun request(url: String, http: OkHttpClient): Result {
         val req = Request.Builder()
             .url(url.trim())
             .header("User-Agent", "v2rayNG/1.9.5")
             .header("Accept", "*/*")
             .build()
-        client(socksPort).newCall(req).execute().use { resp ->
+        http.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
             val body = resp.body?.string() ?: ""
             if (body.isBlank()) throw RuntimeException("empty response")
