@@ -46,7 +46,40 @@ object CertPin {
      * not complete a handshake (a uTLS-only server may refuse a plain one) — the
      * caller then leaves verification to the core.
      */
-    fun fetchLeafPin(host: String, port: Int, servername: String?, timeoutMs: Int = 5000): String {
+    fun fetchLeafPin(host: String, port: Int, servername: String?, timeoutMs: Int = 5000): String =
+        withLeaf(host, port, servername, timeoutMs) { leaf, _ -> pinOf(leaf.encoded) }
+
+    /**
+     * Who is actually answering for this name, in one line.
+     *
+     * When a TLS handshake fails there is no way to tell a censored panel from
+     * a broken one without looking at the certificate the other end sent, and
+     * the JSSE exception never carries it. This dials again with verification
+     * off and reports what came back: the address it reached, the name on the
+     * certificate and who issued it. On the owner's network a middlebox answers
+     * every name with its own certificate, and this is what makes that visible
+     * rather than a guess.
+     *
+     * Diagnostics only — nothing trusts the result.
+     */
+    fun describeLeaf(host: String, port: Int, servername: String? = host, timeoutMs: Int = 5000): String = try {
+        withLeaf(host, port, servername, timeoutMs) { leaf, peer ->
+            val subject = shortName(leaf.subjectX500Principal?.name)
+            val issuer = shortName(leaf.issuerX500Principal?.name)
+            "$peer presented \"$subject\" issued by \"$issuer\""
+        }
+    } catch (t: Throwable) {
+        "could not read the certificate (${t.message ?: t.javaClass.simpleName})"
+    }
+
+    /** CN if there is one, else the whole DN — an X.500 name is unreadable in a toast. */
+    private fun shortName(dn: String?): String {
+        val s = dn ?: return "?"
+        return Regex("CN=([^,]+)").find(s)?.groupValues?.get(1)?.trim() ?: s
+    }
+
+    /** One trust-all handshake; [use] gets the leaf certificate and the address reached. */
+    private fun <T> withLeaf(host: String, port: Int, servername: String?, timeoutMs: Int, use: (X509Certificate, String) -> T): T {
         val trustAll = arrayOf<TrustManager>(object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
             override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
@@ -68,7 +101,9 @@ object CertPin {
             sock.startHandshake()
             val certs = sock.session.peerCertificates
             if (certs.isEmpty()) throw IllegalStateException("the server presented no certificate")
-            return pinOf(certs[0].encoded)
+            val leaf = certs[0] as? X509Certificate ?: throw IllegalStateException("not an X.509 certificate")
+            val peer = sock.inetAddress?.hostAddress ?: host
+            return use(leaf, peer)
         } finally { runCatching { sock.close() } }
     }
 

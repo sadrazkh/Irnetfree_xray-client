@@ -49,14 +49,47 @@ object Subscriptions {
     data class Usage(val upload: Long, val download: Long, val total: Long, val expire: Long)
     data class Result(val servers: List<ServerConfig>, val usage: Usage?, val errors: List<String>)
 
-    /** Resolution that does not believe a fake-IP network (TrustedDns.kt). */
-    private object TrustedResolver : Dns {
+    /**
+     * DoH first, the platform second — the opposite of TrustedDns's own order,
+     * and deliberately so.
+     *
+     * TrustedDns believes the OS unless every answer lands in a range no public
+     * server can be in (198.18/15 and friends). That catches a fake-IP gateway.
+     * It does not catch what a subscription host actually gets, which is a
+     * PUBLIC address belonging to the censor: perfectly routable, not suspect by
+     * any test of the number itself, and the TLS handshake then fails because
+     * the machine it reaches was never the panel. A subscription URL is exactly
+     * the name worth spending one extra round trip on, so it is asked of a DoH
+     * resolver over HTTPS — whose own certificate the platform verifies, so the
+     * middlebox cannot answer for it either — and the OS is the fallback, not
+     * the default.
+     */
+    internal object TrustedResolver : Dns {
+        /** The last address set handed out, per host — for the failure report. */
+        val lastSeen = HashMap<String, String>()
+
         override fun lookup(hostname: String): List<InetAddress> {
-            val r = TrustedDns.resolveHost(hostname, ipv6 = true)
-            val ips = r.ips.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
-            // Nothing usable: fall back to the platform so this can only ever add
-            // answers, never remove the ones that already worked.
-            return ips.ifEmpty { Dns.SYSTEM.lookup(hostname) }
+            val doh = dohAddresses(hostname)
+            val chosen = if (doh.isNotEmpty()) doh else TrustedDns.resolveHost(hostname, ipv6 = true).ips
+            val ips = chosen.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
+            val via = if (doh.isNotEmpty()) "doh" else "os"
+            // Nothing usable: the platform lookup, so this can only ever add
+            // answers and never remove ones that already worked.
+            if (ips.isEmpty()) return Dns.SYSTEM.lookup(hostname)
+            synchronized(lastSeen) { lastSeen[hostname] = ips.joinToString(", ") { it.hostAddress ?: "?" } + " ($via)" }
+            return ips
+        }
+
+        private fun dohAddresses(hostname: String): List<String> {
+            if (DnsPlan.isIp(hostname)) return listOf(hostname)
+            for (url in TrustedDns.DEFAULT_DOH) {
+                val out = ArrayList<String>()
+                for (type in listOf("A", "AAAA")) {
+                    for (ip in TrustedDns.dohQuery(url, hostname, type, 4000)) if (ip !in out) out.add(ip)
+                }
+                if (out.isNotEmpty()) return out
+            }
+            return emptyList()
         }
     }
 
@@ -104,7 +137,7 @@ object Subscriptions {
     fun fetch(url: String, socksPort: Int? = null, call: (String, Int?) -> Result = ::attempt): Result {
         val viaTunnel = socksPort != null && socksPort > 0
         if (!viaTunnel) {
-            try { return call(url, null) } catch (e: Exception) { throw RuntimeException(explain(e, null), e) }
+            try { return call(url, null) } catch (e: Exception) { throw RuntimeException(explain(e, null) + whoAnswered(url, e), e) }
         }
         return try {
             call(url, socksPort)
@@ -114,7 +147,7 @@ object Subscriptions {
             } catch (directFailure: Exception) {
                 // Say both, in the order the user should act on them.
                 throw RuntimeException(
-                    explain(tunnelFailure, socksPort) + "  Off the tunnel: " + explain(directFailure, null),
+                    explain(tunnelFailure, socksPort) + "  Off the tunnel: " + explain(directFailure, null) + whoAnswered(url, directFailure),
                     tunnelFailure
                 )
             }
@@ -158,6 +191,23 @@ object Subscriptions {
                 "${e.message ?: "network error"} — $hint"
             else -> e.message ?: e.toString()
         }
+    }
+
+    /**
+     * After a TLS failure, dial the host again with verification off and report
+     * the certificate that came back. "Handshake failed" cannot distinguish a
+     * censored panel from a broken one; the name on the certificate can. Also
+     * reports the address we resolved to, since a poisoned answer is the other
+     * half of the same story.
+     */
+    private fun whoAnswered(url: String, e: Exception): String {
+        if (e !is SSLException) return ""
+        val u = runCatching { java.net.URI(url.trim()) }.getOrNull() ?: return ""
+        val host = u.host ?: return ""
+        val port = if (u.port > 0) u.port else if (u.scheme.equals("http", true)) 80 else 443
+        val resolved = synchronized(TrustedResolver.lastSeen) { TrustedResolver.lastSeen[host] }
+        val cert = CertPin.describeLeaf(host, port, host)
+        return "  [$host" + (if (resolved != null) " -> $resolved" else "") + "; $cert]"
     }
 
     // "upload=1234; download=5678; total=100000; expire=1699999999"
