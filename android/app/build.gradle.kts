@@ -31,7 +31,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
-        versionName = System.getenv("VERSION_NAME") ?: "1.9.5"
+        versionName = System.getenv("VERSION_NAME") ?: "1.9.6"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
@@ -108,9 +108,14 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // QR code scanning (camera) — self-contained scanner activity + permission.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
-    // Robust HTTP/TLS client for subscription fetching (Android's default
-    // HttpURLConnection fails the TLS handshake with many sub panels).
+    // HTTP client for subscription fetching.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // TLS 1.3 on every Android version. The platform TLS only has it from
+    // Android 10, and the owner's panel sits behind a Cloudflare zone whose
+    // minimum TLS version is 1.3 — on Android 8/9 every fetch of it failed with
+    // "Handshake failed" (see IRApp.installTls13). Installed as the first
+    // security provider it serves OkHttp, HttpURLConnection and raw SSLSocket.
+    implementation("org.conscrypt:conscrypt-android:2.7.0")
 
     // JVM unit tests for the pure core (DnsPlan, ConfigBuilder, LinkParser…): the
     // android.jar on the test classpath stubs org.json, so the real one is added.

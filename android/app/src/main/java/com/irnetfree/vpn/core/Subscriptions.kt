@@ -17,11 +17,14 @@ import javax.net.ssl.SSLHandshakeException
 /**
  * Fetches a subscription URL and parses it into servers + usage info.
  *
- * WHICH PATH a fetch takes is SubFetch's decision, not this file's: a phone
- * that sends this request over its own network gets the ClientHello killed
- * before a certificate arrives, so the request goes through a core — the
- * running one, or a throwaway. All that is left here is the request itself and
- * the three things that make a direct one as survivable as it can be:
+ * WHICH PATH a fetch takes is SubFetch's decision, not this file's (the
+ * tunnel, a throwaway core, or the network directly). The TLS itself is
+ * Conscrypt's, installed by IRApp so that TLS 1.3 exists on every Android —
+ * the owner's panel is behind a Cloudflare zone that accepts nothing older,
+ * and the platform TLS on Android 8/9 has nothing newer, which is what every
+ * "Handshake failed" here actually was. What is left in this file is the
+ * request itself and the three things that make a direct one as survivable
+ * as it can be:
  *
  *  - THE RESOLVER (TrustedResolver below). DoH first, the OS second.
  *  - THE RETRY. An SSL failure is tried again with the ClientHello split across
@@ -138,8 +141,9 @@ object Subscriptions {
         val viaTunnel = socksPort != null && socksPort > 0
         if (!viaTunnel) {
             try { return call(url, null) } catch (plain: Exception) {
-                // A handshake that dies with no certificate is the SNI being read
-                // out of the ClientHello. Say it again in pieces before giving up.
+                // One retry with the ClientHello split across segments — for a
+                // middlebox matching on the SNI. (Not for a server that wants a
+                // newer TLS than the device has; Conscrypt in IRApp covers that.)
                 if (plain is SSLException) {
                     try { return attemptFragmented(url) } catch (frag: Exception) {
                         throw RuntimeException(explain(plain, null) + "  Split ClientHello: " + explain(frag, null) + whoAnswered(url, plain), plain)
@@ -198,7 +202,7 @@ object Subscriptions {
                    else "Over your normal network — connect first, or the panel may be blocked by your ISP."
         return when (e) {
             is SSLHandshakeException, is SSLException ->
-                "TLS handshake failed — something answered for the panel and it was not the panel. $hint (${e.message ?: e.javaClass.simpleName})"
+                "TLS handshake failed. $hint (${causeChain(e)}; ${tlsHere()})"
             is UnknownHostException ->
                 "Could not resolve the subscription host. $hint"
             is SocketTimeoutException ->
@@ -225,6 +229,32 @@ object Subscriptions {
         val cert = CertPin.describeLeaf(host, port, host)
         return "  [$host" + (if (resolved != null) " -> $resolved" else "") + "; $cert]"
     }
+
+    /**
+     * Every message down the cause chain. The platform's SSLHandshakeException
+     * says "Handshake failed" and keeps the reason — a TLS alert number, an
+     * OpenSSL error string — one level down, which is where five releases of
+     * guessing could have ended.
+     */
+    internal fun causeChain(e: Throwable): String {
+        val parts = ArrayList<String>()
+        var t: Throwable? = e
+        var n = 0
+        while (t != null && n++ < 5) {
+            val m = (t.message ?: t.javaClass.simpleName).replace(Regex("\\s+"), " ").trim()
+            if (m.isNotEmpty() && parts.none { it == m }) parts.add(m)
+            t = t.cause
+        }
+        return parts.joinToString(" <- ")
+    }
+
+    /** What this device can speak, so a server that wants more is visible as such. */
+    internal fun tlsHere(): String = try {
+        val p = javax.net.ssl.SSLContext.getDefault().supportedSSLParameters.protocols
+            .filter { it.startsWith("TLS") }.joinToString("/") { it.removePrefix("TLSv") }
+        val provider = java.security.Security.getProviders().firstOrNull()?.name ?: "?"
+        "this device: TLS $p via $provider, Android API ${android.os.Build.VERSION.SDK_INT}"
+    } catch (t: Throwable) { "this device: TLS ?" }
 
     // "upload=1234; download=5678; total=100000; expire=1699999999"
     private fun parseUserInfo(h: String?): Usage? {
