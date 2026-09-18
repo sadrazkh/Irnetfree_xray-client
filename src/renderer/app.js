@@ -2724,7 +2724,12 @@ async function showServerQr(id) {
   const box = $('#qrImage'); box.innerHTML = '';
   try {
     const qr = qrcode(0, 'L'); qr.addData(link); qr.make();
-    box.innerHTML = qr.createImgTag(4, 6);
+    // A scalable SVG, not createImgTag's fixed-size GIF: a long link (an xhttp
+    // `extra` object, a WireGuard peer) makes a 350px+ bitmap that overflowed the
+    // modal and could not shrink. The SVG takes whatever width the box gives it
+    // and stays crisp. margin 16 = the 4 modules of quiet zone the QR spec asks
+    // for; 6px was 1.5 modules, which scanners refuse.
+    box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 16, scalable: true });
   } catch (e) {
     box.innerHTML = '<p class="hint" style="padding:24px 8px">' + (t('qr.tooBig') || 'Link too long for a QR — use Copy.') + '</p>';
   }
