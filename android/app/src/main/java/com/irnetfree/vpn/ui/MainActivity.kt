@@ -594,6 +594,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     var editId by remember { mutableStateOf<String?>(null) }
     var qrServer by remember { mutableStateOf<ServerConfig?>(null) }
     var confirmDelete by remember { mutableStateOf<ServerConfig?>(null) }
+    var addMenu by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
     val tests = remember { mutableStateMapOf<String, TestState>() }
     val testMutex = remember { Mutex() }
@@ -633,10 +634,24 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     .padding(horizontal = 10.dp, vertical = 7.dp)
             )
             Spacer(Modifier.width(12.dp))
-            Box(
-                Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(PRIMARY).clickable { sheet = "import" },
-                contentAlignment = Alignment.Center
-            ) { Text("+", color = ON_PRIMARY, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+            Box {
+                Box(
+                    Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(PRIMARY).clickable { addMenu = true },
+                    contentAlignment = Alignment.Center
+                ) { Text("+", color = ON_PRIMARY, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+                DropdownMenu(addMenu, { addMenu = false }, modifier = Modifier.background(CARD)) {
+                    listOf(
+                        "import" to "Link or subscription",
+                        "wg" to "WireGuard",
+                        "proxy" to "SOCKS / HTTP"
+                    ).forEach { (key, label) ->
+                        DropdownMenuItem(
+                            text = { Text(label, color = TXT, fontSize = 13.sp) },
+                            onClick = { addMenu = false; sheet = key }
+                        )
+                    }
+                }
+            }
         }
         HorizontalDivider(color = BG2)
 
@@ -648,11 +663,6 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                 leadingIcon = { Icon(Icons.Filled.Search, null, Modifier.size(18.dp)) },
                 singleLine = true, shape = RoundedCornerShape(14.dp), colors = tfColors()
             )
-            Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AddPill("+ link / sub", Modifier.weight(1f)) { sheet = "import" }
-                AddPill("+ wireguard", Modifier.weight(1f)) { sheet = "wg" }
-                AddPill("+ socks", Modifier.weight(1f)) { sheet = "proxy" }
-            }
 
             if (store.servers.isEmpty()) EmptyHint("No servers yet — tap + to add one.")
             // Grouped by where a config came from, as the desktop list is: what
@@ -731,13 +741,6 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     }
 }
 
-@Composable private fun AddPill(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Text(
-        label, color = TXT2, fontSize = 11.sp, fontFamily = MONO, textAlign = TextAlign.Center, maxLines = 1,
-        modifier = modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, STROKE, RoundedCornerShape(12.dp))
-            .clickable { onClick() }.padding(vertical = 12.dp)
-    )
-}
 
 /** Shared add-config flow (paste / QR / manual) usable from Home and Servers. */
 @Composable
