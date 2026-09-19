@@ -80,6 +80,9 @@ import com.irnetfree.vpn.vpn.XrayVpnService
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -249,6 +252,10 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     var measuring by remember { mutableStateOf("") }
     var pickerOpen by remember { mutableStateOf(false) }
     var homeSheet by remember { mutableStateOf<String?>(null) }
+    // "Auto (fastest)": what it is measuring right now, and the line that says
+    // what it chose. Both empty until somebody asks for it.
+    var autoPhase by remember { mutableStateOf("") }
+    var autoNote by remember { mutableStateOf("") }
     val haptic = LocalHapticFeedback.current
     val connectedSince by VpnState.connectedSince.collectAsState()
     val health by VpnState.health.collectAsState()
@@ -278,6 +285,48 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     fun selectedServer(): ServerConfig? {
         val sel = store.selection
         return store.serverById(sel) ?: store.chainById(sel.removePrefix("chain:"))?.let { store.chainMembers(it).firstOrNull() }
+    }
+
+    /**
+     * Choose the server instead of being told which one, then connect to it —
+     * the ⚡ row in the Windows picker (renderer/app.js connectAuto).
+     *
+     * IT SAYS WHICH ONE IT PICKED, three times over: the choice is SAVED, so the
+     * exit chip and the connected line now name it like any other selection; a
+     * line under the chip says it was chosen automatically, out of how many, and
+     * on what measurement; and the same sentence goes to the log, where it is
+     * still there tomorrow. An auto-connect you cannot audit is a mystery, not a
+     * convenience.
+     *
+     * Nothing is changed when nothing answers: the selection you had is still
+     * the selection you have.
+     */
+    fun connectFastest() {
+        val list = store.servers.toList()
+        if (list.size < 2 || autoPhase.isNotEmpty()) return
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        scope.launch {
+            autoNote = ""
+            val best = try { pickFastest(ctx, list) { autoPhase = it } } finally { autoPhase = "" }
+            val srv = best?.let { store.serverById(it.id) }
+            if (best == null || srv == null) {
+                autoNote = "no server answered — the selection was left alone"
+                VpnState.addLog("Auto (fastest): no server answered; kept ${store.selectionLabel()}")
+                Toast.makeText(ctx, "No server answered", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val real = best.real ?: -1L
+            val how = if (real >= 0) "$real ms through it" else "${best.tcp ?: -1L} ms handshake"
+            store.saveSelection(best.id)
+            autoNote = "⚡ fastest of ${list.size}: ${srv.name} · $how"
+            VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers")
+            Toast.makeText(ctx, "Fastest: ${srv.name} · $how", Toast.LENGTH_LONG).show()
+            // Already up on something else: take it down first, as the reconnect
+            // button does, so the new choice is what actually carries traffic.
+            if (VpnState.isActive) { XrayVpnService.disconnect(ctx); delay(700) }
+            val prep: Intent? = VpnService.prepare(ctx)
+            if (prep != null) vpnPrepare.launch(prep) else doConnect(ctx, store)
+        }
     }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -338,6 +387,33 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             /* ---- the exit ---- */
             Spacer(Modifier.height(18.dp))
             ExitChip(store, ping) { pickerOpen = true }
+
+            /* ---- let the app choose the exit (Windows: the picker's ⚡ row) ----
+                   On the front screen and not only inside the picker, because on
+                   a phone this is the shortest honest answer to "which one do I
+                   pick?" — one tap, and it tells you what it picked. */
+            if (store.servers.size >= 2) {
+                Spacer(Modifier.height(9.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    Text(
+                        if (autoPhase.isNotEmpty()) autoPhase else "⚡ connect to the fastest",
+                        color = if (autoPhase.isNotEmpty()) AMBER else PRIMARY,
+                        fontSize = 11.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clip(RoundedCornerShape(50))
+                            .border(1.dp, if (autoPhase.isNotEmpty()) STROKE else PRIMARY_DIM, RoundedCornerShape(50))
+                            .clickable(enabled = autoPhase.isEmpty()) { connectFastest() }
+                            .padding(horizontal = 13.dp, vertical = 7.dp)
+                    )
+                }
+            }
+            if (autoNote.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    autoNote, color = MUTED, fontSize = 10.sp, fontFamily = MONO,
+                    textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
 
             /* ---- the numbers: advanced mode only (the design's simple mode is
                    one ring and one decision) ---- */
@@ -454,7 +530,12 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             Spacer(Modifier.height(20.dp))
         }
     }
-    if (pickerOpen) SelectionSheet(store, { pickerOpen = false }) { pickerOpen = false; bump() }
+    if (pickerOpen) SelectionSheet(
+        store,
+        onAuto = { pickerOpen = false; connectFastest() },
+        onDismiss = { pickerOpen = false },
+        onPick = { pickerOpen = false; bump() }
+    )
     AddConfigSheets(store, homeSheet, { homeSheet = it }, bump)
 }
 
@@ -592,9 +673,74 @@ private fun doConnect(ctx: Context, store: Store) {
     catch (e: Exception) { VpnState.set(ConnState.ERROR, error = e.message ?: "connect failed") }
 }
 
+/**
+ * Measure the servers and hand back the winner (null = nothing answered), in
+ * two stages because the two measurements cost wildly different amounts.
+ *
+ *  1. THE HANDSHAKE, to all of them, eight at a time. A TCP connect is a socket
+ *     and nothing else, so thirteen servers cost about three seconds — and a
+ *     server whose port is shut is out of the running here, for free.
+ *  2. A REAL ROUND TRIP, through the three that answered quickest. This one
+ *     costs a throwaway xray each (XrayTester), which is why it is not run on
+ *     everything: it is the measurement that can tell a server that carries
+ *     traffic from one that merely accepts connections, and three of them is
+ *     about the most a phone can spend while somebody is watching the screen.
+ *
+ * Both numbers go to [Fastest.pick], which prefers a server that really carried
+ * a request over one that only shook hands — however fast the handshake was.
+ *
+ * `onPhase` runs on the caller's dispatcher (the UI's), so it may write state.
+ */
+private suspend fun pickFastest(
+    ctx: Context,
+    servers: List<ServerConfig>,
+    onPhase: (String) -> Unit
+): Fastest.Measured? {
+    val measured = LinkedHashMap<String, Fastest.Measured>()
+    var done = 0
+    onPhase("testing 0/${servers.size}…")
+    for (batch in servers.chunked(8)) {
+        val part = withContext(Dispatchers.IO) {
+            batch.map { s -> async { Fastest.Measured(s.id, tcp = Diagnostics.tcpPing(s.address, s.port, timeout = 3000)) } }.awaitAll()
+        }
+        part.forEach { measured[it.id] = it }
+        done += batch.size
+        onPhase("testing $done/${servers.size}…")
+    }
+    val short = Fastest.shortlist(measured.values.toList())
+    if (short.isEmpty()) return null
+    val byId = servers.associateBy { it.id }
+    short.forEachIndexed { i, m ->
+        val s = byId[m.id]
+        if (s != null) {
+            onPhase("checking ${i + 1}/${short.size} · ${s.name.take(16)}")
+            measured[m.id] = m.copy(real = realDelayThrough(ctx, s))
+        }
+    }
+    return Fastest.pick(measured.values.toList())
+}
 
+/** An HTTP round trip through one server, in ms, or -1 if it could not carry it. */
+private suspend fun realDelayThrough(ctx: Context, s: ServerConfig): Long {
+    val h = withContext(Dispatchers.IO) { XrayTester.start(ctx, s) } ?: return -1
+    try {
+        return withContext(Dispatchers.IO) { Diagnostics.httpLatency(h.port, timeout = 5000) }
+    } finally {
+        // NonCancellable on purpose: if the screen went away mid-test the core
+        // still has to be stopped, and a cancelled coroutine cannot withContext.
+        withContext(NonCancellable + Dispatchers.IO) { XrayTester.stop(h) }
+    }
+}
+
+
+/**
+ * The exit picker. Every row here is a SELECTION except the first one: "Auto
+ * (fastest)" is an action — it measures, then connects — which is exactly how
+ * the same row behaves in the Windows picker, and why it sits above the divider
+ * rather than in the list with a tick beside it.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun SelectionSheet(store: Store, onDismiss: () -> Unit, onPick: () -> Unit) {
+@Composable private fun SelectionSheet(store: Store, onAuto: () -> Unit, onDismiss: () -> Unit, onPick: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
         val options = buildList {
             if (store.poolEnabledValid().isNotEmpty()) add(Store.POOL_ID to "🧩 Proxy Pool (${store.poolEnabledValid().size})")
@@ -604,6 +750,23 @@ private fun doConnect(ctx: Context, store: Store) {
         }
         Column(Modifier.fillMaxWidth().heightIn(max = 460.dp).verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
             Text("Select an exit", color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
+            if (store.servers.size >= 2) {
+                Row(
+                    Modifier.fillMaxWidth().clickable { onAuto() }.padding(horizontal = 16.dp, vertical = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("⚡", fontSize = 15.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Auto (fastest)", color = PRIMARY, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "tests every server, then connects to the one that answers fastest",
+                            color = MUTED, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                HorizontalDivider(color = STROKE)
+            }
             if (options.isEmpty()) Text("No servers yet", color = MUTED, modifier = Modifier.padding(16.dp))
             options.forEach { (id, lbl) ->
                 Row(Modifier.fillMaxWidth().clickable { store.saveSelection(id); onPick() }.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
