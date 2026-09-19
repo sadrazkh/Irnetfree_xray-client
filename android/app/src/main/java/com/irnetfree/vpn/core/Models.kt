@@ -174,6 +174,10 @@ data class AppSettings(
     val perAppMode: String = "off",
     val perApps: List<String> = emptyList(),
     val ipv6: Boolean = false,
+    // Connect to the selected config when the app is opened. Off by default:
+    // like the desktop (main.js autoConnect), starting a tunnel by itself is a
+    // thing the user turns on deliberately.
+    val autoConnect: Boolean = false,
     val autoUpdateSubs: Boolean = true,
     val autoUpdateInterval: Int = 60,
     val lang: String = "fa"
@@ -190,7 +194,7 @@ data class AppSettings(
         put("routeDefault", routeDefault)
         put("customRules", JSONArray(customRules.map { it.toJson() }))
         put("perAppMode", perAppMode); put("perApps", JSONArray(perApps))
-        put("ipv6", ipv6); put("autoUpdateSubs", autoUpdateSubs); put("autoUpdateInterval", autoUpdateInterval)
+        put("ipv6", ipv6); put("autoConnect", autoConnect); put("autoUpdateSubs", autoUpdateSubs); put("autoUpdateInterval", autoUpdateInterval)
         put("lang", lang)
     }
     companion object {
@@ -247,6 +251,7 @@ data class AppSettings(
                 perAppMode = o.optString("perAppMode", "off"),
                 perApps = strList(o.optJSONArray("perApps")),
                 ipv6 = o.optBoolean("ipv6", false),
+                autoConnect = o.optBoolean("autoConnect", false),
                 autoUpdateSubs = o.optBoolean("autoUpdateSubs", true),
                 autoUpdateInterval = o.optInt("autoUpdateInterval", 60),
                 lang = o.optString("lang", "fa")

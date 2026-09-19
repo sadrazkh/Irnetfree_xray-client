@@ -66,6 +66,16 @@ class EngineChoiceTest {
         assertEquals("xray", EngineChoice.testEngineFor(null))
     }
 
+    @Test fun connectOnOpenIsOffUntilAskedForAndSurvivesARestart() {
+        // A tunnel that starts by itself is the user's decision, so a store that
+        // predates the setting must not suddenly begin connecting on launch.
+        assertEquals(false, AppSettings.fromJson(JSONObject()).autoConnect)
+        assertEquals(false, AppSettings.fromJson(JSONObject().put("socksPort", 10810)).autoConnect)
+        val on = AppSettings.fromJson(AppSettings().copy(autoConnect = true).toJson())
+        assertEquals(true, on.autoConnect)
+        assertEquals(false, AppSettings.fromJson(on.copy(autoConnect = false).toJson()).autoConnect)
+    }
+
     @Test fun theDefaultEngineSettingRoundTrips() {
         val fresh = AppSettings.fromJson(JSONObject())
         assertEquals("xray", fresh.defaultEngine)

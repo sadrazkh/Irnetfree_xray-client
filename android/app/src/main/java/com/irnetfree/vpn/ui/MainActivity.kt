@@ -140,6 +140,7 @@ private fun App(store: Store) {
     var more by remember { mutableStateOf<String?>(null) }
     var rev by remember { mutableIntStateOf(0) }
     val bump: () -> Unit = { rev++ }
+    AutoConnect(store)
 
     Scaffold(containerColor = BG, bottomBar = {
         Column {
@@ -174,6 +175,53 @@ private fun App(store: Store) {
         }
     }
 }
+
+/**
+ * Connect to the selected config when the app is opened, if the user asked
+ * for it (Settings → Connect on open). The desktop does the same on launch;
+ * this is the same rule with the two things a phone adds.
+ *
+ * ONCE PER PROCESS, not once per composition: this sits in the shell, and the
+ * shell recomposes whenever a tab changes or bump() fires. A flag on the
+ * object survives all of that and dies with the process, which is exactly the
+ * lifetime "on open" means.
+ *
+ * AND NEVER A SURPRISE DIALOG. Android asks for VPN consent through a system
+ * dialog, and throwing one at somebody who has just opened the app — perhaps
+ * only to paste a config — is not auto-connecting, it is ambushing them. When
+ * consent has not been given yet the attempt is skipped and the log says so;
+ * one manual connect grants it for good, and every launch after that is
+ * silent.
+ */
+@Composable private fun AutoConnect(store: Store) {
+    val ctx = LocalContext.current
+    LaunchedEffect(Unit) {
+        if (AutoConnectOnce.done) return@LaunchedEffect
+        AutoConnectOnce.done = true
+        if (!store.settings.autoConnect) return@LaunchedEffect
+        if (VpnState.isActive) return@LaunchedEffect
+        // Only a selection that still resolves — buildPlan throws when the
+        // config it names has been deleted, or a chain has lost its members.
+        val plan = runCatching { store.buildPlan() }
+        if (plan.isFailure) {
+            VpnState.addLog("Connect on open: ${plan.exceptionOrNull()?.message ?: "nothing to connect to"}")
+            return@LaunchedEffect
+        }
+        if (VpnService.prepare(ctx) != null) {
+            VpnState.addLog("Connect on open: Android has not been given VPN permission yet — connect once by hand and it will be automatic after that.")
+            return@LaunchedEffect
+        }
+        // Let the first frame land before a foreground service and a core
+        // start competing with it, as the desktop waits for its window.
+        delay(700)
+        if (VpnState.isActive) return@LaunchedEffect
+        VpnState.addLog("Connect on open: ${store.selectionLabel()}")
+        doConnect(ctx, store)
+    }
+}
+
+/** Survives recomposition; dies with the process. */
+private object AutoConnectOnce { @Volatile var done = false }
 
 /* ================================ CONNECT ================================ */
 /**
@@ -1448,6 +1496,12 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         }
         DropPick("Log level", listOf("none", "error", "warning", "info", "debug").map { it to it }, s.logLevel) { save(s.copy(logLevel = it)) }
         SwitchRow("IPv6", s.ipv6) { save(s.copy(ipv6 = it)) }
+        SwitchRow("Connect on open", s.autoConnect) { save(s.copy(autoConnect = it)) }
+        Text(
+            if (s.autoConnect) "When the app is opened it connects to the config in use, without asking. Android needs VPN permission first — connect once by hand and it is silent from then on."
+            else "The app opens without connecting; the ring waits for you.",
+            color = MUTED, fontSize = 11.sp
+        )
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
         Text("Core", color = TXT, fontWeight = FontWeight.Bold)
         // The default for configs that do not name a core of their own. A chain,
