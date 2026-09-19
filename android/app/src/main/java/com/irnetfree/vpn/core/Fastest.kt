@@ -53,5 +53,5 @@ object Fastest {
      * through a server whose port is closed only buys the same answer slower.
      */
     fun shortlist(all: List<Measured>, n: Int = SHORTLIST): List<Measured> =
-        all.filter { (it.tcp ?: -1) >= 0 }.sortedBy { it.tcp }.take(n)
+        all.filter { (it.tcp ?: -1L) >= 0L }.sortedBy { it.tcp }.take(n)
 }
