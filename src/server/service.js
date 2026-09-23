@@ -47,6 +47,11 @@ const { migrateSettings } = require('../main/settingsMigrate');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
 const { exportBundle, importBundle } = require('../main/backup');
 const { AssetUpdater } = require('../main/assetUpdater');
+// OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
+// list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
+// deliberately NOT given this: Electron never runs on a router.
+const { isOpenwrt, lanInterface, lanDevices, validMacs } = require('../main/openwrtNet');
+const { TunOpenwrt } = require('../main/tunOpenwrt');
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -108,6 +113,9 @@ const DEFAULT_SETTINGS = {
   // start with the OS (desktop-only) and connect to the last server on launch
   launchAtLogin: false,
   autoConnect: false,
+  // OpenWrt gateway: the devices (by MAC) that go around the tunnel. Applied
+  // live to the running gateway — deliberately NOT a reconnect key.
+  lanBypassMacs: [],
   // weekly refresh of the downloaded files, never under a live tunnel:
   // 'off' | 'geo' (the data files only — the default) | 'all' (the cores too)
   autoUpdateAssets: 'geo',
@@ -139,6 +147,10 @@ function createService(opts = {}) {
 
   // bin/ that ships with the source checkout (xray + geo may be downloaded here)
   const bundledBinDir = path.join(__dirname, '..', '..', 'bin');
+  // OpenWrt: `opkg install xray-core sing-box` puts the official cores in
+  // /usr/bin. Searched LAST — a core downloaded into userBinDir still wins.
+  const OPENWRT = isOpenwrt();
+  const systemBinDirs = OPENWRT ? ['/usr/bin'] : [];
 
   const listeners = new Set();
   const send = (channel, payload) => { for (const cb of listeners) { try { cb(channel, payload); } catch {} } };
@@ -207,7 +219,7 @@ function createService(opts = {}) {
   const usage = new UsageMeter({ totals: usageStore.get('totals', {}) });
   let lastUsageSend = 0;
 
-  function binDirs() { return [userBinDir, bundledBinDir]; }
+  function binDirs() { return [userBinDir, bundledBinDir, ...systemBinDirs]; }
   function assetStatus() {
     const st = scanAssets(binDirs());
     if (xray) st.xray = st.xray || xray.binExists('xray');
@@ -224,12 +236,15 @@ function createService(opts = {}) {
    */
   function makeTun(settings, { quiet = false } = {}) {
     let selected;
-    const opts = { binDir: bundledBinDir, extraDirs: [userBinDir], onLog: (line, level) => send('log', { line, level }), lang: settings.lang, userData: dataDir,
+    const opts = { binDir: bundledBinDir, extraDirs: [userBinDir, ...systemBinDirs], onLog: (line, level) => send('log', { line, level }), lang: settings.lang, userData: dataDir,
       onUnexpectedExit: () => {
         if (userDisconnecting || isQuitting || tun !== selected) return;
         send('log', { line: 'The macOS tunnel exited unexpectedly; checking recovery', level: 'error' });
         recoverFromNetworkChange('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
       } };
+    // On a router the backend is not a choice: the gateway wraps sing-box and
+    // adds the device exclusions. `tunBackend` is ignored here.
+    if (OPENWRT) return (selected = new TunOpenwrt(opts));
     if (process.platform === 'darwin' && settings.tunBackend === 'native-macos') return (selected = new NativeMacTun(opts));
     const sb = new TunSingbox(opts);
     const legacy = new TunManager(opts);
@@ -245,7 +260,7 @@ function createService(opts = {}) {
   const xray = new XrayManager({
     binPath: store.get('xrayPath', null),
     dataDir,
-    extraBinDirs: [userBinDir],
+    extraBinDirs: [userBinDir, ...systemBinDirs],
     onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
     onStatus: (state, info) => {
       if (xrayReloading && state === 'stopped') return;
@@ -942,7 +957,7 @@ function createService(opts = {}) {
           const wgEndpoints = Object.values(settings.wgEndpointIps || {});
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...wgEndpoints],
             tunAdapterDns,
-            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps });   // tun2socks ignores the 4th
+            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs });   // tun2socks ignores the 4th; only the router reads bypassMacs
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
           if (tunApps) {
             send('log', {
@@ -1531,6 +1546,10 @@ function createService(opts = {}) {
       elevated: makeTun(getSettings(), { quiet: true }).isElevated(),
       assets: assetStatus(),
       platform: process.platform,
+      // the router flavour of Linux, and the backend a connect would build (the
+      // renderer shows the device list and hides the desktop-only rows on it)
+      flavor: OPENWRT ? 'openwrt' : null,
+      tunBackendId: makeTun(getSettings(), { quiet: true }).backendId,
       version: appVersion,
       // a headless server has no desktop theme, so theme: 'system' behaves as
       // dark here unless the user picks light explicitly
@@ -1613,6 +1632,15 @@ function createService(opts = {}) {
       store.set('settings', next);
       if ('autoUpdateSubs' in partial || 'autoUpdateInterval' in partial) {
         if (next.autoUpdateSubs) subs.startAuto(next.autoUpdateInterval); else subs.stopAuto();
+      }
+      // The gateway's exclusions change under a live tunnel without rebuilding
+      // it: the nft set is replaced, sing-box is not touched (TunOpenwrt).
+      if ('lanBypassMacs' in partial) {
+        next.lanBypassMacs = validMacs(next.lanBypassMacs);
+        store.set('settings', next);
+        if (tun && tun.active && typeof tun.setBypassMacs === 'function') {
+          tun.setBypassMacs(next.lanBypassMacs).catch(e => send('log', { line: 'Gateway exclusions not applied: ' + e.message, level: 'error' }));
+        }
       }
       // "Start with the OS" is a desktop setting: on a server the process is a
       // service already. Refuse it in the store so the switch cannot claim it.
@@ -1719,6 +1747,12 @@ function createService(opts = {}) {
     'proc:clearCache': () => { store.set('procIpCache', {}); return { ok: true }; },
 
     'net:lanInfo': () => { const s = getSettings(); return { ip: lanIp(), all: lanCandidates(), socksPort: s.socksPort, httpPort: s.httpPort }; },
+    // OpenWrt: the devices behind the router (DHCP leases + neighbour table) — the exclusion list's source
+    'net:lanDevices': async () => {
+      if (!OPENWRT) return [];
+      const lanIf = await lanInterface(tunPlatform.run);
+      return lanDevices({ run: tunPlatform.run, lanIf });
+    },
     // Deliberately a no-op — do NOT mirror main.js's netWatcher.poke() here.
     //
     // On the desktop the renderer runs on the same machine as the tunnel, so the
