@@ -133,11 +133,11 @@ test('the main-first rule: before every sing-box rule, main for anything main ro
 
 test('the QUIC refusal is a second chain in the same table, off unless asked for, and never for a direct device', () => {
   const on = net.buildNftRuleset({ lanIf: 'br-lan', macs: ['aa:bb:cc:dd:ee:01'], blockQuic: true });
-  assert.ok(on.includes('  chain fwd {\n    type filter hook forward priority filter - 10; policy accept;\n    iifname "br-lan" meta mark != 0x1f1e udp dport 443 counter reject\n  }\n'), on);
-  assert.ok(on.indexOf('chain pre') < on.indexOf('chain fwd'), 'marking comes first');
+  assert.ok(on.includes('  chain quic {\n    type filter hook forward priority filter - 10; policy accept;\n    iifname "br-lan" meta mark != 0x1f1e udp dport 443 counter reject\n  }\n'), on);
+  assert.ok(on.indexOf('chain pre') < on.indexOf('chain quic'), 'marking comes first');
   assert.match(on, /^}\n$/m, 'the table still closes');
   const off = net.buildNftRuleset({ lanIf: 'br-lan', macs: ['aa:bb:cc:dd:ee:01'] });
-  assert.doesNotMatch(off, /chain fwd|dport 443/);
+  assert.doesNotMatch(off, /chain quic|dport 443/);
   assert.equal(off, net.buildNftRuleset({ lanIf: 'br-lan', macs: ['aa:bb:cc:dd:ee:01'], blockQuic: false }));
 });
 
