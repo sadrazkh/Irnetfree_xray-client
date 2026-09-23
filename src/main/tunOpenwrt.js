@@ -42,7 +42,14 @@ const net = require('./openwrtNet');
 
 /** sing-box's default `iproute2_table_index`; its rules must mention it. */
 const SINGBOX_TABLE = 2022;
-const VERIFY_WAIT_MS = 4000;
+/**
+ * How long the device and the policy route get to appear after sing-box
+ * reports itself up. Its `auto_route` lays the rules a moment AFTER the tun
+ * device exists; on a slow CPU (an emulated one in CI) that moment was over
+ * four seconds once, and a verify that reads `ip rule` too early tears down a
+ * gateway that was about to be fine.
+ */
+const VERIFY_WAIT_MS = 15000;
 
 function defaultWhich(name) {
   return String(process.env.PATH || '').split(path.delimiter).some(d => d && fs.existsSync(path.join(d, name)));
@@ -59,6 +66,7 @@ class TunOpenwrt {
     this.onLog = opts.onLog || (() => {});
     this.lang = opts.lang || 'fa';
     this.tmpDir = opts.tmpDir || os.tmpdir();
+    this.verifyWaitMs = opts.verifyWaitMs || VERIFY_WAIT_MS;
 
     this.backendId = 'openwrt';
     this.managesDns = true;
@@ -105,18 +113,23 @@ class TunOpenwrt {
     try { await this.run('nft', ['delete', 'table', 'inet', 'irnetfree']); } catch { /* not there */ }
   }
 
-  /** The device exists and sing-box's policy route is in place — else the LAN is not tunnelled. */
+  /**
+   * The device exists AND sing-box's policy route is in place — else the LAN
+   * is not tunnelled. Both are polled under one deadline: the rules arrive a
+   * moment after the device.
+   */
   async verify() {
-    const deadline = Date.now() + VERIFY_WAIT_MS;
+    const deadline = Date.now() + this.verifyWaitMs;
     let lastErr = null;
     for (;;) {
-      try { await this.run('ip', ['link', 'show', this.interfaceName]); lastErr = null; break; }
-      catch (e) { lastErr = e; if (Date.now() >= deadline) break; await platform.delay(250); }
-    }
-    if (lastErr) throw lastErr;
-    const rules = await this.run('ip', ['rule', 'show']);
-    if (!new RegExp(`lookup ${SINGBOX_TABLE}\\b`).test(rules)) {
-      throw new Error(`sing-box laid no policy route (ip rule):\n${String(rules).trim()}`);
+      try {
+        await this.run('ip', ['link', 'show', this.interfaceName]);
+        const rules = await this.run('ip', ['rule', 'show']);
+        if (new RegExp(`lookup ${SINGBOX_TABLE}\\b`).test(rules)) return;
+        lastErr = new Error(`sing-box laid no policy route (ip rule):\n${String(rules).trim()}`);
+      } catch (e) { lastErr = e; }
+      if (Date.now() >= deadline) throw lastErr;
+      await platform.delay(250);
     }
   }
 
