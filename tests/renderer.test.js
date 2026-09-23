@@ -87,9 +87,10 @@ test('every string on screen resolves in both languages', () => {
  * in both languages, including the ones only t() ever sees.
  */
 test('the OpenWrt device list and gateway row exist, hidden by default, and are fully translated', () => {
-  for (const id of ['gwRow', 'gwList', 'btnGwRefresh', 'insGatewayRow', 'insGateway']) {
+  for (const id of ['gwRow', 'gwList', 'btnGwRefresh', 'insGatewayRow', 'insGateway', 'gwQuicRow', 'optLanBlockQuic']) {
     assert.ok(htmlIds.has(id), `#${id} is missing`);
   }
+  assert.match(HTML, /id="gwQuicRow" hidden/, 'the QUIC switch is a router thing');
   const between = HTML.slice(HTML.indexOf('id="lanInfo"'), HTML.indexOf('id="optKillSwitch"'));
   assert.ok(between.includes('id="gwRow"'), 'the device list sits under LAN sharing, before the kill switch');
   assert.match(HTML, /id="gwRow" hidden/, 'hidden until flavor=openwrt');

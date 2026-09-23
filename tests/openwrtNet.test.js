@@ -115,19 +115,30 @@ test('the bypass rule sits before every sing-box rule and points marked packets 
     ['-4', 'rule', 'add', 'pref', '8999', 'fwmark', '0x1f1e', 'lookup', 'main'],
     ['-6', 'rule', 'add', 'pref', '8999', 'fwmark', '0x1f1e', 'lookup', 'main']
   ]);
-  assert.deepEqual(net.bypassRuleArgs('del')[0], ['-4', 'rule', 'del', 'pref', '8999', 'fwmark', '0x1f1e', 'lookup', 'main']);
   assert.ok(net.BYPASS_RULE_PREF < 9000, 'sing-box starts its rules at iproute2_rule_index 9000');
   assert.throws(() => net.bypassRuleArgs('flush'), /add or del/);
 });
 
-test('the main-first rule: before every sing-box rule, main for anything main routes specifically', () => {
+test('the main-first rule: before every sing-box rule, main for anything main routes specifically — except DNS', () => {
   assert.deepEqual(net.mainFirstRuleArgs('add'), [
-    ['-4', 'rule', 'add', 'pref', '8998', 'lookup', 'main', 'suppress_prefixlength', '0'],
-    ['-6', 'rule', 'add', 'pref', '8998', 'lookup', 'main', 'suppress_prefixlength', '0']
+    ['-4', 'rule', 'add', 'not', 'dport', '53', 'pref', '8998', 'lookup', 'main', 'suppress_prefixlength', '0'],
+    ['-6', 'rule', 'add', 'not', 'dport', '53', 'pref', '8998', 'lookup', 'main', 'suppress_prefixlength', '0']
   ]);
-  assert.deepEqual(net.mainFirstRuleArgs('del')[1], ['-6', 'rule', 'del', 'pref', '8998', 'lookup', 'main', 'suppress_prefixlength', '0']);
+  // deletion is by preference alone, so an older version's rule at 8998 goes too
+  assert.deepEqual(net.mainFirstRuleArgs('del'), [['-4', 'rule', 'del', 'pref', '8998'], ['-6', 'rule', 'del', 'pref', '8998']]);
+  assert.deepEqual(net.bypassRuleArgs('del'), [['-4', 'rule', 'del', 'pref', '8999'], ['-6', 'rule', 'del', 'pref', '8999']]);
   assert.ok(net.MAIN_FIRST_PREF < net.BYPASS_RULE_PREF, 'main-first, then the MAC bypass, then sing-box');
   assert.throws(() => net.mainFirstRuleArgs('flush'), /add or del/);
+});
+
+test('the QUIC refusal is a second chain in the same table, off unless asked for, and never for a direct device', () => {
+  const on = net.buildNftRuleset({ lanIf: 'br-lan', macs: ['aa:bb:cc:dd:ee:01'], blockQuic: true });
+  assert.ok(on.includes('  chain fwd {\n    type filter hook forward priority filter - 10; policy accept;\n    iifname "br-lan" meta mark != 0x1f1e udp dport 443 counter reject\n  }\n'), on);
+  assert.ok(on.indexOf('chain pre') < on.indexOf('chain fwd'), 'marking comes first');
+  assert.match(on, /^}\n$/m, 'the table still closes');
+  const off = net.buildNftRuleset({ lanIf: 'br-lan', macs: ['aa:bb:cc:dd:ee:01'] });
+  assert.doesNotMatch(off, /chain fwd|dport 443/);
+  assert.equal(off, net.buildNftRuleset({ lanIf: 'br-lan', macs: ['aa:bb:cc:dd:ee:01'], blockQuic: false }));
 });
 
 test('lanStatus: the device and the first IPv4 from ubus; a probe address inside the subnet, never the router', async () => {

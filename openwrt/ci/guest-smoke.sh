@@ -90,6 +90,14 @@ echo "$r" | grep -q 'dev br-lan' || { echo "LAN-to-LAN would enter the tunnel"; 
 r="$(ip route get 8.8.8.8 from 192.168.1.50 iif br-lan mark 0x1f1e)"; echo "excluded device -> internet: $r"
 echo "$r" | grep -q "via $GW" || { echo "an excluded device's traffic is not going out the WAN"; exit 1; }
 if echo "$r" | grep -q 'dev IRNetFree'; then echo "an excluded device's traffic entered the tunnel"; exit 1; fi
+# the DNS leak: a resolver on a CONNECTED subnet (an ISP modem on the WAN's own
+# net is the usual one) must still be reached through the tunnel — only DNS;
+# anything else on that subnet stays local
+r="$(ip route get $GW ipproto udp dport 53)"; echo "router -> DNS on a connected subnet: $r"
+echo "$r" | grep -q 'dev IRNetFree' || { echo "a DNS query to a resolver on a connected subnet would leak"; exit 1; }
+r="$(ip route get $GW ipproto udp dport 123)"; echo "router -> NTP on a connected subnet: $r"
+echo "$r" | grep -q 'dev br-lan' || { echo "non-DNS traffic to a connected subnet left the LAN"; exit 1; }
+nft list table inet irnetfree | grep -q 'udp dport 443 counter reject' || { echo "the QUIC refusal is missing (on by default on a router)"; exit 1; }
 
 say "assert: traffic really passes through the tunnel (the v1.13.3 outage: TCP died at the zone's INPUT)"
 # the router's own unbound sockets go to the tunnel (rule 9003), so this curl

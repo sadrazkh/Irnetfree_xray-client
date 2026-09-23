@@ -52,6 +52,14 @@ test('a router connects at start by default, and a stored "off" still wins', asy
   await service.invoke('settings:set', { autoConnect: true });
 });
 
+test('a router refuses QUIC from the LAN by default; the desktop default is off; the switch still works', async () => {
+  assert.equal(DEFAULT_SETTINGS.lanBlockQuic, false);
+  assert.equal((await service.invoke('settings:get')).lanBlockQuic, true, 'the router overlay');
+  await service.invoke('settings:set', { lanBlockQuic: false });
+  assert.equal((await service.invoke('settings:get')).lanBlockQuic, false);
+  await service.invoke('settings:set', { lanBlockQuic: true });
+});
+
 test('on a router the managed DNS plan is forced on — a stored "off" is overridden, not honoured', async () => {
   assert.equal(DEFAULT_SETTINGS.dnsManaged, true);
   const res = await service.invoke('settings:set', { dnsManaged: false });

@@ -685,6 +685,12 @@
             <div class="gw-list" id="gwList"></div>
             <p class="hint" data-i18n="gw.hint"></p>
           </div>
+          <!-- OpenWrt only: QUIC from the LAN refused, so browsers use TCP (which every proxy carries) -->
+          <div class="switch-row" id="gwQuicRow" hidden>
+            <div><div class="switch-title" data-i18n="gw.quic">QUIC (UDP 443) از شبکه رد نشود</div>
+              <div class="switch-sub" data-i18n="gw.quicSub"></div></div>
+            <label class="switch"><input type="checkbox" id="optLanBlockQuic" /><span class="slider"></span></label>
+          </div>
           <div class="switch-row">
             <div><div class="switch-title" data-i18n="kill.title">کیل سوییچ (Kill switch)</div>
               <div class="switch-sub" data-i18n="kill.sub">اگر اتصال ناگهانی قطع شد، کل اینترنت بسته می‌شود تا نشتی نباشد (ویندوز، نیازمند ادمین)</div></div>
