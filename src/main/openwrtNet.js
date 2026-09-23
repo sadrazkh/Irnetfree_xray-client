@@ -22,6 +22,12 @@ const fs = require('fs');
 const BYPASS_MARK = 0x1f1e;
 /** Below sing-box's default `iproute2_rule_index` (9000): evaluated before its rules. */
 const BYPASS_RULE_PREF = 8999;
+/**
+ * Before both: whatever the main table can route by a SPECIFIC route stays on
+ * the main table. See mainFirstRuleArgs — this is the rule that keeps the
+ * router reachable from its own LAN while the tunnel is up.
+ */
+const MAIN_FIRST_PREF = 8998;
 const NFT_TABLE = 'inet irnetfree';
 
 /**
@@ -146,17 +152,60 @@ function bypassRuleArgs(verb, mark = BYPASS_MARK, pref = BYPASS_RULE_PREF) {
 }
 
 /**
- * The LAN's L3 device, as netifd names it (`br-lan` on every stock image, but
- * a renamed or VLAN'd LAN says otherwise). `run` is tunPlatform.run's shape.
- * Never throws: a router with no ubus answer still gets the default.
+ * The rule that makes a router of this. sing-box's own rule set starts with
+ * `lookup 2022 suppress_prefixlength 0`, which is harmless while its table
+ * holds one default route — but with `route_exclude_address` set (the server
+ * IPs, always) sing-tun fills the table with the SPLIT ranges around the
+ * excluded addresses instead, none of them prefix 0, so nothing is suppressed
+ * any more and every packet the ROUTER ITSELF sends to a LAN client — DNS and
+ * DHCP replies, LuCI, this very UI — is routed into the tunnel and lost. The
+ * house goes dark until the power is pulled (v1.13.2 on the owner's AC-1304).
+ *
+ * This rule sits before all of sing-box's: anything the main table can route
+ * by a specific route (a LAN subnet, a VLAN, the WAN's own net, link-local)
+ * stays on main; only a destination main would send to its DEFAULT route falls
+ * through to sing-box's rules and the tunnel — which is exactly the split a
+ * gateway wants, for forwarded and for its own traffic alike, v4 and v6.
  */
-async function lanInterface(run) {
-  try {
-    const out = await run('ubus', ['call', 'network.interface.lan', 'status']);
-    const j = JSON.parse(out);
-    if (j && typeof j.l3_device === 'string' && j.l3_device) return j.l3_device;
-  } catch { /* fall through */ }
-  return 'br-lan';
+function mainFirstRuleArgs(verb, pref = MAIN_FIRST_PREF) {
+  if (verb !== 'add' && verb !== 'del') throw new Error('mainFirstRuleArgs: verb must be add or del');
+  return ['-4', '-6'].map(fam => [fam, 'rule', verb, 'pref', String(pref), 'lookup', 'main', 'suppress_prefixlength', '0']);
+}
+
+/** `ubus call network.interface.lan status` → { device, address, mask }; pure. */
+function parseLanStatus(text) {
+  const j = JSON.parse(text);
+  const device = (j && typeof j.l3_device === 'string' && j.l3_device) ? j.l3_device : 'br-lan';
+  const a = (j && Array.isArray(j['ipv4-address']) && j['ipv4-address'][0]) || {};
+  const address = (typeof a.address === 'string' && /^\d+\.\d+\.\d+\.\d+$/.test(a.address)) ? a.address : null;
+  const mask = Number.isInteger(a.mask) ? a.mask : null;
+  return { device, address, mask };
+}
+
+/**
+ * The LAN as netifd sees it: its L3 device (`br-lan` on every stock image, but
+ * a renamed or VLAN'd LAN says otherwise) and its first IPv4 address. `run` is
+ * tunPlatform.run's shape. Never throws: no ubus answer → the defaults.
+ */
+async function lanStatus(run) {
+  try { return parseLanStatus(await run('ubus', ['call', 'network.interface.lan', 'status'])); }
+  catch { return { device: 'br-lan', address: null, mask: null }; }
+}
+
+/** The LAN's L3 device only — what the device list and the nft rule need. */
+async function lanInterface(run) { return (await lanStatus(run)).device; }
+
+/**
+ * An address a LAN client could have, for `ip route get`: the router's own
+ * address with bit 1 of its last octet flipped (.1 → .3, .254 → .252). Never
+ * the router itself; inside the subnet for any mask up to /29; null when the
+ * LAN has no usable IPv4 — then there is nothing to probe.
+ */
+function lanProbeAddress(address, mask) {
+  if (!address || !/^\d+\.\d+\.\d+\.\d+$/.test(address) || mask == null || mask > 29) return null;
+  const o = address.split('.').map(Number);
+  o[3] ^= 2;
+  return o.join('.');
 }
 
 /**
@@ -174,7 +223,7 @@ async function lanDevices({ readFile = (p) => fs.promises.readFile(p, 'utf8'), r
 }
 
 module.exports = {
-  BYPASS_MARK, BYPASS_RULE_PREF, NFT_TABLE,
+  BYPASS_MARK, BYPASS_RULE_PREF, MAIN_FIRST_PREF, NFT_TABLE,
   isOpenwrt, normalizeMac, validMacs, parseDhcpLeases, parseNeigh, mergeDevices,
-  buildNftRuleset, bypassRuleArgs, lanInterface, lanDevices
+  buildNftRuleset, bypassRuleArgs, mainFirstRuleArgs, parseLanStatus, lanStatus, lanInterface, lanProbeAddress, lanDevices
 };

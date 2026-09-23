@@ -61,7 +61,7 @@ class TunOpenwrt {
     this.run = opts.run || platform.run;
     this.runSync = opts.runSync || ((cmd, args) => execFileSync(cmd, args, { stdio: 'ignore', timeout: 5000 }));
     this.writeFile = opts.writeFile || ((p, text) => fs.writeFileSync(p, text, { mode: 0o600 }));
-    this.lanInterface = opts.lanInterface || (() => net.lanInterface(this.run));
+    this.lanStatus = opts.lanStatus || (() => net.lanStatus(this.run));
     this.which = opts.which || defaultWhich;
     this.onLog = opts.onLog || (() => {});
     this.lang = opts.lang || 'fa';
@@ -77,6 +77,7 @@ class TunOpenwrt {
     this.excludeIps = [];
     this.macs = [];
     this.lanIf = 'br-lan';
+    this.probe = null;         // a LAN client address for the route check in verify()
     this.mark = net.BYPASS_MARK;
   }
 
@@ -97,14 +98,17 @@ class TunOpenwrt {
     await this.run('nft', ['-f', file]);
   }
 
-  /** The bypass rule, added after clearing any leftover so a restart never doubles it. */
+  /** Every `ip rule` of ours, in the order they are added: main-first, then the bypass. */
+  ruleSets(verb) { return [...net.mainFirstRuleArgs(verb), ...net.bypassRuleArgs(verb, this.mark)]; }
+
+  /** Our rules, added after clearing any leftover so a restart never doubles them. */
   async addRules() {
     await this.delRules();
-    for (const args of net.bypassRuleArgs('add', this.mark)) await this.run('ip', args);
+    for (const args of this.ruleSets('add')) await this.run('ip', args);
   }
 
   async delRules() {
-    for (const args of net.bypassRuleArgs('del', this.mark)) {
+    for (const args of this.ruleSets('del')) {
       try { await this.run('ip', args); } catch { /* not there — the common case */ }
     }
   }
@@ -125,11 +129,20 @@ class TunOpenwrt {
       try {
         await this.run('ip', ['link', 'show', this.interfaceName]);
         const rules = await this.run('ip', ['rule', 'show']);
-        if (new RegExp(`lookup ${SINGBOX_TABLE}\\b`).test(rules)) return;
+        if (new RegExp(`lookup ${SINGBOX_TABLE}\\b`).test(rules)) break;
         lastErr = new Error(`sing-box laid no policy route (ip rule):\n${String(rules).trim()}`);
       } catch (e) { lastErr = e; }
       if (Date.now() >= deadline) throw lastErr;
       await platform.delay(250);
+    }
+    // The check that would have caught v1.13.2: the router's own packets to a
+    // LAN client must NOT be routed into the tunnel. Refusing here costs a log
+    // line; going active would cost the whole house its network.
+    if (this.probe) {
+      const out = String(await this.run('ip', ['route', 'get', this.probe]));
+      if (new RegExp(`\\bdev ${this.interfaceName}\\b`).test(out)) {
+        throw new Error(`the router's own traffic to its LAN (${this.probe}) would enter the tunnel:\n${out.trim()}`);
+      }
     }
   }
 
@@ -151,7 +164,9 @@ class TunOpenwrt {
     if (this.active) return;
     const o = opts || {};
     this.inner.lang = this.lang;
-    this.lanIf = await this.lanInterface();
+    const lan = await this.lanStatus();
+    this.lanIf = lan.device;
+    this.probe = net.lanProbeAddress(lan.address, lan.mask);
     this.macs = net.validMacs(o.bypassMacs);
     let step = 'nft';
     try {
@@ -196,7 +211,7 @@ class TunOpenwrt {
   /** Synchronous best effort for process exit. */
   cleanupSync() {
     try { this.inner.cleanupSync(); } catch { /* best effort */ }
-    for (const args of net.bypassRuleArgs('del', this.mark)) { try { this.runSync('ip', args); } catch { /* not there */ } }
+    for (const args of this.ruleSets('del')) { try { this.runSync('ip', args); } catch { /* not there */ } }
     try { this.runSync('nft', ['delete', 'table', 'inet', 'irnetfree']); } catch { /* not there */ }
   }
 }

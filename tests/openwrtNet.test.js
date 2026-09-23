@@ -120,6 +120,30 @@ test('the bypass rule sits before every sing-box rule and points marked packets 
   assert.throws(() => net.bypassRuleArgs('flush'), /add or del/);
 });
 
+test('the main-first rule: before every sing-box rule, main for anything main routes specifically', () => {
+  assert.deepEqual(net.mainFirstRuleArgs('add'), [
+    ['-4', 'rule', 'add', 'pref', '8998', 'lookup', 'main', 'suppress_prefixlength', '0'],
+    ['-6', 'rule', 'add', 'pref', '8998', 'lookup', 'main', 'suppress_prefixlength', '0']
+  ]);
+  assert.deepEqual(net.mainFirstRuleArgs('del')[1], ['-6', 'rule', 'del', 'pref', '8998', 'lookup', 'main', 'suppress_prefixlength', '0']);
+  assert.ok(net.MAIN_FIRST_PREF < net.BYPASS_RULE_PREF, 'main-first, then the MAC bypass, then sing-box');
+  assert.throws(() => net.mainFirstRuleArgs('flush'), /add or del/);
+});
+
+test('lanStatus: the device and the first IPv4 from ubus; a probe address inside the subnet, never the router', async () => {
+  const status = JSON.stringify({ up: true, l3_device: 'br-lan', 'ipv4-address': [{ address: '192.168.1.1', mask: 24 }] });
+  assert.deepEqual(net.parseLanStatus(status), { device: 'br-lan', address: '192.168.1.1', mask: 24 });
+  assert.deepEqual(net.parseLanStatus('{"up":false}'), { device: 'br-lan', address: null, mask: null });
+  assert.deepEqual(await net.lanStatus(async () => status), { device: 'br-lan', address: '192.168.1.1', mask: 24 });
+  assert.deepEqual(await net.lanStatus(async () => { throw new Error('no ubus'); }), { device: 'br-lan', address: null, mask: null });
+  assert.equal(net.lanProbeAddress('192.168.1.1', 24), '192.168.1.3');
+  assert.equal(net.lanProbeAddress('192.168.1.254', 24), '192.168.1.252');
+  assert.equal(net.lanProbeAddress('10.0.0.1', 8), '10.0.0.3');
+  assert.equal(net.lanProbeAddress('192.168.1.1', 30), null, 'a /30 has no room for a probe');
+  assert.equal(net.lanProbeAddress(null, 24), null);
+  assert.equal(net.lanProbeAddress('192.168.1.1', null), null);
+});
+
 test('lanInterface: ubus names the LAN device; anything else means br-lan', async () => {
   const ubus = async (cmd, args) => {
     assert.equal(cmd, 'ubus');

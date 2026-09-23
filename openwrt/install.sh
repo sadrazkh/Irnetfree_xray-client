@@ -26,7 +26,7 @@ esac
 
 say "packages IRNetFree needs"
 opkg update >/dev/null
-opkg install node kmod-tun nftables unzip ca-bundle
+opkg install node kmod-tun nftables ip-full unzip ca-bundle
 NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
 [ "${NODE_MAJOR:-0}" -ge 18 ] || { echo "node $(node -v 2>/dev/null || echo missing) is too old: IRNetFree needs 18 or newer"; exit 1; }
 echo "node $(node -v)"

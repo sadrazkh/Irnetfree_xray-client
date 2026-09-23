@@ -49,7 +49,7 @@ sh /tmp/install.sh /tmp/irnetfree_<v>_all.ipk
 
 ```sh
 opkg update
-opkg install node kmod-tun nftables unzip ca-bundle
+opkg install node kmod-tun nftables ip-full unzip ca-bundle
 opkg install /tmp/irnetfree_<v>_all.ipk
 ```
 
@@ -111,7 +111,7 @@ PH0، و Chrome برای [OnHub Recovery Utility](https://chromewebstore.google.
 ```sh
 logread -e irnetfree | tail -50      # لاگ سرویس
 ip link show IRNetFree               # دستگاه تونل بالاست؟
-ip rule show | grep -E '2022|8999'   # قواعد sing-box و قاعدهٔ استثنا
+ip rule show | grep -E '2022|8998|8999'   # قواعد sing-box و قاعدهٔ استثنا
 nft list table inet irnetfree        # MACهای مستقیم
 ```
 
