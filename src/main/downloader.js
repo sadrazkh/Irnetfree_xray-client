@@ -125,6 +125,18 @@ function findFile(dir, name) {
   return null;
 }
 
+/**
+ * Linux release-asset arch tokens per Node `os.arch()`. Routers: the Google
+ * Wifi AC-1304 (OpenWrt, see tunOpenwrt.js) is 32-bit ARMv7 — `arm` — and
+ * the two mips rows are what the small routers would need; they are a
+ * mapping, not a supported target. amd64/arm64 rows are what they always were.
+ */
+const LINUX_ARCH = {
+  xray: { x64: '64', arm64: 'arm64-v8a', arm: 'arm32-v7a', mips: 'mips32', mipsel: 'mips32le' },
+  singbox: { x64: 'amd64', arm64: 'arm64', arm: 'armv7', mips: 'mips', mipsel: 'mipsle' },
+  tun2socks: { x64: 'amd64', arm64: 'arm64', arm: 'armv7', mips: 'mips', mipsel: 'mipsle' }
+};
+
 class Downloader {
   /** @param {object} opts { destDir, onLog, onProgress(component, pct) } */
   constructor(opts = {}) {
@@ -154,14 +166,14 @@ class Downloader {
   xrayAssetName(platform = os.platform(), arch = os.arch()) {
     if (platform === 'win32') return arch === 'arm64' ? 'Xray-windows-arm64-v8a.zip' : 'Xray-windows-64.zip';
     if (platform === 'darwin') return arch === 'arm64' ? 'Xray-macos-arm64-v8a.zip' : 'Xray-macos-64.zip';
-    return arch === 'arm64' ? 'Xray-linux-arm64-v8a.zip' : 'Xray-linux-64.zip';
+    return `Xray-linux-${LINUX_ARCH.xray[arch] || '64'}.zip`;
   }
 
   tun2socksAssetName(platform = os.platform(), arch = os.arch()) {
     const a = arch === 'arm64' ? 'arm64' : 'amd64';
     if (platform === 'win32') return `tun2socks-windows-${a}.zip`;
     if (platform === 'darwin') return `tun2socks-darwin-${a}.zip`;
-    return `tun2socks-linux-${a}.zip`;
+    return `tun2socks-linux-${LINUX_ARCH.tun2socks[arch] || 'amd64'}.zip`;
   }
 
   /** Download + integrate one component. Returns { ok, files } or throws. */
@@ -182,7 +194,7 @@ class Downloader {
     const a = arch === 'arm64' ? 'arm64' : 'amd64';
     if (platform === 'win32') return new RegExp(`sing-box-.*-windows-${a}\\.zip$`, 'i');
     if (platform === 'darwin') return new RegExp(`sing-box-.*-darwin-${a}\\.tar\\.gz$`, 'i');
-    return new RegExp(`sing-box-.*-linux-${a}\\.tar\\.gz$`, 'i');
+    return new RegExp(`sing-box-.*-linux-${LINUX_ARCH.singbox[arch] || 'amd64'}\\.tar\\.gz$`, 'i');
   }
 
   async getSingbox() {
