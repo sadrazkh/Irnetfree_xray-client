@@ -88,11 +88,17 @@ function step(name, rc) { if (rc !== 0) throw new Error(`${name} failed with exi
   let rc = 1;
   try {
     await con.waitFor(/Please press Enter to activate this console/, 300000);
-    con.send('\n');
-    // The shell resets the tty when it starts, and anything typed before its
-    // prompt is lost — the first run typed `true` into that gap and waited a
-    // minute for an answer that never came. Wait for the prompt, then sync.
-    await con.waitFor(/root@OpenWrt:\S*#/, 120000);
+    // The "press Enter" line is printed before the console reader is attached,
+    // so a single newline can vanish (the second run's did: the prompt only
+    // appeared when the final `poweroff` newline reached it). Keep pressing
+    // Enter until the prompt answers. The shell also resets the tty when it
+    // starts, so nothing else is typed before that prompt.
+    let prompt = null;
+    for (let i = 0; i < 36 && !prompt; i++) {
+      con.send('\n');
+      try { prompt = await con.waitFor(/root@OpenWrt:\S*#/, 5000); } catch { /* not yet */ }
+    }
+    if (!prompt) throw new Error('no shell prompt after activating the console');
     let synced = 1;
     for (let attempt = 0; attempt < 3 && synced !== 0; attempt++) {
       try { synced = await sh(con, 'true', 30000); } catch { con.send('\n'); }
