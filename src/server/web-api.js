@@ -113,6 +113,7 @@
 
     // LAN + kill switch
     lanInfo: () => invoke('net:lanInfo'),
+    lanDevices: () => invoke('net:lanDevices'),
     disarmKillSwitch: () => invoke('killswitch:disarm'),
     reconnect: () => invoke('vpn:reconnect'),
     releaseGuard: () => invoke('guard:release'),
