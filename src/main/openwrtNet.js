@@ -146,7 +146,7 @@ function buildNftRuleset({ lanIf = 'br-lan', macs = [], mark = BYPASS_MARK, bloc
   // for every Google and Apple host). Devices that go direct keep their QUIC.
   if (blockQuic) {
     lines.push(
-      '  chain fwd {',
+      '  chain quic {',   // not `fwd`: that is nftables' own forward statement, a reserved word
       '    type filter hook forward priority filter - 10; policy accept;',
       `    iifname "${ifName}" meta mark != ${hex} udp dport 443 counter reject`,
       '  }'
