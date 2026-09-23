@@ -57,7 +57,7 @@ function make(opts = {}) {
     inner, run,
     runSync: (cmd, args) => { lines.push('SYNC ' + [cmd, ...args].join(' ')); },
     writeFile: (p, text) => { writes.push([p, text]); },
-    lanInterface: async () => 'br-lan',
+    lanStatus: async () => (opts.lan || { device: 'br-lan', address: '192.168.1.1', mask: 24 }),
     which: (name) => (opts.which ? opts.which(name) : true),
     onLog: (line, level) => logs.push([level, line]),
     lang: 'en', tmpDir: '/tmp/irnf-test',
@@ -94,12 +94,17 @@ test('start: nft table, then the bypass rules, then sing-box, then verify — in
   assert.equal(writes[0][1], net.buildNftRuleset({ lanIf: 'br-lan', macs: ['aa:bb:cc:dd:ee:01'] }));
   assert.deepEqual(lines, [
     'nft -f /tmp/irnf-test/irnetfree-nft.conf',
-    'ip -4 rule del pref 8999 fwmark 0x1f1e lookup main',   // idempotent: clear a leftover first
+    'ip -4 rule del pref 8998 lookup main suppress_prefixlength 0',   // idempotent: clear leftovers first
+    'ip -6 rule del pref 8998 lookup main suppress_prefixlength 0',
+    'ip -4 rule del pref 8999 fwmark 0x1f1e lookup main',
     'ip -6 rule del pref 8999 fwmark 0x1f1e lookup main',
+    'ip -4 rule add pref 8998 lookup main suppress_prefixlength 0',   // main-first BEFORE the bypass, both before sing-box
+    'ip -6 rule add pref 8998 lookup main suppress_prefixlength 0',
     'ip -4 rule add pref 8999 fwmark 0x1f1e lookup main',
     'ip -6 rule add pref 8999 fwmark 0x1f1e lookup main',
     'ip link show IRNetFree',
-    'ip rule show'
+    'ip rule show',
+    'ip route get 192.168.1.3'                                          // the router's own path to a LAN client
   ]);
   assert.deepEqual(inner.calls[0], ['start', 10808, ['1.2.3.4'], { ipv6: false, strict: false, apps: null, bypassMacs: ['AA:BB:CC:DD:EE:01', 'bad'] }]);
   assert.equal(inner.lang, 'en', 'the language the service set is handed down');
@@ -174,6 +179,8 @@ test('stop: sing-box first, then the rules and the table; a second stop is a no-
   assert.deepEqual(tun.excludeIps, []);
   assert.deepEqual(inner.calls.map(c => c[0]), ['start', 'stop']);
   assert.deepEqual(lines, [
+    'ip -4 rule del pref 8998 lookup main suppress_prefixlength 0',
+    'ip -6 rule del pref 8998 lookup main suppress_prefixlength 0',
     'ip -4 rule del pref 8999 fwmark 0x1f1e lookup main',
     'ip -6 rule del pref 8999 fwmark 0x1f1e lookup main',
     'nft delete table inet irnetfree'
@@ -181,6 +188,23 @@ test('stop: sing-box first, then the rules and the table; a second stop is a no-
   lines.length = 0;
   await tun.stop();
   assert.deepEqual(lines, []);
+});
+
+test('verify refuses a gateway that would swallow the router’s own LAN traffic (the v1.13.2 outage)', async () => {
+  // what the AC-1304 showed: sing-box’s split ranges in table 2022 catch 192.168.1.x
+  const bad = make({ answers: [[/^ip rule show/, RULES_OK], [/^ip route get 192\.168\.1\.3/, '192.168.1.3 dev IRNetFree table 2022 src 172.19.0.1 uid 0\n    cache\n']] });
+  await assert.rejects(bad.tun.start(10808, ['1.2.3.4'], [], {}), /\(verify\): the router's own traffic to its LAN \(192\.168\.1\.3\) would enter the tunnel[\s\S]*dev IRNetFree/);
+  assert.equal(bad.tun.active, false);
+  assert.deepEqual(bad.inner.calls.map(c => c[0]), ['start', 'stop'], 'rolled back, not left running');
+  // the healthy answer: br-lan
+  const good = make({ answers: [[/^ip rule show/, RULES_OK], [/^ip route get 192\.168\.1\.3/, '192.168.1.3 dev br-lan src 192.168.1.1 uid 0\n    cache\n']] });
+  await good.tun.start(10808, ['1.2.3.4'], [], {});
+  assert.equal(good.tun.active, true);
+  // a LAN with no usable IPv4 has nothing to probe — no route lookup, no false refusal
+  const noLan = make({ lan: { device: 'br-lan', address: null, mask: null } });
+  await noLan.tun.start(10808, [], [], {});
+  assert.equal(noLan.tun.active, true);
+  assert.ok(!noLan.lines.some(l => l.startsWith('ip route get')), 'nothing to probe');
 });
 
 test('stop keeps going when a delete fails (nothing to delete is the common case)', async () => {
@@ -200,6 +224,8 @@ test('cleanupSync: the synchronous best effort for process exit, inner first', (
   tun.cleanupSync();
   assert.deepEqual(inner.calls, [['cleanupSync']]);
   assert.deepEqual(lines, [
+    'SYNC ip -4 rule del pref 8998 lookup main suppress_prefixlength 0',
+    'SYNC ip -6 rule del pref 8998 lookup main suppress_prefixlength 0',
     'SYNC ip -4 rule del pref 8999 fwmark 0x1f1e lookup main',
     'SYNC ip -6 rule del pref 8999 fwmark 0x1f1e lookup main',
     'SYNC nft delete table inet irnetfree'

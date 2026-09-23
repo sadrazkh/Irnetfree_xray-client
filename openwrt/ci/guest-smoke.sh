@@ -46,10 +46,24 @@ until ip link show IRNetFree >/dev/null 2>&1; do
 	sleep 1
 done
 
-say "assert: sing-box routes, our rule, our table, the zone"
+say "assert: sing-box routes, our rules, our table, the zone"
 ip rule show
 ip rule show | grep -q 'lookup 2022' || { echo "sing-box laid no policy route"; exit 1; }
+ip rule show | grep -q '^8998:.*lookup main suppress_prefixlength 0' || { echo "the main-first rule is missing"; exit 1; }
 ip rule show | grep -q '^8999:' || { echo "the bypass rule is missing"; exit 1; }
+
+say "assert: where packets actually go (the v1.13.2 outage: the router's own LAN replies entered the tunnel)"
+ip route show table 2022
+r="$(ip route get 192.168.1.50)"; echo "router -> LAN client:      $r"
+echo "$r" | grep -q 'dev br-lan' || { echo "the router's own packets to a LAN client would enter the tunnel"; exit 1; }
+r="$(ip route get 8.8.8.8)"; echo "router -> internet:        $r"
+echo "$r" | grep -q 'dev IRNetFree' || { echo "the router's own internet traffic is not tunnelled"; exit 1; }
+r="$(ip route get 8.8.8.8 from 192.168.1.50 iif br-lan)"; echo "LAN client -> internet:    $r"
+echo "$r" | grep -q 'dev IRNetFree' || { echo "a LAN client's internet traffic is not tunnelled"; exit 1; }
+r="$(ip route get 192.168.1.60 from 192.168.1.50 iif br-lan)"; echo "LAN client -> LAN client:  $r"
+echo "$r" | grep -q 'dev br-lan' || { echo "LAN-to-LAN would enter the tunnel"; exit 1; }
+r="$(ip route get 8.8.8.8 from 192.168.1.50 iif br-lan mark 0x1f1e)"; echo "excluded device -> internet: $r"
+echo "$r" | grep -q 'dev eth0' || { echo "an excluded device's traffic is not going out the WAN"; exit 1; }
 nft list table inet irnetfree
 nft list table inet irnetfree | grep -q '02:00:00:00:00:01' || { echo "the excluded MAC is not in the set"; exit 1; }
 nft list ruleset | grep -q 'oifname "IRNetFree"' || { echo "fw4 has no rule for the IRNetFree device"; exit 1; }
@@ -68,5 +82,8 @@ sleep 3
 if ip link show IRNetFree >/dev/null 2>&1; then echo "the TUN device is still there"; exit 1; fi
 if nft list table inet irnetfree >/dev/null 2>&1; then echo "the nft table is still there"; exit 1; fi
 if ip rule show | grep -q '^8999:'; then echo "the bypass rule is still there"; exit 1; fi
+if ip rule show | grep -q '^8998:'; then echo "the main-first rule is still there"; exit 1; fi
+r="$(ip route get 8.8.8.8)"; echo "router -> internet after disconnect: $r"
+echo "$r" | grep -q 'dev eth0' || { echo "after disconnect the router does not go out the WAN"; exit 1; }
 
 say "SMOKE OK"

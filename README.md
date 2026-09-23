@@ -1239,7 +1239,7 @@ gradle wrapper               # یک‌بار، اگر ./gradlew نداری (Wrap
 
 - بک‌اند: `src/main/tunOpenwrt.js` — همان TUN sing-box دسکتاپ (روی لینوکس `auto_route` ترافیک فورواردشده را
   هم می‌گیرد) + یک جدول nftables برای استثناها. DNS روتر دست نمی‌خورد؛ پورت ۵۳ از تونل جواب می‌گیرد.
-- بسته: `irnetfree_<v>_all.ipk` در هر ریلیز (`openwrt/build-ipk.js`)؛ وابسته به `node kmod-tun nftables unzip ca-bundle`.
+- بسته: `irnetfree_<v>_all.ipk` در هر ریلیز (`openwrt/build-ipk.js`)؛ وابسته به `node kmod-tun nftables ip-full unzip ca-bundle`.
   هر push هم یک بستهٔ آزمایشی می‌سازد: Actions → Tests → artifact **`IRNetFree-OpenWrt-dev`**.
 - تست: CI دو OpenWrt واقعی (24.10.2 و 23.05.5، `armsr/armv7`) را در QEMU بوت می‌کند، با همین نصب‌کننده نصب می‌کند
   و گیت‌وی را بالا می‌آورد (`openwrt/ci/`). روی روتر واقعی: چک‌لیست پایین.
@@ -1276,7 +1276,7 @@ sh -c "$(wget -q -O - https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-
 `sh install.sh /tmp/irnetfree_<v>_all.ipk`. دستی هم می‌شود:
 
 ```bash
-opkg update && opkg install node kmod-tun nftables unzip ca-bundle && opkg install /tmp/irnetfree_<v>_all.ipk
+opkg update && opkg install node kmod-tun nftables ip-full unzip ca-bundle && opkg install /tmp/irnetfree_<v>_all.ipk
 ```
 
 بعد **LuCI → Services → IRNetFree → Open IRNetFree** (یا `cat /etc/irnetfree/token` و
@@ -1310,7 +1310,7 @@ opkg update && opkg install node kmod-tun nftables unzip ca-bundle && opkg insta
 ### چک روی دستگاه (چیزی که CI نمی‌بیند)
 
 ```bash
-logread -e irnetfree | tail -50 ; ip link show IRNetFree ; ip rule show | grep -E '2022|8999' ; nft list table inet irnetfree ; free -m
+logread -e irnetfree | tail -50 ; ip link show IRNetFree ; ip rule show | grep -E '2022|8998|8999' ; nft list table inet irnetfree ; free -m
 ```
 
 - گوشی بدون هیچ پروکسی → سایتِ فیلترشده باز شود؛ `ipwho.is` IP سرور را نشان دهد.

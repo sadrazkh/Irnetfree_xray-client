@@ -23,8 +23,13 @@ const { tgz } = require('./tar');
 const ROOT = path.join(__dirname, '..');
 const PKG = 'irnetfree';
 const PREFIX = 'usr/lib/irnetfree';
-/** kmod-tun: the TUN device; nftables: `nft`; unzip: the Downloader's zip step; ca-bundle: TLS to GitHub. */
-const DEPENDS = ['node', 'kmod-tun', 'nftables', 'unzip', 'ca-bundle'];
+/**
+ * kmod-tun: the TUN device; nftables: `nft`; ip-full: iproute2's `ip` (the
+ * gateway's `ip rule … suppress_prefixlength` and `ip route get … mark` checks;
+ * busybox's applet has the former but not a reliable latter); unzip: the
+ * Downloader's zip step; ca-bundle: TLS to GitHub.
+ */
+const DEPENDS = ['node', 'kmod-tun', 'nftables', 'ip-full', 'unzip', 'ca-bundle'];
 
 /** Files under `dir`, relative POSIX paths, sorted; dev files skipped. */
 function walk(dir, rel = '') {

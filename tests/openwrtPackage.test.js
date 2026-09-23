@@ -57,8 +57,8 @@ test('control: the fields, the dependencies the router needs, conffiles, and the
   assert.match(c, new RegExp(`^Version: ${VERSION.replace(/\./g, '\\.')}$`, 'm'));
   assert.match(c, /^Architecture: all$/m);
   assert.match(c, /^Section: net$/m);
-  assert.match(c, /^Depends: node, kmod-tun, nftables, unzip, ca-bundle$/m);
-  assert.deepEqual(DEPENDS, ['node', 'kmod-tun', 'nftables', 'unzip', 'ca-bundle']);
+  assert.match(c, /^Depends: node, kmod-tun, nftables, ip-full, unzip, ca-bundle$/m);
+  assert.deepEqual(DEPENDS, ['node', 'kmod-tun', 'nftables', 'ip-full', 'unzip', 'ca-bundle']);
   const installed = Object.values(data).filter(e => e.type === '0').reduce((n, e) => n + e.data.length, 0);
   assert.match(c, new RegExp(`^Installed-Size: ${installed}$`, 'm'));
   assert.equal(control['./conffiles'].data.toString(), '/etc/config/irnetfree\n');
@@ -171,7 +171,7 @@ test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and t
   assert.match(src, /^set -eu$/m);
   assert.match(src, /\. \/etc\/openwrt_release/);
   assert.match(src, /\t24\.\*\|23\.05\*\) ;;/, '24.x (node 20) and 23.05 (node 18); 25/SNAPSHOT use apk');
-  assert.match(src, /opkg install node kmod-tun nftables unzip ca-bundle$/m, 'the same dependency list as the package');
+  assert.match(src, /opkg install node kmod-tun nftables ip-full unzip ca-bundle$/m, 'the same dependency list as the package');
   assert.match(src, /\[ "\$\{NODE_MAJOR:-0\}" -ge 18 \]/, 'and the node that arrived is checked, not assumed');
   assert.match(src, /IPK="\$\{1:-\}"/, 'a local package as the first argument');
   assert.match(src, /releases\/latest.*grep -o 'https:\/\/\[\^"\]\*_all\\\.ipk'/, 'else the newest release, found without jq');
