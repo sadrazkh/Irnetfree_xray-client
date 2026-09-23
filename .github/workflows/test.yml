@@ -87,9 +87,17 @@ jobs:
     # asked to come up against a SOCKS upstream that does not exist: the TUN
     # device, sing-box's policy route, our nft table and the fw4 zone are what
     # is asserted — not internet. openwrt/ci/guest-smoke.sh is the checklist.
-    name: openwrt (qemu armsr-armv7)
+    #
+    # Two releases, because their feeds carry different nodes: 24.10 has node
+    # 20, 23.05 has node 18 — and the owner's router runs 23.05. The runtime
+    # uses nothing newer than Node 18, and this is where that stays true.
+    name: openwrt (qemu armsr-armv7, ${{ matrix.release }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ['24.10.2', '23.05.5']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -100,12 +108,13 @@ jobs:
       - name: Build the package
         run: node openwrt/build-ipk.js dist
       - name: Keep the package (a testable ipk from every push, without a tag)
+        if: matrix.release == '24.10.2'
         uses: actions/upload-artifact@v4
         with:
           name: IRNetFree-OpenWrt-dev
           path: dist/irnetfree_*_all.ipk
           if-no-files-found: error
       - name: Fetch the OpenWrt image
-        run: curl -fsSL -o /tmp/openwrt-kernel.bin https://downloads.openwrt.org/releases/24.10.2/targets/armsr/armv7/openwrt-24.10.2-armsr-armv7-generic-initramfs-kernel.bin
+        run: curl -fsSL -o /tmp/openwrt-kernel.bin "https://downloads.openwrt.org/releases/${{ matrix.release }}/targets/armsr/armv7/openwrt-${{ matrix.release }}-armsr-armv7-generic-initramfs-kernel.bin"
       - name: Boot, install, connect, assert
         run: node openwrt/ci/qemu-smoke.js --kernel /tmp/openwrt-kernel.bin --ipk "$(ls dist/irnetfree_*_all.ipk)"
