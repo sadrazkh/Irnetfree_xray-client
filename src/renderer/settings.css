@@ -609,3 +609,14 @@
   #view-settings .grid2 { grid-template-columns: 1fr; gap: 16px; }
   .settings-chip { padding: 8px 11px; }
 }
+
+/* ----------------------------- OpenWrt: the devices behind the router ----------------------------- */
+#view-settings .gw-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+#view-settings .gw-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r6); cursor: pointer; }
+#view-settings .gw-item:hover { border-color: var(--softline); }
+#view-settings .gw-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
+#view-settings .gw-dot.on { background: var(--ok); }
+#view-settings .gw-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+#view-settings .gw-meta { font-family: var(--mono); font-size: 11px; color: var(--ink3); direction: ltr; flex: none; }
+#view-settings .gw-direct { font-size: 12px; color: var(--ink2); flex: none; }
+#view-settings .gw-check { flex: none; }
