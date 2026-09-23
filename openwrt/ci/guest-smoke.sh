@@ -31,8 +31,11 @@ done
 TOKEN="$(cat /etc/irnetfree/token)"
 rpc() { curl -fs -X POST "http://127.0.0.1:6969/rpc?token=$TOKEN" -H 'Content-Type: application/json' -d "$1"; }
 
-say "flavor and backend"
+say "flavor, backend, the router's defaults"
 rpc '{"channel":"app:init"}' | jq -e '.result.flavor == "openwrt" and .result.tunBackendId == "openwrt"' >/dev/null
+rpc '{"channel":"settings:get"}' | jq -c '.result | {autoConnect, lanBlockQuic, dnsManaged, tunMode}'
+rpc '{"channel":"settings:get"}' | jq -e '.result.autoConnect == true and .result.lanBlockQuic == true and .result.dnsManaged == true' >/dev/null \
+	|| { echo "the router defaults were not applied to a fresh store"; exit 1; }
 
 say "an upstream: a SOCKS server in this guest, bound to the LAN device so it cannot loop into the tunnel"
 cat > /tmp/upstream.json <<'EOF'
