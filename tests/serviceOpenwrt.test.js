@@ -44,6 +44,21 @@ test('settings:set validates the exclusion list and keeps it out of the reconnec
   assert.deepEqual((await service.invoke('settings:get')).lanBypassMacs, ['aa:bb:cc:dd:ee:ff']);
 });
 
+test('a router connects at start by default, and a stored "off" still wins', async () => {
+  assert.equal(DEFAULT_SETTINGS.autoConnect, false, 'the shared default is the desktop one');
+  assert.equal((await service.invoke('settings:get')).autoConnect, true, 'the router overlay');
+  await service.invoke('settings:set', { autoConnect: false });
+  assert.equal((await service.invoke('settings:get')).autoConnect, false);
+  await service.invoke('settings:set', { autoConnect: true });
+});
+
+test('the boot-time retry is a router thing: the source pins 20 tries 15s apart there, one try elsewhere', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
+  assert.match(src, /const AUTO_RETRY = OPENWRT \? \{ tries: 20, everyMs: 15000 \} : \{ tries: 1, everyMs: 0 \};/);
+  assert.match(src, /if \(store\.get\('activeServerId', null\) \|\| isQuitting\) return;/, 'a connect made by hand ends the retries');
+  assert.match(src, /attempt < AUTO_RETRY\.tries && !userDisconnecting/, 'so does a disconnect');
+});
+
 test('net:lanDevices answers a list even where there are no leases and no LAN', async () => {
   const devices = await service.invoke('net:lanDevices');
   assert.ok(Array.isArray(devices));

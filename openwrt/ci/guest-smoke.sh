@@ -8,15 +8,12 @@
 set -eu
 say() { echo; echo "== $*"; }
 
-say "feeds"
-opkg update >/dev/null
-
-say "packages (node is the big one)"
-opkg install node kmod-tun nftables unzip ca-bundle sing-box xray-core curl jq >/dev/null
-
-say "install irnetfree"
-opkg install /tmp/irnetfree.ipk
+say "the installer, with the package it was given (feeds, node, the ipk)"
+sh /tmp/install.sh /tmp/irnetfree.ipk
 /etc/init.d/irnetfree enabled || { echo "postinst did not enable the service"; exit 1; }
+
+say "test tools and the feed cores"
+opkg install sing-box xray-core curl jq >/dev/null
 uci -q get firewall.irnetfree.name | grep -qx irnetfree || { echo "uci-defaults did not add the firewall zone"; exit 1; }
 [ -s /etc/irnetfree/token ] || { echo "no token was generated"; exit 1; }
 

@@ -1240,10 +1240,83 @@ gradle wrapper               # یک‌بار، اگر ./gradlew نداری (Wrap
 - بک‌اند: `src/main/tunOpenwrt.js` — همان TUN sing-box دسکتاپ (روی لینوکس `auto_route` ترافیک فورواردشده را
   هم می‌گیرد) + یک جدول nftables برای استثناها. DNS روتر دست نمی‌خورد؛ پورت ۵۳ از تونل جواب می‌گیرد.
 - بسته: `irnetfree_<v>_all.ipk` در هر ریلیز (`openwrt/build-ipk.js`)؛ وابسته به `node kmod-tun nftables unzip ca-bundle`.
-- تست: CI یک OpenWrt واقعی را در QEMU بوت می‌کند، بسته را نصب و گیت‌وی را بالا می‌آورد (`openwrt/ci/`).
-- هدف اول: **Google Wifi AC-1304**؛ هر روتر ≥256MB RAM / ≥128MB فضا.
+  هر push هم یک بستهٔ آزمایشی می‌سازد: Actions → Tests → artifact **`IRNetFree-OpenWrt-dev`**.
+- تست: CI یک OpenWrt واقعی (24.10.2، `armsr/armv7`) را در QEMU بوت می‌کند، با همین نصب‌کننده نصب می‌کند و گیت‌وی
+  را بالا می‌آورد (`openwrt/ci/`). روی روتر واقعی: چک‌لیست پایین.
+- بعد از ریبوت روتر خودش وصل می‌شود («اتصال خودکار» روی روتر پیش‌فرض روشن است و تا ۵ دقیقه، هر ۱۵ ثانیه، دوباره
+  تلاش می‌کند تا WAN و ساعت روتر بالا بیایند).
 
-راهنمای نصب و چک روی دستگاه: [`docs/openwrt.md`](docs/openwrt.md).
+### روترهای مناسب
+
+شرط: **OpenWrt 24.10** (فید رسمی‌اش `node` 20 دارد؛ 23.05 فقط node 18 دارد و 25/SNAPSHOT به‌جای opkg از apk استفاده
+می‌کند)، حداقل **256MB RAM** و **128MB فضا** (Node ~۳۶ مگ، هر هسته ۲۰–۴۰ مگ؛ در اجرا ~۱۰۰–۱۵۰ مگ RAM).
+
+| روتر | معماری | RAM / فضا | تصویر 24.10 | وضعیت |
+|---|---|---|---|---|
+| **Google Wifi نسل ۱ (AC-1304)** | ARMv7 (ipq40xx) | 512MB / 4GB | `ipq40xx/chromium` → `google_wifi` | هدف اول؛ نصب OpenWrt به Developer Mode و USB نیاز دارد (پایین) |
+| GL.iNet Slate Plus (GL-A1300) | ARMv7 (ipq40xx) | 256MB / 128MB | `ipq40xx/generic` → `glinet_gl-a1300` | باید کار کند؛ روی دستگاه تست نشده |
+| GL.iNet Beryl AX (GL-MT3000) | ARM64 (filogic) | 512MB / 256MB | `mediatek/filogic` → `glinet_gl-mt3000` | باید کار کند؛ تست نشده |
+| GL.iNet Flint 2 (GL-MT6000) / Brume 2 (GL-MT2500) | ARM64 (filogic) | 1GB / 8GB | `mediatek/filogic` | باید کار کند؛ تست نشده |
+| GL.iNet B1300 / B2200 / AP1300 | ARMv7 (ipq40xx) | 256MB+ | `ipq40xx/generic` | باید کار کند؛ تست نشده |
+| مینی‌پی‌سی x86 / Raspberry Pi 4 | x86_64 / ARM64 | هرچه باشد | `x86/64`، `bcm27xx/bcm2711` | باید کار کند؛ تست نشده |
+| GL-MT1300 Beryl، TP-Link های ارزان، هر روتر ۳۲–۶۴ مگی | MIPS | 128MB / 32MB | — | **نه** — Node جا نمی‌شود |
+
+روی GL.iNet فریم‌ور خود شرکت (فورک قدیمی‌تر OpenWrt) نه؛ **OpenWrt رسمی 24.10** را برای همان مدل sysupgrade کن.
+«باید کار کند» یعنی `node` برای آن معماری در فید هست و بسته معماری‌مستقل است؛ فقط AC-1304 هدفِ تست است.
+
+### نصب (یک خط، روی روتر)
+
+```bash
+sh -c "$(wget -q -O - https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-client/main/openwrt/install.sh)"
+```
+
+همین: وابستگی‌ها را نصب می‌کند، تازه‌ترین `irnetfree_<v>_all.ipk` را از ریلیز می‌گیرد، سرویس را بالا می‌آورد و لینک با
+توکن را چاپ می‌کند. اگر روتر به گیت‌هاب نمی‌رسد، ipk را روی کامپیوتر بگیر و: `scp` به `/tmp/` روتر، بعد
+`sh install.sh /tmp/irnetfree_<v>_all.ipk`. دستی هم می‌شود:
+
+```bash
+opkg update && opkg install node kmod-tun nftables unzip ca-bundle && opkg install /tmp/irnetfree_<v>_all.ipk
+```
+
+بعد **LuCI → Services → IRNetFree → Open IRNetFree** (یا `cat /etc/irnetfree/token` و
+`http://192.168.1.1:6969/?token=<توکن>`). هسته‌ها از **تنظیمات → فایل‌های موردنیاز** (برای ARMv7/ARM64 فایل درست
+را می‌گیرد؛ PattN فقط از گیت‌هاب)، یا `opkg install xray-core sing-box`، یا `scp` به `/etc/irnetfree/bin/`.
+
+### OpenWrt روی Google Wifi (AC-1304)
+
+خلاصهٔ [صفحهٔ دستگاه در ویکی OpenWrt](https://openwrt.org/toh/google/wifi) — قبل از شروع همان صفحه را بخوان؛
+لوازم: هاب USB-C با Power Delivery، یک فلش **USB 2.0**، پیچ‌گوشتی PH0، و مرورگر Chrome برای
+[OnHub Recovery Utility](https://chromewebstore.google.com/detail/onhub-recovery-utility/fmgkgdalfapcmjnanilfcpkhkhedmpdm).
+
+1. **فریم‌ور استوک، تازه**: اگر دستگاه قبلاً دست‌کاری شده، اول با Recovery Mode گوگل (همان Utility، فلش ریکاوری) به
+   کارخانه برگردان. مدل **GJ2CQ** (بدون USB-C) به لحیم‌کاری پورت USB روی تست‌پوینت‌ها نیاز دارد.
+2. `openwrt-24.10.x-ipq40xx-chromium-google_wifi-squashfs-factory.bin` را با **OnHub Recovery Utility** (به‌عنوان
+   local image) روی فلش بنویس — `dd` روی خیلی از فلش‌ها بوت نمی‌شود.
+3. قاب را باز کن (یک پیچ) و **SW7** را روی برد پیدا کن. فلش و برق را به هاب وصل کن، هاب را هنوز به دستگاه نه.
+4. **Reset** را نگه دار، هاب را وصل کن؛ ~۱۶ ثانیه بعد LED نارنجی چشمک می‌زند → Reset را رها کن؛ ~۳ ثانیه بعد نارنجی/کهربایی
+   می‌تپد → **SW7** را بزن؛ بنفش چشمک می‌زند و ریستارت می‌شود.
+5. دوباره **SW7**: LED خاموش می‌شود و از فلش بوت می‌کند (آبی تند → آهسته → ثابت). ~۳۰ ثانیه بعد با کابل LAN
+   `ping 192.168.1.1`.
+6. فریم‌ور را روی eMMC بنویس (از ویکی، دقیقاً همین):
+   ```bash
+   scp -O openwrt-24.10.x-ipq40xx-chromium-google_wifi-squashfs-factory.bin root@192.168.1.1:/tmp/
+   ```
+   ```bash
+   ssh root@192.168.1.1 "dd if=/dev/zero bs=512 seek=7634911 of=/dev/mmcblk0 count=33 && dd if=/tmp/openwrt-24.10.x-ipq40xx-chromium-google_wifi-squashfs-factory.bin of=/dev/mmcblk0"
+   ```
+7. فلش را دربیاور، ریبوت کن؛ OpenWrt از حافظهٔ داخلی بالا می‌آید. حالا خط نصب IRNetFree بالا.
+
+### چک روی دستگاه (چیزی که CI نمی‌بیند)
+
+```bash
+logread -e irnetfree | tail -50 ; ip link show IRNetFree ; ip rule show | grep -E '2022|8999' ; nft list table inet irnetfree ; free -m
+```
+
+- گوشی بدون هیچ پروکسی → سایتِ فیلترشده باز شود؛ `ipwho.is` IP سرور را نشان دهد.
+- دستگاهی که در «دستگاه‌های شبکه» تیک «مستقیم» دارد → IP واقعی خودت.
+- `free -m` قبل و بعد از اتصال — مصرف RAM را گزارش کن.
+
+حذف: `/etc/init.d/irnetfree stop; opkg remove irnetfree; rm -rf /etc/irnetfree`. راهنمای کامل: [`docs/openwrt.md`](docs/openwrt.md).
 
 ## 🚀 انتشار خودکار (GitHub Actions Release)
 

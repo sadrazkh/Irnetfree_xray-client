@@ -155,10 +155,28 @@ test('the QEMU guest script is POSIX sh and ends with the marker the driver look
   assert.match(src, /^set -eu$/m);
   assert.match(src, /say "SMOKE OK"\s*$/, 'the last line is the success marker');
   assert.ok(!src.includes('\r'), 'LF only');
+  assert.match(src, /^sh \/tmp\/install\.sh \/tmp\/irnetfree\.ipk$/m, 'the smoke installs with the same installer a user runs');
   // the driver's own contract with it
   const drv = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'qemu-smoke.js'), 'utf8');
   assert.match(drv, /SMOKE OK/);
   assert.match(drv, /Please press Enter to activate this console/);
+  assert.match(drv, /'\/install\.sh': path\.join\(__dirname, '\.\.', 'install\.sh'\)/, 'and the driver hands the installer to the guest');
+});
+
+test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and takes a local ipk', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'openwrt', 'install.sh'), 'utf8');
+  assert.match(src, /^#!\/bin\/sh\n/);
+  for (const [re, what] of BASHISMS) assert.doesNotMatch(src, re, what);
+  assert.ok(!src.includes('\r'), 'LF only');
+  assert.match(src, /^set -eu$/m);
+  assert.match(src, /\. \/etc\/openwrt_release/);
+  assert.match(src, /\t24\.\*\) ;;/, 'only 24.x: 23.05 has node 18, 25/SNAPSHOT use apk');
+  assert.match(src, /opkg install node kmod-tun nftables unzip ca-bundle$/m, 'the same dependency list as the package');
+  assert.match(src, /IPK="\$\{1:-\}"/, 'a local package as the first argument');
+  assert.match(src, /releases\/latest.*grep -o 'https:\/\/\[\^"\]\*_all\\\.ipk'/, 'else the newest release, found without jq');
+  assert.match(src, /wget -q -O /, 'uclient-fetch syntax (the busybox wget applet is not on every image)');
+  assert.doesNotMatch(src, /wget -qO-/, 'combined short options are not safe on uclient-fetch');
+  assert.match(src, /raw\.githubusercontent\.com\/sadrazkh\/Irnetfree_xray-client\/main\/openwrt\/install\.sh/, 'its own one-line URL is in the header');
 });
 
 test('LuCI: the menu points at the view, the ACL grants the token and nothing else, the view is a LuCI module', () => {

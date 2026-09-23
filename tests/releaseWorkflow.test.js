@@ -240,4 +240,6 @@ test('the test workflow boots OpenWrt in QEMU and runs the smoke', () => {
   assert.match(job, /node openwrt\/build-ipk\.js dist/);
   assert.match(job, /node openwrt\/ci\/qemu-smoke\.js --kernel \/tmp\/openwrt-kernel\.bin --ipk/);
   assert.match(job, /timeout-minutes: \d+/, 'TCG is slow; a hang must not run for six hours');
+  // a testable package from every push, not only from a tag
+  assert.match(job, /uses: actions\/upload-artifact@v4[\s\S]*name: IRNetFree-OpenWrt-dev[\s\S]*path: dist\/irnetfree_\*_all\.ipk/);
 });

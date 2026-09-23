@@ -12,18 +12,72 @@
   `google_wifi` زیر `ipq40xx/chromium`؛ اول `squashfs-factory.bin` بعد برای به‌روزرسانی `sysupgrade.bin`.
 - روترهای ۳۲–۶۴ مگی (MIPS ارزان) هدف نیستند: Node در آن‌ها جا نمی‌شود.
 
-## نصب
+### روترهایی که تصویر 24.10 و `node` دارند
+
+| روتر | معماری | RAM / فضا | تصویر 24.10 | وضعیت |
+|---|---|---|---|---|
+| **Google Wifi نسل ۱ (AC-1304)** | ARMv7 (ipq40xx) | 512MB / 4GB | `ipq40xx/chromium` → `google_wifi` | هدف اول (نصب OpenWrt: پایین) |
+| GL.iNet Slate Plus (GL-A1300) | ARMv7 | 256MB / 128MB | `ipq40xx/generic` → `glinet_gl-a1300` | باید کار کند؛ تست نشده |
+| GL.iNet Beryl AX (GL-MT3000) | ARM64 | 512MB / 256MB | `mediatek/filogic` → `glinet_gl-mt3000` | باید کار کند؛ تست نشده |
+| GL.iNet Flint 2 (GL-MT6000) / Brume 2 (GL-MT2500) | ARM64 | 1GB / 8GB | `mediatek/filogic` | باید کار کند؛ تست نشده |
+| GL.iNet B1300 / B2200 / AP1300 | ARMv7 | 256MB+ | `ipq40xx/generic` | باید کار کند؛ تست نشده |
+| x86 / Raspberry Pi 4 | x86_64 / ARM64 | — | `x86/64`، `bcm27xx/bcm2711` | باید کار کند؛ تست نشده |
+| GL-MT1300، TP-Link ارزان، هر ۳۲–۶۴ مگی | MIPS | 128MB / 32MB | — | **نه** |
+
+روی GL.iNet، فریم‌ور خود شرکت نه — OpenWrt رسمی 24.10 همان مدل را sysupgrade کن. 23.05 فقط `node` 18 دارد و
+25/SNAPSHOT به‌جای opkg از apk استفاده می‌کند؛ نصب‌کننده هر دو را رد می‌کند.
+
+## نصب — یک خط روی روتر
 
 ```sh
-# روی روتر (ssh root@192.168.1.1)
+sh -c "$(wget -q -O - https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-client/main/openwrt/install.sh)"
+```
+
+وابستگی‌ها را نصب می‌کند، تازه‌ترین `irnetfree_<v>_all.ipk` را از ریلیز می‌گیرد، سرویس را بالا می‌آورد و لینک با توکن
+را چاپ می‌کند. دوباره اجرا کردنش = به‌روزرسانی. اگر روتر به گیت‌هاب نمی‌رسد:
+
+```sh
+# روی کامپیوتر: ipk را از صفحهٔ ریلیز بگیر، بعد
+scp irnetfree_<v>_all.ipk root@192.168.1.1:/tmp/
+# روی روتر
+wget -q -O /tmp/install.sh https://raw.githubusercontent.com/sadrazkh/Irnetfree_xray-client/main/openwrt/install.sh
+sh /tmp/install.sh /tmp/irnetfree_<v>_all.ipk
+```
+
+دستی، بدون نصب‌کننده:
+
+```sh
 opkg update
 opkg install node kmod-tun nftables unzip ca-bundle
-# فایل ipk را از صفحهٔ ریلیز بگیر و روی روتر بگذار، مثلاً:
-#   scp irnetfree_1.13.0_all.ipk root@192.168.1.1:/tmp/
-opkg install /tmp/irnetfree_1.13.0_all.ipk
+opkg install /tmp/irnetfree_<v>_all.ipk
 ```
 
 نصب، سرویس را فعال و اجرا می‌کند و یک zone فایروال به نام `irnetfree` برای دستگاه تونل می‌سازد (یک‌بار).
+هر push در گیت‌هاب هم یک بستهٔ آزمایشی می‌سازد: Actions → Tests → artifact `IRNetFree-OpenWrt-dev`.
+
+## OpenWrt روی Google Wifi (AC-1304)
+
+خلاصهٔ [صفحهٔ دستگاه در ویکی OpenWrt](https://openwrt.org/toh/google/wifi) — قبل از شروع خودِ صفحه را بخوان.
+لوازم: هاب USB-C با Power Delivery (هر هابی کار نمی‌کند؛ ویکی مدل‌های تست‌شده را دارد)، فلش **USB 2.0**، پیچ‌گوشتی
+PH0، و Chrome برای [OnHub Recovery Utility](https://chromewebstore.google.com/detail/onhub-recovery-utility/fmgkgdalfapcmjnanilfcpkhkhedmpdm).
+
+1. **استوکِ تازه**: اگر دستگاه قبلاً دست‌کاری شده، اول با Recovery Mode گوگل (همان Utility، فلش ریکاوری: Reset را
+   نگه دار، برق، ~۱۶ ثانیه، رها، فلش ریکاوری را بزن، ۵–۶ دقیقه) به کارخانه برگردان. مدل **GJ2CQ** (بدون USB-C)
+   به لحیم‌کاری پورت USB روی TP1004–TP1007 نیاز دارد.
+2. `openwrt-24.10.x-ipq40xx-chromium-google_wifi-squashfs-factory.bin` را با **OnHub Recovery Utility** (local
+   image) روی فلش بنویس. `dd` روی خیلی از فلش‌ها بوت نمی‌شود؛ اگر `dd` می‌زنی، اول فلش را صفر کن.
+3. قاب را باز کن (یک پیچ PH0) و **SW7** را پیدا کن. فلش و برق را به هاب وصل کن؛ هاب را هنوز به دستگاه نه.
+4. **Reset** را نگه دار و هاب را وصل کن. سفید ثابت، آبی چشمک… ~۱۶ ثانیه بعد نارنجی چشمک → Reset را رها کن. ~۳
+   ثانیه بعد نارنجی/کهربایی می‌تپد → **SW7** را بزن. یکی‌دو بار بنفش چشمک می‌زند و ریستارت می‌شود.
+5. وقتی دوباره بنفش چشمک زد، **SW7**: LED خاموش می‌شود و از فلش بوت می‌کند (آبی تند → آهسته → ثابت). ~۳۰ ثانیه
+   بعد، کابل LAN و `ping 192.168.1.1`. اگر برنگشت: ریکاوری گوگل و از اول؛ اگر بنفش نرفت، فلش دیده نشده (USB 2.0).
+6. فریم‌ور را روی eMMC بنویس — دقیقاً دستورهای ویکی:
+   ```sh
+   ssh-keygen -f ~/.ssh/known_hosts -R 192.168.1.1
+   scp -O openwrt-24.10.x-ipq40xx-chromium-google_wifi-squashfs-factory.bin root@192.168.1.1:/tmp/
+   ssh root@192.168.1.1 "dd if=/dev/zero bs=512 seek=7634911 of=/dev/mmcblk0 count=33 && dd if=/tmp/openwrt-24.10.x-ipq40xx-chromium-google_wifi-squashfs-factory.bin of=/dev/mmcblk0"
+   ```
+7. فلش را دربیاور و ریبوت. آبی، مدتی بنفش (فرصت بوت از USB)، بعد OpenWrt از حافظهٔ داخلی. حالا خط نصب بالا.
 
 ## باز کردن UI
 
@@ -48,7 +102,8 @@ opkg install /tmp/irnetfree_1.13.0_all.ipk
    (dnsmasq روتر دست نمی‌خورد؛ بستهٔ پورت ۵۳ به تونل می‌رود و هستهٔ خود برنامه جواب می‌دهد).
 3. **تنظیمات → اجازه به شبکه محلی → دستگاه‌های شبکه**: فهرست دستگاه‌ها (از DHCP و جدول همسایه‌ها).
    تیک «مستقیم» یعنی آن دستگاه از تونل نمی‌رود؛ بی‌قطعی اعمال می‌شود.
-4. «اتصال خودکار» را روشن کن تا بعد از ریبوت روتر خودش وصل شود.
+4. بعد از ریبوت روتر خودش وصل می‌شود: «اتصال خودکار» روی روتر **پیش‌فرض روشن** است و تا ۵ دقیقه، هر ۱۵ ثانیه،
+   دوباره تلاش می‌کند (WAN و ساعت روتر بعد از بوت دیر بالا می‌آیند). از تنظیمات خاموش می‌شود.
 
 ## چک کردن روی دستگاه (چیزی که CI نمی‌تواند ببیند)
 
