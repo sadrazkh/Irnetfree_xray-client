@@ -209,3 +209,35 @@ test('Gradle gets more heap than the build that ran out of it', () => {
   // 2048 MB is the value that failed collectReleaseDependencies on the v1.9.1 tag.
   assert.ok(mb >= 3072, `-Xmx${m[1]}${m[2]} is not more than the 2048m that ran out of heap`);
 });
+
+/**
+ * The OpenWrt package rides the release (v1.13.0): its own job, the version
+ * synced to the tag like the desktop build, the ipk and its checksum published
+ * — and, unlike the desktop artefacts, a MISSING ipk fails the job: there is
+ * nothing to fall back to.
+ */
+test('the release workflow builds and publishes the OpenWrt package', () => {
+  const yml = YML.replace(/\r\n/g, '\n');   // the checkout may be CRLF on Windows
+  const at = yml.indexOf('\n  openwrt:\n');
+  assert.ok(at >= 0, 'release.yml has an openwrt job');
+  const job = yml.slice(at);
+  assert.match(job, /name: Build OpenWrt package/);
+  assert.match(job, /npm version --no-git-tag-version --allow-same-version "\$\{GITHUB_REF_NAME#v\}"/, 'the ipk carries the tag version');
+  assert.match(job, /node openwrt\/build-ipk\.js dist/);
+  assert.match(job, /sha256sum irnetfree_\*_all\.ipk > SHA256SUMS-openwrt\.txt/);
+  assert.match(job, /uses: softprops\/action-gh-release@v2/);
+  assert.match(job, /dist\/irnetfree_\*_all\.ipk/);
+  assert.match(job, /fail_on_unmatched_files: true/, 'no ipk, no green release');
+});
+
+test('the test workflow boots OpenWrt in QEMU and runs the smoke', () => {
+  const tests = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8').replace(/\r\n/g, '\n');
+  const at = tests.indexOf('\n  openwrt:\n');
+  assert.ok(at >= 0, 'test.yml has an openwrt job');
+  const job = tests.slice(at);
+  assert.match(job, /qemu-system-arm/);
+  assert.match(job, /openwrt-24\.10\.2-armsr-armv7-generic-initramfs-kernel\.bin/);
+  assert.match(job, /node openwrt\/build-ipk\.js dist/);
+  assert.match(job, /node openwrt\/ci\/qemu-smoke\.js --kernel \/tmp\/openwrt-kernel\.bin --ipk/);
+  assert.match(job, /timeout-minutes: \d+/, 'TCG is slow; a hang must not run for six hours');
+});
