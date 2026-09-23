@@ -16,14 +16,20 @@ say() { echo; echo "== $*"; }
 [ -f /etc/openwrt_release ] || { echo "this is not OpenWrt"; exit 1; }
 . /etc/openwrt_release
 say "OpenWrt ${DISTRIB_RELEASE:-?} (${DISTRIB_ARCH:-?})"
+# 24.10's feed has node 20, 23.05's has node 18 — both run IRNetFree (the 23.05
+# one is exercised in CI too). 22.03 and older have node 16 or none; 25 and
+# SNAPSHOT install packages with apk, not opkg, so this script does not fit.
 case "${DISTRIB_RELEASE:-}" in
-	24.*) ;;
-	*) echo "IRNetFree needs OpenWrt 24.10: its feed has node 20 (23.05 has node 18, and 25/SNAPSHOT use apk, not opkg)"; exit 1 ;;
+	24.*|23.05*) ;;
+	*) echo "IRNetFree needs OpenWrt 23.05 or 24.10 (node 18 / 20 in their feeds); 25 and SNAPSHOT use apk instead of opkg, older releases have no usable node"; exit 1 ;;
 esac
 
 say "packages IRNetFree needs"
 opkg update >/dev/null
 opkg install node kmod-tun nftables unzip ca-bundle
+NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
+[ "${NODE_MAJOR:-0}" -ge 18 ] || { echo "node $(node -v 2>/dev/null || echo missing) is too old: IRNetFree needs 18 or newer"; exit 1; }
+echo "node $(node -v)"
 
 if [ -z "$IPK" ]; then
 	say "the newest release"

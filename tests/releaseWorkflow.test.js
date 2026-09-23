@@ -236,7 +236,11 @@ test('the test workflow boots OpenWrt in QEMU and runs the smoke', () => {
   assert.ok(at >= 0, 'test.yml has an openwrt job');
   const job = tests.slice(at);
   assert.match(job, /qemu-system-arm/);
-  assert.match(job, /openwrt-24\.10\.2-armsr-armv7-generic-initramfs-kernel\.bin/);
+  // both feeds' nodes: 24.10 (node 20) and 23.05 (node 18, the owner's router)
+  assert.match(job, /release: \['24\.10\.2', '23\.05\.5'\]/);
+  assert.match(job, /openwrt-\$\{\{ matrix\.release \}\}-armsr-armv7-generic-initramfs-kernel\.bin/);
+  assert.match(job, /fail-fast: false/, 'one release failing must not hide the other');
+  assert.match(job, /if: matrix\.release == '24\.10\.2'\s*\n\s*uses: actions\/upload-artifact@v4/, 'one artifact, not one per release');
   assert.match(job, /node openwrt\/build-ipk\.js dist/);
   assert.match(job, /node openwrt\/ci\/qemu-smoke\.js --kernel \/tmp\/openwrt-kernel\.bin --ipk/);
   assert.match(job, /timeout-minutes: \d+/, 'TCG is slow; a hang must not run for six hours');

@@ -170,8 +170,9 @@ test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and t
   assert.ok(!src.includes('\r'), 'LF only');
   assert.match(src, /^set -eu$/m);
   assert.match(src, /\. \/etc\/openwrt_release/);
-  assert.match(src, /\t24\.\*\) ;;/, 'only 24.x: 23.05 has node 18, 25/SNAPSHOT use apk');
+  assert.match(src, /\t24\.\*\|23\.05\*\) ;;/, '24.x (node 20) and 23.05 (node 18); 25/SNAPSHOT use apk');
   assert.match(src, /opkg install node kmod-tun nftables unzip ca-bundle$/m, 'the same dependency list as the package');
+  assert.match(src, /\[ "\$\{NODE_MAJOR:-0\}" -ge 18 \]/, 'and the node that arrived is checked, not assumed');
   assert.match(src, /IPK="\$\{1:-\}"/, 'a local package as the first argument');
   assert.match(src, /releases\/latest.*grep -o 'https:\/\/\[\^"\]\*_all\\\.ipk'/, 'else the newest release, found without jq');
   assert.match(src, /wget -q -O /, 'uclient-fetch syntax (the busybox wget applet is not on every image)');
