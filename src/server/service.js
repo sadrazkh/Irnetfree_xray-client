@@ -247,6 +247,15 @@ function createService(opts = {}) {
 
   migrateServers();
   migrateSettingsStore();
+  // The router's defaults are WRITTEN into the store once, not overlaid under
+  // it: a fresh store answers `settings` with the desktop's whole
+  // DEFAULT_SETTINGS object, so an overlay beneath it never wins (the QEMU
+  // smoke found the QUIC rule missing on a fresh install for exactly that).
+  // After this first start the user's own choices persist like any other.
+  if (OPENWRT && !store.get('routerDefaultsApplied', false)) {
+    store.set('settings', Object.assign({}, store.get('settings', {}), ROUTER_DEFAULTS));
+    store.set('routerDefaultsApplied', true);
+  }
   // lifetime traffic per config — its own file, so a 30s save does not
   // rewrite every saved server (see main.js)
   const usageStore = new Store(path.join(dataDir, 'usage.json'), { totals: {} });
@@ -453,7 +462,7 @@ function createService(opts = {}) {
   });
 
   /* ----------------------------- settings / data ----------------------------- */
-  function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, ROUTER_DEFAULTS, store.get('settings', {}), ROUTER_FORCED); }
+  function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}), ROUTER_FORCED); }
 
   /**
    * One-time upgrade of the saved servers to the shape the current parser and

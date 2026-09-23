@@ -54,10 +54,23 @@ test('a router connects at start by default, and a stored "off" still wins', asy
 
 test('a router refuses QUIC from the LAN by default; the desktop default is off; the switch still works', async () => {
   assert.equal(DEFAULT_SETTINGS.lanBlockQuic, false);
-  assert.equal((await service.invoke('settings:get')).lanBlockQuic, true, 'the router overlay');
+  assert.equal((await service.invoke('settings:get')).lanBlockQuic, true, 'the router default');
   await service.invoke('settings:set', { lanBlockQuic: false });
   assert.equal((await service.invoke('settings:get')).lanBlockQuic, false);
   await service.invoke('settings:set', { lanBlockQuic: true });
+});
+
+test('the router defaults are written into the store once, with a marker, so a fresh store cannot hide them', () => {
+  // A fresh Store answers `settings` with the whole desktop DEFAULT_SETTINGS
+  // object (autoConnect:false, lanBlockQuic:false); an overlay underneath it
+  // would never win. The service writes the router defaults in, once.
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, 'store.json'), 'utf8'));
+  assert.equal(saved.routerDefaultsApplied, true);
+  assert.equal(saved.settings.autoConnect, true);
+  assert.equal(saved.settings.lanBlockQuic, true);
+  assert.equal(saved.settings.autoUpdateSubs, false, 'what the store already had is kept');
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8'),
+    /if \(OPENWRT && !store\.get\('routerDefaultsApplied', false\)\)/, 'guarded by the marker: a second start leaves the user’s choices alone');
 });
 
 test('on a router the managed DNS plan is forced on — a stored "off" is overridden, not honoured', async () => {
