@@ -151,6 +151,11 @@ function createService(opts = {}) {
   // /usr/bin. Searched LAST — a core downloaded into userBinDir still wins.
   const OPENWRT = isOpenwrt();
   const systemBinDirs = OPENWRT ? ['/usr/bin'] : [];
+  // A router is headless: after a power cut the tunnel has to come back by
+  // itself, so "connect at start" is the default THERE (the user can still turn
+  // it off; a stored value always wins). Everywhere else the desktop's default.
+  // Declared up here: getSettings() is hoisted and runs before the store exists.
+  const ROUTER_DEFAULTS = OPENWRT ? { autoConnect: true } : {};
 
   const listeners = new Set();
   const send = (channel, payload) => { for (const cb of listeners) { try { cb(channel, payload); } catch {} } };
@@ -419,7 +424,7 @@ function createService(opts = {}) {
   });
 
   /* ----------------------------- settings / data ----------------------------- */
-  function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {})); }
+  function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, ROUTER_DEFAULTS, store.get('settings', {})); }
 
   /**
    * One-time upgrade of the saved servers to the shape the current parser and
@@ -1855,12 +1860,24 @@ function createService(opts = {}) {
 
   // Connect to the last server on launch — the headless server's main use.
   // Only a server that still exists; a failure is a log line, the process stays up.
-  if (st.autoConnect) {
+  //
+  // On a router the service starts with the boot (procd START=95) — usually
+  // before the WAN has an address, and with the clock not yet set (a TLS
+  // handshake fails until NTP runs). One attempt would fail every boot, so
+  // there it retries: 20 tries, 15s apart, five minutes in all. A connect made
+  // by hand, or a disconnect, in the meantime ends the retries.
+  const AUTO_RETRY = OPENWRT ? { tries: 20, everyMs: 15000 } : { tries: 1, everyMs: 0 };
+  function autoConnectAtLaunch(attempt = 1) {
     const lastId = store.get('lastServerId', null);
-    if (lastId && store.get('servers', []).some(s => s.id === lastId)) {
-      setTimeout(() => doConnect(lastId).catch((e) => send('log', { line: 'Auto-connect failed: ' + e.message, level: 'error' })), 1000);
-    }
+    if (!lastId || !store.get('servers', []).some(s => s.id === lastId)) return;
+    if (store.get('activeServerId', null) || isQuitting) return;   // connected meanwhile, or going away
+    doConnect(lastId).catch((e) => {
+      const more = attempt < AUTO_RETRY.tries && !userDisconnecting;
+      send('log', { line: `Auto-connect failed (${attempt}/${AUTO_RETRY.tries}): ${e.message}` + (more ? ` — retrying in ${AUTO_RETRY.everyMs / 1000}s` : ''), level: 'error' });
+      if (more) { const t = setTimeout(() => autoConnectAtLaunch(attempt + 1), AUTO_RETRY.everyMs); if (t.unref) t.unref(); }
+    });
   }
+  if (st.autoConnect) { const t = setTimeout(() => autoConnectAtLaunch(), 1000); if (t.unref) t.unref(); }
 
   return { invoke, onEvent, shutdown, dataDir, getSettings, assetStatus, version: appVersion };
 }

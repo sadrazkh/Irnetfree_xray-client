@@ -27,7 +27,11 @@ const DNS_IP = '192.168.1.3';
 if (!KERNEL || !IPK) { console.error('usage: qemu-smoke.js --kernel <bin> --ipk <ipk>'); process.exit(2); }
 
 /* ----------------------------- the files the guest fetches ----------------------------- */
-const FILES = { '/irnetfree.ipk': IPK, '/guest-smoke.sh': path.join(__dirname, 'guest-smoke.sh') };
+const FILES = {
+  '/irnetfree.ipk': IPK,
+  '/guest-smoke.sh': path.join(__dirname, 'guest-smoke.sh'),
+  '/install.sh': path.join(__dirname, '..', 'install.sh')     // the user's installer is what the smoke installs with
+};
 const srv = http.createServer((req, res) => {
   const f = FILES[req.url.split('?')[0]];
   if (!f) { res.writeHead(404); return res.end(); }
@@ -111,7 +115,7 @@ function step(name, rc) { if (rc !== 0) throw new Error(`${name} failed with exi
       `uci set network.lan.gateway='${HOST_IP}' && uci set network.lan.dns='${DNS_IP}' && uci commit network && /etc/init.d/network reload; ` +
       `i=0; until ip route show default | grep -q 'via ${HOST_IP}'; do i=$((i+1)); [ $i -lt 60 ] || { ip addr; ip route; false; break; }; sleep 1; done && ` +
       `echo nameserver ${DNS_IP} > /etc/resolv.conf`, 120000));
-    step('fetch', await sh(con, `wget -q -O /tmp/irnetfree.ipk http://${HOST_IP}:${port}/irnetfree.ipk && wget -q -O /tmp/guest-smoke.sh http://${HOST_IP}:${port}/guest-smoke.sh`, 120000));
+    step('fetch', await sh(con, `wget -q -O /tmp/irnetfree.ipk http://${HOST_IP}:${port}/irnetfree.ipk && wget -q -O /tmp/guest-smoke.sh http://${HOST_IP}:${port}/guest-smoke.sh && wget -q -O /tmp/install.sh http://${HOST_IP}:${port}/install.sh`, 120000));
     rc = await sh(con, 'sh /tmp/guest-smoke.sh 2>&1', 25 * 60000);
     if (rc !== 0) console.error(`\nguest-smoke.sh exited ${rc}`);
     else if (!/SMOKE OK/.test(con.buf)) { console.error('\nthe guest script exited 0 but never printed SMOKE OK'); rc = 1; }
