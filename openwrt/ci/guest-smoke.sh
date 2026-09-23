@@ -97,7 +97,7 @@ r="$(ip route get $GW ipproto udp dport 53)"; echo "router -> DNS on a connected
 echo "$r" | grep -q 'dev IRNetFree' || { echo "a DNS query to a resolver on a connected subnet would leak"; exit 1; }
 r="$(ip route get $GW ipproto udp dport 123)"; echo "router -> NTP on a connected subnet: $r"
 echo "$r" | grep -q 'dev br-lan' || { echo "non-DNS traffic to a connected subnet left the LAN"; exit 1; }
-nft list table inet irnetfree | grep -q 'udp dport 443 counter reject' || { echo "the QUIC refusal is missing (on by default on a router)"; exit 1; }
+nft list table inet irnetfree | grep -q 'udp dport 443 counter.*reject' || { echo "the QUIC refusal is missing (on by default on a router)"; exit 1; }
 
 say "assert: traffic really passes through the tunnel (the v1.13.3 outage: TCP died at the zone's INPUT)"
 # the router's own unbound sockets go to the tunnel (rule 9003), so this curl
