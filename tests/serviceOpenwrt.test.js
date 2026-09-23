@@ -52,6 +52,14 @@ test('a router connects at start by default, and a stored "off" still wins', asy
   await service.invoke('settings:set', { autoConnect: true });
 });
 
+test('on a router the managed DNS plan is forced on — a stored "off" is overridden, not honoured', async () => {
+  assert.equal(DEFAULT_SETTINGS.dnsManaged, true);
+  const res = await service.invoke('settings:set', { dnsManaged: false });
+  assert.equal(res.settings.dnsManaged, true, 'the answer already says the switch has no effect here');
+  assert.equal((await service.invoke('settings:get')).dnsManaged, true);
+  assert.equal((await service.invoke('app:init')).settings.dnsManaged, true);
+});
+
 test('the boot-time retry is a router thing: the source pins 20 tries 15s apart there, one try elsewhere', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
   assert.match(src, /const AUTO_RETRY = OPENWRT \? \{ tries: 20, everyMs: 15000 \} : \{ tries: 1, everyMs: 0 \};/);

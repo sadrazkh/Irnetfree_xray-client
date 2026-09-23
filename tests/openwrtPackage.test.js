@@ -137,12 +137,15 @@ test('uci config and uci-defaults: the four options, the firewall zone, idempote
   const cfg = data['./etc/config/irnetfree'].data.toString();
   for (const opt of ["option enabled '1'", "option port '6969'", "option bind '0.0.0.0'", "option data_dir '/etc/irnetfree'"]) assert.ok(cfg.includes(opt), opt);
   const d = data['./etc/uci-defaults/99-irnetfree'].data.toString();
-  assert.match(d, /uci -q get firewall\.irnetfree >\/dev\/null \|\| \{/, 'runs once: a second install finds the zone');
+  assert.match(d, /^if uci -q get firewall\.irnetfree >\/dev\/null; then$/m, 'an upgrade finds the zone and repairs it; a fresh install creates it');
   for (const line of ["set firewall.irnetfree=zone", "set firewall.irnetfree.name='irnetfree'", "add_list firewall.irnetfree.device='IRNetFree'",
-    "set firewall.irnetfree.input='REJECT'", "set firewall.irnetfree.output='ACCEPT'", "set firewall.irnetfree.forward='REJECT'", "set firewall.irnetfree.masq='0'",
+    "set firewall.irnetfree.input='ACCEPT'", "set firewall.irnetfree.output='ACCEPT'", "set firewall.irnetfree.forward='REJECT'", "set firewall.irnetfree.masq='0'",
     "set firewall.irnetfree_lan=forwarding", "set firewall.irnetfree_lan.src='lan'", "set firewall.irnetfree_lan.dest='irnetfree'", 'commit firewall']) {
     assert.ok(d.includes(line), line);
   }
+  // sing-box's system stack delivers LAN TCP as INPUT on the tun: REJECT here was "UDP passes, no TCP at all" (v1.13.3)
+  assert.doesNotMatch(d, /input='REJECT'/, 'input must never be REJECT again');
+  assert.match(d, /"\$\(uci -q get firewall\.irnetfree\.input\)" != "ACCEPT"[\s\S]*uci set firewall\.irnetfree\.input='ACCEPT'/, 'and an old zone is repaired on upgrade');
   // <<-EOF strips leading TABS only; a space-indented heredoc body would be fed to uci verbatim
   for (const m of d.matchAll(/^([ \t]+)(set|add_list|commit) /gm)) assert.match(m[1], /^\t+$/, 'heredoc body indented with tabs');
   assert.match(d, /^exit 0\s*$/m, 'uci-defaults must exit 0 or it is kept and re-run forever');

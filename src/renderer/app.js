@@ -910,7 +910,9 @@ function applyFlavor() {
   const rt = state.flavor === 'openwrt';
   $('#gwRow').hidden = !rt;
   $('#insGatewayRow').hidden = !rt;
-  for (const id of ['optSysProxy', 'optLaunchAtLogin', 'optKillSwitch']) {
+  // ...and "DNS managed by the app": on a router the service forces it on (the
+  // core must answer every port-53 packet from the LAN), so the switch would lie
+  for (const id of ['optSysProxy', 'optLaunchAtLogin', 'optKillSwitch', 'optDnsManaged']) {
     const row = $('#' + id).closest('.switch-row');
     if (row) row.hidden = rt;
   }
