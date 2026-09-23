@@ -114,16 +114,12 @@ function normalizeAppNames(names) {
  * `route.final` becomes `mode === 'exclude' ? 'socks-out' : 'direct'` — the
  * unlisted apps get the opposite of what the listed ones get.
  */
-function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, gso = false } = {}) {
+function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null } = {}) {
   void ipv6;
   const inbound = { type: 'tun', tag: 'tun-in' };
   if (interfaceName) inbound.interface_name = interfaceName;
   inbound.address = [TUN_ADDR4, TUN_ADDR6];          // v6 entry ALWAYS present (see above)
   inbound.mtu = mtu;
-  // Linux only (the OpenWrt gateway asks for it): batches of segments per
-  // tun read/write instead of one packet each. Absent by default, so every
-  // config the desktop writes is byte-identical to before this key existed.
-  if (gso) inbound.gso = true;
   inbound.auto_route = true;
   inbound.strict_route = !!strict;
   inbound.stack = stack;
@@ -319,7 +315,7 @@ class TunSingbox {
     fs.mkdirSync(base, { recursive: true, mode: 0o700 });
     const work = fs.mkdtempSync(path.join(base, 'irnf-sb-'));
     const cfgFile = path.join(work, 'sing-box.json');
-    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, gso: !!opts.gso });
+    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null });
     fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
     this.work = work;
     return { work, cfgFile };

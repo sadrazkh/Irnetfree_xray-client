@@ -183,10 +183,10 @@ class TunOpenwrt {
       step = 'ip rule';
       await this.addRules();
       step = 'sing-box';
-      // gso: the tun reads and writes whole batches of segments instead of one
-      // packet per syscall — on a 700 MHz Cortex-A7 that is the cheapest
-      // throughput there is. Linux only, which a router is.
-      await this.inner.start(socksPort, bypassAddrs, dnsServers, Object.assign({}, o, { gso: true }));
+      // (GSO on the tun — batches of segments per read/write — is something
+      // sing-box ≥ 1.11 turns on by itself on Linux; the option that once asked
+      // for it is refused by 1.12, which CI found out for us.)
+      await this.inner.start(socksPort, bypassAddrs, dnsServers, o);
       step = 'verify';
       await this.verify();
     } catch (e) {
