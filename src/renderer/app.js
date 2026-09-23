@@ -919,8 +919,15 @@ function applyFlavor() {
   $('#killStatus').hidden = rt;
   $('#tunBackendRow').hidden = rt;
   $('#tunAppRow').hidden = rt;
+  $('#gwQuicRow').hidden = !rt;
+  $('#optLanBlockQuic').checked = !!state.settings.lanBlockQuic;
   if (rt) renderLanDevices();
 }
+$('#optLanBlockQuic').onchange = async () => {
+  // not a reconnect key: the service replaces the nft table under the live tunnel
+  await saveSettings({ lanBlockQuic: $('#optLanBlockQuic').checked }, { silent: true });
+  toast(t('gw.saved'), 'ok');
+};
 
 /** The devices behind the router, each with its "direct" tick. */
 async function renderLanDevices() {

@@ -76,6 +76,7 @@ class TunOpenwrt {
     this.active = false;
     this.excludeIps = [];
     this.macs = [];
+    this.blockQuic = false;    // refuse UDP 443 from the LAN (settings.lanBlockQuic)
     this.lanIf = 'br-lan';
     this.probe = null;         // a LAN client address for the route check in verify()
     this.mark = net.BYPASS_MARK;
@@ -90,11 +91,11 @@ class TunOpenwrt {
 
   /* ----------------------------- the router's two tables ----------------------------- */
 
-  /** Atomic replace of our nft table with the given exclusions. */
+  /** Atomic replace of our nft table with the given exclusions (and the QUIC refusal, when on). */
   async applyTable(macs) {
     // a router path is a POSIX path, whatever the tests run on
     const file = path.posix.join(this.tmpDir, 'irnetfree-nft.conf');
-    this.writeFile(file, net.buildNftRuleset({ lanIf: this.lanIf, macs, mark: this.mark }));
+    this.writeFile(file, net.buildNftRuleset({ lanIf: this.lanIf, macs, mark: this.mark, blockQuic: this.blockQuic }));
     await this.run('nft', ['-f', file]);
   }
 
@@ -107,9 +108,16 @@ class TunOpenwrt {
     for (const args of this.ruleSets('add')) await this.run('ip', args);
   }
 
+  /**
+   * Delete by preference, repeatedly, until the kernel says there is none left:
+   * a leftover from an older version (other selectors, same preference) goes
+   * too, and a doubled rule from an unclean exit cannot survive.
+   */
   async delRules() {
     for (const args of this.ruleSets('del')) {
-      try { await this.run('ip', args); } catch { /* not there — the common case */ }
+      for (let i = 0; i < 4; i++) {
+        try { await this.run('ip', args); } catch { break; }   // "not there" — the common case
+      }
     }
   }
 
@@ -168,13 +176,17 @@ class TunOpenwrt {
     this.lanIf = lan.device;
     this.probe = net.lanProbeAddress(lan.address, lan.mask);
     this.macs = net.validMacs(o.bypassMacs);
+    this.blockQuic = !!o.blockQuic;
     let step = 'nft';
     try {
       await this.applyTable(this.macs);
       step = 'ip rule';
       await this.addRules();
       step = 'sing-box';
-      await this.inner.start(socksPort, bypassAddrs, dnsServers, o);
+      // gso: the tun reads and writes whole batches of segments instead of one
+      // packet per syscall — on a 700 MHz Cortex-A7 that is the cheapest
+      // throughput there is. Linux only, which a router is.
+      await this.inner.start(socksPort, bypassAddrs, dnsServers, Object.assign({}, o, { gso: true }));
       step = 'verify';
       await this.verify();
     } catch (e) {
@@ -196,6 +208,14 @@ class TunOpenwrt {
     this.onLog(`Gateway: ${this.macs.length} device(s) excluded by MAC`, 'info');
   }
 
+  /** Turn the QUIC refusal on or off under a live tunnel; the tunnel is not touched. */
+  async setBlockQuic(on) {
+    this.blockQuic = !!on;
+    if (!this.active) return;
+    await this.applyTable(this.macs);
+    this.onLog(`Gateway: QUIC (UDP 443) from the LAN is ${this.blockQuic ? 'refused — browsers use TCP' : 'allowed'}`, 'info');
+  }
+
   async stop() {
     if (!this.active && !this.inner.active) return;
     this.active = false;
@@ -211,7 +231,9 @@ class TunOpenwrt {
   /** Synchronous best effort for process exit. */
   cleanupSync() {
     try { this.inner.cleanupSync(); } catch { /* best effort */ }
-    for (const args of this.ruleSets('del')) { try { this.runSync('ip', args); } catch { /* not there */ } }
+    for (const args of this.ruleSets('del')) {
+      for (let i = 0; i < 4; i++) { try { this.runSync('ip', args); } catch { break; } }
+    }
     try { this.runSync('nft', ['delete', 'table', 'inet', 'irnetfree']); } catch { /* not there */ }
   }
 }

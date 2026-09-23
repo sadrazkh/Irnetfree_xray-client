@@ -47,15 +47,17 @@ function fakeRun(answers = []) {
 }
 
 const RULES_OK = '0:\tfrom all lookup local\n9000:\tfrom all to 172.19.0.0/30 lookup 2022\n9002:\tnot from all iif lo lookup 2022\n32766:\tfrom all lookup main\n';
+/** What the kernel says to `ip rule del pref N` when there is none: the deletion loop stops on it. */
+const NO_RULE = [/^ip -[46] rule del /, new Error('RTNETLINK answers: No such file or directory')];
 
 function make(opts = {}) {
   const inner = opts.inner || fakeInner();
-  const { run, lines } = fakeRun(opts.answers || [[/^ip rule show/, RULES_OK]]);
+  const { run, lines } = fakeRun([...(opts.answers || [[/^ip rule show/, RULES_OK]]), NO_RULE]);
   const writes = [];
   const logs = [];
   const tun = new TunOpenwrt({
     inner, run,
-    runSync: (cmd, args) => { lines.push('SYNC ' + [cmd, ...args].join(' ')); },
+    runSync: (cmd, args) => { const line = [cmd, ...args].join(' '); lines.push('SYNC ' + line); if (/ rule del /.test(line)) throw new Error('No such file or directory'); },
     writeFile: (p, text) => { writes.push([p, text]); },
     lanStatus: async () => (opts.lan || { device: 'br-lan', address: '192.168.1.1', mask: 24 }),
     which: (name) => (opts.which ? opts.which(name) : true),
@@ -94,19 +96,20 @@ test('start: nft table, then the bypass rules, then sing-box, then verify — in
   assert.equal(writes[0][1], net.buildNftRuleset({ lanIf: 'br-lan', macs: ['aa:bb:cc:dd:ee:01'] }));
   assert.deepEqual(lines, [
     'nft -f /tmp/irnf-test/irnetfree-nft.conf',
-    'ip -4 rule del pref 8998 lookup main suppress_prefixlength 0',   // idempotent: clear leftovers first
-    'ip -6 rule del pref 8998 lookup main suppress_prefixlength 0',
-    'ip -4 rule del pref 8999 fwmark 0x1f1e lookup main',
-    'ip -6 rule del pref 8999 fwmark 0x1f1e lookup main',
-    'ip -4 rule add pref 8998 lookup main suppress_prefixlength 0',   // main-first BEFORE the bypass, both before sing-box
-    'ip -6 rule add pref 8998 lookup main suppress_prefixlength 0',
+    'ip -4 rule del pref 8998',                                            // idempotent: clear leftovers first (by preference, any selectors)
+    'ip -6 rule del pref 8998',
+    'ip -4 rule del pref 8999',
+    'ip -6 rule del pref 8999',
+    'ip -4 rule add not dport 53 pref 8998 lookup main suppress_prefixlength 0',   // main-first BEFORE the bypass, both before sing-box; DNS never shortcut
+    'ip -6 rule add not dport 53 pref 8998 lookup main suppress_prefixlength 0',
     'ip -4 rule add pref 8999 fwmark 0x1f1e lookup main',
     'ip -6 rule add pref 8999 fwmark 0x1f1e lookup main',
     'ip link show IRNetFree',
     'ip rule show',
-    'ip route get 192.168.1.3'                                          // the router's own path to a LAN client
+    'ip route get 192.168.1.3'                                             // the router's own path to a LAN client
   ]);
-  assert.deepEqual(inner.calls[0], ['start', 10808, ['1.2.3.4'], { ipv6: false, strict: false, apps: null, bypassMacs: ['AA:BB:CC:DD:EE:01', 'bad'] }]);
+  assert.deepEqual(inner.calls[0], ['start', 10808, ['1.2.3.4'], { ipv6: false, strict: false, apps: null, bypassMacs: ['AA:BB:CC:DD:EE:01', 'bad'], gso: true }],
+    'sing-box gets gso on a router; everything else is passed through');
   assert.equal(inner.lang, 'en', 'the language the service set is handed down');
   assert.ok(logs.some(([, l]) => /Gateway up on br-lan.*1 excluded/.test(l)), JSON.stringify(logs));
   // a second start is a no-op while active
@@ -120,7 +123,7 @@ test('start fails at nft: nothing else runs, the error names the step', async ()
   assert.equal(tun.active, false);
   assert.equal(inner.calls.filter(c => c[0] === 'start').length, 0, 'sing-box was never started');
   // rollback still clears what might be there
-  assert.ok(lines.includes('ip -4 rule del pref 8999 fwmark 0x1f1e lookup main'));
+  assert.ok(lines.includes('ip -4 rule del pref 8999'));
   assert.ok(lines.includes('nft delete table inet irnetfree'));
 });
 
@@ -130,7 +133,7 @@ test('start fails inside sing-box: the table and rules are rolled back', async (
   assert.equal(tun.active, false);
   assert.deepEqual(inner.calls.map(c => c[0]), ['start', 'stop']);
   assert.equal(lines[lines.length - 1], 'nft delete table inet irnetfree');
-  assert.ok(lines.filter(l => l === 'ip -4 rule del pref 8999 fwmark 0x1f1e lookup main').length >= 2, 'cleared before add, and again on rollback');
+  assert.ok(lines.filter(l => l === 'ip -4 rule del pref 8999').length >= 2, 'cleared before add, and again on rollback');
 });
 
 test('verify: no TUN device, or no sing-box rule, is a failure with the rule dump in it', async () => {
@@ -179,15 +182,41 @@ test('stop: sing-box first, then the rules and the table; a second stop is a no-
   assert.deepEqual(tun.excludeIps, []);
   assert.deepEqual(inner.calls.map(c => c[0]), ['start', 'stop']);
   assert.deepEqual(lines, [
-    'ip -4 rule del pref 8998 lookup main suppress_prefixlength 0',
-    'ip -6 rule del pref 8998 lookup main suppress_prefixlength 0',
-    'ip -4 rule del pref 8999 fwmark 0x1f1e lookup main',
-    'ip -6 rule del pref 8999 fwmark 0x1f1e lookup main',
+    'ip -4 rule del pref 8998',
+    'ip -6 rule del pref 8998',
+    'ip -4 rule del pref 8999',
+    'ip -6 rule del pref 8999',
     'nft delete table inet irnetfree'
   ]);
   lines.length = 0;
   await tun.stop();
   assert.deepEqual(lines, []);
+});
+
+test('deleting by preference repeats until the kernel has none left — a doubled or older rule cannot survive', async () => {
+  let dels = 0;
+  const { tun, lines } = make({ answers: [[/^ip rule show/, RULES_OK], [/^ip -4 rule del pref 8998/, '']] });
+  // the -4 8998 deletion "succeeds" every time in this fake → bounded at 4
+  await tun.start(10808, [], [], {});
+  dels = lines.filter(l => l === 'ip -4 rule del pref 8998').length;
+  assert.equal(dels, 4, `bounded: ${dels}`);
+  assert.equal(lines.filter(l => l === 'ip -6 rule del pref 8998').length, 1, 'the one that says "none" stops at once');
+});
+
+test('the QUIC refusal follows the setting, live, without touching sing-box', async () => {
+  const { tun, inner, writes } = make();
+  await tun.start(10808, [], [], { blockQuic: true });
+  assert.match(writes[writes.length - 1][1], /udp dport 443 counter reject/);
+  const calls = inner.calls.length;
+  await tun.setBlockQuic(false);
+  assert.doesNotMatch(writes[writes.length - 1][1], /dport 443/);
+  await tun.setBlockQuic(true);
+  assert.match(writes[writes.length - 1][1], /udp dport 443 counter reject/);
+  assert.equal(inner.calls.length, calls, 'sing-box untouched');
+  // off by default
+  const plain = make();
+  await plain.tun.start(10808, [], [], {});
+  assert.doesNotMatch(plain.writes[0][1], /dport 443/);
 });
 
 test('verify refuses a gateway that would swallow the router’s own LAN traffic (the v1.13.2 outage)', async () => {
@@ -215,7 +244,7 @@ test('stop keeps going when a delete fails (nothing to delete is the common case
   ] });
   await tun.start(10808, [], [], {});
   await tun.stop();
-  assert.ok(lines.includes('ip -6 rule del pref 8999 fwmark 0x1f1e lookup main'));
+  assert.ok(lines.includes('ip -6 rule del pref 8999'));
   assert.ok(lines.includes('nft delete table inet irnetfree'));
 });
 
@@ -224,10 +253,10 @@ test('cleanupSync: the synchronous best effort for process exit, inner first', (
   tun.cleanupSync();
   assert.deepEqual(inner.calls, [['cleanupSync']]);
   assert.deepEqual(lines, [
-    'SYNC ip -4 rule del pref 8998 lookup main suppress_prefixlength 0',
-    'SYNC ip -6 rule del pref 8998 lookup main suppress_prefixlength 0',
-    'SYNC ip -4 rule del pref 8999 fwmark 0x1f1e lookup main',
-    'SYNC ip -6 rule del pref 8999 fwmark 0x1f1e lookup main',
+    'SYNC ip -4 rule del pref 8998',
+    'SYNC ip -6 rule del pref 8998',
+    'SYNC ip -4 rule del pref 8999',
+    'SYNC ip -6 rule del pref 8999',
     'SYNC nft delete table inet irnetfree'
   ]);
 });

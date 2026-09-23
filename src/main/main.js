@@ -179,6 +179,7 @@ const DEFAULT_SETTINGS = {
   autoConnect: false,
   // OpenWrt gateway only (service.js); here so both DEFAULT_SETTINGS agree
   lanBypassMacs: [],
+  lanBlockQuic: false,
   // weekly refresh of the downloaded files, never under a live tunnel:
   // 'off' | 'geo' (the data files only — the default: they cannot break a
   // working config) | 'all' (the installed cores too, when a release is newer)

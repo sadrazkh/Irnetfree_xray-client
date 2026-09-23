@@ -486,7 +486,9 @@ const I18N = {
     'gw.none': 'دستگاهی پیدا نشد — دستگاه‌ها وقتی از روتر IP بگیرند این‌جا ظاهر می‌شوند.',
     'gw.hint': 'دستگاه مستثنا هم نام‌ها را از DNS روتر می‌پرسد، یعنی از داخل تونل؛ فقط ترافیک خودش مستقیم می‌رود.',
     'gw.online': 'آنلاین', 'gw.offline': 'آفلاین', 'gw.saved': 'فهرست دستگاه‌های مستقیم ذخیره شد',
-    'ins.gateway': 'گیت‌وی', 'gw.insWhole': 'کل شبکه از تونل', 'gw.insDirect': '{n} دستگاه مستقیم'
+    'ins.gateway': 'گیت‌وی', 'gw.insWhole': 'کل شبکه از تونل', 'gw.insDirect': '{n} دستگاه مستقیم',
+    'gw.quic': 'QUIC (UDP 443) از شبکه رد نشود',
+    'gw.quicSub': 'مرورگرها بلافاصله سراغ TCP می‌روند که هر پروکسی‌ای حمل می‌کند؛ دستگاه‌های مستقیم دست نمی‌خورند.'
   },
 
   en: {
@@ -972,7 +974,9 @@ const I18N = {
     'gw.none': 'No devices found — they appear here once they get an address from the router.',
     'gw.hint': 'An excluded device still resolves names through the router, i.e. through the tunnel; only its own traffic goes direct.',
     'gw.online': 'online', 'gw.offline': 'offline', 'gw.saved': 'Direct-device list saved',
-    'ins.gateway': 'Gateway', 'gw.insWhole': 'whole network', 'gw.insDirect': '{n} direct'
+    'ins.gateway': 'Gateway', 'gw.insWhole': 'whole network', 'gw.insDirect': '{n} direct',
+    'gw.quic': 'Refuse QUIC (UDP 443) from the LAN',
+    'gw.quicSub': 'Browsers fall back to TCP at once, which every proxy carries; devices that go direct are not affected.'
   }
 };
 

@@ -125,12 +125,12 @@ function mergeDevices(leases, neigh) {
  * no table. An empty exclusion list still declares the set, so a later
  * `add element` has something to add to.
  */
-function buildNftRuleset({ lanIf = 'br-lan', macs = [], mark = BYPASS_MARK } = {}) {
+function buildNftRuleset({ lanIf = 'br-lan', macs = [], mark = BYPASS_MARK, blockQuic = false } = {}) {
   const list = validMacs(macs);
   const ifName = String(lanIf == null ? '' : lanIf).replace(/[^A-Za-z0-9_.-]/g, '') || 'br-lan';
   const hex = '0x' + Number(mark).toString(16);
   const elements = list.length ? ` elements = { ${list.join(', ')} };` : '';
-  return [
+  const lines = [
     `table ${NFT_TABLE}`,
     `delete table ${NFT_TABLE}`,
     `table ${NFT_TABLE} {`,
@@ -138,17 +138,30 @@ function buildNftRuleset({ lanIf = 'br-lan', macs = [], mark = BYPASS_MARK } = {
     '  chain pre {',
     '    type filter hook prerouting priority mangle; policy accept;',
     `    iifname "${ifName}" ether saddr @bypass_macs meta mark set ${hex} counter`,
-    '  }',
-    '}',
-    ''
-  ].join('\n');
+    '  }'
+  ];
+  // QUIC (UDP 443) from the LAN is refused — not dropped — so a browser falls
+  // back to TCP at once instead of waiting on a proxy that carries UDP badly
+  // or not at all (the AC-1304 log: a stream of `udp:…:443 [socks-in -> proxy]`
+  // for every Google and Apple host). Devices that go direct keep their QUIC.
+  if (blockQuic) {
+    lines.push(
+      '  chain fwd {',
+      '    type filter hook forward priority filter - 10; policy accept;',
+      `    iifname "${ifName}" meta mark != ${hex} udp dport 443 counter reject`,
+      '  }'
+    );
+  }
+  lines.push('}', '');
+  return lines.join('\n');
 }
 
 /** argv for busybox `ip`, v4 then v6: the one rule that lets marked packets out through main. */
 function bypassRuleArgs(verb, mark = BYPASS_MARK, pref = BYPASS_RULE_PREF) {
   if (verb !== 'add' && verb !== 'del') throw new Error('bypassRuleArgs: verb must be add or del');
+  if (verb === 'del') return ['-4', '-6'].map(fam => [fam, 'rule', 'del', 'pref', String(pref)]);
   const hex = '0x' + Number(mark).toString(16);
-  return ['-4', '-6'].map(fam => [fam, 'rule', verb, 'pref', String(pref), 'fwmark', hex, 'lookup', 'main']);
+  return ['-4', '-6'].map(fam => [fam, 'rule', 'add', 'pref', String(pref), 'fwmark', hex, 'lookup', 'main']);
 }
 
 /**
@@ -169,7 +182,16 @@ function bypassRuleArgs(verb, mark = BYPASS_MARK, pref = BYPASS_RULE_PREF) {
  */
 function mainFirstRuleArgs(verb, pref = MAIN_FIRST_PREF) {
   if (verb !== 'add' && verb !== 'del') throw new Error('mainFirstRuleArgs: verb must be add or del');
-  return ['-4', '-6'].map(fam => [fam, 'rule', verb, 'pref', String(pref), 'lookup', 'main', 'suppress_prefixlength', '0']);
+  // `del` is by preference alone: it then also removes the rule an older
+  // version left behind, whatever selectors that one carried.
+  if (verb === 'del') return ['-4', '-6'].map(fam => [fam, 'rule', 'del', 'pref', String(pref)]);
+  // `not dport 53`: a DNS query is NEVER let out through a specific route. The
+  // resolver a router's WAN DHCP hands out is very often the ISP's modem on the
+  // WAN's own subnet — a connected route — and without this every query dnsmasq
+  // forwards would go straight to it, off the tunnel: the DNS leak. Port 53 falls
+  // through to sing-box's rules, enters the tunnel and is answered by the core.
+  // sing-tun's own rule set carries the same `not dport 53` for the same reason.
+  return ['-4', '-6'].map(fam => [fam, 'rule', 'add', 'not', 'dport', '53', 'pref', String(pref), 'lookup', 'main', 'suppress_prefixlength', '0']);
 }
 
 /** `ubus call network.interface.lan status` → { device, address, mask }; pure. */

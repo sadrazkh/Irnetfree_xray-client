@@ -135,6 +135,9 @@ const DEFAULT_SETTINGS = {
   // OpenWrt gateway: the devices (by MAC) that go around the tunnel. Applied
   // live to the running gateway — deliberately NOT a reconnect key.
   lanBypassMacs: [],
+  // OpenWrt gateway: refuse QUIC (UDP 443) from the LAN so browsers use TCP,
+  // which every proxy carries. Applied live. The router turns it on by default.
+  lanBlockQuic: false,
   // weekly refresh of the downloaded files, never under a live tunnel:
   // 'off' | 'geo' (the data files only — the default) | 'all' (the cores too)
   autoUpdateAssets: 'geo',
@@ -174,7 +177,7 @@ function createService(opts = {}) {
   // itself, so "connect at start" is the default THERE (the user can still turn
   // it off; a stored value always wins). Everywhere else the desktop's default.
   // Declared up here: getSettings() is hoisted and runs before the store exists.
-  const ROUTER_DEFAULTS = OPENWRT ? { autoConnect: true } : {};
+  const ROUTER_DEFAULTS = OPENWRT ? { autoConnect: true, lanBlockQuic: true } : {};
   // Applied AFTER the stored settings: not a default but a fact of the platform.
   // The managed DNS plan is what makes the core answer every port-53 packet
   // (dnsBuilder's hijack). Off, a LAN client's or dnsmasq's plain UDP query
@@ -848,6 +851,13 @@ function createService(opts = {}) {
     }
 
     const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+    // A router carries a house: one access-log line per connection, through the
+    // service's stdout into syslog, is real CPU on a Cortex-A7 (the AC-1304 log
+    // was a wall of `accepted udp:…`). Kept when the user asks for a verbose
+    // level — that is how today's two faults were read.
+    if (OPENWRT && !/^(info|debug)$/i.test(String(settings.logLevel || ''))) {
+      config.log = Object.assign({}, config.log, { access: 'none' });
+    }
     // Managed DNS off drops every resolver a routing target brings — a
     // corporate WireGuard's own DNS above all. The names inside that network
     // then never resolve, and nothing else in the log says why.
@@ -996,7 +1006,7 @@ function createService(opts = {}) {
           }
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...wgEndpoints],
             tunAdapterDns,
-            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs });   // tun2socks ignores the 4th; only the router reads bypassMacs
+            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic });   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
           if (tunApps) {
             send('log', {
@@ -1095,7 +1105,9 @@ function createService(opts = {}) {
     // a fresh core counts from zero — tell the meter, or the first poll of the
     // new session reads as growth on the old one (see main.js)
     if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
-    stats.start(1000);
+    // a router polls the core's counters every 3 s, not every second: the
+    // sparkline is not worth a Cortex-A7's time while it is forwarding a house
+    stats.start(OPENWRT ? 3000 : 1000);
 
     startProcWatcher();
     // Watch for the machine's network moving under the live tunnel. Every reconnect
@@ -1680,6 +1692,9 @@ function createService(opts = {}) {
         if (tun && tun.active && typeof tun.setBypassMacs === 'function') {
           tun.setBypassMacs(next.lanBypassMacs).catch(e => send('log', { line: 'Gateway exclusions not applied: ' + e.message, level: 'error' }));
         }
+      }
+      if ('lanBlockQuic' in partial && tun && tun.active && typeof tun.setBlockQuic === 'function') {
+        tun.setBlockQuic(!!next.lanBlockQuic).catch(e => send('log', { line: 'QUIC setting not applied: ' + e.message, level: 'error' }));
       }
       // "Start with the OS" is a desktop setting: on a server the process is a
       // service already. Refuse it in the store so the switch cannot claim it.
