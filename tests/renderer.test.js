@@ -81,6 +81,35 @@ test('every string on screen resolves in both languages', () => {
 });
 
 /**
+ * The OpenWrt gateway (v1.13.0): the device list under LAN sharing and the
+ * inspector's gateway row. Hidden until the service reports flavor=openwrt —
+ * on the desktop these must never show — and every string of theirs is a key
+ * in both languages, including the ones only t() ever sees.
+ */
+test('the OpenWrt device list and gateway row exist, hidden by default, and are fully translated', () => {
+  for (const id of ['gwRow', 'gwList', 'btnGwRefresh', 'insGatewayRow', 'insGateway']) {
+    assert.ok(htmlIds.has(id), `#${id} is missing`);
+  }
+  const between = HTML.slice(HTML.indexOf('id="lanInfo"'), HTML.indexOf('id="optKillSwitch"'));
+  assert.ok(between.includes('id="gwRow"'), 'the device list sits under LAN sharing, before the kill switch');
+  assert.match(HTML, /id="gwRow" hidden/, 'hidden until flavor=openwrt');
+  assert.match(HTML, /id="insGatewayRow" hidden/, 'hidden until flavor=openwrt');
+  assert.match(APP, /state\.flavor = data\.flavor \|\| null/);
+
+  const keys = new Set();
+  for (const m of HTML.matchAll(/data-i18n(?:-ph|-title)?="(gw\.[^"]+|ins\.gateway)"/g)) keys.add(m[1]);
+  for (const m of APP.matchAll(/\bt\(\s*'(gw\.[^']+)'/g)) keys.add(m[1]);
+  assert.ok(keys.size >= 10, `expected the whole card to be translated, found ${keys.size} keys`);
+  const bad = [...keys].filter((k) => (I18N.split(`'${k}':`).length - 1) !== 2).sort();
+  assert.deepEqual(bad, [], 'these keys are not defined exactly once in each of fa and en');
+
+  // the classes the list is built from exist in the stylesheet
+  for (const cls of ['gw-list', 'gw-item', 'gw-dot', 'gw-name', 'gw-meta', 'gw-direct', 'gw-check']) {
+    assert.ok(CSS.includes('.' + cls), `.${cls} has no style`);
+  }
+});
+
+/**
  * The dialog's own controls. styles.css resets `button { background:none;
  * border:0 }` and gives inputs `color: inherit`, so a class-less <button> in
  * there rendered as bare padded text and its <input>s as near-white text on the

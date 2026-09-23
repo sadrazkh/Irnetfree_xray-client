@@ -293,6 +293,8 @@ async function init() {
   state.assets = data.assets || {};
   state.version = data.version || '';
   state.platform = data.platform || (data.assets && data.assets.platform) || 'win32';
+  // the router flavour of Linux: the device list shows, the desktop-only rows go
+  state.flavor = data.flavor || null;
   // main only reports pending keys while something is actually connected, so a
   // fresh launch always starts empty
   state.pendingReconnect = data.pendingReconnect || [];
@@ -334,6 +336,7 @@ async function init() {
   setModeWidget();
   updateLanInfo();
   updateKillStatus();
+  applyFlavor();
   renderPendingBanner();
 
   // app version + xray-core version
@@ -896,6 +899,66 @@ async function updateLanInfo() {
     el.className = 'tun-status warn';
   }
 }
+
+/**
+ * OpenWrt: the router IS the tunnel for the LAN, so the switches that only
+ * mean something on a desktop go (system proxy, login item, Windows kill
+ * switch, the TUN backend choice — fixed there, per-app routing — no process
+ * behind a forwarded packet) and the device list comes.
+ */
+function applyFlavor() {
+  const rt = state.flavor === 'openwrt';
+  $('#gwRow').hidden = !rt;
+  $('#insGatewayRow').hidden = !rt;
+  for (const id of ['optSysProxy', 'optLaunchAtLogin', 'optKillSwitch']) {
+    const row = $('#' + id).closest('.switch-row');
+    if (row) row.hidden = rt;
+  }
+  $('#killStatus').hidden = rt;
+  $('#tunBackendRow').hidden = rt;
+  $('#tunAppRow').hidden = rt;
+  if (rt) renderLanDevices();
+}
+
+/** The devices behind the router, each with its "direct" tick. */
+async function renderLanDevices() {
+  const host = $('#gwList');
+  if (!host || state.flavor !== 'openwrt' || !window.api.lanDevices) return;
+  let devices = [];
+  try { devices = (await window.api.lanDevices()) || []; } catch { devices = []; }
+  const bypass = new Set((state.settings.lanBypassMacs || []).map(m => String(m).toLowerCase()));
+  // an excluded device that is not on the network right now still shows, so it can be un-excluded
+  for (const mac of bypass) if (!devices.some(d => d.mac === mac)) devices.push({ mac, ip: '', name: '', online: false });
+  host.innerHTML = '';
+  if (!devices.length) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = t('gw.none');
+    host.appendChild(p);
+    return;
+  }
+  for (const d of devices) {
+    const row = document.createElement('label');
+    row.className = 'gw-item';
+    row.innerHTML =
+      `<span class="gw-dot${d.online ? ' on' : ''}" title="${escapeHtml(t(d.online ? 'gw.online' : 'gw.offline'))}"></span>` +
+      `<span class="gw-name">${escapeHtml(d.name || d.mac)}</span>` +
+      `<span class="gw-meta">${escapeHtml(d.ip || '')}${d.ip ? ' · ' : ''}${escapeHtml(d.mac)}</span>` +
+      `<span class="gw-direct">${escapeHtml(t('gw.direct'))}</span>` +
+      `<input type="checkbox" class="gw-check"${bypass.has(d.mac) ? ' checked' : ''} />`;
+    row.querySelector('.gw-check').onchange = async (e) => {
+      const next = new Set(bypass);
+      if (e.target.checked) next.add(d.mac); else next.delete(d.mac);
+      // not a reconnect key: the service replaces the nft set under the live tunnel
+      await saveSettings({ lanBypassMacs: [...next] }, { silent: true });
+      toast(t('gw.saved'), 'ok');
+      renderLanDevices();
+    };
+    host.appendChild(row);
+  }
+}
+$('#btnGwRefresh').onclick = () => renderLanDevices();
+
 $('#btnSaveRules').onclick = async () => {
   const rules = textToCustomRules($('#customRules').value);
   await saveSettings({ customRules: rules });
@@ -1888,6 +1951,10 @@ function renderInspector() {
       ? t('path.rules').replace('{n}', (s.routeRules || []).length)
       : (s.routingMode || 'global');
   }
+  if (state.flavor === 'openwrt') {
+    const n = (s.lanBypassMacs || []).length;
+    set('#insGateway', t('gw.insWhole') + (n ? ' · ' + t('gw.insDirect').replace('{n}', n) : ''), s.tunMode ? 'on' : 'off');
+  }
 }
 
 /* status events from main */
@@ -2379,7 +2446,8 @@ function missingEssentials() {
   const list = [];
   if (!anyXrayCore()) list.push('xray');
   if (!(a.geoip && a.geosite)) list.push('geo');
-  if (want && !a.tun2socks) list.push('tun2socks');
+  // on a router sing-box is the backend and tun2socks never runs
+  if (want && !a.tun2socks && state.flavor !== 'openwrt') list.push('tun2socks');
   if (want && isWin && !a.wintun) list.push('wintun');
   return list;
 }

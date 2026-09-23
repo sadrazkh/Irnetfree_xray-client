@@ -478,7 +478,15 @@ const I18N = {
     'ss.search': 'جستجوی کانفیگ…', 'ss.none': 'موردی پیدا نشد',
 
     'ping.tcp': 'پینگ TCP (شبکه)', 'ping.real': 'تأخیر دانلود (از داخل کانفیگ — اثبات کارکرد)',
-    'ping.upload': 'تأخیر آپلود (از داخل کانفیگ) — کانفیگِ کندِ آپلود را پیدا کن'
+    'ping.upload': 'تأخیر آپلود (از داخل کانفیگ) — کانفیگِ کندِ آپلود را پیدا کن',
+
+    /* OpenWrt gateway (the router is the tunnel for the LAN) */
+    'gw.title': 'دستگاه‌های شبکه', 'gw.sub': 'هر دستگاهی که به این روتر وصل است از تونل می‌رود؛ آن‌هایی که علامت می‌زنی مستقیم می‌روند.',
+    'gw.refresh': 'تازه‌سازی', 'gw.direct': 'مستقیم (بدون تونل)',
+    'gw.none': 'دستگاهی پیدا نشد — دستگاه‌ها وقتی از روتر IP بگیرند این‌جا ظاهر می‌شوند.',
+    'gw.hint': 'دستگاه مستثنا هم نام‌ها را از DNS روتر می‌پرسد، یعنی از داخل تونل؛ فقط ترافیک خودش مستقیم می‌رود.',
+    'gw.online': 'آنلاین', 'gw.offline': 'آفلاین', 'gw.saved': 'فهرست دستگاه‌های مستقیم ذخیره شد',
+    'ins.gateway': 'گیت‌وی', 'gw.insWhole': 'کل شبکه از تونل', 'gw.insDirect': '{n} دستگاه مستقیم'
   },
 
   en: {
@@ -956,7 +964,15 @@ const I18N = {
     'ss.search': 'Search configs…', 'ss.none': 'No matches',
 
     'ping.tcp': 'TCP ping (network)', 'ping.real': 'Download latency (through the config — proof it works)',
-    'ping.upload': 'Upload latency (through the config) — find slow-upload configs'
+    'ping.upload': 'Upload latency (through the config) — find slow-upload configs',
+
+    /* OpenWrt gateway (the router is the tunnel for the LAN) */
+    'gw.title': 'Devices on this network', 'gw.sub': 'Every device connected to this router goes through the tunnel; the ones you tick go direct.',
+    'gw.refresh': 'Refresh', 'gw.direct': 'Direct (not through the tunnel)',
+    'gw.none': 'No devices found — they appear here once they get an address from the router.',
+    'gw.hint': 'An excluded device still resolves names through the router, i.e. through the tunnel; only its own traffic goes direct.',
+    'gw.online': 'online', 'gw.offline': 'offline', 'gw.saved': 'Direct-device list saved',
+    'ins.gateway': 'Gateway', 'gw.insWhole': 'whole network', 'gw.insDirect': '{n} direct'
   }
 };
 
