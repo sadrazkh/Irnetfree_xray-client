@@ -36,6 +36,12 @@ ID="$(rpc '{"channel":"servers:addProxy","arg":{"type":"socks","address":"127.0.
 rpc '{"channel":"settings:set","arg":{"tunMode":true,"routingMode":"global","blockAds":false,"dnsManaged":false,"lanBypassMacs":["02:00:00:00:00:01"]}}' \
 	| jq -e '.result.settings.lanBypassMacs == ["02:00:00:00:00:01"]' >/dev/null
 
+# The WAN as this guest has it: the slirp gateway, which sits on br-lan (one
+# NIC). "Out the WAN" below means "via that gateway", not a device name.
+GW="$(ip route show default | sed -n 's/.*via \([0-9.]*\).*/\1/p' | head -n 1)"
+[ -n "$GW" ] || { echo "no default gateway before connect"; ip route; exit 1; }
+echo "WAN gateway: $GW"
+
 say "connect"
 rpc "{\"channel\":\"connect\",\"arg\":\"$ID\"}" > /tmp/connect.json || true
 cat /tmp/connect.json; echo
@@ -63,7 +69,8 @@ echo "$r" | grep -q 'dev IRNetFree' || { echo "a LAN client's internet traffic i
 r="$(ip route get 192.168.1.60 from 192.168.1.50 iif br-lan)"; echo "LAN client -> LAN client:  $r"
 echo "$r" | grep -q 'dev br-lan' || { echo "LAN-to-LAN would enter the tunnel"; exit 1; }
 r="$(ip route get 8.8.8.8 from 192.168.1.50 iif br-lan mark 0x1f1e)"; echo "excluded device -> internet: $r"
-echo "$r" | grep -q 'dev eth0' || { echo "an excluded device's traffic is not going out the WAN"; exit 1; }
+echo "$r" | grep -q "via $GW" || { echo "an excluded device's traffic is not going out the WAN"; exit 1; }
+if echo "$r" | grep -q 'dev IRNetFree'; then echo "an excluded device's traffic entered the tunnel"; exit 1; fi
 nft list table inet irnetfree
 nft list table inet irnetfree | grep -q '02:00:00:00:00:01' || { echo "the excluded MAC is not in the set"; exit 1; }
 nft list ruleset | grep -q 'oifname "IRNetFree"' || { echo "fw4 has no rule for the IRNetFree device"; exit 1; }
@@ -84,6 +91,6 @@ if nft list table inet irnetfree >/dev/null 2>&1; then echo "the nft table is st
 if ip rule show | grep -q '^8999:'; then echo "the bypass rule is still there"; exit 1; fi
 if ip rule show | grep -q '^8998:'; then echo "the main-first rule is still there"; exit 1; fi
 r="$(ip route get 8.8.8.8)"; echo "router -> internet after disconnect: $r"
-echo "$r" | grep -q 'dev eth0' || { echo "after disconnect the router does not go out the WAN"; exit 1; }
+echo "$r" | grep -q "via $GW" || { echo "after disconnect the router does not go out the WAN"; exit 1; }
 
 say "SMOKE OK"

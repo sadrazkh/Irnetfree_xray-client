@@ -120,9 +120,15 @@ function step(name, rc) { if (rc !== 0) throw new Error(`${name} failed with exi
       `uci set network.lan.gateway='${HOST_IP}' && uci set network.lan.dns='${DNS_IP}' && uci commit network && /etc/init.d/network reload; ` +
       `i=0; until ip route show default | grep -q 'via ${HOST_IP}'; do i=$((i+1)); [ $i -lt 60 ] || { ip addr; ip route; false; break; }; sleep 1; done && ` +
       `echo nameserver ${DNS_IP} > /etc/resolv.conf`, 120000));
-    // one step per file, and not quiet: a failing download then names itself
+    // one step per file, not quiet, and three tries: a failing download names
+    // itself, and slirp's first connections have dropped for no reason twice
     for (const name of ['irnetfree.ipk', 'guest-smoke.sh', 'install.sh']) {
-      step(`fetch ${name}`, await sh(con, `wget -O /tmp/${name} http://${HOST_IP}:${port}/${name}`, 120000));
+      let rc = 1;
+      for (let attempt = 1; attempt <= 3 && rc !== 0; attempt++) {
+        rc = await sh(con, `wget -O /tmp/${name} http://${HOST_IP}:${port}/${name}`, 120000);
+        if (rc !== 0) await sh(con, 'sleep 3', 15000);
+      }
+      step(`fetch ${name}`, rc);
     }
     rc = await sh(con, 'sh /tmp/guest-smoke.sh 2>&1', 25 * 60000);
     if (rc !== 0) console.error(`\nguest-smoke.sh exited ${rc}`);
