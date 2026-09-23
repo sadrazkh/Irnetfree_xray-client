@@ -52,6 +52,25 @@ const { AssetUpdater } = require('../main/assetUpdater');
 // deliberately NOT given this: Electron never runs on a router.
 const { isOpenwrt, lanInterface, lanDevices, validMacs } = require('../main/openwrtNet');
 const { TunOpenwrt } = require('../main/tunOpenwrt');
+const tcpNet = require('net');
+
+/** Resolves true once 127.0.0.1:port accepts a TCP connection, false at the deadline. */
+function waitForLocalPort(port, ms) {
+  const deadline = Date.now() + ms;
+  const tryOnce = () => new Promise((resolve) => {
+    const s = tcpNet.connect({ host: '127.0.0.1', port, timeout: 1000 });
+    s.once('connect', () => { s.destroy(); resolve(true); });
+    s.once('error', () => { s.destroy(); resolve(false); });
+    s.once('timeout', () => { s.destroy(); resolve(false); });
+  });
+  return (async () => {
+    for (;;) {
+      if (await tryOnce()) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise(r => setTimeout(r, 300));
+    }
+  })();
+}
 
 const DEFAULT_SETTINGS = {
   socksPort: 10808,
@@ -156,6 +175,13 @@ function createService(opts = {}) {
   // it off; a stored value always wins). Everywhere else the desktop's default.
   // Declared up here: getSettings() is hoisted and runs before the store exists.
   const ROUTER_DEFAULTS = OPENWRT ? { autoConnect: true } : {};
+  // Applied AFTER the stored settings: not a default but a fact of the platform.
+  // The managed DNS plan is what makes the core answer every port-53 packet
+  // (dnsBuilder's hijack). Off, a LAN client's or dnsmasq's plain UDP query
+  // rides the proxy as UDP — which most servers do not carry — and the whole
+  // LAN has no names (the AC-1304 log: `udp:1.1.1.1:53 [socks-in -> proxy]`,
+  // never answered). On a router that switch has no meaning; the UI hides it.
+  const ROUTER_FORCED = OPENWRT ? { dnsManaged: true } : {};
 
   const listeners = new Set();
   const send = (channel, payload) => { for (const cb of listeners) { try { cb(channel, payload); } catch {} } };
@@ -424,7 +450,7 @@ function createService(opts = {}) {
   });
 
   /* ----------------------------- settings / data ----------------------------- */
-  function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, ROUTER_DEFAULTS, store.get('settings', {})); }
+  function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, ROUTER_DEFAULTS, store.get('settings', {}), ROUTER_FORCED); }
 
   /**
    * One-time upgrade of the saved servers to the shape the current parser and
@@ -960,6 +986,14 @@ function createService(opts = {}) {
           // and needs nothing here, but one dialled on its own would loop back
           // into the tunnel it is building).
           const wgEndpoints = Object.values(settings.wgEndpointIps || {});
+          // A slow router: the core takes seconds to bind its SOCKS inbound after
+          // start() returns (nine on the AC-1304), and a TUN that comes up first
+          // answers every LAN connection "connection refused" until then.
+          if (OPENWRT) {
+            const bound = await waitForLocalPort(settings.socksPort, 20000);
+            if (stale()) return abandoned;
+            if (!bound) send('log', { line: `The core has not opened 127.0.0.1:${settings.socksPort} after 20s — starting the gateway anyway`, level: 'warn' });
+          }
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...wgEndpoints],
             tunAdapterDns,
             { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs });   // tun2socks ignores the 4th; only the router reads bypassMacs
@@ -1656,7 +1690,8 @@ function createService(opts = {}) {
         error = 'desktop-only';
         send('log', { line: '"Start with the OS" is a desktop setting — on a server, run IRNetFree as a service', level: 'warn' });
       }
-      return { settings: next, pendingReconnect: pendingKeys(), error };
+      // the answer is the EFFECTIVE settings: on a router a forced key (dnsManaged) wins over what was just written
+      return { settings: Object.assign({}, next, ROUTER_FORCED), pendingReconnect: pendingKeys(), error };
     },
     'settings:pending': () => pendingKeys(),
     'settings:apply': () => reapplyConnection(),
