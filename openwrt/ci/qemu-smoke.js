@@ -89,7 +89,15 @@ function step(name, rc) { if (rc !== 0) throw new Error(`${name} failed with exi
   try {
     await con.waitFor(/Please press Enter to activate this console/, 300000);
     con.send('\n');
-    step('shell', await sh(con, 'true', 60000));
+    // The shell resets the tty when it starts, and anything typed before its
+    // prompt is lost — the first run typed `true` into that gap and waited a
+    // minute for an answer that never came. Wait for the prompt, then sync.
+    await con.waitFor(/root@OpenWrt:\S*#/, 120000);
+    let synced = 1;
+    for (let attempt = 0; attempt < 3 && synced !== 0; attempt++) {
+      try { synced = await sh(con, 'true', 30000); } catch { con.send('\n'); }
+    }
+    step('shell', synced);
     step('route to the host', await sh(con, `ip route add default via ${HOST_IP} && echo nameserver ${DNS_IP} > /etc/resolv.conf`, 30000));
     step('fetch', await sh(con, `wget -q -O /tmp/irnetfree.ipk http://${HOST_IP}:${port}/irnetfree.ipk && wget -q -O /tmp/guest-smoke.sh http://${HOST_IP}:${port}/guest-smoke.sh`, 120000));
     rc = await sh(con, 'sh /tmp/guest-smoke.sh 2>&1', 25 * 60000);
