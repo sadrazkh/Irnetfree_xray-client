@@ -1,0 +1,9 @@
+{
+	"luci-app-irnetfree": {
+		"description": "Grant access to the IRNetFree page",
+		"read": {
+			"file": { "/etc/irnetfree/token": [ "read" ] },
+			"uci": [ "irnetfree" ]
+		}
+	}
+}

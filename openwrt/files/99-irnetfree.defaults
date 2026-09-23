@@ -1,0 +1,22 @@
+#!/bin/sh
+# Runs once, at install (default_postinst runs every uci-defaults script the
+# package ships, then deletes it). A firewall zone for the tunnel device so fw4
+# forwards the LAN into it — explicit, rather than relying on the lan zone's
+# forward policy. Idempotent: a re-install finds the zone and leaves it.
+uci -q get firewall.irnetfree >/dev/null || {
+	uci -q batch <<-EOF
+		set firewall.irnetfree=zone
+		set firewall.irnetfree.name='irnetfree'
+		set firewall.irnetfree.input='REJECT'
+		set firewall.irnetfree.output='ACCEPT'
+		set firewall.irnetfree.forward='REJECT'
+		set firewall.irnetfree.masq='0'
+		add_list firewall.irnetfree.device='IRNetFree'
+		set firewall.irnetfree_lan=forwarding
+		set firewall.irnetfree_lan.src='lan'
+		set firewall.irnetfree_lan.dest='irnetfree'
+		commit firewall
+	EOF
+	[ -x /etc/init.d/firewall ] && /etc/init.d/firewall reload >/dev/null 2>&1
+}
+exit 0
