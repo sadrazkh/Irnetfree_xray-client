@@ -6,3 +6,7 @@ install.sh text eol=lf
 # checkout or CI runner (a converted byte makes it a font the browser rejects).
 *.woff2 binary
 *.woff binary
+
+# Everything that runs on a router (busybox ash) stays LF on every checkout: a
+# CRLF shebang is "/bin/sh^M: not found". The ipk builder normalises them too.
+openwrt/** text eol=lf

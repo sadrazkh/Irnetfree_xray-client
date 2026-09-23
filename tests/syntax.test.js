@@ -17,7 +17,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const ROOT = path.join(__dirname, '..');
-const DIRS = ['src/main', 'src/renderer', 'src/server', 'scripts'];
+const DIRS = ['src/main', 'src/renderer', 'src/server', 'scripts', 'openwrt'];
 
 function jsFiles(dir) {
   const abs = path.join(ROOT, dir);
