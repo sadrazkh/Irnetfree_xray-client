@@ -104,7 +104,13 @@ function step(name, rc) { if (rc !== 0) throw new Error(`${name} failed with exi
       try { synced = await sh(con, 'true', 30000); } catch { con.send('\n'); }
     }
     step('shell', synced);
-    step('route to the host', await sh(con, `ip route add default via ${HOST_IP} && echo nameserver ${DNS_IP} > /etc/resolv.conf`, 30000));
+    // The LAN is static 192.168.1.1 with no gateway; give it slirp's host as
+    // the gateway THROUGH netifd (uci), not `ip route add`, which raced the
+    // bridge coming up on the third run and is undone by any network reload.
+    step('route to the host', await sh(con,
+      `uci set network.lan.gateway='${HOST_IP}' && uci set network.lan.dns='${DNS_IP}' && uci commit network && /etc/init.d/network reload; ` +
+      `i=0; until ip route show default | grep -q 'via ${HOST_IP}'; do i=$((i+1)); [ $i -lt 60 ] || { ip addr; ip route; false; break; }; sleep 1; done && ` +
+      `echo nameserver ${DNS_IP} > /etc/resolv.conf`, 120000));
     step('fetch', await sh(con, `wget -q -O /tmp/irnetfree.ipk http://${HOST_IP}:${port}/irnetfree.ipk && wget -q -O /tmp/guest-smoke.sh http://${HOST_IP}:${port}/guest-smoke.sh`, 120000));
     rc = await sh(con, 'sh /tmp/guest-smoke.sh 2>&1', 25 * 60000);
     if (rc !== 0) console.error(`\nguest-smoke.sh exited ${rc}`);
