@@ -60,7 +60,8 @@ function make(opts = {}) {
     lanInterface: async () => 'br-lan',
     which: (name) => (opts.which ? opts.which(name) : true),
     onLog: (line, level) => logs.push([level, line]),
-    lang: 'en', tmpDir: '/tmp/irnf-test'
+    lang: 'en', tmpDir: '/tmp/irnf-test',
+    verifyWaitMs: opts.verifyWaitMs || 300     // the real 15s is for an emulated CPU; the fakes answer at once
   });
   return { tun, inner, lines, writes, logs };
 }
@@ -134,6 +135,20 @@ test('verify: no TUN device, or no sing-box rule, is a failure with the rule dum
 
   const noRule = make({ answers: [[/^ip rule show/, '0:\tfrom all lookup local\n32766:\tfrom all lookup main\n']] });
   await assert.rejects(noRule.tun.start(10808, [], [], {}), /\(verify\): sing-box laid no policy route[\s\S]*32766/);
+  assert.ok(noRule.lines.filter(l => l === 'ip rule show').length >= 2, 'the rules were polled, not read once');
+});
+
+test('verify waits for rules that arrive a moment after the device (sing-box lays them late on a slow CPU)', async () => {
+  let reads = 0;
+  const { tun } = make({ answers: [[/^ip rule show/, '']], verifyWaitMs: 2000 });
+  // the third read has the rules; the first two are the window CI fell into
+  tun.run = (function (orig) { return async (cmd, args) => {
+    if (cmd === 'ip' && args[0] === 'rule') { reads++; return reads >= 3 ? RULES_OK : '0:\tfrom all lookup local\n'; }
+    return orig(cmd, args);
+  }; })(tun.run);
+  await tun.start(10808, [], [], {});
+  assert.equal(tun.active, true);
+  assert.ok(reads >= 3, `polled ${reads} times`);
 });
 
 test('setBypassMacs while active replaces the set and leaves the tunnel alone; while inactive it only remembers', async () => {
