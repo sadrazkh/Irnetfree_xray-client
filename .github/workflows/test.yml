@@ -79,3 +79,27 @@ jobs:
           done
           echo "total: $total"
           test "$total" -gt 0
+
+  openwrt:
+    # The OpenWrt package runs nowhere but a router, and nobody working on it
+    # has one on the desk. So an OpenWrt 24.10 armsr image boots in QEMU (TCG,
+    # slow), the package installs on top of the feed's node, and the gateway is
+    # asked to come up against a SOCKS upstream that does not exist: the TUN
+    # device, sing-box's policy route, our nft table and the fw4 zone are what
+    # is asserted — not internet. openwrt/ci/guest-smoke.sh is the checklist.
+    name: openwrt (qemu armsr-armv7)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+      - name: Build the package
+        run: node openwrt/build-ipk.js dist
+      - name: Fetch the OpenWrt image
+        run: curl -fsSL -o /tmp/openwrt-kernel.bin https://downloads.openwrt.org/releases/24.10.2/targets/armsr/armv7/openwrt-24.10.2-armsr-armv7-generic-initramfs-kernel.bin
+      - name: Boot, install, connect, assert
+        run: node openwrt/ci/qemu-smoke.js --kernel /tmp/openwrt-kernel.bin --ipk "$(ls dist/irnetfree_*_all.ipk)"

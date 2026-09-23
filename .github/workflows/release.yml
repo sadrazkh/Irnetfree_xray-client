@@ -274,3 +274,49 @@ jobs:
         with:
           files: android/IRNetFree-*.apk
           fail_on_unmatched_files: false
+
+  openwrt:
+    # The router package: architecture `all` (nothing compiled), built by
+    # openwrt/build-ipk.js from the same checkout as the desktop installers.
+    name: Build OpenWrt package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Sync version to tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+
+      - name: Build ipk
+        shell: bash
+        run: |
+          node openwrt/build-ipk.js dist
+          cd dist
+          sha256sum irnetfree_*_all.ipk > SHA256SUMS-openwrt.txt
+          cat SHA256SUMS-openwrt.txt
+          echo "OpenWrt package: $(ls irnetfree_*_all.ipk) ($(du -h irnetfree_*_all.ipk | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IRNetFree-OpenWrt
+          path: |
+            dist/irnetfree_*_all.ipk
+            dist/SHA256SUMS-openwrt.txt
+          if-no-files-found: error
+
+      - name: Publish package to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/irnetfree_*_all.ipk
+            dist/SHA256SUMS-openwrt.txt
+          fail_on_unmatched_files: true
