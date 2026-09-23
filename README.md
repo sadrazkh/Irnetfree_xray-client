@@ -46,6 +46,7 @@ Windows · macOS (Intel + Apple Silicon) · Linux
 - [ساخت نسخه نصبی](#-ساخت-نسخه-نصبی-build)
 - [نسخه CLI / سرور بدون GUI (لینوکس)](#-نسخه-cli--سرور-بدون-gui-لینوکس-headless)
 - [نسخه اندروید](#-نسخه-اندروید-android)
+- [نسخه OpenWrt (روتر)](#-نسخه-openwrt-روتر)
 - [انتشار خودکار (GitHub Actions)](#-انتشار-خودکار-github-actions-release)
 - [معماری](#-معماری-architecture)
 - [ساختار پروژه](#-ساختار-پروژه-project-structure)
@@ -1229,6 +1230,20 @@ gradle wrapper               # یک‌بار، اگر ./gradlew نداری (Wrap
 > ⚠️ رفتار واقعیِ تونل روی **دستگاه/شبیه‌ساز** باید تست شود؛ نسخه‌ی دقیق `libv2ray` باید با امضای API در سرویس VPN بخواند (در صورت تغییر API بالادست، فقط `XrayVpnService.kt` نیاز به تطبیق دارد).
 
 ---
+
+## 🛜 نسخه OpenWrt (روتر)
+
+از **v1.13.0** همین برنامه روی روتر OpenWrt هم می‌رود — نه یک بازنویسی: `src/server/` (نسخهٔ headless) با
+`node` از فید رسمی OpenWrt اجرا می‌شود، همان UI روی `http://<روتر>:6969` بالا می‌آید و **هر دستگاه پشت روتر بدون
+هیچ تنظیمی از تونل می‌رود**. دستگاه‌های انتخابی با MAC مستقیم می‌روند (تنظیمات → دستگاه‌های شبکه).
+
+- بک‌اند: `src/main/tunOpenwrt.js` — همان TUN sing-box دسکتاپ (روی لینوکس `auto_route` ترافیک فورواردشده را
+  هم می‌گیرد) + یک جدول nftables برای استثناها. DNS روتر دست نمی‌خورد؛ پورت ۵۳ از تونل جواب می‌گیرد.
+- بسته: `irnetfree_<v>_all.ipk` در هر ریلیز (`openwrt/build-ipk.js`)؛ وابسته به `node kmod-tun nftables unzip ca-bundle`.
+- تست: CI یک OpenWrt واقعی را در QEMU بوت می‌کند، بسته را نصب و گیت‌وی را بالا می‌آورد (`openwrt/ci/`).
+- هدف اول: **Google Wifi AC-1304**؛ هر روتر ≥256MB RAM / ≥128MB فضا.
+
+راهنمای نصب و چک روی دستگاه: [`docs/openwrt.md`](docs/openwrt.md).
 
 ## 🚀 انتشار خودکار (GitHub Actions Release)
 
