@@ -108,8 +108,8 @@ test('start: nft table, then the bypass rules, then sing-box, then verify — in
     'ip rule show',
     'ip route get 192.168.1.3'                                             // the router's own path to a LAN client
   ]);
-  assert.deepEqual(inner.calls[0], ['start', 10808, ['1.2.3.4'], { ipv6: false, strict: false, apps: null, bypassMacs: ['AA:BB:CC:DD:EE:01', 'bad'], gso: true }],
-    'sing-box gets gso on a router; everything else is passed through');
+  assert.deepEqual(inner.calls[0], ['start', 10808, ['1.2.3.4'], { ipv6: false, strict: false, apps: null, bypassMacs: ['AA:BB:CC:DD:EE:01', 'bad'] }],
+    'the options are passed through untouched (no gso key: sing-box 1.12 refuses it, and enables GSO itself)');
   assert.equal(inner.lang, 'en', 'the language the service set is handed down');
   assert.ok(logs.some(([, l]) => /Gateway up on br-lan.*1 excluded/.test(l)), JSON.stringify(logs));
   // a second start is a no-op while active
