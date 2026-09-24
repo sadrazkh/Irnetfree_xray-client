@@ -1140,23 +1140,31 @@ class LeakGuard {
       // after this line is undoable, by us or by the next launch.
       this.writeState(state);
       this._token = token;
-      await apply();
-      this.onLog(this.platform === 'win32'
-        ? `Leak guard: DNS of ${count} adapters → ${WIN_HOLD4} ${WIN_HOLD6} (loopback: nothing asked there leaves the machine;`
-          + ` the tunnel's resolver ${[peer4, peer6].filter(Boolean).join(' ')} answers)`
-        : `Leak guard: DNS of ${count} adapters → ${[peer4, peer6].filter(Boolean).join(' ')}`, 'info');
-      if (strict) {
-        if (block) {
-          await block();
-          // Not an aside: at this level a bypass rule ("send .ir direct") no
-          // longer reaches anything, because direct dials leave through the
-          // physical adapter this just blocked.
-          this.onLog(`Leak guard (strict): ${count} adapters now block every outbound address but the tunnel's`
-            + ' — traffic your rules send direct is blocked too', 'warn');
-        } else {
-          this.onLog('Leak guard (strict): could not name the tunnel device, so the pf block was skipped'
-            + ' — the DNS override is on, the rest of the traffic is not guarded', 'warn');
+      // From here the state is written and the receipt is live: a failure
+      // hands it over on the error, so the caller can still undo its own
+      // session — and only its own (a release without one is unconditional).
+      try {
+        await apply();
+        this.onLog(this.platform === 'win32'
+          ? `Leak guard: DNS of ${count} adapters → ${WIN_HOLD4} ${WIN_HOLD6} (loopback: nothing asked there leaves the machine;`
+            + ` the tunnel's resolver ${[peer4, peer6].filter(Boolean).join(' ')} answers)`
+          : `Leak guard: DNS of ${count} adapters → ${[peer4, peer6].filter(Boolean).join(' ')}`, 'info');
+        if (strict) {
+          if (block) {
+            await block();
+            // Not an aside: at this level a bypass rule ("send .ir direct") no
+            // longer reaches anything, because direct dials leave through the
+            // physical adapter this just blocked.
+            this.onLog(`Leak guard (strict): ${count} adapters now block every outbound address but the tunnel's`
+              + ' — traffic your rules send direct is blocked too', 'warn');
+          } else {
+            this.onLog('Leak guard (strict): could not name the tunnel device, so the pf block was skipped'
+              + ' — the DNS override is on, the rest of the traffic is not guarded', 'warn');
+          }
         }
+      } catch (e) {
+        if (e && typeof e === 'object') e.token = token;
+        throw e;
       }
       return { engaged: true, adapters: count, token };
     });
