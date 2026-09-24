@@ -94,6 +94,23 @@ test('the boot-time retry is a router thing: for as long as it takes there (15s,
   assert.match(src, /routerBackoffMs: \[2000, 5000, 15000, 30000, 60000\]/, 'the recovery backs off to a minute, and never gives up');
 });
 
+test('the inspector’s gateway line follows the LIVE tunnel, not the TUN switch', () => {
+  // It used to read `s.tunMode`: "on" while the gateway had failed, or before
+  // anything was connected. The expression is evaluated here against states.
+  const vm = require('node:vm');
+  const APP = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const body = APP.slice(APP.indexOf('function renderInspector()'), APP.indexOf('/* status events from main */'));
+  const m = /const gatewayUp = ([^;]+);/.exec(body);
+  assert.ok(m, 'renderInspector computes gatewayUp');
+  assert.match(body, /set\('#insGateway', gatewayUp \?[^\n]*gatewayUp \? 'on' : 'off'\)/, 'and the row shows it');
+  const up = (connected, tunMode, pending = []) => vm.runInNewContext(m[1], { state: { connected, pendingReconnect: pending }, s: { tunMode } });
+  assert.equal(up(false, true), false, 'TUN on, nothing connected: no gateway');
+  assert.equal(up(true, true), true, 'connected with TUN (on a router a failed gateway is a failed connect)');
+  assert.equal(up(true, false), false, 'connected proxy-only by choice');
+  assert.equal(up(true, false, ['tunMode']), true, 'TUN switched off since — the live gateway is still up until the reconnect');
+  assert.equal(up(true, true, ['tunMode']), false, 'TUN switched on since — not up until the reconnect');
+});
+
 test('net:lanDevices answers a list even where there are no leases and no LAN', async () => {
   const devices = await service.invoke('net:lanDevices');
   assert.ok(Array.isArray(devices));
