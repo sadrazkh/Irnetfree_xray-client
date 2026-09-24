@@ -11,9 +11,11 @@
  * the DNS repair, so every service stayed on the tunnel peer and every Connect
  * was refused.
  *
- * Every probe is injected: nothing here signals, lists or tears down a real
- * process. The stale owner is `process.ppid` — a pid that really is alive and
- * ours to signal on every CI runner, which is exactly the reboot case.
+ * The probe is injected in all but the last test: those signal, list and tear
+ * down nothing real. Their owner pid is `process.ppid` only for realism — what
+ * the fake `signal` answers is what decides. The last test is darwin-only and
+ * runs the REAL probe (`kill -0`, `ps`) against a child it spawns itself: the
+ * macos-latest CI job is the only real Mac this project has.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -27,18 +29,24 @@ cp.execFileSync = () => '';
 const platform = require('../src/main/tunPlatform');
 const { TunSingbox } = require('../src/main/tunSingbox');
 const { TunManager } = require('../src/main/tunManager');
-const { ownerAlive, ownerRecord, pidAlive } = require('../src/main/macSessionOwner');
+const { ownerAlive, ownerRecord, pidAlive, processIdentity, defaultProbe, LIVE_TUNNEL } = require('../src/main/macSessionOwner');
 
 const LIVE_START = 'Wed Sep 23 08:00:00 2026';
 const OLD_START = 'Mon Sep 21 09:15:02 2026';
 
-/** A probe: `signal` answers for one pid, `identity` describes it. */
+/** The refusal recovery must treat as "a live tunnel owns this" (macRecovery.js skips the guard). */
+const liveRefusal = (e) => /Another application instance/.test(e.message) && e.code === LIVE_TUNNEL;
+
+/** A probe: `signal` answers for one pid, `identity` describes it (and records whether the command was asked for). */
 function probe({ signal = 'ours', start = LIVE_START, command = '/usr/libexec/some-daemon' } = {}) {
   const seen = [];
   return {
     seen,
     signal: (pid) => { seen.push(['signal', pid]); return signal; },
-    identity: async (pid) => { seen.push(['identity', pid]); return start === null ? null : { start, command }; }
+    identity: async (pid, opts) => {
+      seen.push(['identity', pid, !!(opts && opts.command)]);
+      return start === null ? null : { start, command };
+    }
   };
 }
 
@@ -52,6 +60,13 @@ test('ownerAlive: the pid AND its start time must match; EPERM is never an insta
   assert.equal(await ownerAlive({ ownerPid: process.pid, ownerStart: LIVE_START }, probe()), false, 'this process is never "another instance"');
   assert.equal(await ownerAlive({ ownerPid: 1 }, probe()), false);
   assert.equal(await ownerAlive({}, probe()), false);
+  // Only what the decision needs: the command matters only to a journal without a start time.
+  const withStart = probe();
+  await ownerAlive({ ownerPid: pid, ownerStart: LIVE_START }, withStart);
+  assert.deepEqual(withStart.seen.filter(s => s[0] === 'identity'), [['identity', pid, false]]);
+  const legacy = probe({ command: '/x' });
+  await ownerAlive({ ownerPid: pid }, legacy, '/x');
+  assert.deepEqual(legacy.seen.filter(s => s[0] === 'identity'), [['identity', pid, true]]);
 });
 
 test('ownerAlive: a journal from before the identity was recorded is live only when the pid runs this app', async () => {
@@ -68,7 +83,7 @@ test('ownerAlive: a journal from before the identity was recorded is live only w
 test('ownerRecord names this process by pid and start time; pidAlive counts a root process as alive', async () => {
   const p = probe({ start: LIVE_START });
   assert.deepEqual(await ownerRecord(p), { ownerPid: process.pid, ownerStart: LIVE_START });
-  assert.deepEqual(p.seen, [['identity', process.pid]]);
+  assert.deepEqual(p.seen, [['identity', process.pid, false]], 'every connect: the start time only, one `ps`');
   assert.deepEqual(await ownerRecord(probe({ start: null })), { ownerPid: process.pid, ownerStart: null });
   const failing = { signal: () => 'ours', identity: async () => { throw new Error('ps failed'); } };
   assert.deepEqual(await ownerRecord(failing), { ownerPid: process.pid, ownerStart: null });
@@ -122,7 +137,7 @@ test('sing-box recovery: a live owner (same pid, same start) still refuses, and 
   const ran = capturePrivileged(t);
   const { userData, work } = singboxJournal(t, { ownerPid: process.ppid, ownerStart: LIVE_START });
   const tun = new TunSingbox({ platform: 'darwin', userData, probe: probe({ start: LIVE_START }) });
-  await assert.rejects(tun.recoverMacSessions(), /Another application instance/);
+  await assert.rejects(tun.recoverMacSessions(), liveRefusal);
   assert.equal(ran.length, 0);
   assert.ok(fs.existsSync(path.join(work, 'session.json')));
 });
@@ -134,7 +149,7 @@ test('sing-box recovery: an old journal without an owner start is ours unless th
   assert.equal(await other.recoverMacSessions(), 1);
   const again = singboxJournal(t, { ownerPid: process.ppid });
   const app = new TunSingbox({ platform: 'darwin', userData: again.userData, probe: probe({ command: process.execPath }) });
-  await assert.rejects(app.recoverMacSessions(), /Another application instance/);
+  await assert.rejects(app.recoverMacSessions(), liveRefusal);
 });
 
 test('sing-box start journals the owner start time next to the pid', async (t) => {
@@ -199,10 +214,40 @@ test('tun2socks recovery: a reused ownerPid is recovered; a live owner still ref
   const live = legacyJournal(t, { ownerPid: process.ppid, ownerStart: LIVE_START });
   const blocked = new TunManager({ userData: live.userData, probe: probe({ start: LIVE_START }) });
   blocked.runScriptPrivileged = async () => assert.fail('must not tear down a live instance\'s tunnel');
-  await assert.rejects(blocked.recoverMacSessions(), /Another application instance/);
+  await assert.rejects(blocked.recoverMacSessions(), liveRefusal);
 
   const root = legacyJournal(t, { ownerPid: process.ppid, ownerStart: LIVE_START });
   const eperm = new TunManager({ userData: root.userData, probe: probe({ signal: 'other', start: LIVE_START }) });
   eperm.runScriptPrivileged = async () => {};
   assert.equal(await eperm.recoverMacSessions(), 1);
+});
+
+// Review fix: the REAL probe, where there is a real Mac to run it on (the
+// macos-latest CI job). A sleeping node child is the other process: its pid is
+// ours to signal, `ps` knows its start time, and it runs this very executable.
+test('darwin: the real probe reads a start time and recognises a live owner by it', { skip: process.platform !== 'darwin' && 'the real probe needs macOS ps' }, async (t) => {
+  const own = await processIdentity(process.pid);
+  assert.ok(own && own.start, 'ps -o lstart= names this process');
+  assert.equal(own.command, undefined, 'a start-time read runs one ps, not two');
+  assert.equal((await ownerRecord()).ownerStart, own.start);
+
+  const child = cp.spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+  t.after(() => { try { child.kill('SIGKILL'); } catch {} });
+  await new Promise((resolve) => child.once('spawn', resolve));
+  const id = await processIdentity(child.pid, { command: true });
+  assert.ok(id && id.start, 'the child has a start time');
+  assert.ok(id.command.startsWith(process.execPath), `ps names the executable: ${id.command}`);
+  assert.equal(defaultProbe.signal(child.pid), 'ours');
+  assert.equal(await ownerAlive({ ownerPid: child.pid, ownerStart: id.start }), true, 'same pid, same start: alive');
+  assert.equal(await ownerAlive({ ownerPid: child.pid, ownerStart: OLD_START }), false, 'same pid, other start: a reused pid');
+  assert.equal(await ownerAlive({ ownerPid: child.pid }, defaultProbe, process.execPath), true, 'an old journal: live while the pid runs this executable');
+  assert.equal(pidAlive(child.pid), true);
+
+  child.kill('SIGKILL');
+  await new Promise((resolve) => child.once('exit', resolve));
+  assert.equal(defaultProbe.signal(child.pid), 'gone');
+  assert.equal(await ownerAlive({ ownerPid: child.pid, ownerStart: id.start }), false, 'gone');
+  assert.equal(pidAlive(child.pid), false);
+  // launchd is root's: EPERM — never an instance of this app, but a root pid that runs.
+  assert.equal(defaultProbe.signal(1), 'other');
 });
