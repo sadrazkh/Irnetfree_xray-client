@@ -62,6 +62,43 @@ class SubRefreshTest {
         assertEquals(old.id, both.id); assertEquals("www.speedtest.net", realitySni(both)); assertEquals("a.example", both.address)
     }
 
+    /*
+     * What an OLDER PARSER got wrong is not an edit. WireGuard subscription
+     * servers were always stored with their link, and the parser before this
+     * update read a WARP key's '+' as a space and `host:2408/` as no port
+     * (51820). Today's parser reads the same link right; the stored record still
+     * differs from it — and must be replaced by it, not "kept as the user's".
+     */
+    @Test fun anOldParsersMistakeIsNotAnEdit() {
+        val priv = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+        val pub = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+        val raw = "wireguard://$priv@engage.cloudflareclient.com:2408/?publickey=$pub&address=172.16.0.2/32&mtu=1280#warp"
+        val legacy = ServerConfig("s-warp", "warp", "wireguard", "engage.cloudflareclient.com", 51820,
+            LinkParser.buildWireguardOutbound(priv.replace('+', ' '), pub.replace('+', ' '), "engage.cloudflareclient.com:51820",
+                "172.16.0.2/32", "", "1280", null, null),
+            raw, subId = sub.id)
+        val out = SubRefresh.merge(listOf(legacy), listOf(LinkParser.parseLink(raw)), sub.id).servers[0]
+        assertEquals("s-warp", out.id)
+        assertEquals(2408, out.port)
+        val set = out.outbound.getJSONObject("settings")
+        assertEquals(priv, set.getString("secretKey"))
+        val peer = set.getJSONArray("peers").getJSONObject(0)
+        assertEquals(pub, peer.getString("publicKey")); assertEquals("engage.cloudflareclient.com:2408", peer.getString("endpoint"))
+    }
+
+    /* A new handshake from the panel takes the user's address, never their SNI or keys for the old one. */
+    @Test fun aNewHandshakeFromThePanelTakesNothingOfTheOldOne() {
+        val mine = edited(parse(link("a.example", "A"))) { it.address = "104.16.1.1"; it.sni = "www.speedtest.net"; it.pbk = "MINE" }
+        // the panel moves the same server (same address, uuid, transport) from REALITY to TLS
+        val tls = "vless://u-a.example@a.example:443?type=xhttp&path=%2Fx&host=a.example&mode=auto&security=tls&sni=cdn.example&fp=chrome#A"
+        val out = SubRefresh.merge(listOf(mine), listOf(LinkParser.parseLink(tls)), sub.id).servers[0]
+        assertEquals(mine.id, out.id)
+        assertEquals("104.16.1.1", out.address); assertEquals("104.16.1.1", vnextAddress(out))
+        val st = out.outbound.getJSONObject("streamSettings")
+        assertEquals("tls", st.getString("security")); assertFalse(st.has("realitySettings"))
+        assertEquals("cdn.example", st.getJSONObject("tlsSettings").getString("serverName"))
+    }
+
     @Test fun theSheetsOwnNoiseSpellingIsNotAnEdit() {
         // noise=fakehello in the link; the sheet writes it back as "faketls" on any save
         val raw = "vless://u-a@a.example:443?type=tcp&security=tls&sni=a.example&noise=fakehello#A"
