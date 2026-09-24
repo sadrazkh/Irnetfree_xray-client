@@ -23,6 +23,7 @@ const { SubscriptionManager } = require('./subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
 const { TunSingbox } = require('./tunSingbox');
 const { NativeMacTun } = require('./nativeMacTun');
+const { recoverMacNetwork } = require('./macRecovery');
 const { collectDiagnostics } = require('./connectionDiagnostics');
 const { stopTrackedTunnels, releaseGuardChecked } = require('./tunnelCleanup');
 const tunPlatform = require('./tunPlatform');
@@ -37,7 +38,7 @@ const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = requir
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
-const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
+const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
 const { trayGroups } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
@@ -285,7 +286,8 @@ function setAutostart(enabled) {
     return new Promise((resolve) => execFile('schtasks', args, { windowsHide: true }, (err, so, se) =>
       resolve({ ok: !err, error: err ? String(se || err.message).trim() : null })));
   }
-  try { app.setLoginItemSettings({ openAtLogin: !!enabled, args: ['--hidden'] }); return Promise.resolve({ ok: true }); }
+  // macOS ignores `args`: it opens hidden through its own setting (autostart.js).
+  try { app.setLoginItemSettings(loginItemSettings(enabled, process.platform)); return Promise.resolve({ ok: true }); }
   catch (e) { return Promise.resolve({ ok: false, error: e.message }); }
 }
 
@@ -380,8 +382,9 @@ async function disarmKillSwitch() {
 }
 
 function createWindow() {
-  // `--hidden`: started by the OS at logon (autostart.js) — stay in the tray.
-  const startHidden = process.argv.includes('--hidden');
+  // Started by the OS at logon — stay in the tray: `--hidden` from the Windows
+  // task, or on macOS a launch by the login item (autostart.js).
+  const startHidden = startsHidden({ argv: process.argv, platform: process.platform, loginItem: () => app.getLoginItemSettings() });
   mainWindow = new BrowserWindow({
     width: 1080,
     height: 720,
@@ -1038,13 +1041,15 @@ async function doConnect(serverId, opts = {}) {
           // is and only widens the firewall's holes to cover the server about
           // to be dialled; the engage below narrows them back again. The order
           // is a contract; it is written out above `class LeakGuard`.
+          let hold = null;
           try {
-            if (!tun?.managesDns) await leakGuard.holdForReconnect({
+            if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
               excludes: await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []),
               token: guardToken
             });
           } catch {}
-          if (process.platform === 'darwin') await myTun.stop();
+          // keepDns: the held override stays on the main service too (see reapplyConnection).
+          if (process.platform === 'darwin') await myTun.stop({ keepDns: !!(hold && hold.held) });
           else { try { await myTun.stop(); } catch {} }
         }
         // The per-app split, decided once and told to the user when it is
@@ -1291,6 +1296,7 @@ async function reapplyConnection() {
     // adapters point at a peer that routes nowhere. That is the correct
     // failure — closed, not open — and if the retries are given up on, the
     // banner offers the way out (see runRecovery).
+    let hold = null;
     try {
       if (leakGuard) {
         // The same server is being rebuilt, so its entry addresses are already
@@ -1300,12 +1306,14 @@ async function reapplyConnection() {
         // the serverId.
         let entries = [];
         try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
-        if (!tun?.managesDns) await leakGuard.holdForReconnect({
+        if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
           excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
         });
       }
     } catch {}
-    await stopAllTuns();
+    // macOS: while the guard holds, the tunnel's teardown must not put the
+    // main service back on the ISP's DNS either (keepDns) — only a disconnect does.
+    await stopAllTuns({ keepDns: !!(hold && hold.held) });
     try { await setSystemProxy(false, {}); } catch {}
     try { await removeLanFirewall(); } catch {}
     if (xray) await xray.stop();
@@ -1618,9 +1626,9 @@ function stopNetWatcher() {
  * overlapping connect can leave an older instance holding the machine's routes
  * with nothing else pointing at it (see startedTuns).
  */
-async function stopAllTuns() {
+async function stopAllTuns(opts) {
   dnsGuardWatch?.stop();
-  await stopTrackedTunnels(startedTuns, tun);
+  await stopTrackedTunnels(startedTuns, tun, process.platform, opts);
 }
 
 /** The same sweep for the exit hook, where nothing can be awaited. */
@@ -1833,13 +1841,13 @@ async function repairNetwork() {
     await macRepairPromise;
     // The teardown that failed, once more, before the recoveries.
     if (cleanupFailed) { try { await doDisconnect(); } catch { /* the recoveries below are the point */ } }
-    if (process.platform === 'darwin') {
-      await new NativeMacTun().recoverMacSessions();
-      const repair = new TunSingbox({ userData: app.getPath('userData') });
-      await repair.recoverMacSessions();
-      await new TunManager({ userData: app.getPath('userData') }).recoverMacSessions();
-    }
-    await releaseGuardChecked(leakGuard);
+    // Each recovery on its own (macRecovery.js); the guard's release is its last
+    // step (whatever the others did, unless a live tunnel still uses it), and a
+    // failure that gates Connect is reported after it.
+    let failed = null;
+    if (process.platform === 'darwin') failed = await recoverMacNetwork({ userData: app.getPath('userData'), onLog: (line, level) => send('log', { line, level }), guard: () => releaseGuardChecked(leakGuard) });
+    else await releaseGuardChecked(leakGuard);
+    if (failed) throw failed;
     macRepairError = null;
     cleanupFailed = false;
     return { ok: true };
@@ -2576,20 +2584,19 @@ app.whenReady().then(() => {
     onError: () => send('log', { line: 'DNS guard refresh failed; check network protection or reconnect.', level: 'warn' })
   });
   if (process.platform === 'darwin') {
-    macRepairPromise = (async () => {
-      // First, because it is the one recovery that can be holding the system's
-      // DNS right now: the root daemon outlives the app, so a force quit leaves
-      // it with a live session no journal of ours can undo. A no-op when the
-      // bridge is not there (isAvailable() false), which is every non-packaged
-      // build and the headless server.
-      await new NativeMacTun({ userData: app.getPath('userData') }).recoverMacSessions();
-      const repair = new TunSingbox({ userData: app.getPath('userData') });
-      await repair.recoverMacSessions();
-      await new TunManager({ userData: app.getPath('userData') }).recoverMacSessions();
-      const result = await leakGuard.repairAtLaunch();
-      if (leakGuard.readState()) throw new Error('Saved DNS recovery is incomplete');
-      return result;
-    })().catch(e => { macRepairError = e; send('log', { line: 'Network recovery required', level: 'error' }); });
+    // Native daemon first (it can be holding the system's DNS right now and it
+    // outlives the app; a no-op when the bridge is not there), then both
+    // backends' journals, then the guard — EACH ON ITS OWN (macRecovery.js): a
+    // step that throws no longer stops the ones after it, and a native failure
+    // no longer refuses sing-box / tun2socks connects.
+    macRepairPromise = recoverMacNetwork({
+      userData: app.getPath('userData'),
+      onLog: (line, level) => send('log', { line, level }),
+      guard: async () => {
+        await leakGuard.repairAtLaunch();
+        if (leakGuard.readState()) throw new Error('Saved DNS recovery is incomplete');
+      }
+    }).then(e => { if (e) { macRepairError = e; send('log', { line: 'Network recovery required', level: 'error' }); } });
   } else {
     leakGuard.repairAtLaunch().catch((e) => send('log', { line: 'Leak guard repair failed: ' + e.message, level: 'error' }));
   }

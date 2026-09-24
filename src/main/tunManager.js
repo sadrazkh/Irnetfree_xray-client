@@ -32,6 +32,8 @@ const path = require('path');
 const os = require('os');
 const platform = require('./tunPlatform');
 const macOwners = require('./macSessionLock');
+const macOwner = require('./macSessionOwner');
+const { ipsOf } = require('./macTunScripts');
 const { run, delay, sh, isOwnTunInterface } = platform;
 
 const ADAPTER = platform.TUN2SOCKS_ADAPTER;   // 'XrayTun'
@@ -80,6 +82,7 @@ class TunManager {
     this.macLogTimer = null;
     this.userData = opts.userData || null;
     this.macOwnerKey = this.userData ? path.resolve(this.userData) : this;
+    this.probe = opts.probe || macOwner.defaultProbe;   // who owns a journal / is a pid alive (macSessionOwner.js)
   }
 
   /** Pick the message in the user's language (fa default). */
@@ -353,7 +356,12 @@ class TunManager {
     this.onLog(`Default gateway: ${route.gateway} (dev ${route.device})`, 'info');
 
     const service = await this.serviceForDeviceMac(route.device);
-    const savedDns = service ? await this.getServiceDnsMac(service) : [];
+    let savedDns = service ? await this.getServiceDnsMac(service) : [];
+    // After a reconnect's stop (keepDns) the service still lists the tunnel's
+    // resolver: the originals come from the session before, not from it
+    // (dropped only once this start has succeeded — see macSessionOwner.js).
+    const handedOver = service && macOwner.peekHandedOverDns(this.macOwnerKey, service, savedDns);
+    if (handedOver) savedDns = handedOver;
 
     const ips = await this.resolveServerIps(serverAddress);
     if (!ips.length) this.onLog(this.msg(
@@ -375,7 +383,8 @@ class TunManager {
     const dns2 = this.dnsServers[1] || '';
 
     for (const file of [logFile, pidFile, devFile, identityFile, routesFile]) fs.writeFileSync(file, '', { mode: 0o600 });
-    this.macState = { work, logFile, pidFile, devFile, identityFile, dnsFile, routesFile, service, savedDns, gateway: route.gateway, bypassIps: ips, reqDev, macPid: null, dev: '', identity: '', expectedCommand: `${bin} -device ${reqDev} -proxy socks5://127.0.0.1:${socksPort} -loglevel warn` };
+    const owner = await macOwner.ownerRecord(this.probe);   // pid + start time: a reused pid is not us
+    this.macState = { ...owner, work, logFile, pidFile, devFile, identityFile, dnsFile, routesFile, service, savedDns, tunDns: [dns1, dns2].filter(Boolean), gateway: route.gateway, bypassIps: ips, reqDev, macPid: null, dev: '', identity: '', expectedCommand: `${bin} -device ${reqDev} -proxy socks5://127.0.0.1:${socksPort} -loglevel warn` };
     this.saveMacSession();
     fs.writeFileSync(teardownPath, this.macTeardownScript(), { mode: 0o700 });
     const bypassAdd = ips.map(ip => `if route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1; then echo ${sh(ip)} >> ${sh(routesFile)} || exit 13; fi`).join('\n');
@@ -473,7 +482,12 @@ class TunManager {
           if (line.trim()) this.onLog('[tun] ' + line.trim(), 'error');
         }
       }
-      if (!fs.readFileSync(pidFile, 'utf8').trim() && !fs.existsSync(dnsFile)) {
+      // Nothing to recover after a cancelled prompt, or a rollback that succeeded
+      // with tun2socks gone; a kept journal would keep the owner lock too.
+      const pidText = fs.readFileSync(pidFile, 'utf8').trim();
+      const pid = parseInt(pidText, 10);
+      const rolledBack = !/rollback failed/i.test(m) && Number.isInteger(pid) && !macOwner.pidAlive(pid, this.probe);
+      if ((!pidText || rolledBack) && !fs.existsSync(dnsFile)) {
         fs.rmSync(work, { recursive: true, force: true }); this.macState = null;
       }
       if (/User canceled|-128/i.test(m)) {
@@ -497,6 +511,7 @@ class TunManager {
     Object.assign(this.macState, { macPid, identity, dev });
     if (!macPid || !identity || !/^utun\d+$/.test(dev)) throw new Error('Incomplete tunnel setup state; recovery required');
     this.saveMacSession();
+    if (handedOver) macOwner.dropHandedOverDns(this.macOwnerKey);   // the journal holds them now
     this.bypassIps = ips.slice();
     this.active = true;
 
@@ -551,8 +566,8 @@ class TunManager {
   async recoverMacSessions() {
     if (os.platform() !== 'darwin') return 0;
     const owner = macOwners.get(this.macOwnerKey);
-    if (owner && owner !== this) throw new Error('Another tunnel operation is live; disconnect it before recovery');
-    if (this.active) throw new Error('Disconnect the active tunnel before recovery');
+    if (owner && owner !== this) throw macOwner.liveTunnelError('Another tunnel operation is live; disconnect it before recovery');
+    if (this.active) throw macOwner.liveTunnelError('Disconnect the active tunnel before recovery');
     let count = 0;
     if (this.macState) { await this.stopMac(); count++; }
     if (!this.userData) return count;
@@ -566,12 +581,8 @@ class TunManager {
       if (!fs.existsSync(file)) continue;
       if (fs.lstatSync(file).isSymbolicLink()) throw new Error('Invalid tunnel recovery journal');
       const st = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (Number.isInteger(st.ownerPid) && st.ownerPid > 1 && st.ownerPid !== process.pid) {
-        try {
-          process.kill(st.ownerPid, 0);
-          throw new Error('Another application instance may own this tunnel; close it before recovery');
-        } catch (e) { if (e.code !== 'ESRCH') throw e; }
-      }
+      // The pid AND its start time: after a reboot the old pid is someone else's.
+      if (await macOwner.ownerAlive(st, this.probe)) throw macOwner.liveTunnelError('Another application instance may own this tunnel; close it before recovery');
       if (path.resolve(st.work || '') !== work || !Array.isArray(st.savedDns) || !Array.isArray(st.bypassIps) || typeof st.gateway !== 'string' || typeof st.expectedCommand !== 'string') throw new Error('Invalid tunnel recovery session');
       for (const key of ['logFile', 'pidFile', 'devFile', 'identityFile', 'dnsFile', 'routesFile']) {
         if (typeof st[key] !== 'string' || path.dirname(path.resolve(st[key])) !== work) throw new Error('Invalid tunnel recovery path');
@@ -583,9 +594,13 @@ class TunManager {
     return count;
   }
 
-  macTeardownScript() {
+  /** `opts.keepDns`: a reconnect's stop — the leak guard holds the service's DNS; only a disconnect restores it. */
+  macTeardownScript(opts = {}) {
     const st = this.macState || {};
-    const dns1 = (st.savedDns && st.savedDns.length) ? st.savedDns.map(sh).join(' ') : 'Empty';
+    // The journal is a user-owned file and this runs as root: addresses that
+    // are not IP literals are dropped (see macTunScripts' ipsOf).
+    const saved = ipsOf(st.savedDns);
+    const dns1 = saved.length ? saved.map(sh).join(' ') : 'Empty';
     const lines = ['#!/bin/bash'];
     if (st.pidFile) {
       lines.push(
@@ -610,33 +625,36 @@ class TunManager {
     // disconnect until reboot.
     // Interface routes disappear with the owned utun. Do not delete by a
     // recycled device name after a crash: another VPN may own it by then.
-    for (const ip of (st.bypassIps || [])) {
+    for (const ip of (ipsOf([st.gateway]).length ? ipsOf(st.bypassIps) : [])) {
       lines.push(`if grep -Fxq -- ${sh(ip)} ${sh(st.routesFile)} 2>/dev/null; then route -n delete -host ${sh(ip)} ${sh(st.gateway)} 2>/dev/null || true; fi`);
     }
-    if (st.service) lines.push(`if [ -f ${sh(st.dnsFile)} ]; then networksetup -setdnsservers ${sh(st.service)} ${dns1} || exit 25; rm -f ${sh(st.dnsFile)}; fi`);
+    if (st.service && !opts.keepDns) lines.push(`if [ -f ${sh(st.dnsFile)} ]; then networksetup -setdnsservers ${sh(st.service)} ${dns1} || exit 25; rm -f ${sh(st.dnsFile)}; fi`);
     lines.push('exit 0', '');
     return lines.join('\n');
   }
 
-  async stopMac() {
+  async stopMac(opts = {}) {
     if (this.macStopPromise) return this.macStopPromise;
     if (!this.macState) return;
-    this.macStopPromise = this.finishMacStop();
+    this.macStopPromise = this.finishMacStop(opts);
     try { return await this.macStopPromise; } finally { this.macStopPromise = null; }
   }
 
-  async finishMacStop() {
+  async finishMacStop(opts = {}) {
     this.stopMacLogTail();
-    const work = this.macState.work;
+    const st = this.macState;
+    const work = st.work;
+    const keepDns = !!(opts && opts.keepDns);
     const teardownPath = path.join(work, 'teardown.sh');
     try {
       if (fs.existsSync(teardownPath) && fs.lstatSync(teardownPath).isSymbolicLink()) throw new Error('Invalid tunnel teardown path');
-      fs.writeFileSync(teardownPath, this.macTeardownScript(), { mode: 0o700 });
+      fs.writeFileSync(teardownPath, this.macTeardownScript({ keepDns }), { mode: 0o700 });
       await this.runScriptPrivileged(teardownPath);
     } catch (e) {
       this.onLog('TUN teardown: ' + (e.message || e), 'warn');
       throw e;
     }
+    if (keepDns && st.dnsFile && fs.existsSync(st.dnsFile)) macOwner.handOverDns(this.macOwnerKey, st);
     fs.rmSync(work, { recursive: true, force: true });
     this.macState = null;
     this.bypassIps = [];
@@ -688,7 +706,8 @@ class TunManager {
     return this.startLinux(socksPort, serverAddress);
   }
 
-  async stop() {
+  /** `opts.keepDns` (macOS): a reconnect's stop leaves the service's DNS where the guard holds it. */
+  async stop(opts = {}) {
     if (os.platform() === 'darwin' && this.macStartPromise) await this.macStartPromise.catch(() => {});
     if (!this.active && !this.proc && !this.macState) return;
     const plat = os.platform();
@@ -696,7 +715,7 @@ class TunManager {
     if (plat === 'win32') {
       await this.cleanupRoutesWindows().catch(() => {});
     } else if (plat === 'darwin') {
-      await this.stopMac();
+      await this.stopMac(opts);
       this.active = false;
       this.onLog('TUN mode stopped.', 'info');
       return;

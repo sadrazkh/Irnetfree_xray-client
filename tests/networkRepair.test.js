@@ -57,7 +57,8 @@ test('the refusal is decided before anything is torn down', () => {
   for (const [label, body] of [['main.js', MAIN_REPAIR], ['service.js', SERVICE_REPAIR]]) {
     const refusal = body.indexOf("error: 'connected'");
     assert.notEqual(refusal, -1, `${label}: there is no connected check to order`);
-    for (const after of ['doDisconnect', 'recoverMacSessions', 'releaseGuardChecked']) {
+    // recoverMacNetwork runs every backend's recoverMacSessions (macRecovery.js).
+    for (const after of ['doDisconnect', 'recoverMacNetwork', 'releaseGuardChecked']) {
       assert.ok(refusal < body.indexOf(after),
         `${label}: ${after} runs before the connected check`);
     }

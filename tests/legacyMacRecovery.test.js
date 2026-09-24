@@ -14,7 +14,8 @@ test.after(() => { os.platform = realPlatform; });
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-legacy-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const manager = new TunManager({ userData: dir, lang: 'en' });
+  // No `ps` for the owner's start time, no signal to a real pid.
+  const manager = new TunManager({ userData: dir, lang: 'en', probe: { signal: () => 'gone', identity: async () => null } });
   t.after(() => require('../src/main/macSessionLock').delete(path.resolve(dir)));
   manager.tun2socksPath = () => '/test/tun2socks';
   manager.getDefaultRouteMac = async () => ({ gateway: '192.0.2.1', device: 'en0' });
