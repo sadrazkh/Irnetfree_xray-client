@@ -1168,7 +1168,8 @@ function createService(opts = {}) {
           send('log', { line: 'Strict guard on the tun2socks backend: no strict_route and IPv4-only firewall rules — install sing-box for the guard the setting promises', level: 'warn' });
         }
         } catch (e) { tunError = e.message;
-        if (process.platform === 'darwin' && myTun.active) throw e; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }
+        // (the router's failure path is abortGateway, below — never this macOS one)
+        if (!OPENWRT && process.platform === 'darwin' && myTun.active) throw e; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }
       }
       // The leak guard (standard): the TUN adapter's own resolver is ours, but
       // Windows asks the resolvers of EVERY connected adapter in parallel and
