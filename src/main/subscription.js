@@ -158,36 +158,81 @@ function reconcileServers(previous, fresh) {
   return list.map((f, j) => (match[j] === null ? f : carryOver(old[match[j]], f)));
 }
 
-/** Fetch a URL following redirects; resolves with { body, headers }. */
-function fetchUrl(url, timeout = 15000, redirects = 5) {
+/** No subscription comes near this; a portal, a mistake or a hostile server can. */
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
+/**
+ * The whole fetch — every redirect and every byte — against one clock. The
+ * socket's idle timeout alone never fires for a server that trickles a byte at
+ * a time, and the hourly refresh would wait on it for ever.
+ */
+const FETCH_DEADLINE_MS = 60000;
+
+/**
+ * Where a redirect leads, resolved against the URL that sent it. Refused when
+ * it would leave https for plain http: whoever answered the TLS request with a
+ * 302 (a captive portal, anyone on the path) must not get the next request —
+ * the subscription's secret URL — in the clear.
+ */
+function redirectTarget(from, location) {
+  const next = new URL(location, from);
+  if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error('refused redirect to ' + next.protocol);
+  if (new URL(from).protocol === 'https:' && next.protocol === 'http:') throw new Error('refused redirect from https to http');
+  return next.toString();
+}
+
+/**
+ * Fetch a URL following redirects; resolves with { body, headers }.
+ * opts: timeout (idle, ms), deadline (whole fetch, ms), maxBytes, redirects.
+ */
+function fetchUrl(url, opts = {}) {
+  const timeout = opts.timeout || 15000;
+  const maxBytes = opts.maxBytes || MAX_BODY_BYTES;
+  const redirects = opts.redirects == null ? 5 : opts.redirects;
+  const deadlineAt = opts.deadlineAt || Date.now() + (opts.deadline || FETCH_DEADLINE_MS);
   return new Promise((resolve, reject) => {
     let mod;
     try { mod = url.startsWith('https') ? https : http; }
     catch { return reject(new Error('invalid url')); }
 
-    const req = mod.get(url, {
+    let req = null, done = false;
+    const finish = (err, value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(clock);
+      if (err) { if (req) req.destroy(); reject(err); } else resolve(value);
+    };
+    const clock = setTimeout(() => finish(new Error('the subscription took too long to download')),
+      Math.max(0, deadlineAt - Date.now()));
+    const tooLarge = () => new Error(`the subscription is too large (over ${Math.round(maxBytes / 1048576)} MB)`);
+
+    req = mod.get(url, {
       timeout,
       headers: { 'User-Agent': 'XrayClient/1.0 (subscription)' }
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        if (redirects <= 0) return reject(new Error('too many redirects'));
         res.resume();
-        const next = res.headers.location.startsWith('http')
-          ? res.headers.location
-          : new URL(res.headers.location, url).toString();
-        return resolve(fetchUrl(next, timeout, redirects - 1));
+        if (redirects <= 0) return finish(new Error('too many redirects'));
+        let next;
+        try { next = redirectTarget(url, res.headers.location); } catch (e) { return finish(e); }
+        return finish(null, fetchUrl(next, Object.assign({}, opts, { redirects: redirects - 1, deadlineAt })));
       }
       if (res.statusCode !== 200) {
         res.resume();
-        return reject(new Error('HTTP ' + res.statusCode));
+        return finish(new Error('HTTP ' + res.statusCode));
       }
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (c) => (body += c));
-      res.on('end', () => resolve({ body, headers: res.headers }));
+      if (parseInt(res.headers['content-length'], 10) > maxBytes) return finish(tooLarge());
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > maxBytes) return finish(tooLarge());
+        chunks.push(c);
+      });
+      res.on('end', () => finish(null, { body: Buffer.concat(chunks).toString('utf8'), headers: res.headers }));
+      res.on('error', (e) => finish(e));
     });
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-    req.on('error', (e) => reject(e));
+    req.on('timeout', () => finish(new Error('timeout')));
+    req.on('error', (e) => finish(e));
   });
 }
 
@@ -267,6 +312,16 @@ class SubscriptionManager {
 
     const { servers: parsed, errors, usage } = await (this.opts.fetch || fetchSubscription)(before.url, subId);
 
+    // Nothing usable came back — a captive portal's page, an empty body, a
+    // panel's error, a format we do not read. That is a failed refresh, not a
+    // subscription that has no servers: keep every server it had.
+    if (!parsed.length) {
+      const why = errors.length
+        ? `${errors.length} line(s) not understood — ${errors[0].error}`
+        : 'no server links in the response';
+      throw new Error(`the subscription returned no usable servers (${why}); the servers you had are kept`);
+    }
+
     // Read the store again: other refreshes, an edit or a removal may have
     // landed while this one was on the network. A subscription removed in the
     // meantime stays removed — its servers are not written back.
@@ -339,4 +394,4 @@ function hostnameOf(url) {
   try { return new URL(url).hostname; } catch { return ''; }
 }
 
-module.exports = { SubscriptionManager, fetchSubscription, reconcileServers };
+module.exports = { SubscriptionManager, fetchSubscription, reconcileServers, fetchUrl, redirectTarget, MAX_BODY_BYTES };

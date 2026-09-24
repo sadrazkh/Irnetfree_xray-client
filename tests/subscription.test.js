@@ -282,3 +282,109 @@ test('the owner’s plan still routes through the subscription server after two 
   assert.equal(exit.protocol, 'wireguard');
   assert.equal(exit.streamSettings.sockopt.dialerProxy, 'out-chain-tes-h0', 'the WireGuard still rides the xhttp hop');
 });
+
+/* ------------------------------ a refresh that yields nothing ------------------------------ */
+
+// A captive portal after a 302, an empty body, a panel's error page, a format
+// we do not read: zero servers. That used to delete every server of the
+// subscription, silently, on the hourly timer — the connected one included.
+test('a refresh with zero usable servers keeps the old list and reports an error', async () => {
+  for (const body of [
+    '<html><body>Please log in to the hotel Wi-Fi</body></html>',
+    '',
+    '{"error":"subscription expired"}',
+    'hysteria2://pw@h.example.com:443#H'
+  ]) {
+    const mine = sub([XH + '#DE', TR + '#NL']);
+    const subs = [{ id: 'sub1', url: 'https://a', serverCount: 2, lastUpdated: 1234 }];
+    const { store, mgr, updates } = harness({ servers: mine, subs, bodies: [body] });
+    const before = JSON.stringify(store.servers);
+    await assert.rejects(mgr.refresh('sub1'), /no usable servers/, JSON.stringify(body));
+    assert.equal(JSON.stringify(store.servers), before, 'servers untouched');
+    assert.deepEqual(store.subs, subs, 'the subscription record untouched');
+    assert.equal(updates.length, 0);
+  }
+});
+
+test('refreshAll reports the empty subscription as failed and still refreshes the others', async () => {
+  const { store, mgr } = harness({
+    servers: sub([XH + '#DE']).concat(sub([TR + '#NL'], 'sub2')),
+    subs: [{ id: 'sub1', url: 'https://a' }, { id: 'sub2', url: 'https://b' }],
+    bodies: ['<html>portal</html>', TR + '#NL2']
+  });
+  const r = await mgr.refreshAll();
+  assert.deepEqual(r.map(x => x.ok), [false, true]);
+  assert.match(r[0].error, /no usable servers/);
+  assert.equal(store.servers.filter(s => s.subId === 'sub1').length, 1);
+  assert.equal(store.servers.find(s => s.subId === 'sub2').name, 'NL2');
+});
+
+/* ------------------------------ fetch limits ------------------------------ */
+
+const http = require('node:http');
+const { fetchUrl, redirectTarget, MAX_BODY_BYTES } = require('../src/main/subscription');
+
+/** A local server on an ephemeral port that can be closed with its sockets still open. */
+function serve(handler) {
+  return new Promise((resolve) => {
+    const sockets = new Set();
+    const srv = http.createServer(handler);
+    srv.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
+    srv.listen(0, '127.0.0.1', () => resolve({
+      url: `http://127.0.0.1:${srv.address().port}`,
+      close: () => new Promise(r => { for (const s of sockets) s.destroy(); srv.close(() => r()); })
+    }));
+  });
+}
+
+test('the body is capped: 8 MB by default, refused when the header or the bytes go over', async () => {
+  assert.equal(MAX_BODY_BYTES, 8 * 1024 * 1024);
+  const big = Buffer.alloc(5000, 'a');
+  const s = await serve((req, res) => {
+    if (req.url === '/declared') { res.writeHead(200, { 'Content-Length': String(big.length) }); res.end(big); return; }
+    res.writeHead(200);   // chunked: no length to check up front
+    res.write(big.subarray(0, 2500));
+    setTimeout(() => res.end(big.subarray(2500)), 20);
+  });
+  try {
+    await assert.rejects(fetchUrl(s.url + '/declared', { maxBytes: 4000 }), /too large/);
+    await assert.rejects(fetchUrl(s.url + '/chunked', { maxBytes: 4000 }), /too large/);
+    const ok = await fetchUrl(s.url + '/chunked', { maxBytes: 6000 });
+    assert.equal(ok.body.length, 5000);
+  } finally { await s.close(); }
+});
+
+test('the whole fetch has a deadline — a server trickling bytes never trips the idle timeout', async () => {
+  let timer;
+  const s = await serve((req, res) => {
+    res.writeHead(200);
+    timer = setInterval(() => res.write('a'), 30);
+  });
+  try {
+    const t0 = Date.now();
+    await assert.rejects(fetchUrl(s.url, { timeout: 5000, deadline: 250 }), /took too long/);
+    assert.ok(Date.now() - t0 < 2000, 'gave up at the deadline, not at the idle timeout');
+  } finally { clearInterval(timer); await s.close(); }
+});
+
+test('redirects: relative and same-scheme are followed; https → http is refused', () => {
+  assert.equal(redirectTarget('https://a.example/sub', '/other'), 'https://a.example/other');
+  assert.equal(redirectTarget('https://a.example/sub', 'https://b.example/x'), 'https://b.example/x');
+  assert.equal(redirectTarget('http://a.example/sub', 'https://b.example/x'), 'https://b.example/x', 'an upgrade is fine');
+  assert.equal(redirectTarget('http://a.example/sub', 'http://b.example/x'), 'http://b.example/x');
+  assert.throws(() => redirectTarget('https://a.example/sub', 'http://portal.example/login'), /https to http/);
+  assert.throws(() => redirectTarget('https://a.example/sub', 'HTTP://portal.example/login'), /https to http/);
+  assert.throws(() => redirectTarget('https://a.example/sub', 'ftp://x.example/'), /redirect/);
+});
+
+test('a redirect chain is followed, and the body arrives whole', async () => {
+  const s = await serve((req, res) => {
+    if (req.url === '/a') { res.writeHead(302, { Location: '/b' }); res.end(); return; }
+    res.writeHead(200);
+    res.end('vless://u@a.example.com:443#A');
+  });
+  try {
+    const r = await fetchUrl(s.url + '/a');
+    assert.equal(r.body, 'vless://u@a.example.com:443#A');
+  } finally { await s.close(); }
+});
