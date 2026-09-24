@@ -120,7 +120,7 @@ class XrayPattnCore {
         if (onExit == null) return
         Thread {
             val code = try { p.waitFor() } catch (e: InterruptedException) { return@Thread }
-            if (!stopping) onExit?.invoke(code)
+            if (!stopping) onExit(code)
         }.also { it.isDaemon = true; it.name = "pattn-watch"; it.start() }
     }
 
