@@ -472,6 +472,30 @@ test('win32 start: a process that dies inside the fail-fast window throws its la
   });
 });
 
+test('win32 start: a sing-box that dies while the adapter DNS is being set is never marked active', async () => {
+  // Its exit found `active` still false, so it said nothing — and the start
+  // then marked a dead tunnel live: "TUN mode active" over nothing, the guard
+  // engaged for it, and no drop for the recovery to rebuild.
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun, dir, logs) => {
+    tun.isElevated = () => true;
+    const child = stubChild();
+    fakeSpawn = () => child;
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    const base = answer;
+    let died = false;
+    answer = (cmd, args) => {
+      if (cmd === 'netsh' && !died) { died = true; child.stderr.emit('data', Buffer.from('FATAL[0003] wintun: adapter removed\n')); child.emit('exit', 1, null); }
+      return base(cmd, args);
+    };
+    await assert.rejects(() => tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {}),
+      (e) => /sing-box exited while the TUN adapter was being set up/.test(e.message) && /adapter removed/.test(e.message));
+    assert.equal(died, true);
+    assert.equal(tun.active, false);
+    assert.equal(tun.proc, null);
+    assert.ok(!logs.some(([, l]) => /TUN mode active/.test(l)), 'never announced');
+  });
+});
+
 test('win32 start: adapter never comes Up → stop + throw', async () => {
   await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
     tun.isElevated = () => true;

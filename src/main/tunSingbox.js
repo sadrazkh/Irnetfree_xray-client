@@ -448,6 +448,14 @@ class TunSingbox {
     if (v6[1]) {
       await platform.run('netsh', ['interface', 'ipv6', 'add', 'dnsservers', `name=${TUN_IF}`, v6[1], 'index=2', 'validate=no']).catch(() => {});
     }
+    // sing-box can die during the netsh awaits above: its exit found `active`
+    // still false and said nothing, and a dead tunnel must not be marked live.
+    if (!this.proc) {
+      this.removeWork();
+      throw new Error(this.msg(
+        'sing-box هنگام تنظیم آداپتور TUN بسته شد',
+        'sing-box exited while the TUN adapter was being set up') + this.tail());
+    }
     this.onLog(`TUN adapter ${TUN_IF} up; DNS ${[...dns.v4, ...v6].join(', ')}; routes by sing-box (auto_route)`, 'info');
 
     this.active = true;
