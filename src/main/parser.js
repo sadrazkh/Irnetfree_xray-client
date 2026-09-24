@@ -657,6 +657,7 @@ function makeWireguardServer(fields) {
  * Credential/transport fields depend on protocol.
  */
 function applyServerEdits(server, f) {
+  const before = editFields(server);
   const out = JSON.parse(JSON.stringify(server));
   if (f.name != null) out.name = String(f.name).trim() || out.name;
   const addr = f.address != null ? String(f.address).trim() : out.address;
@@ -755,7 +756,83 @@ function applyServerEdits(server, f) {
   // it; clearing it makes the next connect read the certificate again.
   if (f.clearCertPin) { delete out.certPin; delete out.certPinAt; }
 
+  // Which fields this edit changed, kept on the record (a union over every
+  // edit). The form re-sends every field on every save, so what counts is
+  // what differs afterwards. A subscription refresh carries exactly these
+  // over the provider's new version of the server (subscription.js) — an
+  // edit is known when it is made, never guessed from how a link parses.
+  const after = editFields(out);
+  const changed = Object.keys(after).filter(k => !DERIVED_FIELDS.includes(k) && fieldText(before[k]) !== fieldText(after[k]));
+  if (changed.length) out._edited = [...new Set([...(Array.isArray(server._edited) ? server._edited : []), ...changed])].sort();
+
   return out;
+}
+
+/** Fields of the view that follow another one (serviceName is the path) or have no input (alpn). */
+const DERIVED_FIELDS = ['serviceName', 'alpn'];
+function fieldText(v) {
+  if (v == null || v === '') return '';
+  return typeof v === 'string' ? v.trim() : JSON.stringify(v);
+}
+
+/**
+ * A record's fields as the edit form shows and writes them (app.js
+ * readServerFields / #editSave), in applyServerEdits' own names — so a
+ * value read here can be handed straight back to it.
+ */
+function editFields(s) {
+  const ob = (s && s.outbound) || {};
+  const set = ob.settings || {};
+  const srv = (set.servers && set.servers[0]) || {};
+  const proto = s.protocol || ob.protocol;
+  const st = ob.streamSettings || {};
+  const v = {
+    name: s.name, address: s.address, port: s.port,
+    engine: s.engine || '', fragment: ob._fragment || '', noise: ob._noise || ''
+  };
+  if (proto === 'vless' || proto === 'vmess') {
+    const u = set.vnext && set.vnext[0] && set.vnext[0].users && set.vnext[0].users[0];
+    v.uuid = u ? u.id : '';
+  } else if (proto === 'trojan' || proto === 'shadowsocks') {
+    v.password = srv.password || '';
+  } else if (proto === 'socks' || proto === 'http') {
+    const u = srv.users && srv.users[0];
+    v.username = u ? u.user || '' : '';
+    v.password = u ? u.pass || '' : '';
+  } else if (proto === 'wireguard') {
+    const peer = (set.peers && set.peers[0]) || {};
+    Object.assign(v, {
+      privateKey: set.secretKey || '', publicKey: peer.publicKey || '', presharedKey: peer.preSharedKey || '',
+      localAddress: [].concat(set.address || []).join(','), mtu: set.mtu ? String(set.mtu) : '',
+      reserved: [].concat(set.reserved || []).join(','), allowedIPs: [].concat(peer.allowedIPs || []).join(','),
+      dns: [...asList(s.dns), ...asList(s.dnsDomains)].join(',')
+    });
+  }
+  if (proto === 'vless' || proto === 'vmess' || proto === 'trojan') {
+    const tls = st.tlsSettings || st.realitySettings || {};
+    const rs = st.realitySettings || {};
+    let path = '', host = '';
+    if (st.wsSettings) { path = st.wsSettings.path; host = st.wsSettings.headers && st.wsSettings.headers.Host; }
+    else if (st.grpcSettings) path = st.grpcSettings.serviceName;
+    else if (st.httpSettings) { path = st.httpSettings.path; host = [].concat(st.httpSettings.host || []).join(','); }
+    else if (st.xhttpSettings) { path = st.xhttpSettings.path; host = st.xhttpSettings.host; }
+    else if (st.httpupgradeSettings) { path = st.httpupgradeSettings.path; host = st.httpupgradeSettings.host; }
+    else if (st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.request) {
+      const rq = st.tcpSettings.header.request;
+      path = [].concat(rq.path || [])[0];
+      host = [].concat((rq.headers && rq.headers.Host) || [])[0];
+    }
+    Object.assign(v, {
+      network: st.network === 'raw' ? 'tcp' : (st.network || 'tcp'), security: st.security || 'none',
+      sni: tls.serverName || '', fp: tls.fingerprint || '', pbk: rs.publicKey || '', sid: rs.shortId || '',
+      allowInsecure: !!(st.tlsSettings && st.tlsSettings.allowInsecure),
+      alpn: st.tlsSettings && st.tlsSettings.alpn ? [].concat(st.tlsSettings.alpn).join(',') : '',
+      path: path || '', serviceName: path || '', host: host || '',
+      cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
+      finalMask: st.finalmask ? JSON.stringify(st.finalmask) : ''
+    });
+  }
+  return v;
 }
 
 /** Rebuild streamSettings (transport/security) from edit fields, when supplied. */
@@ -1197,7 +1274,7 @@ function migrateStoredServer(server) {
 
 module.exports = {
   parseLink, parseMany, b64decode, isHttpProxyLink,
-  buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits,
+  buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits, editFields,
   parseWireguardConf, isWireguardConf, splitDnsField,
   buildShareLink, migrateStoredServer
 };
