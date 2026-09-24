@@ -29,6 +29,9 @@ const { hostAllowed, originAllowed } = require('./guard');
 process.on('unhandledRejection', (e) => {
   console.error('  ! unhandled rejection (the service keeps running): ' + ((e && e.stack) || e));
 });
+// Under procd stdout/stderr are pipes into syslog, and the service writes its
+// warnings there: a pipe that breaks must not become an uncaught 'error'.
+for (const s of [process.stdout, process.stderr]) s.on('error', () => {});
 
 /* ----------------------------- CLI args ----------------------------- */
 function parseArgs(argv) {
