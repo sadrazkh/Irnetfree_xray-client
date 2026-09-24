@@ -324,7 +324,11 @@ function adapterDnsServers(settings, tunnelPeer) {
 }
 
 /**
- * What the leak guard must point the machine's PHYSICAL adapters at.
+ * What the leak guard must point the machine's PHYSICAL adapters at — on
+ * macOS. On Windows the guard holds them on loopback instead whatever this
+ * returns (see WIN_HOLD4 in leakGuard.js: Windows sends each adapter's queries
+ * out of that adapter, and with the TUN adapter gone the peer routes out of
+ * the physical NIC), and `peer4` only has to say that the tunnel has one.
  *
  * When the core hijacks port 53 the answer is the tunnel's own peer: every
  * query then enters the TUN, and if the tunnel goes, nothing resolves — closed,
