@@ -333,17 +333,40 @@ test('advanced: a one-member chain collapses to a single outbound', () => {
   assert.deepEqual(c.outbounds.map(o => o.tag), ['out-chain-solo', 'direct', 'block']);
 });
 
-test('advanced: unknown / empty targets fall back to direct', () => {
+// A target that no longer exists (a server deleted, or replaced by a
+// subscription refresh; a chain removed or emptied) used to route `direct`:
+// "connected" with the traffic it was meant to protect leaving in the clear.
+test('advanced: a rule whose target no longer exists is skipped — its traffic follows the default', () => {
   const c = buildConfig(advancedPlan({
+    chainsById: { c1: [VLESS_WS_TLS, TROJAN_TCP_TLS], emptied: [] },
     rules: [
       { type: 'domain', value: 'x.com', target: 'no-such-server' },
       { type: 'domain', value: 'y.com', target: 'chain:missing' },
+      { type: 'domain', value: 'w.com', target: 'chain:emptied' },
+      { type: 'domain', value: 'v.com', target: 'chain' },          // the legacy chain, empty here
       { type: 'domain', value: 'z.com', target: 'block' }
     ],
-    def: 'also-missing'
+    def: 'sv-vless'
   }), settings({ blockAds: false }));
 
-  assert.deepEqual(ruleTags(c), ['direct', 'direct', 'block', 'direct', 'direct']);
+  assert.deepEqual(ruleTags(c), ['block', 'direct', 'out-sv-vless']);
+  assert.deepEqual(c.routing.rules[0].domain, ['z.com']);
+  assert.equal(c.routing.rules.some(r => r.domain && r.domain.some(d => /^[xywv]\.com$/.test(d))), false);
+  assert.deepEqual(c.outbounds.map(o => o.tag), ['out-sv-vless', 'direct', 'block']);
+});
+
+test('advanced: an empty rule target is still direct, and direct / block defaults are untouched', () => {
+  const c = buildConfig(advancedPlan({ rules: [{ type: 'domain', value: 'x.com', target: '' }], def: 'direct' }), settings({ blockAds: false }));
+  assert.deepEqual(ruleTags(c), ['direct', 'direct', 'direct']);
+  assert.equal(buildConfig(advancedPlan({ def: 'block' }), settings({ blockAds: false })).routing.rules.at(-1).outboundTag, 'block');
+});
+
+test('advanced: a default that no longer exists is an error, never a silent direct', () => {
+  for (const def of ['also-missing', 'chain:missing', 'chain:emptied', 'chain']) {
+    const plan = advancedPlan({ chainsById: { emptied: [] }, def });
+    assert.throws(() => buildConfig(plan, settings({ lang: 'en' })), /default target .*no longer exists/i, def);
+    assert.throws(() => buildConfig(plan, settings({ lang: 'fa' })), /پیش‌فرض/, def + ' (fa)');
+  }
 });
 
 test('advanced: rules with no usable values are skipped entirely', () => {
