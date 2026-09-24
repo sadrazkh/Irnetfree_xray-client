@@ -874,7 +874,14 @@ private object AppWork {
             val best = out.best
             val srv = best?.let { store.serverById(it.id) }
             if (best == null || srv == null) {
-                val why = if (out.answered == 0) "no server answered" else "none of the ${out.tried} quickest carried traffic"
+                // The winner may have been deleted (or dropped by a refresh) while
+                // it was measured — say that, not that nothing carried traffic.
+                val gone = best?.let { b -> list.firstOrNull { it.id == b.id }?.name ?: "the winner" }
+                val why = when {
+                    gone != null -> "$gone won but was removed during the test"
+                    out.answered == 0 -> "no server answered"
+                    else -> "none of the ${out.tried} quickest carried traffic"
+                }
                 fastestNote.value = "$why — the selection was left alone"
                 VpnState.addLog("Auto (fastest): $why; kept ${store.selectionLabel()}")
                 Toast.makeText(app, why.replaceFirstChar { it.uppercase() }, Toast.LENGTH_LONG).show()
@@ -998,9 +1005,12 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     // changed instead of calling bump(), which rebuilds the screen through
     // key(rev) in App and takes the scroll position with it — the list used to
     // jump back to the top whenever you chose something near the bottom.
-    var selectedId by remember { mutableStateOf(store.selection) }
+    // Re-read whenever AppWork changed the store: ⚡ fastest or a first import
+    // can move the selection while this tab is open, and a plain remember kept
+    // the tick on the old row.
+    val storeRev = observeStore()
+    var selectedId by remember(storeRev) { mutableStateOf(store.selection) }
     val ctx = LocalContext.current
-    observeStore()
     val tests = remember { mutableStateMapOf<String, TestState>() }
     // The row whose actions are showing. Only ever one, and nothing to begin
     // with: arriving at the list should show the list, not a card mid-flight.
