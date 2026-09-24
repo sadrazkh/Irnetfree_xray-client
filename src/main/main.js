@@ -236,7 +236,8 @@ function makeTun(settings, { quiet = false } = {}) {
   const opts = { binDir: bundledBinDir(), extraDirs: [userBin()], onLog: (line, level) => send('log', { line, level }), lang: settings.lang, userData: app.getPath('userData'),
     onUnexpectedExit: () => {
       if (userDisconnecting || isQuitting || tun !== selected) return;
-      send('log', { line: 'The macOS tunnel exited unexpectedly; checking recovery', level: 'error' });
+      // every platform now: the backends report a tunnel that died on its own
+      send('log', { line: 'The tunnel exited unexpectedly; checking recovery', level: 'error' });
       recoverFromNetworkChange('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
     } };
   if (process.platform === 'darwin' && settings.tunBackend === 'native-macos') return (selected = new NativeMacTun(opts));
