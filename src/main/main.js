@@ -38,6 +38,7 @@ const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
 const { DropBudget } = require('./dropBudget');
+const { isWebUrl, isAppPage } = require('./urlGuard');
 const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
 const { trayGroups } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
@@ -384,6 +385,9 @@ async function disarmKillSwitch() {
   try { await netsh(['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`]); } catch {}
 }
 
+/** The one page the window shows — and the only one it may navigate to (see urlGuard.js). */
+const APP_PAGE = path.join(__dirname, '..', 'renderer', 'index.html');
+
 function createWindow() {
   // `--hidden`: started by the OS at logon (autostart.js) — stay in the tray.
   const startHidden = process.argv.includes('--hidden');
@@ -405,7 +409,18 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  // The preload bridge rides along with whatever page this window shows: it
+  // shows ours and goes nowhere else, opens no window of its own, and a web
+  // link that asks for one goes to the browser instead.
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    if (!isAppPage(url, APP_PAGE)) e.preventDefault();
+  });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isWebUrl(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  mainWindow.loadFile(APP_PAGE);
 
   // the traffic meter follows the window: fast while shown, slow while hidden
   for (const ev of ['show', 'hide', 'minimize', 'restore', 'focus']) {
@@ -2324,7 +2339,12 @@ function registerIpc() {
   ipcMain.on('win:hide', () => mainWindow.hide());
   ipcMain.on('win:close', () => { mainWindow.hide(); });
   ipcMain.on('app:quit', () => { isQuitting = true; app.quit(); });
-  ipcMain.on('open:external', (e, url) => shell.openExternal(url));
+  // web links only: openExternal hands file:, smb:, ms-settings: and custom
+  // protocols to whichever program owns them (see urlGuard.js)
+  ipcMain.on('open:external', (e, url) => {
+    if (isWebUrl(url)) shell.openExternal(url);
+    else send('log', { line: 'Refused to open a link that is not http(s): ' + String(url).slice(0, 100), level: 'warn' });
+  });
   ipcMain.handle('open:dataDir', () => { shell.openPath(dataDir()); return dataDir(); });
 
   // runtime components (xray / tun2socks / wintun / geo files)
