@@ -29,7 +29,13 @@ const path = require('node:path');
 // injected exec lands here and fails, instead of rewriting the proxy of
 // whoever runs `npm test`. Installed before the module destructures them.
 const cp = require('node:child_process');
-cp.execFile = (cmd) => { throw new Error(`the test reached the real ${cmd}`); };
+// The async one only RECORDS (and answers with an error), so the default
+// runner's options can be checked: nothing is ever run.
+const realRuns = [];
+cp.execFile = (cmd, args, opts, cb) => {
+  realRuns.push({ cmd, args, opts });
+  process.nextTick(() => cb(new Error(`the test reached the real ${cmd}`), '', ''));
+};
 cp.execFileSync = (cmd) => { throw new Error(`the test reached the real ${cmd}`); };
 cp.spawn = (cmd) => { throw new Error(`the test reached the real ${cmd}`); };
 
@@ -285,21 +291,101 @@ test('without a journal configured (the headless service) the old behaviour stan
   assert.deepEqual(calls[0], ['reg', ...regAdd('ProxyEnable', 'REG_DWORD', 0)]);
 });
 
+test('the real runner has a deadline: one hung PowerShell must not wedge every proxy operation queued behind it', async () => {
+  realRuns.length = 0;
+  await setSystemProxy(false, { platform: 'linux', journal: null });   // the default runner, into the recording stub
+  assert.ok(realRuns.length >= 1);
+  const t = realRuns[0].opts && realRuns[0].opts.timeout;
+  assert.ok(t >= 10000 && t <= 30000, `timeout ${t}`);
+});
+
+test('win launch: no journal and no port of ours to look for — no PowerShell at all', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: WIN_BYPASS });
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32' }), null);
+  assert.deepEqual(w.calls, []);
+});
+
+test('win launch: another client on our port since the crash (v2rayN uses 10809 too) is not ours', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 0 });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  w.reg.ProxyOverride = 'localhost;127.*;10.*;172.16.*;192.168.*;<local>';   // v2rayN's list, same port
+  w.calls.length = 0;
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', legacyServer: '127.0.0.1:10809' }), 'dropped');
+  assert.deepEqual(w.regCalls(), []);
+});
+
+test('win: a proxy the user changed while connected is theirs — the disconnect leaves it and drops the journal', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 0 });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  w.reg.ProxyServer = 'proxy.corp:8080';
+  w.reg.ProxyOverride = '<local>';
+  w.calls.length = 0;
+  await setSystemProxy(false, { journal, exec: w.exec, platform: 'win32' });
+  assert.deepEqual(w.regCalls(), []);
+  assert.equal(w.reg.ProxyServer, 'proxy.corp:8080');
+  assert.equal(fs.existsSync(journal), false);
+});
+
+test('the exit hook’s restore is bounded in time; what it could not do stays journaled', (t) => {
+  const journal = tmpJournal(t);
+  fs.writeFileSync(journal, JSON.stringify({ platform: 'win32', ours: '127.0.0.1:10809', win: { ProxyEnable: 1, ProxyServer: 'p:1', ProxyOverride: null } }));
+  const calls = [];
+  assert.equal(restoreSystemProxySync({ journal, execSync: (c, a) => calls.push([c, a]), platform: 'win32', budgetMs: 0 }), true);
+  assert.deepEqual(calls, [], 'past the deadline nothing more is started');
+  assert.equal(fs.existsSync(journal), true);
+});
+
 /* ------------------------------- macOS (blind) ------------------------------- */
+
+test('mac: the disconnect also switches our proxy off on a service the journal never saw', async (t) => {
+  const journal = tmpJournal(t);
+  const m = fakeMac({}, 'Wi-Fi\n');
+  await setSystemProxy(true, Object.assign({ journal, exec: m.exec, platform: 'darwin' }, ON));
+  // a USB adapter plugged in, then a server switch: the second enable sets it too, the journal keeps the first record
+  const m2 = fakeMac(m.state, 'Wi-Fi\nUSB LAN\n');
+  await setSystemProxy(true, Object.assign({ journal, exec: m2.exec, platform: 'darwin' }, ON));
+  assert.equal(m2.state['USB LAN'].web.server, '127.0.0.1');
+  await setSystemProxy(false, { journal, exec: m2.exec, platform: 'darwin' });
+  for (const k of ['web', 'secure', 'socks']) assert.equal(m2.state['USB LAN'][k].enabled, false, `USB LAN ${k}`);
+  for (const k of ['web', 'secure', 'socks']) assert.equal(m2.state['Wi-Fi'][k].enabled, false, `Wi-Fi ${k}`);
+});
+
+test('mac: a proxy the user set while connected is theirs — the disconnect leaves it', async (t) => {
+  const journal = tmpJournal(t);
+  const m = fakeMac({});
+  await setSystemProxy(true, Object.assign({ journal, exec: m.exec, platform: 'darwin' }, ON));
+  for (const svc of ['Wi-Fi', 'USB LAN', 'Thunderbolt Bridge']) m.state[svc] = { web: { enabled: true, server: 'proxy.corp', port: 3128 } };
+  m.calls.length = 0;
+  await setSystemProxy(false, { journal, exec: m.exec, platform: 'darwin' });
+  assert.deepEqual(m.sets(), []);
+  assert.equal(fs.existsSync(journal), false);
+});
 
 const LISTING = 'An asterisk (*) denotes that a network service is disabled.\nWi-Fi\nUSB LAN\n';
 const PROXY = (enabled, server, port) => `Enabled: ${enabled ? 'Yes' : 'No'}\nServer: ${server}\nPort: ${port}\nAuthenticated Proxy Enabled: 0\n`;
 
-function fakeMac(state) {
+/** A fake Mac whose networksetup writes land in `state`, so what it reads back is what was set. */
+function fakeMac(state, listing = LISTING) {
   const calls = [];
+  const KIND = { web: 'web', secureweb: 'secure', socksfirewall: 'socks' };
   const exec = async (cmd, args) => {
     calls.push([cmd, ...args]);
-    if (args[0] === '-listallnetworkservices') return LISTING;
-    const get = { '-getwebproxy': 'web', '-getsecurewebproxy': 'secure', '-getsocksfirewallproxy': 'socks' }[args[0]];
-    if (get) { const s = (state[args[1]] || {})[get] || { enabled: false, server: '', port: 0 }; return PROXY(s.enabled, s.server, s.port); }
+    if (args[0] === '-listallnetworkservices') return listing;
+    const get = /^-get(web|secureweb|socksfirewall)proxy$/.exec(args[0]);
+    if (get) { const s = (state[args[1]] || {})[KIND[get[1]]] || { enabled: false, server: '', port: 0 }; return PROXY(s.enabled, s.server, s.port); }
+    const set = /^-set(web|secureweb|socksfirewall)proxy(state)?$/.exec(args[0]);
+    if (set) {
+      const svc = (state[args[1]] = state[args[1]] || {});
+      const cur = (svc[KIND[set[1]]] = svc[KIND[set[1]]] || { enabled: false, server: '', port: 0 });
+      if (set[2]) cur.enabled = args[2] === 'on';
+      else Object.assign(cur, { server: args[2], port: Number(args[3]), enabled: true });
+    }
     return '';
   };
-  return { calls, exec, sets: () => calls.filter(c => /^-set/.test(c[1])) };
+  return { state, calls, exec, sets: () => calls.filter(c => /^-set/.test(c[1])) };
 }
 
 test('mac: each service’s three proxies are journaled, then ours set; the disable puts each back as it was', async (t) => {
