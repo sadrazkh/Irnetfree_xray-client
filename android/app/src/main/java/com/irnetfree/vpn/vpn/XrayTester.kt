@@ -45,5 +45,7 @@ object XrayTester {
 
     fun stop(h: Handle) { h.stop() }
 
+    internal fun testEndpoints(server: ServerConfig, resolve: (String) -> String?): Map<String, String>? = emptyMap()
+
     private fun freePort(): Int? = try { ServerSocket(0).use { it.localPort } } catch (e: Exception) { null }
 }
