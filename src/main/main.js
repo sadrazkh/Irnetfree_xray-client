@@ -1984,6 +1984,10 @@ function registerIpc() {
       const psArgs = argList
         ? `Start-Process -FilePath '${exe}' -Verb RunAs -ArgumentList ${argList}`
         : `Start-Process -FilePath '${exe}' -Verb RunAs`;
+      // The elevated copy asks for the single-instance lock while this one is
+      // still tearing down; finding it held, it would quit at once and leave no
+      // app at all. Hand the lock over first.
+      app.releaseSingleInstanceLock();
       spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', psArgs], { detached: true, windowsHide: true });
       isQuitting = true;
       setTimeout(() => app.quit(), 300);
@@ -2443,7 +2447,31 @@ function getJSON(url) {
 // cmpVersion lives in assetUpdater.js now (the weekly check needs it too).
 
 /* ----------------------------- lifecycle ----------------------------- */
+// One app per user session. The window hides to the tray on close, so a second
+// launch — the shortcut again, the logon task — started a whole second app beside
+// the first, and ITS launch repair ran against the first one's live session:
+// disarmKillSwitch() lifted its kill switch, repairAtLaunch() killed its tunnel
+// and put the adapters back on the ISP's resolvers, and both rewrote store.json.
+// So the lock is taken here, before the ready handler exists; a second instance
+// quits at once, and every way out below checks it — quitting must not touch
+// anything that belongs to the first.
+const primaryInstance = app.requestSingleInstanceLock();
+if (!primaryInstance) app.quit();
+
+// The first instance hears about the second launch: bring the window forward.
+app.on('second-instance', (e, argv) => {
+  // the logon task starts us with --hidden (autostart.js): a running app stays in the tray
+  if (Array.isArray(argv) && argv.includes('--hidden')) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
+
 app.whenReady().then(() => {
+  // A second instance is already quitting (see primaryInstance): it must not
+  // repair, write or show anything on its way out.
+  if (!primaryInstance) return;
   const dir = dataDir();
   store = new Store(path.join(dir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
@@ -2681,6 +2709,7 @@ let quitTeardown = null;   // the teardown in flight, or 'done'
  * asks to quit again; the second pass lets Electron finish.
  */
 app.on('before-quit', (e) => {
+  if (!primaryInstance) return;   // a second instance: nothing here is its to tear down
   isQuitting = true;         // the close handler may let the window go now
   if (quitTeardown === 'done') return;
   e.preventDefault();
@@ -2698,7 +2727,10 @@ app.on('window-all-closed', () => {
 // Ensure system proxy + TUN routes + kill-switch block are cleared on a hard
 // exit (Windows only) — otherwise a kill-switch block would outlive the app and
 // leave the machine with no internet.
-process.on('exit', () => {
+function teardownSync() {
+  // A second instance never held any of this: its exit must not lift the first
+  // one's system proxy or kill switch.
+  if (!primaryInstance) return;
   try { if (store) store.flush(); } catch {}   // a coalesced write must not die with the process
   // The DNS override outlives the app if nobody puts it back, so it goes before
   // the win32 gate below: on macOS (when we are already root) this is the last
@@ -2711,4 +2743,5 @@ process.on('exit', () => {
   cleanupAllTunsSync();   // every backend a connect started, either kind
   try { require('child_process').execFileSync('netsh',
     ['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`], { windowsHide: true }); } catch {}
-});
+}
+process.on('exit', () => teardownSync());
