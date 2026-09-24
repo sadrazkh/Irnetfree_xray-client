@@ -473,6 +473,62 @@ test('killSwitch ON: a drop that no connect healed keeps its block for the rebui
   assert.deepEqual(h.calls, ['arm', 'recover:core-exited']);
 });
 
+/**
+ * reapplyConnection() against fakes: the calls it makes, in order. `connect`
+ * is what doConnect() does (resolve, or throw).
+ */
+function reapplyHarness({ settings = {}, connect = async () => ({ ok: true }) } = {}) {
+  const calls = [];
+  const env = {
+    calls,
+    store: { get: (k, d) => (k === 'activeServerId' ? 'srv1' : d) },
+    xray: { running: true, stop: async () => { calls.push('xray.stop'); env.xray.running = false; } },
+    getSettings: () => Object.assign({ killSwitch: false, systemProxy: true, lang: 'en' }, settings),
+    send: () => {},
+    stats: { stop() {} },
+    usage: null,
+    usageStore: null,
+    leakGuard: null,
+    tun: { managesDns: true },
+    tunPlatform: { resolveServerIps: async () => [] },
+    buildPlan: () => ({ entryAddrs: [] }),
+    stopAllTuns: async () => { calls.push('stopAllTuns'); },
+    setSystemProxy: async (on) => { calls.push('setSystemProxy:' + on); },
+    removeLanFirewall: async () => {},
+    doConnect: async (...a) => { calls.push('doConnect'); const r = await connect(...a); env.xray.running = true; return r; }
+  };
+  const make = new Function('env', `
+    let xrayReloading = false, connGen = 0, appliedSettings = {}, killEngaged = false;
+    const { store, xray, getSettings, send, stats, usage, usageStore, leakGuard, tun, tunPlatform,
+            buildPlan, stopAllTuns, setSystemProxy, removeLanFirewall, doConnect } = env;
+    const stopProcWatcher = () => {};
+    async function armKillSwitch() { env.calls.push('arm'); killEngaged = true; return { ok: true }; }
+    async function disarmKillSwitch() { env.calls.push('disarm'); killEngaged = false; }
+    ${slice('async function reapplyConnection() {', '\n}')}
+    return reapplyConnection;
+  `);
+  return { reapply: make(env), calls, env };
+}
+
+test('a settings reapply keeps the journaled system proxy through the rebuild instead of switching it off and on', async () => {
+  // Switched off, the machine's own (or no) proxy was live for the whole
+  // rebuild: every browser went direct — a leak — and the journal was spent
+  // and taken again. Kept, the proxy points at our port while the core
+  // restarts (closed, not open), and the connect sets it again.
+  const on = reapplyHarness();
+  assert.equal((await on.reapply()).ok, true);
+  assert.deepEqual(on.calls.filter(c => c.startsWith('setSystemProxy')), [], on.calls.join(', '));
+  // the proxy switched OFF in the settings (which is why this reapply runs): restored, before the rebuild
+  const off = reapplyHarness({ settings: { systemProxy: false } });
+  await off.reapply();
+  assert.ok(off.calls.indexOf('setSystemProxy:false') !== -1 && off.calls.indexOf('setSystemProxy:false') < off.calls.indexOf('doConnect'), off.calls.join(', '));
+  // a rebuild that failed leaves no proxy aimed at a core that is gone
+  const failed = reapplyHarness({ connect: async () => { throw new Error('xray exited on startup'); } });
+  const r = await failed.reapply();
+  assert.equal(r.ok, false);
+  assert.ok(failed.calls.indexOf('setSystemProxy:false') > failed.calls.indexOf('doConnect'), failed.calls.join(', '));
+});
+
 /** scheduleShutdownCancelCheck() run at once on a given platform/uid; what it logs and reports. */
 function shutdownCancelled({ platform, uid }) {
   const out = { logs: [], reported: [] };

@@ -1389,7 +1389,12 @@ async function reapplyConnection() {
     // macOS: while the guard holds, the tunnel's teardown must not put the
     // main service back on the ISP's DNS either (keepDns) — only a disconnect does.
     await stopAllTuns({ keepDns: !!(hold && hold.held) });
-    try { await setSystemProxy(false, {}); } catch {}
+    // The system proxy stays through the rebuild when the connect will set it
+    // again: switched off, the machine's own (or no) proxy was live for the
+    // whole gap — every browser direct — and the journal was spent and taken
+    // afresh. Kept, it points at our port while the core restarts: closed,
+    // not open. Only a proxy switched OFF in the settings is restored here.
+    if (!getSettings().systemProxy) { try { await setSystemProxy(false, {}); } catch {} }
     try { await removeLanFirewall(); } catch {}
     if (xray) await xray.stop();
   } finally {
@@ -1408,6 +1413,8 @@ async function reapplyConnection() {
     r = await doConnect(serverId, { holdKillSwitch: armed });
   } catch (e) {
     appliedSettings = null;
+    // the proxy kept above must not stay aimed at a core that did not come back
+    try { await setSystemProxy(false, {}); } catch {}
     if (armed) {
       send('log', { line: 'Reconnect failed — the internet stays blocked by the kill switch: ' + e.message, level: 'error' });
       send('killswitch', { engaged: true });

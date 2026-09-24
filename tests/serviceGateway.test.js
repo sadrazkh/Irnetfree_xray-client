@@ -388,6 +388,31 @@ test('sing-box\'s own [tun] lines reach syslog at most once per 10s per kind; th
   assert.equal(lines.filter(l => /Gateway down/.test(l)).length, 2, 'our own lines are not rate-limited');
 });
 
+/* ----------------------------- post-merge ----------------------------- */
+
+test('a settings apply keeps the system proxy through the rebuild; a rebuild that fails puts it back', async (t) => {
+  const proxy = [];
+  const s = start({ settings: { systemProxy: true } }, { setSystemProxy: async (on) => { proxy.push(on); } });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  assert.deepEqual(proxy, [true]);
+  await s.service.invoke('settings:apply');
+  assert.deepEqual(proxy, [true, true], 'set again by the connect, never switched off in between');
+  s.state.gatewayFails = true;
+  const r = await s.service.invoke('settings:apply');
+  assert.equal(r.ok, false);
+  assert.equal(proxy.at(-1), false, 'not left aimed at a core that did not come back');
+  await s.service.invoke('disconnect');
+  // the proxy switched off in the settings: restored before the rebuild
+  const off = start({ settings: { systemProxy: true } }, { setSystemProxy: async (on) => { off.proxy.push(on); } });
+  off.proxy = [];
+  t.after(() => off.service.shutdown());
+  await off.service.invoke('connect', SERVER.id);
+  await off.service.invoke('settings:set', { systemProxy: false });
+  await off.service.invoke('settings:apply');
+  assert.deepEqual(off.proxy, [true, false]);
+});
+
 /* ----------------------------- R7: orphans and the exit hook ----------------------------- */
 
 test('R7: the cores a killed run left behind are ended before the first connect, and its rules and table cleared', async (t) => {

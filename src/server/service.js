@@ -1375,17 +1375,23 @@ function createService(opts = {}) {
       // ISP — and at the strict level took the outbound block with it — for the
       // whole rebuild. Holding means names stop resolving while the tunnel is
       // down, which is the correct failure: closed, not open.
+      let hold = null;
       try {
         if (leakGuard) {
           let entries = [];
           try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
-          if (!tun?.managesDns) await leakGuard.holdForReconnect({
+          if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
             excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
           });
         }
       } catch {}
-      await stopAllTuns();
-      try { await setProxy(false, {}); } catch {}
+      // macOS: while the guard holds, the tunnel's teardown must not put the
+      // main service back on the ISP's DNS either (keepDns) — only a disconnect does.
+      await stopAllTuns({ keepDns: !!(hold && hold.held) });
+      // The system proxy stays through the rebuild when the connect will set it
+      // again (see main.js): switched off, every browser went direct for the
+      // whole gap. Only a proxy switched OFF in the settings is restored here.
+      if (!getSettings().systemProxy) { try { await setProxy(false, {}); } catch {} }
       if (xray) await xray.stop();
     } finally {
       xrayReloading = prevReloading;
@@ -1401,6 +1407,8 @@ function createService(opts = {}) {
       r = await doConnect(serverId);
     } catch (e) {
       appliedSettings = null;
+      // the proxy kept above must not stay aimed at a core that did not come back
+      try { await setProxy(false, {}); } catch {}
       send('status', { state: 'error', message: e.message });
       return { ok: false, error: e.message };
     }
@@ -1690,9 +1698,9 @@ function createService(opts = {}) {
    * overlapping connect can leave an older instance holding the machine's
    * routes with nothing else pointing at it (see startedTuns).
    */
-  async function stopAllTuns() {
-  dnsGuardWatch?.stop();
-    await stopTrackedTunnels(startedTuns, tun);
+  async function stopAllTuns(opts) {
+    dnsGuardWatch?.stop();
+    await stopTrackedTunnels(startedTuns, tun, process.platform, opts);
   }
 
   /** The same sweep for the exit hook, where nothing can be awaited. */
