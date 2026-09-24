@@ -8,9 +8,9 @@
  * We set an HTTP/HTTPS system proxy pointing at the local Xray HTTP inbound,
  * with a sensible bypass list for local addresses.
  *
- * The desktop app journals what the proxy was before it set it (useProxyJournal,
- * see "the journal" below) and puts exactly that back. Without a journal — the
- * headless service — enable and disable behave as they always did.
+ * The desktop app and the headless service journal what the proxy was before
+ * they set it (useProxyJournal, see "the journal" below) and put exactly that
+ * back. Without a journal enable and disable behave as they always did.
  */
 
 const { execFile, execFileSync } = require('child_process');
@@ -301,7 +301,7 @@ async function disableLinux() {
  */
 let journalFile = null;
 
-/** The desktop app's journal file; null (the headless service) keeps the old blind enable/disable. */
+/** The journal file (the desktop's, or the headless service's own); null keeps the old blind enable/disable. */
 function useProxyJournal(file) { journalFile = file || null; }
 
 function readJournal(file) {

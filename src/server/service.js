@@ -25,7 +25,7 @@ const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinW
 const { assetStatus: scanAssets, downloadedFileNames } = require('../main/assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('../main/geoCheck');
 const { XrayManager, getFreePort, getFreePorts } = require('../main/xrayManager');
-const { setSystemProxy } = require('../main/sysproxy');
+const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('../main/netutils');
 const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
@@ -168,9 +168,18 @@ function createService(opts = {}) {
   // nothing is spawned or bound, and the machine's proxy / routes are never
   // touched. Production passes none of them.
   const deps = opts.deps || {};
-  // IRNETFREE_NO_SYSTEM_PROXY=1: never touch the machine's system proxy — for a
-  // server started by the test suite, whose Ctrl+C reaches it and runs shutdown().
-  const setProxy = deps.setSystemProxy || (process.env.IRNETFREE_NO_SYSTEM_PROXY === '1' ? async () => {} : setSystemProxy);
+  // IRNETFREE_NO_SYSTEM_PROXY=1: never touch the machine's system proxy — a
+  // TEST-ONLY switch, for a server started by the test suite, whose Ctrl+C
+  // reaches it and runs shutdown(). Said once at start: set anywhere else, a
+  // "System proxy enabled" line would otherwise be the only thing to go by.
+  const noSystemProxy = process.env.IRNETFREE_NO_SYSTEM_PROXY === '1';
+  if (noSystemProxy && !deps.setSystemProxy) console.warn('  ! IRNETFREE_NO_SYSTEM_PROXY=1 — the system proxy is never touched (a test-only switch)');
+  const setProxy = deps.setSystemProxy || (noSystemProxy ? async () => {} : setSystemProxy);
+  // The REAL proxy is journaled, as on the desktop (sysproxy.js): what it was
+  // before we set it is what a disconnect, a shutdown and the exit hook put
+  // back — and only when we set it — instead of a blind "off" that killed a
+  // corporate proxy. (Configured once the data dir is known, below.)
+  const realProxy = !deps.setSystemProxy && !noSystemProxy;
   const waitPort = deps.waitForLocalPort || waitForLocalPort;
   const T = Object.assign({
     bootDelayMs: 1000, bootEveryMs: 15000, bootSlowAfter: 20, bootSlowMs: 60000,
@@ -181,6 +190,10 @@ function createService(opts = {}) {
 
   const dataDir = opts.dataDir || defaultDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
+  // A journal of its own: on Windows the default data dir is the desktop app's
+  // userData, and the desktop may be connected right now — this start's repair
+  // must never read (and drop) the desktop's live record.
+  if (realProxy) useProxyJournal(path.join(dataDir, 'proxy-journal-server.json'));
   const userBinDir = path.join(dataDir, 'bin');
   fs.mkdirSync(userBinDir, { recursive: true });
 
@@ -500,6 +513,16 @@ function createService(opts = {}) {
   });
   assetUpdater.start();
 
+  // A proxy journal a dead run left is restored now, as the desktop does at
+  // launch (proxy operations run one at a time, so a boot connect waits for
+  // it). Only our own port marks a leftover of a build before the journal.
+  if (realProxy) {
+    repairSystemProxy({ legacyServer: `127.0.0.1:${getSettings().httpPort}` }).then((r) => {
+      if (r === 'restored') send('log', { line: 'The system proxy a previous run left set was put back the way it was', level: 'warn' });
+      else if (r === 'legacy') send('log', { line: 'The system proxy an older version left pointing at IRNetFree was switched off', level: 'warn' });
+    });
+  }
+
   // The leak guard and its crash repair. A `tun-state.json` left in the data dir
   // means the last session died with every physical adapter still pointing at a
   // tunnel that is gone — the machine has no working DNS until the originals go
@@ -549,6 +572,8 @@ function createService(opts = {}) {
   // The core too: a service that died of an exception used to leave its xray
   // running, holding the SOCKS port the respawned service then could not bind.
   process.on('exit', () => {
+    // the proxy first, as on the desktop: only what the journal says we set, put back as it was
+    if (realProxy) { try { restoreSystemProxySync(); } catch {} }
     try { leakGuard.releaseSync(); } catch {}
     cleanupAllTunsSync();
     try { if (xray && xray.proc) xray.proc.kill(); } catch {}
