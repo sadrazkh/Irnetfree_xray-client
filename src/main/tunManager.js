@@ -71,9 +71,9 @@ class TunManager {
     this.bypassIps = [];   // every /32 we added so we can remove them all
     this.tunIfIndex = null;
     this.dnsServers = ['1.1.1.1', '8.8.8.8'];
-    // The adapter's IPv6 resolver once the v6 side is up (Windows) — what the
-    // leak guard points every physical adapter's v6 family at. null until then,
-    // and null again if the v6 setup failed: the guard then leaves v6 alone.
+    // The adapter's IPv6 resolver once the v6 side is up (Windows) — the peer,
+    // and only when the v4 resolver is the peer too. null until then, without
+    // the hijack, and if the v6 setup failed.
     this.dnsPeer6 = null;
     this.lang = opts.lang || 'fa';   // user-facing error language
     this.macState = null;            // macOS TUN runtime state (pid, routes, dns)
@@ -241,21 +241,25 @@ class TunManager {
       .catch(e => this.onLog('set address: ' + e.message, 'warn'));
 
     // lower the interface metric so TUN routes always win over the physical NIC
+    // (and so Windows asks this adapter's resolver first). Said when it fails:
+    // the leak guard holds every physical adapter on loopback, so this
+    // adapter's resolvers are the only ones that answer.
     await run('netsh', ['interface', 'ip', 'set', 'interface', `interface=${ADAPTER}`, 'metric=1'])
-      .catch(() => {});
+      .catch(e => this.onLog('TUN adapter metric: ' + e.message, 'warn'));
 
     // 7) DNS through the tunnel (leak prevention): force resolvers on the TUN
     await run('netsh', ['interface', 'ip', 'set', 'dnsservers', `name=${ADAPTER}`,
       'static', this.dnsServers[0], 'primary', 'validate=no'])
-      .catch(() => {});
+      .catch(e => this.onLog(`TUN adapter resolver ${this.dnsServers[0]}: ` + e.message, 'warn'));
     if (this.dnsServers[1]) {
       await run('netsh', ['interface', 'ip', 'add', 'dnsservers', `name=${ADAPTER}`,
-        this.dnsServers[1], 'index=2', 'validate=no']).catch(() => {});
+        this.dnsServers[1], 'index=2', 'validate=no'])
+        .catch(e => this.onLog(`TUN adapter resolver ${this.dnsServers[1]}: ` + e.message, 'warn'));
     }
 
     // 7b) IPv6 through the tunnel too — address, resolver, the two /1 routes
-    //     (see TUN_ADDR6). Best effort: a failure is logged, dnsPeer6 stays
-    //     null and the guard leaves the v6 family alone, exactly as before.
+    //     (see TUN_ADDR6). Best effort: a failure is logged and dnsPeer6 stays
+    //     null (the guard holds the physical adapters' v6 on loopback anyway).
     await this.setupIpv6Windows();
 
     // 8) split-default routes through TUN, pinned to the TUN interface index.
@@ -288,20 +292,29 @@ class TunManager {
    * adapter is gone with tun2socks, nothing of this belongs in the registry.
    * The /1 prefixes are longer than the ISP's `::/0`, so they win without any
    * metric games; LAN prefixes are longer still and stay on the LAN.
+   *
+   * The peer is the v6 RESOLVER only when it is the v4 one (tunSingbox's
+   * adapterDns rule): with managed DNS off the core hijacks nothing, the peer
+   * answers no query, and a dead resolver ahead of the working v4 ones pushed
+   * every lookup to Windows' "ask every server" step. The address and the
+   * routes are set either way — v6 traffic must not go around the tunnel.
    */
   async setupIpv6Windows() {
     this.dnsPeer6 = null;
+    const peered = (this.dnsServers || []).includes(TUN_GW);
     try {
       await run('netsh', ['interface', 'ipv6', 'add', 'address', `interface=${ADAPTER}`,
         `address=${TUN_ADDR6}/${TUN_PREFIX6}`, 'store=active']);
-      await run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${ADAPTER}`,
-        'static', TUN_GW6, 'primary', 'validate=no']);
+      if (peered) {
+        await run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${ADAPTER}`,
+          'static', TUN_GW6, 'primary', 'validate=no']);
+      }
       for (const net of SPLIT_ROUTES6) {
         await run('netsh', ['interface', 'ipv6', 'add', 'route', `prefix=${net}`, `interface=${ADAPTER}`,
           `nexthop=${TUN_GW6}`, 'metric=1', 'store=active']);
       }
-      this.dnsPeer6 = TUN_GW6;
-      this.onLog(`IPv6 -> TUN too (${TUN_ADDR6}/${TUN_PREFIX6}, resolver ${TUN_GW6}, ${SPLIT_ROUTES6.join(' + ')})`, 'info');
+      this.dnsPeer6 = peered ? TUN_GW6 : null;
+      this.onLog(`IPv6 -> TUN too (${TUN_ADDR6}/${TUN_PREFIX6}, resolver ${peered ? TUN_GW6 : 'none (no hijack)'}, ${SPLIT_ROUTES6.join(' + ')})`, 'info');
     } catch (e) {
       this.onLog('IPv6 on the TUN adapter failed — v6 stays outside the tunnel: ' + e.message, 'warn');
       await this.cleanupIpv6Windows();
