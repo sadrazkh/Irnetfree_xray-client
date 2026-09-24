@@ -26,6 +26,9 @@ const {
 
 const PEER4 = '172.19.0.2';
 const PEER6 = 'fdfe:dcba:9876::2';
+/** What the guard holds a Windows adapter on (WIN_HOLD4/6 in leakGuard.js). */
+const HOLD4 = '127.0.0.2';
+const HOLD6 = '::1';
 
 /* ----------------------------- Windows: snapshot ----------------------------- */
 
@@ -37,20 +40,24 @@ test('winSnapshotScript skips our own adapters and the virtual ones, and prints 
     'foreach ($a in @(Get-NetAdapter | Where-Object { $_.Status -eq \'Up\''
     + " -and $_.InterfaceAlias -ne 'IRNetFree'"
     + " -and $_.InterfaceAlias -ne 'XrayTun'"
-    + " -and $_.InterfaceDescription -notmatch 'Wintun|TAP|Loopback|Hyper-V|VMware|VirtualBox|Bluetooth' })) {");
-  assert.equal(lines[3],
+    + " -and $_.InterfaceDescription -notmatch 'Wintun|TAP|Loopback|VMware Virtual Ethernet|VirtualBox Host-Only' })) {");
+  assert.equal(lines[3], '$d4 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4)');
+  assert.equal(lines[4], '$d6 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6)');
+  assert.equal(lines[5], 'if (-not $d4.Count -and -not $d6.Count) { continue }');
+  assert.equal(lines[6],
     "$k4 = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\' + $a.InterfaceGuid");
-  assert.equal(lines[4],
+  assert.equal(lines[7],
     "$k6 = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces\\' + $a.InterfaceGuid");
-  assert.equal(lines[5],
+  assert.equal(lines[8],
     '$out += [pscustomobject]@{ alias = $a.InterfaceAlias;'
-    + ' v4 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses);'
-    + ' v6 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 | Select-Object -ExpandProperty ServerAddresses);'
+    + ' v4 = @($d4 | Select-Object -ExpandProperty ServerAddresses);'
+    + ' v6 = @($d6 | Select-Object -ExpandProperty ServerAddresses);'
+    + ' has4 = [bool]$d4.Count; has6 = [bool]$d6.Count;'
     + ' dhcp4 = [string]::IsNullOrWhiteSpace((Get-ItemProperty -Path $k4 -Name NameServer).NameServer);'
     + ' dhcp6 = [string]::IsNullOrWhiteSpace((Get-ItemProperty -Path $k6 -Name NameServer).NameServer) }');
-  assert.equal(lines[6], '}');
-  assert.equal(lines[7], 'ConvertTo-Json -InputObject @($out) -Depth 3 -Compress');
-  assert.equal(lines.length, 8);
+  assert.equal(lines[9], '}');
+  assert.equal(lines[10], 'ConvertTo-Json -InputObject @($out) -Depth 3 -Compress');
+  assert.equal(lines.length, 11);
 });
 
 test('winSnapshotScript: both backends\' adapters are always excluded, a custom alias is added once', () => {
@@ -91,22 +98,22 @@ test('parseWinSnapshot survives what PowerShell does to a one-element array and 
 
 /* ----------------------------- Windows: apply / restore ----------------------------- */
 
-test('winApplyScript points every adapter at the tunnel peer in one script', () => {
+test('winApplyScript holds every adapter on the given resolvers in one script, each line on its own', () => {
   const adapters = [{ alias: 'Wi-Fi' }, { alias: "Bob's Ethernet" }];
-  assert.equal(winApplyScript(adapters, PEER4, PEER6), [
+  assert.equal(winApplyScript(adapters, HOLD4, HOLD6), [
     "$ErrorActionPreference = 'Stop'",
-    "Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '172.19.0.2'",
-    "Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses 'fdfe:dcba:9876::2'",
-    "Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '172.19.0.2'",
-    "Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses 'fdfe:dcba:9876::2'",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 0 v4 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '::1' } catch { Write-Output ('IRNF_FAIL 0 v6 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 1 v4 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '::1' } catch { Write-Output ('IRNF_FAIL 1 v6 ' + $_.Exception.Message) }",
     'Clear-DnsClientCache'
   ].join('\n'));
 });
 
-test('winApplyScript leaves IPv6 alone when there is no v6 peer', () => {
-  assert.equal(winApplyScript([{ alias: 'Wi-Fi' }], PEER4, null), [
+test('winApplyScript leaves a family alone when it is given no address for it', () => {
+  assert.equal(winApplyScript([{ alias: 'Wi-Fi' }], HOLD4, null), [
     "$ErrorActionPreference = 'Stop'",
-    "Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '172.19.0.2'",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 0 v4 ' + $_.Exception.Message) }",
     'Clear-DnsClientCache'
   ].join('\n'));
 });
@@ -298,7 +305,7 @@ test('refresh repairs DHCP drift and journals a newly connected adapter before w
   const original = h.state().win.adapters;
   snapshot = JSON.stringify([
     { alias: 'Wi-Fi', v4: ['192.168.8.254'], v6: ['fe80::2'], dhcp4: true, dhcp6: true },
-    { alias: 'Ethernet', v4: [PEER4], v6: [PEER6], dhcp4: false, dhcp6: false },
+    { alias: 'Ethernet', v4: [HOLD4], v6: [HOLD6], dhcp4: false, dhcp6: false },
     { alias: 'USB Ethernet', v4: ['192.168.20.1'], v6: [], dhcp4: true, dhcp6: true }
   ]);
   // the harness answers netsh with nothing, so the cheap check falls through
@@ -320,7 +327,7 @@ test('refresh without drift is read-only, and stale receipts do not even snapsho
   let snapshot = WIN_SNAP;
   const h = harness('win32', (cmd, args) => /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '');
   const { token } = await h.guard.engage({ level: 'strict', peer4: PEER4, peer6: PEER6 });
-  snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: [PEER4], v6: [PEER6] }]);
+  snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6] }]);
   const ps = () => h.calls.filter(c => c.cmd === 'powershell').length;
   const before = ps();
   assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0 });
@@ -350,6 +357,19 @@ const NETSH_V6 = ['',
   netshBlock('Bluetooth Network Connection', 'DNS servers configured through DHCP', ['fec0:0:0:ffff::1%1', 'fec0:0:0:ffff::2%1'])
 ].join('\r\n');
 
+/** The same machine under the guard: the TUN lists its peer, the guarded adapters the hold. */
+const HELD_V4 = ['',
+  netshBlock('IRNetFree', 'Statically Configured DNS Servers', [PEER4]),
+  netshBlock('Wi-Fi', 'Statically Configured DNS Servers', [HOLD4]),
+  netshBlock('Ethernet', 'Statically Configured DNS Servers', [HOLD4]),
+  netshBlock('Bluetooth Network Connection', 'DNS servers configured through DHCP', ['None'])
+].join('\r\n');
+const HELD_V6 = ['',
+  netshBlock('Wi-Fi', 'Statically Configured DNS Servers', [HOLD6]),
+  netshBlock('Ethernet', 'Statically Configured DNS Servers', [HOLD6]),
+  netshBlock('Bluetooth Network Connection', 'DNS servers configured through DHCP', ['fec0:0:0:ffff::1%1', 'fec0:0:0:ffff::2%1'])
+].join('\r\n');
+
 test('parseNetshDnsServers: one block per quoted alias, addresses only, scope ids dropped, headings never matched', () => {
   const v4 = parseNetshDnsServers(NETSH_V4);
   assert.deepEqual([...v4.keys()], ['irnetfree', 'wi-fi', 'ethernet', 'bluetooth network connection']);
@@ -365,8 +385,8 @@ test('parseNetshDnsServers: one block per quoted alias, addresses only, scope id
   assert.equal(parseNetshDnsServers('    10.255.0.1\r\n').size, 0, 'an address before any block belongs to nobody');
 });
 
-test('refresh: a netsh listing that still names the peers costs no PowerShell; a drift, `full` or an unreadable listing takes the snapshot', async () => {
-  let v4 = NETSH_V4, v6 = NETSH_V6, snapshot = WIN_SNAP;
+test('refresh: a netsh listing that still names the holds costs no PowerShell; a drift, `full` or an unreadable listing takes the snapshot', async () => {
+  let v4 = HELD_V4, v6 = HELD_V6, snapshot = WIN_SNAP;
   const h = harness('win32', (cmd, args) => {
     if (cmd === 'netsh') return args[1] === 'ipv6' ? v6 : v4;
     return /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '';
@@ -384,20 +404,20 @@ test('refresh: a netsh listing that still names the peers costs no PowerShell; a
 
   // the v6 family of an owned adapter drifted back to the router → the full
   // path, which sees the same drift in the snapshot and repairs it
-  v6 = NETSH_V6.replace(`Statically Configured DNS Servers:    ${PEER6}`, 'DNS servers configured through DHCP:  fe80::1%22');
+  v6 = HELD_V6.replace(`Statically Configured DNS Servers:    ${HOLD6}`, 'DNS servers configured through DHCP:  fe80::1%22');
   snapshot = JSON.stringify([
-    { alias: 'Wi-Fi', v4: [PEER4], v6: ['fe80::1'], dhcp4: true, dhcp6: true },
-    { alias: 'Ethernet', v4: [PEER4], v6: [PEER6], dhcp4: false, dhcp6: false }
+    { alias: 'Wi-Fi', v4: [HOLD4], v6: ['fe80::1'], dhcp4: true, dhcp6: true },
+    { alias: 'Ethernet', v4: [HOLD4], v6: [HOLD6], dhcp4: false, dhcp6: false }
   ]);
   p = ps();
   assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
   assert.equal(ps(), p + 2, 'snapshot + apply');
-  assert.match(h.calls.at(-1).script, /InterfaceAlias 'Wi-Fi' -ServerAddresses 'fdfe:dcba:9876::2'/);
+  assert.match(h.calls.at(-1).script, /InterfaceAlias 'Wi-Fi' -ServerAddresses '::1'/);
   assert.doesNotMatch(h.calls.at(-1).script, /InterfaceAlias 'Ethernet'/);
 
   // `full` skips the cheap half even when nothing drifted
-  v6 = NETSH_V6;
-  snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: [PEER4], v6: [PEER6] }, { alias: 'Ethernet', v4: [PEER4], v6: [PEER6] }]);
+  v6 = HELD_V6;
+  snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6] }, { alias: 'Ethernet', v4: [HOLD4], v6: [HOLD6] }]);
   p = ps();
   const before = netsh().length;
   assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: false, adapters: 0 });
@@ -405,8 +425,8 @@ test('refresh: a netsh listing that still names the peers costs no PowerShell; a
   assert.equal(netsh().length, before);
 
   // an adapter netsh no longer lists is gone, not drifted
-  v4 = NETSH_V4.replace(netshBlock('Ethernet', 'Statically Configured DNS Servers', [PEER4]), '');
-  v6 = NETSH_V6.replace(netshBlock('Ethernet', 'Statically Configured DNS Servers', [PEER6]), '');
+  v4 = HELD_V4.replace(netshBlock('Ethernet', 'Statically Configured DNS Servers', [HOLD4]), '');
+  v6 = HELD_V6.replace(netshBlock('Ethernet', 'Statically Configured DNS Servers', [HOLD6]), '');
   p = ps();
   assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
   assert.equal(ps(), p);
@@ -418,10 +438,10 @@ test('refresh: a netsh listing that still names the peers costs no PowerShell; a
   assert.equal(ps(), p + 1);
 
   // a v4 drift alone is enough
-  v4 = NETSH_V4.replace(`Statically Configured DNS Servers:    ${PEER4}\r\n    Register with which suffix:           Primary only\r\n\r\nConfiguration for interface "Ethernet"`,
+  v4 = HELD_V4.replace(`Statically Configured DNS Servers:    ${HOLD4}\r\n    Register with which suffix:           Primary only\r\n\r\nConfiguration for interface "Ethernet"`,
     `DNS servers configured through DHCP:  192.168.8.1\r\n    Register with which suffix:           Primary only\r\n\r\nConfiguration for interface "Ethernet"`);
   assert.deepEqual(parseNetshDnsServers(v4).get('wi-fi'), ['192.168.8.1']);
-  snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: ['192.168.8.1'], v6: [PEER6], dhcp4: true, dhcp6: true }]);
+  snapshot = JSON.stringify([{ alias: 'Wi-Fi', v4: ['192.168.8.1'], v6: [HOLD6], dhcp4: true, dhcp6: true }]);
   p = ps();
   assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
   assert.equal(ps(), p + 2);
@@ -477,7 +497,7 @@ test('engage (win32): snapshot, then the state file, THEN the apply', async () =
   assert.deepEqual(h.calls[0].args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
   assert.equal(h.calls[0].script, winSnapshotScript('IRNetFree'));
   assert.equal(h.calls[0].stateExists, false, 'nothing is recorded before we know what to record');
-  assert.equal(h.calls[1].script, winApplyScript([{ alias: 'Wi-Fi' }, { alias: 'Ethernet' }], PEER4, PEER6));
+  assert.equal(h.calls[1].script, winApplyScript(parseWinSnapshot(WIN_SNAP), HOLD4, HOLD6));
   assert.equal(h.calls[1].stateExists, true,
     'the originals are on disk BEFORE the first adapter is changed — a crash between the two must be repairable');
 
@@ -486,10 +506,13 @@ test('engage (win32): snapshot, then the state file, THEN the apply', async () =
   assert.equal(st.backend, 'sing-box');
   assert.equal(st.peer4, PEER4);
   assert.equal(st.peer6, PEER6);
+  assert.equal(st.hold4, HOLD4);
+  assert.equal(st.hold6, HOLD6);
   assert.equal(st.tunAlias, 'IRNetFree');
   assert.match(st.at, /^\d{4}-\d{2}-\d{2}T/);
   assert.deepEqual(st.win.adapters, parseWinSnapshot(WIN_SNAP));
-  assert.deepEqual(h.logs, [[`Leak guard: DNS of 2 adapters → ${PEER4} ${PEER6}`, 'info']]);
+  assert.deepEqual(h.logs, [[`Leak guard: DNS of 2 adapters → ${HOLD4} ${HOLD6} (loopback: nothing asked there leaves the machine;`
+    + ` the tunnel's resolver ${PEER4} ${PEER6} answers)`, 'info']]);
 });
 
 test('engage (win32): no physical adapter is nothing to guard — no state file, no apply', async () => {
@@ -664,6 +687,209 @@ test('operations are serialized: a repair in flight cannot delete the file a new
   await engaging;
   assert.equal(fs.existsSync(h.statePath), true, 'the live session\'s originals survived the repair');
   assert.deepEqual(h.state().win.adapters, parseWinSnapshot(WIN_SNAP));
+});
+
+/* ================= Windows: what a guarded adapter is pointed at ================= */
+/*
+ * The 2026-09-24 report: "the DNS still leaks, especially on Windows" (v1.13.5,
+ * standard guard). The guard pointed every physical adapter at the TUNNEL PEER
+ * (172.19.0.2 / fdfe:dcba:9876::2) on the theory that a query to the peer can
+ * only enter the tunnel. It cannot be relied on to:
+ *
+ *  - The peer is on-link only on the TUN adapter. Whenever that adapter does not
+ *    exist — every reconnect (the guard is HELD across it, the tunnel is torn
+ *    down and rebuilt), a tunnel that crashed, an app that was killed, retries
+ *    given up on with the guard still holding — the only route to 172.19.0.2 is
+ *    the physical default route, and every name the machine looks up goes to the
+ *    router and the ISP in cleartext. A network that answers every port-53
+ *    packet (the owner has met one: the 198.18/15 fake-IP gateway) then RESOLVES
+ *    it, and a leak test shows that network's resolver.
+ *  - Windows sends each adapter's queries ON that adapter (smart multi-homed
+ *    name resolution: Tailscale adds an NRPT "." rule because Windows 8.1+
+ *    "issue parallel DNS requests to DNS servers associated with all network
+ *    adapters"; Mullvad: "even if the tunnel is the default gateway, all other
+ *    interfaces will also send out the same DNS query outside of the tunnel"),
+ *    and fans a query out to every adapter when the preferred one answers
+ *    REFUSED — which the hijack answers for every non-A/AAAA question.
+ *
+ * Loopback is the one destination no packet ever leaves the host for, on any
+ * adapter, tunnel up or not. So every guarded adapter's resolvers become
+ * loopback on both families, and the TUN adapter's own resolver (set by the
+ * backend, never by the guard) is the one that answers.
+ */
+
+const isLoopback = (ip) => /^127\./.test(ip) || ip === '::1';
+// (the reconnect-gap section below has its own copies of these two)
+const snapAnswer = (snap) => (cmd, args) => (/ConvertTo-Json/.test(args.at(-1)) ? snap : '');
+const psScripts = (h) => h.calls.filter(c => c.cmd === 'powershell').map(c => c.script);
+/** Every address an apply script writes, per `-InterfaceAlias`. */
+function written(script) {
+  const out = [];
+  for (const m of String(script).matchAll(/-InterfaceAlias '((?:[^']|'')*)' -ServerAddresses ((?:'[^']*',?)+)/g)) {
+    for (const a of m[2].split(',')) out.push({ alias: m[1].replace(/''/g, "'"), addr: a.replace(/'/g, '') });
+  }
+  return out;
+}
+
+test('engage (win32): every guarded adapter is held on loopback, both families — never on an address that can leave the machine', async () => {
+  // managed DNS (the tunnel peers), tun2socks whose v6 setup failed (no v6
+  // peer), and managed DNS off / a sing-box-format core (the user's own public
+  // resolvers): the physical adapters get the same answer in all three.
+  for (const peers of [{ peer4: PEER4, peer6: PEER6 }, { peer4: '10.255.0.1', peer6: null }, { peer4: '1.1.1.1', peer6: null }]) {
+    const h = harness('win32', snapAnswer(WIN_SNAP));
+    const r = await h.guard.engage(Object.assign({ level: 'standard', tunAlias: 'IRNetFree' }, peers));
+    assert.equal(r.engaged, true);
+    const addrs = written(h.calls[1].script);
+    assert.deepEqual(addrs.map(w => w.alias), ['Wi-Fi', 'Wi-Fi', 'Ethernet', 'Ethernet'], JSON.stringify(peers));
+    assert.ok(addrs.every(w => isLoopback(w.addr)), `${JSON.stringify(peers)} wrote ${addrs.map(w => w.addr).join(' ')}`);
+    assert.ok(addrs.some(w => w.addr.includes(':')), 'the v6 family is held too, peer6 or not — the router’s fe80:: resolver is on-link');
+    // what the state says the adapters now hold is what refresh() compares against
+    const st = h.state();
+    assert.ok(isLoopback(st.hold4) && isLoopback(st.hold6));
+    assert.equal(st.peer4, peers.peer4, 'the tunnel’s own resolver is still recorded, for the log');
+  }
+});
+
+test('holdForReconnect (win32): what the adapters are held on during the gap cannot leave the machine', async () => {
+  const h = harness('win32', snapAnswer(WIN_SNAP));
+  const s = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  await h.guard.holdForReconnect({ excludes: ['198.51.100.7'], token: s.token });
+  // — the TUN adapter is gone here: 172.19.0.2 would route via the ISP —
+  const addrs = psScripts(h).flatMap(written);
+  assert.ok(addrs.length && addrs.every(w => isLoopback(w.addr)), addrs.map(w => w.addr).join(' '));
+  assert.equal(addrs.some(w => w.addr === PEER4 || w.addr === PEER6), false);
+});
+
+test('winApplyScript: one adapter that cannot be set does not leave the next one on the ISP\'s resolver', () => {
+  // `$ErrorActionPreference = 'Stop'` made the first failing line end the
+  // script: every adapter after it kept its own resolvers, engage() threw, and
+  // the drift watch was never started for the session. A NIC bound to a
+  // Hyper-V external switch or a bridge is Up with no IP interface at all, so
+  // it fails — and the adapter that carries the machine's address comes later.
+  const adapters = [{ alias: 'Wi-Fi' }, { alias: "Bob's Ethernet", has6: false }, { alias: 'Bridge member', has4: false, has6: false }];
+  assert.equal(winApplyScript(adapters, '127.0.0.2', '::1'), [
+    "$ErrorActionPreference = 'Stop'",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 0 v4 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '::1' } catch { Write-Output ('IRNF_FAIL 0 v6 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 1 v4 ' + $_.Exception.Message) }",
+    'Clear-DnsClientCache'
+  ].join('\n'), 'a family the adapter does not have is never attempted');
+});
+
+test('engage (win32): an adapter that refuses is a warning naming it, not a session with no guard', async () => {
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args.at(-1))
+    ? WIN_SNAP
+    : "IRNF_FAIL 1 v6 No MSFT_DNSClientServerAddress objects found with property 'InterfaceAlias' equal to 'Ethernet'.\r\n"));
+  const r = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  assert.equal(r.engaged, true, 'the other adapters ARE guarded — the caller must start the drift watch');
+  assert.ok(r.token);
+  const warn = h.logs.find(([, level]) => level === 'warn');
+  assert.ok(warn, JSON.stringify(h.logs));
+  assert.match(warn[0], /Ethernet \(IPv6\): No MSFT_DNSClientServerAddress/);
+
+  // nothing could be set at all: that is a failed guard, and the state file stays
+  const all = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args.at(-1))
+    ? WIN_SNAP
+    : ['IRNF_FAIL 0 v4 Access is denied.', 'IRNF_FAIL 0 v6 Access is denied.',
+      'IRNF_FAIL 1 v4 Access is denied.', 'IRNF_FAIL 1 v6 Access is denied.'].join('\r\n')));
+  await assert.rejects(() => all.guard.engage({ level: 'standard', peer4: PEER4, tunAlias: 'IRNetFree' }), /Access is denied/);
+  assert.equal(fs.existsSync(all.statePath), true);
+});
+
+test('winSnapshotScript: a NIC whose description says Hyper-V or Bluetooth carries real resolvers and is guarded', () => {
+  // Excluded before, although Windows asks their resolvers like any other:
+  // the only NIC of a Windows VM on Hyper-V (Windows Sandbox, Azure, a test
+  // VM), the host's vEthernet on an EXTERNAL switch (the machine's real
+  // address lives there — netWatcher.js already counts it), and a phone
+  // tethered over Bluetooth PAN.
+  const m = winSnapshotScript('IRNetFree').match(/-notmatch '([^']*)'/);
+  assert.ok(m);
+  const re = new RegExp(m[1], 'i');   // PowerShell's -notmatch is case-insensitive
+  for (const d of ['Microsoft Hyper-V Network Adapter', 'Hyper-V Virtual Ethernet Adapter #2',
+    'Bluetooth Device (Personal Area Network)', 'Intel(R) Wi-Fi 6 AX201 160MHz', 'Remote NDIS based Internet Sharing Device',
+    'Intel(R) PRO/1000 MT Desktop Adapter', 'vmxnet3 Ethernet Adapter']) {
+    assert.equal(re.test(d), false, `${d} must be guarded`);
+  }
+  // another VPN's tunnel, loopback and the host-only side of a hypervisor are not ours to touch
+  for (const d of ['Wintun Userspace Tunnel', 'TAP-Windows Adapter V9', 'Microsoft KM-TEST Loopback Adapter',
+    'VMware Virtual Ethernet Adapter for VMnet8', 'VirtualBox Host-Only Ethernet Adapter']) {
+    assert.equal(re.test(d), true, `${d} stays excluded`);
+  }
+});
+
+test('winSnapshotScript says which families an adapter has, and skips one with no IP interface at all', () => {
+  const s = winSnapshotScript('IRNetFree');
+  assert.match(s, /\$d4 = @\(Get-DnsClientServerAddress -InterfaceIndex \$a\.ifIndex -AddressFamily IPv4\)/);
+  assert.match(s, /\$d6 = @\(Get-DnsClientServerAddress -InterfaceIndex \$a\.ifIndex -AddressFamily IPv6\)/);
+  assert.match(s, /if \(-not \$d4\.Count -and -not \$d6\.Count\) \{ continue \}/);
+  assert.match(s, /has4 = \[bool\]\$d4\.Count; has6 = \[bool\]\$d6\.Count;/);
+  assert.deepEqual(parseWinSnapshot('[{"alias":"Wi-Fi","v4":["192.168.8.1"],"v6":[],"has4":true,"has6":false,"dhcp4":true,"dhcp6":true}]'),
+    [{ alias: 'Wi-Fi', v4: ['192.168.8.1'], v6: [], has4: true, has6: false, dhcp4: true, dhcp6: true }]);
+});
+
+test('refresh (win32): drift is measured against the loopback hold, and a family the adapter lacks is never drift', async () => {
+  let snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: ['192.168.8.1'], v6: ['fe80::1'], has4: true, has6: true, dhcp4: true, dhcp6: true },
+    { alias: 'Ethernet', v4: ['192.168.1.1'], v6: [], has4: true, has6: false, dhcp4: true, dhcp6: true }
+  ]);
+  let v4 = '', v6 = '';
+  const h = harness('win32', (cmd, args) => {
+    if (cmd === 'netsh') return args[1] === 'ipv6' ? v6 : v4;
+    return /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '';
+  });
+  // no v6 peer (tun2socks whose v6 setup failed): the v6 family is watched anyway
+  const { token } = await h.guard.engage({ level: 'standard', peer4: '10.255.0.1', peer6: null, tunAlias: 'XrayTun' });
+  const { hold4, hold6 } = h.state();
+  const ps = () => h.calls.filter(c => c.cmd === 'powershell').length;
+
+  v4 = ['', netshBlock('Wi-Fi', 'Statically Configured DNS Servers', [hold4]), netshBlock('Ethernet', 'Statically Configured DNS Servers', [hold4])].join('\r\n');
+  v6 = ['', netshBlock('Wi-Fi', 'Statically Configured DNS Servers', [hold6])].join('\r\n');
+  let p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
+  assert.equal(ps(), p, 'the holds are what the adapters should list — no PowerShell');
+
+  // the router's RA puts its v6 resolver back on Wi-Fi: seen although peer6 is null
+  v6 = ['', netshBlock('Wi-Fi', 'DNS servers configured through DHCP', ['fe80::1%12'])].join('\r\n');
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [hold4], v6: ['fe80::1'], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [hold4], v6: [], has4: true, has6: false }
+  ]);
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
+  assert.equal(ps(), p + 2);
+  assert.deepEqual(written(h.calls.at(-1).script), [{ alias: 'Wi-Fi', addr: hold4 }, { alias: 'Wi-Fi', addr: hold6 }]);
+
+  // Ethernet has no IPv6 at all: its empty v6 list is not drift, on any tick
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [hold4], v6: [hold6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [hold4], v6: [], has4: true, has6: false }
+  ]);
+  assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: false, adapters: 0 });
+});
+
+test('engage (win32): our own hold is stripped from a re-read snapshot, but a user\'s own loopback resolver is an original', async () => {
+  // A local DNS proxy (dnscrypt-proxy, Acrylic…) is configured exactly like
+  // this. At the FIRST engage nothing of ours can be on an adapter — the state
+  // file is written before any override and only removed after a restore — so
+  // what is there is the user's, and must come back on disconnect.
+  const own = JSON.stringify([{ alias: 'Wi-Fi', v4: ['127.0.0.1'], v6: ['::1'], has4: true, has6: true, dhcp4: false, dhcp6: false }]);
+  const h = harness('win32', snapAnswer(own));
+  await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  assert.deepEqual(h.state().win.adapters[0].v6, ['::1']);
+  assert.match(winRestoreScript(h.state().win.adapters), /-ServerAddresses '::1'/);
+
+  // A re-engage reads our own hold back off an adapter it has not recorded
+  // under that alias (renamed mid-session): that is ours, never an original.
+  let snaps = 0;
+  const g = harness('win32', (cmd, args) => {
+    if (!/ConvertTo-Json/.test(args.at(-1))) return '';
+    return ++snaps === 1 ? WIN_SNAP : JSON.stringify([{ alias: 'Wi-Fi 2', v4: ['127.0.0.2'], v6: ['::1'], has4: true, has6: true, dhcp4: false, dhcp6: false }]);
+  });
+  const opts = { level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' };
+  await g.guard.engage(opts);
+  await g.guard.engage(opts);
+  const renamed = g.state().win.adapters.find(a => a.alias === 'Wi-Fi 2');
+  assert.deepEqual([renamed.v4, renamed.v6], [[], []]);
 });
 
 /* ============================ level: strict ============================ */
@@ -909,7 +1135,7 @@ test('engage (win32, strict): DNS first, then the firewall — and the state fil
   assert.equal(h.calls.length, 3);
   const adapters = parseWinSnapshot(WIN_SNAP);
   assert.equal(h.calls[0].script, winSnapshotScript('IRNetFree'));
-  assert.equal(h.calls[1].script, winApplyScript(adapters, PEER4, null), 'the standard step still runs first');
+  assert.equal(h.calls[1].script, winApplyScript(adapters, HOLD4, HOLD6), 'the standard step still runs first');
   assert.equal(h.calls[2].script, winStrictApplyScript({
     adapters, ranges: rangeComplement(['5.6.7.8', '178.22.122.100', ...GUARD_EXCLUDES])
   }));
@@ -921,7 +1147,7 @@ test('engage (win32, strict): DNS first, then the firewall — and the state fil
   assert.equal(st.udpBlock, false);
   assert.deepEqual(st.win.adapters, adapters);
   assert.deepEqual(h.logs, [
-    [`Leak guard: DNS of 2 adapters → ${PEER4}`, 'info'],
+    [`Leak guard: DNS of 2 adapters → ${HOLD4} ${HOLD6} (loopback: nothing asked there leaves the machine; the tunnel's resolver ${PEER4} answers)`, 'info'],
     ['Leak guard (strict): 2 adapters now block every outbound address but the tunnel\'s — traffic your rules send direct is blocked too', 'warn']
   ]);
 });
