@@ -69,9 +69,19 @@ class FastestTest {
             m("d", tcp = 210), m("e", tcp = 260)
         )
         assertEquals("c", Fastest.pick(measured)?.id)
-        // ...and when none of the shortlist carried anything, the best handshake
-        // of the whole list is still a better answer than nothing.
+        // ...and when none of the shortlist carried anything, a server that was
+        // never really tried is a better answer than one that was and failed.
+        // (This used to pin "a": the best handshake won even though its real
+        // round trip had just failed, so ⚡ connected to a server it had
+        // measured as dead. The audit of 2026-09-24 changed the pin on purpose.)
         val noneCarried = listOf(m("a", tcp = 40, real = -1), m("b", tcp = 55, real = -1), m("d", tcp = 210))
-        assertEquals("a", Fastest.pick(noneCarried)?.id)
+        assertEquals("d", Fastest.pick(noneCarried)?.id)
+    }
+
+    @Test fun aMeasuredFailureDisqualifies() {
+        // The handshake says the port is open; the round trip says it carries
+        // nothing. The second measurement is the one that is true.
+        assertNull(Fastest.score(m("a", tcp = 40, real = -1)))
+        assertNull(Fastest.pick(listOf(m("a", tcp = 40, real = -1), m("b", tcp = 55, real = -1))))
     }
 }
