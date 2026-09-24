@@ -90,7 +90,7 @@ test('the boot-time retry is a router thing: for as long as it takes there (15s,
   // the behaviour itself is driven in serviceGateway.test.js; this pins the production cadence
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
   assert.match(src, /bootEveryMs: 15000, bootSlowAfter: 20, bootSlowMs: 60000/);
-  assert.match(src, /\? \{ tries: Infinity, everyMs: T\.bootEveryMs, slowAfter: T\.bootSlowAfter, slowMs: T\.bootSlowMs \}\n\s*: \{ tries: 1, everyMs: 0, slowAfter: Infinity, slowMs: 0 \};/);
+  assert.match(src, /\? \{ tries: Infinity, everyMs: T\.bootEveryMs, slowAfter: T\.bootSlowAfter, slowMs: T\.bootSlowMs \}\s*: \{ tries: 1, everyMs: 0, slowAfter: Infinity, slowMs: 0 \};/);
   assert.match(src, /routerBackoffMs: \[2000, 5000, 15000, 30000, 60000\]/, 'the recovery backs off to a minute, and never gives up');
 });
 
