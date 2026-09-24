@@ -183,9 +183,9 @@ function connectionEdits(old, said, fresh) {
  *  - Connection fields (address — a clean CDN IP —, port, credential, SNI,
  *    Host, path, …): only those recorded in `_edited` when the user edited
  *    them (see connectionEdits).
- *  - The anti-DPI fields, the engine, a WireGuard's DNS: recorded ones, and —
- *    as before — any whose old value differs from what the old link said, so
- *    a value the provider retunes and the user never touched comes through.
+ *  - The anti-DPI fields, the engine, the patterniha TLS knobs, a WireGuard's
+ *    DNS: likewise only when recorded; otherwise the provider's value (or its
+ *    removal) comes through.
  *  - The name: recorded, or a rename the old link proves.
  *  - The certificate pin is learnt by the app and never in a link: always kept.
  * `_edited` goes forward with what was carried, so it holds refresh after
@@ -199,11 +199,13 @@ function carryOver(old, fresh, said) {
   const kept = [];
   const conn = connectionEdits(old, said, fresh);
   if (conn) { out = applyServerEdits(out, conn.fields); kept.push(...conn.keys); }
+  // Recorded edits only, like the connection fields: an engine, fragment or
+  // noise that merely differs from what the old link parses to today is an
+  // older parser's (or an older app's) value, not the user's.
   for (const f of USER_FIELDS) {
-    const mine = f.get(old);
-    const mineRecorded = recorded.includes(f.key);
-    if (mineRecorded || !said || norm(mine) !== norm(f.get(said))) f.set(out, clone(mine));
-    if (mineRecorded) kept.push(f.key);
+    if (!recorded.includes(f.key)) continue;
+    f.set(out, clone(f.get(old)));
+    kept.push(f.key);
   }
   // A rename when recorded, or when the old link proves one: otherwise the
   // provider's name (which often carries the traffic left) is the current one.
