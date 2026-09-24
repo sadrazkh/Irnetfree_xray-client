@@ -1,9 +1,12 @@
 package com.irnetfree.vpn.ui
 
+import android.Manifest
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -33,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -79,11 +83,14 @@ import com.irnetfree.vpn.vpn.XrayTester
 import com.irnetfree.vpn.vpn.XrayVpnService
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -99,7 +106,7 @@ class MainActivity : ComponentActivity() {
         val crash = IRApp.readCrash(application)
         if (crash != null) { setContent { AppTheme { CrashScreen(crash) { IRApp.clearCrash(application); recreate() } } }; return }
         try {
-            store = Store(this)
+            store = Store.get(this)
             setContent { AppTheme { App(store) } }
         } catch (e: Throwable) {
             setContent { AppTheme { CrashScreen("onCreate failed:\n" + e.stackTraceToString()) { finish() } } }
@@ -243,9 +250,12 @@ private object AutoConnectOnce { @Volatile var done = false }
 private fun HomeScreen(store: Store, bump: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    observeStore()
     val state by VpnState.state.collectAsState()
     val err by VpnState.lastError.collectAsState()
     val traffic by VpnState.traffic.collectAsState()
+    // What the running tunnel was started on — not whatever is selected now.
+    val connectedLabel by VpnState.label.collectAsState()
     var ip by remember { mutableStateOf("—") }
     var ping by remember { mutableStateOf<Long?>(null) }
     var latency by remember { mutableStateOf<Long?>(null) }
@@ -253,9 +263,10 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     var pickerOpen by remember { mutableStateOf(false) }
     var homeSheet by remember { mutableStateOf<String?>(null) }
     // "Auto (fastest)": what it is measuring right now, and the line that says
-    // what it chose. Both empty until somebody asks for it.
-    var autoPhase by remember { mutableStateOf("") }
-    var autoNote by remember { mutableStateOf("") }
+    // what it chose. Both empty until somebody asks for it. They live in
+    // AppWork with the run itself, which a tab switch no longer abandons.
+    val autoPhase by AppWork.fastestPhase.collectAsState()
+    val autoNote by AppWork.fastestNote.collectAsState()
     val haptic = LocalHapticFeedback.current
     val connectedSince by VpnState.connectedSince.collectAsState()
     val health by VpnState.health.collectAsState()
@@ -273,14 +284,31 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         else { spark.add(traffic.rxSpeed to traffic.txSpeed); while (spark.size > 60) spark.removeAt(0) }
     }
 
+    // What to do once Android has said yes: "fastest", or a plain connect.
+    // Saveable, because both system dialogs are other activities and this one
+    // can be recreated behind them.
+    var afterConsent by rememberSaveable { mutableStateOf("connect") }
+    fun proceed() { if (afterConsent == "fastest") AppWork.connectFastest(ctx, store) else doConnect(ctx, store) }
     val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        if (res.resultCode == android.app.Activity.RESULT_OK) doConnect(ctx, store)
+        if (res.resultCode == android.app.Activity.RESULT_OK) proceed()
+    }
+    fun vpnConsentThenProceed() {
+        val prep: Intent? = VpnService.prepare(ctx)
+        if (prep != null) vpnPrepare.launch(prep) else proceed()
+    }
+    // Android 13+ shows no notification without POST_NOTIFICATIONS — and the
+    // VPN's status notification is where its Disconnect button lives. Asked
+    // once, before the first connect; granted or refused, the connect goes on.
+    val notifAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> vpnConsentThenProceed() }
+    fun withConsent(then: String) {
+        afterConsent = then
+        if (needsNotificationAsk(ctx, store)) { store.notifAsked = true; notifAsk.launch(Manifest.permission.POST_NOTIFICATIONS) }
+        else vpnConsentThenProceed()
     }
     fun onPower() {
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         if (state == ConnState.CONNECTED || state == ConnState.CONNECTING) { XrayVpnService.disconnect(ctx); return }
-        val prep: Intent? = VpnService.prepare(ctx)
-        if (prep != null) vpnPrepare.launch(prep) else doConnect(ctx, store)
+        withConsent("connect")
     }
     fun selectedServer(): ServerConfig? {
         val sel = store.selection
@@ -300,33 +328,14 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
      *
      * Nothing is changed when nothing answers: the selection you had is still
      * the selection you have.
+     *
+     * Android's permissions are asked for FIRST, so the run itself (AppWork)
+     * can connect at its end without a screen to show a dialog from.
      */
     fun connectFastest() {
-        val list = store.servers.toList()
-        if (list.size < 2 || autoPhase.isNotEmpty()) return
+        if (store.servers.size < 2 || autoPhase.isNotEmpty()) return
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-        scope.launch {
-            autoNote = ""
-            val best = try { pickFastest(ctx, list) { autoPhase = it } } finally { autoPhase = "" }
-            val srv = best?.let { store.serverById(it.id) }
-            if (best == null || srv == null) {
-                autoNote = "no server answered — the selection was left alone"
-                VpnState.addLog("Auto (fastest): no server answered; kept ${store.selectionLabel()}")
-                Toast.makeText(ctx, "No server answered", Toast.LENGTH_LONG).show()
-                return@launch
-            }
-            val real = best.real ?: -1L
-            val how = if (real >= 0) "$real ms through it" else "${best.tcp ?: -1L} ms handshake"
-            store.saveSelection(best.id)
-            autoNote = "⚡ fastest of ${list.size}: ${srv.name} · $how"
-            VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers")
-            Toast.makeText(ctx, "Fastest: ${srv.name} · $how", Toast.LENGTH_LONG).show()
-            // Already up on something else: take it down first, as the reconnect
-            // button does, so the new choice is what actually carries traffic.
-            if (VpnState.isActive) { XrayVpnService.disconnect(ctx); delay(700) }
-            val prep: Intent? = VpnService.prepare(ctx)
-            if (prep != null) vpnPrepare.launch(prep) else doConnect(ctx, store)
-        }
+        withConsent("fastest")
     }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -362,7 +371,9 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 Spacer(Modifier.height(5.dp))
                 Text(
                     when (state) {
-                        ConnState.CONNECTED -> store.selectionLabel()
+                        // the server carrying traffic; picking another one only
+                        // changes what the NEXT connect uses
+                        ConnState.CONNECTED -> connectedLabel.ifBlank { store.selectionLabel() }
                         ConnState.CONNECTING -> "starting the core and the tunnel"
                         ConnState.ERROR -> err.ifBlank { "see More → Logs" }
                         else -> "tap the ring to connect"
@@ -517,7 +528,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = TXT2), border = BorderStroke(1.dp, STROKE)
                 ) { Text("check IP", fontSize = 12.sp) }
                 OutlinedButton(
-                    onClick = { if (state == ConnState.CONNECTED) { XrayVpnService.disconnect(ctx); scope.launch { delay(600); doConnect(ctx, store) } } },
+                    onClick = { if (state == ConnState.CONNECTED) AppWork.reconnect(ctx, store) },
                     enabled = state == ConnState.CONNECTED,
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = TXT2), border = BorderStroke(1.dp, STROKE)
@@ -686,8 +697,10 @@ private fun doConnect(ctx: Context, store: Store) {
  *     traffic from one that merely accepts connections, and three of them is
  *     about the most a phone can spend while somebody is watching the screen.
  *
- * Both numbers go to [Fastest.pick], which prefers a server that really carried
- * a request over one that only shook hands — however fast the handshake was.
+ * If none of those three carried anything, the next handshakes in line are
+ * tried too, until one does or [Fastest.MAX_TRIES] cores have been spent
+ * ([Fastest.walk]) — a round trip measured as failing disqualifies, so ⚡ never
+ * connects to a server it has just seen fail.
  *
  * `onPhase` runs on the caller's dispatcher (the UI's), so it may write state.
  */
@@ -695,7 +708,7 @@ private suspend fun pickFastest(
     ctx: Context,
     servers: List<ServerConfig>,
     onPhase: (String) -> Unit
-): Fastest.Measured? {
+): FastestResult {
     val measured = LinkedHashMap<String, Fastest.Measured>()
     var done = 0
     onPhase("testing 0/${servers.size}…")
@@ -707,30 +720,211 @@ private suspend fun pickFastest(
         done += batch.size
         onPhase("testing $done/${servers.size}…")
     }
-    val short = Fastest.shortlist(measured.values.toList())
-    if (short.isEmpty()) return null
+    val answered = Fastest.shortlist(measured.values.toList(), Int.MAX_VALUE).size
+    if (answered == 0) return FastestResult(null, 0, 0)
     val byId = servers.associateBy { it.id }
-    short.forEachIndexed { i, m ->
+    val tried = Fastest.walk(measured.values.toList()) { i, m ->
         val s = byId[m.id]
-        if (s != null) {
-            onPhase("checking ${i + 1}/${short.size} · ${s.name.take(16)}")
-            measured[m.id] = m.copy(real = realDelayThrough(ctx, s))
+        if (s == null) -1L else {
+            onPhase("checking ${i + 1} · ${s.name.take(16)}")
+            realDelayThrough(ctx, s)
         }
     }
-    return Fastest.pick(measured.values.toList())
+    return FastestResult(Fastest.pick(tried), answered, tried.size)
 }
 
-/** An HTTP round trip through one server, in ms, or -1 if it could not carry it. */
+/** ⚡'s answer: the winner (null = none), how many shook hands, how many were really tried. */
+private class FastestResult(val best: Fastest.Measured?, val answered: Int, val tried: Int)
+
+/**
+ * An HTTP round trip through one server, in ms, or -1 if it could not carry it.
+ *
+ * Start, measure and stop are ONE blocking unit on IO with a plain
+ * try/finally. The stop used to sit in a `withContext` in the finally, which a
+ * cancelled coroutine never runs, and the start sat outside the try — a screen
+ * that went away mid-test left the throwaway core running. Blocking calls are
+ * not interrupted by a cancel, so this stop always runs.
+ */
 private suspend fun realDelayThrough(ctx: Context, s: ServerConfig): Long {
-    val h = withContext(Dispatchers.IO) { XrayTester.start(ctx, s) } ?: return -1
-    try {
-        return withContext(Dispatchers.IO) { Diagnostics.httpLatency(h.port, timeout = 5000) }
-    } finally {
-        // NonCancellable on purpose: if the screen went away mid-test the core
-        // still has to be stopped, and a cancelled coroutine cannot withContext.
-        withContext(NonCancellable + Dispatchers.IO) { XrayTester.stop(h) }
+    return AppWork.coreLock.withLock {
+        withContext(Dispatchers.IO) {
+            val h = XrayTester.start(ctx, s)
+            if (h == null) -1L else try { Diagnostics.httpLatency(h.port, timeout = 5000) } finally { XrayTester.stop(h) }
+        }
     }
 }
+
+/**
+ * Work that must outlive the screen that started it.
+ *
+ * Every screen sits inside `key(rev)` in App, and bump() rebuilds the whole
+ * subtree — which cancels every rememberCoroutineScope() beneath it, including
+ * the work the screen itself had just started. A subscription refresh ended in
+ * bump(), which cancelled the next one in "refresh all", and the rebuilt screen
+ * found the failed subscription still stale and fetched it again, for as long
+ * as the tab was open; adding a subscription bumped before its own fetch was
+ * done, so a first run imported nothing; ⚡ fastest and reconnect were dropped
+ * by a tab switch half way, the second after it had already disconnected.
+ *
+ * What changes the store or the tunnel therefore runs here, on the main thread,
+ * for the life of the process, and the screens observe it: [storeRev] tells a
+ * screen the lists changed (observeStore), the rest is state to show.
+ */
+private object AppWork {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** One throwaway core at a time (XrayTester's rule), whoever asks: a test, ⚡, a subscription fetch. */
+    val coreLock = Mutex()
+
+    /** Subscription fetches, one at a time. */
+    private val subLock = Mutex()
+
+    /** Subscriptions being fetched or waiting their turn. */
+    val subsBusy = MutableStateFlow<Set<String>>(emptySet())
+
+    /** The last refresh's outcome in one line, and whether it failed. */
+    val subsNote = MutableStateFlow("" to false)
+
+    /** Moves whenever work here wrote the store. */
+    val storeRev = MutableStateFlow(0)
+
+    /** ⚡ fastest: what it is measuring now ("" = not running), and what it chose. */
+    val fastestPhase = MutableStateFlow("")
+    val fastestNote = MutableStateFlow("")
+
+    /**
+     * Fetch one subscription and apply it (SubRefresh), queued behind any fetch
+     * already running; one already waiting is not queued twice. `announce` puts
+     * the outcome in a toast too — the add flows, where the user just asked.
+     */
+    fun refreshSub(ctx: Context, store: Store, subId: String, announce: Boolean = false) {
+        if (subId in subsBusy.value) return
+        subsBusy.value = subsBusy.value + subId
+        val app = ctx.applicationContext
+        scope.launch {
+            try {
+                subLock.withLock { refreshNow(app, store, subId, announce) }
+            } finally {
+                subsBusy.value = subsBusy.value - subId
+            }
+        }
+    }
+
+    private suspend fun refreshNow(ctx: Context, store: Store, subId: String, announce: Boolean) {
+        val url = store.subs.firstOrNull { it.id == subId }?.url ?: return   // deleted while it waited
+        subsNote.value = "Fetching…" to false
+        var error = ""
+        val fetched = try {
+            coreLock.withLock { withContext(Dispatchers.IO) { SubFetch.fetch(ctx, store, url) { s -> VpnState.addLog(s) } } }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            error = e.message ?: e.javaClass.simpleName
+            null
+        }
+        // Deleted while it was being fetched: the result has nowhere to go.
+        val idx = store.subs.indexOfFirst { it.id == subId }
+        if (idx < 0) return
+        val sub = store.subs[idx]
+        val now = System.currentTimeMillis()
+        val note: String
+        var bad = true
+        if (fetched == null) {
+            store.subs[idx] = SubRefresh.failed(sub, error, now)
+            note = "${sub.name}: $error"
+            VpnState.addLog("Subscription ${sub.url}: $error")
+        } else {
+            val r = fetched.result
+            VpnState.addLog("Subscription ${sub.url}: ${r.servers.size} servers via ${fetched.via}")
+            val applied = SubRefresh.applyFetch(store.servers.toList(), sub, r.servers, r.usage, r.errors, now)
+            store.subs[idx] = applied.sub
+            val list = applied.servers
+            val m = applied.merged
+            if (list == null || m == null) {
+                note = "${sub.name}: ${applied.sub.lastError} — kept its ${sub.serverCount} servers"
+                VpnState.addLog("Subscription ${sub.url}: ${applied.sub.lastError}; the ${sub.serverCount} servers it had are kept")
+            } else {
+                store.servers.clear(); store.servers.addAll(list); store.saveServers()
+                if (store.selection.isEmpty()) m.servers.firstOrNull()?.let { store.saveSelection(it.id) }
+                val change = if (m.added == 0 && m.dropped == 0) "" else " · ${m.added} new, ${m.dropped} gone"
+                note = "${sub.name}: ${m.servers.size} servers$change"
+                bad = false
+                VpnState.addLog("Subscription ${sub.url}: ${m.kept} kept (same ids), ${m.added} new, ${m.dropped} gone")
+            }
+        }
+        store.saveSubs()
+        subsNote.value = note to bad
+        storeRev.value = storeRev.value + 1
+        if (announce) Toast.makeText(ctx, note, Toast.LENGTH_LONG).show()
+    }
+
+    /**
+     * ⚡: measure, choose, save the choice, connect to it. Android's permissions
+     * were asked for by the screen before this started, so the end of the run
+     * needs no screen at all.
+     */
+    fun connectFastest(ctx: Context, store: Store) {
+        val list = store.servers.toList()
+        if (list.size < 2 || fastestPhase.value.isNotEmpty()) return
+        val app = ctx.applicationContext
+        fastestPhase.value = "testing 0/${list.size}…"
+        fastestNote.value = ""
+        scope.launch {
+            val out = try { pickFastest(app, list) { fastestPhase.value = it } } finally { fastestPhase.value = "" }
+            val best = out.best
+            val srv = best?.let { store.serverById(it.id) }
+            if (best == null || srv == null) {
+                // The winner may have been deleted (or dropped by a refresh) while
+                // it was measured — say that, not that nothing carried traffic.
+                val gone = best?.let { b -> list.firstOrNull { it.id == b.id }?.name ?: "the winner" }
+                val why = when {
+                    gone != null -> "$gone won but was removed during the test"
+                    out.answered == 0 -> "no server answered"
+                    else -> "none of the ${out.tried} quickest carried traffic"
+                }
+                fastestNote.value = "$why — the selection was left alone"
+                VpnState.addLog("Auto (fastest): $why; kept ${store.selectionLabel()}")
+                Toast.makeText(app, why.replaceFirstChar { it.uppercase() }, Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val real = best.real ?: -1L
+            val how = if (real >= 0) "$real ms through it" else "${best.tcp ?: -1L} ms handshake"
+            store.saveSelection(best.id)
+            storeRev.value = storeRev.value + 1
+            fastestNote.value = "⚡ fastest of ${list.size}: ${srv.name} · $how"
+            VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers")
+            Toast.makeText(app, "Fastest: ${srv.name} · $how", Toast.LENGTH_LONG).show()
+            // Already up on something else: take it down first, as the reconnect
+            // button does, so the new choice is what actually carries traffic.
+            if (VpnState.isActive) { runCatching { XrayVpnService.disconnect(app) }; delay(700) }
+            if (VpnService.prepare(app) != null) {
+                VpnState.addLog("Auto (fastest): Android has not given VPN permission — tap the ring to connect")
+                return@launch
+            }
+            doConnect(app, store)
+        }
+    }
+
+    /** Down, then up again on the current selection — the second half no longer dies with the screen. */
+    fun reconnect(ctx: Context, store: Store) {
+        val app = ctx.applicationContext
+        runCatching { XrayVpnService.disconnect(app) }
+        scope.launch { delay(600); doConnect(app, store) }
+    }
+}
+
+/**
+ * Recompose the caller whenever AppWork has changed the store. The lists are
+ * plain lists, not Compose state, so a screen showing them reads this to be
+ * told — instead of the whole-tree rebuild (bump) that used to cancel the work.
+ * (Not Unit-returning, so the read counts for the caller's own scope.)
+ */
+@Composable private fun observeStore(): Int = AppWork.storeRev.collectAsState().value
+
+/** Android 13+, POST_NOTIFICATIONS not granted, and not asked for before. */
+private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
+    Build.VERSION.SDK_INT >= 33 && !store.notifAsked &&
+        ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
 
 
 /**
@@ -742,6 +936,7 @@ private suspend fun realDelayThrough(ctx: Context, s: ServerConfig): Long {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun SelectionSheet(store: Store, onAuto: () -> Unit, onDismiss: () -> Unit, onPick: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
+        observeStore()
         val options = buildList {
             if (store.poolEnabledValid().isNotEmpty()) add(Store.POOL_ID to "🧩 Proxy Pool (${store.poolEnabledValid().size})")
             if (store.advancedReady()) add(Store.ADV_ID to "🧭 Advanced routing")
@@ -810,27 +1005,40 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     // changed instead of calling bump(), which rebuilds the screen through
     // key(rev) in App and takes the scroll position with it — the list used to
     // jump back to the top whenever you chose something near the bottom.
-    var selectedId by remember { mutableStateOf(store.selection) }
+    // Re-read whenever AppWork changed the store: ⚡ fastest or a first import
+    // can move the selection while this tab is open, and a plain remember kept
+    // the tick on the old row.
+    val storeRev = observeStore()
+    var selectedId by remember(storeRev) { mutableStateOf(store.selection) }
     val ctx = LocalContext.current
     val tests = remember { mutableStateMapOf<String, TestState>() }
-    val testMutex = remember { Mutex() }
     // The row whose actions are showing. Only ever one, and nothing to begin
     // with: arriving at the list should show the list, not a card mid-flight.
     var openId by remember { mutableStateOf("") }
 
-    // One test at a time; `phase` marks which metric is currently measuring.
-    suspend fun testOne(s: ServerConfig) = testMutex.withLock {
+    // One throwaway core at a time, app-wide (AppWork.coreLock); `phase` marks
+    // which metric is currently measuring.
+    //
+    // Start, measure, stop: one blocking unit on IO with a plain try/finally.
+    // The stop used to be a `withContext` in the finally, which a cancelled
+    // coroutine — the screen rebuilt, the tab left — never runs, and the start
+    // sat outside the try: the core kept running. A blocking call is not
+    // interrupted by a cancel, so this stop always runs. (The phase updates are
+    // snapshot-state writes, which may come from any thread.)
+    suspend fun testOne(s: ServerConfig) = AppWork.coreLock.withLock {
         tests[s.id] = TestState(phase = "tcp")
-        val h = withContext(Dispatchers.IO) { XrayTester.start(ctx, s) }
-        if (h == null) { tests[s.id] = TestState(error = "core error"); return@withLock }
-        try {
-            val ping = withContext(Dispatchers.IO) { Diagnostics.tcpPing(s.address, s.port) }
-            tests[s.id] = TestState(tcp = ping, phase = "down")
-            val down = withContext(Dispatchers.IO) { Diagnostics.httpLatency(h.port) }
-            tests[s.id] = TestState(tcp = ping, down = down, phase = "up")
-            val up = withContext(Dispatchers.IO) { Diagnostics.uploadTest(h.port) }
-            tests[s.id] = TestState(tcp = ping, down = down, up = up)
-        } finally { withContext(Dispatchers.IO) { XrayTester.stop(h) } }
+        val result = withContext(Dispatchers.IO) {
+            val h = XrayTester.start(ctx, s)
+            if (h == null) TestState(error = "core error") else try {
+                val ping = Diagnostics.tcpPing(s.address, s.port)
+                tests[s.id] = TestState(tcp = ping, phase = "down")
+                val down = Diagnostics.httpLatency(h.port)
+                tests[s.id] = TestState(tcp = ping, down = down, phase = "up")
+                val up = Diagnostics.uploadTest(h.port)
+                TestState(tcp = ping, down = down, up = up)
+            } finally { XrayTester.stop(h) }
+        }
+        tests[s.id] = result
     }
     fun runTest(s: ServerConfig) { scope.launch { testOne(s) } }
     fun testAll() { scope.launch { for (s in store.servers.toList()) testOne(s) } }
@@ -961,34 +1169,20 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
 private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) -> Unit, bump: () -> Unit) {
     val ctx = LocalContext.current
     var importText by remember { mutableStateOf("") }
-    val scope = rememberCoroutineScope()
+    // The fetch runs in AppWork: the bump() that shows the new subscription
+    // used to cancel its own fetch, so a first run imported nothing.
     fun addSubAndFetch(url: String) {
         val sub = Subscription(newId("sub"), url.trim().take(30), url.trim())
         store.subs.add(sub); store.saveSubs()
         Toast.makeText(ctx, "Fetching subscription…", Toast.LENGTH_SHORT).show()
-        scope.launch {
-            try {
-                val out = withContext(Dispatchers.IO) { SubFetch.fetch(ctx, store, sub.url) { s -> VpnState.addLog(s) } }
-                val r = out.result
-                VpnState.addLog("Subscription ${sub.url}: ${r.servers.size} servers via ${out.via}")
-                store.servers.removeAll { it.subId == sub.id }
-                val tagged = r.servers.map { it.copy(subId = sub.id) }
-                store.servers.addAll(tagged); store.saveServers()
-                if (tagged.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
-                val idx = store.subs.indexOfFirst { it.id == sub.id }
-                if (idx >= 0) store.subs[idx] = sub.copy(serverCount = tagged.size, lastUpdated = System.currentTimeMillis(),
-                    upload = r.usage?.upload ?: 0, download = r.usage?.download ?: 0, total = r.usage?.total ?: 0, expire = r.usage?.expire ?: 0)
-                store.saveSubs(); Toast.makeText(ctx, "Subscription: ${tagged.size} servers added", Toast.LENGTH_SHORT).show(); bump()
-            } catch (e: Exception) {
-                VpnState.addLog("Subscription ${sub.url}: ${e.message}")
-                Toast.makeText(ctx, "Subscription failed — see More → Logs", Toast.LENGTH_LONG).show(); bump()
-            }
-        }
+        AppWork.refreshSub(ctx, store, sub.id, announce = true)
     }
     // Auto-detect: http(s) lines -> subscriptions (fetched); the rest -> config(s).
+    // An HTTP proxy link (`http://user@host:port#name`) is a config, not a
+    // subscription URL — renderer/app.js isSubUrl.
     fun smartImport(text: String) {
         val lines = text.split(Regex("\\r?\\n")).map { it.trim() }.filter { it.isNotEmpty() }
-        val isUrl = { s: String -> s.startsWith("http://", true) || s.startsWith("https://", true) }
+        val isUrl = { s: String -> LinkParser.isSubUrl(s) }
         val urls = lines.filter(isUrl)
         val rest = lines.filterNot(isUrl).joinToString("\n")
         urls.forEach { addSubAndFetch(it) }
@@ -1436,41 +1630,31 @@ private fun protoColor(proto: String): Color = when (proto) {
 @Composable
 private fun SubsScreen(store: Store, bump: () -> Unit) {
     val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var url by remember { mutableStateOf("") }; var name by remember { mutableStateOf("") }; var busy by remember { mutableStateOf(false) }; var msg by remember { mutableStateOf("") }
-    fun refresh(sub: Subscription) {
-        busy = true; msg = "Fetching…"
-        scope.launch {
-            try {
-                val out = withContext(Dispatchers.IO) { SubFetch.fetch(ctx, store, sub.url) { s -> VpnState.addLog(s) } }
-                val r = out.result
-                VpnState.addLog("Subscription ${sub.url}: ${r.servers.size} servers via ${out.via}")
-                store.servers.removeAll { it.subId == sub.id }
-                val tagged = r.servers.map { it.copy(subId = sub.id) }; store.servers.addAll(tagged); store.saveServers()
-                val idx = store.subs.indexOfFirst { it.id == sub.id }
-                if (idx >= 0) store.subs[idx] = sub.copy(serverCount = tagged.size, lastUpdated = System.currentTimeMillis(), upload = r.usage?.upload ?: 0, download = r.usage?.download ?: 0, total = r.usage?.total ?: 0, expire = r.usage?.expire ?: 0)
-                store.saveSubs(); msg = "${tagged.size} servers updated"
-            } catch (e: Exception) {
-                msg = "Error: ${e.message}"
-                VpnState.addLog("Subscription ${sub.url}: ${e.message}")
-            } finally { busy = false; bump() }
-        }
-    }
+    observeStore()
+    var url by remember { mutableStateOf("") }; var name by remember { mutableStateOf("") }
+    // Fetches run in AppWork, one at a time, and apply even if you leave the
+    // tab; this screen only shows them. It used to run them itself and end
+    // each one in bump(), which cancelled the rest of "refresh all" and rebuilt
+    // this screen — whose auto-update then fetched the failed one again.
+    val busy by AppWork.subsBusy.collectAsState()
+    val note by AppWork.subsNote.collectAsState()
+    fun refresh(sub: Subscription) = AppWork.refreshSub(ctx, store, sub.id)
     // Auto update. `autoUpdateSubs` and `autoUpdateInterval` were in the settings
     // model from the start and read by nothing at all, so a subscription only ever
     // refreshed when the user pressed the button. Doing it when this screen opens
     // needs no background work and no extra permission: a list you are looking at
-    // is the list worth being current.
+    // is the list worth being current. A failed attempt counts too (SubRefresh.due),
+    // so a subscription that fails is not fetched again on every visit.
     var settings by remember { mutableStateOf(store.settings) }
     LaunchedEffect(Unit) {
         if (!settings.autoUpdateSubs) return@LaunchedEffect
         val maxAge = settings.autoUpdateInterval.coerceAtLeast(5) * 60_000L
         val now = System.currentTimeMillis()
-        store.subs.toList().forEach { sub -> if (now - sub.lastUpdated >= maxAge) refresh(sub) }
+        store.subs.toList().forEach { sub -> if (SubRefresh.due(sub, now, maxAge)) refresh(sub) }
     }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         TopBar("Subscriptions") {
-            IconButton(onClick = { store.subs.toList().forEach { refresh(it) } }, enabled = !busy && store.subs.isNotEmpty()) {
+            IconButton(onClick = { store.subs.toList().forEach { refresh(it) } }, enabled = store.subs.any { it.id !in busy }) {
                 Icon(Icons.Filled.Refresh, "refresh all", tint = PRIMARY)
             }
         }
@@ -1486,8 +1670,8 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
                 }
             }
             Fld("Subscription URL (https://…)", url) { url = it }; Fld("Name (optional)", name) { name = it }
-            Button(onClick = { if (url.isNotBlank()) { val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim()); store.subs.add(sub); store.saveSubs(); url = ""; name = ""; refresh(sub) } }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Add & fetch") }
-            if (msg.isNotEmpty()) Text(msg, color = if (msg.startsWith("Error")) BAD else PRIMARY, fontSize = 12.sp)
+            Button(onClick = { if (url.isNotBlank()) { val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim()); store.subs.add(sub); store.saveSubs(); url = ""; name = ""; refresh(sub) } }, modifier = Modifier.fillMaxWidth()) { Text("Add & fetch") }
+            if (note.first.isNotEmpty()) Text(note.first, color = if (note.second) BAD else PRIMARY, fontSize = 12.sp)
             Spacer(Modifier.height(8.dp))
             if (store.subs.isEmpty()) EmptyHint("No subscriptions yet.")
             store.subs.forEach { sub ->
@@ -1500,6 +1684,11 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
                             Text(
                                 "${sub.serverCount} servers" + if (sub.lastUpdated > 0) " · updated ${fmtAgo(System.currentTimeMillis() - sub.lastUpdated)}" else " · never updated",
                                 color = MUTED, fontSize = 11.sp, fontFamily = MONO
+                            )
+                            // The last attempt failed (its servers were kept): say when and why.
+                            if (sub.lastError.isNotEmpty() && sub.lastTried > 0) Text(
+                                "last try ${fmtAgo(System.currentTimeMillis() - sub.lastTried)}: ${sub.lastError}",
+                                color = BAD, fontSize = 11.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis
                             )
                             if (sub.total > 0) {
                                 val used = sub.upload + sub.download
@@ -1514,7 +1703,10 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
                                 Text(if (daysLeft >= 0) "$daysLeft days left" else "Expired", color = if (daysLeft < 0) BAD else if (daysLeft <= 3) AMBER else MUTED, fontSize = 11.sp)
                             }
                         }
-                        IconButton(onClick = { refresh(sub) }) { Icon(Icons.Filled.Refresh, "refresh", tint = MUTED) }
+                        IconButton(onClick = { refresh(sub) }, enabled = sub.id !in busy) {
+                            if (sub.id in busy) CircularProgressIndicator(color = PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                            else Icon(Icons.Filled.Refresh, "refresh", tint = MUTED)
+                        }
                         IconButton(onClick = { store.servers.removeAll { it.subId == sub.id }; store.saveServers(); store.subs.removeAll { it.id == sub.id }; store.saveSubs(); bump() }) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD) }
                     }
                 }
@@ -1527,6 +1719,7 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
 /* ================================ POOL ================================ */
 @Composable
 private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
+    observeStore()
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         TopBar("Proxy Pool", back) {
             IconButton(onClick = { val used = usedPorts(store); var sp = 60001; while (used.contains(sp)) sp++; var hp = sp + 1; while (used.contains(hp)) hp++
@@ -1560,6 +1753,7 @@ private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 /* ================================ CHAINS ================================ */
 @Composable
 private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
+    observeStore()
     Screen("Proxy Chain", back, { IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), "Chain ${store.chains.size + 1}", emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) } }) {
         if (store.chains.isEmpty()) EmptyHint("No chains yet.")
         store.chains.toList().forEachIndexed { idx, c ->
@@ -1584,6 +1778,7 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 @Composable
 private fun RoutingScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     val ctx = LocalContext.current
+    observeStore()
     var s by remember { mutableStateOf(store.settings) }
     // Without geoip.dat/geosite.dat the core drops every geo rule, so the two
     // bypass modes and Block ads would do exactly nothing. Show that instead.
@@ -1692,7 +1887,12 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 
 @Composable private fun AppPicker(selected: List<String>, onChange: (List<String>) -> Unit) {
     val ctx = LocalContext.current
-    val apps = remember { runCatching { val pm = ctx.packageManager; pm.getInstalledApplications(0).filter { pm.getLaunchIntentForPackage(it.packageName) != null }.map { it.packageName to pm.getApplicationLabel(it).toString() }.sortedBy { it.second } }.getOrElse { emptyList() } }
+    // Never IRNetFree itself: the app is excluded from its own tunnel so the
+    // core's sockets can leave the device, and "only these apps" with it on the
+    // list would route the core's own traffic back into the core.
+    val apps = remember { runCatching { val pm = ctx.packageManager; pm.getInstalledApplications(0).filter { it.packageName != ctx.packageName && pm.getLaunchIntentForPackage(it.packageName) != null }.map { it.packageName to pm.getApplicationLabel(it).toString() }.sortedBy { it.second } }.getOrElse { emptyList() } }
+    // ...and a list saved before it was hidden here loses it, since it can no longer be unticked
+    LaunchedEffect(Unit) { if (ctx.packageName in selected) onChange(selected - ctx.packageName) }
     var q by remember { mutableStateOf("") }
     OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search apps") }, singleLine = true, colors = tfColors())
     Column {

@@ -20,6 +20,13 @@ object Fastest {
     const val SHORTLIST = 3
 
     /**
+     * When none of the shortlist carried anything, the next handshakes in line
+     * are tried as well — up to this many real round trips in all, each of them
+     * a throwaway core, before ⚡ gives up and says so.
+     */
+    const val MAX_TRIES = 6
+
+    /**
      * One server's measurements, in milliseconds. `tcp` is the handshake to the
      * server's own address; `real` is an HTTP round trip THROUGH it. Either may
      * be null (never measured) or negative (measured, did not answer).
@@ -27,18 +34,23 @@ object Fastest {
     data class Measured(val id: String, val tcp: Long? = null, val real: Long? = null)
 
     /**
-     * What a server is ranked by — lower wins, null means it is not a candidate
-     * at all because nothing about it ever answered.
+     * What a server is ranked by — lower wins, null means it is not a candidate:
+     * nothing about it ever answered, or its real round trip was tried and failed.
      *
      * A REAL round trip beats a handshake however slow it is. A dead exit will
      * still complete a TCP handshake in 40 ms and then carry nothing, and that is
      * precisely the server this feature must not hand somebody. The desktop
      * writes that rule as a band: everything that only managed a handshake is
      * scored 100000 + ms, above every server that actually carried a request.
+     *
+     * And a round trip that was MEASURED as failing disqualifies outright. It
+     * used to fall back into the handshake band, so when all three of the
+     * shortlist failed, the quickest handshake — one of the three that had just
+     * failed — won, and ⚡ connected to a server it had measured as dead.
      */
     fun score(m: Measured): Long? {
-        val real = m.real?.takeIf { it >= 0 }
-        if (real != null) return real
+        val real = m.real
+        if (real != null) return real.takeIf { it >= 0 }
         val tcp = m.tcp?.takeIf { it >= 0 } ?: return null
         return 100_000 + tcp
     }
@@ -54,4 +66,26 @@ object Fastest {
      */
     fun shortlist(all: List<Measured>, n: Int = SHORTLIST): List<Measured> =
         all.filter { (it.tcp ?: -1L) >= 0L }.sortedBy { it.tcp }.take(n)
+
+    /**
+     * The real round trips, in handshake order: the [want] quickest handshakes
+     * first, as always; if not one of them carried anything, the next ones in
+     * line, one at a time, until one does — never more than [maxTries] in all.
+     * Returns every server it TRIED, with its `real` filled in (a failure is
+     * negative), so [pick] over the result can only ever name a server that
+     * really carried a request, and null means none of them did.
+     *
+     * `real` measures one server; inline, so the caller's measuring may suspend.
+     */
+    inline fun walk(all: List<Measured>, want: Int = SHORTLIST, maxTries: Int = MAX_TRIES, real: (index: Int, m: Measured) -> Long): List<Measured> {
+        val tried = ArrayList<Measured>()
+        var carried = 0
+        for (m in shortlist(all, Int.MAX_VALUE)) {
+            if (tried.size >= maxTries || (tried.size >= want && carried > 0)) break
+            val ms = real(tried.size, m)
+            tried.add(m.copy(real = ms))
+            if (ms >= 0) carried++
+        }
+        return tried
+    }
 }
