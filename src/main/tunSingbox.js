@@ -157,6 +157,7 @@ const { buildMacSetupScript, buildMacTeardownScript } = require('./macTunScripts
 // Keep overlapping Connect/Disconnect calls from recovering another live
 // instance's session in this process. Crash recovery starts with an empty map.
 const macOwners = require('./macSessionLock');
+const macOwner = require('./macSessionOwner');
 
 /** Race a promise against a deadline; the timer never outlives the race. */
 function withTimeout(promise, ms, fallback) {
@@ -190,6 +191,7 @@ class TunSingbox {
     this.userData = opts.userData || null;
     this.onUnexpectedExit = opts.onUnexpectedExit || (() => {});
     this.macOwnerKey = this.userData ? path.resolve(this.userData) : this;
+    this.probe = opts.probe || macOwner.defaultProbe;   // who owns a journal / is a pid alive (macSessionOwner.js)
   }
 
   /** Pick the message in the user's language (fa default). */
@@ -475,7 +477,8 @@ class TunSingbox {
     const teardownPath = path.join(work, 'teardown.sh');
     // Pre-create root-written output files as the app user so they remain readable.
     for (const file of [logFile, pidFile, devFile, identityFile]) fs.writeFileSync(file, '', { mode: 0o600 });
-    this.macState = { work, bin, cfgFile, logFile, pidFile, devFile, identityFile, dnsFile, service, savedDns, macPid: null, dev: '', ownerPid: process.pid };
+    const owner = await macOwner.ownerRecord(this.probe);   // pid + start time: a reused pid is not us
+    this.macState = { work, bin, cfgFile, logFile, pidFile, devFile, identityFile, dnsFile, service, savedDns, macPid: null, dev: '', ...owner };
     this.saveMacSession();
     fs.writeFileSync(teardownPath, buildMacTeardownScript(this.macState), { mode: 0o700 });
     fs.writeFileSync(setupPath, buildMacSetupScript({
@@ -562,12 +565,8 @@ class TunSingbox {
       if (!fs.existsSync(file)) continue;
       if (fs.lstatSync(file).isSymbolicLink()) throw new Error('Invalid tunnel recovery journal');
       const st = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (Number.isInteger(st.ownerPid) && st.ownerPid > 1 && st.ownerPid !== process.pid) {
-        try {
-          process.kill(st.ownerPid, 0);
-          throw new Error('Another application instance may own this tunnel; close it before recovery');
-        } catch (e) { if (e.code !== 'ESRCH') throw e; }
-      }
+      // The pid AND its start time: after a reboot the old pid is someone else's.
+      if (await macOwner.ownerAlive(st, this.probe)) throw new Error('Another application instance may own this tunnel; close it before recovery');
       // Reject redirected artifacts before writing or deleting anything.
       if (path.resolve(st.work || '') !== work || !Array.isArray(st.savedDns) || typeof st.bin !== 'string') throw new Error('Invalid tunnel recovery session');
       for (const key of ['cfgFile', 'logFile', 'pidFile', 'devFile', 'identityFile', 'dnsFile']) {
