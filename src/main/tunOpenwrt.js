@@ -29,8 +29,15 @@
  * Fail-closed on a dead core, fail-open on a dead sing-box: routes into the
  * TUN survive an Xray crash (traffic stops, nothing leaks); a sing-box crash
  * removes its own routes and the LAN goes direct until the service's recovery
- * rebuilds it. A kill switch that closes that window is deliberately not in
- * this version (spec §9).
+ * rebuilds it. This class watches for that exit itself (`active` follows
+ * sing-box, `onUnexpectedExit` tells the service); the service watches Xray.
+ * A kill switch that closes the window is deliberately not in this version
+ * (spec §9).
+ *
+ * One ordering rule on the way down: rule 8998 goes only once the IRNetFree
+ * device is gone. Harmless without sing-box, it is what keeps the router's own
+ * LAN replies off a split table 2022 — deleting it under a live one is the
+ * v1.13.2 outage again.
  */
 const fs = require('fs');
 const os = require('os');
@@ -50,14 +57,27 @@ const SINGBOX_TABLE = 2022;
  * gateway that was about to be fine.
  */
 const VERIFY_WAIT_MS = 15000;
+/** How long the IRNetFree device gets to disappear after sing-box is told to stop. */
+const LINK_GONE_WAIT_MS = 5000;
 
 function defaultWhich(name) {
   return String(process.env.PATH || '').split(path.delimiter).some(d => d && fs.existsSync(path.join(d, name)));
 }
 
+/** Block the thread for `ms` — only for the exit hook, where nothing can be awaited. */
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no wait: poll faster */ }
+}
+
 class TunOpenwrt {
   constructor(opts = {}) {
-    this.inner = opts.inner || new TunSingbox(opts);
+    // The inner backend is built WITHOUT the caller's onUnexpectedExit: this
+    // class reports sing-box's exit itself (watchInner), and a pass-through
+    // would fire twice once TunSingbox reports its own exits.
+    const innerOpts = Object.assign({}, opts);
+    delete innerOpts.onUnexpectedExit;
+    this.inner = opts.inner || new TunSingbox(innerOpts);
+    this.onUnexpectedExit = opts.onUnexpectedExit || (() => {});
     this.run = opts.run || platform.run;
     this.runSync = opts.runSync || ((cmd, args) => execFileSync(cmd, args, { stdio: 'ignore', timeout: 5000 }));
     this.writeFile = opts.writeFile || ((p, text) => fs.writeFileSync(p, text, { mode: 0o600 }));
@@ -67,6 +87,7 @@ class TunOpenwrt {
     this.lang = opts.lang || 'fa';
     this.tmpDir = opts.tmpDir || os.tmpdir();
     this.verifyWaitMs = opts.verifyWaitMs || VERIFY_WAIT_MS;
+    this.linkWaitMs = opts.linkWaitMs || LINK_GONE_WAIT_MS;
 
     this.backendId = 'openwrt';
     this.managesDns = true;
@@ -80,6 +101,8 @@ class TunOpenwrt {
     this.lanIf = 'br-lan';
     this.probe = null;         // a LAN client address for the route check in verify()
     this.mark = net.BYPASS_MARK;
+    this.laid = false;         // our table / rules may be in the kernel
+    this.watchGen = 0;         // bumped by every exit we cause: only a newer watch may report
   }
 
   msg(fa, en) { return this.lang === 'en' ? en : fa; }
@@ -155,9 +178,81 @@ class TunOpenwrt {
   }
 
   async rollback() {
+    this.watchGen++;
+    const proc = this.inner.proc || null;
     try { await this.inner.stop(); } catch { /* best effort */ }
-    await this.delRules();
+    await this.unlay(proc);
+  }
+
+  /** Resolves true once `ip link show IRNetFree` fails (no device), false at the deadline. */
+  async linkGone(ms) {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      try { await this.run('ip', ['link', 'show', this.interfaceName]); } catch { return true; }
+      if (Date.now() >= deadline) return false;
+      await platform.delay(200);
+    }
+  }
+
+  linkGoneSync(ms) {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      try { this.runSync('ip', ['link', 'show', this.interfaceName]); } catch { return true; }
+      if (Date.now() >= deadline) return false;
+      sleepSync(100);
+    }
+  }
+
+  /**
+   * Our rules and table, removed — the rules only once sing-box's device is
+   * gone (see the header). A sing-box that outlives its SIGTERM gets a SIGKILL
+   * first; a device that still will not go keeps our rules, which the next
+   * start (or the next service start) clears.
+   */
+  async unlay(proc) {
+    let gone = await this.linkGone(this.linkWaitMs);
+    if (!gone && proc) {
+      try { proc.kill('SIGKILL'); } catch { /* gone meanwhile */ }
+      gone = await this.linkGone(this.linkWaitMs);
+    }
+    if (gone) await this.delRules();
+    else this.onLog(`The ${this.interfaceName} device is still there after sing-box was stopped — the router's rules stay until it is gone (harmless without sing-box; the next start clears them)`, 'error');
     await this.deleteTable();
+    this.laid = !gone;
+    return gone;
+  }
+
+  /**
+   * At service start: what a killed service left behind (our rules, our
+   * table — the QUIC refusal among them) goes, once no IRNetFree device is
+   * left. The caller has already ended its orphaned cores.
+   */
+  clearLeftovers() {
+    this.laid = true;
+    return this.unlay(null);
+  }
+
+  /**
+   * sing-box dying on its own (OOM, a panic) takes its routes with it: the LAN
+   * goes direct while everything above still says "gateway up". `active`
+   * follows the inner's liveness and the service is told, so it can rebuild.
+   * An exit this class caused (stop, rollback, exit hook) bumped the
+   * generation first and is not reported.
+   */
+  watchInner() {
+    const gen = ++this.watchGen;
+    const exited = this.inner.exited;
+    if (!exited || typeof exited.then !== 'function') return;
+    exited.then((info) => {
+      if (gen !== this.watchGen || !this.active || this.inner.active) return;
+      this.active = false;
+      this.excludeIps = [];
+      const why = (info && info.error) || `code=${info && info.code != null ? info.code : '-'} signal=${(info && info.signal) || '-'}`;
+      this.onLog(`Gateway down: sing-box exited on its own (${why}) — the LAN goes direct until the tunnel is rebuilt`, 'error');
+      try {
+        this.onUnexpectedExit(new Error(this.msg(`sing-box گیت‌وی بسته شد (${why})`, `the gateway's sing-box exited (${why})`)));
+      } catch (e) { this.onLog('Gateway recovery: ' + e.message, 'error'); }
+    }, () => { /* never rejects; nothing to report if it does */ });
   }
 
   /* ----------------------------- public API ----------------------------- */
@@ -178,6 +273,7 @@ class TunOpenwrt {
     this.macs = net.validMacs(o.bypassMacs);
     this.blockQuic = !!o.blockQuic;
     let step = 'nft';
+    this.laid = true;
     try {
       await this.applyTable(this.macs);
       step = 'ip rule';
@@ -197,6 +293,7 @@ class TunOpenwrt {
     }
     this.active = true;
     this.excludeIps = this.inner.excludeIps;
+    this.watchInner();
     this.onLog(`Gateway up on ${this.lanIf}: every device behind the router goes through the tunnel; ${this.macs.length} excluded by MAC`, 'info');
   }
 
@@ -216,25 +313,37 @@ class TunOpenwrt {
     this.onLog(`Gateway: QUIC (UDP 443) from the LAN is ${this.blockQuic ? 'refused — browsers use TCP' : 'allowed'}`, 'info');
   }
 
+  /** Also after sing-box died on its own: our rules and table are still there then. */
   async stop() {
-    if (!this.active && !this.inner.active) return;
+    if (!this.active && !this.inner.active && !this.laid) return;
+    this.watchGen++;            // the exit from here on is one we asked for
     this.active = false;
     this.excludeIps = [];
+    const proc = this.inner.proc || null;
     try { await this.inner.stop(); }
-    finally {
-      await this.delRules();
-      await this.deleteTable();
-    }
+    finally { await this.unlay(proc); }
     this.onLog('Gateway stopped: the LAN goes direct.', 'info');
   }
 
-  /** Synchronous best effort for process exit. */
+  /** Synchronous best effort for process exit — the same order: sing-box, its device gone, then our rules. */
   cleanupSync() {
+    if (!this.active && !this.inner.active && !this.laid && !this.inner.proc) return;
+    this.watchGen++;
+    const proc = this.inner.proc || null;
     try { this.inner.cleanupSync(); } catch { /* best effort */ }
-    for (const args of this.ruleSets('del')) {
-      for (let i = 0; i < 4; i++) { try { this.runSync('ip', args); } catch { break; } }
+    let gone = this.linkGoneSync(this.linkWaitMs);
+    if (!gone && proc) {
+      try { proc.kill('SIGKILL'); } catch { /* gone meanwhile */ }
+      gone = this.linkGoneSync(1000);
+    }
+    if (gone) {
+      for (const args of this.ruleSets('del')) {
+        for (let i = 0; i < 4; i++) { try { this.runSync('ip', args); } catch { break; } }
+      }
     }
     try { this.runSync('nft', ['delete', 'table', 'inet', 'irnetfree']); } catch { /* not there */ }
+    this.active = false;
+    this.laid = !gone;
   }
 }
 

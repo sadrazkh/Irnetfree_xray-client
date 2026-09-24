@@ -72,6 +72,8 @@ function buildIpk({ root = ROOT, outDir = path.join(ROOT, 'dist'), version, mtim
   file('etc/init.d/irnetfree', F('irnetfree.init'), 0o755, LF);
   file('etc/config/irnetfree', F('irnetfree.config'), 0o644, LF);
   file('etc/uci-defaults/99-irnetfree', F('99-irnetfree.defaults'), 0o755, LF);
+  // run by the uci-defaults script and by the init script (see the file)
+  file(`${PREFIX}/fw-forwardings.sh`, F('fw-forwardings.sh'), 0o755, LF);
   file('usr/share/luci/menu.d/luci-app-irnetfree.json', F('luci/menu.json'), 0o644, LF);
   file('usr/share/rpcd/acl.d/luci-app-irnetfree.json', F('luci/acl.json'), 0o644, LF);
   file('www/luci-static/resources/view/irnetfree.js', F('luci/irnetfree.js'), 0o644, LF);
