@@ -35,6 +35,15 @@ test('arguments and quotes survive; the pid is a number, never text', () => {
   }
 });
 
+test('the copy starts in the working directory of this one, and an empty argument survives', () => {
+  // the dev relaunch (`electron .`) resolves '.' against the cwd — an elevated
+  // PowerShell starts in System32, where there is no app
+  const inner = decode(elevatedRelaunchScript({ exe: 'C:\\e\\electron.exe', args: ['.', ''], pid: 7, cwd: "D:\\Bob's app" }));
+  assert.match(inner, /Start-Process -FilePath 'C:\\e\\electron\.exe' -WorkingDirectory 'D:\\Bob''s app' -ArgumentList '\.','""'$/,
+    'Start-Process refuses an empty element; the literal "" reads as an empty argument on the other side');
+  assert.doesNotMatch(decode(elevatedRelaunchScript({ exe: 'a.exe', args: [], pid: 7 })), /-WorkingDirectory/, 'none given, none passed');
+});
+
 test('an accepted prompt resolves; a cancelled one rejects — and the caller tears nothing down', async () => {
   const calls = [];
   await runElevatedRelaunch({ exe: 'a.exe', args: [], pid: 1 }, async (cmd, args) => { calls.push([cmd, args]); return ''; });

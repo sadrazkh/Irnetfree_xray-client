@@ -2185,7 +2185,7 @@ function registerIpc() {
     //    copy. A cancelled prompt fails here, and the app — connected or not —
     //    simply keeps running as it was.
     try {
-      await runElevatedRelaunch({ exe: process.execPath, args: process.argv.slice(1), pid: process.pid });
+      await runElevatedRelaunch({ exe: process.execPath, args: process.argv.slice(1), pid: process.pid, cwd: process.cwd() });
     } catch (e) {
       send('log', { line: 'Relaunch as administrator did not happen (' + e.message + ') — IRNetFree keeps running as it is', level: 'warn' });
       return { ok: false, error: null };
