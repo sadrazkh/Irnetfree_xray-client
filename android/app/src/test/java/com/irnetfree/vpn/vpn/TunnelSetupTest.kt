@@ -12,6 +12,9 @@ import org.junit.Assert.fail
 import org.junit.Test
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * The parts of bringing the tunnel up that do not need a device: which apps
@@ -50,6 +53,38 @@ class TunnelSetupTest {
         // A single-quoted YAML scalar ends at the first lone ' — doubled, it is one quote.
         val y = TunnelSetup.tun2socksYaml(10808, LocalAuth("it's", "p'w''"), mtu = 1500, ipv4 = "172.19.0.1", ipv6 = null)
         assertTrue(y, y.contains("  username: 'it''s'\n  password: 'p''w'''''\n"))
+    }
+
+    @Test fun aStartADisconnectOvertookShowsNothingAndLeavesNotConnected() {
+        val g = Generation()
+        val start = g.next()          // an unattended start takes its generation…
+        g.stop()                      // …and a disconnect overtakes it before it shows anything
+        var shown = false
+        assertFalse(g.ifCurrent(start) { shown = true }); assertFalse(shown)
+        assertTrue(g.stopLatest)      // nothing pending: a "Connecting…" still up is nobody's
+        val connect = g.next()        // a connect asked for after it owns the screen
+        assertFalse(g.stopLatest)
+        assertTrue(g.ifCurrent(connect) { shown = true }); assertTrue(shown)
+    }
+
+    @Test fun aDisconnectCannotSlipBetweenTheCheckAndTheConnecting() {
+        val g = Generation()
+        val start = g.next()
+        val order = Collections.synchronizedList(ArrayList<String>())
+        val inside = CountDownLatch(1); val release = CountDownLatch(1)
+        val starter = Thread { g.ifCurrent(start) { inside.countDown(); release.await(2, TimeUnit.SECONDS); order.add("connecting") } }
+        starter.start()
+        assertTrue(inside.await(2, TimeUnit.SECONDS))
+        // The disconnect arrives while the start is between its check and its
+        // "Connecting…"; the service sets Not connected once stop() returns.
+        val stopper = Thread { g.stop(); order.add("stopped") }
+        stopper.start()
+        stopper.join(300)
+        release.countDown()
+        starter.join(2000); stopper.join(2000)
+        // "Connecting…" never lands after the stop — it would stay up for good.
+        assertEquals(listOf("connecting", "stopped"), order.toList())
+        assertTrue(g.stopLatest)
     }
 
     @Test fun aCrashLoopBacksOffAndKeepsTrying() {

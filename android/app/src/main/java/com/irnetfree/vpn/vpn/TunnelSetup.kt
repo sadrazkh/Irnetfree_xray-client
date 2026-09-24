@@ -4,6 +4,7 @@ import com.irnetfree.vpn.core.LocalAuth
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The pure parts of bringing the tunnel up, kept out of the VpnService so the
@@ -41,6 +42,25 @@ object TunnelSetup {
         if (auth != null) append("  username: '${q(auth.user)}'\n  password: '${q(auth.pass)}'\n")
         append("misc:\n  task-stack-size: 20480\n  connect-timeout: 5000\n  read-write-timeout: 60000\n  log-level: warn\n")
     }
+}
+
+class Generation {
+    private val value = AtomicLong(0)
+    @Volatile private var stopped = -1L
+
+    fun get(): Long = value.get()
+
+    fun next(): Long = value.incrementAndGet()
+
+    fun stop(): Long = value.incrementAndGet().also { stopped = it }
+
+    fun ifCurrent(gen: Long, show: () -> Unit): Boolean {
+        if (gen != value.get()) return false
+        show()
+        return true
+    }
+
+    val stopLatest: Boolean get() = value.get() == stopped
 }
 
 /**
