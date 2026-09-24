@@ -447,6 +447,65 @@ test('refresh: a netsh listing that still names the holds costs no PowerShell; a
   assert.equal(ps(), p + 2);
 });
 
+/**
+ * An adapter that comes up mid-session and that netWatcher does not treat as a
+ * network change (a phone tethered over Bluetooth PAN is on its ignore list; so
+ * is everything when auto-reconnect is off) used to wait for the tenth tick —
+ * five minutes of every name going to its resolver. netsh lists it on the next
+ * cheap tick; a resolver of its own on an alias nobody owns is what the
+ * PowerShell snapshot exists to find.
+ */
+test('refresh (win32): an adapter nobody owns showing a resolver of its own takes the snapshot on the next cheap tick', async () => {
+  let v4 = HELD_V4, v6 = HELD_V6, snapshot = WIN_SNAP;
+  const h = harness('win32', (cmd, args) => {
+    if (cmd === 'netsh') return args[1] === 'ipv6' ? v6 : v4;
+    return /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '';
+  });
+  const { token } = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  const ps = () => h.calls.filter(c => c.cmd === 'powershell').length;
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true },
+    'our own TUN listing its peer, and an adapter with no resolver, are nothing new');
+
+  const tether = netshBlock('Bluetooth Network Connection 2', 'DNS servers configured through DHCP', ['192.168.44.1']);
+  v4 = HELD_V4 + '\r\n' + tether;
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Bluetooth Network Connection 2', v4: ['192.168.44.1'], v6: [], has4: true, has6: false, dhcp4: true, dhcp6: true }
+  ]);
+  let p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
+  assert.equal(ps(), p + 2, 'snapshot + apply, on a cheap tick');
+  assert.deepEqual(h.state().win.adapters.at(-1).v4, ['192.168.44.1'], 'its own resolver recorded before it is touched');
+  assert.deepEqual(written(h.calls.at(-1).script), [{ alias: 'Bluetooth Network Connection 2', addr: HOLD4 }]);
+
+  // held now, and owned: the next tick is cheap again
+  v4 = HELD_V4 + '\r\n' + netshBlock('Bluetooth Network Connection 2', 'Statically Configured DNS Servers', [HOLD4]);
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Bluetooth Network Connection 2', v4: [HOLD4], v6: [], has4: true, has6: false }
+  ]);
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
+  assert.equal(ps(), p);
+
+  // another VPN's tunnel: looked at once, left alone, never looked at again
+  v4 += '\r\n' + netshBlock('OpenVPN TAP-Windows6', 'Statically Configured DNS Servers', ['10.8.0.1']);
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0 });
+  assert.equal(ps(), p + 1, 'one snapshot, which does not list it');
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
+  assert.equal(ps(), p);
+
+  // Windows' fec0:0:0:ffff::1-3 placeholders are "no resolver configured"
+  v6 = HELD_V6 + '\r\n' + netshBlock('vEthernet (WSL)', 'DNS servers configured through DHCP', ['fec0:0:0:ffff::1%1', 'fec0:0:0:ffff::2%1']);
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
+  assert.equal(ps(), p);
+});
+
 test('mac refresh preserves original DNS and changes only drifted services', async () => {
   let snapshot = 'Wi-Fi\t192.168.1.1\n';
   const h = harness('darwin', cmd => cmd === '/bin/bash' ? snapshot : '');
