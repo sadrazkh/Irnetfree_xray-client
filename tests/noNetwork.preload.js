@@ -13,6 +13,7 @@
  * wrappers, and whatever it lets fall through lands back here.
  */
 const cp = require('child_process');
+const os = require('os');
 const { EventEmitter } = require('events');
 
 const BLOCKED = new Set([
@@ -29,7 +30,31 @@ function commandName(cmd) {
   const first = String(cmd == null ? '' : cmd).trim().split(/\s+/)[0] || '';
   return first.split(/[\\/]/).pop().replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
 }
-const blocked = (cmd) => BLOCKED.has(commandName(cmd));
+
+/**
+ * A shell handed one of OUR privileged script files — leakGuard's
+ * `irnf-lg-*` restore scripts, the TUN backends' `irnf-sb-*` / mac-tun-sessions
+ * setup and teardown — runs routes, pf and networksetup as whoever runs the
+ * test. Recognised by where they live (the temp dir, or a path of ours); a
+ * `-n` syntax check executes nothing and a script in the repo is not ours.
+ */
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash']);
+const norm = (p) => String(p).replace(/\\/g, '/').toLowerCase();
+const TMP = norm(os.tmpdir()).replace(/\/+$/, '') + '/';
+function privilegedScript(cmd, args) {
+  if (!SHELLS.has(commandName(cmd))) return false;
+  const list = (Array.isArray(args) ? args : []).map(String);
+  if (list.includes('-n')) return false;
+  return list.some((a) => /\.sh$/i.test(a) && (norm(a).startsWith(TMP) || /mac-tun-sessions|\/irnf-/.test(norm(a))));
+}
+
+/** The command (and its argv, or the words of a shell command line) is one no test may run. */
+function blocked(cmd, args) {
+  if (BLOCKED.has(commandName(cmd))) return true;
+  if (Array.isArray(args)) return privilegedScript(cmd, args);
+  const words = String(cmd == null ? '' : cmd).trim().split(/\s+/);
+  return privilegedScript(words[0], words.slice(1));
+}
 const refusal = (cmd) => Object.assign(new Error(`tests/noNetwork.preload.js: a test tried to run the real "${commandName(cmd)}" — fake it`), { code: 'EIRNF_GUARD' });
 
 function failedChild(cmd) {
@@ -39,6 +64,8 @@ function failedChild(cmd) {
   child.stdin = { write() {}, end() {} };
   child.pid = undefined;
   child.kill = () => false;
+  child.unref = () => child;
+  child.ref = () => child;
   // 'error' only to someone listening: execFile/exec already answered through
   // the callback, and an unheard 'error' would crash the test process instead
   process.nextTick(() => {
@@ -51,28 +78,33 @@ function failedChild(cmd) {
 
 const real = {};
 for (const fn of ['execFile', 'execFileSync', 'spawn', 'spawnSync', 'exec', 'execSync']) real[fn] = cp[fn];
+const argvOf = (rest) => (Array.isArray(rest[0]) ? rest[0] : []);
 
 cp.execFile = function (cmd, ...rest) {
-  if (!blocked(cmd)) return real.execFile.call(this, cmd, ...rest);
-  const cb = rest.reverse().find((a) => typeof a === 'function');
+  if (!blocked(cmd, argvOf(rest))) return real.execFile.call(this, cmd, ...rest);
+  const cb = [...rest].reverse().find((a) => typeof a === 'function');
   process.nextTick(() => { if (cb) cb(refusal(cmd), '', ''); });
   return failedChild(cmd);
 };
 cp.exec = function (command, ...rest) {
   if (!blocked(command)) return real.exec.call(this, command, ...rest);
-  const cb = rest.reverse().find((a) => typeof a === 'function');
+  const cb = [...rest].reverse().find((a) => typeof a === 'function');
   process.nextTick(() => { if (cb) cb(refusal(command), '', ''); });
   return failedChild(command);
 };
 cp.spawn = function (cmd, ...rest) {
-  return blocked(cmd) ? failedChild(cmd) : real.spawn.call(this, cmd, ...rest);
+  return blocked(cmd, argvOf(rest)) ? failedChild(cmd) : real.spawn.call(this, cmd, ...rest);
 };
-for (const fn of ['execFileSync', 'spawnSync', 'execSync']) {
+for (const fn of ['execFileSync', 'spawnSync']) {
   cp[fn] = function (cmd, ...rest) {
-    if (blocked(cmd)) throw refusal(cmd);
+    if (blocked(cmd, argvOf(rest))) throw refusal(cmd);
     return real[fn].call(this, cmd, ...rest);
   };
 }
+cp.execSync = function (command, ...rest) {
+  if (blocked(command)) throw refusal(command);
+  return real.execSync.call(this, command, ...rest);
+};
 for (const fn of Object.keys(real)) cp[fn].irnfGuard = true;
 
-module.exports = { BLOCKED, commandName };
+module.exports = { BLOCKED, commandName, blocked };
