@@ -13,9 +13,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts } = require('../src/main/configBuilder');
 const {
-  settings, ruleTags, outboundTagged, vlessWithMarkers,
+  server, settings, ruleTags, outboundTagged, vlessWithMarkers,
   VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK, WG_CORP
 } = require('./fixtures');
 
@@ -333,17 +333,40 @@ test('advanced: a one-member chain collapses to a single outbound', () => {
   assert.deepEqual(c.outbounds.map(o => o.tag), ['out-chain-solo', 'direct', 'block']);
 });
 
-test('advanced: unknown / empty targets fall back to direct', () => {
+// A target that no longer exists (a server deleted, or replaced by a
+// subscription refresh; a chain removed or emptied) used to route `direct`:
+// "connected" with the traffic it was meant to protect leaving in the clear.
+test('advanced: a rule whose target no longer exists is skipped — its traffic follows the default', () => {
   const c = buildConfig(advancedPlan({
+    chainsById: { c1: [VLESS_WS_TLS, TROJAN_TCP_TLS], emptied: [] },
     rules: [
       { type: 'domain', value: 'x.com', target: 'no-such-server' },
       { type: 'domain', value: 'y.com', target: 'chain:missing' },
+      { type: 'domain', value: 'w.com', target: 'chain:emptied' },
+      { type: 'domain', value: 'v.com', target: 'chain' },          // the legacy chain, empty here
       { type: 'domain', value: 'z.com', target: 'block' }
     ],
-    def: 'also-missing'
+    def: 'sv-vless'
   }), settings({ blockAds: false }));
 
-  assert.deepEqual(ruleTags(c), ['direct', 'direct', 'block', 'direct', 'direct']);
+  assert.deepEqual(ruleTags(c), ['block', 'direct', 'out-sv-vless']);
+  assert.deepEqual(c.routing.rules[0].domain, ['z.com']);
+  assert.equal(c.routing.rules.some(r => r.domain && r.domain.some(d => /^[xywv]\.com$/.test(d))), false);
+  assert.deepEqual(c.outbounds.map(o => o.tag), ['out-sv-vless', 'direct', 'block']);
+});
+
+test('advanced: an empty rule target is still direct, and direct / block defaults are untouched', () => {
+  const c = buildConfig(advancedPlan({ rules: [{ type: 'domain', value: 'x.com', target: '' }], def: 'direct' }), settings({ blockAds: false }));
+  assert.deepEqual(ruleTags(c), ['direct', 'direct', 'direct']);
+  assert.equal(buildConfig(advancedPlan({ def: 'block' }), settings({ blockAds: false })).routing.rules.at(-1).outboundTag, 'block');
+});
+
+test('advanced: a default that no longer exists is an error, never a silent direct', () => {
+  for (const def of ['also-missing', 'chain:missing', 'chain:emptied', 'chain']) {
+    const plan = advancedPlan({ chainsById: { emptied: [] }, def });
+    assert.throws(() => buildConfig(plan, settings({ lang: 'en' })), /default target .*no longer exists/i, def);
+    assert.throws(() => buildConfig(plan, settings({ lang: 'fa' })), /پیش‌فرض/, def + ' (fa)');
+  }
 });
 
 test('advanced: rules with no usable values are skipped entirely', () => {
@@ -604,11 +627,17 @@ test('buildTestConfig: single server on a throwaway socks port', () => {
     settings: { auth: 'noauth', udp: false }
   });
   assert.deepEqual(c.outbounds.map(o => o.tag), ['proxy', 'direct']);
+  assert.deepEqual(c.routing, { rules: [{ type: 'field', inboundTag: ['socks-in'], outboundTag: 'proxy' }] });
 });
 
 test('buildTestConfig: a chain target is measured end to end', () => {
   const c = buildTestConfig([VLESS_WS_TLS, TROJAN_TCP_TLS], 47124);
   assert.deepEqual(c.outbounds.map(o => o.tag), ['proxy-h0', 'proxy', 'direct']);
+  // With no routing the core sends everything to the FIRST outbound — the
+  // entry hop alone — so a chain with a dead exit measured green. The test
+  // inbound goes to the exit, which dials through every hop before it.
+  assert.deepEqual(c.routing, { rules: [{ type: 'field', inboundTag: ['socks-in'], outboundTag: 'proxy' }] });
+  assert.equal(outboundTagged(c, 'proxy').streamSettings.sockopt.dialerProxy, 'proxy-h0');
 });
 
 test('buildTestConfig: the fragment dialer is applied so the ping matches reality', () => {
@@ -1369,6 +1398,282 @@ test('a WireGuard peer carries whatever is routed to it, whatever its AllowedIPs
     rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'sv-wgcorp' }], def: 'sv-vless'
   }), settings());
   assert.deepEqual(outboundTagged(adv, 'out-sv-wgcorp').settings.peers[0].allowedIPs, ['0.0.0.0/0', '::/0']);
+});
+
+/* --------------------- entry servers answered from the config --------------------- */
+// With no sockopt.domainStrategy, xray asks the OPERATING SYSTEM for a server it
+// dials by name (transport/internet/dialer.go). Under TUN that resolver is the
+// tunnel itself — the Windows leak guard holds every physical adapter on
+// loopback, the router's dnsmasq forwards into the gateway — so the core's
+// question about its own server waits on that very server: a recursion only the
+// OS cache hid, and every guard apply flushes the cache. The connect resolves
+// the entry names first (entryHosts) and hands them in as `entryHostIps`; the
+// config answers them from dns.hosts and has the dialer ask xray's DNS, never
+// the OS. The NAME stays where it is — SNI, Host and REALITY read their own.
+
+const PINS = { entryHostIps: { 'a.example.com': ['203.0.113.10'], 'b.example.com': ['203.0.113.20'] } };
+const pinnedStrategy = (c) => c.outbounds.filter(o => o.streamSettings && o.streamSettings.sockopt && 'domainStrategy' in o.streamSettings.sockopt).map(o => o.tag);
+
+/** The owner's first hop: VLESS over xhttp with REALITY, addressed by name (or by `address`). */
+function xhttpReality(address) {
+  return server('sv-xhttp', 'xhttp REALITY', 'vless', address || 'edge.example.net', 443, {
+    protocol: 'vless',
+    settings: { vnext: [{ address: address || 'edge.example.net', port: 443, users: [{ id: 'uuid-x', encryption: 'none', flow: '' }] }] },
+    streamSettings: {
+      network: 'xhttp', security: 'reality',
+      xhttpSettings: { path: '/x', mode: 'auto' },
+      realitySettings: { serverName: 'www.microsoft.com', fingerprint: 'chrome', publicKey: 'pk', shortId: 'ab' }
+    }
+  });
+}
+
+test('golden guard: without entryHostIps no dns.hosts and no sockopt.domainStrategy anywhere', () => {
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const plans = [
+    single(), single(frag), single(WG_CORP),
+    { mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] },
+    advancedPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c1' }], def: 'sv-vless' }),
+    poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001, httpPort: 60002 }])
+  ];
+  for (const p of plans) {
+    for (const base of [settings(), managed(), settings(BOUND)]) {
+      const golden = JSON.stringify(buildConfig(p, base));
+      assert.equal('hosts' in buildConfig(p, base).dns, false, p.mode);
+      assert.deepEqual(pinnedStrategy(buildConfig(p, base)), [], p.mode);
+      for (const none of [{}, null, 'x', 7, { 'a.example.com': [] }, { 'a.example.com': ['not-an-ip'] }, { 'elsewhere.example': ['203.0.113.9'] }]) {
+        assert.equal(JSON.stringify(buildConfig(p, Object.assign({}, base, { entryHostIps: none }))), golden,
+          `${p.mode}: ${JSON.stringify(none)} changed the config`);
+      }
+    }
+  }
+});
+
+test('single: the server’s name is answered from dns.hosts and dialled through xray’s DNS — the name itself stays', () => {
+  const c = buildConfig(single(), settings(PINS));
+  assert.deepEqual(c.dns.hosts, { 'a.example.com': ['203.0.113.10'] }, 'only the names this config dials');
+  assert.deepEqual(sockoptOf(c, 'proxy'), { domainStrategy: 'UseIPv4' });
+  const o = outboundTagged(c, 'proxy');
+  assert.equal(o.settings.vnext[0].address, 'a.example.com', 'never the address in place of the name');
+  assert.equal(o.streamSettings.tlsSettings.serverName, 'a.example.com');
+  assert.equal(o.streamSettings.wsSettings.headers.Host, 'a.example.com');
+  // managed DNS off (the owner's mode): the user's list is kept, the hosts join it
+  assert.deepEqual(c.dns.servers, ['1.1.1.1', '8.8.8.8']);
+  assert.equal(c.dns.queryStrategy, 'UseIPv4');
+  // managed: the resolver plan is untouched around it
+  const m = buildConfig(single(), managed(PINS));
+  const plain = buildConfig(single(), managed());
+  assert.deepEqual(m.dns.hosts, { 'a.example.com': ['203.0.113.10'] });
+  const { hosts, ...rest } = m.dns;
+  assert.deepEqual(rest, plain.dns);
+  assert.deepEqual(m.routing, plain.routing);
+  assert.deepEqual(sockoptOf(m, 'direct'), {}, 'the direct outbound resolves as it always did');
+});
+
+test('every entry protocol shape: vnext, servers, and the flat address', () => {
+  const trojan = buildConfig(single(TROJAN_TCP_TLS), settings(PINS));
+  assert.deepEqual(trojan.dns.hosts, { 'b.example.com': ['203.0.113.20'] });
+  assert.equal(sockoptOf(trojan, 'proxy').domainStrategy, 'UseIPv4');
+  const ss = buildConfig(single(SS_TCP), settings({ entryHostIps: { 'c.example.com': ['203.0.113.30'] } }));
+  assert.equal(sockoptOf(ss, 'proxy').domainStrategy, 'UseIPv4');
+  const flat = server('sv-flat', 'flat', 'vless', 'f.example.com', 443,
+    { protocol: 'vless', settings: { address: 'f.example.com', port: 443, id: 'uuid-f', encryption: 'none' }, streamSettings: { network: 'tcp' } });
+  const f = buildConfig(single(flat), settings({ entryHostIps: { 'f.example.com': ['203.0.113.40'] } }));
+  assert.deepEqual(f.dns.hosts, { 'f.example.com': ['203.0.113.40'] });
+  assert.equal(sockoptOf(f, 'proxy').domainStrategy, 'UseIPv4');
+});
+
+test('IPv6: UseIP — still an IPv4 address when the name has one; an IPv6-only name only with IPv6 on', () => {
+  const both = { entryHostIps: { 'a.example.com': ['2001:db8::10', '203.0.113.10', '203.0.113.11'] } };
+  const v4 = buildConfig(single(), settings(both));
+  assert.deepEqual(v4.dns.hosts, { 'a.example.com': ['203.0.113.10', '203.0.113.11'] });
+  assert.equal(sockoptOf(v4, 'proxy').domainStrategy, 'UseIPv4');
+  const v6on = buildConfig(single(), settings(Object.assign({ ipv6: true }, both)));
+  assert.deepEqual(v6on.dns.hosts, { 'a.example.com': ['203.0.113.10', '203.0.113.11'] },
+    'the core picks one address at random with no fallback: never hand it the family a network is likelier to lack');
+  assert.equal(sockoptOf(v6on, 'proxy').domainStrategy, 'UseIP');
+
+  const only6 = { entryHostIps: { 'a.example.com': ['2001:db8::10'] } };
+  const off = buildConfig(single(), settings(only6));
+  assert.equal('hosts' in off.dns, false, 'IPv4-only DNS could never answer it: left to the OS as before');
+  assert.deepEqual(sockoptOf(off, 'proxy'), {});
+  const on = buildConfig(single(), settings(Object.assign({ ipv6: true }, only6)));
+  assert.deepEqual(on.dns.hosts, { 'a.example.com': ['2001:db8::10'] });
+  assert.equal(sockoptOf(on, 'proxy').domainStrategy, 'UseIP');
+
+  // a single address as a string, and junk beside a good one
+  const str = buildConfig(single(), settings({ entryHostIps: { 'a.example.com': '203.0.113.10' } }));
+  assert.deepEqual(str.dns.hosts, { 'a.example.com': ['203.0.113.10'] });
+  const junk = buildConfig(single(), settings({ entryHostIps: { 'a.example.com': ['a.example.com', '', null, '203.0.113.10'] } }));
+  assert.deepEqual(junk.dns.hosts, { 'a.example.com': ['203.0.113.10'] });
+});
+
+test('chain: the first hop is pinned; the hop behind it hands its name to that hop, as before', () => {
+  const c = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] }, settings(PINS));
+  assert.deepEqual(c.dns.hosts, { 'a.example.com': ['203.0.113.10'] },
+    'resolving an inner hop here would put its name on this network’s resolver');
+  assert.deepEqual(sockoptOf(c, 'proxy-h0'), { domainStrategy: 'UseIPv4' });
+  assert.deepEqual(sockoptOf(c, 'proxy'), { dialerProxy: 'proxy-h0' });
+});
+
+test('advanced: every target’s entry is pinned — a server, a chain’s first hop — and nothing behind a hop', () => {
+  const c = buildConfig(advancedPlan({
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c1' }],
+    def: 'sv-vless'
+  }), managed(PINS));
+  assert.deepEqual(c.dns.hosts, { 'b.example.com': ['203.0.113.20'], 'a.example.com': ['203.0.113.10'] });
+  assert.deepEqual(pinnedStrategy(c).sort(), ['out-chain-c1-h0', 'out-sv-trojan', 'out-sv-vless']);
+  assert.deepEqual(sockoptOf(c, 'out-chain-c1'), { dialerProxy: 'out-chain-c1-h0' });
+});
+
+test('pool: the primary and every entry are pinned', () => {
+  const c = buildConfig(poolPlan([
+    { id: 'e1', target: 'sv-trojan', socksPort: 60001 },
+    { id: 'e2', target: 'chain:c1', socksPort: 60003 }
+  ]), managed(PINS));
+  assert.deepEqual(Object.keys(c.dns.hosts).sort(), ['a.example.com', 'b.example.com']);
+  assert.deepEqual(pinnedStrategy(c).sort(), ['out-chain-c1-h0', 'out-sv-trojan', 'out-sv-vless']);
+  assert.deepEqual(sockoptOf(c, 'out-chain-c1'), { dialerProxy: 'out-chain-c1-h0' });
+});
+
+test('anti-DPI and TUN binding: the pin sits beside the dialer and the interface — and the dpi dialer resolves through xray’s DNS too', () => {
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  // The lookup happens BEFORE the dialerProxy redirect (dialer.go), so the
+  // freedom dialer is normally handed an address. When it is handed the NAME
+  // instead (a lookup that failed, a core that resolves later), an AsIs dialer
+  // asked the OS — the very recursion the pin exists for. Whichever of the two
+  // resolves first, the answer comes from dns.hosts.
+  const c = buildConfig(single(frag), settings(PINS));
+  assert.deepEqual(sockoptOf(c, 'proxy'), { dialerProxy: 'dpi-1', domainStrategy: 'UseIPv4' });
+  assert.deepEqual(sockoptOf(c, 'dpi-1'), {});
+  assert.equal(outboundTagged(c, 'dpi-1').settings.domainStrategy, 'UseIPv4');
+  assert.deepEqual(outboundTagged(c, 'dpi-1').settings.fragment, { packets: 'tlshello', length: '100-200', interval: '10-20' }, 'the dialer is otherwise the same');
+  const v6 = buildConfig(single(frag), settings(Object.assign({ ipv6: true }, PINS)));
+  assert.equal(outboundTagged(v6, 'dpi-1').settings.domainStrategy, 'UseIP');
+  const bound = buildConfig(single(frag), managed(Object.assign({}, PINS, BOUND)));
+  assert.deepEqual(sockoptOf(bound, 'proxy'), { dialerProxy: 'dpi-1', domainStrategy: 'UseIPv4' });
+  assert.deepEqual(sockoptOf(bound, 'dpi-1'), { interface: 'Wi-Fi' });
+  assert.equal(outboundTagged(bound, 'dpi-1').settings.domainStrategy, 'UseIPv4');
+  const plain = buildConfig(single(), managed(Object.assign({}, PINS, BOUND)));
+  assert.deepEqual(sockoptOf(plain, 'proxy'), { domainStrategy: 'UseIPv4', interface: 'Wi-Fi' });
+  // nothing pinned: the dialer asks as it always did
+  assert.equal(outboundTagged(buildConfig(single(frag), settings()), 'dpi-1').settings.domainStrategy, 'AsIs');
+});
+
+test('a pinned and an unpinned outbound with the same anti-DPI settings get a dialer each', () => {
+  // One shared dialer with a strategy would send the UNPINNED name to xray's
+  // own resolvers — which sit behind the very proxy it is dialling.
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const other = vlessWithMarkers('sv-other', { _fragment: 'tlshello,100-200,10-20' });
+  other.outbound.settings.vnext[0].address = 'c.example.com';   // nothing resolved it
+  const c = buildConfig(advancedPlan({
+    serversById: { 'sv-frag': frag, 'sv-other': other },
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-other' }],
+    def: 'sv-frag'
+  }), settings(PINS));
+  const pinned = sockoptOf(c, 'out-sv-frag');
+  const unpinned = sockoptOf(c, 'out-sv-other');
+  assert.equal(pinned.domainStrategy, 'UseIPv4');
+  assert.equal('domainStrategy' in unpinned, false);
+  assert.notEqual(pinned.dialerProxy, unpinned.dialerProxy);
+  assert.equal(outboundTagged(c, pinned.dialerProxy).settings.domainStrategy, 'UseIPv4');
+  assert.equal(outboundTagged(c, unpinned.dialerProxy).settings.domainStrategy, 'AsIs');
+  assert.equal(c.outbounds.filter(o => /^dpi-/.test(o.tag)).length, 2);
+  // two pinned ones still share one
+  const both = buildConfig(advancedPlan({
+    serversById: { 'sv-frag': frag, 'sv-other': other },
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-other' }],
+    def: 'sv-frag'
+  }), settings({ entryHostIps: { 'a.example.com': ['203.0.113.10'], 'c.example.com': ['203.0.113.30'] } }));
+  assert.equal(sockoptOf(both, 'out-sv-frag').dialerProxy, sockoptOf(both, 'out-sv-other').dialerProxy);
+  assert.equal(both.outbounds.filter(o => /^dpi-/.test(o.tag)).length, 1);
+});
+
+test('withHosts: the pins join whatever hosts the DNS plan carries — they never replace them, and win for their own names', () => {
+  const dns = { tag: 'dns-internal', hosts: { 'corp.local': ['10.0.0.5'], 'a.example.com': ['192.0.2.1'] }, servers: ['1.1.1.1'] };
+  const out = withHosts(dns, { 'a.example.com': ['203.0.113.10'] });
+  assert.deepEqual(out.hosts, { 'corp.local': ['10.0.0.5'], 'a.example.com': ['203.0.113.10'] });
+  assert.deepEqual(Object.keys(out), ['hosts', 'tag', 'servers'], 'hosts first, as before');
+  assert.deepEqual(dns.hosts, { 'corp.local': ['10.0.0.5'], 'a.example.com': ['192.0.2.1'] }, 'the plan itself is not written to');
+  assert.equal(withHosts(dns, null), dns, 'nothing pinned: the plan as it is');
+  assert.deepEqual(withHosts({ servers: ['1.1.1.1'] }, { 'a.example.com': ['203.0.113.10'] }),
+    { hosts: { 'a.example.com': ['203.0.113.10'] }, servers: ['1.1.1.1'] });
+});
+
+test('an address, a name nothing resolved, and a WireGuard are left exactly as they were', () => {
+  const ip = xhttpReality('198.51.100.4');
+  const c = buildConfig(single(ip), settings({ entryHostIps: { '198.51.100.4': ['198.51.100.4'] } }));
+  assert.equal('hosts' in c.dns, false);
+  assert.deepEqual(sockoptOf(c, 'proxy'), {});
+  // the peer endpoint has its own path (wgEndpointIps) and is not doubled here
+  const wg = buildConfig(single(WG_CORP), settings({ entryHostIps: { 'cobra.example': ['198.51.100.21'] }, wgEndpointIps: { 'cobra.example': '198.51.100.21' } }));
+  assert.equal('hosts' in wg.dns, false);
+  assert.deepEqual(sockoptOf(wg, 'proxy'), {});
+  assert.equal(outboundTagged(wg, 'proxy').settings.peers[0].endpoint, '198.51.100.21:42421');
+});
+
+test('the owner’s corporate chain: hosts for the xhttp hop’s name — only when it is a name', () => {
+  const plan = (xhttp) => ({
+    mode: 'advanced', chain: [],
+    serversById: { 'sv-xhttp': xhttp, 'sv-wgcorp': WG_CORP },
+    chainsById: { tes: [xhttp, WG_CORP] },
+    rules: [{ type: 'ip', value: '192.168.0.0/16, 10.0.0.0/8, 192.168.45.0/24', target: 'chain:tes' }],
+    def: 'sv-xhttp'
+  });
+  const owner = { tunMode: true, leakGuard: 'standard', killSwitch: true, systemProxy: false, routingMode: 'bypass-ir', directInterface: 'Wi-Fi', wgEndpointIps: { 'cobra.example': '198.51.100.21' } };
+  const named = plan(xhttpReality());
+  assert.deepEqual(entryHosts(named), ['edge.example.net'], 'the WireGuard behind the hop is not an entry');
+  for (const dns of [{ dnsManaged: false }, MANAGED]) {
+    const c = buildConfig(named, settings(Object.assign({ entryHostIps: { 'edge.example.net': ['203.0.113.30'] } }, owner, dns)));
+    assert.deepEqual(c.dns.hosts, { 'edge.example.net': ['203.0.113.30'] });
+    for (const tag of ['out-sv-xhttp', 'out-chain-tes-h0']) {
+      assert.deepEqual(sockoptOf(c, tag), { interface: 'Wi-Fi', domainStrategy: 'UseIPv4' }, tag);
+      assert.equal(outboundTagged(c, tag).settings.vnext[0].address, 'edge.example.net');
+      assert.equal(outboundTagged(c, tag).streamSettings.realitySettings.serverName, 'www.microsoft.com');
+    }
+    const wg = outboundTagged(c, 'out-chain-tes');
+    assert.deepEqual(wg.streamSettings.sockopt, { dialerProxy: 'out-chain-tes-h0' });
+    assert.equal(wg.settings.peers[0].endpoint, '198.51.100.21:42421');
+  }
+  // a first hop that is already an address: nothing to resolve, nothing to pin
+  const literal = plan(xhttpReality('203.0.113.30'));
+  assert.deepEqual(entryHosts(literal), []);
+  const c = buildConfig(literal, settings(Object.assign({ entryHostIps: {} }, owner)));
+  assert.equal('hosts' in c.dns, false);
+  assert.deepEqual(pinnedStrategy(c), []);
+});
+
+test('entryHosts: every entry the plan dials by name — never a hop behind one, a WireGuard, an address, or an unused server', () => {
+  assert.deepEqual(entryHosts(single()), ['a.example.com']);
+  assert.deepEqual(entryHosts(VLESS_WS_TLS), ['a.example.com'], 'a bare server is a single plan');
+  assert.deepEqual(entryHosts({ mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_TCP_TLS] }), ['a.example.com']);
+  assert.deepEqual(entryHosts([TROJAN_TCP_TLS, VLESS_WS_TLS]), ['b.example.com']);
+  assert.deepEqual(entryHosts(advancedPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-ss': SS_TCP, 'sv-wg': WG_BAD_MASK },
+    chainsById: { c1: [TROJAN_TCP_TLS, VLESS_WS_TLS] },
+    rules: [
+      { type: 'ip', value: '10.0.0.0/8', target: 'chain:c1' },
+      { type: 'ip', value: '10.1.0.0/16', target: 'sv-wg' },
+      { type: 'ip', value: '10.2.0.0/16', target: 'gone' },
+      { type: 'domain', value: 'x.com', target: 'direct' },
+      null
+    ],
+    def: 'sv-vless'
+  })), ['b.example.com', 'a.example.com'], 'sv-ss is in the store but routed to by nothing');
+  assert.deepEqual(entryHosts(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }, { id: 'e2', target: 'chain:c1', socksPort: 60002 }])),
+    ['a.example.com', 'b.example.com']);
+  assert.deepEqual(entryHosts(single(WG_CORP)), []);
+  assert.deepEqual(entryHosts(single(xhttpReality('203.0.113.30'))), []);
+  assert.deepEqual(entryHosts(single(xhttpReality('2001:db8::30'))), []);
+  assert.deepEqual(entryHosts({ mode: 'single' }), []);
+});
+
+test('pinning never touches the stored record', () => {
+  const s = vlessWithMarkers('sv-frag', { _fragment: 'tlshello' });
+  const before = JSON.stringify(s);
+  buildConfig(single(s), settings(Object.assign({}, PINS, BOUND)));
+  buildConfig({ mode: 'chain', chain: [s, TROJAN_TCP_TLS] }, managed(PINS));
+  assert.equal(JSON.stringify(s), before);
+  assert.equal(VLESS_WS_TLS.outbound.streamSettings.sockopt, undefined);
 });
 
 /* --------------------------- the multi-target latency test --------------------------- */

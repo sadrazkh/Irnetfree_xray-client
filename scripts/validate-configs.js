@@ -79,6 +79,7 @@ for (const [pn, plan] of Object.entries(plans)) {
 // resolver (a server object with plain-CIDR expectedIPs and `domain:` entries,
 // routed through the chain / the exit by an inboundTag+ip rule).
 const managed = dnsModes.managed;
+const PINS = { 'a.example.com': ['203.0.113.10', '203.0.113.11'], 'b.example.com': ['203.0.113.20'] };
 const advancedWgChain = {
   mode: 'advanced', serversById: { 'sv-vless': F.VLESS_WS_TLS, 'sv-wgcorp': F.WG_CORP },
   chainsById: { c1: [F.VLESS_WS_TLS, F.WG_CORP] }, chain: [],
@@ -116,7 +117,26 @@ const shapes = {
   'single-bound-wireguard': [{ mode: 'single', server: F.WG_BAD_MASK }, Object.assign({ directInterface: 'Wi-Fi' }, managed)],
   'chain-bound-wgExit': [{ mode: 'chain', chain: [F.VLESS_WS_TLS, F.WG_BAD_MASK] }, Object.assign({ directInterface: 'Wi-Fi' }, managed)],
   'advanced-bound-wgChain': [advancedWgChain, Object.assign({ directInterface: 'Wi-Fi' }, managed)],
-  'pool-bound': [pool, Object.assign({ directInterface: 'Wi-Fi' }, managed)]
+  'pool-bound': [pool, Object.assign({ directInterface: 'Wi-Fi' }, managed)],
+  // Entry servers answered from the config (configBuilder.pinEntryHosts):
+  // dns.hosts + sockopt.domainStrategy beside the interface, the anti-DPI
+  // dialer and chains, under both DNS modes and with IPv6 (UseIP, a v6 answer).
+  'single-pinned-managed': [single, Object.assign({ entryHostIps: PINS }, managed)],
+  'single-pinned-unmanaged': [single, Object.assign({ entryHostIps: PINS }, dnsModes.unmanaged)],
+  'single-pinned-v6only': [single, Object.assign({ ipv6: true, entryHostIps: { 'a.example.com': ['2001:db8::10'] } }, managed)],
+  'single-pinned-fragment-bound': [{ mode: 'single', server: F.vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' }) }, Object.assign({ routingMode: 'bypass-ir', directInterface: 'Wi-Fi', entryHostIps: PINS }, managed)],
+  // the dpi dialer of a pinned outbound carries its strategy (UseIP with IPv6),
+  // and one beside an unpinned outbound with the same settings is a dialer of its own
+  'single-pinned-fragment-v6': [{ mode: 'single', server: F.vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20', _noise: 'faketls' }) }, Object.assign({ ipv6: true, directInterface: 'Wi-Fi', entryHostIps: PINS }, managed)],
+  'advanced-pinned-fragment-shared': [{
+    mode: 'advanced', chain: [], chainsById: {},
+    serversById: { 'sv-frag': F.vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' }), 'sv-trojan': Object.assign({}, F.TROJAN_TCP_TLS, { outbound: Object.assign({}, F.TROJAN_TCP_TLS.outbound, { _fragment: 'tlshello,100-200,10-20' }) }) },
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }], def: 'sv-frag'
+  }, Object.assign({ routingMode: 'bypass-ir', directInterface: 'Wi-Fi', entryHostIps: { 'a.example.com': ['203.0.113.10'] } }, managed)],
+  'chain-pinned-bound': [chain, Object.assign({ directInterface: 'Wi-Fi', entryHostIps: PINS }, managed)],
+  'advanced-pinned-wgChain-unmanaged': [advancedWgChain, Object.assign({ directInterface: 'Wi-Fi', entryHostIps: PINS, wgEndpointIps: { 'cobra.example': '198.51.100.21' } }, dnsModes.unmanaged)],
+  'advanced-pinned-wgChain-managed': [advancedWgChain, Object.assign({ routingMode: 'bypass-ir', directInterface: 'Wi-Fi', entryHostIps: PINS, wgEndpointIps: { 'cobra.example': '198.51.100.21' } }, managed)],
+  'pool-pinned': [pool, Object.assign({ directInterface: 'Wi-Fi', entryHostIps: PINS }, managed)]
 };
 for (const [name, [plan, over]] of Object.entries(shapes)) {
   total++;

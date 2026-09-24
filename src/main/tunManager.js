@@ -32,9 +32,13 @@ const path = require('path');
 const os = require('os');
 const platform = require('./tunPlatform');
 const macOwners = require('./macSessionLock');
+const macOwner = require('./macSessionOwner');
+const { ipsOf } = require('./macTunScripts');
 const { run, delay, sh, isOwnTunInterface } = platform;
 
 const ADAPTER = platform.TUN2SOCKS_ADAPTER;   // 'XrayTun'
+// How long stop() waits for tun2socks to be gone (sing-box's stop waits as long).
+const STOP_WAIT_MS = 3000;
 // macOS: let the kernel assign the next free utun unit. Forcing a specific
 // unit (e.g. utun123) fails when it's taken/out of range and tun2socks exits
 // before any device appears. We detect the actual device it created instead.
@@ -59,27 +63,138 @@ const TUN_PREFIX6 = 126;
 const TUN_GW6 = 'fdfe:dcba:9876::2';
 const SPLIT_ROUTES6 = ['::/1', '8000::/1'];
 
+/*
+ * The server bypass routes (Windows). Unlike everything else we lay, these sit
+ * on the PHYSICAL interface, so they do not go with the TUN adapter: they are
+ * active routes and live until they are deleted or Windows reboots.
+ *
+ * Two ways that used to go wrong, both "fixed by a reboot":
+ *  - `route delete <ip>` goes through route.exe, whose view of the table leaves
+ *    out every route of a disconnected interface (on the dev machine
+ *    `route print` shows none of the routes `netsh interface ipv4 show route`
+ *    lists on its unplugged Ethernet). So after a LAN → Wi-Fi switch the /32
+ *    pinned to the LAN could stay behind, pointing the server at a gateway that
+ *    comes back to life with the cable. The same blind delete also took any
+ *    route of the user's own to that address.
+ *  - A session that died without its teardown (killed, crashed) left them with
+ *    nobody to remove them.
+ * So each one is deleted by exact match — prefix, interface, next hop — through
+ * netsh, which sees disconnected interfaces too; and each one is journaled in
+ * userData the moment it exists, and whatever a previous process left in that
+ * journal is removed once per launch (recoverRoutesWindows).
+ *
+ * The journal forgets a route only once it is gone: a record whose delete
+ * failed stays (the route may well still be there — a sweep or a teardown that
+ * was refused is retried by the next launch), and a launch that is not elevated
+ * runs no sweep at all. A record from ANOTHER boot is dropped without netsh:
+ * active routes die at a reboot, and an identical route laid since belongs to
+ * someone else. Each record is stamped with its boot (see bootNow).
+ */
+const ROUTE_JOURNAL = 'tun2socks-routes.json';
+const routeKey = (r) => `${r.ip}|${r.nextHop}|${r.ifIndex}`;
+const bypassDeleteArgs = (r) => ['interface', 'ipv4', 'delete', 'route', `prefix=${r.ip}/32`,
+  `interface=${r.ifIndex}`, `nexthop=${r.nextHop}`, 'store=active'];
+
+/**
+ * This boot, as a record is stamped with it: the uptime (it starts from zero
+ * at every boot and only grows within one — sleep included on Windows) and the
+ * wall-clock time the machine booted.
+ */
+function bootNow() {
+  const up = os.uptime();
+  return { up, boot: Date.now() - up * 1000 };
+}
+// The wall-clock boot time moves when the clock is corrected; a reboot moves it
+// by at least the old boot's whole run plus the restart.
+const BOOT_SLACK_MS = 5 * 60 * 1000;
+/** Was record `r` laid in the boot we are in? One with no stamp is taken to be (it is swept as before). */
+function sameBoot(r, now = bootNow()) {
+  if (typeof r.up !== 'number' || typeof r.boot !== 'number') return true;
+  if (now.up < r.up) return false;
+  return Math.abs(now.boot - r.boot) < BOOT_SLACK_MS;
+}
+
+function readRouteJournal(userData) {
+  if (!userData) return [];
+  try {
+    const st = JSON.parse(fs.readFileSync(path.join(userData, ROUTE_JOURNAL), 'utf8'));
+    return (st && Array.isArray(st.routes) ? st.routes : [])
+      .filter(r => r && /^\d+\.\d+\.\d+\.\d+$/.test(r.ip) && /^\d+\.\d+\.\d+\.\d+$/.test(r.nextHop) && /^\d+$/.test(String(r.ifIndex)));
+  } catch { return []; }
+}
+
+/**
+ * Synchronous read-modify-write: no await in between, so two sessions of one
+ * process cannot lose each other's entries. What is added is stamped with
+ * this boot.
+ */
+function updateRouteJournal(userData, add = [], remove = []) {
+  if (!userData) return;
+  const gone = new Set(remove.map(routeKey));
+  const routes = readRouteJournal(userData).filter(r => !gone.has(routeKey(r)));
+  const stamp = add.length ? bootNow() : null;
+  for (const r of add) if (!routes.some(x => routeKey(x) === routeKey(r))) routes.push(Object.assign({}, r, stamp));
+  const file = path.join(userData, ROUTE_JOURNAL);
+  if (!routes.length) { try { fs.unlinkSync(file); } catch {} return; }
+  fs.writeFileSync(file + '.tmp', JSON.stringify({ version: 1, routes }, null, 2));
+  fs.renameSync(file + '.tmp', file);
+}
+
+/** One sweep per userData per process: the journal is read before this process lays anything. */
+const routeSweeps = new Map();
+
+/**
+ * Remove what a previous process of this boot journaled and never removed.
+ * `elevated` false (a netsh delete would be refused): nothing is run and
+ * nothing forgotten, and a later call — the elevated TUN connect — sweeps.
+ */
+function recoverRoutesWindows(userData, onLog = () => {}, elevated = true) {
+  if (!userData) return Promise.resolve(0);
+  const key = path.resolve(userData);
+  if (!routeSweeps.has(key)) {
+    if (!elevated) return Promise.resolve(0);
+    const left = readRouteJournal(userData);
+    routeSweeps.set(key, (async () => {
+      const now = bootNow();
+      const stale = left.filter(r => !sameBoot(r, now));
+      const removed = [];
+      for (const r of left) {
+        if (stale.includes(r)) continue;
+        await run('netsh', bypassDeleteArgs(r)).then(() => removed.push(r), () => {});
+      }
+      try { updateRouteJournal(userData, [], [...stale, ...removed]); } catch {}
+      if (removed.length) onLog(`Removed ${removed.length} bypass routes a previous session left behind`, 'warn');
+      if (removed.length < left.length - stale.length) onLog(`${left.length - stale.length - removed.length} bypass routes a previous session left could not be removed — kept to retry at the next launch`, 'warn');
+      return removed.length;
+    })());
+  }
+  return routeSweeps.get(key);
+}
+
 class TunManager {
   constructor(opts = {}) {
     this.binDir = opts.binDir;
     // Writable dirs (e.g. userData/bin) checked first so downloads/updates win.
     this.extraDirs = (opts.extraDirs || []).filter(Boolean);
     this.onLog = opts.onLog || (() => {});
+    this.onUnexpectedExit = opts.onUnexpectedExit || (() => {});   // a live tunnel died on its own
     this.proc = null;
     this.active = false;
     this.savedGateway = null;
-    this.bypassIps = [];   // every /32 we added so we can remove them all
+    this.bypassIps = [];   // the addresses of the /32s we added (excludeIps)
+    this.bypassRoutes = [];   // … and each route exactly as laid, for an exact-match delete (Windows)
     this.tunIfIndex = null;
     this.dnsServers = ['1.1.1.1', '8.8.8.8'];
-    // The adapter's IPv6 resolver once the v6 side is up (Windows) — what the
-    // leak guard points every physical adapter's v6 family at. null until then,
-    // and null again if the v6 setup failed: the guard then leaves v6 alone.
+    // The adapter's IPv6 resolver once the v6 side is up (Windows) — the peer,
+    // and only when the v4 resolver is the peer too. null until then, without
+    // the hijack, and if the v6 setup failed.
     this.dnsPeer6 = null;
     this.lang = opts.lang || 'fa';   // user-facing error language
     this.macState = null;            // macOS TUN runtime state (pid, routes, dns)
     this.macLogTimer = null;
     this.userData = opts.userData || null;
     this.macOwnerKey = this.userData ? path.resolve(this.userData) : this;
+    this.probe = opts.probe || macOwner.defaultProbe;   // who owns a journal / is a pid alive (macSessionOwner.js)
   }
 
   /** Pick the message in the user's language (fa default). */
@@ -135,6 +250,9 @@ class TunManager {
   /** Discover the current default gateway + interface index (Windows). */
   getDefaultGatewayWin() { return platform.getDefaultGatewayWin(); }
 
+  /** Remove the bypass routes a previous process journaled and never removed (once per launch, elevated). */
+  recoverRoutesWindows() { return recoverRoutesWindows(this.userData, this.onLog, this.isElevated()); }
+
   /** Get the interface index of our TUN adapter once it exists. */
   getTunIfIndex() { return platform.getTunIfIndex(ADAPTER); }
 
@@ -179,7 +297,10 @@ class TunManager {
       'Default network gateway not found'));
     this.onLog(`Default gateway: ${gw.nextHop} (if ${gw.ifIndex})`, 'info');
 
-    // 2) resolve ALL server IPs and add bypass routes (avoid loopback)
+    // 2) resolve ALL server IPs and add bypass routes (avoid loopback) — after
+    //    whatever a previous process left in the route journal is gone, so a
+    //    leftover can neither block the add nor sit beside it on a dead gateway
+    await this.recoverRoutesWindows();
     const ips = await this.resolveServerIps(serverAddress);
     if (!ips.length) this.onLog(this.msg(
       `نتوانستم IP سرور (${serverAddress}) را resolve کنم — ممکن است حلقه ایجاد شود`,
@@ -187,7 +308,13 @@ class TunManager {
     const ifArgs = gw.ifIndex ? ['if', String(gw.ifIndex)] : [];
     for (const ip of ips) {
       await run('route', ['add', ip, 'mask', '255.255.255.255', gw.nextHop, 'metric', '1', ...ifArgs])
-        .then(() => { this.bypassIps.push(ip); this.onLog(`Bypass route for ${ip} via ${gw.nextHop}`, 'info'); })
+        .then(() => {
+          this.bypassIps.push(ip);
+          const r = { ip, nextHop: gw.nextHop, ifIndex: String(gw.ifIndex) };
+          this.bypassRoutes.push(r);
+          try { updateRouteJournal(this.userData, [r]); } catch (e) { this.onLog('Route journal: ' + e.message, 'warn'); }
+          this.onLog(`Bypass route for ${ip} via ${gw.nextHop}`, 'info');
+        })
         .catch(e => this.onLog('Bypass route failed: ' + e.message, 'warn'));
     }
     // 3) launch tun2socks (let it manage the wintun adapter + DNS hijack)
@@ -202,11 +329,23 @@ class TunManager {
 
     this.proc.stdout.on('data', d => this.onLog('[tun] ' + d.toString().trim(), 'log'));
     this.proc.stderr.on('data', d => this.onLog('[tun] ' + d.toString().trim(), 'warn'));
+    const t2s = this.proc;
     this.proc.on('exit', (code) => {
       this.onLog(`tun2socks exited (${code})`, code === 0 ? 'info' : 'error');
+      // stop() does not wait for the exit: one that lands after a restart
+      // spawned the next tun2socks is not news about the tunnel that is live now
+      if (this.proc && this.proc !== t2s) return;
+      // stop() clears `active` before it kills the process, so a live tunnel
+      // here is one nobody stopped: withdraw its routes and tell the owner,
+      // whose recovery rebuilds it — never from inside this event.
+      const lost = this.active;
       if (this.active) this.cleanupRoutesWindows().catch(() => {});
       this.active = false;
       this.proc = null;
+      if (lost) {
+        Promise.resolve().then(() => this.onUnexpectedExit(new Error(`tun2socks exited (${code})`)))
+          .catch(e => this.onLog('TUN recovery callback: ' + e.message, 'error'));
+      }
     });
 
     // give the process a moment to fail fast (missing dll, bad args, etc.)
@@ -241,21 +380,25 @@ class TunManager {
       .catch(e => this.onLog('set address: ' + e.message, 'warn'));
 
     // lower the interface metric so TUN routes always win over the physical NIC
+    // (and so Windows asks this adapter's resolver first). Said when it fails:
+    // the leak guard holds every physical adapter on loopback, so this
+    // adapter's resolvers are the only ones that answer.
     await run('netsh', ['interface', 'ip', 'set', 'interface', `interface=${ADAPTER}`, 'metric=1'])
-      .catch(() => {});
+      .catch(e => this.onLog('TUN adapter metric: ' + e.message, 'warn'));
 
     // 7) DNS through the tunnel (leak prevention): force resolvers on the TUN
     await run('netsh', ['interface', 'ip', 'set', 'dnsservers', `name=${ADAPTER}`,
       'static', this.dnsServers[0], 'primary', 'validate=no'])
-      .catch(() => {});
+      .catch(e => this.onLog(`TUN adapter resolver ${this.dnsServers[0]}: ` + e.message, 'warn'));
     if (this.dnsServers[1]) {
       await run('netsh', ['interface', 'ip', 'add', 'dnsservers', `name=${ADAPTER}`,
-        this.dnsServers[1], 'index=2', 'validate=no']).catch(() => {});
+        this.dnsServers[1], 'index=2', 'validate=no'])
+        .catch(e => this.onLog(`TUN adapter resolver ${this.dnsServers[1]}: ` + e.message, 'warn'));
     }
 
     // 7b) IPv6 through the tunnel too — address, resolver, the two /1 routes
-    //     (see TUN_ADDR6). Best effort: a failure is logged, dnsPeer6 stays
-    //     null and the guard leaves the v6 family alone, exactly as before.
+    //     (see TUN_ADDR6). Best effort: a failure is logged and dnsPeer6 stays
+    //     null (the guard holds the physical adapters' v6 on loopback anyway).
     await this.setupIpv6Windows();
 
     // 8) split-default routes through TUN, pinned to the TUN interface index.
@@ -288,20 +431,37 @@ class TunManager {
    * adapter is gone with tun2socks, nothing of this belongs in the registry.
    * The /1 prefixes are longer than the ISP's `::/0`, so they win without any
    * metric games; LAN prefixes are longer still and stay on the LAN.
+   *
+   * The peer is the v6 RESOLVER only when it is the v4 one (tunSingbox's
+   * adapterDns rule): with managed DNS off the core hijacks nothing, the peer
+   * answers no query, and a dead resolver ahead of the working v4 ones pushed
+   * every lookup to Windows' "ask every server" step. The address and the
+   * routes are set either way — v6 traffic must not go around the tunnel.
    */
   async setupIpv6Windows() {
     this.dnsPeer6 = null;
+    const peered = (this.dnsServers || []).includes(TUN_GW);
     try {
       await run('netsh', ['interface', 'ipv6', 'add', 'address', `interface=${ADAPTER}`,
         `address=${TUN_ADDR6}/${TUN_PREFIX6}`, 'store=active']);
-      await run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${ADAPTER}`,
-        'static', TUN_GW6, 'primary', 'validate=no']);
+      if (peered) {
+        await run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${ADAPTER}`,
+          'static', TUN_GW6, 'primary', 'validate=no']);
+      }
       for (const net of SPLIT_ROUTES6) {
         await run('netsh', ['interface', 'ipv6', 'add', 'route', `prefix=${net}`, `interface=${ADAPTER}`,
           `nexthop=${TUN_GW6}`, 'metric=1', 'store=active']);
       }
-      this.dnsPeer6 = TUN_GW6;
-      this.onLog(`IPv6 -> TUN too (${TUN_ADDR6}/${TUN_PREFIX6}, resolver ${TUN_GW6}, ${SPLIT_ROUTES6.join(' + ')})`, 'info');
+      if (!peered) {
+        // ::1, the leak guard's hold, rather than an empty list Windows may
+        // fill with its fec0:0:0:ffff::1-3 placeholders (they would route into
+        // the TUN and die). Only a warning: the v6 routes are what matter.
+        await run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${ADAPTER}`,
+          'static', '::1', 'primary', 'validate=no'])
+          .catch(e => this.onLog('TUN adapter v6 resolver ::1: ' + e.message, 'warn'));
+      }
+      this.dnsPeer6 = peered ? TUN_GW6 : null;
+      this.onLog(`IPv6 -> TUN too (${TUN_ADDR6}/${TUN_PREFIX6}, resolver ${peered ? TUN_GW6 : 'none (no hijack)'}, ${SPLIT_ROUTES6.join(' + ')})`, 'info');
     } catch (e) {
       this.onLog('IPv6 on the TUN adapter failed — v6 stays outside the tunnel: ' + e.message, 'warn');
       await this.cleanupIpv6Windows();
@@ -321,10 +481,16 @@ class TunManager {
       await run('route', ['delete', net, 'mask', '128.0.0.0', TUN_GW]).catch(() => {});
     }
     await this.cleanupIpv6Windows();
-    for (const ip of this.bypassIps) {
-      await run('route', ['delete', ip]).catch(() => {});
-    }
+    // exactly the routes we laid — see ROUTE_JOURNAL for why not `route delete <ip>`;
+    // one whose delete failed stays journaled for the next launch's sweep
+    const laid = this.bypassRoutes;
+    this.bypassRoutes = [];
     this.bypassIps = [];
+    const removed = [];
+    for (const r of laid) {
+      await run('netsh', bypassDeleteArgs(r)).then(() => removed.push(r), () => {});
+    }
+    if (removed.length) { try { updateRouteJournal(this.userData, [], removed); } catch {} }
     this.tunIfIndex = null;
   }
 
@@ -353,7 +519,12 @@ class TunManager {
     this.onLog(`Default gateway: ${route.gateway} (dev ${route.device})`, 'info');
 
     const service = await this.serviceForDeviceMac(route.device);
-    const savedDns = service ? await this.getServiceDnsMac(service) : [];
+    let savedDns = service ? await this.getServiceDnsMac(service) : [];
+    // After a reconnect's stop (keepDns) the service still lists the tunnel's
+    // resolver: the originals come from the session before, not from it
+    // (dropped only once this start has succeeded — see macSessionOwner.js).
+    const handedOver = service && macOwner.peekHandedOverDns(this.macOwnerKey, service, savedDns);
+    if (handedOver) savedDns = handedOver;
 
     const ips = await this.resolveServerIps(serverAddress);
     if (!ips.length) this.onLog(this.msg(
@@ -375,7 +546,8 @@ class TunManager {
     const dns2 = this.dnsServers[1] || '';
 
     for (const file of [logFile, pidFile, devFile, identityFile, routesFile]) fs.writeFileSync(file, '', { mode: 0o600 });
-    this.macState = { work, logFile, pidFile, devFile, identityFile, dnsFile, routesFile, service, savedDns, gateway: route.gateway, bypassIps: ips, reqDev, macPid: null, dev: '', identity: '', expectedCommand: `${bin} -device ${reqDev} -proxy socks5://127.0.0.1:${socksPort} -loglevel warn` };
+    const owner = await macOwner.ownerRecord(this.probe);   // pid + start time: a reused pid is not us
+    this.macState = { ...owner, work, logFile, pidFile, devFile, identityFile, dnsFile, routesFile, service, savedDns, tunDns: [dns1, dns2].filter(Boolean), gateway: route.gateway, bypassIps: ips, reqDev, macPid: null, dev: '', identity: '', expectedCommand: `${bin} -device ${reqDev} -proxy socks5://127.0.0.1:${socksPort} -loglevel warn` };
     this.saveMacSession();
     fs.writeFileSync(teardownPath, this.macTeardownScript(), { mode: 0o700 });
     const bypassAdd = ips.map(ip => `if route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1; then echo ${sh(ip)} >> ${sh(routesFile)} || exit 13; fi`).join('\n');
@@ -473,7 +645,12 @@ class TunManager {
           if (line.trim()) this.onLog('[tun] ' + line.trim(), 'error');
         }
       }
-      if (!fs.readFileSync(pidFile, 'utf8').trim() && !fs.existsSync(dnsFile)) {
+      // Nothing to recover after a cancelled prompt, or a rollback that succeeded
+      // with tun2socks gone; a kept journal would keep the owner lock too.
+      const pidText = fs.readFileSync(pidFile, 'utf8').trim();
+      const pid = parseInt(pidText, 10);
+      const rolledBack = !/rollback failed/i.test(m) && Number.isInteger(pid) && !macOwner.pidAlive(pid, this.probe);
+      if ((!pidText || rolledBack) && !fs.existsSync(dnsFile)) {
         fs.rmSync(work, { recursive: true, force: true }); this.macState = null;
       }
       if (/User canceled|-128/i.test(m)) {
@@ -497,6 +674,7 @@ class TunManager {
     Object.assign(this.macState, { macPid, identity, dev });
     if (!macPid || !identity || !/^utun\d+$/.test(dev)) throw new Error('Incomplete tunnel setup state; recovery required');
     this.saveMacSession();
+    if (handedOver) macOwner.dropHandedOverDns(this.macOwnerKey);   // the journal holds them now
     this.bypassIps = ips.slice();
     this.active = true;
 
@@ -551,8 +729,8 @@ class TunManager {
   async recoverMacSessions() {
     if (os.platform() !== 'darwin') return 0;
     const owner = macOwners.get(this.macOwnerKey);
-    if (owner && owner !== this) throw new Error('Another tunnel operation is live; disconnect it before recovery');
-    if (this.active) throw new Error('Disconnect the active tunnel before recovery');
+    if (owner && owner !== this) throw macOwner.liveTunnelError('Another tunnel operation is live; disconnect it before recovery');
+    if (this.active) throw macOwner.liveTunnelError('Disconnect the active tunnel before recovery');
     let count = 0;
     if (this.macState) { await this.stopMac(); count++; }
     if (!this.userData) return count;
@@ -566,12 +744,8 @@ class TunManager {
       if (!fs.existsSync(file)) continue;
       if (fs.lstatSync(file).isSymbolicLink()) throw new Error('Invalid tunnel recovery journal');
       const st = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (Number.isInteger(st.ownerPid) && st.ownerPid > 1 && st.ownerPid !== process.pid) {
-        try {
-          process.kill(st.ownerPid, 0);
-          throw new Error('Another application instance may own this tunnel; close it before recovery');
-        } catch (e) { if (e.code !== 'ESRCH') throw e; }
-      }
+      // The pid AND its start time: after a reboot the old pid is someone else's.
+      if (await macOwner.ownerAlive(st, this.probe)) throw macOwner.liveTunnelError('Another application instance may own this tunnel; close it before recovery');
       if (path.resolve(st.work || '') !== work || !Array.isArray(st.savedDns) || !Array.isArray(st.bypassIps) || typeof st.gateway !== 'string' || typeof st.expectedCommand !== 'string') throw new Error('Invalid tunnel recovery session');
       for (const key of ['logFile', 'pidFile', 'devFile', 'identityFile', 'dnsFile', 'routesFile']) {
         if (typeof st[key] !== 'string' || path.dirname(path.resolve(st[key])) !== work) throw new Error('Invalid tunnel recovery path');
@@ -583,9 +757,13 @@ class TunManager {
     return count;
   }
 
-  macTeardownScript() {
+  /** `opts.keepDns`: a reconnect's stop — the leak guard holds the service's DNS; only a disconnect restores it. */
+  macTeardownScript(opts = {}) {
     const st = this.macState || {};
-    const dns1 = (st.savedDns && st.savedDns.length) ? st.savedDns.map(sh).join(' ') : 'Empty';
+    // The journal is a user-owned file and this runs as root: addresses that
+    // are not IP literals are dropped (see macTunScripts' ipsOf).
+    const saved = ipsOf(st.savedDns);
+    const dns1 = saved.length ? saved.map(sh).join(' ') : 'Empty';
     const lines = ['#!/bin/bash'];
     if (st.pidFile) {
       lines.push(
@@ -610,33 +788,36 @@ class TunManager {
     // disconnect until reboot.
     // Interface routes disappear with the owned utun. Do not delete by a
     // recycled device name after a crash: another VPN may own it by then.
-    for (const ip of (st.bypassIps || [])) {
+    for (const ip of (ipsOf([st.gateway]).length ? ipsOf(st.bypassIps) : [])) {
       lines.push(`if grep -Fxq -- ${sh(ip)} ${sh(st.routesFile)} 2>/dev/null; then route -n delete -host ${sh(ip)} ${sh(st.gateway)} 2>/dev/null || true; fi`);
     }
-    if (st.service) lines.push(`if [ -f ${sh(st.dnsFile)} ]; then networksetup -setdnsservers ${sh(st.service)} ${dns1} || exit 25; rm -f ${sh(st.dnsFile)}; fi`);
+    if (st.service && !opts.keepDns) lines.push(`if [ -f ${sh(st.dnsFile)} ]; then networksetup -setdnsservers ${sh(st.service)} ${dns1} || exit 25; rm -f ${sh(st.dnsFile)}; fi`);
     lines.push('exit 0', '');
     return lines.join('\n');
   }
 
-  async stopMac() {
+  async stopMac(opts = {}) {
     if (this.macStopPromise) return this.macStopPromise;
     if (!this.macState) return;
-    this.macStopPromise = this.finishMacStop();
+    this.macStopPromise = this.finishMacStop(opts);
     try { return await this.macStopPromise; } finally { this.macStopPromise = null; }
   }
 
-  async finishMacStop() {
+  async finishMacStop(opts = {}) {
     this.stopMacLogTail();
-    const work = this.macState.work;
+    const st = this.macState;
+    const work = st.work;
+    const keepDns = !!(opts && opts.keepDns);
     const teardownPath = path.join(work, 'teardown.sh');
     try {
       if (fs.existsSync(teardownPath) && fs.lstatSync(teardownPath).isSymbolicLink()) throw new Error('Invalid tunnel teardown path');
-      fs.writeFileSync(teardownPath, this.macTeardownScript(), { mode: 0o700 });
+      fs.writeFileSync(teardownPath, this.macTeardownScript({ keepDns }), { mode: 0o700 });
       await this.runScriptPrivileged(teardownPath);
     } catch (e) {
       this.onLog('TUN teardown: ' + (e.message || e), 'warn');
       throw e;
     }
+    if (keepDns && st.dnsFile && fs.existsSync(st.dnsFile)) macOwner.handOverDns(this.macOwnerKey, st);
     fs.rmSync(work, { recursive: true, force: true });
     this.macState = null;
     this.bypassIps = [];
@@ -688,7 +869,8 @@ class TunManager {
     return this.startLinux(socksPort, serverAddress);
   }
 
-  async stop() {
+  /** `opts.keepDns` (macOS): a reconnect's stop leaves the service's DNS where the guard holds it. */
+  async stop(opts = {}) {
     if (os.platform() === 'darwin' && this.macStartPromise) await this.macStartPromise.catch(() => {});
     if (!this.active && !this.proc && !this.macState) return;
     const plat = os.platform();
@@ -696,20 +878,27 @@ class TunManager {
     if (plat === 'win32') {
       await this.cleanupRoutesWindows().catch(() => {});
     } else if (plat === 'darwin') {
-      await this.stopMac();
+      await this.stopMac(opts);
       this.active = false;
       this.onLog('TUN mode stopped.', 'info');
       return;
     }
     if (this.proc) {
+      // Wait for the exit, bounded: a rebuild that starts the next tun2socks
+      // while this one still holds the XrayTun adapter finds it taken.
+      const proc = this.proc;
+      const exited = new Promise((resolve) => { proc.once('exit', resolve); proc.once('error', resolve); });
       try {
         if (plat === 'win32') {
-          spawn('taskkill', ['/pid', String(this.proc.pid), '/t', '/f'], { windowsHide: true });
+          spawn('taskkill', ['/pid', String(proc.pid), '/t', '/f'], { windowsHide: true });
         } else {
-          this.proc.kill('SIGTERM');
+          proc.kill('SIGTERM');
         }
       } catch {}
-      this.proc = null;
+      let timer = null;
+      await Promise.race([exited, new Promise((resolve) => { timer = setTimeout(resolve, STOP_WAIT_MS); })]);
+      clearTimeout(timer);
+      if (this.proc === proc) this.proc = null;   // not a tun2socks a start spawned meanwhile
     }
     this.onLog('TUN mode stopped.', 'info');
   }
@@ -726,9 +915,11 @@ class TunManager {
           execFileSync('netsh', ['interface', 'ipv6', 'delete', 'route', `prefix=${net}`, `interface=${ADAPTER}`, `nexthop=${TUN_GW6}`], { windowsHide: true });
         } catch {}
       }
-      for (const ip of this.bypassIps) {
-        try { execFileSync('route', ['delete', ip], { windowsHide: true }); } catch {}
+      const removed = [];
+      for (const r of this.bypassRoutes) {
+        try { execFileSync('netsh', bypassDeleteArgs(r), { windowsHide: true }); removed.push(r); } catch {}
       }
+      if (removed.length) { try { updateRouteJournal(this.userData, [], removed); } catch {} }
       return;
     }
     // macOS/Linux: only attempt synchronous teardown when already root (we

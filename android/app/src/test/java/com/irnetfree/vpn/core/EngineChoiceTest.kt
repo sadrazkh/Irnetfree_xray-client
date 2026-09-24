@@ -66,6 +66,17 @@ class EngineChoiceTest {
         assertEquals("xray", EngineChoice.testEngineFor(null))
     }
 
+    @Test fun aLatencyTestRunsOnTheCoreTheServerWouldConnectOn() {
+        // Settings → Default core is honoured, as the desktop does with
+        // testEngineFor(chooseEngine(plan, defaultEngine)) (main.js).
+        assertEquals("xray-pattn", EngineChoice.testEngineFor(a, "xray-pattn"))
+        assertEquals("xray", EngineChoice.testEngineFor(a))
+        assertEquals("xray-pattn", EngineChoice.testEngineFor(p))
+        // a server's own choice beats the default; sing-box tests on Xray
+        assertEquals("xray", EngineChoice.testEngineFor(s("x", "xray"), "xray-pattn"))
+        assertEquals("xray", EngineChoice.testEngineFor(sb, "xray-pattn"))
+    }
+
     @Test fun connectOnOpenIsOffUntilAskedForAndSurvivesARestart() {
         // A tunnel that starts by itself is the user's decision, so a store that
         // predates the setting must not suddenly begin connecting on launch.

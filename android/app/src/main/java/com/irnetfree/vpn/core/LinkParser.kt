@@ -3,7 +3,10 @@ package com.irnetfree.vpn.core
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.URLDecoder
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 
 /**
  * Share-link parser: converts vless:// vmess:// trojan:// ss:// socks:// links
@@ -28,6 +31,16 @@ object LinkParser {
         RegexOption.IGNORE_CASE)
 
     fun isHttpProxyLink(s: String?): Boolean = HTTP_PROXY_LINK.matches((s ?: "").trim())
+
+    /**
+     * A line smart import fetches as a subscription: an http(s) URL that is not
+     * an HTTP proxy link (renderer/app.js isSubUrl). `http://user@host:port#name`
+     * is a proxy to import, not a panel to download.
+     */
+    fun isSubUrl(s: String): Boolean {
+        val t = s.trim()
+        return (t.startsWith("http://", true) || t.startsWith("https://", true)) && !isHttpProxyLink(t)
+    }
 
     fun parseMany(text: String): Pair<List<ServerConfig>, List<String>> {
         var body = text.trim()
@@ -92,40 +105,46 @@ object LinkParser {
         val at = beforeQ.lastIndexOf('@')
         val uuid = beforeQ.substring(0, at)
         val (address, portStr) = splitHostPort(beforeQ.substring(at + 1))
-        val port = portStr.toIntOrNull() ?: 443
+        val port = portOf(portStr, 443)
         val users = JSONObject()
             .put("id", uuid)
-            .put("encryption", q["encryption"] ?: "none")
-            .put("flow", q["flow"] ?: "")
+            .put("encryption", q.given("encryption") ?: "none")
+            .put("flow", q.given("flow") ?: "")
         val ob = JSONObject()
             .put("protocol", "vless")
             .put("settings", JSONObject().put("vnext", JSONArray().put(
                 JSONObject().put("address", address).put("port", port)
                     .put("users", JSONArray().put(users)))))
             .put("streamSettings", buildStream(q))
-        q["fragment"]?.let { ob.put("_fragment", it) }   // TLS fragmentation from the link
-        q["noise"]?.let { ob.put("_noise", it) }         // anti-DPI / fake ClientHello injection
-        return ServerConfig(newId("s"), name.ifBlank { address }, "vless", address, port, ob,
+        q.given("fragment")?.let { ob.put("_fragment", it) }   // TLS fragmentation from the link
+        q.given("noise")?.let { ob.put("_noise", it) }         // anti-DPI / fake ClientHello injection
+        return ServerConfig(newId("s"), name.ifBlank { address }, "vless", address, port, ob, link,
             engine = q["engine"]?.takeIf { it.isNotBlank() && it != "xray" })
     }
 
-    private fun parseVmess(link: String): ServerConfig {
-        val json = b64(link.substring("vmess://".length))
-        val v = JSONObject(json)
+    private fun parseVmess(link: String): ServerConfig =
+        vmessFromJson(JSONObject(b64(link.substring("vmess://".length))), link)
+
+    /**
+     * The vmess JSON, already out of its base64, as a server. Every field is read
+     * the desktop's way, `v.x || default`: v2rayN writes `"sni": ""` and `"fp": ""`,
+     * and an empty value is a missing one — not an empty SNI and no uTLS.
+     */
+    internal fun vmessFromJson(v: JSONObject, link: String): ServerConfig {
         val address = v.optString("add")
-        val port = v.optString("port").toIntOrNull() ?: 443
-        val net = v.optString("net", "tcp").lowercase()
+        val port = portOf(v.optString("port"), 443)
+        val net = v.optString("net").ifBlank { "tcp" }.lowercase()
         val tls = v.optString("tls").lowercase()
         val q = hashMapOf(
             "type" to net,
             "security" to if (tls == "tls") "tls" else "none",
-            "path" to v.optString("path", "/"),
+            "path" to v.optString("path").ifBlank { "/" },
             "host" to v.optString("host"),
-            "sni" to v.optString("sni", v.optString("host")),
-            "fp" to v.optString("fp", "chrome"),
+            "sni" to v.optString("sni").ifBlank { v.optString("host") },
+            "fp" to v.optString("fp").ifBlank { "chrome" },
             "alpn" to v.optString("alpn"),
             "serviceName" to v.optString("path"),
-            "headerType" to v.optString("type", "none"),
+            "headerType" to v.optString("type").ifBlank { "none" },
             // `cs` / `fm` are the standard short keys; the long ones are the form we used to emit
             "cipherSuites" to v.optString("cs").ifBlank { v.optString("cipherSuites") },
             "finalMask" to v.optString("fm").ifBlank { v.optString("finalMask").ifBlank { v.optString("finalmask") } }
@@ -133,16 +152,16 @@ object LinkParser {
         val user = JSONObject()
             .put("id", v.optString("id"))
             .put("alterId", v.optString("aid").toIntOrNull() ?: 0)
-            .put("security", v.optString("scy", "auto"))
+            .put("security", v.optString("scy").ifBlank { "auto" })
         val ob = JSONObject()
             .put("protocol", "vmess")
             .put("settings", JSONObject().put("vnext", JSONArray().put(
                 JSONObject().put("address", address).put("port", port)
                     .put("users", JSONArray().put(user)))))
             .put("streamSettings", buildStream(q))
-        if (v.has("fragment")) ob.put("_fragment", v.optString("fragment"))
-        if (v.has("noise")) ob.put("_noise", v.optString("noise"))
-        return ServerConfig(newId("s"), v.optString("ps", address), "vmess", address, port, ob,
+        v.optString("fragment").takeIf { it.isNotBlank() }?.let { ob.put("_fragment", it) }
+        v.optString("noise").takeIf { it.isNotBlank() }?.let { ob.put("_noise", it) }
+        return ServerConfig(newId("s"), v.optString("ps").ifBlank { address }, "vmess", address, port, ob, link,
             engine = v.optString("engine").takeIf { it.isNotBlank() && it != "xray" })
     }
 
@@ -151,19 +170,19 @@ object LinkParser {
         val (main, name) = splitHash(body)
         val (beforeQ, q0) = splitQuery(main)
         val q = HashMap(q0)
-        if (q["security"] == null) q["security"] = "tls"
+        if (q.given("security") == null) q["security"] = "tls"   // trojan defaults to tls — an empty value too
         val at = beforeQ.lastIndexOf('@')
         val password = dec(beforeQ.substring(0, at))
         val (address, portStr) = splitHostPort(beforeQ.substring(at + 1))
-        val port = portStr.toIntOrNull() ?: 443
+        val port = portOf(portStr, 443)
         val ob = JSONObject()
             .put("protocol", "trojan")
             .put("settings", JSONObject().put("servers", JSONArray().put(
                 JSONObject().put("address", address).put("port", port).put("password", password))))
             .put("streamSettings", buildStream(q))
-        q["fragment"]?.let { ob.put("_fragment", it) }
-        q["noise"]?.let { ob.put("_noise", it) }
-        return ServerConfig(newId("s"), name.ifBlank { address }, "trojan", address, port, ob,
+        q.given("fragment")?.let { ob.put("_fragment", it) }
+        q.given("noise")?.let { ob.put("_noise", it) }
+        return ServerConfig(newId("s"), name.ifBlank { address }, "trojan", address, port, ob, link,
             engine = q["engine"]?.takeIf { it.isNotBlank() && it != "xray" })
     }
 
@@ -190,14 +209,14 @@ object LinkParser {
             method = userInfo.substring(0, ci); password = userInfo.substring(ci + 1)
             val hp = splitHostPort(decoded.substring(at + 1)); address = hp.first; portStr = hp.second
         }
-        val port = portStr.toIntOrNull() ?: 443
+        val port = portOf(portStr, 443)
         val ob = JSONObject()
             .put("protocol", "shadowsocks")
             .put("settings", JSONObject().put("servers", JSONArray().put(
                 JSONObject().put("address", address).put("port", port)
                     .put("method", method).put("password", password).put("uot", true))))
             .put("streamSettings", JSONObject().put("network", "tcp"))
-        return ServerConfig(newId("s"), name.ifBlank { address }, "shadowsocks", address, port, ob)
+        return ServerConfig(newId("s"), name.ifBlank { address }, "shadowsocks", address, port, ob, link)
     }
 
     /**
@@ -232,18 +251,18 @@ object LinkParser {
                 val hp = splitHostPort(main); address = hp.first; portStr = hp.second
             }
         }
-        val port = portStr.toIntOrNull() ?: (if (proto == "http") 8080 else 1080)
+        val port = portOf(portStr, if (proto == "http") 8080 else 1080)
         val ob = proxyOutbound(proto, address, port, dec(user), dec(pass))
-        return ServerConfig(newId("s"), name.ifBlank { address }, proto, address, port, ob)
+        return ServerConfig(newId("s"), name.ifBlank { address }, proto, address, port, ob, link)
     }
 
     /* ------------------------- WireGuard ------------------------- */
 
-    private fun splitCommas(v: String?): List<String> =
+    internal fun splitCommas(v: String?): List<String> =
         (v ?: "").split(Regex("[,\\s]+")).map { it.trim() }.filter { it.isNotEmpty() }
 
     /** Xray requires the interface address to be /32 (IPv4) or /128 (IPv6). */
-    private fun normalizeWgAddresses(list: List<String>): List<String> = list
+    internal fun normalizeWgAddresses(list: List<String>): List<String> = list
         .map { it.trim() }.filter { it.isNotEmpty() }
         .map { a ->
             val v6 = a.contains(":")
@@ -282,14 +301,14 @@ object LinkParser {
         val at = beforeQ.lastIndexOf('@')
         val privateKey = dec(if (at == -1) "" else beforeQ.substring(0, at))
         val (address, portStr) = splitHostPort(if (at == -1) beforeQ else beforeQ.substring(at + 1))
-        val port = portStr.toIntOrNull() ?: 51820
+        val port = portOf(portStr, 51820)
         val ob = buildWireguardOutbound(
             privateKey = privateKey,
-            publicKey = q["publickey"] ?: q["publicKey"] ?: q["peer"] ?: "",
+            publicKey = q.given("publickey") ?: q.given("publicKey") ?: q.given("peer") ?: "",
             endpoint = "$address:$port",
-            address = q["address"] ?: q["ip"] ?: "",
-            presharedKey = q["presharedkey"] ?: q["presharedKey"] ?: q["psk"] ?: "",
-            mtu = q["mtu"], reserved = q["reserved"], allowedIPs = q["allowedips"] ?: q["allowedIPs"]
+            address = q.given("address") ?: q.given("ip") ?: "",
+            presharedKey = q.given("presharedkey") ?: q.given("presharedKey") ?: q.given("psk") ?: "",
+            mtu = q["mtu"], reserved = q["reserved"], allowedIPs = q.given("allowedips") ?: q.given("allowedIPs")
         )
         val (dns, dnsDomains) = splitDnsField(q["dns"])
         return ServerConfig(newId("s"), name.ifBlank { address }, "wireguard", address, port, ob, link, dns = dns, dnsDomains = dnsDomains)
@@ -302,7 +321,7 @@ object LinkParser {
         dnsField: String? = null
     ): ServerConfig {
         val (host, portStr) = splitHostPort(endpoint)
-        val port = portStr.toIntOrNull() ?: 51820
+        val port = portOf(portStr, 51820)
         val ep = if (endpoint.contains(":")) endpoint else "$host:$port"
         val ob = buildWireguardOutbound(privateKey, publicKey, ep, address, presharedKey, mtu, reserved, allowedIPs)
         val (dns, dnsDomains) = splitDnsField(dnsField)
@@ -337,27 +356,34 @@ object LinkParser {
         return dns to domains
     }
 
+    /**
+     * A link value, or null when it is absent OR empty — the desktop's `q.x || …`.
+     * v2rayN exports every key it knows, empty ones included: `type=` read as a
+     * value became network "" (which xray refuses), `sni=` an empty SNI.
+     */
+    private fun Map<String, String?>.given(k: String): String? = this[k]?.takeIf { it.isNotBlank() }
+
     internal fun buildStream(q: Map<String, String?>): JSONObject {
-        val net = (q["type"] ?: q["network"] ?: "tcp").lowercase()
-        val security = (q["security"] ?: "none").lowercase()
+        val net = (q.given("type") ?: q.given("network") ?: "tcp").lowercase()
+        val security = (q.given("security") ?: "none").lowercase()
         val stream = JSONObject().put("network", net).put("security", security)
 
         when (net) {
             "ws" -> stream.put("wsSettings", JSONObject()
-                .put("path", q["path"] ?: "/")
-                .put("headers", JSONObject().apply { q["host"]?.takeIf { it.isNotEmpty() }?.let { put("Host", it) } }))
+                .put("path", q.given("path") ?: "/")
+                .put("headers", JSONObject().apply { q.given("host")?.let { put("Host", it) } }))
             "grpc" -> stream.put("grpcSettings", JSONObject()
-                .put("serviceName", q["serviceName"] ?: q["path"] ?: "")
+                .put("serviceName", q.given("serviceName") ?: q.given("path") ?: "")
                 .put("multiMode", q["mode"] == "multi"))
             "h2", "http" -> {
                 stream.put("network", "h2")
                 stream.put("httpSettings", JSONObject()
-                    .put("path", q["path"] ?: "/")
-                    .put("host", JSONArray().apply { q["host"]?.split(",")?.forEach { put(it) } }))
+                    .put("path", q.given("path") ?: "/")
+                    .put("host", JSONArray().apply { q.given("host")?.split(",")?.forEach { put(it) } }))
             }
             "xhttp", "splithttp" -> {
                 stream.put("network", "xhttp")
-                val xs = JSONObject().put("path", q["path"] ?: "/").put("host", q["host"] ?: "").put("mode", q["mode"] ?: "auto")
+                val xs = JSONObject().put("path", q.given("path") ?: "/").put("host", q.given("host") ?: "").put("mode", q.given("mode") ?: "auto")
                 // `extra`: the link's JSON of everything else xhttp takes — xmux,
                 // padding, scMaxEachPostBytes, the uplink method — as v2rayN and the
                 // panels emit it. The core reads it leniently (unknown keys ignored)
@@ -368,24 +394,24 @@ object LinkParser {
             "kcp", "mkcp" -> {
                 stream.put("network", "kcp")
                 stream.put("kcpSettings", JSONObject()
-                    .put("header", JSONObject().put("type", q["headerType"] ?: "none")).put("seed", q["seed"] ?: ""))
+                    .put("header", JSONObject().put("type", q.given("headerType") ?: "none")).put("seed", q.given("seed") ?: ""))
             }
             "tcp" -> if (q["headerType"] == "http") {
                 stream.put("tcpSettings", JSONObject().put("header", JSONObject()
                     .put("type", "http")
                     .put("request", JSONObject()
-                        .put("path", JSONArray().put(q["path"] ?: "/"))
+                        .put("path", JSONArray().put(q.given("path") ?: "/"))
                         .put("headers", JSONObject().apply {
-                            q["host"]?.takeIf { it.isNotEmpty() }?.let { put("Host", JSONArray().put(it)) }
+                            q.given("host")?.let { put("Host", JSONArray().put(it)) }
                         }))))
             }
         }
 
         if (security == "tls") {
             val tls = JSONObject()
-                .put("serverName", q["sni"] ?: q["host"] ?: "")
+                .put("serverName", q.given("sni") ?: q.given("host") ?: "")
                 .put("allowInsecure", q["allowInsecure"] == "1" || q["allowInsecure"] == "true")
-                .put("fingerprint", q["fp"] ?: "chrome")
+                .put("fingerprint", q.given("fp") ?: "chrome")
             q["alpn"]?.takeIf { it.isNotEmpty() }?.let { tls.put("alpn", JSONArray().apply { it.split(",").forEach { a -> put(a) } }) }
             // patterniha custom TLS: `unsafe` fingerprint + pinned cipherSuites.
             // `cs` is the standard share-link name, `cipherSuites` the long legacy one.
@@ -394,11 +420,11 @@ object LinkParser {
             stream.put("tlsSettings", tls)
         } else if (security == "reality") {
             stream.put("realitySettings", JSONObject()
-                .put("serverName", q["sni"] ?: "")
-                .put("fingerprint", q["fp"] ?: "chrome")
-                .put("publicKey", q["pbk"] ?: "")
-                .put("shortId", q["sid"] ?: "")
-                .put("spiderX", q["spx"] ?: ""))
+                .put("serverName", q.given("sni") ?: "")
+                .put("fingerprint", q.given("fp") ?: "chrome")
+                .put("publicKey", q.given("pbk") ?: "")
+                .put("shortId", q.given("sid") ?: "")
+                .put("spiderX", q.given("spx") ?: ""))
         }
         // finalMask (transport-level masking: fragment, noise, header-custom, …).
         // Stored VERBATIM: the core takes the plural `lengths`/`delays` arrays, and an
@@ -439,26 +465,103 @@ object LinkParser {
         return out
     }
 
-    private fun splitHostPort(hp: String): Pair<String, String> {
+    /**
+     * `host:port`, `[v6]:port` or `[v6]` → the host and the port's text ("" =
+     * none, the caller's default). A `/` ends the authority: `host:2053/?type=ws`
+     * leaves "host:2053/" in front of the query, and the slash is no part of the
+     * port. `[v6]` without a port used to throw.
+     */
+    private fun splitHostPort(hp0: String): Pair<String, String> {
+        val hp = hp0.substringBefore('/')
         if (hp.startsWith("[")) {
             val close = hp.indexOf(']')
-            return hp.substring(1, close) to hp.substring(close + 2)
+            if (close == -1) return hp.substring(1) to ""
+            val rest = hp.substring(close + 1)
+            return hp.substring(1, close) to (if (rest.startsWith(":")) rest.substring(1) else "")
         }
         val i = hp.lastIndexOf(':')
         return if (i == -1) hp to "" else hp.substring(0, i) to hp.substring(i + 1)
     }
 
-    private fun dec(s: String): String = try { URLDecoder.decode(s, "UTF-8") } catch (e: Exception) { s }
+    /** The port a link names — its leading digits, as parseInt reads "2053/" — else [def]. */
+    internal fun portOf(s: String, def: Int): Int =
+        Regex("^\\s*(\\d+)").find(s)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it > 0 } ?: def
+
+    private fun dec(s: String): String = pctDecode(s)
+
+    /**
+     * `%XX` → the byte it names, read as UTF-8, and nothing else: a `+` stays a
+     * `+`. URLDecoder is FORM decoding and made it a space, which broke every
+     * standard-base64 key (WARP's public keys carry '+') and any password with
+     * one in it. This is decodeURIComponent, which the desktop uses — and as the
+     * desktop's safeDecodeURIComponent does, a malformed escape gives the text
+     * back as it was.
+     */
+    internal fun pctDecode(s: String): String {
+        if (s.indexOf('%') < 0) return s
+        val bytes = ByteArrayOutputStream(s.length)
+        var i = 0
+        while (i < s.length) {
+            if (s[i] == '%') {
+                if (i + 2 >= s.length) return s
+                val hi = hexDigit(s[i + 1])
+                val lo = hexDigit(s[i + 2])
+                if (hi < 0 || lo < 0) return s
+                bytes.write(hi * 16 + lo)
+                i += 3
+            } else {
+                val cp = s.codePointAt(i)
+                val b = String(Character.toChars(cp)).toByteArray(Charsets.UTF_8)
+                bytes.write(b, 0, b.size)
+                i += Character.charCount(cp)
+            }
+        }
+        return try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes.toByteArray())).toString()
+        } catch (e: CharacterCodingException) { s }
+    }
+
+    /**
+     * An ASCII hex digit's value, else -1. Not Character.digit, which also takes
+     * every other script's digits — "%۵۰" (Persian five, zero) decoded to "P".
+     */
+    private fun hexDigit(c: Char): Int = when (c) {
+        in '0'..'9' -> c - '0'
+        in 'a'..'f' -> c - 'a' + 10
+        in 'A'..'F' -> c - 'A' + 10
+        else -> -1
+    }
 
     private fun b64(s: String?): String {
         if (s.isNullOrBlank()) return ""
-        var t = s.trim().replace('-', '+').replace('_', '/')
-        while (t.length % 4 != 0) t += "="
-        return try { String(Base64.decode(t, Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { "" }
+        return try { String(Base64.decode(b64Normalize(s), Base64.DEFAULT), Charsets.UTF_8) } catch (e: Exception) { "" }
+    }
+
+    /**
+     * Base64 text the way the decoder takes it: no whitespace anywhere, the
+     * URL-safe alphabet mapped back, padded to a multiple of four. A panel's
+     * subscription body is often wrapped at 76 columns, and the padding used to
+     * be counted with the newlines in — android.util.Base64 refuses the extra
+     * '=' that made, so the whole subscription decoded to nothing. (Node's
+     * Buffer ignores both, which is why the desktop never saw it.)
+     */
+    internal fun b64Normalize(s: String): String {
+        val t = StringBuilder(s.length + 3)
+        for (c in s) {
+            if (c.isWhitespace()) continue
+            t.append(if (c == '-') '+' else if (c == '_') '/' else c)
+        }
+        while (t.length % 4 != 0) t.append('=')
+        return t.toString()
     }
 
     /* ------------------- build share link (carries ALL settings) ------------------- */
-    private fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+    // encodeURIComponent's space, %20: URLEncoder writes '+', which a reader that
+    // keeps '+' as '+' (the desktop, and this parser now) hands back as a '+'.
+    private fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
     private fun jarr(a: JSONArray?): List<String> = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
     private fun b64e(s: String) = Base64.encodeToString(s.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
     private fun qstr(m: Map<String, String>) = m.filterValues { it.isNotBlank() }.entries.joinToString("&") { "${it.key}=${enc(it.value)}" }

@@ -120,17 +120,111 @@ for (const [rel, name] of [
   });
 }
 
-test('the init script: procd, the token, the exact command line, POSIX', () => {
+test('the init script: procd, the token FILE (never the token itself), the exact command line, POSIX', () => {
   const s = data['./etc/init.d/irnetfree'].data.toString();
   assert.match(s, /^#!\/bin\/sh \/etc\/rc\.common\n/);
   assert.match(s, /^USE_PROCD=1$/m);
   assert.match(s, /^START=95$/m);
   assert.match(s, /config_load irnetfree/);
   assert.match(s, /head -c 16 \/dev\/urandom \| hexdump -ve '1\/1 "%02x"' > "\$data_dir\/token"/);
-  assert.match(s, /procd_set_param command \/usr\/bin\/node --max-old-space-size=160 "\$APP" --host "\$bind" --port "\$port" --data-dir "\$data_dir" --token "\$\(cat "\$data_dir\/token"\)"/);
+  // the token on the command line was in `ps`, and in the banner — which procd hands to syslog
+  assert.match(s, /procd_set_param command \/usr\/bin\/node --max-old-space-size=160 "\$APP" --host "\$bind" --port "\$port" --data-dir "\$data_dir" --token-file "\$data_dir\/token"$/m);
+  assert.doesNotMatch(s, /--token "/);
   assert.match(s, /procd_set_param env IRNETFREE_PLATFORM=openwrt/);
   assert.match(s, /procd_set_param respawn/);
+  // time for a clean teardown of the gateway on stop (procd's default is 5s, then SIGKILL)
+  assert.match(s, /procd_set_param term_timeout 15/);
   assert.match(s, /procd_add_reload_trigger irnetfree/);
+  // a zone added after the install (a guest Wi-Fi) is picked up at the next start
+  assert.match(s, /sh \/usr\/lib\/irnetfree\/fw-forwardings\.sh >\/dev\/null 2>&1 \|\| true/);
+});
+
+test('fw-forwardings.sh ships executable, LF, POSIX, and both the install and every start run it', () => {
+  const f = data[`./${PREFIX}/fw-forwardings.sh`];
+  assert.ok(f, 'the forwarding script is in the package');
+  assert.equal(f.mode, 0o755);
+  const src = f.data.toString();
+  assert.ok(!src.includes('\r'), 'LF only');
+  assert.match(src, /^#!\/bin\/sh\n/);
+  for (const [re, what] of BASHISMS) assert.doesNotMatch(src, re, what);
+  assert.match(src, /^set -f\b/m, 'no globbing: an anonymous section is @forwarding[0]');
+  assert.match(data['./etc/uci-defaults/99-irnetfree'].data.toString(), /^sh \/usr\/lib\/irnetfree\/fw-forwardings\.sh$/m);
+});
+
+/**
+ * The forwarding script run for real — by this machine's POSIX sh, against a
+ * fake `uci` (a node script on PATH) that keeps the firewall config in a file.
+ * busybox ash on the router is what the QEMU job runs it with.
+ */
+function findSh() {
+  if (process.platform !== 'win32') return '/bin/sh';
+  for (const p of ['C:/Program Files/Git/usr/bin/sh.exe', 'C:/Program Files/Git/bin/sh.exe']) if (fs.existsSync(p)) return p;
+  return null;
+}
+const FAKE_UCI = `#!/usr/bin/env node
+// uci over a JSON file: [[key, value], …] in order; "firewall.x" → type, "firewall.x.opt" → value
+const fs = require('fs');
+const db = process.env.FAKE_UCI_DB;
+const rows = JSON.parse(fs.readFileSync(db, 'utf8'));
+const save = () => fs.writeFileSync(db, JSON.stringify(rows));
+const unq = (v) => v.replace(/^'(.*)'$/, '$1');
+const set = (kv) => { const i = kv.indexOf('='); const k = kv.slice(0, i), v = unq(kv.slice(i + 1)); const r = rows.find(x => x[0] === k); if (r) r[1] = v; else rows.push([k, v]); };
+let a = process.argv.slice(2);
+if (a[0] === '-q') a = a.slice(1);
+const cmd = a[0];
+if (cmd === 'show') { for (const [k, v] of rows) if (k.startsWith(a[1] + '.')) console.log(k.split('.').length === 2 ? k + '=' + v : k + "='" + v + "'"); process.exit(0); }
+if (cmd === 'get') { const r = rows.find(x => x[0] === a[1]); if (!r) process.exit(1); console.log(r[1]); process.exit(0); }
+if (cmd === 'set') { set(a[1]); save(); process.exit(0); }
+if (cmd === 'commit') { rows.push(['#commit', a[1]]); save(); process.exit(0); }
+if (cmd === 'batch') {
+  for (const line of fs.readFileSync(0, 'utf8').split(/\\r?\\n/)) {
+    const t = line.trim(); if (!t) continue;
+    const [verb, rest] = [t.slice(0, t.indexOf(' ')), t.slice(t.indexOf(' ') + 1)];
+    if (verb === 'set') set(rest); else if (verb === 'commit') rows.push(['#commit', rest]);
+  }
+  save(); process.exit(0);
+}
+process.exit(2);
+`;
+
+test('fw-forwardings.sh: every zone that forwards to wan gets a forwarding to irnetfree — once', (t) => {
+  const sh = findSh();
+  if (!sh) return t.skip('no POSIX sh here');
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-fw-'));
+  t.after(() => { try { fs.rmSync(work, { recursive: true, force: true }); } catch {} });
+  fs.writeFileSync(path.join(work, 'uci'), FAKE_UCI, { mode: 0o755 });
+  const script = path.join(work, 'fw-forwardings.sh');
+  fs.writeFileSync(script, data[`./${PREFIX}/fw-forwardings.sh`].data);
+  const dbFile = path.join(work, 'db.json');
+  const rows = [
+    ['firewall.lan', 'zone'], ['firewall.lan.name', 'lan'],
+    ['firewall.wan', 'zone'], ['firewall.wan.name', 'wan'],
+    ['firewall.guest_zone', 'zone'], ['firewall.guest_zone.name', 'guest'],
+    ['firewall.@forwarding[0]', 'forwarding'], ['firewall.@forwarding[0].src', 'lan'], ['firewall.@forwarding[0].dest', 'wan'],
+    ['firewall.guest_wan', 'forwarding'], ['firewall.guest_wan.src', 'guest'], ['firewall.guest_wan.dest', 'wan'],
+    ['firewall.iot', 'zone'], ['firewall.iot.name', 'iot'],                       // an isolated zone: no wan, so no tunnel either
+    ['firewall.irnetfree', 'zone'], ['firewall.irnetfree.name', 'irnetfree'],
+    ['firewall.irnetfree_lan', 'forwarding'], ['firewall.irnetfree_lan.src', 'lan'], ['firewall.irnetfree_lan.dest', 'irnetfree']
+  ];
+  fs.writeFileSync(dbFile, JSON.stringify(rows));
+  const env = Object.assign({}, process.env, { FAKE_UCI_DB: dbFile, PATH: work + path.delimiter + process.env.PATH });
+  const run = () => spawnSync(sh, [script], { env, encoding: 'utf8', cwd: work });
+  const r1 = run();
+  assert.equal(r1.status, 0, r1.stderr);
+  const after = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
+  const has = (k, v) => after.some(x => x[0] === k && x[1] === v);
+  assert.ok(has('firewall.irnetfree_guest', 'forwarding') && has('firewall.irnetfree_guest.src', 'guest') && has('firewall.irnetfree_guest.dest', 'irnetfree'), JSON.stringify(after));
+  assert.ok(!after.some(x => /irnetfree_iot/.test(x[0])), 'a zone that may not reach wan does not get the tunnel');
+  assert.equal(after.filter(x => x[0].endsWith('.src') && x[1] === 'lan').length, 2, 'lan already had one: not doubled');
+  assert.equal(after.filter(x => x[0] === '#commit').length, 1, 'committed once');
+  // idempotent: a second run changes nothing and commits nothing
+  const r2 = run();
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(dbFile, 'utf8')), after);
+  // no irnetfree zone (removed by hand): the script leaves the firewall alone
+  fs.writeFileSync(dbFile, JSON.stringify(rows.filter(x => !/^firewall\.irnetfree/.test(x[0]))));
+  assert.equal(run().status, 0);
+  assert.ok(!JSON.parse(fs.readFileSync(dbFile, 'utf8')).some(x => /irnetfree/.test(x[0])));
 });
 
 test('uci config and uci-defaults: the four options, the firewall zone, idempotent', () => {

@@ -11,6 +11,8 @@ import org.json.JSONObject
  * geo-asset flag (geo rules are skipped when the .dat files are absent).
  *
  * The VpnService points tun2socks at the SOCKS inbound (settings.socksPort).
+ * That inbound and http-in carry the session's credentials when the caller
+ * hands them in (`inboundAuth`, LocalAuth.kt): loopback is shared by every app.
  */
 object ConfigBuilder {
 
@@ -33,15 +35,18 @@ object ConfigBuilder {
      * address, with the resolved address the caller found for it — see
      * `wgEndpointHosts`. Handed in through the settings-like `wgEndpointIps` map
      * (the desktop's `settings.wgEndpointIps`).
+     *
+     * `inboundAuth`: the session's username/password for socks-in and http-in
+     * (the pool's own ps-/ph- ports stay open — exposing them is that feature).
      */
-    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap()): JSONObject {
+    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null): JSONObject {
         val listen = "127.0.0.1"
         val sniffing = if (s.enableSniffing)
             JSONObject().put("enabled", true).put("destOverride", JSONArray().put("http").put("tls").put("quic")).put("routeOnly", false)
         else JSONObject().put("enabled", false)
 
-        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps)
-        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps)
+        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth)
+        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth)
 
         val outbounds = JSONArray()
         // Every target the plan routes to, with its outbound tag — the resolver a
@@ -78,7 +83,7 @@ object ConfigBuilder {
         // The resolver's exit follows the catch-all; a chain / single plan never
         // applies advanced rules, so the DNS plan sees `advancedRouting: false`.
         val dnsSettings = s.copy(advancedRouting = false)
-        return assemble(s, standardInbounds(s, listen, sniffing), outbounds, rules,
+        return assemble(s, standardInbounds(s, listen, sniffing, inboundAuth), outbounds, rules,
             geoAssets, catchAllTag, dnsSettings, targetResolversFor(targets), wgEndpointIps)
     }
 
@@ -99,7 +104,7 @@ object ConfigBuilder {
 
     /* ----------------------------- advanced ----------------------------- */
 
-    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>): JSONObject {
+    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?): JSONObject {
         val reg = Registry(plan.serversById, plan.chainsById)
         val advRules = JSONArray()
         val targets = ArrayList<Pair<Any?, String>>()
@@ -159,37 +164,34 @@ object ConfigBuilder {
         rules.put(fieldRule().put("port", "0-65535").put("outboundTag", defTag))
 
         val dnsSettings = s.copy(advancedRouting = true, routeRules = plan.rules)
-        return assemble(s, standardInbounds(s, listen, sniffing), JSONArray(reg.outs), rules,
+        return assemble(s, standardInbounds(s, listen, sniffing, auth), JSONArray(reg.outs), rules,
             geo, exitTag, dnsSettings, targetResolversFor(targets), wgEndpointIps)
     }
 
     /* ----------------------------- pool ----------------------------- */
 
-    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>): JSONObject {
+    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?): JSONObject {
         val reg = Registry(plan.serversById, plan.chainsById)
         val inbounds = JSONArray()
-        // The metrics listener binds apiPort itself, outside the inbound list, so
-        // reserve it up front: a pool entry must never take it (xray refuses to
-        // start on a duplicate bind). Mirrors buildPoolConfig() in configBuilder.js.
+        // apiPort stays reserved although this config no longer opens the
+        // metrics listener on it: the settings screen still counts it as taken,
+        // and the desktop's buildPoolConfig() keeps a pool entry off it too.
         val used = HashSet<Int>()
         used.add(s.apiPort)
         val perInbound = JSONArray()
         val targets = ArrayList<Pair<Any?, String>>()
 
-        fun addInbound(tag: String, port: Int, http: Boolean): Boolean {
+        fun addInbound(tag: String, port: Int, http: Boolean, a: LocalAuth? = null): Boolean {
             if (port <= 0 || port > 65535 || !used.add(port)) return false
-            inbounds.put(if (http)
-                JSONObject().put("tag", tag).put("port", port).put("listen", listen).put("protocol", "http").put("settings", JSONObject()).put("sniffing", sniffing)
-            else
-                JSONObject().put("tag", tag).put("port", port).put("listen", listen).put("protocol", "socks").put("settings", JSONObject().put("auth", "noauth").put("udp", true)).put("sniffing", sniffing))
+            inbounds.put(if (http) httpInbound(tag, port, listen, sniffing, a) else socksInbound(tag, port, listen, sniffing, a))
             return true
         }
 
         val primaryTag = reg.tagFor(plan.primary)
         targets.add(targetServer(plan.primary, plan) to primaryTag)
         val stdTags = ArrayList<String>()
-        if (addInbound("socks-in", s.socksPort, false)) stdTags.add("socks-in")
-        if (addInbound("http-in", s.httpPort, true)) stdTags.add("http-in")
+        if (addInbound("socks-in", s.socksPort, false, auth)) stdTags.add("socks-in")
+        if (addInbound("http-in", s.httpPort, true, auth)) stdTags.add("http-in")
         if (stdTags.isNotEmpty()) perInbound.put(rule(stdTags, primaryTag))
 
         for (e in plan.entries) {
@@ -422,21 +424,28 @@ object ConfigBuilder {
         }
     }
 
-    private fun standardInbounds(s: AppSettings, listen: String, sniffing: JSONObject): JSONArray = JSONArray()
-        .put(JSONObject().put("tag", "socks-in").put("port", s.socksPort).put("listen", listen)
-            .put("protocol", "socks").put("settings", JSONObject().put("auth", "noauth").put("udp", true)).put("sniffing", sniffing))
-        .put(JSONObject().put("tag", "http-in").put("port", s.httpPort).put("listen", listen)
-            .put("protocol", "http").put("settings", JSONObject()).put("sniffing", sniffing))
+    private fun standardInbounds(s: AppSettings, listen: String, sniffing: JSONObject, auth: LocalAuth?): JSONArray = JSONArray()
+        .put(socksInbound("socks-in", s.socksPort, listen, sniffing, auth))
+        .put(httpInbound("http-in", s.httpPort, listen, sniffing, auth))
 
-    /**
-     * Live traffic counters over HTTP (GET /debug/vars) instead of the gRPC-only
-     * StatsService. It is a top-level listener, NOT an inbound, so no inbound and
-     * no `inboundTag: ["api"]` routing rule exists any more — nothing can collide
-     * with it and it reports EVERY outbound tag (pool/advanced plans have no
-     * outbound called 'proxy'). Kept on 127.0.0.1 even when allowLan is on.
-     */
-    private fun metricsListener(s: AppSettings): JSONObject = JSONObject()
-        .put("tag", "metrics").put("listen", "127.0.0.1:${s.apiPort}")
+    /** A local SOCKS inbound; with [auth], only for whoever presents it (hev, the app's own clients). */
+    private fun socksInbound(tag: String, port: Int, listen: String, sniffing: JSONObject, auth: LocalAuth?): JSONObject {
+        val settings = if (auth == null) JSONObject().put("auth", "noauth")
+            else JSONObject().put("auth", "password").put("accounts", JSONArray().put(JSONObject().put("user", auth.user).put("pass", auth.pass)))
+        return JSONObject().put("tag", tag).put("port", port).put("listen", listen)
+            .put("protocol", "socks").put("settings", settings.put("udp", true)).put("sniffing", sniffing)
+    }
+
+    private fun httpInbound(tag: String, port: Int, listen: String, sniffing: JSONObject, auth: LocalAuth?): JSONObject {
+        val settings = JSONObject()
+        if (auth != null) settings.put("accounts", JSONArray().put(JSONObject().put("user", auth.user).put("pass", auth.pass)))
+        return JSONObject().put("tag", tag).put("port", port).put("listen", listen)
+            .put("protocol", "http").put("settings", settings).put("sniffing", sniffing)
+    }
+
+    // No metrics listener (the desktop's GET /debug/vars on apiPort): nothing on
+    // Android reads it — the traffic figures come from hev — and it answered any
+    // app on 127.0.0.1 with this tunnel's outbound tags and byte counts.
 
     /**
      * What a WireGuard peer in the CONFIG may carry: everything. `allowedIPs` is
@@ -509,8 +518,9 @@ object ConfigBuilder {
         val level0 = JSONObject().put("statsUserUplink", true).put("statsUserDownlink", true)
         return JSONObject()
             .put("log", JSONObject().put("loglevel", s.logLevel))
-            .put("metrics", metricsListener(s))
-            // stats + policy stay: the counters metrics reports only exist because of them
+            // stats + policy: the core's own counters, the desktop's shape. Nothing on
+            // Android reads them now — the traffic figures come from hev
+            // (TProxyGetStats), and XrayCore.queryTraffic, which could, is never called.
             .put("stats", JSONObject())
             .put("policy", JSONObject()
                 .put("levels", JSONObject().put("0", level0))
@@ -526,10 +536,16 @@ object ConfigBuilder {
             .put("routing", JSONObject().put("domainStrategy", if (s.dnsManaged) "IPOnDemand" else "IPIfNonMatch").put("rules", allRules))
     }
 
-    /** A minimal test config: one socks inbound -> the given server (with fragment, pin, endpoint as stored). */
-    fun buildTestConfig(server: ServerConfig, socksPort: Int): JSONObject {
+    /**
+     * A minimal test config: one socks inbound -> the given server (with
+     * fragment and pin as stored). A WireGuard endpoint that is a name takes the
+     * address the tester resolved (`wgEndpointIps`, XrayTester.testEndpoints):
+     * the throwaway core shares the live tunnel's process, and one that has to
+     * resolve the name itself and fails can panic it (`close of closed channel`).
+     */
+    fun buildTestConfig(server: ServerConfig, socksPort: Int, wgEndpointIps: Map<String, String> = emptyMap()): JSONObject {
         val proxy = cloneOut(server.outbound, "proxy", server)
-        widenWgAllowedIps(proxy); sanitizeWgAddress(proxy)
+        widenWgAllowedIps(proxy); sanitizeWgAddress(proxy); applyWgEndpointIps(proxy, wgEndpointIps)
         val outs = applyFragments(JSONArray().put(proxy))
         outs.put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
         return JSONObject()

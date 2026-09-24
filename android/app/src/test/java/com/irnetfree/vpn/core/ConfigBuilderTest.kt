@@ -155,6 +155,17 @@ class ConfigBuilderTest {
         assertTrue(c.getJSONObject("dns").getJSONArray("servers").get(0) is String)   // no in-country resolver for a pool
     }
 
+    @Test fun testConfigCarriesTheResolvedWireGuardEndpoint() {
+        // A throwaway core that has to resolve a WireGuard endpoint itself can
+        // panic (`close of closed channel`) and take the live tunnel's process
+        // with it — the test config gets the address the tester resolved.
+        val t = ConfigBuilder.buildTestConfig(corpWg, 39998, mapOf("cobra.example" to "51.222.52.23"))
+        val peer = t.getJSONArray("outbounds").getJSONObject(0).getJSONObject("settings").getJSONArray("peers").getJSONObject(0)
+        assertEquals("51.222.52.23:51820", peer.getString("endpoint"))
+        // the stored record keeps its name
+        assertEquals("cobra.example:51820", corpWg.outbound.getJSONObject("settings").getJSONArray("peers").getJSONObject(0).getString("endpoint"))
+    }
+
     @Test fun testConfigKeepsItsMinimalShape() {
         val t = ConfigBuilder.buildTestConfig(vless("t", "t.example", insecure = true), 39999)
         assertNull(t.opt("dns"))

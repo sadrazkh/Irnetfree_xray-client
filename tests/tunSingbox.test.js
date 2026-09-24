@@ -274,7 +274,8 @@ test('isOwnTunInterface recognises the sing-box adapter', () => {
 });
 
 test('physicalInterface delegates to the shared helper for the instance platform', async () => {
-  canned([[/Get-NetRoute -DestinationPrefix/, '10.0.0.1|7\r\n'], [/Get-NetAdapter -InterfaceIndex 7/, 'Ethernet 2\r\n']]);
+  canned([[/Get-NetRoute -DestinationPrefix/, JSON.stringify([{ nextHop: '10.0.0.1', ifIndex: 7, alias: 'Ethernet 2', routeMetric: 0, ifMetric: 25, state: 'Connected' }]) + '\r\n'],
+    [/Get-NetAdapter -InterfaceIndex 7/, 'Ethernet 2\r\n']]);
   const tun = new TunSingbox({ extraDirs: [], platform: 'win32' });
   assert.deepEqual(await tun.physicalInterface(), { name: 'Ethernet 2', ifIndex: '7', gateway: '10.0.0.1' });
   answer = null;
@@ -330,7 +331,7 @@ test('win32 start: spawns `sing-box run -c <cfg>` from its own dir, waits for th
   });
 });
 
-test('win32 start: two v4 servers → set + add index=2; no v6 line without ipv6', async () => {
+test('win32 start: two v4 servers → set + add index=2; the v6 side is loopback, not a resolver of ours', async () => {
   await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
     tun.isElevated = () => true;
     fakeSpawn = killable();
@@ -339,7 +340,8 @@ test('win32 start: two v4 servers → set + add index=2; no v6 line without ipv6
     const netsh = execs.filter(([c]) => c === 'netsh').map(([, a]) => a);
     assert.deepEqual(netsh, [
       ['interface', 'ip', 'set', 'dnsservers', 'name=IRNetFree', 'static', '1.1.1.1', 'primary', 'validate=no'],
-      ['interface', 'ip', 'add', 'dnsservers', 'name=IRNetFree', '8.8.8.8', 'index=2', 'validate=no']
+      ['interface', 'ip', 'add', 'dnsservers', 'name=IRNetFree', '8.8.8.8', 'index=2', 'validate=no'],
+      ['interface', 'ipv6', 'set', 'dnsservers', 'name=IRNetFree', 'static', '::1', 'primary', 'validate=no']
     ]);
     assert.equal(JSON.parse(fs.readFileSync(spawns[0][1][2], 'utf8')).inbounds[0].strict_route, false);
     await tun.stop();
@@ -380,12 +382,19 @@ test('win32 start: the tunnel peer is the adapter resolver on BOTH families, ipv
 });
 
 /**
- * The other way round: a config whose core has no port-53 hijack (the sing-box
- * format) gets plain public resolvers instead of the peer — and then the peer is
- * an address nothing answers on. Handing it out as the v6 resolver would be a
- * v6 black hole, so it is only ever offered next to its own v4 half.
+ * The other way round: a config whose core has no port-53 hijack (managed DNS
+ * off — the owner's own mode — or the sing-box format) gets plain public
+ * resolvers instead of the peer, and then the peer is an address nothing
+ * answers on. It is never offered as the v6 resolver — but sing-tun already put
+ * it there itself (under auto_route it sets the address after the TUN's own on
+ * both families), and leaving the v6 list alone left that dead resolver beside
+ * the working v4 ones: lookups waiting on it. It is replaced by ::1, the same
+ * hold the leak guard puts on the physical adapters: nothing listens there and
+ * a query fails in milliseconds. Not a delete: an empty v6 list is one Windows
+ * may fill with its fec0:0:0:ffff::1-3 placeholders, which would route into
+ * the TUN and die exactly like the peer.
  */
-test('win32 start: without the tunnel peer on v4 there is no invented v6 peer, even with ipv6 on', async () => {
+test('win32 start: without the tunnel peer on v4 the v6 resolver sing-tun set is replaced by loopback, even with ipv6 on', async () => {
   await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
     tun.isElevated = () => true;
     fakeSpawn = killable();
@@ -394,8 +403,29 @@ test('win32 start: without the tunnel peer on v4 there is no invented v6 peer, e
     const netsh = execs.filter(([c]) => c === 'netsh').map(([, a]) => a);
     assert.deepEqual(netsh, [
       ['interface', 'ip', 'set', 'dnsservers', 'name=IRNetFree', 'static', '1.1.1.1', 'primary', 'validate=no'],
-      ['interface', 'ip', 'add', 'dnsservers', 'name=IRNetFree', '8.8.8.8', 'index=2', 'validate=no']
+      ['interface', 'ip', 'add', 'dnsservers', 'name=IRNetFree', '8.8.8.8', 'index=2', 'validate=no'],
+      ['interface', 'ipv6', 'set', 'dnsservers', 'name=IRNetFree', 'static', '::1', 'primary', 'validate=no']
     ]);
+    assert.equal(netsh.some(a => a.includes(TUN_PEER6)), false, 'the dead peer is never written');
+    await tun.stop();
+  });
+});
+
+test('win32 start: replacing that v6 resolver failing is a warning, never a failed connect', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun, dir, logs) => {
+    tun.isElevated = () => true;
+    fakeSpawn = killable();
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    const base = answer;
+    answer = (cmd, args) => {
+      if (/netsh interface ipv6 set dnsservers name=IRNetFree static ::1/.test([cmd, ...args].join(' '))) {
+        throw new Error('The parameter is incorrect.');
+      }
+      return base(cmd, args);
+    };
+    await tun.start(10808, ['1.2.3.4'], ['1.1.1.1'], {});
+    assert.equal(tun.active, true);
+    assert.ok(logs.some(([level, line]) => level === 'warn' && /v6.*The parameter is incorrect/.test(line)), JSON.stringify(logs));
     await tun.stop();
   });
 });
@@ -439,6 +469,30 @@ test('win32 start: a process that dies inside the fail-fast window throws its la
     assert.equal(fs.existsSync(cfgDir), false, 'temp config dir removed on failure');
     assert.ok(!execs.some(([c]) => c === 'netsh'), 'no DNS written for a dead tunnel');
     assert.ok(logs.some(([lvl, l]) => lvl === 'warn' && /\[tun\] FATAL/.test(l)), 'stderr reaches the app log');
+  });
+});
+
+test('win32 start: a sing-box that dies while the adapter DNS is being set is never marked active', async () => {
+  // Its exit found `active` still false, so it said nothing — and the start
+  // then marked a dead tunnel live: "TUN mode active" over nothing, the guard
+  // engaged for it, and no drop for the recovery to rebuild.
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun, dir, logs) => {
+    tun.isElevated = () => true;
+    const child = stubChild();
+    fakeSpawn = () => child;
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    const base = answer;
+    let died = false;
+    answer = (cmd, args) => {
+      if (cmd === 'netsh' && !died) { died = true; child.stderr.emit('data', Buffer.from('FATAL[0003] wintun: adapter removed\n')); child.emit('exit', 1, null); }
+      return base(cmd, args);
+    };
+    await assert.rejects(() => tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {}),
+      (e) => /sing-box exited while the TUN adapter was being set up/.test(e.message) && /adapter removed/.test(e.message));
+    assert.equal(died, true);
+    assert.equal(tun.active, false);
+    assert.equal(tun.proc, null);
+    assert.ok(!logs.some(([, l]) => /TUN mode active/.test(l)), 'never announced');
   });
 });
 
@@ -490,6 +544,104 @@ test('win32: the process dying while active marks the tunnel dead and logs at er
     await tun.stop();   // no process left: nothing to kill, no throw
     assert.ok(!spawns.some(([c]) => c === 'taskkill'));
   });
+});
+
+/*
+ * A live tunnel whose sing-box dies on its own leaves the machine's routes and
+ * DNS pointing into an adapter that is gone: every app that is not using the
+ * system proxy leaves through the physical NIC. Only the macOS health check
+ * used to say so; the owner's recovery never heard about it on Windows or Linux.
+ */
+const flush = () => new Promise((r) => setImmediate(r));
+
+test('a live tunnel whose sing-box exits on its own tells the owner — once, asynchronously — on Windows and Linux', async (t) => {
+  const realGetuid = process.getuid;
+  process.getuid = () => 0;   // startLinux wants root
+  t.after(() => { process.getuid = realGetuid; });
+  for (const [platform, files] of [['win32', ['sing-box.exe', 'wintun.dll']], ['linux', ['sing-box']]]) {
+    await withBin(files, platform, async (tun) => {
+      tun.isElevated = () => true;
+      const lost = [];
+      tun.onUnexpectedExit = (err) => { lost.push(err); };
+      const child = stubChild();
+      fakeSpawn = () => child;
+      canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+      await tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {});
+      assert.equal(tun.active, true, platform);
+      child.emit('exit', 2, null);
+      assert.equal(tun.active, false);
+      assert.deepEqual(lost, [], `${platform}: never from inside the child's own exit event`);
+      await flush();
+      assert.equal(lost.length, 1, `${platform}: the owner hears about the dead tunnel`);
+      assert.match(lost[0].message, /sing-box exited \(code=2/);
+      child.emit('error', new Error('late'));   // a trailing 'error' is not a second drop
+      await flush();
+      assert.equal(lost.length, 1);
+    });
+  }
+});
+
+test('an exit we asked for, or a start that fails, is not a lost tunnel', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
+    tun.isElevated = () => true;
+    const lost = [];
+    tun.onUnexpectedExit = (err) => { lost.push(err); };
+    fakeSpawn = killable();
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    await tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {});
+    await tun.stop();
+    await flush();
+    assert.deepEqual(lost, [], 'a disconnect is not a drop');
+  });
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
+    tun.isElevated = () => true;
+    const lost = [];
+    tun.onUnexpectedExit = (err) => { lost.push(err); };
+    fakeSpawn = () => { const c = stubChild(); process.nextTick(() => c.emit('exit', 1, null)); return c; };
+    canned([]);
+    await assert.rejects(tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {}), /exited immediately/);
+    await flush();
+    assert.deepEqual(lost, [], 'a start that fails reports itself through its own rejection');
+  });
+});
+
+test('a failing recovery callback is logged, never thrown into the child\'s event', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun, dir, logs) => {
+    tun.isElevated = () => true;
+    tun.onUnexpectedExit = async () => { throw new Error('boom'); };
+    const child = stubChild();
+    fakeSpawn = () => child;
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    await tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {});
+    assert.doesNotThrow(() => child.emit('exit', 1, null));
+    await flush();
+    assert.ok(logs.some(([lvl, l]) => lvl === 'error' && /TUN recovery callback: boom/.test(l)), JSON.stringify(logs));
+  });
+});
+
+test('a late exit from a sing-box that was already replaced leaves the live tunnel alone', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
+    tun.isElevated = () => true;
+    const lost = [];
+    tun.onUnexpectedExit = (err) => { lost.push(err); };
+    const old = stubChild();
+    fakeSpawn = () => old;
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    await tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {});
+    const live = stubChild();
+    tun.proc = live;               // a reconnect's newer sing-box, after the old one's bounded stop wait ran out
+    old.emit('exit', 1, null);
+    await flush();
+    assert.equal(tun.active, true, 'the old process is not the tunnel any more');
+    assert.equal(tun.proc, live);
+    assert.deepEqual(lost, []);
+  });
+});
+
+test('the default onUnexpectedExit is a harmless no-op (TunOpenwrt\'s inner passes none)', () => {
+  const tun = new TunSingbox({});
+  assert.equal(typeof tun.onUnexpectedExit, 'function');
+  assert.doesNotThrow(() => tun.onUnexpectedExit(new Error('x')));
 });
 
 test('stop / cleanupSync are no-ops when nothing runs', async () => {

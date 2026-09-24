@@ -945,6 +945,296 @@ test('share links keep allowInsecure=1 (other clients still understand it); the 
   assert.equal('certPin' in parseLink(link), false, 'a fresh import starts unpinned');
 });
 
+/* ------------------- the edit form keeps a TCP HTTP header ------------------- */
+
+/** Every field the edit form sends for a vless/vmess/trojan server (app.js #editSave). */
+function formFields(s, over) {
+  const st = s.outbound.streamSettings;
+  const rq = st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.request;
+  return Object.assign({
+    name: s.name, address: s.address, port: String(s.port), fragment: '', noise: '', engine: 'xray',
+    network: st.network, security: st.security, sni: '', fp: 'chrome', pbk: '', sid: '', allowInsecure: false,
+    path: (rq && rq.path && rq.path[0]) || '', serviceName: (rq && rq.path && rq.path[0]) || '',
+    host: (rq && rq.headers && rq.headers.Host && rq.headers.Host[0]) || '',
+    cipherSuites: '', finalMask: ''
+  }, over || {});
+}
+
+test('applyServerEdits: a rename through the form keeps the TCP HTTP header (obfuscation) whole', () => {
+  const s = parseLink('vless://u@t.example.com:80?type=tcp&headerType=http&path=%2Fa&host=t.com#T');
+  const out = applyServerEdits(s, formFields(s, { name: 'Renamed' }));
+  assert.equal(out.name, 'Renamed');
+  assert.deepEqual(out.outbound.streamSettings, s.outbound.streamSettings);
+});
+
+test('applyServerEdits: the header takes an edited path or Host, and anything the form does not show stays', () => {
+  const s = parseLink('vless://u@t.example.com:80?type=tcp&headerType=http&path=%2Fa&host=t.com#T');
+  // a header from a hand-made config: more than the form knows about
+  s.outbound.streamSettings.tcpSettings.header.request.method = 'GET';
+  s.outbound.streamSettings.tcpSettings.header.request.headers['User-Agent'] = ['Mozilla/5.0'];
+  s.outbound.streamSettings.tcpSettings.header.response = { status: '200' };
+
+  const same = applyServerEdits(s, formFields(s, { name: 'x' }));
+  assert.deepEqual(same.outbound.streamSettings.tcpSettings, s.outbound.streamSettings.tcpSettings);
+
+  const moved = applyServerEdits(s, formFields(s, { path: '/b', host: 'u.com' }));
+  const h = moved.outbound.streamSettings.tcpSettings.header;
+  assert.equal(h.type, 'http');
+  assert.deepEqual(h.request.path, ['/b']);
+  assert.deepEqual(h.request.headers.Host, ['u.com']);
+  assert.deepEqual(h.request.headers['User-Agent'], ['Mozilla/5.0']);
+  assert.equal(h.request.method, 'GET');
+  assert.deepEqual(h.response, { status: '200' });
+
+  const noHost = applyServerEdits(s, formFields(s, { host: '' }));
+  assert.equal('Host' in noHost.outbound.streamSettings.tcpSettings.header.request.headers, false, 'a cleared Host is cleared');
+});
+
+test('applyServerEdits: leaving TCP for another transport leaves the header behind', () => {
+  const s = parseLink('vless://u@t.example.com:80?type=tcp&headerType=http&path=%2Fa&host=t.com#T');
+  const ws = applyServerEdits(s, formFields(s, { network: 'ws' }));
+  assert.equal(ws.outbound.streamSettings.network, 'ws');
+  assert.equal(ws.outbound.streamSettings.tcpSettings, undefined);
+  assert.deepEqual(ws.outbound.streamSettings.wsSettings, { path: '/a', headers: { Host: 't.com' } });
+  // and a kcp header type never leaks into tcp (nor the other way)
+  const k = parseLink('vless://u@k.example.com:443?type=kcp&headerType=srtp&seed=S');
+  const kt = applyServerEdits(k, { network: 'tcp', sni: 'x' });
+  assert.equal(kt.outbound.streamSettings.tcpSettings, undefined);
+  const tk = applyServerEdits(s, formFields(s, { network: 'kcp' }));
+  assert.deepEqual(tk.outbound.streamSettings.kcpSettings.header, { type: 'none' });
+});
+
+test('applyServerEdits: a stored `raw` server keeps its header too', () => {
+  const s = parseLink('vless://u@t.example.com:80?type=tcp&headerType=http&path=%2Fa&host=t.com#T');
+  s.outbound.streamSettings.network = 'raw';   // what an older parse of type=raw stored
+  const out = applyServerEdits(s, formFields(s, { network: '', name: 'x' }));   // no <option> for raw: the select reads ''
+  assert.deepEqual(out.outbound.streamSettings.tcpSettings, s.outbound.streamSettings.tcpSettings);
+});
+
+/* ------------------------ httpupgrade, and raw + http ------------------------ */
+
+test('vless: httpupgrade keeps its path and Host', () => {
+  const s = parseLink('vless://u@h.example.com:443?type=httpupgrade&security=tls&sni=cdn.example.com&path=%2Fup%3Fed%3D2048&host=cdn.example.com#HU');
+  const st = s.outbound.streamSettings;
+  assert.equal(st.network, 'httpupgrade');
+  assert.deepEqual(st.httpupgradeSettings, { path: '/up?ed=2048', host: 'cdn.example.com' });
+  const back = parseLink(buildShareLink(s)).outbound.streamSettings;
+  assert.deepEqual(back, st, 'the share link carries it out and in again');
+});
+
+test('vmess: httpupgrade keeps its path and Host, both ways', () => {
+  const s = parseLink('vmess://' + b64(JSON.stringify({ v: '2', ps: 'VU', add: 'v.example.com', port: '80', id: 'uuid-v', aid: '0', net: 'httpupgrade', path: '/hu', host: 'front.example.com', tls: '' })));
+  const st = s.outbound.streamSettings;
+  assert.equal(st.network, 'httpupgrade');
+  assert.deepEqual(st.httpupgradeSettings, { path: '/hu', host: 'front.example.com' });
+  assert.deepEqual(parseLink(buildShareLink(s)).outbound.streamSettings, st);
+});
+
+test('type=raw is TCP: a raw + http header link keeps its header, both ways', () => {
+  const s = parseLink('vless://u@t.example.com:80?type=raw&headerType=http&path=%2Fa&host=t.com#R');
+  const st = s.outbound.streamSettings;
+  assert.equal(st.network, 'tcp', 'every core knows tcp; only newer ones know raw');
+  assert.deepEqual(st.tcpSettings, { header: { type: 'http', request: { path: ['/a'], headers: { Host: ['t.com'] } } } });
+  assert.deepEqual(parseLink(buildShareLink(s)).outbound.streamSettings, st);
+  // a record stored with network 'raw' still exports its header
+  const stored = JSON.parse(JSON.stringify(s));
+  stored.outbound.streamSettings.network = 'raw';
+  assert.deepEqual(parseLink(buildShareLink(stored)).outbound.streamSettings.tcpSettings, st.tcpSettings);
+  const vm = parseLink('vmess://' + b64(JSON.stringify({ v: '2', add: 'v.example.com', port: '80', id: 'u', net: 'raw', type: 'http', path: '/p', host: 'h.com' })));
+  assert.deepEqual(vm.outbound.streamSettings.tcpSettings.header.request, { path: ['/p'], headers: { Host: ['h.com'] } });
+});
+
+test('applyServerEdits records which fields the user changed, across edits — a save that changes nothing records nothing', () => {
+  const s = parseLink('trojan://pw@b.example.com:443?security=tls&sni=b.example.com&type=ws&path=%2Ftr&host=b.example.com#B');
+  const full = (rec, over) => formFields(rec, Object.assign({ network: 'ws', security: 'tls', sni: 'b.example.com', path: '/tr', host: 'b.example.com' }, over));
+  const same = applyServerEdits(s, full(s));
+  assert.equal('_edited' in same, false, 'the form re-sends every field; unchanged ones are not edits');
+  const a = applyServerEdits(s, full(s, { address: '104.16.1.1' }));
+  assert.deepEqual(a._edited, ['address']);
+  const b = applyServerEdits(a, full(a, { sni: 'front.example.com', name: 'Mine', fragment: 'tlshello,100-200,10-20' }));
+  assert.deepEqual(b._edited, ['address', 'fragment', 'name', 'sni']);
+  const w = parseLink('wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32#W');
+  assert.deepEqual(applyServerEdits(w, { mtu: '1280', dns: '192.168.60.1' })._edited, ['dns', 'mtu']);
+  assert.equal('_edited' in applyServerEdits(s, { clearCertPin: true }), false, 'clearing the pin is not a field of the server');
+});
+
+test('applyServerEdits records what was really saved: whitespace and a value the edit ignored are not edits', () => {
+  const s = parseLink('trojan://pw@b.example.com:443?security=tls&sni=b.example.com&type=ws&path=%2Ftr&host=b.example.com#B');
+  const out = applyServerEdits(s, { address: '  b.example.com  ', port: 'not-a-port', name: '   ', password: '' });
+  assert.equal(out.port, 443);
+  assert.equal(out.name, 'B');
+  assert.equal('_edited' in out, false);
+});
+
+test('applyServerEdits records a field only when the submitted value differs from what the form showed — a rebuild’s normalisation is not an edit', () => {
+  // an httpupgrade server stored before it had settings of its own: the form
+  // shows an empty path, a rename re-submits it empty, and the rebuild makes
+  // it `/` — the user did not touch the path, and recording it would freeze
+  // the 404 the next refresh is about to repair
+  const s = parseLink('vless://u@h.example.com:443?type=httpupgrade&security=tls&sni=cdn.example.com&path=%2Fup&host=cdn.example.com#HU');
+  delete s.outbound.streamSettings.httpupgradeSettings;
+  const out = applyServerEdits(s, formFields(s, { name: 'Renamed', network: 'httpupgrade', security: 'tls', sni: 'cdn.example.com', path: '', host: '' }));
+  assert.deepEqual(out._edited, ['name']);
+  // lists are compared the way the form shows them
+  const w = parseLink('wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32&allowedips=10.0.0.0%2F8,192.168.0.0%2F16&dns=192.168.60.1,tes.systems#W');
+  const same = applyServerEdits(w, { publicKey: 'P', localAddress: '10.0.0.5/32', allowedIPs: '10.0.0.0/8, 192.168.0.0/16', dns: '192.168.60.1, tes.systems', mtu: '1420', reserved: '' });
+  assert.equal('_edited' in same, false);
+});
+
+test('applyServerEdits releases a field saved back to what the server’s own link gives', () => {
+  const s = parseLink('trojan://pw@b.example.com:443?security=tls&sni=b.example.com&type=ws&path=%2Ftr&host=b.example.com&fragment=tlshello,1-2,1-2#B');
+  const full = (rec, over) => formFields(rec, Object.assign({ network: 'ws', security: 'tls', sni: 'b.example.com', path: '/tr', host: 'b.example.com', fragment: 'tlshello,1-2,1-2' }, over));
+  const a = applyServerEdits(s, full(s, { sni: 'front.example.com', address: '104.16.1.1', fragment: 'tlshello,100-200,10-20' }));
+  assert.deepEqual(a._edited, ['address', 'fragment', 'sni']);
+  const b = applyServerEdits(a, full(a, { sni: 'b.example.com', fragment: 'tlshello,1-2,1-2' }));
+  assert.deepEqual(b._edited, ['address'], 'sni and fragment are the link’s again: the panel owns them');
+  const c = applyServerEdits(b, full(b, { address: 'b.example.com' }));
+  assert.equal('_edited' in c, false);
+});
+
+test('applyServerEdits: a WireGuard from a .conf records a cleared DNS — its keyless link says nothing about the server', () => {
+  // A .conf import (a subscription can serve one) keeps `wireguard://host:port`:
+  // no keys, no DNS. Released against THAT link, clearing the corporate DNS
+  // "matched the provider" and was not recorded — the next refresh put it back.
+  const w = makeWireguardServer(Object.assign(parseWireguardConf(WG_CONF), { name: 'Corp' }));
+  assert.equal(w.raw, 'wireguard://ir.vrt-server.org:11040');
+  assert.deepEqual(w.dns, ['1.1.1.1', '8.8.8.8']);
+  const out = applyServerEdits(w, { dns: '' });
+  assert.equal('dns' in out, false);
+  assert.deepEqual(out._edited, ['dns']);
+  // a link WITH its keys still speaks for the server: saved back to it, released
+  const k = parseLink('wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32#W');
+  const a = applyServerEdits(k, { mtu: '1280' });
+  assert.deepEqual(a._edited, ['mtu']);
+  assert.equal('_edited' in applyServerEdits(a, { mtu: '1420' }), false);
+});
+
+test('applyServerEdits: httpupgrade path and Host are edited like the other transports', () => {
+  const s = parseLink('vless://u@h.example.com:443?type=httpupgrade&security=tls&sni=cdn.example.com&path=%2Fup&host=cdn.example.com#HU');
+  const out = applyServerEdits(s, { network: 'httpupgrade', security: 'tls', sni: 'cdn.example.com', path: '/new', host: 'other.example.com' });
+  assert.deepEqual(out.outbound.streamSettings.httpupgradeSettings, { path: '/new', host: 'other.example.com' });
+});
+
+/* ---------------------- ss: plain userinfo (SIP002 / 2022) ---------------------- */
+
+test('ss: plain method:password userinfo — mandatory for SS-2022 — is read as it is', () => {
+  const s = parseLink('ss://2022-blake3-aes-128-gcm:YctPZ6U7xPPcU%2Bgp3u%2BO0A%3D%3D@1.2.3.4:8388#x');
+  assert.deepEqual(s.outbound.settings.servers[0], {
+    address: '1.2.3.4', port: 8388, method: '2022-blake3-aes-128-gcm', password: 'YctPZ6U7xPPcU+gp3u+O0A==', uot: true
+  });
+  const plain = parseLink('ss://aes-256-gcm:secret@ss.example.com:8388#P').outbound.settings.servers[0];
+  assert.equal(plain.method, 'aes-256-gcm');
+  assert.equal(plain.password, 'secret');
+  // the export (base64 userinfo) comes back the same
+  const back = parseLink(buildShareLink(s)).outbound.settings.servers[0];
+  assert.equal(back.method, '2022-blake3-aes-128-gcm');
+  assert.equal(back.password, 'YctPZ6U7xPPcU+gp3u+O0A==');
+});
+
+test('ss: a base64 userinfo whose padding is percent-encoded decodes cleanly', () => {
+  const b = b64('aes-256-gcm:secret1');   // 19 bytes → "==" padding
+  assert.ok(b.endsWith('=='));
+  const s = parseLink('ss://' + b.replace(/=/g, '%3D') + '@ss.example.com:8388#P');
+  assert.equal(s.outbound.settings.servers[0].method, 'aes-256-gcm');
+  assert.equal(s.outbound.settings.servers[0].password, 'secret1', 'no stray bytes from the %3D');
+});
+
+test('ss: a userinfo that is neither plain nor base64 of method:password is an error, not a garbage cipher', () => {
+  assert.throws(() => parseLink('ss://' + b64url('no-colon-here') + '@1.2.3.4:8388#x'), /Shadowsocks/);
+  const { servers, errors } = parseMany('ss://' + b64url('no-colon-here') + '@1.2.3.4:8388#x');
+  assert.equal(servers.length, 0);
+  assert.equal(errors.length, 1);
+});
+
+/* ------------------------- IPv6 hosts are bracketed ------------------------- */
+
+test('share links bracket an IPv6 host and read back the same address', () => {
+  const v6 = '2001:db8::1';
+  const links = [
+    `vless://u@[${v6}]:443?security=tls&sni=a.com#V`,
+    `trojan://pw@[${v6}]:443?security=tls#T`,
+    'ss://' + b64url('aes-256-gcm:pw') + `@[${v6}]:8388#S`,
+    `socks://[${v6}]:1080#K`,
+    `http://[${v6}]:8080#H`,
+    `wireguard://KEY@[${v6}]:51820?publickey=P#W`
+  ];
+  for (const l of links) {
+    const s = parseLink(l);
+    assert.equal(s.address, v6, l);
+    const out = buildShareLink(s);
+    assert.ok(out.includes(`[${v6}]:${s.port}`), `${l} → ${out}`);
+    const back = parseLink(out);
+    assert.equal(back.address, v6, out);
+    assert.equal(back.port, s.port, out);
+  }
+});
+
+test('WireGuard endpoints bracket an IPv6 host: link, form, edit, repair', () => {
+  const v6 = '2606:4700:d0::a29f:c001';
+  const w = parseLink(`wireguard://KEY@[${v6}]:2408?publickey=P#W`);
+  assert.equal(w.outbound.settings.peers[0].endpoint, `[${v6}]:2408`);
+  // the unbracketed form still parses (the port is after the last colon)
+  assert.equal(parseLink(`wireguard://KEY@${v6}:2408?publickey=P#W`).outbound.settings.peers[0].endpoint, `[${v6}]:2408`);
+
+  const edited = applyServerEdits(w, { address: '2001:db8::2', port: '51820' });
+  assert.equal(edited.outbound.settings.peers[0].endpoint, '[2001:db8::2]:51820');
+  const back = applyServerEdits(edited, { address: 'wg.example.com' });
+  assert.equal(back.outbound.settings.peers[0].endpoint, 'wg.example.com:51820', 'a name is never bracketed');
+
+  const made = makeWireguardServer({ endpoint: `[${v6}]:2408`, privateKey: 'K', publicKey: 'P' });
+  assert.equal(made.address, v6);
+  assert.equal(made.outbound.settings.peers[0].endpoint, `[${v6}]:2408`);
+  assert.equal(made.raw, `wireguard://[${v6}]:2408`);
+  const px = makeProxyServer({ type: 'socks', address: v6, port: 1080 });
+  assert.equal(px.raw, `socks://[${v6}]:1080`);
+
+  // a record whose endpoint was overwritten by the interface address is
+  // repaired from its link — bracketed when the host is IPv6
+  const broken = JSON.parse(JSON.stringify(w));
+  broken.address = '10.10.10.42/32';
+  broken.outbound.settings.peers[0].endpoint = '10.10.10.42/32:2408';
+  assert.equal(migrateStoredServer(broken).outbound.settings.peers[0].endpoint, `[${v6}]:2408`);
+});
+
+/* ------------------------- unsupported schemes are reported ------------------------- */
+
+test('parseMany reports a scheme it cannot import instead of dropping the line in silence', () => {
+  const { servers, errors } = parseMany([
+    'hysteria2://pw@h.example.com:443#H',
+    'hy2://pw@h.example.com:443#H2',
+    'tuic://u:p@t.example.com:443#T',
+    'anytls://pw@a.example.com:443#A',
+    'vless://u1@a.example.com:443#ok',
+    '# a comment',
+    'https://t.me/some_channel'
+  ].join('\n'));
+  assert.deepEqual(servers.map(s => s.name), ['ok']);
+  assert.deepEqual(errors.map(e => e.error), [
+    'unsupported protocol: hysteria2', 'unsupported protocol: hy2', 'unsupported protocol: tuic', 'unsupported protocol: anytls'
+  ]);
+  assert.equal(errors[0].line, 'hysteria2://pw@h.example.com:443#H');
+});
+
+test('a base64 subscription of nothing but unsupported lines is decoded and reported, not silently empty', () => {
+  const { servers, errors } = parseMany(b64('hysteria2://pw@h.example.com:443#H\ntuic://u:p@t.example.com:443#T\n'));
+  assert.equal(servers.length, 0);
+  assert.deepEqual(errors.map(e => e.error), ['unsupported protocol: hysteria2', 'unsupported protocol: tuic']);
+});
+
+test('the scheme is case-insensitive: VLESS://, Trojan://, SS://, VMESS:// import', () => {
+  const vm = 'VMESS://' + b64(JSON.stringify({ v: '2', ps: 'M', add: 'm.example.com', port: '443', id: 'u', net: 'tcp' }));
+  const { servers, errors } = parseMany([
+    'VLESS://u1@a.example.com:443#A',
+    'Trojan://pw@b.example.com:443#B',
+    'SS://' + b64url('aes-256-gcm:pw') + '@c.example.com:8388#C',
+    vm
+  ].join('\n'));
+  assert.deepEqual(errors, []);
+  assert.deepEqual(servers.map(s => s.protocol), ['vless', 'trojan', 'shadowsocks', 'vmess']);
+  assert.equal(servers[0].address, 'a.example.com');
+  assert.equal(parseLink('WG://KEY@wg.example.com:51820?publickey=P').protocol, 'wireguard');
+});
+
 /* --------------------------- no silent duplicates --------------------------- */
 
 test('parser.js declares each top-level function exactly once and exports each name once', () => {
