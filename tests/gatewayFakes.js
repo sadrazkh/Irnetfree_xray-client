@@ -117,6 +117,7 @@ function xrayFactory(state) {
       },
       async stop() {
         x.stops++;
+        if (state.stopDelayMs) await new Promise((r) => setTimeout(r, state.stopDelayMs));   // a core slow to exit
         if (!x.running) return;
         x.running = false; x.proc = null;
         state.events.push('xray:stop');
@@ -140,7 +141,7 @@ function deps(state, extra = {}) {
     orphans: () => [],
     kill: () => { throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' }); },
     syslog: () => {},
-    timing: { bootDelayMs: 5, bootEveryMs: 20, bootSlowAfter: 1000, bootSlowMs: 20, routerBackoffMs: [5, 5, 10] }
+    timing: { bootDelayMs: 5, bootEveryMs: 20, bootSlowAfter: 1000, bootSlowMs: 20, routerBackoffMs: [5, 5, 10], crashWindowMs: 0 }
   }, extra);
 }
 

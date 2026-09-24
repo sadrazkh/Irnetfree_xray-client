@@ -167,9 +167,16 @@ function createService(opts = {}) {
   // nothing is spawned or bound, and the machine's proxy / routes are never
   // touched. Production passes none of them.
   const deps = opts.deps || {};
-  const setProxy = deps.setSystemProxy || setSystemProxy;
+  // IRNETFREE_NO_SYSTEM_PROXY=1: never touch the machine's system proxy — for a
+  // server started by the test suite, whose Ctrl+C reaches it and runs shutdown().
+  const setProxy = deps.setSystemProxy || (process.env.IRNETFREE_NO_SYSTEM_PROXY === '1' ? async () => {} : setSystemProxy);
   const waitPort = deps.waitForLocalPort || waitForLocalPort;
-  const T = Object.assign({ bootDelayMs: 1000, bootEveryMs: 15000, bootSlowAfter: 20, bootSlowMs: 60000, routerBackoffMs: [2000, 5000, 15000, 30000, 60000] }, deps.timing || {});
+  const T = Object.assign({
+    bootDelayMs: 1000, bootEveryMs: 15000, bootSlowAfter: 20, bootSlowMs: 60000,
+    routerBackoffMs: [2000, 5000, 15000, 30000, 60000],
+    crashWindowMs: 120000,       // a drop this soon after a rebuild continues that rebuild's backoff
+    syslogTunQuietMs: 10000      // one sing-box line of a kind per this, into syslog
+  }, deps.timing || {});
 
   const dataDir = opts.dataDir || defaultDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
@@ -207,10 +214,27 @@ function createService(opts = {}) {
   // finds them. Info lines stay out: syslog on a router is a small ring buffer.
   const syslog = deps.syslog || ((level, text) => (level === 'err' ? process.stderr : process.stdout).write(text + '\n'));
   const oneLine = (s) => String(s == null ? '' : s).replace(/\s*[\r\n]+\s*/g, ' | ').slice(0, 1000);
+  // sing-box's own output (`[tun] …`) can be a line per connection when
+  // something is wrong: one line of a kind (digits aside) per 10s reaches
+  // syslog, with a count of what was held back. The service's own lines are
+  // never held back.
+  const tunQuiet = new Map();
+  function tunLineSuffix(line) {
+    const kind = line.replace(/\d+/g, '#').slice(0, 80);
+    const now = Date.now();
+    const q = tunQuiet.get(kind);
+    if (q && now - q.at < T.syslogTunQuietMs) { q.held++; return null; }
+    if (tunQuiet.size > 200) tunQuiet.clear();
+    tunQuiet.set(kind, { at: now, held: 0 });
+    return q && q.held ? ` (+${q.held} like it held back)` : '';
+  }
   function toSyslog(channel, p) {
     if (!p) return;
     if (channel === 'log') {
-      if (p.level === 'warn' || p.level === 'error') syslog('err', `irnetfree: [${p.level}] ${oneLine(p.line)}`);
+      if (p.level !== 'warn' && p.level !== 'error') return;
+      const line = oneLine(p.line);
+      const suffix = line.startsWith('[tun] ') ? tunLineSuffix(line) : '';
+      if (suffix !== null) syslog('err', `irnetfree: [${p.level}] ${line}${suffix}`);
       return;
     }
     if (channel !== 'status') return;
@@ -260,6 +284,9 @@ function createService(opts = {}) {
   let cleanupFailed = false;
   // A connect or disconnect by hand ends the boot-time retries (autoConnectAtLaunch).
   let bootCancelled = false;
+  // Core stops that are ours but not a reload (abortGateway): not a crash.
+  // A counter, not a saved-and-restored flag: overlapping calls cannot leave it stuck.
+  let quietStops = 0;
 
   const store = new Store(path.join(dataDir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
@@ -278,6 +305,10 @@ function createService(opts = {}) {
       send('store-error', Object.assign({ kind }, info));
     }
   });
+
+  // A write only when the value really changes: an endless recovery on a
+  // router must not rewrite store.json (flash) on every attempt.
+  function setIfChanged(key, value) { if (store.get(key, undefined) !== value) store.set(key, value); }
 
   migrateServers();
   migrateSettingsStore();
@@ -298,6 +329,14 @@ function createService(opts = {}) {
   // last run is kept for the boot connect (autoConnectAtLaunch).
   const bootIntent = store.get('activeServerId', null);
   if (bootIntent) store.set('activeServerId', null);
+  // OpenWrt: the connection stays the way the user left it. `connectIntent` is
+  // written by every successful connect and cleared ONLY by a disconnect the
+  // user asked for — not by a shutdown, a power cut, a failed boot attempt or a
+  // gateway that did not come up — and the boot connect resumes exactly that.
+  // So a router the user disconnected stays disconnected after a reboot, and
+  // one that was connected comes back even after two power cuts in a row. A
+  // router upgraded from before this key takes it from the last run's live id.
+  if (OPENWRT && store.get('connectIntent', undefined) === undefined) store.set('connectIntent', bootIntent || null);
   // lifetime traffic per config — its own file, so a 30s save does not
   // rewrite every saved server (see main.js)
   const usageStore = new Store(path.join(dataDir, 'usage.json'), { totals: {} });
@@ -326,7 +365,7 @@ function createService(opts = {}) {
       onUnexpectedExit: () => {
         if (userDisconnecting || isQuitting || tun !== selected) return;
         send('log', { line: 'The tunnel exited unexpectedly — rebuilding it', level: 'error' });
-        recoverFromNetworkChange('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
+        recoverFromDrop('tunnel-exited');
       } };
     // On a router the backend is not a choice: the gateway wraps sing-box and
     // adds the device exclusions. `tunBackend` is ignored here.
@@ -349,7 +388,7 @@ function createService(opts = {}) {
     extraBinDirs: [userBinDir, ...systemBinDirs],
     onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
     onStatus: (state, info) => {
-      if (xrayReloading && state === 'stopped') return;
+      if ((xrayReloading || quietStops > 0) && state === 'stopped') return;
       if (state === 'stopped' && !userDisconnecting && !isQuitting && store.get('activeServerId', null)) {
         // The core died under a live connection (OOM, a panic, kill -9) and
         // nothing asked it to: under TUN the tunnel keeps routing into a SOCKS
@@ -358,9 +397,7 @@ function createService(opts = {}) {
         // Rebuilt like a network change; deferred a tick so the drop is
         // reported to the clients first.
         send('log', { line: `The core exited on its own (code=${info && info.code != null ? info.code : '-'} signal=${(info && info.signal) || '-'}) — rebuilding the connection`, level: 'error' });
-        setTimeout(() => recoverFromNetworkChange('core-exited').catch((e) => {
-          send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' });
-        }), 0);
+        setTimeout(() => recoverFromDrop('core-exited'), 0);
       }
       send('xray-status', { state, info });
     }
@@ -1029,8 +1066,9 @@ function createService(opts = {}) {
     // started, so writing activeServerId back here would resurrect the very
     // intent that was cancelled — and every side effect below would follow it.
     if (stale()) return abandoned;
-    store.set('activeServerId', serverId);
-    store.set('lastServerId', serverId);   // survives a disconnect: "connect to the last server" at launch
+    setIfChanged('activeServerId', serverId);
+    setIfChanged('lastServerId', serverId);   // survives a disconnect: "connect to the last server" at launch
+    if (OPENWRT) setIfChanged('connectIntent', serverId);   // the router's "stay like this" (see bootIntent)
     pinWatch.setLive(directServers(plan));
     appliedSettings = snapshotApplied(getSettings());
 
@@ -1212,7 +1250,8 @@ function createService(opts = {}) {
     // direct while the panel, the boot retries and the recovery all took it
     // for a success. Undone and thrown, so each of them retries.
     if (OPENWRT && settings.tunMode && tunError) {
-      await abortGateway(serverId, prevActive);
+      const overtaken = await abortGateway(serverId, prevActive, myTun, stale);
+      if (overtaken) return abandoned;
       throw new Error(tunError);
     }
 
@@ -1264,19 +1303,27 @@ function createService(opts = {}) {
 
   /**
    * OpenWrt: undo a connect whose gateway did not come up (see doConnect).
-   * The core it started stops — a reload, not a crash, so no recovery is
-   * started for it — and the intent goes back to what it was: a rebuild of the
-   * same connection (the recovery) keeps it, so the retries go on; anything
-   * else (the boot connect, a connect or a switch by hand) ends disconnected,
-   * with nothing left running that claims otherwise.
+   * The gateway goes first if it is up after all — never left routing the LAN
+   * into a SOCKS port about to close — then the core this call started, which
+   * is ours, not a crash (quietStops). Then the live state goes back to what it
+   * was: a rebuild of the same connection (the recovery) keeps it, so the
+   * retries go on; anything else (the boot connect, a connect or a switch by
+   * hand) ends disconnected, and says so — the panel, every other client and
+   * syslog were still showing the connection before it. The router's
+   * connectIntent is not touched: only the user's disconnect clears that.
+   *
+   * Returns true when a disconnect or a newer connect overtook this call
+   * while it awaited: that one owns the state now, so nothing is written.
    */
-  async function abortGateway(serverId, prevActive) {
-    const keep = !!prevActive && prevActive === serverId;
-    const prevReloading = xrayReloading;
-    xrayReloading = true;
+  async function abortGateway(serverId, prevActive, myTun, stale) {
+    if (myTun && myTun.active) { try { await myTun.stop(); } catch { /* best effort */ } }
+    if (stale()) return true;
+    quietStops++;
     try { if (xray) await xray.stop(); } catch { /* best effort */ }
-    finally { xrayReloading = prevReloading; }
-    store.set('activeServerId', keep ? serverId : null);
+    finally { quietStops--; }
+    if (stale()) return true;
+    const keep = !!prevActive && prevActive === serverId;
+    setIfChanged('activeServerId', keep ? serverId : null);
     liveDiagnostics = null;
     pinWatch.clear();
     appliedSettings = null;
@@ -1285,7 +1332,9 @@ function createService(opts = {}) {
       stopNetWatcher();
       if (stats) stats.stop();
       liveDirectInterface = null;
+      send('status', { state: 'disconnected' });
     }
+    return false;
   }
 
   /** Reconnect-relevant settings changed since the live tunnel was built. */
@@ -1371,9 +1420,7 @@ function createService(opts = {}) {
    */
   async function reapplyByHand() {
     const r = await reapplyConnection();
-    if (OPENWRT && r && !r.ok && !r.stale && store.get('activeServerId', null)) {
-      recoverFromNetworkChange('gateway-failed').catch((e) => send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' }));
-    }
+    if (OPENWRT && r && !r.ok && !r.stale && store.get('activeServerId', null)) recoverFromDrop('gateway-failed');
     return r;
   }
 
@@ -1415,6 +1462,46 @@ function createService(opts = {}) {
   }
   function stopProcWatcher() { if (procWatcher) { procWatcher.stop(); procWatcher = null; } }
 
+  /** The connection dropped by itself (a core or the gateway died), not because the network moved. */
+  const DROP_REASONS = new Set(['tunnel-exited', 'core-exited', 'gateway-failed']);
+  /** The wait before attempt `i + 1` after attempt `i` did not hold; null: the desktop gives up. */
+  function backoffAfter(i) {
+    return OPENWRT ? T.routerBackoffMs[Math.min(i, T.routerBackoffMs.length - 1)] : RECOVER_BACKOFF_MS[i];
+  }
+  // The last recovery that brought the connection back: when, and on which attempt.
+  let lastRebuilt = null;
+
+  /**
+   * A drop. The first one is rebuilt at once. One that comes within
+   * T.crashWindowMs of the last successful rebuild is the same trouble
+   * continuing — a core OOM-killed or panicking seconds after every start —
+   * and rebuilding it at once, forever, is a full core restart, two flash
+   * writes and a handful of syslog lines every few seconds on the router. So it
+   * carries on from that rebuild's attempt: the backoff applies, and only a
+   * quiet spell longer than the window starts it from the beginning again.
+   * (A stray late `stopped` from a core already replaced lands here too.)
+   */
+  function recoverFromDrop(reason) {
+    const fail = (e) => send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' });
+    // the same gates as recoverFromNetworkChange(), before anything is said or armed
+    if (!store.get('activeServerId', null)) return;
+    if (!OPENWRT && !getSettings().autoReconnectOnNetworkChange) return;
+    if (recovering) { recoverQueued = reason; return; }
+    const since = lastRebuilt ? Date.now() - lastRebuilt.at : Infinity;
+    if (since >= T.crashWindowMs) { recoverFromNetworkChange(reason, 0).catch(fail); return; }
+    const wait = backoffAfter(lastRebuilt.attempt);
+    if (wait == null) {
+      send('log', { line: `The connection keeps dropping right after every rebuild (${reason}) — giving up`, level: 'error' });
+      send('status', { state: 'reconnect-failed', reason, proxyUp: false, tunError: null });
+      return;
+    }
+    const attempt = lastRebuilt.attempt + 1;
+    send('log', { line: `The connection dropped again ${Math.round(since / 1000)}s after it was rebuilt (${reason}) — waiting ${wait / 1000}s before the next rebuild`, level: 'warn' });
+    clearTimeout(recoverTimer);
+    recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt).catch(fail), wait);
+    if (recoverTimer.unref) recoverTimer.unref();
+  }
+
   /**
    * The machine's network changed under a live tunnel. xray does not die when that
    * happens — it just stops passing traffic, and under TUN the bypass routes still
@@ -1435,7 +1522,9 @@ function createService(opts = {}) {
     // the next retry exists for. doDisconnect() clears the id, so a deliberate
     // disconnect still ends the retries.
     if (!store.get('activeServerId', null)) return;
-    if (!getSettings().autoReconnectOnNetworkChange) return;
+    // The switch is about network changes. A router rebuilds a dead core or
+    // gateway whatever it says: nobody is there to do it by hand.
+    if (!getSettings().autoReconnectOnNetworkChange && !(OPENWRT && DROP_REASONS.has(reason))) return;
     if (recovering) { recoverQueued = reason; return; }
 
     // `recovering` is a lock with no timeout behind it: tunManager.run() waits on
@@ -1476,7 +1565,7 @@ function createService(opts = {}) {
     clearTimeout(recoverTimer);
     recoverTimer = null;
 
-    const dropped = reason === 'tunnel-exited' || reason === 'core-exited' || reason === 'gateway-failed';
+    const dropped = DROP_REASONS.has(reason);
     send('log', { line: `${dropped ? 'The connection dropped' : 'Network changed'} (${reason}) — rebuilding the connection`, level: 'warn' });
     send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
     if (attempt === 0) notify('IRNetFree', isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد');
@@ -1521,10 +1610,11 @@ function createService(opts = {}) {
       send('log', {
         line: res.tunError
           ? 'Connection restored after the network change — proxy only, TUN is unavailable: ' + res.tunError
-          : 'Connection restored after the network change',
+          : (dropped ? 'Connection restored' : 'Connection restored after the network change'),
         level: res.tunError ? 'warn' : 'info'
       });
       notify('IRNetFree', isEn() ? 'Connection restored' : 'اتصال دوباره برقرار شد');
+      lastRebuilt = { at: Date.now(), attempt };   // a drop soon after this continues from here (recoverFromDrop)
       return;
     }
     if (res && res.tunError) {
@@ -1534,9 +1624,7 @@ function createService(opts = {}) {
     // saved active server; a disconnect clears it and stops this timer) it
     // goes on trying, backing off to a minute between attempts. The desktop
     // gives up after its three and says so.
-    const delay = OPENWRT
-      ? T.routerBackoffMs[Math.min(attempt, T.routerBackoffMs.length - 1)]
-      : RECOVER_BACKOFF_MS[attempt];
+    const delay = backoffAfter(attempt);
     if (delay == null) {
       // "Nothing came back" and "everything came back except TUN" are different
       // failures: on the second, xray is running and the proxy ports carry traffic,
@@ -1623,6 +1711,7 @@ function createService(opts = {}) {
       connGen++;
       recoverGen++;
       recovering = false;
+      lastRebuilt = null;              // a connection made afresh starts with no crash history
       stopProcWatcher();
       stopNetWatcher();                // nothing live to recover any more
       if (stats) stats.stop();
@@ -1833,7 +1922,8 @@ function createService(opts = {}) {
 
     // by hand: either one ends the boot-time retries
     'connect': (id) => { bootCancelled = true; return doConnect(id); },
-    'disconnect': () => { bootCancelled = true; return doDisconnect(); },
+    // ...and a disconnect by hand is the one thing that clears the router's connectIntent
+    'disconnect': () => { bootCancelled = true; if (OPENWRT) setIfChanged('connectIntent', null); return doDisconnect(); },
 
     'settings:get': () => getSettings(),
     // returns { settings, pendingReconnect } — see main.js / settingsMeta.js
@@ -2080,10 +2170,12 @@ function createService(opts = {}) {
 
   // Connect on launch — the headless server's main use: to what the last run
   // was connected to (bootIntent, read before the stale id was cleared), else
-  // the last connection made. Any target a connect takes — a server, a chain,
-  // advanced routing, the pool — as long as it can still be built; one that
-  // cannot is said, not silently skipped. A failure is a log line, the
-  // process stays up.
+  // the last connection made. On a router: exactly its connectIntent and
+  // nothing else — the connection stays the way the user left it, so after a
+  // disconnect by hand it stays disconnected. Any target a connect takes — a
+  // server, a chain, advanced routing, the pool — as long as it can still be
+  // built; one that cannot is said, not silently skipped. A failure is a log
+  // line, the process stays up.
   //
   // On a router the service starts with the boot (procd START=95) — usually
   // before the WAN has an address, and with the clock not yet set (a TLS
@@ -2098,7 +2190,7 @@ function createService(opts = {}) {
   function autoConnectAtLaunch(attempt = 1) {
     if (bootCancelled || isQuitting) return;                         // done by hand meanwhile, or going away
     if (store.get('activeServerId', null)) return;                   // connected meanwhile
-    const target = bootIntent || store.get('lastServerId', null);
+    const target = OPENWRT ? store.get('connectIntent', null) : (bootIntent || store.get('lastServerId', null));
     if (!target) return;
     try { buildPlan(target, getSettings()); } catch (e) {
       send('log', { line: `Auto-connect: the last connection (${target}) cannot be built any more — ${e.message}`, level: 'error' });

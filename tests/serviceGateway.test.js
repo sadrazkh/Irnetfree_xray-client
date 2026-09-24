@@ -45,7 +45,13 @@ function start(store = {}, extraDeps = {}) {
   const content = Object.assign({ servers: [SERVER], routerDefaultsApplied: true }, store);
   content.settings = Object.assign({}, BASE, store.settings || {});
   fs.writeFileSync(path.join(dir, 'store.json'), JSON.stringify(content));
+  return startIn(dir, extraDeps);
+}
+
+/** A service on an existing data dir — "the next boot". `prime(state)` runs before it is created. */
+function startIn(dir, extraDeps = {}, prime = null) {
   const state = fakes.makeState();
+  if (prime) prime(state);
   const syslog = [];
   const service = createService({ dataDir: dir, deps: fakes.deps(state, Object.assign({ syslog: (level, text) => syslog.push([level, text]) }, extraDeps)) });
   const statuses = [];
@@ -82,21 +88,21 @@ test('R1: a stale activeServerId from the last run is cleared, and the boot conn
 });
 
 test('R1: the boot connect resumes advanced routing (and any non-server target), not only a single server', async (t) => {
-  const s = start({ activeServerId: '__advanced__', lastServerId: '__advanced__', settings: { autoConnect: true, advancedRouting: true, routeDefault: SERVER.id, routeRules: [] } });
+  const s = start({ connectIntent: '__advanced__', lastServerId: '__advanced__', settings: { autoConnect: true, advancedRouting: true, routeDefault: SERVER.id, routeRules: [] } });
   t.after(() => s.service.shutdown());
   await until(() => connectedCount(s) === 1, 'the boot connect of __advanced__');
   assert.equal(s.statuses.find(x => x.state === 'connected').serverId, '__advanced__');
 });
 
 test('R1: a boot connect to something that no longer exists says so instead of doing nothing silently', async (t) => {
-  const s = start({ lastServerId: 'gone-after-a-refresh', settings: { autoConnect: true } });
+  const s = start({ connectIntent: 'gone-after-a-refresh', settings: { autoConnect: true } });
   t.after(() => s.service.shutdown());
   await until(() => s.logs.some(l => /Auto-connect/.test(l.line)), 'a log line');
   assert.equal(s.state.xray.starts.length, 0, 'nothing was started');
 });
 
 test('R1: on a router the boot connect keeps retrying — and a disconnect by hand ends the retries', async (t) => {
-  const s = start({ lastServerId: SERVER.id, settings: { autoConnect: true } });
+  const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } });
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
   await until(() => s.state.events.filter(e => e === 'gateway:start').length >= 4, 'four boot attempts');
@@ -107,8 +113,47 @@ test('R1: on a router the boot connect keeps retrying — and a disconnect by ha
   assert.equal(connectedCount(s), 0);
 });
 
+/* The owner's rule: on a router the connection stays the way the user left it. */
+
+test('R1: a disconnect by hand survives a reboot — the router stays disconnected (no fallback to the last server)', async (t) => {
+  const s = start({ settings: { autoConnect: true } });
+  await s.service.invoke('connect', SERVER.id);
+  await s.service.invoke('disconnect');
+  await s.service.shutdown();
+  const again = startIn(s.dir);
+  t.after(() => again.service.shutdown());
+  await sleep(150);
+  assert.equal(again.state.xray.starts.length, 0, 'nothing was connected at boot');
+  assert.equal(connectedCount(again), 0);
+  // a store with only a last server (a disconnected router upgraded from an older version) stays disconnected too
+  const old = start({ lastServerId: SERVER.id, settings: { autoConnect: true } });
+  t.after(() => old.service.shutdown());
+  await sleep(150);
+  assert.equal(old.state.xray.starts.length, 0);
+});
+
+test('R1: two power cuts before a boot retry succeeds still resume — only a disconnect by hand clears the intent', async (t) => {
+  const s = start({ settings: { autoConnect: true } });
+  await s.service.invoke('connect', SERVER.id);
+  await s.service.shutdown();                                        // power cut 1 (shutdown does not clear it either)
+  const second = startIn(s.dir, {}, (st) => { st.gatewayFails = true; });
+  await until(() => second.state.events.filter(e => e === 'gateway:start').length >= 3, 'failing boot attempts');
+  await second.service.shutdown();                                   // power cut 2, before any retry succeeded
+  const third = startIn(s.dir);
+  t.after(() => third.service.shutdown());
+  await until(() => connectedCount(third) === 1, 'resumed after the second cut');
+  assert.equal(third.statuses.find(x => x.state === 'connected').serverId, SERVER.id);
+});
+
+test('R1: upgrading a router that was connected (activeServerId, no intent yet) resumes it once', async (t) => {
+  const s = start({ activeServerId: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } });
+  t.after(() => s.service.shutdown());
+  await until(() => connectedCount(s) === 1, 'the boot connect');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(s.dir, 'store.json'), 'utf8')).connectIntent, SERVER.id);
+});
+
 test('R1: a connect by hand during the boot retries ends them too', async (t) => {
-  const s = start({ lastServerId: SERVER.id, settings: { autoConnect: true } });
+  const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } });
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
   await until(() => s.state.events.filter(e => e === 'gateway:start').length >= 2, 'two boot attempts');
@@ -218,6 +263,129 @@ test('R3/R4: a rebuild by hand (apply settings) whose gateway fails is handed to
   await until(() => s.statuses.some(x => x.state === 'reconnecting' && x.reason === 'gateway-failed'), 'the recovery taking over');
   s.state.gatewayFails = false;
   await until(() => connectedCount(s) === 2, 'the gateway back without another click');
+});
+
+/* ----------------------------- review fixes ----------------------------- */
+
+test('crash loop: a core that dies again soon after every rebuild is rebuilt with growing waits, and a stable spell resets them', async (t) => {
+  const waits = [150, 400, 800];
+  const s = start({}, { timing: Object.assign({}, fakes.deps(fakes.makeState()).timing, { routerBackoffMs: waits, crashWindowMs: 1500 }) });
+  t.after(() => s.service.shutdown());
+  const at = [];
+  s.service.onEvent((ch, p) => { if (ch === 'status' && p.state === 'connected') at.push(Date.now()); });
+  await s.service.invoke('connect', SERVER.id);
+  const gaps = [];
+  for (let i = 0; i < 3; i++) {
+    const n = at.length;
+    const crashed = Date.now();
+    s.state.xray.crash();
+    await until(() => at.length > n, `rebuild ${i + 1}`, 5000);
+    gaps.push(at[n] - crashed);
+  }
+  assert.ok(gaps[0] < waits[0], `the first drop is rebuilt at once: ${gaps}`);
+  assert.ok(gaps[1] >= waits[0] - 20, `the second waits ${waits[0]}ms: ${gaps}`);
+  assert.ok(gaps[2] >= waits[1] - 20, `the third waits ${waits[1]}ms: ${gaps}`);
+  assert.deepEqual(s.statuses.filter(x => x.state === 'reconnecting').map(x => x.attempt), [1, 2, 3], 'the attempt count carries over');
+  assert.ok(s.logs.some(l => /dropped again \d+s after it was rebuilt \(core-exited\) — waiting 0\.4s before the next rebuild/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+  // a spell longer than the window: the next drop is a first drop again
+  const quietStart = Date.now();
+  await sleep(1600);
+  const n = at.length;
+  s.state.xray.crash();
+  await until(() => at.length > n, 'the rebuild after a stable spell');
+  assert.ok(at[n] - quietStart - 1600 < waits[0], 'rebuilt at once again');
+  assert.equal(s.statuses.filter(x => x.state === 'reconnecting').at(-1).attempt, 1);
+});
+
+test('a failed switch A→B on a router ends disconnected — and says so to every client and to syslog', async (t) => {
+  const b = Object.assign({}, SERVER, { id: 'srv-2', name: 'second' });
+  const s = start({ servers: [SERVER, b] });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.gatewayFails = true;
+  await assert.rejects(s.service.invoke('connect', 'srv-2'));
+  assert.equal(s.statuses.at(-1).state, 'disconnected', JSON.stringify(s.statuses.map(x => x.state)));
+  assert.equal(s.syslog.at(-1)[1], 'irnetfree: disconnected');
+  assert.equal((await s.service.invoke('app:init')).activeServerId, null);
+});
+
+test('an endless recovery does not rewrite store.json on every attempt', async (t) => {
+  const s = start();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const file = path.join(s.dir, 'store.json');
+  s.state.gatewayFails = true;
+  s.state.inners.find(i => i.active).crash();
+  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 2, 'two attempts');
+  const before = fs.readFileSync(file, 'utf8');
+  const mtime = fs.statSync(file).mtimeMs;
+  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 6, 'four more attempts');
+  assert.equal(fs.statSync(file).mtimeMs, mtime, 'no write — nothing in it changed');
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+});
+
+test('a connect overtaken while it is undoing a failed gateway gives way: no store write, no status, no throw', async (t) => {
+  const s = start();
+  t.after(() => s.service.shutdown());
+  s.state.gatewayFails = true;
+  s.state.stopDelayMs = 150;            // the core is slow to exit: the undo is still awaiting it
+  const first = s.service.invoke('connect', SERVER.id);
+  await until(() => s.state.events.includes('gateway:start'), 'the failed gateway');
+  s.state.gatewayFails = false;
+  const second = s.service.invoke('connect', SERVER.id);
+  const r1 = await first;
+  assert.deepEqual(r1, { ok: false, stale: true }, 'abandoned, not an error');
+  await second;
+  assert.equal(s.statuses.at(-1).state, 'connected', JSON.stringify(s.statuses.map(x => x.state)));
+  assert.ok(!s.statuses.some(x => x.state === 'disconnected'), 'the overtaken call said nothing');
+  assert.equal((await s.service.invoke('app:init')).activeServerId, SERVER.id);
+});
+
+test('on a router a dead core is rebuilt even with "reconnect on network change" off', async (t) => {
+  const s = start({ settings: { autoReconnectOnNetworkChange: false } });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.xray.crash();
+  await until(() => connectedCount(s) === 2, 'the rebuild');
+  s.state.inners.find(i => i.active).crash();
+  await until(() => connectedCount(s) === 3, 'the rebuild after sing-box died');
+});
+
+test('a gateway that fails AFTER it came up is stopped before the core — never left routing into a dead SOCKS port', async (t) => {
+  let st = null;   // the fake's shared event list, once the service exists
+  const s = start({}, {
+    gateway: () => ({
+      backendId: 'openwrt', managesDns: true, active: false, interfaceName: 'IRNetFree', dnsPeer: '172.19.0.2', excludeIps: [],
+      isAvailable: () => true, isElevated: () => true, physicalInterface: async () => ({ name: 'eth0' }),
+      async start() { this.active = true; st.events.push('gw:up'); throw new Error('failed after coming up'); },
+      async stop() { if (this.active) st.events.push('gw:stop'); this.active = false; },
+      cleanupSync() {}
+    })
+  });
+  st = s.state;
+  t.after(() => s.service.shutdown());
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /failed after coming up/);
+  assert.equal(s.state.xray.running, false);
+  const ev = s.state.events;
+  assert.ok(ev.includes('gw:stop'), ev.join(', '));
+  assert.ok(ev.indexOf('gw:stop') < ev.lastIndexOf('xray:stop'), 'the gateway goes first: ' + ev.join(', '));
+  assert.ok(!s.logs.some(l => /core exited/i.test(l.line)), 'stopping the core here is not a crash');
+});
+
+test('sing-box\'s own [tun] lines reach syslog at most once per 10s per kind; the service\'s own lines are never held back', async (t) => {
+  const s = start();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const gw = s.state.gateways.find(g => g.active);
+  s.syslog.length = 0;
+  for (let i = 0; i < 50; i++) gw.onLog(`[tun] ERROR inbound/tun[tun-in]: connection ${i} from 192.168.1.${i}:5${i} reset by peer`, 'warn');
+  gw.onLog('[tun] WARN router: a different kind of line', 'warn');
+  gw.onLog('Gateway down: sing-box exited on its own (code=- signal=SIGKILL)', 'error');
+  gw.onLog('Gateway down: sing-box exited on its own (code=- signal=SIGKILL)', 'error');
+  const lines = s.syslog.map(([, l]) => l);
+  assert.equal(lines.filter(l => /connection \d+ from/.test(l)).length, 1, lines.join('\n'));
+  assert.equal(lines.filter(l => /a different kind/.test(l)).length, 1);
+  assert.equal(lines.filter(l => /Gateway down/.test(l)).length, 2, 'our own lines are not rate-limited');
 });
 
 /* ----------------------------- R7: orphans and the exit hook ----------------------------- */
