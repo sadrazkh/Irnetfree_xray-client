@@ -256,7 +256,7 @@ test('a drop waits for a connect in flight, joins a recovery in flight, and only
   const budget = DROP.indexOf('drops.take()');
   assert.ok(wait !== -1 && join !== -1 && wait < join && join < budget, DROP);
   // a user connect that settled with a running core healed the drop: no budget, no rebuild
-  const healedCheck = DROP.indexOf('if (healed()) return liftOwnBlock();');
+  const healedCheck = DROP.indexOf('if (healed() && !recovering) return liftOwnBlock();');
   assert.ok(healedCheck !== -1 && wait < healedCheck && healedCheck < budget, 'healed() is asked right after the connects in flight settle');
 });
 
@@ -277,7 +277,7 @@ test('with automatic reconnect off, a drop that is not torn down still tells the
 
 test('the kill switch is not re-armed over itself (a delete-then-add left a gap with the tunnel down)', () => {
   const arm = slice('async function armKillSwitch() {', '\n}');
-  assert.match(arm, /if \(process\.platform !== 'win32'\) return \{ ok: false, error: 'windows only' \};\n(?:\s*\/\/[^\n]*\n)*\s*if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true \};/);
+  assert.match(arm, /if \(process\.platform !== 'win32'\) return \{ ok: false, error: 'windows only' \};\n(?:\s*\/\/[^\n]*\n)*\s*if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true, added: false \};/);
 });
 
 test('a Retry that fails says so, instead of leaving the window on "Connecting"', () => {
@@ -314,12 +314,12 @@ test('a drop that lands during a recovery waits for it and rebuilds only if that
 
 test('the kill switch trusts killEngaged only when the rule is really there; a drop’s arm is undone if the user disconnected meanwhile', () => {
   const arm = slice('async function armKillSwitch() {', '\n}');
-  assert.match(arm, /if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true \};/);
+  assert.match(arm, /if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true, added: false \};/);
   assert.match(slice('function killRulePresent() {', '\n}'), /netsh\(\['advfirewall', 'firewall', 'show', 'rule', `name=\$\{KILL_RULE\}`\]\)\.then\(\(\) => true, \(\) => false\)/);
   const DROP = dropSrc();
-  assert.match(DROP, /const wasEngaged = killEngaged;/);
-  assert.match(DROP, /if \(r && r\.ok && !wasEngaged\) \{\n\s*send\('log', \{ line: 'Kill switch engaged/, 'said once, not on every drop');
-  assert.match(DROP, /if \(r && r\.ok && !wasEngaged && \(userDisconnecting \|\| isQuitting \|\| !store\.get\('activeServerId', null\)\)\) \{\n\s*await disarmKillSwitch\(\);/);
+  assert.match(DROP, /armedHere = !!\(r && r\.ok && r\.added\);/);
+  assert.match(DROP, /if \(armedHere\) \{\n\s*send\('log', \{ line: 'Kill switch engaged/, 'said once, not on every drop');
+  assert.match(DROP, /if \(armedHere && \(userDisconnecting \|\| isQuitting \|\| !store\.get\('activeServerId', null\)\)\) \{\n\s*await disarmKillSwitch\(\);/);
 });
 
 test('a macOS/Linux shutdown that gets cancelled does not leave the app deaf for good', () => {
@@ -390,10 +390,11 @@ test('Retry after a give-up rebuilds a core that is gone instead of answering "n
  * function's own source is compiled with everything it reaches passed in. The
  * kill switch is a flag the fakes flip — no netsh, no firewall.
  */
-function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false } = {}) {
+function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false, ruleMissing = false } = {}) {
   const sent = [];
   const calls = [];
   const env = {
+    ruleMissing,
     store: { get: (k, d) => (k === 'activeServerId' ? 'srv1' : d) },
     xray: { running: xrayRunning },
     tun: { active: false },
@@ -417,7 +418,14 @@ function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false }
     let killEngaged = env.killEngaged;
     const { store, xray, tun, send, notify, isEn, updateOverlay, getSettings, connectsInFlight, drops,
             doDisconnect, reportReconnectFailed, recoverFromNetworkChange, stopAllTuns, setSystemProxy } = env;
-    async function armKillSwitch() { env.calls.push('arm'); killEngaged = true; return { ok: true }; }
+    // the real one: { ok, added } — added is whether THIS call put the rule in
+    // (the belief killEngaged is re-checked against the rule: ruleMissing)
+    async function armKillSwitch() {
+      env.calls.push('arm');
+      const added = !killEngaged || env.ruleMissing;
+      killEngaged = true;
+      return { ok: true, added };
+    }
     async function disarmKillSwitch() { env.calls.push('disarm'); killEngaged = false; }
     ${dropSrc()}
     // a recovery in flight: the drop waits on recoveryRun; finish() is its end
@@ -430,7 +438,17 @@ function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false }
     return { onConnectionDrop, startRecovery, killEngaged: () => killEngaged };
   `);
   env.calls = calls;
-  return Object.assign(make(env), { env, sent, calls });
+  const h = Object.assign(make(env), { env, sent, calls });
+  /** A connect in flight, the way doConnect() tracks one: `settle(r)` ends it. */
+  h.connect = () => {
+    let settle;
+    const p = new Promise((r) => { settle = r; });
+    env.connectsInFlight.add(p);
+    const gone = () => env.connectsInFlight.delete(p);
+    p.then(gone, gone);
+    return settle;
+  };
+  return h;
 }
 
 test('killSwitch ON: a drop that lands inside the user’s connect lifts ITS block when that connect comes up', async () => {
@@ -439,9 +457,7 @@ test('killSwitch ON: a drop that lands inside the user’s connect lifts ITS blo
   // core — and returns at healed(). Its block stayed: "connected" with the
   // internet blocked.
   const h = dropHarness();
-  let settle;
-  const connect = new Promise((resolve) => { settle = resolve; });
-  h.env.connectsInFlight.add(connect);
+  const settle = h.connect();
   const drop = h.onConnectionDrop('core-exited');
   await new Promise((r) => setImmediate(r));
   assert.equal(h.killEngaged(), true, 'the gap is closed while the connect is still building');
@@ -458,12 +474,72 @@ test('killSwitch ON: a drop that found the block already in place leaves it to w
   // A settings reapply (or a recovery holding a block from an earlier drop)
   // armed it and lifts it itself once its tunnel is up — not this drop.
   const h = dropHarness({ killEngaged: true });
-  const connect = Promise.resolve({ ok: true });
-  h.env.connectsInFlight.add(connect);
+  h.connect()({ ok: true });
   h.env.xray.running = true;
   await h.onConnectionDrop('core-exited');
   assert.equal(h.killEngaged(), true);
   assert.deepEqual(h.calls, ['arm']);
+});
+
+/* ------------------------------- final wave F4 ------------------------------- */
+
+test('killSwitch ON: a rebuild that started while the drop waited is waited for too — its core is up, its tunnel is still being swapped', async () => {
+  // The snapshot of the connects in flight was taken before a recovery's own
+  // connect began: the drop saw the first one settle, found the new core
+  // running, called it healed and lifted the block while the TUN was still
+  // being swapped — the gap the block is there for.
+  const h = dropHarness();
+  const settleFirst = h.connect();
+  const drop = h.onConnectionDrop('core-exited');
+  await new Promise((r) => setImmediate(r));
+  const settleRebuild = h.connect();   // a recovery's connect, begun meanwhile
+  h.env.xray.running = true;           // …whose core is already up
+  settleFirst({ ok: false });
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(h.killEngaged(), true, 'nothing is lifted while a rebuild is still in flight');
+  settleRebuild({ ok: true });
+  await drop;
+  assert.equal(h.killEngaged(), false, 'lifted once every connect has settled over a running core');
+  assert.deepEqual(h.calls, ['arm', 'disarm']);
+});
+
+test('killSwitch ON: a drop that lands while a recovery is swapping the tunnel over a core already up lifts nothing early', async () => {
+  // xray.running already true is not "healed" while `recovering`: the rebuild
+  // is still between its core and its tunnel. The drop joins it instead.
+  const h = dropHarness({ xrayRunning: true });
+  const finish = h.startRecovery();
+  const drop = h.onConnectionDrop('core-exited');
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(h.killEngaged(), true, 'the recovery still swapping the tunnel runs under the block');
+  finish(true);
+  await drop;
+  assert.equal(h.killEngaged(), false);
+  assert.deepEqual(h.calls, ['arm', 'disarm'], 'joined, not a second rebuild');
+});
+
+test('killSwitch ON: a block the drop had to put back (the belief said engaged, the rule was gone) is the drop’s own to lift', async () => {
+  // A disarm racing it deleted the rule: armKillSwitch re-added it — so this
+  // drop put the block in, whatever killEngaged claimed a moment before.
+  const h = dropHarness({ killEngaged: true, ruleMissing: true });
+  const settle = h.connect();
+  const drop = h.onConnectionDrop('core-exited');
+  await new Promise((r) => setImmediate(r));
+  h.env.xray.running = true;
+  settle({ ok: true });
+  await drop;
+  assert.deepEqual(h.calls, ['arm', 'disarm']);
+  assert.equal(h.killEngaged(), false);
+});
+
+test('armKillSwitch says whether it put the rule in', () => {
+  const arm = slice('async function armKillSwitch() {', '\n}');
+  assert.match(arm, /if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true, added: false \};/);
+  assert.match(arm, /killEngaged = true;\n\s*return \{ ok: true, added: true \};/);
+  const DROP = dropSrc();
+  assert.doesNotMatch(DROP, /wasEngaged/, 'the belief is not what says whose block it is');
+  assert.match(DROP, /armedHere = !!\(r && r\.ok && r\.added\);/);
+  assert.match(DROP, /while \(connectsInFlight\.size\) await Promise\.allSettled\(\[\.\.\.connectsInFlight\]\);/);
+  assert.match(DROP, /if \(healed\(\) && !recovering\) return liftOwnBlock\(\);/);
 });
 
 test('killSwitch ON: a drop that no connect healed keeps its block for the rebuild', async () => {
