@@ -1358,6 +1358,12 @@ function createService(opts = {}) {
           send('log', { line: 'Leak guard failed: ' + e.message + ' — the tunnel is up, but the physical adapters keep their own DNS', level: 'error' });
         }
       }
+      // No tunnel at the end of this connect after all, but a switch or a
+      // rebuild HELD the guard for one — see main.js.
+      if (!myTun.active && !stale()) {
+        const released = await releaseStrandedGuard(leakGuard);
+        if (released && released.released) send('log', { line: 'The tunnel did not come up — the adapters’ DNS, held for it, is theirs again', level: 'warn' });
+      }
     } else if (settings.blockUdpInProxyMode) {
       // Proxy mode carries no UDP at all, so WebRTC's question to a STUN server
       // goes around the proxy and comes back with the real address. This is the

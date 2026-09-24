@@ -1303,6 +1303,15 @@ async function connectOnce(serverId, opts = {}) {
         send('log', { line: 'Leak guard failed: ' + e.message + ' — the tunnel is up, but the physical adapters keep their own DNS', level: 'error' });
       }
     }
+    // No tunnel at the end of this connect after all (its start failed, the
+    // backend is missing) — but a switch or a rebuild HELD the guard for one:
+    // every adapter would stay on the loopback hold with nothing behind it,
+    // and "connected, proxy only" raises no banner to give them back. The
+    // guard is only ever for a tunnel (see releaseStrandedGuard).
+    if (!myTun.active && !stale()) {
+      const released = await releaseStrandedGuard(leakGuard);
+      if (released && released.released) send('log', { line: 'The tunnel did not come up — the adapters’ DNS, held for it, is theirs again', level: 'warn' });
+    }
   } else if (settings.blockUdpInProxyMode) {
     // Proxy mode carries no UDP at all, so WebRTC's question to a STUN server
     // goes around the proxy and comes back with the real address. This is the
