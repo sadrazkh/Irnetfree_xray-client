@@ -142,9 +142,23 @@ test('win32 start: without the peer on v4 (managed DNS off) the adapter gets no 
     const netsh = netshLines();
     assert.ok(netsh.includes('interface ip set dnsservers name=XrayTun static 1.1.1.1 primary validate=no'));
     assert.ok(netsh.includes('interface ip add dnsservers name=XrayTun 8.8.8.8 index=2 validate=no'));
-    assert.equal(netsh.some(l => /ipv6 set dnsservers/.test(l)), false, 'no v6 resolver nothing answers on');
+    assert.equal(netsh.some(l => /ipv6 set dnsservers name=XrayTun static fdfe/.test(l)), false, 'no v6 resolver nothing answers on');
+    // loopback instead of an empty list, which Windows may fill with its
+    // fec0:0:0:ffff::1-3 placeholders (they would route into the TUN and die)
+    assert.ok(netsh.includes('interface ipv6 set dnsservers name=XrayTun static ::1 primary validate=no'));
     assert.ok(netsh.includes(V6_LINES[0]) && netsh.includes(V6_LINES[2]) && netsh.includes(V6_LINES[3]), 'v6 address and both /1 routes');
     assert.equal(h.tun.dnsPeer6, null, 'the adapter has no v6 resolver of ours');
+  } finally { h.done(); }
+});
+
+test('win32 start: that loopback v6 resolver failing is a warning — the v6 routes stay', async () => {
+  const h = harness([[/ipv6 set dnsservers name=XrayTun static ::1/, new Error('The parameter is incorrect.')]]);
+  try {
+    await h.tun.startWindows(10808, '1.2.3.4', ['1.1.1.1']);
+    const netsh = netshLines();
+    assert.ok(netsh.includes(V6_LINES[2]) && netsh.includes(V6_LINES[3]), 'v6 still routed into the tunnel');
+    assert.equal(netsh.some(l => /ipv6 delete route/.test(l)), false, 'and not withdrawn');
+    assert.ok(h.logs.some(([lvl, l]) => lvl === 'warn' && /v6.*The parameter is incorrect/.test(l)));
   } finally { h.done(); }
 });
 

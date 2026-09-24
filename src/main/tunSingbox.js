@@ -422,14 +422,19 @@ class TunSingbox {
     if (dns.v4[1]) {
       await platform.run('netsh', ['interface', 'ip', 'add', 'dnsservers', `name=${TUN_IF}`, dns.v4[1], 'index=2', 'validate=no']).catch(() => {});
     }
-    if (dns.v6[0]) {
-      await platform.run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${TUN_IF}`, 'static', dns.v6[0], 'primary', 'validate=no'])
-        .catch(e => this.onLog('set dns (v6): ' + e.message, 'warn'));
+    // No v6 resolver of ours (no hijack: managed DNS off, or a sing-box-format
+    // core) is not "leave v6 alone": sing-tun has already set the peer there
+    // under auto_route, and without the hijack nothing answers it — a dead
+    // resolver beside the working v4 ones. It becomes ::1, the leak guard's
+    // hold: a query there fails in milliseconds. Not a delete, which Windows
+    // may fill with its fec0:0:0:ffff::1-3 placeholders — dead the same way.
+    const v6 = dns.v6.length ? dns.v6 : ['::1'];
+    await platform.run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${TUN_IF}`, 'static', v6[0], 'primary', 'validate=no'])
+      .catch(e => this.onLog('set dns (v6): ' + e.message, 'warn'));
+    if (v6[1]) {
+      await platform.run('netsh', ['interface', 'ipv6', 'add', 'dnsservers', `name=${TUN_IF}`, v6[1], 'index=2', 'validate=no']).catch(() => {});
     }
-    if (dns.v6[1]) {
-      await platform.run('netsh', ['interface', 'ipv6', 'add', 'dnsservers', `name=${TUN_IF}`, dns.v6[1], 'index=2', 'validate=no']).catch(() => {});
-    }
-    this.onLog(`TUN adapter ${TUN_IF} up; DNS ${[...dns.v4, ...dns.v6].join(', ')}; routes by sing-box (auto_route)`, 'info');
+    this.onLog(`TUN adapter ${TUN_IF} up; DNS ${[...dns.v4, ...v6].join(', ')}; routes by sing-box (auto_route)`, 'info');
 
     this.active = true;
     this.onLog(this.msg('حالت TUN فعال شد (کل سیستم).', 'TUN mode active (whole system).'), 'info');

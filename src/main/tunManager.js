@@ -313,6 +313,14 @@ class TunManager {
         await run('netsh', ['interface', 'ipv6', 'add', 'route', `prefix=${net}`, `interface=${ADAPTER}`,
           `nexthop=${TUN_GW6}`, 'metric=1', 'store=active']);
       }
+      if (!peered) {
+        // ::1, the leak guard's hold, rather than an empty list Windows may
+        // fill with its fec0:0:0:ffff::1-3 placeholders (they would route into
+        // the TUN and die). Only a warning: the v6 routes are what matter.
+        await run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${ADAPTER}`,
+          'static', '::1', 'primary', 'validate=no'])
+          .catch(e => this.onLog('TUN adapter v6 resolver ::1: ' + e.message, 'warn'));
+      }
       this.dnsPeer6 = peered ? TUN_GW6 : null;
       this.onLog(`IPv6 -> TUN too (${TUN_ADDR6}/${TUN_PREFIX6}, resolver ${peered ? TUN_GW6 : 'none (no hijack)'}, ${SPLIT_ROUTES6.join(' + ')})`, 'info');
     } catch (e) {
