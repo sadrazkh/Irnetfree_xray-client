@@ -59,6 +59,70 @@ const TUN_PREFIX6 = 126;
 const TUN_GW6 = 'fdfe:dcba:9876::2';
 const SPLIT_ROUTES6 = ['::/1', '8000::/1'];
 
+/*
+ * The server bypass routes (Windows). Unlike everything else we lay, these sit
+ * on the PHYSICAL interface, so they do not go with the TUN adapter: they are
+ * active routes and live until they are deleted or Windows reboots.
+ *
+ * Two ways that used to go wrong, both "fixed by a reboot":
+ *  - `route delete <ip>` goes through route.exe, whose view of the table leaves
+ *    out every route of a disconnected interface (on the dev machine
+ *    `route print` shows none of the routes `netsh interface ipv4 show route`
+ *    lists on its unplugged Ethernet). So after a LAN → Wi-Fi switch the /32
+ *    pinned to the LAN could stay behind, pointing the server at a gateway that
+ *    comes back to life with the cable. The same blind delete also took any
+ *    route of the user's own to that address.
+ *  - A session that died without its teardown (killed, crashed) left them with
+ *    nobody to remove them.
+ * So each one is deleted by exact match — prefix, interface, next hop — through
+ * netsh, which sees disconnected interfaces too; and each one is journaled in
+ * userData the moment it exists, and whatever a previous process left in that
+ * journal is removed once per launch (recoverRoutesWindows).
+ */
+const ROUTE_JOURNAL = 'tun2socks-routes.json';
+const routeKey = (r) => `${r.ip}|${r.nextHop}|${r.ifIndex}`;
+const bypassDeleteArgs = (r) => ['interface', 'ipv4', 'delete', 'route', `prefix=${r.ip}/32`,
+  `interface=${r.ifIndex}`, `nexthop=${r.nextHop}`, 'store=active'];
+
+function readRouteJournal(userData) {
+  if (!userData) return [];
+  try {
+    const st = JSON.parse(fs.readFileSync(path.join(userData, ROUTE_JOURNAL), 'utf8'));
+    return (st && Array.isArray(st.routes) ? st.routes : [])
+      .filter(r => r && /^\d+\.\d+\.\d+\.\d+$/.test(r.ip) && /^\d+\.\d+\.\d+\.\d+$/.test(r.nextHop) && /^\d+$/.test(String(r.ifIndex)));
+  } catch { return []; }
+}
+
+/** Synchronous read-modify-write: no await in between, so two sessions of one process cannot lose each other's entries. */
+function updateRouteJournal(userData, add = [], remove = []) {
+  if (!userData) return;
+  const gone = new Set(remove.map(routeKey));
+  const routes = readRouteJournal(userData).filter(r => !gone.has(routeKey(r)));
+  for (const r of add) if (!routes.some(x => routeKey(x) === routeKey(r))) routes.push(r);
+  const file = path.join(userData, ROUTE_JOURNAL);
+  if (!routes.length) { try { fs.unlinkSync(file); } catch {} return; }
+  fs.writeFileSync(file + '.tmp', JSON.stringify({ version: 1, routes }, null, 2));
+  fs.renameSync(file + '.tmp', file);
+}
+
+/** One sweep per userData per process: the journal is read before this process lays anything. */
+const routeSweeps = new Map();
+
+function recoverRoutesWindows(userData, onLog = () => {}) {
+  if (!userData) return Promise.resolve(0);
+  const key = path.resolve(userData);
+  if (!routeSweeps.has(key)) {
+    const left = readRouteJournal(userData);
+    routeSweeps.set(key, (async () => {
+      for (const r of left) await run('netsh', bypassDeleteArgs(r)).catch(() => {});
+      try { updateRouteJournal(userData, [], left); } catch {}
+      if (left.length) onLog(`Removed ${left.length} bypass routes a previous session left behind`, 'warn');
+      return left.length;
+    })());
+  }
+  return routeSweeps.get(key);
+}
+
 class TunManager {
   constructor(opts = {}) {
     this.binDir = opts.binDir;
@@ -68,7 +132,8 @@ class TunManager {
     this.proc = null;
     this.active = false;
     this.savedGateway = null;
-    this.bypassIps = [];   // every /32 we added so we can remove them all
+    this.bypassIps = [];   // the addresses of the /32s we added (excludeIps)
+    this.bypassRoutes = [];   // … and each route exactly as laid, for an exact-match delete (Windows)
     this.tunIfIndex = null;
     this.dnsServers = ['1.1.1.1', '8.8.8.8'];
     // The adapter's IPv6 resolver once the v6 side is up (Windows) — what the
@@ -135,6 +200,9 @@ class TunManager {
   /** Discover the current default gateway + interface index (Windows). */
   getDefaultGatewayWin() { return platform.getDefaultGatewayWin(); }
 
+  /** Remove the bypass routes a previous process journaled and never removed (once per launch). */
+  recoverRoutesWindows() { return recoverRoutesWindows(this.userData, this.onLog); }
+
   /** Get the interface index of our TUN adapter once it exists. */
   getTunIfIndex() { return platform.getTunIfIndex(ADAPTER); }
 
@@ -179,7 +247,10 @@ class TunManager {
       'Default network gateway not found'));
     this.onLog(`Default gateway: ${gw.nextHop} (if ${gw.ifIndex})`, 'info');
 
-    // 2) resolve ALL server IPs and add bypass routes (avoid loopback)
+    // 2) resolve ALL server IPs and add bypass routes (avoid loopback) — after
+    //    whatever a previous process left in the route journal is gone, so a
+    //    leftover can neither block the add nor sit beside it on a dead gateway
+    await this.recoverRoutesWindows();
     const ips = await this.resolveServerIps(serverAddress);
     if (!ips.length) this.onLog(this.msg(
       `نتوانستم IP سرور (${serverAddress}) را resolve کنم — ممکن است حلقه ایجاد شود`,
@@ -187,7 +258,13 @@ class TunManager {
     const ifArgs = gw.ifIndex ? ['if', String(gw.ifIndex)] : [];
     for (const ip of ips) {
       await run('route', ['add', ip, 'mask', '255.255.255.255', gw.nextHop, 'metric', '1', ...ifArgs])
-        .then(() => { this.bypassIps.push(ip); this.onLog(`Bypass route for ${ip} via ${gw.nextHop}`, 'info'); })
+        .then(() => {
+          this.bypassIps.push(ip);
+          const r = { ip, nextHop: gw.nextHop, ifIndex: String(gw.ifIndex) };
+          this.bypassRoutes.push(r);
+          try { updateRouteJournal(this.userData, [r]); } catch (e) { this.onLog('Route journal: ' + e.message, 'warn'); }
+          this.onLog(`Bypass route for ${ip} via ${gw.nextHop}`, 'info');
+        })
         .catch(e => this.onLog('Bypass route failed: ' + e.message, 'warn'));
     }
     // 3) launch tun2socks (let it manage the wintun adapter + DNS hijack)
@@ -321,10 +398,14 @@ class TunManager {
       await run('route', ['delete', net, 'mask', '128.0.0.0', TUN_GW]).catch(() => {});
     }
     await this.cleanupIpv6Windows();
-    for (const ip of this.bypassIps) {
-      await run('route', ['delete', ip]).catch(() => {});
-    }
+    // exactly the routes we laid — see ROUTE_JOURNAL for why not `route delete <ip>`
+    const laid = this.bypassRoutes;
+    this.bypassRoutes = [];
     this.bypassIps = [];
+    for (const r of laid) {
+      await run('netsh', bypassDeleteArgs(r)).catch(() => {});
+    }
+    if (laid.length) { try { updateRouteJournal(this.userData, [], laid); } catch {} }
     this.tunIfIndex = null;
   }
 
@@ -726,9 +807,10 @@ class TunManager {
           execFileSync('netsh', ['interface', 'ipv6', 'delete', 'route', `prefix=${net}`, `interface=${ADAPTER}`, `nexthop=${TUN_GW6}`], { windowsHide: true });
         } catch {}
       }
-      for (const ip of this.bypassIps) {
-        try { execFileSync('route', ['delete', ip], { windowsHide: true }); } catch {}
+      for (const r of this.bypassRoutes) {
+        try { execFileSync('netsh', bypassDeleteArgs(r), { windowsHide: true }); } catch {}
       }
+      if (this.bypassRoutes.length) { try { updateRouteJournal(this.userData, [], this.bypassRoutes); } catch {} }
       return;
     }
     // macOS/Linux: only attempt synchronous teardown when already root (we

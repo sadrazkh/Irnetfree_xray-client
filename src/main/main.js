@@ -2592,6 +2592,8 @@ app.whenReady().then(() => {
     })().catch(e => { macRepairError = e; send('log', { line: 'Network recovery required', level: 'error' }); });
   } else {
     leakGuard.repairAtLaunch().catch((e) => send('log', { line: 'Leak guard repair failed: ' + e.message, level: 'error' }));
+    // tun2socks' server bypass routes sit on the physical NIC and outlive a killed app until a reboot (see tunManager.js)
+    if (process.platform === 'win32') new TunManager({ userData: dir, onLog: (line, level) => send('log', { line, level }) }).recoverRoutesWindows().catch(() => {});
   }
 
   registerIpc();
