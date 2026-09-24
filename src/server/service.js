@@ -1559,10 +1559,16 @@ function createService(opts = {}) {
       let hold = null;
       try {
         if (leakGuard) {
+          // only the strict level has holes to widen, and no name is asked of
+          // the OS for them on a network that just died (see main.js)
           let entries = [];
-          try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
+          const strict = !!(leakGuard.readState() || {}).strict;
+          if (strict) {
+            try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
+          }
+          const addrs = entries.flatMap(a => lastEntryHostIps.get(a) || [a]);
           if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
-            excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
+            excludes: await tunPlatform.resolveServerIps(addrs, { ipv6: true }).catch(() => [])
           });
         }
       } catch {}
