@@ -82,8 +82,8 @@ class XrayVpnService : VpnService() {
     /** A crash loop's delayed reconnect (main thread only); dropped with the service. */
     private var pendingAutoStart: Runnable? = null
 
-    /** [gen]: the connect this session came from — a newer one, or a disconnect, overtakes it. */
-    private class Launch(val engine: String, val config: String, val socksPort: Int, val gen: Long)
+    /** [gen]: the connect this session came from — a newer one, or a disconnect, overtakes it. [startId]: its start command. */
+    private class Launch(val engine: String, val config: String, val socksPort: Int, val gen: Long, val startId: Int)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         lastStartId = startId
@@ -96,7 +96,7 @@ class XrayVpnService : VpnService() {
                 // deliver this later than that. The notification's Disconnect
                 // carries no generation and moves it here.
                 if (!intent.hasExtra(EXTRA_GEN)) generation.stop()
-                worker.execute { stopAll(startId) }
+                worker.execute { stopAll(startId, fromDisconnect = true) }
                 return START_NOT_STICKY
             }
             ACTION_CONNECT -> {
@@ -211,7 +211,7 @@ class XrayVpnService : VpnService() {
             // 1) Proxy core with a local SOCKS inbound (no internal tun).
             //    EngineChoice already decided which, and prepare() already checked
             //    it is bundled for this ABI; anything else here is a real failure.
-            val launch = Launch(engine, config, socksPort, gen)
+            val launch = Launch(engine, config, socksPort, gen, startId)
             startCore(launch)?.let { return stopAll(startId, it, unattended) }
             if (gen != generation.get()) { VpnState.addLog("Connect cancelled while the core started"); teardown(); finishIfIdle(startId); return }
 
@@ -310,16 +310,16 @@ class XrayVpnService : VpnService() {
      * Not when a disconnect or a newer connect has been asked for since the
      * session started (its generation moved on): that command is queued behind
      * this one, and a restart — up to ten seconds — would only hold it up, for
-     * a core it stops anyway.
+     * a core it stops anyway. The session goes at once instead (dropOvertaken).
      */
     private fun onCoreExit(core: Any, code: Int) {
         worker.execute {
             if (core !== singbox && core !== pattn) return@execute     // stopped or replaced meanwhile
             val l = running ?: return@execute
             val name = if (core === singbox) "sing-box" else "Xray-PattN"
-            VpnState.addLog("⚠ The $name core exited by itself (code $code)")
-            if (l.gen != generation.get()) { VpnState.addLog("Not restarting it — a disconnect or a new connect is next"); return@execute }
             if (core === singbox) { singbox = null } else { pattn = null }
+            VpnState.addLog("⚠ The $name core exited by itself (code $code)")
+            if (l.gen != generation.get()) { dropOvertaken(l, "Not restarting it — a disconnect or a new connect is next"); return@execute }
             val now = SystemClock.elapsedRealtime()
             if (coreRestartedAt != 0L && now - coreRestartedAt < 60_000) {
                 stopAll(lastStartId, "The $name core stopped again (exit code $code) — reconnect, or see More → Logs", notify = true)
@@ -328,11 +328,31 @@ class XrayVpnService : VpnService() {
             coreRestartedAt = now
             VpnState.addLog("Restarting the $name core — the tunnel stays up meanwhile")
             val err = startCore(l)
-            // Overtaken while it restarted: the command queued behind this takes it from here.
-            if (l.gen != generation.get()) return@execute
+            // Overtaken while it restarted: a core that came back carries the
+            // tunnel until the command queued behind this replaces it; one that
+            // did not leaves nothing worth keeping up.
+            if (l.gen != generation.get()) {
+                if (err != null) dropOvertaken(l, "The $name core did not come back — $err")
+                return@execute
+            }
             if (err == null) VpnState.addLog("✓ The $name core is back")
             else stopAll(lastStartId, "The $name core stopped (exit code $code) and did not come back — $err", notify = true)
         }
+    }
+
+    /**
+     * A session a disconnect or a newer connect has overtaken, whose core is
+     * dead: the tunnel goes now. Left up over the dead core, a newer connect
+     * that then failed in prepare() (it never reaches the service) kept a TUN
+     * that let nothing through under "Not connected" — and live() stayed true.
+     * The service stops by this session's own start id, so a start command
+     * that has arrived since keeps it (stopSelf(id) ignores an older id).
+     * Runs on the worker.
+     */
+    private fun dropOvertaken(l: Launch, why: String) {
+        VpnState.addLog("$why — the tunnel is down until then")
+        teardown()
+        finishIfIdle(l.startId)
     }
 
     private fun applyPerApp(b: Builder, mode: String, apps: List<String>) {
@@ -453,13 +473,19 @@ class XrayVpnService : VpnService() {
      * overwrite them on the very next line, so every failure in here reached
      * the user as "Not protected" and nothing else — and with [notify] a
      * notification says it too, for when nobody is looking at the app.
+     *
+     * [fromDisconnect]: the teardown a disconnect asked for. Its Not connected
+     * goes up only while that disconnect is still the latest move: reconnect
+     * and ⚡ connect ~0.6 s after it, and a teardown landing later than that
+     * put "Not protected" over the new connect's CONNECTING (a tap then
+     * started yet another connect) or erased its prepare's ERROR.
      */
-    private fun stopAll(startId: Int, error: String? = null, notify: Boolean = false) {
+    private fun stopAll(startId: Int, error: String? = null, notify: Boolean = false, fromDisconnect: Boolean = false) {
         teardown()
         if (error != null) {
             VpnState.set(ConnState.ERROR, error = error)
             if (notify) notifyError(error)
-        } else {
+        } else if (!fromDisconnect || generation.stopLatest) {
             VpnState.set(ConnState.DISCONNECTED, "")
         }
         finish(startId)
@@ -496,7 +522,7 @@ class XrayVpnService : VpnService() {
         // settings. (VpnService's own onRevoke is a bare stopSelf(); finish() does it here.)
         generation.stop()
         val id = lastStartId
-        worker.execute { stopAll(id) }
+        worker.execute { stopAll(id, fromDisconnect = true) }
     }
 
     override fun onDestroy() {
