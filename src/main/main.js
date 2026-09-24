@@ -100,6 +100,9 @@ const drops = new DropBudget();
 // status or start a watcher. Comparing the token captured at entry against this
 // is how it finds out (see doConnect).
 let connGen = 0;
+// A connect or a disconnect by hand: the connect-on-launch timer (ready-to-show)
+// must not overtake it — set synchronously by each, as service.js's is.
+let bootCancelled = false;
 let userBinDir = null;
 let isQuitting = false;
 let xrayReloading = false;   // true while the proc-routing watcher restarts xray
@@ -495,7 +498,7 @@ function trayMenuTemplate() {
   const active = store.get('activeServerId', null);
   const item = (it) => ({
     label: (it.id === active ? '● ' : '') + it.name,
-    click: () => { drops.reset(); doConnect(it.id).catch((e) => send('log', { line: 'Connect failed: ' + e.message, level: 'error' })); }
+    click: () => { bootCancelled = true; drops.reset(); doConnect(it.id).catch((e) => send('log', { line: 'Connect failed: ' + e.message, level: 'error' })); }
   });
   const groups = trayGroups(store.get('servers', []), store.get('subscriptions', [])).map((g) => ({
     label: g.label || (en ? 'Servers' : 'سرورها'),
@@ -506,7 +509,7 @@ function trayMenuTemplate() {
     { type: 'separator' },
     ...groups,
     ...(groups.length ? [{ type: 'separator' }] : []),
-    { label: en ? 'Disconnect' : 'قطع اتصال', enabled: !!active, click: () => doDisconnect() },
+    { label: en ? 'Disconnect' : 'قطع اتصال', enabled: !!active, click: () => { bootCancelled = true; doDisconnect(); } },
     { type: 'separator' },
     { label: en ? 'Quit' : 'خروج', click: () => { isQuitting = true; app.quit(); } }
   ];
@@ -2443,8 +2446,8 @@ function registerIpc() {
     return subs.list();
   });
 
-  ipcMain.handle('connect', (e, id) => { drops.reset(); return doConnect(id); });
-  ipcMain.handle('disconnect', () => doDisconnect());
+  ipcMain.handle('connect', (e, id) => { bootCancelled = true; drops.reset(); return doConnect(id); });
+  ipcMain.handle('disconnect', () => { bootCancelled = true; return doDisconnect(); });
 
   ipcMain.handle('settings:get', () => getSettings());
   /**
@@ -3096,7 +3099,13 @@ app.whenReady().then(() => {
       }
     }
     if (buildable) {
-      setTimeout(() => doConnect(lastId).catch((e) => send('log', { line: 'Auto-connect failed: ' + e.message, level: 'error' })), 1000);
+      setTimeout(() => {
+        // A connect or a disconnect by hand in this second is the user's
+        // answer: this one would overtake it silently (it comes back stale,
+        // with no status) and land on the last connection instead.
+        if (bootCancelled || isQuitting || store.get('activeServerId', null)) return;
+        doConnect(lastId).catch((e) => send('log', { line: 'Auto-connect failed: ' + e.message, level: 'error' }));
+      }, 1000);
     }
   });
 
