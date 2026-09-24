@@ -178,4 +178,16 @@ object CertPin {
         if (normalizePin(server.certPin).isEmpty()) return false
         return now - server.certPinCheckedAt >= maxAgeMs
     }
+
+    /* ----------------------------- one connect's pins, applied by id ----------------------------- */
+
+    data class PinUpdate(val id: String, val address: String, val port: Int, val sni: String, val checkedAt: Long, val pin: String? = null, val pinAt: String = "")
+
+    /** The name the probe presents: the record's serverName, else its address. */
+    fun sniOf(s: ServerConfig): String =
+        s.outbound.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")?.optString("serverName")?.takeIf { it.isNotBlank() } ?: s.address
+
+    fun learn(plan: ConnectionPlan, now: Long, fetch: (ServerConfig) -> String, log: (String) -> Unit = {}): List<PinUpdate> = emptyList()
+
+    fun applyPins(servers: MutableList<ServerConfig>, updates: List<PinUpdate>): Boolean = false
 }
