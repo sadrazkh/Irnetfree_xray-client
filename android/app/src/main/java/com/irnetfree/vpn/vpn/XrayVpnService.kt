@@ -103,10 +103,27 @@ class XrayVpnService : VpnService() {
             null, VpnService.SERVICE_INTERFACE -> {
                 val gen = generation.incrementAndGet()
                 goForeground("IRNetFree")
+                if (intent == null && restartedTooOften()) {
+                    worker.execute { stopAll(startId, "IRNetFree was stopped twice within two minutes — it will not reconnect by itself again; open the app to connect", notify = true) }
+                    return START_NOT_STICKY
+                }
                 autoStart(gen, startId, if (intent == null) "restarted after the app was stopped" else "always-on VPN")
             }
         }
         return START_STICKY
+    }
+
+    /**
+     * A second restart-after-kill within two minutes is a crash loop (a config
+     * that takes the core down as it starts), not bad luck: reconnecting by
+     * ourselves again would only repeat it.
+     */
+    private fun restartedTooOften(): Boolean {
+        val p = getSharedPreferences("irnf-service", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val last = p.getLong("stickyRestartAt", 0L)
+        p.edit().putLong("stickyRestartAt", now).apply()
+        return last > 0L && now - last in 0L until 120_000L
     }
 
     /** The stored selection, through the same prepare() as the Connect button — off the main thread. */
