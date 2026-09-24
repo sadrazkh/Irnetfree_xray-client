@@ -14,7 +14,8 @@ import java.security.SecureRandom
  * a fresh random username/password on both (ConfigBuilder, SingboxConfig); hev
  * presents it (XrayVpnService.writeTun2socksConfig) and so does every client of
  * the app's own that goes through the tunnel (LocalProxyAuth below). Hex only:
- * the values go into hev's YAML in single quotes and into JSON untouched.
+ * the values go into hev's YAML in single quotes (TunnelSetup doubles a quote
+ * all the same) and into JSON untouched.
  */
 data class LocalAuth(val user: String, val pass: String) {
     companion object {
@@ -59,9 +60,11 @@ object LocalProxyAuth : Authenticator() {
         val a = auth ?: return null
         if (requestingProtocol?.startsWith("SOCKS", ignoreCase = true) != true) return null
         if (requestingPort != port) return null
+        // 127.0.0.1 itself — where the tunnel's inbounds listen and every
+        // client of ours dials them — not the rest of loopback (127.0.0.2, ::1).
         val site = requestingSite
-        val loopback = if (site != null) site.isLoopbackAddress else requestingHost == "127.0.0.1"
-        if (!loopback) return null
+        val local = if (site != null) site.hostAddress == "127.0.0.1" else requestingHost == "127.0.0.1"
+        if (!local) return null
         return PasswordAuthentication(a.user, a.pass.toCharArray())
     }
 }
