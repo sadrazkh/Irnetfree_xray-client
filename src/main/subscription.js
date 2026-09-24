@@ -32,8 +32,12 @@ function withoutRemark(raw) {
  * path/serviceName/host. Two records with the same identity are the same
  * server even when the link around them changed (a vmess `ps`, an SNI, a
  * fingerprint). '' when the record is too odd to say.
+ *
+ * `strict` adds what tells a panel's VARIANTS of one server apart — the same
+ * host, port and uuid offered with another SNI, REALITY key or flow — so a
+ * reordered, retuned list does not swap their ids.
  */
-function serverIdentity(s) {
+function serverIdentity(s, strict) {
   const ob = s && s.outbound;
   if (!ob || typeof ob !== 'object') return '';
   const set = ob.settings || {};
@@ -63,8 +67,15 @@ function serverIdentity(s) {
     path = [].concat(rq.path || []).join(',');
     host = [].concat((rq.headers && rq.headers.Host) || []).join(',');
   }
-  return JSON.stringify([ob.protocol || s.protocol || '', String(s.address || '').toLowerCase(), Number(s.port) || 0,
-    cred, net, path || '', host || '']);
+  const id = [ob.protocol || s.protocol || '', String(s.address || '').toLowerCase(), Number(s.port) || 0,
+    cred, net, path || '', host || ''];
+  if (strict) {
+    const tls = st.tlsSettings || st.realitySettings || {};
+    const rs = st.realitySettings || {};
+    const u = set.vnext && set.vnext[0] && set.vnext[0].users && set.vnext[0].users[0];
+    id.push(st.security || 'none', tls.serverName || '', rs.publicKey || '', rs.shortId || '', (u && u.flow) || '');
+  }
+  return JSON.stringify(id);
 }
 
 const streamOf = (s) => (s && s.outbound && s.outbound.streamSettings) || null;
@@ -125,18 +136,20 @@ function carryOver(old, fresh) {
 
 /**
  * Match a subscription's freshly parsed servers to the ones it had before.
- * Pure. Three passes, each over whatever is still unmatched: the identical
- * link, then the link apart from its remark, then the identity above — so an
- * exact match always wins over a looser one. Within a pass the old servers are
- * taken in order, one each: duplicates in the fresh list never share an id.
- * Unmatched old servers are gone; unmatched fresh ones keep their new id.
+ * Pure. Four passes, each over whatever is still unmatched: the identical
+ * link, the link apart from its remark, the strict identity, the identity
+ * above — so a tighter match always wins over a looser one. Within a pass the
+ * old servers are taken in order, one each: duplicates in the fresh list never
+ * share an id. Unmatched old servers are gone; unmatched fresh ones keep their
+ * new id.
  */
 function reconcileServers(previous, fresh) {
   const old = Array.isArray(previous) ? previous.filter(s => s && s.id) : [];
   const list = Array.isArray(fresh) ? fresh : [];
   const taken = new Set();
   const match = new Array(list.length).fill(null);
-  for (const key of [(s) => String(s.raw || ''), (s) => withoutRemark(s.raw), serverIdentity]) {
+  const passes = [(s) => String(s.raw || ''), (s) => withoutRemark(s.raw), (s) => serverIdentity(s, true), (s) => serverIdentity(s)];
+  for (const key of passes) {
     const byKey = new Map();
     old.forEach((o, i) => {
       if (taken.has(i)) return;
