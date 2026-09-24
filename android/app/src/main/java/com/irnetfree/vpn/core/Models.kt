@@ -31,7 +31,12 @@ data class ServerConfig(
     // certificate a TLS server presented, when its link asked for allowInsecure.
     val certPin: String = "",
     val certPinAt: String = "",
-    val certPinCheckedAt: Long = 0
+    val certPinCheckedAt: Long = 0,
+    // The edit-sheet fields the USER has changed on this server (ServerEditor
+    // field names, accumulated over every save). A subscription refresh keeps
+    // these and nothing else of the old record's connection (SubRefresh.carry):
+    // what the user did is recorded when they do it, never inferred afterwards.
+    val edited: List<String> = emptyList()
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("name", name); put("protocol", protocol)
@@ -41,6 +46,7 @@ data class ServerConfig(
         if (dns.isNotEmpty()) put("dns", JSONArray(dns))
         if (dnsDomains.isNotEmpty()) put("dnsDomains", JSONArray(dnsDomains))
         if (certPin.isNotEmpty()) { put("certPin", certPin); put("certPinAt", certPinAt); put("certPinCheckedAt", certPinCheckedAt) }
+        if (edited.isNotEmpty()) put("edited", JSONArray(edited))
     }
 
     companion object {
@@ -68,7 +74,8 @@ data class ServerConfig(
                 dnsDomains = domains,
                 certPin = CertPin.normalizePin(o.optString("certPin")),
                 certPinAt = o.optString("certPinAt"),
-                certPinCheckedAt = o.optLong("certPinCheckedAt", 0)
+                certPinCheckedAt = o.optLong("certPinCheckedAt", 0),
+                edited = strList(o.optJSONArray("edited"))
             )
         }
 

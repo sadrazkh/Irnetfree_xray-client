@@ -1,7 +1,6 @@
 package com.irnetfree.vpn.core
 
 import org.json.JSONObject
-import kotlin.reflect.KMutableProperty1
 
 /**
  * What a subscription refresh does to the servers that subscription already
@@ -114,27 +113,31 @@ object SubRefresh {
     }
 
     /**
-     * A fresh server that is [old]: the old id and the certificate pinned on
-     * first use (which no link carries). Everything else comes from the
-     * subscription, which is what a refresh is for — except what the USER set.
+     * A fresh server that is [old]: the old id, the certificate pinned on first
+     * use (which no link carries) and the record of what the user edited.
+     * Everything else comes from the subscription, which is what a refresh is
+     * for — except what the USER changed.
      *
-     * "What the user set" is what differs from the old server's own link
-     * ([linked]): that is carried onto the fresh server, and the rest follows the
-     * fresh link — changed, or dropped. It covers everything the edit sheet
-     * writes: the connection (address — a clean Cloudflare IP swapped in is the
-     * usual one — port, credential, transport, path, host, SNI, fingerprint,
-     * REALITY keys, WireGuard fields, patterniha), the name, and the core, TLS
-     * fragment and noise, which a link carries too (`engine=`, `fragment=`,
-     * `noise=`) and a panel retunes when the DPI changes. (Keeping any non-blank
-     * old value froze a panel's old fragment forever; keeping none reverted
-     * every edit every hour.)
+     * THE CONNECTION: exactly the edit-sheet fields recorded in [ServerConfig.edited]
+     * — recorded by ServerEditor.apply when the user saved them, never inferred
+     * afterwards — are carried onto the fresh server; the address above all (a
+     * clean Cloudflare IP swapped in is the usual edit), then port, SNI, host,
+     * path, keys, name… Inferring them as "differs from re-parsing the old link"
+     * took an OLDER PARSER'S MISTAKES for edits (a WARP key's '+' read as a
+     * space, `host:2408/` as 51820) and froze them against every later parser
+     * fix. No record → the panel's connection, as before this change. And when
+     * the panel changed the handshake itself (security or transport), only
+     * where the user reaches the server — address, port, name — is carried: an
+     * SNI or key for the old handshake means nothing in the new one.
      *
-     * Without a link nothing can tell the user's from the panel's: the fresh
-     * connection wins, as it always has, and the core, fragment and noise keep
-     * what they have.
+     * THE CORE, TLS FRAGMENT AND NOISE, which a link carries too (`engine=`,
+     * `fragment=`, `noise=`) and a panel retunes when the DPI changes, keep the
+     * old value only where it differs from what the old server's own link
+     * ([linked]) gives, compared as the sheet writes them back; without a link
+     * they keep what they have.
      */
     fun carry(old: ServerConfig, fresh: ServerConfig, linked: ServerConfig? = linkedForm(old)): ServerConfig {
-        val base = if (linked != null) withUsersEdits(old, linked, fresh) else fresh
+        val base = withUsersEdits(old, linked, fresh)
         val ob = JSONObject(base.outbound.toString())
         for (k in listOf("_fragment", "_noise")) {
             val mine = old.outbound.optString(k)
@@ -148,54 +151,38 @@ object SubRefresh {
         }
         return base.copy(
             id = old.id, outbound = ob, engine = engine,
-            certPin = old.certPin, certPinAt = old.certPinAt, certPinCheckedAt = old.certPinCheckedAt
+            certPin = old.certPin, certPinAt = old.certPinAt, certPinCheckedAt = old.certPinCheckedAt,
+            edited = old.edited
         )
     }
 
-    /** The edit sheet's text fields other than fragment/noise/core (handled in [carry]). */
-    private val SHEET_FIELDS: List<KMutableProperty1<ServerEditor.Fields, String>> = listOf(
-        ServerEditor.Fields::name, ServerEditor.Fields::address, ServerEditor.Fields::port, ServerEditor.Fields::cred,
-        ServerEditor.Fields::network, ServerEditor.Fields::security, ServerEditor.Fields::sni, ServerEditor.Fields::host,
-        ServerEditor.Fields::path, ServerEditor.Fields::fp, ServerEditor.Fields::pbk, ServerEditor.Fields::sid,
-        ServerEditor.Fields::method, ServerEditor.Fields::proxyUser, ServerEditor.Fields::proxyPass,
-        ServerEditor.Fields::wgPub, ServerEditor.Fields::wgAddr, ServerEditor.Fields::wgPsk, ServerEditor.Fields::wgMtu,
-        ServerEditor.Fields::wgReserved, ServerEditor.Fields::wgAllowed, ServerEditor.Fields::wgDns,
-        ServerEditor.Fields::cipherSuites, ServerEditor.Fields::finalMask
-    )
+    /** What is carried when the panel changed the handshake: where the user reaches the server, and what they call it. */
+    private val ADDRESSING = setOf("name", "address", "port")
 
     /**
-     * [fresh] with every sheet field the user changed on [old] (it differs from
-     * [linked], old's own link) written into it — through ServerEditor.apply,
+     * [fresh] with the connection fields the user edited on [old] (its
+     * [ServerConfig.edited] record) written into it — through ServerEditor.apply,
      * which patches exactly those fields and leaves the rest of the fresh
      * outbound as the panel sent it.
      */
-    private fun withUsersEdits(old: ServerConfig, linked: ServerConfig, fresh: ServerConfig): ServerConfig {
+    private fun withUsersEdits(old: ServerConfig, linked: ServerConfig?, fresh: ServerConfig): ServerConfig {
+        if (old.edited.isEmpty()) return fresh
         val mine = ServerEditor.read(old)
-        val link = ServerEditor.read(linked)
+        val panelWas = ServerEditor.read(linked ?: old)
         val f = ServerEditor.read(fresh)
-        var edited = false
-        for (p in SHEET_FIELDS) {
-            if (p.get(mine) != p.get(link)) { p.set(f, p.get(mine)); edited = true }
+        val sameHandshake = panelWas.security.lowercase() == f.security.lowercase() &&
+            ServerEditor.normNet(panelWas.network) == ServerEditor.normNet(f.network)
+        val carried = old.edited.filter { sameHandshake || it in ADDRESSING }
+        var changed = false
+        for ((name, p) in ServerEditor.EDITABLE) {
+            if (name in carried) { p.set(f, p.get(mine)); changed = true }
         }
-        if (mine.allowInsecure != link.allowInsecure) { f.allowInsecure = mine.allowInsecure; edited = true }
-        return if (edited) ServerEditor.apply(fresh, f) else fresh
+        if ("allowInsecure" in carried) { f.allowInsecure = mine.allowInsecure; changed = true }
+        return if (changed) ServerEditor.apply(fresh, f) else fresh
     }
 
-    /**
-     * A fragment / noise value as the edit sheet writes it back: trimmed, and for
-     * noise its presets lower-cased with "fakehello" as "faketls". Opening the
-     * sheet and saving rewrites a link's `noise=fakehello` as "faketls"; that
-     * spelling is the sheet's, not an edit of the user's.
-     */
-    private fun sheetForm(key: String, v: String): String {
-        val t = v.trim()
-        if (key != "_noise") return t
-        return when (val l = t.lowercase()) {
-            "fakehello" -> "faketls"
-            "random", "faketls" -> l
-            else -> t
-        }
-    }
+    /** A fragment / noise value as the edit sheet writes it back (ServerEditor.noiseKey). */
+    private fun sheetForm(key: String, v: String): String = if (key == "_noise") ServerEditor.noiseKey(v) else v.trim()
 
     /**
      * [all] with [subId]'s servers replaced by [servers], in the place the

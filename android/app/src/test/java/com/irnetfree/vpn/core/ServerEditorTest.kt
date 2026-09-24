@@ -95,6 +95,26 @@ class ServerEditorTest {
         assertEquals("cdn.example", stream(out).getJSONObject("tlsSettings").getString("serverName"))
     }
 
+    /*
+     * Which fields the user changed is RECORDED on the server when they save it
+     * (ServerConfig.edited, accumulated), so a subscription refresh can keep
+     * exactly those — inferring them later took an old parser's mistakes for edits.
+     */
+    @Test fun aSaveRecordsTheFieldsItChanged() {
+        val s = LinkParser.parseLink("vless://u@h.example:443?type=ws&path=%2Fws&host=cdn.example&security=tls&sni=cdn.example&noise=fakehello#w")
+        assertEquals(emptyList<String>(), save(s).edited)                             // saved as it was: nothing
+        assertEquals(emptyList<String>(), save(s) { it.noise = "faketls" }.edited)    // the sheet's own spelling
+        assertEquals(emptyList<String>(), save(s) { it.name = "  " }.edited)          // an emptied name keeps the old one
+        val a = save(s) { it.address = "104.16.1.1" }
+        assertEquals(listOf("address"), a.edited)
+        val b = save(a) { it.sni = "x.example"; it.fragment = "tlshello,1-3,1-2"; it.port = "8443" }
+        assertEquals(setOf("address", "port", "sni", "fragment"), b.edited.toSet())
+        assertEquals(b.edited, save(b).edited)                                        // a later untouched save forgets nothing
+        assertEquals(b.edited, ServerConfig.fromJson(b.toJson()).edited)             // and the store keeps it
+        assertTrue(ServerConfig.fromJson(s.toJson()).edited.isEmpty())
+        assertEquals(listOf("engine"), save(s) { it.engine = "sing-box" }.edited)
+    }
+
     @Test fun clearingTheFragmentRemovesIt() {
         val s = LinkParser.parseLink("vless://u@h.example:443?security=tls&sni=a.com&fragment=tlshello%2C100-200%2C10-20#f")
         assertEquals("tlshello,100-200,10-20", s.outbound.getString("_fragment"))

@@ -2,6 +2,7 @@ package com.irnetfree.vpn.core
 
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.reflect.KMutableProperty1
 
 /**
  * Reads editable fields out of a ServerConfig's outbound and rebuilds the
@@ -133,7 +134,59 @@ object ServerEditor {
         if (!patched || f.noise != was.noise) { if (f.noise.isBlank()) out.remove("_noise") else out.put("_noise", f.noise.trim()) }
         val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" }
         val (dns, dnsDomains) = if (s.protocol == "wireguard") LinkParser.splitDnsField(f.wgDns) else (s.dns to s.dnsDomains)
-        return s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = out, engine = engine, dns = dns, dnsDomains = dnsDomains)
+        val edited = (s.edited + changedFields(s, was, f)).distinct()
+        return s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = out, engine = engine, dns = dns, dnsDomains = dnsDomains, edited = edited)
+    }
+
+    /**
+     * The sheet's text fields other than fragment / noise / core, by the name
+     * [ServerConfig.edited] records them under. SubRefresh carries exactly the
+     * recorded ones onto a refreshed subscription server.
+     */
+    internal val EDITABLE: List<Pair<String, KMutableProperty1<Fields, String>>> = listOf(
+        "name" to Fields::name, "address" to Fields::address, "port" to Fields::port, "cred" to Fields::cred,
+        "network" to Fields::network, "security" to Fields::security, "sni" to Fields::sni, "host" to Fields::host,
+        "path" to Fields::path, "fp" to Fields::fp, "pbk" to Fields::pbk, "sid" to Fields::sid,
+        "method" to Fields::method, "proxyUser" to Fields::proxyUser, "proxyPass" to Fields::proxyPass,
+        "wgPub" to Fields::wgPub, "wgAddr" to Fields::wgAddr, "wgPsk" to Fields::wgPsk, "wgMtu" to Fields::wgMtu,
+        "wgReserved" to Fields::wgReserved, "wgAllowed" to Fields::wgAllowed, "wgDns" to Fields::wgDns,
+        "cipherSuites" to Fields::cipherSuites, "finalMask" to Fields::finalMask
+    )
+
+    /** Fields [apply] leaves as they were when the sheet hands them back empty. */
+    private val BLANK_KEEPS = setOf("name", "address", "cred", "wgPub", "method")
+
+    /**
+     * A noise value as the sheet writes it back: its presets lower-cased and
+     * "fakehello" as "faketls". Saving a link's `noise=fakehello` rewrites it as
+     * "faketls" — the sheet's spelling, not a change the user made.
+     */
+    internal fun noiseKey(v: String): String {
+        val t = v.trim()
+        return when (val l = t.lowercase()) {
+            "fakehello" -> "faketls"
+            "random", "faketls" -> l
+            else -> t
+        }
+    }
+
+    /** The names of the fields this save really changes — what [ServerConfig.edited] accumulates. */
+    internal fun changedFields(s: ServerConfig, was: Fields, f: Fields): List<String> {
+        val out = ArrayList<String>()
+        for ((name, p) in EDITABLE) {
+            val now = p.get(f).trim(); val before = p.get(was).trim()
+            val same = when {
+                name == "port" -> (now.toIntOrNull() ?: s.port) == s.port
+                name in BLANK_KEEPS -> now.isEmpty() || now == before
+                else -> now == before
+            }
+            if (!same) out.add(name)
+        }
+        if (f.allowInsecure != was.allowInsecure) out.add("allowInsecure")
+        if (f.fragment.trim() != was.fragment.trim()) out.add("fragment")
+        if (noiseKey(f.noise) != noiseKey(was.noise)) out.add("noise")
+        if (f.engine.trim().takeIf { it.isNotBlank() && it != "xray" } != s.engine?.takeIf { it.isNotBlank() && it != "xray" }) out.add("engine")
+        return out
     }
 
     /** Stream keys that belong to one transport; a change of transport drops them all. */
@@ -141,7 +194,7 @@ object ServerEditor {
         "xhttpSettings", "splithttpSettings", "kcpSettings", "httpupgradeSettings", "quicSettings")
 
     /** What buildStream calls a network: h2 for http, xhttp for splithttp, kcp for mkcp. */
-    private fun normNet(n: String): String = when (val l = n.lowercase()) {
+    internal fun normNet(n: String): String = when (val l = n.lowercase()) {
         "http" -> "h2"; "splithttp" -> "xhttp"; "mkcp" -> "kcp"; else -> l
     }
 
