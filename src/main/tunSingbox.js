@@ -356,10 +356,22 @@ class TunSingbox {
     let gone;
     this.exited = new Promise((resolve) => { gone = resolve; });
     const finish = (info) => {
-      if (this.proc === proc) this.proc = null;
-      // A dead tunnel is a drop: the recovery path treats it like one.
+      // A late exit from a sing-box a reconnect already replaced is not news
+      // about the tunnel that is live now.
+      if (this.proc !== proc) { gone(info); return; }
+      // A live tunnel nobody stopped: the machine's routes and DNS still point
+      // into an adapter that is gone, so every app off the system proxy leaves
+      // through the physical NIC. A dead tunnel is a drop — the owner's
+      // recovery rebuilds it, here as on macOS (checkMacHealth). Never from
+      // inside this event, never thrown into it.
+      const lost = this.active && !this.stopping;
+      this.proc = null;
       this.active = false;
       gone(info);
+      if (lost) {
+        const err = new Error(`sing-box exited (code=${info.code} signal=${info.signal || '-'}${info.error ? ' ' + info.error : ''})`);
+        Promise.resolve().then(() => this.onUnexpectedExit(err)).catch(e => this.onLog('TUN recovery callback: ' + e.message, 'error'));
+      }
     };
     proc.on('exit', (code, signal) => {
       this.onLog(`sing-box exited (code=${code} signal=${signal || '-'})`, (this.stopping || code === 0) ? 'info' : 'error');

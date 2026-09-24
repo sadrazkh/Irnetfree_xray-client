@@ -3,7 +3,7 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, nat
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawn, execFile } = require('child_process');
+const { execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts, wgResolverAddresses } = require('./configBuilder');
@@ -16,7 +16,7 @@ const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinW
 const { assetStatus: scanAssets, downloadedFileNames } = require('./assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
 const { XrayManager, getFreePort, getFreePorts } = require('./xrayManager');
-const { setSystemProxy } = require('./sysproxy');
+const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
@@ -38,6 +38,9 @@ const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = requir
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
+const { DropBudget } = require('./dropBudget');
+const { isWebUrl, isAppPage } = require('./urlGuard');
+const { runElevatedRelaunch } = require('./relaunch');
 const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
 const { trayGroups } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
@@ -86,7 +89,11 @@ let recoverTimer = null;
 let recovering = false;        // a network-change recovery is in flight
 let recoverQueued = null;      // reason of a trigger that arrived during that recovery
 let recoverGen = 0;            // bumped by doDisconnect(); an older recovery no longer owns `recovering`
+let recoveryRun = null;        // the runRecovery() in flight, for a drop to wait on
 const RECOVER_BACKOFF_MS = [2000, 5000, 15000];
+// Drops the connection may take on its own (core exit, TUN death, failed reload)
+// before the app stops rebuilding it — see onConnectionDrop / dropBudget.js.
+const drops = new DropBudget();
 // Bumped by doDisconnect() and by every doConnect(). doConnect awaits half a
 // dozen times and the user can press the power button in any of those gaps: from
 // that moment the older call no longer speaks for the app, so it must not emit a
@@ -237,8 +244,9 @@ function makeTun(settings, { quiet = false } = {}) {
   const opts = { binDir: bundledBinDir(), extraDirs: [userBin()], onLog: (line, level) => send('log', { line, level }), lang: settings.lang, userData: app.getPath('userData'),
     onUnexpectedExit: () => {
       if (userDisconnecting || isQuitting || tun !== selected) return;
-      send('log', { line: 'The macOS tunnel exited unexpectedly; checking recovery', level: 'error' });
-      recoverFromNetworkChange('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
+      // every platform now: the backends report a tunnel that died on its own
+      send('log', { line: 'The tunnel exited unexpectedly; checking recovery', level: 'error' });
+      onConnectionDrop('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
     } };
   if (process.platform === 'darwin' && settings.tunBackend === 'native-macos') return (selected = new NativeMacTun(opts));
   const sb = new TunSingbox(opts);
@@ -313,15 +321,21 @@ async function removeLanFirewall() {
   }
 }
 
-/** Open inbound TCP for the proxy ports. Needs admin; returns {ok,error}. */
+/**
+ * Open inbound TCP for the proxy ports. Needs admin; returns {ok,error}.
+ * The proxy has no authentication, so the hole is the LAN's alone: private and
+ * domain networks, the local subnet. On a network Windows calls Public (a café,
+ * an airport, a hotel) nobody else gets to use it — or to reach the tunnel's
+ * exit through it.
+ */
 async function addLanFirewall(socksPort, httpPort) {
   if (process.platform !== 'win32') return { ok: true };
   await removeLanFirewall();
   try {
     await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${LAN_RULES.socks}`,
-      'dir=in', 'action=allow', 'protocol=TCP', `localport=${socksPort}`]);
+      'dir=in', 'action=allow', 'protocol=TCP', `localport=${socksPort}`, 'profile=private,domain', 'remoteip=localsubnet']);
     await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${LAN_RULES.http}`,
-      'dir=in', 'action=allow', 'protocol=TCP', `localport=${httpPort}`]);
+      'dir=in', 'action=allow', 'protocol=TCP', `localport=${httpPort}`, 'profile=private,domain', 'remoteip=localsubnet']);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -364,6 +378,11 @@ let killEngaged = false;
 
 async function armKillSwitch() {
   if (process.platform !== 'win32') return { ok: false, error: 'windows only' };
+  // Already in: re-arming is a delete then an add — a moment with no block,
+  // and a drop arms it while the tunnel is already down. But the flag is only
+  // a belief: a disarm racing it (a reapply's, a recovery's) may have deleted
+  // the rule meanwhile, so it is trusted only when the rule is really there.
+  if (killEngaged && await killRulePresent()) return { ok: true };
   try {
     await netsh(['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`]).catch(() => {});
     await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${KILL_RULE}`,
@@ -375,11 +394,19 @@ async function armKillSwitch() {
   }
 }
 
+/** Whether the kill-switch rule exists (netsh fails "No rules match" when not). */
+function killRulePresent() {
+  return netsh(['advfirewall', 'firewall', 'show', 'rule', `name=${KILL_RULE}`]).then(() => true, () => false);
+}
+
 async function disarmKillSwitch() {
   killEngaged = false;
   if (process.platform !== 'win32') return;
   try { await netsh(['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`]); } catch {}
 }
+
+/** The one page the window shows — and the only one it may navigate to (see urlGuard.js). */
+const APP_PAGE = path.join(__dirname, '..', 'renderer', 'index.html');
 
 function createWindow() {
   // Started by the OS at logon — stay in the tray: `--hidden` from the Windows
@@ -403,7 +430,18 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  // The preload bridge rides along with whatever page this window shows: it
+  // shows ours and goes nowhere else, opens no window of its own, and a web
+  // link that asks for one goes to the browser instead.
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    if (!isAppPage(url, APP_PAGE)) e.preventDefault();
+  });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isWebUrl(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  mainWindow.loadFile(APP_PAGE);
 
   // the traffic meter follows the window: fast while shown, slow while hidden
   for (const ev of ['show', 'hide', 'minimize', 'restore', 'focus']) {
@@ -416,6 +454,10 @@ function createWindow() {
       mainWindow.hide();
     }
   });
+
+  // Windows shutdown, restart or log-off: no before-quit comes, and the process
+  // is gone seconds later — the synchronous teardown is all there is time for.
+  mainWindow.on('session-end', () => teardownSync('session-end'));
 
   // mainWindow.webContents.openDevTools({ mode: 'detach' });
 }
@@ -445,7 +487,7 @@ function trayMenuTemplate() {
   const active = store.get('activeServerId', null);
   const item = (it) => ({
     label: (it.id === active ? '● ' : '') + it.name,
-    click: () => doConnect(it.id).catch((e) => send('log', { line: 'Connect failed: ' + e.message, level: 'error' }))
+    click: () => { drops.reset(); doConnect(it.id).catch((e) => send('log', { line: 'Connect failed: ' + e.message, level: 'error' })); }
   });
   const groups = trayGroups(store.get('servers', []), store.get('subscriptions', [])).map((g) => ({
     label: g.label || (en ? 'Servers' : 'سرورها'),
@@ -734,6 +776,8 @@ function healCertPin(line) {
   for (const s of hit) send('log', { line: `Certificate changed for ${s.name} — pin cleared, reconnect to pin the new one`, level: 'warn' });
 }
 
+const lastWgEndpointIps = new Map();   // endpoint name → the address the last connect resolved
+
 /**
  * The settings for this connect, with every WireGuard peer endpoint that is a
  * NAME resolved to an address (see configBuilder.wgEndpointHosts for why).
@@ -756,10 +800,21 @@ async function withWgEndpointIps(serverId, settings) {
   await Promise.all(hosts.map(async (h) => {
     const r = await resolveHost(h, { ipv6: !!settings.ipv6, doh: settings.dnsRemote }).catch(() => null);
     if (!r || !r.ips.length) {
+      // A recovery rebuilds with the kill switch armed and the guard held, so
+      // nothing resolves at that moment — and a name left to the core can take
+      // the official core down with it (see above). The address the tunnel was
+      // using a moment ago is the best answer there is.
+      const last = lastWgEndpointIps.get(h);
+      if (last) {
+        map[h] = last;
+        notes.push(`${h} does not resolve right now — using ${last}, the address of the last connect`);
+        return;
+      }
       send('log', { line: `Could not resolve the WireGuard endpoint ${h} — leaving it to the core`, level: 'warn' });
       return;
     }
     map[h] = r.ips[0];
+    lastWgEndpointIps.set(h, r.ips[0]);
     if (r.source === 'doh') {
       notes.push(`this network answered ${h} with ${r.suspect.join(', ')}; using ${r.ips[0]} from DoH instead`);
     } else if (r.source === 'os-suspect') {
@@ -812,6 +867,21 @@ function reportSilentTunnels(vars) {
 }
 
 /**
+ * Every connect in flight. A drop that lands inside one — the core dying while
+ * the tunnel is still being built — waits for it to settle before it rebuilds:
+ * a second connect started beside it had two sing-box processes fighting over
+ * one adapter (see onConnectionDrop). The work itself is connectOnce().
+ */
+const connectsInFlight = new Set();
+function doConnect(serverId, opts) {
+  const p = connectOnce(serverId, opts);
+  connectsInFlight.add(p);
+  const settled = () => connectsInFlight.delete(p);
+  p.then(settled, settled);
+  return p;
+}
+
+/**
  * @param {string} serverId
  * @param {{ holdKillSwitch?: boolean }} [opts] `holdKillSwitch` keeps an already
  *   armed kill-switch block in place instead of clearing it up front — used by
@@ -821,7 +891,7 @@ function reportSilentTunnels(vars) {
  *   before it finished: nothing was emitted and nothing was started, and the
  *   caller must not treat it as either a success or a failure worth retrying.
  */
-async function doConnect(serverId, opts = {}) {
+async function connectOnce(serverId, opts = {}) {
   if (networkRepairing) throw new Error('Network recovery is still running');
   // Every await below is a window in which the user can hit the power button.
   // doDisconnect() then stops the core and clears activeServerId, but THIS call
@@ -1177,7 +1247,7 @@ async function doConnect(serverId, opts = {}) {
     lan = { ip: lanIp(), socksPort: settings.socksPort, httpPort: settings.httpPort };
     const fw = await addLanFirewall(settings.socksPort, settings.httpPort);
     if (process.platform === 'win32') {
-      if (fw.ok) send('log', { line: `LAN sharing on — firewall opened for ports ${settings.socksPort}/${settings.httpPort}`, level: 'info' });
+      if (fw.ok) send('log', { line: `LAN sharing on — firewall opened for ports ${settings.socksPort}/${settings.httpPort} to the local subnet on private networks (if other devices cannot connect, set this network to Private in Windows)`, level: 'info' });
       else send('log', { line: 'LAN firewall rule failed (run as admin to allow it): ' + fw.error, level: 'warn' });
     }
   } else {
@@ -1186,6 +1256,11 @@ async function doConnect(serverId, opts = {}) {
   // Last gate before the irreversible half: the watchers and the 'connected'
   // status. Past this line nothing awaits, so nothing can overtake us.
   if (stale()) return abandoned;
+  // The core only had to survive start()'s grace period; the tunnel and the
+  // guard took seconds more. One that died in between is not a connection —
+  // calling it one told a recovery it was done, and lifted the kill switch over
+  // nothing. Its drop (onConnectionDrop) waits for this call, then rebuilds.
+  if (!xray.running) throw new Error(settings.lang === 'en' ? 'The core exited while the connection was being set up' : 'هسته هنگام برقراری اتصال بسته شد');
 
   // Start live traffic stats
   stats.setBin(xray.anyBin());
@@ -1380,6 +1455,7 @@ async function rebuildActiveConfig() {
   // doesn't flash "disconnected" during the reload.
   const prevReloading = xrayReloading;
   xrayReloading = true;
+  let lostCore = false;
   try {
     const check = await xray.validateWithFallback(config, engine);
     if (!check.ok) throw new Error(check.error);
@@ -1389,8 +1465,16 @@ async function rebuildActiveConfig() {
     // this restarts the core WITHOUT stopping the poller, so the meter has to
     // hear about it here too — same reason as the connect path
     if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
+  } catch (e) {
+    // start() stops the old core before it launches the new one, and the flag
+    // above swallowed BOTH stops: a start that failed leaves no core at all
+    // while the TUN, the DNS override and the proxy still point at it, and the
+    // UI still says connected. That is a drop like any other.
+    lostCore = !xray.running;
+    throw e;
   } finally {
     xrayReloading = prevReloading;
+    if (lostCore) onConnectionDrop('reload-failed').catch((e) => send('log', { line: 'Recovery after the failed reload failed: ' + ((e && e.message) || e), level: 'error' }));
   }
   // NOTE: appliedSettings is deliberately left alone. This path rebuilds only the
   // xray config; the connect-time side effects (system proxy, TUN, LAN firewall)
@@ -1449,7 +1533,9 @@ async function recoverFromNetworkChange(reason, attempt = 0) {
   const gen = recoverGen;
   recovering = true;
   try {
-    await runRecovery(reason, attempt);
+    // kept so a drop landing meanwhile can wait for THIS rebuild (onConnectionDrop)
+    recoveryRun = runRecovery(reason, attempt);
+    await recoveryRun;
   } finally {
     // Release the lock and nothing else. The watcher's own baseline is not ours
     // to move: its ignoreInterface predicate already keeps the fingerprint stable
@@ -1479,9 +1565,15 @@ async function runRecovery(reason, attempt) {
   clearTimeout(recoverTimer);
   recoverTimer = null;
 
-  send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
+  // A drop (onConnectionDrop) takes this same path; the log says which it was.
+  const dropped = DROP_REASONS.has(reason);
+  send('log', { line: dropped ? `The connection dropped (${reason}) — rebuilding it` : `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
   send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
-  if (attempt === 0) notify('IRNetFree', isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد');
+  if (attempt === 0) {
+    notify('IRNetFree', dropped
+      ? (isEn() ? 'Connection dropped — reconnecting' : 'اتصال قطع شد — در حال اتصال مجدد')
+      : (isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد'));
+  }
 
   // Pick the rebuild path by what the core is ACTUALLY doing. Both paths answer
   // in the same { ok, tunError, error } shape.
@@ -1500,7 +1592,7 @@ async function runRecovery(reason, attempt) {
       // connect abandoned itself the newer operation owns the kill switch —
       // doDisconnect() disarms it itself — and announcing "tunnel is back up"
       // here would be a restoration that never happened.
-      if (held && !(res && res.stale)) {
+      if (held && !(res && res.stale) && xray && xray.running) {
         await disarmKillSwitch();
         send('killswitch', { engaged: false });
         send('log', { line: 'Kill switch released — tunnel is back up', level: 'info' });
@@ -1549,37 +1641,147 @@ async function runRecovery(reason, attempt) {
   }
   const delay = RECOVER_BACKOFF_MS[attempt];
   if (delay == null) {
-    // "Nothing came back" and "everything came back except TUN" are different
-    // failures: on the second, xray is running and the proxy ports carry traffic,
-    // so painting the UI red would be a lie. `proxyUp` is what tells them apart.
-    const proxyUp = !!(res && res.ok);
+    const proxyUp = !!(res && res.ok);   // see reportReconnectFailed
     send('log', {
       line: proxyUp
         ? 'Could not bring the system-wide tunnel back after the network change — giving up (the proxy is still up)'
         : 'Could not reconnect after the network change — giving up',
       level: 'error'
     });
-    // The guard is STILL engaged, on purpose: it was held across every attempt
-    // so the ISP never answered a lookup. Giving up therefore leaves the
-    // machine unable to resolve — and at the strict level unable to reach
-    // anything. That is the safe failure, but it must be SAID, or a leak has
-    // simply been traded for a mystery. `guardHeld` drives a banner whose
-    // button calls guard:release.
-    let guardHeld = false;
-    try { guardHeld = !!(leakGuard && leakGuard.readState()); } catch { /* no state, nothing held */ }
-    if (guardHeld) {
-      send('log', {
-        line: 'Your adapters are still pointed at the tunnel, so nothing is leaking — but names will not resolve until you reconnect or restore them from the banner',
-        level: 'warn'
-      });
-    }
-    send('status', { state: 'reconnect-failed', reason, proxyUp, guardHeld, tunError: (res && res.tunError) || null });
-    notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
+    reportReconnectFailed(reason, res);
     return;
   }
   send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
   recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt + 1), delay);
   if (recoverTimer.unref) recoverTimer.unref();
+}
+
+/**
+ * Giving up on a connection the user still wants: every automatic rebuild is
+ * spent. `res` is the last attempt's { ok, tunError } — ok means the core and
+ * the proxy are up and only the system-wide tunnel is missing.
+ */
+function reportReconnectFailed(reason, res) {
+  // "Nothing came back" and "everything came back except TUN" are different
+  // failures: on the second, xray is running and the proxy ports carry traffic,
+  // so painting the UI red would be a lie. `proxyUp` is what tells them apart.
+  const proxyUp = !!(res && res.ok);
+  // The guard is STILL engaged, on purpose: it was held across every attempt
+  // so the ISP never answered a lookup. Giving up therefore leaves the
+  // machine unable to resolve — and at the strict level unable to reach
+  // anything. That is the safe failure, but it must be SAID, or a leak has
+  // simply been traded for a mystery. `guardHeld` drives a banner whose
+  // button calls guard:release.
+  let guardHeld = false;
+  try { guardHeld = !!(leakGuard && leakGuard.readState()); } catch { /* no state, nothing held */ }
+  if (guardHeld) {
+    send('log', {
+      line: 'Your adapters are still pointed at the tunnel, so nothing is leaking — but names will not resolve until you reconnect or restore them from the banner',
+      level: 'warn'
+    });
+  }
+  send('status', { state: 'reconnect-failed', reason, proxyUp, guardHeld, tunError: (res && res.tunError) || null });
+  notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
+}
+
+/** The recovery reasons that are a drop of the connection, not the network moving. */
+const DROP_REASONS = new Set(['core-exited', 'tunnel-exited', 'reload-failed']);
+
+/**
+ * The connection dropped under us: the core exited on its own ('core-exited'),
+ * the TUN backend died ('tunnel-exited'), or a process-routing reload left no
+ * core ('reload-failed'). Nothing else notices. The TUN, the adapters' DNS
+ * override and the system proxy all still point at what is gone, so the machine
+ * reaches nothing — while the UI, on a core exit, says "Disconnected".
+ *
+ * So a drop is handled the way the network moving under the tunnel is: the kill
+ * switch (when on) closes the gap FIRST — the rebuild reads killEngaged to hold
+ * it — and then the same bounded recovery brings the connection back by itself.
+ * A connection that keeps dropping is given up on through the same
+ * reconnect-failed (see DropBudget): a core that starts, survives the grace
+ * period and dies again is a successful rebuild every time, and would loop.
+ */
+async function onConnectionDrop(reason) {
+  if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
+  updateOverlay('off');
+  const s = getSettings();
+  if (s.killSwitch) {
+    const wasEngaged = killEngaged;
+    const r = await armKillSwitch();
+    send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
+    if (r && r.ok && !wasEngaged) {
+      send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
+      notify('IRNetFree', isEn() ? 'VPN dropped — internet blocked by the kill switch' : 'اتصال افتاد — اینترنت با کیل‌سوییچ بسته شد');
+    }
+    else if (!(r && r.ok) && process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
+    // A disconnect that landed while the rule went in has already lifted it —
+    // or is about to, before this add: the rule this drop put in is not wanted.
+    if (r && r.ok && !wasEngaged && (userDisconnecting || isQuitting || !store.get('activeServerId', null))) {
+      await disarmKillSwitch();
+      send('killswitch', { engaged: false });
+      return;
+    }
+  }
+  // A connect in flight (the user's, a recovery's, a settings apply's) is where
+  // this drop may have landed: let it settle first — it fails over a dead core
+  // (see connectOnce) — rather than start a second one beside it.
+  await Promise.allSettled([...connectsInFlight]);
+  // the user may have disconnected while the rule went in
+  if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
+  // Is what this drop broke whole again (a rebuild already brought it back)?
+  const healed = () => (reason === 'tunnel-exited' ? !!(tun && tun.active) : !!(xray && xray.running));
+  // a connect that settled with a running core (the user's, say) healed it: no budget, no rebuild
+  if (healed()) return;
+  // "the proxy works": the core runs AND the kill switch is not blocking it
+  const proxyUp = () => !!(xray && xray.running) && !killEngaged;
+  if (!s.autoReconnectOnNetworkChange) {
+    // Nothing is going to rebuild it. A dead core under a live TUN, DNS override
+    // and proxy is a machine that reaches nothing while the UI says
+    // "Disconnected" — so make that true. With the kill switch on, the block IS
+    // the user's chosen answer and its banner offers the way out; a dead TUN
+    // over a live core keeps the proxy — either way the UI is told.
+    if (reason !== 'tunnel-exited' && !s.killSwitch) {
+      send('log', { line: `The connection dropped (${reason}) and automatic reconnect is off — disconnecting`, level: 'warn' });
+      await doDisconnect().catch(() => { /* doDisconnect reports cleanup-failed itself */ });
+    } else {
+      send('log', { line: `The connection dropped (${reason}) and automatic reconnect is off — reconnect to rebuild it`, level: 'error' });
+      reportReconnectFailed(reason, { ok: proxyUp(), tunError: reason === 'tunnel-exited' ? 'the tunnel exited' : null });
+    }
+    return;
+  }
+  if (recovering) {
+    // A recovery is already rebuilding. Queuing behind it meant a second full
+    // rebuild of a tunnel it had just built: wait for it instead. A retry it
+    // scheduled (or a queued trigger it runs next) rebuilds anyway, and one it
+    // brought back whole needs nothing; only a drop left unhealed goes on.
+    await (recoveryRun || Promise.resolve()).catch(() => {});
+    await Promise.resolve();   // let it release its lock and start what it queued
+    if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
+    if (recoverTimer || recovering || healed()) return;
+  }
+  if (!drops.take()) {
+    send('log', { line: `The connection keeps dropping (${reason}) — no more automatic rebuilds until you reconnect`, level: 'error' });
+    // Nothing automatic may follow the give-up: no pending retry, no queued trigger.
+    clearTimeout(recoverTimer);
+    recoverTimer = null;
+    recoverQueued = null;
+    const gen = connGen;
+    // Leave what a failed recovery leaves: no tunnel and no system proxy aimed
+    // at a core that is gone — only the DNS guard, held on purpose (its banner
+    // gives the resolvers back) — and the kill switch as it is. Before each
+    // step: a connect or a disconnect the user made meanwhile owns the tunnel
+    // and the proxy now, and must not have them swept from under it.
+    if (!(xray && xray.running)) {
+      if (gen !== connGen) return;
+      try { await stopAllTuns(); } catch { /* a tunnel that will not stop is retried by the next disconnect */ }
+      if (gen !== connGen) return;
+      try { await setSystemProxy(false, {}); } catch {}
+    }
+    if (gen !== connGen) return;
+    reportReconnectFailed(reason, { ok: proxyUp() });
+    return;
+  }
+  await recoverFromNetworkChange(reason);
 }
 
 /**
@@ -1648,6 +1850,7 @@ async function doDisconnect() {
     connGen++;
     recoverGen++;
     recovering = false;
+    drops.reset();                   // the next connection starts with a full budget
     stopProcWatcher();
     stopNetWatcher();                // nothing live to recover any more
     if (stats) stats.stop();
@@ -1982,23 +2185,32 @@ function registerIpc() {
   });
 
   // Relaunch the app elevated (Windows) so TUN mode can configure routes.
-  ipcMain.handle('app:relaunchAdmin', () => {
+  ipcMain.handle('app:relaunchAdmin', async () => {
     if (process.platform !== 'win32') return { ok: false, error: 'only on Windows' };
     if (makeTun(getSettings(), { quiet: true }).isElevated()) return { ok: false, error: 'already elevated' };
+    // 1) The UAC prompt, before anything is torn down (see relaunch.js): an
+    //    elevated helper that waits for THIS process to exit, then starts the
+    //    copy. A cancelled prompt fails here, and the app — connected or not —
+    //    simply keeps running as it was.
     try {
-      const exe = process.execPath;
-      const args = process.argv.slice(1);
-      const argList = args.map(a => `'${String(a).replace(/'/g, "''")}'`).join(',');
-      const psArgs = argList
-        ? `Start-Process -FilePath '${exe}' -Verb RunAs -ArgumentList ${argList}`
-        : `Start-Process -FilePath '${exe}' -Verb RunAs`;
-      spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', psArgs], { detached: true, windowsHide: true });
-      isQuitting = true;
-      setTimeout(() => app.quit(), 300);
-      return { ok: true };
+      await runElevatedRelaunch({ exe: process.execPath, args: process.argv.slice(1), pid: process.pid, cwd: process.cwd() });
     } catch (e) {
-      return { ok: false, error: e.message };
+      send('log', { line: 'Relaunch as administrator did not happen (' + e.message + ') — IRNetFree keeps running as it is', level: 'warn' });
+      return { ok: false, error: null };
     }
+    // 2) Accepted: this instance goes down first — the copy repairs the same
+    //    userData files (the guard's state, the proxy journal) and binds the
+    //    same ports — then hands the lock over and quits. The helper starts the
+    //    copy once this process is gone, so the copy finds the lock free, and
+    //    the quit below has nothing left to tear down.
+    isQuitting = true;
+    let timer = null;
+    await Promise.race([teardownForQuit().catch(() => {}), new Promise((resolve) => { timer = setTimeout(resolve, QUIT_TEARDOWN_MS); })]);
+    clearTimeout(timer);
+    quitTeardown = 'done';
+    app.releaseSingleInstanceLock();
+    setTimeout(() => app.quit(), 300);
+    return { ok: true };
   });
 
   ipcMain.handle('servers:delete', (e, id) => {
@@ -2043,7 +2255,7 @@ function registerIpc() {
     return subs.list();
   });
 
-  ipcMain.handle('connect', (e, id) => doConnect(id));
+  ipcMain.handle('connect', (e, id) => { drops.reset(); return doConnect(id); });
   ipcMain.handle('disconnect', () => doDisconnect());
 
   ipcMain.handle('settings:get', () => getSettings());
@@ -2219,7 +2431,12 @@ function registerIpc() {
   ipcMain.on('win:hide', () => mainWindow.hide());
   ipcMain.on('win:close', () => { mainWindow.hide(); });
   ipcMain.on('app:quit', () => { isQuitting = true; app.quit(); });
-  ipcMain.on('open:external', (e, url) => shell.openExternal(url));
+  // web links only: openExternal hands file:, smb:, ms-settings: and custom
+  // protocols to whichever program owns them (see urlGuard.js)
+  ipcMain.on('open:external', (e, url) => {
+    if (isWebUrl(url)) shell.openExternal(url);
+    else send('log', { line: 'Refused to open a link that is not http(s): ' + String(url).slice(0, 100), level: 'warn' });
+  });
   ipcMain.handle('open:dataDir', () => { shell.openPath(dataDir()); return dataDir(); });
 
   // runtime components (xray / tun2socks / wintun / geo files)
@@ -2395,8 +2612,24 @@ function registerIpc() {
   // Reconnect on demand: the same leak-free path the network-change recovery
   // uses, so the guard is held across the gap rather than released.
   ipcMain.handle('vpn:reconnect', async () => {
-    if (!store.get('activeServerId', null)) return { ok: false, error: 'not connected' };
-    try { return await reapplyConnection(); } catch (e) { return { ok: false, error: e.message }; }
+    const id = store.get('activeServerId', null);
+    if (!id) return { ok: false, error: 'not connected' };
+    drops.reset();   // the user asked: a full budget again
+    try {
+      if (xray && xray.running) return await reapplyConnection();
+      // A recovery that gave up (the banner's Retry) has no core left to
+      // rebuild around — reapplyConnection() would answer "not connected".
+      // Build it again, holding any kill-switch block until it is up.
+      const held = killEngaged;
+      const r = await doConnect(id, { holdKillSwitch: held });
+      if (held && r && r.ok && xray && xray.running) { await disarmKillSwitch(); send('killswitch', { engaged: false }); }
+      return r;
+    } catch (e) {
+      // 'connecting' already went out: without a terminal status the window
+      // stays on "Connecting…" and the power button does nothing
+      send('status', { state: 'error', message: e.message });
+      return { ok: false, error: e.message };
+    }
   });
   // The way out when a reconnect has been given up on and the guard is still
   // holding: puts the adapters' own resolvers back, deliberately, on request.
@@ -2451,8 +2684,35 @@ function getJSON(url) {
 // cmpVersion lives in assetUpdater.js now (the weekly check needs it too).
 
 /* ----------------------------- lifecycle ----------------------------- */
+// One app per user session. The window hides to the tray on close, so a second
+// launch — the shortcut again, the logon task — started a whole second app beside
+// the first, and ITS launch repair ran against the first one's live session:
+// disarmKillSwitch() lifted its kill switch, repairAtLaunch() killed its tunnel
+// and put the adapters back on the ISP's resolvers, and both rewrote store.json.
+// So the lock is taken here, before the ready handler exists; a second instance
+// quits at once, and every way out below checks it — quitting must not touch
+// anything that belongs to the first.
+const primaryInstance = app.requestSingleInstanceLock();
+if (!primaryInstance) app.quit();
+
+// The first instance hears about the second launch: bring the window forward.
+app.on('second-instance', (e, argv) => {
+  // the logon task starts us with --hidden (autostart.js): a running app stays in the tray
+  if (Array.isArray(argv) && argv.includes('--hidden')) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
+
 app.whenReady().then(() => {
+  // A second instance is already quitting (see primaryInstance): it must not
+  // repair, write or show anything on its way out.
+  if (!primaryInstance) return;
   const dir = dataDir();
+  // The system proxy is journaled (sysproxy.js): what it was before we set it
+  // is what every disconnect, quit and exit puts back — and only if we set it.
+  useProxyJournal(path.join(dir, 'proxy-journal.json'));
   store = new Store(path.join(dir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
   }, {
@@ -2472,6 +2732,19 @@ app.whenReady().then(() => {
 
   migrateServers();
   migrateSettingsStore();
+  // A new process has no live connection. An activeServerId still in the store
+  // is what a crash or a kill left: the tray marked it "●", and a network change
+  // at launch would "recover" a connection nobody asked for. Connect-on-launch
+  // reads lastServerId, which stays.
+  if (store.get('activeServerId', null)) store.set('activeServerId', null);
+  // A proxy journal a dead session left is restored now. Proxy operations run
+  // one at a time, so an auto-connect a second later waits for this. Only OUR
+  // port marks a leftover of a pre-journal build as ours: a sibling build (the
+  // Plus fork) writes the same bypass list for its own port.
+  repairSystemProxy({ legacyServer: `127.0.0.1:${getSettings().httpPort}` }).then((r) => {
+    if (r === 'restored') send('log', { line: 'The system proxy a previous session left set was put back the way it was', level: 'warn' });
+    else if (r === 'legacy') send('log', { line: 'The system proxy an older version left pointing at IRNetFree was switched off', level: 'warn' });
+  });
   // Lifetime traffic per config, in its own small file (see the declaration).
   usageStore = new Store(path.join(dir, 'usage.json'), { totals: {} });
   usage = new UsageMeter({ totals: usageStore.get('totals', {}) });
@@ -2488,19 +2761,9 @@ app.whenReady().then(() => {
       // old instance's 'stopped' as a disconnect.
       if (xrayReloading && state === 'stopped') return;
       // Unexpected drop (xray died without us asking) while we believe we're
-      // connected → engage the kill switch if enabled.
+      // connected: the kill switch if enabled, then the recovery (onConnectionDrop).
       if (state === 'stopped' && !userDisconnecting && store.get('activeServerId', null)) {
-        updateOverlay('off');
-        if (getSettings().killSwitch) {
-          armKillSwitch().then((r) => {
-            send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
-            if (r && r.ok) {
-              send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
-              notify('IRNetFree', isEn() ? 'VPN dropped — internet blocked by the kill switch' : 'اتصال افتاد — اینترنت با کیل‌سوییچ بسته شد');
-            }
-            else if (process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
-          });
-        }
+        onConnectionDrop('core-exited').catch((e) => send('log', { line: 'Recovery after the core exited failed: ' + ((e && e.message) || e), level: 'error' }));
       }
       send('xray-status', { state, info });
     }
@@ -2580,7 +2843,9 @@ app.whenReady().then(() => {
   });
   dnsGuardWatch = new DnsGuardWatch({
     guard: leakGuard,
-    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading,
+    // and only over a core that is actually running: re-applying the override
+    // every 30 s for a core that died only kept the machine pointed at nothing
+    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading && !!xray?.running,
     onError: () => send('log', { line: 'DNS guard refresh failed; check network protection or reconnect.', level: 'warn' })
   });
   if (process.platform === 'darwin') {
@@ -2614,6 +2879,11 @@ app.whenReady().then(() => {
   try {
     const { powerMonitor } = require('electron');
     powerMonitor.on('resume', () => { if (netWatcher) netWatcher.poke('resume'); });
+    // macOS / Linux shutdown or reboot (Windows: the window's session-end)
+    powerMonitor.on('shutdown', () => {
+      teardownSync('session-end');
+      scheduleShutdownCancelCheck();
+    });
   } catch {}
 
   mainWindow.once('ready-to-show', () => {
@@ -2653,6 +2923,12 @@ async function teardownForQuit() {
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
+  // The system proxy before anything that can wait on a password prompt: on
+  // macOS the privileged steps below run under the 20 s cap, and a quit that
+  // ran out there used to leave every browser aimed at a port nobody listens on.
+  try { await setSystemProxy(false, {}); } catch {}
+  // macOS: the core too — no password needed, and nothing is left behind if the cap hits
+  if (process.platform === 'darwin') { try { if (xray) await xray.stop(); } catch {} }
   if (process.platform === 'darwin') {
     try { await stopAllTuns(); await releaseGuardChecked(leakGuard); }
     catch { send('log', { line: 'Network cleanup pending; recovery retained for next launch', level: 'error' }); }
@@ -2660,7 +2936,6 @@ async function teardownForQuit() {
     try { if (leakGuard) await leakGuard.release(); } catch {}
     await stopAllTuns();
   }
-  try { await setSystemProxy(false, {}); } catch {}
   try { await removeLanFirewall(); } catch {}
   try { await disarmKillSwitch(); } catch {}
   try { if (xray) await xray.stop(); } catch {}
@@ -2690,6 +2965,7 @@ let quitTeardown = null;   // the teardown in flight, or 'done'
  * asks to quit again; the second pass lets Electron finish.
  */
 app.on('before-quit', (e) => {
+  if (!primaryInstance) return;   // a second instance: nothing here is its to tear down
   isQuitting = true;         // the close handler may let the window go now
   if (quitTeardown === 'done') return;
   e.preventDefault();
@@ -2707,17 +2983,66 @@ app.on('window-all-closed', () => {
 // Ensure system proxy + TUN routes + kill-switch block are cleared on a hard
 // exit (Windows only) — otherwise a kill-switch block would outlive the app and
 // leave the machine with no internet.
-process.on('exit', () => {
+//
+// The same synchronous path runs when the SESSION ends under a live tunnel
+// (reason 'session-end'): a Windows shutdown, restart or log-off emits no
+// before-quit, so the static DNS on the tunnel peer, the strict firewall group
+// and the proxy all survived the reboot; macOS and Linux get it from
+// powerMonitor 'shutdown'. Nothing here awaits — the OS gives a few seconds —
+// and each step is bounded. It runs once: the exit hook that follows a session
+// end finds it done.
+let syncTeardownDone = false;
+function teardownSync(reason) {
+  // A second instance never held any of this: its exit must not lift the first
+  // one's system proxy or kill switch.
+  if (!primaryInstance || syncTeardownDone) return;
+  syncTeardownDone = true;
+  // The tunnel and the core are about to go with the process: not a drop to recover.
+  isQuitting = true;
+  userDisconnecting = true;
+  // The system proxy first: the fastest step, and the one every browser depends
+  // on. Only what the journal says we set, put back as it was — no journal, no
+  // write (a blind ProxyEnable=0 here killed a corporate proxy on every exit).
+  try { restoreSystemProxySync(); } catch {}
+  // A kill-switch block that outlives the app is a machine with no internet —
+  // after a reboot too, until the app is started again. Fast, so before the
+  // slow PowerShell restore below.
+  if (process.platform === 'win32') {
+    try { require('child_process').execFileSync('netsh',
+      ['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`], { windowsHide: true, timeout: 5000 }); } catch {}
+  }
   try { if (store) store.flush(); } catch {}   // a coalesced write must not die with the process
   // The DNS override outlives the app if nobody puts it back, so it goes before
   // the win32 gate below: on macOS (when we are already root) this is the last
   // chance to restore it without a password prompt nobody can answer here.
   try { if (leakGuard) leakGuard.releaseSync(); } catch {}
-  if (process.platform !== 'win32') return;
-  try { require('child_process').execFileSync(
-    'reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '0', '/f'],
-    { windowsHide: true }); } catch {}
+  if (process.platform !== 'win32' && reason === 'exit') return;
   cleanupAllTunsSync();   // every backend a connect started, either kind
-  try { require('child_process').execFileSync('netsh',
-    ['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`], { windowsHide: true }); } catch {}
-});
+}
+process.on('exit', () => teardownSync('exit'));
+
+/**
+ * macOS / Linux: the 'shutdown' notice can come before every other app has
+ * agreed, and one of them can still cancel a logout. The synchronous teardown
+ * has then run under a machine that stays up, and its flags would keep every
+ * later drop and recovery silent for good. A process still here a minute later
+ * was not shut down: the flags go down again, and the window says the
+ * connection was taken down. Unref'd — never what keeps a quitting app alive —
+ * and a real quit in progress is left alone.
+ */
+function scheduleShutdownCancelCheck() {
+  const timer = setTimeout(() => {
+    if (quitTeardown) return;
+    isQuitting = false;
+    userDisconnecting = false;
+    syncTeardownDone = false;
+    // Said, not rebuilt: on a macOS TUN a rebuild is a password prompt in the
+    // middle of what may still be a slow logout. The user reconnects (or the
+    // network watcher does, when the network moves).
+    if (store && store.get('activeServerId', null)) {
+      send('log', { line: 'The shutdown was cancelled — the connection was taken down for it; reconnect to bring it back', level: 'warn' });
+      reportReconnectFailed('shutdown-cancelled', { ok: false });
+    }
+  }, 60000);
+  timer.unref();
+}

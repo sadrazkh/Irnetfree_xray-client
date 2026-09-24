@@ -303,7 +303,7 @@ test('main.js: a reconnect stops the tunnel with keepDns exactly when the guard 
   const stopAll = body(MAIN, 'async function stopAllTuns(');
   assert.match(stopAll, /stopTrackedTunnels\(startedTuns, tun, process\.platform, opts\)/);
   // A server switch under TUN rebuilds the tunnel in doConnect with the guard held too.
-  const connect = body(MAIN, 'async function doConnect(');
+  const connect = body(MAIN, 'async function connectOnce(');   // doConnect became a thin wrapper around connectOnce (the drop budget)
   assert.match(connect, /await myTun\.stop\(\{ keepDns: !!\(hold && hold\.held\) \}\)/);
   // A disconnect restores: every other stopAllTuns() call passes nothing.
   assert.equal([...MAIN.matchAll(/stopAllTuns\(\{ keepDns/g)].length, 1);

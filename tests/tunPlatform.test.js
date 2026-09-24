@@ -110,7 +110,7 @@ test('getDefaultGatewayWin: one PowerShell for the active default routes and the
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], 'powershell');
   assert.deepEqual(calls[0][1].slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
-  const script = calls[0][1][3];
+  const script = calls[0][1].at(-1);   // psArgs puts the UTF-8 line before the script
   assert.match(script, /-PolicyStore ActiveStore/, 'a static gateway of an unplugged NIC lives on in the persistent store');
   assert.match(script, /Get-NetIPInterface -AddressFamily IPv4/);
   assert.match(script, /ConnectionState/);
@@ -129,7 +129,7 @@ test('getDefaultGatewayWin: one PowerShell for the active default routes and the
 test('the default-route query on a real Windows (CI runner only): it runs, and its rows are what the pick expects',
   { skip: !(process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true') }, async () => {
     answer = null;
-    const out = await P.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', P.DEFAULT_ROUTES_PS]);
+    const out = await P.run('powershell', P.psArgs(P.DEFAULT_ROUTES_PS));   // exactly the production argv
     const rows = [].concat(JSON.parse(out.trim()));
     assert.ok(rows.length >= 1, 'the runner has a default route: ' + out);
     const live = rows.filter(r => r.state === 'Connected');

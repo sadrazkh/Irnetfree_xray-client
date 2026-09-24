@@ -115,8 +115,6 @@ function isLoopbackIp(ip) {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s) || s === '::1';
 }
 
-const PS_FLAGS = ['-NoProfile', '-NonInteractive'];
-
 /**
  * Every firewall rule we make carries this group, and the group is the only
  * handle we ever remove by — so one `Remove-NetFirewallRule -Group` clears the
@@ -170,6 +168,21 @@ function addrList(v) {
 
 const aliasOf = (a) => (a && typeof a === 'object' ? a.alias : a);
 const nameOf = (s) => (s && typeof s === 'object' ? s.name : s);
+
+/**
+ * An adapter alias the way `-InterfaceAlias` takes it. That parameter is a
+ * WILDCARD — on the DnsClient and NetAdapter cmdlets and on New-NetFirewallRule
+ * alike — so "Ethernet [USB]" is a character class that never matches the
+ * adapter it names, and the override or the restore fails on it. Brackets and
+ * the backtick (the wildcard escape itself) get a backtick; single quotes keep
+ * it literal for the wildcard engine. A plain name comes out as psQuote made it.
+ * `*` and `?` are left alone: Windows refuses them in a connection name, so one
+ * in a record is an alias an older build read garbled (tunPlatform.psArgs) and
+ * applied AS a wildcard — and only the same wildcard undoes that.
+ */
+function psAlias(name) {
+  return psQuote(String(name == null ? '' : name).replace(/[`[\]]/g, '`$&'));
+}
 
 /* ----------------------------- address maths ----------------------------- */
 
@@ -365,7 +378,7 @@ function parseNetshDnsServers(text) {
 function winApplyLines(adapters, addr4, addr6) {
   const lines = ["$ErrorActionPreference = 'Stop'", '$set = 0'];
   (adapters || []).forEach((a, i) => {
-    const alias = psQuote(aliasOf(a));
+    const alias = psAlias(aliasOf(a));
     // Set-DnsClientServerAddress has no -AddressFamily: the family of each call
     // is the family of the addresses in it, and a call leaves the other alone.
     for (const [fam, addr, has] of [['v4', addr4, 'has4'], ['v6', addr6, 'has6']]) {
@@ -443,7 +456,7 @@ function _winRefusedKey(alias, family) { return `${String(alias == null ? '' : a
 function winRestoreLines(adapters) {
   const lines = ["$ErrorActionPreference = 'Stop'"];
   for (const a of adapters || []) {
-    const alias = psQuote(aliasOf(a));
+    const alias = psAlias(aliasOf(a));
     lines.push(`if (Get-NetAdapter -InterfaceAlias ${alias} -ErrorAction SilentlyContinue) {`);
     lines.push(`Set-DnsClientServerAddress -InterfaceAlias ${alias} -ResetServerAddresses`);
     for (const [fam, dhcp] of [['v4', 'dhcp4'], ['v6', 'dhcp6']]) {
@@ -517,7 +530,7 @@ function winStrictApplyScript({ adapters, ranges } = {}) {
       const alias = aliasOf(a);
       for (const proto of ['TCP', 'UDP']) {
         lines.push(winBlockRule(`${FW_GROUP} strict ${proto} ${alias}`,
-          `-InterfaceAlias ${psQuote(alias)} -Protocol ${proto} -RemoteAddress @(${psList(list)})`));
+          `-InterfaceAlias ${psAlias(alias)} -Protocol ${proto} -RemoteAddress @(${psList(list)})`));
       }
     }
   }
@@ -542,7 +555,7 @@ function winUdpBlockApplyScript({ adapters, ranges } = {}) {
     for (const a of adapters || []) {
       const alias = aliasOf(a);
       lines.push(winBlockRule(`${FW_GROUP} udp ${alias}`,
-        `-InterfaceAlias ${psQuote(alias)} -Protocol UDP`
+        `-InterfaceAlias ${psAlias(alias)} -Protocol UDP`
         + ` -RemotePort @(${psList(UDP_KEEP_PORTS)}) -RemoteAddress @(${psList(list)})`));
     }
   }
@@ -934,8 +947,9 @@ class LeakGuard {
     }
   }
 
+  /** UTF-8 stdout, or an adapter's own name comes back as "?????" (see tunPlatform.psArgs). */
   _powershell(script, options) {
-    return this.run('powershell', [...PS_FLAGS, '-Command', script], options);
+    return this.run('powershell', platform.psArgs(script), options);
   }
 
   /** One log line per tunnel process the repair killed. */
@@ -1391,7 +1405,7 @@ class LeakGuard {
       if (this.platform === 'win32') {
         const adapters = (st.win && st.win.adapters) || [];
         if (!adapters.length && !firewall) { this.clearState(); return false; }
-        this.runSync('powershell', [...PS_FLAGS, '-Command', winReleaseScript(adapters, { firewall })],
+        this.runSync('powershell', platform.psArgs(winReleaseScript(adapters, { firewall })),
           { timeout: 5000, stdio: 'ignore', windowsHide: true });
         this.clearState();
         return true;
