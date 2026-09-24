@@ -38,6 +38,17 @@ cp.execFile = (cmd, args, opts, cb) => {
 };
 cp.execFileSync = (cmd) => { throw new Error(`the test reached the real ${cmd}`); };
 cp.spawn = (cmd) => { throw new Error(`the test reached the real ${cmd}`); };
+// The launch repair asks whether anything listens on the proxy's port. The
+// machine running the suite may well have a proxy client there (the owner's own
+// IRNetFree holds 10809): every probe here is injected, and one that is not
+// fails the test instead of reading this machine's ports.
+const net = require('node:net');
+const realSockets = [];
+net.connect = net.createConnection = (o) => { realSockets.push(o); throw new Error('the test reached a real socket — inject `probe`'); };
+/** Probes: nothing listens / another client listens / the probe could not tell. */
+const FREE = async () => false;
+const BUSY = async () => true;
+const UNKNOWN = async () => null;
 
 const {
   setSystemProxy, repairSystemProxy, restoreSystemProxySync, useProxyJournal, WIN_BYPASS
@@ -211,8 +222,8 @@ test('win launch: a journal a dead session left is restored while the proxy is s
   const journal = tmpJournal(t);
   const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: 'proxy.corp:8080', ProxyOverride: '<local>' });
   await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
-  // …and the app is killed here. Next launch:
-  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32' }), 'restored');
+  // …and the app is killed here. Next launch (its core died with it: nothing listens):
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', probe: FREE }), 'restored');
   assert.deepEqual(w.reg, { ProxyEnable: 1, ProxyServer: 'proxy.corp:8080', ProxyOverride: '<local>' });
   assert.equal(fs.existsSync(journal), false);
 });
@@ -234,8 +245,12 @@ test('win launch: our own proxy left by a build that kept no journal is switched
   const legacyServer = '127.0.0.1:10809';   // this app's own HTTP port, from its settings
   // what every build before this one wrote, and left behind after a crash or the update installer
   const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: WIN_BYPASS });
-  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', legacyServer }), 'legacy');
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', legacyServer, probe: FREE }), 'legacy');
   assert.deepEqual(w.regCalls(), [regAdd('ProxyEnable', 'REG_DWORD', 0)]);
+  // our port and our list, but something answers there: a client of its own (a sibling build on our port)
+  const busy = fakeWin(journal, { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: WIN_BYPASS });
+  assert.equal(await repairSystemProxy({ journal, exec: busy.exec, platform: 'win32', legacyServer, probe: BUSY }), null);
+  assert.deepEqual(busy.regCalls(), []);
   for (const other of [
     { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: 'localhost;127.*' },   // another client on the same port
     // a sibling build (the Plus fork writes the same bypass list) connected on ITS port right now
@@ -244,7 +259,7 @@ test('win launch: our own proxy left by a build that kept no journal is switched
     { ProxyEnable: 0, ProxyServer: '127.0.0.1:10809', ProxyOverride: WIN_BYPASS }
   ]) {
     const o = fakeWin(journal, other);
-    assert.equal(await repairSystemProxy({ journal, exec: o.exec, platform: 'win32', legacyServer }), null);
+    assert.equal(await repairSystemProxy({ journal, exec: o.exec, platform: 'win32', legacyServer, probe: FREE }), null);
     assert.deepEqual(o.regCalls(), [], JSON.stringify(other));
   }
   // not told which port is ours: no guessing
@@ -273,7 +288,7 @@ test('the launch repair and a connect cannot interleave: the repair finishes bef
   let release;
   const gate = new Promise((r) => { release = r; });
   const slow = async (cmd, args) => { if (cmd === 'powershell') await gate; return w.exec(cmd, args); };
-  const repair = repairSystemProxy({ journal, exec: slow, platform: 'win32' });
+  const repair = repairSystemProxy({ journal, exec: slow, platform: 'win32', probe: FREE });
   const connect = setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
   await new Promise((r) => setImmediate(r));
   assert.equal(w.reg.ProxyServer, '127.0.0.1:10809');
@@ -312,8 +327,67 @@ test('win launch: another client on our port since the crash (v2rayN uses 10809 
   await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
   w.reg.ProxyOverride = 'localhost;127.*;10.*;172.16.*;192.168.*;<local>';   // v2rayN's list, same port
   w.calls.length = 0;
-  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', legacyServer: '127.0.0.1:10809' }), 'dropped');
+  // …and v2rayN is running: it answers on that port
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', legacyServer: '127.0.0.1:10809', probe: BUSY }), 'dropped');
   assert.deepEqual(w.regCalls(), []);
+});
+
+/*
+ * At launch no core of ours runs, so the port says whose the proxy is: nothing
+ * listening on it is our dead leftover whatever list it carries; a listener is
+ * another client (v2rayN uses 10809 too) and is left alone even under our list.
+ */
+
+test('win launch: our dead leftover is restored even with its bypass list re-saved — nothing listens on the port', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: 'proxy.corp:8080', ProxyOverride: '<local>' });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  w.reg.ProxyOverride = WIN_BYPASS + ';*.corp';   // re-saved while connected; then the app died
+  const asked = [];
+  const probe = async (server) => { asked.push(server); return false; };
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', probe }), 'restored');
+  assert.deepEqual(asked, ['127.0.0.1:10809'], 'the port the proxy points at is the one asked');
+  assert.deepEqual(w.reg, { ProxyEnable: 1, ProxyServer: 'proxy.corp:8080', ProxyOverride: '<local>' });
+  assert.equal(fs.existsSync(journal), false);
+});
+
+test('win launch: a listener on the port is another client’s proxy even under our exact list — left alone', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 0 });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  w.calls.length = 0;
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', probe: BUSY }), 'dropped');
+  assert.deepEqual(w.regCalls(), []);
+  assert.equal(w.reg.ProxyEnable, 1);
+});
+
+test('win launch: a port nobody could probe falls back to our exact list', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 0 });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', probe: UNKNOWN }), 'restored');
+  const again = tmpJournal(t);
+  const o = fakeWin(again, { ProxyEnable: 0 });
+  await setSystemProxy(true, Object.assign({ journal: again, exec: o.exec, platform: 'win32' }, ON));
+  o.reg.ProxyOverride = 'localhost;<local>';
+  o.calls.length = 0;
+  assert.equal(await repairSystemProxy({ journal: again, exec: o.exec, platform: 'win32', probe: UNKNOWN }), 'dropped');
+  assert.deepEqual(o.regCalls(), []);
+});
+
+test('win: during a session an OLD port of ours another client took since is theirs — the disconnect leaves it', async (t) => {
+  // connected on 10809, then the port changed to 20809; v2rayN then took 10809
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 0 });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON, { httpPort: 20809 }));
+  Object.assign(w.reg, { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: 'localhost;127.*;<local>' });
+  w.calls.length = 0;
+  await setSystemProxy(false, { journal, exec: w.exec, platform: 'win32' });
+  assert.deepEqual(w.regCalls(), []);
+  assert.equal(w.reg.ProxyServer, '127.0.0.1:10809');
+  assert.equal(w.reg.ProxyEnable, 1);
+  assert.equal(fs.existsSync(journal), false);
 });
 
 test('win: a proxy the user changed while connected is theirs — the disconnect leaves it and drops the journal', async (t) => {
@@ -500,4 +574,52 @@ test('mac: no journal, no writes; a refused enable leaves no journal behind', as
   const refusing = async (cmd, args) => { if (/^-set/.test(args[0])) throw new Error('You must be an administrator'); return m.exec(cmd, args); };
   await assert.rejects(setSystemProxy(true, Object.assign({ journal, exec: refusing, platform: 'darwin' }, ON)), /administrator/);
   assert.equal(fs.existsSync(journal), false, 'nothing was set, so there is nothing to put back');
+});
+
+test('mac launch: a journal a dead session left is restored while nothing listens on our port', async (t) => {
+  const journal = tmpJournal(t);
+  const m = fakeMac({ 'Wi-Fi': { web: { enabled: true, server: 'proxy.corp', port: 3128 } } });
+  await setSystemProxy(true, Object.assign({ journal, exec: m.exec, platform: 'darwin' }, ON));
+  // …killed here; next launch
+  assert.equal(await repairSystemProxy({ journal, exec: m.exec, platform: 'darwin', probe: FREE }), 'restored');
+  assert.deepEqual(m.state['Wi-Fi'].web, { enabled: true, server: 'proxy.corp', port: 3128 });
+  assert.equal(m.state['USB LAN'].web.enabled, false);
+  assert.equal(fs.existsSync(journal), false);
+});
+
+test('mac launch: a client listening on our port since the crash is not ours — nothing is written', async (t) => {
+  const journal = tmpJournal(t);
+  const m = fakeMac({});
+  await setSystemProxy(true, Object.assign({ journal, exec: m.exec, platform: 'darwin' }, ON));
+  m.calls.length = 0;
+  assert.equal(await repairSystemProxy({ journal, exec: m.exec, platform: 'darwin', probe: BUSY }), 'dropped');
+  assert.deepEqual(m.sets(), []);
+  assert.equal(m.state['Wi-Fi'].web.enabled, true);
+  assert.equal(fs.existsSync(journal), false);
+});
+
+test('mac: during a session an OLD port of ours another client took since is theirs — the disconnect leaves it', async (t) => {
+  const journal = tmpJournal(t);
+  const m = fakeMac({});
+  await setSystemProxy(true, Object.assign({ journal, exec: m.exec, platform: 'darwin' }, ON));
+  await setSystemProxy(true, Object.assign({ journal, exec: m.exec, platform: 'darwin' }, ON, { httpPort: 20809, socksPort: 20808 }));
+  for (const svc of ['Wi-Fi', 'USB LAN']) {
+    m.state[svc].web = { enabled: true, server: '127.0.0.1', port: 10809 };   // another client, on the port we left
+  }
+  m.calls.length = 0;
+  await setSystemProxy(false, { journal, exec: m.exec, platform: 'darwin', probe: BUSY });
+  assert.deepEqual(m.sets(), []);
+  assert.equal(fs.existsSync(journal), false);
+  // the same, with nothing listening on that old port: our dead leftover, restored
+  const j2 = tmpJournal(t);
+  const d = fakeMac({});
+  await setSystemProxy(true, Object.assign({ journal: j2, exec: d.exec, platform: 'darwin' }, ON));
+  await setSystemProxy(true, Object.assign({ journal: j2, exec: d.exec, platform: 'darwin' }, ON, { httpPort: 20809, socksPort: 20808 }));
+  for (const svc of ['Wi-Fi', 'USB LAN']) d.state[svc].web = { enabled: true, server: '127.0.0.1', port: 10809 };
+  await setSystemProxy(false, { journal: j2, exec: d.exec, platform: 'darwin', probe: FREE });
+  assert.equal(d.state['Wi-Fi'].web.enabled, false);
+});
+
+test('no test in this file reached a real socket', () => {
+  assert.deepEqual(realSockets, []);
 });
