@@ -534,3 +534,42 @@ test('A1: a name nothing ever resolved is left to the core, and said so; a proxy
   assert.equal('hosts' in configAt(p, 0).dns, false);
 });
 
+test('A2: a chain that lost a member refuses to connect, by name, instead of becoming a shorter chain', async (t) => {
+  const b = Object.assign({}, SERVER, { id: 'srv-2', name: 'second' });
+  const tes = { id: 'tes', name: 'Tes Chain', members: ['srv-gone', SERVER.id, 'srv-2'] };
+  const s = start({ servers: [SERVER, b], chains: [tes] });
+  t.after(() => s.service.shutdown());
+  // [gone → A → B] would have connected as [A → B]
+  await assert.rejects(s.service.invoke('connect', 'tes'), /The chain “Tes Chain” lost a server/);
+  const pair = start({ servers: [SERVER], chains: [{ id: 'tes', name: 'Tes Chain', members: ['srv-gone', SERVER.id] }] });
+  t.after(() => pair.service.shutdown());
+  await assert.rejects(pair.service.invoke('connect', 'tes'), /The chain “Tes Chain” lost a server/, 'not “needs at least 2 servers”');
+  assert.equal(s.state.xray.starts.length + pair.state.xray.starts.length, 0, 'nothing was started');
+});
+
+test('A2: advanced routing to a chain that lost its first hop refuses — the corporate range never dials the company from the ISP', async (t) => {
+  const tes = { id: 'tes', name: 'Tes Chain', members: ['srv-xhttp-replaced', SERVER.id] };
+  const rules = [{ type: 'ip', value: '192.168.0.0/16, 10.0.0.0/8, 192.168.45.0/24', target: 'chain:tes' }];
+  const s = start({ servers: [SERVER], chains: [tes], settings: { advancedRouting: true, routeDefault: SERVER.id, routeRules: rules } });
+  t.after(() => s.service.shutdown());
+  await assert.rejects(s.service.invoke('connect', '__advanced__'), /The chain “Tes Chain” lost a server/);
+  assert.equal(s.state.xray.starts.length, 0);
+  // the default may name it too
+  const d = start({ servers: [SERVER], chains: [tes], settings: { advancedRouting: true, routeDefault: 'chain:tes', routeRules: [] } });
+  t.after(() => d.service.shutdown());
+  await assert.rejects(d.service.invoke('connect', '__advanced__'), /Tes Chain/);
+  // a broken chain nothing routes to stops nothing
+  const u = start({ servers: [SERVER], chains: [tes], settings: { advancedRouting: true, routeDefault: SERVER.id, routeRules: [] } });
+  t.after(() => u.service.shutdown());
+  await u.service.invoke('connect', '__advanced__');
+  assert.equal(u.state.xray.starts.length, 1);
+});
+
+test('A2: a pool entry on a chain that lost a member refuses as well', async (t) => {
+  const tes = { id: 'tes', name: 'Tes Chain', members: ['srv-gone', SERVER.id] };
+  const pool = [{ id: 'p1', name: 'corp', target: 'chain:tes', socksPort: 47811, enabled: true }];
+  const s = start({ servers: [SERVER], chains: [tes], pool });
+  t.after(() => s.service.shutdown());
+  await assert.rejects(s.service.invoke('connect', '__pool__'), /The chain “Tes Chain” lost a server/);
+});
+
