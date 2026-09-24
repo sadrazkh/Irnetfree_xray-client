@@ -522,6 +522,104 @@ test('win32: the process dying while active marks the tunnel dead and logs at er
   });
 });
 
+/*
+ * A live tunnel whose sing-box dies on its own leaves the machine's routes and
+ * DNS pointing into an adapter that is gone: every app that is not using the
+ * system proxy leaves through the physical NIC. Only the macOS health check
+ * used to say so; the owner's recovery never heard about it on Windows or Linux.
+ */
+const flush = () => new Promise((r) => setImmediate(r));
+
+test('a live tunnel whose sing-box exits on its own tells the owner — once, asynchronously — on Windows and Linux', async (t) => {
+  const realGetuid = process.getuid;
+  process.getuid = () => 0;   // startLinux wants root
+  t.after(() => { process.getuid = realGetuid; });
+  for (const [platform, files] of [['win32', ['sing-box.exe', 'wintun.dll']], ['linux', ['sing-box']]]) {
+    await withBin(files, platform, async (tun) => {
+      tun.isElevated = () => true;
+      const lost = [];
+      tun.onUnexpectedExit = (err) => { lost.push(err); };
+      const child = stubChild();
+      fakeSpawn = () => child;
+      canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+      await tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {});
+      assert.equal(tun.active, true, platform);
+      child.emit('exit', 2, null);
+      assert.equal(tun.active, false);
+      assert.deepEqual(lost, [], `${platform}: never from inside the child's own exit event`);
+      await flush();
+      assert.equal(lost.length, 1, `${platform}: the owner hears about the dead tunnel`);
+      assert.match(lost[0].message, /sing-box exited \(code=2/);
+      child.emit('error', new Error('late'));   // a trailing 'error' is not a second drop
+      await flush();
+      assert.equal(lost.length, 1);
+    });
+  }
+});
+
+test('an exit we asked for, or a start that fails, is not a lost tunnel', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
+    tun.isElevated = () => true;
+    const lost = [];
+    tun.onUnexpectedExit = (err) => { lost.push(err); };
+    fakeSpawn = killable();
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    await tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {});
+    await tun.stop();
+    await flush();
+    assert.deepEqual(lost, [], 'a disconnect is not a drop');
+  });
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
+    tun.isElevated = () => true;
+    const lost = [];
+    tun.onUnexpectedExit = (err) => { lost.push(err); };
+    fakeSpawn = () => { const c = stubChild(); process.nextTick(() => c.emit('exit', 1, null)); return c; };
+    canned([]);
+    await assert.rejects(tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {}), /exited immediately/);
+    await flush();
+    assert.deepEqual(lost, [], 'a start that fails reports itself through its own rejection');
+  });
+});
+
+test('a failing recovery callback is logged, never thrown into the child\'s event', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun, dir, logs) => {
+    tun.isElevated = () => true;
+    tun.onUnexpectedExit = async () => { throw new Error('boom'); };
+    const child = stubChild();
+    fakeSpawn = () => child;
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    await tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {});
+    assert.doesNotThrow(() => child.emit('exit', 1, null));
+    await flush();
+    assert.ok(logs.some(([lvl, l]) => lvl === 'error' && /TUN recovery callback: boom/.test(l)), JSON.stringify(logs));
+  });
+});
+
+test('a late exit from a sing-box that was already replaced leaves the live tunnel alone', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
+    tun.isElevated = () => true;
+    const lost = [];
+    tun.onUnexpectedExit = (err) => { lost.push(err); };
+    const old = stubChild();
+    fakeSpawn = () => old;
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    await tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {});
+    const live = stubChild();
+    tun.proc = live;               // a reconnect's newer sing-box, after the old one's bounded stop wait ran out
+    old.emit('exit', 1, null);
+    await flush();
+    assert.equal(tun.active, true, 'the old process is not the tunnel any more');
+    assert.equal(tun.proc, live);
+    assert.deepEqual(lost, []);
+  });
+});
+
+test('the default onUnexpectedExit is a harmless no-op (TunOpenwrt\'s inner passes none)', () => {
+  const tun = new TunSingbox({});
+  assert.equal(typeof tun.onUnexpectedExit, 'function');
+  assert.doesNotThrow(() => tun.onUnexpectedExit(new Error('x')));
+});
+
 test('stop / cleanupSync are no-ops when nothing runs', async () => {
   await withBin([], 'win32', async (tun) => {
     canned([]);

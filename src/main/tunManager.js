@@ -131,6 +131,7 @@ class TunManager {
     // Writable dirs (e.g. userData/bin) checked first so downloads/updates win.
     this.extraDirs = (opts.extraDirs || []).filter(Boolean);
     this.onLog = opts.onLog || (() => {});
+    this.onUnexpectedExit = opts.onUnexpectedExit || (() => {});   // a live tunnel died on its own
     this.proc = null;
     this.active = false;
     this.savedGateway = null;
@@ -282,11 +283,23 @@ class TunManager {
 
     this.proc.stdout.on('data', d => this.onLog('[tun] ' + d.toString().trim(), 'log'));
     this.proc.stderr.on('data', d => this.onLog('[tun] ' + d.toString().trim(), 'warn'));
+    const t2s = this.proc;
     this.proc.on('exit', (code) => {
       this.onLog(`tun2socks exited (${code})`, code === 0 ? 'info' : 'error');
+      // stop() does not wait for the exit: one that lands after a restart
+      // spawned the next tun2socks is not news about the tunnel that is live now
+      if (this.proc && this.proc !== t2s) return;
+      // stop() clears `active` before it kills the process, so a live tunnel
+      // here is one nobody stopped: withdraw its routes and tell the owner,
+      // whose recovery rebuilds it — never from inside this event.
+      const lost = this.active;
       if (this.active) this.cleanupRoutesWindows().catch(() => {});
       this.active = false;
       this.proc = null;
+      if (lost) {
+        Promise.resolve().then(() => this.onUnexpectedExit(new Error(`tun2socks exited (${code})`)))
+          .catch(e => this.onLog('TUN recovery callback: ' + e.message, 'error'));
+      }
     });
 
     // give the process a moment to fail fast (missing dll, bad args, etc.)

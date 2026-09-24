@@ -36,6 +36,7 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { psArgs } = require('./tunPlatform');
 
 function run(cmd, args, timeout = 6000) {
   return new Promise((resolve) => {
@@ -149,7 +150,9 @@ async function winConnections() {
     "ForEach-Object { $proc=(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue); " +
     "if ($proc) { $e = if ($proc.Path) { Split-Path -Leaf $proc.Path } else { '' }; " +
     "\"$($proc.ProcessName)|$($_.OwningProcess)|$($_.RemoteAddress)|$e\" } }";
-  const out = await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps]);
+  // UTF-8 stdout: a process name outside the OEM code page would come back as
+  // "????" and a rule on it would never match (see tunPlatform.psArgs)
+  const out = await run('powershell', psArgs(ps));
   return parseWinConnections(out);
 }
 

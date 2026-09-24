@@ -10,7 +10,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "test": "node --test \"tests/*.test.js\"",
+    "test": "node --require ./tests/noNetwork.preload.js --test \"tests/*.test.js\"",
     "server": "node src/server/server.js",
     "get-xray": "node scripts/download-xray.js",
     "validate": "node scripts/validate-configs.js",

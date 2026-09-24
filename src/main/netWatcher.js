@@ -43,12 +43,37 @@ const HOST_VIRTUAL_RE = [
   // A container's end of a veth pair. Case-SENSITIVE and anchored on purpose:
   // case-insensitively, `veth[0-9a-f]` also matches "vEthernet (External)" —
   // the one Hyper-V switch that does carry the machine's real address.
-  /^veth[0-9a-f]{4,}$/
+  /^veth[0-9a-f]{4,}$/,
+  // macOS: Internet Sharing and the VM apps (UTM, VMware Fusion, Parallels)
+  // bridge their guests through bridge100 and up — bridge0 is the Thunderbolt
+  // Bridge and is not one of them — and Fusion and Parallels add host-only
+  // vmnetN / vnicN. Case-sensitive and anchored: these are BSD names.
+  /^bridge1\d\d$/,
+  /^vmnet\d+$/,
+  /^vnic\d+$/
 ];
 
 function isHostVirtualInterface(name) {
   const s = String(name == null ? '' : name);
   return HOST_VIRTUAL_RE.some(re => re.test(s));
+}
+
+/**
+ * The /64 an IPv6 address sits in. The low half is the interface identifier —
+ * exactly the part a temporary (privacy) address rotates every few hours while
+ * the network stays where it is. Text that is not a plain IPv6 address comes
+ * back as it went in, so it still counts, just unabridged.
+ */
+function v6Prefix64(address) {
+  const a = String(address == null ? '' : address).replace(/%.*$/, '').toLowerCase();
+  const halves = a.split('::');
+  if (halves.length > 2 || a.includes('.')) return a;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  const groups = [...head, ...Array(Math.max(fill, 0)).fill('0'), ...tail];
+  if (fill < 0 || groups.length !== 8 || !groups.every(g => /^[0-9a-f]{1,4}$/.test(g))) return a;
+  return groups.slice(0, 4).map(g => parseInt(g, 16).toString(16)).join(':') + '::/64';
 }
 
 /**
@@ -70,6 +95,7 @@ function isHostVirtualInterface(name) {
  *    predicate above this one is not the caller's choice: no caller wants a VM
  *    booting to tear its tunnel down, and the app's own injected predicate knows
  *    only about the app's own adapter.
+ *  - The low half of every IPv6 address (see v6Prefix64): only its /64 counts.
  *
  * @param {object} interfaces os.networkInterfaces()-shaped object
  * @param {(name: string) => boolean} [ignoreInterface] defaults to ignoring nothing
@@ -82,10 +108,13 @@ function fingerprint(interfaces, ignoreInterface) {
     for (const ni of (interfaces[name] || [])) {
       if (!ni || ni.internal) continue;
       if (isLinkLocalV6(ni.address)) continue;
-      parts.push(`${name}|${ni.family}|${ni.address}`);
+      // IPv6 counts by its /64: a privacy address rotating inside it is not a
+      // new network, and a stable + a temporary address are one fact, not two
+      const v6 = ni.family === 'IPv6' || ni.family === 6;
+      parts.push(`${name}|${ni.family}|${v6 ? v6Prefix64(ni.address) : ni.address}`);
     }
   }
-  return parts.sort().join(',');
+  return [...new Set(parts)].sort().join(',');
 }
 
 /**
