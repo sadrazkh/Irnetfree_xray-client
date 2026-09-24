@@ -50,7 +50,9 @@ test('a shell running one of OUR privileged script files is refused; a syntax ch
   // leakGuard._privileged, the TUN backends' setup/teardown scripts
   assert.equal(blocked('/bin/bash', [path.join(tmp, 'irnf-lg-abc', 'restore.sh')]), true);
   assert.equal(blocked('bash', [path.join('/Users/a/Library/Application Support/IRNetFree', 'mac-tun-sessions', 'irnf-sb-1', 'teardown.sh')]), true);
-  assert.equal(blocked('sh', [path.join(tmp, 'x', 'setup.sh')]), true);
+  assert.equal(blocked('sh', [path.join(tmp, 'irnf-tun-9', 'setup.sh')]), true);
+  // CI caught it: releaseWorkflow.test.js runs a checksum step it wrote to tmp itself
+  assert.equal(blocked('bash', ['--noprofile', '-eo', 'pipefail', path.join(tmp, 'irnf-rel-1', 'step.sh')]), false, 'a test’s own script in tmp');
   assert.equal(blocked('bash', ['-n', path.join(tmp, 'irnf-lg-abc', 'restore.sh')]), false, 'bash -n executes nothing');
   assert.equal(blocked('bash', ['--noprofile', '--norc', '-eo', 'pipefail', path.join(__dirname, '..', 'scripts', 'x.sh')]), false, 'a repo script');
   assert.equal(blocked('node', [path.join(tmp, 'a.sh')]), false);

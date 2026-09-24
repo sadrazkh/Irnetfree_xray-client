@@ -13,7 +13,6 @@
  * wrappers, and whatever it lets fall through lands back here.
  */
 const cp = require('child_process');
-const os = require('os');
 const { EventEmitter } = require('events');
 
 const BLOCKED = new Set([
@@ -33,19 +32,19 @@ function commandName(cmd) {
 
 /**
  * A shell handed one of OUR privileged script files — leakGuard's
- * `irnf-lg-*` restore scripts, the TUN backends' `irnf-sb-*` / mac-tun-sessions
- * setup and teardown — runs routes, pf and networksetup as whoever runs the
- * test. Recognised by where they live (the temp dir, or a path of ours); a
- * `-n` syntax check executes nothing and a script in the repo is not ours.
+ * `irnf-lg-*` restore scripts, the TUN backends' `irnf-sb-*` / `irnf-tun-*`
+ * work dirs (in the temp dir or userData/mac-tun-sessions) — runs routes, pf
+ * and networksetup as whoever runs the test. Recognised by those names only:
+ * a test's own script in tmp (releaseWorkflow's `irnf-rel-*` checksum step) is
+ * not ours, and a `-n` syntax check executes nothing.
  */
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash']);
 const norm = (p) => String(p).replace(/\\/g, '/').toLowerCase();
-const TMP = norm(os.tmpdir()).replace(/\/+$/, '') + '/';
 function privilegedScript(cmd, args) {
   if (!SHELLS.has(commandName(cmd))) return false;
   const list = (Array.isArray(args) ? args : []).map(String);
   if (list.includes('-n')) return false;
-  return list.some((a) => /\.sh$/i.test(a) && (norm(a).startsWith(TMP) || /mac-tun-sessions|\/irnf-/.test(norm(a))));
+  return list.some((a) => /\.sh$/i.test(a) && /\/mac-tun-sessions\/|\/irnf-(lg|sb|tun)-/.test(norm(a)));
 }
 
 /** The command (and its argv, or the words of a shell command line) is one no test may run. */
