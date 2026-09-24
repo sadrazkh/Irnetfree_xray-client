@@ -415,3 +415,60 @@ test('a second real adapter appearing IS a change', () => {
   h.advance(); h.tick(); h.tick();
   assert.deepEqual(h.fired, ['interfaces']);
 });
+
+/* ------------------- IPv6 privacy addresses, macOS VM bridges ------------------- */
+/*
+ * The owner's laptop is dual-stack. Windows and macOS give every IPv6 adapter a
+ * TEMPORARY (privacy) address beside the stable one and replace it every few
+ * hours to a day — and each replacement read as "the network changed": a full
+ * teardown and rebuild with DNS held, for a network that never moved. The
+ * routing fact an IPv6 address carries is its /64; the interface identifier in
+ * the low half is exactly the part that rotates.
+ */
+
+const v6 = (address) => ({ family: 'IPv6', internal: false, address });
+
+test('an IPv6 privacy address rotating inside the same /64 is not a change', () => {
+  const before = { 'Wi-Fi': [wifi4, v6('2a01:5ec0:1:2:1c3a:9f2e:4b11:77aa'), v6('2a01:5ec0:1:2:8d4:2b9f:e3a1:1')] };
+  const after = { 'Wi-Fi': [wifi4, v6('2a01:5ec0:1:2:1c3a:9f2e:4b11:77aa'), v6('2a01:5ec0:1:2:6f10:aa:bb:cc')] };
+  assert.equal(fingerprint(before), fingerprint(after), 'a new temporary address is not a new network');
+  // two addresses in one /64 are one fact, not two
+  assert.equal(fingerprint(before), fingerprint({ 'Wi-Fi': [wifi4, v6('2a01:5ec0:1:2::1')] }));
+  // compressed or not, zone id or not: the same prefix
+  assert.equal(fingerprint({ A: [v6('2001:db8:0:5::9')] }), fingerprint({ A: [v6('2001:0db8:0000:0005:aaaa:bbbb:cccc:dddd%12')] }));
+});
+
+test('a new IPv6 prefix IS a change', () => {
+  const home = { 'Wi-Fi': [wifi4, v6('2a01:5ec0:1:2::abcd')] };
+  assert.notEqual(fingerprint(home), fingerprint({ 'Wi-Fi': [wifi4, v6('2a01:5ec0:1:3::abcd')] }), 'another /64 is another network');
+  assert.notEqual(fingerprint(home), fingerprint({ 'Wi-Fi': [wifi4] }), 'losing IPv6 is news');
+  assert.notEqual(fingerprint({ A: [v6('2001:db8::1')] }), fingerprint({ B: [v6('2001:db8::1')] }), 'the adapter still counts');
+  assert.notEqual(fingerprint({ A: [v6('::1:2:3:4:5')] }), '', 'an odd but valid form still counts');
+});
+
+test('a temporary-address rotation under a live tunnel never fires the watcher', () => {
+  const reads = [
+    { 'Wi-Fi': [wifi4, v6('2a01:5ec0:1:2:aaaa:1:2:3')] },
+    { 'Wi-Fi': [wifi4, v6('2a01:5ec0:1:2:aaaa:1:2:3'), v6('2a01:5ec0:1:2:bbbb:4:5:6')] },   // the new one arrives
+    { 'Wi-Fi': [wifi4, v6('2a01:5ec0:1:2:bbbb:4:5:6')] },                                  // the old one is retired
+    { 'Wi-Fi': [wifi4, v6('2a01:5ec0:9:9:bbbb:4:5:6')] }                                   // GENUINE: a new prefix
+  ];
+  const h = harness(reads);
+  h.w.start();
+  h.tick();
+  for (let step = 1; step <= 2; step++) { h.advance(); h.tick(); h.tick(); h.tick(); }
+  assert.deepEqual(h.fired, [], 'a privacy-address rotation must not rebuild the tunnel');
+  h.advance(); h.tick(); h.tick();
+  assert.deepEqual(h.fired, ['interfaces'], 'a new prefix still does');
+});
+
+test('macOS VM and sharing bridges are host-only; the Thunderbolt Bridge and the NICs are not', () => {
+  const base = { en0: [wifi4] };
+  for (const name of ['bridge100', 'bridge101', 'bridge199', 'vmnet1', 'vmnet8', 'vnic0', 'vnic1']) {
+    assert.equal(fingerprint(Object.assign({ [name]: [vmnet8] }, base)), fingerprint(base),
+      `${name} coming up is a VM or Internet Sharing, not the Mac changing network`);
+  }
+  for (const name of ['bridge0', 'bridge1', 'bridge10', 'en0', 'en7', 'vmnetx']) {
+    assert.notEqual(fingerprint({ [name]: [vmnet8] }), fingerprint({}), `${name} is a real interface and must count`);
+  }
+});
