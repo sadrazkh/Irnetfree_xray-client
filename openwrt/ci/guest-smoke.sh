@@ -199,6 +199,21 @@ wait_back "xray killed" 180
 since_mark | grep -q 'irnetfree: \[error\] The core exited on its own' || { echo "the exit did not reach syslog"; exit 1; }
 one_each "after the core kill"
 
+say "a crash loop: the core killed three more times, each soon after its rebuild — the waits grow, no rebuild every few seconds"
+mark loop; LOOP="$MARK"
+for n in 1 2 3; do
+	OLD="$(core_xray)"
+	mark "loop$n"
+	kill -9 $OLD
+	wait_back "crash $n of 3" 240
+	[ "$(core_xray)" != "$OLD" ] || { echo "still the old core"; exit 1; }
+done
+WAITS="$(logread | sed -n "/$LOOP/,\$p" | sed -n 's/.*dropped again [0-9]*s after it was rebuilt.*waiting \([0-9.]*\)s before the next rebuild.*/\1/p' | tr '\n' ' ')"
+echo "waits before each rebuild (s): $WAITS"
+echo "$WAITS" | awk '{ if (NF < 3) exit 1; for (i = 2; i <= NF; i++) if ($i + 0 <= $(i - 1) + 0) exit 1 }' \
+	|| { echo "the waits did not grow across the crash loop"; exit 1; }
+one_each "after the crash loop"
+
 say "restart the service while connected: the boot connect brings the gateway back (a stale activeServerId used to stop it)"
 NODE="$(pidof node || true)"
 mark restart
@@ -238,5 +253,20 @@ if ip rule show | grep -q '^8999:'; then echo "the bypass rule is still there"; 
 if ip rule show | grep -q '^8998:'; then echo "the main-first rule is still there"; exit 1; fi
 r="$(ip route get 8.8.8.8)"; echo "router -> internet after disconnect: $r"
 echo "$r" | grep -q "via $GW" || { echo "after disconnect the router does not go out the WAN"; exit 1; }
+
+say "a disconnect by hand survives a restart: the router stays the way the user left it"
+mark stay
+/etc/init.d/irnetfree restart
+i=0
+until curl -fs -o /dev/null http://127.0.0.1:6969/web-api.js; do
+	i=$((i+1))
+	[ $i -lt 150 ] || { echo "the UI did not come back"; exit 1; }
+	sleep 2
+done
+sleep 30   # longer than a boot connect takes here (6-12s above): one would have shown by now
+if ip link show IRNetFree >/dev/null 2>&1 || since_mark | grep -q 'irnetfree: connected'; then
+	echo "the router reconnected after a disconnect by hand"; since_mark | tail -20; exit 1
+fi
+echo "still disconnected after the restart"
 
 say "SMOKE OK"
