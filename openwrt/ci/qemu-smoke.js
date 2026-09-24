@@ -130,7 +130,9 @@ function step(name, rc) { if (rc !== 0) throw new Error(`${name} failed with exi
       }
       step(`fetch ${name}`, rc);
     }
-    rc = await sh(con, 'sh /tmp/guest-smoke.sh 2>&1', 25 * 60000);
+    // the recovery steps (four rebuilds of the gateway on an emulated CPU) are
+    // the slow part; the job's own limit is 40 minutes
+    rc = await sh(con, 'sh /tmp/guest-smoke.sh 2>&1', 32 * 60000);
     if (rc !== 0) console.error(`\nguest-smoke.sh exited ${rc}`);
     else if (!/SMOKE OK/.test(con.buf)) { console.error('\nthe guest script exited 0 but never printed SMOKE OK'); rc = 1; }
   } catch (e) {

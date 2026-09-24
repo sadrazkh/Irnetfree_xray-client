@@ -244,8 +244,44 @@ async function lanDevices({ readFile = (p) => fs.promises.readFile(p, 'utf8'), r
   return mergeDevices(leases, neigh);
 }
 
+/** The cores this service runs, by executable name. */
+const CORE_NAMES = new Set(['xray', 'xray-pattn', 'sing-box']);
+
+/**
+ * The cores a previous run of THIS service left behind: a service that died
+ * without its exit hook (OOM killer, procd's SIGKILL after a slow stop) leaves
+ * its children running — an xray holding the SOCKS port the next one needs, a
+ * sing-box holding the IRNetFree device. Matched by /proc/<pid>/cmdline: the
+ * executable is one of ours AND an argument is one of this service's own FILES
+ * — `<data dir>/config.json`, `<data dir>/test-….json` (latency tests and
+ * validations: test-cfg-…) or the gateway's `<tmp>/irnf-sb-…/sing-box.json`.
+ * By file name, not by directory: a data dir of /tmp must not catch every
+ * core that keeps its config there. Anything else — another package's xray,
+ * a sing-box someone runs by hand — is never touched. Never throws.
+ */
+function ownOrphanCores({ dataDir, tmpDir = '/tmp', selfPid = process.pid, readdir = fs.readdirSync, readFile = fs.readFileSync } = {}) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const dir = String(dataDir || '').replace(/\/+$/, '');
+  const ours = [];
+  if (dir.startsWith('/') && dir.length > 1) ours.push(new RegExp(`^${esc(dir)}/(config|test-[^/]+)\\.json$`));
+  ours.push(new RegExp(`^${esc(String(tmpDir || '/tmp').replace(/\/+$/, ''))}/irnf-sb-[^/]+/sing-box\\.json$`));
+  let entries;
+  try { entries = readdir('/proc'); } catch { return []; }
+  const out = [];
+  for (const e of entries) {
+    if (!/^\d+$/.test(String(e)) || Number(e) === selfPid) continue;
+    let argv;
+    try { argv = String(readFile(`/proc/${e}/cmdline`)).split('\0').filter(Boolean); } catch { continue; }   // exited meanwhile
+    if (!argv.length || !CORE_NAMES.has(argv[0].slice(argv[0].lastIndexOf('/') + 1))) continue;
+    if (!argv.slice(1).some(a => ours.some(re => re.test(a)))) continue;
+    out.push({ pid: Number(e), argv });
+  }
+  return out;
+}
+
 module.exports = {
   BYPASS_MARK, BYPASS_RULE_PREF, MAIN_FIRST_PREF, NFT_TABLE,
   isOpenwrt, normalizeMac, validMacs, parseDhcpLeases, parseNeigh, mergeDevices,
-  buildNftRuleset, bypassRuleArgs, mainFirstRuleArgs, parseLanStatus, lanStatus, lanInterface, lanProbeAddress, lanDevices
+  buildNftRuleset, bypassRuleArgs, mainFirstRuleArgs, parseLanStatus, lanStatus, lanInterface, lanProbeAddress, lanDevices,
+  ownOrphanCores
 };

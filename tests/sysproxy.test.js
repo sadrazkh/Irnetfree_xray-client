@@ -7,7 +7,14 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseMacServices, enableMac, disableMac } = require('../src/main/sysproxy');
+
+// Nothing in this file may reach the real networksetup / reg of the machine
+// running it: a path that ignores the injected exec fails here instead.
+const cp = require('node:child_process');
+cp.execFile = (cmd) => { throw new Error(`the test reached the real ${cmd}`); };
+cp.execFileSync = (cmd) => { throw new Error(`the test reached the real ${cmd}`); };
+
+const { parseMacServices, enableMac, disableMac, probeListener } = require('../src/main/sysproxy');
 
 // What `networksetup -listallnetworkservices` prints on a MacBook with a
 // disabled Thunderbolt Bridge: the legend first, the disabled one starred.
@@ -89,4 +96,17 @@ test('disableMac turns all three off on every service and swallows failures', as
     ['networksetup', '-setwebproxystate', 'Wi-Fi', 'off'],
     ['networksetup', '-setsecurewebproxystate', 'Wi-Fi', 'off']
   ]);
+});
+
+test('probeListener: a listener on a loopback port is true, a closed port false, anything not loopback unknown', async () => {
+  // A server of the test's own on a port the OS picks — never one a proxy client uses.
+  const net = require('node:net');
+  const srv = net.createServer((s) => s.destroy());
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  try {
+    assert.equal(await probeListener(`127.0.0.1:${port}`), true);
+  } finally { await new Promise((r) => srv.close(r)); }
+  assert.equal(await probeListener(`127.0.0.1:${port}`), false, 'nothing listens there any more');
+  for (const s of ['proxy.corp:8080', '10.0.0.1:3128', '', null, '127.0.0.1']) assert.equal(await probeListener(s), null, String(s));
 });

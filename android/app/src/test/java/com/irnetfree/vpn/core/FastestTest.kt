@@ -69,9 +69,53 @@ class FastestTest {
             m("d", tcp = 210), m("e", tcp = 260)
         )
         assertEquals("c", Fastest.pick(measured)?.id)
-        // ...and when none of the shortlist carried anything, the best handshake
-        // of the whole list is still a better answer than nothing.
+        // ...and when none of the shortlist carried anything, a server that was
+        // never really tried is a better answer than one that was and failed.
+        // (This used to pin "a": the best handshake won even though its real
+        // round trip had just failed, so ⚡ connected to a server it had
+        // measured as dead. The audit of 2026-09-24 changed the pin on purpose.)
         val noneCarried = listOf(m("a", tcp = 40, real = -1), m("b", tcp = 55, real = -1), m("d", tcp = 210))
-        assertEquals("a", Fastest.pick(noneCarried)?.id)
+        assertEquals("d", Fastest.pick(noneCarried)?.id)
+    }
+
+    /** The UI's measuring, played back: `real` says which servers carry traffic. */
+    private fun walk(all: List<Fastest.Measured>, real: Map<String, Long>): Pair<List<String>, String?> {
+        val tried = Fastest.walk(all) { _, m -> real[m.id] ?: -1L }
+        return tried.map { it.id } to Fastest.pick(tried)?.id
+    }
+
+    @Test fun theWalkTriesTheShortlistAndStopsWhenOneCarried() {
+        val all = listOf(m("a", tcp = 40), m("b", tcp = 55), m("c", tcp = 70), m("d", tcp = 90), m("e", tcp = -1))
+        val (tried, best) = walk(all, mapOf("a" to 700L, "b" to -1L, "c" to 350L, "d" to 100L))
+        // the three quickest handshakes, as before; "d" is never spent a core on
+        assertEquals(listOf("a", "b", "c"), tried)
+        assertEquals("c", best)
+    }
+
+    @Test fun whenTheShortlistAllFailsTheWalkGoesOn() {
+        // The shape that connected people to a dead server: the three quickest
+        // handshakes all fail the real round trip. The next in line is tried
+        // until one carries, and that one — never a failed one — is the answer.
+        val all = listOf(m("a", tcp = 40), m("b", tcp = 55), m("c", tcp = 70), m("d", tcp = 90), m("f", tcp = 95), m("e", tcp = 300))
+        val (tried, best) = walk(all, mapOf("d" to -1L, "f" to 480L, "e" to 120L))
+        assertEquals(listOf("a", "b", "c", "d", "f"), tried)
+        assertEquals("f", best)
+    }
+
+    @Test fun theWalkGivesUpAfterABoundedNumberOfTries() {
+        val all = (1..10).map { m("s$it", tcp = 10L * it) }
+        val (tried, best) = walk(all, emptyMap())
+        assertEquals(Fastest.MAX_TRIES, tried.size)
+        assertEquals(listOf("s1", "s2", "s3", "s4", "s5", "s6"), tried)
+        assertNull(best)
+        // nothing answered a handshake: nothing is tried at all
+        assertEquals(emptyList<String>(), walk(listOf(m("x", tcp = -1), m("y")), emptyMap()).first)
+    }
+
+    @Test fun aMeasuredFailureDisqualifies() {
+        // The handshake says the port is open; the round trip says it carries
+        // nothing. The second measurement is the one that is true.
+        assertNull(Fastest.score(m("a", tcp = 40, real = -1)))
+        assertNull(Fastest.pick(listOf(m("a", tcp = 40, real = -1), m("b", tcp = 55, real = -1))))
     }
 }

@@ -153,10 +153,11 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
   };
 }
 
-const { buildMacSetupScript, buildMacTeardownScript } = require('./macTunScripts');
+const { buildMacSetupScript, buildMacTeardownScript, assertIps } = require('./macTunScripts');
 // Keep overlapping Connect/Disconnect calls from recovering another live
 // instance's session in this process. Crash recovery starts with an empty map.
 const macOwners = require('./macSessionLock');
+const macOwner = require('./macSessionOwner');
 
 /** Race a promise against a deadline; the timer never outlives the race. */
 function withTimeout(promise, ms, fallback) {
@@ -190,6 +191,7 @@ class TunSingbox {
     this.userData = opts.userData || null;
     this.onUnexpectedExit = opts.onUnexpectedExit || (() => {});
     this.macOwnerKey = this.userData ? path.resolve(this.userData) : this;
+    this.probe = opts.probe || macOwner.defaultProbe;   // who owns a journal / is a pid alive (macSessionOwner.js)
   }
 
   /** Pick the message in the user's language (fa default). */
@@ -354,10 +356,22 @@ class TunSingbox {
     let gone;
     this.exited = new Promise((resolve) => { gone = resolve; });
     const finish = (info) => {
-      if (this.proc === proc) this.proc = null;
-      // A dead tunnel is a drop: the recovery path treats it like one.
+      // A late exit from a sing-box a reconnect already replaced is not news
+      // about the tunnel that is live now.
+      if (this.proc !== proc) { gone(info); return; }
+      // A live tunnel nobody stopped: the machine's routes and DNS still point
+      // into an adapter that is gone, so every app off the system proxy leaves
+      // through the physical NIC. A dead tunnel is a drop — the owner's
+      // recovery rebuilds it, here as on macOS (checkMacHealth). Never from
+      // inside this event, never thrown into it.
+      const lost = this.active && !this.stopping;
+      this.proc = null;
       this.active = false;
       gone(info);
+      if (lost) {
+        const err = new Error(`sing-box exited (code=${info.code} signal=${info.signal || '-'}${info.error ? ' ' + info.error : ''})`);
+        Promise.resolve().then(() => this.onUnexpectedExit(err)).catch(e => this.onLog('TUN recovery callback: ' + e.message, 'error'));
+      }
     };
     proc.on('exit', (code, signal) => {
       this.onLog(`sing-box exited (code=${code} signal=${signal || '-'})`, (this.stopping || code === 0) ? 'info' : 'error');
@@ -422,14 +436,27 @@ class TunSingbox {
     if (dns.v4[1]) {
       await platform.run('netsh', ['interface', 'ip', 'add', 'dnsservers', `name=${TUN_IF}`, dns.v4[1], 'index=2', 'validate=no']).catch(() => {});
     }
-    if (dns.v6[0]) {
-      await platform.run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${TUN_IF}`, 'static', dns.v6[0], 'primary', 'validate=no'])
-        .catch(e => this.onLog('set dns (v6): ' + e.message, 'warn'));
+    // No v6 resolver of ours (no hijack: managed DNS off, or a sing-box-format
+    // core) is not "leave v6 alone": sing-tun has already set the peer there
+    // under auto_route, and without the hijack nothing answers it — a dead
+    // resolver beside the working v4 ones. It becomes ::1, the leak guard's
+    // hold: a query there fails in milliseconds. Not a delete, which Windows
+    // may fill with its fec0:0:0:ffff::1-3 placeholders — dead the same way.
+    const v6 = dns.v6.length ? dns.v6 : ['::1'];
+    await platform.run('netsh', ['interface', 'ipv6', 'set', 'dnsservers', `name=${TUN_IF}`, 'static', v6[0], 'primary', 'validate=no'])
+      .catch(e => this.onLog('set dns (v6): ' + e.message, 'warn'));
+    if (v6[1]) {
+      await platform.run('netsh', ['interface', 'ipv6', 'add', 'dnsservers', `name=${TUN_IF}`, v6[1], 'index=2', 'validate=no']).catch(() => {});
     }
-    if (dns.v6[1]) {
-      await platform.run('netsh', ['interface', 'ipv6', 'add', 'dnsservers', `name=${TUN_IF}`, dns.v6[1], 'index=2', 'validate=no']).catch(() => {});
+    // sing-box can die during the netsh awaits above: its exit found `active`
+    // still false and said nothing, and a dead tunnel must not be marked live.
+    if (!this.proc) {
+      this.removeWork();
+      throw new Error(this.msg(
+        'sing-box هنگام تنظیم آداپتور TUN بسته شد',
+        'sing-box exited while the TUN adapter was being set up') + this.tail());
     }
-    this.onLog(`TUN adapter ${TUN_IF} up; DNS ${[...dns.v4, ...dns.v6].join(', ')}; routes by sing-box (auto_route)`, 'info');
+    this.onLog(`TUN adapter ${TUN_IF} up; DNS ${[...dns.v4, ...v6].join(', ')}; routes by sing-box (auto_route)`, 'info');
 
     this.active = true;
     this.onLog(this.msg('حالت TUN فعال شد (کل سیستم).', 'TUN mode active (whole system).'), 'info');
@@ -458,8 +485,14 @@ class TunSingbox {
 
     const service = await platform.serviceForDeviceMac(route.device);
     if (!service) throw new Error('No physical macOS network service found; TUN DNS cannot be configured');
-    const savedDns = await platform.getServiceDnsMac(service, { strict: true });
+    let savedDns = await platform.getServiceDnsMac(service, { strict: true });
+    // After a reconnect's stop (keepDns) the service still lists the tunnel's
+    // resolver: the originals come from the session before, not from it
+    // (dropped only once this start has succeeded — see macSessionOwner.js).
+    const handedOver = macOwner.peekHandedOverDns(this.macOwnerKey, service, savedDns);
+    if (handedOver) savedDns = handedOver;
     const dns = this.adapterDns(dnsServers, opts);
+    assertIps([...dns.v4, ...dns.v6]);   // they go into a root script: refused before any journal exists
 
     const ips = await this.bypassIps(bypassAddrs);
     this.excludeIps = ips;
@@ -475,7 +508,8 @@ class TunSingbox {
     const teardownPath = path.join(work, 'teardown.sh');
     // Pre-create root-written output files as the app user so they remain readable.
     for (const file of [logFile, pidFile, devFile, identityFile]) fs.writeFileSync(file, '', { mode: 0o600 });
-    this.macState = { work, bin, cfgFile, logFile, pidFile, devFile, identityFile, dnsFile, service, savedDns, macPid: null, dev: '', ownerPid: process.pid };
+    const owner = await macOwner.ownerRecord(this.probe);   // pid + start time: a reused pid is not us
+    this.macState = { work, bin, cfgFile, logFile, pidFile, devFile, identityFile, dnsFile, service, savedDns, tunDns: [...dns.v4, ...dns.v6], macPid: null, dev: '', ...owner };
     this.saveMacSession();
     fs.writeFileSync(teardownPath, buildMacTeardownScript(this.macState), { mode: 0o700 });
     fs.writeFileSync(setupPath, buildMacSetupScript({
@@ -495,9 +529,14 @@ class TunSingbox {
           if (line.trim()) this.onLog('[tun] ' + line.trim(), 'error');
         }
       }
-      // A cancelled prompt before launch is safe to discard. After any mutation
-      // the privileged rollback owns cleanup; keep the journal for verified recovery.
-      if (!fs.readFileSync(pidFile, 'utf8').trim() && !fs.existsSync(dnsFile)) {
+      // A cancelled prompt before launch is safe to discard, and so is a setup
+      // whose own rollback succeeded with sing-box gone (wrong arch, bad config,
+      // "Killed: 9"): nothing is left, and a kept journal would keep the owner
+      // lock and a password prompt for nothing. Otherwise keep it for recovery.
+      const pidText = fs.readFileSync(pidFile, 'utf8').trim();
+      const pid = parseInt(pidText, 10);
+      const rolledBack = !/rollback failed/i.test(m) && Number.isInteger(pid) && !macOwner.pidAlive(pid, this.probe);
+      if ((!pidText || rolledBack) && !fs.existsSync(dnsFile)) {
         this.removeWork(); this.macState = null;
       }
       if (/User canceled|-128/i.test(m)) {
@@ -519,6 +558,7 @@ class TunSingbox {
     Object.assign(this.macState, { macPid, dev });
     if (!macPid || !/^utun\d+$/.test(dev)) throw new Error('TUN setup returned incomplete process/interface state; recovery required');
     this.saveMacSession();
+    if (handedOver) macOwner.dropHandedOverDns(this.macOwnerKey);   // the journal holds them now
     this.stopping = false;
     this.active = true;
 
@@ -547,8 +587,8 @@ class TunSingbox {
   async recoverMacSessions() {
     if (this.platform !== 'darwin') return 0;
     const owner = macOwners.get(this.macOwnerKey);
-    if (owner && owner !== this) throw new Error('Another tunnel operation is live; disconnect it before recovery');
-    if (this.active && !this.stopping) throw new Error('Disconnect the active tunnel before recovery');
+    if (owner && owner !== this) throw macOwner.liveTunnelError('Another tunnel operation is live; disconnect it before recovery');
+    if (this.active && !this.stopping) throw macOwner.liveTunnelError('Disconnect the active tunnel before recovery');
     let count = 0;
     if (this.macState) { await this.stopMac(); count++; }
     if (!this.userData) return count;
@@ -562,12 +602,8 @@ class TunSingbox {
       if (!fs.existsSync(file)) continue;
       if (fs.lstatSync(file).isSymbolicLink()) throw new Error('Invalid tunnel recovery journal');
       const st = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (Number.isInteger(st.ownerPid) && st.ownerPid > 1 && st.ownerPid !== process.pid) {
-        try {
-          process.kill(st.ownerPid, 0);
-          throw new Error('Another application instance may own this tunnel; close it before recovery');
-        } catch (e) { if (e.code !== 'ESRCH') throw e; }
-      }
+      // The pid AND its start time: after a reboot the old pid is someone else's.
+      if (await macOwner.ownerAlive(st, this.probe)) throw macOwner.liveTunnelError('Another application instance may own this tunnel; close it before recovery');
       // Reject redirected artifacts before writing or deleting anything.
       if (path.resolve(st.work || '') !== work || !Array.isArray(st.savedDns) || typeof st.bin !== 'string') throw new Error('Invalid tunnel recovery session');
       for (const key of ['cfgFile', 'logFile', 'pidFile', 'devFile', 'identityFile', 'dnsFile']) {
@@ -635,18 +671,21 @@ class TunSingbox {
     this.macHealthTimer = null;
   }
 
-  async stopMac() {
+  /** `opts.keepDns`: a reconnect's stop — see buildMacTeardownScript. */
+  async stopMac(opts = {}) {
     if (this.macStopPromise) return this.macStopPromise;
     if (!this.macState) return;
     const st = this.macState;
+    const keepDns = !!(opts && opts.keepDns);
     this.stopping = true;
     this.stopMacLogTail(); this.stopMacHealthCheck();
     this.macStopPromise = (async () => {
       const teardownPath = path.join(st.work, 'teardown.sh');
       try {
         if (fs.existsSync(teardownPath) && fs.lstatSync(teardownPath).isSymbolicLink()) throw new Error('Invalid tunnel teardown path');
-        fs.writeFileSync(teardownPath, buildMacTeardownScript({ ...st, pid: st.macPid }), { mode: 0o700 });
+        fs.writeFileSync(teardownPath, buildMacTeardownScript({ ...st, pid: st.macPid, keepDns }), { mode: 0o700 });
         await platform.runScriptPrivileged(teardownPath);
+        if (keepDns && st.dnsFile && fs.existsSync(st.dnsFile)) macOwner.handOverDns(this.macOwnerKey, st);
         fs.rmSync(st.work, { recursive: true, force: true });
         this.work = null; this.macState = null; this.active = false; this.excludeIps = [];
         if (!this.macStartPromise && macOwners.get(this.macOwnerKey) === this) macOwners.delete(this.macOwnerKey);
@@ -710,7 +749,8 @@ class TunSingbox {
     return this.startLinux(socksPort, bypassAddrs, dnsServers, o);
   }
 
-  async stop() {
+  /** `opts.keepDns` (macOS): a reconnect's stop leaves the service's DNS where the guard holds it. */
+  async stop(opts = {}) {
     // A stop during the administrator prompt must wait until setup has either
     // completed or rolled back, before deleting scripts or recovery files.
     if (this.platform === 'darwin' && this.macStartPromise) {
@@ -718,7 +758,7 @@ class TunSingbox {
     }
     if (!this.active && !this.proc && !this.macState) return;
     if (this.platform === 'darwin') {
-      await this.stopMac();
+      await this.stopMac(opts);
       this.onLog('TUN mode stopped.', 'info');
       return;
     }

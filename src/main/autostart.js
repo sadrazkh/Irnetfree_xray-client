@@ -39,4 +39,31 @@ function autostartExe(env = process.env, execPath = process.execPath) {
   return env.PORTABLE_EXECUTABLE_FILE || execPath;
 }
 
-module.exports = { TASK, schtasksCreateArgs, schtasksDeleteArgs, schtasksQueryArgs, autostartExe };
+/**
+ * What `app.setLoginItemSettings` gets off Windows. Its `args` is Windows-only:
+ * a macOS login item never passes it, so `--hidden` never reached the app there
+ * and every login opened the window. macOS has its own word for it,
+ * `openAsHidden` (honoured before macOS 13), and startsHidden() below also asks
+ * how the app was launched, which covers the newer systems.
+ */
+function loginItemSettings(enabled, platform = process.platform) {
+  if (platform === 'darwin') return { openAtLogin: !!enabled, openAsHidden: true };
+  return { openAtLogin: !!enabled, args: ['--hidden'] };
+}
+
+/**
+ * Whether this launch stays in the tray: `--hidden` (the Windows logon task),
+ * or on macOS a launch BY the login item — `wasOpenedAtLogin` /
+ * `wasOpenedAsHidden` from `app.getLoginItemSettings()`, passed as a function
+ * so a platform that has no such thing is never asked.
+ */
+function startsHidden({ argv = process.argv, platform = process.platform, loginItem = null } = {}) {
+  if ((argv || []).includes('--hidden')) return true;
+  if (platform !== 'darwin' || typeof loginItem !== 'function') return false;
+  try {
+    const s = loginItem() || {};
+    return !!(s.wasOpenedAtLogin || s.wasOpenedAsHidden);
+  } catch { return false; }
+}
+
+module.exports = { TASK, schtasksCreateArgs, schtasksDeleteArgs, schtasksQueryArgs, autostartExe, loginItemSettings, startsHidden };

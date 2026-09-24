@@ -56,7 +56,7 @@ function harness(extraTable = []) {
   tun.isElevated = () => true;
   table = [
     ...extraTable,
-    [/Get-NetRoute -DestinationPrefix/, '192.168.8.1|22\r\n'],
+    [/Get-NetRoute -DestinationPrefix/, JSON.stringify([{ nextHop: '192.168.8.1', ifIndex: 22, alias: 'Wi-Fi', routeMetric: 0, ifMetric: 35, state: 'Connected' }]) + '\r\n'],
     [/Get-NetAdapter -Name 'XrayTun'.*\.Status$/, 'Up\r\n'],
     [/Get-NetAdapter -Name 'XrayTun'.*\.ifIndex$/, '44\r\n']
   ];
@@ -97,7 +97,8 @@ test('win32 start: v4 as before, then the adapter gets a v6 address, the peer as
     assert.ok(lines.indexOf(routes[0]) > lines.indexOf('netsh ' + V6_LINES[3]));
     assert.ok(h.logs.some(([, l]) => /IPv6 -> TUN too/.test(l)));
 
-    // stop: v4 split routes, v6 split routes and the bypass route all go
+    // stop: v4 split routes, v6 split routes and the bypass route all go —
+    // the bypass route by exact match (tunNetSwitch.test.js shows why)
     execs.length = 0;
     await h.tun.cleanupRoutesWindows();
     assert.deepEqual(execLines(), [
@@ -105,7 +106,7 @@ test('win32 start: v4 as before, then the adapter gets a v6 address, the peer as
       `route delete 128.0.0.0 mask 128.0.0.0 ${TUN_GW}`,
       'netsh interface ipv6 delete route prefix=::/1 interface=XrayTun nexthop=fdfe:dcba:9876::2',
       'netsh interface ipv6 delete route prefix=8000::/1 interface=XrayTun nexthop=fdfe:dcba:9876::2',
-      'route delete 1.2.3.4'
+      'netsh interface ipv4 delete route prefix=1.2.3.4/32 interface=22 nexthop=192.168.8.1 store=active'
     ]);
     assert.equal(h.tun.dnsPeer6, null, 'no v6 peer once the adapter is gone');
   } finally { h.done(); }
@@ -125,10 +126,67 @@ test('win32 start: a failing v6 step is logged, its routes withdrawn, dnsPeer6 s
   } finally { h.done(); }
 });
 
+/**
+ * With managed DNS off the core hijacks nothing, so the tunnel's v6 gateway
+ * answers no query — and since the leak guard holds the physical adapters on
+ * loopback, the TUN adapter's resolvers are the only ones that answer: a dead
+ * v6 one ahead of them pushed every lookup to Windows' "all servers" step
+ * (~3 s). The v6 resolver is the peer only when the v4 one is (tunSingbox's
+ * adapterDns rule); the v6 address and routes stay either way, so v6 traffic
+ * still cannot go around the tunnel.
+ */
+test('win32 start: without the peer on v4 (managed DNS off) the adapter gets no dead v6 resolver — v6 still routes into the tunnel', async () => {
+  const h = harness();
+  try {
+    await h.tun.startWindows(10808, '1.2.3.4', ['1.1.1.1', '8.8.8.8']);
+    assert.equal(h.tun.active, true);
+    const netsh = netshLines();
+    assert.ok(netsh.includes('interface ip set dnsservers name=XrayTun static 1.1.1.1 primary validate=no'));
+    assert.ok(netsh.includes('interface ip add dnsservers name=XrayTun 8.8.8.8 index=2 validate=no'));
+    assert.equal(netsh.some(l => /ipv6 set dnsservers name=XrayTun static fdfe/.test(l)), false, 'no v6 resolver nothing answers on');
+    // loopback instead of an empty list, which Windows may fill with its
+    // fec0:0:0:ffff::1-3 placeholders (they would route into the TUN and die)
+    assert.ok(netsh.includes('interface ipv6 set dnsservers name=XrayTun static ::1 primary validate=no'));
+    assert.ok(netsh.includes(V6_LINES[0]) && netsh.includes(V6_LINES[2]) && netsh.includes(V6_LINES[3]), 'v6 address and both /1 routes');
+    assert.equal(h.tun.dnsPeer6, null, 'the adapter has no v6 resolver of ours');
+  } finally { h.done(); }
+});
+
+test('win32 start: that loopback v6 resolver failing is a warning — the v6 routes stay', async () => {
+  const h = harness([[/ipv6 set dnsservers name=XrayTun static ::1/, new Error('The parameter is incorrect.')]]);
+  try {
+    await h.tun.startWindows(10808, '1.2.3.4', ['1.1.1.1']);
+    const netsh = netshLines();
+    assert.ok(netsh.includes(V6_LINES[2]) && netsh.includes(V6_LINES[3]), 'v6 still routed into the tunnel');
+    assert.equal(netsh.some(l => /ipv6 delete route/.test(l)), false, 'and not withdrawn');
+    assert.ok(h.logs.some(([lvl, l]) => lvl === 'warn' && /v6.*The parameter is incorrect/.test(l)));
+  } finally { h.done(); }
+});
+
+test('win32 start: the TUN adapter\'s own metric and resolvers failing is said, not swallowed', async () => {
+  // The guard now holds every physical adapter on loopback: the TUN adapter's
+  // resolvers are the only ones that answer, so losing them silently is a
+  // machine with no DNS and nothing in the log.
+  const h = harness([
+    [/interface ip set interface interface=XrayTun metric=1/, new Error('The parameter is incorrect.')],
+    [/interface ip set dnsservers name=XrayTun/, new Error('The object already exists.')],
+    [/interface ip add dnsservers name=XrayTun/, new Error('Element not found.')]
+  ]);
+  try {
+    await h.tun.startWindows(10808, '1.2.3.4', ['1.1.1.1', '8.8.8.8']);
+    assert.equal(h.tun.active, true, 'still not fatal');
+    const warn = h.logs.filter(([lvl]) => lvl === 'warn').map(([, l]) => l).join('\n');
+    assert.match(warn, /metric.*The parameter is incorrect/);
+    assert.match(warn, /1\.1\.1\.1.*The object already exists/);
+    assert.match(warn, /8\.8\.8\.8.*Element not found/);
+  } finally { h.done(); }
+});
+
 test('cleanupSync (Windows) withdraws the v6 split routes with the v4 ones', { skip: process.platform !== 'win32' }, () => {
   const h = harness();
   try {
     h.tun.bypassIps.push('9.9.9.9');
+    h.tun.bypassRoutes.push({ ip: '9.9.9.9', nextHop: '192.168.8.1', ifIndex: '22' });
     execs.length = 0;
     h.tun.cleanupSync();
     assert.deepEqual(execLines(), [
@@ -136,7 +194,94 @@ test('cleanupSync (Windows) withdraws the v6 split routes with the v4 ones', { s
       `route delete 128.0.0.0 mask 128.0.0.0 ${TUN_GW}`,
       'netsh interface ipv6 delete route prefix=::/1 interface=XrayTun nexthop=fdfe:dcba:9876::2',
       'netsh interface ipv6 delete route prefix=8000::/1 interface=XrayTun nexthop=fdfe:dcba:9876::2',
-      'route delete 9.9.9.9'
+      'netsh interface ipv4 delete route prefix=9.9.9.9/32 interface=22 nexthop=192.168.8.1 store=active'
     ]);
   } finally { h.done(); }
+});
+
+/*
+ * tun2socks dying under a live tunnel leaves its /1 split routes pointing at an
+ * adapter that is gone. The exit handler already withdrew them; it now also tells
+ * the owner, whose recovery rebuilds the tunnel — the sing-box backend does the same.
+ */
+const flush = () => new Promise((r) => setImmediate(r));
+
+test('win32: tun2socks exiting on its own under a live tunnel withdraws the routes and tells the owner, once', async () => {
+  const h = harness();
+  try {
+    const lost = [];
+    h.tun.onUnexpectedExit = (err) => { lost.push(err); };
+    await h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    assert.equal(h.tun.active, true);
+    const proc = h.tun.proc;
+    execs.length = 0;
+    proc.emit('exit', 1);
+    assert.equal(h.tun.active, false);
+    assert.deepEqual(lost, [], 'never from inside the child’s own exit event');
+    await flush();
+    assert.equal(lost.length, 1);
+    assert.match(lost[0].message, /tun2socks exited \(1\)/);
+    assert.ok(execLines().some(l => /^route delete 0\.0\.0\.0 mask 128\.0\.0\.0/.test(l)), 'its split routes are withdrawn');
+  } finally { h.done(); }
+});
+
+test('tun2socks: a start that dies at once, or a failing callback, is no lost tunnel and no throw', async () => {
+  const h = harness();
+  try {
+    const lost = [];
+    h.tun.onUnexpectedExit = async (err) => { lost.push(err); throw new Error('boom'); };
+    const starting = h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    await new Promise((r) => setTimeout(r, 50));   // inside the 400 ms fail-fast window
+    h.tun.proc.emit('exit', 1);
+    await assert.rejects(starting, /exited immediately/);
+    await flush();
+    assert.deepEqual(lost, [], 'the start reports itself through its rejection');
+    await h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    assert.doesNotThrow(() => h.tun.proc.emit('exit', 2));
+    await flush(); await flush();
+    assert.equal(lost.length, 1);
+    assert.ok(h.logs.some(([lvl, l]) => lvl === 'error' && /TUN recovery callback: boom/.test(l)));
+  } finally { h.done(); }
+});
+
+test('win32: a late exit from a tun2socks already replaced leaves the live tunnel and its routes alone', async () => {
+  const h = harness();
+  try {
+    const lost = [];
+    h.tun.onUnexpectedExit = (err) => { lost.push(err); };
+    await h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    const old = h.tun.proc;
+    const live = new (require('node:events').EventEmitter)();
+    h.tun.proc = live;             // stop() does not wait for the exit; a restart spawned a new one
+    execs.length = 0;
+    old.emit('exit', 1);
+    await flush();
+    assert.equal(h.tun.active, true);
+    assert.equal(h.tun.proc, live, 'the new process is not forgotten');
+    assert.deepEqual(lost, []);
+    assert.ok(!execLines().some(l => /^route delete/.test(l)), 'the live routes stay');
+  } finally { h.done(); }
+});
+
+test('stop waits for tun2socks to exit, so a rebuild never meets the old XrayTun adapter', { skip: process.platform === 'darwin' }, async () => {
+  // It returned as soon as taskkill was spawned: a rebuild then started the
+  // next tun2socks while the old one still held the adapter (sing-box's stop
+  // has always waited, bounded).
+  const h = harness();
+  try {
+    await h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    const proc = h.tun.proc;
+    let gone = false;
+    setTimeout(() => { gone = true; proc.emit('exit', 1); }, 80);   // taskkill takes a moment
+    await h.tun.stop();
+    assert.equal(gone, true, 'stop() returned while the old tun2socks was still running');
+    assert.equal(h.tun.proc, null);
+    assert.equal(h.tun.active, false);
+  } finally { h.done(); }
+});
+
+test('TunManager takes onUnexpectedExit from its options; the default is a no-op', () => {
+  const f = () => {};
+  assert.equal(new TunManager({ onUnexpectedExit: f }).onUnexpectedExit, f);
+  assert.doesNotThrow(() => new TunManager({}).onUnexpectedExit(new Error('x')));
 });

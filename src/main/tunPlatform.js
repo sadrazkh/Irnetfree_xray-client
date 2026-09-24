@@ -12,6 +12,7 @@
 
 const { execFile, execFileSync } = require('child_process');
 const os = require('os');
+const net = require('net');
 const dns = require('dns').promises;
 
 /** The adapter names the backends create. */
@@ -49,6 +50,24 @@ function run(cmd, args, options = {}) {
       resolve((stdout || '').toString());
     });
   });
+}
+
+/**
+ * The argv for every PowerShell script the app runs.
+ *
+ * Windows PowerShell 5.1 writes REDIRECTED stdout in the console's OEM code
+ * page, and everything here decodes it as UTF-8 — so an adapter someone renamed
+ * "اترنت", or any adapter on a Chinese or Russian Windows, came back as "?????".
+ * xray was then bound to an interface that does not exist (TUN "connected",
+ * nothing passing), and `?` is a wildcard to `-InterfaceAlias`, so the leak
+ * guard's override hit "Wi-Fi" as well. The output is switched to UTF-8 first.
+ * That line travels as its own argument ahead of the script — powershell.exe
+ * joins everything after -Command with a space — so the script stays one
+ * untouched string; the try/catch lets a process with no console still run.
+ */
+const PS_UTF8 = 'try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {};';
+function psArgs(script) {
+  return ['-NoProfile', '-NonInteractive', '-Command', PS_UTF8, script];
 }
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -104,19 +123,72 @@ async function resolveServerIps(serverAddress, opts = {}) {
   return [...new Set(all)];
 }
 
+/**
+ * Every IPv4 default route in the ACTIVE store, with the state and metric of
+ * its interface. The pick happens in pickDefaultRouteWin, where it is tested.
+ */
+const DEFAULT_ROUTES_PS = [
+  "$ErrorActionPreference = 'SilentlyContinue'",
+  '$ifs = @{}',
+  'foreach ($i in @(Get-NetIPInterface -AddressFamily IPv4)) { $ifs[[int]$i.ifIndex] = $i }',
+  '$out = @()',
+  "foreach ($r in @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore)) {",
+  '$i = $ifs[[int]$r.ifIndex]',
+  '$out += [pscustomobject]@{ nextHop = [string]$r.NextHop; ifIndex = [int]$r.ifIndex; alias = [string]$r.InterfaceAlias;'
+    + ' routeMetric = [int]$r.RouteMetric; ifMetric = $(if ($i) { [int]$i.InterfaceMetric } else { $null });'
+    + " state = $(if ($i) { [string]$i.ConnectionState } else { '' }) }",
+  '}',
+  'ConvertTo-Json -InputObject @($out) -Compress'
+].join('\n');
+
+/**
+ * The default route Windows itself routes by, out of that query's rows:
+ * `{ nextHop, ifIndex }` as strings, both '' when there is none.
+ *
+ * The old one-liner sorted Get-NetRoute by RouteMetric alone and took the
+ * first row, and three kinds of row fooled it after a network switch:
+ *  - a default route on an interface that is no longer CONNECTED. The table
+ *    keeps routes of a disconnected interface (netsh shows them, route print
+ *    does not), and without `-PolicyStore` Get-NetRoute also lists the
+ *    persistent store, where an unplugged NIC's static gateway lives on;
+ *  - a tie: every DHCP gateway has RouteMetric 0, and what Windows actually
+ *    compares is route metric + INTERFACE metric — so on a machine with two
+ *    live gateways the listing order chose, not the metric;
+ *  - our own adapters, which are not a way out of the machine.
+ * Naming a dead NIC here binds every dial Xray makes to it (directInterface)
+ * and, on the tun2socks backend, pins the server's bypass route to a gateway
+ * that is gone — a rebuilt tunnel that passes nothing, reported as restored.
+ *
+ * When no row says anything about its interface (Get-NetIPInterface failed),
+ * every row still counts, ordered by what is known — never "no gateway" for
+ * want of a fact the old query never had either.
+ */
+function pickDefaultRouteWin(rows) {
+  const list = (Array.isArray(rows) ? rows : [rows]).filter(r => r && typeof r === 'object');
+  const usable = list.filter(r => net.isIPv4(String(r.nextHop || '')) && r.nextHop !== '0.0.0.0'
+    && /^\d+$/.test(String(r.ifIndex == null ? '' : r.ifIndex)) && !isOwnTunInterface(r.alias));
+  const known = usable.some(r => r.state);
+  // the enum's name, or its value should it ever arrive unnamed (Connected = 1)
+  const live = known ? usable.filter(r => /^(connected|1)$/i.test(String(r.state || ''))) : usable;
+  const num = (v) => Number(v) || 0;
+  live.sort((a, b) => (num(a.routeMetric) + num(a.ifMetric)) - (num(b.routeMetric) + num(b.ifMetric))
+    || num(a.ifMetric) - num(b.ifMetric) || num(a.ifIndex) - num(b.ifIndex));
+  const best = live[0];
+  return best ? { nextHop: String(best.nextHop), ifIndex: String(best.ifIndex) } : { nextHop: '', ifIndex: '' };
+}
+
 /** Discover the current default gateway + interface index (Windows). */
 async function getDefaultGatewayWin() {
-  const ps = "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1; " +
-    "Write-Output ($r.NextHop + '|' + $r.InterfaceIndex)";
-  const out = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
-  const [nextHop, ifIndex] = out.split('|');
-  return { nextHop: nextHop && nextHop.trim(), ifIndex: ifIndex && ifIndex.trim() };
+  const out = (await run('powershell', psArgs(DEFAULT_ROUTES_PS))).trim();
+  let rows;
+  try { rows = JSON.parse(out || '[]'); } catch { rows = []; }
+  return pickDefaultRouteWin(rows);
 }
 
 /** Get the interface index of a TUN adapter once it exists (Windows). */
 async function getTunIfIndex(name) {
   const ps = `(Get-NetAdapter -Name '${name}' -ErrorAction SilentlyContinue).ifIndex`;
-  const out = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
+  const out = (await run('powershell', psArgs(ps))).trim();
   return out ? out.split(/\s+/)[0].trim() : null;
 }
 
@@ -126,7 +198,7 @@ async function waitForAdapter(name, timeout) {
   while (Date.now() < deadline) {
     try {
       const ps = `(Get-NetAdapter -Name '${name}' -ErrorAction SilentlyContinue).Status`;
-      const out = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
+      const out = (await run('powershell', psArgs(ps))).trim();
       if (out && /Up/i.test(out)) return true;
     } catch {}
     await delay(400);
@@ -200,7 +272,7 @@ async function physicalInterface(plat = os.platform()) {
       const idx = String(gw.ifIndex || '').replace(/\D/g, '');
       if (!idx) return { name: null, ifIndex: null, gateway: gw.nextHop || null };
       const ps = `(Get-NetAdapter -InterfaceIndex ${idx} -ErrorAction SilentlyContinue).Name`;
-      const name = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
+      const name = (await run('powershell', psArgs(ps))).trim();
       return { name: name || null, ifIndex: idx, gateway: gw.nextHop || null };
     }
     if (plat === 'darwin') {
@@ -220,7 +292,7 @@ async function physicalInterface(plat = os.platform()) {
 
 module.exports = {
   TUN2SOCKS_ADAPTER, SINGBOX_ADAPTER,
-  isOwnTunInterface, run, delay, sh, isElevated, resolveServerIps,
-  getDefaultGatewayWin, getTunIfIndex, waitForAdapter, runScriptPrivileged,
+  isOwnTunInterface, run, psArgs, delay, sh, isElevated, resolveServerIps,
+  getDefaultGatewayWin, pickDefaultRouteWin, DEFAULT_ROUTES_PS, getTunIfIndex, waitForAdapter, runScriptPrivileged,
   getDefaultRouteMac, serviceForDeviceMac, getServiceDnsMac, physicalInterface
 };

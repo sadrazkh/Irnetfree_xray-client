@@ -38,7 +38,9 @@ object VpnState {
         if (label != null) _label.value = label
         if (error != null && error.isNotBlank()) { _lastError.value = error; addLog("⚠ $error") }
         if (s == ConnState.CONNECTED) { if (_connectedSince.value == 0L) _connectedSince.value = System.currentTimeMillis() }
-        if (s == ConnState.DISCONNECTED) { _connectedSince.value = 0L; _traffic.value = Traffic(); _health.value = null }
+        // ERROR is reached only once the tunnel is down (XrayVpnService.stopAll
+        // keeps it through the teardown), so it ends the session like DISCONNECTED.
+        if (s == ConnState.DISCONNECTED || s == ConnState.ERROR) { _connectedSince.value = 0L; _traffic.value = Traffic(); _health.value = null }
         if (s == ConnState.CONNECTING) _health.value = null
     }
     fun setTraffic(t: Traffic) { _traffic.value = t }

@@ -67,14 +67,95 @@ test('resolveServerIps: literals pass, duplicates collapse, AAAA lookups only on
   assert.ok(localAll.includes('127.0.0.1'), 'with the flag the A records are still there');
 });
 
-test('getDefaultGatewayWin parses "nextHop|ifIndex" from Get-NetRoute', async () => {
-  canned([[/Get-NetRoute -DestinationPrefix '0\.0\.0\.0\/0'/, '192.168.8.1|12\r\n']]);
+/** One row of the default-route query, as getDefaultGatewayWin's PowerShell prints it. */
+const row = (nextHop, ifIndex, alias, routeMetric, ifMetric, state = 'Connected') => ({ nextHop, ifIndex, alias, routeMetric, ifMetric, state });
+
+test('pickDefaultRouteWin: the default route Windows itself routes by', () => {
+  const pick = P.pickDefaultRouteWin;
+  // lowest route metric + interface metric — RouteMetric alone ties at 0 for every DHCP gateway
+  assert.deepEqual(pick([row('192.168.10.1', 23, 'Wi-Fi', 0, 55), row('192.168.1.1', 5, 'Ethernet', 0, 25)]),
+    { nextHop: '192.168.1.1', ifIndex: '5' });
+  assert.deepEqual(pick([row('192.168.10.1', 23, 'Wi-Fi', 0, 35), row('192.168.1.1', 5, 'Ethernet', 50, 25)]),
+    { nextHop: '192.168.10.1', ifIndex: '23' }, 'the sum decides, not either half');
+  // a gateway left in the table on an interface that is not connected is not a way out
+  assert.deepEqual(pick([row('192.168.1.1', 5, 'Ethernet', 0, 25, 'Disconnected'), row('192.168.10.1', 23, 'Wi-Fi', 0, 55)]),
+    { nextHop: '192.168.10.1', ifIndex: '23' });
+  assert.deepEqual(pick([row('192.168.1.1', 5, 'Ethernet', 0, 25, 'Disconnected')]), { nextHop: '', ifIndex: '' },
+    'nothing connected: nothing, rather than a dead NIC');
+  // our own adapters, and on-link defaults (no next hop to pin a /32 to), are never the answer
+  assert.deepEqual(pick([row('10.255.0.1', 44, 'XrayTun', 0, 1), row('172.19.0.2', 45, 'IRNetFree', 0, 0),
+    row('0.0.0.0', 9, 'PPP', 0, 1), row('192.168.10.1', 23, 'Wi-Fi', 0, 55)]), { nextHop: '192.168.10.1', ifIndex: '23' });
+  // equal cost: the lower interface metric, then the lower index — never the listing order
+  assert.deepEqual(pick([row('10.0.0.1', 12, 'B', 10, 20), row('10.0.1.1', 7, 'A', 20, 10)]), { nextHop: '10.0.1.1', ifIndex: '7' });
+  assert.deepEqual(pick([row('10.0.0.1', 12, 'B', 0, 10), row('10.0.1.1', 7, 'A', 0, 10)]), { nextHop: '10.0.1.1', ifIndex: '7' });
+  // no interface facts at all (Get-NetIPInterface failed): every row still counts, by route metric
+  assert.deepEqual(pick([
+    { nextHop: '192.168.10.1', ifIndex: 23, alias: 'Wi-Fi', routeMetric: 5, ifMetric: null, state: '' },
+    { nextHop: '192.168.1.1', ifIndex: 5, alias: 'Ethernet', routeMetric: 0, ifMetric: null, state: '' }
+  ]), { nextHop: '192.168.1.1', ifIndex: '5' });
+  // the state as the enum's value rather than its name still reads
+  assert.deepEqual(pick([row('192.168.1.1', 5, 'Ethernet', 0, 25, '0'), row('192.168.10.1', 23, 'Wi-Fi', 0, 55, '1')]),
+    { nextHop: '192.168.10.1', ifIndex: '23' });
+  // PowerShell 5.1 unwraps a one-element array into the object; junk is no route
+  assert.deepEqual(pick(row('192.168.8.1', 12, 'Wi-Fi', 0, 35)), { nextHop: '192.168.8.1', ifIndex: '12' });
+  for (const junk of [null, undefined, [], 'text', [null, 7, { nextHop: 'fe80::1', ifIndex: 3 }], [{ nextHop: '1.2.3.4' }]]) {
+    assert.deepEqual(pick(junk), { nextHop: '', ifIndex: '' }, JSON.stringify(junk));
+  }
+});
+
+test('getDefaultGatewayWin: one PowerShell for the active default routes and their interfaces, then the pick', async () => {
+  canned([[/Get-NetRoute -DestinationPrefix '0\.0\.0\.0\/0'/, JSON.stringify([
+    row('192.168.1.1', 5, 'Ethernet', 0, 25, 'Disconnected'), row('192.168.8.1', 12, 'Wi-Fi', 0, 35)]) + '\r\n']]);
   assert.deepEqual(await P.getDefaultGatewayWin(), { nextHop: '192.168.8.1', ifIndex: '12' });
+  assert.equal(calls.length, 1);
   assert.equal(calls[0][0], 'powershell');
   assert.deepEqual(calls[0][1].slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
-  canned([[/Get-NetRoute/, '|\r\n']]);
+  const script = calls[0][1].at(-1);   // psArgs puts the UTF-8 line before the script
+  assert.match(script, /-PolicyStore ActiveStore/, 'a static gateway of an unplugged NIC lives on in the persistent store');
+  assert.match(script, /Get-NetIPInterface -AddressFamily IPv4/);
+  assert.match(script, /ConnectionState/);
+  assert.match(script, /InterfaceMetric/);
+  canned([[/Get-NetRoute/, '[]\r\n']]);
   assert.deepEqual(await P.getDefaultGatewayWin(), { nextHop: '', ifIndex: '' }, 'no route: empty, not undefined');
+  canned([[/Get-NetRoute/, 'Get-NetRoute : something went wrong\r\n']]);
+  assert.deepEqual(await P.getDefaultGatewayWin(), { nextHop: '', ifIndex: '' }, 'not JSON: no route, no throw');
 });
+
+// The one test that runs the real query — on the GitHub Windows runner ONLY,
+// never on a developer's or the owner's machine (fakes only there). Nobody can
+// run this PowerShell by hand in the repo's sandbox, and a syntax slip in it
+// would take the gateway, and TUN mode with it, from every Windows user. It
+// only reads: Get-NetIPInterface and Get-NetRoute.
+//
+// `npm test` preloads the no-network guard, which refuses powershell by name —
+// rightly, for every other test. This read-only query on the runner is the one
+// exception, so it runs in a child node without the guard: the production
+// module and argv, nothing faked.
+test('the default-route query on a real Windows (CI runner only): it runs, and its rows are what the pick expects',
+  { skip: !(process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true') }, async () => {
+    const probe = [
+      `const P = require(${JSON.stringify(require.resolve('../src/main/tunPlatform'))});`,
+      '(async () => {',
+      "  const out = await P.run('powershell', P.psArgs(P.DEFAULT_ROUTES_PS));   // exactly the production argv",
+      '  process.stdout.write(JSON.stringify({ out, gw: await P.getDefaultGatewayWin() }));',
+      '})().catch((e) => { process.stderr.write(String((e && e.stack) || e)); process.exit(1); });'
+    ].join('\n');
+    const child = require('node:child_process').spawnSync(process.execPath, ['-e', probe], { encoding: 'utf8', timeout: 60000, windowsHide: true });
+    assert.equal(child.status, 0, child.stderr);
+    const { out, gw } = JSON.parse(child.stdout);
+    const rows = [].concat(JSON.parse(out.trim()));
+    assert.ok(rows.length >= 1, 'the runner has a default route: ' + out);
+    const live = rows.filter(r => r.state === 'Connected');
+    assert.ok(live.length >= 1, 'ConnectionState arrives as its name: ' + out);
+    for (const r of live) {
+      assert.equal(typeof r.ifIndex, 'number');
+      assert.equal(typeof r.routeMetric, 'number');
+      assert.equal(typeof r.ifMetric, 'number');
+      assert.equal(typeof r.alias, 'string');
+    }
+    assert.match(gw.nextHop, /^\d+\.\d+\.\d+\.\d+$/, out);
+    assert.match(gw.ifIndex, /^\d+$/);
+  });
 
 test('getTunIfIndex asks for the adapter it is given', async () => {
   canned([[/Get-NetAdapter -Name 'IRNetFree'/, '23\r\n']]);
@@ -143,12 +224,12 @@ test('runScriptPrivileged (not root) goes through one osascript admin prompt, pa
 
 test('physicalInterface (win32): default route → adapter friendly name, ifIndex, gateway', async () => {
   canned([
-    [/Get-NetRoute -DestinationPrefix/, '192.168.8.1|12\r\n'],
+    [/Get-NetRoute -DestinationPrefix/, JSON.stringify([row('192.168.8.1', 12, 'Wi-Fi', 0, 35)]) + '\r\n'],
     [/Get-NetAdapter -InterfaceIndex 12/, 'Wi-Fi\r\n']
   ]);
   assert.deepEqual(await P.physicalInterface('win32'), { name: 'Wi-Fi', ifIndex: '12', gateway: '192.168.8.1' });
   assert.match(joined(1), /\(Get-NetAdapter -InterfaceIndex 12 -ErrorAction SilentlyContinue\)\.Name/);
-  canned([[/Get-NetRoute -DestinationPrefix/, '|\r\n']]);
+  canned([[/Get-NetRoute -DestinationPrefix/, '[]\r\n']]);
   assert.deepEqual(await P.physicalInterface('win32'), { name: null, ifIndex: null, gateway: null }, 'nothing found: nulls, no throw');
   canned([[/Get-NetRoute/, () => { throw new Error('powershell is not recognized'); }]]);
   assert.deepEqual(await P.physicalInterface('win32'), { name: null, ifIndex: null, gateway: null }, 'a failing command: nulls, no throw');

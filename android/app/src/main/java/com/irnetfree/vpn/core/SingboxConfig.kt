@@ -21,11 +21,16 @@ object SingboxConfig {
 
     class Unsupported(msg: String) : Exception(msg)
 
-    fun build(server: ServerConfig, s: AppSettings): JSONObject {
+    /** [auth]: the session's credentials for both inbounds (LocalAuth.kt), as ConfigBuilder puts them on Xray's. */
+    fun build(server: ServerConfig, s: AppSettings, auth: LocalAuth? = null): JSONObject {
         val listen = "127.0.0.1"
-        val inbounds = JSONArray()
-            .put(JSONObject().put("type", "socks").put("tag", "socks-in").put("listen", listen).put("listen_port", s.socksPort))
-            .put(JSONObject().put("type", "http").put("tag", "http-in").put("listen", listen).put("listen_port", s.httpPort))
+        val socks = JSONObject().put("type", "socks").put("tag", "socks-in").put("listen", listen).put("listen_port", s.socksPort)
+        val http = JSONObject().put("type", "http").put("tag", "http-in").put("listen", listen).put("listen_port", s.httpPort)
+        if (auth != null) {
+            socks.put("users", JSONArray().put(JSONObject().put("username", auth.user).put("password", auth.pass)))
+            http.put("users", JSONArray().put(JSONObject().put("username", auth.user).put("password", auth.pass)))
+        }
+        val inbounds = JSONArray().put(socks).put(http)
 
         val outbounds = JSONArray()
             .put(translateOutbound(server))
