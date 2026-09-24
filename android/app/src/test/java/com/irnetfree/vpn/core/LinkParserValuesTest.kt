@@ -155,6 +155,9 @@ class LinkParserValuesTest {
         assertEquals("a+b c/é", LinkParser.pctDecode("a+b%20c%2F%C3%A9"))
         assertEquals("%zz", LinkParser.pctDecode("%zz")); assertEquals("%C3", LinkParser.pctDecode("%C3"))
         assertEquals("سرور", LinkParser.pctDecode("سرور"))
+        // only ASCII hex digits make an escape: Character.digit also takes Persian ones, and "%۵۰" became "P"
+        assertEquals("%۵۰", LinkParser.pctDecode("%۵۰"))
+        assertEquals("%٥0", LinkParser.pctDecode("%٥0"))
     }
 
     /* renderer/app.js isSubUrl: an http proxy link is a server, not a subscription. */
