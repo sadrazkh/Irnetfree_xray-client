@@ -116,3 +116,13 @@ test('both mirrors refuse a chain that lost a member, with the same words, where
     assert.ok(plan.indexOf("refuseBroken('chain:' + serverId);") < plan.indexOf('needs at least 2 servers'), label);
   }
 });
+
+/* ------------------------------ A3: the live NIC ------------------------------ */
+
+test('every connect reads the NIC again — a live tunnel keeps its old name only when the read names nothing usable', () => {
+  for (const [label, body] of Object.entries(CONNECT)) {
+    assert.doesNotMatch(body, /let name = \(tun\.active && liveDirectInterface\) \|\| null;/, `${label}: a live tunnel skips the read again`);
+    assert.match(body, /if \(settings\.tunMode\) \{\n\s*const phys = await tun\.physicalInterface\(\)\.catch\(\(\) => null\);\n\s*if \(stale\(\)\) return abandoned;\n\s*const name = \(phys && phys\.name && !isOwnTunInterface\(phys\.name\)\) \? phys\.name : \(\(tun\.active && liveDirectInterface\) \|\| null\);/,
+      `${label}: the read is unconditional, the live name only its fallback`);
+  }
+});
