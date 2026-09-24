@@ -263,6 +263,23 @@ test('win32: a late exit from a tun2socks already replaced leaves the live tunne
   } finally { h.done(); }
 });
 
+test('stop waits for tun2socks to exit, so a rebuild never meets the old XrayTun adapter', { skip: process.platform === 'darwin' }, async () => {
+  // It returned as soon as taskkill was spawned: a rebuild then started the
+  // next tun2socks while the old one still held the adapter (sing-box's stop
+  // has always waited, bounded).
+  const h = harness();
+  try {
+    await h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    const proc = h.tun.proc;
+    let gone = false;
+    setTimeout(() => { gone = true; proc.emit('exit', 1); }, 80);   // taskkill takes a moment
+    await h.tun.stop();
+    assert.equal(gone, true, 'stop() returned while the old tun2socks was still running');
+    assert.equal(h.tun.proc, null);
+    assert.equal(h.tun.active, false);
+  } finally { h.done(); }
+});
+
 test('TunManager takes onUnexpectedExit from its options; the default is a no-op', () => {
   const f = () => {};
   assert.equal(new TunManager({ onUnexpectedExit: f }).onUnexpectedExit, f);
