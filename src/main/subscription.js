@@ -219,8 +219,13 @@ function carryOver(old, fresh, said) {
   for (const k of missed) while (kept.includes(k)) kept.splice(kept.indexOf(k), 1);
   // A rename when recorded, or when the old link proves one: otherwise the
   // provider's name (which often carries the traffic left) is the current one.
-  if (recorded.includes('name')) { out.name = old.name; kept.push('name'); }
-  else if (said && norm(old.name) !== norm(said.name) && norm(old.name)) out.name = old.name;
+  // A rename proven against the old link (made by a version that recorded
+  // nothing) is recorded the first time it is carried, so later refreshes
+  // rely on the record rather than on the inference.
+  if (recorded.includes('name') || (said && norm(old.name) !== norm(said.name) && norm(old.name))) {
+    out.name = old.name;
+    kept.push('name');
+  }
   for (const k of Object.keys(old)) if (/^certPin/.test(k)) out[k] = old[k];
   delete out._edited;
   if (kept.length) out._edited = [...new Set(kept)].sort();
