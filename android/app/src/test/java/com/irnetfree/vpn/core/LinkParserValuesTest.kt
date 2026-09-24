@@ -3,6 +3,7 @@ package com.irnetfree.vpn.core
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -105,6 +106,64 @@ class LinkParserValuesTest {
         val t = LinkParser.parseLink("trojan://pa+ss%2Fw@h.example:443?sni=a.com#n")
         assertEquals("pa+ss/w", server0(t).getString("password"))
         assertEquals("pa+ss/w", server0(LinkParser.parseLink(LinkParser.buildShareLink(t))).getString("password"))
+    }
+
+    /*
+     * vmess goes through android.util.Base64, a stub off a device, so its JSON
+     * half is tested on its own: v2rayN writes `"sni": ""`, `"fp": ""`, `"net": ""`.
+     */
+    @Test fun vmessReadsEmptyFieldsAsMissing() {
+        val v = JSONObject("""{"v":"2","ps":"","add":"v.example","port":"2083","id":"U","aid":"0","scy":"","net":"",
+            "type":"","host":"cdn.example","path":"","tls":"tls","sni":"","fp":"","alpn":"","fragment":"","noise":""}""")
+        val s = LinkParser.vmessFromJson(v, "vmess://x")
+        assertEquals("v.example", s.name); assertEquals(2083, s.port); assertEquals("vmess://x", s.raw)
+        assertEquals("tcp", stream(s).getString("network"))
+        val tls = stream(s).getJSONObject("tlsSettings")
+        assertEquals("cdn.example", tls.getString("serverName")); assertEquals("chrome", tls.getString("fingerprint"))
+        assertEquals("auto", vnextUser(s).getString("security"))
+        assertFalse(s.outbound.has("_fragment")); assertFalse(s.outbound.has("_noise"))
+        val ws = LinkParser.vmessFromJson(JSONObject("""{"add":"v.example","port":443,"id":"U","net":"ws","host":"h.example","path":"","tls":"tls","sni":"s.example"}"""), "")
+        assertEquals("/", stream(ws).getJSONObject("wsSettings").getString("path"))
+        assertEquals("s.example", stream(ws).getJSONObject("tlsSettings").getString("serverName"))
+        assertEquals(443, ws.port)
+    }
+
+    /*
+     * A panel's base64 wrapped at 76 columns: the padding was counted with the
+     * newlines in, and android.util.Base64 refuses the extra '='. (The decoder
+     * is a stub here, so the normalisation is checked against java.util.Base64.)
+     */
+    @Test fun wrappedBase64IsNormalisedBeforeDecoding() {
+        val body = "vless://u@a.example:443?security=none#A\nvless://u@b.example:443?security=none#B\n"
+        val enc = java.util.Base64.getEncoder().encodeToString(body.toByteArray())
+        val wrapped = enc.chunked(76).joinToString("\r\n") + "\n"
+        val norm = LinkParser.b64Normalize(wrapped)
+        assertEquals(enc, norm)
+        assertEquals(body, String(java.util.Base64.getDecoder().decode(norm)))
+        // unpadded, URL-safe, wrapped
+        val url = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(byteArrayOf(-5, -1, -2, 0x3e, 0x3f))
+        assertEquals(0, LinkParser.b64Normalize(url.chunked(3).joinToString("\n")).length % 4)
+        assertEquals(listOf(-5, -1, -2, 0x3e, 0x3f), java.util.Base64.getDecoder().decode(LinkParser.b64Normalize(url.chunked(3).joinToString("\n"))).map { it.toInt() })
+    }
+
+    @Test fun portOfReadsLeadingDigits() {
+        assertEquals(2053, LinkParser.portOf("2053/", 443)); assertEquals(8443, LinkParser.portOf("8443", 443))
+        assertEquals(443, LinkParser.portOf("", 443)); assertEquals(443, LinkParser.portOf("x", 443)); assertEquals(443, LinkParser.portOf("0", 443))
+    }
+
+    @Test fun pctDecodeIsDecodeUriComponent() {
+        assertEquals("a+b c/é", LinkParser.pctDecode("a+b%20c%2F%C3%A9"))
+        assertEquals("%zz", LinkParser.pctDecode("%zz")); assertEquals("%C3", LinkParser.pctDecode("%C3"))
+        assertEquals("سرور", LinkParser.pctDecode("سرور"))
+    }
+
+    /* renderer/app.js isSubUrl: an http proxy link is a server, not a subscription. */
+    @Test fun anHttpProxyLinkIsNotASubscriptionUrl() {
+        assertTrue(LinkParser.isSubUrl("https://sub.example.com/abc?token=1"))
+        assertTrue(LinkParser.isSubUrl("http://sub.example.com/path"))
+        assertFalse(LinkParser.isSubUrl("http://user:pass@1.2.3.4:8080#office"))
+        assertFalse(LinkParser.isSubUrl("http://1.2.3.4:3128"))
+        assertFalse(LinkParser.isSubUrl("vless://u@h:443"))
     }
 
     /* A name with a space goes out as %20 — a '+' would now come back as a '+'. */
