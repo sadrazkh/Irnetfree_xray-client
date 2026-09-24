@@ -31,23 +31,28 @@ function signalState(pid) {
   catch (e) { return e && e.code === 'EPERM' ? 'other' : 'gone'; }
 }
 
-/** `{ start, command }` of a running pid, or null when `ps` has nothing to say. */
-async function processIdentity(pid) {
+/**
+ * `{ start }` of a running pid — plus `command` when asked for (a second `ps`,
+ * needed only for a journal without a start time) — or null when `ps` has
+ * nothing to say.
+ */
+async function processIdentity(pid, { command = false } = {}) {
   try {
     const opts = { timeout: 3000 };
     const start = (await platform.run('ps', ['-ww', '-p', String(pid), '-o', 'lstart='], opts)).trim();
-    const command = (await platform.run('ps', ['-ww', '-p', String(pid), '-o', 'command='], opts)).trim();
-    return start ? { start, command } : null;
+    if (!start) return null;
+    if (!command) return { start };
+    return { start, command: (await platform.run('ps', ['-ww', '-p', String(pid), '-o', 'command='], opts)).trim() };
   } catch { return null; }
 }
 
 const defaultProbe = { signal: signalState, identity: processIdentity };
 
-async function identityOf(probe, pid) {
-  try { return (await probe.identity(pid)) || null; } catch { return null; }
+async function identityOf(probe, pid, opts) {
+  try { return (await probe.identity(pid, opts)) || null; } catch { return null; }
 }
 
-/** The journal fields that name THIS process as the owner. */
+/** The journal fields that name THIS process as the owner (one `ps` per connect). */
 async function ownerRecord(probe = defaultProbe) {
   const id = await identityOf(probe, process.pid);
   return { ownerPid: process.pid, ownerStart: (id && id.start) || null };
@@ -58,9 +63,10 @@ async function ownerAlive(st, probe = defaultProbe, execPath = process.execPath)
   const pid = st && st.ownerPid;
   if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return false;
   if (probe.signal(pid) !== 'ours') return false;
-  const id = await identityOf(probe, pid);
+  const hasStart = typeof st.ownerStart === 'string' && !!st.ownerStart;
+  const id = await identityOf(probe, pid, { command: !hasStart });
   if (!id) return false;
-  if (typeof st.ownerStart === 'string' && st.ownerStart) return id.start === st.ownerStart;
+  if (hasStart) return id.start === st.ownerStart;
   const command = String(id.command || '');
   return !!execPath && (command === execPath || command.startsWith(execPath + ' '));
 }
