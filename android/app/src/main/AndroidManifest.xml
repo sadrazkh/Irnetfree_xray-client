@@ -9,6 +9,15 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
+    <!-- Package visibility (Android 11+): without this the per-app picker sees
+         almost none of the user's apps. Launchable apps are the ones to pick. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <application
         android:name=".IRApp"
         android:allowBackup="true"
@@ -42,6 +51,11 @@
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
+            <!-- Always-on VPN starts the service with the action above, at boot
+                 too; onStartCommand connects the stored selection for it. -->
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="true" />
         </service>
     </application>
 </manifest>

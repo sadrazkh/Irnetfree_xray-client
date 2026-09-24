@@ -1,6 +1,7 @@
 package com.irnetfree.vpn.vpn
 
 import android.content.Context
+import com.irnetfree.vpn.core.LocalProxyAuth
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.Store
 import com.irnetfree.vpn.core.Subscriptions
@@ -41,9 +42,13 @@ object SubFetch {
     data class Outcome(val result: Subscriptions.Result, val via: String)
 
     fun fetch(ctx: Context, store: Store, url: String, log: (String) -> Unit = {}): Outcome {
-        // 1. The tunnel, if it is up: its inbound is already listening.
+        // 1. The tunnel, if it is up: its inbound is already listening. It asks
+        //    for the session's credentials, which java.net's SOCKS client gets
+        //    from LocalProxyAuth — for that port, the one the tunnel really
+        //    runs on even if Settings has changed since.
         if (VpnState.state.value == ConnState.CONNECTED) {
-            return tagged("the tunnel") { Outcome(Subscriptions.fetch(url, store.settings.socksPort), "the tunnel") }
+            val port = LocalProxyAuth.activePort ?: store.settings.socksPort
+            return tagged("the tunnel") { Outcome(Subscriptions.fetch(url, port), "the tunnel") }
         }
 
         // 2. A throwaway core on a free port. Not being connected is the normal
@@ -53,7 +58,7 @@ object SubFetch {
             log("Subscription: not connected and no config to borrow a core from — trying the network directly")
         } else {
             log("Subscription: not connected — fetching through a temporary ${server.name} core")
-            val handle = XrayTester.start(ctx, server)
+            val handle = XrayTester.start(ctx, server, store.settings)
             if (handle == null) {
                 log("Subscription: the temporary ${server.name} core did not start — trying the network directly")
             } else {
