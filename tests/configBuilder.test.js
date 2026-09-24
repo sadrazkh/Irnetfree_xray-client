@@ -13,7 +13,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts } = require('../src/main/configBuilder');
 const {
   server, settings, ruleTags, outboundTagged, vlessWithMarkers,
   VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK, WG_CORP
@@ -1535,19 +1535,68 @@ test('pool: the primary and every entry are pinned', () => {
   assert.deepEqual(sockoptOf(c, 'out-chain-c1'), { dialerProxy: 'out-chain-c1-h0' });
 });
 
-test('anti-DPI and TUN binding: the pin sits beside the dialer and the interface, the dpi dialer gets the address', () => {
+test('anti-DPI and TUN binding: the pin sits beside the dialer and the interface — and the dpi dialer resolves through xray’s DNS too', () => {
   const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
-  // the lookup happens BEFORE the dialerProxy redirect (dialer.go), so the
-  // freedom dialer is handed an address — without the pin it asked the OS
+  // The lookup happens BEFORE the dialerProxy redirect (dialer.go), so the
+  // freedom dialer is normally handed an address. When it is handed the NAME
+  // instead (a lookup that failed, a core that resolves later), an AsIs dialer
+  // asked the OS — the very recursion the pin exists for. Whichever of the two
+  // resolves first, the answer comes from dns.hosts.
   const c = buildConfig(single(frag), settings(PINS));
   assert.deepEqual(sockoptOf(c, 'proxy'), { dialerProxy: 'dpi-1', domainStrategy: 'UseIPv4' });
   assert.deepEqual(sockoptOf(c, 'dpi-1'), {});
-  assert.equal(outboundTagged(c, 'dpi-1').settings.domainStrategy, 'AsIs');
+  assert.equal(outboundTagged(c, 'dpi-1').settings.domainStrategy, 'UseIPv4');
+  assert.deepEqual(outboundTagged(c, 'dpi-1').settings.fragment, { packets: 'tlshello', length: '100-200', interval: '10-20' }, 'the dialer is otherwise the same');
+  const v6 = buildConfig(single(frag), settings(Object.assign({ ipv6: true }, PINS)));
+  assert.equal(outboundTagged(v6, 'dpi-1').settings.domainStrategy, 'UseIP');
   const bound = buildConfig(single(frag), managed(Object.assign({}, PINS, BOUND)));
   assert.deepEqual(sockoptOf(bound, 'proxy'), { dialerProxy: 'dpi-1', domainStrategy: 'UseIPv4' });
   assert.deepEqual(sockoptOf(bound, 'dpi-1'), { interface: 'Wi-Fi' });
+  assert.equal(outboundTagged(bound, 'dpi-1').settings.domainStrategy, 'UseIPv4');
   const plain = buildConfig(single(), managed(Object.assign({}, PINS, BOUND)));
   assert.deepEqual(sockoptOf(plain, 'proxy'), { domainStrategy: 'UseIPv4', interface: 'Wi-Fi' });
+  // nothing pinned: the dialer asks as it always did
+  assert.equal(outboundTagged(buildConfig(single(frag), settings()), 'dpi-1').settings.domainStrategy, 'AsIs');
+});
+
+test('a pinned and an unpinned outbound with the same anti-DPI settings get a dialer each', () => {
+  // One shared dialer with a strategy would send the UNPINNED name to xray's
+  // own resolvers — which sit behind the very proxy it is dialling.
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const other = vlessWithMarkers('sv-other', { _fragment: 'tlshello,100-200,10-20' });
+  other.outbound.settings.vnext[0].address = 'c.example.com';   // nothing resolved it
+  const c = buildConfig(advancedPlan({
+    serversById: { 'sv-frag': frag, 'sv-other': other },
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-other' }],
+    def: 'sv-frag'
+  }), settings(PINS));
+  const pinned = sockoptOf(c, 'out-sv-frag');
+  const unpinned = sockoptOf(c, 'out-sv-other');
+  assert.equal(pinned.domainStrategy, 'UseIPv4');
+  assert.equal('domainStrategy' in unpinned, false);
+  assert.notEqual(pinned.dialerProxy, unpinned.dialerProxy);
+  assert.equal(outboundTagged(c, pinned.dialerProxy).settings.domainStrategy, 'UseIPv4');
+  assert.equal(outboundTagged(c, unpinned.dialerProxy).settings.domainStrategy, 'AsIs');
+  assert.equal(c.outbounds.filter(o => /^dpi-/.test(o.tag)).length, 2);
+  // two pinned ones still share one
+  const both = buildConfig(advancedPlan({
+    serversById: { 'sv-frag': frag, 'sv-other': other },
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-other' }],
+    def: 'sv-frag'
+  }), settings({ entryHostIps: { 'a.example.com': ['203.0.113.10'], 'c.example.com': ['203.0.113.30'] } }));
+  assert.equal(sockoptOf(both, 'out-sv-frag').dialerProxy, sockoptOf(both, 'out-sv-other').dialerProxy);
+  assert.equal(both.outbounds.filter(o => /^dpi-/.test(o.tag)).length, 1);
+});
+
+test('withHosts: the pins join whatever hosts the DNS plan carries — they never replace them, and win for their own names', () => {
+  const dns = { tag: 'dns-internal', hosts: { 'corp.local': ['10.0.0.5'], 'a.example.com': ['192.0.2.1'] }, servers: ['1.1.1.1'] };
+  const out = withHosts(dns, { 'a.example.com': ['203.0.113.10'] });
+  assert.deepEqual(out.hosts, { 'corp.local': ['10.0.0.5'], 'a.example.com': ['203.0.113.10'] });
+  assert.deepEqual(Object.keys(out), ['hosts', 'tag', 'servers'], 'hosts first, as before');
+  assert.deepEqual(dns.hosts, { 'corp.local': ['10.0.0.5'], 'a.example.com': ['192.0.2.1'] }, 'the plan itself is not written to');
+  assert.equal(withHosts(dns, null), dns, 'nothing pinned: the plan as it is');
+  assert.deepEqual(withHosts({ servers: ['1.1.1.1'] }, { 'a.example.com': ['203.0.113.10'] }),
+    { hosts: { 'a.example.com': ['203.0.113.10'] }, servers: ['1.1.1.1'] });
 });
 
 test('an address, a name nothing resolved, and a WireGuard are left exactly as they were', () => {
