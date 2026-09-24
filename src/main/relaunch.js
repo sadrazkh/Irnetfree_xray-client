@@ -21,6 +21,10 @@ const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
 /**
  * `cwd`: the copy starts where this one runs — an elevated PowerShell starts in
  * System32, and the dev relaunch (`electron .`) resolves '.' against the cwd.
+ * Only when the elevated helper can see it, though: a mapped drive belongs to
+ * the user's own logon session, the elevated token has no such drive, and a
+ * -WorkingDirectory there fails the start — no copy, and this one already
+ * gone. So the helper asks Test-Path first and starts without it otherwise.
  * An empty argument goes as a literal "" — Start-Process refuses an empty
  * element, and the other side's command-line parser reads "" as one.
  */
@@ -28,9 +32,12 @@ function elevatedRelaunchScript({ exe, args = [], pid, cwd = null, waitSeconds =
   const id = Number(pid);
   if (!Number.isInteger(id) || id <= 0) throw new Error('elevated relaunch: no pid to wait for');
   const argv = args.map(a => (String(a) === '' ? '""' : String(a)));
-  const start = `Start-Process -FilePath ${psq(exe)}`
-    + (cwd ? ` -WorkingDirectory ${psq(cwd)}` : '')
+  const startIn = (dir) => `Start-Process -FilePath ${psq(exe)}`
+    + (dir ? ` -WorkingDirectory ${psq(dir)}` : '')
     + (argv.length ? ` -ArgumentList ${argv.map(psq).join(',')}` : '');
+  const start = cwd
+    ? `if (Test-Path -LiteralPath ${psq(cwd)}) { ${startIn(cwd)} } else { ${startIn(null)} }`
+    : startIn(null);
   const inner = `Wait-Process -Id ${id} -Timeout ${Number(waitSeconds) || 60} -ErrorAction SilentlyContinue; ${start}`;
   const encoded = Buffer.from(inner, 'utf16le').toString('base64');
   return `Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','${encoded}' -ErrorAction Stop`;

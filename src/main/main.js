@@ -2207,9 +2207,11 @@ function registerIpc() {
     // 1) The UAC prompt, before anything is torn down (see relaunch.js): an
     //    elevated helper that waits for THIS process to exit, then starts the
     //    copy. A cancelled prompt fails here, and the app — connected or not —
-    //    simply keeps running as it was.
+    //    simply keeps running as it was. Only the dev relaunch (`electron .`)
+    //    needs this instance's working directory; an installed build starts
+    //    from its own path and passes none.
     try {
-      await runElevatedRelaunch({ exe: process.execPath, args: process.argv.slice(1), pid: process.pid, cwd: process.cwd() });
+      await runElevatedRelaunch({ exe: process.execPath, args: process.argv.slice(1), pid: process.pid, cwd: app.isPackaged ? null : process.cwd() });
     } catch (e) {
       send('log', { line: 'Relaunch as administrator did not happen (' + e.message + ') — IRNetFree keeps running as it is', level: 'warn' });
       return { ok: false, error: null };

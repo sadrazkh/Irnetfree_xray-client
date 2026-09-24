@@ -341,7 +341,9 @@ test('the elevated relaunch tears nothing down until the UAC prompt was accepted
   assert.ok(ask !== -1 && down !== -1 && ask < down, relaunch);
   assert.match(relaunch, /catch \(e\) \{[\s\S]*return \{ ok: false, error: /, 'a cancelled prompt leaves this instance running, connected, and says so');
   assert.doesNotMatch(relaunch, /spawn\('powershell'/, 'the copy is started by the elevated helper once this instance is gone');
-  assert.match(relaunch, /runElevatedRelaunch\(\{[^}]*cwd: process\.cwd\(\) \}\)/, 'and in this instance’s working directory');
+  // in this instance’s working directory — which only the dev relaunch (`electron .`) needs;
+  // an installed build passes none (a mapped drive is invisible to the elevated token)
+  assert.match(relaunch, /runElevatedRelaunch\(\{[^}]*cwd: app\.isPackaged \? null : process\.cwd\(\) \}\)/);
 });
 
 test('the window says a DROP when it was one, and says the kill switch closed the internet once', () => {
