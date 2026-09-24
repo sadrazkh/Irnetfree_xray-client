@@ -80,11 +80,37 @@ const SPLIT_ROUTES6 = ['::/1', '8000::/1'];
  * netsh, which sees disconnected interfaces too; and each one is journaled in
  * userData the moment it exists, and whatever a previous process left in that
  * journal is removed once per launch (recoverRoutesWindows).
+ *
+ * The journal forgets a route only once it is gone: a record whose delete
+ * failed stays (the route may well still be there — a sweep or a teardown that
+ * was refused is retried by the next launch), and a launch that is not elevated
+ * runs no sweep at all. A record from ANOTHER boot is dropped without netsh:
+ * active routes die at a reboot, and an identical route laid since belongs to
+ * someone else. Each record is stamped with its boot (see bootNow).
  */
 const ROUTE_JOURNAL = 'tun2socks-routes.json';
 const routeKey = (r) => `${r.ip}|${r.nextHop}|${r.ifIndex}`;
 const bypassDeleteArgs = (r) => ['interface', 'ipv4', 'delete', 'route', `prefix=${r.ip}/32`,
   `interface=${r.ifIndex}`, `nexthop=${r.nextHop}`, 'store=active'];
+
+/**
+ * This boot, as a record is stamped with it: the uptime (it starts from zero
+ * at every boot and only grows within one — sleep included on Windows) and the
+ * wall-clock time the machine booted.
+ */
+function bootNow() {
+  const up = os.uptime();
+  return { up, boot: Date.now() - up * 1000 };
+}
+// The wall-clock boot time moves when the clock is corrected; a reboot moves it
+// by at least the old boot's whole run plus the restart.
+const BOOT_SLACK_MS = 5 * 60 * 1000;
+/** Was record `r` laid in the boot we are in? One with no stamp is taken to be (it is swept as before). */
+function sameBoot(r, now = bootNow()) {
+  if (typeof r.up !== 'number' || typeof r.boot !== 'number') return true;
+  if (now.up < r.up) return false;
+  return Math.abs(now.boot - r.boot) < BOOT_SLACK_MS;
+}
 
 function readRouteJournal(userData) {
   if (!userData) return [];
@@ -95,12 +121,17 @@ function readRouteJournal(userData) {
   } catch { return []; }
 }
 
-/** Synchronous read-modify-write: no await in between, so two sessions of one process cannot lose each other's entries. */
+/**
+ * Synchronous read-modify-write: no await in between, so two sessions of one
+ * process cannot lose each other's entries. What is added is stamped with
+ * this boot.
+ */
 function updateRouteJournal(userData, add = [], remove = []) {
   if (!userData) return;
   const gone = new Set(remove.map(routeKey));
   const routes = readRouteJournal(userData).filter(r => !gone.has(routeKey(r)));
-  for (const r of add) if (!routes.some(x => routeKey(x) === routeKey(r))) routes.push(r);
+  const stamp = add.length ? bootNow() : null;
+  for (const r of add) if (!routes.some(x => routeKey(x) === routeKey(r))) routes.push(Object.assign({}, r, stamp));
   const file = path.join(userData, ROUTE_JOURNAL);
   if (!routes.length) { try { fs.unlinkSync(file); } catch {} return; }
   fs.writeFileSync(file + '.tmp', JSON.stringify({ version: 1, routes }, null, 2));
@@ -110,16 +141,29 @@ function updateRouteJournal(userData, add = [], remove = []) {
 /** One sweep per userData per process: the journal is read before this process lays anything. */
 const routeSweeps = new Map();
 
-function recoverRoutesWindows(userData, onLog = () => {}) {
+/**
+ * Remove what a previous process of this boot journaled and never removed.
+ * `elevated` false (a netsh delete would be refused): nothing is run and
+ * nothing forgotten, and a later call — the elevated TUN connect — sweeps.
+ */
+function recoverRoutesWindows(userData, onLog = () => {}, elevated = true) {
   if (!userData) return Promise.resolve(0);
   const key = path.resolve(userData);
   if (!routeSweeps.has(key)) {
+    if (!elevated) return Promise.resolve(0);
     const left = readRouteJournal(userData);
     routeSweeps.set(key, (async () => {
-      for (const r of left) await run('netsh', bypassDeleteArgs(r)).catch(() => {});
-      try { updateRouteJournal(userData, [], left); } catch {}
-      if (left.length) onLog(`Removed ${left.length} bypass routes a previous session left behind`, 'warn');
-      return left.length;
+      const now = bootNow();
+      const stale = left.filter(r => !sameBoot(r, now));
+      const removed = [];
+      for (const r of left) {
+        if (stale.includes(r)) continue;
+        await run('netsh', bypassDeleteArgs(r)).then(() => removed.push(r), () => {});
+      }
+      try { updateRouteJournal(userData, [], [...stale, ...removed]); } catch {}
+      if (removed.length) onLog(`Removed ${removed.length} bypass routes a previous session left behind`, 'warn');
+      if (removed.length < left.length - stale.length) onLog(`${left.length - stale.length - removed.length} bypass routes a previous session left could not be removed — kept to retry at the next launch`, 'warn');
+      return removed.length;
     })());
   }
   return routeSweeps.get(key);
@@ -204,8 +248,8 @@ class TunManager {
   /** Discover the current default gateway + interface index (Windows). */
   getDefaultGatewayWin() { return platform.getDefaultGatewayWin(); }
 
-  /** Remove the bypass routes a previous process journaled and never removed (once per launch). */
-  recoverRoutesWindows() { return recoverRoutesWindows(this.userData, this.onLog); }
+  /** Remove the bypass routes a previous process journaled and never removed (once per launch, elevated). */
+  recoverRoutesWindows() { return recoverRoutesWindows(this.userData, this.onLog, this.isElevated()); }
 
   /** Get the interface index of our TUN adapter once it exists. */
   getTunIfIndex() { return platform.getTunIfIndex(ADAPTER); }
@@ -435,14 +479,16 @@ class TunManager {
       await run('route', ['delete', net, 'mask', '128.0.0.0', TUN_GW]).catch(() => {});
     }
     await this.cleanupIpv6Windows();
-    // exactly the routes we laid — see ROUTE_JOURNAL for why not `route delete <ip>`
+    // exactly the routes we laid — see ROUTE_JOURNAL for why not `route delete <ip>`;
+    // one whose delete failed stays journaled for the next launch's sweep
     const laid = this.bypassRoutes;
     this.bypassRoutes = [];
     this.bypassIps = [];
+    const removed = [];
     for (const r of laid) {
-      await run('netsh', bypassDeleteArgs(r)).catch(() => {});
+      await run('netsh', bypassDeleteArgs(r)).then(() => removed.push(r), () => {});
     }
-    if (laid.length) { try { updateRouteJournal(this.userData, [], laid); } catch {} }
+    if (removed.length) { try { updateRouteJournal(this.userData, [], removed); } catch {} }
     this.tunIfIndex = null;
   }
 
@@ -860,10 +906,11 @@ class TunManager {
           execFileSync('netsh', ['interface', 'ipv6', 'delete', 'route', `prefix=${net}`, `interface=${ADAPTER}`, `nexthop=${TUN_GW6}`], { windowsHide: true });
         } catch {}
       }
+      const removed = [];
       for (const r of this.bypassRoutes) {
-        try { execFileSync('netsh', bypassDeleteArgs(r), { windowsHide: true }); } catch {}
+        try { execFileSync('netsh', bypassDeleteArgs(r), { windowsHide: true }); removed.push(r); } catch {}
       }
-      if (this.bypassRoutes.length) { try { updateRouteJournal(this.userData, [], this.bypassRoutes); } catch {} }
+      if (removed.length) { try { updateRouteJournal(this.userData, [], removed); } catch {} }
       return;
     }
     // macOS/Linux: only attempt synchronous teardown when already root (we
