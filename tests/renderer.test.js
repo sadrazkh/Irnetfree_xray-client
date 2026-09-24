@@ -261,3 +261,83 @@ test('the traffic path reflows instead of scrolling, and its caption cannot esca
   const cap = rule('.path-cap');
   assert.doesNotMatch(cap, /position:\s*absolute/);
 });
+
+/* --------------------------- stored values in the markup --------------------------- */
+
+/** Every `${…}` on one line, braces balanced. */
+function interpolations(line) {
+  const out = [];
+  for (let i = line.indexOf('${'); i !== -1; i = line.indexOf('${', i + 2)) {
+    let depth = 0, j = i + 1;
+    for (; j < line.length; j++) {
+      if (line[j] === '{') depth++;
+      else if (line[j] === '}' && --depth === 0) break;
+    }
+    out.push(line.slice(i + 2, j).trim());
+  }
+  return out;
+}
+
+// A backup is a file someone can hand you; servers, chains, pool entries,
+// subscriptions and settings come out of it and are drawn with innerHTML. So a
+// line that builds markup may interpolate a record's field only through
+// escapeHtml() — or through a helper that escapes (or only ever yields
+// numbers), or as the condition of a ternary between two literals.
+test('no stored value reaches innerHTML unescaped', () => {
+  const SAFE_CALL = /^(escapeHtml|usageLabel|subUsageHtml|processOptions|fmtBytes|fmtSpeed|fmtDuration|fmtMs|t)\(/;
+  const LITERAL_TERNARY = /^[^?`]+\?\s*('[^']*'|"[^"]*")\s*:\s*('[^']*'|"[^"]*")$/;
+  const RECORD = /(^|[^.\w$])(s|sub|chain|entry|info|server|srv|c|d|e|g|p|u)\.\w|^(id|value)$/;
+  let seen = 0;
+  const bad = [];
+  APP.split(/\r?\n/).forEach((line, n) => {
+    if (!/<\/?[a-z]/i.test(line)) return;
+    for (const e of interpolations(line)) {
+      seen++;
+      if (SAFE_CALL.test(e) || LITERAL_TERNARY.test(e)) continue;
+      if (RECORD.test(e)) bad.push(`app.js:${n + 1}: \${${e}}`);
+    }
+  });
+  assert.ok(seen > 60, `expected to scan the markup builders, saw ${seen} interpolations`);
+  assert.deepEqual(bad, [], 'escape these with escapeHtml()');
+});
+
+test('escapeHtml covers every character that can leave an attribute or a text node', () => {
+  const escapeHtml = appFunction('escapeHtml');
+  assert.equal(escapeHtml(`"><img src=x onerror='a&b'>`), '&quot;&gt;&lt;img src=x onerror=&#39;a&amp;b&#39;&gt;');
+  assert.equal(escapeHtml(443), '443');
+});
+
+/* --------------------------- the edit form's transports --------------------------- */
+
+/** A top-level `function name(…) {…}` from app.js, compiled on its own (it must not need the DOM). */
+function appFunction(name) {
+  const start = APP.indexOf(`\nfunction ${name}(`);
+  assert.ok(start > -1, `app.js has no function ${name}`);
+  let depth = 0, j = APP.indexOf('{', start);
+  for (; j < APP.length; j++) {
+    if (APP[j] === '{') depth++;
+    else if (APP[j] === '}' && --depth === 0) break;
+  }
+  return new Function(`${APP.slice(start, j + 1)}; return ${name};`)();
+}
+
+test('the edit form offers every transport the parser builds, httpupgrade included', () => {
+  const sel = HTML.match(/<select id="edNetwork"[^>]*>([\s\S]*?)<\/select>/);
+  assert.ok(sel, 'no #edNetwork select');
+  const opts = [...sel[1].matchAll(/value="([^"]+)"/g)].map((m) => m[1]);
+  for (const n of ['tcp', 'ws', 'grpc', 'h2', 'xhttp', 'kcp', 'httpupgrade']) assert.ok(opts.includes(n), `no <option> for ${n}`);
+  const front = APP.match(/const frontable = \[([^\]]+)\]/);
+  assert.ok(front && /'httpupgrade'/.test(front[1]), 'httpupgrade rides a CDN like ws: its Host field must show');
+});
+
+test('the edit form reads an httpupgrade path and Host, and shows a stored raw server as tcp', () => {
+  const readServerFields = appFunction('readServerFields');
+  const rec = (streamSettings) => ({
+    protocol: 'vless', name: 'x', address: 'a.example.com', port: 443,
+    outbound: { protocol: 'vless', settings: { vnext: [{ users: [{ id: 'u' }] }] }, streamSettings }
+  });
+  const hu = readServerFields(rec({ network: 'httpupgrade', security: 'tls', httpupgradeSettings: { path: '/up', host: 'cdn.example.com' }, tlsSettings: { serverName: 'cdn.example.com' } }));
+  assert.deepEqual([hu.network, hu.path, hu.host], ['httpupgrade', '/up', 'cdn.example.com']);
+  const raw = readServerFields(rec({ network: 'raw', security: 'none', tcpSettings: { header: { type: 'http', request: { path: ['/a'], headers: { Host: ['t.com'] } } } } }));
+  assert.deepEqual([raw.network, raw.path, raw.host], ['tcp', '/a', 't.com']);
+});
