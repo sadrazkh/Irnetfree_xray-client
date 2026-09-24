@@ -135,6 +135,19 @@ test('the synchronous teardown runs once, says it is quitting first, and covers 
   assert.match(MAIN, /process\.on\('exit', \(\) => teardownSync\('exit'\)\);/);
 });
 
+/* ------------------------- stale activeServerId at launch ------------------------- */
+
+test('a launch clears the activeServerId a crash or a kill left, and connect-on-launch still has lastServerId', () => {
+  const clear = WHEN_READY.indexOf("store.set('activeServerId', null)");
+  assert.notEqual(clear, -1, 'a new process has no live connection; the tray marked it and a network change "recovered" it');
+  assert.ok(WHEN_READY.indexOf('new Store(') < clear);
+  for (const later of ['registerIpc()', 'createTray()', 'createWindow()']) {
+    assert.ok(clear < WHEN_READY.indexOf(later), `${later} must already see it cleared`);
+  }
+  assert.match(WHEN_READY, /const lastId = store\.get\('lastServerId', null\);/, 'connect-on-launch reads lastServerId');
+});
+
+
 /* ------------------------- W5: a connection that drops ------------------------- */
 
 /** The drop handler's source — read per test, so a missing one fails that test, not the file. */

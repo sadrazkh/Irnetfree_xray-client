@@ -2621,6 +2621,11 @@ app.whenReady().then(() => {
 
   migrateServers();
   migrateSettingsStore();
+  // A new process has no live connection. An activeServerId still in the store
+  // is what a crash or a kill left: the tray marked it "●", and a network change
+  // at launch would "recover" a connection nobody asked for. Connect-on-launch
+  // reads lastServerId, which stays.
+  if (store.get('activeServerId', null)) store.set('activeServerId', null);
   // Lifetime traffic per config, in its own small file (see the declaration).
   usageStore = new Store(path.join(dir, 'usage.json'), { totals: {} });
   usage = new UsageMeter({ totals: usageStore.get('totals', {}) });
