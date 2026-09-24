@@ -627,11 +627,17 @@ test('buildTestConfig: single server on a throwaway socks port', () => {
     settings: { auth: 'noauth', udp: false }
   });
   assert.deepEqual(c.outbounds.map(o => o.tag), ['proxy', 'direct']);
+  assert.deepEqual(c.routing, { rules: [{ type: 'field', inboundTag: ['socks-in'], outboundTag: 'proxy' }] });
 });
 
 test('buildTestConfig: a chain target is measured end to end', () => {
   const c = buildTestConfig([VLESS_WS_TLS, TROJAN_TCP_TLS], 47124);
   assert.deepEqual(c.outbounds.map(o => o.tag), ['proxy-h0', 'proxy', 'direct']);
+  // With no routing the core sends everything to the FIRST outbound — the
+  // entry hop alone — so a chain with a dead exit measured green. The test
+  // inbound goes to the exit, which dials through every hop before it.
+  assert.deepEqual(c.routing, { rules: [{ type: 'field', inboundTag: ['socks-in'], outboundTag: 'proxy' }] });
+  assert.equal(outboundTagged(c, 'proxy').streamSettings.sockopt.dialerProxy, 'proxy-h0');
 });
 
 test('buildTestConfig: the fragment dialer is applied so the ping matches reality', () => {

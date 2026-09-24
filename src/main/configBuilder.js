@@ -773,7 +773,10 @@ function buildTestConfig(target, socksPort) {
       protocol: 'socks',
       settings: { auth: 'noauth', udp: false }
     }],
-    outbounds
+    outbounds,
+    // Unrouted traffic goes to the FIRST outbound — for a chain the entry hop
+    // alone, so a dead exit measured green. Route the inbound to the exit.
+    routing: { rules: [{ type: 'field', inboundTag: ['socks-in'], outboundTag: 'proxy' }] }
   };
 }
 
