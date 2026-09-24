@@ -51,6 +51,24 @@ function run(cmd, args, options = {}) {
   });
 }
 
+/**
+ * The argv for every PowerShell script the app runs.
+ *
+ * Windows PowerShell 5.1 writes REDIRECTED stdout in the console's OEM code
+ * page, and everything here decodes it as UTF-8 — so an adapter someone renamed
+ * "اترنت", or any adapter on a Chinese or Russian Windows, came back as "?????".
+ * xray was then bound to an interface that does not exist (TUN "connected",
+ * nothing passing), and `?` is a wildcard to `-InterfaceAlias`, so the leak
+ * guard's override hit "Wi-Fi" as well. The output is switched to UTF-8 first.
+ * That line travels as its own argument ahead of the script — powershell.exe
+ * joins everything after -Command with a space — so the script stays one
+ * untouched string; the try/catch lets a process with no console still run.
+ */
+const PS_UTF8 = 'try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {};';
+function psArgs(script) {
+  return ['-NoProfile', '-NonInteractive', '-Command', PS_UTF8, script];
+}
+
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /** Single-quote a value for bash. */
@@ -108,7 +126,7 @@ async function resolveServerIps(serverAddress, opts = {}) {
 async function getDefaultGatewayWin() {
   const ps = "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1; " +
     "Write-Output ($r.NextHop + '|' + $r.InterfaceIndex)";
-  const out = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
+  const out = (await run('powershell', psArgs(ps))).trim();
   const [nextHop, ifIndex] = out.split('|');
   return { nextHop: nextHop && nextHop.trim(), ifIndex: ifIndex && ifIndex.trim() };
 }
@@ -116,7 +134,7 @@ async function getDefaultGatewayWin() {
 /** Get the interface index of a TUN adapter once it exists (Windows). */
 async function getTunIfIndex(name) {
   const ps = `(Get-NetAdapter -Name '${name}' -ErrorAction SilentlyContinue).ifIndex`;
-  const out = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
+  const out = (await run('powershell', psArgs(ps))).trim();
   return out ? out.split(/\s+/)[0].trim() : null;
 }
 
@@ -126,7 +144,7 @@ async function waitForAdapter(name, timeout) {
   while (Date.now() < deadline) {
     try {
       const ps = `(Get-NetAdapter -Name '${name}' -ErrorAction SilentlyContinue).Status`;
-      const out = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
+      const out = (await run('powershell', psArgs(ps))).trim();
       if (out && /Up/i.test(out)) return true;
     } catch {}
     await delay(400);
@@ -200,7 +218,7 @@ async function physicalInterface(plat = os.platform()) {
       const idx = String(gw.ifIndex || '').replace(/\D/g, '');
       if (!idx) return { name: null, ifIndex: null, gateway: gw.nextHop || null };
       const ps = `(Get-NetAdapter -InterfaceIndex ${idx} -ErrorAction SilentlyContinue).Name`;
-      const name = (await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])).trim();
+      const name = (await run('powershell', psArgs(ps))).trim();
       return { name: name || null, ifIndex: idx, gateway: gw.nextHop || null };
     }
     if (plat === 'darwin') {
@@ -220,7 +238,7 @@ async function physicalInterface(plat = os.platform()) {
 
 module.exports = {
   TUN2SOCKS_ADAPTER, SINGBOX_ADAPTER,
-  isOwnTunInterface, run, delay, sh, isElevated, resolveServerIps,
+  isOwnTunInterface, run, psArgs, delay, sh, isElevated, resolveServerIps,
   getDefaultGatewayWin, getTunIfIndex, waitForAdapter, runScriptPrivileged,
   getDefaultRouteMac, serviceForDeviceMac, getServiceDnsMac, physicalInterface
 };
