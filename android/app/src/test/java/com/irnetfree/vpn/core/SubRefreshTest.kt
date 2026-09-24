@@ -71,6 +71,64 @@ class SubRefreshTest {
         assertEquals("tlshello,100-200,10-20", out.outbound.getString("_fragment")); assertEquals("random", out.outbound.getString("_noise"))
     }
 
+    /*
+     * `fragment=`, `noise=` and `engine=` come FROM THE LINK as well, and they
+     * are what a panel retunes when the DPI changes. Only a value the user set
+     * themselves — one that differs from what the old server's own link gives —
+     * may outlive a refresh.
+     */
+    private fun tuned(host: String, name: String, frag: String?, engine: String? = null) =
+        "vless://u-$host@$host:443?type=tcp&security=tls&sni=$host" +
+            (frag?.let { "&fragment=" + it.replace(",", "%2C") } ?: "") + (engine?.let { "&engine=$it" } ?: "") + "#$name"
+
+    @Test fun aPanelThatRetunesTheFragmentIsFollowed() {
+        val old = parse(tuned("a.example", "A", "tlshello,100-200,10-20"))
+        val out = SubRefresh.merge(listOf(old), listOf(LinkParser.parseLink(tuned("a.example", "A", "tlshello,1-3,1-2"))), sub.id).servers[0]
+        assertEquals(old.id, out.id)
+        assertEquals("tlshello,1-3,1-2", out.outbound.getString("_fragment"))
+        // a panel that drops it is followed too
+        val gone = SubRefresh.merge(listOf(old), listOf(LinkParser.parseLink(tuned("a.example", "A", null))), sub.id).servers[0]
+        assertEquals(old.id, gone.id)
+        assertFalse(gone.outbound.has("_fragment"))
+    }
+
+    @Test fun aFragmentTheUserSetWinsOverThePanels() {
+        val base = parse(tuned("a.example", "A", "tlshello,100-200,10-20"))
+        val mine = base.copy(outbound = org.json.JSONObject(base.outbound.toString()).put("_fragment", "1-3,5-10,1-1"))
+        val fresh = listOf(LinkParser.parseLink(tuned("a.example", "A", "tlshello,1-3,1-2")))
+        assertEquals("1-3,5-10,1-1", SubRefresh.merge(listOf(mine), fresh, sub.id).servers[0].outbound.getString("_fragment"))
+        // cleared by the user: it stays cleared
+        val cleared = base.copy(outbound = org.json.JSONObject(base.outbound.toString()).also { it.remove("_fragment") })
+        assertFalse(SubRefresh.merge(listOf(cleared), fresh, sub.id).servers[0].outbound.has("_fragment"))
+    }
+
+    @Test fun theCoreFollowsTheSameRule() {
+        val old = parse(tuned("a.example", "A", null, engine = "xray-pattn"))
+        fun refreshTo(o: ServerConfig, engine: String?) = SubRefresh.merge(listOf(o), listOf(LinkParser.parseLink(tuned("a.example", "A", null, engine))), sub.id).servers[0]
+        assertEquals("sing-box", refreshTo(old, "sing-box").engine)          // the panel changed it
+        assertNull(refreshTo(old, null).engine)                              // the panel dropped it
+        assertEquals("sing-box", refreshTo(old.copy(engine = "sing-box"), "xray-pattn").engine)   // the user chose it
+        assertNull(refreshTo(old.copy(engine = null), "xray-pattn").engine)  // the user chose the default
+    }
+
+    @Test fun aServerStoredWithoutItsLinkKeepsWhatItHas() {
+        // an older store kept no link, so nothing can tell a user's value from the panel's: keep it
+        val old = parse(tuned("a.example", "A", "tlshello,100-200,10-20", engine = "sing-box")).copy(raw = "")
+        val out = SubRefresh.merge(listOf(old), listOf(LinkParser.parseLink(tuned("a.example", "A", "tlshello,1-3,1-2"))), sub.id).servers[0]
+        assertEquals(old.id, out.id)
+        assertEquals("tlshello,100-200,10-20", out.outbound.getString("_fragment")); assertEquals("sing-box", out.engine)
+    }
+
+    @Test fun variantsOfOneServerKeepTheirOwnIds() {
+        // One server offered with two SNIs (or two fingerprints), which a panel
+        // reorders and renames: every link differs and the loose identity is the
+        // same for both, so only the tighter one keeps each id with its variant.
+        fun v(sni: String, fp: String, name: String) = "vless://u-a@a.example:443?type=tcp&security=tls&sni=$sni&fp=$fp#$name"
+        val old = listOf(parse(v("x.example", "chrome", "A1")), parse(v("y.example", "chrome", "A2")), parse(v("x.example", "firefox", "A3")))
+        val fresh = listOf(v("x.example", "firefox", "A3 · new"), v("y.example", "chrome", "A2 · new"), v("x.example", "chrome", "A1 · new")).map { LinkParser.parseLink(it) }
+        assertEquals(listOf(old[2].id, old[1].id, old[0].id), SubRefresh.merge(old, fresh, sub.id).servers.map { it.id })
+    }
+
     @Test fun theChainStillHasItsMembersAfterARefresh() {
         // the owner's corporate chain: [subscription xhttp server] → [WireGuard added by hand]
         val xhttp = parse(link("edge.example", "Edge"))
