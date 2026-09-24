@@ -112,6 +112,20 @@ class TunnelSetupTest {
         assertEquals(0L, StickyRestart.next(t0 + 3_600_000L, 4, t0).waitMs)
     }
 
+    @Test fun aLateDisconnectLeavesTheReconnectsScreenAlone() {
+        // Reconnect and ⚡: disconnect(), then a connect ~0.6 s later. The
+        // disconnect's teardown may land after that connect has taken its
+        // generation; its Not connected goes up only while the disconnect is
+        // still the latest move (XrayVpnService.stopAll, fromDisconnect).
+        val g = Generation()
+        g.next()                      // the session that is up
+        g.stop()                      // disconnect()
+        assertTrue("nothing asked since: Not connected", g.stopLatest)
+        val reconnect = g.next()      // the connect 0.6 s later
+        assertFalse("the late teardown leaves the new CONNECTING (or its ERROR) alone", g.stopLatest)
+        assertEquals(reconnect, g.get())  // and the reconnect itself was not overtaken
+    }
+
     private fun wg(endpoint: String): ServerConfig {
         val ob = JSONObject().put("protocol", "wireguard").put("settings", JSONObject()
             .put("secretKey", "k").put("address", JSONArray().put("10.13.13.2/32"))
