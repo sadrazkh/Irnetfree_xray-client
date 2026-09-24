@@ -76,7 +76,9 @@ test('the elevated relaunch hands the lock over before the new instance can ask 
   const relaunch = slice("ipcMain.handle('app:relaunchAdmin'", '\n  });');
   const release = relaunch.indexOf('app.releaseSingleInstanceLock()');
   assert.notEqual(release, -1, 'the elevated copy would find the lock held and quit — no app at all');
-  assert.ok(release < relaunch.indexOf("spawn('powershell'"), 'released before the elevated copy is started');
+  // the copy is started by the elevated helper only once this process has
+  // exited (relaunch.js), so releasing just before the quit is in time
+  assert.ok(release < relaunch.indexOf('app.quit()'), 'released before this instance quits');
 });
 
 /* --------------------- W2 / W11 / M2: the system proxy journal --------------------- */
@@ -117,7 +119,7 @@ test('a Windows session end and a macOS/Linux shutdown run the synchronous teard
   // all survived the reboot.
   const win = slice('function createWindow() {', '\n}');
   assert.match(win, /mainWindow\.on\('session-end', \(\) => teardownSync\('session-end'\)\);/);
-  assert.match(WHEN_READY, /powerMonitor\.on\('shutdown', \(\) => teardownSync\('session-end'\)\);/);
+  assert.match(WHEN_READY, /powerMonitor\.on\('shutdown', \(\) => \{\n\s*teardownSync\('session-end'\);/);
 });
 
 test('the synchronous teardown runs once, says it is quitting first, and covers the tunnel and the kill switch', () => {
@@ -207,7 +209,7 @@ test('a connection that keeps dropping is given up on through the same reconnect
 test('giving up on a connection that keeps dropping leaves no tunnel or proxy aimed at the dead core', () => {
   const DROP = dropSrc();
   const give = DROP.slice(DROP.indexOf('if (!drops.take()) {'));
-  assert.match(give, /if \(!\(xray && xray\.running\)\) \{\n\s*try \{ await stopAllTuns\(\); \}[^\n]*\n\s*try \{ await setSystemProxy\(false, \{\}\); \}/);
+  assert.match(give, /if \(!\(xray && xray\.running\)\) \{\n(?:\s*if \(gen !== connGen\) return;\n)?\s*try \{ await stopAllTuns\(\); \}[^\n]*\n(?:\s*if \(gen !== connGen\) return;\n)?\s*try \{ await setSystemProxy\(false, \{\}\); \}/);
   assert.ok(give.indexOf('stopAllTuns') < give.indexOf('reportReconnectFailed'), 'torn down before the UI is told');
   assert.doesNotMatch(give.slice(0, give.indexOf('reportReconnectFailed')), /leakGuard\.release|disarmKillSwitch/,
     'the guard stays held and the kill switch stays as it is — the banners offer both back');
@@ -250,7 +252,7 @@ test('a drop waits for a connect in flight, joins a recovery in flight, and only
   assert.match(slice('function doConnect(serverId, opts) {', '\n}'), /connectOnce\(serverId, opts\)[\s\S]*connectsInFlight\.add\(p\)/);
   const DROP = dropSrc();
   const wait = DROP.indexOf('await Promise.allSettled([...connectsInFlight])');
-  const join = DROP.indexOf('if (recovering) { await recoverFromNetworkChange(reason); return; }');
+  const join = DROP.indexOf('if (recovering) {');
   const budget = DROP.indexOf('drops.take()');
   assert.ok(wait !== -1 && join !== -1 && wait < join && join < budget, DROP);
 });
@@ -272,7 +274,7 @@ test('with automatic reconnect off, a drop that is not torn down still tells the
 
 test('the kill switch is not re-armed over itself (a delete-then-add left a gap with the tunnel down)', () => {
   const arm = slice('async function armKillSwitch() {', '\n}');
-  assert.match(arm, /if \(process\.platform !== 'win32'\) return \{ ok: false, error: 'windows only' \};\n(?:\s*\/\/[^\n]*\n)*\s*if \(killEngaged\) return \{ ok: true \};/);
+  assert.match(arm, /if \(process\.platform !== 'win32'\) return \{ ok: false, error: 'windows only' \};\n(?:\s*\/\/[^\n]*\n)*\s*if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true \};/);
 });
 
 test('a Retry that fails says so, instead of leaving the window on "Connecting"', () => {
@@ -281,14 +283,75 @@ test('a Retry that fails says so, instead of leaving the window on "Connecting"'
   assert.match(retry, /if \(held && r && r\.ok && xray && xray\.running\)/);
 });
 
-test('the elevated relaunch tears this instance down BEFORE it hands over the lock and starts the elevated copy', () => {
+test('the elevated relaunch tears this instance down BEFORE it hands over the lock and quits', () => {
   const relaunch = slice("ipcMain.handle('app:relaunchAdmin'", '\n  });');
   const down = relaunch.indexOf('await Promise.race([teardownForQuit()');
   const release = relaunch.indexOf('app.releaseSingleInstanceLock()');
-  const spawnAt = relaunch.indexOf("spawn('powershell'");
-  assert.ok(down !== -1 && down < release && release < spawnAt,
+  const quit = relaunch.indexOf('app.quit()');
+  assert.ok(down !== -1 && down < release && release < quit,
     'the copy repairs the same userData files and binds the same ports the moment it starts');
   assert.match(relaunch, /quitTeardown = 'done';/, 'and the quit that follows does not tear down a second time');
+});
+
+/* ------------------------------- second review ------------------------------- */
+
+test('the give-up teardown checks, before EACH step, that no connect or disconnect took over', () => {
+  const DROP = dropSrc();
+  const give = DROP.slice(DROP.indexOf('if (!drops.take()) {'));
+  assert.match(give, /if \(gen !== connGen\) return;\n\s*try \{ await stopAllTuns\(\); \}[^\n]*\n\s*if \(gen !== connGen\) return;\n\s*try \{ await setSystemProxy\(false, \{\}\); \}/, give);
+});
+
+test('a drop that lands during a recovery waits for it and rebuilds only if that recovery left it unhealed', () => {
+  const DROP = dropSrc();
+  assert.doesNotMatch(DROP, /if \(recovering\) \{ await recoverFromNetworkChange\(reason\); return; \}/, 'joining queued a second full rebuild');
+  assert.match(DROP, /if \(recovering\) \{\n[\s\S]*?await \(recoveryRun \|\| Promise\.resolve\(\)\)\.catch\(\(\) => \{\}\);[\s\S]*?if \(recoverTimer \|\| recovering \|\| healed\(\)\) return;/);
+  assert.match(DROP, /const healed = \(\) => \(reason === 'tunnel-exited' \? !!\(tun && tun\.active\) : !!\(xray && xray\.running\)\);/);
+  assert.match(slice('async function recoverFromNetworkChange(reason, attempt = 0) {', '\n}'), /recoveryRun = runRecovery\(reason, attempt\);\n\s*await recoveryRun;/);
+});
+
+test('the kill switch trusts killEngaged only when the rule is really there; a drop’s arm is undone if the user disconnected meanwhile', () => {
+  const arm = slice('async function armKillSwitch() {', '\n}');
+  assert.match(arm, /if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true \};/);
+  assert.match(slice('function killRulePresent() {', '\n}'), /netsh\(\['advfirewall', 'firewall', 'show', 'rule', `name=\$\{KILL_RULE\}`\]\)\.then\(\(\) => true, \(\) => false\)/);
+  const DROP = dropSrc();
+  assert.match(DROP, /const wasEngaged = killEngaged;/);
+  assert.match(DROP, /if \(r && r\.ok && !wasEngaged\) \{\n\s*send\('log', \{ line: 'Kill switch engaged/, 'said once, not on every drop');
+  assert.match(DROP, /if \(r && r\.ok && !wasEngaged && \(userDisconnecting \|\| isQuitting \|\| !store\.get\('activeServerId', null\)\)\) \{\n\s*await disarmKillSwitch\(\);/);
+});
+
+test('a macOS/Linux shutdown that gets cancelled does not leave the app deaf for good', () => {
+  assert.match(WHEN_READY, /powerMonitor\.on\('shutdown', \(\) => \{\n\s*teardownSync\('session-end'\);\n\s*scheduleShutdownCancelCheck\(\);/);
+  const check = slice('function scheduleShutdownCancelCheck() {', '\n}');
+  assert.match(check, /isQuitting = false;/);
+  assert.match(check, /userDisconnecting = false;/);
+  assert.match(check, /syncTeardownDone = false;/);
+  assert.match(check, /recoverFromNetworkChange\('shutdown-cancelled'\)/);
+  assert.match(check, /\.unref\(\)/, 'never what keeps a quitting process alive');
+});
+
+test('the elevated relaunch tears nothing down until the UAC prompt was accepted', () => {
+  const relaunch = slice("ipcMain.handle('app:relaunchAdmin'", '\n  });');
+  const ask = relaunch.indexOf('await runElevatedRelaunch(');
+  const down = relaunch.indexOf('await Promise.race([teardownForQuit()');
+  assert.ok(ask !== -1 && down !== -1 && ask < down, relaunch);
+  assert.match(relaunch, /catch \(e\) \{[\s\S]*return \{ ok: false, error: /, 'a cancelled prompt leaves this instance running, connected, and says so');
+  assert.doesNotMatch(relaunch, /spawn\('powershell'/, 'the copy is started by the elevated helper once this instance is gone');
+});
+
+test('the window says a DROP when it was one, and says the kill switch closed the internet once', () => {
+  const R = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', f), 'utf8').replace(/\r\n/g, '\n');
+  const APP = R('app.js');
+  const I18N = R('i18n.js');
+  // the reasons main.js calls a drop (DROP_REASONS) are the ones the window knows
+  const mainReasons = /const DROP_REASONS = new Set\(\[([^\]]*)\]\)/.exec(MAIN)[1];
+  assert.match(APP, new RegExp(`const DROP_REASONS = \\[${mainReasons.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\];`));
+  assert.match(APP, /toast\(t\(DROP_REASONS\.includes\(d\.reason\) \? 'net\.dropFailed' : 'net\.failed'\), 'err', 8000\);/);
+  assert.match(APP, /DROP_REASONS\.includes\(state\.reconnectReason\) \? 'state\.reconnectingDrop' : 'state\.reconnecting'/);
+  for (const key of ['net.dropFailed', 'state.reconnectingDrop']) {
+    assert.equal((I18N.match(new RegExp(`'${key.replace('.', '\\.')}':`, 'g')) || []).length, 2, `${key}: one fa and one en string`);
+  }
+  // the kill-switch toast on the way IN only — a second drop under an engaged switch is not news
+  assert.match(APP, /const wasEngaged = state\.killEngaged;[\s\S]*?if \(state\.killEngaged && !wasEngaged\) toast\(t\('kill\.blocked'\), 'err'\);/);
 });
 
 test('a tunnel backend dying and a reload that leaves no core take the same path', () => {
