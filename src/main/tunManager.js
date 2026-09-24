@@ -33,6 +33,7 @@ const os = require('os');
 const platform = require('./tunPlatform');
 const macOwners = require('./macSessionLock');
 const macOwner = require('./macSessionOwner');
+const { ipsOf } = require('./macTunScripts');
 const { run, delay, sh, isOwnTunInterface } = platform;
 
 const ADAPTER = platform.TUN2SOCKS_ADAPTER;   // 'XrayTun'
@@ -594,7 +595,10 @@ class TunManager {
   /** `opts.keepDns`: a reconnect's stop — the leak guard holds the service's DNS; only a disconnect restores it. */
   macTeardownScript(opts = {}) {
     const st = this.macState || {};
-    const dns1 = (st.savedDns && st.savedDns.length) ? st.savedDns.map(sh).join(' ') : 'Empty';
+    // The journal is a user-owned file and this runs as root: addresses that
+    // are not IP literals are dropped (see macTunScripts' ipsOf).
+    const saved = ipsOf(st.savedDns);
+    const dns1 = saved.length ? saved.map(sh).join(' ') : 'Empty';
     const lines = ['#!/bin/bash'];
     if (st.pidFile) {
       lines.push(
@@ -619,7 +623,7 @@ class TunManager {
     // disconnect until reboot.
     // Interface routes disappear with the owned utun. Do not delete by a
     // recycled device name after a crash: another VPN may own it by then.
-    for (const ip of (st.bypassIps || [])) {
+    for (const ip of (ipsOf([st.gateway]).length ? ipsOf(st.bypassIps) : [])) {
       lines.push(`if grep -Fxq -- ${sh(ip)} ${sh(st.routesFile)} 2>/dev/null; then route -n delete -host ${sh(ip)} ${sh(st.gateway)} 2>/dev/null || true; fi`);
     }
     if (st.service && !opts.keepDns) lines.push(`if [ -f ${sh(st.dnsFile)} ]; then networksetup -setdnsservers ${sh(st.service)} ${dns1} || exit 25; rm -f ${sh(st.dnsFile)}; fi`);

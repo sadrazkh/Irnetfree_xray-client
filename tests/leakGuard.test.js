@@ -216,15 +216,16 @@ test('macApplyScript sets every service to the peers and flushes the cache', () 
   assert.equal(macApplyScript(services, PEER4, PEER6), [
     '#!/bin/bash',
     'FAIL=0',
-    "networksetup -setdnsservers 'Wi-Fi' 172.19.0.2 fdfe:dcba:9876::2 || FAIL=1",
-    "networksetup -setdnsservers 'Bob'\\''s Net' 172.19.0.2 fdfe:dcba:9876::2 || FAIL=1",
+    // quoted too (audit M7): the peers are read back from the state file for every refresh
+    "networksetup -setdnsservers 'Wi-Fi' '172.19.0.2' 'fdfe:dcba:9876::2' || FAIL=1",
+    "networksetup -setdnsservers 'Bob'\\''s Net' '172.19.0.2' 'fdfe:dcba:9876::2' || FAIL=1",
     'dscacheutil -flushcache 2>/dev/null || true',
     'killall -HUP mDNSResponder 2>/dev/null || true',
     'exit $FAIL',
     ''
   ].join('\n'));
   assert.match(macApplyScript([{ name: 'Wi-Fi' }], PEER4, null),
-    /networksetup -setdnsservers 'Wi-Fi' 172\.19\.0\.2 \|\| FAIL=1/);
+    /networksetup -setdnsservers 'Wi-Fi' '172\.19\.0\.2' \|\| FAIL=1/);
 });
 
 test('macRestoreScript puts the recorded servers back, "Empty" where there were none', () => {
@@ -1439,13 +1440,13 @@ test('repairAtLaunch still repairs when the app has engaged nothing yet', async 
 // runs as root.
 test('recorded resolvers are quoted before they reach a root shell', () => {
   const evil = "1.1.1.1'; touch /tmp/pwned; echo '";
-  const script = macRestoreScript([{ name: 'Wi-Fi', dns: [evil] }]);
-  // The address is data read off the machine and this script runs as root, so
-  // it must arrive as ONE shell word: the quote it carries comes back escaped
-  // (sh()), never raw, and the line still ends the way every other one does.
+  const script = macRestoreScript([{ name: 'Wi-Fi', dns: [evil, '9.9.9.9'] }]);
+  // The address is data read off the machine and this script runs as root.
+  // Every value is quoted (sh()); since audit M7 one that is not an IP literal
+  // does not reach the script at all — the restore says less, never something else.
   assert.equal(script.includes(evil), false, 'the payload is never interpolated raw');
-  assert.equal(script.split(String.fromCharCode(92) + "'").length - 1, 2, 'both quotes escaped');
-  assert.match(script, /networksetup -setdnsservers 'Wi-Fi' .* \|\| FAIL=1/);
+  assert.doesNotMatch(script, /pwned/);
+  assert.match(script, /networksetup -setdnsservers 'Wi-Fi' '9\.9\.9\.9' \|\| FAIL=1/);
 });
 
 for (const dns of [['9.9.9.9', '149.112.112.112'], []]) {

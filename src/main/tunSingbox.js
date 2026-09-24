@@ -153,7 +153,7 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
   };
 }
 
-const { buildMacSetupScript, buildMacTeardownScript } = require('./macTunScripts');
+const { buildMacSetupScript, buildMacTeardownScript, assertIps } = require('./macTunScripts');
 // Keep overlapping Connect/Disconnect calls from recovering another live
 // instance's session in this process. Crash recovery starts with an empty map.
 const macOwners = require('./macSessionLock');
@@ -466,6 +466,7 @@ class TunSingbox {
     const handedOver = macOwner.takeHandedOverDns(this.macOwnerKey, service, savedDns);
     if (handedOver) savedDns = handedOver;
     const dns = this.adapterDns(dnsServers, opts);
+    assertIps([...dns.v4, ...dns.v6]);   // they go into a root script: refused before any journal exists
 
     const ips = await this.bypassIps(bypassAddrs);
     this.excludeIps = ips;

@@ -1,6 +1,15 @@
 'use strict';
+const { isIP } = require('net');
 const { sh } = require('./tunPlatform');
-const dnsArgs = values => (values && values.length ? values : ['Empty']).map(sh).join(' ');
+// Resolvers in a root script are IP literals, quoted. The saved ones come back
+// out of a user-owned journal: anything else is dropped (the restore says less,
+// never something else). What a setup is about to set must all be addresses.
+const ipsOf = values => (values || []).map(v => String(v == null ? '' : v).trim()).filter(v => isIP(v));
+const dnsArgs = values => { const ips = ipsOf(values); return (ips.length ? ips : ['Empty']).map(sh).join(' '); };
+function assertIps(values) {
+  if ((values || []).some(v => !isIP(String(v == null ? '' : v).trim()))) throw new Error('TUN resolver is not an IP address; refusing to write it into a root script');
+  return values || [];
+}
 // `keepDns`: a reconnect's stop. The leak guard is holding every service on the
 // tunnel's resolver, so the ISP's DNS must not come back for the rebuild; only
 // a real disconnect (or a recovery) restores it.
@@ -38,6 +47,7 @@ exit 0
 `;
 }
 function buildMacSetupScript({ bin, cfgFile, logFile, pidFile, devFile, identityFile = cfgFile + '.identity', dnsFile = cfgFile + '.dns', teardownPath = cfgFile + '.teardown', service, dnsServers = [] }) {
+ assertIps(dnsServers);
  return `#!/bin/bash
 trap '' HUP
 BIN=${sh(bin)}
@@ -96,4 +106,4 @@ kill -0 "$SBPID" 2>/dev/null || exit 15
 exit 0
 `;
 }
-module.exports = { buildMacSetupScript, buildMacTeardownScript };
+module.exports = { buildMacSetupScript, buildMacTeardownScript, assertIps, ipsOf };
