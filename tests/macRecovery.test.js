@@ -21,6 +21,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { recoverMacNetwork } = require('../src/main/macRecovery');
+const { LIVE_TUNNEL } = require('../src/main/macSessionOwner');
 
 function fakes(fail = {}) {
   const ran = [];
@@ -28,7 +29,8 @@ function fakes(fail = {}) {
     constructor(opts) { this.opts = opts; }
     async recoverMacSessions() {
       ran.push([name, this.opts && this.opts.userData]);
-      if (fail[name]) throw new Error(fail[name]);
+      const f = fail[name];
+      if (f) throw (f instanceof Error ? f : new Error(f));
     }
   };
   const backends = { NativeMacTun: make('native'), TunSingbox: make('sing-box'), TunManager: make('tun2socks') };
@@ -80,6 +82,40 @@ test('no guard step when none is given; a throwing logger cannot turn into a rej
   assert.match(gate.message, /sing-box.*y/);
 });
 
+// Review fix: a step that refused because a LIVE tunnel owns the journal (a
+// second instance started with `open -n`, a connect still in flight) must not
+// be followed by the guard's DNS restore — that would put the live instance's
+// services back on the ISP's resolver under its running tunnel.
+test('a live tunnel owner stops the DNS step: logged, gated, the guard never runs', async () => {
+  const live = Object.assign(new Error('Another application instance may own this tunnel; close it before recovery'), { code: LIVE_TUNNEL });
+  for (const backend of ['sing-box', 'tun2socks']) {
+    const { ran, backends, guard } = fakes({ [backend]: live });
+    const logs = [];
+    const gate = await recoverMacNetwork({ userData: '/u', guard, backends, onLog: (l, v) => logs.push([v, l]) });
+    assert.deepEqual(ran.map(r => r[0]), ['native', 'sing-box', 'tun2socks'], `${backend}: the guard step did not run`);
+    assert.ok(gate instanceof Error);
+    assert.match(gate.message, /Another application instance/);
+    assert.ok(logs.some(([v, l]) => v === 'warn' && /saved DNS.*left alone.*live tunnel/i.test(l)), `${backend}: says why`);
+  }
+});
+
+test('the real backends mark every "a live tunnel owns this" refusal with the code the recovery checks', async () => {
+  const fs2 = require('node:fs'), os = require('node:os');
+  const { TunSingbox } = require('../src/main/tunSingbox');
+  const lock = require('../src/main/macSessionLock');
+  assert.ok(typeof LIVE_TUNNEL === 'string' && LIVE_TUNNEL, 'the code is exported');
+  const userData = fs2.mkdtempSync(path.join(os.tmpdir(), 'irnf-live-'));
+  try {
+    const holder = new TunSingbox({ platform: 'darwin', userData });
+    lock.set(path.resolve(userData), holder);
+    const other = new TunSingbox({ platform: 'darwin', userData });
+    await assert.rejects(other.recoverMacSessions(), (e) => e.code === LIVE_TUNNEL);
+    lock.delete(path.resolve(userData));
+    holder.active = true;
+    await assert.rejects(holder.recoverMacSessions(), (e) => e.code === LIVE_TUNNEL);
+  } finally { lock.delete(path.resolve(userData)); fs2.rmSync(userData, { recursive: true, force: true }); }
+});
+
 /* --------------------------- main.js / service.js --------------------------- */
 
 // Both require their runtime at load, so the wiring is read as text.
@@ -104,14 +140,12 @@ test('the launch recovery runs every step on its own and always the guard\'s DNS
   }
 });
 
-test('manual recovery releases the guard even when a backend step failed, and only then reports it', () => {
+test('manual recovery: on macOS the guard release is the recovery\'s own last step (skipped under a live tunnel), elsewhere it runs as before', () => {
   for (const [label, src] of [['main.js', MAIN], ['service.js', SERVICE]]) {
     const start = src.indexOf('async function repairNetwork()');
     const body = src.slice(start, src.indexOf('finally { networkRepairing = false; }', start));
-    const recover = body.indexOf('recoverMacNetwork(');
-    const release = body.indexOf('await releaseGuardChecked(leakGuard);');
-    const report = body.indexOf('if (failed) throw failed;');
-    assert.ok(recover > 0 && recover < release && release < report, `${label}: recover → release → report`);
+    assert.match(body, /if \(process\.platform === 'darwin'\) failed = await recoverMacNetwork\(\{[^\n]*guard: \(\) => releaseGuardChecked\(leakGuard\) \}\);\n\s*else await releaseGuardChecked\(leakGuard\);\n\s*if \(failed\) throw failed;/,
+      `${label}: recover (guard as its step) → report; other platforms release directly`);
     assert.doesNotMatch(body, /await new (NativeMacTun|TunSingbox|TunManager)\(/);
   }
 });

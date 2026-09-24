@@ -65,6 +65,15 @@ async function ownerAlive(st, probe = defaultProbe, execPath = process.execPath)
   return !!execPath && (command === execPath || command.startsWith(execPath + ' '));
 }
 
+/**
+ * The code on every recovery refusal that means "a LIVE tunnel owns this" —
+ * another instance, an operation in flight, this very tunnel still up.
+ * macRecovery.js then leaves the guard's DNS alone: restoring it would put the
+ * live tunnel's services back on the ISP's resolver under it.
+ */
+const LIVE_TUNNEL = 'IRNF_TUNNEL_LIVE';
+function liveTunnelError(message) { return Object.assign(new Error(message), { code: LIVE_TUNNEL }); }
+
 /** A root tunnel process (sing-box / tun2socks): EPERM means it runs, only ESRCH means it is gone. */
 function pidAlive(pid, probe = defaultProbe) {
   return Number.isInteger(pid) && pid > 1 && probe.signal(pid) !== 'gone';
@@ -103,6 +112,6 @@ function peekHandedOverDns(key, service, current) {
 function dropHandedOverDns(key) { dnsHandover.delete(key); }
 
 module.exports = {
-  signalState, processIdentity, defaultProbe, ownerRecord, ownerAlive, pidAlive,
+  signalState, processIdentity, defaultProbe, ownerRecord, ownerAlive, pidAlive, LIVE_TUNNEL, liveTunnelError,
   handOverDns, peekHandedOverDns, dropHandedOverDns
 };
