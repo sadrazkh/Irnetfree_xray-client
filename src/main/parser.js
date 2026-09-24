@@ -763,7 +763,17 @@ function applyServerEdits(server, f) {
   // edit is known when it is made, never guessed from how a link parses.
   const after = editFields(out);
   const changed = Object.keys(after).filter(k => !DERIVED_FIELDS.includes(k) && fieldText(before[k]) !== fieldText(after[k]));
-  if (changed.length) out._edited = [...new Set([...(Array.isArray(server._edited) ? server._edited : []), ...changed])].sort();
+  if (changed.length) {
+    // A field saved back to what the server's own link gives is released:
+    // it is the provider's again, and follows the provider's next change.
+    let link = null;
+    try { link = editFields(parseLink(out.raw)); } catch { link = null; }
+    const released = (k) => !!link && k in link && fieldText(link[k]) === fieldText(after[k]);
+    const edited = [...new Set([...(Array.isArray(server._edited) ? server._edited : []), ...changed])]
+      .filter(k => !(changed.includes(k) && released(k)))
+      .sort();
+    if (edited.length) out._edited = edited; else delete out._edited;
+  }
 
   return out;
 }
