@@ -138,6 +138,8 @@ function deps(state, extra = {}) {
     gateway: gatewayFactory(state),
     setSystemProxy: async () => {},
     waitForLocalPort: async () => true,
+    // the device list's ubus / ip neigh: no LAN here (a test that wants one passes its own)
+    lanRun: async (cmd, args) => { throw new Error(`no ${cmd} here: ${[cmd, ...args].join(' ')}`); },
     orphans: () => [],
     kill: () => { throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' }); },
     syslog: () => {},
