@@ -298,7 +298,7 @@ test('the launch repair and a connect cannot interleave: the repair finishes bef
   assert.equal(JSON.parse(fs.readFileSync(journal, 'utf8')).win.ProxyEnable, 0, 'and its journal holds the true original');
 });
 
-test('without a journal configured (the headless service) the old behaviour stands', async () => {
+test('without a journal configured the old behaviour stands', async () => {
   const calls = [];
   const exec = async (cmd, args) => { calls.push([cmd, ...args]); return ''; };
   useProxyJournal(null);
