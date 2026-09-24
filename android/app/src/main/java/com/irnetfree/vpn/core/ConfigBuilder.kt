@@ -518,7 +518,9 @@ object ConfigBuilder {
         val level0 = JSONObject().put("statsUserUplink", true).put("statsUserDownlink", true)
         return JSONObject()
             .put("log", JSONObject().put("loglevel", s.logLevel))
-            // stats + policy stay: the core's own counters (XrayCore.queryTraffic) live on them
+            // stats + policy: the core's own counters, the desktop's shape. Nothing on
+            // Android reads them now — the traffic figures come from hev
+            // (TProxyGetStats), and XrayCore.queryTraffic, which could, is never called.
             .put("stats", JSONObject())
             .put("policy", JSONObject()
                 .put("levels", JSONObject().put("0", level0))
