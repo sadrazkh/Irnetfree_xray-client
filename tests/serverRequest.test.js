@@ -35,7 +35,8 @@ function startServer(dir, extra = []) {
     const timer = setTimeout(() => { if (!done) { done = true; child.kill('SIGKILL'); reject(new Error('the server did not start:\n' + out)); } }, 30000);
     const onData = (d) => {
       out += d;
-      const m = /Listening: http:\/\/127\.0\.0\.1:(\d+)\//.exec(out);
+      // the whole banner: its last line on a loopback bind (it can arrive in several chunks)
+      const m = /Listening: http:\/\/127\.0\.0\.1:(\d+)\/[\s\S]*in your browser\./.exec(out);
       if (m && !done) { done = true; clearTimeout(timer); resolve({ child, port: Number(m[1]), out: () => out }); }
     };
     child.stdout.on('data', onData);
