@@ -3,7 +3,7 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, nat
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawn, execFile } = require('child_process');
+const { execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts, wgResolverAddresses } = require('./configBuilder');
@@ -39,6 +39,7 @@ const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
 const { DropBudget } = require('./dropBudget');
 const { isWebUrl, isAppPage } = require('./urlGuard');
+const { runElevatedRelaunch } = require('./relaunch');
 const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
 const { trayGroups } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
@@ -87,6 +88,7 @@ let recoverTimer = null;
 let recovering = false;        // a network-change recovery is in flight
 let recoverQueued = null;      // reason of a trigger that arrived during that recovery
 let recoverGen = 0;            // bumped by doDisconnect(); an older recovery no longer owns `recovering`
+let recoveryRun = null;        // the runRecovery() in flight, for a drop to wait on
 const RECOVER_BACKOFF_MS = [2000, 5000, 15000];
 // Drops the connection may take on its own (core exit, TUN death, failed reload)
 // before the app stops rebuilding it — see onConnectionDrop / dropBudget.js.
@@ -375,8 +377,10 @@ let killEngaged = false;
 async function armKillSwitch() {
   if (process.platform !== 'win32') return { ok: false, error: 'windows only' };
   // Already in: re-arming is a delete then an add — a moment with no block,
-  // and a drop arms it while the tunnel is already down.
-  if (killEngaged) return { ok: true };
+  // and a drop arms it while the tunnel is already down. But the flag is only
+  // a belief: a disarm racing it (a reapply's, a recovery's) may have deleted
+  // the rule meanwhile, so it is trusted only when the rule is really there.
+  if (killEngaged && await killRulePresent()) return { ok: true };
   try {
     await netsh(['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`]).catch(() => {});
     await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${KILL_RULE}`,
@@ -386,6 +390,11 @@ async function armKillSwitch() {
   } catch (e) {
     return { ok: false, error: e.message };
   }
+}
+
+/** Whether the kill-switch rule exists (netsh fails "No rules match" when not). */
+function killRulePresent() {
+  return netsh(['advfirewall', 'firewall', 'show', 'rule', `name=${KILL_RULE}`]).then(() => true, () => false);
 }
 
 async function disarmKillSwitch() {
@@ -1516,7 +1525,9 @@ async function recoverFromNetworkChange(reason, attempt = 0) {
   const gen = recoverGen;
   recovering = true;
   try {
-    await runRecovery(reason, attempt);
+    // kept so a drop landing meanwhile can wait for THIS rebuild (onConnectionDrop)
+    recoveryRun = runRecovery(reason, attempt);
+    await recoveryRun;
   } finally {
     // Release the lock and nothing else. The watcher's own baseline is not ours
     // to move: its ignoreInterface predicate already keeps the fingerprint stable
@@ -1687,13 +1698,21 @@ async function onConnectionDrop(reason) {
   updateOverlay('off');
   const s = getSettings();
   if (s.killSwitch) {
+    const wasEngaged = killEngaged;
     const r = await armKillSwitch();
     send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
-    if (r && r.ok) {
+    if (r && r.ok && !wasEngaged) {
       send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
       notify('IRNetFree', isEn() ? 'VPN dropped — internet blocked by the kill switch' : 'اتصال افتاد — اینترنت با کیل‌سوییچ بسته شد');
     }
-    else if (process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
+    else if (!(r && r.ok) && process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
+    // A disconnect that landed while the rule went in has already lifted it —
+    // or is about to, before this add: the rule this drop put in is not wanted.
+    if (r && r.ok && !wasEngaged && (userDisconnecting || isQuitting || !store.get('activeServerId', null))) {
+      await disarmKillSwitch();
+      send('killswitch', { engaged: false });
+      return;
+    }
   }
   // A connect in flight (the user's, a recovery's, a settings apply's) is where
   // this drop may have landed: let it settle first — it fails over a dead core
@@ -1718,9 +1737,18 @@ async function onConnectionDrop(reason) {
     }
     return;
   }
-  // A recovery already running rebuilds for this drop too: join it (it queues
-  // the reason) — the budget is for drops that each start a rebuild of their own.
-  if (recovering) { await recoverFromNetworkChange(reason); return; }
+  // Is what this drop broke whole again (a rebuild already brought it back)?
+  const healed = () => (reason === 'tunnel-exited' ? !!(tun && tun.active) : !!(xray && xray.running));
+  if (recovering) {
+    // A recovery is already rebuilding. Queuing behind it meant a second full
+    // rebuild of a tunnel it had just built: wait for it instead. A retry it
+    // scheduled (or a queued trigger it runs next) rebuilds anyway, and one it
+    // brought back whole needs nothing; only a drop left unhealed goes on.
+    await (recoveryRun || Promise.resolve()).catch(() => {});
+    await Promise.resolve();   // let it release its lock and start what it queued
+    if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
+    if (recoverTimer || recovering || healed()) return;
+  }
   if (!drops.take()) {
     send('log', { line: `The connection keeps dropping (${reason}) — no more automatic rebuilds until you reconnect`, level: 'error' });
     // Nothing automatic may follow the give-up: no pending retry, no queued trigger.
@@ -1730,12 +1758,15 @@ async function onConnectionDrop(reason) {
     const gen = connGen;
     // Leave what a failed recovery leaves: no tunnel and no system proxy aimed
     // at a core that is gone — only the DNS guard, held on purpose (its banner
-    // gives the resolvers back) — and the kill switch as it is.
+    // gives the resolvers back) — and the kill switch as it is. Before each
+    // step: a connect or a disconnect the user made meanwhile owns the tunnel
+    // and the proxy now, and must not have them swept from under it.
     if (!(xray && xray.running)) {
+      if (gen !== connGen) return;
       try { await stopAllTuns(); } catch { /* a tunnel that will not stop is retried by the next disconnect */ }
+      if (gen !== connGen) return;
       try { await setSystemProxy(false, {}); } catch {}
     }
-    // the user connected or disconnected meanwhile: that is the state, not this
     if (gen !== connGen) return;
     reportReconnectFailed(reason, { ok: proxyUp() });
     return;
@@ -2147,30 +2178,29 @@ function registerIpc() {
   ipcMain.handle('app:relaunchAdmin', async () => {
     if (process.platform !== 'win32') return { ok: false, error: 'only on Windows' };
     if (makeTun(getSettings(), { quiet: true }).isElevated()) return { ok: false, error: 'already elevated' };
+    // 1) The UAC prompt, before anything is torn down (see relaunch.js): an
+    //    elevated helper that waits for THIS process to exit, then starts the
+    //    copy. A cancelled prompt fails here, and the app — connected or not —
+    //    simply keeps running as it was.
     try {
-      const exe = process.execPath;
-      const args = process.argv.slice(1);
-      const argList = args.map(a => `'${String(a).replace(/'/g, "''")}'`).join(',');
-      const psArgs = argList
-        ? `Start-Process -FilePath '${exe}' -Verb RunAs -ArgumentList ${argList}`
-        : `Start-Process -FilePath '${exe}' -Verb RunAs`;
-      // This instance goes down FIRST: the elevated copy repairs the same
-      // userData files (the guard's state, the proxy journal) and binds the same
-      // ports the moment it starts. Then the lock is handed over — a copy that
-      // found it still held would quit at once and leave no app at all — and
-      // the quit below has nothing left to tear down.
-      isQuitting = true;
-      let timer = null;
-      await Promise.race([teardownForQuit().catch(() => {}), new Promise((resolve) => { timer = setTimeout(resolve, QUIT_TEARDOWN_MS); })]);
-      clearTimeout(timer);
-      quitTeardown = 'done';
-      app.releaseSingleInstanceLock();
-      spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', psArgs], { detached: true, windowsHide: true });
-      setTimeout(() => app.quit(), 300);
-      return { ok: true };
+      await runElevatedRelaunch({ exe: process.execPath, args: process.argv.slice(1), pid: process.pid });
     } catch (e) {
-      return { ok: false, error: e.message };
+      send('log', { line: 'Relaunch as administrator did not happen (' + e.message + ') — IRNetFree keeps running as it is', level: 'warn' });
+      return { ok: false, error: null };
     }
+    // 2) Accepted: this instance goes down first — the copy repairs the same
+    //    userData files (the guard's state, the proxy journal) and binds the
+    //    same ports — then hands the lock over and quits. The helper starts the
+    //    copy once this process is gone, so the copy finds the lock free, and
+    //    the quit below has nothing left to tear down.
+    isQuitting = true;
+    let timer = null;
+    await Promise.race([teardownForQuit().catch(() => {}), new Promise((resolve) => { timer = setTimeout(resolve, QUIT_TEARDOWN_MS); })]);
+    clearTimeout(timer);
+    quitTeardown = 'done';
+    app.releaseSingleInstanceLock();
+    setTimeout(() => app.quit(), 300);
+    return { ok: true };
   });
 
   ipcMain.handle('servers:delete', (e, id) => {
@@ -2839,7 +2869,10 @@ app.whenReady().then(() => {
     const { powerMonitor } = require('electron');
     powerMonitor.on('resume', () => { if (netWatcher) netWatcher.poke('resume'); });
     // macOS / Linux shutdown or reboot (Windows: the window's session-end)
-    powerMonitor.on('shutdown', () => teardownSync('session-end'));
+    powerMonitor.on('shutdown', () => {
+      teardownSync('session-end');
+      scheduleShutdownCancelCheck();
+    });
   } catch {}
 
   mainWindow.once('ready-to-show', () => {
@@ -2976,3 +3009,26 @@ function teardownSync(reason) {
   cleanupAllTunsSync();   // every backend a connect started, either kind
 }
 process.on('exit', () => teardownSync('exit'));
+
+/**
+ * macOS / Linux: the 'shutdown' notice can come before every other app has
+ * agreed, and one of them can still cancel a logout. The synchronous teardown
+ * has then run under a machine that stays up, and its flags would keep every
+ * later drop and recovery silent for good. A process still here a minute later
+ * was not shut down: the flags go down again, and the connection the user
+ * still wants is rebuilt. Unref'd — never what keeps a quitting app alive —
+ * and a real quit in progress is left alone.
+ */
+function scheduleShutdownCancelCheck() {
+  const timer = setTimeout(() => {
+    if (quitTeardown) return;
+    isQuitting = false;
+    userDisconnecting = false;
+    syncTeardownDone = false;
+    send('log', { line: 'The shutdown was cancelled — rebuilding the connection', level: 'warn' });
+    if (store && store.get('activeServerId', null)) {
+      recoverFromNetworkChange('shutdown-cancelled').catch((e) => send('log', { line: 'Recovery after a cancelled shutdown failed: ' + ((e && e.message) || e), level: 'error' }));
+    }
+  }, 60000);
+  timer.unref();
+}
