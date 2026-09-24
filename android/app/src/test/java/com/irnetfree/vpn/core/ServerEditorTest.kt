@@ -115,6 +115,27 @@ class ServerEditorTest {
         assertEquals(listOf("engine"), save(s) { it.engine = "sing-box" }.edited)
     }
 
+    /* The record is what the save really changed — not what the form said. */
+    @Test fun whatASaveDidNotChangeIsNotRecorded() {
+        val s = LinkParser.parseLink("vless://u@h.example:443?type=ws&path=%2Fws&host=cdn.example&security=tls&sni=cdn.example#w")
+        val spaced = save(s) { it.port = " 8443" }            // not a number to apply: the port stays 443
+        assertEquals(443, spaced.port); assertEquals(emptyList<String>(), spaced.edited)
+        val wg = LinkParser.parseLink("wireguard://PRIV@cobra.tes.ca:42421?publickey=PUB&address=10.10.10.42&mtu=1420#corp")
+        val mtu = save(wg) { it.wgMtu = "auto" }              // likewise: the MTU stays 1420
+        assertEquals(1420, mtu.outbound.getJSONObject("settings").getInt("mtu")); assertEquals(emptyList<String>(), mtu.edited)
+        assertEquals(emptyList<String>(), save(s) { it.sni = " cdn.example " }.edited)   // trimmed to what it was
+    }
+
+    /* Saving the value the server's own link gives releases the field: it follows the panel again. */
+    @Test fun savingTheLinksOwnValueReleasesTheField() {
+        val s = LinkParser.parseLink("vless://u@h.example:443?type=ws&path=%2Fws&host=cdn.example&security=tls&sni=cdn.example#w")
+        val a = save(s) { it.sni = "x.example"; it.address = "104.16.1.1" }
+        assertEquals(setOf("address", "sni"), a.edited.toSet())
+        val b = save(a) { it.sni = "cdn.example" }
+        assertEquals(listOf("address"), b.edited)
+        assertEquals(emptyList<String>(), save(b) { it.address = "h.example" }.edited)
+    }
+
     @Test fun clearingTheFragmentRemovesIt() {
         val s = LinkParser.parseLink("vless://u@h.example:443?security=tls&sni=a.com&fragment=tlshello%2C100-200%2C10-20#f")
         assertEquals("tlshello,100-200,10-20", s.outbound.getString("_fragment"))
