@@ -168,22 +168,36 @@ test('a launch clears the activeServerId a crash or a kill left, and connect-on-
 });
 
 /** The ready-to-show handler (connect on launch) against fakes: what it connects to, and what it says. */
-function launchConnect({ lastId, servers = [], build = () => ({}) }) {
-  const out = { connects: [], logs: [] };
+/**
+ * The ready-to-show handler (connect on launch) against fakes. Its timer is
+ * held: `fire()` runs it; before that, `state` is what the user did meanwhile
+ * (bootCancelled — a connect or a disconnect by hand —, isQuitting, a live activeServerId).
+ */
+function launchConnect({ lastId, servers = [], build = () => ({}), fire = true }) {
+  const out = { connects: [], logs: [], state: { bootCancelled: false, isQuitting: false, activeServerId: null } };
+  let timer = null;
   const make = new Function('env', `
-    const { store, getSettings, buildPlan, doConnect, send, updateOverlay } = env;
-    const setTimeout = (fn) => fn();
+    const { getSettings, buildPlan, doConnect, send, updateOverlay } = env;
+    const store = { get: (k, d) => (k === 'activeServerId' ? env.state.activeServerId : env.get(k, d)) };
+    const setTimeout = (fn) => { env.hold(fn); };
     const mainWindow = { once: (ev, fn) => fn() };
+    const flags = () => { bootCancelled = env.state.bootCancelled; isQuitting = env.state.isQuitting; };
+    let bootCancelled = false, isQuitting = false;
     ${slice("mainWindow.once('ready-to-show', () => {", '\n  });')}
+    return flags;
   `);
-  make({
-    store: { get: (k, d) => (k === 'lastServerId' ? lastId : k === 'servers' ? servers : d) },
+  const flags = make({
+    state: out.state,
+    get: (k, d) => (k === 'lastServerId' ? lastId : k === 'servers' ? servers : d),
+    hold: (fn) => { timer = fn; },
     getSettings: () => ({ autoConnect: true, lang: 'en' }),
     buildPlan: build,
     doConnect: async (id) => { out.connects.push(id); },
     send: (ch, p) => { if (ch === 'log') out.logs.push(p.line); },
     updateOverlay: () => {}
   });
+  out.fire = () => { flags(); if (timer) timer(); };
+  if (fire) out.fire();
   return out;
 }
 
@@ -198,6 +212,31 @@ test('connect on launch resumes any target a connect takes — advanced routing,
   assert.deepEqual(gone.connects, []);
   assert.deepEqual(gone.logs, ['Auto-connect: the last connection (sv-gone) cannot be built any more — Server not found']);
   assert.deepEqual(launchConnect({ lastId: null }).connects, []);
+});
+
+test('a connect or a disconnect by hand in the launch connect’s second is not overtaken by it', () => {
+  // The timer called doConnect(lastId) with no second look: a Connect clicked in
+  // that second was overtaken silently (its call came back stale, no status)
+  // and the app landed on the last connection instead — service.js's
+  // autoConnectAtLaunch asks first.
+  for (const [what, set] of [
+    ['a connect or a disconnect by hand', (s) => { s.bootCancelled = true; }],
+    ['a quit', (s) => { s.isQuitting = true; }],
+    ['a connection already up', (s) => { s.activeServerId = 'sv-2'; }]
+  ]) {
+    const l = launchConnect({ lastId: '__advanced__', fire: false });
+    set(l.state);
+    l.fire();
+    assert.deepEqual(l.connects, [], what);
+  }
+  // the flag is set by every connect and disconnect by hand, before it starts
+  const handler = (name) => slice(`ipcMain.handle('${name}', `, '\n');
+  assert.match(handler('connect'), /\{ bootCancelled = true; drops\.reset\(\); return doConnect\(id\); \}/);
+  assert.match(handler('disconnect'), /\{ bootCancelled = true; return doDisconnect\(\); \}/);
+  const tray = slice('function trayMenuTemplate() {', '\n}');
+  assert.match(tray, /click: \(\) => \{ bootCancelled = true; drops\.reset\(\); doConnect\(it\.id\)/);
+  assert.match(tray, /click: \(\) => \{ bootCancelled = true; doDisconnect\(\); \}/);
+  assert.match(MAIN, /^let bootCancelled = false;/m);
 });
 
 /* ----------------------------- S5: navigation guards ----------------------------- */
@@ -253,7 +292,7 @@ test('a connection that keeps dropping is given up on through the same reconnect
     'the network-change recovery gives up through the same function');
   // the user's own connect / disconnect starts the count over
   assert.match(slice('async function doDisconnect() {', '\n}'), /drops\.reset\(\);/);
-  assert.match(MAIN, /ipcMain\.handle\('connect', \(e, id\) => \{ drops\.reset\(\); return doConnect\(id\); \}\);/);
+  assert.match(MAIN, /ipcMain\.handle\('connect', \(e, id\) => \{ bootCancelled = true; drops\.reset\(\); return doConnect\(id\); \}\);/);
 });
 
 test('giving up on a connection that keeps dropping leaves no tunnel or proxy aimed at the dead core', () => {
