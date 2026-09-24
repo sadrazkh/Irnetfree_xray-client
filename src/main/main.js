@@ -3038,12 +3038,21 @@ app.whenReady().then(() => {
 
   mainWindow.once('ready-to-show', () => {
     updateOverlay('off');
-    // Connect to the last server on launch — once the renderer exists, so the
-    // 'connecting' and 'connected' events have somewhere to land. Only a server
-    // that still exists; a failure is a log line, the app stays up.
+    // Connect to the last connection on launch — once the renderer exists, so
+    // the 'connecting' and 'connected' events have somewhere to land. Any
+    // target a connect takes — a server, a chain, advanced routing, the pool
+    // (the service's autoConnectAtLaunch asks the same) — as long as it can
+    // still be built; one that cannot is said, not silently skipped. A failure
+    // is a log line, the app stays up.
     const boot = getSettings();
     const lastId = store.get('lastServerId', null);
-    if (boot.autoConnect && lastId && store.get('servers', []).some(s => s.id === lastId)) {
+    let buildable = false;
+    if (boot.autoConnect && lastId) {
+      try { buildPlan(lastId, boot); buildable = true; } catch (e) {
+        send('log', { line: `Auto-connect: the last connection (${lastId}) cannot be built any more — ${e.message}`, level: 'error' });
+      }
+    }
+    if (buildable) {
       setTimeout(() => doConnect(lastId).catch((e) => send('log', { line: 'Auto-connect failed: ' + e.message, level: 'error' })), 1000);
     }
   });

@@ -167,6 +167,39 @@ test('a launch clears the activeServerId a crash or a kill left, and connect-on-
   assert.match(WHEN_READY, /const lastId = store\.get\('lastServerId', null\);/, 'connect-on-launch reads lastServerId');
 });
 
+/** The ready-to-show handler (connect on launch) against fakes: what it connects to, and what it says. */
+function launchConnect({ lastId, servers = [], build = () => ({}) }) {
+  const out = { connects: [], logs: [] };
+  const make = new Function('env', `
+    const { store, getSettings, buildPlan, doConnect, send, updateOverlay } = env;
+    const setTimeout = (fn) => fn();
+    const mainWindow = { once: (ev, fn) => fn() };
+    ${slice("mainWindow.once('ready-to-show', () => {", '\n  });')}
+  `);
+  make({
+    store: { get: (k, d) => (k === 'lastServerId' ? lastId : k === 'servers' ? servers : d) },
+    getSettings: () => ({ autoConnect: true, lang: 'en' }),
+    buildPlan: build,
+    doConnect: async (id) => { out.connects.push(id); },
+    send: (ch, p) => { if (ch === 'log') out.logs.push(p.line); },
+    updateOverlay: () => {}
+  });
+  return out;
+}
+
+test('connect on launch resumes any target a connect takes — advanced routing, a chain, the pool — not only a server', () => {
+  // The owner's own selection is advanced routing: `servers.some(s => s.id === lastId)`
+  // never matched '__advanced__', so connect-on-launch silently did nothing.
+  for (const id of ['__advanced__', 'chain:c1', '__pool__', 'sv-1']) {
+    assert.deepEqual(launchConnect({ lastId: id, servers: [{ id: 'sv-1' }] }).connects, [id], id);
+  }
+  // one that cannot be built any more is said, not silently skipped (service.js says the same)
+  const gone = launchConnect({ lastId: 'sv-gone', build: () => { throw new Error('Server not found'); } });
+  assert.deepEqual(gone.connects, []);
+  assert.deepEqual(gone.logs, ['Auto-connect: the last connection (sv-gone) cannot be built any more — Server not found']);
+  assert.deepEqual(launchConnect({ lastId: null }).connects, []);
+});
+
 /* ----------------------------- S5: navigation guards ----------------------------- */
 
 test('the window navigates only to its own page and opens nothing itself; open:external takes web links only', () => {
