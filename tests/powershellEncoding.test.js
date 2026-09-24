@@ -20,12 +20,12 @@ const assert = require('node:assert/strict');
 const os = require('node:os');
 
 const cp = require('node:child_process');
-const realExecFile = cp.execFile;
 const calls = [];
 let answer = null;
+// Never falls through to the real execFile: nothing here may run on the machine.
 cp.execFile = (cmd, args, opts, cb) => {
   if (typeof opts === 'function') { cb = opts; opts = undefined; }
-  if (!answer) return realExecFile(cmd, args, opts, cb);
+  if (!answer) throw new Error(`the test reached the real ${cmd}`);
   calls.push([cmd, args]);
   let out;
   try { out = answer(cmd, args); } catch (e) { return process.nextTick(() => cb(e, '', e.message)); }
