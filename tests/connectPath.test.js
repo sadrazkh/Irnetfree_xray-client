@@ -158,6 +158,17 @@ test('a TUN connect whose tunnel is not up at its end gives back the guard its r
   }
 });
 
+test('both mirrors re-apply the DNS guard only over a core that is actually running', () => {
+  // re-applying the override every 30 s for a core that died only kept the machine pointed at nothing
+  const isActive = (source, label) => {
+    const m = /isActive: \(\) => ([^\n]*),\n/.exec(slice(source, label, 'new DnsGuardWatch({', '});'));
+    assert.ok(m, `${label}: DnsGuardWatch has no isActive`);
+    return m[1];
+  };
+  assert.equal(isActive(SERVICE, 'service.js'), isActive(MAIN, 'main.js'));
+  assert.match(isActive(SERVICE, 'service.js'), /&& !!xray\?\.running$/);
+});
+
 /* ------------------------------ A3: the live NIC ------------------------------ */
 
 test('every connect reads the NIC again — a live tunnel keeps its old name only when the read names nothing usable', () => {
