@@ -266,7 +266,23 @@ function makeRegistry(plan) {
     return 'direct';
   }
 
-  return { outs, add, tagFor };
+  /**
+   * Does the target still name something? A server deleted (or replaced by a
+   * subscription refresh), a chain removed or left with no members: tagFor()
+   * would send that `direct` — the traffic the rule was meant to protect,
+   * leaving in the clear while the app says "connected". An empty target is
+   * the user's own "not routed anywhere" and stays `direct`.
+   */
+  function exists(target) {
+    if (!target || target === 'direct' || target === 'block') return true;
+    const members = (list) => (list || []).filter(s => s && s.outbound).length > 0;
+    if (target === 'chain') return members(plan.chain);
+    if (typeof target === 'string' && target.indexOf('chain:') === 0) return members((plan.chainsById || {})[target.slice('chain:'.length)]);
+    const s = (plan.serversById || {})[target];
+    return !!(s && s.outbound);
+  }
+
+  return { outs, add, tagFor, exists };
 }
 
 /**
@@ -510,6 +526,13 @@ function buildConfig(planArg, settings) {
 
   if (plan.mode === 'advanced') {
     const reg = makeRegistry(plan);
+    // The default carries everything no rule claims: gone, there is nothing
+    // honest to send that traffic to. Refuse, rather than connect `direct`.
+    if (!reg.exists(plan.def)) {
+      throw new Error(s.lang === 'en'
+        ? 'Advanced routing: the default target no longer exists (it was removed, or replaced by a subscription update) — choose a new default under Routing.'
+        : 'روتینگ ویژه: مقصدِ پیش‌فرض دیگر وجود ندارد (حذف شده، یا با به‌روزرسانیِ اشتراک عوض شده) — در بخش روتینگ یک مقصدِ پیش‌فرضِ تازه انتخاب کن.');
+    }
     const advRules = [];
     for (const r of plan.rules || []) {
       if (!r) continue;
@@ -529,6 +552,10 @@ function buildConfig(planArg, settings) {
       } else if (r.type === 'port') {
         field = 'port'; value = vals.join(',');
       } else continue;
+
+      // A rule to a target that no longer exists is left out: its traffic
+      // then follows the default like everything else no rule claims.
+      if (!reg.exists(r.target)) continue;
 
       // Resolve the target only once the rule is known to survive: tagFor()
       // REGISTERS the outbound(s), so doing it earlier leaves a dead outbound
@@ -746,7 +773,10 @@ function buildTestConfig(target, socksPort) {
       protocol: 'socks',
       settings: { auth: 'noauth', udp: false }
     }],
-    outbounds
+    outbounds,
+    // Unrouted traffic goes to the FIRST outbound — for a chain the entry hop
+    // alone, so a dead exit measured green. Route the inbound to the exit.
+    routing: { rules: [{ type: 'field', inboundTag: ['socks-in'], outboundTag: 'proxy' }] }
   };
 }
 
