@@ -17,10 +17,15 @@ const { createService, DEFAULT_SETTINGS } = require('../src/server/service');
 // main.js requires Electron at load, so its defaults are read as text
 const MAIN_SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
 
+const fakes = require('./gatewayFakes');
+
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-svc-openwrt-'));
 // no subscription timer, no asset updater: nothing to keep the process alive
 fs.writeFileSync(path.join(dir, 'store.json'), JSON.stringify({ settings: { autoUpdateSubs: false, autoUpdateAssets: 'off' } }));
-const service = createService({ dataDir: dir });
+// The seams faked: shutdown() used to run the REAL "system proxy off" — on
+// Windows a registry write on whoever ran `npm test` — and the start-time
+// cleanup would run the real `ip` / `nft`.
+const service = createService({ dataDir: dir, deps: fakes.deps(fakes.makeState()) });
 test.after(async () => { await service.shutdown(); try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
 
 test('both DEFAULT_SETTINGS carry lanBypassMacs = []', () => {
@@ -81,11 +86,12 @@ test('on a router the managed DNS plan is forced on — a stored "off" is overri
   assert.equal((await service.invoke('app:init')).settings.dnsManaged, true);
 });
 
-test('the boot-time retry is a router thing: the source pins 20 tries 15s apart there, one try elsewhere', () => {
+test('the boot-time retry is a router thing: for as long as it takes there (15s, then every minute), one try elsewhere', () => {
+  // the behaviour itself is driven in serviceGateway.test.js; this pins the production cadence
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
-  assert.match(src, /const AUTO_RETRY = OPENWRT \? \{ tries: 20, everyMs: 15000 \} : \{ tries: 1, everyMs: 0 \};/);
-  assert.match(src, /if \(store\.get\('activeServerId', null\) \|\| isQuitting\) return;/, 'a connect made by hand ends the retries');
-  assert.match(src, /attempt < AUTO_RETRY\.tries && !userDisconnecting/, 'so does a disconnect');
+  assert.match(src, /bootEveryMs: 15000, bootSlowAfter: 20, bootSlowMs: 60000/);
+  assert.match(src, /\? \{ tries: Infinity, everyMs: T\.bootEveryMs, slowAfter: T\.bootSlowAfter, slowMs: T\.bootSlowMs \}\n\s*: \{ tries: 1, everyMs: 0, slowAfter: Infinity, slowMs: 0 \};/);
+  assert.match(src, /routerBackoffMs: \[2000, 5000, 15000, 30000, 60000\]/, 'the recovery backs off to a minute, and never gives up');
 });
 
 test('net:lanDevices answers a list even where there are no leases and no LAN', async () => {
