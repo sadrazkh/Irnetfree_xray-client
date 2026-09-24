@@ -56,7 +56,7 @@ function harness(extraTable = []) {
   tun.isElevated = () => true;
   table = [
     ...extraTable,
-    [/Get-NetRoute -DestinationPrefix/, '192.168.8.1|22\r\n'],
+    [/Get-NetRoute -DestinationPrefix/, JSON.stringify([{ nextHop: '192.168.8.1', ifIndex: 22, alias: 'Wi-Fi', routeMetric: 0, ifMetric: 35, state: 'Connected' }]) + '\r\n'],
     [/Get-NetAdapter -Name 'XrayTun'.*\.Status$/, 'Up\r\n'],
     [/Get-NetAdapter -Name 'XrayTun'.*\.ifIndex$/, '44\r\n']
   ];
