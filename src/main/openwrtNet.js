@@ -252,15 +252,19 @@ const CORE_NAMES = new Set(['xray', 'xray-pattn', 'sing-box']);
  * without its exit hook (OOM killer, procd's SIGKILL after a slow stop) leaves
  * its children running — an xray holding the SOCKS port the next one needs, a
  * sing-box holding the IRNetFree device. Matched by /proc/<pid>/cmdline: the
- * executable is one of ours AND an argument lies inside this service's data
- * dir (xray's config and test configs) or is one of the gateway's own sing-box
- * configs (`<tmp>/irnf-sb-…`). Anything else — another package's xray, a
- * sing-box someone runs by hand — is never touched. Never throws.
+ * executable is one of ours AND an argument is one of this service's own FILES
+ * — `<data dir>/config.json`, `<data dir>/test-….json` (latency tests and
+ * validations: test-cfg-…) or the gateway's `<tmp>/irnf-sb-…/sing-box.json`.
+ * By file name, not by directory: a data dir of /tmp must not catch every
+ * core that keeps its config there. Anything else — another package's xray,
+ * a sing-box someone runs by hand — is never touched. Never throws.
  */
 function ownOrphanCores({ dataDir, tmpDir = '/tmp', selfPid = process.pid, readdir = fs.readdirSync, readFile = fs.readFileSync } = {}) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const dir = String(dataDir || '').replace(/\/+$/, '');
-  const inData = dir.startsWith('/') && dir.length > 1 ? dir + '/' : null;
-  const sbPrefix = String(tmpDir || '/tmp').replace(/\/+$/, '') + '/irnf-sb-';
+  const ours = [];
+  if (dir.startsWith('/') && dir.length > 1) ours.push(new RegExp(`^${esc(dir)}/(config|test-[^/]+)\\.json$`));
+  ours.push(new RegExp(`^${esc(String(tmpDir || '/tmp').replace(/\/+$/, ''))}/irnf-sb-[^/]+/sing-box\\.json$`));
   let entries;
   try { entries = readdir('/proc'); } catch { return []; }
   const out = [];
@@ -269,7 +273,7 @@ function ownOrphanCores({ dataDir, tmpDir = '/tmp', selfPid = process.pid, readd
     let argv;
     try { argv = String(readFile(`/proc/${e}/cmdline`)).split('\0').filter(Boolean); } catch { continue; }   // exited meanwhile
     if (!argv.length || !CORE_NAMES.has(argv[0].slice(argv[0].lastIndexOf('/') + 1))) continue;
-    if (!argv.slice(1).some(a => (inData && a.startsWith(inData)) || a.startsWith(sbPrefix))) continue;
+    if (!argv.slice(1).some(a => ours.some(re => re.test(a)))) continue;
     out.push({ pid: Number(e), argv });
   }
   return out;
