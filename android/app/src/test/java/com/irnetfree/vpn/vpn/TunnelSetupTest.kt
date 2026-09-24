@@ -46,6 +46,37 @@ class TunnelSetupTest {
         assertFalse(v6, v6.contains("username"))
     }
 
+    @Test fun hevsYamlQuotesTheCredentials() {
+        // A single-quoted YAML scalar ends at the first lone ' — doubled, it is one quote.
+        val y = TunnelSetup.tun2socksYaml(10808, LocalAuth("it's", "p'w''"), mtu = 1500, ipv4 = "172.19.0.1", ipv6 = null)
+        assertTrue(y, y.contains("  username: 'it''s'\n  password: 'p''w'''''\n"))
+    }
+
+    @Test fun aCrashLoopBacksOffAndKeepsTrying() {
+        val t0 = 1_000_000_000_000L
+        // The first restart after a kill, or one long after the last attempt: at once.
+        val first = StickyRestart.next(0L, 0, t0)
+        assertEquals(0, first.streak); assertEquals(0L, first.waitMs); assertEquals(t0, first.attemptAt)
+        assertEquals(0L, StickyRestart.next(t0 - 10 * 60_000L, 3, t0).waitMs)
+
+        // A config that takes the process down five seconds into every attempt:
+        // 30 s, 60 s, then 120 s each time — never a stop, which under lockdown
+        // was a phone with no internet until somebody opened the app.
+        var at = 0L; var streak = 0; var now = t0
+        val waits = ArrayList<Long>()
+        repeat(7) {
+            val n = StickyRestart.next(at, streak, now)
+            waits.add(n.waitMs); at = n.attemptAt; streak = n.streak
+            now = n.attemptAt + 5_000L
+        }
+        assertEquals(listOf(0L, 30_000L, 60_000L, 120_000L, 120_000L, 120_000L, 120_000L), waits)
+
+        // Killed again while it waited (the planned attempt is still ahead): the same loop.
+        assertEquals(60_000L, StickyRestart.next(t0 + 30_000L, 1, t0).waitMs)
+        // A clock set far back does not make every restart look like a loop.
+        assertEquals(0L, StickyRestart.next(t0 + 3_600_000L, 4, t0).waitMs)
+    }
+
     private fun wg(endpoint: String): ServerConfig {
         val ob = JSONObject().put("protocol", "wireguard").put("settings", JSONObject()
             .put("secretKey", "k").put("address", JSONArray().put("10.13.13.2/32"))

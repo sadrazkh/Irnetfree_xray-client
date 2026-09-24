@@ -107,6 +107,10 @@ class LocalAuthTest {
         assertNull(Authenticator.requestPasswordAuthentication("127.0.0.1", lo, 40002, "SOCKS5", "SOCKS authentication", null))
         assertNull(Authenticator.requestPasswordAuthentication("10.0.0.5", InetAddress.getByName("10.0.0.5"), 40001, "SOCKS5", "SOCKS authentication", null))
         assertNull(Authenticator.requestPasswordAuthentication("127.0.0.1", lo, 40001, "http", "realm", "basic"))
+        // 127.0.0.1 itself, where the tunnel listens — not the rest of loopback
+        assertNull(Authenticator.requestPasswordAuthentication("127.0.0.2", InetAddress.getByName("127.0.0.2"), 40001, "SOCKS5", "SOCKS authentication", null))
+        assertNull(Authenticator.requestPasswordAuthentication("::1", InetAddress.getByName("::1"), 40001, "SOCKS5", "SOCKS authentication", null))
+        assertNull(Authenticator.requestPasswordAuthentication("localhost", null, 40001, "SOCKS5", "SOCKS authentication", null))
         // a newer session's credentials are not dropped by an older teardown
         LocalProxyAuth.release(LocalAuth("old", "old"))
         assertNotNull(Authenticator.requestPasswordAuthentication("127.0.0.1", lo, 40001, "SOCKS5", "SOCKS authentication", null))

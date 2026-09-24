@@ -40,6 +40,14 @@ object TunnelSetup {
     }
 }
 
+object StickyRestart {
+    const val WINDOW_MS = 120_000L
+
+    class Next(val streak: Int, val waitMs: Long, val attemptAt: Long)
+
+    fun next(lastAttemptAt: Long, streak: Int, now: Long): Next = Next(0, 0L, now)
+}
+
 /**
  * Is a loopback port free for a core to bind? A subprocess core's "ready" is
  * "the port answers" — which another app, or an orphan of ours, satisfies just
