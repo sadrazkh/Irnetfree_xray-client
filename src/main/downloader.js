@@ -62,16 +62,32 @@ function pickModule(u) {
 function downloadFile(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
+    let settled = false;
+    let body = null;             // the response being written, dropped on a failure
     // Never leave a half-written (or empty, still-open) file behind: a 403 from
     // GitHub's rate limiter used to strand a zero-byte *.tmp with its handle open.
-    const fail = (err) => { file.close(() => { try { fs.unlinkSync(dest); } catch {} reject(err); }); };
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      if (body) { try { body.destroy(); } catch {} }
+      const drop = () => { try { fs.unlinkSync(dest); } catch {} reject(err); };
+      if (file.closed) return drop();
+      file.once('close', drop);
+      file.destroy();
+    };
+    // ENOSPC / EIO / EACCES on the destination: without a listener an error on
+    // the write stream is an uncaught exception — the whole process, and on a
+    // router with it the gateway. It is a failed download like any other.
+    file.on('error', fail);
     const req = (u, depth) => {
       if (depth > 6) return fail(new Error('too many redirects'));
       let mod;
       try { mod = pickModule(u); } catch (e) { return fail(e); }
       mod.get(u, { headers: { 'User-Agent': 'IRNetFree' } }, (res) => {
+        if (settled) { res.resume(); return; }
         if (res.statusCode >= 300 && res.headers.location) { res.resume(); req(res.headers.location, depth + 1); return; }
         if (res.statusCode !== 200) { res.resume(); return fail(new Error('HTTP ' + res.statusCode)); }
+        body = res;
         const total = parseInt(res.headers['content-length'] || '0', 10);
         let got = 0;
         res.on('data', (c) => {
@@ -79,8 +95,11 @@ function downloadFile(url, dest, onProgress) {
           if (onProgress && total) onProgress(Math.min(100, Math.round((got / total) * 100)));
         });
         res.on('error', fail);
+        // a connection that closes before the body is complete is a failure,
+        // whether or not this Node reports it as an error on the response
+        res.on('close', () => { if (!res.complete) fail(new Error('the download was cut off')); });
         res.pipe(file);
-        file.on('finish', () => file.close(() => resolve(dest)));
+        file.on('finish', () => file.close(() => { if (!settled) { settled = true; resolve(dest); } }));
       }).on('error', fail);
     };
     req(url, 0);
@@ -143,6 +162,7 @@ class Downloader {
     this.destDir = opts.destDir;
     this.onLog = opts.onLog || (() => {});
     this.onProgress = opts.onProgress || (() => {});
+    this.copyFile = opts.copyFile || fs.copyFileSync;   // a seam for the tests (a copy that fails half way)
     fs.mkdirSync(this.destDir, { recursive: true });
   }
 
@@ -312,13 +332,26 @@ class Downloader {
     return { ok: true, files: [placed] };
   }
 
-  /** Copy a file into destDir; mark executable on unix. */
+  /**
+   * Copy a file into destDir; mark executable on unix. The copy goes to
+   * `<name>.new` and is renamed over the old one, so a copy that fails half way
+   * (a full flash on a router) never truncates — or, through libuv's cleanup of
+   * a failed copy, deletes — the core that was working. The rename also works
+   * under a running binary on Linux, where copying onto it is ETXTBSY.
+   */
   place(src, name, exec = false) {
     const dest = path.join(this.destDir, name);
-    fs.copyFileSync(src, dest);
-    if (os.platform() !== 'win32') {
-      if (exec) { try { fs.chmodSync(dest, 0o755); } catch {} }
-      if (os.platform() === 'darwin') this.macPrepareBinary(dest, exec);
+    const tmp = dest + '.new';
+    try {
+      this.copyFile(src, tmp);
+      if (os.platform() !== 'win32') {
+        if (exec) { try { fs.chmodSync(tmp, 0o755); } catch {} }
+        if (os.platform() === 'darwin') this.macPrepareBinary(tmp, exec);
+      }
+      fs.renameSync(tmp, dest);
+    } catch (e) {
+      try { fs.rmSync(tmp, { force: true }); } catch {}
+      throw e;
     }
     return dest;
   }
