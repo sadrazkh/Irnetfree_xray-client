@@ -330,7 +330,7 @@ test('a macOS/Linux shutdown that gets cancelled does not leave the app deaf for
   assert.match(check, /syncTeardownDone = false;/);
   // no automatic rebuild: on a macOS TUN that is a password prompt in the middle of a slow logout
   assert.doesNotMatch(check, /recoverFromNetworkChange/);
-  assert.match(check, /reportReconnectFailed\('shutdown-cancelled', \{ ok: false \}\)/, 'the user (or the network watcher) rebuilds');
+  assert.match(check, /reportReconnectFailed\(partial \? 'shutdown-cancelled-partial' : 'shutdown-cancelled', \{ ok: false \}\)/, 'the user (or the network watcher) rebuilds');
   assert.match(check, /\.unref\(\)/, 'never what keeps a quitting process alive');
 });
 
@@ -354,7 +354,7 @@ test('the window says a DROP when it was one, and says the kill switch closed th
   const mainReasons = /const DROP_REASONS = new Set\(\[([^\]]*)\]\)/.exec(MAIN)[1];
   assert.match(APP, new RegExp(`const DROP_REASONS = \\[${mainReasons.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\];`));
   assert.match(APP, /toast\(t\(failedKey\(d\.reason\)\), 'err', 8000\);/);
-  assert.match(APP, /function failedKey\(reason\) \{\n\s*if \(reason === 'shutdown-cancelled'\) return 'net\.shutdownCancelled';\n\s*return DROP_REASONS\.includes\(reason\) \? 'net\.dropFailed' : 'net\.failed';/);
+  assert.match(APP, /function failedKey\(reason\) \{\n\s*if \(reason === 'shutdown-cancelled'\) return 'net\.shutdownCancelled';\n\s*if \(reason === 'shutdown-cancelled-partial'\) return 'net\.shutdownCancelledPartial';\n\s*return DROP_REASONS\.includes\(reason\) \? 'net\.dropFailed' : 'net\.failed';/);
   assert.match(APP, /DROP_REASONS\.includes\(state\.reconnectReason\) \? 'state\.reconnectingDrop' : 'state\.reconnecting'/);
   for (const key of ['net.dropFailed', 'state.reconnectingDrop', 'net.shutdownCancelled']) {
     assert.equal((I18N.match(new RegExp(`'${key.replace('.', '\\.')}':`, 'g')) || []).length, 2, `${key}: one fa and one en string`);
@@ -471,6 +471,43 @@ test('killSwitch ON: a drop that no connect healed keeps its block for the rebui
   await h.onConnectionDrop('core-exited');
   assert.equal(h.killEngaged(), true, 'the recovery rebuilds under the block');
   assert.deepEqual(h.calls, ['arm', 'recover:core-exited']);
+});
+
+/** scheduleShutdownCancelCheck() run at once on a given platform/uid; what it logs and reports. */
+function shutdownCancelled({ platform, uid }) {
+  const out = { logs: [], reported: [] };
+  const make = new Function('process', 'setTimeout', 'env', `
+    let quitTeardown = null, isQuitting = true, userDisconnecting = true, syncTeardownDone = true;
+    const store = { get: (k, d) => (k === 'activeServerId' ? 'srv1' : d) };
+    const send = (ch, p) => { if (ch === 'log') env.logs.push(p.line); };
+    const reportReconnectFailed = (reason, res) => env.reported.push(reason);
+    ${slice('function scheduleShutdownCancelCheck() {', '\n}')}
+    return scheduleShutdownCancelCheck;
+  `);
+  const proc = { platform, getuid: uid == null ? undefined : () => uid };
+  make(proc, (fn) => { fn(); return { unref() {} }; }, out)();
+  return out;
+}
+
+test('a cancelled shutdown on macOS as non-root does not claim the connection was taken down', () => {
+  // As non-root the exit teardown could run nothing privileged: the sing-box
+  // TUN and the core are still up — only the system proxy may have been put back.
+  const mac = shutdownCancelled({ platform: 'darwin', uid: 501 });
+  assert.equal(mac.logs.length, 1);
+  assert.doesNotMatch(mac.logs[0], /taken down/);
+  assert.match(mac.logs[0], /may be only partly up/);
+  assert.deepEqual(mac.reported, ['shutdown-cancelled-partial']);
+  for (const [platform, uid] of [['win32', null], ['darwin', 0], ['linux', 1000]]) {
+    const other = shutdownCancelled({ platform, uid });
+    assert.match(other.logs[0], /taken down for it/, platform);
+    assert.deepEqual(other.reported, ['shutdown-cancelled'], platform);
+  }
+  const R = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', f), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(R('app.js'), /if \(reason === 'shutdown-cancelled-partial'\) return 'net\.shutdownCancelledPartial';/);
+  const I18N = R('i18n.js');
+  const strings = [...I18N.matchAll(/'net\.shutdownCancelledPartial': '([^']*)'/g)].map(m => m[1]);
+  assert.equal(strings.length, 2, 'one fa and one en string');
+  for (const s of strings) assert.doesNotMatch(s, /taken down|قطع شده بود/);
 });
 
 test('killSwitch ON: a drop that joins a recovery which brings the core back lifts its own block too', async () => {
