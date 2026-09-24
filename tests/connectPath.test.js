@@ -45,7 +45,7 @@ const seam = (s) => s.replace(/\bresolveName\(/g, 'resolveHost(');
 
 const CONNECT = {
   'main.js': slice(MAIN, 'main.js', 'async function connectOnce(serverId, opts = {}) {', '\n  return { ok: true, tunError };\n}'),
-  'service.js': slice(SERVICE, 'service.js', 'async function doConnect(serverId) {', '\n    return { ok: true, tunError };\n  }')
+  'service.js': slice(SERVICE, 'service.js', 'async function connectOnce(serverId) {', '\n    return { ok: true, tunError };\n  }')
 };
 
 /* ---------------------------- A1: pinned entry names ---------------------------- */

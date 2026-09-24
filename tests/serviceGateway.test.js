@@ -456,6 +456,44 @@ test('a drop queued behind a recovery is replayed through the crash window, not 
   assert.ok(s.logs.some(l => /dropped again \d+s after it was rebuilt \(core-exited\)/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
 });
 
+test('a core that dies while its connect is still bringing the gateway up is rebuilt AFTER that connect — never a second gateway beside it', async (t) => {
+  // The core binds its SOCKS port while the connect waits (waitPort): a kill -9
+  // there used to start the recovery's connect at once, beside the first — a
+  // second TunOpenwrt built while the first was inside start(), and the loser's
+  // undo deleted the shared nft table by name: a gateway "up" with no
+  // exclusions and no QUIC rule.
+  const slowPort = { waitForLocalPort: () => new Promise((r) => setTimeout(() => r(true), 150)) };
+  const s = start({}, slowPort);
+  t.after(() => s.service.shutdown());
+  const first = s.service.invoke('connect', SERVER.id);
+  await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
+  s.state.xray.crash();
+  await first;
+  await until(() => connectedCount(s) === 2, 'the rebuild');
+  assert.equal(s.state.inners.filter(i => i.starts > 0).length, 1, 'one gateway, rebuilt in place — never a second one beside it');
+  assert.equal(s.state.inners.filter(i => i.active).length, 1);
+  assert.equal(s.state.xray.running, true);
+  assert.equal(s.state.xray.starts.length, 2);
+  // the rebuild started only once the first connect had finished
+  const ev = s.state.events.filter(e => e === 'gateway:start' || e === 'xray:start');
+  assert.deepEqual(ev, ['xray:start', 'gateway:start', 'xray:start', 'gateway:start'], ev.join(', '));
+});
+
+test('a drop that lands inside a connect which then comes up whole is not rebuilt', async (t) => {
+  // a sing-box that died while the connect was still building the gateway, which that connect then rebuilt
+  const slowPort = { waitForLocalPort: () => new Promise((r) => setTimeout(() => r(true), 100)) };
+  const s = start({}, slowPort);
+  t.after(() => s.service.shutdown());
+  const first = s.service.invoke('connect', SERVER.id);
+  await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
+  s.state.xray.crash();
+  s.state.xray.running = true;   // …a stale "stopped" of a core already replaced: the connect’s own is up
+  await first;
+  await sleep(100);
+  assert.equal(connectedCount(s), 1);
+  assert.ok(!s.statuses.some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.map(x => x.state)));
+});
+
 test('a connect by hand starts with no crash history — its first drop is rebuilt at once', async (t) => {
   const s = start({}, withTiming({ routerBackoffMs: [1500, 1500, 1500], crashWindowMs: 60000 }));
   t.after(() => s.service.shutdown());
