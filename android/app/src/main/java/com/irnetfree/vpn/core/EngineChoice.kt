@@ -55,5 +55,11 @@ object EngineChoice {
     /** Throwaway latency tests use an Xray-format core (buildTestConfig is Xray JSON). */
     fun testEngineFor(engineId: String?): String = if (engineId == PATTN) PATTN else XRAY
 
-    fun testEngineFor(server: ServerConfig, defaultEngine: String = XRAY): String = testEngineFor(server.engine)
+    /**
+     * The core a throwaway test of [server] runs on: the one connecting to it
+     * would use — its own choice, else Settings → Default core — never sing-box
+     * (the desktop's testEngineFor(chooseEngine(plan, defaultEngine)), main.js).
+     */
+    fun testEngineFor(server: ServerConfig, defaultEngine: String = XRAY): String =
+        testEngineFor(chooseEngine(ConnectionPlan.Single(server), defaultEngine))
 }
