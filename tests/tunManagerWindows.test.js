@@ -186,6 +186,25 @@ test('tun2socks: a start that dies at once, or a failing callback, is no lost tu
   } finally { h.done(); }
 });
 
+test('win32: a late exit from a tun2socks already replaced leaves the live tunnel and its routes alone', async () => {
+  const h = harness();
+  try {
+    const lost = [];
+    h.tun.onUnexpectedExit = (err) => { lost.push(err); };
+    await h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    const old = h.tun.proc;
+    const live = new (require('node:events').EventEmitter)();
+    h.tun.proc = live;             // stop() does not wait for the exit; a restart spawned a new one
+    execs.length = 0;
+    old.emit('exit', 1);
+    await flush();
+    assert.equal(h.tun.active, true);
+    assert.equal(h.tun.proc, live, 'the new process is not forgotten');
+    assert.deepEqual(lost, []);
+    assert.ok(!execLines().some(l => /^route delete/.test(l)), 'the live routes stay');
+  } finally { h.done(); }
+});
+
 test('TunManager takes onUnexpectedExit from its options; the default is a no-op', () => {
   const f = () => {};
   assert.equal(new TunManager({ onUnexpectedExit: f }).onUnexpectedExit, f);
