@@ -317,9 +317,10 @@ function parseShadowsocks(link) {
     // Plain `method:password` (percent-encoded; the only form SS-2022 allows)
     // or base64 of it. Plain is recognised first — base64 decoding is lenient
     // enough to turn plain text into a garbage cipher — and base64 only counts
-    // when what it decodes to is a method:password pair.
+    // when what it decodes to is a method:password pair. Base64 of the
+    // percent-DECODED text: a `%3D` padding decoded raw leaves stray bytes.
     const plain = safeDecodeURIComponent(userInfo);
-    const decoded = plain.includes(':') ? plain : b64decode(userInfo);
+    const decoded = plain.includes(':') ? plain : b64decode(plain);
     const ci = decoded.indexOf(':');
     if (ci === -1) throw new Error('Shadowsocks: cannot read method:password from the link');
     method = decoded.slice(0, ci);

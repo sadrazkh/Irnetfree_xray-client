@@ -1066,6 +1066,14 @@ test('ss: plain method:password userinfo — mandatory for SS-2022 — is read a
   assert.equal(back.password, 'YctPZ6U7xPPcU+gp3u+O0A==');
 });
 
+test('ss: a base64 userinfo whose padding is percent-encoded decodes cleanly', () => {
+  const b = b64('aes-256-gcm:secret1');   // 19 bytes → "==" padding
+  assert.ok(b.endsWith('=='));
+  const s = parseLink('ss://' + b.replace(/=/g, '%3D') + '@ss.example.com:8388#P');
+  assert.equal(s.outbound.settings.servers[0].method, 'aes-256-gcm');
+  assert.equal(s.outbound.settings.servers[0].password, 'secret1', 'no stray bytes from the %3D');
+});
+
 test('ss: a userinfo that is neither plain nor base64 of method:password is an error, not a garbage cipher', () => {
   assert.throws(() => parseLink('ss://' + b64url('no-colon-here') + '@1.2.3.4:8388#x'), /Shadowsocks/);
   const { servers, errors } = parseMany('ss://' + b64url('no-colon-here') + '@1.2.3.4:8388#x');
