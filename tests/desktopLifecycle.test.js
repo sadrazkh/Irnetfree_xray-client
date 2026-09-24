@@ -193,7 +193,7 @@ test('a connection that keeps dropping is given up on through the same reconnect
   const DROP = dropSrc();
   const budget = DROP.indexOf('drops.take()');
   assert.notEqual(budget, -1, 'nothing bounds a core that starts, survives the grace and dies again');
-  assert.ok(budget < DROP.indexOf('await recoverFromNetworkChange(reason)'));
+  assert.ok(budget < DROP.lastIndexOf('await recoverFromNetworkChange(reason)'), 'the budget is spent before a rebuild of its own starts');
   assert.match(DROP, /if \(!drops\.take\(\)\) \{[\s\S]*?reportReconnectFailed\(reason,/);
   const give = slice('function reportReconnectFailed(reason, res) {', '\n}');
   assert.match(give, /state: 'reconnect-failed'/);
@@ -231,6 +231,64 @@ test('with automatic reconnect off, a dead core is torn down instead of left und
     'nothing will rebuild it: make the "Disconnected" the UI shows true');
   // a drop the user already answered is not handled twice
   assert.match(DROP, /^async function onConnectionDrop\(reason\) \{\n {2}if \(userDisconnecting \|\| isQuitting \|\| !store\.get\('activeServerId', null\)\) return;/);
+});
+
+test('a connect whose core died while the tunnel was being built fails instead of reporting "connected"', () => {
+  // The core only has to survive start()'s 1.2 s grace; the TUN and the guard
+  // take seconds more. Reporting connected over a dead core told a recovery it
+  // was done — and it lifted the kill switch over nothing.
+  const body = slice('async function connectOnce(serverId, opts = {}) {', "send('status', {\n    state: 'connected'");
+  const gate = body.lastIndexOf('if (stale()) return abandoned;');
+  const dead = body.indexOf('if (!xray.running) throw new Error(');
+  assert.ok(dead !== -1 && gate < dead, 'the dead-core check is the last gate before the watchers and the status');
+  const rec = slice('async function runRecovery(reason, attempt) {', '\n}');
+  assert.match(rec, /if \(held && !\(res && res\.stale\) && xray && xray\.running\) \{/, 'the block is lifted only over a running core');
+});
+
+test('a drop waits for a connect in flight, joins a recovery in flight, and only then spends the budget', () => {
+  assert.match(MAIN, /^const connectsInFlight = new Set\(\);$/m);
+  assert.match(slice('function doConnect(serverId, opts) {', '\n}'), /connectOnce\(serverId, opts\)[\s\S]*connectsInFlight\.add\(p\)/);
+  const DROP = dropSrc();
+  const wait = DROP.indexOf('await Promise.allSettled([...connectsInFlight])');
+  const join = DROP.indexOf('if (recovering) { await recoverFromNetworkChange(reason); return; }');
+  const budget = DROP.indexOf('drops.take()');
+  assert.ok(wait !== -1 && join !== -1 && wait < join && join < budget, DROP);
+});
+
+test('giving up cancels the pending retry and says nothing when the user acted meanwhile; proxyUp is false under the kill switch', () => {
+  const DROP = dropSrc();
+  const give = DROP.slice(DROP.indexOf('if (!drops.take()) {'));
+  assert.match(give, /clearTimeout\(recoverTimer\);\s*recoverTimer = null;\s*recoverQueued = null;/);
+  assert.match(give, /const gen = connGen;[\s\S]*if \(gen !== connGen\) return;[\s\S]*reportReconnectFailed/);
+  assert.match(DROP, /const proxyUp = \(\) => !!\(xray && xray\.running\) && !killEngaged;/);
+  assert.doesNotMatch(DROP, /\{ ok: !!\(xray && xray\.running\) \}/);
+});
+
+test('with automatic reconnect off, a drop that is not torn down still tells the UI the truth', () => {
+  const DROP = dropSrc();
+  const off = DROP.slice(DROP.indexOf('if (!s.autoReconnectOnNetworkChange)'), DROP.indexOf('if (recovering)'));
+  assert.match(off, /reportReconnectFailed\(reason, \{ ok: proxyUp\(\)/, 'a reload that left no core, or a dead TUN, must not stay "connected"');
+});
+
+test('the kill switch is not re-armed over itself (a delete-then-add left a gap with the tunnel down)', () => {
+  const arm = slice('async function armKillSwitch() {', '\n}');
+  assert.match(arm, /if \(process\.platform !== 'win32'\) return \{ ok: false, error: 'windows only' \};\n(?:\s*\/\/[^\n]*\n)*\s*if \(killEngaged\) return \{ ok: true \};/);
+});
+
+test('a Retry that fails says so, instead of leaving the window on "Connecting"', () => {
+  const retry = slice("ipcMain.handle('vpn:reconnect'", '\n  });');
+  assert.match(retry, /catch \(e\) \{[\s\S]*send\('status', \{ state: 'error', message: e\.message \}\)/);
+  assert.match(retry, /if \(held && r && r\.ok && xray && xray\.running\)/);
+});
+
+test('the elevated relaunch tears this instance down BEFORE it hands over the lock and starts the elevated copy', () => {
+  const relaunch = slice("ipcMain.handle('app:relaunchAdmin'", '\n  });');
+  const down = relaunch.indexOf('await Promise.race([teardownForQuit()');
+  const release = relaunch.indexOf('app.releaseSingleInstanceLock()');
+  const spawnAt = relaunch.indexOf("spawn('powershell'");
+  assert.ok(down !== -1 && down < release && release < spawnAt,
+    'the copy repairs the same userData files and binds the same ports the moment it starts');
+  assert.match(relaunch, /quitTeardown = 'done';/, 'and the quit that follows does not tear down a second time');
 });
 
 test('a tunnel backend dying and a reload that leaves no core take the same path', () => {
