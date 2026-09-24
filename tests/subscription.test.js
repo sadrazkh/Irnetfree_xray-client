@@ -134,6 +134,26 @@ test('several servers sharing one identity are paired in order, one old id each'
   assert.equal(swapped[0].id, old[0].id, 'the identity match takes what is left');
 });
 
+test('panel variants of one server (same host, port, uuid; another SNI) keep their own ids when reordered and retuned', () => {
+  const a = XH.replace('sni=www.speedtest.net', 'sni=a.example');
+  const b = XH.replace('sni=www.speedtest.net', 'sni=b.example');
+  const old = sub([a + '#one', b + '#two']);
+  // the panel reorders them AND changes the fingerprint: no link matches, even without its remark
+  const retune = (l) => l.replace('fp=chrome', 'fp=firefox');
+  const next = reconcileServers(old, sub([retune(b) + '#two', retune(a) + '#one']));
+  assert.equal(next[0].id, old[1].id, 'the b.example variant is still b');
+  assert.equal(next[1].id, old[0].id, 'the a.example variant is still a');
+  // the same for REALITY keys and a vless flow
+  const k1 = XH.replace('pbk=PUBKEY', 'pbk=KEY1'), k2 = XH.replace('pbk=PUBKEY', 'pbk=KEY2');
+  const o2 = sub([k1 + '#k1', k2 + '#k2']);
+  const n2 = reconcileServers(o2, sub([retune(k2) + '#k2', retune(k1) + '#k1']));
+  assert.deepEqual(n2.map(s => s.id), [o2[1].id, o2[0].id]);
+  const f1 = XH + '&flow=xtls-rprx-vision', f2 = XH;
+  const o3 = sub([f1 + '#f1', f2 + '#f2']);
+  const n3 = reconcileServers(o3, sub([retune(f2) + '#f2', retune(f1) + '#f1']));
+  assert.deepEqual(n3.map(s => s.id), [o3[1].id, o3[0].id]);
+});
+
 test('the user’s own settings on a server survive the refresh', () => {
   const [old] = sub([XH + '#DE']);
   old.engine = 'xray-pattn';
@@ -182,6 +202,23 @@ test('what the user did not touch follows the provider — a new fragment, name 
   assert.equal(next.outbound._fragment, 'tlshello,5-9,5-9', 'the provider changed its own fragment');
   assert.equal(next.name, 'DE-renamed', 'the provider renamed a server the user never renamed');
   assert.equal('engine' in next, false, 'the provider dropped its engine hint');
+});
+
+test('a value the user changed wins over the panel retuning the same field', () => {
+  const [old] = sub([XH + '&fragment=tlshello,1-2,1-2&noise=random&engine=xray-pattn#DE']);
+  old.outbound._fragment = 'tlshello,100-200,10-20';   // edited in the form
+  old.outbound._noise = 'faketls';
+  old.engine = 'sing-box';
+  const [next] = reconcileServers([old], sub([XH + '&fragment=tlshello,5-9,5-9&noise=rand:10-20:0&engine=xray#DE']));
+  assert.equal(next.outbound._fragment, 'tlshello,100-200,10-20');
+  assert.equal(next.outbound._noise, 'faketls');
+  assert.equal(next.engine, 'sing-box');
+  // and one the user left alone takes the panel's new value in the same refresh
+  const [old2] = sub([XH + '&fragment=tlshello,1-2,1-2&noise=random#DE']);
+  old2.outbound._noise = 'faketls';
+  const [n2] = reconcileServers([old2], sub([XH + '&fragment=tlshello,5-9,5-9&noise=rand:10-20:0#DE']));
+  assert.equal(n2.outbound._fragment, 'tlshello,5-9,5-9', 'untouched: the panel’s');
+  assert.equal(n2.outbound._noise, 'faketls', 'edited: the user’s');
 });
 
 test('a setting the user cleared stays cleared', () => {
