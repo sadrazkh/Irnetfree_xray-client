@@ -1044,6 +1044,20 @@ test('type=raw is TCP: a raw + http header link keeps its header, both ways', ()
   assert.deepEqual(vm.outbound.streamSettings.tcpSettings.header.request, { path: ['/p'], headers: { Host: ['h.com'] } });
 });
 
+test('applyServerEdits records which fields the user changed, across edits — a save that changes nothing records nothing', () => {
+  const s = parseLink('trojan://pw@b.example.com:443?security=tls&sni=b.example.com&type=ws&path=%2Ftr&host=b.example.com#B');
+  const full = (rec, over) => formFields(rec, Object.assign({ network: 'ws', security: 'tls', sni: 'b.example.com', path: '/tr', host: 'b.example.com' }, over));
+  const same = applyServerEdits(s, full(s));
+  assert.equal('_edited' in same, false, 'the form re-sends every field; unchanged ones are not edits');
+  const a = applyServerEdits(s, full(s, { address: '104.16.1.1' }));
+  assert.deepEqual(a._edited, ['address']);
+  const b = applyServerEdits(a, full(a, { sni: 'front.example.com', name: 'Mine', fragment: 'tlshello,100-200,10-20' }));
+  assert.deepEqual(b._edited, ['address', 'fragment', 'name', 'sni']);
+  const w = parseLink('wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32#W');
+  assert.deepEqual(applyServerEdits(w, { mtu: '1280', dns: '192.168.60.1' })._edited, ['dns', 'mtu']);
+  assert.equal('_edited' in applyServerEdits(s, { clearCertPin: true }), false, 'clearing the pin is not a field of the server');
+});
+
 test('applyServerEdits: httpupgrade path and Host are edited like the other transports', () => {
   const s = parseLink('vless://u@h.example.com:443?type=httpupgrade&security=tls&sni=cdn.example.com&path=%2Fup&host=cdn.example.com#HU');
   const out = applyServerEdits(s, { network: 'httpupgrade', security: 'tls', sni: 'cdn.example.com', path: '/new', host: 'other.example.com' });
