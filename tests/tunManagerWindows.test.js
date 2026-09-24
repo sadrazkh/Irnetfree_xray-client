@@ -140,3 +140,54 @@ test('cleanupSync (Windows) withdraws the v6 split routes with the v4 ones', { s
     ]);
   } finally { h.done(); }
 });
+
+/*
+ * tun2socks dying under a live tunnel leaves its /1 split routes pointing at an
+ * adapter that is gone. The exit handler already withdrew them; it now also tells
+ * the owner, whose recovery rebuilds the tunnel — the sing-box backend does the same.
+ */
+const flush = () => new Promise((r) => setImmediate(r));
+
+test('win32: tun2socks exiting on its own under a live tunnel withdraws the routes and tells the owner, once', async () => {
+  const h = harness();
+  try {
+    const lost = [];
+    h.tun.onUnexpectedExit = (err) => { lost.push(err); };
+    await h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    assert.equal(h.tun.active, true);
+    const proc = h.tun.proc;
+    execs.length = 0;
+    proc.emit('exit', 1);
+    assert.equal(h.tun.active, false);
+    assert.deepEqual(lost, [], 'never from inside the child’s own exit event');
+    await flush();
+    assert.equal(lost.length, 1);
+    assert.match(lost[0].message, /tun2socks exited \(1\)/);
+    assert.ok(execLines().some(l => /^route delete 0\.0\.0\.0 mask 128\.0\.0\.0/.test(l)), 'its split routes are withdrawn');
+  } finally { h.done(); }
+});
+
+test('tun2socks: a start that dies at once, or a failing callback, is no lost tunnel and no throw', async () => {
+  const h = harness();
+  try {
+    const lost = [];
+    h.tun.onUnexpectedExit = async (err) => { lost.push(err); throw new Error('boom'); };
+    const starting = h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    await new Promise((r) => setTimeout(r, 50));   // inside the 400 ms fail-fast window
+    h.tun.proc.emit('exit', 1);
+    await assert.rejects(starting, /exited immediately/);
+    await flush();
+    assert.deepEqual(lost, [], 'the start reports itself through its rejection');
+    await h.tun.startWindows(10808, '1.2.3.4', ['10.255.0.1']);
+    assert.doesNotThrow(() => h.tun.proc.emit('exit', 2));
+    await flush(); await flush();
+    assert.equal(lost.length, 1);
+    assert.ok(h.logs.some(([lvl, l]) => lvl === 'error' && /TUN recovery callback: boom/.test(l)));
+  } finally { h.done(); }
+});
+
+test('TunManager takes onUnexpectedExit from its options; the default is a no-op', () => {
+  const f = () => {};
+  assert.equal(new TunManager({ onUnexpectedExit: f }).onUnexpectedExit, f);
+  assert.doesNotThrow(() => new TunManager({}).onUnexpectedExit(new Error('x')));
+});
