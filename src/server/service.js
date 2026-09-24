@@ -1262,13 +1262,15 @@ function createService(opts = {}) {
           // Releasing here put the adapters back on the ISP's resolvers for the
           // whole rebuild, with no tunnel; holding keeps the override and only
           // widens the firewall's holes to the server about to be dialled.
+          let hold = null;
           try {
-            if (!tun?.managesDns) await leakGuard.holdForReconnect({
+            if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
               excludes: await tunPlatform.resolveServerIps([...entryAddrs, ...pinnedIps], { ipv6: true }).catch(() => []),
               token: guardToken
             });
           } catch {}
-          if (process.platform === 'darwin') await myTun.stop();
+          // keepDns: the held override stays on the main service too (see reapplyConnection).
+          if (process.platform === 'darwin') await myTun.stop({ keepDns: !!(hold && hold.held) });
           else { try { await myTun.stop(); } catch {} }
         }
         try {

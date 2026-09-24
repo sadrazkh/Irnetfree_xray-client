@@ -322,4 +322,10 @@ test('service.js mirrors it: the headless reconnect keeps the held DNS on the ma
   assert.match(reapply, /await stopAllTuns\(\{ keepDns: !!\(hold && hold\.held\) \}\);/);
   assert.match(inner('async function stopAllTuns('), /stopTrackedTunnels\(startedTuns, tun, process\.platform, opts\)/);
   assert.equal([...SERVICE.matchAll(/stopAllTuns\(\{ keepDns/g)].length, 1, 'a disconnect and a shutdown restore');
+  // …and a server switch under TUN (headless macOS), which rebuilds the tunnel inside doConnect with the guard held
+  // (to its own end: a block inside it sits at the function's indentation)
+  const from = SERVICE.indexOf('async function doConnect(');
+  const connect = SERVICE.slice(from, SERVICE.indexOf('\n    return { ok: true, tunError };\n  }', from));
+  assert.match(connect, /\bhold = await leakGuard\.holdForReconnect\(/, 'the switch keeps the hold result too');
+  assert.match(connect, /if \(process\.platform === 'darwin'\) await myTun\.stop\(\{ keepDns: !!\(hold && hold\.held\) \}\);/);
 });
