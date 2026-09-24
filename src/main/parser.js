@@ -772,8 +772,15 @@ function applyServerEdits(server, f) {
   if (changed.length) {
     // A field saved back to what the server's own link gives is released:
     // it is the provider's again, and follows the provider's next change.
+    // Not against the `wireguard://host:port` a .conf import keeps: it has no
+    // keys and no DNS, says nothing about the server, and a cleared field would
+    // "match" it (the same guard as subscription.js linkOf).
     let link = null;
-    try { link = editFields(parseLink(out.raw)); } catch { link = null; }
+    try {
+      const said = parseLink(out.raw);
+      const set = said && said.outbound && said.outbound.settings;
+      if (!(said.protocol === 'wireguard' && !(set && set.secretKey))) link = editFields(said);
+    } catch { link = null; }
     const released = (k) => !!link && k in link && fieldText(link[k]) === fieldText(after[k]);
     const edited = [...new Set([...(Array.isArray(server._edited) ? server._edited : []), ...changed])]
       .filter(k => !(changed.includes(k) && released(k)))

@@ -388,6 +388,81 @@ test('sing-box\'s own [tun] lines reach syslog at most once per 10s per kind; th
   assert.equal(lines.filter(l => /Gateway down/.test(l)).length, 2, 'our own lines are not rate-limited');
 });
 
+/* ----------------------------- post-merge ----------------------------- */
+
+test('a settings apply keeps the system proxy through the rebuild; a rebuild that fails puts it back', async (t) => {
+  const proxy = [];
+  const s = start({ settings: { systemProxy: true } }, { setSystemProxy: async (on) => { proxy.push(on); } });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  assert.deepEqual(proxy, [true]);
+  await s.service.invoke('settings:apply');
+  assert.deepEqual(proxy, [true, true], 'set again by the connect, never switched off in between');
+  s.state.gatewayFails = true;
+  const r = await s.service.invoke('settings:apply');
+  assert.equal(r.ok, false);
+  assert.equal(proxy.at(-1), false, 'not left aimed at a core that did not come back');
+  await s.service.invoke('disconnect');
+  // the proxy switched off in the settings: restored before the rebuild
+  const off = start({ settings: { systemProxy: true } }, { setSystemProxy: async (on) => { off.proxy.push(on); } });
+  off.proxy = [];
+  t.after(() => off.service.shutdown());
+  await off.service.invoke('connect', SERVER.id);
+  await off.service.invoke('settings:set', { systemProxy: false });
+  await off.service.invoke('settings:apply');
+  assert.deepEqual(off.proxy, [true, false]);
+});
+
+test('a failing boot attempt says nothing about a disconnect — there was no connection to lose', async (t) => {
+  const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } });
+  t.after(() => s.service.shutdown());
+  s.state.gatewayFails = true;
+  await until(() => s.state.events.filter(e => e === 'gateway:start').length >= 3, 'three failed boot attempts');
+  assert.ok(!s.statuses.some(x => x.state === 'disconnected'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.ok(!s.syslog.some(([, l]) => l === 'irnetfree: disconnected'), 'syslog is not told of a disconnect every 15 s');
+});
+
+const withTiming = (over) => ({ timing: Object.assign({}, fakes.deps(fakes.makeState()).timing, over) });
+
+test('a drop queued behind a recovery is replayed through the crash window, not rebuilt at once', async (t) => {
+  // the core's SOCKS port takes a moment to come up: the rebuild is still going when the next drop lands
+  const slowPort = { waitForLocalPort: () => new Promise((r) => setTimeout(() => r(true), 100)) };
+  const s = start({}, Object.assign(withTiming({ routerBackoffMs: [300, 300, 300], crashWindowMs: 10000 }), slowPort));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  // the core dies again while the recovery for its first death is still rebuilding
+  let again = false;
+  s.service.onEvent((ch, p) => { if (ch === 'status' && p.state === 'reconnecting' && !again) { again = true; s.state.xray.crash(); } });
+  s.state.xray.crash();
+  await until(() => connectedCount(s) === 3, 'the rebuild, then the queued drop’s', 5000);
+  assert.ok(s.logs.findIndex(l => /dropped again/.test(l.line)) > s.logs.findIndex(l => /Connection restored/.test(l.line)), 'replayed after the rebuild');
+  assert.deepEqual(s.statuses.filter(x => x.state === 'reconnecting').map(x => x.attempt), [1, 2], 'it continued that rebuild’s backoff');
+  assert.ok(s.logs.some(l => /dropped again \d+s after it was rebuilt \(core-exited\)/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+});
+
+test('a connect by hand starts with no crash history — its first drop is rebuilt at once', async (t) => {
+  const s = start({}, withTiming({ routerBackoffMs: [1500, 1500, 1500], crashWindowMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.xray.crash();
+  await until(() => connectedCount(s) === 2, 'the rebuild');
+  await s.service.invoke('connect', SERVER.id);   // the user, by hand
+  const n = connectedCount(s);
+  const crashed = Date.now();
+  s.state.xray.crash();
+  await until(() => connectedCount(s) === n + 1, 'the rebuild after the connect by hand');
+  assert.ok(Date.now() - crashed < 1500, 'no wait: the history before the connect by hand is gone');
+  assert.ok(!s.logs.some(l => /dropped again/.test(l.line)));
+});
+
+test('the give-up of a crash loop says whether the proxy is still up', () => {
+  // Reached only on the desktop (a router never gives up) and only after 2+5+15 s of
+  // waits, so pinned as text: a tunnel that keeps dying over a live core leaves the proxy up.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
+  const body = src.slice(src.indexOf('function recoverFromDrop(reason) {'), src.indexOf('async function recoverFromNetworkChange('));
+  assert.match(body, /send\('status', \{ state: 'reconnect-failed', reason, proxyUp: !!\(xray && xray\.running\), tunError: null \}\);/);
+});
+
 /* ----------------------------- R7: orphans and the exit hook ----------------------------- */
 
 test('R7: the cores a killed run left behind are ended before the first connect, and its rules and table cleared', async (t) => {

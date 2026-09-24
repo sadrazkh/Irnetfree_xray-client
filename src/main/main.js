@@ -1475,7 +1475,12 @@ async function reapplyConnection() {
     // macOS: while the guard holds, the tunnel's teardown must not put the
     // main service back on the ISP's DNS either (keepDns) — only a disconnect does.
     await stopAllTuns({ keepDns: !!(hold && hold.held) });
-    try { await setSystemProxy(false, {}); } catch {}
+    // The system proxy stays through the rebuild when the connect will set it
+    // again: switched off, the machine's own (or no) proxy was live for the
+    // whole gap — every browser direct — and the journal was spent and taken
+    // afresh. Kept, it points at our port while the core restarts: closed,
+    // not open. Only a proxy switched OFF in the settings is restored here.
+    if (!getSettings().systemProxy) { try { await setSystemProxy(false, {}); } catch {} }
     try { await removeLanFirewall(); } catch {}
     if (xray) await xray.stop();
   } finally {
@@ -1494,6 +1499,8 @@ async function reapplyConnection() {
     r = await doConnect(serverId, { holdKillSwitch: armed });
   } catch (e) {
     appliedSettings = null;
+    // the proxy kept above must not stay aimed at a core that did not come back
+    try { await setSystemProxy(false, {}); } catch {}
     if (armed) {
       send('log', { line: 'Reconnect failed — the internet stays blocked by the kill switch: ' + e.message, level: 'error' });
       send('killswitch', { engaged: true });
@@ -1794,9 +1801,22 @@ async function onConnectionDrop(reason) {
   if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
   updateOverlay('off');
   const s = getSettings();
+  // The block THIS drop put in (not one a reapply or an earlier drop already
+  // held — lifting that is its holder's call). A connect in flight disarms up
+  // front, so a drop landing inside the user's connect arms AFTER that: the
+  // connect then comes up, the drop finds it healed, and without this the
+  // window says connected with the internet blocked.
+  let armedHere = false;
+  const liftOwnBlock = async () => {
+    if (!armedHere) return;
+    await disarmKillSwitch();
+    send('killswitch', { engaged: false });
+    send('log', { line: 'Kill switch released — tunnel is back up', level: 'info' });
+  };
   if (s.killSwitch) {
     const wasEngaged = killEngaged;
     const r = await armKillSwitch();
+    armedHere = !!(r && r.ok && !wasEngaged);
     send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
     if (r && r.ok && !wasEngaged) {
       send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
@@ -1819,8 +1839,9 @@ async function onConnectionDrop(reason) {
   if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
   // Is what this drop broke whole again (a rebuild already brought it back)?
   const healed = () => (reason === 'tunnel-exited' ? !!(tun && tun.active) : !!(xray && xray.running));
-  // a connect that settled with a running core (the user's, say) healed it: no budget, no rebuild
-  if (healed()) return;
+  // a connect that settled with a running core (the user's, say) healed it: no
+  // budget, no rebuild — and no block of ours left over the connection it made
+  if (healed()) return liftOwnBlock();
   // "the proxy works": the core runs AND the kill switch is not blocking it
   const proxyUp = () => !!(xray && xray.running) && !killEngaged;
   if (!s.autoReconnectOnNetworkChange) {
@@ -1846,7 +1867,9 @@ async function onConnectionDrop(reason) {
     await (recoveryRun || Promise.resolve()).catch(() => {});
     await Promise.resolve();   // let it release its lock and start what it queued
     if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
-    if (recoverTimer || recovering || healed()) return;
+    if (recoverTimer || recovering) return;
+    // a rebuild that captured "not held" before this drop armed lifts nothing itself
+    if (healed()) return liftOwnBlock();
   }
   if (!drops.take()) {
     send('log', { line: `The connection keeps dropping (${reason}) — no more automatic rebuilds until you reconnect`, level: 'error' });
@@ -2280,9 +2303,11 @@ function registerIpc() {
     // 1) The UAC prompt, before anything is torn down (see relaunch.js): an
     //    elevated helper that waits for THIS process to exit, then starts the
     //    copy. A cancelled prompt fails here, and the app — connected or not —
-    //    simply keeps running as it was.
+    //    simply keeps running as it was. Only the dev relaunch (`electron .`)
+    //    needs this instance's working directory; an installed build starts
+    //    from its own path and passes none.
     try {
-      await runElevatedRelaunch({ exe: process.execPath, args: process.argv.slice(1), pid: process.pid, cwd: process.cwd() });
+      await runElevatedRelaunch({ exe: process.execPath, args: process.argv.slice(1), pid: process.pid, cwd: app.isPackaged ? null : process.cwd() });
     } catch (e) {
       send('log', { line: 'Relaunch as administrator did not happen (' + e.message + ') — IRNetFree keeps running as it is', level: 'warn' });
       return { ok: false, error: null };
@@ -2863,7 +2888,12 @@ app.whenReady().then(() => {
     setSubs: (arr) => store.set('subscriptions', arr),
     getServers: () => store.get('servers', []),
     setServers: (arr) => store.set('servers', arr),
-    onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) })
+    onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) }),
+    // an automatic refresh that failed used to vanish without a word
+    onError: (sub, e) => {
+      send('log', { line: `Subscription "${sub.name}" could not be updated automatically: ${e.message}`, level: 'warn' });
+      send('subs-updated', { sub, info: { error: e.message }, servers: store.get('servers', []), subs: store.get('subscriptions', []) });
+    }
   });
 
   // A placeholder until the first connect picks the backend for real (see
@@ -3129,8 +3159,18 @@ function scheduleShutdownCancelCheck() {
     // middle of what may still be a slow logout. The user reconnects (or the
     // network watcher does, when the network moves).
     if (store && store.get('activeServerId', null)) {
-      send('log', { line: 'The shutdown was cancelled — the connection was taken down for it; reconnect to bring it back', level: 'warn' });
-      reportReconnectFailed('shutdown-cancelled', { ok: false });
+      // A Mac as non-root: the exit teardown could run nothing privileged, so
+      // the TUN and the core are most likely still up — only the system proxy
+      // (and a native-service tunnel) may have gone. Saying "taken down" there
+      // is not true.
+      const partial = process.platform === 'darwin' && !(process.getuid && process.getuid() === 0);
+      send('log', {
+        line: partial
+          ? 'The shutdown was cancelled — the connection may be only partly up (stopping the tunnel needs a password, so it was left running; the system proxy may have been put back); reconnect to be sure'
+          : 'The shutdown was cancelled — the connection was taken down for it; reconnect to bring it back',
+        level: 'warn'
+      });
+      reportReconnectFailed(partial ? 'shutdown-cancelled-partial' : 'shutdown-cancelled', { ok: false });
     }
   }, 60000);
   timer.unref();

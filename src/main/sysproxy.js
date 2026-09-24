@@ -8,13 +8,14 @@
  * We set an HTTP/HTTPS system proxy pointing at the local Xray HTTP inbound,
  * with a sensible bypass list for local addresses.
  *
- * The desktop app journals what the proxy was before it set it (useProxyJournal,
- * see "the journal" below) and puts exactly that back. Without a journal — the
- * headless service — enable and disable behave as they always did.
+ * The desktop app and the headless service journal what the proxy was before
+ * they set it (useProxyJournal, see "the journal" below) and put exactly that
+ * back. Without a journal enable and disable behave as they always did.
  */
 
 const { execFile, execFileSync } = require('child_process');
 const fs = require('fs');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 const { psArgs } = require('./tunPlatform');
@@ -300,7 +301,7 @@ async function disableLinux() {
  */
 let journalFile = null;
 
-/** The desktop app's journal file; null (the headless service) keeps the old blind enable/disable. */
+/** The journal file (the desktop's, or the headless service's own); null keeps the old blind enable/disable. */
 function useProxyJournal(file) { journalFile = file || null; }
 
 function readJournal(file) {
@@ -386,25 +387,79 @@ function writtenOf(j) {
   return j.ours && j.ours.host ? [`${j.ours.host}:${j.ours.httpPort}`] : [];
 }
 
+/** The `host:port` our core serves right now (the last enable's). */
+function oursOf(j) {
+  if (typeof j.ours === 'string') return j.ours;
+  return j.ours && j.ours.host ? `${j.ours.host}:${j.ours.httpPort}` : null;
+}
+
+const PROBE_MS = 500;
+/**
+ * Does anything accept a TCP connection on `server` (a loopback host:port)?
+ * true, false (refused: nothing there), or null when it could not be told —
+ * not loopback, a timeout, any other error. ~500 ms at most.
+ */
+function probeListener(server) {
+  const m = /^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})$/.exec(String(server == null ? '' : server));
+  if (!m) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let s = null;
+    let timer = null;
+    const done = (v) => { clearTimeout(timer); try { s && s.destroy(); } catch {} resolve(v); };
+    try {
+      s = net.connect({ host: m[1], port: Number(m[2]) });
+      timer = setTimeout(() => done(null), PROBE_MS);
+      if (timer.unref) timer.unref();
+      s.once('connect', () => done(true));
+      s.once('error', (e) => done(e && e.code === 'ECONNREFUSED' ? false : null));
+    } catch { done(null); }
+  });
+}
+
 /**
  * Is the proxy on the machine right now still the one WE set? Two answers,
  * for two moments:
- *  - `session` (a disconnect, a reapply, a give-up): our core holds the port,
- *    so a proxy aimed at any 127.0.0.1:<port> we wrote this session is ours,
- *    whatever its bypass list and its switch say — a half-done enable, a list
- *    re-saved while connected. Only a different server is someone else's.
- *  - `launch`: no core of ours runs, and another client (v2rayN uses 10809
- *    too) may really be on that port — so, while it is switched ON, our exact
- *    bypass list as well. Switched off (a restore that died after its first
- *    step, say), nobody is using it and the record is finished.
+ *  - `session` (a disconnect, a reapply, a give-up): our core holds the port
+ *    it serves now, so a proxy aimed at THAT one is ours whatever its bypass
+ *    list and its switch say — a half-done enable, a list re-saved while
+ *    connected. An older port we wrote this session is ours only under our own
+ *    list (a port change whose write failed): with another list, another
+ *    client has taken it since and it is theirs.
+ *  - `launch`: no core of ours runs, so the port itself answers. Nothing
+ *    listening on it: our dead leftover, whatever list it carries (restored).
+ *    A listener: another client (v2rayN uses 10809 too) — left alone, even
+ *    under our list. When the probe cannot tell, our exact list decides.
+ *    Switched off (a restore that died after its first step, say), nobody is
+ *    using it and the record is finished.
  */
-function ownsWin(cur, j, when) {
-  if (!writtenOf(j).includes(cur.ProxyServer)) return false;
-  return when === 'launch' ? (cur.ProxyOverride === WIN_BYPASS || Number(cur.ProxyEnable) !== 1) : true;
+async function ownsWin(cur, j, when, probe) {
+  const server = cur.ProxyServer;
+  if (!writtenOf(j).includes(server)) return false;
+  const ourList = cur.ProxyOverride === WIN_BYPASS;
+  if (when !== 'launch') return server === oursOf(j) || ourList;
+  if (Number(cur.ProxyEnable) !== 1) return true;
+  const busy = await probe(server);
+  return busy == null ? ourList : !busy;
 }
-function ownsMac(cur, j) {
+/**
+ * The same answer for a Mac, service by service (any one of ours will do: the
+ * restore puts every recorded service back). There is no list of ours to go
+ * by: an older port — and, at launch, any port — is ours while nothing
+ * listens on it (a probe that cannot tell keeps the old answer: ours).
+ */
+async function ownsMac(cur, j, when, probe) {
   const written = writtenOf(j);
-  return cur.some(s => s.web && s.web.server && written.includes(`${s.web.server}:${s.web.port}`));
+  const ours = oursOf(j);
+  for (const s of cur) {
+    const w = s.web;
+    if (!w || !w.server) continue;
+    const server = `${w.server}:${w.port}`;
+    if (!written.includes(server)) continue;
+    if (when !== 'launch' && server === ours) return true;
+    if (when === 'launch' && !w.enabled) return true;
+    if (await probe(server) !== true) return true;
+  }
+  return false;
 }
 
 /**
@@ -414,13 +469,13 @@ function ownsMac(cur, j) {
  * since the crash: theirs, left alone, and the stale record goes — else true.
  * A snapshot that cannot be read restores anyway: the journal says we set it.
  */
-async function restoreJournaled(platform, { exec, journal, when = 'session' }) {
+async function restoreJournaled(platform, { exec, journal, when = 'session', probe = probeListener }) {
   const j = readJournal(journal);
   if (!j) return false;
   if (platform === 'win32') {
     let cur = null;
     try { cur = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
-    if (cur && !ownsWin(cur, j, when)) { clearJournal(journal); return 'not-ours'; }
+    if (cur && !(await ownsWin(cur, j, when, probe))) { clearJournal(journal); return 'not-ours'; }
     const ok = await runWinRestore(winRestoreSteps(j.win), exec);
     await refreshWindows(exec).catch(() => {});
     // something could not be put back: keep the record for the next launch
@@ -428,7 +483,7 @@ async function restoreJournaled(platform, { exec, journal, when = 'session' }) {
   } else {
     let cur = null;
     try { cur = await macSnapshot(exec); } catch { /* unknown */ }
-    if (cur && !ownsMac(cur, j)) { clearJournal(journal); return 'not-ours'; }
+    if (cur && !(await ownsMac(cur, j, when, probe))) { clearJournal(journal); return 'not-ours'; }
     if (!Array.isArray(j.mac)) {
       await disableMac(exec).catch(() => {});   // nothing known about before: the old disable
     } else {
@@ -455,7 +510,8 @@ async function restoreJournaled(platform, { exec, journal, when = 'session' }) {
 /**
  * @param {boolean} enabled
  * @param {object} [opts] host, httpPort, socksPort; and for the tests `exec`
- *   (the async runner), `platform`, and `journal` (defaults to useProxyJournal's).
+ *   (the async runner), `platform`, `journal` (defaults to useProxyJournal's)
+ *   and `probe` (is anything listening on a host:port — see probeListener).
  */
 async function setSystemProxy(enabled, opts = {}) {
   const host = opts.host || '127.0.0.1';
@@ -464,11 +520,12 @@ async function setSystemProxy(enabled, opts = {}) {
   const platform = opts.platform || os.platform();
   const exec = opts.exec || run;
   const journal = opts.journal !== undefined ? opts.journal : journalFile;
+  const probe = opts.probe || probeListener;
 
   if (journal && journaled(platform)) {
     return serial(() => (enabled
       ? enableJournaled(platform, { host, httpPort, socksPort }, { exec, journal })
-      : restoreJournaled(platform, { exec, journal })));
+      : restoreJournaled(platform, { exec, journal, probe })));
   }
   if (enabled) {
     if (platform === 'win32') return enableWindows(host, httpPort, exec);
@@ -484,22 +541,25 @@ async function setSystemProxy(enabled, opts = {}) {
 /**
  * At launch: a journal left behind means the last session died with the proxy
  * set. Put it back — but only while the proxy is still OURS: one someone set
- * since the crash is theirs, and the stale record just goes. On Windows, with
- * no journal, the proxy a build before the journal left (the one that died
- * connected, or that the update installer closed) is recognised by our own
- * exact bypass list AND `opts.legacyServer` — this app's own 127.0.0.1:port,
- * since a sibling build (the Plus fork) writes the same list for its own port
- * and may be connected right now — and switched off. Resolves 'restored' |
- * 'dropped' | 'legacy' | null; never throws.
+ * since the crash is theirs, and the stale record just goes (see ownsWin /
+ * ownsMac: at launch the port decides — nothing listening is our dead
+ * leftover, a listener is another client). On Windows, with no journal, the
+ * proxy a build before the journal left (the one that died connected, or that
+ * the update installer closed) is recognised by our own exact bypass list AND
+ * `opts.legacyServer` — this app's own 127.0.0.1:port, since a sibling build
+ * (the Plus fork) writes the same list for its own port and may be connected
+ * right now — with nothing listening there, and switched off. Resolves
+ * 'restored' | 'dropped' | 'legacy' | null; never throws.
  */
 function repairSystemProxy(opts = {}) {
   const platform = opts.platform || os.platform();
   const exec = opts.exec || run;
   const journal = opts.journal !== undefined ? opts.journal : journalFile;
+  const probe = opts.probe || probeListener;
   if (!journal || !journaled(platform)) return Promise.resolve(null);
   return serial(async () => {
     if (readJournal(journal)) {
-      const r = await restoreJournaled(platform, { exec, journal, when: 'launch' });
+      const r = await restoreJournaled(platform, { exec, journal, when: 'launch', probe });
       return r === 'not-ours' ? 'dropped' : 'restored';
     }
     // No journal: only a pre-journal leftover on OUR port is left to look
@@ -507,7 +567,9 @@ function repairSystemProxy(opts = {}) {
     if (platform !== 'win32' || !opts.legacyServer) return null;
     let cur = null;
     try { cur = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
-    if (cur && Number(cur.ProxyEnable) === 1 && ownsWin(cur, { ours: opts.legacyServer }, 'launch')) {
+    // No record says we set it, so our exact list must, as well as a port nobody answers on.
+    if (cur && Number(cur.ProxyEnable) === 1 && cur.ProxyOverride === WIN_BYPASS
+        && await ownsWin(cur, { ours: opts.legacyServer }, 'launch', probe)) {
       await disableWindows(exec).catch(() => {});
       return 'legacy';
     }
@@ -549,5 +611,5 @@ function restoreSystemProxySync(opts = {}) {
 
 module.exports = {
   setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync,
-  parseMacServices, enableMac, disableMac, parseWinProxy, parseMacProxy, WIN_BYPASS
+  parseMacServices, enableMac, disableMac, parseWinProxy, parseMacProxy, probeListener, WIN_BYPASS
 };

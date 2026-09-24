@@ -1980,6 +1980,7 @@ function reconnectingKey() {
 /** What a give-up says: a cancelled shutdown, a drop, or the network moving. */
 function failedKey(reason) {
   if (reason === 'shutdown-cancelled') return 'net.shutdownCancelled';
+  if (reason === 'shutdown-cancelled-partial') return 'net.shutdownCancelledPartial';
   return DROP_REASONS.includes(reason) ? 'net.dropFailed' : 'net.failed';
 }
 window.api.onStatus((d) => {

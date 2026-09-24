@@ -35,6 +35,7 @@ class FakeWindows {
     this.unfaked = [];
     this.tunProc = null;
     this.nextTunIdx = 44;
+    this.denyDelete = null;     // a Set of prefixes whose delete is refused (not elevated, say)
   }
 
   addIf(idx, alias, metric, state = 'Connected') { this.ifs.set(idx, { idx, alias, metric, state }); }
@@ -146,6 +147,7 @@ class FakeWindows {
     const line = args.join(' ');
     const kv = Object.fromEntries(args.filter(a => a.includes('=')).map(a => [a.slice(0, a.indexOf('=')), a.slice(a.indexOf('=') + 1)]));
     if (/^interface ipv4 delete route /.test(line)) {
+      if (this.denyDelete && this.denyDelete.has(kv.prefix)) throw new Error('The requested operation requires elevation (Run as administrator).');
       const idx = Number(kv.interface);
       const hit = (r) => (!kv.store || r.store === kv.store) && r.prefix === kv.prefix && r.ifIndex === idx && r.nextHop === kv.nexthop;
       const before = this.routes.length;
@@ -204,6 +206,10 @@ cp.execFile = (cmd, args, opts, cb) => {
 cp.execFileSync = (cmd, args) => fake.exec(cmd, args);
 cp.spawn = (cmd, args) => fake.spawn(cmd, args);
 os.platform = () => 'win32';
+// The machine's uptime, when a test needs a reboot between two sessions.
+const realUptime = os.uptime;
+let uptimeNow = null;
+os.uptime = () => (uptimeNow == null ? realUptime() : uptimeNow);
 
 const TM_PATH = require.resolve('../src/main/tunManager');
 const tunPlatform = require('../src/main/tunPlatform');
@@ -348,6 +354,100 @@ test('the first connect after such a crash clears the leftovers before it lays i
     await tun.stop();
     assert.deepEqual(fake.hostRoutes(SERVER), []);
     assert.deepEqual(fake.unfaked, []);
+  } finally { h.done(); }
+});
+
+/* The route journal across reboots, refusals and a user who is not an administrator. */
+
+const journalRoutes = (userData) => {
+  const f = path.join(userData, 'tun2socks-routes.json');
+  return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')).routes.map(r => r.ip).sort() : [];
+};
+const deletes = (from) => fake.cmds.slice(from).filter(c => /^netsh interface ipv4 delete route /.test(c));
+
+test('a journal an earlier boot left is dropped without netsh: its routes died with that boot, and an identical one laid since is someone else’s', async () => {
+  const h = setup();
+  try {
+    let TunManager = freshTunManager();
+    fake.addIf(5, 'Ethernet', 25);
+    fake.addRoute({ prefix: '0.0.0.0/0', nextHop: '192.168.1.1', ifIndex: 5, origin: 'dhcp' });
+    uptimeNow = 50000;                                              // hours into this boot
+    await h.make(TunManager).start(10808, [SERVER], ['10.255.0.1']);
+    fake.crash();
+    // the machine reboots: every active route goes with it…
+    fake.routes = fake.routes.filter(r => r.store !== 'active' || r.origin === 'dhcp');
+    uptimeNow = 120;
+    // …and since, the user (or another VPN) laid the very same /32
+    fake.addRoute({ prefix: `${SERVER}/32`, nextHop: '192.168.1.1', ifIndex: 5, origin: 'user' });
+    TunManager = freshTunManager();
+    const from = fake.cmds.length;
+    assert.equal(await h.make(TunManager).recoverRoutesWindows(), 0);
+    assert.deepEqual(deletes(from), [], 'nothing run for a route of another boot');
+    assert.deepEqual(fake.hostRoutes(SERVER), ['192.168.1.1@5'], 'theirs stays');
+    assert.deepEqual(journalRoutes(h.userData), [], 'the stale record is gone');
+    assert.deepEqual(fake.unfaked, []);
+  } finally { uptimeNow = null; h.done(); }
+});
+
+test('a sweep whose delete fails keeps that record — the route may still be there — and the next launch retries it', async () => {
+  const h = setup();
+  try {
+    let TunManager = freshTunManager();
+    officeLaptop();
+    await h.make(TunManager).start(10808, [SERVER, '5.6.7.8'], ['10.255.0.1']);
+    fake.crash();
+    fake.denyDelete = new Set(['5.6.7.8/32']);
+    TunManager = freshTunManager();
+    assert.equal(await h.make(TunManager).recoverRoutesWindows(), 1);
+    assert.deepEqual(fake.hostRoutes('5.6.7.8'), ['192.168.1.1@5']);
+    assert.deepEqual(journalRoutes(h.userData), ['5.6.7.8'], 'still ours, still recorded');
+    fake.denyDelete = null;
+    TunManager = freshTunManager();                                 // the next launch
+    assert.equal(await h.make(TunManager).recoverRoutesWindows(), 1);
+    assert.deepEqual(fake.hostRoutes('5.6.7.8'), []);
+    assert.deepEqual(journalRoutes(h.userData), []);
+  } finally { h.done(); }
+});
+
+test('not elevated: the launch sweep runs nothing and forgets nothing — an elevated launch does it', async () => {
+  const h = setup();
+  try {
+    let TunManager = freshTunManager();
+    officeLaptop();
+    await h.make(TunManager).start(10808, [SERVER, '5.6.7.8'], ['10.255.0.1']);
+    fake.crash();
+    TunManager = freshTunManager();
+    const plain = h.make(TunManager);
+    plain.isElevated = () => false;
+    const from = fake.cmds.length;
+    assert.equal(await plain.recoverRoutesWindows(), 0);
+    assert.deepEqual(deletes(from), []);
+    assert.deepEqual(journalRoutes(h.userData), ['1.2.3.4', '5.6.7.8']);
+    assert.equal(await h.make(TunManager).recoverRoutesWindows(), 2, 'the same process, elevated after all (the TUN connect)');
+    assert.deepEqual(journalRoutes(h.userData), []);
+  } finally { h.done(); }
+});
+
+test('a teardown whose delete fails keeps the record for the next launch (the exit hook’s too)', async () => {
+  const h = setup();
+  try {
+    let TunManager = freshTunManager();
+    officeLaptop();
+    const tun = h.make(TunManager);
+    await tun.start(10808, [SERVER, '5.6.7.8'], ['10.255.0.1']);
+    fake.denyDelete = new Set([`${SERVER}/32`]);
+    await tun.stop();
+    assert.deepEqual(journalRoutes(h.userData), ['1.2.3.4']);
+    const again = h.make(TunManager);
+    await again.start(10808, ['5.6.7.8'], ['10.255.0.1']);
+    fake.denyDelete = new Set(['5.6.7.8/32']);
+    again.cleanupSync();
+    assert.deepEqual(journalRoutes(h.userData), ['1.2.3.4', '5.6.7.8']);
+    fake.denyDelete = null;
+    TunManager = freshTunManager();
+    assert.equal(await h.make(TunManager).recoverRoutesWindows(), 2);
+    assert.deepEqual(fake.hostRoutes(SERVER), []);
+    assert.deepEqual(journalRoutes(h.userData), []);
   } finally { h.done(); }
 });
 
