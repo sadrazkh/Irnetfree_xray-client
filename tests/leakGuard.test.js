@@ -102,19 +102,21 @@ test('winApplyScript holds every adapter on the given resolvers in one script, e
   const adapters = [{ alias: 'Wi-Fi' }, { alias: "Bob's Ethernet" }];
   assert.equal(winApplyScript(adapters, HOLD4, HOLD6), [
     "$ErrorActionPreference = 'Stop'",
-    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 0 v4 ' + $_.Exception.Message) }",
-    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '::1' } catch { Write-Output ('IRNF_FAIL 0 v6 ' + $_.Exception.Message) }",
-    "try { Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 1 v4 ' + $_.Exception.Message) }",
-    "try { Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '::1' } catch { Write-Output ('IRNF_FAIL 1 v6 ' + $_.Exception.Message) }",
-    'Clear-DnsClientCache'
+    '$set = 0',
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '127.0.0.2'; $set++ } catch { Write-Output ('IRNF_FAIL 0 v4 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '::1'; $set++ } catch { Write-Output ('IRNF_FAIL 0 v6 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '127.0.0.2'; $set++ } catch { Write-Output ('IRNF_FAIL 1 v4 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '::1'; $set++ } catch { Write-Output ('IRNF_FAIL 1 v6 ' + $_.Exception.Message) }",
+    'if ($set) { Clear-DnsClientCache }'
   ].join('\n'));
 });
 
 test('winApplyScript leaves a family alone when it is given no address for it', () => {
   assert.equal(winApplyScript([{ alias: 'Wi-Fi' }], HOLD4, null), [
     "$ErrorActionPreference = 'Stop'",
-    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 0 v4 ' + $_.Exception.Message) }",
-    'Clear-DnsClientCache'
+    '$set = 0',
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '127.0.0.2'; $set++ } catch { Write-Output ('IRNF_FAIL 0 v4 ' + $_.Exception.Message) }",
+    'if ($set) { Clear-DnsClientCache }'
   ].join('\n'));
 });
 
@@ -828,10 +830,11 @@ test('winApplyScript: one adapter that cannot be set does not leave the next one
   const adapters = [{ alias: 'Wi-Fi' }, { alias: "Bob's Ethernet", has6: false }, { alias: 'Bridge member', has4: false, has6: false }];
   assert.equal(winApplyScript(adapters, '127.0.0.2', '::1'), [
     "$ErrorActionPreference = 'Stop'",
-    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 0 v4 ' + $_.Exception.Message) }",
-    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '::1' } catch { Write-Output ('IRNF_FAIL 0 v6 ' + $_.Exception.Message) }",
-    "try { Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '127.0.0.2' } catch { Write-Output ('IRNF_FAIL 1 v4 ' + $_.Exception.Message) }",
-    'Clear-DnsClientCache'
+    '$set = 0',
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '127.0.0.2'; $set++ } catch { Write-Output ('IRNF_FAIL 0 v4 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ServerAddresses '::1'; $set++ } catch { Write-Output ('IRNF_FAIL 0 v6 ' + $_.Exception.Message) }",
+    "try { Set-DnsClientServerAddress -InterfaceAlias 'Bob''s Ethernet' -ServerAddresses '127.0.0.2'; $set++ } catch { Write-Output ('IRNF_FAIL 1 v4 ' + $_.Exception.Message) }",
+    'if ($set) { Clear-DnsClientCache }'
   ].join('\n'), 'a family the adapter does not have is never attempted');
 });
 
@@ -928,9 +931,8 @@ test('refresh (win32): drift is measured against the loopback hold, and a family
 
 test('engage (win32): our own hold is stripped from a re-read snapshot, but a user\'s own loopback resolver is an original', async () => {
   // A local DNS proxy (dnscrypt-proxy, Acrylic…) is configured exactly like
-  // this. At the FIRST engage nothing of ours can be on an adapter — the state
-  // file is written before any override and only removed after a restore — so
-  // what is there is the user's, and must come back on disconnect.
+  // this: 127.0.0.1 is never our hold, and ::1 beside it is the user's too.
+  // It must come back on disconnect.
   const own = JSON.stringify([{ alias: 'Wi-Fi', v4: ['127.0.0.1'], v6: ['::1'], has4: true, has6: true, dhcp4: false, dhcp6: false }]);
   const h = harness('win32', snapAnswer(own));
   await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
@@ -949,6 +951,121 @@ test('engage (win32): our own hold is stripped from a re-read snapshot, but a us
   await g.guard.engage(opts);
   const renamed = g.state().win.adapters.find(a => a.alias === 'Wi-Fi 2');
   assert.deepEqual([renamed.v4, renamed.v6], [[], []]);
+});
+
+/**
+ * Review I1. A USB NIC or an RNDIS tether unplugged before the disconnect is
+ * skipped by the restore (it is not there) while the state file is cleared —
+ * and Windows keeps its static 127.0.0.2 / ::1 for when it comes back. The next
+ * FIRST engage then read our hold as the adapter's original (dhcp4:false) and
+ * the release after it pinned 127.0.0.2 for good: no DNS on that adapter
+ * outside the VPN, ever. 127.0.0.2 is ours by construction, with or without a
+ * state file; ::1 is ours when it sits beside it.
+ */
+test('engage (win32): a hold left behind on an adapter that missed its restore is never recorded as the original', async () => {
+  const h = harness('win32', snapAnswer(JSON.stringify([
+    { alias: 'USB Ethernet', v4: ['127.0.0.2'], v6: ['::1'], has4: true, has6: true, dhcp4: false, dhcp6: false },
+    { alias: 'Wi-Fi', v4: ['192.168.8.1'], v6: ['::1'], has4: true, has6: true, dhcp4: true, dhcp6: false }
+  ])));
+  assert.equal(fs.existsSync(h.statePath), false, 'no session of ours is live — the first engage');
+  await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  const [usb, wifi] = h.state().win.adapters;
+  assert.deepEqual([usb.v4, usb.v6], [[], []], 'recorded as "was DHCP" — the reset is the restore');
+  assert.deepEqual(wifi.v6, ['::1'], '::1 without our 127.0.0.2 beside it is the user\'s own');
+  const restore = winRestoreScript(h.state().win.adapters);
+  assert.doesNotMatch(restore, /'127\.0\.0\.2'/);
+  assert.match(restore, /if \(Get-NetAdapter -InterfaceAlias 'USB Ethernet'[^\n]*\n[^\n]*'USB Ethernet' -ResetServerAddresses\n\}/);
+});
+
+/**
+ * Review M1. On Windows the tunnel's own resolvers are never written to an
+ * adapter any more, so they are not ours to strip: with managed DNS off peer4
+ * is the user's own public resolver, and a user who set 1.1.1.1 statically was
+ * reset to DHCP at disconnect. Only a state file from before the hold (which
+ * did write the peers) still gets them stripped.
+ */
+test('engage (win32): a static resolver that is also the tunnel\'s (managed DNS off) is an original', async () => {
+  const h = harness('win32', snapAnswer(JSON.stringify([
+    { alias: 'Wi-Fi', v4: ['1.1.1.1', '8.8.8.8'], v6: [], has4: true, has6: true, dhcp4: false, dhcp6: true }
+  ])));
+  await h.guard.engage({ level: 'standard', peer4: '1.1.1.1', peer6: null, tunAlias: 'IRNetFree' });
+  assert.deepEqual(h.state().win.adapters[0].v4, ['1.1.1.1', '8.8.8.8']);
+  assert.match(winRestoreScript(h.state().win.adapters), /-ServerAddresses '1\.1\.1\.1','8\.8\.8\.8'/);
+
+  // a live state file written before the hold existed: it wrote the peers
+  const g = harness('win32', snapAnswer(JSON.stringify([
+    { alias: 'Wi-Fi', v4: [PEER4], v6: [PEER6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [PEER4], v6: [PEER6], has4: true, has6: true, dhcp4: false, dhcp6: false }
+  ])));
+  fs.writeFileSync(g.statePath, JSON.stringify({
+    version: 1, peer4: PEER4, peer6: PEER6, level: 'standard', strict: false,
+    win: { adapters: [{ alias: 'Wi-Fi', v4: ['192.168.8.1'], v6: [], dhcp4: true, dhcp6: true }] }
+  }));
+  await g.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  const eth = g.state().win.adapters.find(a => a.alias === 'Ethernet');
+  assert.deepEqual([eth.v4, eth.v6], [[], []]);
+});
+
+test('refresh (win32): an adapter first seen mid-session keeps a ::1 of its own', async () => {
+  let snapshot = WIN_SNAP;
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args.at(-1)) ? snapshot : ''));
+  const { token } = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'USB LAN', v4: ['192.168.20.1'], v6: ['::1'], has4: true, has6: true, dhcp4: true, dhcp6: false }
+  ]);
+  assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: true, adapters: 1 });
+  assert.deepEqual(h.state().win.adapters.at(-1).v6, ['::1']);
+});
+
+/**
+ * Review M2. An adapter family that refuses (the error is the adapter's, it
+ * does not go away) was retried on every 30-s tick — a PowerShell snapshot
+ * each time, a warning each time, and a Clear-DnsClientCache each time: the
+ * whole machine's DNS cache flushed twice a minute for the session.
+ */
+test('refresh (win32): a family that refused is not retried every tick, and the cache is flushed only after a Set that worked', async () => {
+  let snapshot = WIN_SNAP, v4 = '', v6 = '';
+  let applyOut = 'IRNF_FAIL 1 v6 The requested operation is not supported.\r\n';
+  const h = harness('win32', (cmd, args) => {
+    if (cmd === 'netsh') return args[1] === 'ipv6' ? v6 : v4;
+    return /ConvertTo-Json/.test(args.at(-1)) ? snapshot : applyOut;
+  });
+  const { token } = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  const warns = () => h.logs.filter(([l, level]) => level === 'warn' && /could not set the DNS/.test(l)).length;
+  assert.equal(warns(), 1);
+  applyOut = '';
+  const ps = () => h.calls.filter(c => c.cmd === 'powershell').length;
+
+  // Ethernet's v6 still lists the router: not drift, it is the family that refused
+  v4 = HELD_V4;
+  v6 = HELD_V6.replace(netshBlock('Ethernet', 'Statically Configured DNS Servers', [HOLD6]),
+    netshBlock('Ethernet', 'DNS servers configured through DHCP', ['fe80::1%22']));
+  let p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
+  assert.equal(ps(), p, 'no PowerShell on the cheap tick');
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [HOLD4], v6: ['fe80::1'], has4: true, has6: true }
+  ]);
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: false, adapters: 0 });
+  assert.equal(ps(), p + 1, 'the snapshot only — no apply, so no cache flush');
+  assert.equal(warns(), 1, 'said once');
+
+  // the family that works is still repaired, and only that one is attempted
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: ['192.168.1.1'], v6: ['fe80::1'], has4: true, has6: true }
+  ]);
+  assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: true, adapters: 1 });
+  assert.deepEqual(written(h.calls.at(-1).script), [{ alias: 'Ethernet', addr: HOLD4 }]);
+
+  // a new engage (a reconnect) tries it again
+  applyOut = '';
+  await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  assert.ok(written(h.calls.at(-1).script).some(w => w.alias === 'Ethernet' && w.addr === HOLD6));
 });
 
 /* ============================ level: strict ============================ */
