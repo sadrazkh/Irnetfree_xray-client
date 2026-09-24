@@ -33,6 +33,16 @@ test('the guard refuses network commands on every entry point, whatever the path
   assert.equal(spawned.code, 'EIRNF_GUARD');
 });
 
+test('command names are read the same on every OS, Windows paths included', () => {
+  // CI caught it: on Linux path.basename leaves 'C:\\…\\NETSH.EXE' whole
+  const { commandName } = require('./noNetwork.preload.js');
+  assert.equal(commandName('C:\\Windows\\System32\\NETSH.EXE'), 'netsh');
+  assert.equal(commandName('/usr/sbin/networksetup'), 'networksetup');
+  assert.equal(commandName('reg.exe'), 'reg');
+  assert.equal(commandName('route print'), 'route');
+  assert.equal(commandName('/opt/homebrew/bin/node'), 'node', 'not on the list, so it runs');
+});
+
 test('everything else still runs', { skip: !guarded }, () => {
   assert.equal(cp.execFileSync(process.execPath, ['-e', 'process.stdout.write("ok")'], { encoding: 'utf8' }), 'ok');
 });

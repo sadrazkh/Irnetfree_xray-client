@@ -13,7 +13,6 @@
  * wrappers, and whatever it lets fall through lands back here.
  */
 const cp = require('child_process');
-const path = require('path');
 const { EventEmitter } = require('events');
 
 const BLOCKED = new Set([
@@ -22,9 +21,13 @@ const BLOCKED = new Set([
   'gsettings', 'ip', 'nft', 'iptables', 'resolvectl', 'nmcli', 'sysctl', 'uci', 'sudo'
 ]);
 
-/** 'C:\\Windows\\System32\\reg.exe' → 'reg'; '/usr/sbin/networksetup' → 'networksetup'. */
+/**
+ * 'C:\\Windows\\System32\\reg.exe' → 'reg'; '/usr/sbin/networksetup' → 'networksetup'.
+ * Both separators on every OS: path.basename on Linux leaves a Windows path whole.
+ */
 function commandName(cmd) {
-  return path.basename(String(cmd == null ? '' : cmd).trim().split(/\s+/)[0] || '').replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
+  const first = String(cmd == null ? '' : cmd).trim().split(/\s+/)[0] || '';
+  return first.split(/[\\/]/).pop().replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
 }
 const blocked = (cmd) => BLOCKED.has(commandName(cmd));
 const refusal = (cmd) => Object.assign(new Error(`tests/noNetwork.preload.js: a test tried to run the real "${commandName(cmd)}" — fake it`), { code: 'EIRNF_GUARD' });
