@@ -1154,6 +1154,7 @@ node src/server/server.js --port 6969
 | `--port <n>` | `6969` | پورت وب UI |
 | `--host <addr>` | `127.0.0.1` | آدرس bind (`0.0.0.0` برای شبکه) |
 | `--token <secret>` | — | توکن دسترسی (روی bind غیرلوکال اجباری) |
+| `--token-file <path>` | — | توکن از این فایل خوانده می‌شود (اگر نباشد ساخته می‌شود، فقط-root) و **هیچ‌جا چاپ نمی‌شود** — روتر همین را استفاده می‌کند |
 | `--data-dir <path>` | `~/.local/share/irnetfree` | محل ذخیره‌ی کانفیگ‌ها/تنظیمات |
 | `--no-auth` | — | غیرفعال‌کردن توکن حتی روی bind عمومی (خطرناک) |
 
@@ -1316,6 +1317,9 @@ logread -e irnetfree | tail -50 ; ip link show IRNetFree ; ip rule show | grep -
 - گوشی بدون هیچ پروکسی → سایتِ فیلترشده باز شود؛ `ipwho.is` IP سرور را نشان دهد.
 - دستگاهی که در «دستگاه‌های شبکه» تیک «مستقیم» دارد → IP واقعی خودت.
 - `free -m` قبل و بعد از اتصال — مصرف RAM را گزارش کن.
+
+توکن در لاگ سیستم (`logread`) نمی‌آید؛ همیشه در `/etc/irnetfree/token` است. `logread -e irnetfree` هشدارها، خطاها
+و وضعیت اتصال را نشان می‌دهد.
 
 حذف: `/etc/init.d/irnetfree stop; opkg remove irnetfree; rm -rf /etc/irnetfree`. راهنمای کامل: [`docs/openwrt.md`](docs/openwrt.md).
 
