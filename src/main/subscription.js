@@ -13,7 +13,7 @@
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
-const { parseMany, parseLink, applyServerEdits } = require('./parser');
+const { parseMany, parseLink, applyServerEdits, editFields } = require('./parser');
 
 function uid() { return crypto.randomBytes(8).toString('hex'); }
 
@@ -87,21 +87,21 @@ function put(obj, key, v) {
 /**
  * What the user sets on a server that its link can ALSO carry: the edit form's
  * anti-DPI fields, the per-config engine, the patterniha TLS knobs, a
- * WireGuard's DNS line. Connection parameters (address, credentials, SNI,
- * keys…) are not here: they must match the server, and the provider is the one
- * who knows them.
+ * WireGuard's DNS line. `key` is the edit form's name for it (the name
+ * applyServerEdits records in `_edited`).
  */
 const USER_FIELDS = [
-  { get: (s) => s.engine, set: (s, v) => put(s, 'engine', v) },
-  { get: (s) => s.outbound && s.outbound._fragment, set: (s, v) => put(s.outbound, '_fragment', v) },
-  { get: (s) => s.outbound && s.outbound._noise, set: (s, v) => put(s.outbound, '_noise', v) },
-  { get: (s) => { const st = streamOf(s); return st ? st.finalmask : undefined; }, set: (s, v) => put(streamOf(s), 'finalmask', v) },
+  { key: 'engine', get: (s) => s.engine, set: (s, v) => put(s, 'engine', v) },
+  { key: 'fragment', get: (s) => s.outbound && s.outbound._fragment, set: (s, v) => put(s.outbound, '_fragment', v) },
+  { key: 'noise', get: (s) => s.outbound && s.outbound._noise, set: (s, v) => put(s.outbound, '_noise', v) },
+  { key: 'finalMask', get: (s) => { const st = streamOf(s); return st ? st.finalmask : undefined; }, set: (s, v) => put(streamOf(s), 'finalmask', v) },
   {
+    key: 'cipherSuites',
     get: (s) => { const st = streamOf(s); return st && st.tlsSettings ? st.tlsSettings.cipherSuites : undefined; },
     set: (s, v) => { const st = streamOf(s); if (st && st.tlsSettings) put(st.tlsSettings, 'cipherSuites', v); }
   },
-  { get: (s) => s.dns, set: (s, v) => put(s, 'dns', v) },
-  { get: (s) => s.dnsDomains, set: (s, v) => put(s, 'dnsDomains', v) }
+  { key: 'dns', get: (s) => s.dns, set: (s, v) => put(s, 'dns', v) },
+  { key: 'dns', get: (s) => s.dnsDomains, set: (s, v) => put(s, 'dnsDomains', v) }
 ];
 
 /** Values compared the way the edit form writes them: blank is absent, text is trimmed. */
@@ -112,11 +112,12 @@ function norm(v) {
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
 /**
- * What the provider's link said the old server was: its `raw`, parsed again.
- * `raw` is never touched by an edit and is replaced by every refresh, so the
- * difference between this and the stored record is exactly what the user
- * changed. null when the link cannot say — it does not parse, or it is the
- * `wireguard://host:port` a .conf import keeps, which has no keys in it.
+ * What the provider's link said the old server was: its `raw`, parsed again
+ * (an edit never touches `raw`; every refresh replaces it). Used to FIND the
+ * server — one whose address the user swapped is still the provider's server
+ * — and to compare its handshake with the fresh one's. null when the link
+ * cannot say: it does not parse, or it is the `wireguard://host:port` a .conf
+ * import keeps, which has no keys in it.
  */
 function linkOf(old) {
   let said;
@@ -126,117 +127,91 @@ function linkOf(old) {
   return said;
 }
 
-/**
- * The connection fields of a record as the edit form shows and writes them
- * (app.js readServerFields / #editSave → parser.applyServerEdits): address and
- * port, the credential, a WireGuard's keys and interface, and the transport.
- */
+/** The connection fields of the edit form (parser.editFields names). */
+const CONNECTION_KEYS = ['address', 'port', 'uuid', 'password', 'username',
+  'privateKey', 'publicKey', 'presharedKey', 'localAddress', 'mtu', 'reserved', 'allowedIPs',
+  'network', 'security', 'sni', 'host', 'path', 'fp', 'pbk', 'sid', 'allowInsecure'];
+/** The ones the stream is rebuilt from, as the form sends them all on a save. */
 const STREAM_KEYS = ['network', 'security', 'sni', 'host', 'path', 'serviceName', 'fp', 'pbk', 'sid', 'allowInsecure', 'alpn'];
-function editView(s) {
-  const ob = (s && s.outbound) || {};
-  const set = ob.settings || {};
-  const srv = (set.servers && set.servers[0]) || {};
-  const proto = s.protocol || ob.protocol;
-  const v = { address: s.address, port: s.port };
-  if (proto === 'vless' || proto === 'vmess') {
-    const u = set.vnext && set.vnext[0] && set.vnext[0].users && set.vnext[0].users[0];
-    v.uuid = u ? u.id : '';
-  } else if (proto === 'trojan' || proto === 'shadowsocks') {
-    v.password = srv.password || '';
-  } else if (proto === 'socks' || proto === 'http') {
-    const u = srv.users && srv.users[0];
-    v.username = u ? u.user || '' : '';
-    v.password = u ? u.pass || '' : '';
-  } else if (proto === 'wireguard') {
-    const peer = (set.peers && set.peers[0]) || {};
-    Object.assign(v, {
-      privateKey: set.secretKey || '', publicKey: peer.publicKey || '', presharedKey: peer.preSharedKey || '',
-      localAddress: [].concat(set.address || []).join(','), mtu: set.mtu ? String(set.mtu) : '',
-      reserved: [].concat(set.reserved || []).join(','), allowedIPs: [].concat(peer.allowedIPs || []).join(',')
-    });
-  }
-  if (proto === 'vless' || proto === 'vmess' || proto === 'trojan') {
-    const st = ob.streamSettings || {};
-    const tls = st.tlsSettings || st.realitySettings || {};
-    const rs = st.realitySettings || {};
-    let path = '', host = '';
-    if (st.wsSettings) { path = st.wsSettings.path; host = st.wsSettings.headers && st.wsSettings.headers.Host; }
-    else if (st.grpcSettings) path = st.grpcSettings.serviceName;
-    else if (st.httpSettings) { path = st.httpSettings.path; host = [].concat(st.httpSettings.host || []).join(','); }
-    else if (st.xhttpSettings) { path = st.xhttpSettings.path; host = st.xhttpSettings.host; }
-    else if (st.httpupgradeSettings) { path = st.httpupgradeSettings.path; host = st.httpupgradeSettings.host; }
-    else if (st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.request) {
-      const rq = st.tcpSettings.header.request;
-      path = [].concat(rq.path || [])[0];
-      host = [].concat((rq.headers && rq.headers.Host) || [])[0];
-    }
-    Object.assign(v, {
-      network: st.network === 'raw' ? 'tcp' : (st.network || 'tcp'), security: st.security || 'none',
-      sni: tls.serverName || '', fp: tls.fingerprint || '', pbk: rs.publicKey || '', sid: rs.shortId || '',
-      allowInsecure: !!(st.tlsSettings && st.tlsSettings.allowInsecure),
-      alpn: st.tlsSettings && st.tlsSettings.alpn ? [].concat(st.tlsSettings.alpn).join(',') : '',
-      path: path || '', serviceName: path || '', host: host || ''
-    });
-  }
-  return v;
+
+/** The field names applyServerEdits recorded as the user's edits. */
+function recordedEdits(s) {
+  return Array.isArray(s && s._edited) ? s._edited.filter(k => typeof k === 'string') : [];
 }
 
 /**
- * The connection fields the user changed, as applyServerEdits() takes them —
- * null when there are none. A field is the user's when the stored record
- * differs from what its own link said AND is not blank: a blank is what an
- * older parser left in a field it did not fill yet (httpupgrade's path before
- * it had settings of its own), and the refresh is what repairs that. alpn
- * has no form field; serviceName mirrors path.
+ * The connection fields the user edited (as recorded when they edited them),
+ * as applyServerEdits() takes them, and their names — null when none carry.
+ * Nothing is inferred: a record with no `_edited` is taken as the provider
+ * sent it, so every parser fix reaches it on the next refresh. A field the
+ * user CLEARED in the form is recorded like any other edit, so it is carried
+ * as cleared — a removed PSK, an empty shortId, a path reset to `/` stay that
+ * way across refreshes; nothing has to guess whether a blank was theirs. When the
+ * provider moved the server to another handshake or transport (security or
+ * network differs between the old link and the fresh server), only the
+ * address and port go across: an SNI, a fingerprint or a REALITY key belong
+ * to the handshake they were set for.
  */
 function connectionEdits(old, said, fresh) {
-  // A field no form can edit that still differs means the record is not what
-  // this link parses to today — an older parser wrote it (a Shadowsocks
-  // method garbled by the base64-first read). Nothing in it is the user's.
-  const method = (s) => { const set = s.outbound && s.outbound.settings; return norm(set && set.servers && set.servers[0] && set.servers[0].method); };
-  if ((old.protocol === 'shadowsocks' || said.protocol === 'shadowsocks') && method(old) !== method(said)) return null;
-  const mine = editView(old), was = editView(said);
-  const edited = Object.keys(mine).filter(k => k !== 'alpn' && k !== 'serviceName' &&
-    norm(mine[k]) !== '' && norm(mine[k]) !== norm(was[k]));
-  if (!edited.length) return null;
+  let keys = recordedEdits(old).filter(k => CONNECTION_KEYS.includes(k));
+  if (!keys.length) return null;
+  const was = said ? editFields(said) : null;
+  const now = editFields(fresh);
+  if (!was || was.security !== now.security || was.network !== now.network) {
+    keys = keys.filter(k => k === 'address' || k === 'port');
+  }
+  const mine = editFields(old);
+  keys = keys.filter(k => k in mine);
+  if (!keys.length) return null;
   const fields = {};
   // The stream is rebuilt from every field, as the form sends them: the
   // fresh server's, with the user's changes over them.
-  if (edited.some(k => STREAM_KEYS.includes(k))) {
-    const now = editView(fresh);
+  if (keys.some(k => STREAM_KEYS.includes(k))) {
     for (const k of STREAM_KEYS) if (k in now) fields[k] = now[k];
   }
-  for (const k of edited) fields[k] = mine[k];
-  if (edited.includes('path')) fields.serviceName = mine.path;
+  for (const k of keys) fields[k] = mine[k];
+  if (keys.includes('path')) fields.serviceName = mine.path;
   // socks/http credentials go as a pair (applyServerEdits replaces both)
-  if (edited.includes('username') || (edited.includes('password') && 'username' in mine)) {
+  if ('username' in mine && (keys.includes('username') || keys.includes('password'))) {
     fields.username = mine.username; fields.password = mine.password;
   }
-  return fields;
+  return { fields, keys };
 }
 
 /**
  * The fresh record, with the old one's id and everything that was the user's.
- * A field counts as the user's when the old record differs from what its own
- * link says (they edited it — or cleared it), so a value the provider changed
- * and the user never touched still comes through. That goes for the
- * connection fields too — an address swapped for a clean CDN IP, an SNI, a
- * Host, a path (see connectionEdits). The certificate pin is learnt by the
- * app on first use and never travels in a link: always kept.
+ *  - Connection fields (address — a clean CDN IP —, port, credential, SNI,
+ *    Host, path, …): only those recorded in `_edited` when the user edited
+ *    them (see connectionEdits).
+ *  - The anti-DPI fields, the engine, a WireGuard's DNS: recorded ones, and —
+ *    as before — any whose old value differs from what the old link said, so
+ *    a value the provider retunes and the user never touched comes through.
+ *  - The name: recorded, or a rename the old link proves.
+ *  - The certificate pin is learnt by the app and never in a link: always kept.
+ * `_edited` goes forward with what was carried, so it holds refresh after
+ * refresh.
  */
 function carryOver(old, fresh, said) {
   let out = Object.assign({}, fresh, { id: old.id });
   out.outbound = clone(fresh.outbound);
-  const conn = said ? connectionEdits(old, said, fresh) : null;
-  if (conn) out = applyServerEdits(out, conn);
+  delete out._edited;
+  const recorded = recordedEdits(old);
+  const kept = [];
+  const conn = connectionEdits(old, said, fresh);
+  if (conn) { out = applyServerEdits(out, conn.fields); kept.push(...conn.keys); }
   for (const f of USER_FIELDS) {
     const mine = f.get(old);
-    if (!said || norm(mine) !== norm(f.get(said))) f.set(out, clone(mine));
+    const mineRecorded = recorded.includes(f.key);
+    if (mineRecorded || !said || norm(mine) !== norm(f.get(said))) f.set(out, clone(mine));
+    if (mineRecorded) kept.push(f.key);
   }
-  // A rename only when it can be proven one: otherwise the provider's name
-  // (which often carries the traffic left) is the current one.
-  if (said && norm(old.name) !== norm(said.name) && norm(old.name)) out.name = old.name;
+  // A rename when recorded, or when the old link proves one: otherwise the
+  // provider's name (which often carries the traffic left) is the current one.
+  if (recorded.includes('name')) { out.name = old.name; kept.push('name'); }
+  else if (said && norm(old.name) !== norm(said.name) && norm(old.name)) out.name = old.name;
   for (const k of Object.keys(old)) if (/^certPin/.test(k)) out[k] = old[k];
+  delete out._edited;
+  if (kept.length) out._edited = [...new Set(kept)].sort();
   return out;
 }
 

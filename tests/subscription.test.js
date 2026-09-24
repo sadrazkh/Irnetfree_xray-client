@@ -303,6 +303,106 @@ test('a user edit to a credential or a WireGuard field is kept too; a field the 
   assert.deepEqual(hNext.outbound.streamSettings.httpupgradeSettings, { path: '/up', host: 'cdn.example.com' });
 });
 
+test('a legacy record (no recorded edits) holding an older parser’s output comes out as today’s parse', () => {
+  // what older versions stored for these links: not edits, mistakes
+  const [ws] = sub([TR + '#NL']);
+  ws.outbound.streamSettings.wsSettings = { path: '/legacy', headers: { Host: 'legacy.example.com' } };
+  ws.outbound.streamSettings.tlsSettings.serverName = 'legacy.example.com';
+  const rawLink = 'vless://11111111-2222-3333-4444-555555555555@t.example.com:80?type=raw&headerType=http&path=%2Fa&host=t.com#R';
+  const [raw] = sub([rawLink]);
+  raw.outbound.streamSettings = { network: 'raw', security: 'none' };
+  const [nWs, nRaw] = reconcileServers([ws, raw], sub([TR + '#NL', rawLink]));
+  assert.equal(nWs.id, ws.id);
+  assert.deepEqual(nWs.outbound.streamSettings.wsSettings, { path: '/tr', headers: { Host: 't.example.com' } });
+  assert.equal(nWs.outbound.streamSettings.tlsSettings.serverName, 't.example.com');
+  assert.equal(nRaw.id, raw.id);
+  assert.deepEqual(nRaw.outbound.streamSettings.tcpSettings.header.request, { path: ['/a'], headers: { Host: ['t.com'] } });
+  assert.equal('_edited' in nWs, false);
+});
+
+test('recorded edits keep being carried refresh after refresh, and only they are recorded', () => {
+  const [orig] = sub([XH + '#DE 12GB']);
+  const old = applyServerEdits(orig, form(orig, { address: '104.16.1.1' }));
+  const [n1] = reconcileServers([old], sub([XH + '#DE 11GB']));
+  assert.deepEqual(n1._edited, ['address']);
+  const [n2] = reconcileServers([n1], sub([XH.replace('fp=chrome', 'fp=firefox') + '#DE 10GB']));
+  assert.equal(n2.id, old.id);
+  assert.equal(n2.address, '104.16.1.1');
+  assert.equal(n2.outbound.streamSettings.realitySettings.fingerprint, 'firefox');
+  assert.deepEqual(n2._edited, ['address']);
+});
+
+test('a panel moving the server from REALITY to TLS gets the user’s address, never their SNI, fingerprint or REALITY keys', () => {
+  const [orig] = sub([XH + '#DE']);   // xhttp + REALITY
+  const old = applyServerEdits(orig, form(orig, { address: '104.16.1.1', sni: 'mine.example.com', fp: 'safari', pbk: 'MYKEY', sid: 'ffff' }));
+  assert.deepEqual(old._edited, ['address', 'fp', 'pbk', 'sid', 'sni']);
+  // the panel moved the same user and path to plain TLS (matched on the loose pass)
+  const tls = XH.replace('security=reality', 'security=tls').replace('sni=www.speedtest.net', 'sni=panel.example.com').replace('&pbk=PUBKEY&sid=ab12', '');
+  const [next] = reconcileServers([old], sub([tls + '#DE']));
+  assert.equal(next.id, old.id);
+  assert.equal(next.address, '104.16.1.1', 'the address is still the user’s');
+  assert.equal(next.outbound.settings.vnext[0].address, '104.16.1.1');
+  const st = next.outbound.streamSettings;
+  assert.equal(st.security, 'tls');
+  assert.equal(st.realitySettings, undefined);
+  assert.equal(st.tlsSettings.serverName, 'panel.example.com', 'the REALITY SNI does not follow into a TLS handshake');
+  assert.equal(st.tlsSettings.fingerprint, 'chrome', 'nor the fingerprint');
+  assert.deepEqual(next._edited, ['address']);
+  // a transport change is another server altogether (the network is part of
+  // what a server IS): nothing of the user's reaches it
+  const [ws] = reconcileServers([old], sub([XH.replace('type=xhttp', 'type=ws') + '#DE']));
+  assert.notEqual(ws.id, old.id);
+  assert.equal(ws.address, 'x.example.com');
+});
+
+test('a panel moving the server from TLS to REALITY gets the user’s address, never their TLS SNI or fingerprint', () => {
+  const tlsLink = 'vless://11111111-2222-3333-4444-555555555555@x.example.com:443?type=ws&security=tls&sni=x.example.com&fp=chrome&path=%2Fw&host=x.example.com';
+  const [orig] = sub([tlsLink + '#T']);
+  const old = applyServerEdits(orig, Object.assign(form(orig), { address: '104.16.1.1', sni: 'front.example.com', fp: 'firefox' }));
+  const reality = tlsLink.replace('security=tls', 'security=reality').replace('sni=x.example.com', 'sni=www.speedtest.net') + '&pbk=PANELKEY&sid=cd34';
+  const [next] = reconcileServers([old], sub([reality + '#T']));
+  assert.equal(next.id, old.id);
+  assert.equal(next.address, '104.16.1.1');
+  assert.deepEqual(next.outbound.streamSettings.realitySettings, {
+    serverName: 'www.speedtest.net', fingerprint: 'chrome', publicKey: 'PANELKEY', shortId: 'cd34', spiderX: ''
+  });
+});
+
+test('a connection field the user cleared in the form stays cleared across refreshes', () => {
+  const wg = 'wireguard://K@wg.example.com:51820?publickey=P&presharedkey=PSK&address=10.0.0.5%2F32#W';
+  const [w] = sub([wg]);
+  const wOld = applyServerEdits(w, { presharedKey: '' });
+  assert.deepEqual(wOld._edited, ['presharedKey']);
+  const [wNext] = reconcileServers([wOld], sub([wg + '2']));
+  assert.equal('preSharedKey' in wNext.outbound.settings.peers[0], false);
+  const [w2] = reconcileServers([wNext], sub([wg + '3']));
+  assert.equal('preSharedKey' in w2.outbound.settings.peers[0], false, 'and the next refresh too');
+
+  const [r] = sub([XH + '#R']);
+  const rOld = applyServerEdits(r, form(r, { sid: '' }));
+  const [rNext] = reconcileServers([rOld], sub([XH + '#R2']));
+  assert.equal(rNext.outbound.streamSettings.realitySettings.shortId, '');
+  assert.equal(rNext.outbound.streamSettings.realitySettings.publicKey, 'PUBKEY', 'what the user did not clear is the panel’s');
+
+  const [t] = sub([TR + '#NL']);
+  const tOld = applyServerEdits(t, form(t, { path: '' }));   // the form's "no path" is the root
+  assert.equal(tOld.outbound.streamSettings.wsSettings.path, '/');
+  const [tNext] = reconcileServers([tOld], sub([TR + '#NL2']));
+  assert.equal(tNext.outbound.streamSettings.wsSettings.path, '/');
+});
+
+test('an ss record the old %3D decode garbled comes out as today’s parse after the first refresh', () => {
+  const b64pad = Buffer.from('aes-256-gcm:pass').toString('base64');   // 16 bytes → "==" padding
+  assert.ok(b64pad.endsWith('=='));
+  const link = 'ss://' + b64pad.replace(/=/g, '%3D') + '@ss.example.com:8388#S';
+  const [old] = sub([link]);
+  old.outbound.settings.servers[0].password = 'pass\r��';   // what the raw-base64 decode stored
+  const [next] = reconcileServers([old], sub([link]));
+  assert.equal(next.id, old.id);
+  assert.equal(next.outbound.settings.servers[0].method, 'aes-256-gcm');
+  assert.equal(next.outbound.settings.servers[0].password, 'pass');
+});
+
 test('an SS-2022 server the old parser garbled is repaired by the refresh, not "kept as the user’s"', () => {
   const link = 'ss://2022-blake3-aes-128-gcm:YctPZ6U7xPPcU%2Bgp3u%2BO0A%3D%3D@1.2.3.4:8388#x';
   const [old] = sub([link]);
