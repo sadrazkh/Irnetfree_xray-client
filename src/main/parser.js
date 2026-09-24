@@ -80,7 +80,13 @@ function buildStreamSettings(q) {
       path: q.path || '/',
       host: q.host ? q.host.split(',') : []
     };
-  } else if (net === 'tcp') {
+  } else if (net === 'httpupgrade') {
+    // Without its own settings the core dials `/` with Host = the address —
+    // a 404 from every CDN-fronted httpupgrade server.
+    stream.httpupgradeSettings = { path: q.path || '/', host: q.host || '' };
+  } else if (net === 'tcp' || net === 'raw') {
+    // `raw` is the core's newer name for tcp; every core knows `tcp`.
+    stream.network = 'tcp';
     if ((q.headerType || '') === 'http') {
       stream.tcpSettings = {
         header: {
@@ -308,8 +314,14 @@ function parseShadowsocks(link) {
     const atIdx = main.lastIndexOf('@');
     const userInfo = main.slice(0, atIdx);
     const hostPart = main.slice(atIdx + 1);
-    const decoded = b64decode(userInfo) || safeDecodeURIComponent(userInfo);
+    // Plain `method:password` (percent-encoded; the only form SS-2022 allows)
+    // or base64 of it. Plain is recognised first — base64 decoding is lenient
+    // enough to turn plain text into a garbage cipher — and base64 only counts
+    // when what it decodes to is a method:password pair.
+    const plain = safeDecodeURIComponent(userInfo);
+    const decoded = plain.includes(':') ? plain : b64decode(userInfo);
     const ci = decoded.indexOf(':');
+    if (ci === -1) throw new Error('Shadowsocks: cannot read method:password from the link');
     method = decoded.slice(0, ci);
     password = decoded.slice(ci + 1);
     [address, port] = splitHostPort(hostPart);
@@ -319,6 +331,7 @@ function parseShadowsocks(link) {
     const userInfo = decoded.slice(0, atIdx);
     const hostPart = decoded.slice(atIdx + 1);
     const ci = userInfo.indexOf(':');
+    if (atIdx === -1 || ci === -1) throw new Error('Shadowsocks: cannot read method:password from the link');
     method = userInfo.slice(0, ci);
     password = userInfo.slice(ci + 1);
     [address, port] = splitHostPort(hostPart);
@@ -427,7 +440,7 @@ function makeProxyServer(fields) {
   const user = String(fields.username || '').trim();
   const pass = String(fields.password || '').trim();
   const outbound = buildProxyOutbound(type, address, port, user, pass);
-  const raw = `${type}://${address}:${port}`;
+  const raw = `${type}://${joinHostPort(address, port)}`;
   return mkServer(fields.name || address || type.toUpperCase(), type, address, port, raw, outbound);
 }
 
@@ -607,7 +620,7 @@ function parseWireguard(link) {
   const outbound = buildWireguardOutbound({
     privateKey,
     publicKey: q.publickey || q.publicKey || q.peer || '',
-    endpoint: `${address}:${port}`,
+    endpoint: joinHostPort(address, port),
     address: q.address || q.ip || '',
     // Left undefined when absent so buildWireguardOutbound keeps its own default
     // (0.0.0.0/0, ::/0) rather than seeing an explicit empty list.
@@ -624,11 +637,12 @@ function parseWireguard(link) {
  * Create a WireGuard server record from a UI form (no share link).
  */
 function makeWireguardServer(fields) {
-  const [host, portStr] = splitHostPort(fields.endpoint || '');
+  const [host, portStr] = splitHostPort(String(fields.endpoint || '').trim());
   const port = parseInt(portStr, 10) || parseInt(fields.port, 10) || 51820;
-  const endpoint = fields.endpoint || `${host}:${port}`;
+  // Rebuilt from its parts so an IPv6 host is bracketed however it was typed.
+  const endpoint = host ? joinHostPort(host, port) : (fields.endpoint || `${host}:${port}`);
   const outbound = buildWireguardOutbound(Object.assign({}, fields, { endpoint }));
-  const raw = 'wireguard://' + (host || '') + ':' + port;
+  const raw = 'wireguard://' + joinHostPort(host || '', port);
   return withWgDns(
     mkServer(fields.name || host || 'WireGuard', 'wireguard', host || '', port, raw, outbound),
     fields.dns
@@ -693,7 +707,7 @@ function applyServerEdits(server, f) {
     const st = ob.settings;
     const peer = st && st.peers && st.peers[0];
     if (peer) {
-      peer.endpoint = `${addr}:${port}`;
+      peer.endpoint = joinHostPort(addr, port);
       if (f.publicKey) peer.publicKey = f.publicKey.trim();
       if (f.presharedKey != null) {
         if (f.presharedKey.trim()) peer.preSharedKey = f.presharedKey.trim();
@@ -760,6 +774,15 @@ function rebuildStream(ob, f) {
   const ks = cur.kcpSettings || {};
   const gs = cur.grpcSettings || {};
 
+  // TCP's HTTP header (obfuscation): the form re-sends every field on every
+  // save, so a rename alone used to rebuild the stream without it — and a
+  // working config stopped connecting. It stays while the server stays on TCP.
+  const net = String(f.network || cur.network || 'tcp').toLowerCase();
+  const isTcp = (n) => n === 'tcp' || n === 'raw';
+  const th = isTcp(String(cur.network || 'tcp').toLowerCase()) && isTcp(net) &&
+    cur.tcpSettings && cur.tcpSettings.header && cur.tcpSettings.header.type === 'http'
+    ? cur.tcpSettings.header : null;
+
   const q = {
     type: f.network || cur.network || 'tcp',
     security: f.security || cur.security || 'none',
@@ -776,7 +799,8 @@ function rebuildStream(ob, f) {
     spx: rs.spiderX || '',
     mode: xs.mode || (gs.multiMode ? 'multi' : ''),
     seed: ks.seed || '',
-    headerType: (ks.header && ks.header.type) || '',
+    // each transport's own header type: kcp's never lands on tcp, nor the reverse
+    headerType: (net === 'kcp' || net === 'mkcp') ? ((ks.header && ks.header.type) || '') : (th ? 'http' : ''),
     // patterniha: cipherSuites (tls) + finalMask (stream). Edited value wins,
     // else keep whatever the config already had.
     cipherSuites: f.cipherSuites != null ? f.cipherSuites : ((cur.tlsSettings && cur.tlsSettings.cipherSuites) || ''),
@@ -787,6 +811,21 @@ function rebuildStream(ob, f) {
   // Carry over any transport `extra`/advanced sub-keys the builder doesn't model
   // (e.g. xhttp scMaxEachPostBytes / uplink method / padding) so they persist.
   if (rebuilt.xhttpSettings && xs.extra) rebuilt.xhttpSettings.extra = xs.extra;
+
+  // The header as it was (a hand-made one carries more than path and Host),
+  // with only what the form changed applied to it.
+  if (th && rebuilt.tcpSettings) {
+    const header = JSON.parse(JSON.stringify(th));
+    const req = header.request || (header.request = {});
+    const curPath = [].concat(req.path || [])[0] || '';
+    const curHost = [].concat((req.headers && req.headers.Host) || [])[0] || '';
+    if (f.path != null && f.path !== curPath) req.path = [f.path || '/'];
+    if (f.host != null && f.host !== curHost) {
+      req.headers = req.headers || {};
+      if (f.host) req.headers.Host = [f.host]; else delete req.headers.Host;
+    }
+    rebuilt.tcpSettings = Object.assign({}, cur.tcpSettings, { header });
+  }
 
   ob.streamSettings = rebuilt;
 }
@@ -805,6 +844,16 @@ function splitHostPort(hp) {
   return [hp.slice(0, idx), hp.slice(idx + 1)];
 }
 
+/**
+ * The inverse: host and port joined for a link or an endpoint, an IPv6 address
+ * in brackets. `2606:…:c001:2408` is not an endpoint any core (or any other
+ * client reading our share link) can split.
+ */
+function joinHostPort(host, port) {
+  const h = String(host == null ? '' : host);
+  return (isIP(h) === 6 ? `[${h}]` : h) + ':' + port;
+}
+
 function mkServer(name, protocol, address, port, raw, outbound) {
   return {
     id: uid(),
@@ -817,11 +866,20 @@ function mkServer(name, protocol, address, port, raw, outbound) {
   };
 }
 
+/** A URI scheme at the start of a line, and the ones we can import. */
+const SCHEME = /^([a-z][a-z0-9+.-]*):\/\//i;
+const SCHEME_LINE = /^[a-z][a-z0-9+.-]*:\/\//im;
+const SUPPORTED = /^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//i;
+
 /**
  * Parse a single share link into a server object. Throws on failure.
  */
 function parseLink(link) {
-  const l = String(link).trim();
+  let l = String(link).trim();
+  // A scheme is case-insensitive (RFC 3986): `VLESS://` is a vless link. The
+  // parsers below slice by the lower-case spelling.
+  const sm = l.match(SCHEME);
+  if (sm) l = sm[1].toLowerCase() + l.slice(sm[1].length);
   if (l.startsWith('vless://')) return parseVless(l);
   if (l.startsWith('vmess://')) return parseVmess(l);
   if (l.startsWith('trojan://')) return parseTrojan(l);
@@ -850,22 +908,32 @@ function parseMany(text) {
     catch (e) { return { servers: [], errors: [{ line: '[Interface]…', error: e.message }] }; }
   }
 
-  // If it has no scheme but decodes to links, treat as subscription base64.
-  if (!/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//im.test(body)) {
+  // If it has no link at all but decodes to links, treat as subscription
+  // base64 — links of any scheme, so a subscription of nothing we can import
+  // is still read far enough to say so.
+  if (!SCHEME_LINE.test(body)) {
     const decoded = b64decode(body);
-    if (/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//im.test(decoded)) body = decoded;
+    if (SCHEME_LINE.test(decoded)) body = decoded;
   }
 
   const lines = body.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const servers = [];
   const errors = [];
   for (const line of lines) {
-    if (!/^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg):\/\//i.test(line) && !isHttpProxyLink(line)) continue;
-    try {
-      servers.push(parseLink(line));
-    } catch (e) {
-      errors.push({ line, error: e.message });
+    if (SUPPORTED.test(line) || isHttpProxyLink(line)) {
+      try {
+        servers.push(parseLink(line));
+      } catch (e) {
+        errors.push({ line, error: e.message });
+      }
+      continue;
     }
+    // hysteria2 / tuic / anytls / … are proxy links we cannot import: say so,
+    // rather than a subscription that seems to have fewer servers. http(s)
+    // lines are not links (a channel URL, a subscription URL) and comments
+    // have no scheme; both stay skipped.
+    const m = line.match(SCHEME);
+    if (m && !/^https?$/i.test(m[1])) errors.push({ line, error: 'unsupported protocol: ' + m[1].toLowerCase() });
   }
   return { servers, errors };
 }
@@ -890,8 +958,9 @@ function streamToQuery(st) {
     const extra = st.xhttpSettings.extra;
     if (extra && typeof extra === 'object' && !Array.isArray(extra) && Object.keys(extra).length) q.extra = JSON.stringify(extra);
   }
+  else if (net === 'httpupgrade' && st.httpupgradeSettings) { q.path = st.httpupgradeSettings.path || ''; q.host = st.httpupgradeSettings.host || ''; }
   else if (net === 'kcp' && st.kcpSettings) { q.headerType = (st.kcpSettings.header && st.kcpSettings.header.type) || 'none'; if (st.kcpSettings.seed) q.seed = st.kcpSettings.seed; }
-  else if (net === 'tcp' && st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.type === 'http') {
+  else if ((net === 'tcp' || net === 'raw') && st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.type === 'http') {
     q.headerType = 'http'; const rq = st.tcpSettings.header.request || {};
     q.path = (rq.path && rq.path[0]) || ''; q.host = (rq.headers && rq.headers.Host && rq.headers.Host[0]) || '';
   }
@@ -918,12 +987,12 @@ function buildShareLink(server) {
     const u = ob.settings.vnext[0].users[0];
     const q = Object.assign({ encryption: u.encryption || 'none' }, streamToQuery(ob.streamSettings), extras);
     if (u.flow) q.flow = u.flow;
-    return `vless://${u.id}@${server.address}:${server.port}?${qs(q)}${name}`;
+    return `vless://${u.id}@${joinHostPort(server.address, server.port)}?${qs(q)}${name}`;
   }
   if (proto === 'trojan') {
     const srv = ob.settings.servers[0];
     const q = Object.assign({}, streamToQuery(ob.streamSettings), extras);
-    return `trojan://${enc(srv.password)}@${server.address}:${server.port}?${qs(q)}${name}`;
+    return `trojan://${enc(srv.password)}@${joinHostPort(server.address, server.port)}?${qs(q)}${name}`;
   }
   if (proto === 'vmess') {
     const u = ob.settings.vnext[0].users[0]; const p = streamToQuery(ob.streamSettings);
@@ -938,12 +1007,12 @@ function buildShareLink(server) {
   }
   if (proto === 'shadowsocks') {
     const srv = ob.settings.servers[0];
-    return `ss://${Buffer.from(`${srv.method}:${srv.password}`).toString('base64')}@${server.address}:${server.port}${name}`;
+    return `ss://${Buffer.from(`${srv.method}:${srv.password}`).toString('base64')}@${joinHostPort(server.address, server.port)}${name}`;
   }
   if (proto === 'socks' || proto === 'http') {
     const srv = ob.settings.servers[0]; const c = srv.users && srv.users[0];
     const auth = c ? Buffer.from(`${c.user || ''}:${c.pass || ''}`).toString('base64') + '@' : '';
-    return `${proto}://${auth}${server.address}:${server.port}${name}`;
+    return `${proto}://${auth}${joinHostPort(server.address, server.port)}${name}`;
   }
   if (proto === 'wireguard') {
     const st = ob.settings || {};
@@ -957,7 +1026,7 @@ function buildShareLink(server) {
       reserved: (st.reserved || []).join(','),
       dns: [...asList(server.dns), ...asList(server.dnsDomains)].join(',')
     };
-    return `wireguard://${enc(st.secretKey || '')}@${server.address}:${server.port}?${qs(q)}${name}`;
+    return `wireguard://${enc(st.secretKey || '')}@${joinHostPort(server.address, server.port)}?${qs(q)}${name}`;
   }
   return server.raw || '';   // unknown protocol: fall back to the imported link
 }
@@ -1112,7 +1181,7 @@ function migrateStoredServer(server) {
     // A hand-edited store may have no peers at all; repairing address/port is
     // still worth doing, and inventing a peer list would not be.
     if (isPlainObject(wgSt) && Array.isArray(wgSt.peers) && isPlainObject(wgSt.peers[0])) {
-      const peers = wgSt.peers.map((p, i) => i === 0 ? Object.assign({}, p, { endpoint: `${wg.host}:${wg.port}` }) : p);
+      const peers = wgSt.peers.map((p, i) => i === 0 ? Object.assign({}, p, { endpoint: joinHostPort(wg.host, wg.port) }) : p);
       outbound.settings = Object.assign({}, wgSt, { peers });
     }
   }
