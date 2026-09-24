@@ -16,7 +16,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { SubscriptionManager, reconcileServers } = require('../src/main/subscription');
-const { parseMany, parseLink } = require('../src/main/parser');
+const { parseMany, parseLink, applyServerEdits } = require('../src/main/parser');
 const { buildConfig } = require('../src/main/configBuilder');
 const F = require('./fixtures');
 
@@ -155,15 +155,19 @@ test('panel variants of one server (same host, port, uuid; another SNI) keep the
 });
 
 test('the user’s own settings on a server survive the refresh', () => {
-  const [old] = sub([XH + '#DE']);
-  old.engine = 'xray-pattn';
-  old.outbound._fragment = 'tlshello,100-200,10-20';
-  old.outbound._noise = 'faketls';
-  old.outbound.streamSettings.finalmask = { tcp: [{ type: 'fragment', settings: { packets: 'tlshello', lengths: ['100-200'], delays: ['10-20'] } }] };
+  const [orig] = sub([XH + '#DE']);
+  const mask = { tcp: [{ type: 'fragment', settings: { packets: 'tlshello', lengths: ['100-200'], delays: ['10-20'] } }] };
+  // set through the edit form, the way the app records an edit
+  const old = applyServerEdits(orig, {
+    name: 'My exit', engine: 'xray-pattn', fragment: 'tlshello,100-200,10-20', noise: 'faketls',
+    network: 'xhttp', security: 'reality', sni: 'www.speedtest.net', pbk: 'PUBKEY', sid: 'ab12', fp: 'chrome', path: '/xh', host: '',
+    finalMask: JSON.stringify(mask)
+  });
+  assert.deepEqual(old._edited, ['engine', 'finalMask', 'fragment', 'name', 'noise']);
+  // learnt by the app on first use, never an edit
   old.certPin = 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde';
   old.certPinAt = '2026-09-24T10:00:00.000Z';
   old.certPinCheckedAt = 1790000000000;
-  old.name = 'My exit';   // renamed by the user
 
   const [next] = reconcileServers([old], sub([XH + '#DE%20%7C%209GB']));
   assert.equal(next.id, old.id);
@@ -181,14 +185,14 @@ test('the user’s own settings on a server survive the refresh', () => {
 
 test('cipherSuites edited on a TLS server survive; a WireGuard server keeps its edited DNS', () => {
   const tls = 'vless://u@c.example.com:443?security=tls&sni=c.example.com&fp=unsafe#C';
-  const [old] = sub([tls]);
-  old.outbound.streamSettings.tlsSettings.cipherSuites = 'TLS_AES_128_GCM_SHA256';
+  const [orig] = sub([tls]);
+  const old = applyServerEdits(orig, { cipherSuites: 'TLS_AES_128_GCM_SHA256', network: 'tcp', security: 'tls', sni: 'c.example.com', fp: 'unsafe' });
   const [next] = reconcileServers([old], sub([tls]));
   assert.equal(next.outbound.streamSettings.tlsSettings.cipherSuites, 'TLS_AES_128_GCM_SHA256');
 
   const wg = 'wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32#W';
-  const [ow] = sub([wg]);
-  ow.dns = ['192.168.60.1']; ow.dnsDomains = ['tes.systems'];
+  const [w] = sub([wg]);
+  const ow = applyServerEdits(w, { dns: '192.168.60.1, tes.systems' });
   const [nw] = reconcileServers([ow], sub([wg]));
   assert.equal(nw.id, ow.id);
   assert.deepEqual(nw.dns, ['192.168.60.1']);
@@ -205,25 +209,21 @@ test('what the user did not touch follows the provider — a new fragment, name 
 });
 
 test('a value the user changed wins over the panel retuning the same field', () => {
-  const [old] = sub([XH + '&fragment=tlshello,1-2,1-2&noise=random&engine=xray-pattn#DE']);
-  old.outbound._fragment = 'tlshello,100-200,10-20';   // edited in the form
-  old.outbound._noise = 'faketls';
-  old.engine = 'sing-box';
+  const [orig] = sub([XH + '&fragment=tlshello,1-2,1-2&noise=random&engine=xray-pattn#DE']);
+  const old = applyServerEdits(orig, { fragment: 'tlshello,100-200,10-20', noise: 'faketls', engine: 'sing-box' });   // edited in the form
   const [next] = reconcileServers([old], sub([XH + '&fragment=tlshello,5-9,5-9&noise=rand:10-20:0&engine=xray#DE']));
   assert.equal(next.outbound._fragment, 'tlshello,100-200,10-20');
   assert.equal(next.outbound._noise, 'faketls');
   assert.equal(next.engine, 'sing-box');
   // and one the user left alone takes the panel's new value in the same refresh
-  const [old2] = sub([XH + '&fragment=tlshello,1-2,1-2&noise=random#DE']);
-  old2.outbound._noise = 'faketls';
+  const [orig2] = sub([XH + '&fragment=tlshello,1-2,1-2&noise=random#DE']);
+  const old2 = applyServerEdits(orig2, { noise: 'faketls' });
   const [n2] = reconcileServers([old2], sub([XH + '&fragment=tlshello,5-9,5-9&noise=rand:10-20:0#DE']));
   assert.equal(n2.outbound._fragment, 'tlshello,5-9,5-9', 'untouched: the panel’s');
   assert.equal(n2.outbound._noise, 'faketls', 'edited: the user’s');
 });
 
 /* --------------- connection fields the user edited (review fix 1) --------------- */
-
-const { applyServerEdits } = require('../src/main/parser');
 
 /** Every field the edit form sends for a vless/vmess/trojan server (app.js #editSave), from the record. */
 function form(s, over) {
@@ -391,6 +391,29 @@ test('a connection field the user cleared in the form stays cleared across refre
   assert.equal(tNext.outbound.streamSettings.wsSettings.path, '/');
 });
 
+test('engine, fragment and noise follow recorded edits only: a stored value that is not today’s parse is replaced; one the user set through the app survives', () => {
+  const link = XH + '&fragment=tlshello,5-9,5-9&noise=random&engine=xray-pattn#DE';
+  // an old record whose markers differ from what its link parses to today, with no recorded edit
+  const [legacy] = sub([link]);
+  legacy.outbound._fragment = '1,1,1';
+  legacy.outbound._noise = 'str:old:0';
+  legacy.engine = 'sing-box';
+  const [n1] = reconcileServers([legacy], sub([link]));
+  assert.equal(n1.outbound._fragment, 'tlshello,5-9,5-9');
+  assert.equal(n1.outbound._noise, 'random');
+  assert.equal(n1.engine, 'xray-pattn');
+  assert.equal('_edited' in n1, false);
+  // the same values set through the edit form are the user's
+  const [orig] = sub([link]);
+  const mine = applyServerEdits(orig, { fragment: '1,1,1', noise: 'str:old:0', engine: 'sing-box' });
+  assert.deepEqual(mine._edited, ['engine', 'fragment', 'noise']);
+  const [n2] = reconcileServers([mine], sub([link.replace('fragment=tlshello,5-9,5-9', 'fragment=tlshello,6-8,6-8')]));
+  assert.equal(n2.outbound._fragment, '1,1,1');
+  assert.equal(n2.outbound._noise, 'str:old:0');
+  assert.equal(n2.engine, 'sing-box');
+  assert.deepEqual(n2._edited, ['engine', 'fragment', 'noise']);
+});
+
 test('an ss record the old %3D decode garbled comes out as today’s parse after the first refresh', () => {
   const b64pad = Buffer.from('aes-256-gcm:pass').toString('base64');   // 16 bytes → "==" padding
   assert.ok(b64pad.endsWith('=='));
@@ -416,18 +439,21 @@ test('an SS-2022 server the old parser garbled is repaired by the refresh, not "
 });
 
 test('a setting the user cleared stays cleared', () => {
-  const [old] = sub([XH + '&fragment=tlshello,1-2,1-2#DE']);
-  delete old.outbound._fragment;   // "Hide SNI" switched off in the edit form
+  const [orig] = sub([XH + '&fragment=tlshello,1-2,1-2#DE']);
+  const old = applyServerEdits(orig, { fragment: '' });   // "Hide SNI" switched off in the edit form
+  assert.deepEqual(old._edited, ['fragment']);
   const [next] = reconcileServers([old], sub([XH + '&fragment=tlshello,1-2,1-2#DE']));
   assert.equal('_fragment' in next.outbound, false);
 });
 
-test('an old server whose link no longer parses still hands over its id and settings', () => {
-  const [old] = sub([XH + '#DE']);
-  const odd = Object.assign({}, old, { raw: 'not a link', engine: 'xray-pattn' });
+test('an old server whose link no longer parses still hands over its id and its recorded settings', () => {
+  const [orig] = sub([XH + '#DE']);
+  const old = applyServerEdits(orig, { engine: 'xray-pattn' });
+  const odd = Object.assign({}, old, { raw: 'not a link', outbound: Object.assign({}, old.outbound, { _noise: 'faketls' }) });
   const [next] = reconcileServers([odd], sub([XH + '#DE-2']));
   assert.equal(next.id, old.id, 'matched by identity');
-  assert.equal(next.engine, 'xray-pattn', 'without the old link to compare with, what the old record had is kept');
+  assert.equal(next.engine, 'xray-pattn', 'a recorded edit needs no link to compare with');
+  assert.equal('_noise' in next.outbound, false, 'an unrecorded value is not the user’s');
   assert.equal(next.name, 'DE-2', 'a rename cannot be proven, so the provider’s name is taken');
 });
 
