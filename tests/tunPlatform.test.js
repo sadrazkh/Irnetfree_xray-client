@@ -126,10 +126,23 @@ test('getDefaultGatewayWin: one PowerShell for the active default routes and the
 // run this PowerShell by hand in the repo's sandbox, and a syntax slip in it
 // would take the gateway, and TUN mode with it, from every Windows user. It
 // only reads: Get-NetIPInterface and Get-NetRoute.
+//
+// `npm test` preloads the no-network guard, which refuses powershell by name —
+// rightly, for every other test. This read-only query on the runner is the one
+// exception, so it runs in a child node without the guard: the production
+// module and argv, nothing faked.
 test('the default-route query on a real Windows (CI runner only): it runs, and its rows are what the pick expects',
   { skip: !(process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true') }, async () => {
-    answer = null;
-    const out = await P.run('powershell', P.psArgs(P.DEFAULT_ROUTES_PS));   // exactly the production argv
+    const probe = [
+      `const P = require(${JSON.stringify(require.resolve('../src/main/tunPlatform'))});`,
+      '(async () => {',
+      "  const out = await P.run('powershell', P.psArgs(P.DEFAULT_ROUTES_PS));   // exactly the production argv",
+      '  process.stdout.write(JSON.stringify({ out, gw: await P.getDefaultGatewayWin() }));',
+      '})().catch((e) => { process.stderr.write(String((e && e.stack) || e)); process.exit(1); });'
+    ].join('\n');
+    const child = require('node:child_process').spawnSync(process.execPath, ['-e', probe], { encoding: 'utf8', timeout: 60000, windowsHide: true });
+    assert.equal(child.status, 0, child.stderr);
+    const { out, gw } = JSON.parse(child.stdout);
     const rows = [].concat(JSON.parse(out.trim()));
     assert.ok(rows.length >= 1, 'the runner has a default route: ' + out);
     const live = rows.filter(r => r.state === 'Connected');
@@ -140,7 +153,6 @@ test('the default-route query on a real Windows (CI runner only): it runs, and i
       assert.equal(typeof r.ifMetric, 'number');
       assert.equal(typeof r.alias, 'string');
     }
-    const gw = await P.getDefaultGatewayWin();
     assert.match(gw.nextHop, /^\d+\.\d+\.\d+\.\d+$/, out);
     assert.match(gw.ifIndex, /^\d+$/);
   });
