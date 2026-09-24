@@ -603,9 +603,9 @@ test('killSwitch ON: a drop that no connect healed keeps its block for the rebui
  * reapplyConnection() against fakes: the calls it makes, in order. `connect`
  * is what doConnect() does (resolve, or throw).
  */
-function reapplyHarness({ settings = {}, connect = async () => ({ ok: true }) } = {}) {
+function reapplyHarness({ settings = {}, connect = async () => ({ ok: true }), over = {} } = {}) {
   const calls = [];
-  const env = {
+  const env = Object.assign({
     calls,
     store: { get: (k, d) => (k === 'activeServerId' ? 'srv1' : d) },
     xray: { running: true, stop: async () => { calls.push('xray.stop'); env.xray.running = false; } },
@@ -618,15 +618,16 @@ function reapplyHarness({ settings = {}, connect = async () => ({ ok: true }) } 
     tun: { managesDns: true },
     tunPlatform: { resolveServerIps: async () => [] },
     buildPlan: () => ({ entryAddrs: [] }),
+    lastEntryHostIps: new Map(),
     stopAllTuns: async () => { calls.push('stopAllTuns'); },
     setSystemProxy: async (on) => { calls.push('setSystemProxy:' + on); },
     removeLanFirewall: async () => {},
     doConnect: async (...a) => { calls.push('doConnect'); const r = await connect(...a); env.xray.running = true; return r; }
-  };
+  }, over);
   const make = new Function('env', `
     let xrayReloading = false, connGen = 0, appliedSettings = {}, killEngaged = false;
     const { store, xray, getSettings, send, stats, usage, usageStore, leakGuard, tun, tunPlatform,
-            buildPlan, stopAllTuns, setSystemProxy, removeLanFirewall, doConnect } = env;
+            buildPlan, lastEntryHostIps, stopAllTuns, setSystemProxy, removeLanFirewall, doConnect } = env;
     const stopProcWatcher = () => {};
     async function armKillSwitch() { env.calls.push('arm'); killEngaged = true; return { ok: true }; }
     async function disarmKillSwitch() { env.calls.push('disarm'); killEngaged = false; }
@@ -653,6 +654,58 @@ test('a settings reapply keeps the journaled system proxy through the rebuild in
   const r = await failed.reapply();
   assert.equal(r.ok, false);
   assert.ok(failed.calls.indexOf('setSystemProxy:false') > failed.calls.indexOf('doConnect'), failed.calls.join(', '));
+});
+
+/** A reapply over a held guard at `level`: the names it asked of the OS, and the excludes it held. */
+async function reapplyLookups({ strict, entryAddrs, pinned = {} }) {
+  const asked = [];
+  const held = [];
+  const h = reapplyHarness({
+    over: {
+      tun: { managesDns: false },
+      leakGuard: {
+        readState: () => ({ peer4: '172.19.0.2', strict }),
+        holdForReconnect: async ({ excludes }) => { held.push(excludes); return { held: true }; }
+      },
+      tunPlatform: {
+        resolveServerIps: async (list) => {
+          for (const a of list) if (!/^[\d.:a-f]+$/i.test(a)) asked.push(a);
+          return list.filter(a => /^[\d.:a-f]+$/i.test(a));
+        }
+      },
+      buildPlan: () => ({ entryAddrs }),
+      lastEntryHostIps: new Map(Object.entries(pinned))
+    }
+  });
+  assert.equal((await h.reapply()).ok, true);
+  return { asked, held };
+}
+
+test('a reapply over a held guard asks the OS for no name — at the standard level nothing is looked up at all', async () => {
+  // Every recovery is a reapply, on a network that just died: a lookup there
+  // took seconds per attempt, for firewall holes only the strict level has.
+  const std = await reapplyLookups({ strict: false, entryAddrs: ['edge.example.net', '198.51.100.4'], pinned: { 'edge.example.net': ['203.0.113.30'] } });
+  assert.deepEqual(std.asked, []);
+  assert.deepEqual(std.held, [[]], 'nothing to widen: the override is the whole guard there');
+  // strict: the addresses of the last connect stand in for the names it pinned
+  const strict = await reapplyLookups({ strict: true, entryAddrs: ['edge.example.net', '198.51.100.4'], pinned: { 'edge.example.net': ['203.0.113.30'] } });
+  assert.deepEqual(strict.asked, []);
+  assert.deepEqual(strict.held, [['203.0.113.30', '198.51.100.4']]);
+  // a name the last connect never pinned (new with this apply) is still looked up, at strict only
+  const fresh = await reapplyLookups({ strict: true, entryAddrs: ['new.example.net'] });
+  assert.deepEqual(fresh.asked, ['new.example.net']);
+});
+
+test('service.js holds the guard across a reapply the same way', () => {
+  const SERVICE = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8').replace(/\r\n/g, '\n');
+  const hold = (src, label) => {
+    const body = src.slice(src.indexOf('async function reapplyConnection() {'));
+    const a = body.indexOf('let hold = null;');
+    const b = body.indexOf('await stopAllTuns({ keepDns');
+    assert.ok(a !== -1 && b > a, label);
+    return body.slice(a, b).split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('//')).join('\n');
+  };
+  assert.equal(hold(SERVICE, 'service.js'), hold(MAIN, 'main.js'));
 });
 
 /** scheduleShutdownCancelCheck() run at once on a given platform/uid; what it logs and reports. */

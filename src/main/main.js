@@ -1490,11 +1490,18 @@ async function reapplyConnection() {
         // in the held state's exclude list — hold merges rather than replaces,
         // so passing them again is cheap and idempotent under retries. Built
         // from the plan rather than a captured variable: this function has only
-        // the serverId.
+        // the serverId. Only the strict level has holes to widen, and a name is
+        // not asked of the OS for them: every recovery comes through here, on
+        // a network that just died, where a lookup takes seconds per attempt.
+        // What the last connect pinned stands in for the names it pinned.
         let entries = [];
-        try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
+        const strict = !!(leakGuard.readState() || {}).strict;
+        if (strict) {
+          try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
+        }
+        const addrs = entries.flatMap(a => lastEntryHostIps.get(a) || [a]);
         if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
-          excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
+          excludes: await tunPlatform.resolveServerIps(addrs, { ipv6: true }).catch(() => [])
         });
       }
     } catch {}
