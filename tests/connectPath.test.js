@@ -96,3 +96,23 @@ test('a process-route reload keeps the addresses the live tunnel was built for',
   assert.match(MAIN, /^let livePins = null;$/m);
   assert.match(SERVICE, /^ {2}let livePins = null;$/m);
 });
+
+/* ------------------------ A2: a chain that lost a member ------------------------ */
+
+test('both mirrors refuse a chain that lost a member, with the same words, wherever the plan uses it', () => {
+  const [[, main], [, service]] = both('const legacyIds = store.get(\'chain\', []) || [];', 'let plan, label;');
+  assert.equal(main, service);
+  assert.match(main, /The chain “\$\{name\}” lost a server/);
+  assert.match(main, /زنجیرهٔ «\$\{name\}» یکی از سرورهایش را از دست داده/, 'bilingual, like every connect error');
+  for (const [label, source] of [['main.js', MAIN], ['service.js', SERVICE]]) {
+    const plan = slice(source, label, 'function buildPlan(serverId, settings) {', 'return { plan, label, entryAddrs };');
+    for (const call of [
+      'for (const e of enabled) refuseBroken(e.target);',                   // a pool entry
+      'for (const tg of targets) { refuseBroken(tg); addEntryForTarget(tg); }', // every advanced rule and the default
+      "refuseBroken('chain:' + serverId);",                                  // a chain connected to directly
+      "refuseBroken('chain');"                                               // the legacy chain
+    ]) assert.ok(plan.includes(call), `${label}: buildPlan no longer calls ${call}`);
+    // the refusal comes before the "at least 2 servers" check, which it would otherwise hide
+    assert.ok(plan.indexOf("refuseBroken('chain:' + serverId);") < plan.indexOf('needs at least 2 servers'), label);
+  }
+});

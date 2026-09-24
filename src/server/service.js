@@ -680,7 +680,25 @@ function createService(opts = {}) {
     const membersOf = (c) => (c && Array.isArray(c.members) ? c.members.map(id => serversById[id]).filter(Boolean) : []);
     const chainsById = {};
     for (const c of chains) chainsById[c.id] = membersOf(c);
-    const legacyChain = (store.get('chain', []) || []).map(byId).filter(Boolean);
+    const legacyIds = store.get('chain', []) || [];
+    const legacyChain = legacyIds.map(byId).filter(Boolean);
+    // A chain is its members in order, or nothing: one that lost a member —
+    // deleted, or replaced by a subscription update — is not a shorter chain.
+    // [xhttp → corporate WireGuard] without its first hop is the WireGuard
+    // dialled from the ISP, the very thing the chain was built to avoid.
+    // Refused, by name, wherever this plan uses it (like the advanced default
+    // that no longer exists, in configBuilder).
+    const lostMember = (ids) => Array.isArray(ids) && ids.some(id => !serversById[id]);
+    const brokenChain = (name) => new Error(settings.lang === 'en'
+      ? `The chain “${name}” lost a server (it was removed, or replaced by a subscription update) — connecting would skip that hop. Put the server back into the chain under Chain.`
+      : `زنجیرهٔ «${name}» یکی از سرورهایش را از دست داده (حذف شده، یا با به‌روزرسانیِ اشتراک عوض شده) — اتصال آن هاپ را دور می‌زد. در بخشِ زنجیره سرور را دوباره در زنجیره بگذار.`);
+    const refuseBroken = (tg) => {
+      if (tg === 'chain' && lostMember(legacyIds)) throw brokenChain(legacyChain.map(s => s.name).join(' → '));
+      if (String(tg).indexOf('chain:') === 0) {
+        const c = chainById[String(tg).slice('chain:'.length)];
+        if (c && lostMember(c.members)) throw brokenChain(c.name || c.id);
+      }
+    };
 
     let plan, label;
     let entryAddrs = [];
@@ -700,7 +718,9 @@ function createService(opts = {}) {
         if (String(tg).indexOf('chain:') === 0) { const m = chainsById[String(tg).slice('chain:'.length)]; return !!(m && m.length >= 2); }
         return !!serversById[tg];
       };
-      const entries = getPool().filter(e => e.enabled && e.socksPort && targetExists(e.target))
+      const enabled = getPool().filter(e => e.enabled && e.socksPort);
+      for (const e of enabled) refuseBroken(e.target);
+      const entries = enabled.filter(e => targetExists(e.target))
         .map(e => ({ id: e.id, name: e.name, target: e.target, socksPort: e.socksPort, httpPort: e.httpPort }));
       if (!entries.length) throw new Error(settings.lang === 'en'
         ? 'Enable at least one valid proxy in the pool (with a port and an existing target).'
@@ -715,14 +735,16 @@ function createService(opts = {}) {
       label = '🧭 ' + (settings.lang === 'en' ? 'Advanced routing' : 'روتینگ ویژه');
       const targets = new Set(rules.map(r => r && r.target));
       targets.add(def);
-      for (const tg of targets) addEntryForTarget(tg);
+      for (const tg of targets) { refuseBroken(tg); addEntryForTarget(tg); }
     } else if (chainById[serverId]) {
+      refuseBroken('chain:' + serverId);
       const members = membersOf(chainById[serverId]);
       if (members.length < 2) throw new Error(settings.lang === 'en' ? 'This chain needs at least 2 servers' : 'این زنجیره حداقل به ۲ سرور نیاز دارد');
       plan = { mode: 'chain', chain: members, name: chainById[serverId].name };
       label = chainById[serverId].name;
       entryAddrs = [members[0].address];
     } else if (serverId === '__chain__') {
+      refuseBroken('chain');
       if (legacyChain.length < 2) throw new Error(settings.lang === 'en' ? 'The chain needs at least 2 servers' : 'زنجیره حداقل به ۲ سرور نیاز دارد');
       plan = { mode: 'chain', chain: legacyChain };
       label = legacyChain.map(s => s.name).join(' → ');
