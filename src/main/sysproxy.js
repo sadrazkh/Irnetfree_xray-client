@@ -40,11 +40,15 @@ const regDword = (name, v) => ['add', WIN_REG, '/v', name, '/t', 'REG_DWORD', '/
 const regSz = (name, v) => ['add', WIN_REG, '/v', name, '/t', 'REG_SZ', '/d', String(v), '/f'];
 const regDelete = (name) => ['delete', WIN_REG, '/v', name, '/f'];
 
+/**
+ * The server and the list first, the switch LAST: a write that fails or times
+ * out on the way leaves no proxy switched on over a half-set configuration.
+ */
 async function enableWindows(host, httpPort, exec = run) {
   const proxyServer = `${host}:${httpPort}`;
-  await exec('reg', regDword('ProxyEnable', 1));
   await exec('reg', regSz('ProxyServer', proxyServer));
   await exec('reg', regSz('ProxyOverride', WIN_BYPASS));
+  await exec('reg', regDword('ProxyEnable', 1));
   await refreshWindows(exec);
 }
 
@@ -117,7 +121,9 @@ function winRestoreSteps(prev) {
  * (last, only when it was on). That one runs only when everything before it
  * landed — over a server that could not be written back it would aim every
  * browser at OUR dead port. Each runner answers whether all of it landed (the
- * journal is spent) or not (it stays for the next launch).
+ * journal is spent) or not (it stays for the next launch). A delete that fails
+ * is no failure: its value was usually never there, and the switch back on
+ * never follows a delete (a proxy that was on had a server).
  */
 function splitReenable(steps) {
   return steps.length === 4 ? [steps.slice(0, 3), steps[3]] : [steps, null];
@@ -125,14 +131,14 @@ function splitReenable(steps) {
 async function runWinRestore(steps, exec) {
   const [head, reenable] = splitReenable(steps);
   let ok = true;
-  for (const args of head) { try { await exec('reg', args); } catch { ok = false; } }
+  for (const args of head) { try { await exec('reg', args); } catch { if (args[0] !== 'delete') ok = false; } }
   if (ok && reenable) { try { await exec('reg', reenable); } catch { ok = false; } }
   return ok;
 }
 function runWinRestoreSync(steps, execSync) {
   const [head, reenable] = splitReenable(steps);
   let ok = true;
-  for (const args of head) { try { execSync('reg', args); } catch { ok = false; } }
+  for (const args of head) { try { execSync('reg', args); } catch { if (args[0] !== 'delete') ok = false; } }
   if (ok && reenable) { try { execSync('reg', reenable); } catch { ok = false; } }
   return ok;
 }
@@ -331,29 +337,37 @@ function serial(fn) {
 
 async function enableJournaled(platform, { host, httpPort, socksPort }, { exec, journal }) {
   const ours = platform === 'win32' ? `${host}:${httpPort}` : { host, httpPort, socksPort };
+  const server = `${host}:${httpPort}`;
   const existing = readJournal(journal);
   let fresh = false;
   if (!existing) {
     // Before the first change. An unreadable snapshot still journals (null):
     // the disable then does what it always did, instead of nothing.
-    const rec = { platform, ours, at: new Date().toISOString() };
+    const rec = { platform, ours, written: [server], at: new Date().toISOString() };
     if (platform === 'win32') {
       rec.win = null;
       try { rec.win = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
-      // Our own port with our own list is a leftover of ours (a restore that
-      // failed halfway, a build before the journal that died connected) — never
-      // "what was there before": recorded as off, or every disconnect would
-      // switch a dead proxy back on.
+      // A proxy on OUR port is a leftover of ours (a restore that failed
+      // halfway, a build before the journal that died connected), whatever list
+      // it carries: our core holds the port, nothing else can be serving it.
+      // Never "what was there before" — recorded as off, or every disconnect
+      // would switch a dead proxy back on.
       const w = rec.win;
-      if (w && Number(w.ProxyEnable) === 1 && w.ProxyServer === ours && w.ProxyOverride === WIN_BYPASS) rec.win = Object.assign({}, w, { ProxyEnable: 0 });
+      if (w && Number(w.ProxyEnable) === 1 && w.ProxyServer === server) rec.win = Object.assign({}, w, { ProxyEnable: 0 });
     } else {
       rec.mac = null;   // unknown — not "no services": the restore then switches ours off everywhere
       try { rec.mac = await macSnapshot(exec); } catch { /* unknown */ }
     }
     writeJournal(journal, rec);
     fresh = true;
-  } else if (JSON.stringify(existing.ours) !== JSON.stringify(ours)) {
-    writeJournal(journal, Object.assign({}, existing, { ours }));   // keep the original, name what is ours now
+  } else {
+    // Keep the original record. Name what is ours now — and remember EVERY
+    // server written this session, before the write: one that timed out may
+    // still have landed, and a port change whose write failed leaves the old one.
+    const written = [...new Set([...writtenOf(existing), server])];
+    if (JSON.stringify(existing.ours) !== JSON.stringify(ours) || written.length !== writtenOf(existing).length) {
+      writeJournal(journal, Object.assign({}, existing, { ours, written }));
+    }
   }
   try {
     if (platform === 'win32') await enableWindows(host, httpPort, exec);
@@ -365,18 +379,32 @@ async function enableJournaled(platform, { host, httpPort, socksPort }, { exec, 
   }
 }
 
+/** Every `host:port` written this session (a journal from before `written` names only `ours`). */
+function writtenOf(j) {
+  if (Array.isArray(j.written) && j.written.length) return j.written.map(String);
+  if (typeof j.ours === 'string') return [j.ours];
+  return j.ours && j.ours.host ? [`${j.ours.host}:${j.ours.httpPort}`] : [];
+}
+
 /**
- * Is the proxy on the machine right now still the one WE set? Windows: our
- * server AND our exact bypass list, switched on — v2rayN, for one, uses the
- * same 127.0.0.1:10809 with a list of its own. macOS: our host:port as some
- * service's web proxy, switched on.
+ * Is the proxy on the machine right now still the one WE set? Two answers,
+ * for two moments:
+ *  - `session` (a disconnect, a reapply, a give-up): our core holds the port,
+ *    so a proxy aimed at any 127.0.0.1:<port> we wrote this session is ours,
+ *    whatever its bypass list and its switch say — a half-done enable, a list
+ *    re-saved while connected. Only a different server is someone else's.
+ *  - `launch`: no core of ours runs, and another client (v2rayN uses 10809
+ *    too) may really be on that port — so, while it is switched ON, our exact
+ *    bypass list as well. Switched off (a restore that died after its first
+ *    step, say), nobody is using it and the record is finished.
  */
-function ownsWin(cur, j) {
-  return Number(cur.ProxyEnable) === 1 && cur.ProxyServer === j.ours && cur.ProxyOverride === WIN_BYPASS;
+function ownsWin(cur, j, when) {
+  if (!writtenOf(j).includes(cur.ProxyServer)) return false;
+  return when === 'launch' ? (cur.ProxyOverride === WIN_BYPASS || Number(cur.ProxyEnable) !== 1) : true;
 }
 function ownsMac(cur, j) {
-  const o = j.ours || {};
-  return cur.some(s => s.web && s.web.enabled && s.web.server === o.host && s.web.port === Number(o.httpPort));
+  const written = writtenOf(j);
+  return cur.some(s => s.web && s.web.server && written.includes(`${s.web.server}:${s.web.port}`));
 }
 
 /**
@@ -386,13 +414,13 @@ function ownsMac(cur, j) {
  * since the crash: theirs, left alone, and the stale record goes — else true.
  * A snapshot that cannot be read restores anyway: the journal says we set it.
  */
-async function restoreJournaled(platform, { exec, journal }) {
+async function restoreJournaled(platform, { exec, journal, when = 'session' }) {
   const j = readJournal(journal);
   if (!j) return false;
   if (platform === 'win32') {
     let cur = null;
     try { cur = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
-    if (cur && !ownsWin(cur, j)) { clearJournal(journal); return 'not-ours'; }
+    if (cur && !ownsWin(cur, j, when)) { clearJournal(journal); return 'not-ours'; }
     const ok = await runWinRestore(winRestoreSteps(j.win), exec);
     await refreshWindows(exec).catch(() => {});
     // something could not be put back: keep the record for the next launch
@@ -471,7 +499,7 @@ function repairSystemProxy(opts = {}) {
   if (!journal || !journaled(platform)) return Promise.resolve(null);
   return serial(async () => {
     if (readJournal(journal)) {
-      const r = await restoreJournaled(platform, { exec, journal });
+      const r = await restoreJournaled(platform, { exec, journal, when: 'launch' });
       return r === 'not-ours' ? 'dropped' : 'restored';
     }
     // No journal: only a pre-journal leftover on OUR port is left to look
@@ -479,7 +507,7 @@ function repairSystemProxy(opts = {}) {
     if (platform !== 'win32' || !opts.legacyServer) return null;
     let cur = null;
     try { cur = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
-    if (cur && ownsWin(cur, { ours: opts.legacyServer })) {
+    if (cur && Number(cur.ProxyEnable) === 1 && ownsWin(cur, { ours: opts.legacyServer }, 'launch')) {
       await disableWindows(exec).catch(() => {});
       return 'legacy';
     }

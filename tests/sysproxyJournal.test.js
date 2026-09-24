@@ -100,10 +100,10 @@ test('win: the previous state is journaled before the first registry write, then
   const firstReg = w.calls.find(c => c.cmd === 'reg');
   assert.equal(firstReg.journal, true, 'the journal must exist before anything is overwritten — a crash in between still has a record');
   assert.deepEqual(w.regCalls(), [
-    regAdd('ProxyEnable', 'REG_DWORD', 1),
     regAdd('ProxyServer', 'REG_SZ', '127.0.0.1:10809'),
-    regAdd('ProxyOverride', 'REG_SZ', WIN_BYPASS)
-  ], 'what is written is what it always was');
+    regAdd('ProxyOverride', 'REG_SZ', WIN_BYPASS),
+    regAdd('ProxyEnable', 'REG_DWORD', 1)
+  ], 'the switch goes on LAST: a write that fails before it leaves no proxy aimed at a half-set server');
   const j = JSON.parse(fs.readFileSync(journal, 'utf8'));
   assert.deepEqual(j.win, { ProxyEnable: 0, ProxyServer: null, ProxyOverride: null, AutoConfigURL: 'http://wpad.corp/proxy.pac' });
   assert.equal(j.ours, '127.0.0.1:10809');
@@ -327,6 +327,68 @@ test('win: a proxy the user changed while connected is theirs — the disconnect
   assert.deepEqual(w.regCalls(), []);
   assert.equal(w.reg.ProxyServer, 'proxy.corp:8080');
   assert.equal(fs.existsSync(journal), false);
+});
+
+/*
+ * While our core holds the port, a proxy aimed at 127.0.0.1:<a port we wrote
+ * this session> is OURS whatever its bypass list says — nothing else can be
+ * serving it. Requiring the exact list made the disconnect call it "not ours"
+ * and leave our dead proxy switched on (W2 all over again).
+ */
+
+test('win: a half-done enable is still ours at the disconnect', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 0 });
+  const flaky = async (cmd, args) => { if (cmd === 'reg' && args.includes('ProxyOverride') && args[0] === 'add') throw new Error('timed out'); return w.exec(cmd, args); };
+  await assert.rejects(setSystemProxy(true, Object.assign({ journal, exec: flaky, platform: 'win32' }, ON)));
+  assert.equal(w.reg.ProxyServer, '127.0.0.1:10809');
+  assert.notEqual(w.reg.ProxyEnable, 1, 'the switch was never turned on over a half-set proxy');
+  await setSystemProxy(false, { journal, exec: w.exec, platform: 'win32' });
+  assert.deepEqual(w.reg, { ProxyEnable: 0 }, 'our server is gone again');
+  assert.equal(fs.existsSync(journal), false);
+});
+
+test('win: a bypass list re-saved while connected does not make our proxy someone else’s', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 0 });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  w.reg.ProxyOverride = WIN_BYPASS + ';*.corp';   // the Settings page, or the user, re-saved it
+  await setSystemProxy(false, { journal, exec: w.exec, platform: 'win32' });
+  assert.equal(w.reg.ProxyEnable, 0, 'our dead proxy is not left switched on');
+  assert.equal(w.reg.ProxyServer, undefined);
+});
+
+test('win: every port written this session stays ours — a port change whose server write failed', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 0 });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  const flaky = async (cmd, args) => { if (cmd === 'reg' && args.includes('127.0.0.1:20809')) throw new Error('timed out'); return w.exec(cmd, args); };
+  await assert.rejects(setSystemProxy(true, Object.assign({ journal, exec: flaky, platform: 'win32' }, ON, { httpPort: 20809 })));
+  assert.equal(w.reg.ProxyServer, '127.0.0.1:10809', 'the old server is still there');
+  await setSystemProxy(false, { journal, exec: w.exec, platform: 'win32' });
+  assert.equal(w.reg.ProxyEnable, 0);
+  assert.equal(w.reg.ProxyServer, undefined);
+});
+
+test('win: a leftover on our port is never journaled as "before", whatever list it carries', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: 'localhost;<local>' });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  assert.equal(JSON.parse(fs.readFileSync(journal, 'utf8')).win.ProxyEnable, 0, 'our core holds the port: that proxy was ours');
+  await setSystemProxy(false, { journal, exec: w.exec, platform: 'win32' });
+  assert.equal(w.reg.ProxyEnable, 0);
+});
+
+test('win launch: a restore that died after switching ours off is finished at the next launch', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: 'proxy.corp:8080', ProxyOverride: '<local>' });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  const flaky = async (cmd, args) => { if (cmd === 'reg' && args.includes('ProxyServer')) throw new Error('Access is denied.'); return w.exec(cmd, args); };
+  await setSystemProxy(false, { journal, exec: flaky, platform: 'win32' });
+  assert.equal(w.reg.ProxyEnable, 0);
+  assert.equal(w.reg.ProxyServer, '127.0.0.1:10809', 'half-restored: off, still our server');
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', legacyServer: '127.0.0.1:10809' }), 'restored');
+  assert.deepEqual(w.reg, { ProxyEnable: 1, ProxyServer: 'proxy.corp:8080', ProxyOverride: '<local>' });
 });
 
 test('the exit hook’s restore is bounded in time; what it could not do stays journaled', (t) => {
