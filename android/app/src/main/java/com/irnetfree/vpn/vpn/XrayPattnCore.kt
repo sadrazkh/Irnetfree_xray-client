@@ -36,14 +36,27 @@ class XrayPattnCore {
     @Volatile private var reader: Thread? = null
     @Volatile private var tail: String = ""   // most recent core output, for error reports
     @Volatile private var cfgFile: File? = null
+    /** Set by stop(): an exit after it is ours, not the core's. */
+    @Volatile private var stopping = false
 
-    /** Start PattN and wait until its socks port is live. False on any failure. */
-    fun start(ctx: Context, configJson: String, socksPort: Int, onLog: (String) -> Unit): Boolean {
+    /**
+     * Start PattN and wait until its socks port is live. False on any failure,
+     * and then nothing it launched is left running. [onExit] hears the exit
+     * code if the core dies later on its own (not after stop()).
+     */
+    fun start(ctx: Context, configJson: String, socksPort: Int, onLog: (String) -> Unit, onExit: ((Int) -> Unit)? = null): Boolean {
+        stopping = false
         val bin = binary(ctx)
         if (bin == null) {
             val f = File(ctx.applicationInfo.nativeLibraryDir, SO_NAME)
             onLog(if (!f.exists()) "Xray-PattN: $SO_NAME not bundled for this device (arm64 only) — using the in-process core"
                   else "Xray-PattN: $SO_NAME present but not executable — using the in-process core")
+            return false
+        }
+        // "Ready" below is "the port answers", which anyone already listening
+        // there satisfies too — so the port has to be ours before the launch.
+        if (!LocalPort.waitFree(socksPort)) {
+            onLog("Xray-PattN: 127.0.0.1:$socksPort is already taken by another app — nothing launched; choose another SOCKS port in Settings")
             return false
         }
         return try {
@@ -87,19 +100,32 @@ class XrayPattnCore {
             }
             prober.start()
             runCatching { prober.join(7000) }
+            // Anything but ready stops what was launched: a process left behind
+            // holds the port and makes the next start's probe lie.
             when {
-                ready.get() -> { onLog("Xray-PattN: socks ready on 127.0.0.1:$socksPort"); Log.i(TAG, "pattn ready"); true }
-                died.get() -> { onLog("Xray-PattN exited (code ${runCatching { p.exitValue() }.getOrNull()}) — ${tail.ifBlank { "no output; check the config" }}"); false }
-                else -> { onLog("Xray-PattN: socks port $socksPort did not open in time — ${tail.ifBlank { "no output" }}"); false }
+                ready.get() && p.isAlive -> { watch(p, onExit); onLog("Xray-PattN: socks ready on 127.0.0.1:$socksPort"); Log.i(TAG, "pattn ready"); true }
+                died.get() || !p.isAlive -> { onLog("Xray-PattN exited (code ${runCatching { p.exitValue() }.getOrNull()}) — ${tail.ifBlank { "no output; check the config" }}"); stop(); false }
+                else -> { onLog("Xray-PattN: socks port $socksPort did not open in time — ${tail.ifBlank { "no output" }}; stopped it"); stop(); false }
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Xray-PattN start failed", t)
             onLog("Xray-PattN error: ${t.message ?: t}")
+            stop()
             false
         }
     }
 
+    /** A thread waiting on the child, so a core that exits later is noticed. */
+    private fun watch(p: Process, onExit: ((Int) -> Unit)?) {
+        if (onExit == null) return
+        Thread {
+            val code = try { p.waitFor() } catch (e: InterruptedException) { return@Thread }
+            if (!stopping) onExit?.invoke(code)
+        }.also { it.isDaemon = true; it.name = "pattn-watch"; it.start() }
+    }
+
     fun stop() {
+        stopping = true
         runCatching { cfgFile?.delete() }; cfgFile = null
         runCatching { proc?.destroy() }
         runCatching {
