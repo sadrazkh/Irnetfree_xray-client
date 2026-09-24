@@ -138,44 +138,53 @@ object SubRefresh {
      * a noise spec's base64 as a space, and that would have passed for an edit.
      */
     fun carry(old: ServerConfig, fresh: ServerConfig, linked: ServerConfig? = linkedForm(old)): ServerConfig {
-        val base = withUsersEdits(old, linked, fresh)
+        val (base, kept) = withUsersEdits(old, linked, fresh)
         val ob = JSONObject(base.outbound.toString())
         for ((field, k) in listOf("fragment" to "_fragment", "noise" to "_noise")) {
-            if (field !in old.edited) continue
+            if (field !in kept) continue
             val mine = old.outbound.optString(k)
             if (mine.isBlank()) ob.remove(k) else ob.put(k, mine)
         }
-        val engine = if ("engine" in old.edited) old.engine else fresh.engine
+        val engine = if ("engine" in kept) old.engine else fresh.engine
         return base.copy(
             id = old.id, outbound = ob, engine = engine,
             certPin = old.certPin, certPinAt = old.certPinAt, certPinCheckedAt = old.certPinCheckedAt,
-            edited = old.edited
+            edited = kept
         )
     }
 
-    /** What is carried when the panel changed the handshake: where the user reaches the server, and what they call it. */
-    private val ADDRESSING = setOf("name", "address", "port")
+    /**
+     * What is carried when the panel changed the handshake: where the user
+     * reaches the server and what they call it, and the core, fragment and noise,
+     * which belong to no one handshake.
+     */
+    private val ACROSS_HANDSHAKES = setOf("name", "address", "port", "fragment", "noise", "engine")
 
     /**
      * [fresh] with the connection fields the user edited on [old] (its
      * [ServerConfig.edited] record) written into it — through ServerEditor.apply,
      * which patches exactly those fields and leaves the rest of the fresh
-     * outbound as the panel sent it.
+     * outbound as the panel sent it — and the record the refreshed server keeps.
+     *
+     * The record keeps only what was CARRIED. After a handshake change the SNI,
+     * keys, path… of the old one are not carried, and a record still naming them
+     * would, on the next refresh (the same handshake by then), carry what the
+     * refreshed server holds for them — the PANEL's values — and freeze them.
      */
-    private fun withUsersEdits(old: ServerConfig, linked: ServerConfig?, fresh: ServerConfig): ServerConfig {
-        if (old.edited.isEmpty()) return fresh
+    private fun withUsersEdits(old: ServerConfig, linked: ServerConfig?, fresh: ServerConfig): Pair<ServerConfig, List<String>> {
+        if (old.edited.isEmpty()) return fresh to emptyList()
         val mine = ServerEditor.read(old)
         val panelWas = ServerEditor.read(linked ?: old)
         val f = ServerEditor.read(fresh)
         val sameHandshake = panelWas.security.lowercase() == f.security.lowercase() &&
             ServerEditor.normNet(panelWas.network) == ServerEditor.normNet(f.network)
-        val carried = old.edited.filter { sameHandshake || it in ADDRESSING }
+        val kept = old.edited.filter { sameHandshake || it in ACROSS_HANDSHAKES }
         var changed = false
         for ((name, p) in ServerEditor.EDITABLE) {
-            if (name in carried) { p.set(f, p.get(mine)); changed = true }
+            if (name in kept) { p.set(f, p.get(mine)); changed = true }
         }
-        if ("allowInsecure" in carried) { f.allowInsecure = mine.allowInsecure; changed = true }
-        return if (changed) ServerEditor.apply(fresh, f) else fresh
+        if ("allowInsecure" in kept) { f.allowInsecure = mine.allowInsecure; changed = true }
+        return (if (changed) ServerEditor.apply(fresh, f) else fresh) to kept
     }
 
     /**
