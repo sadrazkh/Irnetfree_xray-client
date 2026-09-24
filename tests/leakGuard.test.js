@@ -919,7 +919,7 @@ test('refresh (win32): drift is measured against the loopback hold, and a family
   p = ps();
   assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
   assert.equal(ps(), p + 2);
-  assert.deepEqual(written(h.calls.at(-1).script), [{ alias: 'Wi-Fi', addr: hold4 }, { alias: 'Wi-Fi', addr: hold6 }]);
+  assert.deepEqual(written(h.calls.at(-1).script), [{ alias: 'Wi-Fi', addr: hold6 }], 'only the family that drifted');
 
   // Ethernet has no IPv6 at all: its empty v6 list is not drift, on any tick
   snapshot = JSON.stringify([
@@ -1023,9 +1023,12 @@ test('refresh (win32): an adapter first seen mid-session keeps a ::1 of its own'
  * Review M2. An adapter family that refuses (the error is the adapter's, it
  * does not go away) was retried on every 30-s tick — a PowerShell snapshot
  * each time, a warning each time, and a Clear-DnsClientCache each time: the
- * whole machine's DNS cache flushed twice a minute for the session.
+ * whole machine's DNS cache flushed twice a minute for the session. It is
+ * retried on the full ticks only (the first and every tenth), so a one-off
+ * refusal — a race with an unplug — does not leave the family on its own
+ * resolver for the whole session; and it is warned about once.
  */
-test('refresh (win32): a family that refused is not retried every tick, and the cache is flushed only after a Set that worked', async () => {
+test('refresh (win32): a family that refused is retried on full ticks only, warned about once, and the cache is flushed only after a Set that worked', async () => {
   let snapshot = WIN_SNAP, v4 = '', v6 = '';
   let applyOut = 'IRNF_FAIL 1 v6 The requested operation is not supported.\r\n';
   const h = harness('win32', (cmd, args) => {
@@ -1045,27 +1048,79 @@ test('refresh (win32): a family that refused is not retried every tick, and the 
   let p = ps();
   assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
   assert.equal(ps(), p, 'no PowerShell on the cheap tick');
-  snapshot = JSON.stringify([
-    { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
-    { alias: 'Ethernet', v4: [HOLD4], v6: ['fe80::1'], has4: true, has6: true }
-  ]);
-  p = ps();
-  assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: false, adapters: 0 });
-  assert.equal(ps(), p + 1, 'the snapshot only — no apply, so no cache flush');
-  assert.equal(warns(), 1, 'said once');
 
-  // the family that works is still repaired, and only that one is attempted
+  // a cheap tick that does take the snapshot (Ethernet's v4 drifted): the
+  // family that works is repaired, the one that refused is not attempted
+  v4 = HELD_V4.replace(netshBlock('Ethernet', 'Statically Configured DNS Servers', [HOLD4]),
+    netshBlock('Ethernet', 'DNS servers configured through DHCP', ['192.168.1.1']));
   snapshot = JSON.stringify([
     { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
     { alias: 'Ethernet', v4: ['192.168.1.1'], v6: ['fe80::1'], has4: true, has6: true }
   ]);
-  assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: true, adapters: 1 });
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
   assert.deepEqual(written(h.calls.at(-1).script), [{ alias: 'Ethernet', addr: HOLD4 }]);
 
-  // a new engage (a reconnect) tries it again
+  // a full tick tries it again; refusing again is neither an error nor a second warning
+  v4 = HELD_V4;
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [HOLD4], v6: ['fe80::1'], has4: true, has6: true }
+  ]);
+  applyOut = 'IRNF_FAIL 0 v6 The requested operation is not supported.\r\n';
+  assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: false, adapters: 0, refused: 1 });
+  assert.deepEqual(written(h.calls.at(-1).script), [{ alias: 'Ethernet', addr: HOLD6 }]);
+  assert.equal(warns(), 1, 'said once per connect');
+  assert.equal(h.logs.some(([l]) => /repaired DNS drift/.test(l)), true, 'the v4 repair above');
+  const repairs = h.logs.filter(([l]) => /repaired DNS drift/.test(l)).length;
+
+  // … and between full ticks it is left alone again
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
+  assert.equal(ps(), p);
+
+  // the refusal was a one-off: the next full tick holds it
   applyOut = '';
-  await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
-  assert.ok(written(h.calls.at(-1).script).some(w => w.alias === 'Ethernet' && w.addr === HOLD6));
+  assert.deepEqual(await h.guard.refresh({ token, full: true }), { refreshed: true, adapters: 1 });
+  assert.deepEqual(written(h.calls.at(-1).script), [{ alias: 'Ethernet', addr: HOLD6 }]);
+  assert.equal(h.logs.filter(([l]) => /repaired DNS drift/.test(l)).length, repairs + 1);
+});
+
+/**
+ * Review minor 2. The cheap tick looks at an alias nobody owns once — but
+ * netsh also lists an adapter that is not up, with whatever resolver it last
+ * had. Judged (and skipped: the snapshot lists only adapters that are Up)
+ * while it was down, it must still be looked at again when it comes up on a
+ * network that hands it a different resolver.
+ */
+test('refresh (win32): an alias judged once is looked at again when its resolvers change', async () => {
+  let v4 = HELD_V4, snapshot = WIN_SNAP;
+  const h = harness('win32', (cmd, args) => {
+    if (cmd === 'netsh') return args[1] === 'ipv6' ? HELD_V6 : v4;
+    return /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '';
+  });
+  const { token } = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6, tunAlias: 'IRNetFree' });
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true }
+  ]);
+  const ps = () => h.calls.filter(c => c.cmd === 'powershell').length;
+  // down, listed with a stale resolver: one snapshot, which does not list it
+  v4 = HELD_V4 + '\r\n' + netshBlock('USB LAN', 'DNS servers configured through DHCP', ['192.168.50.1']);
+  let p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0 });
+  assert.equal(ps(), p + 1);
+  p = ps();
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: false, adapters: 0, quick: true });
+  assert.equal(ps(), p, 'the same alias with the same resolver is not looked at twice');
+  // up, on another network: looked at again, and adopted
+  v4 = HELD_V4 + '\r\n' + netshBlock('USB LAN', 'DNS servers configured through DHCP', ['10.20.0.1']);
+  snapshot = JSON.stringify([
+    { alias: 'Wi-Fi', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'Ethernet', v4: [HOLD4], v6: [HOLD6], has4: true, has6: true },
+    { alias: 'USB LAN', v4: ['10.20.0.1'], v6: [], has4: true, has6: false, dhcp4: true, dhcp6: true }
+  ]);
+  assert.deepEqual(await h.guard.refresh({ token }), { refreshed: true, adapters: 1 });
+  assert.deepEqual(written(h.calls.at(-1).script), [{ alias: 'USB LAN', addr: HOLD4 }]);
 });
 
 /* ============================ level: strict ============================ */

@@ -944,22 +944,32 @@ class LeakGuard {
    * the session must go on being watched; only when nothing at all could be
    * set is it the guard failing, and that throws like the spawn failing does.
    *
-   * A family that refused is remembered until the next engage (`_winFailed`,
-   * see _winRefusedKey): its error is the adapter's and does not go away on
-   * its own, so refresh() neither counts it as drift nor tries it again —
-   * no PowerShell snapshot, warning and cache flush every 30 s for the session.
-   * The next engage (a reconnect, a new session) tries it afresh.
+   * A family that refused is remembered (`_winFailed`, see _winRefusedKey):
+   * its error is usually the adapter's and does not go away on its own, so the
+   * cheap ticks of refresh() neither count it as drift nor try it again — no
+   * PowerShell snapshot, warning and cache flush every 30 s for the session.
+   * The full ticks (the first and every tenth) and the next engage try it
+   * afresh, so a one-off refusal (a race with an unplug) is not for good; the
+   * warning is said once per engage (`_winWarned`). `fatal: false` (refresh)
+   * never throws: the guard is engaged, one family of one adapter is not.
+   * Returns what refused.
    */
-  async _winApply(adapters, addr4, addr6, options) {
+  async _winApply(adapters, addr4, addr6, options, { fatal = true } = {}) {
     const out = await this._powershell(winApplyScript(adapters, addr4, addr6), options);
     const { attempted, failed } = winApplyOutcome(out, adapters, addr4, addr6);
-    if (!failed.length) return;
+    if (!failed.length) return failed;
     this._winFailed = this._winFailed || new Set();
+    this._winWarned = this._winWarned || new Set();
     for (const f of failed) this._winFailed.add(_winRefusedKey(f.alias, f.family));
-    const what = failed.map(f => `${f.alias} (${f.family === 'v6' ? 'IPv6' : 'IPv4'}): ${f.message}`).join('; ');
-    if (failed.length >= attempted) throw new Error(`no adapter's DNS could be set — ${what}`);
-    this.onLog(`Leak guard: could not set the DNS of ${what} — the other adapters are guarded;`
-      + ' not retried until the next connect', 'warn');
+    const what = (list) => list.map(f => `${f.alias} (${f.family === 'v6' ? 'IPv6' : 'IPv4'}): ${f.message}`).join('; ');
+    if (fatal && failed.length >= attempted) throw new Error(`no adapter's DNS could be set — ${what(failed)}`);
+    const fresh = failed.filter(f => !this._winWarned.has(_winRefusedKey(f.alias, f.family)));
+    for (const f of fresh) this._winWarned.add(_winRefusedKey(f.alias, f.family));
+    if (fresh.length) {
+      this.onLog(`Leak guard: could not set the DNS of ${what(fresh)} — the other adapters are guarded;`
+        + ' tried again every few minutes', 'warn');
+    }
+    return failed;
   }
 
   /** Did this adapter family refuse the hold since the last engage? */
@@ -1051,6 +1061,7 @@ class LeakGuard {
         // one that refused before gets another try.
         this._winSeen = new Set();
         this._winFailed = new Set();
+        this._winWarned = new Set();
         apply = () => this._winApply(adapters, WIN_HOLD4, WIN_HOLD6);
         if (strict) {
           const ranges = rangeComplement([...(excludes || []), ...GUARD_EXCLUDES]);
@@ -1172,26 +1183,39 @@ class LeakGuard {
           // An adapter nobody owns that lists a resolver of its own has come up
           // since the last snapshot — a Bluetooth tether, anything with
           // auto-reconnect off: netWatcher rebuilds for neither. The snapshot
-          // decides whether it is ours to guard; each alias is looked at once.
+          // decides whether it is ours to guard. Each alias is looked at once
+          // per resolver list: netsh also lists an adapter that is down, with
+          // the resolver it last had, and one judged (and skipped) then must be
+          // looked at again when it comes up on a network that hands it another.
+          // Coming up on the same one waits for the next full tick (≤ 5 min).
           const known = new Set([...owned, ...[...OWN_ADAPTERS, st.tunAlias].map(a => String(a || '').toLowerCase())]);
           const resolves = (ip) => !isLoopbackIp(ip) && !/^fec0:0:0:ffff::[123]$/i.test(ip);
+          const resolversOf = (alias) => [...(v4.get(alias) || []), ...((v6 && v6.get(alias)) || [])].filter(resolves);
+          const seenKey = (alias) => `${alias}|${resolversOf(alias).sort().join(',')}`;
           const newcomers = [...new Set([...v4.keys(), ...(v6 ? v6.keys() : [])])].filter(alias => !known.has(alias)
-            && !this._winSeen.has(alias)
-            && [...(v4.get(alias) || []), ...((v6 && v6.get(alias)) || [])].some(resolves));
-          for (const alias of newcomers) this._winSeen.add(alias);
+            && resolversOf(alias).length && !this._winSeen.has(seenKey(alias)));
+          for (const alias of newcomers) this._winSeen.add(seenKey(alias));
           if (v4.size && !drifted && !newcomers.length) return { refreshed: false, adapters: 0, quick: true };
         }
+        // A full tick tries again what refused (see _winApply).
+        if (full) this._winFailed = new Set();
         const fresh = parseWinSnapshot(await this._powershell(winSnapshotScript(st.tunAlias), options));
         // A family the adapter does not have lists nothing, and that is not
-        // drift; one that refused the hold is not retried before the next engage.
+        // drift; one that refused the hold waits for a full tick. Only the
+        // families that drifted are set again.
         const wants = (a, fam) => a[fam === 'v4' ? 'has4' : 'has6'] !== false && !this._winRefused(a.alias, fam);
-        changed = fresh.filter(a => (wants(a, 'v4') && !same(a.v4, [want4]))
-          || (want6 && wants(a, 'v6') && !same(a.v6, [want6])))
-          .map(a => Object.assign({}, a, wants(a, 'v4') ? {} : { has4: false }, wants(a, 'v6') ? {} : { has6: false }));
+        const drift4 = (a) => wants(a, 'v4') && !same(a.v4, [want4]);
+        const drift6 = (a) => !!want6 && wants(a, 'v6') && !same(a.v6, [want6]);
+        changed = fresh.filter(a => drift4(a) || drift6(a))
+          .map(a => Object.assign({}, a, { has4: drift4(a), has6: drift6(a) }));
         if (!changed.length) return { refreshed: false, adapters: 0 };
         st.win.adapters = mergeTargets(st.win.adapters, winWithoutHold(fresh, st.hold4 ? [] : peers), a => a.alias);
         this.writeState(st);
-        await this._winApply(changed, want4, want6, options);
+        const refused = await this._winApply(changed, want4, want6, options, { fatal: false });
+        const held = changed.filter(a => ['v4', 'v6'].some(fam => a[fam === 'v4' ? 'has4' : 'has6']
+          && !refused.some(f => f.alias === a.alias && f.family === fam)));
+        if (!held.length) return { refreshed: false, adapters: 0, refused: refused.length };
+        changed = held;
       } else if (this.platform === 'darwin' && st.mac) {
         const fresh = parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()], options));
         changed = fresh.filter(s => !same(s.dns, peers));
