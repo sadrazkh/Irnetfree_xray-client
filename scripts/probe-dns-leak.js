@@ -34,6 +34,8 @@
  *                        scope    drop `domains`+`skipFallback` from the domestic and the
  *                                 corporate server (both sit on 127.0.0.1)
  *                        nonip    drop the dns outbound's refuse rule
+ *                        pin      drop dns.hosts + sockopt.domainStrategy (the entry
+ *                                 server's name goes back to the OS)
  *                      (a probe that cannot fail proves nothing — run these first)
  */
 const fs = require('fs');
@@ -45,7 +47,9 @@ const { spawn } = require('child_process');
 const { buildConfig } = require('../src/main/configBuilder');
 
 const BASE = Number(process.env.IRNF_PROBE_PORT || 39800);
-const P = { hop: BASE + 1, socks: BASE + 10, http: BASE + 11, api: BASE + 12, ir: BASE + 20, world: BASE + 21, corp: BASE + 22 };
+const P = { hop: BASE + 1, hop2: BASE + 2, socks: BASE + 10, http: BASE + 11, api: BASE + 12, ir: BASE + 20, world: BASE + 21, corp: BASE + 22 };
+/** Where the second hop listens: an address `localhost` never resolves to. */
+const PIN_HOST = '127.0.0.2';
 const SINK_HOST = '127.0.0.9', SINK_PORT = 53;
 const SINK6_HOST = '::1';
 /** Reachable only through the exit: this address is on no interface here. */
@@ -248,10 +252,10 @@ function waitPort(port, host, ms) {
 }
 
 /** The exit: everything that reaches it is redirected to the remote resolver. */
-function hopConfig() {
+function hopConfig(host = '127.0.0.1', port = P.hop) {
   return {
     log: { loglevel: 'warning' },
-    inbounds: [{ tag: 'in', port: P.hop, listen: '127.0.0.1', protocol: 'socks', settings: { auth: 'noauth', udp: true } }],
+    inbounds: [{ tag: 'in', port, listen: host, protocol: 'socks', settings: { auth: 'noauth', udp: true } }],
     outbounds: [{ tag: 'redir', protocol: 'freedom', settings: { redirect: `127.0.0.1:${P.world}` } }]
   };
 }
@@ -371,6 +375,20 @@ const CORP_PLAN = {
   def: 'sv-hop'
 };
 
+/**
+ * The entry server by NAME, answered from the config (configBuilder's
+ * pinEntryHosts: dns.hosts + sockopt.domainStrategy). `localhost` is the one
+ * name the OS answers without asking anybody — 127.0.0.1 / ::1 — and the hop
+ * behind it listens on 127.0.0.2 only. A query that comes back at all proves
+ * the core dialled the address the connect resolved rather than asking the OS
+ * (under TUN that question enters the tunnel and waits on this very server);
+ * a pin that does not work costs no packet on the wire either.
+ */
+const PINNED_SERVER = {
+  id: 'sv-pinned', name: 'pinned', protocol: 'socks', address: 'localhost', port: P.hop2,
+  outbound: { protocol: 'socks', settings: { servers: [{ address: 'localhost', port: P.hop2 }] } }
+};
+
 function baseSettings(over) {
   return Object.assign({
     socksPort: P.socks, httpPort: P.http, apiPort: P.api,
@@ -395,6 +413,11 @@ function sabotage(cfg) {
     // forwarded to the address the client asked — which is the sink.
     const o = cfg.outbounds.find(x => x.protocol === 'dns');
     if (o) o.settings = { nonIPQuery: 'skip' };
+  }
+  if (BREAK === 'pin') {
+    // the entry server's name left to the OS again, as before the pin
+    delete cfg.dns.hosts;
+    for (const o of cfg.outbounds) if (o.streamSettings && o.streamSettings.sockopt) delete o.streamSettings.sockopt.domainStrategy;
   }
   return cfg;
 }
@@ -526,6 +549,23 @@ const scenarios = [
     }
   },
   {
+    id: 'pinned-entry',
+    why: 'an entry server named by hostname is dialled at the address the connect resolved, never asked of the OS',
+    plan: { mode: 'single', server: PINNED_SERVER },
+    settings: { routingMode: 'global', entryHostIps: { localhost: [PIN_HOST] } },
+    needs: 'hop2',
+    names: ['example.com', 'github.com'],
+    check(r) {
+      const answered = r.answers.filter(a => a.rcode === 0 && a.ips && a.ips.length);
+      return [
+        [r.world.includes('example.com') && answered.length === r.answers.length,
+          `the exit answered through ${PIN_HOST}, the pinned address (nothing listens where the OS puts localhost)`,
+          'the exit was never reached — the core did not dial the pinned address'],
+        [r.sink.length === 0, 'nothing escaped to the original destination', `LEAK: ${r.sink.length} packet(s) reached the sink`]
+      ];
+    }
+  },
+  {
     id: 'aaaa-ipv4only',
     why: 'ipv6:false must not put an AAAA question on the wire',
     settings: { routingMode: 'bypass-ir' },
@@ -561,8 +601,17 @@ async function run() {
       console.log('  hop did not start: ' + e.message + '\n' + hop.log.slice(-500));
       stopCore(hop); failures++; continue;
     }
+    // The second hop needs 127.0.0.2, which macOS has only once it is aliased
+    // onto lo0: without it the scenarios that need it are skipped, not failed.
+    const hop2 = startCore(core.exe, hopConfig(PIN_HOST, P.hop2), 'hop2-' + core.name);
+    let hop2Up = true;
+    try { await waitPort(P.hop2, PIN_HOST, 8000); } catch { hop2Up = false; stopCore(hop2); }
 
     for (const sc of scenarios) {
+      if (sc.needs === 'hop2' && !hop2Up) {
+        console.log(`\n  [${sc.id}] SKIPPED — nothing can listen on ${PIN_HOST} here (macOS: sudo ifconfig lo0 alias ${PIN_HOST})`);
+        continue;
+      }
       ir.reset(); world.reset(); corp.reset(); sk.reset(); sk6.reset();
       const settings = baseSettings(sc.settings);
       const cfg = sabotage(buildConfig(sc.plan || PLAN, settings));
@@ -603,6 +652,7 @@ async function run() {
       stopCore(client);
     }
     stopCore(hop);
+    stopCore(hop2);
   }
 
   ir.close(); world.close(); corp.close(); sk.close(); sk6.close();

@@ -143,6 +143,117 @@ function wgEndpointHosts(planArg) {
   return out;
 }
 
+/**
+ * The server a proxy outbound dials: `vnext[0]` (vless, vmess), `servers[0]`
+ * (trojan, shadowsocks, socks, http) or the flat `settings.address` newer
+ * configs carry. Null for an outbound that names no server of its own, and for
+ * WireGuard, whose peer endpoint has its own path (wgEndpointHosts).
+ */
+const NO_SERVER = new Set(['freedom', 'blackhole', 'dns', 'loopback', 'wireguard']);
+function serverAddressOf(o) {
+  if (!o || !o.settings || NO_SERVER.has(o.protocol)) return null;
+  const st = o.settings;
+  const first = (list) => (Array.isArray(list) && list[0] && list[0].address) || '';
+  const a = String(first(st.vnext) || first(st.servers) || (typeof st.address === 'string' ? st.address : '')).trim();
+  return a || null;
+}
+
+/**
+ * The server a routing target is ENTERED through: a chain's first hop, a
+ * server looked up by id. targetServer's twin, from the other end.
+ */
+function targetEntry(target, plan) {
+  const first = (list) => (list || []).filter(s => s && s.outbound)[0] || null;
+  if (!target || target === 'direct' || target === 'block') return null;
+  if (Array.isArray(target)) return first(target);
+  if (typeof target === 'object') return target;
+  if (target === 'chain') return first(plan.chain);
+  if (target.indexOf('chain:') === 0) return first((plan.chainsById || {})[target.slice('chain:'.length)]);
+  return (plan.serversById || {})[target] || null;
+}
+
+/**
+ * The names a connect has to resolve before it builds the config: the server
+ * of every outbound that dials the network ITSELF — a single server, the first
+ * hop of a chain, the entry of every target an advanced plan or a pool routes
+ * to. A hop behind another hop is not one (its name travels through that hop
+ * and is resolved at the far end), nor is a WireGuard, an address, or a server
+ * the plan does not route to — the store behind an advanced plan holds every
+ * server the user has. See pinEntryHosts for what the answers are for.
+ */
+function entryHosts(planArg) {
+  const plan = normalizePlan(planArg);
+  const entries = [];
+  if (plan.mode === 'advanced') {
+    for (const r of plan.rules || []) if (r) entries.push(targetEntry(r.target, plan));
+    entries.push(targetEntry(plan.def, plan));
+  } else if (plan.mode === 'pool') {
+    entries.push(targetEntry(plan.primary, plan));
+    for (const e of plan.entries || []) if (e) entries.push(targetEntry(e.target, plan));
+  } else if (plan.mode === 'chain') {
+    entries.push(targetEntry(plan.chain, plan));
+  } else {
+    entries.push(plan.server || null);
+  }
+  const out = [];
+  for (const s of entries) {
+    const host = serverAddressOf(s && s.outbound);
+    if (host && !net.isIP(host) && !out.includes(host)) out.push(host);
+  }
+  return out;
+}
+
+/**
+ * The addresses a pinned name is answered with: its IPv4 ones when it has any —
+ * the core picks one at random with no fallback, so never the family a network
+ * is likelier to lack — else its IPv6 ones, but only with IPv6 on (the DNS then
+ * asks for AAAA at all; see dnsBuilder's queryStrategy).
+ */
+function pinnable(list, ipv6) {
+  const ips = [].concat(list == null ? [] : list).map(x => String(x == null ? '' : x).trim()).filter(x => net.isIP(x));
+  const v4 = ips.filter(x => net.isIPv4(x));
+  if (v4.length) return v4;
+  return ipv6 ? ips.filter(x => net.isIPv6(x)) : [];
+}
+
+/**
+ * Answer the entry servers' names from the config.
+ *
+ * With no `sockopt.domainStrategy`, xray hands a server it dials by NAME to the
+ * system dialer — the OPERATING SYSTEM resolves it (transport/internet/
+ * dialer.go). Under TUN that resolver is the tunnel: the Windows leak guard
+ * holds every physical adapter on loopback, the router's dnsmasq forwards into
+ * the gateway. So the core's question about its own server enters the tunnel
+ * and waits on that very server — a recursion only the OS cache hid, and every
+ * guard apply flushes the cache. `dns.hosts` answers the name from the config;
+ * the strategy makes the dialer ask xray's DNS (hosts first) instead of the OS.
+ * The NAME stays in the outbound: SNI, the Host header and REALITY's
+ * serverName are read from their own fields, never from the address.
+ *
+ * `map` = { name: [addresses] }, what the connect resolved for entryHosts().
+ * Only an outbound with no dialerProxy yet — a hop behind a hop hands its name
+ * to that hop — and only a name with an address to give: a strategy with
+ * nothing in hosts would ask xray's own resolvers, which sit behind the very
+ * proxy. Runs before applyFragments: the lookup happens before the dialerProxy
+ * redirect, so the dpi dialer is then handed the address. Returns the hosts
+ * table, or null when nothing was pinned (the config is then as it was).
+ */
+function pinEntryHosts(outbounds, map, ipv6) {
+  if (!map || typeof map !== 'object') return null;
+  const hosts = {};
+  for (const o of outbounds) {
+    const host = serverAddressOf(o);
+    if (!host || net.isIP(host) || !Object.prototype.hasOwnProperty.call(map, host)) continue;
+    if (o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy) continue;
+    const ips = pinnable(map[host], ipv6);
+    if (!ips.length) continue;
+    const ss = o.streamSettings || (o.streamSettings = {});
+    ss.sockopt = Object.assign({}, ss.sockopt, { domainStrategy: ipv6 ? 'UseIP' : 'UseIPv4' });
+    hosts[host] = ips;
+  }
+  return Object.keys(hosts).length ? hosts : null;
+}
+
 /** Put the resolved address in the peer's endpoint, keeping its port. */
 function applyWgEndpointIps(o, map) {
   if (!o || o.protocol !== 'wireguard' || !map || !o.settings) return o;
@@ -621,6 +732,7 @@ function buildConfig(planArg, settings) {
 
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
   outbounds = (outbounds || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
+  const hosts = pinEntryHosts(outbounds, s.entryHostIps, s.ipv6);
   outbounds = applyFragments(outbounds);
   bindDirectDials(outbounds, s.directInterface);
 
@@ -647,7 +759,7 @@ function buildConfig(planArg, settings) {
       levels: { '0': level0 },
       system: { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true }
     },
-    dns: dnsPlan.dns,
+    dns: hosts ? Object.assign({ hosts }, dnsPlan.dns) : dnsPlan.dns,
     inbounds: [
       { tag: 'socks-in', port: s.socksPort, listen, protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing },
       { tag: 'http-in', port: s.httpPort, listen, protocol: 'http', settings: {}, sniffing }
@@ -720,7 +832,9 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
     { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
-  const outbounds = applyFragments((reg.outs || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps)));
+  const pinned = (reg.outs || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
+  const hosts = pinEntryHosts(pinned, s.entryHostIps, s.ipv6);
+  const outbounds = applyFragments(pinned);
   bindDirectDials(outbounds, s.directInterface);
 
   // Resolver rules first (see buildConfig), then private/LAN direct, THEN
@@ -744,7 +858,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
       levels: { '0': level0 },
       system: { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true }
     },
-    dns: dnsPlan.dns,
+    dns: hosts ? Object.assign({ hosts }, dnsPlan.dns) : dnsPlan.dns,
     inbounds,
     outbounds,
     // IPIfNonMatch on purpose: the pool emits no user ip rule (only the private
@@ -966,4 +1080,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts };
