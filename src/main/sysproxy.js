@@ -107,6 +107,31 @@ function winRestoreSteps(prev) {
   return steps;
 }
 
+/**
+ * winRestoreSteps split in two: what always runs, and the switch back ON
+ * (last, only when it was on). That one runs only when everything before it
+ * landed — over a server that could not be written back it would aim every
+ * browser at OUR dead port. Each runner answers whether all of it landed (the
+ * journal is spent) or not (it stays for the next launch).
+ */
+function splitReenable(steps) {
+  return steps.length === 4 ? [steps.slice(0, 3), steps[3]] : [steps, null];
+}
+async function runWinRestore(steps, exec) {
+  const [head, reenable] = splitReenable(steps);
+  let ok = true;
+  for (const args of head) { try { await exec('reg', args); } catch { ok = false; } }
+  if (ok && reenable) { try { await exec('reg', reenable); } catch { ok = false; } }
+  return ok;
+}
+function runWinRestoreSync(steps, execSync) {
+  const [head, reenable] = splitReenable(steps);
+  let ok = true;
+  for (const args of head) { try { execSync('reg', args); } catch { ok = false; } }
+  if (ok && reenable) { try { execSync('reg', reenable); } catch { ok = false; } }
+  return ok;
+}
+
 /* --------------------------- macOS --------------------------- */
 
 /**
@@ -310,6 +335,12 @@ async function enableJournaled(platform, { host, httpPort, socksPort }, { exec, 
     if (platform === 'win32') {
       rec.win = null;
       try { rec.win = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
+      // Our own port with our own list is a leftover of ours (a restore that
+      // failed halfway, a build before the journal that died connected) — never
+      // "what was there before": recorded as off, or every disconnect would
+      // switch a dead proxy back on.
+      const w = rec.win;
+      if (w && Number(w.ProxyEnable) === 1 && w.ProxyServer === ours && w.ProxyOverride === WIN_BYPASS) rec.win = Object.assign({}, w, { ProxyEnable: 0 });
     } else {
       rec.mac = null;   // unknown — not "no services": the restore then switches ours off everywhere
       try { rec.mac = await macSnapshot(exec); } catch { /* unknown */ }
@@ -334,14 +365,10 @@ async function restoreJournaled(platform, { exec, journal }) {
   const j = readJournal(journal);
   if (!j) return false;
   if (platform === 'win32') {
-    let offFailed = false;
-    const steps = winRestoreSteps(j.win);
-    for (let i = 0; i < steps.length; i++) {
-      try { await exec('reg', steps[i]); } catch { if (i === 0) offFailed = true; }
-    }
+    const ok = await runWinRestore(winRestoreSteps(j.win), exec);
     await refreshWindows(exec).catch(() => {});
-    // ours could not even be switched off: keep the record for the next launch
-    if (offFailed) return true;
+    // something could not be put back: keep the record for the next launch
+    if (!ok) return true;
   } else if (!Array.isArray(j.mac)) {
     await disableMac(exec).catch(() => {});   // nothing known about before: the old disable
   } else {
@@ -440,14 +467,10 @@ function restoreSystemProxySync(opts = {}) {
   // macOS with nothing recorded: switching ours off needs the service list,
   // which this path cannot read — the journal stays for the launch repair
   if (platform === 'darwin' && !Array.isArray(j.mac)) return false;
-  const steps = platform === 'win32'
-    ? winRestoreSteps(j.win).map(args => ['reg', args])
-    : macRestoreSteps(j.mac);
-  let offFailed = false;
-  steps.forEach(([cmd, args], i) => {
-    try { execSync(cmd, args); } catch { if (i === 0 && platform === 'win32') offFailed = true; }
-  });
-  if (!offFailed) clearJournal(journal);
+  let ok = true;
+  if (platform === 'win32') ok = runWinRestoreSync(winRestoreSteps(j.win), execSync);
+  else for (const [cmd, args] of macRestoreSteps(j.mac)) { try { execSync(cmd, args); } catch { /* best effort */ } }
+  if (ok) clearJournal(journal);
   return true;
 }
 

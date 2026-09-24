@@ -174,6 +174,33 @@ test('win: when even switching ours off fails, the journal is kept for the next 
   assert.equal(fs.existsSync(journal), true);
 });
 
+test('win: our own proxy is never recorded as "what was there before"', async (t) => {
+  // e.g. a restore that could not write the server back, or a build before the
+  // journal that died connected: the machine still points at OUR port
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: WIN_BYPASS });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  assert.equal(JSON.parse(fs.readFileSync(journal, 'utf8')).win.ProxyEnable, 0, 'recorded as off');
+  await setSystemProxy(false, { journal, exec: w.exec, platform: 'win32' });
+  assert.equal(w.reg.ProxyEnable, 0, 'the disconnect does not switch our dead proxy back on');
+});
+
+test('win: a restore that could not put the server back does not switch the proxy on, and keeps the journal', async (t) => {
+  const journal = tmpJournal(t);
+  const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: 'proxy.corp:8080', ProxyOverride: '<local>' });
+  await setSystemProxy(true, Object.assign({ journal, exec: w.exec, platform: 'win32' }, ON));
+  const flaky = async (cmd, args) => { if (cmd === 'reg' && args.includes('ProxyServer')) throw new Error('Access is denied.'); return w.exec(cmd, args); };
+  await setSystemProxy(false, { journal, exec: flaky, platform: 'win32' });
+  assert.equal(w.reg.ProxyEnable, 0, 'ProxyEnable=1 over OUR server would aim every browser at a dead port');
+  assert.equal(fs.existsSync(journal), true, 'the next launch finishes the job');
+  const s = fakeWin(journal, {});
+  Object.assign(s.reg, w.reg);
+  const flakySync = (cmd, args) => { if (args.includes('ProxyServer')) throw new Error('Access is denied.'); return s.execSync(cmd, args); };
+  assert.equal(restoreSystemProxySync({ journal, execSync: flakySync, platform: 'win32' }), true);
+  assert.equal(s.reg.ProxyEnable, 0);
+  assert.equal(fs.existsSync(journal), true);
+});
+
 test('win launch: a journal a dead session left is restored while the proxy is still ours', async (t) => {
   const journal = tmpJournal(t);
   const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: 'proxy.corp:8080', ProxyOverride: '<local>' });
