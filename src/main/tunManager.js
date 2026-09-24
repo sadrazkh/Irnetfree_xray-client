@@ -32,6 +32,7 @@ const path = require('path');
 const os = require('os');
 const platform = require('./tunPlatform');
 const macOwners = require('./macSessionLock');
+const macOwner = require('./macSessionOwner');
 const { run, delay, sh, isOwnTunInterface } = platform;
 
 const ADAPTER = platform.TUN2SOCKS_ADAPTER;   // 'XrayTun'
@@ -80,6 +81,7 @@ class TunManager {
     this.macLogTimer = null;
     this.userData = opts.userData || null;
     this.macOwnerKey = this.userData ? path.resolve(this.userData) : this;
+    this.probe = opts.probe || macOwner.defaultProbe;   // who owns a journal / is a pid alive (macSessionOwner.js)
   }
 
   /** Pick the message in the user's language (fa default). */
@@ -375,7 +377,8 @@ class TunManager {
     const dns2 = this.dnsServers[1] || '';
 
     for (const file of [logFile, pidFile, devFile, identityFile, routesFile]) fs.writeFileSync(file, '', { mode: 0o600 });
-    this.macState = { work, logFile, pidFile, devFile, identityFile, dnsFile, routesFile, service, savedDns, gateway: route.gateway, bypassIps: ips, reqDev, macPid: null, dev: '', identity: '', expectedCommand: `${bin} -device ${reqDev} -proxy socks5://127.0.0.1:${socksPort} -loglevel warn` };
+    const owner = await macOwner.ownerRecord(this.probe);   // pid + start time: a reused pid is not us
+    this.macState = { ...owner, work, logFile, pidFile, devFile, identityFile, dnsFile, routesFile, service, savedDns, gateway: route.gateway, bypassIps: ips, reqDev, macPid: null, dev: '', identity: '', expectedCommand: `${bin} -device ${reqDev} -proxy socks5://127.0.0.1:${socksPort} -loglevel warn` };
     this.saveMacSession();
     fs.writeFileSync(teardownPath, this.macTeardownScript(), { mode: 0o700 });
     const bypassAdd = ips.map(ip => `if route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1; then echo ${sh(ip)} >> ${sh(routesFile)} || exit 13; fi`).join('\n');
@@ -566,12 +569,8 @@ class TunManager {
       if (!fs.existsSync(file)) continue;
       if (fs.lstatSync(file).isSymbolicLink()) throw new Error('Invalid tunnel recovery journal');
       const st = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (Number.isInteger(st.ownerPid) && st.ownerPid > 1 && st.ownerPid !== process.pid) {
-        try {
-          process.kill(st.ownerPid, 0);
-          throw new Error('Another application instance may own this tunnel; close it before recovery');
-        } catch (e) { if (e.code !== 'ESRCH') throw e; }
-      }
+      // The pid AND its start time: after a reboot the old pid is someone else's.
+      if (await macOwner.ownerAlive(st, this.probe)) throw new Error('Another application instance may own this tunnel; close it before recovery');
       if (path.resolve(st.work || '') !== work || !Array.isArray(st.savedDns) || !Array.isArray(st.bypassIps) || typeof st.gateway !== 'string' || typeof st.expectedCommand !== 'string') throw new Error('Invalid tunnel recovery session');
       for (const key of ['logFile', 'pidFile', 'devFile', 'identityFile', 'dnsFile', 'routesFile']) {
         if (typeof st[key] !== 'string' || path.dirname(path.resolve(st[key])) !== work) throw new Error('Invalid tunnel recovery path');
