@@ -504,8 +504,8 @@ object LinkParser {
         while (i < s.length) {
             if (s[i] == '%') {
                 if (i + 2 >= s.length) return s
-                val hi = Character.digit(s[i + 1], 16)
-                val lo = Character.digit(s[i + 2], 16)
+                val hi = hexDigit(s[i + 1])
+                val lo = hexDigit(s[i + 2])
                 if (hi < 0 || lo < 0) return s
                 bytes.write(hi * 16 + lo)
                 i += 3
@@ -522,6 +522,17 @@ object LinkParser {
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
                 .decode(ByteBuffer.wrap(bytes.toByteArray())).toString()
         } catch (e: CharacterCodingException) { s }
+    }
+
+    /**
+     * An ASCII hex digit's value, else -1. Not Character.digit, which also takes
+     * every other script's digits — "%۵۰" (Persian five, zero) decoded to "P".
+     */
+    private fun hexDigit(c: Char): Int = when (c) {
+        in '0'..'9' -> c - '0'
+        in 'a'..'f' -> c - 'a' + 10
+        in 'A'..'F' -> c - 'A' + 10
+        else -> -1
     }
 
     private fun b64(s: String?): String {
