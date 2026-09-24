@@ -213,3 +213,19 @@ test('ownOrphanCores: only xray / xray-pattn / sing-box whose command line point
   assert.deepEqual(net.ownOrphanCores({ dataDir: '', tmpDir: '/nowhere', selfPid: 1, readdir, readFile }).map(f => f.pid), []);
   assert.deepEqual(net.ownOrphanCores({ dataDir: 'etc/irnetfree', tmpDir: '/nowhere', selfPid: 1, readdir, readFile }).map(f => f.pid), []);
 });
+
+test('ownOrphanCores matches this service\'s own FILE NAMES, so a data dir of /tmp cannot catch a foreign core', () => {
+  const procs = {
+    800: ['/usr/bin/xray', 'run', '-c', '/tmp/config.json'],                        // ours (data_dir /tmp): the live config
+    801: ['/usr/bin/xray', 'run', '-test', '-c', '/tmp/test-cfg-1727.json'],         // ours: a validation
+    802: ['/usr/bin/xray', 'run', '-c', '/tmp/test-1727.json'],                      // ours: a latency test
+    803: ['/usr/bin/xray', 'run', '-c', '/tmp/passwall/xray.json'],                   // another package's core under /tmp
+    804: ['/usr/bin/sing-box', 'run', '-c', '/tmp/upstream.json'],                     // someone's sing-box under /tmp
+    805: ['/usr/bin/sing-box', 'run', '-c', '/tmp/irnf-sb-Q1w2e3/sing-box.json'],      // ours: the gateway
+    806: ['/usr/bin/sing-box', 'run', '-c', '/tmp/irnf-sb-Q1w2e3/other.json'],          // not the gateway's file
+    807: ['/usr/bin/xray', 'run', '-c', '/tmp/sub/config.json']                         // a config.json, but not in the data dir
+  };
+  const readdir = () => Object.keys(procs);
+  const readFile = (p) => Buffer.from(procs[/^\/proc\/(\d+)\//.exec(p)[1]].join('\0') + '\0');
+  assert.deepEqual(net.ownOrphanCores({ dataDir: '/tmp', tmpDir: '/tmp', selfPid: 1, readdir, readFile }).map(f => f.pid), [800, 801, 802, 805]);
+});
