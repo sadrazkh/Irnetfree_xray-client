@@ -2763,9 +2763,11 @@ function setNoiseFields(noise) {
   if (!sel) return;
   const nz = String(noise || '').trim();
   const key = nz.toLowerCase();
-  if (!nz) { sel.value = 'off'; if (custom) custom.value = ''; }
-  else if (NOISE_PRESET_KEYS.includes(key)) { sel.value = key === 'fakehello' ? 'faketls' : key; if (custom) custom.value = ''; }
-  else { sel.value = 'custom'; if (custom) custom.value = nz; }
+  // A preset keeps its own spelling (`fakehello`, `FakeTLS`): mapped onto the
+  // nearest option, a save that changed nothing would rewrite it.
+  if (!nz) { selectValue(sel, 'off'); if (custom) custom.value = ''; }
+  else if (NOISE_PRESET_KEYS.includes(key)) { selectValue(sel, nz); if (custom) custom.value = ''; }
+  else { selectValue(sel, 'custom'); if (custom) custom.value = nz; }
   syncNoiseCustom();
 }
 
@@ -2826,25 +2828,7 @@ function openEdit(id) {
   editOriginal = s;
   const f = readServerFields(s);
   const proto = s.protocol;
-
-  $('#edName').value = f.name || '';
-  $('#edAddress').value = f.address || '';
-  $('#edPort').value = f.port || '';
-  $('#edCred').value = f.cred || '';
-  $('#edNetwork').value = f.network || 'tcp';
-  $('#edSecurity').value = f.security || 'none';
-  $('#edSni').value = f.sni || '';
-  $('#edHost').value = f.host || '';
-  $('#edPath').value = f.path || '';
-  $('#edFp').value = f.fp || '';
-  $('#edPbk').value = f.pbk || '';
-  $('#edSid').value = f.sid || '';
-  $('#edFragment').value = f.fragment || '';
-  setNoiseFields(f.noise || '');
-  if ($('#edCipherSuites')) $('#edCipherSuites').value = f.cipherSuites || '';
-  if ($('#edFinalMask')) $('#edFinalMask').value = f.finalMask || '';
-  if ($('#edEngine')) $('#edEngine').value = f.engine || 'xray';
-  $('#edInsecure').checked = !!f.allowInsecure;
+  fillEditForm(f, proto);
   // The certificate pinned on first use stands in for "allow insecure" now
   // (certPin.js). Shown abbreviated, the full hash in the tooltip; clearing it
   // makes the next connect read the certificate again.
@@ -2881,12 +2865,41 @@ function openEdit(id) {
   $('#edRealityRow').hidden = !(isStd && $('#edSecurity').value === 'reality');
   updateSpoofLabels();
 
-  if (isProxy) {
+  $('#editModal').hidden = false;
+}
+
+/**
+ * Put a record's form view (readServerFields) into the edit form. What this
+ * shows is what a save sends back, so a save that changes nothing changes
+ * nothing — the main process records a field as the user's edit only when
+ * the submitted value differs from the shown one (parser.applyServerEdits).
+ */
+function fillEditForm(f, proto) {
+  $('#edName').value = f.name || '';
+  $('#edAddress').value = f.address || '';
+  $('#edPort').value = f.port || '';
+  $('#edCred').value = f.cred || '';
+  $('#edNetwork').value = f.network || 'tcp';
+  $('#edSecurity').value = f.security || 'none';
+  $('#edSni').value = f.sni || '';
+  $('#edHost').value = f.host || '';
+  $('#edPath').value = f.path || '';
+  selectValue($('#edFp'), f.fp || '');
+  $('#edPbk').value = f.pbk || '';
+  $('#edSid').value = f.sid || '';
+  $('#edFragment').value = f.fragment || '';
+  setNoiseFields(f.noise || '');
+  if ($('#edCipherSuites')) $('#edCipherSuites').value = f.cipherSuites || '';
+  if ($('#edFinalMask')) $('#edFinalMask').value = f.finalMask || '';
+  if ($('#edEngine')) selectValue($('#edEngine'), f.engine || 'xray');
+  $('#edInsecure').checked = !!f.allowInsecure;
+
+  if (proto === 'socks' || proto === 'http') {
     $('#edProxyUser').value = f.pxUser || '';
     $('#edProxyPass').value = f.pxPass || '';
   }
 
-  if (isWg) {
+  if (proto === 'wireguard') {
     $('#edWgPub').value = f.wgPub || '';
     $('#edWgAddr').value = f.wgAddr || '';
     $('#edWgPsk').value = f.wgPsk || '';
@@ -2895,8 +2908,25 @@ function openEdit(id) {
     $('#edWgAllowed').value = f.wgAllowed || '';
     $('#edWgDns').value = f.wgDns || '';
   }
+}
 
-  $('#editModal').hidden = false;
+/**
+ * Set a <select>, adding the value as an option of its own when the record
+ * holds one the markup does not list (a fingerprint like `qq`, an engine from
+ * a link): otherwise the select reads back as another value, and a save that
+ * changed nothing would rewrite it. Options added for an earlier record go.
+ */
+function selectValue(sel, v) {
+  if (!sel) return;
+  for (const o of [...sel.querySelectorAll('option[data-own]')]) o.remove();
+  if (v && ![...sel.options].some(o => o.value === v)) {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = v;
+    o.dataset.own = '1';
+    sel.appendChild(o);
+  }
+  sel.value = v;
 }
 
 function show(sel, on) { const el = $(sel); if (el) el.hidden = !on; }
@@ -2963,10 +2993,12 @@ $('#editCancel').onclick = closeEdit;
 $('#editModal').onclick = (e) => { if (e.target === $('#editModal')) closeEdit(); };
 if ($('#edNoise')) $('#edNoise').onchange = syncNoiseCustom;
 
-$('#editSave').onclick = async () => {
-  const id = state.editingId;
-  if (!id || !editOriginal) return;
-  const proto = editOriginal.protocol;
+/**
+ * What a save sends: every field of the form, read back from the inputs that
+ * fillEditForm() filled. `orig` is the record being edited.
+ */
+function collectEditFields(orig, clearPin) {
+  const proto = orig.protocol;
   const fields = {
     name: $('#edName').value,
     address: $('#edAddress').value,
@@ -2991,13 +3023,13 @@ $('#editSave').onclick = async () => {
     fields.pbk = $('#edPbk').value.trim();
     fields.sid = $('#edSid').value.trim();
     fields.allowInsecure = $('#edInsecure').checked;
-    if (editClearPin) fields.clearCertPin = true;
+    if (clearPin) fields.clearCertPin = true;
     // patterniha custom-TLS: cipherSuites + finalMask ('' clears them)
     fields.cipherSuites = $('#edCipherSuites') ? $('#edCipherSuites').value.trim() : '';
     fields.finalMask = $('#edFinalMask') ? $('#edFinalMask').value.trim() : '';
     // preserve alpn from original (no field for it)
-    const orig = readServerFields(editOriginal);
-    if (orig.alpn) fields.alpn = orig.alpn;
+    const shown = readServerFields(orig);
+    if (shown.alpn) fields.alpn = shown.alpn;
   } else if (proto === 'wireguard') {
     fields.publicKey = $('#edWgPub').value.trim();
     // `address` above is the ENDPOINT host (#edAddress); the interface address
@@ -3005,9 +3037,6 @@ $('#editSave').onclick = async () => {
     // endpoint with "10.10.10.42/32" and stopped the core from starting.
     fields.localAddress = $('#edWgAddr').value.trim();
     fields.dns = $('#edWgDns').value.trim();
-    // the endpoint field must hold the PUBLIC host — the interface address
-    // pasted here is exactly how the record used to get corrupted
-    if (!String(fields.address).trim() || String(fields.address).includes('/')) return toast(t('t.wgBadEndpoint'), 'err');
     fields.presharedKey = $('#edWgPsk').value.trim();
     fields.mtu = $('#edWgMtu').value;
     fields.reserved = $('#edWgReserved').value.trim();
@@ -3016,6 +3045,19 @@ $('#editSave').onclick = async () => {
     fields.username = $('#edProxyUser').value.trim();
     fields.password = $('#edProxyPass').value.trim();
   }
+
+  return fields;
+}
+
+$('#editSave').onclick = async () => {
+  const id = state.editingId;
+  if (!id || !editOriginal) return;
+  const proto = editOriginal.protocol;
+  const fields = collectEditFields(editOriginal, editClearPin);
+
+  // the endpoint field must hold the PUBLIC host — the interface address
+  // pasted here is exactly how the record used to get corrupted
+  if (proto === 'wireguard' && (!String(fields.address).trim() || String(fields.address).includes('/'))) return toast(t('t.wgBadEndpoint'), 'err');
 
   // finalmask goes to the core untouched, so catch bad JSON here rather than
   // letting xray refuse the whole config at connect time

@@ -330,6 +330,100 @@ test('the edit form offers every transport the parser builds, httpupgrade includ
   assert.ok(front && /'httpupgrade'/.test(front[1]), 'httpupgrade rides a CDN like ws: its Host field must show');
 });
 
+/**
+ * The edit form's own code — readServerFields, fillEditForm, collectEditFields
+ * and the noise/select helpers — run against a fake DOM whose <select>s behave
+ * like a browser's: a value with no matching <option> reads back as ''. The
+ * options are the ones index.html has.
+ */
+function editFormHarness() {
+  const vm = require('node:vm');
+  const selectOptions = (id) => {
+    const m = HTML.match(new RegExp(`<select id="${id}"[^>]*>([\\s\\S]*?)</select>`));
+    return m ? [...m[1].matchAll(/value="([^"]*)"/g)].map((x) => x[1]) : null;
+  };
+  const els = new Map();
+  const makeOption = (value) => {
+    const o = { value, textContent: value, dataset: {}, parent: null };
+    o.remove = () => { if (o.parent) o.parent.options.splice(o.parent.options.indexOf(o), 1); };
+    return o;
+  };
+  const el = (id) => {
+    if (els.has(id)) return els.get(id);
+    const opts = selectOptions(id);
+    const e = { id, hidden: false, checked: false, textContent: '', title: '', style: {}, dataset: {} };
+    if (opts) {
+      e.options = [];
+      let v = '';
+      e.appendChild = (o) => { o.parent = e; e.options.push(o); };
+      opts.forEach((x) => e.appendChild(makeOption(x)));
+      e.querySelectorAll = (q) => (q === 'option[data-own]' ? e.options.filter((o) => o.dataset.own) : []);
+      Object.defineProperty(e, 'value', {
+        get: () => v,
+        set: (x) => { v = e.options.some((o) => o.value === String(x)) ? String(x) : ''; }
+      });
+    } else {
+      let v = '';
+      Object.defineProperty(e, 'value', { get: () => v, set: (x) => { v = String(x == null ? '' : x); } });
+    }
+    els.set(id, e);
+    return e;
+  };
+  const $ = (sel) => (typeof sel === 'string' && sel[0] === '#' ? el(sel.slice(1)) : null);
+  const document = { createElement: () => makeOption('') };
+  const ctx = vm.createContext({ $, document });
+  const src = (name) => {
+    const start = APP.indexOf(`\nfunction ${name}(`);
+    assert.ok(start > -1, `app.js has no function ${name}`);
+    let depth = 0, j = APP.indexOf('{', start);
+    for (; j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) break;
+    }
+    return APP.slice(start, j + 1);
+  };
+  const consts = APP.match(/^const NOISE_PRESET_KEYS = .*;$/m);
+  assert.ok(consts, 'no NOISE_PRESET_KEYS in app.js');
+  vm.runInContext([consts[0], ...['readServerFields', 'fillEditForm', 'collectEditFields', 'setNoiseFields', 'readNoiseField',
+    'syncNoiseCustom', 'show', 'selectValue'].map(src)].join('\n'), ctx);
+  return ctx;
+}
+
+test('a no-op save through the real edit form records nothing, for every shape the parser builds', () => {
+  const { parseLink, applyServerEdits } = require('../src/main/parser');
+  const form = editFormHarness();
+  const b64 = (s) => Buffer.from(s).toString('base64');
+  const legacyHu = parseLink('vless://u@h.example.com:443?type=httpupgrade&security=tls&sni=cdn.example.com&path=%2Fup&host=cdn.example.com#HU');
+  delete legacyHu.outbound.streamSettings.httpupgradeSettings;   // stored before httpupgrade had settings
+  const shapes = {
+    'xhttp+reality': parseLink('vless://11111111-2222-3333-4444-555555555555@x.example.com:443?type=xhttp&security=reality&sni=www.speedtest.net&fp=chrome&pbk=PUBKEY&sid=ab12&spx=%2Fs&path=%2Fxh&mode=packet-up&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D#XH'),
+    grpc: parseLink('vless://u@g.example.com:443?type=grpc&serviceName=svc&mode=multi&security=tls&sni=g.example.com&alpn=h2#G'),
+    'tcp+http': parseLink('vless://u@t.example.com:80?type=tcp&headerType=http&path=%2Fa&host=t.com#T'),
+    h2: parseLink('vless://u@h.example.com:443?type=h2&path=%2Fp&host=a.com,b.com&security=tls#H2'),
+    'httpupgrade legacy': legacyHu,
+    kcp: parseLink('vless://u@k.example.com:443?type=kcp&headerType=srtp&seed=S#K'),
+    'ws+tls': parseLink('trojan://pw@b.example.com:443?security=tls&sni=b.example.com&type=ws&path=%2Ftr&host=b.example.com&allowInsecure=1#W'),
+    'vmess ws': parseLink('vmess://' + b64(JSON.stringify({ v: '2', ps: 'VM', add: 'vm.example.com', port: '443', id: 'uuid-vm', aid: '0', net: 'ws', path: '/vm', host: 'vm.example.com', tls: 'tls' }))),
+    ss: parseLink('ss://' + b64('aes-256-gcm:secret') + '@ss.example.com:8388#SS'),
+    socks: parseLink('socks://user:pass@1.2.3.4:1080#S'),
+    http: parseLink('http://dXNlcjpwYXNz@1.2.3.4:8080#H'),
+    wireguard: parseLink('wireguard://K@wg.example.com:51820?publickey=P&presharedkey=PSK&address=10.0.0.5%2F32&allowedips=10.0.0.0%2F8,192.168.0.0%2F16&mtu=1380&reserved=1,2,3&dns=192.168.60.1,tes.systems#WG'),
+    'fp qq': parseLink('vless://u@q.example.com:443?type=ws&security=tls&sni=q.example.com&fp=qq&path=%2Fq#Q'),
+    'fp 360': parseLink('vless://u@q.example.com:443?type=ws&security=tls&sni=q.example.com&fp=360&path=%2Fq#Q'),
+    'noise fakehello': parseLink('vless://u@n.example.com:443?security=tls&sni=n.example.com&noise=fakehello&fragment=tlshello,100-200,10-20#N'),
+    'noise FakeTLS': parseLink('vless://u@n.example.com:443?security=tls&sni=n.example.com&noise=FakeTLS#N'),
+    'engine outside the options': parseLink('vless://u@e.example.com:443?security=tls&sni=e.example.com&engine=xray-custom#E')
+  };
+  for (const [name, rec] of Object.entries(shapes)) {
+    form.fillEditForm(form.readServerFields(rec), rec.protocol);
+    const fields = form.collectEditFields(rec, false);
+    const out = applyServerEdits(rec, fields);
+    assert.equal('_edited' in out, false, `${name}: recorded ${JSON.stringify(out._edited)}`);
+    if (name === 'httpupgrade legacy') continue;   // the rebuild repairs it — unrecorded, so the refresh still owns it
+    assert.deepEqual(out, rec, `${name}: a no-op save changed the server`);
+  }
+});
+
 test('the edit form reads an httpupgrade path and Host, and shows a stored raw server as tcp', () => {
   const readServerFields = appFunction('readServerFields');
   const rec = (streamSettings) => ({
