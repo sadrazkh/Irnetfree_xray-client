@@ -181,6 +181,8 @@ function createService(opts = {}) {
   // corporate proxy. (Configured once the data dir is known, below.)
   const realProxy = !deps.setSystemProxy && !noSystemProxy;
   const waitPort = deps.waitForLocalPort || waitForLocalPort;
+  // the router's read-only LAN lookups (ubus, ip neigh) for the device list
+  const lanRun = deps.lanRun || tunPlatform.run;
   const T = Object.assign({
     bootDelayMs: 1000, bootEveryMs: 15000, bootSlowAfter: 20, bootSlowMs: 60000,
     routerBackoffMs: [2000, 5000, 15000, 30000, 60000],
@@ -2114,8 +2116,8 @@ function createService(opts = {}) {
     // OpenWrt: the devices behind the router (DHCP leases + neighbour table) — the exclusion list's source
     'net:lanDevices': async () => {
       if (!OPENWRT) return [];
-      const lanIf = await lanInterface(tunPlatform.run);
-      return lanDevices({ run: tunPlatform.run, lanIf });
+      const lanIf = await lanInterface(lanRun);
+      return lanDevices({ run: lanRun, lanIf });
     },
     // Deliberately a no-op — do NOT mirror main.js's netWatcher.poke() here.
     //
