@@ -76,9 +76,14 @@ function pidAlive(pid, probe = defaultProbe) {
  * of this app would read THAT back as the service's original DNS and journal
  * it — and a disconnect, or a crash recovery, would then "restore" a resolver
  * that routes nowhere. The stopping session leaves its originals here, keyed
- * like the session lock; the next start takes them while the service still
+ * like the session lock; the next start uses them while the service still
  * lists only what a tunnel set. Anything else is a change made in between, and
  * the fresh reading wins.
+ *
+ * Read with peek, and dropped only once a start has SUCCEEDED — its journal
+ * holds them from then on. Consuming them on read lost them to any rebuild
+ * that failed after it (a cancelled prompt, a sing-box that died and rolled
+ * back), and the retry then journalled the tunnel peer as the original.
  */
 const dnsHandover = new Map();
 
@@ -87,13 +92,17 @@ function handOverDns(key, st) {
   dnsHandover.set(key, { service: st.service, savedDns: st.savedDns.slice(), tunDns: st.tunDns.slice() });
 }
 
-function takeHandedOverDns(key, service, current) {
+function peekHandedOverDns(key, service, current) {
   const h = dnsHandover.get(key);
-  dnsHandover.delete(key);
   if (!h || h.service !== service) return null;
   const set = new Set(h.tunDns.map(s => String(s).toLowerCase()));
   const now = (current || []).map(s => String(s).toLowerCase());
   return now.length && now.every(s => set.has(s)) ? h.savedDns.slice() : null;
 }
 
-module.exports = { signalState, processIdentity, defaultProbe, ownerRecord, ownerAlive, pidAlive, handOverDns, takeHandedOverDns };
+function dropHandedOverDns(key) { dnsHandover.delete(key); }
+
+module.exports = {
+  signalState, processIdentity, defaultProbe, ownerRecord, ownerAlive, pidAlive,
+  handOverDns, peekHandedOverDns, dropHandedOverDns
+};

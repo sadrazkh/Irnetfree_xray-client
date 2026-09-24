@@ -462,8 +462,9 @@ class TunSingbox {
     if (!service) throw new Error('No physical macOS network service found; TUN DNS cannot be configured');
     let savedDns = await platform.getServiceDnsMac(service, { strict: true });
     // After a reconnect's stop (keepDns) the service still lists the tunnel's
-    // resolver: the originals come from the session before, not from it.
-    const handedOver = macOwner.takeHandedOverDns(this.macOwnerKey, service, savedDns);
+    // resolver: the originals come from the session before, not from it
+    // (dropped only once this start has succeeded — see macSessionOwner.js).
+    const handedOver = macOwner.peekHandedOverDns(this.macOwnerKey, service, savedDns);
     if (handedOver) savedDns = handedOver;
     const dns = this.adapterDns(dnsServers, opts);
     assertIps([...dns.v4, ...dns.v6]);   // they go into a root script: refused before any journal exists
@@ -532,6 +533,7 @@ class TunSingbox {
     Object.assign(this.macState, { macPid, dev });
     if (!macPid || !/^utun\d+$/.test(dev)) throw new Error('TUN setup returned incomplete process/interface state; recovery required');
     this.saveMacSession();
+    if (handedOver) macOwner.dropHandedOverDns(this.macOwnerKey);   // the journal holds them now
     this.stopping = false;
     this.active = true;
 
