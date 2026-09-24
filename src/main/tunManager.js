@@ -476,7 +476,12 @@ class TunManager {
           if (line.trim()) this.onLog('[tun] ' + line.trim(), 'error');
         }
       }
-      if (!fs.readFileSync(pidFile, 'utf8').trim() && !fs.existsSync(dnsFile)) {
+      // Nothing to recover after a cancelled prompt, or a rollback that succeeded
+      // with tun2socks gone; a kept journal would keep the owner lock too.
+      const pidText = fs.readFileSync(pidFile, 'utf8').trim();
+      const pid = parseInt(pidText, 10);
+      const rolledBack = !/rollback failed/i.test(m) && Number.isInteger(pid) && !macOwner.pidAlive(pid, this.probe);
+      if ((!pidText || rolledBack) && !fs.existsSync(dnsFile)) {
         fs.rmSync(work, { recursive: true, force: true }); this.macState = null;
       }
       if (/User canceled|-128/i.test(m)) {

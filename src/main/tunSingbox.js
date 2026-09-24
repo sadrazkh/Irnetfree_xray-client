@@ -498,9 +498,14 @@ class TunSingbox {
           if (line.trim()) this.onLog('[tun] ' + line.trim(), 'error');
         }
       }
-      // A cancelled prompt before launch is safe to discard. After any mutation
-      // the privileged rollback owns cleanup; keep the journal for verified recovery.
-      if (!fs.readFileSync(pidFile, 'utf8').trim() && !fs.existsSync(dnsFile)) {
+      // A cancelled prompt before launch is safe to discard, and so is a setup
+      // whose own rollback succeeded with sing-box gone (wrong arch, bad config,
+      // "Killed: 9"): nothing is left, and a kept journal would keep the owner
+      // lock and a password prompt for nothing. Otherwise keep it for recovery.
+      const pidText = fs.readFileSync(pidFile, 'utf8').trim();
+      const pid = parseInt(pidText, 10);
+      const rolledBack = !/rollback failed/i.test(m) && Number.isInteger(pid) && !macOwner.pidAlive(pid, this.probe);
+      if ((!pidText || rolledBack) && !fs.existsSync(dnsFile)) {
         this.removeWork(); this.macState = null;
       }
       if (/User canceled|-128/i.test(m)) {
