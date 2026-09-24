@@ -208,6 +208,18 @@ test('R3: on a router the recovery keeps retrying past the desktop’s three tri
   await until(() => connectedCount(s2) === 2, 'back once it can be');
 });
 
+test('R3/R4: a rebuild by hand (apply settings) whose gateway fails is handed to the recovery, which brings it back', async (t) => {
+  const s = start();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.gatewayFails = true;
+  const r = await s.service.invoke('settings:apply');
+  assert.equal(r.ok, false);
+  await until(() => s.statuses.some(x => x.state === 'reconnecting' && x.reason === 'gateway-failed'), 'the recovery taking over');
+  s.state.gatewayFails = false;
+  await until(() => connectedCount(s) === 2, 'the gateway back without another click');
+});
+
 /* ----------------------------- R7: orphans and the exit hook ----------------------------- */
 
 test('R7: the cores a killed run left behind are ended before the first connect, and its rules and table cleared', async (t) => {

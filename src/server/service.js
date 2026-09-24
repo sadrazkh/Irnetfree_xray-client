@@ -1362,6 +1362,21 @@ function createService(opts = {}) {
     return { ok: true, tunError: (r && r.tunError) || null };
   }
 
+  /**
+   * A rebuild asked for by hand (apply settings, reconnect). On a router one
+   * whose gateway did not come up keeps the intent with nothing running (see
+   * abortGateway) — so it is handed to the recovery, which goes on trying as
+   * after any other drop. Not used by the recovery itself: that one has its
+   * own backoff.
+   */
+  async function reapplyByHand() {
+    const r = await reapplyConnection();
+    if (OPENWRT && r && !r.ok && !r.stale && store.get('activeServerId', null)) {
+      recoverFromNetworkChange('gateway-failed').catch((e) => send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' }));
+    }
+    return r;
+  }
+
   async function rebuildActiveConfig() {
     const serverId = store.get('activeServerId', null);
     if (!serverId || !xray.running) return;
@@ -1461,7 +1476,7 @@ function createService(opts = {}) {
     clearTimeout(recoverTimer);
     recoverTimer = null;
 
-    const dropped = reason === 'tunnel-exited' || reason === 'core-exited';
+    const dropped = reason === 'tunnel-exited' || reason === 'core-exited' || reason === 'gateway-failed';
     send('log', { line: `${dropped ? 'The connection dropped' : 'Network changed'} (${reason}) — rebuilding the connection`, level: 'warn' });
     send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
     if (attempt === 0) notify('IRNetFree', isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد');
@@ -1864,7 +1879,7 @@ function createService(opts = {}) {
       return { settings: Object.assign({}, next, ROUTER_FORCED), pendingReconnect: pendingKeys(), error };
     },
     'settings:pending': () => pendingKeys(),
-    'settings:apply': () => reapplyConnection(),
+    'settings:apply': () => reapplyByHand(),
 
     'ping:tcp': async (id) => { const { server } = resolveTarget(id); if (!server) return { ok: false, error: 'not found' }; return tcpPing(server.address, server.port); },
     'ping:real': async (id) => {
@@ -1983,7 +1998,7 @@ function createService(opts = {}) {
     // the same leak-free rebuild the network-change recovery uses
     'vpn:reconnect': async () => {
       if (!store.get('activeServerId', null)) return { ok: false, error: 'not connected' };
-      try { return await reapplyConnection(); } catch (e) { return { ok: false, error: e.message }; }
+      try { return await reapplyByHand(); } catch (e) { return { ok: false, error: e.message }; }
     },
     'guard:release': async () => {
       try { if (leakGuard) await leakGuard.release(); return { ok: true }; }
