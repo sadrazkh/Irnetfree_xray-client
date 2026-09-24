@@ -326,6 +326,23 @@ test('refresh repairs DHCP drift and journals a newly connected adapter before w
   assert.equal(h.calls.length, after);
 });
 
+test('an engage that fails after writing its state hands its receipt over on the error — its own release still works, a stranger’s does not', async () => {
+  // An overtaken connect releases only with a receipt (a release without one is
+  // unconditional and undid the newer connect's live guard). An engage whose
+  // apply threw had written the state already: without the receipt on the
+  // error that connect could not undo it at all.
+  const h = harness('win32', (cmd, args) => (/ConvertTo-Json/.test(args.at(-1)) ? WIN_SNAP : new Error('Access is denied.')));
+  const err = await h.guard.engage({ level: 'standard', peer4: PEER4, peer6: PEER6 }).then(() => null, (e) => e);
+  assert.ok(err, 'the apply failed');
+  assert.match(err.token, /^irnf-guard-\d+$/);
+  assert.equal(fs.existsSync(h.statePath), true, 'its state was written before the apply');
+  assert.equal((await h.guard.release({ token: 'irnf-guard-0' })).stale, true, 'another receipt is refused');
+  const snap = h.calls.length;
+  const r = await h.guard.release({ token: err.token });
+  assert.ok(h.calls.length > snap, 'the release ran with the receipt');
+  assert.equal(r.stale, undefined);
+});
+
 test('refresh without drift is read-only, and stale receipts do not even snapshot', async () => {
   let snapshot = WIN_SNAP;
   const h = harness('win32', (cmd, args) => /ConvertTo-Json/.test(args.at(-1)) ? snapshot : '');

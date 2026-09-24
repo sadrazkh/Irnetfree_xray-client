@@ -37,6 +37,8 @@ const { ipsOf } = require('./macTunScripts');
 const { run, delay, sh, isOwnTunInterface } = platform;
 
 const ADAPTER = platform.TUN2SOCKS_ADAPTER;   // 'XrayTun'
+// How long stop() waits for tun2socks to be gone (sing-box's stop waits as long).
+const STOP_WAIT_MS = 3000;
 // macOS: let the kernel assign the next free utun unit. Forcing a specific
 // unit (e.g. utun123) fails when it's taken/out of range and tun2socks exits
 // before any device appears. We detect the actual device it created instead.
@@ -882,14 +884,21 @@ class TunManager {
       return;
     }
     if (this.proc) {
+      // Wait for the exit, bounded: a rebuild that starts the next tun2socks
+      // while this one still holds the XrayTun adapter finds it taken.
+      const proc = this.proc;
+      const exited = new Promise((resolve) => { proc.once('exit', resolve); proc.once('error', resolve); });
       try {
         if (plat === 'win32') {
-          spawn('taskkill', ['/pid', String(this.proc.pid), '/t', '/f'], { windowsHide: true });
+          spawn('taskkill', ['/pid', String(proc.pid), '/t', '/f'], { windowsHide: true });
         } else {
-          this.proc.kill('SIGTERM');
+          proc.kill('SIGTERM');
         }
       } catch {}
-      this.proc = null;
+      let timer = null;
+      await Promise.race([exited, new Promise((resolve) => { timer = setTimeout(resolve, STOP_WAIT_MS); })]);
+      clearTimeout(timer);
+      if (this.proc === proc) this.proc = null;   // not a tun2socks a start spawned meanwhile
     }
     this.onLog('TUN mode stopped.', 'info');
   }

@@ -620,6 +620,47 @@ test('mac: during a session an OLD port of ours another client took since is the
   assert.equal(d.state['Wi-Fi'].web.enabled, false);
 });
 
+test('mac launch: a service switched off does not hand over one that carries another client’s LIVE proxy on our port', async (t) => {
+  // A restore that died after its first step left Wi-Fi's proxy switched off;
+  // USB LAN still names 127.0.0.1:10809, where another client listens now. The
+  // switched-off service made the whole record "ours", and the restore then
+  // rewrote USB LAN — the other client's live proxy — too.
+  const journal = tmpJournal(t);
+  const m = fakeMac({ 'Wi-Fi': { web: { enabled: true, server: 'proxy.corp', port: 3128 } } });
+  await setSystemProxy(true, Object.assign({ journal, exec: m.exec, platform: 'darwin' }, ON));
+  m.state['Wi-Fi'].web.enabled = false;
+  m.calls.length = 0;
+  const probed = [];
+  const probe = async (server) => { probed.push(server); return true; };
+  assert.equal(await repairSystemProxy({ journal, exec: m.exec, platform: 'darwin', probe }), 'restored');
+  assert.deepEqual(m.state['Wi-Fi'].web, { enabled: true, server: 'proxy.corp', port: 3128 }, 'what is ours is put back');
+  assert.deepEqual(m.state['USB LAN'].web, { enabled: true, server: '127.0.0.1', port: 10809 }, 'what is theirs is left alone');
+  assert.deepEqual(m.sets().filter(c => c.includes('USB LAN')), []);
+  assert.deepEqual(probed, ['127.0.0.1:10809'], 'one probe per server');
+  assert.equal(fs.existsSync(journal), false);
+});
+
+test('mac launch: every service on our port served by another client — one probe for all of them, nothing written', async (t) => {
+  const journal = tmpJournal(t);
+  const m = fakeMac({});
+  await setSystemProxy(true, Object.assign({ journal, exec: m.exec, platform: 'darwin' }, ON));
+  m.calls.length = 0;
+  const probed = [];
+  assert.equal(await repairSystemProxy({ journal, exec: m.exec, platform: 'darwin', probe: async (s) => { probed.push(s); return true; } }), 'dropped');
+  assert.deepEqual(m.sets(), []);
+  assert.deepEqual(probed, ['127.0.0.1:10809']);
+});
+
+test('mac launch: nothing listening — our dead leftover is restored on every service, the switched-off one included', async (t) => {
+  const journal = tmpJournal(t);
+  const m = fakeMac({ 'Wi-Fi': { web: { enabled: true, server: 'proxy.corp', port: 3128 } } });
+  await setSystemProxy(true, Object.assign({ journal, exec: m.exec, platform: 'darwin' }, ON));
+  m.state['Wi-Fi'].web.enabled = false;
+  assert.equal(await repairSystemProxy({ journal, exec: m.exec, platform: 'darwin', probe: FREE }), 'restored');
+  assert.deepEqual(m.state['Wi-Fi'].web, { enabled: true, server: 'proxy.corp', port: 3128 });
+  assert.equal(m.state['USB LAN'].web.enabled, false);
+});
+
 test('no test in this file reached a real socket', () => {
   assert.deepEqual(realSockets, []);
 });

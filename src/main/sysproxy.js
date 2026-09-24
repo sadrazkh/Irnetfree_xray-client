@@ -443,9 +443,10 @@ async function ownsWin(cur, j, when, probe) {
 }
 /**
  * The same answer for a Mac, service by service (any one of ours will do: the
- * restore puts every recorded service back). There is no list of ours to go
- * by: an older port — and, at launch, any port — is ours while nothing
- * listens on it (a probe that cannot tell keeps the old answer: ours).
+ * restore puts every recorded service back, but for theirsMac's). There is no
+ * list of ours to go by: an older port — and, at launch, any port — is ours
+ * while nothing listens on it (a probe that cannot tell keeps the old answer:
+ * ours).
  */
 async function ownsMac(cur, j, when, probe) {
   const written = writtenOf(j);
@@ -460,6 +461,35 @@ async function ownsMac(cur, j, when, probe) {
     if (await probe(server) !== true) return true;
   }
   return false;
+}
+
+/**
+ * The services that carry ANOTHER client's live proxy: switched on to a port
+ * we wrote, with something listening there that is not our core (at launch
+ * no core of ours runs; during a session ours holds the port it serves now).
+ * The restore passes them by — a service of ours switched off made the whole
+ * record ours, and rewrote theirs with it.
+ */
+async function theirsMac(cur, j, when, probe) {
+  const written = writtenOf(j);
+  const live = when === 'launch' ? null : oursOf(j);
+  const out = new Set();
+  for (const s of cur || []) {
+    const w = s.web;
+    if (!w || !w.server || !w.enabled) continue;
+    const server = `${w.server}:${w.port}`;
+    if (written.includes(server) && server !== live && await probe(server) === true) out.add(s.name);
+  }
+  return out;
+}
+
+/** One probe per server for a whole restore (a Mac asks for each service). */
+function probeOnce(probe) {
+  const seen = new Map();
+  return (server) => {
+    if (!seen.has(server)) seen.set(server, Promise.resolve().then(() => probe(server)));
+    return seen.get(server);
+  };
 }
 
 /**
@@ -483,17 +513,19 @@ async function restoreJournaled(platform, { exec, journal, when = 'session', pro
   } else {
     let cur = null;
     try { cur = await macSnapshot(exec); } catch { /* unknown */ }
-    if (cur && !(await ownsMac(cur, j, when, probe))) { clearJournal(journal); return 'not-ours'; }
+    const busy = probeOnce(probe);
+    if (cur && !(await ownsMac(cur, j, when, busy))) { clearJournal(journal); return 'not-ours'; }
+    const theirs = await theirsMac(cur, j, when, busy);
     if (!Array.isArray(j.mac)) {
       await disableMac(exec).catch(() => {});   // nothing known about before: the old disable
     } else {
-      for (const [cmd, args] of macRestoreSteps(j.mac)) await exec(cmd, args).catch(() => {});
+      for (const [cmd, args] of macRestoreSteps(j.mac.filter(s => !(s && theirs.has(s.name))))) await exec(cmd, args).catch(() => {});
       // A service the record never saw (plugged in, renamed, or set by a
       // server switch's second enable) that carries OUR proxy: switched off.
       const recorded = new Set(j.mac.map(s => s && s.name));
       const o = j.ours || {};
       for (const svc of cur || []) {
-        if (recorded.has(svc.name)) continue;
+        if (recorded.has(svc.name) || theirs.has(svc.name)) continue;
         for (const k of MAC_KINDS) {
           const r = svc[k.key];
           const port = Number(k.key === 'socks' ? o.socksPort : o.httpPort);
