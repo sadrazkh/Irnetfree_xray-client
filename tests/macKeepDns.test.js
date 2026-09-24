@@ -308,3 +308,18 @@ test('main.js: a reconnect stops the tunnel with keepDns exactly when the guard 
   // A disconnect restores: every other stopAllTuns() call passes nothing.
   assert.equal([...MAIN.matchAll(/stopAllTuns\(\{ keepDns/g)].length, 1);
 });
+
+test('service.js mirrors it: the headless reconnect keeps the held DNS on the main service too', () => {
+  const SERVICE = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8').replace(/\r\n/g, '\n');
+  // service.js's functions sit one level deeper (inside createService)
+  const inner = (head) => {
+    const start = SERVICE.indexOf(head);
+    assert.notEqual(start, -1, `${head} is gone`);
+    return SERVICE.slice(start, SERVICE.indexOf('\n  }\n', start));
+  };
+  const reapply = inner('async function reapplyConnection(');
+  assert.match(reapply, /\bhold = await leakGuard\.holdForReconnect\(/, 'the hold result is kept');
+  assert.match(reapply, /await stopAllTuns\(\{ keepDns: !!\(hold && hold\.held\) \}\);/);
+  assert.match(inner('async function stopAllTuns('), /stopTrackedTunnels\(startedTuns, tun, process\.platform, opts\)/);
+  assert.equal([...SERVICE.matchAll(/stopAllTuns\(\{ keepDns/g)].length, 1, 'a disconnect and a shutdown restore');
+});
