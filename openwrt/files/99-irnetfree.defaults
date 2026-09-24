@@ -32,4 +32,8 @@ else
 	EOF
 	[ -x /etc/init.d/firewall ] && /etc/init.d/firewall reload >/dev/null 2>&1
 fi
+# Not only lan: every zone that forwards to wan (a guest Wi-Fi, a VLAN) also
+# forwards to irnetfree, or it has no internet while the gateway is up. The
+# init script runs the same at every start, for a zone added later.
+sh /usr/lib/irnetfree/fw-forwardings.sh
 exit 0
