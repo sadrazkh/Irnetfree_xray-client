@@ -38,7 +38,7 @@ const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = requir
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
-const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
+const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
 const { trayGroups } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
@@ -286,7 +286,8 @@ function setAutostart(enabled) {
     return new Promise((resolve) => execFile('schtasks', args, { windowsHide: true }, (err, so, se) =>
       resolve({ ok: !err, error: err ? String(se || err.message).trim() : null })));
   }
-  try { app.setLoginItemSettings({ openAtLogin: !!enabled, args: ['--hidden'] }); return Promise.resolve({ ok: true }); }
+  // macOS ignores `args`: it opens hidden through its own setting (autostart.js).
+  try { app.setLoginItemSettings(loginItemSettings(enabled, process.platform)); return Promise.resolve({ ok: true }); }
   catch (e) { return Promise.resolve({ ok: false, error: e.message }); }
 }
 
@@ -381,8 +382,9 @@ async function disarmKillSwitch() {
 }
 
 function createWindow() {
-  // `--hidden`: started by the OS at logon (autostart.js) — stay in the tray.
-  const startHidden = process.argv.includes('--hidden');
+  // Started by the OS at logon — stay in the tray: `--hidden` from the Windows
+  // task, or on macOS a launch by the login item (autostart.js).
+  const startHidden = startsHidden({ argv: process.argv, platform: process.platform, loginItem: () => app.getLoginItemSettings() });
   mainWindow = new BrowserWindow({
     width: 1080,
     height: 720,
