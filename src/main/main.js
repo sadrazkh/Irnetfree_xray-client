@@ -3058,8 +3058,18 @@ function scheduleShutdownCancelCheck() {
     // middle of what may still be a slow logout. The user reconnects (or the
     // network watcher does, when the network moves).
     if (store && store.get('activeServerId', null)) {
-      send('log', { line: 'The shutdown was cancelled — the connection was taken down for it; reconnect to bring it back', level: 'warn' });
-      reportReconnectFailed('shutdown-cancelled', { ok: false });
+      // A Mac as non-root: the exit teardown could run nothing privileged, so
+      // the TUN and the core are most likely still up — only the system proxy
+      // (and a native-service tunnel) may have gone. Saying "taken down" there
+      // is not true.
+      const partial = process.platform === 'darwin' && !(process.getuid && process.getuid() === 0);
+      send('log', {
+        line: partial
+          ? 'The shutdown was cancelled — the connection may be only partly up (stopping the tunnel needs a password, so it was left running; the system proxy may have been put back); reconnect to be sure'
+          : 'The shutdown was cancelled — the connection was taken down for it; reconnect to bring it back',
+        level: 'warn'
+      });
+      reportReconnectFailed(partial ? 'shutdown-cancelled-partial' : 'shutdown-cancelled', { ok: false });
     }
   }, 60000);
   timer.unref();
