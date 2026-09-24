@@ -1967,6 +1967,12 @@ function renderInspector() {
 }
 
 /* status events from main */
+// The recovery reasons main.js calls a drop (DROP_REASONS there) rather than
+// the network moving: the window says which of the two it was.
+const DROP_REASONS = ['core-exited', 'tunnel-exited', 'reload-failed'];
+function reconnectingKey() {
+  return DROP_REASONS.includes(state.reconnectReason) ? 'state.reconnectingDrop' : 'state.reconnecting';
+}
 window.api.onStatus((d) => {
   if (d.state === 'connected') {
     state.connected = true;
@@ -1999,7 +2005,7 @@ window.api.onStatus((d) => {
     setConnUI('connecting', d.serverId);
     // the rebuild reapplyConnection() runs is still part of the recovery — keep
     // saying so instead of flashing a bare "Connecting…"
-    if (state.wasReconnecting) $('#connState').textContent = t('state.reconnecting');
+    if (state.wasReconnecting) $('#connState').textContent = t(reconnectingKey());
   } else if (d.state === 'disconnected') {
     state.connected = false;
     state.connecting = false;
@@ -2023,8 +2029,9 @@ window.api.onStatus((d) => {
     state.connected = false;
     state.connecting = true;
     state.wasReconnecting = true;
+    state.reconnectReason = d.reason || '';
     setConnUI('connecting', d.serverId || state.activeServerId);
-    $('#connState').textContent = t('state.reconnecting');
+    $('#connState').textContent = t(reconnectingKey());
   } else if (d.state === 'reconnect-failed') {
     // every retry is spent — the user has to act
     state.connecting = false;
@@ -2047,7 +2054,7 @@ window.api.onStatus((d) => {
     } else {
       state.connected = false;
       setConnUI('error');
-      toast(t('net.failed'), 'err', 8000);
+      toast(t(DROP_REASONS.includes(d.reason) ? 'net.dropFailed' : 'net.failed'), 'err', 8000);
     }
   } else if (d.state === 'cleanup-failed') {
     // The state IS the code; `d.error` carries it too, for a headless consumer.
@@ -2099,10 +2106,12 @@ window.api.onStoreError(reportStoreError);
 
 /* ----------------------------- kill switch ----------------------------- */
 window.api.onKillSwitch((d) => {
+  const wasEngaged = state.killEngaged;
   state.killEngaged = !!(d && d.engaged);
   const banner = $('#killBanner');
   if (banner) banner.hidden = !state.killEngaged;
-  if (state.killEngaged) toast(t('kill.blocked'), 'err');
+  // on the way in only: a second drop under a switch already closed is not news
+  if (state.killEngaged && !wasEngaged) toast(t('kill.blocked'), 'err');
 });
 $('#killDisarm').onclick = async () => {
   // full teardown so the machine returns to normal direct internet

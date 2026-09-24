@@ -468,6 +468,8 @@ const I18N = {
     'state.reconnecting': 'شبکه عوض شد — اتصال مجدد…',
     'net.reconnected': 'اتصال بعد از تغییر شبکه برقرار شد',
     'net.failed': 'شبکه عوض شد و اتصال مجدد ناموفق بود',
+    'net.dropFailed': 'اتصال مدام قطع می‌شود و اتصال مجدد ناموفق بود — دوباره وصل شوید',
+    'state.reconnectingDrop': 'اتصال قطع شد — اتصال مجدد…',
     'net.tunFailed': 'اتصال برقرار است ولی تونل سیستمی (TUN) بالا نیامد — فقط پروکسی کار می‌کند',
     'net.cleanupFailed': 'پاک‌سازی شبکه ناقص ماند؛ از «عیب‌یابی → بازیابی شبکه» استفاده کنید.',
 
@@ -956,6 +958,8 @@ const I18N = {
     'state.reconnecting': 'Network changed — reconnecting…',
     'net.reconnected': 'Reconnected after the network change',
     'net.failed': 'The network changed and reconnecting failed',
+    'net.dropFailed': 'The connection keeps dropping and reconnecting failed — connect again',
+    'state.reconnectingDrop': 'Connection dropped — reconnecting…',
     'net.tunFailed': 'Connected, but the system-wide tunnel (TUN) did not come back — proxy only',
     'net.cleanupFailed': 'Network cleanup was incomplete; use Diagnostics → Recover network.',
 
