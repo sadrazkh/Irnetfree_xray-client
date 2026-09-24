@@ -355,6 +355,40 @@ test('a panel moving the server from REALITY to TLS gets the user’s address, n
   assert.equal(ws.address, 'x.example.com');
 });
 
+test('after a handshake change only what was carried stays recorded: the panel’s next SNI change wins', () => {
+  const [orig] = sub([XH + '#DE']);   // REALITY
+  const old = applyServerEdits(orig, form(orig, { address: '104.16.1.1', sni: 'mine.example.com', pbk: 'MYKEY' }));
+  const tls = XH.replace('security=reality', 'security=tls').replace('sni=www.speedtest.net', 'sni=panel.example.com').replace('&pbk=PUBKEY&sid=ab12', '');
+  const [n1] = reconcileServers([old], sub([tls + '#DE']));
+  assert.deepEqual(n1._edited, ['address']);
+  // same handshake now; the panel changes its TLS SNI
+  const [n2] = reconcileServers([n1], sub([tls.replace('sni=panel.example.com', 'sni=panel2.example.com') + '#DE']));
+  assert.equal(n2.id, old.id);
+  assert.equal(n2.outbound.streamSettings.tlsSettings.serverName, 'panel2.example.com');
+  assert.equal(n2.address, '104.16.1.1');
+  assert.deepEqual(n2._edited, ['address']);
+});
+
+test('a recorded field the fresh server has no place for is not kept as recorded', () => {
+  const tlsLink = 'vless://u@c.example.com:443?type=ws&security=tls&sni=c.example.com&fp=unsafe&path=%2Fw#C';
+  const [orig] = sub([tlsLink]);
+  const old = applyServerEdits(orig, { cipherSuites: 'TLS_AES_128_GCM_SHA256', network: 'ws', security: 'tls', sni: 'c.example.com', fp: 'unsafe', path: '/w' });
+  assert.deepEqual(old._edited, ['cipherSuites']);
+  const reality = tlsLink.replace('security=tls', 'security=reality') + '&pbk=K&sid=01';
+  const [next] = reconcileServers([old], sub([reality]));
+  assert.equal(next.outbound.streamSettings.tlsSettings, undefined);
+  assert.equal('_edited' in next, false, 'cipherSuites has no TLS settings to live in');
+});
+
+test('a field released back to the link follows the panel again', () => {
+  const [orig] = sub([TR + '#NL']);
+  const a = applyServerEdits(orig, form(orig, { sni: 'front.example.com' }));
+  const b = applyServerEdits(a, form(a, { sni: 't.example.com' }));   // back to the link's own SNI
+  assert.equal('_edited' in b, false);
+  const [next] = reconcileServers([b], sub([TR.replace('sni=t.example.com', 'sni=u.example.com') + '#NL']));
+  assert.equal(next.outbound.streamSettings.tlsSettings.serverName, 'u.example.com');
+});
+
 test('a panel moving the server from TLS to REALITY gets the user’s address, never their TLS SNI or fingerprint', () => {
   const tlsLink = 'vless://11111111-2222-3333-4444-555555555555@x.example.com:443?type=ws&security=tls&sni=x.example.com&fp=chrome&path=%2Fw&host=x.example.com';
   const [orig] = sub([tlsLink + '#T']);
