@@ -11,6 +11,7 @@
 
 const { execFile } = require('child_process');
 const os = require('os');
+const { psArgs } = require('./tunPlatform');
 
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
@@ -50,7 +51,7 @@ function refreshWindows() {
     '  [void]$t::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0)', // INTERNET_OPTION_REFRESH
     '} catch {}'
   ].join('\n');
-  return run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps]);
+  return run('powershell', psArgs(ps));
 }
 
 /* --------------------------- macOS --------------------------- */
