@@ -131,24 +131,21 @@ object SubRefresh {
      * SNI or key for the old handshake means nothing in the new one.
      *
      * THE CORE, TLS FRAGMENT AND NOISE, which a link carries too (`engine=`,
-     * `fragment=`, `noise=`) and a panel retunes when the DPI changes, keep the
-     * old value only where it differs from what the old server's own link
-     * ([linked]) gives, compared as the sheet writes them back; without a link
-     * they keep what they have.
+     * `fragment=`, `noise=`) and a panel retunes when the DPI changes, follow
+     * the same record: the old value where the user set it through the sheet
+     * (an emptied one stays empty), the panel's everywhere else. Nothing is ever
+     * inferred from comparing with the old link — the old parser read a '+' in
+     * a noise spec's base64 as a space, and that would have passed for an edit.
      */
     fun carry(old: ServerConfig, fresh: ServerConfig, linked: ServerConfig? = linkedForm(old)): ServerConfig {
         val base = withUsersEdits(old, linked, fresh)
         val ob = JSONObject(base.outbound.toString())
-        for (k in listOf("_fragment", "_noise")) {
+        for ((field, k) in listOf("fragment" to "_fragment", "noise" to "_noise")) {
+            if (field !in old.edited) continue
             val mine = old.outbound.optString(k)
-            val usersOwn = if (linked != null) sheetForm(k, mine) != sheetForm(k, linked.outbound.optString(k)) else mine.isNotBlank()
-            if (usersOwn) { if (mine.isBlank()) ob.remove(k) else ob.put(k, mine) }
+            if (mine.isBlank()) ob.remove(k) else ob.put(k, mine)
         }
-        val engine = when {
-            linked == null -> old.engine ?: fresh.engine
-            old.engine != linked.engine -> old.engine
-            else -> fresh.engine
-        }
+        val engine = if ("engine" in old.edited) old.engine else fresh.engine
         return base.copy(
             id = old.id, outbound = ob, engine = engine,
             certPin = old.certPin, certPinAt = old.certPinAt, certPinCheckedAt = old.certPinCheckedAt,
@@ -180,9 +177,6 @@ object SubRefresh {
         if ("allowInsecure" in carried) { f.allowInsecure = mine.allowInsecure; changed = true }
         return if (changed) ServerEditor.apply(fresh, f) else fresh
     }
-
-    /** A fragment / noise value as the edit sheet writes it back (ServerEditor.noiseKey). */
-    private fun sheetForm(key: String, v: String): String = if (key == "_noise") ServerEditor.noiseKey(v) else v.trim()
 
     /**
      * [all] with [subId]'s servers replaced by [servers], in the place the
