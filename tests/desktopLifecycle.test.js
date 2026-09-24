@@ -121,6 +121,16 @@ test('giving up on a connection that keeps dropping leaves no tunnel or proxy ai
     'the guard stays held and the kill switch stays as it is — the banners offer both back');
 });
 
+test('a recovery that cannot resolve the WireGuard endpoint uses the address of the last connect', () => {
+  // The owner's corporate chain: cobra.tes.ca is a NAME. A recovery rebuilds
+  // under the armed kill switch and the held guard, where nothing resolves, and
+  // a name left to the official core has taken the whole core down before.
+  const wg = slice('async function withWgEndpointIps(serverId, settings) {', '\n}');
+  assert.match(wg, /const last = lastWgEndpointIps\.get\(h\);\n\s*if \(last\) \{\n\s*map\[h\] = last;/);
+  assert.match(wg, /map\[h\] = r\.ips\[0\];\n\s*lastWgEndpointIps\.set\(h, r\.ips\[0\]\);/, 'every fresh answer is remembered');
+  assert.match(MAIN, /^const lastWgEndpointIps = new Map\(\);/m);
+});
+
 test('with automatic reconnect off, a dead core is torn down instead of left under the TUN, DNS and proxy', () => {
   const DROP = dropSrc();
   const at = DROP.indexOf('if (!s.autoReconnectOnNetworkChange)');
