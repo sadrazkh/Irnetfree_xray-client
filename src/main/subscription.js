@@ -13,9 +13,150 @@
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
-const { parseMany } = require('./parser');
+const { parseMany, parseLink } = require('./parser');
 
 function uid() { return crypto.randomBytes(8).toString('hex'); }
+
+/* ------------------------- a refresh keeps who a server is ------------------------- */
+
+/** The share link without its `#remark` — panels rewrite the remark (traffic left, days left) on every fetch. */
+function withoutRemark(raw) {
+  const s = String(raw || '');
+  const i = s.indexOf('#');
+  return i === -1 ? s : s.slice(0, i);
+}
+
+/**
+ * What a server connects to, as one string: protocol, address, port, its
+ * credential (uuid / password / private key), the transport and its
+ * path/serviceName/host. Two records with the same identity are the same
+ * server even when the link around them changed (a vmess `ps`, an SNI, a
+ * fingerprint). '' when the record is too odd to say.
+ */
+function serverIdentity(s) {
+  const ob = s && s.outbound;
+  if (!ob || typeof ob !== 'object') return '';
+  const set = ob.settings || {};
+  const st = ob.streamSettings || {};
+  let cred = '';
+  if (ob.protocol === 'vless' || ob.protocol === 'vmess') {
+    const u = set.vnext && set.vnext[0] && set.vnext[0].users && set.vnext[0].users[0];
+    cred = (u && u.id) || '';
+  } else if (ob.protocol === 'trojan' || ob.protocol === 'shadowsocks') {
+    const srv = set.servers && set.servers[0];
+    cred = srv ? [srv.method || '', srv.password || ''].join(':') : '';
+  } else if (ob.protocol === 'socks' || ob.protocol === 'http') {
+    const u = set.servers && set.servers[0] && set.servers[0].users && set.servers[0].users[0];
+    cred = u ? [u.user || '', u.pass || ''].join(':') : '';
+  } else if (ob.protocol === 'wireguard') {
+    cred = set.secretKey || '';
+  }
+  const net = st.network || 'tcp';
+  let path = '', host = '';
+  if (st.wsSettings) { path = st.wsSettings.path; host = st.wsSettings.headers && (st.wsSettings.headers.Host || st.wsSettings.headers.host); }
+  else if (st.grpcSettings) path = st.grpcSettings.serviceName;
+  else if (st.httpSettings) { path = st.httpSettings.path; host = [].concat(st.httpSettings.host || []).join(','); }
+  else if (st.xhttpSettings) { path = st.xhttpSettings.path; host = st.xhttpSettings.host; }
+  else if (st.httpupgradeSettings) { path = st.httpupgradeSettings.path; host = st.httpupgradeSettings.host; }
+  else if (st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.request) {
+    const rq = st.tcpSettings.header.request;
+    path = [].concat(rq.path || []).join(',');
+    host = [].concat((rq.headers && rq.headers.Host) || []).join(',');
+  }
+  return JSON.stringify([ob.protocol || s.protocol || '', String(s.address || '').toLowerCase(), Number(s.port) || 0,
+    cred, net, path || '', host || '']);
+}
+
+const streamOf = (s) => (s && s.outbound && s.outbound.streamSettings) || null;
+function put(obj, key, v) {
+  if (!obj) return;
+  if (v === undefined) delete obj[key]; else obj[key] = v;
+}
+
+/**
+ * What the user sets on a server that its link can ALSO carry: the edit form's
+ * anti-DPI fields, the per-config engine, the patterniha TLS knobs, a
+ * WireGuard's DNS line. Connection parameters (address, credentials, SNI,
+ * keys…) are not here: they must match the server, and the provider is the one
+ * who knows them.
+ */
+const USER_FIELDS = [
+  { get: (s) => s.engine, set: (s, v) => put(s, 'engine', v) },
+  { get: (s) => s.outbound && s.outbound._fragment, set: (s, v) => put(s.outbound, '_fragment', v) },
+  { get: (s) => s.outbound && s.outbound._noise, set: (s, v) => put(s.outbound, '_noise', v) },
+  { get: (s) => { const st = streamOf(s); return st ? st.finalmask : undefined; }, set: (s, v) => put(streamOf(s), 'finalmask', v) },
+  {
+    get: (s) => { const st = streamOf(s); return st && st.tlsSettings ? st.tlsSettings.cipherSuites : undefined; },
+    set: (s, v) => { const st = streamOf(s); if (st && st.tlsSettings) put(st.tlsSettings, 'cipherSuites', v); }
+  },
+  { get: (s) => s.dns, set: (s, v) => put(s, 'dns', v) },
+  { get: (s) => s.dnsDomains, set: (s, v) => put(s, 'dnsDomains', v) }
+];
+
+/** Values compared the way the edit form writes them: blank is absent, text is trimmed. */
+function norm(v) {
+  if (v == null || v === '') return '';
+  return typeof v === 'string' ? v.trim() : JSON.stringify(v);
+}
+const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+
+/**
+ * The fresh record, with the old one's id and everything that was the user's.
+ * A field counts as the user's when the old record differs from what its own
+ * link says (they edited it — or cleared it), so a value the provider changed
+ * and the user never touched still comes through. The certificate pin is
+ * learnt by the app on first use and never travels in a link: always kept.
+ */
+function carryOver(old, fresh) {
+  const out = Object.assign({}, fresh, { id: old.id });
+  out.outbound = clone(fresh.outbound);
+  let said = null;
+  try { said = parseLink(old.raw); } catch { said = null; }
+  for (const f of USER_FIELDS) {
+    const mine = f.get(old);
+    if (!said || norm(mine) !== norm(f.get(said))) f.set(out, clone(mine));
+  }
+  // A rename only when it can be proven one: otherwise the provider's name
+  // (which often carries the traffic left) is the current one.
+  if (said && norm(old.name) !== norm(said.name) && norm(old.name)) out.name = old.name;
+  for (const k of Object.keys(old)) if (/^certPin/.test(k)) out[k] = old[k];
+  return out;
+}
+
+/**
+ * Match a subscription's freshly parsed servers to the ones it had before.
+ * Pure. Three passes, each over whatever is still unmatched: the identical
+ * link, then the link apart from its remark, then the identity above — so an
+ * exact match always wins over a looser one. Within a pass the old servers are
+ * taken in order, one each: duplicates in the fresh list never share an id.
+ * Unmatched old servers are gone; unmatched fresh ones keep their new id.
+ */
+function reconcileServers(previous, fresh) {
+  const old = Array.isArray(previous) ? previous.filter(s => s && s.id) : [];
+  const list = Array.isArray(fresh) ? fresh : [];
+  const taken = new Set();
+  const match = new Array(list.length).fill(null);
+  for (const key of [(s) => String(s.raw || ''), (s) => withoutRemark(s.raw), serverIdentity]) {
+    const byKey = new Map();
+    old.forEach((o, i) => {
+      if (taken.has(i)) return;
+      const k = key(o);
+      if (!k) return;
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k).push(i);
+    });
+    list.forEach((f, j) => {
+      if (match[j] !== null) return;
+      const k = key(f);
+      const q = k && byKey.get(k);
+      if (!q || !q.length) return;
+      const i = q.shift();
+      taken.add(i);
+      match[j] = i;
+    });
+  }
+  return list.map((f, j) => (match[j] === null ? f : carryOver(old[match[j]], f)));
+}
 
 /** Fetch a URL following redirects; resolves with { body, headers }. */
 function fetchUrl(url, timeout = 15000, redirects = 5) {
@@ -89,6 +230,7 @@ class SubscriptionManager {
    *   getServers()     -> array of all servers
    *   setServers(arr)  -> persist servers
    *   onUpdate(sub, info) -> notify renderer
+   *   fetch(url, subId)   -> optional, fetchSubscription's shape (tests)
    */
   constructor(opts) {
     this.opts = opts;
@@ -114,16 +256,28 @@ class SubscriptionManager {
     return { sub: this.list().find(s => s.id === id), ...res };
   }
 
-  /** Replace all servers belonging to a sub with freshly fetched ones. */
+  /**
+   * Replace the servers belonging to a sub with freshly fetched ones. A server
+   * still in the subscription keeps its id and the user's own settings on it
+   * (see reconcileServers).
+   */
   async refresh(subId) {
+    const before = this.opts.getSubs().find(s => s.id === subId);
+    if (!before) throw new Error('subscription not found');
+
+    const { servers: parsed, errors, usage } = await (this.opts.fetch || fetchSubscription)(before.url, subId);
+
+    // Read the store again: other refreshes, an edit or a removal may have
+    // landed while this one was on the network. A subscription removed in the
+    // meantime stays removed — its servers are not written back.
     const subs = this.opts.getSubs();
     const sub = subs.find(s => s.id === subId);
     if (!sub) throw new Error('subscription not found');
 
-    const { servers: fresh, errors, usage } = await fetchSubscription(sub.url, subId);
-
     // keep manually-added servers (no subId) + servers from OTHER subs
-    const others = this.opts.getServers().filter(s => s.subId !== subId);
+    const all = this.opts.getServers();
+    const others = all.filter(s => s.subId !== subId);
+    const fresh = reconcileServers(all.filter(s => s.subId === subId), parsed);
     this.opts.setServers(others.concat(fresh));
 
     sub.lastUpdated = Date.now();
@@ -185,4 +339,4 @@ function hostnameOf(url) {
   try { return new URL(url).hostname; } catch { return ''; }
 }
 
-module.exports = { SubscriptionManager, fetchSubscription };
+module.exports = { SubscriptionManager, fetchSubscription, reconcileServers };
