@@ -134,8 +134,22 @@ object ServerEditor {
         if (!patched || f.noise != was.noise) { if (f.noise.isBlank()) out.remove("_noise") else out.put("_noise", f.noise.trim()) }
         val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" }
         val (dns, dnsDomains) = if (s.protocol == "wireguard") LinkParser.splitDnsField(f.wgDns) else (s.dns to s.dnsDomains)
-        val edited = (s.edited + changedFields(s, was, f)).distinct()
-        return s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = out, engine = engine, dns = dns, dnsDomains = dnsDomains, edited = edited)
+        val saved = s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = out, engine = engine, dns = dns, dnsDomains = dnsDomains)
+        return saved.copy(edited = record(s, was, read(saved)))
+    }
+
+    /**
+     * The new [ServerConfig.edited]: the old record plus every field this save
+     * REALLY changed — [read] of the saved server against [read] of the one
+     * before, so a value apply did not take (" 8443", a non-numeric MTU, a padded
+     * SNI trimmed back to what it was) is no edit — minus every field that now
+     * holds exactly what the server's own link gives: saving the link's value
+     * releases the field, and it follows the panel again.
+     */
+    private fun record(s: ServerConfig, before: Fields, after: Fields): List<String> {
+        val changed = RECORDABLE.filter { valueOf(it, before) != valueOf(it, after) }
+        val linked = SubRefresh.linkedForm(s)?.let { read(it) }
+        return (s.edited + changed).distinct().filter { linked == null || valueOf(it, after) != valueOf(it, linked) }
     }
 
     /**
@@ -153,8 +167,17 @@ object ServerEditor {
         "cipherSuites" to Fields::cipherSuites, "finalMask" to Fields::finalMask
     )
 
-    /** Fields [apply] leaves as they were when the sheet hands them back empty. */
-    private val BLANK_KEEPS = setOf("name", "address", "cred", "wgPub", "method")
+    /** Everything [ServerConfig.edited] can name: the text fields, then the switch, the fragment, the noise, the core. */
+    private val RECORDABLE: List<String> = EDITABLE.map { it.first } + listOf("allowInsecure", "fragment", "noise", "engine")
+
+    /** One recordable field of [f], in the form a save writes it (so two spellings of one value compare equal). */
+    private fun valueOf(name: String, f: Fields): String = when (name) {
+        "allowInsecure" -> f.allowInsecure.toString()
+        "fragment" -> f.fragment.trim()
+        "noise" -> noiseKey(f.noise)
+        "engine" -> f.engine.trim().takeIf { it.isNotBlank() && it != "xray" } ?: ""
+        else -> EDITABLE.firstOrNull { it.first == name }?.second?.get(f)?.trim() ?: ""
+    }
 
     /**
      * A noise value as the sheet writes it back: its presets lower-cased and
@@ -168,25 +191,6 @@ object ServerEditor {
             "random", "faketls" -> l
             else -> t
         }
-    }
-
-    /** The names of the fields this save really changes — what [ServerConfig.edited] accumulates. */
-    internal fun changedFields(s: ServerConfig, was: Fields, f: Fields): List<String> {
-        val out = ArrayList<String>()
-        for ((name, p) in EDITABLE) {
-            val now = p.get(f).trim(); val before = p.get(was).trim()
-            val same = when {
-                name == "port" -> (now.toIntOrNull() ?: s.port) == s.port
-                name in BLANK_KEEPS -> now.isEmpty() || now == before
-                else -> now == before
-            }
-            if (!same) out.add(name)
-        }
-        if (f.allowInsecure != was.allowInsecure) out.add("allowInsecure")
-        if (f.fragment.trim() != was.fragment.trim()) out.add("fragment")
-        if (noiseKey(f.noise) != noiseKey(was.noise)) out.add("noise")
-        if (f.engine.trim().takeIf { it.isNotBlank() && it != "xray" } != s.engine?.takeIf { it.isNotBlank() && it != "xray" }) out.add("engine")
-        return out
     }
 
     /** Stream keys that belong to one transport; a change of transport drops them all. */
