@@ -221,6 +221,100 @@ test('a value the user changed wins over the panel retuning the same field', () 
   assert.equal(n2.outbound._noise, 'faketls', 'edited: the user’s');
 });
 
+/* --------------- connection fields the user edited (review fix 1) --------------- */
+
+const { applyServerEdits } = require('../src/main/parser');
+
+/** Every field the edit form sends for a vless/vmess/trojan server (app.js #editSave), from the record. */
+function form(s, over) {
+  const st = s.outbound.streamSettings;
+  const t = st.tlsSettings || st.realitySettings || {};
+  const ws = st.wsSettings;
+  const path = ws ? ws.path : (st.xhttpSettings ? st.xhttpSettings.path : '');
+  const host = ws ? ws.headers.Host : (st.xhttpSettings ? st.xhttpSettings.host : '');
+  return Object.assign({
+    name: s.name, address: s.address, port: String(s.port), fragment: s.outbound._fragment || '', noise: s.outbound._noise || '',
+    engine: s.engine || 'xray', network: st.network, security: st.security, sni: t.serverName || '', host: host || '',
+    path: path || '', serviceName: path || '', fp: t.fingerprint || 'chrome', pbk: t.publicKey || '', sid: t.shortId || '',
+    allowInsecure: false, cipherSuites: '', finalMask: ''
+  }, over || {});
+}
+
+test('an address the user swapped in (a clean Cloudflare IP) survives the refresh; what the panel changed still comes through', () => {
+  const [orig] = sub([XH + '#DE 12GB']);
+  const old = applyServerEdits(orig, form(orig, { address: '104.16.1.1' }));
+  assert.equal(old.outbound.settings.vnext[0].address, '104.16.1.1');
+  // the panel rewrote the remark AND changed the SNI: no link matches exactly
+  const moved = XH.replace('sni=www.speedtest.net', 'sni=www.microsoft.com');
+  const [next] = reconcileServers([old], sub([moved + '#DE 11GB']));
+  assert.equal(next.id, old.id, 'matched by what the panel said it was, not by the edited address');
+  assert.equal(next.address, '104.16.1.1');
+  assert.equal(next.outbound.settings.vnext[0].address, '104.16.1.1', 'the outbound dials the user’s address');
+  assert.equal(next.outbound.streamSettings.realitySettings.serverName, 'www.microsoft.com', 'the SNI was the panel’s to change');
+  assert.equal(next.name, 'DE 11GB');
+  assert.equal(next.raw, moved + '#DE 11GB');
+});
+
+test('port, SNI, Host and path the user edited survive the refresh', () => {
+  const [orig] = sub([TR + '#NL']);
+  const old = applyServerEdits(orig, form(orig, { port: '2053', sni: 'front.example.com', host: 'real.example.com', path: '/mine' }));
+  const [next] = reconcileServers([old], sub([TR + '#NL 2']));
+  assert.equal(next.id, old.id);
+  assert.equal(next.port, 2053);
+  assert.equal(next.outbound.settings.servers[0].port, 2053);
+  const st = next.outbound.streamSettings;
+  assert.equal(st.tlsSettings.serverName, 'front.example.com');
+  assert.deepEqual(st.wsSettings, { path: '/mine', headers: { Host: 'real.example.com' } });
+  assert.equal(next.outbound.settings.servers[0].password, 'pw');
+});
+
+test('a connection field the user never edited follows the panel — an address change included', () => {
+  const [old] = sub([TR + '#NL']);
+  const newPath = TR.replace('path=%2Ftr', 'path=%2Fnew');
+  const [n1] = reconcileServers([old], sub([newPath.replace('sni=t.example.com', 'sni=u.example.com') + '#NL']));
+  assert.equal(n1.outbound.streamSettings.tlsSettings.serverName, 'u.example.com');
+  // the panel moved the server: the address is part of what a server IS, so
+  // this is the panel's new server — at its new address, nothing stale carried
+  const [n2] = reconcileServers([old], sub([TR.replace('t.example.com:443', 'moved.example.com:443') + '#NL']));
+  assert.equal(n2.address, 'moved.example.com');
+  assert.equal(n2.outbound.settings.servers[0].address, 'moved.example.com');
+});
+
+test('a user edit to a credential or a WireGuard field is kept too; a field the parser only now fills is not mistaken for one', () => {
+  const [ss] = sub(['ss://' + Buffer.from('aes-256-gcm:old-pass').toString('base64') + '@ss.example.com:8388#S']);
+  const ssOld = applyServerEdits(ss, { password: 'my-pass' });
+  const [ssNext] = reconcileServers([ssOld], sub(['ss://' + Buffer.from('aes-256-gcm:old-pass').toString('base64') + '@ss.example.com:8388#S2']));
+  assert.equal(ssNext.id, ssOld.id);
+  assert.equal(ssNext.outbound.settings.servers[0].password, 'my-pass');
+
+  const wg = 'wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32&mtu=1420#W';
+  const [w] = sub([wg]);
+  const wOld = applyServerEdits(w, { mtu: '1280', allowedIPs: '10.0.0.0/8' });
+  const [wNext] = reconcileServers([wOld], sub([wg.replace('#W', '#W2')]));
+  assert.equal(wNext.outbound.settings.mtu, 1280);
+  assert.deepEqual(wNext.outbound.settings.peers[0].allowedIPs, ['10.0.0.0/8']);
+
+  // stored before httpupgrade had settings of its own: that empty path is the
+  // old parser's, not the user's — the refresh repairs the server
+  const hu = 'vless://u@h.example.com:443?type=httpupgrade&security=tls&sni=cdn.example.com&path=%2Fup&host=cdn.example.com#HU';
+  const [h] = sub([hu]);
+  delete h.outbound.streamSettings.httpupgradeSettings;
+  const [hNext] = reconcileServers([h], sub([hu]));
+  assert.deepEqual(hNext.outbound.streamSettings.httpupgradeSettings, { path: '/up', host: 'cdn.example.com' });
+});
+
+test('an SS-2022 server the old parser garbled is repaired by the refresh, not "kept as the user’s"', () => {
+  const link = 'ss://2022-blake3-aes-128-gcm:YctPZ6U7xPPcU%2Bgp3u%2BO0A%3D%3D@1.2.3.4:8388#x';
+  const [old] = sub([link]);
+  // what the parser before this fix stored: base64-decoded plain text on both sides of the colon
+  old.outbound.settings.servers[0].method = '�M��Z';
+  old.outbound.settings.servers[0].password = '�M��Zp';
+  const [next] = reconcileServers([old], sub([link]));
+  assert.equal(next.id, old.id);
+  assert.equal(next.outbound.settings.servers[0].method, '2022-blake3-aes-128-gcm');
+  assert.equal(next.outbound.settings.servers[0].password, 'YctPZ6U7xPPcU+gp3u+O0A==');
+});
+
 test('a setting the user cleared stays cleared', () => {
   const [old] = sub([XH + '&fragment=tlshello,1-2,1-2#DE']);
   delete old.outbound._fragment;   // "Hide SNI" switched off in the edit form

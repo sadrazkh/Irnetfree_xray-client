@@ -13,7 +13,7 @@
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
-const { parseMany, parseLink } = require('./parser');
+const { parseMany, parseLink, applyServerEdits } = require('./parser');
 
 function uid() { return crypto.randomBytes(8).toString('hex'); }
 
@@ -112,17 +112,123 @@ function norm(v) {
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
 /**
+ * What the provider's link said the old server was: its `raw`, parsed again.
+ * `raw` is never touched by an edit and is replaced by every refresh, so the
+ * difference between this and the stored record is exactly what the user
+ * changed. null when the link cannot say — it does not parse, or it is the
+ * `wireguard://host:port` a .conf import keeps, which has no keys in it.
+ */
+function linkOf(old) {
+  let said;
+  try { said = parseLink(old.raw); } catch { return null; }
+  const set = said && said.outbound && said.outbound.settings;
+  if (said.protocol === 'wireguard' && !(set && set.secretKey)) return null;
+  return said;
+}
+
+/**
+ * The connection fields of a record as the edit form shows and writes them
+ * (app.js readServerFields / #editSave → parser.applyServerEdits): address and
+ * port, the credential, a WireGuard's keys and interface, and the transport.
+ */
+const STREAM_KEYS = ['network', 'security', 'sni', 'host', 'path', 'serviceName', 'fp', 'pbk', 'sid', 'allowInsecure', 'alpn'];
+function editView(s) {
+  const ob = (s && s.outbound) || {};
+  const set = ob.settings || {};
+  const srv = (set.servers && set.servers[0]) || {};
+  const proto = s.protocol || ob.protocol;
+  const v = { address: s.address, port: s.port };
+  if (proto === 'vless' || proto === 'vmess') {
+    const u = set.vnext && set.vnext[0] && set.vnext[0].users && set.vnext[0].users[0];
+    v.uuid = u ? u.id : '';
+  } else if (proto === 'trojan' || proto === 'shadowsocks') {
+    v.password = srv.password || '';
+  } else if (proto === 'socks' || proto === 'http') {
+    const u = srv.users && srv.users[0];
+    v.username = u ? u.user || '' : '';
+    v.password = u ? u.pass || '' : '';
+  } else if (proto === 'wireguard') {
+    const peer = (set.peers && set.peers[0]) || {};
+    Object.assign(v, {
+      privateKey: set.secretKey || '', publicKey: peer.publicKey || '', presharedKey: peer.preSharedKey || '',
+      localAddress: [].concat(set.address || []).join(','), mtu: set.mtu ? String(set.mtu) : '',
+      reserved: [].concat(set.reserved || []).join(','), allowedIPs: [].concat(peer.allowedIPs || []).join(',')
+    });
+  }
+  if (proto === 'vless' || proto === 'vmess' || proto === 'trojan') {
+    const st = ob.streamSettings || {};
+    const tls = st.tlsSettings || st.realitySettings || {};
+    const rs = st.realitySettings || {};
+    let path = '', host = '';
+    if (st.wsSettings) { path = st.wsSettings.path; host = st.wsSettings.headers && st.wsSettings.headers.Host; }
+    else if (st.grpcSettings) path = st.grpcSettings.serviceName;
+    else if (st.httpSettings) { path = st.httpSettings.path; host = [].concat(st.httpSettings.host || []).join(','); }
+    else if (st.xhttpSettings) { path = st.xhttpSettings.path; host = st.xhttpSettings.host; }
+    else if (st.httpupgradeSettings) { path = st.httpupgradeSettings.path; host = st.httpupgradeSettings.host; }
+    else if (st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.request) {
+      const rq = st.tcpSettings.header.request;
+      path = [].concat(rq.path || [])[0];
+      host = [].concat((rq.headers && rq.headers.Host) || [])[0];
+    }
+    Object.assign(v, {
+      network: st.network === 'raw' ? 'tcp' : (st.network || 'tcp'), security: st.security || 'none',
+      sni: tls.serverName || '', fp: tls.fingerprint || '', pbk: rs.publicKey || '', sid: rs.shortId || '',
+      allowInsecure: !!(st.tlsSettings && st.tlsSettings.allowInsecure),
+      alpn: st.tlsSettings && st.tlsSettings.alpn ? [].concat(st.tlsSettings.alpn).join(',') : '',
+      path: path || '', serviceName: path || '', host: host || ''
+    });
+  }
+  return v;
+}
+
+/**
+ * The connection fields the user changed, as applyServerEdits() takes them —
+ * null when there are none. A field is the user's when the stored record
+ * differs from what its own link said AND is not blank: a blank is what an
+ * older parser left in a field it did not fill yet (httpupgrade's path before
+ * it had settings of its own), and the refresh is what repairs that. alpn
+ * has no form field; serviceName mirrors path.
+ */
+function connectionEdits(old, said, fresh) {
+  // A field no form can edit that still differs means the record is not what
+  // this link parses to today — an older parser wrote it (a Shadowsocks
+  // method garbled by the base64-first read). Nothing in it is the user's.
+  const method = (s) => { const set = s.outbound && s.outbound.settings; return norm(set && set.servers && set.servers[0] && set.servers[0].method); };
+  if ((old.protocol === 'shadowsocks' || said.protocol === 'shadowsocks') && method(old) !== method(said)) return null;
+  const mine = editView(old), was = editView(said);
+  const edited = Object.keys(mine).filter(k => k !== 'alpn' && k !== 'serviceName' &&
+    norm(mine[k]) !== '' && norm(mine[k]) !== norm(was[k]));
+  if (!edited.length) return null;
+  const fields = {};
+  // The stream is rebuilt from every field, as the form sends them: the
+  // fresh server's, with the user's changes over them.
+  if (edited.some(k => STREAM_KEYS.includes(k))) {
+    const now = editView(fresh);
+    for (const k of STREAM_KEYS) if (k in now) fields[k] = now[k];
+  }
+  for (const k of edited) fields[k] = mine[k];
+  if (edited.includes('path')) fields.serviceName = mine.path;
+  // socks/http credentials go as a pair (applyServerEdits replaces both)
+  if (edited.includes('username') || (edited.includes('password') && 'username' in mine)) {
+    fields.username = mine.username; fields.password = mine.password;
+  }
+  return fields;
+}
+
+/**
  * The fresh record, with the old one's id and everything that was the user's.
  * A field counts as the user's when the old record differs from what its own
  * link says (they edited it — or cleared it), so a value the provider changed
- * and the user never touched still comes through. The certificate pin is
- * learnt by the app on first use and never travels in a link: always kept.
+ * and the user never touched still comes through. That goes for the
+ * connection fields too — an address swapped for a clean CDN IP, an SNI, a
+ * Host, a path (see connectionEdits). The certificate pin is learnt by the
+ * app on first use and never travels in a link: always kept.
  */
-function carryOver(old, fresh) {
-  const out = Object.assign({}, fresh, { id: old.id });
+function carryOver(old, fresh, said) {
+  let out = Object.assign({}, fresh, { id: old.id });
   out.outbound = clone(fresh.outbound);
-  let said = null;
-  try { said = parseLink(old.raw); } catch { said = null; }
+  const conn = said ? connectionEdits(old, said, fresh) : null;
+  if (conn) out = applyServerEdits(out, conn);
   for (const f of USER_FIELDS) {
     const mine = f.get(old);
     if (!said || norm(mine) !== norm(f.get(said))) f.set(out, clone(mine));
@@ -141,19 +247,21 @@ function carryOver(old, fresh) {
  * above — so a tighter match always wins over a looser one. Within a pass the
  * old servers are taken in order, one each: duplicates in the fresh list never
  * share an id. Unmatched old servers are gone; unmatched fresh ones keep their
- * new id.
+ * new id. An old server's identity is what its link said it was, so one whose
+ * address the user swapped is still found.
  */
 function reconcileServers(previous, fresh) {
   const old = Array.isArray(previous) ? previous.filter(s => s && s.id) : [];
+  const said = old.map(linkOf);
   const list = Array.isArray(fresh) ? fresh : [];
   const taken = new Set();
   const match = new Array(list.length).fill(null);
   const passes = [(s) => String(s.raw || ''), (s) => withoutRemark(s.raw), (s) => serverIdentity(s, true), (s) => serverIdentity(s)];
-  for (const key of passes) {
+  for (const [p, key] of passes.entries()) {
     const byKey = new Map();
     old.forEach((o, i) => {
       if (taken.has(i)) return;
-      const k = key(o);
+      const k = key(p >= 2 && said[i] ? said[i] : o);
       if (!k) return;
       if (!byKey.has(k)) byKey.set(k, []);
       byKey.get(k).push(i);
@@ -168,7 +276,7 @@ function reconcileServers(previous, fresh) {
       match[j] = i;
     });
   }
-  return list.map((f, j) => (match[j] === null ? f : carryOver(old[match[j]], f)));
+  return list.map((f, j) => (match[j] === null ? f : carryOver(old[match[j]], f, said[match[j]])));
 }
 
 /** No subscription comes near this; a portal, a mistake or a hostile server can. */
