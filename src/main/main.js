@@ -1705,9 +1705,22 @@ async function onConnectionDrop(reason) {
   if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
   updateOverlay('off');
   const s = getSettings();
+  // The block THIS drop put in (not one a reapply or an earlier drop already
+  // held — lifting that is its holder's call). A connect in flight disarms up
+  // front, so a drop landing inside the user's connect arms AFTER that: the
+  // connect then comes up, the drop finds it healed, and without this the
+  // window says connected with the internet blocked.
+  let armedHere = false;
+  const liftOwnBlock = async () => {
+    if (!armedHere) return;
+    await disarmKillSwitch();
+    send('killswitch', { engaged: false });
+    send('log', { line: 'Kill switch released — tunnel is back up', level: 'info' });
+  };
   if (s.killSwitch) {
     const wasEngaged = killEngaged;
     const r = await armKillSwitch();
+    armedHere = !!(r && r.ok && !wasEngaged);
     send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
     if (r && r.ok && !wasEngaged) {
       send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
@@ -1730,8 +1743,9 @@ async function onConnectionDrop(reason) {
   if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
   // Is what this drop broke whole again (a rebuild already brought it back)?
   const healed = () => (reason === 'tunnel-exited' ? !!(tun && tun.active) : !!(xray && xray.running));
-  // a connect that settled with a running core (the user's, say) healed it: no budget, no rebuild
-  if (healed()) return;
+  // a connect that settled with a running core (the user's, say) healed it: no
+  // budget, no rebuild — and no block of ours left over the connection it made
+  if (healed()) return liftOwnBlock();
   // "the proxy works": the core runs AND the kill switch is not blocking it
   const proxyUp = () => !!(xray && xray.running) && !killEngaged;
   if (!s.autoReconnectOnNetworkChange) {
@@ -1757,7 +1771,9 @@ async function onConnectionDrop(reason) {
     await (recoveryRun || Promise.resolve()).catch(() => {});
     await Promise.resolve();   // let it release its lock and start what it queued
     if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
-    if (recoverTimer || recovering || healed()) return;
+    if (recoverTimer || recovering) return;
+    // a rebuild that captured "not held" before this drop armed lifts nothing itself
+    if (healed()) return liftOwnBlock();
   }
   if (!drops.take()) {
     send('log', { line: `The connection keeps dropping (${reason}) — no more automatic rebuilds until you reconnect`, level: 'error' });
