@@ -10,11 +10,21 @@ const assert = require('node:assert/strict');
 const { TunOpenwrt } = require('../src/main/tunOpenwrt');
 const net = require('../src/main/openwrtNet');
 
-/** A fake TunSingbox: records calls; `failStart` makes start() throw. */
+/**
+ * A fake TunSingbox: records calls; `failStart` makes start() throw. Like the
+ * real one, start() arms a fresh `exited` promise; `crash()` is sing-box dying
+ * on its own, stop() the exit we asked for. The IRNetFree device exists while
+ * the process runs — or, with `linger`, after it (a sing-box that ignores
+ * SIGTERM); `proc.kill('SIGKILL')` ends a lingering one.
+ */
 function fakeInner({ available = true, failStart = false } = {}) {
-  return {
+  const inner = {
     calls: [],
+    kills: [],
     active: false,
+    linger: false,
+    proc: null,
+    exited: Promise.resolve(),
     excludeIps: [],
     interfaceName: 'IRNetFree',
     dnsPeer: '172.19.0.2',
@@ -24,27 +34,47 @@ function fakeInner({ available = true, failStart = false } = {}) {
     isElevated: () => true,
     prepare: async () => {},
     physicalInterface: async () => ({ name: 'eth0', ifIndex: null, gateway: '192.168.1.2' }),
+    get linkUp() { return this.active || this.linger; },
     async start(socksPort, bypass, dns, opts) {
       this.calls.push(['start', socksPort, bypass, opts]);
       if (failStart) throw new Error('sing-box exited immediately');
+      this.exited = new Promise((resolve) => { this.gone = resolve; });
+      this.proc = { kill: (sig) => { this.kills.push(sig); if (sig === 'SIGKILL') this.linger = false; } };
       this.active = true; this.excludeIps = ['1.2.3.4/32'];
     },
-    async stop() { this.calls.push(['stop']); this.active = false; this.excludeIps = []; },
+    crash(info = { code: null, signal: 'SIGKILL' }) { this.active = false; this.proc = null; this.gone(info); },
+    async stop() {
+      this.calls.push(['stop']);
+      const was = this.active;
+      this.active = false; this.excludeIps = []; this.proc = this.linger ? this.proc : null;
+      if (was && this.gone) this.gone({ code: 0, signal: 'SIGTERM' });
+    },
     cleanupSync() { this.calls.push(['cleanupSync']); }
   };
+  return inner;
 }
 
-/** A fake command runner: `answers` maps a regex over "cmd args…" to stdout or an Error. */
+/**
+ * A fake command runner: `answers` maps a regex over "cmd args…" to stdout,
+ * an Error, or a function of the line returning either.
+ */
 function fakeRun(answers = []) {
   const lines = [];
   const run = async (cmd, args) => {
     const line = [cmd, ...args].join(' ');
     lines.push(line);
-    for (const [re, out] of answers) if (re.test(line)) { if (out instanceof Error) throw out; return out; }
+    for (const [re, ans] of answers) {
+      if (!re.test(line)) continue;
+      const out = typeof ans === 'function' ? ans(line) : ans;
+      if (out instanceof Error) throw out;
+      return out;
+    }
     return '';
   };
   return { run, lines };
 }
+
+const NO_LINK = () => new Error('Device "IRNetFree" does not exist.');
 
 const RULES_OK = '0:\tfrom all lookup local\n9000:\tfrom all to 172.19.0.0/30 lookup 2022\n9002:\tnot from all iif lo lookup 2022\n32766:\tfrom all lookup main\n';
 /** What the kernel says to `ip rule del pref N` when there is none: the deletion loop stops on it. */
@@ -52,21 +82,33 @@ const NO_RULE = [/^ip -[46] rule del /, new Error('RTNETLINK answers: No such fi
 
 function make(opts = {}) {
   const inner = opts.inner || fakeInner();
-  const { run, lines } = fakeRun([...(opts.answers || [[/^ip rule show/, RULES_OK]]), NO_RULE]);
+  // the device is there exactly while the fake says so, unless a test overrides it
+  const link = [/^ip link show IRNetFree/, () => (inner.linkUp ? '' : NO_LINK())];
+  const { run, lines } = fakeRun([...(opts.answers || [[/^ip rule show/, RULES_OK]]), link, NO_RULE]);
   const writes = [];
   const logs = [];
+  const exits = [];
   const tun = new TunOpenwrt({
     inner, run,
-    runSync: (cmd, args) => { const line = [cmd, ...args].join(' '); lines.push('SYNC ' + line); if (/ rule del /.test(line)) throw new Error('No such file or directory'); },
+    runSync: (cmd, args) => {
+      const line = [cmd, ...args].join(' ');
+      lines.push('SYNC ' + line);
+      if (/ rule del /.test(line)) throw new Error('No such file or directory');
+      if (/^ip link show IRNetFree/.test(line) && !inner.linkUp) throw NO_LINK();
+    },
     writeFile: (p, text) => { writes.push([p, text]); },
     lanStatus: async () => (opts.lan || { device: 'br-lan', address: '192.168.1.1', mask: 24 }),
     which: (name) => (opts.which ? opts.which(name) : true),
     onLog: (line, level) => logs.push([level, line]),
+    onUnexpectedExit: (err) => exits.push(err),
     lang: 'en', tmpDir: '/tmp/irnf-test',
-    verifyWaitMs: opts.verifyWaitMs || 300     // the real 15s is for an emulated CPU; the fakes answer at once
+    verifyWaitMs: opts.verifyWaitMs || 300,    // the real 15s is for an emulated CPU; the fakes answer at once
+    linkWaitMs: opts.linkWaitMs || 150
   });
-  return { tun, inner, lines, writes, logs };
+  return { tun, inner, lines, writes, logs, exits };
 }
+
+const tick = () => new Promise((r) => setImmediate(r));
 
 test('contract: the fields the service reads, and DNS declared as the backend’s own', () => {
   const { tun } = make();
@@ -173,7 +215,7 @@ test('setBypassMacs while active replaces the set and leaves the tunnel alone; w
   assert.equal(tun.active, true);
 });
 
-test('stop: sing-box first, then the rules and the table; a second stop is a no-op', async () => {
+test('stop: sing-box first, then — once its device is gone — the rules and the table; a second stop is a no-op', async () => {
   const { tun, inner, lines } = make();
   await tun.start(10808, [], [], {});
   lines.length = 0;
@@ -182,6 +224,7 @@ test('stop: sing-box first, then the rules and the table; a second stop is a no-
   assert.deepEqual(tun.excludeIps, []);
   assert.deepEqual(inner.calls.map(c => c[0]), ['start', 'stop']);
   assert.deepEqual(lines, [
+    'ip link show IRNetFree',                 // gone: only now may 8998 go
     'ip -4 rule del pref 8998',
     'ip -6 rule del pref 8998',
     'ip -4 rule del pref 8999',
@@ -248,17 +291,142 @@ test('stop keeps going when a delete fails (nothing to delete is the common case
   assert.ok(lines.includes('nft delete table inet irnetfree'));
 });
 
-test('cleanupSync: the synchronous best effort for process exit, inner first', () => {
+test('cleanupSync: the synchronous best effort for process exit, inner first, the rules once the device is gone', async () => {
   const { tun, inner, lines } = make();
+  await tun.start(10808, [], [], {});
+  // what the real inner's cleanupSync does on Linux: SIGTERM — the process then exits
+  inner.cleanupSync = function () { this.calls.push(['cleanupSync']); this.active = false; };
+  lines.length = 0;
   tun.cleanupSync();
-  assert.deepEqual(inner.calls, [['cleanupSync']]);
+  assert.deepEqual(inner.calls.map(c => c[0]), ['start', 'cleanupSync']);
   assert.deepEqual(lines, [
+    'SYNC ip link show IRNetFree',
     'SYNC ip -4 rule del pref 8998',
     'SYNC ip -6 rule del pref 8998',
     'SYNC ip -4 rule del pref 8999',
     'SYNC ip -6 rule del pref 8999',
     'SYNC nft delete table inet irnetfree'
   ]);
+  // an instance that never laid anything has nothing to clean — and must not
+  // sit out the device wait while ANOTHER instance's sing-box is still up
+  const idle = make();
+  idle.tun.cleanupSync();
+  assert.deepEqual(idle.lines, []);
+});
+
+test('the inner sing-box is built WITHOUT the caller’s onUnexpectedExit — this class reports the exit, once', () => {
+  let called = 0;
+  const tun = new TunOpenwrt({ onUnexpectedExit: () => { called++; }, run: async () => '', runSync: () => {} });
+  assert.notEqual(tun.inner.onUnexpectedExit, tun.onUnexpectedExit);
+  tun.inner.onUnexpectedExit(new Error('x'));
+  assert.equal(called, 0, 'a pass-through would fire twice once TunSingbox reports its own exits');
+});
+
+test('sing-box dying on its own: the gateway is no longer active and the service is told, once, with the reason', async () => {
+  const { tun, inner, exits, logs } = make();
+  await tun.start(10808, [], [], {});
+  assert.equal(tun.active, true);
+  inner.crash({ code: null, signal: 'SIGKILL' });
+  await tick();
+  assert.equal(tun.active, false, 'active follows the inner’s liveness');
+  assert.deepEqual(tun.excludeIps, []);
+  assert.equal(exits.length, 1);
+  assert.match(exits[0].message, /SIGKILL/);
+  assert.ok(logs.some(([lvl, l]) => lvl === 'error' && /sing-box exited on its own/.test(l)), JSON.stringify(logs));
+});
+
+test('an exit we asked for is never reported — not during stop, not late, not from a previous run', async () => {
+  const { tun, inner, exits } = make();
+  await tun.start(10808, [], [], {});
+  const first = inner.gone;
+  await tun.stop();
+  await tick();
+  assert.equal(exits.length, 0, 'stop');
+  await tun.start(10808, [], [], {});
+  first({ code: 0, signal: 'SIGTERM' });   // the old process's exit, arriving after the restart
+  await tick();
+  assert.equal(exits.length, 0, 'a late exit of the previous run');
+  assert.equal(tun.active, true);
+  // a failed start's rollback is ours too
+  const bad = make({ answers: [[/^ip rule show/, RULES_OK], [/^ip route get/, '192.168.1.3 dev IRNetFree table 2022\n']] });
+  await assert.rejects(bad.tun.start(10808, [], [], {}));
+  await tick();
+  assert.equal(bad.exits.length, 0, 'rollback');
+});
+
+test('stop after sing-box died still clears our rules and table (its device went with it)', async () => {
+  const { tun, inner, lines } = make();
+  await tun.start(10808, [], [], {});
+  inner.crash();
+  await tick();
+  lines.length = 0;
+  await tun.stop();
+  assert.ok(lines.includes('ip -4 rule del pref 8998'), lines.join('\n'));
+  assert.ok(lines.includes('ip -6 rule del pref 8999'));
+  assert.equal(lines[lines.length - 1], 'nft delete table inet irnetfree', 'the QUIC refusal must not outlive the gateway');
+});
+
+test('rule 8998 is never deleted while the IRNetFree device still exists (the v1.13.2 outage under a live table 2022)', async () => {
+  // a sing-box that outlives SIGTERM: SIGKILL, then the rules
+  const slow = make();
+  await slow.tun.start(10808, [], [], {});
+  slow.inner.linger = true;
+  slow.lines.length = 0;
+  await slow.tun.stop();
+  assert.deepEqual(slow.inner.kills, ['SIGKILL']);
+  const firstDel = slow.lines.indexOf('ip -4 rule del pref 8998');
+  assert.ok(firstDel > 0, slow.lines.join('\n'));
+  assert.equal(slow.lines[firstDel - 1], 'ip link show IRNetFree', 'the last look before the delete saw no device');
+
+  // a device that will not go: our rules stay (harmless without sing-box), the table goes, and it is said
+  const stuck = make();
+  await stuck.tun.start(10808, [], [], {});
+  stuck.inner.linger = true;
+  stuck.inner.proc = null;         // nothing of ours left to kill
+  stuck.inner.kills.length = 0;
+  stuck.lines.length = 0;
+  await stuck.tun.stop();
+  assert.ok(!stuck.lines.some(l => / rule del /.test(l)), stuck.lines.join('\n'));
+  assert.ok(stuck.lines.includes('nft delete table inet irnetfree'));
+  assert.ok(stuck.logs.some(([lvl, l]) => lvl === 'error' && /IRNetFree device is still there/.test(l)), JSON.stringify(stuck.logs));
+  // ...and the next stop, once it is gone, finishes the job
+  stuck.inner.linger = false;
+  stuck.lines.length = 0;
+  await stuck.tun.stop();
+  assert.ok(stuck.lines.includes('ip -4 rule del pref 8998'));
+
+  // the exit hook keeps the same rule
+  const exitHook = make();
+  await exitHook.tun.start(10808, [], [], {});
+  exitHook.inner.linger = true;
+  exitHook.inner.proc = null;
+  exitHook.lines.length = 0;
+  exitHook.tun.cleanupSync();
+  assert.ok(!exitHook.lines.some(l => / rule del /.test(l)), exitHook.lines.join('\n'));
+});
+
+test('a rollback removes 8998 only after sing-box and its device are gone', async () => {
+  const bad = make({ answers: [[/^ip rule show/, RULES_OK], [/^ip route get 192\.168\.1\.3/, '192.168.1.3 dev IRNetFree table 2022\n']] });
+  await assert.rejects(bad.tun.start(10808, ['1.2.3.4'], [], {}), /would enter the tunnel/);
+  const probe = bad.lines.indexOf('ip route get 192.168.1.3');
+  const after = bad.lines.slice(probe + 1);
+  assert.equal(after[0], 'ip link show IRNetFree');
+  assert.equal(after[1], 'ip -4 rule del pref 8998');
+  assert.deepEqual(bad.inner.calls.map(c => c[0]), ['start', 'stop']);
+});
+
+test('clearLeftovers: what a killed service left (rules, table) goes at the next start — only with no device', async () => {
+  const { tun, lines } = make();
+  assert.equal(await tun.clearLeftovers(), true);
+  assert.deepEqual(lines, [
+    'ip link show IRNetFree',
+    'ip -4 rule del pref 8998', 'ip -6 rule del pref 8998', 'ip -4 rule del pref 8999', 'ip -6 rule del pref 8999',
+    'nft delete table inet irnetfree'
+  ]);
+  const held = make();
+  held.inner.linger = true;      // a sing-box nobody could stop still holds the device
+  assert.equal(await held.tun.clearLeftovers(), false);
+  assert.ok(!held.lines.some(l => / rule del /.test(l)));
 });
 
 test('the pass-throughs the service calls', async () => {
