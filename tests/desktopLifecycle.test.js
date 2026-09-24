@@ -79,6 +79,35 @@ test('the elevated relaunch hands the lock over before the new instance can ask 
   assert.ok(release < relaunch.indexOf("spawn('powershell'"), 'released before the elevated copy is started');
 });
 
+/* --------------------- W2 / W11 / M2: the system proxy journal --------------------- */
+
+test('the proxy journal is configured and a dead session’s proxy repaired at launch, before any connect', () => {
+  const use = WHEN_READY.indexOf("useProxyJournal(path.join(dir, 'proxy-journal.json'))");
+  const repair = WHEN_READY.indexOf('repairSystemProxy()');
+  assert.notEqual(use, -1, 'the desktop app must journal the proxy it sets (sysproxy.useProxyJournal)');
+  assert.notEqual(repair, -1, 'nothing repairs a proxy left aimed at 127.0.0.1 after a crash or the update installer');
+  assert.ok(WHEN_READY.indexOf('if (!primaryInstance) return;') < use, 'never in a second instance — it would undo the first one’s proxy');
+  assert.ok(use < repair && repair < WHEN_READY.indexOf('createWindow()'), 'before the window, so before any connect');
+});
+
+test('the exit hook restores the journal instead of blindly switching the proxy off', () => {
+  const sync = slice('function teardownSync(', '\n}');
+  assert.match(sync, /restoreSystemProxySync\(\)/);
+  assert.ok(sync.indexOf('restoreSystemProxySync()') < sync.indexOf('leakGuard.releaseSync()'),
+    'the proxy first: the fastest step and the one every browser depends on');
+  assert.doesNotMatch(MAIN, /'ProxyEnable'/, 'no raw ProxyEnable=0 left anywhere in main.js — that killed corporate proxies');
+});
+
+test('quitting restores the proxy (and on macOS stops the core) before the steps that need a password', () => {
+  const quit = slice('async function teardownForQuit() {', '\n}');
+  const proxy = quit.indexOf('await setSystemProxy(false, {})');
+  const mac = quit.indexOf("if (process.platform === 'darwin') {\n    try { await stopAllTuns();");
+  assert.ok(proxy !== -1 && mac !== -1, quit);
+  assert.ok(proxy < mac, 'a 20 s cap on an unanswered password prompt must not leave the proxy aimed at a dead port');
+  const macCore = quit.indexOf("if (process.platform === 'darwin') { try { if (xray) await xray.stop(); } catch {} }");
+  assert.ok(macCore !== -1 && macCore < mac, 'macOS: the core stops before the privileged steps too');
+});
+
 /* ------------------------- W5: a connection that drops ------------------------- */
 
 /** The drop handler's source — read per test, so a missing one fails that test, not the file. */
