@@ -35,8 +35,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -130,9 +133,13 @@ class XrayVpnService : VpnService() {
     private fun autoStart(gen: Long, startId: Int, why: String) {
         Thread {
             val intent = try {
-                val store = Store(this@XrayVpnService)
-                val plan = store.buildPlan()          // throws when nothing usable is selected
-                val label = store.selectionLabel()
+                // The process's one Store, the screens' own (Store.get): a second
+                // instance saved its copy of the lists (prepare's pins end in
+                // saveServers) over whatever the UI had saved since, and the UI
+                // never saw the pins. Its lists are read on the main thread,
+                // where the screens write them.
+                val store = Store.get(this@XrayVpnService)
+                val (plan, label) = onMain { store.buildPlan() to store.selectionLabel() }   // throws when nothing usable is selected
                 VpnState.set(ConnState.CONNECTING, label)
                 VpnState.addLog("Connecting by itself ($why): $label")
                 prepare(this@XrayVpnService, store, plan, label)
@@ -546,6 +553,19 @@ class XrayVpnService : VpnService() {
         private val worker: ExecutorService = Executors.newSingleThreadExecutor { r -> Thread(r, "irnf-tunnel").apply { isDaemon = true } }
 
         /**
+         * Run [block] on the main thread and hand back its result (or its
+         * exception): the process Store's lists are written there by every
+         * screen — a subscription refresh replaces them wholesale — so the
+         * connect and auto-start threads read and write them only through here.
+         */
+        private fun <T> onMain(block: () -> T): T {
+            if (Looper.myLooper() == Looper.getMainLooper()) return block()
+            val task = FutureTask(Callable { block() })
+            Handler(Looper.getMainLooper()).post(task)
+            return try { task.get() } catch (e: ExecutionException) { throw e.cause ?: e }
+        }
+
+        /**
          * Build the plan and the config, then start the service. Runs its network
          * steps (certificate pins, WireGuard endpoints) on a worker thread: they
          * are TLS dials and DNS lookups, and the caller is the UI. The state is
@@ -570,18 +590,26 @@ class XrayVpnService : VpnService() {
             }.also { it.isDaemon = true; it.name = "irnf-connect" }.start()
         }
 
-        /** Everything before the service: pins, endpoints, the config. Blocks. */
+        /** Everything before the service: pins, endpoints, the config. Blocks; never on the main thread. */
         fun prepare(ctx: Context, store: Store, plan0: ConnectionPlan, label: String): Intent {
-            val s = store.settings
-
             // Certificate pinning on first use (CertPin.kt): a server whose link
             // asked for allowInsecure is dialled once, its leaf certificate hashed
             // and stored; the config then pins it. The core refuses allowInsecure
-            // itself, so without this such a server never connected at all. The
-            // plan holds copies of the records, so it is rebuilt from the store
-            // afterwards and the pins learnt just now reach the config.
-            ensureCertPins(store, plan0)
-            val plan = store.buildPlan()
+            // itself, so without this such a server never connected at all.
+            //
+            // The dials run here; the store takes the result on the main thread,
+            // by id (CertPin.applyPins). This thread used to write the list by an
+            // index it had looked up earlier, while a subscription refresh could
+            // be replacing that very list on the main thread (clear + addAll).
+            // The plan holds copies of the records, so it is rebuilt from the
+            // store afterwards and the pins learnt just now reach the config.
+            val pins = CertPin.learn(plan0, System.currentTimeMillis(),
+                fetch = { srv -> CertPin.fetchLeafPin(srv.address, srv.port, CertPin.sniOf(srv)) },
+                log = { line -> VpnState.addLog(line) })
+            val (plan, s) = onMain {
+                if (CertPin.applyPins(store.servers, pins)) store.saveServers()
+                store.buildPlan() to store.settings
+            }
 
             // Which core, exactly as the desktop decides it (EngineChoice.kt):
             // a single server takes its own choice, and a chain/pool/advanced plan
@@ -649,45 +677,6 @@ class XrayVpnService : VpnService() {
                 putExtra(EXTRA_PERAPP_MODE, s.perAppMode)
                 putStringArrayListExtra(EXTRA_PERAPPS, ArrayList(s.perApps))
             }
-        }
-
-        /** Pins learnt or dropped on this connect are written to the store and applied to the plan's own records. */
-        private fun ensureCertPins(store: Store, plan: ConnectionPlan) {
-            val targets = CertPin.pinTargets(plan)
-            for (b in targets.behind) VpnState.addLog("${b.name} sits behind a proxy; its certificate cannot be pinned automatically — connect to it directly once to pin it")
-            val now = System.currentTimeMillis()
-            // A pin re-checked at most every six hours: a rotated certificate makes
-            // the core refuse every dial and it says so only at log level info.
-            val due = CertPin.directServers(plan).filter { CertPin.recheckDue(it, now) }
-            val stale = ArrayList<String>()
-            for (srv in due) {
-                val sni = srv.outbound.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")?.optString("serverName")?.takeIf { it.isNotBlank() } ?: srv.address
-                val live = runCatching { CertPin.fetchLeafPin(srv.address, srv.port, sni) }.getOrNull() ?: continue   // unreachable is not a verdict
-                if (CertPin.normalizePin(live).isNotEmpty() && CertPin.normalizePin(live) != CertPin.normalizePin(srv.certPin)) stale.add(srv.id)
-            }
-            var changed = false
-            for (i in store.servers.indices) {
-                val srv = store.servers[i]
-                if (due.none { it.id == srv.id }) continue
-                store.servers[i] = if (srv.id in stale) srv.copy(certPin = "", certPinAt = "", certPinCheckedAt = now) else srv.copy(certPinCheckedAt = now)
-                changed = true
-            }
-            for (id in stale) VpnState.addLog("Certificate changed for ${store.serverById(id)?.name ?: id} — the old pin is gone; the one it presents now will be pinned instead")
-            val probe = ArrayList(targets.probe.map { it.id })
-            for (id in stale) if (id !in probe) probe.add(id)
-            for (id in probe) {
-                val srv = store.serverById(id) ?: continue
-                val sni = srv.outbound.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")?.optString("serverName")?.takeIf { it.isNotBlank() } ?: srv.address
-                try {
-                    val pin = CertPin.fetchLeafPin(srv.address, srv.port, sni)
-                    val i = store.servers.indexOfFirst { it.id == id }
-                    if (i >= 0) { store.servers[i] = srv.copy(certPin = pin, certPinAt = java.util.Date(now).toString(), certPinCheckedAt = now); changed = true }
-                    VpnState.addLog("Certificate pinned on first use for ${srv.name}: $pin")
-                } catch (e: Exception) {
-                    VpnState.addLog("Could not read the certificate of ${srv.name} to pin it (${e.message}) — the core will verify it itself")
-                }
-            }
-            if (changed) store.saveServers()
         }
 
         /** The WireGuard endpoint names of the plan resolved through TrustedDns; logged as the desktop does. */
