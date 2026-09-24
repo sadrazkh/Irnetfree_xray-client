@@ -1058,6 +1058,25 @@ test('applyServerEdits records which fields the user changed, across edits — a
   assert.equal('_edited' in applyServerEdits(s, { clearCertPin: true }), false, 'clearing the pin is not a field of the server');
 });
 
+test('applyServerEdits records what was really saved: whitespace and a value the edit ignored are not edits', () => {
+  const s = parseLink('trojan://pw@b.example.com:443?security=tls&sni=b.example.com&type=ws&path=%2Ftr&host=b.example.com#B');
+  const out = applyServerEdits(s, { address: '  b.example.com  ', port: 'not-a-port', name: '   ', password: '' });
+  assert.equal(out.port, 443);
+  assert.equal(out.name, 'B');
+  assert.equal('_edited' in out, false);
+});
+
+test('applyServerEdits releases a field saved back to what the server’s own link gives', () => {
+  const s = parseLink('trojan://pw@b.example.com:443?security=tls&sni=b.example.com&type=ws&path=%2Ftr&host=b.example.com&fragment=tlshello,1-2,1-2#B');
+  const full = (rec, over) => formFields(rec, Object.assign({ network: 'ws', security: 'tls', sni: 'b.example.com', path: '/tr', host: 'b.example.com', fragment: 'tlshello,1-2,1-2' }, over));
+  const a = applyServerEdits(s, full(s, { sni: 'front.example.com', address: '104.16.1.1', fragment: 'tlshello,100-200,10-20' }));
+  assert.deepEqual(a._edited, ['address', 'fragment', 'sni']);
+  const b = applyServerEdits(a, full(a, { sni: 'b.example.com', fragment: 'tlshello,1-2,1-2' }));
+  assert.deepEqual(b._edited, ['address'], 'sni and fragment are the link’s again: the panel owns them');
+  const c = applyServerEdits(b, full(b, { address: 'b.example.com' }));
+  assert.equal('_edited' in c, false);
+});
+
 test('applyServerEdits: httpupgrade path and Host are edited like the other transports', () => {
   const s = parseLink('vless://u@h.example.com:443?type=httpupgrade&security=tls&sni=cdn.example.com&path=%2Fup&host=cdn.example.com#HU');
   const out = applyServerEdits(s, { network: 'httpupgrade', security: 'tls', sni: 'cdn.example.com', path: '/new', host: 'other.example.com' });
