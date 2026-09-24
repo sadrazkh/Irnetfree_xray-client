@@ -45,12 +45,25 @@ object SubRefresh {
     }
 
     /**
+     * [identity] and the handshake too — security, SNI, fingerprint, REALITY key
+     * and short id, VLESS flow. A panel that offers one server under several
+     * SNIs or fingerprints and reorders them must not swap their ids, which the
+     * looser identity alone would do.
+     */
+    fun strictIdentity(s: ServerConfig): String {
+        val f = ServerEditor.read(s)
+        val flow = s.outbound.optJSONObject("settings")?.optJSONArray("vnext")?.optJSONObject(0)
+            ?.optJSONArray("users")?.optJSONObject(0)?.optString("flow") ?: ""
+        return listOf(identity(s), f.security, f.sni.lowercase(), f.fp, f.pbk, f.sid, flow).joinToString("\u0001")
+    }
+
+    /**
      * Each fresh server paired with the old server of this subscription it is —
-     * first by the identical link, then by [identity] — each old one claimed at
-     * most once, so a subscription that lists the same server twice keeps two
-     * servers. A matched server keeps the old id and what the user set on it
-     * ([carry]); an unmatched fresh one keeps its new id; an unmatched old one
-     * is gone, as it is gone from the subscription.
+     * the identical link first, then [strictIdentity], then [identity] — each
+     * old one claimed at most once, so a subscription that lists the same server
+     * twice keeps two servers. A matched server keeps the old id and what the
+     * user set on it ([carry]); an unmatched fresh one keeps its new id; an
+     * unmatched old one is gone, as it is gone from the subscription.
      */
     fun merge(old: List<ServerConfig>, fresh: List<ServerConfig>, subId: String): Merged {
         val claimed = BooleanArray(old.size)
@@ -63,13 +76,17 @@ object SubRefresh {
             claimed[j] = true; match[i] = old[j]
         }
         // 2. the same server under a changed link: renamed, parameters reordered,
-        //    or stored before links were kept at all (an older store has no raw)
-        val oldKeys = old.map { identity(it) }
-        for (i in fresh.indices) {
-            if (match[i] != null) continue
-            val key = identity(fresh[i])
-            val j = old.indices.firstOrNull { !claimed[it] && oldKeys[it] == key } ?: continue
-            claimed[j] = true; match[i] = old[j]
+        //    retuned, or stored before links were kept at all (an older store has
+        //    no raw) — the tight identity first, so variants keep their own ids
+        val passes: List<(ServerConfig) -> String> = listOf({ s -> strictIdentity(s) }, { s -> identity(s) })
+        for (key in passes) {
+            val oldKeys = old.map { key(it) }
+            for (i in fresh.indices) {
+                if (match[i] != null) continue
+                val k = key(fresh[i])
+                val j = old.indices.firstOrNull { !claimed[it] && oldKeys[it] == k } ?: continue
+                claimed[j] = true; match[i] = old[j]
+            }
         }
         val servers = fresh.indices.map { i ->
             val m = match[i]
@@ -80,19 +97,34 @@ object SubRefresh {
     }
 
     /**
-     * A fresh server that is [old]: the old id, and what the user set on it that
-     * a link does not carry — the core it runs on, the certificate pinned on
-     * first use, the TLS fragment and noise. Everything the link does carry
-     * (name, address, keys, transport) comes from the subscription, which is what
-     * a refresh is for.
+     * A fresh server that is [old]: the old id and the certificate pinned on
+     * first use (which no link carries). Everything else comes from the
+     * subscription, which is what a refresh is for — including the core, the
+     * TLS fragment and the noise, which a link DOES carry (`engine=`,
+     * `fragment=`, `noise=`) and a panel retunes when the DPI changes.
+     *
+     * Those three keep the old value only where the USER set it: where it
+     * differs from what the old server's own link gives. A value that simply
+     * came from the link follows the link — changed, or dropped. (Keeping any
+     * non-blank old value, as this first did, froze a panel's old fragment
+     * forever.) A server stored without its link cannot tell the two apart and
+     * keeps what it has.
      */
     fun carry(old: ServerConfig, fresh: ServerConfig): ServerConfig {
+        val asLinked = old.raw.takeIf { it.isNotBlank() }?.let { runCatching { LinkParser.parseLink(it) }.getOrNull() }
         val ob = JSONObject(fresh.outbound.toString())
-        old.outbound.optString("_fragment").takeIf { it.isNotBlank() }?.let { ob.put("_fragment", it) }
-        old.outbound.optString("_noise").takeIf { it.isNotBlank() }?.let { ob.put("_noise", it) }
+        for (k in listOf("_fragment", "_noise")) {
+            val mine = old.outbound.optString(k)
+            val usersOwn = if (asLinked != null) mine != asLinked.outbound.optString(k) else mine.isNotBlank()
+            if (usersOwn) { if (mine.isBlank()) ob.remove(k) else ob.put(k, mine) }
+        }
+        val engine = when {
+            asLinked == null -> old.engine ?: fresh.engine
+            old.engine != asLinked.engine -> old.engine
+            else -> fresh.engine
+        }
         return fresh.copy(
-            id = old.id, outbound = ob,
-            engine = old.engine ?: fresh.engine,
+            id = old.id, outbound = ob, engine = engine,
             certPin = old.certPin, certPinAt = old.certPinAt, certPinCheckedAt = old.certPinCheckedAt
         )
     }
