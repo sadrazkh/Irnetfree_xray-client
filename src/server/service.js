@@ -32,6 +32,7 @@ const { SubscriptionManager } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
 const { TunSingbox } = require('../main/tunSingbox');
 const { NativeMacTun } = require('../main/nativeMacTun');
+const { recoverMacNetwork } = require('../main/macRecovery');
 const { collectDiagnostics } = require('../main/connectionDiagnostics');
 const { stopTrackedTunnels, releaseGuardChecked } = require('../main/tunnelCleanup');
 const tunPlatform = require('../main/tunPlatform');
@@ -430,20 +431,19 @@ function createService(opts = {}) {
     onError: () => send('log', { line: 'DNS guard refresh failed; check network protection or reconnect.', level: 'warn' })
   });
   if (process.platform === 'darwin') {
-    macRepairPromise = (async () => {
-      // First, because it is the one recovery that can be holding the system's
-      // DNS right now: the root daemon outlives the app, so a force quit leaves
-      // it with a live session no journal of ours can undo. A no-op when the
-      // bridge is not there (isAvailable() false), which is every non-packaged
-      // build and the headless server.
-      await new NativeMacTun({ userData: dataDir }).recoverMacSessions();
-      const repair = new TunSingbox({ userData: dataDir });
-      await repair.recoverMacSessions();
-      await new TunManager({ userData: dataDir }).recoverMacSessions();
-      const result = await leakGuard.repairAtLaunch();
-      if (leakGuard.readState()) throw new Error('Saved DNS recovery is incomplete');
-      return result;
-    })().catch(e => { macRepairError = e; send('log', { line: 'Network recovery required', level: 'error' }); });
+    // Native daemon first (it can be holding the system's DNS right now and it
+    // outlives the app; a no-op when the bridge is not there), then both
+    // backends' journals, then the guard — EACH ON ITS OWN (macRecovery.js): a
+    // step that throws no longer stops the ones after it, and a native failure
+    // no longer refuses sing-box / tun2socks connects.
+    macRepairPromise = recoverMacNetwork({
+      userData: dataDir,
+      onLog: (line, level) => send('log', { line, level }),
+      guard: async () => {
+        await leakGuard.repairAtLaunch();
+        if (leakGuard.readState()) throw new Error('Saved DNS recovery is incomplete');
+      }
+    }).then(e => { if (e) { macRepairError = e; send('log', { line: 'Network recovery required', level: 'error' }); } });
   } else {
     leakGuard.repairAtLaunch().catch((e) => send('log', { line: 'Leak guard repair failed: ' + e.message, level: 'error' }));
   }
@@ -1574,13 +1574,13 @@ function createService(opts = {}) {
       await macRepairPromise;
       // The teardown that failed, once more, before the recoveries.
       if (cleanupFailed) { try { await doDisconnect(); } catch { /* the recoveries below are the point */ } }
-      if (process.platform === 'darwin') {
-        await new NativeMacTun().recoverMacSessions();
-        const repair = new TunSingbox({ userData: dataDir });
-        await repair.recoverMacSessions();
-        await new TunManager({ userData: dataDir }).recoverMacSessions();
-      }
-      await releaseGuardChecked(leakGuard);
+      // Each recovery on its own (macRecovery.js); the guard's release is its last
+      // step (whatever the others did, unless a live tunnel still uses it), and a
+      // failure that gates Connect is reported after it.
+      let failed = null;
+      if (process.platform === 'darwin') failed = await recoverMacNetwork({ userData: dataDir, onLog: (line, level) => send('log', { line, level }), guard: () => releaseGuardChecked(leakGuard) });
+      else await releaseGuardChecked(leakGuard);
+      if (failed) throw failed;
       macRepairError = null;
       cleanupFailed = false;
       return { ok: true };

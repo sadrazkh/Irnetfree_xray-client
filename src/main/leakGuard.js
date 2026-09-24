@@ -487,10 +487,17 @@ const MAC_FLUSH = [
   'killall -HUP mDNSResponder 2>/dev/null || true'
 ];
 
+/**
+ * The peers come back out of the state file — a file the user owns — for every
+ * 30 s refresh, and this script runs as root. So an IP literal or no apply at
+ * all, and quoted even then: `'1.1.1.1; id > /tmp/pwn'` was a root command.
+ */
 function macApplyLines(services, peer4, peer6) {
-  const peers = [peer4, peer6].filter(Boolean).join(' ');
+  const peers = [peer4, peer6].filter(Boolean).map(p => String(p).trim());
+  if (!peers.length) throw new Error('Leak guard: no tunnel resolver to point the services at');
+  if (peers.some(p => !net.isIP(p))) throw new Error('Leak guard: the tunnel resolver is not an IP address — nothing was applied');
   return [
-    ...(services || []).map(s => `networksetup -setdnsservers ${sh(nameOf(s))} ${peers} || FAIL=1`),
+    ...(services || []).map(s => `networksetup -setdnsservers ${sh(nameOf(s))} ${peers.map(sh).join(' ')} || FAIL=1`),
     ...MAC_FLUSH
   ];
 }
@@ -499,7 +506,8 @@ function macApplyLines(services, peer4, peer6) {
 function macRestoreLines(services) {
   return [
     ...(services || []).map(s => {
-      const dns = addrList(s && s.dns);
+      // Only IP literals: the record is read back from a user-owned file.
+      const dns = addrList(s && s.dns).filter(a => net.isIP(a));
       // The addresses are quoted too: they came off the machine, and this
       // script runs as root.
       return `networksetup -setdnsservers ${sh(nameOf(s))} ${dns.length ? dns.map(sh).join(' ') : 'Empty'} || FAIL=1`;
@@ -895,7 +903,8 @@ class LeakGuard {
         count = services.length;
         state.mac = { services };
         state.strict = !!anchor;
-        apply = () => this._privileged('apply', macApplyScript(services, peer4, peer6));
+        const applyScript = macApplyScript(services, peer4, peer6);   // a peer that is no IP stops here, before the state file
+        apply = () => this._privileged('apply', applyScript);
         if (anchor) {
           // Carried over: if the FIRST engage of this session turned pf on, the
           // second one finds it already on and would record "not ours",
@@ -1002,9 +1011,10 @@ class LeakGuard {
         const fresh = parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()], options));
         changed = fresh.filter(s => !same(s.dns, peers));
         if (!changed.length) return { refreshed: false, adapters: 0 };
+        const script = macApplyScript(changed, st.peer4, st.peer6);   // a tampered peer throws before any write
         st.mac.services = mergeTargets(st.mac.services, withoutPeers(fresh, peers), s => s.name);
         this.writeState(st);
-        await this._privileged('refresh', macApplyScript(changed, st.peer4, st.peer6), options);
+        await this._privileged('refresh', script, options);
       } else return { refreshed: false, skipped: true };
       this.onLog(`Leak guard: repaired DNS drift on ${changed.length} adapters`, 'warn');
       return { refreshed: true, adapters: changed.length };
