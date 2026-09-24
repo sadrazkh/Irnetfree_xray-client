@@ -34,7 +34,7 @@ const { TunSingbox } = require('../main/tunSingbox');
 const { NativeMacTun } = require('../main/nativeMacTun');
 const { recoverMacNetwork } = require('../main/macRecovery');
 const { collectDiagnostics } = require('../main/connectionDiagnostics');
-const { stopTrackedTunnels, releaseGuardChecked } = require('../main/tunnelCleanup');
+const { stopTrackedTunnels, releaseGuardChecked, releaseStrandedGuard } = require('../main/tunnelCleanup');
 const tunPlatform = require('../main/tunPlatform');
 const { appsForTun } = require('../main/tunApps');
 const { LeakGuard } = require('../main/leakGuard');
@@ -219,9 +219,13 @@ function createService(opts = {}) {
   const ROUTER_FORCED = OPENWRT ? { dnsManaged: true } : {};
 
   const listeners = new Set();
+  // to the clients only — for an event whose reason syslog already has
+  const tell = (channel, payload) => {
+    for (const cb of listeners) { try { cb(channel, payload); } catch {} }
+  };
   const send = (channel, payload) => {
     if (OPENWRT) { try { toSyslog(channel, payload); } catch {} }
-    for (const cb of listeners) { try { cb(channel, payload); } catch {} }
+    tell(channel, payload);
   };
   // On a router the service's stdout/stderr ARE its log: procd hands them to
   // syslog, tagged `node[pid]` — and nothing about the gateway used to reach
@@ -306,6 +310,8 @@ function createService(opts = {}) {
   // Core stops that are ours but not a reload (abortGateway): not a crash.
   // A counter, not a saved-and-restored flag: overlapping calls cannot leave it stuck.
   let quietStops = 0;
+  // Every connect in flight (see doConnect): a drop waits for them (recoverFromDrop).
+  const connectsInFlight = new Set();
 
   const store = new Store(path.join(dataDir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
@@ -553,7 +559,8 @@ function createService(opts = {}) {
   });
   const dnsGuardWatch = new DnsGuardWatch({
     guard: leakGuard,
-    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading,
+    // and only over a core that is actually running (see main.js)
+    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading && !!xray?.running,
     onError: () => send('log', { line: 'DNS guard refresh failed; check network protection or reconnect.', level: 'warn' })
   });
   if (process.platform === 'darwin') {
@@ -1032,7 +1039,23 @@ function createService(opts = {}) {
     return Object.assign({}, settings, { entryHostIps: map });
   }
 
-  async function doConnect(serverId) {
+  /**
+   * A connect, tracked while it is in flight. A drop that lands inside one —
+   * the core dying while the gateway is still being built — waits for it
+   * before it rebuilds (recoverFromDrop): a second connect started beside it
+   * built a second gateway while the first was inside start(), and the
+   * loser's undo deleted the shared nft table by name. The work itself is
+   * connectOnce(). (main.js: doConnect / onConnectionDrop.)
+   */
+  function doConnect(serverId, opts) {
+    const p = connectOnce(serverId, opts);
+    connectsInFlight.add(p);
+    const settled = () => connectsInFlight.delete(p);
+    p.then(settled, settled);
+    return p;
+  }
+
+  async function connectOnce(serverId, opts = {}) {
     if (networkRepairing) throw new Error('Network recovery is still running');
     // Every await below is a window in which the operator can hit disconnect.
     // doDisconnect() then stops the core and clears activeServerId, but THIS call
@@ -1065,6 +1088,15 @@ function createService(opts = {}) {
     let settings = await effectiveSettings();
     if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
+
+    // No tunnel in this connect, and none still up: a guard held for the last
+    // one (a settings apply that turned TUN off, a connect after the recovery
+    // gave up) would leave every adapter without a resolver — see main.js.
+    if (!settings.tunMode && !(tun && tun.active)) {
+      const released = await releaseStrandedGuard(leakGuard);
+      if (stale()) return abandoned;
+      if (released && released.released) send('log', { line: 'No tunnel in this connection — the adapters’ DNS, held for the last one, is theirs again', level: 'info' });
+    }
 
     // allowInsecure is gone from the core: pin the certificate on first use instead.
     await ensureCertPins(serverId, settings);
@@ -1253,13 +1285,15 @@ function createService(opts = {}) {
           // Releasing here put the adapters back on the ISP's resolvers for the
           // whole rebuild, with no tunnel; holding keeps the override and only
           // widens the firewall's holes to the server about to be dialled.
+          let hold = null;
           try {
-            if (!tun?.managesDns) await leakGuard.holdForReconnect({
+            if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
               excludes: await tunPlatform.resolveServerIps([...entryAddrs, ...pinnedIps], { ipv6: true }).catch(() => []),
               token: guardToken
             });
           } catch {}
-          if (process.platform === 'darwin') await myTun.stop();
+          // keepDns: the held override stays on the main service too (see reapplyConnection).
+          if (process.platform === 'darwin') await myTun.stop({ keepDns: !!(hold && hold.held) });
           else { try { await myTun.stop(); } catch {} }
         }
         try {
@@ -1343,9 +1377,18 @@ function createService(opts = {}) {
           // kept their own resolvers. Deliberately NOT tunError: that one means
           // "no tunnel", and the network-change recovery retries the whole
           // connection on it.
+          // a failed engage hands its receipt over (see main.js)
+          guardToken = (e && e.token) || guardToken;
           guardError = e.message;
           send('log', { line: 'Leak guard failed: ' + e.message + ' — the tunnel is up, but the physical adapters keep their own DNS', level: 'error' });
         }
+      }
+      // No tunnel at the end of this connect after all, but a switch or a
+      // rebuild HELD the guard for one — see main.js. Not inside a recovery
+      // that will retry it: the hold stays until it comes back or the give-up.
+      if (!myTun.active && !stale() && !(opts.recovery && myTun.isAvailable() && myTun.isElevated())) {
+        const released = await releaseStrandedGuard(leakGuard);
+        if (released && released.released) send('log', { line: 'The tunnel did not come up — the adapters’ DNS, held for it, is theirs again', level: 'warn' });
       }
     } else if (settings.blockUdpInProxyMode) {
       // Proxy mode carries no UDP at all, so WebRTC's question to a STUN server
@@ -1370,13 +1413,15 @@ function createService(opts = {}) {
     // this is the last gate before the watchers and the 'connected' status.
     if (stale()) {
       // Everything this call started belongs to an intent that no longer
-      // exists. The release is unconditional: engage() can also throw AFTER
-      // writing the state file, and a release with nothing to undo is a no-op.
+      // exists. The release carries this call's receipt (an engage that threw
+      // AFTER writing the state file hands one over too); with none there is
+      // nothing of ours to undo — and a release without one is unconditional:
+      // it would undo the newer connect's live guard (see main.js).
       // The tunnel goes too — the disconnect's own tun.stop() may well have run
       // BEFORE this call's start() finished, which would leave the backend
       // holding the machine's default routes while the client is told
       // "disconnected".
-      await leakGuard.release({ token: guardToken }).catch(() => {});
+      if (guardToken) await leakGuard.release({ token: guardToken }).catch(() => {});
       if (myTun && myTun.active) { try { await myTun.stop(); } catch {} }
       return abandoned;
     }
@@ -1386,7 +1431,7 @@ function createService(opts = {}) {
     // direct while the panel, the boot retries and the recovery all took it
     // for a success. Undone and thrown, so each of them retries.
     if (OPENWRT && settings.tunMode && tunError) {
-      const overtaken = await abortGateway(serverId, prevActive, myTun, stale);
+      const overtaken = await abortGateway(serverId, prevActive, myTun, stale, tunError);
       if (overtaken) return abandoned;
       throw new Error(tunError);
     }
@@ -1447,13 +1492,16 @@ function createService(opts = {}) {
    * hand) ends disconnected — and says so when there WAS a connection before
    * it (the panel, every other client and syslog were still showing it). A
    * boot attempt or a first connect had none: a "disconnected" every 15 s of
-   * boot retries would only fill syslog. The router's connectIntent is not
-   * touched: only the user's disconnect clears that.
+   * boot retries would only fill syslog. Every client was told "connecting"
+   * though, and only the one that asked hears the throw — so the others get
+   * the error (`message`), and syslog does not: it has the reason already
+   * ("TUN start failed", "Auto-connect failed"). The router's connectIntent is
+   * not touched: only the user's disconnect clears that.
    *
    * Returns true when a disconnect or a newer connect overtook this call
    * while it awaited: that one owns the state now, so nothing is written.
    */
-  async function abortGateway(serverId, prevActive, myTun, stale) {
+  async function abortGateway(serverId, prevActive, myTun, stale, message) {
     if (myTun && myTun.active) { try { await myTun.stop(); } catch { /* best effort */ } }
     if (stale()) return true;
     quietStops++;
@@ -1471,6 +1519,7 @@ function createService(opts = {}) {
       if (stats) stats.stop();
       liveDirectInterface = null;
       if (prevActive) send('status', { state: 'disconnected' });
+      else tell('status', { state: 'error', message });
     }
     return false;
   }
@@ -1485,7 +1534,7 @@ function createService(opts = {}) {
    * no hot reload). The headless build has no Windows firewall kill switch, so
    * this is a plain teardown + reconnect.
    */
-  async function reapplyConnection() {
+  async function reapplyConnection(opts = {}) {
     const serverId = store.get('activeServerId', null);
     if (!serverId || !xray || !xray.running) return { ok: false, error: 'not connected' };
 
@@ -1515,10 +1564,16 @@ function createService(opts = {}) {
       let hold = null;
       try {
         if (leakGuard) {
+          // only the strict level has holes to widen, and no name is asked of
+          // the OS for them on a network that just died (see main.js)
           let entries = [];
-          try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
+          const strict = !!(leakGuard.readState() || {}).strict;
+          if (strict) {
+            try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
+          }
+          const addrs = entries.flatMap(a => lastEntryHostIps.get(a) || [a]);
           if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
-            excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
+            excludes: await tunPlatform.resolveServerIps(addrs, { ipv6: true }).catch(() => [])
           });
         }
       } catch {}
@@ -1541,7 +1596,7 @@ function createService(opts = {}) {
 
     let r;
     try {
-      r = await doConnect(serverId);
+      r = await doConnect(serverId, { recovery: !!opts.recovery });
     } catch (e) {
       appliedSettings = null;
       // the proxy kept above must not stay aimed at a core that did not come back
@@ -1636,6 +1691,18 @@ function createService(opts = {}) {
     if (!store.get('activeServerId', null)) return;
     if (!OPENWRT && !getSettings().autoReconnectOnNetworkChange) return;
     if (recovering) { recoverQueued = reason; return; }
+    // A connect in flight (the operator's, the boot's, a settings apply's) is
+    // where this drop may have landed: never a second one beside it (see
+    // doConnect). Once it has settled, look again — every gate above, and
+    // whether that connect brought back what this drop broke.
+    if (connectsInFlight.size) {
+      Promise.allSettled([...connectsInFlight]).then(() => {
+        if (userDisconnecting || isQuitting) return;
+        if (reason === 'core-exited' ? !!(xray && xray.running) : !!(tun && tun.active)) return;
+        recoverFromDrop(reason);
+      }).catch(fail);
+      return;
+    }
     const since = lastRebuilt ? Date.now() - lastRebuilt.at : Infinity;
     if (since >= T.crashWindowMs) { recoverFromNetworkChange(reason, 0).catch(fail); return; }
     const wait = backoffAfter(lastRebuilt.attempt);
@@ -1730,7 +1797,7 @@ function createService(opts = {}) {
     try {
       // A previous attempt already stopped the core, so there is nothing to tear
       // down and reapplyConnection() would refuse — connect straight away.
-      res = (xray && xray.running) ? await reapplyConnection() : await doConnect(serverId);
+      res = (xray && xray.running) ? await reapplyConnection({ recovery: true }) : await doConnect(serverId, { recovery: true });
     } catch (e) {
       // doConnect() throws where reapplyConnection() returns { ok: false }.
       res = { ok: false, error: (e && e.message) || String(e) };

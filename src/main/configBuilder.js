@@ -235,8 +235,9 @@ function pinnable(list, ipv6) {
  * to that hop — and only a name with an address to give: a strategy with
  * nothing in hosts would ask xray's own resolvers, which sit behind the very
  * proxy. Runs before applyFragments: the lookup happens before the dialerProxy
- * redirect, so the dpi dialer is then handed the address. Returns the hosts
- * table, or null when nothing was pinned (the config is then as it was).
+ * redirect, so the dpi dialer is then handed the address — and it carries the
+ * same strategy, for when it is handed the name. Returns the hosts table, or
+ * null when nothing was pinned (the config is then as it was; see withHosts).
  */
 function pinEntryHosts(outbounds, map, ipv6) {
   if (!map || typeof map !== 'object') return null;
@@ -252,6 +253,18 @@ function pinEntryHosts(outbounds, map, ipv6) {
     hosts[host] = ips;
   }
   return Object.keys(hosts).length ? hosts : null;
+}
+
+/**
+ * The DNS plan with the pinned names (pinEntryHosts) in its hosts table —
+ * JOINED to any hosts the plan carries itself, never in place of them, and
+ * winning only for their own names (what the tunnel's bypass was cut for).
+ * Nothing pinned: the plan as it is. `hosts` stays the first key.
+ */
+function withHosts(dns, pins) {
+  if (!pins) return dns;
+  const hosts = Object.assign({}, dns && dns.hosts, pins);
+  return Object.assign({ hosts }, dns, { hosts });
 }
 
 /** Put the resolved address in the peer's endpoint, keeping its port. */
@@ -759,7 +772,7 @@ function buildConfig(planArg, settings) {
       levels: { '0': level0 },
       system: { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true }
     },
-    dns: hosts ? Object.assign({ hosts }, dnsPlan.dns) : dnsPlan.dns,
+    dns: withHosts(dnsPlan.dns, hosts),
     inbounds: [
       { tag: 'socks-in', port: s.socksPort, listen, protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing },
       { tag: 'http-in', port: s.httpPort, listen, protocol: 'http', settings: {}, sniffing }
@@ -858,7 +871,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
       levels: { '0': level0 },
       system: { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true }
     },
-    dns: hosts ? Object.assign({ hosts }, dnsPlan.dns) : dnsPlan.dns,
+    dns: withHosts(dnsPlan.dns, hosts),
     inbounds,
     outbounds,
     // IPIfNonMatch on purpose: the pool emits no user ip rule (only the private
@@ -967,7 +980,7 @@ function splitList(v) {
  * outbounds appended; the markers are stripped.
  */
 function applyFragments(outbounds) {
-  const byKey = {};   // "frag|noise" -> tag
+  const byKey = {};   // "frag|noise|strategy" -> tag
   const extra = [];
   for (const o of outbounds) {
     if (!o || (!o._fragment && !o._noise)) continue;
@@ -977,12 +990,19 @@ function applyFragments(outbounds) {
     const ss = o.streamSettings || (o.streamSettings = {});
     const sockopt = ss.sockopt || (ss.sockopt = {});
     if (sockopt.dialerProxy) continue;   // chained hop — don't override
-    const key = frag + '|' + noise;
+    // A pinned outbound (pinEntryHosts) hands its dialer the strategy too: the
+    // name is normally resolved before the redirect, but a dialer handed the
+    // NAME asks the OS when it is AsIs — the recursion the pin is there to
+    // stop. So whichever resolves first, dns.hosts answers. Its own dialer:
+    // one shared with an unpinned name would send that name to xray's DNS,
+    // which sits behind the very proxy being dialled.
+    const strategy = sockopt.domainStrategy || '';
+    const key = frag + '|' + noise + '|' + strategy;
     let tag = byKey[key];
     if (!tag) {
       tag = 'dpi-' + (Object.keys(byKey).length + 1);
       byKey[key] = tag;
-      extra.push(makeFragmentOutbound(tag, frag, noise));
+      extra.push(makeFragmentOutbound(tag, frag, noise, strategy));
     }
     sockopt.dialerProxy = tag;
   }
@@ -1018,8 +1038,8 @@ function bindDirectDials(outbounds, name) {
   return outbounds;
 }
 
-function makeFragmentOutbound(tag, fragStr, noiseStr) {
-  const settings = { domainStrategy: 'AsIs' };
+function makeFragmentOutbound(tag, fragStr, noiseStr, strategy) {
+  const settings = { domainStrategy: strategy || 'AsIs' };
   if (fragStr) {
     const p = String(fragStr).split(',').map(s => s.trim());
     // xray rejects LengthMin=0, so clamp length min to >=1; keep packets/interval sane.
@@ -1080,4 +1100,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts };

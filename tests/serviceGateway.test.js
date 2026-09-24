@@ -420,6 +420,22 @@ test('a failing boot attempt says nothing about a disconnect — there was no co
   await until(() => s.state.events.filter(e => e === 'gateway:start').length >= 3, 'three failed boot attempts');
   assert.ok(!s.statuses.some(x => x.state === 'disconnected'), JSON.stringify(s.statuses.map(x => x.state)));
   assert.ok(!s.syslog.some(([, l]) => l === 'irnetfree: disconnected'), 'syslog is not told of a disconnect every 15 s');
+  assert.ok(!s.syslog.some(([, l]) => /^irnetfree: error — /.test(l)), 'nor of an error status: each attempt’s reason is in it already');
+});
+
+test('a first connect by hand whose gateway fails ends every open panel on the error — not on "Connecting…"', async (t) => {
+  // No connection before it, so no "disconnected" (see the boot test above) —
+  // but it said "connecting" to every client, and the one that asked is the
+  // only one that hears the throw.
+  const s = start();
+  t.after(() => s.service.shutdown());
+  s.state.gatewayFails = true;
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /Gateway did not come up/);
+  const last = s.statuses.at(-1);
+  assert.equal(last.state, 'error', JSON.stringify(s.statuses.map(x => x.state)));
+  assert.match(last.message, /Gateway did not come up \(sing-box\)/);
+  assert.ok(!s.syslog.some(([, l]) => /^irnetfree: error — /.test(l)), 'syslog has the reason once, from the log line');
+  assert.ok(s.syslog.some(([, l]) => /\[error\] .*Gateway did not come up/.test(l)));
 });
 
 const withTiming = (over) => ({ timing: Object.assign({}, fakes.deps(fakes.makeState()).timing, over) });
@@ -438,6 +454,44 @@ test('a drop queued behind a recovery is replayed through the crash window, not 
   assert.ok(s.logs.findIndex(l => /dropped again/.test(l.line)) > s.logs.findIndex(l => /Connection restored/.test(l.line)), 'replayed after the rebuild');
   assert.deepEqual(s.statuses.filter(x => x.state === 'reconnecting').map(x => x.attempt), [1, 2], 'it continued that rebuild’s backoff');
   assert.ok(s.logs.some(l => /dropped again \d+s after it was rebuilt \(core-exited\)/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+});
+
+test('a core that dies while its connect is still bringing the gateway up is rebuilt AFTER that connect — never a second gateway beside it', async (t) => {
+  // The core binds its SOCKS port while the connect waits (waitPort): a kill -9
+  // there used to start the recovery's connect at once, beside the first — a
+  // second TunOpenwrt built while the first was inside start(), and the loser's
+  // undo deleted the shared nft table by name: a gateway "up" with no
+  // exclusions and no QUIC rule.
+  const slowPort = { waitForLocalPort: () => new Promise((r) => setTimeout(() => r(true), 150)) };
+  const s = start({}, slowPort);
+  t.after(() => s.service.shutdown());
+  const first = s.service.invoke('connect', SERVER.id);
+  await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
+  s.state.xray.crash();
+  await first;
+  await until(() => connectedCount(s) === 2, 'the rebuild');
+  assert.equal(s.state.inners.filter(i => i.starts > 0).length, 1, 'one gateway, rebuilt in place — never a second one beside it');
+  assert.equal(s.state.inners.filter(i => i.active).length, 1);
+  assert.equal(s.state.xray.running, true);
+  assert.equal(s.state.xray.starts.length, 2);
+  // the rebuild started only once the first connect had finished
+  const ev = s.state.events.filter(e => e === 'gateway:start' || e === 'xray:start');
+  assert.deepEqual(ev, ['xray:start', 'gateway:start', 'xray:start', 'gateway:start'], ev.join(', '));
+});
+
+test('a drop that lands inside a connect which then comes up whole is not rebuilt', async (t) => {
+  // a sing-box that died while the connect was still building the gateway, which that connect then rebuilt
+  const slowPort = { waitForLocalPort: () => new Promise((r) => setTimeout(() => r(true), 100)) };
+  const s = start({}, slowPort);
+  t.after(() => s.service.shutdown());
+  const first = s.service.invoke('connect', SERVER.id);
+  await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
+  s.state.xray.crash();
+  s.state.xray.running = true;   // …a stale "stopped" of a core already replaced: the connect’s own is up
+  await first;
+  await sleep(100);
+  assert.equal(connectedCount(s), 1);
+  assert.ok(!s.statuses.some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.map(x => x.state)));
 });
 
 test('a connect by hand starts with no crash history — its first drop is rebuilt at once', async (t) => {

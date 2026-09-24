@@ -36,6 +36,8 @@
  *                        nonip    drop the dns outbound's refuse rule
  *                        pin      drop dns.hosts + sockopt.domainStrategy (the entry
  *                                 server's name goes back to the OS)
+ *                        dpi      the anti-DPI dialer resolves AsIs again (a name it is
+ *                                 handed goes back to the OS)
  *                      (a probe that cannot fail proves nothing — run these first)
  */
 const fs = require('fs');
@@ -389,6 +391,12 @@ const PINNED_SERVER = {
   outbound: { protocol: 'socks', settings: { servers: [{ address: 'localhost', port: P.hop2 }] } }
 };
 
+/** The same server behind the anti-DPI dialer (TLS fragmentation lets a SOCKS handshake through as it is). */
+const PINNED_DPI_SERVER = Object.assign({}, PINNED_SERVER, {
+  id: 'sv-pinned-dpi',
+  outbound: Object.assign({}, PINNED_SERVER.outbound, { _fragment: 'tlshello,100-200,10-20' })
+});
+
 function baseSettings(over) {
   return Object.assign({
     socksPort: P.socks, httpPort: P.http, apiPort: P.api,
@@ -418,6 +426,10 @@ function sabotage(cfg) {
     // the entry server's name left to the OS again, as before the pin
     delete cfg.dns.hosts;
     for (const o of cfg.outbounds) if (o.streamSettings && o.streamSettings.sockopt) delete o.streamSettings.sockopt.domainStrategy;
+  }
+  if (BREAK === 'dpi') {
+    // the anti-DPI dialer as it was before it carried the pin's strategy
+    for (const o of cfg.outbounds) if (/^dpi-/.test(o.tag || '')) o.settings.domainStrategy = 'AsIs';
   }
   return cfg;
 }
@@ -566,6 +578,32 @@ const scenarios = [
     }
   },
   {
+    // configBuilder.applyFragments: a pinned outbound's anti-DPI dialer carries
+    // the pin's strategy. The name is normally resolved before the redirect, so
+    // here the outbound's OWN strategy is taken away: the NAME reaches the
+    // dialer — the case its strategy is for — and must still land on the
+    // pinned address, never on the OS's answer (under TUN: the tunnel itself).
+    id: 'pinned-entry-dpi',
+    why: 'an anti-DPI dialer handed the entry server\'s NAME resolves it from the pin too',
+    plan: { mode: 'single', server: PINNED_DPI_SERVER },
+    settings: { routingMode: 'global', entryHostIps: { localhost: [PIN_HOST] } },
+    needs: 'hop2',
+    tweak(cfg) {
+      const o = cfg.outbounds.find(x => x.tag === 'proxy');
+      if (o && o.streamSettings && o.streamSettings.sockopt) delete o.streamSettings.sockopt.domainStrategy;
+    },
+    names: ['example.com', 'github.com'],
+    check(r) {
+      const answered = r.answers.filter(a => a.rcode === 0 && a.ips && a.ips.length);
+      return [
+        [r.world.includes('example.com') && answered.length === r.answers.length,
+          `the exit answered through ${PIN_HOST}: the dialer resolved the name from the pin`,
+          'the exit was never reached — the dialer asked the OS for the name'],
+        [r.sink.length === 0, 'nothing escaped to the original destination', `LEAK: ${r.sink.length} packet(s) reached the sink`]
+      ];
+    }
+  },
+  {
     id: 'aaaa-ipv4only',
     why: 'ipv6:false must not put an AAAA question on the wire',
     settings: { routingMode: 'bypass-ir' },
@@ -615,6 +653,7 @@ async function run() {
       ir.reset(); world.reset(); corp.reset(); sk.reset(); sk6.reset();
       const settings = baseSettings(sc.settings);
       const cfg = sabotage(buildConfig(sc.plan || PLAN, settings));
+      if (sc.tweak) sc.tweak(cfg);
       const client = startCore(core.exe, cfg, `${sc.id}-${core.name}`);
       let up = true;
       try { await waitPort(P.socks, '127.0.0.1', 8000); } catch { up = false; }

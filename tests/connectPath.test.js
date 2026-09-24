@@ -45,7 +45,7 @@ const seam = (s) => s.replace(/\bresolveName\(/g, 'resolveHost(');
 
 const CONNECT = {
   'main.js': slice(MAIN, 'main.js', 'async function connectOnce(serverId, opts = {}) {', '\n  return { ok: true, tunError };\n}'),
-  'service.js': slice(SERVICE, 'service.js', 'async function doConnect(serverId) {', '\n    return { ok: true, tunError };\n  }')
+  'service.js': slice(SERVICE, 'service.js', 'async function connectOnce(serverId, opts = {}) {', '\n    return { ok: true, tunError };\n  }')
 };
 
 /* ---------------------------- A1: pinned entry names ---------------------------- */
@@ -115,6 +115,80 @@ test('both mirrors refuse a chain that lost a member, with the same words, where
     // the refusal comes before the "at least 2 servers" check, which it would otherwise hide
     assert.ok(plan.indexOf("refuseBroken('chain:' + serverId);") < plan.indexOf('needs at least 2 servers'), label);
   }
+});
+
+/* -------------------- F1: a held guard does not outlive the tunnel -------------------- */
+
+test('a connect that builds no tunnel gives back a guard held for the last one — before the lookups and the core', () => {
+  // TUN → proxy through a settings apply (reapplyConnection holds the guard
+  // across the rebuild), or a connect after the "reconnect given up" banner
+  // with TUN off: nothing in a proxy connect engaged or released the guard, so
+  // the whole proxy session ran with every adapter on a resolver that answers
+  // nothing. A tunnel still up (a server switch keeps it) keeps its guard.
+  for (const [label, body] of Object.entries(CONNECT)) {
+    const release = body.indexOf('if (!settings.tunMode && !(tun && tun.active)) {\n');
+    assert.notEqual(release, -1, `${label}: a connect without a tunnel no longer looks for a held guard`);
+    assert.match(body.slice(release), /^if \(!settings\.tunMode && !\(tun && tun\.active\)\) \{\n\s*const released = await releaseStrandedGuard\(leakGuard\);\n\s*if \(stale\(\)\) return abandoned;/,
+      `${label}: given back — and a disconnect that landed meanwhile still wins`);
+    assert.ok(body.indexOf('let settings = await effectiveSettings();') < release, `${label}: decided on the settings of THIS connect`);
+    for (const later of ['await ensureCertPins(serverId, settings);', 'withEntryHostIps(serverId, settings)', 'await xray.start(config, runEngine);']) {
+      const at = body.indexOf(later);
+      assert.notEqual(at, -1, `${label}: ${later} is gone`);
+      assert.ok(release < at, `${label}: ${later} runs before the resolvers are given back`);
+    }
+  }
+  assert.match(MAIN, /^const \{ stopTrackedTunnels, releaseGuardChecked, releaseStrandedGuard \} = require\('\.\/tunnelCleanup'\);$/m);
+  assert.match(SERVICE, /^const \{ stopTrackedTunnels, releaseGuardChecked, releaseStrandedGuard \} = require\('\.\.\/main\/tunnelCleanup'\);$/m);
+});
+
+test('a TUN connect whose tunnel is not up at its end gives back the guard its rebuild held — it reports "proxy only", no banner', () => {
+  // A server switch (or a rebuild) under a live tunnel holds the guard and
+  // stops the tunnel; a start that then fails (or a backend that is missing)
+  // skips the engage and reports connected with a tunError: the adapters sat
+  // on 127.0.0.2/::1 with nothing behind them, and no banner offered them back.
+  // …but not inside a recovery that will retry that tunnel: there the hold
+  // stays until it comes back or the give-up, whose banner offers the resolvers
+  // back (guardHeld). A retry is for a tunnel that could have worked — the same
+  // question runRecovery's tunRetryable asks.
+  const IF = 'if (!myTun.active && !stale() && !(opts.recovery && myTun.isAvailable() && myTun.isElevated())) {\n';
+  for (const [label, body] of Object.entries(CONNECT)) {
+    const engage = body.indexOf('leakGuard.engage(');
+    const release = body.indexOf(IF);
+    const gate = body.indexOf('if (stale()) {\n', engage);
+    assert.notEqual(release, -1, `${label}: a tunnel that did not come up keeps the guard its rebuild held — or a retrying recovery gives it up`);
+    assert.ok(engage < release && release < gate, `${label}: after the engage it did not reach, before the overtaken-connect gate`);
+    assert.match(body.slice(release + IF.length), /^\s*const released = await releaseStrandedGuard\(leakGuard\);/, label);
+    // inside the TUN branch: proxy mode's own UDP block is the else of that branch and stays
+    assert.ok(release < body.indexOf('} else if (settings.blockUdpInProxyMode) {'), label);
+  }
+  // the recovery says so, on both of its paths, in both mirrors; a reapply passes it on
+  const rec = (src, label, end) => slice(src, label, 'async function runRecovery(reason, attempt) {', end);
+  const main = rec(MAIN, 'main.js', '\n}\n');
+  assert.match(main, /res = await reapplyConnection\(\{ recovery: true \}\);/);
+  assert.match(main, /res = await doConnect\(serverId, \{ holdKillSwitch: held, recovery: true \}\);/);
+  assert.match(rec(SERVICE, 'service.js', '\n  }\n'), /res = \(xray && xray\.running\) \? await reapplyConnection\(\{ recovery: true \}\) : await doConnect\(serverId, \{ recovery: true \}\);/);
+  assert.match(slice(SERVICE, 'service.js', 'async function reapplyConnection(opts = {}) {', '\n  }\n'), /r = await doConnect\(serverId, \{ recovery: !!opts\.recovery \}\);/);
+  assert.match(slice(SERVICE, 'service.js', 'function doConnect(serverId, opts) {', '\n  }\n'), /const p = connectOnce\(serverId, opts\);/);
+});
+
+test('an overtaken connect with no receipt releases nothing — without one the release is unconditional and undid the newer connect’s live guard', () => {
+  for (const [label, body] of Object.entries(CONNECT)) {
+    assert.match(body, /if \(guardToken\) await leakGuard\.release\(\{ token: guardToken \}\)\.catch\(\(\) => \{\}\);/, label);
+    assert.doesNotMatch(body, /\n\s*await leakGuard\.release\(\{ token: guardToken \}\)/, `${label}: an unguarded release is left`);
+    // an engage that failed after it wrote its state hands its receipt over on the error, so that one is still ours to undo
+    assert.match(body, /guardToken = \(e && e\.token\) \|\| guardToken;/, label);
+  }
+});
+
+test('both mirrors re-apply the DNS guard only over a core that is actually running', () => {
+  // re-applying the override every 30 s for a core that died only kept the machine pointed at nothing
+  const isActive = (source, label) => {
+    const m = /isActive: \(\) => ([^\n]*),\n/.exec(slice(source, label, 'new DnsGuardWatch({', '});'));
+    assert.ok(m, `${label}: DnsGuardWatch has no isActive`);
+    return m[1];
+  };
+  assert.equal(isActive(SERVICE, 'service.js'), isActive(MAIN, 'main.js'));
+  assert.match(isActive(SERVICE, 'service.js'), /&& !!xray\?\.running$/);
 });
 
 /* ------------------------------ A3: the live NIC ------------------------------ */

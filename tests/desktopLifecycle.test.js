@@ -138,6 +138,23 @@ test('the synchronous teardown runs once, says it is quitting first, and covers 
   assert.match(MAIN, /process\.on\('exit', \(\) => teardownSync\('exit'\)\);/);
 });
 
+test('a quit during a connect or a recovery leaves nothing of theirs running: the generations move first, the exit hook ends the core', () => {
+  // A recovery's connect still in flight when the user quits went on past the
+  // teardown's xray.stop() — it started its core again, and nothing stopped
+  // that one: an orphan holding the SOCKS port the next launch needs.
+  const quit = slice('async function teardownForQuit() {', '\n}');
+  const firstAwait = quit.indexOf('await ');
+  for (const bump of ['connGen++;', 'recoverGen++;']) {
+    const at = quit.indexOf(bump);
+    assert.ok(at !== -1 && at < firstAwait, `teardownForQuit: ${bump} before the first await — ${quit}`);
+  }
+  const sync = slice('function teardownSync(reason) {', '\n}');
+  const kill = sync.indexOf('try { if (xray && xray.proc) xray.proc.kill(); } catch {}');
+  assert.notEqual(kill, -1, 'the exit hook ends the core, as the headless service’s does');
+  assert.ok(sync.indexOf('isQuitting = true;') < kill && sync.indexOf('userDisconnecting = true;') < kill, 'its stop is no drop to recover');
+  assert.ok(kill < sync.indexOf("if (process.platform !== 'win32' && reason === 'exit') return;"), 'on every platform');
+});
+
 /* ------------------------- stale activeServerId at launch ------------------------- */
 
 test('a launch clears the activeServerId a crash or a kill left, and connect-on-launch still has lastServerId', () => {
@@ -148,6 +165,78 @@ test('a launch clears the activeServerId a crash or a kill left, and connect-on-
     assert.ok(clear < WHEN_READY.indexOf(later), `${later} must already see it cleared`);
   }
   assert.match(WHEN_READY, /const lastId = store\.get\('lastServerId', null\);/, 'connect-on-launch reads lastServerId');
+});
+
+/** The ready-to-show handler (connect on launch) against fakes: what it connects to, and what it says. */
+/**
+ * The ready-to-show handler (connect on launch) against fakes. Its timer is
+ * held: `fire()` runs it; before that, `state` is what the user did meanwhile
+ * (bootCancelled — a connect or a disconnect by hand —, isQuitting, a live activeServerId).
+ */
+function launchConnect({ lastId, servers = [], build = () => ({}), fire = true }) {
+  const out = { connects: [], logs: [], state: { bootCancelled: false, isQuitting: false, activeServerId: null } };
+  let timer = null;
+  const make = new Function('env', `
+    const { getSettings, buildPlan, doConnect, send, updateOverlay } = env;
+    const store = { get: (k, d) => (k === 'activeServerId' ? env.state.activeServerId : env.get(k, d)) };
+    const setTimeout = (fn) => { env.hold(fn); };
+    const mainWindow = { once: (ev, fn) => fn() };
+    const flags = () => { bootCancelled = env.state.bootCancelled; isQuitting = env.state.isQuitting; };
+    let bootCancelled = false, isQuitting = false;
+    ${slice("mainWindow.once('ready-to-show', () => {", '\n  });')}
+    return flags;
+  `);
+  const flags = make({
+    state: out.state,
+    get: (k, d) => (k === 'lastServerId' ? lastId : k === 'servers' ? servers : d),
+    hold: (fn) => { timer = fn; },
+    getSettings: () => ({ autoConnect: true, lang: 'en' }),
+    buildPlan: build,
+    doConnect: async (id) => { out.connects.push(id); },
+    send: (ch, p) => { if (ch === 'log') out.logs.push(p.line); },
+    updateOverlay: () => {}
+  });
+  out.fire = () => { flags(); if (timer) timer(); };
+  if (fire) out.fire();
+  return out;
+}
+
+test('connect on launch resumes any target a connect takes — advanced routing, a chain, the pool — not only a server', () => {
+  // The owner's own selection is advanced routing: `servers.some(s => s.id === lastId)`
+  // never matched '__advanced__', so connect-on-launch silently did nothing.
+  for (const id of ['__advanced__', 'chain:c1', '__pool__', 'sv-1']) {
+    assert.deepEqual(launchConnect({ lastId: id, servers: [{ id: 'sv-1' }] }).connects, [id], id);
+  }
+  // one that cannot be built any more is said, not silently skipped (service.js says the same)
+  const gone = launchConnect({ lastId: 'sv-gone', build: () => { throw new Error('Server not found'); } });
+  assert.deepEqual(gone.connects, []);
+  assert.deepEqual(gone.logs, ['Auto-connect: the last connection (sv-gone) cannot be built any more — Server not found']);
+  assert.deepEqual(launchConnect({ lastId: null }).connects, []);
+});
+
+test('a connect or a disconnect by hand in the launch connect’s second is not overtaken by it', () => {
+  // The timer called doConnect(lastId) with no second look: a Connect clicked in
+  // that second was overtaken silently (its call came back stale, no status)
+  // and the app landed on the last connection instead — service.js's
+  // autoConnectAtLaunch asks first.
+  for (const [what, set] of [
+    ['a connect or a disconnect by hand', (s) => { s.bootCancelled = true; }],
+    ['a quit', (s) => { s.isQuitting = true; }],
+    ['a connection already up', (s) => { s.activeServerId = 'sv-2'; }]
+  ]) {
+    const l = launchConnect({ lastId: '__advanced__', fire: false });
+    set(l.state);
+    l.fire();
+    assert.deepEqual(l.connects, [], what);
+  }
+  // the flag is set by every connect and disconnect by hand, before it starts
+  const handler = (name) => slice(`ipcMain.handle('${name}', `, '\n');
+  assert.match(handler('connect'), /\{ bootCancelled = true; drops\.reset\(\); return doConnect\(id\); \}/);
+  assert.match(handler('disconnect'), /\{ bootCancelled = true; return doDisconnect\(\); \}/);
+  const tray = slice('function trayMenuTemplate() {', '\n}');
+  assert.match(tray, /click: \(\) => \{ bootCancelled = true; drops\.reset\(\); doConnect\(it\.id\)/);
+  assert.match(tray, /click: \(\) => \{ bootCancelled = true; doDisconnect\(\); \}/);
+  assert.match(MAIN, /^let bootCancelled = false;/m);
 });
 
 /* ----------------------------- S5: navigation guards ----------------------------- */
@@ -203,7 +292,7 @@ test('a connection that keeps dropping is given up on through the same reconnect
     'the network-change recovery gives up through the same function');
   // the user's own connect / disconnect starts the count over
   assert.match(slice('async function doDisconnect() {', '\n}'), /drops\.reset\(\);/);
-  assert.match(MAIN, /ipcMain\.handle\('connect', \(e, id\) => \{ drops\.reset\(\); return doConnect\(id\); \}\);/);
+  assert.match(MAIN, /ipcMain\.handle\('connect', \(e, id\) => \{ bootCancelled = true; drops\.reset\(\); return doConnect\(id\); \}\);/);
 });
 
 test('giving up on a connection that keeps dropping leaves no tunnel or proxy aimed at the dead core', () => {
@@ -256,7 +345,7 @@ test('a drop waits for a connect in flight, joins a recovery in flight, and only
   const budget = DROP.indexOf('drops.take()');
   assert.ok(wait !== -1 && join !== -1 && wait < join && join < budget, DROP);
   // a user connect that settled with a running core healed the drop: no budget, no rebuild
-  const healedCheck = DROP.indexOf('if (healed()) return liftOwnBlock();');
+  const healedCheck = DROP.indexOf('if (healed() && !recovering) return liftOwnBlock();');
   assert.ok(healedCheck !== -1 && wait < healedCheck && healedCheck < budget, 'healed() is asked right after the connects in flight settle');
 });
 
@@ -277,7 +366,7 @@ test('with automatic reconnect off, a drop that is not torn down still tells the
 
 test('the kill switch is not re-armed over itself (a delete-then-add left a gap with the tunnel down)', () => {
   const arm = slice('async function armKillSwitch() {', '\n}');
-  assert.match(arm, /if \(process\.platform !== 'win32'\) return \{ ok: false, error: 'windows only' \};\n(?:\s*\/\/[^\n]*\n)*\s*if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true \};/);
+  assert.match(arm, /if \(process\.platform !== 'win32'\) return \{ ok: false, error: 'windows only' \};\n(?:\s*\/\/[^\n]*\n)*\s*if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true, added: false \};/);
 });
 
 test('a Retry that fails says so, instead of leaving the window on "Connecting"', () => {
@@ -314,12 +403,12 @@ test('a drop that lands during a recovery waits for it and rebuilds only if that
 
 test('the kill switch trusts killEngaged only when the rule is really there; a drop’s arm is undone if the user disconnected meanwhile', () => {
   const arm = slice('async function armKillSwitch() {', '\n}');
-  assert.match(arm, /if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true \};/);
+  assert.match(arm, /if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true, added: false \};/);
   assert.match(slice('function killRulePresent() {', '\n}'), /netsh\(\['advfirewall', 'firewall', 'show', 'rule', `name=\$\{KILL_RULE\}`\]\)\.then\(\(\) => true, \(\) => false\)/);
   const DROP = dropSrc();
-  assert.match(DROP, /const wasEngaged = killEngaged;/);
-  assert.match(DROP, /if \(r && r\.ok && !wasEngaged\) \{\n\s*send\('log', \{ line: 'Kill switch engaged/, 'said once, not on every drop');
-  assert.match(DROP, /if \(r && r\.ok && !wasEngaged && \(userDisconnecting \|\| isQuitting \|\| !store\.get\('activeServerId', null\)\)\) \{\n\s*await disarmKillSwitch\(\);/);
+  assert.match(DROP, /armedHere = !!\(r && r\.ok && r\.added\);/);
+  assert.match(DROP, /if \(armedHere\) \{\n\s*send\('log', \{ line: 'Kill switch engaged/, 'said once, not on every drop');
+  assert.match(DROP, /if \(armedHere && \(userDisconnecting \|\| isQuitting \|\| !store\.get\('activeServerId', null\)\)\) \{\n\s*await disarmKillSwitch\(\);/);
 });
 
 test('a macOS/Linux shutdown that gets cancelled does not leave the app deaf for good', () => {
@@ -390,10 +479,11 @@ test('Retry after a give-up rebuilds a core that is gone instead of answering "n
  * function's own source is compiled with everything it reaches passed in. The
  * kill switch is a flag the fakes flip — no netsh, no firewall.
  */
-function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false } = {}) {
+function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false, ruleMissing = false } = {}) {
   const sent = [];
   const calls = [];
   const env = {
+    ruleMissing,
     store: { get: (k, d) => (k === 'activeServerId' ? 'srv1' : d) },
     xray: { running: xrayRunning },
     tun: { active: false },
@@ -417,7 +507,14 @@ function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false }
     let killEngaged = env.killEngaged;
     const { store, xray, tun, send, notify, isEn, updateOverlay, getSettings, connectsInFlight, drops,
             doDisconnect, reportReconnectFailed, recoverFromNetworkChange, stopAllTuns, setSystemProxy } = env;
-    async function armKillSwitch() { env.calls.push('arm'); killEngaged = true; return { ok: true }; }
+    // the real one: { ok, added } — added is whether THIS call put the rule in
+    // (the belief killEngaged is re-checked against the rule: ruleMissing)
+    async function armKillSwitch() {
+      env.calls.push('arm');
+      const added = !killEngaged || env.ruleMissing;
+      killEngaged = true;
+      return { ok: true, added };
+    }
     async function disarmKillSwitch() { env.calls.push('disarm'); killEngaged = false; }
     ${dropSrc()}
     // a recovery in flight: the drop waits on recoveryRun; finish() is its end
@@ -430,7 +527,17 @@ function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false }
     return { onConnectionDrop, startRecovery, killEngaged: () => killEngaged };
   `);
   env.calls = calls;
-  return Object.assign(make(env), { env, sent, calls });
+  const h = Object.assign(make(env), { env, sent, calls });
+  /** A connect in flight, the way doConnect() tracks one: `settle(r)` ends it. */
+  h.connect = () => {
+    let settle;
+    const p = new Promise((r) => { settle = r; });
+    env.connectsInFlight.add(p);
+    const gone = () => env.connectsInFlight.delete(p);
+    p.then(gone, gone);
+    return settle;
+  };
+  return h;
 }
 
 test('killSwitch ON: a drop that lands inside the user’s connect lifts ITS block when that connect comes up', async () => {
@@ -439,9 +546,7 @@ test('killSwitch ON: a drop that lands inside the user’s connect lifts ITS blo
   // core — and returns at healed(). Its block stayed: "connected" with the
   // internet blocked.
   const h = dropHarness();
-  let settle;
-  const connect = new Promise((resolve) => { settle = resolve; });
-  h.env.connectsInFlight.add(connect);
+  const settle = h.connect();
   const drop = h.onConnectionDrop('core-exited');
   await new Promise((r) => setImmediate(r));
   assert.equal(h.killEngaged(), true, 'the gap is closed while the connect is still building');
@@ -458,12 +563,93 @@ test('killSwitch ON: a drop that found the block already in place leaves it to w
   // A settings reapply (or a recovery holding a block from an earlier drop)
   // armed it and lifts it itself once its tunnel is up — not this drop.
   const h = dropHarness({ killEngaged: true });
-  const connect = Promise.resolve({ ok: true });
-  h.env.connectsInFlight.add(connect);
+  h.connect()({ ok: true });
   h.env.xray.running = true;
   await h.onConnectionDrop('core-exited');
   assert.equal(h.killEngaged(), true);
   assert.deepEqual(h.calls, ['arm']);
+});
+
+/* ------------------------------- final wave F4 ------------------------------- */
+
+test('killSwitch ON: a rebuild that started while the drop waited is waited for too — its core is up, its tunnel is still being swapped', async () => {
+  // The snapshot of the connects in flight was taken before a recovery's own
+  // connect began: the drop saw the first one settle, found the new core
+  // running, called it healed and lifted the block while the TUN was still
+  // being swapped — the gap the block is there for.
+  const h = dropHarness();
+  const settleFirst = h.connect();
+  const drop = h.onConnectionDrop('core-exited');
+  await new Promise((r) => setImmediate(r));
+  const settleRebuild = h.connect();   // a recovery's connect, begun meanwhile
+  h.env.xray.running = true;           // …whose core is already up
+  settleFirst({ ok: false });
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(h.killEngaged(), true, 'nothing is lifted while a rebuild is still in flight');
+  settleRebuild({ ok: true });
+  await drop;
+  assert.equal(h.killEngaged(), false, 'lifted once every connect has settled over a running core');
+  assert.deepEqual(h.calls, ['arm', 'disarm']);
+});
+
+test('killSwitch ON: a drop that lands while a recovery is swapping the tunnel over a core already up lifts nothing early', async () => {
+  // xray.running already true is not "healed" while `recovering`: the rebuild
+  // is still between its core and its tunnel. The drop joins it instead.
+  const h = dropHarness({ xrayRunning: true });
+  const finish = h.startRecovery();
+  const drop = h.onConnectionDrop('core-exited');
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(h.killEngaged(), true, 'the recovery still swapping the tunnel runs under the block');
+  finish(true);
+  await drop;
+  assert.equal(h.killEngaged(), false);
+  assert.deepEqual(h.calls, ['arm', 'disarm'], 'joined, not a second rebuild');
+});
+
+test('killSwitch ON: a block the drop had to put back (the belief said engaged, the rule was gone) is the drop’s own to lift', async () => {
+  // A disarm racing it deleted the rule: armKillSwitch re-added it — so this
+  // drop put the block in, whatever killEngaged claimed a moment before.
+  const h = dropHarness({ killEngaged: true, ruleMissing: true });
+  const settle = h.connect();
+  const drop = h.onConnectionDrop('core-exited');
+  await new Promise((r) => setImmediate(r));
+  h.env.xray.running = true;
+  settle({ ok: true });
+  await drop;
+  assert.deepEqual(h.calls, ['arm', 'disarm']);
+  assert.equal(h.killEngaged(), false);
+});
+
+test('killSwitch ON: a server switch under TUN seals its own stop→start gap, and lifts that block the way a reapply does', () => {
+  // A settings reapply armed the block for the gap between the old tunnel and
+  // the new one; a server switch — the same stop and start, inside the connect
+  // — did not, and every app off the proxy went direct until the new tunnel was up.
+  const body = slice('async function connectOnce(serverId, opts = {}) {', '\n  return { ok: true, tunError };\n}');
+  const rebuild = body.indexOf('if (myTun.active) {');
+  assert.notEqual(rebuild, -1);
+  const arm = body.indexOf('if (settings.killSwitch && !opts.holdKillSwitch) {', rebuild);
+  const hold = body.indexOf('leakGuard.holdForReconnect(', rebuild);
+  const stop = body.indexOf('myTun.stop(', rebuild);
+  assert.ok(arm !== -1 && arm < hold && arm < stop, 'armed before the old tunnel goes (a reapply or a recovery holding its own block arms nothing here)');
+  assert.match(body.slice(arm), /^if \(settings\.killSwitch && !opts\.holdKillSwitch\) \{\n\s*const r = await armKillSwitch\(\);\n\s*switchArmed = !!\(r && r\.ok && r\.added\);/);
+  // lifted once the connect stands: after the new tunnel, over a running core, before the last gate
+  const lift = body.indexOf('if (switchArmed && !stale() && xray.running) {\n');
+  const start = body.indexOf('await myTun.start(');
+  const lastGate = body.lastIndexOf('if (stale()) return abandoned;');
+  assert.ok(lift !== -1 && start < lift && lift < lastGate, 'lifted after the new tunnel, and nothing awaits past the last gate');
+  assert.match(body.slice(lift), /^if \(switchArmed && !stale\(\) && xray\.running\) \{\n\s*await disarmKillSwitch\(\);\n\s*send\('killswitch', \{ engaged: false \}\);/);
+  assert.ok(lastGate < body.indexOf('if (!xray.running) throw new Error('), 'a core that died keeps the block: its drop rebuilds under it');
+});
+
+test('armKillSwitch says whether it put the rule in', () => {
+  const arm = slice('async function armKillSwitch() {', '\n}');
+  assert.match(arm, /if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true, added: false \};/);
+  assert.match(arm, /killEngaged = true;\n\s*return \{ ok: true, added: true \};/);
+  const DROP = dropSrc();
+  assert.doesNotMatch(DROP, /wasEngaged/, 'the belief is not what says whose block it is');
+  assert.match(DROP, /armedHere = !!\(r && r\.ok && r\.added\);/);
+  assert.match(DROP, /while \(connectsInFlight\.size\) await Promise\.allSettled\(\[\.\.\.connectsInFlight\]\);/);
+  assert.match(DROP, /if \(healed\(\) && !recovering\) return liftOwnBlock\(\);/);
 });
 
 test('killSwitch ON: a drop that no connect healed keeps its block for the rebuild', async () => {
@@ -477,9 +663,9 @@ test('killSwitch ON: a drop that no connect healed keeps its block for the rebui
  * reapplyConnection() against fakes: the calls it makes, in order. `connect`
  * is what doConnect() does (resolve, or throw).
  */
-function reapplyHarness({ settings = {}, connect = async () => ({ ok: true }) } = {}) {
+function reapplyHarness({ settings = {}, connect = async () => ({ ok: true }), over = {} } = {}) {
   const calls = [];
-  const env = {
+  const env = Object.assign({
     calls,
     store: { get: (k, d) => (k === 'activeServerId' ? 'srv1' : d) },
     xray: { running: true, stop: async () => { calls.push('xray.stop'); env.xray.running = false; } },
@@ -492,23 +678,36 @@ function reapplyHarness({ settings = {}, connect = async () => ({ ok: true }) } 
     tun: { managesDns: true },
     tunPlatform: { resolveServerIps: async () => [] },
     buildPlan: () => ({ entryAddrs: [] }),
+    lastEntryHostIps: new Map(),
     stopAllTuns: async () => { calls.push('stopAllTuns'); },
     setSystemProxy: async (on) => { calls.push('setSystemProxy:' + on); },
     removeLanFirewall: async () => {},
     doConnect: async (...a) => { calls.push('doConnect'); const r = await connect(...a); env.xray.running = true; return r; }
-  };
+  }, over);
   const make = new Function('env', `
     let xrayReloading = false, connGen = 0, appliedSettings = {}, killEngaged = false;
     const { store, xray, getSettings, send, stats, usage, usageStore, leakGuard, tun, tunPlatform,
-            buildPlan, stopAllTuns, setSystemProxy, removeLanFirewall, doConnect } = env;
+            buildPlan, lastEntryHostIps, stopAllTuns, setSystemProxy, removeLanFirewall, doConnect } = env;
     const stopProcWatcher = () => {};
     async function armKillSwitch() { env.calls.push('arm'); killEngaged = true; return { ok: true }; }
     async function disarmKillSwitch() { env.calls.push('disarm'); killEngaged = false; }
-    ${slice('async function reapplyConnection() {', '\n}')}
+    ${slice('async function reapplyConnection(opts = {}) {', '\n}')}
     return reapplyConnection;
   `);
   return { reapply: make(env), calls, env };
 }
+
+test('a recovery’s reapply tells its connect it will be retried; a settings apply or a Retry does not', async () => {
+  // A connect that knows a recovery will retry its tunnel keeps the held guard
+  // over a failed TUN start (the give-up's banner offers it back); any other
+  // connect gives it back at once (see connectOnce).
+  const seen = [];
+  const h = reapplyHarness({ connect: async (id, o) => { seen.push(o); return { ok: true }; } });
+  await h.reapply({ recovery: true });
+  await h.reapply();
+  assert.deepEqual(seen.map(o => !!o.recovery), [true, false]);
+  assert.equal(seen[0].holdKillSwitch, false, 'the kill-switch hold still travels beside it');
+});
 
 test('a settings reapply keeps the journaled system proxy through the rebuild instead of switching it off and on', async () => {
   // Switched off, the machine's own (or no) proxy was live for the whole
@@ -527,6 +726,58 @@ test('a settings reapply keeps the journaled system proxy through the rebuild in
   const r = await failed.reapply();
   assert.equal(r.ok, false);
   assert.ok(failed.calls.indexOf('setSystemProxy:false') > failed.calls.indexOf('doConnect'), failed.calls.join(', '));
+});
+
+/** A reapply over a held guard at `level`: the names it asked of the OS, and the excludes it held. */
+async function reapplyLookups({ strict, entryAddrs, pinned = {} }) {
+  const asked = [];
+  const held = [];
+  const h = reapplyHarness({
+    over: {
+      tun: { managesDns: false },
+      leakGuard: {
+        readState: () => ({ peer4: '172.19.0.2', strict }),
+        holdForReconnect: async ({ excludes }) => { held.push(excludes); return { held: true }; }
+      },
+      tunPlatform: {
+        resolveServerIps: async (list) => {
+          for (const a of list) if (!/^[\d.:a-f]+$/i.test(a)) asked.push(a);
+          return list.filter(a => /^[\d.:a-f]+$/i.test(a));
+        }
+      },
+      buildPlan: () => ({ entryAddrs }),
+      lastEntryHostIps: new Map(Object.entries(pinned))
+    }
+  });
+  assert.equal((await h.reapply()).ok, true);
+  return { asked, held };
+}
+
+test('a reapply over a held guard asks the OS for no name — at the standard level nothing is looked up at all', async () => {
+  // Every recovery is a reapply, on a network that just died: a lookup there
+  // took seconds per attempt, for firewall holes only the strict level has.
+  const std = await reapplyLookups({ strict: false, entryAddrs: ['edge.example.net', '198.51.100.4'], pinned: { 'edge.example.net': ['203.0.113.30'] } });
+  assert.deepEqual(std.asked, []);
+  assert.deepEqual(std.held, [[]], 'nothing to widen: the override is the whole guard there');
+  // strict: the addresses of the last connect stand in for the names it pinned
+  const strict = await reapplyLookups({ strict: true, entryAddrs: ['edge.example.net', '198.51.100.4'], pinned: { 'edge.example.net': ['203.0.113.30'] } });
+  assert.deepEqual(strict.asked, []);
+  assert.deepEqual(strict.held, [['203.0.113.30', '198.51.100.4']]);
+  // a name the last connect never pinned (new with this apply) is still looked up, at strict only
+  const fresh = await reapplyLookups({ strict: true, entryAddrs: ['new.example.net'] });
+  assert.deepEqual(fresh.asked, ['new.example.net']);
+});
+
+test('service.js holds the guard across a reapply the same way', () => {
+  const SERVICE = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8').replace(/\r\n/g, '\n');
+  const hold = (src, label) => {
+    const body = src.slice(src.indexOf('async function reapplyConnection(opts = {}) {'));
+    const a = body.indexOf('let hold = null;');
+    const b = body.indexOf('await stopAllTuns({ keepDns');
+    assert.ok(a !== -1 && b > a, label);
+    return body.slice(a, b).split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('//')).join('\n');
+  };
+  assert.equal(hold(SERVICE, 'service.js'), hold(MAIN, 'main.js'));
 });
 
 /** scheduleShutdownCancelCheck() run at once on a given platform/uid; what it logs and reports. */
