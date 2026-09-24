@@ -219,9 +219,13 @@ function createService(opts = {}) {
   const ROUTER_FORCED = OPENWRT ? { dnsManaged: true } : {};
 
   const listeners = new Set();
+  // to the clients only — for an event whose reason syslog already has
+  const tell = (channel, payload) => {
+    for (const cb of listeners) { try { cb(channel, payload); } catch {} }
+  };
   const send = (channel, payload) => {
     if (OPENWRT) { try { toSyslog(channel, payload); } catch {} }
-    for (const cb of listeners) { try { cb(channel, payload); } catch {} }
+    tell(channel, payload);
   };
   // On a router the service's stdout/stderr ARE its log: procd hands them to
   // syslog, tagged `node[pid]` — and nothing about the gateway used to reach
@@ -1403,7 +1407,7 @@ function createService(opts = {}) {
     // direct while the panel, the boot retries and the recovery all took it
     // for a success. Undone and thrown, so each of them retries.
     if (OPENWRT && settings.tunMode && tunError) {
-      const overtaken = await abortGateway(serverId, prevActive, myTun, stale);
+      const overtaken = await abortGateway(serverId, prevActive, myTun, stale, tunError);
       if (overtaken) return abandoned;
       throw new Error(tunError);
     }
@@ -1464,13 +1468,16 @@ function createService(opts = {}) {
    * hand) ends disconnected — and says so when there WAS a connection before
    * it (the panel, every other client and syslog were still showing it). A
    * boot attempt or a first connect had none: a "disconnected" every 15 s of
-   * boot retries would only fill syslog. The router's connectIntent is not
-   * touched: only the user's disconnect clears that.
+   * boot retries would only fill syslog. Every client was told "connecting"
+   * though, and only the one that asked hears the throw — so the others get
+   * the error (`message`), and syslog does not: it has the reason already
+   * ("TUN start failed", "Auto-connect failed"). The router's connectIntent is
+   * not touched: only the user's disconnect clears that.
    *
    * Returns true when a disconnect or a newer connect overtook this call
    * while it awaited: that one owns the state now, so nothing is written.
    */
-  async function abortGateway(serverId, prevActive, myTun, stale) {
+  async function abortGateway(serverId, prevActive, myTun, stale, message) {
     if (myTun && myTun.active) { try { await myTun.stop(); } catch { /* best effort */ } }
     if (stale()) return true;
     quietStops++;
@@ -1488,6 +1495,7 @@ function createService(opts = {}) {
       if (stats) stats.stop();
       liveDirectInterface = null;
       if (prevActive) send('status', { state: 'disconnected' });
+      else tell('status', { state: 'error', message });
     }
     return false;
   }

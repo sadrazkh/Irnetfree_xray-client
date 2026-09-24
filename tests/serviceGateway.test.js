@@ -420,6 +420,22 @@ test('a failing boot attempt says nothing about a disconnect — there was no co
   await until(() => s.state.events.filter(e => e === 'gateway:start').length >= 3, 'three failed boot attempts');
   assert.ok(!s.statuses.some(x => x.state === 'disconnected'), JSON.stringify(s.statuses.map(x => x.state)));
   assert.ok(!s.syslog.some(([, l]) => l === 'irnetfree: disconnected'), 'syslog is not told of a disconnect every 15 s');
+  assert.ok(!s.syslog.some(([, l]) => /^irnetfree: error — /.test(l)), 'nor of an error status: each attempt’s reason is in it already');
+});
+
+test('a first connect by hand whose gateway fails ends every open panel on the error — not on "Connecting…"', async (t) => {
+  // No connection before it, so no "disconnected" (see the boot test above) —
+  // but it said "connecting" to every client, and the one that asked is the
+  // only one that hears the throw.
+  const s = start();
+  t.after(() => s.service.shutdown());
+  s.state.gatewayFails = true;
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /Gateway did not come up/);
+  const last = s.statuses.at(-1);
+  assert.equal(last.state, 'error', JSON.stringify(s.statuses.map(x => x.state)));
+  assert.match(last.message, /Gateway did not come up \(sing-box\)/);
+  assert.ok(!s.syslog.some(([, l]) => /^irnetfree: error — /.test(l)), 'syslog has the reason once, from the log line');
+  assert.ok(s.syslog.some(([, l]) => /\[error\] .*Gateway did not come up/.test(l)));
 });
 
 const withTiming = (over) => ({ timing: Object.assign({}, fakes.deps(fakes.makeState()).timing, over) });
