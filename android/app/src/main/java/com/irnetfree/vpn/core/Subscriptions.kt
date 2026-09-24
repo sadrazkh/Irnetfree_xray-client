@@ -101,6 +101,9 @@ object Subscriptions {
             .retryOnConnectionFailure(true)
             .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.COMPATIBLE_TLS, ConnectionSpec.CLEARTEXT))
         if (socksPort != null && socksPort > 0) {
+            // The tunnel's inbound asks for the session's credentials: OkHttp
+            // hands a SOCKS proxy to java.net's own Socket(Proxy), whose RFC 1929
+            // step gets them from LocalProxyAuth. A throwaway core's port is open.
             b.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort)))
         } else {
             b.dns(TrustedResolver)
