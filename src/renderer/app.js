@@ -1962,7 +1962,11 @@ function renderInspector() {
   }
   if (state.flavor === 'openwrt') {
     const n = (s.lanBypassMacs || []).length;
-    set('#insGateway', t('gw.insWhole') + (n ? ' · ' + t('gw.insDirect').replace('{n}', n) : ''), s.tunMode ? 'on' : 'off');
+    // the LIVE gateway, not the switch: connected (on a router a gateway that
+    // did not come up is a failed connect) with the TUN the connection was
+    // built with — a switch flipped since is only pending
+    const gatewayUp = !!state.connected && (!!s.tunMode !== (state.pendingReconnect || []).includes('tunMode'));
+    set('#insGateway', gatewayUp ? t('gw.insWhole') + (n ? ' · ' + t('gw.insDirect').replace('{n}', n) : '') : off, gatewayUp ? 'on' : 'off');
   }
 }
 

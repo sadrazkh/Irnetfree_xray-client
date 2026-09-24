@@ -7,10 +7,13 @@
  *
  * Usage:
  *   node src/server/server.js [--port 6969] [--host 127.0.0.1] [--token SECRET]
- *                             [--data-dir /path] [--open]
+ *                             [--token-file /path] [--data-dir /path] [--open]
  *
  * Security: binds to 127.0.0.1 by default (reach it via `ssh -L`). If you bind to
  * 0.0.0.0 a token is required (auto-generated + printed when you don't pass one).
+ * `--token-file` reads it from a file (made there, root-only, when missing) and
+ * never prints it — the router's init script uses that, because procd hands
+ * this process's output to syslog.
  */
 
 const http = require('http');
@@ -20,22 +23,50 @@ const crypto = require('crypto');
 const { createService } = require('./service');
 const { hostAllowed, originAllowed } = require('./guard');
 
+// A stray rejection anywhere in the service must not end the process: on a
+// router this process IS the gateway, and Node ≥ 15 exits on an unhandled one
+// (the exit hook then tears the tunnel down). Logged, and the service goes on.
+process.on('unhandledRejection', (e) => {
+  console.error('  ! unhandled rejection (the service keeps running): ' + ((e && e.stack) || e));
+});
+// Under procd stdout/stderr are pipes into syslog, and the service writes its
+// warnings there: a pipe that breaks must not become an uncaught 'error'.
+for (const s of [process.stdout, process.stderr]) s.on('error', () => {});
+
 /* ----------------------------- CLI args ----------------------------- */
 function parseArgs(argv) {
-  const a = { port: 6969, host: '127.0.0.1', token: null, dataDir: null, noAuth: false };
+  const a = { port: 6969, host: '127.0.0.1', token: null, tokenFile: null, dataDir: null, noAuth: false };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     const val = () => argv[++i];
-    if (k === '--port' || k === '-p') a.port = parseInt(val(), 10) || a.port;
+    // 0 is a real answer: an ephemeral port (the tests use it)
+    if (k === '--port' || k === '-p') { const n = parseInt(val(), 10); if (Number.isInteger(n) && n >= 0) a.port = n; }
     else if (k === '--host' || k === '-h') a.host = val();
     else if (k === '--token' || k === '-t') a.token = val();
+    else if (k === '--token-file') a.tokenFile = val();
     else if (k === '--data-dir' || k === '-d') a.dataDir = val();
     else if (k === '--no-auth') a.noAuth = true;
   }
   return a;
 }
+
+/** The token in `file`, or a new one written there (0600) when it is missing or empty. */
+function tokenFromFile(file) {
+  let t = '';
+  try { t = fs.readFileSync(file, 'utf8').trim(); } catch { /* made below */ }
+  if (t) return t;
+  t = crypto.randomBytes(16).toString('hex');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, t + '\n', { mode: 0o600 });
+  return t;
+}
+
 const args = parseArgs(process.argv.slice(2));
 const isLoopback = args.host === '127.0.0.1' || args.host === '::1' || args.host === 'localhost';
+if (args.tokenFile && !args.token) {
+  try { args.token = tokenFromFile(args.tokenFile); }
+  catch (e) { console.error('\n  Cannot read or create the token file ' + args.tokenFile + ': ' + e.message + '\n'); process.exit(1); }
+}
 // Non-loopback bind must be authenticated; make a token if the user didn't set one.
 if (!isLoopback && !args.token && !args.noAuth) {
   args.token = crypto.randomBytes(16).toString('hex');
@@ -97,7 +128,7 @@ function readBody(req) {
 }
 
 /* ----------------------------- request router ----------------------------- */
-const server = http.createServer(async (req, res) => {
+async function handle(req, res) {
   // DNS-rebinding guard: without a token only loopback Host values are served.
   // --no-auth waives the token, not this guard: on a loopback bind the Host set
   // is enforced anyway (see guard.js), so pass the bind's loopback-ness in.
@@ -105,7 +136,15 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     return res.end('forbidden host');
   }
-  const url = new URL(req.url, 'http://localhost');
+  // A request target that is not a path (`//x:99999/`, `//[`, `http://[`)
+  // makes URL throw — and this runs before the token check, so it was the way
+  // any host on the LAN could stop the service. A 400, not a crash.
+  let url;
+  try { url = new URL(req.url, 'http://localhost'); }
+  catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    return res.end('bad request');
+  }
   const pathname = url.pathname;
 
   // RPC: POST /rpc {channel, arg}
@@ -155,6 +194,20 @@ const server = http.createServer(async (req, res) => {
   const file = path.join(RENDERER, safe);
   if (!file.startsWith(RENDERER)) { res.writeHead(403); return res.end('forbidden'); }
   return sendFile(res, file);
+}
+
+// The handler is async: whatever it throws becomes a rejection, and one nobody
+// catches ends the process. Every request goes through this one catch — a 500
+// while nothing has been sent, otherwise the response is simply ended. (The
+// URL is not logged: it can carry the token.)
+const server = http.createServer((req, res) => {
+  handle(req, res).catch((e) => {
+    console.error('  ! request failed: ' + ((e && e.message) || e));
+    try {
+      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end();
+    } catch { /* the socket is gone */ }
+  });
 });
 
 server.on('error', (e) => {
@@ -168,18 +221,24 @@ server.on('error', (e) => {
 
 server.listen(args.port, args.host, () => {
   const shown = isLoopback ? '127.0.0.1' : args.host;
-  const q = TOKEN ? ('?token=' + TOKEN) : '';
+  const port = server.address().port;   // the real one when --port 0 asked for any
+  // A token that lives in a file is never printed: on a router this output is
+  // syslog (procd), and the file is where LuCI and the installer read it from.
+  const q = TOKEN && !args.tokenFile ? ('?token=' + TOKEN) : '';
   console.log('');
   console.log('  IRNetFree server (headless) — v' + service.version);
   console.log('  Data dir : ' + service.dataDir);
-  console.log('  Listening: http://' + shown + ':' + args.port + '/' + q);
+  console.log('  Listening: http://' + shown + ':' + port + '/' + q);
+  if (TOKEN && args.tokenFile) {
+    console.log('  Token    : ' + args.tokenFile + '  (open http://<this host>:' + port + '/?token=<the token in that file>)');
+  }
   if (isLoopback) {
     console.log('');
     console.log('  This is bound to localhost. From your machine, forward the port:');
-    console.log('    ssh -N -L ' + args.port + ':127.0.0.1:' + args.port + ' user@SERVER');
-    console.log('  then open  http://127.0.0.1:' + args.port + '/  in your browser.');
+    console.log('    ssh -N -L ' + port + ':127.0.0.1:' + port + ' user@SERVER');
+    console.log('  then open  http://127.0.0.1:' + port + '/  in your browser.');
   } else if (TOKEN) {
-    console.log('  Bound to a public interface — a token is required (in the URL above).');
+    console.log('  Bound to a public interface — a token is required' + (args.tokenFile ? ' (in the file above).' : ' (in the URL above).'));
   }
   console.log('');
 });

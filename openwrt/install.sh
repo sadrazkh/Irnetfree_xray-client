@@ -55,6 +55,7 @@ PORT="$(uci -q get irnetfree.main.port || echo 6969)"
 echo
 echo "IRNetFree is installed and running. Open it here:"
 echo "  http://$LAN:$PORT/?token=$(cat /etc/irnetfree/token 2>/dev/null)"
-echo "or LuCI -> Services -> IRNetFree."
+echo "or LuCI -> Services -> IRNetFree. The token lives in /etc/irnetfree/token"
+echo "(cat it any time); it is never written to the system log."
 echo "Cores: Settings -> Required files (downloads the ARM/MIPS build), or: opkg install xray-core sing-box"
 echo "Log:   logread -e irnetfree"
