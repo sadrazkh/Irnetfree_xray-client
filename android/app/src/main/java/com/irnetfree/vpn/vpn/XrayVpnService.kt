@@ -40,7 +40,6 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Whole-device tunnel:
@@ -96,12 +95,12 @@ class XrayVpnService : VpnService() {
                 // and ⚡ connect ~0.6 s later, and a busy main thread can
                 // deliver this later than that. The notification's Disconnect
                 // carries no generation and moves it here.
-                if (!intent.hasExtra(EXTRA_GEN)) stopGeneration()
+                if (!intent.hasExtra(EXTRA_GEN)) generation.stop()
                 worker.execute { stopAll(startId) }
                 return START_NOT_STICKY
             }
             ACTION_CONNECT -> {
-                val gen = if (intent.hasExtra(EXTRA_GEN)) intent.getLongExtra(EXTRA_GEN, 0L) else nextGeneration()
+                val gen = if (intent.hasExtra(EXTRA_GEN)) intent.getLongExtra(EXTRA_GEN, 0L) else generation.next()
                 goForeground(intent.getStringExtra(EXTRA_LABEL) ?: "IRNetFree")
                 worker.execute { startTunnel(intent, gen, startId, unattended = false) }
             }
@@ -113,7 +112,7 @@ class XrayVpnService : VpnService() {
             // notification — with lockdown on, silence here is a phone with no
             // internet and no reason given.
             null, VpnService.SERVICE_INTERFACE -> {
-                val gen = nextGeneration()
+                val gen = generation.next()
                 val why = if (intent == null) "restarted after the app was stopped" else "always-on VPN"
                 val wait = if (intent == null) stickyRestartWait() else 0L
                 if (wait <= 0L) {
@@ -162,8 +161,9 @@ class XrayVpnService : VpnService() {
                 // where the screens write them.
                 val store = Store.get(this@XrayVpnService)
                 val (plan, label) = onMain { store.buildPlan() to store.selectionLabel() }   // throws when nothing usable is selected
-                // Overtaken already — a disconnect, or a connect: no "Connecting…" that nothing would clear.
-                if (!connectingIfCurrent(gen, label)) { worker.execute { finishIfIdle(startId) }; return@Thread }
+                // Overtaken already — a disconnect, or a connect: no "Connecting…"
+                // that nothing would clear (checked and set under one lock, Generation).
+                if (!generation.ifCurrent(gen) { VpnState.set(ConnState.CONNECTING, label) }) { worker.execute { finishIfIdle(startId) }; return@Thread }
                 VpnState.addLog("Connecting by itself ($why): $label")
                 prepare(this@XrayVpnService, store, plan, label)
             } catch (e: Throwable) {
@@ -487,14 +487,14 @@ class XrayVpnService : VpnService() {
      */
     private fun finishIfIdle(startId: Int) {
         if (live()) return
-        if (generation.get() == stoppedGen && VpnState.state.value == ConnState.CONNECTING) VpnState.set(ConnState.DISCONNECTED, "")
+        if (generation.stopLatest && VpnState.state.value == ConnState.CONNECTING) VpnState.set(ConnState.DISCONNECTED, "")
         finish(startId)
     }
 
     override fun onRevoke() {
         // Another VPN took over, or the user switched this one off in Android's
         // settings. (VpnService's own onRevoke is a bare stopSelf(); finish() does it here.)
-        stopGeneration()
+        generation.stop()
         val id = lastStartId
         worker.execute { stopAll(id) }
     }
@@ -586,26 +586,7 @@ class XrayVpnService : VpnService() {
         const val EXTRA_GEN = "gen"; const val EXTRA_SOCKS_USER = "socksUser"; const val EXTRA_SOCKS_PASS = "socksPass"
 
         /** Moved on by every connect and disconnect: a prepare or a start carrying an older value was overtaken. */
-        private val generation = AtomicLong(0)
-
-        /** The generation the last disconnect moved to: while it is still the current one, no connect is pending. */
-        @Volatile private var stoppedGen = -1L
-
-        /** A connect moves the generation on — under the lock connectingIfCurrent takes. */
-        private fun nextGeneration(): Long = synchronized(generation) { generation.incrementAndGet() }
-
-        /** So does a disconnect, and it is remembered as one (finishIfIdle). */
-        private fun stopGeneration(): Long = synchronized(generation) { generation.incrementAndGet().also { stoppedGen = it } }
-
-        /**
-         * CONNECTING for [gen] — only while it is still the current generation,
-         * checked and set under the lock every move of it takes. Set without the
-         * check, an unattended start that a disconnect had already overtaken
-         * put up a "Connecting…" that nothing would ever clear.
-         */
-        private fun connectingIfCurrent(gen: Long, label: String): Boolean = synchronized(generation) {
-            if (gen != generation.get()) false else { VpnState.set(ConnState.CONNECTING, label); true }
-        }
+        private val generation = Generation()
 
         /**
          * Run [block] on the main thread and hand back its result (or its
@@ -638,7 +619,7 @@ class XrayVpnService : VpnService() {
         fun connect(ctx: Context, store: Store) {
             val plan = store.buildPlan()          // throws with a user-facing message; the caller reports it
             val label = store.selectionLabel()
-            val gen = nextGeneration()
+            val gen = generation.next()
             Thread {
                 try {
                     val intent = prepare(ctx, store, plan, label)
@@ -758,7 +739,7 @@ class XrayVpnService : VpnService() {
         }
 
         fun disconnect(ctx: Context) {
-            val gen = stopGeneration()            // a connect still in prepare() stops there
+            val gen = generation.stop()            // a connect still in prepare() stops there
             ctx.startService(Intent(ctx, XrayVpnService::class.java).setAction(ACTION_DISCONNECT).putExtra(EXTRA_GEN, gen))
         }
     }

@@ -44,22 +44,32 @@ object TunnelSetup {
     }
 }
 
+/**
+ * The tunnel service's generation: moved on by every connect and every
+ * disconnect, so a prepare or a start that carries an older value knows it was
+ * overtaken. [ifCurrent] checks and acts under the lock every move takes: an
+ * unattended start's "Connecting…" can then never land after the disconnect
+ * that overtook it (whose Not connected comes after its move) — checked first
+ * and set after, it stayed up for good.
+ */
 class Generation {
     private val value = AtomicLong(0)
     @Volatile private var stopped = -1L
 
     fun get(): Long = value.get()
 
-    fun next(): Long = value.incrementAndGet()
+    /** A connect. */
+    fun next(): Long = synchronized(this) { value.incrementAndGet() }
 
-    fun stop(): Long = value.incrementAndGet().also { stopped = it }
+    /** A disconnect, remembered as one ([stopLatest]). */
+    fun stop(): Long = synchronized(this) { value.incrementAndGet().also { stopped = it } }
 
-    fun ifCurrent(gen: Long, show: () -> Unit): Boolean {
-        if (gen != value.get()) return false
-        show()
-        return true
+    /** Run [show] only while [gen] is still the current generation; true when it ran. */
+    fun ifCurrent(gen: Long, show: () -> Unit): Boolean = synchronized(this) {
+        if (gen != value.get()) false else { show(); true }
     }
 
+    /** The latest move was a disconnect: no connect is pending, so a "Connecting…" still up is nobody's. */
     val stopLatest: Boolean get() = value.get() == stopped
 }
 
