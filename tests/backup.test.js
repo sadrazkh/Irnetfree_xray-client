@@ -108,6 +108,33 @@ test('an imported server must be a protocol we build, with a real port', () => {
   assert.deepEqual(r.next.servers.map(s => [s.id, s.protocol, s.port]), [['s-a', 'vless', 8443], ['s-e', 'shadowsocks', 8388]]);
 });
 
+test('a server refused for its protocol, port or outbound takes its chain memberships and pool targets with it', () => {
+  const b = exportBundle({
+    store: {
+      servers: [
+        { id: 'ok', protocol: 'vless', port: 443, outbound: {} },
+        { id: 'badproto', protocol: 'nope', port: 443, outbound: {} },
+        { id: 'badport', protocol: 'vless', port: 'x', outbound: {} },
+        { id: 'noout', protocol: 'vless', port: 443 }
+      ],
+      chains: [{ id: 'c1', members: ['ok', 'badproto', 'badport', 'noout', 'here'] }],
+      pool: [
+        { id: 'p1', target: 'badproto', socksPort: 60001 },
+        { id: 'p2', target: 'badport', socksPort: 60002 },
+        { id: 'p3', target: 'ok', socksPort: 60003 },
+        { id: 'p4', target: 'here', socksPort: 60004 }
+      ]
+    }
+  });
+  // `here` is refused from the file too, but a server by that id is already on
+  // this machine — references to it stay good
+  b.servers.push({ id: 'here', protocol: 'nope', outbound: {} });
+  const r = importBundle(b, { servers: [{ id: 'here', protocol: 'trojan', port: 443, outbound: {} }] });
+  assert.deepEqual(r.next.servers.map(s => s.id), ['here', 'ok']);
+  assert.deepEqual(r.next.chains[0].members, ['ok', 'here']);
+  assert.deepEqual(r.next.pool.map(p => [p.id, p.target]), [['p1', ''], ['p2', ''], ['p3', 'ok'], ['p4', 'here']]);
+});
+
 test('imported ports and counts are integers: pool ports, the subscription’s server count, the settings’ ports', () => {
   const b = exportBundle({
     store: {
