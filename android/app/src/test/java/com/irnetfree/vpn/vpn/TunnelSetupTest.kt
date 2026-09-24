@@ -112,6 +112,17 @@ class TunnelSetupTest {
         assertEquals(0L, StickyRestart.next(t0 + 3_600_000L, 4, t0).waitMs)
     }
 
+    @Test fun aCrashLoopsWaitCountsTheTimeThePhoneSlept() {
+        // Handler delays run on uptime, which stops in deep sleep: the wait is
+        // measured on the elapsed-realtime clock and looked at every few seconds.
+        val due = 10_000_000L
+        assertEquals(5_000L, StickyRestart.tick(due, due - 60_000L))
+        assertEquals(2_000L, StickyRestart.tick(due, due - 2_000L))
+        assertEquals(0L, StickyRestart.tick(due, due))
+        // asleep past it: due at the first look after waking, not a whole wait later
+        assertEquals(0L, StickyRestart.tick(due, due + 3_600_000L))
+    }
+
     @Test fun aLateDisconnectLeavesTheReconnectsScreenAlone() {
         // Reconnect and ⚡: disconnect(), then a connect ~0.6 s later. The
         // disconnect's teardown may land after that connect has taken its

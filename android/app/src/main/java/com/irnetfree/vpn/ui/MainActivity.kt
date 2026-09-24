@@ -210,6 +210,13 @@ private fun App(store: Store) {
         AutoConnectOnce.done = true
         if (!store.settings.autoConnect) return@LaunchedEffect
         if (VpnState.isActive) return@LaunchedEffect
+        // Stopped unexpectedly and waiting out a crash loop's backoff: the
+        // service reconnects by itself, and an attempt from here would only
+        // repeat the crash sooner.
+        if (XrayVpnService.restartPending) {
+            VpnState.addLog("Connect on open: skipped — IRNetFree reconnects by itself shortly (it stopped unexpectedly)")
+            return@LaunchedEffect
+        }
         // Only a selection that still resolves — buildPlan throws when the
         // config it names has been deleted, or a chain has lost its members.
         val plan = runCatching { store.buildPlan() }
@@ -224,7 +231,7 @@ private fun App(store: Store) {
         // Let the first frame land before a foreground service and a core
         // start competing with it, as the desktop waits for its window.
         delay(700)
-        if (VpnState.isActive) return@LaunchedEffect
+        if (VpnState.isActive || XrayVpnService.restartPending) return@LaunchedEffect
         VpnState.addLog("Connect on open: ${store.selectionLabel()}")
         doConnect(ctx, store)
     }
