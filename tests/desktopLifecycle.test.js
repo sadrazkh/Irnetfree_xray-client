@@ -147,7 +147,6 @@ test('a launch clears the activeServerId a crash or a kill left, and connect-on-
   assert.match(WHEN_READY, /const lastId = store\.get\('lastServerId', null\);/, 'connect-on-launch reads lastServerId');
 });
 
-
 /* ----------------------------- S5: navigation guards ----------------------------- */
 
 test('the window navigates only to its own page and opens nothing itself; open:external takes web links only', () => {
@@ -159,6 +158,17 @@ test('the window navigates only to its own page and opens nothing itself; open:e
   assert.doesNotMatch(MAIN, /ipcMain\.on\('open:external', \(e, url\) => shell\.openExternal\(url\)\);/);
 });
 
+/* --------------------------- W12: Allow LAN firewall scope --------------------------- */
+
+test('the Allow LAN rules open the no-auth proxy to the local subnet on private networks only', () => {
+  const add = slice('async function addLanFirewall(socksPort, httpPort) {', '\n}');
+  const rules = add.match(/netsh\(\['advfirewall', 'firewall', 'add', 'rule'[^\]]*\]\)/g) || [];
+  assert.equal(rules.length, 2, add);
+  for (const r of rules) {
+    assert.match(r, /'profile=private,domain'/, 'never on a public network (café, airport)');
+    assert.match(r, /'remoteip=localsubnet'/, 'never from beyond the LAN');
+  }
+});
 
 /* ------------------------- W5: a connection that drops ------------------------- */
 
