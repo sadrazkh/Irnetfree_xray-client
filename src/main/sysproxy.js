@@ -311,8 +311,8 @@ async function enableJournaled(platform, { host, httpPort, socksPort }, { exec, 
       rec.win = null;
       try { rec.win = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
     } else {
-      rec.mac = [];
-      try { rec.mac = await macSnapshot(exec); } catch { /* unknown: nothing recorded, the restore switches ours off */ }
+      rec.mac = null;   // unknown — not "no services": the restore then switches ours off everywhere
+      try { rec.mac = await macSnapshot(exec); } catch { /* unknown */ }
     }
     writeJournal(journal, rec);
     fresh = true;
@@ -342,6 +342,8 @@ async function restoreJournaled(platform, { exec, journal }) {
     await refreshWindows(exec).catch(() => {});
     // ours could not even be switched off: keep the record for the next launch
     if (offFailed) return true;
+  } else if (!Array.isArray(j.mac)) {
+    await disableMac(exec).catch(() => {});   // nothing known about before: the old disable
   } else {
     for (const [cmd, args] of macRestoreSteps(j.mac)) await exec(cmd, args).catch(() => {});
   }
@@ -385,7 +387,9 @@ async function setSystemProxy(enabled, opts = {}) {
  * since the crash is theirs, and the stale record just goes. On Windows, with
  * no journal, the proxy a build before the journal left (the one that died
  * connected, or that the update installer closed) is recognised by our own
- * exact bypass list on 127.0.0.1, and switched off. Resolves 'restored' |
+ * exact bypass list AND `opts.legacyServer` — this app's own 127.0.0.1:port,
+ * since a sibling build (the Plus fork) writes the same list for its own port
+ * and may be connected right now — and switched off. Resolves 'restored' |
  * 'dropped' | 'legacy' | null; never throws.
  */
 function repairSystemProxy(opts = {}) {
@@ -404,7 +408,7 @@ function repairSystemProxy(opts = {}) {
         await restoreJournaled(platform, { exec, journal });
         return 'restored';
       }
-      if (cur && Number(cur.ProxyEnable) === 1 && cur.ProxyOverride === WIN_BYPASS && /^127\.0\.0\.1:\d+$/.test(cur.ProxyServer || '')) {
+      if (opts.legacyServer && cur && Number(cur.ProxyEnable) === 1 && cur.ProxyOverride === WIN_BYPASS && cur.ProxyServer === opts.legacyServer) {
         await disableWindows(exec).catch(() => {});
         return 'legacy';
       }
@@ -433,6 +437,9 @@ function restoreSystemProxySync(opts = {}) {
   if (!journal || !journaled(platform)) return false;
   const j = readJournal(journal);
   if (!j) return false;
+  // macOS with nothing recorded: switching ours off needs the service list,
+  // which this path cannot read — the journal stays for the launch repair
+  if (platform === 'darwin' && !Array.isArray(j.mac)) return false;
   const steps = platform === 'win32'
     ? winRestoreSteps(j.win).map(args => ['reg', args])
     : macRestoreSteps(j.mac);

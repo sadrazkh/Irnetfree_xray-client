@@ -83,10 +83,11 @@ test('the elevated relaunch hands the lock over before the new instance can ask 
 
 test('the proxy journal is configured and a dead session’s proxy repaired at launch, before any connect', () => {
   const use = WHEN_READY.indexOf("useProxyJournal(path.join(dir, 'proxy-journal.json'))");
-  const repair = WHEN_READY.indexOf('repairSystemProxy()');
+  const repair = WHEN_READY.indexOf('repairSystemProxy({ legacyServer: `127.0.0.1:${getSettings().httpPort}` })');
   assert.notEqual(use, -1, 'the desktop app must journal the proxy it sets (sysproxy.useProxyJournal)');
-  assert.notEqual(repair, -1, 'nothing repairs a proxy left aimed at 127.0.0.1 after a crash or the update installer');
+  assert.notEqual(repair, -1, 'nothing repairs a proxy left aimed at 127.0.0.1 after a crash or the update installer — and only OUR port counts as ours');
   assert.ok(WHEN_READY.indexOf('if (!primaryInstance) return;') < use, 'never in a second instance — it would undo the first one’s proxy');
+  assert.ok(WHEN_READY.indexOf('new Store(') < repair, 'the settings (our HTTP port) are read from the store');
   assert.ok(use < repair && repair < WHEN_READY.indexOf('createWindow()'), 'before the window, so before any connect');
 });
 

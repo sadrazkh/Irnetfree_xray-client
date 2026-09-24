@@ -198,19 +198,26 @@ test('win launch: a proxy someone set since the crash is theirs — the stale jo
 
 test('win launch: our own proxy left by a build that kept no journal is switched off; anyone else’s is not', async (t) => {
   const journal = tmpJournal(t);
+  const legacyServer = '127.0.0.1:10809';   // this app's own HTTP port, from its settings
   // what every build before this one wrote, and left behind after a crash or the update installer
   const w = fakeWin(journal, { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: WIN_BYPASS });
-  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32' }), 'legacy');
+  assert.equal(await repairSystemProxy({ journal, exec: w.exec, platform: 'win32', legacyServer }), 'legacy');
   assert.deepEqual(w.regCalls(), [regAdd('ProxyEnable', 'REG_DWORD', 0)]);
   for (const other of [
     { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: 'localhost;127.*' },   // another client on the same port
+    // a sibling build (the Plus fork writes the same bypass list) connected on ITS port right now
+    { ProxyEnable: 1, ProxyServer: '127.0.0.1:30819', ProxyOverride: WIN_BYPASS },
     { ProxyEnable: 1, ProxyServer: 'proxy.corp:8080', ProxyOverride: WIN_BYPASS },
     { ProxyEnable: 0, ProxyServer: '127.0.0.1:10809', ProxyOverride: WIN_BYPASS }
   ]) {
     const o = fakeWin(journal, other);
-    assert.equal(await repairSystemProxy({ journal, exec: o.exec, platform: 'win32' }), null);
+    assert.equal(await repairSystemProxy({ journal, exec: o.exec, platform: 'win32', legacyServer }), null);
     assert.deepEqual(o.regCalls(), [], JSON.stringify(other));
   }
+  // not told which port is ours: no guessing
+  const n = fakeWin(journal, { ProxyEnable: 1, ProxyServer: '127.0.0.1:10809', ProxyOverride: WIN_BYPASS });
+  assert.equal(await repairSystemProxy({ journal, exec: n.exec, platform: 'win32' }), null);
+  assert.deepEqual(n.regCalls(), []);
 });
 
 test('win exit hook: the journal is restored synchronously, and only when there is one', async (t) => {
@@ -285,6 +292,28 @@ test('mac: each service’s three proxies are journaled, then ours set; the disa
     '-setsocksfirewallproxystate Wi-Fi off'               // never configured
   ]);
   assert.ok(lines.includes('-setwebproxystate USB LAN off'));
+  assert.equal(fs.existsSync(journal), false);
+});
+
+test('mac: a snapshot that could not be read still gets ours switched off on every service', async (t) => {
+  const journal = tmpJournal(t);
+  const m = fakeMac({});
+  let listing = 0;
+  const flaky = async (cmd, args) => {
+    // the snapshot's listing fails; enable's own listing, later, works
+    if (args[0] === '-listallnetworkservices' && listing++ === 0) throw new Error('networksetup: timed out');
+    return m.exec(cmd, args);
+  };
+  await setSystemProxy(true, Object.assign({ journal, exec: flaky, platform: 'darwin' }, ON));
+  assert.equal(JSON.parse(fs.readFileSync(journal, 'utf8')).mac, null, 'unknown, not "no services"');
+  m.calls.length = 0;
+  await setSystemProxy(false, { journal, exec: m.exec, platform: 'darwin' });
+  const offs = m.sets().map(c => c.slice(1).join(' '));
+  for (const svc of ['Wi-Fi', 'USB LAN']) {
+    for (const verb of ['-setwebproxystate', '-setsecurewebproxystate', '-setsocksfirewallproxystate']) {
+      assert.ok(offs.includes(`${verb} ${svc} off`), `${verb} ${svc} off — the old disable, not nothing`);
+    }
+  }
   assert.equal(fs.existsSync(journal), false);
 });
 
