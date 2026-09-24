@@ -86,8 +86,18 @@ object StickyRestart {
     /** A restart this soon after the previous attempt is the same crash again. */
     const val WINDOW_MS = 120_000L
 
+    /** How often a waiting restart looks at the clock, in uptime. */
+    const val TICK_MS = 5_000L
+
     /** [attemptAt]: when this restart connects — what the next one measures from. */
     class Next(val streak: Int, val waitMs: Long, val attemptAt: Long)
+
+    /**
+     * The wait is counted in elapsed real time — deep sleep included, which a
+     * Handler's uptime is not — and looked at every [TICK_MS]: how long until
+     * the next look, 0 = [due] has come.
+     */
+    fun tick(due: Long, now: Long): Long = if (now >= due) 0L else minOf(due - now, TICK_MS)
 
     /**
      * [lastAttemptAt]/[streak]: what the previous restart stored (0 = none).

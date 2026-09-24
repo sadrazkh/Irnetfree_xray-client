@@ -126,9 +126,24 @@ class XrayVpnService : VpnService() {
                     val msg = "IRNetFree stopped unexpectedly again — it reconnects by itself in ${wait / 1000} s"
                     goForeground(msg, action = "Stop")
                     VpnState.set(ConnState.ERROR, error = msg)
-                    val r = Runnable { if (gen == generation.get()) autoStart(gen, startId, why) }
+                    // Counted in elapsed real time, deep sleep included, and looked
+                    // at every few seconds (StickyRestart.tick): a postDelayed of
+                    // the whole wait runs on uptime, which stops while the phone
+                    // sleeps, so the wait stretched with every minute asleep.
+                    val due = SystemClock.elapsedRealtime() + wait
+                    pendingRestart = true
+                    val r = object : Runnable {
+                        override fun run() {
+                            if (gen != generation.get()) { pendingRestart = false; return }
+                            val next = StickyRestart.tick(due, SystemClock.elapsedRealtime())
+                            if (next > 0L) { main.postDelayed(this, next); return }
+                            pendingRestart = false
+                            goForeground("IRNetFree")      // the countdown and its Stop are over
+                            autoStart(gen, startId, why)
+                        }
+                    }
                     pendingAutoStart = r
-                    main.postDelayed(r, wait)
+                    main.postDelayed(r, StickyRestart.tick(due, SystemClock.elapsedRealtime()))
                 }
             }
         }
@@ -526,7 +541,7 @@ class XrayVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        pendingAutoStart?.let { main.removeCallbacks(it) }; pendingAutoStart = null
+        pendingAutoStart?.let { main.removeCallbacks(it) }; pendingAutoStart = null; pendingRestart = false
         runCatching { scope.cancel() }
         // Normally everything is already down (stopAll ran first). Stopped some
         // other way, the tunnel still goes — on the worker, after whatever it is
@@ -613,6 +628,16 @@ class XrayVpnService : VpnService() {
 
         /** Moved on by every connect and disconnect: a prepare or a start carrying an older value was overtaken. */
         private val generation = Generation()
+
+        @Volatile private var pendingRestart = false
+
+        /**
+         * A crash loop's reconnect is waiting out its backoff (StickyRestart).
+         * Connect-on-open must not jump it: the app opened during the wait
+         * would otherwise connect at once and repeat the crash sooner. (A tap
+         * on Connect still connects — the user asked.)
+         */
+        val restartPending: Boolean get() = pendingRestart
 
         /**
          * Run [block] on the main thread and hand back its result (or its
