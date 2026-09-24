@@ -16,7 +16,7 @@ const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinW
 const { assetStatus: scanAssets, downloadedFileNames } = require('./assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('./geoCheck');
 const { XrayManager, getFreePort, getFreePorts } = require('./xrayManager');
-const { setSystemProxy } = require('./sysproxy');
+const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
@@ -2589,6 +2589,15 @@ app.whenReady().then(() => {
   // repair, write or show anything on its way out.
   if (!primaryInstance) return;
   const dir = dataDir();
+  // The system proxy is journaled (sysproxy.js): what it was before we set it
+  // is what every disconnect, quit and exit puts back — and only if we set it.
+  // A journal a dead session left is restored now; proxy operations run one at
+  // a time, so an auto-connect a second later waits for this.
+  useProxyJournal(path.join(dir, 'proxy-journal.json'));
+  repairSystemProxy().then((r) => {
+    if (r === 'restored') send('log', { line: 'The system proxy a previous session left set was put back the way it was', level: 'warn' });
+    else if (r === 'legacy') send('log', { line: 'The system proxy an older version left pointing at IRNetFree was switched off', level: 'warn' });
+  });
   store = new Store(path.join(dir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
   }, {
@@ -2780,6 +2789,12 @@ async function teardownForQuit() {
   try { stopNetWatcher(); } catch {}
   try { if (stats) stats.stop(); } catch {}
   try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
+  // The system proxy before anything that can wait on a password prompt: on
+  // macOS the privileged steps below run under the 20 s cap, and a quit that
+  // ran out there used to leave every browser aimed at a port nobody listens on.
+  try { await setSystemProxy(false, {}); } catch {}
+  // macOS: the core too — no password needed, and nothing is left behind if the cap hits
+  if (process.platform === 'darwin') { try { if (xray) await xray.stop(); } catch {} }
   if (process.platform === 'darwin') {
     try { await stopAllTuns(); await releaseGuardChecked(leakGuard); }
     catch { send('log', { line: 'Network cleanup pending; recovery retained for next launch', level: 'error' }); }
@@ -2787,7 +2802,6 @@ async function teardownForQuit() {
     try { if (leakGuard) await leakGuard.release(); } catch {}
     await stopAllTuns();
   }
-  try { await setSystemProxy(false, {}); } catch {}
   try { await removeLanFirewall(); } catch {}
   try { await disarmKillSwitch(); } catch {}
   try { if (xray) await xray.stop(); } catch {}
@@ -2839,15 +2853,16 @@ function teardownSync() {
   // A second instance never held any of this: its exit must not lift the first
   // one's system proxy or kill switch.
   if (!primaryInstance) return;
+  // The system proxy first: the fastest step, and the one every browser depends
+  // on. Only what the journal says we set, put back as it was — no journal, no
+  // write (a blind ProxyEnable=0 here killed a corporate proxy on every exit).
+  try { restoreSystemProxySync(); } catch {}
   try { if (store) store.flush(); } catch {}   // a coalesced write must not die with the process
   // The DNS override outlives the app if nobody puts it back, so it goes before
   // the win32 gate below: on macOS (when we are already root) this is the last
   // chance to restore it without a password prompt nobody can answer here.
   try { if (leakGuard) leakGuard.releaseSync(); } catch {}
   if (process.platform !== 'win32') return;
-  try { require('child_process').execFileSync(
-    'reg', ['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '0', '/f'],
-    { windowsHide: true }); } catch {}
   cleanupAllTunsSync();   // every backend a connect started, either kind
   try { require('child_process').execFileSync('netsh',
     ['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`], { windowsHide: true }); } catch {}
