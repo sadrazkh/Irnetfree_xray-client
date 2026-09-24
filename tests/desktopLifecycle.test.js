@@ -148,6 +148,18 @@ test('a launch clears the activeServerId a crash or a kill left, and connect-on-
 });
 
 
+/* ----------------------------- S5: navigation guards ----------------------------- */
+
+test('the window navigates only to its own page and opens nothing itself; open:external takes web links only', () => {
+  const win = slice('function createWindow() {', '\n}');
+  assert.match(win, /webContents\.on\('will-navigate', \(e, url\) => \{\n\s*if \(!isAppPage\(url, APP_PAGE\)\) e\.preventDefault\(\);/);
+  assert.match(win, /webContents\.setWindowOpenHandler\(\(\{ url \}\) => \{\n\s*if \(isWebUrl\(url\)\) shell\.openExternal\(url\);\n\s*return \{ action: 'deny' \};/);
+  assert.match(win, /mainWindow\.loadFile\(APP_PAGE\);/, 'the page the guard allows is the page that is loaded');
+  assert.match(MAIN, /ipcMain\.on\('open:external', \(e, url\) => \{\n\s*if \(isWebUrl\(url\)\) shell\.openExternal\(url\);/);
+  assert.doesNotMatch(MAIN, /ipcMain\.on\('open:external', \(e, url\) => shell\.openExternal\(url\)\);/);
+});
+
+
 /* ------------------------- W5: a connection that drops ------------------------- */
 
 /** The drop handler's source — read per test, so a missing one fails that test, not the file. */
