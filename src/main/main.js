@@ -317,15 +317,21 @@ async function removeLanFirewall() {
   }
 }
 
-/** Open inbound TCP for the proxy ports. Needs admin; returns {ok,error}. */
+/**
+ * Open inbound TCP for the proxy ports. Needs admin; returns {ok,error}.
+ * The proxy has no authentication, so the hole is the LAN's alone: private and
+ * domain networks, the local subnet. On a network Windows calls Public (a café,
+ * an airport, a hotel) nobody else gets to use it — or to reach the tunnel's
+ * exit through it.
+ */
 async function addLanFirewall(socksPort, httpPort) {
   if (process.platform !== 'win32') return { ok: true };
   await removeLanFirewall();
   try {
     await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${LAN_RULES.socks}`,
-      'dir=in', 'action=allow', 'protocol=TCP', `localport=${socksPort}`]);
+      'dir=in', 'action=allow', 'protocol=TCP', `localport=${socksPort}`, 'profile=private,domain', 'remoteip=localsubnet']);
     await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${LAN_RULES.http}`,
-      'dir=in', 'action=allow', 'protocol=TCP', `localport=${httpPort}`]);
+      'dir=in', 'action=allow', 'protocol=TCP', `localport=${httpPort}`, 'profile=private,domain', 'remoteip=localsubnet']);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -1209,7 +1215,7 @@ async function doConnect(serverId, opts = {}) {
     lan = { ip: lanIp(), socksPort: settings.socksPort, httpPort: settings.httpPort };
     const fw = await addLanFirewall(settings.socksPort, settings.httpPort);
     if (process.platform === 'win32') {
-      if (fw.ok) send('log', { line: `LAN sharing on — firewall opened for ports ${settings.socksPort}/${settings.httpPort}`, level: 'info' });
+      if (fw.ok) send('log', { line: `LAN sharing on — firewall opened for ports ${settings.socksPort}/${settings.httpPort} to the local subnet on private networks (if other devices cannot connect, set this network to Private in Windows)`, level: 'info' });
       else send('log', { line: 'LAN firewall rule failed (run as admin to allow it): ' + fw.error, level: 'warn' });
     }
   } else {
