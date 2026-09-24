@@ -255,6 +255,9 @@ test('a drop waits for a connect in flight, joins a recovery in flight, and only
   const join = DROP.indexOf('if (recovering) {');
   const budget = DROP.indexOf('drops.take()');
   assert.ok(wait !== -1 && join !== -1 && wait < join && join < budget, DROP);
+  // a user connect that settled with a running core healed the drop: no budget, no rebuild
+  const healedCheck = DROP.indexOf('if (healed()) return;');
+  assert.ok(healedCheck !== -1 && wait < healedCheck && healedCheck < budget, 'healed() is asked right after the connects in flight settle');
 });
 
 test('giving up cancels the pending retry and says nothing when the user acted meanwhile; proxyUp is false under the kill switch', () => {
@@ -325,7 +328,9 @@ test('a macOS/Linux shutdown that gets cancelled does not leave the app deaf for
   assert.match(check, /isQuitting = false;/);
   assert.match(check, /userDisconnecting = false;/);
   assert.match(check, /syncTeardownDone = false;/);
-  assert.match(check, /recoverFromNetworkChange\('shutdown-cancelled'\)/);
+  // no automatic rebuild: on a macOS TUN that is a password prompt in the middle of a slow logout
+  assert.doesNotMatch(check, /recoverFromNetworkChange/);
+  assert.match(check, /reportReconnectFailed\('shutdown-cancelled', \{ ok: false \}\)/, 'the user (or the network watcher) rebuilds');
   assert.match(check, /\.unref\(\)/, 'never what keeps a quitting process alive');
 });
 
@@ -345,9 +350,10 @@ test('the window says a DROP when it was one, and says the kill switch closed th
   // the reasons main.js calls a drop (DROP_REASONS) are the ones the window knows
   const mainReasons = /const DROP_REASONS = new Set\(\[([^\]]*)\]\)/.exec(MAIN)[1];
   assert.match(APP, new RegExp(`const DROP_REASONS = \\[${mainReasons.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\];`));
-  assert.match(APP, /toast\(t\(DROP_REASONS\.includes\(d\.reason\) \? 'net\.dropFailed' : 'net\.failed'\), 'err', 8000\);/);
+  assert.match(APP, /toast\(t\(failedKey\(d\.reason\)\), 'err', 8000\);/);
+  assert.match(APP, /function failedKey\(reason\) \{\n\s*if \(reason === 'shutdown-cancelled'\) return 'net\.shutdownCancelled';\n\s*return DROP_REASONS\.includes\(reason\) \? 'net\.dropFailed' : 'net\.failed';/);
   assert.match(APP, /DROP_REASONS\.includes\(state\.reconnectReason\) \? 'state\.reconnectingDrop' : 'state\.reconnecting'/);
-  for (const key of ['net.dropFailed', 'state.reconnectingDrop']) {
+  for (const key of ['net.dropFailed', 'state.reconnectingDrop', 'net.shutdownCancelled']) {
     assert.equal((I18N.match(new RegExp(`'${key.replace('.', '\\.')}':`, 'g')) || []).length, 2, `${key}: one fa and one en string`);
   }
   // the kill-switch toast on the way IN only — a second drop under an engaged switch is not news

@@ -1720,6 +1720,10 @@ async function onConnectionDrop(reason) {
   await Promise.allSettled([...connectsInFlight]);
   // the user may have disconnected while the rule went in
   if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
+  // Is what this drop broke whole again (a rebuild already brought it back)?
+  const healed = () => (reason === 'tunnel-exited' ? !!(tun && tun.active) : !!(xray && xray.running));
+  // a connect that settled with a running core (the user's, say) healed it: no budget, no rebuild
+  if (healed()) return;
   // "the proxy works": the core runs AND the kill switch is not blocking it
   const proxyUp = () => !!(xray && xray.running) && !killEngaged;
   if (!s.autoReconnectOnNetworkChange) {
@@ -1737,8 +1741,6 @@ async function onConnectionDrop(reason) {
     }
     return;
   }
-  // Is what this drop broke whole again (a rebuild already brought it back)?
-  const healed = () => (reason === 'tunnel-exited' ? !!(tun && tun.active) : !!(xray && xray.running));
   if (recovering) {
     // A recovery is already rebuilding. Queuing behind it meant a second full
     // rebuild of a tunnel it had just built: wait for it instead. A retry it
@@ -3015,8 +3017,8 @@ process.on('exit', () => teardownSync('exit'));
  * agreed, and one of them can still cancel a logout. The synchronous teardown
  * has then run under a machine that stays up, and its flags would keep every
  * later drop and recovery silent for good. A process still here a minute later
- * was not shut down: the flags go down again, and the connection the user
- * still wants is rebuilt. Unref'd — never what keeps a quitting app alive —
+ * was not shut down: the flags go down again, and the window says the
+ * connection was taken down. Unref'd — never what keeps a quitting app alive —
  * and a real quit in progress is left alone.
  */
 function scheduleShutdownCancelCheck() {
@@ -3025,9 +3027,12 @@ function scheduleShutdownCancelCheck() {
     isQuitting = false;
     userDisconnecting = false;
     syncTeardownDone = false;
-    send('log', { line: 'The shutdown was cancelled — rebuilding the connection', level: 'warn' });
+    // Said, not rebuilt: on a macOS TUN a rebuild is a password prompt in the
+    // middle of what may still be a slow logout. The user reconnects (or the
+    // network watcher does, when the network moves).
     if (store && store.get('activeServerId', null)) {
-      recoverFromNetworkChange('shutdown-cancelled').catch((e) => send('log', { line: 'Recovery after a cancelled shutdown failed: ' + ((e && e.message) || e), level: 'error' }));
+      send('log', { line: 'The shutdown was cancelled — the connection was taken down for it; reconnect to bring it back', level: 'warn' });
+      reportReconnectFailed('shutdown-cancelled', { ok: false });
     }
   }, 60000);
   timer.unref();

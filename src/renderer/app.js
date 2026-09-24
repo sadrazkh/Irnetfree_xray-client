@@ -1973,6 +1973,11 @@ const DROP_REASONS = ['core-exited', 'tunnel-exited', 'reload-failed'];
 function reconnectingKey() {
   return DROP_REASONS.includes(state.reconnectReason) ? 'state.reconnectingDrop' : 'state.reconnecting';
 }
+/** What a give-up says: a cancelled shutdown, a drop, or the network moving. */
+function failedKey(reason) {
+  if (reason === 'shutdown-cancelled') return 'net.shutdownCancelled';
+  return DROP_REASONS.includes(reason) ? 'net.dropFailed' : 'net.failed';
+}
 window.api.onStatus((d) => {
   if (d.state === 'connected') {
     state.connected = true;
@@ -2054,7 +2059,7 @@ window.api.onStatus((d) => {
     } else {
       state.connected = false;
       setConnUI('error');
-      toast(t(DROP_REASONS.includes(d.reason) ? 'net.dropFailed' : 'net.failed'), 'err', 8000);
+      toast(t(failedKey(d.reason)), 'err', 8000);
     }
   } else if (d.state === 'cleanup-failed') {
     // The state IS the code; `d.error` carries it too, for a headless consumer.
