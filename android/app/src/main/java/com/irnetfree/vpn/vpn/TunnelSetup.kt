@@ -40,12 +40,38 @@ object TunnelSetup {
     }
 }
 
+/**
+ * When a START_STICKY restart (the process was killed under a live tunnel)
+ * connects by itself again. At once — unless the previous attempt was under
+ * two minutes ago: that is a crash loop (a config that takes the core down as
+ * it starts, a native crash IRApp's handler never sees), and connecting at
+ * once only repeats it. It then waits 30 s, 60 s, then 120 s each time, and
+ * keeps trying: giving up left a phone under lockdown with no internet until
+ * somebody opened the app.
+ */
 object StickyRestart {
+    /** A restart this soon after the previous attempt is the same crash again. */
     const val WINDOW_MS = 120_000L
 
+    /** [attemptAt]: when this restart connects — what the next one measures from. */
     class Next(val streak: Int, val waitMs: Long, val attemptAt: Long)
 
-    fun next(lastAttemptAt: Long, streak: Int, now: Long): Next = Next(0, 0L, now)
+    /**
+     * [lastAttemptAt]/[streak]: what the previous restart stored (0 = none).
+     * A restart before that attempt was even due — killed while it waited —
+     * counts as the same loop; one from a clock set far back does not.
+     */
+    fun next(lastAttemptAt: Long, streak: Int, now: Long): Next {
+        val gap = now - lastAttemptAt
+        val s = if (lastAttemptAt > 0L && gap >= -WINDOW_MS && gap < WINDOW_MS) (streak + 1).coerceAtMost(100) else 0
+        val wait = when {
+            s <= 0 -> 0L
+            s == 1 -> 30_000L
+            s == 2 -> 60_000L
+            else -> 120_000L
+        }
+        return Next(s, wait, now + wait)
+    }
 }
 
 /**
