@@ -43,6 +43,27 @@ test('command names are read the same on every OS, Windows paths included', () =
   assert.equal(commandName('/opt/homebrew/bin/node'), 'node', 'not on the list, so it runs');
 });
 
+test('a shell running one of OUR privileged script files is refused; a syntax check or a repo script is not', () => {
+  const os = require('node:os');
+  const { blocked } = require('./noNetwork.preload.js');
+  const tmp = os.tmpdir();
+  // leakGuard._privileged, the TUN backends' setup/teardown scripts
+  assert.equal(blocked('/bin/bash', [path.join(tmp, 'irnf-lg-abc', 'restore.sh')]), true);
+  assert.equal(blocked('bash', [path.join('/Users/a/Library/Application Support/IRNetFree', 'mac-tun-sessions', 'irnf-sb-1', 'teardown.sh')]), true);
+  assert.equal(blocked('sh', [path.join(tmp, 'x', 'setup.sh')]), true);
+  assert.equal(blocked('bash', ['-n', path.join(tmp, 'irnf-lg-abc', 'restore.sh')]), false, 'bash -n executes nothing');
+  assert.equal(blocked('bash', ['--noprofile', '--norc', '-eo', 'pipefail', path.join(__dirname, '..', 'scripts', 'x.sh')]), false, 'a repo script');
+  assert.equal(blocked('node', [path.join(tmp, 'a.sh')]), false);
+});
+
+test('the failed child a refused spawn returns can be unref’d and ref’d like a real one', { skip: !guarded }, () => {
+  const child = cp.spawn('reg', ['query', 'HKCU\\Software\\IRNetFree-guard-test']);
+  child.on('error', () => {});
+  assert.equal(typeof child.unref, 'function');
+  assert.equal(typeof child.ref, 'function');
+  assert.doesNotThrow(() => { child.unref(); child.ref(); });
+});
+
 test('everything else still runs', { skip: !guarded }, () => {
   assert.equal(cp.execFileSync(process.execPath, ['-e', 'process.stdout.write("ok")'], { encoding: 'utf8' }), 'ok');
 });
