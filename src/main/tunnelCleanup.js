@@ -2,17 +2,18 @@
 
 // Failed macOS teardown must remain retryable. Other platforms retain their
 // existing best-effort behavior; this does not change their networking policy.
-async function stopTrackedTunnels(started, current, platform = process.platform) {
+// `stopOpts` go to every tunnel's stop() — `{ keepDns: true }` for a reconnect.
+async function stopTrackedTunnels(started, current, platform = process.platform, stopOpts) {
   const all = new Set(started);
   if (current) all.add(current);
   if (platform !== 'darwin') {
     started.clear();
-    for (const tunnel of all) { try { await tunnel.stop(); } catch {} }
+    for (const tunnel of all) { try { await tunnel.stop(stopOpts); } catch {} }
     return;
   }
   const failures = [];
   for (const tunnel of all) {
-    try { await tunnel.stop(); started.delete(tunnel); }
+    try { await tunnel.stop(stopOpts); started.delete(tunnel); }
     catch (error) {
       if (platform === 'darwin') { started.add(tunnel); failures.push(error); }
       else started.delete(tunnel);

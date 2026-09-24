@@ -1,7 +1,7 @@
 'use strict';
 /**
- * Who wrote a macOS tunnel journal — shared by both backends (tunSingbox.js,
- * tunManager.js).
+ * Who wrote a macOS tunnel journal, and what a reconnect hands to the next one
+ * (at the end) — shared by both backends (tunSingbox.js, tunManager.js).
  *
  * Every journal names the app process that started its tunnel (`ownerPid`), so
  * a second instance never tears down a tunnel a live one is using. A pid alone
@@ -70,4 +70,30 @@ function pidAlive(pid, probe = defaultProbe) {
   return Number.isInteger(pid) && pid > 1 && probe.signal(pid) !== 'gone';
 }
 
-module.exports = { signalState, processIdentity, defaultProbe, ownerRecord, ownerAlive, pidAlive };
+/*
+ * What a reconnect hands over. Its stop keeps the service on the tunnel's
+ * resolver (`keepDns`: the leak guard is holding it there), so the next start
+ * of this app would read THAT back as the service's original DNS and journal
+ * it — and a disconnect, or a crash recovery, would then "restore" a resolver
+ * that routes nowhere. The stopping session leaves its originals here, keyed
+ * like the session lock; the next start takes them while the service still
+ * lists only what a tunnel set. Anything else is a change made in between, and
+ * the fresh reading wins.
+ */
+const dnsHandover = new Map();
+
+function handOverDns(key, st) {
+  if (!st || !st.service || !Array.isArray(st.savedDns) || !Array.isArray(st.tunDns)) return;
+  dnsHandover.set(key, { service: st.service, savedDns: st.savedDns.slice(), tunDns: st.tunDns.slice() });
+}
+
+function takeHandedOverDns(key, service, current) {
+  const h = dnsHandover.get(key);
+  dnsHandover.delete(key);
+  if (!h || h.service !== service) return null;
+  const set = new Set(h.tunDns.map(s => String(s).toLowerCase()));
+  const now = (current || []).map(s => String(s).toLowerCase());
+  return now.length && now.every(s => set.has(s)) ? h.savedDns.slice() : null;
+}
+
+module.exports = { signalState, processIdentity, defaultProbe, ownerRecord, ownerAlive, pidAlive, handOverDns, takeHandedOverDns };

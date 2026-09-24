@@ -460,7 +460,11 @@ class TunSingbox {
 
     const service = await platform.serviceForDeviceMac(route.device);
     if (!service) throw new Error('No physical macOS network service found; TUN DNS cannot be configured');
-    const savedDns = await platform.getServiceDnsMac(service, { strict: true });
+    let savedDns = await platform.getServiceDnsMac(service, { strict: true });
+    // After a reconnect's stop (keepDns) the service still lists the tunnel's
+    // resolver: the originals come from the session before, not from it.
+    const handedOver = macOwner.takeHandedOverDns(this.macOwnerKey, service, savedDns);
+    if (handedOver) savedDns = handedOver;
     const dns = this.adapterDns(dnsServers, opts);
 
     const ips = await this.bypassIps(bypassAddrs);
@@ -478,7 +482,7 @@ class TunSingbox {
     // Pre-create root-written output files as the app user so they remain readable.
     for (const file of [logFile, pidFile, devFile, identityFile]) fs.writeFileSync(file, '', { mode: 0o600 });
     const owner = await macOwner.ownerRecord(this.probe);   // pid + start time: a reused pid is not us
-    this.macState = { work, bin, cfgFile, logFile, pidFile, devFile, identityFile, dnsFile, service, savedDns, macPid: null, dev: '', ...owner };
+    this.macState = { work, bin, cfgFile, logFile, pidFile, devFile, identityFile, dnsFile, service, savedDns, tunDns: [...dns.v4, ...dns.v6], macPid: null, dev: '', ...owner };
     this.saveMacSession();
     fs.writeFileSync(teardownPath, buildMacTeardownScript(this.macState), { mode: 0o700 });
     fs.writeFileSync(setupPath, buildMacSetupScript({
@@ -639,18 +643,21 @@ class TunSingbox {
     this.macHealthTimer = null;
   }
 
-  async stopMac() {
+  /** `opts.keepDns`: a reconnect's stop — see buildMacTeardownScript. */
+  async stopMac(opts = {}) {
     if (this.macStopPromise) return this.macStopPromise;
     if (!this.macState) return;
     const st = this.macState;
+    const keepDns = !!(opts && opts.keepDns);
     this.stopping = true;
     this.stopMacLogTail(); this.stopMacHealthCheck();
     this.macStopPromise = (async () => {
       const teardownPath = path.join(st.work, 'teardown.sh');
       try {
         if (fs.existsSync(teardownPath) && fs.lstatSync(teardownPath).isSymbolicLink()) throw new Error('Invalid tunnel teardown path');
-        fs.writeFileSync(teardownPath, buildMacTeardownScript({ ...st, pid: st.macPid }), { mode: 0o700 });
+        fs.writeFileSync(teardownPath, buildMacTeardownScript({ ...st, pid: st.macPid, keepDns }), { mode: 0o700 });
         await platform.runScriptPrivileged(teardownPath);
+        if (keepDns && st.dnsFile && fs.existsSync(st.dnsFile)) macOwner.handOverDns(this.macOwnerKey, st);
         fs.rmSync(st.work, { recursive: true, force: true });
         this.work = null; this.macState = null; this.active = false; this.excludeIps = [];
         if (!this.macStartPromise && macOwners.get(this.macOwnerKey) === this) macOwners.delete(this.macOwnerKey);
@@ -714,7 +721,8 @@ class TunSingbox {
     return this.startLinux(socksPort, bypassAddrs, dnsServers, o);
   }
 
-  async stop() {
+  /** `opts.keepDns` (macOS): a reconnect's stop leaves the service's DNS where the guard holds it. */
+  async stop(opts = {}) {
     // A stop during the administrator prompt must wait until setup has either
     // completed or rolled back, before deleting scripts or recovery files.
     if (this.platform === 'darwin' && this.macStartPromise) {
@@ -722,7 +730,7 @@ class TunSingbox {
     }
     if (!this.active && !this.proc && !this.macState) return;
     if (this.platform === 'darwin') {
-      await this.stopMac();
+      await this.stopMac(opts);
       this.onLog('TUN mode stopped.', 'info');
       return;
     }

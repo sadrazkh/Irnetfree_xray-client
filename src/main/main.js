@@ -1038,13 +1038,15 @@ async function doConnect(serverId, opts = {}) {
           // is and only widens the firewall's holes to cover the server about
           // to be dialled; the engage below narrows them back again. The order
           // is a contract; it is written out above `class LeakGuard`.
+          let hold = null;
           try {
-            if (!tun?.managesDns) await leakGuard.holdForReconnect({
+            if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
               excludes: await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []),
               token: guardToken
             });
           } catch {}
-          if (process.platform === 'darwin') await myTun.stop();
+          // keepDns: the held override stays on the main service too (see reapplyConnection).
+          if (process.platform === 'darwin') await myTun.stop({ keepDns: !!(hold && hold.held) });
           else { try { await myTun.stop(); } catch {} }
         }
         // The per-app split, decided once and told to the user when it is
@@ -1291,6 +1293,7 @@ async function reapplyConnection() {
     // adapters point at a peer that routes nowhere. That is the correct
     // failure — closed, not open — and if the retries are given up on, the
     // banner offers the way out (see runRecovery).
+    let hold = null;
     try {
       if (leakGuard) {
         // The same server is being rebuilt, so its entry addresses are already
@@ -1300,12 +1303,14 @@ async function reapplyConnection() {
         // the serverId.
         let entries = [];
         try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
-        if (!tun?.managesDns) await leakGuard.holdForReconnect({
+        if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
           excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
         });
       }
     } catch {}
-    await stopAllTuns();
+    // macOS: while the guard holds, the tunnel's teardown must not put the
+    // main service back on the ISP's DNS either (keepDns) — only a disconnect does.
+    await stopAllTuns({ keepDns: !!(hold && hold.held) });
     try { await setSystemProxy(false, {}); } catch {}
     try { await removeLanFirewall(); } catch {}
     if (xray) await xray.stop();
@@ -1618,9 +1623,9 @@ function stopNetWatcher() {
  * overlapping connect can leave an older instance holding the machine's routes
  * with nothing else pointing at it (see startedTuns).
  */
-async function stopAllTuns() {
+async function stopAllTuns(opts) {
   dnsGuardWatch?.stop();
-  await stopTrackedTunnels(startedTuns, tun);
+  await stopTrackedTunnels(startedTuns, tun, process.platform, opts);
 }
 
 /** The same sweep for the exit hook, where nothing can be awaited. */

@@ -1,7 +1,10 @@
 'use strict';
 const { sh } = require('./tunPlatform');
 const dnsArgs = values => (values && values.length ? values : ['Empty']).map(sh).join(' ');
-function buildMacTeardownScript({ pid, bin, cfgFile, pidFile = cfgFile + '.pid', identityFile = cfgFile + '.identity', dnsFile = cfgFile + '.dns', service, savedDns }) {
+// `keepDns`: a reconnect's stop. The leak guard is holding every service on the
+// tunnel's resolver, so the ISP's DNS must not come back for the rebuild; only
+// a real disconnect (or a recovery) restores it.
+function buildMacTeardownScript({ pid, bin, cfgFile, pidFile = cfgFile + '.pid', identityFile = cfgFile + '.identity', dnsFile = cfgFile + '.dns', service, savedDns, keepDns = false }) {
   return `#!/bin/bash
 PIDFILE=${sh(pidFile)}
 IDENTITY=${sh(identityFile)}
@@ -27,7 +30,7 @@ elif [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null && [ ! -s "$IDENTITY" ]; then
   echo 'Missing tunnel process identity; recovery retained' >&2
   exit 24
 fi
-${service ? `if [ -f "$DNSFILE" ]; then
+${service && !keepDns ? `if [ -f "$DNSFILE" ]; then
   networksetup -setdnsservers ${sh(service)} ${dnsArgs(savedDns)} || exit 25
   rm -f "$DNSFILE"
 fi` : 'true'}

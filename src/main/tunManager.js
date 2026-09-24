@@ -355,7 +355,11 @@ class TunManager {
     this.onLog(`Default gateway: ${route.gateway} (dev ${route.device})`, 'info');
 
     const service = await this.serviceForDeviceMac(route.device);
-    const savedDns = service ? await this.getServiceDnsMac(service) : [];
+    let savedDns = service ? await this.getServiceDnsMac(service) : [];
+    // After a reconnect's stop (keepDns) the service still lists the tunnel's
+    // resolver: the originals come from the session before, not from it.
+    const handedOver = service && macOwner.takeHandedOverDns(this.macOwnerKey, service, savedDns);
+    if (handedOver) savedDns = handedOver;
 
     const ips = await this.resolveServerIps(serverAddress);
     if (!ips.length) this.onLog(this.msg(
@@ -378,7 +382,7 @@ class TunManager {
 
     for (const file of [logFile, pidFile, devFile, identityFile, routesFile]) fs.writeFileSync(file, '', { mode: 0o600 });
     const owner = await macOwner.ownerRecord(this.probe);   // pid + start time: a reused pid is not us
-    this.macState = { ...owner, work, logFile, pidFile, devFile, identityFile, dnsFile, routesFile, service, savedDns, gateway: route.gateway, bypassIps: ips, reqDev, macPid: null, dev: '', identity: '', expectedCommand: `${bin} -device ${reqDev} -proxy socks5://127.0.0.1:${socksPort} -loglevel warn` };
+    this.macState = { ...owner, work, logFile, pidFile, devFile, identityFile, dnsFile, routesFile, service, savedDns, tunDns: [dns1, dns2].filter(Boolean), gateway: route.gateway, bypassIps: ips, reqDev, macPid: null, dev: '', identity: '', expectedCommand: `${bin} -device ${reqDev} -proxy socks5://127.0.0.1:${socksPort} -loglevel warn` };
     this.saveMacSession();
     fs.writeFileSync(teardownPath, this.macTeardownScript(), { mode: 0o700 });
     const bypassAdd = ips.map(ip => `if route -n add -host ${sh(ip)} ${sh(route.gateway)} >/dev/null 2>&1; then echo ${sh(ip)} >> ${sh(routesFile)} || exit 13; fi`).join('\n');
@@ -587,7 +591,8 @@ class TunManager {
     return count;
   }
 
-  macTeardownScript() {
+  /** `opts.keepDns`: a reconnect's stop — the leak guard holds the service's DNS; only a disconnect restores it. */
+  macTeardownScript(opts = {}) {
     const st = this.macState || {};
     const dns1 = (st.savedDns && st.savedDns.length) ? st.savedDns.map(sh).join(' ') : 'Empty';
     const lines = ['#!/bin/bash'];
@@ -617,30 +622,33 @@ class TunManager {
     for (const ip of (st.bypassIps || [])) {
       lines.push(`if grep -Fxq -- ${sh(ip)} ${sh(st.routesFile)} 2>/dev/null; then route -n delete -host ${sh(ip)} ${sh(st.gateway)} 2>/dev/null || true; fi`);
     }
-    if (st.service) lines.push(`if [ -f ${sh(st.dnsFile)} ]; then networksetup -setdnsservers ${sh(st.service)} ${dns1} || exit 25; rm -f ${sh(st.dnsFile)}; fi`);
+    if (st.service && !opts.keepDns) lines.push(`if [ -f ${sh(st.dnsFile)} ]; then networksetup -setdnsservers ${sh(st.service)} ${dns1} || exit 25; rm -f ${sh(st.dnsFile)}; fi`);
     lines.push('exit 0', '');
     return lines.join('\n');
   }
 
-  async stopMac() {
+  async stopMac(opts = {}) {
     if (this.macStopPromise) return this.macStopPromise;
     if (!this.macState) return;
-    this.macStopPromise = this.finishMacStop();
+    this.macStopPromise = this.finishMacStop(opts);
     try { return await this.macStopPromise; } finally { this.macStopPromise = null; }
   }
 
-  async finishMacStop() {
+  async finishMacStop(opts = {}) {
     this.stopMacLogTail();
-    const work = this.macState.work;
+    const st = this.macState;
+    const work = st.work;
+    const keepDns = !!(opts && opts.keepDns);
     const teardownPath = path.join(work, 'teardown.sh');
     try {
       if (fs.existsSync(teardownPath) && fs.lstatSync(teardownPath).isSymbolicLink()) throw new Error('Invalid tunnel teardown path');
-      fs.writeFileSync(teardownPath, this.macTeardownScript(), { mode: 0o700 });
+      fs.writeFileSync(teardownPath, this.macTeardownScript({ keepDns }), { mode: 0o700 });
       await this.runScriptPrivileged(teardownPath);
     } catch (e) {
       this.onLog('TUN teardown: ' + (e.message || e), 'warn');
       throw e;
     }
+    if (keepDns && st.dnsFile && fs.existsSync(st.dnsFile)) macOwner.handOverDns(this.macOwnerKey, st);
     fs.rmSync(work, { recursive: true, force: true });
     this.macState = null;
     this.bypassIps = [];
@@ -692,7 +700,8 @@ class TunManager {
     return this.startLinux(socksPort, serverAddress);
   }
 
-  async stop() {
+  /** `opts.keepDns` (macOS): a reconnect's stop leaves the service's DNS where the guard holds it. */
+  async stop(opts = {}) {
     if (os.platform() === 'darwin' && this.macStartPromise) await this.macStartPromise.catch(() => {});
     if (!this.active && !this.proc && !this.macState) return;
     const plat = os.platform();
@@ -700,7 +709,7 @@ class TunManager {
     if (plat === 'win32') {
       await this.cleanupRoutesWindows().catch(() => {});
     } else if (plat === 'darwin') {
-      await this.stopMac();
+      await this.stopMac(opts);
       this.active = false;
       this.onLog('TUN mode stopped.', 'info');
       return;
