@@ -37,6 +37,7 @@ const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = requir
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
 const { NetWatcher, fingerprint } = require('./netWatcher');
+const { DropBudget } = require('./dropBudget');
 const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe } = require('./autostart');
 const { trayGroups } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
@@ -86,6 +87,9 @@ let recovering = false;        // a network-change recovery is in flight
 let recoverQueued = null;      // reason of a trigger that arrived during that recovery
 let recoverGen = 0;            // bumped by doDisconnect(); an older recovery no longer owns `recovering`
 const RECOVER_BACKOFF_MS = [2000, 5000, 15000];
+// Drops the connection may take on its own (core exit, TUN death, failed reload)
+// before the app stops rebuilding it — see onConnectionDrop / dropBudget.js.
+const drops = new DropBudget();
 // Bumped by doDisconnect() and by every doConnect(). doConnect awaits half a
 // dozen times and the user can press the power button in any of those gaps: from
 // that moment the older call no longer speaks for the app, so it must not emit a
@@ -238,7 +242,7 @@ function makeTun(settings, { quiet = false } = {}) {
       if (userDisconnecting || isQuitting || tun !== selected) return;
       // every platform now: the backends report a tunnel that died on its own
       send('log', { line: 'The tunnel exited unexpectedly; checking recovery', level: 'error' });
-      recoverFromNetworkChange('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
+      onConnectionDrop('tunnel-exited').catch(e => send('log', { line: e.message, level: 'error' }));
     } };
   if (process.platform === 'darwin' && settings.tunBackend === 'native-macos') return (selected = new NativeMacTun(opts));
   const sb = new TunSingbox(opts);
@@ -443,7 +447,7 @@ function trayMenuTemplate() {
   const active = store.get('activeServerId', null);
   const item = (it) => ({
     label: (it.id === active ? '● ' : '') + it.name,
-    click: () => doConnect(it.id).catch((e) => send('log', { line: 'Connect failed: ' + e.message, level: 'error' }))
+    click: () => { drops.reset(); doConnect(it.id).catch((e) => send('log', { line: 'Connect failed: ' + e.message, level: 'error' })); }
   });
   const groups = trayGroups(store.get('servers', []), store.get('subscriptions', [])).map((g) => ({
     label: g.label || (en ? 'Servers' : 'سرورها'),
@@ -1373,6 +1377,7 @@ async function rebuildActiveConfig() {
   // doesn't flash "disconnected" during the reload.
   const prevReloading = xrayReloading;
   xrayReloading = true;
+  let lostCore = false;
   try {
     const check = await xray.validateWithFallback(config, engine);
     if (!check.ok) throw new Error(check.error);
@@ -1382,8 +1387,16 @@ async function rebuildActiveConfig() {
     // this restarts the core WITHOUT stopping the poller, so the meter has to
     // hear about it here too — same reason as the connect path
     if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
+  } catch (e) {
+    // start() stops the old core before it launches the new one, and the flag
+    // above swallowed BOTH stops: a start that failed leaves no core at all
+    // while the TUN, the DNS override and the proxy still point at it, and the
+    // UI still says connected. That is a drop like any other.
+    lostCore = !xray.running;
+    throw e;
   } finally {
     xrayReloading = prevReloading;
+    if (lostCore) onConnectionDrop('reload-failed').catch((e) => send('log', { line: 'Recovery after the failed reload failed: ' + ((e && e.message) || e), level: 'error' }));
   }
   // NOTE: appliedSettings is deliberately left alone. This path rebuilds only the
   // xray config; the connect-time side effects (system proxy, TUN, LAN firewall)
@@ -1472,9 +1485,15 @@ async function runRecovery(reason, attempt) {
   clearTimeout(recoverTimer);
   recoverTimer = null;
 
-  send('log', { line: `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
+  // A drop (onConnectionDrop) takes this same path; the log says which it was.
+  const dropped = DROP_REASONS.has(reason);
+  send('log', { line: dropped ? `The connection dropped (${reason}) — rebuilding it` : `Network changed (${reason}) — rebuilding the connection`, level: 'warn' });
   send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
-  if (attempt === 0) notify('IRNetFree', isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد');
+  if (attempt === 0) {
+    notify('IRNetFree', dropped
+      ? (isEn() ? 'Connection dropped — reconnecting' : 'اتصال قطع شد — در حال اتصال مجدد')
+      : (isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد'));
+  }
 
   // Pick the rebuild path by what the core is ACTUALLY doing. Both paths answer
   // in the same { ok, tunError, error } shape.
@@ -1542,37 +1561,108 @@ async function runRecovery(reason, attempt) {
   }
   const delay = RECOVER_BACKOFF_MS[attempt];
   if (delay == null) {
-    // "Nothing came back" and "everything came back except TUN" are different
-    // failures: on the second, xray is running and the proxy ports carry traffic,
-    // so painting the UI red would be a lie. `proxyUp` is what tells them apart.
-    const proxyUp = !!(res && res.ok);
+    const proxyUp = !!(res && res.ok);   // see reportReconnectFailed
     send('log', {
       line: proxyUp
         ? 'Could not bring the system-wide tunnel back after the network change — giving up (the proxy is still up)'
         : 'Could not reconnect after the network change — giving up',
       level: 'error'
     });
-    // The guard is STILL engaged, on purpose: it was held across every attempt
-    // so the ISP never answered a lookup. Giving up therefore leaves the
-    // machine unable to resolve — and at the strict level unable to reach
-    // anything. That is the safe failure, but it must be SAID, or a leak has
-    // simply been traded for a mystery. `guardHeld` drives a banner whose
-    // button calls guard:release.
-    let guardHeld = false;
-    try { guardHeld = !!(leakGuard && leakGuard.readState()); } catch { /* no state, nothing held */ }
-    if (guardHeld) {
-      send('log', {
-        line: 'Your adapters are still pointed at the tunnel, so nothing is leaking — but names will not resolve until you reconnect or restore them from the banner',
-        level: 'warn'
-      });
-    }
-    send('status', { state: 'reconnect-failed', reason, proxyUp, guardHeld, tunError: (res && res.tunError) || null });
-    notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
+    reportReconnectFailed(reason, res);
     return;
   }
   send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
   recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt + 1), delay);
   if (recoverTimer.unref) recoverTimer.unref();
+}
+
+/**
+ * Giving up on a connection the user still wants: every automatic rebuild is
+ * spent. `res` is the last attempt's { ok, tunError } — ok means the core and
+ * the proxy are up and only the system-wide tunnel is missing.
+ */
+function reportReconnectFailed(reason, res) {
+  // "Nothing came back" and "everything came back except TUN" are different
+  // failures: on the second, xray is running and the proxy ports carry traffic,
+  // so painting the UI red would be a lie. `proxyUp` is what tells them apart.
+  const proxyUp = !!(res && res.ok);
+  // The guard is STILL engaged, on purpose: it was held across every attempt
+  // so the ISP never answered a lookup. Giving up therefore leaves the
+  // machine unable to resolve — and at the strict level unable to reach
+  // anything. That is the safe failure, but it must be SAID, or a leak has
+  // simply been traded for a mystery. `guardHeld` drives a banner whose
+  // button calls guard:release.
+  let guardHeld = false;
+  try { guardHeld = !!(leakGuard && leakGuard.readState()); } catch { /* no state, nothing held */ }
+  if (guardHeld) {
+    send('log', {
+      line: 'Your adapters are still pointed at the tunnel, so nothing is leaking — but names will not resolve until you reconnect or restore them from the banner',
+      level: 'warn'
+    });
+  }
+  send('status', { state: 'reconnect-failed', reason, proxyUp, guardHeld, tunError: (res && res.tunError) || null });
+  notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
+}
+
+/** The recovery reasons that are a drop of the connection, not the network moving. */
+const DROP_REASONS = new Set(['core-exited', 'tunnel-exited', 'reload-failed']);
+
+/**
+ * The connection dropped under us: the core exited on its own ('core-exited'),
+ * the TUN backend died ('tunnel-exited'), or a process-routing reload left no
+ * core ('reload-failed'). Nothing else notices. The TUN, the adapters' DNS
+ * override and the system proxy all still point at what is gone, so the machine
+ * reaches nothing — while the UI, on a core exit, says "Disconnected".
+ *
+ * So a drop is handled the way the network moving under the tunnel is: the kill
+ * switch (when on) closes the gap FIRST — the rebuild reads killEngaged to hold
+ * it — and then the same bounded recovery brings the connection back by itself.
+ * A connection that keeps dropping is given up on through the same
+ * reconnect-failed (see DropBudget): a core that starts, survives the grace
+ * period and dies again is a successful rebuild every time, and would loop.
+ */
+async function onConnectionDrop(reason) {
+  if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
+  updateOverlay('off');
+  const s = getSettings();
+  if (s.killSwitch) {
+    const r = await armKillSwitch();
+    send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
+    if (r && r.ok) {
+      send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
+      notify('IRNetFree', isEn() ? 'VPN dropped — internet blocked by the kill switch' : 'اتصال افتاد — اینترنت با کیل‌سوییچ بسته شد');
+    }
+    else if (process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
+  }
+  // the user may have disconnected while the rule went in
+  if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
+  if (!s.autoReconnectOnNetworkChange) {
+    // Nothing is going to rebuild it. A dead core under a live TUN, DNS override
+    // and proxy is a machine that reaches nothing while the UI says
+    // "Disconnected" — so make that true. With the kill switch on, the block IS
+    // the user's chosen answer and its banner offers the way out; a dead TUN
+    // over a live core still has a working proxy, so that is only said.
+    if (reason !== 'tunnel-exited' && !s.killSwitch) {
+      send('log', { line: `The connection dropped (${reason}) and automatic reconnect is off — disconnecting`, level: 'warn' });
+      await doDisconnect().catch(() => { /* doDisconnect reports cleanup-failed itself */ });
+    } else {
+      send('log', { line: `The connection dropped (${reason}) and automatic reconnect is off — reconnect to rebuild it`, level: 'error' });
+    }
+    return;
+  }
+  if (!drops.take()) {
+    send('log', { line: `The connection keeps dropping (${reason}) — no more automatic rebuilds until you reconnect`, level: 'error' });
+    // Leave what a failed recovery leaves: no tunnel and no system proxy aimed
+    // at a core that is gone — only the DNS guard, held on purpose (its banner
+    // gives the resolvers back) — and the kill switch as it is.
+    if (!(xray && xray.running)) {
+      try { await stopAllTuns(); } catch { /* a tunnel that will not stop is retried by the next disconnect */ }
+      try { await setSystemProxy(false, {}); } catch {}
+    }
+    reportReconnectFailed(reason, { ok: !!(xray && xray.running) });
+    return;
+  }
+  await recoverFromNetworkChange(reason);
 }
 
 /**
@@ -1641,6 +1731,7 @@ async function doDisconnect() {
     connGen++;
     recoverGen++;
     recovering = false;
+    drops.reset();                   // the next connection starts with a full budget
     stopProcWatcher();
     stopNetWatcher();                // nothing live to recover any more
     if (stats) stats.stop();
@@ -2040,7 +2131,7 @@ function registerIpc() {
     return subs.list();
   });
 
-  ipcMain.handle('connect', (e, id) => doConnect(id));
+  ipcMain.handle('connect', (e, id) => { drops.reset(); return doConnect(id); });
   ipcMain.handle('disconnect', () => doDisconnect());
 
   ipcMain.handle('settings:get', () => getSettings());
@@ -2392,8 +2483,19 @@ function registerIpc() {
   // Reconnect on demand: the same leak-free path the network-change recovery
   // uses, so the guard is held across the gap rather than released.
   ipcMain.handle('vpn:reconnect', async () => {
-    if (!store.get('activeServerId', null)) return { ok: false, error: 'not connected' };
-    try { return await reapplyConnection(); } catch (e) { return { ok: false, error: e.message }; }
+    const id = store.get('activeServerId', null);
+    if (!id) return { ok: false, error: 'not connected' };
+    drops.reset();   // the user asked: a full budget again
+    try {
+      if (xray && xray.running) return await reapplyConnection();
+      // A recovery that gave up (the banner's Retry) has no core left to
+      // rebuild around — reapplyConnection() would answer "not connected".
+      // Build it again, holding any kill-switch block until it is up.
+      const held = killEngaged;
+      const r = await doConnect(id, { holdKillSwitch: held });
+      if (held && r && r.ok) { await disarmKillSwitch(); send('killswitch', { engaged: false }); }
+      return r;
+    } catch (e) { return { ok: false, error: e.message }; }
   });
   // The way out when a reconnect has been given up on and the guard is still
   // holding: puts the adapters' own resolvers back, deliberately, on request.
@@ -2509,19 +2611,9 @@ app.whenReady().then(() => {
       // old instance's 'stopped' as a disconnect.
       if (xrayReloading && state === 'stopped') return;
       // Unexpected drop (xray died without us asking) while we believe we're
-      // connected → engage the kill switch if enabled.
+      // connected: the kill switch if enabled, then the recovery (onConnectionDrop).
       if (state === 'stopped' && !userDisconnecting && store.get('activeServerId', null)) {
-        updateOverlay('off');
-        if (getSettings().killSwitch) {
-          armKillSwitch().then((r) => {
-            send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
-            if (r && r.ok) {
-              send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
-              notify('IRNetFree', isEn() ? 'VPN dropped — internet blocked by the kill switch' : 'اتصال افتاد — اینترنت با کیل‌سوییچ بسته شد');
-            }
-            else if (process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
-          });
-        }
+        onConnectionDrop('core-exited').catch((e) => send('log', { line: 'Recovery after the core exited failed: ' + ((e && e.message) || e), level: 'error' }));
       }
       send('xray-status', { state, info });
     }
@@ -2601,7 +2693,9 @@ app.whenReady().then(() => {
   });
   dnsGuardWatch = new DnsGuardWatch({
     guard: leakGuard,
-    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading,
+    // and only over a core that is actually running: re-applying the override
+    // every 30 s for a core that died only kept the machine pointed at nothing
+    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading && !!xray?.running,
     onError: () => send('log', { line: 'DNS guard refresh failed; check network protection or reconnect.', level: 'warn' })
   });
   if (process.platform === 'darwin') {
