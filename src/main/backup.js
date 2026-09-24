@@ -54,16 +54,18 @@ function cleanSubscription(s) {
   return out;
 }
 
-function cleanChain(c) {
-  return Array.isArray(c.members) ? Object.assign({}, c, { members: c.members.filter(validId) }) : c;
+/** `refused`: ids of servers this import left out — a member naming one goes with it. */
+function cleanChain(c, refused) {
+  return Array.isArray(c.members) ? Object.assign({}, c, { members: c.members.filter(m => validId(m) && !refused.has(m)) }) : c;
 }
 
-function cleanPoolEntry(e) {
+function cleanPoolEntry(e, refused) {
   const out = Object.assign({}, e);
   for (const k of ['socksPort', 'httpPort']) if (k in e) out[k] = portOf(e[k]) || 0;
   if ('target' in e) {
     const t = typeof e.target === 'string' ? e.target : '';
-    out.target = validId(t.indexOf('chain:') === 0 ? t.slice('chain:'.length) : t) ? t : '';
+    const isChain = t.indexOf('chain:') === 0;
+    out.target = validId(isChain ? t.slice('chain:'.length) : t) && (isChain || !refused.has(t)) ? t : '';
   }
   return out;
 }
@@ -103,19 +105,24 @@ function importBundle(bundle, current) {
   if (!isObj(bundle) || bundle.app !== 'IRNetFree' || bundle.format !== 1) throw new Error('not an IRNetFree backup');
   const c = current || {};
   // `clean` returns the record as it may come in, or null to leave it out.
+  // `refused` collects the ids of records it left out.
   const merge = (have, incoming, clean) => {
     const list = Array.isArray(have) ? have : [];
     const ids = new Set(list.map(x => x && x.id));
-    const add = (Array.isArray(incoming) ? incoming : [])
-      .filter(x => isObj(x) && validId(x.id) && !ids.has(x.id))
-      .map(clean)
-      .filter(Boolean);
-    return { list: list.concat(add), n: add.length };
+    const add = [], refused = new Set();
+    for (const x of Array.isArray(incoming) ? incoming : []) {
+      if (!isObj(x) || !validId(x.id) || ids.has(x.id)) continue;
+      const kept = clean(x);
+      if (kept) add.push(kept); else refused.add(x.id);
+    }
+    for (const x of add) refused.delete(x.id);
+    return { list: list.concat(add), n: add.length, refused };
   };
   const servers = merge(c.servers, bundle.servers, cleanServer);
   const subscriptions = merge(c.subscriptions, bundle.subscriptions, cleanSubscription);
-  const chains = merge(c.chains, bundle.chains, cleanChain);
-  const pool = merge(c.pool, bundle.pool, cleanPoolEntry);
+  // a server left out for its protocol, port or outbound is not referenced either
+  const chains = merge(c.chains, bundle.chains, (x) => cleanChain(x, servers.refused));
+  const pool = merge(c.pool, bundle.pool, (x) => cleanPoolEntry(x, servers.refused));
   return {
     next: {
       servers: servers.list,
