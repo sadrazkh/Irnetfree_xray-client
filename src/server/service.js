@@ -1077,18 +1077,17 @@ function createService(opts = {}) {
 
     // Under TUN the OS default route is the tunnel, so every dial Xray makes
     // itself (direct, the anti-DPI dialers, the first hop of a chain) must be
-    // bound to the physical NIC or it re-enters the TUN and loops. Read BEFORE
-    // tun.start() — with the tunnel up the default route is the tunnel itself,
-    // which is also why a live tunnel keeps the name it was built with. Re-derived
-    // on every (re)connect, so a network change picks up the new NIC. Never
+    // bound to the physical NIC or it re-enters the TUN and loops. Read on
+    // every (re)connect — a live tunnel too: this connect rebuilds it, and the
+    // network may have moved under it (a server switch, a recovery that finds
+    // the tunnel still up). The pick never names our own adapters or their
+    // routes, so asking with the tunnel up is safe; a read that still names
+    // nothing usable keeps the name the live tunnel was built with. Never
     // persisted: effectiveSettings() is the source, the store never sees it.
     if (settings.tunMode) {
-      let name = (tun.active && liveDirectInterface) || null;
-      if (!name) {
-        const phys = await tun.physicalInterface().catch(() => null);
-        if (stale()) return abandoned;
-        name = (phys && phys.name && !isOwnTunInterface(phys.name)) ? phys.name : null;
-      }
+      const phys = await tun.physicalInterface().catch(() => null);
+      if (stale()) return abandoned;
+      const name = (phys && phys.name && !isOwnTunInterface(phys.name)) ? phys.name : ((tun.active && liveDirectInterface) || null);
       if (name) settings = Object.assign({}, settings, { directInterface: name });
       else send('log', { line: 'Could not find the physical network interface — direct traffic under TUN may loop', level: 'warn' });
       liveDirectInterface = name;

@@ -573,3 +573,22 @@ test('A2: a pool entry on a chain that lost a member refuses as well', async (t)
   await assert.rejects(s.service.invoke('connect', '__pool__'), /The chain “Tes Chain” lost a server/);
 });
 
+test('A3: a connect over a live gateway reads the NIC again instead of keeping the one the tunnel was built with', async (t) => {
+  const b = Object.assign({}, SERVER, { id: 'srv-2', name: 'second' });
+  const s = start({ servers: [SERVER, b] });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(outboundOf(configAt(s, 0), 'direct').streamSettings.sockopt.interface, 'eth0');
+  // the WAN moved while connected; the switch to B rebuilds the gateway for it
+  s.state.inners.find(i => i.active).physicalInterface = async () => ({ name: 'wan2', ifIndex: null, gateway: '10.0.0.1' });
+  await s.service.invoke('connect', 'srv-2');
+  assert.equal(outboundOf(configAt(s, 1), 'direct').streamSettings.sockopt.interface, 'wan2');
+  // a read that names nothing usable (the tunnel's own device, a failed
+  // lookup) keeps the name the live tunnel was built with
+  s.state.inners.find(i => i.active).physicalInterface = async () => ({ name: 'IRNetFree', ifIndex: null, gateway: null });
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(outboundOf(configAt(s, 2), 'direct').streamSettings.sockopt.interface, 'wan2');
+  s.state.inners.find(i => i.active).physicalInterface = async () => { throw new Error('ip: not found'); };
+  await s.service.invoke('connect', 'srv-2');
+  assert.equal(outboundOf(configAt(s, 3), 'direct').streamSettings.sockopt.interface, 'wan2');
+});
