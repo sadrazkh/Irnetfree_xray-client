@@ -7,6 +7,13 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+
+// Nothing in this file may reach the real networksetup / reg of the machine
+// running it: a path that ignores the injected exec fails here instead.
+const cp = require('node:child_process');
+cp.execFile = (cmd) => { throw new Error(`the test reached the real ${cmd}`); };
+cp.execFileSync = (cmd) => { throw new Error(`the test reached the real ${cmd}`); };
+
 const { parseMacServices, enableMac, disableMac } = require('../src/main/sysproxy');
 
 // What `networksetup -listallnetworkservices` prints on a MacBook with a

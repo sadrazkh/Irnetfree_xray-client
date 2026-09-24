@@ -13,6 +13,19 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+// shutdown() below turns the system proxy off the headless way (no journal):
+// on a Windows dev machine that was a real `reg add … ProxyEnable 0` and a
+// WinINet refresh on every `npm test`, on a Mac networksetup. Nothing in here
+// may change the network of the machine running it.
+const cp = require('node:child_process');
+const NETWORK = new Set(['reg', 'netsh', 'route', 'powershell', 'networksetup', 'gsettings', 'osascript', 'taskkill', 'ip', 'nft']);
+for (const fn of ['execFile', 'execFileSync', 'spawn']) {
+  const real = cp[fn];
+  cp[fn] = function (cmd, ...rest) {
+    if (NETWORK.has(String(cmd))) throw new Error(`the test reached the real ${cmd}`);
+    return real.call(this, cmd, ...rest);
+  };
+}
 const { createService, DEFAULT_SETTINGS } = require('../src/server/service');
 // main.js requires Electron at load, so its defaults are read as text
 const MAIN_SRC = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
