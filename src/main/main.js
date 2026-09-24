@@ -736,6 +736,8 @@ function healCertPin(line) {
   for (const s of hit) send('log', { line: `Certificate changed for ${s.name} — pin cleared, reconnect to pin the new one`, level: 'warn' });
 }
 
+const lastWgEndpointIps = new Map();   // endpoint name → the address the last connect resolved
+
 /**
  * The settings for this connect, with every WireGuard peer endpoint that is a
  * NAME resolved to an address (see configBuilder.wgEndpointHosts for why).
@@ -758,10 +760,21 @@ async function withWgEndpointIps(serverId, settings) {
   await Promise.all(hosts.map(async (h) => {
     const r = await resolveHost(h, { ipv6: !!settings.ipv6, doh: settings.dnsRemote }).catch(() => null);
     if (!r || !r.ips.length) {
+      // A recovery rebuilds with the kill switch armed and the guard held, so
+      // nothing resolves at that moment — and a name left to the core can take
+      // the official core down with it (see above). The address the tunnel was
+      // using a moment ago is the best answer there is.
+      const last = lastWgEndpointIps.get(h);
+      if (last) {
+        map[h] = last;
+        notes.push(`${h} does not resolve right now — using ${last}, the address of the last connect`);
+        return;
+      }
       send('log', { line: `Could not resolve the WireGuard endpoint ${h} — leaving it to the core`, level: 'warn' });
       return;
     }
     map[h] = r.ips[0];
+    lastWgEndpointIps.set(h, r.ips[0]);
     if (r.source === 'doh') {
       notes.push(`this network answered ${h} with ${r.suspect.join(', ')}; using ${r.ips[0]} from DoH instead`);
     } else if (r.source === 'os-suspect') {
