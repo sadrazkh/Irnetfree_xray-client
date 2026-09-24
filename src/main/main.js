@@ -419,6 +419,10 @@ function createWindow() {
     }
   });
 
+  // Windows shutdown, restart or log-off: no before-quit comes, and the process
+  // is gone seconds later — the synchronous teardown is all there is time for.
+  mainWindow.on('session-end', () => teardownSync('session-end'));
+
   // mainWindow.webContents.openDevTools({ mode: 'detach' });
 }
 
@@ -2750,6 +2754,8 @@ app.whenReady().then(() => {
   try {
     const { powerMonitor } = require('electron');
     powerMonitor.on('resume', () => { if (netWatcher) netWatcher.poke('resume'); });
+    // macOS / Linux shutdown or reboot (Windows: the window's session-end)
+    powerMonitor.on('shutdown', () => teardownSync('session-end'));
   } catch {}
 
   mainWindow.once('ready-to-show', () => {
@@ -2849,22 +2855,40 @@ app.on('window-all-closed', () => {
 // Ensure system proxy + TUN routes + kill-switch block are cleared on a hard
 // exit (Windows only) — otherwise a kill-switch block would outlive the app and
 // leave the machine with no internet.
-function teardownSync() {
+//
+// The same synchronous path runs when the SESSION ends under a live tunnel
+// (reason 'session-end'): a Windows shutdown, restart or log-off emits no
+// before-quit, so the static DNS on the tunnel peer, the strict firewall group
+// and the proxy all survived the reboot; macOS and Linux get it from
+// powerMonitor 'shutdown'. Nothing here awaits — the OS gives a few seconds —
+// and each step is bounded. It runs once: the exit hook that follows a session
+// end finds it done.
+let syncTeardownDone = false;
+function teardownSync(reason) {
   // A second instance never held any of this: its exit must not lift the first
   // one's system proxy or kill switch.
-  if (!primaryInstance) return;
+  if (!primaryInstance || syncTeardownDone) return;
+  syncTeardownDone = true;
+  // The tunnel and the core are about to go with the process: not a drop to recover.
+  isQuitting = true;
+  userDisconnecting = true;
   // The system proxy first: the fastest step, and the one every browser depends
   // on. Only what the journal says we set, put back as it was — no journal, no
   // write (a blind ProxyEnable=0 here killed a corporate proxy on every exit).
   try { restoreSystemProxySync(); } catch {}
+  // A kill-switch block that outlives the app is a machine with no internet —
+  // after a reboot too, until the app is started again. Fast, so before the
+  // slow PowerShell restore below.
+  if (process.platform === 'win32') {
+    try { require('child_process').execFileSync('netsh',
+      ['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`], { windowsHide: true, timeout: 5000 }); } catch {}
+  }
   try { if (store) store.flush(); } catch {}   // a coalesced write must not die with the process
   // The DNS override outlives the app if nobody puts it back, so it goes before
   // the win32 gate below: on macOS (when we are already root) this is the last
   // chance to restore it without a password prompt nobody can answer here.
   try { if (leakGuard) leakGuard.releaseSync(); } catch {}
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32' && reason === 'exit') return;
   cleanupAllTunsSync();   // every backend a connect started, either kind
-  try { require('child_process').execFileSync('netsh',
-    ['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`], { windowsHide: true }); } catch {}
 }
-process.on('exit', () => teardownSync());
+process.on('exit', () => teardownSync('exit'));

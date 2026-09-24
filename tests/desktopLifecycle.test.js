@@ -108,6 +108,33 @@ test('quitting restores the proxy (and on macOS stops the core) before the steps
   assert.ok(macCore !== -1 && macCore < mac, 'macOS: the core stops before the privileged steps too');
 });
 
+/* ------------------ W7: shutdown, restart or log-off while connected ------------------ */
+
+test('a Windows session end and a macOS/Linux shutdown run the synchronous teardown', () => {
+  // Electron emits no before-quit for a Windows shutdown / restart / log-off:
+  // the static DNS on the tunnel peer, the strict firewall group and the proxy
+  // all survived the reboot.
+  const win = slice('function createWindow() {', '\n}');
+  assert.match(win, /mainWindow\.on\('session-end', \(\) => teardownSync\('session-end'\)\);/);
+  assert.match(WHEN_READY, /powerMonitor\.on\('shutdown', \(\) => teardownSync\('session-end'\)\);/);
+});
+
+test('the synchronous teardown runs once, says it is quitting first, and covers the tunnel and the kill switch', () => {
+  const sync = slice('function teardownSync(reason) {', '\n}');
+  assert.match(sync, /if \(!primaryInstance \|\| syncTeardownDone\) return;\n\s*syncTeardownDone = true;/, 'session-end and then exit: once');
+  const quitting = sync.indexOf('isQuitting = true;');
+  const disc = sync.indexOf('userDisconnecting = true;');
+  assert.ok(quitting !== -1 && disc !== -1, 'a tunnel killed on the way out must not be reported as a drop to recover');
+  for (const step of ['restoreSystemProxySync()', 'leakGuard.releaseSync()', 'cleanupAllTunsSync()', 'name=${KILL_RULE}']) {
+    const at = sync.indexOf(step);
+    assert.notEqual(at, -1, `teardownSync: ${step} is gone`);
+    assert.ok(quitting < at && disc < at, `${step} runs before the quitting flags are up`);
+  }
+  // the exit hook keeps its old platform gate for the tunnels; a session end sweeps them everywhere
+  assert.match(sync, /if \(process\.platform !== 'win32' && reason === 'exit'\) return;\n\s*cleanupAllTunsSync\(\);/);
+  assert.match(MAIN, /process\.on\('exit', \(\) => teardownSync\('exit'\)\);/);
+});
+
 /* ------------------------- W5: a connection that drops ------------------------- */
 
 /** The drop handler's source — read per test, so a missing one fails that test, not the file. */
