@@ -21,7 +21,7 @@ object SingboxConfig {
 
     class Unsupported(msg: String) : Exception(msg)
 
-    fun build(server: ServerConfig, s: AppSettings): JSONObject {
+    fun build(server: ServerConfig, s: AppSettings, auth: LocalAuth? = null): JSONObject {
         val listen = "127.0.0.1"
         val inbounds = JSONArray()
             .put(JSONObject().put("type", "socks").put("tag", "socks-in").put("listen", listen).put("listen_port", s.socksPort))

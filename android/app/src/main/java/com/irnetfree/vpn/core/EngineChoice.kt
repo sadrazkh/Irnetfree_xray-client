@@ -54,4 +54,6 @@ object EngineChoice {
 
     /** Throwaway latency tests use an Xray-format core (buildTestConfig is Xray JSON). */
     fun testEngineFor(engineId: String?): String = if (engineId == PATTN) PATTN else XRAY
+
+    fun testEngineFor(server: ServerConfig, defaultEngine: String = XRAY): String = testEngineFor(server.engine)
 }

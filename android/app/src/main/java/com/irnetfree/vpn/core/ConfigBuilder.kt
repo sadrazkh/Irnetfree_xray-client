@@ -34,7 +34,7 @@ object ConfigBuilder {
      * `wgEndpointHosts`. Handed in through the settings-like `wgEndpointIps` map
      * (the desktop's `settings.wgEndpointIps`).
      */
-    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap()): JSONObject {
+    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null): JSONObject {
         val listen = "127.0.0.1"
         val sniffing = if (s.enableSniffing)
             JSONObject().put("enabled", true).put("destOverride", JSONArray().put("http").put("tls").put("quic")).put("routeOnly", false)
@@ -527,7 +527,7 @@ object ConfigBuilder {
     }
 
     /** A minimal test config: one socks inbound -> the given server (with fragment, pin, endpoint as stored). */
-    fun buildTestConfig(server: ServerConfig, socksPort: Int): JSONObject {
+    fun buildTestConfig(server: ServerConfig, socksPort: Int, wgEndpointIps: Map<String, String> = emptyMap()): JSONObject {
         val proxy = cloneOut(server.outbound, "proxy", server)
         widenWgAllowedIps(proxy); sanitizeWgAddress(proxy)
         val outs = applyFragments(JSONArray().put(proxy))
