@@ -756,13 +756,19 @@ function applyServerEdits(server, f) {
   // it; clearing it makes the next connect read the certificate again.
   if (f.clearCertPin) { delete out.certPin; delete out.certPinAt; }
 
-  // Which fields this edit changed, kept on the record (a union over every
-  // edit). The form re-sends every field on every save, so what counts is
-  // what differs afterwards. A subscription refresh carries exactly these
-  // over the provider's new version of the server (subscription.js) — an
-  // edit is known when it is made, never guessed from how a link parses.
+  // Which fields the user edited, kept on the record (a union over every
+  // edit). The form re-sends every field on every save, so a field counts
+  // only when the value SUBMITTED differs from what the form SHOWED for it
+  // (compared the way the form shows it) AND the saved record changed for it.
+  // Either alone is not an edit: a rebuild's normalisation changes the record
+  // without the user touching the field (an httpupgrade stored with no path
+  // becomes `/`), and an input the edit ignores changes nothing. A
+  // subscription refresh carries exactly these over the provider's new
+  // version of the server (subscription.js) — an edit is known when it is
+  // made, never guessed from how a link parses.
   const after = editFields(out);
-  const changed = Object.keys(after).filter(k => !DERIVED_FIELDS.includes(k) && fieldText(before[k]) !== fieldText(after[k]));
+  const changed = Object.keys(after).filter(k => !DERIVED_FIELDS.includes(k) && f[k] != null &&
+    formText(k, f[k]) !== formText(k, before[k]) && fieldText(before[k]) !== fieldText(after[k]));
   if (changed.length) {
     // A field saved back to what the server's own link gives is released:
     // it is the provider's again, and follows the provider's next change.
@@ -783,6 +789,21 @@ const DERIVED_FIELDS = ['serviceName', 'alpn'];
 function fieldText(v) {
   if (v == null || v === '') return '';
   return typeof v === 'string' ? v.trim() : JSON.stringify(v);
+}
+
+/**
+ * A value as the edit form shows and submits it: lists after splitCommas,
+ * text trimmed, a checkbox as a boolean, and the defaults the form puts in an
+ * empty field (engine `xray`, fingerprint `chrome`).
+ */
+const LIST_FIELDS = ['allowedIPs', 'localAddress', 'reserved', 'dns'];
+function formText(k, v) {
+  if (k === 'allowInsecure') return String(!!v);
+  if (LIST_FIELDS.includes(k)) return splitCommas(v).join(',');
+  const s = String(v == null ? '' : v).trim();
+  if (k === 'engine') return s || 'xray';
+  if (k === 'fp') return s || 'chrome';
+  return s;
 }
 
 /**

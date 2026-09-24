@@ -1066,6 +1066,21 @@ test('applyServerEdits records what was really saved: whitespace and a value the
   assert.equal('_edited' in out, false);
 });
 
+test('applyServerEdits records a field only when the submitted value differs from what the form showed — a rebuild’s normalisation is not an edit', () => {
+  // an httpupgrade server stored before it had settings of its own: the form
+  // shows an empty path, a rename re-submits it empty, and the rebuild makes
+  // it `/` — the user did not touch the path, and recording it would freeze
+  // the 404 the next refresh is about to repair
+  const s = parseLink('vless://u@h.example.com:443?type=httpupgrade&security=tls&sni=cdn.example.com&path=%2Fup&host=cdn.example.com#HU');
+  delete s.outbound.streamSettings.httpupgradeSettings;
+  const out = applyServerEdits(s, formFields(s, { name: 'Renamed', network: 'httpupgrade', security: 'tls', sni: 'cdn.example.com', path: '', host: '' }));
+  assert.deepEqual(out._edited, ['name']);
+  // lists are compared the way the form shows them
+  const w = parseLink('wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32&allowedips=10.0.0.0%2F8,192.168.0.0%2F16&dns=192.168.60.1,tes.systems#W');
+  const same = applyServerEdits(w, { publicKey: 'P', localAddress: '10.0.0.5/32', allowedIPs: '10.0.0.0/8, 192.168.0.0/16', dns: '192.168.60.1, tes.systems', mtu: '1420', reserved: '' });
+  assert.equal('_edited' in same, false);
+});
+
 test('applyServerEdits releases a field saved back to what the server’s own link gives', () => {
   const s = parseLink('trojan://pw@b.example.com:443?security=tls&sni=b.example.com&type=ws&path=%2Ftr&host=b.example.com&fragment=tlshello,1-2,1-2#B');
   const full = (rec, over) => formFields(rec, Object.assign({ network: 'ws', security: 'tls', sni: 'b.example.com', path: '/tr', host: 'b.example.com', fragment: 'tlshello,1-2,1-2' }, over));
