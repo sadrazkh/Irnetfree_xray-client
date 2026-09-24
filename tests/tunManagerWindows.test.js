@@ -125,6 +125,62 @@ test('win32 start: a failing v6 step is logged, its routes withdrawn, dnsPeer6 s
   } finally { h.done(); }
 });
 
+/**
+ * With managed DNS off the core hijacks nothing, so the tunnel's v6 gateway
+ * answers no query — and since the leak guard holds the physical adapters on
+ * loopback, the TUN adapter's resolvers are the only ones that answer: a dead
+ * v6 one ahead of them pushed every lookup to Windows' "all servers" step
+ * (~3 s). The v6 resolver is the peer only when the v4 one is (tunSingbox's
+ * adapterDns rule); the v6 address and routes stay either way, so v6 traffic
+ * still cannot go around the tunnel.
+ */
+test('win32 start: without the peer on v4 (managed DNS off) the adapter gets no dead v6 resolver — v6 still routes into the tunnel', async () => {
+  const h = harness();
+  try {
+    await h.tun.startWindows(10808, '1.2.3.4', ['1.1.1.1', '8.8.8.8']);
+    assert.equal(h.tun.active, true);
+    const netsh = netshLines();
+    assert.ok(netsh.includes('interface ip set dnsservers name=XrayTun static 1.1.1.1 primary validate=no'));
+    assert.ok(netsh.includes('interface ip add dnsservers name=XrayTun 8.8.8.8 index=2 validate=no'));
+    assert.equal(netsh.some(l => /ipv6 set dnsservers name=XrayTun static fdfe/.test(l)), false, 'no v6 resolver nothing answers on');
+    // loopback instead of an empty list, which Windows may fill with its
+    // fec0:0:0:ffff::1-3 placeholders (they would route into the TUN and die)
+    assert.ok(netsh.includes('interface ipv6 set dnsservers name=XrayTun static ::1 primary validate=no'));
+    assert.ok(netsh.includes(V6_LINES[0]) && netsh.includes(V6_LINES[2]) && netsh.includes(V6_LINES[3]), 'v6 address and both /1 routes');
+    assert.equal(h.tun.dnsPeer6, null, 'the adapter has no v6 resolver of ours');
+  } finally { h.done(); }
+});
+
+test('win32 start: that loopback v6 resolver failing is a warning — the v6 routes stay', async () => {
+  const h = harness([[/ipv6 set dnsservers name=XrayTun static ::1/, new Error('The parameter is incorrect.')]]);
+  try {
+    await h.tun.startWindows(10808, '1.2.3.4', ['1.1.1.1']);
+    const netsh = netshLines();
+    assert.ok(netsh.includes(V6_LINES[2]) && netsh.includes(V6_LINES[3]), 'v6 still routed into the tunnel');
+    assert.equal(netsh.some(l => /ipv6 delete route/.test(l)), false, 'and not withdrawn');
+    assert.ok(h.logs.some(([lvl, l]) => lvl === 'warn' && /v6.*The parameter is incorrect/.test(l)));
+  } finally { h.done(); }
+});
+
+test('win32 start: the TUN adapter\'s own metric and resolvers failing is said, not swallowed', async () => {
+  // The guard now holds every physical adapter on loopback: the TUN adapter's
+  // resolvers are the only ones that answer, so losing them silently is a
+  // machine with no DNS and nothing in the log.
+  const h = harness([
+    [/interface ip set interface interface=XrayTun metric=1/, new Error('The parameter is incorrect.')],
+    [/interface ip set dnsservers name=XrayTun/, new Error('The object already exists.')],
+    [/interface ip add dnsservers name=XrayTun/, new Error('Element not found.')]
+  ]);
+  try {
+    await h.tun.startWindows(10808, '1.2.3.4', ['1.1.1.1', '8.8.8.8']);
+    assert.equal(h.tun.active, true, 'still not fatal');
+    const warn = h.logs.filter(([lvl]) => lvl === 'warn').map(([, l]) => l).join('\n');
+    assert.match(warn, /metric.*The parameter is incorrect/);
+    assert.match(warn, /1\.1\.1\.1.*The object already exists/);
+    assert.match(warn, /8\.8\.8\.8.*Element not found/);
+  } finally { h.done(); }
+});
+
 test('cleanupSync (Windows) withdraws the v6 split routes with the v4 ones', { skip: process.platform !== 'win32' }, () => {
   const h = harness();
   try {

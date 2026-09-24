@@ -12,8 +12,9 @@
  *  - macOS resolves per network service; only the service that owns the default
  *    route was ours.
  *
- * So for the length of a session every physical adapter's DNS points at the
- * tunnel peer, and the originals go back afterwards. "Afterwards" includes the
+ * So for the length of a session every physical adapter's DNS is taken — on
+ * macOS pointed at the tunnel peer, on Windows held on loopback (WIN_HOLD4, and
+ * why not the peer) — and the originals go back afterwards. "Afterwards" includes the
  * ugly cases: a disconnect, a quit, a hard `process.exit`, and — because none of
  * those run when the app is killed or the machine loses power — the next launch,
  * from `userData/tun-state.json`. That file is the whole crash story: it is
@@ -28,8 +29,9 @@
  * for exactly as long as it takes to protect the machine again. So there is
  * `holdForReconnect()`: the override stays, and only the firewall's holes are
  * widened to admit the server the next tunnel is about to dial. During the gap
- * the adapters point at a peer that routes nowhere, so names simply do not
- * resolve. That is the safe answer, and it is the whole design.
+ * names simply do not resolve. That is the safe answer, and it is the whole
+ * design — and on Windows it holds only because the adapters are on loopback:
+ * with the TUN adapter gone, the peer routes out of the physical NIC.
  *
  * The other half of the same problem is ownership. Two connects can overlap,
  * and the one that loses still runs its cleanup: without a way to tell whose
@@ -64,8 +66,54 @@ const STATE_FILE = 'tun-state.json';
 /** Adapters we create ourselves — never guarded, whichever backend is live. */
 const OWN_ADAPTERS = [platform.SINGBOX_ADAPTER, platform.TUN2SOCKS_ADAPTER];
 
-/** Adapter descriptions that are not a physical NIC (ours included). */
-const VIRTUAL_RE = 'Wintun|TAP|Loopback|Hyper-V|VMware|VirtualBox|Bluetooth';
+/**
+ * Adapter descriptions the guard leaves alone: another VPN's tunnel (and ours),
+ * loopback, and the HOST-ONLY side of a hypervisor. Not "Hyper-V" or
+ * "Bluetooth": Windows asks those adapters' resolvers like any other, and they
+ * can carry real ones — the only NIC of a Windows VM on Hyper-V ("Microsoft
+ * Hyper-V Network Adapter"), the host's vEthernet on an EXTERNAL switch (the
+ * machine's real address lives there; netWatcher.js counts it for the same
+ * reason), a phone tethered over Bluetooth PAN. Excluding them left each of
+ * those machines on its router's resolver for the whole session.
+ */
+const VIRTUAL_RE = 'Wintun|TAP|Loopback|VMware Virtual Ethernet|VirtualBox Host-Only';
+
+/**
+ * What every guarded Windows adapter's resolvers are for the session, on both
+ * families: loopback. Never the tunnel peer.
+ *
+ * The peer (172.19.0.2 / fdfe:dcba:9876::2) is on-link only on the TUN adapter.
+ * Whenever that adapter does not exist — every reconnect, where the guard is
+ * held while the tunnel is rebuilt; a tunnel that crashed; an app that was
+ * killed and not yet relaunched; retries given up on with the guard holding —
+ * the only route to the peer is the physical default route, so every name the
+ * machine looks up went to the router and the ISP in cleartext, and a network
+ * that answers every port-53 packet resolved it for them. And Windows sends an
+ * adapter's queries ON that adapter, to every adapter when the preferred one is
+ * slow or answers REFUSED (smart multi-homed name resolution), so the peer on a
+ * physical adapter was never a way into the tunnel to begin with.
+ *
+ * Loopback is the one address no packet leaves the host for, tunnel or not. The
+ * TUN adapter keeps its own resolver (the backend sets it, not the guard) and is
+ * the one that answers; normally nothing listens on 127.0.0.2:53, so a query
+ * fanned out to a physical adapter fails at once instead of waiting — which
+ * also serves a core with no port-53 hijack, where the peer answered nothing
+ * and the guard had to hand the adapters public resolvers (see guardPeers).
+ * During a reconnect names do not resolve at all: closed, as the hold intends.
+ * 127.0.0.2 rather than .1 so it is never mistaken for a local DNS proxy the
+ * user configured (those listen on .1); v6 has only ::1.
+ */
+const WIN_HOLD4 = '127.0.0.2';
+const WIN_HOLD6 = '::1';
+
+/** The marker an apply script prints for an adapter family it could not set. */
+const APPLY_FAIL = 'IRNF_FAIL';
+
+/** 127.0.0.0/8 or ::1 — a resolver there is this machine, never the network. */
+function isLoopbackIp(ip) {
+  const s = String(ip == null ? '' : ip).trim().toLowerCase();
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s) || s === '::1';
+}
 
 const PS_FLAGS = ['-NoProfile', '-NonInteractive'];
 
@@ -208,6 +256,11 @@ function rangeComplement(excludes) {
  * that, so an empty one means "this family is on DHCP, put it back with
  * -ResetServerAddresses". It is also locale-independent, which `netsh`'s
  * "Statically Configured DNS Servers" heading is not.
+ *
+ * `has4` / `has6` say whether the adapter has that IP family at all — a family
+ * whose binding is off has no DNS client entry — and an adapter with neither (a
+ * NIC bound to a Hyper-V external switch or a bridge: Up, but no IP interface)
+ * is not listed: it asks no resolver, and setting one on it can only fail.
  */
 function winSnapshotScript(tunAlias) {
   const skip = [...new Set([...OWN_ADAPTERS, ...(tunAlias ? [String(tunAlias)] : [])])];
@@ -216,16 +269,21 @@ function winSnapshotScript(tunAlias) {
     ...skip.map(a => `$_.InterfaceAlias -ne ${psQuote(a)}`),
     `$_.InterfaceDescription -notmatch ${psQuote(VIRTUAL_RE)}`
   ].join(' -and ');
-  const dnsOf = (fam) => `@(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily ${fam} | Select-Object -ExpandProperty ServerAddresses)`;
+  const entry = (fam) => `@(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily ${fam})`;
+  const dnsOf = (d) => `@(${d} | Select-Object -ExpandProperty ServerAddresses)`;
   return [
     "$ErrorActionPreference = 'SilentlyContinue'",
     '$out = @()',
     `foreach ($a in @(Get-NetAdapter | Where-Object { ${where} })) {`,
+    `$d4 = ${entry('IPv4')}`,
+    `$d6 = ${entry('IPv6')}`,
+    'if (-not $d4.Count -and -not $d6.Count) { continue }',
     "$k4 = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\' + $a.InterfaceGuid",
     "$k6 = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces\\' + $a.InterfaceGuid",
     '$out += [pscustomobject]@{ alias = $a.InterfaceAlias;'
-      + ` v4 = ${dnsOf('IPv4')};`
-      + ` v6 = ${dnsOf('IPv6')};`
+      + ` v4 = ${dnsOf('$d4')};`
+      + ` v6 = ${dnsOf('$d6')};`
+      + ' has4 = [bool]$d4.Count; has6 = [bool]$d6.Count;'
       + ' dhcp4 = [string]::IsNullOrWhiteSpace((Get-ItemProperty -Path $k4 -Name NameServer).NameServer);'
       + ' dhcp6 = [string]::IsNullOrWhiteSpace((Get-ItemProperty -Path $k6 -Name NameServer).NameServer) }',
     '}',
@@ -249,6 +307,9 @@ function parseWinSnapshot(json) {
     const alias = String(a.alias == null ? '' : a.alias).trim();
     if (!alias) continue;
     const rec = { alias, v4: addrList(a.v4), v6: addrList(a.v6) };
+    // absent (an older record): assume the family is there, as before
+    if (typeof a.has4 === 'boolean') rec.has4 = a.has4;
+    if (typeof a.has6 === 'boolean') rec.has6 = a.has6;
     if (typeof a.dhcp4 === 'boolean') rec.dhcp4 = a.dhcp4;
     if (typeof a.dhcp6 === 'boolean') rec.dhcp6 = a.dhcp6;
     out.push(rec);
@@ -287,19 +348,86 @@ function parseNetshDnsServers(text) {
   return out;
 }
 
-/** Every adapter's resolver becomes the tunnel peer; the cache goes with it. */
-function winApplyLines(adapters, peer4, peer6) {
-  const lines = ["$ErrorActionPreference = 'Stop'"];
-  for (const a of adapters || []) {
+/**
+ * Every adapter's resolver becomes `addr4` / `addr6` (the guard passes the
+ * loopback hold, WIN_HOLD4/6); the cache goes with it.
+ *
+ * Each adapter family is its own try: under `$ErrorActionPreference = 'Stop'`
+ * the first line that failed used to end the script, so every adapter after it
+ * kept its own resolvers and engage() threw — no guard and no drift watch for
+ * the session, over one adapter that could not be set. A failure is printed as
+ * `IRNF_FAIL <index> <v4|v6> <message>` for winApplyOutcome() to read, and a
+ * family the snapshot says the adapter does not have is not attempted. The
+ * cache is flushed only when a Set went through: a run that changed nothing
+ * has nothing stale to flush, and a refresh that keeps retrying an adapter
+ * that refuses would otherwise empty the machine's DNS cache every tick.
+ */
+function winApplyLines(adapters, addr4, addr6) {
+  const lines = ["$ErrorActionPreference = 'Stop'", '$set = 0'];
+  (adapters || []).forEach((a, i) => {
     const alias = psQuote(aliasOf(a));
     // Set-DnsClientServerAddress has no -AddressFamily: the family of each call
     // is the family of the addresses in it, and a call leaves the other alone.
-    if (peer4) lines.push(`Set-DnsClientServerAddress -InterfaceAlias ${alias} -ServerAddresses ${psQuote(peer4)}`);
-    if (peer6) lines.push(`Set-DnsClientServerAddress -InterfaceAlias ${alias} -ServerAddresses ${psQuote(peer6)}`);
-  }
-  lines.push('Clear-DnsClientCache');
+    for (const [fam, addr, has] of [['v4', addr4, 'has4'], ['v6', addr6, 'has6']]) {
+      if (!addr || (a && a[has] === false)) continue;
+      lines.push(`try { Set-DnsClientServerAddress -InterfaceAlias ${alias} -ServerAddresses ${psQuote(addr)}; $set++ }`
+        + ` catch { Write-Output ('${APPLY_FAIL} ${i} ${fam} ' + $_.Exception.Message) }`);
+    }
+  });
+  lines.push('if ($set) { Clear-DnsClientCache }');
   return lines;
 }
+
+/**
+ * What an apply script's output says: how many adapter families it tried, and
+ * `[{ alias, family, message }]` for each one it could not set.
+ */
+function winApplyOutcome(out, adapters, addr4, addr6) {
+  const list = adapters || [];
+  let attempted = 0;
+  for (const a of list) {
+    if (addr4 && !(a && a.has4 === false)) attempted++;
+    if (addr6 && !(a && a.has6 === false)) attempted++;
+  }
+  const failed = [];
+  const re = new RegExp(`^${APPLY_FAIL} (\\d+) (v4|v6) ?(.*)$`);
+  for (const line of String(out == null ? '' : out).split(/\r?\n/)) {
+    const m = re.exec(line.trim());
+    if (!m || !list[Number(m[1])]) continue;
+    failed.push({ alias: aliasOf(list[Number(m[1])]), family: m[2], message: m[3].trim() });
+  }
+  return { attempted, failed };
+}
+
+/**
+ * A Windows snapshot with our own hold taken out of it, so it is never recorded
+ * as an adapter's original.
+ *
+ * 127.0.0.2 is stripped ALWAYS, state file or not: it is ours by construction,
+ * and it can be on an adapter with no session of ours live — a USB NIC or a
+ * tether unplugged before the disconnect is skipped by the restore while the
+ * state file goes, and Windows keeps the static hold for when it comes back.
+ * Recording it then pinned 127.0.0.2 on that adapter for good at the next
+ * release. ::1 goes only from beside it: on its own it is a local DNS proxy's
+ * address, the user's (so is 127.0.0.1).
+ *
+ * The tunnel's own resolvers are NOT stripped: they are never written to an
+ * adapter here, and with managed DNS off they are the user's own public ones —
+ * a static 1.1.1.1 must come back as a static 1.1.1.1. `legacyPeers` is for a
+ * live state file written before the hold existed, which did write them.
+ */
+function winWithoutHold(list, legacyPeers) {
+  const drop = new Set(addrList(legacyPeers).map(a => a.toLowerCase()));
+  const keep = (arr, ours) => addrList(arr).filter(a => !drop.has(a.toLowerCase()) && !ours.includes(a.toLowerCase()));
+  return (list || []).map(a => {
+    const v4 = addrList(a && a.v4);
+    const held = v4.length === 1 && v4[0] === WIN_HOLD4;
+    return Object.assign({}, a, { v4: keep(v4, [WIN_HOLD4]), v6: keep(a && a.v6, held ? [WIN_HOLD6] : []) });
+  });
+}
+
+/** The key an adapter family that refused the hold is remembered under. */
+function _winRefusedKey(alias, family) { return `${String(alias == null ? '' : alias).toLowerCase()}|${family}`; }
 
 /**
  * Put the recorded resolvers back.
@@ -819,11 +947,52 @@ class LeakGuard {
   }
 
   /**
-   * Point every physical adapter at the tunnel peer for this session, and — at
-   * `level: 'strict'` — firewall everything that is not the tunnel off those
-   * adapters. `level: 'off'` (and Linux, which has no portable resolver to
-   * rewrite) does nothing. Throws when the override itself fails — the caller
-   * keeps the tunnel, logs it and carries on.
+   * Hold `adapters` on `addr4` / `addr6` (Windows). An adapter family that
+   * could not be set is a warning that names it — the others ARE guarded and
+   * the session must go on being watched; only when nothing at all could be
+   * set is it the guard failing, and that throws like the spawn failing does.
+   *
+   * A family that refused is remembered (`_winFailed`, see _winRefusedKey):
+   * its error is usually the adapter's and does not go away on its own, so the
+   * cheap ticks of refresh() neither count it as drift nor try it again — no
+   * PowerShell snapshot, warning and cache flush every 30 s for the session.
+   * The full ticks (the first and every tenth) and the next engage try it
+   * afresh, so a one-off refusal (a race with an unplug) is not for good; the
+   * warning is said once per engage (`_winWarned`). `fatal: false` (refresh)
+   * never throws: the guard is engaged, one family of one adapter is not.
+   * Returns what refused.
+   */
+  async _winApply(adapters, addr4, addr6, options, { fatal = true } = {}) {
+    const out = await this._powershell(winApplyScript(adapters, addr4, addr6), options);
+    const { attempted, failed } = winApplyOutcome(out, adapters, addr4, addr6);
+    if (!failed.length) return failed;
+    this._winFailed = this._winFailed || new Set();
+    this._winWarned = this._winWarned || new Set();
+    for (const f of failed) this._winFailed.add(_winRefusedKey(f.alias, f.family));
+    const what = (list) => list.map(f => `${f.alias} (${f.family === 'v6' ? 'IPv6' : 'IPv4'}): ${f.message}`).join('; ');
+    if (fatal && failed.length >= attempted) throw new Error(`no adapter's DNS could be set — ${what(failed)}`);
+    const fresh = failed.filter(f => !this._winWarned.has(_winRefusedKey(f.alias, f.family)));
+    for (const f of fresh) this._winWarned.add(_winRefusedKey(f.alias, f.family));
+    if (fresh.length) {
+      this.onLog(`Leak guard: could not set the DNS of ${what(fresh)} — the other adapters are guarded;`
+        + ' tried again every few minutes', 'warn');
+    }
+    return failed;
+  }
+
+  /** Did this adapter family refuse the hold since the last engage? */
+  _winRefused(alias, family) {
+    return !!(this._winFailed && this._winFailed.has(_winRefusedKey(alias, family)));
+  }
+
+  /**
+   * Take every physical adapter's DNS for this session (macOS: the tunnel peer;
+   * Windows: the loopback hold — `peer4`/`peer6` there only say which resolver
+   * the TUN adapter answers on), and — at `level: 'strict'` — firewall
+   * everything that is not the tunnel off those adapters. `level: 'off'` (and
+   * Linux, which has no portable resolver to rewrite) does nothing. Throws when
+   * the override itself fails — the caller keeps the tunnel, logs it and
+   * carries on; one Windows adapter that cannot be set is only a warning.
    *
    * `excludes` are the addresses that must still reach the network directly:
    * the resolved server entry IPs and the resolver bypass addresses of the live
@@ -882,14 +1051,26 @@ class LeakGuard {
       const liveStrict = !!(live && live.strict);
       const liveUdp = !!(live && live.udpBlock);
       if (this.platform === 'win32') {
+        // Our hold is never an original (see winWithoutHold), with or without
+        // a live session; the peers only for a state file from before the hold.
+        const legacy = (live && !live.hold4) ? [live.peer4, live.peer6] : [];
         const adapters = mergeTargets(
           (live && live.win && live.win.adapters) || [],
-          withoutPeers(parseWinSnapshot(await this._powershell(winSnapshotScript(tunAlias))), [peer4, peer6]),
+          winWithoutHold(parseWinSnapshot(await this._powershell(winSnapshotScript(tunAlias))), legacy),
           (a) => a.alias);
         count = adapters.length;
         state.win = { adapters };
         state.strict = strict;
-        apply = () => this._powershell(winApplyScript(adapters, peer4, peer6));
+        // What the adapters are held on (see WIN_HOLD4) — refresh() compares
+        // against these, not the tunnel's resolver.
+        state.hold4 = WIN_HOLD4;
+        state.hold6 = WIN_HOLD6;
+        // Every adapter there is has just been looked at (see refresh()), and
+        // one that refused before gets another try.
+        this._winSeen = new Set();
+        this._winFailed = new Set();
+        this._winWarned = new Set();
+        apply = () => this._winApply(adapters, WIN_HOLD4, WIN_HOLD6);
         if (strict) {
           const ranges = rangeComplement([...(excludes || []), ...GUARD_EXCLUDES]);
           block = () => this._powershell(winStrictApplyScript({ adapters, ranges }));
@@ -946,7 +1127,10 @@ class LeakGuard {
       this.writeState(state);
       this._token = token;
       await apply();
-      this.onLog(`Leak guard: DNS of ${count} adapters → ${[peer4, peer6].filter(Boolean).join(' ')}`, 'info');
+      this.onLog(this.platform === 'win32'
+        ? `Leak guard: DNS of ${count} adapters → ${WIN_HOLD4} ${WIN_HOLD6} (loopback: nothing asked there leaves the machine;`
+          + ` the tunnel's resolver ${[peer4, peer6].filter(Boolean).join(' ')} answers)`
+        : `Leak guard: DNS of ${count} adapters → ${[peer4, peer6].filter(Boolean).join(' ')}`, 'info');
       if (strict) {
         if (block) {
           await block();
@@ -973,7 +1157,7 @@ class LeakGuard {
    *
    * Windows pays for the snapshot in two halves. `netsh` lists every
    * interface's resolvers in tens of milliseconds; when each adapter this
-   * session owns still names the peer(s), that is the whole tick. Only a
+   * session owns still names the hold, that is the whole tick. Only a
    * drift — or `full`, which the watch sets on its first tick and every Nth
    * after — takes the PowerShell snapshot that can also see an adapter that
    * came up since (netsh cannot tell ours from the machine's).
@@ -990,23 +1174,57 @@ class LeakGuard {
       const same = (a, b) => a.length === b.length && a.every(v => b.includes(v));
       let changed;
       if (this.platform === 'win32' && st.win) {
+        // What the adapters are held on (WIN_HOLD4/6); a state file written
+        // before the hold existed held them on the peers.
+        const want4 = st.hold4 || st.peer4;
+        const want6 = st.hold4 ? st.hold6 : st.peer6;
+        this._winSeen = this._winSeen || new Set();   // reset by every engage
         if (!full && (st.win.adapters || []).length) {
           const owned = st.win.adapters.map(a => String(a.alias || '').toLowerCase()).filter(Boolean);
           const lists = (map, alias, peer) => (map.get(alias) || []).includes(String(peer).toLowerCase());
           const v4 = parseNetshDnsServers(await this.run('netsh', ['interface', 'ipv4', 'show', 'dnsservers'], options));
-          const v6 = st.peer6 ? parseNetshDnsServers(await this.run('netsh', ['interface', 'ipv6', 'show', 'dnsservers'], options)) : null;
+          const v6 = want6 ? parseNetshDnsServers(await this.run('netsh', ['interface', 'ipv6', 'show', 'dnsservers'], options)) : null;
           // An alias netsh no longer lists is an adapter that is gone, not a
-          // drift; an empty listing is not trusted and falls through.
-          const drifted = owned.some(alias => (v4.has(alias) && !lists(v4, alias, st.peer4))
-            || (v6 && v6.has(alias) && !lists(v6, alias, st.peer6)));
-          if (v4.size && !drifted) return { refreshed: false, adapters: 0, quick: true };
+          // drift; an empty listing is not trusted and falls through. Nor is a
+          // family that refused the hold (see _winApply).
+          const drifted = owned.some(alias => (v4.has(alias) && !this._winRefused(alias, 'v4') && !lists(v4, alias, want4))
+            || (v6 && v6.has(alias) && !this._winRefused(alias, 'v6') && !lists(v6, alias, want6)));
+          // An adapter nobody owns that lists a resolver of its own has come up
+          // since the last snapshot — a Bluetooth tether, anything with
+          // auto-reconnect off: netWatcher rebuilds for neither. The snapshot
+          // decides whether it is ours to guard. Each alias is looked at once
+          // per resolver list: netsh also lists an adapter that is down, with
+          // the resolver it last had, and one judged (and skipped) then must be
+          // looked at again when it comes up on a network that hands it another.
+          // Coming up on the same one waits for the next full tick (≤ 5 min).
+          const known = new Set([...owned, ...[...OWN_ADAPTERS, st.tunAlias].map(a => String(a || '').toLowerCase())]);
+          const resolves = (ip) => !isLoopbackIp(ip) && !/^fec0:0:0:ffff::[123]$/i.test(ip);
+          const resolversOf = (alias) => [...(v4.get(alias) || []), ...((v6 && v6.get(alias)) || [])].filter(resolves);
+          const seenKey = (alias) => `${alias}|${resolversOf(alias).sort().join(',')}`;
+          const newcomers = [...new Set([...v4.keys(), ...(v6 ? v6.keys() : [])])].filter(alias => !known.has(alias)
+            && resolversOf(alias).length && !this._winSeen.has(seenKey(alias)));
+          for (const alias of newcomers) this._winSeen.add(seenKey(alias));
+          if (v4.size && !drifted && !newcomers.length) return { refreshed: false, adapters: 0, quick: true };
         }
+        // A full tick tries again what refused (see _winApply).
+        if (full) this._winFailed = new Set();
         const fresh = parseWinSnapshot(await this._powershell(winSnapshotScript(st.tunAlias), options));
-        changed = fresh.filter(a => !same(a.v4, [st.peer4]) || (st.peer6 && !same(a.v6, [st.peer6])));
+        // A family the adapter does not have lists nothing, and that is not
+        // drift; one that refused the hold waits for a full tick. Only the
+        // families that drifted are set again.
+        const wants = (a, fam) => a[fam === 'v4' ? 'has4' : 'has6'] !== false && !this._winRefused(a.alias, fam);
+        const drift4 = (a) => wants(a, 'v4') && !same(a.v4, [want4]);
+        const drift6 = (a) => !!want6 && wants(a, 'v6') && !same(a.v6, [want6]);
+        changed = fresh.filter(a => drift4(a) || drift6(a))
+          .map(a => Object.assign({}, a, { has4: drift4(a), has6: drift6(a) }));
         if (!changed.length) return { refreshed: false, adapters: 0 };
-        st.win.adapters = mergeTargets(st.win.adapters, withoutPeers(fresh, peers), a => a.alias);
+        st.win.adapters = mergeTargets(st.win.adapters, winWithoutHold(fresh, st.hold4 ? [] : peers), a => a.alias);
         this.writeState(st);
-        await this._powershell(winApplyScript(changed, st.peer4, st.peer6), options);
+        const refused = await this._winApply(changed, want4, want6, options, { fatal: false });
+        const held = changed.filter(a => ['v4', 'v6'].some(fam => a[fam === 'v4' ? 'has4' : 'has6']
+          && !refused.some(f => f.alias === a.alias && f.family === fam)));
+        if (!held.length) return { refreshed: false, adapters: 0, refused: refused.length };
+        changed = held;
       } else if (this.platform === 'darwin' && st.mac) {
         const fresh = parseMacSnapshot(await this.run('/bin/bash', ['-c', macSnapshotScript()], options));
         changed = fresh.filter(s => !same(s.dns, peers));

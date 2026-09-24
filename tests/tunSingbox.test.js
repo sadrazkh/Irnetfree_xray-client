@@ -330,7 +330,7 @@ test('win32 start: spawns `sing-box run -c <cfg>` from its own dir, waits for th
   });
 });
 
-test('win32 start: two v4 servers → set + add index=2; no v6 line without ipv6', async () => {
+test('win32 start: two v4 servers → set + add index=2; the v6 side is loopback, not a resolver of ours', async () => {
   await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
     tun.isElevated = () => true;
     fakeSpawn = killable();
@@ -339,7 +339,8 @@ test('win32 start: two v4 servers → set + add index=2; no v6 line without ipv6
     const netsh = execs.filter(([c]) => c === 'netsh').map(([, a]) => a);
     assert.deepEqual(netsh, [
       ['interface', 'ip', 'set', 'dnsservers', 'name=IRNetFree', 'static', '1.1.1.1', 'primary', 'validate=no'],
-      ['interface', 'ip', 'add', 'dnsservers', 'name=IRNetFree', '8.8.8.8', 'index=2', 'validate=no']
+      ['interface', 'ip', 'add', 'dnsservers', 'name=IRNetFree', '8.8.8.8', 'index=2', 'validate=no'],
+      ['interface', 'ipv6', 'set', 'dnsservers', 'name=IRNetFree', 'static', '::1', 'primary', 'validate=no']
     ]);
     assert.equal(JSON.parse(fs.readFileSync(spawns[0][1][2], 'utf8')).inbounds[0].strict_route, false);
     await tun.stop();
@@ -380,12 +381,19 @@ test('win32 start: the tunnel peer is the adapter resolver on BOTH families, ipv
 });
 
 /**
- * The other way round: a config whose core has no port-53 hijack (the sing-box
- * format) gets plain public resolvers instead of the peer — and then the peer is
- * an address nothing answers on. Handing it out as the v6 resolver would be a
- * v6 black hole, so it is only ever offered next to its own v4 half.
+ * The other way round: a config whose core has no port-53 hijack (managed DNS
+ * off — the owner's own mode — or the sing-box format) gets plain public
+ * resolvers instead of the peer, and then the peer is an address nothing
+ * answers on. It is never offered as the v6 resolver — but sing-tun already put
+ * it there itself (under auto_route it sets the address after the TUN's own on
+ * both families), and leaving the v6 list alone left that dead resolver beside
+ * the working v4 ones: lookups waiting on it. It is replaced by ::1, the same
+ * hold the leak guard puts on the physical adapters: nothing listens there and
+ * a query fails in milliseconds. Not a delete: an empty v6 list is one Windows
+ * may fill with its fec0:0:0:ffff::1-3 placeholders, which would route into
+ * the TUN and die exactly like the peer.
  */
-test('win32 start: without the tunnel peer on v4 there is no invented v6 peer, even with ipv6 on', async () => {
+test('win32 start: without the tunnel peer on v4 the v6 resolver sing-tun set is replaced by loopback, even with ipv6 on', async () => {
   await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
     tun.isElevated = () => true;
     fakeSpawn = killable();
@@ -394,8 +402,29 @@ test('win32 start: without the tunnel peer on v4 there is no invented v6 peer, e
     const netsh = execs.filter(([c]) => c === 'netsh').map(([, a]) => a);
     assert.deepEqual(netsh, [
       ['interface', 'ip', 'set', 'dnsservers', 'name=IRNetFree', 'static', '1.1.1.1', 'primary', 'validate=no'],
-      ['interface', 'ip', 'add', 'dnsservers', 'name=IRNetFree', '8.8.8.8', 'index=2', 'validate=no']
+      ['interface', 'ip', 'add', 'dnsservers', 'name=IRNetFree', '8.8.8.8', 'index=2', 'validate=no'],
+      ['interface', 'ipv6', 'set', 'dnsservers', 'name=IRNetFree', 'static', '::1', 'primary', 'validate=no']
     ]);
+    assert.equal(netsh.some(a => a.includes(TUN_PEER6)), false, 'the dead peer is never written');
+    await tun.stop();
+  });
+});
+
+test('win32 start: replacing that v6 resolver failing is a warning, never a failed connect', async () => {
+  await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun, dir, logs) => {
+    tun.isElevated = () => true;
+    fakeSpawn = killable();
+    canned([[/Get-NetAdapter -Name 'IRNetFree'.*Status/, 'Up\r\n']]);
+    const base = answer;
+    answer = (cmd, args) => {
+      if (/netsh interface ipv6 set dnsservers name=IRNetFree static ::1/.test([cmd, ...args].join(' '))) {
+        throw new Error('The parameter is incorrect.');
+      }
+      return base(cmd, args);
+    };
+    await tun.start(10808, ['1.2.3.4'], ['1.1.1.1'], {});
+    assert.equal(tun.active, true);
+    assert.ok(logs.some(([level, line]) => level === 'warn' && /v6.*The parameter is incorrect/.test(line)), JSON.stringify(logs));
     await tun.stop();
   });
 });

@@ -31,7 +31,8 @@
  *   IRNF_PROBE_PORT   base port, default 39800
  *   IRNF_PROBE_KEEP=1 keep the generated configs and print where they are
  *   IRNF_PROBE_BREAK   deliberately break the plan so the probe must FAIL:
- *                        scope    drop `domains`+`skipFallback` from the domestic server
+ *                        scope    drop `domains`+`skipFallback` from the domestic and the
+ *                                 corporate server (both sit on 127.0.0.1)
  *                        nonip    drop the dns outbound's refuse rule
  *                      (a probe that cannot fail proves nothing — run these first)
  */
@@ -496,6 +497,30 @@ const scenarios = [
       return [
         [r.corp.includes('git.corp.test'), 'the corporate resolver answered its own search domain', 'the corporate resolver was never asked — rig broken'],
         [stray.length === 0, 'no public name went to the corporate resolver', `LEAK: the company was asked about ${stray.join(', ')}`],
+        [r.sink.length === 0, 'nothing escaped to the original destination', `LEAK: ${r.sink.length} packet(s) reached the sink`]
+      ];
+    }
+  },
+  {
+    // The owner's own shape: advanced routing to a chain that ends in a
+    // corporate WireGuard with its own resolver and search domain, routingMode
+    // bypass-ir underneath. With the public DoH dead, the fallback must not
+    // hand the world to the company (skipFallback), and an advanced plan that
+    // does not also apply the mode builds no in-country resolver at all.
+    id: 'corp-remote-dead',
+    why: 'with the public resolver dead, the corporate one must not inherit the world',
+    plan: CORP_PLAN,
+    settings: { routingMode: 'bypass-ir' },
+    mute: 'remote',
+    timeout: 25000,
+    names: ['example.com', 'snapp.ir', 'git.corp.test'],
+    check(r) {
+      const stray = r.corp.filter(n => !n.endsWith('corp.test'));
+      return [
+        [r.corp.includes('git.corp.test'), 'the corporate resolver still answered its own search domain', 'the corporate resolver was never asked — rig broken'],
+        [stray.length === 0, 'the corporate resolver was not offered the names the DoH could not answer',
+          `LEAK: with the remote resolver dead, the company was asked about ${stray.join(', ')}`],
+        [r.ir.length === 0, 'no in-country resolver in an advanced plan that does not apply the mode', `LEAK: domestic resolver saw ${r.ir.join(', ')}`],
         [r.sink.length === 0, 'nothing escaped to the original destination', `LEAK: ${r.sink.length} packet(s) reached the sink`]
       ];
     }
