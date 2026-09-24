@@ -1,6 +1,7 @@
 package com.irnetfree.vpn.core
 
 import org.json.JSONObject
+import kotlin.reflect.KMutableProperty1
 
 /**
  * What a subscription refresh does to the servers that subscription already
@@ -67,66 +68,133 @@ object SubRefresh {
      */
     fun merge(old: List<ServerConfig>, fresh: List<ServerConfig>, subId: String): Merged {
         val claimed = BooleanArray(old.size)
-        val match = arrayOfNulls<ServerConfig>(fresh.size)
+        val match = IntArray(fresh.size) { -1 }
+        // What each old server's own link gives: the identities below compare the
+        // panel's link with the panel's link, not with what the user made of it —
+        // a server whose address the user swapped for a clean IP is still the
+        // panel's server. (No link, or one that no longer parses: the server as stored.)
+        val linked = old.map { linkedForm(it) }
+        val basis = old.indices.map { linked[it] ?: old[it] }
         // 1. the identical link — the strongest evidence there is
         for (i in fresh.indices) {
             val raw = fresh[i].raw
             if (raw.isBlank()) continue
             val j = old.indices.firstOrNull { !claimed[it] && old[it].raw == raw } ?: continue
-            claimed[j] = true; match[i] = old[j]
+            claimed[j] = true; match[i] = j
         }
         // 2. the same server under a changed link: renamed, parameters reordered,
         //    retuned, or stored before links were kept at all (an older store has
         //    no raw) — the tight identity first, so variants keep their own ids
         val passes: List<(ServerConfig) -> String> = listOf({ s -> strictIdentity(s) }, { s -> identity(s) })
         for (key in passes) {
-            val oldKeys = old.map { key(it) }
+            val oldKeys = basis.map { key(it) }
             for (i in fresh.indices) {
-                if (match[i] != null) continue
+                if (match[i] >= 0) continue
                 val k = key(fresh[i])
                 val j = old.indices.firstOrNull { !claimed[it] && oldKeys[it] == k } ?: continue
-                claimed[j] = true; match[i] = old[j]
+                claimed[j] = true; match[i] = j
             }
         }
         val servers = fresh.indices.map { i ->
-            val m = match[i]
-            (if (m != null) carry(m, fresh[i]) else fresh[i]).copy(subId = subId)
+            val j = match[i]
+            (if (j >= 0) carry(old[j], fresh[i], linked[j]) else fresh[i]).copy(subId = subId)
         }
-        val kept = match.count { it != null }
+        val kept = match.count { it >= 0 }
         return Merged(servers, kept, fresh.size - kept, old.size - kept)
+    }
+
+    /**
+     * [s] as its own link gives it, read the way the store reads a record
+     * (LinkParser.migrateStoredServer), or null when it has no link or the link
+     * no longer parses.
+     */
+    fun linkedForm(s: ServerConfig): ServerConfig? {
+        val raw = s.raw.takeIf { it.isNotBlank() } ?: return null
+        return try { LinkParser.migrateStoredServer(LinkParser.parseLink(raw)) } catch (e: Exception) { null }
     }
 
     /**
      * A fresh server that is [old]: the old id and the certificate pinned on
      * first use (which no link carries). Everything else comes from the
-     * subscription, which is what a refresh is for — including the core, the
-     * TLS fragment and the noise, which a link DOES carry (`engine=`,
-     * `fragment=`, `noise=`) and a panel retunes when the DPI changes.
+     * subscription, which is what a refresh is for — except what the USER set.
      *
-     * Those three keep the old value only where the USER set it: where it
-     * differs from what the old server's own link gives. A value that simply
-     * came from the link follows the link — changed, or dropped. (Keeping any
-     * non-blank old value, as this first did, froze a panel's old fragment
-     * forever.) A server stored without its link cannot tell the two apart and
-     * keeps what it has.
+     * "What the user set" is what differs from the old server's own link
+     * ([linked]): that is carried onto the fresh server, and the rest follows the
+     * fresh link — changed, or dropped. It covers everything the edit sheet
+     * writes: the connection (address — a clean Cloudflare IP swapped in is the
+     * usual one — port, credential, transport, path, host, SNI, fingerprint,
+     * REALITY keys, WireGuard fields, patterniha), the name, and the core, TLS
+     * fragment and noise, which a link carries too (`engine=`, `fragment=`,
+     * `noise=`) and a panel retunes when the DPI changes. (Keeping any non-blank
+     * old value froze a panel's old fragment forever; keeping none reverted
+     * every edit every hour.)
+     *
+     * Without a link nothing can tell the user's from the panel's: the fresh
+     * connection wins, as it always has, and the core, fragment and noise keep
+     * what they have.
      */
-    fun carry(old: ServerConfig, fresh: ServerConfig): ServerConfig {
-        val asLinked = old.raw.takeIf { it.isNotBlank() }?.let { runCatching { LinkParser.parseLink(it) }.getOrNull() }
-        val ob = JSONObject(fresh.outbound.toString())
+    fun carry(old: ServerConfig, fresh: ServerConfig, linked: ServerConfig? = linkedForm(old)): ServerConfig {
+        val base = if (linked != null) withUsersEdits(old, linked, fresh) else fresh
+        val ob = JSONObject(base.outbound.toString())
         for (k in listOf("_fragment", "_noise")) {
             val mine = old.outbound.optString(k)
-            val usersOwn = if (asLinked != null) mine != asLinked.outbound.optString(k) else mine.isNotBlank()
+            val usersOwn = if (linked != null) sheetForm(k, mine) != sheetForm(k, linked.outbound.optString(k)) else mine.isNotBlank()
             if (usersOwn) { if (mine.isBlank()) ob.remove(k) else ob.put(k, mine) }
         }
         val engine = when {
-            asLinked == null -> old.engine ?: fresh.engine
-            old.engine != asLinked.engine -> old.engine
+            linked == null -> old.engine ?: fresh.engine
+            old.engine != linked.engine -> old.engine
             else -> fresh.engine
         }
-        return fresh.copy(
+        return base.copy(
             id = old.id, outbound = ob, engine = engine,
             certPin = old.certPin, certPinAt = old.certPinAt, certPinCheckedAt = old.certPinCheckedAt
         )
+    }
+
+    /** The edit sheet's text fields other than fragment/noise/core (handled in [carry]). */
+    private val SHEET_FIELDS: List<KMutableProperty1<ServerEditor.Fields, String>> = listOf(
+        ServerEditor.Fields::name, ServerEditor.Fields::address, ServerEditor.Fields::port, ServerEditor.Fields::cred,
+        ServerEditor.Fields::network, ServerEditor.Fields::security, ServerEditor.Fields::sni, ServerEditor.Fields::host,
+        ServerEditor.Fields::path, ServerEditor.Fields::fp, ServerEditor.Fields::pbk, ServerEditor.Fields::sid,
+        ServerEditor.Fields::method, ServerEditor.Fields::proxyUser, ServerEditor.Fields::proxyPass,
+        ServerEditor.Fields::wgPub, ServerEditor.Fields::wgAddr, ServerEditor.Fields::wgPsk, ServerEditor.Fields::wgMtu,
+        ServerEditor.Fields::wgReserved, ServerEditor.Fields::wgAllowed, ServerEditor.Fields::wgDns,
+        ServerEditor.Fields::cipherSuites, ServerEditor.Fields::finalMask
+    )
+
+    /**
+     * [fresh] with every sheet field the user changed on [old] (it differs from
+     * [linked], old's own link) written into it — through ServerEditor.apply,
+     * which patches exactly those fields and leaves the rest of the fresh
+     * outbound as the panel sent it.
+     */
+    private fun withUsersEdits(old: ServerConfig, linked: ServerConfig, fresh: ServerConfig): ServerConfig {
+        val mine = ServerEditor.read(old)
+        val link = ServerEditor.read(linked)
+        val f = ServerEditor.read(fresh)
+        var edited = false
+        for (p in SHEET_FIELDS) {
+            if (p.get(mine) != p.get(link)) { p.set(f, p.get(mine)); edited = true }
+        }
+        if (mine.allowInsecure != link.allowInsecure) { f.allowInsecure = mine.allowInsecure; edited = true }
+        return if (edited) ServerEditor.apply(fresh, f) else fresh
+    }
+
+    /**
+     * A fragment / noise value as the edit sheet writes it back: trimmed, and for
+     * noise its presets lower-cased with "fakehello" as "faketls". Opening the
+     * sheet and saving rewrites a link's `noise=fakehello` as "faketls"; that
+     * spelling is the sheet's, not an edit of the user's.
+     */
+    private fun sheetForm(key: String, v: String): String {
+        val t = v.trim()
+        if (key != "_noise") return t
+        return when (val l = t.lowercase()) {
+            "fakehello" -> "faketls"
+            "random", "faketls" -> l
+            else -> t
+        }
     }
 
     /**
