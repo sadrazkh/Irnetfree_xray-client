@@ -14,9 +14,67 @@ import org.junit.Test
  */
 class SubRefreshTest {
     private val sub = Subscription("sub-1", "panel", "https://panel.example/sub")
-    private fun link(host: String, name: String, uuid: String = "u-$host", path: String = "/x") =
-        "vless://$uuid@$host:443?type=xhttp&path=${path.replace("/", "%2F")}&host=$host&mode=auto&security=reality&sni=www.google.com&pbk=K&sid=ab#$name"
+    private fun link(host: String, name: String, uuid: String = "u-$host", path: String = "/x", sni: String = "www.google.com") =
+        "vless://$uuid@$host:443?type=xhttp&path=${path.replace("/", "%2F")}&host=$host&mode=auto&security=reality&sni=$sni&pbk=K&sid=ab#$name"
     private fun parse(l: String) = LinkParser.parseLink(l).copy(subId = sub.id)
+    /** What the edit sheet does: read, change, save. */
+    private fun edited(s: ServerConfig, edit: (ServerEditor.Fields) -> Unit): ServerConfig {
+        val f = ServerEditor.read(s); edit(f); return ServerEditor.apply(s, f)
+    }
+    private fun realitySni(s: ServerConfig) = s.outbound.getJSONObject("streamSettings").getJSONObject("realitySettings").getString("serverName")
+    private fun vnextAddress(s: ServerConfig) = s.outbound.getJSONObject("settings").getJSONArray("vnext").getJSONObject(0).getString("address")
+
+    /*
+     * What the user edited on a subscription server — above all a clean
+     * Cloudflare IP in place of the panel's address, which is how half of Iran
+     * gets through — is the user's, and a refresh must not revert it. What the
+     * panel changed where the user edited nothing is the panel's. The test for
+     * "the user's" is the same as for fragment/noise/core: it differs from
+     * what the old server's own link gives.
+     */
+    @Test fun whatTheUserEditedOnTheConnectionSurvivesARefresh() {
+        val orig = parse(link("a.example", "A · 12 GB left"))
+        val mine = edited(orig) { it.address = "104.16.1.1"; it.path = "/mine"; it.sni = "www.speedtest.net" }
+        assertEquals("104.16.1.1", mine.address)
+        // the panel renames it (so its link changed) and changes nothing else
+        val out = SubRefresh.merge(listOf(mine), listOf(LinkParser.parseLink(link("a.example", "A · 11 GB left"))), sub.id).servers[0]
+        assertEquals(mine.id, out.id)
+        assertEquals("104.16.1.1", out.address); assertEquals("104.16.1.1", vnextAddress(out))
+        assertEquals("/mine", out.outbound.getJSONObject("streamSettings").getJSONObject("xhttpSettings").getString("path"))
+        assertEquals("www.speedtest.net", realitySni(out))
+        assertEquals("A · 11 GB left", out.name)   // the name was never the user's: the panel's
+        // ...and the user's own name, when they gave one, is theirs too
+        val named = edited(orig) { it.name = "Work" }
+        assertEquals("Work", SubRefresh.merge(listOf(named), listOf(LinkParser.parseLink(link("a.example", "A · 11 GB left"))), sub.id).servers[0].name)
+    }
+
+    @Test fun whatThePanelChangedWinsWhereTheUserEditedNothing() {
+        val old = parse(link("a.example", "A"))
+        // a new SNI from the panel: still the same server (same address, key, transport), the panel's SNI
+        val out = SubRefresh.merge(listOf(old), listOf(LinkParser.parseLink(link("a.example", "A", sni = "www.apple.com"))), sub.id).servers[0]
+        assertEquals(old.id, out.id); assertEquals("www.apple.com", realitySni(out))
+        // a new address from the panel: the panel's address (a new server by X1's identity)
+        val moved = SubRefresh.merge(listOf(old), listOf(LinkParser.parseLink(link("b.example", "A", uuid = "u-a.example"))), sub.id).servers[0]
+        assertEquals("b.example", moved.address); assertEquals("b.example", vnextAddress(moved))
+        // the user edited only the SNI: the panel's new address is still the panel's
+        val sniOnly = edited(old) { it.sni = "www.speedtest.net" }
+        val both = SubRefresh.merge(listOf(sniOnly), listOf(LinkParser.parseLink(link("a.example", "A", sni = "www.apple.com", path = "/x"))), sub.id).servers[0]
+        assertEquals(old.id, both.id); assertEquals("www.speedtest.net", realitySni(both)); assertEquals("a.example", both.address)
+    }
+
+    @Test fun theSheetsOwnNoiseSpellingIsNotAnEdit() {
+        // noise=fakehello in the link; the sheet writes it back as "faketls" on any save
+        val raw = "vless://u-a@a.example:443?type=tcp&security=tls&sni=a.example&noise=fakehello#A"
+        val saved = edited(parse(raw)) { it.noise = "faketls" }
+        assertEquals("faketls", saved.outbound.getString("_noise"))
+        // the panel moves the SNI and the noise: both are the panel's
+        val fresh = LinkParser.parseLink("vless://u-a@a.example:443?type=tcp&security=tls&sni=b.example&noise=random#A2")
+        val out = SubRefresh.merge(listOf(saved), listOf(fresh), sub.id).servers[0]
+        assertEquals(saved.id, out.id)
+        assertEquals("random", out.outbound.getString("_noise"))
+        assertEquals("b.example", out.outbound.getJSONObject("streamSettings").getJSONObject("tlsSettings").getString("serverName"))
+        assertEquals("A2", out.name); assertEquals("a.example", out.address)
+    }
 
     @Test fun anUnchangedServerKeepsItsId() {
         val old = listOf(parse(link("a.example", "A")), parse(link("b.example", "B")))
