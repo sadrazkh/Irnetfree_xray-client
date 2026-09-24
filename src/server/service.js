@@ -310,6 +310,8 @@ function createService(opts = {}) {
   // Core stops that are ours but not a reload (abortGateway): not a crash.
   // A counter, not a saved-and-restored flag: overlapping calls cannot leave it stuck.
   let quietStops = 0;
+  // Every connect in flight (see doConnect): a drop waits for them (recoverFromDrop).
+  const connectsInFlight = new Set();
 
   const store = new Store(path.join(dataDir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
@@ -1036,7 +1038,23 @@ function createService(opts = {}) {
     return Object.assign({}, settings, { entryHostIps: map });
   }
 
-  async function doConnect(serverId) {
+  /**
+   * A connect, tracked while it is in flight. A drop that lands inside one —
+   * the core dying while the gateway is still being built — waits for it
+   * before it rebuilds (recoverFromDrop): a second connect started beside it
+   * built a second gateway while the first was inside start(), and the
+   * loser's undo deleted the shared nft table by name. The work itself is
+   * connectOnce(). (main.js: doConnect / onConnectionDrop.)
+   */
+  function doConnect(serverId) {
+    const p = connectOnce(serverId);
+    connectsInFlight.add(p);
+    const settled = () => connectsInFlight.delete(p);
+    p.then(settled, settled);
+    return p;
+  }
+
+  async function connectOnce(serverId) {
     if (networkRepairing) throw new Error('Network recovery is still running');
     // Every await below is a window in which the operator can hit disconnect.
     // doDisconnect() then stops the core and clears activeServerId, but THIS call
@@ -1661,6 +1679,18 @@ function createService(opts = {}) {
     if (!store.get('activeServerId', null)) return;
     if (!OPENWRT && !getSettings().autoReconnectOnNetworkChange) return;
     if (recovering) { recoverQueued = reason; return; }
+    // A connect in flight (the operator's, the boot's, a settings apply's) is
+    // where this drop may have landed: never a second one beside it (see
+    // doConnect). Once it has settled, look again — every gate above, and
+    // whether that connect brought back what this drop broke.
+    if (connectsInFlight.size) {
+      Promise.allSettled([...connectsInFlight]).then(() => {
+        if (userDisconnecting || isQuitting) return;
+        if (reason === 'core-exited' ? !!(xray && xray.running) : !!(tun && tun.active)) return;
+        recoverFromDrop(reason);
+      }).catch(fail);
+      return;
+    }
     const since = lastRebuilt ? Date.now() - lastRebuilt.at : Infinity;
     if (since >= T.crashWindowMs) { recoverFromNetworkChange(reason, 0).catch(fail); return; }
     const wait = backoffAfter(lastRebuilt.attempt);
