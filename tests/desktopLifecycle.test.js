@@ -581,6 +581,27 @@ test('killSwitch ON: a block the drop had to put back (the belief said engaged, 
   assert.equal(h.killEngaged(), false);
 });
 
+test('killSwitch ON: a server switch under TUN seals its own stop→start gap, and lifts that block the way a reapply does', () => {
+  // A settings reapply armed the block for the gap between the old tunnel and
+  // the new one; a server switch — the same stop and start, inside the connect
+  // — did not, and every app off the proxy went direct until the new tunnel was up.
+  const body = slice('async function connectOnce(serverId, opts = {}) {', '\n  return { ok: true, tunError };\n}');
+  const rebuild = body.indexOf('if (myTun.active) {');
+  assert.notEqual(rebuild, -1);
+  const arm = body.indexOf('if (settings.killSwitch && !opts.holdKillSwitch) {', rebuild);
+  const hold = body.indexOf('leakGuard.holdForReconnect(', rebuild);
+  const stop = body.indexOf('myTun.stop(', rebuild);
+  assert.ok(arm !== -1 && arm < hold && arm < stop, 'armed before the old tunnel goes (a reapply or a recovery holding its own block arms nothing here)');
+  assert.match(body.slice(arm), /^if \(settings\.killSwitch && !opts\.holdKillSwitch\) \{\n\s*const r = await armKillSwitch\(\);\n\s*switchArmed = !!\(r && r\.ok && r\.added\);/);
+  // lifted once the connect stands: after the new tunnel, over a running core, before the last gate
+  const lift = body.indexOf('if (switchArmed && !stale() && xray.running) {\n');
+  const start = body.indexOf('await myTun.start(');
+  const lastGate = body.lastIndexOf('if (stale()) return abandoned;');
+  assert.ok(lift !== -1 && start < lift && lift < lastGate, 'lifted after the new tunnel, and nothing awaits past the last gate');
+  assert.match(body.slice(lift), /^if \(switchArmed && !stale\(\) && xray\.running\) \{\n\s*await disarmKillSwitch\(\);\n\s*send\('killswitch', \{ engaged: false \}\);/);
+  assert.ok(lastGate < body.indexOf('if (!xray.running) throw new Error('), 'a core that died keeps the block: its drop rebuilds under it');
+});
+
 test('armKillSwitch says whether it put the rule in', () => {
   const arm = slice('async function armKillSwitch() {', '\n}');
   assert.match(arm, /if \(killEngaged && await killRulePresent\(\)\) return \{ ok: true, added: false \};/);
