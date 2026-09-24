@@ -109,6 +109,12 @@ const WIN_HOLD6 = '::1';
 /** The marker an apply script prints for an adapter family it could not set. */
 const APPLY_FAIL = 'IRNF_FAIL';
 
+/** 127.0.0.0/8 or ::1 — a resolver there is this machine, never the network. */
+function isLoopbackIp(ip) {
+  const s = String(ip == null ? '' : ip).trim().toLowerCase();
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s) || s === '::1';
+}
+
 const PS_FLAGS = ['-NoProfile', '-NonInteractive'];
 
 /**
@@ -996,6 +1002,8 @@ class LeakGuard {
         // against these, not the tunnel's resolver.
         state.hold4 = WIN_HOLD4;
         state.hold6 = WIN_HOLD6;
+        // Every adapter there is has just been looked at (see refresh()).
+        this._winSeen = new Set();
         apply = () => this._winApply(adapters, WIN_HOLD4, WIN_HOLD6);
         if (strict) {
           const ranges = rangeComplement([...(excludes || []), ...GUARD_EXCLUDES]);
@@ -1103,6 +1111,7 @@ class LeakGuard {
         // before the hold existed held them on the peers.
         const want4 = st.hold4 || st.peer4;
         const want6 = st.hold4 ? st.hold6 : st.peer6;
+        this._winSeen = this._winSeen || new Set();   // reset by every engage
         if (!full && (st.win.adapters || []).length) {
           const owned = st.win.adapters.map(a => String(a.alias || '').toLowerCase()).filter(Boolean);
           const lists = (map, alias, peer) => (map.get(alias) || []).includes(String(peer).toLowerCase());
@@ -1112,7 +1121,17 @@ class LeakGuard {
           // drift; an empty listing is not trusted and falls through.
           const drifted = owned.some(alias => (v4.has(alias) && !lists(v4, alias, want4))
             || (v6 && v6.has(alias) && !lists(v6, alias, want6)));
-          if (v4.size && !drifted) return { refreshed: false, adapters: 0, quick: true };
+          // An adapter nobody owns that lists a resolver of its own has come up
+          // since the last snapshot — a Bluetooth tether, anything with
+          // auto-reconnect off: netWatcher rebuilds for neither. The snapshot
+          // decides whether it is ours to guard; each alias is looked at once.
+          const known = new Set([...owned, ...[...OWN_ADAPTERS, st.tunAlias].map(a => String(a || '').toLowerCase())]);
+          const resolves = (ip) => !isLoopbackIp(ip) && !/^fec0:0:0:ffff::[123]$/i.test(ip);
+          const newcomers = [...new Set([...v4.keys(), ...(v6 ? v6.keys() : [])])].filter(alias => !known.has(alias)
+            && !this._winSeen.has(alias)
+            && [...(v4.get(alias) || []), ...((v6 && v6.get(alias)) || [])].some(resolves));
+          for (const alias of newcomers) this._winSeen.add(alias);
+          if (v4.size && !drifted && !newcomers.length) return { refreshed: false, adapters: 0, quick: true };
         }
         const fresh = parseWinSnapshot(await this._powershell(winSnapshotScript(st.tunAlias), options));
         // A family the adapter does not have lists nothing, and that is not drift.
