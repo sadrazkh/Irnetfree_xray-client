@@ -97,6 +97,14 @@ class SubRefreshTest {
         val st = out.outbound.getJSONObject("streamSettings")
         assertEquals("tls", st.getString("security")); assertFalse(st.has("realitySettings"))
         assertEquals("cdn.example", st.getJSONObject("tlsSettings").getString("serverName"))
+        // The record keeps only what was carried. It kept "sni" and "pbk" as well,
+        // and the next refresh — the same handshake now — carried the SNI the
+        // record's server held, which by then was the PANEL's: frozen for good.
+        assertEquals(listOf("address"), out.edited)
+        val tls2 = tls.replace("sni=cdn.example", "sni=cdn2.example")
+        val out2 = SubRefresh.merge(listOf(out), listOf(LinkParser.parseLink(tls2)), sub.id).servers[0]
+        assertEquals(mine.id, out2.id); assertEquals("104.16.1.1", out2.address)
+        assertEquals("cdn2.example", out2.outbound.getJSONObject("streamSettings").getJSONObject("tlsSettings").getString("serverName"))
     }
 
     @Test fun theSheetsOwnNoiseSpellingIsNotAnEdit() {
