@@ -379,19 +379,24 @@ function lanIp() {
 const KILL_RULE = 'IRNetFree KillSwitch';
 let killEngaged = false;
 
+/**
+ * `added` says whether THIS call put the rule in — a caller that lifts only
+ * the block it armed (onConnectionDrop) asks that, never the killEngaged
+ * belief read before the call.
+ */
 async function armKillSwitch() {
   if (process.platform !== 'win32') return { ok: false, error: 'windows only' };
   // Already in: re-arming is a delete then an add — a moment with no block,
   // and a drop arms it while the tunnel is already down. But the flag is only
   // a belief: a disarm racing it (a reapply's, a recovery's) may have deleted
   // the rule meanwhile, so it is trusted only when the rule is really there.
-  if (killEngaged && await killRulePresent()) return { ok: true };
+  if (killEngaged && await killRulePresent()) return { ok: true, added: false };
   try {
     await netsh(['advfirewall', 'firewall', 'delete', 'rule', `name=${KILL_RULE}`]).catch(() => {});
     await netsh(['advfirewall', 'firewall', 'add', 'rule', `name=${KILL_RULE}`,
       'dir=out', 'action=block', 'protocol=any', 'remoteip=any']);
     killEngaged = true;
-    return { ok: true };
+    return { ok: true, added: true };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -1835,18 +1840,19 @@ async function onConnectionDrop(reason) {
     send('log', { line: 'Kill switch released — tunnel is back up', level: 'info' });
   };
   if (s.killSwitch) {
-    const wasEngaged = killEngaged;
     const r = await armKillSwitch();
-    armedHere = !!(r && r.ok && !wasEngaged);
+    // whether THIS call put the rule in — not the killEngaged belief, which a
+    // racing disarm may have made stale (armKillSwitch then adds it again)
+    armedHere = !!(r && r.ok && r.added);
     send('killswitch', { engaged: !!(r && r.ok), error: r && r.error });
-    if (r && r.ok && !wasEngaged) {
+    if (armedHere) {
       send('log', { line: 'Kill switch engaged — internet blocked (VPN dropped unexpectedly)', level: 'warn' });
       notify('IRNetFree', isEn() ? 'VPN dropped — internet blocked by the kill switch' : 'اتصال افتاد — اینترنت با کیل‌سوییچ بسته شد');
     }
     else if (!(r && r.ok) && process.platform === 'win32') send('log', { line: 'Kill switch failed (run as admin): ' + (r && r.error), level: 'error' });
     // A disconnect that landed while the rule went in has already lifted it —
     // or is about to, before this add: the rule this drop put in is not wanted.
-    if (r && r.ok && !wasEngaged && (userDisconnecting || isQuitting || !store.get('activeServerId', null))) {
+    if (armedHere && (userDisconnecting || isQuitting || !store.get('activeServerId', null))) {
       await disarmKillSwitch();
       send('killswitch', { engaged: false });
       return;
@@ -1854,15 +1860,19 @@ async function onConnectionDrop(reason) {
   }
   // A connect in flight (the user's, a recovery's, a settings apply's) is where
   // this drop may have landed: let it settle first — it fails over a dead core
-  // (see connectOnce) — rather than start a second one beside it.
-  await Promise.allSettled([...connectsInFlight]);
+  // (see connectOnce) — rather than start a second one beside it. And every
+  // one that began while we waited: a recovery's rebuild has its core up
+  // before its tunnel, and the snapshot of the first wait never saw it.
+  while (connectsInFlight.size) await Promise.allSettled([...connectsInFlight]);
   // the user may have disconnected while the rule went in
   if (userDisconnecting || isQuitting || !store.get('activeServerId', null)) return;
   // Is what this drop broke whole again (a rebuild already brought it back)?
   const healed = () => (reason === 'tunnel-exited' ? !!(tun && tun.active) : !!(xray && xray.running));
   // a connect that settled with a running core (the user's, say) healed it: no
-  // budget, no rebuild — and no block of ours left over the connection it made
-  if (healed()) return liftOwnBlock();
+  // budget, no rebuild — and no block of ours left over the connection it made.
+  // Not while a recovery runs: its core comes up before its tunnel, and the
+  // block stays until it is done (the join below).
+  if (healed() && !recovering) return liftOwnBlock();
   // "the proxy works": the core runs AND the kill switch is not blocking it
   const proxyUp = () => !!(xray && xray.running) && !killEngaged;
   if (!s.autoReconnectOnNetworkChange) {
