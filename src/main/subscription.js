@@ -197,16 +197,26 @@ function carryOver(old, fresh, said) {
   delete out._edited;
   const recorded = recordedEdits(old);
   const kept = [];
+  // `_edited` goes forward with only what really landed on the fresh record:
+  // a name kept after a handshake change (or for a TLS knob a REALITY server
+  // has no place for) would carry the PANEL's value next time and freeze it.
   const conn = connectionEdits(old, said, fresh);
-  if (conn) { out = applyServerEdits(out, conn.fields); kept.push(...conn.keys); }
+  if (conn) {
+    out = applyServerEdits(out, conn.fields);
+    const got = editFields(out), mine = editFields(old);
+    kept.push(...conn.keys.filter(k => norm(got[k]) === norm(mine[k])));
+  }
   // Recorded edits only, like the connection fields: an engine, fragment or
   // noise that merely differs from what the old link parses to today is an
   // older parser's (or an older app's) value, not the user's.
+  const missed = new Set();
   for (const f of USER_FIELDS) {
     if (!recorded.includes(f.key)) continue;
-    f.set(out, clone(f.get(old)));
-    kept.push(f.key);
+    const mine = f.get(old);
+    f.set(out, clone(mine));
+    if (norm(f.get(out)) === norm(mine)) kept.push(f.key); else missed.add(f.key);
   }
+  for (const k of missed) while (kept.includes(k)) kept.splice(kept.indexOf(k), 1);
   // A rename when recorded, or when the old link proves one: otherwise the
   // provider's name (which often carries the traffic left) is the current one.
   if (recorded.includes('name')) { out.name = old.name; kept.push('name'); }
