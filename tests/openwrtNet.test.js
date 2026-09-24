@@ -185,3 +185,31 @@ test('lanDevices: leases + neighbours, each source optional, and the exact comma
     run: async () => { throw new Error('ip: not found'); }
   }), []);
 });
+
+test('ownOrphanCores: only xray / xray-pattn / sing-box whose command line points into THIS service — never anything else', () => {
+  const procs = {
+    1: ['/sbin/procd'],
+    700: ['/usr/bin/xray', 'run', '-c', '/etc/irnetfree/config.json'],                  // ours: the live config
+    701: ['/etc/irnetfree/bin/xray-pattn', 'run', '-c', '/etc/irnetfree/test-17.json'],  // ours: a test core
+    702: ['/usr/bin/sing-box', 'run', '-c', '/tmp/irnf-sb-AbC123/sing-box.json'],       // ours: the gateway
+    703: ['/usr/bin/sing-box', 'run', '-c', '/tmp/upstream.json'],                      // someone else's sing-box
+    704: ['/usr/bin/xray', 'run', '-c', '/etc/xray/config.json'],                        // the xray-core package's own service
+    705: ['/usr/bin/node', '/usr/lib/irnetfree/src/server/server.js', '--data-dir', '/etc/irnetfree'],   // not a core (and this process)
+    706: ['/usr/bin/xray', 'run', '-c', '/etc/irnetfree-other/config.json'],             // a prefix is not a directory
+    707: ['/usr/bin/xrayfoo', 'run', '-c', '/etc/irnetfree/config.json']                 // not one of our cores
+  };
+  const readdir = (p) => { assert.equal(p, '/proc'); return ['self', 'net', ...Object.keys(procs)]; };
+  const readFile = (p) => {
+    const m = /^\/proc\/(\d+)\/cmdline$/.exec(p);
+    if (!m || !procs[m[1]]) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });   // exited meanwhile
+    return Buffer.from(procs[m[1]].join('\0') + '\0');
+  };
+  const found = net.ownOrphanCores({ dataDir: '/etc/irnetfree/', tmpDir: '/tmp', selfPid: 705, readdir, readFile });
+  assert.deepEqual(found.map(f => f.pid), [700, 701, 702]);
+  assert.deepEqual(found[2].argv, ['/usr/bin/sing-box', 'run', '-c', '/tmp/irnf-sb-AbC123/sing-box.json']);
+  // no /proc (not Linux): nothing
+  assert.deepEqual(net.ownOrphanCores({ dataDir: '/etc/irnetfree', readdir: () => { throw new Error('ENOENT'); } }), []);
+  // a relative or empty data dir matches no core by its data path
+  assert.deepEqual(net.ownOrphanCores({ dataDir: '', tmpDir: '/nowhere', selfPid: 1, readdir, readFile }).map(f => f.pid), []);
+  assert.deepEqual(net.ownOrphanCores({ dataDir: 'etc/irnetfree', tmpDir: '/nowhere', selfPid: 1, readdir, readFile }).map(f => f.pid), []);
+});

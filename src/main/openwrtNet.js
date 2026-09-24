@@ -244,8 +244,40 @@ async function lanDevices({ readFile = (p) => fs.promises.readFile(p, 'utf8'), r
   return mergeDevices(leases, neigh);
 }
 
+/** The cores this service runs, by executable name. */
+const CORE_NAMES = new Set(['xray', 'xray-pattn', 'sing-box']);
+
+/**
+ * The cores a previous run of THIS service left behind: a service that died
+ * without its exit hook (OOM killer, procd's SIGKILL after a slow stop) leaves
+ * its children running — an xray holding the SOCKS port the next one needs, a
+ * sing-box holding the IRNetFree device. Matched by /proc/<pid>/cmdline: the
+ * executable is one of ours AND an argument lies inside this service's data
+ * dir (xray's config and test configs) or is one of the gateway's own sing-box
+ * configs (`<tmp>/irnf-sb-…`). Anything else — another package's xray, a
+ * sing-box someone runs by hand — is never touched. Never throws.
+ */
+function ownOrphanCores({ dataDir, tmpDir = '/tmp', selfPid = process.pid, readdir = fs.readdirSync, readFile = fs.readFileSync } = {}) {
+  const dir = String(dataDir || '').replace(/\/+$/, '');
+  const inData = dir.startsWith('/') && dir.length > 1 ? dir + '/' : null;
+  const sbPrefix = String(tmpDir || '/tmp').replace(/\/+$/, '') + '/irnf-sb-';
+  let entries;
+  try { entries = readdir('/proc'); } catch { return []; }
+  const out = [];
+  for (const e of entries) {
+    if (!/^\d+$/.test(String(e)) || Number(e) === selfPid) continue;
+    let argv;
+    try { argv = String(readFile(`/proc/${e}/cmdline`)).split('\0').filter(Boolean); } catch { continue; }   // exited meanwhile
+    if (!argv.length || !CORE_NAMES.has(argv[0].slice(argv[0].lastIndexOf('/') + 1))) continue;
+    if (!argv.slice(1).some(a => (inData && a.startsWith(inData)) || a.startsWith(sbPrefix))) continue;
+    out.push({ pid: Number(e), argv });
+  }
+  return out;
+}
+
 module.exports = {
   BYPASS_MARK, BYPASS_RULE_PREF, MAIN_FIRST_PREF, NFT_TABLE,
   isOpenwrt, normalizeMac, validMacs, parseDhcpLeases, parseNeigh, mergeDevices,
-  buildNftRuleset, bypassRuleArgs, mainFirstRuleArgs, parseLanStatus, lanStatus, lanInterface, lanProbeAddress, lanDevices
+  buildNftRuleset, bypassRuleArgs, mainFirstRuleArgs, parseLanStatus, lanStatus, lanInterface, lanProbeAddress, lanDevices,
+  ownOrphanCores
 };
