@@ -1841,11 +1841,12 @@ async function repairNetwork() {
     await macRepairPromise;
     // The teardown that failed, once more, before the recoveries.
     if (cleanupFailed) { try { await doDisconnect(); } catch { /* the recoveries below are the point */ } }
-    // Each recovery on its own (macRecovery.js); the guard's release runs
-    // whatever they did, and a failure that gates Connect is reported after it.
+    // Each recovery on its own (macRecovery.js); the guard's release is its last
+    // step (whatever the others did, unless a live tunnel still uses it), and a
+    // failure that gates Connect is reported after it.
     let failed = null;
-    if (process.platform === 'darwin') failed = await recoverMacNetwork({ userData: app.getPath('userData'), onLog: (line, level) => send('log', { line, level }) });
-    await releaseGuardChecked(leakGuard);
+    if (process.platform === 'darwin') failed = await recoverMacNetwork({ userData: app.getPath('userData'), onLog: (line, level) => send('log', { line, level }), guard: () => releaseGuardChecked(leakGuard) });
+    else await releaseGuardChecked(leakGuard);
     if (failed) throw failed;
     macRepairError = null;
     cleanupFailed = false;

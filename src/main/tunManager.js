@@ -566,8 +566,8 @@ class TunManager {
   async recoverMacSessions() {
     if (os.platform() !== 'darwin') return 0;
     const owner = macOwners.get(this.macOwnerKey);
-    if (owner && owner !== this) throw new Error('Another tunnel operation is live; disconnect it before recovery');
-    if (this.active) throw new Error('Disconnect the active tunnel before recovery');
+    if (owner && owner !== this) throw macOwner.liveTunnelError('Another tunnel operation is live; disconnect it before recovery');
+    if (this.active) throw macOwner.liveTunnelError('Disconnect the active tunnel before recovery');
     let count = 0;
     if (this.macState) { await this.stopMac(); count++; }
     if (!this.userData) return count;
@@ -582,7 +582,7 @@ class TunManager {
       if (fs.lstatSync(file).isSymbolicLink()) throw new Error('Invalid tunnel recovery journal');
       const st = JSON.parse(fs.readFileSync(file, 'utf8'));
       // The pid AND its start time: after a reboot the old pid is someone else's.
-      if (await macOwner.ownerAlive(st, this.probe)) throw new Error('Another application instance may own this tunnel; close it before recovery');
+      if (await macOwner.ownerAlive(st, this.probe)) throw macOwner.liveTunnelError('Another application instance may own this tunnel; close it before recovery');
       if (path.resolve(st.work || '') !== work || !Array.isArray(st.savedDns) || !Array.isArray(st.bypassIps) || typeof st.gateway !== 'string' || typeof st.expectedCommand !== 'string') throw new Error('Invalid tunnel recovery session');
       for (const key of ['logFile', 'pidFile', 'devFile', 'identityFile', 'dnsFile', 'routesFile']) {
         if (typeof st[key] !== 'string' || path.dirname(path.resolve(st[key])) !== work) throw new Error('Invalid tunnel recovery path');
