@@ -35,8 +35,10 @@ function fakeInner(state) {
     isElevated: () => true,
     prepare: async () => {},
     physicalInterface: async () => ({ name: 'eth0', ifIndex: null, gateway: '192.168.1.2' }),
-    async start() {
+    bypass: null,   // the addresses the last start was told to keep off the tunnel
+    async start(socksPort, bypassAddrs) {
       inner.starts++;
+      inner.bypass = (bypassAddrs || []).slice();
       state.events.push('gateway:start');
       if (state.gatewayFails) throw new Error('sing-box exited immediately');
       inner.exited = new Promise((resolve) => { inner.gone = resolve; });

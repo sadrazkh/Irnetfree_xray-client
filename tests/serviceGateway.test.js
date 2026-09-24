@@ -466,3 +466,71 @@ test('R13: warnings, errors and the connection’s state reach syslog marked irn
   assert.doesNotMatch(text, /Gateway up on br-lan/, 'an info log line stays out of syslog');
   for (const [, l] of s.syslog) assert.ok(!l.includes('\n'), 'one line per entry');
 });
+
+/* ------------- the connect path: pinned entry names, loud chains, the live NIC ------------- */
+
+/** An upstream addressed by NAME (.invalid: were anything to ask a real resolver, it asks for nothing real). */
+const NAMED = Object.assign(makeProxyServer({ type: 'socks', address: 'upstream.invalid', port: 1080, name: 'named-upstream' }), { id: 'srv-named' });
+
+/** deps.resolveHost: answers `answer()` for every name, remembers each question. */
+function fakeResolver(answer) {
+  const asked = [];
+  const fn = async (host) => {
+    asked.push(host);
+    const ips = answer(host) || [];
+    return { ips, source: ips.length ? 'os' : 'none', suspect: [] };
+  };
+  fn.asked = asked;
+  return fn;
+}
+const configAt = (s, i) => s.state.xray.starts[i].config;
+const outboundOf = (cfg, tag) => cfg.outbounds.find(o => o.tag === tag);
+
+test('A1: an upstream named by hostname is answered from the config, resolved before the gateway comes up', async (t) => {
+  const resolveHost = fakeResolver(() => ['198.51.100.7']);
+  const s = start({ servers: [NAMED] }, { resolveHost });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', NAMED.id);
+  const cfg = configAt(s, 0);
+  assert.deepEqual(cfg.dns.hosts, { 'upstream.invalid': ['198.51.100.7'] });
+  const proxy = outboundOf(cfg, 'proxy');
+  assert.equal(proxy.streamSettings.sockopt.domainStrategy, 'UseIPv4', 'the dialer asks the core’s DNS, never dnsmasq');
+  assert.equal(proxy.streamSettings.sockopt.interface, 'eth0');
+  assert.equal(proxy.settings.servers[0].address, 'upstream.invalid', 'the name stays in the outbound');
+  assert.deepEqual(resolveHost.asked, ['upstream.invalid']);
+  const gw = s.state.inners.find(i => i.active);
+  assert.ok(gw.bypass.includes('198.51.100.7'), `the gateway keeps the pinned address off the tunnel: ${gw.bypass}`);
+});
+
+test('A1: a rebuild where nothing resolves keeps the address of the last connect — the name is never handed back to the OS', async (t) => {
+  let answer = ['198.51.100.7'];
+  const s = start({ servers: [NAMED] }, { resolveHost: fakeResolver(() => answer) });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', NAMED.id);
+  answer = [];   // a recovery under the gateway: dnsmasq's upstream is the tunnel that is down
+  await s.service.invoke('connect', NAMED.id);
+  assert.deepEqual(configAt(s, 1).dns.hosts, { 'upstream.invalid': ['198.51.100.7'] });
+  assert.ok(s.logs.some(l => l.level === 'warn' && /upstream\.invalid does not resolve right now — using 198\.51\.100\.7/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+  answer = ['198.51.100.8'];   // a fresh answer always wins
+  await s.service.invoke('connect', NAMED.id);
+  assert.deepEqual(configAt(s, 2).dns.hosts, { 'upstream.invalid': ['198.51.100.8'] });
+});
+
+test('A1: a name nothing ever resolved is left to the core, and said so; a proxy-only connect resolves nothing', async (t) => {
+  const none = fakeResolver(() => []);
+  const s = start({ servers: [NAMED] }, { resolveHost: none });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', NAMED.id);
+  assert.equal('hosts' in configAt(s, 0).dns, false);
+  assert.equal('domainStrategy' in outboundOf(configAt(s, 0), 'proxy').streamSettings.sockopt, false);
+  assert.ok(s.logs.some(l => l.level === 'warn' && /Could not resolve the server upstream\.invalid/.test(l.line)));
+
+  // no tunnel, no recursion: the OS answers the core as it always did
+  const asked = fakeResolver(() => ['198.51.100.7']);
+  const p = start({ servers: [NAMED], settings: { tunMode: false } }, { resolveHost: asked });
+  t.after(() => p.service.shutdown());
+  await p.service.invoke('connect', NAMED.id);
+  assert.deepEqual(asked.asked, []);
+  assert.equal('hosts' in configAt(p, 0).dns, false);
+});
+

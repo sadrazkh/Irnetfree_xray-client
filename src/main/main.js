@@ -6,7 +6,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts, wgResolverAddresses } = require('./configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('./configBuilder');
 const { adapterDnsServers, guardPeers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
@@ -112,6 +112,9 @@ let appliedSettings = null;
 // doConnect); null when not under TUN. rebuildActiveConfig() reuses it rather
 // than asking the OS again — with the tunnel up, the default route IS the tunnel.
 let liveDirectInterface = null;
+// The addresses the LIVE connection pinned ({ wgEndpointIps, entryHostIps },
+// see doConnect); rebuildActiveConfig() reuses them for the same reason.
+let livePins = null;
 let liveDiagnostics = null;
 let macRepairPromise = Promise.resolve();
 let macRepairError = null;
@@ -828,6 +831,58 @@ async function withWgEndpointIps(serverId, settings) {
   return Object.assign({}, settings, { wgEndpointIps: map });
 }
 
+const lastEntryHostIps = new Map();    // entry server name → the addresses the last connect resolved
+
+/**
+ * The settings for this connect, with the addresses of every entry server
+ * the core dials by NAME (configBuilder.entryHosts) — answered from the
+ * config, so the core never asks the OS for its own server (see
+ * configBuilder.pinEntryHosts: under TUN the OS resolver is the tunnel, and
+ * the question waited on the very server it was about). Only under TUN:
+ * without a tunnel the OS resolver is the network's and nothing loops.
+ *
+ * Resolved here, before the tunnel and the guard, through trustedDns like
+ * the WireGuard endpoints. A recovery rebuilds under the armed kill switch
+ * and the held guard, where nothing resolves: the addresses of the last
+ * connect are the best answer there is. A name with neither is left to the
+ * core, as before.
+ */
+async function withEntryHostIps(serverId, settings) {
+  if (!settings.tunMode) return settings;
+  let hosts = [];
+  try {
+    hosts = entryHosts(buildPlan(serverId, settings).plan);
+  } catch { return settings; }
+  if (!hosts.length) return settings;
+  const map = {};
+  const notes = [];
+  await Promise.all(hosts.map(async (h) => {
+    const r = await resolveHost(h, { ipv6: !!settings.ipv6, doh: settings.dnsRemote }).catch(() => null);
+    if (!r || !r.ips.length) {
+      const last = lastEntryHostIps.get(h);
+      if (last) {
+        map[h] = last;
+        notes.push(`${h} does not resolve right now — using ${last.join(', ')}, the address of the last connect`);
+        return;
+      }
+      send('log', { line: `Could not resolve the server ${h} — leaving it to the core, which asks the system resolver`, level: 'warn' });
+      return;
+    }
+    map[h] = r.ips.slice();
+    lastEntryHostIps.set(h, r.ips.slice());
+    if (r.source === 'doh') {
+      notes.push(`this network answered ${h} with ${r.suspect.join(', ')}; using ${r.ips.join(', ')} from DoH instead`);
+    } else if (r.source === 'os-suspect') {
+      notes.push(`${h} resolves to ${r.ips.join(', ')}, which no public server can be — if the server is not on this LAN, the network is answering for it`);
+    }
+  }));
+  for (const n of notes) send('log', { line: 'Server address: ' + n, level: 'warn' });
+  const named = Object.keys(map);
+  if (!named.length) return settings;
+  send('log', { line: 'Server address: ' + named.map(h => `${h} → ${map[h].join(', ')}`).join('; '), level: 'info' });
+  return Object.assign({}, settings, { entryHostIps: map });
+}
+
 /**
  * Arm the "this tunnel is talking to nobody" watch for the WireGuard outbounds
  * of the config we are about to run, and forget the previous connection's.
@@ -938,9 +993,15 @@ async function connectOnce(serverId, opts = {}) {
   // chain. On that core the tunnel then never comes up — everything else still
   // works, which is what makes it so hard to see. Resolve it here, once, and
   // give the core an address: same behaviour on both, and the tunnel no longer
-  // bootstraps through the DNS it is itself supposed to carry.
-  settings = await withWgEndpointIps(serverId, settings);
+  // bootstraps through the DNS it is itself supposed to carry. The entry
+  // servers' names likewise, before the tunnel and the guard (see
+  // withEntryHostIps) — the two side by side: under a held rebuild each can
+  // take seconds to fail.
+  const [wgSet, entrySet] = await Promise.all([withWgEndpointIps(serverId, settings), withEntryHostIps(serverId, settings)]);
   if (stale()) return abandoned;
+  settings = Object.assign({}, settings, { wgEndpointIps: wgSet.wgEndpointIps, entryHostIps: entrySet.entryHostIps });
+  // Every address the core will dial by itself, for the tunnel's bypass.
+  const pinnedIps = [...Object.values(settings.wgEndpointIps || {}), ...Object.values(settings.entryHostIps || {}).flat()];
 
   // The TUN layer for this connect — the backend setting plus what is
   // installed. A LIVE instance is never replaced: switching servers keeps the
@@ -978,6 +1039,9 @@ async function connectOnce(serverId, opts = {}) {
   } else {
     liveDirectInterface = null;
   }
+  // What this connect pinned: a process-route reload (rebuildActiveConfig)
+  // keeps the tunnel, whose bypass was cut for exactly these addresses.
+  livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
 
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
   // Managed DNS off drops every resolver a routing target brings — a
@@ -1114,7 +1178,7 @@ async function connectOnce(serverId, opts = {}) {
           let hold = null;
           try {
             if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
-              excludes: await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []),
+              excludes: await tunPlatform.resolveServerIps([...entryAddrs, ...pinnedIps], { ipv6: true }).catch(() => []),
               token: guardToken
             });
           } catch {}
@@ -1137,12 +1201,13 @@ async function connectOnce(serverId, opts = {}) {
         // does) — a hole in the exclusions either way, and wrong entirely for a
         // sing-box-format config, whose plan is not the one running.
         tunAdapterDns = adapterDnsServers(settings, hijacks ? dnsPeer : null);
-        // The WireGuard endpoints this connect resolved itself are addresses the
-        // core will dial DIRECTLY (a peer dialled through a chain rides the hop
-        // and needs nothing here, but one dialled on its own would loop back
-        // into the tunnel it is building).
-        const wgEndpoints = Object.values(settings.wgEndpointIps || {});
-        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...wgEndpoints],
+        // The addresses this connect resolved itself (pinnedIps: the WireGuard
+        // endpoints, the entry servers' names) are what the core will dial
+        // DIRECTLY (a peer dialled through a chain rides the hop and needs
+        // nothing here, but one dialled on its own would loop back into the
+        // tunnel it is building) — kept off it even when the backend's own
+        // lookup of a name answers otherwise, or nothing, under a held rebuild.
+        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...pinnedIps],
           tunAdapterDns,
           { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
@@ -1449,6 +1514,9 @@ async function rebuildActiveConfig() {
   // Keep the binding the live connection was built with (see doConnect): the
   // tunnel stays up across this reload, and asking the OS now would name it.
   if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
+  // …and the addresses it pinned: the tunnel's bypass names exactly these, and
+  // a name asked again now could answer another (see doConnect)
+  if (livePins) settings = Object.assign({}, settings, livePins);
   // `plan` too: the usage meter needs it to attribute the new core's bytes
   const { plan, config, engine } = buildActive(serverId, settings);
   // Suppress the transient 'stopped' status from the old instance so the UI
