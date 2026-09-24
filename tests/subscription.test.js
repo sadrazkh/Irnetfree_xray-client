@@ -380,6 +380,17 @@ test('a recorded field the fresh server has no place for is not kept as recorded
   assert.equal('_edited' in next, false, 'cipherSuites has no TLS settings to live in');
 });
 
+test('a rename proven against the old link is recorded the first time it is carried', () => {
+  const [old] = sub([XH + '#DE 12GB']);
+  old.name = 'My exit';   // renamed by an app version that recorded nothing
+  const [n1] = reconcileServers([old], sub([XH + '#DE 11GB']));
+  assert.equal(n1.name, 'My exit');
+  assert.deepEqual(n1._edited, ['name']);
+  const [n2] = reconcileServers([n1], sub([XH + '#DE 10GB']));
+  assert.equal(n2.name, 'My exit');
+  assert.deepEqual(n2._edited, ['name']);
+});
+
 test('a field released back to the link follows the panel again', () => {
   const [orig] = sub([TR + '#NL']);
   const a = applyServerEdits(orig, form(orig, { sni: 'front.example.com' }));
