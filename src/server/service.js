@@ -559,7 +559,8 @@ function createService(opts = {}) {
   });
   const dnsGuardWatch = new DnsGuardWatch({
     guard: leakGuard,
-    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading,
+    // and only over a core that is actually running (see main.js)
+    isActive: () => !!tun?.active && !tun.managesDns && !userDisconnecting && !isQuitting && !xrayReloading && !!xray?.running,
     onError: () => send('log', { line: 'DNS guard refresh failed; check network protection or reconnect.', level: 'warn' })
   });
   if (process.platform === 'darwin') {
