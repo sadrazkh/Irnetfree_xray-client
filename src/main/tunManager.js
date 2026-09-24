@@ -358,8 +358,9 @@ class TunManager {
     const service = await this.serviceForDeviceMac(route.device);
     let savedDns = service ? await this.getServiceDnsMac(service) : [];
     // After a reconnect's stop (keepDns) the service still lists the tunnel's
-    // resolver: the originals come from the session before, not from it.
-    const handedOver = service && macOwner.takeHandedOverDns(this.macOwnerKey, service, savedDns);
+    // resolver: the originals come from the session before, not from it
+    // (dropped only once this start has succeeded — see macSessionOwner.js).
+    const handedOver = service && macOwner.peekHandedOverDns(this.macOwnerKey, service, savedDns);
     if (handedOver) savedDns = handedOver;
 
     const ips = await this.resolveServerIps(serverAddress);
@@ -510,6 +511,7 @@ class TunManager {
     Object.assign(this.macState, { macPid, identity, dev });
     if (!macPid || !identity || !/^utun\d+$/.test(dev)) throw new Error('Incomplete tunnel setup state; recovery required');
     this.saveMacSession();
+    if (handedOver) macOwner.dropHandedOverDns(this.macOwnerKey);   // the journal holds them now
     this.bypassIps = ips.slice();
     this.active = true;
 
