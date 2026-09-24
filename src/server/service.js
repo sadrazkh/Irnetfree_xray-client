@@ -426,7 +426,12 @@ function createService(opts = {}) {
     setSubs: (arr) => store.set('subscriptions', arr),
     getServers: () => store.get('servers', []),
     setServers: (arr) => store.set('servers', arr),
-    onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) })
+    onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) }),
+    // an automatic refresh that failed used to vanish without a word
+    onError: (sub, e) => {
+      send('log', { line: `Subscription "${sub.name}" could not be updated automatically: ${e.message}`, level: 'warn' });
+      send('subs-updated', { sub, info: { error: e.message }, servers: store.get('servers', []), subs: store.get('subscriptions', []) });
+    }
   });
 
   // A placeholder until the first connect picks the backend for real (see
