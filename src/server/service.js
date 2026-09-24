@@ -344,12 +344,15 @@ function createService(opts = {}) {
   const bootIntent = store.get('activeServerId', null);
   if (bootIntent) store.set('activeServerId', null);
   // OpenWrt: the connection stays the way the user left it. `connectIntent` is
-  // written by every successful connect and cleared ONLY by a disconnect the
-  // user asked for — not by a shutdown, a power cut, a failed boot attempt or a
-  // gateway that did not come up — and the boot connect resumes exactly that.
-  // So a router the user disconnected stays disconnected after a reboot, and
-  // one that was connected comes back even after two power cuts in a row. A
-  // router upgraded from before this key takes it from the last run's live id.
+  // written by every connect once its core is up — BEFORE the gateway is, so
+  // the last command wins: a switch to B whose gateway then fails leaves the
+  // router disconnected now and resumes B, not A, at the next boot. It is
+  // cleared ONLY by a disconnect the user asked for — not by a shutdown, a
+  // power cut, a failed boot attempt or a gateway that did not come up — and
+  // the boot connect resumes exactly that. So a router the user disconnected
+  // stays disconnected after a reboot, and one that was connected comes back
+  // even after two power cuts in a row. A router upgraded from before this key
+  // takes it from the last run's live id.
   if (OPENWRT && store.get('connectIntent', undefined) === undefined) store.set('connectIntent', bootIntent || null);
   // lifetime traffic per config — its own file, so a 30s save does not
   // rewrite every saved server (see main.js)
@@ -1334,9 +1337,11 @@ function createService(opts = {}) {
    * is ours, not a crash (quietStops). Then the live state goes back to what it
    * was: a rebuild of the same connection (the recovery) keeps it, so the
    * retries go on; anything else (the boot connect, a connect or a switch by
-   * hand) ends disconnected, and says so — the panel, every other client and
-   * syslog were still showing the connection before it. The router's
-   * connectIntent is not touched: only the user's disconnect clears that.
+   * hand) ends disconnected — and says so when there WAS a connection before
+   * it (the panel, every other client and syslog were still showing it). A
+   * boot attempt or a first connect had none: a "disconnected" every 15 s of
+   * boot retries would only fill syslog. The router's connectIntent is not
+   * touched: only the user's disconnect clears that.
    *
    * Returns true when a disconnect or a newer connect overtook this call
    * while it awaited: that one owns the state now, so nothing is written.
@@ -1358,7 +1363,7 @@ function createService(opts = {}) {
       stopNetWatcher();
       if (stats) stats.stop();
       liveDirectInterface = null;
-      send('status', { state: 'disconnected' });
+      if (prevActive) send('status', { state: 'disconnected' });
     }
     return false;
   }
@@ -1526,7 +1531,8 @@ function createService(opts = {}) {
     const wait = backoffAfter(lastRebuilt.attempt);
     if (wait == null) {
       send('log', { line: `The connection keeps dropping right after every rebuild (${reason}) — giving up`, level: 'error' });
-      send('status', { state: 'reconnect-failed', reason, proxyUp: false, tunError: null });
+      // a tunnel that keeps dying over a live core leaves the proxy up — say so
+      send('status', { state: 'reconnect-failed', reason, proxyUp: !!(xray && xray.running), tunError: null });
       return;
     }
     const attempt = lastRebuilt.attempt + 1;
@@ -1584,10 +1590,13 @@ function createService(opts = {}) {
     if (gen !== recoverGen) return;
 
     // A newer network arrived while we were rebuilding for the old one: start over
-    // for it, from the first backoff step.
+    // for it, from the first backoff step. A DROP that arrived meanwhile goes
+    // through recoverFromDrop() instead: the rebuild just made counts, and a
+    // core dying again right after it waits its turn (the crash window).
     const queued = recoverQueued;
     if (queued == null) return;
     recoverQueued = null;
+    if (DROP_REASONS.has(queued)) { recoverFromDrop(queued); return; }
     await recoverFromNetworkChange(queued, 0);
   }
 
@@ -1954,8 +1963,9 @@ function createService(opts = {}) {
     'subs:remove': (id) => { subs.remove(id); return { subs: subs.list(), servers: store.get('servers', []) }; },
     'subs:autoUpdate': ({ id, enabled }) => { subs.setAutoUpdate(id, enabled); return subs.list(); },
 
-    // by hand: either one ends the boot-time retries
-    'connect': (id) => { bootCancelled = true; return doConnect(id); },
+    // by hand: either one ends the boot-time retries — and a connect made
+    // afresh starts with no crash history (recoverFromDrop), as after a disconnect
+    'connect': (id) => { bootCancelled = true; lastRebuilt = null; return doConnect(id); },
     // ...and a disconnect by hand is the one thing that clears the router's connectIntent
     'disconnect': () => { bootCancelled = true; if (OPENWRT) setIfChanged('connectIntent', null); return doDisconnect(); },
 
