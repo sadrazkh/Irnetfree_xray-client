@@ -1175,6 +1175,7 @@ async function connectOnce(serverId, opts = {}) {
   let guardError = null;
   let guardEngaged = false;
   let guardToken = null;      // receipt for this connect's guard session
+  let switchArmed = false;    // the kill-switch block this connect put in for its own tunnel swap
   // What the TUN adapter's own resolver was set to. The leak guard points the
   // PHYSICAL adapters at the same thing (see dnsBuilder.guardPeers): when the
   // core hijacks port 53 that is the tunnel peer, and when it does not, the
@@ -1206,6 +1207,22 @@ async function connectOnce(serverId, opts = {}) {
         // be blocked by our own guard. Tear it down and build it for this
         // connect; the kill switch (when armed) seals the gap.
         if (myTun.active) {
+          // The same gap a settings reapply has — the old tunnel goes below,
+          // the new one is not up yet, and every app off the proxy leaves
+          // direct meanwhile — sealed the same way: the kill switch, armed
+          // here and lifted once this connect stands (below). A caller that
+          // already holds a block (holdKillSwitch: a reapply, a recovery)
+          // lifts its own.
+          if (settings.killSwitch && !opts.holdKillSwitch) {
+            const r = await armKillSwitch();
+            switchArmed = !!(r && r.ok && r.added);
+            if (switchArmed) {
+              send('killswitch', { engaged: true });
+              send('log', { line: 'Kill switch engaged for the server switch — internet blocked until the new tunnel is up', level: 'warn' });
+            } else if (!(r && r.ok) && process.platform === 'win32') {
+              send('log', { line: 'Kill switch could not be armed for the server switch (run as admin): ' + (r && r.error), level: 'warn' });
+            }
+          }
           // HOLD, never release. Releasing here put the adapters back on the
           // ISP's resolvers — and at the strict level took the firewall block
           // with them — for the whole rebuild, with no tunnel, which is the
@@ -1364,6 +1381,15 @@ async function connectOnce(serverId, opts = {}) {
     }
   } else {
     await removeLanFirewall();
+  }
+  // The server switch's own block (see the tunnel rebuild above) goes the way
+  // a settings reapply's does: once this connect stands — not over a core
+  // that died (its drop rebuilds under it), and not for an intent a
+  // disconnect or a newer connect overtook (theirs to decide).
+  if (switchArmed && !stale() && xray.running) {
+    await disarmKillSwitch();
+    send('killswitch', { engaged: false });
+    send('log', { line: 'Kill switch released — tunnel is back up', level: 'info' });
   }
   // Last gate before the irreversible half: the watchers and the 'connected'
   // status. Past this line nothing awaits, so nothing can overtake us.
