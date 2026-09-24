@@ -19,9 +19,14 @@ const os = require('os');
 const path = require('path');
 const { psArgs } = require('./tunPlatform');
 
+// Every proxy operation runs one at a time (see serial below), so one command
+// that hangs — a PowerShell that never returns — would wedge every connect,
+// disconnect and quit queued behind it. None of them takes seconds normally.
+const RUN_TIMEOUT_MS = 20000;
+
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { windowsHide: true }, (err, stdout, stderr) => {
+    execFile(cmd, args, { windowsHide: true, timeout: RUN_TIMEOUT_MS }, (err, stdout, stderr) => {
       if (err) return reject(new Error((stderr || err.message || '').toString().trim()));
       resolve((stdout || '').toString().trim());
     });
@@ -360,19 +365,59 @@ async function enableJournaled(platform, { host, httpPort, socksPort }, { exec, 
   }
 }
 
-/** Put the journaled state back and spend the journal. false when there was none (not ours). */
+/**
+ * Is the proxy on the machine right now still the one WE set? Windows: our
+ * server AND our exact bypass list, switched on — v2rayN, for one, uses the
+ * same 127.0.0.1:10809 with a list of its own. macOS: our host:port as some
+ * service's web proxy, switched on.
+ */
+function ownsWin(cur, j) {
+  return Number(cur.ProxyEnable) === 1 && cur.ProxyServer === j.ours && cur.ProxyOverride === WIN_BYPASS;
+}
+function ownsMac(cur, j) {
+  const o = j.ours || {};
+  return cur.some(s => s.web && s.web.enabled && s.web.server === o.host && s.web.port === Number(o.httpPort));
+}
+
+/**
+ * Put the journaled state back and spend the journal. Resolves false when
+ * there was none (not ours to touch), 'not-ours' when the proxy on the machine
+ * is no longer the one we set — someone changed it while we were connected, or
+ * since the crash: theirs, left alone, and the stale record goes — else true.
+ * A snapshot that cannot be read restores anyway: the journal says we set it.
+ */
 async function restoreJournaled(platform, { exec, journal }) {
   const j = readJournal(journal);
   if (!j) return false;
   if (platform === 'win32') {
+    let cur = null;
+    try { cur = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
+    if (cur && !ownsWin(cur, j)) { clearJournal(journal); return 'not-ours'; }
     const ok = await runWinRestore(winRestoreSteps(j.win), exec);
     await refreshWindows(exec).catch(() => {});
     // something could not be put back: keep the record for the next launch
     if (!ok) return true;
-  } else if (!Array.isArray(j.mac)) {
-    await disableMac(exec).catch(() => {});   // nothing known about before: the old disable
   } else {
-    for (const [cmd, args] of macRestoreSteps(j.mac)) await exec(cmd, args).catch(() => {});
+    let cur = null;
+    try { cur = await macSnapshot(exec); } catch { /* unknown */ }
+    if (cur && !ownsMac(cur, j)) { clearJournal(journal); return 'not-ours'; }
+    if (!Array.isArray(j.mac)) {
+      await disableMac(exec).catch(() => {});   // nothing known about before: the old disable
+    } else {
+      for (const [cmd, args] of macRestoreSteps(j.mac)) await exec(cmd, args).catch(() => {});
+      // A service the record never saw (plugged in, renamed, or set by a
+      // server switch's second enable) that carries OUR proxy: switched off.
+      const recorded = new Set(j.mac.map(s => s && s.name));
+      const o = j.ours || {};
+      for (const svc of cur || []) {
+        if (recorded.has(svc.name)) continue;
+        for (const k of MAC_KINDS) {
+          const r = svc[k.key];
+          const port = Number(k.key === 'socks' ? o.socksPort : o.httpPort);
+          if (r && r.enabled && r.server === o.host && r.port === port) await exec('networksetup', [k.state, svc.name, 'off']).catch(() => {});
+        }
+      }
+    }
   }
   clearJournal(journal);
   return true;
@@ -425,42 +470,42 @@ function repairSystemProxy(opts = {}) {
   const journal = opts.journal !== undefined ? opts.journal : journalFile;
   if (!journal || !journaled(platform)) return Promise.resolve(null);
   return serial(async () => {
-    const j = readJournal(journal);
-    if (platform === 'win32') {
-      let cur = null;
-      try { cur = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
-      if (j) {
-        const ours = !cur || (Number(cur.ProxyEnable) === 1 && cur.ProxyServer === j.ours);
-        if (!ours) { clearJournal(journal); return 'dropped'; }
-        await restoreJournaled(platform, { exec, journal });
-        return 'restored';
-      }
-      if (opts.legacyServer && cur && Number(cur.ProxyEnable) === 1 && cur.ProxyOverride === WIN_BYPASS && cur.ProxyServer === opts.legacyServer) {
-        await disableWindows(exec).catch(() => {});
-        return 'legacy';
-      }
-      return null;
+    if (readJournal(journal)) {
+      const r = await restoreJournaled(platform, { exec, journal });
+      return r === 'not-ours' ? 'dropped' : 'restored';
     }
-    if (!j) return null;
+    // No journal: only a pre-journal leftover on OUR port is left to look
+    // for, and only on Windows — nothing to ask PowerShell otherwise.
+    if (platform !== 'win32' || !opts.legacyServer) return null;
     let cur = null;
-    try { cur = await macSnapshot(exec); } catch { /* unknown */ }
-    const o = j.ours || {};
-    const ours = !cur || cur.some(s => s.web && s.web.enabled && s.web.server === o.host && s.web.port === Number(o.httpPort));
-    if (!ours) { clearJournal(journal); return 'dropped'; }
-    await restoreJournaled(platform, { exec, journal });
-    return 'restored';
+    try { cur = parseWinProxy(await exec('powershell', psArgs(WIN_SNAPSHOT_PS))); } catch { /* unknown */ }
+    if (cur && ownsWin(cur, { ours: opts.legacyServer })) {
+      await disableWindows(exec).catch(() => {});
+      return 'legacy';
+    }
+    return null;
   }).catch(() => null);
 }
 
 /**
  * The exit hook's version: synchronous, bounded, never throws. The journal is
- * the only authority — none means we set nothing. No WinINet refresh (a
- * PowerShell start on the way out); browsers watch the registry key anyway.
+ * the only authority — none means we set nothing. It does not ask whether the
+ * proxy is still ours (no PowerShell on the way out, and none for the WinINet
+ * refresh either; browsers watch the registry key anyway). Bounded twice: each
+ * command by its own timeout, the whole by `budgetMs` — a machine shutting down
+ * gives seconds, and a Mac has up to six networksetup calls per service. What
+ * did not fit stays journaled for the next launch.
  */
 function restoreSystemProxySync(opts = {}) {
   const platform = opts.platform || os.platform();
   const journal = opts.journal !== undefined ? opts.journal : journalFile;
-  const execSync = opts.execSync || ((cmd, args) => execFileSync(cmd, args, { windowsHide: true, stdio: 'ignore', timeout: 3000 }));
+  const run1 = opts.execSync || ((cmd, args) => execFileSync(cmd, args, { windowsHide: true, stdio: 'ignore', timeout: 3000 }));
+  const deadline = Date.now() + (opts.budgetMs == null ? 8000 : opts.budgetMs);
+  let late = false;
+  const execSync = (cmd, args) => {
+    if (Date.now() >= deadline) { late = true; throw new Error('out of time'); }
+    return run1(cmd, args);
+  };
   if (!journal || !journaled(platform)) return false;
   const j = readJournal(journal);
   if (!j) return false;
@@ -470,7 +515,7 @@ function restoreSystemProxySync(opts = {}) {
   let ok = true;
   if (platform === 'win32') ok = runWinRestoreSync(winRestoreSteps(j.win), execSync);
   else for (const [cmd, args] of macRestoreSteps(j.mac)) { try { execSync(cmd, args); } catch { /* best effort */ } }
-  if (ok) clearJournal(journal);
+  if (ok && !late) clearJournal(journal);
   return true;
 }
 
