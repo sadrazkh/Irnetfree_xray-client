@@ -31,7 +31,12 @@ data class ServerConfig(
     // certificate a TLS server presented, when its link asked for allowInsecure.
     val certPin: String = "",
     val certPinAt: String = "",
-    val certPinCheckedAt: Long = 0
+    val certPinCheckedAt: Long = 0,
+    // The edit-sheet fields the USER has changed on this server (ServerEditor
+    // field names, accumulated over every save). A subscription refresh keeps
+    // these and nothing else of the old record's connection (SubRefresh.carry):
+    // what the user did is recorded when they do it, never inferred afterwards.
+    val edited: List<String> = emptyList()
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("name", name); put("protocol", protocol)
@@ -41,6 +46,7 @@ data class ServerConfig(
         if (dns.isNotEmpty()) put("dns", JSONArray(dns))
         if (dnsDomains.isNotEmpty()) put("dnsDomains", JSONArray(dnsDomains))
         if (certPin.isNotEmpty()) { put("certPin", certPin); put("certPinAt", certPinAt); put("certPinCheckedAt", certPinCheckedAt) }
+        if (edited.isNotEmpty()) put("edited", JSONArray(edited))
     }
 
     companion object {
@@ -68,7 +74,8 @@ data class ServerConfig(
                 dnsDomains = domains,
                 certPin = CertPin.normalizePin(o.optString("certPin")),
                 certPinAt = o.optString("certPinAt"),
-                certPinCheckedAt = o.optLong("certPinCheckedAt", 0)
+                certPinCheckedAt = o.optLong("certPinCheckedAt", 0),
+                edited = strList(o.optJSONArray("edited"))
             )
         }
 
@@ -108,7 +115,13 @@ data class PoolEntry(
     }
 }
 
-/** A subscription source + its last-known usage (from Subscription-Userinfo). */
+/**
+ * A subscription source + its last-known usage (from Subscription-Userinfo).
+ * `lastUpdated` is the last refresh that brought servers; `lastTried` the last
+ * attempt of any outcome, so a failing one waits out the auto-update interval
+ * like a good one instead of being fetched again on every visit (SubRefresh.due);
+ * `lastError` is what that attempt said when it failed ("" = it did not).
+ */
 data class Subscription(
     val id: String,
     val name: String,
@@ -116,18 +129,22 @@ data class Subscription(
     val serverCount: Int = 0,
     val lastUpdated: Long = 0,
     val autoUpdate: Boolean = true,
-    val upload: Long = 0, val download: Long = 0, val total: Long = 0, val expire: Long = 0
+    val upload: Long = 0, val download: Long = 0, val total: Long = 0, val expire: Long = 0,
+    val lastTried: Long = 0,
+    val lastError: String = ""
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("name", name); put("url", url)
         put("serverCount", serverCount); put("lastUpdated", lastUpdated); put("autoUpdate", autoUpdate)
         put("upload", upload); put("download", download); put("total", total); put("expire", expire)
+        put("lastTried", lastTried); if (lastError.isNotEmpty()) put("lastError", lastError)
     }
     companion object {
         fun fromJson(o: JSONObject) = Subscription(
             o.optString("id"), o.optString("name", "Sub"), o.optString("url"),
             o.optInt("serverCount"), o.optLong("lastUpdated"), o.optBoolean("autoUpdate", true),
-            o.optLong("upload"), o.optLong("download"), o.optLong("total"), o.optLong("expire"))
+            o.optLong("upload"), o.optLong("download"), o.optLong("total"), o.optLong("expire"),
+            o.optLong("lastTried"), o.optString("lastError"))
     }
 }
 

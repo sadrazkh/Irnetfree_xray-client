@@ -47,6 +47,11 @@ class Store(context: Context) {
     fun saveSelection(sel: String) { selection = sel; prefs.edit().putString("selection", sel).apply() }
     fun saveSettings(sNew: AppSettings) { settings = sNew; prefs.edit().putString("settings", sNew.toJson().toString()).apply() }
 
+    /** Whether the app has asked for POST_NOTIFICATIONS yet (Android 13+; asked once, before a first connect). */
+    var notifAsked: Boolean
+        get() = prefs.getBoolean("notifAsked", false)
+        set(v) { prefs.edit().putBoolean("notifAsked", v).apply() }
+
     private fun <T> read(key: String, map: (JSONObject) -> T): MutableList<T> {
         val out = ArrayList<T>()
         try { val a = JSONArray(prefs.getString(key, "[]")); for (i in 0 until a.length()) out.add(map(a.getJSONObject(i))) } catch (_: Exception) {}
@@ -127,5 +132,17 @@ class Store(context: Context) {
     companion object {
         const val POOL_ID = "__pool__"
         const val ADV_ID = "__advanced__"
+
+        @Volatile private var shared: Store? = null
+
+        /**
+         * The process's one store, for the UI. Work that outlives a screen — a
+         * subscription fetch, ⚡ fastest — writes into the lists it started
+         * with; an activity recreated meanwhile must be showing those same
+         * lists, not a second copy read from disk that the next save of either
+         * would overwrite.
+         */
+        fun get(ctx: Context): Store =
+            shared ?: synchronized(this) { shared ?: Store(ctx.applicationContext).also { shared = it } }
     }
 }
