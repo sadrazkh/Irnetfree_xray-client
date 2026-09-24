@@ -652,11 +652,23 @@ function reapplyHarness({ settings = {}, connect = async () => ({ ok: true }), o
     const stopProcWatcher = () => {};
     async function armKillSwitch() { env.calls.push('arm'); killEngaged = true; return { ok: true }; }
     async function disarmKillSwitch() { env.calls.push('disarm'); killEngaged = false; }
-    ${slice('async function reapplyConnection() {', '\n}')}
+    ${slice('async function reapplyConnection(opts = {}) {', '\n}')}
     return reapplyConnection;
   `);
   return { reapply: make(env), calls, env };
 }
+
+test('a recovery’s reapply tells its connect it will be retried; a settings apply or a Retry does not', async () => {
+  // A connect that knows a recovery will retry its tunnel keeps the held guard
+  // over a failed TUN start (the give-up's banner offers it back); any other
+  // connect gives it back at once (see connectOnce).
+  const seen = [];
+  const h = reapplyHarness({ connect: async (id, o) => { seen.push(o); return { ok: true }; } });
+  await h.reapply({ recovery: true });
+  await h.reapply();
+  assert.deepEqual(seen.map(o => !!o.recovery), [true, false]);
+  assert.equal(seen[0].holdKillSwitch, false, 'the kill-switch hold still travels beside it');
+});
 
 test('a settings reapply keeps the journaled system proxy through the rebuild instead of switching it off and on', async () => {
   // Switched off, the machine's own (or no) proxy was live for the whole
@@ -720,7 +732,7 @@ test('a reapply over a held guard asks the OS for no name — at the standard le
 test('service.js holds the guard across a reapply the same way', () => {
   const SERVICE = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8').replace(/\r\n/g, '\n');
   const hold = (src, label) => {
-    const body = src.slice(src.indexOf('async function reapplyConnection() {'));
+    const body = src.slice(src.indexOf('async function reapplyConnection(opts = {}) {'));
     const a = body.indexOf('let hold = null;');
     const b = body.indexOf('await stopAllTuns({ keepDns');
     assert.ok(a !== -1 && b > a, label);

@@ -45,7 +45,7 @@ const seam = (s) => s.replace(/\bresolveName\(/g, 'resolveHost(');
 
 const CONNECT = {
   'main.js': slice(MAIN, 'main.js', 'async function connectOnce(serverId, opts = {}) {', '\n  return { ok: true, tunError };\n}'),
-  'service.js': slice(SERVICE, 'service.js', 'async function connectOnce(serverId) {', '\n    return { ok: true, tunError };\n  }')
+  'service.js': slice(SERVICE, 'service.js', 'async function connectOnce(serverId, opts = {}) {', '\n    return { ok: true, tunError };\n  }')
 };
 
 /* ---------------------------- A1: pinned entry names ---------------------------- */
@@ -146,15 +146,37 @@ test('a TUN connect whose tunnel is not up at its end gives back the guard its r
   // stops the tunnel; a start that then fails (or a backend that is missing)
   // skips the engage and reports connected with a tunError: the adapters sat
   // on 127.0.0.2/::1 with nothing behind them, and no banner offered them back.
+  // …but not inside a recovery that will retry that tunnel: there the hold
+  // stays until it comes back or the give-up, whose banner offers the resolvers
+  // back (guardHeld). A retry is for a tunnel that could have worked — the same
+  // question runRecovery's tunRetryable asks.
+  const IF = 'if (!myTun.active && !stale() && !(opts.recovery && myTun.isAvailable() && myTun.isElevated())) {\n';
   for (const [label, body] of Object.entries(CONNECT)) {
     const engage = body.indexOf('leakGuard.engage(');
-    const release = body.indexOf('if (!myTun.active && !stale()) {\n');
+    const release = body.indexOf(IF);
     const gate = body.indexOf('if (stale()) {\n', engage);
-    assert.notEqual(release, -1, `${label}: a tunnel that did not come up keeps the guard its rebuild held`);
+    assert.notEqual(release, -1, `${label}: a tunnel that did not come up keeps the guard its rebuild held — or a retrying recovery gives it up`);
     assert.ok(engage < release && release < gate, `${label}: after the engage it did not reach, before the overtaken-connect gate`);
-    assert.match(body.slice(release), /^if \(!myTun\.active && !stale\(\)\) \{\n\s*const released = await releaseStrandedGuard\(leakGuard\);/, label);
+    assert.match(body.slice(release + IF.length), /^\s*const released = await releaseStrandedGuard\(leakGuard\);/, label);
     // inside the TUN branch: proxy mode's own UDP block is the else of that branch and stays
     assert.ok(release < body.indexOf('} else if (settings.blockUdpInProxyMode) {'), label);
+  }
+  // the recovery says so, on both of its paths, in both mirrors; a reapply passes it on
+  const rec = (src, label, end) => slice(src, label, 'async function runRecovery(reason, attempt) {', end);
+  const main = rec(MAIN, 'main.js', '\n}\n');
+  assert.match(main, /res = await reapplyConnection\(\{ recovery: true \}\);/);
+  assert.match(main, /res = await doConnect\(serverId, \{ holdKillSwitch: held, recovery: true \}\);/);
+  assert.match(rec(SERVICE, 'service.js', '\n  }\n'), /res = \(xray && xray\.running\) \? await reapplyConnection\(\{ recovery: true \}\) : await doConnect\(serverId, \{ recovery: true \}\);/);
+  assert.match(slice(SERVICE, 'service.js', 'async function reapplyConnection(opts = {}) {', '\n  }\n'), /r = await doConnect\(serverId, \{ recovery: !!opts\.recovery \}\);/);
+  assert.match(slice(SERVICE, 'service.js', 'function doConnect(serverId, opts) {', '\n  }\n'), /const p = connectOnce\(serverId, opts\);/);
+});
+
+test('an overtaken connect with no receipt releases nothing — without one the release is unconditional and undid the newer connect’s live guard', () => {
+  for (const [label, body] of Object.entries(CONNECT)) {
+    assert.match(body, /if \(guardToken\) await leakGuard\.release\(\{ token: guardToken \}\)\.catch\(\(\) => \{\}\);/, label);
+    assert.doesNotMatch(body, /\n\s*await leakGuard\.release\(\{ token: guardToken \}\)/, `${label}: an unguarded release is left`);
+    // an engage that failed after it wrote its state hands its receipt over on the error, so that one is still ours to undo
+    assert.match(body, /guardToken = \(e && e\.token\) \|\| guardToken;/, label);
   }
 });
 

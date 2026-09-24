@@ -1047,15 +1047,15 @@ function createService(opts = {}) {
    * loser's undo deleted the shared nft table by name. The work itself is
    * connectOnce(). (main.js: doConnect / onConnectionDrop.)
    */
-  function doConnect(serverId) {
-    const p = connectOnce(serverId);
+  function doConnect(serverId, opts) {
+    const p = connectOnce(serverId, opts);
     connectsInFlight.add(p);
     const settled = () => connectsInFlight.delete(p);
     p.then(settled, settled);
     return p;
   }
 
-  async function connectOnce(serverId) {
+  async function connectOnce(serverId, opts = {}) {
     if (networkRepairing) throw new Error('Network recovery is still running');
     // Every await below is a window in which the operator can hit disconnect.
     // doDisconnect() then stops the core and clears activeServerId, but THIS call
@@ -1377,13 +1377,16 @@ function createService(opts = {}) {
           // kept their own resolvers. Deliberately NOT tunError: that one means
           // "no tunnel", and the network-change recovery retries the whole
           // connection on it.
+          // a failed engage hands its receipt over (see main.js)
+          guardToken = (e && e.token) || guardToken;
           guardError = e.message;
           send('log', { line: 'Leak guard failed: ' + e.message + ' — the tunnel is up, but the physical adapters keep their own DNS', level: 'error' });
         }
       }
       // No tunnel at the end of this connect after all, but a switch or a
-      // rebuild HELD the guard for one — see main.js.
-      if (!myTun.active && !stale()) {
+      // rebuild HELD the guard for one — see main.js. Not inside a recovery
+      // that will retry it: the hold stays until it comes back or the give-up.
+      if (!myTun.active && !stale() && !(opts.recovery && myTun.isAvailable() && myTun.isElevated())) {
         const released = await releaseStrandedGuard(leakGuard);
         if (released && released.released) send('log', { line: 'The tunnel did not come up — the adapters’ DNS, held for it, is theirs again', level: 'warn' });
       }
@@ -1410,13 +1413,15 @@ function createService(opts = {}) {
     // this is the last gate before the watchers and the 'connected' status.
     if (stale()) {
       // Everything this call started belongs to an intent that no longer
-      // exists. The release is unconditional: engage() can also throw AFTER
-      // writing the state file, and a release with nothing to undo is a no-op.
+      // exists. The release carries this call's receipt (an engage that threw
+      // AFTER writing the state file hands one over too); with none there is
+      // nothing of ours to undo — and a release without one is unconditional:
+      // it would undo the newer connect's live guard (see main.js).
       // The tunnel goes too — the disconnect's own tun.stop() may well have run
       // BEFORE this call's start() finished, which would leave the backend
       // holding the machine's default routes while the client is told
       // "disconnected".
-      await leakGuard.release({ token: guardToken }).catch(() => {});
+      if (guardToken) await leakGuard.release({ token: guardToken }).catch(() => {});
       if (myTun && myTun.active) { try { await myTun.stop(); } catch {} }
       return abandoned;
     }
@@ -1529,7 +1534,7 @@ function createService(opts = {}) {
    * no hot reload). The headless build has no Windows firewall kill switch, so
    * this is a plain teardown + reconnect.
    */
-  async function reapplyConnection() {
+  async function reapplyConnection(opts = {}) {
     const serverId = store.get('activeServerId', null);
     if (!serverId || !xray || !xray.running) return { ok: false, error: 'not connected' };
 
@@ -1591,7 +1596,7 @@ function createService(opts = {}) {
 
     let r;
     try {
-      r = await doConnect(serverId);
+      r = await doConnect(serverId, { recovery: !!opts.recovery });
     } catch (e) {
       appliedSettings = null;
       // the proxy kept above must not stay aimed at a core that did not come back
@@ -1792,7 +1797,7 @@ function createService(opts = {}) {
     try {
       // A previous attempt already stopped the core, so there is nothing to tear
       // down and reapplyConnection() would refuse — connect straight away.
-      res = (xray && xray.running) ? await reapplyConnection() : await doConnect(serverId);
+      res = (xray && xray.running) ? await reapplyConnection({ recovery: true }) : await doConnect(serverId, { recovery: true });
     } catch (e) {
       // doConnect() throws where reapplyConnection() returns { ok: false }.
       res = { ok: false, error: (e && e.message) || String(e) };
