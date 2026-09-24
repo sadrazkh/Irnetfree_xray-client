@@ -157,20 +157,20 @@ class SubRefreshTest {
     }
 
     @Test fun whatTheUserSetOnAServerSurvivesARefresh() {
-        val base = parse(link("a.example", "A"))
-        val ob = org.json.JSONObject(base.outbound.toString()).put("_fragment", "tlshello,100-200,10-20").put("_noise", "random")
-        val old = base.copy(outbound = ob, engine = "sing-box", certPin = "ab".repeat(32), certPinAt = "then", certPinCheckedAt = 42L)
+        // set through the sheet, which records it; the pin is learnt by the app and always kept
+        val old = edited(parse(link("a.example", "A"))) { it.fragment = "tlshello,100-200,10-20"; it.noise = "random"; it.engine = "sing-box" }
+            .copy(certPin = "ab".repeat(32), certPinAt = "then", certPinCheckedAt = 42L)
         val out = SubRefresh.merge(listOf(old), listOf(LinkParser.parseLink(link("a.example", "A"))), sub.id).servers[0]
         assertEquals(old.id, out.id); assertEquals("sing-box", out.engine)
         assertEquals("ab".repeat(32), out.certPin); assertEquals("then", out.certPinAt); assertEquals(42L, out.certPinCheckedAt)
         assertEquals("tlshello,100-200,10-20", out.outbound.getString("_fragment")); assertEquals("random", out.outbound.getString("_noise"))
+        assertEquals(old.edited, out.edited)   // and the record goes on, for the next refresh
     }
 
     /*
      * `fragment=`, `noise=` and `engine=` come FROM THE LINK as well, and they
      * are what a panel retunes when the DPI changes. Only a value the user set
-     * themselves — one that differs from what the old server's own link gives —
-     * may outlive a refresh.
+     * themselves — recorded when they saved it — may outlive a refresh.
      */
     private fun tuned(host: String, name: String, frag: String?, engine: String? = null) =
         "vless://u-$host@$host:443?type=tcp&security=tls&sni=$host" +
@@ -189,11 +189,11 @@ class SubRefreshTest {
 
     @Test fun aFragmentTheUserSetWinsOverThePanels() {
         val base = parse(tuned("a.example", "A", "tlshello,100-200,10-20"))
-        val mine = base.copy(outbound = org.json.JSONObject(base.outbound.toString()).put("_fragment", "1-3,5-10,1-1"))
+        val mine = edited(base) { it.fragment = "1-3,5-10,1-1" }
         val fresh = listOf(LinkParser.parseLink(tuned("a.example", "A", "tlshello,1-3,1-2")))
         assertEquals("1-3,5-10,1-1", SubRefresh.merge(listOf(mine), fresh, sub.id).servers[0].outbound.getString("_fragment"))
         // cleared by the user: it stays cleared
-        val cleared = base.copy(outbound = org.json.JSONObject(base.outbound.toString()).also { it.remove("_fragment") })
+        val cleared = edited(base) { it.fragment = "" }
         assertFalse(SubRefresh.merge(listOf(cleared), fresh, sub.id).servers[0].outbound.has("_fragment"))
     }
 
@@ -202,16 +202,37 @@ class SubRefreshTest {
         fun refreshTo(o: ServerConfig, engine: String?) = SubRefresh.merge(listOf(o), listOf(LinkParser.parseLink(tuned("a.example", "A", null, engine))), sub.id).servers[0]
         assertEquals("sing-box", refreshTo(old, "sing-box").engine)          // the panel changed it
         assertNull(refreshTo(old, null).engine)                              // the panel dropped it
-        assertEquals("sing-box", refreshTo(old.copy(engine = "sing-box"), "xray-pattn").engine)   // the user chose it
-        assertNull(refreshTo(old.copy(engine = null), "xray-pattn").engine)  // the user chose the default
+        assertEquals("sing-box", refreshTo(edited(old) { it.engine = "sing-box" }, "xray-pattn").engine)   // the user chose it
+        assertNull(refreshTo(edited(old) { it.engine = "xray" }, "xray-pattn").engine)  // the user chose the default
     }
 
-    @Test fun aServerStoredWithoutItsLinkKeepsWhatItHas() {
-        // an older store kept no link, so nothing can tell a user's value from the panel's: keep it
+    @Test fun withNoRecordOfAnEditThePanelsValuesWin() {
+        // A server with no record of an edit — stored before edits were recorded,
+        // with or without its link — takes the panel's fragment, noise and core:
+        // what a refresh always did. Nothing is inferred from a link comparison.
         val old = parse(tuned("a.example", "A", "tlshello,100-200,10-20", engine = "sing-box")).copy(raw = "")
         val out = SubRefresh.merge(listOf(old), listOf(LinkParser.parseLink(tuned("a.example", "A", "tlshello,1-3,1-2"))), sub.id).servers[0]
         assertEquals(old.id, out.id)
-        assertEquals("tlshello,100-200,10-20", out.outbound.getString("_fragment")); assertEquals("sing-box", out.engine)
+        assertEquals("tlshello,1-3,1-2", out.outbound.getString("_fragment")); assertNull(out.engine)
+        // set on the stored record by other means than the sheet (an older version's edit): not recorded, not kept
+        val base = parse(link("a.example", "A"))
+        val unrecorded = base.copy(outbound = org.json.JSONObject(base.outbound.toString()).put("_fragment", "1-3,5-10,1-1"), engine = "sing-box")
+        val out2 = SubRefresh.merge(listOf(unrecorded), listOf(LinkParser.parseLink(link("a.example", "A"))), sub.id).servers[0]
+        assertFalse(out2.outbound.has("_fragment")); assertNull(out2.engine)
+    }
+
+    /*
+     * The old parser read a '+' in a query value as a space — and a noise spec's
+     * base64 payload carries '+'. The stored spec differs from today's reading
+     * of the very same link; that is the old parser's mistake, not an edit, and a
+     * refresh replaces it with today's reading.
+     */
+    @Test fun anOldParsersNoiseIsNotAnEdit() {
+        val raw = "vless://u-a@a.example:443?type=tcp&security=tls&sni=a.example&noise=base64:7nQB+AAAAQAA/Aa=:10-20#A"
+        val legacy = parse(raw).let { it.copy(outbound = org.json.JSONObject(it.outbound.toString()).put("_noise", "base64:7nQB AAAAQAA/Aa=:10-20")) }
+        val out = SubRefresh.merge(listOf(legacy), listOf(LinkParser.parseLink(raw)), sub.id).servers[0]
+        assertEquals(legacy.id, out.id)
+        assertEquals("base64:7nQB+AAAAQAA/Aa=:10-20", out.outbound.getString("_noise"))
     }
 
     @Test fun variantsOfOneServerKeepTheirOwnIds() {
