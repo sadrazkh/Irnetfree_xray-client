@@ -141,6 +141,23 @@ test('a connect that builds no tunnel gives back a guard held for the last one �
   assert.match(SERVICE, /^const \{ stopTrackedTunnels, releaseGuardChecked, releaseStrandedGuard \} = require\('\.\.\/main\/tunnelCleanup'\);$/m);
 });
 
+test('a TUN connect whose tunnel is not up at its end gives back the guard its rebuild held — it reports "proxy only", no banner', () => {
+  // A server switch (or a rebuild) under a live tunnel holds the guard and
+  // stops the tunnel; a start that then fails (or a backend that is missing)
+  // skips the engage and reports connected with a tunError: the adapters sat
+  // on 127.0.0.2/::1 with nothing behind them, and no banner offered them back.
+  for (const [label, body] of Object.entries(CONNECT)) {
+    const engage = body.indexOf('leakGuard.engage(');
+    const release = body.indexOf('if (!myTun.active && !stale()) {\n');
+    const gate = body.indexOf('if (stale()) {\n', engage);
+    assert.notEqual(release, -1, `${label}: a tunnel that did not come up keeps the guard its rebuild held`);
+    assert.ok(engage < release && release < gate, `${label}: after the engage it did not reach, before the overtaken-connect gate`);
+    assert.match(body.slice(release), /^if \(!myTun\.active && !stale\(\)\) \{\n\s*const released = await releaseStrandedGuard\(leakGuard\);/, label);
+    // inside the TUN branch: proxy mode's own UDP block is the else of that branch and stays
+    assert.ok(release < body.indexOf('} else if (settings.blockUdpInProxyMode) {'), label);
+  }
+});
+
 /* ------------------------------ A3: the live NIC ------------------------------ */
 
 test('every connect reads the NIC again — a live tunnel keeps its old name only when the read names nothing usable', () => {
