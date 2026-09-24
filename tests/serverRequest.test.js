@@ -16,7 +16,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const net = require('node:net');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -28,6 +28,9 @@ function startServer(dir, extra = []) {
   return new Promise((resolve, reject) => {
     const env = Object.assign({}, process.env);
     delete env.IRNETFREE_PLATFORM;
+    // A Ctrl+C on `npm test` reaches this child too, and its shutdown turns the
+    // system proxy off — on Windows a registry write on whoever ran the suite.
+    env.IRNETFREE_NO_SYSTEM_PROXY = '1';
     const child = spawn(process.execPath, [SERVER, '--port', '0', '--host', '127.0.0.1', '--data-dir', dir, ...extra],
       { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let out = '';
@@ -83,6 +86,27 @@ test('a request target URL cannot parse is a 400, and the server keeps answering
   const ok = await raw(srv.port, request('/web-api.js'));
   assert.match(ok, /^HTTP\/1\.1 200 /, 'still serving after the bad requests');
   assert.equal(srv.child.exitCode, null, 'the process is still alive');
+});
+
+test('IRNETFREE_NO_SYSTEM_PROXY=1: the service never touches the system proxy, not even on shutdown', () => {
+  // Run in a child with the proxy module replaced by a spy BEFORE the service
+  // loads it — so even a failing check can only ever call the spy.
+  const dir = tempDir();
+  const script = `
+    const sysproxy = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'main', 'sysproxy.js'))});
+    let calls = 0;
+    sysproxy.setSystemProxy = async () => { calls++; };
+    const { createService } = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'server', 'service.js'))});
+    const svc = createService({ dataDir: ${JSON.stringify(dir)} });
+    svc.shutdown().then(() => { console.log('CALLS ' + calls); process.exit(0); });
+  `;
+  const run = (env) => spawnSync(process.execPath, ['-e', script], { env: Object.assign({}, process.env, env, { IRNETFREE_PLATFORM: '' }), encoding: 'utf8', timeout: 30000, windowsHide: true });
+  try {
+    const off = run({ IRNETFREE_NO_SYSTEM_PROXY: '1' });
+    assert.match(off.stdout, /^CALLS 0$/m, off.stdout + off.stderr);
+    const on = run({ IRNETFREE_NO_SYSTEM_PROXY: '' });   // the spy shows the switch is what made the difference
+    assert.match(on.stdout, /^CALLS 1$/m, on.stdout + on.stderr);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('the entry logs a stray rejection instead of dying of it; the handler cannot reject', () => {
