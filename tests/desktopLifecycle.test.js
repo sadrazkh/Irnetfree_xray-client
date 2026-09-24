@@ -138,6 +138,23 @@ test('the synchronous teardown runs once, says it is quitting first, and covers 
   assert.match(MAIN, /process\.on\('exit', \(\) => teardownSync\('exit'\)\);/);
 });
 
+test('a quit during a connect or a recovery leaves nothing of theirs running: the generations move first, the exit hook ends the core', () => {
+  // A recovery's connect still in flight when the user quits went on past the
+  // teardown's xray.stop() — it started its core again, and nothing stopped
+  // that one: an orphan holding the SOCKS port the next launch needs.
+  const quit = slice('async function teardownForQuit() {', '\n}');
+  const firstAwait = quit.indexOf('await ');
+  for (const bump of ['connGen++;', 'recoverGen++;']) {
+    const at = quit.indexOf(bump);
+    assert.ok(at !== -1 && at < firstAwait, `teardownForQuit: ${bump} before the first await — ${quit}`);
+  }
+  const sync = slice('function teardownSync(reason) {', '\n}');
+  const kill = sync.indexOf('try { if (xray && xray.proc) xray.proc.kill(); } catch {}');
+  assert.notEqual(kill, -1, 'the exit hook ends the core, as the headless service’s does');
+  assert.ok(sync.indexOf('isQuitting = true;') < kill && sync.indexOf('userDisconnecting = true;') < kill, 'its stop is no drop to recover');
+  assert.ok(kill < sync.indexOf("if (process.platform !== 'win32' && reason === 'exit') return;"), 'on every platform');
+});
+
 /* ------------------------- stale activeServerId at launch ------------------------- */
 
 test('a launch clears the activeServerId a crash or a kill left, and connect-on-launch still has lastServerId', () => {

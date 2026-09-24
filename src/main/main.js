@@ -3068,6 +3068,11 @@ app.whenReady().then(() => {
  */
 async function teardownForQuit() {
   userDisconnecting = true;   // quitting on purpose — don't trip the kill switch
+  // A connect or a recovery still in flight stops speaking for the app, as at
+  // a disconnect: past the xray.stop() below it would start its core again,
+  // and nothing would stop that one.
+  connGen++;
+  recoverGen++;
   try { if (store) store.flush(); } catch {}   // whatever setLazy() still holds
   try { if (assetUpdater) assetUpdater.stop(); } catch {}
   try { stopNetWatcher(); } catch {}
@@ -3166,6 +3171,9 @@ function teardownSync(reason) {
   // the win32 gate below: on macOS (when we are already root) this is the last
   // chance to restore it without a password prompt nobody can answer here.
   try { if (leakGuard) leakGuard.releaseSync(); } catch {}
+  // The core too (the headless service's exit hook does the same): one that
+  // outlives the app holds the SOCKS port the next launch needs.
+  try { if (xray && xray.proc) xray.proc.kill(); } catch {}
   if (process.platform !== 'win32' && reason === 'exit') return;
   cleanupAllTunsSync();   // every backend a connect started, either kind
 }
@@ -3191,7 +3199,7 @@ function scheduleShutdownCancelCheck() {
     // network watcher does, when the network moves).
     if (store && store.get('activeServerId', null)) {
       // A Mac as non-root: the exit teardown could run nothing privileged, so
-      // the TUN and the core are most likely still up — only the system proxy
+      // the TUN is most likely still up — only the system proxy, the core
       // (and a native-service tunnel) may have gone. Saying "taken down" there
       // is not true.
       const partial = process.platform === 'darwin' && !(process.getuid && process.getuid() === 0);
