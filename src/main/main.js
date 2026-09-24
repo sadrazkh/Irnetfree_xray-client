@@ -2621,13 +2621,7 @@ app.whenReady().then(() => {
   const dir = dataDir();
   // The system proxy is journaled (sysproxy.js): what it was before we set it
   // is what every disconnect, quit and exit puts back — and only if we set it.
-  // A journal a dead session left is restored now; proxy operations run one at
-  // a time, so an auto-connect a second later waits for this.
   useProxyJournal(path.join(dir, 'proxy-journal.json'));
-  repairSystemProxy().then((r) => {
-    if (r === 'restored') send('log', { line: 'The system proxy a previous session left set was put back the way it was', level: 'warn' });
-    else if (r === 'legacy') send('log', { line: 'The system proxy an older version left pointing at IRNetFree was switched off', level: 'warn' });
-  });
   store = new Store(path.join(dir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
   }, {
@@ -2652,6 +2646,14 @@ app.whenReady().then(() => {
   // at launch would "recover" a connection nobody asked for. Connect-on-launch
   // reads lastServerId, which stays.
   if (store.get('activeServerId', null)) store.set('activeServerId', null);
+  // A proxy journal a dead session left is restored now. Proxy operations run
+  // one at a time, so an auto-connect a second later waits for this. Only OUR
+  // port marks a leftover of a pre-journal build as ours: a sibling build (the
+  // Plus fork) writes the same bypass list for its own port.
+  repairSystemProxy({ legacyServer: `127.0.0.1:${getSettings().httpPort}` }).then((r) => {
+    if (r === 'restored') send('log', { line: 'The system proxy a previous session left set was put back the way it was', level: 'warn' });
+    else if (r === 'legacy') send('log', { line: 'The system proxy an older version left pointing at IRNetFree was switched off', level: 'warn' });
+  });
   // Lifetime traffic per config, in its own small file (see the declaration).
   usageStore = new Store(path.join(dir, 'usage.json'), { totals: {} });
   usage = new UsageMeter({ totals: usageStore.get('totals', {}) });
