@@ -832,9 +832,9 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
     { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
-  const pinned = (reg.outs || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
-  const hosts = pinEntryHosts(pinned, s.entryHostIps, s.ipv6);
-  const outbounds = applyFragments(pinned);
+  const outs = (reg.outs || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
+  const hosts = pinEntryHosts(outs, s.entryHostIps, s.ipv6);   // see buildConfig
+  const outbounds = applyFragments(outs);
   bindDirectDials(outbounds, s.directInterface);
 
   // Resolver rules first (see buildConfig), then private/LAN direct, THEN
