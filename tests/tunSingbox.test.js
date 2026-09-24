@@ -274,7 +274,8 @@ test('isOwnTunInterface recognises the sing-box adapter', () => {
 });
 
 test('physicalInterface delegates to the shared helper for the instance platform', async () => {
-  canned([[/Get-NetRoute -DestinationPrefix/, '10.0.0.1|7\r\n'], [/Get-NetAdapter -InterfaceIndex 7/, 'Ethernet 2\r\n']]);
+  canned([[/Get-NetRoute -DestinationPrefix/, JSON.stringify([{ nextHop: '10.0.0.1', ifIndex: 7, alias: 'Ethernet 2', routeMetric: 0, ifMetric: 25, state: 'Connected' }]) + '\r\n'],
+    [/Get-NetAdapter -InterfaceIndex 7/, 'Ethernet 2\r\n']]);
   const tun = new TunSingbox({ extraDirs: [], platform: 'win32' });
   assert.deepEqual(await tun.physicalInterface(), { name: 'Ethernet 2', ifIndex: '7', gateway: '10.0.0.1' });
   answer = null;

@@ -56,7 +56,7 @@ function harness(extraTable = []) {
   tun.isElevated = () => true;
   table = [
     ...extraTable,
-    [/Get-NetRoute -DestinationPrefix/, '192.168.8.1|22\r\n'],
+    [/Get-NetRoute -DestinationPrefix/, JSON.stringify([{ nextHop: '192.168.8.1', ifIndex: 22, alias: 'Wi-Fi', routeMetric: 0, ifMetric: 35, state: 'Connected' }]) + '\r\n'],
     [/Get-NetAdapter -Name 'XrayTun'.*\.Status$/, 'Up\r\n'],
     [/Get-NetAdapter -Name 'XrayTun'.*\.ifIndex$/, '44\r\n']
   ];
@@ -97,7 +97,8 @@ test('win32 start: v4 as before, then the adapter gets a v6 address, the peer as
     assert.ok(lines.indexOf(routes[0]) > lines.indexOf('netsh ' + V6_LINES[3]));
     assert.ok(h.logs.some(([, l]) => /IPv6 -> TUN too/.test(l)));
 
-    // stop: v4 split routes, v6 split routes and the bypass route all go
+    // stop: v4 split routes, v6 split routes and the bypass route all go —
+    // the bypass route by exact match (tunNetSwitch.test.js shows why)
     execs.length = 0;
     await h.tun.cleanupRoutesWindows();
     assert.deepEqual(execLines(), [
@@ -105,7 +106,7 @@ test('win32 start: v4 as before, then the adapter gets a v6 address, the peer as
       `route delete 128.0.0.0 mask 128.0.0.0 ${TUN_GW}`,
       'netsh interface ipv6 delete route prefix=::/1 interface=XrayTun nexthop=fdfe:dcba:9876::2',
       'netsh interface ipv6 delete route prefix=8000::/1 interface=XrayTun nexthop=fdfe:dcba:9876::2',
-      'route delete 1.2.3.4'
+      'netsh interface ipv4 delete route prefix=1.2.3.4/32 interface=22 nexthop=192.168.8.1 store=active'
     ]);
     assert.equal(h.tun.dnsPeer6, null, 'no v6 peer once the adapter is gone');
   } finally { h.done(); }
@@ -185,6 +186,7 @@ test('cleanupSync (Windows) withdraws the v6 split routes with the v4 ones', { s
   const h = harness();
   try {
     h.tun.bypassIps.push('9.9.9.9');
+    h.tun.bypassRoutes.push({ ip: '9.9.9.9', nextHop: '192.168.8.1', ifIndex: '22' });
     execs.length = 0;
     h.tun.cleanupSync();
     assert.deepEqual(execLines(), [
@@ -192,7 +194,7 @@ test('cleanupSync (Windows) withdraws the v6 split routes with the v4 ones', { s
       `route delete 128.0.0.0 mask 128.0.0.0 ${TUN_GW}`,
       'netsh interface ipv6 delete route prefix=::/1 interface=XrayTun nexthop=fdfe:dcba:9876::2',
       'netsh interface ipv6 delete route prefix=8000::/1 interface=XrayTun nexthop=fdfe:dcba:9876::2',
-      'route delete 9.9.9.9'
+      'netsh interface ipv4 delete route prefix=9.9.9.9/32 interface=22 nexthop=192.168.8.1 store=active'
     ]);
   } finally { h.done(); }
 });
