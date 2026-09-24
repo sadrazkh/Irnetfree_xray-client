@@ -117,6 +117,30 @@ test('both mirrors refuse a chain that lost a member, with the same words, where
   }
 });
 
+/* -------------------- F1: a held guard does not outlive the tunnel -------------------- */
+
+test('a connect that builds no tunnel gives back a guard held for the last one — before the lookups and the core', () => {
+  // TUN → proxy through a settings apply (reapplyConnection holds the guard
+  // across the rebuild), or a connect after the "reconnect given up" banner
+  // with TUN off: nothing in a proxy connect engaged or released the guard, so
+  // the whole proxy session ran with every adapter on a resolver that answers
+  // nothing. A tunnel still up (a server switch keeps it) keeps its guard.
+  for (const [label, body] of Object.entries(CONNECT)) {
+    const release = body.indexOf('if (!settings.tunMode && !(tun && tun.active)) {\n');
+    assert.notEqual(release, -1, `${label}: a connect without a tunnel no longer looks for a held guard`);
+    assert.match(body.slice(release), /^if \(!settings\.tunMode && !\(tun && tun\.active\)\) \{\n\s*const released = await releaseStrandedGuard\(leakGuard\);\n\s*if \(stale\(\)\) return abandoned;/,
+      `${label}: given back — and a disconnect that landed meanwhile still wins`);
+    assert.ok(body.indexOf('let settings = await effectiveSettings();') < release, `${label}: decided on the settings of THIS connect`);
+    for (const later of ['await ensureCertPins(serverId, settings);', 'withEntryHostIps(serverId, settings)', 'await xray.start(config, runEngine);']) {
+      const at = body.indexOf(later);
+      assert.notEqual(at, -1, `${label}: ${later} is gone`);
+      assert.ok(release < at, `${label}: ${later} runs before the resolvers are given back`);
+    }
+  }
+  assert.match(MAIN, /^const \{ stopTrackedTunnels, releaseGuardChecked, releaseStrandedGuard \} = require\('\.\/tunnelCleanup'\);$/m);
+  assert.match(SERVICE, /^const \{ stopTrackedTunnels, releaseGuardChecked, releaseStrandedGuard \} = require\('\.\.\/main\/tunnelCleanup'\);$/m);
+});
+
 /* ------------------------------ A3: the live NIC ------------------------------ */
 
 test('every connect reads the NIC again — a live tunnel keeps its old name only when the read names nothing usable', () => {

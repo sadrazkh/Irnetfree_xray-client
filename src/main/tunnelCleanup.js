@@ -29,4 +29,22 @@ async function releaseGuardChecked(guard, platform = process.platform) {
   return result;
 }
 
-module.exports = { stopTrackedTunnels, releaseGuardChecked };
+// A guard held for a tunnel that is not coming back — a settings apply that
+// turned TUN off (the reapply holds it across the rebuild), a connect after a
+// recovery was given up on — keeps every adapter on a resolver that answers
+// nothing, and a connect without a tunnel never engages or releases one: the
+// whole proxy session would run with no DNS at all. That connect gives it back
+// itself. Only a DNS override counts (engage always records its peer): proxy
+// mode's own UDP block names no resolver, and the connect renews it — lifting
+// it here would open the WebRTC leak for the switch. Never throws; resolves the
+// release's answer, or null when nothing was held.
+async function releaseStrandedGuard(guard) {
+  if (!guard) return null;
+  let st = null;
+  try { st = guard.readState(); } catch { /* unreadable: nothing we can give back */ }
+  if (!st || !st.peer4) return null;
+  try { return await guard.release(); }
+  catch (e) { return { released: false, error: (e && e.message) || String(e) }; }
+}
+
+module.exports = { stopTrackedTunnels, releaseGuardChecked, releaseStrandedGuard };

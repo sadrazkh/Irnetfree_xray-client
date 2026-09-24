@@ -34,7 +34,7 @@ const { TunSingbox } = require('../main/tunSingbox');
 const { NativeMacTun } = require('../main/nativeMacTun');
 const { recoverMacNetwork } = require('../main/macRecovery');
 const { collectDiagnostics } = require('../main/connectionDiagnostics');
-const { stopTrackedTunnels, releaseGuardChecked } = require('../main/tunnelCleanup');
+const { stopTrackedTunnels, releaseGuardChecked, releaseStrandedGuard } = require('../main/tunnelCleanup');
 const tunPlatform = require('../main/tunPlatform');
 const { appsForTun } = require('../main/tunApps');
 const { LeakGuard } = require('../main/leakGuard');
@@ -1065,6 +1065,15 @@ function createService(opts = {}) {
     let settings = await effectiveSettings();
     if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
+
+    // No tunnel in this connect, and none still up: a guard held for the last
+    // one (a settings apply that turned TUN off, a connect after the recovery
+    // gave up) would leave every adapter without a resolver — see main.js.
+    if (!settings.tunMode && !(tun && tun.active)) {
+      const released = await releaseStrandedGuard(leakGuard);
+      if (stale()) return abandoned;
+      if (released && released.released) send('log', { line: 'No tunnel in this connection — the adapters’ DNS, held for the last one, is theirs again', level: 'info' });
+    }
 
     // allowInsecure is gone from the core: pin the certificate on first use instead.
     await ensureCertPins(serverId, settings);
