@@ -18,12 +18,19 @@ const { psArgs } = require('./tunPlatform');
 /** Single-quote for PowerShell. */
 const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
-function elevatedRelaunchScript({ exe, args = [], pid, waitSeconds = 60 }) {
+/**
+ * `cwd`: the copy starts where this one runs — an elevated PowerShell starts in
+ * System32, and the dev relaunch (`electron .`) resolves '.' against the cwd.
+ * An empty argument goes as a literal "" — Start-Process refuses an empty
+ * element, and the other side's command-line parser reads "" as one.
+ */
+function elevatedRelaunchScript({ exe, args = [], pid, cwd = null, waitSeconds = 60 }) {
   const id = Number(pid);
   if (!Number.isInteger(id) || id <= 0) throw new Error('elevated relaunch: no pid to wait for');
-  const start = args.length
-    ? `Start-Process -FilePath ${psq(exe)} -ArgumentList ${args.map(psq).join(',')}`
-    : `Start-Process -FilePath ${psq(exe)}`;
+  const argv = args.map(a => (String(a) === '' ? '""' : String(a)));
+  const start = `Start-Process -FilePath ${psq(exe)}`
+    + (cwd ? ` -WorkingDirectory ${psq(cwd)}` : '')
+    + (argv.length ? ` -ArgumentList ${argv.map(psq).join(',')}` : '');
   const inner = `Wait-Process -Id ${id} -Timeout ${Number(waitSeconds) || 60} -ErrorAction SilentlyContinue; ${start}`;
   const encoded = Buffer.from(inner, 'utf16le').toString('base64');
   return `Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','${encoded}' -ErrorAction Stop`;
