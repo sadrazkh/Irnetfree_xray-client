@@ -25,7 +25,7 @@ const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinW
 const { assetStatus: scanAssets, downloadedFileNames } = require('../main/assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('../main/geoCheck');
 const { XrayManager, getFreePort, getFreePorts } = require('../main/xrayManager');
-const { setSystemProxy } = require('../main/sysproxy');
+const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('../main/netutils');
 const { Store } = require('../main/store');
 const { SubscriptionManager } = require('../main/subscription');
@@ -168,10 +168,21 @@ function createService(opts = {}) {
   // nothing is spawned or bound, and the machine's proxy / routes are never
   // touched. Production passes none of them.
   const deps = opts.deps || {};
-  // IRNETFREE_NO_SYSTEM_PROXY=1: never touch the machine's system proxy — for a
-  // server started by the test suite, whose Ctrl+C reaches it and runs shutdown().
-  const setProxy = deps.setSystemProxy || (process.env.IRNETFREE_NO_SYSTEM_PROXY === '1' ? async () => {} : setSystemProxy);
+  // IRNETFREE_NO_SYSTEM_PROXY=1: never touch the machine's system proxy — a
+  // TEST-ONLY switch, for a server started by the test suite, whose Ctrl+C
+  // reaches it and runs shutdown(). Said once at start: set anywhere else, a
+  // "System proxy enabled" line would otherwise be the only thing to go by.
+  const noSystemProxy = process.env.IRNETFREE_NO_SYSTEM_PROXY === '1';
+  if (noSystemProxy && !deps.setSystemProxy) console.warn('  ! IRNETFREE_NO_SYSTEM_PROXY=1 — the system proxy is never touched (a test-only switch)');
+  const setProxy = deps.setSystemProxy || (noSystemProxy ? async () => {} : setSystemProxy);
+  // The REAL proxy is journaled, as on the desktop (sysproxy.js): what it was
+  // before we set it is what a disconnect, a shutdown and the exit hook put
+  // back — and only when we set it — instead of a blind "off" that killed a
+  // corporate proxy. (Configured once the data dir is known, below.)
+  const realProxy = !deps.setSystemProxy && !noSystemProxy;
   const waitPort = deps.waitForLocalPort || waitForLocalPort;
+  // the router's read-only LAN lookups (ubus, ip neigh) for the device list
+  const lanRun = deps.lanRun || tunPlatform.run;
   const T = Object.assign({
     bootDelayMs: 1000, bootEveryMs: 15000, bootSlowAfter: 20, bootSlowMs: 60000,
     routerBackoffMs: [2000, 5000, 15000, 30000, 60000],
@@ -181,6 +192,10 @@ function createService(opts = {}) {
 
   const dataDir = opts.dataDir || defaultDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
+  // A journal of its own: on Windows the default data dir is the desktop app's
+  // userData, and the desktop may be connected right now — this start's repair
+  // must never read (and drop) the desktop's live record.
+  if (realProxy) useProxyJournal(path.join(dataDir, 'proxy-journal-server.json'));
   const userBinDir = path.join(dataDir, 'bin');
   fs.mkdirSync(userBinDir, { recursive: true });
 
@@ -334,12 +349,15 @@ function createService(opts = {}) {
   const bootIntent = store.get('activeServerId', null);
   if (bootIntent) store.set('activeServerId', null);
   // OpenWrt: the connection stays the way the user left it. `connectIntent` is
-  // written by every successful connect and cleared ONLY by a disconnect the
-  // user asked for — not by a shutdown, a power cut, a failed boot attempt or a
-  // gateway that did not come up — and the boot connect resumes exactly that.
-  // So a router the user disconnected stays disconnected after a reboot, and
-  // one that was connected comes back even after two power cuts in a row. A
-  // router upgraded from before this key takes it from the last run's live id.
+  // written by every connect once its core is up — BEFORE the gateway is, so
+  // the last command wins: a switch to B whose gateway then fails leaves the
+  // router disconnected now and resumes B, not A, at the next boot. It is
+  // cleared ONLY by a disconnect the user asked for — not by a shutdown, a
+  // power cut, a failed boot attempt or a gateway that did not come up — and
+  // the boot connect resumes exactly that. So a router the user disconnected
+  // stays disconnected after a reboot, and one that was connected comes back
+  // even after two power cuts in a row. A router upgraded from before this key
+  // takes it from the last run's live id.
   if (OPENWRT && store.get('connectIntent', undefined) === undefined) store.set('connectIntent', bootIntent || null);
   // lifetime traffic per config — its own file, so a 30s save does not
   // rewrite every saved server (see main.js)
@@ -413,7 +431,12 @@ function createService(opts = {}) {
     setSubs: (arr) => store.set('subscriptions', arr),
     getServers: () => store.get('servers', []),
     setServers: (arr) => store.set('servers', arr),
-    onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) })
+    onUpdate: (sub, info) => send('subs-updated', { sub, info, servers: store.get('servers', []), subs: store.get('subscriptions', []) }),
+    // an automatic refresh that failed used to vanish without a word
+    onError: (sub, e) => {
+      send('log', { line: `Subscription "${sub.name}" could not be updated automatically: ${e.message}`, level: 'warn' });
+      send('subs-updated', { sub, info: { error: e.message }, servers: store.get('servers', []), subs: store.get('subscriptions', []) });
+    }
   });
 
   // A placeholder until the first connect picks the backend for real (see
@@ -503,6 +526,16 @@ function createService(opts = {}) {
   });
   assetUpdater.start();
 
+  // A proxy journal a dead run left is restored now, as the desktop does at
+  // launch (proxy operations run one at a time, so a boot connect waits for
+  // it). Only our own port marks a leftover of a build before the journal.
+  if (realProxy) {
+    repairSystemProxy({ legacyServer: `127.0.0.1:${getSettings().httpPort}` }).then((r) => {
+      if (r === 'restored') send('log', { line: 'The system proxy a previous run left set was put back the way it was', level: 'warn' });
+      else if (r === 'legacy') send('log', { line: 'The system proxy an older version left pointing at IRNetFree was switched off', level: 'warn' });
+    });
+  }
+
   // The leak guard and its crash repair. A `tun-state.json` left in the data dir
   // means the last session died with every physical adapter still pointing at a
   // tunnel that is gone — the machine has no working DNS until the originals go
@@ -552,6 +585,8 @@ function createService(opts = {}) {
   // The core too: a service that died of an exception used to leave its xray
   // running, holding the SOCKS port the respawned service then could not bind.
   process.on('exit', () => {
+    // the proxy first, as on the desktop: only what the journal says we set, put back as it was
+    if (realProxy) { try { restoreSystemProxySync(); } catch {} }
     try { leakGuard.releaseSync(); } catch {}
     cleanupAllTunsSync();
     try { if (xray && xray.proc) xray.proc.kill(); } catch {}
@@ -1409,9 +1444,11 @@ function createService(opts = {}) {
    * is ours, not a crash (quietStops). Then the live state goes back to what it
    * was: a rebuild of the same connection (the recovery) keeps it, so the
    * retries go on; anything else (the boot connect, a connect or a switch by
-   * hand) ends disconnected, and says so — the panel, every other client and
-   * syslog were still showing the connection before it. The router's
-   * connectIntent is not touched: only the user's disconnect clears that.
+   * hand) ends disconnected — and says so when there WAS a connection before
+   * it (the panel, every other client and syslog were still showing it). A
+   * boot attempt or a first connect had none: a "disconnected" every 15 s of
+   * boot retries would only fill syslog. The router's connectIntent is not
+   * touched: only the user's disconnect clears that.
    *
    * Returns true when a disconnect or a newer connect overtook this call
    * while it awaited: that one owns the state now, so nothing is written.
@@ -1433,7 +1470,7 @@ function createService(opts = {}) {
       stopNetWatcher();
       if (stats) stats.stop();
       liveDirectInterface = null;
-      send('status', { state: 'disconnected' });
+      if (prevActive) send('status', { state: 'disconnected' });
     }
     return false;
   }
@@ -1475,17 +1512,23 @@ function createService(opts = {}) {
       // ISP — and at the strict level took the outbound block with it — for the
       // whole rebuild. Holding means names stop resolving while the tunnel is
       // down, which is the correct failure: closed, not open.
+      let hold = null;
       try {
         if (leakGuard) {
           let entries = [];
           try { entries = buildPlan(serverId, getSettings()).entryAddrs || []; } catch { /* fall back to what is held */ }
-          if (!tun?.managesDns) await leakGuard.holdForReconnect({
+          if (!tun?.managesDns) hold = await leakGuard.holdForReconnect({
             excludes: await tunPlatform.resolveServerIps(entries, { ipv6: true }).catch(() => [])
           });
         }
       } catch {}
-      await stopAllTuns();
-      try { await setProxy(false, {}); } catch {}
+      // macOS: while the guard holds, the tunnel's teardown must not put the
+      // main service back on the ISP's DNS either (keepDns) — only a disconnect does.
+      await stopAllTuns({ keepDns: !!(hold && hold.held) });
+      // The system proxy stays through the rebuild when the connect will set it
+      // again (see main.js): switched off, every browser went direct for the
+      // whole gap. Only a proxy switched OFF in the settings is restored here.
+      if (!getSettings().systemProxy) { try { await setProxy(false, {}); } catch {} }
       if (xray) await xray.stop();
     } finally {
       xrayReloading = prevReloading;
@@ -1501,6 +1544,8 @@ function createService(opts = {}) {
       r = await doConnect(serverId);
     } catch (e) {
       appliedSettings = null;
+      // the proxy kept above must not stay aimed at a core that did not come back
+      try { await setProxy(false, {}); } catch {}
       send('status', { state: 'error', message: e.message });
       return { ok: false, error: e.message };
     }
@@ -1596,7 +1641,8 @@ function createService(opts = {}) {
     const wait = backoffAfter(lastRebuilt.attempt);
     if (wait == null) {
       send('log', { line: `The connection keeps dropping right after every rebuild (${reason}) — giving up`, level: 'error' });
-      send('status', { state: 'reconnect-failed', reason, proxyUp: false, tunError: null });
+      // a tunnel that keeps dying over a live core leaves the proxy up — say so
+      send('status', { state: 'reconnect-failed', reason, proxyUp: !!(xray && xray.running), tunError: null });
       return;
     }
     const attempt = lastRebuilt.attempt + 1;
@@ -1654,10 +1700,13 @@ function createService(opts = {}) {
     if (gen !== recoverGen) return;
 
     // A newer network arrived while we were rebuilding for the old one: start over
-    // for it, from the first backoff step.
+    // for it, from the first backoff step. A DROP that arrived meanwhile goes
+    // through recoverFromDrop() instead: the rebuild just made counts, and a
+    // core dying again right after it waits its turn (the crash window).
     const queued = recoverQueued;
     if (queued == null) return;
     recoverQueued = null;
+    if (DROP_REASONS.has(queued)) { recoverFromDrop(queued); return; }
     await recoverFromNetworkChange(queued, 0);
   }
 
@@ -1793,9 +1842,9 @@ function createService(opts = {}) {
    * overlapping connect can leave an older instance holding the machine's
    * routes with nothing else pointing at it (see startedTuns).
    */
-  async function stopAllTuns() {
-  dnsGuardWatch?.stop();
-    await stopTrackedTunnels(startedTuns, tun);
+  async function stopAllTuns(opts) {
+    dnsGuardWatch?.stop();
+    await stopTrackedTunnels(startedTuns, tun, process.platform, opts);
   }
 
   /** The same sweep for the exit hook, where nothing can be awaited. */
@@ -2024,8 +2073,9 @@ function createService(opts = {}) {
     'subs:remove': (id) => { subs.remove(id); return { subs: subs.list(), servers: store.get('servers', []) }; },
     'subs:autoUpdate': ({ id, enabled }) => { subs.setAutoUpdate(id, enabled); return subs.list(); },
 
-    // by hand: either one ends the boot-time retries
-    'connect': (id) => { bootCancelled = true; return doConnect(id); },
+    // by hand: either one ends the boot-time retries — and a connect made
+    // afresh starts with no crash history (recoverFromDrop), as after a disconnect
+    'connect': (id) => { bootCancelled = true; lastRebuilt = null; return doConnect(id); },
     // ...and a disconnect by hand is the one thing that clears the router's connectIntent
     'disconnect': () => { bootCancelled = true; if (OPENWRT) setIfChanged('connectIntent', null); return doDisconnect(); },
 
@@ -2169,8 +2219,8 @@ function createService(opts = {}) {
     // OpenWrt: the devices behind the router (DHCP leases + neighbour table) — the exclusion list's source
     'net:lanDevices': async () => {
       if (!OPENWRT) return [];
-      const lanIf = await lanInterface(tunPlatform.run);
-      return lanDevices({ run: tunPlatform.run, lanIf });
+      const lanIf = await lanInterface(lanRun);
+      return lanDevices({ run: lanRun, lanIf });
     },
     // Deliberately a no-op — do NOT mirror main.js's netWatcher.poke() here.
     //

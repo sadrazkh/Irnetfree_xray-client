@@ -39,9 +39,20 @@ test('the copy starts in the working directory of this one, and an empty argumen
   // the dev relaunch (`electron .`) resolves '.' against the cwd — an elevated
   // PowerShell starts in System32, where there is no app
   const inner = decode(elevatedRelaunchScript({ exe: 'C:\\e\\electron.exe', args: ['.', ''], pid: 7, cwd: "D:\\Bob's app" }));
-  assert.match(inner, /Start-Process -FilePath 'C:\\e\\electron\.exe' -WorkingDirectory 'D:\\Bob''s app' -ArgumentList '\.','""'$/,
+  assert.match(inner, /Start-Process -FilePath 'C:\\e\\electron\.exe' -WorkingDirectory 'D:\\Bob''s app' -ArgumentList '\.','""' \}/,
     'Start-Process refuses an empty element; the literal "" reads as an empty argument on the other side');
-  assert.doesNotMatch(decode(elevatedRelaunchScript({ exe: 'a.exe', args: [], pid: 7 })), /-WorkingDirectory/, 'none given, none passed');
+  assert.doesNotMatch(decode(elevatedRelaunchScript({ exe: 'a.exe', args: [], pid: 7 })), /-WorkingDirectory|Test-Path/, 'none given, none passed');
+});
+
+test('a working directory the elevated helper cannot see is dropped, not fatal', () => {
+  // A mapped drive belongs to the user's own logon session: the elevated token
+  // does not see it, Start-Process fails on -WorkingDirectory, and the user is
+  // left with no instance at all. The helper looks first and starts the copy
+  // without it when it is not there.
+  const inner = decode(elevatedRelaunchScript({ exe: 'C:\\Program Files\\IRNetFree\\IRNetFree.exe', args: ['--x'], pid: 7, cwd: 'Z:\\work' }));
+  assert.equal(inner, "Wait-Process -Id 7 -Timeout 60 -ErrorAction SilentlyContinue; "
+    + "if (Test-Path -LiteralPath 'Z:\\work') { Start-Process -FilePath 'C:\\Program Files\\IRNetFree\\IRNetFree.exe' -WorkingDirectory 'Z:\\work' -ArgumentList '--x' } "
+    + "else { Start-Process -FilePath 'C:\\Program Files\\IRNetFree\\IRNetFree.exe' -ArgumentList '--x' }");
 });
 
 test('an accepted prompt resolves; a cancelled one rejects — and the caller tears nothing down', async () => {

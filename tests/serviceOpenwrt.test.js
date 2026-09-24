@@ -129,3 +129,21 @@ test('net:lanDevices answers a list even where there are no leases and no LAN', 
   assert.ok(Array.isArray(devices));
   for (const d of devices) assert.match(d.mac, /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/);
 });
+
+test('net:lanDevices asks its commands of the injected runner — never the real ubus / ip of the machine running the suite', async () => {
+  const asked = [];
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-svc-openwrt-lan-'));
+  fs.writeFileSync(path.join(dir2, 'store.json'), JSON.stringify({ settings: { autoUpdateSubs: false, autoUpdateAssets: 'off' } }));
+  const lanRun = async (cmd, args) => {
+    asked.push([cmd, ...args].join(' '));
+    if (cmd === 'ubus') return JSON.stringify({ l3_device: 'br-lan', 'ipv4-address': [{ address: '192.168.1.1', mask: 24 }] });
+    if (cmd === 'ip') return '192.168.1.23 lladdr aa:bb:cc:dd:ee:01 REACHABLE\n';
+    throw new Error('unfaked: ' + cmd);
+  };
+  const svc = createService({ dataDir: dir2, deps: Object.assign(fakes.deps(fakes.makeState()), { lanRun }) });
+  try {
+    const devices = await svc.invoke('net:lanDevices');
+    assert.deepEqual(asked, ['ubus call network.interface.lan status', 'ip neigh show dev br-lan']);
+    assert.ok(devices.some(d => d.mac === 'aa:bb:cc:dd:ee:01' && d.online), JSON.stringify(devices));
+  } finally { await svc.shutdown(); fs.rmSync(dir2, { recursive: true, force: true }); }
+});

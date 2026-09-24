@@ -388,6 +388,8 @@ class SubscriptionManager {
    *   getServers()     -> array of all servers
    *   setServers(arr)  -> persist servers
    *   onUpdate(sub, info) -> notify renderer
+   *   onError(sub, error) -> an AUTOMATIC refresh failed (a refresh by hand
+   *                          rejects to its caller instead)
    *   fetch(url, subId)   -> optional, fetchSubscription's shape (tests)
    */
   constructor(opts) {
@@ -480,13 +482,20 @@ class SubscriptionManager {
     return subs;
   }
 
-  /** Start a periodic refresh for subs that have autoUpdate=true. */
+  /**
+   * Start a periodic refresh for subs that have autoUpdate=true. A refresh
+   * that fails is handed to onError — it used to vanish, so a subscription
+   * whose server had been blocked for days still looked merely "updated N
+   * hours ago".
+   */
   startAuto(intervalMinutes = 60) {
     this.stopAuto();
     const ms = Math.max(5, intervalMinutes) * 60 * 1000;
     this.timer = setInterval(() => {
       const subs = this.opts.getSubs().filter(s => s.autoUpdate);
-      subs.forEach(s => this.refresh(s.id).catch(() => {}));
+      subs.forEach(s => this.refresh(s.id).catch((e) => {
+        try { if (this.opts.onError) this.opts.onError(s, e); } catch { /* a listener's own failure */ }
+      }));
     }, ms);
     if (this.timer.unref) this.timer.unref();
   }

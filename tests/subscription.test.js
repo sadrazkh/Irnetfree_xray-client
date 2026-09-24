@@ -679,6 +679,39 @@ test('redirects: relative and same-scheme are followed; https → http is refuse
   assert.throws(() => redirectTarget('https://a.example/sub', 'ftp://x.example/'), /redirect/);
 });
 
+test('an automatic refresh that fails is handed to onError, not swallowed; one that works still reaches onUpdate', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const h = harness({
+    subs: [
+      { id: 'sub1', name: 'S', url: 'https://sub.example/x', autoUpdate: true },
+      { id: 'sub2', name: 'Off', url: 'https://b', autoUpdate: false },
+      { id: 'sub3', name: 'Fine', url: 'https://c', autoUpdate: true }
+    ],
+    bodies: [new Error('Client network socket disconnected before secure TLS connection was established'), XH + '#DE']
+  });
+  const failed = [];
+  h.mgr.opts.onError = (sub, e) => failed.push([sub.id, e.message]);
+  h.mgr.startAuto(5);
+  t.mock.timers.tick(5 * 60 * 1000);
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  h.mgr.stopAuto();
+  assert.deepEqual(failed, [['sub1', 'Client network socket disconnected before secure TLS connection was established']]);
+  assert.deepEqual(h.updates, [{ added: 1, errors: 0 }]);
+});
+
+test('the desktop and the headless service both say a failed automatic refresh: a log line and the subs-updated event with the error', () => {
+  // main.js needs Electron and service.js builds a live service: read as text, the two mirrors compared
+  const R = (...p) => require('node:fs').readFileSync(require('node:path').join(__dirname, '..', ...p), 'utf8').replace(/\r\n/g, '\n');
+  const wiring = (src) => {
+    const at = src.indexOf('new SubscriptionManager({');
+    assert.notEqual(at, -1);
+    return src.slice(at, src.indexOf('\n  });', at)).split('\n').map(l => l.trim()).join('\n');
+  };
+  const main = wiring(R('src', 'main', 'main.js'));
+  assert.match(main, /onError: \(sub, e\) => \{\n\s*send\('log', \{ line: `Subscription "\$\{sub\.name\}" could not be updated automatically: \$\{e\.message\}`, level: 'warn' \}\);\n\s*send\('subs-updated', \{ sub, info: \{ error: e\.message \}, servers: store\.get\('servers', \[\]\), subs: store\.get\('subscriptions', \[\]\) \}\);/);
+  assert.equal(main, wiring(R('src', 'server', 'service.js')), 'service.js mirrors main.js');
+});
+
 test('a redirect chain is followed, and the body arrives whole', async () => {
   const s = await serve((req, res) => {
     if (req.url === '/a') { res.writeHead(302, { Location: '/b' }); res.end(); return; }

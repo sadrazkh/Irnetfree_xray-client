@@ -1092,6 +1092,23 @@ test('applyServerEdits releases a field saved back to what the server’s own li
   assert.equal('_edited' in c, false);
 });
 
+test('applyServerEdits: a WireGuard from a .conf records a cleared DNS — its keyless link says nothing about the server', () => {
+  // A .conf import (a subscription can serve one) keeps `wireguard://host:port`:
+  // no keys, no DNS. Released against THAT link, clearing the corporate DNS
+  // "matched the provider" and was not recorded — the next refresh put it back.
+  const w = makeWireguardServer(Object.assign(parseWireguardConf(WG_CONF), { name: 'Corp' }));
+  assert.equal(w.raw, 'wireguard://ir.vrt-server.org:11040');
+  assert.deepEqual(w.dns, ['1.1.1.1', '8.8.8.8']);
+  const out = applyServerEdits(w, { dns: '' });
+  assert.equal('dns' in out, false);
+  assert.deepEqual(out._edited, ['dns']);
+  // a link WITH its keys still speaks for the server: saved back to it, released
+  const k = parseLink('wireguard://K@wg.example.com:51820?publickey=P&address=10.0.0.5%2F32#W');
+  const a = applyServerEdits(k, { mtu: '1280' });
+  assert.deepEqual(a._edited, ['mtu']);
+  assert.equal('_edited' in applyServerEdits(a, { mtu: '1420' }), false);
+});
+
 test('applyServerEdits: httpupgrade path and Host are edited like the other transports', () => {
   const s = parseLink('vless://u@h.example.com:443?type=httpupgrade&security=tls&sni=cdn.example.com&path=%2Fup&host=cdn.example.com#HU');
   const out = applyServerEdits(s, { network: 'httpupgrade', security: 'tls', sni: 'cdn.example.com', path: '/new', host: 'other.example.com' });

@@ -88,24 +88,31 @@ test('a request target URL cannot parse is a 400, and the server keeps answering
   assert.equal(srv.child.exitCode, null, 'the process is still alive');
 });
 
-test('IRNETFREE_NO_SYSTEM_PROXY=1: the service never touches the system proxy, not even on shutdown', () => {
-  // Run in a child with the proxy module replaced by a spy BEFORE the service
-  // loads it — so even a failing check can only ever call the spy.
+test('IRNETFREE_NO_SYSTEM_PROXY=1: the service never touches the system proxy, not even on shutdown — and says so at start', () => {
+  // Run in a child with every proxy function that reaches the machine replaced
+  // by a spy BEFORE the service loads the module — so even a failing check can
+  // only ever call a spy (this child runs without the suite's no-network guard).
   const dir = tempDir();
   const script = `
     const sysproxy = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'main', 'sysproxy.js'))});
-    let calls = 0;
-    sysproxy.setSystemProxy = async () => { calls++; };
+    const calls = { set: 0, repair: 0, journal: 0 };
+    sysproxy.setSystemProxy = async () => { calls.set++; };
+    sysproxy.repairSystemProxy = async () => { calls.repair++; return null; };
+    sysproxy.useProxyJournal = () => { calls.journal++; };
+    sysproxy.restoreSystemProxySync = () => false;
     const { createService } = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'server', 'service.js'))});
     const svc = createService({ dataDir: ${JSON.stringify(dir)} });
-    svc.shutdown().then(() => { console.log('CALLS ' + calls); process.exit(0); });
+    svc.shutdown().then(() => { console.log('CALLS ' + calls.set + ' REPAIR ' + calls.repair + ' JOURNAL ' + calls.journal); process.exit(0); });
   `;
   const run = (env) => spawnSync(process.execPath, ['-e', script], { env: Object.assign({}, process.env, env, { IRNETFREE_PLATFORM: '' }), encoding: 'utf8', timeout: 30000, windowsHide: true });
   try {
     const off = run({ IRNETFREE_NO_SYSTEM_PROXY: '1' });
-    assert.match(off.stdout, /^CALLS 0$/m, off.stdout + off.stderr);
-    const on = run({ IRNETFREE_NO_SYSTEM_PROXY: '' });   // the spy shows the switch is what made the difference
-    assert.match(on.stdout, /^CALLS 1$/m, on.stdout + on.stderr);
+    assert.match(off.stdout, /^CALLS 0 REPAIR 0 JOURNAL 0$/m, off.stdout + off.stderr);
+    assert.match(off.stdout + off.stderr, /IRNETFREE_NO_SYSTEM_PROXY=1 .*test-only/, 'one line at start says the switch is on');
+    const on = run({ IRNETFREE_NO_SYSTEM_PROXY: '' });   // the spies show the switch is what made the difference
+    // …and without it the service journals the proxy like the desktop does, and repairs a dead session's at start
+    assert.match(on.stdout, /^CALLS 1 REPAIR 1 JOURNAL 1$/m, on.stdout + on.stderr);
+    assert.doesNotMatch(on.stdout + on.stderr, /IRNETFREE_NO_SYSTEM_PROXY/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
