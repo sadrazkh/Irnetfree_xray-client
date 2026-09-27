@@ -209,3 +209,137 @@ test('D3: a selection that is gone falls back when the picker is drawn, and main
   assert.match(fnSource('renderPicker'), /\n\s*keepSelectionValid\(\);\n/);
   assert.match(fnSource('deleteServer'), /if \(state\.selectedServerId === id\) state\.selectedServerId = null;/);
 });
+
+/* --------------------------- D2: the Servers page's groups fold --------------------------- */
+
+/** Just enough of an element for serverGroup(): children, attributes, classes, a click. */
+function fakeEl(tag) {
+  const el = {
+    tagName: tag.toUpperCase(), children: [], attrs: {}, dataset: {}, hidden: false, disabled: false,
+    textContent: '', title: '', className: '', type: '', id: '', dir: '', onclick: null, html: '',
+    classList: {
+      toggle(c, on) {
+        const set = new Set(el.className.split(/\s+/).filter(Boolean));
+        if (on === undefined ? !set.has(c) : on) set.add(c); else set.delete(c);
+        el.className = [...set].join(' ');
+      },
+      contains: (c) => el.className.split(/\s+/).includes(c)
+    },
+    appendChild(c) { el.children.push(c); return c; },
+    get firstChild() { return el.children[0] || null; },
+    setAttribute(k, v) { el.attrs[k] = String(v); },
+    getAttribute(k) { return k in el.attrs ? el.attrs[k] : null; },
+    // innerHTML is only ever a template here; the parts it names are looked up by class
+    parts: {},
+    querySelector(sel) { return el.parts[sel] || (el.parts[sel] = fakeEl('span')); },
+    set innerHTML(v) { el.html = v; },
+    get innerHTML() { return el.html; }
+  };
+  return el;
+}
+const byClass = (el, cls) => (el.className.split(/\s+/).includes(cls) ? [el] : []).concat(...el.children.map((c) => byClass(c, cls)));
+
+function groupHarness(stored) {
+  const storage = new Map(stored === undefined ? [] : [['irnetfree.foldedGroups', stored]]);
+  const built = [];
+  const refreshed = [];
+  const ctx = compile(['serverGroup', 'groupKey', 'setGroupFolded', 'loadFoldedGroups', 'subUsageBrief', 'fmtBytes', 'fmtDuration'], {
+    localStorage: { getItem: (k) => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => storage.set(k, String(v)) },
+    document: { createElement: fakeEl },
+    t: (k) => k,
+    timeAgo: () => '5 min',
+    refreshSub: async (id) => { refreshed.push(id); },
+    serverCard: (s) => { built.push(s.id); const c = fakeEl('div'); c.className = 'server-card'; return c; },
+    Date, Math, JSON, Set, Array, String, Infinity
+  }, "const FOLDED_KEY = 'irnetfree.foldedGroups';\nconst foldedGroups = loadFoldedGroups();");
+  return { ctx, storage, built, refreshed };
+}
+const HOUR = 3600;
+const SUB = { id: 'sub1', name: 'Sub one', lastUpdated: 1, usage: { upload: 0, download: 40 * 2 ** 30, total: 50 * 2 ** 30, expire: Date.now() / 1000 + 12.5 * 24 * HOUR } };
+
+test('D2: a group’s head is a button that folds it — aria-expanded, the count in it, remembered, cards built only when open', async () => {
+  const h = groupHarness();
+  const g = { id: 'sub1', name: 'Sub one', sub: SUB, items: [{ id: 'a' }, { id: 'b' }] };
+  const wrap = h.ctx.serverGroup(g, 3);
+  const [toggle] = byClass(wrap, 'srv-group-toggle');
+  const [body] = byClass(wrap, 'srv-group-body');
+  assert.equal(toggle.tagName, 'BUTTON');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true', 'open unless folded by hand');
+  assert.equal(toggle.getAttribute('aria-controls'), body.id);
+  assert.equal(body.id, 'srvGroup3');
+  assert.equal(toggle.querySelector('.srv-group-count').textContent, '2', 'the count is part of the head, so it shows folded too');
+  assert.equal(toggle.querySelector('.srv-group-name').textContent, 'Sub one');
+  assert.equal(wrap.dataset.group, 'sub:sub1');
+  assert.deepEqual(h.built, ['a', 'b']);
+
+  toggle.onclick();                                    // fold
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(body.hidden, true);
+  assert.equal(wrap.classList.contains('folded'), true);
+  assert.deepEqual(JSON.parse(h.storage.get('irnetfree.foldedGroups')), ['sub:sub1'], 'remembered across restarts');
+  toggle.onclick();                                    // and open again
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(body.hidden, false);
+  assert.deepEqual(h.built, ['a', 'b'], 'the cards it had are kept, not built twice');
+  assert.deepEqual(JSON.parse(h.storage.get('irnetfree.foldedGroups')), []);
+});
+
+test('D2: a group folded last time opens folded and builds no card until it is opened', () => {
+  const h = groupHarness(JSON.stringify(['manual']));
+  const manual = h.ctx.serverGroup({ id: '', name: 'srv.manual', sub: null, items: [{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }] }, 0);
+  const [toggle] = byClass(manual, 'srv-group-toggle');
+  const [body] = byClass(manual, 'srv-group-body');
+  assert.equal(manual.dataset.group, 'manual');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(body.hidden, true);
+  assert.deepEqual(h.built, [], 'a folded 300-server subscription costs one row');
+  assert.deepEqual(byClass(manual, 'srv-group-refresh'), [], 'the hand-added pile has no subscription to refresh');
+  toggle.onclick();
+  assert.deepEqual(h.built, ['m1', 'm2', 'm3']);
+  // storage that is not ours, or not there at all, only costs remembering
+  assert.equal(groupHarness('{not json').ctx.loadFoldedGroups().size, 0);
+  assert.equal(groupHarness(JSON.stringify({ a: 1 })).ctx.loadFoldedGroups().size, 0);
+  assert.deepEqual([...groupHarness(JSON.stringify(['sub:x', 7, null])).ctx.loadFoldedGroups()], ['sub:x']);
+});
+
+test('D2: a subscription’s head carries its own refresh, and its quota and time left in its bars’ colours', async () => {
+  const h = groupHarness();
+  const wrap = h.ctx.serverGroup({ id: 'sub1', name: 'Sub one', sub: SUB, items: [{ id: 'a' }] }, 0);
+  const [refresh] = byClass(wrap, 'srv-group-refresh');
+  assert.equal(refresh.tagName, 'BUTTON');
+  assert.equal(refresh.getAttribute('aria-label'), 'srv.subRefresh');
+  refresh.onclick();
+  assert.equal(refresh.disabled, true, 'one refresh at a time');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(h.refreshed, ['sub1']);
+  assert.equal(refresh.disabled, false);
+  const [meta] = byClass(wrap, 'srv-group-meta');
+  assert.equal(meta.className, 'srv-group-meta mid', '80% of the quota used');
+  assert.deepEqual(meta.children.map((c) => [c.textContent, c.dir]), [['40.0 GB / 50.0 GB', 'ltr'], ['12 sub.days sub.left', '']]);
+  assert.equal(meta.title, 'sub.lastUpdate: 5 min');
+
+  const brief = (usage) => ({ ...h.ctx.subUsageBrief({ usage }) });   // out of the vm's realm, for deepEqual
+  const now = Date.now() / 1000;
+  assert.deepEqual(brief(undefined), { data: '', time: '', level: '' }, 'a subscription that reports nothing shows nothing');
+  assert.equal(brief({ upload: 95, download: 0, total: 100 }).level, 'bad');
+  assert.equal(brief({ upload: 10, download: 0, total: 100 }).level, '');
+  assert.equal(brief({ total: 0, expire: now + 2 * 24 * HOUR }).level, 'bad', 'two days left');
+  assert.equal(brief({ total: 0, expire: now + 5 * 24 * HOUR }).level, 'mid');
+  assert.deepEqual(brief({ total: 0, expire: now - 10 }), { data: '', time: 'sub.expired', level: 'bad' });
+  assert.equal(brief({ upload: 2048, download: 0 }).data, '2.0 KB · sub.unlimited');
+});
+
+test('D2: the list is flat when there is nothing to tell apart, a folded group says it holds the selection, and it is styled both ways', () => {
+  const render = fnSource('renderServers');
+  assert.match(render, /if \(!labelled\) \{\n\s*for \(const g of groups\) for \(const s of g\.items\) list\.appendChild\(serverCard\(s\)\);\n\s*return;/);
+  assert.match(render, /groups\.forEach\(\(g, n\) => list\.appendChild\(serverGroup\(g, n\)\)\);\n\s*refreshSelection\(\);/);
+  assert.match(fnSource('refreshSelection'), /g\.classList\.toggle\('has-sel', g\.dataset\.group === selGroup\)/);
+  assert.match(fnSource('serverGroups'), /sub: sub \|\| null/);
+  assert.match(CSS, /\.srv-group\.folded \.srv-group-chev \{ transform: rotate\(-90deg\); \}/);
+  assert.match(CSS, /\[dir="rtl"\] \.srv-group\.folded \.srv-group-chev \{ transform: rotate\(90deg\); \}/, 'folded, it points along a Persian line too');
+  assert.match(CSS, /\.srv-group-body \{ display: flex; flex-direction: column; gap: 10px; \}/);
+  assert.match(CSS, /\.srv-group\.folded\.has-sel \.srv-group-count \{/);
+  // the Subscriptions page keeps adding and editing: nothing of it moved
+  for (const id of ['btnSubAddOpen', 'btnSubAdd', 'subList', 'btnRefreshAll']) assert.match(HTML, new RegExp(`id="${id}"`));
+  assertTranslated(['srv.groupToggle', 'srv.subRefresh']);
+});
