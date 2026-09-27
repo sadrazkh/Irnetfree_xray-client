@@ -14,7 +14,8 @@ const RULES_OK = '0:\tfrom all lookup local\n8998:\tnot from all dport 53 lookup
 
 /**
  * `state` is shared with the test: flip `gatewayFails`, `singboxMissing`,
- * `xrayFails` to make the next attempt fail; read `events`, `xray`, `gateways`.
+ * `xrayFails` to make the next attempt fail, set `gatewayGate` (a promise) to
+ * hold the next gateway start until it resolves; read `events`, `xray`, `gateways`.
  */
 function makeState() {
   return { events: [], gateways: [], inners: [], gatewayFails: false, singboxMissing: false, xrayFails: false, xray: null };
@@ -40,6 +41,7 @@ function fakeInner(state) {
       inner.starts++;
       inner.bypass = (bypassAddrs || []).slice();
       state.events.push('gateway:start');
+      if (state.gatewayGate) await state.gatewayGate;   // a gateway slow to come up: the test opens it
       if (state.gatewayFails) throw new Error('sing-box exited immediately');
       inner.exited = new Promise((resolve) => { inner.gone = resolve; });
       inner.proc = { kill: () => {} };

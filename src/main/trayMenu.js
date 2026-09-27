@@ -23,4 +23,18 @@ function trayGroups(servers, subs, max = 25) {
   return out;
 }
 
-module.exports = { trayGroups };
+/**
+ * The tray's Disconnect item. While a connect is in flight — a first connect,
+ * a switch, a rebuild after a drop — it is that connect's Cancel: a connect that
+ * hangs (a dead server, no network) could otherwise only be waited out from the
+ * tray, whose Disconnect was greyed out until something was active. `state` is
+ * the last connection status told to the window.
+ */
+function trayStopItem({ active, state, en }) {
+  if (state === 'connecting' || state === 'reconnecting') {
+    return { label: en ? 'Cancel connecting' : 'لغو اتصال', enabled: true };
+  }
+  return { label: en ? 'Disconnect' : 'قطع اتصال', enabled: !!active };
+}
+
+module.exports = { trayGroups, trayStopItem };

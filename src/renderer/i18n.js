@@ -492,7 +492,13 @@ const I18N = {
     'gw.online': 'آنلاین', 'gw.offline': 'آفلاین', 'gw.saved': 'فهرست دستگاه‌های مستقیم ذخیره شد',
     'ins.gateway': 'گیت‌وی', 'gw.insWhole': 'کل شبکه از تونل', 'gw.insDirect': '{n} دستگاه مستقیم',
     'gw.quic': 'QUIC (UDP 443) از شبکه رد نشود',
-    'gw.quicSub': 'مرورگرها بلافاصله سراغ TCP می‌روند که هر پروکسی‌ای حمل می‌کند؛ دستگاه‌های مستقیم دست نمی‌خورند.'
+    'gw.quicSub': 'مرورگرها بلافاصله سراغ TCP می‌روند که هر پروکسی‌ای حمل می‌کند؛ دستگاه‌های مستقیم دست نمی‌خورند.',
+    // while a connect is in flight every connect control is its Cancel
+    'power.connect': 'اتصال', 'power.disconnect': 'قطع اتصال',
+    'power.cancel': 'لغو', 'power.cancelHint': 'لغو اتصال',
+    'state.cancelling': 'در حال لغو…',
+    // the Servers page's groups
+    'srv.groupToggle': 'باز یا بسته کردن این گروه', 'srv.subRefresh': 'به‌روزرسانی همین ساب'
   },
 
   en: {
@@ -984,7 +990,13 @@ const I18N = {
     'gw.online': 'online', 'gw.offline': 'offline', 'gw.saved': 'Direct-device list saved',
     'ins.gateway': 'Gateway', 'gw.insWhole': 'whole network', 'gw.insDirect': '{n} direct',
     'gw.quic': 'Refuse QUIC (UDP 443) from the LAN',
-    'gw.quicSub': 'Browsers fall back to TCP at once, which every proxy carries; devices that go direct are not affected.'
+    'gw.quicSub': 'Browsers fall back to TCP at once, which every proxy carries; devices that go direct are not affected.',
+    // while a connect is in flight every connect control is its Cancel
+    'power.connect': 'Connect', 'power.disconnect': 'Disconnect',
+    'power.cancel': 'Cancel', 'power.cancelHint': 'Cancel connecting',
+    'state.cancelling': 'Cancelling…',
+    // the Servers page's groups
+    'srv.groupToggle': 'Show or hide this group', 'srv.subRefresh': 'Refresh this subscription'
   }
 };
 
