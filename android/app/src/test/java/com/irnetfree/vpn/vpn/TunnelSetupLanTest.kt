@@ -114,6 +114,23 @@ class TunnelSetupLanTest {
         assertTrue(LocalPort.isFree(port, LocalPort.ANY))
     }
 
+    @Test fun theLanPortProbeAsksBothAtOnceAndNeverWaitsForAPortToFree() {
+        // It runs on the tunnel's one worker, where every Cancel queues: two
+        // waitFree()s held a "Connecting…" up to four seconds.
+        val free = ServerSocket().let { s -> s.bind(InetSocketAddress(InetAddress.getByName(LocalPort.ANY), 0)); val p = s.localPort; s.close(); p }
+        val held = ServerSocket()
+        held.bind(InetSocketAddress(InetAddress.getByName(LocalPort.ANY), 0))
+        try {
+            val t0 = System.nanoTime()
+            assertEquals(listOf(held.localPort), LocalPort.takenNow(listOf(held.localPort, free, held.localPort), LocalPort.ANY))
+            assertTrue("well under a second", (System.nanoTime() - t0) / 1_000_000 < 900)
+            val t1 = System.nanoTime()
+            assertEquals(listOf(held.localPort), LocalPort.takenNow(listOf(held.localPort), LocalPort.ANY, graceMs = 0L))
+            assertEquals(emptyList<Int>(), LocalPort.takenNow(listOf(free), LocalPort.ANY))
+            assertTrue("nothing held: no second look", (System.nanoTime() - t1) / 1_000_000 < 500)
+        } finally { held.close() }
+    }
+
     /* ---------------- where the other devices point their proxy ---------------- */
 
     @Test fun theLanAddressesAreWifiHotspotAndTethers_neverTheCarrierOrTheTunnel() {
