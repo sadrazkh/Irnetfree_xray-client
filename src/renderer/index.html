@@ -23,9 +23,13 @@
   <!-- custom titlebar -->
   <header class="titlebar conn-off" id="titlebar">
     <div class="tb-left">
-      <span class="tb-logo-wrap">
-        <img class="tb-logo" src="../../assets/icon.png" alt="IRNetFree" />
-        <span class="tb-logo-badge"></span>
+      <!-- the logo with the app's version under it (app:init → #tbVersion) -->
+      <span class="tb-brand">
+        <span class="tb-logo-wrap">
+          <img class="tb-logo" src="../../assets/icon.png" alt="IRNetFree" />
+          <span class="tb-logo-badge"></span>
+        </span>
+        <span class="tb-ver" id="tbVersion" dir="ltr" data-i18n-title="about.version"></span>
       </span>
       <span class="tb-title">IR<b>NETFREE</b></span>
     </div>

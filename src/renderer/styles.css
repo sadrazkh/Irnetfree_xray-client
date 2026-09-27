@@ -173,6 +173,18 @@ button { cursor: pointer; background: none; border: 0; color: inherit; }
   user-select: none;
 }
 .tb-left { display: flex; align-items: center; gap: 10px; }
+/* the logo with the version under it: one column, centred on the logo, and
+   no taller than the bar (18 + 2 + 9 in every skin's 46px) */
+.tb-brand { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }
+.tb-ver {
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: .02em;
+  color: var(--ink3);
+  white-space: nowrap;
+}
+.tb-ver:empty { display: none; }
 .tb-logo-wrap { position: relative; display: inline-flex; }
 .tb-logo { width: 18px; height: 18px; border-radius: var(--r2); display: block; }
 .tb-logo-badge {
