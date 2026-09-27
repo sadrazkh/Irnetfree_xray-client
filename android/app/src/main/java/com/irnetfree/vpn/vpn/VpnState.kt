@@ -1,5 +1,6 @@
 package com.irnetfree.vpn.vpn
 
+import com.irnetfree.vpn.core.LanShare
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -33,6 +34,15 @@ object VpnState {
     data class Health(val ok: Boolean, val text: String)
     fun setHealth(ok: Boolean, text: String) { _health.value = Health(ok, text) }
 
+    /**
+     * The LAN share the running tunnel really opened (null = none): what
+     * Settings → LAN sharing holds against it, to say "sharing now" or
+     * "applies on the next connect". Only a CONNECTED tunnel has one.
+     */
+    private val _lanShared = MutableStateFlow<LanShare?>(null)
+    val lanShared: StateFlow<LanShare?> = _lanShared
+    fun setLanShared(v: LanShare?) { _lanShared.value = v }
+
     fun set(s: ConnState, label: String? = null, error: String? = null) {
         _state.value = s
         if (label != null) _label.value = label
@@ -42,6 +52,7 @@ object VpnState {
         // keeps it through the teardown), so it ends the session like DISCONNECTED.
         if (s == ConnState.DISCONNECTED || s == ConnState.ERROR) { _connectedSince.value = 0L; _traffic.value = Traffic(); _health.value = null }
         if (s == ConnState.CONNECTING) _health.value = null
+        if (s != ConnState.CONNECTED) _lanShared.value = null
     }
     fun setTraffic(t: Traffic) { _traffic.value = t }
     fun addLog(line: String) { _log.value = (_log.value + line).takeLast(300) }

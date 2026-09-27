@@ -2371,6 +2371,7 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             Row(Modifier.fillMaxWidth().clickable { save(s.copy(perAppMode = v)) }, verticalAlignment = Alignment.CenterVertically) { RadioButton(s.perAppMode == v, { save(s.copy(perAppMode = v)) }); Text(l, color = TXT) }
         }
         if (s.perAppMode != "off") AppPicker(s.perApps) { save(s.copy(perApps = it)) }
+        LanShareSection(store)
     }
 }
 
