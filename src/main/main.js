@@ -547,6 +547,21 @@ function setServers(list) {
   refreshTray();
 }
 
+/**
+ * The config the picker points at — a server, a chain, advanced routing, the
+ * pool — remembered on its own. `activeServerId` is cleared at every launch (a
+ * new process has no live connection) and `lastServerId` only moves on a
+ * connect, so every restart used to land the picker on the first server. The
+ * renderer resolves it again at launch against what can still be selected
+ * (lastServerId, then the first server, when it cannot). Written only when it
+ * moved, and coalesced: clicking down a list is a write per click.
+ */
+function setSelection(id) {
+  const v = typeof id === 'string' && id ? id : null;
+  if (store.get('selectedServerId', null) !== v) store.setLazy('selectedServerId', v);
+  return v;
+}
+
 /* ----------------------------- core actions ----------------------------- */
 
 /** Process names referenced by advanced routing 'process' rules. */
@@ -2320,6 +2335,9 @@ function registerIpc() {
     subscriptions: store.get('subscriptions', []),
     settings: getSettings(),
     activeServerId: store.get('activeServerId', null),
+    // the picker's own choice, and the last connection made: what a restart restores
+    selectedServerId: store.get('selectedServerId', null),
+    lastServerId: store.get('lastServerId', null),
     chain: store.get('chain', []),
     chains: getChains(),
     pool: getPool(),
@@ -2480,6 +2498,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('servers:list', () => store.get('servers', []));
+  ipcMain.handle('selection:set', (e, id) => setSelection(id));
   // Serialize a server (with ALL its settings) back into a shareable link.
   ipcMain.handle('servers:link', (e, id) => {
     const s = store.get('servers', []).find(x => x.id === id);
