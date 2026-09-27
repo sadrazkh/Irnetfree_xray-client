@@ -12,6 +12,8 @@ const state = {
   activeServerId: null,   // currently connected server
   activeEngine: '',       // core the live connection runs on
   selectedServerId: null, // chosen in the picker (target for connect)
+  savedSelection: null,   // what main last stored as the selection (keepSelectionValid)
+  lastServerId: null,     // the last connection made — a selection that is gone falls back to it
   connected: false,
   connecting: false,
   tunAvailable: false,
@@ -287,7 +289,7 @@ async function init() {
   state.subscriptions = data.subscriptions || [];
   state.settings = data.settings || {};
   state.activeServerId = data.activeServerId || null;
-  state.selectedServerId = data.activeServerId || (state.servers[0] && state.servers[0].id) || null;
+  state.lastServerId = data.lastServerId || null;
   state.tunAvailable = !!data.tunAvailable;
   state.elevated = !!data.elevated;
   state.assets = data.assets || {};
@@ -308,6 +310,12 @@ async function init() {
     id: e.id, name: e.name || 'Proxy', target: e.target || '',
     socksPort: e.socksPort || 0, httpPort: e.httpPort || 0, enabled: e.enabled !== false
   }));
+  // The picker's choice survives a restart: the one main stored, then the live
+  // connection (a reload of a connected window), then the last one made, then
+  // the first server. Resolved once the chains, the pool and the settings are
+  // in — they decide what can still be selected.
+  state.savedSelection = data.selectedServerId || null;
+  state.selectedServerId = resolveSelection([data.selectedServerId, data.activeServerId, data.lastServerId], selectable, state.servers);
 
   window.i18n.applyI18n(state.settings.lang || 'fa');
   $('#btnLang').textContent = (state.settings.lang || 'fa') === 'fa' ? 'EN' : 'فا';
@@ -1221,6 +1229,42 @@ function advancedReady() {
     (((state.settings.routeRules || []).length > 0) || !!state.settings.routeDefault);
 }
 
+/**
+ * Which config the picker points at: the first of `candidates` that can still
+ * be selected (`valid`), else the first server, else nothing. Pure — the order
+ * of the candidates is the caller's (see init and keepSelectionValid).
+ */
+function resolveSelection(candidates, valid, servers) {
+  for (const id of candidates || []) if (id && valid(id)) return id;
+  return (servers && servers[0] && servers[0].id) || null;
+}
+
+/** Whether `id` can be connected right now: a server, a ready chain, advanced routing or the pool once set up. */
+function selectable(id) {
+  if (id === ADV_ID) return advancedReady();
+  if (id === POOL_ID) return poolReady();
+  if (isChainId(id)) return chainReady(chainById(id));
+  return !!srvById(id);
+}
+
+/**
+ * The selection survives a restart (main's selectedServerId). Checked whenever
+ * the picker is drawn — which every change of what can be selected ends in —
+ * so one that is gone falls back to the live connection, the last one made,
+ * then the first server; and whatever it is now goes to main when it moved.
+ */
+function keepSelectionValid() {
+  const id = resolveSelection([state.selectedServerId, state.activeServerId, state.lastServerId], selectable, state.servers);
+  if (id !== state.selectedServerId) {
+    state.selectedServerId = id;
+    refreshSelection();
+  }
+  if (id !== state.savedSelection && window.api.setSelection) {
+    state.savedSelection = id;
+    Promise.resolve(window.api.setSelection(id)).catch(() => { state.savedSelection = undefined; });
+  }
+}
+
 function selectServer(id) {
   state.selectedServerId = id;
   refreshSelection();
@@ -1237,10 +1281,10 @@ function renderPicker() {
   const btnPing = $('#pickerPing');
   const menu = $('#pickerMenu');
 
-  // drop a stale pseudo selection if its feature is no longer available
-  if (isChainId(state.selectedServerId) && !chainReady(chainById(state.selectedServerId))) state.selectedServerId = null;
-  if (state.selectedServerId === ADV_ID && !advancedReady()) state.selectedServerId = null;
-  if (state.selectedServerId === POOL_ID && !poolReady()) state.selectedServerId = null;
+  // a selection that can no longer be connected (a server deleted or dropped
+  // by a refresh, a chain that lost a hop, the pool or advanced routing
+  // emptied) falls back — and whatever it is now, main keeps it
+  keepSelectionValid();
 
   const selId = state.selectedServerId;
   const sel = state.servers.find(s => s.id === selId);
@@ -1451,7 +1495,8 @@ document.addEventListener('paste', (e) => {
 async function deleteServer(id) {
   state.servers = await window.api.deleteServer(id);
   delete state.pings[id];
-  if (state.selectedServerId === id) state.selectedServerId = state.servers[0] && state.servers[0].id || null;
+  // the picker falls back to the live connection, the last one made, then the first server (keepSelectionValid)
+  if (state.selectedServerId === id) state.selectedServerId = null;
   // prune the deleted server from any named chains
   const inAnyChain = state.chains.some(c => (c.members || []).includes(id));
   if (inAnyChain) {
@@ -2043,6 +2088,7 @@ window.api.onStatus((d) => {
     state.connected = true;
     state.connecting = false;
     state.activeServerId = d.serverId;
+    state.lastServerId = d.serverId;   // main's lastServerId moved with it
     state.lan = d.lan || null;
     // a fresh connect is built from the current settings — nothing is stale
     setPending(d.pendingReconnect || []);

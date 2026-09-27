@@ -147,3 +147,65 @@ test('D1: the controls say Cancel while connecting — the power button’s word
   assert.match(CSS, /\.power-btn\.connecting \.power-cancel \{ display: block; \}/);
   assertTranslated(['power.connect', 'power.disconnect', 'power.cancel', 'power.cancelHint', 'state.cancelling']);
 });
+
+/* --------------------------- D3: the selection survives a restart --------------------------- */
+
+test('D3: the stored selection wins while it can still be connected; then the live one, the last one, the first server', () => {
+  const { resolveSelection } = compile(['resolveSelection'], {});
+  const servers = [{ id: 's1' }, { id: 's2' }, { id: 's3' }];
+  const valid = (id) => ['s1', 's2', 's3', 'chain-ok', '__pool__'].includes(id);
+  assert.equal(resolveSelection(['s3', null, 's2'], valid, servers), 's3', 'the choice itself — not the first server');
+  assert.equal(resolveSelection(['gone', null, 's2'], valid, servers), 's2', 'deleted or dropped by a refresh: the last connection made');
+  assert.equal(resolveSelection(['gone', null, 'also-gone'], valid, servers), 's1', 'then the first server');
+  assert.equal(resolveSelection(['chain-ok'], valid, servers), 'chain-ok', 'a chain, advanced routing, the pool are selections too');
+  assert.equal(resolveSelection(['chain-broken', '__pool__'], valid, servers), '__pool__');
+  assert.equal(resolveSelection([null, undefined, ''], valid, []), null, 'nothing to select');
+});
+
+test('D3: whatever can be selected decides — a chain that lost a hop, advanced routing or the pool emptied fall back', () => {
+  const ctx = compile(['selectable', 'chainById', 'isChainId', 'chainMembers', 'chainReady', 'srvById', 'poolTargetValid', 'poolEnabledValid', 'poolReady', 'advancedReady'], {
+    state: {
+      servers: [{ id: 's1' }, { id: 's2' }],
+      chains: [{ id: 'c-ok', members: ['s1', 's2'] }, { id: 'c-short', members: ['s1', 'gone'] }],
+      pool: [],
+      settings: {}
+    }
+  }, "const ADV_ID = '__advanced__';\nconst POOL_ID = '__pool__';");
+  assert.equal(ctx.selectable('s2'), true);
+  assert.equal(ctx.selectable('gone'), false);
+  assert.equal(ctx.selectable('c-ok'), true);
+  assert.equal(ctx.selectable('c-short'), false, 'a chain with one hop left is no chain');
+  assert.equal(ctx.selectable('__advanced__'), false);
+  assert.equal(ctx.selectable('__pool__'), false);
+  ctx.state.settings = { advancedRouting: true, routeRules: [{ type: 'domain', value: 'x', target: 's1' }] };
+  ctx.state.pool = [{ id: 'p', enabled: true, socksPort: 60001, target: 's1' }];
+  assert.equal(ctx.selectable('__advanced__'), true);
+  assert.equal(ctx.selectable('__pool__'), true);
+});
+
+test('D3: a selection that is gone falls back when the picker is drawn, and main hears of a choice only when it moved', () => {
+  const stored = [];
+  const ctx = compile(['keepSelectionValid', 'resolveSelection'], {
+    state: { servers: [{ id: 's1' }, { id: 's2' }], selectedServerId: 's2', savedSelection: 's2', activeServerId: null, lastServerId: 's1' },
+    selectable: (id) => ['s1', 's2'].includes(id),
+    refreshSelection: () => stored.push('refresh'),
+    window: { api: { setSelection: async (id) => { stored.push(id); return id; } } }
+  });
+  ctx.keepSelectionValid();
+  assert.deepEqual(stored, [], 'nothing moved, nothing written');
+  ctx.state.servers = [{ id: 's1' }];                 // s2 deleted, or dropped by a subscription refresh
+  ctx.selectable = (id) => id === 's1';
+  ctx.keepSelectionValid();
+  assert.equal(ctx.state.selectedServerId, 's1');
+  assert.deepEqual(stored, ['refresh', 's1'], 'the cards follow, and main keeps the new choice');
+  ctx.keepSelectionValid();
+  assert.deepEqual(stored, ['refresh', 's1'], 'once');
+
+  // at launch: the stored choice, the live connection, the last one made — resolved after the chains and the pool are in
+  const init = fnSource('init');
+  assert.match(init, /state\.savedSelection = data\.selectedServerId \|\| null;\n\s*state\.selectedServerId = resolveSelection\(\[data\.selectedServerId, data\.activeServerId, data\.lastServerId\], selectable, state\.servers\);/);
+  assert.ok(init.indexOf('resolveSelection(') > init.indexOf('state.pool = '), 'the chains, the pool and the settings decide what is selectable');
+  assert.doesNotMatch(init, /state\.selectedServerId = data\.activeServerId \|\|/, 'the v1.14 line that lost the choice at every restart');
+  assert.match(fnSource('renderPicker'), /\n\s*keepSelectionValid\(\);\n/);
+  assert.match(fnSource('deleteServer'), /if \(state\.selectedServerId === id\) state\.selectedServerId = null;/);
+});

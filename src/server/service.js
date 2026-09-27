@@ -339,6 +339,19 @@ function createService(opts = {}) {
   // router must not rewrite store.json (flash) on every attempt.
   function setIfChanged(key, value) { if (store.get(key, undefined) !== value) store.set(key, value); }
 
+  /**
+   * The config the picker points at, remembered on its own (see main.js):
+   * `activeServerId` is cleared at every start and `lastServerId` only moves
+   * on a connect, so every restart used to land on the first server. Written
+   * only when it moved, and coalesced — clicking down a list is a write per
+   * click, and on a router every write is flash.
+   */
+  function setSelection(id) {
+    const v = typeof id === 'string' && id ? id : null;
+    if (store.get('selectedServerId', null) !== v) store.setLazy('selectedServerId', v);
+    return v;
+  }
+
   migrateServers();
   migrateSettingsStore();
   // The router's defaults are WRITTEN into the store once, not overlaid under
@@ -2089,6 +2102,9 @@ function createService(opts = {}) {
       subscriptions: store.get('subscriptions', []),
       settings: getSettings(),
       activeServerId: store.get('activeServerId', null),
+      // the picker's own choice, and the last connection made: what a restart restores
+      selectedServerId: store.get('selectedServerId', null),
+      lastServerId: store.get('lastServerId', null),
       chain: store.get('chain', []),
       chains: getChains(),
       pool: getPool(),
@@ -2138,6 +2154,7 @@ function createService(opts = {}) {
     'servers:clear': () => { store.set('servers', []); return []; },
     'servers:list': () => store.get('servers', []),
     'servers:link': (id) => { const s = store.get('servers', []).find(x => x.id === id); return s ? buildShareLink(s) : ''; },
+    'selection:set': (id) => setSelection(id),
 
     'chain:get': () => store.get('chain', []),
     'chain:set': (ids) => { const v = Array.isArray(ids) ? ids : []; store.set('chain', v); return v; },
