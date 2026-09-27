@@ -38,15 +38,20 @@ object ConfigBuilder {
      *
      * `inboundAuth`: the session's username/password for socks-in and http-in
      * (the pool's own ps-/ph- ports stay open — exposing them is that feature).
+     *
+     * `lan`: LAN sharing (LanShare) — when enabled, two more inbounds on every
+     * interface, routed by the very rules the tunnel's traffic takes; the only
+     * rule of their own keeps them off the phone's loopback (lanGuardRules).
      */
-    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null): JSONObject {
+    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null): JSONObject {
         val listen = "127.0.0.1"
         val sniffing = if (s.enableSniffing)
             JSONObject().put("enabled", true).put("destOverride", JSONArray().put("http").put("tls").put("quic")).put("routeOnly", false)
         else JSONObject().put("enabled", false)
+        val share = lan?.takeIf { it.enabled }
 
-        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth)
-        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth)
+        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share)
+        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share)
 
         val outbounds = JSONArray()
         // Every target the plan routes to, with its outbound tag — the resolver a
@@ -83,8 +88,10 @@ object ConfigBuilder {
         // The resolver's exit follows the catch-all; a chain / single plan never
         // applies advanced rules, so the DNS plan sees `advancedRouting: false`.
         val dnsSettings = s.copy(advancedRouting = false)
-        return assemble(s, standardInbounds(s, listen, sniffing, inboundAuth), outbounds, rules,
-            geoAssets, catchAllTag, dnsSettings, targetResolversFor(targets), wgEndpointIps)
+        val inbounds = standardInbounds(s, listen, sniffing, inboundAuth)
+        val lanTags = addLanInbounds(inbounds, share, sniffing, setOf(s.socksPort, s.httpPort))
+        return assemble(s, inbounds, outbounds, rules,
+            geoAssets, catchAllTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags)
     }
 
     /**
@@ -104,7 +111,7 @@ object ConfigBuilder {
 
     /* ----------------------------- advanced ----------------------------- */
 
-    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?): JSONObject {
+    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?): JSONObject {
         val reg = Registry(plan.serversById, plan.chainsById)
         val advRules = JSONArray()
         val targets = ArrayList<Pair<Any?, String>>()
@@ -164,13 +171,15 @@ object ConfigBuilder {
         rules.put(fieldRule().put("port", "0-65535").put("outboundTag", defTag))
 
         val dnsSettings = s.copy(advancedRouting = true, routeRules = plan.rules)
-        return assemble(s, standardInbounds(s, listen, sniffing, auth), JSONArray(reg.outs), rules,
-            geo, exitTag, dnsSettings, targetResolversFor(targets), wgEndpointIps)
+        val inbounds = standardInbounds(s, listen, sniffing, auth)
+        val lanTags = addLanInbounds(inbounds, lan, sniffing, setOf(s.socksPort, s.httpPort))
+        return assemble(s, inbounds, JSONArray(reg.outs), rules,
+            geo, exitTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags)
     }
 
     /* ----------------------------- pool ----------------------------- */
 
-    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?): JSONObject {
+    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?): JSONObject {
         val reg = Registry(plan.serversById, plan.chainsById)
         val inbounds = JSONArray()
         // apiPort stays reserved although this config no longer opens the
@@ -192,6 +201,12 @@ object ConfigBuilder {
         val stdTags = ArrayList<String>()
         if (addInbound("socks-in", s.socksPort, false, auth)) stdTags.add("socks-in")
         if (addInbound("http-in", s.httpPort, true, auth)) stdTags.add("http-in")
+        // LAN sharing goes where the tunnel's own traffic goes: the primary exit.
+        // Its ports are claimed after the tunnel's and before the entries', so a
+        // pool entry sitting on one loses it (LanShare.problem keeps them apart).
+        val lanTags = addLanInbounds(inbounds, lan, sniffing, used)
+        used.addAll(lanPorts(lan, lanTags))
+        stdTags.addAll(lanTags)
         if (stdTags.isNotEmpty()) perInbound.put(rule(stdTags, primaryTag))
 
         for (e in plan.entries) {
@@ -214,7 +229,7 @@ object ConfigBuilder {
         // Pool emits no bypass rules, so an in-country resolver would only hand
         // the primary exit an Iranian IP to dial from abroad — routingMode is not its.
         val dnsSettings = s.copy(advancedRouting = false, routingMode = "global")
-        return assemble(s, inbounds, JSONArray(reg.outs), rules, geo, primaryTag, dnsSettings, targetResolversFor(targets), wgEndpointIps)
+        return assemble(s, inbounds, JSONArray(reg.outs), rules, geo, primaryTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags)
     }
 
     /* ----------------------------- chain / registry ----------------------------- */
@@ -443,6 +458,40 @@ object ConfigBuilder {
             .put("protocol", "http").put("settings", settings).put("sniffing", sniffing)
     }
 
+    /**
+     * LAN sharing's two inbounds (LanShare): on every interface, with the
+     * share's own credentials when it asks for them, sniffing like the tunnel's.
+     * A port already [taken] by this config is skipped rather than written
+     * twice — a config the core would refuse whole. The tags that went in.
+     */
+    private fun addLanInbounds(inbounds: JSONArray, lan: LanShare?, sniffing: JSONObject, taken: Set<Int>): List<String> {
+        if (lan == null || !lan.enabled) return emptyList()
+        val a = if (lan.auth) LocalAuth(lan.user, lan.pass) else null
+        val tags = ArrayList<String>()
+        if (lan.socksPort !in taken) { inbounds.put(socksInbound(LanShare.SOCKS_TAG, lan.socksPort, LanShare.LISTEN, sniffing, a)); tags.add(LanShare.SOCKS_TAG) }
+        if (lan.httpPort !in taken && lan.httpPort != lan.socksPort) { inbounds.put(httpInbound(LanShare.HTTP_TAG, lan.httpPort, LanShare.LISTEN, sniffing, a)); tags.add(LanShare.HTTP_TAG) }
+        return tags
+    }
+
+    private fun lanPorts(lan: LanShare?, tags: List<String>): List<Int> = if (lan == null) emptyList() else buildList {
+        if (LanShare.SOCKS_TAG in tags) add(lan.socksPort)
+        if (LanShare.HTTP_TAG in tags) add(lan.httpPort)
+    }
+
+    /** The phone's own loopback, as a destination. */
+    val LOOPBACK = listOf("127.0.0.0/8", "0.0.0.0/8", "::1/128")
+
+    /**
+     * The one routing difference LAN sharing has from the tunnel: nothing that
+     * comes in from the network reaches the PHONE's own loopback — the tunnel's
+     * inbounds, the pool's open ports, other apps' local servers. The tunnel's
+     * traffic cannot get there either (loopback never enters the TUN); through
+     * the proxy it would, since private ranges go direct. First of all rules.
+     */
+    private fun lanGuardRules(tags: List<String>): List<JSONObject> = if (tags.isEmpty()) emptyList() else listOf(
+        fieldRule().put("inboundTag", JSONArray(tags)).put("ip", JSONArray(LOOPBACK)).put("outboundTag", "block"),
+        fieldRule().put("inboundTag", JSONArray(tags)).put("domain", JSONArray().put("domain:localhost")).put("outboundTag", "block"))
+
     // No metrics listener (the desktop's GET /debug/vars on apiPort): nothing on
     // Android reads it — the traffic figures come from hev — and it answered any
     // app on 127.0.0.1 with this tunnel's outbound tags and byte counts.
@@ -494,14 +543,17 @@ object ConfigBuilder {
     private fun assemble(
         s: AppSettings, inbounds: JSONArray, outboundsIn: JSONArray, rules: JSONArray,
         geoAssets: Boolean, exitTag: String, dnsSettings: AppSettings,
-        targetResolvers: List<DnsPlan.TargetResolver>, wgEndpointIps: Map<String, String>
+        targetResolvers: List<DnsPlan.TargetResolver>, wgEndpointIps: Map<String, String>,
+        lanTags: List<String> = emptyList()
     ): JSONObject {
         // Name resolution (see DnsPlan.kt). Its rules go FIRST: the port-53 hijack
         // must beat the private-IP bypass, or a query to the tunnel resolver would
-        // be sent "direct" into nowhere instead of being answered.
+        // be sent "direct" into nowhere instead of being answered. Only LAN
+        // sharing's loopback guard comes before them (it matches nothing else).
         val plan = DnsPlan.build(dnsSettings, geoAssets, exitTag, targetResolvers)
         plan.hijackOutbound?.let { outboundsIn.put(it) }
         val allRules = JSONArray()
+        lanGuardRules(lanTags).forEach { allRules.put(it) }
         plan.rules.forEach { allRules.put(it) }
         for (i in 0 until rules.length()) allRules.put(rules.getJSONObject(i))
 
