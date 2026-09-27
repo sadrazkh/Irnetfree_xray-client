@@ -1142,9 +1142,17 @@ private object AppWork {
         val phase: (String) -> Unit = { p -> if (run == fastestRun) fastestPhase.value = p }
         phase("testing 0/${list.size}…")
         fastestNote.value = ""
+        // A connect or a disconnect asked for while ⚡ measures (it takes seconds)
+        // is the user's newer word: ⚡ then applies nothing at its end.
+        val ticket = XrayVpnService.moves
         fastestJob = scope.launch {
             try {
                 val out = pickFastest(app, list, phase)
+                if (XrayVpnService.moves != ticket) {
+                    fastestNote.value = "a connect or disconnect was asked for meanwhile — not applied"
+                    VpnState.addLog("Auto (fastest): a connect or disconnect was asked for meanwhile — result not applied")
+                    return@launch
+                }
                 val best = out.best
                 val srv = best?.let { store.serverById(it.id) }
                 if (best == null || srv == null) {
@@ -1168,14 +1176,9 @@ private object AppWork {
                 fastestNote.value = "⚡ fastest of ${list.size}: ${srv.name} · $how"
                 VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers")
                 snack("Fastest: ${srv.name} · $how")
-                // Already up on something else: take it down first, as the reconnect
-                // button does, so the new choice is what actually carries traffic.
-                // Still ⚡'s (and still cancellable) until the connect is asked for.
-                if (VpnState.isActive) {
-                    phase("switching to ${srv.name.take(16)}…")
-                    runCatching { XrayVpnService.disconnect(app) }
-                    delay(700)
-                }
+                // Already up on something else: the service switches a live tunnel
+                // onto the new choice itself (one tunnel, no gap without the VPN),
+                // so there is no disconnect first any more.
                 if (VpnService.prepare(app) != null) {
                     VpnState.addLog("Auto (fastest): Android has not given VPN permission — tap the ring to connect")
                     snack("Android has not given VPN permission yet — tap Connect")
