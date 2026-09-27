@@ -26,6 +26,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,11 +38,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.draw.scale
@@ -86,11 +93,14 @@ import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -150,9 +160,25 @@ private fun App(store: Store) {
     var more by remember { mutableStateOf<String?>(null) }
     var rev by remember { mutableIntStateOf(0) }
     val bump: () -> Unit = { rev++ }
+    // One place every screen and every background job says what happened —
+    // above all what went wrong, which used to vanish without a word. (Before
+    // AutoConnect: its effect may speak at once, and a message sent before
+    // anyone listens is dropped.)
+    val snackHost = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        AppWork.snacks.collect { s ->
+            val r = snackHost.showSnackbar(
+                s.text, actionLabel = s.action, withDismissAction = s.action == null,
+                duration = if (s.action != null) SnackbarDuration.Long else SnackbarDuration.Short
+            )
+            if (r == SnackbarResult.ActionPerformed) s.onAction?.invoke()
+        }
+    }
     AutoConnect(store)
 
-    Scaffold(containerColor = BG, bottomBar = {
+    Scaffold(containerColor = BG, snackbarHost = {
+        SnackbarHost(snackHost) { d -> Snackbar(d, containerColor = CARD2, contentColor = TXT, actionColor = PRIMARY) }
+    }, bottomBar = {
         Column {
             HorizontalDivider(color = STROKE)
             NavigationBar(containerColor = BG2, tonalElevation = 0.dp) {
@@ -221,24 +247,30 @@ private fun App(store: Store) {
         // config it names has been deleted, or a chain has lost its members.
         val plan = runCatching { store.buildPlan() }
         if (plan.isFailure) {
-            VpnState.addLog("Connect on open: ${plan.exceptionOrNull()?.message ?: "nothing to connect to"}")
+            val why = plan.exceptionOrNull()?.message ?: "nothing to connect to"
+            VpnState.addLog("Connect on open: $why")
+            AppWork.snack("Connect on open skipped: $why")
             return@LaunchedEffect
         }
         if (VpnService.prepare(ctx) != null) {
             VpnState.addLog("Connect on open: Android has not been given VPN permission yet — connect once by hand and it will be automatic after that.")
+            AppWork.snack("Connect on open needs one connect by hand first (Android’s VPN permission)")
             return@LaunchedEffect
         }
         // Let the first frame land before a foreground service and a core
         // start competing with it, as the desktop waits for its window.
         delay(700)
-        if (VpnState.isActive || XrayVpnService.restartPending) return@LaunchedEffect
+        // A connect or a cancel made by hand in that moment wins (the desktop's
+        // connect-on-launch steps aside the same way): tapping Connect and then
+        // Cancel must not be followed by a connect nobody asked for.
+        if (AutoConnectOnce.manual || VpnState.isActive || XrayVpnService.restartPending) return@LaunchedEffect
         VpnState.addLog("Connect on open: ${store.selectionLabel()}")
         doConnect(ctx, store)
     }
 }
 
-/** Survives recomposition; dies with the process. */
-private object AutoConnectOnce { @Volatile var done = false }
+/** Survives recomposition; dies with the process. [manual]: a connect, cancel or disconnect was made by hand. */
+private object AutoConnectOnce { @Volatile var done = false; @Volatile var manual = false }
 
 /* ================================ CONNECT ================================ */
 /**
@@ -264,7 +296,6 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     // What the running tunnel was started on — not whatever is selected now.
     val connectedLabel by VpnState.label.collectAsState()
     var ip by remember { mutableStateOf("—") }
-    var ping by remember { mutableStateOf<Long?>(null) }
     var latency by remember { mutableStateOf<Long?>(null) }
     var measuring by remember { mutableStateOf("") }
     var pickerOpen by remember { mutableStateOf(false) }
@@ -278,6 +309,16 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     val connectedSince by VpnState.connectedSince.collectAsState()
     val health by VpnState.health.collectAsState()
     val settings = store.settings
+    val version = remember { appVersion(ctx) }
+    // Something is on its way to a connection — the tunnel coming up, or ⚡
+    // measuring before it connects — and can be cancelled from the ring or the
+    // button under your thumb.
+    val busy = state == ConnState.CONNECTING || autoPhase.isNotEmpty()
+    // A cancel asked for and not through yet: the screen says "Cancelling…"
+    // instead of a "Connecting…" that looks as if the tap did nothing.
+    var cancelAsked by remember { mutableStateOf(false) }
+    LaunchedEffect(busy) { if (!busy) cancelAsked = false }
+    var pinging by remember { mutableStateOf(false) }
     var elapsed by remember { mutableStateOf(0L) }
     LaunchedEffect(connectedSince) {
         while (connectedSince > 0) { elapsed = System.currentTimeMillis() - connectedSince; delay(1000) }
@@ -298,6 +339,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     fun proceed() { if (afterConsent == "fastest") AppWork.connectFastest(ctx, store) else doConnect(ctx, store) }
     val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         if (res.resultCode == android.app.Activity.RESULT_OK) proceed()
+        else AppWork.snack("Android’s VPN permission was not given — nothing was connected")
     }
     fun vpnConsentThenProceed() {
         val prep: Intent? = VpnService.prepare(ctx)
@@ -312,15 +354,52 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         if (needsNotificationAsk(ctx, store)) { store.notifAsked = true; notifAsk.launch(Manifest.permission.POST_NOTIFICATIONS) }
         else vpnConsentThenProceed()
     }
+    /**
+     * The ring and the button under your thumb. While something is on its way
+     * it CANCELS: ⚡ stops measuring (a tunnel already up stays up), and a
+     * connect in flight goes down the ordinary disconnect path, which drops a
+     * connect still being prepared before its service is ever started.
+     */
     fun onPower() {
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-        if (state == ConnState.CONNECTED || state == ConnState.CONNECTING) { XrayVpnService.disconnect(ctx); return }
+        AutoConnectOnce.manual = true
+        if (busy) {
+            cancelAsked = true
+            if (autoPhase.isNotEmpty()) AppWork.cancelFastest()
+            if (state == ConnState.CONNECTING) AppWork.disconnect(ctx)
+            return
+        }
+        if (state == ConnState.CONNECTED) { AppWork.disconnect(ctx); return }
+        // Nothing to connect to: say how to get something, instead of an error.
+        if (!store.selectionResolves()) {
+            if (store.servers.isEmpty()) { homeSheet = "import"; AppWork.snack("Add a server first — a link, a QR code or a subscription") }
+            else { pickerOpen = true; AppWork.snack("Pick a server to connect to") }
+            return
+        }
         withConsent("connect")
     }
     fun selectedServer(): ServerConfig? {
         val sel = store.selection
         return store.serverById(sel) ?: store.chainById(sel.removePrefix("chain:"))?.let { store.chainMembers(it).firstOrNull() }
     }
+    /** A TCP ping of the selected server, asked for by a tap; the result is kept with the other tests. */
+    fun pingSelected() {
+        val srv = selectedServer()
+        if (srv == null) { AppWork.snack("Nothing to ping — select a server first"); return }
+        if (pinging) return
+        pinging = true
+        scope.launch {
+            val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(srv.address, srv.port) }
+            AppWork.putPing(srv.id, ms)
+            pinging = false
+            if (ms < 0) AppWork.snack("${srv.name}: no answer on port ${srv.port}")
+        }
+    }
+    // The last TCP ping of the selected server (a chain: its first hop), from
+    // wherever it was measured — a tap here, a test on Servers, ⚡. Never
+    // measured on its own: pinging a server nobody asked about, every time the
+    // app opens, is not ours to do.
+    val selTest = selectedServer()?.let { AppWork.tests[it.id] }
 
     /**
      * Choose the server instead of being told which one, then connect to it —
@@ -342,16 +421,26 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     fun connectFastest() {
         if (store.servers.size < 2 || autoPhase.isNotEmpty()) return
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        AutoConnectOnce.manual = true
         withConsent("fastest")
     }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        /* ---- header: brand, mode, uptime ---- */
-        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(18.dp).clip(RoundedCornerShape(5.dp)).background(PRIMARY))
-            Spacer(Modifier.width(8.dp))
-            Text("IR", color = TXT, fontWeight = FontWeight.Bold, fontSize = 14.sp, letterSpacing = 0.06.em)
-            Text("NETFREE", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 14.sp, letterSpacing = 0.06.em)
+        /* ---- header: brand (and the version under it), mode, uptime ---- */
+        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(18.dp).clip(RoundedCornerShape(5.dp)).background(PRIMARY))
+                    Spacer(Modifier.width(8.dp))
+                    Text("IR", color = TXT, fontWeight = FontWeight.Bold, fontSize = 14.sp, letterSpacing = 0.06.em)
+                    Text("NETFREE", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 14.sp, letterSpacing = 0.06.em)
+                }
+                // Which build this is, where a screenshot will show it.
+                if (version.isNotEmpty()) Text(
+                    "v$version", color = MUTED2, fontSize = 9.sp, fontFamily = MONO,
+                    modifier = Modifier.padding(start = 26.dp)
+                )
+            }
             Spacer(Modifier.weight(1f))
             Text(
                 if (settings.advancedMode) "ADVANCED" else "SIMPLE",
@@ -365,27 +454,33 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
 
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 20.dp)) {
             /* ---- the ring ---- */
-            PowerRing(state, ::onPower)
+            PowerRing(state, busy, ::onPower)
             Spacer(Modifier.height(14.dp))
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    when (state) {
-                        ConnState.CONNECTED -> "Connected"; ConnState.CONNECTING -> "Connecting…"
-                        ConnState.ERROR -> "Not connected"; else -> "Not protected"
+                    when {
+                        busy && cancelAsked -> "Cancelling…"
+                        state == ConnState.CONNECTED -> "Connected"
+                        state == ConnState.CONNECTING -> "Connecting…"
+                        autoPhase.isNotEmpty() -> "Finding the fastest…"
+                        state == ConnState.ERROR -> "Not connected"
+                        else -> "Not protected"
                     },
                     color = TXT, fontSize = 19.sp, fontWeight = FontWeight.SemiBold
                 )
                 Spacer(Modifier.height(5.dp))
                 Text(
-                    when (state) {
+                    when {
+                        // ⚡ says what it is measuring, even over a tunnel still up
+                        autoPhase.isNotEmpty() -> "$autoPhase · tap the ring to cancel"
                         // the server carrying traffic; picking another one only
                         // changes what the NEXT connect uses
-                        ConnState.CONNECTED -> connectedLabel.ifBlank { store.selectionLabel() }
-                        ConnState.CONNECTING -> "starting the core and the tunnel"
-                        ConnState.ERROR -> err.ifBlank { "see More → Logs" }
+                        state == ConnState.CONNECTED -> connectedLabel.ifBlank { store.selectionLabel() }
+                        state == ConnState.CONNECTING -> "starting the core and the tunnel · tap the ring to cancel"
+                        state == ConnState.ERROR -> err.ifBlank { "see More → Logs" }
                         else -> "tap the ring to connect"
                     },
-                    color = if (state == ConnState.ERROR) BAD else MUTED,
+                    color = if (state == ConnState.ERROR && !busy) BAD else MUTED,
                     fontSize = 11.sp, fontFamily = MONO, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
             }
@@ -402,26 +497,31 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 }
             }
 
-            /* ---- the exit ---- */
-            Spacer(Modifier.height(18.dp))
-            ExitChip(store, ping) { pickerOpen = true }
-
             /* ---- let the app choose the exit (Windows: the picker's ⚡ row) ----
                    On the front screen and not only inside the picker, because on
                    a phone this is the shortest honest answer to "which one do I
-                   pick?" — one tap, and it tells you what it picked. */
+                   pick?" — one tap, and it tells you what it picked. The exit
+                   itself sits at the bottom now, under the thumb. */
             if (store.servers.size >= 2) {
-                Spacer(Modifier.height(9.dp))
+                Spacer(Modifier.height(12.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                    Text(
-                        if (autoPhase.isNotEmpty()) autoPhase else "⚡ connect to the fastest",
-                        color = if (autoPhase.isNotEmpty()) AMBER else PRIMARY,
-                        fontSize = 11.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.clip(RoundedCornerShape(50))
-                            .border(1.dp, if (autoPhase.isNotEmpty()) STROKE else PRIMARY_DIM, RoundedCornerShape(50))
-                            .clickable(enabled = autoPhase.isEmpty()) { connectFastest() }
-                            .padding(horizontal = 13.dp, vertical = 7.dp)
-                    )
+                    val running = autoPhase.isNotEmpty()
+                    Box(
+                        Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(50))
+                            .border(1.dp, if (running) AMBER.copy(alpha = 0.5f) else PRIMARY_DIM, RoundedCornerShape(50))
+                            // while it runs the same chip stops it
+                            .clickable(onClickLabel = if (running) "cancel" else "connect to the fastest") {
+                                if (running) { cancelAsked = true; AppWork.cancelFastest() } else connectFastest()
+                            }
+                            .padding(horizontal = 18.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            if (running) "✕ stop testing" else "⚡ connect to the fastest",
+                            color = if (running) AMBER else PRIMARY,
+                            fontSize = 13.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
             if (autoNote.isNotEmpty()) {
@@ -443,7 +543,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             }
             Spacer(Modifier.height(10.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric(Modifier.weight(1f), "TCP PING", if (measuring == "ping") "…" else fmtLat(ping), "to the server", if (measuring == "ping") AMBER else latColor(ping))
+                Metric(Modifier.weight(1f), "TCP PING", if (pinging) "…" else fmtLat(selTest?.tcp), "to the server", if (pinging) AMBER else latColor(selTest?.tcp))
                 Metric(Modifier.weight(1f), "REAL DELAY", if (measuring == "delay") "…" else fmtLat(latency), "through the tunnel", if (measuring == "delay") AMBER else latColor(latency))
             }
 
@@ -508,14 +608,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             Spacer(Modifier.height(16.dp))
             if (settings.advancedMode) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
-                    onClick = {
-                        val srv = selectedServer() ?: return@OutlinedButton
-                        measuring = "ping"
-                        scope.launch {
-                            val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(srv.address, srv.port) }
-                            ping = if (ms >= 0) ms else null; measuring = ""
-                        }
-                    },
+                    onClick = { pingSelected() },
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = TXT2), border = BorderStroke(1.dp, STROKE)
                 ) { Text("ping test", fontSize = 12.sp) }
@@ -529,6 +622,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                             val r = withContext(Dispatchers.IO) { Diagnostics.ipInfo(sp) }
                             ip = if (r.ok) "${flag(r.countryCode)} ${r.ip}" else "fail"
                             measuring = ""
+                            if (!r.ok) AppWork.snack("IP check failed" + if (r.error.isNotBlank()) ": ${r.error}" else "")
                         }
                     },
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
@@ -547,6 +641,25 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             }
             Spacer(Modifier.height(20.dp))
         }
+
+        /* ---- under the thumb: what you connect to, and the button ----
+               The ring sits high on a tall phone; the exit and Connect / Cancel /
+               Disconnect are pinned at the bottom, where a thumb already is. */
+        HorizontalDivider(color = STROKE)
+        Box(Modifier.fillMaxWidth().background(BG2).padding(horizontal = 12.dp, vertical = 10.dp)) {
+            if (store.servers.isEmpty()) {
+                // Nothing to connect to yet: one thing to do about it.
+                EmptyState(
+                    "No server yet",
+                    "Add a config link, a QR code or your subscription link.",
+                    "Add a server or subscription"
+                ) { homeSheet = "import" }
+            } else Row(verticalAlignment = Alignment.CenterVertically) {
+                ExitChip(store, selTest, pinging, Modifier.weight(1f), onPick = { pickerOpen = true }, onPing = { pingSelected() })
+                Spacer(Modifier.width(10.dp))
+                PowerButton(state, busy, ::onPower)
+            }
+        }
     }
     if (pickerOpen) SelectionSheet(
         store,
@@ -561,10 +674,12 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
  * The power ring. Connected it is a solid mint disc with a ring pulsing out of
  * it; otherwise a dark disc with a hairline. The glyph is the power symbol drawn
  * as an arc with a gap at the top, which is what the design shows.
+ *
+ * [busy] (connecting, or ⚡ measuring) it spins around a ✕: the ring is also
+ * how you cancel, and it should look like it.
  */
-@Composable private fun PowerRing(state: ConnState, onPower: () -> Unit) {
+@Composable private fun PowerRing(state: ConnState, busy: Boolean, onPower: () -> Unit) {
     val on = state == ConnState.CONNECTED
-    val busy = state == ConnState.CONNECTING
     val pulse by rememberInfiniteTransition(label = "ring").animateFloat(
         1f, 1.28f, infiniteRepeatable(tween(2400, easing = LinearEasing), RepeatMode.Restart), label = "scale"
     )
@@ -578,15 +693,39 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 Modifier.size(170.dp).clip(CircleShape)
                     .background(if (on) PRIMARY else Color(0xFF101B19))
                     .border(if (on) 0.dp else 1.dp, if (on) Color.Transparent else Color(0xFF21302D), CircleShape)
-                    .clickable { onPower() },
+                    .clickable(onClickLabel = if (busy) "cancel" else if (on) "disconnect" else "connect") { onPower() },
                 contentAlignment = Alignment.Center
             ) {
-                when {
-                    busy -> CircularProgressIndicator(color = PRIMARY, strokeWidth = 4.dp, modifier = Modifier.size(52.dp))
-                    else -> PowerGlyph(if (on) ON_PRIMARY else Color(0xFF486B63))
-                }
+                if (busy) Box(contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = if (on) ON_PRIMARY else PRIMARY, strokeWidth = 4.dp, modifier = Modifier.size(64.dp))
+                    Icon(Icons.Filled.Close, "cancel", tint = if (on) ON_PRIMARY else TXT2, modifier = Modifier.size(26.dp))
+                } else PowerGlyph(if (on) ON_PRIMARY else Color(0xFF486B63))
             }
         }
+    }
+}
+
+/**
+ * The same decision as the ring, under the thumb: Connect, Cancel while
+ * something is on its way, Disconnect once it is up.
+ */
+@Composable private fun PowerButton(state: ConnState, busy: Boolean, onPower: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    val mod = Modifier.heightIn(min = 52.dp).widthIn(min = 104.dp)
+    val pad = PaddingValues(horizontal = 16.dp)
+    when {
+        busy -> OutlinedButton(
+            onClick = onPower, modifier = mod, shape = shape, contentPadding = pad, border = BorderStroke(1.dp, AMBER.copy(alpha = 0.6f)),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = AMBER)
+        ) { Text("Cancel", fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+        state == ConnState.CONNECTED -> OutlinedButton(
+            onClick = onPower, modifier = mod, shape = shape, contentPadding = pad, border = BorderStroke(1.dp, STROKE),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = TXT)
+        ) { Text("Disconnect", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1) }
+        else -> Button(
+            onClick = onPower, modifier = mod, shape = shape, contentPadding = pad,
+            colors = ButtonDefaults.buttonColors(containerColor = PRIMARY, contentColor = ON_PRIMARY)
+        ) { Text("Connect", fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
     }
 }
 
@@ -610,27 +749,40 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     }
 }
 
-/** The selected exit, with its protocol, country and last measured ping. */
-@Composable private fun ExitChip(store: Store, ping: Long?, onClick: () -> Unit) {
+/**
+ * The selected exit: its flag, name, protocol and last ping. Tapping it opens
+ * the picker; tapping the ping measures it again (a TCP handshake, nothing more).
+ */
+@Composable private fun ExitChip(store: Store, result: TestState?, pinging: Boolean, modifier: Modifier, onPick: () -> Unit, onPing: () -> Unit) {
     val srv = store.serverById(store.selection)
+    val (flag, label) = if (srv != null) ServerLabel.split(srv.name) else null to store.selectionLabel()
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(CARD)
-            .border(1.dp, STROKE, RoundedCornerShape(14.dp)).clickable { onClick() }
-            .padding(horizontal = 13.dp, vertical = 11.dp),
+        modifier.heightIn(min = 56.dp).clip(RoundedCornerShape(14.dp)).background(CARD)
+            .border(1.dp, STROKE, RoundedCornerShape(14.dp)).clickable(onClickLabel = "choose a server") { onPick() }
+            .padding(start = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            badge(srv?.protocol ?: ""), color = PRIMARY, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em,
-            modifier = Modifier.clip(RoundedCornerShape(5.dp)).border(1.dp, PRIMARY_DIM, RoundedCornerShape(5.dp)).padding(horizontal = 6.dp, vertical = 4.dp)
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            if (srv != null) srv.name else store.selectionLabel(),
-            color = TXT, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis
-        )
-        if (ping != null) { Text(fmtLat(ping), color = latColor(ping), fontSize = 12.sp, fontFamily = MONO); Spacer(Modifier.width(8.dp)) }
-        Text("›", color = MUTED2, fontSize = 13.sp)
+        if (srv != null) Leading(flag, srv.protocol)
+        Spacer(Modifier.width(if (srv != null) 10.dp else 2.dp))
+        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+            Text(label, color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                if (srv != null) badge(srv.protocol) + " · tap to change" else "tap to change",
+                color = MUTED2, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+        // The ping: its own 48 dp target, so measuring never opens the picker.
+        Box(
+            Modifier.heightIn(min = 48.dp).widthIn(min = 52.dp).clickable(onClickLabel = "ping") { onPing() }.padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            val ms = result?.tcp
+            when {
+                pinging -> Text("…", color = AMBER, fontSize = 13.sp, fontFamily = MONO)
+                ms != null -> Text(if (ms >= 0) "$ms ms" else "×", color = latColor(ms), fontSize = 12.sp, fontFamily = MONO, maxLines = 1)
+                else -> Text("ping", color = MUTED, fontSize = 11.sp, fontFamily = MONO)
+            }
+        }
     }
 }
 
@@ -723,7 +875,7 @@ private suspend fun pickFastest(
         val part = withContext(Dispatchers.IO) {
             batch.map { s -> async { Fastest.Measured(s.id, tcp = Diagnostics.tcpPing(s.address, s.port, timeout = 3000)) } }.awaitAll()
         }
-        part.forEach { measured[it.id] = it }
+        part.forEach { measured[it.id] = it; AppWork.putPing(it.id, it.tcp ?: -1L) }   // the list shows them too
         done += batch.size
         onPhase("testing $done/${servers.size}…")
     }
@@ -794,15 +946,117 @@ private object AppWork {
 
     /** Moves whenever work here wrote the store. */
     val storeRev = MutableStateFlow(0)
+    /** A screen wrote the store and wants itself (and only itself) redrawn — unlike bump(), the scroll position stays. */
+    fun touch() { storeRev.value = storeRev.value + 1 }
 
     /** ⚡ fastest: what it is measuring now ("" = not running), and what it chose. */
     val fastestPhase = MutableStateFlow("")
     val fastestNote = MutableStateFlow("")
+    /** The ⚡ run in flight, and its number: a cancelled run's last words are not shown. */
+    private var fastestJob: Job? = null
+    private var fastestRun = 0
+    /** The second half of a reconnect, waiting its 0.6 s — a Cancel meanwhile drops it. */
+    private var pendingConnect: Job? = null
+
+    /** What the app's snackbar is to say; App collects it. */
+    class Snack(val text: String, val action: String? = null, val onAction: (() -> Unit)? = null)
+    val snacks = MutableSharedFlow<Snack>(extraBufferCapacity = 8)
+    fun snack(text: String, action: String? = null, onAction: (() -> Unit)? = null) { snacks.tryEmit(Snack(text, action, onAction)) }
+
+    /**
+     * Every server's last measurements, by id — the Servers list, the exit on
+     * Connect and ⚡ all write and read the same map, so a ping measured on one
+     * screen is still there on the other, and after a tab switch.
+     */
+    val tests = mutableStateMapOf<String, TestState>()
+    /** "ping all" is running (it can be stopped). */
+    val testingAll = MutableStateFlow(false)
+    private var testAllJob: Job? = null
+
+    /** A handshake time for [id] (-1 = no answer), unless a full test of it is running. */
+    fun putPing(id: String, ms: Long) {
+        val t = tests[id]
+        if (t == null || t.phase.isEmpty()) tests[id] = (t ?: TestState()).copy(tcp = ms, error = null)
+    }
+
+    /**
+     * One full test — handshake, a real round trip and an upload through a
+     * throwaway core — one core at a time, app-wide (coreLock).
+     *
+     * Start, measure, stop: one blocking unit on IO with a plain try/finally.
+     * The stop used to be a `withContext` in the finally, which a cancelled
+     * coroutine never runs, and the start sat outside the try: the core kept
+     * running. A blocking call is not interrupted by a cancel, so this stop
+     * always runs. Stopped half way, the row is left without its "…".
+     */
+    private suspend fun testOne(ctx: Context, s: ServerConfig) {
+        try {
+            coreLock.withLock {
+                tests[s.id] = TestState(phase = "tcp")
+                val result = withContext(Dispatchers.IO) {
+                    val h = XrayTester.start(ctx, s)
+                    if (h == null) TestState(error = "core error") else try {
+                        val ping = Diagnostics.tcpPing(s.address, s.port)
+                        tests[s.id] = TestState(tcp = ping, phase = "down")
+                        val down = Diagnostics.httpLatency(h.port)
+                        tests[s.id] = TestState(tcp = ping, down = down, phase = "up")
+                        val up = Diagnostics.uploadTest(h.port)
+                        TestState(tcp = ping, down = down, up = up)
+                    } finally { XrayTester.stop(h) }
+                }
+                tests[s.id] = result
+            }
+        } finally {
+            val t = tests[s.id]
+            if (t != null && t.phase.isNotEmpty()) tests[s.id] = t.copy(phase = "")
+        }
+    }
+
+    /** Test one server; it carries on if the screen goes away. */
+    fun test(ctx: Context, s: ServerConfig) {
+        val app = ctx.applicationContext
+        scope.launch { testOne(app, s) }
+    }
+
+    /** "ping all": every server in turn, until done or [stopTests]. */
+    fun testAll(ctx: Context, list: List<ServerConfig>) {
+        if (testAllJob?.isActive == true) return
+        val app = ctx.applicationContext
+        testingAll.value = true
+        testAllJob = scope.launch {
+            try { for (s in list) testOne(app, s) } finally { testingAll.value = false }
+        }
+    }
+
+    fun stopTests() { testAllJob?.cancel(); testAllJob = null; testingAll.value = false }
+
+    /**
+     * The user's Disconnect — and Cancel, while a connect is on its way. The
+     * service's own path (generation moved on at once, so a connect still being
+     * prepared is dropped before its service starts); a reconnect's pending
+     * second half goes too, and connect-on-open steps aside.
+     */
+    fun disconnect(ctx: Context) {
+        AutoConnectOnce.manual = true
+        pendingConnect?.cancel(); pendingConnect = null
+        runCatching { XrayVpnService.disconnect(ctx.applicationContext) }
+            .onFailure { e -> snack("Disconnect failed: ${e.message ?: e.javaClass.simpleName}") }
+    }
+
+    /** Stop ⚡ where it is. A tunnel already up stays up; the selection is whatever it was when stopped. */
+    fun cancelFastest() {
+        if (fastestJob == null && fastestPhase.value.isEmpty()) return
+        fastestJob?.cancel(); fastestJob = null
+        fastestRun++
+        fastestPhase.value = ""
+        fastestNote.value = "⚡ stopped"
+        VpnState.addLog("Auto (fastest): stopped by hand")
+    }
 
     /**
      * Fetch one subscription and apply it (SubRefresh), queued behind any fetch
      * already running; one already waiting is not queued twice. `announce` puts
-     * the outcome in a toast too — the add flows, where the user just asked.
+     * the outcome in the snackbar too — where the user just asked for it.
      */
     fun refreshSub(ctx: Context, store: Store, subId: String, announce: Boolean = false) {
         if (subId in subsBusy.value) return
@@ -852,17 +1106,25 @@ private object AppWork {
                 VpnState.addLog("Subscription ${sub.url}: ${applied.sub.lastError}; the ${sub.serverCount} servers it had are kept")
             } else {
                 store.servers.clear(); store.servers.addAll(list); store.saveServers()
+                // Ids are kept across a refresh (SubRefresh.merge), so a selected
+                // server is still selected. One the panel dropped falls back to
+                // the choice before it, and that is said, not discovered later.
+                var moved = ""
                 if (store.selection.isEmpty()) m.servers.firstOrNull()?.let { store.saveSelection(it.id) }
+                else if (store.repairSelection()) moved = " · your server is gone from it, now using ${store.selectionLabel()}"
                 val change = if (m.added == 0 && m.dropped == 0) "" else " · ${m.added} new, ${m.dropped} gone"
-                note = "${sub.name}: ${m.servers.size} servers$change"
+                note = "${sub.name}: ${m.servers.size} servers$change$moved"
                 bad = false
                 VpnState.addLog("Subscription ${sub.url}: ${m.kept} kept (same ids), ${m.added} new, ${m.dropped} gone")
+                if (moved.isNotEmpty()) VpnState.addLog("Selection: the selected server left ${sub.name}; now ${store.selectionLabel()}")
             }
         }
         store.saveSubs()
         subsNote.value = note to bad
         storeRev.value = storeRev.value + 1
-        if (announce) Toast.makeText(ctx, note, Toast.LENGTH_LONG).show()
+        if (announce) {
+            if (bad) snack(note, "Retry") { refreshSub(ctx, store, subId, announce = true) } else snack(note)
+        }
     }
 
     /**
@@ -874,41 +1136,60 @@ private object AppWork {
         val list = store.servers.toList()
         if (list.size < 2 || fastestPhase.value.isNotEmpty()) return
         val app = ctx.applicationContext
-        fastestPhase.value = "testing 0/${list.size}…"
+        val run = ++fastestRun
+        // Only this run's words reach the screen: one cancelled a moment ago
+        // may still be unwinding (a handshake is not interrupted mid-way).
+        val phase: (String) -> Unit = { p -> if (run == fastestRun) fastestPhase.value = p }
+        phase("testing 0/${list.size}…")
         fastestNote.value = ""
-        scope.launch {
-            val out = try { pickFastest(app, list) { fastestPhase.value = it } } finally { fastestPhase.value = "" }
-            val best = out.best
-            val srv = best?.let { store.serverById(it.id) }
-            if (best == null || srv == null) {
-                // The winner may have been deleted (or dropped by a refresh) while
-                // it was measured — say that, not that nothing carried traffic.
-                val gone = best?.let { b -> list.firstOrNull { it.id == b.id }?.name ?: "the winner" }
-                val why = when {
-                    gone != null -> "$gone won but was removed during the test"
-                    out.answered == 0 -> "no server answered"
-                    else -> "none of the ${out.tried} quickest carried traffic"
+        // A connect or a disconnect asked for while ⚡ measures (it takes seconds)
+        // is the user's newer word: ⚡ then applies nothing at its end.
+        val ticket = XrayVpnService.moves
+        fastestJob = scope.launch {
+            try {
+                val out = pickFastest(app, list, phase)
+                if (XrayVpnService.moves != ticket) {
+                    fastestNote.value = "a connect or disconnect was asked for meanwhile — not applied"
+                    VpnState.addLog("Auto (fastest): a connect or disconnect was asked for meanwhile — result not applied")
+                    return@launch
                 }
-                fastestNote.value = "$why — the selection was left alone"
-                VpnState.addLog("Auto (fastest): $why; kept ${store.selectionLabel()}")
-                Toast.makeText(app, why.replaceFirstChar { it.uppercase() }, Toast.LENGTH_LONG).show()
-                return@launch
+                val best = out.best
+                val srv = best?.let { store.serverById(it.id) }
+                if (best == null || srv == null) {
+                    // The winner may have been deleted (or dropped by a refresh) while
+                    // it was measured — say that, not that nothing carried traffic.
+                    val gone = best?.let { b -> list.firstOrNull { it.id == b.id }?.name ?: "the winner" }
+                    val why = when {
+                        gone != null -> "$gone won but was removed during the test"
+                        out.answered == 0 -> "no server answered"
+                        else -> "none of the ${out.tried} quickest carried traffic"
+                    }
+                    fastestNote.value = "$why — the selection was left alone"
+                    VpnState.addLog("Auto (fastest): $why; kept ${store.selectionLabel()}")
+                    snack(why.replaceFirstChar { it.uppercase() })
+                    return@launch
+                }
+                val real = best.real ?: -1L
+                val how = if (real >= 0) "$real ms through it" else "${best.tcp ?: -1L} ms handshake"
+                store.saveSelection(best.id)
+                storeRev.value = storeRev.value + 1
+                fastestNote.value = "⚡ fastest of ${list.size}: ${srv.name} · $how"
+                VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers")
+                snack("Fastest: ${srv.name} · $how")
+                // Already up on something else: the service switches a live tunnel
+                // onto the new choice itself (one tunnel, no gap without the VPN),
+                // so there is no disconnect first any more.
+                if (VpnService.prepare(app) != null) {
+                    VpnState.addLog("Auto (fastest): Android has not given VPN permission — tap the ring to connect")
+                    snack("Android has not given VPN permission yet — tap Connect")
+                    return@launch
+                }
+                phase("")
+                doConnect(app, store)
+            } finally {
+                phase("")
+                if (run == fastestRun) fastestJob = null
             }
-            val real = best.real ?: -1L
-            val how = if (real >= 0) "$real ms through it" else "${best.tcp ?: -1L} ms handshake"
-            store.saveSelection(best.id)
-            storeRev.value = storeRev.value + 1
-            fastestNote.value = "⚡ fastest of ${list.size}: ${srv.name} · $how"
-            VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers")
-            Toast.makeText(app, "Fastest: ${srv.name} · $how", Toast.LENGTH_LONG).show()
-            // Already up on something else: take it down first, as the reconnect
-            // button does, so the new choice is what actually carries traffic.
-            if (VpnState.isActive) { runCatching { XrayVpnService.disconnect(app) }; delay(700) }
-            if (VpnService.prepare(app) != null) {
-                VpnState.addLog("Auto (fastest): Android has not given VPN permission — tap the ring to connect")
-                return@launch
-            }
-            doConnect(app, store)
         }
     }
 
@@ -916,7 +1197,8 @@ private object AppWork {
     fun reconnect(ctx: Context, store: Store) {
         val app = ctx.applicationContext
         runCatching { XrayVpnService.disconnect(app) }
-        scope.launch { delay(600); doConnect(app, store) }
+        pendingConnect?.cancel()
+        pendingConnect = scope.launch { delay(600); pendingConnect = null; doConnect(app, store) }
     }
 }
 
@@ -939,44 +1221,82 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
  * (fastest)" is an action — it measures, then connects — which is exactly how
  * the same row behaves in the Windows picker, and why it sits above the divider
  * rather than in the list with a tick beside it.
+ *
+ * A lazy list, with the servers under their subscription's name as on Servers:
+ * a subscription can hold hundreds, and one flat list of them was a long scroll
+ * with nothing to find your own by.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun SelectionSheet(store: Store, onAuto: () -> Unit, onDismiss: () -> Unit, onPick: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
         observeStore()
-        val options = buildList {
+        val modes = buildList {
             if (store.poolEnabledValid().isNotEmpty()) add(Store.POOL_ID to "🧩 Proxy Pool (${store.poolEnabledValid().size})")
             if (store.advancedReady()) add(Store.ADV_ID to "🧭 Advanced routing")
             store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }
-            store.servers.forEach { add(it.id to "${badge(it.protocol)} ${it.name}") }
         }
-        Column(Modifier.fillMaxWidth().heightIn(max = 460.dp).verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-            Text("Select an exit", color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
-            if (store.servers.size >= 2) {
-                Row(
-                    Modifier.fillMaxWidth().clickable { onAuto() }.padding(horizontal = 16.dp, vertical = 13.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("⚡", fontSize = 15.sp)
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("Auto (fastest)", color = PRIMARY, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "tests every server, then connects to the one that answers fastest",
-                            color = MUTED, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis
-                        )
+        val groups = ServerGroups.build(store.servers, store.subs, "", emptySet(), store.selection)
+        val pick: (String) -> Unit = { id -> store.saveSelection(id); onPick() }
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
+            item { Text("Select an exit", color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp)) }
+            if (store.servers.size >= 2) item {
+                Column {
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable { onAuto() }.padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("⚡", fontSize = 15.sp)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Auto (fastest)", color = PRIMARY, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "tests every server, then connects to the one that answers fastest",
+                                color = MUTED, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
+                    HorizontalDivider(color = STROKE)
                 }
-                HorizontalDivider(color = STROKE)
             }
-            if (options.isEmpty()) Text("No servers yet", color = MUTED, modifier = Modifier.padding(16.dp))
-            options.forEach { (id, lbl) ->
-                Row(Modifier.fillMaxWidth().clickable { store.saveSelection(id); onPick() }.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(lbl, color = TXT, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (store.selection == id) Icon(Icons.Filled.CheckCircle, null, tint = PRIMARY)
+            if (modes.isEmpty() && store.servers.isEmpty()) item { Text("No servers yet", color = MUTED, modifier = Modifier.padding(16.dp)) }
+            items(modes) { (id, lbl) -> PickRow(lbl, null, null, null, store.selection == id, null) { pick(id) } }
+            for (g in groups) {
+                if (g.servers.isEmpty()) continue
+                item {
+                    Text(
+                        g.title.uppercase(), color = MUTED2, fontSize = 10.sp, fontFamily = MONO, letterSpacing = 0.08.em, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp)
+                    )
+                }
+                items(g.servers) { s ->
+                    val (flag, label) = ServerLabel.split(s.name)
+                    PickRow(label, flag, s.protocol, s.address, store.selection == s.id, AppWork.tests[s.id]?.tcp) { pick(s.id) }
                 }
             }
         }
+    }
+}
+
+/** One row of the picker: 56 dp, the flag or protocol, the name, the last ping, a tick when it is the one. */
+@Composable private fun PickRow(label: String, flag: String?, proto: String?, address: String?, selected: Boolean, ping: Long?, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).background(if (selected) CARD_SEL else Color.Transparent)
+            .clickable { onClick() }.padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (proto != null) { Leading(flag, proto); Spacer(Modifier.width(10.dp)) }
+        Column(Modifier.weight(1f)) {
+            Text(
+                label, color = TXT, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+            )
+            if (proto != null) Text(
+                badge(proto) + (if (address.isNullOrBlank()) "" else " · $address"),
+                color = MUTED2, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (ping != null) { Spacer(Modifier.width(8.dp)); Text(fmtLat(ping), color = latColor(ping), fontSize = 12.sp, fontFamily = MONO) }
+        if (selected) { Spacer(Modifier.width(10.dp)); Icon(Icons.Filled.CheckCircle, "selected", tint = PRIMARY) }
     }
 }
 
@@ -997,11 +1317,15 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
  * card is the one marked IN USE. Selecting is free — it changes which config
  * the next connect uses, never the tunnel that is already running.
  *
- * Subscriptions stay separated into their own sections, as they are on Windows.
+ * Subscriptions are groups that fold away under their header (ServerGroups),
+ * each with its usage, expiry and a refresh button of its own, and what is
+ * folded is remembered across restarts. A lazy list, because a subscription
+ * can hold hundreds; pull it down to refresh every subscription. Adding,
+ * renaming and deleting subscriptions stays on the SUBS tab.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ServersScreen(store: Store, bump: () -> Unit) {
-    val scope = rememberCoroutineScope()
     var q by remember { mutableStateOf("") }
     var sheet by remember { mutableStateOf<String?>(null) }
     var editId by remember { mutableStateOf<String?>(null) }
@@ -1014,63 +1338,70 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     // jump back to the top whenever you chose something near the bottom.
     // Re-read whenever AppWork changed the store: ⚡ fastest or a first import
     // can move the selection while this tab is open, and a plain remember kept
-    // the tick on the old row.
+    // the tick on the old row. (Deletes and edits here move storeRev too, for
+    // the same reason, instead of bump().)
     val storeRev = observeStore()
     var selectedId by remember(storeRev) { mutableStateOf(store.selection) }
     val ctx = LocalContext.current
-    val tests = remember { mutableStateMapOf<String, TestState>() }
+    // Test results live in AppWork: a ping measured here is on Connect too,
+    // and "ping all" carries on (and can be stopped) if you leave the tab.
+    val tests = AppWork.tests
+    val testingAll by AppWork.testingAll.collectAsState()
+    val busy by AppWork.subsBusy.collectAsState()
     // The row whose actions are showing. Only ever one, and nothing to begin
     // with: arriving at the list should show the list, not a card mid-flight.
     var openId by remember { mutableStateOf("") }
-
-    // One throwaway core at a time, app-wide (AppWork.coreLock); `phase` marks
-    // which metric is currently measuring.
-    //
-    // Start, measure, stop: one blocking unit on IO with a plain try/finally.
-    // The stop used to be a `withContext` in the finally, which a cancelled
-    // coroutine — the screen rebuilt, the tab left — never runs, and the start
-    // sat outside the try: the core kept running. A blocking call is not
-    // interrupted by a cancel, so this stop always runs. (The phase updates are
-    // snapshot-state writes, which may come from any thread.)
-    suspend fun testOne(s: ServerConfig) = AppWork.coreLock.withLock {
-        tests[s.id] = TestState(phase = "tcp")
-        val result = withContext(Dispatchers.IO) {
-            val h = XrayTester.start(ctx, s)
-            if (h == null) TestState(error = "core error") else try {
-                val ping = Diagnostics.tcpPing(s.address, s.port)
-                tests[s.id] = TestState(tcp = ping, phase = "down")
-                val down = Diagnostics.httpLatency(h.port)
-                tests[s.id] = TestState(tcp = ping, down = down, phase = "up")
-                val up = Diagnostics.uploadTest(h.port)
-                TestState(tcp = ping, down = down, up = up)
-            } finally { XrayTester.stop(h) }
-        }
-        tests[s.id] = result
+    // Folded groups, kept across restarts; a deleted subscription's is forgotten.
+    var collapsed by remember { mutableStateOf(ServerGroups.prune(store.collapsedGroups, store.subs)) }
+    val searching = q.isNotBlank()
+    val groups = ServerGroups.build(store.servers, store.subs, q, collapsed, selectedId)
+    val entries = ServerGroups.entries(groups, searching)
+    val now = remember(storeRev) { System.currentTimeMillis() }
+    val listState = rememberLazyListState()
+    // Open at the server in use — not at the top of a list of hundreds.
+    LaunchedEffect(Unit) {
+        val i = ServerGroups.scrollTarget(entries, store.selection)
+        if (i > 1) listState.scrollToItem(i - 1)
     }
-    fun runTest(s: ServerConfig) { scope.launch { testOne(s) } }
-    fun testAll() { scope.launch { for (s in store.servers.toList()) testOne(s) } }
-    val testingAll = tests.values.any { it.phase.isNotEmpty() }
+    val pull = rememberPullToRefreshState()
+    if (pull.isRefreshing) LaunchedEffect(true) {
+        refreshAllSubs(ctx, store)
+        pull.endRefresh()
+    }
+    val clearSearch: @Composable (() -> Unit)? = if (q.isEmpty()) null else ({
+        IconButton(onClick = { q = "" }) { Icon(Icons.Filled.Close, "clear the search", tint = MUTED) }
+    })
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         /* ---- header: title, ping all, add ---- */
         Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 12.dp),
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Servers", color = TXT, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            Text(
-                if (testingAll) "testing…" else "ping all",
-                color = PRIMARY, fontSize = 10.sp, fontFamily = MONO,
-                modifier = Modifier.clip(RoundedCornerShape(50)).border(1.dp, PRIMARY_DIM, RoundedCornerShape(50))
-                    .clickable(enabled = !testingAll) { testAll() }
-                    .padding(horizontal = 10.dp, vertical = 7.dp)
-            )
-            Spacer(Modifier.width(12.dp))
+            if (store.servers.isNotEmpty()) Box(
+                Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(50))
+                    .clickable(onClickLabel = if (testingAll) "stop testing" else "test every server") {
+                        if (testingAll) AppWork.stopTests() else AppWork.testAll(ctx, store.servers.toList())
+                    }
+                    .padding(horizontal = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    if (testingAll) "stop testing" else "ping all",
+                    color = if (testingAll) AMBER else PRIMARY, fontSize = 12.sp, fontFamily = MONO,
+                    modifier = Modifier.clip(RoundedCornerShape(50))
+                        .border(1.dp, if (testingAll) AMBER.copy(alpha = 0.5f) else PRIMARY_DIM, RoundedCornerShape(50))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+            }
             Box {
-                Box(
-                    Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(PRIMARY).clickable { addMenu = true },
-                    contentAlignment = Alignment.Center
-                ) { Text("+", color = ON_PRIMARY, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+                IconButton(onClick = { addMenu = true }) {
+                    Box(
+                        Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(PRIMARY),
+                        contentAlignment = Alignment.Center
+                    ) { Icon(Icons.Filled.Add, "add a server", tint = ON_PRIMARY, modifier = Modifier.size(22.dp)) }
+                }
                 DropdownMenu(addMenu, { addMenu = false }, modifier = Modifier.background(CARD)) {
                     listOf(
                         "import" to "Link or subscription",
@@ -1078,7 +1409,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                         "proxy" to "SOCKS / HTTP"
                     ).forEach { (key, label) ->
                         DropdownMenuItem(
-                            text = { Text(label, color = TXT, fontSize = 13.sp) },
+                            text = { Text(label, color = TXT, fontSize = 14.sp) },
                             onClick = { addMenu = false; sheet = key }
                         )
                     }
@@ -1086,63 +1417,68 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
             }
         }
         HorizontalDivider(color = BG2)
+        if (store.servers.isNotEmpty()) OutlinedTextField(
+            q, { q = it }, Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
+            placeholder = { Text("Search name or address…", fontSize = 13.sp) },
+            leadingIcon = { Icon(Icons.Filled.Search, null, Modifier.size(18.dp)) },
+            trailingIcon = clearSearch,
+            singleLine = true, shape = RoundedCornerShape(14.dp), colors = tfColors()
+        )
 
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp)) {
-            Spacer(Modifier.height(14.dp))
-            OutlinedTextField(
-                q, { q = it }, Modifier.fillMaxWidth(),
-                placeholder = { Text("Search…", fontSize = 13.sp) },
-                leadingIcon = { Icon(Icons.Filled.Search, null, Modifier.size(18.dp)) },
-                singleLine = true, shape = RoundedCornerShape(14.dp), colors = tfColors()
-            )
-
-            if (store.servers.isEmpty()) EmptyHint("No servers yet — tap + to add one.")
-            // Grouped by where a config came from, as the desktop list is: what
-            // you typed yourself first, then one section per subscription. With
-            // a subscription of thirteen and a handful of your own, an
-            // undifferentiated list makes your own impossible to find again.
-            val shown = store.servers.filter { it.name.contains(q, true) || it.address.contains(q, true) }
-            val groups = buildList {
-                val byHand = shown.filter { it.subId == null }
-                if (byHand.isNotEmpty()) add("ADDED BY HAND" to byHand)
-                store.subs.forEach { sub ->
-                    val mine = shown.filter { it.subId == sub.id }
-                    if (mine.isNotEmpty()) add(sub.name.uppercase() to mine)
+        Box(Modifier.weight(1f).fillMaxWidth().clipToBounds().nestedScroll(pull.nestedScrollConnection)) {
+            LazyColumn(
+                Modifier.fillMaxSize().imePadding(), state = listState,
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp)
+            ) {
+                if (store.servers.isEmpty() && store.subs.isEmpty()) item(key = "empty") {
+                    Box(Modifier.padding(top = 32.dp)) {
+                        EmptyState(
+                            "No servers yet",
+                            "Paste a config link or your subscription link, scan a QR code, or add a WireGuard or SOCKS server by hand.",
+                            "Add a server or subscription"
+                        ) { sheet = "import" }
+                    }
                 }
-                // A config whose subscription was deleted still belongs somewhere.
-                val orphans = shown.filter { s -> s.subId != null && store.subs.none { it.id == s.subId } }
-                if (orphans.isNotEmpty()) add("FROM A REMOVED SUBSCRIPTION" to orphans)
-            }
-            groups.forEach { (title, list) ->
-                Row(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(title, color = MUTED, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "${list.size}", color = MUTED2, fontSize = 9.sp, fontFamily = MONO,
-                        modifier = Modifier.clip(RoundedCornerShape(50)).background(CARD).padding(horizontal = 7.dp, vertical = 2.dp)
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    HorizontalDivider(color = STROKE)
-                }
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    list.forEach { s ->
-                        ConfigCard(
-                            s,
-                            selected = selectedId == s.id,
-                            open = openId == s.id,
-                            result = tests[s.id],
-                            onSelect = { store.saveSelection(s.id); selectedId = s.id },
-                            onToggle = { openId = if (openId == s.id) "" else s.id },
-                            onTest = { runTest(s) },
-                            onCopy = { copyLink(ctx, s) },
-                            onQr = { qrServer = s },
-                            onEdit = { editId = s.id },
-                            onDelete = { confirmDelete = s }
+                if (searching && entries.isEmpty()) item(key = "nomatch") { EmptyHint("Nothing matches “${q.trim()}”.") }
+                items(entries, key = { it.key }) { e ->
+                    when (e) {
+                        is ServerGroups.ListEntry.Head -> {
+                            val g = e.group
+                            val sub = g.sub
+                            val refresh: (() -> Unit)? = if (sub == null) null else ({ AppWork.refreshSub(ctx, store, sub.id, announce = true) })
+                            GroupHeader(
+                                g, now, refreshing = sub != null && sub.id in busy, foldable = !searching,
+                                onToggle = { collapsed = ServerGroups.toggle(collapsed, g.key); store.collapsedGroups = collapsed },
+                                onRefresh = refresh
+                            )
+                        }
+                        is ServerGroups.ListEntry.Item -> {
+                            val s = e.server
+                            Box(Modifier.padding(bottom = 8.dp)) {
+                                ConfigCard(
+                                    s,
+                                    selected = selectedId == s.id,
+                                    open = openId == s.id,
+                                    result = tests[s.id],
+                                    onSelect = { store.saveSelection(s.id); selectedId = s.id },
+                                    onToggle = { openId = if (openId == s.id) "" else s.id },
+                                    onTest = { AppWork.test(ctx, s) },
+                                    onCopy = { copyLink(ctx, s) },
+                                    onQr = { qrServer = s },
+                                    onEdit = { editId = s.id },
+                                    onDelete = { confirmDelete = s }
+                                )
+                            }
+                        }
+                        is ServerGroups.ListEntry.Empty -> Text(
+                            if (e.group.sub?.lastError?.isNotEmpty() == true) "no servers — the last fetch failed; tap ⟳ or pull down to try again"
+                            else "no servers yet — tap ⟳ or pull down to fetch them",
+                            color = MUTED, fontSize = 12.sp, modifier = Modifier.padding(start = 30.dp, bottom = 10.dp)
                         )
                     }
                 }
             }
-            Spacer(Modifier.height(16.dp))
+            PullToRefreshContainer(state = pull, modifier = Modifier.align(Alignment.TopCenter), containerColor = CARD2, contentColor = PRIMARY)
         }
         qrServer?.let { QrDialog(it) { qrServer = null } }
     }
@@ -1154,7 +1490,16 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
             title = { Text("Delete this config?", color = TXT, fontSize = 16.sp) },
             text = { Text(victim.name, color = MUTED, fontSize = 13.sp, fontFamily = MONO) },
             confirmButton = {
-                TextButton(onClick = { store.deleteServer(victim.id); confirmDelete = null; bump() }) {
+                TextButton(onClick = {
+                    val wasSelected = store.selection == victim.id
+                    store.deleteServer(victim.id)   // a selection that named it falls back (Store.repairSelection)
+                    confirmDelete = null
+                    AppWork.touch()                 // not bump(): the list keeps its place
+                    AppWork.snack(
+                        if (wasSelected && store.selection.isNotEmpty()) "Deleted ${victim.name} — now using ${store.selectionLabel()}"
+                        else "Deleted ${victim.name}"
+                    )
+                }) {
                     Text("Delete", color = BAD)
                 }
             },
@@ -1166,7 +1511,105 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     if (editing != null) EditConfigSheet(editing, onDismiss = { editId = null }) { updated ->
         val idx = store.servers.indexOfFirst { it.id == updated.id }
         if (idx >= 0) { store.servers[idx] = updated; store.saveServers() }
-        editId = null; bump()
+        editId = null; AppWork.touch()
+    }
+}
+
+/**
+ * Pull to refresh: every subscription, one after another (AppWork queues them),
+ * then one line on how it went. The fetches are AppWork's, so leaving the screen
+ * stops only the spinner, never a fetch.
+ */
+private suspend fun refreshAllSubs(ctx: Context, store: Store) {
+    val subs = store.subs.toList()
+    if (subs.isEmpty()) { AppWork.snack("No subscriptions to refresh — add one on the SUBS tab"); return }
+    val started = System.currentTimeMillis()
+    subs.forEach { AppWork.refreshSub(ctx, store, it.id) }
+    AppWork.subsBusy.first { it.isEmpty() }
+    val ids = subs.mapTo(HashSet()) { it.id }
+    val failed = store.subs.count { it.id in ids && it.lastError.isNotEmpty() && it.lastTried >= started }
+    AppWork.snack(
+        when {
+            subs.size == 1 -> AppWork.subsNote.value.first
+            failed == 0 -> "${subs.size} subscriptions refreshed"
+            else -> "$failed of ${subs.size} subscriptions failed — their servers are kept"
+        }
+    )
+}
+
+/**
+ * A group's header: tap it to fold or unfold the group. A subscription's shows
+ * its usage, expiry and last update, and a refresh button of its own; a folded
+ * group holding the server in use says so.
+ */
+@Composable private fun GroupHeader(
+    g: ServerGroups.Group,
+    now: Long,
+    refreshing: Boolean,
+    foldable: Boolean,
+    onToggle: () -> Unit,
+    onRefresh: (() -> Unit)?
+) {
+    val summary = g.sub?.let { ServerGroups.summary(it, now) }
+    val line = summary?.text ?: if (g.key == ServerGroups.MANUAL) "added by hand" else "their subscription was deleted"
+    val tint = when (summary?.level) {
+        ServerGroups.LEVEL_BAD -> BAD
+        ServerGroups.LEVEL_WARN -> AMBER
+        else -> MUTED2
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp).heightIn(min = 52.dp).clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = foldable, onClickLabel = if (g.open) "fold" else "unfold") { onToggle() }
+            .padding(start = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            if (g.open) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
+            null, tint = MUTED, modifier = Modifier.size(22.dp)
+        )
+        Spacer(Modifier.width(6.dp))
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    g.title.uppercase(), color = TXT2, fontSize = 11.sp, fontFamily = MONO, letterSpacing = 0.08.em,
+                    fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (g.servers.size == g.total) "${g.total}" else "${g.servers.size}/${g.total}",
+                    color = MUTED2, fontSize = 10.sp, fontFamily = MONO,
+                    modifier = Modifier.clip(RoundedCornerShape(50)).background(CARD).padding(horizontal = 7.dp, vertical = 2.dp)
+                )
+                if (!g.open && g.hasSelected) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "IN USE", color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.1.em, maxLines = 1,
+                        modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(PRIMARY).padding(horizontal = 5.dp, vertical = 2.dp)
+                    )
+                }
+            }
+            Text(line, color = tint, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (onRefresh != null) IconButton(onClick = onRefresh, enabled = !refreshing) {
+            if (refreshing) CircularProgressIndicator(color = PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+            else Icon(Icons.Filled.Refresh, "refresh ${g.title}", tint = MUTED)
+        }
+    }
+}
+
+/** Nothing here yet: what is missing, and the one thing to do about it. */
+@Composable private fun EmptyState(title: String, text: String, action: String, onAction: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(title, color = TXT, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(4.dp))
+        Text(text, color = MUTED, fontSize = 12.sp, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(12.dp))
+        Button(
+            onClick = onAction, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = PRIMARY, contentColor = ON_PRIMARY)
+        ) { Text(action, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
     }
 }
 
@@ -1181,7 +1624,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     fun addSubAndFetch(url: String) {
         val sub = Subscription(newId("sub"), url.trim().take(30), url.trim())
         store.subs.add(sub); store.saveSubs()
-        Toast.makeText(ctx, "Fetching subscription…", Toast.LENGTH_SHORT).show()
+        AppWork.snack("Fetching the subscription…")
         AppWork.refreshSub(ctx, store, sub.id, announce = true)
     }
     // Auto-detect: http(s) lines -> subscriptions (fetched); the rest -> config(s).
@@ -1197,8 +1640,8 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             val (parsed, errs) = LinkParser.parseMany(rest)
             store.servers.addAll(parsed); store.saveServers()
             if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
-            if (urls.isEmpty()) Toast.makeText(ctx, "${parsed.size} config(s) added" + if (errs.isNotEmpty()) " (${errs.size} errors)" else "", Toast.LENGTH_SHORT).show()
-        } else if (urls.isEmpty()) Toast.makeText(ctx, "Nothing recognized", Toast.LENGTH_SHORT).show()
+            if (urls.isEmpty()) AppWork.snack("${parsed.size} config(s) added" + if (errs.isNotEmpty()) " · ${errs.size} line(s) not recognised" else "")
+        } else if (urls.isEmpty()) AppWork.snack("Nothing recognised — paste a vless/vmess/trojan/ss/wireguard link or a subscription URL")
         bump()
     }
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
@@ -1212,7 +1655,9 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     }
     when (sheet) {
         "import" -> AddLinkSheet(importText, { importText = it }, { pasteClip() }, { launchQr() }, { setSheet(null) }) {
-            if (importText.isNotBlank()) smartImport(importText); importText = ""; setSheet(null); bump()
+            // An empty Add used to close the sheet as if something had been added.
+            if (importText.isBlank()) Toast.makeText(ctx, "Paste a link first, or scan a QR code", Toast.LENGTH_SHORT).show()
+            else { smartImport(importText); importText = ""; setSheet(null); bump() }
         }
         "wg" -> WgSheet(store, { setSheet(null) }) { setSheet(null); bump() }
         "proxy" -> ProxySheet(store, { setSheet(null) }) { setSheet(null); bump() }
@@ -1301,7 +1746,7 @@ private fun latColor(ms: Long?): Color = when {
                 // Tap to use it. Tapping the one already in use opens it, so the
                 // actions are one deliberate tap away and never a surprise.
                 .clickable { if (selected) onToggle() else onSelect() }
-                .padding(start = 14.dp, end = 6.dp, top = 13.dp, bottom = 13.dp),
+                .padding(start = 14.dp, end = 0.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Leading(flag, s.protocol)
@@ -1330,12 +1775,12 @@ private fun latColor(ms: Long?): Color = when {
             when {
                 r?.phase?.isNotEmpty() == true -> Text("…", color = AMBER, fontSize = 12.sp, fontFamily = MONO)
                 r?.error != null -> Text("×", color = BAD, fontSize = 12.sp, fontFamily = MONO)
-                r?.tcp != null -> Text(fmtLat(r.tcp), color = latColor(r.tcp), fontSize = 12.sp, fontFamily = MONO)
+                r?.tcp != null -> Text(fmtLat(r.tcp) + (if (r.tcp in 0L..999L) " ms" else ""), color = latColor(r.tcp), fontSize = 12.sp, fontFamily = MONO, maxLines = 1)
                 else -> Text("—", color = SUBTLE, fontSize = 12.sp, fontFamily = MONO)
             }
             // The one affordance that says there is more in here, and opens it
-            // without changing which config is in use.
-            IconButton(onClick = onToggle, modifier = Modifier.size(34.dp)) {
+            // without changing which config is in use. A full 48 dp target.
+            IconButton(onClick = onToggle, modifier = Modifier.size(48.dp)) {
                 Icon(
                     if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
                     if (open) "close" else "actions",
@@ -1401,10 +1846,9 @@ private fun latColor(ms: Long?): Color = when {
 }
 
 @Composable private fun CardAction(label: String, tint: Color, modifier: Modifier, onClick: () -> Unit) {
-    Text(
-        label, color = tint, fontSize = 10.sp, fontFamily = MONO, textAlign = TextAlign.Center, maxLines = 1,
-        modifier = modifier.clickable { onClick() }.padding(vertical = 13.dp)
-    )
+    Box(modifier.heightIn(min = 48.dp).clickable { onClick() }, contentAlignment = Alignment.Center) {
+        Text(label, color = tint, fontSize = 12.sp, fontFamily = MONO, textAlign = TextAlign.Center, maxLines = 1)
+    }
 }
 
 @Composable private fun ActionRule(color: Color) {
@@ -1485,6 +1929,7 @@ private fun protoColor(proto: String): Color = when (proto) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun WgSheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
+    val ctx = LocalContext.current
     var name by remember { mutableStateOf("") }; var ep by remember { mutableStateOf("") }; var priv by remember { mutableStateOf("") }; var pub by remember { mutableStateOf("") }
     var addr by remember { mutableStateOf("") }; var allowed by remember { mutableStateOf("0.0.0.0/0, ::/0") }; var psk by remember { mutableStateOf("") }; var mtu by remember { mutableStateOf("1420") }; var reserved by remember { mutableStateOf("") }
     var dnsLine by remember { mutableStateOf("") }
@@ -1497,13 +1942,17 @@ private fun protoColor(proto: String): Color = when (proto) {
             Fld("DNS (optional) — the .conf's DNS line: resolver and search domains", dnsLine) { dnsLine = it }
             Text("e.g. 192.168.60.1, corp.example — names under corp.example are asked of that resolver through this tunnel (needs DNS managed by the app).", color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(10.dp))
-            Button(onClick = { if (ep.isNotBlank() && priv.isNotBlank() && pub.isNotBlank()) { val s = LinkParser.makeWireguardServer(name, ep, priv, pub, addr, allowed, psk, mtu, reserved, dnsLine); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() } }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
+            Button(onClick = {
+                if (ep.isNotBlank() && priv.isNotBlank() && pub.isNotBlank()) { val s = LinkParser.makeWireguardServer(name, ep, priv, pub, addr, allowed, psk, mtu, reserved, dnsLine); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() }
+                else Toast.makeText(ctx, "Endpoint, private key and peer public key are needed", Toast.LENGTH_SHORT).show()
+            }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun ProxySheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
+    val ctx = LocalContext.current
     var type by remember { mutableStateOf("socks") }; var name by remember { mutableStateOf("") }; var host by remember { mutableStateOf("") }; var port by remember { mutableStateOf("") }; var user by remember { mutableStateOf("") }; var pass by remember { mutableStateOf("") }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 16.dp)) {
@@ -1511,7 +1960,10 @@ private fun protoColor(proto: String): Color = when (proto) {
             Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { FilterChip(type == "socks", { type = "socks" }, { Text("SOCKS5") }); FilterChip(type == "http", { type = "http" }, { Text("HTTP") }) }
             Fld("Name", name) { name = it }; Fld("Host", host) { host = it }; Fld("Port", port) { port = it }; Fld("Username (optional)", user) { user = it }; Fld("Password (optional)", pass) { pass = it }
             Spacer(Modifier.height(10.dp))
-            Button(onClick = { if (host.isNotBlank() && port.isNotBlank()) { val s = LinkParser.makeProxyServer(type, name, host, port.toIntOrNull() ?: 1080, user, pass); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() } }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
+            Button(onClick = {
+                if (host.isNotBlank() && port.isNotBlank()) { val s = LinkParser.makeProxyServer(type, name, host, port.toIntOrNull() ?: 1080, user, pass); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() }
+                else Toast.makeText(ctx, "Host and port are needed", Toast.LENGTH_SHORT).show()
+            }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
         }
     }
 }
@@ -1645,6 +2097,7 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
     // this screen — whose auto-update then fetched the failed one again.
     val busy by AppWork.subsBusy.collectAsState()
     val note by AppWork.subsNote.collectAsState()
+    var confirmDelete by remember { mutableStateOf<Subscription?>(null) }
     fun refresh(sub: Subscription) = AppWork.refreshSub(ctx, store, sub.id)
     // Auto update. `autoUpdateSubs` and `autoUpdateInterval` were in the settings
     // model from the start and read by nothing at all, so a subscription only ever
@@ -1677,10 +2130,13 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
                 }
             }
             Fld("Subscription URL (https://…)", url) { url = it }; Fld("Name (optional)", name) { name = it }
-            Button(onClick = { if (url.isNotBlank()) { val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim()); store.subs.add(sub); store.saveSubs(); url = ""; name = ""; refresh(sub) } }, modifier = Modifier.fillMaxWidth()) { Text("Add & fetch") }
+            Button(onClick = {
+                if (url.isBlank()) AppWork.snack("Paste your subscription link (https://…) first")
+                else { val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim()); store.subs.add(sub); store.saveSubs(); url = ""; name = ""; AppWork.refreshSub(ctx, store, sub.id, announce = true) }
+            }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Add & fetch") }
             if (note.first.isNotEmpty()) Text(note.first, color = if (note.second) BAD else PRIMARY, fontSize = 12.sp)
             Spacer(Modifier.height(8.dp))
-            if (store.subs.isEmpty()) EmptyHint("No subscriptions yet.")
+            if (store.subs.isEmpty()) EmptyHint("No subscriptions yet — paste your subscription link above. Its servers appear on SERVERS, in a group of their own.")
             store.subs.forEach { sub ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1710,16 +2166,40 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
                                 Text(if (daysLeft >= 0) "$daysLeft days left" else "Expired", color = if (daysLeft < 0) BAD else if (daysLeft <= 3) AMBER else MUTED, fontSize = 11.sp)
                             }
                         }
-                        IconButton(onClick = { refresh(sub) }, enabled = sub.id !in busy) {
+                        IconButton(onClick = { AppWork.refreshSub(ctx, store, sub.id, announce = true) }, enabled = sub.id !in busy) {
                             if (sub.id in busy) CircularProgressIndicator(color = PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                             else Icon(Icons.Filled.Refresh, "refresh", tint = MUTED)
                         }
-                        IconButton(onClick = { store.servers.removeAll { it.subId == sub.id }; store.saveServers(); store.subs.removeAll { it.id == sub.id }; store.saveSubs(); bump() }) { Icon(Icons.Filled.DeleteOutline, "del", tint = BAD) }
+                        IconButton(onClick = { confirmDelete = sub }) { Icon(Icons.Filled.DeleteOutline, "delete", tint = BAD) }
                     }
                 }
             }
             Spacer(Modifier.height(16.dp))
         }
+    }
+    // A subscription takes all of its servers with it, so it asks first — it
+    // used to go on one tap of an icon next to Refresh.
+    confirmDelete?.let { victim ->
+        val count = store.servers.count { it.subId == victim.id }
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            containerColor = CARD,
+            title = { Text("Delete this subscription?", color = TXT, fontSize = 16.sp) },
+            text = { Text("${victim.name} and its $count server(s)", color = MUTED, fontSize = 13.sp, fontFamily = MONO) },
+            confirmButton = {
+                TextButton(onClick = {
+                    val wasIn = store.serverById(store.selection)?.subId == victim.id
+                    store.deleteSubscription(victim.id)   // a selection among its servers falls back
+                    confirmDelete = null
+                    AppWork.snack(
+                        if (wasIn && store.selection.isNotEmpty()) "Deleted ${victim.name} — now using ${store.selectionLabel()}"
+                        else "Deleted ${victim.name}"
+                    )
+                    bump()
+                }) { Text("Delete", color = BAD) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel", color = MUTED) } }
+        )
     }
 }
 
@@ -1770,7 +2250,12 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("⛓ ${c.name}", color = TXT, modifier = Modifier.weight(1f))
                         if (store.chainReady(c)) IconButton(onClick = { store.saveSelection("chain:${c.id}"); bump() }) { Icon(Icons.Filled.CheckCircle, null, tint = if (store.selection == "chain:${c.id}") PRIMARY else MUTED) }
-                        IconButton(onClick = { store.chains.removeAt(idx); store.saveChains(); bump() }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
+                        IconButton(onClick = {
+                            val wasSelected = store.selection == "chain:${c.id}"
+                            store.deleteChain(c.id)   // a selection that named it falls back
+                            if (wasSelected && store.selection.isNotEmpty()) AppWork.snack("Deleted ${c.name} — now using ${store.selectionLabel()}")
+                            bump()
+                        }) { Icon(Icons.Filled.DeleteOutline, "delete chain", tint = BAD) }
                     }
                     Text("Path: " + (members.joinToString(" → ") { it.name }.ifEmpty { "empty — add at least 2 servers" }), color = MUTED, fontSize = 12.sp)
                     members.forEachIndexed { mi, s -> Row(verticalAlignment = Alignment.CenterVertically) { Text("${mi + 1}. ${s.name}", color = TXT, fontSize = 13.sp, modifier = Modifier.weight(1f)); IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filter { it != s.id }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, null, tint = BAD) } } }
@@ -1889,6 +2374,7 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             Row(Modifier.fillMaxWidth().clickable { save(s.copy(perAppMode = v)) }, verticalAlignment = Alignment.CenterVertically) { RadioButton(s.perAppMode == v, { save(s.copy(perAppMode = v)) }); Text(l, color = TXT) }
         }
         if (s.perAppMode != "off") AppPicker(s.perApps) { save(s.copy(perApps = it)) }
+        LanShareSection(store)
     }
 }
 
@@ -2067,15 +2553,15 @@ private fun targetOptionsFull(store: Store): List<Pair<String, String>> = buildL
 // pool entry handed that port makes the config fail to build.
 private fun usedPorts(store: Store): Set<Int> { val s = HashSet<Int>(); s.add(store.settings.socksPort); s.add(store.settings.httpPort); s.add(store.settings.apiPort); store.pool.forEach { if (it.socksPort > 0) s.add(it.socksPort); if (it.httpPort > 0) s.add(it.httpPort) }; return s }
 
-fun fmtBytes(n: Long): String { var v = n.toDouble(); val u = arrayOf("B", "KB", "MB", "GB", "TB"); var i = 0; while (v >= 1024 && i < u.size - 1) { v /= 1024; i++ }; return (if (i == 0) v.toLong().toString() else String.format("%.1f", v)) + " " + u[i] }
-fun fmtSpeed(n: Long) = fmtBytes(n) + "/s"
-/** "12s" / "7 min" / "3 h" / "2 d" ago — short enough for a list row. */
-private fun fmtAgo(ms: Long): String = when {
-    ms < 60_000 -> "${ms / 1000}s ago"
-    ms < 3_600_000 -> "${ms / 60_000} min ago"
-    ms < 86_400_000 -> "${ms / 3_600_000} h ago"
-    else -> "${ms / 86_400_000} d ago"
-}
+// fmtBytes, fmtSpeed and fmtAgo live in Format.kt (the list logic's tests use them).
+
+/** "1.15.0" — the installed build's versionName; "" when the platform will not say. */
+private fun appVersion(ctx: Context): String = runCatching {
+    val pm = ctx.packageManager
+    val info = if (Build.VERSION.SDK_INT >= 33) pm.getPackageInfo(ctx.packageName, PackageManager.PackageInfoFlags.of(0))
+               else @Suppress("DEPRECATION") pm.getPackageInfo(ctx.packageName, 0)
+    info.versionName ?: ""
+}.getOrDefault("")
 
 private fun fmtDuration(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0); return "%02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)

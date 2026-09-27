@@ -19,8 +19,14 @@ class Store(context: Context) {
     val subs: MutableList<Subscription> = read("subs") { Subscription.fromJson(it) }
     var settings: AppSettings = loadSettings()
     var selection: String = prefs.getString("selection", "") ?: ""
+    /** The choice before [selection]: where a selection whose server is gone falls back to (Selection.repair). */
+    var previousSelection: String = prefs.getString("selectionPrev", "") ?: ""
+        private set
 
-    init { migrateServers() }
+    // The selection is checked on every start as well: one saved before ids
+    // were stable, or naming a server removed while the app was not running,
+    // comes back as the choice before it (or the first server), not as "—".
+    init { migrateServers(); repairSelection() }
 
     /**
      * One-time upgrade of the saved servers to the shape the current parser and
@@ -44,13 +50,44 @@ class Store(context: Context) {
     fun saveChains() = prefs.edit().putString("chains", JSONArray(chains.map { it.toJson() }).toString()).apply()
     fun savePool() = prefs.edit().putString("pool", JSONArray(pool.map { it.toJson() }).toString()).apply()
     fun saveSubs() = prefs.edit().putString("subs", JSONArray(subs.map { it.toJson() }).toString()).apply()
-    fun saveSelection(sel: String) { selection = sel; prefs.edit().putString("selection", sel).apply() }
+    fun saveSelection(sel: String) {
+        previousSelection = Selection.previousAfterPick(selection, previousSelection, sel, serverIds(), chainIds())
+        selection = sel
+        writeSelection()
+    }
     fun saveSettings(sNew: AppSettings) { settings = sNew; prefs.edit().putString("settings", sNew.toJson().toString()).apply() }
+
+    private fun writeSelection() = prefs.edit().putString("selection", selection).putString("selectionPrev", previousSelection).apply()
+    private fun serverIds(): Set<String> = servers.mapTo(HashSet()) { it.id }
+    private fun chainIds(): Set<String> = chains.mapTo(HashSet()) { it.id }
+
+    /** Does the selection name something that exists (a server, a chain, the pool, advanced routing)? */
+    fun selectionResolves(): Boolean = Selection.resolves(selection, serverIds(), chainIds())
+
+    /**
+     * Point the selection at something that exists — after a server or chain
+     * is deleted, a subscription refresh has dropped the selected server, and
+     * on every start. A selection that still resolves is left exactly as it is.
+     * True when it moved (the caller says so).
+     */
+    fun repairSelection(): Boolean {
+        val next = Selection.repair(selection, previousSelection, servers.map { it.id }, chains.map { it.id })
+        if (next == selection) return false
+        selection = next
+        previousSelection = ""   // what it fell back from is gone, and what it fell back to is now current
+        writeSelection()
+        return true
+    }
 
     /** Whether the app has asked for POST_NOTIFICATIONS yet (Android 13+; asked once, before a first connect). */
     var notifAsked: Boolean
         get() = prefs.getBoolean("notifAsked", false)
         set(v) { prefs.edit().putBoolean("notifAsked", v).apply() }
+
+    /** The Servers screen's folded groups (ServerGroups keys), kept across restarts. */
+    var collapsedGroups: Set<String>
+        get() = try { ServerConfig.strList(JSONArray(prefs.getString("collapsedGroups", "[]"))).toSet() } catch (_: Exception) { emptySet() }
+        set(v) { prefs.edit().putString("collapsedGroups", JSONArray(v.toList()).toString()).apply() }
 
     private fun <T> read(key: String, map: (JSONObject) -> T): MutableList<T> {
         val out = ArrayList<T>()
@@ -74,12 +111,26 @@ class Store(context: Context) {
     fun poolEnabledValid() = pool.filter { it.enabled && it.socksPort > 0 && poolTargetValid(it.target) }
     fun advancedReady() = settings.advancedRouting && (settings.routeRules.isNotEmpty() || settings.routeDefault.isNotEmpty())
 
-    /** Delete a server and prune it from chains/pool. */
+    /** Delete a server and prune it from chains/pool; a selection that named it falls back (repairSelection). */
     fun deleteServer(id: String) {
         servers.removeAll { it.id == id }; saveServers()
         var changed = false
         for (i in chains.indices) if (chains[i].members.contains(id)) { chains[i] = chains[i].copy(members = chains[i].members.filter { it != id }); changed = true }
         if (changed) saveChains()
+        repairSelection()
+    }
+
+    /** Delete a subscription with the servers it brought; a selection among them falls back. */
+    fun deleteSubscription(id: String) {
+        servers.removeAll { it.subId == id }; saveServers()
+        subs.removeAll { it.id == id }; saveSubs()
+        repairSelection()
+    }
+
+    /** Delete a chain; a selection that named it falls back. */
+    fun deleteChain(id: String) {
+        chains.removeAll { it.id == id }; saveChains()
+        repairSelection()
     }
 
     fun selectionLabel(): String = when {
@@ -130,8 +181,8 @@ class Store(context: Context) {
     }
 
     companion object {
-        const val POOL_ID = "__pool__"
-        const val ADV_ID = "__advanced__"
+        const val POOL_ID = Selection.POOL
+        const val ADV_ID = Selection.ADVANCED
 
         @Volatile private var shared: Store? = null
 

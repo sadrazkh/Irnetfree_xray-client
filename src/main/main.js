@@ -42,7 +42,7 @@ const { DropBudget } = require('./dropBudget');
 const { isWebUrl, isAppPage } = require('./urlGuard');
 const { runElevatedRelaunch } = require('./relaunch');
 const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
-const { trayGroups } = require('./trayMenu');
+const { trayGroups, trayStopItem } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
 const https = require('https');
@@ -100,6 +100,11 @@ const drops = new DropBudget();
 // status or start a watcher. Comparing the token captured at entry against this
 // is how it finds out (see doConnect).
 let connGen = 0;
+// connGen as the last disconnect left it. While the two are equal nothing has
+// connected since, so a call that finds itself overtaken can tell a disconnect
+// (a Cancel pressed while connecting: the machine must end up exactly as a
+// disconnect leaves it) from a newer connect (which owns whatever it finds).
+let disconnectGen = 0;
 // A connect or a disconnect by hand: the connect-on-launch timer (ready-to-show)
 // must not overtake it — set synchronously by each, as service.js's is.
 let bootCancelled = false;
@@ -266,10 +271,15 @@ function makeTun(settings, { quiet = false } = {}) {
   return (selected = sb);   // neither: the sing-box error message names what to install
 }
 
+// The last connection state told to the window: while it is 'connecting' the
+// tray's Disconnect is the connect's Cancel (trayStopItem).
+let lastStatus = 'disconnected';
+
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+  if (channel === 'status' && payload && payload.state) lastStatus = payload.state;
   // the tray marks the live server and lists what a subscription refresh brought
   if (channel === 'status' || channel === 'subs-updated') refreshTray();
 }
@@ -498,18 +508,27 @@ function trayMenuTemplate() {
   const active = store.get('activeServerId', null);
   const item = (it) => ({
     label: (it.id === active ? '● ' : '') + it.name,
-    click: () => { bootCancelled = true; drops.reset(); doConnect(it.id).catch((e) => send('log', { line: 'Connect failed: ' + e.message, level: 'error' })); }
+    click: () => { bootCancelled = true; drops.reset(); doConnect(it.id).catch((e) => {
+      send('log', { line: 'Connect failed: ' + e.message, level: 'error' });
+      // 'connecting' already went out, and nothing in the window asked for this
+      // connect to hear its throw: without a terminal status it stays on
+      // "Connecting…" (and the tray on Cancel) — as vpn:reconnect says it.
+      // Unless a disconnect overtook it: its 'disconnected' is the last word.
+      if (connGen !== disconnectGen) send('status', { state: 'error', message: e.message });
+    }); }
   });
   const groups = trayGroups(store.get('servers', []), store.get('subscriptions', [])).map((g) => ({
     label: g.label || (en ? 'Servers' : 'سرورها'),
     submenu: g.items.map(item)
   }));
+  // Disconnect — or, while a connect is in flight, its Cancel
+  const stop = trayStopItem({ active: !!active, state: lastStatus, en });
   return [
     { label: en ? 'Show' : 'نمایش', click: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show(); } },
     { type: 'separator' },
     ...groups,
     ...(groups.length ? [{ type: 'separator' }] : []),
-    { label: en ? 'Disconnect' : 'قطع اتصال', enabled: !!active, click: () => { bootCancelled = true; doDisconnect(); } },
+    { label: stop.label, enabled: stop.enabled, click: () => { bootCancelled = true; doDisconnect(); } },
     { type: 'separator' },
     { label: en ? 'Quit' : 'خروج', click: () => { isQuitting = true; app.quit(); } }
   ];
@@ -526,6 +545,21 @@ function refreshTray() {
 function setServers(list) {
   store.set('servers', list);
   refreshTray();
+}
+
+/**
+ * The config the picker points at — a server, a chain, advanced routing, the
+ * pool — remembered on its own. `activeServerId` is cleared at every launch (a
+ * new process has no live connection) and `lastServerId` only moves on a
+ * connect, so every restart used to land the picker on the first server. The
+ * renderer resolves it again at launch against what can still be selected
+ * (lastServerId, then the first server, when it cannot). Written only when it
+ * moved, and coalesced: clicking down a list is a write per click.
+ */
+function setSelection(id) {
+  const v = typeof id === 'string' && id ? id : null;
+  if (store.get('selectedServerId', null) !== v) store.setLazy('selectedServerId', v);
+  return v;
 }
 
 /* ----------------------------- core actions ----------------------------- */
@@ -1129,10 +1163,11 @@ async function connectOnce(serverId, opts = {}) {
   // mistaken for an unexpected drop (which would trip the kill switch) or flash
   // "disconnected" in the UI. Save/restore rather than clear: reapplyConnection()
   // wraps the whole teardown+reconnect in the same flag.
+  let ownCore = null;   // the core this call started, while it is still the one running
   const prevReloading = xrayReloading;
   xrayReloading = true;
   try {
-    await xray.start(config, runEngine);
+    if (await xray.start(config, runEngine)) ownCore = xray.proc;
     if (!stale()) liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));
   } catch (e) {
     // start() watches for 1.2 s to catch a config that crashes the core on
@@ -1148,10 +1183,33 @@ async function connectOnce(serverId, opts = {}) {
   } finally {
     xrayReloading = prevReloading;
   }
-  // The critical one. doDisconnect() has already stopped the core it just
-  // started, so writing activeServerId back here would resurrect the very intent
-  // the user cancelled — and every side effect below would follow it.
-  if (stale()) return abandoned;
+  // A disconnect that overtook this call (Cancel, pressed while connecting) tore
+  // down what it found — but this call can have started things AFTER that
+  // teardown ran. The core of a server switch above all: start() stops the old
+  // core first, and the disconnect's own stop, waiting on the same exit, is
+  // released after it, with the new core already spawned — nothing else would
+  // ever stop that one. And the kill switch a switch arms (below), whose netsh
+  // can land after the disconnect's disarm: the internet blocked behind a
+  // window that says "disconnected". Both are undone here, and only for a
+  // disconnect with nothing after it: a newer connect owns what it finds (its
+  // own start() stops our core first, and it decides about the kill switch).
+  const giveWay = async (armedHere = false) => {
+    if (connGen === disconnectGen) {
+      if (ownCore && xray.proc === ownCore) {
+        const prev = xrayReloading;
+        xrayReloading = true;   // ours, not a drop
+        try { await xray.stop(); } catch { /* best effort */ } finally { xrayReloading = prev; }
+      }
+      if (armedHere) {
+        try { await disarmKillSwitch(); } catch { /* best effort */ }
+        send('killswitch', { engaged: false });
+      }
+    }
+    return abandoned;
+  };
+  // The critical one. Writing activeServerId back here would resurrect the very
+  // intent the user cancelled — and every side effect below would follow it.
+  if (stale()) return giveWay();
 
   store.set('activeServerId', serverId);
   // `activeServerId` is cleared by a disconnect; this one survives it, for
@@ -1170,7 +1228,7 @@ async function connectOnce(serverId, opts = {}) {
       send('log', { line: 'System proxy failed: ' + e.message, level: 'error' });
     }
   }
-  if (stale()) return abandoned;
+  if (stale()) return giveWay();
 
   updateTray(true, label);
 
@@ -1356,8 +1414,12 @@ async function connectOnce(serverId, opts = {}) {
       // the first thing this block cut off. Resolve them the way the TUN layer
       // does before they become firewall holes.
       const udpExcludes = await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []);
-      await leakGuard.engageUdpBlock({ excludes: udpExcludes });
+      const udp = await leakGuard.engageUdpBlock({ excludes: udpExcludes });
       guardEngaged = true;
+      // Its receipt too: a disconnect landing during the lookup above released
+      // the guard BEFORE this engage, and the gate below then had no receipt to
+      // give the block back with — UDP stayed blocked after the Cancel.
+      guardToken = (udp && udp.token) || guardToken;
     } catch (e) {
       guardError = e.message;
       send('log', { line: 'UDP block failed: ' + e.message + ' — WebRTC can still reveal your address in proxy mode', level: 'error' });
@@ -1379,7 +1441,7 @@ async function connectOnce(serverId, opts = {}) {
     // holding the machine's default routes while the UI says 'disconnected'.
     if (guardToken) await leakGuard.release({ token: guardToken }).catch(() => {});
     if (myTun && myTun.active) { try { await myTun.stop(); } catch {} }
-    return abandoned;
+    return giveWay(switchArmed);
   }
 
   // LAN sharing: open the firewall on Windows + report the address other
@@ -1397,8 +1459,8 @@ async function connectOnce(serverId, opts = {}) {
   }
   // The server switch's own block (see the tunnel rebuild above) goes the way
   // a settings reapply's does: once this connect stands — not over a core
-  // that died (its drop rebuilds under it), and not for an intent a
-  // disconnect or a newer connect overtook (theirs to decide).
+  // that died (its drop rebuilds under it), and not for an intent a newer
+  // connect overtook (theirs to decide; a disconnect's is giveWay's).
   if (switchArmed && !stale() && xray.running) {
     await disarmKillSwitch();
     send('killswitch', { engaged: false });
@@ -1406,7 +1468,12 @@ async function connectOnce(serverId, opts = {}) {
   }
   // Last gate before the irreversible half: the watchers and the 'connected'
   // status. Past this line nothing awaits, so nothing can overtake us.
-  if (stale()) return abandoned;
+  // A disconnect that landed during the LAN rule above may have removed it
+  // before it was added: gone again with the rest.
+  if (stale()) {
+    if (settings.allowLan && connGen === disconnectGen) { try { await removeLanFirewall(); } catch {} }
+    return giveWay(switchArmed);
+  }
   // The core only had to survive start()'s grace period; the tunnel and the
   // guard took seconds more. One that died in between is not a connection —
   // calling it one told a recovery it was done, and lifted the kill switch over
@@ -1494,6 +1561,16 @@ async function reapplyConnection(opts = {}) {
   if (getSettings().killSwitch) {
     const r = await armKillSwitch();
     armed = !!(r && r.ok);
+    // A disconnect (Cancel) that landed during the arm has already said
+    // 'disconnected': a 'connecting' after it put the window back on
+    // "Connecting…" for good, over nothing. And its disarm may have run before
+    // this netsh added the rule — the internet blocked behind a window that says
+    // disconnected — so a block put in for a disconnect's machine is lifted
+    // again. A newer connect decides about the kill switch itself.
+    if (gen !== connGen) {
+      if (armed && connGen === disconnectGen) { try { await disarmKillSwitch(); } catch {} send('killswitch', { engaged: false }); }
+      return { ok: false, stale: true };
+    }
     send('killswitch', { engaged: armed, error: r && r.error });
     if (armed) send('log', { line: 'Kill switch engaged for a settings reconnect — internet blocked until the tunnel is back', level: 'warn' });
     else if (process.platform === 'win32') send('log', { line: 'Kill switch could not be armed for the reconnect (run as admin): ' + (r && r.error), level: 'warn' });
@@ -2037,6 +2114,7 @@ async function doDisconnect() {
     // watchers, and a recovery that hung (a stuck PowerShell, an ignored macOS
     // password prompt) must not keep its lock and park every future trigger.
     connGen++;
+    disconnectGen = connGen;
     recoverGen++;
     recovering = false;
     drops.reset();                   // the next connection starts with a full budget
@@ -2257,6 +2335,9 @@ function registerIpc() {
     subscriptions: store.get('subscriptions', []),
     settings: getSettings(),
     activeServerId: store.get('activeServerId', null),
+    // the picker's own choice, and the last connection made: what a restart restores
+    selectedServerId: store.get('selectedServerId', null),
+    lastServerId: store.get('lastServerId', null),
     chain: store.get('chain', []),
     chains: getChains(),
     pool: getPool(),
@@ -2417,6 +2498,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('servers:list', () => store.get('servers', []));
+  ipcMain.handle('selection:set', (e, id) => setSelection(id));
   // Serialize a server (with ALL its settings) back into a shareable link.
   ipcMain.handle('servers:link', (e, id) => {
     const s = store.get('servers', []).find(x => x.id === id);

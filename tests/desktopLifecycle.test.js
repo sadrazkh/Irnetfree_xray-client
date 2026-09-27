@@ -635,7 +635,8 @@ test('killSwitch ON: a server switch under TUN seals its own stop→start gap, a
   // lifted once the connect stands: after the new tunnel, over a running core, before the last gate
   const lift = body.indexOf('if (switchArmed && !stale() && xray.running) {\n');
   const start = body.indexOf('await myTun.start(');
-  const lastGate = body.lastIndexOf('if (stale()) return abandoned;');
+  // the last gate gives way (an overtaken connect undoes what it started — see cancelConnect.test.js)
+  const lastGate = body.lastIndexOf('if (stale()) {\n');
   assert.ok(lift !== -1 && start < lift && lift < lastGate, 'lifted after the new tunnel, and nothing awaits past the last gate');
   assert.match(body.slice(lift), /^if \(switchArmed && !stale\(\) && xray\.running\) \{\n\s*await disarmKillSwitch\(\);\n\s*send\('killswitch', \{ engaged: false \}\);/);
   assert.ok(lastGate < body.indexOf('if (!xray.running) throw new Error('), 'a core that died keeps the block: its drop rebuilds under it');
@@ -685,7 +686,7 @@ function reapplyHarness({ settings = {}, connect = async () => ({ ok: true }), o
     doConnect: async (...a) => { calls.push('doConnect'); const r = await connect(...a); env.xray.running = true; return r; }
   }, over);
   const make = new Function('env', `
-    let xrayReloading = false, connGen = 0, appliedSettings = {}, killEngaged = false;
+    let xrayReloading = false, connGen = 0, disconnectGen = 0, appliedSettings = {}, killEngaged = false;
     const { store, xray, getSettings, send, stats, usage, usageStore, leakGuard, tun, tunPlatform,
             buildPlan, lastEntryHostIps, stopAllTuns, setSystemProxy, removeLanFirewall, doConnect } = env;
     const stopProcWatcher = () => {};

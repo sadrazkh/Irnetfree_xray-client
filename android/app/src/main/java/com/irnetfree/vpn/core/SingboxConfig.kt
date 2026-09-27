@@ -21,8 +21,13 @@ object SingboxConfig {
 
     class Unsupported(msg: String) : Exception(msg)
 
-    /** [auth]: the session's credentials for both inbounds (LocalAuth.kt), as ConfigBuilder puts them on Xray's. */
-    fun build(server: ServerConfig, s: AppSettings, auth: LocalAuth? = null): JSONObject {
+    /**
+     * [auth]: the session's credentials for both inbounds (LocalAuth.kt), as ConfigBuilder puts them on Xray's.
+     * [lan]: LAN sharing (LanShare) — two more inbounds on every interface. Nothing
+     * here routes by inbound, so they take the tunnel's route as they are; the
+     * only rules of their own keep them off loopback, as on Xray.
+     */
+    fun build(server: ServerConfig, s: AppSettings, auth: LocalAuth? = null, lan: LanShare? = null): JSONObject {
         val listen = "127.0.0.1"
         val socks = JSONObject().put("type", "socks").put("tag", "socks-in").put("listen", listen).put("listen_port", s.socksPort)
         val http = JSONObject().put("type", "http").put("tag", "http-in").put("listen", listen).put("listen_port", s.httpPort)
@@ -31,6 +36,21 @@ object SingboxConfig {
             http.put("users", JSONArray().put(JSONObject().put("username", auth.user).put("password", auth.pass)))
         }
         val inbounds = JSONArray().put(socks).put(http)
+        val lanTags = ArrayList<String>()
+        if (lan != null && lan.enabled) {
+            val taken = setOf(s.socksPort, s.httpPort)
+            fun users(): JSONArray = JSONArray().put(JSONObject().put("username", lan.user).put("password", lan.pass))
+            if (lan.socksPort !in taken) {
+                val o = JSONObject().put("type", "socks").put("tag", LanShare.SOCKS_TAG).put("listen", LanShare.LISTEN).put("listen_port", lan.socksPort)
+                if (lan.auth) o.put("users", users())
+                inbounds.put(o); lanTags.add(LanShare.SOCKS_TAG)
+            }
+            if (lan.httpPort !in taken && lan.httpPort != lan.socksPort) {
+                val o = JSONObject().put("type", "http").put("tag", LanShare.HTTP_TAG).put("listen", LanShare.LISTEN).put("listen_port", lan.httpPort)
+                if (lan.auth) o.put("users", users())
+                inbounds.put(o); lanTags.add(LanShare.HTTP_TAG)
+            }
+        }
 
         val outbounds = JSONArray()
             .put(translateOutbound(server))
@@ -48,13 +68,17 @@ object SingboxConfig {
                 .put("type", "udp").put("tag", "dns-direct").put("server", dnsServer)))
             .put("final", "dns-direct")
 
+        // resolve outbound server domains via dns-direct (no resolve→proxy loop)
+        val route = JSONObject().put("final", "proxy").put("default_domain_resolver", "dns-direct")
+        if (lanTags.isNotEmpty()) route.put("rules", JSONArray()
+            .put(JSONObject().put("inbound", JSONArray(lanTags)).put("ip_cidr", JSONArray(ConfigBuilder.LOOPBACK)).put("action", "reject"))
+            .put(JSONObject().put("inbound", JSONArray(lanTags)).put("domain_suffix", JSONArray().put("localhost")).put("action", "reject")))
         return JSONObject()
             .put("log", JSONObject().put("level", logLevel(s.logLevel)).put("timestamp", false))
             .put("dns", dns)
             .put("inbounds", inbounds)
             .put("outbounds", outbounds)
-            // resolve outbound server domains via dns-direct (no resolve→proxy loop)
-            .put("route", JSONObject().put("final", "proxy").put("default_domain_resolver", "dns-direct"))
+            .put("route", route)
     }
 
     private fun logLevel(x: String): String {
