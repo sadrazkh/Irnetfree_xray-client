@@ -272,19 +272,36 @@ class XrayVpnService : VpnService() {
             // LAN sharing binds its two ports on every interface, and one that
             // another app already holds takes the WHOLE core down ("address in
             // use") — a connect that fails over a convenience. Asked here, after
-            // the old session let go of them: taken, this connection goes without
-            // sharing and says why.
+            // the old session let go of them, both at once and without waiting
+            // (LocalPort.takenNow — this is the worker every Cancel queues on):
+            // taken, this connection goes without sharing and says why.
             val taken: List<Int> = if (lan0 == null) emptyList()
-                else listOf(lan0.socksPort, lan0.httpPort).filter { p: Int -> !LocalPort.waitFree(p, 2000, LocalPort.ANY) }
+                else LocalPort.takenNow(listOf(lan0.socksPort, lan0.httpPort), LocalPort.ANY)
             val lan: LanShare? = if (taken.isEmpty()) lan0 else null
             val config: String = if (taken.isEmpty()) config0 else TunnelSetup.withoutLan(config0)
-            if (taken.isNotEmpty()) VpnState.addLog("⚠ LAN sharing: port ${taken.joinToString(" and ")} is in use by another app — this connection goes without sharing; choose other ports under Settings → LAN sharing")
+            if (taken.isNotEmpty()) VpnState.addLog("⚠ LAN sharing skipped: port ${taken.joinToString(" and ")} is in use by another app — connecting without it; choose other ports under Settings → LAN sharing")
 
             // 1) Proxy core with a local SOCKS inbound (no internal tun).
             //    EngineChoice already decided which, and prepare() already checked
             //    it is bundled for this ABI; anything else here is a real failure.
-            val launch = Launch(engine, config, socksPort, gen, startId, lan)
-            startCore(launch)?.let { err -> return fail(gen, startId, err, unattended) }
+            val first = Launch(engine, config, socksPort, gen, startId, lan)
+            val firstErr = startCore(first)
+            val launch: Launch
+            if (firstErr != null && lan != null && gen == generation.get()) {
+                // The check above is check-then-bind: another app can still take
+                // a LAN port before the core binds it, and a core that cannot bind
+                // one does not start at all. Sharing is a convenience, the tunnel
+                // is not — once more at once, without it (a failed start leaves
+                // nothing running to stop first).
+                val held = LocalPort.takenNow(listOf(lan.socksPort, lan.httpPort), LocalPort.ANY, graceMs = 0L)
+                val why = if (held.isNotEmpty()) "port ${held.joinToString(" and ")} is in use by another app" else "the core would not start with it ($firstErr)"
+                VpnState.addLog("⚠ LAN sharing skipped: $why — connecting without it; choose other ports under Settings → LAN sharing")
+                launch = Launch(engine, TunnelSetup.withoutLan(config), socksPort, gen, startId, null)
+                startCore(launch)?.let { err -> return fail(gen, startId, err, unattended) }
+            } else {
+                launch = first
+                if (firstErr != null) return fail(gen, startId, firstErr, unattended)
+            }
             if (gen != generation.get()) { VpnState.addLog("Connect cancelled while the core started"); teardown(); finishIfIdle(startId); return }
 
             // 2) TUN — exclude our own app so xray's sockets bypass the tunnel
@@ -322,13 +339,13 @@ class XrayVpnService : VpnService() {
             // the newer one's Connecting — or over the error of a newer connect
             // that failed. The tunnel stays up meanwhile: the command queued
             // behind this one replaces it or stops it (see the class comment).
-            if (!generation.ifCurrent(gen) { VpnState.set(ConnState.CONNECTED, label); VpnState.setLanShared(lan) }) {
+            if (!generation.ifCurrent(gen) { VpnState.set(ConnState.CONNECTED, label); VpnState.setLanShared(launch.lan) }) {
                 VpnState.addLog("Up, but a disconnect or another connect has been asked for since — that comes next")
                 return
             }
             VpnState.addLog("Connected")
             updateNotification(label, true)
-            if (lan != null) logLan(lan)
+            launch.lan?.let { l: LanShare -> logLan(l) }
             startStatsLoop()
             selfCheck(launch)
             Log.i(TAG, "tunnel up: $label")

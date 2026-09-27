@@ -230,6 +230,23 @@ object LocalPort {
         true
     } catch (e: Exception) { false }
 
+    /**
+     * Which of [ports] somebody holds on [host] — all asked at once, never
+     * waited on: the caller is the tunnel's one worker, and every queued Cancel
+     * and connect waits behind it (two waitFree()s were up to four seconds of
+     * a "Connecting…" that looked stuck). One second look after [graceMs],
+     * for all of them together, covers a core of ours stopped a moment ago
+     * that is still letting go. A port free here can still be taken before the
+     * core binds it — the caller must survive that too (startTunnel retries
+     * without LAN sharing).
+     */
+    fun takenNow(ports: List<Int>, host: String, graceMs: Long = 150): List<Int> {
+        val taken = ports.distinct().filter { p: Int -> !isFree(p, host) }
+        if (taken.isEmpty() || graceMs <= 0L) return taken
+        try { Thread.sleep(graceMs) } catch (e: InterruptedException) { return taken }
+        return taken.filter { p: Int -> !isFree(p, host) }
+    }
+
     /** Wait a moment for a port to come free: the core just stopped may still be letting go of it. */
     fun waitFree(port: Int, timeoutMs: Long = 3000, host: String = "127.0.0.1"): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
