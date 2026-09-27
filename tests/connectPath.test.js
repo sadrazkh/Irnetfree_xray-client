@@ -131,7 +131,7 @@ test('a connect that builds no tunnel gives back a guard held for the last one â
     assert.match(body.slice(release), /^if \(!settings\.tunMode && !\(tun && tun\.active\)\) \{\n\s*const released = await releaseStrandedGuard\(leakGuard\);\n\s*if \(stale\(\)\) return abandoned;/,
       `${label}: given back â€” and a disconnect that landed meanwhile still wins`);
     assert.ok(body.indexOf('let settings = await effectiveSettings();') < release, `${label}: decided on the settings of THIS connect`);
-    for (const later of ['await ensureCertPins(serverId, settings);', 'withEntryHostIps(serverId, settings)', 'await xray.start(config, runEngine);']) {
+    for (const later of ['await ensureCertPins(serverId, settings);', 'withEntryHostIps(serverId, settings)', 'await xray.start(config, runEngine)']) {
       const at = body.indexOf(later);
       assert.notEqual(at, -1, `${label}: ${later} is gone`);
       assert.ok(release < at, `${label}: ${later} runs before the resolvers are given back`);
