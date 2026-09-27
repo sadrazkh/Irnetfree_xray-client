@@ -38,7 +38,8 @@ const dirs = [];
 test.after(() => { for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function until(pred, what, ms = 4000) {
+// generous: a loaded CI runner is slow, and the deadline only costs time when a test fails anyway
+async function until(pred, what, ms = 20000) {
   const deadline = Date.now() + ms;
   while (!pred()) {
     if (Date.now() > deadline) throw new Error('timed out waiting for: ' + what);
