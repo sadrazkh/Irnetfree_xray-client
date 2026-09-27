@@ -54,6 +54,7 @@
     clearServers: () => invoke('servers:clear'),
     listServers: () => invoke('servers:list'),
     serverLink: (id) => invoke('servers:link', id),
+    setSelection: (id) => invoke('selection:set', id),
 
     // chains
     getChain: () => invoke('chain:get'),

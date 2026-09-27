@@ -289,6 +289,10 @@ function createService(opts = {}) {
   // status or start a watcher. Comparing the token captured at entry against this
   // is how it finds out (see doConnect).
   let connGen = 0;
+  // connGen as the last disconnect left it: while the two are equal nothing has
+  // connected since, so an overtaken call can tell a disconnect (a Cancel while
+  // connecting) from a newer connect, which owns whatever it finds (see main.js).
+  let disconnectGen = 0;
   // Settings the LIVE tunnel was built from (null when disconnected) — see
   // ../main/settingsMeta.js.
   let appliedSettings = null;
@@ -334,6 +338,19 @@ function createService(opts = {}) {
   // A write only when the value really changes: an endless recovery on a
   // router must not rewrite store.json (flash) on every attempt.
   function setIfChanged(key, value) { if (store.get(key, undefined) !== value) store.set(key, value); }
+
+  /**
+   * The config the picker points at, remembered on its own (see main.js):
+   * `activeServerId` is cleared at every start and `lastServerId` only moves
+   * on a connect, so every restart used to land on the first server. Written
+   * only when it moved, and coalesced — clicking down a list is a write per
+   * click, and on a router every write is flash.
+   */
+  function setSelection(id) {
+    const v = typeof id === 'string' && id ? id : null;
+    if (store.get('selectedServerId', null) !== v) store.setLazy('selectedServerId', v);
+    return v;
+  }
 
   migrateServers();
   migrateSettingsStore();
@@ -1212,10 +1229,11 @@ function createService(opts = {}) {
 
     // save/restore rather than clear — reapplyConnection() wraps the whole
     // teardown+reconnect in the same flag
+    let ownCore = null;   // the core this call started, while it is still the one running
     const prevReloading = xrayReloading;
     xrayReloading = true;
     try {
-      await xray.start(config, runEngine);
+      if (await xray.start(config, runEngine)) ownCore = xray.proc;
       if (!stale()) liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));
     } catch (e) {
       // start() watches for 1.2 s to catch a config that crashes the core on
@@ -1228,10 +1246,24 @@ function createService(opts = {}) {
       if (stale()) return abandoned;
       throw e;
     } finally { xrayReloading = prevReloading; }
-    // The critical one. doDisconnect() has already stopped the core this just
-    // started, so writing activeServerId back here would resurrect the very
-    // intent that was cancelled — and every side effect below would follow it.
-    if (stale()) return abandoned;
+    // A disconnect that overtook this call (a Cancel while connecting) tore down
+    // what it found — but this call can have started its core AFTER that
+    // teardown: in a server switch start() stops the old core first, and the
+    // disconnect's own stop, waiting on the same exit, is released after it,
+    // with the new core already spawned. Nothing else would ever stop that one.
+    // Stopped here, and only for a disconnect with nothing after it: a newer
+    // connect owns the core it finds (its own start() stops ours first). Ours,
+    // not a crash (quietStops).
+    const giveWay = async () => {
+      if (connGen === disconnectGen && ownCore && xray.proc === ownCore) {
+        quietStops++;
+        try { await xray.stop(); } catch { /* best effort */ } finally { quietStops--; }
+      }
+      return abandoned;
+    };
+    // The critical one. Writing activeServerId back here would resurrect the
+    // very intent that was cancelled — and every side effect below would follow it.
+    if (stale()) return giveWay();
     setIfChanged('activeServerId', serverId);
     setIfChanged('lastServerId', serverId);   // survives a disconnect: "connect to the last server" at launch
     if (OPENWRT) setIfChanged('connectIntent', serverId);   // the router's "stay like this" (see bootIntent)
@@ -1244,7 +1276,7 @@ function createService(opts = {}) {
         send('log', { line: 'System proxy enabled', level: 'info' });
       } catch (e) { send('log', { line: 'System proxy failed: ' + e.message, level: 'error' }); }
     }
-    if (stale()) return abandoned;
+    if (stale()) return giveWay();
 
     // TUN mode (system-wide tunnel via sing-box, or tun2socks as the fallback —
     // see makeTun). Requires root/admin + the backend's files.
@@ -1320,7 +1352,7 @@ function createService(opts = {}) {
           // answers every LAN connection "connection refused" until then.
           if (OPENWRT) {
             const bound = await waitPort(settings.socksPort, 20000);
-            if (stale()) return abandoned;
+            if (stale()) return giveWay();
             if (!bound) send('log', { line: `The core has not opened 127.0.0.1:${settings.socksPort} after 20s — starting the gateway anyway`, level: 'warn' });
           }
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...pinnedIps],
@@ -1401,8 +1433,10 @@ function createService(opts = {}) {
       // the first thing this block cut off. Resolve them the way the TUN layer
       // does before they become firewall holes.
       const udpExcludes = await tunPlatform.resolveServerIps(entryAddrs, { ipv6: true }).catch(() => []);
-      await leakGuard.engageUdpBlock({ excludes: udpExcludes });
+      const udp = await leakGuard.engageUdpBlock({ excludes: udpExcludes });
         guardEngaged = true;
+        // its receipt too: a connect overtaken below gives back what it engaged
+        guardToken = (udp && udp.token) || guardToken;
       } catch (e) {
         guardError = e.message;
         send('log', { line: 'UDP block failed: ' + e.message + ' — WebRTC can still reveal your address in proxy mode', level: 'error' });
@@ -1423,7 +1457,7 @@ function createService(opts = {}) {
       // "disconnected".
       if (guardToken) await leakGuard.release({ token: guardToken }).catch(() => {});
       if (myTun && myTun.active) { try { await myTun.stop(); } catch {} }
-      return abandoned;
+      return giveWay();
     }
 
     // On a router a gateway that did not come up is a FAILED connect, not the
@@ -1432,7 +1466,7 @@ function createService(opts = {}) {
     // for a success. Undone and thrown, so each of them retries.
     if (OPENWRT && settings.tunMode && tunError) {
       const overtaken = await abortGateway(serverId, prevActive, myTun, stale, tunError);
-      if (overtaken) return abandoned;
+      if (overtaken) return giveWay();
       throw new Error(tunError);
     }
 
@@ -1929,6 +1963,7 @@ function createService(opts = {}) {
       // the watchers, and a recovery that hung (a stuck privileged shell) must not
       // keep its lock and park every future trigger.
       connGen++;
+      disconnectGen = connGen;
       recoverGen++;
       recovering = false;
       lastRebuilt = null;              // a connection made afresh starts with no crash history
@@ -2067,6 +2102,9 @@ function createService(opts = {}) {
       subscriptions: store.get('subscriptions', []),
       settings: getSettings(),
       activeServerId: store.get('activeServerId', null),
+      // the picker's own choice, and the last connection made: what a restart restores
+      selectedServerId: store.get('selectedServerId', null),
+      lastServerId: store.get('lastServerId', null),
       chain: store.get('chain', []),
       chains: getChains(),
       pool: getPool(),
@@ -2116,6 +2154,7 @@ function createService(opts = {}) {
     'servers:clear': () => { store.set('servers', []); return []; },
     'servers:list': () => store.get('servers', []),
     'servers:link': (id) => { const s = store.get('servers', []).find(x => x.id === id); return s ? buildShareLink(s) : ''; },
+    'selection:set': (id) => setSelection(id),
 
     'chain:get': () => store.get('chain', []),
     'chain:set': (ids) => { const v = Array.isArray(ids) ? ids : []; store.set('chain', v); return v; },

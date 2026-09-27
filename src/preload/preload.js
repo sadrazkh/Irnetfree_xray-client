@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('api', {
   clearServers: () => ipcRenderer.invoke('servers:clear'),
   listServers: () => ipcRenderer.invoke('servers:list'),
   serverLink: (id) => ipcRenderer.invoke('servers:link', id),
+  // the picker's choice, kept across restarts (see main.js setSelection)
+  setSelection: (id) => ipcRenderer.invoke('selection:set', id),
 
   // proxy chain (legacy single chain)
   getChain: () => ipcRenderer.invoke('chain:get'),

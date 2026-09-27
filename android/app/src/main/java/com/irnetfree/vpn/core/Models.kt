@@ -277,6 +277,120 @@ data class AppSettings(
     }
 }
 
+/**
+ * LAN sharing: while connected, the other devices on the phone's Wi-Fi or on
+ * its hotspot use the phone as a proxy — a SOCKS5 and an HTTP inbound of their
+ * own, on every interface, routed exactly like the tunnel's traffic (the same
+ * rules, the same DNS plan) on whichever core runs (ConfigBuilder,
+ * SingboxConfig). The tunnel's own socks-in/http-in stay on 127.0.0.1 with
+ * their per-session credentials (LocalAuth.kt); these are separate inbounds.
+ *
+ * Off by default. Password on by default, with a generated username and
+ * password the user can read, copy and change; off, anyone on the network can
+ * use the connection. Stored under a key of its own (LanShareStore), not inside
+ * AppSettings: the Settings screen writes AppSettings back whole from the copy
+ * it opened with, and a change made in this section meanwhile was lost with it.
+ */
+data class LanShare(
+    val enabled: Boolean = false,
+    val socksPort: Int = DEFAULT_SOCKS,
+    val httpPort: Int = DEFAULT_HTTP,
+    val auth: Boolean = true,
+    val user: String = "",
+    val pass: String = ""
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("enabled", enabled); put("socksPort", socksPort); put("httpPort", httpPort)
+        put("auth", auth); put("user", user); put("pass", pass)
+    }
+
+    /**
+     * Why this share cannot open beside [s]'s own inbounds and the pool's, in
+     * words for the user; null = it can. Checked by the Settings section as it
+     * is typed and again at connect, where a share that no longer fits (the
+     * tunnel's port was changed onto it since) is left out of that connection.
+     */
+    fun problem(s: AppSettings, pool: List<PoolEntry>): String? {
+        for ((name, p) in listOf("SOCKS" to socksPort, "HTTP" to httpPort)) {
+            if (p < MIN_PORT || p > MAX_PORT) return "The LAN $name port must be between $MIN_PORT and $MAX_PORT"
+        }
+        if (socksPort == httpPort) return "The LAN SOCKS and HTTP ports must differ"
+        for (p in listOf(socksPort, httpPort)) {
+            if (p == s.socksPort) return "Port $p is the tunnel's own SOCKS port"
+            if (p == s.httpPort) return "Port $p is the tunnel's own HTTP port"
+            if (p == s.apiPort) return "Port $p is reserved for the core's API port"
+            val e = pool.firstOrNull { it.socksPort == p || it.httpPort == p }
+            if (e != null) return "Port $p belongs to the proxy pool (${e.name})"
+        }
+        if (auth) credentialProblem(user, pass)?.let { m -> return m }
+        return null
+    }
+
+    /** Blank credentials filled in with generated ones; set ones are kept. */
+    fun withCredentials(): LanShare =
+        if (user.isNotEmpty() && pass.isNotEmpty()) this
+        else copy(user = user.ifEmpty { newUser() }, pass = pass.ifEmpty { newPass() })
+
+    companion object {
+        const val DEFAULT_SOCKS = 10810
+        const val DEFAULT_HTTP = 10811
+        const val MIN_PORT = 1024
+        const val MAX_PORT = 65535
+        /** The inbound tags, in both config formats: TunnelSetup.withoutLan finds them by these. */
+        const val SOCKS_TAG = "lan-socks"
+        const val HTTP_TAG = "lan-http"
+        /** Every interface: the phone's Wi-Fi address and its hotspot's alike. */
+        const val LISTEN = "0.0.0.0"
+
+        // No 0/O, 1/l/i: these get typed on a TV or a laptop by hand.
+        private const val ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+        private val rng = java.security.SecureRandom()
+        private fun pick(n: Int): String = buildString { repeat(n) { append(ALPHABET[rng.nextInt(ALPHABET.length)]) } }
+        fun newUser(): String = "irnf-" + pick(4)
+        fun newPass(): String = pick(12)
+
+        fun fromJson(o: JSONObject): LanShare = LanShare(
+            enabled = o.optBoolean("enabled", false),
+            socksPort = o.optInt("socksPort", DEFAULT_SOCKS),
+            httpPort = o.optInt("httpPort", DEFAULT_HTTP),
+            auth = o.optBoolean("auth", true),
+            user = o.optString("user", ""),
+            pass = o.optString("pass", "")
+        )
+
+        /**
+         * Printable ASCII only (no spaces): SOCKS5 sends them as bytes, and a
+         * person types them on another device. The username carries no ":" —
+         * HTTP's Basic auth splits the pair on the first one.
+         */
+        fun credentialProblem(user: String, pass: String): String? {
+            fun bad(v: String) = v.any { c -> c.code < 33 || c.code > 126 }
+            return when {
+                user.isEmpty() -> "Enter a username, or turn the password off"
+                pass.isEmpty() -> "Enter a password, or turn the password off"
+                user.length > 64 || pass.length > 64 -> "The username and the password take at most 64 characters each"
+                bad(user) || bad(pass) -> "Letters, digits and plain symbols only — no spaces"
+                user.contains(':') -> "The username cannot contain \":\""
+                else -> null
+            }
+        }
+
+        /**
+         * Do [a] and [b] open the same share — the same ports and, with a
+         * password, the same credentials? Off (or null) on both sides is the
+         * same too. What the running tunnel opened (VpnState.lanShared) against
+         * what Settings holds now: different means "applies on the next connect".
+         */
+        fun same(a: LanShare?, b: LanShare?): Boolean {
+            val x = a?.takeIf { it.enabled }
+            val y = b?.takeIf { it.enabled }
+            if (x == null || y == null) return x == null && y == null
+            return x.socksPort == y.socksPort && x.httpPort == y.httpPort && x.auth == y.auth &&
+                (!x.auth || (x.user == y.user && x.pass == y.pass))
+        }
+    }
+}
+
 /** What to connect through. single / chain / pool / advanced. */
 sealed class ConnectionPlan {
     data class Single(val server: ServerConfig) : ConnectionPlan()
@@ -289,6 +403,28 @@ sealed class ConnectionPlan {
         val rules: List<RouteRule>, val def: String,
         val serversById: Map<String, ServerConfig>, val chainsById: Map<String, List<ServerConfig>>
     ) : ConnectionPlan()
+
+    /**
+     * The same plan — the same servers, chain, pool or rules — with each
+     * record replaced by [fresh]'s record of that id (one [fresh] no longer
+     * has is kept as it was). How a connect picks up the certificate pins it
+     * has just learnt: rebuilding the plan from the store's CURRENT selection
+     * instead connected whatever had been selected meanwhile, under the label
+     * and notification of the server that was asked for.
+     */
+    fun withRecords(fresh: (String) -> ServerConfig?): ConnectionPlan {
+        fun f(s: ServerConfig): ServerConfig = fresh(s.id) ?: s
+        fun servers(m: Map<String, ServerConfig>): Map<String, ServerConfig> = m.mapValues { e: Map.Entry<String, ServerConfig> -> f(e.value) }
+        fun chains(m: Map<String, List<ServerConfig>>): Map<String, List<ServerConfig>> =
+            m.mapValues { e: Map.Entry<String, List<ServerConfig>> -> e.value.map { s: ServerConfig -> f(s) } }
+        val p: ConnectionPlan = this
+        return when (p) {
+            is Single -> Single(f(p.server))
+            is Chain -> Chain(p.name, p.members.map { s: ServerConfig -> f(s) })
+            is Pool -> p.copy(serversById = servers(p.serversById), chainsById = chains(p.chainsById))
+            is Advanced -> p.copy(serversById = servers(p.serversById), chainsById = chains(p.chainsById))
+        }
+    }
 }
 
 fun newId(prefix: String): String =

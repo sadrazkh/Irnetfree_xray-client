@@ -12,6 +12,8 @@ const state = {
   activeServerId: null,   // currently connected server
   activeEngine: '',       // core the live connection runs on
   selectedServerId: null, // chosen in the picker (target for connect)
+  savedSelection: null,   // what main last stored as the selection (keepSelectionValid)
+  lastServerId: null,     // the last connection made — a selection that is gone falls back to it
   connected: false,
   connecting: false,
   tunAvailable: false,
@@ -287,7 +289,7 @@ async function init() {
   state.subscriptions = data.subscriptions || [];
   state.settings = data.settings || {};
   state.activeServerId = data.activeServerId || null;
-  state.selectedServerId = data.activeServerId || (state.servers[0] && state.servers[0].id) || null;
+  state.lastServerId = data.lastServerId || null;
   state.tunAvailable = !!data.tunAvailable;
   state.elevated = !!data.elevated;
   state.assets = data.assets || {};
@@ -308,6 +310,12 @@ async function init() {
     id: e.id, name: e.name || 'Proxy', target: e.target || '',
     socksPort: e.socksPort || 0, httpPort: e.httpPort || 0, enabled: e.enabled !== false
   }));
+  // The picker's choice survives a restart: the one main stored, then the live
+  // connection (a reload of a connected window), then the last one made, then
+  // the first server. Resolved once the chains, the pool and the settings are
+  // in — they decide what can still be selected.
+  state.savedSelection = data.selectedServerId || null;
+  state.selectedServerId = resolveSelection([data.selectedServerId, data.activeServerId, data.lastServerId], selectable, state.servers);
 
   window.i18n.applyI18n(state.settings.lang || 'fa');
   $('#btnLang').textContent = (state.settings.lang || 'fa') === 'fa' ? 'EN' : 'فا';
@@ -339,8 +347,9 @@ async function init() {
   applyFlavor();
   renderPendingBanner();
 
-  // app version + xray-core version
+  // app version (Settings → About, and small under the logo) + xray-core version
   $('#appVersion').textContent = 'v' + (state.version || '?');
+  $('#tbVersion').textContent = state.version ? 'v' + state.version : '';
   refreshXrayVersion();
 
   // the store failed to load before this window existed, so it is delivered here
@@ -1040,13 +1049,62 @@ function serverGroups() {
       // A subscription can be deleted while its servers stay behind. Name the
       // group honestly rather than tipping them into the hand-added pile, where
       // the next refresh would look like it had lost them.
-      groups.set(s.subId, { name: sub ? sub.name : t('srv.subGone'), items: [] });
+      groups.set(s.subId, { name: sub ? sub.name : t('srv.subGone'), sub: sub || null, items: [] });
     }
     groups.get(s.subId).items.push(s);
   }
   const out = [];
-  if (manual.length) out.push({ id: '', name: t('srv.manual'), items: manual });
-  for (const [id, g] of groups) out.push({ id, name: g.name, items: g.items });
+  if (manual.length) out.push({ id: '', name: t('srv.manual'), sub: null, items: manual });
+  for (const [id, g] of groups) out.push({ id, name: g.name, sub: g.sub, items: g.items });
+  return out;
+}
+
+/* ------------------- folded groups (remembered per window) ------------------- */
+// The groups the user folded, by key ('manual', 'sub:<id>'). Kept the way the
+// theme is — in this window's storage, and per browser on the router — and
+// open is the default, so a group nobody folded (a new subscription too) shows
+// its servers.
+const FOLDED_KEY = 'irnetfree.foldedGroups';
+const foldedGroups = loadFoldedGroups();
+function loadFoldedGroups() {
+  try {
+    const v = JSON.parse(localStorage.getItem(FOLDED_KEY) || '[]');
+    return new Set(Array.isArray(v) ? v.filter((k) => typeof k === 'string') : []);
+  } catch { return new Set(); }
+}
+function setGroupFolded(key, folded) {
+  if (folded) foldedGroups.add(key); else foldedGroups.delete(key);
+  try { localStorage.setItem(FOLDED_KEY, JSON.stringify([...foldedGroups])); } catch { /* only costs remembering it */ }
+}
+/** A group's key: the subscription it came from, or the hand-added pile. */
+function groupKey(subId) { return subId ? 'sub:' + subId : 'manual'; }
+
+/**
+ * A subscription's quota and time left, short enough for its group head:
+ * { data, time, level } — empty strings for what it does not report; `level`
+ * by the thresholds subUsageHtml() colours its bars with ('' | 'mid' | 'bad').
+ * `data` is figures only (it is set left-to-right in both languages): an
+ * unlimited quota reads "1.5 GB / ∞".
+ */
+function subUsageBrief(sub) {
+  const out = { data: '', time: '', level: '' };
+  const u = sub && sub.usage;
+  if (!u) return out;
+  const used = (u.upload || 0) + (u.download || 0);
+  let pct = 0;
+  if (u.total > 0) {
+    pct = Math.round(used / u.total * 100);
+    out.data = `${fmtBytes(used)} / ${fmtBytes(u.total)}`;
+  } else if (used > 0) {
+    out.data = `${fmtBytes(used)} / ∞`;
+  }
+  let days = Infinity;
+  if (u.expire > 0) {
+    const rem = u.expire - Date.now() / 1000;
+    days = rem / 86400;
+    out.time = rem <= 0 ? t('sub.expired') : `${fmtDuration(rem)} ${t('sub.left')}`;
+  }
+  out.level = (pct >= 90 || days < 3) ? 'bad' : (pct >= 70 || days < 7) ? 'mid' : '';
   return out;
 }
 
@@ -1058,71 +1116,140 @@ function renderServers() {
   const groups = serverGroups();
   // no headings when there is nothing to tell apart
   const labelled = groups.length > 1 || !!(groups[0] && groups[0].id);
-  for (const g of groups) {
-  let host = list;
-  if (labelled) {
-    const wrap = document.createElement('div');
-    wrap.className = 'srv-group';
-    const head = document.createElement('div');
-    head.className = 'srv-group-head';
-    head.innerHTML = `<span class="srv-group-ico">${g.id ? '🔗' : '✎'}</span>
-      <span class="srv-group-name"></span><span class="srv-group-count"></span>`;
-    head.querySelector('.srv-group-name').textContent = g.name;
-    head.querySelector('.srv-group-count').textContent = String(g.items.length);
-    wrap.appendChild(head);
-    list.appendChild(wrap);
-    host = wrap;
+  if (!labelled) {
+    for (const g of groups) for (const s of g.items) list.appendChild(serverCard(s));
+    return;
   }
-  for (const s of g.items) {
-    const card = document.createElement('div');
-    const isActive = s.id === state.activeServerId && state.connected;
-    const isSel = s.id === state.selectedServerId;
-    card.className = 'server-card' + (isActive ? ' active' : '') + (isSel ? ' selected' : '');
-    card.dataset.srvId = s.id;
+  groups.forEach((g, n) => list.appendChild(serverGroup(g, n)));
+  refreshSelection();   // a folded group holding the selection says so on its head
+}
 
-    const tl = pingResultLabel((state.pings[s.id] || {}).tcp);
-    const rl = pingResultLabel((state.pings[s.id] || {}).real);
-    const ul = pingResultLabel((state.pings[s.id] || {}).upload);
-    // always in the markup, hidden when not selected: refreshSelection() can
-    // then move it between cards without rebuilding either of them
-    const selBadge = `<span class="sel-badge"${isSel ? '' : ' hidden'}>✓ ${escapeHtml(t('srv.selected'))}</span>`;
+/**
+ * One group of the list. Its head folds it — a button with aria-expanded, the
+ * count always on it — and a subscription's head carries that subscription's
+ * own refresh, and its quota and time left when it reports them, so it can be
+ * looked after from here (adding and editing stay on the Subscriptions page).
+ * A folded group builds no cards until it is opened: a 300-server
+ * subscription folded away costs one row.
+ */
+function serverGroup(g, n) {
+  const key = groupKey(g.id);
+  const open = !foldedGroups.has(key);
+  const wrap = document.createElement('div');
+  wrap.className = 'srv-group' + (open ? '' : ' folded');
+  wrap.dataset.group = key;
 
-    card.innerHTML = `
-      <span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(s.id)}"></span>
-      <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>
-      <div class="srv-info">
-        <div class="srv-name">${escapeHtml(s.name)} ${selBadge}</div>
-        <div class="srv-addr">${escapeHtml(s.address)}:${escapeHtml(s.port)}</div>
-      </div>
-      <div class="stat-group">
-        <span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>⚡</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${escapeHtml(s.id)}">${tl.txt}</b></span>
-        <span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${escapeHtml(s.id)}">${rl.txt}</b></span>
-        <span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${escapeHtml(s.id)}">${ul.txt}</b></span>
-      </div>
-      <span class="srv-usage" data-usage="${escapeHtml(s.id)}" title="${escapeHtml(t('srv.usage'))} — ${escapeHtml(t('srv.usageClick'))}">${usageLabel(s.id)}</span>
-      <div class="srv-actions">
-        <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
-        <button class="icon-btn copy-srv" data-i18n-title="btn.copy" title="copy">⧉</button>
-        <button class="icon-btn qr-srv" data-i18n-title="btn.qr" title="QR">▦</button>
-        <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="edit">✎</button>
-        <button class="icon-btn connect-srv" title="▶">▶</button>
-        <button class="icon-btn del-srv" title="🗑">🗑</button>
-      </div>`;
+  const head = document.createElement('div');
+  head.className = 'srv-group-head';
+  const toggle = document.createElement('button');
+  toggle.className = 'srv-group-toggle';
+  toggle.type = 'button';
+  toggle.innerHTML = `<span class="srv-group-chev" aria-hidden="true">▾</span>
+    <span class="srv-group-ico" aria-hidden="true">${g.id ? '🔗' : '✎'}</span>
+    <span class="srv-group-name"></span><span class="srv-group-count"></span>`;
+  toggle.querySelector('.srv-group-name').textContent = g.name;
+  toggle.querySelector('.srv-group-count').textContent = String(g.items.length);
+  toggle.title = t('srv.groupToggle');
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.setAttribute('aria-controls', 'srvGroup' + n);
+  head.appendChild(toggle);
 
-    // clicking the card body selects the server (syncs with the home picker)
-    card.querySelector('.srv-info').onclick = () => selectServer(s.id);
-    card.querySelector('.proto-badge').onclick = () => selectServer(s.id);
-    card.querySelector('.ping-srv').onclick = (e) => { e.stopPropagation(); pingServer(s.id); };
-    card.querySelector('.copy-srv').onclick = (e) => { e.stopPropagation(); copyServerLink(s.id); };
-    card.querySelector('.qr-srv').onclick = (e) => { e.stopPropagation(); showServerQr(s.id); };
-    card.querySelector('.edit-srv').onclick = (e) => { e.stopPropagation(); openEdit(s.id); };
-    card.querySelector('.connect-srv').onclick = (e) => { e.stopPropagation(); connect(s.id); };
-    card.querySelector('.del-srv').onclick = (e) => { e.stopPropagation(); deleteServer(s.id); };
-    // the lifetime figure is its own clear button — nothing to clear when empty
-    card.querySelector('.srv-usage').onclick = (e) => { e.stopPropagation(); clearUsageFor(s.id); };
-    host.appendChild(card);
+  if (g.sub) {
+    const brief = subUsageBrief(g.sub);
+    if (brief.data || brief.time) {
+      const meta = document.createElement('span');
+      meta.className = 'srv-group-meta' + (brief.level ? ' ' + brief.level : '');
+      meta.title = t('sub.lastUpdate') + ': ' + timeAgo(g.sub.lastUpdated);
+      for (const [text, dir] of [[brief.data, 'ltr'], [brief.time, '']]) {
+        if (!text) continue;
+        const part = document.createElement('span');
+        if (dir) part.dir = dir;
+        part.textContent = text;
+        meta.appendChild(part);
+      }
+      head.appendChild(meta);
     }
+    const refresh = document.createElement('button');
+    refresh.className = 'icon-btn srv-group-refresh';
+    refresh.type = 'button';
+    refresh.textContent = '⟳';
+    refresh.title = t('srv.subRefresh');
+    refresh.setAttribute('aria-label', refresh.title);
+    refresh.onclick = () => {
+      refresh.disabled = true;
+      refreshSub(g.id).finally(() => { refresh.disabled = false; });
+    };
+    head.appendChild(refresh);
   }
+  wrap.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'srv-group-body';
+  body.id = 'srvGroup' + n;
+  body.hidden = !open;
+  if (open) for (const s of g.items) body.appendChild(serverCard(s));
+  wrap.appendChild(body);
+
+  toggle.onclick = () => {
+    const nowOpen = toggle.getAttribute('aria-expanded') !== 'true';
+    setGroupFolded(key, !nowOpen);
+    toggle.setAttribute('aria-expanded', String(nowOpen));
+    wrap.classList.toggle('folded', !nowOpen);
+    body.hidden = !nowOpen;
+    if (nowOpen && !body.firstChild) for (const s of g.items) body.appendChild(serverCard(s));
+  };
+  return wrap;
+}
+
+/** One server's card, wired. */
+function serverCard(s) {
+  const card = document.createElement('div');
+  const isActive = s.id === state.activeServerId && state.connected;
+  const isSel = s.id === state.selectedServerId;
+  card.className = 'server-card' + (isActive ? ' active' : '') + (isSel ? ' selected' : '');
+  card.dataset.srvId = s.id;
+
+  const tl = pingResultLabel((state.pings[s.id] || {}).tcp);
+  const rl = pingResultLabel((state.pings[s.id] || {}).real);
+  const ul = pingResultLabel((state.pings[s.id] || {}).upload);
+  // always in the markup, hidden when not selected: refreshSelection() can
+  // then move it between cards without rebuilding either of them
+  const selBadge = `<span class="sel-badge"${isSel ? '' : ' hidden'}>✓ ${escapeHtml(t('srv.selected'))}</span>`;
+
+  card.innerHTML = `
+    <span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(s.id)}"></span>
+    <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>
+    <div class="srv-info">
+      <div class="srv-name">${escapeHtml(s.name)} ${selBadge}</div>
+      <div class="srv-addr">${escapeHtml(s.address)}:${escapeHtml(s.port)}</div>
+    </div>
+    <div class="stat-group">
+      <span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>⚡</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${escapeHtml(s.id)}">${tl.txt}</b></span>
+      <span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${escapeHtml(s.id)}">${rl.txt}</b></span>
+      <span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${escapeHtml(s.id)}">${ul.txt}</b></span>
+    </div>
+    <span class="srv-usage" data-usage="${escapeHtml(s.id)}" title="${escapeHtml(t('srv.usage'))} — ${escapeHtml(t('srv.usageClick'))}">${usageLabel(s.id)}</span>
+    <div class="srv-actions">
+      <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
+      <button class="icon-btn copy-srv" data-i18n-title="btn.copy" title="copy">⧉</button>
+      <button class="icon-btn qr-srv" data-i18n-title="btn.qr" title="QR">▦</button>
+      <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="edit">✎</button>
+      <button class="icon-btn connect-srv" title="▶">▶</button>
+      <button class="icon-btn del-srv" title="🗑">🗑</button>
+    </div>`;
+
+  // clicking the card body selects the server (syncs with the home picker)
+  card.querySelector('.srv-info').onclick = () => selectServer(s.id);
+  card.querySelector('.proto-badge').onclick = () => selectServer(s.id);
+  card.querySelector('.ping-srv').onclick = (e) => { e.stopPropagation(); pingServer(s.id); };
+  card.querySelector('.copy-srv').onclick = (e) => { e.stopPropagation(); copyServerLink(s.id); };
+  card.querySelector('.qr-srv').onclick = (e) => { e.stopPropagation(); showServerQr(s.id); };
+  card.querySelector('.edit-srv').onclick = (e) => { e.stopPropagation(); openEdit(s.id); };
+  connectGlyph(card.querySelector('.connect-srv')).onclick = (e) => { e.stopPropagation(); connect(s.id); };
+  card.querySelector('.del-srv').onclick = (e) => { e.stopPropagation(); deleteServer(s.id); };
+  // the lifetime figure is its own clear button — nothing to clear when empty
+  card.querySelector('.srv-usage').onclick = (e) => { e.stopPropagation(); clearUsageFor(s.id); };
+  return card;
 }
 
 /**
@@ -1138,6 +1265,10 @@ function refreshSelection() {
     const badge = card.querySelector('.sel-badge');
     if (badge) badge.hidden = !on;
   });
+  // a folded group has no cards to mark: its head says it holds the selection
+  const selSrv = srvById(sel);
+  const selGroup = selSrv ? groupKey(selSrv.subId) : null;
+  $$('#serverList .srv-group[data-group]').forEach((g) => g.classList.toggle('has-sel', g.dataset.group === selGroup));
 }
 
 /** Lifetime totals changed: rewrite the spans that show them, nothing else. */
@@ -1182,6 +1313,7 @@ function bestServerId() {
 }
 
 async function connectAuto() {
+  if (state.connecting) return cancelConnect();   // the row is the Cancel while connecting
   let best = bestServerId();
   if (!best) { await pingMany(state.servers.map(s => s.id)); best = bestServerId(); }
   if (!best) return toast(t('t.autoNone'), 'err');
@@ -1220,6 +1352,42 @@ function advancedReady() {
     (((state.settings.routeRules || []).length > 0) || !!state.settings.routeDefault);
 }
 
+/**
+ * Which config the picker points at: the first of `candidates` that can still
+ * be selected (`valid`), else the first server, else nothing. Pure — the order
+ * of the candidates is the caller's (see init and keepSelectionValid).
+ */
+function resolveSelection(candidates, valid, servers) {
+  for (const id of candidates || []) if (id && valid(id)) return id;
+  return (servers && servers[0] && servers[0].id) || null;
+}
+
+/** Whether `id` can be connected right now: a server, a ready chain, advanced routing or the pool once set up. */
+function selectable(id) {
+  if (id === ADV_ID) return advancedReady();
+  if (id === POOL_ID) return poolReady();
+  if (isChainId(id)) return chainReady(chainById(id));
+  return !!srvById(id);
+}
+
+/**
+ * The selection survives a restart (main's selectedServerId). Checked whenever
+ * the picker is drawn — which every change of what can be selected ends in —
+ * so one that is gone falls back to the live connection, the last one made,
+ * then the first server; and whatever it is now goes to main when it moved.
+ */
+function keepSelectionValid() {
+  const id = resolveSelection([state.selectedServerId, state.activeServerId, state.lastServerId], selectable, state.servers);
+  if (id !== state.selectedServerId) {
+    state.selectedServerId = id;
+    refreshSelection();
+  }
+  if (id !== state.savedSelection && window.api.setSelection) {
+    state.savedSelection = id;
+    Promise.resolve(window.api.setSelection(id)).catch(() => { state.savedSelection = undefined; });
+  }
+}
+
 function selectServer(id) {
   state.selectedServerId = id;
   refreshSelection();
@@ -1236,10 +1404,10 @@ function renderPicker() {
   const btnPing = $('#pickerPing');
   const menu = $('#pickerMenu');
 
-  // drop a stale pseudo selection if its feature is no longer available
-  if (isChainId(state.selectedServerId) && !chainReady(chainById(state.selectedServerId))) state.selectedServerId = null;
-  if (state.selectedServerId === ADV_ID && !advancedReady()) state.selectedServerId = null;
-  if (state.selectedServerId === POOL_ID && !poolReady()) state.selectedServerId = null;
+  // a selection that can no longer be connected (a server deleted or dropped
+  // by a refresh, a chain that lost a hop, the pool or advanced routing
+  // emptied) falls back — and whatever it is now, main keeps it
+  keepSelectionValid();
 
   const selId = state.selectedServerId;
   const sel = state.servers.find(s => s.id === selId);
@@ -1321,8 +1489,8 @@ function renderPicker() {
   // and connects, and the picker then shows the server that won.
   if (state.servers.length >= 2) {
     const row = document.createElement('div');
-    row.className = 'picker-item picker-special';
-    row.innerHTML = `<span class="q-dot"></span><span class="proto-badge proto-auto">⚡</span><span class="pi-name">${escapeHtml(t('picker.auto'))}</span>`;
+    row.className = 'picker-item picker-special picker-auto';
+    row.innerHTML = `<span class="q-dot"></span><span class="proto-badge proto-auto">⚡</span><span class="pi-name">${escapeHtml(t(state.connecting ? 'power.cancelHint' : 'picker.auto'))}</span>`;
     row.onclick = () => { closePicker(); connectAuto(); };
     menu.appendChild(row);
   }
@@ -1450,7 +1618,8 @@ document.addEventListener('paste', (e) => {
 async function deleteServer(id) {
   state.servers = await window.api.deleteServer(id);
   delete state.pings[id];
-  if (state.selectedServerId === id) state.selectedServerId = state.servers[0] && state.servers[0].id || null;
+  // the picker falls back to the live connection, the last one made, then the first server (keepSelectionValid)
+  if (state.selectedServerId === id) state.selectedServerId = null;
   // prune the deleted server from any named chains
   const inAnyChain = state.chains.some(c => (c.members || []).includes(id));
   if (inAnyChain) {
@@ -1605,19 +1774,30 @@ function showGeo(info) {
 function hideGeo() { $('#connGeo').hidden = true; }
 
 /* ----------------------------- connect / disconnect ----------------------------- */
+// The connect this window is waiting on, and the last one the user cancelled:
+// a cancelled connect that then fails has failed because of the cancel, and
+// is no error to show.
+let connectSeq = 0;
+let cancelledSeq = 0;
+
 async function connect(id) {
-  if (state.connecting) return;
+  // A connect in flight (or a rebuild): every control that would start one is
+  // its Cancel. It used to do nothing here, so a connect that hung — a dead
+  // server, no network — could only be waited out.
+  if (state.connecting) return cancelConnect();
   if (state.connected && state.activeServerId === id) return disconnect();
   // TUN wanted but not elevated (Windows): offer to relaunch as admin first.
   if (state.settings.tunMode && state.tunAvailable && !state.elevated && state.platform === 'win32') {
     if (await promptRelaunchAdmin()) return;
   }
   selectServer(id);
+  const seq = ++connectSeq;
   state.connecting = true;
   setConnUI('connecting', id);
   try {
     await window.api.connect(id);
   } catch (e) {
+    if (seq <= cancelledSeq) return;   // the 'disconnected' the Cancel brought is the last word
     state.connecting = false;
     setConnUI('error');
     toast(t('t.connectFailed') + ': ' + e.message, 'err');
@@ -1630,7 +1810,20 @@ async function disconnect() {
   try { await window.api.disconnect(); } catch (e) { toast(e.message, 'err'); }
 }
 
+/**
+ * Stop the connect in flight. It is a disconnect: main's (or the service's)
+ * disconnect overtakes the connect, which gives way at its next step and
+ * undoes whatever it started after the teardown, and the 'disconnected' status
+ * brings every window — and every browser on the router — back.
+ */
+function cancelConnect() {
+  cancelledSeq = connectSeq;
+  $('#connState').textContent = t('state.cancelling');
+  return disconnect();
+}
+
 $('#powerBtn').onclick = () => {
+  if (state.connecting) return cancelConnect();
   if (state.connected) return disconnect();
   const id = state.selectedServerId || state.activeServerId || (state.servers[0] && state.servers[0].id);
   if (!id) return toast(t('t.addServerFirst'), 'err');
@@ -1710,6 +1903,36 @@ function setConnUI(stateStr, id) {
   startUptime(stateStr === 'connected');
   renderTrafficPath(stateStr);
   renderInspector();
+  refreshConnectControls();
+}
+
+/**
+ * While a connect is in flight every control that would start one says what it
+ * does now: Cancel (see connect()). The power button's tooltip and accessible
+ * name, the ▶ of each server and chain, the pool's connect button and the
+ * picker's Auto row — rewritten where they exist; the ones built later ask
+ * connectGlyph() themselves.
+ */
+function refreshConnectControls() {
+  const busy = !!state.connecting;
+  const hint = t(busy ? 'power.cancelHint' : state.connected ? 'power.disconnect' : 'power.connect');
+  const power = $('#powerBtn');
+  power.title = hint;
+  power.setAttribute('aria-label', hint);
+  $$('.connect-srv, .ch-connect').forEach((b) => connectGlyph(b));
+  const pool = $('#btnPoolConnect');
+  if (pool) pool.textContent = t(busy ? 'power.cancel' : 'pool.connect');
+  const auto = $('#pickerMenu .picker-auto .pi-name');
+  if (auto) auto.textContent = t(busy ? 'power.cancelHint' : 'picker.auto');
+}
+
+/** A ▶ button: play while idle, stop (the connect's Cancel) while one is in flight. */
+function connectGlyph(btn) {
+  const busy = !!state.connecting;
+  btn.textContent = busy ? '■' : '▶';
+  btn.title = t(busy ? 'power.cancel' : 'power.connect');
+  btn.setAttribute('aria-label', btn.title);
+  return btn;
 }
 
 /* ------------------------- title-bar uptime clock ------------------------- */
@@ -1988,6 +2211,7 @@ window.api.onStatus((d) => {
     state.connected = true;
     state.connecting = false;
     state.activeServerId = d.serverId;
+    state.lastServerId = d.serverId;   // main's lastServerId moved with it
     state.lan = d.lan || null;
     // a fresh connect is built from the current settings — nothing is stale
     setPending(d.pendingReconnect || []);
@@ -3313,7 +3537,7 @@ function renderChains() {
 
     // actions
     card.querySelector('.ch-ping').onclick = () => pingServer(chain.id);
-    card.querySelector('.ch-connect').onclick = () => { if (ready) connect(chain.id); };
+    connectGlyph(card.querySelector('.ch-connect')).onclick = () => { if (ready) connect(chain.id); };
     card.querySelector('.ch-del').onclick = () => {
       state.chains = state.chains.filter(c => c.id !== chain.id);
       if (state.selectedServerId === chain.id) state.selectedServerId = null;
@@ -3445,6 +3669,7 @@ $('#btnAddPool').onclick = () => {
 };
 
 $('#btnPoolConnect').onclick = () => {
+  if (state.connecting) return cancelConnect();
   if (!poolReady()) return toast(t('pool.needOne'), 'err');
   connect(POOL_ID);
 };

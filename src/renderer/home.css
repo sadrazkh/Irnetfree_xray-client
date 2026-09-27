@@ -184,9 +184,20 @@
 }
 .power-btn:hover { filter: brightness(.94); }
 .power-btn.connected { background: var(--soft); border-color: var(--softline); color: var(--accent); }
-.power-btn.connecting { background: var(--soft); border-color: var(--warn); color: var(--warn); }
+.power-btn.connecting { background: var(--soft); border-color: var(--warn); color: var(--warn); row-gap: 6px; }
 .power-btn.connecting .power-ico { animation: pulse 1.4s ease-in-out infinite; }
 .power-ico { width: 46px; height: 46px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+/* While connecting the button is the connect's Cancel: it says so under the
+   icon, and turns to the danger colour under the pointer. */
+.power-cancel {
+  display: none;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  line-height: 1;
+}
+.power-btn.connecting .power-cancel { display: block; }
+.power-btn.connecting:hover { border-color: var(--danger); color: var(--danger); }
 .connect-state { font-size: 13px; font-weight: 700; text-align: center; }
 .connect-meta {
   font-family: var(--mono);
