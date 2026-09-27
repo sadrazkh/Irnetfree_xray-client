@@ -379,6 +379,7 @@ button.pool-item:hover .pool-add { color: var(--accent); }
 .srv-group-toggle:hover .srv-group-name { color: var(--ink); }
 .srv-group-toggle .srv-group-name { min-width: 0; }   /* a long name ellipsises, the count stays */
 .srv-group-chev {
+  display: inline-block;   /* a transform does nothing to an inline box */
   font-size: 11px;
   line-height: 1;
   color: var(--ink3);
@@ -401,11 +402,11 @@ button.pool-item:hover .pool-add { color: var(--accent); }
   display: inline-flex;
   gap: 8px;
   flex: 0 0 auto;
-  font-family: var(--mono);
   font-size: 11px;
   color: var(--ink3);
   white-space: nowrap;
 }
+.srv-group-meta [dir="ltr"] { font-family: var(--mono); }   /* the figures; "12 days left" reads in the UI face */
 .srv-group-meta.mid { color: var(--warn); }
 .srv-group-meta.bad { color: var(--danger); }
 /* its refresh sits past the rule, at the end of the row */

@@ -326,7 +326,7 @@ test('D2: a subscription’s head carries its own refresh, and its quota and tim
   assert.equal(brief({ total: 0, expire: now + 2 * 24 * HOUR }).level, 'bad', 'two days left');
   assert.equal(brief({ total: 0, expire: now + 5 * 24 * HOUR }).level, 'mid');
   assert.deepEqual(brief({ total: 0, expire: now - 10 }), { data: '', time: 'sub.expired', level: 'bad' });
-  assert.equal(brief({ upload: 2048, download: 0 }).data, '2.0 KB · sub.unlimited');
+  assert.equal(brief({ upload: 2048, download: 0 }).data, '2.0 KB / ∞', 'figures only: this part is set left-to-right in both languages');
 });
 
 test('D2: the list is flat when there is nothing to tell apart, a folded group says it holds the selection, and it is styled both ways', () => {
@@ -336,6 +336,7 @@ test('D2: the list is flat when there is nothing to tell apart, a folded group s
   assert.match(fnSource('refreshSelection'), /g\.classList\.toggle\('has-sel', g\.dataset\.group === selGroup\)/);
   assert.match(fnSource('serverGroups'), /sub: sub \|\| null/);
   assert.match(CSS, /\.srv-group\.folded \.srv-group-chev \{ transform: rotate\(-90deg\); \}/);
+  assert.match(CSS, /\.srv-group-chev \{\n\s*display: inline-block;/, 'a transform does nothing to an inline box (seen in the browser: the chevron never turned)');
   assert.match(CSS, /\[dir="rtl"\] \.srv-group\.folded \.srv-group-chev \{ transform: rotate\(90deg\); \}/, 'folded, it points along a Persian line too');
   assert.match(CSS, /\.srv-group-body \{ display: flex; flex-direction: column; gap: 10px; \}/);
   assert.match(CSS, /\.srv-group\.folded\.has-sel \.srv-group-count \{/);

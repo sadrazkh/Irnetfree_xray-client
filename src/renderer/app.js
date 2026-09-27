@@ -1082,6 +1082,8 @@ function groupKey(subId) { return subId ? 'sub:' + subId : 'manual'; }
  * A subscription's quota and time left, short enough for its group head:
  * { data, time, level } — empty strings for what it does not report; `level`
  * by the thresholds subUsageHtml() colours its bars with ('' | 'mid' | 'bad').
+ * `data` is figures only (it is set left-to-right in both languages): an
+ * unlimited quota reads "1.5 GB / ∞".
  */
 function subUsageBrief(sub) {
   const out = { data: '', time: '', level: '' };
@@ -1093,7 +1095,7 @@ function subUsageBrief(sub) {
     pct = Math.round(used / u.total * 100);
     out.data = `${fmtBytes(used)} / ${fmtBytes(u.total)}`;
   } else if (used > 0) {
-    out.data = `${fmtBytes(used)} · ${t('sub.unlimited')}`;
+    out.data = `${fmtBytes(used)} / ∞`;
   }
   let days = Infinity;
   if (u.expire > 0) {
