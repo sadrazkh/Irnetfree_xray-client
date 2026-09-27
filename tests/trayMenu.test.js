@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { trayGroups } = require('../src/main/trayMenu');
+const { trayGroups, trayStopItem } = require('../src/main/trayMenu');
 
 test('trayGroups: hand-added first, then each subscription that has servers, orphans last, capped', () => {
   const servers = [
@@ -18,4 +18,13 @@ test('trayGroups: hand-added first, then each subscription that has servers, orp
   assert.deepEqual(trayGroups(servers, subs, 1).map(g => g.items.length), [1, 1, 1, 1], 'capped per group');
   assert.deepEqual(trayGroups([], subs), []);
   assert.deepEqual(trayGroups(null, null), []);
+});
+
+test('trayStopItem: Disconnect while something is active, the connect’s Cancel while one is in flight', () => {
+  assert.deepEqual(trayStopItem({ active: false, state: 'disconnected', en: true }), { label: 'Disconnect', enabled: false });
+  assert.deepEqual(trayStopItem({ active: true, state: 'connected', en: true }), { label: 'Disconnect', enabled: true });
+  // a first connect has nothing active yet — the item used to be greyed out exactly then
+  assert.deepEqual(trayStopItem({ active: false, state: 'connecting', en: true }), { label: 'Cancel connecting', enabled: true });
+  assert.deepEqual(trayStopItem({ active: true, state: 'reconnecting', en: false }), { label: 'لغو اتصال', enabled: true });
+  assert.deepEqual(trayStopItem({ active: true, state: 'error', en: false }), { label: 'قطع اتصال', enabled: true });
 });

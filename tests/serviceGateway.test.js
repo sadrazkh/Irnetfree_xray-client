@@ -73,6 +73,23 @@ async function until(pred, what, ms = 4000) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const connectedCount = (s) => s.statuses.filter(x => x.state === 'connected').length;
+// Boot retries run on timers, each behind a whole failing connect: on a loaded
+// CI runner (Windows, with every test file running beside this one) four of
+// them once took longer than the 4 s default. These waits are for the attempts,
+// not a race against the clock — a generous deadline only costs time when the
+// test fails anyway.
+const RETRIES_MS = 30000;
+const gatewayStarts = (s) => s.state.events.filter(e => e === 'gateway:start').length;
+/** The count once it has stopped moving: an attempt already past its last gate may still land. */
+async function settledStarts(s, quietMs = 200) {
+  let n = gatewayStarts(s);
+  for (;;) {
+    await sleep(quietMs);
+    const m = gatewayStarts(s);
+    if (m === n) return n;
+    n = m;
+  }
+}
 
 /* ----------------------------- R1: back after a restart ----------------------------- */
 
@@ -105,11 +122,11 @@ test('R1: on a router the boot connect keeps retrying — and a disconnect by ha
   const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } });
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
-  await until(() => s.state.events.filter(e => e === 'gateway:start').length >= 4, 'four boot attempts');
+  await until(() => gatewayStarts(s) >= 4, 'four boot attempts', RETRIES_MS);
   await s.service.invoke('disconnect');
-  const n = s.state.events.filter(e => e === 'gateway:start').length;
-  await sleep(150);
-  assert.equal(s.state.events.filter(e => e === 'gateway:start').length, n, 'no attempt after the disconnect');
+  const n = await settledStarts(s);
+  await sleep(300);   // well past bootEveryMs (20 ms): a retry still scheduled would have run
+  assert.equal(gatewayStarts(s), n, 'no attempt after the disconnect');
   assert.equal(connectedCount(s), 0);
 });
 
@@ -137,7 +154,7 @@ test('R1: two power cuts before a boot retry succeeds still resume — only a di
   await s.service.invoke('connect', SERVER.id);
   await s.service.shutdown();                                        // power cut 1 (shutdown does not clear it either)
   const second = startIn(s.dir, {}, (st) => { st.gatewayFails = true; });
-  await until(() => second.state.events.filter(e => e === 'gateway:start').length >= 3, 'failing boot attempts');
+  await until(() => second.state.events.filter(e => e === 'gateway:start').length >= 3, 'failing boot attempts', RETRIES_MS);
   await second.service.shutdown();                                   // power cut 2, before any retry succeeded
   const third = startIn(s.dir);
   t.after(() => third.service.shutdown());
@@ -156,7 +173,7 @@ test('R1: a connect by hand during the boot retries ends them too', async (t) =>
   const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } });
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
-  await until(() => s.state.events.filter(e => e === 'gateway:start').length >= 2, 'two boot attempts');
+  await until(() => gatewayStarts(s) >= 2, 'two boot attempts', RETRIES_MS);
   s.state.gatewayFails = false;
   await s.service.invoke('connect', SERVER.id);
   const n = s.state.events.filter(e => e === 'xray:start').length;
@@ -236,7 +253,7 @@ test('R3: on a router the recovery keeps retrying past the desktop’s three tri
   await s.service.invoke('connect', SERVER.id);
   s.state.gatewayFails = true;
   s.state.inners.find(i => i.active).crash();
-  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 7, 'seven recovery attempts');
+  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 7, 'seven recovery attempts', RETRIES_MS);
   assert.ok(!s.statuses.some(x => x.state === 'reconnect-failed'), 'a router never gives up');
   await s.service.invoke('disconnect');
   const n = s.statuses.filter(x => x.state === 'reconnecting').length;
@@ -248,7 +265,7 @@ test('R3: on a router the recovery keeps retrying past the desktop’s three tri
   await s2.service.invoke('connect', SERVER.id);
   s2.state.gatewayFails = true;
   s2.state.inners.find(i => i.active).crash();
-  await until(() => s2.statuses.filter(x => x.state === 'reconnecting').length >= 5, 'five failed attempts');
+  await until(() => s2.statuses.filter(x => x.state === 'reconnecting').length >= 5, 'five failed attempts', RETRIES_MS);
   s2.state.gatewayFails = false;
   await until(() => connectedCount(s2) === 2, 'back once it can be');
 });
@@ -316,10 +333,10 @@ test('an endless recovery does not rewrite store.json on every attempt', async (
   const file = path.join(s.dir, 'store.json');
   s.state.gatewayFails = true;
   s.state.inners.find(i => i.active).crash();
-  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 2, 'two attempts');
+  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 2, 'two attempts', RETRIES_MS);
   const before = fs.readFileSync(file, 'utf8');
   const mtime = fs.statSync(file).mtimeMs;
-  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 6, 'four more attempts');
+  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 6, 'four more attempts', RETRIES_MS);
   assert.equal(fs.statSync(file).mtimeMs, mtime, 'no write — nothing in it changed');
   assert.equal(fs.readFileSync(file, 'utf8'), before);
 });
@@ -417,7 +434,7 @@ test('a failing boot attempt says nothing about a disconnect — there was no co
   const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } });
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
-  await until(() => s.state.events.filter(e => e === 'gateway:start').length >= 3, 'three failed boot attempts');
+  await until(() => s.state.events.filter(e => e === 'gateway:start').length >= 3, 'three failed boot attempts', RETRIES_MS);
   assert.ok(!s.statuses.some(x => x.state === 'disconnected'), JSON.stringify(s.statuses.map(x => x.state)));
   assert.ok(!s.syslog.some(([, l]) => l === 'irnetfree: disconnected'), 'syslog is not told of a disconnect every 15 s');
   assert.ok(!s.syslog.some(([, l]) => /^irnetfree: error — /.test(l)), 'nor of an error status: each attempt’s reason is in it already');
