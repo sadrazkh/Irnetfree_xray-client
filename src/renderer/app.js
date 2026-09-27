@@ -1116,7 +1116,7 @@ function renderServers() {
     card.querySelector('.copy-srv').onclick = (e) => { e.stopPropagation(); copyServerLink(s.id); };
     card.querySelector('.qr-srv').onclick = (e) => { e.stopPropagation(); showServerQr(s.id); };
     card.querySelector('.edit-srv').onclick = (e) => { e.stopPropagation(); openEdit(s.id); };
-    card.querySelector('.connect-srv').onclick = (e) => { e.stopPropagation(); connect(s.id); };
+    connectGlyph(card.querySelector('.connect-srv')).onclick = (e) => { e.stopPropagation(); connect(s.id); };
     card.querySelector('.del-srv').onclick = (e) => { e.stopPropagation(); deleteServer(s.id); };
     // the lifetime figure is its own clear button — nothing to clear when empty
     card.querySelector('.srv-usage').onclick = (e) => { e.stopPropagation(); clearUsageFor(s.id); };
@@ -1182,6 +1182,7 @@ function bestServerId() {
 }
 
 async function connectAuto() {
+  if (state.connecting) return cancelConnect();   // the row is the Cancel while connecting
   let best = bestServerId();
   if (!best) { await pingMany(state.servers.map(s => s.id)); best = bestServerId(); }
   if (!best) return toast(t('t.autoNone'), 'err');
@@ -1321,8 +1322,8 @@ function renderPicker() {
   // and connects, and the picker then shows the server that won.
   if (state.servers.length >= 2) {
     const row = document.createElement('div');
-    row.className = 'picker-item picker-special';
-    row.innerHTML = `<span class="q-dot"></span><span class="proto-badge proto-auto">⚡</span><span class="pi-name">${escapeHtml(t('picker.auto'))}</span>`;
+    row.className = 'picker-item picker-special picker-auto';
+    row.innerHTML = `<span class="q-dot"></span><span class="proto-badge proto-auto">⚡</span><span class="pi-name">${escapeHtml(t(state.connecting ? 'power.cancelHint' : 'picker.auto'))}</span>`;
     row.onclick = () => { closePicker(); connectAuto(); };
     menu.appendChild(row);
   }
@@ -1605,19 +1606,30 @@ function showGeo(info) {
 function hideGeo() { $('#connGeo').hidden = true; }
 
 /* ----------------------------- connect / disconnect ----------------------------- */
+// The connect this window is waiting on, and the last one the user cancelled:
+// a cancelled connect that then fails has failed because of the cancel, and
+// is no error to show.
+let connectSeq = 0;
+let cancelledSeq = 0;
+
 async function connect(id) {
-  if (state.connecting) return;
+  // A connect in flight (or a rebuild): every control that would start one is
+  // its Cancel. It used to do nothing here, so a connect that hung — a dead
+  // server, no network — could only be waited out.
+  if (state.connecting) return cancelConnect();
   if (state.connected && state.activeServerId === id) return disconnect();
   // TUN wanted but not elevated (Windows): offer to relaunch as admin first.
   if (state.settings.tunMode && state.tunAvailable && !state.elevated && state.platform === 'win32') {
     if (await promptRelaunchAdmin()) return;
   }
   selectServer(id);
+  const seq = ++connectSeq;
   state.connecting = true;
   setConnUI('connecting', id);
   try {
     await window.api.connect(id);
   } catch (e) {
+    if (seq <= cancelledSeq) return;   // the 'disconnected' the Cancel brought is the last word
     state.connecting = false;
     setConnUI('error');
     toast(t('t.connectFailed') + ': ' + e.message, 'err');
@@ -1630,7 +1642,20 @@ async function disconnect() {
   try { await window.api.disconnect(); } catch (e) { toast(e.message, 'err'); }
 }
 
+/**
+ * Stop the connect in flight. It is a disconnect: main's (or the service's)
+ * disconnect overtakes the connect, which gives way at its next step and
+ * undoes whatever it started after the teardown, and the 'disconnected' status
+ * brings every window — and every browser on the router — back.
+ */
+function cancelConnect() {
+  cancelledSeq = connectSeq;
+  $('#connState').textContent = t('state.cancelling');
+  return disconnect();
+}
+
 $('#powerBtn').onclick = () => {
+  if (state.connecting) return cancelConnect();
   if (state.connected) return disconnect();
   const id = state.selectedServerId || state.activeServerId || (state.servers[0] && state.servers[0].id);
   if (!id) return toast(t('t.addServerFirst'), 'err');
@@ -1710,6 +1735,36 @@ function setConnUI(stateStr, id) {
   startUptime(stateStr === 'connected');
   renderTrafficPath(stateStr);
   renderInspector();
+  refreshConnectControls();
+}
+
+/**
+ * While a connect is in flight every control that would start one says what it
+ * does now: Cancel (see connect()). The power button's tooltip and accessible
+ * name, the ▶ of each server and chain, the pool's connect button and the
+ * picker's Auto row — rewritten where they exist; the ones built later ask
+ * connectGlyph() themselves.
+ */
+function refreshConnectControls() {
+  const busy = !!state.connecting;
+  const hint = t(busy ? 'power.cancelHint' : state.connected ? 'power.disconnect' : 'power.connect');
+  const power = $('#powerBtn');
+  power.title = hint;
+  power.setAttribute('aria-label', hint);
+  $$('.connect-srv, .ch-connect').forEach((b) => connectGlyph(b));
+  const pool = $('#btnPoolConnect');
+  if (pool) pool.textContent = t(busy ? 'power.cancel' : 'pool.connect');
+  const auto = $('#pickerMenu .picker-auto .pi-name');
+  if (auto) auto.textContent = t(busy ? 'power.cancelHint' : 'picker.auto');
+}
+
+/** A ▶ button: play while idle, stop (the connect's Cancel) while one is in flight. */
+function connectGlyph(btn) {
+  const busy = !!state.connecting;
+  btn.textContent = busy ? '■' : '▶';
+  btn.title = t(busy ? 'power.cancel' : 'power.connect');
+  btn.setAttribute('aria-label', btn.title);
+  return btn;
 }
 
 /* ------------------------- title-bar uptime clock ------------------------- */
@@ -3313,7 +3368,7 @@ function renderChains() {
 
     // actions
     card.querySelector('.ch-ping').onclick = () => pingServer(chain.id);
-    card.querySelector('.ch-connect').onclick = () => { if (ready) connect(chain.id); };
+    connectGlyph(card.querySelector('.ch-connect')).onclick = () => { if (ready) connect(chain.id); };
     card.querySelector('.ch-del').onclick = () => {
       state.chains = state.chains.filter(c => c.id !== chain.id);
       if (state.selectedServerId === chain.id) state.selectedServerId = null;
@@ -3445,6 +3500,7 @@ $('#btnAddPool').onclick = () => {
 };
 
 $('#btnPoolConnect').onclick = () => {
+  if (state.connecting) return cancelConnect();
   if (!poolReady()) return toast(t('pool.needOne'), 'err');
   connect(POOL_ID);
 };

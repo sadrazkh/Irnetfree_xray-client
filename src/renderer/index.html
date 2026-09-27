@@ -106,8 +106,11 @@
 
           <div class="connect-row">
             <div class="connect-panel">
+              <!-- while a connect is in flight this is its Cancel (app.js connect()):
+                   the word shows under the icon, the tooltip and aria-label say it too -->
               <button class="power-btn" id="powerBtn" aria-label="connect">
                 <svg viewBox="0 0 24 24" class="power-ico"><path d="M12 3v9" /><path d="M7 6.5a8 8 0 1 0 10 0" /></svg>
+                <span class="power-cancel" data-i18n="power.cancel">لغو</span>
               </button>
               <div class="connect-state" id="connState" data-i18n="state.disconnected">قطع شده</div>
               <div class="connect-meta" id="connMeta"></div>
