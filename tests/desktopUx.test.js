@@ -344,3 +344,23 @@ test('D2: the list is flat when there is nothing to tell apart, a folded group s
   for (const id of ['btnSubAddOpen', 'btnSubAdd', 'subList', 'btnRefreshAll']) assert.match(HTML, new RegExp(`id="${id}"`));
   assertTranslated(['srv.groupToggle', 'srv.subRefresh']);
 });
+
+/* --------------------------- D4: the version under the logo --------------------------- */
+
+test('D4: the app’s version sits small under the logo, from app:init, left-to-right in both languages', () => {
+  const left = HTML.slice(HTML.indexOf('<div class="tb-left">'), HTML.indexOf('<span class="tb-title">'));
+  assert.match(left, /<span class="tb-brand">\n\s*<span class="tb-logo-wrap">[\s\S]*?<\/span>\n\s*<\/span>\n\s*<span class="tb-ver" id="tbVersion" dir="ltr" data-i18n-title="about\.version"><\/span>\n\s*<\/span>/,
+    'the logo (and its state badge) first, the version under it, one column');
+  // app:init answers `version` on both: app.getVersion() on the desktop, package.json in the service
+  assert.match(R('src', 'main', 'main.js'), /version: app\.getVersion\(\),/);
+  assert.match(R('src', 'server', 'service.js'), /require\(path\.join\(__dirname, '\.\.', '\.\.', 'package\.json'\)\)\.version/);
+  assert.match(fnSource('init'), /\$\('#tbVersion'\)\.textContent = state\.version \? 'v' \+ state\.version : '';/);
+  // small and muted, and no taller than the bar: 18px logo + 2 + 9px text in a 46px bar
+  const rule = CSS.slice(CSS.indexOf('.tb-ver {'), CSS.indexOf('}', CSS.indexOf('.tb-ver {')));
+  assert.match(rule, /font-size: 9px;/);
+  assert.match(rule, /line-height: 1;/);
+  assert.match(rule, /color: var\(--ink3\);/);
+  assert.match(CSS, /\.tb-brand \{ display: inline-flex; flex-direction: column; align-items: center; gap: 2px; \}/);
+  assert.match(CSS, /\.tb-ver:empty \{ display: none; \}/, 'nothing reserved before app:init answers');
+  assert.match(CSS, /\.tb-logo \{ width: 18px; height: 18px;/);
+});

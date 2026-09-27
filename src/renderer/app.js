@@ -347,8 +347,9 @@ async function init() {
   applyFlavor();
   renderPendingBanner();
 
-  // app version + xray-core version
+  // app version (Settings → About, and small under the logo) + xray-core version
   $('#appVersion').textContent = 'v' + (state.version || '?');
+  $('#tbVersion').textContent = state.version ? 'v' + state.version : '';
   refreshXrayVersion();
 
   // the store failed to load before this window existed, so it is delivered here
