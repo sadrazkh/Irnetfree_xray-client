@@ -362,6 +362,55 @@ button.pool-item:hover .pool-add { color: var(--accent); }
   background: var(--line);
 }
 
+/* The head folds the group: chevron, icon, name and count are one button
+   (aria-expanded), so the count stays in sight with the group folded. */
+.srv-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 6px;
+  margin-inline-start: -6px;
+  border-radius: var(--r2);
+  text-align: start;
+  transition: background 140ms ease-out;
+}
+.srv-group-toggle:hover { background: var(--soft); }
+.srv-group-toggle:hover .srv-group-name { color: var(--ink); }
+.srv-group-toggle .srv-group-name { min-width: 0; }   /* a long name ellipsises, the count stays */
+.srv-group-chev {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--ink3);
+  flex: 0 0 auto;
+  transition: transform 140ms ease-out;
+}
+/* folded, the chevron points along the line: right in English, left in Persian */
+.srv-group.folded .srv-group-chev { transform: rotate(-90deg); }
+[dir="rtl"] .srv-group.folded .srv-group-chev { transform: rotate(90deg); }
+.srv-group-body { display: flex; flex-direction: column; gap: 10px; }
+/* folded over the selected config: the count chip carries the accent, since
+   there is no card on show to carry it */
+.srv-group.folded.has-sel .srv-group-count {
+  color: var(--accentInk);
+  border-color: var(--accentLine);
+  background: var(--accentSoft);
+}
+/* a subscription's quota and time left, in the same colours its bars use */
+.srv-group-meta {
+  display: inline-flex;
+  gap: 8px;
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink3);
+  white-space: nowrap;
+}
+.srv-group-meta.mid { color: var(--warn); }
+.srv-group-meta.bad { color: var(--danger); }
+/* its refresh sits past the rule, at the end of the row */
+.srv-group-refresh { order: 1; font-size: 13px; }
+
 /* ----------------------------- selection ----------------------------- */
 
 /*

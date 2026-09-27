@@ -1048,13 +1048,60 @@ function serverGroups() {
       // A subscription can be deleted while its servers stay behind. Name the
       // group honestly rather than tipping them into the hand-added pile, where
       // the next refresh would look like it had lost them.
-      groups.set(s.subId, { name: sub ? sub.name : t('srv.subGone'), items: [] });
+      groups.set(s.subId, { name: sub ? sub.name : t('srv.subGone'), sub: sub || null, items: [] });
     }
     groups.get(s.subId).items.push(s);
   }
   const out = [];
-  if (manual.length) out.push({ id: '', name: t('srv.manual'), items: manual });
-  for (const [id, g] of groups) out.push({ id, name: g.name, items: g.items });
+  if (manual.length) out.push({ id: '', name: t('srv.manual'), sub: null, items: manual });
+  for (const [id, g] of groups) out.push({ id, name: g.name, sub: g.sub, items: g.items });
+  return out;
+}
+
+/* ------------------- folded groups (remembered per window) ------------------- */
+// The groups the user folded, by key ('manual', 'sub:<id>'). Kept the way the
+// theme is — in this window's storage, and per browser on the router — and
+// open is the default, so a group nobody folded (a new subscription too) shows
+// its servers.
+const FOLDED_KEY = 'irnetfree.foldedGroups';
+const foldedGroups = loadFoldedGroups();
+function loadFoldedGroups() {
+  try {
+    const v = JSON.parse(localStorage.getItem(FOLDED_KEY) || '[]');
+    return new Set(Array.isArray(v) ? v.filter((k) => typeof k === 'string') : []);
+  } catch { return new Set(); }
+}
+function setGroupFolded(key, folded) {
+  if (folded) foldedGroups.add(key); else foldedGroups.delete(key);
+  try { localStorage.setItem(FOLDED_KEY, JSON.stringify([...foldedGroups])); } catch { /* only costs remembering it */ }
+}
+/** A group's key: the subscription it came from, or the hand-added pile. */
+function groupKey(subId) { return subId ? 'sub:' + subId : 'manual'; }
+
+/**
+ * A subscription's quota and time left, short enough for its group head:
+ * { data, time, level } — empty strings for what it does not report; `level`
+ * by the thresholds subUsageHtml() colours its bars with ('' | 'mid' | 'bad').
+ */
+function subUsageBrief(sub) {
+  const out = { data: '', time: '', level: '' };
+  const u = sub && sub.usage;
+  if (!u) return out;
+  const used = (u.upload || 0) + (u.download || 0);
+  let pct = 0;
+  if (u.total > 0) {
+    pct = Math.round(used / u.total * 100);
+    out.data = `${fmtBytes(used)} / ${fmtBytes(u.total)}`;
+  } else if (used > 0) {
+    out.data = `${fmtBytes(used)} · ${t('sub.unlimited')}`;
+  }
+  let days = Infinity;
+  if (u.expire > 0) {
+    const rem = u.expire - Date.now() / 1000;
+    days = rem / 86400;
+    out.time = rem <= 0 ? t('sub.expired') : `${fmtDuration(rem)} ${t('sub.left')}`;
+  }
+  out.level = (pct >= 90 || days < 3) ? 'bad' : (pct >= 70 || days < 7) ? 'mid' : '';
   return out;
 }
 
@@ -1066,71 +1113,140 @@ function renderServers() {
   const groups = serverGroups();
   // no headings when there is nothing to tell apart
   const labelled = groups.length > 1 || !!(groups[0] && groups[0].id);
-  for (const g of groups) {
-  let host = list;
-  if (labelled) {
-    const wrap = document.createElement('div');
-    wrap.className = 'srv-group';
-    const head = document.createElement('div');
-    head.className = 'srv-group-head';
-    head.innerHTML = `<span class="srv-group-ico">${g.id ? '🔗' : '✎'}</span>
-      <span class="srv-group-name"></span><span class="srv-group-count"></span>`;
-    head.querySelector('.srv-group-name').textContent = g.name;
-    head.querySelector('.srv-group-count').textContent = String(g.items.length);
-    wrap.appendChild(head);
-    list.appendChild(wrap);
-    host = wrap;
+  if (!labelled) {
+    for (const g of groups) for (const s of g.items) list.appendChild(serverCard(s));
+    return;
   }
-  for (const s of g.items) {
-    const card = document.createElement('div');
-    const isActive = s.id === state.activeServerId && state.connected;
-    const isSel = s.id === state.selectedServerId;
-    card.className = 'server-card' + (isActive ? ' active' : '') + (isSel ? ' selected' : '');
-    card.dataset.srvId = s.id;
+  groups.forEach((g, n) => list.appendChild(serverGroup(g, n)));
+  refreshSelection();   // a folded group holding the selection says so on its head
+}
 
-    const tl = pingResultLabel((state.pings[s.id] || {}).tcp);
-    const rl = pingResultLabel((state.pings[s.id] || {}).real);
-    const ul = pingResultLabel((state.pings[s.id] || {}).upload);
-    // always in the markup, hidden when not selected: refreshSelection() can
-    // then move it between cards without rebuilding either of them
-    const selBadge = `<span class="sel-badge"${isSel ? '' : ' hidden'}>✓ ${escapeHtml(t('srv.selected'))}</span>`;
+/**
+ * One group of the list. Its head folds it — a button with aria-expanded, the
+ * count always on it — and a subscription's head carries that subscription's
+ * own refresh, and its quota and time left when it reports them, so it can be
+ * looked after from here (adding and editing stay on the Subscriptions page).
+ * A folded group builds no cards until it is opened: a 300-server
+ * subscription folded away costs one row.
+ */
+function serverGroup(g, n) {
+  const key = groupKey(g.id);
+  const open = !foldedGroups.has(key);
+  const wrap = document.createElement('div');
+  wrap.className = 'srv-group' + (open ? '' : ' folded');
+  wrap.dataset.group = key;
 
-    card.innerHTML = `
-      <span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(s.id)}"></span>
-      <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>
-      <div class="srv-info">
-        <div class="srv-name">${escapeHtml(s.name)} ${selBadge}</div>
-        <div class="srv-addr">${escapeHtml(s.address)}:${escapeHtml(s.port)}</div>
-      </div>
-      <div class="stat-group">
-        <span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>⚡</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${escapeHtml(s.id)}">${tl.txt}</b></span>
-        <span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${escapeHtml(s.id)}">${rl.txt}</b></span>
-        <span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${escapeHtml(s.id)}">${ul.txt}</b></span>
-      </div>
-      <span class="srv-usage" data-usage="${escapeHtml(s.id)}" title="${escapeHtml(t('srv.usage'))} — ${escapeHtml(t('srv.usageClick'))}">${usageLabel(s.id)}</span>
-      <div class="srv-actions">
-        <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
-        <button class="icon-btn copy-srv" data-i18n-title="btn.copy" title="copy">⧉</button>
-        <button class="icon-btn qr-srv" data-i18n-title="btn.qr" title="QR">▦</button>
-        <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="edit">✎</button>
-        <button class="icon-btn connect-srv" title="▶">▶</button>
-        <button class="icon-btn del-srv" title="🗑">🗑</button>
-      </div>`;
+  const head = document.createElement('div');
+  head.className = 'srv-group-head';
+  const toggle = document.createElement('button');
+  toggle.className = 'srv-group-toggle';
+  toggle.type = 'button';
+  toggle.innerHTML = `<span class="srv-group-chev" aria-hidden="true">▾</span>
+    <span class="srv-group-ico" aria-hidden="true">${g.id ? '🔗' : '✎'}</span>
+    <span class="srv-group-name"></span><span class="srv-group-count"></span>`;
+  toggle.querySelector('.srv-group-name').textContent = g.name;
+  toggle.querySelector('.srv-group-count').textContent = String(g.items.length);
+  toggle.title = t('srv.groupToggle');
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.setAttribute('aria-controls', 'srvGroup' + n);
+  head.appendChild(toggle);
 
-    // clicking the card body selects the server (syncs with the home picker)
-    card.querySelector('.srv-info').onclick = () => selectServer(s.id);
-    card.querySelector('.proto-badge').onclick = () => selectServer(s.id);
-    card.querySelector('.ping-srv').onclick = (e) => { e.stopPropagation(); pingServer(s.id); };
-    card.querySelector('.copy-srv').onclick = (e) => { e.stopPropagation(); copyServerLink(s.id); };
-    card.querySelector('.qr-srv').onclick = (e) => { e.stopPropagation(); showServerQr(s.id); };
-    card.querySelector('.edit-srv').onclick = (e) => { e.stopPropagation(); openEdit(s.id); };
-    connectGlyph(card.querySelector('.connect-srv')).onclick = (e) => { e.stopPropagation(); connect(s.id); };
-    card.querySelector('.del-srv').onclick = (e) => { e.stopPropagation(); deleteServer(s.id); };
-    // the lifetime figure is its own clear button — nothing to clear when empty
-    card.querySelector('.srv-usage').onclick = (e) => { e.stopPropagation(); clearUsageFor(s.id); };
-    host.appendChild(card);
+  if (g.sub) {
+    const brief = subUsageBrief(g.sub);
+    if (brief.data || brief.time) {
+      const meta = document.createElement('span');
+      meta.className = 'srv-group-meta' + (brief.level ? ' ' + brief.level : '');
+      meta.title = t('sub.lastUpdate') + ': ' + timeAgo(g.sub.lastUpdated);
+      for (const [text, dir] of [[brief.data, 'ltr'], [brief.time, '']]) {
+        if (!text) continue;
+        const part = document.createElement('span');
+        if (dir) part.dir = dir;
+        part.textContent = text;
+        meta.appendChild(part);
+      }
+      head.appendChild(meta);
     }
+    const refresh = document.createElement('button');
+    refresh.className = 'icon-btn srv-group-refresh';
+    refresh.type = 'button';
+    refresh.textContent = '⟳';
+    refresh.title = t('srv.subRefresh');
+    refresh.setAttribute('aria-label', refresh.title);
+    refresh.onclick = () => {
+      refresh.disabled = true;
+      refreshSub(g.id).finally(() => { refresh.disabled = false; });
+    };
+    head.appendChild(refresh);
   }
+  wrap.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'srv-group-body';
+  body.id = 'srvGroup' + n;
+  body.hidden = !open;
+  if (open) for (const s of g.items) body.appendChild(serverCard(s));
+  wrap.appendChild(body);
+
+  toggle.onclick = () => {
+    const nowOpen = toggle.getAttribute('aria-expanded') !== 'true';
+    setGroupFolded(key, !nowOpen);
+    toggle.setAttribute('aria-expanded', String(nowOpen));
+    wrap.classList.toggle('folded', !nowOpen);
+    body.hidden = !nowOpen;
+    if (nowOpen && !body.firstChild) for (const s of g.items) body.appendChild(serverCard(s));
+  };
+  return wrap;
+}
+
+/** One server's card, wired. */
+function serverCard(s) {
+  const card = document.createElement('div');
+  const isActive = s.id === state.activeServerId && state.connected;
+  const isSel = s.id === state.selectedServerId;
+  card.className = 'server-card' + (isActive ? ' active' : '') + (isSel ? ' selected' : '');
+  card.dataset.srvId = s.id;
+
+  const tl = pingResultLabel((state.pings[s.id] || {}).tcp);
+  const rl = pingResultLabel((state.pings[s.id] || {}).real);
+  const ul = pingResultLabel((state.pings[s.id] || {}).upload);
+  // always in the markup, hidden when not selected: refreshSelection() can
+  // then move it between cards without rebuilding either of them
+  const selBadge = `<span class="sel-badge"${isSel ? '' : ' hidden'}>✓ ${escapeHtml(t('srv.selected'))}</span>`;
+
+  card.innerHTML = `
+    <span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(s.id)}"></span>
+    <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>
+    <div class="srv-info">
+      <div class="srv-name">${escapeHtml(s.name)} ${selBadge}</div>
+      <div class="srv-addr">${escapeHtml(s.address)}:${escapeHtml(s.port)}</div>
+    </div>
+    <div class="stat-group">
+      <span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>⚡</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${escapeHtml(s.id)}">${tl.txt}</b></span>
+      <span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${escapeHtml(s.id)}">${rl.txt}</b></span>
+      <span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${escapeHtml(s.id)}">${ul.txt}</b></span>
+    </div>
+    <span class="srv-usage" data-usage="${escapeHtml(s.id)}" title="${escapeHtml(t('srv.usage'))} — ${escapeHtml(t('srv.usageClick'))}">${usageLabel(s.id)}</span>
+    <div class="srv-actions">
+      <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
+      <button class="icon-btn copy-srv" data-i18n-title="btn.copy" title="copy">⧉</button>
+      <button class="icon-btn qr-srv" data-i18n-title="btn.qr" title="QR">▦</button>
+      <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="edit">✎</button>
+      <button class="icon-btn connect-srv" title="▶">▶</button>
+      <button class="icon-btn del-srv" title="🗑">🗑</button>
+    </div>`;
+
+  // clicking the card body selects the server (syncs with the home picker)
+  card.querySelector('.srv-info').onclick = () => selectServer(s.id);
+  card.querySelector('.proto-badge').onclick = () => selectServer(s.id);
+  card.querySelector('.ping-srv').onclick = (e) => { e.stopPropagation(); pingServer(s.id); };
+  card.querySelector('.copy-srv').onclick = (e) => { e.stopPropagation(); copyServerLink(s.id); };
+  card.querySelector('.qr-srv').onclick = (e) => { e.stopPropagation(); showServerQr(s.id); };
+  card.querySelector('.edit-srv').onclick = (e) => { e.stopPropagation(); openEdit(s.id); };
+  connectGlyph(card.querySelector('.connect-srv')).onclick = (e) => { e.stopPropagation(); connect(s.id); };
+  card.querySelector('.del-srv').onclick = (e) => { e.stopPropagation(); deleteServer(s.id); };
+  // the lifetime figure is its own clear button — nothing to clear when empty
+  card.querySelector('.srv-usage').onclick = (e) => { e.stopPropagation(); clearUsageFor(s.id); };
+  return card;
 }
 
 /**
@@ -1146,6 +1262,10 @@ function refreshSelection() {
     const badge = card.querySelector('.sel-badge');
     if (badge) badge.hidden = !on;
   });
+  // a folded group has no cards to mark: its head says it holds the selection
+  const selSrv = srvById(sel);
+  const selGroup = selSrv ? groupKey(selSrv.subId) : null;
+  $$('#serverList .srv-group[data-group]').forEach((g) => g.classList.toggle('has-sel', g.dataset.group === selGroup));
 }
 
 /** Lifetime totals changed: rewrite the spans that show them, nothing else. */

@@ -496,7 +496,9 @@ const I18N = {
     // while a connect is in flight every connect control is its Cancel
     'power.connect': 'اتصال', 'power.disconnect': 'قطع اتصال',
     'power.cancel': 'لغو', 'power.cancelHint': 'لغو اتصال',
-    'state.cancelling': 'در حال لغو…'
+    'state.cancelling': 'در حال لغو…',
+    // the Servers page's groups
+    'srv.groupToggle': 'باز یا بسته کردن این گروه', 'srv.subRefresh': 'به‌روزرسانی همین ساب'
   },
 
   en: {
@@ -992,7 +994,9 @@ const I18N = {
     // while a connect is in flight every connect control is its Cancel
     'power.connect': 'Connect', 'power.disconnect': 'Disconnect',
     'power.cancel': 'Cancel', 'power.cancelHint': 'Cancel connecting',
-    'state.cancelling': 'Cancelling…'
+    'state.cancelling': 'Cancelling…',
+    // the Servers page's groups
+    'srv.groupToggle': 'Show or hide this group', 'srv.subRefresh': 'Refresh this subscription'
   }
 };
 
