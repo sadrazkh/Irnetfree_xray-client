@@ -83,6 +83,42 @@ class SwitchRacesTest {
         assertFalse(shown)
     }
 
+    @Test fun aCancelWhileTheTunnelComesUpNeverShowsConnected() {
+        // Home's Cancel while connecting: disconnect() moves the generation at
+        // once; the start already past its checks (core up, TUN up) publishes
+        // Connected only under ifCurrent — refused — and the queued DISCONNECT's
+        // teardown puts Not connected up. The service's own sequence, step by step.
+        val g = Generation()
+        try {
+            val a = g.next { VpnState.set(ConnState.CONNECTING, "A") }       // connect()
+            assertEquals(a, g.get())                                          // startTunnel's checks pass…
+            g.stop()                                                          // …Cancel
+            assertFalse(g.ifCurrent(a) { VpnState.set(ConnState.CONNECTED, "A") })
+            assertEquals(ConnState.CONNECTING, VpnState.state.value)          // never Connected, not even for a moment
+            assertTrue(g.ifStopped { VpnState.set(ConnState.DISCONNECTED, "") })   // stopAll, queued behind the start
+            assertEquals(ConnState.DISCONNECTED, VpnState.state.value)
+
+            // The Cancel lands while the start holds the lock: the tunnel WAS up
+            // at that instant, so Connected goes first — and Not connected after
+            // it, never the other way round.
+            val b = g.next { VpnState.set(ConnState.CONNECTING, "B") }
+            val seen = Collections.synchronizedList(ArrayList<ConnState>())
+            val inside = CountDownLatch(1); val release = CountDownLatch(1)
+            val start = Thread { g.ifCurrent(b) { VpnState.set(ConnState.CONNECTED, "B"); seen.add(VpnState.state.value); inside.countDown(); release.await(2, TimeUnit.SECONDS) } }
+            start.start()
+            assertTrue(inside.await(2, TimeUnit.SECONDS))
+            val cancel = Thread { g.stop(); g.ifStopped { VpnState.set(ConnState.DISCONNECTED, ""); seen.add(VpnState.state.value) } }
+            cancel.start()
+            cancel.join(300)
+            release.countDown()
+            start.join(2000); cancel.join(2000)
+            assertEquals(listOf(ConnState.CONNECTED, ConnState.DISCONNECTED), seen.toList())
+            assertEquals(ConnState.DISCONNECTED, VpnState.state.value)
+        } finally {
+            VpnState.set(ConnState.DISCONNECTED, "")
+        }
+    }
+
     @Test fun notConnectedGoesUpOnlyWhileTheDisconnectIsTheLatestMove() {
         val g = Generation()
         g.next(); g.stop()
