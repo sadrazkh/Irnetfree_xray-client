@@ -1,0 +1,12 @@
+# The only image built from this repo is the relay (relay/Dockerfile, context =
+# the repo root). It needs relay/ and three files under src/server/remote/;
+# nothing else goes into the build upload.
+*
+!relay/
+!relay/**
+!src/
+!src/server/
+!src/server/remote/
+!src/server/remote/ws.js
+!src/server/remote/frames.js
+!src/server/remote/token.js
