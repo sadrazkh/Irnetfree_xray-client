@@ -466,9 +466,10 @@ function snapshotHarness(flavor = 'openwrt') {
     setConnUI: (s) => calls.push('ui:' + s),
     appendLog: (line) => calls.push('log:' + line),
     renderServers: () => {}, renderPicker: () => {}, renderPendingBanner: () => {}, setPending: () => {}, setModeWidget: () => {},
-    updateLanInfo: () => {}, hideGeo: () => {}, resetTraffic: () => {}, checkIp: () => {}, quickPing: () => {}, updateAdminBtn: () => {},
+    updateLanInfo: () => {}, hideGeo: () => {}, resetTraffic: () => {}, checkIp: () => {}, quickPing: (id) => calls.push('quickPing:' + id), updateAdminBtn: () => {},
     reconnectingKey: () => 'state.reconnecting', failedKey: () => 'net.failed',
-    setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1, Date,
+    // timers run at once, so what a handler defers (the quick ping, the IP check) is seen
+    setInterval: () => 1, clearInterval: () => {}, setTimeout: (fn) => { try { fn(); } catch {} return 1; }, Date,
     window: { api: {} }
   });
   vm.runInContext(['var uptimeTimer = null;', 'var uptimeFrom = 0;', fnSource('startUptime'), fnSource('attemptText'),
@@ -533,6 +534,15 @@ test('S4: on the router a reconnecting status shows the attempt, a waiting statu
   const d = snapshotHarness(null);
   d.ctx.onStatus({ state: 'reconnecting', serverId: 's1', reason: 'interfaces', attempt: 1 });
   assert.equal(d.el('connState').textContent, 'state.reconnecting');
+});
+
+test('S6: the router does not start a test core for the quick ping after every connect; the desktop still does', () => {
+  const router = snapshotHarness('openwrt');
+  router.ctx.onStatus({ state: 'connected', serverId: 's1', engine: 'xray' });
+  assert.ok(!router.calls.some((c) => c.startsWith('quickPing:')), router.calls.join(', '));
+  const desktop = snapshotHarness(null);
+  desktop.ctx.onStatus({ state: 'connected', serverId: 's1', engine: 'xray' });
+  assert.ok(desktop.calls.includes('quickPing:s1'), desktop.calls.join(', '));
 });
 
 test('S4: the attempt strings exist in both languages, verbatim', () => {

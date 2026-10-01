@@ -236,3 +236,67 @@ test('B1: the boot connect follows connectIntent — set with autoConnect on it 
   await sleep(150);
   assert.equal(noAuto.state.xray.starts.length, 0, 'the setting off: nothing connects');
 });
+
+/* ----------------------------- S6 / S7: memory and diagnostics ----------------------------- */
+
+/** /proc as a test sees it: MemAvailable, and a VmRSS for every pid asked. */
+const fakeProc = (p) => {
+  if (p === '/proc/meminfo') return 'MemTotal:         507904 kB\nMemFree:           80000 kB\nMemAvailable:     123456 kB\n';
+  const m = /^\/proc\/(\d+)\/status$/.exec(p);
+  if (m) return `Name:\tx\nVmRSS:\t   ${40000 + Number(m[1]) % 1000} kB\n`;
+  throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+};
+
+test('S7: every status transition is one ring line with its cause and generation; connect and drop lines carry the memory', async (t) => {
+  const s = H.start({}, Object.assign({ readProc: fakeProc }, timing({ routerBackoffMs: [300, 300, 300], crashWindowMs: 0 })));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  let lines = s.service.logTail(500);
+  assert.ok(lines.some(l => /status: connecting \(cause=user, gen=1\)$/.test(l)), lines.join('\n'));
+  const up = lines.find(l => /status: connected \(cause=user, gen=1\)/.test(l));
+  assert.ok(up, lines.join('\n'));
+  assert.match(up, / mem: avail=123456kB rss node=\d+kB xray=\d+kB sing-box=\d+kB$/, 'MemAvailable and the RSS of node, xray and sing-box at the connect');
+  assert.match(up, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d status: /, 'stamped');
+  s.state.xray.crash();
+  await until(() => connectedCount(s) === 2, 'the rebuild');
+  lines = s.service.logTail(500);
+  assert.ok(lines.some(l => /\[error\] The core exited on its own \(code=- signal=SIGKILL\) — rebuilding the connection mem: avail=123456kB/.test(l)), 'the drop line carries the memory: ' + lines.join('\n'));
+  assert.ok(lines.some(l => /status: reconnecting \(cause=recovery, gen=1, attempt=1, reason=core-exited\) mem: avail=123456kB/.test(l)), lines.join('\n'));
+  assert.ok(lines.some(l => /status: connected \(cause=recovery, gen=2\)/.test(l)), lines.join('\n'));
+  await s.service.invoke('disconnect');
+  assert.ok(s.service.logTail(5).some(l => /status: disconnected \(cause=user, gen=3\)$/.test(l)), s.service.logTail(5).join('\n'));
+  assert.equal(s.service.logTail(500).filter(l => /status: /.test(l)).length, s.statuses.length, 'exactly one line per status told to the clients');
+});
+
+test('S7: diagnostics() carries the status, the versions, MemAvailable, the RSS, the rules and the last lines — and never the UI token or the remote tokens', async (t) => {
+  const s = H.start({ remote: { token: 'remote-token-xyz123456', relay: { token: 'relay-token-abc456789' }, cloudflared: { token: 'cf-token-qwerty987654' } }, settings: { remote: { token: 'settings-remote-token-7890' } } }, { readProc: fakeProc });
+  t.after(() => s.service.shutdown());
+  fs.writeFileSync(path.join(s.dir, 'token'), 'ui-token-0123456789abcdef\n');
+  await s.service.invoke('connect', SERVER.id);
+  // the lines the ring may carry: a token in a URL, a token said in clear
+  s.service.log('opened http://192.168.1.1:6969/?token=ui-token-0123456789abcdef by hand', 'info');
+  s.service.log('relay says relay-token-abc456789 and remote-token-xyz123456 and cf-token-qwerty987654 and settings-remote-token-7890', 'warn');
+  const { text } = await s.service.diagnostics();
+  assert.match(text, /^IRNetFree \d+\.\d+\.\d+ — node v\d+/);
+  assert.match(text, /^status: \{"state":"connected"/m);
+  assert.match(text, /^settings: \{.*"killSwitch":false/m);
+  assert.match(text, /^store: \{"servers":2/m);
+  assert.match(text, /^cores: \{"xray":"26\.1\.1"/m);
+  assert.match(text, /^MemAvailable: 123456 kB$/m);
+  assert.match(text, /^RSS: node=\d+ kB, xray=\d+ kB, sing-box=\d+ kB$/m);
+  assert.match(text, /^gateway: up, core: running, kill switch: \{/m);
+  assert.match(text, /^ip rule: unavailable \(/m, 'the fakes have no ip here — said, not thrown');
+  assert.match(text, /^--- log \(last 300 lines\) ---$/m);
+  assert.match(text, /status: connected \(cause=user/);
+  for (const secret of ['ui-token-0123456789abcdef', 'relay-token-abc456789', 'remote-token-xyz123456', 'cf-token-qwerty987654', 'settings-remote-token-7890']) {
+    assert.ok(!text.includes(secret), 'the diagnostics text carries ' + secret);
+  }
+  assert.match(text, /\?token=\[redacted\] by hand/);
+  assert.match(text, /relay says \[redacted\] and \[redacted\]/);
+  // without /proc (the owner's Windows machine, a container): the memory lines are simply absent
+  const plain = H.start();
+  t.after(() => plain.service.shutdown());
+  const t2 = (await plain.service.diagnostics()).text;
+  if (process.platform !== 'linux') assert.doesNotMatch(t2, /^MemAvailable:/m);
+  assert.match(t2, /^status: \{"state":"disconnected"/m);
+});

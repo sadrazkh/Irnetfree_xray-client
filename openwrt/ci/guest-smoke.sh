@@ -172,6 +172,12 @@ one_each() {
 }
 UPSTREAM="$(upstream_pid)"
 
+say "memory while connected: MemAvailable and the RSS of node, xray and sing-box (S6 — the numbers behind any GOMEMLIMIT)"
+grep -E '^(MemTotal|MemAvailable):' /proc/meminfo
+for p in $(pidof node) $(gw_singbox) $(core_xray); do
+	printf 'pid %s %s: %s\n' "$p" "$(cat "/proc/$p/comm")" "$(grep VmRSS "/proc/$p/status" | tr -s ' \t' ' ')"
+done
+
 say "a request target the URL parser refuses is a 400 — it used to end the service (and the gateway) with no token"
 NODE="$(pidof node || true)"
 code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 'http://127.0.0.1:6969//x:99999/' || true)"

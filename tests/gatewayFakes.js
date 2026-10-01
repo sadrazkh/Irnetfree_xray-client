@@ -45,7 +45,7 @@ function fakeInner(state) {
       if (state.gatewayGate) await state.gatewayGate;   // a gateway slow to come up: the test opens it
       if (state.gatewayFails) throw new Error('sing-box exited immediately');
       inner.exited = new Promise((resolve) => { inner.gone = resolve; });
-      inner.proc = { kill: () => {} };
+      inner.proc = { pid: 5151, kill: () => {} };   // a pid: the service reads its RSS from /proc (memInfo)
       inner.active = true;
       inner.excludeIps = ['192.0.2.10/32'];
     },
