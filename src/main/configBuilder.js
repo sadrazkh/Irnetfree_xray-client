@@ -571,6 +571,25 @@ function routingStrategy(s) {
   return s.dnsManaged === false ? 'IPIfNonMatch' : 'IPOnDemand';
 }
 
+/**
+ * The destinations the router's remote control dials (service.setRemoteBypass,
+ * v1.16: the relay's host and addresses, Cloudflare's tunnel edge). They go
+ * `direct` right after the DNS rules — the hijack must still win — and ahead
+ * of every user rule and the private bypass. Two rules, not one: xray ANDs the
+ * fields of a rule, so names and addresses in one would match nothing. The
+ * Android app has no router remote control and does not carry this.
+ */
+function remoteBypassRules(s) {
+  const rb = s && s.remoteBypass;
+  if (!rb || typeof rb !== 'object') return [];
+  const hosts = [...new Set((Array.isArray(rb.hosts) ? rb.hosts : []).map(h => String(h == null ? '' : h).trim().toLowerCase()).filter(Boolean))];
+  const ips = [...new Set((Array.isArray(rb.cidrs) ? rb.cidrs : []).map(c => String(c == null ? '' : c).trim()).filter(Boolean))];
+  const out = [];
+  if (hosts.length) out.push({ type: 'field', domain: hosts.map(h => 'full:' + h), outboundTag: 'direct' });
+  if (ips.length) out.push({ type: 'field', ip: ips, outboundTag: 'direct' });
+  return out;
+}
+
 const SETTINGS_DEFAULTS = {
   socksPort: 10808,
   httpPort: 10809,
@@ -741,7 +760,7 @@ function buildConfig(planArg, settings) {
   const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
     { geoAssets: geo, exitTag, dropUdpDirect: dropsUdpDirect(s), targetResolvers: targetResolversFor(targets, plan) });
   if (dnsPlan.hijackOutbound) outbounds.push(dnsPlan.hijackOutbound);
-  rules = [...dnsPlan.rules, ...rules];
+  rules = [...dnsPlan.rules, ...remoteBypassRules(s), ...rules];
 
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
   outbounds = (outbounds || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
@@ -854,6 +873,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   // per-inbound routing, THEN a catch-all to the primary exit so nothing is
   // ever left unrouted.
   rules.push(...dnsPlan.rules);
+  rules.push(...remoteBypassRules(s));
   rules.push({ type: 'field', ip: PRIVATE_IPS.slice(), outboundTag: 'direct' });
   rules.push(...perInboundRules);
   rules.push({ type: 'field', port: '0-65535', outboundTag: primaryTag });
@@ -1100,4 +1120,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, remoteBypassRules, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts };

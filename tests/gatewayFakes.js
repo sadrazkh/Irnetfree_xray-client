@@ -18,7 +18,8 @@ const RULES_OK = '0:\tfrom all lookup local\n8998:\tnot from all dport 53 lookup
  * hold the next gateway start until it resolves; read `events`, `xray`, `gateways`.
  */
 function makeState() {
-  return { events: [], gateways: [], inners: [], gatewayFails: false, singboxMissing: false, xrayFails: false, xray: null };
+  // `commands`: every `ip` / `nft` line the gateway ran, in order
+  return { events: [], commands: [], gateways: [], inners: [], gatewayFails: false, singboxMissing: false, xrayFails: false, xray: null };
 }
 
 function fakeInner(state) {
@@ -67,6 +68,7 @@ function gatewayFactory(state) {
     const inner = fakeInner(state);
     const run = async (cmd, args) => {
       const line = [cmd, ...args].join(' ');
+      state.commands.push(line);
       if (/^nft delete table/.test(line)) state.events.push('gateway:clear-table');
       if (/^ip link show IRNetFree/.test(line)) { if (!inner.active) throw new Error('Device "IRNetFree" does not exist.'); return ''; }
       if (/^ip rule show/.test(line)) return RULES_OK;

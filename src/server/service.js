@@ -51,7 +51,7 @@ const { AssetUpdater } = require('../main/assetUpdater');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
 // list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
 // deliberately NOT given this: Electron never runs on a router.
-const { isOpenwrt, lanInterface, lanDevices, validMacs, ownOrphanCores } = require('../main/openwrtNet');
+const { isOpenwrt, lanInterface, lanDevices, validMacs, ownOrphanCores, normalizeCidrs } = require('../main/openwrtNet');
 const { TunOpenwrt } = require('../main/tunOpenwrt');
 const { createLogRing } = require('./logRing');
 const tcpNet = require('net');
@@ -908,6 +908,9 @@ function createService(opts = {}) {
   }
 
   function buildActive(serverId, settings) {
+    // the remote control's destinations go direct in every config the router runs (setRemoteBypass)
+    const rb = remoteBypass();
+    if (rb.hosts.length || rb.cidrs.length) settings = Object.assign({}, settings, { remoteBypass: rb });
     const { plan, label, entryAddrs } = buildPlan(serverId, settings);
 
     const geoSt = assetStatus();
@@ -1452,6 +1455,8 @@ function createService(opts = {}) {
             const bound = await waitPort(settings.socksPort, 20000);
             if (stale()) return giveWay();
             if (!bound) send('log', { line: `The core has not opened 127.0.0.1:${settings.socksPort} after 20s — starting the gateway anyway`, level: 'warn' });
+            // the remote control's destinations, laid with the gateway (setRemoteBypass)
+            if (typeof myTun.setBypass === 'function') await myTun.setBypass(remoteBypass().cidrs);
           }
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...pinnedIps],
             tunAdapterDns,
@@ -2473,6 +2478,13 @@ function createService(opts = {}) {
       catch (e) { return { ok: false, error: e.message }; }
     },
     'killswitch:status': () => ({ engaged: false }),
+    // the remote control's destinations (feat/remote calls setRemoteBypass in
+    // process; the QEMU smoke and any token holder reach it here)
+    'remote:bypass': async (arg) => {
+      const a = arg && typeof arg === 'object' ? arg : {};
+      await setRemoteBypass(a.owner, a);
+      return Object.assign({ ok: true }, remoteBypassByOwner.get(a.owner));
+    },
     'usage:get': () => ({ totals: usage ? usage.totals : {}, grand: grandTotal(usage ? usage.totals : {}) }),
     // Forget a lifetime total — one config, or all of them. Written through at
     // once: an absence the next flush might not reach comes back at launch.
@@ -2525,6 +2537,43 @@ function createService(opts = {}) {
   function alreadyUp(id) {
     return !!id && id === store.get('activeServerId', null) && !!(xray && xray.running) && !!(tun && tun.active)
       && !recovering && !recoverTimer && !connectsInFlight.size && conn.state === 'connected';
+  }
+
+  /* ----------------------------- destinations that never ride the tunnel (A10) ----------------------------- */
+  // The remote control's destinations (spec R8/C2), per owner — the relay
+  // agent, cloudflared — with the union applied: while the gateway is up one
+  // `ip rule … pref 8997 to <cidr> lookup main` per cidr (TunOpenwrt.setBypass:
+  // live, swept with the gateway's own rules), and the next core config
+  // carries a direct rule for the names and one for the addresses
+  // (configBuilder.remoteBypassRules). Node cannot mark its own sockets, so
+  // the router's own dials are kept off the tunnel by destination. The kill
+  // switch never touches them: it filters forwarded traffic, not OUTPUT.
+  const remoteBypassByOwner = new Map();
+  const REMOTE_OWNERS = ['relay', 'cloudflared'];
+  function remoteBypass() {
+    const hosts = [];
+    const cidrs = [];
+    for (const list of remoteBypassByOwner.values()) {
+      for (const h of list.hosts) if (!hosts.includes(h)) hosts.push(h);
+      for (const c of list.cidrs) if (!cidrs.includes(c)) cidrs.push(c);
+    }
+    return { hosts, cidrs };
+  }
+  async function setRemoteBypass(owner, list) {
+    if (!REMOTE_OWNERS.includes(owner)) throw new Error(`setRemoteBypass: unknown owner "${owner}" (${REMOTE_OWNERS.join(' | ')})`);
+    const l = list && typeof list === 'object' ? list : {};
+    const hosts = [...new Set((Array.isArray(l.hosts) ? l.hosts : []).map(h => String(h == null ? '' : h).trim().toLowerCase()).filter(h => /^[a-z0-9][a-z0-9.-]*$/.test(h)))];
+    const cidrs = normalizeCidrs(Array.isArray(l.cidrs) ? l.cidrs : []);
+    remoteBypassByOwner.set(owner, { hosts, cidrs });
+    if (tun && tun.active && typeof tun.setBypass === 'function') await tun.setBypass(remoteBypass().cidrs);
+  }
+  /** The in-country, route-excluded resolvers the running config dials direct — else the plain addresses of the setting. */
+  function directResolvers() {
+    if (liveDiagnostics && liveDiagnostics.config) {
+      const live = resolverBypassIpsOf(liveDiagnostics.config);
+      if (live.length) return live;
+    }
+    return (getSettings().dnsDirect || []).map(x => String(x == null ? '' : x).trim()).filter(x => tcpNet.isIP(x));
   }
 
   /* ----------------------------- what the LuCI facade reads (luciApi.js) ----------------------------- */
@@ -2728,7 +2777,9 @@ function createService(opts = {}) {
     // the connection as one fact (S1), for server.js's events stream and the LuCI facade
     connSnapshot,
     // what the LuCI facade (luciApi.js) reads and starts
-    memInfo, traffic, configsForLuci, settingsForLuci, setSettingsForLuci, devices, logTail, diagnostics, testThroughTunnel, actions, log
+    memInfo, traffic, configsForLuci, settingsForLuci, setSettingsForLuci, devices, logTail, diagnostics, testThroughTunnel, actions, log,
+    // the remote control's destinations that never ride the tunnel (feat/remote's agent and cloudflared)
+    setRemoteBypass, remoteBypass, directResolvers
   };
 }
 
