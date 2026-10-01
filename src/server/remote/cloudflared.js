@@ -8,6 +8,11 @@
  * `cloudflared tunnel --no-autoupdate … run --token <T>` (the token in argv is
  * the package's choice, not ours: we hand it to `uci batch` on stdin).
  * https://github.com/openwrt/packages/tree/openwrt-23.05/net/cloudflared
+ * Verified on the CI images: 23.05.5 ships 2024.4.1-2 (its default config lists
+ * `token ''` and `protocol 'http2'`), 24.10.2 ships 2025.5.0 (its default config
+ * lists only config/origincert/logfile; the init reads the rest). `uci show`
+ * omits empty-valued options, so the section is found by its type, never by
+ * the presence of a `token` line.
  *
  * Kept out of the tunnel the same way the relay is: its edge addresses go to
  * `service.setRemoteBypass('cloudflared', …)` and a dnsmasq drop-in sends the
