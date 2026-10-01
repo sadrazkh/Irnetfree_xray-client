@@ -322,6 +322,7 @@ function fakeLuci(opts = {}) {
         env.calls.push({ object: o.object, method: o.method, params });
         let r = env.replies[o.method];
         if (typeof r === 'function') r = r(params);
+        if (r instanceof Error) return Promise.reject(r);   // the HTTP request itself failed
         // rpc.js: with expect {'': {}}, anything that is not an object (an array too) becomes {}
         return Promise.resolve(r).then((v) => (o.expect && Object.prototype.hasOwnProperty.call(o.expect, '') && Object.prototype.toString.call(v) !== '[object Object]') ? {} : v);
       };
@@ -705,6 +706,12 @@ test('Overview: a service that is not running shows that and Start; an old servi
   const o = await openView('overview', old);
   assert.match(o.v.el.problem.textContent, /does not know this request yet — update IRNetFree/);
   assert.equal(o.v.el.problem.buttons().length, 0, 'no Start for a service that is running');
+
+  // the router itself does not answer (a reboot, LuCI's session gone): the poll says so and does not throw
+  env.replies.status = new Error('XHR request timed out');
+  await v.refresh();
+  assert.equal(v.el.body.style.display, 'none');
+  assert.match(v.el.problem.textContent, /No answer from the service\./);
 });
 
 test('Overview in Persian', async () => {
@@ -859,6 +866,9 @@ test('Remote access: Install cloudflared, then the page follows remote_status un
   assert.equal(v.el.cfState.textContent, 'running — Registered tunnel connection');
   assert.equal(v.el.relayState.textContent, 'connecting…');
   assert.match(env.ui.notes.pop().textContent, /cloudflared is installed/);
+  env.replies.remote_status = new Error('XHR request timed out');
+  await env.poll.added[0].fn();
+  assert.equal(v.el.relayState.textContent, 'No answer from the service.');
 });
 
 test('Remote access: a service without the remote module, or not running', async () => {

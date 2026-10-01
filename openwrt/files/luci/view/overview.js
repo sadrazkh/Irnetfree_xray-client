@@ -134,6 +134,9 @@ return view.extend({
 				self.cfgDue = self.tick + 10;
 				self.applyConfigs(r[1]);
 			}
+		}, function () {
+			// the router itself did not answer (a reboot, LuCI's session ended): say so, keep polling
+			self.applyStatus(null);
 		});
 	},
 

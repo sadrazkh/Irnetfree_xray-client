@@ -396,9 +396,9 @@ SID="$(awk '$6 ~ /^sysauth/ { print $7 }' /tmp/luci.jar 2>/dev/null | head -n 1)
 echo "login: HTTP $code, session ${SID:+(set)}"
 [ -n "$SID" ] || { echo "no LuCI session after the login"; exit 1; }
 curl -s -b /tmp/luci.jar -o /tmp/luci-menu.json http://127.0.0.1/cgi-bin/luci/admin/menu
-jq -c '.children.admin.children.services.children.irnetfree | {title, satisfied, tabs: (.children | keys)}' /tmp/luci-menu.json || true
+jq -M -c '.children.admin.children.services.children.irnetfree | {title, satisfied, tabs: (.children | keys)}' /tmp/luci-menu.json || true
 jq -e '.children.admin.children.services.children.irnetfree | (.satisfied != false) and (.children | has("overview") and has("settings") and has("remote") and has("log"))' /tmp/luci-menu.json >/dev/null \
-	|| { echo "the LuCI menu has no Services -> IRNetFree with its four tabs (or the ACL is not granted)"; jq -c '.children.admin.children.services.children | keys' /tmp/luci-menu.json; exit 1; }
+	|| { echo "the LuCI menu has no Services -> IRNetFree with its four tabs (or the ACL is not granted)"; jq -M -c '.children.admin.children.services.children | keys' /tmp/luci-menu.json; exit 1; }
 for p in overview settings remote log; do
 	code="$(curl -s -b /tmp/luci.jar -o /tmp/luci-page.html -w '%{http_code}' "http://127.0.0.1/cgi-bin/luci/admin/services/irnetfree/$p" || true)"
 	grep -q "irnetfree/$p" /tmp/luci-page.html || { echo "the $p tab (HTTP $code) does not load the view irnetfree/$p"; head -c 600 /tmp/luci-page.html; exit 1; }
@@ -417,8 +417,8 @@ luci_rpc '"file","read",{"path":"/etc/irnetfree/token"}' | jq -e '.result[0] == 
 	|| { echo "the LuCI session may not read the token file for the web UI link (the ACL)"; exit 1; }
 # the tab names in Persian: LuCI's fa catalog has them, under the hash the browser computes (sfh "Remote access")
 curl -s -b /tmp/luci.jar -o /tmp/luci-fa.js http://127.0.0.1/cgi-bin/luci/admin/translations/fa
-fa="$(sed 's/^window\.TR=//; s/,};$/}/; s/;$//' /tmp/luci-fa.js | jq -r '.["45517f0a"] // empty' 2>/dev/null || true)"
-[ "$fa" = "دسترسی از راه دور" ] || { echo "the Persian tab names are not in LuCI's fa catalog (got '$fa')"; head -c 300 /tmp/luci-fa.js; echo; exit 1; }
-echo "LuCI's fa catalog: Remote access = $fa"
+grep -qF '"45517f0a":"دسترسی از راه دور"' /tmp/luci-fa.js \
+	|| { echo "the Persian tab names are not in LuCI's fa catalog"; head -c 300 /tmp/luci-fa.js; echo; exit 1; }
+echo "LuCI's fa catalog has the IRNetFree tab names ($(grep -o '"[0-9a-f]\{8\}":' /tmp/luci-fa.js | wc -l) strings in all)"
 
 say "SMOKE OK"
