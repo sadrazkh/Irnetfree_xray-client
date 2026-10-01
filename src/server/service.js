@@ -46,6 +46,7 @@ const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = requir
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 const { migrateSettings } = require('../main/settingsMigrate');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
+const { createWanWatcher, decide: decideWanChange } = require('../main/wanWatch');
 const { exportBundle, importBundle } = require('../main/backup');
 const { AssetUpdater } = require('../main/assetUpdater');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
@@ -188,8 +189,15 @@ function createService(opts = {}) {
     bootDelayMs: 1000, bootEveryMs: 15000, bootSlowAfter: 20, bootSlowMs: 60000,
     routerBackoffMs: [2000, 5000, 15000, 30000, 60000],
     crashWindowMs: 120000,       // a drop this soon after a rebuild continues that rebuild's backoff
-    syslogTunQuietMs: 10000      // one sing-box line of a kind per this, into syslog
+    syslogTunQuietMs: 10000,     // one sing-box line of a kind per this, into syslog
+    // the router's WAN watcher (wanWatch.js): the poll, how long a change must hold still, the gap between the two probes
+    wanIntervalMs: 5000, wanSettleMs: 10000, wanProbeGapMs: 5000
   }, deps.timing || {});
+  // "does the tunnel answer" — an HTTP 204 through the local SOCKS inbound, 5 s (a test hands in an answer)
+  const probeTunnel = deps.probeTunnel || (async () => {
+    const r = await httpThroughProxy(getSettings().socksPort, { host: 'cp.cloudflare.com', port: 80, path: '/generate_204', timeout: 5000 });
+    return !!(r && r.ok);
+  });
 
   const dataDir = opts.dataDir || defaultDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
@@ -2033,8 +2041,44 @@ function createService(opts = {}) {
     if (recoverTimer.unref) recoverTimer.unref();
   }
 
+  /**
+   * The router's verdict on a settled WAN change (wanWatch.js, S3): the
+   * tunnel is asked whether it survived — twice, 5 s apart — and only one
+   * that answers neither time is rebuilt, through the same recovery a drop
+   * uses; the device the live connection's direct dials are bound to having
+   * vanished is a rebuild at once. Said either way, with the diff.
+   */
+  async function judgeWanChange(diff) {
+    const what = diff.lines.length ? diff.lines.join('; ') : 'the link moved and settled back';
+    const bound = liveDirectInterface;
+    let verdict;
+    try { verdict = await decideWanChange({ diff, boundDev: bound, probe: probeTunnel, probeGapMs: T.wanProbeGapMs }); }
+    catch { verdict = 'rebuild'; }
+    if (verdict === 'kept') { send('log', { line: `Network changed (${what}) — the tunnel answers, kept`, level: 'info' }); return; }
+    const why = bound && diff.devGone.includes(bound) ? `the WAN device the tunnel is bound to (${bound}) is gone` : 'the tunnel does not answer';
+    send('log', { line: `Network changed (${what}) — ${why}, rebuilding`, level: 'warn' });
+    await recoverFromNetworkChange('wan-changed').catch((e) => {
+      send('log', { line: 'Network recovery failed: ' + ((e && e.message) || e), level: 'error' });
+    });
+  }
+
   function startNetWatcher() {
     stopNetWatcher();
+    if (OPENWRT) {
+      // The router's watcher: WAN facts only, from netifd (the interfaces
+      // holding a default route — up, device, IPv4 address, gateway; IPv6 by
+      // up and device only), judged by a probe (judgeWanChange). The desktop's
+      // every-address fingerprint rebuilt the gateway on an IPv6 prefix
+      // rotation and on every WAN blip — 20-40 s of the LAN direct each time.
+      netWatcher = createWanWatcher({
+        readDump: async () => JSON.parse(await lanRun('ubus', ['call', 'network.interface', 'dump'], { timeout: 5000 })),
+        settleMs: T.wanSettleMs,
+        intervalMs: T.wanIntervalMs,
+        onChange: ({ diff }) => judgeWanChange(diff)
+      });
+      netWatcher.start();
+      return;
+    }
     netWatcher = new NetWatcher({
       read: () => os.networkInterfaces(),
       // Our own TUN adapter is not part of "the machine's network": a rebuild
@@ -2057,6 +2101,7 @@ function createService(opts = {}) {
    * taken before the watcher exists is comparable with the baseline it adopts.
    */
   function currentNetFingerprint() {
+    if (OPENWRT) return null;   // the router judges WAN changes by a probe (startNetWatcher), never by this
     return fingerprint(os.networkInterfaces(), isOwnTunInterface);
   }
 
