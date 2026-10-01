@@ -116,8 +116,9 @@ Notes:
 - **http2 only.** QUIC has been throttled or blocked on Iranian ISPs since mid-2025, so the tunnel is pinned
   to `--protocol http2` (TCP 7844). The edge addresses it dials (Cloudflare's published list,
   198.41.192.0/24, 198.41.200.0/24 and the two IPv6 ranges) bypass the VPN, and the edge-discovery names
-  (`argotunnel.com`, `cftunnel.com`) are resolved through the config's direct resolvers (a dnsmasq drop-in in
-  `/tmp/dnsmasq.d`, there only while the tunnel is enabled).
+  (`argotunnel.com`, `cftunnel.com`) are resolved through the config's direct resolvers (a dnsmasq drop-in
+  `irnetfree-cloudflared.conf` in the dir dnsmasq reads — `/tmp/dnsmasq.d` on 23.05, `/tmp/dnsmasq.<instance>.d`
+  on 24.10 — there only while the tunnel is enabled).
 - **No fallback through the VPN**: cloudflared cannot use a SOCKS/HTTP proxy for its own connections. If the
   direct way to Cloudflare is blocked, this path is down; the relay is the one to rely on.
 - **Package version.** OpenWrt 23.05's feed ships `cloudflared 2024.4.1` (8 MB), 24.10's `2025.5.0` (both
@@ -278,7 +279,8 @@ LuCI یا `/_relay/` را رد می‌کند.
 - **فقط http2.** QUIC از نیمهٔ ۲۰۲۵ روی ISPهای ایران محدود یا بسته است، پس تونل روی `--protocol http2`
   (TCP 7844) ثابت شده. آدرس‌های لبه‌ای که می‌گیرد (فهرست منتشرشدهٔ کلادفلر: 198.41.192.0/24، 198.41.200.0/24 و
   دو بازهٔ IPv6) VPN را دور می‌زنند و نام‌های کشف لبه (`argotunnel.com`، `cftunnel.com`) از رزولورهای مستقیم
-  کانفیگ حل می‌شوند (یک drop-in برای dnsmasq در `/tmp/dnsmasq.d`، فقط تا وقتی تونل فعال است).
+  کانفیگ حل می‌شوند (یک drop-in به نام `irnetfree-cloudflared.conf` در پوشه‌ای که dnsmasq می‌خواند — در 23.05
+  `/tmp/dnsmasq.d`، در 24.10 `/tmp/dnsmasq.<instance>.d` — فقط تا وقتی تونل فعال است).
 - **راه جایگزین از داخل VPN ندارد**: cloudflared برای اتصال‌های خودش پراکسی SOCKS/HTTP نمی‌پذیرد. اگر راه مستقیم
   به کلادفلر بسته باشد این مسیر پایین است؛ رله همانی است که باید رویش حساب کرد.
 - **نسخهٔ بسته.** فید OpenWrt 23.05 نسخهٔ `cloudflared 2024.4.1` (۸ مگابایت) و فید 24.10 نسخهٔ `2025.5.0` را دارد
