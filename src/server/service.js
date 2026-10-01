@@ -2288,6 +2288,14 @@ function createService(opts = {}) {
     // afresh starts with no crash history (recoverFromDrop), as after a disconnect
     'connect': (id) => {
       bootCancelled = true; lastRebuilt = null;
+      // On a router a Connect on the connection that is already up — a page
+      // that loaded while the tunnel was up and had no idea (S1), pressed again
+      // — is not a 20-40 s rebuild of a gateway that is fine (S2). (The crash
+      // history is still cleared above: the user asked for this connection afresh.)
+      if (OPENWRT && alreadyUp(id)) {
+        send('log', { line: `Connect: already connected to ${conn.label || id} with the gateway up — nothing to rebuild`, level: 'info' });
+        return { ok: true, already: true };
+      }
       return doConnect(id, { cause: store.get('activeServerId', null) ? 'switch' : 'user' });
     },
     // ...and a disconnect by hand is the one thing that clears the router's connectIntent
@@ -2509,6 +2517,12 @@ function createService(opts = {}) {
     const h = handlers[channel];
     if (!h) throw new Error('unknown channel: ' + channel);
     return await h(arg);
+  }
+
+  /** Connected to exactly `id`, core running, gateway up, nothing rebuilding or in flight: a Connect has nothing to do. */
+  function alreadyUp(id) {
+    return !!id && id === store.get('activeServerId', null) && !!(xray && xray.running) && !!(tun && tun.active)
+      && !recovering && !recoverTimer && !connectsInFlight.size && conn.state === 'connected';
   }
 
   function onEvent(cb) { listeners.add(cb); return () => listeners.delete(cb); }

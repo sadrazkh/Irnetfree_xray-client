@@ -95,3 +95,43 @@ test('S1: the web bridge exposes the snapshot channel and the renderer applies i
   assert.match(MAIN, /ipcMain\.handle\('app:init', \(\) => \(\{[\s\S]*?conn: connSnapshot\(\)\n/);
   assert.match(MAIN, /^function connSnapshot\(\) \{/m);
 });
+
+/* ----------------------------- S2: a stale page cannot tear down a live gateway ----------------------------- */
+
+test('S2: Connect on the connection that is already up is a no-op ({ already: true }), a connect to another server still switches', async (t) => {
+  const s = H.start();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const gw = s.state.inners.find(i => i.active);
+  const starts = s.state.xray.starts.length;
+  const stops = s.state.xray.stops;
+
+  const r = await s.service.invoke('connect', SERVER.id);
+  assert.deepEqual(r, { ok: true, already: true });
+  assert.equal(s.state.xray.starts.length, starts, 'no core restart');
+  assert.equal(s.state.xray.stops, stops, 'no core stop');
+  assert.equal(s.state.inners.find(i => i.active), gw, 'the same gateway, untouched');
+  assert.equal(gw.starts, 1);
+  assert.ok(s.logs.some(l => /already connected/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+  assert.equal(connectedCount(s), 1, 'no second "connected"');
+
+  const sw = await s.service.invoke('connect', SERVER_B.id);
+  assert.equal(sw.ok, true);
+  assert.equal(sw.already, undefined);
+  assert.equal((await s.service.invoke('app:init')).activeServerId, SERVER_B.id);
+  assert.equal(s.service.connSnapshot().serverId, SERVER_B.id);
+  assert.equal(s.service.connSnapshot().cause, 'switch');
+});
+
+test('S2: with the gateway down (a drop being rebuilt) a Connect is not a no-op', async (t) => {
+  const s = H.start({}, { timing: Object.assign({}, H.fakes.deps(H.fakes.makeState()).timing, { routerBackoffMs: [2000, 2000, 2000], crashWindowMs: 60000 }) });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.gatewayFails = true;
+  s.state.inners.find(i => i.active).crash();
+  await until(() => s.statuses.some(x => x.state === 'reconnecting'), 'the recovery');
+  s.state.gatewayFails = false;
+  const r = await s.service.invoke('connect', SERVER.id);
+  assert.equal(r.already, undefined, 'a real connect: the gateway was down');
+  assert.equal(s.service.connSnapshot().state, 'connected');
+});

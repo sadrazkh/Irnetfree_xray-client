@@ -654,11 +654,12 @@ test('A1: a rebuild where nothing resolves keeps the address of the last connect
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', NAMED.id);
   answer = [];   // a recovery under the gateway: dnsmasq's upstream is the tunnel that is down
-  await s.service.invoke('connect', NAMED.id);
+  // a rebuild of the live connection (v1.16: a Connect on the connection that is already up is a no-op, S2)
+  await s.service.invoke('vpn:reconnect');
   assert.deepEqual(configAt(s, 1).dns.hosts, { 'upstream.invalid': ['198.51.100.7'] });
   assert.ok(s.logs.some(l => l.level === 'warn' && /upstream\.invalid does not resolve right now — using 198\.51\.100\.7/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
   answer = ['198.51.100.8'];   // a fresh answer always wins
-  await s.service.invoke('connect', NAMED.id);
+  await s.service.invoke('vpn:reconnect');
   assert.deepEqual(configAt(s, 2).dns.hosts, { 'upstream.invalid': ['198.51.100.8'] });
 });
 
