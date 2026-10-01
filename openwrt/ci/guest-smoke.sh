@@ -102,10 +102,23 @@ if opkg install cloudflared > /tmp/cf-install.log 2>&1; then
 	cloudflared --version 2>&1 | head -n 1 || true
 	[ -x /etc/init.d/cloudflared ] || { echo "the package ships no init script"; exit 1; }
 	echo "--- /etc/config/cloudflared"; cat /etc/config/cloudflared
-	uci -q show cloudflared | grep -q '\.token=' || { echo "the package's UCI has no token option — the spec's fallback (TUNNEL_TOKEN in the env) would be needed"; exit 1; }
+	echo "--- /etc/init.d/cloudflared: how it reads enabled / token / protocol"
+	grep -n 'config_get\|procd_set_param command\|procd_append_param\|token\|protocol' /etc/init.d/cloudflared || true
+	# the default config file may not list `token` (24.10's does not); what matters is that the init reads it
+	grep -q 'token' /etc/init.d/cloudflared || { echo "the package's init script does not read a token option — the spec's fallback (TUNNEL_TOKEN in the env) would be needed"; exit 1; }
 	uci -q show cloudflared | grep -q '^cloudflared\.[A-Za-z0-9_]*=cloudflared' || { echo "no section of type cloudflared"; exit 1; }
 	node -e "require('/usr/lib/irnetfree/src/server/remote/cloudflared').createCloudflared().status().then(s => { console.log('cloudflared status: ' + JSON.stringify(s)); process.exit(s.installed ? 0 : 1); })" \
 		|| { echo "status does not report installed"; exit 1; }
+	# the real apply path, on then off, with a token that cannot work (base64 of a made-up JSON): the UCI
+	# write through uci batch on stdin, protocol pinned to http2, the service enabled/started, the dnsmasq
+	# drop-in written — then everything undone
+	node -e "const c = require('/usr/lib/irnetfree/src/server/remote/cloudflared').createCloudflared({ log: (l) => console.log('  ' + l) }); c.apply({ enabled: true, token: 'eyJhIjoiMDAwIiwidCI6IjAwMCIsInMiOiIwMDAifQ==' }).then((r) => { console.log('apply on: ' + JSON.stringify(r)); return c.status(); }).then((s) => { console.log('status while on: ' + JSON.stringify(s)); return c.apply({ enabled: false, token: '' }); }).then((r) => { console.log('apply off: ' + JSON.stringify(r)); process.exit(0); }).catch((e) => { console.log('apply failed: ' + e.message); process.exit(1); })" \
+		|| { echo "the apply path failed"; exit 1; }
+	[ "$(uci -q get cloudflared.config.protocol)" = http2 ] || { echo "protocol was not pinned to http2 in UCI"; uci show cloudflared; exit 1; }
+	[ "$(uci -q get cloudflared.config.enabled)" = 0 ] || { echo "apply off did not write enabled=0"; uci show cloudflared; exit 1; }
+	[ ! -e /tmp/dnsmasq.d/irnetfree-cloudflared.conf ] || { echo "the dnsmasq drop-in was not removed when off"; exit 1; }
+	if pidof cloudflared >/dev/null; then echo "cloudflared still runs after apply off"; exit 1; fi
+	echo "cloudflared: UCI written, http2 pinned, started and stopped through its own init, drop-in cleaned"
 else
 	echo "cloudflared: NOT installable from this feed:"; tail -n 5 /tmp/cf-install.log
 	node -e "require('/usr/lib/irnetfree/src/server/remote/cloudflared').createCloudflared().status().then(s => { console.log('cloudflared status: ' + JSON.stringify(s)); process.exit(s.installed ? 1 : 0); })" \
