@@ -2310,7 +2310,10 @@ window.api.onStatus((d) => {
     setTimeout(() => checkIp(3, true), 1200);
     // auto-measure TCP ping + real delay for the active config so the home
     // cards show real numbers (real delay = proof the config actually works)
-    setTimeout(() => quickPing(d.serverId), 700);
+    // — not on a router: a test core beside the live one on every connect
+    // (and every recovery) is memory a 512 MB box does not have (S6); the
+    // ⚡ button still measures on request
+    if (state.flavor !== 'openwrt') setTimeout(() => quickPing(d.serverId), 700);
   } else if (d.state === 'connecting') {
     state.connecting = true;
     setConnUI('connecting', d.serverId);
