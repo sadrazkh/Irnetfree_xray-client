@@ -226,8 +226,7 @@ function createRemoteAgent(o) {
       online(c, useVpn ? 'vpn' : 'direct', host, ips, cfg);
     } catch (e) {
       if (myGen !== gen) return;
-      const msg = describeError(e);
-      log(`remote: ${useVpn ? 'the dial through the tunnel' : 'the direct dial'} to ${host} failed: ${msg}`, 'warn');
+      const msg = `${useVpn ? 'the dial through the tunnel' : 'the direct dial'} to ${host} failed: ${describeError(e)}`;
       if (!useVpn && up) {
         directFailures++;
         if (directFailures >= DIRECT_FAILURES_BEFORE_VPN && !vpnMode) {
@@ -263,8 +262,7 @@ function createRemoteAgent(o) {
       if (keepalive) { clearInterval(keepalive); keepalive = null; }
       for (const [id, s] of streams) { streams.delete(id); try { s.req.destroy(); } catch { /* gone */ } }
       if (!running) { state = 'off'; return; }
-      log(`remote: the link to ${host} closed (${code}${reason ? ', ' + reason : ''})`, 'warn');
-      scheduleRetry(`link closed (${code}${reason ? ' ' + reason : ''})`);
+      scheduleRetry(`the link to ${host} closed (${code}${reason ? ', ' + reason : ''})`);
     });
     keepalive = setInterval(() => {
       if (conn !== c) return;
@@ -282,7 +280,7 @@ function createRemoteAgent(o) {
     const base = BACKOFF_MS[Math.min(failures, BACKOFF_MS.length - 1)];
     failures++;
     const wait = Math.round(base * (1 + Math.random() * 0.3));
-    log(`remote: retrying in ${Math.round(wait / 1000)} s`);
+    log(`remote: ${reason} — next try in ${Math.round(wait / 1000)} s`, 'warn');   // one line per failed attempt, into syslog
     if (retryTimer) timers.clearTimeout(retryTimer);
     const myGen = gen;
     retryTimer = timers.setTimeout(() => { retryTimer = null; if (running && myGen === gen) attempt(myGen); }, wait);
