@@ -58,6 +58,62 @@ rpc '{"channel":"settings:get"}' | jq -c '.result | {autoConnect, lanBlockQuic, 
 rpc '{"channel":"settings:get"}' | jq -e '.result.autoConnect == true and .result.lanBlockQuic == true and .result.dnsManaged == true' >/dev/null \
 	|| { echo "the router defaults were not applied to a fresh store"; exit 1; }
 
+# ---- remote control (feat/remote): the relay link's building blocks on this node, cloudflared from the feed ----
+say "remote: the WebSocket, frame, token, agent and api modules run on this node (the relay link's building blocks)"
+cat > /tmp/remote-selftest.js <<'EOF'
+const http = require('http');
+const { wsConnect, wsAccept } = require('/usr/lib/irnetfree/src/server/remote/ws');
+const { T, encode, decode } = require('/usr/lib/irnetfree/src/server/remote/frames');
+const { mintToken, isToken } = require('/usr/lib/irnetfree/src/server/remote/token');
+const { forbiddenPath } = require('/usr/lib/irnetfree/src/server/remote/agent');
+const api = require('/usr/lib/irnetfree/src/server/remote/api');
+const srv = http.createServer();
+srv.on('upgrade', (req, socket, head) => {
+  const c = wsAccept(req, socket, head);
+  c.on('message', (m) => { const f = decode(m); c.send(encode(T.RES_HEAD, f.stream, { status: 200, echo: f.json(), auth: req.headers.authorization })); });
+});
+srv.listen(0, '127.0.0.1', async () => {
+  const token = mintToken();
+  const c = await wsConnect('ws://127.0.0.1:' + srv.address().port + '/_relay/agent', { headers: { Authorization: 'Bearer ' + token } });
+  c.on('message', (m) => {
+    const f = decode(m);
+    const j = f.json();
+    const ok = f.type === T.RES_HEAD && f.stream === 7 && j.echo.hello === 'router' && j.auth === 'Bearer ' + token && isToken(token)
+      && forbiddenPath('/luci/x') && forbiddenPath('/_relay/agent') && !forbiddenPath('/rpc') && api.METHODS.length === 4;
+    console.log(ok ? 'REMOTE SELFTEST OK on node ' + process.version : 'REMOTE SELFTEST FAILED ' + JSON.stringify(j));
+    c.close(1000); srv.close(); process.exit(ok ? 0 : 1);
+  });
+  c.send(encode(T.REQ_HEAD, 7, { hello: 'router' }));
+});
+setTimeout(() => { console.log('REMOTE SELFTEST TIMEOUT'); process.exit(1); }, 30000);
+EOF
+node /tmp/remote-selftest.js | tee /tmp/remote-selftest.log
+grep -q 'REMOTE SELFTEST OK' /tmp/remote-selftest.log || { echo "the remote modules do not run on this node"; exit 1; }
+
+say "remote: the service started remote access without an error (nothing enabled yet — no link, no dial)"
+if logread | grep -q 'remote: not started'; then echo "the remote api did not start"; logread | grep 'remote' | tail -n 5; exit 1; fi
+if logread | grep -qi 'remote:.*dialing'; then echo "the agent dialed although nothing is enabled"; exit 1; fi
+echo "remote access idle, as configured"
+
+say "remote: cloudflared in this release's feed — package, version, its UCI config and init script, dnsmasq's drop-in dir"
+if opkg install cloudflared > /tmp/cf-install.log 2>&1; then
+	echo "cloudflared: installed from the feed"
+	opkg status cloudflared | grep -E '^(Version|Architecture|Installed-Size):'
+	cloudflared --version 2>&1 | head -n 1 || true
+	[ -x /etc/init.d/cloudflared ] || { echo "the package ships no init script"; exit 1; }
+	echo "--- /etc/config/cloudflared"; cat /etc/config/cloudflared
+	uci -q show cloudflared | grep -q '\.token=' || { echo "the package's UCI has no token option — the spec's fallback (TUNNEL_TOKEN in the env) would be needed"; exit 1; }
+	uci -q show cloudflared | grep -q '^cloudflared\.[A-Za-z0-9_]*=cloudflared' || { echo "no section of type cloudflared"; exit 1; }
+	node -e "require('/usr/lib/irnetfree/src/server/remote/cloudflared').createCloudflared().status().then(s => { console.log('cloudflared status: ' + JSON.stringify(s)); process.exit(s.installed ? 0 : 1); })" \
+		|| { echo "status does not report installed"; exit 1; }
+else
+	echo "cloudflared: NOT installable from this feed:"; tail -n 5 /tmp/cf-install.log
+	node -e "require('/usr/lib/irnetfree/src/server/remote/cloudflared').createCloudflared().status().then(s => { console.log('cloudflared status: ' + JSON.stringify(s)); process.exit(s.installed ? 1 : 0); })" \
+		|| { echo "status claims installed without the binary"; exit 1; }
+fi
+if grep -qs 'conf-dir=/tmp/dnsmasq.d' /var/etc/dnsmasq.conf.*; then echo "dnsmasq reads /tmp/dnsmasq.d — where the edge-domain drop-in goes"
+else echo "dnsmasq does not read /tmp/dnsmasq.d:"; grep -hs 'conf-dir\|conf-file' /var/etc/dnsmasq.conf.* || true; exit 1; fi
+
 say "an upstream: a SOCKS server in this guest, bound to the LAN device so it cannot loop into the tunnel"
 cat > /tmp/upstream.json <<'EOF'
 {"log":{"level":"warn"},"inbounds":[{"type":"socks","tag":"in","listen":"192.168.1.1","listen_port":1081}],"outbounds":[{"type":"direct","tag":"out","bind_interface":"br-lan"}]}
