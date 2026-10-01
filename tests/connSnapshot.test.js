@@ -135,3 +135,104 @@ test('S2: with the gateway down (a drop being rebuilt) a Connect is not a no-op'
   assert.equal(r.already, undefined, 'a real connect: the gateway was down');
   assert.equal(s.service.connSnapshot().state, 'connected');
 });
+
+/* ----------------------------- S4 / B3: a drop reads "reconnecting", a boot retry "waiting" ----------------------------- */
+
+const timing = (over) => ({ timing: Object.assign({}, H.fakes.deps(H.fakes.makeState()).timing, over) });
+
+test('S4: the core dying under a live connection: the very next status is reconnecting (attempt 1, retryInMs 0), the stop event says rebuilding, and the backoff keeps saying reconnecting with the wait', async (t) => {
+  const s = H.start({}, timing({ routerBackoffMs: [400, 400, 400], crashWindowMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const n = s.statuses.length;
+  const stops = s.events.filter(([ch]) => ch === 'xray-status').length;
+  s.state.xray.crash();
+  await until(() => s.statuses.length > n, 'a status after the drop');
+  assert.deepEqual([s.statuses[n].state, s.statuses[n].attempt, s.statuses[n].retryInMs, s.statuses[n].cause], ['reconnecting', 1, 0, 'recovery'], JSON.stringify(s.statuses[n]));
+  const stop = s.events.filter(([ch]) => ch === 'xray-status')[stops][1];
+  assert.equal(stop.state, 'stopped');
+  assert.equal(stop.rebuilding, true, 'the window keeps "connected" until the recovery speaks');
+  await until(() => connectedCount(s) === 2, 'the rebuild');
+  assert.equal(s.service.connSnapshot().state, 'connected');
+
+  // a second drop soon after: the backoff — said at once, with the wait, and the snapshot says so through it
+  const m = s.statuses.length;
+  s.state.xray.crash();
+  await until(() => s.statuses.length > m, 'the backoff status');
+  const waiting = s.statuses[m];
+  assert.equal(waiting.state, 'reconnecting');
+  assert.equal(waiting.attempt, 2);
+  assert.equal(waiting.retryInMs, 400);
+  const snap = s.service.connSnapshot();
+  assert.equal(snap.state, 'reconnecting');
+  assert.equal(snap.attempt, 2);
+  assert.ok(snap.retryInMs > 0 && snap.retryInMs <= 400, 'until the next attempt: ' + snap.retryInMs);
+  assert.equal(snap.reason, 'core-exited');
+  assert.ok(!s.statuses.slice(n).some(x => x.state === 'disconnected' || x.state === 'error'), 'never a bare disconnected: ' + s.statuses.slice(n).map(x => x.state).join(','));
+  await until(() => connectedCount(s) === 3, 'the rebuild after the wait', 5000);
+  assert.equal(s.service.connSnapshot().retryInMs, null);
+  // a final stop (the user's disconnect) is not a rebuild
+  await s.service.invoke('disconnect');
+  const last = s.events.filter(([ch]) => ch === 'xray-status').at(-1)[1];
+  assert.equal(last.state, 'stopped');
+  assert.equal(!!last.rebuilding, false);
+});
+
+test('S4: a rebuild that fails keeps saying reconnecting with the next wait — the snapshot never shows error while the recovery goes on', async (t) => {
+  const s = H.start({}, timing({ routerBackoffMs: [300, 300, 300], crashWindowMs: 0 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.gatewayFails = true;
+  s.state.inners.find(i => i.active).crash();
+  await until(() => s.statuses.filter(x => x.state === 'reconnecting' && x.retryInMs > 0).length >= 1, 'the wait after a failed attempt', 5000);
+  const w = s.statuses.filter(x => x.state === 'reconnecting' && x.retryInMs > 0)[0];
+  assert.equal(w.attempt, 2, 'the attempt about to start');
+  assert.equal(w.retryInMs, 300);
+  assert.equal(s.service.connSnapshot().state, 'reconnecting');
+  assert.ok(!s.statuses.some(x => x.state === 'error' || x.state === 'disconnected'), s.statuses.map(x => x.state).join(','));
+  s.state.gatewayFails = false;
+  await until(() => connectedCount(s) === 2, 'back', 5000);
+});
+
+test('B3: the boot connect with the WAN not there reads waiting (attempt n) between and during its retries, never error — and comes up when it can', async (t) => {
+  const s = H.start({ connectIntent: SERVER.id, settings: { autoConnect: true } }, timing({ bootDelayMs: 5, bootEveryMs: 60, bootSlowAfter: 1000 }));
+  t.after(() => s.service.shutdown());
+  s.state.gatewayFails = true;
+  await until(() => s.statuses.some(x => x.state === 'waiting' && x.attempt >= 3), 'the third attempt', 10000);
+  const waits = s.statuses.filter(x => x.state === 'waiting');
+  // said after each failure (with the wait) and again as the next attempt starts (its "connecting" reads waiting too)
+  assert.deepEqual([...new Set(waits.map(x => x.attempt))].slice(0, 3), [1, 2, 3], 'the attempt increments: ' + waits.map(x => x.attempt).join(','));
+  assert.ok(waits.every(x => x.cause === 'boot' && x.serverId === SERVER.id));
+  assert.ok(waits.some(x => typeof x.retryInMs === 'number' && x.retryInMs > 0), 'the wait before the next attempt is said');
+  assert.ok(!s.statuses.some(x => x.state === 'error' || x.state === 'disconnected'), 'no error between attempts: ' + s.statuses.map(x => x.state).join(','));
+  assert.ok(!s.statuses.slice(1).some(x => x.state === 'connecting'), 'a retry reads waiting, not connecting: ' + s.statuses.map(x => x.state).join(','));
+  const snap = s.service.connSnapshot();
+  assert.equal(snap.state, 'waiting');
+  assert.ok(snap.attempt >= 3);
+  assert.equal(snap.cause, 'boot');
+  assert.ok(snap.reason && /Gateway did not come up/.test(snap.reason), snap.reason);
+  s.state.gatewayFails = false;
+  await until(() => connectedCount(s) === 1, 'up once the WAN is there', 10000);
+  assert.equal(s.service.connSnapshot().state, 'connected');
+  assert.equal(s.service.connSnapshot().cause, 'boot');
+  // …and a later connect by hand is a plain "connecting" again
+  await s.service.invoke('disconnect');
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(s.statuses.at(-2).state, 'connecting');
+  assert.equal(s.statuses.at(-1).state, 'connected');
+});
+
+test('B1: the boot connect follows connectIntent — set with autoConnect on it connects, cleared it does not', async (t) => {
+  const on = H.start({ connectIntent: SERVER.id, settings: { autoConnect: true } });
+  t.after(() => on.service.shutdown());
+  await until(() => connectedCount(on) === 1, 'the boot connect');
+  assert.equal(on.service.connSnapshot().cause, 'boot');
+  const off = H.start({ connectIntent: null, lastServerId: SERVER.id, settings: { autoConnect: true } });
+  t.after(() => off.service.shutdown());
+  await sleep(150);
+  assert.equal(off.state.xray.starts.length, 0, 'no intent: nothing connects');
+  const noAuto = H.start({ connectIntent: SERVER.id, settings: { autoConnect: false } });
+  t.after(() => noAuto.service.shutdown());
+  await sleep(150);
+  assert.equal(noAuto.state.xray.starts.length, 0, 'the setting off: nothing connects');
+});

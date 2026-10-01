@@ -303,8 +303,14 @@ function createService(opts = {}) {
 
   // to the clients only — for an event whose reason syslog already has
   const tell = (channel, payload) => {
-    if (channel === 'status') noteStatus(payload);
-    else if (channel === 'log' && payload) ring.push(`${stamp()} [${payload.level || 'info'}] ${oneLine(payload.line)}`);
+    if (channel === 'status') {
+      // a boot retry's own "connecting" reads "waiting" as well — no flip
+      // between the two every 15 s while the WAN is not there (B3)
+      if (payload && payload.state === 'connecting' && payload.cause === 'boot' && bootAttempt > 1) {
+        payload = { state: 'waiting', serverId: payload.serverId, attempt: bootAttempt, cause: 'boot' };
+      }
+      noteStatus(payload);
+    } else if (channel === 'log' && payload) ring.push(`${stamp()} [${payload.level || 'info'}] ${oneLine(payload.line)}`);
     for (const cb of listeners) { try { cb(channel, payload); } catch {} }
   };
   const send = (channel, payload) => {
@@ -517,17 +523,22 @@ function createService(opts = {}) {
     onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
     onStatus: (state, info) => {
       if ((xrayReloading || quietStops > 0) && state === 'stopped') return;
-      if (state === 'stopped' && !userDisconnecting && !isQuitting && store.get('activeServerId', null)) {
+      const drop = state === 'stopped' && !userDisconnecting && !isQuitting && !!store.get('activeServerId', null);
+      if (drop) {
         // The core died under a live connection (OOM, a panic, kill -9) and
         // nothing asked it to: under TUN the tunnel keeps routing into a SOCKS
         // port nobody answers — on a router the whole LAN offline behind a
         // gateway that still says "up". (headless: no Windows kill switch.)
         // Rebuilt like a network change; deferred a tick so the drop is
         // reported to the clients first.
-        send('log', { line: `The core exited on its own (code=${info && info.code != null ? info.code : '-'} signal=${(info && info.signal) || '-'}) — rebuilding the connection`, level: 'error' });
+        send('log', { line: `The core exited on its own (code=${info && info.code != null ? info.code : '-'} signal=${(info && info.signal) || '-'}) — rebuilding the connection${memLine()}`, level: 'error' });
         setTimeout(() => recoverFromDrop('core-exited'), 0);
       }
-      send('xray-status', { state, info });
+      // `rebuilding`: this stop is a drop the service is about to rebuild (on
+      // a router always, elsewhere with the switch on) — the window keeps
+      // "connected" until the recovery says "reconnecting" (S4), instead of
+      // painting "disconnected" with a red toast for the whole backoff.
+      send('xray-status', { state, info, rebuilding: drop && (OPENWRT || !!getSettings().autoReconnectOnNetworkChange) });
     }
   };
   const xray = deps.xray ? deps.xray(xrayOpts) : new XrayManager(xrayOpts);
@@ -1165,7 +1176,7 @@ function createService(opts = {}) {
     // caller): the snapshot must not stay on "connecting" for every later page
     // load. A boot attempt's failure is said by the boot loop itself (waiting).
     p.catch((e) => {
-      if (conn.state !== 'connecting') return;
+      if (conn.state !== 'connecting' || (opts && opts.cause === 'boot')) return;
       noteStatus({ state: 'error', message: (e && e.message) || String(e), serverId, cause: (opts && opts.cause) || 'user' });
     });
     return p;
@@ -1568,7 +1579,7 @@ function createService(opts = {}) {
     // direct while the panel, the boot retries and the recovery all took it
     // for a success. Undone and thrown, so each of them retries.
     if (OPENWRT && settings.tunMode && tunError) {
-      const overtaken = await abortGateway(serverId, prevActive, myTun, stale, tunError);
+      const overtaken = await abortGateway(serverId, prevActive, myTun, stale, tunError, cause === 'boot');
       if (overtaken) return giveWay();
       throw new Error(tunError);
     }
@@ -1637,8 +1648,10 @@ function createService(opts = {}) {
    *
    * Returns true when a disconnect or a newer connect overtook this call
    * while it awaited: that one owns the state now, so nothing is written.
+   * A boot attempt (`boot`) says nothing here at all: the boot loop reports
+   * its waiting between the retries (B3).
    */
-  async function abortGateway(serverId, prevActive, myTun, stale, message) {
+  async function abortGateway(serverId, prevActive, myTun, stale, message, boot = false) {
     if (myTun && myTun.active) { try { await myTun.stop(); } catch { /* best effort */ } }
     if (stale()) return true;
     quietStops++;
@@ -1656,7 +1669,7 @@ function createService(opts = {}) {
       if (stats) stats.stop();
       liveDirectInterface = null;
       if (prevActive) send('status', { state: 'disconnected', cause: 'abort' });
-      else tell('status', { state: 'error', message, serverId, cause: 'abort' });
+      else if (!boot) tell('status', { state: 'error', message, serverId, cause: 'abort' });
     }
     return false;
   }
@@ -1739,7 +1752,10 @@ function createService(opts = {}) {
       appliedSettings = null;
       // the proxy kept above must not stay aimed at a core that did not come back
       try { await setProxy(false, {}); } catch {}
-      send('status', { state: 'error', message: e.message, serverId, cause });
+      // Inside a recovery the attempt's failure is not an "error" for the
+      // clients: runRecovery says "reconnecting" with the next wait at once,
+      // and the log line carries the reason (S4). A rebuild by hand says it.
+      if (!opts.recovery) send('status', { state: 'error', message: e.message, serverId, cause });
       return { ok: false, error: e.message };
     }
     // A disconnect overtook the connect: it emitted nothing and started nothing,
@@ -1856,7 +1872,11 @@ function createService(opts = {}) {
       return;
     }
     const attempt = lastRebuilt.attempt + 1;
-    send('log', { line: `The connection dropped again ${Math.round(since / 1000)}s after it was rebuilt (${reason}) — waiting ${wait / 1000}s before the next rebuild`, level: 'warn' });
+    send('log', { line: `The connection dropped again ${Math.round(since / 1000)}s after it was rebuilt (${reason}) — waiting ${wait / 1000}s before the next rebuild${memLine()}`, level: 'warn' });
+    // Said at once and kept through the wait (S4): the clients would otherwise
+    // show "disconnected" until the rebuild starts. The attempt is the one
+    // about to run — the number runRecovery will report for it.
+    send('status', { state: 'reconnecting', reason, attempt: attempt + 1, retryInMs: wait, cause: causeOf(reason) });
     clearTimeout(recoverTimer);
     recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt).catch(fail), wait);
     if (recoverTimer.unref) recoverTimer.unref();
@@ -2005,6 +2025,8 @@ function createService(opts = {}) {
       return;
     }
     send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
+    // still "reconnecting" through the wait, with the attempt about to run (S4)
+    send('status', { state: 'reconnecting', reason, attempt: attempt + 2, retryInMs: delay, cause: recoveryCause });
     recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt + 1), delay);
     if (recoverTimer.unref) recoverTimer.unref();
   }
@@ -2752,7 +2774,13 @@ function createService(opts = {}) {
   const AUTO_RETRY = OPENWRT
     ? { tries: Infinity, everyMs: T.bootEveryMs, slowAfter: T.bootSlowAfter, slowMs: T.bootSlowMs }
     : { tries: 1, everyMs: 0, slowAfter: Infinity, slowMs: 0 };
+  // The boot connect's attempt in flight or waiting (0: none). While it is a
+  // RETRY its statuses read "waiting for internet" (B3): the first attempt is
+  // a plain connect, every one after it says what it is — the WAN, the modem
+  // or the clock not there yet — instead of flipping connecting↔error.
+  let bootAttempt = 0;
   function autoConnectAtLaunch(attempt = 1) {
+    bootAttempt = 0;
     if (bootCancelled || isQuitting) return;                         // done by hand meanwhile, or going away
     if (store.get('activeServerId', null)) return;                   // connected meanwhile
     const target = OPENWRT ? store.get('connectIntent', null) : (bootIntent || store.get('lastServerId', null));
@@ -2761,13 +2789,19 @@ function createService(opts = {}) {
       send('log', { line: `Auto-connect: the last connection (${target}) cannot be built any more — ${e.message}`, level: 'error' });
       return;
     }
-    doConnect(target).catch((e) => {
+    bootAttempt = attempt;
+    doConnect(target, { cause: 'boot' }).then(() => { bootAttempt = 0; }, (e) => {
+      bootAttempt = 0;
       if (bootCancelled || isQuitting) return;
       const more = attempt < AUTO_RETRY.tries;
       const wait = attempt >= AUTO_RETRY.slowAfter ? AUTO_RETRY.slowMs : AUTO_RETRY.everyMs;
       const of = Number.isFinite(AUTO_RETRY.tries) ? `/${AUTO_RETRY.tries}` : '';
       send('log', { line: `Auto-connect failed (${attempt}${of}): ${e.message}` + (more ? ` — retrying in ${wait / 1000}s` : ''), level: 'error' });
-      if (more) { const t = setTimeout(() => autoConnectAtLaunch(attempt + 1), wait); if (t.unref) t.unref(); }
+      if (!more) return;
+      // "waiting for internet", not an error, between the attempts (B3)
+      send('status', { state: 'waiting', serverId: target, attempt, retryInMs: wait, reason: e.message, cause: 'boot' });
+      const t = setTimeout(() => autoConnectAtLaunch(attempt + 1), wait);
+      if (t.unref) t.unref();
     });
   }
   if (st.autoConnect) { const t = setTimeout(() => autoConnectAtLaunch(), T.bootDelayMs); if (t.unref) t.unref(); }
