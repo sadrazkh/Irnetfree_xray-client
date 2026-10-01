@@ -34,7 +34,10 @@ start_service() {
 	# server's banner (syslog, through procd) would print it
 	procd_set_param command /usr/bin/node --max-old-space-size=160 "$APP" --host "$bind" --port "$port" --data-dir "$data_dir" --token-file "$data_dir/token"
 	procd_set_param env IRNETFREE_PLATFORM=openwrt HOME=/root
-	procd_set_param respawn
+	# never give up: procd's default stops respawning after 5 exits in an hour,
+	# and a router with no gateway has nobody to restart it by hand (the service
+	# itself exits in order on a fatal error, for exactly this respawn)
+	procd_set_param respawn 3600 5 0
 	# stopping takes the gateway down in order (sing-box, then the router's
 	# rules, then the core); procd's default 5s before SIGKILL is short on a
 	# slow router, and a killed service leaves its cores to the next start

@@ -131,7 +131,8 @@ test('the init script: procd, the token FILE (never the token itself), the exact
   assert.match(s, /procd_set_param command \/usr\/bin\/node --max-old-space-size=160 "\$APP" --host "\$bind" --port "\$port" --data-dir "\$data_dir" --token-file "\$data_dir\/token"$/m);
   assert.doesNotMatch(s, /--token "/);
   assert.match(s, /procd_set_param env IRNETFREE_PLATFORM=openwrt/);
-  assert.match(s, /procd_set_param respawn/);
+  // never give up: procd's default (5 crashes in an hour) left a router with no gateway until someone restarted it by hand
+  assert.match(s, /^\tprocd_set_param respawn 3600 5 0$/m);
   // time for a clean teardown of the gateway on stop (procd's default is 5s, then SIGKILL)
   assert.match(s, /procd_set_param term_timeout 15/);
   assert.match(s, /procd_add_reload_trigger irnetfree/);

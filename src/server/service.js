@@ -720,6 +720,8 @@ function createService(opts = {}) {
   // Only processes whose command line points into THIS service are touched
   // (openwrtNet.ownOrphanCores). doConnect() waits for this; it never rejects.
   const killPid = deps.kill || ((pid, sig) => process.kill(pid, sig));
+  // app:quit ends the process (a test hands in a spy, never process.exit)
+  const exitProcess = deps.exit || ((code) => process.exit(code));
   async function sweepOrphans() {
     const found = deps.orphans ? deps.orphans() : ownOrphanCores({ dataDir: path.resolve(dataDir), tmpDir: os.tmpdir() });
     if (found.length) {
@@ -2546,7 +2548,16 @@ function createService(opts = {}) {
     'open:dataDir': () => dataDir,
     'open:external': () => {},
     'win:minimize': () => {}, 'win:maximize': () => {}, 'win:hide': () => {}, 'win:close': () => {},
-    'app:quit': () => { shutdown(); }
+    // The headless service's quit is an orderly EXIT, for procd to restart
+    // (S5): it used to take the gateway down and leave node running with
+    // isQuitting set — no recovery, no boot connect — until a restart by hand.
+    // Answered first, exited a moment later so the reply gets out.
+    'app:quit': async () => {
+      await shutdown();
+      const t = setTimeout(() => exitProcess(0), 200);
+      if (t.unref) t.unref();
+      return { ok: true, exiting: true };
+    }
   };
 
   async function invoke(channel, arg) {
