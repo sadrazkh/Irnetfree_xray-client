@@ -302,7 +302,8 @@ test('crash loop: a core that dies again soon after every rebuild is rebuilt wit
   assert.ok(gaps[0] < waits[0], `the first drop is rebuilt at once: ${gaps}`);
   assert.ok(gaps[1] >= waits[0] - 20, `the second waits ${waits[0]}ms: ${gaps}`);
   assert.ok(gaps[2] >= waits[1] - 20, `the third waits ${waits[1]}ms: ${gaps}`);
-  assert.deepEqual(s.statuses.filter(x => x.state === 'reconnecting').map(x => x.attempt), [1, 2, 3], 'the attempt count carries over');
+  // (v1.16: the backoff says "reconnecting" with the wait before the attempt starts, so an attempt may be said twice)
+  assert.deepEqual([...new Set(s.statuses.filter(x => x.state === 'reconnecting').map(x => x.attempt))], [1, 2, 3], 'the attempt count carries over');
   assert.ok(s.logs.some(l => /dropped again \d+s after it was rebuilt \(core-exited\) — waiting 0\.4s before the next rebuild/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
   // a spell longer than the window: the next drop is a first drop again
   const quietStart = Date.now();
@@ -469,7 +470,7 @@ test('a drop queued behind a recovery is replayed through the crash window, not 
   s.state.xray.crash();
   await until(() => connectedCount(s) === 3, 'the rebuild, then the queued drop’s', 5000);
   assert.ok(s.logs.findIndex(l => /dropped again/.test(l.line)) > s.logs.findIndex(l => /Connection restored/.test(l.line)), 'replayed after the rebuild');
-  assert.deepEqual(s.statuses.filter(x => x.state === 'reconnecting').map(x => x.attempt), [1, 2], 'it continued that rebuild’s backoff');
+  assert.deepEqual([...new Set(s.statuses.filter(x => x.state === 'reconnecting').map(x => x.attempt))], [1, 2], 'it continued that rebuild’s backoff');
   assert.ok(s.logs.some(l => /dropped again \d+s after it was rebuilt \(core-exited\)/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
 });
 

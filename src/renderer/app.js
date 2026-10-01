@@ -2342,7 +2342,17 @@ window.api.onStatus((d) => {
     state.wasReconnecting = true;
     state.reconnectReason = d.reason || '';
     setConnUI('connecting', d.serverId || state.activeServerId);
-    $('#connState').textContent = t(reconnectingKey());
+    // the router says which attempt this is, and keeps saying so through the
+    // backoff (S4); the desktop keeps its own wording
+    $('#connState').textContent = state.flavor === 'openwrt' && d.attempt ? attemptText('reconnecting', d.attempt) : t(reconnectingKey());
+  } else if (d.state === 'waiting') {
+    // the router's boot connect waiting for the WAN (B3): between its
+    // retries, and during one — never "error" until it comes up
+    state.connected = false;
+    state.connecting = true;
+    state.wasReconnecting = false;
+    setConnUI('connecting', d.serverId || state.activeServerId);
+    $('#connState').textContent = attemptText('waiting', d.attempt);
   } else if (d.state === 'reconnect-failed') {
     // every retry is spent — the user has to act
     state.connecting = false;
@@ -2382,7 +2392,10 @@ window.api.onStatus((d) => {
 });
 
 window.api.onXrayStatus((d) => {
-  if (d.state === 'stopped' && state.connected) {
+  // `rebuilding`: the core died under a live connection and the service is
+  // about to rebuild it — its "reconnecting" follows at once; painting
+  // "disconnected" with a red toast here was the whole backoff's display (S4)
+  if (d.state === 'stopped' && state.connected && !d.rebuilding) {
     state.connected = false;
     setConnUI('disconnected');
     renderPendingBanner();

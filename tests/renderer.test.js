@@ -508,6 +508,33 @@ test('S1: a page loaded while the tunnel is up starts connected, with the uptime
   assert.equal(h.calls.filter((c) => c.startsWith('ui:')).length, 5);
 });
 
+test('S4: on the router a reconnecting status shows the attempt, a waiting status the boot retry, and a core stop that is being rebuilt paints nothing', () => {
+  const h = snapshotHarness();
+  h.ctx.onStatus({ state: 'connected', serverId: 's1', engine: 'xray' });
+  assert.equal(h.ctx.state.connected, true);
+  h.ctx.onStatus({ state: 'reconnecting', serverId: 's1', reason: 'core-exited', attempt: 2, retryInMs: 5000 });
+  assert.equal(h.ctx.state.connecting, true);
+  assert.equal(h.el('connState').textContent, 'Reconnecting… (attempt 2)');
+  assert.ok(!h.calls.some((c) => /^toast:err/.test(c)), 'no red toast: ' + h.calls.join(', '));
+  h.ctx.onStatus({ state: 'waiting', serverId: 's1', attempt: 4, retryInMs: 15000 });
+  assert.equal(h.el('connState').textContent, 'Waiting for internet… (attempt 4)');
+  assert.equal(h.ctx.state.connecting, true);
+  // the core died under a live connection and the service is rebuilding: not a disconnect
+  h.ctx.onStatus({ state: 'connected', serverId: 's1', engine: 'xray' });
+  const before = h.calls.length;
+  h.ctx.onXrayStatus({ state: 'stopped', info: { code: null, signal: 'SIGKILL' }, rebuilding: true });
+  assert.equal(h.ctx.state.connected, true, 'still connected until the service says otherwise');
+  assert.equal(h.calls.length, before, 'nothing painted, nothing toasted');
+  // …while a final stop (no rebuild coming) still paints disconnected with its toast
+  h.ctx.onXrayStatus({ state: 'stopped', info: { code: 0 } });
+  assert.equal(h.ctx.state.connected, false);
+  assert.ok(h.calls.includes('ui:disconnected') && h.calls.some((c) => c.startsWith('toast:err')));
+  // the desktop keeps its own wording for a recovery (no attempt in the text)
+  const d = snapshotHarness(null);
+  d.ctx.onStatus({ state: 'reconnecting', serverId: 's1', reason: 'interfaces', attempt: 1 });
+  assert.equal(d.el('connState').textContent, 'state.reconnecting');
+});
+
 test('S4: the attempt strings exist in both languages, verbatim', () => {
   for (const k of ['state.reconnectingN', 'state.waiting']) assert.equal(I18N.split(`'${k}':`).length - 1, 2, k);
   assert.match(I18N, /'state\.reconnectingN': 'Reconnecting… \(attempt \{n\}\)'/);
