@@ -22,6 +22,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { createService } = require('./service');
 const { hostAllowed, originAllowed } = require('./guard');
+const { createLuciApi, isLoopbackPeer } = require('./luciApi');
 
 // A stray rejection anywhere in the service must not end the process: on a
 // router this process IS the gateway, and Node ≥ 15 exits on an unhandled one
@@ -99,12 +100,25 @@ service.onEvent((channel, payload) => {
   for (const res of sseClients) { try { res.write(line); } catch {} }
 });
 
+// The LuCI facade: POST /luci/<method>, loopback only, token in the body
+// (see luciApi.js). feat/remote mounts its api here from its start hook —
+// a getter, so a mount after this line still reaches the facade.
+let remoteApi = null;
+const luci = createLuciApi({ service, remoteApi: () => remoteApi });
+
 /* ----------------------------- auth ----------------------------- */
+/** `a` equals the token, in constant time (a string of another length is simply wrong). */
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const x = Buffer.from(a, 'utf8');
+  const y = Buffer.from(b, 'utf8');
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
 function authed(req, url) {
   if (!TOKEN) return true;
   const q = url.searchParams.get('token');
   const h = req.headers['x-irnetfree-token'];
-  return q === TOKEN || h === TOKEN;
+  return safeEqual(q, TOKEN) || safeEqual(h, TOKEN);
 }
 
 /* ----------------------------- helpers ----------------------------- */
@@ -172,6 +186,24 @@ async function handle(req, res) {
     const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 25000);
     req.on('close', () => { clearInterval(ping); sseClients.delete(res); });
     return;
+  }
+
+  // The LuCI facade: POST /luci/<method> {token, arg} — from this machine
+  // only (the rpcd plugin), the token in the body, never in the URL.
+  if (pathname.startsWith('/luci/')) {
+    if (!isLoopbackPeer(req.socket && req.socket.remoteAddress)) return sendJson(res, 403, { error: 'loopback only' });
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'POST only' });
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJson(res, 400, { error: 'a JSON object {token, arg} is required' });
+    if (TOKEN && !safeEqual(body.token, TOKEN)) return sendJson(res, 401, { error: 'unauthorized' });
+    try {
+      const result = await luci.handle(pathname.slice('/luci/'.length), body.arg);
+      return sendJson(res, 200, result === undefined ? {} : result);
+    } catch (e) {
+      const code = e && Number.isInteger(e.code) && e.code >= 400 && e.code < 600 ? e.code : 500;
+      return sendJson(res, code, { error: (e && e.message) || String(e) });
+    }
   }
 
   // Static: only GET

@@ -593,10 +593,12 @@ function createService(opts = {}) {
     }
   }
 
+  let lastStats = null;   // the poller's last sample, for the facade's traffic line
   const stats = new StatsPoller({
     binPath: xray.anyBin(),
     apiPort: getSettings().apiPort,
     onStats: (s) => {
+      lastStats = s;
       send('stats', s);
       if (!usage) return;
       usage.tick(s.per);
@@ -2525,6 +2527,138 @@ function createService(opts = {}) {
       && !recovering && !recoverTimer && !connectsInFlight.size && conn.state === 'connected';
   }
 
+  /* ----------------------------- what the LuCI facade reads (luciApi.js) ----------------------------- */
+
+  /** The live core's counters, zero when nothing runs: { up, down, upRate, downRate } (bytes, bytes/s). */
+  function traffic() {
+    const s = (xray && xray.running && lastStats) || null;
+    return { up: s ? s.totalUp || 0 : 0, down: s ? s.totalDown || 0 : 0, upRate: s ? s.upSpeed || 0 : 0, downRate: s ? s.downSpeed || 0 : 0 };
+  }
+
+  /** Every connectable config, grouped the way the web UI's picker groups them. */
+  function configsForLuci() {
+    const servers = store.get('servers', []);
+    const subs = store.get('subscriptions', []);
+    const item = (sv) => ({ id: sv.id, name: sv.name || sv.address || sv.id, proto: sv.protocol || 'unknown' });
+    const groups = [];
+    for (const sub of subs) {
+      groups.push({ id: 'sub:' + sub.id, name: sub.name || sub.url || sub.id, kind: 'subscription', items: servers.filter(sv => sv.subId === sub.id).map(item) });
+    }
+    const subIds = new Set(subs.map(x => x.id));
+    const manual = servers.filter(sv => !sv.subId || !subIds.has(sv.subId)).map(item);
+    if (manual.length || !groups.length) groups.push({ id: 'manual', name: 'Manual', kind: 'manual', items: manual });
+    const byId = {};
+    for (const sv of servers) byId[sv.id] = sv;
+    // a chain is connectable with two members that still exist
+    const chains = getChains().filter(c => (c.members || []).filter(id => byId[id]).length >= 2).map(c => ({ id: c.id, name: c.name || 'Chain', proto: 'chain' }));
+    if (chains.length) groups.push({ id: 'chains', name: 'Chains', kind: 'chains', items: chains });
+    const pool = getPool().filter(e => e.enabled && e.socksPort);
+    if (pool.length) groups.push({ id: 'pools', name: 'Proxy pool', kind: 'pools', items: [{ id: '__pool__', name: `Proxy pool (${pool.length})`, proto: 'pool' }] });
+    const s = getSettings();
+    if (s.advancedRouting && ((s.routeRules || []).length || s.routeDefault)) {
+      groups.push({ id: 'routing', name: 'Advanced routing', kind: 'routing', items: [{ id: '__advanced__', name: 'Advanced routing', proto: 'advanced' }] });
+    }
+    return { selectedId: store.get('selectedServerId', null), activeId: store.get('activeServerId', null), groups };
+  }
+
+  /** The four router settings LuCI edits. */
+  function settingsForLuci() {
+    const s = getSettings();
+    return { autoConnect: !!s.autoConnect, killSwitch: !!s.killSwitch, lanBlockQuic: !!s.lanBlockQuic, lanBypassMacs: validMacs(s.lanBypassMacs) };
+  }
+  /** …written the way settings:set writes them (validated and applied live by it); the facade validated the values. */
+  async function setSettingsForLuci(partial) {
+    const allowed = {};
+    for (const k of ['autoConnect', 'killSwitch', 'lanBlockQuic']) if (typeof partial[k] === 'boolean') allowed[k] = partial[k];
+    if (Array.isArray(partial.lanBypassMacs)) allowed.lanBypassMacs = validMacs(partial.lanBypassMacs);
+    if (Object.keys(allowed).length) await handlers['settings:set'](allowed);
+    return settingsForLuci();
+  }
+
+  /** The devices behind the router with their "bypass" tick; an excluded device not on the LAN right now still shows. */
+  async function devices() {
+    const list = OPENWRT ? await handlers['net:lanDevices']() : [];
+    const bypass = new Set(validMacs(getSettings().lanBypassMacs));
+    const out = list.map(d => ({ mac: d.mac, ip: d.ip || '', name: d.name || '', online: !!d.online, bypass: bypass.has(d.mac) }));
+    for (const mac of bypass) if (!out.some(d => d.mac === mac)) out.push({ mac, ip: '', name: '', online: false, bypass: true });
+    return out;
+  }
+
+  const logTail = (n) => ring.tail(n);
+
+  /** The secrets no diagnostics text may carry: the UI token, the remote control's device / tunnel tokens. */
+  function secrets() {
+    const out = new Set();
+    try { const t = fs.readFileSync(path.join(dataDir, 'token'), 'utf8').trim(); if (t) out.add(t); } catch { /* no token file (a loopback bind) */ }
+    const walk = (v, depth = 0) => {
+      if (!v || typeof v !== 'object' || depth > 3) return;
+      for (const [k, x] of Object.entries(v)) {
+        if (/token|password|secret/i.test(k) && typeof x === 'string' && x.length >= 6) out.add(x);
+        else if (x && typeof x === 'object') walk(x, depth + 1);
+      }
+    };
+    walk(store.get('remote', null));
+    walk((store.get('settings', null) || {}).remote);
+    return [...out];
+  }
+  function redact(text) {
+    let t = text;
+    for (const sec of secrets()) t = t.split(sec).join('[redacted]');
+    return t.replace(/([?&]token=)[^&\s"']+/g, '$1[redacted]');
+  }
+
+  /** One text for "Copy diagnostics": status, versions, memory, the rules, the last 300 lines — no secrets. */
+  async function diagnostics() {
+    const s = getSettings();
+    const lines = [];
+    lines.push(`IRNetFree ${appVersion} — node ${process.version} ${process.platform}/${process.arch}, ${OPENWRT ? 'openwrt' : 'headless'}, service up ${Math.round(process.uptime())}s, ${new Date().toISOString()}`);
+    lines.push('status: ' + JSON.stringify(connSnapshot()));
+    lines.push('settings: ' + JSON.stringify({
+      tunMode: !!s.tunMode, routingMode: s.routingMode, advancedRouting: !!s.advancedRouting, defaultEngine: s.defaultEngine, ipv6: !!s.ipv6, logLevel: s.logLevel,
+      autoConnect: !!s.autoConnect, killSwitch: !!s.killSwitch, lanBlockQuic: !!s.lanBlockQuic, lanBypassMacs: validMacs(s.lanBypassMacs).length
+    }));
+    lines.push('store: ' + JSON.stringify({
+      servers: store.get('servers', []).length, subscriptions: store.get('subscriptions', []).length, chains: getChains().length,
+      connectIntent: store.get('connectIntent', null), activeServerId: store.get('activeServerId', null), selectedServerId: store.get('selectedServerId', null)
+    }));
+    const versions = {};
+    const installed = assetStatus();
+    for (const id of ['xray', 'xray-pattn', 'sing-box']) {
+      if (!installed[id]) continue;
+      try { versions[id] = await Promise.race([xray.version(id), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000).unref())]); }
+      catch (e) { versions[id] = 'error: ' + ((e && e.message) || e); }
+    }
+    lines.push('cores: ' + JSON.stringify(versions));
+    const m = memInfo();
+    if (m.memAvailableKb != null) lines.push(`MemAvailable: ${m.memAvailableKb} kB`);
+    if (Object.keys(m.rss).length) lines.push('RSS: ' + Object.entries(m.rss).map(([k, v]) => `${k}=${v} kB`).join(', '));
+    lines.push(`gateway: ${tun && tun.active ? 'up' : 'down'}, core: ${xray && xray.running ? 'running' : 'stopped'}, kill switch: ${JSON.stringify(killSwitchState())}`);
+    if (OPENWRT) {
+      try { lines.push('ip rule:', String(await lanRun('ip', ['rule', 'show'])).trim()); }
+      catch (e) { lines.push('ip rule: unavailable (' + ((e && e.message) || e) + ')'); }
+    }
+    lines.push('--- log (last 300 lines) ---');
+    lines.push(...ring.tail(300));
+    return { text: redact(lines.join('\n')) };
+  }
+
+  /** HTTP 204 through the tunnel (the local SOCKS inbound), 5 s: { ok, ms } or { ok: false, error }. */
+  async function testThroughTunnel() {
+    if (!(xray && xray.running) || !store.get('activeServerId', null)) return { ok: false, error: 'not connected' };
+    const r = await httpThroughProxy(getSettings().socksPort, { host: 'cp.cloudflare.com', port: 80, path: '/generate_204', timeout: 5000 });
+    return r && r.ok ? { ok: true, ms: r.ms } : { ok: false, error: (r && (r.error || (r.status ? 'HTTP ' + r.status : null))) || 'no answer' };
+  }
+
+  /** The actions LuCI starts; each is the same RPC the web UI uses. */
+  const actions = {
+    connect: (id) => { setSelection(id); return Promise.resolve().then(() => handlers.connect(id)); },
+    select: (id) => setSelection(id),
+    disconnect: () => Promise.resolve().then(() => handlers.disconnect()),
+    reconnect: () => Promise.resolve().then(() => handlers['vpn:reconnect']()),
+    subsUpdate: () => Promise.resolve().then(() => handlers['subs:refreshAll']())
+  };
+  const log = (line, level) => send('log', { line, level: level || 'info' });
+
   function onEvent(cb) { listeners.add(cb); return () => listeners.delete(cb); }
 
   async function shutdown() {
@@ -2592,7 +2726,9 @@ function createService(opts = {}) {
   return {
     invoke, onEvent, shutdown, dataDir, getSettings, assetStatus, version: appVersion,
     // the connection as one fact (S1), for server.js's events stream and the LuCI facade
-    connSnapshot
+    connSnapshot,
+    // what the LuCI facade (luciApi.js) reads and starts
+    memInfo, traffic, configsForLuci, settingsForLuci, setSettingsForLuci, devices, logTail, diagnostics, testThroughTunnel, actions, log
   };
 }
 
