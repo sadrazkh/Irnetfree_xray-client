@@ -424,6 +424,98 @@ test('a no-op save through the real edit form records nothing, for every shape t
   }
 });
 
+/* --------------------------- the connection snapshot (v1.16 S1 / S4) --------------------------- */
+
+/** A top-level (async) function of app.js, as source. */
+function fnSource(name) {
+  let start = APP.indexOf(`\nfunction ${name}(`);
+  if (start === -1) start = APP.indexOf(`\nasync function ${name}(`);
+  assert.ok(start > -1, `app.js has no function ${name}`);
+  let depth = 0, j = APP.indexOf('{', APP.indexOf(')', start));
+  for (; j < APP.length; j++) {
+    if (APP[j] === '{') depth++;
+    else if (APP[j] === '}' && --depth === 0) break;
+  }
+  return APP.slice(start, j + 1);
+}
+/** The body of a `window.api.onX((d) => { … });` handler, as a named function. */
+function handlerSource(name) {
+  const head = `window.api.${name}((d) => {`;
+  const start = APP.indexOf(head);
+  assert.ok(start > -1, `app.js has no ${name} handler`);
+  const end = APP.indexOf('\n});', start);
+  // `var`: a vm script's top-level let/const never becomes a property of its context
+  return `var ${name} = (d) => {${APP.slice(start + head.length, end)}\n};`;
+}
+const STRINGS = { 'state.reconnectingN': 'Reconnecting… (attempt {n})', 'state.waiting': 'Waiting for internet… (attempt {n})', 't.disconnected': 'Disconnected' };
+
+/** applyConnSnapshot and the status handlers over a fake page: what they paint and what they say. */
+function snapshotHarness(flavor = 'openwrt') {
+  const vm = require('node:vm');
+  const calls = [];
+  const els = new Map();
+  const el = (id) => {
+    if (!els.has(id)) els.set(id, { id, textContent: '', hidden: false, className: '', title: '', classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {} });
+    return els.get(id);
+  };
+  const ctx = vm.createContext({
+    state: { connected: false, connecting: false, activeServerId: null, activeEngine: '', selectedServerId: null, lastServerId: null, settings: {}, flavor, servers: [], pendingReconnect: [], wasReconnecting: false, lan: null },
+    $: (sel) => el(String(sel).replace(/^#/, '')),
+    t: (k) => STRINGS[k] || k,
+    toast: (msg, kind) => calls.push('toast:' + (kind || '') + ':' + msg),
+    setConnUI: (s) => calls.push('ui:' + s),
+    appendLog: (line) => calls.push('log:' + line),
+    renderServers: () => {}, renderPicker: () => {}, renderPendingBanner: () => {}, setPending: () => {}, setModeWidget: () => {},
+    updateLanInfo: () => {}, hideGeo: () => {}, resetTraffic: () => {}, checkIp: () => {}, quickPing: () => {}, updateAdminBtn: () => {},
+    reconnectingKey: () => 'state.reconnecting', failedKey: () => 'net.failed',
+    setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1, Date,
+    window: { api: {} }
+  });
+  vm.runInContext(['var uptimeTimer = null;', 'var uptimeFrom = 0;', fnSource('startUptime'), fnSource('attemptText'),
+    fnSource('applyKillSwitchState'), fnSource('applyConnSnapshot'), handlerSource('onStatus'), handlerSource('onXrayStatus')].join('\n'), ctx);
+  return { ctx, calls, el };
+}
+
+test('S1: a page loaded while the tunnel is up starts connected, with the uptime from the service and no toast — idempotently', () => {
+  const h = snapshotHarness();
+  const since = Date.now() - 65000;
+  const up = { state: 'connected', serverId: 's1', engine: 'xray', since, reason: null, attempt: 0, killSwitch: { enabled: false, armed: false, blocking: false } };
+  h.ctx.applyConnSnapshot(up);
+  assert.equal(h.ctx.state.connected, true);
+  assert.equal(h.ctx.state.connecting, false);
+  assert.equal(h.ctx.state.activeServerId, 's1');
+  assert.equal(h.ctx.state.activeEngine, 'xray');
+  assert.equal(h.ctx.uptimeFrom, since, 'the clock counts from when the service says the tunnel came up');
+  assert.deepEqual(h.calls, ['ui:connected'], 'no toast, no log line');
+  // the same snapshot again (an events reconnect): nothing new is said
+  h.ctx.applyConnSnapshot(up);
+  assert.deepEqual(h.calls, ['ui:connected', 'ui:connected']);
+  assert.equal(h.ctx.uptimeFrom, since);
+
+  h.ctx.applyConnSnapshot({ state: 'reconnecting', serverId: 's1', attempt: 2, reason: 'core-exited' });
+  assert.equal(h.ctx.state.connected, false);
+  assert.equal(h.ctx.state.connecting, true);
+  assert.equal(h.el('connState').textContent, 'Reconnecting… (attempt 2)');
+  h.ctx.applyConnSnapshot({ state: 'waiting', serverId: 's1', attempt: 3 });
+  assert.equal(h.el('connState').textContent, 'Waiting for internet… (attempt 3)');
+  h.ctx.applyConnSnapshot({ state: 'disconnected', serverId: null, since: null });
+  assert.equal(h.ctx.state.connected, false);
+  assert.equal(h.ctx.state.connecting, false);
+  assert.equal(h.calls.at(-1), 'ui:disconnected');
+  assert.ok(!h.calls.some((c) => c.startsWith('toast:')), 'a snapshot never toasts: ' + h.calls.join(', '));
+  // a snapshot with nothing in it changes nothing
+  h.ctx.applyConnSnapshot(null);
+  assert.equal(h.calls.filter((c) => c.startsWith('ui:')).length, 5);
+});
+
+test('S4: the attempt strings exist in both languages, verbatim', () => {
+  for (const k of ['state.reconnectingN', 'state.waiting']) assert.equal(I18N.split(`'${k}':`).length - 1, 2, k);
+  assert.match(I18N, /'state\.reconnectingN': 'Reconnecting… \(attempt \{n\}\)'/);
+  assert.match(I18N, /'state\.reconnectingN': 'اتصال مجدد… \(تلاش \{n\}\)'/);
+  assert.match(I18N, /'state\.waiting': 'Waiting for internet… \(attempt \{n\}\)'/);
+  assert.match(I18N, /'state\.waiting': 'منتظر اینترنت… \(تلاش \{n\}\)'/);
+});
+
 test('the edit form reads an httpupgrade path and Host, and shows a stored raw server as tcp', () => {
   const readServerFields = appFunction('readServerFields');
   const rec = (streamSettings) => ({

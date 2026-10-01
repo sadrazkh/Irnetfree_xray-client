@@ -164,6 +164,10 @@ async function handle(req, res) {
     if (!originAllowed(req.headers)) return sendJson(res, 403, { error: 'cross-origin request refused' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.write('retry: 3000\n\n');
+    // The connection as it IS, first — on every (re)connect of the stream: a
+    // browser whose EventSource dropped and came back (a phone's background
+    // tab) missed whatever happened meanwhile, and nothing else would replay it.
+    res.write('data: ' + JSON.stringify({ channel: 'conn:snapshot', payload: service.connSnapshot() }) + '\n\n');
     sseClients.add(res);
     const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 25000);
     req.on('close', () => { clearInterval(ping); sseClients.delete(res); });
