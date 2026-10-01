@@ -421,4 +421,51 @@ grep -qF '"45517f0a":"دسترسی از راه دور"' /tmp/luci-fa.js \
 	|| { echo "the Persian tab names are not in LuCI's fa catalog"; head -c 300 /tmp/luci-fa.js; echo; exit 1; }
 echo "LuCI's fa catalog has the IRNetFree tab names ($(grep -o '"[0-9a-f]\{8\}":' /tmp/luci-fa.js | wc -l) strings in all)"
 
+if [ "$FACADE" = 0 ]; then
+	# After SMOKE OK the driver (qemu-smoke.js) opens every tab in a real browser.
+	# Without the facade the pages could only say "update IRNetFree", so on this
+	# branch a stub answers /luci/<method> in place of the service: canned replies
+	# in the facade's shapes (spec §3.4), one config name built to break an
+	# innerHTML. Never used once the facade answers.
+	say "LuCI: a stub of the service's /luci API for the browser check (no facade on this branch)"
+	/etc/init.d/irnetfree stop
+	cat > /tmp/luci-stub.js <<'EOF'
+const http = require('http');
+const now = Date.now();
+const R = {
+  status: { state: 'connected', reason: null, cause: 'user', attempt: 0, retryInMs: null, since: now - 3725000, serverId: 's2',
+    label: 'ci-upstream', engine: 'xray', tun: true, killSwitch: { enabled: true, armed: true, blocking: false }, version: 'stub',
+    traffic: { up: 123456, down: 7654321, upRate: 1000, downRate: 20000 }, memAvailableKb: 300000,
+    remote: { relay: { state: 'online', path: 'direct', since: now - 60000 }, cloudflared: { installed: false } } },
+  configs: { selectedId: 's2', activeId: 's2', groups: [
+    { id: 'sub', name: 'CI provider', kind: 'subscription', items: [{ id: 's1', name: 'DE-1', proto: 'vless' }, { id: 's2', name: 'ci-upstream', proto: 'socks' }] },
+    { id: 'manual', name: 'manual', kind: 'manual', items: [{ id: 'm1', name: '<img src=x onerror=alert(1)>', proto: 'vmess' }] }] },
+  settings_get: { autoConnect: true, killSwitch: true, lanBlockQuic: true, lanBypassMacs: ['02:00:00:00:00:01'] },
+  devices: [{ mac: '02:00:00:00:00:01', ip: '192.168.1.50', name: 'phone', bypass: true }, { mac: '02:00:00:00:00:02', ip: '192.168.1.51', name: 'laptop', bypass: false }],
+  log: { lines: ['irnetfree: stub line one', 'irnetfree: stub line two'] },
+  diagnostics: { text: 'stub diagnostics' },
+  remote_get: { relay: { enabled: true, relayUrl: 'https://relay.example.com', name: 'home', tokenSet: true }, cloudflared: { installed: false, enabled: false, tokenSet: false } },
+  remote_status: { relay: { state: 'online', path: 'direct', since: now - 60000 }, cloudflared: { installed: false, running: false } },
+  test: { ok: true, ms: 42 }
+};
+http.createServer((req, res) => {
+  req.resume();
+  req.on('end', () => {
+    const m = (/^\/luci\/([a-z_]+)$/.exec(req.url) || [])[1];
+    const body = JSON.stringify(m ? (R[m] !== undefined ? R[m] : { accepted: true }) : { error: 'not found' });
+    res.writeHead(m ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(body);
+  });
+}).listen(6969, '127.0.0.1');
+EOF
+	node /tmp/luci-stub.js > /tmp/luci-stub.log 2>&1 &
+	i=0
+	until lu status | grep -q '"state": "connected"'; do
+		i=$((i+1))
+		[ $i -lt 40 ] || { echo "the stub did not answer"; cat /tmp/luci-stub.log; exit 1; }
+		sleep 1
+	done
+	echo "LUCI-STUB: answering /luci/* on 127.0.0.1:6969 in place of the service"
+fi
+
 say "SMOKE OK"
