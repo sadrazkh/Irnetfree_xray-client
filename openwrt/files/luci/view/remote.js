@@ -125,7 +125,7 @@ return view.extend({
 
 	refresh: function () {
 		var self = this;
-		return common.remoteStatus().then(function (st) { self.applyState(st); });
+		return common.remoteStatus().then(function (st) { self.applyState(st); }, function () { self.applyState(null); });
 	},
 
 	applyState: function (st) {
