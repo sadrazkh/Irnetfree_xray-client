@@ -82,6 +82,12 @@ test('data: the app under /usr/lib/irnetfree, the service files, the LuCI files 
   assert.equal(data['./etc/uci-defaults/99-irnetfree'].mode, 0o755);
   assert.equal(data['./etc/config/irnetfree'].mode, 0o644);
   assert.equal(data[`./${PREFIX}/src/server/server.js`].mode, 0o644);
+  // rpcd execs its plugins directly: executable, LF, byte for byte the checked-in script
+  const plug = data['./usr/libexec/rpcd/luci.irnetfree'];
+  assert.ok(plug, 'the rpcd plugin LuCI talks to is in the package');
+  assert.equal(plug.mode, 0o755);
+  assert.ok(!plug.data.includes('\r'), 'the rpcd plugin carries a carriage return');
+  assert.equal(plug.data.toString(), fs.readFileSync(path.join(ROOT, 'openwrt/files/rpcd/luci.irnetfree'), 'utf8').replace(/\r\n/g, '\n'));
   assert.ok(!files.some(n => /node_modules|\.map$|\.test\.js$/.test(n)), 'no dev files ship');
   // every file's directory exists as an entry, in order, so opkg never has to invent one
   for (const n of files) {
@@ -111,7 +117,8 @@ const BASHISMS = [
 ];
 for (const [rel, name] of [
   ['./etc/init.d/irnetfree', 'the init script'], ['./etc/uci-defaults/99-irnetfree', 'the uci-defaults script'],
-  ['CONTROL:./postinst', 'postinst'], ['CONTROL:./prerm', 'prerm']
+  ['CONTROL:./postinst', 'postinst'], ['CONTROL:./prerm', 'prerm'],
+  ['./usr/libexec/rpcd/luci.irnetfree', 'the rpcd plugin']
 ]) {
   test(`${name} is POSIX sh: no bashisms`, () => {
     const src = (rel.startsWith('CONTROL:') ? control[rel.slice(8)] : data[rel]).data.toString();

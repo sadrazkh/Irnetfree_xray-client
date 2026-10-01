@@ -77,6 +77,8 @@ function buildIpk({ root = ROOT, outDir = path.join(ROOT, 'dist'), version, mtim
   file('usr/share/luci/menu.d/luci-app-irnetfree.json', F('luci/menu.json'), 0o644, LF);
   file('usr/share/rpcd/acl.d/luci-app-irnetfree.json', F('luci/acl.json'), 0o644, LF);
   file('www/luci-static/resources/view/irnetfree.js', F('luci/irnetfree.js'), 0o644, LF);
+  // LuCI's pages reach the service through this rpcd plugin (ubus luci.irnetfree.*)
+  file('usr/libexec/rpcd/luci.irnetfree', F('rpcd/luci.irnetfree'), 0o755, LF);
 
   const installed = data.reduce((n, e) => n + (e.data ? e.data.length : 0), 0);
   const control = [

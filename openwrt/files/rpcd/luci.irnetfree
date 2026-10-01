@@ -1,0 +1,92 @@
+#!/bin/sh
+# rpcd exec plugin: LuCI's IRNetFree pages call ubus luci.irnetfree.<method>;
+# every method except `service` is forwarded to the service's local API
+# (POST 127.0.0.1:<port>/luci/<method>, loopback only, token in the body —
+# never in argv, where `ps` would show it).
+#
+# rpcd runs `luci.irnetfree list` once when it starts (the reply declares the
+# methods and their argument types: a string, a number, a boolean, an array or
+# an object as the sample value) and `luci.irnetfree call <method>` with the
+# ubus arguments as JSON on stdin; what this prints is the reply. rpcd carries
+# a JSON object and nothing else, so an array from the service comes back as
+# {"result":[...]} and every failure as {"error":"..."}:
+#   not-running    nothing answers on the port (the pages offer Start)
+#   timeout        the service took longer than 30 s
+#   unauthorized   the service refused the token (401)
+#   http <code>    any other non-2xx reply — uclient-fetch drops the body of
+#                  those, so the code is all that is left
+# Long actions (connect, subscription updates, ...) are answered at once by the
+# service; the pages follow the status. POSIX sh: this runs under busybox ash.
+
+METHODS='status configs connect select disconnect reconnect test subs_update settings_get settings_set devices log diagnostics remote_get remote_set remote_status cloudflared_install'
+
+case "$1" in
+list)
+	cat <<'EOF'
+{"status":{},"configs":{},"connect":{"id":"str"},"select":{"id":"str"},"disconnect":{},"reconnect":{},"test":{},"subs_update":{},"settings_get":{},"settings_set":{"autoConnect":true,"killSwitch":true,"lanBlockQuic":true,"lanBypassMacs":[]},"devices":{},"log":{"lines":300},"diagnostics":{},"remote_get":{},"remote_set":{"relay":{},"cloudflared":{}},"remote_status":{},"cloudflared_install":{},"service":{"action":"str"}}
+EOF
+	;;
+call)
+	method="$2"
+	# the ubus arguments (rpcd writes them and closes stdin); none at all is {}
+	input="$(cat)"
+	[ -n "$input" ] || input='{}'
+
+	# the one method answered here: start the service when the API cannot
+	if [ "$method" = service ]; then
+		action="$(printf '%s' "$input" | jsonfilter -e '@.action' 2>/dev/null)"
+		case "$action" in
+		start|restart)
+			if [ -x /etc/init.d/irnetfree ] && /etc/init.d/irnetfree "$action" >/dev/null 2>&1; then
+				echo '{"ok":true}'
+			else
+				echo "{\"error\":\"service $action failed\"}"
+			fi
+			;;
+		*) echo '{"error":"bad action"}' ;;
+		esac
+		exit 0
+	fi
+
+	case " $METHODS " in
+	*" $method "*) ;;
+	*) echo '{"error":"unknown method"}'; exit 0 ;;
+	esac
+
+	port="$(uci -q get irnetfree.main.port)"
+	case "$port" in ''|*[!0-9]*) port=6969 ;; esac
+	data_dir="$(uci -q get irnetfree.main.data_dir)"
+	[ -n "$data_dir" ] || data_dir=/etc/irnetfree
+
+	tmp="$(mktemp /tmp/irnf-luci.XXXXXX)" || { echo '{"error":"no tmp"}'; exit 0; }
+	errf="$tmp.err"
+	trap 'rm -f "$tmp" "$errf"' EXIT
+	# {"token":"<the token file>","arg":<stdin>}: the token goes from its file
+	# into the body file without passing through a variable or an argument
+	{
+		printf '{"token":"'
+		tr -d '\r\n' < "$data_dir/token" 2>/dev/null
+		printf '","arg":%s}' "$input"
+	} > "$tmp"
+	out="$(uclient-fetch -T 30 -O - --post-file="$tmp" "http://127.0.0.1:$port/luci/$method" 2>"$errf")"
+	rc=$?
+	if [ "$rc" = 0 ]; then
+		case "$out" in
+		'') echo '{"error":"empty reply"}' ;;
+		\{*) printf '%s\n' "$out" ;;
+		\[*) printf '{"result":%s}\n' "$out" ;;
+		*) echo '{"error":"bad reply"}' ;;
+		esac
+		exit 0
+	fi
+	code="$(sed -n 's/.*HTTP error \([0-9][0-9]*\).*/\1/p' "$errf" | head -n 1)"
+	case "$code" in
+	'')
+		if grep -q 'timed out' "$errf" 2>/dev/null; then echo '{"error":"timeout"}'; else echo '{"error":"not-running"}'; fi
+		;;
+	401) echo '{"error":"unauthorized"}' ;;
+	*) echo "{\"error\":\"http $code\"}" ;;
+	esac
+	;;
+esac
+exit 0
