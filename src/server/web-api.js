@@ -145,6 +145,8 @@
     onAssetProgress: (cb) => on('asset-progress', cb),
     onKillSwitch: (cb) => on('killswitch', cb),
     onSystemTheme: (cb) => on('system-theme', cb),
-    onStoreError: (cb) => on('store-error', cb)
+    onStoreError: (cb) => on('store-error', cb),
+    // the connection as one fact — the first event of every events (re)connect
+    onConnSnapshot: (cb) => on('conn:snapshot', cb)
   };
 })();

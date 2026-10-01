@@ -53,6 +53,7 @@ const { AssetUpdater } = require('../main/assetUpdater');
 // deliberately NOT given this: Electron never runs on a router.
 const { isOpenwrt, lanInterface, lanDevices, validMacs, ownOrphanCores } = require('../main/openwrtNet');
 const { TunOpenwrt } = require('../main/tunOpenwrt');
+const { createLogRing } = require('./logRing');
 const tcpNet = require('net');
 
 /** Resolves true once 127.0.0.1:port accepts a TCP connection, false at the deadline. */
@@ -219,8 +220,91 @@ function createService(opts = {}) {
   const ROUTER_FORCED = OPENWRT ? { dnsManaged: true } : {};
 
   const listeners = new Set();
+  const oneLine = (s) => String(s == null ? '' : s).replace(/\s*[\r\n]+\s*/g, ' | ').slice(0, 1000);
+
+  /* ----------------------------- the connection as one fact ----------------------------- */
+  // Everything a page needs on load and after every events reconnect
+  // (connSnapshot): the LAST state told to the clients, kept where the status
+  // events pass (tell, below — the one funnel), plus what only the service
+  // knows — who caused it, when the tunnel came up, when the next attempt is.
+  // A page that loaded while the tunnel was up used to start on
+  // "disconnected" with no event ever coming to correct it, and its Connect
+  // was a 20-40 s rebuild of a gateway that was fine (v1.16 S1/S2).
+  const ring = createLogRing(500);   // the last 500 log lines and state changes, for LuCI (S7)
+  const conn = { state: 'disconnected', reason: null, cause: null, attempt: 0, retryAt: null, since: null, serverId: null, label: null, engine: null, tun: false };
+  const stamp = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+  // the service's own files under /proc (Linux); a test hands in fakes
+  const readProc = deps.readProc || ((p) => fs.readFileSync(p, 'utf8'));
+  /**
+   * MemAvailable and the RSS of node, xray and sing-box, from /proc — on Linux;
+   * a file that is not there is a field that is not reported. Logged at every
+   * connect and drop (S6: a 512 MB router), and in the diagnostics bundle.
+   */
+  function memInfo() {
+    const out = { memAvailableKb: null, rss: {} };
+    try { const m = /^MemAvailable:\s+(\d+)/m.exec(readProc('/proc/meminfo')); if (m) out.memAvailableKb = Number(m[1]); } catch { /* not Linux */ }
+    const pids = { node: process.pid, xray: xray && xray.proc && xray.proc.pid, 'sing-box': tun && tun.inner && tun.inner.proc && tun.inner.proc.pid };
+    for (const [name, pid] of Object.entries(pids)) {
+      if (!pid) continue;
+      try { const m = /^VmRSS:\s+(\d+)/m.exec(readProc(`/proc/${pid}/status`)); if (m) out.rss[name] = Number(m[1]); } catch { /* gone, or not Linux */ }
+    }
+    return out;
+  }
+  function memLine() {
+    const m = memInfo();
+    const rss = Object.entries(m.rss).map(([k, v]) => `${k}=${v}kB`).join(' ');
+    if (m.memAvailableKb == null && !rss) return '';
+    return ` mem:${m.memAvailableKb != null ? ` avail=${m.memAvailableKb}kB` : ''}${rss ? ` rss ${rss}` : ''}`;
+  }
+  /** The status event just told to the clients, folded into `conn`; one ring line per transition, with its cause. */
+  function noteStatus(p) {
+    if (!p || !p.state) return;
+    switch (p.state) {
+      case 'connecting':
+        // the rebuild inside a recovery is still the recovery, and a boot retry still "waiting"
+        Object.assign(conn, { state: recovering ? 'reconnecting' : 'connecting', reason: null, attempt: recovering ? conn.attempt : 0, retryAt: null, since: null, serverId: p.serverId || conn.serverId, tun: false });
+        break;
+      case 'waiting':
+        Object.assign(conn, { state: 'waiting', reason: p.reason == null ? conn.reason : oneLine(p.reason), attempt: p.attempt || 0, retryAt: p.retryInMs == null ? null : Date.now() + p.retryInMs, since: null, serverId: p.serverId || conn.serverId, tun: false });
+        break;
+      case 'connected':
+        Object.assign(conn, { state: 'connected', reason: null, attempt: 0, retryAt: null, since: Date.now(), serverId: p.serverId || null, label: p.label || null, engine: p.engine || null, tun: !!p.tun });
+        break;
+      case 'reconnecting':
+        Object.assign(conn, { state: 'reconnecting', reason: p.reason == null ? null : oneLine(p.reason), attempt: p.attempt || 0, retryAt: p.retryInMs ? Date.now() + p.retryInMs : null, since: null, tun: false });
+        break;
+      case 'reconnect-failed':
+        Object.assign(conn, { state: p.proxyUp ? 'connected' : 'error', reason: p.reason == null ? null : oneLine(p.reason), attempt: 0, retryAt: null, since: p.proxyUp ? conn.since : null, tun: false });
+        break;
+      case 'error':
+        Object.assign(conn, { state: 'error', reason: oneLine(p.message || p.error || 'error'), attempt: 0, retryAt: null, since: null, tun: false });
+        break;
+      case 'disconnected':
+        Object.assign(conn, { state: 'disconnected', reason: null, attempt: 0, retryAt: null, since: null, serverId: null, label: null, engine: null, tun: false });
+        break;
+      default: return;   // cleanup-failed: the state before it stands
+    }
+    conn.cause = p.cause || null;
+    const detail = [`cause=${conn.cause}`, `gen=${connGen}`];
+    if (conn.attempt) detail.push(`attempt=${conn.attempt}`);
+    if (p.reason) detail.push(`reason=${oneLine(p.reason)}`);
+    if (conn.state === 'error') detail.push(`error=${conn.reason}`);
+    ring.push(`${stamp()} status: ${conn.state} (${detail.join(', ')})${conn.state === 'connected' || conn.state === 'reconnecting' ? memLine() : ''}`);
+  }
+  /** The connection, as one fact (see above): app:init.conn, the first event of every /events stream, LuCI's status. */
+  function connSnapshot() {
+    return {
+      state: conn.state, reason: conn.reason, cause: conn.cause, attempt: conn.attempt,
+      retryInMs: conn.retryAt == null ? null : Math.max(0, conn.retryAt - Date.now()),
+      since: conn.since, serverId: conn.serverId, label: conn.label, engine: conn.engine, tun: conn.tun,
+      killSwitch: killSwitchState()
+    };
+  }
+
   // to the clients only — for an event whose reason syslog already has
   const tell = (channel, payload) => {
+    if (channel === 'status') noteStatus(payload);
+    else if (channel === 'log' && payload) ring.push(`${stamp()} [${payload.level || 'info'}] ${oneLine(payload.line)}`);
     for (const cb of listeners) { try { cb(channel, payload); } catch {} }
   };
   const send = (channel, payload) => {
@@ -233,7 +317,6 @@ function createService(opts = {}) {
   // are mirrored there, one line each, marked so `logread -e irnetfree`
   // finds them. Info lines stay out: syslog on a router is a small ring buffer.
   const syslog = deps.syslog || ((level, text) => (level === 'err' ? process.stderr : process.stdout).write(text + '\n'));
-  const oneLine = (s) => String(s == null ? '' : s).replace(/\s*[\r\n]+\s*/g, ' | ').slice(0, 1000);
   // sing-box's own output (`[tun] …`) can be a line per connection when
   // something is wrong: one line of a kind (digits aside) per 10s reaches
   // syslog, with a count of what was held back. The service's own lines are
@@ -643,6 +726,9 @@ function createService(opts = {}) {
 
   /* ----------------------------- settings / data ----------------------------- */
   function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}), ROUTER_FORCED); }
+
+  /** What the kill switch is doing — part of every snapshot (the router's is wired below, A7). */
+  function killSwitchState() { return { enabled: !!getSettings().killSwitch, armed: false, blocking: false }; }
 
   /**
    * One-time upgrade of the saved servers to the shape the current parser and
@@ -1069,6 +1155,14 @@ function createService(opts = {}) {
     connectsInFlight.add(p);
     const settled = () => connectsInFlight.delete(p);
     p.then(settled, settled);
+    // A connect that threw before any status could say so (a config the core
+    // refused; a first connect's failed gateway — abortGateway tells only the
+    // caller): the snapshot must not stay on "connecting" for every later page
+    // load. A boot attempt's failure is said by the boot loop itself (waiting).
+    p.catch((e) => {
+      if (conn.state !== 'connecting') return;
+      noteStatus({ state: 'error', message: (e && e.message) || String(e), serverId, cause: (opts && opts.cause) || 'user' });
+    });
     return p;
   }
 
@@ -1085,6 +1179,8 @@ function createService(opts = {}) {
     const abandoned = { ok: false, stale: true };
     // what the intent was before this call — a router's failed gateway puts it back (abortGateway)
     const prevActive = store.get('activeServerId', null);
+    // who asked (the snapshot's `cause`): the user, the boot, a switch, or the recovery that called
+    const cause = opts.cause || (opts.recovery ? recoveryCause : 'user');
     if (process.platform === 'darwin') {
       await macRepairPromise;
       if (stale()) return abandoned;
@@ -1203,7 +1299,7 @@ function createService(opts = {}) {
       }
     }
 
-    send('status', { state: 'connecting', serverId });
+    send('status', { state: 'connecting', serverId, cause });
 
     const check = await xray.validateWithFallback(config, engine);
     if (stale()) return abandoned;
@@ -1506,7 +1602,7 @@ function createService(opts = {}) {
 
     send('status', {
       state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
-      tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys()
+      tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys(), cause
     });
     // `tunError` is the one failure this function does NOT throw for: TUN is a
     // best-effort upgrade and we stay connected proxy-only without it. Callers
@@ -1552,8 +1648,8 @@ function createService(opts = {}) {
       stopNetWatcher();
       if (stats) stats.stop();
       liveDirectInterface = null;
-      if (prevActive) send('status', { state: 'disconnected' });
-      else tell('status', { state: 'error', message });
+      if (prevActive) send('status', { state: 'disconnected', cause: 'abort' });
+      else tell('status', { state: 'error', message, serverId, cause: 'abort' });
     }
     return false;
   }
@@ -1580,8 +1676,9 @@ function createService(opts = {}) {
     // serverId captured above back, bring TUN up and report connected: the
     // operator's disconnect undone.
     const gen = connGen;
+    const cause = opts.recovery ? recoveryCause : 'user';
 
-    send('status', { state: 'connecting', serverId });
+    send('status', { state: 'connecting', serverId, cause });
 
     const prevReloading = xrayReloading;
     xrayReloading = true;              // intentional restart, not a drop
@@ -1635,7 +1732,7 @@ function createService(opts = {}) {
       appliedSettings = null;
       // the proxy kept above must not stay aimed at a core that did not come back
       try { await setProxy(false, {}); } catch {}
-      send('status', { state: 'error', message: e.message });
+      send('status', { state: 'error', message: e.message, serverId, cause });
       return { ok: false, error: e.message };
     }
     // A disconnect overtook the connect: it emitted nothing and started nothing,
@@ -1708,6 +1805,11 @@ function createService(opts = {}) {
   }
   // The last recovery that brought the connection back: when, and on which attempt.
   let lastRebuilt = null;
+  // The recovery in flight, for the snapshot's `cause`: a drop being rebuilt
+  // ('recovery') or the network having moved ('netwatch'). Read by the
+  // connect/reapply it calls (their status events carry it).
+  let recoveryCause = 'recovery';
+  const causeOf = (reason) => (DROP_REASONS.has(reason) ? 'recovery' : 'netwatch');
 
   /**
    * A drop. The first one is rebuilt at once. One that comes within
@@ -1820,8 +1922,9 @@ function createService(opts = {}) {
     recoverTimer = null;
 
     const dropped = DROP_REASONS.has(reason);
+    recoveryCause = causeOf(reason);
     send('log', { line: `${dropped ? 'The connection dropped' : 'Network changed'} (${reason}) — rebuilding the connection`, level: 'warn' });
-    send('status', { state: 'reconnecting', reason, attempt: attempt + 1 });
+    send('status', { state: 'reconnecting', reason, attempt: attempt + 1, retryInMs: 0, cause: recoveryCause });
     if (attempt === 0) notify('IRNetFree', isEn() ? 'Network changed — reconnecting' : 'شبکه عوض شد — در حال اتصال مجدد');
 
     // Pick the rebuild path by what the core is ACTUALLY doing. Both paths answer
@@ -1994,7 +2097,7 @@ function createService(opts = {}) {
       appliedSettings = null;          // nothing live to be out of sync with
       liveDirectInterface = null;
       cleanupFailed = false;
-      send('status', { state: 'disconnected' });
+      send('status', { state: 'disconnected', cause: 'user' });
     } catch (e) {
       // A CODE, not a sentence: the desktop says this one in the user's language
       // (net.cleanupFailed) and a headless consumer gets something it can branch on.
@@ -2124,7 +2227,9 @@ function createService(opts = {}) {
       pendingReconnect: pendingKeys(),
       // lifetime traffic per config, so a browser reload does not lose it
       usage: usage ? usage.totals : {},
-      storeError: store.loadError
+      storeError: store.loadError,
+      // the connection as it IS (S1): a page that loads while the tunnel is up starts connected
+      conn: connSnapshot()
     }),
 
     'servers:import': (text) => {
@@ -2181,7 +2286,10 @@ function createService(opts = {}) {
 
     // by hand: either one ends the boot-time retries — and a connect made
     // afresh starts with no crash history (recoverFromDrop), as after a disconnect
-    'connect': (id) => { bootCancelled = true; lastRebuilt = null; return doConnect(id); },
+    'connect': (id) => {
+      bootCancelled = true; lastRebuilt = null;
+      return doConnect(id, { cause: store.get('activeServerId', null) ? 'switch' : 'user' });
+    },
     // ...and a disconnect by hand is the one thing that clears the router's connectIntent
     'disconnect': () => { bootCancelled = true; if (OPENWRT) setIfChanged('connectIntent', null); return doDisconnect(); },
 
@@ -2467,7 +2575,11 @@ function createService(opts = {}) {
   }
   if (st.autoConnect) { const t = setTimeout(() => autoConnectAtLaunch(), T.bootDelayMs); if (t.unref) t.unref(); }
 
-  return { invoke, onEvent, shutdown, dataDir, getSettings, assetStatus, version: appVersion };
+  return {
+    invoke, onEvent, shutdown, dataDir, getSettings, assetStatus, version: appVersion,
+    // the connection as one fact (S1), for server.js's events stream and the LuCI facade
+    connSnapshot
+  };
 }
 
 module.exports = { createService, DEFAULT_SETTINGS };

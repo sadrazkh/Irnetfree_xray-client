@@ -346,6 +346,10 @@ async function init() {
   updateKillStatus();
   applyFlavor();
   renderPendingBanner();
+  // The connection as it IS (S1): a page that loads while the tunnel is up
+  // starts connected, with the real uptime — not on "disconnected" until an
+  // event that never comes on a stable tunnel.
+  if (data.conn) applyConnSnapshot(data.conn);
 
   // app version (Settings → About, and small under the logo) + xray-core version
   $('#appVersion').textContent = 'v' + (state.version || '?');
@@ -1944,7 +1948,8 @@ function connectGlyph(btn) {
  */
 let uptimeTimer = null;
 let uptimeFrom = 0;
-function startUptime(on) {
+/** `from`: when the service says the tunnel came up (a snapshot) — else now. */
+function startUptime(on, from) {
   const el = $('#tbUptime');
   const meta = $('#connMeta');
   if (!on) {
@@ -1954,8 +1959,11 @@ function startUptime(on) {
     if (meta) meta.textContent = state.xrayVersion ? 'core ' + state.xrayVersion : '';
     return;
   }
-  if (uptimeTimer) return;              // already counting this connection
-  uptimeFrom = Date.now();
+  if (uptimeTimer) {                    // already counting this connection
+    if (from) uptimeFrom = from;        // …but the service knows better when it came up
+    return;
+  }
+  uptimeFrom = from || Date.now();
   const tick = () => {
     const s = Math.max(0, Math.floor((Date.now() - uptimeFrom) / 1000));
     const hh = String(Math.floor(s / 3600)).padStart(2, '0');
@@ -1967,6 +1975,75 @@ function startUptime(on) {
   };
   tick();
   uptimeTimer = setInterval(tick, 1000);
+}
+
+/* ---------------------- the connection as one fact (snapshot) ---------------------- */
+
+/**
+ * What the service says the connection IS — app:init.conn on every page load
+ * and the first event of every events (re)connect (web-api.js). Applied
+ * idempotently: no toast, no log line, the uptime from the service's `since`.
+ * A phone that reloads a background tab used to see "disconnected" while the
+ * tunnel was up, with no event ever coming to correct it (v1.16 S1).
+ */
+function applyConnSnapshot(conn) {
+  if (!conn || !conn.state) return;
+  const id = conn.serverId || null;
+  state.wasReconnecting = false;
+  if (conn.state === 'connected') {
+    state.connected = true;
+    state.connecting = false;
+    state.activeServerId = id;
+    state.activeEngine = conn.engine || '';
+    setConnUI('connected', id);
+    startUptime(true, conn.since || null);
+  } else if (conn.state === 'connecting') {
+    state.connected = false;
+    state.connecting = true;
+    setConnUI('connecting', id || state.activeServerId);
+  } else if (conn.state === 'reconnecting' || conn.state === 'waiting') {
+    state.connected = false;
+    state.connecting = true;
+    state.wasReconnecting = conn.state === 'reconnecting';
+    state.reconnectReason = conn.reason || '';
+    setConnUI('connecting', id || state.activeServerId);
+    $('#connState').textContent = attemptText(conn.state, conn.attempt);
+  } else if (conn.state === 'error') {
+    state.connected = false;
+    state.connecting = false;
+    state.activeServerId = null;
+    state.activeEngine = '';
+    setConnUI('error');
+  } else {
+    state.connected = false;
+    state.connecting = false;
+    state.activeServerId = null;
+    state.activeEngine = '';
+    setConnUI('disconnected');
+  }
+  applyKillSwitchState(conn.killSwitch);
+  renderServers();
+  renderPicker();
+}
+
+/** "Reconnecting… (attempt n)" / "Waiting for internet… (attempt n)" — the router's two in-between states. */
+function attemptText(kind, n) {
+  return t(kind === 'waiting' ? 'state.waiting' : 'state.reconnectingN').replace('{n}', String(n || 1));
+}
+
+/**
+ * The router's kill switch, from a snapshot or a killswitch event:
+ * {enabled, armed, blocking} — the banner shows while it blocks the LAN
+ * (the tunnel is down and the VPN is meant to be on; "Turn the VPN off" =
+ * disconnect, which disarms it).
+ */
+function applyKillSwitchState(ks) {
+  if (!ks || typeof ks !== 'object' || state.flavor !== 'openwrt') return;
+  state.killSwitch = ks;
+  state.killEngaged = !!ks.blocking;
+  const banner = $('#killBanner');
+  if (banner) banner.hidden = !ks.blocking;
+  if (typeof updateKillStatus === 'function') updateKillStatus();
 }
 
 /* ---------------------------- the traffic path ---------------------------- */
@@ -2337,6 +2414,9 @@ function reportStoreError(d) {
   toast(d.recovered ? t('store.recovered') : t('store.lost'), 'err', 12000);
 }
 window.api.onStoreError(reportStoreError);
+// the headless server replays the connection as the first event of every
+// events (re)connect; the desktop bridge has no such channel (app:init is enough there)
+if (window.api.onConnSnapshot) window.api.onConnSnapshot(applyConnSnapshot);
 
 /* ----------------------------- kill switch ----------------------------- */
 window.api.onKillSwitch((d) => {
