@@ -284,14 +284,44 @@ test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and t
   assert.match(src, /raw\.githubusercontent\.com\/sadrazkh\/Irnetfree_xray-client\/main\/openwrt\/install\.sh/, 'its own one-line URL is in the header');
 });
 
-test('LuCI: the menu points at the view, the ACL grants the token and nothing else, the view is a LuCI module', () => {
+test('LuCI: Services → IRNetFree with four tabs, behind its own ACL', () => {
   const menu = JSON.parse(data['./usr/share/luci/menu.d/luci-app-irnetfree.json'].data.toString());
-  assert.deepEqual(menu['admin/services/irnetfree'].action, { type: 'view', path: 'irnetfree' });
-  assert.deepEqual(menu['admin/services/irnetfree'].depends, { acl: ['luci-app-irnetfree'] });
+  const top = menu['admin/services/irnetfree'];
+  assert.equal(top.title, 'IRNetFree');
+  assert.equal(top.order, 90);
+  assert.deepEqual(top.action, { type: 'firstchild' }, 'the entry opens its first tab');
+  assert.deepEqual(top.depends, { acl: ['luci-app-irnetfree'] });
+  const tabs = Object.keys(menu).filter((k) => k !== 'admin/services/irnetfree');
+  assert.deepEqual(tabs.map((k) => [k, menu[k].title, menu[k].order, menu[k].action]), [
+    ['admin/services/irnetfree/overview', 'Overview', 10, { type: 'view', path: 'irnetfree/overview' }],
+    ['admin/services/irnetfree/settings', 'Settings', 20, { type: 'view', path: 'irnetfree/settings' }],
+    ['admin/services/irnetfree/remote', 'Remote access', 30, { type: 'view', path: 'irnetfree/remote' }],
+    ['admin/services/irnetfree/log', 'Log', 40, { type: 'view', path: 'irnetfree/log' }]
+  ]);
+});
+
+test('LuCI ACL: reading and changing are split method by method, one file (the token) is readable, nothing else', () => {
   const acl = JSON.parse(data['./usr/share/rpcd/acl.d/luci-app-irnetfree.json'].data.toString());
-  assert.deepEqual(Object.keys(acl['luci-app-irnetfree'].read.file), ['/etc/irnetfree/token']);
-  assert.deepEqual(acl['luci-app-irnetfree'].read.uci, ['irnetfree']);
-  assert.equal(acl['luci-app-irnetfree'].write, undefined, 'the page changes nothing');
+  assert.deepEqual(Object.keys(acl), ['luci-app-irnetfree']);
+  const a = acl['luci-app-irnetfree'];
+  assert.equal(a.description, 'IRNetFree: status, settings and remote access');
+  const READ = ['status', 'configs', 'settings_get', 'devices', 'log', 'diagnostics', 'remote_get', 'remote_status'];
+  const WRITE = ['connect', 'select', 'disconnect', 'reconnect', 'test', 'subs_update', 'settings_set', 'remote_set',
+    'cloudflared_install', 'service'];
+  assert.deepEqual(a.read.ubus, { 'luci.irnetfree': READ });
+  assert.deepEqual(a.write.ubus, { 'luci.irnetfree': WRITE });
+  assert.deepEqual(a.read.file, { '/etc/irnetfree/token': ['read'] }, 'the token file (the web UI link) and no other file');
+  assert.equal(a.write.file, undefined, 'no file is writable');
+  assert.deepEqual(a.read.uci, ['irnetfree']);
+  assert.deepEqual(a.write.uci, ['irnetfree'], 'the web UI port and listen address');
+  // every method the rpcd plugin declares is granted exactly once — as reading or as changing
+  const plugin = data['./usr/libexec/rpcd/luci.irnetfree'].data.toString();
+  const list = JSON.parse(/cat <<'EOF'\n([\s\S]*?)\nEOF/.exec(plugin)[1]);
+  assert.deepEqual([...READ, ...WRITE].sort(), Object.keys(list).sort());
+  assert.equal(new Set([...READ, ...WRITE]).size, READ.length + WRITE.length, 'no method is both');
+});
+
+test('LuCI: the old link page (removed with the tabs)', () => {
   const view = data['./www/luci-static/resources/view/irnetfree.js'].data.toString();
   assert.match(view, /^'use strict';\n'require view';\n'require fs';\n'require uci';/);
   assert.match(view, /fs\.read\('\/etc\/irnetfree\/token'\)/);
