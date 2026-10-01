@@ -259,7 +259,7 @@ test('the QEMU guest script is POSIX sh and ends with the marker the driver look
   // remote control (feat/remote): the modules on the real node, cloudflared from the feed, the dnsmasq drop-in dir
   assert.match(src, /REMOTE SELFTEST OK/, 'the remote modules are exercised on the router\'s node');
   assert.match(src, /^if opkg install cloudflared /m, 'cloudflared is installed from the feed');
-  assert.match(src, /conf-dir=\/tmp\/dnsmasq\.d/, 'the drop-in dir is checked');
+  assert.match(src, /grep -h '\^conf-dir=' \/var\/etc\/dnsmasq\.conf\.\*/, 'the drop-in dir is read off dnsmasq\'s generated config, not assumed');
   // the driver's own contract with it
   const drv = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'qemu-smoke.js'), 'utf8');
   assert.match(drv, /SMOKE OK/);

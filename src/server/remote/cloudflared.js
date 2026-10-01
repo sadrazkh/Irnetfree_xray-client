@@ -51,7 +51,15 @@ const EDGE = Object.freeze({
   cidrs: Object.freeze(['198.41.192.0/24', '198.41.200.0/24', '2606:4700:a0::/123', '2606:4700:a8::/123'])
 });
 
-const DROP_IN = '/tmp/dnsmasq.d/irnetfree-cloudflared.conf';
+/**
+ * Where dnsmasq reads drop-ins differs per release — 23.05: `conf-dir=/tmp/dnsmasq.d`;
+ * 24.10: one dir per instance, `conf-dir=/tmp/dnsmasq.<cfg>.d` (seen on the CI
+ * images) — so the dirs are read off the config dnsmasq's init generated
+ * (/var/etc/dnsmasq.conf.<cfg>), and 23.05's is the fallback when none is found.
+ */
+const DROP_IN_NAME = 'irnetfree-cloudflared.conf';
+const DROP_IN = '/tmp/dnsmasq.d/' + DROP_IN_NAME;
+const DNSMASQ_GENERATED = '/var/etc';
 const BIN = '/usr/bin/cloudflared';
 const INIT = '/etc/init.d/cloudflared';
 const DNSMASQ_INIT = '/etc/init.d/dnsmasq';
@@ -77,6 +85,21 @@ function uciBatch({ section = 'config', token = null, enabled }) {
   lines.push(`set cloudflared.${section}.protocol=${q(PROTOCOL)}`);
   lines.push('commit cloudflared');
   return lines.join('\n') + '\n';
+}
+
+/** The `conf-dir=` directories of every generated dnsmasq config (a `,filter` suffix dropped); 23.05's dir when none. */
+function dnsmasqConfDirs(fsImpl = fs, generatedDir = DNSMASQ_GENERATED) {
+  const dirs = [];
+  try {
+    for (const name of fsImpl.readdirSync(generatedDir)) {
+      if (!/^dnsmasq\.conf\./.test(name)) continue;
+      let text = '';
+      try { text = String(fsImpl.readFileSync(path.posix.join(generatedDir, name), 'utf8')); } catch { continue; }
+      for (const m of text.matchAll(/^conf-dir=([^\s,]+)/gm)) if (!dirs.includes(m[1])) dirs.push(m[1]);
+    }
+  } catch { /* no generated config: dnsmasq not managed by OpenWrt's init here */ }
+  if (!dirs.length) dirs.push(path.posix.dirname(DROP_IN));
+  return dirs;
 }
 
 /** The section of type `cloudflared` in `uci show cloudflared` output (the package names it `config`). */
@@ -113,11 +136,12 @@ function createCloudflared(o = {}) {
   const fsImpl = o.fsImpl || fs;
   const service = o.service || {};
   const log = o.log || (() => {});
-  const dropIn = o.dropInPath || DROP_IN;
+  const generatedDir = o.dnsmasqGeneratedDir || DNSMASQ_GENERATED;
   const bin = o.binPath || BIN;
   let installing = false;
   let lastInstall = null;     // { ok, at, error }
   let versionCache = null;
+  let dropInsWritten = [];    // the files written at the last apply on, removed at apply off
 
   const installed = () => { try { return fsImpl.existsSync(bin); } catch { return false; } };
 
@@ -133,12 +157,26 @@ function createCloudflared(o = {}) {
     catch (e) { log('cloudflared: the bypass was not applied: ' + e.message, 'warn'); }
   }
 
+  /** The drop-in into every conf-dir dnsmasq reads (on), or out of every one it was ever written to (off). */
   function writeDropIn(on) {
+    const dirs = dnsmasqConfDirs(fsImpl, generatedDir);
     try {
-      if (on) { fsImpl.mkdirSync(path.dirname(dropIn), { recursive: true }); fsImpl.writeFileSync(dropIn, dnsmasqDropIn(resolvers())); }
-      else if (fsImpl.existsSync(dropIn)) fsImpl.unlinkSync(dropIn);
+      if (on) {
+        const text = dnsmasqDropIn(resolvers());
+        dropInsWritten = [];
+        for (const d of dirs) {
+          const file = path.posix.join(d, DROP_IN_NAME);
+          fsImpl.mkdirSync(d, { recursive: true });
+          fsImpl.writeFileSync(file, text);
+          dropInsWritten.push(file);
+        }
+        return true;
+      }
+      const files = new Set([...dropInsWritten, ...dirs.map((d) => path.posix.join(d, DROP_IN_NAME)), DROP_IN]);
+      for (const file of files) if (fsImpl.existsSync(file)) fsImpl.unlinkSync(file);
+      dropInsWritten = [];
       return true;
-    } catch (e) { log('cloudflared: the dnsmasq drop-in was not written: ' + e.message, 'warn'); return false; }
+    } catch (e) { log('cloudflared: the dnsmasq drop-in was not ' + (on ? 'written' : 'removed') + ': ' + e.message, 'warn'); return false; }
   }
 
   async function section() {
@@ -213,4 +251,4 @@ function createCloudflared(o = {}) {
   return { installed, apply, status, install, version, get installing() { return installing; } };
 }
 
-module.exports = { EDGE, DROP_IN, BIN, PROTOCOL, bypassList, dnsmasqDropIn, uciBatch, sectionOf, runArgs, isTunnelToken, createCloudflared, defaultRun };
+module.exports = { EDGE, DROP_IN, DROP_IN_NAME, DNSMASQ_GENERATED, BIN, PROTOCOL, bypassList, dnsmasqDropIn, dnsmasqConfDirs, uciBatch, sectionOf, runArgs, isTunnelToken, createCloudflared, defaultRun };

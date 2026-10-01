@@ -72,10 +72,33 @@ function fakeFs(files = {}) {
     files,
     existsSync: (p) => p in files,
     writeFileSync: (p, data) => { files[p] = String(data); },
+    readFileSync: (p) => { if (!(p in files)) throw new Error('ENOENT ' + p); return files[p]; },
+    readdirSync: (dir) => Object.keys(files).filter((p) => p.startsWith(dir + '/')).map((p) => p.slice(dir.length + 1)).filter((n) => !n.includes('/')),
     unlinkSync: (p) => { delete files[p]; },
     mkdirSync: () => {}
   };
 }
+
+test('the drop-in dirs come from dnsmasq\'s generated config: 23.05\'s /tmp/dnsmasq.d, 24.10\'s per-instance dir; 23.05\'s when there is none', () => {
+  const none = fakeFs({});
+  assert.deepEqual(cf.dnsmasqConfDirs(none), ['/tmp/dnsmasq.d']);
+  const v23 = fakeFs({ '/var/etc/dnsmasq.conf.cfg01411c': 'conf-file=/etc/dnsmasq.conf\nconf-dir=/tmp/dnsmasq.d\n' });
+  assert.deepEqual(cf.dnsmasqConfDirs(v23), ['/tmp/dnsmasq.d']);
+  const v24 = fakeFs({ '/var/etc/dnsmasq.conf.cfg01411c': 'conf-file=/etc/dnsmasq.conf\nconf-dir=/tmp/dnsmasq.cfg01411c.d\nconf-file=/usr/share/dnsmasq/rfc6761.conf\n', '/var/etc/dnsmasq.conf.guest': 'conf-dir=/tmp/dnsmasq.guest.d,*.conf\n', '/var/etc/other.conf': 'conf-dir=/nope\n' });
+  assert.deepEqual(cf.dnsmasqConfDirs(v24), ['/tmp/dnsmasq.cfg01411c.d', '/tmp/dnsmasq.guest.d']);
+});
+
+test('apply on writes the drop-in into every dir dnsmasq reads (24.10 shape), apply off removes them all', async () => {
+  const { run } = fakeRun();
+  const fsImpl = fakeFs({ '/usr/bin/cloudflared': '', '/var/etc/dnsmasq.conf.cfg01411c': 'conf-dir=/tmp/dnsmasq.cfg01411c.d\n', '/var/etc/dnsmasq.conf.guest': 'conf-dir=/tmp/dnsmasq.guest.d\n' });
+  const d = cf.createCloudflared({ run, fsImpl, service: { directResolvers: () => ['178.22.122.100'] } });
+  await d.apply({ enabled: true, token: 'x'.repeat(50) });
+  assert.equal(fsImpl.files['/tmp/dnsmasq.cfg01411c.d/irnetfree-cloudflared.conf'], cf.dnsmasqDropIn(['178.22.122.100']));
+  assert.equal(fsImpl.files['/tmp/dnsmasq.guest.d/irnetfree-cloudflared.conf'], cf.dnsmasqDropIn(['178.22.122.100']));
+  assert.ok(!('/tmp/dnsmasq.d/irnetfree-cloudflared.conf' in fsImpl.files), 'not written where dnsmasq does not look');
+  await d.apply({ enabled: false, token: '' });
+  assert.ok(!Object.keys(fsImpl.files).some((p) => p.endsWith('irnetfree-cloudflared.conf')), 'all gone');
+});
 
 test('apply on: the UCI batch on stdin (never argv), the drop-in written from the direct resolvers, the bypass set, dnsmasq reloaded, the service enabled and restarted', async () => {
   const { run, calls } = fakeRun({ 'uci -q show cloudflared': { code: 0, stdout: "cloudflared.config=cloudflared\ncloudflared.config.enabled='0'\n", stderr: '' } });
