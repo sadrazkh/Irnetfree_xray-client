@@ -24,6 +24,33 @@ const { createService } = require('./service');
 const { hostAllowed, originAllowed } = require('./guard');
 const { createLuciApi, isLoopbackPeer } = require('./luciApi');
 
+// Every line this process writes starts with `irnetfree:` (v1.16 S5): under
+// procd the lines are syslog, and `logread -e irnetfree` must find the
+// banner, the shutdown, a stray rejection and a fatal error too — not only
+// the service's own tagged lines. Blank lines (a terminal's cosmetics) are
+// dropped; a chunk without its newline is continued by the next write.
+function prefixed(stream) {
+  const write = stream.write.bind(stream);
+  let midLine = false;
+  stream.write = function (chunk, encoding, cb) {
+    if (typeof encoding === 'function') { cb = encoding; encoding = undefined; }
+    const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+    const parts = text.split('\n');
+    let out = '';
+    for (let i = 0; i < parts.length; i++) {
+      const last = i === parts.length - 1;
+      const line = parts[i];
+      if (last && line === '') break;              // the chunk ended with its newline
+      if (!midLine && line === '') continue;       // a blank line
+      out += (midLine || line.startsWith('irnetfree:') ? line : 'irnetfree: ' + line) + (last ? '' : '\n');
+      midLine = last;
+    }
+    if (!out) { if (cb) process.nextTick(cb); return true; }
+    return write(out, encoding, cb);
+  };
+}
+for (const s of [process.stdout, process.stderr]) prefixed(s);
+
 // A stray rejection anywhere in the service must not end the process: on a
 // router this process IS the gateway, and Node ≥ 15 exits on an unhandled one
 // (the exit hook then tears the tunnel down). Logged, and the service goes on.
@@ -94,6 +121,18 @@ function indexHtml() {
 
 /* ----------------------------- service ----------------------------- */
 const service = createService({ dataDir: args.dataDir });
+// An uncaught exception used to be the end: node died, the exit hook tore the
+// tunnel down, and after five such deaths in an hour procd gave up on the
+// service — a router with no gateway until someone restarted it by hand (S5).
+// Now it is said with the prefix, the gateway goes down in order (capped at
+// 10 s), the process exits 1, and procd (respawn 3600 5 0: never giving up)
+// brings the service back — which reconnects by itself.
+process.on('uncaughtException', (e) => {
+  console.error('irnetfree: [fatal] ' + ((e && e.stack) || e) + ' — shutting down for procd to restart the service');
+  const cap = setTimeout(() => process.exit(1), 10000);
+  cap.unref();
+  Promise.resolve().then(() => service.shutdown()).catch(() => {}).then(() => process.exit(1));
+});
 const sseClients = new Set();
 service.onEvent((channel, payload) => {
   const line = 'data: ' + JSON.stringify({ channel, payload }) + '\n\n';
@@ -277,6 +316,10 @@ server.listen(args.port, args.host, () => {
     console.log('  Bound to a public interface — a token is required' + (args.tokenFile ? ' (in the file above).' : ' (in the URL above).'));
   }
   console.log('');
+  // a test's way to make the service throw from a timer (tests/serverRequest.test.js): the fatal path above must end the process
+  if (process.env.IRNETFREE_TEST_THROW_MS) {
+    setTimeout(() => { throw new Error('IRNETFREE_TEST_THROW_MS: a test-made uncaught exception'); }, Number(process.env.IRNETFREE_TEST_THROW_MS) || 100);
+  }
 });
 
 /* ----------------------------- lifecycle ----------------------------- */
