@@ -1,0 +1,23 @@
+# Persian for what LuCI translates from its own catalogs rather than from the
+# pages: the menu (Services → IRNetFree → its tabs) and the ACL description.
+# The pages' own strings are in irnetfree-common.js. openwrt/build-ipk.js
+# compiles this to /usr/lib/lua/luci/i18n/irnetfree.fa.lmo (openwrt/lmo.js).
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: fa\n"
+
+msgid "Overview"
+msgstr "نمای کلی"
+
+msgid "Settings"
+msgstr "تنظیمات"
+
+msgid "Remote access"
+msgstr "دسترسی از راه دور"
+
+msgid "Log"
+msgstr "لاگ"
+
+msgid "IRNetFree: status, settings and remote access"
+msgstr "IRNetFree: وضعیت، تنظیمات و دسترسی از راه دور"

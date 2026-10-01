@@ -36,6 +36,10 @@ test('tar: ustar headers a real tar reads, round-trips through our reader, deter
   if (sys.status === 0) assert.deepEqual(sys.stdout.trim().split(/\r?\n/), ['./d/', './d/x.txt', './d/run']);
 });
 
+/** The LuCI pages where LuCI looks for them: views by their menu path, the shared module by its require name. */
+const LUCI_PAGES = ['overview', 'settings', 'remote', 'log'].map((v) => `./www/luci-static/resources/view/irnetfree/${v}.js`)
+  .concat('./www/luci-static/resources/irnetfree/common.js');
+
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-ipk-'));
 test.after(() => { try { fs.rmSync(outDir, { recursive: true, force: true }); } catch {} });
 const built = buildIpk({ root: ROOT, outDir, mtime: 0 });
@@ -76,8 +80,9 @@ test('data: the app under /usr/lib/irnetfree, the service files, the LuCI files 
     `./${PREFIX}/src/renderer/index.html`, `./${PREFIX}/assets/logo.svg`, `./${PREFIX}/package.json`,
     './etc/init.d/irnetfree', './etc/config/irnetfree', './etc/uci-defaults/99-irnetfree',
     './usr/share/luci/menu.d/luci-app-irnetfree.json', './usr/share/rpcd/acl.d/luci-app-irnetfree.json',
-    './www/luci-static/resources/view/irnetfree.js'
+    ...LUCI_PAGES
   ]) assert.ok(files.includes(must), `${must} is not in the package`);
+  assert.ok(!files.includes('./www/luci-static/resources/view/irnetfree.js'), 'the old link page is gone (opkg removes it on upgrade)');
   assert.equal(data['./etc/init.d/irnetfree'].mode, 0o755);
   assert.equal(data['./etc/uci-defaults/99-irnetfree'].mode, 0o755);
   assert.equal(data['./etc/config/irnetfree'].mode, 0o644);
@@ -96,7 +101,7 @@ test('data: the app under /usr/lib/irnetfree, the service files, the LuCI files 
   }
   assert.equal(data[`./${PREFIX}/src/server/server.js`].data.toString(), fs.readFileSync(path.join(ROOT, 'src/server/server.js')).toString(), 'shipped verbatim');
   // the router-side text files are LF whatever the checkout did (a CRLF shebang is "/bin/sh^M: not found")
-  for (const n of ['./etc/init.d/irnetfree', './etc/uci-defaults/99-irnetfree', './etc/config/irnetfree', './www/luci-static/resources/view/irnetfree.js']) {
+  for (const n of ['./etc/init.d/irnetfree', './etc/uci-defaults/99-irnetfree', './etc/config/irnetfree', ...LUCI_PAGES]) {
     assert.ok(!data[n].data.includes('\r'), `${n} carries a carriage return`);
   }
   for (const s of ['./postinst', './prerm']) assert.ok(!control[s].data.includes('\r'), `${s} carries a carriage return`);
@@ -321,9 +326,22 @@ test('LuCI ACL: reading and changing are split method by method, one file (the t
   assert.equal(new Set([...READ, ...WRITE]).size, READ.length + WRITE.length, 'no method is both');
 });
 
-test('LuCI: the old link page (removed with the tabs)', () => {
-  const view = data['./www/luci-static/resources/view/irnetfree.js'].data.toString();
-  assert.match(view, /^'use strict';\n'require view';\n'require fs';\n'require uci';/);
-  assert.match(view, /fs\.read\('\/etc\/irnetfree\/token'\)/);
-  assert.match(view, /'\?token=' \+ encodeURIComponent\(token\)/);
+test('LuCI: every tab\'s view and the shared module ship verbatim, where the menu and the require name point', () => {
+  const menu = JSON.parse(data['./usr/share/luci/menu.d/luci-app-irnetfree.json'].data.toString());
+  for (const [key, node] of Object.entries(menu)) {
+    if (!node.action || node.action.type !== 'view') continue;
+    const f = `./www/luci-static/resources/view/${node.action.path}.js`;
+    assert.ok(data[f], `${key} opens ${node.action.path}, which is not in the package`);
+    assert.equal(data[f].mode, 0o644);
+    assert.equal(data[f].data.toString(), fs.readFileSync(path.join(ROOT, 'openwrt/files/luci/view', path.basename(f)), 'utf8').replace(/\r\n/g, '\n'));
+    // 'require irnetfree.common' is /luci-static/resources/irnetfree/common.js
+    assert.match(data[f].data.toString(), /^'require irnetfree\.common as common';$/m);
+  }
+  const common = data['./www/luci-static/resources/irnetfree/common.js'];
+  assert.equal(common.data.toString(), fs.readFileSync(path.join(ROOT, 'openwrt/files/luci/irnetfree-common.js'), 'utf8').replace(/\r\n/g, '\n'));
+  assert.match(common.data.toString(), /rpc\.declare\(\{ object: 'luci\.irnetfree'/);
+  // the web UI link the old page had lives on in the Overview
+  const overview = data['./www/luci-static/resources/view/irnetfree/overview.js'].data.toString();
+  assert.match(overview, /fs\.read\('\/etc\/irnetfree\/token'\)/);
+  assert.match(common.data.toString(), /'\?token=' \+ encodeURIComponent\(token\)/);
 });
