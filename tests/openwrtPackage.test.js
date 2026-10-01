@@ -107,6 +107,19 @@ test('data: the app under /usr/lib/irnetfree, the service files, the LuCI files 
   for (const s of ['./postinst', './prerm']) assert.ok(!control[s].data.includes('\r'), `${s} carries a carriage return`);
 });
 
+test('postinst: rpcd reloads (the plugin and the ACL) and LuCI forgets its caches — on a live router, after the default steps', () => {
+  const s = control['./postinst'].data.toString();
+  const dflt = s.indexOf('default_postinst "$0" "$@"');
+  assert.ok(dflt > 0, 'the default steps (uci-defaults, enable, start) still run');
+  const tail = s.slice(dflt);
+  // rpcd reads plugins and ACLs only when it starts; a reload re-execs it and keeps the sessions
+  assert.match(tail, /\[ -n "\$IPKG_INSTROOT" \] \|\| \{[\s\S]*\/etc\/init\.d\/rpcd reload[\s\S]*\}/, 'not while an image is being built');
+  assert.match(tail, /\[ -x \/etc\/init\.d\/rpcd \] && \/etc\/init\.d\/rpcd reload/, 'a router without rpcd (no LuCI) is fine');
+  assert.match(tail, /rm -rf \/tmp\/luci-indexcache\* \/tmp\/luci-modulecache\//, 'the menu and module caches');
+  assert.match(tail, /^rc=\$\?$/m);
+  assert.match(s, /exit \$rc\n$/, 'the default steps\' result is the script\'s');
+});
+
 /** ash is not bash: the constructs that silently do the wrong thing there. */
 const BASHISMS = [
   [/\[\[/, '[[ ]]'],

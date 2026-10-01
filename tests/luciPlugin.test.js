@@ -92,6 +92,24 @@ test('the token never reaches a command line or a shell variable — the file go
   assert.match(s, /http:\/\/127\.0\.0\.1:\$port\/luci\/\$method/, 'loopback only');
 });
 
+test('the QEMU smoke drives the plugin as LuCI does: rpcd lists it, ubus calls it, the browser\'s /ubus reaches it with a session', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'guest-smoke.sh'), 'utf8');
+  const at = s.indexOf('# LuCI (feat/router-luci)');
+  assert.ok(at > 0, 'the LuCI section is in the guest script');
+  const sec = s.slice(at);
+  assert.match(sec, /ubus -v list luci\.irnetfree/);
+  const listed = /for m in ([\s\S]*?); do/.exec(sec)[1].replace(/\\\n/g, ' ').trim().split(/\s+/);
+  assert.deepEqual(listed.sort(), [...FACADE, 'service'].sort(), 'every method is checked in the list rpcd gives');
+  assert.match(sec, /"error": "not-running"/, 'a stopped service, through the real uclient-fetch');
+  assert.match(sec, /lu service '\{"action":"start"\}'/, 'and Start, the plugin\'s own call');
+  assert.match(sec, /"error": "http 405"/, 'a service without the facade is recognised …');
+  assert.match(sec, /SMOKE pending-facade/, '… and said so, instead of failing');
+  assert.match(sec, /lu settings_set '\{"killSwitch":true\}'[\s\S]*nft list table inet irnetfree_ks/, 'settings_set arms the kill switch table');
+  assert.match(sec, /cgi-bin\/luci\/admin\/menu/, 'the menu as a browser gets it');
+  assert.match(sec, /http:\/\/127\.0\.0\.1\/ubus\//, 'the ubus call a page makes, through the ACL');
+  assert.match(sec, /"45517f0a"/, 'the Persian tab names, under the hash the browser computes');
+});
+
 /* ------------------------------ run it for real ------------------------------ */
 
 function findSh() {
