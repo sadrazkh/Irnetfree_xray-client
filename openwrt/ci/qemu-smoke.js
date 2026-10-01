@@ -84,11 +84,13 @@ class Console {
 // LuCI's error box or never leaves "Loading view…". Then LuCI is switched to
 // Persian in the guest and the Overview is read again. No Chrome here (a local
 // run): skipped, and said so.
+// what each tab shows once the service's /luci API answers (the facade, or the
+// guest script's stub of it on a branch without the facade)
 const LUCI_TABS = {
-  overview: /id="irnf-overview"/,
-  settings: /id="cbi-irnetfree"/,          // the UCI form: there even when the service does not answer
+  overview: /class="irnf-badge"/,                                        // the status, as a badge
+  settings: /id="cbi-json"[\s\S]*id="cbi-irnetfree"/,                     // the router settings, then the UCI form
   remote: /<h2[^>]*>(Remote access|دسترسی از راه دور)<\/h2>/,
-  log: /id="irnf-log"/
+  log: /id="irnf-log"[^>]*>[^<]{10,}/                                     // lines in the log
 };
 const LUCI_ERROR = /<h4>(TypeError|ReferenceError|SyntaxError|RangeError|NetworkError|RPCError|DependencyError|InternalError|Runtime error)[^<]*<\/h4>[\s\S]{0,400}/;
 
@@ -144,6 +146,7 @@ async function checkTab(chrome, port, tab, mark) {
   else if (uncaught.length) problem = `uncaught: ${uncaught[0].slice(0, 300)}`;
   else if (!view) problem = 'no #view in the page (not logged in?)';
   else if (/Loading view/.test(view[1].slice(0, 400))) problem = 'stuck on "Loading view…"';
+  else if (/<img[^>]*src="x"/.test(r.dom)) problem = 'a config name went into the page as HTML';
   else if (!mark.test(r.dom)) problem = `the page did not render (no ${mark})`;
   console.log(`LUCI-RENDER ${tab}: ${problem ? 'FAILED — ' + problem : 'ok'}`);
   console.log(`  ${textOf(view ? view[1] : r.dom).slice(0, 700)}`);
@@ -158,7 +161,7 @@ async function luciInBrowser(con, port) {
   for (const [tab, mark] of Object.entries(LUCI_TABS)) if ((await checkTab(chrome, port, tab, mark)).problem) bad++;
   // Persian: LuCI in fa loads irnetfree.fa.lmo (the tab names) and the pages read <html lang="fa">
   if (await sh(con, "uci set luci.main.lang='fa' && uci commit luci && rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/", 30000) === 0) {
-    const fa = await checkTab(chrome, port, 'overview', /id="irnf-overview"/);
+    const fa = await checkTab(chrome, port, 'overview', /class="irnf-badge"/);
     const missing = ['وضعیت', 'نمای کلی', 'دسترسی از راه دور'].filter((s) => !fa.dom.includes(s));
     if (fa.problem || missing.length) { bad++; console.log(`LUCI-RENDER overview (fa): FAILED — ${fa.problem || 'no ' + missing.join(', ')}`); }
     else console.log('LUCI-RENDER overview (fa): ok — Persian page text and tab names');
