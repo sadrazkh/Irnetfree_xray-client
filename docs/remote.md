@@ -120,11 +120,11 @@ Notes:
   `/tmp/dnsmasq.d`, there only while the tunnel is enabled).
 - **No fallback through the VPN**: cloudflared cannot use a SOCKS/HTTP proxy for its own connections. If the
   direct way to Cloudflare is blocked, this path is down; the relay is the one to rely on.
-- **Package version.** OpenWrt 23.05's feed ships `cloudflared 2024.4.1` (8 MB); Cloudflare supports
-  cloudflared releases within a year of the latest, so this one is outside the window — it still connects
-  today, but may stop working at some point, and no newer package exists for 23.05. 24.10's feed carries a
-  newer one (the Remote access page shows the installed version). Upstream binaries (36 MB, armhf) are not
-  fetched by IRNetFree in this round.
+- **Package version.** OpenWrt 23.05's feed ships `cloudflared 2024.4.1` (8 MB), 24.10's `2025.5.0` (both
+  verified on the CI images). Cloudflare supports cloudflared releases within a year of the latest, so both
+  are outside the window — they still connect today, but may stop working at some point, and no newer package
+  exists for those releases. The Remote access page shows the installed version. Upstream binaries (36 MB,
+  armhf) are not fetched by IRNetFree in this round.
 - RAM: cloudflared takes roughly 30 MB on the router.
 
 ## 3. Security
@@ -281,10 +281,11 @@ LuCI یا `/_relay/` را رد می‌کند.
   کانفیگ حل می‌شوند (یک drop-in برای dnsmasq در `/tmp/dnsmasq.d`، فقط تا وقتی تونل فعال است).
 - **راه جایگزین از داخل VPN ندارد**: cloudflared برای اتصال‌های خودش پراکسی SOCKS/HTTP نمی‌پذیرد. اگر راه مستقیم
   به کلادفلر بسته باشد این مسیر پایین است؛ رله همانی است که باید رویش حساب کرد.
-- **نسخهٔ بسته.** فید OpenWrt 23.05 نسخهٔ `cloudflared 2024.4.1` (۸ مگابایت) را دارد؛ کلادفلر نسخه‌های تا یک سال
-  پس از آخرین انتشار را پشتیبانی می‌کند، پس این یکی بیرون از آن بازه است — امروز وصل می‌شود ولی ممکن است روزی
-  از کار بیفتد و بستهٔ تازه‌تری برای 23.05 نیست. فید 24.10 نسخهٔ تازه‌تری دارد (صفحهٔ Remote access نسخهٔ
-  نصب‌شده را نشان می‌دهد). باینری‌های upstream (۳۶ مگابایت) در این دور توسط IRNetFree دانلود نمی‌شوند.
+- **نسخهٔ بسته.** فید OpenWrt 23.05 نسخهٔ `cloudflared 2024.4.1` (۸ مگابایت) و فید 24.10 نسخهٔ `2025.5.0` را دارد
+  (هر دو روی image‌های CI دیده شده). کلادفلر نسخه‌های تا یک سال پس از آخرین انتشار را پشتیبانی می‌کند، پس هر دو
+  بیرون از آن بازه‌اند — امروز وصل می‌شوند ولی ممکن است روزی از کار بیفتند و بستهٔ تازه‌تری برای این نسخه‌ها
+  نیست. صفحهٔ Remote access نسخهٔ نصب‌شده را نشان می‌دهد. باینری‌های upstream (۳۶ مگابایت) در این دور توسط
+  IRNetFree دانلود نمی‌شوند.
 - RAM: cloudflared حدود ۳۰ مگابایت روی روتر می‌گیرد.
 
 ## ۳. امنیت
