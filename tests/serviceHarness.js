@@ -50,10 +50,10 @@ function startIn(dir, extraDeps = {}, prime = null) {
   return { service, state, statuses, logs, events, syslog, dir };
 }
 
-/** Poll until `pred()` is true (or fail with `what`). */
+/** Poll until `pred()` is true (or fail with `what`); the predicate may be async. */
 async function until(pred, what, ms = 4000) {
   const deadline = Date.now() + ms;
-  while (!pred()) {
+  while (!(await pred())) {
     if (Date.now() > deadline) throw new Error('timed out waiting for: ' + what);
     await new Promise((r) => setTimeout(r, 5));
   }
