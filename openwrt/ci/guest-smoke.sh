@@ -816,6 +816,8 @@ mark d3
 rpc "{\"channel\":\"connect\",\"arg\":\"$ID\"}" > /tmp/connect-d3.json || true
 jq -c '.result // .error' /tmp/connect-d3.json
 wait_back "D3 connect (bypass-ir)" 180
+# Quad9 is no in-country resolver, and the service says so for a real router (field report D3)
+since_mark | grep -E '(holds public resolvers|رزولورهای عمومی دارد) \(9\.9\.9\.9, 149\.112\.112\.112\)' || { echo "no warning that the in-country DNS holds public resolvers"; exit 1; }
 
 say "D3: the core's config — the DNS module asks the in-country pair direct, the direct dial bound to the WAN device"
 C=/etc/irnetfree/config.json

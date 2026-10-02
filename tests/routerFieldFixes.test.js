@@ -387,6 +387,31 @@ test('D3: dnsmasq running as the service’s own user — the own-lookup rule is
   assert.ok(s.logs.some(l => l.level === 'warn' && /dnsmasq runs as uid 0/.test(l.line)), lines(s).join('\n'));
 });
 
+test('D3: public anycast resolvers as the in-country DNS of a bypass mode (a desktop backup\'s 8.8.8.8, 1.1.1.1) are said at warn on every connect, in the user\'s language', async (t) => {
+  // field report D3: dnsDirect is not kept on a restore, so a desktop's
+  // [8.8.8.8, 1.1.1.1] silently became the "in-country" resolver bypass-ir asks
+  // in plain text from Iran — filtered, poisoned, and every name told to the ISP
+  for (const [lang, re] of [
+    ['en', /^\[warn\] The in-country DNS of bypass-ir holds public resolvers \(8\.8\.8\.8, 1\.1\.1\.1\): they are asked in plain text from inside the country, where they are filtered or answer poisoned — put in-country resolvers in the direct DNS list$/],
+    ['fa', /^\[warn\] DNS داخلی bypass-ir رزولورهای عمومی دارد \(8\.8\.8\.8, 1\.1\.1\.1\): از داخل کشور بی‌رمز پرسیده می‌شوند، جایی که فیلتر شده‌اند یا جواب مسموم می‌دهند — رزولورهای داخل کشور را در فهرست DNS مستقیم بگذار$/]
+  ]) {
+    const s = H.start({ settings: { lang, routingMode: 'bypass-ir', dnsDirect: ['8.8.8.8', '1.1.1.1'] } });   // the desktop's own, restored
+    t.after(() => s.service.shutdown());
+    withGeo(s);
+    await s.service.invoke('connect', SERVER.id);
+    assert.equal(connectedCount(s), 1, 'a warning, not a refusal');
+    assert.equal(lines(s).filter((l) => re.test(l)).length, 1, lines(s).join('\n'));
+  }
+  // in-country resolvers, or global mode (where none is asked direct): nothing said
+  for (const settings of [{ routingMode: 'bypass-ir', dnsDirect: ['178.22.122.100', '185.51.200.2'] }, { routingMode: 'global', dnsDirect: ['8.8.8.8'] }]) {
+    const s = H.start({ settings });
+    t.after(() => s.service.shutdown());
+    withGeo(s);
+    await s.service.invoke('connect', SERVER.id);
+    assert.ok(!lines(s).some((l) => /public resolvers/.test(l)), lines(s).join('\n'));
+  }
+});
+
 test('D3: WireGuard endpoints and pinned entry addresses are still kept off the tunnel', async (t) => {
   const named = Object.assign({}, SERVER, { id: 'srv-named', address: 'upstream.invalid' });
   named.outbound = JSON.parse(JSON.stringify(SERVER.outbound));
