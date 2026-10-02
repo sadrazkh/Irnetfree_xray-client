@@ -40,3 +40,14 @@ test('fix 5: a router whose store says tunMode:false still builds the whole-netw
   assert.equal(s.statuses.find(x => x.state === 'connected').tun, true);
   assert.ok(s.state.events.includes('gateway:start'));
 });
+
+/* ----------------------------- fix 7: warnings that were false on a router ----------------------------- */
+
+test('fix 7: the strict leak guard on a router is sing-box’s strict_route — no "tun2socks backend" warning', async (t) => {
+  const s = H.start({ settings: { leakGuard: 'strict' } });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(connectedCount(s), 1);
+  assert.ok(!s.logs.some(l => /tun2socks backend/.test(l.line)), lines(s).join('\n'));
+  assert.ok(!s.syslog.some(([, l]) => /tun2socks backend/.test(l)), 'nor in syslog');
+});

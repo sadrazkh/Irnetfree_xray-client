@@ -121,6 +121,14 @@ test('contract: the fields the service reads, and DNS declared as the backend’
   assert.deepEqual(tun.excludeIps, []);
 });
 
+test('the sing-box backend it builds for itself knows it is composed by the router (no desktop resolver advice in syslog)', () => {
+  const { TunSingbox } = require('../src/main/tunSingbox');
+  const own = new TunOpenwrt({ lang: 'en' });
+  assert.ok(own.inner instanceof TunSingbox);
+  assert.equal(own.inner.composedBy, 'openwrt');
+  assert.equal(new TunSingbox({}).composedBy, null, 'a TunSingbox of its own is not');
+});
+
 test('isAvailable: sing-box present AND nft on PATH', () => {
   assert.equal(make().tun.isAvailable(), true);
   assert.equal(make({ inner: fakeInner({ available: false }) }).tun.isAvailable(), false);
