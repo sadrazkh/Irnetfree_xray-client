@@ -213,6 +213,46 @@ test('fix 20: a core that is still running when the 20 s are up is still given t
   assert.ok(s.logs.some(l => l.level === 'warn' && /has not opened 127\.0\.0\.1:47808 after 20s — starting the gateway anyway/.test(l.line)));
 });
 
+/* ----------------------------- fix 21: an official core older than the DNS plan ----------------------------- */
+
+const OLD_CORE_EN = 'The xray core is 24.12.31; the LAN\'s DNS is verified on 26.3.27 and newer — download the core under Settings → Required files';
+const OLD_CORE_FA = 'هستهٔ xray نسخهٔ 24.12.31 است؛ DNS شبکه روی 26.3.27 و بالاتر آزموده شده — هسته را از تنظیمات ← فایل‌های موردنیاز دانلود کن';
+
+test('fix 21: a router connecting on an official core older than 26.3.27 (the feed’s 24.12.31) says so at warn, in the user’s language', async (t) => {
+  for (const [lang, want] of [['en', OLD_CORE_EN], ['fa', OLD_CORE_FA]]) {
+    const s = H.start({ settings: { lang } });
+    t.after(() => s.service.shutdown());
+    s.state.coreVersions = { xray: '24.12.31' };
+    await s.service.invoke('connect', SERVER.id);
+    assert.equal(connectedCount(s), 1, 'a warning, not a refusal');
+    assert.deepEqual(s.logs.filter(l => /26\.3\.27/.test(l.line)).map(l => [l.level, l.line]), [['warn', want]]);
+    assert.ok(s.syslog.some(([, l]) => l.includes(want)), 'it reaches syslog');
+  }
+});
+
+test('fix 21: 26.3.27 and newer (compared as numbers), an unreadable version, or a config on Xray-PattN: not a word', async (t) => {
+  for (const [versions, engine] of [[{ xray: '26.3.27' }, null], [{ xray: '26.10.1' }, null], [{ xray: '' }, null], [{ xray: 'Xray (unknown build)' }, null], [{ xray: '24.12.31' }, 'xray-pattn']]) {
+    const s = H.start({ servers: [Object.assign({}, SERVER, engine ? { engine } : {})] });
+    t.after(() => s.service.shutdown());
+    s.state.coreVersions = versions;
+    await s.service.invoke('connect', SERVER.id);
+    assert.equal(connectedCount(s), 1);
+    assert.ok(!s.logs.some(l => /verified on 26\.3\.27/.test(l.line)), JSON.stringify(versions) + ' ' + engine + ': ' + lines(s).join('\n'));
+  }
+});
+
+/* ----------------------------- fix 22: missing geo files reach the log ----------------------------- */
+
+test('fix 22: bypass-ir with no geo files is a warn line too (syslog, LuCI → Log) — not only a toast', async (t) => {
+  const s = H.start({ settings: { routingMode: 'bypass-ir' } });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const connected = s.statuses.find(x => x.state === 'connected');
+  assert.match(connected.geoWarn || '', /Geo files \(geoip\/geosite\) are missing/, 'the toast is still there');
+  assert.ok(s.logs.some(l => l.level === 'warn' && l.line === connected.geoWarn), lines(s).join('\n'));
+  assert.ok(s.syslog.some(([, l]) => /\[warn\] Geo files \(geoip\/geosite\) are missing/.test(l)));
+});
+
 /* ----------------------------- fix 8: "the whole-network tunnel", not "the gateway" ----------------------------- */
 
 test('fix 8: no sing-box on the router — the refusal names the whole-network tunnel, in both languages', async (t) => {

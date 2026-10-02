@@ -161,6 +161,19 @@ const DEFAULT_SETTINGS = {
   lang: 'fa'
 };
 
+/** The official core the LAN's DNS plan was verified on (dnsBuilder.js: the hijack's `rules` form). */
+const CORE_DNS_VERIFIED = '26.3.27';
+
+/** "24.12.31" below "26.3.27", compared as numbers; a string with no x.y.z in it is never below anything. */
+function versionBelow(v, min) {
+  const parse = (s) => { const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(s || '')); return m ? m.slice(1, 4).map(Number) : null; };
+  const a = parse(v);
+  const b = parse(min);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
+}
+
 function defaultDataDir() {
   const base = process.env.IRNETFREE_DATA
     || (process.platform === 'win32'
@@ -1075,6 +1088,9 @@ function createService(opts = {}) {
       geoWarn = settings.lang === 'en'
         ? 'Geo files (geoip/geosite) are missing — geo-based rules were skipped. Download them under Settings → Required files.'
         : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
+      // a log line too: on a router bypass-ir then IS global routing, and a
+      // toast at connect time is gone before anyone reads it (field report D4)
+      send('log', { line: geoWarn, level: 'warn' });
     }
 
     // Per-config core selection (see engineChoice.js): a single server's own
@@ -1458,6 +1474,8 @@ function createService(opts = {}) {
 
     send('status', { state: 'connecting', serverId, cause });
 
+    // asked beside the validation (cached by the manager after the first ask): see the check below
+    const officialVersion = OPENWRT ? Promise.resolve(xray.version('xray')).catch(() => '') : null;
     const check = await xray.validateWithFallback(config, engine);
     if (stale()) return abandoned;
     if (!check.ok) {
@@ -1487,6 +1505,22 @@ function createService(opts = {}) {
       throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
     }
     const runEngine = check.engine;
+    // The LAN's DNS plan (the hijack's `rules` form, `expectedIPs`) is verified
+    // on the official core from 26.3.27 (dnsBuilder.js); an older one — the
+    // 23.05 feed's xray-core is 24.12.31 — leaves HTTPS/SVCB queries with no
+    // answer at all. Said at every connect on it (field report D2, fix 21).
+    if (OPENWRT && runEngine === 'xray') {
+      const v = await officialVersion;
+      if (stale()) return abandoned;
+      if (versionBelow(v, CORE_DNS_VERIFIED)) {
+        send('log', {
+          line: settings.lang === 'en'
+            ? `The xray core is ${v}; the LAN's DNS is verified on ${CORE_DNS_VERIFIED} and newer — download the core under Settings → Required files`
+            : `هستهٔ xray نسخهٔ ${v} است؛ DNS شبکه روی ${CORE_DNS_VERIFIED} و بالاتر آزموده شده — هسته را از تنظیمات ← فایل‌های موردنیاز دانلود کن`,
+          level: 'warn'
+        });
+      }
+    }
 
     // save/restore rather than clear — reapplyConnection() wraps the whole
     // teardown+reconnect in the same flag
