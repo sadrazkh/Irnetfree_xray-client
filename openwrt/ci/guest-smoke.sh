@@ -326,19 +326,68 @@ rpc '{"channel":"app:init"}' | jq -e '.result.conn.killSwitch == {"enabled":true
 [ -L /etc/rc.d/S19irnetfree-ks ] || { echo "irnetfree-ks is not enabled at boot"; ls /etc/rc.d | grep irnetfree; exit 1; }
 
 say "a LAN-side network namespace: packets the router FORWARDS (a probe from 127.0.0.1 proves nothing about the LAN)"
-LANNS=0
+# Two ways to put a peer behind the router. A: a veth whose other end is a port
+# of br-lan — the peer is a station on the LAN (192.168.1.77). B: a routed
+# veth on its own /30 (192.168.77.2 behind veth0), veth0 added to the lan
+# zone, which is what fw4 needs to forward it like the LAN. Whichever pings
+# the router first is used; neither → the forward chain is checked by its
+# rules alone and the job says so.
+LANNS=0; LANIP=; LANIF=; LANMAC=; LANZONE=
+lanping() { ip netns exec lan0 ping -c 1 -W 3 "$1" >/dev/null 2>&1; }
+lanwhy() {
+	echo "-- lan0: addresses, routes, neighbours"
+	ip netns exec lan0 ip -4 addr show veth1 | grep inet || true
+	ip netns exec lan0 ip route || true
+	ip netns exec lan0 ip neigh || true
+	echo "-- the router: neighbours on $1, the bridge's ports, a ping back, rp_filter, fw4's input chain"
+	ip neigh show dev "$1" || true
+	bridge link show 2>/dev/null || true
+	ping -c 1 -W 3 "$2" >/dev/null 2>&1 && echo "router -> lan0: ping ok" || echo "router -> lan0: no ping"
+	echo "rp_filter: all=$(cat /proc/sys/net/ipv4/conf/all/rp_filter) $1=$(cat "/proc/sys/net/ipv4/conf/$1/rp_filter" 2>/dev/null)"
+	nft list chain inet fw4 input 2>/dev/null | head -12 || true
+}
 if ip netns add lan0 2>/dev/null; then
 	opkg install kmod-veth >/dev/null 2>&1 || true
 	if ip link add veth0 type veth peer name veth1 2>/dev/null; then
 		ip link set veth1 netns lan0
-		ip link set veth0 master br-lan up
 		ip netns exec lan0 ip link set lo up
 		ip netns exec lan0 ip link set veth1 up
+		LANMAC="$(ip netns exec lan0 cat /sys/class/net/veth1/address)"
+		# A: a port of br-lan
+		ip link set veth0 master br-lan up
 		ip netns exec lan0 ip addr add 192.168.1.77/24 dev veth1
 		ip netns exec lan0 ip route add default via 192.168.1.1
-		LANMAC="$(ip netns exec lan0 cat /sys/class/net/veth1/address)"
-		LANNS=1
-		echo "lan0: 192.168.1.77 ($LANMAC) behind br-lan"
+		sleep 1
+		if lanping 192.168.1.1; then
+			LANNS=1; LANIP=192.168.1.77; LANIF=br-lan
+			echo "lan0: $LANIP ($LANMAC) as a port of br-lan — pings the router"
+		else
+			echo "A: a veth port of br-lan does not reach the router — why:"
+			lanwhy br-lan 192.168.1.77
+			# B: routed, on its own /30, veth0 in the lan zone
+			ip link set veth0 nomaster
+			ip addr add 192.168.77.1/30 dev veth0
+			ip link set veth0 up
+			ip netns exec lan0 ip addr flush dev veth1
+			ip netns exec lan0 ip addr add 192.168.77.2/30 dev veth1
+			ip netns exec lan0 ip route replace default via 192.168.77.1
+			for z in $(uci show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
+				[ "$(uci -q get firewall.$z.name)" = lan ] || continue
+				uci add_list firewall.$z.device='veth0'; LANZONE="$z"
+			done
+			uci commit firewall; fw4 reload >/dev/null 2>&1 || true
+			sleep 2
+			if lanping 192.168.77.1; then
+				LANNS=1; LANIP=192.168.77.2; LANIF=veth0
+				echo "lan0: $LANIP ($LANMAC) behind a routed veth0 in the lan zone — pings the router"
+			else
+				echo "B: a routed veth does not reach the router either — why:"
+				lanwhy veth0 192.168.77.2
+				echo "no working LAN-side namespace — the forward chain is checked by its rules only"
+				ip link delete veth0 2>/dev/null || true
+				ip netns delete lan0
+			fi
+		fi
 	else
 		echo "no veth in this image — the forward chain is checked by its rules only"
 		ip netns delete lan0
@@ -353,19 +402,15 @@ lanprobe() {
 	c="$(ip netns exec lan0 curl -s -o /dev/null -w '%{http_code}' --max-time 15 http://1.1.1.1/ 2>/dev/null || true)"
 	[ -n "$c" ] && [ "$c" != "000" ]
 }
-lanwhy() {
-	echo "-- lan0: addresses, routes, the router from inside"
-	ip netns exec lan0 ip -4 addr show veth1 | grep inet || true
-	ip netns exec lan0 ip route || true
-	ip netns exec lan0 ping -c 1 -W 3 192.168.1.1 >/dev/null 2>&1 && echo "lan0 -> router: ping ok" || echo "lan0 -> router: no ping"
-	echo "-- the router's view"
-	ip route get 1.1.1.1 from 192.168.1.77 iif br-lan || true
-	nft list chain inet irnetfree_ks lanblock || true
-	logread | tail -15
-}
 rejects() { nft list chain inet irnetfree_ks lanblock | sed -n 's/.*counter packets \([0-9]*\) bytes [0-9]* reject.*/\1/p'; }
 if [ "$LANNS" = 1 ]; then
-	lanprobe && echo "lan0 reaches the internet through the tunnel" || { echo "lan0 has no internet with the tunnel up (the kill switch must not block a working tunnel)"; lanwhy; exit 1; }
+	if lanprobe; then echo "lan0 reaches the internet through the tunnel"; else
+		echo "lan0 has no internet with the tunnel up (the kill switch must not block a working tunnel)"
+		ip route get 1.1.1.1 from "$LANIP" iif "$LANIF" || true
+		nft list chain inet irnetfree_ks lanblock || true
+		logread | tail -15
+		exit 1
+	fi
 fi
 
 say "sing-box dies and cannot come back (its binary held): the LAN is blocked and the reject counter moves; an excluded device passes; the router itself stays free"
@@ -390,7 +435,7 @@ if [ "$LANNS" = 1 ]; then
 	sleep 2
 	nft list table inet irnetfree_ks | grep -q "$LANMAC" || { echo "the excluded MAC is not in the kill switch's set"; nft list table inet irnetfree_ks; unhold; exit 1; }
 	lanprobe || { echo "an excluded device has no internet while the tunnel is down"; nft list chain inet irnetfree_ks lanblock; unhold; exit 1; }
-	r="$(ip route get 1.1.1.1 from 192.168.1.77 iif br-lan mark 0x1f1e)"; echo "excluded device -> internet: $r"
+	r="$(ip route get 1.1.1.1 from "$LANIP" iif "$LANIF" mark 0x1f1e)"; echo "excluded device -> internet: $r"
 	echo "$r" | grep -q "via $GW" || { echo "an excluded device's traffic does not leave by the WAN"; unhold; exit 1; }
 	luci settings_set '{"lanBypassMacs":[]}' >/dev/null
 	sleep 2
@@ -430,7 +475,8 @@ rpc '{"channel":"app:init"}' | jq -e '.result.conn.state == "disconnected" and .
 if [ "$LANNS" = 1 ]; then
 	lanprobe || { echo "lan0 has no internet after the VPN was turned off"; exit 1; }
 	echo "lan0 goes direct with the VPN off"
-	ip netns delete lan0
+	ip netns delete lan0   # takes the veth pair with it
+	if [ -n "$LANZONE" ]; then uci del_list firewall.$LANZONE.device='veth0'; uci commit firewall; fw4 reload >/dev/null 2>&1 || true; fi
 fi
 if ip rule show | grep -q '^8999:'; then echo "the bypass rule is still there"; exit 1; fi
 if ip rule show | grep -q '^8998:'; then echo "the main-first rule is still there"; exit 1; fi
