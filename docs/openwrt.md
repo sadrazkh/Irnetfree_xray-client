@@ -151,7 +151,7 @@ PH0، و Chrome برای [OnHub Recovery Utility](https://chromewebstore.google.
 ```sh
 /etc/init.d/irnetfree-ks stop        # جدول را برمی‌دارد (تا بازسازی بعدیِ سرویس، که دوباره می‌گذاردش)
 nft list table inet irnetfree_ks     # هست یا نه، MACهای مستثنا
-nft list chain inet irnetfree_ks fwd # شمارندهٔ reject: چند بسته بسته شده
+nft list chain inet irnetfree_ks lanblock # شمارندهٔ reject: چند بسته بسته شده
 ```
 
 حذف بسته (prerm) جدول و فایل را هم پاک می‌کند.
