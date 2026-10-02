@@ -425,6 +425,17 @@ test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and t
   assert.match(src, /wget -q -O /, 'uclient-fetch syntax (the busybox wget applet is not on every image)');
   assert.doesNotMatch(src, /wget -qO-/, 'combined short options are not safe on uclient-fetch');
   assert.match(src, /raw\.githubusercontent\.com\/sadrazkh\/Irnetfree_xray-client\/main\/openwrt\/install\.sh/, 'its own one-line URL is in the header');
+  // the cores it points to: the app's own download first, the feed's xray-core only as a fallback — the LAN's DNS
+  // (REFUSED for HTTPS/SVCB queries, expectedIPs) is verified on xray 26.3.27+, and both feeds carry older builds
+  const out = src.split('\n').filter(l => /^echo /.test(l));
+  const from = out.findIndex(l => /Cores:/.test(l));
+  assert.ok(from >= 0, 'the installer says where the cores come from');
+  const cores = out.slice(from, out.findIndex((l, i) => i > from && /Log:/.test(l))).join('\n');
+  assert.match(cores, /Settings -> Required files/);
+  assert.match(cores, /opkg install xray-core sing-box/);
+  assert.ok(cores.indexOf('Required files') < cores.indexOf('opkg install xray-core'), 'Required files is named first');
+  assert.match(cores, /26\.3\.27/, 'and why: the version the LAN\'s DNS is verified on');
+  assert.match(cores, /fallback/i, 'the feed is the fallback, not an equal choice');
 });
 
 test('LuCI: Services → IRNetFree with four tabs, behind its own ACL', () => {
