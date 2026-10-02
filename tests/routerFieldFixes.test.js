@@ -328,6 +328,39 @@ test('D3: bypass-ir on a router — the in-country resolvers are NOT cut out of 
   assert.equal(direct.streamSettings.sockopt.interface, 'eth0', 'the direct dial is bound to the WAN device the gateway found');
   // the remote control still learns which resolvers the core dials direct
   assert.deepEqual(s.service.directResolvers(), ['178.22.122.100', '185.51.200.2']);
+  // …and the router's OWN lookups through them (the relay agent's) leave by the WAN: a rule for this
+  // process's user from lo only — LAN devices and dnsmasq (its own user) stay in the tunnel (review of v1.16.1)
+  for (const ip of ['178.22.122.100', '185.51.200.2']) {
+    assert.ok(s.state.commands.includes(`ip -4 rule add pref 8997 iif lo uidrange 0-0 to ${ip}/32 ipproto udp dport 53 lookup main`), s.state.commands.filter(c => /8997/.test(c)).join('\n'));
+  }
+  // what a dnsmasq drop-in binds to so its query skips the tunnel the same way (cloudflared's edge discovery)
+  assert.equal(s.service.directDevice(), 'eth0', 'the device the live direct dials are bound to');
+});
+
+test('D3: directDevice() with no live connection is the main table’s default route — never our own tunnel; null with none', async (t) => {
+  let route = 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n'
+    + 'br-lan\tC0A80100\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n'
+    + 'IRNetFree\t00000000\t00000000\t0001\t0\t0\t0\t00000000\t0\t0\t0\n'
+    + 'pppoe-wan\t00000000\t0100000A\t0003\t0\t0\t10\t00000000\t0\t0\t0\n'
+    + 'wan\t00000000\t0102A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n';
+  const s = H.start({}, { readProc: (p) => { if (p === '/proc/net/route') return route; throw new Error('ENOENT'); } });
+  t.after(() => s.service.shutdown());
+  assert.equal(s.service.directDevice(), 'wan', 'the lowest metric of the up default routes, our TUN skipped');
+  route = route.split('\n').filter(l => !/^wan\t/.test(l)).join('\n');
+  assert.equal(s.service.directDevice(), 'pppoe-wan');
+  route = 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n';
+  assert.equal(s.service.directDevice(), null);
+});
+
+test('D3: dnsmasq running as the service’s own user — the own-lookup rule is not laid, and the log says why', async (t) => {
+  const s = H.start({ settings: { routingMode: 'bypass-ir', dnsDirect: ['178.22.122.100', '185.51.200.2'] } });
+  t.after(() => s.service.shutdown());
+  withGeo(s);
+  s.state.procUids = { dnsmasq: [0] };
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(connectedCount(s), 1);
+  assert.ok(!s.state.commands.some(c => /uidrange/.test(c)));
+  assert.ok(s.logs.some(l => l.level === 'warn' && /dnsmasq runs as uid 0/.test(l.line)), lines(s).join('\n'));
 });
 
 test('D3: WireGuard endpoints and pinned entry addresses are still kept off the tunnel', async (t) => {

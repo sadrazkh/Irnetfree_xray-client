@@ -15,8 +15,17 @@
  * the presence of a `token` line.
  *
  * Kept out of the tunnel the same way the relay is: its edge addresses go to
- * `service.setRemoteBypass('cloudflared', …)` and a dnsmasq drop-in sends the
- * edge domains to the config's direct resolvers while it runs. `protocol`
+ * `service.setRemoteBypass('cloudflared', …)`, and a dnsmasq drop-in sends the
+ * edge domains to the config's direct resolvers while it runs, each line
+ * bound to the WAN device (`server=/…/<resolver>@<dev>`, SO_BINDTODEVICE, the
+ * device from `service.directDevice()`). The binding is what keeps edge
+ * discovery off the tunnel: since v1.16.1 those resolvers are IN the
+ * whole-LAN tunnel (field report D3), where the port-53 hijack refuses SRV,
+ * and dnsmasq — its own user — has no other way around it. A drop-in written
+ * before the WAN had a device (a boot) is rechecked every minute while on and
+ * rewritten when the device or the resolvers change. dnsmasq is RESTARTED
+ * for every drop-in change: OpenWrt's reload is a SIGHUP, on which dnsmasq
+ * re-reads no config at all. `protocol`
  * is pinned to http2 (TCP 7844): QUIC has been throttled or blocked on
  * Iranian ISPs since mid-2025. cloudflared cannot use a SOCKS/HTTP proxy for
  * its own tunnel connections, so unlike the relay link it has no "via VPN"
@@ -66,15 +75,24 @@ const DNSMASQ_INIT = '/etc/init.d/dnsmasq';
 const PROTOCOL = 'http2';
 const TOKEN_RE = /^[A-Za-z0-9+/=_-]{40,4096}$/;
 const STATUS_CACHE_MS = 15000;
+/** How often a running tunnel's drop-in is compared with the device and resolvers the service names now. */
+const DROP_IN_RECHECK_MS = 60000;
 
 const bypassList = () => ({ hosts: EDGE.hosts.slice(), cidrs: EDGE.cidrs.slice() });
 const isTunnelToken = (s) => typeof s === 'string' && TOKEN_RE.test(s);
 
-/** `server=/<edge domain>/<direct resolver>` for every pair — what dnsmasq reads from its conf-dir. */
-function dnsmasqDropIn(resolvers) {
+/**
+ * `server=/<edge domain>/<direct resolver>[@<WAN device>]` for every pair —
+ * what dnsmasq reads from its conf-dir. The in-country resolvers are in the
+ * whole-LAN tunnel since v1.16.1, where the port-53 hijack refuses SRV:
+ * `@<device>` (SO_BINDTODEVICE) sends these queries out the WAN whatever the
+ * tunnel does, like the core's bound direct dials. No device known: plain.
+ */
+function dnsmasqDropIn(resolvers, dev = null) {
   const ips = (resolvers || []).filter((r) => /^[0-9a-f.:]+$/i.test(String(r)));
+  const at = typeof dev === 'string' && /^[A-Za-z0-9_.-]{1,15}$/.test(dev) ? '@' + dev : '';
   const lines = ['# IRNetFree: Cloudflare Tunnel edge discovery must not depend on the VPN tunnel'];
-  for (const d of EDGE.domains) for (const ip of ips) lines.push(`server=/${d}/${ip}`);
+  for (const d of EDGE.domains) for (const ip of ips) lines.push(`server=/${d}/${ip}${at}`);
   return lines.join('\n') + '\n';
 }
 
@@ -129,8 +147,9 @@ function defaultRun(cmd, args, { input = null, timeoutMs = 120000 } = {}) {
  * @param {object} o
  * @param {Function} [o.run]        (cmd, args, {input}) → Promise<{code, stdout, stderr}>
  * @param {object} [o.fsImpl]       existsSync / writeFileSync / unlinkSync / mkdirSync
- * @param {object} [o.service]      directResolvers?, setRemoteBypass?, getSettings (dnsDirect)
+ * @param {object} [o.service]      directResolvers?, directDevice?, setRemoteBypass?, getSettings (dnsDirect)
  * @param {Function} [o.log]
+ * @param {{setInterval, clearInterval}} [o.timers]   the drop-in's recheck (tests fire it by hand)
  */
 function createCloudflared(o = {}) {
   const run = o.run || defaultRun;
@@ -140,10 +159,15 @@ function createCloudflared(o = {}) {
   const generatedDir = o.dnsmasqGeneratedDir || DNSMASQ_GENERATED;
   const bin = o.binPath || BIN;
   const now = o.now || Date.now;
+  const timers = o.timers || { setInterval, clearInterval };
   let installing = false;
   let lastInstall = null;     // { ok, at, error }
   let versionCache = null;
   let dropInsWritten = [];    // the files written at the last apply on, removed at apply off
+  let dropInText = null;      // what they say (null: none written)
+  let boundDev = null;        // the last WAN device the service named — kept while it names none for a moment
+  let recheckTimer = null;
+  let rechecking = false;
   let probed = null;          // { at, running, lastLine } — LuCI polls every 3 s; pidof + logread are forks on a Cortex-A7 (review M6)
 
   const installed = () => { try { return fsImpl.existsSync(bin); } catch { return false; } };
@@ -160,12 +184,24 @@ function createCloudflared(o = {}) {
     catch (e) { log('cloudflared: the bypass was not applied: ' + e.message, 'warn'); }
   }
 
+  /**
+   * The drop-in as it should read now: the direct resolvers, bound to the WAN
+   * device the service names — or, while it names none for a moment (the WAN
+   * redialing), the one it named last; plain lines only before it ever named one.
+   */
+  function currentDropIn() {
+    let dev = null;
+    try { if (typeof service.directDevice === 'function') dev = service.directDevice(); } catch { /* none known */ }
+    if (dev) boundDev = dev;
+    return dnsmasqDropIn(resolvers(), boundDev);
+  }
+
   /** The drop-in into every conf-dir dnsmasq reads (on), or out of every one it was ever written to (off). */
   function writeDropIn(on) {
     const dirs = dnsmasqConfDirs(fsImpl, generatedDir);
     try {
       if (on) {
-        const text = dnsmasqDropIn(resolvers());
+        const text = currentDropIn();
         dropInsWritten = [];
         for (const d of dirs) {
           const file = path.posix.join(d, DROP_IN_NAME);
@@ -173,13 +209,40 @@ function createCloudflared(o = {}) {
           fsImpl.writeFileSync(file, text);
           dropInsWritten.push(file);
         }
+        dropInText = text;
         return true;
       }
       const files = new Set([...dropInsWritten, ...dirs.map((d) => path.posix.join(d, DROP_IN_NAME)), DROP_IN]);
       for (const file of files) if (fsImpl.existsSync(file)) fsImpl.unlinkSync(file);
       dropInsWritten = [];
+      dropInText = null;
       return true;
     } catch (e) { log('cloudflared: the dnsmasq drop-in was not ' + (on ? 'written' : 'removed') + ': ' + e.message, 'warn'); return false; }
+  }
+
+  /**
+   * While the tunnel runs: the drop-in compared with what the service names
+   * now, and rewritten (dnsmasq restarted) only when that differs — a boot
+   * that wrote it before the WAN had a device, a new WAN device, other
+   * direct resolvers. A minute apart; nothing forks unless it changed.
+   */
+  async function recheck() {
+    if (rechecking || dropInText == null) return;
+    rechecking = true;
+    try {
+      if (currentDropIn() === dropInText) return;
+      if (!writeDropIn(true)) return;
+      await run(DNSMASQ_INIT, ['restart']);
+      log(`cloudflared: edge discovery re-pointed — ${boundDev ? 'its DNS bound to ' + boundDev : 'no WAN device known yet'}, through ${resolvers().join(', ')}`, 'info');
+    } catch (e) { log('cloudflared: the drop-in recheck failed: ' + ((e && e.message) || e), 'warn'); }
+    finally { rechecking = false; }
+  }
+
+  function watchDropIn(on) {
+    if (recheckTimer != null) { timers.clearInterval(recheckTimer); recheckTimer = null; }
+    if (!on) return;
+    recheckTimer = timers.setInterval(recheck, DROP_IN_RECHECK_MS);
+    if (recheckTimer && typeof recheckTimer.unref === 'function') recheckTimer.unref();
   }
 
   async function section() {
@@ -199,16 +262,21 @@ function createCloudflared(o = {}) {
     if (on) {
       await bypass(true);
       writeDropIn(true);
-      await run(DNSMASQ_INIT, ['reload']);
+      // a restart, not a reload: OpenWrt's reload is a SIGHUP, which makes
+      // dnsmasq re-read hosts and leases but none of its config — the drop-in
+      // waited for whatever restarted it next
+      await run(DNSMASQ_INIT, ['restart']);
+      watchDropIn(true);
       await run(INIT, ['enable']);
       const r = await run(INIT, ['restart']);
       log(r.code === 0 ? 'cloudflared: started (protocol http2, direct only — it cannot ride the VPN)' : 'cloudflared: its service did not start: ' + (r.stderr || r.code).toString().trim(), r.code === 0 ? 'info' : 'error');
       return { ok: r.code === 0 };
     }
+    watchDropIn(false);
     await run(INIT, ['stop']);
     await run(INIT, ['disable']);
     writeDropIn(false);
-    await run(DNSMASQ_INIT, ['reload']);
+    await run(DNSMASQ_INIT, ['restart']);
     await bypass(false);
     log('cloudflared: stopped');
     return { ok: true };
