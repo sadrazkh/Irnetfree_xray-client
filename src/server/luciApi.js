@@ -11,7 +11,11 @@
  * do not rename. Actions (connect / disconnect / reconnect / subs_update)
  * start the work and answer { accepted: true } at once — the page follows
  * the status. settings_set takes only the four router keys, validated the
- * way settings:set validates them, and applies them live.
+ * way settings:set validates them, and applies them live. A method that
+ * refuses its argument throws { code: 400 }; server.js answers that — and
+ * anything else a method throws — as HTTP 200 { error }, because
+ * uclient-fetch drops the body of a non-2xx reply (only an unknown method
+ * is a 404 there).
  *
  * remote_get / remote_set / remote_status / cloudflared_install belong to
  * feat/remote's api (src/server/remote/api.js); they are delegated when that
@@ -63,16 +67,21 @@ function createLuciApi({ service, remoteApi = null } = {}) {
 
   const methods = {
     async status() {
-      let remoteStatus = null;
-      const r = remote();
-      if (r && typeof r.remote_status === 'function') { try { remoteStatus = await r.remote_status(); } catch { remoteStatus = null; } }
       const mem = service.memInfo();
-      return Object.assign({}, service.connSnapshot(), {
+      const out = Object.assign({}, service.connSnapshot(), {
         version: service.version,
         traffic: service.traffic(),
-        memAvailableKb: mem.memAvailableKb == null ? null : mem.memAvailableKb,
-        remote: remoteStatus
+        memAvailableKb: mem.memAvailableKb == null ? null : mem.memAvailableKb
       });
+      // feat/remote's remote_status() (async): { relay: {state, path, since,
+      // lastError, relayHost}, cloudflared: {installed, running, lastLine} } —
+      // absent or not started → no `remote` key; one that throws → {error}
+      const r = remote();
+      if (r && typeof r.remote_status === 'function') {
+        try { out.remote = await r.remote_status(); }
+        catch (e) { out.remote = { error: (e && e.message) || String(e) }; }
+      }
+      return out;
     },
     configs: () => service.configsForLuci(),
     connect(a) {

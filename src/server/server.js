@@ -240,8 +240,13 @@ async function handle(req, res) {
       const result = await luci.handle(pathname.slice('/luci/'.length), body.arg);
       return sendJson(res, 200, result === undefined ? {} : result);
     } catch (e) {
-      const code = e && Number.isInteger(e.code) && e.code >= 400 && e.code < 600 ? e.code : 500;
-      return sendJson(res, code, { error: (e && e.message) || String(e) });
+      // Only an unknown method is an HTTP error. Whatever a method itself
+      // refuses or throws (a setting it will not take, remote_set's Error)
+      // travels as 200 {error}: uclient-fetch — what the rpcd plugin fetches
+      // with — drops the body of every non-2xx reply, and LuCI would see
+      // nothing but "HTTP 400".
+      if (e && e.code === 404) return sendJson(res, 404, { error: e.message || 'unknown method' });
+      return sendJson(res, 200, { error: (e && e.message) || String(e) });
     }
   }
 

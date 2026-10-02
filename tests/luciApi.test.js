@@ -40,8 +40,11 @@ test('status: the snapshot plus version, traffic, memAvailableKb and remote (nul
   assert.equal(st.version, require('../package.json').version);
   assert.deepEqual(st.traffic, { up: 0, down: 0, upRate: 0, downRate: 0 });
   assert.ok('memAvailableKb' in st);
-  assert.equal(st.remote, null);
+  assert.ok(!('remote' in st), 'no remote api: no remote key');
   assert.deepEqual(st.killSwitch, { enabled: false, armed: false, blocking: false });
+  // a remote api whose status throws: {error}, never a failed status
+  const broken = createLuciApi({ service: s.service, remoteApi: { remote_status: async () => { throw new Error('agent not started'); } } });
+  assert.deepEqual((await broken.handle('status', {})).remote, { error: 'agent not started' });
 });
 
 test('connect {id} is accepted at once and the status follows; select, disconnect, reconnect and subs_update answer their shapes', async (t) => {
@@ -150,7 +153,7 @@ test('remote_* and cloudflared_install are the remote api when it is mounted, an
   assert.deepEqual(await api.handle('remote_set', { relay: { enabled: true } }), { ok: true });
   assert.deepEqual(calls, [{ relay: { enabled: true } }]);
   assert.deepEqual(await api.handle('remote_set', { relay: { relayUrl: 'ftp://x' } }), { error: 'relayUrl must be https://' }, 'a refused setting is the reply, not a 500');
-  assert.deepEqual((await api.handle('status', {})).remote, { relay: { state: 'off' }, cloudflared: { installed: false } }, 'status carries remote_status');
+  assert.deepEqual((await api.handle('status', {})).remote, { relay: { state: 'off' }, cloudflared: { installed: false } }, 'status carries the awaited remote_status');
   // the api may also be handed in as a getter (mounted after the facade was built)
   let late = null;
   const lazy = createLuciApi({ service: s.service, remoteApi: () => late });
@@ -195,10 +198,16 @@ test('POST /luci/<method> from 127.0.0.1 with the token answers; wrong token 401
   const nope = await post('/luci/nope', JSON.stringify({ token: TOKEN, arg: {} }));
   assert.equal(nope.status, 404);
   assert.equal(nope.json.error, 'unknown method');
-  // a method's own refusal travels with its code
+  // a method's own refusal is a 200 {error}: uclient-fetch (the rpcd plugin) drops the body of every non-2xx reply
   const bad = await post('/luci/connect', JSON.stringify({ token: TOKEN, arg: {} }));
-  assert.equal(bad.status, 400);
+  assert.equal(bad.status, 200);
   assert.match(bad.json.error, /id/);
+  const badSetting = await post('/luci/settings_set', JSON.stringify({ token: TOKEN, arg: { killSwitch: 'maybe' } }));
+  assert.equal(badSetting.status, 200);
+  assert.match(badSetting.json.error, /killSwitch must be a boolean/);
+  const notObject = await post('/luci/settings_set', JSON.stringify({ token: TOKEN, arg: 'x' }));
+  assert.equal(notObject.status, 200);
+  assert.match(notObject.json.error, /object/);
   // the methods that take no argument accept a missing one
   const log = await post('/luci/log', JSON.stringify({ token: TOKEN }));
   assert.equal(log.status, 200);
