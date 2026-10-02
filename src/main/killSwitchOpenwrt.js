@@ -90,7 +90,8 @@ function createKillSwitch({ run, dataDir, fs: fsImpl, tmpDir } = {}) {
   const dir = String(dataDir || '/etc/irnetfree');
   const snippetPath = (dir.startsWith('/') ? path.posix : path).join(dir, 'killswitch.nft');
   const tmpPath = path.posix.join(String(tmpDir || os.tmpdir()).replace(/\\/g, '/'), 'irnetfree-ks.nft');
-  let armed = false;
+  let armed = false;     // we loaded the table (and wrote the snippet)
+  let present = false;   // …and the kernel still had it when it was last asked (check)
   let current = { bypassMacs: [], wanDevs: [] };
 
   /** Validate, then load: a snippet nft refuses changes nothing in the kernel. */
@@ -100,10 +101,29 @@ function createKillSwitch({ run, dataDir, fs: fsImpl, tmpDir } = {}) {
     await run('nft', ['-f', tmpPath]);
   }
 
-  return {
+  const api = {
     snippetPath,
-    isArmed: () => armed,
+    /** Armed as far as the kernel is concerned: loaded by us, and there the last time the kernel was asked. */
+    isArmed: () => armed && present,
     bypassMacs: () => current.bypassMacs.slice(),
+    /**
+     * Ask the kernel whether the table is there (one cheap `nft list`) and
+     * remember the answer: `fw4 stop` / `fw4 flush`, a package's postinst or a
+     * hand `nft flush ruleset` empty the whole ruleset, and a switch that
+     * thinks it is armed over a LAN on the ISP is the worst of both.
+     */
+    async check() {
+      try { await run('nft', ['list', 'table', ...KS_TABLE.split(' ')]); present = true; }
+      catch { present = false; }
+      return present;
+    },
+    /** Armed in memory but the kernel lost the table: load it again with what it had. True when it did. */
+    async ensure() {
+      if (!armed) return false;
+      if (await api.check()) return false;
+      await api.arm(current);
+      return true;
+    },
     /** Load the table (validated first) and write the boot snippet. Rejects, with nothing applied or written, when nft refuses it. */
     async arm({ bypassMacs = [], wanDevs = [] } = {}) {
       const text = ksSnippet({ bypassMacs, wanDevs });
@@ -111,6 +131,7 @@ function createKillSwitch({ run, dataDir, fs: fsImpl, tmpDir } = {}) {
       try { f.mkdirSync(path.dirname(snippetPath), { recursive: true }); } catch { /* exists */ }
       f.writeFileSync(snippetPath, text, { mode: 0o600 });
       armed = true;
+      present = true;
       current = { bypassMacs: validMacs(bypassMacs), wanDevs: Array.isArray(wanDevs) ? wanDevs.slice() : [] };
     },
     /** Remove the boot snippet, then the table; a table that is not there is fine. */
@@ -121,14 +142,16 @@ function createKillSwitch({ run, dataDir, fs: fsImpl, tmpDir } = {}) {
         if (!/No such file or directory|does not exist/i.test(String((e && e.message) || e))) throw e;
       }
       armed = false;
+      present = false;
       current = { bypassMacs: [], wanDevs: [] };
     },
     /** The excluded devices changed under an armed switch: the set and the snippet, atomically. Disarmed: nothing. */
     async setBypassMacs(macs) {
       if (!armed) return;
-      await this.arm({ bypassMacs: macs, wanDevs: current.wanDevs });
+      await api.arm({ bypassMacs: macs, wanDevs: current.wanDevs });
     }
   };
+  return api;
 }
 
 module.exports = { ksSnippet, createKillSwitch, KS_TABLE, MARK, PRIVATE4, PRIVATE6 };

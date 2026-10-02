@@ -237,6 +237,58 @@ test('B1: the boot connect follows connectIntent — set with autoConnect on it 
   assert.equal(noAuto.state.xray.starts.length, 0, 'the setting off: nothing connects');
 });
 
+/* ----------------------------- review fixes: I5, M5 ----------------------------- */
+
+test('I5: a Connect by hand during a drop’s backoff ends the pending retry — the fresh connection is not rebuilt when the timer would have fired', async (t) => {
+  const s = H.start({}, timing({ routerBackoffMs: [500, 500, 500], crashWindowMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.xray.crash();
+  await until(() => connectedCount(s) === 2, 'the first drop rebuilt at once');
+  s.state.xray.crash();   // again within the window: a backoff of 500 ms is pending
+  await until(() => s.statuses.some(x => x.state === 'reconnecting' && x.retryInMs === 500), 'the backoff');
+  await s.service.invoke('connect', SERVER.id);   // the user, seeing "Reconnecting… (attempt 2)", presses Connect
+  assert.equal(connectedCount(s), 3);
+  const n = s.statuses.length;
+  await sleep(900);   // past the backoff: a live timer would have rebuilt the connection the user just made
+  assert.equal(connectedCount(s), 3, 'no rebuild after the connect by hand');
+  assert.ok(!s.statuses.slice(n).some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.slice(n).map(x => x.state)));
+  assert.equal(s.service.connSnapshot().retryInMs, null);
+  assert.equal(s.state.xray.starts.length, 3);
+});
+
+test('I5: a Reconnect by hand during a backoff ends the pending retry too', async (t) => {
+  const s = H.start({}, timing({ routerBackoffMs: [500, 500, 500], crashWindowMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.inners.find(i => i.active).crash();
+  await until(() => connectedCount(s) === 2, 'the first drop rebuilt at once');
+  s.state.inners.find(i => i.active).crash();   // the core is still up: a Reconnect is a plain rebuild
+  await until(() => s.statuses.some(x => x.state === 'reconnecting' && x.retryInMs === 500), 'the backoff');
+  const r = await s.service.invoke('vpn:reconnect');
+  assert.equal(r.ok, true);
+  assert.equal(connectedCount(s), 3);
+  const n = s.statuses.length;
+  await sleep(900);
+  assert.equal(connectedCount(s), 3, 'no rebuild after the reconnect by hand');
+  assert.ok(!s.statuses.slice(n).some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.slice(n).map(x => x.state)));
+});
+
+test('M5: a Connect on the live connection with settings pending a reconnect is a real connect (it applies them), not a no-op', async (t) => {
+  const s = H.start();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const r0 = await s.service.invoke('settings:set', { routingMode: 'bypass-ir' });
+  assert.ok(r0.pendingReconnect.includes('routingMode'), JSON.stringify(r0.pendingReconnect));
+  const r = await s.service.invoke('connect', SERVER.id);
+  assert.equal(r.ok, true);
+  assert.equal(r.already, undefined, 'the pending settings are what the connect is for');
+  assert.equal(connectedCount(s), 2);
+  assert.deepEqual((await s.service.invoke('settings:pending')), [], 'applied by the rebuild');
+  // and with nothing pending it is the no-op again
+  assert.deepEqual(await s.service.invoke('connect', SERVER.id), { ok: true, already: true });
+});
+
 /* ----------------------------- S6 / S7: memory and diagnostics ----------------------------- */
 
 /** /proc as a test sees it: MemAvailable, and a VmRSS for every pid asked. */
