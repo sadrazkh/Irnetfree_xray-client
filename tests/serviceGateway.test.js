@@ -204,12 +204,16 @@ test('R4: no sing-box on the router is a failed connect before any core starts',
   assert.equal(s.state.xray.starts.length, 0);
 });
 
-test('R4: TUN turned off on a router is still a plain proxy connect (the user’s choice, not a failure)', async (t) => {
+// v1.16.1 (field report fix 5): TUN is forced on a router — "proxy only" there
+// was the whole LAN going direct behind a panel that said connected, and a LAN
+// with no internet under an armed kill switch. A stored "off" still connects,
+// with the gateway (routerFieldFixes.test.js pins the settings side).
+test('R4: TUN turned off in a router’s store is overridden — the connect builds the gateway', async (t) => {
   const s = start({ settings: { tunMode: false } });
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', SERVER.id);
   assert.equal(connectedCount(s), 1);
-  assert.equal(s.statuses.find(x => x.state === 'connected').tun, false);
+  assert.equal(s.statuses.find(x => x.state === 'connected').tun, true);
 });
 
 /* ----------------------------- R3: dead cores are rebuilt ----------------------------- */
@@ -664,7 +668,7 @@ test('A1: a rebuild where nothing resolves keeps the address of the last connect
   assert.deepEqual(configAt(s, 2).dns.hosts, { 'upstream.invalid': ['198.51.100.8'] });
 });
 
-test('A1: a name nothing ever resolved is left to the core, and said so; a proxy-only connect resolves nothing', async (t) => {
+test('A1: a name nothing ever resolved is left to the core, and said so; a router’s stored "TUN off" still pins it', async (t) => {
   const none = fakeResolver(() => []);
   const s = start({ servers: [NAMED] }, { resolveHost: none });
   t.after(() => s.service.shutdown());
@@ -673,13 +677,16 @@ test('A1: a name nothing ever resolved is left to the core, and said so; a proxy
   assert.equal('domainStrategy' in outboundOf(configAt(s, 0), 'proxy').streamSettings.sockopt, false);
   assert.ok(s.logs.some(l => l.level === 'warn' && /Could not resolve the server upstream\.invalid/.test(l.line)));
 
-  // no tunnel, no recursion: the OS answers the core as it always did
+  // A proxy-only connect resolves nothing (`if (!settings.tunMode) return
+  // settings;`, pinned in both mirrors by connectPath.test.js) — but a router
+  // has no proxy-only connect any more (field report fix 5): a stored "off"
+  // is still a tunnel, so the name is pinned like under any other gateway.
   const asked = fakeResolver(() => ['198.51.100.7']);
   const p = start({ servers: [NAMED], settings: { tunMode: false } }, { resolveHost: asked });
   t.after(() => p.service.shutdown());
   await p.service.invoke('connect', NAMED.id);
-  assert.deepEqual(asked.asked, []);
-  assert.equal('hosts' in configAt(p, 0).dns, false);
+  assert.deepEqual(asked.asked, ['upstream.invalid']);
+  assert.deepEqual(configAt(p, 0).dns.hosts, { 'upstream.invalid': ['198.51.100.7'] });
 });
 
 test('A2: a chain that lost a member refuses to connect, by name, instead of becoming a shorter chain', async (t) => {

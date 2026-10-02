@@ -227,7 +227,11 @@ function createService(opts = {}) {
   // rides the proxy as UDP — which most servers do not carry — and the whole
   // LAN has no names (the AC-1304 log: `udp:1.1.1.1:53 [socks-in -> proxy]`,
   // never answered). On a router that switch has no meaning; the UI hides it.
-  const ROUTER_FORCED = OPENWRT ? { dnsManaged: true } : {};
+  // TUN likewise: "connected, proxy only" on a router is every device behind
+  // it going direct while the panel says connected — and with the kill switch
+  // armed, a LAN with no internet at all (killSwitchState: the gateway is
+  // never up). A desktop backup restored there carried exactly that.
+  const ROUTER_FORCED = OPENWRT ? { dnsManaged: true, tunMode: true } : {};
 
   const listeners = new Set();
   const oneLine = (s) => String(s == null ? '' : s).replace(/\s*[\r\n]+\s*/g, ' | ').slice(0, 1000);
