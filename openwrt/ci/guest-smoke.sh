@@ -347,9 +347,9 @@ else
 	echo "no network namespaces in this image — the forward chain is checked by its rules only"
 fi
 lanprobe() { ip netns exec lan0 wget -q -O /dev/null -T 4 http://1.1.1.1/; }
-rejects() { nft list chain inet irnetfree_ks fwd | sed -n 's/.*counter packets \([0-9]*\) bytes [0-9]* reject.*/\1/p'; }
+rejects() { nft list chain inet irnetfree_ks lanblock | sed -n 's/.*counter packets \([0-9]*\) bytes [0-9]* reject.*/\1/p'; }
 if [ "$LANNS" = 1 ]; then
-	lanprobe && echo "lan0 reaches the internet through the tunnel" || { echo "lan0 has no internet with the tunnel up (the kill switch must not block a working tunnel)"; nft list chain inet irnetfree_ks fwd; exit 1; }
+	lanprobe && echo "lan0 reaches the internet through the tunnel" || { echo "lan0 has no internet with the tunnel up (the kill switch must not block a working tunnel)"; nft list chain inet irnetfree_ks lanblock; exit 1; }
 fi
 
 say "sing-box dies and cannot come back (its binary held): the LAN is blocked and the reject counter moves; an excluded device passes; the router itself stays free"
@@ -368,20 +368,20 @@ if [ "$LANNS" = 1 ]; then
 	if lanprobe; then echo "lan0 still reaches the internet with the tunnel down"; unhold; exit 1; fi
 	after="$(rejects)"; after="${after:-0}"
 	echo "reject counter: $before -> $after"
-	[ "$after" -gt "$before" ] || { echo "the reject counter did not move"; nft list chain inet irnetfree_ks fwd; unhold; exit 1; }
+	[ "$after" -gt "$before" ] || { echo "the reject counter did not move"; nft list chain inet irnetfree_ks lanblock; unhold; exit 1; }
 	echo "-- the namespace's MAC excluded: marked by the kill switch's own chain, it passes"
 	luci settings_set "{\"lanBypassMacs\":[\"$LANMAC\"]}" | jq -e '.ok == true' >/dev/null
 	sleep 2
 	nft list table inet irnetfree_ks | grep -q "$LANMAC" || { echo "the excluded MAC is not in the kill switch's set"; nft list table inet irnetfree_ks; unhold; exit 1; }
-	lanprobe || { echo "an excluded device has no internet while the tunnel is down"; nft list chain inet irnetfree_ks fwd; unhold; exit 1; }
+	lanprobe || { echo "an excluded device has no internet while the tunnel is down"; nft list chain inet irnetfree_ks lanblock; unhold; exit 1; }
 	r="$(ip route get 1.1.1.1 from 192.168.1.77 iif br-lan mark 0x1f1e)"; echo "excluded device -> internet: $r"
 	echo "$r" | grep -q "via $GW" || { echo "an excluded device's traffic does not leave by the WAN"; unhold; exit 1; }
 	luci settings_set '{"lanBypassMacs":[]}' >/dev/null
 	sleep 2
 	if lanprobe; then echo "lan0 reaches the internet after its exclusion was removed"; unhold; exit 1; fi
 else
-	nft list chain inet irnetfree_ks fwd | grep -q 'reject with icmpx type admin-prohibited' || { echo "no reject rule"; unhold; exit 1; }
-	nft list chain inet irnetfree_ks fwd | grep -q 'meta mark 0x00001f1e accept' || { echo "no accept for excluded devices"; nft list chain inet irnetfree_ks fwd; unhold; exit 1; }
+	nft list chain inet irnetfree_ks lanblock | grep -q 'reject with icmpx.*admin-prohibited' || { echo "no reject rule"; unhold; exit 1; }
+	nft list chain inet irnetfree_ks lanblock | grep -q 'meta mark 0x00001f1e accept' || { echo "no accept for excluded devices"; nft list chain inet irnetfree_ks lanblock; unhold; exit 1; }
 fi
 
 say "the binary back: the gateway recovers by itself, the block lifts, the table stays (the VPN is still meant to be on)"

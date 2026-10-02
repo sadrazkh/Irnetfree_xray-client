@@ -13,7 +13,7 @@
  *   pre  (prerouting, mangle + 5): marks packets from the excluded devices
  *        (`lanBypassMacs`) 0x1f1e, so they pass below whatever the gateway's
  *        own table is doing right now;
- *   fwd  (forward, filter - 5, ahead of fw4): accepts reply-direction packets
+ *   lanblock (forward, filter - 5, ahead of fw4; `fwd` and `forward` are nft keywords): accepts reply-direction packets
  *        (an inbound port-forward's answers), anything through the tunnel
  *        device either way, the marked devices, private / link-local /
  *        multicast / CGNAT destinations (LAN↔LAN, guest↔LAN, the ISP modem's
@@ -60,7 +60,7 @@ function ksSnippet({ bypassMacs = [], wanDevs = [] } = {}) {
     '\t\ttype filter hook prerouting priority mangle + 5; policy accept;',
     `\t\tether saddr @bypass meta mark set ${MARK}`,
     '\t}',
-    '\tchain fwd {',
+    '\tchain lanblock {',   // not `fwd` / `forward`: nft keywords (the QEMU job refused the snippet)
     '\t\ttype filter hook forward priority filter - 5; policy accept;',
     '\t\tct direction reply accept',
     '\t\tiifname "IRNetFree" accept',
