@@ -15,6 +15,9 @@ at once:
 Either way you end up in the same IRNetFree web UI the LAN uses: turn the VPN on and off, switch configs,
 change settings, read the log.
 
+Installing IRNetFree on the router, and the rest of the router guide: [`docs/openwrt.md`](openwrt.md) (Persian); its
+section «دسترسی از بیرون خانه» is the short form of this page.
+
 ## 1. The relay
 
 One Node process, no npm dependencies, ~1 MB. It does three things: logs you in (one password), pairs
@@ -186,6 +189,9 @@ only thing between the internet and the router's UI.
 
 در هر دو، به همان UI وب IRNetFree می‌رسی که در خانه می‌بینی: VPN را روشن/خاموش کن، کانفیگ عوض کن، تنظیمات را
 تغییر بده، لاگ را بخوان.
+
+نصب IRNetFree روی روتر و بقیهٔ راهنمای روتر: [`docs/openwrt.md`](openwrt.md)؛ بخش «دسترسی از بیرون خانه» در آن، خلاصهٔ
+همین صفحه است.
 
 ## ۱. رله
 
