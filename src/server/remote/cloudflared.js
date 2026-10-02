@@ -20,7 +20,8 @@
  * bound to the WAN device (`server=/…/<resolver>@<dev>`, SO_BINDTODEVICE, the
  * device from `service.directDevice()`). The binding is what keeps edge
  * discovery off the tunnel: since v1.16.1 those resolvers are IN the
- * whole-LAN tunnel (field report D3), where the port-53 hijack refuses SRV,
+ * whole-LAN tunnel (field report D3), where SRV gets no answer (the port-53
+ * hijack refuses it; the feed's older cores leave it unanswered),
  * and dnsmasq — its own user — has no other way around it. A drop-in written
  * before the WAN had a device (a boot) is rechecked every minute while on and
  * rewritten when the device or the resolvers change. dnsmasq is RESTARTED
@@ -84,7 +85,8 @@ const isTunnelToken = (s) => typeof s === 'string' && TOKEN_RE.test(s);
 /**
  * `server=/<edge domain>/<direct resolver>[@<WAN device>]` for every pair —
  * what dnsmasq reads from its conf-dir. The in-country resolvers are in the
- * whole-LAN tunnel since v1.16.1, where the port-53 hijack refuses SRV:
+ * whole-LAN tunnel since v1.16.1, where SRV gets no answer (refused by the
+ * port-53 hijack, unanswered by the feed's older cores):
  * `@<device>` (SO_BINDTODEVICE) sends these queries out the WAN whatever the
  * tunnel does, like the core's bound direct dials. No device known: plain.
  */
