@@ -170,3 +170,11 @@ test('keep: the keys a machine needs as they are stay as they are — and the an
   assert.equal(all.next.settings.autoConnect, false);
   assert.deepEqual(all.kept, []);
 });
+
+test('flavor: a backup says where it was made when asked to (the router), and only then', () => {
+  // The router's restore keeps its own settings only from a backup made
+  // elsewhere — its own backup, restored after a reset, must bring them back.
+  assert.equal(exportBundle({ store: current, flavor: 'openwrt' }).flavor, 'openwrt');
+  assert.equal('flavor' in exportBundle({ store: current }), false, 'a desktop backup is as it always was');
+  assert.equal('flavor' in exportBundle({ store: current, flavor: null }), false);
+});
