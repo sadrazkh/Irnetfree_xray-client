@@ -48,6 +48,31 @@ function toast(msg, kind = '', ms = 2600) {
   toast._t = setTimeout(() => { el.className = 'toast'; }, ms);
 }
 
+/**
+ * A toast that carries one button — for a message whose fix is a single click
+ * ("not applied yet — Reconnect"). It stays up longer than a plain toast, the
+ * button runs `run` and takes the toast away, and the next plain toast()
+ * replaces it like any other. Hiding drops only `show`: the toast fades out
+ * where it stood (and is click-through again) instead of jumping back to the
+ * plain toast's position mid-fade.
+ */
+function toastAction(msg, label, run, kind = 'warn', ms = 12000) {
+  const el = $('#toast');
+  const hide = () => { el.className = 'toast has-action ' + kind; };
+  el.textContent = '';
+  const text = document.createElement('span');
+  text.textContent = msg;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn small toast-action';
+  btn.textContent = label;
+  btn.onclick = () => { clearTimeout(toast._t); hide(); run(); };
+  el.append(text, btn);
+  el.className = 'toast show has-action ' + kind;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(hide, ms);
+}
+
 function pingClass(ms) {
   if (ms < 0) return 'ping-bad';
   if (ms < 200) return 'ping-good';
@@ -923,9 +948,12 @@ async function updateLanInfo() {
 
 /**
  * OpenWrt: the router IS the tunnel for the LAN, so the switches that only
- * mean something on a desktop go (system proxy, login item, Windows kill
- * switch, the TUN backend choice — fixed there, per-app routing — no process
- * behind a forwarded packet) and the device list comes.
+ * mean something on a desktop go (system proxy, login item, the TUN switch
+ * and its backend choice — fixed there, per-app routing — no process behind a
+ * forwarded packet, the proxy-mode UDP block, the leak-guard cards) and the
+ * device list comes. The parts that read state as they render (the mode card,
+ * the TUN status line, Required files, the inspector) check the flavour
+ * themselves.
  */
 function applyFlavor() {
   const rt = state.flavor === 'openwrt';
@@ -962,6 +990,18 @@ function applyFlavor() {
   }
   $('#tunBackendRow').hidden = rt;
   $('#tunAppRow').hidden = rt;
+  // The router's tunnel is the whole network's, always (field report G2): no
+  // TUN switch (its wording is the desktop's — admin rights, "the system"), in
+  // its place one line saying so; no proxy-mode UDP block (there is no proxy
+  // mode), and no leak-guard cards (the DNS guard they choose is skipped on a
+  // router, where dnsmasq answers the LAN through the tunnel).
+  const tunRow = $('#optTun').closest('.switch-row');
+  if (tunRow) tunRow.hidden = rt;
+  $('#tunRouterNote').hidden = !rt;
+  $('#udpBlockRow').hidden = rt;
+  $('#leakGuardRow').hidden = rt;
+  // remote access is set up in LuCI; this page only says where
+  $('#gwRemoteRow').hidden = !rt;
   $('#gwQuicRow').hidden = !rt;
   $('#optLanBlockQuic').checked = !!state.settings.lanBlockQuic;
   if (rt) renderLanDevices();
@@ -1010,6 +1050,29 @@ async function renderLanDevices() {
   }
 }
 $('#btnGwRefresh').onclick = () => renderLanDevices();
+
+/**
+ * Settings, scrolled to one row. A category chip or a search can be hiding the
+ * row's card — then the page is un-filtered first, or the jump lands nowhere.
+ * Only the content column scrolls: scrollIntoView would scroll the page itself
+ * as well and push the frameless window's title bar out of view.
+ */
+function openSettingAt(sel) {
+  showView('settings');
+  const el = $(sel);
+  if (!el) return;
+  const card = el.closest('.card');
+  if (card && card.hidden) {
+    const all = document.querySelector('.settings-chip[data-category="all"]');
+    if (all) all.click();
+  }
+  const column = el.closest('.content');
+  if (column) column.scrollTop += el.getBoundingClientRect().top - column.getBoundingClientRect().top - 12;
+}
+// The inspector's gateway row is a status, not a switch: its tooltip says what
+// it means, and a click opens the one thing about it that can be changed — which
+// devices go direct (#gwRow starts with the same explanation).
+$('#insGatewayRow').onclick = () => openSettingAt('#gwRow');
 
 $('#btnSaveRules').onclick = async () => {
   const rules = textToCustomRules($('#customRules').value);
@@ -2296,7 +2359,7 @@ function renderInspector() {
     // did not come up is a failed connect) with the TUN the connection was
     // built with — a switch flipped since is only pending
     const gatewayUp = !!state.connected && (!!s.tunMode !== (state.pendingReconnect || []).includes('tunMode'));
-    set('#insGateway', gatewayUp ? t('gw.insWhole') + (n ? ' · ' + t('gw.insDirect').replace('{n}', n) : '') : off, gatewayUp ? 'on' : 'off');
+    set('#insGateway', gatewayUp ? t('gw.insWhole') + (n ? ' · ' + t('gw.insDirect').replace('{n}', n) : '') : t('gw.insOff'), gatewayUp ? 'on' : 'off');
   }
 }
 
@@ -2652,9 +2715,12 @@ function renderComponents() {
   list.innerHTML = '';
   const a = state.assets || {};
   const isWin = (a.platform || 'win32') === 'win32';
+  const rt = state.flavor === 'openwrt';
 
   for (const c of COMPONENTS) {
     if (c.winOnly && !isWin) continue;
+    // a router's tunnel is sing-box's: tun2socks never runs there, wintun is Windows'
+    if (rt && (c.key === 'tun2socks' || c.key === 'wintun')) continue;
     const present = c.has ? c.has(a) : !!a[c.key];
     const v = c.ver && present ? state.coreVersions[c.ver] : '';
     const ver = v ? ` <span class="comp-ver">v${escapeHtml(v)}</span>` : '';
@@ -2681,7 +2747,16 @@ function renderComponents() {
   // sing-box OR tun2socks, plus wintun on Windows). Older mains do not send it —
   // then say nothing rather than guess from a single component.
   const tunNote = $('#compTunNote');
-  if (tunNote) tunNote.hidden = typeof a.tunReady !== 'boolean' || a.tunReady;
+  if (!tunNote) return;
+  if (rt) {
+    // The router's own reading: tunReady also counts tun2socks, which cannot
+    // carry the gateway — the tunnel's availability is the service's to say.
+    tunNote.setAttribute('data-i18n', 'tun.routerUnavailable');
+    tunNote.textContent = t('tun.routerUnavailable');
+    tunNote.hidden = !!state.tunAvailable;
+  } else {
+    tunNote.hidden = typeof a.tunReady !== 'boolean' || a.tunReady;
+  }
 }
 
 async function downloadComponent(key, btn) {
@@ -2831,22 +2906,31 @@ function missingEssentials() {
   const list = [];
   if (!anyXrayCore()) list.push('xray');
   if (!(a.geoip && a.geosite)) list.push('geo');
-  // on a router sing-box is the backend and tun2socks never runs
-  if (want && !a.tun2socks && state.flavor !== 'openwrt') list.push('tun2socks');
-  if (want && isWin && !a.wintun) list.push('wintun');
+  // On a router sing-box is the backend and tun2socks never runs — and sing-box
+  // is not optional there: without it the whole-network tunnel cannot start, and
+  // the package does not depend on it (a freshly flashed router meets it first
+  // as a failed connect). Only when it is the missing piece: with sing-box
+  // present and the tunnel still unavailable, downloading it again fixes nothing.
+  if (state.flavor === 'openwrt') {
+    if (!state.tunAvailable && !a['sing-box']) list.push('sing-box');
+  } else {
+    if (want && !a.tun2socks) list.push('tun2socks');
+    if (want && isWin && !a.wintun) list.push('wintun');
+  }
   return list;
 }
 
 function maybePromptMissingFiles() {
   const missing = missingEssentials();
   // Only auto-prompt when the core (xray) is missing — geo/tun are optional and
-  // already surfaced in Settings → Required files.
-  if (!missing.includes('xray')) return;
+  // already surfaced in Settings → Required files. On a router sing-box is not
+  // optional (it IS the gateway), so it prompts too.
+  if (!missing.includes('xray') && !missing.includes('sing-box')) return;
   openFilesModal(missing);
 }
 
 const COMP_LABEL = {
-  xray: 'comp.xray', 'xray-pattn': 'comp.xrayPattn',
+  xray: 'comp.xray', 'xray-pattn': 'comp.xrayPattn', 'sing-box': 'comp.singbox',
   geo: 'comp.geo', tun2socks: 'comp.tun2socks', wintun: 'comp.wintun'
 };
 
@@ -2929,6 +3013,14 @@ function updateTunStatus() {
   updateGuardRows();
   const el = $('#tunStatus');
   if (!el) return;
+  if (state.flavor === 'openwrt') {
+    // The router has no TUN switch and no admin question: the whole-network
+    // tunnel is ready, or sing-box is missing (and the line says where to get it).
+    el.textContent = t(state.tunAvailable ? 'tun.routerReady' : 'tun.routerUnavailable');
+    el.className = 'tun-status ' + (state.tunAvailable ? 'ok' : 'warn');
+    updateAdminBtn(false);
+    return;
+  }
   if (!state.tunAvailable) {
     el.textContent = t('tun.unavailable');
     el.className = 'tun-status warn';
@@ -3322,6 +3414,7 @@ function updateSpoofLabels() {
   const on = isStd && (sec === 'tls' || sec === 'reality');
   show('#edSpoofHead', on); show('#edTlsRow', on);
   show('#edHideSniRow', on);
+  updateHideSniNote();   // follows the switch row, shown or not
   const hintEl = $('#edSpoofHint'); if (hintEl) hintEl.hidden = !on;
   if (!on) return;
 
@@ -3343,6 +3436,18 @@ function updateSpoofLabels() {
   $('#edHideSni').checked = !!($('#edFragment').value || '').trim();
 }
 
+/**
+ * A server that already fragments its ClientHello with finalmask (the
+ * patterniha subscriptions) gets a second, generic fragmenter in front of it
+ * when Hide SNI is turned on — say so under the switch, while the form's
+ * finalmask is non-empty and the switch is showing.
+ */
+function updateHideSniNote() {
+  const row = $('#edHideSniRow');
+  const fm = $('#edFinalMask');
+  show('#edHideSniFmNote', !!(row && !row.hidden && fm && (fm.value || '').trim()));
+}
+
 // The default SNI-hiding fragment (patterniha-style: fragment the ClientHello
 // so DPI can't read the SNI). Editable later in Advanced → Fragment.
 const HIDE_SNI_FRAGMENT = 'tlshello,100-200,10-20';
@@ -3353,6 +3458,7 @@ $('#edSecurity').onchange = () => {
   updateSpoofLabels();
 };
 $('#edNetwork').onchange = () => updateSpoofLabels();
+if ($('#edFinalMask')) $('#edFinalMask').oninput = updateHideSniNote;
 // Hide-SNI toggle drives the (advanced) Fragment field with a sensible default.
 if ($('#edHideSni')) $('#edHideSni').onchange = () => {
   const frag = $('#edFragment');
@@ -3425,7 +3531,36 @@ function collectEditFields(orig, clearPin) {
   return fields;
 }
 
-$('#editSave').onclick = async () => {
+/**
+ * Is server `id` part of the connection that is up right now — the server
+ * itself, a member of the live chain, or a target of the live pool or advanced
+ * plan (resolved the way the main process builds them)? A save only writes the
+ * store: the running tunnel keeps the record it was built from until a
+ * reconnect, so an edit of a live server is not live yet.
+ */
+function serverInLivePlan(id) {
+  const live = state.activeServerId;
+  if (!id || !live || !state.connected) return false;
+  if (live === id) return true;
+  const chainHas = (cid) => {
+    const c = (state.chains || []).find(x => x.id === cid);
+    return !!(c && (c.members || []).includes(id));
+  };
+  const targetHas = (tg) => tg === id
+    || (tg === 'chain' && (state.chain || []).includes(id))
+    || (String(tg).startsWith('chain:') && chainHas(String(tg).slice(6)));
+  if (live === '__chain__') return (state.chain || []).includes(id);
+  if (live === '__pool__') return (state.pool || []).some(e => e && e.enabled && targetHas(e.target));
+  if (live === '__advanced__') {
+    const s = state.settings || {};
+    const first = (state.servers || [])[0];
+    const def = s.routeDefault || (first && first.id) || 'direct';
+    return [...(s.routeRules || []).map(r => r && r.target), def].some(targetHas);
+  }
+  return chainHas(live);
+}
+
+async function saveEdit() {
   const id = state.editingId;
   if (!id || !editOriginal) return;
   const proto = editOriginal.protocol;
@@ -3448,11 +3583,16 @@ $('#editSave').onclick = async () => {
     state.servers = res.servers;
     renderServers(); renderPicker(); renderChains(); renderPool(); renderAdvanced();
     closeEdit();
-    toast(t('t.serverUpdated'), 'ok');
+    // The edit is in the store, not in the running tunnel: say so, with the
+    // one click that applies it (the same leak-free rebuild as the Reconnect
+    // button) — a Disconnect + Connect would go direct in between.
+    if (serverInLivePlan(id)) toastAction(t('t.serverUpdatedLive'), t('btn.reconnect'), doReconnect);
+    else toast(t('t.serverUpdated'), 'ok');
   } else {
     toast(t('t.failed'), 'err');
   }
-};
+}
+$('#editSave').onclick = saveEdit;
 
 /* ----------------------------- WireGuard add ----------------------------- */
 $('#btnWgOpen').onclick = () => {
@@ -4297,12 +4437,26 @@ function resetTraffic() {
   drawSpark();
 }
 function setModeWidget() {
+  const card = $('#modeCard');
+  if (state.flavor === 'openwrt') {
+    // A router has one mode — the whole network through the tunnel — so the
+    // card names it, explains it on hover and opens nothing (openModeModal):
+    // "Proxy" there meant a LAN going direct while the UI said connected.
+    $('#modeIco').textContent = '🛡';
+    $('#modeLabel').textContent = t('mode.router');
+    $('#modeSub').textContent = t('mode.routerSub');
+    if (card) {
+      card.title = t('mode.routerNote');
+      card.setAttribute('aria-disabled', 'true');
+      card.classList.add('mode-card-fixed');
+    }
+    return;
+  }
   // Reflect the CHOSEN mode (so users see/can change it before connecting).
   const wantTun = !!state.settings.tunMode;
   $('#modeIco').textContent = wantTun ? '🛡' : '⚡';
   $('#modeLabel').textContent = wantTun ? t('mode.tun') : t('mode.proxy');
   $('#modeSub').textContent = wantTun ? t('mode.tunSub') : t('mode.proxySub');
-  const card = $('#modeCard');
   if (card) card.title = t('mode.pick');
 }
 
@@ -4327,7 +4481,11 @@ function renderModeOptions() {
   else if (state.settings.tunMode && !state.elevated) note.textContent = t('tun.needAdmin');
   else note.textContent = '';
 }
-function openModeModal() { renderModeOptions(); $('#modeModal').hidden = false; }
+function openModeModal() {
+  if (state.flavor === 'openwrt') return;   // one mode on a router: nothing to pick (setModeWidget)
+  renderModeOptions();
+  $('#modeModal').hidden = false;
+}
 function closeModeModal() { $('#modeModal').hidden = true; }
 $('#modeCard').onclick = openModeModal;
 // straight to the place the missing backend is downloaded from

@@ -111,6 +111,31 @@ test('the OpenWrt device list and gateway row exist, hidden by default, and are 
 });
 
 /**
+ * v1.16.1 (field report items 1-2): the owner could not tell what the
+ * inspector's "Gateway" row was, nor select it — it looked like the switches
+ * around it and was two bare spans. With flavor=openwrt it is a button whose
+ * tooltip says what it means and whose click opens the device list; the whole
+ * router layout is pinned in tests/rendererRouter.test.js.
+ */
+test('flavor=openwrt: the inspector gateway row is a button that explains itself and opens the device list', () => {
+  assert.match(HTML, /<button type="button" class="ins-row" id="insGatewayRow" hidden data-i18n-title="gw\.insHint">/);
+  assert.match(APP, /\$\('#insGatewayRow'\)\.onclick = \(\) => openSettingAt\('#gwRow'\);/);
+  const vm = require('node:vm');
+  const els = {};
+  const node = (id) => els[id] || (els[id] = { id, hidden: true, textContent: '', checked: false,
+    setAttribute() {}, closest: () => null, querySelector: () => null });
+  const $ = (sel) => node(String(sel).replace(/^#/, ''));
+  const ctx = vm.createContext({ state: { flavor: 'openwrt', settings: {} }, $, t: (k) => k, renderLanDevices: () => {} });
+  vm.runInContext(fnSource('applyFlavor'), ctx);
+  ctx.applyFlavor();
+  assert.equal(els.insGatewayRow.hidden, false, 'shown on the router');
+  assert.equal(els.gwRow.hidden, false, 'with the device list it opens');
+  ctx.state.flavor = null;
+  ctx.applyFlavor();
+  assert.equal(els.insGatewayRow.hidden, true, 'never on the desktop');
+});
+
+/**
  * The dialog's own controls. styles.css resets `button { background:none;
  * border:0 }` and gives inputs `color: inherit`, so a class-less <button> in
  * there rendered as bare padded text and its <input>s as near-white text on the
