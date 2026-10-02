@@ -457,6 +457,12 @@ const I18N = {
     'kill.winOnly': '⚠ کیل سوییچ فعلاً فقط روی ویندوز کار می‌کند',
     'kill.blocked': '⛔ کیل سوییچ فعال شد — اینترنت بسته است',
     'kill.reconnect': 'اتصال مجدد', 'kill.disarm': 'باز کردن اینترنت',
+    // the router's kill switch (v1.16): blocks the LAN only while the VPN is meant to be on
+    'kill.routerTitle': 'کیل سوییچ',
+    'kill.routerSub': 'تا وقتی VPN روشن است و تونل قطع شده، دستگاه‌های شبکه اینترنت ندارند (دستگاه‌های مستثنا و خود روتر هیچ‌وقت بسته نمی‌شوند)',
+    'kill.routerBlocked': '⛔ اینترنت شبکه تا برگشتن VPN بسته است',
+    'kill.routerOff': 'VPN را خاموش کن',
+    'kill.routerArmed': '✓ فعال — هر وقت تونل قطع شود، اینترنت شبکه بسته می‌شود',
     'kill.opened': 'اینترنت باز شد',
 
     'netauto.title': 'اتصال مجدد خودکار هنگام تغییر شبکه',
@@ -465,7 +471,12 @@ const I18N = {
     'login.title': 'اجرا با ویندوز', 'login.sub': 'برنامه هنگام ورود به سیستم، پنهان در سینی، اجرا می‌شود (روی ویندوز یک task زمان‌بندی‌شده با دسترسی ادمین ساخته می‌شود)',
     'login.failed': 'اجرا با سیستم‌عامل تنظیم نشد',
     'autoconn.title': 'اتصال خودکار', 'autoconn.sub': 'هنگام اجرا به آخرین سروری که وصل بودید وصل می‌شود',
+    // the same switch on the router (v1.16 B1): it says what it does there
+    'autoconn.routerTitle': 'با روشن شدن روتر وصل شو',
+    'autoconn.routerSub': 'بعد از ریبوت یا قطع برق، VPN همان‌طور که بود برمی‌گردد',
     'state.reconnecting': 'شبکه عوض شد — اتصال مجدد…',
+    'state.reconnectingN': 'اتصال مجدد… (تلاش {n})',
+    'state.waiting': 'منتظر اینترنت… (تلاش {n})',
     'net.reconnected': 'اتصال بعد از تغییر شبکه برقرار شد',
     'net.failed': 'شبکه عوض شد و اتصال مجدد ناموفق بود',
     'net.dropFailed': 'اتصال مدام قطع می‌شود و اتصال مجدد ناموفق بود — دوباره وصل شوید',
@@ -955,6 +966,12 @@ const I18N = {
     'kill.winOnly': '⚠ Kill switch currently works on Windows only',
     'kill.blocked': '⛔ Kill switch engaged — internet is blocked',
     'kill.reconnect': 'Reconnect', 'kill.disarm': 'Unblock internet',
+    // the router's kill switch (v1.16): blocks the LAN only while the VPN is meant to be on
+    'kill.routerTitle': 'Kill switch',
+    'kill.routerSub': 'While the VPN is on and the tunnel is down, devices on the LAN have no internet (excluded devices and the router itself are never blocked)',
+    'kill.routerBlocked': '⛔ LAN internet is blocked until the VPN is back',
+    'kill.routerOff': 'Turn the VPN off',
+    'kill.routerArmed': '✓ Armed — whenever the tunnel is down, LAN internet is blocked',
     'kill.opened': 'Internet unblocked',
 
     'netauto.title': 'Reconnect automatically when the network changes',
@@ -963,7 +980,12 @@ const I18N = {
     'login.title': 'Start with the OS', 'login.sub': 'Starts hidden in the tray at logon (on Windows via a scheduled task with administrator rights)',
     'login.failed': 'Could not set up start with the OS',
     'autoconn.title': 'Connect automatically', 'autoconn.sub': 'Connects to the last server you used when the app starts',
+    // the same switch on the router (v1.16 B1): it says what it does there
+    'autoconn.routerTitle': 'Connect when the router starts',
+    'autoconn.routerSub': 'After a reboot or power cut the VPN comes back as it was',
     'state.reconnecting': 'Network changed — reconnecting…',
+    'state.reconnectingN': 'Reconnecting… (attempt {n})',
+    'state.waiting': 'Waiting for internet… (attempt {n})',
     'net.reconnected': 'Reconnected after the network change',
     'net.failed': 'The network changed and reconnecting failed',
     'net.dropFailed': 'The connection keeps dropping and reconnecting failed — connect again',

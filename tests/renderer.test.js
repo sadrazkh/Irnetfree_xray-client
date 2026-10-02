@@ -424,6 +424,233 @@ test('a no-op save through the real edit form records nothing, for every shape t
   }
 });
 
+/* --------------------------- the connection snapshot (v1.16 S1 / S4) --------------------------- */
+
+/** A top-level (async) function of app.js, as source. */
+function fnSource(name) {
+  let start = APP.indexOf(`\nfunction ${name}(`);
+  if (start === -1) start = APP.indexOf(`\nasync function ${name}(`);
+  assert.ok(start > -1, `app.js has no function ${name}`);
+  let depth = 0, j = APP.indexOf('{', APP.indexOf(')', start));
+  for (; j < APP.length; j++) {
+    if (APP[j] === '{') depth++;
+    else if (APP[j] === '}' && --depth === 0) break;
+  }
+  return APP.slice(start, j + 1);
+}
+/** The body of a `window.api.onX((d) => { … });` handler, as a named function. */
+function handlerSource(name) {
+  const head = `window.api.${name}((d) => {`;
+  const start = APP.indexOf(head);
+  assert.ok(start > -1, `app.js has no ${name} handler`);
+  const end = APP.indexOf('\n});', start);
+  // `var`: a vm script's top-level let/const never becomes a property of its context
+  return `var ${name} = (d) => {${APP.slice(start + head.length, end)}\n};`;
+}
+const STRINGS = { 'state.reconnectingN': 'Reconnecting… (attempt {n})', 'state.waiting': 'Waiting for internet… (attempt {n})', 't.disconnected': 'Disconnected' };
+
+/** applyConnSnapshot and the status handlers over a fake page: what they paint and what they say. */
+function snapshotHarness(flavor = 'openwrt') {
+  const vm = require('node:vm');
+  const calls = [];
+  const els = new Map();
+  const el = (id) => {
+    if (!els.has(id)) els.set(id, { id, textContent: '', hidden: false, className: '', title: '', classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {} });
+    return els.get(id);
+  };
+  const ctx = vm.createContext({
+    state: { connected: false, connecting: false, activeServerId: null, activeEngine: '', selectedServerId: null, lastServerId: null, settings: {}, flavor, servers: [], pendingReconnect: [], wasReconnecting: false, lan: null },
+    $: (sel) => el(String(sel).replace(/^#/, '')),
+    t: (k) => STRINGS[k] || k,
+    toast: (msg, kind) => calls.push('toast:' + (kind || '') + ':' + msg),
+    setConnUI: (s) => calls.push('ui:' + s),
+    appendLog: (line) => calls.push('log:' + line),
+    renderServers: () => {}, renderPicker: () => {}, renderPendingBanner: () => {}, setPending: () => {}, setModeWidget: () => {},
+    updateLanInfo: () => {}, hideGeo: () => {}, resetTraffic: () => {}, checkIp: () => {}, quickPing: (id) => calls.push('quickPing:' + id), updateAdminBtn: () => {},
+    reconnectingKey: () => 'state.reconnecting', failedKey: () => 'net.failed',
+    // timers run at once, so what a handler defers (the quick ping, the IP check) is seen
+    setInterval: () => 1, clearInterval: () => {}, setTimeout: (fn) => { try { fn(); } catch {} return 1; }, Date,
+    window: { api: {} }
+  });
+  vm.runInContext(['var uptimeTimer = null;', 'var uptimeFrom = 0;', fnSource('startUptime'), fnSource('attemptText'),
+    fnSource('applyKillSwitchState'), fnSource('applyConnSnapshot'), handlerSource('onStatus'), handlerSource('onXrayStatus')].join('\n'), ctx);
+  return { ctx, calls, el };
+}
+
+test('S1: a page loaded while the tunnel is up starts connected, with the uptime from the service and no toast — idempotently', () => {
+  const h = snapshotHarness();
+  const since = Date.now() - 65000;
+  const up = { state: 'connected', serverId: 's1', engine: 'xray', since, reason: null, attempt: 0, killSwitch: { enabled: false, armed: false, blocking: false } };
+  h.ctx.applyConnSnapshot(up);
+  assert.equal(h.ctx.state.connected, true);
+  assert.equal(h.ctx.state.connecting, false);
+  assert.equal(h.ctx.state.activeServerId, 's1');
+  assert.equal(h.ctx.state.activeEngine, 'xray');
+  assert.equal(h.ctx.uptimeFrom, since, 'the clock counts from when the service says the tunnel came up');
+  assert.deepEqual(h.calls, ['ui:connected'], 'no toast, no log line');
+  // the same snapshot again (an events reconnect): nothing new is said
+  h.ctx.applyConnSnapshot(up);
+  assert.deepEqual(h.calls, ['ui:connected', 'ui:connected']);
+  assert.equal(h.ctx.uptimeFrom, since);
+
+  h.ctx.applyConnSnapshot({ state: 'reconnecting', serverId: 's1', attempt: 2, reason: 'core-exited' });
+  assert.equal(h.ctx.state.connected, false);
+  assert.equal(h.ctx.state.connecting, true);
+  assert.equal(h.el('connState').textContent, 'Reconnecting… (attempt 2)');
+  h.ctx.applyConnSnapshot({ state: 'waiting', serverId: 's1', attempt: 3 });
+  assert.equal(h.el('connState').textContent, 'Waiting for internet… (attempt 3)');
+  h.ctx.applyConnSnapshot({ state: 'disconnected', serverId: null, since: null });
+  assert.equal(h.ctx.state.connected, false);
+  assert.equal(h.ctx.state.connecting, false);
+  assert.equal(h.calls.at(-1), 'ui:disconnected');
+  assert.ok(!h.calls.some((c) => c.startsWith('toast:')), 'a snapshot never toasts: ' + h.calls.join(', '));
+  // a snapshot with nothing in it changes nothing
+  h.ctx.applyConnSnapshot(null);
+  assert.equal(h.calls.filter((c) => c.startsWith('ui:')).length, 5);
+});
+
+test('S4: on the router a reconnecting status shows the attempt, a waiting status the boot retry, and a core stop that is being rebuilt paints nothing', () => {
+  const h = snapshotHarness();
+  h.ctx.onStatus({ state: 'connected', serverId: 's1', engine: 'xray' });
+  assert.equal(h.ctx.state.connected, true);
+  h.ctx.onStatus({ state: 'reconnecting', serverId: 's1', reason: 'core-exited', attempt: 2, retryInMs: 5000 });
+  assert.equal(h.ctx.state.connecting, true);
+  assert.equal(h.el('connState').textContent, 'Reconnecting… (attempt 2)');
+  assert.ok(!h.calls.some((c) => /^toast:err/.test(c)), 'no red toast: ' + h.calls.join(', '));
+  h.ctx.onStatus({ state: 'waiting', serverId: 's1', attempt: 4, retryInMs: 15000 });
+  assert.equal(h.el('connState').textContent, 'Waiting for internet… (attempt 4)');
+  assert.equal(h.ctx.state.connecting, true);
+  // the core died under a live connection and the service is rebuilding: not a disconnect
+  h.ctx.onStatus({ state: 'connected', serverId: 's1', engine: 'xray' });
+  const before = h.calls.length;
+  h.ctx.onXrayStatus({ state: 'stopped', info: { code: null, signal: 'SIGKILL' }, rebuilding: true });
+  assert.equal(h.ctx.state.connected, true, 'still connected until the service says otherwise');
+  assert.equal(h.calls.length, before, 'nothing painted, nothing toasted');
+  // …while a final stop (no rebuild coming) still paints disconnected with its toast
+  h.ctx.onXrayStatus({ state: 'stopped', info: { code: 0 } });
+  assert.equal(h.ctx.state.connected, false);
+  assert.ok(h.calls.includes('ui:disconnected') && h.calls.some((c) => c.startsWith('toast:err')));
+  // the desktop keeps its own wording for a recovery (no attempt in the text)
+  const d = snapshotHarness(null);
+  d.ctx.onStatus({ state: 'reconnecting', serverId: 's1', reason: 'interfaces', attempt: 1 });
+  assert.equal(d.el('connState').textContent, 'state.reconnecting');
+});
+
+test('S6: the router does not start a test core for the quick ping after every connect; the desktop still does', () => {
+  const router = snapshotHarness('openwrt');
+  router.ctx.onStatus({ state: 'connected', serverId: 's1', engine: 'xray' });
+  assert.ok(!router.calls.some((c) => c.startsWith('quickPing:')), router.calls.join(', '));
+  const desktop = snapshotHarness(null);
+  desktop.ctx.onStatus({ state: 'connected', serverId: 's1', engine: 'xray' });
+  assert.ok(desktop.calls.includes('quickPing:s1'), desktop.calls.join(', '));
+});
+
+/* --------------------------- the router's kill switch (v1.16 K1/K4) --------------------------- */
+
+test('K1/K4: on the router the kill switch row shows with router wording, the banner says the LAN is blocked, and its action is the disconnect', () => {
+  // the row is no longer among the desktop-only rows hidden on the router
+  const flavor = fnSource('applyFlavor');
+  assert.doesNotMatch(flavor, /'optKillSwitch'/, 'the kill switch row is not hidden on the router any more');
+  assert.match(flavor, /kill\.routerTitle/);
+  assert.match(flavor, /kill\.routerSub/);
+  assert.match(flavor, /kill\.routerBlocked/);
+  assert.match(flavor, /kill\.routerOff/);
+  // the banner's "Turn the VPN off" is the disconnect (which disarms), as before
+  assert.match(APP, /\$\('#killDisarm'\)\.onclick = async \(\) => \{[\r\n]+[\s\S]*?await window\.api\.disconnect\(\);/);
+  // the strings, in both languages
+  const keys = ['kill.routerTitle', 'kill.routerSub', 'kill.routerBlocked', 'kill.routerOff', 'kill.routerArmed'];
+  for (const k of keys) assert.equal(I18N.split(`'${k}':`).length - 1, 2, k);
+  assert.match(I18N, /'kill\.routerBlocked': '⛔ LAN internet is blocked until the VPN is back'/);
+  assert.match(I18N, /'kill\.routerOff': 'Turn the VPN off'/);
+  assert.match(I18N, /'kill\.routerTitle': 'Kill switch'/);
+
+  // the state from a snapshot or a killswitch event paints the banner and the status line
+  const vm = require('node:vm');
+  const els = new Map();
+  const el = (id) => { if (!els.has(id)) els.set(id, { id, textContent: '', hidden: true, className: '' }); return els.get(id); };
+  const calls = [];
+  const ctx = vm.createContext({
+    state: { flavor: 'openwrt', settings: { killSwitch: true }, platform: 'linux', elevated: true },
+    $: (sel) => el(String(sel).replace(/^#/, '')),
+    t: (k) => k,
+    toast: (msg, kind) => calls.push('toast:' + kind + ':' + msg)
+  });
+  vm.runInContext([fnSource('applyKillSwitchState'), fnSource('updateKillStatus')].join('\n'), ctx);
+  ctx.applyKillSwitchState({ enabled: true, armed: true, blocking: true });
+  assert.equal(el('killBanner').hidden, false, 'blocking: the banner shows');
+  assert.equal(ctx.state.killEngaged, true);
+  assert.equal(el('killStatus').textContent, 'kill.routerBlocked');
+  ctx.applyKillSwitchState({ enabled: true, armed: true, blocking: false });
+  assert.equal(el('killBanner').hidden, true);
+  assert.equal(el('killStatus').textContent, 'kill.routerArmed');
+  ctx.applyKillSwitchState({ enabled: true, armed: false, blocking: false });
+  assert.equal(el('killStatus').textContent, '');
+  // the desktop's kill switch events are not the router's
+  ctx.state.flavor = null;
+  ctx.applyKillSwitchState({ enabled: true, armed: true, blocking: true });
+  assert.equal(el('killBanner').hidden, true, 'nothing of the router’s on the desktop');
+  // the event handler: the router's wording in the toast
+  const h = vm.createContext({
+    state: { flavor: 'openwrt', settings: {}, killEngaged: false },
+    $: (sel) => el(String(sel).replace(/^#/, '')),
+    t: (k) => k,
+    toast: (msg, kind) => calls.push('toast:' + kind + ':' + msg),
+    window: { api: {} }
+  });
+  vm.runInContext([fnSource('applyKillSwitchState'), fnSource('updateKillStatus'), handlerSource('onKillSwitch')].join('\n'), h);
+  h.onKillSwitch({ engaged: true, router: true, enabled: true, armed: true, blocking: true });
+  assert.ok(calls.includes('toast:err:kill.routerBlocked'), calls.join(', '));
+  assert.equal(el('killBanner').hidden, false);
+});
+
+/* --------------------------- "Connect when the router starts" (v1.16 B1) --------------------------- */
+
+test('B1: on the router the autoConnect row says what it does — "Connect when the router starts" with its hint; the desktop keeps the old text', () => {
+  for (const k of ['autoconn.routerTitle', 'autoconn.routerSub']) assert.equal(I18N.split(`'${k}':`).length - 1, 2, k);
+  assert.match(I18N, /'autoconn\.routerTitle': 'Connect when the router starts'/);
+  assert.match(I18N, /'autoconn\.routerSub': 'After a reboot or power cut the VPN comes back as it was'/);
+  assert.match(I18N, /'autoconn\.routerTitle': 'با روشن شدن روتر وصل شو'/);
+  assert.match(I18N, /'autoconn\.routerSub': 'بعد از ریبوت یا قطع برق، VPN همان‌طور که بود برمی‌گردد'/);
+  // the desktop strings stay
+  assert.match(I18N, /'autoconn\.title': 'Connect automatically'/);
+  assert.match(I18N, /'autoconn\.title': 'اتصال خودکار'/);
+
+  // applyFlavor relabels the row through data-i18n (so a language switch keeps the wording) — run against a fake page
+  const vm = require('node:vm');
+  const relabelled = {};
+  const node = (id) => ({ id, hidden: false, checked: false, textContent: '', attrs: {},
+    setAttribute(k, v) { this.attrs[k] = v; relabelled[this.id] = v; }, closest() { return rows[this.id] || null; }, querySelector(sel) { return (rows[this.id] && rows[this.id].parts[sel]) || null; } });
+  const rows = {};
+  const row = (id) => { const title = node(id + ':title'); const sub = node(id + ':sub'); rows[id] = { hidden: false, parts: { '.switch-title': title, '.switch-sub': sub }, querySelector(sel) { return this.parts[sel] || null; } }; return rows[id]; };
+  for (const id of ['optSysProxy', 'optLaunchAtLogin', 'optDnsManaged', 'optKillSwitch', 'optAutoConnect']) row(id);
+  const els = {};
+  const $ = (sel) => {
+    const m = /^#([A-Za-z0-9_-]+)(?: (.+))?$/.exec(sel);
+    if (!m) return null;
+    if (m[2]) return node(m[1] + ' ' + m[2]);
+    return els[m[1]] || (els[m[1]] = node(m[1]));
+  };
+  const ctx = vm.createContext({ state: { flavor: 'openwrt', settings: {} }, $, t: (k) => k, renderLanDevices: () => {} });
+  vm.runInContext(fnSource('applyFlavor'), ctx);
+  ctx.applyFlavor();
+  assert.equal(relabelled['optAutoConnect:title'], 'autoconn.routerTitle');
+  assert.equal(relabelled['optAutoConnect:sub'], 'autoconn.routerSub');
+  assert.equal(rows.optAutoConnect.parts['.switch-title'].textContent, 'autoconn.routerTitle');
+  assert.equal(rows.optAutoConnect.hidden, false, 'the row stays');
+  ctx.state.flavor = null;
+  ctx.applyFlavor();
+  assert.equal(relabelled['optAutoConnect:title'], 'autoconn.title', 'the desktop gets its own wording back');
+  assert.equal(relabelled['optAutoConnect:sub'], 'autoconn.sub');
+});
+
+test('S4: the attempt strings exist in both languages, verbatim', () => {
+  for (const k of ['state.reconnectingN', 'state.waiting']) assert.equal(I18N.split(`'${k}':`).length - 1, 2, k);
+  assert.match(I18N, /'state\.reconnectingN': 'Reconnecting… \(attempt \{n\}\)'/);
+  assert.match(I18N, /'state\.reconnectingN': 'اتصال مجدد… \(تلاش \{n\}\)'/);
+  assert.match(I18N, /'state\.waiting': 'Waiting for internet… \(attempt \{n\}\)'/);
+  assert.match(I18N, /'state\.waiting': 'منتظر اینترنت… \(تلاش \{n\}\)'/);
+});
+
 test('the edit form reads an httpupgrade path and Host, and shows a stored raw server as tcp', () => {
   const readServerFields = appFunction('readServerFields');
   const rec = (streamSettings) => ({
