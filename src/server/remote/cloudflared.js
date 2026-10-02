@@ -202,14 +202,18 @@ function createCloudflared(o = {}) {
       await run(DNSMASQ_INIT, ['reload']);
       await run(INIT, ['enable']);
       const r = await run(INIT, ['restart']);
-      log(r.code === 0 ? 'cloudflared: started (protocol http2, direct only — it cannot ride the VPN)' : 'cloudflared: its service did not start: ' + (r.stderr || r.code).toString().trim(), r.code === 0 ? 'info' : 'error');
-      return { ok: r.code === 0 };
+      probed = null;  // a poll while this ran saw it before the restart: not kept for 15 s (v1.16.1)
+      if (r.code === 0) { log('cloudflared: started (protocol http2, direct only — it cannot ride the VPN)'); return { ok: true }; }
+      const error = 'its service did not start: ' + (r.stderr || r.code).toString().trim();
+      log('cloudflared: ' + error, 'error');
+      return { ok: false, error };
     }
     await run(INIT, ['stop']);
     await run(INIT, ['disable']);
     writeDropIn(false);
     await run(DNSMASQ_INIT, ['reload']);
     await bypass(false);
+    probed = null;
     log('cloudflared: stopped');
     return { ok: true };
   }
