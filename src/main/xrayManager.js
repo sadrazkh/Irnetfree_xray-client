@@ -17,6 +17,21 @@ const net = require('net');
 
 /** Upstream's plaintext-outbound refusal (infra/conf/xray.go); the patterniha fork lifts it. */
 const PLAINTEXT_REJECT = /without TLS.*prohibited/i;
+/**
+ * The official core refusing the fork's `finalmask` (measured on 26.3.27 over
+ * all 44 of the owner's patterniha servers: "infra/conf: LengthMin can't be 0").
+ * Only read for a config that carries a finalmask — a freedom fragment can say
+ * the same words about itself (usesFinalmask).
+ */
+const FINALMASK_REJECT = /LengthMin can't be 0|finalmask/i;
+
+/** Does any outbound carry a (non-empty) `streamSettings.finalmask`? */
+function usesFinalmask(config) {
+  return ((config && config.outbounds) || []).some((o) => {
+    const fm = o && o.streamSettings && o.streamSettings.finalmask;
+    return !!fm && typeof fm === 'object' && Object.keys(fm).length > 0;
+  });
+}
 
 class XrayManager {
   constructor(opts = {}) {
@@ -27,8 +42,14 @@ class XrayManager {
     this.extraBinDirs = (opts.extraBinDirs || []).filter(Boolean);
     this.onLog = opts.onLog || (() => {}); // (line, level)
     this.onStatus = opts.onStatus || (() => {}); // ('running'|'stopped'|'error', info)
+    // How long `-test` may take before the config counts as UNVERIFIED (and
+    // starts anyway). 6 s on a desktop; the router asks for ~30 s — on a
+    // Cortex-A7 a slow refusal used to pass as "unverified" and only show up
+    // as a dead connection (field report S2, fix 20).
+    this.testTimeoutMs = opts.testTimeoutMs || 6000;
     this.proc = null;
     this.running = false;
+    this.recent = '';                     // the running core's last output (recentLines)
     this._versions = {};                  // engineId -> version string
     /** Validations that PASSED, keyed by core file + geo files + config bytes (see validationKey). */
     this._validated = new Map();
@@ -237,36 +258,50 @@ class XrayManager {
         if (code === 0) return finish({ ok: true });
         // Older xray builds may not know the -test flag; don't false-reject.
         if (/flag provided but not defined|not defined:.*test|unknown (flag|command)/i.test(out)) {
+          this.onLog(`${path.basename(bin)} does not know -test — the config was not verified before it starts`, 'warn');
           return finish({ ok: true, unverified: true });
         }
         finish({ ok: false, error: extractXrayError(out) || `xray -test exited with code ${code}` });
       });
-      // safety timeout — don't hang the UI if -test never returns
-      setTimeout(() => { if (!settled) { try { proc.kill(); } catch {} finish({ ok: true, unverified: true }); } }, 6000);
+      // safety timeout — don't hang the UI if -test never returns. Said out
+      // loud: a config that is refused after this would otherwise look like a
+      // connection that came up and carries nothing.
+      const limit = this.testTimeoutMs;
+      setTimeout(() => {
+        if (settled) return;
+        try { proc.kill(); } catch {}
+        this.onLog(`${path.basename(bin)} did not finish its config check within ${limit / 1000} s — the config was not verified; starting it anyway`, 'warn');
+        finish({ ok: true, unverified: true });
+      }, limit);
     });
   }
 
   /**
    * Validate on the requested engine. If the OFFICIAL core rejects the config
-   * only because it is plaintext VLESS/Trojan to a public address and the
-   * patterniha fork is installed, validate on the fork instead — that is the one
-   * thing the fork exists for. Returns { ok, engine, error?, fellBack?,
-   * plaintextRejected? } so the caller knows which core to start and can tell
-   * the user to install the fork when it is missing.
+   * only because it is plaintext VLESS/Trojan to a public address — or because
+   * it carries the fork's `finalmask` — and the patterniha fork is installed,
+   * validate on the fork instead: those are the things the fork exists for.
+   * Returns { ok, engine, error?, fellBack?, plaintextRejected?, pattnNeeded? }
+   * so the caller knows which core to start and can tell the user to install
+   * the fork when it is missing (`pattnNeeded`: a finalmask refusal).
    */
   async validateWithFallback(config, engineId) {
     const first = this.resolveEngine(engineId);
     const r = await this.validate(config, first.id);
     if (r.ok) return { ok: true, engine: first.id };
     const plaintextRejected = PLAINTEXT_REJECT.test(r.error || '');
-    if (first.id === 'xray' && plaintextRejected && this.resolveBin('xray-pattn')) {
+    const finalmaskRejected = !plaintextRejected && first.id === 'xray' && FINALMASK_REJECT.test(r.error || '') && usesFinalmask(config);
+    if (first.id === 'xray' && (plaintextRejected || finalmaskRejected) && this.resolveBin('xray-pattn')) {
       const again = await this.validate(config, 'xray-pattn');
       if (again.ok) {
-        this.onLog(`Official core rejects this plaintext config — running it on ${engineLabel('xray-pattn')}`, 'warn');
+        this.onLog(plaintextRejected
+          ? `Official core rejects this plaintext config — running it on ${engineLabel('xray-pattn')}`
+          : `Official core rejects this config's finalmask (${r.error}) — running it on ${engineLabel('xray-pattn')}`, 'warn');
         return { ok: true, engine: 'xray-pattn', fellBack: true };
       }
       return { ok: false, engine: 'xray-pattn', error: again.error, plaintextRejected: false };
     }
+    if (finalmaskRejected) return { ok: false, engine: first.id, error: r.error, plaintextRejected, pattnNeeded: true };
     return { ok: false, engine: first.id, error: r.error, plaintextRejected };
   }
 
@@ -292,12 +327,18 @@ class XrayManager {
 
     this.running = true;
     // keep the most recent lines so a crash-on-start can report the real reason
+    // — and, through recentLines(), a crash after the grace (the router's wait
+    // for the SOCKS port). Only this start's output: a late line from the core
+    // it replaced is not mixed in.
     let recent = '';
     let earlyExit = null;
+    this.recent = '';
+    this._recentOf = proc;
 
     const handleData = (buf, level) => {
       const text = buf.toString('utf8');
       recent = (recent + text).slice(-4000);
+      if (this._recentOf === proc) this.recent = recent;
       for (const line of text.split(/\r?\n/)) {
         if (line.trim()) this.onLog(line.trim(), level);
       }
@@ -340,6 +381,11 @@ class XrayManager {
 
     if (this.running && this.proc === proc) this.onStatus('running', { pid: proc.pid });
     return this.running && this.proc === proc;
+  }
+
+  /** The last `n` non-empty lines the core started last printed (kept after it exited). */
+  recentLines(n = 5) {
+    return String(this.recent || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean).slice(-n);
   }
 
   async stop() {

@@ -478,27 +478,40 @@ test('a drop queued behind a recovery is replayed through the crash window, not 
   assert.ok(s.logs.some(l => /dropped again \d+s after it was rebuilt \(core-exited\)/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
 });
 
-test('a core that dies while its connect is still bringing the gateway up is rebuilt AFTER that connect — never a second gateway beside it', async (t) => {
+test('a core that dies while its connect waits for the SOCKS port fails that connect — no gateway into the dead port, none beside it', async (t) => {
   // The core binds its SOCKS port while the connect waits (waitPort): a kill -9
   // there used to start the recovery's connect at once, beside the first — a
   // second TunOpenwrt built while the first was inside start(), and the loser's
   // undo deleted the shared nft table by name: a gateway "up" with no
-  // exclusions and no QUIC rule.
+  // exclusions and no QUIC rule. v1.16.0 then built the first connect's
+  // gateway anyway, into the dead port, and rebuilt after it. Now (field
+  // report fix 20) a connect by hand fails, with the core's own last lines,
+  // and nothing is rebuilt behind the user's back.
   const slowPort = { waitForLocalPort: () => new Promise((r) => setTimeout(() => r(true), 150)) };
   const s = start({}, slowPort);
   t.after(() => s.service.shutdown());
   const first = s.service.invoke('connect', SERVER.id);
   await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
-  s.state.xray.crash();
-  await first;
-  await until(() => connectedCount(s) === 2, 'the rebuild');
-  assert.equal(s.state.inners.filter(i => i.starts > 0).length, 1, 'one gateway, rebuilt in place — never a second one beside it');
-  assert.equal(s.state.inners.filter(i => i.active).length, 1);
-  assert.equal(s.state.xray.running, true);
+  s.state.xray.crash(['panic: the core went']);
+  await assert.rejects(first, /The core exited before it opened 127\.0\.0\.1:\d+ — the whole-network tunnel was not started\. Its last lines: panic: the core went/);
+  await sleep(100);
+  assert.equal(s.state.events.includes('gateway:start'), false, 'no gateway at all');
+  assert.equal(s.state.xray.starts.length, 1, 'no rebuild of a connect by hand that failed');
+  assert.equal(connectedCount(s), 0);
+});
+
+test('…at boot the same death is retried by the boot loop: one gateway, once a core lives', async (t) => {
+  let calls = 0;
+  let s = null;
+  const dying = { waitForLocalPort: async () => { if (++calls === 1) s.state.xray.crash(['panic: the core went']); return true; } };
+  s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } }, dying);
+  t.after(() => s.service.shutdown());
+  await until(() => connectedCount(s) === 1, 'the boot connect’s second attempt');
   assert.equal(s.state.xray.starts.length, 2);
-  // the rebuild started only once the first connect had finished
+  assert.equal(s.state.inners.filter(i => i.starts > 0).length, 1, 'one gateway — none was built for the dead core');
   const ev = s.state.events.filter(e => e === 'gateway:start' || e === 'xray:start');
-  assert.deepEqual(ev, ['xray:start', 'gateway:start', 'xray:start', 'gateway:start'], ev.join(', '));
+  assert.deepEqual(ev, ['xray:start', 'xray:start', 'gateway:start'], ev.join(', '));
+  assert.ok(!s.logs.some(l => /starting the gateway anyway/.test(l.line)));
 });
 
 test('a drop that lands inside a connect which then comes up whole is not rebuilt', async (t) => {
@@ -508,8 +521,12 @@ test('a drop that lands inside a connect which then comes up whole is not rebuil
   t.after(() => s.service.shutdown());
   const first = s.service.invoke('connect', SERVER.id);
   await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
+  const own = s.state.xray.proc;
   s.state.xray.crash();
-  s.state.xray.running = true;   // …a stale "stopped" of a core already replaced: the connect’s own is up
+  // …a stale "stopped" of a core already replaced: the connect’s own is up (the
+  // real XrayManager never clears `proc` for a late exit of an old one)
+  s.state.xray.running = true;
+  s.state.xray.proc = own;
   await first;
   await sleep(100);
   assert.equal(connectedCount(s), 1);

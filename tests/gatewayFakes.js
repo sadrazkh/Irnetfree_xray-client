@@ -105,16 +105,23 @@ function xrayFactory(state) {
       stops: 0,
       validated: [],
       resolveEngine: (id) => ({ id: id === 'sing-box' || id === 'xray-pattn' ? id : 'xray', bin: '/fake/' + (id || 'xray') }),
-      resolveBin: (id) => '/fake/' + (id || 'xray'),
+      resolveBin: (id) => (state.missingBins && state.missingBins.includes(id || 'xray') ? null : '/fake/' + (id || 'xray')),
       binExists: () => true,
       anyBin: () => '/fake/xray',
-      version: async () => '26.1.1',
+      // `state.coreVersions`: { xray: '24.12.31' } — what `xray version` answers per engine (a current core by default)
+      versionsAsked: [],
+      version: async (id = 'xray') => { x.versionsAsked.push(id); return ((state.coreVersions || {})[id]) || (id === 'xray-pattn' ? '26.9.1' : '26.3.27'); },
       forgetVersions() {},
       validate: async () => ({ ok: true }),
-      async validateWithFallback(config, engine) { x.validated.push({ config, engine }); return { ok: true, engine }; },
+      // `state.check`: what the next validation answers instead of a pass (a refusal, a fallback)
+      async validateWithFallback(config, engine) { x.validated.push({ config, engine }); return state.check ? Object.assign({ engine }, state.check) : { ok: true, engine }; },
+      recent: [],
+      /** The running core's last output lines (XrayManager.recentLines). */
+      recentLines: (n = 5) => x.recent.slice(-n),
       async start(config, engine) {
         if (x.running) await x.stop();
         x.starts.push({ config, engine });
+        x.recent = [];
         state.events.push('xray:start');
         if (state.xrayFails) throw new Error('xray exited on startup (code 23)');
         x.running = true;
@@ -130,7 +137,8 @@ function xrayFactory(state) {
         state.events.push('xray:stop');
         o.onStatus('stopped', { code: 0, signal: 'SIGTERM' });
       },
-      crash() { x.running = false; x.proc = null; o.onStatus('stopped', { code: null, signal: 'SIGKILL' }); },
+      /** The core dying on its own; `lines`: what it printed last. */
+      crash(lines) { if (Array.isArray(lines)) x.recent = lines.slice(); x.running = false; x.proc = null; o.onStatus('stopped', { code: null, signal: 'SIGKILL' }); },
       startTest: async () => { throw new Error('no test cores here'); }
     };
     state.xray = x;
