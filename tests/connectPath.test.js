@@ -206,11 +206,15 @@ test('both mirrors count an edit of a server the live connection dials as a pend
   assert.equal(mainIds, serviceIds);
   const [[, mainKeys], [, serviceKeys]] = both('function pendingKeys() {');
   assert.equal(mainKeys, serviceKeys);
+  // a rename or a Save with nothing changed is no pending edit, in either (review of v1.16.1)
+  const [[, mainDial], [, serviceDial]] = both('function dialChanged(a, b) {');
+  assert.equal(mainDial, serviceDial);
+  assert.match(mainDial, /Object\.assign\(\{\}, s, \{ name: null, _edited: null \}\)/);
   assert.match(mainKeys, /if \(appliedSettings && serverEditPending\) keys\.push\('servers'\);/);
   for (const [label, src] of [['main.js', MAIN], ['service.js', SERVICE]]) {
     assert.match(src, /appliedSettings = snapshotApplied\(getSettings\(\)\);\n\s*liveServerIds = planServerIds\(plan\);\n\s*serverEditPending = false;/, `${label}: the connect records what it dials`);
     const upd = slice(src, label, "'servers:update'", 'return { ok: true, server: servers[idx], servers, live, pendingReconnect: pendingKeys() };');
-    assert.match(upd, /const live = !!appliedSettings && liveServerIds\.has\(id\);\n\s*if \(live\) serverEditPending = true;/, label);
+    assert.match(upd, /const live = !!appliedSettings && liveServerIds\.has\(id\) && dialChanged\(before, servers\[idx\]\);\n\s*if \(live\) serverEditPending = true;/, label);
   }
 });
 

@@ -129,7 +129,7 @@ test('fix 18: editing the live server is a pending change — reported, and a Co
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', SERVER.id);
   assert.deepEqual(await s.service.invoke('settings:pending'), []);
-  const r = await s.service.invoke('servers:update', { id: SERVER.id, fields: { name: 'ci-upstream (edited)' } });
+  const r = await s.service.invoke('servers:update', { id: SERVER.id, fields: { port: 1081 } });
   assert.equal(r.ok, true);
   assert.equal(r.live, true, 'the answer says the edited server is in the live connection');
   assert.deepEqual(r.pendingReconnect, ['servers']);
@@ -144,6 +144,30 @@ test('fix 18: editing the live server is a pending change — reported, and a Co
   assert.equal((await s.service.invoke('connect', SERVER.id)).already, true, 'and the next Connect is the no-op again');
 });
 
+test('fix 18: a rename of the live server, or a Save with nothing changed (the edit dialog sends every field), is no pending change — the next Connect stays the no-op', async (t) => {
+  // review of v1.16.1: either one asked for a reconnect, and a LuCI Connect then
+  // rebuilt the gateway — a 20-40 s LAN outage — for a config that did not change
+  const { editFields } = require('../src/main/parser');
+  const s = H.start();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const stored = (await s.service.invoke('servers:list')).find((x) => x.id === SERVER.id);
+  const same = await s.service.invoke('servers:update', { id: SERVER.id, fields: editFields(stored) });
+  assert.equal(same.ok, true);
+  assert.equal(same.live, false, 'nothing that is dialled changed');
+  assert.deepEqual(same.pendingReconnect, []);
+  const renamed = await s.service.invoke('servers:update', { id: SERVER.id, fields: { name: 'ci-upstream (renamed)' } });
+  assert.equal(renamed.server.name, 'ci-upstream (renamed)', 'the rename is saved');
+  assert.equal(renamed.live, false, 'a name is never in the config');
+  assert.deepEqual(await s.service.invoke('settings:pending'), []);
+  assert.equal((await s.service.invoke('connect', SERVER.id)).already, true);
+  assert.equal(connectedCount(s), 1);
+  // …while a change of what is dialled still is one
+  const moved = await s.service.invoke('servers:update', { id: SERVER.id, fields: { port: 1081 } });
+  assert.equal(moved.live, true);
+  assert.deepEqual(moved.pendingReconnect, ['servers']);
+});
+
 test('fix 18: editing a server the live connection does not use changes nothing pending; a settings key and an edit are both reported', async (t) => {
   const s = H.start();
   t.after(() => s.service.shutdown());
@@ -152,7 +176,7 @@ test('fix 18: editing a server the live connection does not use changes nothing 
   assert.equal(r.live, false);
   assert.deepEqual(r.pendingReconnect, []);
   assert.equal((await s.service.invoke('connect', SERVER.id)).already, true);
-  await s.service.invoke('servers:update', { id: SERVER.id, fields: { name: 'x' } });
+  await s.service.invoke('servers:update', { id: SERVER.id, fields: { address: '192.0.2.12' } });
   await s.service.invoke('settings:set', { routingMode: 'bypass-ir' });
   assert.deepEqual((await s.service.invoke('settings:pending')).sort(), ['routingMode', 'servers']);
   await s.service.invoke('vpn:reconnect');
@@ -163,11 +187,11 @@ test('fix 18: a hop of the live chain counts as the live connection; nothing is 
   const chain = { id: 'ch-1', name: 'two hops', members: [SERVER.id, SERVER_B.id] };
   const s = H.start({ chains: [chain] });
   t.after(() => s.service.shutdown());
-  assert.equal((await s.service.invoke('servers:update', { id: SERVER_B.id, fields: { name: 'b' } })).live, false, 'disconnected: nothing is live');
+  assert.equal((await s.service.invoke('servers:update', { id: SERVER_B.id, fields: { port: 1082 } })).live, false, 'disconnected: nothing is live');
   assert.deepEqual(await s.service.invoke('settings:pending'), []);
   await s.service.invoke('connect', chain.id);
   assert.equal(connectedCount(s), 1);
-  const r = await s.service.invoke('servers:update', { id: SERVER_B.id, fields: { name: 'second hop' } });
+  const r = await s.service.invoke('servers:update', { id: SERVER_B.id, fields: { port: 1083 } });
   assert.equal(r.live, true);
   assert.deepEqual(r.pendingReconnect, ['servers']);
   await s.service.invoke('disconnect');
