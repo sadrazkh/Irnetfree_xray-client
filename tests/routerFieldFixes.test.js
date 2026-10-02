@@ -93,6 +93,58 @@ test('fix 9: a router’s own backup restored on it changes none of those keys �
   assert.ok(!s.logs.some(l => /Backup restored on a router/.test(l.line)), lines(s).join('\n'));
 });
 
+/* ----------------------------- fix 18: a server edit is not live until a reconnect ----------------------------- */
+
+test('fix 18: editing the live server is a pending change — reported, and a Connect on it rebuilds instead of "already connected"', async (t) => {
+  const s = H.start();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  assert.deepEqual(await s.service.invoke('settings:pending'), []);
+  const r = await s.service.invoke('servers:update', { id: SERVER.id, fields: { name: 'ci-upstream (edited)' } });
+  assert.equal(r.ok, true);
+  assert.equal(r.live, true, 'the answer says the edited server is in the live connection');
+  assert.deepEqual(r.pendingReconnect, ['servers']);
+  assert.deepEqual(await s.service.invoke('settings:pending'), ['servers']);
+  assert.deepEqual((await s.service.invoke('app:init')).pendingReconnect, ['servers']);
+  // the Connect the user presses to apply it (web UI or LuCI) is not a silent no-op any more
+  const again = await s.service.invoke('connect', SERVER.id);
+  assert.notEqual(again.already, true);
+  assert.equal(connectedCount(s), 2, 'rebuilt with the edit');
+  assert.equal(s.state.xray.starts.at(-1).config.outbounds.length > 0, true);
+  assert.deepEqual(await s.service.invoke('settings:pending'), [], 'the rebuild applied it');
+  assert.equal((await s.service.invoke('connect', SERVER.id)).already, true, 'and the next Connect is the no-op again');
+});
+
+test('fix 18: editing a server the live connection does not use changes nothing pending; a settings key and an edit are both reported', async (t) => {
+  const s = H.start();
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  const r = await s.service.invoke('servers:update', { id: SERVER_B.id, fields: { name: 'other' } });
+  assert.equal(r.live, false);
+  assert.deepEqual(r.pendingReconnect, []);
+  assert.equal((await s.service.invoke('connect', SERVER.id)).already, true);
+  await s.service.invoke('servers:update', { id: SERVER.id, fields: { name: 'x' } });
+  await s.service.invoke('settings:set', { routingMode: 'bypass-ir' });
+  assert.deepEqual((await s.service.invoke('settings:pending')).sort(), ['routingMode', 'servers']);
+  await s.service.invoke('vpn:reconnect');
+  assert.deepEqual(await s.service.invoke('settings:pending'), []);
+});
+
+test('fix 18: a hop of the live chain counts as the live connection; nothing is pending while disconnected', async (t) => {
+  const chain = { id: 'ch-1', name: 'two hops', members: [SERVER.id, SERVER_B.id] };
+  const s = H.start({ chains: [chain] });
+  t.after(() => s.service.shutdown());
+  assert.equal((await s.service.invoke('servers:update', { id: SERVER_B.id, fields: { name: 'b' } })).live, false, 'disconnected: nothing is live');
+  assert.deepEqual(await s.service.invoke('settings:pending'), []);
+  await s.service.invoke('connect', chain.id);
+  assert.equal(connectedCount(s), 1);
+  const r = await s.service.invoke('servers:update', { id: SERVER_B.id, fields: { name: 'second hop' } });
+  assert.equal(r.live, true);
+  assert.deepEqual(r.pendingReconnect, ['servers']);
+  await s.service.invoke('disconnect');
+  assert.deepEqual(await s.service.invoke('settings:pending'), [], 'gone with the connection');
+});
+
 /* ----------------------------- fix 8: "the whole-network tunnel", not "the gateway" ----------------------------- */
 
 test('fix 8: no sing-box on the router — the refusal names the whole-network tunnel, in both languages', async (t) => {

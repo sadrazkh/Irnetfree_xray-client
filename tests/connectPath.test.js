@@ -191,6 +191,22 @@ test('both mirrors re-apply the DNS guard only over a core that is actually runn
   assert.match(isActive(SERVICE, 'service.js'), /&& !!xray\?\.running$/);
 });
 
+/* ------------------- fix 18: a server edit waits for a reconnect ------------------- */
+
+test('both mirrors count an edit of a server the live connection dials as a pending change (the renderer is shared)', () => {
+  // driven for real on the router in routerFieldFixes.test.js; the desktop must answer servers:update the same way
+  const [[, mainIds], [, serviceIds]] = both('function planServerIds(plan) {');
+  assert.equal(mainIds, serviceIds);
+  const [[, mainKeys], [, serviceKeys]] = both('function pendingKeys() {');
+  assert.equal(mainKeys, serviceKeys);
+  assert.match(mainKeys, /if \(appliedSettings && serverEditPending\) keys\.push\('servers'\);/);
+  for (const [label, src] of [['main.js', MAIN], ['service.js', SERVICE]]) {
+    assert.match(src, /appliedSettings = snapshotApplied\(getSettings\(\)\);\n\s*liveServerIds = planServerIds\(plan\);\n\s*serverEditPending = false;/, `${label}: the connect records what it dials`);
+    const upd = slice(src, label, "'servers:update'", 'return { ok: true, server: servers[idx], servers, live, pendingReconnect: pendingKeys() };');
+    assert.match(upd, /const live = !!appliedSettings && liveServerIds\.has\(id\);\n\s*if \(live\) serverEditPending = true;/, label);
+  }
+});
+
 /* ------------------------------ A3: the live NIC ------------------------------ */
 
 test('every connect reads the NIC again — a live tunnel keeps its old name only when the read names nothing usable', () => {
