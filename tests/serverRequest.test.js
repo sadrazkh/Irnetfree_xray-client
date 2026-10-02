@@ -146,3 +146,58 @@ test('--token-file: the token is read from (or made in) the file, and never prin
   assert.doesNotMatch(srv2.out(), new RegExp(made));
   assert.match(await raw(srv2.port, request('/?token=' + made)), /^HTTP\/1\.1 200 /);
 });
+
+/* ------------------------- S5 (v1.16): the service never stays dead ------------------------- */
+
+const child = require('./serverChild');
+
+test('S5: an uncaught exception ends in an orderly exit (code 1) that procd restarts, said with the irnetfree prefix', async (t) => {
+  const dir = child.tempDir();
+  const srv = await child.startServer(dir, [], { IRNETFREE_TEST_THROW_MS: '300' });
+  t.after(() => child.stop(srv, dir));
+  const exit = await Promise.race([srv.exit, new Promise((_, rej) => setTimeout(() => rej(new Error('the process did not exit:\n' + srv.out())), 20000))]);
+  assert.equal(exit.code, 1, srv.out());
+  assert.match(srv.out(), /^irnetfree: \[fatal\] Error: IRNETFREE_TEST_THROW_MS/m, srv.out());
+  assert.match(srv.out(), /shutting down for procd to restart/);
+});
+
+test('S5: every line the server writes starts with irnetfree: (the banner too) — and the token is never among them', async (t) => {
+  const dir = child.tempDir();
+  const file = path.join(dir, 'token');
+  fs.writeFileSync(file, 'deadbeefdeadbeefdeadbeefdeadbeef\n');
+  const srv = await child.startServer(dir, ['--token-file', file]);
+  t.after(() => child.stop(srv, dir));
+  await raw(srv.port, request('//['));   // a 400 the server logs nothing for; the banner is what we read
+  const lines = srv.out().split(/\r?\n/).filter((l) => l.length);
+  assert.ok(lines.length >= 4, srv.out());
+  for (const l of lines) assert.match(l, /^irnetfree: /, `unprefixed line: ${JSON.stringify(l)}`);
+  assert.ok(!lines.some((l) => l.trim() === 'irnetfree:'), 'no empty prefixed lines');
+  assert.doesNotMatch(srv.out(), /deadbeefdeadbeef/);
+  assert.match(srv.out(), /irnetfree: {3}Listening: http:\/\/127\.0\.0\.1:\d+\//);
+});
+
+test('S5: the token is compared in constant time — by behaviour: the right one 200, a wrong one of the same length 401, a wrong length 401', async (t) => {
+  const dir = child.tempDir();
+  const TOKEN = '0123456789abcdef0123456789abcdef';
+  const srv = await child.startServer(dir, ['--token', TOKEN]);
+  t.after(() => child.stop(srv, dir));
+  assert.match(await raw(srv.port, request('/?token=' + TOKEN)), /^HTTP\/1\.1 200 /);
+  assert.match(await raw(srv.port, request('/?token=' + TOKEN.slice(0, -1) + '0')), /^HTTP\/1\.1 401 /, 'same length, last character off');
+  assert.match(await raw(srv.port, request('/?token=' + TOKEN.slice(0, 8))), /^HTTP\/1\.1 401 /, 'a prefix of it');
+  assert.match(await raw(srv.port, request('/?token=' + TOKEN + '0')), /^HTTP\/1\.1 401 /, 'one character more');
+  assert.match(await raw(srv.port, request('/')), /^HTTP\/1\.1 401 /);
+  const src = fs.readFileSync(SERVER, 'utf8');
+  assert.match(src, /function safeEqual\(a, b\)[\s\S]*crypto\.timingSafeEqual\(x, y\)/);
+  assert.match(src, /return safeEqual\(q, TOKEN\) \|\| safeEqual\(h, TOKEN\);/);
+});
+
+test('S5: app:quit on the headless service answers, then the process exits (procd restarts it) — never "quitting but alive"', async (t) => {
+  const dir = child.tempDir();
+  const srv = await child.startServer(dir);
+  t.after(() => child.stop(srv, dir));
+  const r = await child.request(srv.port, { method: 'POST', path: '/rpc', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: 'app:quit' }) });
+  assert.equal(r.status, 200, r.body);
+  assert.deepEqual(r.json, { result: { ok: true, exiting: true } });
+  const exit = await Promise.race([srv.exit, new Promise((_, rej) => setTimeout(() => rej(new Error('still alive after app:quit:\n' + srv.out())), 15000))]);
+  assert.equal(exit.code, 0, srv.out());
+});

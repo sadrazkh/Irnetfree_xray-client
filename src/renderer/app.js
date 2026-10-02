@@ -346,6 +346,10 @@ async function init() {
   updateKillStatus();
   applyFlavor();
   renderPendingBanner();
+  // The connection as it IS (S1): a page that loads while the tunnel is up
+  // starts connected, with the real uptime — not on "disconnected" until an
+  // event that never comes on a stable tunnel.
+  if (data.conn) applyConnSnapshot(data.conn);
 
   // app version (Settings → About, and small under the logo) + xray-core version
   $('#appVersion').textContent = 'v' + (state.version || '?');
@@ -878,6 +882,14 @@ $('#optLaunchAtLogin').onchange = async () => {
 function updateKillStatus() {
   const el = $('#killStatus');
   if (!el) return;
+  if (state.flavor === 'openwrt') {
+    // the router's: armed — and whether it blocks right now — comes from the service (a snapshot, a killswitch event)
+    const ks = state.killSwitch;
+    if (!ks || !ks.armed) { el.textContent = ''; el.className = 'tun-status'; return; }
+    el.textContent = t(ks.blocking ? 'kill.routerBlocked' : 'kill.routerArmed');
+    el.className = 'tun-status ' + (ks.blocking ? 'warn' : 'ok');
+    return;
+  }
   if (!state.settings.killSwitch) { el.textContent = ''; el.className = 'tun-status'; return; }
   if (state.platform !== 'win32') { el.textContent = t('kill.winOnly'); el.className = 'tun-status warn'; return; }
   if (!state.elevated) { el.textContent = t('kill.needAdmin'); el.className = 'tun-status warn'; return; }
@@ -921,11 +933,33 @@ function applyFlavor() {
   $('#insGatewayRow').hidden = !rt;
   // ...and "DNS managed by the app": on a router the service forces it on (the
   // core must answer every port-53 packet from the LAN), so the switch would lie
-  for (const id of ['optSysProxy', 'optLaunchAtLogin', 'optKillSwitch', 'optDnsManaged']) {
+  for (const id of ['optSysProxy', 'optLaunchAtLogin', 'optDnsManaged']) {
     const row = $('#' + id).closest('.switch-row');
     if (row) row.hidden = rt;
   }
-  $('#killStatus').hidden = rt;
+  // The kill switch row stays on the router, with the router's wording (K1):
+  // while the VPN is on and the tunnel is down, the LAN has no internet. The
+  // banner's wording and its "off" action follow (K4): turning the VPN off
+  // (= disconnect) is what disarms it. Relabelled through data-i18n so a
+  // language switch keeps the wording.
+  const relabel = (el, key) => { if (!el) return; el.setAttribute('data-i18n', key); el.textContent = t(key); };
+  const ksRow = $('#optKillSwitch').closest('.switch-row');
+  if (ksRow) {
+    ksRow.hidden = false;
+    relabel(ksRow.querySelector('.switch-title'), rt ? 'kill.routerTitle' : 'kill.title');
+    relabel(ksRow.querySelector('.switch-sub'), rt ? 'kill.routerSub' : 'kill.sub');
+  }
+  relabel($('#killBanner .kill-banner-text'), rt ? 'kill.routerBlocked' : 'kill.blocked');
+  relabel($('#killDisarm'), rt ? 'kill.routerOff' : 'kill.disarm');
+  $('#killStatus').hidden = false;
+  // "Connect automatically" is, on a router, "Connect when the router starts":
+  // after a reboot or a power cut the VPN comes back as it was (B1) — the same
+  // setting, named for what it does there
+  const acRow = $('#optAutoConnect').closest('.switch-row');
+  if (acRow) {
+    relabel(acRow.querySelector('.switch-title'), rt ? 'autoconn.routerTitle' : 'autoconn.title');
+    relabel(acRow.querySelector('.switch-sub'), rt ? 'autoconn.routerSub' : 'autoconn.sub');
+  }
   $('#tunBackendRow').hidden = rt;
   $('#tunAppRow').hidden = rt;
   $('#gwQuicRow').hidden = !rt;
@@ -1944,7 +1978,8 @@ function connectGlyph(btn) {
  */
 let uptimeTimer = null;
 let uptimeFrom = 0;
-function startUptime(on) {
+/** `from`: when the service says the tunnel came up (a snapshot) — else now. */
+function startUptime(on, from) {
   const el = $('#tbUptime');
   const meta = $('#connMeta');
   if (!on) {
@@ -1954,8 +1989,11 @@ function startUptime(on) {
     if (meta) meta.textContent = state.xrayVersion ? 'core ' + state.xrayVersion : '';
     return;
   }
-  if (uptimeTimer) return;              // already counting this connection
-  uptimeFrom = Date.now();
+  if (uptimeTimer) {                    // already counting this connection
+    if (from) uptimeFrom = from;        // …but the service knows better when it came up
+    return;
+  }
+  uptimeFrom = from || Date.now();
   const tick = () => {
     const s = Math.max(0, Math.floor((Date.now() - uptimeFrom) / 1000));
     const hh = String(Math.floor(s / 3600)).padStart(2, '0');
@@ -1967,6 +2005,75 @@ function startUptime(on) {
   };
   tick();
   uptimeTimer = setInterval(tick, 1000);
+}
+
+/* ---------------------- the connection as one fact (snapshot) ---------------------- */
+
+/**
+ * What the service says the connection IS — app:init.conn on every page load
+ * and the first event of every events (re)connect (web-api.js). Applied
+ * idempotently: no toast, no log line, the uptime from the service's `since`.
+ * A phone that reloads a background tab used to see "disconnected" while the
+ * tunnel was up, with no event ever coming to correct it (v1.16 S1).
+ */
+function applyConnSnapshot(conn) {
+  if (!conn || !conn.state) return;
+  const id = conn.serverId || null;
+  state.wasReconnecting = false;
+  if (conn.state === 'connected') {
+    state.connected = true;
+    state.connecting = false;
+    state.activeServerId = id;
+    state.activeEngine = conn.engine || '';
+    setConnUI('connected', id);
+    startUptime(true, conn.since || null);
+  } else if (conn.state === 'connecting') {
+    state.connected = false;
+    state.connecting = true;
+    setConnUI('connecting', id || state.activeServerId);
+  } else if (conn.state === 'reconnecting' || conn.state === 'waiting') {
+    state.connected = false;
+    state.connecting = true;
+    state.wasReconnecting = conn.state === 'reconnecting';
+    state.reconnectReason = conn.reason || '';
+    setConnUI('connecting', id || state.activeServerId);
+    $('#connState').textContent = attemptText(conn.state, conn.attempt);
+  } else if (conn.state === 'error') {
+    state.connected = false;
+    state.connecting = false;
+    state.activeServerId = null;
+    state.activeEngine = '';
+    setConnUI('error');
+  } else {
+    state.connected = false;
+    state.connecting = false;
+    state.activeServerId = null;
+    state.activeEngine = '';
+    setConnUI('disconnected');
+  }
+  applyKillSwitchState(conn.killSwitch);
+  renderServers();
+  renderPicker();
+}
+
+/** "Reconnecting… (attempt n)" / "Waiting for internet… (attempt n)" — the router's two in-between states. */
+function attemptText(kind, n) {
+  return t(kind === 'waiting' ? 'state.waiting' : 'state.reconnectingN').replace('{n}', String(n || 1));
+}
+
+/**
+ * The router's kill switch, from a snapshot or a killswitch event:
+ * {enabled, armed, blocking} — the banner shows while it blocks the LAN
+ * (the tunnel is down and the VPN is meant to be on; "Turn the VPN off" =
+ * disconnect, which disarms it).
+ */
+function applyKillSwitchState(ks) {
+  if (!ks || typeof ks !== 'object' || state.flavor !== 'openwrt') return;
+  state.killSwitch = ks;
+  state.killEngaged = !!ks.blocking;
+  const banner = $('#killBanner');
+  if (banner) banner.hidden = !ks.blocking;
+  if (typeof updateKillStatus === 'function') updateKillStatus();
 }
 
 /* ---------------------------- the traffic path ---------------------------- */
@@ -2233,7 +2340,10 @@ window.api.onStatus((d) => {
     setTimeout(() => checkIp(3, true), 1200);
     // auto-measure TCP ping + real delay for the active config so the home
     // cards show real numbers (real delay = proof the config actually works)
-    setTimeout(() => quickPing(d.serverId), 700);
+    // — not on a router: a test core beside the live one on every connect
+    // (and every recovery) is memory a 512 MB box does not have (S6); the
+    // ⚡ button still measures on request
+    if (state.flavor !== 'openwrt') setTimeout(() => quickPing(d.serverId), 700);
   } else if (d.state === 'connecting') {
     state.connecting = true;
     setConnUI('connecting', d.serverId);
@@ -2265,7 +2375,17 @@ window.api.onStatus((d) => {
     state.wasReconnecting = true;
     state.reconnectReason = d.reason || '';
     setConnUI('connecting', d.serverId || state.activeServerId);
-    $('#connState').textContent = t(reconnectingKey());
+    // the router says which attempt this is, and keeps saying so through the
+    // backoff (S4); the desktop keeps its own wording
+    $('#connState').textContent = state.flavor === 'openwrt' && d.attempt ? attemptText('reconnecting', d.attempt) : t(reconnectingKey());
+  } else if (d.state === 'waiting') {
+    // the router's boot connect waiting for the WAN (B3): between its
+    // retries, and during one — never "error" until it comes up
+    state.connected = false;
+    state.connecting = true;
+    state.wasReconnecting = false;
+    setConnUI('connecting', d.serverId || state.activeServerId);
+    $('#connState').textContent = attemptText('waiting', d.attempt);
   } else if (d.state === 'reconnect-failed') {
     // every retry is spent — the user has to act
     state.connecting = false;
@@ -2305,7 +2425,10 @@ window.api.onStatus((d) => {
 });
 
 window.api.onXrayStatus((d) => {
-  if (d.state === 'stopped' && state.connected) {
+  // `rebuilding`: the core died under a live connection and the service is
+  // about to rebuild it — its "reconnecting" follows at once; painting
+  // "disconnected" with a red toast here was the whole backoff's display (S4)
+  if (d.state === 'stopped' && state.connected && !d.rebuilding) {
     state.connected = false;
     setConnUI('disconnected');
     renderPendingBanner();
@@ -2337,6 +2460,9 @@ function reportStoreError(d) {
   toast(d.recovered ? t('store.recovered') : t('store.lost'), 'err', 12000);
 }
 window.api.onStoreError(reportStoreError);
+// the headless server replays the connection as the first event of every
+// events (re)connect; the desktop bridge has no such channel (app:init is enough there)
+if (window.api.onConnSnapshot) window.api.onConnSnapshot(applyConnSnapshot);
 
 /* ----------------------------- kill switch ----------------------------- */
 window.api.onKillSwitch((d) => {
@@ -2344,6 +2470,13 @@ window.api.onKillSwitch((d) => {
   state.killEngaged = !!(d && d.engaged);
   const banner = $('#killBanner');
   if (banner) banner.hidden = !state.killEngaged;
+  // the router's switch carries its whole state (armed, blocking): the status
+  // line follows it, and the toast says what it blocks — the LAN
+  if (d && d.router) {
+    applyKillSwitchState(d);
+    if (state.killEngaged && !wasEngaged) toast(t('kill.routerBlocked'), 'err');
+    return;
+  }
   // on the way in only: a second drop under a switch already closed is not news
   if (state.killEngaged && !wasEngaged) toast(t('kill.blocked'), 'err');
 });

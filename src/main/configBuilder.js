@@ -571,6 +571,7 @@ function routingStrategy(s) {
   return s.dnsManaged === false ? 'IPIfNonMatch' : 'IPOnDemand';
 }
 
+
 const SETTINGS_DEFAULTS = {
   socksPort: 10808,
   httpPort: 10809,

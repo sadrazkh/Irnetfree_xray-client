@@ -142,6 +142,8 @@ test('start: nft table, then the bypass rules, then sing-box, then verify — in
     'ip -6 rule del pref 8998',
     'ip -4 rule del pref 8999',
     'ip -6 rule del pref 8999',
+    'ip -4 rule del pref 8997',                                            // the remote control's destination rules (v1.16) — a killed run's too
+    'ip -6 rule del pref 8997',
     'ip -4 rule add not dport 53 pref 8998 lookup main suppress_prefixlength 0',   // main-first BEFORE the bypass, both before sing-box; DNS never shortcut
     'ip -6 rule add not dport 53 pref 8998 lookup main suppress_prefixlength 0',
     'ip -4 rule add pref 8999 fwmark 0x1f1e lookup main',
@@ -229,11 +231,81 @@ test('stop: sing-box first, then — once its device is gone — the rules and t
     'ip -6 rule del pref 8998',
     'ip -4 rule del pref 8999',
     'ip -6 rule del pref 8999',
+    'ip -4 rule del pref 8997',
+    'ip -6 rule del pref 8997',
     'nft delete table inet irnetfree'
   ]);
   lines.length = 0;
   await tun.stop();
   assert.deepEqual(lines, []);
+});
+
+/* ------------------- the remote control's destinations never ride the tunnel (v1.16 A10) ------------------- */
+
+test('setBypass while up adds one `to <cidr> lookup main` rule per destination (pref 8997, v4 and v6); a new list removes the old ones; stop sweeps them', async () => {
+  const { tun, inner, lines } = make();
+  await tun.setBypass(['203.0.113.7']);
+  assert.equal(lines.length, 0, 'nothing runs before the tunnel is up — remembered only');
+  await tun.start(10808, [], [], {});
+  assert.ok(lines.includes('ip -4 rule add pref 8997 to 203.0.113.7/32 lookup main'), 'the remembered destination is laid with the gateway: ' + lines.join('\n'));
+  const calls = inner.calls.length;
+  lines.length = 0;
+  await tun.setBypass(['203.0.113.7/32', '2001:db8::7', 'not an address', '198.51.100.0/24']);
+  assert.deepEqual(lines, [
+    'ip -6 rule add pref 8997 to 2001:db8::7/128 lookup main',
+    'ip -4 rule add pref 8997 to 198.51.100.0/24 lookup main'
+  ], 'only what is new is added; a bare address is /32 or /128; junk never reaches ip');
+  lines.length = 0;
+  await tun.setBypass(['198.51.100.0/24']);
+  assert.deepEqual(lines, [
+    'ip -4 rule del pref 8997 to 203.0.113.7/32 lookup main',
+    'ip -6 rule del pref 8997 to 2001:db8::7/128 lookup main'
+  ], 'what left the list is removed, what stayed is left alone');
+  assert.equal(inner.calls.length, calls, 'sing-box untouched');
+  assert.deepEqual(tun.bypassCidrs, ['198.51.100.0/24']);
+  lines.length = 0;
+  await tun.stop();
+  assert.ok(lines.includes('ip -4 rule del pref 8997') && lines.includes('ip -6 rule del pref 8997'), 'stop sweeps every 8997 rule: ' + lines.join('\n'));
+  // a rule that will not add does not fail the others, and is said
+  const bad = make({ answers: [[/^ip rule show/, RULES_OK], [/^ip -4 rule add pref 8997 to 203/, new Error('RTNETLINK answers: Invalid argument')]] });
+  await bad.tun.start(10808, [], [], {});
+  await bad.tun.setBypass(['203.0.113.7', '203.0.113.8']);
+  assert.ok(bad.lines.includes('ip -4 rule add pref 8997 to 203.0.113.8/32 lookup main'));
+  assert.ok(bad.logs.some(([lvl, l]) => lvl === 'error' && /203\.0\.113\.7\/32/.test(l) && /Invalid argument/.test(l)), JSON.stringify(bad.logs));
+  assert.equal(bad.tun.active, true, 'the gateway is not torn down for it');
+});
+
+test('M1: the 8997 sweep deletes until the kernel has none left — not at most four per family (the two singletons keep their bound)', async () => {
+  let v4 = 0;
+  const { tun, lines } = make({ answers: [
+    [/^ip rule show/, RULES_OK],
+    [/^ip -4 rule del pref 8997$/, () => (++v4 <= 6 ? '' : new Error('RTNETLINK answers: No such file or directory'))]
+  ] });
+  await tun.start(10808, [], [], {});
+  lines.length = 0; v4 = 0;
+  await tun.stop();
+  assert.equal(lines.filter(l => l === 'ip -4 rule del pref 8997').length, 7, 'six deletions and the one that says "none"');
+  assert.equal(lines.filter(l => l === 'ip -6 rule del pref 8997').length, 1);
+  assert.ok(lines.filter(l => l === 'ip -4 rule del pref 8998').length <= 4);
+  // bounded all the same: a kernel that keeps saying yes cannot hold the teardown forever
+  const forever = make({ answers: [[/^ip rule show/, RULES_OK], [/^ip -4 rule del pref 8997$/, '']] });
+  await forever.tun.start(10808, [], [], {});
+  forever.lines.length = 0;
+  await forever.tun.stop();
+  assert.equal(forever.lines.filter(l => l === 'ip -4 rule del pref 8997').length, 64);
+});
+
+test('openwrtNet: the remote bypass rule argv and the cidr normalisation', () => {
+  assert.deepEqual(net.remoteBypassRuleArgs('add', '203.0.113.7/32'), ['-4', 'rule', 'add', 'pref', '8997', 'to', '203.0.113.7/32', 'lookup', 'main']);
+  assert.deepEqual(net.remoteBypassRuleArgs('del', '2001:db8::/64'), ['-6', 'rule', 'del', 'pref', '8997', 'to', '2001:db8::/64', 'lookup', 'main']);
+  assert.throws(() => net.remoteBypassRuleArgs('flush', '1.2.3.4/32'), /verb/);
+  assert.deepEqual(net.remoteBypassSweepArgs(), [['-4', 'rule', 'del', 'pref', '8997'], ['-6', 'rule', 'del', 'pref', '8997']]);
+  assert.equal(net.normalizeCidr('203.0.113.7'), '203.0.113.7/32');
+  assert.equal(net.normalizeCidr(' 203.0.113.0/24 '), '203.0.113.0/24');
+  assert.equal(net.normalizeCidr('2001:DB8::7'), '2001:db8::7/128');
+  assert.equal(net.normalizeCidr('2001:db8::/64'), '2001:db8::/64');
+  for (const bad of ['', null, 'relay.example', '203.0.113.7/33', '2001:db8::/129', '1.2.3', '1.2.3.4/x', '::ffff:1.2.3.4/200']) assert.equal(net.normalizeCidr(bad), null, String(bad));
+  assert.deepEqual(net.normalizeCidrs(['1.1.1.1', '1.1.1.1/32', 'x', '2606:4700::/32']), ['1.1.1.1/32', '2606:4700::/32'], 'deduplicated, order kept');
 });
 
 test('deleting by preference repeats until the kernel has none left — a doubled or older rule cannot survive', async () => {
@@ -305,6 +377,8 @@ test('cleanupSync: the synchronous best effort for process exit, inner first, th
     'SYNC ip -6 rule del pref 8998',
     'SYNC ip -4 rule del pref 8999',
     'SYNC ip -6 rule del pref 8999',
+    'SYNC ip -4 rule del pref 8997',
+    'SYNC ip -6 rule del pref 8997',
     'SYNC nft delete table inet irnetfree'
   ]);
   // an instance that never laid anything has nothing to clean — and must not
@@ -421,6 +495,7 @@ test('clearLeftovers: what a killed service left (rules, table) goes at the next
   assert.deepEqual(lines, [
     'ip link show IRNetFree',
     'ip -4 rule del pref 8998', 'ip -6 rule del pref 8998', 'ip -4 rule del pref 8999', 'ip -6 rule del pref 8999',
+    'ip -4 rule del pref 8997', 'ip -6 rule del pref 8997',
     'nft delete table inet irnetfree'
   ]);
   const held = make();

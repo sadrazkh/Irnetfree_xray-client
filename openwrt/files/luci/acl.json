@@ -1,8 +1,13 @@
 {
 	"luci-app-irnetfree": {
-		"description": "Grant access to the IRNetFree page",
+		"description": "IRNetFree: status, settings and remote access",
 		"read": {
+			"ubus": { "luci.irnetfree": [ "status", "configs", "settings_get", "devices", "log", "diagnostics", "remote_get", "remote_status" ] },
 			"file": { "/etc/irnetfree/token": [ "read" ] },
+			"uci": [ "irnetfree" ]
+		},
+		"write": {
+			"ubus": { "luci.irnetfree": [ "connect", "select", "disconnect", "reconnect", "test", "subs_update", "settings_set", "remote_set", "cloudflared_install", "service" ] },
 			"uci": [ "irnetfree" ]
 		}
 	}
