@@ -159,6 +159,52 @@ test('validateWithFallback: …and what the fork refuses is the fork’s error (
   });
 });
 
+/**
+ * A fake official core behind spawn(): `version` names `ver`, and `run -test`
+ * says "Configuration OK." to ANY config — what a real Xray older than 26.3.27
+ * does with a finalmask, a key it does not know (checked by the reviewer with
+ * an unknown streamSettings key on 26.3.27 itself).
+ */
+function acceptingCore(ver, spawned) {
+  return (bin, args) => {
+    spawned.push([path.basename(bin), args.join(' ')]);
+    const child = stubChild();
+    const out = args.includes('version')
+      ? `Xray ${ver} (Xray, Penetrates Everything.) Custom (go1.23.4 linux/arm)\nA unified platform for anti-censorship.\n`
+      : `Xray ${ver} (Xray, Penetrates Everything.)\nConfiguration OK.\n`;
+    setImmediate(() => { child.stdout.emit('data', Buffer.from(out)); child.emit('exit', 0); });
+    return child;
+  };
+}
+
+test('validateWithFallback, with a real -test and version run: an official 24.12.31 that says "Configuration OK." to a finalmask config is not trusted with it — the fork is asked for', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const spawned = [];
+    fakeSpawn = acceptingCore('24.12.31', spawned);
+    try {
+      const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
+      assert.equal(r.ok, false, 'never run a finalmask server with its mask silently dropped');
+      assert.equal(r.pattnNeeded, true, 'the "needs Xray-PattN" message and the download prompt');
+      assert.equal(r.finalmaskIgnored, true);
+      assert.equal(r.coreVersion, '24.12.31');
+      assert.deepEqual(spawned.map(([b, a]) => [b, /-test/.test(a) ? 'test' : a]), [[exe('xray'), 'test'], [exe('xray'), 'version']]);
+      // the same core with a plain config is fine: the version is not the question then
+      spawned.length = 0;
+      const plain = { inbounds: [], outbounds: [{ tag: 'proxy', protocol: 'vless', streamSettings: { network: 'tcp' } }] };
+      assert.deepEqual(await xm.validateWithFallback(plain, 'xray'), { ok: true, engine: 'xray' });
+    } finally { fakeSpawn = null; }
+  });
+  // …and with the fork installed the official core is not even spawned for it
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
+    const spawned = [];
+    fakeSpawn = acceptingCore('24.12.31', spawned);
+    try {
+      assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: true, engine: 'xray-pattn', fellBack: true });
+      assert.deepEqual(spawned.map(([b]) => b), [exe('xray-pattn')]);
+    } finally { fakeSpawn = null; }
+  });
+});
+
 test('validateWithFallback: …and says the fork is needed when it is not', async () => {
   await withBin([exe('xray')], async (xm) => {
     xm.validate = async () => ({ ok: false, error: LENGTH_MIN });
