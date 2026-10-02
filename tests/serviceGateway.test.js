@@ -493,7 +493,7 @@ test('a core that dies while its connect waits for the SOCKS port fails that con
   const first = s.service.invoke('connect', SERVER.id);
   await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
   s.state.xray.crash(['panic: the core went']);
-  await assert.rejects(first, /The core exited before it opened 127\.0\.0\.1:\d+ — the whole-network tunnel was not started\. Its last lines: panic: the core went/);
+  await assert.rejects(first, /The core exited \(code=- signal=SIGKILL\) before it opened 127\.0\.0\.1:\d+ — the whole-network tunnel was not started\. Its last lines: panic: the core went/);
   await sleep(100);
   assert.equal(s.state.events.includes('gateway:start'), false, 'no gateway at all');
   assert.equal(s.state.xray.starts.length, 1, 'no rebuild of a connect by hand that failed');
@@ -512,6 +512,107 @@ test('…at boot the same death is retried by the boot loop: one gateway, once a
   const ev = s.state.events.filter(e => e === 'gateway:start' || e === 'xray:start');
   assert.deepEqual(ev, ['xray:start', 'xray:start', 'gateway:start'], ev.join(', '));
   assert.ok(!s.logs.some(l => /starting the gateway anyway/.test(l.line)));
+});
+
+/**
+ * deps.waitForLocalPort for a core that dies while the connect waits for its
+ * SOCKS port — whenever `dying()` says so; it returns as the real one does,
+ * once `opts.stop()` sees the core gone.
+ */
+function portOfDyingCore(get, dying, lines = ['panic: out of memory']) {
+  return async (port, ms, opts) => {
+    if (!dying()) return true;
+    get().state.xray.crash(lines);
+    const deadline = Date.now() + Math.min(ms, 2000);
+    while (Date.now() < deadline && !(opts && typeof opts.stop === 'function' && opts.stop())) await sleep(5);
+    return false;
+  };
+}
+
+test('a recovery whose core dies before its SOCKS port opens, attempt after attempt, keeps the backoff — never a restart at once', async (t) => {
+  // v1.16.1 review (critical): each attempt's connect fails with the core's own
+  // words (fix 20) — and the same death, a drop queued behind that recovery,
+  // was replayed through recoverFromDrop as a FIRST drop (no successful
+  // rebuild to count from), which ran attempt 0 again at once and cancelled
+  // the backoff timer: 127 core starts in 1.5 s, forever, on the A7.
+  let s = null;
+  let dying = false;
+  s = start({}, Object.assign(withTiming({ routerBackoffMs: [1000, 1000, 1000], crashWindowMs: 120000 }), { waitForLocalPort: portOfDyingCore(() => s, () => dying) }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  dying = true;
+  const n0 = s.state.xray.starts.length;
+  s.state.xray.crash();   // the drop: its rebuild's core dies before its port opens, and so does every retry's
+  await sleep(1500);
+  const n = s.state.xray.starts.length - n0;
+  assert.ok(n >= 1 && n <= 2, `at most two core starts in 1.5 s with a 1 s backoff, got ${n}: ${s.logs.map(l => l.line).slice(-8).join(' / ')}`);
+  assert.ok(s.statuses.some(x => x.state === 'reconnecting' && x.retryInMs === 1000), 'the retry waits its turn');
+  // …and once a core lives again, the next retry brings the connection back
+  dying = false;
+  await until(() => connectedCount(s) === 2, 'back once the core lives', 5000);
+});
+
+test('…and a Connect by hand on a pending edit whose core dies the same way is handed to the recovery AFTER the first wait', async (t) => {
+  // The hand Connect on the live server (item 18) keeps the intent when it
+  // fails (abortGateway): it used to be taken up by the drop at once — a
+  // second start right behind the first — and then looped like the above.
+  let s = null;
+  let dying = false;
+  s = start({}, Object.assign(withTiming({ routerBackoffMs: [1000, 1000, 1000], crashWindowMs: 120000 }), { waitForLocalPort: portOfDyingCore(() => s, () => dying) }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  await s.service.invoke('servers:update', { id: SERVER.id, fields: { address: '192.0.2.10', port: 1081 } });
+  dying = true;
+  const n0 = s.state.xray.starts.length;
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /before it opened 127\.0\.0\.1:47808/);
+  await sleep(1500);
+  const n = s.state.xray.starts.length - n0;
+  assert.ok(n >= 1 && n <= 2, `the Connect and at most one retry after the 1 s wait, got ${n}: ${s.logs.map(l => l.line).slice(-8).join(' / ')}`);
+  assert.ok(s.statuses.some(x => x.state === 'reconnecting' && x.retryInMs === 1000), 'the hand-over says when it retries');
+  dying = false;
+  await until(() => connectedCount(s) === 2, 'back without another click', 5000);
+  assert.equal(s.state.xray.starts.at(-1).config.outbounds.find(o => o.tag === 'proxy').settings.servers[0].port, 1081, 'with the edit');
+});
+
+test('…but a Connect on the live connection refused before anything was torn down (a bad edit) leaves the running connection alone', async (t) => {
+  const s = start({}, withTiming({ routerBackoffMs: [20, 20, 20], crashWindowMs: 120000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  await s.service.invoke('servers:update', { id: SERVER.id, fields: { port: 1082 } });
+  s.state.check = { ok: false, error: 'infra/conf: something the core refuses' };
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /Config error: infra\/conf: something the core refuses/);
+  await sleep(100);
+  assert.equal(s.state.xray.starts.length, 1, 'no retry tears down what still works');
+  assert.ok(!s.statuses.some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.equal(s.state.xray.running, true);
+  assert.ok(s.state.inners.some(i => i.active), 'the gateway is still up');
+});
+
+test('a connect by hand whose core dies before its port opens: no "rebuilding" for a rebuild that never comes; the error names the signal and the panic, not its stack', async (t) => {
+  const stack = [
+    '2026/10/02 10:00:00 [Warning] core: Xray 26.3.27 started',
+    'panic: runtime error: invalid memory address or nil pointer dereference',
+    '[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x5c1a2c]',
+    'goroutine 1 [running]:',
+    'github.com/xtls/xray-core/app/dns.(*Server).Start(0x0)',
+    '\t/build/app/dns/server.go:123 +0x1c',
+    'main.main()',
+    '\t/build/main/main.go:45 +0x2a8'
+  ];
+  let s = null;
+  s = start({ settings: { killSwitch: true } }, { waitForLocalPort: portOfDyingCore(() => s, () => true, stack) });
+  t.after(() => s.service.shutdown());
+  await assert.rejects(s.service.invoke('connect', SERVER.id), (e) => {
+    assert.match(e.message, /^The core exited \(code=- signal=SIGKILL\) before it opened 127\.0\.0\.1:47808 — the whole-network tunnel was not started\. Its last lines: panic: runtime error: invalid memory address or nil pointer dereference( mem:.*)?$/);
+    return true;
+  });
+  await sleep(50);
+  const text = s.logs.map(l => `[${l.level}] ${l.line}`);
+  assert.ok(!text.some(l => /rebuilding the connection/.test(l)), text.join('\n'));
+  assert.ok(text.some(l => /^\[error\] The core exited on its own \(code=- signal=SIGKILL\) while connecting/.test(l)), text.join('\n'));
+  // the kill switch stays armed (the intent is the user's), and says what that means now
+  assert.ok(text.some(l => /^\[warn\] Kill switch: the connect failed and nothing retries it — LAN internet stays blocked until a connect succeeds or you press Disconnect/.test(l)), text.join('\n'));
+  assert.equal(s.state.xray.starts.length, 1);
 });
 
 test('a drop that lands inside a connect which then comes up whole is not rebuilt', async (t) => {
@@ -552,7 +653,7 @@ test('the give-up of a crash loop says whether the proxy is still up', () => {
   // Reached only on the desktop (a router never gives up) and only after 2+5+15 s of
   // waits, so pinned as text: a tunnel that keeps dying over a live core leaves the proxy up.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
-  const body = src.slice(src.indexOf('function recoverFromDrop(reason) {'), src.indexOf('async function recoverFromNetworkChange('));
+  const body = src.slice(src.indexOf('function recoverFromDrop(reason, seq = null) {'), src.indexOf('async function recoverFromNetworkChange('));
   assert.match(body, /send\('status', \{ state: 'reconnect-failed', reason, proxyUp: !!\(xray && xray\.running\), tunError: null \}\);/);
 });
 

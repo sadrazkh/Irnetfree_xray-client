@@ -458,6 +458,13 @@ function createService(opts = {}) {
   let quietStops = 0;
   // Every connect in flight (see doConnect): a drop waits for them (recoverFromDrop).
   const connectsInFlight = new Set();
+  // Every 'stopped' the core manager reported, numbered, with how it ended;
+  // and the number of the one a connect reported as ITS failure (the router's
+  // wait for the SOCKS port: coreGoneError). That death was a drop too — but
+  // the connect's caller retries it, so the drop is not (recoverFromDrop).
+  let coreStops = 0;
+  let coreStopReported = 0;
+  let lastCoreExit = null;
 
   const store = new Store(path.join(dataDir, 'store.json'), {
     servers: [], subscriptions: [], settings: DEFAULT_SETTINGS, activeServerId: null, xrayPath: null
@@ -579,6 +586,7 @@ function createService(opts = {}) {
     extraBinDirs: [userBinDir, ...systemBinDirs],
     onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
     onStatus: (state, info) => {
+      if (state === 'stopped') { coreStops++; lastCoreExit = info || null; }
       if ((xrayReloading || quietStops > 0) && state === 'stopped') return;
       const drop = state === 'stopped' && !userDisconnecting && !isQuitting && !!store.get('activeServerId', null);
       if (drop) {
@@ -587,9 +595,14 @@ function createService(opts = {}) {
         // port nobody answers — on a router the whole LAN offline behind a
         // gateway that still says "up". (headless: no Windows kill switch.)
         // Rebuilt like a network change; deferred a tick so the drop is
-        // reported to the clients first.
-        send('log', { line: `The core exited on its own (code=${info && info.code != null ? info.code : '-'} signal=${(info && info.signal) || '-'}) — rebuilding the connection${memLine()}`, level: 'error' });
-        setTimeout(() => recoverFromDrop('core-exited'), 0);
+        // reported to the clients first. Inside a connect it may be that
+        // connect's own core, which then fails it (coreGoneError) and is not
+        // rebuilt here — so "rebuilding" is not promised; the recovery says
+        // it when it is the one that rebuilds.
+        const seq = coreStops;
+        const how = `code=${info && info.code != null ? info.code : '-'} signal=${(info && info.signal) || '-'}`;
+        send('log', { line: `The core exited on its own (${how})${connectsInFlight.size ? ' while connecting' : ' — rebuilding the connection'}${memLine()}`, level: 'error' });
+        setTimeout(() => recoverFromDrop('core-exited', seq), 0);
       }
       // `rebuilding`: this stop is a drop the service is about to rebuild (on
       // a router always, elsewhere with the switch on) — the window keeps
@@ -1659,7 +1672,8 @@ function createService(opts = {}) {
           if (OPENWRT) {
             const bound = await waitCorePort(settings.socksPort, 20000, ownCore);
             if (stale()) return giveWay();
-            if (bound === 'exited') throw coreGoneError(settings);
+            // this connect's failure — and so its caller's retry, not the drop's (recoverFromDrop)
+            if (bound === 'exited') { coreStopReported = coreStops; throw coreGoneError(settings); }
             if (bound !== 'bound') send('log', { line: `The core has not opened 127.0.0.1:${settings.socksPort} after 20s — starting the gateway anyway`, level: 'warn' });
             // the remote control's destinations, laid with the gateway (setRemoteBypass)
             if (typeof myTun.setBypass === 'function') await myTun.setBypass(remoteBypass().cidrs);
@@ -1863,14 +1877,23 @@ function createService(opts = {}) {
     } finally { over = true; clearTimeout(timer); }
   }
 
-  /** The connect's error for a core that exited before its port opened — in the user's language, with its last lines. */
+  /**
+   * The connect's error for a core that exited before its port opened — in the
+   * user's language: how it ended (an OOM kill prints nothing; the signal and
+   * the memory are the clue), and what it said. A Go panic is quoted by its
+   * own `panic:` line, not the stack frames printed after it.
+   */
   function coreGoneError(settings) {
-    const last = typeof xray.recentLines === 'function' ? xray.recentLines(5) : [];
+    const all = typeof xray.recentLines === 'function' ? xray.recentLines(60) : [];
+    const key = all.find(l => /^(panic|fatal error):|Failed to start/i.test(l));
+    const last = key ? [key] : all.slice(-5);
+    const ex = lastCoreExit || {};
+    const how = `code=${ex.code != null ? ex.code : '-'} signal=${ex.signal || '-'}`;
     const en = settings.lang === 'en';
     const said = last.length ? last.join(' | ') : (en ? '(it printed nothing)' : '(چیزی چاپ نکرد)');
     const e = new Error(en
-      ? `The core exited before it opened 127.0.0.1:${settings.socksPort} — the whole-network tunnel was not started. Its last lines: ${said}`
-      : `هسته پیش از باز کردن 127.0.0.1:${settings.socksPort} بسته شد — تونل کل شبکه راه‌اندازی نشد. آخرین خطوط آن: ${said}`);
+      ? `The core exited (${how}) before it opened 127.0.0.1:${settings.socksPort} — the whole-network tunnel was not started. Its last lines: ${said}${memLine()}`
+      : `هسته پیش از باز کردن 127.0.0.1:${settings.socksPort} بسته شد (${how}) — تونل کل شبکه راه‌اندازی نشد. آخرین خطوط آن: ${said}${memLine()}`);
     e.coreGone = true;
     return e;
   }
@@ -1915,6 +1938,11 @@ function createService(opts = {}) {
       liveDirectInterface = null;
       if (prevActive) send('status', { state: 'disconnected', cause: 'abort' });
       else if (!boot) tell('status', { state: 'error', message, serverId, cause: 'abort' });
+      // The intent stays (only the user's Disconnect clears it), so an armed
+      // kill switch keeps the LAN blocked — with no retry coming. Said plainly.
+      if (!boot && killSwitchState().blocking) {
+        send('log', { line: 'Kill switch: the connect failed and nothing retries it — LAN internet stays blocked until a connect succeeds or you press Disconnect', level: 'warn' });
+      }
     }
     return false;
   }
@@ -2044,8 +2072,30 @@ function createService(opts = {}) {
   async function reapplyByHand() {
     endPendingRecovery();
     const r = await reapplyConnection();
-    if (OPENWRT && r && !r.ok && !r.stale && store.get('activeServerId', null)) recoverFromDrop('gateway-failed');
+    if (OPENWRT && r && !r.ok && !r.stale) handToRecovery('gateway-failed');
     return r;
+  }
+
+  /**
+   * A rebuild by hand — a Reconnect, an Apply, a Connect on the live
+   * connection — that failed and kept the intent (abortGateway), with nothing
+   * running: the recovery takes it over as after any drop, from its SECOND
+   * attempt, after the first wait — the try by hand was the first. Taken up at
+   * once instead, a core that dies before its port opens was started twice in
+   * a row, and then (through the drop its death also was) again and again with
+   * no backoff at all (review of v1.16.1, critical).
+   */
+  function handToRecovery(reason) {
+    if (!OPENWRT || !store.get('activeServerId', null) || recoverTimer) return;
+    if ((xray && xray.running) || (tun && tun.active)) return;   // refused before anything was torn down: the old connection still runs
+    const wait = backoffAfter(0);
+    recoveryCause = causeOf(reason);
+    send('log', { line: `Reconnect failed — retrying in ${wait / 1000}s`, level: 'warn' });
+    send('status', { state: 'reconnecting', reason, attempt: 2, retryInMs: wait, cause: recoveryCause });
+    recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, 1).catch((e) => {
+      send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' });
+    }), wait);
+    if (recoverTimer.unref) recoverTimer.unref();
   }
 
   /**
@@ -2125,11 +2175,22 @@ function createService(opts = {}) {
    * quiet spell longer than the window starts it from the beginning again.
    * (A stray late `stopped` from a core already replaced lands here too.)
    */
-  function recoverFromDrop(reason) {
+  function recoverFromDrop(reason, seq = null) {
     const fail = (e) => send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' });
+    // The death of a core whose connect reported it as its own failure
+    // (coreGoneError, `seq`: the core's stop): that connect's caller retries
+    // — the recovery's backoff, the boot loop, a hand-over (handToRecovery) —
+    // or, for a connect by hand that kept nothing, nobody does. Not here too.
+    const reported = () => seq != null && seq === coreStopReported;
+    if (reported()) return;
     // the same gates as recoverFromNetworkChange(), before anything is said or armed
     if (!store.get('activeServerId', null)) return;
     if (!OPENWRT && !getSettings().autoReconnectOnNetworkChange) return;
+    // A retry already scheduled (a failed attempt's backoff, a hand-over, an
+    // earlier drop's wait) is the rebuild for this drop too. Taken up again
+    // here, a drop with no successful rebuild to count from ran attempt 0 at
+    // once and cancelled that backoff (review of v1.16.1, critical).
+    if (recoverTimer) return;
     if (recovering) { recoverQueued = reason; return; }
     // A connect in flight (the operator's, the boot's, a settings apply's) is
     // where this drop may have landed: never a second one beside it (see
@@ -2139,7 +2200,7 @@ function createService(opts = {}) {
       Promise.allSettled([...connectsInFlight]).then(() => {
         if (userDisconnecting || isQuitting) return;
         if (reason === 'core-exited' ? !!(xray && xray.running) : !!(tun && tun.active)) return;
-        recoverFromDrop(reason);
+        recoverFromDrop(reason, seq);
       }).catch(fail);
       return;
     }
@@ -2673,7 +2734,16 @@ function createService(opts = {}) {
         send('log', { line: `Connect: already connected to ${conn.label || id} with the gateway up — nothing to rebuild`, level: 'info' });
         return { ok: true, already: true };
       }
-      return doConnect(id, { cause: store.get('activeServerId', null) ? 'switch' : 'user' });
+      const p = doConnect(id, { cause: store.get('activeServerId', null) ? 'switch' : 'user' });
+      if (!OPENWRT) return p;
+      // A Connect on the live connection (a pending edit or setting) that
+      // failed keeps its intent (abortGateway) with nothing running: the
+      // recovery takes it over like a failed Reconnect. A first connect or a
+      // switch ends disconnected, and is not retried.
+      return p.catch((e) => {
+        if (store.get('activeServerId', null) === id) handToRecovery('gateway-failed');
+        throw e;
+      });
     },
     // ...and a disconnect by hand is the one thing that clears the router's connectIntent —
     // and disarms the kill switch BEFORE the teardown: the user's own "off" never blocks the LAN
