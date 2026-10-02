@@ -545,6 +545,64 @@ test('S6: the router does not start a test core for the quick ping after every c
   assert.ok(desktop.calls.includes('quickPing:s1'), desktop.calls.join(', '));
 });
 
+/* --------------------------- the router's kill switch (v1.16 K1/K4) --------------------------- */
+
+test('K1/K4: on the router the kill switch row shows with router wording, the banner says the LAN is blocked, and its action is the disconnect', () => {
+  // the row is no longer among the desktop-only rows hidden on the router
+  const flavor = fnSource('applyFlavor');
+  assert.doesNotMatch(flavor, /'optKillSwitch'/, 'the kill switch row is not hidden on the router any more');
+  assert.match(flavor, /kill\.routerTitle/);
+  assert.match(flavor, /kill\.routerSub/);
+  assert.match(flavor, /kill\.routerBlocked/);
+  assert.match(flavor, /kill\.routerOff/);
+  // the banner's "Turn the VPN off" is the disconnect (which disarms), as before
+  assert.match(APP, /\$\('#killDisarm'\)\.onclick = async \(\) => \{[\r\n]+[\s\S]*?await window\.api\.disconnect\(\);/);
+  // the strings, in both languages
+  const keys = ['kill.routerTitle', 'kill.routerSub', 'kill.routerBlocked', 'kill.routerOff', 'kill.routerArmed'];
+  for (const k of keys) assert.equal(I18N.split(`'${k}':`).length - 1, 2, k);
+  assert.match(I18N, /'kill\.routerBlocked': '⛔ LAN internet is blocked until the VPN is back'/);
+  assert.match(I18N, /'kill\.routerOff': 'Turn the VPN off'/);
+  assert.match(I18N, /'kill\.routerTitle': 'Kill switch'/);
+
+  // the state from a snapshot or a killswitch event paints the banner and the status line
+  const vm = require('node:vm');
+  const els = new Map();
+  const el = (id) => { if (!els.has(id)) els.set(id, { id, textContent: '', hidden: true, className: '' }); return els.get(id); };
+  const calls = [];
+  const ctx = vm.createContext({
+    state: { flavor: 'openwrt', settings: { killSwitch: true }, platform: 'linux', elevated: true },
+    $: (sel) => el(String(sel).replace(/^#/, '')),
+    t: (k) => k,
+    toast: (msg, kind) => calls.push('toast:' + kind + ':' + msg)
+  });
+  vm.runInContext([fnSource('applyKillSwitchState'), fnSource('updateKillStatus')].join('\n'), ctx);
+  ctx.applyKillSwitchState({ enabled: true, armed: true, blocking: true });
+  assert.equal(el('killBanner').hidden, false, 'blocking: the banner shows');
+  assert.equal(ctx.state.killEngaged, true);
+  assert.equal(el('killStatus').textContent, 'kill.routerBlocked');
+  ctx.applyKillSwitchState({ enabled: true, armed: true, blocking: false });
+  assert.equal(el('killBanner').hidden, true);
+  assert.equal(el('killStatus').textContent, 'kill.routerArmed');
+  ctx.applyKillSwitchState({ enabled: true, armed: false, blocking: false });
+  assert.equal(el('killStatus').textContent, '');
+  // the desktop's kill switch events are not the router's
+  ctx.state.flavor = null;
+  ctx.applyKillSwitchState({ enabled: true, armed: true, blocking: true });
+  assert.equal(el('killBanner').hidden, true, 'nothing of the router’s on the desktop');
+  // the event handler: the router's wording in the toast
+  const h = vm.createContext({
+    state: { flavor: 'openwrt', settings: {}, killEngaged: false },
+    $: (sel) => el(String(sel).replace(/^#/, '')),
+    t: (k) => k,
+    toast: (msg, kind) => calls.push('toast:' + kind + ':' + msg),
+    window: { api: {} }
+  });
+  vm.runInContext([fnSource('applyKillSwitchState'), fnSource('updateKillStatus'), handlerSource('onKillSwitch')].join('\n'), h);
+  h.onKillSwitch({ engaged: true, router: true, enabled: true, armed: true, blocking: true });
+  assert.ok(calls.includes('toast:err:kill.routerBlocked'), calls.join(', '));
+  assert.equal(el('killBanner').hidden, false);
+});
+
 test('S4: the attempt strings exist in both languages, verbatim', () => {
   for (const k of ['state.reconnectingN', 'state.waiting']) assert.equal(I18N.split(`'${k}':`).length - 1, 2, k);
   assert.match(I18N, /'state\.reconnectingN': 'Reconnecting… \(attempt \{n\}\)'/);

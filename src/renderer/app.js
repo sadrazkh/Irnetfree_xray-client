@@ -882,6 +882,14 @@ $('#optLaunchAtLogin').onchange = async () => {
 function updateKillStatus() {
   const el = $('#killStatus');
   if (!el) return;
+  if (state.flavor === 'openwrt') {
+    // the router's: armed — and whether it blocks right now — comes from the service (a snapshot, a killswitch event)
+    const ks = state.killSwitch;
+    if (!ks || !ks.armed) { el.textContent = ''; el.className = 'tun-status'; return; }
+    el.textContent = t(ks.blocking ? 'kill.routerBlocked' : 'kill.routerArmed');
+    el.className = 'tun-status ' + (ks.blocking ? 'warn' : 'ok');
+    return;
+  }
   if (!state.settings.killSwitch) { el.textContent = ''; el.className = 'tun-status'; return; }
   if (state.platform !== 'win32') { el.textContent = t('kill.winOnly'); el.className = 'tun-status warn'; return; }
   if (!state.elevated) { el.textContent = t('kill.needAdmin'); el.className = 'tun-status warn'; return; }
@@ -925,11 +933,25 @@ function applyFlavor() {
   $('#insGatewayRow').hidden = !rt;
   // ...and "DNS managed by the app": on a router the service forces it on (the
   // core must answer every port-53 packet from the LAN), so the switch would lie
-  for (const id of ['optSysProxy', 'optLaunchAtLogin', 'optKillSwitch', 'optDnsManaged']) {
+  for (const id of ['optSysProxy', 'optLaunchAtLogin', 'optDnsManaged']) {
     const row = $('#' + id).closest('.switch-row');
     if (row) row.hidden = rt;
   }
-  $('#killStatus').hidden = rt;
+  // The kill switch row stays on the router, with the router's wording (K1):
+  // while the VPN is on and the tunnel is down, the LAN has no internet. The
+  // banner's wording and its "off" action follow (K4): turning the VPN off
+  // (= disconnect) is what disarms it. Relabelled through data-i18n so a
+  // language switch keeps the wording.
+  const relabel = (el, key) => { if (!el) return; el.setAttribute('data-i18n', key); el.textContent = t(key); };
+  const ksRow = $('#optKillSwitch').closest('.switch-row');
+  if (ksRow) {
+    ksRow.hidden = false;
+    relabel(ksRow.querySelector('.switch-title'), rt ? 'kill.routerTitle' : 'kill.title');
+    relabel(ksRow.querySelector('.switch-sub'), rt ? 'kill.routerSub' : 'kill.sub');
+  }
+  relabel($('#killBanner .kill-banner-text'), rt ? 'kill.routerBlocked' : 'kill.blocked');
+  relabel($('#killDisarm'), rt ? 'kill.routerOff' : 'kill.disarm');
+  $('#killStatus').hidden = false;
   $('#tunBackendRow').hidden = rt;
   $('#tunAppRow').hidden = rt;
   $('#gwQuicRow').hidden = !rt;
@@ -2440,6 +2462,13 @@ window.api.onKillSwitch((d) => {
   state.killEngaged = !!(d && d.engaged);
   const banner = $('#killBanner');
   if (banner) banner.hidden = !state.killEngaged;
+  // the router's switch carries its whole state (armed, blocking): the status
+  // line follows it, and the toast says what it blocks — the LAN
+  if (d && d.router) {
+    applyKillSwitchState(d);
+    if (state.killEngaged && !wasEngaged) toast(t('kill.routerBlocked'), 'err');
+    return;
+  }
   // on the way in only: a second drop under a switch already closed is not news
   if (state.killEngaged && !wasEngaged) toast(t('kill.blocked'), 'err');
 });

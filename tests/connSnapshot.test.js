@@ -272,10 +272,12 @@ test('S7: diagnostics() carries the status, the versions, MemAvailable, the RSS,
   const s = H.start({ remote: { token: 'remote-token-xyz123456', relay: { token: 'relay-token-abc456789' }, cloudflared: { token: 'cf-token-qwerty987654' } }, settings: { remote: { token: 'settings-remote-token-7890' } } }, { readProc: fakeProc });
   t.after(() => s.service.shutdown());
   fs.writeFileSync(path.join(s.dir, 'token'), 'ui-token-0123456789abcdef\n');
+  // feat/remote keeps its settings in <data_dir>/remote.json — its tokens are secrets too
+  fs.writeFileSync(path.join(s.dir, 'remote.json'), JSON.stringify({ relay: { enabled: true, relayUrl: 'https://r.example', token: 'json-relay-token-55555555' }, cloudflared: { token: 'json-cf-token-66666666' } }));
   await s.service.invoke('connect', SERVER.id);
   // the lines the ring may carry: a token in a URL, a token said in clear
   s.service.log('opened http://192.168.1.1:6969/?token=ui-token-0123456789abcdef by hand', 'info');
-  s.service.log('relay says relay-token-abc456789 and remote-token-xyz123456 and cf-token-qwerty987654 and settings-remote-token-7890', 'warn');
+  s.service.log('relay says relay-token-abc456789 and remote-token-xyz123456 and cf-token-qwerty987654 and settings-remote-token-7890 json-relay-token-55555555 json-cf-token-66666666', 'warn');
   const { text } = await s.service.diagnostics();
   assert.match(text, /^IRNetFree \d+\.\d+\.\d+ — node v\d+/);
   assert.match(text, /^status: \{"state":"connected"/m);
@@ -288,7 +290,7 @@ test('S7: diagnostics() carries the status, the versions, MemAvailable, the RSS,
   assert.match(text, /^ip rule: unavailable \(/m, 'the fakes have no ip here — said, not thrown');
   assert.match(text, /^--- log \(last 300 lines\) ---$/m);
   assert.match(text, /status: connected \(cause=user/);
-  for (const secret of ['ui-token-0123456789abcdef', 'relay-token-abc456789', 'remote-token-xyz123456', 'cf-token-qwerty987654', 'settings-remote-token-7890']) {
+  for (const secret of ['ui-token-0123456789abcdef', 'relay-token-abc456789', 'remote-token-xyz123456', 'cf-token-qwerty987654', 'settings-remote-token-7890', 'json-relay-token-55555555', 'json-cf-token-66666666']) {
     assert.ok(!text.includes(secret), 'the diagnostics text carries ' + secret);
   }
   assert.match(text, /\?token=\[redacted\] by hand/);

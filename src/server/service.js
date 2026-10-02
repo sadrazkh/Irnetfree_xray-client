@@ -54,6 +54,7 @@ const { AssetUpdater } = require('../main/assetUpdater');
 // deliberately NOT given this: Electron never runs on a router.
 const { isOpenwrt, lanInterface, lanDevices, validMacs, ownOrphanCores, normalizeCidrs } = require('../main/openwrtNet');
 const { TunOpenwrt } = require('../main/tunOpenwrt');
+const { createKillSwitch } = require('../main/killSwitchOpenwrt');
 const { createLogRing } = require('./logRing');
 const tcpNet = require('net');
 
@@ -247,6 +248,14 @@ function createService(opts = {}) {
    * MemAvailable and the RSS of node, xray and sing-box, from /proc — on Linux;
    * a file that is not there is a field that is not reported. Logged at every
    * connect and drop (S6: a 512 MB router), and in the diagnostics bundle.
+   *
+   * No GOMEMLIMIT for the cores. Measured in the QEMU smoke while connected
+   * (v1.16, armsr-armv7, one idle connection): node 36-40 MB, sing-box 22-32 MB,
+   * xray 25 MB RSS — ~100 MB for the three, against ~570 MB available of the
+   * guest's 768 MB and the AC-1304's 512 MB. A limit only matters once a Go
+   * heap balloons under load, and one set near these figures would make the
+   * collector burn a Cortex-A7 core for nothing; the figures the router logs
+   * here are what would justify one later.
    */
   function memInfo() {
     const out = { memAvailableKb: null, rss: {} };
@@ -298,6 +307,7 @@ function createService(opts = {}) {
     if (p.reason) detail.push(`reason=${oneLine(p.reason)}`);
     if (conn.state === 'error') detail.push(`error=${conn.reason}`);
     ring.push(`${stamp()} status: ${conn.state} (${detail.join(', ')})${conn.state === 'connected' || conn.state === 'reconnecting' ? memLine() : ''}`);
+    publishKillSwitch();   // the gateway's up/down is what `blocking` follows
   }
   /** The connection, as one fact (see above): app:init.conn, the first event of every /events stream, LuCI's status. */
   function connSnapshot() {
@@ -506,7 +516,8 @@ function createService(opts = {}) {
       // the macOS health check, and on a router the gateway's own watch on its sing-box
       onUnexpectedExit: () => {
         if (userDisconnecting || isQuitting || tun !== selected) return;
-        send('log', { line: 'The tunnel exited unexpectedly — rebuilding it', level: 'error' });
+        send('log', { line: 'The tunnel exited unexpectedly — rebuilding it' + memLine(), level: 'error' });
+        publishKillSwitch();   // the gateway is down: the LAN is blocked from this moment (K4)
         recoverFromDrop('tunnel-exited');
       } };
     // On a router the backend is not a choice: the gateway wraps sing-box and
@@ -750,8 +761,62 @@ function createService(opts = {}) {
   /* ----------------------------- settings / data ----------------------------- */
   function getSettings() { return Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}), ROUTER_FORCED); }
 
-  /** What the kill switch is doing — part of every snapshot (the router's is wired below, A7). */
-  function killSwitchState() { return { enabled: !!getSettings().killSwitch, armed: false, blocking: false }; }
+  /* ----------------------------- the kill switch (K1–K6) ----------------------------- */
+  // Armed ⇔ settings.killSwitch && connectIntent: the VPN is meant to be on —
+  // by the user, or restored at boot. Armed, LAN devices' forwarded traffic to
+  // the internet is rejected unless it goes through the tunnel; never the
+  // excluded devices, private destinations, the replies of inbound
+  // connections, or the router's own traffic (killSwitchOpenwrt.js). Its own
+  // table, which the gateway's teardown and the orphan sweep never touch: it
+  // survives rebuilds, recoveries, server switches, a crash of this service
+  // and — through the snippet /etc/init.d/irnetfree-ks replays at boot — a
+  // reboot. The user turning the VPN off (the disconnect clears the intent)
+  // or the setting off disarms it; `blocking` = armed with the gateway down.
+  const ks = deps.killSwitch ? deps.killSwitch({ dataDir }) : createKillSwitch({ run: tunPlatform.run, dataDir, fs });
+  let ksTold = null;   // {enabled|armed|blocking} as last told to the clients
+  function killSwitchState() {
+    const enabled = !!getSettings().killSwitch;
+    const armed = OPENWRT && ks.isArmed();
+    return { enabled, armed, blocking: armed && !(tun && tun.active) };
+  }
+  /** Tell the clients and the log whenever {enabled, armed, blocking} moved — `blocking` is the LAN's internet, said loudly. */
+  function publishKillSwitch() {
+    if (!OPENWRT) return;
+    const st = killSwitchState();
+    const key = `${st.enabled}|${st.armed}|${st.blocking}`;
+    if (key === ksTold) return;
+    const was = ksTold;
+    ksTold = key;
+    if (st.blocking) send('log', { line: 'Kill switch: the tunnel is down — LAN internet is blocked until it is back (excluded devices and the router itself are not)', level: 'warn' });
+    else if (was && was.endsWith('|true')) send('log', { line: 'Kill switch: the tunnel is back — LAN internet restored', level: 'info' });
+    ring.push(`${stamp()} killswitch: ${JSON.stringify(st)}`);
+    tell('killswitch', Object.assign({ engaged: st.blocking, router: true }, st));
+  }
+  // One arm / disarm at a time, in order: a connect's arm and a disconnect's disarm must never race.
+  let ksQueue = Promise.resolve();
+  function syncKillSwitch(why) {
+    if (!OPENWRT) return Promise.resolve();
+    ksQueue = ksQueue.then(async () => {
+      const s = getSettings();
+      const want = !!s.killSwitch && !!store.get('connectIntent', null);
+      const macs = validMacs(s.lanBypassMacs);
+      if (want && !ks.isArmed()) {
+        await ks.arm({ bypassMacs: macs, wanDevs: [] });
+        send('log', { line: `Kill switch armed (${why}): while the VPN is on and the tunnel is down, LAN internet is blocked; ${macs.length} device(s) excluded`, level: 'info' });
+      } else if (!want && (ks.isArmed() || why === 'start')) {
+        const was = ks.isArmed();
+        await ks.disarm();   // at start: whatever a killed run or the boot script left behind
+        if (was) send('log', { line: `Kill switch disarmed (${why}): the LAN goes direct whenever the tunnel is down`, level: 'info' });
+      } else if (want && ks.isArmed() && why === 'settings') {
+        await ks.setBypassMacs(macs);
+      }
+    }).catch((e) => send('log', { line: `Kill switch: ${why} failed: ${(e && e.message) || e}`, level: 'error' }))
+      .then(() => publishKillSwitch());
+    return ksQueue;
+  }
+  // A new service: armed before the boot connect starts (the boot script
+  // already replayed the snippet at boot; this re-applies the same table).
+  const ksReady = syncKillSwitch('start');
 
   /**
    * One-time upgrade of the saved servers to the shape the current parser and
@@ -1389,6 +1454,10 @@ function createService(opts = {}) {
     setIfChanged('activeServerId', serverId);
     setIfChanged('lastServerId', serverId);   // survives a disconnect: "connect to the last server" at launch
     if (OPENWRT) setIfChanged('connectIntent', serverId);   // the router's "stay like this" (see bootIntent)
+    if (OPENWRT) {
+      await syncKillSwitch('connect');   // the VPN is meant to be on from here: armed before the gateway (K2)
+      if (stale()) return giveWay();
+    }
     pinWatch.setLive(directServers(plan));
     appliedSettings = snapshotApplied(getSettings());
 
@@ -1449,6 +1518,7 @@ function createService(opts = {}) {
           // keepDns: the held override stays on the main service too (see reapplyConnection).
           if (process.platform === 'darwin') await myTun.stop({ keepDns: !!(hold && hold.held) });
           else { try { await myTun.stop(); } catch {} }
+          publishKillSwitch();   // a router's switch: the LAN is blocked across the gap (K3)
         }
         try {
           myTun.lang = settings.lang || 'fa';
@@ -2125,6 +2195,7 @@ function createService(opts = {}) {
   async function stopAllTuns(opts) {
     dnsGuardWatch?.stop();
     await stopTrackedTunnels(startedTuns, tun, process.platform, opts);
+    publishKillSwitch();   // the gateway is down: a rebuild's gap is blocked, a disconnect's is not (disarmed before it)
   }
 
   /** The same sweep for the exit hook, where nothing can be awaited. */
@@ -2374,8 +2445,13 @@ function createService(opts = {}) {
       }
       return doConnect(id, { cause: store.get('activeServerId', null) ? 'switch' : 'user' });
     },
-    // ...and a disconnect by hand is the one thing that clears the router's connectIntent
-    'disconnect': () => { bootCancelled = true; if (OPENWRT) setIfChanged('connectIntent', null); return doDisconnect(); },
+    // ...and a disconnect by hand is the one thing that clears the router's connectIntent —
+    // and disarms the kill switch BEFORE the teardown: the user's own "off" never blocks the LAN
+    'disconnect': async () => {
+      bootCancelled = true;
+      if (OPENWRT) { setIfChanged('connectIntent', null); await syncKillSwitch('disconnect'); }
+      return doDisconnect();
+    },
 
     'settings:get': () => getSettings(),
     // returns { settings, pendingReconnect } — see main.js / settingsMeta.js
@@ -2390,7 +2466,7 @@ function createService(opts = {}) {
       if (!tokens.length) return { checked: true, bad: [] };
       return checkGeoTokens(tokens, (cfg) => xray.validate(cfg));
     },
-    'settings:set': (partial) => {
+    'settings:set': async (partial) => {
       const next = Object.assign(getSettings(), partial);
       store.set('settings', next);
       if ('autoUpdateSubs' in partial || 'autoUpdateInterval' in partial) {
@@ -2408,6 +2484,8 @@ function createService(opts = {}) {
       if ('lanBlockQuic' in partial && tun && tun.active && typeof tun.setBlockQuic === 'function') {
         tun.setBlockQuic(!!next.lanBlockQuic).catch(e => send('log', { line: 'QUIC setting not applied: ' + e.message, level: 'error' }));
       }
+      // the kill switch follows its setting at once, and the excluded devices live (K2)
+      if (OPENWRT && ('killSwitch' in partial || 'lanBypassMacs' in partial)) await syncKillSwitch('settings');
       // "Start with the OS" is a desktop setting: on a server the process is a
       // service already. Refuse it in the store so the switch cannot claim it.
       let error = null;
@@ -2726,6 +2804,8 @@ function createService(opts = {}) {
     };
     walk(store.get('remote', null));
     walk((store.get('settings', null) || {}).remote);
+    // feat/remote keeps its settings (the device token, the tunnel token) in <dataDir>/remote.json
+    try { walk(JSON.parse(fs.readFileSync(path.join(dataDir, 'remote.json'), 'utf8'))); } catch { /* none, or not JSON */ }
     return [...out];
   }
   function redact(text) {
@@ -2860,7 +2940,8 @@ function createService(opts = {}) {
       if (t.unref) t.unref();
     });
   }
-  if (st.autoConnect) { const t = setTimeout(() => autoConnectAtLaunch(), T.bootDelayMs); if (t.unref) t.unref(); }
+  // (after the kill switch has been armed from the saved intent — ksReady — so the LAN is covered before the gateway is built)
+  if (st.autoConnect) { const t = setTimeout(() => { ksReady.then(() => autoConnectAtLaunch()); }, T.bootDelayMs); if (t.unref) t.unref(); }
 
   return {
     invoke, onEvent, shutdown, dataDir, getSettings, assetStatus, version: appVersion,

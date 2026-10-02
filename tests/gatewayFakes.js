@@ -9,6 +9,7 @@
  * and by the child process that test starts for the exit hook.
  */
 const { TunOpenwrt } = require('../src/main/tunOpenwrt');
+const { createKillSwitch } = require('../src/main/killSwitchOpenwrt');
 
 const RULES_OK = '0:\tfrom all lookup local\n8998:\tnot from all dport 53 lookup main suppress_prefixlength 0\n9002:\tnot from all iif lo lookup 2022\n32766:\tfrom all lookup main\n';
 
@@ -137,11 +138,28 @@ function xrayFactory(state) {
   };
 }
 
+/** deps.killSwitch: the real module over a run that records into `state.commands` and an in-memory fs — never the machine's nft. */
+function killSwitchFactory(state) {
+  return ({ dataDir }) => {
+    const files = new Map();
+    const fs = {
+      writeFileSync: (p, text) => { files.set(p, String(text)); },
+      readFileSync: (p) => { if (!files.has(p)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return files.get(p); },
+      unlinkSync: (p) => { if (!files.delete(p)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); },
+      existsSync: (p) => files.has(p),
+      mkdirSync: () => {}
+    };
+    const run = async (cmd, args) => { state.commands.push([cmd, ...args].join(' ')); return ''; };
+    return createKillSwitch({ run, dataDir, fs, tmpDir: '/tmp' });
+  };
+}
+
 /** Every seam the service has, faked; `timing` short enough for a test. */
 function deps(state, extra = {}) {
   return Object.assign({
     xray: xrayFactory(state),
     gateway: gatewayFactory(state),
+    killSwitch: killSwitchFactory(state),
     setSystemProxy: async () => {},
     waitForLocalPort: async () => true,
     // the device list's ubus / ip neigh: no LAN here (a test that wants one passes its own)
