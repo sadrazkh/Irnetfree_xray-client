@@ -582,3 +582,23 @@ test('the Persian pages: ?lang=fa switches the dashboard and the login page to P
   const en = await request(port, 'GET', '/_relay/?lang=en', { jar });
   assert.match(en.body, /dir="ltr"/);
 });
+
+test('close() ends promptly even with an upgraded link that never said hello, and refuses upgrades while closing', async (t) => {
+  // A link is in `links` only after its HELLO, and server.close() waits for
+  // every socket while closeAllConnections() leaves upgraded ones alone: an
+  // agent mid-handshake (or one redialling during the shutdown) kept close()
+  // pending — the CI hang in remoteAgent.test.js.
+  const { relay, login, addRouter, connectAgent } = await startRelay(t);
+  const jar = await login();
+  const { token } = await addRouter(jar, 'home');
+  const silent = await connectAgent(token, null);   // upgraded, no HELLO
+  t.after(() => { try { silent.close(1000); } catch {} });
+  const started = Date.now();
+  const closed = relay.close();
+  // an agent that redials while the relay shuts down must not get a link
+  const late = wsConnect(`ws://127.0.0.1:${relay.port}/_relay/agent`, { headers: { Authorization: 'Bearer ' + token } })
+    .then((c) => { try { c.close(1000); } catch {} return 'accepted'; }, () => 'refused');
+  await Promise.race([closed, sleep(4000).then(() => { throw new Error('relay.close() still pending after 4 s'); })]);
+  assert.ok(Date.now() - started < 4000);
+  assert.equal(await late, 'refused');
+});
