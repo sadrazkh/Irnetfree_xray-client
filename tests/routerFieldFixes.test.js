@@ -235,6 +235,19 @@ test('fix 20: a finalmask server the official core refuses, with no Xray-PattN i
   }
 });
 
+test('fix 20: a finalmask server on an official core too old to know finalmask (it passes -test and would drop the mask) says what to install — in both languages', async (t) => {
+  for (const [lang, re] of [
+    ['en', /^This server needs Xray-PattN — install it under Settings → Required files \(the official core 24\.12\.31 does not know finalmask and would run it without its mask\)$/],
+    ['fa', /^این سرور به Xray-PattN نیاز دارد — از تنظیمات ← فایل‌های موردنیاز نصبش کن \(هستهٔ رسمی 24\.12\.31 finalmask را نمی‌شناسد و آن را بدون ماسکش اجرا می‌کرد\)$/]
+  ]) {
+    const s = H.start({ settings: { lang } });
+    t.after(() => s.service.shutdown());
+    s.state.check = { ok: false, pattnNeeded: true, finalmaskIgnored: true, coreVersion: '24.12.31', error: 'xray 24.12.31 does not know finalmask (26.3.27 and newer do) — it would run this server without its mask', plaintextRejected: false };
+    await assert.rejects(s.service.invoke('connect', SERVER.id), (e) => re.test(e.message) || assert.fail(e.message));
+    assert.equal(s.state.xray.starts.length, 0, 'nothing started');
+  }
+});
+
 test('fix 20: a core that is still running when the 20 s are up is still given the gateway (a slow bind is not a death)', async (t) => {
   const s = H.start({}, { waitForLocalPort: async () => false });
   t.after(() => s.service.shutdown());

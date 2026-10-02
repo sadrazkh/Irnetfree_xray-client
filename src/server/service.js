@@ -24,7 +24,7 @@ const { resolveHost } = require('../main/trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
 const { assetStatus: scanAssets, downloadedFileNames } = require('../main/assets');
 const { geoTokensOf, checkGeoTokens, geoCodeHint } = require('../main/geoCheck');
-const { XrayManager, getFreePort, getFreePorts } = require('../main/xrayManager');
+const { XrayManager, getFreePort, getFreePorts, versionBelow } = require('../main/xrayManager');
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('../main/netutils');
 const { Store } = require('../main/store');
@@ -163,16 +163,6 @@ const DEFAULT_SETTINGS = {
 
 /** The official core the LAN's DNS plan was verified on (dnsBuilder.js: the hijack's `rules` form). */
 const CORE_DNS_VERIFIED = '26.3.27';
-
-/** "24.12.31" below "26.3.27", compared as numbers; a string with no x.y.z in it is never below anything. */
-function versionBelow(v, min) {
-  const parse = (s) => { const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(s || '')); return m ? m.slice(1, 4).map(Number) : null; };
-  const a = parse(v);
-  const b = parse(min);
-  if (!a || !b) return false;
-  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
-  return false;
-}
 
 function defaultDataDir() {
   const base = process.env.IRNETFREE_DATA
@@ -1496,10 +1486,17 @@ function createService(opts = {}) {
       // The fork's finalmask, refused by the official core, and no fork to
       // fall back to (xrayManager.validateWithFallback): what to install is
       // the message — the renderer offers the download on the product name.
+      // (finalmaskIgnored: an official core older than 26.3.27 passes the
+      // config — finalmask is an unknown key to it — and would run it unmasked)
       if (check.pattnNeeded) {
-        throw new Error(settings.lang === 'en'
-          ? `This server needs Xray-PattN — install it under Settings → Required files (the official core refuses it: ${check.error})`
-          : `این سرور به Xray-PattN نیاز دارد — از تنظیمات ← فایل‌های موردنیاز نصبش کن (هستهٔ رسمی آن را رد می‌کند: ${check.error})`);
+        const en = settings.lang === 'en';
+        const why = check.finalmaskIgnored
+          ? (en ? `the official core ${check.coreVersion} does not know finalmask and would run it without its mask`
+            : `هستهٔ رسمی ${check.coreVersion} finalmask را نمی‌شناسد و آن را بدون ماسکش اجرا می‌کرد`)
+          : (en ? `the official core refuses it: ${check.error}` : `هستهٔ رسمی آن را رد می‌کند: ${check.error}`);
+        throw new Error(en
+          ? `This server needs Xray-PattN — install it under Settings → Required files (${why})`
+          : `این سرور به Xray-PattN نیاز دارد — از تنظیمات ← فایل‌های موردنیاز نصبش کن (${why})`);
       }
       // The official core refuses plaintext VLESS/Trojan to public addresses and the
       // fork that accepts them is not installed — say so, the renderer offers the download.
