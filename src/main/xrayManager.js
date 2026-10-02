@@ -33,6 +33,24 @@ function usesFinalmask(config) {
   });
 }
 
+/**
+ * The first official release that knows `finalmask` at all. Before it the key
+ * is ignored like any unknown one — `-test` says "Configuration OK." and the
+ * server runs with its mask silently dropped (the OpenWrt 23.05 feed's
+ * xray-core is 24.12.31).
+ */
+const FINALMASK_SINCE = '26.3.27';
+
+/** "24.12.31" below "26.3.27", compared as numbers; a string with no x.y.z in it is never below anything. */
+function versionBelow(v, min) {
+  const parse = (s) => { const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(s || '')); return m ? m.slice(1, 4).map(Number) : null; };
+  const a = parse(v);
+  const b = parse(min);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
+}
+
 class XrayManager {
   constructor(opts = {}) {
     this.binPath = opts.binPath || null;
@@ -278,30 +296,53 @@ class XrayManager {
 
   /**
    * Validate on the requested engine. If the OFFICIAL core rejects the config
-   * only because it is plaintext VLESS/Trojan to a public address — or because
-   * it carries the fork's `finalmask` — and the patterniha fork is installed,
-   * validate on the fork instead: those are the things the fork exists for.
-   * Returns { ok, engine, error?, fellBack?, plaintextRejected?, pattnNeeded? }
-   * so the caller knows which core to start and can tell the user to install
-   * the fork when it is missing (`pattnNeeded`: a finalmask refusal).
+   * only because it is plaintext VLESS/Trojan to a public address and the
+   * patterniha fork is installed, validate on the fork instead; a config
+   * carrying the fork's `finalmask` goes to the fork first (see below) —
+   * those are the things the fork exists for. Returns { ok, engine, error?,
+   * fellBack?, plaintextRejected?, pattnNeeded?, finalmaskIgnored?,
+   * coreVersion? } so the caller knows which core to start and can tell the
+   * user to install the fork when it is missing (`pattnNeeded`: a finalmask
+   * the official core refuses — or, `finalmaskIgnored`, one it is too old to
+   * know and would drop).
    */
   async validateWithFallback(config, engineId) {
     const first = this.resolveEngine(engineId);
+    // A config carrying the fork's `finalmask` runs on the fork when it is
+    // there, and the official core is not asked: one older than 26.3.27
+    // PASSES it (an unknown key) and runs the server unmasked; a newer one
+    // refuses the fork's values — a failing -test, paid on every connect.
+    if (first.id === 'xray' && usesFinalmask(config)) {
+      if (this.resolveBin('xray-pattn')) {
+        const onFork = await this.validate(config, 'xray-pattn');
+        if (!onFork.ok) return { ok: false, engine: 'xray-pattn', error: onFork.error, plaintextRejected: false };
+        this.onLog(`This config carries finalmask (the patterniha fork's transport mask) — running it on ${engineLabel('xray-pattn')}`, 'info');
+        return { ok: true, engine: 'xray-pattn', fellBack: true };
+      }
+      const r = await this.validate(config, 'xray');
+      if (!r.ok) {
+        return { ok: false, engine: 'xray', error: r.error, plaintextRejected: PLAINTEXT_REJECT.test(r.error || ''), ...(FINALMASK_REJECT.test(r.error || '') ? { pattnNeeded: true } : {}) };
+      }
+      const v = await this.version('xray');
+      if (versionBelow(v, FINALMASK_SINCE)) {
+        return {
+          ok: false, engine: 'xray', pattnNeeded: true, finalmaskIgnored: true, coreVersion: v,
+          error: `xray ${v} does not know finalmask (${FINALMASK_SINCE} and newer do) — it would run this server without its mask`
+        };
+      }
+      return { ok: true, engine: 'xray' };
+    }
     const r = await this.validate(config, first.id);
     if (r.ok) return { ok: true, engine: first.id };
     const plaintextRejected = PLAINTEXT_REJECT.test(r.error || '');
-    const finalmaskRejected = !plaintextRejected && first.id === 'xray' && FINALMASK_REJECT.test(r.error || '') && usesFinalmask(config);
-    if (first.id === 'xray' && (plaintextRejected || finalmaskRejected) && this.resolveBin('xray-pattn')) {
+    if (first.id === 'xray' && plaintextRejected && this.resolveBin('xray-pattn')) {
       const again = await this.validate(config, 'xray-pattn');
       if (again.ok) {
-        this.onLog(plaintextRejected
-          ? `Official core rejects this plaintext config — running it on ${engineLabel('xray-pattn')}`
-          : `Official core rejects this config's finalmask (${r.error}) — running it on ${engineLabel('xray-pattn')}`, 'warn');
+        this.onLog(`Official core rejects this plaintext config — running it on ${engineLabel('xray-pattn')}`, 'warn');
         return { ok: true, engine: 'xray-pattn', fellBack: true };
       }
       return { ok: false, engine: 'xray-pattn', error: again.error, plaintextRejected: false };
     }
-    if (finalmaskRejected) return { ok: false, engine: first.id, error: r.error, plaintextRejected, pattnNeeded: true };
     return { ok: false, engine: first.id, error: r.error, plaintextRejected };
   }
 
@@ -507,4 +548,4 @@ function getFreePorts(n) {
   });
 }
 
-module.exports = { XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT };
+module.exports = { XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, versionBelow };

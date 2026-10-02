@@ -134,22 +134,65 @@ const FINALMASK_CFG = {
 };
 const LENGTH_MIN = 'infra/conf: LengthMin can\'t be 0';
 
-test('validateWithFallback: a finalmask config the official core refuses runs on the fork when it is installed', async () => {
+test('validateWithFallback: a finalmask config goes to the fork FIRST when it is installed — the official core is not asked', async () => {
+  // Asked first, an official core older than 26.3.27 (the 23.05 feed's
+  // 24.12.31) passes it — Xray ignores keys it does not know — and runs the
+  // server with its mask silently dropped; a 26.3.27 refuses it, and that
+  // failing -test (geo files loaded, on a Cortex-A7) was paid on every connect
+  // (review of v1.16.1). README: such a config must run on PattN.
   await withBin([exe('xray'), exe('xray-pattn')], async (xm, dir, logs) => {
     const calls = [];
-    xm.validate = async (cfg, id) => { calls.push(id); return id === 'xray' ? { ok: false, error: LENGTH_MIN } : { ok: true }; };
+    xm.validate = async (cfg, id) => { calls.push(id); return { ok: true }; };   // an official core that would have passed it too
     const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
     assert.deepEqual(r, { ok: true, engine: 'xray-pattn', fellBack: true });
-    assert.deepEqual(calls, ['xray', 'xray-pattn']);
+    assert.deepEqual(calls, ['xray-pattn']);
     assert.match(logs.at(-1), /finalmask.*Xray-PattN/);
+  });
+});
+
+test('validateWithFallback: …and what the fork refuses is the fork’s error (the official core knows even less)', async () => {
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
+    const calls = [];
+    xm.validate = async (cfg, id) => { calls.push(id); return { ok: false, error: 'infra/conf: bad finalmask' }; };
+    assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: false, engine: 'xray-pattn', error: 'infra/conf: bad finalmask', plaintextRejected: false });
+    assert.deepEqual(calls, ['xray-pattn']);
   });
 });
 
 test('validateWithFallback: …and says the fork is needed when it is not', async () => {
   await withBin([exe('xray')], async (xm) => {
     xm.validate = async () => ({ ok: false, error: LENGTH_MIN });
+    xm.version = async () => '26.3.27';
     const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
     assert.deepEqual(r, { ok: false, engine: 'xray', error: LENGTH_MIN, plaintextRejected: false, pattnNeeded: true });
+  });
+});
+
+test('validateWithFallback: with no fork, an official core older than 26.3.27 that PASSES a finalmask config still needs the fork — it would drop the mask', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const calls = [];
+    xm.validate = async (cfg, id) => { calls.push(id); return { ok: true }; };   // unknown keys are ignored: "Configuration OK."
+    xm.version = async () => '24.12.31';
+    const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
+    assert.equal(r.ok, false);
+    assert.equal(r.engine, 'xray');
+    assert.equal(r.pattnNeeded, true);
+    assert.equal(r.finalmaskIgnored, true);
+    assert.equal(r.coreVersion, '24.12.31');
+    assert.match(r.error, /xray 24\.12\.31 does not know finalmask \(26\.3\.27 and newer do\)/);
+  });
+});
+
+test('validateWithFallback: with no fork, an official core from 26.3.27 that accepts the finalmask runs it — and a config with none never asks the version', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    let asked = 0;
+    xm.validate = async () => ({ ok: true });
+    xm.version = async () => { asked++; return '26.3.27'; };
+    assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: true, engine: 'xray' });
+    assert.equal(asked, 1);
+    const plain = { inbounds: [], outbounds: [{ tag: 'proxy', protocol: 'vless', streamSettings: { network: 'tcp' } }] };
+    assert.deepEqual(await xm.validateWithFallback(plain, 'xray'), { ok: true, engine: 'xray' });
+    assert.equal(asked, 1);
   });
 });
 
