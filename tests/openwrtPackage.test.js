@@ -10,9 +10,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
 const { tar, untar, tgz, untgz } = require('../openwrt/tar');
-const { buildIpk, PKG, DEPENDS, PREFIX } = require('../openwrt/build-ipk');
+const { buildIpk, sourceDateEpoch, PKG, DEPENDS, PREFIX } = require('../openwrt/build-ipk');
 
 const ROOT = path.join(__dirname, '..');
 const VERSION = require('../package.json').version;
@@ -53,6 +54,93 @@ test('the ipk is what opkg expects: debian-binary, control, data — and is name
   assert.equal(path.basename(built.out), `${PKG}_${VERSION}_all.ipk`);
   assert.deepEqual(outer.map(e => e.name), ['./debian-binary', './control.tar.gz', './data.tar.gz']);
   assert.equal(outerMap['./debian-binary'].data.toString(), '2.0\n');
+});
+
+/**
+ * Every tar header's mtime in a gzipped tar, in order — the ustar field at
+ * offset 136, octal. Our reader leaves it out; this is all the tests need.
+ */
+function mtimesOf(gz) {
+  const buf = zlib.gunzipSync(gz);
+  const out = [];
+  for (let off = 0; off + 512 <= buf.length;) {
+    const h = buf.subarray(off, off + 512);
+    if (h.every(b => b === 0)) break;
+    out.push(parseInt(h.subarray(136, 148).toString('utf8').replace(/\0[\s\S]*$/, '').trim(), 8));
+    off += 512 + Math.ceil((parseInt(h.subarray(124, 136).toString('utf8').replace(/\0[\s\S]*$/, '').trim(), 8) || 0) / 512) * 512;
+  }
+  return out;
+}
+
+/** The mtimes of all three tars an ipk is made of: the outer one, control.tar.gz and data.tar.gz. */
+function ipkMtimes(file) {
+  const raw = fs.readFileSync(file);
+  const members = byName(untgz(raw));
+  return [...mtimesOf(raw), ...mtimesOf(members['./control.tar.gz'].data), ...mtimesOf(members['./data.tar.gz'].data)];
+}
+
+/** Runs `fn` with SOURCE_DATE_EPOCH set to `value` (undefined: unset), then puts the environment back. */
+function withEpoch(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'SOURCE_DATE_EPOCH');
+  const old = process.env.SOURCE_DATE_EPOCH;
+  if (value === undefined) delete process.env.SOURCE_DATE_EPOCH; else process.env.SOURCE_DATE_EPOCH = value;
+  try { return fn(); } finally { if (had) process.env.SOURCE_DATE_EPOCH = old; else delete process.env.SOURCE_DATE_EPOCH; }
+}
+
+/*
+ * The files' mtimes. uhttpd hands a file's mtime to the browser as
+ * Last-Modified and sends no Cache-Control, so the browser keeps a LuCI view
+ * fresh for a tenth of its age: stamped 1970 that is years, and after an
+ * upgrade the owner kept seeing the old pages. The release stamps the tagged
+ * commit's time (SOURCE_DATE_EPOCH, release.yml); a build without it takes the
+ * checkout's commit time — the same commit, the same bytes, and never 1970.
+ */
+test('mtimes: SOURCE_DATE_EPOCH stamps every member of all three tars, and the same epoch builds the same bytes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-ipk-sde-'));
+  try {
+    const epoch = 1790000000;
+    const a = withEpoch(String(epoch), () => fs.readFileSync(buildIpk({ root: ROOT, outDir: path.join(dir, 'a') }).out));
+    const b = withEpoch(String(epoch), () => fs.readFileSync(buildIpk({ root: ROOT, outDir: path.join(dir, 'b') }).out));
+    assert.ok(a.equals(b), 'reproducible: one epoch, one package');
+    const all = ipkMtimes(path.join(dir, 'a', `${PKG}_${VERSION}_all.ipk`));
+    assert.ok(all.length > 50, 'every header was read');
+    assert.deepEqual([...new Set(all)], [epoch]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('mtimes: without SOURCE_DATE_EPOCH the checkout\'s commit time — never 1970', (t) => {
+  const git = spawnSync('git', ['-C', ROOT, 'log', '-1', '--format=%ct'], { encoding: 'utf8' });
+  if (git.status !== 0 || !/^\d+$/.test(String(git.stdout).trim())) return t.skip('not a git checkout');
+  const commit = Number(String(git.stdout).trim());
+  assert.equal(sourceDateEpoch({ env: {}, root: ROOT }), commit);
+  assert.equal(sourceDateEpoch({ env: { SOURCE_DATE_EPOCH: '' }, root: ROOT }), commit, 'an empty value is no value');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-ipk-git-'));
+  try {
+    const out = withEpoch(undefined, () => buildIpk({ root: ROOT, outDir: dir }).out);
+    assert.deepEqual([...new Set(ipkMtimes(out))], [commit]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('mtimes: no SOURCE_DATE_EPOCH and no git — the build time, still never 1970', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-ipk-nogit-'));
+  try {
+    if (spawnSync('git', ['-C', dir, 'rev-parse', '--git-dir'], { encoding: 'utf8' }).status === 0) return t.skip('the temp dir is inside a git checkout');
+    assert.equal(sourceDateEpoch({ env: {}, root: dir, now: () => 1790000000999 }), 1790000000);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('mtimes: a SOURCE_DATE_EPOCH that is not whole seconds refuses to build', () => {
+  for (const bad of ['yesterday', '-5', '1.5', '17e8', '0x10']) {
+    assert.throws(() => sourceDateEpoch({ env: { SOURCE_DATE_EPOCH: bad }, root: ROOT }), /SOURCE_DATE_EPOCH/, bad);
+  }
+  assert.equal(sourceDateEpoch({ env: { SOURCE_DATE_EPOCH: ' 1790000000\n' }, root: ROOT }), 1790000000, 'surrounding whitespace is fine');
+  assert.equal(sourceDateEpoch({ env: { SOURCE_DATE_EPOCH: '0' }, root: ROOT }), 0, 'an explicit 0 is what was asked for');
 });
 
 test('control: the fields, the dependencies the router needs, conffiles, and the standard OpenWrt scripts', () => {
