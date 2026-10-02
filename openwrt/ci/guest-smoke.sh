@@ -38,6 +38,11 @@ uci show firewall | grep -E "^firewall\.irnetfree_(lan|guest)\." || true
 [ "$(uci -q get firewall.irnetfree_guest.src)" = guest ] && [ "$(uci -q get firewall.irnetfree_guest.dest)" = irnetfree ] \
 	|| { echo "the guest zone forwards to wan but not to the tunnel zone — no internet for it while connected"; exit 1; }
 [ "$(uci show firewall | grep -c "\.dest='irnetfree'")" = 2 ] || { echo "a forwarding to the tunnel zone is missing or doubled"; uci show firewall | grep irnetfree; exit 1; }
+# the installed files are not dated 1970 (build-ipk stamps the commit's time): uhttpd hands a view's mtime to the
+# browser as Last-Modified, and a 1970 view stayed "fresh" in the browser for years after an upgrade
+m="$(date -r /www/luci-static/resources/view/irnetfree/overview.js +%s 2>/dev/null || echo '?')"
+echo "LuCI overview.js mtime: $m ($(date -u -r /www/luci-static/resources/view/irnetfree/overview.js 2>/dev/null || echo '?'))"
+case "$m" in ''|*[!0-9]*) echo "(date -r cannot read it on this image: not asserted)" ;; *) [ "$m" -gt 31536000 ] || { echo "the LuCI views landed dated 1970: browsers keep the old ones after an upgrade"; exit 1; } ;; esac
 
 say "test tools and the feed cores (kmod-veth: the WAN-change interface and the LAN-side namespace below)"
 opkg install sing-box xray-core curl jq kmod-veth >/dev/null
