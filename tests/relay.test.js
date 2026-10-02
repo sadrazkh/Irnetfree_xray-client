@@ -465,6 +465,110 @@ test('a request that never gets its answer times out with 504 and a CANCEL; the 
   assert.equal(agent.readyState, 'open');
 });
 
+test('a slow-body request is cut by the HTTP request timeout, while an SSE response longer than it still streams (review I2)', async (t) => {
+  const { port, login, addRouter, connectAgent, open } = await startRelay(t, { httpRequestTimeoutMs: 600, connectionsCheckingIntervalMs: 100 });
+  const jar = await login();
+  const { id, token } = await addRouter(jar, 'home');
+  const agent = await connectAgent(token);
+  t.after(() => agent.socket.destroy());
+  let reply;
+  serveAgent(agent, (rec, rep) => { reply = rep; rep.head(200, { 'content-type': 'text/event-stream' }); rep.body(': hi\n\n'); });
+  await open(jar, id);
+  // (a) the SSE response outlives requestTimeout: six chunks over 1.5 s all arrive
+  const chunks = [];
+  const streamed = new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/events', headers: { Cookie: `relay_session=${jar.relay_session}; relay_router=${jar.relay_router}` } }, (res) => {
+      res.on('data', (c) => chunks.push(c.toString()));
+      res.on('end', () => resolve());
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  await sleep(100);
+  for (let i = 0; i < 6; i++) { reply.body(`data: ${i}\n\n`); await sleep(250); }
+  reply.end();
+  await streamed;
+  assert.equal(chunks.join('').split('\n\n').filter((s) => s.startsWith('data:')).length, 6, chunks.join(''));
+  // (b) a request whose body trickles in is cut (408 or a closed socket) within a couple of seconds
+  const net = require('node:net');
+  const outcome = await new Promise((resolve) => {
+    let buf = '';
+    const started = Date.now();
+    const s = net.connect(port, '127.0.0.1', () => s.write(`POST /_relay/login HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: http://127.0.0.1:${port}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 100\r\n\r\np`));
+    s.setEncoding('utf8');
+    s.on('data', (d) => { buf += d; });
+    s.on('close', () => resolve({ buf, ms: Date.now() - started }));
+    s.on('error', () => {});
+    setTimeout(() => { s.destroy(); resolve({ buf, ms: Infinity }); }, 4000);
+  });
+  assert.ok(outcome.ms < 3000, 'the trickling request was cut: ' + outcome.ms + ' ms');
+  assert.ok(/408|^$/.test(outcome.buf.split('\r\n')[0] || ''), 'a 408 or a plain close, got: ' + outcome.buf.slice(0, 60));
+});
+
+test('the store: every write uses its own tmp name (two containers share one volume and both are PID 1 — review I3)', async (t) => {
+  const { relay } = await startRelay(t);
+  const seen = [];
+  const orig = fs.openSync;
+  fs.openSync = (p, ...a) => { if (/relay\.json\..*\.tmp$/.test(String(p))) seen.push(String(p)); return orig(p, ...a); };
+  try {
+    relay.store.update((d) => { d.routers.a = { name: 'a' }; });
+    relay.store.update((d) => { d.routers.b = { name: 'b' }; });
+  } finally { fs.openSync = orig; }
+  assert.equal(seen.length, 2);
+  assert.notEqual(seen[0], seen[1], 'a new tmp name per write');
+  assert.ok(seen.every((p) => p.includes('.' + process.pid + '.')), 'the pid is in it too');
+  assert.deepEqual(Object.keys(relay.store.get().routers).sort(), ['a', 'b']);
+  assert.ok(!fs.readdirSync(path.dirname(relay.store.file)).some((n) => n.endsWith('.tmp')), 'no tmp file left behind');
+});
+
+test('a store write that fails while an agent says hello is a log line, not a crash of the relay (review I3)', async (t) => {
+  const { port, relay, login, addRouter, connectAgent, open } = await startRelay(t);
+  const jar = await login();
+  const { id, token } = await addRouter(jar, 'home');
+  await open(jar, id);
+  const realUpdate = relay.store.update;
+  relay.store.update = () => { throw new Error('ENOSPC: no space left on device (faked)'); };
+  t.after(() => { relay.store.update = realUpdate; });
+  const agent = await connectAgent(token);
+  t.after(() => agent.socket.destroy());
+  serveAgent(agent, (rec, rep) => { rep.head(200, { 'content-type': 'text/plain' }); rep.body('alive'); rep.end(); });
+  await sleep(100);
+  assert.equal(agent.readyState, 'open', 'the link stays up');
+  const r = await request(port, 'GET', '/', { jar });
+  assert.equal(r.status, 200);
+  assert.equal(r.body, 'alive');
+  relay.store.update = realUpdate;
+  assert.equal((await request(port, 'GET', '/_relay/', { jar })).status, 200, 'the relay still answers');
+});
+
+test('behind the proxy the login limiter keys on the hop Traefik appended — the last X-Forwarded-For entry (review M1)', async (t) => {
+  const { port, origin } = await startRelay(t);
+  const attempt = (xff, password) => request(port, 'POST', '/_relay/login', { headers: { Origin: origin, 'X-Forwarded-For': xff, 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ password }) });
+  // five failures with a different first hop each time, the same last hop: the sixth is blocked
+  for (let i = 0; i < 5; i++) assert.equal((await attempt(`203.0.113.${i + 1}, 198.51.100.9`, 'wrong one ' + i)).status, 401);
+  assert.equal((await attempt('203.0.113.77, 198.51.100.9', PASSWORD)).status, 429);
+  // another last hop is not
+  assert.equal((await attempt('203.0.113.1, 198.51.100.10', PASSWORD)).status, 302);
+});
+
+test('sessions do not survive a RELAY_PASSWORD change; they do survive a restart with the same one (review M2)', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-relay-pw-'));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+  const start = async (password) => { const r = createRelay({ password, dataDir: dir, log: () => {} }); await r.listen(0, '127.0.0.1'); return r; };
+  const a = await start(PASSWORD);
+  const jar = {};
+  const login = await request(a.port, 'POST', '/_relay/login', { jar, headers: { Origin: 'http://127.0.0.1:' + a.port, 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ password: PASSWORD }) });
+  assert.equal(login.status, 302);
+  await a.close();
+  const same = await start(PASSWORD);
+  assert.equal((await request(same.port, 'GET', '/_relay/', { jar })).status, 200, 'the same password: the session lives on');
+  await same.close();
+  const rotated = await start('a brand new password for the relay');
+  assert.equal((await request(rotated.port, 'GET', '/_relay/', { jar })).status, 302, 'a new password: everyone is logged out');
+  await rotated.close();
+});
+
 test('the Persian pages: ?lang=fa switches the dashboard and the login page to Persian with a cookie', async (t) => {
   const { port, login } = await startRelay(t);
   const jar = await login();
