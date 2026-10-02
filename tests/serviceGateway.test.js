@@ -188,7 +188,7 @@ test('R4: a gateway that does not come up fails the connect — the core is stop
   const s = start();
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
-  await assert.rejects(s.service.invoke('connect', SERVER.id), /Gateway did not come up \(sing-box\)/);
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /The whole-network tunnel did not come up \(sing-box\)/);
   assert.equal(s.state.xray.running, false, 'the core this connect started is stopped again');
   assert.equal(connectedCount(s), 0, 'no "connected, proxy only"');
   assert.equal((await s.service.invoke('app:init')).activeServerId, null);
@@ -452,12 +452,12 @@ test('a first connect by hand whose gateway fails ends every open panel on the e
   const s = start();
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
-  await assert.rejects(s.service.invoke('connect', SERVER.id), /Gateway did not come up/);
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /The whole-network tunnel did not come up/);
   const last = s.statuses.at(-1);
   assert.equal(last.state, 'error', JSON.stringify(s.statuses.map(x => x.state)));
-  assert.match(last.message, /Gateway did not come up \(sing-box\)/);
+  assert.match(last.message, /The whole-network tunnel did not come up \(sing-box\)/);
   assert.ok(!s.syslog.some(([, l]) => /^irnetfree: error — /.test(l)), 'syslog has the reason once, from the log line');
-  assert.ok(s.syslog.some(([, l]) => /\[error\] .*Gateway did not come up/.test(l)));
+  assert.ok(s.syslog.some(([, l]) => /\[error\] .*The whole-network tunnel did not come up/.test(l)));
 });
 
 const withTiming = (over) => ({ timing: Object.assign({}, fakes.deps(fakes.makeState()).timing, over) });
@@ -611,10 +611,10 @@ test('R13: warnings, errors and the connection’s state reach syslog marked irn
   await s.service.invoke('connect', SERVER.id);
   await s.service.invoke('disconnect');
   const text = s.syslog.map(([lvl, l]) => `${lvl} ${l}`).join('\n');
-  assert.match(text, /^err irnetfree: \[error\] .*Gateway did not come up/m);
+  assert.match(text, /^err irnetfree: \[error\] .*The whole-network tunnel did not come up/m);
   assert.match(text, /^info irnetfree: connected — ci-upstream, gateway up$/m);
   assert.match(text, /^info irnetfree: disconnected$/m);
-  assert.doesNotMatch(text, /Gateway up on br-lan/, 'an info log line stays out of syslog');
+  assert.doesNotMatch(text, /Whole-network tunnel \(gateway\) up on br-lan/, 'an info log line stays out of syslog');
   for (const [, l] of s.syslog) assert.ok(!l.includes('\n'), 'one line per entry');
 });
 

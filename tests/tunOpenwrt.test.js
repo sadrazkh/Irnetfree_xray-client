@@ -163,15 +163,21 @@ test('start: nft table, then the bypass rules, then sing-box, then verify — in
   assert.deepEqual(inner.calls[0], ['start', 10808, ['1.2.3.4'], { ipv6: false, strict: false, apps: null, bypassMacs: ['AA:BB:CC:DD:EE:01', 'bad'] }],
     'the options are passed through untouched (no gso key: sing-box 1.12 refuses it, and enables GSO itself)');
   assert.equal(inner.lang, 'en', 'the language the service set is handed down');
-  assert.ok(logs.some(([, l]) => /Gateway up on br-lan.*1 excluded/.test(l)), JSON.stringify(logs));
+  assert.ok(logs.some(([, l]) => /Whole-network tunnel \(gateway\) up on br-lan: every device behind the router goes through the VPN; 1 excluded by MAC/.test(l)), JSON.stringify(logs));
   // a second start is a no-op while active
   await tun.start(10808, [], [], {});
   assert.equal(inner.calls.filter(c => c[0] === 'start').length, 1);
 });
 
+test('the failure says "whole-network tunnel" in Persian too — the word the owner could not place was «گیت‌وی»', async () => {
+  const { tun } = make({ answers: [[/^nft -f/, new Error('nft: command not found')]] });
+  tun.lang = 'fa';
+  await assert.rejects(tun.start(10808, [], [], {}), /^Error: تونل کل شبکه بالا نیامد \(nft\): nft: command not found$/);
+});
+
 test('start fails at nft: nothing else runs, the error names the step', async () => {
   const { tun, inner, lines } = make({ answers: [[/^nft -f/, new Error('nft: command not found')]] });
-  await assert.rejects(tun.start(10808, [], [], {}), /Gateway did not come up \(nft\): nft: command not found/);
+  await assert.rejects(tun.start(10808, [], [], {}), /The whole-network tunnel did not come up \(nft\): nft: command not found/);
   assert.equal(tun.active, false);
   assert.equal(inner.calls.filter(c => c[0] === 'start').length, 0, 'sing-box was never started');
   // rollback still clears what might be there

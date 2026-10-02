@@ -1384,8 +1384,8 @@ function createService(opts = {}) {
     // missing sing-box / nft is a failed connect, before any core is started.
     if (OPENWRT && settings.tunMode && !myTun.isAvailable()) {
       throw new Error(settings.lang === 'en'
-        ? 'The gateway needs sing-box and nft on the router: opkg install sing-box nftables (or Settings → Required files for sing-box)'
-        : 'گیت‌وی روی روتر به sing-box و nft نیاز دارد: opkg install sing-box nftables (یا sing-box از تنظیمات → فایل‌های موردنیاز)');
+        ? 'The whole-network tunnel needs sing-box and nft on the router: opkg install sing-box nftables (or Settings → Required files for sing-box)'
+        : 'تونل کل شبکه روی روتر به sing-box و nft نیاز دارد: opkg install sing-box nftables (یا sing-box از تنظیمات → فایل‌های موردنیاز)');
     }
   if (settings.tunMode && myTun.prepare) {
     await myTun.prepare({ strict: settings.leakGuard === 'strict' });

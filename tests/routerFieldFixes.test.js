@@ -51,3 +51,17 @@ test('fix 7: the strict leak guard on a router is sing-box’s strict_route — 
   assert.ok(!s.logs.some(l => /tun2socks backend/.test(l.line)), lines(s).join('\n'));
   assert.ok(!s.syslog.some(([, l]) => /tun2socks backend/.test(l)), 'nor in syslog');
 });
+
+/* ----------------------------- fix 8: "the whole-network tunnel", not "the gateway" ----------------------------- */
+
+test('fix 8: no sing-box on the router — the refusal names the whole-network tunnel, in both languages', async (t) => {
+  for (const [lang, re] of [
+    ['en', /^The whole-network tunnel needs sing-box and nft on the router: opkg install sing-box nftables \(or Settings → Required files for sing-box\)$/],
+    ['fa', /^تونل کل شبکه روی روتر به sing-box و nft نیاز دارد: opkg install sing-box nftables \(یا sing-box از تنظیمات → فایل‌های موردنیاز\)$/]
+  ]) {
+    const s = H.start({ settings: { lang } });
+    t.after(() => s.service.shutdown());
+    s.state.singboxMissing = true;
+    await assert.rejects(s.service.invoke('connect', SERVER.id), (e) => re.test(e.message) || assert.fail(e.message));
+  }
+});

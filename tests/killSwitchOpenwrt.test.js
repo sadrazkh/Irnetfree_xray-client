@@ -242,7 +242,7 @@ test('K3: a new service started with the intent set and the setting on arms BEFO
   const order = [];
   s.ks.lines.forEach((l) => { if (l === 'nft -f /tmp/irnetfree-ks.nft') order.push('ks'); });
   assert.ok(s.logs.findIndex(l => /Kill switch armed \(start\)/.test(l.line)) >= 0, JSON.stringify(s.logs.map(l => l.line)));
-  assert.ok(s.logs.findIndex(l => /Kill switch armed \(start\)/.test(l.line)) < s.logs.findIndex(l => /Gateway up on/.test(l.line)), 'armed before the gateway came up');
+  assert.ok(s.logs.findIndex(l => /Kill switch armed \(start\)/.test(l.line)) < s.logs.findIndex(l => /Whole-network tunnel \(gateway\) up on/.test(l.line)), 'armed before the gateway came up');
   assert.deepEqual(s.service.connSnapshot().killSwitch, { enabled: true, armed: true, blocking: false });
 
   const off = service({ connectIntent: SERVER.id, settings: { killSwitch: false, autoConnect: false } });
@@ -286,7 +286,7 @@ test('I1: at start the switch arms only when the boot connect will run — "Conn
   t.after(() => on.service.shutdown());
   await until(() => connectedCount(on) === 1, 'the boot connect');
   assert.equal(armed(on), 1);
-  assert.ok(on.logs.findIndex(l => /Kill switch armed \(start\)/.test(l.line)) < on.logs.findIndex(l => /Gateway up on/.test(l.line)));
+  assert.ok(on.logs.findIndex(l => /Kill switch armed \(start\)/.test(l.line)) < on.logs.findIndex(l => /Whole-network tunnel \(gateway\) up on/.test(l.line)));
 });
 
 test('I2: the kill switch module can ask the kernel whether its table is there, and counts as armed only while it is', async () => {
