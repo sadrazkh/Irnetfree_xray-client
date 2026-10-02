@@ -72,19 +72,28 @@ function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no wait: poll faster */ }
 }
 
-/** The real uids of every running process named `name` (/proc/<pid>/comm, /proc/<pid>/status); [] off Linux. */
+/**
+ * The real uids of the running processes named `name` (/proc/<pid>/comm,
+ * /proc/<pid>/status) — not counting one whose parent has the same name: a
+ * helper it forked. dnsmasq forks its dhcp-script helper BEFORE it drops root
+ * (OpenWrt starts it --user=dnsmasq), so that helper stays uid 0 — and sends
+ * no DNS. [] off Linux.
+ */
 function procUidsOf(name, fsImpl = fs) {
-  const uids = new Set();
   let pids = [];
   try { pids = fsImpl.readdirSync('/proc').filter(p => /^\d+$/.test(p)); } catch { return []; }
+  const found = [];
   for (const pid of pids) {
     try {
       if (String(fsImpl.readFileSync(`/proc/${pid}/comm`, 'utf8')).trim() !== name) continue;
-      const m = /^Uid:\s+(\d+)/m.exec(String(fsImpl.readFileSync(`/proc/${pid}/status`, 'utf8')));
-      if (m) uids.add(Number(m[1]));
+      const status = String(fsImpl.readFileSync(`/proc/${pid}/status`, 'utf8'));
+      const uid = /^Uid:\s+(\d+)/m.exec(status);
+      const ppid = /^PPid:\s+(\d+)/m.exec(status);
+      if (uid) found.push({ pid, ppid: ppid ? ppid[1] : null, uid: Number(uid[1]) });
     } catch { /* gone meanwhile */ }
   }
-  return [...uids];
+  const named = new Set(found.map(p => p.pid));
+  return [...new Set(found.filter(p => !named.has(p.ppid)).map(p => p.uid))];
 }
 
 /**

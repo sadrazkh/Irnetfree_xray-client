@@ -329,20 +329,28 @@ test('D3: …not when dnsmasq runs as the same user — its upstream to them wou
   assert.ok(bad.logs.some(([lvl, l]) => lvl === 'error' && /178\.22\.122\.100\/32/.test(l) && /uidrange/.test(l)), JSON.stringify(bad.logs));
 });
 
-test('procUidsOf: the real uid of every process by that name, from /proc; nothing when /proc cannot be read', () => {
+test('procUidsOf: the real uid of every process by that name that is not its own helper, from /proc; nothing when /proc cannot be read', () => {
   const { procUidsOf } = require('../src/main/tunOpenwrt');
+  // OpenWrt 23.05 as the QEMU job saw it (run 37066289759): dnsmasq --user=dnsmasq
+  // (uid 453), and the dhcp-script helper it forks BEFORE dropping root — a
+  // dnsmasq that stays uid 0 and sends no DNS. Counted, it read as "dnsmasq runs
+  // as root" and no own-lookup rule was laid.
   const files = {
-    '/proc/1/comm': 'procd\n', '/proc/1/status': 'Name:\tprocd\nUid:\t0\t0\t0\t0\n',
-    '/proc/812/comm': 'dnsmasq\n', '/proc/812/status': 'Name:\tdnsmasq\nUid:\t453\t453\t453\t453\n',
+    '/proc/1/comm': 'procd\n', '/proc/1/status': 'Name:\tprocd\nPPid:\t0\nUid:\t0\t0\t0\t0\n',
+    '/proc/812/comm': 'dnsmasq\n', '/proc/812/status': 'Name:\tdnsmasq\nPPid:\t1\nUid:\t453\t453\t453\t453\n',
+    '/proc/815/comm': 'dnsmasq\n', '/proc/815/status': 'Name:\tdnsmasq\nPPid:\t812\nUid:\t0\t0\t0\t0\n',
     '/proc/813/comm': 'dnsmasq\n'   // gone before its status was read
   };
   const fsImpl = {
-    readdirSync: () => ['1', '812', '813', 'self', 'net'],
+    readdirSync: () => ['1', '812', '813', '815', 'self', 'net'],
     readFileSync: (p) => { if (!(p in files)) throw new Error('ENOENT ' + p); return files[p]; }
   };
   assert.deepEqual(procUidsOf('dnsmasq', fsImpl), [453]);
   assert.deepEqual(procUidsOf('cloudflared', fsImpl), []);
   assert.deepEqual(procUidsOf('dnsmasq', { readdirSync: () => { throw new Error('no /proc'); } }), []);
+  // a dnsmasq with no --user: the main process is root, and that is what counts
+  files['/proc/812/status'] = 'Name:\tdnsmasq\nPPid:\t1\nUid:\t0\t0\t0\t0\n';
+  assert.deepEqual(procUidsOf('dnsmasq', fsImpl), [0]);
 });
 
 test('M1: the 8997 sweep deletes until the kernel has none left — not at most four per family (the two singletons keep their bound)', async () => {
