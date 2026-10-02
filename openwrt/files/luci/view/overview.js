@@ -9,9 +9,9 @@
 
 /*
  * Services → IRNetFree → Overview: the state of the tunnel and the VPN switch,
- * the config picker with Connect / Reconnect / Test connection / Update
- * subscriptions, the kill switch and remote-access states, and the link to the
- * full web UI. Every control acts at once — there is no Save. The status is
+ * whether every device behind the router goes through it, the config picker
+ * with Connect / Reconnect / Test connection / Update subscriptions, the kill
+ * switch and remote-access states, and the link to the full web UI. Every control acts at once — there is no Save. The status is
  * read every 3 s, the config list every 30 s and soon after a subscription
  * update. Text from the service (config names, errors) only ever goes in as
  * text nodes, never as HTML.
@@ -51,6 +51,7 @@ return view.extend({
 		el.badge = E('span', {});
 		el.vpn = E('input', { 'type': 'checkbox', 'id': 'irnf-vpn', 'change': ui.createHandlerFn(this, 'handleSwitch') });
 		el.vpnText = E('label', { 'for': 'irnf-vpn', 'style': 'margin:0 .5em' });
+		el.tun = E('span', {});
 		el.config = E('span', {});
 		el.uptime = E('span', {});
 		el.traffic = E('span', {});
@@ -72,6 +73,7 @@ return view.extend({
 				E('table', { 'class': 'table' }, [
 					row(common.t('Connection'), el.badge),
 					row(common.t('VPN'), E('span', {}, [ el.vpn, el.vpnText ])),
+					row(common.t('Whole-network tunnel'), el.tun),
 					row(common.t('Config'), el.config),
 					row(common.t('Connected for'), el.uptime),
 					row(common.t('Traffic'), el.traffic),
@@ -162,6 +164,8 @@ return view.extend({
 		var on = common.vpnOn(st.state);
 		if (!this.busy) el.vpn.checked = on;
 		el.vpnText.textContent = on ? common.t('On') : common.t('Off');
+		// the gateway itself: up only while connected with the TUN (the service's st.tun)
+		el.tun.textContent = st.tun ? common.t('On — every device behind the router goes through the VPN') : common.t('Off');
 		el.config.textContent = st.label ? (st.engine ? st.label + ' (' + st.engine + ')' : String(st.label)) : '—';
 		this.since = (st.state === 'connected' && st.since) ? +st.since : null;
 		this.showUptime();
@@ -217,13 +221,20 @@ return view.extend({
 	},
 
 	/* run an action, report a refusal (the service's, or a call that never got
-	 * through), then show the real state at once — the switch snaps back too */
+	 * through), then show the real state at once — the switch snaps back too.
+	 * A Connect on the config that is already up rebuilds nothing ({already}):
+	 * said next to the buttons and at the top, or the click looks dead (L4). */
 	act: function (p) {
-		var self = this;
+		var self = this, out = this.el.result;
 		this.busy = true;
+		out.textContent = '';
 		return p.then(function (r) {
 			var err = common.errorOf(r);
 			if (err) common.notify(err, 'danger');
+			else if (r.already) {
+				out.textContent = common.t('This config is already connected — press Reconnect to apply changes.');
+				common.notify(out.textContent);
+			}
 		}, common.failed).then(function () {
 			self.busy = false;
 			return self.refresh();

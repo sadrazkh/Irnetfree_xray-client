@@ -10,11 +10,22 @@
 /*
  * Services → IRNetFree → Remote access: the relay (your own server the router
  * keeps a link to) and Cloudflare Tunnel, each with its live state. The
- * settings live in the service (remote_get / remote_set); Save sends only
- * what changed and the service applies it at once. Tokens are write-only:
- * the service only ever says whether one is set, the fields start empty, and a
- * token is sent only when one was typed. The states are re-read every 5 s.
+ * settings live in the service (remote_get / remote_set); nothing here acts
+ * before Save, which sends only what changed, and the service applies it at
+ * once. Tokens are write-only: the service only ever says whether one is set,
+ * the fields start empty, and a token is sent only when one was typed.
+ * «Enabled» is checked on the page the way remote_set checks it — the relay
+ * needs its URL and a device token, Cloudflare needs cloudflared and a tunnel
+ * token — and a refused Save is a dialog with the reason (v1.16.1: a refusal
+ * used to be a notice at the top, in English, easy to miss). The states are
+ * re-read every 5 s.
  */
+
+/* What an option holds now: its widget's value, else what it was rendered with. */
+function formOf(o, sid) {
+	var v = (o && typeof o.formvalue === 'function') ? o.formvalue(sid) : null;
+	return (v == null && o) ? o.cfgvalue(sid) : v;
+}
 
 return view.extend({
 	load: function () {
@@ -29,6 +40,11 @@ return view.extend({
 		var self = this, conf = data[0];
 		var el = this.el = {};
 		this.map = null;
+		this.opts = { relay: {}, cloudflared: {} };
+		this.pollSeq = 0;         // every status read is numbered when it leaves
+		this.installAfter = -1;   // the reads that left before Install was accepted
+		this.installing = false;
+		this.installError = null;
 
 		if (common.errorOf(conf)) {
 			return E('div', { 'class': 'cbi-map' }, [
@@ -60,15 +76,28 @@ return view.extend({
 				enabled: this.loaded.cloudflared.enabled ? '1' : '0'
 			}
 		}, common.t('Remote access'),
-			common.t('Control this router from outside the home — turn the VPN on or off, change the config — without a static IP, even behind CGNAT. The control link never goes through the VPN. Both ways can be on at once.'));
+			common.t('Control this router from outside the home — turn the VPN on or off, change the config — without a static IP, even behind CGNAT. The control link never goes through the VPN. Both ways can be on at once.') + ' ' +
+			common.t('Changes take effect only when you press Save at the bottom of the page.'));
 
-		var s = m.section(form.NamedSection, 'relay', 'relay', common.t('Your own relay'),
-			common.t('A small server you run (on Harbora or any Docker host) that this router keeps a link to. Add the router on the relay, then paste the device token it shows here.'));
-		var o = s.option(form.Flag, 'enabled', common.t('Enabled'));
+		var enabledCheck = function (section_id) { return self.enableProblem(section_id) || true; };
+		var recheck = function (section_id) { self.recheck(section_id); return true; };
+
+		var s = m.section(form.NamedSection, 'relay', 'relay', common.t('Your own relay'));
+		// what the relay is, before anything is asked: there is no relay unless you run one
+		var o = s.option(form.DummyValue, '_about');
+		o.renderWidget = function () {
+			return E('div', { 'class': 'alert-message notice' }, [
+				E('p', {}, [ common.t('The relay is a server you run yourself; IRNetFree does not provide one. Deploy relay/ on Harbora or any Docker host, press Add router on the relay’s page, then paste the relay URL and the 43-character device token here.') ]),
+				E('p', {}, [ E('a', { 'href': common.remoteGuide, 'target': '_blank', 'rel': 'noopener' }, [ common.t('Step-by-step guide: docs/remote.md') ]) ])
+			]);
+		};
+		this.opts.relay.enabled = o = s.option(form.Flag, 'enabled', common.t('Enabled'));
 		o.rmempty = false;
-		o = s.option(form.Value, 'relayUrl', common.t('Relay URL'));
+		o.validate = enabledCheck;
+		this.opts.relay.relayUrl = o = s.option(form.Value, 'relayUrl', common.t('Relay URL'));
 		o.placeholder = 'https://relay.example.com';
 		o.validate = function (section_id, value) {
+			self.recheck(section_id);
 			return (!value || common.validRelayUrl(value)) ? true : common.t('Use https:// and a host name, with no path.');
 		};
 		o = s.option(form.Value, 'name', common.t('Router name'), common.t('Up to 40 characters.'));
@@ -76,8 +105,9 @@ return view.extend({
 		o.validate = function (section_id, value) {
 			return common.validRouterName(value) ? true : common.t('Up to 40 characters.');
 		};
-		this.relayToken = o = s.option(form.Value, 'token', common.t('Device token'), this.tokenText('relay'));
+		this.relayToken = this.opts.relay.token = o = s.option(form.Value, 'token', common.t('Device token'), this.tokenText('relay'));
 		o.password = true;
+		o.validate = recheck;
 		o = s.option(form.DummyValue, '_state', common.t('State'));
 		o.renderWidget = function () { return E('div', {}, [ el.relayState, ' ', el.relayOpen ]); };
 
@@ -86,18 +116,22 @@ return view.extend({
 				uci.get('irnetfree', 'main', 'port') || '6969'));
 		o = s.option(form.DummyValue, '_installed', common.t('cloudflared program'));
 		o.renderWidget = function () { return el.cfInstalled; };
-		o = s.option(form.Flag, 'enabled', common.t('Enabled'));
+		this.opts.cloudflared.enabled = o = s.option(form.Flag, 'enabled', common.t('Enabled'));
 		o.rmempty = false;
-		this.cfToken = o = s.option(form.Value, 'token', common.t('Tunnel token'), this.tokenText('cloudflared'));
+		o.validate = enabledCheck;
+		this.cfToken = this.opts.cloudflared.token = o = s.option(form.Value, 'token', common.t('Tunnel token'), this.tokenText('cloudflared'));
 		o.password = true;
+		o.validate = recheck;
 		o = s.option(form.DummyValue, '_state', common.t('State'));
 		o.renderWidget = function () { return el.cfState; };
 
 		this.map = m;
+		this.rendered = false;
 		this.showInstalled();
-		this.applyState(data[1]);
+		this.applyState(data[1], 0);
 		poll.add(L.bind(this.refresh, this), 5);
-		return m.render();
+		// the form's widgets exist only once it is rendered: LuCI reaches them through the map's root
+		return m.render().then(function (node) { self.rendered = true; return node; });
 	},
 
 	tokenText: function (which) {
@@ -105,6 +139,30 @@ return view.extend({
 		return which === 'relay'
 			? common.t('Not set yet: paste the token the relay showed when you added this router.')
 			: common.t('Not set yet: paste the token of the tunnel you created in the Cloudflare dashboard.');
+	},
+
+	/* Why «Enabled» in this section cannot be saved as the form stands, or null.
+	 * A Cloudflare tick saved earlier (v1.16.0 took one without cloudflared) is
+	 * not judged again while it is left alone — the service judges only what a
+	 * Save sends, and the State line says what is wrong with it. LuCI hands a
+	 * Flag's validator the input's value ("1") ticked or not, so the tick is
+	 * read here, never taken from that argument. */
+	enableProblem: function (sid) {
+		var o = this.opts && this.opts[sid];
+		if (!this.rendered || !o || !o.enabled) return null;
+		var on = formOf(o.enabled, sid) === '1';
+		var typed = !!formOf(o.token, sid);
+		if (sid === 'relay')
+			return common.relayEnableProblem(on, formOf(o.relayUrl, sid), typed || this.tokenSet.relay);
+		if (this.loaded.cloudflared.enabled && !typed) return null;
+		return common.cloudflaredEnableProblem(on, this.cfInstalled, typed || this.tokenSet.cloudflared);
+	},
+
+	/* Judge the tick again — after the URL or a token was typed, or cloudflared
+	 * came in — so LuCI's red mark on it follows the form. */
+	recheck: function (sid) {
+		var f = this.opts && this.opts[sid] && this.opts[sid].enabled;
+		if (this.rendered && f && typeof f.triggerValidation === 'function') f.triggerValidation(sid);
 	},
 
 	showInstalled: function () {
@@ -117,18 +175,20 @@ return view.extend({
 		}
 		else {
 			dom.content(el.cfInstalled, [
-				common.t('Not installed'), ' ',
+				common.t('Not installed'),
+				this.installError ? ' — ' + common.t('Install failed: %s', this.installError) : '',
+				' ',
 				E('button', { 'class': 'btn cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, 'handleInstall') }, [ common.t('Install') ])
 			]);
 		}
 	},
 
 	refresh: function () {
-		var self = this;
-		return common.remoteStatus().then(function (st) { self.applyState(st); }, function () { self.applyState(null); });
+		var self = this, seq = ++this.pollSeq;
+		return common.remoteStatus().then(function (st) { self.applyState(st, seq); }, function () { self.applyState(null, seq); });
 	},
 
-	applyState: function (st) {
+	applyState: function (st, seq) {
 		var el = this.el;
 		if (common.errorOf(st)) {
 			el.relayState.textContent = common.errorOf(st);
@@ -141,12 +201,43 @@ return view.extend({
 			? [ E('a', { 'href': url, 'target': '_blank', 'rel': 'noopener' }, [ common.t('Open the relay') ]) ]
 			: null);
 		var c = st.cloudflared || {};
-		el.cfState.textContent = common.cloudflaredText(c) + (c.installed && c.lastLine ? ' — ' + c.lastLine : '');
-		if (c.installed && !this.cfInstalled) {
-			this.cfInstalled = true;
+		// the last line of its log — unless the phrase already ends with it as the reason it is not running
+		el.cfState.textContent = common.cloudflaredText(c) + (c.installed && c.lastLine && (c.running || !c.enabled) ? ' — ' + c.lastLine : '');
+		this.followInstall(c, seq || 0);
+	},
+
+	/* The install's progress, from status reads that left after Install was
+	 * accepted (one already on its way shows the time before the click):
+	 * installing until the service's install ends — installed, or failed with
+	 * its reason and Install offered again. It used to wait for "installed"
+	 * only, and a failed opkg left «در حال نصب…» on the page for good (L6). */
+	followInstall: function (c, seq) {
+		if (c.installed) {
+			if (!this.cfInstalled) {
+				this.cfInstalled = true;
+				this.installing = false;
+				this.installError = null;
+				this.showInstalled();
+				this.recheck('cloudflared');
+				common.notify(common.t('cloudflared is installed.'));
+			}
+			return;
+		}
+		if (seq <= this.installAfter) return;
+		if (c.installing) {
+			if (!this.installing) { this.installing = true; this.showInstalled(); }
+			return;
+		}
+		var failed = (c.lastInstall && c.lastInstall.ok === false) ? String(c.lastInstall.error || '?') : null;
+		if (this.installing) {
 			this.installing = false;
+			this.installError = failed;
 			this.showInstalled();
-			common.notify(common.t('cloudflared is installed.'));
+			if (failed) common.notify(common.t('Install failed: %s', failed), 'danger');
+		}
+		else if (failed !== this.installError) {
+			this.installError = failed;
+			this.showInstalled();
 		}
 	},
 
@@ -156,6 +247,8 @@ return view.extend({
 			var err = common.errorOf(r);
 			if (err) return common.notify(err, 'danger');
 			self.installing = true;
+			self.installError = null;
+			self.installAfter = self.pollSeq;
 			self.showInstalled();
 		}, common.failed);
 	},
@@ -163,6 +256,15 @@ return view.extend({
 	handleSave: function () {
 		var self = this, m = this.map;
 		if (!m) return Promise.resolve();
+		// the page's own check first, with the reason in words (LuCI's refusal of
+		// an invalid field says only "invalid input value" on 23.05)
+		this.recheck('relay');
+		this.recheck('cloudflared');
+		var problem = this.enableProblem('relay') || this.enableProblem('cloudflared');
+		if (problem) {
+			common.showRefusal(problem);
+			return Promise.reject(new Error(problem));
+		}
 		return m.save().then(function () {
 			var get = function (sec, k) { return m.data.get('json', sec, k); };
 			var relay = {}, cf = {}, any = false;
@@ -185,7 +287,7 @@ return view.extend({
 			return common.remoteSet(Object.keys(relay).length ? relay : undefined, Object.keys(cf).length ? cf : undefined).then(function (r) {
 				var err = common.errorOf(r);
 				if (err) {
-					common.notify(err, 'danger');
+					common.showRefusal(err);
 					throw new Error(err);
 				}
 				self.loaded = next;
@@ -200,7 +302,7 @@ return view.extend({
 				return m.reset();
 			}, function (e) {
 				// the call itself failed (no write access, a timeout): say why, and the save failed
-				common.failed(e);
+				common.showRefusal(common.rpcError(e));
 				throw e;
 			});
 		});
