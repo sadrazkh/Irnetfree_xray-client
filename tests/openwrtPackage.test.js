@@ -83,6 +83,9 @@ test('data: the app under /usr/lib/irnetfree, the service files, the LuCI files 
   assert.equal(data['./etc/config/irnetfree'].mode, 0o644);
   assert.equal(data[`./${PREFIX}/src/server/server.js`].mode, 0o644);
   assert.ok(!files.some(n => /node_modules|\.map$|\.test\.js$/.test(n)), 'no dev files ship');
+  // remote control: the router's side ships (the agent and what it needs), the relay app does not (it runs on a server)
+  for (const f of ['ws.js', 'frames.js', 'token.js', 'agent.js', 'api.js', 'cloudflared.js']) assert.ok(files.includes(`./${PREFIX}/src/server/remote/${f}`), `src/server/remote/${f} is in the package`);
+  assert.ok(!files.some(n => n.includes('/relay/')), 'the relay app does not ship in the ipk');
   // every file's directory exists as an entry, in order, so opkg never has to invent one
   for (const n of files) {
     const dir = n.slice(0, n.lastIndexOf('/') + 1);
@@ -253,6 +256,10 @@ test('the QEMU guest script is POSIX sh and ends with the marker the driver look
   assert.match(src, /say "SMOKE OK"\s*$/, 'the last line is the success marker');
   assert.ok(!src.includes('\r'), 'LF only');
   assert.match(src, /^sh \/tmp\/install\.sh \/tmp\/irnetfree\.ipk$/m, 'the smoke installs with the same installer a user runs');
+  // remote control (feat/remote): the modules on the real node, cloudflared from the feed, the dnsmasq drop-in dir
+  assert.match(src, /REMOTE SELFTEST OK/, 'the remote modules are exercised on the router\'s node');
+  assert.match(src, /^if opkg install cloudflared /m, 'cloudflared is installed from the feed');
+  assert.match(src, /grep -h '\^conf-dir=' \/var\/etc\/dnsmasq\.conf\.\*/, 'the drop-in dir is read off dnsmasq\'s generated config, not assumed');
   // the driver's own contract with it
   const drv = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'qemu-smoke.js'), 'utf8');
   assert.match(drv, /SMOKE OK/);
