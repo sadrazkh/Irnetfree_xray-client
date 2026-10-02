@@ -14,8 +14,15 @@ snippet() {
 }
 
 start() {
-	local f; f="$(snippet)"
+	local f store; f="$(snippet)"
 	[ -s "$f" ] || return 0
+	# "Connect when the router starts" off: the VPN stays off after this boot,
+	# so there is nothing to block for — the service (S95) would only disarm
+	# it, and the LAN must not be blocked for the minute in between
+	store="$(dirname "$f")/store.json"
+	if [ -s "$store" ] && [ "$(jsonfilter -i "$store" -e '@.settings.autoConnect' 2>/dev/null)" = "false" ]; then
+		return 0
+	fi
 	nft -c -f "$f" 2>/dev/null && nft -f "$f"
 }
 
