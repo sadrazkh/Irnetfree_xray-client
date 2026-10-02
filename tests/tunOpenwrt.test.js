@@ -275,6 +275,26 @@ test('setBypass while up adds one `to <cidr> lookup main` rule per destination (
   assert.equal(bad.tun.active, true, 'the gateway is not torn down for it');
 });
 
+test('M1: the 8997 sweep deletes until the kernel has none left — not at most four per family (the two singletons keep their bound)', async () => {
+  let v4 = 0;
+  const { tun, lines } = make({ answers: [
+    [/^ip rule show/, RULES_OK],
+    [/^ip -4 rule del pref 8997$/, () => (++v4 <= 6 ? '' : new Error('RTNETLINK answers: No such file or directory'))]
+  ] });
+  await tun.start(10808, [], [], {});
+  lines.length = 0; v4 = 0;
+  await tun.stop();
+  assert.equal(lines.filter(l => l === 'ip -4 rule del pref 8997').length, 7, 'six deletions and the one that says "none"');
+  assert.equal(lines.filter(l => l === 'ip -6 rule del pref 8997').length, 1);
+  assert.ok(lines.filter(l => l === 'ip -4 rule del pref 8998').length <= 4);
+  // bounded all the same: a kernel that keeps saying yes cannot hold the teardown forever
+  const forever = make({ answers: [[/^ip rule show/, RULES_OK], [/^ip -4 rule del pref 8997$/, '']] });
+  await forever.tun.start(10808, [], [], {});
+  forever.lines.length = 0;
+  await forever.tun.stop();
+  assert.equal(forever.lines.filter(l => l === 'ip -4 rule del pref 8997').length, 64);
+});
+
 test('openwrtNet: the remote bypass rule argv and the cidr normalisation', () => {
   assert.deepEqual(net.remoteBypassRuleArgs('add', '203.0.113.7/32'), ['-4', 'rule', 'add', 'pref', '8997', 'to', '203.0.113.7/32', 'lookup', 'main']);
   assert.deepEqual(net.remoteBypassRuleArgs('del', '2001:db8::/64'), ['-6', 'rule', 'del', 'pref', '8997', 'to', '2001:db8::/64', 'lookup', 'main']);
