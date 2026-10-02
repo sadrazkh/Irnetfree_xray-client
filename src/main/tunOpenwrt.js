@@ -146,9 +146,13 @@ class TunOpenwrt {
    * a leftover from an older version (other selectors, same preference) goes
    * too, and a doubled rule from an unclean exit cannot survive.
    */
+  /** How many times a deletion by preference is repeated: the two singletons a few, the per-destination 8997 rules until none is left. */
+  delCap(args) { return args[4] === String(net.REMOTE_BYPASS_PREF) ? 64 : 4; }
+
   async delRules() {
     for (const args of this.ruleSets('del')) {
-      for (let i = 0; i < 4; i++) {
+      const cap = this.delCap(args);
+      for (let i = 0; i < cap; i++) {
         try { await this.run('ip', args); } catch { break; }   // "not there" — the common case
       }
     }
@@ -377,7 +381,8 @@ class TunOpenwrt {
     }
     if (gone) {
       for (const args of this.ruleSets('del')) {
-        for (let i = 0; i < 4; i++) { try { this.runSync('ip', args); } catch { break; } }
+        const cap = this.delCap(args);
+        for (let i = 0; i < cap; i++) { try { this.runSync('ip', args); } catch { break; } }
       }
     }
     try { this.runSync('nft', ['delete', 'table', 'inet', 'irnetfree']); } catch { /* not there */ }

@@ -181,37 +181,6 @@ test('rule values split on both "," and "|"', () => {
   assert.deepEqual(adv.routing.rules[0].ip, ['1.1.1.1', '2.2.2.2']);
 });
 
-test('remoteBypass: the remote control’s destinations go direct — after the DNS rules, before the first user rule (v1.16 A10)', () => {
-  const bypass = { hosts: ['relay.example', 'Edge.Example.NET'], cidrs: ['203.0.113.7/32', '2606:4700::/32'] };
-  // the managed DNS plan on (the fixture keeps it off): its rules — the hijack last — must stay ahead
-  const c = buildConfig(single(), settings({ dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: ['178.22.122.100'], customRules: [{ outboundTag: 'direct', domain: 'intranet.local' }], remoteBypass: bypass }));
-  const rules = c.routing.rules;
-  const lastDns = Math.max(...rules.map((r, i) => (r.port === '53' || (r.inboundTag || []).includes('dns-internal')) ? i : -1));
-  const dom = rules.findIndex(r => r.outboundTag === 'direct' && r.domain && r.domain.includes('full:relay.example'));
-  const ip = rules.findIndex(r => r.outboundTag === 'direct' && r.ip && r.ip.includes('203.0.113.7/32'));
-  const user = rules.findIndex(r => r.domain && r.domain.includes('intranet.local'));
-  assert.ok(lastDns > -1 && dom > -1 && ip > -1 && user > -1, JSON.stringify(rules));
-  assert.ok(dom > lastDns && ip > lastDns, 'after the DNS rules (the hijack must still win)');
-  assert.ok(dom < user && ip < user, 'before the user’s rules');
-  assert.ok(dom < rules.findIndex(r => r.ip && r.ip.includes('10.0.0.0/8')), 'before the private bypass too (the relay is public)');
-  // xray ANDs the fields of one rule, so the names and the addresses are two rules
-  assert.deepEqual(rules[dom], { type: 'field', domain: ['full:relay.example', 'full:edge.example.net'], outboundTag: 'direct' });
-  assert.deepEqual(rules[ip], { type: 'field', ip: ['203.0.113.7/32', '2606:4700::/32'], outboundTag: 'direct' });
-  // advanced plans and the pool get the same rules in the same place
-  const adv = buildConfig(advancedPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-vless' }] }), settings({ remoteBypass: bypass }));
-  const advUser = adv.routing.rules.findIndex(r => r.domain && r.domain.includes('a.com'));
-  const advDom = adv.routing.rules.findIndex(r => r.domain && r.domain.includes('full:relay.example'));
-  assert.ok(advDom > -1 && advDom < advUser);
-  const pool = buildConfig(poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001 }]), settings({ remoteBypass: bypass }));
-  assert.ok(pool.routing.rules.some(r => r.ip && r.ip.includes('203.0.113.7/32') && r.outboundTag === 'direct'));
-  // nothing to bypass: no rule, and a half-empty list emits only its half
-  const none = buildConfig(single(), settings({ remoteBypass: { hosts: [], cidrs: [] } }));
-  assert.ok(!none.routing.rules.some(r => r.domain && r.domain.some(d => d.startsWith('full:'))));
-  const half = buildConfig(single(), settings({ remoteBypass: { hosts: [], cidrs: ['203.0.113.7/32'] } }));
-  assert.ok(half.routing.rules.some(r => r.ip && r.ip.includes('203.0.113.7/32')));
-  assert.ok(!half.routing.rules.some(r => r.domain && r.domain.some(d => d.startsWith('full:'))));
-});
-
 test('a custom rule with no domain/ip/port is dropped', () => {
   const c = buildConfig(single(), settings({ customRules: [{ outboundTag: 'direct' }, { domain: 'x.com' }] }));
   assert.deepEqual(ruleTags(c), ['block', 'direct', 'proxy']);

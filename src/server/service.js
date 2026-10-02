@@ -192,7 +192,8 @@ function createService(opts = {}) {
     crashWindowMs: 120000,       // a drop this soon after a rebuild continues that rebuild's backoff
     syslogTunQuietMs: 10000,     // one sing-box line of a kind per this, into syslog
     // the router's WAN watcher (wanWatch.js): the poll, how long a change must hold still, the gap between the two probes
-    wanIntervalMs: 5000, wanSettleMs: 10000, wanProbeGapMs: 5000
+    wanIntervalMs: 5000, wanSettleMs: 10000, wanProbeGapMs: 5000,
+    ksVerifyMs: 30000            // while the kill switch should be armed: how often the kernel is asked for its table
   }, deps.timing || {});
   // "does the tunnel answer" — an HTTP 204 through the local SOCKS inbound, 5 s (a test hands in an answer)
   const probeTunnel = deps.probeTunnel || (async () => {
@@ -800,23 +801,67 @@ function createService(opts = {}) {
       const s = getSettings();
       const want = !!s.killSwitch && !!store.get('connectIntent', null);
       const macs = validMacs(s.lanBypassMacs);
-      if (want && !ks.isArmed()) {
-        await ks.arm({ bypassMacs: macs, wanDevs: [] });
-        send('log', { line: `Kill switch armed (${why}): while the VPN is on and the tunnel is down, LAN internet is blocked; ${macs.length} device(s) excluded`, level: 'info' });
-      } else if (!want && (ks.isArmed() || why === 'start')) {
+      if (want) {
+        // armed as far as we remember — but is the table still in the kernel?
+        // `fw4 stop` / `fw4 flush`, a package's postinst, a hand `nft flush
+        // ruleset` empty the whole ruleset (review I2); asked on every pass
+        // except a settings change, which rewrites the table anyway
+        if (ks.isArmed() && why !== 'settings' && !(await ks.check())) {
+          send('log', { line: 'Kill switch: the table is gone from the kernel (a firewall flush or restart?) — re-arming', level: 'warn' });
+        }
+        if (!ks.isArmed()) {
+          await ks.arm({ bypassMacs: macs, wanDevs: [] });
+          send('log', { line: `Kill switch armed (${why}): while the VPN is on and the tunnel is down, LAN internet is blocked; ${macs.length} device(s) excluded`, level: 'info' });
+        } else if (why === 'settings') {
+          await ks.setBypassMacs(macs);
+        }
+      } else if (ks.isArmed() || why === 'start') {
         const was = ks.isArmed();
         await ks.disarm();   // at start: whatever a killed run or the boot script left behind
         if (was) send('log', { line: `Kill switch disarmed (${why}): the LAN goes direct whenever the tunnel is down`, level: 'info' });
-      } else if (want && ks.isArmed() && why === 'settings') {
-        await ks.setBypassMacs(macs);
       }
     }).catch((e) => send('log', { line: `Kill switch: ${why} failed: ${(e && e.message) || e}`, level: 'error' }))
       .then(() => publishKillSwitch());
     return ksQueue;
   }
+  // A saved intent means "the VPN is on" only if the boot connect will run (B1,
+  // review I1): with "Connect when the router starts" off the VPN stays off
+  // after this boot, and a saved connection that no longer builds brings
+  // nothing — so the intent is cleared, and nothing (the kill switch above
+  // all) acts on a connection that is not coming: armed with nothing coming
+  // was a dark LAN until someone found the UI.
+  // It runs as the first step of the kill switch queue — after createService
+  // returned, so the caller's listeners see the verdict — and before 'start'.
+  function gateBootIntent() {
+    const target = store.get('connectIntent', null);
+    if (!target) return;
+    const s0 = getSettings();
+    let why = null;
+    if (!s0.autoConnect) why = '"Connect when the router starts" is off, the VPN stays off after this boot';
+    else { try { buildPlan(target, s0); } catch (e) { why = `the last connection (${target}) cannot be built any more — ${(e && e.message) || e}`; } }
+    if (!why) return;
+    send('log', { line: `Auto-connect: ${why}; the saved connection is cleared`, level: s0.autoConnect ? 'error' : 'info' });
+    if (s0.killSwitch) {
+      send('log', { line: s0.autoConnect
+        ? 'Kill switch: not armed — the saved connection cannot be built, nothing will connect; turn the VPN on by hand to arm it'
+        : 'Kill switch: not armed at start — "Connect when the router starts" is off, the VPN stays off after this boot', level: s0.autoConnect ? 'warn' : 'info' });
+    }
+    store.set('connectIntent', null);
+  }
+  if (OPENWRT) ksQueue = ksQueue.then(gateBootIntent);
   // A new service: armed before the boot connect starts (the boot script
   // already replayed the snippet at boot; this re-applies the same table).
   const ksReady = syncKillSwitch('start');
+  // …and while it should be armed, the kernel is asked every T.ksVerifyMs
+  // whether the table is still there, and it is re-armed when not (review I2)
+  let ksTimer = null;
+  if (OPENWRT) {
+    ksTimer = setInterval(() => {
+      if (isQuitting || !getSettings().killSwitch || !store.get('connectIntent', null)) return;
+      syncKillSwitch('verify');
+    }, T.ksVerifyMs);
+    if (ksTimer.unref) ksTimer.unref();
+  }
 
   /**
    * One-time upgrade of the saved servers to the shape the current parser and
@@ -994,9 +1039,6 @@ function createService(opts = {}) {
   }
 
   function buildActive(serverId, settings) {
-    // the remote control's destinations go direct in every config the router runs (setRemoteBypass)
-    const rb = remoteBypass();
-    if (rb.hosts.length || rb.cidrs.length) settings = Object.assign({}, settings, { remoteBypass: rb });
     const { plan, label, entryAddrs } = buildPlan(serverId, settings);
 
     const geoSt = assetStatus();
@@ -1854,9 +1896,22 @@ function createService(opts = {}) {
    * own backoff.
    */
   async function reapplyByHand() {
+    endPendingRecovery();
     const r = await reapplyConnection();
     if (OPENWRT && r && !r.ok && !r.stale && store.get('activeServerId', null)) recoverFromDrop('gateway-failed');
     return r;
+  }
+
+  /**
+   * A connect or a reconnect by hand ends a drop's pending retry, as a
+   * disconnect does (review I5): the backoff timer would otherwise fire into
+   * the connection just made and rebuild it — a 20-40 s LAN outage shown as
+   * "reconnecting", for nothing.
+   */
+  function endPendingRecovery() {
+    clearTimeout(recoverTimer);
+    recoverTimer = null;
+    recoverQueued = null;
   }
 
   async function rebuildActiveConfig() {
@@ -2017,6 +2072,13 @@ function createService(opts = {}) {
     if (queued == null) return;
     recoverQueued = null;
     if (DROP_REASONS.has(queued)) { recoverFromDrop(queued); return; }
+    // the router's WAN verdict is never replayed blind: the rebuild that just
+    // finished built for the network we have now (review I3; judgeWanChange
+    // does not queue behind a recovery either, this is the belt to its braces)
+    if (queued === 'wan-changed') {
+      send('log', { line: 'A network change judged during the rebuild is not replayed — the rebuild built for the network we have now', level: 'info' });
+      return;
+    }
     await recoverFromNetworkChange(queued, 0);
   }
 
@@ -2121,10 +2183,28 @@ function createService(opts = {}) {
   async function judgeWanChange(diff) {
     const what = diff.lines.length ? diff.lines.join('; ') : 'the link moved and settled back';
     const bound = liveDirectInterface;
+    // A rebuild in flight (a drop's recovery, a backoff retry scheduled, a
+    // connect by hand) builds for the network we have NOW, and a gateway that
+    // is down for a drop cannot answer a probe: judged, this change would only
+    // queue a second, blind rebuild behind the first (review I3). Not judged.
+    const busy = () => recovering || !!recoverTimer || connectsInFlight.size > 0 || !(tun && tun.active);
+    if (busy()) {
+      send('log', { line: `Network changed (${what}) — a rebuild is in flight, which builds for the network we have now; not judged`, level: 'info' });
+      return;
+    }
+    const gen = connGen;   // the connection this verdict is about (review M4)
     let verdict;
     try { verdict = await decideWanChange({ diff, boundDev: bound, probe: probeTunnel, probeGapMs: T.wanProbeGapMs }); }
     catch { verdict = 'rebuild'; }
+    if (gen !== connGen) {
+      send('log', { line: `Network changed (${what}) — the connection moved meanwhile, verdict dropped`, level: 'info' });
+      return;
+    }
     if (verdict === 'kept') { send('log', { line: `Network changed (${what}) — the tunnel answers, kept`, level: 'info' }); return; }
+    if (busy()) {
+      send('log', { line: `Network changed (${what}) — the tunnel does not answer, but a rebuild is already in flight; not queued`, level: 'info' });
+      return;
+    }
     const why = bound && diff.devGone.includes(bound) ? `the WAN device the tunnel is bound to (${bound}) is gone` : 'the tunnel does not answer';
     send('log', { line: `Network changed (${what}) — ${why}, rebuilding`, level: 'warn' });
     await recoverFromNetworkChange('wan-changed').catch((e) => {
@@ -2435,6 +2515,7 @@ function createService(opts = {}) {
     // afresh starts with no crash history (recoverFromDrop), as after a disconnect
     'connect': (id) => {
       bootCancelled = true; lastRebuilt = null;
+      endPendingRecovery();   // a drop's pending retry would rebuild the connection this makes (review I5)
       // On a router a Connect on the connection that is already up — a page
       // that loaded while the tunnel was up and had no idea (S1), pressed again
       // — is not a 20-40 s rebuild of a gateway that is fine (S2). (The crash
@@ -2692,18 +2773,22 @@ function createService(opts = {}) {
   /** Connected to exactly `id`, core running, gateway up, nothing rebuilding or in flight: a Connect has nothing to do. */
   function alreadyUp(id) {
     return !!id && id === store.get('activeServerId', null) && !!(xray && xray.running) && !!(tun && tun.active)
-      && !recovering && !recoverTimer && !connectsInFlight.size && conn.state === 'connected';
+      && !recovering && !recoverTimer && !connectsInFlight.size && conn.state === 'connected'
+      && !pendingKeys().length;   // settings waiting for a reconnect: that is what the Connect is for (review M5)
   }
 
   /* ----------------------------- destinations that never ride the tunnel (A10) ----------------------------- */
   // The remote control's destinations (spec R8/C2), per owner — the relay
   // agent, cloudflared — with the union applied: while the gateway is up one
   // `ip rule … pref 8997 to <cidr> lookup main` per cidr (TunOpenwrt.setBypass:
-  // live, swept with the gateway's own rules), and the next core config
-  // carries a direct rule for the names and one for the addresses
-  // (configBuilder.remoteBypassRules). Node cannot mark its own sockets, so
-  // the router's own dials are kept off the tunnel by destination. The kill
-  // switch never touches them: it filters forwarded traffic, not OUTPUT.
+  // live, swept with the gateway's own rules). Node cannot mark its own
+  // sockets, so the router's own dials are kept off the tunnel by destination.
+  // No xray routing rule for them (review I4): the ip rules already take every
+  // socket of the router's out of the tunnel, and an xray rule would have sent
+  // the agent's one deliberate dial THROUGH the tunnel (the SOCKS fallback, R9)
+  // direct — the path that was blocked. The hosts are kept for the record and
+  // the facade. The kill switch never touches any of this: it filters
+  // forwarded traffic, not OUTPUT.
   const remoteBypassByOwner = new Map();
   const REMOTE_OWNERS = ['relay', 'cloudflared'];
   function remoteBypass() {
@@ -2871,6 +2956,7 @@ function createService(opts = {}) {
   async function shutdown() {
     if (isQuitting) return; isQuitting = true;
     userDisconnecting = true;
+    if (ksTimer) clearInterval(ksTimer);
     try { store.flush(); } catch {}   // whatever setLazy() still holds
     try { assetUpdater.stop(); } catch {}
     try { stopNetWatcher(); } catch {}

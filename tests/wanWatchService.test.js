@@ -83,6 +83,43 @@ test('S3: an IPv6 prefix rotation is nothing; the device xray binds to vanishing
   assert.ok(s.logs.some(l => /Network changed \(wan: default v4 route gone; wan6: default v6 route gone\) — the WAN device the tunnel is bound to \(eth0\) is gone, rebuilding/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
 });
 
+test('I3: a change that settles while a rebuild is in flight (or the gateway is down for a drop) is not judged, and never queued behind the recovery — exactly one rebuild', async (t) => {
+  const s = service([false, false]);
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  await until(() => s.asked.filter(l => /network\.interface dump/.test(l)).length >= 2, 'the watcher polling');
+  // sing-box dies and cannot come back for a while: the recovery retries (reconnecting…)
+  s.state.gatewayFails = true;
+  s.state.inners.find(i => i.active).crash();
+  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 2, 'the recovery retrying', 8000);
+  // …and the WAN moves meanwhile (a PPPoE renewal in the window)
+  s.dump = { interface: [lan, wan({ addr: '192.0.2.77' }), wan6()] };
+  await until(() => s.logs.some(l => /Network changed \(wan: 192\.0\.2\.10\/24 → 192\.0\.2\.77\/24\) — a rebuild is in flight/.test(l.line)), 'the change seen but not judged', 8000);
+  assert.equal(s.probes, 0, 'the probe would only answer for a tunnel being rebuilt');
+  s.state.gatewayFails = false;
+  await until(() => connectedCount(s) === 2, 'the recovery brings it back', 8000);
+  await sleep(300);
+  assert.equal(connectedCount(s), 2, 'no second rebuild for the change');
+  assert.ok(!s.statuses.some(x => x.state === 'reconnecting' && x.reason === 'wan-changed'), JSON.stringify(s.statuses.map(x => [x.state, x.reason])));
+  assert.equal(s.service.connSnapshot().state, 'connected');
+});
+
+test('M4: a verdict reached after the connection moved (a disconnect and a connect during the probes) is dropped', async (t) => {
+  const s = service([false, false]);
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  await until(() => s.asked.filter(l => /network\.interface dump/.test(l)).length >= 2, 'the watcher polling');
+  s.dump = { interface: [lan, wan({ addr: '192.0.2.77' }), wan6()] };
+  await until(() => s.probes >= 1, 'the first probe', 5000);
+  // the user turns the VPN off and on while the judge waits for its second probe
+  await s.service.invoke('disconnect');
+  await s.service.invoke('connect', SERVER.id);
+  await until(() => s.logs.some(l => /Network changed \(wan: 192\.0\.2\.10\/24 → 192\.0\.2\.77\/24\) — the connection moved meanwhile, verdict dropped/.test(l.line)), 'the stale verdict dropped', 5000);
+  await sleep(300);
+  assert.ok(!s.statuses.some(x => x.state === 'reconnecting' && x.reason === 'wan-changed'), 'the fresh connection is not torn down for it');
+  assert.equal(connectedCount(s), 2);
+});
+
 test('S3: the watcher stops with a disconnect; a failed ubus read is no change; the desktop fingerprint is not consulted on a router', async (t) => {
   const s = service([true]);
   t.after(() => s.service.shutdown());
