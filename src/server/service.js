@@ -1664,7 +1664,17 @@ function createService(opts = {}) {
             // the remote control's destinations, laid with the gateway (setRemoteBypass)
             if (typeof myTun.setBypass === 'function') await myTun.setBypass(remoteBypass().cidrs);
           }
-          await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...pinnedIps],
+          // The in-country resolvers the core dials `direct` (bypass-ir) are a
+          // route exclusion on a desktop. Not on a router: there the exclusion
+          // is for the WHOLE LAN on every port — dnsmasq's upstream, or a phone
+          // with a hard-coded resolver, then went to them in plain text by the
+          // ISP, and filtered names came back poisoned (field report D3). The
+          // core's own query to them needs no hole: its `direct` outbound is
+          // bound to the WAN device (configBuilder.bindDirectDials,
+          // SO_BINDTODEVICE), which no route in sing-box's table matches. The
+          // entry servers, WireGuard endpoints and pinned addresses stay off.
+          const resolverHoles = OPENWRT ? [] : resolverBypassIpsOf(config);
+          await myTun.start(settings.socksPort, [...entryAddrs, ...resolverHoles, ...pinnedIps],
             tunAdapterDns,
             { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic });   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
@@ -2949,7 +2959,13 @@ function createService(opts = {}) {
     remoteBypassByOwner.set(owner, { hosts, cidrs });
     if (tun && tun.active && typeof tun.setBypass === 'function') await tun.setBypass(remoteBypass().cidrs);
   }
-  /** The in-country, route-excluded resolvers the running config dials direct — else the plain addresses of the setting. */
+  /**
+   * The in-country resolvers the running config dials direct — else the plain
+   * addresses of the setting. Since v1.16.1 (field report D3) they are NOT
+   * route-excluded on a router: the router's own query to them (the remote
+   * agent, cloudflared's dnsmasq drop-in) enters the tunnel there like every
+   * LAN device's, and is answered by the core's port-53 hijack.
+   */
   function directResolvers() {
     if (liveDiagnostics && liveDiagnostics.config) {
       const live = resolverBypassIpsOf(liveDiagnostics.config);

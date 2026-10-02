@@ -253,6 +253,53 @@ test('fix 22: bypass-ir with no geo files is a warn line too (syslog, LuCI → L
   assert.ok(s.syslog.some(([, l]) => /\[warn\] Geo files \(geoip\/geosite\) are missing/.test(l)));
 });
 
+/* ----------------------------- D3: the in-country resolvers stay in the tunnel for the LAN ----------------------------- */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { DNS_TAG } = require('../src/main/dnsBuilder');
+/** geoip.dat / geosite.dat where the service looks first (an empty file is "present" to it) — bypass-ir then builds the in-country resolver. */
+function withGeo(s) {
+  for (const f of ['geoip.dat', 'geosite.dat']) fs.writeFileSync(path.join(s.dir, 'bin', f), '');
+}
+
+test('D3: bypass-ir on a router — the in-country resolvers are NOT cut out of the whole-LAN tunnel; the server is', async (t) => {
+  // route_exclude_address took them out of table 2022 for every device and
+  // every port: dnsmasq's upstream (Shecan, or a restored 8.8.8.8) then left in
+  // plain text by the ISP, and filtered names came back poisoned (field report D3).
+  const s = H.start({ settings: { routingMode: 'bypass-ir', dnsDirect: ['178.22.122.100', '185.51.200.2'] } });
+  t.after(() => s.service.shutdown());
+  withGeo(s);
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(connectedCount(s), 1);
+  const inner = s.state.inners.find(i => i.active);
+  assert.ok(inner.bypass.includes('192.0.2.10'), 'the entry server stays off the tunnel: ' + JSON.stringify(inner.bypass));
+  for (const ip of ['178.22.122.100', '185.51.200.2']) assert.ok(!inner.bypass.includes(ip), `${ip} must stay in the tunnel for the LAN: ${JSON.stringify(inner.bypass)}`);
+  // …and the core's own query to them still leaves direct, bound to the WAN device (SO_BINDTODEVICE escapes table 2022)
+  const config = s.state.xray.starts[0].config;
+  const rule = config.routing.rules.find(r => Array.isArray(r.inboundTag) && r.inboundTag.includes(DNS_TAG) && r.outboundTag === 'direct' && Array.isArray(r.ip));
+  assert.ok(rule, 'the DNS module’s rule to the in-country resolvers');
+  assert.deepEqual(rule.ip, ['178.22.122.100', '185.51.200.2']);
+  assert.equal(rule.port, '53');
+  const direct = config.outbounds.find(o => o.tag === 'direct');
+  assert.equal(direct.streamSettings.sockopt.interface, 'eth0', 'the direct dial is bound to the WAN device the gateway found');
+  // the remote control still learns which resolvers the core dials direct
+  assert.deepEqual(s.service.directResolvers(), ['178.22.122.100', '185.51.200.2']);
+});
+
+test('D3: WireGuard endpoints and pinned entry addresses are still kept off the tunnel', async (t) => {
+  const named = Object.assign({}, SERVER, { id: 'srv-named', address: 'upstream.invalid' });
+  named.outbound = JSON.parse(JSON.stringify(SERVER.outbound));
+  named.outbound.settings.servers[0].address = 'upstream.invalid';
+  const s = H.start({ servers: [named], settings: { routingMode: 'bypass-ir' } }, { resolveHost: async () => ({ ips: ['198.51.100.7'], source: 'os', suspect: [] }) });
+  t.after(() => s.service.shutdown());
+  withGeo(s);
+  await s.service.invoke('connect', 'srv-named');
+  const inner = s.state.inners.find(i => i.active);
+  assert.ok(inner.bypass.includes('198.51.100.7'), 'the pinned address of the entry name: ' + JSON.stringify(inner.bypass));
+  assert.ok(!inner.bypass.includes('178.22.122.100'));
+});
+
 /* ----------------------------- fix 8: "the whole-network tunnel", not "the gateway" ----------------------------- */
 
 test('fix 8: no sing-box on the router — the refusal names the whole-network tunnel, in both languages', async (t) => {

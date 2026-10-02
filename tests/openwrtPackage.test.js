@@ -322,6 +322,26 @@ test('the QEMU guest script is POSIX sh and ends with the marker the driver look
   assert.match(drv, /'\/install\.sh': path\.join\(__dirname, '\.\.', 'install\.sh'\)/, 'and the driver hands the installer to the guest');
 });
 
+test('the QEMU smoke proves D3: the in-country resolvers stay in the whole-LAN tunnel, the core’s own query leaves by the WAN (fix/v1161-core)', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'guest-smoke.sh'), 'utf8');
+  const at = src.indexOf('say "D3: bypass-ir');
+  assert.notEqual(at, -1, 'the D3 section is gone');
+  const d3 = src.slice(at, src.indexOf('say "SMOKE OK"'));
+  // from a LAN client, DNS and HTTPS to them; from the router, DNS (dnsmasq's upstream) — all dev IRNetFree
+  assert.match(d3, /ip route get "\$ip" from 192\.168\.1\.50 iif br-lan ipproto udp dport 53\)/);
+  assert.match(d3, /ip route get "\$ip" from 192\.168\.1\.50 iif br-lan ipproto tcp dport 443\)/);
+  assert.match(d3, /ip route get "\$ip" ipproto udp dport 53\)/);
+  // sing-box's own exclusion list: the entry server stays, the resolvers do not
+  assert.match(d3, /route_exclude_address \| index\("192\.168\.1\.1\/32"\)/);
+  // the config: dns-internal → direct on :53, the direct dial bound to the WAN device; an Iranian name resolves; conntrack shows the WAN source
+  assert.match(d3, /\.outboundTag == "direct" and \.port == "53"/);
+  assert.match(d3, /\.streamSettings\.sockopt\.interface == \$dev/);
+  assert.match(d3, /nslookup www\.digikala\.com 1\.1\.1\.1/);
+  assert.match(d3, /\/proc\/net\/nf_conntrack/);
+  // and it leaves the router as it found it
+  assert.match(d3, /\\"routingMode\\":\\"global\\",\\"dnsDirect\\":\$D3_DIRECT_WAS/);
+});
+
 test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and takes a local ipk', () => {
   const src = fs.readFileSync(path.join(ROOT, 'openwrt', 'install.sh'), 'utf8');
   assert.match(src, /^#!\/bin\/sh\n/);
