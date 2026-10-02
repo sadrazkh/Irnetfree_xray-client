@@ -222,6 +222,8 @@ server.on('error', (e) => {
 server.listen(args.port, args.host, () => {
   const shown = isLoopback ? '127.0.0.1' : args.host;
   const port = server.address().port;   // the real one when --port 0 asked for any
+  // remote access (spec §3.5): the relay link and Cloudflare Tunnel, started from <data_dir>/remote.json; never throws
+  require('./remote/api').start({ service, localPort: port, uiToken: TOKEN });
   // A token that lives in a file is never printed: on a router this output is
   // syslog (procd), and the file is where LuCI and the installer read it from.
   const q = TOKEN && !args.tokenFile ? ('?token=' + TOKEN) : '';

@@ -1,0 +1,38 @@
+# The only image built from this repo is the relay (relay/Dockerfile, context = the repo root). It
+# needs relay/ and three files under src/server/remote/; everything else stays out of the upload.
+#
+# Written for Harbora's packer (Harbora/src/Harbora.Cli/SourcePacker.cs), which reads this file in
+# place of .gitignore and is NOT Docker's matcher: `!` negation lines are dropped, a bare name
+# matches that name at ANY depth, a pattern with `*` matches any single path segment. So: positive
+# patterns only, no `*` by itself — the list names what to leave out, never what to keep.
+# tests/relayPack.test.js applies those exact rules to the repo and pins the upload set.
+# (.git, node_modules, bin, .env are Harbora built-ins and Docker defaults; listed for Docker.)
+.git
+node_modules
+bin
+.env
+.claude
+.superpowers
+.github
+android
+openwrt
+tests
+docs
+assets
+scripts
+native
+dist
+install.sh
+package.json
+package-lock.json
+README.md
+src/main
+src/renderer
+src/server/server.js
+src/server/service.js
+src/server/guard.js
+src/server/web-api.js
+src/server/luciApi.js
+src/server/remote/agent.js
+src/server/remote/api.js
+src/server/remote/cloudflared.js
