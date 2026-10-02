@@ -56,6 +56,14 @@ var FA = {
 	'connecting…': 'در حال اتصال…',
 	'offline': 'آفلاین',
 	'offline — %s': 'آفلاین — %s',
+	'connecting… (attempt %s)': 'در حال اتصال… (تلاش %s)',
+	'connecting… (attempt %s) — %s': 'در حال اتصال… (تلاش %s) — %s',
+	'Enabled but not running: %s': 'فعال ولی اجرا نمی‌شود: %s',
+	'cloudflared is not installed': 'cloudflared نصب نشده است',
+	'no tunnel token': 'توکن تونل تنظیم نشده',
+	'see the Log tab': 'زبانهٔ «لاگ» را ببین',
+	'applying…': 'در حال اعمال…',
+	'installing…': 'در حال نصب…',
 	'off': 'خاموش',
 	'not installed': 'نصب نشده',
 	'running': 'در حال اجرا',
@@ -74,6 +82,7 @@ var FA = {
 	// shared by the pages
 	'Saved — applied.': 'ذخیره شد — اعمال شد.',
 	'Nothing changed.': 'چیزی تغییر نکرد.',
+	'Not saved': 'ذخیره نشد',
 	'Close': 'بستن',
 	'The browser did not allow copying. Select all the text below and copy it.': 'مرورگر اجازهٔ کپی نداد. همهٔ متن زیر را انتخاب و کپی کن.',
 
@@ -89,6 +98,9 @@ var FA = {
 	'Connected for': 'مدت اتصال',
 	'Traffic': 'ترافیک',
 	'Kill switch': 'کیل سوییچ',
+	'Whole-network tunnel': 'تونل کل شبکه',
+	'On — every device behind the router goes through the VPN': 'روشن — همهٔ دستگاه‌های پشت روتر از VPN می‌روند',
+	'This config is already connected — press Reconnect to apply changes.': 'همین کانفیگ الان وصل است — برای اعمال تغییرها «اتصال مجدد» را بزن.',
 	'On — ready: it blocks only while the VPN is on and the tunnel is down': 'روشن — آماده: فقط وقتی VPN روشن است و تونل قطع است می‌بندد',
 	'On — waits until the VPN is switched on': 'روشن — تا VPN روشن نشود کاری نمی‌کند',
 	'On — blocking': 'روشن — در حال بستن',
@@ -131,8 +143,15 @@ var FA = {
 
 	// Remote access
 	'Control this router from outside the home — turn the VPN on or off, change the config — without a static IP, even behind CGNAT. The control link never goes through the VPN. Both ways can be on at once.': 'این روتر را از بیرون خانه کنترل کن — VPN را روشن یا خاموش کن، کانفیگ را عوض کن — بدون IP ثابت و حتی پشت CGNAT. لینک کنترل هیچ‌وقت از داخل VPN نمی‌رود. هر دو راه می‌توانند هم‌زمان روشن باشند.',
+	'Changes take effect only when you press Save at the bottom of the page.': 'تغییرها فقط با دکمهٔ «ذخیره» پایین صفحه اعمال می‌شوند.',
 	'Your own relay': 'رلهٔ خودت',
-	'A small server you run (on Harbora or any Docker host) that this router keeps a link to. Add the router on the relay, then paste the device token it shows here.': 'یک سرور کوچک که خودت اجرا می‌کنی (روی هاربورا یا هر میزبان داکر) و روتر به آن وصل می‌ماند. روتر را در رله اضافه کن و توکن دستگاهی را که نشان می‌دهد این‌جا بچسبان.',
+	'The relay is a server you run yourself; IRNetFree does not provide one. Deploy relay/ on Harbora or any Docker host, press Add router on the relay’s page, then paste the relay URL and the 43-character device token here.': 'رله سرور خودِ توست؛ IRNetFree رله‌ای نمی‌دهد. اول relay/ را روی هاربورا یا هر سرور داکر بالا بیاور، در صفحهٔ رله «Add router» را بزن، بعد آدرس رله و توکن ۴۳ کاراکتری را این‌جا بچسبان.',
+	'Step-by-step guide: docs/remote.md': 'راهنمای قدم‌به‌قدم: docs/remote.md',
+	'To enable, first enter the relay URL and the device token': 'برای فعال‌کردن، اول آدرس رله و توکن دستگاه را وارد کن',
+	'Install cloudflared first (the Install button above)': 'اول cloudflared را نصب کن (دکمهٔ «نصب» بالا)',
+	'Paste the Cloudflare tunnel token first': 'اول توکن تونل کلودفلر را بچسبان',
+	'The token must be the 43-character device token the relay showed.': 'توکن باید همان توکن ۴۳ کاراکتری‌ای باشد که رله نشان داد.',
+	'The Cloudflare tunnel token does not look right.': 'توکن تونل کلودفلر درست به نظر نمی‌رسد.',
 	'Enabled': 'فعال',
 	'Relay URL': 'آدرس رله',
 	'Use https:// and a host name, with no path.': 'با https:// و نام میزبان بنویس، بدون مسیر.',
@@ -152,6 +171,7 @@ var FA = {
 	'Install': 'نصب',
 	'Installing… (opkg update, then opkg install cloudflared — this can take a few minutes)': 'در حال نصب… (opkg update و بعد opkg install cloudflared — ممکن است چند دقیقه طول بکشد)',
 	'cloudflared is installed.': 'cloudflared نصب شد.',
+	'Install failed: %s': 'نصب ناموفق بود: %s',
 	'Tunnel token': 'توکن تونل',
 	'Not set yet: paste the token of the tunnel you created in the Cloudflare dashboard.': 'هنوز تنظیم نشده: توکن تونلی را که در داشبورد کلودفلر ساختی بچسبان.',
 
@@ -225,7 +245,43 @@ function errorOf(res) {
 	if (e === 'remote not available') return t('Remote access is not part of this IRNetFree version.');
 	if ((m = /^http (\d+)$/.exec(e)) != null) return t('The service answered with an error (HTTP %s).', m[1]);
 	if (e === 'empty reply' || e === 'bad reply') return t('No answer from the service.');
-	return t('Error: %s', e);
+	return serviceRefusal(e) || t('Error: %s', e);
+}
+
+/* The remote api's refusals (src/server/remote/api.js, remote_set) as the
+ * page's own sentences — a refusal in English was missed (field report L1). */
+function serviceRefusal(e) {
+	switch (e) {
+	case 'enabling needs the relay URL and the device token': return t('To enable, first enter the relay URL and the device token');
+	case 'enabling needs cloudflared — install it first': return t('Install cloudflared first (the Install button above)');
+	case 'enabling needs the Cloudflare tunnel token': return t('Paste the Cloudflare tunnel token first');
+	case 'token must be the 43-character device token the relay showed': return t('The token must be the 43-character device token the relay showed.');
+	case 'relayUrl must be https://<host>[:port]/ with no path': return t('Use https:// and a host name, with no path.');
+	case 'name must be at most 40 printable characters': return t('Up to 40 characters.');
+	case 'the Cloudflare tunnel token does not look right': return t('The Cloudflare tunnel token does not look right.');
+	default: return null;
+	}
+}
+
+/* Why ticking «Enabled» cannot be saved as the form stands — the checks
+ * remote_set makes, so nothing is sent that it would refuse — or null. */
+function relayEnableProblem(on, relayUrl, hasToken) {
+	return (on && !(relayUrl && hasToken)) ? t('To enable, first enter the relay URL and the device token') : null;
+}
+
+function cloudflaredEnableProblem(on, installed, hasToken) {
+	if (!on) return null;
+	if (!installed) return t('Install cloudflared first (the Install button above)');
+	return hasToken ? null : t('Paste the Cloudflare tunnel token first');
+}
+
+/* A refused Save: a dialog with the reason and Close — a notice at the top of
+ * the page was easy to miss below the fold (field report L1). */
+function showRefusal(msg) {
+	ui.showModal(t('Not saved'), [
+		E('p', {}, [ String(msg) ]),
+		E('div', { 'class': 'right' }, [ E('button', { 'class': 'btn', 'click': ui.hideModal }, [ t('Close') ]) ])
+	]);
 }
 
 function isDown(res) {
@@ -283,13 +339,17 @@ function clock(ms) {
 	return isNaN(d.getTime()) ? '' : d.toLocaleString();
 }
 
-/* The relay agent's status ({state, path, since, lastError}) as a phrase. */
+/* The relay agent's status ({state, path, since, lastError, attempt}) as a
+ * phrase; while it redials, the attempt and why the last one failed. */
 function relayText(r) {
 	if (!r || typeof r !== 'object') return t('off');
-	var s;
+	var s, n;
 	switch (r.state) {
 	case 'online': s = (r.path === 'vpn') ? t('online through the VPN') : t('online (direct)'); break;
-	case 'connecting': s = t('connecting…'); break;
+	case 'connecting':
+		n = (+r.attempt > 0) ? Math.floor(+r.attempt) : 0;
+		s = !n ? t('connecting…') : r.lastError ? t('connecting… (attempt %s) — %s', n, r.lastError) : t('connecting… (attempt %s)', n);
+		break;
 	case 'error': s = r.lastError ? t('offline — %s', r.lastError) : t('offline'); break;
 	case 'off': return t('off');
 	default: s = r.state ? String(r.state) : t('off');
@@ -297,10 +357,24 @@ function relayText(r) {
 	return (r.since && r.state === 'online') ? s + ' · ' + t('since %s', clock(r.since)) : s;
 }
 
-/* cloudflared's status ({installed, running, lastLine}) as a phrase. */
+/* cloudflared's status as a phrase: {installed, running, lastLine} and, from
+ * v1.16.1, {enabled, tokenSet, applying, apply: {ok, error}, installing} —
+ * meant to run and not running says why (it used to say nothing, L2). */
 function cloudflaredText(c) {
-	if (!c || typeof c !== 'object' || !c.installed) return t('not installed');
-	return c.running ? t('running') : t('stopped');
+	if (!c || typeof c !== 'object') return t('not installed');
+	if (c.installing) return t('installing…');
+	if (c.applying) return t('applying…');
+	if (c.installed && c.running) return t('running');
+	if (c.enabled) return t('Enabled but not running: %s', cloudflaredWhy(c));
+	return c.installed ? t('stopped') : t('not installed');
+}
+
+function cloudflaredWhy(c) {
+	if (!c.installed) return t('cloudflared is not installed');
+	if (c.tokenSet === false) return t('no tunnel token');
+	if (c.apply && c.apply.ok === false && c.apply.error) return String(c.apply.error);
+	if (c.lastLine) return String(c.lastLine);
+	return t('see the Log tab');
 }
 
 function remoteLine(rm) {
@@ -460,6 +534,9 @@ function showText(title, text) {
 	return ta;
 }
 
+/* docs/remote.md: running the relay, pairing a router, Cloudflare Tunnel (English, then Persian) */
+var REMOTE_GUIDE = 'https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/remote.md';
+
 var serviceAction = call('service', [ 'action' ]);
 var statusCall = call('status');
 
@@ -510,6 +587,10 @@ return baseclass.extend({
 	validRelayUrl: validRelayUrl,
 	validRouterName: validRouterName,
 	webUiUrl: webUiUrl,
+	remoteGuide: REMOTE_GUIDE,
+	relayEnableProblem: relayEnableProblem,
+	cloudflaredEnableProblem: cloudflaredEnableProblem,
+	showRefusal: showRefusal,
 	notify: notify,
 	rpcError: rpcError,
 	failed: failed,
