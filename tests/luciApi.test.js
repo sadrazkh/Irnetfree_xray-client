@@ -119,8 +119,11 @@ test('devices, log and diagnostics answer their shapes; test without a connectio
   const log = await api.handle('log', { lines: 2 });
   assert.equal(log.lines.length, 2);
   assert.match(log.lines[1], /\[info\] ring line 5$/);
-  assert.equal((await api.handle('log', {})).lines.length, 5, 'the default is the last 300 — all five here');
-  assert.equal((await api.handle('log', { lines: 9999 })).lines.length, 5, 'capped at the ring');
+  const mine = (lines) => lines.filter(l => /ring line \d$/.test(l)).length;
+  const all = (await api.handle('log', {})).lines;
+  assert.equal(mine(all), 5, 'the default is the last 300 — all five here');
+  assert.ok(all.length < 300);
+  assert.deepEqual((await api.handle('log', { lines: 9999 })).lines, all, 'capped at the ring');
   const d = await api.handle('diagnostics', {});
   assert.equal(typeof d.text, 'string');
   assert.match(d.text, /status: \{/);
@@ -135,16 +138,18 @@ test('remote_* and cloudflared_install are the remote api when it is mounted, an
     assert.deepEqual(await none.handle(m, {}), { error: 'remote not available' }, m);
   }
   const calls = [];
+  // feat/remote's shapes: get/set/install synchronous, status async, set throws an Error on invalid input
   const remoteApi = {
     remote_get: () => ({ relay: { enabled: false, relayUrl: '', name: '', tokenSet: false }, cloudflared: { installed: false, enabled: false, tokenSet: false } }),
-    remote_set: (arg) => { calls.push(arg); return { ok: true }; },
-    remote_status: () => ({ relay: { state: 'off' }, cloudflared: { installed: false } }),
+    remote_set: (arg) => { if (arg && arg.relay && arg.relay.relayUrl === 'ftp://x') throw new Error('relayUrl must be https://'); calls.push(arg); return { ok: true }; },
+    remote_status: async () => ({ relay: { state: 'off' }, cloudflared: { installed: false } }),
     cloudflared_install: () => ({ accepted: true })
   };
   const api = createLuciApi({ service: s.service, remoteApi });
   assert.equal((await api.handle('remote_get', {})).relay.tokenSet, false);
   assert.deepEqual(await api.handle('remote_set', { relay: { enabled: true } }), { ok: true });
   assert.deepEqual(calls, [{ relay: { enabled: true } }]);
+  assert.deepEqual(await api.handle('remote_set', { relay: { relayUrl: 'ftp://x' } }), { error: 'relayUrl must be https://' }, 'a refused setting is the reply, not a 500');
   assert.deepEqual((await api.handle('status', {})).remote, { relay: { state: 'off' }, cloudflared: { installed: false } }, 'status carries remote_status');
   // the api may also be handed in as a getter (mounted after the facade was built)
   let late = null;

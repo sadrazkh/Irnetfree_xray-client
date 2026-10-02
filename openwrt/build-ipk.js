@@ -70,6 +70,8 @@ function buildIpk({ root = ROOT, outDir = path.join(ROOT, 'dist'), version, mtim
   const F = (n) => path.join(root, 'openwrt', 'files', n);
   const LF = { lf: true };
   file('etc/init.d/irnetfree', F('irnetfree.init'), 0o755, LF);
+  // the kill switch's boot replay (START=19, before network): see killSwitchOpenwrt.js
+  file('etc/init.d/irnetfree-ks', F('irnetfree-ks.init'), 0o755, LF);
   file('etc/config/irnetfree', F('irnetfree.config'), 0o644, LF);
   file('etc/uci-defaults/99-irnetfree', F('99-irnetfree.defaults'), 0o755, LF);
   // run by the uci-defaults script and by the init script (see the file)

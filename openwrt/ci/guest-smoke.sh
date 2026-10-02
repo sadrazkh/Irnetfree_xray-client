@@ -250,11 +250,172 @@ logread | grep -q 'Token    : /etc/irnetfree/token' || { echo "the banner does n
 if logread | grep -q "$TOKEN"; then echo "the token is in the system log"; exit 1; fi
 if cmdline "$(pidof node)" | grep -q "$TOKEN"; then echo "the token is on the service's command line"; exit 1; fi
 
+# --- v1.16: the connection as one fact, the LuCI facade, the remote bypass, the WAN watcher, the kill switch ---
+
+say "the connection as one fact (S1/S2): app:init.conn says connected with its uptime source; a Connect on the live connection is a no-op"
+rpc '{"channel":"app:init"}' | jq -e '.result.conn.state == "connected" and .result.conn.since != null and .result.conn.tun == true and .result.conn.serverId != null' >/dev/null \
+	|| { echo "app:init.conn does not say connected"; rpc '{"channel":"app:init"}' | jq '.result.conn'; exit 1; }
+PIDS="$(gw_singbox)"
+rpc "{\"channel\":\"connect\",\"arg\":\"$ID\"}" | jq -e '.result.already == true' >/dev/null || { echo "a second Connect on the live connection was not a no-op"; exit 1; }
+[ "$(gw_singbox)" = "$PIDS" ] || { echo "the gateway was rebuilt for a Connect on the live connection"; exit 1; }
+
+say "the LuCI facade (A9): loopback only, the token in the body, the live state"
+luci() { uclient-fetch -q -O - --post-data="{\"token\":\"$TOKEN\",\"arg\":$2}" "http://127.0.0.1:6969/luci/$1"; }
+luci status '{}' > /tmp/luci-status.json
+jq -e '.state == "connected" and .version != null and .traffic.up >= 0 and .killSwitch.enabled == false' /tmp/luci-status.json >/dev/null || { echo "luci/status is wrong"; cat /tmp/luci-status.json; exit 1; }
+jq -c '{state, since, memAvailableKb, traffic}' /tmp/luci-status.json
+luci configs '{}' | jq -e '(.groups | length) >= 1 and .activeId != null' >/dev/null || { echo "luci/configs is wrong"; exit 1; }
+luci log '{"lines":5}' | jq -e '(.lines | length) <= 5 and (.lines | length) >= 1' >/dev/null || { echo "luci/log is wrong"; exit 1; }
+luci diagnostics '{}' > /tmp/diag.json
+jq -r '.text' /tmp/diag.json | grep -E '^(MemAvailable|RSS):' || { echo "the diagnostics carry no memory lines"; jq -r '.text' /tmp/diag.json | head -20; exit 1; }
+if jq -r '.text' /tmp/diag.json | grep -q "$TOKEN"; then echo "the token is in the diagnostics"; exit 1; fi
+echo "luci/test: $(luci test '{}')"
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST --data '{"token":"nope","arg":{}}' http://127.0.0.1:6969/luci/status)"; [ "$code" = 401 ] || { echo "a wrong token got $code"; exit 1; }
+code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:6969/luci/status)"; [ "$code" = 405 ] || { echo "a GET got $code"; exit 1; }
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "{\"token\":\"$TOKEN\",\"arg\":{}}" http://192.168.1.1:6969/luci/status)"; [ "$code" = 403 ] || { echo "a LAN-address peer got $code (loopback only)"; exit 1; }
+luci settings_set '{"lanBlockQuic":false}' | jq -e '.ok == true and .settings.lanBlockQuic == false' >/dev/null || { echo "settings_set failed"; exit 1; }
+sleep 2
+if nft list table inet irnetfree | grep -q 'udp dport 443'; then echo "settings_set did not apply live"; exit 1; fi
+luci settings_set '{"lanBlockQuic":true}' >/dev/null
+
+say "destinations the remote control uses never ride the tunnel (A10)"
+rpc '{"channel":"remote:bypass","arg":{"owner":"relay","hosts":["relay.example"],"cidrs":["198.51.100.1/32"]}}' | jq -e '.result.ok == true' >/dev/null
+ip rule show | grep '^8997:' || { echo "no 8997 rule"; ip rule show; exit 1; }
+r="$(ip route get 198.51.100.1)"; echo "router -> the relay's address: $r"
+echo "$r" | grep -q "via $GW" || { echo "the relay's address does not leave by the WAN"; exit 1; }
+if echo "$r" | grep -q 'dev IRNetFree'; then echo "the relay's address entered the tunnel"; exit 1; fi
+ip route get 8.8.8.8 | grep -q 'dev IRNetFree' || { echo "everything else is no longer tunnelled"; exit 1; }
+rpc '{"channel":"remote:bypass","arg":{"owner":"relay","hosts":[],"cidrs":[]}}' >/dev/null
+if ip rule show | grep -q '^8997:'; then echo "the 8997 rule did not go"; exit 1; fi
+
+say "a network change judged by a probe (S3): a second default route appears through netifd — the tunnel answers, kept"
+uci -q batch <<'EOF'
+set network.wtest=interface
+set network.wtest.proto='static'
+set network.wtest.device='br-lan'
+set network.wtest.ipaddr='192.168.1.9'
+set network.wtest.netmask='255.255.255.0'
+set network.wtest.gateway='192.168.1.2'
+set network.wtest.metric='50'
+commit network
+EOF
+PIDS="$(gw_singbox)"
+ifup wtest
+judged() { luci log '{"lines":80}' | jq -r '.lines[]' | grep -q "$1"; }
+i=0
+until judged 'Network changed (wtest: default v4 route appeared'; do
+	i=$((i+1)); [ $i -lt 60 ] || { echo "the watcher never judged the change"; luci log '{"lines":40}' | jq -r '.lines[]' | tail -20; exit 1; }; sleep 1
+done
+luci log '{"lines":80}' | jq -r '.lines[]' | grep 'Network changed' | tail -1
+judged 'Network changed (wtest: default v4 route appeared.*— the tunnel answers, kept' || { echo "the change was not kept"; luci log '{"lines":40}' | jq -r '.lines[]' | tail -20; exit 1; }
+ifdown wtest; uci -q delete network.wtest; uci commit network
+i=0
+until judged 'Network changed (wtest: default v4 route gone) — the tunnel answers, kept'; do
+	i=$((i+1)); [ $i -lt 60 ] || { echo "the route leaving was not judged"; luci log '{"lines":40}' | jq -r '.lines[]' | tail -20; exit 1; }; sleep 1
+done
+[ "$(gw_singbox)" = "$PIDS" ] || { echo "the gateway was rebuilt for a change the tunnel survived"; exit 1; }
+
+# --- the kill switch (K1–K6): armed while the VPN is meant to be on; the LAN has no internet while the tunnel is down ---
+say "kill switch on: the table is in the kernel, the snippet on disk, status says armed and not blocking"
+luci settings_set '{"killSwitch":true}' | jq -e '.ok == true and .settings.killSwitch == true' >/dev/null || { echo "settings_set killSwitch failed"; exit 1; }
+i=0; until nft list table inet irnetfree_ks >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 20 ] || { echo "no kill switch table"; logread -e irnetfree | tail -20; exit 1; }; sleep 1; done
+nft list table inet irnetfree_ks
+[ -s /etc/irnetfree/killswitch.nft ] || { echo "no boot snippet"; exit 1; }
+nft -c -f /etc/irnetfree/killswitch.nft || { echo "the snippet does not validate"; exit 1; }
+rpc '{"channel":"app:init"}' | jq -e '.result.conn.killSwitch == {"enabled":true,"armed":true,"blocking":false}' >/dev/null || { echo "status does not say armed"; rpc '{"channel":"app:init"}' | jq '.result.conn.killSwitch'; exit 1; }
+[ -L /etc/rc.d/S19irnetfree-ks ] || { echo "irnetfree-ks is not enabled at boot"; ls /etc/rc.d | grep irnetfree; exit 1; }
+
+say "a LAN-side network namespace: packets the router FORWARDS (a probe from 127.0.0.1 proves nothing about the LAN)"
+LANNS=0
+if ip netns add lan0 2>/dev/null; then
+	opkg install kmod-veth >/dev/null 2>&1 || true
+	if ip link add veth0 type veth peer name veth1 2>/dev/null; then
+		ip link set veth1 netns lan0
+		ip link set veth0 master br-lan up
+		ip netns exec lan0 ip link set lo up
+		ip netns exec lan0 ip link set veth1 up
+		ip netns exec lan0 ip addr add 192.168.1.77/24 dev veth1
+		ip netns exec lan0 ip route add default via 192.168.1.1
+		LANMAC="$(ip netns exec lan0 cat /sys/class/net/veth1/address)"
+		LANNS=1
+		echo "lan0: 192.168.1.77 ($LANMAC) behind br-lan"
+	else
+		echo "no veth in this image — the forward chain is checked by its rules only"
+		ip netns delete lan0
+	fi
+else
+	echo "no network namespaces in this image — the forward chain is checked by its rules only"
+fi
+lanprobe() { ip netns exec lan0 wget -q -O /dev/null -T 4 http://1.1.1.1/; }
+rejects() { nft list chain inet irnetfree_ks fwd | sed -n 's/.*counter packets \([0-9]*\) bytes [0-9]* reject.*/\1/p'; }
+if [ "$LANNS" = 1 ]; then
+	lanprobe && echo "lan0 reaches the internet through the tunnel" || { echo "lan0 has no internet with the tunnel up (the kill switch must not block a working tunnel)"; nft list chain inet irnetfree_ks fwd; exit 1; }
+fi
+
+say "sing-box dies and cannot come back (its binary held): the LAN is blocked and the reject counter moves; an excluded device passes; the router itself stays free"
+mv /usr/bin/sing-box /usr/bin/sing-box.held
+unhold() { [ -e /usr/bin/sing-box.held ] && mv /usr/bin/sing-box.held /usr/bin/sing-box; return 0; }
+OLD="$(gw_singbox)"; mark ks
+kill -9 $OLD
+i=0; until rpc '{"channel":"app:init"}' | jq -e '.result.conn.killSwitch.blocking == true' >/dev/null; do i=$((i+1)); [ $i -lt 30 ] || { echo "status never said blocking"; rpc '{"channel":"app:init"}' | jq '.result.conn'; unhold; exit 1; }; sleep 1; done
+nft list table inet irnetfree_ks >/dev/null || { echo "the table went with the gateway"; unhold; exit 1; }
+since_mark | grep -q 'Kill switch: the tunnel is down' || { echo "the block did not reach syslog"; since_mark | tail; unhold; exit 1; }
+r="$(ip route get 1.1.1.1 from 192.168.1.50 iif br-lan)"; echo "LAN client -> internet with the tunnel down (routing): $r — the firewall says no"
+code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://1.1.1.1/ || true)"; echo "the router itself -> internet: HTTP $code"
+[ -n "$code" ] && [ "$code" != "000" ] || { echo "the router's own traffic is blocked — it must stay free (NTP, opkg, the relay)"; unhold; exit 1; }
+before="$(rejects)"; before="${before:-0}"
+if [ "$LANNS" = 1 ]; then
+	if lanprobe; then echo "lan0 still reaches the internet with the tunnel down"; unhold; exit 1; fi
+	after="$(rejects)"; after="${after:-0}"
+	echo "reject counter: $before -> $after"
+	[ "$after" -gt "$before" ] || { echo "the reject counter did not move"; nft list chain inet irnetfree_ks fwd; unhold; exit 1; }
+	echo "-- the namespace's MAC excluded: marked by the kill switch's own chain, it passes"
+	luci settings_set "{\"lanBypassMacs\":[\"$LANMAC\"]}" | jq -e '.ok == true' >/dev/null
+	sleep 2
+	nft list table inet irnetfree_ks | grep -q "$LANMAC" || { echo "the excluded MAC is not in the kill switch's set"; nft list table inet irnetfree_ks; unhold; exit 1; }
+	lanprobe || { echo "an excluded device has no internet while the tunnel is down"; nft list chain inet irnetfree_ks fwd; unhold; exit 1; }
+	r="$(ip route get 1.1.1.1 from 192.168.1.77 iif br-lan mark 0x1f1e)"; echo "excluded device -> internet: $r"
+	echo "$r" | grep -q "via $GW" || { echo "an excluded device's traffic does not leave by the WAN"; unhold; exit 1; }
+	luci settings_set '{"lanBypassMacs":[]}' >/dev/null
+	sleep 2
+	if lanprobe; then echo "lan0 reaches the internet after its exclusion was removed"; unhold; exit 1; fi
+else
+	nft list chain inet irnetfree_ks fwd | grep -q 'reject with icmpx type admin-prohibited' || { echo "no reject rule"; unhold; exit 1; }
+	nft list chain inet irnetfree_ks fwd | grep -q 'meta mark 0x00001f1e accept' || { echo "no accept for excluded devices"; nft list chain inet irnetfree_ks fwd; unhold; exit 1; }
+fi
+
+say "the binary back: the gateway recovers by itself, the block lifts, the table stays (the VPN is still meant to be on)"
+unhold
+wait_back "kill switch recovery" 300
+rpc '{"channel":"app:init"}' | jq -e '.result.conn.killSwitch == {"enabled":true,"armed":true,"blocking":false}' >/dev/null || { echo "status after the recovery is wrong"; rpc '{"channel":"app:init"}' | jq '.result.conn.killSwitch'; exit 1; }
+nft list table inet irnetfree_ks >/dev/null || { echo "the table went with the rebuild"; exit 1; }
+judged 'Kill switch: the tunnel is back' || { echo "the lift is not in the log"; luci log '{"lines":30}' | jq -r '.lines[]' | tail -10; exit 1; }
+if [ "$LANNS" = 1 ]; then lanprobe || { echo "lan0 has no internet after the recovery"; exit 1; }; fi
+one_each "after the kill switch recovery"
+
+say "a reboot-equivalent: the table deleted by hand, /etc/init.d/irnetfree-ks start replays the snippet; stop lifts it"
+nft delete table inet irnetfree_ks
+/etc/init.d/irnetfree-ks start
+nft list table inet irnetfree_ks >/dev/null || { echo "the boot script did not replay the snippet"; exit 1; }
+/etc/init.d/irnetfree-ks stop
+if nft list table inet irnetfree_ks >/dev/null 2>&1; then echo "stop did not lift the table"; exit 1; fi
+/etc/init.d/irnetfree-ks start
+nft list table inet irnetfree_ks >/dev/null || { echo "start did not bring it back"; exit 1; }
+
 say "disconnect"
 rpc '{"channel":"disconnect"}' >/dev/null
 sleep 3
 if ip link show IRNetFree >/dev/null 2>&1; then echo "the TUN device is still there"; exit 1; fi
 if nft list table inet irnetfree >/dev/null 2>&1; then echo "the nft table is still there"; exit 1; fi
+# the user's disconnect disarms the kill switch: table and snippet gone, the LAN direct
+if nft list table inet irnetfree_ks >/dev/null 2>&1; then echo "the kill switch table outlived the user's disconnect"; exit 1; fi
+[ ! -e /etc/irnetfree/killswitch.nft ] || { echo "the boot snippet outlived the disconnect"; exit 1; }
+rpc '{"channel":"app:init"}' | jq -e '.result.conn.state == "disconnected" and .result.conn.killSwitch.armed == false' >/dev/null || { echo "the snapshot after the disconnect is wrong"; exit 1; }
+if [ "$LANNS" = 1 ]; then
+	lanprobe || { echo "lan0 has no internet after the VPN was turned off"; exit 1; }
+	echo "lan0 goes direct with the VPN off"
+	ip netns delete lan0
+fi
 if ip rule show | grep -q '^8999:'; then echo "the bypass rule is still there"; exit 1; fi
 if ip rule show | grep -q '^8998:'; then echo "the main-first rule is still there"; exit 1; fi
 r="$(ip route get 8.8.8.8)"; echo "router -> internet after disconnect: $r"

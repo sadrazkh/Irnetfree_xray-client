@@ -111,11 +111,16 @@ function createLuciApi({ service, remoteApi = null } = {}) {
     },
     diagnostics: () => service.diagnostics()
   };
+  // feat/remote's api: remote_get / remote_set / cloudflared_install are
+  // synchronous, remote_status is async, and remote_set throws an Error on
+  // invalid input — awaited either way, and a thrown Error is the reply's
+  // {error} (a refused setting is not a server failure).
   for (const m of REMOTE_METHODS) {
-    methods[m] = (a) => {
+    methods[m] = async (a) => {
       const r = remote();
       if (!r || typeof r[m] !== 'function') return { error: 'remote not available' };
-      return r[m](a);
+      try { return await r[m](a); }
+      catch (e) { return { error: (e && e.message) || String(e) }; }
     };
   }
 
