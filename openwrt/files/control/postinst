@@ -3,3 +3,13 @@
 [ -s "${IPKG_INSTROOT}/lib/functions.sh" ] || exit 0
 . "${IPKG_INSTROOT}/lib/functions.sh"
 default_postinst "$0" "$@"
+rc=$?
+# LuCI: rpcd reads its plugins and ACLs only when it starts (a reload re-execs
+# it and keeps the sessions), and LuCI caches its menu and modules — without
+# both, Services → IRNetFree shows the old page until a reboot. Only on a live
+# router, not while an image is being built.
+[ -n "$IPKG_INSTROOT" ] || {
+	[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload >/dev/null 2>&1
+	rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/
+}
+exit $rc

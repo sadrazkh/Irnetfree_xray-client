@@ -17,6 +17,7 @@
  * router is that the kernel accepts the text — which the QEMU job does.
  */
 const fs = require('fs');
+const nodeNet = require('net');
 
 /** Packets from excluded devices carry this mark; matches nothing sing-box uses. */
 const BYPASS_MARK = 0x1f1e;
@@ -28,6 +29,15 @@ const BYPASS_RULE_PREF = 8999;
  * router reachable from its own LAN while the tunnel is up.
  */
 const MAIN_FIRST_PREF = 8998;
+/**
+ * Before all of them: the destinations the remote control dials (the relay,
+ * Cloudflare's tunnel edge — service.setRemoteBypass) go by the main table,
+ * whatever the tunnel does. By destination, because node cannot mark its own
+ * sockets (no SO_MARK), and before 8998 so that even a DNS query to one of
+ * them (the relay's resolver is not among them, but a cidr could carry one)
+ * is not pulled into the tunnel by the main-first rule's `not dport 53`.
+ */
+const REMOTE_BYPASS_PREF = 8997;
 const NFT_TABLE = 'inet irnetfree';
 
 /**
@@ -194,6 +204,51 @@ function mainFirstRuleArgs(verb, pref = MAIN_FIRST_PREF) {
   return ['-4', '-6'].map(fam => [fam, 'rule', 'add', 'not', 'dport', '53', 'pref', String(pref), 'lookup', 'main', 'suppress_prefixlength', '0']);
 }
 
+/**
+ * `203.0.113.7` → `203.0.113.7/32`, `2001:DB8::7` → `2001:db8::7/128`, a
+ * cidr kept as it is (lower-cased); anything that is not an address with an
+ * optional valid prefix length → null. The only shape that ever reaches `ip`.
+ */
+function normalizeCidr(s) {
+  const raw = String(s == null ? '' : s).trim().toLowerCase();
+  if (!raw) return null;
+  const slash = raw.indexOf('/');
+  const addr = slash === -1 ? raw : raw.slice(0, slash);
+  const fam = nodeNet.isIP(addr);
+  if (!fam) return null;
+  const max = fam === 4 ? 32 : 128;
+  let bits = max;
+  if (slash !== -1) {
+    const b = raw.slice(slash + 1);
+    if (!/^\d{1,3}$/.test(b)) return null;
+    bits = Number(b);
+    if (bits > max) return null;
+  }
+  return `${addr}/${bits}`;
+}
+
+/** The list, cleaned: junk dropped, duplicates dropped, order kept. */
+function normalizeCidrs(list) {
+  const out = [];
+  for (const x of (Array.isArray(list) ? list : [])) {
+    const c = normalizeCidr(x);
+    if (c && !out.includes(c)) out.push(c);
+  }
+  return out;
+}
+
+/** argv for `ip`: the remote control's one rule per destination — `to <cidr> lookup main` at pref 8997, in the cidr's family. */
+function remoteBypassRuleArgs(verb, cidr, pref = REMOTE_BYPASS_PREF) {
+  if (verb !== 'add' && verb !== 'del') throw new Error('remoteBypassRuleArgs: verb must be add or del');
+  const fam = cidr.includes(':') ? '-6' : '-4';
+  return [fam, 'rule', verb, 'pref', String(pref), 'to', cidr, 'lookup', 'main'];
+}
+
+/** argv for `ip`, v4 then v6: every 8997 rule by preference — the sweep a teardown (or a killed run's leftovers) needs. */
+function remoteBypassSweepArgs(pref = REMOTE_BYPASS_PREF) {
+  return ['-4', '-6'].map(fam => [fam, 'rule', 'del', 'pref', String(pref)]);
+}
+
 /** `ubus call network.interface.lan status` → { device, address, mask }; pure. */
 function parseLanStatus(text) {
   const j = JSON.parse(text);
@@ -280,8 +335,9 @@ function ownOrphanCores({ dataDir, tmpDir = '/tmp', selfPid = process.pid, readd
 }
 
 module.exports = {
-  BYPASS_MARK, BYPASS_RULE_PREF, MAIN_FIRST_PREF, NFT_TABLE,
+  BYPASS_MARK, BYPASS_RULE_PREF, MAIN_FIRST_PREF, REMOTE_BYPASS_PREF, NFT_TABLE,
   isOpenwrt, normalizeMac, validMacs, parseDhcpLeases, parseNeigh, mergeDevices,
   buildNftRuleset, bypassRuleArgs, mainFirstRuleArgs, parseLanStatus, lanStatus, lanInterface, lanProbeAddress, lanDevices,
+  normalizeCidr, normalizeCidrs, remoteBypassRuleArgs, remoteBypassSweepArgs,
   ownOrphanCores
 };

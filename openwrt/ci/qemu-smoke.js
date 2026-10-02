@@ -13,8 +13,10 @@
  * guest script exited 0 and printed SMOKE OK. Everything the guest prints is
  * streamed to stdout, so a red job has the whole story in its log.
  */
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const http = require('http');
+const net = require('net');
+const os = require('os');
 const fs = require('fs');
 const path = require('path');
 
@@ -73,6 +75,114 @@ class Console {
   send(s) { this.proc.stdin.write(s); }
 }
 
+/* ----------------------------- the LuCI pages in a real browser ----------------------------- */
+// The guest script proves the plugin, the menu and the ubus calls; that the
+// pages RUN only a browser can show. After it passed, each IRNetFree tab is
+// opened by this runner's Chrome through QEMU's forward to the guest's uhttpd
+// (:80), logged in the way LuCI's login form does (a fresh image has no root
+// password), and the DOM is read after the scripts ran: a page that threw shows
+// LuCI's error box or never leaves "Loading view…". Then LuCI is switched to
+// Persian in the guest and the Overview is read again. No Chrome here (a local
+// run): skipped, and said so.
+// what each tab shows once the service's /luci API answers (the facade, or the
+// guest script's stub of it on a branch without the facade)
+const LUCI_TABS = {
+  overview: /class="irnf-badge"/,                                        // the status, as a badge
+  settings: /id="cbi-json"[\s\S]*id="cbi-irnetfree"/,                     // the router settings, then the UCI form
+  remote: /<h2[^>]*>(Remote access|دسترسی از راه دور)<\/h2>/,
+  log: /id="irnf-log"[^>]*>[^<]{10,}/                                     // lines in the log
+};
+const LUCI_ERROR = /<h4>(TypeError|ReferenceError|SyntaxError|RangeError|NetworkError|RPCError|DependencyError|InternalError|Runtime error)[^<]*<\/h4>[\s\S]{0,400}/;
+// one tab (a page normally takes 10-30 s here): six tabs stay well inside what the 40-min job
+// leaves after the guest script, and a Chrome that gives no DOM at all ends the check at once
+const TAB_LIMIT_MS = 90000;
+
+/** A loopback port nobody listens on, for the forward to the guest's LuCI. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.on('error', reject);
+    s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+  });
+}
+
+function findChrome() {
+  for (const c of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
+    const r = spawnSync('sh', ['-c', `command -v ${c}`], { encoding: 'utf8' });
+    if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
+  }
+  return null;
+}
+
+/** Chrome's DOM of `url` after its scripts ran (virtual time: network waits do not count), and its console. */
+function dumpDom(chrome, url) {
+  return new Promise((resolve) => {
+    const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-chrome-'));
+    const p = spawn(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run',
+      '--no-default-browser-check', `--user-data-dir=${profile}`, '--enable-logging=stderr', '--log-level=0',
+      '--virtual-time-budget=30000', '--dump-dom', url], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let dom = '', log = '', killed = false;
+    p.stdout.on('data', (d) => { dom += d; });
+    p.stderr.on('data', (d) => { log += d; });
+    const timer = setTimeout(() => { killed = true; p.kill('SIGKILL'); }, TAB_LIMIT_MS);
+    p.on('error', (e) => { log += e.message; });
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* best effort */ }
+      resolve({ code, dom, log, killed });
+    });
+  });
+}
+
+const textOf = (html) => html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/g, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+/** One tab: rendered, not stuck, no LuCI error box, no uncaught exception. → a problem, or null. */
+async function checkTab(chrome, port, tab, mark) {
+  const url = `http://127.0.0.1:${port}/cgi-bin/luci/admin/services/irnetfree/${tab}?luci_username=root&luci_password=`;
+  const started = Date.now();
+  const r = await dumpDom(chrome, url);
+  const secs = Math.round((Date.now() - started) / 1000);
+  const view = /<div[^>]*id="view"[^>]*>([\s\S]*)/.exec(r.dom);
+  const uncaught = r.log.split('\n').filter((l) => /CONSOLE/.test(l) && /Uncaught|is not defined|is not a function|Cannot read/.test(l));
+  for (const l of r.log.split('\n').filter((x) => /CONSOLE/.test(x))) console.log(`  [console] ${l.replace(/^.*?CONSOLE/, 'CONSOLE').slice(0, 300)}`);
+  let problem = null;
+  if (!r.dom) problem = r.killed ? `Chrome gave no DOM within ${TAB_LIMIT_MS / 1000}s` : `Chrome gave no DOM (exit ${r.code})`;
+  else if (LUCI_ERROR.test(r.dom)) problem = `LuCI's error box: ${textOf(LUCI_ERROR.exec(r.dom)[0]).slice(0, 400)}`;
+  else if (uncaught.length) problem = `uncaught: ${uncaught[0].slice(0, 300)}`;
+  else if (!view) problem = 'no #view in the page (not logged in?)';
+  else if (/Loading view/.test(view[1].slice(0, 400))) problem = 'stuck on "Loading view…"';
+  else if (/<img[^>]*src="x"/.test(r.dom)) problem = 'a config name went into the page as HTML';
+  else if (!mark.test(r.dom)) problem = `the page did not render (no ${mark})`;
+  console.log(`LUCI-RENDER ${tab}: ${problem ? 'FAILED — ' + problem : 'ok'} (${secs}s)`);
+  console.log(`  ${textOf(view ? view[1] : r.dom).slice(0, 700)}`);
+  return { problem, dom: r.dom, noDom: !r.dom };
+}
+
+async function luciInBrowser(con, port) {
+  const chrome = findChrome();
+  if (!chrome) { console.log('\nLUCI-RENDER skipped: no Chrome on this machine'); return 0; }
+  console.log(`\n== the LuCI pages in a real browser (${chrome}, forward 127.0.0.1:${port} -> 192.168.1.1:80)`);
+  let bad = 0;
+  for (const [tab, mark] of Object.entries(LUCI_TABS)) {
+    const res = await checkTab(chrome, port, tab, mark);
+    // a browser or forward that hangs would hang the same way for every tab: stop, say why
+    if (res.noDom) { console.log(`SMOKE FAILED: the LuCI render check — ${res.problem} for the ${tab} tab; stopping here`); return 1; }
+    if (res.problem) bad++;
+  }
+  // Persian: LuCI in fa loads irnetfree.fa.lmo (the tab names) and the pages read <html lang="fa">
+  if (await sh(con, "uci set luci.main.lang='fa' && uci commit luci && rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/", 30000) === 0) {
+    const fa = await checkTab(chrome, port, 'overview', /class="irnf-badge"/);
+    const missing = ['وضعیت', 'نمای کلی', 'دسترسی از راه دور'].filter((s) => !fa.dom.includes(s));
+    if (fa.problem || missing.length) { bad++; console.log(`LUCI-RENDER overview (fa): FAILED — ${fa.problem || 'no ' + missing.join(', ')}`); }
+    else console.log('LUCI-RENDER overview (fa): ok — Persian page text and tab names');
+    await sh(con, "uci set luci.main.lang='auto' && uci commit luci", 30000);
+  }
+  else { bad++; console.log('LUCI-RENDER: could not switch LuCI to Persian in the guest'); }
+  if (bad) console.log(`SMOKE FAILED: the LuCI render check — ${bad} page(s) failed (the LUCI-RENDER lines above)`);
+  else console.log('LUCI-RENDER OK');
+  return bad ? 1 : 0;
+}
+
 let n = 0;
 /** Run one shell line in the guest; resolve with its exit code. */
 async function sh(con, cmd, ms) {
@@ -86,10 +196,12 @@ function step(name, rc) { if (rc !== 0) throw new Error(`${name} failed with exi
 (async () => {
   await new Promise(r => srv.listen(0, '0.0.0.0', r));
   const port = srv.address().port;
+  const luciPort = await freePort();
   const qemu = spawn(QEMU, [
     '-M', 'virt', '-cpu', 'cortex-a15', '-smp', '2', '-m', '768', '-nographic', '-no-reboot',
     '-kernel', KERNEL,
-    '-netdev', `user,id=n0,net=192.168.1.0/24,host=${HOST_IP},dns=${DNS_IP}`,
+    // the forward: this runner's browser reaches the guest's LuCI (uhttpd on the LAN address)
+    '-netdev', `user,id=n0,net=192.168.1.0/24,host=${HOST_IP},dns=${DNS_IP},hostfwd=tcp:127.0.0.1:${luciPort}-192.168.1.1:80`,
     '-device', 'virtio-net-pci,netdev=n0'
   ], { stdio: ['pipe', 'pipe', 'pipe'] });
   qemu.on('error', (e) => { console.error(`\ncould not start ${QEMU}: ${e.message}`); process.exit(1); });
@@ -135,6 +247,7 @@ function step(name, rc) { if (rc !== 0) throw new Error(`${name} failed with exi
     rc = await sh(con, 'sh /tmp/guest-smoke.sh 2>&1', 32 * 60000);
     if (rc !== 0) console.error(`\nguest-smoke.sh exited ${rc}`);
     else if (!/SMOKE OK/.test(con.buf)) { console.error('\nthe guest script exited 0 but never printed SMOKE OK'); rc = 1; }
+    else rc = await luciInBrowser(con, luciPort);
   } catch (e) {
     console.error('\n' + e.message);
     rc = 1;

@@ -8,7 +8,8 @@
  * What goes in: the app exactly as checked out (src/, assets/, package.json —
  * the service reads its version from it) under /usr/lib/irnetfree, the procd
  * init script, the uci config, a uci-defaults script that adds the firewall
- * zone once, and three static LuCI files. What stays out: node itself (a feed
+ * zone once, and the LuCI app (menu, ACL, one view per tab, their shared
+ * module, the rpcd plugin they call). What stays out: node itself (a feed
  * package, `Depends:`), every core binary (downloaded on the router, or the
  * feed's xray-core/sing-box in /usr/bin), node_modules (the runtime needs
  * none), tests, source maps.
@@ -19,6 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 const { tgz } = require('./tar');
+const { buildLmo, parsePo } = require('./lmo');
 
 const ROOT = path.join(__dirname, '..');
 const PKG = 'irnetfree';
@@ -70,13 +72,22 @@ function buildIpk({ root = ROOT, outDir = path.join(ROOT, 'dist'), version, mtim
   const F = (n) => path.join(root, 'openwrt', 'files', n);
   const LF = { lf: true };
   file('etc/init.d/irnetfree', F('irnetfree.init'), 0o755, LF);
+  // the kill switch's boot replay (START=19, before network): see killSwitchOpenwrt.js
+  file('etc/init.d/irnetfree-ks', F('irnetfree-ks.init'), 0o755, LF);
   file('etc/config/irnetfree', F('irnetfree.config'), 0o644, LF);
   file('etc/uci-defaults/99-irnetfree', F('99-irnetfree.defaults'), 0o755, LF);
   // run by the uci-defaults script and by the init script (see the file)
   file(`${PREFIX}/fw-forwardings.sh`, F('fw-forwardings.sh'), 0o755, LF);
   file('usr/share/luci/menu.d/luci-app-irnetfree.json', F('luci/menu.json'), 0o644, LF);
   file('usr/share/rpcd/acl.d/luci-app-irnetfree.json', F('luci/acl.json'), 0o644, LF);
-  file('www/luci-static/resources/view/irnetfree.js', F('luci/irnetfree.js'), 0o644, LF);
+  // Services → IRNetFree: one view per tab, and what they share ('require irnetfree.common')
+  for (const v of ['overview', 'settings', 'remote', 'log']) file(`www/luci-static/resources/view/irnetfree/${v}.js`, F(`luci/view/${v}.js`), 0o644, LF);
+  file('www/luci-static/resources/irnetfree/common.js', F('luci/irnetfree-common.js'), 0o644, LF);
+  // LuCI translates the menu from its own catalogs (every *.fa.lmo here), not from the pages
+  ensureDir('usr/lib/lua/luci/i18n');
+  data.push({ name: 'usr/lib/lua/luci/i18n/irnetfree.fa.lmo', data: buildLmo(parsePo(fs.readFileSync(F('luci/po/fa/irnetfree.po'), 'utf8'))), mode: 0o644 });
+  // LuCI's pages reach the service through this rpcd plugin (ubus luci.irnetfree.*)
+  file('usr/libexec/rpcd/luci.irnetfree', F('rpcd/luci.irnetfree'), 0o755, LF);
 
   const installed = data.reduce((n, e) => n + (e.data ? e.data.length : 0), 0);
   const control = [

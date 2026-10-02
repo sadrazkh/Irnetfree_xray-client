@@ -101,6 +101,7 @@ class TunOpenwrt {
     this.lanIf = 'br-lan';
     this.probe = null;         // a LAN client address for the route check in verify()
     this.mark = net.BYPASS_MARK;
+    this.bypassCidrs = [];     // the remote control's destinations, routed past the tunnel (setBypass)
     this.laid = false;         // our table / rules may be in the kernel
     this.watchGen = 0;         // bumped by every exit we cause: only a newer watch may report
   }
@@ -122,8 +123,17 @@ class TunOpenwrt {
     await this.run('nft', ['-f', file]);
   }
 
-  /** Every `ip rule` of ours, in the order they are added: main-first, then the bypass. */
-  ruleSets(verb) { return [...net.mainFirstRuleArgs(verb), ...net.bypassRuleArgs(verb, this.mark)]; }
+  /**
+   * Every `ip rule` of ours, in the order they are added: main-first, then
+   * the bypass. A deletion also sweeps the remote control's destination
+   * rules (pref 8997) — they are laid one per cidr (setBypass), but a
+   * teardown, and the next start's clearing of a killed run's leftovers,
+   * must take every one of them by preference alone.
+   */
+  ruleSets(verb) {
+    const sets = [...net.mainFirstRuleArgs(verb), ...net.bypassRuleArgs(verb, this.mark)];
+    return verb === 'del' ? [...sets, ...net.remoteBypassSweepArgs()] : sets;
+  }
 
   /** Our rules, added after clearing any leftover so a restart never doubles them. */
   async addRules() {
@@ -136,9 +146,13 @@ class TunOpenwrt {
    * a leftover from an older version (other selectors, same preference) goes
    * too, and a doubled rule from an unclean exit cannot survive.
    */
+  /** How many times a deletion by preference is repeated: the two singletons a few, the per-destination 8997 rules until none is left. */
+  delCap(args) { return args[4] === String(net.REMOTE_BYPASS_PREF) ? 64 : 4; }
+
   async delRules() {
     for (const args of this.ruleSets('del')) {
-      for (let i = 0; i < 4; i++) {
+      const cap = this.delCap(args);
+      for (let i = 0; i < cap; i++) {
         try { await this.run('ip', args); } catch { break; }   // "not there" — the common case
       }
     }
@@ -295,6 +309,35 @@ class TunOpenwrt {
     this.excludeIps = this.inner.excludeIps;
     this.watchInner();
     this.onLog(`Gateway up on ${this.lanIf}: every device behind the router goes through the tunnel; ${this.macs.length} excluded by MAC`, 'info');
+    // the remote control's destinations, remembered while the gateway was down (setBypass)
+    for (const c of this.bypassCidrs) await this.layBypass(c);
+  }
+
+  /**
+   * The destinations the remote control uses (the relay, Cloudflare's tunnel
+   * edge — service.setRemoteBypass): one `to <cidr> lookup main` rule each at
+   * pref 8997, before every rule of ours and sing-box's, so the router's own
+   * dials to them leave by the WAN whatever the tunnel does (node cannot mark
+   * its sockets, so this is by destination). Live under a running gateway:
+   * what left the list is removed, what joined is added, the rest untouched;
+   * with the gateway down the list is only remembered and laid by the next
+   * start. A rule the kernel refuses is logged — never a gateway failure.
+   */
+  async setBypass(list) {
+    const next = net.normalizeCidrs(list);
+    const prev = this.bypassCidrs;
+    this.bypassCidrs = next;
+    if (!this.active) return;
+    for (const c of prev) {
+      if (next.includes(c)) continue;
+      try { await this.run('ip', net.remoteBypassRuleArgs('del', c)); } catch { /* already gone */ }
+    }
+    for (const c of next) if (!prev.includes(c)) await this.layBypass(c);
+  }
+
+  async layBypass(cidr) {
+    try { await this.run('ip', net.remoteBypassRuleArgs('add', cidr)); }
+    catch (e) { this.onLog(`Remote bypass: could not route ${cidr} past the tunnel: ${e.message}`, 'error'); }
   }
 
   /** Replace the exclusions under a live tunnel; the tunnel is not touched. */
@@ -338,7 +381,8 @@ class TunOpenwrt {
     }
     if (gone) {
       for (const args of this.ruleSets('del')) {
-        for (let i = 0; i < 4; i++) { try { this.runSync('ip', args); } catch { break; } }
+        const cap = this.delCap(args);
+        for (let i = 0; i < cap; i++) { try { this.runSync('ip', args); } catch { break; } }
       }
     }
     try { this.runSync('nft', ['delete', 'table', 'inet', 'irnetfree']); } catch { /* not there */ }

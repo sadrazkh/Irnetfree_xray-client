@@ -22,6 +22,34 @@ const path = require('path');
 const crypto = require('crypto');
 const { createService } = require('./service');
 const { hostAllowed, originAllowed } = require('./guard');
+const { createLuciApi, isLoopbackPeer } = require('./luciApi');
+
+// Every line this process writes starts with `irnetfree:` (v1.16 S5): under
+// procd the lines are syslog, and `logread -e irnetfree` must find the
+// banner, the shutdown, a stray rejection and a fatal error too — not only
+// the service's own tagged lines. Blank lines (a terminal's cosmetics) are
+// dropped; a chunk without its newline is continued by the next write.
+function prefixed(stream) {
+  const write = stream.write.bind(stream);
+  let midLine = false;
+  stream.write = function (chunk, encoding, cb) {
+    if (typeof encoding === 'function') { cb = encoding; encoding = undefined; }
+    const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+    const parts = text.split('\n');
+    let out = '';
+    for (let i = 0; i < parts.length; i++) {
+      const last = i === parts.length - 1;
+      const line = parts[i];
+      if (last && line === '') break;              // the chunk ended with its newline
+      if (!midLine && line === '') continue;       // a blank line
+      out += (midLine || line.startsWith('irnetfree:') ? line : 'irnetfree: ' + line) + (last ? '' : '\n');
+      midLine = last;
+    }
+    if (!out) { if (cb) process.nextTick(cb); return true; }
+    return write(out, encoding, cb);
+  };
+}
+for (const s of [process.stdout, process.stderr]) prefixed(s);
 
 // A stray rejection anywhere in the service must not end the process: on a
 // router this process IS the gateway, and Node ≥ 15 exits on an unhandled one
@@ -93,18 +121,43 @@ function indexHtml() {
 
 /* ----------------------------- service ----------------------------- */
 const service = createService({ dataDir: args.dataDir });
+// An uncaught exception used to be the end: node died, the exit hook tore the
+// tunnel down, and after five such deaths in an hour procd gave up on the
+// service — a router with no gateway until someone restarted it by hand (S5).
+// Now it is said with the prefix, the gateway goes down in order (capped at
+// 10 s), the process exits 1, and procd (respawn 3600 5 0: never giving up)
+// brings the service back — which reconnects by itself.
+process.on('uncaughtException', (e) => {
+  console.error('irnetfree: [fatal] ' + ((e && e.stack) || e) + ' — shutting down for procd to restart the service');
+  const cap = setTimeout(() => process.exit(1), 10000);
+  cap.unref();
+  Promise.resolve().then(() => service.shutdown()).catch(() => {}).then(() => process.exit(1));
+});
 const sseClients = new Set();
 service.onEvent((channel, payload) => {
   const line = 'data: ' + JSON.stringify({ channel, payload }) + '\n\n';
   for (const res of sseClients) { try { res.write(line); } catch {} }
 });
 
+// The LuCI facade: POST /luci/<method>, loopback only, token in the body
+// (see luciApi.js). The remote api is assigned in listen's callback below —
+// a getter, so a mount after this line still reaches the facade.
+let remoteApi = null;
+const luci = createLuciApi({ service, remoteApi: () => remoteApi });
+
 /* ----------------------------- auth ----------------------------- */
+/** `a` equals the token, in constant time (a string of another length is simply wrong). */
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const x = Buffer.from(a, 'utf8');
+  const y = Buffer.from(b, 'utf8');
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
 function authed(req, url) {
   if (!TOKEN) return true;
   const q = url.searchParams.get('token');
   const h = req.headers['x-irnetfree-token'];
-  return q === TOKEN || h === TOKEN;
+  return safeEqual(q, TOKEN) || safeEqual(h, TOKEN);
 }
 
 /* ----------------------------- helpers ----------------------------- */
@@ -164,10 +217,37 @@ async function handle(req, res) {
     if (!originAllowed(req.headers)) return sendJson(res, 403, { error: 'cross-origin request refused' });
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.write('retry: 3000\n\n');
+    // The connection as it IS, first — on every (re)connect of the stream: a
+    // browser whose EventSource dropped and came back (a phone's background
+    // tab) missed whatever happened meanwhile, and nothing else would replay it.
+    res.write('data: ' + JSON.stringify({ channel: 'conn:snapshot', payload: service.connSnapshot() }) + '\n\n');
     sseClients.add(res);
     const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 25000);
     req.on('close', () => { clearInterval(ping); sseClients.delete(res); });
     return;
+  }
+
+  // The LuCI facade: POST /luci/<method> {token, arg} — from this machine
+  // only (the rpcd plugin), the token in the body, never in the URL.
+  if (pathname.startsWith('/luci/')) {
+    if (!isLoopbackPeer(req.socket && req.socket.remoteAddress)) return sendJson(res, 403, { error: 'loopback only' });
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'POST only' });
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJson(res, 400, { error: 'a JSON object {token, arg} is required' });
+    if (TOKEN && !safeEqual(body.token, TOKEN)) return sendJson(res, 401, { error: 'unauthorized' });
+    try {
+      const result = await luci.handle(pathname.slice('/luci/'.length), body.arg);
+      return sendJson(res, 200, result === undefined ? {} : result);
+    } catch (e) {
+      // Only an unknown method is an HTTP error. Whatever a method itself
+      // refuses or throws (a setting it will not take, remote_set's Error)
+      // travels as 200 {error}: uclient-fetch — what the rpcd plugin fetches
+      // with — drops the body of every non-2xx reply, and LuCI would see
+      // nothing but "HTTP 400".
+      if (e && e.code === 404) return sendJson(res, 404, { error: e.message || 'unknown method' });
+      return sendJson(res, 200, { error: (e && e.message) || String(e) });
+    }
   }
 
   // Static: only GET
@@ -222,6 +302,9 @@ server.on('error', (e) => {
 server.listen(args.port, args.host, () => {
   const shown = isLoopback ? '127.0.0.1' : args.host;
   const port = server.address().port;   // the real one when --port 0 asked for any
+  // remote access (spec §3.5): the relay link and Cloudflare Tunnel, started from <data_dir>/remote.json; never throws.
+  // Its api is what the LuCI facade's remote_* methods reach (null when it could not start).
+  remoteApi = require('./remote/api').start({ service, localPort: port, uiToken: TOKEN });
   // A token that lives in a file is never printed: on a router this output is
   // syslog (procd), and the file is where LuCI and the installer read it from.
   const q = TOKEN && !args.tokenFile ? ('?token=' + TOKEN) : '';
@@ -241,6 +324,10 @@ server.listen(args.port, args.host, () => {
     console.log('  Bound to a public interface — a token is required' + (args.tokenFile ? ' (in the file above).' : ' (in the URL above).'));
   }
   console.log('');
+  // a test's way to make the service throw from a timer (tests/serverRequest.test.js): the fatal path above must end the process
+  if (process.env.IRNETFREE_TEST_THROW_MS) {
+    setTimeout(() => { throw new Error('IRNETFREE_TEST_THROW_MS: a test-made uncaught exception'); }, Number(process.env.IRNETFREE_TEST_THROW_MS) || 100);
+  }
 });
 
 /* ----------------------------- lifecycle ----------------------------- */

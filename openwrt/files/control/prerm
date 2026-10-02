@@ -2,3 +2,15 @@
 [ -s "${IPKG_INSTROOT}/lib/functions.sh" ] || exit 0
 . "${IPKG_INSTROOT}/lib/functions.sh"
 default_prerm "$0" "$@"
+ret=$?
+# The kill switch's table and its boot snippet: nothing of ours may keep
+# blocking the LAN once the package is gone (default_prerm stopped the init
+# scripts, which lifts the table; the snippet would still replay at a boot if
+# the script were left behind by hand). Only on the live system.
+if [ -z "$IPKG_INSTROOT" ]; then
+	nft delete table inet irnetfree_ks 2>/dev/null
+	config_load irnetfree 2>/dev/null
+	config_get data_dir main data_dir /etc/irnetfree
+	rm -f "$data_dir/killswitch.nft"
+fi
+exit $ret

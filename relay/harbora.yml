@@ -1,0 +1,15 @@
+# The IRNetFree relay on Harbora. The app itself is created in the panel
+# (Small; container port 8080; volume /app/data; secret RELAY_PASSWORD), then:
+#
+#   harbora deploy irnetfree-relay -y        (from the repo root; this file is relay/harbora.yml,
+#                                             so pass it with --path or copy it to the root)
+#
+# The build context is the repo root: the Dockerfile copies the three shared
+# modules under src/server/remote/ beside relay/. The root .dockerignore keeps
+# everything else out of the upload. No `# syntax=` line in the Dockerfile:
+# Harbora's builder cannot fetch the BuildKit frontend.
+app: irnetfree-relay
+
+build:
+  dockerfile: relay/Dockerfile
+  context: .
