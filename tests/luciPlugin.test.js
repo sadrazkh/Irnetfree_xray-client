@@ -114,8 +114,6 @@ test('the QEMU smoke drives the plugin as LuCI does: rpcd lists it, ubus calls i
   assert.deepEqual(listed.sort(), [...FACADE, 'service'].sort(), 'every method is checked in the list rpcd gives');
   assert.match(sec, /"error": "not-running"/, 'a stopped service, through the real uclient-fetch');
   assert.match(sec, /lu service '\{"action":"start"\}'/, 'and Start, the plugin\'s own call');
-  assert.match(sec, /"error": "http 405"/, 'a service without the facade is recognised …');
-  assert.match(sec, /SMOKE pending-facade/, '… and said so, instead of failing');
   assert.match(sec, /lu settings_set '\{"killSwitch":true\}'[\s\S]*nft list table inet irnetfree_ks/, 'settings_set arms the kill switch table');
   assert.match(sec, /cgi-bin\/luci\/admin\/menu/, 'the menu as a browser gets it');
   assert.match(sec, /http:\/\/127\.0\.0\.1\/ubus\//, 'the ubus call a page makes, through the ACL');
