@@ -436,6 +436,21 @@ test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and t
   assert.ok(cores.indexOf('Required files') < cores.indexOf('opkg install xray-core'), 'Required files is named first');
   assert.match(cores, /26\.3\.27/, 'and why: the version the LAN\'s DNS is verified on');
   assert.match(cores, /fallback/i, 'the feed is the fallback, not an equal choice');
+  // Required files is in the :6969 web UI only — LuCI has a Settings tab of its own, without any core download
+  assert.match(cores, /web UI[^\n]*Settings -> Required files/, 'the place is named: the web UI the link above opens');
+  assert.match(cores, /not LuCI's Settings tab/, 'and it is not LuCI\'s Settings tab');
+  // After an upgrade the browser keeps the old LuCI pages: v1.16.0 and older dated every file 1970, the view URLs do
+  // not change between versions, so a cached copy stays "fresh" for years and is never asked for again — Ctrl+F5
+  // refreshes one page load, not the views LuCI fetches after it. Said every time, not "if the pages look old".
+  const upgrade = out.slice(out.findIndex(l => /After an upgrade/.test(l))).join('\n');
+  assert.ok(out.some(l => /After an upgrade/.test(l)), 'the installer says what to do in the browser after an upgrade');
+  assert.match(upgrade, /log out of LuCI/);
+  assert.match(upgrade, /cached (images and )?files/, 'clear the browser\'s cached files — the step that reliably works');
+  assert.match(upgrade, /Ctrl\+Shift\+Del/);
+  assert.match(upgrade, /phone/, 'and on a phone');
+  assert.match(upgrade, /private/, 'a private window: no cache, the quick check');
+  assert.match(upgrade, /v1\.16\.0 or older/, 'unconditional coming from a 1970-dated package');
+  assert.doesNotMatch(upgrade, /\bif (the )?(LuCI )?pages? (look|show)/i, 'not conditional on noticing old pages — nothing tells the owner they are old');
 });
 
 test('LuCI: Services → IRNetFree with four tabs, behind its own ACL', () => {
