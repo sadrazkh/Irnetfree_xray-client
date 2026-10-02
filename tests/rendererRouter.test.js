@@ -74,6 +74,7 @@ function fakePage() {
       querySelector(sel) { return get(key + ' ' + sel); },
       appendChild(c) { this.children.push(c); return c; },
       append(...c) { this.children.push(...c); },
+      replaceChildren(...c) { this.children = c; },
       scrollIntoView(o) { this.scrolled = o || {}; },
       top: 0, scrollTop: 0,
       getBoundingClientRect() { return { top: this.top, height: 0 }; },
@@ -242,18 +243,21 @@ test('6/17: on the router Settings drop the desktop TUN controls, explain the wh
   const remote = HTML.slice(HTML.indexOf('id="gwRemoteRow"'), HTML.indexOf('id="optKillSwitch"'));
   assert.ok(remote.includes('data-i18n="gw.remote"'), 'the pointer is in the router block, before the kill switch');
 
-  const h = harness({ fns: ['applyFlavor'] });
+  const location = { protocol: 'http:', hostname: '192.168.1.1' };
+  const h = harness({ fns: ['applyFlavor', 'renderRemotePointer'], extra: { location } });
   h.ctx.applyFlavor();
   for (const id of FLAVOR_ROWS) assert.equal(h.el(id).hidden, true, `${id} is a desktop control`);
   assert.equal(h.el('#optTun').closest('.switch-row').hidden, true, 'no TUN switch: on a router the tunnel is the network');
   assert.equal(h.el('#tunRouterNote').hidden, false);
   assert.equal(h.el('#gwRemoteRow').hidden, false);
+  assert.equal(h.el('#gwRemote').children.length, 1, 'the pointer is rendered (t() here returns the bare key: plain text)');
   assert.equal(h.el('#gwRow').hidden, false);
   assert.equal(h.el('#insGatewayRow').hidden, false);
 
   // the desktop: every one of them as it was
-  const d = harness({ flavor: null, fns: ['applyFlavor'] });
+  const d = harness({ flavor: null, fns: ['applyFlavor', 'renderRemotePointer'], extra: { location } });
   d.ctx.applyFlavor();
+  assert.equal(d.el('#gwRemote').children.length, 0, 'nothing rendered into a hidden row');
   for (const id of FLAVOR_ROWS) assert.equal(d.el(id).hidden, false, `${id} stays on the desktop`);
   assert.equal(d.el('#optTun').closest('.switch-row').hidden, false);
   assert.equal(d.el('#tunRouterNote').hidden, true);
@@ -262,19 +266,26 @@ test('6/17: on the router Settings drop the desktop TUN controls, explain the wh
   assert.equal(d.el('#insGatewayRow').hidden, true);
 });
 
-test('6: on the router the mode card is "Whole network", explains itself and opens nothing; the desktop keeps Proxy / TUN and its picker', () => {
-  const fns = ['setModeWidget', 'openModeModal'];
+test('6: on the router the mode card is "Whole network", explains itself and opens the device list — never the Proxy/TUN picker; the desktop keeps Proxy / TUN and its picker', () => {
+  const fns = ['setModeWidget', 'openModeModal', 'openSettingAt'];
   const r = harness({ fns, settings: { tunMode: true } });
   r.ctx.setModeWidget();
   assert.equal(r.el('#modeLabel').textContent, 'mode.router');
   assert.equal(r.el('#modeSub').textContent, 'mode.routerSub');
-  assert.equal(r.el('#modeCard').title, 'mode.routerNote');
-  assert.equal(r.el('#modeCard').getAttribute('aria-disabled'), 'true');
-  assert.ok(r.el('#modeCard').classList.contains('mode-card-fixed'));
+  // The Home screen has no device list "below" the card: its tooltip is the
+  // gateway's own explanation (which names where the device list is), not
+  // mode.routerNote, whose "Below you can only exclude…" points at Settings.
+  assert.equal(r.el('#modeCard').title, 'gw.insHint');
+  // A control that does nothing is what the owner reported in LuCI: the card
+  // is a real button on the router too, and it goes where the one router
+  // choice is — which devices go direct.
+  assert.equal(r.el('#modeCard').getAttribute('aria-disabled'), null);
+  assert.ok(!r.el('#modeCard').classList.contains('mode-card-fixed'));
   r.el('#modeModal').hidden = true;
   r.ctx.openModeModal();
   assert.equal(r.el('#modeModal').hidden, true, 'the picker stays shut');
   assert.ok(!r.calls.some((c) => c[0] === 'modeOptions'), 'the Proxy/TUN picker does not open on a router');
+  assert.deepEqual(r.calls, [['view', 'settings']], 'a click opens Settings (at the device list)');
   // even a router store that still says proxy shows the whole network: there is no other mode there
   const p = harness({ fns, settings: { tunMode: false } });
   p.ctx.setModeWidget();
@@ -292,12 +303,12 @@ test('6: on the router the mode card is "Whole network", explains itself and ope
     d.ctx.openModeModal();
     assert.equal(d.el('#modeModal').hidden, false, 'the desktop picker opens');
     assert.ok(d.calls.some((c) => c[0] === 'modeOptions'));
+    assert.ok(!d.calls.some((c) => c[0] === 'view'), 'and nothing else');
   }
-  assert.match(CSS, /\.mode-card-fixed[^{]*\{[^}]*cursor:\s*default/, 'a card that does nothing does not look clickable');
 });
 
 test('6/8: the router’s TUN status line speaks of the whole network — ready, or sing-box missing — and never of admin rights', () => {
-  const fns = ['updateTunStatus', 'updateAdminBtn'];
+  const fns = ['updateTunStatus', 'updateAdminBtn', 'routerTunMissingKey'];
   const ready = harness({ fns, settings: { tunMode: true } });
   ready.ctx.state.elevated = false;
   ready.ctx.updateTunStatus();
@@ -309,6 +320,15 @@ test('6/8: the router’s TUN status line speaks of the whole network — ready,
   missing.ctx.updateTunStatus();
   assert.equal(missing.el('#tunStatus').textContent, 'tun.routerUnavailable');
   assert.equal(missing.el('#tunStatus').className, 'tun-status warn');
+  // The router's tunnel is sing-box AND nft (TunOpenwrt.isAvailable): with
+  // sing-box there, the missing piece is nft — telling the user to download
+  // sing-box again would fix nothing (and missingEssentials does not ask for it).
+  const noNft = harness({ fns, settings: { tunMode: true } });
+  noNft.ctx.state.tunAvailable = false;
+  noNft.ctx.state.assets = { platform: 'linux', 'sing-box': true };
+  noNft.ctx.updateTunStatus();
+  assert.equal(noNft.el('#tunStatus').textContent, 'tun.routerNoNft');
+  assert.equal(noNft.el('#tunStatus').className, 'tun-status warn');
 
   // the desktop's four states, word for word as before
   const cases = [
@@ -366,14 +386,16 @@ test('8: a router without sing-box asks for it at load, like a missing xray; the
 });
 
 test('8: the router’s Required files list has no tun2socks or wintun, and its TUN note is the router’s; the desktop list is whole', () => {
-  const fns = ['escapeHtml', 'renderComponents', constSource('COMPONENTS')];
+  const fns = ['escapeHtml', 'renderComponents', 'routerTunMissingKey', constSource('COMPONENTS')];
   const rows = (h) => h.el('#compList').children.map((r) => r.innerHTML).join('\n');
   const r = harness({ fns });
   r.ctx.state.assets = { platform: 'linux', xray: true, 'sing-box': false, tun2socks: false, tunReady: false };
   r.ctx.state.tunAvailable = false;
   r.ctx.renderComponents();
   const routerRows = rows(r);
-  assert.match(routerRows, /comp\.singbox/);
+  // sing-box on a router is the whole-network tunnel, not "the TUN mode's backend"
+  assert.match(routerRows, /comp\.singboxRouter/);
+  assert.doesNotMatch(routerRows, /comp\.singbox</);
   assert.doesNotMatch(routerRows, /comp\.tun2socksLegacy/);
   assert.doesNotMatch(routerRows, /comp\.wintun/);
   assert.equal(r.el('#compTunNote').hidden, false);
@@ -389,12 +411,21 @@ test('8: the router’s Required files list has no tun2socks or wintun, and its 
   r3.ctx.state.assets = { platform: 'linux', xray: true, 'sing-box': true, tunReady: true };
   r3.ctx.renderComponents();
   assert.equal(r3.el('#compTunNote').hidden, true);
+  // sing-box present, the tunnel still unavailable: the note names nft
+  const r4 = harness({ fns });
+  r4.ctx.state.assets = { platform: 'linux', xray: true, 'sing-box': true, tunReady: true };
+  r4.ctx.state.tunAvailable = false;
+  r4.ctx.renderComponents();
+  assert.equal(r4.el('#compTunNote').hidden, false);
+  assert.equal(r4.el('#compTunNote').getAttribute('data-i18n'), 'tun.routerNoNft');
+  assert.equal(r4.el('#compTunNote').textContent, 'tun.routerNoNft');
 
   const d = harness({ flavor: null, fns });
   d.ctx.state.assets = { platform: 'win32', xray: true, tunReady: false };
   d.ctx.renderComponents();
   const deskRows = rows(d);
-  for (const k of ['comp.xray', 'comp.singbox', 'comp.tun2socksLegacy', 'comp.wintun']) assert.match(deskRows, new RegExp(k.replace('.', '\\.')));
+  for (const k of ['comp.xray', 'comp.singbox<', 'comp.tun2socksLegacy', 'comp.wintun']) assert.match(deskRows, new RegExp(k.replace('.', '\\.')));
+  assert.doesNotMatch(deskRows, /comp\.singboxRouter/, 'the desktop keeps its own sing-box label');
   assert.equal(d.el('#compTunNote').hidden, false);
   assert.equal(d.el('#compTunNote').getAttribute('data-i18n'), null, 'the desktop note keeps its markup key');
 });
@@ -407,7 +438,8 @@ test('18: a server is "live" when the connection up right now is built from it �
   s.servers = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
   s.chains = [{ id: 'k1', members: ['a', 'b'] }];
   s.chain = ['c', 'b'];
-  s.pool = [{ target: 'c', enabled: true }, { target: 'chain:k1', enabled: true }, { target: 'x', enabled: false }];
+  s.pool = [{ target: 'c', enabled: true, socksPort: 20001 }, { target: 'chain:k1', enabled: true, socksPort: 20002 },
+    { target: 'x', enabled: false, socksPort: 20003 }, { target: 'b', enabled: true, socksPort: 0 }];
   const live = (activeServerId, id, connected = true) => { s.activeServerId = activeServerId; s.connected = connected; return h.ctx.serverInLivePlan(id); };
   assert.equal(live('a', 'a'), true);
   assert.equal(live('a', 'b'), false);
@@ -419,6 +451,10 @@ test('18: a server is "live" when the connection up right now is built from it �
   assert.equal(live('__pool__', 'a'), true, 'a member of a pool chain');
   s.pool[0].enabled = false;
   assert.equal(live('__pool__', 'c'), false, 'a disabled pool entry is not running');
+  // main and the service build the pool from `enabled && socksPort`: an
+  // enabled entry with no port never started
+  s.pool[1].enabled = false;
+  assert.equal(live('__pool__', 'b'), false, 'an enabled pool entry without a port is not running');
   s.settings = { routeRules: [{ target: 'chain:k1' }, { target: 'direct' }], routeDefault: 'c' };
   assert.equal(live('__advanced__', 'a'), true, 'an advanced rule’s chain');
   assert.equal(live('__advanced__', 'c'), true, 'the advanced default');
@@ -473,6 +509,54 @@ test('18: saving an edit of the live server says it is not applied yet and offer
   assert.match(rule[1], /(^|[\s;])left:\s*50%/);
 });
 
+/**
+ * servers:update now answers { live, pendingReconnect } (fix/v1161-core: an
+ * edit of a server the live plan dials is the pending key 'servers'). The
+ * service judges against the plan it actually built; the renderer's own
+ * reading (serverInLivePlan) is only for a main that does not say.
+ */
+test('18 (review): a save takes the service’s word — its "live" verdict and its pending list — and reads the plan itself only for a main that says neither', async () => {
+  const run = async ({ reply, activeServerId = 's1' }) => {
+    const h = harness({
+      fns: ['serverInLivePlan', 'toastAction', 'setPending', 'saveEdit'],
+      prelude: 'var editOriginal = { protocol: "vless" }; var editClearPin = false;',
+      extra: {
+        collectEditFields: () => ({ name: 'x' }),
+        renderServers() {}, renderPicker() {}, renderChains() {}, renderPool() {}, renderAdvanced() {}, closeEdit() {},
+        renderPendingBanner: () => h.calls.push(['banner', [...h.ctx.state.pendingReconnect].join(',')]),
+        doReconnect: () => {},
+        window: { api: { updateServer: async () => Object.assign({ ok: true, servers: [{ id: 's1' }, { id: 's2' }] }, reply) } }
+      }
+    });
+    Object.assign(h.ctx.state, { editingId: 's1', connected: true, activeServerId, servers: [{ id: 's1' }, { id: 's2' }] });
+    await h.ctx.saveEdit();
+    return h;
+  };
+  const withAction = (h) => h.el('#toast').className.includes('has-action');
+
+  // live, and 'servers' pending: the lasting banner comes at once, beside the toast
+  const live = await run({ reply: { live: true, pendingReconnect: ['servers'] } });
+  assert.ok(withAction(live));
+  assert.deepEqual([...live.ctx.state.pendingReconnect], ['servers']);
+  assert.ok(live.calls.some((c) => c[0] === 'banner' && c[1] === 'servers'), 'the pending banner is refreshed with it');
+
+  // the service says not live (say, a pool entry it never started): believed over the renderer's reading
+  const notLive = await run({ reply: { live: false, pendingReconnect: [] } });
+  assert.ok(!withAction(notLive));
+  assert.deepEqual(notLive.calls.filter((c) => c[0] === 'toast'), [['toast', 't.serverUpdated', 'ok']]);
+
+  // and live by the service's word where the renderer would not have said so
+  const svcOnly = await run({ reply: { live: true, pendingReconnect: ['servers'] }, activeServerId: 's2' });
+  assert.ok(withAction(svcOnly));
+
+  // an older main (neither field): the renderer's own reading, and the pending list left alone
+  const old = await run({ reply: {} });
+  assert.ok(withAction(old));
+  assert.ok(!old.calls.some((c) => c[0] === 'banner'), 'no list in the reply: the banner is not touched');
+  const oldOther = await run({ reply: {}, activeServerId: 's2' });
+  assert.ok(!withAction(oldOther));
+});
+
 /* ------------------------------ 19: Hide SNI tells the truth ------------------------------ */
 
 test('19: a server that already fragments with finalmask says so under the Hide SNI switch', () => {
@@ -500,4 +584,178 @@ test('19: a server that already fragments with finalmask says so under the Hide 
   h.el('#edFinalMask').value = '';
   h.ctx.updateHideSniNote();
   assert.equal(h.el('#edHideSniFmNote').hidden, true, 'cleared in the form: gone at once');
+});
+
+/* ------------------------------------ review round ------------------------------------ */
+
+/** i18n.js itself in a context of its own: t() exactly as the page runs it, in one language. */
+function realT(lang) {
+  const window = {};
+  vm.runInContext(I18N, vm.createContext({ window, document: { documentElement: {}, querySelectorAll: () => [] } }));
+  window.i18n.applyI18n(lang);
+  return window.i18n.t;
+}
+
+test('review: every key the pending list can hold has a name in fa and en — "servers" (an edit of the live server) included', () => {
+  const { RECONNECT_KEYS } = require('../src/main/settingsMeta');
+  // pendingKeys() adds keys beyond the settings: 'servers' (fix/v1161-core),
+  // and whatever main or the service push there in future
+  const extra = new Set(['servers']);
+  for (const f of ['src/main/main.js', 'src/server/service.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    const body = (src.match(/function pendingKeys\(\) \{[\s\S]*?\n\s*\}/) || [''])[0];
+    for (const m of body.matchAll(/keys\.push\('([^']+)'\)/g)) extra.add(m[1]);
+  }
+  for (const k of extra) definedOnceEach('set.' + k);
+  for (const lang of ['fa', 'en']) {
+    const h = harness({ fns: ['pendingLabels'], extra: { t: realT(lang) } });
+    h.ctx.state.pendingReconnect = [...RECONNECT_KEYS, ...extra];
+    const labels = [...h.ctx.pendingLabels()];
+    labels.forEach((l, i) => assert.ok(!/^set\./.test(l), `${lang}: '${h.ctx.state.pendingReconnect[i]}' shows as the raw key "${l}"`));
+  }
+  assert.equal(str('fa', 'set.servers'), 'ویرایش سرورِ متصل');
+  assert.equal(str('en', 'set.servers'), 'Edit of the connected server');
+});
+
+test('review: on the router the inspector has no TUN row and no Leak guard row — unless a stored "strict" is still live, and then Settings shows the guard so it can be lowered', () => {
+  // the rows carry ids to hide them by
+  assert.match(HTML, /<div class="ins-row" id="insTunRow"><span class="ins-label" data-i18n="ins\.tun">[^<]*<\/span><span class="ins-val" id="insTun">/);
+  assert.match(HTML, /<div class="ins-row" id="insGuardRow"><span class="ins-label" data-i18n="ins\.guard">[^<]*<\/span><span class="ins-val" id="insGuard">/);
+  const fns = ['applyFlavor', 'renderInspector'];
+  const extra = { renderRemotePointer() {} };
+  for (const leakGuard of [undefined, 'off', 'standard']) {
+    const r = harness({ fns, extra, settings: { tunMode: true, leakGuard } });
+    r.ctx.applyFlavor();
+    r.ctx.state.connected = true;
+    r.ctx.renderInspector();
+    assert.equal(r.el('#insTunRow').hidden, true, 'the whole-network row stands for it');
+    assert.equal(r.el('#insGuardRow').hidden, true, `no guard row at ${leakGuard}: nothing on the router answers it`);
+    assert.equal(r.el('#leakGuardRow').hidden, true);
+  }
+  // A router store holding "strict" (a desktop backup restored before the
+  // router kept its own guard) still reaches sing-box's strict_route: it shows,
+  // in the inspector and in Settings, where it can be set back.
+  const s = harness({ fns, extra, settings: { tunMode: true, leakGuard: 'strict' } });
+  s.ctx.applyFlavor();
+  s.ctx.renderInspector();
+  assert.equal(s.el('#insTunRow').hidden, true);
+  assert.equal(s.el('#insGuardRow').hidden, false);
+  assert.equal(s.el('#leakGuardRow').hidden, false);
+  // lowered in Settings: the inspector row goes with the save's render
+  s.ctx.state.settings = { tunMode: true, leakGuard: 'standard' };
+  s.ctx.renderInspector();
+  assert.equal(s.el('#insGuardRow').hidden, true);
+
+  // the desktop: both rows, at every level, as before
+  for (const leakGuard of ['off', 'standard', 'strict']) {
+    const d = harness({ flavor: null, fns, extra, settings: { tunMode: true, leakGuard } });
+    d.ctx.applyFlavor();
+    d.ctx.renderInspector();
+    assert.equal(d.el('#insTunRow').hidden, false);
+    assert.equal(d.el('#insGuardRow').hidden, false);
+    assert.equal(d.el('#leakGuardRow').hidden, false);
+    assert.equal(d.el('#insGuard').textContent, leakGuard);
+  }
+});
+
+test('review: while the router reconnects or waits for the WAN the gateway row says so — not "off — the VPN is off"', () => {
+  const fns = ['renderInspector'];
+  const rec = harness({ fns, settings: { tunMode: true } });
+  // status 'reconnecting' / 'waiting': connected false, connecting true
+  rec.ctx.state.connecting = true;
+  rec.ctx.renderInspector();
+  assert.equal(rec.el('#insGateway').textContent, 'state.connecting');
+  assert.ok(!rec.el('#insGateway').classList.contains('off'), 'neither off…');
+  assert.ok(!rec.el('#insGateway').classList.contains('on'), '…nor on');
+  // and back to off once nothing is in flight
+  rec.ctx.state.connecting = false;
+  rec.ctx.renderInspector();
+  assert.equal(rec.el('#insGateway').textContent, 'gw.insOff');
+  assert.ok(rec.el('#insGateway').classList.contains('off'));
+});
+
+test('review: the router strings this round adds, in both languages', () => {
+  const want = {
+    'tun.routerNoNft': [
+      '⚠ nft (nftables) روی روتر نیست — تونل کل شبکه بدون آن بالا نمی‌آید: opkg install nftables',
+      '⚠ nft (nftables) is not on the router — the whole-network tunnel cannot start without it: opkg install nftables'],
+    'lan.routerTitle': ['باز کردن پورت‌های پراکسی SOCKS/HTTP روی شبکه', 'Open the SOCKS/HTTP proxy ports to the LAN'],
+    'lan.routerSub': [
+      'لازم نیست — همهٔ دستگاه‌ها از قبل از تونل می‌روند؛ فقط برای برنامه‌ای که خودش پراکسی می‌خواهد.',
+      'Not needed — every device already goes through the tunnel; only for an app that asks for a proxy itself.'],
+    'comp.singboxRouter': ['هستهٔ sing-box (تونل کل شبکه)', 'sing-box core (the whole-network tunnel)']
+  };
+  for (const [k, [fa, en]] of Object.entries(want)) {
+    definedOnceEach(k);
+    assert.equal(str('fa', k), fa, `fa ${k}`);
+    assert.equal(str('en', k), en, `en ${k}`);
+  }
+});
+
+test('review: on the router the Allow LAN row says what it does there — the proxy ports, not the tunnel; the desktop keeps its words', () => {
+  const extra = { renderRemotePointer() {} };
+  const r = harness({ fns: ['applyFlavor'], extra });
+  r.ctx.applyFlavor();
+  const row = r.el('#optAllowLan').closest('.switch-row');
+  assert.equal(row.hidden, false, 'the row stays: the ports are real');
+  assert.equal(row.querySelector('.switch-title').getAttribute('data-i18n'), 'lan.routerTitle');
+  assert.equal(row.querySelector('.switch-title').textContent, 'lan.routerTitle');
+  assert.equal(row.querySelector('.switch-sub').getAttribute('data-i18n'), 'lan.routerSub');
+  assert.equal(row.querySelector('.switch-sub').textContent, 'lan.routerSub');
+  const d = harness({ flavor: null, fns: ['applyFlavor'], extra });
+  d.ctx.applyFlavor();
+  const drow = d.el('#optAllowLan').closest('.switch-row');
+  assert.equal(drow.querySelector('.switch-title').getAttribute('data-i18n'), 'lan.title');
+  assert.equal(drow.querySelector('.switch-title').textContent, 'lan.title');
+  assert.equal(drow.querySelector('.switch-sub').getAttribute('data-i18n'), 'lan.sub');
+  // the markup's own keys are the desktop's, so the desktop reads exactly as before
+  assert.match(HTML, /<div class="switch-title" data-i18n="lan\.title">/);
+  assert.match(HTML, /<div class="switch-sub" data-i18n="lan\.sub">/);
+});
+
+test('review: the router’s Required-files prompt names sing-box for the whole-network tunnel; the desktop’s is unchanged', () => {
+  const fns = ['escapeHtml', 'compLabel', 'openFilesModal', constSource('COMP_LABEL')];
+  const r = harness({ fns });
+  r.ctx.openFilesModal(['sing-box']);
+  assert.match(r.el('#filesList').children[0].innerHTML, /comp\.singboxRouter</);
+  const d = harness({ flavor: null, fns });
+  d.ctx.openFilesModal(['xray', 'sing-box']);
+  const desk = d.el('#filesList').children.map((c) => c.innerHTML).join('\n');
+  assert.match(desk, /comp\.xray</);
+  assert.match(desk, /comp\.singbox</);
+  assert.doesNotMatch(desk, /comp\.singboxRouter/);
+  // the download loop says the same name
+  assert.match(APP, /\$\('#filesProgress'\)\.textContent = `\$\{t\('t\.downloading'\)\} \$\{t\(compLabel\(key\)\)\}…`;/);
+});
+
+test('17 (review): the remote-access pointer links LuCI’s Remote access page on this router, and the guide', () => {
+  assert.match(HTML, /<p class="hint" id="gwRemote" data-i18n="gw\.remote"><\/p>/);
+  const loc = { protocol: 'http:', hostname: '192.168.86.1', port: '6969', host: '192.168.86.1:6969' };
+  for (const lang of ['en', 'fa']) {
+    const text = str(lang, 'gw.remote');
+    const h = harness({ fns: ['renderRemotePointer'], extra: { t: () => text, location: loc } });
+    h.el('#gwRemote').children.push('stale');   // a language switch renders it again
+    h.ctx.renderRemotePointer();
+    const parts = h.el('#gwRemote').children;
+    assert.equal(parts.map((c) => (typeof c === 'string' ? c : c.textContent)).join(''), text, `${lang}: the words are the string, verbatim`);
+    const links = parts.filter((c) => typeof c !== 'string');
+    assert.equal(links.length, 2, `${lang}: two links`);
+    assert.ok(links[0].textContent.startsWith('LuCI ') && !links[0].textContent.includes('('), `${lang}: the LuCI path is the first link: ${links[0].textContent}`);
+    assert.equal(links[0].href, 'http://192.168.86.1/cgi-bin/luci/admin/services/irnetfree/remote', 'LuCI on this router — its own port, not the web UI’s');
+    assert.equal(links[1].textContent, 'docs/remote.md');
+    assert.equal(links[1].href, 'https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/remote.md');
+    for (const a of links) {
+      assert.equal(a.target, '_blank');
+      assert.equal(a.rel, 'noopener');
+    }
+  }
+  // a string without the expected places is shown as plain text, never mangled
+  const plain = harness({ fns: ['renderRemotePointer'], extra: { t: () => 'something else', location: loc } });
+  plain.ctx.renderRemotePointer();
+  assert.deepEqual([...plain.el('#gwRemote').children], ['something else']);
+  // rendered where the row shows, and again after a language switch (applyI18n resets it to plain text)
+  assert.match(fnSource('applyFlavor'), /if \(rt\) renderRemotePointer\(\);/);
+  assert.match(fnSource('setLang'), /if \(state\.flavor === 'openwrt'\) renderRemotePointer\(\);/);
+  // the page has no other link: without a rule it is the browser's dark blue on the dark panel (seen in a render)
+  assert.match(CSS, /\.hint a\s*\{[^}]*color:\s*var\(--accentInk\)/);
 });

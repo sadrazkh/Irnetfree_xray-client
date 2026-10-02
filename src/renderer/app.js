@@ -283,6 +283,8 @@ window.api.onSystemTheme((d) => {
 
 function setLang(lang) {
   window.i18n.applyI18n(lang);
+  // applyI18n left the remote-access pointer as plain text: its links again
+  if (state.flavor === 'openwrt') renderRemotePointer();
   $('#btnLang').textContent = lang === 'fa' ? 'EN' : 'فا';
   $('#langSelect').value = lang;
   // re-render dynamic content so it picks up the new language
@@ -994,14 +996,32 @@ function applyFlavor() {
   // TUN switch (its wording is the desktop's — admin rights, "the system"), in
   // its place one line saying so; no proxy-mode UDP block (there is no proxy
   // mode), and no leak-guard cards (the DNS guard they choose is skipped on a
-  // router, where dnsmasq answers the LAN through the tunnel).
+  // router, where dnsmasq answers the LAN through the tunnel) — except while
+  // the store still holds "strict" (a desktop backup restored earlier): that
+  // level does reach the router's sing-box (strict_route), so it stays in
+  // view, where it can be set back.
   const tunRow = $('#optTun').closest('.switch-row');
   if (tunRow) tunRow.hidden = rt;
   $('#tunRouterNote').hidden = !rt;
   $('#udpBlockRow').hidden = rt;
-  $('#leakGuardRow').hidden = rt;
-  // remote access is set up in LuCI; this page only says where
+  const guardHidden = rt && (state.settings || {}).leakGuard !== 'strict';
+  $('#leakGuardRow').hidden = guardHidden;
+  // The inspector mirrors Settings: a row there that no switch stands behind
+  // is the "Gateway" the owner could not place (G1). The whole-network row
+  // stands for TUN; the guard row follows the guard (renderInspector).
+  $('#insTunRow').hidden = rt;
+  $('#insGuardRow').hidden = guardHidden;
+  // "Allow LAN" on a router only opens the SOCKS/HTTP ports to the LAN (the
+  // whole network is tunnelled either way): named for that, or "off" reads as
+  // "the LAN gets no VPN"
+  const lanRow = $('#optAllowLan').closest('.switch-row');
+  if (lanRow) {
+    relabel(lanRow.querySelector('.switch-title'), rt ? 'lan.routerTitle' : 'lan.title');
+    relabel(lanRow.querySelector('.switch-sub'), rt ? 'lan.routerSub' : 'lan.sub');
+  }
+  // remote access is set up in LuCI; this page says where, with links
   $('#gwRemoteRow').hidden = !rt;
+  if (rt) renderRemotePointer();
   $('#gwQuicRow').hidden = !rt;
   $('#optLanBlockQuic').checked = !!state.settings.lanBlockQuic;
   if (rt) renderLanDevices();
@@ -1073,6 +1093,37 @@ function openSettingAt(sel) {
 // it means, and a click opens the one thing about it that can be changed — which
 // devices go direct (#gwRow starts with the same explanation).
 $('#insGatewayRow').onclick = () => openSettingAt('#gwRow');
+
+/**
+ * The router's pointer to remote access (field report 17), its two places as
+ * links: LuCI's Remote access page on this router (uhttpd, the router's own
+ * port — not this page's) and the guide. The words are gw.remote verbatim; a
+ * translation without "LuCI … (" and "docs/remote.md" in it stays plain text.
+ * applyI18n resets the paragraph to that plain text, so a language switch
+ * renders it again.
+ */
+function renderRemotePointer() {
+  const p = $('#gwRemote');
+  if (!p) return;
+  const text = t('gw.remote');
+  const guide = 'docs/remote.md';
+  const a = text.indexOf('LuCI'), b = text.indexOf(' (', a), g = text.indexOf(guide, b);
+  if (a < 0 || b < 0 || g < 0) { p.replaceChildren(text); return; }
+  const link = (label, href) => {
+    const el = document.createElement('a');
+    el.textContent = label;
+    el.href = href;
+    el.target = '_blank';
+    el.rel = 'noopener';
+    return el;
+  };
+  p.replaceChildren(
+    text.slice(0, a),
+    link(text.slice(a, b), `${location.protocol}//${location.hostname}/cgi-bin/luci/admin/services/irnetfree/remote`),
+    text.slice(b, g),
+    link(guide, 'https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/' + guide),
+    text.slice(g + guide.length));
+}
 
 $('#btnSaveRules').onclick = async () => {
   const rules = textToCustomRules($('#customRules').value);
@@ -2354,12 +2405,19 @@ function renderInspector() {
       : (s.routingMode || 'global');
   }
   if (state.flavor === 'openwrt') {
+    // the guard row is there only while a stored "strict" is live (applyFlavor),
+    // and goes with the save that lowers it
+    const guardRow = $('#insGuardRow');
+    if (guardRow) guardRow.hidden = s.leakGuard !== 'strict';
     const n = (s.lanBypassMacs || []).length;
     // the LIVE gateway, not the switch: connected (on a router a gateway that
     // did not come up is a failed connect) with the TUN the connection was
     // built with — a switch flipped since is only pending
     const gatewayUp = !!state.connected && (!!s.tunMode !== (state.pendingReconnect || []).includes('tunMode'));
-    set('#insGateway', gatewayUp ? t('gw.insWhole') + (n ? ' · ' + t('gw.insDirect').replace('{n}', n) : '') : t('gw.insOff'), gatewayUp ? 'on' : 'off');
+    // a recovery or the boot connect waiting for the WAN is not "the VPN is
+    // off": the VPN is on its way back (and an armed kill switch is holding the LAN)
+    if (!gatewayUp && state.connecting) set('#insGateway', t('state.connecting'));
+    else set('#insGateway', gatewayUp ? t('gw.insWhole') + (n ? ' · ' + t('gw.insDirect').replace('{n}', n) : '') : t('gw.insOff'), gatewayUp ? 'on' : 'off');
   }
 }
 
@@ -2724,12 +2782,14 @@ function renderComponents() {
     const present = c.has ? c.has(a) : !!a[c.key];
     const v = c.ver && present ? state.coreVersions[c.ver] : '';
     const ver = v ? ` <span class="comp-ver">v${escapeHtml(v)}</span>` : '';
+    // sing-box on a router is the whole-network tunnel, not a TUN mode's backend
+    const label = rt && c.key === 'sing-box' ? 'comp.singboxRouter' : c.label;
     const row = document.createElement('div');
     row.className = 'comp-row';
     row.innerHTML = `
       <div class="comp-info">
         <span class="comp-dot ${present ? 'ok' : 'missing'}"></span>
-        <span class="comp-name">${escapeHtml(t(c.label))}${ver}</span>
+        <span class="comp-name">${escapeHtml(t(label))}${ver}</span>
         <span class="comp-state ${present ? 'ok' : 'missing'}">${present ? t('comp.installed') : t('comp.missing')}</span>
       </div>
       <button class="btn ${present ? 'ghost' : 'primary'} comp-btn">${present ? t('btn.update') : t('btn.download')}</button>`;
@@ -2751,12 +2811,23 @@ function renderComponents() {
   if (rt) {
     // The router's own reading: tunReady also counts tun2socks, which cannot
     // carry the gateway — the tunnel's availability is the service's to say.
-    tunNote.setAttribute('data-i18n', 'tun.routerUnavailable');
-    tunNote.textContent = t('tun.routerUnavailable');
+    const key = routerTunMissingKey();
+    tunNote.setAttribute('data-i18n', key);
+    tunNote.textContent = t(key);
     tunNote.hidden = !!state.tunAvailable;
   } else {
     tunNote.hidden = typeof a.tunReady !== 'boolean' || a.tunReady;
   }
+}
+
+/**
+ * Why the router's whole-network tunnel is unavailable, as a string key. It
+ * needs sing-box AND nft (TunOpenwrt.isAvailable): with sing-box there, the
+ * missing half is nft — "download sing-box" would fix nothing (and
+ * missingEssentials does not ask for it then).
+ */
+function routerTunMissingKey() {
+  return (state.assets || {})['sing-box'] ? 'tun.routerNoNft' : 'tun.routerUnavailable';
 }
 
 async function downloadComponent(key, btn) {
@@ -2933,6 +3004,11 @@ const COMP_LABEL = {
   xray: 'comp.xray', 'xray-pattn': 'comp.xrayPattn', 'sing-box': 'comp.singbox',
   geo: 'comp.geo', tun2socks: 'comp.tun2socks', wintun: 'comp.wintun'
 };
+/** The prompt's name for a component: on a router sing-box is the whole-network tunnel. */
+function compLabel(key) {
+  if (key === 'sing-box' && state.flavor === 'openwrt') return 'comp.singboxRouter';
+  return COMP_LABEL[key] || key;
+}
 
 function openFilesModal(missing) {
   const listEl = $('#filesList');
@@ -2940,7 +3016,7 @@ function openFilesModal(missing) {
   for (const key of missing) {
     const row = document.createElement('div');
     row.className = 'files-row';
-    row.innerHTML = `<span class="files-dot missing"></span><span class="files-name">${escapeHtml(t(COMP_LABEL[key] || key))}</span>`;
+    row.innerHTML = `<span class="files-dot missing"></span><span class="files-name">${escapeHtml(t(compLabel(key)))}</span>`;
     listEl.appendChild(row);
   }
   $('#filesProgress').textContent = '';
@@ -2957,7 +3033,7 @@ $('#filesDownload').onclick = async () => {
   const btn = $('#filesDownload');
   btn.disabled = true;
   for (const key of missing) {
-    $('#filesProgress').textContent = `${t('t.downloading')} ${t(COMP_LABEL[key] || key)}…`;
+    $('#filesProgress').textContent = `${t('t.downloading')} ${t(compLabel(key))}…`;
     const res = await window.api.downloadAsset(key);
     if (res && res.ok) {
       state.assets = res.assets || state.assets;
@@ -3015,8 +3091,9 @@ function updateTunStatus() {
   if (!el) return;
   if (state.flavor === 'openwrt') {
     // The router has no TUN switch and no admin question: the whole-network
-    // tunnel is ready, or sing-box is missing (and the line says where to get it).
-    el.textContent = t(state.tunAvailable ? 'tun.routerReady' : 'tun.routerUnavailable');
+    // tunnel is ready, or sing-box (else nft) is missing — the line says which,
+    // and where to get it.
+    el.textContent = t(state.tunAvailable ? 'tun.routerReady' : routerTunMissingKey());
     el.className = 'tun-status ' + (state.tunAvailable ? 'ok' : 'warn');
     updateAdminBtn(false);
     return;
@@ -3550,7 +3627,8 @@ function serverInLivePlan(id) {
     || (tg === 'chain' && (state.chain || []).includes(id))
     || (String(tg).startsWith('chain:') && chainHas(String(tg).slice(6)));
   if (live === '__chain__') return (state.chain || []).includes(id);
-  if (live === '__pool__') return (state.pool || []).some(e => e && e.enabled && targetHas(e.target));
+  // the pool runs the entries that are enabled AND have a port (as main builds it)
+  if (live === '__pool__') return (state.pool || []).some(e => e && e.enabled && e.socksPort && targetHas(e.target));
   if (live === '__advanced__') {
     const s = state.settings || {};
     const first = (state.servers || [])[0];
@@ -3581,12 +3659,18 @@ async function saveEdit() {
   const res = await window.api.updateServer(id, fields);
   if (res.ok) {
     state.servers = res.servers;
+    // The service judges an edit against the plan it actually built and keeps
+    // it pending ('servers') until a reconnect: the lasting banner from its
+    // list, the toast from its verdict. A main that sends neither (older
+    // builds) leaves the banner alone, and the renderer reads the plan itself.
+    if (Array.isArray(res.pendingReconnect)) setPending(res.pendingReconnect);
+    const live = typeof res.live === 'boolean' ? res.live : serverInLivePlan(id);
     renderServers(); renderPicker(); renderChains(); renderPool(); renderAdvanced();
     closeEdit();
     // The edit is in the store, not in the running tunnel: say so, with the
     // one click that applies it (the same leak-free rebuild as the Reconnect
     // button) — a Disconnect + Connect would go direct in between.
-    if (serverInLivePlan(id)) toastAction(t('t.serverUpdatedLive'), t('btn.reconnect'), doReconnect);
+    if (live) toastAction(t('t.serverUpdatedLive'), t('btn.reconnect'), doReconnect);
     else toast(t('t.serverUpdated'), 'ok');
   } else {
     toast(t('t.failed'), 'err');
@@ -4440,16 +4524,14 @@ function setModeWidget() {
   const card = $('#modeCard');
   if (state.flavor === 'openwrt') {
     // A router has one mode — the whole network through the tunnel — so the
-    // card names it, explains it on hover and opens nothing (openModeModal):
-    // "Proxy" there meant a LAN going direct while the UI said connected.
+    // card names it and never offers Proxy ("Proxy" there meant a LAN going
+    // direct while the UI said connected). It is not a dead control either:
+    // its tooltip is the gateway's own explanation and a click opens the one
+    // router choice, which devices go direct (openModeModal).
     $('#modeIco').textContent = '🛡';
     $('#modeLabel').textContent = t('mode.router');
     $('#modeSub').textContent = t('mode.routerSub');
-    if (card) {
-      card.title = t('mode.routerNote');
-      card.setAttribute('aria-disabled', 'true');
-      card.classList.add('mode-card-fixed');
-    }
+    if (card) card.title = t('gw.insHint');
     return;
   }
   // Reflect the CHOSEN mode (so users see/can change it before connecting).
@@ -4482,7 +4564,8 @@ function renderModeOptions() {
   else note.textContent = '';
 }
 function openModeModal() {
-  if (state.flavor === 'openwrt') return;   // one mode on a router: nothing to pick (setModeWidget)
+  // one mode on a router, nothing to pick: the card opens the device list instead (setModeWidget)
+  if (state.flavor === 'openwrt') { openSettingAt('#gwRow'); return; }
   renderModeOptions();
   $('#modeModal').hidden = false;
 }

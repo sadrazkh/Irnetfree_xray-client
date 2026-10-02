@@ -125,7 +125,7 @@ test('flavor=openwrt: the inspector gateway row is a button that explains itself
   const node = (id) => els[id] || (els[id] = { id, hidden: true, textContent: '', checked: false,
     setAttribute() {}, closest: () => null, querySelector: () => null });
   const $ = (sel) => node(String(sel).replace(/^#/, ''));
-  const ctx = vm.createContext({ state: { flavor: 'openwrt', settings: {} }, $, t: (k) => k, renderLanDevices: () => {} });
+  const ctx = vm.createContext({ state: { flavor: 'openwrt', settings: {} }, $, t: (k) => k, renderLanDevices: () => {}, renderRemotePointer: () => {} });
   vm.runInContext(fnSource('applyFlavor'), ctx);
   ctx.applyFlavor();
   assert.equal(els.insGatewayRow.hidden, false, 'shown on the router');
@@ -655,7 +655,7 @@ test('B1: on the router the autoConnect row says what it does — "Connect when 
     if (m[2]) return node(m[1] + ' ' + m[2]);
     return els[m[1]] || (els[m[1]] = node(m[1]));
   };
-  const ctx = vm.createContext({ state: { flavor: 'openwrt', settings: {} }, $, t: (k) => k, renderLanDevices: () => {} });
+  const ctx = vm.createContext({ state: { flavor: 'openwrt', settings: {} }, $, t: (k) => k, renderLanDevices: () => {}, renderRemotePointer: () => {} });
   vm.runInContext(fnSource('applyFlavor'), ctx);
   ctx.applyFlavor();
   assert.equal(relabelled['optAutoConnect:title'], 'autoconn.routerTitle');
