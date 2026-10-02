@@ -232,6 +232,11 @@ function createService(opts = {}) {
   // armed, a LAN with no internet at all (killSwitchState: the gateway is
   // never up). A desktop backup restored there carried exactly that.
   const ROUTER_FORCED = OPENWRT ? { dnsManaged: true, tunMode: true } : {};
+  // What a backup restored on a router does not overlay (backup:import): the
+  // desktop's own switches, and the router's choices a desktop file would
+  // undo — a desktop's lanBlockQuic:false / autoConnect:false / killSwitch
+  // turned the router's defaults off with nothing said (field report D5, fix 9).
+  const ROUTER_KEEPS_ON_IMPORT = ['tunMode', 'tunBackend', 'tunAppMode', 'tunApps', 'systemProxy', 'launchAtLogin', 'leakGuard', 'blockUdpInProxyMode', 'autoConnect', 'lanBlockQuic', 'killSwitch'];
 
   const listeners = new Set();
   const oneLine = (s) => String(s == null ? '' : s).replace(/\s*[\r\n]+\s*/g, ' | ').slice(0, 1000);
@@ -2744,12 +2749,14 @@ function createService(opts = {}) {
         r = importBundle(bundle, {
           servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
           chains: getChains(), pool: getPool(), settings: getSettings(), usage: usage ? usage.totals : {}
-        });
+        }, { keep: OPENWRT ? ROUTER_KEEPS_ON_IMPORT : [] });
       } catch (err) { return { ok: false, error: err.message }; }
       store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, settings: r.next.settings });
       if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
       send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries added`, level: 'info' });
-      return { ok: true, added: r.added };
+      // `kept`: the router-only keys the backup wanted changed — for the renderer's own words
+      if (r.kept.length) send('log', { line: 'Backup restored on a router: desktop-only settings were kept as the router needs them (TUN, system proxy, per-app routing, leak guard, connect at start, QUIC refusal, kill switch)', level: 'warn' });
+      return { ok: true, added: r.added, kept: r.kept };
     },
 
     // desktop-only / no-op in server mode
