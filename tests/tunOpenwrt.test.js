@@ -106,7 +106,7 @@ function make(opts = {}) {
     linkWaitMs: opts.linkWaitMs || 150,
     // who we are, and who dnsmasq runs as (OpenWrt: its own user) — never the test machine's /proc
     uid: opts.uid != null ? opts.uid : 0,
-    uidsOf: opts.uidsOf || ((name) => (name === 'dnsmasq' ? [453] : []))
+    uidsOf: opts.uidsOf || ((name) => (name === 'dnsmasq' ? [0, 453] : []))   // the root jail and the dnsmasq in it
   });
   return { tun, inner, lines, writes, logs, exits };
 }
@@ -329,28 +329,32 @@ test('D3: …not when dnsmasq runs as the same user — its upstream to them wou
   assert.ok(bad.logs.some(([lvl, l]) => lvl === 'error' && /178\.22\.122\.100\/32/.test(l) && /uidrange/.test(l)), JSON.stringify(bad.logs));
 });
 
-test('procUidsOf: the real uid of every process by that name that is not its own helper, from /proc; nothing when /proc cannot be read', () => {
+test('procUidsOf: the real uid of every process by that name, from /proc; nothing when /proc cannot be read', () => {
   const { procUidsOf } = require('../src/main/tunOpenwrt');
-  // OpenWrt 23.05 as the QEMU job saw it (run 37066289759): dnsmasq --user=dnsmasq
-  // (uid 453), and the dhcp-script helper it forks BEFORE dropping root — a
-  // dnsmasq that stays uid 0 and sends no DNS. Counted, it read as "dnsmasq runs
-  // as root" and no own-lookup rule was laid.
+  // OpenWrt 23.05 and 24.10 as the QEMU job saw them (run 37067447979): procd
+  // jails dnsmasq — the jail, named "dnsmasq", stays root (parent procd) and
+  // its child, the dnsmasq that forwards, runs as 453
   const files = {
     '/proc/1/comm': 'procd\n', '/proc/1/status': 'Name:\tprocd\nPPid:\t0\nUid:\t0\t0\t0\t0\n',
-    '/proc/812/comm': 'dnsmasq\n', '/proc/812/status': 'Name:\tdnsmasq\nPPid:\t1\nUid:\t453\t453\t453\t453\n',
-    '/proc/815/comm': 'dnsmasq\n', '/proc/815/status': 'Name:\tdnsmasq\nPPid:\t812\nUid:\t0\t0\t0\t0\n',
-    '/proc/813/comm': 'dnsmasq\n'   // gone before its status was read
+    '/proc/4611/comm': 'dnsmasq\n', '/proc/4611/status': 'Name:\tdnsmasq\nPPid:\t1\nUid:\t0\t0\t0\t0\n',
+    '/proc/4620/comm': 'dnsmasq\n', '/proc/4620/status': 'Name:\tdnsmasq\nPPid:\t4611\nUid:\t453\t453\t453\t453\n',
+    '/proc/4630/comm': 'dnsmasq\n'   // gone before its status was read
   };
   const fsImpl = {
-    readdirSync: () => ['1', '812', '813', '815', 'self', 'net'],
+    readdirSync: () => ['1', '4611', '4620', '4630', 'self', 'net'],
     readFileSync: (p) => { if (!(p in files)) throw new Error('ENOENT ' + p); return files[p]; }
   };
-  assert.deepEqual(procUidsOf('dnsmasq', fsImpl), [453]);
+  assert.deepEqual(procUidsOf('dnsmasq', fsImpl).sort((a, b) => a - b), [0, 453]);
   assert.deepEqual(procUidsOf('cloudflared', fsImpl), []);
   assert.deepEqual(procUidsOf('dnsmasq', { readdirSync: () => { throw new Error('no /proc'); } }), []);
-  // a dnsmasq with no --user: the main process is root, and that is what counts
-  files['/proc/812/status'] = 'Name:\tdnsmasq\nPPid:\t1\nUid:\t0\t0\t0\t0\n';
-  assert.deepEqual(procUidsOf('dnsmasq', fsImpl), [0]);
+});
+
+test('forwardsAs: dnsmasq forwards as a uid only when every dnsmasq runs as it — a root jail around a dnsmasq of its own user is not root\'s', () => {
+  const { forwardsAs } = require('../src/main/tunOpenwrt');
+  assert.equal(forwardsAs([0, 453], 0), false, 'OpenWrt: the jail is root, the forwarder 453');
+  assert.equal(forwardsAs([453], 0), false);
+  assert.equal(forwardsAs([0], 0), true, 'a dnsmasq that drops no privileges');
+  assert.equal(forwardsAs([], 0), false, 'none running');
 });
 
 test('M1: the 8997 sweep deletes until the kernel has none left — not at most four per family (the two singletons keep their bound)', async () => {

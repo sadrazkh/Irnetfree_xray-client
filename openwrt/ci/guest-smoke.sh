@@ -843,15 +843,14 @@ say "D3: where packets to the in-country resolvers go — a LAN device's DNS and
 # device's DNS to them out again (the `from 192.168.1.50 iif br-lan` lookups
 # below are such packets). dnsmasq must run as a user of its own (OpenWrt
 # starts it --user=dnsmasq), or the rule would take its upstream out too.
-# (its dhcp-script helper, forked before it drops root, is a dnsmasq too — uid 0,
-# and it sends no DNS: the one that forwards is the dnsmasq whose parent is not one)
+# (procd jails dnsmasq: the jail, named after it, stays root as the parent of
+# the dnsmasq that forwards, which runs as its own user — run 37067447979)
 DNSMASQ_PID=; DNSMASQ_UID=
 for p in $(pidof dnsmasq); do
 	pp="$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null)"
 	u="$(awk '/^Uid:/{print $2}' "/proc/$p/status" 2>/dev/null)"
 	echo "dnsmasq: pid $p, parent $pp ($(cat "/proc/$pp/comm" 2>/dev/null)), uid $u"
-	[ "$(cat "/proc/$pp/comm" 2>/dev/null)" = dnsmasq ] && continue
-	DNSMASQ_PID=$p; DNSMASQ_UID=$u
+	[ -n "$u" ] && [ "$u" != 0 ] && { DNSMASQ_PID=$p; DNSMASQ_UID=$u; }
 done
 echo "the dnsmasq that forwards: pid ${DNSMASQ_PID:-?}, uid ${DNSMASQ_UID:-?}"
 [ -n "$DNSMASQ_UID" ] && [ "$DNSMASQ_UID" != 0 ] || { echo "dnsmasq runs as root here — the own-lookup rule cannot tell it from the service"; exit 1; }
@@ -926,7 +925,10 @@ say "D3: cloudflared's edge discovery (an SRV lookup through dnsmasq) — answer
 # unbound enter the tunnel, whose port-53 hijack refuses SRV.
 CF_JS=/usr/lib/irnetfree/src/server/remote/cloudflared
 cf_dirs() { node -e "process.stdout.write(require('$CF_JS').dnsmasqConfDirs().join(' '))"; }
-srv_lookup() { nslookup -type=SRV _v2-origintunneld._tcp.argotunnel.com 127.0.0.1 2>&1 || true; }
+# cloudflared's own question, asked of dnsmasq the way it asks it (node's resolver: busybox nslookup's -type is optional)
+srv_lookup() {
+	node -e "const d = require('dns'); d.setServers(['127.0.0.1']); d.resolveSrv('_v2-origintunneld._tcp.argotunnel.com', (e, a) => console.log(e ? 'SRV error ' + e.code : 'SRV ' + JSON.stringify(a)));" 2>&1 || true
+}
 node -e "
 const fs = require('fs');
 const cf = require('$CF_JS');
@@ -935,8 +937,8 @@ for (const d of cf.dnsmasqConfDirs()) { fs.mkdirSync(d, { recursive: true }); fs
 process.stdout.write(text);
 "
 /etc/init.d/dnsmasq restart; sleep 3
-out="$(srv_lookup)"; echo "unbound: $(echo "$out" | tail -n 2 | tr '\n' ' ')"
-if echo "$out" | grep -qE 'service = [0-9]+ [0-9]+ 7844 '; then echo "the UNBOUND lines answered SRV — the tunnel did not refuse it, so the binding below would prove nothing"; exit 1; fi
+out="$(srv_lookup)"; echo "unbound: $out"
+if echo "$out" | grep -q '"port":7844'; then echo "the UNBOUND lines answered SRV — the tunnel did not refuse it, so the binding below would prove nothing"; exit 1; fi
 for d in $(cf_dirs); do rm -f "$d/irnf-smoke-srv.conf"; done
 CF_REAL=
 if [ -x /usr/bin/cloudflared ]; then
@@ -965,13 +967,13 @@ process.stdout.write(text);
 	/etc/init.d/dnsmasq restart
 fi
 out=; i=0
-until echo "$out" | grep -qE 'service = [0-9]+ [0-9]+ 7844 '; do
+until echo "$out" | grep -q '"port":7844'; do
 	i=$((i+1))
 	[ $i -le 8 ] || { echo "no SRV answer for _v2-origintunneld._tcp.argotunnel.com through the bound drop-in"; echo "$out"; logread | grep -i dnsmasq | tail -10; exit 1; }
 	sleep 3
 	out="$(srv_lookup)"
 done
-echo "$out" | grep -E 'service = ' | head -n 4
+echo "bound: $out" | cut -c1-300
 logread | grep 'for domain argotunnel\.com' | tail -n 2
 if [ -n "$CF_REAL" ]; then
 	luci remote_set '{"cloudflared":{"enabled":false}}' | jq -e '.ok == true' >/dev/null || { echo "remote_set (cloudflared off) was refused"; exit 1; }
