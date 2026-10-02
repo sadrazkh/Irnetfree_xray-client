@@ -19,9 +19,12 @@ const { SERVER, until } = H;
 
 const added = (s) => s.state.commands.filter(l => /^ip -[46] rule add pref 8997 /.test(l));
 const removed = (s) => s.state.commands.filter(l => /^ip -[46] rule del pref 8997 to /.test(l));
-const directRules = (cfg) => cfg.routing.rules.filter(r => r.outboundTag === 'direct' && ((r.domain || []).some(d => d.startsWith('full:')) || (r.ip || []).some(ip => /^(203\.0\.113|2606:4700)/.test(ip))));
+// Review I4: no xray routing rule for these destinations any more — the 8997 ip rules already take the router's
+// own sockets out of the tunnel, and an xray rule would have sent the agent's deliberate "via VPN" dial (R9,
+// through the SOCKS inbound) direct, the one path that was blocked. Any such rule in a config is a regression.
+const directRules = (cfg) => cfg.routing.rules.filter(r => r.outboundTag === 'direct' && ((r.domain || []).some(d => d.startsWith('full:')) || (r.ip || []).some(ip => /^(203\.0\.113|2606:4700|198\.51\.100)/.test(ip))));
 
-test('while the gateway is up the rules are added live, a replaced list removes what left, and the next config carries the direct rules', async (t) => {
+test('while the gateway is up the rules are added live, a replaced list removes what left — and no config ever carries an xray rule for them', async (t) => {
   const s = H.start();
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', SERVER.id);
@@ -42,13 +45,14 @@ test('while the gateway is up the rules are added live, a replaced list removes 
   assert.deepEqual(removed(s), ['ip -6 rule del pref 8997 to 2606:4700::/32 lookup main']);
   assert.ok(added(s).includes('ip -4 rule add pref 8997 to 203.0.113.9/32 lookup main'));
 
-  // the next core config (a rebuild) carries a direct rule for the names and one for the addresses
+  // the next core config (a rebuild) carries NO rule for them: the 8997 ip rules are the whole bypass (review I4)
   await s.service.invoke('vpn:reconnect');
   await until(() => s.statuses.filter(x => x.state === 'connected').length >= 2, 'the rebuild');
   const cfg = s.state.xray.starts.at(-1).config;
-  const rules = directRules(cfg);
+  assert.deepEqual(directRules(cfg), []);
+  assert.ok(!JSON.stringify(cfg.routing.rules).includes('relay.example'), 'the relay host is in no xray rule');
   // the union in owner order (the relay's key kept its place when its list was replaced), then cloudflared's
-  assert.deepEqual(rules.map(r => r.domain || r.ip), [['full:relay.example', 'full:edge.example'], ['203.0.113.9/32', '203.0.113.7/32', '198.51.100.0/24']]);
+  assert.deepEqual(s.service.remoteBypass(), { hosts: ['relay.example', 'edge.example'], cidrs: ['203.0.113.9/32', '203.0.113.7/32', '198.51.100.0/24'] });
   // …and the rebuilt gateway laid the rules again (its teardown swept them)
   assert.ok(s.state.commands.includes('ip -4 rule del pref 8997'), 'swept with the gateway');
   const after = s.state.commands.lastIndexOf('ip -4 rule del pref 8997');
@@ -62,14 +66,15 @@ test('while the gateway is up the rules are added live, a replaced list removes 
   await assert.rejects(s.service.setRemoteBypass('someone', { hosts: [], cidrs: [] }), /owner/);
 });
 
-test('with the gateway down the list is only remembered — laid when the gateway comes up, and in its first config', async (t) => {
+test('with the gateway down the list is only remembered — laid when the gateway comes up; the first config carries no rule for it', async (t) => {
   const s = H.start();
   t.after(() => s.service.shutdown());
   await s.service.setRemoteBypass('relay', { hosts: ['relay.example'], cidrs: ['203.0.113.7/32'] });
   assert.deepEqual(added(s), []);
   await s.service.invoke('connect', SERVER.id);
   assert.deepEqual(added(s), ['ip -4 rule add pref 8997 to 203.0.113.7/32 lookup main']);
-  assert.deepEqual(directRules(s.state.xray.starts[0].config).map(r => r.domain || r.ip), [['full:relay.example'], ['203.0.113.7/32']]);
+  assert.deepEqual(directRules(s.state.xray.starts[0].config), []);
+  assert.equal('remoteBypass' in (s.state.xray.validated[0] || {}), false);
   // the RPC form (the smoke, and any token holder) is the same call
   assert.deepEqual(await s.service.invoke('remote:bypass', { owner: 'relay', hosts: [], cidrs: ['198.51.100.1'] }), { ok: true, hosts: [], cidrs: ['198.51.100.1/32'] });
   assert.ok(added(s).includes('ip -4 rule add pref 8997 to 198.51.100.1/32 lookup main'));
