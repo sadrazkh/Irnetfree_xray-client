@@ -74,7 +74,7 @@ class TunOpenwrt {
     // The inner backend is built WITHOUT the caller's onUnexpectedExit: this
     // class reports sing-box's exit itself (watchInner), and a pass-through
     // would fire twice once TunSingbox reports its own exits.
-    const innerOpts = Object.assign({}, opts);
+    const innerOpts = Object.assign({}, opts, { composedBy: 'openwrt' });
     delete innerOpts.onUnexpectedExit;
     this.inner = opts.inner || new TunSingbox(innerOpts);
     this.onUnexpectedExit = opts.onUnexpectedExit || (() => {});

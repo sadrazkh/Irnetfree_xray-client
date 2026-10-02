@@ -1605,7 +1605,8 @@ function createService(opts = {}) {
               level: 'info'
             });
           }
-        if (settings.leakGuard === 'strict' && myTun.backendId !== 'sing-box') {
+        // the router's gateway IS sing-box (composed): its strict level is strict_route
+        if (settings.leakGuard === 'strict' && !['sing-box', 'openwrt'].includes(myTun.backendId)) {
           send('log', { line: 'Strict guard on the tun2socks backend: no strict_route and IPv4-only firewall rules — install sing-box for the guard the setting promises', level: 'warn' });
         }
         } catch (e) { tunError = e.message;
