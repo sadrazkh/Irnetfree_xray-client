@@ -349,4 +349,214 @@ if ip link show IRNetFree >/dev/null 2>&1 || since_mark | grep -q 'irnetfree: co
 fi
 echo "still disconnected after the restart"
 
+# ===========================================================================
+# LuCI (feat/router-luci): the rpcd plugin, the ubus API the pages call, and
+# the pages as LuCI serves them to a browser. The calls that need the
+# service's /luci API (the facade, feat/router-core) answer
+# {"error":"http 405"} on a branch without it: those checks print
+# "SMOKE pending-facade" instead of failing, and run strict by themselves as
+# soon as the facade answers.
+# ===========================================================================
+say "LuCI: what this image has (the armsr initramfs may come without LuCI or rpcd)"
+for p in rpcd uhttpd uhttpd-mod-ubus luci-base luci-mod-admin-full luci-theme-bootstrap; do
+	if opkg list-installed | grep -q "^$p "; then echo "  $p: in the image"; else echo "  $p: not in the image"; fi
+done
+if ! opkg list-installed | grep -q '^luci-base ' || ! opkg list-installed | grep -q '^rpcd '; then
+	echo "installing LuCI from the feed (opkg install luci: luci-base, the admin pages, the theme, uhttpd, rpcd)"
+	opkg install luci >/dev/null || { echo "could not install LuCI from the feed"; exit 1; }
+	/etc/init.d/rpcd restart >/dev/null 2>&1 || true
+	/etc/init.d/uhttpd enable >/dev/null 2>&1 || true
+	/etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+	sleep 3
+fi
+
+say "LuCI: the package's pieces are where rpcd and LuCI look for them"
+for f in /usr/libexec/rpcd/luci.irnetfree /usr/share/rpcd/acl.d/luci-app-irnetfree.json /usr/share/luci/menu.d/luci-app-irnetfree.json \
+	/www/luci-static/resources/view/irnetfree/overview.js /www/luci-static/resources/view/irnetfree/settings.js \
+	/www/luci-static/resources/view/irnetfree/remote.js /www/luci-static/resources/view/irnetfree/log.js \
+	/www/luci-static/resources/irnetfree/common.js /usr/lib/lua/luci/i18n/irnetfree.fa.lmo; do
+	[ -s "$f" ] || { echo "missing: $f"; exit 1; }
+done
+[ -x /usr/libexec/rpcd/luci.irnetfree ] || { echo "the rpcd plugin is not executable"; exit 1; }
+
+say "LuCI: rpcd lists luci.irnetfree with every method (postinst reloads rpcd)"
+i=0
+until ubus -v list luci.irnetfree > /tmp/luci-ubus.txt 2>/dev/null; do
+	i=$((i+1))
+	[ $i -lt 15 ] || { echo "rpcd does not know luci.irnetfree"; ubus list | head -40; exit 1; }
+	sleep 1
+done
+cat /tmp/luci-ubus.txt
+for m in status configs connect select disconnect reconnect test subs_update settings_get settings_set devices log \
+	diagnostics remote_get remote_set remote_status cloudflared_install service; do
+	grep -q "\"$m\":" /tmp/luci-ubus.txt || { echo "luci.irnetfree has no method $m"; exit 1; }
+done
+
+lu() { ubus call luci.irnetfree "$@" 2>&1 || true; }
+
+say "LuCI: status through the plugin"
+r="$(lu status)"; echo "$r" | head -30
+FACADE=1
+case "$r" in
+*'"error": "http 405"'*) FACADE=0; echo "SMOKE pending-facade: this service has no /luci API (POST /luci/status is 405) — the facade checks below are skipped" ;;
+*'"state": "'*) ;;
+*) echo "status through LuCI gave neither a state nor the pending-facade answer"; exit 1 ;;
+esac
+
+say "LuCI: a stopped service reads as not-running, and the plugin's own service call starts it"
+/etc/init.d/irnetfree stop
+# the service closes its port only after its shutdown (the gateway first): wait for it
+i=0
+until lu status | grep -q '"error": "not-running"'; do
+	i=$((i+1))
+	[ $i -lt 30 ] || { echo "a stopped service did not read as not-running within 30s"; lu status; exit 1; }
+	sleep 1
+done
+echo "stopped: status reads not-running after ${i}s"
+r="$(lu service '{"action":"halt"}')"
+echo "$r" | grep -q '"error": "bad action"' || { echo "the service call took an action it should refuse: $r"; exit 1; }
+r="$(lu service '{"action":"start"}')"; echo "$r"
+echo "$r" | grep -q '"ok": true' || { echo "service start through LuCI failed"; exit 1; }
+i=0
+until curl -fs -o /dev/null http://127.0.0.1:6969/web-api.js; do
+	i=$((i+1))
+	[ $i -lt 150 ] || { echo "the service did not come back after a start from LuCI"; logread | tail -30; exit 1; }
+	sleep 2
+done
+r="$(lu status)"
+case "$r" in *'"error": "not-running"'*) echo "still not-running after the start"; exit 1 ;; esac
+echo "started from LuCI, answering again"
+
+if [ "$FACADE" = 1 ]; then
+	say "LuCI: the VPN switch on (connect from the Overview's API) — the status says connected"
+	mark luci
+	r="$(lu connect "{\"id\":\"$ID\"}")"; echo "$r"
+	echo "$r" | grep -q '"accepted": true' || { echo "connect through LuCI was not accepted"; exit 1; }
+	wait_back "LuCI connect" 180
+	r="$(lu status)"; echo "$r" | head -24
+	echo "$r" | grep -q '"state": "connected"' || { echo "status through LuCI does not say connected while the gateway is up"; exit 1; }
+
+	say "LuCI: the kill switch from Settings arms its table at once, and the table goes when it is turned off"
+	r="$(lu settings_set '{"killSwitch":true}')"; echo "$r" | head -12
+	echo "$r" | grep -q '"ok": true' || { echo "settings_set {killSwitch:true} was refused"; exit 1; }
+	i=0
+	until nft list table inet irnetfree_ks >/dev/null 2>&1; do
+		i=$((i+1))
+		[ $i -lt 15 ] || { echo "settings_set {killSwitch:true} did not arm the kill switch (no table inet irnetfree_ks)"; exit 1; }
+		sleep 1
+	done
+	nft list table inet irnetfree_ks | head -24
+	lu settings_set '{"killSwitch":false}' | grep -q '"ok": true' || { echo "settings_set {killSwitch:false} was refused"; exit 1; }
+	i=0
+	while nft list table inet irnetfree_ks >/dev/null 2>&1; do
+		i=$((i+1))
+		[ $i -lt 15 ] || { echo "the kill switch table stayed after it was turned off"; exit 1; }
+		sleep 1
+	done
+
+	say "LuCI: the VPN switch off"
+	lu disconnect | grep -q '"accepted": true' || { echo "disconnect through LuCI was not accepted"; exit 1; }
+	i=0
+	while ip link show IRNetFree >/dev/null 2>&1; do
+		i=$((i+1))
+		[ $i -lt 60 ] || { echo "the TUN device stayed after a disconnect from LuCI"; exit 1; }
+		sleep 1
+	done
+	lu status | grep -q '"state": "disconnected"' || { echo "status does not say disconnected after the switch went off"; exit 1; }
+
+	say "LuCI: the rest of the API answers in the shapes the pages read"
+	lu configs | grep -q '"groups"' || { echo "configs has no groups"; exit 1; }
+	lu settings_get | grep -q '"killSwitch": false' || { echo "settings_get does not show the kill switch off"; exit 1; }
+	lu devices | grep -q '"result"' || { echo "devices did not come back as {result: [...]}"; exit 1; }
+	lu log '{"lines":20}' | grep -q '"lines"' || { echo "log has no lines"; exit 1; }
+	lu diagnostics | grep -q '"text"' || { echo "diagnostics has no text"; exit 1; }
+	lu remote_get | head -12
+else
+	echo "SMOKE pending-facade: connect through LuCI, status \"connected\", settings_set {killSwitch:true} -> table inet irnetfree_ks, disconnect, configs/settings_get/devices/log/diagnostics"
+fi
+
+say "LuCI over HTTP: a browser's login, the menu with the four tabs, the pages, the ubus calls through the ACL"
+code="$(curl -s -o /dev/null -w '%{http_code}' -c /tmp/luci.jar -d 'luci_username=root&luci_password=' http://127.0.0.1/cgi-bin/luci/ || true)"
+SID="$(awk '$6 ~ /^sysauth/ { print $7 }' /tmp/luci.jar 2>/dev/null | head -n 1)"
+echo "login: HTTP $code, session ${SID:+(set)}"
+[ -n "$SID" ] || { echo "no LuCI session after the login"; exit 1; }
+curl -s -b /tmp/luci.jar -o /tmp/luci-menu.json http://127.0.0.1/cgi-bin/luci/admin/menu
+jq -M -c '.children.admin.children.services.children.irnetfree | {title, satisfied, tabs: (.children | keys)}' /tmp/luci-menu.json || true
+jq -e '.children.admin.children.services.children.irnetfree | (.satisfied != false) and (.children | has("overview") and has("settings") and has("remote") and has("log"))' /tmp/luci-menu.json >/dev/null \
+	|| { echo "the LuCI menu has no Services -> IRNetFree with its four tabs (or the ACL is not granted)"; jq -M -c '.children.admin.children.services.children | keys' /tmp/luci-menu.json; exit 1; }
+for p in overview settings remote log; do
+	code="$(curl -s -b /tmp/luci.jar -o /tmp/luci-page.html -w '%{http_code}' "http://127.0.0.1/cgi-bin/luci/admin/services/irnetfree/$p" || true)"
+	grep -q "irnetfree/$p" /tmp/luci-page.html || { echo "the $p tab (HTTP $code) does not load the view irnetfree/$p"; head -c 600 /tmp/luci-page.html; exit 1; }
+	code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1/luci-static/resources/view/irnetfree/$p.js" || true)"
+	[ "$code" = 200 ] || { echo "/luci-static/resources/view/irnetfree/$p.js: HTTP $code"; exit 1; }
+	echo "  $p: the page and its view are served"
+done
+code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/luci-static/resources/irnetfree/common.js || true)"
+[ "$code" = 200 ] || { echo "/luci-static/resources/irnetfree/common.js: HTTP $code"; exit 1; }
+# the call a page makes, with the page's session: rpcd must grant it through the ACL
+luci_rpc() { curl -s -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"call\",\"params\":[\"$SID\",$1]}" http://127.0.0.1/ubus/; }
+r="$(luci_rpc '"luci.irnetfree","status",{}')"
+echo "ubus over HTTP, luci.irnetfree status: $(echo "$r" | cut -c1-160)"
+echo "$r" | jq -e '.result[0] == 0' >/dev/null || { echo "the LuCI session may not call luci.irnetfree status (the ACL)"; exit 1; }
+luci_rpc '"file","read",{"path":"/etc/irnetfree/token"}' | jq -e '.result[0] == 0 and (.result[1].data | length) > 0' >/dev/null \
+	|| { echo "the LuCI session may not read the token file for the web UI link (the ACL)"; exit 1; }
+# the tab names in Persian: LuCI's fa catalog has them, under the hash the browser computes (sfh "Remote access")
+curl -s -b /tmp/luci.jar -o /tmp/luci-fa.js http://127.0.0.1/cgi-bin/luci/admin/translations/fa
+grep -qF '"45517f0a":"دسترسی از راه دور"' /tmp/luci-fa.js \
+	|| { echo "the Persian tab names are not in LuCI's fa catalog"; head -c 300 /tmp/luci-fa.js; echo; exit 1; }
+echo "LuCI's fa catalog has the IRNetFree tab names ($(grep -o '"[0-9a-f]\{8\}":' /tmp/luci-fa.js | wc -l) strings in all)"
+
+if [ "$FACADE" = 0 ]; then
+	# After SMOKE OK the driver (qemu-smoke.js) opens every tab in a real browser.
+	# Without the facade the pages could only say "update IRNetFree", so on this
+	# branch a stub answers /luci/<method> in place of the service: canned replies
+	# in the facade's shapes (spec §3.4), one config name built to break an
+	# innerHTML. Never used once the facade answers.
+	say "LuCI: a stub of the service's /luci API for the browser check (no facade on this branch)"
+	/etc/init.d/irnetfree stop
+	i=0
+	until lu status | grep -q '"error": "not-running"'; do
+		i=$((i+1))
+		[ $i -lt 30 ] || { echo "the service still holds its port 30s after the stop"; exit 1; }
+		sleep 1
+	done
+	cat > /tmp/luci-stub.js <<'EOF'
+const http = require('http');
+const now = Date.now();
+const R = {
+  status: { state: 'connected', reason: null, cause: 'user', attempt: 0, retryInMs: null, since: now - 3725000, serverId: 's2',
+    label: 'ci-upstream', engine: 'xray', tun: true, killSwitch: { enabled: true, armed: true, blocking: false }, version: 'stub',
+    traffic: { up: 123456, down: 7654321, upRate: 1000, downRate: 20000 }, memAvailableKb: 300000,
+    remote: { relay: { state: 'online', path: 'direct', since: now - 60000 }, cloudflared: { installed: false } } },
+  configs: { selectedId: 's2', activeId: 's2', groups: [
+    { id: 'sub', name: 'CI provider', kind: 'subscription', items: [{ id: 's1', name: 'DE-1', proto: 'vless' }, { id: 's2', name: 'ci-upstream', proto: 'socks' }] },
+    { id: 'manual', name: 'manual', kind: 'manual', items: [{ id: 'm1', name: '<img src=x onerror=alert(1)>', proto: 'vmess' }] }] },
+  settings_get: { autoConnect: true, killSwitch: true, lanBlockQuic: true, lanBypassMacs: ['02:00:00:00:00:01'] },
+  devices: [{ mac: '02:00:00:00:00:01', ip: '192.168.1.50', name: 'phone', bypass: true }, { mac: '02:00:00:00:00:02', ip: '192.168.1.51', name: 'laptop', bypass: false }],
+  log: { lines: ['irnetfree: stub line one', 'irnetfree: stub line two'] },
+  diagnostics: { text: 'stub diagnostics' },
+  remote_get: { relay: { enabled: true, relayUrl: 'https://relay.example.com', name: 'home', tokenSet: true }, cloudflared: { installed: false, enabled: false, tokenSet: false } },
+  remote_status: { relay: { state: 'online', path: 'direct', since: now - 60000 }, cloudflared: { installed: false, running: false } },
+  test: { ok: true, ms: 42 }
+};
+http.createServer((req, res) => {
+  req.resume();
+  req.on('end', () => {
+    const m = (/^\/luci\/([a-z_]+)$/.exec(req.url) || [])[1];
+    const body = JSON.stringify(m ? (R[m] !== undefined ? R[m] : { accepted: true }) : { error: 'not found' });
+    res.writeHead(m ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(body);
+  });
+}).listen(6969, '127.0.0.1');
+EOF
+	node /tmp/luci-stub.js > /tmp/luci-stub.log 2>&1 &
+	i=0
+	until lu status | grep -q '"state": "connected"'; do
+		i=$((i+1))
+		[ $i -lt 40 ] || { echo "the stub did not answer"; cat /tmp/luci-stub.log; exit 1; }
+		sleep 1
+	done
+	echo "LUCI-STUB: answering /luci/* on 127.0.0.1:6969 in place of the service"
+fi
+
 say "SMOKE OK"

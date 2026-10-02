@@ -35,7 +35,10 @@ const files = DIRS.flatMap(jsFiles);
 
 test('the shipped JavaScript files are found', () => {
   assert.ok(files.length >= 40, `only ${files.length} files found under ${DIRS.join(', ')}`);
-  for (const must of ['src/renderer/i18n.js', 'src/renderer/app.js', 'src/main/main.js', 'src/server/service.js']) {
+  for (const must of ['src/renderer/i18n.js', 'src/renderer/app.js', 'src/main/main.js', 'src/server/service.js',
+    // the LuCI pages: a browser evaluates them as they are, like the renderer
+    'openwrt/files/luci/irnetfree-common.js', 'openwrt/files/luci/view/overview.js', 'openwrt/files/luci/view/settings.js',
+    'openwrt/files/luci/view/remote.js', 'openwrt/files/luci/view/log.js']) {
     assert.ok(files.includes(must.split('/').join(path.sep)) || files.includes(must), `${must} is not in the list`);
   }
 });

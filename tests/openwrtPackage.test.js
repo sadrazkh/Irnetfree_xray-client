@@ -36,6 +36,10 @@ test('tar: ustar headers a real tar reads, round-trips through our reader, deter
   if (sys.status === 0) assert.deepEqual(sys.stdout.trim().split(/\r?\n/), ['./d/', './d/x.txt', './d/run']);
 });
 
+/** The LuCI pages where LuCI looks for them: views by their menu path, the shared module by its require name. */
+const LUCI_PAGES = ['overview', 'settings', 'remote', 'log'].map((v) => `./www/luci-static/resources/view/irnetfree/${v}.js`)
+  .concat('./www/luci-static/resources/irnetfree/common.js');
+
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-ipk-'));
 test.after(() => { try { fs.rmSync(outDir, { recursive: true, force: true }); } catch {} });
 const built = buildIpk({ root: ROOT, outDir, mtime: 0 });
@@ -76,12 +80,19 @@ test('data: the app under /usr/lib/irnetfree, the service files, the LuCI files 
     `./${PREFIX}/src/renderer/index.html`, `./${PREFIX}/assets/logo.svg`, `./${PREFIX}/package.json`,
     './etc/init.d/irnetfree', './etc/config/irnetfree', './etc/uci-defaults/99-irnetfree',
     './usr/share/luci/menu.d/luci-app-irnetfree.json', './usr/share/rpcd/acl.d/luci-app-irnetfree.json',
-    './www/luci-static/resources/view/irnetfree.js'
+    ...LUCI_PAGES
   ]) assert.ok(files.includes(must), `${must} is not in the package`);
+  assert.ok(!files.includes('./www/luci-static/resources/view/irnetfree.js'), 'the old link page is gone (opkg removes it on upgrade)');
   assert.equal(data['./etc/init.d/irnetfree'].mode, 0o755);
   assert.equal(data['./etc/uci-defaults/99-irnetfree'].mode, 0o755);
   assert.equal(data['./etc/config/irnetfree'].mode, 0o644);
   assert.equal(data[`./${PREFIX}/src/server/server.js`].mode, 0o644);
+  // rpcd execs its plugins directly: executable, LF, byte for byte the checked-in script
+  const plug = data['./usr/libexec/rpcd/luci.irnetfree'];
+  assert.ok(plug, 'the rpcd plugin LuCI talks to is in the package');
+  assert.equal(plug.mode, 0o755);
+  assert.ok(!plug.data.includes('\r'), 'the rpcd plugin carries a carriage return');
+  assert.equal(plug.data.toString(), fs.readFileSync(path.join(ROOT, 'openwrt/files/rpcd/luci.irnetfree'), 'utf8').replace(/\r\n/g, '\n'));
   assert.ok(!files.some(n => /node_modules|\.map$|\.test\.js$/.test(n)), 'no dev files ship');
   // remote control: the router's side ships (the agent and what it needs), the relay app does not (it runs on a server)
   for (const f of ['ws.js', 'frames.js', 'token.js', 'agent.js', 'api.js', 'cloudflared.js']) assert.ok(files.includes(`./${PREFIX}/src/server/remote/${f}`), `src/server/remote/${f} is in the package`);
@@ -93,10 +104,23 @@ test('data: the app under /usr/lib/irnetfree, the service files, the LuCI files 
   }
   assert.equal(data[`./${PREFIX}/src/server/server.js`].data.toString(), fs.readFileSync(path.join(ROOT, 'src/server/server.js')).toString(), 'shipped verbatim');
   // the router-side text files are LF whatever the checkout did (a CRLF shebang is "/bin/sh^M: not found")
-  for (const n of ['./etc/init.d/irnetfree', './etc/uci-defaults/99-irnetfree', './etc/config/irnetfree', './www/luci-static/resources/view/irnetfree.js']) {
+  for (const n of ['./etc/init.d/irnetfree', './etc/uci-defaults/99-irnetfree', './etc/config/irnetfree', ...LUCI_PAGES]) {
     assert.ok(!data[n].data.includes('\r'), `${n} carries a carriage return`);
   }
   for (const s of ['./postinst', './prerm']) assert.ok(!control[s].data.includes('\r'), `${s} carries a carriage return`);
+});
+
+test('postinst: rpcd reloads (the plugin and the ACL) and LuCI forgets its caches — on a live router, after the default steps', () => {
+  const s = control['./postinst'].data.toString();
+  const dflt = s.indexOf('default_postinst "$0" "$@"');
+  assert.ok(dflt > 0, 'the default steps (uci-defaults, enable, start) still run');
+  const tail = s.slice(dflt);
+  // rpcd reads plugins and ACLs only when it starts; a reload re-execs it and keeps the sessions
+  assert.match(tail, /\[ -n "\$IPKG_INSTROOT" \] \|\| \{[\s\S]*\/etc\/init\.d\/rpcd reload[\s\S]*\}/, 'not while an image is being built');
+  assert.match(tail, /\[ -x \/etc\/init\.d\/rpcd \] && \/etc\/init\.d\/rpcd reload/, 'a router without rpcd (no LuCI) is fine');
+  assert.match(tail, /rm -rf \/tmp\/luci-indexcache\* \/tmp\/luci-modulecache\//, 'the menu and module caches');
+  assert.match(tail, /^rc=\$\?$/m);
+  assert.match(s, /exit \$rc\n$/, 'the default steps\' result is the script\'s');
 });
 
 /** ash is not bash: the constructs that silently do the wrong thing there. */
@@ -114,7 +138,8 @@ const BASHISMS = [
 ];
 for (const [rel, name] of [
   ['./etc/init.d/irnetfree', 'the init script'], ['./etc/uci-defaults/99-irnetfree', 'the uci-defaults script'],
-  ['CONTROL:./postinst', 'postinst'], ['CONTROL:./prerm', 'prerm']
+  ['CONTROL:./postinst', 'postinst'], ['CONTROL:./prerm', 'prerm'],
+  ['./usr/libexec/rpcd/luci.irnetfree', 'the rpcd plugin']
 ]) {
   test(`${name} is POSIX sh: no bashisms`, () => {
     const src = (rel.startsWith('CONTROL:') ? control[rel.slice(8)] : data[rel]).data.toString();
@@ -284,16 +309,59 @@ test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and t
   assert.match(src, /raw\.githubusercontent\.com\/sadrazkh\/Irnetfree_xray-client\/main\/openwrt\/install\.sh/, 'its own one-line URL is in the header');
 });
 
-test('LuCI: the menu points at the view, the ACL grants the token and nothing else, the view is a LuCI module', () => {
+test('LuCI: Services → IRNetFree with four tabs, behind its own ACL', () => {
   const menu = JSON.parse(data['./usr/share/luci/menu.d/luci-app-irnetfree.json'].data.toString());
-  assert.deepEqual(menu['admin/services/irnetfree'].action, { type: 'view', path: 'irnetfree' });
-  assert.deepEqual(menu['admin/services/irnetfree'].depends, { acl: ['luci-app-irnetfree'] });
+  const top = menu['admin/services/irnetfree'];
+  assert.equal(top.title, 'IRNetFree');
+  assert.equal(top.order, 90);
+  assert.deepEqual(top.action, { type: 'firstchild' }, 'the entry opens its first tab');
+  assert.deepEqual(top.depends, { acl: ['luci-app-irnetfree'] });
+  const tabs = Object.keys(menu).filter((k) => k !== 'admin/services/irnetfree');
+  assert.deepEqual(tabs.map((k) => [k, menu[k].title, menu[k].order, menu[k].action]), [
+    ['admin/services/irnetfree/overview', 'Overview', 10, { type: 'view', path: 'irnetfree/overview' }],
+    ['admin/services/irnetfree/settings', 'Settings', 20, { type: 'view', path: 'irnetfree/settings' }],
+    ['admin/services/irnetfree/remote', 'Remote access', 30, { type: 'view', path: 'irnetfree/remote' }],
+    ['admin/services/irnetfree/log', 'Log', 40, { type: 'view', path: 'irnetfree/log' }]
+  ]);
+});
+
+test('LuCI ACL: reading and changing are split method by method, one file (the token) is readable, nothing else', () => {
   const acl = JSON.parse(data['./usr/share/rpcd/acl.d/luci-app-irnetfree.json'].data.toString());
-  assert.deepEqual(Object.keys(acl['luci-app-irnetfree'].read.file), ['/etc/irnetfree/token']);
-  assert.deepEqual(acl['luci-app-irnetfree'].read.uci, ['irnetfree']);
-  assert.equal(acl['luci-app-irnetfree'].write, undefined, 'the page changes nothing');
-  const view = data['./www/luci-static/resources/view/irnetfree.js'].data.toString();
-  assert.match(view, /^'use strict';\n'require view';\n'require fs';\n'require uci';/);
-  assert.match(view, /fs\.read\('\/etc\/irnetfree\/token'\)/);
-  assert.match(view, /'\?token=' \+ encodeURIComponent\(token\)/);
+  assert.deepEqual(Object.keys(acl), ['luci-app-irnetfree']);
+  const a = acl['luci-app-irnetfree'];
+  assert.equal(a.description, 'IRNetFree: status, settings and remote access');
+  const READ = ['status', 'configs', 'settings_get', 'devices', 'log', 'diagnostics', 'remote_get', 'remote_status'];
+  const WRITE = ['connect', 'select', 'disconnect', 'reconnect', 'test', 'subs_update', 'settings_set', 'remote_set',
+    'cloudflared_install', 'service'];
+  assert.deepEqual(a.read.ubus, { 'luci.irnetfree': READ });
+  assert.deepEqual(a.write.ubus, { 'luci.irnetfree': WRITE });
+  assert.deepEqual(a.read.file, { '/etc/irnetfree/token': ['read'] }, 'the token file (the web UI link) and no other file');
+  assert.equal(a.write.file, undefined, 'no file is writable');
+  assert.deepEqual(a.read.uci, ['irnetfree']);
+  assert.deepEqual(a.write.uci, ['irnetfree'], 'the web UI port and listen address');
+  // every method the rpcd plugin declares is granted exactly once — as reading or as changing
+  const plugin = data['./usr/libexec/rpcd/luci.irnetfree'].data.toString();
+  const list = JSON.parse(/cat <<'EOF'\n([\s\S]*?)\nEOF/.exec(plugin)[1]);
+  assert.deepEqual([...READ, ...WRITE].sort(), Object.keys(list).sort());
+  assert.equal(new Set([...READ, ...WRITE]).size, READ.length + WRITE.length, 'no method is both');
+});
+
+test('LuCI: every tab\'s view and the shared module ship verbatim, where the menu and the require name point', () => {
+  const menu = JSON.parse(data['./usr/share/luci/menu.d/luci-app-irnetfree.json'].data.toString());
+  for (const [key, node] of Object.entries(menu)) {
+    if (!node.action || node.action.type !== 'view') continue;
+    const f = `./www/luci-static/resources/view/${node.action.path}.js`;
+    assert.ok(data[f], `${key} opens ${node.action.path}, which is not in the package`);
+    assert.equal(data[f].mode, 0o644);
+    assert.equal(data[f].data.toString(), fs.readFileSync(path.join(ROOT, 'openwrt/files/luci/view', path.basename(f)), 'utf8').replace(/\r\n/g, '\n'));
+    // 'require irnetfree.common' is /luci-static/resources/irnetfree/common.js
+    assert.match(data[f].data.toString(), /^'require irnetfree\.common as common';$/m);
+  }
+  const common = data['./www/luci-static/resources/irnetfree/common.js'];
+  assert.equal(common.data.toString(), fs.readFileSync(path.join(ROOT, 'openwrt/files/luci/irnetfree-common.js'), 'utf8').replace(/\r\n/g, '\n'));
+  assert.match(common.data.toString(), /rpc\.declare\(\{ object: 'luci\.irnetfree'/);
+  // the web UI link the old page had lives on in the Overview
+  const overview = data['./www/luci-static/resources/view/irnetfree/overview.js'].data.toString();
+  assert.match(overview, /fs\.read\('\/etc\/irnetfree\/token'\)/);
+  assert.match(common.data.toString(), /'\?token=' \+ encodeURIComponent\(token\)/);
 });
