@@ -301,14 +301,16 @@ class TunOpenwrt {
       await this.verify();
     } catch (e) {
       await this.rollback();
+      // "the whole-network tunnel": «گیت‌وی» alone was a word the owner could
+      // not place (field report G1) — the router IS the gateway, this is what it does
       throw new Error(this.msg(
-        `گیت‌وی بالا نیامد (${step}): ${e.message}`,
-        `Gateway did not come up (${step}): ${e.message}`));
+        `تونل کل شبکه بالا نیامد (${step}): ${e.message}`,
+        `The whole-network tunnel did not come up (${step}): ${e.message}`));
     }
     this.active = true;
     this.excludeIps = this.inner.excludeIps;
     this.watchInner();
-    this.onLog(`Gateway up on ${this.lanIf}: every device behind the router goes through the tunnel; ${this.macs.length} excluded by MAC`, 'info');
+    this.onLog(`Whole-network tunnel (gateway) up on ${this.lanIf}: every device behind the router goes through the VPN; ${this.macs.length} excluded by MAC`, 'info');
     // the remote control's destinations, remembered while the gateway was down (setBypass)
     for (const c of this.bypassCidrs) await this.layBypass(c);
   }

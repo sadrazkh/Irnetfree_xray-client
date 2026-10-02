@@ -63,10 +63,10 @@ test('S1: a connect by hand that fails leaves the snapshot on error with the rea
   const s = H.start();
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
-  await assert.rejects(s.service.invoke('connect', SERVER.id), /Gateway did not come up/);
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /The whole-network tunnel did not come up/);
   const conn = s.service.connSnapshot();
   assert.equal(conn.state, 'error');
-  assert.match(conn.reason, /Gateway did not come up/);
+  assert.match(conn.reason, /The whole-network tunnel did not come up/);
   assert.equal(conn.since, null);
 });
 
@@ -210,7 +210,7 @@ test('B3: the boot connect with the WAN not there reads waiting (attempt n) betw
   assert.equal(snap.state, 'waiting');
   assert.ok(snap.attempt >= 3);
   assert.equal(snap.cause, 'boot');
-  assert.ok(snap.reason && /Gateway did not come up/.test(snap.reason), snap.reason);
+  assert.ok(snap.reason && /The whole-network tunnel did not come up/.test(snap.reason), snap.reason);
   s.state.gatewayFails = false;
   await until(() => connectedCount(s) === 1, 'up once the WAN is there', 10000);
   assert.equal(s.service.connSnapshot().state, 'connected');
