@@ -79,8 +79,15 @@ test('the connect resolves both kinds of name BEFORE the tunnel and the guard, a
     }
     assert.match(body, /settings = Object\.assign\(\{\}, settings, \{ wgEndpointIps: wgSet\.wgEndpointIps, entryHostIps: entrySet\.entryHostIps \}\);/);
     assert.match(body, /const pinnedIps = \[\.\.\.Object\.values\(settings\.wgEndpointIps \|\| \{\}\), \.\.\.Object\.values\(settings\.entryHostIps \|\| \{\}\)\.flat\(\)\];/);
-    assert.match(body, /await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverBypassIpsOf\(config\), \.\.\.pinnedIps\],/,
-      `${label}: the tunnel must keep every pinned address off itself`);
+    // the router keeps the in-country resolvers IN its whole-LAN tunnel (field
+    // report D3, driven in routerFieldFixes.test.js); everywhere else they are a hole
+    if (label === 'main.js') {
+      assert.match(body, /await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverBypassIpsOf\(config\), \.\.\.pinnedIps\],/,
+        `${label}: the tunnel must keep every pinned address off itself`);
+    } else {
+      assert.match(body, /const resolverHoles = OPENWRT \? \[\] : resolverBypassIpsOf\(config\);\n\s*await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverHoles, \.\.\.pinnedIps\],/,
+        `${label}: the tunnel must keep every pinned address off itself — and, off a router, the direct resolvers`);
+    }
     assert.match(body, /excludes: await tunPlatform\.resolveServerIps\(\[\.\.\.entryAddrs, \.\.\.pinnedIps\], \{ ipv6: true \}\)/,
       `${label}: a held rebuild's firewall holes must cover the addresses the new core will dial`);
     assert.doesNotMatch(body, /wgEndpoints/, `${label}: the WireGuard endpoints travel inside pinnedIps now`);

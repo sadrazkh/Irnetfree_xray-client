@@ -757,4 +757,102 @@ grep -qF '"45517f0a":"دسترسی از راه دور"' /tmp/luci-fa.js \
 	|| { echo "the Persian tab names are not in LuCI's fa catalog"; head -c 300 /tmp/luci-fa.js; echo; exit 1; }
 echo "LuCI's fa catalog has the IRNetFree tab names ($(grep -o '"[0-9a-f]\{8\}":' /tmp/luci-fa.js | wc -l) strings in all)"
 
+# ===========================================================================
+# v1.16.1 core (fix/v1161-core, field report D3): in bypass-ir the in-country
+# resolvers the core dials `direct` stay IN the whole-LAN tunnel. v1.16.0 cut
+# them out of sing-box's table for every device and every port — dnsmasq's
+# upstream (or a phone's hard-coded resolver) then left in plain text by the
+# ISP. Only the core's own query to them leaves direct, its socket bound to
+# the WAN device. The router is disconnected here (the LuCI section ends so).
+# Quad9 stands in for the in-country pair: CI can reach it, Iran's cannot be
+# relied on from a runner; "Iranian names" come from hand-made geo files
+# (geosite CATEGORY-IR = digikala.com, aparat.com; geoip IR = all of IPv4 —
+# the only codes bypass-ir loads), so nothing is downloaded.
+# ===========================================================================
+say "D3: bypass-ir with hand-made geo files and Quad9 as the in-country resolvers"
+WANDEV="$(ip route show default | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)"
+WANIP="$(ip -4 addr show dev "$WANDEV" | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n 1)"
+echo "WAN device: $WANDEV ($WANIP)"
+[ -n "$WANDEV" ] && [ -n "$WANIP" ] || { echo "no WAN device/address before the D3 connect"; ip route; exit 1; }
+# (the service's weekly geo refresh may have put real ones there already while
+# it sat disconnected — those are used as they are; only a missing one is made)
+cat > /tmp/irnf-mkgeo.js <<'EOF'
+// protobuf by hand (xray's routercommon): GeoIPList{entry=1} GeoIP{country_code=1, cidr=2} CIDR{ip=1, prefix=2};
+// GeoSiteList{entry=1} GeoSite{country_code=1, domain=2} Domain{type=1 (2: a domain and its subdomains), value=2}
+const fs = require('fs');
+fs.mkdirSync('/tmp/irnf-geo', { recursive: true });
+const varint = (n) => { const b = []; while (n > 127) { b.push((n & 127) | 128); n >>>= 7; } b.push(n); return Buffer.from(b); };
+const bytes = (no, buf) => Buffer.concat([varint((no << 3) | 2), varint(buf.length), buf]);
+const str = (no, s) => bytes(no, Buffer.from(s, 'utf8'));
+const num = (no, n) => Buffer.concat([varint(no << 3), varint(n)]);
+const cidr = (ip, prefix) => bytes(2, Buffer.concat([bytes(1, Buffer.from(ip.split('.').map(Number))), num(2, prefix)]));
+const domain = (v) => bytes(2, Buffer.concat([num(1, 2), str(2, v)]));
+fs.writeFileSync('/tmp/irnf-geo/geoip.dat', bytes(1, Buffer.concat([str(1, 'IR'), cidr('0.0.0.0', 1), cidr('128.0.0.0', 1)])));
+fs.writeFileSync('/tmp/irnf-geo/geosite.dat', bytes(1, Buffer.concat([str(1, 'CATEGORY-IR'), domain('digikala.com'), domain('aparat.com')])));
+EOF
+node /tmp/irnf-mkgeo.js
+D3_GEO=
+for f in geoip.dat geosite.dat; do
+	if [ -s "/etc/irnetfree/bin/$f" ]; then echo "$f: the service's own ($(wc -c < "/etc/irnetfree/bin/$f") bytes)"
+	else cp "/tmp/irnf-geo/$f" "/etc/irnetfree/bin/$f"; D3_GEO="$D3_GEO $f"; echo "$f: hand-made"; fi
+done
+rpc '{"channel":"assets:status"}' | jq -e '.result.geoip == true and .result.geosite == true' >/dev/null || { echo "the service does not see the geo files"; ls -la /etc/irnetfree/bin; exit 1; }
+D3_DIRECT_WAS="$(rpc '{"channel":"settings:get"}' | jq -c '.result.dnsDirect')"
+rpc '{"channel":"settings:set","arg":{"routingMode":"bypass-ir","dnsDirect":["9.9.9.9","149.112.112.112"]}}' \
+	| jq -e '.result.settings.routingMode == "bypass-ir"' >/dev/null || { echo "settings:set bypass-ir failed"; exit 1; }
+mark d3
+rpc "{\"channel\":\"connect\",\"arg\":\"$ID\"}" > /tmp/connect-d3.json || true
+jq -c '.result // .error' /tmp/connect-d3.json
+wait_back "D3 connect (bypass-ir)" 180
+
+say "D3: the core's config — the DNS module asks the in-country pair direct, the direct dial bound to the WAN device"
+C=/etc/irnetfree/config.json
+jq -c '.routing.rules[] | select((.inboundTag // []) | index("dns-internal"))' "$C"
+jq -e '[.routing.rules[] | select(((.inboundTag // []) | index("dns-internal")) and .outboundTag == "direct" and .port == "53" and .ip == ["9.9.9.9","149.112.112.112"])] | length == 1' "$C" >/dev/null \
+	|| { echo "no dns-internal -> direct rule for the in-country resolvers on :53"; exit 1; }
+jq -e --arg dev "$WANDEV" '[.outbounds[] | select(.tag == "direct")][0].streamSettings.sockopt.interface == $dev' "$C" >/dev/null \
+	|| { echo "the direct outbound is not bound to the WAN device $WANDEV"; jq -c '.outbounds[] | select(.tag == "direct")' "$C"; exit 1; }
+SB_CFG="$(cmdline "$(gw_singbox | head -n 1)" | grep -o '/[^ ]*irnf-sb-[^ ]*/sing-box\.json' | head -n 1)"
+[ -s "$SB_CFG" ] || { echo "the gateway's sing-box config was not found ($SB_CFG)"; exit 1; }
+echo "sing-box route_exclude_address: $(jq -c '.inbounds[0].route_exclude_address' "$SB_CFG")"
+jq -e '.inbounds[0].route_exclude_address | index("192.168.1.1/32")' "$SB_CFG" >/dev/null || { echo "the entry server is no longer kept off the tunnel"; exit 1; }
+for ip in 9.9.9.9 149.112.112.112; do
+	if jq -e --arg c "$ip/32" '.inbounds[0].route_exclude_address | index($c)' "$SB_CFG" >/dev/null; then echo "$ip is cut out of the whole-LAN tunnel again (D3)"; exit 1; fi
+done
+
+say "D3: where packets to the in-country resolvers go — a LAN device's DNS and HTTPS, and the router's own DNS (dnsmasq's upstream)"
+for ip in 9.9.9.9 149.112.112.112; do
+	r="$(ip route get "$ip" from 192.168.1.50 iif br-lan ipproto udp dport 53)"; echo "LAN client -> $ip:53/udp:  $r"
+	echo "$r" | grep -q 'dev IRNetFree' || { echo "a LAN device's DNS to $ip leaves outside the tunnel"; exit 1; }
+	r="$(ip route get "$ip" from 192.168.1.50 iif br-lan ipproto tcp dport 443)"; echo "LAN client -> $ip:443/tcp: $r"
+	echo "$r" | grep -q 'dev IRNetFree' || { echo "a LAN device's HTTPS to $ip leaves outside the tunnel"; exit 1; }
+	r="$(ip route get "$ip" ipproto udp dport 53)"; echo "router -> $ip:53/udp:      $r"
+	echo "$r" | grep -q 'dev IRNetFree' || { echo "the router's own DNS to $ip (dnsmasq's upstream) leaves outside the tunnel"; exit 1; }
+done
+
+say "D3: the router still resolves an Iranian name — through the core's direct resolver path, out the WAN"
+out=; i=0
+until echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address'; do
+	i=$((i+1))
+	[ $i -le 6 ] || { echo "www.digikala.com did not resolve through the hijack"; echo "$out"; logread | tail -20; exit 1; }
+	out="$(nslookup www.digikala.com 1.1.1.1 2>&1 || true)"
+	echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address' || sleep 5
+done
+echo "$out" | sed -n '/^Name:/,$p'
+if [ -r /proc/net/nf_conntrack ]; then
+	ct="$(grep -E "src=$WANIP dst=(9\.9\.9\.9|149\.112\.112\.112) sport=[0-9]+ dport=53 " /proc/net/nf_conntrack | head -n 2 || true)"
+	echo "conntrack, the core's own query: ${ct:-none}"
+	[ -n "$ct" ] || { echo "no query from the WAN address ($WANIP) to the in-country resolvers — the core's direct path did not leave by the WAN"; grep -E 'dport=53 ' /proc/net/nf_conntrack | head -n 10 || true; exit 1; }
+	if grep -qE "src=172\.19\.0\.1 dst=(9\.9\.9\.9|149\.112\.112\.112) .*dport=53 " /proc/net/nf_conntrack; then echo "the core's query to the in-country resolvers looped into the tunnel"; exit 1; fi
+else
+	echo "no /proc/net/nf_conntrack in this image — the config's direct rule and its WAN binding (above) are the proof"
+fi
+
+say "D3: back to global, disconnected, the hand-made geo files gone"
+rpc '{"channel":"disconnect"}' >/dev/null
+i=0
+while ip link show IRNetFree >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 60 ] || { echo "the TUN device stayed after the D3 disconnect"; exit 1; }; sleep 1; done
+rpc "{\"channel\":\"settings:set\",\"arg\":{\"routingMode\":\"global\",\"dnsDirect\":$D3_DIRECT_WAS}}" | jq -e '.result.settings.routingMode == "global"' >/dev/null
+for f in $D3_GEO; do rm -f "/etc/irnetfree/bin/$f"; done
+
 say "SMOKE OK"
