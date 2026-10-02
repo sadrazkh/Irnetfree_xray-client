@@ -339,12 +339,16 @@ lanwhy() {
 	ip netns exec lan0 ip -4 addr show veth1 | grep inet || true
 	ip netns exec lan0 ip route || true
 	ip netns exec lan0 ip neigh || true
+	lanping 192.168.1.2 && echo "lan0 -> slirp (192.168.1.2): ping ok" || echo "lan0 -> slirp (192.168.1.2): no ping"
 	echo "-- the router: neighbours on $1, the bridge's ports, a ping back, rp_filter, fw4's input chain"
 	ip neigh show dev "$1" || true
 	bridge link show 2>/dev/null || true
+	[ -e /sys/class/net/br-lan/brif/veth0/state ] && echo "veth0 port state: $(cat /sys/class/net/br-lan/brif/veth0/state) (3 = forwarding)"
+	bridge fdb show br br-lan 2>/dev/null | grep -i "$LANMAC" || echo "no fdb entry for $LANMAC"
 	ping -c 1 -W 3 "$2" >/dev/null 2>&1 && echo "router -> lan0: ping ok" || echo "router -> lan0: no ping"
 	echo "rp_filter: all=$(cat /proc/sys/net/ipv4/conf/all/rp_filter) $1=$(cat "/proc/sys/net/ipv4/conf/$1/rp_filter" 2>/dev/null)"
 	nft list chain inet fw4 input 2>/dev/null | head -12 || true
+	nft list chain inet fw4 input_lan 2>/dev/null || true
 }
 if ip netns add lan0 2>/dev/null; then
 	opkg install kmod-veth >/dev/null 2>&1 || true
@@ -371,6 +375,9 @@ if ip netns add lan0 2>/dev/null; then
 			ip netns exec lan0 ip addr flush dev veth1
 			ip netns exec lan0 ip addr add 192.168.77.2/30 dev veth1
 			ip netns exec lan0 ip route replace default via 192.168.77.1
+			# slirp (this guest's "WAN") answers a direct packet by ARPing its source on the
+			# virtual link; an address behind a routed veth needs the router to answer for it
+			ip neigh add proxy 192.168.77.2 dev br-lan
 			for z in $(uci show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
 				[ "$(uci -q get firewall.$z.name)" = lan ] || continue
 				uci add_list firewall.$z.device='veth0'; LANZONE="$z"
@@ -476,7 +483,10 @@ if [ "$LANNS" = 1 ]; then
 	lanprobe || { echo "lan0 has no internet after the VPN was turned off"; exit 1; }
 	echo "lan0 goes direct with the VPN off"
 	ip netns delete lan0   # takes the veth pair with it
-	if [ -n "$LANZONE" ]; then uci del_list firewall.$LANZONE.device='veth0'; uci commit firewall; fw4 reload >/dev/null 2>&1 || true; fi
+	if [ -n "$LANZONE" ]; then
+		ip neigh del proxy 192.168.77.2 dev br-lan 2>/dev/null || true
+		uci del_list firewall.$LANZONE.device='veth0'; uci commit firewall; fw4 reload >/dev/null 2>&1 || true
+	fi
 fi
 if ip rule show | grep -q '^8999:'; then echo "the bypass rule is still there"; exit 1; fi
 if ip rule show | grep -q '^8998:'; then echo "the main-first rule is still there"; exit 1; fi
