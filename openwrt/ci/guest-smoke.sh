@@ -421,12 +421,25 @@ lanprobe() {
 	[ -n "$c" ] && [ "$c" != "000" ]
 }
 rejects() { nft list chain inet irnetfree_ks lanblock | sed -n 's/.*counter packets \([0-9]*\) bytes [0-9]* reject.*/\1/p'; }
+# a tunnel that just came up carries traffic a moment later on an emulated CPU: up to ten tries, 3 s apart
+lanprobe_soon() {
+	local i=0
+	until lanprobe; do
+		i=$((i+1)); [ $i -lt 10 ] || return 1
+		sleep 3
+	done
+	[ $i = 0 ] || echo "(lan0 reached the internet after $i retries)"
+}
+lantunnelwhy() {
+	ip route get 1.1.1.1 from "$LANIP" iif "$LANIF" || true
+	ip rule show || true
+	nft list chain inet irnetfree_ks lanblock || true
+	logread | tail -15
+}
 if [ "$LANNS" = 1 ]; then
-	if lanprobe; then echo "lan0 reaches the internet through the tunnel"; else
+	if lanprobe_soon; then echo "lan0 reaches the internet through the tunnel"; else
 		echo "lan0 has no internet with the tunnel up (the kill switch must not block a working tunnel)"
-		ip route get 1.1.1.1 from "$LANIP" iif "$LANIF" || true
-		nft list chain inet irnetfree_ks lanblock || true
-		logread | tail -15
+		lantunnelwhy
 		exit 1
 	fi
 fi
@@ -469,7 +482,7 @@ wait_back "kill switch recovery" 300
 rpc '{"channel":"app:init"}' | jq -e '.result.conn.killSwitch == {"enabled":true,"armed":true,"blocking":false}' >/dev/null || { echo "status after the recovery is wrong"; rpc '{"channel":"app:init"}' | jq '.result.conn.killSwitch'; exit 1; }
 nft list table inet irnetfree_ks >/dev/null || { echo "the table went with the rebuild"; exit 1; }
 judged 'Kill switch: the tunnel is back' || { echo "the lift is not in the log"; luci log '{"lines":30}' | jq -r '.lines[]' | tail -10; exit 1; }
-if [ "$LANNS" = 1 ]; then lanprobe || { echo "lan0 has no internet after the recovery"; exit 1; }; fi
+if [ "$LANNS" = 1 ]; then lanprobe_soon || { echo "lan0 has no internet after the recovery"; lantunnelwhy; exit 1; }; fi
 one_each "after the kill switch recovery"
 
 say "a reboot-equivalent: the table deleted by hand, /etc/init.d/irnetfree-ks start replays the snippet; stop lifts it"
