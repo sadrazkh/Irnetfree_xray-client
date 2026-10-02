@@ -346,10 +346,26 @@ if ip netns add lan0 2>/dev/null; then
 else
 	echo "no network namespaces in this image — the forward chain is checked by its rules only"
 fi
-lanprobe() { ip netns exec lan0 wget -q -O /dev/null -T 4 http://1.1.1.1/; }
+# an HTTP code of any kind is "the internet answers" (1.1.1.1 answers 301 — which wget would follow to https and fail on);
+# a rejected connection is an immediate 000
+lanprobe() {
+	local c
+	c="$(ip netns exec lan0 curl -s -o /dev/null -w '%{http_code}' --max-time 15 http://1.1.1.1/ 2>/dev/null || true)"
+	[ -n "$c" ] && [ "$c" != "000" ]
+}
+lanwhy() {
+	echo "-- lan0: addresses, routes, the router from inside"
+	ip netns exec lan0 ip -4 addr show veth1 | grep inet || true
+	ip netns exec lan0 ip route || true
+	ip netns exec lan0 ping -c 1 -W 3 192.168.1.1 >/dev/null 2>&1 && echo "lan0 -> router: ping ok" || echo "lan0 -> router: no ping"
+	echo "-- the router's view"
+	ip route get 1.1.1.1 from 192.168.1.77 iif br-lan || true
+	nft list chain inet irnetfree_ks lanblock || true
+	logread | tail -15
+}
 rejects() { nft list chain inet irnetfree_ks lanblock | sed -n 's/.*counter packets \([0-9]*\) bytes [0-9]* reject.*/\1/p'; }
 if [ "$LANNS" = 1 ]; then
-	lanprobe && echo "lan0 reaches the internet through the tunnel" || { echo "lan0 has no internet with the tunnel up (the kill switch must not block a working tunnel)"; nft list chain inet irnetfree_ks lanblock; exit 1; }
+	lanprobe && echo "lan0 reaches the internet through the tunnel" || { echo "lan0 has no internet with the tunnel up (the kill switch must not block a working tunnel)"; lanwhy; exit 1; }
 fi
 
 say "sing-box dies and cannot come back (its binary held): the LAN is blocked and the reject counter moves; an excluded device passes; the router itself stays free"
