@@ -60,7 +60,10 @@ function createAuth({ password, secret, store, now = Date.now, windowMs = 15 * 6
     globalFails = 0;
   }
 
-  const sign = (id) => crypto.createHmac('sha256', secret).update(id).digest('base64url');
+  // the signing key binds the sessions to the CURRENT password: rotating RELAY_PASSWORD (the natural "log everyone
+  // out" after a lost phone) invalidates every cookie at once; the same password across a restart keeps them (review M2)
+  const signingKey = crypto.createHmac('sha256', secret).update(pwHash).digest();
+  const sign = (id) => crypto.createHmac('sha256', signingKey).update(id).digest('base64url');
 
   /** A new session; the cookie value is `<id>.<signature>`. Expired sessions are swept here. */
   function createSession(ip) {

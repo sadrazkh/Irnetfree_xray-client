@@ -166,6 +166,24 @@ test('status when installed: running from pidof, the last syslog line, the versi
   assert.equal(calls.filter((c) => c.args[0] === '--version').length, 1, 'the version is asked once');
 });
 
+test('status is memoised for 15 s (LuCI polls every 3 s on a Cortex-A7), and an apply makes it fresh at once (review M6)', async () => {
+  const { run, calls } = fakeRun({ 'pidof cloudflared': { code: 0, stdout: '1\n', stderr: '' } });
+  let now = 1000000;
+  const d = cf.createCloudflared({ run, fsImpl: fakeFs({ '/usr/bin/cloudflared': '' }), now: () => now });
+  const probes = () => calls.filter((c) => c.cmd === 'pidof' || (c.cmd === 'sh' && /logread/.test(c.args[1]))).length;
+  await d.status(); await d.status(); await d.status();
+  assert.equal(probes(), 2, 'one pidof + one logread for three polls');
+  now += 14 * 1000;
+  await d.status();
+  assert.equal(probes(), 2, 'still cached inside the window');
+  now += 2 * 1000;
+  await d.status();
+  assert.equal(probes(), 4, 'probed again after 15 s');
+  await d.apply({ enabled: false, token: '' });
+  await d.status();
+  assert.equal(probes(), 6, 'an apply drops the cache so the page sees the change at once');
+});
+
 test('install: opkg update then opkg install in the background, accepted at once, applied after when asked', async () => {
   const files = {};
   const { run, calls } = fakeRun({ 'opkg install cloudflared': { code: 0, stdout: 'Installing cloudflared', stderr: '' } });

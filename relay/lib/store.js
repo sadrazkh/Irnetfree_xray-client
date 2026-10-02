@@ -21,7 +21,9 @@ const fresh = () => ({ routers: {}, sessions: {} });
 function openStore(dir) {
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'relay.json');
-  const tmp = file + '.' + process.pid + '.tmp';
+  // a tmp name of its own per write: in each container the relay is PID 1, so a per-process name would be the
+  // SAME file in both during a cutover — one truncating the other's half-written bytes (review I3)
+  const tmpName = () => file + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex') + '.tmp';
   let data = null;
   let stamp = null;
   const stampNow = () => {
@@ -46,9 +48,15 @@ function openStore(dir) {
   function save(next) {
     const json = JSON.stringify(next, null, 2);
     fs.mkdirSync(dir, { recursive: true });
-    const fd = fs.openSync(tmp, 'w', 0o600);
-    try { fs.writeFileSync(fd, json); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    fs.renameSync(tmp, file);
+    const tmp = tmpName();
+    try {
+      const fd = fs.openSync(tmp, 'w', 0o600);
+      try { fs.writeFileSync(fd, json); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch { /* never made, or gone */ }
+      throw e;
+    }
     data = next;
     stamp = stampNow();
   }

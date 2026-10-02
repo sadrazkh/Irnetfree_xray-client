@@ -35,9 +35,13 @@ router keeps open to it. What it sees is plaintext — it is *your* server (see 
    harbora deploy irnetfree-relay -y
    ```
 
-   The upload is small: the root `.dockerignore` keeps everything but `relay/` and three files under
-   `src/server/remote/` out of it. Health: Harbora GETs `/` and passes on anything under 500 — the relay
-   answers 302 (to the login page) there and `200 ok` on `/_relay/health`.
+   The upload is small: the root `.dockerignore` names everything but `relay/` and three files under
+   `src/server/remote/` (Harbora's packer reads it with its own rules — no `!` negations, a bare name
+   matches at any depth — and `tests/relayPack.test.js` pins the resulting upload set). `harbora deploy`
+   runs `harbora doctor` first; its "would exclude" list must keep `relay/` and `src/server/remote/ws.js`,
+   `frames.js`, `token.js` — if it does not, do not deploy with `--skip-doctor`, fix the ignore file.
+   Health: Harbora GETs `/` and passes on anything under 500 — the relay answers 302 (to the login page)
+   there and `200 ok` on `/_relay/health`.
 3. Open `https://<the app's domain>/_relay/login`, sign in with `RELAY_PASSWORD`.
 
 Redeploys are start-first: for a while the old and the new container share the volume. The relay keeps its
@@ -202,9 +206,12 @@ only thing between the internet and the router's UI.
    harbora deploy irnetfree-relay -y
    ```
 
-   آپلود کوچک است: `.dockerignore` ریشه جز `relay/` و سه فایل زیر `src/server/remote/` چیزی نمی‌فرستد.
-   سلامت: هاربورا `/` را می‌گیرد و زیر ۵۰۰ قبول می‌کند — رله آنجا 302 (به صفحهٔ ورود) می‌دهد و روی
-   `/_relay/health` هم `200 ok`.
+   آپلود کوچک است: `.dockerignore` ریشه همه‌چیز جز `relay/` و سه فایل زیر `src/server/remote/` را نام می‌برد
+   (پکر هاربورا آن را با قواعد خودش می‌خواند — بدون خط‌های `!`، و یک نام ساده در هر عمقی می‌گیرد؛
+   `tests/relayPack.test.js` مجموعهٔ آپلود را ثابت نگه می‌دارد). `harbora deploy` اول `harbora doctor` را اجرا
+   می‌کند؛ فهرست «would exclude» آن باید `relay/` و `src/server/remote/ws.js`، `frames.js`، `token.js` را نگه
+   داشته باشد — اگر نه، با `--skip-doctor` استقرار نده، فایل ignore را درست کن. سلامت: هاربورا `/` را می‌گیرد
+   و زیر ۵۰۰ قبول می‌کند — رله آنجا 302 (به صفحهٔ ورود) می‌دهد و روی `/_relay/health` هم `200 ok`.
 ۳. `https://<دامنهٔ اپ>/_relay/login` را باز کن و با `RELAY_PASSWORD` وارد شو.
 
 استقرار دوباره start-first است: مدتی کانتینر قدیم و جدید یک والیوم را شریک‌اند. رله داده‌اش را با نوشتن اتمیک

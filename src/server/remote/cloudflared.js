@@ -65,6 +65,7 @@ const INIT = '/etc/init.d/cloudflared';
 const DNSMASQ_INIT = '/etc/init.d/dnsmasq';
 const PROTOCOL = 'http2';
 const TOKEN_RE = /^[A-Za-z0-9+/=_-]{40,4096}$/;
+const STATUS_CACHE_MS = 15000;
 
 const bypassList = () => ({ hosts: EDGE.hosts.slice(), cidrs: EDGE.cidrs.slice() });
 const isTunnelToken = (s) => typeof s === 'string' && TOKEN_RE.test(s);
@@ -138,10 +139,12 @@ function createCloudflared(o = {}) {
   const log = o.log || (() => {});
   const generatedDir = o.dnsmasqGeneratedDir || DNSMASQ_GENERATED;
   const bin = o.binPath || BIN;
+  const now = o.now || Date.now;
   let installing = false;
   let lastInstall = null;     // { ok, at, error }
   let versionCache = null;
   let dropInsWritten = [];    // the files written at the last apply on, removed at apply off
+  let probed = null;          // { at, running, lastLine } — LuCI polls every 3 s; pidof + logread are forks on a Cortex-A7 (review M6)
 
   const installed = () => { try { return fsImpl.existsSync(bin); } catch { return false; } };
 
@@ -190,6 +193,7 @@ function createCloudflared(o = {}) {
     const on = !!enabled && !!token;
     if (enabled && !token) log('cloudflared: enabled without a tunnel token — not started', 'warn');
     const sec = await section();
+    probed = null;    // whatever this changes, the next status probes again
     const uci = await run('uci', ['-q', 'batch'], { input: uciBatch({ section: sec, token: on ? token : null, enabled: on }) });
     if (uci.code !== 0) { log('cloudflared: uci refused the settings: ' + (uci.stderr || uci.code).toString().trim(), 'error'); return { ok: false, error: 'uci' }; }
     if (on) {
@@ -222,9 +226,14 @@ function createCloudflared(o = {}) {
     let running = false;
     let lastLine = null;
     if (isInstalled) {
-      running = (await run('pidof', ['cloudflared'])).code === 0;
-      const lr = await run('sh', ['-c', 'logread -e cloudflared 2>/dev/null | tail -n 1']);
-      lastLine = lr.code === 0 ? (lr.stdout.trim().split('\n').pop() || null) : null;
+      if (!probed || now() - probed.at >= STATUS_CACHE_MS) {
+        running = (await run('pidof', ['cloudflared'])).code === 0;
+        const lr = await run('sh', ['-c', 'logread -e cloudflared 2>/dev/null | tail -n 1']);
+        lastLine = lr.code === 0 ? (lr.stdout.trim().split('\n').pop() || null) : null;
+        probed = { at: now(), running, lastLine };
+      } else {
+        ({ running, lastLine } = probed);
+      }
     }
     return { installed: isInstalled, running, lastLine, version: isInstalled ? await version() : null, installing, lastInstall, path: 'direct', viaVpn: false };
   }
@@ -234,6 +243,7 @@ function createCloudflared(o = {}) {
     if (installing) return { accepted: true, already: true };
     installing = true;
     versionCache = null;
+    probed = null;
     log('cloudflared: installing from the feed (opkg update && opkg install cloudflared)…');
     (async () => {
       const up = await run('opkg', ['update'], { timeoutMs: 300000 });

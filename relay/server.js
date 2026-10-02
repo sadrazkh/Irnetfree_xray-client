@@ -66,7 +66,7 @@ function readForm(req, limit = FORM_LIMIT) {
   });
 }
 
-function createRelay({ password, dataDir, now = Date.now, log = console.log, requestTimeoutMs = 60000, maxBodyBytes = 8 << 20 } = {}) {
+function createRelay({ password, dataDir, now = Date.now, log = console.log, requestTimeoutMs = 60000, maxBodyBytes = 8 << 20, httpRequestTimeoutMs = 120000, connectionsCheckingIntervalMs = 30000 } = {}) {
   if (!dataDir) throw new Error('a data dir is required');
   const store = openStore(dataDir);
   // said at start, not at the first login: a volume the `node` user cannot write
@@ -97,7 +97,10 @@ function createRelay({ password, dataDir, now = Date.now, log = console.log, req
     const first = (v) => String(v || '').split(',')[0].trim();
     const proto = (trusted && first(h['x-forwarded-proto'])) || (req.socket.encrypted ? 'https' : 'http');
     const host = (trusted && first(h['x-forwarded-host'])) || String(h.host || '');
-    const ip = (trusted && first(h['x-forwarded-for'])) || peer;
+    // the client IP for the login limiter is the hop the reverse proxy itself appended — the LAST entry; the
+    // first one is whatever the client claimed, should the proxy ever pass client-supplied headers through
+    const hops = String(h['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const ip = (trusted && hops.length && hops[hops.length - 1]) || peer;
     return { proto, host, ip };
   }
 
@@ -144,10 +147,14 @@ function createRelay({ password, dataDir, now = Date.now, log = console.log, req
     });
     links.set(routerId, link);
     if (cache.version(routerId) !== link.hello.version) cache.drop(routerId);
-    store.update((d) => {
-      const r = d.routers[routerId];
-      if (r) { r.lastSeen = now(); r.version = link.hello.version; r.path = link.hello.path; }
-    });
+    // reached from the socket's 'message' event: a write that fails (the volume full, a tmp collision) must be a
+    // log line here, never an exception out of the listener — that would end the relay, and the agent redials in 2 s
+    try {
+      store.update((d) => {
+        const r = d.routers[routerId];
+        if (r) { r.lastSeen = now(); r.version = link.hello.version; r.path = link.hello.path; }
+      });
+    } catch (e) { log('relay: store write failed: ' + e.message); }
     log(`relay: router ${routerId} (${link.hello.name || '?'}) online, app ${link.hello.version || '?'}, path ${link.hello.path || '?'}`);
   }
 
@@ -287,16 +294,22 @@ function createRelay({ password, dataDir, now = Date.now, log = console.log, req
     return proxied(req, res, url, cookies, lang);
   }
 
-  const server = http.createServer((req, res) => {
+  const server = http.createServer({ connectionsCheckingInterval: connectionsCheckingIntervalMs }, (req, res) => {
     handle(req, res).catch((e) => {
       log('relay: request failed: ' + ((e && e.message) || e));
       try { if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' }); res.end(); } catch { /* gone */ }
     });
   });
   server.on('upgrade', onUpgrade);
-  server.keepAliveTimeout = 65000;
-  server.headersTimeout = 70000;
-  server.requestTimeout = 0;       // an SSE stream through the relay lives as long as the browser keeps it
+  // requestTimeout bounds RECEIVING a request (headers + body), not the response: an SSE stream or a long
+  // download is untouched by it, while a client that trickles a body forever is cut — with 0 (review I2)
+  // nothing on the relay ever closed such a socket, and the relay faces the internet. Measured on node 22:
+  // the body deadline only fires when headersTimeout <= requestTimeout (70 s / 600 ms: never cut; 500 ms /
+  // 600 ms: 408 after 658 ms), so the two are derived together; keepAliveTimeout stays under headersTimeout.
+  const headersTimeout = Math.min(70000, httpRequestTimeoutMs);
+  server.keepAliveTimeout = Math.min(65000, headersTimeout);
+  server.headersTimeout = headersTimeout;
+  server.requestTimeout = httpRequestTimeoutMs;
 
   const api = {
     server, store, links, cache,

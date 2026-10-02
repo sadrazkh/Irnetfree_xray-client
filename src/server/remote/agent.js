@@ -41,12 +41,26 @@ const HIGH_WATER = 1 << 20;
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'expect']);
 const COMPRESSIBLE = /^(text\/|application\/(javascript|x-javascript|json|xml|manifest\+json)|image\/svg\+xml)/i;
 
-/** /_relay/* and /luci/* (any case, any number of leading slashes, encoded or not) never reach the router. */
-function forbiddenPath(p) {
-  const raw = String(p || '');
-  let decoded = raw;
-  try { decoded = decodeURIComponent(raw); } catch { /* keep raw */ }
-  return [raw, decoded].some((s) => /^[/\\]+(_relay|luci)([/\\?#]|$)/i.test(s));
+/**
+ * The request target as the router's server routes it: `new URL(target,
+ * 'http://localhost')` — the same parser, so dot-segments (`/./`, `/../`, their
+ * percent-encoded forms) fold the same way on both sides — or null when it is
+ * no path of the router's own UI: unparseable, or an absolute-form target for
+ * another origin (the agent only ever talks to its own UI). Review I1: judging
+ * the raw string let `/./luci/status` through to the facade.
+ */
+function normaliseTarget(target) {
+  let u;
+  try { u = new URL(String(target || ''), 'http://localhost'); } catch { return null; }
+  if (u.origin !== 'http://localhost' || u.username || u.password) return null;
+  return u;
+}
+
+/** /_relay/* and /luci/* (any case, any number of leading slashes, after normalisation) never reach the router; nor does a target that is not a path of its UI. */
+function forbiddenPath(target) {
+  const u = normaliseTarget(target);
+  if (!u) return true;
+  return /^\/+(_relay|luci)(\/|$)/i.test(u.pathname);
 }
 
 const cidrOf = (ip) => (ip.includes(':') ? ip + '/128' : ip + '/32');
@@ -315,8 +329,10 @@ function createRemoteAgent(o) {
 
   function openStream(c, id, head) {
     const method = String(head.method || 'GET').toUpperCase();
-    const target = String(head.path || '/');
-    if (forbiddenPath(target)) { log(`remote: refused ${method} ${target.slice(0, 80)} (not the web UI)`, 'warn'); reply(c, id, 403, 'forbidden'); return; }
+    const asked = String(head.path || '/');
+    const u = normaliseTarget(asked);
+    if (!u || forbiddenPath(asked)) { log(`remote: refused ${method} ${asked.slice(0, 80)} (not the web UI)`, 'warn'); reply(c, id, 403, 'forbidden'); return; }
+    const target = u.pathname + u.search;   // the normalised form — what was judged is what is sent
     const inHeaders = head.headers && typeof head.headers === 'object' ? head.headers : {};
     const wantsGzip = /(^|,)\s*gzip\s*(;|,|$)/i.test(String(inHeaders['accept-encoding'] || ''));
     const headers = {};
@@ -412,4 +428,4 @@ function createRemoteAgent(o) {
   return { start, stop, reconfigure, status, link: () => conn, setClock: (fn) => { now = fn; } };
 }
 
-module.exports = { createRemoteAgent, BACKOFF_MS, forbiddenPath, describeError, DIRECT_RETRY_MS };
+module.exports = { createRemoteAgent, BACKOFF_MS, forbiddenPath, normaliseTarget, describeError, DIRECT_RETRY_MS };

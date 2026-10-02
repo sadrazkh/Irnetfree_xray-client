@@ -165,6 +165,23 @@ test('boot(): the agent starts only when enabled; the module-level methods reach
   started.stop();
 });
 
+test('remote.json (the device token) is kept 0600 — on every write, and fixed on an existing file (review M8)', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-remote-mode-'));
+  t.after(() => { api._reset(); try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+  const file = path.join(dir, 'remote.json');
+  fs.writeFileSync(file, JSON.stringify({ relay: { enabled: false, relayUrl: '', name: '', token: 'old' } }), { mode: 0o644 });
+  const chmods = [];
+  const orig = fs.chmodSync;
+  fs.chmodSync = (p, mode) => { chmods.push([String(p), mode]); return orig(p, mode); };
+  t.after(() => { fs.chmodSync = orig; });
+  const started = api.start({ service: { version: '1.16.0', dataDir: dir, getSettings: () => ({ socksPort: 1 }) }, localPort: 1, uiToken: 'x', log: () => {}, cloudflared: fakeCloudflared() });
+  assert.ok(chmods.some(([p, m]) => p === file && m === 0o600), 'an existing file is fixed at start');
+  started.remote_set({ relay: { name: 'Home' } });
+  assert.ok(chmods.filter(([p, m]) => p === file && m === 0o600).length >= 2, 'and after a write');
+  if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  started.stop();
+});
+
 test('start() never throws: a broken service object is a log line, not a crash of the gateway process', (t) => {
   const logs = [];
   api._reset();

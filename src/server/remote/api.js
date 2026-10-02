@@ -19,7 +19,28 @@
  * exported at module level, bound to whatever `current()` is at call time.
  */
 const path = require('path');
+const fs = require('fs');
 const { Store } = require('../../main/store');
+
+/**
+ * The store for remote.json: the device token lives in it, so the file is
+ * kept 0600 — after every write (the Store writes a fresh tmp file and renames
+ * it, so the mode is set again each time) and on an existing file at start.
+ * On the router only root runs the service, but a privilege-dropped daemon
+ * must not be able to read a relay credential (review M8).
+ */
+class SecretStore extends Store {
+  constructor(file, defaults) {
+    super(file, defaults);
+    if (fs.existsSync(file)) this._private();
+  }
+  _private() { try { fs.chmodSync(this.filePath, 0o600); } catch { /* best effort (Windows: the read-only bit only) */ } }
+  save() {
+    const ok = super.save();
+    if (ok) this._private();
+    return ok;
+  }
+}
 const { createRemoteAgent } = require('./agent');
 const { createCloudflared, isTunnelToken } = require('./cloudflared');
 const { isToken } = require('./token');
@@ -149,7 +170,7 @@ function start({ service, localPort, uiToken, log, store, agent, cloudflared, da
   try {
     const l = log || defaultLog(service || {});
     const dir = dataDir || (service && service.dataDir) || process.cwd();
-    const st = store || new Store(path.join(dir, 'remote.json'), DEFAULTS());
+    const st = store || new SecretStore(path.join(dir, 'remote.json'), DEFAULTS());
     const cf = cloudflared || createCloudflared({ service, log: l });
     const ag = agent || createRemoteAgent({
       getSettings: () => Object.assign({}, DEFAULTS().relay, st.get('relay', {}) || {}, { lastIps: st.get('lastIps', []) || [] }),

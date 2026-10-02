@@ -206,12 +206,29 @@ test('/luci/* is refused by the agent with 403 and never reaches the router', as
   const d = makeDeps(t, { relayPort: r.port, uiPort: ui.port, token: r.token });
   d.agent.start();
   await until(() => d.agent.status().state === 'online');
-  for (const p of ['/luci/status', '/LUCI/status', '/luci/remote_get?x=1', '//luci/status']) {
+  // the literal shapes, and every shape the router's own `new URL(req.url, 'http://localhost').pathname`
+  // would fold into /luci/… (dot-segments, encoded dot-segments, an absolute-form target) — review I1
+  // (/_relay/* never reaches the agent through the relay — the relay answers its own paths first — so those
+  // shapes are covered by the direct forbiddenPath assertions below)
+  for (const p of ['/luci/status', '/LUCI/status', '/luci/remote_get?x=1', '//luci/status',
+    '/./luci/status', '/x/../luci/status', '/%2e%2e/luci/status', '/%2e/luci/status', 'http://127.0.0.1:6969/luci/status', '/a/b/../../luci/status']) {
     const res = await request(r.port, 'POST', p, { jar: r.jar, body: '{}' });
     assert.equal(res.status, 403, p);
     assert.doesNotMatch(res.body, /LUCI FACADE/, p);
   }
+  // an absolute-form target for another host is refused too: the agent only ever talks to its own UI
+  assert.equal((await request(r.port, 'GET', 'http://evil.example/x', { jar: r.jar })).status, 403);
   assert.equal(ui.seen.length, 0, 'nothing reached the router');
+  // a dot-segment path to a legitimate endpoint reaches the router in its normalised form
+  const ok = await request(r.port, 'POST', '/x/../rpc', { jar: r.jar, headers: { 'Content-Type': 'application/json' }, body: '{"channel":"x"}' });
+  assert.equal(ok.status, 200);
+  assert.equal(ui.seen.length, 1);
+  assert.equal(ui.seen[0].url, '/rpc', 'forwarded as the pathname the router would route on');
+  // the agent's own judgement, as the QEMU self-test calls it
+  const { forbiddenPath } = require('../src/server/remote/agent');
+  for (const bad of ['/luci/x', '/_relay/agent', '/./luci/x', '/%2e%2e/luci/x', 'http://127.0.0.1:6969/luci/x', 'http://evil.example/rpc', '//evil.example/rpc', 'http://[', 'http://u:p@localhost/rpc']) assert.equal(forbiddenPath(bad), true, bad);
+  // a relative reference that is merely odd resolves to a path of the UI (the router 404s it) and is not the agent's business
+  for (const good of ['/rpc', '/events?token=1', '/', '/x/../rpc', '/assets/icon.png', '/luci.js', '/luciferin/', 'not a path']) assert.equal(forbiddenPath(good), false, good);
 });
 
 test('SSE events stream through the link to the browser', async (t) => {
