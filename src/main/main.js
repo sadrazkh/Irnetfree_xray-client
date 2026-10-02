@@ -1581,6 +1581,13 @@ function pendingKeys() {
   return keys;
 }
 
+/** Did an edit change what the core dials? Everything but the name (a label, never in the config) and `_edited` (which fields a subscription refresh keeps), key order aside. */
+function dialChanged(a, b) {
+  const canon = (v) => (Array.isArray(v) ? v.map(canon) : (v && typeof v === 'object' ? Object.keys(v).sort().reduce((o, k) => { o[k] = canon(v[k]); return o; }, {}) : v));
+  const dialled = (s) => JSON.stringify(canon(Object.assign({}, s, { name: null, _edited: null })));
+  return dialled(a) !== dialled(b);
+}
+
 /** The ids of every saved server a plan dials: each hop of a chain, every pool and advanced-routing target. */
 function planServerIds(plan) {
   const ids = new Set();
@@ -2484,10 +2491,12 @@ function registerIpc() {
     const servers = store.get('servers', []);
     const idx = servers.findIndex(s => s.id === id);
     if (idx === -1) return { ok: false, error: 'not found', servers };
-    servers[idx] = applyServerEdits(servers[idx], fields || {});
+    const before = servers[idx];
+    servers[idx] = applyServerEdits(before, fields || {});
     setServers(servers);
     // an edit of a server the live connection dials waits for a reconnect (see liveServerIds)
-    const live = !!appliedSettings && liveServerIds.has(id);
+    // — one that changes what is dialled: a rename, or a Save with nothing changed, is none
+    const live = !!appliedSettings && liveServerIds.has(id) && dialChanged(before, servers[idx]);
     if (live) serverEditPending = true;
     return { ok: true, server: servers[idx], servers, live, pendingReconnect: pendingKeys() };
   });
