@@ -360,6 +360,8 @@ const I18N = {
     'set.tunBackend': 'بک‌اندِ TUN', 'set.leakGuard': 'گارد نشتی',
     'set.tunAppMode': 'روتینگ به‌تفکیک برنامه زیر TUN', 'set.tunApps': 'برنامه‌های انتخاب‌شده',
     'set.blockUdpInProxyMode': 'بستن UDP در حالت پروکسی',
+    // not a setting: an edit of a server the live connection dials (pendingKeys pushes 'servers')
+    'set.servers': 'ویرایش سرورِ متصل',
     'set.defaultEngine': 'هستهٔ پیش‌فرض',
     'set.defaultEngineHint': 'کانفیگ‌هایی که هسته‌ی مشخصی انتخاب نکرده‌اند، و زنجیره/استخر/روتینگ پیشرفته، روی این هسته اجرا می‌شوند. اگر عضوی PattN بخواهد، کل plan روی PattN می‌رود.',
     'comp.xrayPattn': 'هستهٔ Xray-PattN (fork پترنیها — کانفیگ بدون TLS را می‌پذیرد)',
@@ -869,6 +871,8 @@ const I18N = {
     'set.tunBackend': 'TUN backend', 'set.leakGuard': 'Leak guard',
     'set.tunAppMode': 'Per-app routing under TUN', 'set.tunApps': 'Selected apps',
     'set.blockUdpInProxyMode': 'Block UDP in proxy mode',
+    // not a setting: an edit of a server the live connection dials (pendingKeys pushes 'servers')
+    'set.servers': 'Edit of the connected server',
     'set.defaultEngine': 'Default core',
     'set.defaultEngineHint': 'Configs without their own core choice, and chains / pool / advanced routing, run on this core. If any member asks for PattN the whole plan runs on PattN.',
     'comp.xrayPattn': 'Xray-PattN core (patterniha fork — accepts plaintext configs)',
