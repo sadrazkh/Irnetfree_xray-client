@@ -230,6 +230,77 @@ test('the release workflow builds and publishes the OpenWrt package', () => {
   assert.match(job, /fail_on_unmatched_files: true/, 'no ipk, no green release');
 });
 
+/** The openwrt job's `- name: Build ipk` step: its keys and its `run: |` script. */
+function buildIpkStep() {
+  const lines = YML.replace(/\r\n/g, '\n').split('\n');
+  const job = lines.findIndex(l => l === '  openwrt:');
+  assert.ok(job >= 0, 'release.yml has an openwrt job');
+  const start = lines.findIndex((l, i) => i > job && /^ {6}- name: Build ipk\s*$/.test(l));
+  assert.ok(start >= 0, 'the openwrt job has a "Build ipk" step');
+  const keys = {};
+  const run = [];
+  let inRun = false;
+  for (let i = start + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (/^ {6}- /.test(l) || /^ {0,5}\S/.test(l)) break;
+    if (inRun) {
+      if (l.trim() === '' || /^ {10}/.test(l)) { run.push(l.slice(10)); continue; }
+      inRun = false;
+    }
+    const m = /^ {8}([\w-]+):\s*(.*)$/.exec(l);
+    if (!m) continue;
+    keys[m[1]] = m[2];
+    inRun = m[1] === 'run';
+  }
+  return { keys, script: run.join('\n').trim() + '\n' };
+}
+
+/*
+ * The ipk's files carry the tagged commit's time. uhttpd serves a LuCI view
+ * with its mtime as Last-Modified and no Cache-Control, and a browser keeps a
+ * response fresh for a tenth of its age — stamped 1970 (build-ipk's old
+ * default) that was years, so after an upgrade the owner kept the old views.
+ * Run for real: the step's lines up to the build, in a scratch git repo whose
+ * one commit has a known time, with `node` replaced by a function that records
+ * the SOURCE_DATE_EPOCH it was handed.
+ */
+test('the OpenWrt release package is stamped with the tagged commit\'s time (SOURCE_DATE_EPOCH), not 1970', (t) => {
+  const bash = findBash();
+  if (!bash) return t.skip('no bash on this machine');
+  const { keys, script } = buildIpkStep();
+  assert.equal(keys.shell, 'bash');
+  const lines = script.split('\n');
+  const build = lines.findIndex(l => /^node openwrt\/build-ipk\.js dist$/.test(l.trim()));
+  assert.ok(build >= 0, 'the step builds with node openwrt/build-ipk.js dist');
+  assert.ok(lines.slice(0, build).some(l => /SOURCE_DATE_EPOCH/.test(l)), 'SOURCE_DATE_EPOCH is set before the build');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-rel-'));
+  try {
+    const git = (...a) => spawnSync('git', a, {
+      cwd: root, encoding: 'utf8',
+      env: Object.assign({}, process.env, { GIT_AUTHOR_DATE: '1790000000 +0000', GIT_COMMITTER_DATE: '1790000000 +0000' })
+    });
+    if (git('init', '-q').status !== 0) return t.skip('no git on this machine');
+    const c = git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '--allow-empty', '-m', 'tag');
+    assert.equal(c.status, 0, c.stderr);
+    const file = path.join(root, 'step.sh');
+    fs.writeFileSync(file, [
+      'node() { printf "%s" "${SOURCE_DATE_EPOCH-unset}" > seen.txt; }',
+      ...lines.slice(0, build + 1)
+    ].join('\n') + '\n');
+    const r = spawnSync(bash, ['--noprofile', '--norc', '-eo', 'pipefail', file], { cwd: root, encoding: 'utf8' });
+    assert.equal(r.status, 0, `step failed:\n${r.stdout}\n${r.stderr}`);
+    assert.equal(fs.readFileSync(path.join(root, 'seen.txt'), 'utf8'), '1790000000', 'build-ipk is handed the commit\'s time, exported');
+    // a step that cannot read the commit time must fail, not build a package stamped 1970 (or "now")
+    fs.rmSync(path.join(root, '.git'), { recursive: true, force: true });
+    fs.rmSync(path.join(root, 'seen.txt'), { force: true });
+    const r2 = spawnSync(bash, ['--noprofile', '--norc', '-eo', 'pipefail', file], { cwd: root, encoding: 'utf8', env: Object.assign({}, process.env, { GIT_CEILING_DIRECTORIES: path.dirname(root) }) });
+    assert.notEqual(r2.status, 0, 'no commit time, no build');
+    assert.equal(fs.existsSync(path.join(root, 'seen.txt')), false, 'build-ipk never ran');
+  } finally {
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
+  }
+});
+
 test('the test workflow boots OpenWrt in QEMU and runs the smoke', () => {
   const tests = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8').replace(/\r\n/g, '\n');
   const at = tests.indexOf('\n  openwrt:\n');
