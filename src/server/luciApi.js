@@ -10,7 +10,8 @@
  * The methods and their shapes are the contract of the v1.16 spec (§3.4):
  * do not rename. Actions (connect / disconnect / reconnect / subs_update)
  * start the work and answer { accepted: true } at once — the page follows
- * the status. settings_set takes only the four router keys, validated the
+ * the status; a connect to the config that is already up answers
+ * { accepted: true, already: true } (v1.16.1). settings_set takes only the four router keys, validated the
  * way settings:set validates them, and applies them live. A method that
  * refuses its argument throws { code: 400 }; server.js answers that — and
  * anything else a method throws — as HTTP 200 { error }, because
@@ -84,10 +85,18 @@ function createLuciApi({ service, remoteApi = null } = {}) {
       return out;
     },
     configs: () => service.configsForLuci(),
-    connect(a) {
+    async connect(a) {
       const id = a.id;
       if (typeof id !== 'string' || !id) throw err(400, 'connect: an id is required');
-      return background('connect', service.actions.connect(id));
+      const p = Promise.resolve(service.actions.connect(id));
+      // On a router a Connect on the config that is already up answers
+      // { ok, already } without an await on anything (service.js, S2) — so it
+      // is known before the next turn of the event loop. Said to the page,
+      // which tells the user to press Reconnect for an edit (field report L4);
+      // a real connect takes 20-40 s and stays in the background.
+      const early = await Promise.race([p.then((r) => r, () => null), new Promise((resolve) => setImmediate(resolve, null))]);
+      if (early && early.already) return { accepted: true, already: true };
+      return background('connect', p);
     },
     select(a) {
       const id = a.id;
@@ -123,13 +132,19 @@ function createLuciApi({ service, remoteApi = null } = {}) {
   // feat/remote's api: remote_get / remote_set / cloudflared_install are
   // synchronous, remote_status is async, and remote_set throws an Error on
   // invalid input — awaited either way, and a thrown Error is the reply's
-  // {error} (a refused setting is not a server failure).
+  // {error} (a refused setting is not a server failure) — and a warn line:
+  // syslog keeps warn, so the refusal is on the router, not only on a page
+  // that may have been closed (field report L1).
   for (const m of REMOTE_METHODS) {
     methods[m] = async (a) => {
       const r = remote();
       if (!r || typeof r[m] !== 'function') return { error: 'remote not available' };
       try { return await r[m](a); }
-      catch (e) { return { error: (e && e.message) || String(e) }; }
+      catch (e) {
+        const msg = (e && e.message) || String(e);
+        if (typeof service.log === 'function') service.log(`LuCI: ${m} refused: ${msg}`, 'warn');
+        return { error: msg };
+      }
     };
   }
 
