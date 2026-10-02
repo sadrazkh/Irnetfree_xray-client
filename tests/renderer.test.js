@@ -603,6 +603,46 @@ test('K1/K4: on the router the kill switch row shows with router wording, the ba
   assert.equal(el('killBanner').hidden, false);
 });
 
+/* --------------------------- "Connect when the router starts" (v1.16 B1) --------------------------- */
+
+test('B1: on the router the autoConnect row says what it does — "Connect when the router starts" with its hint; the desktop keeps the old text', () => {
+  for (const k of ['autoconn.routerTitle', 'autoconn.routerSub']) assert.equal(I18N.split(`'${k}':`).length - 1, 2, k);
+  assert.match(I18N, /'autoconn\.routerTitle': 'Connect when the router starts'/);
+  assert.match(I18N, /'autoconn\.routerSub': 'After a reboot or power cut the VPN comes back as it was'/);
+  assert.match(I18N, /'autoconn\.routerTitle': 'با روشن شدن روتر وصل شو'/);
+  assert.match(I18N, /'autoconn\.routerSub': 'بعد از ریبوت یا قطع برق، VPN همان‌طور که بود برمی‌گردد'/);
+  // the desktop strings stay
+  assert.match(I18N, /'autoconn\.title': 'Connect automatically'/);
+  assert.match(I18N, /'autoconn\.title': 'اتصال خودکار'/);
+
+  // applyFlavor relabels the row through data-i18n (so a language switch keeps the wording) — run against a fake page
+  const vm = require('node:vm');
+  const relabelled = {};
+  const node = (id) => ({ id, hidden: false, checked: false, textContent: '', attrs: {},
+    setAttribute(k, v) { this.attrs[k] = v; relabelled[this.id] = v; }, closest() { return rows[this.id] || null; }, querySelector(sel) { return (rows[this.id] && rows[this.id].parts[sel]) || null; } });
+  const rows = {};
+  const row = (id) => { const title = node(id + ':title'); const sub = node(id + ':sub'); rows[id] = { hidden: false, parts: { '.switch-title': title, '.switch-sub': sub }, querySelector(sel) { return this.parts[sel] || null; } }; return rows[id]; };
+  for (const id of ['optSysProxy', 'optLaunchAtLogin', 'optDnsManaged', 'optKillSwitch', 'optAutoConnect']) row(id);
+  const els = {};
+  const $ = (sel) => {
+    const m = /^#([A-Za-z0-9_-]+)(?: (.+))?$/.exec(sel);
+    if (!m) return null;
+    if (m[2]) return node(m[1] + ' ' + m[2]);
+    return els[m[1]] || (els[m[1]] = node(m[1]));
+  };
+  const ctx = vm.createContext({ state: { flavor: 'openwrt', settings: {} }, $, t: (k) => k, renderLanDevices: () => {} });
+  vm.runInContext(fnSource('applyFlavor'), ctx);
+  ctx.applyFlavor();
+  assert.equal(relabelled['optAutoConnect:title'], 'autoconn.routerTitle');
+  assert.equal(relabelled['optAutoConnect:sub'], 'autoconn.routerSub');
+  assert.equal(rows.optAutoConnect.parts['.switch-title'].textContent, 'autoconn.routerTitle');
+  assert.equal(rows.optAutoConnect.hidden, false, 'the row stays');
+  ctx.state.flavor = null;
+  ctx.applyFlavor();
+  assert.equal(relabelled['optAutoConnect:title'], 'autoconn.title', 'the desktop gets its own wording back');
+  assert.equal(relabelled['optAutoConnect:sub'], 'autoconn.sub');
+});
+
 test('S4: the attempt strings exist in both languages, verbatim', () => {
   for (const k of ['state.reconnectingN', 'state.waiting']) assert.equal(I18N.split(`'${k}':`).length - 1, 2, k);
   assert.match(I18N, /'state\.reconnectingN': 'Reconnecting… \(attempt \{n\}\)'/);

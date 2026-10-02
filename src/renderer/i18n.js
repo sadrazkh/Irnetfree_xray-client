@@ -471,6 +471,9 @@ const I18N = {
     'login.title': 'اجرا با ویندوز', 'login.sub': 'برنامه هنگام ورود به سیستم، پنهان در سینی، اجرا می‌شود (روی ویندوز یک task زمان‌بندی‌شده با دسترسی ادمین ساخته می‌شود)',
     'login.failed': 'اجرا با سیستم‌عامل تنظیم نشد',
     'autoconn.title': 'اتصال خودکار', 'autoconn.sub': 'هنگام اجرا به آخرین سروری که وصل بودید وصل می‌شود',
+    // the same switch on the router (v1.16 B1): it says what it does there
+    'autoconn.routerTitle': 'با روشن شدن روتر وصل شو',
+    'autoconn.routerSub': 'بعد از ریبوت یا قطع برق، VPN همان‌طور که بود برمی‌گردد',
     'state.reconnecting': 'شبکه عوض شد — اتصال مجدد…',
     'state.reconnectingN': 'اتصال مجدد… (تلاش {n})',
     'state.waiting': 'منتظر اینترنت… (تلاش {n})',
@@ -977,6 +980,9 @@ const I18N = {
     'login.title': 'Start with the OS', 'login.sub': 'Starts hidden in the tray at logon (on Windows via a scheduled task with administrator rights)',
     'login.failed': 'Could not set up start with the OS',
     'autoconn.title': 'Connect automatically', 'autoconn.sub': 'Connects to the last server you used when the app starts',
+    // the same switch on the router (v1.16 B1): it says what it does there
+    'autoconn.routerTitle': 'Connect when the router starts',
+    'autoconn.routerSub': 'After a reboot or power cut the VPN comes back as it was',
     'state.reconnecting': 'Network changed — reconnecting…',
     'state.reconnectingN': 'Reconnecting… (attempt {n})',
     'state.waiting': 'Waiting for internet… (attempt {n})',

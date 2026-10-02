@@ -952,6 +952,14 @@ function applyFlavor() {
   relabel($('#killBanner .kill-banner-text'), rt ? 'kill.routerBlocked' : 'kill.blocked');
   relabel($('#killDisarm'), rt ? 'kill.routerOff' : 'kill.disarm');
   $('#killStatus').hidden = false;
+  // "Connect automatically" is, on a router, "Connect when the router starts":
+  // after a reboot or a power cut the VPN comes back as it was (B1) — the same
+  // setting, named for what it does there
+  const acRow = $('#optAutoConnect').closest('.switch-row');
+  if (acRow) {
+    relabel(acRow.querySelector('.switch-title'), rt ? 'autoconn.routerTitle' : 'autoconn.title');
+    relabel(acRow.querySelector('.switch-sub'), rt ? 'autoconn.routerSub' : 'autoconn.sub');
+  }
   $('#tunBackendRow').hidden = rt;
   $('#tunAppRow').hidden = rt;
   $('#gwQuicRow').hidden = !rt;
