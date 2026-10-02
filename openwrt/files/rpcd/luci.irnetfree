@@ -11,12 +11,17 @@
 # a JSON object and nothing else, so an array from the service comes back as
 # {"result":[...]} and every failure as {"error":"..."}:
 #   not-running    nothing answers on the port (the pages offer Start)
-#   timeout        the service took longer than 30 s
+#   timeout        the service took longer than 15 s
 #   unauthorized   the service refused the token (401)
 #   http <code>    any other non-2xx reply — uclient-fetch drops the body of
 #                  those, so the code is all that is left
 # Long actions (connect, subscription updates, ...) are answered at once by the
 # service; the pages follow the status. POSIX sh: this runs under busybox ash.
+#
+# The 15 s request timeout (-T) has to stay below the two that sit above it:
+# LuCI's rpc gives up after 20 s, and rpcd SIGKILLs an exec plugin after its
+# `timeout` (/etc/config/rpcd, 30 s) — with -T above those, "timeout" could
+# never be answered and a killed shell would leave its temp files behind.
 
 METHODS='status configs connect select disconnect reconnect test subs_update settings_get settings_set devices log diagnostics remote_get remote_set remote_status cloudflared_install'
 
@@ -58,9 +63,13 @@ call)
 	data_dir="$(uci -q get irnetfree.main.data_dir)"
 	[ -n "$data_dir" ] || data_dir=/etc/irnetfree
 
+	# the body file holds the token: it goes on every way out — an exit, or a
+	# signal (which ends the script through that exit) — set before it exists
+	tmp=''
+	trap '[ -z "$tmp" ] || rm -f "$tmp" "$tmp.err"' EXIT
+	trap 'exit 1' HUP INT TERM
 	tmp="$(mktemp /tmp/irnf-luci.XXXXXX)" || { echo '{"error":"no tmp"}'; exit 0; }
 	errf="$tmp.err"
-	trap 'rm -f "$tmp" "$errf"' EXIT
 	# {"token":"<the token file>","arg":<stdin>}: the token goes from its file
 	# into the body file without passing through a variable or an argument
 	{
@@ -68,7 +77,7 @@ call)
 		tr -d '\r\n' < "$data_dir/token" 2>/dev/null
 		printf '","arg":%s}' "$input"
 	} > "$tmp"
-	out="$(uclient-fetch -T 30 -O - --post-file="$tmp" "http://127.0.0.1:$port/luci/$method" 2>"$errf")"
+	out="$(uclient-fetch -T 15 -O - --post-file="$tmp" "http://127.0.0.1:$port/luci/$method" 2>"$errf")"
 	rc=$?
 	if [ "$rc" = 0 ]; then
 		case "$out" in

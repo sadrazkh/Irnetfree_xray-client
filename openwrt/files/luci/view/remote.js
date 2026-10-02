@@ -33,7 +33,7 @@ return view.extend({
 		if (common.errorOf(conf)) {
 			return E('div', { 'class': 'cbi-map' }, [
 				E('h2', {}, [ common.t('Remote access') ]),
-				common.problemBox(conf, function () { window.setTimeout(function () { window.location.reload(); }, 3000); })
+				common.problemBox(conf, common.reloadWhenUp)
 			]);
 		}
 
@@ -157,7 +157,7 @@ return view.extend({
 			if (err) return common.notify(err, 'danger');
 			self.installing = true;
 			self.showInstalled();
-		});
+		}, common.failed);
 	},
 
 	handleSave: function () {
@@ -198,6 +198,10 @@ return view.extend({
 				self.cfToken.description = self.tokenText('cloudflared');
 				common.notify(common.t('Saved — applied.'));
 				return m.reset();
+			}, function (e) {
+				// the call itself failed (no write access, a timeout): say why, and the save failed
+				common.failed(e);
+				throw e;
 			});
 		});
 	},

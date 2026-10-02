@@ -45,6 +45,9 @@ var FA = {
 	'No answer from the service.': 'جوابی از سرویس نیامد.',
 	'Start the service': 'اجرای سرویس',
 	'Starting the service…': 'در حال اجرای سرویس…',
+	'The service has not answered yet — it may still be starting. Reload this page in a moment.': 'سرویس هنوز جواب نداده — شاید هنوز در حال بالا آمدن است. کمی بعد این صفحه را دوباره باز کن.',
+	'Your LuCI login may not change IRNetFree (it needs write access to luci-app-irnetfree).': 'کاربر LuCI شما اجازهٔ تغییر IRNetFree را ندارد (دسترسی نوشتن luci-app-irnetfree لازم است).',
+	'The router did not answer in time.': 'روتر به‌موقع جواب نداد.',
 	// remote-access states
 	'Relay: %s': 'رله: %s',
 	'Cloudflare Tunnel: %s': 'تونل کلودفلر: %s',
@@ -122,8 +125,9 @@ var FA = {
 	'The port and address the IRNetFree web UI listens on. Save & Apply restarts the service: a few seconds, then the tunnel comes back by itself.': 'پورت و آدرسی که رابط وب IRNetFree روی آن گوش می‌دهد. «ذخیره و اعمال» سرویس را ری‌استارت می‌کند: چند ثانیه، بعد تونل خودش برمی‌گردد.',
 	'Port': 'پورت',
 	'Listen address': 'آدرس',
-	'Every interface (0.0.0.0)': 'همهٔ اینترفیس‌ها (0.0.0.0)',
+	'The LAN and this router (0.0.0.0)': 'شبکهٔ محلی و خود روتر (0.0.0.0)',
 	'This router only (127.0.0.1)': 'فقط خود روتر (127.0.0.1)',
+	'With “This router only” no device on the LAN can open the web UI; these LuCI pages keep working either way.': 'با «فقط خود روتر» هیچ دستگاهی در شبکه رابط وب را باز نمی‌کند؛ این صفحه‌های LuCI در هر دو حالت کار می‌کنند.',
 
 	// Remote access
 	'Control this router from outside the home — turn the VPN on or off, change the config — without a static IP, even behind CGNAT. The control link never goes through the VPN. Both ways can be on at once.': 'این روتر را از بیرون خانه کنترل کن — VPN را روشن یا خاموش کن، کانفیگ را عوض کن — بدون IP ثابت و حتی پشت CGNAT. لینک کنترل هیچ‌وقت از داخل VPN نمی‌رود. هر دو راه می‌توانند هم‌زمان روشن باشند.',
@@ -226,6 +230,20 @@ function errorOf(res) {
 
 function isDown(res) {
 	return !!(res && res.error === 'not-running');
+}
+
+/* A call that did not resolve at all — LuCI's rpc rejects when the HTTP request
+ * fails or times out (20 s) and when ubus refuses it (a LuCI user with only the
+ * read half of luci-app-irnetfree gets "Access denied" for every action). */
+function rpcError(e) {
+	var m = String((e && e.message) || e || '');
+	if (/Access denied|-32002/.test(m)) return t('Your LuCI login may not change IRNetFree (it needs write access to luci-app-irnetfree).');
+	if (/timed out|timeout/i.test(m)) return t('The router did not answer in time.');
+	return t('Error: %s', m.split('\n')[0]);
+}
+
+function failed(e) {
+	return notify(rpcError(e), 'danger');
 }
 
 /* A list reply: the plugin wraps the service's arrays as {result: […]}. */
@@ -380,11 +398,30 @@ function problemBox(res, onStarted) {
 					if (e) return notify(e, 'danger');
 					notify(t('Starting the service…'));
 					if (typeof onStarted === 'function') return onStarted();
-				});
+				}, failed);
 			})
 		}, [ t('Start the service') ]));
 	}
 	return E('div', { 'class': 'alert-message warning irnf-problem' }, children);
+}
+
+/* After a start: ask every 2 s until the service answers (any reply but
+ * not-running), at most `tries` times. → Promise<boolean> */
+function waitUntilUp(tries) {
+	tries = (tries == null) ? 20 : tries;
+	return statusCall().then(function (r) { return !isDown(r); }, function () { return false; }).then(function (up) {
+		if (up || tries <= 1) return up;
+		return new Promise(function (resolve) { window.setTimeout(resolve, 2000); }).then(function () { return waitUntilUp(tries - 1); });
+	});
+}
+
+/* What a page that cannot render without the service does after Start:
+ * reload once the service answers — node takes a while to listen on a slow router. */
+function reloadWhenUp() {
+	return waitUntilUp().then(function (up) {
+		if (up) window.location.reload();
+		else notify(t('The service has not answered yet — it may still be starting. Reload this page in a moment.'), 'warning');
+	});
 }
 
 /* Copy text: the async clipboard where the page is a secure context, the old
@@ -424,10 +461,11 @@ function showText(title, text) {
 }
 
 var serviceAction = call('service', [ 'action' ]);
+var statusCall = call('status');
 
 return baseclass.extend({
 	/* the service's local API, through the rpcd plugin (spec §3.4) */
-	status: call('status'),
+	status: statusCall,
 	configs: call('configs'),
 	connect: call('connect', [ 'id' ]),
 	select: call('select', [ 'id' ]),
@@ -473,7 +511,11 @@ return baseclass.extend({
 	validRouterName: validRouterName,
 	webUiUrl: webUiUrl,
 	notify: notify,
+	rpcError: rpcError,
+	failed: failed,
 	problemBox: problemBox,
+	waitUntilUp: waitUntilUp,
+	reloadWhenUp: reloadWhenUp,
 	copyText: copyText,
 	showText: showText
 });

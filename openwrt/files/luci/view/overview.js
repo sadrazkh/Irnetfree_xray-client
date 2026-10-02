@@ -145,10 +145,15 @@ return view.extend({
 		var err = common.errorOf(st);
 		if (err) {
 			this.since = null;
-			dom.content(el.problem, [ common.problemBox(st, L.bind(this.refresh, this)) ]);
+			// the same problem again: keep the box, so a click on its Start lands on the node it began on
+			if (err !== this.shownErr) {
+				this.shownErr = err;
+				dom.content(el.problem, [ common.problemBox(st, L.bind(this.refresh, this)) ]);
+			}
 			el.body.style.display = 'none';
 			return;
 		}
+		this.shownErr = null;
 		dom.content(el.problem, null);
 		el.body.style.display = '';
 		el.version.textContent = st.version ? common.t('Version %s', st.version) : '';
@@ -211,19 +216,17 @@ return view.extend({
 		return (this.cf && (this.cf.selectedId || this.cf.activeId)) || '';
 	},
 
-	/* run an action, report a refusal, then show the new state at once */
+	/* run an action, report a refusal (the service's, or a call that never got
+	 * through), then show the real state at once — the switch snaps back too */
 	act: function (p) {
 		var self = this;
 		this.busy = true;
-		var done = function () { self.busy = false; };
 		return p.then(function (r) {
 			var err = common.errorOf(r);
 			if (err) common.notify(err, 'danger');
-			done();
+		}, common.failed).then(function () {
+			self.busy = false;
 			return self.refresh();
-		}, function (e) {
-			done();
-			throw e;
 		});
 	},
 
@@ -257,11 +260,18 @@ return view.extend({
 	},
 
 	handleSelect: function () {
-		var id = this.el.picker.value;
+		var self = this, el = this.el;
+		var prev = this.pickedId || (this.cf && this.cf.selectedId) || '';
+		var id = el.picker.value;
+		// refused: the picker goes back to the selection the service kept
+		var undo = function () { self.pickedId = prev || null; el.picker.value = prev; };
 		this.pickedId = id;
 		return common.select(id).then(function (r) {
 			var err = common.errorOf(r);
-			if (err) common.notify(err, 'danger');
+			if (err) { common.notify(err, 'danger'); undo(); }
+		}, function (e) {
+			common.failed(e);
+			undo();
 		});
 	},
 
@@ -272,6 +282,8 @@ return view.extend({
 			if (r && r.ok) out.textContent = common.t('Test: %s ms', r.ms);
 			else if (r && r.ok === false) out.textContent = common.t('Test failed: %s', r.error || '?');
 			else out.textContent = common.t('Test failed: %s', common.errorOf(r) || '?');
+		}, function (e) {
+			out.textContent = common.t('Test failed: %s', common.rpcError(e));
 		});
 	},
 
@@ -282,7 +294,7 @@ return view.extend({
 			if (err) return common.notify(err, 'danger');
 			common.notify(common.t('Updating subscriptions — the list refreshes when they are done.'));
 			self.cfgDue = self.tick + 4;
-		});
+		}, common.failed);
 	},
 
 	handleSave: null,

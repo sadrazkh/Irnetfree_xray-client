@@ -38,7 +38,7 @@ return view.extend({
 		if (common.errorOf(settings)) {
 			nodes.push(Promise.resolve(E('div', { 'class': 'cbi-section' }, [
 				E('h2', {}, [ common.t('IRNetFree settings') ]),
-				common.problemBox(settings, function () { window.setTimeout(function () { window.location.reload(); }, 3000); })
+				common.problemBox(settings, common.reloadWhenUp)
 			])));
 		}
 		else {
@@ -84,11 +84,14 @@ return view.extend({
 		o.datatype = 'port';
 		o.placeholder = '6969';
 		o.rmempty = false;
-		o = s.option(form.Value, 'bind', common.t('Listen address'));
-		o.datatype = 'ipaddr';
-		o.placeholder = '0.0.0.0';
-		o.value('0.0.0.0', common.t('Every interface (0.0.0.0)'));
+		// two choices, nothing typed: LuCI reaches the service on 127.0.0.1, so a
+		// LAN address would leave every tab saying the service is not running
+		o = s.option(form.ListValue, 'bind', common.t('Listen address'),
+			common.t('With “This router only” no device on the LAN can open the web UI; these LuCI pages keep working either way.'));
+		o.value('0.0.0.0', common.t('The LAN and this router (0.0.0.0)'));
 		o.value('127.0.0.1', common.t('This router only (127.0.0.1)'));
+		o.default = '0.0.0.0';
+		o.rmempty = false;
 		this.uciMap = m;
 		nodes.push(m.render());
 
@@ -121,6 +124,10 @@ return view.extend({
 				}
 				self.loaded = r && r.settings ? common.routerSettings(r.settings) : next;
 				common.notify(common.t('Saved — applied.'));
+			}, function (e) {
+				// the call itself failed (no write access, a timeout): say why, and the save failed
+				common.failed(e);
+				throw e;
 			});
 		});
 	},

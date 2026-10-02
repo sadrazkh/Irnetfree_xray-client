@@ -221,8 +221,14 @@ function fakeForm(env) {
   }
   class Value extends Opt {}
   class DynamicList extends Opt {}
+  class ListValue extends Opt {   // a <select>: only the declared values
+    parse(sid) {
+      if (this.formValue !== undefined && !this.keylist.includes(String(this.formValue))) throw new TypeError(`Option "${this.title}": not one of the choices`);
+      return super.parse(sid);
+    }
+  }
   class DummyValue extends Opt { parse() {} }
-  for (const C of [Flag, Value, DynamicList, DummyValue]) C.isOption = true;
+  for (const C of [Flag, Value, DynamicList, ListValue, DummyValue]) C.isOption = true;
   class NamedSection {
     constructor(map, sectionId, type, title, description) { Object.assign(this, { map, section: sectionId, sectiontype: type, title, description, options: [] }); }
     option(cls, ...a) {
@@ -271,7 +277,7 @@ function fakeForm(env) {
   class JSONMap extends Map {
     constructor(data, title, description) { super('json', title, description); this.data = new JSONData(data); }
   }
-  return { maps, module: { Map, JSONMap, NamedSection, Flag, Value, DynamicList, DummyValue } };
+  return { maps, module: { Map, JSONMap, NamedSection, Flag, Value, DynamicList, ListValue, DummyValue } };
 }
 
 /** A fresh fake LuCI; `replies` answers the plugin's methods (method → reply or function(params)). */
@@ -284,7 +290,8 @@ function fakeLuci(opts = {}) {
   };
   env.window = {
     location: { hostname: '192.168.1.1', reloads: 0, reload() { this.reloads++; } },
-    setTimeout: (fn, ms) => { env.timers.push({ fn, ms }); return env.timers.length; },
+    // timers are recorded; a test that needs them to run sets env.runTimers (they then run at once)
+    setTimeout: (fn, ms) => { env.timers.push({ fn, ms }); if (env.runTimers) setImmediate(fn); return env.timers.length; },
     navigator: {},
     isSecureContext: false
   };
@@ -692,6 +699,11 @@ test('Overview: a service that is not running shows that and Start; an old servi
   assert.equal(v.el.body.style.display, 'none');
   assert.match(v.el.problem.textContent, /The IRNetFree service is not running\./);
   assert.match(page.textContent, /No token yet/);
+  // the poll does not rebuild the box (and its button) while nothing changed: a click must not land on a replaced node
+  const start = v.el.problem.button('Start the service');
+  await v.refresh();
+  await v.refresh();
+  assert.equal(v.el.problem.button('Start the service'), start, 'the same Start button after two polls');
   env.calls.length = 0;
   await v.el.problem.button('Start the service').fire('click')[0];
   assert.deepEqual(callsOf(env, 'service').map((c) => c.params), [{ action: 'start' }]);
@@ -701,6 +713,12 @@ test('Overview: a service that is not running shows that and Start; an old servi
   await v.refresh();
   assert.equal(v.el.body.style.display, '');
   assert.equal(v.el.problem.childNodes.length, 0);
+
+  // a different problem replaces the box
+  env.replies.status = { error: 'unauthorized' };
+  await v.refresh();
+  assert.match(v.el.problem.textContent, /its token changed/);
+  assert.equal(v.el.problem.buttons().length, 0);
 
   const old = fakeLuci({ replies: healthy({ status: { error: 'http 405' } }) });
   const o = await openView('overview', old);
@@ -712,6 +730,90 @@ test('Overview: a service that is not running shows that and Start; an old servi
   await v.refresh();
   assert.equal(v.el.body.style.display, 'none');
   assert.match(v.el.problem.textContent, /No answer from the service\./);
+});
+
+const DENIED = (m) => new Error(`RPC call to luci.irnetfree/${m} failed with error -32002: Access denied`);
+const TIMED_OUT = () => new Error('XHR request timed out');
+
+test('Overview: a rejected call (no write access, LuCI\'s own timeout) ends the busy state and says why', async () => {
+  const env = fakeLuci({ replies: healthy() });
+  const { v } = await openView('overview', env);
+  env.replies.connect = DENIED('connect');
+  v.el.picker.value = 's1';
+  await v.handleConnect();   // resolves: nothing is thrown at LuCI
+  assert.match(env.ui.notes.pop().textContent, /may not change IRNetFree/);
+  assert.equal(v.busy, false);
+  // a refused switch-off snaps the switch back to the service's state at once
+  env.replies.disconnect = DENIED('disconnect');
+  v.el.vpn.checked = false;
+  await v.handleSwitch({ currentTarget: { checked: false } });
+  assert.equal(v.el.vpn.checked, true, 'still on: the disconnect was refused');
+  assert.match(env.ui.notes.pop().textContent, /may not change IRNetFree/);
+  // "Testing…" never stays
+  env.replies.test = TIMED_OUT();
+  await v.handleTest();
+  assert.equal(v.el.result.textContent, 'Test failed: The router did not answer in time.');
+  env.replies.subs_update = DENIED('subs_update');
+  await v.handleUpdateSubs();
+  assert.match(env.ui.notes.pop().textContent, /may not change IRNetFree/);
+  // a refused pick goes back to the selection the service kept
+  env.replies.select = DENIED('select');
+  v.el.picker.value = 'm1';
+  await v.handleSelect();
+  assert.match(env.ui.notes.pop().textContent, /may not change IRNetFree/);
+  assert.equal(v.el.picker.value, 's2');
+  env.replies.select = { error: 'no such server' };
+  v.el.picker.value = 'm1';
+  await v.handleSelect();
+  assert.equal(v.el.picker.value, 's2', 'and so does one the service refused');
+});
+
+test('Settings, Remote access, Log: a rejected call says why and leaves nothing half-done', async () => {
+  const env = fakeLuci({ replies: healthy({ settings_set: DENIED('settings_set') }) });
+  const s = await openView('settings', env);
+  env.maps[0].option('settings', 'killSwitch').formValue = true;
+  await assert.rejects(s.v.handleSave());
+  assert.match(env.ui.notes.pop().textContent, /may not change IRNetFree/);
+
+  const r = fakeLuci({ replies: healthy({ cloudflared_install: DENIED('cloudflared_install'), remote_set: TIMED_OUT() }) });
+  const rv = await openView('remote', r);
+  await rv.v.handleInstall();
+  assert.match(r.ui.notes.pop().textContent, /may not change IRNetFree/);
+  assert.match(rv.v.el.cfInstalled.textContent, /Not installed/, 'no "Installing…" left behind');
+  r.maps[0].option('relay', 'name').formValue = 'office';
+  await assert.rejects(rv.v.handleSave());
+  assert.match(r.ui.notes.pop().textContent, /did not answer in time/);
+
+  const l = fakeLuci({ replies: healthy() });
+  const lv = await openView('log', l);
+  l.replies.diagnostics = TIMED_OUT();
+  await lv.v.handleCopy();
+  assert.match(l.ui.notes.pop().textContent, /did not answer in time/);
+  l.replies.log = TIMED_OUT();
+  await lv.v.handleRefresh();
+  assert.match(lv.page.textContent, /No answer from the service\./);
+});
+
+test('Settings and Remote access: after Start, the page reloads once the service answers — not after a fixed wait', async () => {
+  const env = fakeLuci({ replies: healthy({ settings_get: { error: 'not-running' } }) });
+  const { page } = await openView('settings', env);
+  env.runTimers = true;
+  let asked = 0;
+  env.replies.status = () => (++asked < 3 ? { error: 'not-running' } : { state: 'disconnected' });
+  await page.button('Start the service').fire('click')[0];
+  assert.equal(asked, 3, 'asked until it answered');
+  assert.equal(env.window.location.reloads, 1);
+  assert.ok(env.timers.some((x) => x.ms === 2000), 'every 2 s');
+
+  // a service that never comes up: a bounded wait, no reload, and the page says so
+  const down = fakeLuci({ replies: healthy({ remote_get: { error: 'not-running' }, status: { error: 'not-running' } }) });
+  const d = await openView('remote', down);
+  down.runTimers = true;
+  await d.page.button('Start the service').fire('click')[0];
+  assert.equal(down.window.location.reloads, 0);
+  const n = callsOf(down, 'status').length;
+  assert.ok(n >= 10 && n <= 30, `asked ${n} times, then gave up`);
+  assert.match(down.ui.notes.pop().textContent, /has not answered yet/);
 });
 
 test('Overview in Persian', async () => {
@@ -747,9 +849,18 @@ test('Settings: the four router settings from the service, devices to pick from,
   // the web UI's own settings, in UCI
   assert.equal(u.config, 'irnetfree');
   assert.equal(u.sections[0].section, 'main');
-  assert.deepEqual(u.sections[0].options.map((o) => [o.option, o.datatype]), [['port', 'port'], ['bind', 'ipaddr']]);
+  const [port, bind] = u.sections[0].options;
+  assert.deepEqual([port.option, port.constructor.name, port.datatype], ['port', 'Value', 'port']);
+  // LuCI reaches the service on 127.0.0.1, so a LAN address would break every tab: the LAN or this router only, nothing typed
+  assert.deepEqual([bind.option, bind.constructor.name], ['bind', 'ListValue']);
+  assert.deepEqual(bind.keylist, ['0.0.0.0', '127.0.0.1']);
+  assert.deepEqual(bind.vallist, ['The LAN and this router (0.0.0.0)', 'This router only (127.0.0.1)']);
+  assert.equal(bind.default, '0.0.0.0');
+  assert.equal(bind.rmempty, false);
   assert.match(u.description, /restarts the service/);
   assert.equal(typeof v.handleSave, 'function');
+  bind.formValue = '192.168.1.1';
+  await assert.rejects(v.handleSave(), /not one of the choices/);
 });
 
 test('Settings: Save sends only what changed and the service applies it; Save & Apply commits staged UCI', async () => {
