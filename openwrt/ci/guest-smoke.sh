@@ -843,9 +843,17 @@ say "D3: where packets to the in-country resolvers go — a LAN device's DNS and
 # device's DNS to them out again (the `from 192.168.1.50 iif br-lan` lookups
 # below are such packets). dnsmasq must run as a user of its own (OpenWrt
 # starts it --user=dnsmasq), or the rule would take its upstream out too.
-DNSMASQ_PID="$(pidof dnsmasq | cut -d' ' -f1)"
-DNSMASQ_UID="$(awk '/^Uid:/{print $2}' "/proc/$DNSMASQ_PID/status" 2>/dev/null)"
-echo "dnsmasq: pid $DNSMASQ_PID, uid ${DNSMASQ_UID:-?}"
+# (its dhcp-script helper, forked before it drops root, is a dnsmasq too — uid 0,
+# and it sends no DNS: the one that forwards is the dnsmasq whose parent is not one)
+DNSMASQ_PID=; DNSMASQ_UID=
+for p in $(pidof dnsmasq); do
+	pp="$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null)"
+	u="$(awk '/^Uid:/{print $2}' "/proc/$p/status" 2>/dev/null)"
+	echo "dnsmasq: pid $p, parent $pp ($(cat "/proc/$pp/comm" 2>/dev/null)), uid $u"
+	[ "$(cat "/proc/$pp/comm" 2>/dev/null)" = dnsmasq ] && continue
+	DNSMASQ_PID=$p; DNSMASQ_UID=$u
+done
+echo "the dnsmasq that forwards: pid ${DNSMASQ_PID:-?}, uid ${DNSMASQ_UID:-?}"
 [ -n "$DNSMASQ_UID" ] && [ "$DNSMASQ_UID" != 0 ] || { echo "dnsmasq runs as root here — the own-lookup rule cannot tell it from the service"; exit 1; }
 echo "own-lookup rules:"; ip rule show | grep -F 'uidrange' || true
 for ip in 9.9.9.9 149.112.112.112; do
