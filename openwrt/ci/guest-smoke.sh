@@ -39,8 +39,8 @@ uci show firewall | grep -E "^firewall\.irnetfree_(lan|guest)\." || true
 	|| { echo "the guest zone forwards to wan but not to the tunnel zone — no internet for it while connected"; exit 1; }
 [ "$(uci show firewall | grep -c "\.dest='irnetfree'")" = 2 ] || { echo "a forwarding to the tunnel zone is missing or doubled"; uci show firewall | grep irnetfree; exit 1; }
 
-say "test tools and the feed cores"
-opkg install sing-box xray-core curl jq >/dev/null
+say "test tools and the feed cores (kmod-veth: the WAN-change interface and the LAN-side namespace below)"
+opkg install sing-box xray-core curl jq kmod-veth >/dev/null
 
 say "service up"
 i=0
@@ -289,13 +289,21 @@ rpc '{"channel":"remote:bypass","arg":{"owner":"relay","hosts":[],"cidrs":[]}}' 
 if ip rule show | grep -q '^8997:'; then echo "the 8997 rule did not go"; exit 1; fi
 
 say "a network change judged by a probe (S3): a second default route appears through netifd — the tunnel answers, kept"
+# On its own link (a veth pair), never as an alias of br-lan: on 23.05 netifd
+# took the LAN's shared connected route away with the alias (run #209), and
+# every rebuild after that refused the gateway — rightly — for a LAN without
+# its route. The gateway on that link is nobody; the route's metric keeps it
+# behind the real default, and only its existence is what the watcher sees.
+ip link add wt0 type veth peer name wt1
+ip link set wt1 up
+ip link set wt0 up
 uci -q batch <<'EOF'
 set network.wtest=interface
 set network.wtest.proto='static'
-set network.wtest.device='br-lan'
-set network.wtest.ipaddr='192.168.1.9'
+set network.wtest.device='wt0'
+set network.wtest.ipaddr='192.168.78.1'
 set network.wtest.netmask='255.255.255.0'
-set network.wtest.gateway='192.168.1.2'
+set network.wtest.gateway='192.168.78.2'
 set network.wtest.metric='50'
 commit network
 EOF
@@ -314,6 +322,9 @@ until judged 'Network changed (wtest: default v4 route gone) — the tunnel answ
 	i=$((i+1)); [ $i -lt 60 ] || { echo "the route leaving was not judged"; luci log '{"lines":40}' | jq -r '.lines[]' | tail -20; exit 1; }; sleep 1
 done
 [ "$(gw_singbox)" = "$PIDS" ] || { echo "the gateway was rebuilt for a change the tunnel survived"; exit 1; }
+ip link del wt0
+# the LAN's own route must have survived all of the above (a rebuild's verify needs it)
+ip route show | grep -q '^192.168.1.0/24 dev br-lan' || { echo "the LAN's connected route is gone from main"; ip route; exit 1; }
 
 # --- the kill switch (K1–K6): armed while the VPN is meant to be on; the LAN has no internet while the tunnel is down ---
 say "kill switch on: the table is in the kernel, the snippet on disk, status says armed and not blocking"
