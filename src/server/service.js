@@ -413,6 +413,13 @@ function createService(opts = {}) {
   // Settings the LIVE tunnel was built from (null when disconnected) — see
   // ../main/settingsMeta.js.
   let appliedSettings = null;
+  // The saved servers the live connection dials (every hop, every target), and
+  // whether one of them was edited since it was built: the edit is only in the
+  // store until a reconnect — a pending change like a settings key ('servers'
+  // in pendingKeys), so a Connect on the live server is not "nothing to
+  // rebuild" while it waits (field report S3, fix 18).
+  let liveServerIds = new Set();
+  let serverEditPending = false;
   // The physical interface the LIVE connection's direct dials are bound to (see
   // doConnect); null when not under TUN. rebuildActiveConfig() reuses it rather
   // than asking the OS again — with the tunnel up, the default route IS the tunnel.
@@ -1511,6 +1518,8 @@ function createService(opts = {}) {
     }
     pinWatch.setLive(directServers(plan));
     appliedSettings = snapshotApplied(getSettings());
+    liveServerIds = planServerIds(plan);
+    serverEditPending = false;
 
     if (settings.systemProxy) {
       try {
@@ -1806,9 +1815,32 @@ function createService(opts = {}) {
     return false;
   }
 
-  /** Reconnect-relevant settings changed since the live tunnel was built. */
+  /** Reconnect-relevant settings changed since the live tunnel was built — and 'servers' for an edit of one it dials. */
   function pendingKeys() {
-    return pendingReconnectKeys(appliedSettings, getSettings());
+    const keys = pendingReconnectKeys(appliedSettings, getSettings());
+    if (appliedSettings && serverEditPending) keys.push('servers');
+    return keys;
+  }
+
+  /** The ids of every saved server a plan dials: each hop of a chain, every pool and advanced-routing target. */
+  function planServerIds(plan) {
+    const ids = new Set();
+    const add = (s) => { if (s && s.id) ids.add(s.id); };
+    const hops = (list) => { for (const s of list || []) add(s); };
+    const target = (tg) => {
+      if (!tg || tg === 'direct' || tg === 'block') return;
+      if (tg === 'chain') return hops(plan.chain);
+      if (String(tg).indexOf('chain:') === 0) return hops((plan.chainsById || {})[String(tg).slice('chain:'.length)]);
+      add((plan.serversById || {})[tg]);
+    };
+    switch (plan && plan.mode) {
+      case 'single': add(plan.server); break;
+      case 'chain': hops(plan.chain); break;
+      case 'pool': for (const e of plan.entries || []) if (e) target(e.target); break;
+      case 'advanced': for (const r of plan.rules || []) if (r) target(r.target); target(plan.def); break;
+      default: break;
+    }
+    return ids;
   }
 
   /**
@@ -2490,7 +2522,10 @@ function createService(opts = {}) {
       if (idx === -1) return { ok: false, error: 'not found', servers };
       servers[idx] = applyServerEdits(servers[idx], fields || {});
       store.set('servers', servers);
-      return { ok: true, server: servers[idx], servers };
+      // an edit of a server the live connection dials waits for a reconnect (see liveServerIds)
+      const live = !!appliedSettings && liveServerIds.has(id);
+      if (live) serverEditPending = true;
+      return { ok: true, server: servers[idx], servers, live, pendingReconnect: pendingKeys() };
     },
     'servers:delete': (id) => { const servers = store.get('servers', []).filter(s => s.id !== id); store.set('servers', servers); return servers; },
     'servers:clear': () => { store.set('servers', []); return []; },
