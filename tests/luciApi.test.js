@@ -162,6 +162,33 @@ test('remote_* and cloudflared_install are the remote api when it is mounted, an
   assert.deepEqual(await lazy.handle('cloudflared_install', {}), { accepted: true });
 });
 
+test('connect on the config that is already up answers {accepted, already: true} — the page can say so instead of nothing (L4)', async (t) => {
+  const s = H.start();
+  t.after(() => s.service.shutdown());
+  const api = createLuciApi({ service: s.service });
+  await s.service.actions.connect(SERVER.id);   // the whole connect, gateway up
+  assert.equal(s.service.connSnapshot().state, 'connected');
+  const starts = s.state.xray.starts.length;
+  assert.deepEqual(await api.handle('connect', { id: SERVER.id }), { accepted: true, already: true });
+  assert.equal(s.state.xray.starts.length, starts, 'nothing rebuilt');
+  // another config is a real switch: accepted, and no "already"
+  assert.deepEqual(await api.handle('connect', { id: SERVER_B.id }), { accepted: true });
+  await until(async () => (await api.handle('status')).serverId === SERVER_B.id && (await api.handle('status')).state === 'connected', 'the switch');
+  // a service whose connect never settles still answers at once
+  const slow = createLuciApi({ service: { actions: { connect: () => new Promise(() => {}) }, log() {} } });
+  assert.deepEqual(await slow.handle('connect', { id: 'x' }), { accepted: true });
+});
+
+test('a refused remote setting is logged at warn — "LuCI: <method> refused: <msg>" — so syslog has it, not only the page', async (t) => {
+  const s = H.start();
+  t.after(() => s.service.shutdown());
+  const msg = 'enabling needs the relay URL and the device token';
+  const api = createLuciApi({ service: s.service, remoteApi: { remote_set: () => { throw new Error(msg); } } });
+  assert.deepEqual(await api.handle('remote_set', { relay: { enabled: true } }), { error: msg });
+  assert.ok(s.logs.some((l) => l.level === 'warn' && l.line === 'LuCI: remote_set refused: ' + msg), JSON.stringify(s.logs));
+  assert.ok(s.syslog.some(([, text]) => text.includes('LuCI: remote_set refused: ' + msg)), 'warn reaches syslog: ' + JSON.stringify(s.syslog));
+});
+
 test('isLoopbackPeer: 127.0.0.1, ::1 and the v4-mapped loopback are local; a LAN address is not', () => {
   for (const a of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '127.0.0.53']) assert.equal(isLoopbackPeer(a), true, a);
   for (const a of ['192.168.1.10', '::ffff:192.168.1.10', '10.0.0.1', '', null, undefined, 'fe80::1']) assert.equal(isLoopbackPeer(a), false, String(a));

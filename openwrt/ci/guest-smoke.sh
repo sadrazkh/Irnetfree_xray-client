@@ -757,4 +757,56 @@ grep -qF '"45517f0a":"دسترسی از راه دور"' /tmp/luci-fa.js \
 	|| { echo "the Persian tab names are not in LuCI's fa catalog"; head -c 300 /tmp/luci-fa.js; echo; exit 1; }
 echo "LuCI's fa catalog has the IRNetFree tab names ($(grep -o '"[0-9a-f]\{8\}":' /tmp/luci-fa.js | wc -l) strings in all)"
 
+# ===========================================================================
+# v1.16.1 LuCI (fix/v1161-luci) — the owner's first install: «فعال» on Remote
+# access must be honest (a setting that cannot work is refused with the reason,
+# and the refusal is a warn line in syslog), the status carries what the
+# Overview's "Whole-network tunnel" row and the Cloudflare state line read,
+# and a Connect on the config that is already up answers already:true (the
+# page then says: press Reconnect to apply changes).
+# ===========================================================================
+say "LuCI v1.16.1: Remote access refuses an «Enabled» that cannot work, says why, and syslog has it"
+mark luci161
+r="$(lu remote_set '{"relay":{"enabled":true}}')"; echo "$r"
+echo "$r" | jq -e '.error == "enabling needs the relay URL and the device token"' >/dev/null \
+	|| { echo "remote_set took the relay enabled without its URL and device token"; exit 1; }
+if [ -x /usr/bin/cloudflared ]; then want='enabling needs the Cloudflare tunnel token'; else want='enabling needs cloudflared'; fi
+r="$(lu remote_set '{"cloudflared":{"enabled":true}}')"; echo "$r"
+echo "$r" | jq -e --arg w "$want" '.error | startswith($w)' >/dev/null \
+	|| { echo "remote_set took Cloudflare enabled (cloudflared $([ -x /usr/bin/cloudflared ] && echo installed || echo 'not installed'), no token) — expected: $want"; exit 1; }
+lu remote_get | jq -e '.relay.enabled == false and .cloudflared.enabled == false' >/dev/null || { echo "a refused remote_set saved something"; lu remote_get; exit 1; }
+i=0
+until since_mark | grep -q 'LuCI: remote_set refused: enabling needs the relay URL and the device token'; do
+	i=$((i+1))
+	[ $i -lt 10 ] || { echo "the refusal is not in syslog (warn)"; since_mark | tail -10; exit 1; }
+	sleep 1
+done
+since_mark | grep 'LuCI: remote_set refused' | tail -2
+r="$(lu remote_status)"; echo "$r" | jq -c '.cloudflared | {installed, running, enabled, tokenSet, applying, apply}'
+echo "$r" | jq -e '.cloudflared | (.enabled == false) and (.tokenSet == false) and (.applying == false) and has("apply")' >/dev/null \
+	|| { echo "remote_status does not say whether Cloudflare is meant to run (the page's «Enabled but not running» line)"; exit 1; }
+
+say "LuCI v1.16.1: the Overview's whole-network row (tun), and Connect on the live config answers already:true without a rebuild"
+r="$(lu connect "{\"id\":\"$ID\"}")"; echo "$r"
+echo "$r" | jq -e '.accepted == true and .already != true' >/dev/null || { echo "a connect from disconnected was not accepted as a real connect"; exit 1; }
+wait_back "LuCI v1.16.1 connect" 180
+lu status | jq -e '.state == "connected" and .tun == true' >/dev/null || { echo "status does not say tun:true while the gateway is up"; lu status | head -30; exit 1; }
+sleep 3   # the connect's own bookkeeping ends just after "connected"
+GW="$(gw_singbox | tr '\n' ' ')"; CORE="$(core_xray | tr '\n' ' ')"
+r="$(lu connect "{\"id\":\"$ID\"}")"; echo "$r"
+echo "$r" | jq -e '.accepted == true and .already == true' >/dev/null || { echo "a Connect on the config that is already up did not answer already:true"; exit 1; }
+sleep 5
+[ "$(gw_singbox | tr '\n' ' ')" = "$GW" ] && [ "$(core_xray | tr '\n' ' ')" = "$CORE" ] \
+	|| { echo "the Connect on the live config rebuilt the gateway (sing-box $GW -> $(gw_singbox | tr '\n' ' '), xray $CORE -> $(core_xray | tr '\n' ' '))"; exit 1; }
+gateway_up || { echo "the gateway is not up after the Connect on the live config"; exit 1; }
+echo "already:true — the same sing-box ($GW) and xray ($CORE), nothing rebuilt"
+lu disconnect | jq -e '.accepted == true' >/dev/null || { echo "disconnect through LuCI was not accepted"; exit 1; }
+i=0
+while ip link show IRNetFree >/dev/null 2>&1; do
+	i=$((i+1))
+	[ $i -lt 60 ] || { echo "the TUN device stayed after the disconnect"; exit 1; }
+	sleep 1
+done
+lu status | jq -e '.tun == false' >/dev/null || { echo "status says tun while disconnected"; exit 1; }
+
 say "SMOKE OK"
