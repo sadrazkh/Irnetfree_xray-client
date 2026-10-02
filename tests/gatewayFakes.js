@@ -87,7 +87,10 @@ function gatewayFactory(state) {
       lanStatus: async () => ({ device: 'br-lan', address: '192.168.1.1', mask: 24 }),
       which: () => true,
       verifyWaitMs: 200,
-      linkWaitMs: 50
+      linkWaitMs: 50,
+      // the service as root, dnsmasq as its own user (OpenWrt's) — `state.procUids` overrides; never this machine's /proc
+      uid: 0,
+      uidsOf: (name) => ((state.procUids && state.procUids[name]) || (name === 'dnsmasq' ? [453] : []))
     }));
     state.gateways.push(gw);
     return gw;

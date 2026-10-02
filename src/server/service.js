@@ -1684,10 +1684,14 @@ function createService(opts = {}) {
           // bound to the WAN device (configBuilder.bindDirectDials,
           // SO_BINDTODEVICE), which no route in sing-box's table matches. The
           // entry servers, WireGuard endpoints and pinned addresses stay off.
+          // The router's OWN lookups through them (the relay link's) still go
+          // around the tunnel — this process's UDP 53 only, by a rule for its
+          // user from the router itself (`ownDirect`, TunOpenwrt.layOwnDirect):
+          // the remote way in must not need the VPN.
           const resolverHoles = OPENWRT ? [] : resolverBypassIpsOf(config);
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverHoles, ...pinnedIps],
             tunAdapterDns,
-            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic });   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic
+            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] });   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
           if (tunApps) {
             send('log', {
@@ -3032,10 +3036,14 @@ function createService(opts = {}) {
   }
   /**
    * The in-country resolvers the running config dials direct — else the plain
-   * addresses of the setting. Since v1.16.1 (field report D3) they are NOT
-   * route-excluded on a router: the router's own query to them (the remote
-   * agent, cloudflared's dnsmasq drop-in) enters the tunnel there like every
-   * LAN device's, and is answered by the core's port-53 hijack.
+   * addresses of the setting. Since v1.16.1 (field report D3) they are no
+   * longer route-excluded on a router: a LAN device's query to them, and
+   * dnsmasq's upstream, ride the tunnel. The router's own control path still
+   * reaches them by the WAN: this process's UDP 53 by a rule of its own
+   * (TunOpenwrt.layOwnDirect — the relay agent's lookup), and a dnsmasq
+   * drop-in by binding its server line to directDevice() (cloudflared's edge
+   * discovery: `server=/…/<resolver>@<device>`). In global mode the config
+   * dials none: this is then the setting, and no rule is laid for it.
    */
   function directResolvers() {
     if (liveDiagnostics && liveDiagnostics.config) {
@@ -3043,6 +3051,29 @@ function createService(opts = {}) {
       if (live.length) return live;
     }
     return (getSettings().dnsDirect || []).map(x => String(x == null ? '' : x).trim()).filter(x => tcpNet.isIP(x));
+  }
+  /**
+   * The router's WAN device, for what must leave by it whatever the tunnel
+   * does — a dnsmasq server line bound to it (SO_BINDTODEVICE) skips table
+   * 2022 the way the core's bound `direct` dials do. The live connection's
+   * binding when there is one; else the main table's default route with the
+   * lowest metric (/proc/net/route: the main table only — sing-box's routes
+   * live in 2022), never our own tunnel; null when there is none (no WAN yet).
+   */
+  function directDevice() {
+    if (!OPENWRT) return null;
+    if (liveDirectInterface) return liveDirectInterface;
+    let text = '';
+    try { text = String(readProc('/proc/net/route')); } catch { return null; }
+    let best = null;
+    for (const line of text.split('\n').slice(1)) {
+      const f = line.trim().split(/\s+/);
+      if (f.length < 8 || f[1] !== '00000000' || f[7] !== '00000000') continue;   // a default route
+      if (!(parseInt(f[3], 16) & 1) || isOwnTunInterface(f[0])) continue;            // up, and not ours
+      const metric = parseInt(f[6], 10) || 0;
+      if (!best || metric < best.metric) best = { dev: f[0], metric };
+    }
+    return best ? best.dev : null;
   }
 
   /* ----------------------------- what the LuCI facade reads (luciApi.js) ----------------------------- */
@@ -3264,7 +3295,7 @@ function createService(opts = {}) {
     // what the LuCI facade (luciApi.js) reads and starts
     memInfo, traffic, configsForLuci, settingsForLuci, setSettingsForLuci, devices, logTail, diagnostics, testThroughTunnel, actions, log,
     // the remote control's destinations that never ride the tunnel (feat/remote's agent and cloudflared)
-    setRemoteBypass, remoteBypass, directResolvers
+    setRemoteBypass, remoteBypass, directResolvers, directDevice
   };
 }
 

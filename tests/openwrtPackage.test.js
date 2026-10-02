@@ -327,10 +327,31 @@ test('the QEMU smoke proves D3: the in-country resolvers stay in the whole-LAN t
   const at = src.indexOf('say "D3: bypass-ir');
   assert.notEqual(at, -1, 'the D3 section is gone');
   const d3 = src.slice(at, src.indexOf('say "SMOKE OK"'));
-  // from a LAN client, DNS and HTTPS to them; from the router, DNS (dnsmasq's upstream) — all dev IRNetFree
+  // from a LAN client, DNS and HTTPS to them; as dnsmasq's own user, DNS (its upstream) — all dev IRNetFree
   assert.match(d3, /ip route get "\$ip" from 192\.168\.1\.50 iif br-lan ipproto udp dport 53\)/);
   assert.match(d3, /ip route get "\$ip" from 192\.168\.1\.50 iif br-lan ipproto tcp dport 443\)/);
-  assert.match(d3, /ip route get "\$ip" ipproto udp dport 53\)/);
+  assert.match(d3, /ip route get "\$ip" ipproto udp dport 53 uid "\$DNSMASQ_UID"\)/);
+  assert.match(d3, /\[ "\$DNSMASQ_UID" != 0 \]/, 'dnsmasq runs as a user of its own, or the own-lookup rule would take it out too');
+  // …and the service's own DNS to them (the relay link's lookup) leaves by the WAN — UDP 53 of its own user only (review of v1.16.1)
+  assert.match(d3, /grep -F 'iif lo' \| grep -F 'uidrange 0-0' \| grep -qE 'ipproto \(udp\|17\) dport 53'/);
+  assert.match(d3, /ip route get "\$ip" ipproto udp dport 53 uid 0\)/);
+  assert.match(d3, /grep -q "dev \$WANDEV"/);
+  assert.match(d3, /ip route get "\$ip" ipproto tcp dport 443 uid 0\)/);
+  assert.match(d3, /ip route get "\$ip" ipproto udp dport 53 uid 65534\)/);
+  // real packets: root's query from the WAN address, nobody's (setuid before the socket) not
+  assert.match(d3, /if \(uid\) process\.setuid\(Number\(uid\)\);\nconst s = require\('dgram'\)\.createSocket\('udp4'\);/);
+  assert.match(d3, /node \/tmp\/irnf-own-dns\.js 9\.9\.9\.9 53532 65534/);
+  // cloudflared's edge discovery: the unbound lines refused (the control), then an SRV answer through the
+  // drop-in the service's own remote api writes, its lines bound to the WAN device
+  assert.match(d3, /cf\.dnsmasqDropIn\(\['9\.9\.9\.9', '149\.112\.112\.112'\]\);/);
+  assert.match(d3, /the UNBOUND lines answered SRV/);
+  assert.match(d3, /luci remote_set '\{"cloudflared":\{"enabled":true,/);
+  assert.match(d3, /grep -q "\^server=\/argotunnel\.com\/9\.9\.9\.9@\$WANDEV\\\$"/);
+  assert.match(d3, /cf\.dnsmasqDropIn\(\['9\.9\.9\.9', '149\.112\.112\.112'\], process\.argv\[1\]\)/);
+  assert.match(d3, /nslookup -type=SRV _v2-origintunneld\._tcp\.argotunnel\.com 127\.0\.0\.1/);
+  assert.match(d3, /luci remote_set '\{"cloudflared":\{"enabled":false\}\}'/);
+  // the own-lookup rules go with the gateway
+  assert.match(d3, /the own-lookup rules stayed after the D3 disconnect/);
   // sing-box's own exclusion list: the entry server stays, the resolvers do not
   assert.match(d3, /route_exclude_address \| index\("192\.168\.1\.1\/32"\)/);
   // the config: dns-internal → direct on :53, the direct dial bound to the WAN device; an Iranian name resolves; conntrack shows the WAN source

@@ -31,6 +31,73 @@ test('the dnsmasq drop-in names every edge domain for every direct resolver, and
   assert.equal(cf.DROP_IN, '/tmp/dnsmasq.d/irnetfree-cloudflared.conf');
 });
 
+test('the drop-in binds every server line to the WAN device when there is one — the in-country resolvers are in the whole-LAN tunnel since v1.16.1', () => {
+  // dnsmasq's query (its own user) to them would ride the tunnel, where the
+  // port-53 hijack refuses SRV — cloudflared's edge discovery — and the DoT
+  // fallback at 1.1.1.1:853 rides the tunnel too: dead with the VPN. `@<dev>`
+  // is SO_BINDTODEVICE, which skips table 2022 like the core's bound dials.
+  const lines = (t) => t.split('\n').filter((l) => l && !l.startsWith('#'));
+  assert.deepEqual(lines(cf.dnsmasqDropIn(['178.22.122.100', '2001:db8::53'], 'wan')), [
+    'server=/argotunnel.com/178.22.122.100@wan', 'server=/argotunnel.com/2001:db8::53@wan',
+    'server=/cftunnel.com/178.22.122.100@wan', 'server=/cftunnel.com/2001:db8::53@wan'
+  ]);
+  assert.deepEqual(lines(cf.dnsmasqDropIn(['178.22.122.100'], 'pppoe-wan')), ['server=/argotunnel.com/178.22.122.100@pppoe-wan', 'server=/cftunnel.com/178.22.122.100@pppoe-wan']);
+  // no device known (no WAN yet), or a name that is not one: the plain lines, as before
+  for (const dev of [null, '', 'bad name', 'a/b', 'x'.repeat(16)]) {
+    assert.deepEqual(lines(cf.dnsmasqDropIn(['178.22.122.100'], dev)), ['server=/argotunnel.com/178.22.122.100', 'server=/cftunnel.com/178.22.122.100'], String(dev));
+  }
+});
+
+test('apply on writes the drop-in bound to the device the service names (directDevice)', async () => {
+  const { run } = fakeRun();
+  const fsImpl = fakeFs({ '/usr/bin/cloudflared': '' });
+  const d = cf.createCloudflared({ run, fsImpl, service: { directResolvers: () => ['178.22.122.100'], directDevice: () => 'wan' } });
+  await d.apply({ enabled: true, token: 'x'.repeat(50) });
+  assert.equal(fsImpl.files[cf.DROP_IN], cf.dnsmasqDropIn(['178.22.122.100'], 'wan'));
+  assert.match(fsImpl.files[cf.DROP_IN], /^server=\/argotunnel\.com\/178\.22\.122\.100@wan$/m);
+});
+
+test('a drop-in written before the WAN had a device (a boot) is bound once one appears — rechecked while on, dnsmasq restarted only on a change, never after off', async () => {
+  const { run, calls } = fakeRun();
+  const fsImpl = fakeFs({ '/usr/bin/cloudflared': '' });
+  let dev = null;
+  let resolvers = ['178.22.122.100'];
+  const ticks = [];
+  const timers = { setInterval: (fn, ms) => { ticks.push({ fn, ms, live: true }); return ticks.length; }, clearInterval: (id) => { if (ticks[id - 1]) ticks[id - 1].live = false; } };
+  const logs = [];
+  const d = cf.createCloudflared({ run, fsImpl, timers, log: (l, lv) => logs.push(`${lv || 'info'}: ${l}`), service: { directResolvers: () => resolvers, directDevice: () => dev } });
+  await d.apply({ enabled: true, token: 'x'.repeat(50) });
+  assert.equal(fsImpl.files[cf.DROP_IN], cf.dnsmasqDropIn(['178.22.122.100']), 'no device yet: the plain lines');
+  assert.equal(ticks.length, 1);
+  assert.equal(ticks[0].ms, 60000);
+  const restarts = () => calls.filter((c) => c.cmd === '/etc/init.d/dnsmasq' && c.args[0] === 'restart').length;
+  const before = restarts();
+  await ticks[0].fn();
+  assert.equal(restarts(), before, 'nothing changed: dnsmasq is left alone');
+  dev = 'pppoe-wan';
+  await ticks[0].fn();
+  assert.equal(fsImpl.files[cf.DROP_IN], cf.dnsmasqDropIn(['178.22.122.100'], 'pppoe-wan'));
+  assert.equal(restarts(), before + 1);
+  assert.ok(logs.some((l) => /^info: cloudflared: edge discovery .*pppoe-wan/.test(l)), logs.join('\n'));
+  // the device unknown again for a moment (the WAN redialing): the binding stays
+  dev = null;
+  await ticks[0].fn();
+  assert.equal(fsImpl.files[cf.DROP_IN], cf.dnsmasqDropIn(['178.22.122.100'], 'pppoe-wan'));
+  assert.equal(restarts(), before + 1);
+  // the direct resolvers change (a routing mode with others): rewritten
+  resolvers = ['185.51.200.2'];
+  await ticks[0].fn();
+  assert.equal(fsImpl.files[cf.DROP_IN], cf.dnsmasqDropIn(['185.51.200.2'], 'pppoe-wan'));
+  assert.equal(restarts(), before + 2);
+  await d.apply({ enabled: false, token: '' });
+  assert.equal(ticks[0].live, false, 'off ends the recheck');
+  assert.ok(!(cf.DROP_IN in fsImpl.files));
+  // a second on does not leave two rechecks running
+  await d.apply({ enabled: true, token: 'x'.repeat(50) });
+  await d.apply({ enabled: true, token: 'x'.repeat(50) });
+  assert.equal(ticks.filter((x) => x.live).length, 1);
+});
+
 test('the UCI batch: enabled, the token, protocol http2, one commit; off clears enabled and keeps the token out', () => {
   const on = cf.uciBatch({ section: 'config', token: 'eyJhIjoiMTIzIn0', enabled: true });
   assert.equal(on, "set cloudflared.config.enabled='1'\nset cloudflared.config.token='eyJhIjoiMTIzIn0'\nset cloudflared.config.protocol='http2'\ncommit cloudflared\n");
@@ -100,7 +167,7 @@ test('apply on writes the drop-in into every dir dnsmasq reads (24.10 shape), ap
   assert.ok(!Object.keys(fsImpl.files).some((p) => p.endsWith('irnetfree-cloudflared.conf')), 'all gone');
 });
 
-test('apply on: the UCI batch on stdin (never argv), the drop-in written from the direct resolvers, the bypass set, dnsmasq reloaded, the service enabled and restarted', async () => {
+test('apply on: the UCI batch on stdin (never argv), the drop-in written from the direct resolvers, the bypass set, dnsmasq restarted (a reload reads no conf-dir), the service enabled and restarted', async () => {
   const { run, calls } = fakeRun({ 'uci -q show cloudflared': { code: 0, stdout: "cloudflared.config=cloudflared\ncloudflared.config.enabled='0'\n", stderr: '' } });
   const fsImpl = fakeFs({ '/usr/bin/cloudflared': '' });
   const bypass = [];
@@ -116,12 +183,16 @@ test('apply on: the UCI batch on stdin (never argv), the drop-in written from th
   assert.equal(fsImpl.files[cf.DROP_IN], cf.dnsmasqDropIn(['178.22.122.100']));
   assert.deepEqual(bypass, [['cloudflared', cf.bypassList()]]);
   const seq = calls.map((c) => c.cmd + ' ' + c.args.join(' '));
-  assert.ok(seq.includes('/etc/init.d/dnsmasq reload'));
+  // OpenWrt's dnsmasq reload is a SIGHUP, and dnsmasq re-reads no config on
+  // one: a new drop-in in its conf-dir waited for the next restart (review of v1.16.1)
+  assert.ok(seq.includes('/etc/init.d/dnsmasq restart'), seq.join('\n'));
+  assert.ok(!seq.includes('/etc/init.d/dnsmasq reload'));
+  assert.ok(seq.indexOf('/etc/init.d/dnsmasq restart') < seq.indexOf('/etc/init.d/cloudflared restart'), 'dnsmasq knows the edge domains before cloudflared asks');
   assert.ok(seq.indexOf('/etc/init.d/cloudflared enable') < seq.indexOf('/etc/init.d/cloudflared restart'));
   assert.ok(logs.some((l) => /http2/.test(l) && /direct/.test(l)), 'the log says http2 and direct only');
 });
 
-test('apply off: enabled=0 committed, the service stopped and disabled, the drop-in removed, dnsmasq reloaded, the bypass cleared', async () => {
+test('apply off: enabled=0 committed, the service stopped and disabled, the drop-in removed, dnsmasq restarted, the bypass cleared', async () => {
   const { run, calls } = fakeRun();
   const fsImpl = fakeFs({ '/usr/bin/cloudflared': '', [cf.DROP_IN]: 'old' });
   const bypass = [];
@@ -133,7 +204,7 @@ test('apply off: enabled=0 committed, the service stopped and disabled, the drop
   assert.ok(!(cf.DROP_IN in fsImpl.files), 'the drop-in is gone');
   assert.deepEqual(bypass, [['cloudflared', { hosts: [], cidrs: [] }]]);
   const seq = calls.map((c) => c.cmd + ' ' + c.args.join(' '));
-  assert.ok(seq.includes('/etc/init.d/cloudflared stop') && seq.includes('/etc/init.d/cloudflared disable') && seq.includes('/etc/init.d/dnsmasq reload'));
+  assert.ok(seq.includes('/etc/init.d/cloudflared stop') && seq.includes('/etc/init.d/cloudflared disable') && seq.includes('/etc/init.d/dnsmasq restart'), seq.join('\n'));
 });
 
 test('not installed: apply does nothing but say so; status says installed:false without running anything', async () => {
