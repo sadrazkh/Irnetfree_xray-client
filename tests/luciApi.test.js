@@ -221,3 +221,21 @@ test('server.js: the route checks the peer before anything else and compares the
   assert.match(src, /crypto\.timingSafeEqual/);
   assert.match(src, /createLuciApi\(\{ service, remoteApi/);
 });
+
+test('server.js mounts the remote api its start hook builds: remote_get answers the relay settings and status carries remote', async (t) => {
+  // feat/remote's start() runs inside listen's callback and returns the api; the
+  // facade reaches it through server.js's `remoteApi` getter — a start whose
+  // result is dropped leaves every Remote access call "remote not available"
+  const dir = child.tempDir();
+  const srv = await child.startServer(dir, ['--token', TOKEN]);
+  t.after(() => child.stop(srv, dir));
+  const post = (p, body) => child.request(srv.port, { method: 'POST', path: p, body, headers: { 'Content-Type': 'text/plain' } });
+  const rg = await post('/luci/remote_get', JSON.stringify({ token: TOKEN, arg: {} }));
+  assert.equal(rg.status, 200, rg.body);
+  assert.equal(rg.json.error, undefined, rg.body);
+  assert.equal(typeof rg.json.relay, 'object', rg.body);
+  assert.equal(rg.json.relay.tokenSet, false);
+  const st = await post('/luci/status', JSON.stringify({ token: TOKEN, arg: {} }));
+  assert.equal(st.status, 200, st.body);
+  assert.ok(st.json.remote && typeof st.json.remote === 'object', st.body);
+});
