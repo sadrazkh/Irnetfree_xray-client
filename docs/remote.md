@@ -129,7 +129,8 @@ Notes:
   `irnetfree-cloudflared.conf` in the dir dnsmasq reads — `/tmp/dnsmasq.d` on 23.05, `/tmp/dnsmasq.<instance>.d`
   on 24.10 — there only while the tunnel is enabled). Each line is bound to the WAN device,
   `server=/argotunnel.com/<resolver>@<WAN device>`: from v1.16.1 those resolvers are inside the whole-LAN
-  tunnel, whose DNS refuses the SRV lookup edge discovery is, and the binding (SO_BINDTODEVICE) takes dnsmasq's
+  tunnel, whose DNS does not answer the SRV lookup edge discovery is (the hijack refuses it, or the feed's older
+  cores leave it unanswered), and the binding (SO_BINDTODEVICE) takes dnsmasq's
   query for these two names out by the WAN in every routing mode. A drop-in written before the WAN had a device
   (at boot) is rewritten within a minute of one appearing. dnsmasq is restarted for every change of it: its
   reload re-reads no config.
@@ -303,7 +304,8 @@ IRNetFree به آن‌ها از راه WAN می‌رود — یک `ip rule` در
   کانفیگ حل می‌شوند (یک drop-in به نام `irnetfree-cloudflared.conf` در پوشه‌ای که dnsmasq می‌خواند — در 23.05
   `/tmp/dnsmasq.d`، در 24.10 `/tmp/dnsmasq.<instance>.d` — فقط تا وقتی تونل فعال است). هر خط به دستگاه WAN
   بسته شده، `server=/argotunnel.com/<رزولور>@<دستگاه WAN>`: از v1.16.1 این رزولورها داخل تونل کل شبکه‌اند که
-  DNSاش پرسش SRV کشف لبه را رد می‌کند، و این بستن (SO_BINDTODEVICE) پرسش dnsmasq برای این دو نام را در هر
+  DNSاش به پرسش SRV کشف لبه جواب نمی‌دهد (hijack آن را رد می‌کند، یا هسته‌های قدیمی‌تر فید بی‌جواب می‌گذارندش)، و
+  این بستن (SO_BINDTODEVICE) پرسش dnsmasq برای این دو نام را در هر
   حالت مسیریابی از راه WAN بیرون می‌برد. drop-in‌ای که پیش از داشتن دستگاه WAN نوشته شده (هنگام بوت) حداکثر یک
   دقیقه بعد از پیدا شدن آن دوباره نوشته می‌شود. با هر تغییرش dnsmasq ری‌استارت می‌شود: reload آن هیچ کانفیگی را
   دوباره نمی‌خواند.

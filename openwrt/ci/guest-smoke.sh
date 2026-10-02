@@ -932,7 +932,8 @@ say "D3: cloudflared's edge discovery (an SRV lookup through dnsmasq) — answer
 # dnsmasq (its own user) has no way around the tunnel but SO_BINDTODEVICE:
 # `server=/<domain>/<resolver>@<WAN device>` (cloudflared.dnsmasqDropIn, the
 # device from service.directDevice()). The control first: the same lines
-# unbound enter the tunnel, whose port-53 hijack refuses SRV.
+# unbound enter the tunnel, where SRV gets no answer (the hijack refuses it;
+# the feed's older cores leave it unanswered — ETIMEOUT on 24.10, run 37068874055).
 CF_JS=/usr/lib/irnetfree/src/server/remote/cloudflared
 cf_dirs() { node -e "process.stdout.write(require('$CF_JS').dnsmasqConfDirs().join(' '))"; }
 # cloudflared's own question, asked of dnsmasq the way it asks it (node's resolver: busybox nslookup's -type is optional)
