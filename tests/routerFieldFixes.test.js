@@ -52,6 +52,47 @@ test('fix 7: the strict leak guard on a router is sing-box’s strict_route — 
   assert.ok(!s.syslog.some(([, l]) => /tun2socks backend/.test(l)), 'nor in syslog');
 });
 
+/* ----------------------------- fix 9: a desktop backup restored on a router ----------------------------- */
+
+const ROUTER_KEPT = ['tunMode', 'tunBackend', 'tunAppMode', 'tunApps', 'systemProxy', 'launchAtLogin', 'leakGuard', 'blockUdpInProxyMode', 'autoConnect', 'lanBlockQuic', 'killSwitch'];
+const DESKTOP = {
+  tunMode: false, tunBackend: 'tun2socks', tunAppMode: 'exclude', tunApps: ['chrome.exe'], systemProxy: true, launchAtLogin: true,
+  leakGuard: 'off', blockUdpInProxyMode: true, autoConnect: false, lanBlockQuic: false, killSwitch: true,
+  routingMode: 'bypass-ir', dnsDirect: ['8.8.8.8', '1.1.1.1'], lang: 'en'
+};
+
+test('fix 9: a desktop backup restored on a router keeps the router’s own settings — and says so at warn, in English', async (t) => {
+  const s = H.start({ settings: { autoConnect: true, lanBlockQuic: true, killSwitch: false, leakGuard: 'standard', tunAppMode: 'off', tunApps: [], systemProxy: false, launchAtLogin: false, blockUdpInProxyMode: false, tunBackend: 'sing-box' } });
+  t.after(() => s.service.shutdown());
+  const before = await s.service.invoke('settings:get');
+  const bundle = { app: 'IRNetFree', format: 1, version: '1.16.0', servers: [], subscriptions: [], chains: [], pool: [], settings: DESKTOP, usage: {} };
+  const r = await s.service.invoke('backup:import', JSON.stringify(bundle));
+  assert.equal(r.ok, true);
+  const after = await s.service.invoke('settings:get');
+  for (const k of ROUTER_KEPT) assert.deepEqual(after[k], before[k], `${k} stays the router’s`);
+  assert.equal(after.routingMode, 'bypass-ir', 'the rest of the backup is restored');
+  assert.deepEqual(after.dnsDirect, ['8.8.8.8', '1.1.1.1']);
+  assert.deepEqual(r.kept, ROUTER_KEPT, 'the answer names what was kept — every one of them differed here (for the renderer’s own words)');
+  const warn = s.logs.filter(l => l.level === 'warn' && /^Backup restored on a router/.test(l.line));
+  assert.deepEqual(warn.map(l => l.line), ['Backup restored on a router: desktop-only settings were kept as the router needs them (TUN, system proxy, per-app routing, leak guard, connect at start, QUIC refusal, kill switch)']);
+  assert.ok(s.syslog.some(([, l]) => /\[warn\] Backup restored on a router/.test(l)), 'a warn reaches syslog');
+  // the store itself holds the router's values, not the desktop's under a forced overlay
+  const onDisk = JSON.parse(require('node:fs').readFileSync(require('node:path').join(s.dir, 'store.json'), 'utf8')).settings;
+  assert.equal(onDisk.tunMode, true);
+  assert.equal(onDisk.autoConnect, true);
+  assert.equal(onDisk.killSwitch, false);
+});
+
+test('fix 9: a router’s own backup restored on it changes none of those keys — and says nothing about them', async (t) => {
+  const s = H.start({ settings: { autoConnect: true, lanBlockQuic: true } });
+  t.after(() => s.service.shutdown());
+  const own = await s.service.invoke('backup:export');
+  const r = await s.service.invoke('backup:import', own);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.kept, []);
+  assert.ok(!s.logs.some(l => /Backup restored on a router/.test(l.line)), lines(s).join('\n'));
+});
+
 /* ----------------------------- fix 8: "the whole-network tunnel", not "the gateway" ----------------------------- */
 
 test('fix 8: no sing-box on the router — the refusal names the whole-network tunnel, in both languages', async (t) => {
