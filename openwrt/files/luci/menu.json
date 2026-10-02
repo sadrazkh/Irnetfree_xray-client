@@ -2,7 +2,11 @@
 	"admin/services/irnetfree": {
 		"title": "IRNetFree",
 		"order": 90,
-		"action": { "type": "view", "path": "irnetfree" },
+		"action": { "type": "firstchild" },
 		"depends": { "acl": [ "luci-app-irnetfree" ] }
-	}
+	},
+	"admin/services/irnetfree/overview": { "title": "Overview", "order": 10, "action": { "type": "view", "path": "irnetfree/overview" } },
+	"admin/services/irnetfree/settings": { "title": "Settings", "order": 20, "action": { "type": "view", "path": "irnetfree/settings" } },
+	"admin/services/irnetfree/remote": { "title": "Remote access", "order": 30, "action": { "type": "view", "path": "irnetfree/remote" } },
+	"admin/services/irnetfree/log": { "title": "Log", "order": 40, "action": { "type": "view", "path": "irnetfree/log" } }
 }
