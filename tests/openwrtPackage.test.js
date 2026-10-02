@@ -154,6 +154,11 @@ test('the kill switch ships: /etc/init.d/irnetfree-ks (START=19, before network 
   assert.match(src, /config_load irnetfree/);
   assert.match(src, /config_get data_dir main data_dir \/etc\/irnetfree/);
   assert.match(src, /\[ -s "\$f" \] \|\| return 0/, 'no snippet (disarmed): nothing to do');
+  // "Connect when the router starts" off in the store: the VPN stays off after this boot — the snippet is not loaded,
+  // so the LAN is not blocked for the minute before the service starts and disarms (review I1)
+  assert.match(src, /jsonfilter -i "\$store" -e '@\.settings\.autoConnect'/, 'the switch is read from store.json');
+  assert.match(src, /= "false" \]/, 'only an explicit off skips it (a store without the key is a router that connects at start)');
+  assert.ok(src.indexOf('jsonfilter') < src.indexOf('nft -c -f'), 'checked before the load');
   assert.match(src, /nft -c -f "\$f" 2>\/dev\/null && nft -f "\$f"/, 'validated first: a broken snippet loads nothing');
   assert.match(src, /^stop\(\) \{\n\tnft delete table inet irnetfree_ks 2>\/dev\/null\n\treturn 0\n\}/m, 'the escape hatch from SSH: lifts the block by hand');
   const prerm = control['./prerm'].data.toString();

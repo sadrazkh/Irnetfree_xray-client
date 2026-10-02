@@ -144,7 +144,9 @@ test('setBypassMacs while armed rewrites the kernel set and the snippet atomical
 function service(store = {}, extra = {}) {
   const fs = fakeFs();
   const { run, lines } = fakeRun(extra.answers || {});
-  const s = H.start(store, { killSwitch: ({ dataDir }) => createKillSwitch({ run, dataDir, fs, tmpDir: '/tmp' }) });
+  // the periodic re-verification runs fast here (30 ms; 30 s on the router)
+  const timing = Object.assign({}, H.fakes.deps(H.fakes.makeState()).timing, { ksVerifyMs: 30 }, extra.timing || {});
+  const s = H.start(store, { killSwitch: ({ dataDir }) => createKillSwitch({ run, dataDir, fs, tmpDir: '/tmp' }), timing });
   return Object.assign(s, { ks: { fs, lines } });
 }
 const armed = (s) => s.ks.lines.filter(l => l === 'nft -f /tmp/irnetfree-ks.nft').length;
@@ -249,6 +251,102 @@ test('K3: a new service started with the intent set and the setting on arms BEFO
   assert.equal(armed(off), 0);
   assert.equal(disarmed(off), 1, 'whatever a killed run or the boot script left is cleared');
   assert.ok(!off.logs.some(l => /Kill switch disarmed/.test(l.line)), 'silently: nothing was armed');
+});
+
+/* ----------------------------- review fixes (I1, I2) ----------------------------- */
+
+test('I1: at start the switch arms only when the boot connect will run — "Connect when the router starts" off, or an unbuildable saved connection, disarms (table and snippet)', async (t) => {
+  // killSwitch on, autoConnect OFF, an intent from a connect by hand before the reboot: per B1 the VPN stays off
+  // after this boot — nothing to block for; the boot script's table and the snippet go
+  const off = service({ connectIntent: SERVER.id, settings: { killSwitch: true, autoConnect: false } });
+  t.after(() => off.service.shutdown());
+  await until(() => off.logs.some(l => /Kill switch: not armed at start/.test(l.line)), 'the start verdict');
+  assert.equal(armed(off), 0, 'never armed');
+  assert.ok(disarmed(off) >= 1, 'the table a boot script may have replayed is cleared');
+  assert.ok(!snippetThere(off));
+  assert.ok(off.logs.some(l => /"Connect when the router starts" is off/.test(l.line)), JSON.stringify(off.logs.map(l => l.line)));
+  assert.deepEqual(off.service.connSnapshot().killSwitch, { enabled: true, armed: false, blocking: false });
+  await sleep(100);
+  assert.equal(off.state.xray.starts.length, 0, 'and nothing connects');
+  // …a later connect by hand arms as always
+  await off.service.invoke('connect', SERVER.id);
+  assert.equal(armed(off), 1);
+
+  // autoConnect on but the saved connection cannot be built (deleted, or replaced by a subscription refresh)
+  const gone = service({ connectIntent: 'srv-deleted', settings: { killSwitch: true, autoConnect: true } });
+  t.after(() => gone.service.shutdown());
+  await until(() => gone.logs.some(l => /Kill switch: not armed — the saved connection cannot be built/.test(l.line)), 'the boot-nothing verdict');
+  assert.equal(armed(gone), 0);
+  assert.ok(!snippetThere(gone));
+  assert.deepEqual(gone.service.connSnapshot().killSwitch, { enabled: true, armed: false, blocking: false });
+  assert.ok(gone.logs.some(l => /Auto-connect: the last connection \(srv-deleted\) cannot be built/.test(l.line)));
+
+  // the case that must still arm: autoConnect on, a buildable intent — before the boot connect
+  const on = service({ connectIntent: SERVER.id, settings: { killSwitch: true, autoConnect: true } });
+  t.after(() => on.service.shutdown());
+  await until(() => connectedCount(on) === 1, 'the boot connect');
+  assert.equal(armed(on), 1);
+  assert.ok(on.logs.findIndex(l => /Kill switch armed \(start\)/.test(l.line)) < on.logs.findIndex(l => /Gateway up on/.test(l.line)));
+});
+
+test('I2: the kill switch module can ask the kernel whether its table is there, and counts as armed only while it is', async () => {
+  // a kernel: `nft -f` puts the table there, `nft delete table` takes it, a flush (the test) takes it behind our back
+  const kernel = { table: false };
+  const { ks, lines } = make({
+    '^nft list table inet irnetfree_ks': () => (kernel.table ? 'table inet irnetfree_ks {\n}' : new Error('Error: No such file or directory\nlist table inet irnetfree_ks')),
+    '^nft -f ': () => { kernel.table = true; return ''; },
+    '^nft delete table': () => { kernel.table = false; return ''; }
+  });
+  assert.equal(await ks.check(), false, 'nothing armed, nothing there');
+  assert.equal(ks.isArmed(), false);
+  await ks.arm({ bypassMacs: ['aa:bb:cc:dd:ee:01'] });
+  assert.equal(await ks.check(), true);
+  assert.equal(ks.isArmed(), true);
+  kernel.table = false;   // a firewall flush emptied the ruleset
+  assert.equal(ks.isArmed(), true, 'not asked yet: still believed armed');
+  assert.equal(await ks.check(), false);
+  assert.equal(ks.isArmed(), false, 'armed in memory, gone in the kernel: not armed');
+  assert.equal(await ks.ensure(), true, 're-armed with what it had');
+  assert.equal(ks.isArmed(), true);
+  assert.equal(kernel.table, true);
+  assert.deepEqual(ks.bypassMacs(), ['aa:bb:cc:dd:ee:01']);
+  assert.equal(lines.filter(l => l === 'nft -f /tmp/irnetfree-ks.nft').length, 2);
+  assert.equal(await ks.ensure(), false, 'there: nothing to do');
+  // ensure() with nothing armed is nothing
+  await ks.disarm();
+  assert.equal(await ks.ensure(), false);
+  assert.equal(lines.filter(l => l === 'nft -f /tmp/irnetfree-ks.nft').length, 2);
+  assert.equal(ks.isArmed(), false);
+});
+
+test('I2: while armed the service re-verifies the table and re-arms when a flush took it — status never says armed while the kernel has no table', async (t) => {
+  const answers = { gone: false, refuse: false };
+  const s = service({ settings: { killSwitch: true } }, {
+    answers: {
+      '^nft list table inet irnetfree_ks': () => (answers.gone ? new Error('Error: No such file or directory') : ''),
+      '^nft -f ': () => (answers.refuse ? new Error('nft: busy') : '')
+    }
+  });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(armed(s), 1);
+  assert.deepEqual(s.service.connSnapshot().killSwitch, { enabled: true, armed: true, blocking: false });
+  // the kernel's ruleset is flushed (fw4 stop / flush, a package's postinst, a hand `nft flush ruleset`)
+  answers.gone = true; answers.refuse = true;
+  await until(() => s.logs.some(l => l.level === 'warn' && /Kill switch: the table is gone from the kernel/.test(l.line)), 'the periodic check noticing', 3000);
+  await until(() => s.service.connSnapshot().killSwitch.armed === false, 'not armed while the re-arm is refused', 3000);
+  assert.ok(s.logs.some(l => l.level === 'error' && /Kill switch: verify failed: nft: busy/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+  assert.ok(s.events.some(([ch, p]) => ch === 'killswitch' && p.armed === false), 'the clients were told');
+  // nft takes it again: re-armed by the next check, with the excluded devices it had
+  answers.gone = false; answers.refuse = false;
+  await until(() => s.service.connSnapshot().killSwitch.armed === true, 're-armed', 3000);
+  assert.ok(armed(s) >= 2, 'nft -f ran again');
+  assert.ok(s.logs.some(l => /Kill switch armed \(verify\)/.test(l.line)));
+  // the user's disconnect still disarms and the checks stop asking
+  await s.service.invoke('disconnect');
+  const asked = s.ks.lines.filter(l => l === 'nft list table inet irnetfree_ks').length;
+  await sleep(150);
+  assert.equal(s.ks.lines.filter(l => l === 'nft list table inet irnetfree_ks').length, asked, 'nothing to verify when nothing is wanted');
 });
 
 test('K3: an arm that fails (nft refuses the snippet) is logged, the connect goes on, and the switch reports not armed', async (t) => {
