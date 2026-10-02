@@ -81,12 +81,19 @@ function cleanSettings(s) {
   return out;
 }
 
-function exportBundle({ version, store, usage }) {
+/**
+ * `flavor`: where the backup was made, when that matters on restore — the
+ * router writes 'openwrt', so its own backup restored after a reset brings
+ * back its router-only settings, which a desktop's must not touch (`keep`
+ * in importBundle). Absent on a desktop backup, as it always was.
+ */
+function exportBundle({ version, store, usage, flavor }) {
   const s = store || {};
   return {
     app: 'IRNetFree',
     format: 1,
     version: version || '',
+    ...(flavor ? { flavor: String(flavor) } : {}),
     exportedAt: new Date().toISOString(),
     servers: Array.isArray(s.servers) ? s.servers : [],
     subscriptions: Array.isArray(s.subscriptions) ? s.subscriptions : [],

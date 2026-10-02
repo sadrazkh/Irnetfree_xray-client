@@ -93,6 +93,35 @@ test('fix 9: a router’s own backup restored on it changes none of those keys �
   assert.ok(!s.logs.some(l => /Backup restored on a router/.test(l.line)), lines(s).join('\n'));
 });
 
+test('fix 9: a router’s backup restored on a reset router brings its kill switch and connect-at-start back — the keep list is for desktop backups', async (t) => {
+  // The usual reason to restore on a router: it was reset or re-flashed, and
+  // the fresh defaults (kill switch off, connect at start on) must give way to
+  // what the owner had. Keeping them silently dropped his kill switch, and the
+  // warn line blamed a desktop file that did not exist (review of v1.16.1).
+  const old = H.start({ settings: { killSwitch: true, autoConnect: false, lanBlockQuic: false, routingMode: 'bypass-ir' } });
+  t.after(() => old.service.shutdown());
+  const text = await old.service.invoke('backup:export');
+  assert.equal(JSON.parse(text).flavor, 'openwrt', 'a router’s backup says where it was made');
+  const fresh = H.start({ settings: { killSwitch: false, autoConnect: true, lanBlockQuic: true, routingMode: 'global' } });
+  t.after(() => fresh.service.shutdown());
+  const r = await fresh.service.invoke('backup:import', text);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.kept, []);
+  const after = await fresh.service.invoke('settings:get');
+  assert.equal(after.killSwitch, true);
+  assert.equal(after.autoConnect, false);
+  assert.equal(after.lanBlockQuic, false);
+  assert.equal(after.routingMode, 'bypass-ir');
+  assert.ok(!fresh.logs.some(l => /Backup restored on a router/.test(l.line)), lines(fresh).join('\n'));
+  // a bundle with no mark (a desktop's, or one from before the mark) is a desktop backup
+  const unmarked = Object.assign(JSON.parse(text), { flavor: undefined });
+  const fresh2 = H.start({ settings: { killSwitch: false, autoConnect: true, lanBlockQuic: true } });
+  t.after(() => fresh2.service.shutdown());
+  const r2 = await fresh2.service.invoke('backup:import', JSON.stringify(unmarked));
+  assert.deepEqual(r2.kept.sort(), ['autoConnect', 'killSwitch', 'lanBlockQuic']);
+  assert.equal((await fresh2.service.invoke('settings:get')).killSwitch, false);
+});
+
 /* ----------------------------- fix 18: a server edit is not live until a reconnect ----------------------------- */
 
 test('fix 18: editing the live server is a pending change — reported, and a Connect on it rebuilds instead of "already connected"', async (t) => {

@@ -2948,7 +2948,8 @@ function createService(opts = {}) {
     'backup:export': () => JSON.stringify(exportBundle({
       version: appVersion,
       store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), settings: getSettings() },
-      usage: usage ? usage.totals : {}
+      usage: usage ? usage.totals : {},
+      flavor: OPENWRT ? 'openwrt' : null   // a router's own backup brings its router-only settings back (backup:import)
     }), null, 2),
     'backup:import': (text) => {
       let bundle;
@@ -2958,7 +2959,10 @@ function createService(opts = {}) {
         r = importBundle(bundle, {
           servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
           chains: getChains(), pool: getPool(), settings: getSettings(), usage: usage ? usage.totals : {}
-        }, { keep: OPENWRT ? ROUTER_KEEPS_ON_IMPORT : [] });
+        // the keep list is for a backup made elsewhere (a desktop's, or one
+        // from before the mark): the router's own, restored after a reset or
+        // a re-flash, is exactly what should bring its kill switch back
+        }, { keep: OPENWRT && !(bundle && bundle.flavor === 'openwrt') ? ROUTER_KEEPS_ON_IMPORT : [] });
       } catch (err) { return { ok: false, error: err.message }; }
       store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, settings: r.next.settings });
       if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
