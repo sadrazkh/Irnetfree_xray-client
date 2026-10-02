@@ -181,3 +181,20 @@ test('every reconnect key has a human-readable name in both languages', () => {
     assert.equal(hits, 2, `set.${key} must be defined in both fa and en (found ${hits})`);
   }
 });
+
+test('every key pendingKeys() can add beyond the settings has a name in both languages too', () => {
+  // 'servers' (an edit of a server the live connection dials, v1.16.1 fix 18)
+  // is no setting, so the loop above never saw it — and the apply banner and
+  // dialog showed the raw "set.servers" in both languages.
+  const i18n = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'i18n.js'), 'utf8');
+  for (const file of ['src/server/service.js', 'src/main/main.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    const body = src.slice(src.indexOf('function pendingKeys() {'), src.indexOf('function planServerIds(plan) {'));
+    const extra = [...body.matchAll(/keys\.push\('([A-Za-z]+)'\)/g)].map(m => m[1]);
+    assert.deepEqual(extra, ['servers'], `${file}: the extra keys pendingKeys() reports`);
+    for (const key of extra) {
+      const hits = i18n.split(`'set.${key}':`).length - 1;
+      assert.equal(hits, 2, `set.${key} must be defined in both fa and en (found ${hits})`);
+    }
+  }
+});
