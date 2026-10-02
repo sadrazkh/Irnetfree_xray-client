@@ -335,7 +335,7 @@ test('S7: diagnostics() carries the status, the versions, MemAvailable, the RSS,
   assert.match(text, /^status: \{"state":"connected"/m);
   assert.match(text, /^settings: \{.*"killSwitch":false/m);
   assert.match(text, /^store: \{"servers":2/m);
-  assert.match(text, /^cores: \{"xray":"26\.1\.1"/m);
+  assert.match(text, /^cores: \{"xray":"26\.3\.27"/m);   // the fake answers a current core (gatewayFakes)
   assert.match(text, /^MemAvailable: 123456 kB$/m);
   assert.match(text, /^RSS: node=\d+ kB, xray=\d+ kB, sing-box=\d+ kB$/m);
   assert.match(text, /^gateway: up, core: running, kill switch: \{/m);

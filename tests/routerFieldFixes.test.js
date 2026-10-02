@@ -145,6 +145,74 @@ test('fix 18: a hop of the live chain counts as the live connection; nothing is 
   assert.deepEqual(await s.service.invoke('settings:pending'), [], 'gone with the connection');
 });
 
+/* ----------------------------- fix 20: refusals the A7 used to hide ----------------------------- */
+
+test('fix 20: the router gives the core’s config check ~30 s before it counts as unverified', async (t) => {
+  let given = null;
+  const s = H.start({}, { xray: (o) => { given = o; return H.fakes.deps(H.fakes.makeState()).xray(o); } });
+  t.after(() => s.service.shutdown());
+  assert.equal(given.testTimeoutMs, 30000);
+});
+
+/** deps.waitForLocalPort for a core that dies while the gateway waits for its SOCKS port — the first time; later cores bind. */
+function dyingCore(s, lines) {
+  let calls = 0;
+  return async (port, ms, opts) => {
+    if (++calls > 1) return true;
+    s.state.xray.crash(lines);
+    const deadline = Date.now() + Math.min(ms, 2000);
+    while (Date.now() < deadline && !(opts && typeof opts.stop === 'function' && opts.stop())) await sleep(5);
+    return false;
+  };
+}
+
+test('fix 20: a core that exits while the gateway waits for its port fails the connect with the core’s own last lines — no tunnel into a dead port', async (t) => {
+  const s = H.start({}, { waitForLocalPort: (...a) => wait(...a) });
+  const wait = dyingCore(s, ['2026/10/02 10:00:00 [Warning] core: Xray 26.3.27 started', 'panic: runtime error: index out of range [3] with length 3']);
+  t.after(() => s.service.shutdown());
+  const t0 = Date.now();
+  await assert.rejects(s.service.invoke('connect', SERVER.id), (e) => {
+    assert.match(e.message, /^The core exited before it opened 127\.0\.0\.1:47808 — the whole-network tunnel was not started\. Its last lines: .*panic: runtime error: index out of range/);
+    return true;
+  });
+  assert.ok(Date.now() - t0 < 1500, 'aborted when the core went, not after the 20 s wait');
+  assert.equal(s.state.events.includes('gateway:start'), false, 'no gateway routing the LAN into a SOCKS port nobody will open');
+  assert.ok(!s.logs.some(l => /starting the gateway anyway/.test(l.line)), lines(s).join('\n'));
+  assert.equal(s.service.connSnapshot().state, 'error');
+  assert.equal((await s.service.invoke('app:init')).activeServerId, null);
+  await sleep(50);
+  assert.equal(s.state.xray.starts.length, 1, 'a connect by hand that failed is not rebuilt behind the user’s back');
+});
+
+test('fix 20: the same abort in Persian, and a core that printed nothing still says so', async (t) => {
+  const s = H.start({ settings: { lang: 'fa' } }, { waitForLocalPort: (...a) => wait(...a) });
+  const wait = dyingCore(s, []);
+  t.after(() => s.service.shutdown());
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /^Error: هسته پیش از باز کردن 127\.0\.0\.1:47808 بسته شد — تونل کل شبکه راه‌اندازی نشد\. آخرین خطوط آن: \(چیزی چاپ نکرد\)$/);
+});
+
+test('fix 20: a finalmask server the official core refuses, with no Xray-PattN installed, says what to install — in both languages', async (t) => {
+  for (const [lang, re] of [
+    ['en', /^This server needs Xray-PattN — install it under Settings → Required files \(the official core refuses it: infra\/conf: LengthMin can't be 0\)$/],
+    ['fa', /^این سرور به Xray-PattN نیاز دارد — از تنظیمات ← فایل‌های موردنیاز نصبش کن \(هستهٔ رسمی آن را رد می‌کند: infra\/conf: LengthMin can't be 0\)$/]
+  ]) {
+    const s = H.start({ settings: { lang } });
+    t.after(() => s.service.shutdown());
+    s.state.check = { ok: false, error: 'infra/conf: LengthMin can\'t be 0', plaintextRejected: false, pattnNeeded: true };
+    await assert.rejects(s.service.invoke('connect', SERVER.id), (e) => re.test(e.message) || assert.fail(e.message));
+    assert.equal(s.state.xray.starts.length, 0, 'nothing started');
+    assert.ok(s.logs.some(l => l.level === 'error' && /Config rejected by xray: infra\/conf: LengthMin/.test(l.line)), 'the core’s own words stay in the log');
+  }
+});
+
+test('fix 20: a core that is still running when the 20 s are up is still given the gateway (a slow bind is not a death)', async (t) => {
+  const s = H.start({}, { waitForLocalPort: async () => false });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(connectedCount(s), 1);
+  assert.ok(s.logs.some(l => l.level === 'warn' && /has not opened 127\.0\.0\.1:47808 after 20s — starting the gateway anyway/.test(l.line)));
+});
+
 /* ----------------------------- fix 8: "the whole-network tunnel", not "the gateway" ----------------------------- */
 
 test('fix 8: no sing-box on the router — the refusal names the whole-network tunnel, in both languages', async (t) => {

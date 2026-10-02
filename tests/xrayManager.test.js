@@ -125,6 +125,44 @@ test('validateWithFallback reports a plaintext rejection when the fork is not in
   });
 });
 
+// A patterniha subscription server: its ClientHello fragmenter lives in the
+// fork's `finalmask`, which the official 26.3.27 refuses — measured on all 44
+// of the owner's finalmask servers (field report S1, fix 20).
+const FINALMASK_CFG = {
+  inbounds: [],
+  outbounds: [{ tag: 'proxy', protocol: 'vless', streamSettings: { network: 'tcp', finalmask: { tcp: [{ type: 'fragment', settings: { packets: 'tlshello', length: '0-0' } }] } } }, { tag: 'direct', protocol: 'freedom' }]
+};
+const LENGTH_MIN = 'infra/conf: LengthMin can\'t be 0';
+
+test('validateWithFallback: a finalmask config the official core refuses runs on the fork when it is installed', async () => {
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm, dir, logs) => {
+    const calls = [];
+    xm.validate = async (cfg, id) => { calls.push(id); return id === 'xray' ? { ok: false, error: LENGTH_MIN } : { ok: true }; };
+    const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
+    assert.deepEqual(r, { ok: true, engine: 'xray-pattn', fellBack: true });
+    assert.deepEqual(calls, ['xray', 'xray-pattn']);
+    assert.match(logs.at(-1), /finalmask.*Xray-PattN/);
+  });
+});
+
+test('validateWithFallback: …and says the fork is needed when it is not', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    xm.validate = async () => ({ ok: false, error: LENGTH_MIN });
+    const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
+    assert.deepEqual(r, { ok: false, engine: 'xray', error: LENGTH_MIN, plaintextRejected: false, pattnNeeded: true });
+  });
+});
+
+test('validateWithFallback: the same words from a config with no finalmask are its own error (a freedom fragment), not a fork question', async () => {
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
+    const calls = [];
+    xm.validate = async (cfg, id) => { calls.push(id); return { ok: false, error: LENGTH_MIN }; };
+    const plain = { inbounds: [], outbounds: [{ tag: 'proxy', protocol: 'vless', streamSettings: { network: 'tcp' } }] };
+    assert.deepEqual(await xm.validateWithFallback(plain, 'xray'), { ok: false, engine: 'xray', error: LENGTH_MIN, plaintextRejected: false });
+    assert.deepEqual(calls, ['xray']);
+  });
+});
+
 test('validateWithFallback passes other errors through untouched', async () => {
   await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
     xm.validate = async () => ({ ok: false, error: 'infra/conf: unknown transport' });
@@ -275,6 +313,41 @@ test('validate: an old core that does not know -test passes UNVERIFIED and is no
   });
 });
 
+test('validate: the -test deadline is the caller’s (6 s by default) — a run past it passes UNVERIFIED and says so at warn', async () => {
+  // The router asks for ~30 s: on a Cortex-A7 a -test past 6 s counted as a
+  // pass, and a config the core refuses then reached start() — whose 1.2 s
+  // grace hides a slow refusal (field report S2, fix 20).
+  assert.equal(new XrayManager({ dataDir: os.tmpdir() }).testTimeoutMs, 6000);
+  assert.equal(new XrayManager({ dataDir: os.tmpdir(), testTimeoutMs: 30000 }).testTimeoutMs, 30000);
+  await withBin([exe('xray')], async (xm) => {
+    const logs = [];
+    xm.onLog = (line, level) => logs.push([level, line]);
+    xm.testTimeoutMs = 40;
+    let killed = 0;
+    fakeSpawn = () => { const p = stubChild(); p.kill = () => { killed++; }; return p; };   // never exits by itself
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      const t0 = Date.now();
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true, unverified: true });
+      assert.ok(Date.now() - t0 < 3000, 'the deadline given, not the default');
+      assert.equal(killed, 1, 'the run is ended');
+      assert.ok(logs.some(([lvl, l]) => lvl === 'warn' && /did not finish its config check within 0\.04 s — the config was not verified/.test(l)), JSON.stringify(logs));
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: an old core that does not know -test passes UNVERIFIED with a warn line too', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const logs = [];
+    xm.onLog = (line, level) => logs.push([level, line]);
+    fakeSpawn = () => { const p = stubChild(); setImmediate(() => { p.stderr.emit('data', Buffer.from('flag provided but not defined: -test')); p.emit('exit', 2); }); return p; };
+    try {
+      assert.deepEqual(await xm.validate({ inbounds: [] }, 'xray'), { ok: true, unverified: true });
+      assert.ok(logs.some(([lvl, l]) => lvl === 'warn' && /does not know -test — the config was not verified/.test(l)), JSON.stringify(logs));
+    } finally { fakeSpawn = null; }
+  });
+});
+
 test('validate: the key follows the core file — a replaced binary is checked again', async () => {
   await withBin([exe('xray')], async (xm, dir) => {
     const before = spawns.length;
@@ -332,6 +405,32 @@ test('a late exit or error from an old core cannot stop its replacement', async 
       assert.equal(xm.proc, current);
       assert.equal(xm.running, true);
       assert.deepEqual(statuses, [], 'the replacement must not be reported stopped');
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('recentLines: the last lines the core that was started last printed — for a core that dies after its grace period', async () => {
+  // The router's connect waits ~9 s for the SOCKS port after start() returned;
+  // a core that dies in that window must be reported with its own words
+  // (field report fix 20), not as "has not opened … starting the gateway anyway".
+  await withBin([exe('xray')], async (xm) => {
+    const first = stubChild();
+    const second = stubChild();
+    let n = 0;
+    fakeSpawn = () => (n++ === 0 ? first : second);
+    try {
+      assert.deepEqual(xm.recentLines(), [], 'nothing started yet');
+      const a = xm.start({ inbounds: [] }, 'xray');
+      first.stdout.emit('data', Buffer.from('Xray 26.3.27 started\n'));
+      await a;
+      first.stderr.emit('data', Buffer.from('\n  line one  \r\nline two\nline three\n'));
+      assert.deepEqual(xm.recentLines(2), ['line two', 'line three']);
+      first.emit('exit', 2, null);
+      assert.deepEqual(xm.recentLines(), ['Xray 26.3.27 started', 'line one', 'line two', 'line three'], 'still there once it has exited');
+      const b = xm.start({ inbounds: [] }, 'xray');
+      first.stdout.emit('data', Buffer.from('a late line from the old core\n'));
+      await b;
+      assert.deepEqual(xm.recentLines(), [], 'a new start begins empty, and the old core’s late output is not mixed in');
     } finally { fakeSpawn = null; }
   });
 });

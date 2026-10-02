@@ -58,9 +58,14 @@ const { createKillSwitch } = require('../main/killSwitchOpenwrt');
 const { createLogRing } = require('./logRing');
 const tcpNet = require('net');
 
-/** Resolves true once 127.0.0.1:port accepts a TCP connection, false at the deadline. */
-function waitForLocalPort(port, ms) {
+/**
+ * Resolves true once 127.0.0.1:port accepts a TCP connection, false at the
+ * deadline — or as soon as `opts.stop()` says there is no point (the core
+ * that would open it is gone).
+ */
+function waitForLocalPort(port, ms, opts = {}) {
   const deadline = Date.now() + ms;
+  const stop = typeof opts.stop === 'function' ? opts.stop : () => false;
   const tryOnce = () => new Promise((resolve) => {
     const s = tcpNet.connect({ host: '127.0.0.1', port, timeout: 1000 });
     s.once('connect', () => { s.destroy(); resolve(true); });
@@ -70,7 +75,7 @@ function waitForLocalPort(port, ms) {
   return (async () => {
     for (;;) {
       if (await tryOnce()) return true;
-      if (Date.now() >= deadline) return false;
+      if (Date.now() >= deadline || stop()) return false;
       await new Promise(r => setTimeout(r, 300));
     }
   })();
@@ -555,6 +560,9 @@ function createService(opts = {}) {
   const xrayOpts = {
     binPath: store.get('xrayPath', null),
     dataDir,
+    // a Cortex-A7 can take far longer than 6 s over `-test`: past the
+    // deadline a config counts as unverified (fix 20) — give it room there
+    testTimeoutMs: OPENWRT ? 30000 : undefined,
     extraBinDirs: [userBinDir, ...systemBinDirs],
     onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
     onStatus: (state, info) => {
@@ -1454,6 +1462,14 @@ function createService(opts = {}) {
     if (stale()) return abandoned;
     if (!check.ok) {
       send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
+      // The fork's finalmask, refused by the official core, and no fork to
+      // fall back to (xrayManager.validateWithFallback): what to install is
+      // the message — the renderer offers the download on the product name.
+      if (check.pattnNeeded) {
+        throw new Error(settings.lang === 'en'
+          ? `This server needs Xray-PattN — install it under Settings → Required files (the official core refuses it: ${check.error})`
+          : `این سرور به Xray-PattN نیاز دارد — از تنظیمات ← فایل‌های موردنیاز نصبش کن (هستهٔ رسمی آن را رد می‌کند: ${check.error})`);
+      }
       // The official core refuses plaintext VLESS/Trojan to public addresses and the
       // fork that accepts them is not installed — say so, the renderer offers the download.
       const hint = check.plaintextRejected
@@ -1602,10 +1618,15 @@ function createService(opts = {}) {
           // A slow router: the core takes seconds to bind its SOCKS inbound after
           // start() returns (nine on the AC-1304), and a TUN that comes up first
           // answers every LAN connection "connection refused" until then.
+          // A core that DIED meanwhile is a failed connect, said with its own
+          // last lines — the gateway would only route the whole LAN into a
+          // port nobody will ever open, then rebuild, forever (fix 20). One
+          // still running after the 20 s may just be slow: it gets the gateway.
           if (OPENWRT) {
-            const bound = await waitPort(settings.socksPort, 20000);
+            const bound = await waitCorePort(settings.socksPort, 20000, ownCore);
             if (stale()) return giveWay();
-            if (!bound) send('log', { line: `The core has not opened 127.0.0.1:${settings.socksPort} after 20s — starting the gateway anyway`, level: 'warn' });
+            if (bound === 'exited') throw coreGoneError(settings);
+            if (bound !== 'bound') send('log', { line: `The core has not opened 127.0.0.1:${settings.socksPort} after 20s — starting the gateway anyway`, level: 'warn' });
             // the remote control's destinations, laid with the gateway (setRemoteBypass)
             if (typeof myTun.setBypass === 'function') await myTun.setBypass(remoteBypass().cidrs);
           }
@@ -1625,7 +1646,7 @@ function createService(opts = {}) {
         }
         } catch (e) { tunError = e.message;
         // (the router's failure path is abortGateway, below — never this macOS one)
-        if (!OPENWRT && process.platform === 'darwin' && myTun.active) throw e; send('log', { line: 'TUN start failed: ' + e.message, level: 'error' }); }
+        if (!OPENWRT && process.platform === 'darwin' && myTun.active) throw e; send('log', { line: (e && e.coreGone ? '' : 'TUN start failed: ') + e.message, level: 'error' }); }
       }
       // The leak guard (standard): the TUN adapter's own resolver is ours, but
       // Windows asks the resolvers of EVERY connected adapter in parallel and
@@ -1769,6 +1790,45 @@ function createService(opts = {}) {
     // recovery) can only find out from here — the status event above is fire and
     // forget. The clients ignore this value; they only await the call.
     return { ok: true, tunError };
+  }
+
+  /**
+   * The router's wait for the core's SOCKS inbound (connectOnce): 'bound',
+   * 'timeout' — or 'exited' as soon as the core this connect started is gone
+   * (start() watches only its first 1.2 s; the A7 needs ~9 s to bind).
+   */
+  async function waitCorePort(port, ms, core) {
+    const gone = () => !xray.running || (!!core && xray.proc !== core);
+    let timer = null;
+    let over = false;
+    const exited = new Promise((resolve) => {
+      const tick = () => {
+        if (over) return;
+        if (gone()) { resolve('exited'); return; }
+        timer = setTimeout(tick, 200);
+        if (timer.unref) timer.unref();
+      };
+      tick();
+    });
+    try {
+      const r = await Promise.race([
+        Promise.resolve(waitPort(port, ms, { stop: gone })).then((b) => (b ? 'bound' : 'timeout')),
+        exited
+      ]);
+      return gone() ? 'exited' : r;
+    } finally { over = true; clearTimeout(timer); }
+  }
+
+  /** The connect's error for a core that exited before its port opened — in the user's language, with its last lines. */
+  function coreGoneError(settings) {
+    const last = typeof xray.recentLines === 'function' ? xray.recentLines(5) : [];
+    const en = settings.lang === 'en';
+    const said = last.length ? last.join(' | ') : (en ? '(it printed nothing)' : '(چیزی چاپ نکرد)');
+    const e = new Error(en
+      ? `The core exited before it opened 127.0.0.1:${settings.socksPort} — the whole-network tunnel was not started. Its last lines: ${said}`
+      : `هسته پیش از باز کردن 127.0.0.1:${settings.socksPort} بسته شد — تونل کل شبکه راه‌اندازی نشد. آخرین خطوط آن: ${said}`);
+    e.coreGone = true;
+    return e;
   }
 
   /**
