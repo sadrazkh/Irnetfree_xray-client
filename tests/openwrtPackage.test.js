@@ -340,7 +340,8 @@ test('the QEMU smoke proves D3: the in-country resolvers stay in the whole-LAN t
   assert.match(d3, /ip route get "\$ip" ipproto udp dport 53 uid 65534\)/);
   // real packets: root's query from the WAN address, nobody's (setuid before the socket) not
   assert.match(d3, /if \(uid\) process\.setuid\(Number\(uid\)\);\nconst s = require\('dgram'\)\.createSocket\('udp4'\);/);
-  assert.match(d3, /node \/tmp\/irnf-own-dns\.js 9\.9\.9\.9 53532 65534/);
+  assert.match(d3, /node \/tmp\/irnf-own-dns\.js 9\.9\.9\.9 "\$1" \$\{2:-\}/);
+  assert.match(d3, /ct2="\$\(own_ct "\$port" 65534\)"/);
   // cloudflared's edge discovery: the unbound lines refused (the control), then an SRV answer through the
   // drop-in the service's own remote api writes, its lines bound to the WAN device
   assert.match(d3, /cf\.dnsmasqDropIn\(\['9\.9\.9\.9', '149\.112\.112\.112'\]\);/);

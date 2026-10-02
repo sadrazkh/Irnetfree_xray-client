@@ -915,10 +915,15 @@ s.bind(Number(port), () => s.send(q, 53, ip));
 s.on('message', () => { console.log(`uid ${process.getuid()} -> ${ip}:53 from :${port}: answered`); process.exit(0); });
 setTimeout(() => { console.log(`uid ${process.getuid()} -> ${ip}:53 from :${port}: no answer in 5 s`); process.exit(0); }, 5000);
 EOF
-	node /tmp/irnf-own-dns.js 9.9.9.9 53531
-	node /tmp/irnf-own-dns.js 9.9.9.9 53532 65534
-	ct1="$(grep -E "dst=9\.9\.9\.9 sport=53531 dport=53 " /proc/net/nf_conntrack | head -n 1 || true)"
-	ct2="$(grep -E "dst=9\.9\.9\.9 sport=53532 dport=53 " /proc/net/nf_conntrack | head -n 1 || true)"
+	# one query from <port> [as <uid>], then its conntrack entry — asked again from a new port when
+	# none is there: run 37071843770 answered the query and then had no entry for it (one gone
+	# between the two, as the core's own query above went missing once; the next entry was there)
+	own_ct() {
+		node /tmp/irnf-own-dns.js 9.9.9.9 "$1" ${2:-} >&2
+		grep -E "dst=9\.9\.9\.9 sport=$1 dport=53 " /proc/net/nf_conntrack | head -n 1 || true
+	}
+	ct1=; for port in 53531 53533 53535 53537; do ct1="$(own_ct "$port")"; [ -n "$ct1" ] && break; done
+	ct2=; for port in 53532 53534 53536 53538; do ct2="$(own_ct "$port" 65534)"; [ -n "$ct2" ] && break; done
 	echo "conntrack, uid 0:     ${ct1:-none}"
 	echo "conntrack, uid 65534: ${ct2:-none}"
 	echo "$ct1" | grep -q "src=$WANIP " || { echo "the service's own query to 9.9.9.9 did not leave from the WAN address $WANIP"; exit 1; }
