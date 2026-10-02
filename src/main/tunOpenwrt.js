@@ -72,28 +72,32 @@ function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no wait: poll faster */ }
 }
 
-/**
- * The real uids of the running processes named `name` (/proc/<pid>/comm,
- * /proc/<pid>/status) — not counting one whose parent has the same name: a
- * helper it forked. dnsmasq forks its dhcp-script helper BEFORE it drops root
- * (OpenWrt starts it --user=dnsmasq), so that helper stays uid 0 — and sends
- * no DNS. [] off Linux.
- */
+/** The real uids of every running process named `name` (/proc/<pid>/comm, /proc/<pid>/status); [] off Linux. */
 function procUidsOf(name, fsImpl = fs) {
+  const uids = new Set();
   let pids = [];
   try { pids = fsImpl.readdirSync('/proc').filter(p => /^\d+$/.test(p)); } catch { return []; }
-  const found = [];
   for (const pid of pids) {
     try {
       if (String(fsImpl.readFileSync(`/proc/${pid}/comm`, 'utf8')).trim() !== name) continue;
-      const status = String(fsImpl.readFileSync(`/proc/${pid}/status`, 'utf8'));
-      const uid = /^Uid:\s+(\d+)/m.exec(status);
-      const ppid = /^PPid:\s+(\d+)/m.exec(status);
-      if (uid) found.push({ pid, ppid: ppid ? ppid[1] : null, uid: Number(uid[1]) });
+      const m = /^Uid:\s+(\d+)/m.exec(String(fsImpl.readFileSync(`/proc/${pid}/status`, 'utf8')));
+      if (m) uids.add(Number(m[1]));
     } catch { /* gone meanwhile */ }
   }
-  const named = new Set(found.map(p => p.pid));
-  return [...new Set(found.filter(p => !named.has(p.ppid)).map(p => p.uid))];
+  return [...uids];
+}
+
+/**
+ * Does dnsmasq forward as `uid`? Only when EVERY process by that name runs as
+ * it. On OpenWrt not all of them are the forwarder: procd jails dnsmasq, and
+ * the jail (ujail, named after it) stays root as the parent of the real one,
+ * which drops to its own user (--user=dnsmasq) — what the QEMU job saw on 23.05
+ * and 24.10 (run 37067447979: a root "dnsmasq" whose child runs as 453). A
+ * dnsmasq that drops no privileges leaves every one of them root. None
+ * running: not shared.
+ */
+function forwardsAs(uids, uid) {
+  return uids.length > 0 && uids.every(u => u === uid);
 }
 
 /**
@@ -379,7 +383,7 @@ class TunOpenwrt {
     const cidrs = net.normalizeCidrs(list);
     if (!cidrs.length) return;
     let shared = false;
-    try { shared = this.uidsOf('dnsmasq').includes(this.uid); } catch { /* unknown: not shared */ }
+    try { shared = forwardsAs(this.uidsOf('dnsmasq'), this.uid); } catch { /* unknown: not shared */ }
     if (shared) {
       this.onLog(`dnsmasq runs as uid ${this.uid}, like this service — the router's own lookups through the in-country resolvers (${cidrs.join(', ')}) stay in the tunnel; a route for them would take dnsmasq's upstream out of it too`, 'warn');
       return;
@@ -468,4 +472,4 @@ class TunOpenwrt {
   }
 }
 
-module.exports = { TunOpenwrt, SINGBOX_TABLE, ownDirectRuleArgs, procUidsOf };
+module.exports = { TunOpenwrt, SINGBOX_TABLE, ownDirectRuleArgs, procUidsOf, forwardsAs };

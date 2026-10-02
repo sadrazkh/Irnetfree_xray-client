@@ -348,7 +348,8 @@ test('the QEMU smoke proves D3: the in-country resolvers stay in the whole-LAN t
   assert.match(d3, /luci remote_set '\{"cloudflared":\{"enabled":true,/);
   assert.match(d3, /grep -q "\^server=\/argotunnel\.com\/9\.9\.9\.9@\$WANDEV\\\$"/);
   assert.match(d3, /cf\.dnsmasqDropIn\(\['9\.9\.9\.9', '149\.112\.112\.112'\], process\.argv\[1\]\)/);
-  assert.match(d3, /nslookup -type=SRV _v2-origintunneld\._tcp\.argotunnel\.com 127\.0\.0\.1/);
+  assert.match(d3, /d\.setServers\(\['127\.0\.0\.1'\]\); d\.resolveSrv\('_v2-origintunneld\._tcp\.argotunnel\.com'/);
+  assert.match(d3, /until echo "\$out" \| grep -q '"port":7844'; do/);
   assert.match(d3, /luci remote_set '\{"cloudflared":\{"enabled":false\}\}'/);
   // the own-lookup rules go with the gateway
   assert.match(d3, /the own-lookup rules stayed after the D3 disconnect/);

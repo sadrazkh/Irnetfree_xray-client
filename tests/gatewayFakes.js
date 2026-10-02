@@ -90,7 +90,7 @@ function gatewayFactory(state) {
       linkWaitMs: 50,
       // the service as root, dnsmasq as its own user (OpenWrt's) — `state.procUids` overrides; never this machine's /proc
       uid: 0,
-      uidsOf: (name) => ((state.procUids && state.procUids[name]) || (name === 'dnsmasq' ? [453] : []))
+      uidsOf: (name) => ((state.procUids && state.procUids[name]) || (name === 'dnsmasq' ? [0, 453] : []))   // OpenWrt's: the root jail, the dnsmasq in it
     }));
     state.gateways.push(gw);
     return gw;
