@@ -46,7 +46,9 @@ return view.extend({
 	show: function (res) {
 		var self = this;
 		var err = common.errorOf(res);
-		dom.content(this.problem, err ? [ common.problemBox(res, function () { return self.handleRefresh(); }) ] : null);
+		dom.content(this.problem, err ? [ common.problemBox(res, function () {
+			return common.waitUntilUp().then(function () { return self.handleRefresh(); });
+		}) ] : null);
 		var lines = (!err && Array.isArray(res.lines)) ? res.lines : [];
 		dom.content(this.pre, [ err ? '' : (lines.length ? lines.join('\n') : common.t('The log is empty.')) ]);
 		this.pre.scrollTop = this.pre.scrollHeight;
@@ -54,7 +56,8 @@ return view.extend({
 
 	handleRefresh: function () {
 		var self = this;
-		return common.log(LINES).then(function (res) { self.show(res); });
+		// a call that never got through reads as "no answer", like an empty reply
+		return common.log(LINES).then(function (res) { self.show(res); }, function () { self.show(null); });
 	},
 
 	handleCopy: function () {
@@ -66,7 +69,7 @@ return view.extend({
 				if (ok) common.notify(common.t('Diagnostics copied to the clipboard.'));
 				else common.showText(common.t('Copy diagnostics'), text);
 			});
-		});
+		}, common.failed);
 	},
 
 	handleSave: null,

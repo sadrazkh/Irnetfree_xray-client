@@ -93,6 +93,9 @@ const LUCI_TABS = {
   log: /id="irnf-log"[^>]*>[^<]{10,}/                                     // lines in the log
 };
 const LUCI_ERROR = /<h4>(TypeError|ReferenceError|SyntaxError|RangeError|NetworkError|RPCError|DependencyError|InternalError|Runtime error)[^<]*<\/h4>[\s\S]{0,400}/;
+// one tab (a page normally takes 10-30 s here): six tabs stay well inside what the 40-min job
+// leaves after the guest script, and a Chrome that gives no DOM at all ends the check at once
+const TAB_LIMIT_MS = 90000;
 
 /** A loopback port nobody listens on, for the forward to the guest's LuCI. */
 function freePort() {
@@ -118,15 +121,15 @@ function dumpDom(chrome, url) {
     const p = spawn(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run',
       '--no-default-browser-check', `--user-data-dir=${profile}`, '--enable-logging=stderr', '--log-level=0',
       '--virtual-time-budget=30000', '--dump-dom', url], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let dom = '', log = '';
+    let dom = '', log = '', killed = false;
     p.stdout.on('data', (d) => { dom += d; });
     p.stderr.on('data', (d) => { log += d; });
-    const timer = setTimeout(() => p.kill('SIGKILL'), 240000);
+    const timer = setTimeout(() => { killed = true; p.kill('SIGKILL'); }, TAB_LIMIT_MS);
     p.on('error', (e) => { log += e.message; });
     p.on('close', (code) => {
       clearTimeout(timer);
       try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* best effort */ }
-      resolve({ code, dom, log });
+      resolve({ code, dom, log, killed });
     });
   });
 }
@@ -136,21 +139,23 @@ const textOf = (html) => html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<
 /** One tab: rendered, not stuck, no LuCI error box, no uncaught exception. → a problem, or null. */
 async function checkTab(chrome, port, tab, mark) {
   const url = `http://127.0.0.1:${port}/cgi-bin/luci/admin/services/irnetfree/${tab}?luci_username=root&luci_password=`;
+  const started = Date.now();
   const r = await dumpDom(chrome, url);
+  const secs = Math.round((Date.now() - started) / 1000);
   const view = /<div[^>]*id="view"[^>]*>([\s\S]*)/.exec(r.dom);
   const uncaught = r.log.split('\n').filter((l) => /CONSOLE/.test(l) && /Uncaught|is not defined|is not a function|Cannot read/.test(l));
   for (const l of r.log.split('\n').filter((x) => /CONSOLE/.test(x))) console.log(`  [console] ${l.replace(/^.*?CONSOLE/, 'CONSOLE').slice(0, 300)}`);
   let problem = null;
-  if (!r.dom) problem = `Chrome gave no DOM (exit ${r.code})`;
+  if (!r.dom) problem = r.killed ? `Chrome gave no DOM within ${TAB_LIMIT_MS / 1000}s` : `Chrome gave no DOM (exit ${r.code})`;
   else if (LUCI_ERROR.test(r.dom)) problem = `LuCI's error box: ${textOf(LUCI_ERROR.exec(r.dom)[0]).slice(0, 400)}`;
   else if (uncaught.length) problem = `uncaught: ${uncaught[0].slice(0, 300)}`;
   else if (!view) problem = 'no #view in the page (not logged in?)';
   else if (/Loading view/.test(view[1].slice(0, 400))) problem = 'stuck on "Loading view…"';
   else if (/<img[^>]*src="x"/.test(r.dom)) problem = 'a config name went into the page as HTML';
   else if (!mark.test(r.dom)) problem = `the page did not render (no ${mark})`;
-  console.log(`LUCI-RENDER ${tab}: ${problem ? 'FAILED — ' + problem : 'ok'}`);
+  console.log(`LUCI-RENDER ${tab}: ${problem ? 'FAILED — ' + problem : 'ok'} (${secs}s)`);
   console.log(`  ${textOf(view ? view[1] : r.dom).slice(0, 700)}`);
-  return { problem, dom: r.dom };
+  return { problem, dom: r.dom, noDom: !r.dom };
 }
 
 async function luciInBrowser(con, port) {
@@ -158,7 +163,12 @@ async function luciInBrowser(con, port) {
   if (!chrome) { console.log('\nLUCI-RENDER skipped: no Chrome on this machine'); return 0; }
   console.log(`\n== the LuCI pages in a real browser (${chrome}, forward 127.0.0.1:${port} -> 192.168.1.1:80)`);
   let bad = 0;
-  for (const [tab, mark] of Object.entries(LUCI_TABS)) if ((await checkTab(chrome, port, tab, mark)).problem) bad++;
+  for (const [tab, mark] of Object.entries(LUCI_TABS)) {
+    const res = await checkTab(chrome, port, tab, mark);
+    // a browser or forward that hangs would hang the same way for every tab: stop, say why
+    if (res.noDom) { console.log(`SMOKE FAILED: the LuCI render check — ${res.problem} for the ${tab} tab; stopping here`); return 1; }
+    if (res.problem) bad++;
+  }
   // Persian: LuCI in fa loads irnetfree.fa.lmo (the tab names) and the pages read <html lang="fa">
   if (await sh(con, "uci set luci.main.lang='fa' && uci commit luci && rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/", 30000) === 0) {
     const fa = await checkTab(chrome, port, 'overview', /class="irnf-badge"/);
@@ -168,7 +178,8 @@ async function luciInBrowser(con, port) {
     await sh(con, "uci set luci.main.lang='auto' && uci commit luci", 30000);
   }
   else { bad++; console.log('LUCI-RENDER: could not switch LuCI to Persian in the guest'); }
-  console.log(bad ? `LUCI-RENDER: ${bad} failed` : 'LUCI-RENDER OK');
+  if (bad) console.log(`SMOKE FAILED: the LuCI render check — ${bad} page(s) failed (the LUCI-RENDER lines above)`);
+  else console.log('LUCI-RENDER OK');
   return bad ? 1 : 0;
 }
 

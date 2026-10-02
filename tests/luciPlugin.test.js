@@ -88,8 +88,20 @@ test('the token never reaches a command line or a shell variable — the file go
   assert.match(s, /--post-file="\$tmp"/);
   assert.match(s, /tr -d '\\r\\n' < "\$data_dir\/token"/, 'the token file is redirected into the body, not read into a variable');
   assert.match(s, /mktemp \/tmp\/irnf-luci\.XXXXXX/, 'a private (0600) temp file');
-  assert.match(s, /trap 'rm -f "\$tmp"[^']*' EXIT/, 'removed on every way out');
   assert.match(s, /http:\/\/127\.0\.0\.1:\$port\/luci\/\$method/, 'loopback only');
+});
+
+test('the request gives up before LuCI and rpcd do, and the temp body goes on every way out', () => {
+  const s = src();
+  // LuCI's rpc gives up at 20 s and rpcd SIGKILLs an exec plugin at 30 s (/etc/config/rpcd `timeout`):
+  // a uclient-fetch timeout above those makes the "timeout" reply unreachable and skips the cleanup
+  const t = /uclient-fetch -T (\d+) /.exec(s);
+  assert.ok(t, 'uclient-fetch has a timeout');
+  assert.ok(Number(t[1]) < 20, `-T ${t[1]} must be below LuCI's 20 s`);
+  assert.match(s, /^\ttrap '\[ -z "\$tmp" \] \|\| rm -f "\$tmp" "\$tmp\.err"' EXIT$/m, 'the body and its stderr are removed on exit');
+  assert.match(s, /^\ttrap 'exit 1' HUP INT TERM$/m, 'a signal ends the script through that exit');
+  assert.ok(s.indexOf("' EXIT") < s.indexOf('mktemp '), 'the cleanup is in place before the file exists');
+  assert.match(s, /rpcd[\s\S]{0,200}timeout[\s\S]{0,200}above|above[\s\S]{0,200}-T/, 'the header says the order of the timeouts matters');
 });
 
 test('the QEMU smoke drives the plugin as LuCI does: rpcd lists it, ubus calls it, the browser\'s /ubus reaches it with a session', () => {
@@ -108,6 +120,21 @@ test('the QEMU smoke drives the plugin as LuCI does: rpcd lists it, ubus calls i
   assert.match(sec, /cgi-bin\/luci\/admin\/menu/, 'the menu as a browser gets it');
   assert.match(sec, /http:\/\/127\.0\.0\.1\/ubus\//, 'the ubus call a page makes, through the ACL');
   assert.match(sec, /"45517f0a"/, 'the Persian tab names, under the hash the browser computes');
+});
+
+test('the browser check cannot eat the job\'s time limit: a capped tab, and a hang ends it at once with a SMOKE line', () => {
+  const d = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'qemu-smoke.js'), 'utf8');
+  const cap = /const TAB_LIMIT_MS = (\d+);/.exec(d);
+  assert.ok(cap, 'one named cap per tab');
+  assert.ok(Number(cap[1]) <= 120000, `a tab may take ${cap[1]} ms — six of them must fit what the 40-min job leaves`);
+  assert.match(d, /setTimeout\(\(\) => \{ killed = true; p\.kill\('SIGKILL'\); \}, TAB_LIMIT_MS\)/);
+  assert.match(d, /if \(res\.noDom\) \{ console\.log\(`SMOKE FAILED[^\n]*; return 1; \}/, 'no DOM from Chrome stops the check at once');
+  assert.match(d, /SMOKE FAILED: the LuCI render check/, 'a failed page is a SMOKE line too');
+  // and the smoke waits for a stop instead of sleeping a fixed time
+  const s = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'guest-smoke.sh'), 'utf8');
+  const sec = s.slice(s.indexOf('# LuCI (feat/router-luci)'));
+  assert.doesNotMatch(sec, /\/etc\/init\.d\/irnetfree stop\n\s*sleep /, 'no fixed sleep after a stop');
+  assert.match(sec, /\/etc\/init\.d\/irnetfree stop\n\s*(#[^\n]*\n\s*)?i=0\n\s*until lu status \| grep -q '"error": "not-running"'/);
 });
 
 /* ------------------------------ run it for real ------------------------------ */
@@ -154,7 +181,9 @@ const body = postFile ? fs.readFileSync(postFile) : null;
 fs.appendFileSync(process.env.FAKE_FETCH_LOG, JSON.stringify({ argv, postFile, out, body: body && body.toString('utf8') }) + '\\n');
 // the default port may be a real IRNetFree on the machine running the tests: never touch it
 if (/^http:\\/\\/127\\.0\\.0\\.1:6969\\//.test(url)) { process.stderr.write('Connection failed\\n'); process.exit(4); }
-const req = http.request(url, { method: body ? 'POST' : 'GET', timeout: timeout * 1000,
+// a test can shorten -T to milliseconds to reach the timeout path quickly
+const timeoutMs = Number(process.env.FAKE_FETCH_TIMEOUT_MS) || timeout * 1000;
+const req = http.request(url, { method: body ? 'POST' : 'GET', timeout: timeoutMs,
   headers: body ? { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': body.length } : {} }, (res) => {
   const chunks = [];
   res.on('data', (c) => chunks.push(c));
@@ -184,7 +213,7 @@ console.log(String(v));
 /** A stub of the service's /luci/<method> API on an ephemeral loopback port. */
 function stubFacade() {
   const seen = [];
-  const stub = { seen, reply: () => [200, { ok: true }] };
+  const stub = { seen, delay: 0, reply: () => [200, { ok: true }] };
   stub.server = http.createServer((req, res) => {
     let body = '';
     req.setEncoding('utf8');
@@ -193,8 +222,11 @@ function stubFacade() {
       seen.push({ method: req.method, url: req.url, body });
       const [code, json] = stub.reply(req.url.replace(/^\/luci\//, ''), body);
       const text = json === undefined ? '' : JSON.stringify(json);   // undefined: an empty body
-      res.writeHead(code, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text) });
-      res.end(text);
+      setTimeout(() => {
+        if (res.destroyed) return;
+        res.writeHead(code, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text) });
+        res.end(text);
+      }, stub.delay);
     });
   });
   return new Promise((resolve) => stub.server.listen(0, '127.0.0.1', () => { stub.port = stub.server.address().port; resolve(stub); }));
@@ -287,7 +319,7 @@ test('call: each method is POSTed to 127.0.0.1:<uci port>/luci/<method> with the
   // the token was never on a command line, and the body file is gone
   for (const f of fetches(box)) {
     assert.ok(!f.argv.join(' ').includes(TOKEN), 'the token is not in uclient-fetch argv');
-    assert.deepEqual(f.argv.slice(0, 3), ['-T', '30', '-O']);
+    assert.deepEqual(f.argv.slice(0, 3), ['-T', '15', '-O']);
     assert.equal(f.out, '-');
     assert.ok(f.postFile && /irnf-luci\./.test(f.postFile), f.postFile);
     assert.equal(fs.existsSync(f.postFile), false, `the temp body ${f.postFile} was left behind`);
@@ -334,6 +366,40 @@ test('call: every way the service can fail is a JSON object with an error the pa
   const closed = await new Promise((resolve) => stub.server.close(() => resolve(stub.port)));
   const r = await plugin(envFor(box, { 'irnetfree.main.port': String(closed), 'irnetfree.main.data_dir': box.dataDir }), ['call', 'status'], '{ }');
   assert.deepEqual(r.json, { error: 'not-running' }, r.out + r.err);
+});
+
+test('call: a service that answers too slowly is a "timeout" (reachable now that -T is below LuCI\'s and rpcd\'s), and nothing is left behind', async (t) => {
+  if (!SH) return t.skip('no POSIX sh here');
+  const box = setup(t);
+  const stub = await stubFacade();
+  t.after(() => stub.server.close());
+  stub.delay = 3000;
+  const env = Object.assign(envFor(box, { 'irnetfree.main.port': String(stub.port), 'irnetfree.main.data_dir': box.dataDir }), { FAKE_FETCH_TIMEOUT_MS: '300' });
+  const r = await plugin(env, ['call', 'test'], '{ }');
+  assert.deepEqual(r.json, { error: 'timeout' }, r.out + r.err);
+  const f = fetches(box)[0];
+  assert.equal(fs.existsSync(f.postFile), false, 'the body file is gone');
+  assert.equal(fs.existsSync(f.postFile + '.err'), false, 'and so is its stderr file');
+});
+
+test('call: a TERM while the request is out (a shutdown) still removes the temp body', async (t) => {
+  if (!SH || process.platform === 'win32') return t.skip('needs POSIX signals');
+  const box = setup(t);
+  const stub = await stubFacade();
+  t.after(() => stub.server.close());
+  stub.delay = 1500;
+  const env = envFor(box, { 'irnetfree.main.port': String(stub.port), 'irnetfree.main.data_dir': box.dataDir });
+  const child = spawn(SH, [PLUGIN, 'call', 'status'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdin.end('{ }');
+  const closed = new Promise((resolve) => child.on('close', resolve));
+  // once uclient-fetch is out with the body file, the shell is told to stop
+  for (let i = 0; i < 100 && !fetches(box).length; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(fetches(box).length, 1, 'the request went out');
+  child.kill('SIGTERM');
+  await closed;
+  const f = fetches(box)[0];
+  assert.equal(fs.existsSync(f.postFile), false, `the body file ${f.postFile} (it holds the token) was left behind`);
+  assert.equal(fs.existsSync(f.postFile + '.err'), false);
 });
 
 test('call: an unknown method never leaves the plugin; uci gives the port, 6969 when unset', async (t) => {

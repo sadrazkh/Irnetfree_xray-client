@@ -325,9 +325,14 @@ esac
 
 say "LuCI: a stopped service reads as not-running, and the plugin's own service call starts it"
 /etc/init.d/irnetfree stop
-sleep 2
-r="$(lu status)"; echo "$r"
-echo "$r" | grep -q '"error": "not-running"' || { echo "a stopped service did not read as not-running"; exit 1; }
+# the service closes its port only after its shutdown (the gateway first): wait for it
+i=0
+until lu status | grep -q '"error": "not-running"'; do
+	i=$((i+1))
+	[ $i -lt 30 ] || { echo "a stopped service did not read as not-running within 30s"; lu status; exit 1; }
+	sleep 1
+done
+echo "stopped: status reads not-running after ${i}s"
 r="$(lu service '{"action":"halt"}')"
 echo "$r" | grep -q '"error": "bad action"' || { echo "the service call took an action it should refuse: $r"; exit 1; }
 r="$(lu service '{"action":"start"}')"; echo "$r"
@@ -429,6 +434,12 @@ if [ "$FACADE" = 0 ]; then
 	# innerHTML. Never used once the facade answers.
 	say "LuCI: a stub of the service's /luci API for the browser check (no facade on this branch)"
 	/etc/init.d/irnetfree stop
+	i=0
+	until lu status | grep -q '"error": "not-running"'; do
+		i=$((i+1))
+		[ $i -lt 30 ] || { echo "the service still holds its port 30s after the stop"; exit 1; }
+		sleep 1
+	done
 	cat > /tmp/luci-stub.js <<'EOF'
 const http = require('http');
 const now = Date.now();
