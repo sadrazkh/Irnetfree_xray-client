@@ -883,7 +883,17 @@ until echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address'; do
 done
 echo "$out" | sed -n '/^Name:/,$p'
 if [ -r /proc/net/nf_conntrack ]; then
-	ct="$(grep -E "src=$WANIP dst=(9\.9\.9\.9|149\.112\.112\.112) sport=[0-9]+ dport=53 " /proc/net/nf_conntrack | head -n 2 || true)"
+	# (run 37068874055: the answer above came before the core's query showed up
+	# here — it asked a moment later — so a few looks, each after a name the core
+	# has not cached: its own query to the in-country pair, then)
+	ct=; i=0
+	while :; do
+		ct="$(grep -E "src=$WANIP dst=(9\.9\.9\.9|149\.112\.112\.112) sport=[0-9]+ dport=53 " /proc/net/nf_conntrack | head -n 2 || true)"
+		[ -n "$ct" ] && break
+		i=$((i+1)); [ $i -le 5 ] || break
+		nslookup "ci$i.digikala.com" 1.1.1.1 >/dev/null 2>&1 || true
+		sleep 1
+	done
 	echo "conntrack, the core's own query: ${ct:-none}"
 	[ -n "$ct" ] || { echo "no query from the WAN address ($WANIP) to the in-country resolvers — the core's direct path did not leave by the WAN"; grep -E 'dport=53 ' /proc/net/nf_conntrack | head -n 10 || true; exit 1; }
 	if grep -qE "src=172\.19\.0\.1 dst=(9\.9\.9\.9|149\.112\.112\.112) .*dport=53 " /proc/net/nf_conntrack; then echo "the core's query to the in-country resolvers looped into the tunnel"; exit 1; fi
