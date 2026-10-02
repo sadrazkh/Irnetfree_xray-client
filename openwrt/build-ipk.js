@@ -19,6 +19,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const { tgz } = require('./tar');
 const { buildLmo, parsePo } = require('./lmo');
 
@@ -46,7 +47,35 @@ function walk(dir, rel = '') {
   return out;
 }
 
-function buildIpk({ root = ROOT, outDir = path.join(ROOT, 'dist'), version, mtime = Number(process.env.SOURCE_DATE_EPOCH) || 0 } = {}) {
+/**
+ * The mtime every file in the package carries, in seconds.
+ *
+ * Not 1970 (what this was until v1.16.0): uhttpd serves a LuCI view with its
+ * mtime as Last-Modified and no Cache-Control, and a browser then keeps the
+ * response fresh for a tenth of its age — for a 1970 file, years. After an
+ * upgrade the browser kept running the old views and never asked.
+ *
+ *   1. SOURCE_DATE_EPOCH (https://reproducible-builds.org/specs/source-date-epoch/):
+ *      the release sets it to the tagged commit's time. Whole seconds or the
+ *      build stops — a typo must not ship a package stamped 1970 again.
+ *   2. Else the commit time of the checkout at `root` (a dev build, the CI
+ *      artifact): the same commit builds the same bytes.
+ *   3. Else (no git, no repository) the time of the build.
+ */
+function sourceDateEpoch({ env = process.env, root = ROOT, now = Date.now } = {}) {
+  const raw = env.SOURCE_DATE_EPOCH == null ? '' : String(env.SOURCE_DATE_EPOCH).trim();
+  if (raw) {
+    if (!/^\d+$/.test(raw)) throw new Error(`build-ipk: SOURCE_DATE_EPOCH must be whole seconds since 1970, not "${raw}"`);
+    return Number(raw);
+  }
+  try {
+    const ct = execFileSync('git', ['-C', root, 'log', '-1', '--format=%ct'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
+    if (/^\d+$/.test(ct) && Number(ct) > 0) return Number(ct);
+  } catch { /* no git, or not a checkout */ }
+  return Math.floor(now() / 1000);
+}
+
+function buildIpk({ root = ROOT, outDir = path.join(ROOT, 'dist'), version, mtime = sourceDateEpoch({ root }) } = {}) {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const ver = version || pkg.version;
   const data = [];
@@ -117,12 +146,12 @@ function buildIpk({ root = ROOT, outDir = path.join(ROOT, 'dist'), version, mtim
   fs.mkdirSync(outDir, { recursive: true });
   const out = path.join(outDir, `${PKG}_${ver}_all.ipk`);
   fs.writeFileSync(out, outer);
-  return { out, files: data.filter(e => !e.dir).map(e => e.name), control, installed };
+  return { out, files: data.filter(e => !e.dir).map(e => e.name), control, installed, mtime };
 }
 
 if (require.main === module) {
   const r = buildIpk({ outDir: process.argv[2] ? path.resolve(process.argv[2]) : undefined });
-  console.log(`${r.out}  (${r.files.length} files, ${(r.installed / 1048576).toFixed(1)} MB installed)`);
+  console.log(`${r.out}  (${r.files.length} files, ${(r.installed / 1048576).toFixed(1)} MB installed, files dated ${new Date(r.mtime * 1000).toISOString()})`);
 }
 
-module.exports = { buildIpk, PKG, DEPENDS, PREFIX };
+module.exports = { buildIpk, sourceDateEpoch, PKG, DEPENDS, PREFIX };
