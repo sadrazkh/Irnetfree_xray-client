@@ -702,9 +702,10 @@
               <div class="switch-sub" data-i18n="gw.quicSub"></div></div>
             <label class="switch"><input type="checkbox" id="optLanBlockQuic" /><span class="slider"></span></label>
           </div>
-          <!-- OpenWrt only: remote access lives in LuCI, not on this page -->
+          <!-- OpenWrt only: remote access lives in LuCI, not on this page — the
+               LuCI page and the guide are links (renderRemotePointer) -->
           <div class="setting-row" id="gwRemoteRow" hidden>
-            <p class="hint" data-i18n="gw.remote"></p>
+            <p class="hint" id="gwRemote" data-i18n="gw.remote"></p>
           </div>
           <div class="switch-row">
             <div><div class="switch-title" data-i18n="kill.title">کیل سوییچ (Kill switch)</div>
@@ -790,9 +791,10 @@
 
       <div class="ins-group">
         <div class="ins-head" data-i18n="ins.protection">محافظت</div>
-        <div class="ins-row"><span class="ins-label" data-i18n="ins.tun">TUN</span><span class="ins-val" id="insTun">—</span></div>
+        <!-- #insTunRow / #insGuardRow: the router has no TUN switch and no guard cards to mirror (applyFlavor) -->
+        <div class="ins-row" id="insTunRow"><span class="ins-label" data-i18n="ins.tun">TUN</span><span class="ins-val" id="insTun">—</span></div>
         <div class="ins-row"><span class="ins-label" data-i18n="ins.kill">Kill switch</span><span class="ins-val" id="insKill">—</span></div>
-        <div class="ins-row"><span class="ins-label" data-i18n="ins.guard">Leak guard</span><span class="ins-val" id="insGuard">—</span></div>
+        <div class="ins-row" id="insGuardRow"><span class="ins-label" data-i18n="ins.guard">Leak guard</span><span class="ins-val" id="insGuard">—</span></div>
         <div class="ins-row"><span class="ins-label" data-i18n="ins.ipv6">IPv6</span><span class="ins-val" id="insIpv6">—</span></div>
         <!-- OpenWrt only: a status, not a switch — the button says what it means and opens the device list -->
         <button type="button" class="ins-row" id="insGatewayRow" hidden data-i18n-title="gw.insHint"><span class="ins-label" data-i18n="ins.gateway">تونل کل شبکه</span><span class="ins-val ins-text" id="insGateway">—</span></button>

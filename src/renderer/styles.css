@@ -507,6 +507,10 @@ button { cursor: pointer; background: none; border: 0; color: inherit; }
   margin-bottom: 7px;
 }
 .hint { font-size: 12px; line-height: 1.7; color: var(--ink3); margin: 6px 0 0; }
+/* a link inside a hint (the router's remote-access pointer): the theme's accent,
+   not the browser's dark blue on a dark panel */
+.hint a { color: var(--accentInk); text-decoration: underline; text-underline-offset: 2px; }
+.hint a:hover { text-decoration-thickness: 2px; }
 .small { font-size: 11px; }
 .empty {
   color: var(--dim);
@@ -757,10 +761,6 @@ button.ins-row:hover .ins-label { color: var(--accentInk); }
   border-color: var(--accent);
 }
 .mode-option.active .mode-opt-title { color: var(--accentInk); font-weight: 700; }
-/* The router's mode card (setModeWidget): one mode, nothing to pick — so it does
-   not look like a button that might open something. */
-.mode-card.mode-card-fixed { cursor: default; }
-button.readout.mode-card-fixed:hover { background: var(--panel); border-color: var(--line); }
 /* a mode whose backend is not installed cannot be chosen — say so by looking it */
 .mode-option.disabled { opacity: .55; }
 .mode-option.disabled:hover { border-color: var(--softline); }

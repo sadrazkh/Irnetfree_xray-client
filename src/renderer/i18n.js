@@ -293,6 +293,9 @@ const I18N = {
     'udpblock.sub': 'جلوی WebRTC/STUN را می‌گیرد تا وقتی در حالت TUN نیستی IP واقعی‌ات لو نرود. بازی‌ها و تماس‌هایی که UDP لازم دارند از کار می‌افتند.',
     'udpblock.needsProxy': 'در حالت TUN لازم نیست — خودِ TUN، UDP را هم از تونل می‌برد.',
     'lan.title': 'اجازه به شبکه محلی (LAN)', 'lan.sub': 'دستگاه‌های دیگه هم بتونن وصل بشن',
+    // the same switch on a router: it only opens the proxy ports — the whole network goes through the tunnel anyway
+    'lan.routerTitle': 'باز کردن پورت‌های پراکسی SOCKS/HTTP روی شبکه',
+    'lan.routerSub': 'لازم نیست — همهٔ دستگاه‌ها از قبل از تونل می‌روند؛ فقط برای برنامه‌ای که خودش پراکسی می‌خواهد.',
 
     'comp.title': 'فایل‌های موردنیاز', 'comp.hint': 'اگر فایلی نبود با یک کلیک دانلود و یکپارچه می‌شود — بدون نیاز به ساخت دوباره برنامه.',
     'assets.auto': 'به‌روزرسانی خودکار فایل‌ها', 'assets.auto.off': 'خاموش',
@@ -300,6 +303,7 @@ const I18N = {
     'assets.auto.hint': 'فقط وقتی وصل نیستید. فایل‌های geo داده‌اند و کانفیگی را خراب نمی‌کنند؛ هستهٔ جدید می‌تواند رفتار عوض کند، پس فقط با انتخاب خودتان',
     'comp.xray': 'هسته Xray', 'comp.tun2socksLegacy': 'tun2socks (حالت TUN — قدیمی)',
     'comp.singbox': 'هستهٔ sing-box (بک‌اندِ حالت TUN، ضد DPI)',
+    'comp.singboxRouter': 'هستهٔ sing-box (تونل کل شبکه)',
     'comp.wintun': 'wintun.dll (حالت TUN)', 'comp.geo': 'فایل‌های روتینگ (geoip + geosite)',
     'comp.tunNote': '⚠ حالت TUN به sing-box (یا tun2socks) نیاز دارد و روی ویندوز به wintun.dll — از همین‌جا دانلودشان کن.',
     'comp.installed': 'نصب‌شده', 'comp.missing': 'موجود نیست',
@@ -319,6 +323,8 @@ const I18N = {
     // the router: the tunnel is the network's, never a mode — and root is not a question there
     'tun.routerReady': '✓ تونل کل شبکه آماده است',
     'tun.routerUnavailable': '⚠ sing-box روی روتر نیست — تونل کل شبکه بدون آن بالا نمی‌آید. از «فایل‌های موردنیاز» دانلودش کن یا: opkg install sing-box',
+    // sing-box is there, the tunnel still is not: the other half of it is nft
+    'tun.routerNoNft': '⚠ nft (nftables) روی روتر نیست — تونل کل شبکه بدون آن بالا نمی‌آید: opkg install nftables',
 
     't.settingsSaved': 'تنظیمات ذخیره شد', 't.rulesSaved': 'قوانین ذخیره شد', 't.copied': 'کپی شد ✓',
     't.routingMode': 'حالت روتینگ', 't.noServerSel': 'سروری انتخاب نشده',
@@ -366,6 +372,8 @@ const I18N = {
     'set.tunBackend': 'بک‌اندِ TUN', 'set.leakGuard': 'گارد نشتی',
     'set.tunAppMode': 'روتینگ به‌تفکیک برنامه زیر TUN', 'set.tunApps': 'برنامه‌های انتخاب‌شده',
     'set.blockUdpInProxyMode': 'بستن UDP در حالت پروکسی',
+    // not a setting: an edit of a server the live connection dials (pendingKeys pushes 'servers')
+    'set.servers': 'ویرایش سرورِ متصل',
     'set.defaultEngine': 'هستهٔ پیش‌فرض',
     'set.defaultEngineHint': 'کانفیگ‌هایی که هسته‌ی مشخصی انتخاب نکرده‌اند، و زنجیره/استخر/روتینگ پیشرفته، روی این هسته اجرا می‌شوند. اگر عضوی PattN بخواهد، کل plan روی PattN می‌رود.',
     'comp.xrayPattn': 'هستهٔ Xray-PattN (fork پترنیها — کانفیگ بدون TLS را می‌پذیرد)',
@@ -813,12 +821,16 @@ const I18N = {
     'udpblock.sub': 'Stops WebRTC/STUN from revealing your real IP when you are not in TUN mode. Breaks games and calls that need UDP.',
     'udpblock.needsProxy': 'TUN mode covers UDP already.',
     'lan.title': 'Allow LAN', 'lan.sub': 'Let other devices connect too',
+    // the same switch on a router: it only opens the proxy ports — the whole network goes through the tunnel anyway
+    'lan.routerTitle': 'Open the SOCKS/HTTP proxy ports to the LAN',
+    'lan.routerSub': 'Not needed — every device already goes through the tunnel; only for an app that asks for a proxy itself.',
 
     'comp.title': 'Required files', 'comp.hint': 'Missing files are downloaded and integrated with one click — no rebuild needed.',
     'assets.auto': 'Update files automatically', 'assets.auto.off': 'Off',
     'assets.auto.geo': 'Weekly — geo files only', 'assets.auto.all': 'Weekly — geo files and cores',
     'assets.auto.hint': 'Only while disconnected. Geo files are data and cannot break a config; a new core can change behaviour, so only if you choose it',
     'comp.xray': 'Xray core', 'comp.singbox': 'sing-box core (TUN backend, anti-DPI)',
+    'comp.singboxRouter': 'sing-box core (the whole-network tunnel)',
     'comp.tun2socksLegacy': 'tun2socks (TUN mode — legacy)',
     'comp.wintun': 'wintun.dll (TUN mode)', 'comp.geo': 'Routing files (geoip + geosite)',
     'comp.tunNote': '⚠ TUN mode needs sing-box (or tun2socks), plus wintun.dll on Windows — download them here.',
@@ -839,6 +851,8 @@ const I18N = {
     // the router: the tunnel is the network's, never a mode — and root is not a question there
     'tun.routerReady': '✓ Whole-network tunnel ready',
     'tun.routerUnavailable': '⚠ sing-box is not on the router — the whole-network tunnel cannot start without it. Download it under Required files, or: opkg install sing-box',
+    // sing-box is there, the tunnel still is not: the other half of it is nft
+    'tun.routerNoNft': '⚠ nft (nftables) is not on the router — the whole-network tunnel cannot start without it: opkg install nftables',
 
     't.settingsSaved': 'Settings saved', 't.rulesSaved': 'Rules saved', 't.copied': 'Copied ✓',
     't.routingMode': 'Routing mode', 't.noServerSel': 'No server selected',
@@ -886,6 +900,8 @@ const I18N = {
     'set.tunBackend': 'TUN backend', 'set.leakGuard': 'Leak guard',
     'set.tunAppMode': 'Per-app routing under TUN', 'set.tunApps': 'Selected apps',
     'set.blockUdpInProxyMode': 'Block UDP in proxy mode',
+    // not a setting: an edit of a server the live connection dials (pendingKeys pushes 'servers')
+    'set.servers': 'Edit of the connected server',
     'set.defaultEngine': 'Default core',
     'set.defaultEngineHint': 'Configs without their own core choice, and chains / pool / advanced routing, run on this core. If any member asks for PattN the whole plan runs on PattN.',
     'comp.xrayPattn': 'Xray-PattN core (patterniha fork — accepts plaintext configs)',
