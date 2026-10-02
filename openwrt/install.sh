@@ -60,8 +60,19 @@ echo "(cat it any time); it is never written to the system log."
 # The cores: the app's own download first. The LAN's DNS (REFUSED for the
 # HTTPS/SVCB queries phones and browsers send, expectedIPs) is verified on
 # xray 26.3.27 and newer; the feeds' xray-core is older (23.05: 24.12.31,
-# 24.10: 25.1.30) and ships no geoip.dat/geosite.dat.
-echo "Cores: Settings -> Required files first (the ARM/MIPS build of xray and sing-box, with the geo files):"
-echo "       the LAN's DNS is verified on xray 26.3.27 and newer, and the feed's xray-core is older."
+# 24.10: 25.1.30) and ships no geoip.dat/geosite.dat. Required files is in
+# the :6969 web UI only; LuCI's own Settings tab has no core download.
+echo "Cores: in the web UI (the link above): Settings -> Required files first -- not LuCI's Settings tab."
+echo "       It fetches the ARM/MIPS build of xray and sing-box, with the geo files: the LAN's DNS is"
+echo "       verified on xray 26.3.27 and newer, and the feed's xray-core is older. A new core is used"
+echo "       from the next connect (Disconnect, then Connect)."
 echo "       Fallback only, when the router cannot reach GitHub: opkg install xray-core sing-box"
 echo "Log:   logread -e irnetfree"
+# The browser: up to v1.16.0 every file in the package was dated 1970 and the
+# LuCI views keep their URLs from version to version, so a browser holds the
+# old views as "fresh" for years and never asks the router again; Ctrl+F5 only
+# refreshes what one page load fetches, not the views LuCI loads after it.
+echo "After an upgrade (always, coming from v1.16.0 or older): log out of LuCI, clear this"
+echo "       browser's cached images and files (Ctrl+Shift+Del; on a phone: the browser's"
+echo "       Delete browsing data -> cached images and files), then log in again. Otherwise the"
+echo "       browser keeps showing the old LuCI pages; a private window shows the new ones at once."
