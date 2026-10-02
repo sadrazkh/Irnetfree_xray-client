@@ -57,5 +57,11 @@ echo "IRNetFree is installed and running. Open it here:"
 echo "  http://$LAN:$PORT/?token=$(cat /etc/irnetfree/token 2>/dev/null)"
 echo "or LuCI -> Services -> IRNetFree. The token lives in /etc/irnetfree/token"
 echo "(cat it any time); it is never written to the system log."
-echo "Cores: Settings -> Required files (downloads the ARM/MIPS build), or: opkg install xray-core sing-box"
+# The cores: the app's own download first. The LAN's DNS (REFUSED for the
+# HTTPS/SVCB queries phones and browsers send, expectedIPs) is verified on
+# xray 26.3.27 and newer; the feeds' xray-core is older (23.05: 24.12.31,
+# 24.10: 25.1.30) and ships no geoip.dat/geosite.dat.
+echo "Cores: Settings -> Required files first (the ARM/MIPS build of xray and sing-box, with the geo files):"
+echo "       the LAN's DNS is verified on xray 26.3.27 and newer, and the feed's xray-core is older."
+echo "       Fallback only, when the router cannot reach GitHub: opkg install xray-core sing-box"
 echo "Log:   logread -e irnetfree"
