@@ -140,7 +140,7 @@ service.onEvent((channel, payload) => {
 });
 
 // The LuCI facade: POST /luci/<method>, loopback only, token in the body
-// (see luciApi.js). feat/remote mounts its api here from its start hook —
+// (see luciApi.js). The remote api is assigned in listen's callback below —
 // a getter, so a mount after this line still reaches the facade.
 let remoteApi = null;
 const luci = createLuciApi({ service, remoteApi: () => remoteApi });
@@ -302,8 +302,9 @@ server.on('error', (e) => {
 server.listen(args.port, args.host, () => {
   const shown = isLoopback ? '127.0.0.1' : args.host;
   const port = server.address().port;   // the real one when --port 0 asked for any
-  // remote access (spec §3.5): the relay link and Cloudflare Tunnel, started from <data_dir>/remote.json; never throws
-  require('./remote/api').start({ service, localPort: port, uiToken: TOKEN });
+  // remote access (spec §3.5): the relay link and Cloudflare Tunnel, started from <data_dir>/remote.json; never throws.
+  // Its api is what the LuCI facade's remote_* methods reach (null when it could not start).
+  remoteApi = require('./remote/api').start({ service, localPort: port, uiToken: TOKEN });
   // A token that lives in a file is never printed: on a router this output is
   // syslog (procd), and the file is where LuCI and the installer read it from.
   const q = TOKEN && !args.tokenFile ? ('?token=' + TOKEN) : '';
