@@ -78,7 +78,7 @@ test('data: the app under /usr/lib/irnetfree, the service files, the LuCI files 
   for (const must of [
     `./${PREFIX}/src/server/server.js`, `./${PREFIX}/src/server/service.js`, `./${PREFIX}/src/main/tunOpenwrt.js`,
     `./${PREFIX}/src/renderer/index.html`, `./${PREFIX}/assets/logo.svg`, `./${PREFIX}/package.json`,
-    './etc/init.d/irnetfree', './etc/config/irnetfree', './etc/uci-defaults/99-irnetfree',
+    './etc/init.d/irnetfree', './etc/init.d/irnetfree-ks', './etc/config/irnetfree', './etc/uci-defaults/99-irnetfree',
     './usr/share/luci/menu.d/luci-app-irnetfree.json', './usr/share/rpcd/acl.d/luci-app-irnetfree.json',
     ...LUCI_PAGES
   ]) assert.ok(files.includes(must), `${must} is not in the package`);
@@ -159,12 +159,37 @@ test('the init script: procd, the token FILE (never the token itself), the exact
   assert.match(s, /procd_set_param command \/usr\/bin\/node --max-old-space-size=160 "\$APP" --host "\$bind" --port "\$port" --data-dir "\$data_dir" --token-file "\$data_dir\/token"$/m);
   assert.doesNotMatch(s, /--token "/);
   assert.match(s, /procd_set_param env IRNETFREE_PLATFORM=openwrt/);
-  assert.match(s, /procd_set_param respawn/);
+  // never give up: procd's default (5 crashes in an hour) left a router with no gateway until someone restarted it by hand
+  assert.match(s, /^\tprocd_set_param respawn 3600 5 0$/m);
   // time for a clean teardown of the gateway on stop (procd's default is 5s, then SIGKILL)
   assert.match(s, /procd_set_param term_timeout 15/);
   assert.match(s, /procd_add_reload_trigger irnetfree/);
   // a zone added after the install (a guest Wi-Fi) is picked up at the next start
   assert.match(s, /sh \/usr\/lib\/irnetfree\/fw-forwardings\.sh >\/dev\/null 2>&1 \|\| true/);
+});
+
+test('the kill switch ships: /etc/init.d/irnetfree-ks (START=19, before network at 20) replays the snippet; prerm removes the table and the snippet', () => {
+  const ks = data['./etc/init.d/irnetfree-ks'];
+  assert.ok(ks, 'the boot script is in the package');
+  assert.equal(ks.mode, 0o755);
+  const src = ks.data.toString();
+  assert.ok(!src.includes('\r'), 'LF only');
+  assert.match(src, /^#!\/bin\/sh \/etc\/rc\.common\n/);
+  for (const [re, what] of BASHISMS) assert.doesNotMatch(src, re, what);
+  assert.match(src, /^START=19$/m, 'after firewall (19, sorts first), before network (20): the block is in place before any interface is up');
+  assert.match(src, /^STOP=90$/m);
+  assert.doesNotMatch(src, /USE_PROCD/, 'not a daemon: start() loads a file and returns');
+  assert.match(src, /config_load irnetfree/);
+  assert.match(src, /config_get data_dir main data_dir \/etc\/irnetfree/);
+  assert.match(src, /\[ -s "\$f" \] \|\| return 0/, 'no snippet (disarmed): nothing to do');
+  assert.match(src, /nft -c -f "\$f" 2>\/dev\/null && nft -f "\$f"/, 'validated first: a broken snippet loads nothing');
+  assert.match(src, /^stop\(\) \{\n\tnft delete table inet irnetfree_ks 2>\/dev\/null\n\treturn 0\n\}/m, 'the escape hatch from SSH: lifts the block by hand');
+  const prerm = control['./prerm'].data.toString();
+  assert.match(prerm, /nft delete table inet irnetfree_ks 2>\/dev\/null/);
+  assert.match(prerm, /rm -f "\$data_dir\/killswitch\.nft"/);
+  assert.match(prerm, /\[ -z "\$IPKG_INSTROOT" \]|\[ -n "\$IPKG_INSTROOT" \] \|\|/, 'only on the live system');
+  assert.match(prerm, /default_prerm "\$0" "\$@"/);
+  assert.match(prerm, /^exit \$ret$/m, 'default_prerm’s own status is what opkg sees');
 });
 
 test('fw-forwardings.sh ships executable, LF, POSIX, and both the install and every start run it', () => {

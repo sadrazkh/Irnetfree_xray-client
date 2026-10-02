@@ -275,11 +275,53 @@ function makeTun(settings, { quiet = false } = {}) {
 // tray's Disconnect is the connect's Cancel (trayStopItem).
 let lastStatus = 'disconnected';
 
+// The connection as ONE fact, for app:init (the renderer seeds itself from it
+// on every load — a reload while connected used to start on "disconnected"
+// with no event ever coming to correct it). Mirrors service.js connSnapshot();
+// the desktop has no boot retries, and `armed`/`blocking` is its Windows
+// firewall block (killEngaged).
+const conn = { state: 'disconnected', reason: null, attempt: 0, retryAt: null, since: null, serverId: null, label: null, engine: null, tun: false };
+function noteStatus(p) {
+  if (!p || !p.state) return;
+  const one = (s) => String(s == null ? '' : s).replace(/\s*[\r\n]+\s*/g, ' | ').slice(0, 1000);
+  switch (p.state) {
+    case 'connecting':
+      Object.assign(conn, { state: recovering ? 'reconnecting' : 'connecting', reason: null, attempt: recovering ? conn.attempt : 0, retryAt: null, since: null, serverId: p.serverId || conn.serverId, tun: false });
+      break;
+    case 'connected':
+      Object.assign(conn, { state: 'connected', reason: null, attempt: 0, retryAt: null, since: Date.now(), serverId: p.serverId || null, label: p.label || null, engine: p.engine || null, tun: !!p.tun });
+      break;
+    case 'reconnecting':
+      Object.assign(conn, { state: 'reconnecting', reason: p.reason == null ? null : one(p.reason), attempt: p.attempt || 0, retryAt: p.retryInMs ? Date.now() + p.retryInMs : null, since: null, tun: false });
+      break;
+    case 'reconnect-failed':
+      Object.assign(conn, { state: p.proxyUp ? 'connected' : 'error', reason: p.reason == null ? null : one(p.reason), attempt: 0, retryAt: null, since: p.proxyUp ? conn.since : null, tun: false });
+      break;
+    case 'error':
+      Object.assign(conn, { state: 'error', reason: one(p.message || p.error || 'error'), attempt: 0, retryAt: null, since: null, tun: false });
+      break;
+    case 'disconnected':
+      Object.assign(conn, { state: 'disconnected', reason: null, attempt: 0, retryAt: null, since: null, serverId: null, label: null, engine: null, tun: false });
+      break;
+    default: break;   // cleanup-failed: the state before it stands
+  }
+}
+function connSnapshot() {
+  const s = getSettings();
+  return {
+    state: conn.state, reason: conn.reason, cause: null, attempt: conn.attempt,
+    retryInMs: conn.retryAt == null ? null : Math.max(0, conn.retryAt - Date.now()),
+    since: conn.since, serverId: conn.serverId, label: conn.label, engine: conn.engine, tun: conn.tun,
+    killSwitch: { enabled: !!s.killSwitch, armed: !!killEngaged, blocking: !!killEngaged }
+  };
+}
+
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
   if (channel === 'status' && payload && payload.state) lastStatus = payload.state;
+  if (channel === 'status') noteStatus(payload);
   // the tray marks the live server and lists what a subscription refresh brought
   if (channel === 'status' || channel === 'subs-updated') refreshTray();
 }
@@ -2355,7 +2397,9 @@ function registerIpc() {
     usage: usage ? usage.totals : {},
     // set when the saved data was unreadable at startup (the window did not
     // exist yet, so the store-error event could not have been delivered)
-    storeError: store.loadError
+    storeError: store.loadError,
+    // the connection as it IS: a renderer reload while connected starts connected
+    conn: connSnapshot()
   }));
 
   ipcMain.handle('servers:import', (e, text) => {
