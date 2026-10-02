@@ -163,6 +163,8 @@ const DEFAULT_SETTINGS = {
 
 /** The official core the LAN's DNS plan was verified on (dnsBuilder.js: the hijack's `rules` form). */
 const CORE_DNS_VERIFIED = '26.3.27';
+/** Public anycast resolvers — no in-country resolver for a bypass mode (Google, Cloudflare, Quad9). */
+const PUBLIC_ANYCAST_DNS = new Set(['8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1', '9.9.9.9', '149.112.112.112', '2001:4860:4860::8888', '2001:4860:4860::8844', '2606:4700:4700::1111', '2606:4700:4700::1001', '2620:fe::fe', '2620:fe::9']);
 
 function defaultDataDir() {
   const base = process.env.IRNETFREE_DATA
@@ -1527,6 +1529,23 @@ function createService(opts = {}) {
           line: settings.lang === 'en'
             ? `The xray core is ${v}; the LAN's DNS is verified on ${CORE_DNS_VERIFIED} and newer — download the core under Settings → Required files`
             : `هستهٔ xray نسخهٔ ${v} است؛ DNS شبکه روی ${CORE_DNS_VERIFIED} و بالاتر آزموده شده — هسته را از تنظیمات ← فایل‌های موردنیاز دانلود کن`,
+          level: 'warn'
+        });
+      }
+    }
+    // The resolvers a bypass mode asks direct are asked in plain text from
+    // inside the country: a public anycast one there (a desktop backup's
+    // 8.8.8.8 / 1.1.1.1 — dnsDirect is not kept on a restore) is filtered or
+    // answers poisoned, and tells the ISP every name. Said at every connect
+    // (field report D3).
+    if (OPENWRT) {
+      const anycast = resolverBypassIpsOf(config).filter(ip => PUBLIC_ANYCAST_DNS.has(ip));
+      if (anycast.length) {
+        const mode = String(settings.routingMode || '');
+        send('log', {
+          line: settings.lang === 'en'
+            ? `The in-country DNS of ${mode} holds public resolvers (${anycast.join(', ')}): they are asked in plain text from inside the country, where they are filtered or answer poisoned — put in-country resolvers in the direct DNS list`
+            : `DNS داخلی ${mode} رزولورهای عمومی دارد (${anycast.join(', ')}): از داخل کشور بی‌رمز پرسیده می‌شوند، جایی که فیلتر شده‌اند یا جواب مسموم می‌دهند — رزولورهای داخل کشور را در فهرست DNS مستقیم بگذار`,
           level: 'warn'
         });
       }

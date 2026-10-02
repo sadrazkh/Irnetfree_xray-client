@@ -352,6 +352,8 @@ test('the QEMU smoke proves D3: the in-country resolvers stay in the whole-LAN t
   assert.match(d3, /luci remote_set '\{"cloudflared":\{"enabled":false\}\}'/);
   // the own-lookup rules go with the gateway
   assert.match(d3, /the own-lookup rules stayed after the D3 disconnect/);
+  // Quad9 as the in-country pair is said at warn (field report D3: a desktop's 8.8.8.8 restored on the router)
+  assert.match(d3, /since_mark \| grep -E '\(holds public resolvers\|رزولورهای عمومی دارد\) \\\(9\\\.9\\\.9\\\.9, 149\\\.112\\\.112\\\.112\\\)'/);
   // sing-box's own exclusion list: the entry server stays, the resolvers do not
   assert.match(d3, /route_exclude_address \| index\("192\.168\.1\.1\/32"\)/);
   // the config: dns-internal → direct on :53, the direct dial bound to the WAN device; an Iranian name resolves; conntrack shows the WAN source
