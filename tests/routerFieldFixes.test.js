@@ -172,7 +172,8 @@ test('fix 20: a core that exits while the gateway waits for its port fails the c
   t.after(() => s.service.shutdown());
   const t0 = Date.now();
   await assert.rejects(s.service.invoke('connect', SERVER.id), (e) => {
-    assert.match(e.message, /^The core exited before it opened 127\.0\.0\.1:47808 — the whole-network tunnel was not started\. Its last lines: .*panic: runtime error: index out of range/);
+    // how it ended, and the panic's own line (not the lines after it)
+    assert.match(e.message, /^The core exited \(code=- signal=SIGKILL\) before it opened 127\.0\.0\.1:47808 — the whole-network tunnel was not started\. Its last lines: panic: runtime error: index out of range \[3\] with length 3( mem:.*)?$/);
     return true;
   });
   assert.ok(Date.now() - t0 < 1500, 'aborted when the core went, not after the 20 s wait');
@@ -188,7 +189,7 @@ test('fix 20: the same abort in Persian, and a core that printed nothing still s
   const s = H.start({ settings: { lang: 'fa' } }, { waitForLocalPort: (...a) => wait(...a) });
   const wait = dyingCore(s, []);
   t.after(() => s.service.shutdown());
-  await assert.rejects(s.service.invoke('connect', SERVER.id), /^Error: هسته پیش از باز کردن 127\.0\.0\.1:47808 بسته شد — تونل کل شبکه راه‌اندازی نشد\. آخرین خطوط آن: \(چیزی چاپ نکرد\)$/);
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /^Error: هسته پیش از باز کردن 127\.0\.0\.1:47808 بسته شد \(code=- signal=SIGKILL\) — تونل کل شبکه راه‌اندازی نشد\. آخرین خطوط آن: \(چیزی چاپ نکرد\)( mem:.*)?$/);
 });
 
 test('fix 20: a finalmask server the official core refuses, with no Xray-PattN installed, says what to install — in both languages', async (t) => {
