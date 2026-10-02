@@ -184,6 +184,28 @@ test('status is memoised for 15 s (LuCI polls every 3 s on a Cortex-A7), and an 
   assert.equal(probes(), 6, 'an apply drops the cache so the page sees the change at once');
 });
 
+test('v1.16.1: a status read while an apply runs is not kept past it, and a restart that fails says why', async () => {
+  let up = false;
+  let d;
+  const { run } = fakeRun();
+  const wrapped = async (cmd, args, opts) => {
+    if (cmd === 'pidof') return { code: up ? 0 : 1, stdout: up ? '7\n' : '', stderr: '' };
+    if (cmd === '/etc/init.d/cloudflared' && args[0] === 'restart') {
+      await d.status();   // LuCI polls while the apply runs: "not running" yet
+      up = true;
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    return run(cmd, args, opts);
+  };
+  d = cf.createCloudflared({ run: wrapped, fsImpl: fakeFs({ '/usr/bin/cloudflared': '' }) });
+  assert.deepEqual(await d.apply({ enabled: true, token: 'x'.repeat(50) }), { ok: true });
+  assert.equal((await d.status()).running, true, 'the poll from inside the apply was not cached for 15 s');
+
+  const failing = fakeRun({ '/etc/init.d/cloudflared restart': { code: 1, stdout: '', stderr: 'Command failed: Not found\n' } });
+  const f = cf.createCloudflared({ run: failing.run, fsImpl: fakeFs({ '/usr/bin/cloudflared': '' }) });
+  assert.deepEqual(await f.apply({ enabled: true, token: 'x'.repeat(50) }), { ok: false, error: 'its service did not start: Command failed: Not found' });
+});
+
 test('install: opkg update then opkg install in the background, accepted at once, applied after when asked', async () => {
   const files = {};
   const { run, calls } = fakeRun({ 'opkg install cloudflared': { code: 0, stdout: 'Installing cloudflared', stderr: '' } });
