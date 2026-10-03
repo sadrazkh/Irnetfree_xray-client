@@ -3049,7 +3049,9 @@ async function downloadComponent(key, btn) {
   } else {
     state.assets = res.assets || state.assets;
     renderComponents();
-    toast(t('t.downloadFailed') + ': ' + (res.error || ''), 'err');
+    // a version install (corePicker.js) holds this core right now: said, not an error
+    if (res.coreBusy) toast(t('comp.coreBusy'), 'warn');
+    else toast(t('t.downloadFailed') + ': ' + (res.error || ''), 'err');
   }
 }
 
@@ -3065,11 +3067,17 @@ function openCorePicker(key, opener) {
     opener,
     busy: () => !!(state.connected || state.connecting),
     toast,
-    onInstalled: (res) => {
-      state.assets = res.assets || state.assets;
-      state.tunAvailable = !!res.tunAvailable;
+    onInstalled: async (res) => {
+      let r = res || {};
+      // an install whose answer was lost (the picker asked the service how it
+      // ended) carries no assets: read them, and keep what is not said
+      if (!r.assets && window.api.assetsStatus) {
+        try { r = Object.assign({}, r, { assets: await window.api.assetsStatus() }); } catch { /* the rows keep what they had */ }
+      }
+      if (r.assets) state.assets = r.assets;
+      if (typeof r.tunAvailable === 'boolean') state.tunAvailable = r.tunAvailable;
       renderComponents();
-      updateXrayStatus(res.xrayReady);
+      updateXrayStatus(typeof r.xrayReady === 'boolean' ? r.xrayReady : anyXrayCore());
       updateTunStatus();
       refreshXrayVersion();
     }

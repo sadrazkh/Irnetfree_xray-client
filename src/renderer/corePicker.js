@@ -93,10 +93,12 @@
     job: null,          // the install in flight or just ended: { component, tag, card, pct, phase, error, refused }
     serverBusy: false,  // refused as connected — until the window's own state says otherwise
     downOnBackdrop: null,
+    otherTimer: 0,      // asking again while another client's install runs (watchOther)
     listening: false
   };
 
-  const running = () => !!(ui.job && (ui.job.phase === 'download' || ui.job.phase === 'verify'));
+  // 'checking': the answer was lost on the way (the remote relay's 60 s limit, a dropped call) and the service is being asked how it ended
+  const running = () => !!(ui.job && (ui.job.phase === 'download' || ui.job.phase === 'verify' || ui.job.phase === 'checking'));
   /** Connected or connecting: the window's state, the service's own word, or a refusal just now. */
   const busy = () => {
     let mine = false;
@@ -169,6 +171,10 @@
     const busyNote = el('p', 'cv-busy');
     busyNote.setAttribute('role', 'status');
     busyNote.hidden = true;
+    // another install running — this window's on another core, or another client's (the service says)
+    const otherNote = el('p', 'cv-other');
+    otherNote.setAttribute('role', 'status');
+    otherNote.hidden = true;
 
     const body = el('div', 'modal-body cv-body');
     const list = el('div', 'cv-list');
@@ -176,7 +182,7 @@
     // the note about ⭐ ends the list, in the part that scrolls: a phone keeps its height for the cards
     const foot = el('p', 'cv-foot');
     body.append(list, foot);
-    dialog.append(head, bar, busyNote, body);
+    dialog.append(head, bar, busyNote, otherNote, body);
     overlay.append(dialog);
     document.body.appendChild(overlay);
 
@@ -190,7 +196,7 @@
       ui.downOnBackdrop = null;
       if (e.target === overlay && fromBackdrop) closeModal();
     });
-    ui.m = { overlay, dialog, title, installed, target, close, segStable, segPre, busyNote, list, foot };
+    ui.m = { overlay, dialog, title, installed, target, close, segStable, segPre, busyNote, otherNote, list, foot };
     return ui.m;
   }
 
@@ -364,46 +370,120 @@
   async function install(card) {
     if (busy() || running()) { paint(); return; }
     const component = ui.component;
-    const job = { component, tag: card.tag, version: card.version, card, pct: null, phase: 'download', error: '', refused: null, dom: null };
+    const job = { component, tag: card.tag, version: card.version, card, prerelease: ui.prerelease, pct: null, phase: 'download', error: '', refused: null, reason: null, lost: null, dom: null };
     ui.job = job;
     ui.confirm = null;
     paint();
     let res;
+    let lost = false;
     try {
       if (!window.api || typeof window.api.installCoreVersion !== 'function') throw new Error('this page cannot install a version — reload it');
       res = await window.api.installCoreVersion(component, card.tag);
     } catch (e) {
-      res = { ok: false, error: (e && e.message) || String(e) };
+      lost = true;   // the bridge threw: the answer, not the install, is what failed
+      res = null;
     }
     if (ui.job !== job) return;
-    res = res && typeof res === 'object' ? res : { ok: false, error: 'no answer' };
+    // An answer that never came — the remote relay ends a request at 60 s, a
+    // proxy answers 504, a call is dropped — says nothing about the router: it
+    // may be extracting the core right now. Only the service's own failure is
+    // "untouched"; for this one the service is asked how it ended (check()).
+    if (lost || !res || typeof res !== 'object' || typeof res.ok !== 'boolean') {
+      job.phase = 'checking';
+      job.checkSince = Date.now();
+      if (ui.open) paint();
+      check(job);
+      return;
+    }
+    finish(job, res);
+  }
+
+  /** The asked-again's pace, and how long a lost answer is chased before "unknown". */
+  const CHECK_EVERY_MS = 3000;
+  const CHECK_FOR_MS = 30 * 60 * 1000;
+
+  /**
+   * A lost answer: ask cores:versions until the install is over — while the
+   * service names this tag in `installing` it is still running; then the
+   * installed version says how it ended. A question that fails (the router out
+   * of reach for a moment) is asked again.
+   */
+  function check(job) {
+    setTimeout(async () => {
+      if (ui.job !== job || job.phase !== 'checking') return;
+      let res = null;
+      try { res = await window.api.coreVersions(job.component, { prerelease: job.prerelease }); } catch { res = null; }
+      if (ui.job !== job || job.phase !== 'checking') return;
+      const answered = !!res && typeof res === 'object' && typeof res.installed === 'string';
+      const still = answered && res.installing && res.installing.component === job.component && res.installing.tag === job.tag;
+      if (!answered || still) {
+        if (Date.now() - job.checkSince < CHECK_FOR_MS) { check(job); return; }
+        job.lost = 'unknown';
+        finish(job, { ok: false });
+        return;
+      }
+      // the answer it asked for is the list now (the badges follow the version installed)
+      if (res.ok && ui.component === job.component) { ui.res = res; ui.fresh = true; }
+      if (sameVersion(res.installed, job.version)) {
+        finish(job, { ok: true, component: job.component, tag: job.tag, version: job.version, checked: true });
+        return;
+      }
+      job.lost = 'installed';
+      job.lostInstalled = res.installed;
+      finish(job, { ok: false });
+    }, CHECK_EVERY_MS);
+  }
+
+  const sameVersion = (a, b) => !!a && !!b && String(a).replace(/^v/i, '') === String(b).replace(/^v/i, '');
+
+  /** How an install ended — the service's answer, or what check() learned. */
+  function finish(job, res) {
+    const component = job.component;
     const shown = ui.open && ui.component === component;
-    const name = { core: NAMES[component], v: 'v' + card.version };
+    const name = { core: NAMES[component], v: 'v' + job.version };
     if (res.ok) {
       job.phase = 'done';
       try { if (ui.hooks.onInstalled) ui.hooks.onInstalled(res, component); } catch { /* the page refreshes itself next time */ }
-      if (!shown) { ui.job = null; toast(fill(t('cv.installedToast'), name), 'ok'); return; }
+      if (!shown) {
+        ui.job = null;
+        toast(fill(t('cv.installedToast'), name), 'ok');
+        if (ui.open) paint();   // another core's modal: free again
+        return;
+      }
       paint();
-      load();   // quiet: the badges and the actions follow the version now installed
+      if (!res.checked) load();   // quiet: the badges and the actions follow the version now installed
       return;
     }
     if (res.refused === 'connected') {
       ui.job = null;
       ui.serverBusy = true;
       if (!shown) toast(t('cv.busy'), 'warn');
-      paint();
+      if (ui.open) paint();
       return;
     }
     job.phase = 'error';
     job.refused = res.refused || null;
-    job.error = res.refused === 'installing' ? '' : String(res.error || '');
+    job.reason = res.reason || null;
+    // the reasons the page words itself carry no raw text (EPERM, a lock)
+    job.error = job.refused || job.reason === 'in-use' || job.lost ? '' : String(res.error || '');
     if (!shown) {
       ui.job = null;
-      toast(fill(t('cv.failedToast'), name) + (job.error ? ': ' + job.error : ''), 'err');
+      toast(fill(t('cv.failedToast'), name) + ': ' + (job.error || failText(job)), 'err');
+      if (ui.open) paint();
       return;
     }
     paint();
-    focusIn(card.tag, 'retry');
+    focusIn(job.tag, 'retry');
+  }
+
+  /** The line a failed card says. Only the service's own failure is "untouched". */
+  function failText(job) {
+    if (job.refused === 'installing') return t('cv.oneAtATime');
+    if (job.refused === 'core-busy') return t('cv.coreBusy');
+    if (job.reason === 'in-use') return t('cv.inUse');
+    if (job.lost === 'installed') return fill(t('cv.lostNot'), { v: job.lostInstalled ? 'v' + job.lostInstalled : t('cv.notInstalled') });
+    if (job.lost === 'unknown') return t('cv.lostUnknown');
+    return t('cv.failed');
   }
 
   /** The asset-progress event (app.js): the picker's own install only. True when it was ours. */
@@ -412,7 +492,7 @@
     if (!d || !job || !running() || d.component !== job.component) return false;
     const pct = Math.max(0, Math.min(100, Math.round(Number(d.pct) || 0)));
     job.pct = pct;
-    if (pct >= 100) job.phase = 'verify';
+    if (pct >= 100 && job.phase === 'download') job.phase = 'verify';
     showProgress(job);
     return true;
   }
@@ -444,6 +524,12 @@
     }
     m.busyNote.textContent = t('cv.busy');
     m.busyNote.hidden = !blocked;
+    // another install running: this window's on another core, or another client's (the service's word)
+    const other = otherInstall();
+    m.otherNote.textContent = other ? fill(t('cv.otherInstall'), { core: NAMES[other.component] || other.component, v: other.tag }) : '';
+    m.otherNote.hidden = !other;
+    // asked again once the answer in hand is the latest (a reload in flight answers first)
+    if (other && other.fromService && !ui.loading && !ui.refreshing) watchOther();
     m.foot.textContent = t('cv.foot');
 
     m.list.setAttribute('aria-busy', String(!!ui.loading));
@@ -456,9 +542,32 @@
     else if (!res) m.list.replaceChildren();
     else if (!res.ok) m.list.replaceChildren(errorPanel(res));
     else if (!cards.length) m.list.replaceChildren(emptyPanel(res));
-    else m.list.replaceChildren(...cards.map((c, i) => cardNode(c, i, blocked)));
+    else m.list.replaceChildren(...cards.map((c, i) => cardNode(c, i, blocked || !!other)));
     // the control that had the focus, rebuilt — or the dialog, never the page behind
     if (kept && !(kept.tag && kept.role && focusIn(kept.tag, kept.role, false)) && ui.open) m.dialog.focus();
+  }
+
+  /**
+   * An install other than this card's: { component, tag, fromService }, or null.
+   * This window's own job on another core (closed, then another core opened),
+   * or the one the service names (`installing`, another client of the router).
+   */
+  function otherInstall() {
+    if (running() && ui.job.component !== ui.component) return { component: ui.job.component, tag: 'v' + ui.job.version, fromService: false };
+    const i = ui.res && ui.res.installing;
+    if (!i || !i.component || !i.tag) return null;
+    if (ui.job && ui.job.component === i.component && ui.job.tag === i.tag) return null;   // this window's own
+    return { component: i.component, tag: String(i.tag), fromService: true };
+  }
+
+  /** Another client's install: ask again a little later, until the service says it is over. */
+  const OTHER_EVERY_MS = 4000;
+  function watchOther() {
+    if (ui.otherTimer) return;
+    ui.otherTimer = setTimeout(() => {
+      ui.otherTimer = 0;
+      if (ui.open && !running()) load();
+    }, OTHER_EVERY_MS);
   }
 
   function skeleton() {
@@ -580,7 +689,7 @@
     if (job.phase === 'error') {
       const box = el('div', 'cv-fail');
       box.setAttribute('role', 'alert');
-      box.append(el('p', 'cv-fail-text', t(job.refused === 'installing' ? 'cv.oneAtATime' : 'cv.failed')));
+      box.append(el('p', 'cv-fail-text', failText(job)));
       if (job.error) {
         const why = el('code', 'cv-fail-why', job.error);
         why.setAttribute('dir', 'ltr');
@@ -613,7 +722,8 @@
     const d = job.dom;
     if (!d) return;
     const verifying = job.phase === 'verify';
-    const known = !verifying && Number.isFinite(job.pct);
+    const checking = job.phase === 'checking';
+    const known = !verifying && !checking && Number.isFinite(job.pct);
     d.track.classList.toggle('is-indeterminate', !known);
     if (known) {
       d.track.setAttribute('aria-valuenow', String(job.pct));
@@ -622,7 +732,7 @@
       d.track.removeAttribute('aria-valuenow');
       d.bar.style.width = '';
     }
-    d.text.textContent = verifying ? t('cv.verifying') : known ? `${t('cv.downloading')} ${job.pct}%` : t('cv.downloading');
+    d.text.textContent = checking ? t('cv.checking') : verifying ? t('cv.verifying') : known ? `${t('cv.downloading')} ${job.pct}%` : t('cv.downloading');
   }
 
   window.corePicker = {

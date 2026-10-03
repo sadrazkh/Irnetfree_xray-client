@@ -489,8 +489,9 @@
 .cv-seg .seg-btn { white-space: nowrap; }
 .cv-seg .seg-btn:disabled { cursor: not-allowed; opacity: .6; }
 
-/* "disconnect first": a held state of the whole modal, so it sits above the list */
-.cv-busy {
+/* "disconnect first": a held state of the whole modal, so it sits above the list;
+   another install running is the same kind of note, in the info colour */
+.cv-busy, .cv-other {
   margin-block: 12px 0;
   margin-inline: 18px;
   padding-block: 10px;
@@ -503,6 +504,7 @@
   font-weight: 600;
   line-height: 1.7;
 }
+.cv-other { border-inline-start-color: var(--info); background: var(--infoSoft); color: var(--info); }
 
 .cv-body {
   flex: 1 1 auto;
