@@ -83,7 +83,7 @@ function hintsHarness({ servers, subs = SUBS, rules = [], ifaces = {}, platform 
       if (throwOn === 'store') throw new Error('store gone');
       return k === 'servers' ? servers : (k === 'subscriptions' ? subs : d);
     } },
-    os: { networkInterfaces: () => ifaces },
+    os: { networkInterfaces: () => { logs.reads = (logs.reads || 0) + 1; return ifaces; } },
     send: (ch, p) => { if (ch === 'log') logs.push(p); },
     getSettings: () => ({ routeRules: rules }),
     getChains: () => [{ id: 'tes', name: 'Tes Chain', members: ['hop', 'b47f'] }],
@@ -114,7 +114,7 @@ function ownerLaptop() {
 test('W1/W4 at connect on the owner’s laptop: the twins are told apart by group, the home LAN in the broad corporate rule is an info line only', () => {
   const { plan, servers } = ownerLaptop();
   const h = hintsHarness({ servers, rules: OWNER_RULES, ifaces: Object.assign({}, WIFI, OUR_TUN) });
-  const out = h.ctx.connectHints(plan);
+  const out = h.ctx.connectHints(plan, { tun: true });
   assert.deepEqual(plain(out), [
     // the twin is in a live subscription and the chain's copy was added by hand: deleting the twin would not last
     { id: 'wgSharedKeySub', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info', otherInSub: true, byHand: true },
@@ -136,7 +136,7 @@ test('W4 at connect: a LAN that holds the corporate WireGuard’s DNS is a warn 
     servers: [HOP, chainWg], rules: OWNER_RULES,
     ifaces: { Ethernet: [{ address: '192.168.60.23', netmask: '255.255.255.0', family: 'IPv4', internal: false, cidr: '192.168.60.23/24' }] }
   });
-  assert.deepEqual(plain(h.ctx.connectHints(plan)), [
+  assert.deepEqual(plain(h.ctx.connectHints(plan, { tun: true })), [
     { id: 'lanInRange', lan: '192.168.60.0/24', iface: 'Ethernet', range: '192.168.0.0/16', target: 'Tes Chain', address: '192.168.60.1', key: 'DNS' }
   ]);
   assert.deepEqual(h.logs.map((l) => l.level), ['warn']);
@@ -148,36 +148,55 @@ test('W1/W4 at connect: a store with one record per identity says nothing to the
   const lanIfaces = WIFI;
   // one record per identity, corporate ranges that do not touch this LAN
   const healthy = hintsHarness({ servers: [chainWg], rules: [{ type: 'ip', value: '192.168.60.0/24', target: 'b47f' }], ifaces: lanIfaces });
-  assert.deepEqual(plain(healthy.ctx.connectHints({ mode: 'advanced', serversById: { b47f: chainWg }, rules: [{ type: 'ip', value: '192.168.60.0/24', target: 'b47f' }], def: 'b47f' })), []);
+  assert.deepEqual(plain(healthy.ctx.connectHints({ mode: 'advanced', serversById: { b47f: chainWg }, rules: [{ type: 'ip', value: '192.168.60.0/24', target: 'b47f' }], def: 'b47f' }, { tun: true })), []);
   assert.equal(healthy.logs.length, 0);
   // the owner's broad rule around this LAN, one record per identity: nothing for the window, one info line
   const broad = hintsHarness({ servers: [HOP, chainWg], rules: OWNER_RULES, ifaces: lanIfaces });
-  assert.deepEqual(plain(broad.ctx.connectHints({ mode: 'advanced', serversById: { hop: HOP, b47f: chainWg }, chainsById: { tes: [HOP, chainWg] }, chain: [], rules: OWNER_RULES, def: 'hop' })), []);
+  assert.deepEqual(plain(broad.ctx.connectHints({ mode: 'advanced', serversById: { hop: HOP, b47f: chainWg }, chainsById: { tes: [HOP, chainWg] }, chain: [], rules: OWNER_RULES, def: 'hop' }, { tun: true })), []);
   assert.deepEqual(broad.logs.map((l) => l.level), ['info']);
   // a single config: its stored rules are not in this plan
   const single = hintsHarness({ servers: [chainWg], rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'b47f' }], ifaces: lanIfaces });
-  assert.deepEqual(plain(single.ctx.connectHints({ mode: 'single', server: chainWg })), []);
+  assert.deepEqual(plain(single.ctx.connectHints({ mode: 'single', server: chainWg }, { tun: true })), []);
   // a throw anywhere is swallowed: the connect goes on exactly as before
   const broken = hintsHarness({ servers: [], throwOn: 'store' });
-  assert.deepEqual(plain(broken.ctx.connectHints({ mode: 'single', server: chainWg })), []);
+  assert.deepEqual(plain(broken.ctx.connectHints({ mode: 'single', server: chainWg }, { tun: true })), []);
   assert.deepEqual(plain(broken.ctx.connectHints(null)), []);
+});
+
+test('W4 is a fact about the tunnel’s routes: with TUN off (the system proxy bypasses private ranges anyway) it is not asked — W1 still is', () => {
+  const { plan, servers } = ownerLaptop();
+  const lan60 = { Ethernet: [{ address: '192.168.60.23', netmask: '255.255.255.0', family: 'IPv4', internal: false, cidr: '192.168.60.23/24' }] };
+  const off = hintsHarness({ servers, rules: OWNER_RULES, ifaces: lan60 });
+  assert.deepEqual(plain(off.ctx.connectHints(plan, { tun: false })).map((n) => n.id), ['wgSharedKeySub', 'wgSharedAddress']);
+  assert.deepEqual(off.logs.map((l) => l.level), ['warn', 'warn'], 'no W4 line either');
+  assert.equal(off.logs.reads || 0, 0, 'this PC’s networks are not even read');
+  assert.deepEqual(plain(off.ctx.connectHints(plan)).map((n) => n.id), ['wgSharedKeySub', 'wgSharedAddress'], 'no TUN said: none');
+  const on = hintsHarness({ servers, rules: OWNER_RULES, ifaces: lan60 });
+  assert.deepEqual(plain(on.ctx.connectHints(plan, { tun: true })).map((n) => n.id), ['wgSharedKeySub', 'wgSharedAddress', 'lanInRange']);
+  // which notices need the tunnel: W4's three, nothing else
+  assert.deepEqual(['wgSharedKey', 'wgSharedKeySub', 'wgSharedAddress', 'wgSharedAddressSub', 'lanInRange', 'rangeInLan', 'lanInBroadRange', 'corpDnsOff']
+    .filter((id) => notices.needsTun({ id })), ['lanInRange', 'rangeInLan', 'lanInBroadRange']);
+  assert.equal(notices.needsTun(null), false);
 });
 
 test('the connect asks for the notices on Windows only, after the plan is built and before anything is started, and the connected status carries them', () => {
   // W3: the existing managed-DNS line stays exactly as it was, and on Windows becomes a notice too
   assert.match(CONNECT, /line: `Managed DNS is off, so the resolver of your WireGuard \(\$\{corp\.join\(', '\)\}\) is not in this config and names inside that network will not resolve — turn Settings → DNS → "DNS managed by the app" back on`,\n\s*level: 'warn'\n\s*\}\);\n\s*if \(process\.platform === 'win32'\) notices\.push\(\{ id: 'corpDnsOff', servers: corp\.join\(', '\) \}\);/);
-  assert.match(CONNECT, /\n {2}if \(process\.platform === 'win32'\) notices\.push\(\.\.\.connectHints\(plan\)\);\n/);
+  // W4 only for a connect that asks for the tunnel
+  assert.match(CONNECT, /\n {2}if \(process\.platform === 'win32'\) notices\.push\(\.\.\.connectHints\(plan, \{ tun: !!settings\.tunMode \}\)\);\n/);
   const built = CONNECT.indexOf('= buildActive(serverId, settings);');
   const declared = CONNECT.indexOf('const notices = [];');
-  const asked = CONNECT.indexOf('notices.push(...connectHints(plan))');
+  const asked = CONNECT.indexOf('notices.push(...connectHints(plan, { tun: !!settings.tunMode }))');
   assert.ok(built > -1 && built < declared && declared < asked, 'after the plan is built');
   for (const later of ["send('status', { state: 'connecting', serverId });", 'xray.validateWithFallback(', 'xray.start(', 'myTun.start(', 'leakGuard.engage(']) {
     const at = CONNECT.indexOf(later);
     assert.ok(at > asked, `${later} must come after the notices are gathered`);
   }
-  assert.match(CONNECT, /tun: tun\.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys\(\), notices\n\s*\}\);/);
+  // …and only while that tunnel is up: a TUN that did not start (proxy only) drops W4 from the status
+  assert.match(CONNECT, /tun: tun\.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys\(\),\n\s*notices: tun\.active \? notices : notices\.filter\(\(n\) => !needsTun\(n\)\)\n\s*\}\);/);
+  assert.match(MAIN, /^const \{ [^}]*\bneedsTun\b[^}]* \} = require\('\.\/connectNotices'\);$/m);
   // gathered once, said once: nothing else in the connect reads or changes them
-  assert.equal(CONNECT.split('notices').length - 1, 4, 'declared, W3, W1/W4, the status — and nowhere else');
+  assert.equal(CONNECT.split('notices').length - 1, 6, 'declared, W3, W1/W4, the status (three times in its one line) — and nowhere else');
 });
 
 /* ------------------------------ main: "give my internet back" (guard:release) ------------------------------ */
