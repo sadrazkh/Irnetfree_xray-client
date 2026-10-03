@@ -804,19 +804,50 @@ button.ins-row:hover .ins-label { color: var(--accentInk); }
 }
 .toast-action { flex: 0 0 auto; }
 
+/* The banners (kill switch, held DNS, unapplied settings, the logon task) float
+   in one stack over the window's foot, centred, above the toast's resting
+   place. They must be fixed: html/body never scroll and .layout fills the
+   window, so a banner in the flow after it lies just below the screen — where
+   all four sat, unseen, from the 52ac922 redesign to v1.16.3
+   (tests/bannerLayout.test.js renders it). Shown together they stack in markup
+   order; the stack itself takes no clicks, so the empty stack is not a dead
+   zone over the page. Over the pages and their menus, under the modals and the
+   toast. */
+.banner-stack {
+  position: fixed;
+  left: 50%;
+  bottom: 70px;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: max-content;
+  max-width: min(640px, calc(100vw - 24px));
+  max-height: calc(100vh - var(--tbh) - 86px);
+  overflow-y: auto;
+  pointer-events: none;
+}
+.banner-stack > * { pointer-events: auto; }
 .kill-banner, .pending-banner {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px 12px;
   padding: 12px 15px;
   border-radius: var(--r5);
-  margin-bottom: 14px;
   font-size: 12px;
+  box-shadow: var(--shadow);
 }
-.kill-banner { background: var(--dangerSoft); border: 1px solid var(--danger); color: var(--danger); }
-.pending-banner { background: var(--accentSoft); border: 1px solid var(--accentLine); color: var(--accentInk); }
-.kill-banner-text, .pending-banner-text { flex: 1; line-height: 1.7; }
-.kill-banner-actions, .pending-banner-actions { display: flex; gap: 8px; }
+/* the soft tints are translucent: over the page they sit on the opaque panel */
+.kill-banner { background: linear-gradient(var(--dangerSoft), var(--dangerSoft)), var(--panel); border: 1px solid var(--danger); color: var(--danger); }
+.pending-banner { background: linear-gradient(var(--accentSoft), var(--accentSoft)), var(--panel); border: 1px solid var(--accentLine); color: var(--accentInk); }
+/* a long path (the logon-task banner names two) wraps instead of running off the side */
+.kill-banner-text, .pending-banner-text { flex: 1 1 auto; min-width: 0; line-height: 1.7; overflow-wrap: anywhere; }
+.kill-banner-actions, .pending-banner-actions { display: flex; gap: 8px; flex: 0 0 auto; margin-inline-start: auto; }
+/* a phone (the router's page): the buttons go under the text rather than squeeze it */
+@media (max-width: 560px) {
+  .kill-banner, .pending-banner { flex-wrap: wrap; }
+}
 
 /* ----------------------------- simple / advanced ----------------------------- */
 
