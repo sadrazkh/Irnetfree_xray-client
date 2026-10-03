@@ -441,6 +441,10 @@ test('the QEMU smoke proves v1.16.2: 65536 open files for node and both cores, u
   assert.match(v, /"dnsRemote":\["https:\/\/192\.0\.2\.1\/dns-query"\]/);
   assert.match(v, /inlan node \/tmp\/irnf-flood\.js dns 192\.168\.1\.1 400 "b\$\$" 3 2000 100/);
   assert.match(v, /grep -ci 'too many open files' \/tmp\/irnf-flood-b\.log/);
+  // the outage proven by a name that exists getting no address — not by the flood's answers, which the feed cores never give
+  assert.match(v, /out="\$\(inlan nslookup www\.example\.com 192\.168\.1\.1 2>&1 \|\| true\)"/);
+  assert.match(v, /a name resolved with the DoH black-holed — the outage was not simulated/);
+  assert.doesNotMatch(v, /\.answered \* 4 >= \.sent \* 3/, 'REFUSED from an overflowing dnsmasq is no answer');
   assert.match(v, /resolves example\.org/);
   // the flood script inside: arrow functions only (the bashism check reads heredocs too)
   assert.doesNotMatch(v, /^\s*function\s/m);
