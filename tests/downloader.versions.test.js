@@ -345,6 +345,51 @@ test('installVersion: only the three cores, only a release tag — nothing fetch
   assert.deepEqual(h.calls, []);
 });
 
+/* ------------------------------ review fixes: one core, one writer (M1); the file in use (M2) ------------------------------ */
+
+test('M1: Update (download) and a version install never run on the same core at once — either way round; other cores are free', async () => {
+  const h = installer();
+  let release;
+  h.d.getXray = () => new Promise((r) => { release = () => r({ ok: true, files: [] }); });
+  const update = h.d.download('xray-pattn');
+  await assert.rejects(h.d.installVersion('xray-pattn', 'v26.9.13'), (e) => e.code === 'ECOREBUSY' && /another download or install of this core is running/.test(e.message));
+  assert.equal(h.installed(), 'WORKING CORE');
+  assert.equal(h.calls.filter((c) => c.startsWith('api:')).length, 0, 'refused before asking GitHub');
+  // the official core is another file: installed meanwhile
+  assert.equal((await h.d.installVersion('xray', 'v26.9.13')).ok, true);
+  release();
+  await update;
+  // the other way round: an Update while an install downloads
+  let open;
+  h.d.fetchFile = (url, dest) => new Promise((r) => { open = () => { fs.writeFileSync(dest, 'zip'); r(); }; });
+  const install = h.d.installVersion('xray-pattn', 'v26.9.13');
+  await assert.rejects(h.d.download('xray-pattn'), (e) => e.code === 'ECOREBUSY');
+  await new Promise((r) => setImmediate(r));
+  open();
+  await install;
+  assert.equal(h.installed(), 'NEW CORE');
+  // released after a failure too; the geo files are never held
+  h.d.getXray = async () => { throw new Error('HTTP 403'); };
+  await assert.rejects(h.d.download('xray-pattn'), /HTTP 403/);
+  h.d.getXray = async () => ({ ok: true, files: [] });
+  assert.deepEqual(await h.d.download('xray-pattn'), { ok: true, files: [] });
+  h.d.getGeo = async () => ({ ok: true, files: [] });
+  await Promise.all([h.d.download('geo'), h.d.download('geo')]);
+});
+
+test('M2: Windows — the core file held by a short-lived core (a latency test, a config check) is said in plain words, and nothing is replaced', async () => {
+  for (const code of ['EPERM', 'EBUSY', 'EACCES']) {
+    const h = installer({ platform: 'win32', arch: 'x64' });
+    h.d.place = () => { throw Object.assign(new Error(`${code}: operation not permitted, rename 'C:\\bin\\xray-pattn.exe.new' -> 'C:\\bin\\xray-pattn.exe'`), { code }); };
+    await assert.rejects(h.d.installVersion('xray-pattn', 'v26.9.13'),
+      (e) => e.code === 'ECOREINUSE' && /in use/.test(e.message) && /nothing was replaced/.test(e.message) && !/rename/.test(e.message), code);
+    assert.equal(h.installed(), 'WORKING CORE');
+  }
+  // anything else from place() goes on as it was
+  const h = installer({ platform: 'win32', arch: 'x64', fail: 'place' });
+  await assert.rejects(h.d.installVersion('xray-pattn', 'v26.9.13'), (e) => /ENOSPC/.test(e.message) && e.code === 'ENOSPC');
+});
+
 /* ------------------------------ the real `<bin> version` ------------------------------ */
 
 test('runVersion: a binary that fails says why in a few words — never its path, which could read as a version', { timeout: 30000 }, async () => {

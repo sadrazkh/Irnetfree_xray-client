@@ -275,6 +275,21 @@ test('cores:install — one at a time; a failure is said, nothing is refreshed, 
   assert.equal((await h.api.install({ component: 'xray', tag: 'v26.3.27' })).ok, true, 'the lock went with the failure');
 });
 
+test('cores:install — another download of this core (M1) and the core file in use (M2) come back as reasons, not raw errors', async () => {
+  const busy = makeApi();
+  busy.downloader.installVersion = async () => { throw Object.assign(new Error('another download or install of this core is running'), { code: 'ECOREBUSY' }); };
+  assert.deepEqual(await busy.api.install({ component: 'sing-box', tag: 'v1.13.14' }), { ok: false, refused: 'core-busy', component: 'sing-box', tag: 'v1.13.14' });
+  assert.deepEqual(busy.after, []);
+  const inUse = makeApi();
+  inUse.downloader.installVersion = async () => { throw Object.assign(new Error('the core file is in use — close latency tests and try again; nothing was replaced'), { code: 'ECOREINUSE' }); };
+  const res = await inUse.api.install({ component: 'xray', tag: 'v26.3.27' });
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'in-use');
+  assert.match(res.error, /in use/);
+  assert.deepEqual(res.assets, { 'xray-pattn': true });
+  assert.ok(inUse.log.some(([level, line]) => level === 'warn' && /in use/.test(line)), 'a warning, not an error: nothing broke');
+});
+
 test('cores:install — only the three cores, only a release tag', async () => {
   const h = makeApi();
   for (const [component, tag] of [['geo', 'v1.0.0'], ['wintun', 'v0.14.1'], ['xray', '../../etc/passwd'], ['xray', 'latest'], ['xray', ''], ['xray', 'v26.3.27/../x']]) {

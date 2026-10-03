@@ -157,6 +157,20 @@ test('router: the update button now forgets a sing-box version too — the row s
   assert.equal(s.state.xray.forgot, 1);
 });
 
+test('router: the update button says when a version install holds the same core (M1) — a flag the page words, not a raw error', async (t) => {
+  const s = start({}, { downloader: (opts) => {
+    const d = fakeGithub([])(opts);
+    d.download = async () => { throw Object.assign(new Error('another download or install of this core is running'), { code: 'ECOREBUSY' }); };
+    return d;
+  } });
+  t.after(() => s.service.shutdown());
+  const res = await s.service.invoke('assets:download', 'xray-pattn');
+  assert.equal(res.ok, false);
+  assert.equal(res.coreBusy, true);
+  assert.match(res.error, /another download or install of this core/);
+  assert.ok(res.assets);
+});
+
 /* ------------------------------ main.js, as text ------------------------------ */
 
 const MAIN = R('src', 'main', 'main.js');
@@ -192,6 +206,8 @@ test('desktop: after a core changed — a download or a chosen version — the s
   const dl = MAIN.slice(MAIN.indexOf("ipcMain.handle('assets:download'"), MAIN.indexOf("ipcMain.handle('xray:locate'"));
   assert.match(dl, /if \(CORE_IDS\.includes\(component\)\) afterCoreChanged\(component\);/);
   assert.doesNotMatch(dl, /xray\.binPath = null/, 'one place says what a core change clears');
+  // another download or install of the same core (M1): a flag the page words in its language
+  assert.match(dl, /return \{ ok: false, error: err\.message, coreBusy: err\.code === 'ECOREBUSY', assets: assetStatus\(\) \};/);
 });
 
 test('the router’s service wires the same shared handlers', () => {

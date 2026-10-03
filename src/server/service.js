@@ -3133,7 +3133,11 @@ function createService(opts = {}) {
         // a core (sing-box too: its version is shown beside it now) — see afterCoreChanged
         if (CORE_IDS.includes(component)) afterCoreChanged(component);
         return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(), xrayReady: xray.binExists() };
-      } catch (err) { send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' }); return { ok: false, error: err.message, assets: assetStatus() }; }
+      } catch (err) {
+        send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' });
+        // coreBusy: a version install holds this core (Downloader.holdCore) — the page words it
+        return { ok: false, error: err.message, coreBusy: err.code === 'ECOREBUSY', assets: assetStatus() };
+      }
     },
     // a core's releases for the picker, and one installed by its tag (refused while connected or connecting)
     'cores:versions': (arg) => coreVersions.versions(arg),
