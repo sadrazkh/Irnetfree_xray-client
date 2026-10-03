@@ -767,6 +767,31 @@ test('a rebuild the core refuses (the store changed under the live connection) s
   await until(() => connectedCount(s) === 2, 'the rare retry', 3000);
 });
 
+test('…but a binary that is gone for a while (sing-box or the core: an opkg upgrade, a file held) is no refusal — the recovery keeps its quick backoff and comes back by itself', async (t) => {
+  // the QEMU smoke holds /usr/bin/sing-box during a recovery and gives it back: run 37080745024 waited out
+  // the 10-minute refusal retry on 23.05.5 when a missing sing-box was taken for one
+  const s = start({}, withTiming({ refusedRetryMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.singboxMissing = true;
+  s.state.inners.find(i => i.active).crash();
+  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 4, 'retries at the backoff’s pace', RETRIES_MS);
+  assert.ok(!s.statuses.some(x => x.state === 'error'), JSON.stringify(s.statuses.map(x => x.state)));
+  s.state.singboxMissing = false;
+  await until(() => connectedCount(s) === 2, 'back once sing-box is', 5000);
+  // the core's file, the same way: what its check says when there is none, or when the spawn finds it gone or busy
+  for (const error of ['core binary not found', 'spawn /usr/bin/xray ENOENT', 'spawn /usr/bin/xray ETXTBSY']) {
+    s.state.check = { ok: false, error };
+    const n = s.statuses.filter(x => x.state === 'reconnecting').length;
+    s.state.xray.crash();
+    await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= n + 3, `retries for "${error}"`, RETRIES_MS);
+    assert.ok(!s.statuses.some(x => x.state === 'error'), error + ': ' + JSON.stringify(s.statuses.map(x => x.state)));
+    delete s.state.check;
+    const c = connectedCount(s);
+    await until(() => connectedCount(s) === c + 1, `back after "${error}"`, 5000);
+  }
+});
+
 test('…and a Reconnect by hand the core refuses is not handed to the quick retries either', async (t) => {
   const s = start({}, withTiming({ refusedRetryMs: 60000 }));
   t.after(() => s.service.shutdown());
