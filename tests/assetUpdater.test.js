@@ -37,6 +37,27 @@ test('cmpVersion and versionNumber', () => {
   assert.equal(versionNumber('no number here'), '');
 });
 
+// The version picker (coreVersions.js) orders release tags, and sing-box's are
+// semver with a pre-release part: 1.13.0-beta.3 comes BEFORE 1.13.0. Split on
+// the dots alone, "0-beta" read as 0 and the beta's ".3" as a fourth number, so
+// the beta outranked its own release.
+test('cmpVersion orders pre-release tags the way semver does', () => {
+  assert.ok(cmpVersion('1.13.0-beta.3', '1.13.0') < 0, 'a release outranks its own pre-releases');
+  assert.ok(cmpVersion('1.13.0', '1.13.0-rc.1') > 0);
+  assert.ok(cmpVersion('1.13.0-beta.3', '1.13.0-beta.10') < 0, 'numeric identifiers compare as numbers');
+  assert.ok(cmpVersion('1.15.0-alpha.10', '1.15.0-alpha.9') > 0);
+  assert.ok(cmpVersion('1.14.0-alpha.2', '1.14.0-beta.1') < 0, 'alpha < beta < rc');
+  assert.ok(cmpVersion('1.14.0-rc.1', '1.14.0-beta.17') > 0);
+  assert.ok(cmpVersion('1.14.0-rc', '1.14.0-rc.1') < 0, 'fewer identifiers sort first when the rest are equal');
+  assert.ok(cmpVersion('1.14.0-beta.1', '1.13.21') > 0, 'the numbers decide before the pre-release part');
+  assert.equal(cmpVersion('v1.13.0-BETA.3', '1.13.0-beta.3'), 0, 'a leading v and the case do not matter');
+  assert.ok(cmpVersion('v26.9.22', '26.9.13') > 0);
+  // plain dotted versions compare exactly as before
+  assert.ok(cmpVersion('26.10.3', '26.9.27') > 0);
+  assert.equal(cmpVersion('26.3.27', 'v26.3.27'), 0);
+  assert.ok(cmpVersion('1.6', '1.6.1') < 0);
+});
+
 test('all: geo every week, a core only when newer, installed cores only', async () => {
   const h = make();
   assert.deepEqual(await h.u.tick(), { ran: true, done: ['geo', 'xray'] });
