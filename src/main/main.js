@@ -46,6 +46,7 @@ const { sharedWgIdentities, localSubnets, lanOverlaps, targetNeeds, routeTargetN
 const { trayGroups, trayStopItem } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
+const { CORE_IDS, createCoreVersionsApi } = require('./coreVersions');
 const https = require('https');
 
 let mainWindow = null;
@@ -2556,6 +2557,30 @@ async function repairNetwork() {
   } finally { networkRepairing = false; }
 }
 
+/**
+ * After a core's binary changed — a download, or a version chosen in the
+ * picker: what was cached about it. binPath caches ONLY the official core — and
+ * holds the path the user picked with "Locate xray…" — so a change to the fork
+ * must not clear it.
+ */
+function afterCoreChanged(component) {
+  if (component === 'xray') xray.binPath = null;
+  xray.forgetVersions();
+  stats.setBin(xray.anyBin());
+}
+
+/**
+ * A core is never replaced under a connection (the version picker's
+ * 'cores:install'): the core or a tunnel up, a connect in flight, a recovery
+ * between its attempts, or the window told anything but disconnected or an error.
+ */
+function coreChangeBlocked() {
+  return connectsInFlight.size > 0 || recovering || !!recoverTimer
+    || !!store.get('activeServerId', null)
+    || !!(xray && xray.running) || !!(tun && tun.active)
+    || ['connecting', 'reconnecting', 'connected'].includes(conn.state);
+}
+
 function registerIpc() {
   ipcMain.handle('diagnostics:connection', (e, probe) => connectionDiagnostics(probe));
   ipcMain.handle('network:repair', () => repairNetwork());
@@ -2957,20 +2982,29 @@ function registerIpc() {
   ipcMain.handle('assets:download', async (e, component) => {
     try {
       const res = await downloader.download(component);
-      // refresh stats binary + xray path in case a core was (re)installed.
-      // binPath caches ONLY the official core — and holds the path the user
-      // picked with "Locate xray…" — so downloading the fork must not clear it.
-      if (component === 'xray' || component === 'xray-pattn') {
-        if (component === 'xray') xray.binPath = null;
-        xray.forgetVersions();
-        stats.setBin(xray.anyBin());
-      }
+      // refresh the stats binary, the cached versions and the xray path in case
+      // a core was (re)installed — sing-box too: its version is shown beside it
+      if (CORE_IDS.includes(component)) afterCoreChanged(component);
       return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(), xrayReady: xray.binExists() };
     } catch (err) {
       send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' });
-      return { ok: false, error: err.message, assets: assetStatus() };
+      // coreBusy: a version install holds this core (Downloader.holdCore) — the page words it
+      return { ok: false, error: err.message, coreBusy: err.code === 'ECOREBUSY', assets: assetStatus() };
     }
   });
+
+  // the version picker (Required files → Choose version): a core's releases, and
+  // one installed by its tag — the same handlers the router's service has
+  const coreVersions = createCoreVersionsApi({
+    downloader,
+    installedVersion: (id) => xray.version(id),
+    busy: coreChangeBlocked,
+    afterInstall: afterCoreChanged,
+    result: () => ({ assets: assetStatus(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(), xrayReady: xray.binExists() }),
+    onLog: (line, level) => send('log', { line, level })
+  });
+  ipcMain.handle('cores:versions', (e, arg) => coreVersions.versions(arg));
+  ipcMain.handle('cores:install', (e, arg) => coreVersions.install(arg));
 
   ipcMain.handle('xray:locate', async () => {
     const res = await dialog.showOpenDialog(mainWindow, {
