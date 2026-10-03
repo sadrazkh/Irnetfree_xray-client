@@ -27,7 +27,8 @@ function cleanupDirs() { for (const d of dirs) { try { fs.rmSync(d, { recursive:
 function start(store = {}, extraDeps = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-svc-'));
   dirs.push(dir);
-  const content = Object.assign({ servers: [SERVER, SERVER_B], routerDefaultsApplied: true }, store);
+  // routerRepair: the v1.16.2 one-time repair has run (routerRepair.test.js opts out with routerRepair: undefined)
+  const content = Object.assign({ servers: [SERVER, SERVER_B], routerDefaultsApplied: true, routerRepair: 1 }, store);
   content.settings = Object.assign({}, BASE, store.settings || {});
   fs.writeFileSync(path.join(dir, 'store.json'), JSON.stringify(content));
   return startIn(dir, extraDeps);

@@ -16,7 +16,7 @@ const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('../main/configBuilder');
-const { adapterDnsServers, guardPeers } = require('../main/dnsBuilder');
+const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor } = require('../main/engineChoice');
@@ -566,6 +566,7 @@ function createService(opts = {}) {
     store.set('settings', Object.assign({}, store.get('settings', {}), ROUTER_DEFAULTS));
     store.set('routerDefaultsApplied', true);
   }
+  if (OPENWRT && !(store.get('routerRepair', 0) >= 1)) repairRouterSettings();
   // A new process has no live connection. `activeServerId` means "connected
   // to this, in THIS process" and lives in the store — only a disconnect ever
   // cleared it, so after a reboot, a power cut or a crash it was still there,
@@ -994,6 +995,41 @@ function createService(opts = {}) {
     const raw = store.get('settings', null);
     const { settings, changed } = migrateSettings(raw);
     if (changed) store.set('settings', settings);
+  }
+
+  /**
+   * v1.16.2, once per router (`routerRepair`): what a desktop backup restored
+   * before v1.16.1 overwrote — the restore kept nothing of the router's then
+   * (fix 9 came later). The owner's AC-1304 connected with bypass-ir's
+   * in-country DNS set to 1.1.1.1 / 8.8.8.8, asked in plain text from inside
+   * Iran; a desktop's backup also always carries lanBlockQuic:false (the
+   * desktop has no such switch, and every LAN QUIC flow then held a SOCKS UDP
+   * session — descriptors the gateway ran out of) and autoConnect:false (every
+   * restart then left the LAN direct, the kill switch unarmed).
+   *
+   * Only with a desktop's TRACE in the stored settings: an in-country list of
+   * public resolvers alone (the router's menu offers Iranian ones only), or a
+   * value the router's UI has not been able to set since v1.13.0 — a choice
+   * made on the router itself is left alone. Never touched: the kill switch,
+   * the routing mode, the DoH list, sniffing, LAN access, the rules. Said once
+   * at warn; each value can be set back under Settings, and it never runs again.
+   */
+  function repairRouterSettings() {
+    const raw = Object.assign({}, store.get('settings', {}));
+    const direct = Array.isArray(raw.dnsDirect) ? raw.dnsDirect : null;
+    const publicDirect = !!direct && direct.length > 0 && direct.every(e => PUBLIC_ANYCAST_DNS.has(resolverIp(e) || ''));
+    const fromDesktop = publicDirect || raw.systemProxy === true || raw.launchAtLogin === true
+      || (typeof raw.tunBackend === 'string' && raw.tunBackend !== 'sing-box')
+      || (typeof raw.tunAppMode === 'string' && raw.tunAppMode !== 'off');
+    const did = [];
+    if (fromDesktop && raw.lanBlockQuic === false) { raw.lanBlockQuic = true; did.push('QUIC (UDP 443) from the LAN is refused again'); }
+    if (fromDesktop && raw.autoConnect === false) { raw.autoConnect = true; did.push('"Connect when the router starts" is on again'); }
+    if (publicDirect) {
+      did.push(`the in-country DNS is ${DEFAULT_SETTINGS.dnsDirect.join(', ')} instead of the public ${direct.join(', ')}`);
+      raw.dnsDirect = DEFAULT_SETTINGS.dnsDirect.slice();
+    }
+    store.assign(did.length ? { settings: raw, routerRepair: 1 } : { routerRepair: 1 });
+    if (did.length) send('log', { line: `Router settings repaired once (a desktop backup restored before v1.16.1 had overwritten them): ${did.join('; ')} — each can be set back under Settings`, level: 'warn' });
   }
 
   function getChains() {
