@@ -25,6 +25,15 @@ const PLAINTEXT_REJECT = /without TLS.*prohibited/i;
  */
 const FINALMASK_REJECT = /LengthMin can't be 0|finalmask/i;
 
+/**
+ * Go's own runtime out of memory: the heap ("fatal error: runtime: out of
+ * memory", or "runtime: out of memory: cannot allocate …" then "fatal error:
+ * out of memory") or a thread it could not create. Exit code 2 — the check
+ * died of the router's memory, not of the config (a refusal is "Failed to
+ * start: …", exit 23).
+ */
+const GO_OUT_OF_MEMORY = /\bruntime: (out of memory|cannot allocate memory|failed to create new OS thread)|\bfatal error: out of memory/;
+
 /** Does any outbound carry a (non-empty) `streamSettings.finalmask`? */
 function usesFinalmask(config) {
   return ((config && config.outbounds) || []).some((o) => {
@@ -272,8 +281,18 @@ class XrayManager {
         resolve(res);
       };
       proc.on('error', (err) => finish({ ok: false, error: err.message }));
-      proc.on('exit', (code) => {
+      proc.on('exit', (code, signal) => {
         if (code === 0) return finish({ ok: true });
+        // Killed — the kernel's OOM killer on a 512 MB router, mostly — or
+        // ended by Go's runtime out of memory: no verdict on the config at all.
+        // Its banner ("… Reading config: …") is all it printed, and read as the
+        // reason it made a refusal of a check that never finished (v1.16.1
+        // re-review). `killed` says so to the caller, whatever the words.
+        const oom = signal ? null : out.split(/\r?\n/).map(l => l.trim()).find(l => GO_OUT_OF_MEMORY.test(l));
+        if (signal || oom) {
+          const what = signal ? `was killed (${signal})` : `ran out of memory (${oom})`;
+          return finish({ ok: false, killed: true, error: `${path.basename(bin)} -test ${what} — the config was not checked` });
+        }
         // Older xray builds may not know the -test flag; don't false-reject.
         if (/flag provided but not defined|not defined:.*test|unknown (flag|command)/i.test(out)) {
           this.onLog(`${path.basename(bin)} does not know -test — the config was not verified before it starts`, 'warn');
@@ -315,12 +334,13 @@ class XrayManager {
     if (first.id === 'xray' && usesFinalmask(config)) {
       if (this.resolveBin('xray-pattn')) {
         const onFork = await this.validate(config, 'xray-pattn');
-        if (!onFork.ok) return { ok: false, engine: 'xray-pattn', error: onFork.error, plaintextRejected: false };
+        if (!onFork.ok) return { ok: false, engine: 'xray-pattn', error: onFork.error, plaintextRejected: false, ...killedOf(onFork) };
         this.onLog(`This config carries finalmask (the patterniha fork's transport mask) — running it on ${engineLabel('xray-pattn')}`, 'info');
         return { ok: true, engine: 'xray-pattn', fellBack: true };
       }
       const r = await this.validate(config, 'xray');
       if (!r.ok) {
+        if (r.killed) return { ok: false, engine: 'xray', error: r.error, plaintextRejected: false, killed: true };
         return { ok: false, engine: 'xray', error: r.error, plaintextRejected: PLAINTEXT_REJECT.test(r.error || ''), ...(FINALMASK_REJECT.test(r.error || '') ? { pattnNeeded: true } : {}) };
       }
       const v = await this.version('xray');
@@ -341,9 +361,9 @@ class XrayManager {
         this.onLog(`Official core rejects this plaintext config — running it on ${engineLabel('xray-pattn')}`, 'warn');
         return { ok: true, engine: 'xray-pattn', fellBack: true };
       }
-      return { ok: false, engine: 'xray-pattn', error: again.error, plaintextRejected: false };
+      return { ok: false, engine: 'xray-pattn', error: again.error, plaintextRejected: false, ...killedOf(again) };
     }
-    return { ok: false, engine: first.id, error: r.error, plaintextRejected };
+    return { ok: false, engine: first.id, error: r.error, plaintextRejected, ...killedOf(r) };
   }
 
   /** Start the core with the given config object, on the given engine. */
@@ -495,6 +515,9 @@ class XrayManager {
 }
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/** A validation's `killed` (validate: its -test never gave a verdict), carried into validateWithFallback's answer. */
+function killedOf(r) { return r && r.killed ? { killed: true } : {}; }
 
 /**
  * Pull the meaningful line out of xray's (verbose) startup output.
