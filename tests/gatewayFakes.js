@@ -140,6 +140,8 @@ function xrayFactory(state) {
         state.events.push('xray:stop');
         o.onStatus('stopped', { code: 0, signal: 'SIGTERM' });
       },
+      /** A line the core printed (its output reaches the service through onLog). */
+      log(line, level = 'error') { o.onLog(line, level); },
       /** The core dying on its own; `lines`: what it printed last. */
       crash(lines) { if (Array.isArray(lines)) x.recent = lines.slice(); x.running = false; x.proc = null; o.onStatus('stopped', { code: null, signal: 'SIGKILL' }); },
       startTest: async () => { throw new Error('no test cores here'); }
