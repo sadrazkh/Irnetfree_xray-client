@@ -2588,6 +2588,12 @@ function failedKey(reason) {
   return DROP_REASONS.includes(reason) ? 'net.dropFailed' : 'net.failed';
 }
 window.api.onStatus((d) => {
+  // "Give my internet back" belongs to a give-up with the guard held, and to
+  // nothing after it: a reconnect that came back (or is being built) owns the
+  // guard again, and its button would put every adapter on the ISP's resolvers
+  // under a live tunnel. A failed teardown is no new state: it leaves it be.
+  const gb = $('#guardBanner');
+  if (gb && d.state !== 'cleanup-failed') gb.hidden = !(d.state === 'reconnect-failed' && d.guardHeld);
   if (d.state === 'connected') {
     state.connected = true;
     state.connecting = false;
@@ -2670,10 +2676,8 @@ window.api.onStatus((d) => {
     state.wasReconnecting = false;
     // The guard was HELD across every attempt so the ISP never answered a
     // lookup, and it is still holding. Nothing leaks, but nothing resolves
-    // either — say so and offer the way out, or a leak has been traded for
-    // a mystery.
-    const gb = $('#guardBanner');
-    if (gb) gb.hidden = !d.guardHeld;
+    // either — say so and offer the way out (#guardBanner, shown above when
+    // d.guardHeld), or a leak has been traded for a mystery.
     if (d.proxyUp) {
       // The tunnel itself came back and only TUN did not: xray is running and the
       // proxy ports work, so the red error state would be wrong. Stay connected
@@ -2790,13 +2794,19 @@ $('#guardRetry').onclick = async () => {
   $('#guardBanner').hidden = true;
   await doReconnect();
 };
-$('#guardRelease').onclick = async () => {
-  // Deliberate: puts the adapters' own resolvers back. From here on the machine
-  // resolves through its ISP again — which is why it takes an explicit click.
+/**
+ * The guard banner's "give my internet back". Deliberate: puts the adapters'
+ * own resolvers back, and from here on the machine resolves through its ISP
+ * again — which is why it takes an explicit click. Main refuses while a
+ * connection uses the guard (`refused`): said in the user's language.
+ */
+async function giveInternetBack() {
   const r = await window.api.releaseGuard();
   $('#guardBanner').hidden = true;
+  if (r && r.refused) return toast(t('guard.releaseRefused'), 'err');
   toast(r && r.ok === false ? (r.error || 'failed') : t('t.guardReleased'), r && r.ok === false ? 'err' : 'ok');
-};
+}
+$('#guardRelease').onclick = giveInternetBack;
 
 $('#killReconnect').onclick = async () => {
   const id = state.activeServerId || state.selectedServerId || (state.servers[0] && state.servers[0].id);
