@@ -318,3 +318,83 @@ test('the test workflow boots OpenWrt in QEMU and runs the smoke', () => {
   // a testable package from every push, not only from a tag
   assert.match(job, /uses: actions\/upload-artifact@v4[\s\S]*name: IRNetFree-OpenWrt-dev[\s\S]*path: dist\/irnetfree_\*_all\.ipk/);
 });
+
+/** The `run: |` script and the env keys of the android job's step named `name`. */
+function androidStep(name) {
+  const lines = YML.split(/\r?\n/);
+  const at = lines.findIndex(l => l.trim() === '- name: ' + name);
+  assert.ok(at >= 0, 'release.yml has a "' + name + '" step');
+  const body = [];
+  for (let i = at + 1; i < lines.length; i++) {
+    if (/^\s{6}-\s/.test(lines[i]) || /^\s{2}\S/.test(lines[i])) break;
+    body.push(lines[i]);
+  }
+  const text = body.join('\n');
+  const runAt = body.findIndex(l => /^\s+run: \|\s*$/.test(l));
+  const run = runAt < 0 ? '' : body.slice(runAt + 1).map(l => l.replace(/^ {10}/, '')).join('\n');
+  return { text, run };
+}
+
+/*
+ * Every release before v1.16.3 was signed with the runner's throwaway debug key
+ * (no keystore secret), so each version carried a different certificate and a
+ * phone with an older copy refused the update: "App not installed as package
+ * appears to be invalid". The real key is four secrets; with one missing Gradle
+ * falls back to that debug key without a word.
+ */
+test('a release key is all four secrets or none — a partial set fails the build', (t) => {
+  const bash = findBash();
+  if (!bash) return t.skip('no bash here');
+  const { run } = androidStep('Decode release keystore (if configured)');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-ks-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'step.sh');
+  fs.writeFileSync(file, run);
+  const go = (env) => {
+    const out = path.join(dir, 'out-' + Object.keys(env).join('-'));
+    fs.writeFileSync(out, '');
+    const r = spawnSync(bash, ['--noprofile', '--norc', '-eo', 'pipefail', file], {
+      encoding: 'utf8',
+      env: Object.assign({}, process.env, { RUNNER_TEMP: dir, GITHUB_OUTPUT: out, KS_B64: '', KS_PASS: '', KS_ALIAS: '', KS_KEY_PASS: '' }, env)
+    });
+    return { status: r.status, text: r.stdout + r.stderr, output: fs.readFileSync(out, 'utf8') };
+  };
+  const b64 = Buffer.from('not really a keystore').toString('base64');
+  const none = go({});
+  assert.equal(none.status, 0, 'no key at all: a fork still builds (debug-signed)');
+  assert.match(none.text, /No keystore secret/);
+  for (const missing of ['KS_PASS', 'KS_ALIAS', 'KS_KEY_PASS']) {
+    const env = { KS_B64: b64, KS_PASS: 'p', KS_ALIAS: 'irnetfree', KS_KEY_PASS: 'p' };
+    env[missing] = '';
+    const r = go(env);
+    assert.notEqual(r.status, 0, 'the keystore with ' + missing + ' empty must fail the step');
+    assert.match(r.text, /::error::/);
+    assert.doesNotMatch(r.output, /path=/, 'and hand Gradle no keystore');
+  }
+  const all = go({ KS_B64: b64, KS_PASS: 'p', KS_ALIAS: 'irnetfree', KS_KEY_PASS: 'p' });
+  assert.equal(all.status, 0, all.text);
+  assert.match(all.output, /^path=.*release\.keystore$/m);
+});
+
+test('with the release key configured, a tag never ships the debug APK', () => {
+  const { text, run } = androidStep('Collect APK');
+  assert.match(text, /KEYSTORE_PATH: \$\{\{ steps\.keystore\.outputs\.path \}\}/, 'the step knows whether a real key was configured');
+  const refuse = run.indexOf('refusing to publish the debug build');
+  const warn = run.indexOf('this release carries the DEBUG build');
+  assert.ok(refuse > 0 && warn > refuse, 'the refusal comes before the old warn-and-ship path');
+  assert.match(run.slice(0, warn), /KEYSTORE_PATH[\s\S]*GITHUB_REF_TYPE[\s\S]*exit 1/);
+});
+
+test("the APK's certificate is pinned to IRNetFree's release key", () => {
+  const { text, run } = androidStep("Verify the APK's certificate (release key)");
+  assert.match(text, /if: steps\.keystore\.outputs\.path != ''/, 'only where the real key was used (a fork without it still builds)');
+  assert.match(text, /EXPECTED_CERT_SHA256: aabda682057fde3ea565c0d972ea103eed0d6c9ee20232bee98f0b6fc8ce3fc6/);
+  assert.match(run, /apksigner" verify --print-certs "\$GITHUB_WORKSPACE\/\$\{\{ steps\.apk\.outputs\.file \}\}"/);
+  assert.match(run, /Signer #1 certificate SHA-256 digest/);
+  assert.match(run, /exit 1/);
+  const lines = YML.split(/\r?\n/);
+  const verify = lines.findIndex(l => l.includes("- name: Verify the APK's certificate"));
+  const upload = lines.findIndex(l => l.includes('- name: Upload APK artifact'));
+  const publish = lines.findIndex(l => l.includes('- name: Publish APK to GitHub Release'));
+  assert.ok(verify > 0 && verify < upload && verify < publish, 'checked before anything is uploaded or published');
+});

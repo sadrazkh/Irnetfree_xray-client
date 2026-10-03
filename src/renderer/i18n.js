@@ -34,6 +34,7 @@ const I18N = {
     'mode.getFiles': 'دانلود فایل‌های موردنیاز',
     'guard.held': '🔒 اتصال مجدد ناموفق بود. گارد نشتی دی‌ان‌اسِ کارت‌های شبکه را هنوز نگه داشته (روی ویندوز روی نشانی loopbackِ خودِ دستگاه، پس هیچ پرسشی از دستگاه بیرون نمی‌رود) — تا دوباره وصل نشوی نام‌ها باز نمی‌شوند.',
     'guard.retry': 'تلاش دوباره', 'guard.release': 'اینترنتم را برگردان',
+    'guard.releaseRefused': 'اتصال برقرار است و DNS آداپتورها مال همین اتصال است — برای برگرداندنش قطع کن',
     't.reconnecting': 'در حال اتصال مجدد…', 't.guardReleased': 'دی‌ان‌اس آداپتورها برگردانده شد',
     'set.skin': 'ظاهر برنامه',
     'skin.cockpit': 'کاکپیت', 'skin.console': 'کنسول (پیش‌فرض)', 'skin.legacy': 'کلاسیک',
@@ -528,7 +529,21 @@ const I18N = {
     'power.cancel': 'لغو', 'power.cancelHint': 'لغو اتصال',
     'state.cancelling': 'در حال لغو…',
     // the Servers page's groups
-    'srv.groupToggle': 'باز یا بسته کردن این گروه', 'srv.subRefresh': 'به‌روزرسانی همین ساب'
+    'srv.groupToggle': 'باز یا بسته کردن این گروه', 'srv.subRefresh': 'به‌روزرسانی همین ساب',
+    // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
+    'notice.proxyOnly': 'فقط پراکسی — تونل بالا نیامد: {reason}',
+    'notice.guardFailed': 'محافظ نشت DNS فعال نشد — ممکن است DNS بیرون از تونل برود: {reason}',
+    'notice.wgSharedKey': 'وایرگارد {name}: همین کلید خصوصی در رکورد دیگری هم ذخیره شده، «{other}» در گروه «{group}» — سرور وایرگارد برای هر کلید فقط یک دستگاه می‌پذیرد، پس اگر هر دو استفاده شوند (روی دو دستگاه، یا تست آن رکورد وقتی وصلی) یکی از کار می‌افتد. نسخه‌ای را که استفاده نمی‌کنی پاک کن، وقتی وصلی تستش نکن و برای هر دستگاه یک peer جدا از ادمین سرور بگیر',
+    'notice.wgSharedKeySub': 'وایرگارد {name}: همین کلید خصوصی در رکورد دیگری هم ذخیره شده، «{other}» در گروه «{group}» — سرور وایرگارد برای هر کلید فقط یک دستگاه می‌پذیرد، پس اگر هر دو استفاده شوند (روی دو دستگاه، یا تست آن رکورد وقتی وصلی) یکی از کار می‌افتد. رکوردی که در یک ساب است با به‌روزرسانی بعدیِ آن ساب برمی‌گردد، پس پاک کردنش دوام ندارد: همان را نگه دار، به جای این یکی از آن استفاده کن (زنجیره را روی آن دوباره بساز)، نسخهٔ دستی را پاک کن و وقتی وصلی تستش نکن — یا اگر آن ساب نباید استفاده شود، ساب را حذف کن',
+    'notice.wgSharedAddress': 'وایرگارد {name}: آدرس تونلش ({address}) در رکورد دیگری هم با کلیدی دیگر برای همین سرور ذخیره شده، «{other}» در گروه «{group}» — سرور هر آدرس را فقط به یک کلید می‌دهد (مگر به همهٔ دستگاه‌ها یک آدرس بدهد)، پس ممکن است یکی از این دو هیچ ترافیکی رد نکند. رکوردی را که ادمین سرور برای همین دستگاه ساخته نگه دار، دیگری را پاک کن و وقتی وصلی تستش نکن',
+    'notice.wgSharedAddressSub': 'وایرگارد {name}: آدرس تونلش ({address}) در رکورد دیگری هم با کلیدی دیگر برای همین سرور ذخیره شده، «{other}» در گروه «{group}» — سرور هر آدرس را فقط به یک کلید می‌دهد (مگر به همهٔ دستگاه‌ها یک آدرس بدهد)، پس ممکن است یکی از این دو هیچ ترافیکی رد نکند. رکوردی که در یک ساب است با به‌روزرسانی بعدیِ آن ساب برمی‌گردد، پس پاک کردنش دوام ندارد: اگر همان است که ادمین سرور برای همین دستگاه ساخته، نگهش دار، به جای این یکی از آن استفاده کن (زنجیره را روی آن دوباره بساز) و نسخهٔ دستی را پاک کن؛ اگر نه، ساب را حذف کن. وقتی وصلی تستش نکن',
+    'notice.lanInRange': 'شبکهٔ محلی شما {lan} ({iface}) با {address} — {key} وایرگاردِ {target} — هم‌پوشانی دارد، داخل {range} که روتینگ ویژه آن را به {target} می‌فرستد: آدرس‌های {lan} روی همین شبکهٔ محلی می‌مانند و هرگز به تونل نمی‌رسند. آن شبکهٔ محلی، ماشین مجازی یا شبکهٔ host-only را به زیرشبکهٔ دیگری ببر',
+    'notice.rangeInLan': '{range} که روتینگ ویژه آن را به {target} می‌فرستد بخشی از شبکهٔ محلی شما {lan} ({iface}) است — میزبان‌های {range} روی همین شبکهٔ محلی می‌مانند، نه داخل تونل. آن شبکهٔ محلی، ماشین مجازی یا شبکهٔ host-only را به زیرشبکهٔ دیگری ببر',
+    'notice.corpDnsOff': 'مدیریت DNS خاموش است، پس DNS وایرگاردِ شما ({servers}) استفاده نمی‌شود و نام‌های داخل آن شبکه باز نمی‌شوند — تنظیمات ← DNS ← «مدیریت DNS توسط برنامه» را دوباره روشن کن',
+    'notice.autostartStale': 'ویندوز هنگام ورود نسخهٔ دیگری از IRNetFree را اجرا می‌کند — {task} — نه همین نسخه ({current}). آن نسخه کد شبکهٔ خودش را دارد که شاید قدیمی‌تر باشد.',
+    'notice.autostartFix': 'هنگام ورود همین نسخه اجرا شود',
+    'notice.autostartFixed': 'از این به بعد هنگام ورود به ویندوز همین نسخه اجرا می‌شود',
+    'notice.autostartFixFailed': 'تغییر اجرای خودکار ناموفق بود: {error}'
   },
 
   en: {
@@ -561,6 +576,7 @@ const I18N = {
     'mode.getFiles': 'Download the required files',
     'guard.held': '🔒 The reconnect was given up on. The leak guard is still holding your network adapters’ DNS (on Windows on this machine’s own loopback address, so no lookup leaves it) — names will not resolve until you connect again.',
     'guard.retry': 'Try again', 'guard.release': 'Restore my internet',
+    'guard.releaseRefused': 'A connection is up and the adapters’ DNS is its own — disconnect to give it back',
     't.reconnecting': 'Reconnecting…', 't.guardReleased': 'The adapters have their own resolvers back',
     'set.skin': 'Look',
     'skin.cockpit': 'Cockpit', 'skin.console': 'Console (default)', 'skin.legacy': 'Classic',
@@ -1056,7 +1072,21 @@ const I18N = {
     'power.cancel': 'Cancel', 'power.cancelHint': 'Cancel connecting',
     'state.cancelling': 'Cancelling…',
     // the Servers page's groups
-    'srv.groupToggle': 'Show or hide this group', 'srv.subRefresh': 'Refresh this subscription'
+    'srv.groupToggle': 'Show or hide this group', 'srv.subRefresh': 'Refresh this subscription',
+    // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
+    'notice.proxyOnly': 'Proxy only — the tunnel did not start: {reason}',
+    'notice.guardFailed': 'Leak guard failed — DNS may leave outside the tunnel: {reason}',
+    'notice.wgSharedKey': 'WireGuard {name}: the same private key is also stored in another record, “{other}” in the group “{group}” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls. Delete the copy you do not use, do not test it while connected, and get one peer per device from the server’s admin',
+    'notice.wgSharedKeySub': 'WireGuard {name}: the same private key is also stored in another record, “{other}” in the group “{group}” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls. A record in a subscription comes back on the subscription’s next update, so deleting that one does not last: keep it, use it in place of this one (rebuild the chain on it), delete the copy added by hand and do not test it while connected — or remove the subscription if it should not be used',
+    'notice.wgSharedAddress': 'WireGuard {name}: its tunnel address {address} is also stored in another record, “{other}” in the group “{group}”, with another key for the same server — the server gives an address to one key only (unless it gives every device the same one), so one of the two may carry nothing. Keep the record the server’s admin made for this device, delete the other, and do not test it while connected',
+    'notice.wgSharedAddressSub': 'WireGuard {name}: its tunnel address {address} is also stored in another record, “{other}” in the group “{group}”, with another key for the same server — the server gives an address to one key only (unless it gives every device the same one), so one of the two may carry nothing. A record in a subscription comes back on the subscription’s next update, so deleting that one does not last: if it is the one the server’s admin made for this device, keep it, use it in place of this one (rebuild the chain on it) and delete the copy added by hand; if not, remove the subscription. Do not test it while connected',
+    'notice.lanInRange': 'Your local network {lan} ({iface}) overlaps {address} — the {key} of {target}’s WireGuard — inside {range} that advanced routing sends to {target}: addresses in {lan} stay on the LAN and never reach the tunnel. Move that LAN, VM or host-only network to another subnet',
+    'notice.rangeInLan': '{range} that advanced routing sends to {target} is part of your local network {lan} ({iface}) — hosts in {range} stay on the LAN, not the tunnel. Move that LAN, VM or host-only network to another subnet',
+    'notice.corpDnsOff': 'Managed DNS is off, so your WireGuard’s resolver ({servers}) is not used and names inside that network will not resolve — turn Settings → DNS → “DNS managed by the app” back on',
+    'notice.autostartStale': 'At logon Windows starts another copy of IRNetFree — {task} — not this one ({current}). That copy keeps its own, possibly older, network code.',
+    'notice.autostartFix': 'Start this version at logon',
+    'notice.autostartFixed': 'At logon Windows now starts this version',
+    'notice.autostartFixFailed': 'Could not update the logon task: {error}'
   }
 };
 

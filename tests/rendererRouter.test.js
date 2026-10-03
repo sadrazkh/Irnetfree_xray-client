@@ -499,14 +499,19 @@ test('18: saving an edit of the live server says it is not applied yet and offer
   }
   assert.match(APP, /\$\('#editSave'\)\.onclick = saveEdit;/);
   // the toast is click-through only while it has no button, and the long one is
-  // centred on the physical left edge — the logical inset is the right edge in
-  // Persian, and translateX is physical: it started off the window's left side
+  // centred on the physical left edge — a logical inset is the right edge in
+  // Persian, and translateX is physical: it started off the window's left side.
+  // Every toast is centred so (the plain one too, v1.16.3): the button's rule
+  // adds no inset of its own (tests/bannerLayout.test.js renders both)
   assert.match(CSS, /\.toast\.has-action\.show\s*\{\s*pointer-events:\s*auto/, 'clickable while it shows');
   assert.doesNotMatch(CSS, /\.toast\.has-action\s*\{[^}]*pointer-events:\s*auto/, 'a faded toast must not swallow clicks');
   const rule = CSS.match(/\.toast\.has-action\s*\{([^}]*)\}/);
   assert.ok(rule, 'no .toast.has-action rule');
-  assert.match(rule[1], /inset-inline-start:\s*auto/);
-  assert.match(rule[1], /(^|[\s;])left:\s*50%/);
+  assert.doesNotMatch(rule[1], /inset-inline|(^|[\s;])(left|right):/);
+  const base = CSS.match(/\n\.toast\s*\{([^}]*)\}/);
+  assert.ok(base, 'no .toast rule');
+  assert.match(base[1], /(^|[\s;])left:\s*50%/);
+  assert.doesNotMatch(base[1], /inset-inline/);
 });
 
 /**
