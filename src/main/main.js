@@ -42,7 +42,7 @@ const { DropBudget } = require('./dropBudget');
 const { isWebUrl, isAppPage } = require('./urlGuard');
 const { runElevatedRelaunch } = require('./relaunch');
 const { schtasksCreateArgs, schtasksDeleteArgs, schtasksQueryXmlArgs, taskExeFromXml, autostartStale, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
-const { sharedWgIdentities, localSubnets, lanOverlaps, routeTargetName, noticeLine } = require('./connectNotices');
+const { sharedWgIdentities, localSubnets, lanOverlaps, targetNeeds, routeTargetName, noticeLine, noticeLevel, forWindow } = require('./connectNotices');
 const { trayGroups, trayStopItem } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
@@ -1667,24 +1667,26 @@ function planServerIds(plan) {
  * Windows (v1.16.3): what this PC does to a plan that the plan itself cannot
  * show (connectNotices.js) — a WireGuard identity the plan uses that another
  * stored record also holds (W1), and a local network inside a private range
- * advanced routing sends to a tunnel (W4). Each is a warn line here and,
- * through the 'connected' status, a toast in the window; nothing is changed.
- * A hint must never cost a connect: whatever goes wrong in here is swallowed.
+ * advanced routing sends to a tunnel (W4). Each is a line here; those that can
+ * be the cause (forWindow) also go, through the 'connected' status, to the
+ * window as a toast — a LAN inside a broad range that holds nothing the target
+ * needs stays an info line. Nothing is changed. A hint must never cost a
+ * connect: whatever goes wrong in here is swallowed.
  */
 function connectHints(plan) {
   const out = [];
   try {
-    const found = sharedWgIdentities(planServerIds(plan), store.get('servers', []));
+    const found = sharedWgIdentities(planServerIds(plan), store.get('servers', []), store.get('subscriptions', []));
     if (plan && plan.mode === 'advanced') {
       // our own adapters (an earlier tunnel still up on a server switch) are not "your local network"
       const own = [TUN_LOCAL_IP, String(TUN_ADDR4).split('/')[0]];
       const lans = localSubnets(os.networkInterfaces(), (name, address) => isOwnTunInterface(name) || own.includes(address));
       const chains = getChains();
-      found.push(...lanOverlaps(lans, getSettings().routeRules, (tg) => routeTargetName(tg, plan, chains)));
+      found.push(...lanOverlaps(lans, getSettings().routeRules, (tg) => routeTargetName(tg, plan, chains), (tg) => targetNeeds(tg, plan)));
     }
     for (const n of found) {
-      send('log', { line: noticeLine(n), level: 'warn' });
-      out.push(n);
+      send('log', { line: noticeLine(n), level: noticeLevel(n) });
+      if (forWindow(n)) out.push(n);
     }
   } catch { /* said nothing; the connect goes on exactly as before */ }
   return out;

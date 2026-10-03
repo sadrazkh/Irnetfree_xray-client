@@ -2,10 +2,15 @@
 /**
  * What a connect can see on THIS machine that explains a tunnel that "does not
  * work properly" here while the same configs work on another PC (v1.16.3,
- * windows-android-report §2): said — a warn line in the log and a toast in the
- * window — and never acted on. Nothing here touches a config, a route or a
- * resolver, and each check returns nothing at all where its condition does not
- * hold, so a healthy machine hears nothing new.
+ * windows-android-report §2): said — a line in the log and, where it can be
+ * the cause, a toast in the window — and never acted on. Nothing here touches a
+ * config, a route or a resolver, and each check returns nothing at all where
+ * its condition does not hold.
+ *
+ * That is not "a healthy PC hears nothing": W1 is a fact about the STORE, so a
+ * PC that works but holds a WireGuard identity twice says it too (the window
+ * once per run, app.js connectToasts). W4 is a fact about this PC's networks,
+ * and only the overlaps that can hit something the plan needs reach the window.
  *
  *   W1  a WireGuard identity stored twice. A WireGuard server keeps one
  *       endpoint per key and routes a tunnel address to one key: the same peer
@@ -15,7 +20,12 @@
  *   W4  a local network inside a private range advanced routing sends to a
  *       tunnel. The tunnel's routes are 0/0 minus its exclusions, so an on-link
  *       /24 (the Wi-Fi, a VirtualBox host-only net) is more specific and wins:
- *       hosts there never reach the chain however the rule reads.
+ *       hosts there never reach the chain however the rule reads. That bites
+ *       only where the target has hosts in that /24 — a broad /16 or /8 rule
+ *       around a home LAN is almost always fine, so it is a log line; the
+ *       window hears it when the LAN holds the target's WireGuard DNS, its
+ *       tunnel address or a narrower AllowedIPs entry, or when the rule itself
+ *       is as narrow as the LAN.
  *
  * Pure: the store's records, the rules and os.networkInterfaces() come in as
  * arguments (main.js asks, on Windows only). Private keys never leave here —
@@ -49,15 +59,28 @@ function wgFacts(s) {
 }
 
 /**
+ * The Servers page's group a record sits in, so twin records with one name can
+ * be told apart: its subscription's name, or — for the window to say in the
+ * user's language — { t: <i18n key> } for "added by hand" or "deleted
+ * subscription" (the page's own two labels).
+ */
+function groupOf(s, subs) {
+  if (!s || !s.subId) return { t: 'srv.manual' };
+  const sub = (Array.isArray(subs) ? subs : []).find(x => x && x.id === s.subId);
+  return sub && sub.name ? String(sub.name) : { t: 'srv.subGone' };
+}
+
+/**
  * Every WireGuard record the plan uses (`usedIds`, its server ids) whose
  * identity another stored record for the SAME server also holds:
- *   { id: 'wgSharedKey', name, other }               the same private key;
- *   { id: 'wgSharedAddress', name, other, address }  the same tunnel address
- *                                                    under another key.
- * Another server is another session (no clash); WARP's shared address is by
- * design. One entry per pair.
+ *   { id: 'wgSharedKey', name, other, group }           the same private key;
+ *   { id: 'wgSharedAddress', name, other, group, address }  the same tunnel
+ *                                                    address under another key.
+ * `other` is the other record's name and `group` its group (groupOf) — two
+ * records can have one name. Another server is another session (no clash);
+ * WARP's shared address is by design. One entry per pair.
  */
-function sharedWgIdentities(usedIds, servers) {
+function sharedWgIdentities(usedIds, servers, subs = []) {
   const iterable = usedIds && typeof usedIds !== 'string' && typeof usedIds[Symbol.iterator] === 'function';
   const used = new Set(iterable ? usedIds : []);
   const wg = (Array.isArray(servers) ? servers : []).filter(s => isWg(s) && s.id);
@@ -73,17 +96,17 @@ function sharedWgIdentities(usedIds, servers) {
       if (said.has(pair)) continue;
       const fb = wgFacts(b);
       if (fb.server !== fa.server) continue;
-      const name = a.name || a.id, other = b.name || b.id;
+      const name = a.name || a.id, other = b.name || b.id, group = groupOf(b, subs);
       if (fa.key && fa.key === fb.key) {
         said.add(pair);
-        out.push({ id: 'wgSharedKey', name, other });
+        out.push({ id: 'wgSharedKey', name, other, group });
         continue;
       }
       if (fa.server === WARP_PEER || !fa.key || !fb.key) continue;
       const address = fa.addrs.find(x => fb.addrs.includes(x));
       if (address) {
         said.add(pair);
-        out.push({ id: 'wgSharedAddress', name, other, address });
+        out.push({ id: 'wgSharedAddress', name, other, group, address });
       }
     }
   }
@@ -182,36 +205,116 @@ function ruleRanges(rules) {
 }
 
 /**
- * Each local network (localSubnets) that a private range of the advanced
- * rules, sent to a tunnel, overlaps — the first such rule per network, in rule
- * order, unless an earlier rule already keeps that network `direct` or blocks
- * it (the user meant it to stay local). `nameOf(target)` names a server or a
- * chain; null means the target is gone and configBuilder drops the rule.
- *   { id: 'lanInRange', lan, iface, range, target }  the LAN inside the range
- *   { id: 'rangeInLan', lan, iface, range, target }  the range inside the LAN
+ * What a routing target needs through its tunnel, as far as its WireGuard
+ * records say (a chain: every WireGuard hop): [{ address, key }] — the DNS
+ * servers, the tunnel address (without its prefix) and the AllowedIPs entries
+ * other than a full tunnel, IPv4 only, named by their wg-quick keys (DNS,
+ * Address, AllowedIPs), which read the same in every language. Never a key.
+ * Nothing for `direct`, `block`, a proxy, or a target that is gone.
  */
-function lanOverlaps(subnets, rules, nameOf = () => null) {
+function targetNeeds(target, plan) {
+  if (!target || target === 'direct' || target === 'block') return [];
+  const p = plan || {};
+  let list;
+  if (target === 'chain') list = p.chain;
+  else if (String(target).indexOf('chain:') === 0) list = (p.chainsById || {})[String(target).slice('chain:'.length)];
+  else list = [(p.serversById || {})[target]];
+  const out = [];
+  const seen = new Set();
+  const add = (address, key) => {
+    if (seen.has(key + ' ' + address)) return;
+    seen.add(key + ' ' + address);
+    out.push({ address, key });
+  };
+  const host = (v) => {
+    const c = parseCidr(String(v == null ? '' : v).trim().replace(/\/\d+$/, ''));
+    return c ? cidrText(c).replace(/\/32$/, '') : null;
+  };
+  for (const s of Array.isArray(list) ? list : []) {
+    if (!isWg(s)) continue;
+    for (const d of Array.isArray(s.dns) ? s.dns : []) { const h = host(d); if (h) add(h, 'DNS'); }
+    const st = (s.outbound && s.outbound.settings) || {};
+    for (const a of Array.isArray(st.address) ? st.address : (st.address ? [st.address] : [])) { const h = host(a); if (h) add(h, 'Address'); }
+    const peer = (Array.isArray(st.peers) && st.peers[0]) || {};
+    for (const a of Array.isArray(peer.allowedIPs) ? peer.allowedIPs : []) {
+      const c = parseCidr(a);
+      if (c && c.bits > 0) add(cidrText(c), 'AllowedIPs');
+    }
+  }
+  return out;
+}
+
+/**
+ * The first of `needs` (targetNeeds) that lies in the LAN `net` and so never
+ * reaches a tunnel `range` wider than that LAN: a DNS server or the tunnel
+ * address inside it, or an AllowedIPs entry narrower than the rule that
+ * overlaps it (one as wide as the rule says nothing the rule did not).
+ */
+function needInLan(net, range, needs) {
+  for (const n of Array.isArray(needs) ? needs : []) {
+    const c = n && parseCidr(n.address);
+    if (!c) continue;
+    const hit = n.key === 'AllowedIPs'
+      ? c.bits > range.bits && (contains(net, c) || contains(c, net))
+      : c.bits === 32 && contains(net, c);
+    if (hit) return { address: n.address, key: n.key };
+  }
+  return null;
+}
+
+/**
+ * Each local network (localSubnets) that a private range of the advanced
+ * rules, sent to a tunnel, overlaps — one finding per network, unless an
+ * earlier rule already keeps that network `direct` or blocks it (the user
+ * meant it to stay local). `nameOf(target)` names a server or a chain; null
+ * means the target is gone and configBuilder drops the rule. `needsOf(target)`
+ * is what that target needs through its tunnel (targetNeeds). Strongest first,
+ * the first rule among equals:
+ *   { id: 'rangeInLan', lan, iface, range, target }   the range is the LAN or
+ *                                                     inside it — the user asked for hosts on the LAN
+ *   { id: 'lanInRange', lan, iface, range, target, address, key }
+ *                                                     the LAN is inside the range and holds
+ *                                                     `address`, the target's `key` (DNS, Address, AllowedIPs)
+ *   { id: 'lanInBroadRange', lan, iface, range, target }  the LAN is inside the range and nothing
+ *                                                     the target is known to need is in it: a log line only
+ */
+function lanOverlaps(subnets, rules, nameOf = () => null, needsOf = () => []) {
   const ranges = ruleRanges(rules);
   const out = [];
   for (const lan of Array.isArray(subnets) ? subnets : []) {
     const net = lan && parseCidr(lan.cidr);
     if (!net) continue;
+    let needed = null, broad = null, narrow = null;
     for (const e of ranges) {
       const local = !e.target || e.target === 'direct' || e.target === 'block';
       if (local) {
         if (contains(e.range, net)) break;
         continue;
       }
-      const inside = contains(e.range, net);
-      if (!inside && !contains(net, e.range)) continue;
+      const within = contains(net, e.range);
+      if (!within && !contains(e.range, net)) continue;
       const target = nameOf(e.target);
       if (!target) continue;
-      out.push({ id: inside ? 'lanInRange' : 'rangeInLan', lan: cidrText(net), iface: lan.iface, range: e.label, target });
-      break;
+      const found = { lan: cidrText(net), iface: lan.iface, range: e.label, target };
+      if (within) { narrow = Object.assign({ id: 'rangeInLan' }, found); break; }
+      if (!needed) {
+        const need = needInLan(net, e.range, needsOf(e.target));
+        if (need) needed = Object.assign({ id: 'lanInRange' }, found, need);
+      }
+      if (!broad) broad = Object.assign({ id: 'lanInBroadRange' }, found);
     }
+    const best = narrow || needed || broad;
+    if (best) out.push(best);
   }
   return out;
 }
+
+/** Notices that stay in the log: never a toast. */
+const LOG_ONLY = new Set(['lanInBroadRange']);
+/** Does the window hear this notice (a toast), or only the log? */
+function forWindow(n) { return !!n && !LOG_ONLY.has(n.id); }
+/** The log level of a notice's line. */
+function noticeLevel(n) { return forWindow(n) ? 'warn' : 'info'; }
 
 /**
  * A routing target by the name the user gave it: a server, a named chain
@@ -236,22 +339,32 @@ function routeTargetName(target, plan, chains) {
 
 /* ------------------------------ the log line ------------------------------ */
 
+/** The window's two group labels (i18n.js 'srv.manual' / 'srv.subGone'), for the English log line. */
+const GROUP_EN = { 'srv.manual': 'Added by hand', 'srv.subGone': 'Deleted subscription' };
+const groupText = (g) => (g && typeof g === 'object' ? (GROUP_EN[g.t] || '') : String(g == null ? '' : g));
+
 /** The English log line of a notice (the window says it from i18n.js, in the user's language). */
 function noticeLine(n) {
   if (!n) return '';
   const lan = (x) => `${x.lan}${x.iface ? ` (${x.iface})` : ''}`;
+  const move = 'Move that LAN, VM or host-only network to another subnet';
   switch (n.id) {
     case 'wgSharedKey':
-      return `WireGuard ${n.name}: this identity is also stored as ${n.other} — a WireGuard server accepts one device per key; used on two devices (or tested while connected) one of them stalls. Ask the server’s admin for one peer per device, and do not copy WireGuard records between devices`;
+      return `WireGuard ${n.name}: the same private key is also stored in another record, “${n.other}” in the group “${groupText(n.group)}” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls. Delete the copy you do not use, do not test it while connected, and get one peer per device from the server’s admin`;
     case 'wgSharedAddress':
-      return `WireGuard ${n.name}: its tunnel address ${n.address} is also stored as ${n.other} with another key for the same server — a WireGuard server routes an address to one key only (unless the provider gives every device the same address), so one of the two may carry nothing`;
+      return `WireGuard ${n.name}: its tunnel address ${n.address} is also stored in another record, “${n.other}” in the group “${groupText(n.group)}”, with another key for the same server — the server gives an address to one key only (unless it gives every device the same one), so one of the two may carry nothing. Keep the record the server’s admin made for this device, delete the other, and do not test it while connected`;
     case 'lanInRange':
-      return `Your local network ${lan(n)} lies inside ${n.range} that advanced routing sends to ${n.target} — hosts in ${n.lan} stay on the LAN, not the tunnel`;
+      return `Your local network ${lan(n)} overlaps ${n.address} — the ${n.key} of ${n.target}’s WireGuard — inside ${n.range} that advanced routing sends to ${n.target}: addresses in ${n.lan} stay on the LAN and never reach the tunnel. ${move}`;
     case 'rangeInLan':
-      return `${n.range} that advanced routing sends to ${n.target} lies inside your local network ${lan(n)} — hosts in ${n.range} stay on the LAN, not the tunnel`;
+      return `${n.range} that advanced routing sends to ${n.target} is part of your local network ${lan(n)} — hosts in ${n.range} stay on the LAN, not the tunnel. ${move}`;
+    case 'lanInBroadRange':
+      return `Your local network ${lan(n)} lies inside ${n.range} that advanced routing sends to ${n.target}; none of the addresses ${n.target} is known to need (a WireGuard DNS, Address or narrower AllowedIPs) is in it, so this matters only if a host you reach through ${n.target} has an address in ${n.lan}`;
     default:
       return '';
   }
 }
 
-module.exports = { sharedWgIdentities, localSubnets, lanOverlaps, routeTargetName, noticeLine, PRIVATE_V4, WARP_PEER };
+module.exports = {
+  sharedWgIdentities, localSubnets, lanOverlaps, targetNeeds, routeTargetName,
+  noticeLine, noticeLevel, forWindow, LOG_ONLY, PRIVATE_V4, WARP_PEER
+};

@@ -39,6 +39,8 @@ const state = {
   connIssues: [],
   // main's notices about this PC (W1/W3/W4) already toasted for this connection
   noticesToasted: new Set(),
+  // …and those about the store itself (a WireGuard identity stored twice), toasted once per run
+  noticesOnce: new Set(),
   // Windows: the logon task starts another copy of the app ({ task, current }) — checkAutostart
   autostartStale: null,
   // lifetime traffic per config id — survives disconnect and restart
@@ -2214,10 +2216,20 @@ function connIssuesFrom(d) {
   return out;
 }
 
-/** A notice in the user's language: 'notice.<id>' with each {field} filled in from the notice, literally. */
+/**
+ * A notice in the user's language: 'notice.<id>' with each {field} filled in
+ * from the notice, literally. A field main cannot say in the user's language —
+ * a record's group "added by hand" — comes as { t: <i18n key> } and is this
+ * window's own string.
+ */
 function noticeText(n) {
   if (!n || !n.id) return '';
-  return t('notice.' + n.id).replace(/\{(\w+)\}/g, (m, k) => (n[k] == null ? m : String(n[k])));
+  return t('notice.' + n.id).replace(/\{(\w+)\}/g, (m, k) => {
+    const v = n[k];
+    if (v == null) return m;
+    if (typeof v === 'object') return typeof v.t === 'string' ? t(v.t) : m;
+    return String(v);
+  });
 }
 
 /** Those lines: shown while connected, gone with the connection; repainted by setConnUI (a language switch too). */
@@ -2238,21 +2250,25 @@ function renderConnIssues(stateStr) {
 /**
  * What a 'connected' status says in toasts, in order: the failures above (the
  * tunError toast, now saying what it means), the missing geo files as before,
- * then what main found on this PC (Windows only: a WireGuard identity stored
- * twice, a LAN inside a routed range, managed DNS off for a corporate
- * resolver). Those last ones once per connection: a recovery that finds the
- * same thing again does not repeat it; a connect after a disconnect does.
+ * then what main found (Windows only: a WireGuard identity stored twice, a LAN
+ * that holds what a routed tunnel needs, managed DNS off for a corporate
+ * resolver), each with what to do. A recovery that finds the same thing again
+ * never repeats it. This PC's findings come back with the next connection (its
+ * network may have changed); a WireGuard identity stored twice is a fact about
+ * the store, the same on every connect — said once per run.
  */
 function connectToasts(d) {
   const out = connIssuesFrom(d).map(n => ({ msg: noticeText(n), kind: 'err', ms: 9000 }));
   if (d && d.geoWarn) out.push({ msg: d.geoWarn, kind: 'warn', ms: 2600 });
   if (!state.noticesToasted) state.noticesToasted = new Set();
+  if (!state.noticesOnce) state.noticesOnce = new Set();
   for (const n of (d && Array.isArray(d.notices)) ? d.notices : []) {
     if (!n || !n.id) continue;
     const key = JSON.stringify(n);
-    if (state.noticesToasted.has(key)) continue;
-    state.noticesToasted.add(key);
-    out.push({ msg: noticeText(n), kind: 'warn', ms: 9000 });
+    const said = (n.id === 'wgSharedKey' || n.id === 'wgSharedAddress') ? state.noticesOnce : state.noticesToasted;
+    if (said.has(key)) continue;
+    said.add(key);
+    out.push({ msg: noticeText(n), kind: 'warn', ms: 12000 });
   }
   return out;
 }
