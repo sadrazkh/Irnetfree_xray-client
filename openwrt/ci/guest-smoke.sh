@@ -1069,4 +1069,227 @@ while ip rule show | grep -q 'uidrange'; do i=$((i+1)); [ $i -lt 15 ] || { echo 
 rpc "{\"channel\":\"settings:set\",\"arg\":{\"routingMode\":\"global\",\"dnsDirect\":$D3_DIRECT_WAS}}" | jq -e '.result.settings.routingMode == "global"' >/dev/null
 for f in $D3_GEO; do rm -f "/etc/irnetfree/bin/$f"; done
 
+# ===========================================================================
+# v1.16.2 (fix/v1162-router) — the owner's AC-1304 (OpenWrt 23.05.4, v1.16.1):
+# the exit's DoH timed out ("failed to retrieve response … context deadline
+# exceeded"), the core answered the LAN nothing, every client and dnsmasq
+# retried, and 49-90 s after the gateway came up sing-box said "socket: too
+# many open files" hundreds of times — no device could browse. Here: the
+# limits procd now gives node, sing-box and xray (65536, from irnetfree.init),
+# the gateway's UDP session lifetime (udp_timeout 120) and the core's DNS
+# block; then a DNS flood from a LAN-side namespace through dnsmasq (each
+# upstream query a new port — a new UDP session in sing-box) and a few hundred
+# UDP flows to distinct ports, with sing-box's and xray's open files sampled
+# every second; the flood drained by the 120 s lifetime; and the owner's very
+# failure — the DoH black-holed, every name asked three times — with names
+# resolving through the tunnel again once it is back. The router is
+# disconnected here (D3 ends so).
+# ===========================================================================
+say "v1.16.2: connect; node, sing-box and xray have 65536 open files (procd limits), the gateway's UDP sessions last 120 s, the core runs the router's DNS block"
+fdn() { ls "/proc/$1/fd" 2>/dev/null | wc -l; }
+nofile() { awk '/^Max open files/ { print $4 " " $5 }' "/proc/$1/limits"; }
+fd_pids() { FD_SB="$(gw_singbox | head -n 1)"; FD_X="$(core_xray | head -n 1)"; }
+mark fd
+rpc "{\"channel\":\"connect\",\"arg\":\"$ID\"}" > /tmp/connect-fd.json || true
+jq -c '.result // .error' /tmp/connect-fd.json
+wait_back "v1.16.2 connect" 180
+fd_pids
+echo "cores: $(sing-box version 2>/dev/null | head -n 1); xray $(cmdline "$FD_X" | cut -d' ' -f1) $("$(cmdline "$FD_X" | cut -d' ' -f1)" version 2>/dev/null | head -n 1)"
+for p in $(pidof node) $FD_SB $FD_X; do
+	l="$(nofile "$p")"
+	echo "pid $p $(cat "/proc/$p/comm"): Max open files $l, $(fdn "$p") in use"
+	[ "$l" = "65536 65536" ] || { echo "pid $p ($(cat "/proc/$p/comm")) does not have the init's 65536 open files"; cat "/proc/$p/limits"; exit 1; }
+done
+judged 'Open files at connect: node [0-9]* of 65536, xray [0-9]* of 65536, sing-box [0-9]* of 65536' \
+	|| { echo "the service did not say the open files at connect"; luci log '{"lines":40}' | jq -r '.lines[]' | tail -20; exit 1; }
+luci log '{"lines":80}' | jq -r '.lines[]' | grep 'Open files at connect' | tail -n 1
+luci diagnostics '{}' | jq -r '.text' | grep '^open files' || { echo "the diagnostics carry no open-files line"; exit 1; }
+luci diagnostics '{}' | jq -r '.text' | grep -q '^open files (in use/Max open files): node=[0-9]*/65536 xray=[0-9]*/65536 sing-box=[0-9]*/65536' \
+	|| { echo "the diagnostics' open-files line is not node, xray and sing-box at 65536"; exit 1; }
+SB_CFG="$(cmdline "$FD_SB" | grep -o '/[^ ]*irnf-sb-[^ ]*/sing-box\.json' | head -n 1)"
+echo "sing-box tun inbound: $(jq -c '.inbounds[0] | {stack, udp_timeout}' "$SB_CFG")"
+jq -e '.inbounds[0].udp_timeout == 120' "$SB_CFG" >/dev/null || { echo "the gateway's sing-box has no udp_timeout 120"; exit 1; }
+C=/etc/irnetfree/config.json
+echo "the core's DNS block: $(jq -c '.dns | del(.hosts)' "$C")"
+jq -e '.dns.enableParallelQuery == true and .dns.serveStale == true and .dns.serveExpiredTTL == 86400' "$C" >/dev/null || { echo "the core's DNS block is not the router's"; exit 1; }
+jq -e '.dns.servers | map(select(type == "object" and (.address | tostring | startswith("https://")))) | length > 0 and all(.timeoutMs == 8000)' "$C" >/dev/null \
+	|| { echo "a DoH server of the core has no 8 s budget"; exit 1; }
+
+say "v1.16.2: a LAN-side namespace again (lan0, a port of br-lan) to flood from"
+FLOODNS=
+if ip netns add lan0 2>/dev/null; then
+	if ip link add veth0 type veth peer name veth1 2>/dev/null; then
+		ip link set veth1 netns lan0
+		ip netns exec lan0 ip link set lo up
+		ip netns exec lan0 ip link set veth1 up
+		ip link set veth0 master br-lan up
+		ip netns exec lan0 ip addr add 192.168.1.77/24 dev veth1
+		ip netns exec lan0 ip route add default via 192.168.1.1
+		sleep 1
+		if lanping 192.168.1.1; then FLOODNS=1; echo "lan0: 192.168.1.77 — pings the router"; else echo "lan0 does not reach the router — why:"; lanwhy br-lan 192.168.1.77; fi
+	fi
+	[ -n "$FLOODNS" ] || ip netns delete lan0
+fi
+[ -n "$FLOODNS" ] || echo "no LAN-side namespace: the flood runs from the router itself (dnsmasq's upstream and the router's own UDP enter the same sing-box)"
+inlan() { if [ -n "$FLOODNS" ]; then ip netns exec lan0 "$@"; else "$@"; fi; }
+# node in the namespace: one A query per name, each from a socket of its own, asked again from that
+# socket every <gap> ms up to <tries> times (a stub resolver's retry); UDP flows, one socket each
+cat > /tmp/irnf-flood.js <<'EOF'
+const dgram = require('dgram');
+const [mode, ...a] = process.argv.slice(2);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const query = (id, name) => Buffer.concat([
+  Buffer.from([id >> 8, id & 255, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]),
+  ...name.split('.').map((l) => Buffer.concat([Buffer.from([l.length]), Buffer.from(l)])),
+  Buffer.from([0, 0, 1, 0, 1])
+]);
+const ask = (server, name, tries, gapMs) => new Promise((resolve) => {
+  const s = dgram.createSocket('udp4');
+  const id = Math.floor(Math.random() * 65536);
+  const q = query(id, name);
+  let n = 0;
+  let done = false;
+  let timer = null;
+  const finish = (r) => { if (done) return; done = true; clearTimeout(timer); try { s.close(); } catch (e) { /* closed */ } resolve(r); };
+  const send = () => { n++; s.send(q, 53, server, () => {}); timer = setTimeout(() => (n < tries ? send() : finish({ timeout: true })), gapMs); };
+  s.on('message', (m) => { if (m.length > 3 && m.readUInt16BE(0) === id) finish({ rcode: m[3] & 15 }); });
+  s.on('error', () => finish({ error: true }));
+  s.bind(0, send);
+});
+(async () => {
+  if (mode === 'dns') {
+    const server = a[0], count = Number(a[1]), tag = a[2], tries = Number(a[3]), gapMs = Number(a[4]), wave = Number(a[5]);
+    const r = { sent: count, answered: 0, noerror: 0, nxdomain: 0, servfail: 0, other: 0, unanswered: 0, seconds: 0 };
+    const t0 = Date.now();
+    for (let i = 0; i < count; i += wave) {
+      const batch = [];
+      for (let j = i; j < Math.min(count, i + wave); j++) batch.push(ask(server, 'irnf-' + tag + '-' + j + '.example.com', tries, gapMs));
+      for (const x of await Promise.all(batch)) {
+        if (x.timeout || x.error) { r.unanswered++; continue; }
+        r.answered++;
+        if (x.rcode === 0) r.noerror++; else if (x.rcode === 3) r.nxdomain++; else if (x.rcode === 2) r.servfail++; else r.other++;
+      }
+    }
+    r.seconds = Math.round((Date.now() - t0) / 1000);
+    console.log('FLOOD DNS ' + JSON.stringify(r));
+  } else if (mode === 'udp') {
+    const target = a[0], base = Number(a[1]), count = Number(a[2]);
+    for (let i = 0; i < count; i++) {
+      const s = dgram.createSocket('udp4');
+      await new Promise((r) => s.bind(0, r));
+      for (let k = 0; k < 2; k++) await new Promise((r) => s.send(Buffer.from('irnf-flood ' + i), base + i, target, () => r()));
+      s.close();
+      if (i % 50 === 49) await sleep(100);
+    }
+    console.log('FLOOD UDP ' + JSON.stringify({ flows: count, to: target + ':' + base + '-' + (base + count - 1) }));
+  }
+})();
+EOF
+SAMPLER=
+fd_sample_start() {
+	rm -f /tmp/irnf-fd.stop /tmp/irnf-fd.samples
+	( while [ ! -e /tmp/irnf-fd.stop ]; do echo "$(fdn "$FD_SB") $(fdn "$FD_X")" >> /tmp/irnf-fd.samples; sleep 1; done ) &
+	SAMPLER=$!
+}
+fd_sample_stop() { touch /tmp/irnf-fd.stop; wait "$SAMPLER" 2>/dev/null || true; }
+fd_peak() { awk -v c="$1" 'BEGIN { m = 0 } { if ($c + 0 > m) m = $c + 0 } END { print m }' /tmp/irnf-fd.samples; }
+# a name nobody asked before (dnsmasq caches): through dnsmasq, its upstream in the tunnel
+resolves() {
+	out=; i=0
+	until echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address'; do
+		i=$((i+1))
+		[ $i -le 8 ] || { echo "$1 did not resolve from the LAN through the tunnel"; echo "$out"; logread | tail -20; exit 1; }
+		out="$(inlan nslookup "$1" 192.168.1.1 2>&1 || true)"
+		echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address' || sleep 5
+	done
+	echo "$1 from the LAN through dnsmasq and the tunnel: $(echo "$out" | sed -n '/^Name:/,$p' | grep '^Address' | head -n 2 | tr '\n' ' ')"
+}
+
+say "v1.16.2: 1500 names nobody asked before through dnsmasq (100 at a time), then 300 UDP flows to distinct ports — sing-box's and xray's open files every second"
+BASE_SB="$(fdn "$FD_SB")"; BASE_X="$(fdn "$FD_X")"
+echo "before the flood: sing-box $BASE_SB open files, xray $BASE_X"
+logread -f > /tmp/irnf-flood-a.log 2>&1 &
+LOGF=$!
+sleep 1; logger -t irnf-smoke "irnf-flood-a-start-$$"
+fd_sample_start
+inlan node /tmp/irnf-flood.js dns 192.168.1.1 1500 "a$$" 1 3000 100 | tee /tmp/irnf-flood-a.txt
+inlan node /tmp/irnf-flood.js udp 198.51.100.1 30000 300 | tee -a /tmp/irnf-flood-a.txt
+UDP_DONE="$(date +%s)"
+sleep 3
+fd_sample_stop
+logger -t irnf-smoke "irnf-flood-a-end-$$"; sleep 1
+kill "$LOGF" 2>/dev/null || true
+grep -q "irnf-flood-a-end-$$" /tmp/irnf-flood-a.log || { echo "logread -f captured nothing: the log check below would prove nothing"; head -n 5 /tmp/irnf-flood-a.log; exit 1; }
+PEAK_SB="$(fd_peak 1)"; PEAK_X="$(fd_peak 2)"; NOW_SB="$(fdn "$FD_SB")"
+echo "sing-box open files: before $BASE_SB, peak $PEAK_SB, after $NOW_SB — limit 65536 (the kernel's 4096 before v1.16.2)"
+echo "xray open files: before $BASE_X, peak $PEAK_X — limit 65536"
+EMFILE="$(grep -ci 'too many open files' /tmp/irnf-flood-a.log || true)"
+echo "\"too many open files\" in the log during the flood: ${EMFILE:-0}"
+[ "${EMFILE:-0}" = 0 ] || { grep -i 'too many open files' /tmp/irnf-flood-a.log | head -n 5; exit 1; }
+sed -n 's/^FLOOD DNS //p' /tmp/irnf-flood-a.txt | jq -e '.answered * 4 >= .sent * 3' >/dev/null || { echo "fewer than 3 in 4 of the flood's names were answered"; exit 1; }
+[ "$PEAK_SB" -lt 32768 ] || { echo "sing-box reached $PEAK_SB open files — not well under its 65536"; exit 1; }
+[ "$PEAK_X" -lt 32768 ] || { echo "xray reached $PEAK_X open files — not well under its 65536"; exit 1; }
+[ "$NOW_SB" -ge $((BASE_SB + 300)) ] || { echo "the 300 UDP flows hold no sessions in sing-box ($BASE_SB -> $NOW_SB) — the drain below would prove nothing"; exit 1; }
+resolves example.net
+if [ -n "$FLOODNS" ]; then lanprobe_soon || { echo "lan0 has no TCP through the tunnel after the flood"; lantunnelwhy; exit 1; }; echo "lan0: TCP through the tunnel after the flood"; fi
+
+say "v1.16.2: the flood's sessions are gone 120 s after their last packet (udp_timeout) — sing-box's default 300 s would still hold every one of them"
+# sing-box up to 1.13 drops expired NAT sessions when a new one is added: a fresh flow each look
+while [ $(( $(date +%s) - UDP_DONE )) -lt 125 ]; do sleep 5; done
+DRAINED=; el=0
+while [ "$el" -lt 200 ]; do
+	inlan node /tmp/irnf-flood.js udp 198.51.100.2 40000 1 >/dev/null
+	sleep 3
+	NOW_SB="$(fdn "$FD_SB")"; el=$(( $(date +%s) - UDP_DONE ))
+	echo "${el}s after the flood: sing-box $NOW_SB open files (before $BASE_SB, peak $PEAK_SB)"
+	if [ "$NOW_SB" -le $((BASE_SB + 60)) ]; then DRAINED=1; break; fi
+	sleep 5
+done
+[ -n "$DRAINED" ] || { echo "the flood's UDP sessions were still open ${el}s after it — the 120 s lifetime did not take"; exit 1; }
+
+say "v1.16.2: the owner's failure — the exit's DoH black-holed (no answer: the LAN gets none and retries), 400 new names asked three times each"
+DNS_REMOTE_WAS="$(rpc '{"channel":"settings:get"}' | jq -c '.result.dnsRemote')"
+rpc '{"channel":"settings:set","arg":{"dnsRemote":["https://192.0.2.1/dns-query"]}}' | jq -e '.result.settings.dnsRemote == ["https://192.0.2.1/dns-query"]' >/dev/null \
+	|| { echo "settings:set dnsRemote failed"; exit 1; }
+mark fdb
+rpc "{\"channel\":\"connect\",\"arg\":\"$ID\"}" > /tmp/connect-fdb.json || true
+jq -c '.result // .error' /tmp/connect-fdb.json
+wait_back "connect with the DoH black-holed" 180
+fd_pids
+jq -c '.dns.servers' /etc/irnetfree/config.json
+BASE_SB="$(fdn "$FD_SB")"; BASE_X="$(fdn "$FD_X")"
+echo "before: sing-box $BASE_SB open files, xray $BASE_X"
+logread -f > /tmp/irnf-flood-b.log 2>&1 &
+LOGF=$!
+sleep 1
+fd_sample_start
+inlan node /tmp/irnf-flood.js dns 192.168.1.1 400 "b$$" 3 2000 100 | tee /tmp/irnf-flood-b.txt
+sleep 3
+fd_sample_stop
+logger -t irnf-smoke "irnf-flood-b-end-$$"; sleep 1
+kill "$LOGF" 2>/dev/null || true
+grep -q "irnf-flood-b-end-$$" /tmp/irnf-flood-b.log || { echo "logread -f captured nothing during the outage"; exit 1; }
+PEAK_SB="$(fd_peak 1)"; PEAK_X="$(fd_peak 2)"
+echo "sing-box open files: before $BASE_SB, peak $PEAK_SB, after $(fdn "$FD_SB") — limit 65536"
+echo "xray open files: before $BASE_X, peak $PEAK_X — limit 65536"
+echo "the core's DoH failures logged meanwhile: $(grep -Ec 'failed to retrieve response|context deadline exceeded|192\.0\.2\.1' /tmp/irnf-flood-b.log || true)"
+grep -E 'failed to retrieve response|192\.0\.2\.1' /tmp/irnf-flood-b.log | head -n 2 || true
+sed -n 's/^FLOOD DNS //p' /tmp/irnf-flood-b.txt | jq -e '(.noerror + .nxdomain) * 10 < .sent' >/dev/null || { echo "names were answered with the DoH black-holed — the outage was not simulated"; exit 1; }
+EMFILE="$(grep -ci 'too many open files' /tmp/irnf-flood-b.log || true)"
+echo "\"too many open files\" in the log during the outage: ${EMFILE:-0}"
+[ "${EMFILE:-0}" = 0 ] || { grep -i 'too many open files' /tmp/irnf-flood-b.log | head -n 5; exit 1; }
+[ "$PEAK_SB" -lt 32768 ] && [ "$PEAK_X" -lt 32768 ] || { echo "open files not well under 65536 during the outage (sing-box $PEAK_SB, xray $PEAK_X)"; exit 1; }
+
+say "v1.16.2: the DoH back — names resolve through the tunnel again (the owner's \"then it suddenly works\")"
+rpc "{\"channel\":\"settings:set\",\"arg\":{\"dnsRemote\":$DNS_REMOTE_WAS}}" | jq -e '.result.settings.dnsRemote | tostring | contains("192.0.2.1") | not' >/dev/null \
+	|| { echo "settings:set could not put the DoH list back"; exit 1; }
+mark fdc
+rpc "{\"channel\":\"connect\",\"arg\":\"$ID\"}" > /tmp/connect-fdc.json || true
+wait_back "connect with the DoH back" 180
+resolves example.org
+rpc '{"channel":"disconnect"}' >/dev/null
+i=0
+while ip link show IRNetFree >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 60 ] || { echo "the TUN device stayed after the v1.16.2 disconnect"; exit 1; }; sleep 1; done
+if [ -n "$FLOODNS" ]; then ip netns delete lan0; fi
+
 say "SMOKE OK"

@@ -415,6 +415,37 @@ test('the QEMU guest script is POSIX sh and ends with the marker the driver look
   assert.match(drv, /'\/install\.sh': path\.join\(__dirname, '\.\.', 'install\.sh'\)/, 'and the driver hands the installer to the guest');
 });
 
+test('the QEMU smoke proves v1.16.2: 65536 open files for node and both cores, udp_timeout 120, the router\'s DNS block, a flood from the LAN with no "too many open files", the drain, the DoH outage and names after it', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'guest-smoke.sh'), 'utf8');
+  const at = src.indexOf('say "v1.16.2: connect;');
+  assert.notEqual(at, -1, 'the v1.16.2 section is gone');
+  const v = src.slice(at, src.indexOf('say "SMOKE OK"'));
+  assert.match(v, /for p in \$\(pidof node\) \$FD_SB \$FD_X; do/, 'node, the gateway\'s sing-box and the core');
+  assert.match(v, /\[ "\$l" = "65536 65536" \]/, 'soft and hard, from /proc/<pid>/limits');
+  assert.match(v, /jq -e '\.inbounds\[0\]\.udp_timeout == 120' "\$SB_CFG"/);
+  assert.match(v, /\.dns\.enableParallelQuery == true and \.dns\.serveStale == true and \.dns\.serveExpiredTTL == 86400/);
+  assert.match(v, /all\(\.timeoutMs == 8000\)/);
+  assert.match(v, /judged 'Open files at connect: node \[0-9\]\* of 65536, xray \[0-9\]\* of 65536, sing-box \[0-9\]\* of 65536'/, 'the service says it at connect');
+  // the flood: from lan0 through dnsmasq, then UDP flows; open files sampled; no EMFILE in a live capture of the log
+  assert.match(v, /ip netns exec lan0 "\$@"/);
+  assert.match(v, /inlan node \/tmp\/irnf-flood\.js dns 192\.168\.1\.1 1500 "a\$\$" 1 3000 100/);
+  assert.match(v, /inlan node \/tmp\/irnf-flood\.js udp 198\.51\.100\.1 30000 300/);
+  assert.match(v, /logread -f > \/tmp\/irnf-flood-a\.log/);
+  assert.match(v, /grep -ci 'too many open files' \/tmp\/irnf-flood-a\.log/);
+  assert.match(v, /\[ "\$PEAK_SB" -lt 32768 \]/, 'well under the limit');
+  assert.match(v, /resolves example\.net/);
+  // the drain: past 120 s, a fresh session each look, back near the baseline before 200 s (300 s would still hold them)
+  assert.match(v, /-lt 125 \]; do sleep 5; done/);
+  assert.match(v, /if \[ "\$NOW_SB" -le \$\(\(BASE_SB \+ 60\)\) \]; then DRAINED=1; break; fi/);
+  // the owner's failure: DoH black-holed, three tries each, nothing answered, no EMFILE, names back after it
+  assert.match(v, /"dnsRemote":\["https:\/\/192\.0\.2\.1\/dns-query"\]/);
+  assert.match(v, /inlan node \/tmp\/irnf-flood\.js dns 192\.168\.1\.1 400 "b\$\$" 3 2000 100/);
+  assert.match(v, /grep -ci 'too many open files' \/tmp\/irnf-flood-b\.log/);
+  assert.match(v, /resolves example\.org/);
+  // the flood script inside: arrow functions only (the bashism check reads heredocs too)
+  assert.doesNotMatch(v, /^\s*function\s/m);
+});
+
 test('the QEMU smoke proves D3: the in-country resolvers stay in the whole-LAN tunnel, the core’s own query leaves by the WAN (fix/v1161-core)', () => {
   const src = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'guest-smoke.sh'), 'utf8');
   const at = src.indexOf('say "D3: bypass-ir');
