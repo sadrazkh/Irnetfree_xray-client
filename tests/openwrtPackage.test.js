@@ -251,6 +251,11 @@ test('the init script: procd, the token FILE (never the token itself), the exact
   assert.match(s, /^\tprocd_set_param respawn 3600 5 0$/m);
   // time for a clean teardown of the gateway on stop (procd's default is 5s, then SIGKILL)
   assert.match(s, /procd_set_param term_timeout 15/);
+  // v1.16.2: the descriptor limit for node and the cores it starts (procd applies it before exec; children
+  // inherit it). Without it they had the kernel's 4096 — the owner's AC-1304 ran out ("too many open files")
+  const inst = s.slice(s.indexOf('procd_open_instance'), s.indexOf('procd_close_instance'));
+  assert.match(inst, /^\tprocd_set_param limits nofile="65536 65536"$/m, 'one limits call, soft and hard, inside the instance');
+  assert.equal((s.match(/procd_set_param limits/g) || []).length, 1, 'a second limits call would replace the first');
   assert.match(s, /procd_add_reload_trigger irnetfree/);
   // a zone added after the install (a guest Wi-Fi) is picked up at the next start
   assert.match(s, /sh \/usr\/lib\/irnetfree\/fw-forwardings\.sh >\/dev\/null 2>&1 \|\| true/);
