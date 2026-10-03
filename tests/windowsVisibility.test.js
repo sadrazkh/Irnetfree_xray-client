@@ -7,15 +7,20 @@
  * Nothing in this round changes what the app DOES — no generated config, no
  * route, no resolver, no guard action, no step of the connect: it only makes
  * the app SAY, on the PC where it happens, which of the known causes applies.
- * Each message fires only on the condition it names, so a healthy PC sees
- * nothing new (tests/desktopPin.test.js still pins every generated config).
+ * Each message fires only on the condition it names (tests/desktopPin.test.js
+ * still pins every generated config). That is NOT "a healthy PC sees nothing
+ * new": a WireGuard identity stored twice is in the store, so a PC that works
+ * says it too — which is why it is said once per run, with what to do.
  *
  *   L2(c)  the leak guard failed           → a toast and a line under the state
  *   L2     TUN on, the tunnel did not come up (proxy only) → a persistent line + the reason
- *   W1     a WireGuard identity stored twice → warn line + one toast per connect
- *   W4     a LAN inside a routed private range → warn line + one toast per connect
+ *   W1     a WireGuard identity stored twice → warn line every connect + one toast per run
+ *   W4     a LAN holding what a routed tunnel needs (its WireGuard DNS, Address,
+ *          a narrower AllowedIPs), or a rule as narrow as the LAN → warn line + one
+ *          toast per connection; a LAN merely inside a broad /16 or /8 → an info line only
  *   W3     managed DNS off with a corporate resolver → the existing warning, also a toast
- *   L1     the logon task starts another copy → a banner whose button re-registers it
+ *   L1     the logon task starts another copy → a banner whose button re-registers it,
+ *          on screen (a fixed stack over the window's foot — the render check proves it)
  *
  * main.js needs Electron, so — like desktopUx.test.js — its new functions are
  * compiled on their own in a vm against fakes, and the wiring is read as text.
@@ -62,13 +67,22 @@ const CONNECT = slice(MAIN, 'async function connectOnce(serverId, opts = {}) {',
 
 const PUB = 'Q29ycG9yYXRlU2VydmVyUHVibGljS2V5MDAwMDAwMDA=';
 const KEY = 'cHJpdmF0ZS1rZXktQS1BQUFBQUFBQUFBQUFBQUFBQUE=';
-const wg = (id, name) => Object.assign(makeWireguardServer({ name, endpoint: 'vpn.corp.example:51820', publicKey: PUB, privateKey: KEY, address: '10.10.10.42/32' }), { id });
+const KEY_B = 'cHJpdmF0ZS1rZXktQi1CQkJCQkJCQkJCQkJCQkJCQkI=';
+// the owner's corporate WireGuard: its DNS, its tunnel address, AllowedIPs as wide as the advanced rule
+const wg = (id, name, f = {}) => Object.assign(makeWireguardServer(Object.assign({
+  name, endpoint: 'vpn.corp.example:51820', publicKey: PUB, privateKey: KEY, address: '10.10.10.42/32',
+  dns: '192.168.60.1, tes.systems', allowedIPs: '192.168.0.0/16, 10.0.0.0/8'
+}, f)), { id });
+const SUBS = [{ id: 'sub0554', name: 'tes-vpn-service.platform.irnetfree.info' }];
 
-function hintsHarness({ servers, rules = [], ifaces = {}, platform = 'win32', throwOn = null } = {}) {
+function hintsHarness({ servers, subs = SUBS, rules = [], ifaces = {}, platform = 'win32', throwOn = null } = {}) {
   const logs = [];
   const ctx = vm.createContext({
     process: { platform },
-    store: { get: (k, d) => { if (throwOn === 'store') throw new Error('store gone'); return k === 'servers' ? servers : d; } },
+    store: { get: (k, d) => {
+      if (throwOn === 'store') throw new Error('store gone');
+      return k === 'servers' ? servers : (k === 'subscriptions' ? subs : d);
+    } },
     os: { networkInterfaces: () => ifaces },
     send: (ch, p) => { if (ch === 'log') logs.push(p); },
     getSettings: () => ({ routeRules: rules }),
@@ -82,38 +96,62 @@ function hintsHarness({ servers, rules = [], ifaces = {}, platform = 'win32', th
   return { ctx, logs };
 }
 
-test('W1/W4 at connect: a warn line each, and the notices handed back for the window — never a key', () => {
-  const chainWg = wg('b47f', 'tes-wg');
-  const twin = wg('fa69', 'tes-wg (copy)');
-  const hop = { id: 'hop', name: '🇬🇧-2', protocol: 'vless', outbound: { protocol: 'vless' } };
-  const plan = { mode: 'advanced', serversById: { hop, b47f: chainWg, fa69: twin }, chainsById: { tes: [hop, chainWg] }, chain: [],
-    rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:tes' }], def: 'hop' };
-  const h = hintsHarness({
-    servers: [hop, chainWg, twin],
-    rules: plan.rules,
-    ifaces: {
-      'Wi-Fi': [{ address: '192.168.1.5', netmask: '255.255.255.0', family: 'IPv4', internal: false, cidr: '192.168.1.5/24' }],
-      IRNetFree: [{ address: '172.19.0.1', netmask: '255.255.255.252', family: 'IPv4', internal: false, cidr: '172.19.0.1/30' }]
-    }
-  });
+// The owner's laptop as its store reads (records b47f / fa69 / f132, the rule, the Wi-Fi):
+// the chain's cobra.tes.ca added by hand, its twin from a subscription, reza-wire on the
+// same tunnel address under another key — and a home LAN inside the broad corporate rule.
+const HOP = { id: 'hop', name: '🇬🇧-2', protocol: 'vless', outbound: { protocol: 'vless' } };
+const OWNER_RULES = [{ type: 'ip', value: '192.168.0.0/16, 10.0.0.0/8', target: 'chain:tes' }];
+const WIFI = { 'Wi-Fi': [{ address: '192.168.1.5', netmask: '255.255.255.0', family: 'IPv4', internal: false, cidr: '192.168.1.5/24' }] };
+const OUR_TUN = { IRNetFree: [{ address: '172.19.0.1', netmask: '255.255.255.252', family: 'IPv4', internal: false, cidr: '172.19.0.1/30' }] };
+function ownerLaptop() {
+  const chainWg = wg('b47f', 'cobra.tes.ca');
+  const twin = Object.assign(wg('fa69', 'cobra.tes.ca'), { subId: 'sub0554' });
+  const reza = wg('f132', 'reza-wire', { privateKey: KEY_B });
+  const plan = { mode: 'advanced', serversById: { hop: HOP, b47f: chainWg }, chainsById: { tes: [HOP, chainWg] }, chain: [], rules: OWNER_RULES, def: 'hop' };
+  return { plan, servers: [HOP, chainWg, twin, reza] };
+}
+
+test('W1/W4 at connect on the owner’s laptop: the twins are told apart by group, the home LAN in the broad corporate rule is an info line only', () => {
+  const { plan, servers } = ownerLaptop();
+  const h = hintsHarness({ servers, rules: OWNER_RULES, ifaces: Object.assign({}, WIFI, OUR_TUN) });
   const out = h.ctx.connectHints(plan);
   assert.deepEqual(plain(out), [
-    { id: 'wgSharedKey', name: 'tes-wg', other: 'tes-wg (copy)' },
-    { id: 'lanInRange', lan: '192.168.1.0/24', iface: 'Wi-Fi', range: '192.168.0.0/16', target: 'Tes Chain' }
-  ]);
-  assert.deepEqual(h.logs.map((l) => l.level), ['warn', 'warn']);
-  assert.match(h.logs[0].line, /^WireGuard tes-wg: this identity is also stored as tes-wg \(copy\)/);
-  assert.match(h.logs[1].line, /^Your local network 192\.168\.1\.0\/24 \(Wi-Fi\) lies inside 192\.168\.0\.0\/16 that advanced routing sends to Tes Chain/);
+    { id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info' },
+    { id: 'wgSharedAddress', name: 'cobra.tes.ca', other: 'reza-wire', group: { t: 'srv.manual' }, address: '10.10.10.42' }
+  ], 'no lanInRange for 192.168.1.0/24: nothing Tes Chain needs is in it');
+  assert.deepEqual(h.logs.map((l) => l.level), ['warn', 'warn', 'info']);
+  assert.match(h.logs[0].line, /^WireGuard cobra\.tes\.ca: the same private key is also stored in another record, “cobra\.tes\.ca” in the group “tes-vpn-service\.platform\.irnetfree\.info” — /);
+  assert.match(h.logs[1].line, /^WireGuard cobra\.tes\.ca: its tunnel address 10\.10\.10\.42 is also stored in another record, “reza-wire” in the group “Added by hand”/);
+  assert.match(h.logs[2].line, /^Your local network 192\.168\.1\.0\/24 \(Wi-Fi\) lies inside 192\.168\.0\.0\/16 that advanced routing sends to Tes Chain; none of the addresses Tes Chain is known to need/);
   assert.ok(!JSON.stringify(h.logs).includes(KEY) && !JSON.stringify(out).includes(KEY), 'the private key is never said');
+  assert.ok(!JSON.stringify(h.logs).includes(KEY_B) && !JSON.stringify(out).includes(KEY_B));
 });
 
-test('W1/W4 at connect: a healthy plan says nothing; W4 is asked only of advanced routing; nothing in here can fail a connect', () => {
+test('W4 at connect: a LAN that holds the corporate WireGuard’s DNS is a warn line AND a notice for the window', () => {
+  const chainWg = wg('b47f', 'cobra.tes.ca');
+  const plan = { mode: 'advanced', serversById: { hop: HOP, b47f: chainWg }, chainsById: { tes: [HOP, chainWg] }, chain: [], rules: OWNER_RULES, def: 'hop' };
+  const h = hintsHarness({
+    servers: [HOP, chainWg], rules: OWNER_RULES,
+    ifaces: { Ethernet: [{ address: '192.168.60.23', netmask: '255.255.255.0', family: 'IPv4', internal: false, cidr: '192.168.60.23/24' }] }
+  });
+  assert.deepEqual(plain(h.ctx.connectHints(plan)), [
+    { id: 'lanInRange', lan: '192.168.60.0/24', iface: 'Ethernet', range: '192.168.0.0/16', target: 'Tes Chain', address: '192.168.60.1', key: 'DNS' }
+  ]);
+  assert.deepEqual(h.logs.map((l) => l.level), ['warn']);
+  assert.match(h.logs[0].line, /^Your local network 192\.168\.60\.0\/24 \(Ethernet\) overlaps 192\.168\.60\.1 — the DNS of Tes Chain’s WireGuard — .* Move that LAN, VM or host-only network to another subnet$/);
+});
+
+test('W1/W4 at connect: a store with one record per identity says nothing to the window; W4 is asked only of advanced routing; nothing in here can fail a connect', () => {
   const chainWg = wg('b47f', 'tes-wg');
-  const lanIfaces = { 'Wi-Fi': [{ address: '192.168.1.5', netmask: '255.255.255.0', family: 'IPv4', internal: false, cidr: '192.168.1.5/24' }] };
+  const lanIfaces = WIFI;
   // one record per identity, corporate ranges that do not touch this LAN
   const healthy = hintsHarness({ servers: [chainWg], rules: [{ type: 'ip', value: '192.168.60.0/24', target: 'b47f' }], ifaces: lanIfaces });
   assert.deepEqual(plain(healthy.ctx.connectHints({ mode: 'advanced', serversById: { b47f: chainWg }, rules: [{ type: 'ip', value: '192.168.60.0/24', target: 'b47f' }], def: 'b47f' })), []);
   assert.equal(healthy.logs.length, 0);
+  // the owner's broad rule around this LAN, one record per identity: nothing for the window, one info line
+  const broad = hintsHarness({ servers: [HOP, chainWg], rules: OWNER_RULES, ifaces: lanIfaces });
+  assert.deepEqual(plain(broad.ctx.connectHints({ mode: 'advanced', serversById: { hop: HOP, b47f: chainWg }, chainsById: { tes: [HOP, chainWg] }, chain: [], rules: OWNER_RULES, def: 'hop' })), []);
+  assert.deepEqual(broad.logs.map((l) => l.level), ['info']);
   // a single config: its stored rules are not in this plan
   const single = hintsHarness({ servers: [chainWg], rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'b47f' }], ifaces: lanIfaces });
   assert.deepEqual(plain(single.ctx.connectHints({ mode: 'single', server: chainWg })), []);
@@ -262,7 +300,7 @@ function windowHarness({ lang = 'en', platform = 'win32', flavor = null, api = {
   const el = (id) => { if (!els.has(id)) els.set(id, new El(id)); return els.get(id); };
   const ctx = vm.createContext({
     state: { connected: false, connecting: false, activeServerId: null, activeEngine: '', settings: { tunMode: true }, flavor, platform,
-      servers: [], pendingReconnect: [], wasReconnecting: false, lan: null, connIssues: [], noticesToasted: new Set(), autostartStale: null },
+      servers: [], pendingReconnect: [], wasReconnecting: false, lan: null, connIssues: [], noticesToasted: new Set(), noticesOnce: new Set(), autostartStale: null },
     $: (sel) => el(String(sel).replace(/^#/, '')),
     t: i18nT(lang),
     document: { createElement: () => new El('') },
@@ -283,7 +321,7 @@ function windowHarness({ lang = 'en', platform = 'win32', flavor = null, api = {
 }
 const UP = { state: 'connected', serverId: 's1', engine: 'xray', tun: true, tunError: null, guardError: null, geoWarn: null, lan: null, pendingReconnect: [] };
 
-test('a healthy connect shows nothing new — no toast, no line — on the desktop and on the router', () => {
+test('a connect with nothing to say (no failure, no notice) shows nothing new — no toast, no line — on the desktop and on the router', () => {
   for (const flavor of [null, 'openwrt']) {
     const h = windowHarness({ flavor });
     h.ctx.onStatus(Object.assign({}, UP, { notices: [] }));
@@ -343,14 +381,16 @@ test('L2(c): the leak guard failed under a live tunnel — a toast and a line; t
   assert.equal(proxyMode.el('connIssues').hidden, true);
 });
 
-test('W1/W3/W4: each notice is a toast, one after another, once per connection — a recovery does not repeat it, the next connect does', () => {
-  const notes = [
-    { id: 'corpDnsOff', servers: '192.168.60.1' },
-    { id: 'wgSharedKey', name: 'tes-wg', other: 'tes-wg (copy)' },
-    { id: 'wgSharedAddress', name: 'tes-wg', other: 'reza-wire', address: '10.10.10.42' },
-    { id: 'lanInRange', lan: '192.168.1.0/24', iface: 'Wi-Fi', range: '192.168.0.0/16', target: 'Tes Chain' },
-    { id: 'rangeInLan', lan: '192.168.1.0/24', iface: 'Wi-Fi', range: '192.168.1.20/32', target: 'tes-wg' }
-  ];
+const NOTES = [
+  { id: 'corpDnsOff', servers: '192.168.60.1' },
+  { id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info' },
+  { id: 'wgSharedAddress', name: 'cobra.tes.ca', other: 'reza-wire', group: { t: 'srv.manual' }, address: '10.10.10.42' },
+  { id: 'lanInRange', lan: '192.168.60.0/24', iface: 'Ethernet', range: '192.168.0.0/16', target: 'Tes Chain', address: '192.168.60.1', key: 'DNS' },
+  { id: 'rangeInLan', lan: '192.168.1.0/24', iface: 'Wi-Fi', range: '192.168.1.20/32', target: 'tes-wg' }
+];
+
+test('W1/W3/W4: each notice is a toast, one after another — what to do in it; a recovery never repeats one, a new connection repeats the PC’s, the store’s twins are said once per run', () => {
+  const notes = NOTES;
   const h = windowHarness();
   h.ctx.onStatus(Object.assign({}, UP, { geoWarn: 'Geo files are missing', notices: notes }));
   const t = h.toasts();
@@ -358,28 +398,52 @@ test('W1/W3/W4: each notice is a toast, one after another, once per connection �
   assert.equal(t[0][2], 'Geo files are missing', 'the geo toast is as it was, and first');
   assert.equal(t[0][3], 2600);
   assert.equal(t[1][2], 'Managed DNS is off, so your WireGuard’s resolver (192.168.60.1) is not used and names inside that network will not resolve — turn Settings → DNS → “DNS managed by the app” back on');
-  assert.equal(t[2][2], 'WireGuard tes-wg: this identity is also stored as tes-wg (copy) — a WireGuard server accepts one device per key; used on two devices (or tested while connected) one of them stalls');
-  assert.match(t[3][2], /^WireGuard tes-wg: its tunnel address 10\.10\.10\.42 is also stored as reza-wire with another key/);
-  assert.equal(t[4][2], 'Your local network 192.168.1.0/24 lies inside 192.168.0.0/16 that advanced routing sends to Tes Chain — hosts in 192.168.1.0/24 stay on the LAN, not the tunnel');
-  assert.equal(t[5][2], '192.168.1.20/32 that advanced routing sends to tes-wg lies inside your local network 192.168.1.0/24 — hosts in 192.168.1.20/32 stay on the LAN, not the tunnel');
-  assert.ok(t.slice(1).every((c) => c[3] >= 8000), 'long enough to read');
+  // the window's English says what main's log line says, word for word — the remedy included
+  for (let i = 1; i < notes.length; i++) assert.equal(t[i + 1][2], notices.noticeLine(notes[i]), notes[i].id);
+  assert.equal(t[2][2], 'WireGuard cobra.tes.ca: the same private key is also stored in another record, “cobra.tes.ca” in the group “tes-vpn-service.platform.irnetfree.info” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls. Delete the copy you do not use, do not test it while connected, and get one peer per device from the server’s admin');
+  assert.match(t[3][2], /^WireGuard cobra\.tes\.ca: its tunnel address 10\.10\.10\.42 is also stored in another record, “reza-wire” in the group “Added by hand”, with another key/);
+  assert.match(t[4][2], /^Your local network 192\.168\.60\.0\/24 \(Ethernet\) overlaps 192\.168\.60\.1 — the DNS of Tes Chain’s WireGuard — /);
+  assert.ok(t.slice(1).every((c) => c[3] >= 12000), 'long enough to read a sentence and its remedy');
   assert.equal(h.el('connIssues').hidden, true, 'advice, not a failure of this connection: no line under the state');
   // the network moved and the connection was rebuilt: the same findings are not said again
   // (only the "reconnected" toast it always gave)
-  const warns = () => h.toasts().filter((c) => c[1] === 'warn').length;
+  const warns = () => h.toasts().filter((c) => c[1] === 'warn').map((c) => c[2]);
   h.ctx.onStatus({ state: 'reconnecting', reason: 'interfaces' });
   h.ctx.onStatus(Object.assign({}, UP, { notices: notes }));
-  assert.equal(warns(), 6);
+  assert.equal(warns().length, 6);
   assert.equal(h.toasts().at(-1)[1], 'ok');
-  // a disconnect and a new connect: said again
+  // a disconnect and a new connect: this PC's findings again (its network may have changed) —
+  // the store's twin records not: they are said once per run
   h.ctx.onStatus({ state: 'disconnected' });
-  h.ctx.onStatus(Object.assign({}, UP, { notices: notes.slice(1, 2) }));
-  assert.equal(warns(), 7);
+  h.ctx.onStatus(Object.assign({}, UP, { notices: notes }));
+  assert.deepEqual(warns().slice(6), [t[1][2], t[4][2], t[5][2]]);
+  // a twin that was not there before is new: said
+  h.ctx.onStatus({ state: 'disconnected' });
+  const other = { id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra (old)', group: { t: 'srv.manual' } };
+  h.ctx.onStatus(Object.assign({}, UP, { notices: [other] }));
+  assert.match(warns().at(-1), /“cobra \(old\)” in the group “Added by hand”/);
   // Persian
   const fa = windowHarness({ lang: 'fa' });
   fa.ctx.onStatus(Object.assign({}, UP, { notices: notes }));
   assert.ok(fa.toasts().every((c) => !/\{\w+\}/.test(c[2])), 'every placeholder filled');
-  assert.match(fa.toasts()[1][2], /^وایرگارد tes-wg: /);
+  assert.match(fa.toasts()[1][2], /^وایرگارد cobra\.tes\.ca: /);
+  assert.match(fa.toasts()[1][2], /«tes-vpn-service\.platform\.irnetfree\.info»/);
+  assert.match(fa.toasts()[2][2], /«کانفیگ‌های دستی»/, 'the group label in the user’s language');
+});
+
+test('the remedy is in both languages: delete the twin, do not test it while connected, one peer per device; move the clashing network', () => {
+  const fa = i18nT('fa'), en = i18nT('en');
+  assert.match(en('notice.wgSharedKey'), /Delete the copy you do not use, do not test it while connected, and get one peer per device from the server’s admin$/);
+  assert.match(fa('notice.wgSharedKey'), /نسخه‌ای را که استفاده نمی‌کنی پاک کن، وقتی وصلی تستش نکن و برای هر دستگاه یک peer جدا از ادمین سرور بگیر$/);
+  assert.match(en('notice.wgSharedAddress'), /Keep the record the server’s admin made for this device, delete the other, and do not test it while connected$/);
+  assert.match(fa('notice.wgSharedAddress'), /دیگری را پاک کن و وقتی وصلی تستش نکن$/);
+  for (const id of ['lanInRange', 'rangeInLan']) {
+    assert.match(en('notice.' + id), /Move that LAN, VM or host-only network to another subnet$/, id);
+    assert.match(fa('notice.' + id), /آن شبکهٔ محلی، ماشین مجازی یا شبکهٔ host-only را به زیرشبکهٔ دیگری ببر$/, id);
+  }
+  // twin records are told apart: "another record" and its group, in both languages
+  assert.match(en('notice.wgSharedKey'), /another record, “\{other\}” in the group “\{group\}”/);
+  assert.match(fa('notice.wgSharedKey'), /رکورد دیگری .*«\{other\}» در گروه «\{group\}»/);
 });
 
 test('the toasts of one connect come one after another, not over each other', () => {
@@ -397,11 +461,17 @@ test('the toasts of one connect come one after another, not over each other', ()
   assert.deepEqual(series(), ['err:Leak guard f', 'warn:geo', 'warn:Managed DNS ']);
 });
 
-test('a notice’s text: every {field} filled from the notice, literally', () => {
+test('a notice’s text: every {field} filled from the notice, literally — a { t } field is the window’s own string, in the user’s language', () => {
   const h = windowHarness();
   assert.equal(h.ctx.noticeText({ id: 'proxyOnly', reason: 'a $& b $1' }), 'Proxy only — the tunnel did not start: a $& b $1');
   assert.equal(h.ctx.noticeText({ id: 'proxyOnly' }), 'Proxy only — the tunnel did not start: {reason}');
+  assert.equal(h.ctx.noticeText({ id: 'proxyOnly', reason: { t: 'srv.manual' } }), 'Proxy only — the tunnel did not start: Added by hand');
+  assert.equal(h.ctx.noticeText({ id: 'proxyOnly', reason: { t: 'srv.subGone' } }), 'Proxy only — the tunnel did not start: Deleted subscription');
+  // an object that is not a string reference is not printed as [object Object]
+  assert.equal(h.ctx.noticeText({ id: 'proxyOnly', reason: { x: 1 } }), 'Proxy only — the tunnel did not start: {reason}');
   assert.equal(h.ctx.noticeText(null), '');
+  const fa = windowHarness({ lang: 'fa' });
+  assert.equal(fa.ctx.noticeText({ id: 'proxyOnly', reason: { t: 'srv.manual' } }), 'فقط پراکسی — تونل بالا نیامد: کانفیگ‌های دستی');
 });
 
 /* ------------------------------ the window: the logon task banner (L1) ------------------------------ */
@@ -463,7 +533,10 @@ test('the markup: the issue lines sit under the connection state, the banner bes
 });
 
 test('every notice main can send, and every line the window shows, is a string in both languages with the same fields', () => {
-  const fromMain = new Set([...R('src', 'main', 'connectNotices.js').matchAll(/\bid: '(\w+)'/g)].map((m) => m[1]));
+  // what connectNotices makes, minus what stays in the log (a broad range around a LAN), plus main's own W3
+  const made = [...R('src', 'main', 'connectNotices.js').matchAll(/\bid: '(\w+)'/g)].map((m) => m[1]);
+  assert.ok(made.includes('lanInBroadRange'));
+  const fromMain = new Set(made.filter((id) => !notices.LOG_ONLY.has(id)));
   fromMain.add('corpDnsOff');
   assert.deepEqual([...fromMain].sort(), ['corpDnsOff', 'lanInRange', 'rangeInLan', 'wgSharedAddress', 'wgSharedKey']);
   const ids = [...fromMain, 'proxyOnly', 'guardFailed', 'autostartStale', 'autostartFix', 'autostartFixed', 'autostartFixFailed'];
@@ -496,5 +569,10 @@ test('the wiring: setConnUI repaints the lines, a language switch the banner, an
   // the state starts empty
   assert.match(APP, /connIssues: \[\],/);
   assert.match(APP, /noticesToasted: new Set\(\),/);
+  assert.match(APP, /noticesOnce: new Set\(\),/);
   assert.match(APP, /autostartStale: null,/);
+  // a disconnect forgets this connection's notices, never the run's
+  const down = slice(APP, "} else if (d.state === 'disconnected') {", 'setPending([]);');
+  assert.match(down, /state\.noticesToasted = new Set\(\);/);
+  assert.doesNotMatch(down, /noticesOnce/);
 });
