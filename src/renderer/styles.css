@@ -67,6 +67,8 @@
   --danger: #ff6b6b;
   --okSoft: rgba(74, 222, 155, .13);
   --dangerSoft: rgba(255, 107, 107, .13);
+  --warnSoft: rgba(224, 176, 96, .13);
+  --infoSoft: rgba(156, 200, 255, .12);
   --shadow: 0 24px 60px rgba(0, 0, 0, .5);
   /* what dims the page behind anything modal — .modal-overlay and a <dialog>'s
      ::backdrop, which cannot share a class but must look like one thing */
@@ -110,6 +112,8 @@
   --danger: #c0392b;
   --okSoft: rgba(15, 125, 82, .12);
   --dangerSoft: rgba(192, 57, 43, .10);
+  --warnSoft: rgba(138, 94, 15, .10);
+  --infoSoft: rgba(37, 95, 174, .10);
   --shadow: 0 20px 46px rgba(20, 30, 40, .13);
 }
 
