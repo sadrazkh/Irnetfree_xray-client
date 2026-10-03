@@ -22,7 +22,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { BANNERS, checkPage, serveRenderer, bannerCheckJs, bannerTexts, findBrowser, renderInBrowser } = require('./renderCheck');
+const { BANNERS, checkPage, harnessPage, parseSizes, serveRenderer, bannerCheckJs, bannerTexts, findBrowser, renderInBrowser } = require('./renderCheck');
 
 const R = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8').replace(/\r\n/g, '\n');
 const HTML = R('src', 'renderer', 'index.html');
@@ -92,6 +92,11 @@ test('the render check serves the real markup and CSS — only the scripts are l
   assert.match(texts.autostart, /IRNetFree-Portable-1\.13\.0-x64-setup-copy\.exe/);
   assert.doesNotMatch(texts.autostart + texts.pending, /\{\w+\}/);
   assert.doesNotThrow(() => new vm.Script(bannerCheckJs(texts)));
+  // the harness: one iframe of exactly each size, around the page above
+  assert.deepEqual(parseSizes('1080x720, 900x600,390x760,x,99999x1'), [{ width: 1080, height: 720 }, { width: 900, height: 600 }, { width: 390, height: 760 }]);
+  const harness = harnessPage(parseSizes('1080x720,390x760'));
+  assert.match(harness, /<iframe id="f0" data-width="1080" data-height="720" src="\/\?frame=0" style="width:1080px;height:720px"><\/iframe>/);
+  assert.match(harness, /<iframe id="f1" data-width="390" data-height="760" src="\/\?frame=1" style="width:390px;height:760px"><\/iframe>/);
   // never a browser on a machine that did not ask for one
   assert.equal(findBrowser({}, 'win32'), null);
   assert.equal(findBrowser({}, 'linux'), null);
@@ -109,13 +114,17 @@ const SIZES = [
 
 test('a real render: every banner, shown, lies inside the viewport, is what is under its centre, and so are its buttons', { skip: BROWSER ? false : 'no browser for a render (CI, or IRNF_RENDER_BROWSER=<chrome or edge>)', timeout: 240000 }, async () => {
   // the app's own Persian texts; the logon-task banner at its longest (two unbreakable Windows paths)
-  const { url, close } = await serveRenderer(bannerCheckJs(bannerTexts()));
+  const served = await serveRenderer(bannerCheckJs(bannerTexts()));
   try {
+    // one browser, one iframe of exactly each size (a headless window's own size differs per OS)
+    const all = await renderInBrowser(BROWSER, served, SIZES);
+    assert.equal(all.length, SIZES.length);
     for (const size of SIZES) {
-      const out = await renderInBrowser(BROWSER, url, size);
+      const out = all.find((r) => r.size && r.size.width === size.width && r.size.height === size.height);
+      assert.ok(out && !out.error, `no measurement for ${size.width}x${size.height}: ${JSON.stringify(out)}`);
       const W = out.width, H = out.height;
       const where = (b) => `${size.width}x${size.height} (viewport ${W}x${H}) ${b.id}: ${JSON.stringify(b.box)}`;
-      assert.ok(W >= size.width * 0.9 && H >= size.height * 0.75, `the window size took: ${W}x${H}`);
+      assert.ok(Math.abs(W - size.width) <= 1 && Math.abs(H - size.height) <= 1, `the frame’s viewport: ${W}x${H}`);
       const inside = (r) => r.width > 0 && r.height > 0 && r.top >= -0.5 && r.left >= -0.5 && r.bottom <= H + 0.5 && r.right <= W + 0.5;
       for (const run of out.runs) {
         if (run.shown.length > 1 && !size.together) continue;
@@ -139,6 +148,6 @@ test('a real render: every banner, shown, lies inside the viewport, is what is u
       }
     }
   } finally {
-    await close();
+    await served.close();
   }
 });
