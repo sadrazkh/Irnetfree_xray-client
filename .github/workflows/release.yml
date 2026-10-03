@@ -194,8 +194,18 @@ jobs:
         id: keystore
         env:
           KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           if [ -n "$KS_B64" ]; then
+            # all four or nothing: with one missing, Gradle silently signs with the
+            # runner's throwaway debug key again — every release a different
+            # certificate, and phones refuse the update ("package appears to be invalid")
+            if [ -z "$KS_PASS" ] || [ -z "$KS_ALIAS" ] || [ -z "$KS_KEY_PASS" ]; then
+              echo "::error::ANDROID_KEYSTORE_BASE64 is set but ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS or ANDROID_KEY_PASSWORD is empty — add all four secrets."
+              exit 1
+            fi
             echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
             echo "path=$RUNNER_TEMP/release.keystore" >> "$GITHUB_OUTPUT"
             echo "Release keystore configured."
@@ -235,6 +245,8 @@ jobs:
 
       - name: Collect APK
         id: apk
+        env:
+          KEYSTORE_PATH: ${{ steps.keystore.outputs.path }}
         run: |
           # Prefer the release APK, fall back to debug so a tag always has
           # something installable — but SAY SO. v1.9.1 shipped a debug APK
@@ -254,12 +266,38 @@ jobs:
           echo "file=android/$out" >> "$GITHUB_OUTPUT"
           echo "variant=$variant" >> "$GITHUB_OUTPUT"
           echo "Built $out from $src"
+          if [ "$variant" = debug ] && [ -n "${KEYSTORE_PATH:-}" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            # with the real key configured a tag must ship the release build: the
+            # debug APK carries the runner's throwaway certificate, which no phone
+            # with the real one installed accepts as an update
+            echo "::error::assembleRelease produced no APK and a release key is configured — refusing to publish the debug build (it would not install over the real one). Check the Gradle output above."
+            exit 1
+          fi
           if [ "$variant" = debug ]; then
             echo "::error::assembleRelease produced no APK — this release carries the DEBUG build. Check the Gradle output above (it was an OutOfMemoryError last time)."
             echo "⚠ **The APK in this release is the debug build** — \`assembleRelease\` failed." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "APK: release variant, $(du -h "$out" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Verify the APK's certificate (release key)
+        if: steps.keystore.outputs.path != ''
+        env:
+          # the public SHA-256 of IRNetFree's permanent release certificate (CN=IRNetFree,
+          # valid until 2054); a different one means the build was not signed with it
+          EXPECTED_CERT_SHA256: aabda682057fde3ea565c0d972ea103eed0d6c9ee20232bee98f0b6fc8ce3fc6
+        run: |
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          apksigner="$(ls -d "$sdk"/build-tools/*/ 2>/dev/null | sort -V | tail -n1)apksigner"
+          [ -x "$apksigner" ] || { echo "::error::apksigner not found under $sdk/build-tools"; exit 1; }
+          out="$("$apksigner" verify --print-certs "$GITHUB_WORKSPACE/${{ steps.apk.outputs.file }}" 2>&1)" || { echo "$out"; echo "::error::apksigner could not verify the APK"; exit 1; }
+          echo "$out" | grep -E 'Signer #1 certificate (DN|SHA-256)' || true
+          got="$(echo "$out" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr -d ' :' | tr 'A-F' 'a-f')"
+          if [ "$got" != "$EXPECTED_CERT_SHA256" ]; then
+            echo "::error::the APK is signed with $got, not IRNetFree's release certificate $EXPECTED_CERT_SHA256"
+            exit 1
+          fi
+          echo "APK signed with IRNetFree's release certificate ($got)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
