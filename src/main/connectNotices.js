@@ -327,6 +327,15 @@ function lanOverlaps(subnets, rules, nameOf = () => null, needsOf = () => []) {
   return out;
 }
 
+/**
+ * W4's notices: facts about the TUN's routes (an on-link LAN beats the
+ * tunnel's 0/0). Without a live tunnel they say nothing true — the system
+ * proxy sends private ranges around itself anyway.
+ */
+const TUN_ONLY = new Set(['lanInRange', 'rangeInLan', 'lanInBroadRange']);
+/** Is this notice about the tunnel's routes (said only while a TUN is live)? */
+function needsTun(n) { return !!n && TUN_ONLY.has(n.id); }
+
 /** Notices that stay in the log: never a toast. */
 const LOG_ONLY = new Set(['lanInBroadRange']);
 /** Does the window hear this notice (a toast), or only the log? */
@@ -391,5 +400,5 @@ function noticeLine(n) {
 
 module.exports = {
   sharedWgIdentities, localSubnets, lanOverlaps, targetNeeds, routeTargetName,
-  noticeLine, noticeLevel, forWindow, LOG_ONLY, PRIVATE_V4, WARP_PEER
+  noticeLine, noticeLevel, forWindow, needsTun, LOG_ONLY, PRIVATE_V4, WARP_PEER
 };

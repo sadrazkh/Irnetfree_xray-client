@@ -42,7 +42,7 @@ const { DropBudget } = require('./dropBudget');
 const { isWebUrl, isAppPage } = require('./urlGuard');
 const { runElevatedRelaunch } = require('./relaunch');
 const { schtasksCreateArgs, schtasksDeleteArgs, schtasksQueryXmlArgs, taskExeFromXml, autostartStale, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
-const { sharedWgIdentities, localSubnets, lanOverlaps, targetNeeds, routeTargetName, noticeLine, noticeLevel, forWindow } = require('./connectNotices');
+const { sharedWgIdentities, localSubnets, lanOverlaps, targetNeeds, routeTargetName, noticeLine, noticeLevel, forWindow, needsTun } = require('./connectNotices');
 const { trayGroups, trayStopItem } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
@@ -1233,7 +1233,7 @@ async function connectOnce(serverId, opts = {}) {
       if (process.platform === 'win32') notices.push({ id: 'corpDnsOff', servers: corp.join(', ') });
     }
   }
-  if (process.platform === 'win32') notices.push(...connectHints(plan));
+  if (process.platform === 'win32') notices.push(...connectHints(plan, { tun: !!settings.tunMode }));
 
   send('status', { state: 'connecting', serverId });
 
@@ -1618,7 +1618,8 @@ async function connectOnce(serverId, opts = {}) {
   updateOverlay('on');
   send('status', {
     state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
-    tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys(), notices
+    tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys(),
+    notices: tun.active ? notices : notices.filter((n) => !needsTun(n))
   });
   // `tunError` is the one failure this function does NOT throw for: TUN is a
   // best-effort upgrade and we stay connected proxy-only without it. Callers
@@ -1670,14 +1671,16 @@ function planServerIds(plan) {
  * advanced routing sends to a tunnel (W4). Each is a line here; those that can
  * be the cause (forWindow) also go, through the 'connected' status, to the
  * window as a toast — a LAN inside a broad range that holds nothing the target
- * needs stays an info line. Nothing is changed. A hint must never cost a
+ * needs stays an info line. W4 is about the TUN's routes, so it is asked only
+ * of a connect that asks for the tunnel (`tun`); proxy mode sends private
+ * ranges around the proxy anyway. Nothing is changed. A hint must never cost a
  * connect: whatever goes wrong in here is swallowed.
  */
-function connectHints(plan) {
+function connectHints(plan, { tun = false } = {}) {
   const out = [];
   try {
     const found = sharedWgIdentities(planServerIds(plan), store.get('servers', []), store.get('subscriptions', []));
-    if (plan && plan.mode === 'advanced') {
+    if (tun && plan && plan.mode === 'advanced') {
       // our own adapters (an earlier tunnel still up on a server switch) are not "your local network"
       const own = [TUN_LOCAL_IP, String(TUN_ADDR4).split('/')[0]];
       const lans = localSubnets(os.networkInterfaces(), (name, address) => isOwnTunInterface(name) || own.includes(address));
