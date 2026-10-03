@@ -2091,6 +2091,41 @@ function reportReconnectFailed(reason, res) {
   notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
 }
 
+/**
+ * Is the guard's override some connection's own DNS right now? The core
+ * running over a live TUN (the guard engaged for it, or held over its
+ * rebuild), or a connect in flight — which holds, or is about to take, its own
+ * guard receipt. Never true after a give-up: every give-up leaves either no
+ * core or no tunnel (the proxy up, only TUN missing).
+ */
+function guardInUse() {
+  return connectsInFlight.size > 0 || !!(xray && xray.running && tun && tun.active);
+}
+
+/**
+ * guard:release — the banner's "give my internet back" after a give-up with
+ * the guard held. A release without a receipt is unconditional (the user's own
+ * intent), so asked while a connection uses the guard it would put every
+ * physical adapter back on the ISP's resolvers under a tunnel that carries the
+ * traffic: a DNS leak with the window saying connected (the banner used to
+ * outlive its give-up and offer exactly that). Refused then — a disconnect
+ * gives the resolvers back — and otherwise as it always was.
+ */
+async function releaseGuardOnRequest() {
+  if (guardInUse()) {
+    send('log', { line: 'Not giving the adapters their own DNS back: a connection is up (or being built) and the leak guard belongs to it — disconnect to restore them', level: 'warn' });
+    return {
+      ok: false,
+      refused: 'connected',
+      error: isEn()
+        ? 'A connection is up and the adapters’ DNS is its own — disconnect to give it back'
+        : 'اتصال برقرار است و DNS آداپتورها مال همین اتصال است — برای برگرداندنش قطع کن'
+    };
+  }
+  try { if (leakGuard) await leakGuard.release(); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+}
+
 /** The recovery reasons that are a drop of the connection, not the network moving. */
 const DROP_REASONS = new Set(['core-exited', 'tunnel-exited', 'reload-failed']);
 
@@ -3077,11 +3112,9 @@ function registerIpc() {
     }
   });
   // The way out when a reconnect has been given up on and the guard is still
-  // holding: puts the adapters' own resolvers back, deliberately, on request.
-  ipcMain.handle('guard:release', async () => {
-    try { if (leakGuard) await leakGuard.release(); return { ok: true }; }
-    catch (e) { return { ok: false, error: e.message }; }
-  });
+  // holding: puts the adapters' own resolvers back, deliberately, on request —
+  // never under a live tunnel (releaseGuardOnRequest).
+  ipcMain.handle('guard:release', () => releaseGuardOnRequest());
 
   // Delete the files the app downloaded into the writable bin (userData/bin).
   // Does NOT touch a user-located xray (store.xrayPath) or the bundled bin.

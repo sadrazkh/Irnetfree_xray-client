@@ -178,6 +178,55 @@ test('the connect asks for the notices on Windows only, after the plan is built 
   assert.equal(CONNECT.split('notices').length - 1, 4, 'declared, W3, W1/W4, the status — and nowhere else');
 });
 
+/* ------------------------------ main: "give my internet back" (guard:release) ------------------------------ */
+
+function guardReleaseHarness({ running = false, active = false, inFlight = 0, lang = 'en', guard = 'ok' } = {}) {
+  const calls = [];
+  const logs = [];
+  const ctx = vm.createContext({
+    xray: { running }, tun: { active },
+    connectsInFlight: new Set(Array.from({ length: inFlight }, (_, i) => Promise.resolve(i))),
+    leakGuard: guard === null ? null : {
+      release: async (...args) => { calls.push(['release', ...args]); if (guard === 'throws') throw new Error('Access is denied.'); return { released: true }; }
+    },
+    send: (ch, p) => { if (ch === 'log') logs.push(p); },
+    isEn: () => lang === 'en'
+  });
+  vm.runInContext([fnOf(MAIN, 'guardInUse'), fnOf(MAIN, 'releaseGuardOnRequest')].join('\n'), ctx);
+  return { ctx, calls, logs };
+}
+
+test('guard:release gives the adapters their resolvers back after a give-up — and refuses while a tunnel is up or a connect is being built (no leak under a live tunnel)', async () => {
+  // the give-up it is for: no core, no tunnel — or the proxy back and only TUN missing
+  for (const [running, active] of [[false, false], [true, false], [false, true]]) {
+    const h = guardReleaseHarness({ running, active });
+    assert.deepEqual(plain(await h.ctx.releaseGuardOnRequest()), { ok: true }, `running ${running}, tun ${active}`);
+    assert.deepEqual(h.calls, [['release']], 'the release without a receipt, as before');
+  }
+  // the core running over a live TUN: the guard is that tunnel's — a release now is every
+  // physical adapter back on the ISP's resolvers while the tunnel carries the traffic
+  const live = guardReleaseHarness({ running: true, active: true });
+  const r = plain(await live.ctx.releaseGuardOnRequest());
+  assert.equal(r.ok, false);
+  assert.equal(r.refused, 'connected');
+  assert.match(r.error, /disconnect/i);
+  assert.deepEqual(live.calls, [], 'nothing released');
+  assert.deepEqual(live.logs.map((l) => l.level), ['warn']);
+  assert.equal(guardReleaseHarness({ running: true, active: true, lang: 'fa' }).ctx.guardInUse(), true);
+  const faR = plain(await guardReleaseHarness({ running: true, active: true, lang: 'fa' }).ctx.releaseGuardOnRequest());
+  assert.match(faR.error, /قطع/);
+  // a connect in flight holds (or is about to take) its guard receipt: not from under it
+  const building = guardReleaseHarness({ inFlight: 1 });
+  assert.equal(plain(await building.ctx.releaseGuardOnRequest()).refused, 'connected');
+  assert.deepEqual(building.calls, []);
+  // no guard, or one that fails: said, not thrown
+  assert.deepEqual(plain(await guardReleaseHarness({ guard: null }).ctx.releaseGuardOnRequest()), { ok: true });
+  assert.deepEqual(plain(await guardReleaseHarness({ guard: 'throws' }).ctx.releaseGuardOnRequest()), { ok: false, error: 'Access is denied.' });
+  // the IPC goes through it
+  assert.match(MAIN, /ipcMain\.handle\('guard:release', \(\) => releaseGuardOnRequest\(\)\);/);
+  assert.doesNotMatch(MAIN, /ipcMain\.handle\('guard:release', async/);
+});
+
 /* ------------------------------ main: the logon task (L1) ------------------------------ */
 
 const TASK_XML = (cmd) => `<?xml version="1.0" encoding="UTF-16"?>\r\r\n<Task><Actions Context="Author"><Exec><Command>${cmd}</Command><Arguments>--hidden</Arguments></Exec></Actions></Task>`;
@@ -311,11 +360,12 @@ function windowHarness({ lang = 'en', platform = 'win32', flavor = null, api = {
     updateLanInfo: () => {}, hideGeo: () => {}, resetTraffic: () => {}, checkIp: () => {}, quickPing: () => {},
     updateAdminBtn: (on) => calls.push(['admin', on]),
     reconnectingKey: () => 'state.reconnecting', failedKey: () => 'net.failed',
+    attemptText: (kind, n) => `${kind} ${n}`, showErrorReason: (m) => calls.push(['error', m]),
     setTimeout: timers || ((fn) => { fn(); return 1; }), clearTimeout: () => {},
     window: { api }
   });
   vm.runInContext(['connIssuesFrom', 'noticeText', 'renderConnIssues', 'connectToasts', 'toastSeries',
-    'checkAutostart', 'renderAutostartBanner', 'repointAutostart'].map((n) => fnOf(APP, n)).join('\n') + '\n' + handlerSource('onStatus'), ctx);
+    'checkAutostart', 'renderAutostartBanner', 'repointAutostart', 'giveInternetBack'].map((n) => fnOf(APP, n)).join('\n') + '\n' + handlerSource('onStatus'), ctx);
   const toasts = () => calls.filter((c) => c[0] === 'toast');
   return { ctx, calls, el, toasts };
 }
@@ -472,6 +522,59 @@ test('a notice’s text: every {field} filled from the notice, literally — a {
   assert.equal(h.ctx.noticeText(null), '');
   const fa = windowHarness({ lang: 'fa' });
   assert.equal(fa.ctx.noticeText({ id: 'proxyOnly', reason: { t: 'srv.manual' } }), 'فقط پراکسی — تونل بالا نیامد: کانفیگ‌های دستی');
+});
+
+/* ------------------------------ the window: the "give my internet back" banner ------------------------------ */
+
+test('the guard banner belongs to a give-up with the guard held: any later state takes it away, so its button is never offered under a live tunnel', () => {
+  const GAVE_UP = { state: 'reconnect-failed', reason: 'interfaces', proxyUp: false, guardHeld: true, tunError: null };
+  const later = [
+    Object.assign({}, UP),                                   // a reconnect (the banner's Retry, the tray, a new network) came back
+    { state: 'connecting', serverId: 's1' },
+    { state: 'reconnecting', reason: 'interfaces' },
+    { state: 'disconnected' },
+    { state: 'waiting', attempt: 2 },
+    { state: 'error', message: 'x' }
+  ];
+  for (const d of later) {
+    const h = windowHarness();
+    h.ctx.onStatus(GAVE_UP);
+    assert.equal(h.el('guardBanner').hidden, false, 'shown by the give-up');
+    h.ctx.onStatus(d);
+    assert.equal(h.el('guardBanner').hidden, true, `still on screen after '${d.state}'`);
+  }
+  // a give-up with nothing held: no banner; one with the proxy still up and the guard held: the banner
+  const none = windowHarness();
+  none.ctx.onStatus(Object.assign({}, GAVE_UP, { guardHeld: false }));
+  assert.equal(none.el('guardBanner').hidden, true);
+  const proxy = windowHarness();
+  proxy.ctx.onStatus(Object.assign({}, GAVE_UP, { proxyUp: true, tunError: 'TUN adapter did not become ready' }));
+  assert.equal(proxy.el('guardBanner').hidden, false);
+  // a disconnect whose teardown failed is no new state: the banner stays as it was
+  const cleanup = windowHarness();
+  cleanup.ctx.onStatus(GAVE_UP);
+  cleanup.ctx.onStatus({ state: 'cleanup-failed', error: 'cleanup-failed' });
+  assert.equal(cleanup.el('guardBanner').hidden, false);
+});
+
+test('the banner’s "give my internet back": main’s refusal under a live tunnel is said in the user’s language, a release as before', async () => {
+  for (const lang of ['en', 'fa']) {
+    const t = i18nT(lang);
+    const refused = windowHarness({ lang, api: { releaseGuard: async () => ({ ok: false, refused: 'connected', error: 'main’s English' }) } });
+    refused.el('guardBanner').hidden = false;
+    await refused.ctx.giveInternetBack();
+    assert.deepEqual(refused.toasts().map((c) => [c[1], c[2]]), [['err', t('guard.releaseRefused')]]);
+    assert.equal(refused.el('guardBanner').hidden, true);
+    const done = windowHarness({ lang, api: { releaseGuard: async () => ({ ok: true }) } });
+    await done.ctx.giveInternetBack();
+    assert.deepEqual(done.toasts().map((c) => [c[1], c[2]]), [['ok', t('t.guardReleased')]]);
+    const failed = windowHarness({ lang, api: { releaseGuard: async () => ({ ok: false, error: 'Access is denied.' }) } });
+    await failed.ctx.giveInternetBack();
+    assert.deepEqual(failed.toasts().map((c) => [c[1], c[2]]), [['err', 'Access is denied.']]);
+  }
+  assert.notEqual(i18nT('fa')('guard.releaseRefused'), i18nT('en')('guard.releaseRefused'));
+  assert.equal(I18N_SRC.split("'guard.releaseRefused':").length - 1, 2, 'once in each language');
+  assert.match(APP, /\$\('#guardRelease'\)\.onclick = giveInternetBack;/);
 });
 
 /* ------------------------------ the window: the logon task banner (L1) ------------------------------ */
