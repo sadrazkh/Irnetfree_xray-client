@@ -43,6 +43,8 @@
   --danger: #ff6b6b;
   --okSoft: rgba(47, 214, 191, .12);
   --dangerSoft: rgba(255, 107, 107, .13);
+  --warnSoft: rgba(224, 176, 96, .13);
+  --infoSoft: rgba(127, 180, 255, .12);
   --shadow: 0 24px 60px rgba(0, 0, 0, .45);
   /* softer corners than the cockpit's instrument edges */
   --r1: 3px; --r2: 5px; --r3: 6px; --r4: 7px; --r5: 8px; --r6: 10px;
@@ -73,6 +75,8 @@
   --danger: #c0392b;
   --okSoft: rgba(15, 132, 120, .10);
   --dangerSoft: rgba(192, 57, 43, .10);
+  --warnSoft: rgba(125, 85, 16, .10);
+  --infoSoft: rgba(42, 99, 184, .10);
   --shadow: 0 20px 46px rgba(20, 30, 40, .14);
 }
 
@@ -168,6 +172,8 @@
   --danger: #f87171;
   --okSoft: rgba(45, 212, 191, .13);
   --dangerSoft: rgba(248, 113, 113, .13);
+  --warnSoft: rgba(234, 179, 8, .13);
+  --infoSoft: rgba(79, 140, 255, .13);
   --shadow: 0 18px 44px rgba(0, 0, 0, .5);
   /* the old look was round */
   --r1: 4px; --r2: 6px; --r3: 8px; --r4: 10px; --r5: 12px; --r6: 14px;
@@ -198,6 +204,8 @@
   --danger: #c0392b;
   --okSoft: rgba(15, 118, 110, .12);
   --dangerSoft: rgba(192, 57, 43, .10);
+  --warnSoft: rgba(116, 91, 12, .10);
+  --infoSoft: rgba(47, 111, 228, .10);
   --shadow: 0 16px 40px rgba(20, 30, 40, .12);
 }
 

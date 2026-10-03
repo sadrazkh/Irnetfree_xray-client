@@ -354,6 +354,25 @@
   min-width: 96px;
   text-align: center;
 }
+/* A core's row carries two: «انتخاب نسخه» (the version picker) and the update
+   button, which ends the row as it always did. They stay one cluster, and on
+   a phone (the router's page) they go under the name rather than squeeze it. */
+.comp-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.comp-pick {
+  flex: 0 0 auto;
+  min-width: 96px;
+  text-align: center;
+  white-space: nowrap;
+}
+@media (max-width: 560px) {
+  .comp-row { flex-wrap: wrap; }
+  .comp-actions { flex: 1 1 100%; justify-content: flex-end; }
+}
 
 .files-list { display: flex; flex-direction: column; gap: 6px; }
 .files-row {
@@ -390,6 +409,329 @@
 }
 
 .admin-btn { margin-block-start: 16px; }
+
+/* ----------------------------- settings: the version picker ----------------------------- */
+
+/* A core's versions, over Required files (corePicker.js builds it): a head
+   that says what is installed and what this device downloads, the Stable |
+   With pre-releases switch, a scrolling list of version cards, a foot note.
+   The modal is a column whose middle scrolls, so the head and the switch stay
+   put on a phone; the overlay is the shared one (centred by its grid — no
+   physical offset to mirror). Tokens only, so every skin and both themes
+   carry it; motion is the global reduced-motion rule's to switch off. */
+.cv-overlay { animation: cv-fade 160ms ease-out both; }
+.cv-overlay.cv-leaving { animation: cv-fade-out 150ms ease-in both; }
+@supports ((-webkit-backdrop-filter: blur(2px)) or (backdrop-filter: blur(2px))) {
+  .cv-overlay { -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
+}
+.cv-modal {
+  width: min(600px, 100%);
+  max-height: min(86vh, 780px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  outline: none;
+  animation: cv-rise 240ms cubic-bezier(.2, .9, .3, 1) both;
+}
+.cv-overlay.cv-leaving .cv-modal { animation: cv-sink 150ms ease-in both; }
+@keyframes cv-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes cv-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes cv-rise { from { opacity: 0; transform: translateY(14px) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes cv-sink { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(8px) scale(.98); } }
+
+.cv-head { align-items: flex-start; gap: 12px; padding-block: 16px; }
+.cv-glyph {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--r5);
+  background: var(--accentSoft);
+  border: 1px solid var(--accentLine);
+  color: var(--accent);
+}
+.cv-glyph svg { display: block; width: 20px; height: 20px; }
+.cv-headtext { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.cv-title { margin: 0; font-size: 15px; font-weight: 700; line-height: 1.45; overflow-wrap: anywhere; }
+.cv-sub { display: flex; flex-wrap: wrap; gap: 6px; }
+.cv-chip {
+  display: inline-block;
+  max-width: 100%;
+  padding-block: 2px;
+  padding-inline: 8px;
+  border-radius: var(--r2);
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cv-chip-installed { background: var(--okSoft); border-color: transparent; color: var(--ok); }
+.cv-chip-installed.is-none { background: var(--soft); border-color: var(--softline); color: var(--ink3); }
+/* its tooltip names the exact archive this device downloads */
+.cv-chip-target { cursor: help; }
+.cv-close { flex: 0 0 auto; margin-block-start: -2px; }
+
+.cv-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-block: 12px;
+  padding-inline: 18px;
+  border-bottom: 1px solid var(--line);
+}
+.cv-seg { flex-wrap: nowrap; }
+.cv-seg .seg-btn { white-space: nowrap; }
+.cv-seg .seg-btn:disabled { cursor: not-allowed; opacity: .6; }
+
+/* "disconnect first": a held state of the whole modal, so it sits above the list;
+   another install running is the same kind of note, in the info colour */
+.cv-busy, .cv-other {
+  margin-block: 12px 0;
+  margin-inline: 18px;
+  padding-block: 10px;
+  padding-inline: 12px;
+  border-radius: var(--r4);
+  border-inline-start: 3px solid var(--warn);
+  background: var(--warnSoft);
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.7;
+}
+.cv-other { border-inline-start-color: var(--info); background: var(--infoSoft); color: var(--info); }
+
+.cv-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-block: 14px 18px;
+  padding-inline: 18px;
+}
+.cv-list { display: flex; flex-direction: column; gap: 10px; transition: opacity 160ms ease-out; }
+/* a quiet reload (the other list, after an install): the cards stay, dimmed */
+.cv-list.is-refreshing { opacity: .55; }
+
+/* One version. Two columns — what it is, and its action — over a row for its
+   state (the warning, the progress, the result) that spans both. The leading
+   edge carries meaning like a Required files row: installed in --ok, the
+   suggested one in the accent. */
+.cv-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 14px;
+  padding-block: 12px;
+  padding-inline: 14px;
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-inline-start: 3px solid var(--softline);
+  border-radius: var(--r5);
+  transition: background 140ms ease-out, border-color 140ms ease-out;
+}
+.cv-card:hover { background: var(--panel); }
+.cv-card.is-suggested { border-inline-start-color: var(--accent); }
+.cv-card.is-installed { border-inline-start-color: var(--ok); background: linear-gradient(var(--okSoft), var(--okSoft)), var(--soft); }
+.cv-card.is-installed:hover { background: linear-gradient(var(--okSoft), var(--okSoft)), var(--panel); }
+.cv-card.is-latest .cv-ver { color: var(--ink); }
+.cv-card.is-pre .cv-ver { color: var(--ink2); }
+.cv-card.is-confirm { border-color: var(--warn); }
+.cv-card.is-busy { border-color: var(--accentLine); }
+.cv-card.is-done { border-color: var(--ok); }
+.cv-card.is-failed { border-color: var(--danger); }
+/* a list that just arrived comes in one card after another */
+.cv-list.cv-enter .cv-card { animation: cv-card-in 260ms ease-out both; animation-delay: calc(var(--i, 0) * 32ms); }
+@keyframes cv-card-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.cv-main { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.cv-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.cv-ver {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--ink);
+  letter-spacing: .01em;
+  overflow-wrap: anywhere;
+}
+.cv-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.cv-badge {
+  display: inline-block;
+  padding-block: 1px;
+  padding-inline: 7px;
+  border-radius: var(--r2);
+  border: 1px solid transparent;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.cv-badge-suggested { background: var(--accentSoft); border-color: var(--accentLine); color: var(--accentInk); }
+.cv-badge-latest { background: var(--infoSoft); color: var(--info); }
+.cv-badge-installed { background: var(--okSoft); color: var(--ok); }
+.cv-badge-pre { background: var(--warnSoft); color: var(--warn); }
+.cv-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11.5px; line-height: 1.5; color: var(--ink3); }
+.cv-age { white-space: nowrap; }
+.cv-sep { color: var(--dim); }
+.cv-size { font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+.cv-act { display: flex; justify-content: flex-end; }
+.cv-btn { min-width: 108px; text-align: center; white-space: nowrap; }
+/* Upgrade / Install: tonal — six solid accent buttons in a column would shout
+   over the badges, which are what the eye should read first; solid on hover */
+.btn.cv-tonal { background: var(--accentSoft); border-color: var(--accentLine); color: var(--accentInk); }
+.btn.cv-tonal:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--onAccent); }
+/* Downgrade is amber: older than what is there is a choice to make on purpose */
+.btn.cv-amber { background: var(--warnSoft); border-color: var(--warn); color: var(--warn); }
+.btn.cv-amber:hover:not(:disabled) { background: var(--warnSoft); border-color: var(--warn); color: var(--warn); filter: brightness(1.12); }
+/* Reinstall: an outline that still reads as a button on the installed card's tint */
+.cv-btn.ghost { border-color: var(--dim); color: var(--ink2); }
+.cv-btn.ghost:hover:not(:disabled) { border-color: var(--ink3); color: var(--ink); }
+
+/* the state row: the warning, the progress, the result */
+.cv-warn, .cv-progress, .cv-done, .cv-fail { grid-column: 1 / -1; }
+.cv-warn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-block: 10px;
+  padding-inline: 12px;
+  border-radius: var(--r4);
+  background: var(--warnSoft);
+  border-inline-start: 3px solid var(--warn);
+}
+.cv-warn-text { margin: 0; font-size: 12px; line-height: 1.75; color: var(--warn); }
+.cv-warn-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.cv-cancel, .cv-go { min-width: 96px; text-align: center; white-space: nowrap; }
+
+.cv-progress { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.cv-track {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 6px;
+  border-radius: var(--r1);
+  background: var(--softline);
+  overflow: hidden;
+}
+/* inset-inline-start is the start in both directions: the bar fills from the right in Persian */
+.cv-fill {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 220ms ease-out;
+}
+.cv-track.is-indeterminate .cv-fill { width: 34%; animation: cv-slide 1.15s ease-in-out infinite; }
+@keyframes cv-slide { from { inset-inline-start: -34%; } to { inset-inline-start: 100%; } }
+.cv-progress-text {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accentInk);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cv-done { margin: 0; font-size: 12px; font-weight: 600; line-height: 1.6; color: var(--ok); }
+.cv-fail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 12px;
+  padding-block: 10px;
+  padding-inline: 12px;
+  border-radius: var(--r4);
+  background: var(--dangerSoft);
+  border-inline-start: 3px solid var(--danger);
+}
+.cv-fail-text { grid-column: 1; margin: 0; font-size: 12px; font-weight: 600; line-height: 1.6; color: var(--danger); }
+.cv-fail-why {
+  grid-column: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cv-fail .cv-retry { grid-column: 2; grid-row: 1 / span 2; }
+
+/* the list could not be read, or holds nothing for this device */
+.cv-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding-block: 28px;
+  padding-inline: 16px;
+  text-align: center;
+  border: 1px dashed var(--softline);
+  border-radius: var(--r5);
+}
+.cv-empty-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.7; color: var(--ink2); }
+.cv-error .cv-empty-title { color: var(--warn); }
+.cv-empty .cv-fail-why { max-width: 100%; text-align: center; }
+
+/* the skeleton while GitHub answers: the cards' own shape, shimmering */
+.cv-skel { pointer-events: none; }
+.cv-skel .cv-main { gap: 9px; }
+.cv-skel-bar {
+  display: block;
+  height: 10px;
+  border-radius: var(--r1);
+  background: linear-gradient(90deg, var(--softline) 0%, var(--line) 50%, var(--softline) 100%);
+  background-size: 200% 100%;
+  animation: cv-shimmer 1.3s ease-in-out infinite;
+}
+.cv-skel-ver { width: 38%; height: 14px; }
+.cv-skel-meta { width: 24%; }
+.cv-skel-btn { width: 108px; height: 28px; border-radius: var(--r4); }
+@keyframes cv-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+/* for the screen reader only: "getting the list…" */
+.cv-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* the note about ⭐ ends the scrolling list */
+.cv-foot {
+  margin-block: 16px 0;
+  margin-inline: 0;
+  padding-block-start: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+  line-height: 1.75;
+  color: var(--ink3);
+}
+
+/* a phone (the router's page): the modal takes the screen, a card's button
+   goes under its version at full width, the switch spans the bar */
+@media (max-width: 560px) {
+  .cv-overlay { padding: 10px; }
+  .cv-modal { max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); }
+  .cv-head { padding-inline: 14px; }
+  .cv-bar { padding-inline: 14px; }
+  .cv-busy { margin-inline: 14px; }
+  .cv-body { padding-inline: 14px; }
+  .cv-seg { flex: 1 1 auto; }
+  .cv-seg .seg-btn { flex: 1 1 0; }
+  .cv-card { grid-template-columns: minmax(0, 1fr); }
+  .cv-act .cv-btn { width: 100%; }
+  .cv-fail { grid-template-columns: minmax(0, 1fr); }
+  .cv-fail .cv-retry { grid-column: 1; grid-row: auto; justify-self: end; }
+}
 
 /* ----------------------------- settings: about & status ----------------------------- */
 

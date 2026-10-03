@@ -404,12 +404,18 @@ async function init() {
 }
 
 /* ----------------------------- core versions ----------------------------- */
-const XRAY_ENGINES = ['xray', 'xray-pattn'];
+// the cores with a version beside their row (and the version picker, corePicker.js)
+const CORE_KEYS = ['xray', 'xray-pattn', 'sing-box'];
+/** A core's own `version` answer as its number ('sing-box version 1.13.14' → '1.13.14'); anything else as it was. */
+function coreVersionText(v) {
+  const m = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)/.exec(String(v || ''));
+  return m ? m[1] : String(v || '').trim();
+}
 async function refreshXrayVersion() {
-  for (const id of XRAY_ENGINES) {
+  for (const id of CORE_KEYS) {
     try {
       const res = await window.api.xrayVersion(id);
-      state.coreVersions[id] = (res && res.ok) ? res.version : '';
+      state.coreVersions[id] = (res && res.ok) ? coreVersionText(res.version) : '';
     } catch { state.coreVersions[id] = ''; }
   }
   state.xrayVersion = state.coreVersions.xray || state.coreVersions['xray-pattn'] || '';
@@ -2948,10 +2954,11 @@ $('#btnDownloadHelp').onclick = () => {
 };
 
 /* ----------------------------- required components ----------------------------- */
+// `pick`: the row offers the version picker (corePicker.js) beside its update button
 const COMPONENTS = [
-  { key: 'xray', label: 'comp.xray', ver: 'xray' },
-  { key: 'xray-pattn', label: 'comp.xrayPattn', ver: 'xray-pattn' },
-  { key: 'sing-box', label: 'comp.singbox', has: (a) => !!a['sing-box'] },
+  { key: 'xray', label: 'comp.xray', ver: 'xray', pick: true },
+  { key: 'xray-pattn', label: 'comp.xrayPattn', ver: 'xray-pattn', pick: true },
+  { key: 'sing-box', label: 'comp.singbox', ver: 'sing-box', pick: true, has: (a) => !!a['sing-box'] },
   { key: 'geo', label: 'comp.geo', has: (a) => a.geoip && a.geosite },
   { key: 'tun2socks', label: 'comp.tun2socksLegacy' },
   { key: 'wintun', label: 'comp.wintun', winOnly: true }
@@ -2973,6 +2980,8 @@ function renderComponents() {
     const ver = v ? ` <span class="comp-ver">v${escapeHtml(v)}</span>` : '';
     // sing-box on a router is the whole-network tunnel, not a TUN mode's backend
     const label = rt && c.key === 'sing-box' ? 'comp.singboxRouter' : c.label;
+    // a core: «انتخاب نسخه» first, then the update button exactly as it was
+    const pick = c.pick ? `<button class="btn ghost comp-pick" type="button">${escapeHtml(t('cv.choose'))}</button>` : '';
     const row = document.createElement('div');
     row.className = 'comp-row';
     row.innerHTML = `
@@ -2981,9 +2990,11 @@ function renderComponents() {
         <span class="comp-name">${escapeHtml(t(label))}${ver}</span>
         <span class="comp-state ${present ? 'ok' : 'missing'}">${present ? t('comp.installed') : t('comp.missing')}</span>
       </div>
-      <button class="btn ${present ? 'ghost' : 'primary'} comp-btn">${present ? t('btn.update') : t('btn.download')}</button>`;
+      <div class="comp-actions">${pick}<button class="btn ${present ? 'ghost' : 'primary'} comp-btn">${present ? t('btn.update') : t('btn.download')}</button></div>`;
     const btn = row.querySelector('.comp-btn');
     btn.onclick = () => downloadComponent(c.key, btn);
+    const pickBtn = row.querySelector('.comp-pick');
+    if (pickBtn) pickBtn.onclick = () => openCorePicker(c.key, pickBtn);
     list.appendChild(row);
   }
 
@@ -3033,13 +3044,44 @@ async function downloadComponent(key, btn) {
     renderComponents();
     updateXrayStatus(res.xrayReady);
     updateTunStatus();
-    if (key === 'xray' || key === 'xray-pattn') refreshXrayVersion();
+    if (CORE_KEYS.includes(key)) refreshXrayVersion();
     toast(t('t.downloaded'), 'ok');
   } else {
     state.assets = res.assets || state.assets;
     renderComponents();
-    toast(t('t.downloadFailed') + ': ' + (res.error || ''), 'err');
+    // a version install (corePicker.js) holds this core right now: said, not an error
+    if (res.coreBusy) toast(t('comp.coreBusy'), 'warn');
+    else toast(t('t.downloadFailed') + ': ' + (res.error || ''), 'err');
   }
+}
+
+/**
+ * Settings → Required files → «انتخاب نسخه»: the version picker (corePicker.js)
+ * for one core. Busy is this window's own reading of the connection (the
+ * service refuses on its own as well); after an install the rows, the core
+ * status and the versions are read again, as after a download.
+ */
+function openCorePicker(key, opener) {
+  if (!window.corePicker) return;
+  window.corePicker.open(key, {
+    opener,
+    busy: () => !!(state.connected || state.connecting),
+    toast,
+    onInstalled: async (res) => {
+      let r = res || {};
+      // an install whose answer was lost (the picker asked the service how it
+      // ended) carries no assets: read them, and keep what is not said
+      if (!r.assets && window.api.assetsStatus) {
+        try { r = Object.assign({}, r, { assets: await window.api.assetsStatus() }); } catch { /* the rows keep what they had */ }
+      }
+      if (r.assets) state.assets = r.assets;
+      if (typeof r.tunAvailable === 'boolean') state.tunAvailable = r.tunAvailable;
+      renderComponents();
+      updateXrayStatus(typeof r.xrayReady === 'boolean' ? r.xrayReady : anyXrayCore());
+      updateTunStatus();
+      refreshXrayVersion();
+    }
+  });
 }
 
 window.api.onAssetProgress((d) => {
@@ -3049,6 +3091,8 @@ window.api.onAssetProgress((d) => {
     if (st) st.textContent = t('about.downloading') + ' ' + Math.round(Number(d.pct) || 0) + '%';
     return;
   }
+  // a version the picker is installing: its card shows the progress, no toast on top
+  if (window.corePicker && window.corePicker.progress(d)) return;
   // surface coarse progress through the toast + the files modal if open
   toast(`${t('t.downloading')} ${d.component}: ${d.pct}%`);
   const fp = $('#filesProgress');

@@ -104,6 +104,9 @@
     assetsStatus: () => invoke('assets:status'),
     downloadAsset: (component) => invoke('assets:download', component),
     removeAssets: () => invoke('assets:remove'),
+    // the version picker: a core's releases ({ prerelease, force }), and one installed by its tag
+    coreVersions: (component, opts) => invoke('cores:versions', Object.assign({}, opts, { component })),
+    installCoreVersion: (component, tag) => invoke('cores:install', { component, tag }),
 
     // process routing
     listProcesses: () => invoke('proc:list'),
