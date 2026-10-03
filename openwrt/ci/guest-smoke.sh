@@ -154,7 +154,7 @@ else
 fi
 say "an upstream: a SOCKS server in this guest, bound to the LAN device so it cannot loop into the tunnel"
 # 198.51.100.10 alone goes to a sink on loopback (the v1.16.2 flood holds TCP connections open there), and it
-# may open 65536 files: that flood's 2400 connections take two each here too, past the kernel's 4096
+# may open 65536 files: that flood's 2400 connections take six each in a sing-box (14400), past the kernel's 4096
 cat > /tmp/upstream.json <<'EOF'
 {"log":{"level":"warn"},"inbounds":[{"type":"socks","tag":"in","listen":"192.168.1.1","listen_port":1081}],"outbounds":[{"type":"direct","tag":"out","bind_interface":"br-lan"},{"type":"direct","tag":"sink"}],"route":{"rules":[{"ip_cidr":["198.51.100.10/32"],"action":"route","outbound":"sink","override_address":"127.0.0.1","override_port":18090}],"final":"out"}}
 EOF
@@ -1257,11 +1257,13 @@ say "v1.16.2: 1500 names nobody asked before through dnsmasq (100 at a time), 24
 # the same way. What counts here is the gateway under it, not the answers.
 # Neither the names nor UDP flows can take a core past 4096 open files: dnsmasq keeps about 150 queries
 # in flight, and sing-box's TUN keeps at most 1024 UDP sessions (sing's udpnat, 1.11 and 1.12 alike: the
-# oldest is closed for a new one) — about 2048 files. TCP can: a connection from the LAN is two open
-# files in sing-box (the TUN side, its SOCKS dial to xray) and two in xray (that dial, its own to the
-# upstream) for as long as it is open. 2400 of them, each answered end to end by a sink behind the
-# upstream and all held at once, are more than 4096 in each core — a count v1.16.1's limit could never
-# reach, so the "too many open files" check after it is one the old limit fails.
+# oldest is closed for a new one) — about 2048 files. TCP can: a connection from the LAN is six open
+# files in sing-box (the TUN side, its SOCKS dial to xray and, by the count, a splice pipe each way
+# between them: 14565 for 2400 on 23.05.5, 14562 on 24.10.2) and two in xray (that dial, its own to the
+# upstream: 4902 and 4892) for as long as it is open — the old 4096 was about 680 connections. 2400 of
+# them, each answered end to end by a sink behind the upstream and all held at once, are more than 4096
+# in each core — a count v1.16.1's limit could never reach, so the "too many open files" check after it
+# is one the old limit fails.
 UP_PID="$(upstream_pid)"
 [ "$(nofile "$UP_PID")" = "65536 65536" ] || { echo "the test's upstream (pid $UP_PID) may open $(nofile "$UP_PID") files — it would run out before the gateway does"; exit 1; }
 ( ulimit -H -n 65536 && ulimit -S -n 65536 && exec node /tmp/irnf-flood.js sink 18090 ) > /tmp/irnf-sink.log 2>&1 &

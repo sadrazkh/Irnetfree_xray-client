@@ -433,7 +433,7 @@ test('the QEMU smoke proves v1.16.2: 65536 open files for node and both cores, u
   assert.match(v, /logread -f > \/tmp\/irnf-flood-a\.log/);
   // past the old budget, or the "no EMFILE" below proves nothing: sing-box's TUN keeps at most 1024 UDP sessions
   // (about 2048 open files), so the load that crosses 4096 is TCP — 2400 connections from the LAN, each answered
-  // end to end by a sink behind the test's upstream, all held open at once (two open files each in sing-box and xray)
+  // end to end by a sink behind the test's upstream, all held open at once (six open files each in sing-box, two in xray)
   const tcp = v.search(/inlan node \/tmp\/irnf-flood\.js tcp 198\.51\.100\.10 18090 2400 50 /);
   assert.notEqual(tcp, -1, 'the TCP hold from the LAN');
   assert.match(v, /\( ulimit -H -n 65536 && ulimit -S -n 65536 && exec node \/tmp\/irnf-flood\.js sink 18090 \)/, 'the sink holds 2400 sockets itself');
