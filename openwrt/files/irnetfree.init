@@ -42,6 +42,11 @@ start_service() {
 	# rules, then the core); procd's default 5s before SIGKILL is short on a
 	# slow router, and a killed service leaves its cores to the next start
 	procd_set_param term_timeout 15
+	# open files for node and the cores it starts (they inherit it): without
+	# this they get the kernel's 4096, and a busy LAN ran sing-box out of them
+	# ("too many open files", no device could browse — v1.16.2). procd sets it
+	# in the child before exec; the feed's own xray-core init sets 1000000
+	procd_set_param limits nofile="65536 65536"
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance

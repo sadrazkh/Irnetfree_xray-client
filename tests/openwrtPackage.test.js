@@ -251,6 +251,11 @@ test('the init script: procd, the token FILE (never the token itself), the exact
   assert.match(s, /^\tprocd_set_param respawn 3600 5 0$/m);
   // time for a clean teardown of the gateway on stop (procd's default is 5s, then SIGKILL)
   assert.match(s, /procd_set_param term_timeout 15/);
+  // v1.16.2: the descriptor limit for node and the cores it starts (procd applies it before exec; children
+  // inherit it). Without it they had the kernel's 4096 — the owner's AC-1304 ran out ("too many open files")
+  const inst = s.slice(s.indexOf('procd_open_instance'), s.indexOf('procd_close_instance'));
+  assert.match(inst, /^\tprocd_set_param limits nofile="65536 65536"$/m, 'one limits call, soft and hard, inside the instance');
+  assert.equal((s.match(/procd_set_param limits/g) || []).length, 1, 'a second limits call would replace the first');
   assert.match(s, /procd_add_reload_trigger irnetfree/);
   // a zone added after the install (a guest Wi-Fi) is picked up at the next start
   assert.match(s, /sh \/usr\/lib\/irnetfree\/fw-forwardings\.sh >\/dev\/null 2>&1 \|\| true/);
@@ -408,6 +413,69 @@ test('the QEMU guest script is POSIX sh and ends with the marker the driver look
   assert.match(drv, /SMOKE OK/);
   assert.match(drv, /Please press Enter to activate this console/);
   assert.match(drv, /'\/install\.sh': path\.join\(__dirname, '\.\.', 'install\.sh'\)/, 'and the driver hands the installer to the guest');
+});
+
+test('the QEMU smoke proves v1.16.2: 65536 open files for node and both cores, udp_timeout 120, the router\'s DNS block, both cores held past v1.16.1\'s 4096 open files from the LAN with no "too many open files", the drain, the DoH outage and names after it', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'guest-smoke.sh'), 'utf8');
+  const at = src.indexOf('say "v1.16.2: connect;');
+  assert.notEqual(at, -1, 'the v1.16.2 section is gone');
+  const v = src.slice(at, src.indexOf('say "SMOKE OK"'));
+  assert.match(v, /for p in \$\(pidof node\) \$FD_SB \$FD_X; do/, 'node, the gateway\'s sing-box and the core');
+  assert.match(v, /\[ "\$l" = "65536 65536" \]/, 'soft and hard, from /proc/<pid>/limits');
+  assert.match(v, /jq -e '\.inbounds\[0\]\.udp_timeout == 120' "\$SB_CFG"/);
+  assert.match(v, /\.dns\.enableParallelQuery == true and \.dns\.serveStale == true and \.dns\.serveExpiredTTL == 86400/);
+  assert.match(v, /all\(\.timeoutMs == 8000\)/);
+  assert.match(v, /judged 'Open files at connect: node \[0-9\]\* of 65536, xray \[0-9\]\* of 65536, sing-box \[0-9\]\* of 65536'/, 'the service says it at connect');
+  // the flood: from lan0 through dnsmasq, then TCP connections held, then UDP flows; open files sampled; no EMFILE in a live capture of the log
+  assert.match(v, /ip netns exec lan0 "\$@"/);
+  assert.match(v, /inlan node \/tmp\/irnf-flood\.js dns 192\.168\.1\.1 1500 "a\$\$" 1 3000 100/);
+  assert.match(v, /inlan node \/tmp\/irnf-flood\.js udp 198\.51\.100\.1 30000 300/);
+  assert.match(v, /logread -f > \/tmp\/irnf-flood-a\.log/);
+  // past the old budget, or the "no EMFILE" below proves nothing: sing-box's TUN keeps at most 1024 UDP sessions
+  // (about 2048 open files), so the load that crosses 4096 is TCP — 2400 connections from the LAN, each answered
+  // end to end by a sink behind the test's upstream, all held open at once (six open files each in sing-box, two in xray)
+  const tcp = v.search(/inlan node \/tmp\/irnf-flood\.js tcp 198\.51\.100\.10 18090 2400 50 /);
+  assert.notEqual(tcp, -1, 'the TCP hold from the LAN');
+  assert.match(v, /\( ulimit -H -n 65536 && ulimit -S -n 65536 && exec node \/tmp\/irnf-flood\.js sink 18090 \)/, 'the sink holds 2400 sockets itself');
+  // the upstream hands 198.51.100.10 to the sink on loopback (everything else still leaves bound to br-lan) and may open as many files
+  assert.match(src, /"route":\{"rules":\[\{"ip_cidr":\["198\.51\.100\.10\/32"\],"action":"route","outbound":"sink","override_address":"127\.0\.0\.1","override_port":18090\}\],"final":"out"\}/);
+  assert.match(src, /^\( ulimit -H -n 65536 && ulimit -S -n 65536 && exec sing-box run -c \/tmp\/upstream\.json \) > \/tmp\/upstream\.log 2>&1 &$/m);
+  assert.match(v, /\[ "\$\(nofile "\$UP_PID"\)" = "65536 65536" \]/, 'the test\'s own upstream must not run out before the gateway does');
+  assert.match(v, /HELD_SB="\$\(fdn "\$FD_SB"\)"; HELD_X="\$\(fdn "\$FD_X"\)"/, 'read while every connection is held');
+  assert.match(v, /jq -e '\.echoed == 2400 and \.failed == 0 and \.closedEarly == 0'/, 'every connection answered and none dropped while held');
+  const pastSb = v.indexOf('[ "$HELD_SB" -gt 4096 ]');
+  const pastX = v.indexOf('[ "$HELD_X" -gt 4096 ]');
+  const emfileA = v.indexOf("grep -ci 'too many open files' /tmp/irnf-flood-a.log");
+  assert.ok(pastSb > tcp && pastX > tcp, 'sing-box and xray each held more than v1.16.1\'s 4096 at once');
+  assert.ok(emfileA > pastSb && emfileA > pastX, 'the "no too many open files" check comes after the proof that the load crossed 4096');
+  assert.ok(tcp < v.indexOf('inlan node /tmp/irnf-flood.js udp 198.51.100.1 30000 300'), 'the TCP hold is let go before the UDP flows, whose clock the drain reads');
+  assert.match(v, /\[ "\$\(fdn "\$FD_SB"\)" -le \$\(\(PRE_TCP_SB \+ 60\)\) \]/, 'the held connections let go of their files');
+  assert.match(v, /\[ "\$PEAK_SB" -lt 32768 \]/, 'well under the limit');
+  assert.match(v, /resolves example\.net/);
+  // the drain: past 120 s, a fresh session each look, back near the baseline before 200 s (300 s would still hold them)
+  assert.match(v, /-lt 125 \]; do sleep 5; done/);
+  assert.match(v, /if \[ "\$NOW_SB" -le \$\(\(BASE_SB \+ 60\)\) \]; then DRAINED=1; break; fi/);
+  // the owner's failure: DoH black-holed, three tries each, nothing answered, no EMFILE, names back after it
+  assert.match(v, /"dnsRemote":\["https:\/\/192\.0\.2\.1\/dns-query"\]/);
+  assert.match(v, /inlan node \/tmp\/irnf-flood\.js dns 192\.168\.1\.1 400 "b\$\$" 3 2000 100/);
+  assert.match(v, /grep -ci 'too many open files' \/tmp\/irnf-flood-b\.log/);
+  // that load stays far under 4096 (dnsmasq's 150 in flight bound it): its open-files checks are said to be a sanity run, not the proof
+  const b = v.slice(v.indexOf('irnf-flood-b.log'), v.indexOf('say "v1.16.2: the DoH back'));
+  assert.match(b, /a sanity check, not the proof: this load stays far under 4096/);
+  assert.doesNotMatch(b, /-gt 4096/, 'no claim of crossing the old budget where nothing crosses it');
+  // the outage proven by a name that exists getting no address — not by the flood's answers, which the feed cores never give
+  assert.match(v, /out="\$\(inlan nslookup www\.example\.com 192\.168\.1\.1 2>&1 \|\| true\)"/);
+  assert.match(v, /a name resolved with the DoH black-holed — the outage was not simulated/);
+  assert.doesNotMatch(v, /\.answered \* 4 >= \.sent \* 3/, 'REFUSED from an overflowing dnsmasq is no answer');
+  assert.match(v, /resolves example\.org/);
+  // the one-time repair on the real store: the owner's shape seeded with the service stopped, repaired and said once
+  assert.match(v, /jq 'del\(\.routerRepair\) \| \.settings\.lanBlockQuic = false \| \.settings\.autoConnect = false \| \.settings\.dnsDirect = \["1\.1\.1\.1", "8\.8\.8\.8"\]'/);
+  assert.match(v, /since_mark \| grep 'Router settings repaired once' \|\|/);
+  assert.match(v, /\.result\.dnsDirect == \["178\.22\.122\.100", "185\.51\.200\.2"\]/);
+  assert.match(v, /if since_mark \| grep -q 'Router settings repaired once'; then echo "the repair ran a second time"; exit 1; fi/);
+  assert.match(v, /cp \/tmp\/irnf-store\.saved "\$STORE"/, 'the store is put back as it was');
+  // the flood script inside: arrow functions only (the bashism check reads heredocs too)
+  assert.doesNotMatch(v, /^\s*function\s/m);
 });
 
 test('the QEMU smoke proves D3: the in-country resolvers stay in the whole-LAN tunnel, the core’s own query leaves by the WAN (fix/v1161-core)', () => {

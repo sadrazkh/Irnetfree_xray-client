@@ -421,3 +421,58 @@ test('target resolver: IPv6 ranges leave expectedIPs while ipv6 is off — no A 
   const v6 = buildDnsPlan(base({ ipv6: true }), opts({ targetResolvers: [t] }));
   assert.deepEqual(v6.dns.servers.at(-1).expectedIPs, ['fd00::/8', '10.0.0.0/8']);
 });
+
+/* ----------------------------- routerDnsTuning (v1.16.2: the router only) ----------------------------- */
+// The owner's AC-1304: "app/dns: failed to retrieve response for google.com. >
+// Post https://1.1.1.1/dns-query: context deadline exceeded" over and over —
+// a cold DoH connection through the exit (VLESS over WebSocket via Cloudflare,
+// a second TLS inside) had the default 4 s of ONE query to come up, the
+// fallback 1.0.0.1 was a second cold connection asked only after it, and a
+// failed lookup sends the LAN no answer at all (so it retries). service.js
+// applies this to a router's xray-format config only (buildActive).
+
+const { routerDnsTuning, ROUTER_DOH_TIMEOUT_MS, ROUTER_SERVE_EXPIRED_TTL } = require('../src/main/dnsBuilder');
+
+test('routerDnsTuning: each DoH server gets 8 s, both race (parallel query), a known name survives an outage (serve stale, a day at most)', () => {
+  const p = buildDnsPlan(base({ routingMode: 'bypass-ir' }), opts());
+  const before = JSON.stringify(p.dns);
+  const d = routerDnsTuning(p.dns);
+  assert.equal(ROUTER_DOH_TIMEOUT_MS, 8000);
+  assert.equal(ROUTER_SERVE_EXPIRED_TTL, 86400);
+  assert.deepEqual(d, {
+    tag: 'dns-internal',
+    queryStrategy: 'UseIPv4',
+    servers: [
+      p.dns.servers[0], p.dns.servers[1],   // the in-country pair: untouched (its own group, still preferred for .ir names)
+      { address: 'https://1.1.1.1/dns-query', timeoutMs: 8000 },
+      { address: 'https://8.8.8.8/dns-query', timeoutMs: 8000 }
+    ],
+    enableParallelQuery: true,
+    serveStale: true,
+    serveExpiredTTL: 86400
+  });
+  assert.equal(JSON.stringify(p.dns), before, 'the plan it was given is not changed');
+  assert.deepEqual(p.dns.servers[0], { address: '178.22.122.100', domains: ['geosite:category-ir', 'regexp:.*\\.ir$'], expectedIPs: ['geoip:ir'], skipFallback: true });
+});
+
+test('routerDnsTuning: a fallback that is not a DoH URL keeps the queries serial — a corporate resolver would otherwise be asked every public name through its tunnel', () => {
+  const corp = buildDnsPlan(base(), opts({ targetResolvers: [{ address: '192.168.60.1', outboundTag: 'wg-corp' }] }));
+  const d = routerDnsTuning(corp.dns);
+  assert.equal('enableParallelQuery' in d, false);
+  assert.deepEqual(d.servers.at(-1), { address: '192.168.60.1' }, 'the target resolver as it was');
+  assert.equal(d.servers[0].timeoutMs, 8000, 'the DoH entries still get their time');
+  assert.equal(d.serveStale, true);
+  // with search domains it is no fallback (skipFallback), but a race asks EVERY sorted server at once: the
+  // company's names (x.tes.systems) would go to the public DoH servers too — serial (review of v1.16.2)
+  const scoped = buildDnsPlan(base(), opts({ targetResolvers: [{ address: '192.168.60.1', outboundTag: 'wg-corp', domains: ['domain:tes.systems'] }] }));
+  assert.equal('enableParallelQuery' in routerDnsTuning(scoped.dns), false);
+  // a plain resolver in the remote list (rides the exit as UDP): serial, as before
+  assert.equal('enableParallelQuery' in routerDnsTuning(buildDnsPlan(base({ dnsRemote: ['https://1.1.1.1/dns-query', '8.8.8.8'] }), opts()).dns), false);
+});
+
+test('routerDnsTuning: nothing to tune is returned as it came', () => {
+  assert.equal(routerDnsTuning(null), null);
+  assert.equal(routerDnsTuning(undefined), undefined);
+  const odd = { queryStrategy: 'UseIPv4' };
+  assert.equal(routerDnsTuning(odd), odd);
+});

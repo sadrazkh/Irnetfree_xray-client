@@ -113,8 +113,14 @@ function normalizeAppNames(names) {
  *   2. `{ process_name: names, outbound: mode === 'exclude' ? 'direct' : 'socks-out' }`.
  * `route.final` becomes `mode === 'exclude' ? 'socks-out' : 'direct'` — the
  * unlisted apps get the opposite of what the listed ones get.
+ *
+ * `udpTimeout`: the router's alone (TunOpenwrt passes it, writeConfig takes
+ * it only when composed by it). A positive whole number of seconds becomes the
+ * inbound's `udp_timeout` — a JSON number, which every sing-box from 1.7.8 to
+ * 1.14 reads as seconds — after every other key; anything else leaves the
+ * output exactly as v1.16.1 built it (tests/desktopPin.test.js).
  */
-function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null } = {}) {
+function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null } = {}) {
   void ipv6;
   const inbound = { type: 'tun', tag: 'tun-in' };
   if (interfaceName) inbound.interface_name = interfaceName;
@@ -124,6 +130,7 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
   inbound.strict_route = !!strict;
   inbound.stack = stack;
   inbound.route_exclude_address = excludeIps.filter(Boolean).map(cidrOf);
+  if (Number.isInteger(udpTimeout) && udpTimeout > 0) inbound.udp_timeout = udpTimeout;
 
   const outbounds = [{ type: 'socks', tag: 'socks-out', server: '127.0.0.1', server_port: socksPort, version: '5' }];
   const route = { final: 'socks-out', auto_detect_interface: true };
@@ -321,7 +328,9 @@ class TunSingbox {
     fs.mkdirSync(base, { recursive: true, mode: 0o700 });
     const work = fs.mkdtempSync(path.join(base, 'irnf-sb-'));
     const cfgFile = path.join(work, 'sing-box.json');
-    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null });
+    // udpTimeout is the router's (TunOpenwrt); a desktop caller cannot set it
+    const udpTimeout = this.composedBy === 'openwrt' ? opts.udpTimeout : null;
+    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout });
     fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
     this.work = work;
     return { work, cfgFile };
