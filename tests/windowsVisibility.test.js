@@ -771,3 +771,36 @@ test('the wiring: setConnUI repaints the lines, a language switch the banner, an
   assert.match(down, /state\.noticesToasted = new Set\(\);/);
   assert.doesNotMatch(down, /noticesOnce/);
 });
+
+/* --------- a connect that fails before a tunnel: a guard stranded by a give-up is given back --------- */
+
+function failedConnectHarness({ active = false, running = false, others = 0 } = {}) {
+  const released = [];
+  const logs = [];
+  const ctx = vm.createContext({
+    xray: { running }, tun: { active },
+    connectsInFlight: new Set(Array.from({ length: others }, () => new Promise(() => {}))),
+    leakGuard: {},
+    releaseStrandedGuard: async (g) => { released.push(g); return { released: true }; },
+    connectOnce: async () => { throw new Error('Config rejected by xray'); },
+    send: (ch, p) => { if (ch === 'log') logs.push(p); }
+  });
+  vm.runInContext([fnOf(MAIN, 'guardInUse'), fnOf(MAIN, 'releaseGuardAfterFailedConnect'), fnOf(MAIN, 'doConnect')].join('\n'), ctx);
+  return { ctx, released, logs };
+}
+const settle = () => new Promise((r) => setTimeout(r, 20));
+
+test('a connect that fails before any tunnel gives a guard held by a given-up reconnect back — the window\'s banner was hidden by its "connecting" (review of v1.16.3)', async () => {
+  const h = failedConnectHarness();
+  await assert.rejects(h.ctx.doConnect('srv'), /Config rejected/);
+  await settle();
+  assert.equal(h.released.length, 1, 'the adapters get their resolvers back');
+  assert.equal(h.logs.at(-1).level, 'info');
+  // a recovery keeps its hold (runRecovery retries the tunnel), a live tunnel or another connect owns the guard
+  for (const [opts, shape] of [[{ recovery: true }, {}], [undefined, { active: true, running: true }], [undefined, { others: 1 }]]) {
+    const k = failedConnectHarness(shape);
+    await assert.rejects(k.ctx.doConnect('srv', opts));
+    await settle();
+    assert.equal(k.released.length, 0, JSON.stringify({ opts, shape }));
+  }
+});
