@@ -765,10 +765,16 @@ button.ins-row:hover .ins-label { color: var(--accentInk); }
 .mode-option.disabled { opacity: .55; }
 .mode-option.disabled:hover { border-color: var(--softline); }
 
+/* Centred on the physical left edge, like the banner stack: translateX is
+   always physical, and a logical inset-inline-start: 50% is the RIGHT edge in
+   Persian — a long toast then started half its width off the window's left
+   side (measured: left -270 px at 1080x720, -225 px at 900x600;
+   tests/bannerLayout.test.js renders it). */
 .toast {
   position: fixed;
   inset-block-end: 22px;
-  inset-inline-start: 50%;
+  left: 50%;
+  right: auto;
   transform: translateX(-50%) translateY(12px);
   z-index: 200;
   padding: 11px 18px;
@@ -789,18 +795,13 @@ button.ins-row:hover .ins-label { color: var(--accentInk); }
 .toast.err { border-color: var(--danger); color: var(--danger); }
 .toast.warn { border-color: var(--warn); color: var(--warn); }
 /* A toast with a button (toastAction): clickable only while it shows, and the
-   message and its action sit on one line. Centred on the physical left edge:
-   the logical inset above is the right edge in Persian, and with translateX
-   (always physical) a long toast started off the window's left side (measured
-   at 1240 px, RTL: left edge at -177 px). */
+   message and its action sit on one line. Centred like every toast (above). */
 .toast.has-action.show { pointer-events: auto; }
 .toast.has-action {
   display: flex;
   align-items: center;
   gap: 12px;
   text-align: start;
-  inset-inline-start: auto;
-  left: 50%;
 }
 .toast-action { flex: 0 0 auto; }
 

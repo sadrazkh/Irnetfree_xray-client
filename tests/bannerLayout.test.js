@@ -22,7 +22,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { BANNERS, checkPage, harnessPage, parseSizes, serveRenderer, bannerCheckJs, bannerTexts, findBrowser, renderInBrowser } = require('./renderCheck');
+const { BANNERS, checkPage, harnessPage, parseSizes, serveRenderer, bannerCheckJs, bannerTexts, longestNotice, findBrowser, renderInBrowser } = require('./renderCheck');
 
 const R = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8').replace(/\r\n/g, '\n');
 const HTML = R('src', 'renderer', 'index.html');
@@ -82,6 +82,26 @@ test('the stack is fixed over the window’s foot, above the toast’s edge, und
   assert.match(rule(STYLES, '.kill-banner-text, .pending-banner-text'), /overflow-wrap: anywhere;/);
 });
 
+test('the toast is centred on the physical left edge, plain or with a button — in Persian a logical inset put a long one half off the window', () => {
+  // inset-inline-start: 50% is `right: 50%` in RTL, and translateX(-50%) is
+  // physical: a plain toast as wide as its max-width started off the window's
+  // left side (measured left -270 px at 1080x720, -225 px at 900x600)
+  const toast = rule(STYLES, '.toast');
+  assert.match(toast, /(^|[\s;])left: 50%;/);
+  assert.match(toast, /(^|[\s;])right: auto;/);
+  assert.doesNotMatch(toast, /inset-inline-(start|end):|inset-inline:/, 'no logical horizontal inset');
+  assert.match(toast, /transform: translateX\(-50%\) translateY\(12px\);/);
+  assert.match(rule(STYLES, '.toast.show'), /transform: translateX\(-50%\) translateY\(0\);/);
+  assert.match(toast, /max-width: min\(560px, 88vw\);/, 'never wider than the window');
+  // no later rule puts a logical inset (or another left/right) back on any toast
+  for (const m of ALL_CSS.matchAll(/([^{}]*)\{([^}]*)\}/g)) {
+    const sel = m[1].replace(/\/\*[\s\S]*?\*\//g, '').trim();
+    if (/\.toast\b(?![-\w])/.test(sel) && sel !== '.toast') {
+      assert.doesNotMatch(m[2], /inset-inline|(^|[\s;])(left|right):/, `${sel} must not move the toast off its physical centre`);
+    }
+  }
+});
+
 test('the render check serves the real markup and CSS — only the scripts are left out', () => {
   const page = checkPage();
   assert.doesNotMatch(page.replace('<script src="/__render-check.js"></script>', ''), /<script\b/);
@@ -91,6 +111,15 @@ test('the render check serves the real markup and CSS — only the scripts are l
   const texts = bannerTexts();
   assert.match(texts.autostart, /IRNetFree-Portable-1\.13\.0-x64-setup-copy\.exe/);
   assert.doesNotMatch(texts.autostart + texts.pending, /\{\w+\}/);
+  // the toast's texts: the longest notice of each language, every field filled
+  assert.equal(texts.toasts.length, 2);
+  assert.match(texts.toasts[0], /[؀-ۿ]/, 'the first is Persian');
+  assert.doesNotMatch(texts.toasts[1], /[؀-ۿ]/, 'the second is English');
+  for (const s of texts.toasts) {
+    assert.doesNotMatch(s, /\{\w+\}/, s);
+    assert.ok(s.length > 300, `the longest notice, not a short one (${s.length})`);
+  }
+  assert.equal(longestNotice('fa'), texts.toasts[0]);
   assert.doesNotThrow(() => new vm.Script(bannerCheckJs(texts)));
   // the harness: one iframe of exactly each size, around the page above
   assert.deepEqual(parseSizes('1080x720, 900x600,390x760,x,99999x1'), [{ width: 1080, height: 720 }, { width: 900, height: 600 }, { width: 390, height: 760 }]);
@@ -112,7 +141,7 @@ const SIZES = [
   { width: 390, height: 760, together: false }    // the router's page on a phone: one banner at a time there
 ];
 
-test('a real render: every banner, shown, lies inside the viewport, is what is under its centre, and so are its buttons', { skip: BROWSER ? false : 'no browser for a render (CI, or IRNF_RENDER_BROWSER=<chrome or edge>)', timeout: 240000 }, async () => {
+test('a real render: every banner, shown, lies inside the viewport, is what is under its centre, and so are its buttons — and the longest toast lies inside it too', { skip: BROWSER ? false : 'no browser for a render (CI, or IRNF_RENDER_BROWSER=<chrome or edge>)', timeout: 240000 }, async () => {
   // the app's own Persian texts; the logon-task banner at its longest (two unbreakable Windows paths)
   const served = await serveRenderer(bannerCheckJs(bannerTexts()));
   try {
@@ -145,6 +174,16 @@ test('a real render: every banner, shown, lies inside the viewport, is what is u
             assert.ok(a.bottom <= c.top + 0.5 || c.bottom <= a.top + 0.5, `${list[i].id} and ${list[j].id} overlap at ${size.width}x${size.height} ${run.dir}`);
           }
         }
+      }
+      // the toast with the longest notice (Persian, English), plain and with its button, in both directions:
+      // all of it inside the window — a logical inset put a long Persian one half off its left edge
+      assert.equal(out.toasts.length, 2 * 2 * 2, `${size.width}x${size.height}: ${JSON.stringify(out.toasts)}`);
+      for (const tst of out.toasts) {
+        const at = `the toast (${tst.dir}, ${tst.action ? 'with its button' : 'plain'}, ${tst.length} chars) at ${size.width}x${size.height}: ${JSON.stringify(tst.box)}`;
+        assert.ok(tst.box.width > 0 && tst.box.height > 0, at);
+        assert.ok(tst.box.left >= -0.5, `off the left edge — ${at}`);
+        assert.ok(tst.box.right <= W + 0.5, `off the right edge — ${at}`);
+        assert.ok(tst.box.top >= -0.5 && tst.box.bottom <= H + 0.5, `off the top or bottom — ${at}`);
       }
     }
   } finally {
