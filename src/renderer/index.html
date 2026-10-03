@@ -118,6 +118,8 @@
               </button>
               <div class="connect-state" id="connState" data-i18n="state.disconnected">قطع شده</div>
               <div class="connect-meta" id="connMeta"></div>
+              <!-- what the live connection did not do (proxy only, the leak guard): app.js renderConnIssues -->
+              <div class="conn-issues" id="connIssues" role="status" hidden></div>
               <div class="connect-server" id="connServer" data-i18n="conn.noServer">سروری انتخاب نشده</div>
               <div class="connect-geo" id="connGeo" hidden>
                 <span class="geo-flag" id="geoFlag"></span>
@@ -1106,6 +1108,16 @@
     <div class="pending-banner-actions">
       <button class="btn" id="pendingApply" data-i18n="apply.now">اعمال و اتصال مجدد</button>
       <button class="btn ghost" id="pendingDismiss" data-i18n="apply.dismiss">بستن</button>
+    </div>
+  </div>
+
+  <!-- Windows: the logon task starts ANOTHER copy of the app (an older build keeps its
+       own DNS code) — main only reads the task; the button re-registers it for this one -->
+  <div class="pending-banner" id="autostartBanner" hidden>
+    <span class="pending-banner-text" id="autostartBannerText"></span>
+    <div class="pending-banner-actions">
+      <button class="btn" id="autostartFix" data-i18n="notice.autostartFix">هنگام ورود همین نسخه اجرا شود</button>
+      <button class="btn ghost" id="autostartDismiss" data-i18n="apply.dismiss">بستن</button>
     </div>
   </div>
 

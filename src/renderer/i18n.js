@@ -528,7 +528,19 @@ const I18N = {
     'power.cancel': 'لغو', 'power.cancelHint': 'لغو اتصال',
     'state.cancelling': 'در حال لغو…',
     // the Servers page's groups
-    'srv.groupToggle': 'باز یا بسته کردن این گروه', 'srv.subRefresh': 'به‌روزرسانی همین ساب'
+    'srv.groupToggle': 'باز یا بسته کردن این گروه', 'srv.subRefresh': 'به‌روزرسانی همین ساب',
+    // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
+    'notice.proxyOnly': 'فقط پراکسی — تونل بالا نیامد: {reason}',
+    'notice.guardFailed': 'محافظ نشت DNS فعال نشد — ممکن است DNS بیرون از تونل برود: {reason}',
+    'notice.wgSharedKey': 'وایرگارد {name}: همین هویت با نام {other} هم ذخیره شده — سرور وایرگارد برای هر کلید فقط یک دستگاه می‌پذیرد؛ اگر روی دو دستگاه استفاده شود (یا وقتی وصلی تست شود) یکی از آن دو از کار می‌افتد',
+    'notice.wgSharedAddress': 'وایرگارد {name}: آدرس تونلش ({address}) با کلیدی دیگر و برای همین سرور با نام {other} هم ذخیره شده — سرور هر آدرس را فقط به یک کلید می‌دهد (مگر به همهٔ دستگاه‌ها یک آدرس بدهد)، پس ممکن است یکی از این دو هیچ ترافیکی رد نکند',
+    'notice.lanInRange': 'شبکهٔ محلی شما {lan} داخل {range} است که روتینگ ویژه آن را به {target} می‌فرستد — میزبان‌های {lan} روی همین شبکهٔ محلی می‌مانند، نه داخل تونل',
+    'notice.rangeInLan': '{range} که روتینگ ویژه آن را به {target} می‌فرستد داخل شبکهٔ محلی شما {lan} است — میزبان‌های {range} روی همین شبکهٔ محلی می‌مانند، نه داخل تونل',
+    'notice.corpDnsOff': 'مدیریت DNS خاموش است، پس DNS وایرگاردِ شما ({servers}) استفاده نمی‌شود و نام‌های داخل آن شبکه باز نمی‌شوند — تنظیمات ← DNS ← «مدیریت DNS توسط برنامه» را دوباره روشن کن',
+    'notice.autostartStale': 'ویندوز هنگام ورود نسخهٔ دیگری از IRNetFree را اجرا می‌کند — {task} — نه همین نسخه ({current}). آن نسخه کد شبکهٔ خودش را دارد که شاید قدیمی‌تر باشد.',
+    'notice.autostartFix': 'هنگام ورود همین نسخه اجرا شود',
+    'notice.autostartFixed': 'از این به بعد هنگام ورود به ویندوز همین نسخه اجرا می‌شود',
+    'notice.autostartFixFailed': 'تغییر اجرای خودکار ناموفق بود: {error}'
   },
 
   en: {
@@ -1056,7 +1068,19 @@ const I18N = {
     'power.cancel': 'Cancel', 'power.cancelHint': 'Cancel connecting',
     'state.cancelling': 'Cancelling…',
     // the Servers page's groups
-    'srv.groupToggle': 'Show or hide this group', 'srv.subRefresh': 'Refresh this subscription'
+    'srv.groupToggle': 'Show or hide this group', 'srv.subRefresh': 'Refresh this subscription',
+    // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
+    'notice.proxyOnly': 'Proxy only — the tunnel did not start: {reason}',
+    'notice.guardFailed': 'Leak guard failed — DNS may leave outside the tunnel: {reason}',
+    'notice.wgSharedKey': 'WireGuard {name}: this identity is also stored as {other} — a WireGuard server accepts one device per key; used on two devices (or tested while connected) one of them stalls',
+    'notice.wgSharedAddress': 'WireGuard {name}: its tunnel address {address} is also stored as {other} with another key for the same server — the server gives an address to one key only (unless it gives every device the same one), so one of the two may carry nothing',
+    'notice.lanInRange': 'Your local network {lan} lies inside {range} that advanced routing sends to {target} — hosts in {lan} stay on the LAN, not the tunnel',
+    'notice.rangeInLan': '{range} that advanced routing sends to {target} lies inside your local network {lan} — hosts in {range} stay on the LAN, not the tunnel',
+    'notice.corpDnsOff': 'Managed DNS is off, so your WireGuard’s resolver ({servers}) is not used and names inside that network will not resolve — turn Settings → DNS → “DNS managed by the app” back on',
+    'notice.autostartStale': 'At logon Windows starts another copy of IRNetFree — {task} — not this one ({current}). That copy keeps its own, possibly older, network code.',
+    'notice.autostartFix': 'Start this version at logon',
+    'notice.autostartFixed': 'At logon Windows now starts this version',
+    'notice.autostartFixFailed': 'Could not update the logon task: {error}'
   }
 };
 
