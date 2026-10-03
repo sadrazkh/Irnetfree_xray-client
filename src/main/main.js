@@ -116,6 +116,11 @@ let userDisconnecting = false; // true during an intentional disconnect (kill sw
 // disconnected). Diffing it against the current settings is what tells the user
 // "you changed this, but it won't take effect until you reconnect".
 let appliedSettings = null;
+// The saved servers the live connection dials, and whether one was edited
+// since: the edit waits for a reconnect like a settings key (pendingKeys,
+// 'servers'). The router's service does the same (field report fix 18).
+let liveServerIds = new Set();
+let serverEditPending = false;
 // The physical interface the LIVE connection's direct dials are bound to (see
 // doConnect); null when not under TUN. rebuildActiveConfig() reuses it rather
 // than asking the OS again — with the tunnel up, the default route IS the tunnel.
@@ -1261,6 +1266,8 @@ async function connectOnce(serverId, opts = {}) {
   // Everything below is a connect-time side effect, so from here on the live
   // tunnel matches these settings exactly — record what it was built from.
   appliedSettings = snapshotApplied(getSettings());
+  liveServerIds = planServerIds(plan);
+  serverEditPending = false;
 
   if (settings.systemProxy) {
     try {
@@ -1567,9 +1574,39 @@ async function connectOnce(serverId, opts = {}) {
   return { ok: true, tunError };
 }
 
-/** Reconnect-relevant settings the user changed since the live tunnel was built. */
+/** Reconnect-relevant settings the user changed since the live tunnel was built — and 'servers' for an edit of one it dials. */
 function pendingKeys() {
-  return pendingReconnectKeys(appliedSettings, getSettings());
+  const keys = pendingReconnectKeys(appliedSettings, getSettings());
+  if (appliedSettings && serverEditPending) keys.push('servers');
+  return keys;
+}
+
+/** Did an edit change what the core dials? Everything but the name (a label, never in the config) and `_edited` (which fields a subscription refresh keeps), key order aside. */
+function dialChanged(a, b) {
+  const canon = (v) => (Array.isArray(v) ? v.map(canon) : (v && typeof v === 'object' ? Object.keys(v).sort().reduce((o, k) => { o[k] = canon(v[k]); return o; }, {}) : v));
+  const dialled = (s) => JSON.stringify(canon(Object.assign({}, s, { name: null, _edited: null })));
+  return dialled(a) !== dialled(b);
+}
+
+/** The ids of every saved server a plan dials: each hop of a chain, every pool and advanced-routing target. */
+function planServerIds(plan) {
+  const ids = new Set();
+  const add = (s) => { if (s && s.id) ids.add(s.id); };
+  const hops = (list) => { for (const s of list || []) add(s); };
+  const target = (tg) => {
+    if (!tg || tg === 'direct' || tg === 'block') return;
+    if (tg === 'chain') return hops(plan.chain);
+    if (String(tg).indexOf('chain:') === 0) return hops((plan.chainsById || {})[String(tg).slice('chain:'.length)]);
+    add((plan.serversById || {})[tg]);
+  };
+  switch (plan && plan.mode) {
+    case 'single': add(plan.server); break;
+    case 'chain': hops(plan.chain); break;
+    case 'pool': for (const e of plan.entries || []) if (e) target(e.target); break;
+    case 'advanced': for (const r of plan.rules || []) if (r) target(r.target); target(plan.def); break;
+    default: break;
+  }
+  return ids;
 }
 
 /**
@@ -2454,9 +2491,14 @@ function registerIpc() {
     const servers = store.get('servers', []);
     const idx = servers.findIndex(s => s.id === id);
     if (idx === -1) return { ok: false, error: 'not found', servers };
-    servers[idx] = applyServerEdits(servers[idx], fields || {});
+    const before = servers[idx];
+    servers[idx] = applyServerEdits(before, fields || {});
     setServers(servers);
-    return { ok: true, server: servers[idx], servers };
+    // an edit of a server the live connection dials waits for a reconnect (see liveServerIds)
+    // — one that changes what is dialled: a rename, or a Save with nothing changed, is none
+    const live = !!appliedSettings && liveServerIds.has(id) && dialChanged(before, servers[idx]);
+    if (live) serverEditPending = true;
+    return { ok: true, server: servers[idx], servers, live, pendingReconnect: pendingKeys() };
   });
 
   ipcMain.handle('chain:get', () => store.get('chain', []));

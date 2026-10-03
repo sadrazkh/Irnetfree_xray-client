@@ -103,7 +103,10 @@ function make(opts = {}) {
     onUnexpectedExit: (err) => exits.push(err),
     lang: 'en', tmpDir: '/tmp/irnf-test',
     verifyWaitMs: opts.verifyWaitMs || 300,    // the real 15s is for an emulated CPU; the fakes answer at once
-    linkWaitMs: opts.linkWaitMs || 150
+    linkWaitMs: opts.linkWaitMs || 150,
+    // who we are, and who dnsmasq runs as (OpenWrt: its own user) — never the test machine's /proc
+    uid: opts.uid != null ? opts.uid : 0,
+    uidsOf: opts.uidsOf || ((name) => (name === 'dnsmasq' ? [0, 453] : []))   // the root jail and the dnsmasq in it
   });
   return { tun, inner, lines, writes, logs, exits };
 }
@@ -119,6 +122,14 @@ test('contract: the fields the service reads, and DNS declared as the backend’
   assert.equal(tun.dnsPeer6, 'fdfe:dcba:9876::2');
   assert.equal(tun.active, false);
   assert.deepEqual(tun.excludeIps, []);
+});
+
+test('the sing-box backend it builds for itself knows it is composed by the router (no desktop resolver advice in syslog)', () => {
+  const { TunSingbox } = require('../src/main/tunSingbox');
+  const own = new TunOpenwrt({ lang: 'en' });
+  assert.ok(own.inner instanceof TunSingbox);
+  assert.equal(own.inner.composedBy, 'openwrt');
+  assert.equal(new TunSingbox({}).composedBy, null, 'a TunSingbox of its own is not');
 });
 
 test('isAvailable: sing-box present AND nft on PATH', () => {
@@ -155,15 +166,21 @@ test('start: nft table, then the bypass rules, then sing-box, then verify — in
   assert.deepEqual(inner.calls[0], ['start', 10808, ['1.2.3.4'], { ipv6: false, strict: false, apps: null, bypassMacs: ['AA:BB:CC:DD:EE:01', 'bad'] }],
     'the options are passed through untouched (no gso key: sing-box 1.12 refuses it, and enables GSO itself)');
   assert.equal(inner.lang, 'en', 'the language the service set is handed down');
-  assert.ok(logs.some(([, l]) => /Gateway up on br-lan.*1 excluded/.test(l)), JSON.stringify(logs));
+  assert.ok(logs.some(([, l]) => /Whole-network tunnel \(gateway\) up on br-lan: every device behind the router goes through the VPN; 1 excluded by MAC/.test(l)), JSON.stringify(logs));
   // a second start is a no-op while active
   await tun.start(10808, [], [], {});
   assert.equal(inner.calls.filter(c => c[0] === 'start').length, 1);
 });
 
+test('the failure says "whole-network tunnel" in Persian too — the word the owner could not place was «گیت‌وی»', async () => {
+  const { tun } = make({ answers: [[/^nft -f/, new Error('nft: command not found')]] });
+  tun.lang = 'fa';
+  await assert.rejects(tun.start(10808, [], [], {}), /^Error: تونل کل شبکه بالا نیامد \(nft\): nft: command not found$/);
+});
+
 test('start fails at nft: nothing else runs, the error names the step', async () => {
   const { tun, inner, lines } = make({ answers: [[/^nft -f/, new Error('nft: command not found')]] });
-  await assert.rejects(tun.start(10808, [], [], {}), /Gateway did not come up \(nft\): nft: command not found/);
+  await assert.rejects(tun.start(10808, [], [], {}), /The whole-network tunnel did not come up \(nft\): nft: command not found/);
   assert.equal(tun.active, false);
   assert.equal(inner.calls.filter(c => c[0] === 'start').length, 0, 'sing-box was never started');
   // rollback still clears what might be there
@@ -273,6 +290,71 @@ test('setBypass while up adds one `to <cidr> lookup main` rule per destination (
   assert.ok(bad.lines.includes('ip -4 rule add pref 8997 to 203.0.113.8/32 lookup main'));
   assert.ok(bad.logs.some(([lvl, l]) => lvl === 'error' && /203\.0\.113\.7\/32/.test(l) && /Invalid argument/.test(l)), JSON.stringify(bad.logs));
   assert.equal(bad.tun.active, true, 'the gateway is not torn down for it');
+});
+
+test('D3: the router’s OWN queries to the in-country resolvers leave by the WAN — one `iif lo uidrange <us> … dport 53` rule each, after verify; stop sweeps them', async () => {
+  // Since v1.16.1 those resolvers are in the whole-LAN tunnel (no route
+  // exclusion: dnsmasq's upstream and the LAN went to them by the ISP). The
+  // router's own control path — the relay agent resolves its relay through
+  // them — must not depend on the tunnel (review of v1.16.1): a rule for this
+  // process's user and the loopback "interface" only. Forwarded LAN packets
+  // (iif br-lan, uid 0 to the kernel) and dnsmasq (its own user) stay in.
+  const { tun, lines } = make({ uid: 0 });
+  await tun.start(10808, [], [], { ownDirect: ['178.22.122.100', '2001:DB8::53', 'not an address', '178.22.122.100'] });
+  const own = lines.filter(l => /uidrange/.test(l));
+  assert.deepEqual(own, [
+    'ip -4 rule add pref 8997 iif lo uidrange 0-0 to 178.22.122.100/32 ipproto udp dport 53 lookup main',
+    'ip -6 rule add pref 8997 iif lo uidrange 0-0 to 2001:db8::53/128 ipproto udp dport 53 lookup main'
+  ], lines.join('\n'));
+  assert.ok(lines.indexOf(own[0]) > lines.findIndex(l => /^ip rule show/.test(l)), 'laid once the gateway is verified');
+  lines.length = 0;
+  await tun.stop();
+  assert.ok(lines.includes('ip -4 rule del pref 8997') && lines.includes('ip -6 rule del pref 8997'), 'the 8997 sweep takes them: ' + lines.join('\n'));
+  // the service's own user is what the rule names
+  const other = make({ uid: 1000 });
+  await other.tun.start(10808, [], [], { ownDirect: ['178.22.122.100'] });
+  assert.ok(other.lines.includes('ip -4 rule add pref 8997 iif lo uidrange 1000-1000 to 178.22.122.100/32 ipproto udp dport 53 lookup main'));
+});
+
+test('D3: …not when dnsmasq runs as the same user — its upstream to them would leave by the ISP again; said at warn, the gateway stays', async () => {
+  const { tun, lines, logs } = make({ uid: 0, uidsOf: () => [0] });
+  await tun.start(10808, [], [], { ownDirect: ['178.22.122.100'] });
+  assert.ok(!lines.some(l => /uidrange/.test(l)), lines.join('\n'));
+  assert.ok(logs.some(([lvl, l]) => lvl === 'warn' && /dnsmasq runs as uid 0/.test(l)), JSON.stringify(logs));
+  assert.equal(tun.active, true);
+  // a rule the kernel refuses is said, and the gateway stays too
+  const bad = make({ answers: [[/^ip rule show/, RULES_OK], [/uidrange/, new Error('Error: argument "uidrange" is wrong')]] });
+  await bad.tun.start(10808, [], [], { ownDirect: ['178.22.122.100'] });
+  assert.equal(bad.tun.active, true);
+  assert.ok(bad.logs.some(([lvl, l]) => lvl === 'error' && /178\.22\.122\.100\/32/.test(l) && /uidrange/.test(l)), JSON.stringify(bad.logs));
+});
+
+test('procUidsOf: the real uid of every process by that name, from /proc; nothing when /proc cannot be read', () => {
+  const { procUidsOf } = require('../src/main/tunOpenwrt');
+  // OpenWrt 23.05 and 24.10 as the QEMU job saw them (run 37067447979): procd
+  // jails dnsmasq — the jail, named "dnsmasq", stays root (parent procd) and
+  // its child, the dnsmasq that forwards, runs as 453
+  const files = {
+    '/proc/1/comm': 'procd\n', '/proc/1/status': 'Name:\tprocd\nPPid:\t0\nUid:\t0\t0\t0\t0\n',
+    '/proc/4611/comm': 'dnsmasq\n', '/proc/4611/status': 'Name:\tdnsmasq\nPPid:\t1\nUid:\t0\t0\t0\t0\n',
+    '/proc/4620/comm': 'dnsmasq\n', '/proc/4620/status': 'Name:\tdnsmasq\nPPid:\t4611\nUid:\t453\t453\t453\t453\n',
+    '/proc/4630/comm': 'dnsmasq\n'   // gone before its status was read
+  };
+  const fsImpl = {
+    readdirSync: () => ['1', '4611', '4620', '4630', 'self', 'net'],
+    readFileSync: (p) => { if (!(p in files)) throw new Error('ENOENT ' + p); return files[p]; }
+  };
+  assert.deepEqual(procUidsOf('dnsmasq', fsImpl).sort((a, b) => a - b), [0, 453]);
+  assert.deepEqual(procUidsOf('cloudflared', fsImpl), []);
+  assert.deepEqual(procUidsOf('dnsmasq', { readdirSync: () => { throw new Error('no /proc'); } }), []);
+});
+
+test('forwardsAs: dnsmasq forwards as a uid only when every dnsmasq runs as it — a root jail around a dnsmasq of its own user is not root\'s', () => {
+  const { forwardsAs } = require('../src/main/tunOpenwrt');
+  assert.equal(forwardsAs([0, 453], 0), false, 'OpenWrt: the jail is root, the forwarder 453');
+  assert.equal(forwardsAs([453], 0), false);
+  assert.equal(forwardsAs([0], 0), true, 'a dnsmasq that drops no privileges');
+  assert.equal(forwardsAs([], 0), false, 'none running');
 });
 
 test('M1: the 8997 sweep deletes until the kernel has none left — not at most four per family (the two singletons keep their bound)', async () => {

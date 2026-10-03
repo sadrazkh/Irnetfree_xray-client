@@ -2158,6 +2158,7 @@ function applyConnSnapshot(conn) {
     state.activeServerId = null;
     state.activeEngine = '';
     setConnUI('error');
+    showErrorReason(conn.reason);
   } else {
     state.connected = false;
     state.connecting = false;
@@ -2168,6 +2169,16 @@ function applyConnSnapshot(conn) {
   applyKillSwitchState(conn.killSwitch);
   renderServers();
   renderPicker();
+}
+
+/**
+ * The router's error state with its reason, as LuCI's badge says it
+ * ("Error: …"): a connect the router made on its own (at boot, in a
+ * recovery) that the core refused — a finalmask server with no Xray-PattN —
+ * has no click waiting for a toast, and a bare "Error" said nothing.
+ */
+function showErrorReason(reason) {
+  if (state.flavor === 'openwrt' && reason) $('#connState').textContent = t('state.error') + ': ' + reason;
 }
 
 /** "Reconnecting… (attempt n)" / "Waiting for internet… (attempt n)" — the router's two in-between states. */
@@ -2539,6 +2550,7 @@ window.api.onStatus((d) => {
     state.connected = false;
     state.connecting = false;
     setConnUI('error');
+    showErrorReason(d.message);
     renderPendingBanner();
     renderServers();
     renderPicker();

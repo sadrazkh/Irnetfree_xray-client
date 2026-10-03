@@ -16,7 +16,10 @@
  *      packets to the main table — out the WAN, with fw4's normal NAT;
  *   3. a check, after sing-box is up, that the TUN device exists and the
  *      policy route is really there — a gateway that silently is not one
- *      leaks the whole house.
+ *      leaks the whole house;
+ *   4. at pref 8997, what the router's own control path needs off the
+ *      tunnel: the remote control's destinations (setBypass), and this
+ *      process's own DNS to the in-country resolvers (layOwnDirect).
  *
  * Order on start: table → rules → sing-box → verify; any failure rolls back
  * in reverse and the error names the step. The exclusion list is replaced
@@ -69,12 +72,55 @@ function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no wait: poll faster */ }
 }
 
+/** The real uids of every running process named `name` (/proc/<pid>/comm, /proc/<pid>/status); [] off Linux. */
+function procUidsOf(name, fsImpl = fs) {
+  const uids = new Set();
+  let pids = [];
+  try { pids = fsImpl.readdirSync('/proc').filter(p => /^\d+$/.test(p)); } catch { return []; }
+  for (const pid of pids) {
+    try {
+      if (String(fsImpl.readFileSync(`/proc/${pid}/comm`, 'utf8')).trim() !== name) continue;
+      const m = /^Uid:\s+(\d+)/m.exec(String(fsImpl.readFileSync(`/proc/${pid}/status`, 'utf8')));
+      if (m) uids.add(Number(m[1]));
+    } catch { /* gone meanwhile */ }
+  }
+  return [...uids];
+}
+
+/**
+ * Does dnsmasq forward as `uid`? Only when EVERY process by that name runs as
+ * it. On OpenWrt not all of them are the forwarder: procd jails dnsmasq, and
+ * the jail (ujail, named after it) stays root as the parent of the real one,
+ * which drops to its own user (--user=dnsmasq) — what the QEMU job saw on 23.05
+ * and 24.10 (run 37067447979: a root "dnsmasq" whose child runs as 453). A
+ * dnsmasq that drops no privileges leaves every one of them root. None
+ * running: not shared.
+ */
+function forwardsAs(uids, uid) {
+  return uids.length > 0 && uids.every(u => u === uid);
+}
+
+/**
+ * argv for `ip`: this process's OWN DNS (UDP 53) to one in-country resolver by
+ * the main table, at the remote control's preference (8997, swept with it).
+ * `uidrange`: only this process's user — dnsmasq runs as its own (OpenWrt
+ * starts it `--user=dnsmasq`), so its upstream, and with it every LAN
+ * device's query, stays in the tunnel. `iif lo`: only what the router itself
+ * sends. Without it the rule would take the LAN out again: the kernel looks up
+ * a FORWARDED packet's route with uid 0 (no socket — root of the namespace),
+ * so `uidrange 0-0` alone matches every LAN device's DNS to these addresses.
+ */
+function ownDirectRuleArgs(verb, cidr, uid) {
+  const fam = cidr.includes(':') ? '-6' : '-4';
+  return [fam, 'rule', verb, 'pref', String(net.REMOTE_BYPASS_PREF), 'iif', 'lo', 'uidrange', `${uid}-${uid}`, 'to', cidr, 'ipproto', 'udp', 'dport', '53', 'lookup', 'main'];
+}
+
 class TunOpenwrt {
   constructor(opts = {}) {
     // The inner backend is built WITHOUT the caller's onUnexpectedExit: this
     // class reports sing-box's exit itself (watchInner), and a pass-through
     // would fire twice once TunSingbox reports its own exits.
-    const innerOpts = Object.assign({}, opts);
+    const innerOpts = Object.assign({}, opts, { composedBy: 'openwrt' });
     delete innerOpts.onUnexpectedExit;
     this.inner = opts.inner || new TunSingbox(innerOpts);
     this.onUnexpectedExit = opts.onUnexpectedExit || (() => {});
@@ -88,6 +134,9 @@ class TunOpenwrt {
     this.tmpDir = opts.tmpDir || os.tmpdir();
     this.verifyWaitMs = opts.verifyWaitMs || VERIFY_WAIT_MS;
     this.linkWaitMs = opts.linkWaitMs || LINK_GONE_WAIT_MS;
+    // who this service runs as, and who another process runs as (layOwnDirect)
+    this.uid = opts.uid != null ? opts.uid : (typeof process.getuid === 'function' ? process.getuid() : 0);
+    this.uidsOf = opts.uidsOf || ((name) => procUidsOf(name));
 
     this.backendId = 'openwrt';
     this.managesDns = true;
@@ -301,16 +350,48 @@ class TunOpenwrt {
       await this.verify();
     } catch (e) {
       await this.rollback();
+      // "the whole-network tunnel": «گیت‌وی» alone was a word the owner could
+      // not place (field report G1) — the router IS the gateway, this is what it does
       throw new Error(this.msg(
-        `گیت‌وی بالا نیامد (${step}): ${e.message}`,
-        `Gateway did not come up (${step}): ${e.message}`));
+        `تونل کل شبکه بالا نیامد (${step}): ${e.message}`,
+        `The whole-network tunnel did not come up (${step}): ${e.message}`));
     }
     this.active = true;
     this.excludeIps = this.inner.excludeIps;
     this.watchInner();
-    this.onLog(`Gateway up on ${this.lanIf}: every device behind the router goes through the tunnel; ${this.macs.length} excluded by MAC`, 'info');
+    this.onLog(`Whole-network tunnel (gateway) up on ${this.lanIf}: every device behind the router goes through the VPN; ${this.macs.length} excluded by MAC`, 'info');
     // the remote control's destinations, remembered while the gateway was down (setBypass)
     for (const c of this.bypassCidrs) await this.layBypass(c);
+    await this.layOwnDirect(o.ownDirect);
+  }
+
+  /**
+   * The in-country resolvers the core dials `direct` (`o.ownDirect`) are IN
+   * the whole-LAN tunnel since v1.16.1 — cut out of it, dnsmasq's upstream and
+   * every LAN device's query to them left by the ISP in plain text (field
+   * report D3). The router's OWN lookups through them must not need the
+   * tunnel, though: the relay link resolves its relay there, and is the way in
+   * when the VPN is broken (remote/agent.js). So this process's UDP 53 to
+   * them goes by the main table (ownDirectRuleArgs) — unless dnsmasq runs as
+   * the same user, when that rule would take its upstream out again: then
+   * nothing is laid, and the log says so. The core's own query needs none
+   * (its `direct` dial is bound to the WAN device), nor does a dnsmasq server
+   * line bound to it (cloudflared.js). Laid after verify, swept with every
+   * 8997 rule on the way down.
+   */
+  async layOwnDirect(list) {
+    const cidrs = net.normalizeCidrs(list);
+    if (!cidrs.length) return;
+    let shared = false;
+    try { shared = forwardsAs(this.uidsOf('dnsmasq'), this.uid); } catch { /* unknown: not shared */ }
+    if (shared) {
+      this.onLog(`dnsmasq runs as uid ${this.uid}, like this service — the router's own lookups through the in-country resolvers (${cidrs.join(', ')}) stay in the tunnel; a route for them would take dnsmasq's upstream out of it too`, 'warn');
+      return;
+    }
+    for (const c of cidrs) {
+      try { await this.run('ip', ownDirectRuleArgs('add', c, this.uid)); }
+      catch (e) { this.onLog(`Own DNS: could not route ${c} past the tunnel: ${e.message}`, 'error'); }
+    }
   }
 
   /**
@@ -391,4 +472,4 @@ class TunOpenwrt {
   }
 }
 
-module.exports = { TunOpenwrt, SINGBOX_TABLE };
+module.exports = { TunOpenwrt, SINGBOX_TABLE, ownDirectRuleArgs, procUidsOf, forwardsAs };
