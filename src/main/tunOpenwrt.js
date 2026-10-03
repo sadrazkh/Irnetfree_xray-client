@@ -62,6 +62,29 @@ const SINGBOX_TABLE = 2022;
 const VERIFY_WAIT_MS = 15000;
 /** How long the IRNetFree device gets to disappear after sing-box is told to stop. */
 const LINK_GONE_WAIT_MS = 5000;
+/**
+ * The gateway's UDP session lifetime (sing-box's tun `udp_timeout`, seconds).
+ * Every LAN UDP flow is a SOCKS UDP ASSOCIATE to the core — a TCP control
+ * connection and a UDP socket in sing-box, a listener per association in
+ * Xray ≥ 26.6 — held until the session expires: 5 minutes by default. The
+ * owner's AC-1304 (field log, v1.16.1): DoH through the exit timed out, the
+ * core answered nothing, dnsmasq's retries reused each query's port, and on
+ * sing-box 1.11/1.12 (the 23.05 and 24.10 feeds) a second packet resets a
+ * session to that default — so every retried query held two descriptors for
+ * five minutes, until sing-box hit "too many open files" and no device could
+ * browse. 120 s drains them in two.
+ *
+ * Not lower: RFC 4787 REQ-5 (a UDP mapping lives at least 2 minutes), and on
+ * the system stack the same timer ends a TCP connection that is idle both
+ * ways — 60 s would cut 60-second keepalives. Not a shorter DNS-only timeout
+ * either: sing-box ≥ 1.11 already gives port 53 ten seconds, a `route-options`
+ * rule exists only from 1.11 (an older sing-box refuses the whole config) and
+ * 1.11/1.12 drop it on the next packet anyway. The integer form is read as
+ * seconds by every sing-box from 1.7.8 to 1.14. The real fix is the
+ * descriptor limit (irnetfree.init: procd `limits nofile`); this keeps what
+ * piles up under it short-lived.
+ */
+const ROUTER_UDP_TIMEOUT_S = 120;
 
 function defaultWhich(name) {
   return String(process.env.PATH || '').split(path.delimiter).some(d => d && fs.existsSync(path.join(d, name)));
@@ -345,7 +368,8 @@ class TunOpenwrt {
       // (GSO on the tun — batches of segments per read/write — is something
       // sing-box ≥ 1.11 turns on by itself on Linux; the option that once asked
       // for it is refused by 1.12, which CI found out for us.)
-      await this.inner.start(socksPort, bypassAddrs, dnsServers, o);
+      // udpTimeout: the router's UDP session lifetime (ROUTER_UDP_TIMEOUT_S)
+      await this.inner.start(socksPort, bypassAddrs, dnsServers, Object.assign({}, o, { udpTimeout: ROUTER_UDP_TIMEOUT_S }));
       step = 'verify';
       await this.verify();
     } catch (e) {
@@ -472,4 +496,4 @@ class TunOpenwrt {
   }
 }
 
-module.exports = { TunOpenwrt, SINGBOX_TABLE, ownDirectRuleArgs, procUidsOf, forwardsAs };
+module.exports = { TunOpenwrt, SINGBOX_TABLE, ROUTER_UDP_TIMEOUT_S, ownDirectRuleArgs, procUidsOf, forwardsAs };
