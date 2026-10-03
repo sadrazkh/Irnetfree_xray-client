@@ -17,6 +17,8 @@
  *       on two devices (the router kept the desktop's rules; backups copy
  *       records verbatim) — or the twin record tested while connected, from a
  *       throwaway core — moves the session away, and the live tunnel stalls.
+ *       Its remedy depends on where the twin lives: one in a live subscription
+ *       comes back on the next refresh, so it is the one to keep.
  *   W4  a local network inside a private range advanced routing sends to a
  *       tunnel. The tunnel's routes are 0/0 minus its exclusions, so an on-link
  *       /24 (the Wi-Fi, a VirtualBox host-only net) is more specific and wins:
@@ -58,6 +60,12 @@ function wgFacts(s) {
   };
 }
 
+/** The subscription a record came with, while that subscription is still stored (its refresh can bring the record back). */
+function liveSubOf(s, subs) {
+  if (!s || !s.subId) return null;
+  return (Array.isArray(subs) ? subs : []).find(x => x && x.id === s.subId) || null;
+}
+
 /**
  * The Servers page's group a record sits in, so twin records with one name can
  * be told apart: its subscription's name, or — for the window to say in the
@@ -66,19 +74,27 @@ function wgFacts(s) {
  */
 function groupOf(s, subs) {
   if (!s || !s.subId) return { t: 'srv.manual' };
-  const sub = (Array.isArray(subs) ? subs : []).find(x => x && x.id === s.subId);
+  const sub = liveSubOf(s, subs);
   return sub && sub.name ? String(sub.name) : { t: 'srv.subGone' };
 }
 
 /**
  * Every WireGuard record the plan uses (`usedIds`, its server ids) whose
  * identity another stored record for the SAME server also holds:
- *   { id: 'wgSharedKey', name, other, group }           the same private key;
- *   { id: 'wgSharedAddress', name, other, group, address }  the same tunnel
- *                                                    address under another key.
+ *   { id: 'wgSharedKey', name, other, group, otherInSub, byHand }
+ *                                                    the same private key;
+ *   { id: 'wgSharedAddress', name, other, group, otherInSub, byHand, address }
+ *                                                    the same tunnel address under another key.
  * `other` is the other record's name and `group` its group (groupOf) — two
- * records can have one name. Another server is another session (no clash);
- * WARP's shared address is by design. One entry per pair.
+ * records can have one name. `otherInSub`: the other record belongs to a
+ * subscription that is still stored; `byHand`: the one the plan uses (`name`)
+ * was added by hand. Both together are the owner's case, and their own ids —
+ * 'wgSharedKeySub', 'wgSharedAddressSub' — because "delete the copy you do not
+ * use" does not last there: a record deleted from a subscription has no
+ * tombstone and the next refresh (hourly by default) brings it back, so the
+ * remedy is to keep the subscription's record, rebuild on it and delete the
+ * hand-added one. Another server is another session (no clash); WARP's shared
+ * address is by design. One entry per pair.
  */
 function sharedWgIdentities(usedIds, servers, subs = []) {
   const iterable = usedIds && typeof usedIds !== 'string' && typeof usedIds[Symbol.iterator] === 'function';
@@ -96,17 +112,19 @@ function sharedWgIdentities(usedIds, servers, subs = []) {
       if (said.has(pair)) continue;
       const fb = wgFacts(b);
       if (fb.server !== fa.server) continue;
-      const name = a.name || a.id, other = b.name || b.id, group = groupOf(b, subs);
+      const facts = { name: a.name || a.id, other: b.name || b.id, group: groupOf(b, subs), otherInSub: !!liveSubOf(b, subs), byHand: !a.subId };
+      // the twin comes back with its subscription's next refresh: keep it, delete the hand-added one
+      const comesBack = facts.otherInSub && facts.byHand;
       if (fa.key && fa.key === fb.key) {
         said.add(pair);
-        out.push({ id: 'wgSharedKey', name, other, group });
+        out.push(comesBack ? Object.assign({ id: 'wgSharedKeySub' }, facts) : Object.assign({ id: 'wgSharedKey' }, facts));
         continue;
       }
       if (fa.server === WARP_PEER || !fa.key || !fb.key) continue;
       const address = fa.addrs.find(x => fb.addrs.includes(x));
       if (address) {
         said.add(pair);
-        out.push({ id: 'wgSharedAddress', name, other, group, address });
+        out.push(Object.assign(comesBack ? { id: 'wgSharedAddressSub' } : { id: 'wgSharedAddress' }, facts, { address }));
       }
     }
   }
@@ -348,11 +366,18 @@ function noticeLine(n) {
   if (!n) return '';
   const lan = (x) => `${x.lan}${x.iface ? ` (${x.iface})` : ''}`;
   const move = 'Move that LAN, VM or host-only network to another subnet';
+  const sharedKey = () => `WireGuard ${n.name}: the same private key is also stored in another record, “${n.other}” in the group “${groupText(n.group)}” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls.`;
+  const sharedAddress = () => `WireGuard ${n.name}: its tunnel address ${n.address} is also stored in another record, “${n.other}” in the group “${groupText(n.group)}”, with another key for the same server — the server gives an address to one key only (unless it gives every device the same one), so one of the two may carry nothing.`;
+  const comesBack = 'A record in a subscription comes back on the subscription’s next update, so deleting that one does not last:';
   switch (n.id) {
     case 'wgSharedKey':
-      return `WireGuard ${n.name}: the same private key is also stored in another record, “${n.other}” in the group “${groupText(n.group)}” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls. Delete the copy you do not use, do not test it while connected, and get one peer per device from the server’s admin`;
+      return `${sharedKey()} Delete the copy you do not use, do not test it while connected, and get one peer per device from the server’s admin`;
+    case 'wgSharedKeySub':
+      return `${sharedKey()} ${comesBack} keep it, use it in place of this one (rebuild the chain on it), delete the copy added by hand and do not test it while connected — or remove the subscription if it should not be used`;
     case 'wgSharedAddress':
-      return `WireGuard ${n.name}: its tunnel address ${n.address} is also stored in another record, “${n.other}” in the group “${groupText(n.group)}”, with another key for the same server — the server gives an address to one key only (unless it gives every device the same one), so one of the two may carry nothing. Keep the record the server’s admin made for this device, delete the other, and do not test it while connected`;
+      return `${sharedAddress()} Keep the record the server’s admin made for this device, delete the other, and do not test it while connected`;
+    case 'wgSharedAddressSub':
+      return `${sharedAddress()} ${comesBack} if it is the one the server’s admin made for this device, keep it, use it in place of this one (rebuild the chain on it) and delete the copy added by hand; if not, remove the subscription. Do not test it while connected`;
     case 'lanInRange':
       return `Your local network ${lan(n)} overlaps ${n.address} — the ${n.key} of ${n.target}’s WireGuard — inside ${n.range} that advanced routing sends to ${n.target}: addresses in ${n.lan} stay on the LAN and never reach the tunnel. ${move}`;
     case 'rangeInLan':

@@ -38,7 +38,7 @@ test('W1: the plan’s WireGuard record shares its private key with another reco
   const vless = Object.assign(makeProxyServer({ type: 'socks', address: '192.0.2.10', port: 1080, name: 'hop' }), { id: 'hop' });
   const out = sharedWgIdentities(new Set(['hop', 'b47f']), [vless, chainWg, twin]);
   // a record added by hand: its group is the window's own "Added by hand" label, in the user's language
-  assert.deepEqual(out, [{ id: 'wgSharedKey', name: 'tes-wg', other: 'tes-wg (copy)', group: { t: 'srv.manual' } }]);
+  assert.deepEqual(out, [{ id: 'wgSharedKey', name: 'tes-wg', other: 'tes-wg (copy)', group: { t: 'srv.manual' }, otherInSub: false, byHand: true }]);
   const said = JSON.stringify(out) + noticeLine(out[0]);
   assert.ok(!said.includes(KEY_A), 'the private key is never in a notice or a log line');
   assert.equal(noticeLine(out[0]),
@@ -51,25 +51,58 @@ test('W1: twin records with ONE name are told apart — the other one’s group 
   const chainWg = wg('b47f', 'cobra.tes.ca');
   const twin = Object.assign(wg('fa69', 'cobra.tes.ca'), { subId: 'sub0554' });
   const out = sharedWgIdentities(['b47f'], [chainWg, twin], subs);
-  assert.deepEqual(out, [{ id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info' }]);
+  // the twin is in a live subscription and the used one was added by hand: the remedy differs (next test)
+  assert.deepEqual(out, [{ id: 'wgSharedKeySub', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info', otherInSub: true, byHand: true }]);
   assert.match(noticeLine(out[0]), /^WireGuard cobra\.tes\.ca: the same private key is also stored in another record, “cobra\.tes\.ca” in the group “tes-vpn-service\.platform\.irnetfree\.info” — /);
   // the other way round: the plan uses the subscription's copy, the twin was added by hand
   assert.deepEqual(sharedWgIdentities(['fa69'], [chainWg, twin], subs),
-    [{ id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: { t: 'srv.manual' } }]);
+    [{ id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: { t: 'srv.manual' }, otherInSub: false, byHand: false }]);
   // a subscription deleted while its records stayed: the window's "Deleted subscription" group
   const orphan = Object.assign(wg('o1', 'cobra.tes.ca'), { subId: 'gone' });
   const gone = sharedWgIdentities(['b47f'], [chainWg, orphan], subs);
-  assert.deepEqual(gone, [{ id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: { t: 'srv.subGone' } }]);
+  assert.deepEqual(gone, [{ id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: { t: 'srv.subGone' }, otherInSub: false, byHand: true }]);
   assert.match(noticeLine(gone[0]), /in the group “Deleted subscription” — /);
   // no subscription list at all (an old store): never a throw, the group is still said
   assert.deepEqual(sharedWgIdentities(['b47f'], [chainWg, twin], null)[0].group, { t: 'srv.subGone' });
+});
+
+test('W1: a twin in a live subscription comes back on its next update — keep that one, rebuild the chain on it and delete the hand-added copy (the owner’s laptop)', () => {
+  // the chain Tes Chain dials the hand-added cobra.tes.ca (b47f); its twin fa69 came with the
+  // subscription 'tes-vpn-service.platform.irnetfree.info' — "delete the copy you do not use" does
+  // not last there: no tombstone, and the refresh (on by default, hourly) brings it back
+  const subs = [{ id: 'sub0554', name: 'tes-vpn-service.platform.irnetfree.info' }];
+  const chainWg = wg('b47f', 'cobra.tes.ca');
+  const twin = Object.assign(wg('fa69', 'cobra.tes.ca'), { subId: 'sub0554' });
+  const [key] = sharedWgIdentities(['hop', 'b47f'], [chainWg, twin], subs);
+  assert.equal(key.id, 'wgSharedKeySub');
+  assert.equal(key.otherInSub, true, 'the twin belongs to a live subscription');
+  assert.equal(key.byHand, true, 'the record the plan uses was added by hand');
+  assert.equal(noticeLine(key),
+    'WireGuard cobra.tes.ca: the same private key is also stored in another record, “cobra.tes.ca” in the group “tes-vpn-service.platform.irnetfree.info” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls. A record in a subscription comes back on the subscription’s next update, so deleting that one does not last: keep it, use it in place of this one (rebuild the chain on it), delete the copy added by hand and do not test it while connected — or remove the subscription if it should not be used');
+  assert.doesNotMatch(noticeLine(key), /Delete the copy you do not use/);
+  // the same tunnel address under another key, the other record in the subscription
+  const other = Object.assign(wg('s2', 'reza-wire', { privateKey: KEY_B }), { subId: 'sub0554' });
+  const [addr] = sharedWgIdentities(['b47f'], [chainWg, other], subs);
+  assert.deepEqual(addr, { id: 'wgSharedAddressSub', name: 'cobra.tes.ca', other: 'reza-wire', group: 'tes-vpn-service.platform.irnetfree.info', otherInSub: true, byHand: true, address: '10.10.10.42' });
+  assert.equal(noticeLine(addr),
+    'WireGuard cobra.tes.ca: its tunnel address 10.10.10.42 is also stored in another record, “reza-wire” in the group “tes-vpn-service.platform.irnetfree.info”, with another key for the same server — the server gives an address to one key only (unless it gives every device the same one), so one of the two may carry nothing. A record in a subscription comes back on the subscription’s next update, so deleting that one does not last: if it is the one the server’s admin made for this device, keep it, use it in place of this one (rebuild the chain on it) and delete the copy added by hand; if not, remove the subscription. Do not test it while connected');
+  // two hand-added records: today's text, unchanged
+  const hand = sharedWgIdentities(['b47f'], [chainWg, wg('h2', 'cobra.tes.ca')], subs);
+  assert.equal(hand[0].id, 'wgSharedKey');
+  assert.match(noticeLine(hand[0]), /Delete the copy you do not use, do not test it while connected, and get one peer per device from the server’s admin$/);
+  // a twin whose subscription was deleted does not come back: today's text
+  assert.equal(sharedWgIdentities(['b47f'], [chainWg, Object.assign(wg('o1', 'cobra.tes.ca'), { subId: 'gone' })], subs)[0].id, 'wgSharedKey');
+  // the plan uses the subscription's record and the twin was added by hand: deleting the hand-added one lasts
+  const fromSub = sharedWgIdentities(['fa69'], [chainWg, twin], subs)[0];
+  assert.equal(fromSub.id, 'wgSharedKey');
+  assert.equal(fromSub.byHand, false);
 });
 
 test('W1: the same tunnel address under another key for the same server is said too — the address, never a key, and what to do', () => {
   const chainWg = wg('b47f', 'tes-wg');
   const reza = wg('r1', 'reza-wire', { privateKey: KEY_B });
   const out = sharedWgIdentities(['b47f'], [chainWg, reza]);
-  assert.deepEqual(out, [{ id: 'wgSharedAddress', name: 'tes-wg', other: 'reza-wire', group: { t: 'srv.manual' }, address: '10.10.10.42' }]);
+  assert.deepEqual(out, [{ id: 'wgSharedAddress', name: 'tes-wg', other: 'reza-wire', group: { t: 'srv.manual' }, otherInSub: false, byHand: true, address: '10.10.10.42' }]);
   const line = noticeLine(out[0]);
   assert.ok(!line.includes(KEY_A) && !line.includes(KEY_B));
   assert.equal(line,
@@ -87,7 +120,7 @@ test('W1: nothing to say where nothing is shared — another server, Cloudflare 
   assert.deepEqual(sharedWgIdentities(['w1'], [warp1, warp2]), []);
   // …but one WARP key stored twice is one device twice
   const warp1copy = wg('w3', 'warp-1 copy', { publicKey: WARP_PUB, privateKey: KEY_A, address: '172.16.0.2/32', endpoint: 'engage.cloudflareclient.com:2408' });
-  assert.deepEqual(sharedWgIdentities(['w1'], [warp1, warp1copy]), [{ id: 'wgSharedKey', name: 'warp-1', other: 'warp-1 copy', group: { t: 'srv.manual' } }]);
+  assert.deepEqual(sharedWgIdentities(['w1'], [warp1, warp1copy]), [{ id: 'wgSharedKey', name: 'warp-1', other: 'warp-1 copy', group: { t: 'srv.manual' }, otherInSub: false, byHand: true }]);
   // duplicates the plan does not touch are not this connect's business
   assert.deepEqual(sharedWgIdentities(['hop'], [chainWg, wg('fa69', 'tes-wg (copy)')]), []);
   // a healthy store: one record per identity

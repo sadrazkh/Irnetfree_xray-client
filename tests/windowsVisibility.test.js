@@ -116,11 +116,13 @@ test('W1/W4 at connect on the owner’s laptop: the twins are told apart by grou
   const h = hintsHarness({ servers, rules: OWNER_RULES, ifaces: Object.assign({}, WIFI, OUR_TUN) });
   const out = h.ctx.connectHints(plan);
   assert.deepEqual(plain(out), [
-    { id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info' },
-    { id: 'wgSharedAddress', name: 'cobra.tes.ca', other: 'reza-wire', group: { t: 'srv.manual' }, address: '10.10.10.42' }
+    // the twin is in a live subscription and the chain's copy was added by hand: deleting the twin would not last
+    { id: 'wgSharedKeySub', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info', otherInSub: true, byHand: true },
+    { id: 'wgSharedAddress', name: 'cobra.tes.ca', other: 'reza-wire', group: { t: 'srv.manual' }, otherInSub: false, byHand: true, address: '10.10.10.42' }
   ], 'no lanInRange for 192.168.1.0/24: nothing Tes Chain needs is in it');
   assert.deepEqual(h.logs.map((l) => l.level), ['warn', 'warn', 'info']);
   assert.match(h.logs[0].line, /^WireGuard cobra\.tes\.ca: the same private key is also stored in another record, “cobra\.tes\.ca” in the group “tes-vpn-service\.platform\.irnetfree\.info” — /);
+  assert.match(h.logs[0].line, /keep it, use it in place of this one \(rebuild the chain on it\), delete the copy added by hand/);
   assert.match(h.logs[1].line, /^WireGuard cobra\.tes\.ca: its tunnel address 10\.10\.10\.42 is also stored in another record, “reza-wire” in the group “Added by hand”/);
   assert.match(h.logs[2].line, /^Your local network 192\.168\.1\.0\/24 \(Wi-Fi\) lies inside 192\.168\.0\.0\/16 that advanced routing sends to Tes Chain; none of the addresses Tes Chain is known to need/);
   assert.ok(!JSON.stringify(h.logs).includes(KEY) && !JSON.stringify(out).includes(KEY), 'the private key is never said');
@@ -433,8 +435,8 @@ test('L2(c): the leak guard failed under a live tunnel — a toast and a line; t
 
 const NOTES = [
   { id: 'corpDnsOff', servers: '192.168.60.1' },
-  { id: 'wgSharedKey', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info' },
-  { id: 'wgSharedAddress', name: 'cobra.tes.ca', other: 'reza-wire', group: { t: 'srv.manual' }, address: '10.10.10.42' },
+  { id: 'wgSharedKeySub', name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info', otherInSub: true, byHand: true },
+  { id: 'wgSharedAddress', name: 'cobra.tes.ca', other: 'reza-wire', group: { t: 'srv.manual' }, otherInSub: false, byHand: true, address: '10.10.10.42' },
   { id: 'lanInRange', lan: '192.168.60.0/24', iface: 'Ethernet', range: '192.168.0.0/16', target: 'Tes Chain', address: '192.168.60.1', key: 'DNS' },
   { id: 'rangeInLan', lan: '192.168.1.0/24', iface: 'Wi-Fi', range: '192.168.1.20/32', target: 'tes-wg' }
 ];
@@ -450,7 +452,7 @@ test('W1/W3/W4: each notice is a toast, one after another — what to do in it; 
   assert.equal(t[1][2], 'Managed DNS is off, so your WireGuard’s resolver (192.168.60.1) is not used and names inside that network will not resolve — turn Settings → DNS → “DNS managed by the app” back on');
   // the window's English says what main's log line says, word for word — the remedy included
   for (let i = 1; i < notes.length; i++) assert.equal(t[i + 1][2], notices.noticeLine(notes[i]), notes[i].id);
-  assert.equal(t[2][2], 'WireGuard cobra.tes.ca: the same private key is also stored in another record, “cobra.tes.ca” in the group “tes-vpn-service.platform.irnetfree.info” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls. Delete the copy you do not use, do not test it while connected, and get one peer per device from the server’s admin');
+  assert.equal(t[2][2], 'WireGuard cobra.tes.ca: the same private key is also stored in another record, “cobra.tes.ca” in the group “tes-vpn-service.platform.irnetfree.info” — a WireGuard server accepts one device per key, so when both are used (on two devices, or that record tested while you are connected) one of them stalls. A record in a subscription comes back on the subscription’s next update, so deleting that one does not last: keep it, use it in place of this one (rebuild the chain on it), delete the copy added by hand and do not test it while connected — or remove the subscription if it should not be used');
   assert.match(t[3][2], /^WireGuard cobra\.tes\.ca: its tunnel address 10\.10\.10\.42 is also stored in another record, “reza-wire” in the group “Added by hand”, with another key/);
   assert.match(t[4][2], /^Your local network 192\.168\.60\.0\/24 \(Ethernet\) overlaps 192\.168\.60\.1 — the DNS of Tes Chain’s WireGuard — /);
   assert.ok(t.slice(1).every((c) => c[3] >= 12000), 'long enough to read a sentence and its remedy');
@@ -494,6 +496,22 @@ test('the remedy is in both languages: delete the twin, do not test it while con
   // twin records are told apart: "another record" and its group, in both languages
   assert.match(en('notice.wgSharedKey'), /another record, “\{other\}” in the group “\{group\}”/);
   assert.match(fa('notice.wgSharedKey'), /رکورد دیگری .*«\{other\}» در گروه «\{group\}»/);
+  // the twin in a live subscription (the owner's case): deleting it does not last — keep that one,
+  // rebuild the chain on it, delete the hand-added copy, or remove the subscription
+  for (const id of ['wgSharedKeySub', 'wgSharedAddressSub']) {
+    assert.match(en('notice.' + id), /A record in a subscription comes back on the subscription’s next update, so deleting that one does not last: /, id);
+    assert.match(en('notice.' + id), /use it in place of this one \(rebuild the chain on it\)/, id);
+    assert.match(en('notice.' + id), /delete the copy added by hand/, id);
+    assert.match(en('notice.' + id), /remove the subscription/, id);
+    assert.doesNotMatch(en('notice.' + id), /Delete the copy you do not use|delete the other/, id);
+    assert.match(fa('notice.' + id), /با به‌روزرسانی بعدیِ آن ساب برمی‌گردد/, id);
+    assert.match(fa('notice.' + id), /زنجیره را روی آن دوباره بساز/, id);
+    assert.match(fa('notice.' + id), /نسخهٔ دستی را پاک کن/, id);
+    assert.match(fa('notice.' + id), /ساب را حذف کن/, id);
+    // the window's English is main's log line, word for word
+    const n = { id, name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info', otherInSub: true, byHand: true, address: '10.10.10.42' };
+    assert.equal(windowHarness().ctx.noticeText(n), notices.noticeLine(n), id);
+  }
 });
 
 test('the toasts of one connect come one after another, not over each other', () => {
@@ -641,7 +659,7 @@ test('every notice main can send, and every line the window shows, is a string i
   assert.ok(made.includes('lanInBroadRange'));
   const fromMain = new Set(made.filter((id) => !notices.LOG_ONLY.has(id)));
   fromMain.add('corpDnsOff');
-  assert.deepEqual([...fromMain].sort(), ['corpDnsOff', 'lanInRange', 'rangeInLan', 'wgSharedAddress', 'wgSharedKey']);
+  assert.deepEqual([...fromMain].sort(), ['corpDnsOff', 'lanInRange', 'rangeInLan', 'wgSharedAddress', 'wgSharedAddressSub', 'wgSharedKey', 'wgSharedKeySub']);
   const ids = [...fromMain, 'proxyOnly', 'guardFailed', 'autostartStale', 'autostartFix', 'autostartFixed', 'autostartFixFailed'];
   const fa = i18nT('fa'), en = i18nT('en');
   const fields = (s) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(',');
