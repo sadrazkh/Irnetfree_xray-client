@@ -34,6 +34,15 @@ const state = {
   pendingReconnect: [],
   pendingDismissed: false, // user chose "later"; keep the banner out of the way
   wasReconnecting: false,  // main is rebuilding after a network change (toast on success)
+  // what the live connection did not do — proxy only, the leak guard — kept on
+  // Home under the state while it is up (connIssuesFrom / renderConnIssues)
+  connIssues: [],
+  // main's notices about this PC (W1/W3/W4) already toasted for this connection
+  noticesToasted: new Set(),
+  // …and those about the store itself (a WireGuard identity stored twice), toasted once per run
+  noticesOnce: new Set(),
+  // Windows: the logon task starts another copy of the app ({ task, current }) — checkAutostart
+  autostartStale: null,
   // lifetime traffic per config id — survives disconnect and restart
   usage: {},
   pings: {} // id -> { tcp, real }
@@ -299,6 +308,7 @@ function setLang(lang) {
   updateTunStatus();
   setModeWidget();
   refreshConnLabels();
+  renderAutostartBanner();
   renderSettingCards();   // option labels are translated strings
   // the chrome carries three strings that are not data-i18n nodes: the mode
   // badge, the path diagram's own labels and the inspector's on/off words
@@ -388,6 +398,9 @@ async function init() {
 
   // prompt to download required files on first run / when essentials are missing
   maybePromptMissingFiles();
+
+  // Windows: does the logon task start another copy of the app? (main reads it; a banner if so)
+  checkAutostart();
 }
 
 /* ----------------------------- core versions ----------------------------- */
@@ -772,6 +785,9 @@ async function applySettingsNow() {
 
 $('#pendingApply').onclick = () => applySettingsNow();
 $('#pendingDismiss').onclick = () => { state.pendingDismissed = true; renderPendingBanner(); };
+// Windows: the logon task starts another copy — point it at this one, or leave it for this run
+$('#autostartFix').onclick = () => repointAutostart();
+$('#autostartDismiss').onclick = () => { state.autostartStale = null; renderAutostartBanner(); };
 
 $('#btnSaveSettings').onclick = async () => {
   await saveSettings(readSettingsForm());
@@ -2051,6 +2067,7 @@ function setConnUI(stateStr, id) {
   startUptime(stateStr === 'connected');
   renderTrafficPath(stateStr);
   renderInspector();
+  renderConnIssues(stateStr);
   refreshConnectControls();
 }
 
@@ -2179,6 +2196,148 @@ function applyConnSnapshot(conn) {
  */
 function showErrorReason(reason) {
   if (state.flavor === 'openwrt' && reason) $('#connState').textContent = t('state.error') + ': ' + reason;
+}
+
+/* ------------- what the connection did not do, and what this PC does to it (v1.16.3) ------------- */
+
+/**
+ * The lines Home keeps under the connection state while it is up: failures of
+ * THIS connection that were only ever a log line — TUN was asked for and the
+ * tunnel did not come up (the connect went on proxy-only), or the tunnel came
+ * up and the leak guard did not (the adapters kept their own resolvers, so
+ * names can leave outside it). A guardError with no tunnel is the proxy mode's
+ * UDP block, not the guard: not said here.
+ */
+function connIssuesFrom(d) {
+  const out = [];
+  if (!d) return out;
+  if (d.tunError) out.push({ id: 'proxyOnly', reason: String(d.tunError) });
+  if (d.tun && d.guardError) out.push({ id: 'guardFailed', reason: String(d.guardError) });
+  return out;
+}
+
+/**
+ * A notice in the user's language: 'notice.<id>' with each {field} filled in
+ * from the notice, literally. A field main cannot say in the user's language —
+ * a record's group "added by hand" — comes as { t: <i18n key> } and is this
+ * window's own string.
+ */
+function noticeText(n) {
+  if (!n || !n.id) return '';
+  return t('notice.' + n.id).replace(/\{(\w+)\}/g, (m, k) => {
+    const v = n[k];
+    if (v == null) return m;
+    if (typeof v === 'object') return typeof v.t === 'string' ? t(v.t) : m;
+    return String(v);
+  });
+}
+
+/** Those lines: shown while connected, gone with the connection; repainted by setConnUI (a language switch too). */
+function renderConnIssues(stateStr) {
+  const box = $('#connIssues');
+  if (!box) return;
+  const list = stateStr === 'connected' ? (state.connIssues || []) : [];
+  box.textContent = '';
+  for (const n of list) {
+    const line = document.createElement('div');
+    line.className = 'conn-issue';
+    line.textContent = noticeText(n);
+    box.appendChild(line);
+  }
+  box.hidden = !list.length;
+}
+
+/**
+ * What a 'connected' status says in toasts, in order: the failures above (the
+ * tunError toast, now saying what it means), the missing geo files as before,
+ * then what main found (Windows only: a WireGuard identity stored twice, a LAN
+ * that holds what a routed tunnel needs, managed DNS off for a corporate
+ * resolver), each with what to do. A recovery that finds the same thing again
+ * never repeats it. This PC's findings come back with the next connection (its
+ * network may have changed); a WireGuard identity stored twice is a fact about
+ * the store, the same on every connect — said once per run.
+ */
+function connectToasts(d) {
+  const out = connIssuesFrom(d).map(n => ({ msg: noticeText(n), kind: 'err', ms: 9000 }));
+  if (d && d.geoWarn) out.push({ msg: d.geoWarn, kind: 'warn', ms: 2600 });
+  if (!state.noticesToasted) state.noticesToasted = new Set();
+  if (!state.noticesOnce) state.noticesOnce = new Set();
+  const listed = new Set();
+  for (const n of (d && Array.isArray(d.notices)) ? d.notices : []) {
+    if (!n || !n.id) continue;
+    const key = JSON.stringify(n);
+    // wgSharedKey / wgSharedAddress and their …Sub forms (the twin in a subscription): the store's, once per run
+    const said = /^wgShared(Key|Address)(Sub)?$/.test(n.id) ? state.noticesOnce : state.noticesToasted;
+    if (said.has(key) || listed.has(key)) continue;
+    listed.add(key);
+    // said once it is on screen: a series cut short (the connection went) leaves it to the next connection
+    out.push({ msg: noticeText(n), kind: 'warn', ms: 12000, shown: () => said.add(key) });
+  }
+  return out;
+}
+
+/**
+ * Toasts one after another: there is one toast element, and a second toast()
+ * replaces the first unread. One series at a time — a new one ends the last,
+ * and so does the connection going (cancelToastSeries); an item's `shown` runs
+ * once it is actually on screen.
+ */
+function toastSeries(items) {
+  cancelToastSeries();
+  const list = (items || []).filter(i => i && i.msg);
+  const next = () => {
+    toastSeries._t = null;
+    const it = list.shift();
+    if (!it) return;
+    toast(it.msg, it.kind, it.ms);
+    if (typeof it.shown === 'function') it.shown();
+    if (list.length) toastSeries._t = setTimeout(next, it.ms + 300);
+  };
+  next();
+}
+
+/** The rest of a series, not shown yet, goes with its connection (a disconnect, a switch, a rebuild). */
+function cancelToastSeries() {
+  clearTimeout(toastSeries._t);
+  toastSeries._t = null;
+}
+
+/* ------------- Windows: the logon task starts another copy (v1.16.3, L1) ------------- */
+
+/**
+ * Asked once the window has loaded — main only READS the task: a logon task
+ * that starts ANOTHER copy of the app (an old build from before the v1.14 DNS
+ * fix, a portable that was moved) gets a banner whose button points it at this
+ * one. Silent everywhere else: off Windows, on the router's page (its web api
+ * has no such call), and where the task is this copy, absent or unreadable.
+ */
+async function checkAutostart() {
+  if (state.platform !== 'win32' || !window.api.autostartCheck) return;
+  let r = null;
+  try { r = await window.api.autostartCheck(); } catch { return; }
+  state.autostartStale = (r && r.stale) ? { task: r.taskExe, current: r.currentExe } : null;
+  renderAutostartBanner();
+}
+
+function renderAutostartBanner() {
+  const banner = $('#autostartBanner');
+  if (!banner) return;
+  const s = state.autostartStale;
+  banner.hidden = !s;
+  if (s) $('#autostartBannerText').textContent = noticeText(Object.assign({ id: 'autostartStale' }, s));
+}
+
+/** The banner's button — the one write of this check, and only on this click. */
+async function repointAutostart() {
+  let r = null;
+  try { r = await window.api.autostartRepoint(); } catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
+  if (r && r.ok) {
+    state.autostartStale = null;
+    renderAutostartBanner();
+    toast(t('notice.autostartFixed'), 'ok');
+  } else {
+    toast(noticeText({ id: 'autostartFixFailed', error: (r && r.error) || '' }), 'err', 8000);
+  }
 }
 
 /** "Reconnecting… (attempt n)" / "Waiting for internet… (attempt n)" — the router's two in-between states. */
@@ -2446,6 +2605,14 @@ function failedKey(reason) {
   return DROP_REASONS.includes(reason) ? 'net.dropFailed' : 'net.failed';
 }
 window.api.onStatus((d) => {
+  // "Give my internet back" belongs to a give-up with the guard held, and to
+  // nothing after it: a reconnect that came back (or is being built) owns the
+  // guard again, and its button would put every adapter on the ISP's resolvers
+  // under a live tunnel. A failed teardown is no new state: it leaves it be.
+  const gb = $('#guardBanner');
+  if (gb && d.state !== 'cleanup-failed') gb.hidden = !(d.state === 'reconnect-failed' && d.guardHeld);
+  // the last connection's toasts not shown yet go with it ('connected' starts its own series)
+  if (d.state !== 'connected' && d.state !== 'cleanup-failed') cancelToastSeries();
   if (d.state === 'connected') {
     state.connected = true;
     state.connecting = false;
@@ -2455,6 +2622,8 @@ window.api.onStatus((d) => {
     // a fresh connect is built from the current settings — nothing is stale
     setPending(d.pendingReconnect || []);
     state.activeEngine = d.engine || '';
+    // what this connection did not do stays under the state while it is up (setConnUI paints it)
+    state.connIssues = connIssuesFrom(d);
     setConnUI('connected', d.serverId);
     // only say "reconnected" when we actually were recovering from a network change
     if (state.wasReconnecting) { toast(t('net.reconnected'), 'ok'); state.wasReconnecting = false; }
@@ -2463,12 +2632,12 @@ window.api.onStatus((d) => {
     renderServers();
     renderPicker();
     if (d.tunError) {
-      toast(d.tunError, 'err');
       updateAdminBtn(true);
     } else if (state.settings.tunMode && d.tun) {
       updateAdminBtn(false);
     }
-    if (d.geoWarn) toast(d.geoWarn, 'warn');
+    // proxy only / the leak guard, the geo files, main's notices about this PC — one after another
+    toastSeries(connectToasts(d));
     setTimeout(() => checkIp(3, true), 1200);
     // auto-measure TCP ping + real delay for the active config so the home
     // cards show real numbers (real delay = proof the config actually works)
@@ -2488,6 +2657,8 @@ window.api.onStatus((d) => {
     state.wasReconnecting = false;   // no live tunnel left to recover
     state.lan = null;
     state.activeEngine = '';
+    state.connIssues = [];
+    state.noticesToasted = new Set();   // the next connection says its notices again
     setPending([]);          // nothing live to be out of sync with
     setConnUI('disconnected');
     $('#statIp').textContent = '—';
@@ -2524,15 +2695,14 @@ window.api.onStatus((d) => {
     state.wasReconnecting = false;
     // The guard was HELD across every attempt so the ISP never answered a
     // lookup, and it is still holding. Nothing leaks, but nothing resolves
-    // either — say so and offer the way out, or a leak has been traded for
-    // a mystery.
-    const gb = $('#guardBanner');
-    if (gb) gb.hidden = !d.guardHeld;
+    // either — say so and offer the way out (#guardBanner, shown above when
+    // d.guardHeld), or a leak has been traded for a mystery.
     if (d.proxyUp) {
       // The tunnel itself came back and only TUN did not: xray is running and the
       // proxy ports work, so the red error state would be wrong. Stay connected
       // and say what is actually missing.
       state.connected = true;
+      state.connIssues = [{ id: 'proxyOnly', reason: d.tunError || '—' }];
       setConnUI('connected', state.activeServerId);
       toast(t('net.tunFailed'), 'warn', 8000);
       if (d.tunError) appendLog('Reconnect gave up on TUN: ' + d.tunError, 'warn');
@@ -2563,6 +2733,7 @@ window.api.onXrayStatus((d) => {
   // "disconnected" with a red toast here was the whole backoff's display (S4)
   if (d.state === 'stopped' && state.connected && !d.rebuilding) {
     state.connected = false;
+    cancelToastSeries();
     setConnUI('disconnected');
     renderPendingBanner();
     renderServers();
@@ -2643,13 +2814,19 @@ $('#guardRetry').onclick = async () => {
   $('#guardBanner').hidden = true;
   await doReconnect();
 };
-$('#guardRelease').onclick = async () => {
-  // Deliberate: puts the adapters' own resolvers back. From here on the machine
-  // resolves through its ISP again — which is why it takes an explicit click.
+/**
+ * The guard banner's "give my internet back". Deliberate: puts the adapters'
+ * own resolvers back, and from here on the machine resolves through its ISP
+ * again — which is why it takes an explicit click. Main refuses while a
+ * connection uses the guard (`refused`): said in the user's language.
+ */
+async function giveInternetBack() {
   const r = await window.api.releaseGuard();
   $('#guardBanner').hidden = true;
+  if (r && r.refused) return toast(t('guard.releaseRefused'), 'err');
   toast(r && r.ok === false ? (r.error || 'failed') : t('t.guardReleased'), r && r.ok === false ? 'err' : 'ok');
-};
+}
+$('#guardRelease').onclick = giveInternetBack;
 
 $('#killReconnect').onclick = async () => {
   const id = state.activeServerId || state.selectedServerId || (state.servers[0] && state.servers[0].id);

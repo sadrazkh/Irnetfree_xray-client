@@ -21,7 +21,7 @@ const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = requir
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
-const { TunSingbox } = require('./tunSingbox');
+const { TunSingbox, TUN_ADDR4 } = require('./tunSingbox');
 const { NativeMacTun } = require('./nativeMacTun');
 const { recoverMacNetwork } = require('./macRecovery');
 const { collectDiagnostics } = require('./connectionDiagnostics');
@@ -41,7 +41,8 @@ const { NetWatcher, fingerprint } = require('./netWatcher');
 const { DropBudget } = require('./dropBudget');
 const { isWebUrl, isAppPage } = require('./urlGuard');
 const { runElevatedRelaunch } = require('./relaunch');
-const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
+const { schtasksCreateArgs, schtasksDeleteArgs, schtasksQueryXmlArgs, taskExeFromXml, autostartStale, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
+const { sharedWgIdentities, localSubnets, lanOverlaps, targetNeeds, routeTargetName, noticeLine, noticeLevel, forWindow, needsTun } = require('./connectNotices');
 const { trayGroups, trayStopItem } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
@@ -360,6 +361,54 @@ function setAutostart(enabled) {
   // macOS ignores `args`: it opens hidden through its own setting (autostart.js).
   try { app.setLoginItemSettings(loginItemSettings(enabled, process.platform)); return Promise.resolve({ ok: true }); }
   catch (e) { return Promise.resolve({ ok: false, error: e.message }); }
+}
+
+/**
+ * Windows: does the logon task start ANOTHER copy of the app? It runs exactly
+ * the file it was registered with, so a PC can keep starting an old build — one
+ * from before the v1.14 Windows DNS fix — at every logon while this one sits
+ * beside it (windows-android-report L1). Asked by the window once it loads
+ * (autostart:check), never at launch: one READ of the task (`schtasks /Query
+ * /XML`), answered once per run. A packaged build only — a dev run's
+ * electron.exe is never the file a task should start. Resolves { stale,
+ * taskExe?, currentExe? }; any doubt is { stale: false } (autostartStale).
+ */
+let autostartChecked = null;
+function autostartCheck() {
+  if (process.platform !== 'win32' || !app.isPackaged) return Promise.resolve({ stale: false });
+  if (!autostartChecked) {
+    autostartChecked = new Promise((resolve) => {
+      execFile('schtasks', schtasksQueryXmlArgs(), { windowsHide: true, timeout: 15000 }, (err, so) => {
+        if (err) return resolve({ stale: false });   // no task (or not readable): nothing to say
+        const taskExe = taskExeFromXml(String(so || ''));
+        const currentExe = autostartExe();
+        if (!autostartStale(taskExe, currentExe, { same: sameFile })) return resolve({ stale: false });
+        send('log', { line: `The logon task IRNetFree starts ${taskExe}, not this copy (${currentExe}) — at the next logon Windows runs that build instead of this one`, level: 'warn' });
+        resolve({ stale: true, taskExe, currentExe });
+      });
+    });
+  }
+  return autostartChecked;
+}
+
+/** Two paths that name one file (an 8.3 name, a junction); false when either is not there. */
+function sameFile(a, b) {
+  try { return fs.realpathSync.native(a).toLowerCase() === fs.realpathSync.native(b).toLowerCase(); } catch { return false; }
+}
+
+/**
+ * The banner's button: register the logon task for THIS copy, through the
+ * same helper the "launch at login" switch uses — the only write of this
+ * round, and only on the owner's click. The next check reads the task again.
+ */
+async function autostartRepoint() {
+  if (process.platform !== 'win32') return { ok: false, error: 'windows only' };
+  const r = await setAutostart(true);
+  autostartChecked = null;
+  send('log', r.ok
+    ? { line: `The logon task now starts this copy (${autostartExe()})`, level: 'info' }
+    : { line: 'Could not point the logon task at this copy: ' + r.error, level: 'error' });
+  return r;
 }
 
 /* ----------------------------- LAN sharing ----------------------------- */
@@ -1044,7 +1093,24 @@ function doConnect(serverId, opts) {
   connectsInFlight.add(p);
   const settled = () => connectsInFlight.delete(p);
   p.then(settled, settled);
+  // after `settled` (registered first): this connect is no longer "in flight"
+  if (!(opts && opts.recovery)) p.catch(() => releaseGuardAfterFailedConnect().catch(() => {}));
   return p;
+}
+
+/**
+ * A connect that failed before any tunnel came up (a refused config, the core
+ * not starting): a guard still held for a reconnect that was given up points
+ * every adapter at a resolver nothing answers, and the window's "give my
+ * internet back" banner went away with this connect's 'connecting'. Given back
+ * here, as a TUN that fails to start does — unless a tunnel is up or another
+ * connect is being built (the guard is theirs). A recovery keeps its hold.
+ */
+async function releaseGuardAfterFailedConnect() {
+  if (guardInUse()) return null;
+  const r = await releaseStrandedGuard(leakGuard);
+  if (r && r.released) send('log', { line: 'The connect failed before a tunnel came up — the adapters’ DNS, held for the last connection, is theirs again', level: 'info' });
+  return r;
 }
 
 /**
@@ -1168,18 +1234,23 @@ async function connectOnce(serverId, opts = {}) {
   livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
 
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+  // What the window is told besides the log, on Windows (v1.16.3): each one a
+  // toast once this connect stands. Said only — nothing below reads them.
+  const notices = [];
   // Managed DNS off drops every resolver a routing target brings — a
   // corporate WireGuard's own DNS above all. The names inside that network
   // then never resolve, and nothing else in the log says why.
   if (settings.dnsManaged === false) {
-    const corp = wgResolverAddresses(plan);
+    const corp = routedWgResolvers(plan);
     if (corp.length) {
       send('log', {
         line: `Managed DNS is off, so the resolver of your WireGuard (${corp.join(', ')}) is not in this config and names inside that network will not resolve — turn Settings → DNS → "DNS managed by the app" back on`,
         level: 'warn'
       });
+      if (process.platform === 'win32') notices.push({ id: 'corpDnsOff', servers: corp.join(', ') });
     }
   }
+  if (process.platform === 'win32') notices.push(...connectHints(plan, { tun: !!settings.tunMode }));
 
   send('status', { state: 'connecting', serverId });
 
@@ -1564,7 +1635,8 @@ async function connectOnce(serverId, opts = {}) {
   updateOverlay('on');
   send('status', {
     state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
-    tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys()
+    tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys(),
+    notices: tun.active ? notices : notices.filter((n) => !needsTun(n))
   });
   // `tunError` is the one failure this function does NOT throw for: TUN is a
   // best-effort upgrade and we stay connected proxy-only without it. Callers
@@ -1607,6 +1679,50 @@ function planServerIds(plan) {
     default: break;
   }
   return ids;
+}
+
+/**
+ * The resolvers of the WireGuard records this plan dials (planServerIds), for
+ * the "managed DNS is off" warning. An advanced or pool plan carries EVERY
+ * stored server in serversById, and wgResolverAddresses reads them all — so a
+ * corporate WireGuard that no rule routes to was warned about on every connect.
+ * A single server and a chain are what they dial, as before.
+ */
+function routedWgResolvers(plan) {
+  if (!plan || (plan.mode !== 'advanced' && plan.mode !== 'pool')) return plan ? wgResolverAddresses(plan) : [];
+  const byId = plan.serversById || {};
+  return wgResolverAddresses({ mode: 'chain', chain: [...planServerIds(plan)].map((id) => byId[id]).filter(Boolean) });
+}
+
+/**
+ * Windows (v1.16.3): what this PC does to a plan that the plan itself cannot
+ * show (connectNotices.js) — a WireGuard identity the plan uses that another
+ * stored record also holds (W1), and a local network inside a private range
+ * advanced routing sends to a tunnel (W4). Each is a line here; those that can
+ * be the cause (forWindow) also go, through the 'connected' status, to the
+ * window as a toast — a LAN inside a broad range that holds nothing the target
+ * needs stays an info line. W4 is about the TUN's routes, so it is asked only
+ * of a connect that asks for the tunnel (`tun`); proxy mode sends private
+ * ranges around the proxy anyway. Nothing is changed. A hint must never cost a
+ * connect: whatever goes wrong in here is swallowed.
+ */
+function connectHints(plan, { tun = false } = {}) {
+  const out = [];
+  try {
+    const found = sharedWgIdentities(planServerIds(plan), store.get('servers', []), store.get('subscriptions', []));
+    if (tun && plan && plan.mode === 'advanced') {
+      // our own adapters (an earlier tunnel still up on a server switch) are not "your local network"
+      const own = [TUN_LOCAL_IP, String(TUN_ADDR4).split('/')[0]];
+      const lans = localSubnets(os.networkInterfaces(), (name, address) => isOwnTunInterface(name) || own.includes(address));
+      const chains = getChains();
+      found.push(...lanOverlaps(lans, getSettings().routeRules, (tg) => routeTargetName(tg, plan, chains), (tg) => targetNeeds(tg, plan)));
+    }
+    for (const n of found) {
+      send('log', { line: noticeLine(n), level: noticeLevel(n) });
+      if (forWindow(n)) out.push(n);
+    }
+  } catch { /* said nothing; the connect goes on exactly as before */ }
+  return out;
 }
 
 /**
@@ -2006,6 +2122,41 @@ function reportReconnectFailed(reason, res) {
   }
   send('status', { state: 'reconnect-failed', reason, proxyUp, guardHeld, tunError: (res && res.tunError) || null });
   notify('IRNetFree', isEn() ? 'Could not reconnect — open the app' : 'اتصال مجدد ناموفق — برنامه را باز کنید');
+}
+
+/**
+ * Is the guard's override some connection's own DNS right now? The core
+ * running over a live TUN (the guard engaged for it, or held over its
+ * rebuild), or a connect in flight — which holds, or is about to take, its own
+ * guard receipt. Never true after a give-up: every give-up leaves either no
+ * core or no tunnel (the proxy up, only TUN missing).
+ */
+function guardInUse() {
+  return connectsInFlight.size > 0 || !!(xray && xray.running && tun && tun.active);
+}
+
+/**
+ * guard:release — the banner's "give my internet back" after a give-up with
+ * the guard held. A release without a receipt is unconditional (the user's own
+ * intent), so asked while a connection uses the guard it would put every
+ * physical adapter back on the ISP's resolvers under a tunnel that carries the
+ * traffic: a DNS leak with the window saying connected (the banner used to
+ * outlive its give-up and offer exactly that). Refused then — a disconnect
+ * gives the resolvers back — and otherwise as it always was.
+ */
+async function releaseGuardOnRequest() {
+  if (guardInUse()) {
+    send('log', { line: 'Not giving the adapters their own DNS back: a connection is up (or being built) and the leak guard belongs to it — disconnect to restore them', level: 'warn' });
+    return {
+      ok: false,
+      refused: 'connected',
+      error: isEn()
+        ? 'A connection is up and the adapters’ DNS is its own — disconnect to give it back'
+        : 'اتصال برقرار است و DNS آداپتورها مال همین اتصال است — برای برگرداندنش قطع کن'
+    };
+  }
+  try { if (leakGuard) await leakGuard.release(); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
 }
 
 /** The recovery reasons that are a drop of the connection, not the network moving. */
@@ -2797,6 +2948,9 @@ function registerIpc() {
     else send('log', { line: 'Refused to open a link that is not http(s): ' + String(url).slice(0, 100), level: 'warn' });
   });
   ipcMain.handle('open:dataDir', () => { shell.openPath(dataDir()); return dataDir(); });
+  // Windows: which copy the logon task starts (a read), and the banner's fix (the owner's click)
+  ipcMain.handle('autostart:check', () => autostartCheck());
+  ipcMain.handle('autostart:repoint', () => autostartRepoint());
 
   // runtime components (xray / tun2socks / wintun / geo files)
   ipcMain.handle('assets:status', () => assetStatus());
@@ -2991,11 +3145,9 @@ function registerIpc() {
     }
   });
   // The way out when a reconnect has been given up on and the guard is still
-  // holding: puts the adapters' own resolvers back, deliberately, on request.
-  ipcMain.handle('guard:release', async () => {
-    try { if (leakGuard) await leakGuard.release(); return { ok: true }; }
-    catch (e) { return { ok: false, error: e.message }; }
-  });
+  // holding: puts the adapters' own resolvers back, deliberately, on request —
+  // never under a live tunnel (releaseGuardOnRequest).
+  ipcMain.handle('guard:release', () => releaseGuardOnRequest());
 
   // Delete the files the app downloaded into the writable bin (userData/bin).
   // Does NOT touch a user-located xray (store.xrayPath) or the bundled bin.

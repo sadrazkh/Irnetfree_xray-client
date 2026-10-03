@@ -77,6 +77,9 @@ contextBridge.exposeInMainWorld('api', {
 
   // relaunch elevated (Windows) for TUN mode
   relaunchAdmin: () => ipcRenderer.invoke('app:relaunchAdmin'),
+  // Windows: does the logon task start another copy? (a read) / point it at this one (the banner's button)
+  autostartCheck: () => ipcRenderer.invoke('autostart:check'),
+  autostartRepoint: () => ipcRenderer.invoke('autostart:repoint'),
 
   // runtime components (download / integrate / update / remove)
   assetsStatus: () => ipcRenderer.invoke('assets:status'),

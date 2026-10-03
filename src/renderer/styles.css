@@ -765,10 +765,16 @@ button.ins-row:hover .ins-label { color: var(--accentInk); }
 .mode-option.disabled { opacity: .55; }
 .mode-option.disabled:hover { border-color: var(--softline); }
 
+/* Centred on the physical left edge, like the banner stack: translateX is
+   always physical, and a logical inset-inline-start: 50% is the RIGHT edge in
+   Persian — a long toast then started half its width off the window's left
+   side (measured: left -270 px at 1080x720, -225 px at 900x600;
+   tests/bannerLayout.test.js renders it). */
 .toast {
   position: fixed;
   inset-block-end: 22px;
-  inset-inline-start: 50%;
+  left: 50%;
+  right: auto;
   transform: translateX(-50%) translateY(12px);
   z-index: 200;
   padding: 11px 18px;
@@ -789,34 +795,60 @@ button.ins-row:hover .ins-label { color: var(--accentInk); }
 .toast.err { border-color: var(--danger); color: var(--danger); }
 .toast.warn { border-color: var(--warn); color: var(--warn); }
 /* A toast with a button (toastAction): clickable only while it shows, and the
-   message and its action sit on one line. Centred on the physical left edge:
-   the logical inset above is the right edge in Persian, and with translateX
-   (always physical) a long toast started off the window's left side (measured
-   at 1240 px, RTL: left edge at -177 px). */
+   message and its action sit on one line. Centred like every toast (above). */
 .toast.has-action.show { pointer-events: auto; }
 .toast.has-action {
   display: flex;
   align-items: center;
   gap: 12px;
   text-align: start;
-  inset-inline-start: auto;
-  left: 50%;
 }
 .toast-action { flex: 0 0 auto; }
 
+/* The banners (kill switch, held DNS, unapplied settings, the logon task) float
+   in one stack over the window's foot, centred, above the toast's resting
+   place. They must be fixed: html/body never scroll and .layout fills the
+   window, so a banner in the flow after it lies just below the screen — where
+   all four sat, unseen, from the 52ac922 redesign to v1.16.3
+   (tests/bannerLayout.test.js renders it). Shown together they stack in markup
+   order; the stack itself takes no clicks, so the empty stack is not a dead
+   zone over the page. Over the pages and their menus, under the modals and the
+   toast. */
+.banner-stack {
+  position: fixed;
+  left: 50%;
+  bottom: 70px;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: max-content;
+  max-width: min(640px, calc(100vw - 24px));
+  max-height: calc(100vh - var(--tbh) - 86px);
+  overflow-y: auto;
+  pointer-events: none;
+}
+.banner-stack > * { pointer-events: auto; }
 .kill-banner, .pending-banner {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px 12px;
   padding: 12px 15px;
   border-radius: var(--r5);
-  margin-bottom: 14px;
   font-size: 12px;
+  box-shadow: var(--shadow);
 }
-.kill-banner { background: var(--dangerSoft); border: 1px solid var(--danger); color: var(--danger); }
-.pending-banner { background: var(--accentSoft); border: 1px solid var(--accentLine); color: var(--accentInk); }
-.kill-banner-text, .pending-banner-text { flex: 1; line-height: 1.7; }
-.kill-banner-actions, .pending-banner-actions { display: flex; gap: 8px; }
+/* the soft tints are translucent: over the page they sit on the opaque panel */
+.kill-banner { background: linear-gradient(var(--dangerSoft), var(--dangerSoft)), var(--panel); border: 1px solid var(--danger); color: var(--danger); }
+.pending-banner { background: linear-gradient(var(--accentSoft), var(--accentSoft)), var(--panel); border: 1px solid var(--accentLine); color: var(--accentInk); }
+/* a long path (the logon-task banner names two) wraps instead of running off the side */
+.kill-banner-text, .pending-banner-text { flex: 1 1 auto; min-width: 0; line-height: 1.7; overflow-wrap: anywhere; }
+.kill-banner-actions, .pending-banner-actions { display: flex; gap: 8px; flex: 0 0 auto; margin-inline-start: auto; }
+/* a phone (the router's page): the buttons go under the text rather than squeeze it */
+@media (max-width: 560px) {
+  .kill-banner, .pending-banner { flex-wrap: wrap; }
+}
 
 /* ----------------------------- simple / advanced ----------------------------- */
 
