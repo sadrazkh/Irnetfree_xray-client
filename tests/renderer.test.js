@@ -498,7 +498,10 @@ function snapshotHarness(flavor = 'openwrt') {
     window: { api: {} }
   });
   vm.runInContext(['var uptimeTimer = null;', 'var uptimeFrom = 0;', fnSource('startUptime'), fnSource('attemptText'),
-    fnSource('applyKillSwitchState'), fnSource('applyConnSnapshot'), handlerSource('onStatus'), handlerSource('onXrayStatus')].join('\n'), ctx);
+    fnSource('applyKillSwitchState'), fnSource('applyConnSnapshot'),
+    // what a 'connected' status says besides the state (v1.16.3, tests/windowsVisibility.test.js)
+    fnSource('connIssuesFrom'), fnSource('noticeText'), fnSource('connectToasts'), fnSource('toastSeries'),
+    handlerSource('onStatus'), handlerSource('onXrayStatus')].join('\n'), ctx);
   return { ctx, calls, el };
 }
 
