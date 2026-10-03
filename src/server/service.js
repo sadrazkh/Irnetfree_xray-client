@@ -1221,6 +1221,11 @@ function createService(opts = {}) {
     if (!config) {
       config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
     }
+    // The router's DNS block (v1.16.2, dnsBuilder.routerDnsTuning): 8 s per
+    // DoH server, the DoH servers raced, a known name answered from cache
+    // through an outage of the exit's DoH. Here, after buildConfig, so the
+    // connect and every rebuild get it and a desktop's config never does.
+    if (OPENWRT && engineFormat(engine) === 'xray' && config.dns) config.dns = routerDnsTuning(config.dns);
     return { plan, label, entryAddrs, config, geoWarn, engine };
   }
 

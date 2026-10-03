@@ -308,6 +308,56 @@ function buildDnsPlan(settings, opts) {
   };
 }
 
+/** The router's DoH budget per query (xray's default is 4 s): a cold connection through the exit needs room. */
+const ROUTER_DOH_TIMEOUT_MS = 8000;
+/** How long an expired answer may still be served while it is refreshed (a day); finite, so xray's cleanup keeps running. */
+const ROUTER_SERVE_EXPIRED_TTL = 86400;
+
+/**
+ * The router's DNS block (v1.16.2) — applied by service.js to a router's
+ * xray-format config only, after buildConfig; never part of a desktop's.
+ *
+ * The owner's AC-1304 logged "app/dns: failed to retrieve response for
+ * google.com. > Post https://1.1.1.1/dns-query: context deadline exceeded"
+ * for name after name. Xray's DoH client dials its one connection per server
+ * through the exit — on that router VLESS over WebSocket via Cloudflare, with
+ * a second TLS to 1.1.1.1 inside — on the context of the query that needed it:
+ * 4 s for all of it on a lossy path out of Iran. The fallback (1.0.0.1) is a
+ * second cold connection, asked only once the first has timed out; and a
+ * failed lookup sends the LAN no answer at all, so every client retries.
+ *
+ *   - `timeoutMs` 8000 on every DoH server: room for the cold dial. A retry
+ *     joins the lookup in flight (xray deduplicates by name) and finds it
+ *     cached.
+ *   - `enableParallelQuery`: the DoH servers race (both connections stay
+ *     warm), the fallback is no longer a cold 4 s after the first. The
+ *     in-country pair is its own group, asked first for .ir names as before —
+ *     only when every server a public name can fall back to is a DoH URL: a
+ *     plain resolver, or a corporate WireGuard's without search domains, would
+ *     otherwise be asked EVERY name, through its own tunnel (dnsBuilder above:
+ *     "public names never travel through the tunnel to the company").
+ *   - `serveStale` with a day's `serveExpiredTTL`: a name the router knew is
+ *     answered at once (TTL 1) during an outage of the exit's DoH and refreshed
+ *     behind it — not "no answer" for the whole house.
+ *
+ * Xray 24.12/25.1 (the 23.05/24.10 feeds' cores) read no such keys and ignore
+ * them (plain JSON decoding); the object form `{ address: <DoH URL> }` is read
+ * by every core as the string form is. Returns a new object; anything without
+ * a server list comes back as it was.
+ */
+function routerDnsTuning(dns) {
+  if (!dns || !Array.isArray(dns.servers)) return dns;
+  const isDoh = (s) => typeof s === 'string' && isDohUrl(s);
+  const servers = dns.servers.map(s => (isDoh(s) ? { address: s, timeoutMs: ROUTER_DOH_TIMEOUT_MS } : s));
+  // every server a name can fall back to (no skipFallback) is a DoH URL of the remote list
+  const raceSafe = dns.servers.every(s => isDoh(s) || (s && typeof s === 'object' && s.skipFallback === true));
+  const out = Object.assign({}, dns, { servers });
+  if (raceSafe) out.enableParallelQuery = true;
+  out.serveStale = true;
+  out.serveExpiredTTL = ROUTER_SERVE_EXPIRED_TTL;
+  return out;
+}
+
 /**
  * What the TUN adapter's DNS servers should be. Managed, with a peer to hand
  * the queries to: the tunnel's own address — every query then enters the TUN
@@ -359,6 +409,6 @@ function guardPeers(adapterDns, tunnel) {
 }
 
 module.exports = {
-  buildDnsPlan, adapterDnsServers, guardPeers, isDohUrl, resolverIp, resolverPort,
-  DNS_DEFAULT_REMOTE, DNS_DEFAULT_DIRECT_IR, DNS_DEFAULT_DIRECT_CN, DNS_TAG, HIJACK_TAG
+  buildDnsPlan, adapterDnsServers, guardPeers, isDohUrl, resolverIp, resolverPort, routerDnsTuning,
+  DNS_DEFAULT_REMOTE, DNS_DEFAULT_DIRECT_IR, DNS_DEFAULT_DIRECT_CN, DNS_TAG, HIJACK_TAG, ROUTER_DOH_TIMEOUT_MS, ROUTER_SERVE_EXPIRED_TTL
 };
