@@ -40,6 +40,7 @@ const ENGINES = {
     id: 'sing-box',
     label: 'sing-box (fake ClientHello / uTLS / fragment)',
     format: 'sing-box',                               // needs the sing-box translator
+    repo: 'SagerNet/sing-box',
     exe: { win32: 'sing-box.exe', default: 'sing-box' },
     runArgs: (cfg) => ['run', '-c', cfg],
     testArgs: (cfg) => ['check', '-c', cfg]
