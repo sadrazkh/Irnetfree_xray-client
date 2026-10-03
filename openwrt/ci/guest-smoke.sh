@@ -153,10 +153,12 @@ else
 		|| { echo "status claims installed without the binary"; exit 1; }
 fi
 say "an upstream: a SOCKS server in this guest, bound to the LAN device so it cannot loop into the tunnel"
+# 198.51.100.10 alone goes to a sink on loopback (the v1.16.2 flood holds TCP connections open there), and it
+# may open 65536 files: that flood's 2400 connections take two each here too, past the kernel's 4096
 cat > /tmp/upstream.json <<'EOF'
-{"log":{"level":"warn"},"inbounds":[{"type":"socks","tag":"in","listen":"192.168.1.1","listen_port":1081}],"outbounds":[{"type":"direct","tag":"out","bind_interface":"br-lan"}]}
+{"log":{"level":"warn"},"inbounds":[{"type":"socks","tag":"in","listen":"192.168.1.1","listen_port":1081}],"outbounds":[{"type":"direct","tag":"out","bind_interface":"br-lan"},{"type":"direct","tag":"sink"}],"route":{"rules":[{"ip_cidr":["198.51.100.10/32"],"action":"route","outbound":"sink","override_address":"127.0.0.1","override_port":18090}],"final":"out"}}
 EOF
-sing-box run -c /tmp/upstream.json > /tmp/upstream.log 2>&1 &
+( ulimit -H -n 65536 && ulimit -S -n 65536 && exec sing-box run -c /tmp/upstream.json ) > /tmp/upstream.log 2>&1 &
 i=0
 until netstat -tln 2>/dev/null | grep -q ':1081 '; do
 	i=$((i+1))
@@ -1078,12 +1080,15 @@ for f in $D3_GEO; do rm -f "/etc/irnetfree/bin/$f"; done
 # limits procd now gives node, sing-box and xray (65536, from irnetfree.init),
 # the gateway's UDP session lifetime (udp_timeout 120) and the core's DNS
 # block; then a DNS flood from a LAN-side namespace through dnsmasq (each
-# upstream query a new port — a new UDP session in sing-box) and a few hundred
-# UDP flows to distinct ports, with sing-box's and xray's open files sampled
-# every second; the flood drained by the 120 s lifetime; and the owner's very
-# failure — the DoH black-holed, every name asked three times — with names
-# resolving through the tunnel again once it is back. The router is
-# disconnected here (D3 ends so).
+# upstream query a new port — a new UDP session in sing-box), 2400 TCP
+# connections from the LAN held open at once — past the 4096 open files
+# v1.16.1's cores had, in sing-box and in xray, so "no too many open files"
+# is a check that the old limit would fail — and a few hundred UDP flows to
+# distinct ports, with sing-box's and xray's open files sampled every second;
+# the UDP flows drained by the 120 s lifetime; and the owner's very failure —
+# the DoH black-holed, every name asked three times — with names resolving
+# through the tunnel again once it is back. The router is disconnected here
+# (D3 ends so).
 # ===========================================================================
 say "v1.16.2: connect; node, sing-box and xray have 65536 open files (procd limits), the gateway's UDP sessions last 120 s, the core runs the router's DNS block"
 fdn() { ls "/proc/$1/fd" 2>/dev/null | wc -l; }
@@ -1182,6 +1187,46 @@ const ask = (server, name, tries, gapMs) => new Promise((resolve) => {
       if (i % 50 === 49) await sleep(100);
     }
     console.log('FLOOD UDP ' + JSON.stringify({ flows: count, to: target + ':' + base + '-' + (base + count - 1) }));
+  } else if (mode === 'tcp') {
+    // <count> connections, <wave> at a time; each counts once the sink's echo came back through the whole chain
+    // (sing-box, xray, the upstream). All are held until <release> exists, a byte every 40 s on each (sing-box's
+    // TUN forgets a TCP mapping silent for its udp_timeout), then closed together.
+    const net = require('net');
+    const fs = require('fs');
+    const target = a[0], port = Number(a[1]), count = Number(a[2]), wave = Number(a[3]), release = a[4];
+    const r = { conns: count, echoed: 0, failed: 0, closedEarly: 0, seconds: 0 };
+    const held = [];
+    const open = () => new Promise((resolve) => {
+      const s = net.connect(port, target);
+      let done = false;
+      const finish = (ok) => { if (done) return; done = true; clearTimeout(timer); if (ok) { held.push(s); r.echoed++; } else { r.failed++; s.destroy(); } resolve(); };
+      const timer = setTimeout(() => finish(false), 60000);
+      s.on('connect', () => s.write('irnf-hold\n'));
+      s.once('data', () => finish(true));
+      s.on('data', () => {});
+      s.on('error', () => finish(false));
+      s.on('close', () => { if (!done) finish(false); else s.irnfClosed = true; });
+    });
+    const t0 = Date.now();
+    const keep = setInterval(() => { for (const s of held) if (!s.irnfClosed) s.write('.'); }, 40000);
+    for (let i = 0; i < count; i += wave) {
+      const batch = [];
+      for (let j = i; j < Math.min(count, i + wave); j++) batch.push(open());
+      await Promise.all(batch);
+    }
+    r.seconds = Math.round((Date.now() - t0) / 1000);
+    console.log('FLOOD TCP HELD ' + JSON.stringify(r));
+    const until = Date.now() + 300000;
+    while (!fs.existsSync(release) && Date.now() < until) await sleep(200);
+    clearInterval(keep);
+    r.closedEarly = held.filter((s) => s.irnfClosed).length;
+    for (const s of held) s.destroy();
+    console.log('FLOOD TCP ' + JSON.stringify(r));
+  } else if (mode === 'sink') {
+    // on the router, behind the upstream: echoes what it gets and keeps every connection until it is killed
+    const net = require('net');
+    net.createServer((s) => { s.on('data', (d) => s.write(d)); s.on('error', () => {}); })
+      .listen(Number(a[0]), '127.0.0.1', () => console.log('SINK listening on 127.0.0.1:' + a[0]));
   }
 })();
 EOF
@@ -1205,19 +1250,73 @@ resolves() {
 	echo "$1 from the LAN through dnsmasq and the tunnel: $(echo "$out" | sed -n '/^Name:/,$p' | grep '^Address' | head -n 2 | tr '\n' ' ')"
 }
 
-say "v1.16.2: 1500 names nobody asked before through dnsmasq (100 at a time), then 300 UDP flows to distinct ports — sing-box's and xray's open files every second"
+say "v1.16.2: 1500 names nobody asked before through dnsmasq (100 at a time), 2400 TCP connections from the LAN held open at once — past v1.16.1's 4096 open files in sing-box and in xray — then 300 UDP flows to distinct ports; sing-box's and xray's open files every second"
 # The names do not exist. The feeds' cores (24.12.31, 25.1.30) send nothing back for such a name, as
 # the owner's core sent nothing when its DoH timed out; dnsmasq then holds each query for a while and,
 # with 150 in flight, refuses the rest itself (REFUSED) — the storm the owner's dnsmasq made, bounded
 # the same way. What counts here is the gateway under it, not the answers.
+# Neither the names nor UDP flows can take a core past 4096 open files: dnsmasq keeps about 150 queries
+# in flight, and sing-box's TUN keeps at most 1024 UDP sessions (sing's udpnat, 1.11 and 1.12 alike: the
+# oldest is closed for a new one) — about 2048 files. TCP can: a connection from the LAN is two open
+# files in sing-box (the TUN side, its SOCKS dial to xray) and two in xray (that dial, its own to the
+# upstream) for as long as it is open. 2400 of them, each answered end to end by a sink behind the
+# upstream and all held at once, are more than 4096 in each core — a count v1.16.1's limit could never
+# reach, so the "too many open files" check after it is one the old limit fails.
+UP_PID="$(upstream_pid)"
+[ "$(nofile "$UP_PID")" = "65536 65536" ] || { echo "the test's upstream (pid $UP_PID) may open $(nofile "$UP_PID") files — it would run out before the gateway does"; exit 1; }
+( ulimit -H -n 65536 && ulimit -S -n 65536 && exec node /tmp/irnf-flood.js sink 18090 ) > /tmp/irnf-sink.log 2>&1 &
+SINK=$!
+i=0
+until netstat -tln 2>/dev/null | grep -q '127\.0\.0\.1:18090 '; do
+	i=$((i+1))
+	[ $i -lt 30 ] || { echo "the sink never listened"; cat /tmp/irnf-sink.log; exit 1; }
+	sleep 1
+done
+# the guest's conntrack table, not the cores, must not be what gives first: each held connection is
+# about five entries (the LAN's, the TUN's, the three loopback hops)
+CT=/proc/sys/net/netfilter/nf_conntrack_max
+CT_WAS="$(cat "$CT" 2>/dev/null || echo 0)"
+if [ -w "$CT" ] && [ "$CT_WAS" -lt 65536 ]; then echo 65536 > "$CT"; fi
+echo "conntrack: max $(cat "$CT" 2>/dev/null || echo '?') (the guest had $CT_WAS); kernel files in use/max: $(cut -f1,3 /proc/sys/fs/file-nr | tr '\t' '/')"
+memused() { free | awk '/^Mem:/ { print $3 " of " $2 " kB" }'; }
 BASE_SB="$(fdn "$FD_SB")"; BASE_X="$(fdn "$FD_X")"
-echo "before the flood: sing-box $BASE_SB open files, xray $BASE_X"
+echo "before the flood: sing-box $BASE_SB open files, xray $BASE_X; memory in use $(memused)"
 logread -f > /tmp/irnf-flood-a.log 2>&1 &
 LOGF=$!
 sleep 1; logger -t irnf-smoke "irnf-flood-a-start-$$"
 fd_sample_start
 inlan node /tmp/irnf-flood.js dns 192.168.1.1 1500 "a$$" 1 3000 100 | tee /tmp/irnf-flood-a.txt
 DNS_PEAK_SB="$(fd_peak 1)"
+PRE_TCP_SB="$(fdn "$FD_SB")"
+rm -f /tmp/irnf-tcp.release
+( ulimit -H -n 65536 && ulimit -S -n 65536 && inlan node /tmp/irnf-flood.js tcp 198.51.100.10 18090 2400 50 /tmp/irnf-tcp.release ) > /tmp/irnf-flood-tcp.txt 2>&1 &
+TCPC=$!
+i=0
+until grep -q '^FLOOD TCP HELD ' /tmp/irnf-flood-tcp.txt; do
+	i=$((i+1))
+	kill -0 "$TCPC" 2>/dev/null || { echo "the TCP flood ended before it held its connections:"; cat /tmp/irnf-flood-tcp.txt; exit 1; }
+	[ $i -lt 600 ] || { echo "the 2400 connections were not up within 600 s (sing-box $(fdn "$FD_SB") open files)"; touch /tmp/irnf-tcp.release; exit 1; }
+	sleep 1
+done
+HELD_SB="$(fdn "$FD_SB")"; HELD_X="$(fdn "$FD_X")"
+grep '^FLOOD TCP HELD ' /tmp/irnf-flood-tcp.txt
+echo "all held: sing-box $HELD_SB open files, xray $HELD_X, the upstream $(fdn "$UP_PID"), the sink $(fdn "$SINK"); conntrack entries $(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo '?'); memory in use $(memused)"
+touch /tmp/irnf-tcp.release
+wait "$TCPC" || true
+kill "$SINK" 2>/dev/null || true
+wait "$SINK" 2>/dev/null || true
+TCP_R="$(sed -n 's/^FLOOD TCP {/{/p' /tmp/irnf-flood-tcp.txt)"
+echo "FLOOD TCP $TCP_R"
+echo "$TCP_R" | jq -e '.echoed == 2400 and .failed == 0 and .closedEarly == 0' >/dev/null \
+	|| { echo "not every connection was answered and held"; cat /tmp/irnf-flood-tcp.txt; tail -n 5 /tmp/upstream.log; exit 1; }
+i=0
+until [ "$(fdn "$FD_SB")" -le $((PRE_TCP_SB + 60)) ]; do
+	i=$((i+1))
+	[ $i -lt 90 ] || { echo "sing-box still has $(fdn "$FD_SB") open files 90 s after the 2400 connections closed ($PRE_TCP_SB before them)"; exit 1; }
+	sleep 1
+done
+echo "the 2400 connections let go: sing-box back to $(fdn "$FD_SB") open files after ${i}s, xray $(fdn "$FD_X")"
+PRE_UDP_SB="$(fdn "$FD_SB")"
 inlan node /tmp/irnf-flood.js udp 198.51.100.1 30000 300 | tee -a /tmp/irnf-flood-a.txt
 UDP_DONE="$(date +%s)"
 sleep 3
@@ -1229,14 +1328,20 @@ PEAK_SB="$(fd_peak 1)"; PEAK_X="$(fd_peak 2)"; NOW_SB="$(fdn "$FD_SB")"; NOW_X="
 # (an emulated CPU opens the last associations after the sampler stopped: the later reading counts too)
 if [ "$NOW_SB" -gt "$PEAK_SB" ]; then PEAK_SB="$NOW_SB"; fi
 if [ "$NOW_X" -gt "$PEAK_X" ]; then PEAK_X="$NOW_X"; fi
-echo "sing-box open files: before $BASE_SB, peak $DNS_PEAK_SB during the names, $PEAK_SB with the UDP flows, after $NOW_SB — limit 65536 (the kernel's 4096 before v1.16.2)"
-echo "xray open files: before $BASE_X, peak $PEAK_X — limit 65536"
+if [ "$HELD_SB" -gt "$PEAK_SB" ]; then PEAK_SB="$HELD_SB"; fi
+if [ "$HELD_X" -gt "$PEAK_X" ]; then PEAK_X="$HELD_X"; fi
+echo "sing-box open files: before $BASE_SB, peak $DNS_PEAK_SB during the names, $HELD_SB with the 2400 connections held, $NOW_SB with the UDP flows — limit 65536 (v1.16.1's cores had the kernel's 4096)"
+echo "xray open files: before $BASE_X, $HELD_X with the connections held, peak $PEAK_X — limit 65536"
+echo "conntrack \"table full\" in the log during the flood: $(grep -c 'table full' /tmp/irnf-flood-a.log || true)"
+# the proof that this load is one the old 4096 could not carry: both cores held more than that at once
+[ "$HELD_SB" -gt 4096 ] || { echo "sing-box held only $HELD_SB open files with every connection up — not past v1.16.1's 4096: the check below would prove nothing"; exit 1; }
+[ "$HELD_X" -gt 4096 ] || { echo "xray held only $HELD_X open files with every connection up — not past v1.16.1's 4096: the check below would prove nothing"; exit 1; }
 EMFILE="$(grep -ci 'too many open files' /tmp/irnf-flood-a.log || true)"
 echo "\"too many open files\" in the log during the flood: ${EMFILE:-0}"
 [ "${EMFILE:-0}" = 0 ] || { grep -i 'too many open files' /tmp/irnf-flood-a.log | head -n 5; exit 1; }
 [ "$PEAK_SB" -lt 32768 ] || { echo "sing-box reached $PEAK_SB open files — not well under its 65536"; exit 1; }
 [ "$PEAK_X" -lt 32768 ] || { echo "xray reached $PEAK_X open files — not well under its 65536"; exit 1; }
-[ "$NOW_SB" -ge $((BASE_SB + 300)) ] || { echo "the 300 UDP flows hold no sessions in sing-box ($BASE_SB -> $NOW_SB) — the drain below would prove nothing"; exit 1; }
+[ "$NOW_SB" -ge $((PRE_UDP_SB + 300)) ] || { echo "the 300 UDP flows hold no sessions in sing-box ($PRE_UDP_SB -> $NOW_SB) — the drain below would prove nothing"; exit 1; }
 resolves example.net
 if [ -n "$FLOODNS" ]; then lanprobe_soon || { echo "lan0 has no TCP through the tunnel after the flood"; lantunnelwhy; exit 1; }; echo "lan0: TCP through the tunnel after the flood"; fi
 
@@ -1288,8 +1393,10 @@ sleep 10
 out="$(inlan nslookup www.example.com 192.168.1.1 2>&1 || true)"
 echo "www.example.com with the DoH black-holed: $(echo "$out" | sed -n '/^Name:/,$p' | tr '\n' ' ' | cut -c1-160)$(echo "$out" | grep -Ei "can't find|timed out|no answer" | head -n 1)"
 if echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address'; then echo "a name resolved with the DoH black-holed — the outage was not simulated"; exit 1; fi
+# a sanity check, not the proof: this load stays far under 4096 (dnsmasq's ~150 queries in flight bound
+# it) and would pass on v1.16.1 too — the connections held above are what crossed the old limit
 EMFILE="$(grep -ci 'too many open files' /tmp/irnf-flood-b.log || true)"
-echo "\"too many open files\" in the log during the outage: ${EMFILE:-0}"
+echo "\"too many open files\" in the log during the outage: ${EMFILE:-0} (a sanity check, not the proof: this load stays far under 4096)"
 [ "${EMFILE:-0}" = 0 ] || { grep -i 'too many open files' /tmp/irnf-flood-b.log | head -n 5; exit 1; }
 [ "$PEAK_SB" -lt 32768 ] && [ "$PEAK_X" -lt 32768 ] || { echo "open files not well under 65536 during the outage (sing-box $PEAK_SB, xray $PEAK_X)"; exit 1; }
 
