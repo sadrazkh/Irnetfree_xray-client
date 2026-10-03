@@ -266,6 +266,10 @@ function createService(opts = {}) {
   const stamp = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
   // the service's own files under /proc (Linux); a test hands in fakes
   const readProc = deps.readProc || ((p) => fs.readFileSync(p, 'utf8'));
+  /** node, the core and the gateway's sing-box, by pid (a process not running is absent). */
+  function procPids() {
+    return { node: process.pid, xray: xray && xray.proc && xray.proc.pid, 'sing-box': tun && tun.inner && tun.inner.proc && tun.inner.proc.pid };
+  }
   /**
    * MemAvailable and the RSS of node, xray and sing-box, from /proc — on Linux;
    * a file that is not there is a field that is not reported. Logged at every
@@ -279,10 +283,6 @@ function createService(opts = {}) {
    * collector burn a Cortex-A7 core for nothing; the figures the router logs
    * here are what would justify one later.
    */
-  /** node, the core and the gateway's sing-box, by pid (a process not running is absent). */
-  function procPids() {
-    return { node: process.pid, xray: xray && xray.proc && xray.proc.pid, 'sing-box': tun && tun.inner && tun.inner.proc && tun.inner.proc.pid };
-  }
   function memInfo() {
     const out = { memAvailableKb: null, rss: {} };
     try { const m = /^MemAvailable:\s+(\d+)/m.exec(readProc('/proc/meminfo')); if (m) out.memAvailableKb = Number(m[1]); } catch { /* not Linux */ }
