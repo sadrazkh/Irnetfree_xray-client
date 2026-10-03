@@ -163,6 +163,7 @@ function createRelay({ password, dataDir, now = Date.now, log = console.log, req
       try { socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch { /* gone */ }
       socket.destroy();
     };
+    if (closing) return refuse(503, 'Service Unavailable');   // a redial during the shutdown gets no link
     let url;
     try { url = new URL(req.url, 'http://relay'); } catch { return refuse(400, 'Bad Request'); }
     if (url.pathname !== '/_relay/agent') return refuse(404, 'Not Found');
@@ -301,6 +302,11 @@ function createRelay({ password, dataDir, now = Date.now, log = console.log, req
     });
   });
   server.on('upgrade', onUpgrade);
+  // every socket, upgraded ones included: closeAllConnections() leaves an
+  // upgraded socket alone, and server.close() waits for it — a link still
+  // waiting for its HELLO (not in `links` yet) kept close() pending
+  const sockets = new Set();
+  server.on('connection', (sock) => { sockets.add(sock); sock.once('close', () => sockets.delete(sock)); });
   // requestTimeout bounds RECEIVING a request (headers + body), not the response: an SSE stream or a long
   // download is untouched by it, while a client that trickles a body forever is cut — with 0 (review I2)
   // nothing on the relay ever closed such a socket, and the relay faces the internet. Measured on node 22:
@@ -329,7 +335,11 @@ function createRelay({ password, dataDir, now = Date.now, log = console.log, req
       }));
       links.clear();
       await Promise.race([Promise.all(gone), new Promise((r) => setTimeout(r, 1000).unref())]);
-      await new Promise((resolve) => { server.close(() => resolve()); if (server.closeAllConnections) server.closeAllConnections(); });
+      await new Promise((resolve) => {
+        server.close(() => resolve());
+        if (server.closeAllConnections) server.closeAllConnections();
+        for (const sock of sockets) sock.destroy();   // upgraded links (with or without a HELLO) the grace did not end
+      });
     }
   };
   return api;

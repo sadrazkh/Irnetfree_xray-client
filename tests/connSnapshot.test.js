@@ -63,10 +63,10 @@ test('S1: a connect by hand that fails leaves the snapshot on error with the rea
   const s = H.start();
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
-  await assert.rejects(s.service.invoke('connect', SERVER.id), /Gateway did not come up/);
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /The whole-network tunnel did not come up/);
   const conn = s.service.connSnapshot();
   assert.equal(conn.state, 'error');
-  assert.match(conn.reason, /Gateway did not come up/);
+  assert.match(conn.reason, /The whole-network tunnel did not come up/);
   assert.equal(conn.since, null);
 });
 
@@ -94,6 +94,15 @@ test('S1: the web bridge exposes the snapshot channel and the renderer applies i
   const MAIN = R('main', 'main.js');
   assert.match(MAIN, /ipcMain\.handle\('app:init', \(\) => \(\{[\s\S]*?conn: connSnapshot\(\)\n/);
   assert.match(MAIN, /^function connSnapshot\(\) \{/m);
+});
+
+test('the router\'s web UI says why it is in error, as LuCI\'s badge does — a refusal the router hit on its own has no click waiting for a toast', () => {
+  // v1.16.1 re-review: a boot connect refused for want of Xray-PattN showed a bare "Error" here; the reason was only in the log
+  const APP = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8').replace(/\r\n/g, '\n');
+  const body = (from, to) => APP.slice(APP.indexOf(from), APP.indexOf(to, APP.indexOf(from)));
+  assert.match(APP, /^function showErrorReason\(reason\) \{\n\s*if \(state\.flavor === 'openwrt' && reason\) \$\('#connState'\)\.textContent = t\('state\.error'\) \+ ': ' \+ reason;\n\}/m);
+  assert.match(body("} else if (conn.state === 'error') {", '} else {'), /setConnUI\('error'\);\n\s*showErrorReason\(conn\.reason\);/, 'the snapshot (every page load)');
+  assert.match(body("} else if (d.state === 'error') {", '});'), /setConnUI\('error'\);\n\s*showErrorReason\(d\.message\);/, 'the live status event');
 });
 
 /* ----------------------------- S2: a stale page cannot tear down a live gateway ----------------------------- */
@@ -210,7 +219,7 @@ test('B3: the boot connect with the WAN not there reads waiting (attempt n) betw
   assert.equal(snap.state, 'waiting');
   assert.ok(snap.attempt >= 3);
   assert.equal(snap.cause, 'boot');
-  assert.ok(snap.reason && /Gateway did not come up/.test(snap.reason), snap.reason);
+  assert.ok(snap.reason && /The whole-network tunnel did not come up/.test(snap.reason), snap.reason);
   s.state.gatewayFails = false;
   await until(() => connectedCount(s) === 1, 'up once the WAN is there', 10000);
   assert.equal(s.service.connSnapshot().state, 'connected');
@@ -335,7 +344,7 @@ test('S7: diagnostics() carries the status, the versions, MemAvailable, the RSS,
   assert.match(text, /^status: \{"state":"connected"/m);
   assert.match(text, /^settings: \{.*"killSwitch":false/m);
   assert.match(text, /^store: \{"servers":2/m);
-  assert.match(text, /^cores: \{"xray":"26\.1\.1"/m);
+  assert.match(text, /^cores: \{"xray":"26\.3\.27"/m);   // the fake answers a current core (gatewayFakes)
   assert.match(text, /^MemAvailable: 123456 kB$/m);
   assert.match(text, /^RSS: node=\d+ kB, xray=\d+ kB, sing-box=\d+ kB$/m);
   assert.match(text, /^gateway: up, core: running, kill switch: \{/m);

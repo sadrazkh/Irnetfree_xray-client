@@ -294,9 +294,17 @@ jobs:
         shell: bash
         run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
 
+      # Every file in the package carries the tagged commit's time, not 1970:
+      # uhttpd serves LuCI's views with their mtime as Last-Modified and no
+      # Cache-Control, so a browser keeps them fresh for a tenth of their age —
+      # stamped 1970, years: after an upgrade it went on running the old views.
+      # The assignment stands alone so that a failing `git log` fails the step.
       - name: Build ipk
         shell: bash
         run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH (the time of the commit being released)"
           node openwrt/build-ipk.js dist
           cd dist
           sha256sum irnetfree_*_all.ipk > SHA256SUMS-openwrt.txt

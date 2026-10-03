@@ -81,12 +81,19 @@ function cleanSettings(s) {
   return out;
 }
 
-function exportBundle({ version, store, usage }) {
+/**
+ * `flavor`: where the backup was made, when that matters on restore — the
+ * router writes 'openwrt', so its own backup restored after a reset brings
+ * back its router-only settings, which a desktop's must not touch (`keep`
+ * in importBundle). Absent on a desktop backup, as it always was.
+ */
+function exportBundle({ version, store, usage, flavor }) {
   const s = store || {};
   return {
     app: 'IRNetFree',
     format: 1,
     version: version || '',
+    ...(flavor ? { flavor: String(flavor) } : {}),
     exportedAt: new Date().toISOString(),
     servers: Array.isArray(s.servers) ? s.servers : [],
     subscriptions: Array.isArray(s.subscriptions) ? s.subscriptions : [],
@@ -97,11 +104,20 @@ function exportBundle({ version, store, usage }) {
   };
 }
 
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
 /**
- * @returns {{ next: object, added: { servers, subscriptions, chains, pool } }}
+ * `opts.keep`: settings keys this machine keeps as they are, whatever the
+ * backup says — a router restoring a desktop backup must not take the
+ * desktop's TUN, system proxy, per-app routing, leak guard, connect-at-start,
+ * QUIC refusal or kill switch (field report fix 9). A kept key the machine
+ * never had stays absent. `kept` names the ones the backup carried with
+ * another value, so the caller can say so.
+ *
+ * @returns {{ next: object, added: { servers, subscriptions, chains, pool }, kept: string[] }}
  * @throws when the bundle is not an IRNetFree backup
  */
-function importBundle(bundle, current) {
+function importBundle(bundle, current, opts = {}) {
   if (!isObj(bundle) || bundle.app !== 'IRNetFree' || bundle.format !== 1) throw new Error('not an IRNetFree backup');
   const c = current || {};
   // `clean` returns the record as it may come in, or null to leave it out.
@@ -123,16 +139,25 @@ function importBundle(bundle, current) {
   // a server left out for its protocol, port or outbound is not referenced either
   const chains = merge(c.chains, bundle.chains, (x) => cleanChain(x, servers.refused));
   const pool = merge(c.pool, bundle.pool, (x) => cleanPoolEntry(x, servers.refused));
+  const have = isObj(c.settings) ? c.settings : {};
+  const incoming = isObj(bundle.settings) ? cleanSettings(bundle.settings) : {};
+  const kept = [];
+  for (const k of Array.isArray(opts && opts.keep) ? opts.keep : []) {
+    if (!(k in incoming)) continue;
+    if (!sameJson(incoming[k], have[k])) kept.push(k);
+    delete incoming[k];
+  }
   return {
     next: {
       servers: servers.list,
       subscriptions: subscriptions.list,
       chains: chains.list,
       pool: pool.list,
-      settings: Object.assign({}, isObj(c.settings) ? c.settings : {}, isObj(bundle.settings) ? cleanSettings(bundle.settings) : {}),
+      settings: Object.assign({}, have, incoming),
       usage: Object.assign({}, isObj(c.usage) ? c.usage : {}, isObj(bundle.usage) ? bundle.usage : {})
     },
-    added: { servers: servers.n, subscriptions: subscriptions.n, chains: chains.n, pool: pool.n }
+    added: { servers: servers.n, subscriptions: subscriptions.n, chains: chains.n, pool: pool.n },
+    kept
   };
 }
 

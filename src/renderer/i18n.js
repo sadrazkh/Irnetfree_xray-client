@@ -68,6 +68,8 @@ const I18N = {
     'traffic.down': 'دانلود', 'traffic.up': 'آپلود',
     'mode.proxy': 'پروکسی', 'mode.tun': 'TUN',
     'mode.proxySub': 'SOCKS/HTTP', 'mode.tunSub': 'کل سیستم',
+    'mode.router': 'کل شبکه', 'mode.routerSub': 'همهٔ دستگاه‌های پشت روتر',
+    'mode.routerNote': 'روی روتر، تونل همیشه برای کل شبکه است — هر دستگاهی که به این روتر وصل شود از VPN می‌رود. پایین‌تر فقط می‌توانی دستگاه‌هایی را که نباید از تونل بروند مستثنا کنی.',
 
     'session.title': 'مصرف این نشست',
     'session.down': 'دانلود کل', 'session.up': 'آپلود کل', 'session.sum': 'مجموع',
@@ -157,8 +159,9 @@ const I18N = {
     'spoof.frontTitle': '🛡 TLS / CDN — SNI و دورزدن',
     'spoof.frontSni': 'SNI — دامنهٔ واقعی (CDN همین را می‌خواند؛ = Host)',
     'spoof.frontHost': 'Host — همان دامنهٔ SNI',
-    'spoof.frontHint': 'SNI و Host همان دامنهٔ واقعی تو هستند و CDN بر اساس SNI روت می‌کند، پس باید یکی باشند (SNIِ «فیک»ِ متفاوت اینجا وصل نمی‌شود). برای دورزدن، پایین «پنهان‌کردن SNI» را روشن کن.',
-    'spoof.hideSni': '🕵 پنهان‌کردن SNI از DPI (فرگمنت/پترنیها)',
+    'spoof.frontHint': 'SNI و Host همان دامنهٔ واقعی تو هستند و CDN بر اساس SNI روت می‌کند، پس باید یکی باشند (SNIِ «فیک»ِ متفاوت اینجا وصل نمی‌شود). اگر بدون آن وصل نمی‌شود، «پنهان‌کردن SNI» را امتحان کن.',
+    'spoof.hideSni': '🕵 پنهان‌کردن SNI از DPI (فرگمنت TLS)',
+    'spoof.hideSniFinalmask': 'این سرور ClientHello را از قبل با finalmask (پترنیها) تکه می‌کند؛ روشن‌کردن این کلید یک فرگمنت دوم (freedom) هم اضافه می‌کند — معمولاً لازم نیست.',
     'spoof.realityTitle': '🛡 REALITY (تقلید یک سایت واقعی)',
     'spoof.realitySni': 'SNI — باید دقیقاً با serverNames سرور بخواند',
     'spoof.realityHint': 'REALITY فرانتینگ نیست: SNI باید همان سایتی باشد که سرورت تقلیدش می‌کند (serverNames)، مثل www.google.com؛ دلخواه نیست. اتصال همچنان به «Address» می‌رود.',
@@ -290,6 +293,9 @@ const I18N = {
     'udpblock.sub': 'جلوی WebRTC/STUN را می‌گیرد تا وقتی در حالت TUN نیستی IP واقعی‌ات لو نرود. بازی‌ها و تماس‌هایی که UDP لازم دارند از کار می‌افتند.',
     'udpblock.needsProxy': 'در حالت TUN لازم نیست — خودِ TUN، UDP را هم از تونل می‌برد.',
     'lan.title': 'اجازه به شبکه محلی (LAN)', 'lan.sub': 'دستگاه‌های دیگه هم بتونن وصل بشن',
+    // the same switch on a router: it only opens the proxy ports — the whole network goes through the tunnel anyway
+    'lan.routerTitle': 'باز کردن پورت‌های پراکسی SOCKS/HTTP روی شبکه',
+    'lan.routerSub': 'لازم نیست — همهٔ دستگاه‌ها از قبل از تونل می‌روند؛ فقط برای برنامه‌ای که خودش پراکسی می‌خواهد.',
 
     'comp.title': 'فایل‌های موردنیاز', 'comp.hint': 'اگر فایلی نبود با یک کلیک دانلود و یکپارچه می‌شود — بدون نیاز به ساخت دوباره برنامه.',
     'assets.auto': 'به‌روزرسانی خودکار فایل‌ها', 'assets.auto.off': 'خاموش',
@@ -297,6 +303,7 @@ const I18N = {
     'assets.auto.hint': 'فقط وقتی وصل نیستید. فایل‌های geo داده‌اند و کانفیگی را خراب نمی‌کنند؛ هستهٔ جدید می‌تواند رفتار عوض کند، پس فقط با انتخاب خودتان',
     'comp.xray': 'هسته Xray', 'comp.tun2socksLegacy': 'tun2socks (حالت TUN — قدیمی)',
     'comp.singbox': 'هستهٔ sing-box (بک‌اندِ حالت TUN، ضد DPI)',
+    'comp.singboxRouter': 'هستهٔ sing-box (تونل کل شبکه)',
     'comp.wintun': 'wintun.dll (حالت TUN)', 'comp.geo': 'فایل‌های روتینگ (geoip + geosite)',
     'comp.tunNote': '⚠ حالت TUN به sing-box (یا tun2socks) نیاز دارد و روی ویندوز به wintun.dll — از همین‌جا دانلودشان کن.',
     'comp.installed': 'نصب‌شده', 'comp.missing': 'موجود نیست',
@@ -313,6 +320,11 @@ const I18N = {
     'tun.unavailable': '⚠ sing-box (یا tun2socks) یا wintun.dll پیدا نشد — حالت TUN غیرفعال است. از «فایل‌های موردنیاز» دانلودشان کن.',
     'tun.ready': '✓ حالت TUN آماده است (هنگام اتصال، کل سیستم تانل می‌شود — اجرا با دسترسی ادمین).',
     'tun.off': 'حالت TUN در دسترس است ولی خاموش.',
+    // the router: the tunnel is the network's, never a mode — and root is not a question there
+    'tun.routerReady': '✓ تونل کل شبکه آماده است',
+    'tun.routerUnavailable': '⚠ sing-box روی روتر نیست — تونل کل شبکه بدون آن بالا نمی‌آید. از «فایل‌های موردنیاز» دانلودش کن یا: opkg install sing-box',
+    // sing-box is there, the tunnel still is not: the other half of it is nft
+    'tun.routerNoNft': '⚠ nft (nftables) روی روتر نیست — تونل کل شبکه بدون آن بالا نمی‌آید: opkg install nftables',
 
     't.settingsSaved': 'تنظیمات ذخیره شد', 't.rulesSaved': 'قوانین ذخیره شد', 't.copied': 'کپی شد ✓',
     't.routingMode': 'حالت روتینگ', 't.noServerSel': 'سروری انتخاب نشده',
@@ -360,6 +372,8 @@ const I18N = {
     'set.tunBackend': 'بک‌اندِ TUN', 'set.leakGuard': 'گارد نشتی',
     'set.tunAppMode': 'روتینگ به‌تفکیک برنامه زیر TUN', 'set.tunApps': 'برنامه‌های انتخاب‌شده',
     'set.blockUdpInProxyMode': 'بستن UDP در حالت پروکسی',
+    // not a setting: an edit of a server the live connection dials (pendingKeys pushes 'servers')
+    'set.servers': 'ویرایش سرورِ متصل',
     'set.defaultEngine': 'هستهٔ پیش‌فرض',
     'set.defaultEngineHint': 'کانفیگ‌هایی که هسته‌ی مشخصی انتخاب نکرده‌اند، و زنجیره/استخر/روتینگ پیشرفته، روی این هسته اجرا می‌شوند. اگر عضوی PattN بخواهد، کل plan روی PattN می‌رود.',
     'comp.xrayPattn': 'هستهٔ Xray-PattN (fork پترنیها — کانفیگ بدون TLS را می‌پذیرد)',
@@ -371,6 +385,7 @@ const I18N = {
     't.never': 'هرگز', 't.secAgo': 'ثانیه پیش', 't.minAgo': 'دقیقه پیش', 't.hrAgo': 'ساعت پیش', 't.dayAgo': 'روز پیش',
     't.error': 'خطا',
     't.serverUpdated': 'سرور به‌روزرسانی شد', 't.wgAdded': 'WireGuard اضافه شد',
+    't.serverUpdatedLive': 'سرور به‌روزرسانی شد — روی اتصالِ فعلی هنوز اعمال نشده؛ «اتصال مجدد» را بزن.',
     't.wgMissing': 'Endpoint و کلید خصوصی و عمومی لازم است',
     't.wgBadEndpoint': 'Endpoint باید آدرس سرور عمومی به شکل host:port باشد (مثل cobra.tes.ca:42421)، نه آدرس محلی تونل',
     't.chainOn': 'زنجیره فعال شد', 't.chainOff': 'زنجیره غیرفعال شد',
@@ -501,8 +516,12 @@ const I18N = {
     'gw.none': 'دستگاهی پیدا نشد — دستگاه‌ها وقتی از روتر IP بگیرند این‌جا ظاهر می‌شوند.',
     'gw.hint': 'دستگاه مستثنا هم نام‌ها را از DNS روتر می‌پرسد، یعنی از داخل تونل؛ فقط ترافیک خودش مستقیم می‌رود.',
     'gw.online': 'آنلاین', 'gw.offline': 'آفلاین', 'gw.saved': 'فهرست دستگاه‌های مستقیم ذخیره شد',
-    'ins.gateway': 'گیت‌وی', 'gw.insWhole': 'کل شبکه از تونل', 'gw.insDirect': '{n} دستگاه مستقیم',
-    'gw.quic': 'QUIC (UDP 443) از شبکه رد نشود',
+    'ins.gateway': 'تونل کل شبکه', 'gw.insWhole': 'روشن — همهٔ دستگاه‌ها', 'gw.insDirect': '{n} دستگاه مستقیم',
+    'gw.insOff': 'خاموش — VPN قطع است',
+    // what the inspector row means (its tooltip, and the first line of the device list it opens)
+    'gw.insHint': 'روتر «گیت‌وی» (دروازهٔ) شبکه است: هر دستگاهی که با وای‌فای یا کابل به این روتر وصل شود، بدون هیچ تنظیمی روی خودِ دستگاه از تونل VPN می‌رود. این یک وضعیت است، نه گزینه — روی روتر همیشه همین است. برای این‌که دستگاهی مستقیم برود: تنظیمات ← دستگاه‌های شبکه.',
+    'gw.quic': 'رد کردن QUIC (UDP 443) از شبکه',
+    'gw.remote': 'دسترسی از بیرون خانه: LuCI ← Services ← IRNetFree ← دسترسی از راه دور (راهنما: docs/remote.md)',
     'gw.quicSub': 'مرورگرها بلافاصله سراغ TCP می‌روند که هر پروکسی‌ای حمل می‌کند؛ دستگاه‌های مستقیم دست نمی‌خورند.',
     // while a connect is in flight every connect control is its Cancel
     'power.connect': 'اتصال', 'power.disconnect': 'قطع اتصال',
@@ -576,6 +595,8 @@ const I18N = {
     'traffic.down': 'Download', 'traffic.up': 'Upload',
     'mode.proxy': 'Proxy', 'mode.tun': 'TUN',
     'mode.proxySub': 'SOCKS/HTTP', 'mode.tunSub': 'Whole system',
+    'mode.router': 'Whole network', 'mode.routerSub': 'every device behind the router',
+    'mode.routerNote': 'On a router the tunnel is always for the whole network — every device connected to this router goes through the VPN. Below you can only exclude devices that should go direct.',
 
     'session.title': 'This session',
     'session.down': 'Total down', 'session.up': 'Total up', 'session.sum': 'Total',
@@ -666,8 +687,9 @@ const I18N = {
     'spoof.frontTitle': '🛡 TLS / CDN — SNI & bypass',
     'spoof.frontSni': 'SNI — real domain (the CDN reads this; = Host)',
     'spoof.frontHost': 'Host — same as SNI',
-    'spoof.frontHint': 'SNI and Host are your real domain, and the CDN routes by the SNI, so they must match (a different "fake" SNI here won\'t connect). To bypass DPI, turn on "Hide SNI" below.',
-    'spoof.hideSni': '🕵 Hide SNI from DPI (fragment / patterniha)',
+    'spoof.frontHint': 'SNI and Host are your real domain, and the CDN routes by the SNI, so they must match (a different "fake" SNI here won\'t connect). If it does not connect without it, try “Hide SNI” below.',
+    'spoof.hideSni': '🕵 Hide SNI from DPI (TLS fragment)',
+    'spoof.hideSniFinalmask': 'This server already fragments its ClientHello with finalmask (patterniha); turning this on adds a second (freedom) fragmenter — usually not needed.',
     'spoof.realityTitle': '🛡 REALITY (mimic a real site)',
     'spoof.realitySni': 'SNI — must match the server\'s serverNames',
     'spoof.realityHint': 'REALITY is not fronting: the SNI must be the exact site your server mimics (its serverNames), e.g. www.google.com — not a free choice. The connection still goes to Address.',
@@ -799,12 +821,16 @@ const I18N = {
     'udpblock.sub': 'Stops WebRTC/STUN from revealing your real IP when you are not in TUN mode. Breaks games and calls that need UDP.',
     'udpblock.needsProxy': 'TUN mode covers UDP already.',
     'lan.title': 'Allow LAN', 'lan.sub': 'Let other devices connect too',
+    // the same switch on a router: it only opens the proxy ports — the whole network goes through the tunnel anyway
+    'lan.routerTitle': 'Open the SOCKS/HTTP proxy ports to the LAN',
+    'lan.routerSub': 'Not needed — every device already goes through the tunnel; only for an app that asks for a proxy itself.',
 
     'comp.title': 'Required files', 'comp.hint': 'Missing files are downloaded and integrated with one click — no rebuild needed.',
     'assets.auto': 'Update files automatically', 'assets.auto.off': 'Off',
     'assets.auto.geo': 'Weekly — geo files only', 'assets.auto.all': 'Weekly — geo files and cores',
     'assets.auto.hint': 'Only while disconnected. Geo files are data and cannot break a config; a new core can change behaviour, so only if you choose it',
     'comp.xray': 'Xray core', 'comp.singbox': 'sing-box core (TUN backend, anti-DPI)',
+    'comp.singboxRouter': 'sing-box core (the whole-network tunnel)',
     'comp.tun2socksLegacy': 'tun2socks (TUN mode — legacy)',
     'comp.wintun': 'wintun.dll (TUN mode)', 'comp.geo': 'Routing files (geoip + geosite)',
     'comp.tunNote': '⚠ TUN mode needs sing-box (or tun2socks), plus wintun.dll on Windows — download them here.',
@@ -822,6 +848,11 @@ const I18N = {
     'tun.unavailable': '⚠ sing-box (or tun2socks) or wintun.dll not found — TUN mode disabled. Download them under “Required files”.',
     'tun.ready': '✓ TUN mode ready (on connect the whole system is tunneled — run as admin).',
     'tun.off': 'TUN mode is available but off.',
+    // the router: the tunnel is the network's, never a mode — and root is not a question there
+    'tun.routerReady': '✓ Whole-network tunnel ready',
+    'tun.routerUnavailable': '⚠ sing-box is not on the router — the whole-network tunnel cannot start without it. Download it under Required files, or: opkg install sing-box',
+    // sing-box is there, the tunnel still is not: the other half of it is nft
+    'tun.routerNoNft': '⚠ nft (nftables) is not on the router — the whole-network tunnel cannot start without it: opkg install nftables',
 
     't.settingsSaved': 'Settings saved', 't.rulesSaved': 'Rules saved', 't.copied': 'Copied ✓',
     't.routingMode': 'Routing mode', 't.noServerSel': 'No server selected',
@@ -869,6 +900,8 @@ const I18N = {
     'set.tunBackend': 'TUN backend', 'set.leakGuard': 'Leak guard',
     'set.tunAppMode': 'Per-app routing under TUN', 'set.tunApps': 'Selected apps',
     'set.blockUdpInProxyMode': 'Block UDP in proxy mode',
+    // not a setting: an edit of a server the live connection dials (pendingKeys pushes 'servers')
+    'set.servers': 'Edit of the connected server',
     'set.defaultEngine': 'Default core',
     'set.defaultEngineHint': 'Configs without their own core choice, and chains / pool / advanced routing, run on this core. If any member asks for PattN the whole plan runs on PattN.',
     'comp.xrayPattn': 'Xray-PattN core (patterniha fork — accepts plaintext configs)',
@@ -880,6 +913,7 @@ const I18N = {
     't.never': 'never', 't.secAgo': 's ago', 't.minAgo': 'm ago', 't.hrAgo': 'h ago', 't.dayAgo': 'd ago',
     't.error': 'Error',
     't.serverUpdated': 'Server updated', 't.wgAdded': 'WireGuard added',
+    't.serverUpdatedLive': 'Server updated — not applied to the live connection yet; press Reconnect.',
     't.wgMissing': 'Endpoint, private key and public key are required',
     't.wgBadEndpoint': 'Endpoint must be the public server as host:port (e.g. cobra.tes.ca:42421), not the local tunnel address',
     't.chainOn': 'Chain enabled', 't.chainOff': 'Chain disabled',
@@ -1010,8 +1044,12 @@ const I18N = {
     'gw.none': 'No devices found — they appear here once they get an address from the router.',
     'gw.hint': 'An excluded device still resolves names through the router, i.e. through the tunnel; only its own traffic goes direct.',
     'gw.online': 'online', 'gw.offline': 'offline', 'gw.saved': 'Direct-device list saved',
-    'ins.gateway': 'Gateway', 'gw.insWhole': 'whole network', 'gw.insDirect': '{n} direct',
+    'ins.gateway': 'Whole-network tunnel', 'gw.insWhole': 'on — every device', 'gw.insDirect': '{n} go direct',
+    'gw.insOff': 'off — the VPN is off',
+    // what the inspector row means (its tooltip, and the first line of the device list it opens)
+    'gw.insHint': 'The router is the network\'s gateway: every device on its Wi-Fi or cable goes through the VPN tunnel with no setup on the device. This is a status, not an option — on a router it is always on. To let a device go direct: Settings → Devices on this network.',
     'gw.quic': 'Refuse QUIC (UDP 443) from the LAN',
+    'gw.remote': 'Access from outside the home: LuCI → Services → IRNetFree → Remote access (guide: docs/remote.md)',
     'gw.quicSub': 'Browsers fall back to TCP at once, which every proxy carries; devices that go direct are not affected.',
     // while a connect is in flight every connect control is its Cancel
     'power.connect': 'Connect', 'power.disconnect': 'Disconnect',

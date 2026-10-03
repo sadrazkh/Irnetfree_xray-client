@@ -148,8 +148,11 @@ test('login: the session cookie is HttpOnly, Secure, SameSite=Strict; a tampered
   const value = setCookie.split(';')[0].split('=')[1];
   const dash = await request(port, 'GET', '/_relay/', { jar: { relay_session: value } });
   assert.equal(dash.status, 200);
-  // flip one character of the signature
-  const tampered = value.slice(0, -2) + (value.endsWith('a') ? 'b' : 'a') + value.slice(-1);
+  // flip one character of the signature — the one before the last, chosen by what IS there: chosen by the last
+  // character, a signature whose one before the last already was the replacement came back untouched (1 run in 64)
+  const at = value.length - 2;
+  const tampered = value.slice(0, at) + (value[at] === 'a' ? 'b' : 'a') + value.slice(at + 1);
+  assert.notEqual(tampered, value);
   const bad = await request(port, 'GET', '/_relay/', { jar: { relay_session: tampered } });
   assert.equal(bad.status, 302);
   assert.equal(bad.headers.location, '/_relay/login');
@@ -581,4 +584,24 @@ test('the Persian pages: ?lang=fa switches the dashboard and the login page to P
   assert.match(again.body, /dir="rtl"/, 'remembered');
   const en = await request(port, 'GET', '/_relay/?lang=en', { jar });
   assert.match(en.body, /dir="ltr"/);
+});
+
+test('close() ends promptly even with an upgraded link that never said hello, and refuses upgrades while closing', async (t) => {
+  // A link is in `links` only after its HELLO, and server.close() waits for
+  // every socket while closeAllConnections() leaves upgraded ones alone: an
+  // agent mid-handshake (or one redialling during the shutdown) kept close()
+  // pending — the CI hang in remoteAgent.test.js.
+  const { relay, login, addRouter, connectAgent } = await startRelay(t);
+  const jar = await login();
+  const { token } = await addRouter(jar, 'home');
+  const silent = await connectAgent(token, null);   // upgraded, no HELLO
+  t.after(() => { try { silent.close(1000); } catch {} });
+  const started = Date.now();
+  const closed = relay.close();
+  // an agent that redials while the relay shuts down must not get a link
+  const late = wsConnect(`ws://127.0.0.1:${relay.port}/_relay/agent`, { headers: { Authorization: 'Bearer ' + token } })
+    .then((c) => { try { c.close(1000); } catch {} return 'accepted'; }, () => 'refused');
+  await Promise.race([closed, sleep(4000).then(() => { throw new Error('relay.close() still pending after 4 s'); })]);
+  assert.ok(Date.now() - started < 4000);
+  assert.equal(await late, 'refused');
 });

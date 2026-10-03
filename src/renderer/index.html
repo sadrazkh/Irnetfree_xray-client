@@ -601,6 +601,8 @@
               <div class="switch-sub" data-i18n="tun.sub">همه‌ی ترافیک سیستم از تانل رد می‌شه (نیازمند sing-box (یا tun2socks) و دسترسی ادمین)</div></div>
             <label class="switch"><input type="checkbox" id="optTun" /><span class="slider"></span></label>
           </div>
+          <!-- OpenWrt only: there is no TUN switch there — the tunnel is the whole network's -->
+          <p class="hint" id="tunRouterNote" data-i18n="mode.routerNote" hidden></p>
           <div class="tun-status" id="tunStatus"></div>
           <button class="btn ghost admin-btn" id="btnRunAdmin" data-i18n="tun.runAdmin" hidden>اجرای مجدد با دسترسی ادمین</button>
           <!-- which program builds the tunnel; changing it needs a reconnect -->
@@ -685,6 +687,8 @@
                renderLanDevices(); a tick saves lanBypassMacs and applies live. -->
           <div class="setting-row" id="gwRow" hidden>
             <div class="field-label" data-i18n="gw.title">دستگاه‌های شبکه</div>
+            <!-- the first line under the title: what the inspector's gateway row (which opens this) means -->
+            <p class="hint" data-i18n="gw.insHint"></p>
             <p class="hint" data-i18n="gw.sub"></p>
             <div class="row-gap">
               <button class="btn ghost" type="button" id="btnGwRefresh" data-i18n="gw.refresh">تازه‌سازی</button>
@@ -694,9 +698,14 @@
           </div>
           <!-- OpenWrt only: QUIC from the LAN refused, so browsers use TCP (which every proxy carries) -->
           <div class="switch-row" id="gwQuicRow" hidden>
-            <div><div class="switch-title" data-i18n="gw.quic">QUIC (UDP 443) از شبکه رد نشود</div>
+            <div><div class="switch-title" data-i18n="gw.quic">رد کردن QUIC (UDP 443) از شبکه</div>
               <div class="switch-sub" data-i18n="gw.quicSub"></div></div>
             <label class="switch"><input type="checkbox" id="optLanBlockQuic" /><span class="slider"></span></label>
+          </div>
+          <!-- OpenWrt only: remote access lives in LuCI, not on this page — the
+               LuCI page and the guide are links (renderRemotePointer) -->
+          <div class="setting-row" id="gwRemoteRow" hidden>
+            <p class="hint" id="gwRemote" data-i18n="gw.remote"></p>
           </div>
           <div class="switch-row">
             <div><div class="switch-title" data-i18n="kill.title">کیل سوییچ (Kill switch)</div>
@@ -782,11 +791,13 @@
 
       <div class="ins-group">
         <div class="ins-head" data-i18n="ins.protection">محافظت</div>
-        <div class="ins-row"><span class="ins-label" data-i18n="ins.tun">TUN</span><span class="ins-val" id="insTun">—</span></div>
+        <!-- #insTunRow / #insGuardRow: the router has no TUN switch and no guard cards to mirror (applyFlavor) -->
+        <div class="ins-row" id="insTunRow"><span class="ins-label" data-i18n="ins.tun">TUN</span><span class="ins-val" id="insTun">—</span></div>
         <div class="ins-row"><span class="ins-label" data-i18n="ins.kill">Kill switch</span><span class="ins-val" id="insKill">—</span></div>
-        <div class="ins-row"><span class="ins-label" data-i18n="ins.guard">Leak guard</span><span class="ins-val" id="insGuard">—</span></div>
+        <div class="ins-row" id="insGuardRow"><span class="ins-label" data-i18n="ins.guard">Leak guard</span><span class="ins-val" id="insGuard">—</span></div>
         <div class="ins-row"><span class="ins-label" data-i18n="ins.ipv6">IPv6</span><span class="ins-val" id="insIpv6">—</span></div>
-        <div class="ins-row" id="insGatewayRow" hidden><span class="ins-label" data-i18n="ins.gateway">گیت‌وی</span><span class="ins-val" id="insGateway">—</span></div>
+        <!-- OpenWrt only: a status, not a switch — the button says what it means and opens the device list -->
+        <button type="button" class="ins-row" id="insGatewayRow" hidden data-i18n-title="gw.insHint"><span class="ins-label" data-i18n="ins.gateway">تونل کل شبکه</span><span class="ins-val ins-text" id="insGateway">—</span></button>
       </div>
 
       <div class="ins-div"></div>
@@ -852,9 +863,11 @@
         </div>
         <p class="hint" id="edSpoofHint">The SNI is the domain sent in the TLS handshake.</p>
         <label class="switch-row inline-switch" id="edHideSniRow">
-          <span class="switch-title" id="edHideSniLabel">🕵 Hide SNI from DPI (fragment)</span>
+          <span class="switch-title" id="edHideSniLabel">🕵 Hide SNI from DPI (TLS fragment)</span>
           <span class="switch"><input type="checkbox" id="edHideSni" /><span class="slider"></span></span>
         </label>
+        <!-- the server's finalmask already fragments the ClientHello: this switch would add a second fragmenter -->
+        <p class="hint warn" id="edHideSniFmNote" data-i18n="spoof.hideSniFinalmask" hidden></p>
         <div class="grid2" id="edPathRow">
           <div><label class="field-label" data-i18n="edit.path">Path / ServiceName</label>
             <input type="text" id="edPath" class="input" dir="ltr" /></div>

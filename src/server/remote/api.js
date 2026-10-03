@@ -6,7 +6,8 @@
  *
  *   remote_get()        → { relay: {enabled, relayUrl, name, tokenSet}, cloudflared: {installed, enabled, tokenSet} }
  *   remote_set(arg)     → { ok: true }    arg = { relay?: {enabled?, relayUrl?, name?, token?}, cloudflared?: {enabled?, token?} }
- *   remote_status()     → { relay: agent.status(), cloudflared: {installed, running, lastLine, …} }
+ *                         (throws an Error with the reason on a refusal; then nothing of either half is saved)
+ *   remote_status()     → { relay: agent.status(), cloudflared: {installed, running, lastLine, …, enabled, tokenSet, applying, apply} }
  *   cloudflared_install() → { accepted: true }     (opkg in the background; progress in the log)
  *
  * The settings live in <dataDir>/remote.json — a store of their own, not
@@ -68,6 +69,10 @@ function createRemoteApi({ store, service, agent, cloudflared, log = () => {} })
   const read = (key) => Object.assign({}, DEFAULTS()[key], store.get(key, {}) || {});
   const relay = () => read('relay');
   const cf = () => read('cloudflared');
+  // cloudflared.apply runs in the background and answers {ok, error}: kept
+  // for remote_status, so "enabled" that does not run can say why (v1.16.1)
+  let applying = 0;
+  let lastApply = null;       // { ok, error? } of the last apply that finished
 
   function remote_get() {
     const r = relay();
@@ -78,61 +83,89 @@ function createRemoteApi({ store, service, agent, cloudflared, log = () => {} })
     };
   }
 
+  /** The relay half of a remote_set, validated: the settings it would store (throws on a refusal). */
+  function nextRelay(a, cur) {
+    const next = Object.assign({}, cur);
+    if ('relayUrl' in a) {
+      const v = a.relayUrl === '' ? '' : validRelayUrl(a.relayUrl);
+      if (v === null) throw new Error('relayUrl must be https://<host>[:port]/ with no path');
+      next.relayUrl = v;
+    }
+    if ('name' in a) {
+      const v = validName(a.name);
+      if (v === null) throw new Error('name must be at most 40 printable characters');
+      next.name = v;
+    }
+    if ('token' in a && a.token !== '' && a.token != null) {
+      if (!isToken(a.token)) throw new Error('token must be the 43-character device token the relay showed');
+      next.token = a.token;
+    }
+    if ('enabled' in a) next.enabled = !!a.enabled;
+    if (next.enabled && (!next.relayUrl || !next.token)) throw new Error('enabling needs the relay URL and the device token');
+    return next;
+  }
+
+  /**
+   * The Cloudflare half, validated the same way: "enabled" is refused while
+   * cloudflared is not installed or no tunnel token is set — v1.16.0 took it,
+   * said "applied" and started nothing (field report L2). Judged only when
+   * the call carries this half, so a tick v1.16.0 saved does not block a
+   * relay change.
+   */
+  function nextCloudflared(a, cur) {
+    const next = Object.assign({}, cur);
+    if ('token' in a && a.token !== '' && a.token != null) {
+      if (!isTunnelToken(a.token)) throw new Error('the Cloudflare tunnel token does not look right');
+      next.token = String(a.token).trim();
+    }
+    if ('enabled' in a) next.enabled = !!a.enabled;
+    if (next.enabled && !cloudflared.installed()) throw new Error('enabling needs cloudflared — install it first');
+    if (next.enabled && !next.token) throw new Error('enabling needs the Cloudflare tunnel token');
+    return next;
+  }
+
+  /** Apply the tunnel's settings in the background; its result is what remote_status reports. */
+  function applyCloudflared(c) {
+    applying++;
+    return Promise.resolve()
+      .then(() => cloudflared.apply({ enabled: c.enabled, token: c.token }))
+      .then((r) => { lastApply = r && r.ok === false ? { ok: false, error: String(r.error || 'failed') } : { ok: true }; },
+        (e) => { lastApply = { ok: false, error: (e && e.message) || String(e) }; log('cloudflared: ' + lastApply.error, 'error'); })
+      .then(() => { applying--; });
+  }
+
   function remote_set(arg) {
     const a = arg && typeof arg === 'object' ? arg : {};
-    let relayChanged = false;
-    let cfChanged = false;
-    if (a.relay && typeof a.relay === 'object') {
-      const cur = relay();
-      const next = Object.assign({}, cur);
-      if ('relayUrl' in a.relay) {
-        const v = a.relay.relayUrl === '' ? '' : validRelayUrl(a.relay.relayUrl);
-        if (v === null) throw new Error('relayUrl must be https://<host>[:port]/ with no path');
-        next.relayUrl = v;
-      }
-      if ('name' in a.relay) {
-        const v = validName(a.relay.name);
-        if (v === null) throw new Error('name must be at most 40 printable characters');
-        next.name = v;
-      }
-      if ('token' in a.relay && a.relay.token !== '' && a.relay.token != null) {
-        if (!isToken(a.relay.token)) throw new Error('token must be the 43-character device token the relay showed');
-        next.token = a.relay.token;
-      }
-      if ('enabled' in a.relay) next.enabled = !!a.relay.enabled;
-      if (next.enabled && (!next.relayUrl || !next.token)) throw new Error('enabling needs the relay URL and the device token');
-      relayChanged = JSON.stringify(next) !== JSON.stringify(cur);
-      if (relayChanged) { store.set('relay', next); if (next.relayUrl !== cur.relayUrl) store.set('lastIps', []); }
-    }
-    if (a.cloudflared && typeof a.cloudflared === 'object') {
-      const cur = cf();
-      const next = Object.assign({}, cur);
-      if ('token' in a.cloudflared && a.cloudflared.token !== '' && a.cloudflared.token != null) {
-        if (!isTunnelToken(a.cloudflared.token)) throw new Error('the Cloudflare tunnel token does not look right');
-        next.token = String(a.cloudflared.token).trim();
-      }
-      if ('enabled' in a.cloudflared) next.enabled = !!a.cloudflared.enabled;
-      cfChanged = JSON.stringify(next) !== JSON.stringify(cur);
-      if (cfChanged) store.set('cloudflared', next);
-    }
+    // both halves are judged before either is written: a refusal leaves nothing half-saved
+    const relayCur = relay();
+    const relayNext = a.relay && typeof a.relay === 'object' ? nextRelay(a.relay, relayCur) : relayCur;
+    const cfCur = cf();
+    const cfNext = a.cloudflared && typeof a.cloudflared === 'object' ? nextCloudflared(a.cloudflared, cfCur) : cfCur;
+    const relayChanged = JSON.stringify(relayNext) !== JSON.stringify(relayCur);
+    const cfChanged = JSON.stringify(cfNext) !== JSON.stringify(cfCur);
+    if (relayChanged) { store.set('relay', relayNext); if (relayNext.relayUrl !== relayCur.relayUrl) store.set('lastIps', []); }
+    if (cfChanged) store.set('cloudflared', cfNext);
     if (relayChanged) {
       const r = relay();
       if (r.enabled) { agent.reconfigure(); log(`remote: relay link ${r.relayUrl} (${r.name || 'router'}) — (re)started`); }
       else { agent.stop(); log('remote: relay link off'); }
     }
-    if (cfChanged) {
-      const c = cf();
-      Promise.resolve().then(() => cloudflared.apply({ enabled: c.enabled, token: c.token })).catch((e) => log('cloudflared: ' + e.message, 'error'));
-    }
+    if (cfChanged) applyCloudflared(cf());
     return { ok: true };
   }
 
+  /** The relay agent's status; cloudflared's, with whether it is meant to run, a token is set, an apply is running and how the last one went. */
   async function remote_status() {
-    return { relay: agent.status(), cloudflared: await cloudflared.status() };
+    const st = await cloudflared.status();
+    const c = cf();
+    return {
+      relay: agent.status(),
+      cloudflared: Object.assign({}, st, { enabled: !!c.enabled, tokenSet: !!c.token, applying: applying > 0, apply: lastApply })
+    };
   }
 
   function cloudflared_install() {
-    return cloudflared.install(() => { const c = cf(); if (c.enabled && c.token) return cloudflared.apply({ enabled: true, token: c.token }); });
+    return cloudflared.install(() => { const c = cf(); if (c.enabled && c.token) return applyCloudflared({ enabled: true, token: c.token }); });
   }
 
   /** At service start: the link if enabled, the tunnel's drop-in and bypass if enabled (they live in /tmp and the live rules). */
@@ -140,9 +173,7 @@ function createRemoteApi({ store, service, agent, cloudflared, log = () => {} })
     const r = relay();
     if (r.enabled) agent.start();
     const c = cf();
-    if (c.enabled && c.token && cloudflared.installed()) {
-      Promise.resolve().then(() => cloudflared.apply({ enabled: true, token: c.token })).catch((e) => log('cloudflared: ' + e.message, 'error'));
-    }
+    if (c.enabled && c.token && cloudflared.installed()) applyCloudflared({ enabled: true, token: c.token });
   }
 
   function stop() { agent.stop(); }

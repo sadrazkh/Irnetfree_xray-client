@@ -125,11 +125,156 @@ test('validateWithFallback reports a plaintext rejection when the fork is not in
   });
 });
 
+// A patterniha subscription server: its ClientHello fragmenter lives in the
+// fork's `finalmask`, which the official 26.3.27 refuses — measured on all 44
+// of the owner's finalmask servers (field report S1, fix 20).
+const FINALMASK_CFG = {
+  inbounds: [],
+  outbounds: [{ tag: 'proxy', protocol: 'vless', streamSettings: { network: 'tcp', finalmask: { tcp: [{ type: 'fragment', settings: { packets: 'tlshello', length: '0-0' } }] } } }, { tag: 'direct', protocol: 'freedom' }]
+};
+const LENGTH_MIN = 'infra/conf: LengthMin can\'t be 0';
+
+test('validateWithFallback: a finalmask config goes to the fork FIRST when it is installed — the official core is not asked', async () => {
+  // Asked first, an official core older than 26.3.27 (the 23.05 feed's
+  // 24.12.31) passes it — Xray ignores keys it does not know — and runs the
+  // server with its mask silently dropped; a 26.3.27 refuses it, and that
+  // failing -test (geo files loaded, on a Cortex-A7) was paid on every connect
+  // (review of v1.16.1). README: such a config must run on PattN.
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm, dir, logs) => {
+    const calls = [];
+    xm.validate = async (cfg, id) => { calls.push(id); return { ok: true }; };   // an official core that would have passed it too
+    const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
+    assert.deepEqual(r, { ok: true, engine: 'xray-pattn', fellBack: true });
+    assert.deepEqual(calls, ['xray-pattn']);
+    assert.match(logs.at(-1), /finalmask.*Xray-PattN/);
+  });
+});
+
+test('validateWithFallback: …and what the fork refuses is the fork’s error (the official core knows even less)', async () => {
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
+    const calls = [];
+    xm.validate = async (cfg, id) => { calls.push(id); return { ok: false, error: 'infra/conf: bad finalmask' }; };
+    assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: false, engine: 'xray-pattn', error: 'infra/conf: bad finalmask', plaintextRejected: false });
+    assert.deepEqual(calls, ['xray-pattn']);
+  });
+});
+
+/**
+ * A fake official core behind spawn(): `version` names `ver`, and `run -test`
+ * says "Configuration OK." to ANY config — what a real Xray older than 26.3.27
+ * does with a finalmask, a key it does not know (checked by the reviewer with
+ * an unknown streamSettings key on 26.3.27 itself).
+ */
+function acceptingCore(ver, spawned) {
+  return (bin, args) => {
+    spawned.push([path.basename(bin), args.join(' ')]);
+    const child = stubChild();
+    const out = args.includes('version')
+      ? `Xray ${ver} (Xray, Penetrates Everything.) Custom (go1.23.4 linux/arm)\nA unified platform for anti-censorship.\n`
+      : `Xray ${ver} (Xray, Penetrates Everything.)\nConfiguration OK.\n`;
+    setImmediate(() => { child.stdout.emit('data', Buffer.from(out)); child.emit('exit', 0); });
+    return child;
+  };
+}
+
+test('validateWithFallback, with a real -test and version run: an official 24.12.31 that says "Configuration OK." to a finalmask config is not trusted with it — the fork is asked for', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const spawned = [];
+    fakeSpawn = acceptingCore('24.12.31', spawned);
+    try {
+      const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
+      assert.equal(r.ok, false, 'never run a finalmask server with its mask silently dropped');
+      assert.equal(r.pattnNeeded, true, 'the "needs Xray-PattN" message and the download prompt');
+      assert.equal(r.finalmaskIgnored, true);
+      assert.equal(r.coreVersion, '24.12.31');
+      assert.deepEqual(spawned.map(([b, a]) => [b, /-test/.test(a) ? 'test' : a]), [[exe('xray'), 'test'], [exe('xray'), 'version']]);
+      // the same core with a plain config is fine: the version is not the question then
+      spawned.length = 0;
+      const plain = { inbounds: [], outbounds: [{ tag: 'proxy', protocol: 'vless', streamSettings: { network: 'tcp' } }] };
+      assert.deepEqual(await xm.validateWithFallback(plain, 'xray'), { ok: true, engine: 'xray' });
+    } finally { fakeSpawn = null; }
+  });
+  // …and with the fork installed the official core is not even spawned for it
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
+    const spawned = [];
+    fakeSpawn = acceptingCore('24.12.31', spawned);
+    try {
+      assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: true, engine: 'xray-pattn', fellBack: true });
+      assert.deepEqual(spawned.map(([b]) => b), [exe('xray-pattn')]);
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validateWithFallback: …and says the fork is needed when it is not', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    xm.validate = async () => ({ ok: false, error: LENGTH_MIN });
+    xm.version = async () => '26.3.27';
+    const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
+    assert.deepEqual(r, { ok: false, engine: 'xray', error: LENGTH_MIN, plaintextRejected: false, pattnNeeded: true });
+  });
+});
+
+test('validateWithFallback: with no fork, an official core older than 26.3.27 that PASSES a finalmask config still needs the fork — it would drop the mask', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const calls = [];
+    xm.validate = async (cfg, id) => { calls.push(id); return { ok: true }; };   // unknown keys are ignored: "Configuration OK."
+    xm.version = async () => '24.12.31';
+    const r = await xm.validateWithFallback(FINALMASK_CFG, 'xray');
+    assert.equal(r.ok, false);
+    assert.equal(r.engine, 'xray');
+    assert.equal(r.pattnNeeded, true);
+    assert.equal(r.finalmaskIgnored, true);
+    assert.equal(r.coreVersion, '24.12.31');
+    assert.match(r.error, /xray 24\.12\.31 does not know finalmask \(26\.3\.27 and newer do\)/);
+  });
+});
+
+test('validateWithFallback: with no fork, an official core from 26.3.27 that accepts the finalmask runs it — and a config with none never asks the version', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    let asked = 0;
+    xm.validate = async () => ({ ok: true });
+    xm.version = async () => { asked++; return '26.3.27'; };
+    assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: true, engine: 'xray' });
+    assert.equal(asked, 1);
+    const plain = { inbounds: [], outbounds: [{ tag: 'proxy', protocol: 'vless', streamSettings: { network: 'tcp' } }] };
+    assert.deepEqual(await xm.validateWithFallback(plain, 'xray'), { ok: true, engine: 'xray' });
+    assert.equal(asked, 1);
+  });
+});
+
+test('validateWithFallback: the same words from a config with no finalmask are its own error (a freedom fragment), not a fork question', async () => {
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
+    const calls = [];
+    xm.validate = async (cfg, id) => { calls.push(id); return { ok: false, error: LENGTH_MIN }; };
+    const plain = { inbounds: [], outbounds: [{ tag: 'proxy', protocol: 'vless', streamSettings: { network: 'tcp' } }] };
+    assert.deepEqual(await xm.validateWithFallback(plain, 'xray'), { ok: false, engine: 'xray', error: LENGTH_MIN, plaintextRejected: false });
+    assert.deepEqual(calls, ['xray']);
+  });
+});
+
 test('validateWithFallback passes other errors through untouched', async () => {
   await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
     xm.validate = async () => ({ ok: false, error: 'infra/conf: unknown transport' });
     const r = await xm.validateWithFallback({}, 'xray');
     assert.deepEqual(r, { ok: false, engine: 'xray', error: 'infra/conf: unknown transport', plaintextRejected: false });
+  });
+});
+
+test('validateWithFallback: a check that was killed stays flagged on every path — the caller must not take it for a verdict', async () => {
+  const KILLED = { ok: false, killed: true, error: 'xray -test was killed (SIGKILL) — the config was not checked' };
+  const PLAINTEXT = 'vless without TLS or other encryption is prohibited unless the server address is a private IP or domain';
+  await withBin([exe('xray')], async (xm) => {
+    xm.validate = async () => KILLED;
+    assert.deepEqual(await xm.validateWithFallback({}, 'xray'), { ok: false, engine: 'xray', error: KILLED.error, plaintextRejected: false, killed: true });
+    // a finalmask config on the official core, no fork: no "install Xray-PattN" either
+    assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: false, engine: 'xray', error: KILLED.error, plaintextRejected: false, killed: true });
+  });
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
+    xm.validate = async () => KILLED;
+    assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: false, engine: 'xray-pattn', error: KILLED.error, plaintextRejected: false, killed: true });
+    // the official core refuses the plaintext, the fork's check is killed
+    xm.validate = async (cfg, id) => (id === 'xray' ? { ok: false, error: PLAINTEXT } : KILLED);
+    assert.deepEqual(await xm.validateWithFallback({}, 'xray'), { ok: false, engine: 'xray-pattn', error: KILLED.error, plaintextRejected: false, killed: true });
   });
 });
 
@@ -275,6 +420,41 @@ test('validate: an old core that does not know -test passes UNVERIFIED and is no
   });
 });
 
+test('validate: the -test deadline is the caller’s (6 s by default) — a run past it passes UNVERIFIED and says so at warn', async () => {
+  // The router asks for ~30 s: on a Cortex-A7 a -test past 6 s counted as a
+  // pass, and a config the core refuses then reached start() — whose 1.2 s
+  // grace hides a slow refusal (field report S2, fix 20).
+  assert.equal(new XrayManager({ dataDir: os.tmpdir() }).testTimeoutMs, 6000);
+  assert.equal(new XrayManager({ dataDir: os.tmpdir(), testTimeoutMs: 30000 }).testTimeoutMs, 30000);
+  await withBin([exe('xray')], async (xm) => {
+    const logs = [];
+    xm.onLog = (line, level) => logs.push([level, line]);
+    xm.testTimeoutMs = 40;
+    let killed = 0;
+    fakeSpawn = () => { const p = stubChild(); p.kill = () => { killed++; }; return p; };   // never exits by itself
+    try {
+      const cfg = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+      const t0 = Date.now();
+      assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true, unverified: true });
+      assert.ok(Date.now() - t0 < 3000, 'the deadline given, not the default');
+      assert.equal(killed, 1, 'the run is ended');
+      assert.ok(logs.some(([lvl, l]) => lvl === 'warn' && /did not finish its config check within 0\.04 s — the config was not verified/.test(l)), JSON.stringify(logs));
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: an old core that does not know -test passes UNVERIFIED with a warn line too', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const logs = [];
+    xm.onLog = (line, level) => logs.push([level, line]);
+    fakeSpawn = () => { const p = stubChild(); setImmediate(() => { p.stderr.emit('data', Buffer.from('flag provided but not defined: -test')); p.emit('exit', 2); }); return p; };
+    try {
+      assert.deepEqual(await xm.validate({ inbounds: [] }, 'xray'), { ok: true, unverified: true });
+      assert.ok(logs.some(([lvl, l]) => lvl === 'warn' && /does not know -test — the config was not verified/.test(l)), JSON.stringify(logs));
+    } finally { fakeSpawn = null; }
+  });
+});
+
 test('validate: the key follows the core file — a replaced binary is checked again', async () => {
   await withBin([exe('xray')], async (xm, dir) => {
     const before = spawns.length;
@@ -287,6 +467,57 @@ test('validate: the key follows the core file — a replaced binary is checked a
       fs.utimesSync(bin, t, t);                       // "re-downloaded": a new mtime
       assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true });
       assert.equal(spawns.length - before, 2);
+    } finally { fakeSpawn = null; }
+  });
+});
+
+// What `xray run -test` prints before it loads the geo files (checked on a local
+// xray 26.3.27 by the v1.16.1 re-review). A check killed after it leaves only
+// this, and its last line — the one extractXrayError picks — is no verdict.
+const TEST_BANNER = 'Xray 26.3.27 (Xray, Penetrates Everything.) Custom (go1.26.1 linux/arm)\n'
+  + 'A unified platform for anti-censorship.\n'
+  + '[Info] infra/conf/serial: Reading config: &{Name:/etc/irnetfree/test-cfg-1.json Format:json}\n';
+/** A -test that prints `out` (on stdout, or the stream named) and then ends with (code, signal). */
+const endsWith = (out, code, signal, stream = 'stdout') => () => {
+  const p = stubChild();
+  setImmediate(() => { p[stream].emit('data', Buffer.from(out)); p.emit('exit', code, signal); });
+  return p;
+};
+const TEST_CFG = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+
+test('validate: a -test killed by a signal after its banner (the kernel\'s OOM killer on a 512 MB router) is no verdict — it says it was killed, is flagged, and is not cached', async () => {
+  // was: { ok:false, error:'[Info] infra/conf/serial: Reading config: …' }, which the
+  // router's service took for the core refusing the config and waited 10 minutes on
+  await withBin([exe('xray')], async (xm) => {
+    const before = spawns.length;
+    fakeSpawn = endsWith(TEST_BANNER, null, 'SIGKILL');
+    try {
+      const r = await xm.validate(TEST_CFG, 'xray');
+      assert.equal(r.ok, false);
+      assert.equal(r.killed, true);
+      assert.match(r.error, /^xray(\.exe)? -test was killed \(SIGKILL\) — the config was not checked$/);
+      assert.equal((await xm.validate(TEST_CFG, 'xray')).killed, true);
+      assert.equal(spawns.length - before, 2, 'never cached');
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: …and so is a -test that Go\'s own runtime ended out of memory (exit 2) — either form the runtime prints', async () => {
+  const heap = 'fatal error: runtime: out of memory\n\nruntime stack:\nruntime.throw({0x1c2d4f3, 0x16})\n\t/usr/local/go/src/runtime/panic.go:1023 +0x4c\n\ngoroutine 1 [running]:\nmain.main()\n';
+  const block = 'runtime: out of memory: cannot allocate 4194304-byte block (3866624 in use)\nfatal error: out of memory\n\ngoroutine 1 [running]:\nruntime.throw({0x1c2d4f3, 0xd})\n\t/usr/local/go/src/runtime/panic.go:1023 +0x4c\n';
+  await withBin([exe('xray')], async (xm) => {
+    try {
+      for (const tail of [heap, block]) {
+        fakeSpawn = endsWith(TEST_BANNER + tail, 2, null, 'stderr');
+        const r = await xm.validate(TEST_CFG, 'xray');
+        assert.equal(r.ok, false);
+        assert.equal(r.killed, true, tail);
+        assert.match(r.error, /^xray(\.exe)? -test ran out of memory \(.*out of memory.*\) — the config was not checked$/);
+      }
+      // the core's own verdict after the same banner stays one: "Failed to start", exit 23
+      fakeSpawn = endsWith(TEST_BANNER + 'Failed to start: main: failed to load config files: [/etc/irnetfree/test-cfg-1.json] > infra/conf: unknown transport protocol: foo\n', 23, null);
+      const refused = await xm.validate(TEST_CFG, 'xray');
+      assert.deepEqual(refused, { ok: false, error: 'infra/conf: unknown transport protocol: foo' });
     } finally { fakeSpawn = null; }
   });
 });
@@ -332,6 +563,32 @@ test('a late exit or error from an old core cannot stop its replacement', async 
       assert.equal(xm.proc, current);
       assert.equal(xm.running, true);
       assert.deepEqual(statuses, [], 'the replacement must not be reported stopped');
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('recentLines: the last lines the core that was started last printed — for a core that dies after its grace period', async () => {
+  // The router's connect waits ~9 s for the SOCKS port after start() returned;
+  // a core that dies in that window must be reported with its own words
+  // (field report fix 20), not as "has not opened … starting the gateway anyway".
+  await withBin([exe('xray')], async (xm) => {
+    const first = stubChild();
+    const second = stubChild();
+    let n = 0;
+    fakeSpawn = () => (n++ === 0 ? first : second);
+    try {
+      assert.deepEqual(xm.recentLines(), [], 'nothing started yet');
+      const a = xm.start({ inbounds: [] }, 'xray');
+      first.stdout.emit('data', Buffer.from('Xray 26.3.27 started\n'));
+      await a;
+      first.stderr.emit('data', Buffer.from('\n  line one  \r\nline two\nline three\n'));
+      assert.deepEqual(xm.recentLines(2), ['line two', 'line three']);
+      first.emit('exit', 2, null);
+      assert.deepEqual(xm.recentLines(), ['Xray 26.3.27 started', 'line one', 'line two', 'line three'], 'still there once it has exited');
+      const b = xm.start({ inbounds: [] }, 'xray');
+      first.stdout.emit('data', Buffer.from('a late line from the old core\n'));
+      await b;
+      assert.deepEqual(xm.recentLines(), [], 'a new start begins empty, and the old core’s late output is not mixed in');
     } finally { fakeSpawn = null; }
   });
 });

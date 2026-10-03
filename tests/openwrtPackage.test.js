@@ -10,9 +10,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
 const { tar, untar, tgz, untgz } = require('../openwrt/tar');
-const { buildIpk, PKG, DEPENDS, PREFIX } = require('../openwrt/build-ipk');
+const { buildIpk, sourceDateEpoch, PKG, DEPENDS, PREFIX } = require('../openwrt/build-ipk');
 
 const ROOT = path.join(__dirname, '..');
 const VERSION = require('../package.json').version;
@@ -53,6 +54,93 @@ test('the ipk is what opkg expects: debian-binary, control, data — and is name
   assert.equal(path.basename(built.out), `${PKG}_${VERSION}_all.ipk`);
   assert.deepEqual(outer.map(e => e.name), ['./debian-binary', './control.tar.gz', './data.tar.gz']);
   assert.equal(outerMap['./debian-binary'].data.toString(), '2.0\n');
+});
+
+/**
+ * Every tar header's mtime in a gzipped tar, in order — the ustar field at
+ * offset 136, octal. Our reader leaves it out; this is all the tests need.
+ */
+function mtimesOf(gz) {
+  const buf = zlib.gunzipSync(gz);
+  const out = [];
+  for (let off = 0; off + 512 <= buf.length;) {
+    const h = buf.subarray(off, off + 512);
+    if (h.every(b => b === 0)) break;
+    out.push(parseInt(h.subarray(136, 148).toString('utf8').replace(/\0[\s\S]*$/, '').trim(), 8));
+    off += 512 + Math.ceil((parseInt(h.subarray(124, 136).toString('utf8').replace(/\0[\s\S]*$/, '').trim(), 8) || 0) / 512) * 512;
+  }
+  return out;
+}
+
+/** The mtimes of all three tars an ipk is made of: the outer one, control.tar.gz and data.tar.gz. */
+function ipkMtimes(file) {
+  const raw = fs.readFileSync(file);
+  const members = byName(untgz(raw));
+  return [...mtimesOf(raw), ...mtimesOf(members['./control.tar.gz'].data), ...mtimesOf(members['./data.tar.gz'].data)];
+}
+
+/** Runs `fn` with SOURCE_DATE_EPOCH set to `value` (undefined: unset), then puts the environment back. */
+function withEpoch(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'SOURCE_DATE_EPOCH');
+  const old = process.env.SOURCE_DATE_EPOCH;
+  if (value === undefined) delete process.env.SOURCE_DATE_EPOCH; else process.env.SOURCE_DATE_EPOCH = value;
+  try { return fn(); } finally { if (had) process.env.SOURCE_DATE_EPOCH = old; else delete process.env.SOURCE_DATE_EPOCH; }
+}
+
+/*
+ * The files' mtimes. uhttpd hands a file's mtime to the browser as
+ * Last-Modified and sends no Cache-Control, so the browser keeps a LuCI view
+ * fresh for a tenth of its age: stamped 1970 that is years, and after an
+ * upgrade the owner kept seeing the old pages. The release stamps the tagged
+ * commit's time (SOURCE_DATE_EPOCH, release.yml); a build without it takes the
+ * checkout's commit time — the same commit, the same bytes, and never 1970.
+ */
+test('mtimes: SOURCE_DATE_EPOCH stamps every member of all three tars, and the same epoch builds the same bytes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-ipk-sde-'));
+  try {
+    const epoch = 1790000000;
+    const a = withEpoch(String(epoch), () => fs.readFileSync(buildIpk({ root: ROOT, outDir: path.join(dir, 'a') }).out));
+    const b = withEpoch(String(epoch), () => fs.readFileSync(buildIpk({ root: ROOT, outDir: path.join(dir, 'b') }).out));
+    assert.ok(a.equals(b), 'reproducible: one epoch, one package');
+    const all = ipkMtimes(path.join(dir, 'a', `${PKG}_${VERSION}_all.ipk`));
+    assert.ok(all.length > 50, 'every header was read');
+    assert.deepEqual([...new Set(all)], [epoch]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('mtimes: without SOURCE_DATE_EPOCH the checkout\'s commit time — never 1970', (t) => {
+  const git = spawnSync('git', ['-C', ROOT, 'log', '-1', '--format=%ct'], { encoding: 'utf8' });
+  if (git.status !== 0 || !/^\d+$/.test(String(git.stdout).trim())) return t.skip('not a git checkout');
+  const commit = Number(String(git.stdout).trim());
+  assert.equal(sourceDateEpoch({ env: {}, root: ROOT }), commit);
+  assert.equal(sourceDateEpoch({ env: { SOURCE_DATE_EPOCH: '' }, root: ROOT }), commit, 'an empty value is no value');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-ipk-git-'));
+  try {
+    const out = withEpoch(undefined, () => buildIpk({ root: ROOT, outDir: dir }).out);
+    assert.deepEqual([...new Set(ipkMtimes(out))], [commit]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('mtimes: no SOURCE_DATE_EPOCH and no git — the build time, still never 1970', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-ipk-nogit-'));
+  try {
+    if (spawnSync('git', ['-C', dir, 'rev-parse', '--git-dir'], { encoding: 'utf8' }).status === 0) return t.skip('the temp dir is inside a git checkout');
+    assert.equal(sourceDateEpoch({ env: {}, root: dir, now: () => 1790000000999 }), 1790000000);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('mtimes: a SOURCE_DATE_EPOCH that is not whole seconds refuses to build', () => {
+  for (const bad of ['yesterday', '-5', '1.5', '17e8', '0x10']) {
+    assert.throws(() => sourceDateEpoch({ env: { SOURCE_DATE_EPOCH: bad }, root: ROOT }), /SOURCE_DATE_EPOCH/, bad);
+  }
+  assert.equal(sourceDateEpoch({ env: { SOURCE_DATE_EPOCH: ' 1790000000\n' }, root: ROOT }), 1790000000, 'surrounding whitespace is fine');
+  assert.equal(sourceDateEpoch({ env: { SOURCE_DATE_EPOCH: '0' }, root: ROOT }), 0, 'an explicit 0 is what was asked for');
 });
 
 test('control: the fields, the dependencies the router needs, conffiles, and the standard OpenWrt scripts', () => {
@@ -322,6 +410,51 @@ test('the QEMU guest script is POSIX sh and ends with the marker the driver look
   assert.match(drv, /'\/install\.sh': path\.join\(__dirname, '\.\.', 'install\.sh'\)/, 'and the driver hands the installer to the guest');
 });
 
+test('the QEMU smoke proves D3: the in-country resolvers stay in the whole-LAN tunnel, the core’s own query leaves by the WAN (fix/v1161-core)', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'openwrt', 'ci', 'guest-smoke.sh'), 'utf8');
+  const at = src.indexOf('say "D3: bypass-ir');
+  assert.notEqual(at, -1, 'the D3 section is gone');
+  const d3 = src.slice(at, src.indexOf('say "SMOKE OK"'));
+  // from a LAN client, DNS and HTTPS to them; as dnsmasq's own user, DNS (its upstream) — all dev IRNetFree
+  assert.match(d3, /ip route get "\$ip" from 192\.168\.1\.50 iif br-lan ipproto udp dport 53\)/);
+  assert.match(d3, /ip route get "\$ip" from 192\.168\.1\.50 iif br-lan ipproto tcp dport 443\)/);
+  assert.match(d3, /ip route get "\$ip" ipproto udp dport 53 uid "\$DNSMASQ_UID"\)/);
+  assert.match(d3, /\[ "\$DNSMASQ_UID" != 0 \]/, 'dnsmasq runs as a user of its own, or the own-lookup rule would take it out too');
+  // …and the service's own DNS to them (the relay link's lookup) leaves by the WAN — UDP 53 of its own user only (review of v1.16.1)
+  assert.match(d3, /grep -F 'iif lo' \| grep -F 'uidrange 0-0' \| grep -qE 'ipproto \(udp\|17\) dport 53'/);
+  assert.match(d3, /ip route get "\$ip" ipproto udp dport 53 uid 0\)/);
+  assert.match(d3, /grep -q "dev \$WANDEV"/);
+  assert.match(d3, /ip route get "\$ip" ipproto tcp dport 443 uid 0\)/);
+  assert.match(d3, /ip route get "\$ip" ipproto udp dport 53 uid 65534\)/);
+  // real packets: root's query from the WAN address, nobody's (setuid before the socket) not
+  assert.match(d3, /if \(uid\) process\.setuid\(Number\(uid\)\);\nconst s = require\('dgram'\)\.createSocket\('udp4'\);/);
+  assert.match(d3, /node \/tmp\/irnf-own-dns\.js 9\.9\.9\.9 "\$1" \$\{2:-\}/);
+  assert.match(d3, /ct2="\$\(own_ct "\$port" 65534\)"/);
+  // cloudflared's edge discovery: the unbound lines refused (the control), then an SRV answer through the
+  // drop-in the service's own remote api writes, its lines bound to the WAN device
+  assert.match(d3, /cf\.dnsmasqDropIn\(\['9\.9\.9\.9', '149\.112\.112\.112'\]\);/);
+  assert.match(d3, /the UNBOUND lines answered SRV/);
+  assert.match(d3, /luci remote_set '\{"cloudflared":\{"enabled":true,/);
+  assert.match(d3, /grep -q "\^server=\/argotunnel\.com\/9\.9\.9\.9@\$WANDEV\\\$"/);
+  assert.match(d3, /cf\.dnsmasqDropIn\(\['9\.9\.9\.9', '149\.112\.112\.112'\], process\.argv\[1\]\)/);
+  assert.match(d3, /d\.setServers\(\['127\.0\.0\.1'\]\); d\.resolveSrv\('_v2-origintunneld\._tcp\.argotunnel\.com'/);
+  assert.match(d3, /until echo "\$out" \| grep -q '"port":7844'; do/);
+  assert.match(d3, /luci remote_set '\{"cloudflared":\{"enabled":false\}\}'/);
+  // the own-lookup rules go with the gateway
+  assert.match(d3, /the own-lookup rules stayed after the D3 disconnect/);
+  // Quad9 as the in-country pair is said at warn (field report D3: a desktop's 8.8.8.8 restored on the router)
+  assert.match(d3, /since_mark \| grep -E '\(holds public resolvers\|رزولورهای عمومی دارد\) \\\(9\\\.9\\\.9\\\.9, 149\\\.112\\\.112\\\.112\\\)'/);
+  // sing-box's own exclusion list: the entry server stays, the resolvers do not
+  assert.match(d3, /route_exclude_address \| index\("192\.168\.1\.1\/32"\)/);
+  // the config: dns-internal → direct on :53, the direct dial bound to the WAN device; an Iranian name resolves; conntrack shows the WAN source
+  assert.match(d3, /\.outboundTag == "direct" and \.port == "53"/);
+  assert.match(d3, /\.streamSettings\.sockopt\.interface == \$dev/);
+  assert.match(d3, /nslookup www\.digikala\.com 1\.1\.1\.1/);
+  assert.match(d3, /\/proc\/net\/nf_conntrack/);
+  // and it leaves the router as it found it
+  assert.match(d3, /\\"routingMode\\":\\"global\\",\\"dnsDirect\\":\$D3_DIRECT_WAS/);
+});
+
 test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and takes a local ipk', () => {
   const src = fs.readFileSync(path.join(ROOT, 'openwrt', 'install.sh'), 'utf8');
   assert.match(src, /^#!\/bin\/sh\n/);
@@ -337,6 +470,32 @@ test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and t
   assert.match(src, /wget -q -O /, 'uclient-fetch syntax (the busybox wget applet is not on every image)');
   assert.doesNotMatch(src, /wget -qO-/, 'combined short options are not safe on uclient-fetch');
   assert.match(src, /raw\.githubusercontent\.com\/sadrazkh\/Irnetfree_xray-client\/main\/openwrt\/install\.sh/, 'its own one-line URL is in the header');
+  // the cores it points to: the app's own download first, the feed's xray-core only as a fallback — the LAN's DNS
+  // (REFUSED for HTTPS/SVCB queries, expectedIPs) is verified on xray 26.3.27+, and both feeds carry older builds
+  const out = src.split('\n').filter(l => /^echo /.test(l));
+  const from = out.findIndex(l => /Cores:/.test(l));
+  assert.ok(from >= 0, 'the installer says where the cores come from');
+  const cores = out.slice(from, out.findIndex((l, i) => i > from && /Log:/.test(l))).join('\n');
+  assert.match(cores, /Settings -> Required files/);
+  assert.match(cores, /opkg install xray-core sing-box/);
+  assert.ok(cores.indexOf('Required files') < cores.indexOf('opkg install xray-core'), 'Required files is named first');
+  assert.match(cores, /26\.3\.27/, 'and why: the version the LAN\'s DNS is verified on');
+  assert.match(cores, /fallback/i, 'the feed is the fallback, not an equal choice');
+  // Required files is in the :6969 web UI only — LuCI has a Settings tab of its own, without any core download
+  assert.match(cores, /web UI[^\n]*Settings -> Required files/, 'the place is named: the web UI the link above opens');
+  assert.match(cores, /not LuCI's Settings tab/, 'and it is not LuCI\'s Settings tab');
+  // After an upgrade the browser keeps the old LuCI pages: v1.16.0 and older dated every file 1970, the view URLs do
+  // not change between versions, so a cached copy stays "fresh" for years and is never asked for again — Ctrl+F5
+  // refreshes one page load, not the views LuCI fetches after it. Said every time, not "if the pages look old".
+  const upgrade = out.slice(out.findIndex(l => /After an upgrade/.test(l))).join('\n');
+  assert.ok(out.some(l => /After an upgrade/.test(l)), 'the installer says what to do in the browser after an upgrade');
+  assert.match(upgrade, /log out of LuCI/);
+  assert.match(upgrade, /cached (images and )?files/, 'clear the browser\'s cached files — the step that reliably works');
+  assert.match(upgrade, /Ctrl\+Shift\+Del/);
+  assert.match(upgrade, /phone/, 'and on a phone');
+  assert.match(upgrade, /private/, 'a private window: no cache, the quick check');
+  assert.match(upgrade, /v1\.16\.0 or older/, 'unconditional coming from a 1970-dated package');
+  assert.doesNotMatch(upgrade, /\bif (the )?(LuCI )?pages? (look|show)/i, 'not conditional on noticing old pages — nothing tells the owner they are old');
 });
 
 test('LuCI: Services → IRNetFree with four tabs, behind its own ACL', () => {
