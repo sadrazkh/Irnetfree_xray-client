@@ -446,6 +446,12 @@ test('the QEMU smoke proves v1.16.2: 65536 open files for node and both cores, u
   assert.match(v, /a name resolved with the DoH black-holed — the outage was not simulated/);
   assert.doesNotMatch(v, /\.answered \* 4 >= \.sent \* 3/, 'REFUSED from an overflowing dnsmasq is no answer');
   assert.match(v, /resolves example\.org/);
+  // the one-time repair on the real store: the owner's shape seeded with the service stopped, repaired and said once
+  assert.match(v, /jq 'del\(\.routerRepair\) \| \.settings\.lanBlockQuic = false \| \.settings\.autoConnect = false \| \.settings\.dnsDirect = \["1\.1\.1\.1", "8\.8\.8\.8"\]'/);
+  assert.match(v, /since_mark \| grep 'Router settings repaired once' \|\|/);
+  assert.match(v, /\.result\.dnsDirect == \["178\.22\.122\.100", "185\.51\.200\.2"\]/);
+  assert.match(v, /if since_mark \| grep -q 'Router settings repaired once'; then echo "the repair ran a second time"; exit 1; fi/);
+  assert.match(v, /cp \/tmp\/irnf-store\.saved "\$STORE"/, 'the store is put back as it was');
   // the flood script inside: arrow functions only (the bashism check reads heredocs too)
   assert.doesNotMatch(v, /^\s*function\s/m);
 });

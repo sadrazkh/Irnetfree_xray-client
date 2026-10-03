@@ -1305,4 +1305,37 @@ i=0
 while ip link show IRNetFree >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 60 ] || { echo "the TUN device stayed after the v1.16.2 disconnect"; exit 1; }; sleep 1; done
 if [ -n "$FLOODNS" ]; then ip netns delete lan0; fi
 
+say "v1.16.2: the one-time repair — a store as a desktop backup left it before v1.16.1 is repaired at the next start, once, and said"
+STORE=/etc/irnetfree/store.json
+[ "$(jq -r '.routerRepair' "$STORE")" = 1 ] || { echo "no routerRepair marker in the store after the first start"; jq -c 'del(.servers, .subscriptions)' "$STORE" | cut -c1-300; exit 1; }
+svc_stop() {
+	/etc/init.d/irnetfree stop
+	i=0; while pidof node >/dev/null; do i=$((i+1)); [ $i -lt 40 ] || { echo "the service did not stop"; exit 1; }; sleep 1; done
+}
+svc_up() {
+	i=0; until curl -fs -o /dev/null http://127.0.0.1:6969/web-api.js; do i=$((i+1)); [ $i -lt 150 ] || { echo "the UI did not come back"; logread | tail -30; exit 1; }; sleep 2; done
+}
+svc_stop
+cp "$STORE" /tmp/irnf-store.saved
+# the owner's router: public resolvers as the in-country DNS, QUIC refusal and connect-at-start off, no marker
+jq 'del(.routerRepair) | .settings.lanBlockQuic = false | .settings.autoConnect = false | .settings.dnsDirect = ["1.1.1.1", "8.8.8.8"]' /tmp/irnf-store.saved > "$STORE"
+mark repair
+/etc/init.d/irnetfree start
+svc_up
+since_mark | grep 'Router settings repaired once' || { echo "the repair was not said in syslog"; since_mark | grep irnetfree | tail -10; exit 1; }
+rpc '{"channel":"settings:get"}' | jq -c '.result | {lanBlockQuic, autoConnect, dnsDirect}'
+rpc '{"channel":"settings:get"}' | jq -e '.result.lanBlockQuic == true and .result.autoConnect == true and .result.dnsDirect == ["178.22.122.100", "185.51.200.2"]' >/dev/null \
+	|| { echo "the repair did not put the router's values back"; exit 1; }
+[ "$(jq -r '.routerRepair' "$STORE")" = 1 ] || { echo "the repair left no marker"; exit 1; }
+# once: the next start says nothing
+mark repair2
+/etc/init.d/irnetfree restart
+svc_up
+sleep 3
+if since_mark | grep -q 'Router settings repaired once'; then echo "the repair ran a second time"; exit 1; fi
+svc_stop
+cp /tmp/irnf-store.saved "$STORE"
+/etc/init.d/irnetfree start
+svc_up
+
 say "SMOKE OK"
