@@ -1347,10 +1347,11 @@ function createService(opts = {}) {
 
   /**
    * A connect refused before anything starts: the core's own verdict on the
-   * config, a plan that cannot be built, a missing sing-box. No quick retry
-   * changes that — a file installed, an edit or a subscription refresh does —
-   * so the router's boot loop and recovery say it as an error and try again
-   * rarely (holdRefused), instead of "Waiting for internet…" every 15-60 s.
+   * config (Xray-PattN needed among them), a plan that cannot be built. No
+   * quick retry changes that — a file installed, an edit or a subscription
+   * refresh does — so the router's boot loop and recovery say it as an error
+   * and try again rarely (holdRefused), instead of "Waiting for internet…"
+   * every 15-60 s. A binary missing is not one: it may be back in a minute.
    */
   const refusal = (e) => Object.assign(e instanceof Error ? e : new Error(String(e)), { refused: true });
 
@@ -1433,8 +1434,10 @@ function createService(opts = {}) {
     // On a router "connected, proxy only" is the whole LAN going direct behind
     // a gateway that says it is up — so there the gateway is not optional: a
     // missing sing-box / nft is a failed connect, before any core is started.
+    // (no refusal(): a binary gone for a while — an opkg upgrade, a file held —
+    // comes back by itself, and the recovery's backoff is what finds it)
     if (OPENWRT && settings.tunMode && !myTun.isAvailable()) {
-      throw refusal(settings.lang === 'en'
+      throw new Error(settings.lang === 'en'
         ? 'The whole-network tunnel needs sing-box and nft on the router: opkg install sing-box nftables (or Settings → Required files for sing-box)'
         : 'تونل کل شبکه روی روتر به sing-box و nft نیاز دارد: opkg install sing-box nftables (یا sing-box از تنظیمات → فایل‌های موردنیاز)');
     }
@@ -1527,10 +1530,11 @@ function createService(opts = {}) {
       // the (untranslated) product name in it. A property set here would be
       // dropped in transit — don't add one.
       const refused = new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
-      // the core's verdict, unless its check itself was killed or never ran (a
-      // signal, a spawn short of memory). (`refused` is read in this process
-      // only — the boot loop and the recovery — never by the renderer.)
-      throw /exited with code null|\bE(NOMEM|AGAIN|MFILE|NFILE)\b/.test(String(check.error || '')) ? refused : refusal(refused);
+      // the core's verdict, unless its check was killed or never ran: a
+      // signal, a spawn short of memory, its file gone or being replaced (an
+      // opkg upgrade) — those come back by themselves. (`refused` is read in
+      // this process only — the boot loop and the recovery — never by the renderer.)
+      throw /exited with code null|binary not found|\bE(NOENT|TXTBSY|NOMEM|AGAIN|MFILE|NFILE)\b/.test(String(check.error || '')) ? refused : refusal(refused);
     }
     const runEngine = check.engine;
     // The LAN's DNS plan (the hijack's `rules` form, `expectedIPs`) is verified
@@ -2163,8 +2167,8 @@ function createService(opts = {}) {
   }
 
   /**
-   * On a router: a connect the core refused (refusal() — the config, a plan
-   * that cannot be built, sing-box missing), from the recovery or a hand-over.
+   * On a router: a connect the core refused (refusal() — the config, Xray-PattN
+   * needed, a plan that cannot be built), from the recovery or a hand-over.
    * The intent stays; the clients hear why as an error (LuCI: "Error: …"), not
    * "Reconnecting… (attempt n)" with the reason only in syslog; it is tried
    * again rarely (T.refusedRetryMs) — a file installed, an edit or a
@@ -3383,7 +3387,7 @@ function createService(opts = {}) {
       if (bootCancelled || isQuitting) return;
       const more = attempt < AUTO_RETRY.tries;
       // Refused by the core (refusal(): a finalmask server with no Xray-PattN
-      // on a feed core, a config it rejects, sing-box missing) — not the WAN,
+      // on a feed core, a config it rejects, a plan it cannot build) — not the WAN,
       // the modem or the clock: "Waiting for internet…" every 15-60 s would
       // hide it (v1.16.1 re-review). Said as an error, tried again rarely.
       const refused = OPENWRT && !!(e && e.refused);
