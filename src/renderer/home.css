@@ -207,6 +207,21 @@
   text-align: center;
   direction: ltr;
 }
+/* What the live connection did not do (proxy only, the leak guard): under the
+   state for as long as it is up. The reason is the backend's own words, often
+   a long path or a sing-box line, so it wraps anywhere rather than widen the panel. */
+.conn-issues { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.conn-issue {
+  padding: 6px 9px;
+  border: 1px solid var(--danger);
+  border-radius: var(--r4);
+  background: var(--dangerSoft);
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.55;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
 
 .readouts {
   flex: 1 1 420px;
