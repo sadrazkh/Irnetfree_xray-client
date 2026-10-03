@@ -1093,7 +1093,24 @@ function doConnect(serverId, opts) {
   connectsInFlight.add(p);
   const settled = () => connectsInFlight.delete(p);
   p.then(settled, settled);
+  // after `settled` (registered first): this connect is no longer "in flight"
+  if (!(opts && opts.recovery)) p.catch(() => releaseGuardAfterFailedConnect().catch(() => {}));
   return p;
+}
+
+/**
+ * A connect that failed before any tunnel came up (a refused config, the core
+ * not starting): a guard still held for a reconnect that was given up points
+ * every adapter at a resolver nothing answers, and the window's "give my
+ * internet back" banner went away with this connect's 'connecting'. Given back
+ * here, as a TUN that fails to start does — unless a tunnel is up or another
+ * connect is being built (the guard is theirs). A recovery keeps its hold.
+ */
+async function releaseGuardAfterFailedConnect() {
+  if (guardInUse()) return null;
+  const r = await releaseStrandedGuard(leakGuard);
+  if (r && r.released) send('log', { line: 'The connect failed before a tunnel came up — the adapters’ DNS, held for the last connection, is theirs again', level: 'info' });
+  return r;
 }
 
 /**
