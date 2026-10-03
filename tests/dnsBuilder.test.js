@@ -462,9 +462,10 @@ test('routerDnsTuning: a fallback that is not a DoH URL keeps the queries serial
   assert.deepEqual(d.servers.at(-1), { address: '192.168.60.1' }, 'the target resolver as it was');
   assert.equal(d.servers[0].timeoutMs, 8000, 'the DoH entries still get their time');
   assert.equal(d.serveStale, true);
-  // with search domains it is never a fallback (skipFallback): the race is safe again
+  // with search domains it is no fallback (skipFallback), but a race asks EVERY sorted server at once: the
+  // company's names (x.tes.systems) would go to the public DoH servers too — serial (review of v1.16.2)
   const scoped = buildDnsPlan(base(), opts({ targetResolvers: [{ address: '192.168.60.1', outboundTag: 'wg-corp', domains: ['domain:tes.systems'] }] }));
-  assert.equal(routerDnsTuning(scoped.dns).enableParallelQuery, true);
+  assert.equal('enableParallelQuery' in routerDnsTuning(scoped.dns), false);
   // a plain resolver in the remote list (rides the exit as UDP): serial, as before
   assert.equal('enableParallelQuery' in routerDnsTuning(buildDnsPlan(base({ dnsRemote: ['https://1.1.1.1/dns-query', '8.8.8.8'] }), opts()).dns), false);
 });

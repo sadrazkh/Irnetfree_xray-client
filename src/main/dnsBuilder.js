@@ -330,12 +330,14 @@ const ROUTER_SERVE_EXPIRED_TTL = 86400;
  *     joins the lookup in flight (xray deduplicates by name) and finds it
  *     cached.
  *   - `enableParallelQuery`: the DoH servers race (both connections stay
- *     warm), the fallback is no longer a cold 4 s after the first. The
- *     in-country pair is its own group, asked first for .ir names as before —
- *     only when every server a public name can fall back to is a DoH URL: a
- *     plain resolver, or a corporate WireGuard's without search domains, would
- *     otherwise be asked EVERY name, through its own tunnel (dnsBuilder above:
- *     "public names never travel through the tunnel to the company").
+ *     warm), the fallback is no longer a cold 4 s after the first. A race
+ *     asks every sorted server at the same time: for .ir names the in-country
+ *     pair's answer is preferred (its own group), but the DoH servers are asked
+ *     too. So it is on only when every server is a DoH URL or the in-country
+ *     pair: a plain resolver, or ANY corporate WireGuard resolver (with search
+ *     domains or without), keeps the queries serial — otherwise the company's
+ *     names would reach the public DoH servers, or every public name the
+ *     company ("the internal name is never shown outside").
  *   - `serveStale` with a day's `serveExpiredTTL`: a name the router knew is
  *     answered at once (TTL 1) during an outage of the exit's DoH and refreshed
  *     behind it — not "no answer" for the whole house.
@@ -345,12 +347,17 @@ const ROUTER_SERVE_EXPIRED_TTL = 86400;
  * by every core as the string form is. Returns a new object; anything without
  * a server list comes back as it was.
  */
+/** The domains buildDnsPlan gives the in-country pair (Iran, or China for the cn bypass) — nothing else may race. */
+const IN_COUNTRY_DOMAINS = new Set(['geosite:category-ir', 'regexp:.*\\.ir$', 'geosite:cn']);
+
 function routerDnsTuning(dns) {
   if (!dns || !Array.isArray(dns.servers)) return dns;
   const isDoh = (s) => typeof s === 'string' && isDohUrl(s);
   const servers = dns.servers.map(s => (isDoh(s) ? { address: s, timeoutMs: ROUTER_DOH_TIMEOUT_MS } : s));
-  // every server a name can fall back to (no skipFallback) is a DoH URL of the remote list
-  const raceSafe = dns.servers.every(s => isDoh(s) || (s && typeof s === 'object' && s.skipFallback === true));
+  // a race asks every sorted server at once: only DoH URLs of the remote list and the in-country pair may take part
+  const inCountry = (s) => !!s && typeof s === 'object' && s.skipFallback === true
+    && Array.isArray(s.domains) && s.domains.length > 0 && s.domains.every(d => IN_COUNTRY_DOMAINS.has(d));
+  const raceSafe = dns.servers.every(s => isDoh(s) || inCountry(s));
   const out = Object.assign({}, dns, { servers });
   if (raceSafe) out.enableParallelQuery = true;
   out.serveStale = true;
