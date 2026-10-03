@@ -678,6 +678,7 @@ test('Required files: the three cores get «انتخاب نسخه» beside an un
     assert.equal(h.downloads.at(-1), key);
   }
   for (const label of ['comp.geo', 'comp.tun2socksLegacy', 'comp.wintun']) assert.doesNotMatch(byLabel(label).innerHTML, /comp-pick|cv\.choose/, label);
+  assert.equal(I18N.split("'cv.choose':").length - 1, 2, 'the button’s word in fa and en');
   // the installed versions, sing-box's too once it is there
   assert.match(byLabel('comp.xrayPattn').innerHTML, /<span class="comp-ver">v26\.9\.22<\/span>/);
   const sb = rowsHarness({ platform: 'linux', xray: true, 'sing-box': true }, { 'sing-box': '1.13.14' }, 'openwrt');
