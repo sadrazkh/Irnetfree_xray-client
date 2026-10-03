@@ -494,13 +494,13 @@ function snapshotHarness(flavor = 'openwrt') {
     updateLanInfo: () => {}, hideGeo: () => {}, resetTraffic: () => {}, checkIp: () => {}, quickPing: (id) => calls.push('quickPing:' + id), updateAdminBtn: () => {},
     reconnectingKey: () => 'state.reconnecting', failedKey: () => 'net.failed',
     // timers run at once, so what a handler defers (the quick ping, the IP check) is seen
-    setInterval: () => 1, clearInterval: () => {}, setTimeout: (fn) => { try { fn(); } catch {} return 1; }, Date,
+    setInterval: () => 1, clearInterval: () => {}, setTimeout: (fn) => { try { fn(); } catch {} return 1; }, clearTimeout: () => {}, Date,
     window: { api: {} }
   });
   vm.runInContext(['var uptimeTimer = null;', 'var uptimeFrom = 0;', fnSource('startUptime'), fnSource('attemptText'),
     fnSource('applyKillSwitchState'), fnSource('applyConnSnapshot'),
     // what a 'connected' status says besides the state (v1.16.3, tests/windowsVisibility.test.js)
-    fnSource('connIssuesFrom'), fnSource('noticeText'), fnSource('connectToasts'), fnSource('toastSeries'),
+    fnSource('connIssuesFrom'), fnSource('noticeText'), fnSource('connectToasts'), fnSource('toastSeries'), fnSource('cancelToastSeries'),
     handlerSource('onStatus'), handlerSource('onXrayStatus')].join('\n'), ctx);
   return { ctx, calls, el };
 }

@@ -345,7 +345,7 @@ class El {
   setAttribute() {}
 }
 
-function windowHarness({ lang = 'en', platform = 'win32', flavor = null, api = {}, timers = null } = {}) {
+function windowHarness({ lang = 'en', platform = 'win32', flavor = null, api = {}, timers = null, clear = null } = {}) {
   const calls = [];
   const els = new Map();
   const el = (id) => { if (!els.has(id)) els.set(id, new El(id)); return els.get(id); };
@@ -363,10 +363,10 @@ function windowHarness({ lang = 'en', platform = 'win32', flavor = null, api = {
     updateAdminBtn: (on) => calls.push(['admin', on]),
     reconnectingKey: () => 'state.reconnecting', failedKey: () => 'net.failed',
     attemptText: (kind, n) => `${kind} ${n}`, showErrorReason: (m) => calls.push(['error', m]),
-    setTimeout: timers || ((fn) => { fn(); return 1; }), clearTimeout: () => {},
+    setTimeout: timers || ((fn) => { fn(); return 1; }), clearTimeout: clear || (() => {}),
     window: { api }
   });
-  vm.runInContext(['connIssuesFrom', 'noticeText', 'renderConnIssues', 'connectToasts', 'toastSeries',
+  vm.runInContext(['connIssuesFrom', 'noticeText', 'renderConnIssues', 'connectToasts', 'toastSeries', 'cancelToastSeries',
     'checkAutostart', 'renderAutostartBanner', 'repointAutostart', 'giveInternetBack'].map((n) => fnOf(APP, n)).join('\n') + '\n' + handlerSource('onStatus'), ctx);
   const toasts = () => calls.filter((c) => c[0] === 'toast');
   return { ctx, calls, el, toasts };
@@ -527,6 +527,35 @@ test('the toasts of one connect come one after another, not over each other', ()
   assert.deepEqual(series(), ['err:Leak guard f', 'warn:geo']);
   pending.find(([, ms]) => ms === 2600 + 300)[0]();
   assert.deepEqual(series(), ['err:Leak guard f', 'warn:geo', 'warn:Managed DNS ']);
+});
+
+test('a series still running when its connection goes (a disconnect, a switch, a rebuild) stops there — and a notice it never showed is said by the next connection', () => {
+  const twin = NOTES[1];   // the store's: once per run
+  for (const gone of [{ state: 'disconnected' }, { state: 'connecting', serverId: 's2' }, { state: 'reconnecting', reason: 'interfaces' }]) {
+    const pending = new Map();
+    let n = 0;
+    const h = windowHarness({ timers: (fn, ms) => { pending.set(++n, [fn, ms]); return n; }, clear: (id) => pending.delete(id) });
+    const runPending = () => { const list = [...pending.values()]; pending.clear(); for (const [fn] of list) fn(); };
+    h.ctx.onStatus(Object.assign({}, UP, { guardError: 'g', notices: [twin, NOTES[3]] }));
+    assert.deepEqual(h.toasts().map((c) => c[1]), ['err'], 'the first one shows, the rest wait their turn');
+    h.ctx.onStatus(gone);
+    runPending();
+    assert.deepEqual(h.toasts().map((c) => c[1]), ['err'], `nothing more after '${gone.state}'`);
+    // the next connection says what was never shown — the twin too, though it is once per run
+    const warns = () => h.toasts().filter((c) => c[1] === 'warn').map((c) => c[2]);
+    h.ctx.onStatus(Object.assign({}, UP, { notices: [twin, NOTES[3]] }));
+    runPending();
+    runPending();
+    assert.deepEqual(warns(), [notices.noticeLine(twin), notices.noticeLine(NOTES[3])], gone.state);
+    // shown now: the twin is not said again this run, the PC's finding is (a new connection)
+    h.ctx.onStatus({ state: 'disconnected' });
+    h.ctx.onStatus(Object.assign({}, UP, { notices: [twin, NOTES[3]] }));
+    runPending();
+    assert.deepEqual(warns().slice(2), [notices.noticeLine(NOTES[3])]);
+  }
+  // a core that stopped with nothing to rebuild it is a disconnect too
+  const xrayStopped = slice(APP, 'window.api.onXrayStatus((d) => {', '\n});');
+  assert.match(xrayStopped, /state\.connected = false;\n\s*cancelToastSeries\(\);/);
 });
 
 test('a notice’s text: every {field} filled from the notice, literally — a { t } field is the window’s own string, in the user’s language', () => {

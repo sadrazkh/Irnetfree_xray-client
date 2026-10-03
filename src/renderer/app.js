@@ -2262,28 +2262,44 @@ function connectToasts(d) {
   if (d && d.geoWarn) out.push({ msg: d.geoWarn, kind: 'warn', ms: 2600 });
   if (!state.noticesToasted) state.noticesToasted = new Set();
   if (!state.noticesOnce) state.noticesOnce = new Set();
+  const listed = new Set();
   for (const n of (d && Array.isArray(d.notices)) ? d.notices : []) {
     if (!n || !n.id) continue;
     const key = JSON.stringify(n);
     // wgSharedKey / wgSharedAddress and their …Sub forms (the twin in a subscription): the store's, once per run
     const said = /^wgShared(Key|Address)(Sub)?$/.test(n.id) ? state.noticesOnce : state.noticesToasted;
-    if (said.has(key)) continue;
-    said.add(key);
-    out.push({ msg: noticeText(n), kind: 'warn', ms: 12000 });
+    if (said.has(key) || listed.has(key)) continue;
+    listed.add(key);
+    // said once it is on screen: a series cut short (the connection went) leaves it to the next connection
+    out.push({ msg: noticeText(n), kind: 'warn', ms: 12000, shown: () => said.add(key) });
   }
   return out;
 }
 
-/** Toasts one after another: there is one toast element, and a second toast() replaces the first unread. */
+/**
+ * Toasts one after another: there is one toast element, and a second toast()
+ * replaces the first unread. One series at a time — a new one ends the last,
+ * and so does the connection going (cancelToastSeries); an item's `shown` runs
+ * once it is actually on screen.
+ */
 function toastSeries(items) {
+  cancelToastSeries();
   const list = (items || []).filter(i => i && i.msg);
   const next = () => {
+    toastSeries._t = null;
     const it = list.shift();
     if (!it) return;
     toast(it.msg, it.kind, it.ms);
-    if (list.length) setTimeout(next, it.ms + 300);
+    if (typeof it.shown === 'function') it.shown();
+    if (list.length) toastSeries._t = setTimeout(next, it.ms + 300);
   };
   next();
+}
+
+/** The rest of a series, not shown yet, goes with its connection (a disconnect, a switch, a rebuild). */
+function cancelToastSeries() {
+  clearTimeout(toastSeries._t);
+  toastSeries._t = null;
 }
 
 /* ------------- Windows: the logon task starts another copy (v1.16.3, L1) ------------- */
@@ -2595,6 +2611,8 @@ window.api.onStatus((d) => {
   // under a live tunnel. A failed teardown is no new state: it leaves it be.
   const gb = $('#guardBanner');
   if (gb && d.state !== 'cleanup-failed') gb.hidden = !(d.state === 'reconnect-failed' && d.guardHeld);
+  // the last connection's toasts not shown yet go with it ('connected' starts its own series)
+  if (d.state !== 'connected' && d.state !== 'cleanup-failed') cancelToastSeries();
   if (d.state === 'connected') {
     state.connected = true;
     state.connecting = false;
@@ -2715,6 +2733,7 @@ window.api.onXrayStatus((d) => {
   // "disconnected" with a red toast here was the whole backoff's display (S4)
   if (d.state === 'stopped' && state.connected && !d.rebuilding) {
     state.connected = false;
+    cancelToastSeries();
     setConnUI('disconnected');
     renderPendingBanner();
     renderServers();
