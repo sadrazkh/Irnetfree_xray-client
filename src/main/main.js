@@ -21,7 +21,7 @@ const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = requir
 const { Store } = require('./store');
 const { SubscriptionManager } = require('./subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
-const { TunSingbox } = require('./tunSingbox');
+const { TunSingbox, TUN_ADDR4 } = require('./tunSingbox');
 const { NativeMacTun } = require('./nativeMacTun');
 const { recoverMacNetwork } = require('./macRecovery');
 const { collectDiagnostics } = require('./connectionDiagnostics');
@@ -41,7 +41,8 @@ const { NetWatcher, fingerprint } = require('./netWatcher');
 const { DropBudget } = require('./dropBudget');
 const { isWebUrl, isAppPage } = require('./urlGuard');
 const { runElevatedRelaunch } = require('./relaunch');
-const { schtasksCreateArgs, schtasksDeleteArgs, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
+const { schtasksCreateArgs, schtasksDeleteArgs, schtasksQueryXmlArgs, taskExeFromXml, autostartStale, autostartExe, loginItemSettings, startsHidden } = require('./autostart');
+const { sharedWgIdentities, localSubnets, lanOverlaps, routeTargetName, noticeLine } = require('./connectNotices');
 const { trayGroups, trayStopItem } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
@@ -360,6 +361,54 @@ function setAutostart(enabled) {
   // macOS ignores `args`: it opens hidden through its own setting (autostart.js).
   try { app.setLoginItemSettings(loginItemSettings(enabled, process.platform)); return Promise.resolve({ ok: true }); }
   catch (e) { return Promise.resolve({ ok: false, error: e.message }); }
+}
+
+/**
+ * Windows: does the logon task start ANOTHER copy of the app? It runs exactly
+ * the file it was registered with, so a PC can keep starting an old build — one
+ * from before the v1.14 Windows DNS fix — at every logon while this one sits
+ * beside it (windows-android-report L1). Asked by the window once it loads
+ * (autostart:check), never at launch: one READ of the task (`schtasks /Query
+ * /XML`), answered once per run. A packaged build only — a dev run's
+ * electron.exe is never the file a task should start. Resolves { stale,
+ * taskExe?, currentExe? }; any doubt is { stale: false } (autostartStale).
+ */
+let autostartChecked = null;
+function autostartCheck() {
+  if (process.platform !== 'win32' || !app.isPackaged) return Promise.resolve({ stale: false });
+  if (!autostartChecked) {
+    autostartChecked = new Promise((resolve) => {
+      execFile('schtasks', schtasksQueryXmlArgs(), { windowsHide: true, timeout: 15000 }, (err, so) => {
+        if (err) return resolve({ stale: false });   // no task (or not readable): nothing to say
+        const taskExe = taskExeFromXml(String(so || ''));
+        const currentExe = autostartExe();
+        if (!autostartStale(taskExe, currentExe, { same: sameFile })) return resolve({ stale: false });
+        send('log', { line: `The logon task IRNetFree starts ${taskExe}, not this copy (${currentExe}) — at the next logon Windows runs that build instead of this one`, level: 'warn' });
+        resolve({ stale: true, taskExe, currentExe });
+      });
+    });
+  }
+  return autostartChecked;
+}
+
+/** Two paths that name one file (an 8.3 name, a junction); false when either is not there. */
+function sameFile(a, b) {
+  try { return fs.realpathSync.native(a).toLowerCase() === fs.realpathSync.native(b).toLowerCase(); } catch { return false; }
+}
+
+/**
+ * The banner's button: register the logon task for THIS copy, through the
+ * same helper the "launch at login" switch uses — the only write of this
+ * round, and only on the owner's click. The next check reads the task again.
+ */
+async function autostartRepoint() {
+  if (process.platform !== 'win32') return { ok: false, error: 'windows only' };
+  const r = await setAutostart(true);
+  autostartChecked = null;
+  send('log', r.ok
+    ? { line: `The logon task now starts this copy (${autostartExe()})`, level: 'info' }
+    : { line: 'Could not point the logon task at this copy: ' + r.error, level: 'error' });
+  return r;
 }
 
 /* ----------------------------- LAN sharing ----------------------------- */
@@ -1168,6 +1217,9 @@ async function connectOnce(serverId, opts = {}) {
   livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
 
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+  // What the window is told besides the log, on Windows (v1.16.3): each one a
+  // toast once this connect stands. Said only — nothing below reads them.
+  const notices = [];
   // Managed DNS off drops every resolver a routing target brings — a
   // corporate WireGuard's own DNS above all. The names inside that network
   // then never resolve, and nothing else in the log says why.
@@ -1178,8 +1230,10 @@ async function connectOnce(serverId, opts = {}) {
         line: `Managed DNS is off, so the resolver of your WireGuard (${corp.join(', ')}) is not in this config and names inside that network will not resolve — turn Settings → DNS → "DNS managed by the app" back on`,
         level: 'warn'
       });
+      if (process.platform === 'win32') notices.push({ id: 'corpDnsOff', servers: corp.join(', ') });
     }
   }
+  if (process.platform === 'win32') notices.push(...connectHints(plan));
 
   send('status', { state: 'connecting', serverId });
 
@@ -1564,7 +1618,7 @@ async function connectOnce(serverId, opts = {}) {
   updateOverlay('on');
   send('status', {
     state: 'connected', serverId, server: byId(serverId) || null, label, engine: runEngine,
-    tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys()
+    tun: tun.active, tunError, guardError, geoWarn, lan, pendingReconnect: pendingKeys(), notices
   });
   // `tunError` is the one failure this function does NOT throw for: TUN is a
   // best-effort upgrade and we stay connected proxy-only without it. Callers
@@ -1607,6 +1661,33 @@ function planServerIds(plan) {
     default: break;
   }
   return ids;
+}
+
+/**
+ * Windows (v1.16.3): what this PC does to a plan that the plan itself cannot
+ * show (connectNotices.js) — a WireGuard identity the plan uses that another
+ * stored record also holds (W1), and a local network inside a private range
+ * advanced routing sends to a tunnel (W4). Each is a warn line here and,
+ * through the 'connected' status, a toast in the window; nothing is changed.
+ * A hint must never cost a connect: whatever goes wrong in here is swallowed.
+ */
+function connectHints(plan) {
+  const out = [];
+  try {
+    const found = sharedWgIdentities(planServerIds(plan), store.get('servers', []));
+    if (plan && plan.mode === 'advanced') {
+      // our own adapters (an earlier tunnel still up on a server switch) are not "your local network"
+      const own = [TUN_LOCAL_IP, String(TUN_ADDR4).split('/')[0]];
+      const lans = localSubnets(os.networkInterfaces(), (name, address) => isOwnTunInterface(name) || own.includes(address));
+      const chains = getChains();
+      found.push(...lanOverlaps(lans, getSettings().routeRules, (tg) => routeTargetName(tg, plan, chains)));
+    }
+    for (const n of found) {
+      send('log', { line: noticeLine(n), level: 'warn' });
+      out.push(n);
+    }
+  } catch { /* said nothing; the connect goes on exactly as before */ }
+  return out;
 }
 
 /**
@@ -2797,6 +2878,9 @@ function registerIpc() {
     else send('log', { line: 'Refused to open a link that is not http(s): ' + String(url).slice(0, 100), level: 'warn' });
   });
   ipcMain.handle('open:dataDir', () => { shell.openPath(dataDir()); return dataDir(); });
+  // Windows: which copy the logon task starts (a read), and the banner's fix (the owner's click)
+  ipcMain.handle('autostart:check', () => autostartCheck());
+  ipcMain.handle('autostart:repoint', () => autostartRepoint());
 
   // runtime components (xray / tun2socks / wintun / geo files)
   ipcMain.handle('assets:status', () => assetStatus());
