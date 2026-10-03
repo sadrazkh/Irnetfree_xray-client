@@ -823,7 +823,9 @@ while ip link show IRNetFree >/dev/null 2>&1; do
 	[ $i -lt 60 ] || { echo "the TUN device stayed after the disconnect"; exit 1; }
 	sleep 1
 done
-lu status | jq -e '.tun == false' >/dev/null || { echo "status says tun while disconnected"; exit 1; }
+# the service says tun:false at its 'disconnected' event, a moment after the device is gone: poll, not one read
+i=0
+until lu status | jq -e '.tun == false' >/dev/null; do i=$((i+1)); [ $i -lt 15 ] || { echo "status says tun while disconnected"; exit 1; }; sleep 1; done
 
 # v1.16.1 core (fix/v1161-core, field report D3): in bypass-ir the in-country
 # resolvers the core dials `direct` stay IN the whole-LAN tunnel. v1.16.0 cut
