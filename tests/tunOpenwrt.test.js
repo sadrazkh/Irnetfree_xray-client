@@ -132,6 +132,15 @@ test('the sing-box backend it builds for itself knows it is composed by the rout
   assert.equal(new TunSingbox({}).composedBy, null, 'a TunSingbox of its own is not');
 });
 
+test('the gateway bounds every UDP session to 120 s (udp_timeout) — the owner\'s AC-1304 ran out of open files on 5-minute sessions (v1.16.2)', async () => {
+  const { ROUTER_UDP_TIMEOUT_S } = require('../src/main/tunOpenwrt');
+  assert.equal(ROUTER_UDP_TIMEOUT_S, 120, 'RFC 4787 REQ-5: never under 2 minutes; the same timer ends idle TCP on the system stack');
+  const { tun, inner } = make();
+  await tun.start(30808, [], [], { bypassMacs: [], udpTimeout: 5 });
+  assert.equal(inner.calls[0][3].udpTimeout, 120, 'the router\'s value, whatever a caller sends');
+  assert.deepEqual(Object.keys(inner.calls[0][3]).sort(), ['bypassMacs', 'udpTimeout']);
+});
+
 test('isAvailable: sing-box present AND nft on PATH', () => {
   assert.equal(make().tun.isAvailable(), true);
   assert.equal(make({ inner: fakeInner({ available: false }) }).tun.isAvailable(), false);
@@ -163,8 +172,8 @@ test('start: nft table, then the bypass rules, then sing-box, then verify — in
     'ip rule show',
     'ip route get 192.168.1.3'                                             // the router's own path to a LAN client
   ]);
-  assert.deepEqual(inner.calls[0], ['start', 10808, ['1.2.3.4'], { ipv6: false, strict: false, apps: null, bypassMacs: ['AA:BB:CC:DD:EE:01', 'bad'] }],
-    'the options are passed through untouched (no gso key: sing-box 1.12 refuses it, and enables GSO itself)');
+  assert.deepEqual(inner.calls[0], ['start', 10808, ['1.2.3.4'], { ipv6: false, strict: false, apps: null, bypassMacs: ['AA:BB:CC:DD:EE:01', 'bad'], udpTimeout: 120 }],
+    'the options are passed through, plus the router\'s UDP session lifetime (no gso key: sing-box 1.12 refuses it, and enables GSO itself)');
   assert.equal(inner.lang, 'en', 'the language the service set is handed down');
   assert.ok(logs.some(([, l]) => /Whole-network tunnel \(gateway\) up on br-lan: every device behind the router goes through the VPN; 1 excluded by MAC/.test(l)), JSON.stringify(logs));
   // a second start is a no-op while active

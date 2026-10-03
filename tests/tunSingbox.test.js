@@ -196,6 +196,38 @@ test('writeConfig: opts.apps rides into buildTunConfig — rules present when se
   tun.removeWork();
 });
 
+/* ------------------------------ udp_timeout: the router's UDP session lifetime (v1.16.2) ------------------------------ */
+
+test('buildTunConfig: udpTimeout (whole seconds) becomes the TUN inbound\'s udp_timeout, a JSON number, after every other key', () => {
+  const inb = buildTunConfig({ socksPort: 30808, udpTimeout: 120 }).inbounds[0];
+  assert.equal(inb.udp_timeout, 120);
+  assert.equal(typeof inb.udp_timeout, 'number', 'a number: every sing-box from 1.7.8 to 1.14 reads it as seconds (UDPTimeoutCompat)');
+  assert.deepEqual(Object.keys(inb), ['type', 'tag', 'interface_name', 'address', 'mtu', 'auto_route', 'strict_route', 'stack', 'route_exclude_address', 'udp_timeout']);
+});
+
+test('buildTunConfig: without a usable udpTimeout the output is byte-stable with v1.16.1 (no key)', () => {
+  const base = JSON.stringify(buildTunConfig({ socksPort: 10808 }));
+  for (const v of [undefined, null, 0, -5, 1.5, '120', '2m', NaN, Infinity, true]) {
+    const cfg = buildTunConfig({ socksPort: 10808, udpTimeout: v });
+    assert.equal('udp_timeout' in cfg.inbounds[0], false, String(v));
+    assert.equal(JSON.stringify(cfg), base, String(v));
+  }
+});
+
+test('writeConfig: udpTimeout reaches the config only when the router composes this backend — a desktop caller cannot set it', () => {
+  const desk = new TunSingbox({ extraDirs: [], onLog: () => {} });
+  const { cfgFile: deskFile } = desk.writeConfig(10808, [], { udpTimeout: 120 }, 'IRNetFree');
+  assert.equal('udp_timeout' in JSON.parse(fs.readFileSync(deskFile, 'utf8')).inbounds[0], false, 'composedBy null: ignored');
+  desk.removeWork();
+  const router = new TunSingbox({ extraDirs: [], onLog: () => {}, composedBy: 'openwrt' });
+  const { cfgFile: routerFile } = router.writeConfig(30808, [], { udpTimeout: 120 }, 'IRNetFree');
+  assert.equal(JSON.parse(fs.readFileSync(routerFile, 'utf8')).inbounds[0].udp_timeout, 120);
+  router.removeWork();
+  const { cfgFile: plainFile } = router.writeConfig(30808, [], {}, 'IRNetFree');
+  assert.equal('udp_timeout' in JSON.parse(fs.readFileSync(plainFile, 'utf8')).inbounds[0], false, 'the router passes it; none given, none written');
+  router.removeWork();
+});
+
 /* ------------------------------ surface ------------------------------ */
 
 test('the surface task 2 wires in', () => {

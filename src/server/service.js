@@ -16,7 +16,7 @@ const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('../main/configBuilder');
-const { adapterDnsServers, guardPeers } = require('../main/dnsBuilder');
+const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor } = require('../main/engineChoice');
@@ -202,6 +202,7 @@ function createService(opts = {}) {
     refusedRetryMs: 600000,      // a connect the core refused (holdRefused): tried again this rarely — no WAN to wait for
     crashWindowMs: 120000,       // a drop this soon after a rebuild continues that rebuild's backoff
     syslogTunQuietMs: 10000,     // one sing-box line of a kind per this, into syslog
+    outOfFilesQuietMs: 60000,    // a core's "too many open files": one line with the numbers per this (watchOpenFiles)
     // the router's WAN watcher (wanWatch.js): the poll, how long a change must hold still, the gap between the two probes
     wanIntervalMs: 5000, wanSettleMs: 10000, wanProbeGapMs: 5000,
     ksVerifyMs: 30000            // while the kill switch should be armed: how often the kernel is asked for its table
@@ -265,6 +266,10 @@ function createService(opts = {}) {
   const stamp = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
   // the service's own files under /proc (Linux); a test hands in fakes
   const readProc = deps.readProc || ((p) => fs.readFileSync(p, 'utf8'));
+  /** node, the core and the gateway's sing-box, by pid (a process not running is absent). */
+  function procPids() {
+    return { node: process.pid, xray: xray && xray.proc && xray.proc.pid, 'sing-box': tun && tun.inner && tun.inner.proc && tun.inner.proc.pid };
+  }
   /**
    * MemAvailable and the RSS of node, xray and sing-box, from /proc — on Linux;
    * a file that is not there is a field that is not reported. Logged at every
@@ -281,7 +286,7 @@ function createService(opts = {}) {
   function memInfo() {
     const out = { memAvailableKb: null, rss: {} };
     try { const m = /^MemAvailable:\s+(\d+)/m.exec(readProc('/proc/meminfo')); if (m) out.memAvailableKb = Number(m[1]); } catch { /* not Linux */ }
-    const pids = { node: process.pid, xray: xray && xray.proc && xray.proc.pid, 'sing-box': tun && tun.inner && tun.inner.proc && tun.inner.proc.pid };
+    const pids = procPids();
     for (const [name, pid] of Object.entries(pids)) {
       if (!pid) continue;
       try { const m = /^VmRSS:\s+(\d+)/m.exec(readProc(`/proc/${pid}/status`)); if (m) out.rss[name] = Number(m[1]); } catch { /* gone, or not Linux */ }
@@ -293,6 +298,62 @@ function createService(opts = {}) {
     const rss = Object.entries(m.rss).map(([k, v]) => `${k}=${v}kB`).join(' ');
     if (m.memAvailableKb == null && !rss) return '';
     return ` mem:${m.memAvailableKb != null ? ` avail=${m.memAvailableKb}kB` : ''}${rss ? ` rss ${rss}` : ''}`;
+  }
+  /* ----------------------------- the router's open files (v1.16.2) ----------------------------- */
+  // The owner's AC-1304 (23.05.4, v1.16.1): 49-90 s after the gateway came up,
+  // sing-box said "socket: too many open files" hundreds of times and no
+  // device could browse. procd set no limit, so node and the cores had the
+  // kernel's 4096; irnetfree.init now sets 65536. What each process really got
+  // is read here — at every connect, in the diagnostics, and when a core runs
+  // out — so the next field log carries the budget. The router only: a
+  // desktop's limits are the desktop's business, and none of this runs there.
+  /** The router's own directory listings under /proc; a test hands in fakes. */
+  const listProc = deps.listProc || ((p) => fs.readdirSync(p));
+  /** What irnetfree.init sets (procd `limits nofile`), and below what a core's limit is said at warn. */
+  const ROUTER_NOFILE = 65536;
+  const ROUTER_NOFILE_FLOOR = 16384;
+  /** Per process: descriptors in use (/proc/<pid>/fd) and "Max open files" soft/hard (/proc/<pid>/limits); {} without /proc. */
+  function openFiles() {
+    const out = {};
+    const num = (v) => (v === 'unlimited' ? Infinity : Number(v));
+    for (const [name, pid] of Object.entries(procPids())) {
+      if (!pid) continue;
+      const e = { open: null, soft: null, hard: null };
+      try { const m = /^Max open files\s+(\d+|unlimited)\s+(\d+|unlimited)/m.exec(readProc(`/proc/${pid}/limits`)); if (m) { e.soft = num(m[1]); e.hard = num(m[2]); } } catch { /* gone, or not Linux */ }
+      try { e.open = listProc(`/proc/${pid}/fd`).length; } catch { /* gone, or not Linux */ }
+      if (e.open != null || e.soft != null) out[name] = e;
+    }
+    return out;
+  }
+  const ofNum = (v) => (v == null ? '?' : String(v));
+  /** "node=12/65536 xray=40/65536 sing-box=31/65536" — in use / soft limit. */
+  function openFilesText(of = openFiles()) {
+    return Object.entries(of).map(([k, e]) => `${k}=${ofNum(e.open)}/${ofNum(e.soft)}`).join(' ');
+  }
+  /** At every connect, once the gateway is up: the budget, at warn when a core got less than the init sets. */
+  function noteOpenFiles() {
+    if (!OPENWRT) return;
+    const of = openFiles();
+    if (!Object.keys(of).length) return;   // no /proc to read
+    const now = Object.entries(of).map(([k, e]) => `${k} ${ofNum(e.open)} of ${ofNum(e.soft)}`).join(', ');
+    const low = ['xray', 'sing-box'].filter(k => of[k] && of[k].soft != null && of[k].soft < ROUTER_NOFILE_FLOOR);
+    if (!low.length) { send('log', { line: `Open files at connect: ${now}`, level: 'info' }); return; }
+    const limits = [...new Set(low.map(k => of[k].soft))];
+    const said = limits.length === 1 ? `${low.join(' and ')} may hold only ${limits[0]}` : low.map(k => `${k} may hold only ${of[k].soft}`).join(', ');
+    send('log', {
+      line: `Open files: ${said} (${low.length > 1 ? 'their' : 'its'} "Max open files") — a busy LAN runs that out ("too many open files": no device behind the router can browse). The service's init gives every process ${ROUTER_NOFILE}: restart it (/etc/init.d/irnetfree restart), or reinstall the package if this stays. Now: ${now}`,
+      level: 'warn'
+    });
+  }
+  /** A core's "too many open files": one error line with the numbers, at most one a minute (the cores print it per connection). */
+  let outOfFilesAt = 0;
+  function watchOpenFiles(line) {
+    if (!OPENWRT || !/too many open files/i.test(String(line))) return;
+    const now = Date.now();
+    if (outOfFilesAt && now - outOfFilesAt < T.outOfFilesQuietMs) return;
+    outOfFilesAt = now;
+    const text = openFilesText();
+    send('log', { line: `Out of open files ("too many open files")${text ? ': ' + text : ''} — new connections from the LAN fail until some close`, level: 'error' });
   }
   /** The status event just told to the clients, folded into `conn`; one ring line per transition, with its cause. */
   function noteStatus(p) {
@@ -505,6 +566,7 @@ function createService(opts = {}) {
     store.set('settings', Object.assign({}, store.get('settings', {}), ROUTER_DEFAULTS));
     store.set('routerDefaultsApplied', true);
   }
+  if (OPENWRT && !(store.get('routerRepair', 0) >= 1)) repairRouterSettings();
   // A new process has no live connection. `activeServerId` means "connected
   // to this, in THIS process" and lives in the store — only a disconnect ever
   // cleared it, so after a reboot, a power cut or a crash it was still there,
@@ -547,7 +609,7 @@ function createService(opts = {}) {
    */
   function makeTun(settings, { quiet = false } = {}) {
     let selected;
-    const opts = { binDir: bundledBinDir, extraDirs: [userBinDir, ...systemBinDirs], onLog: (line, level) => send('log', { line, level }), lang: settings.lang, userData: dataDir,
+    const opts = { binDir: bundledBinDir, extraDirs: [userBinDir, ...systemBinDirs], onLog: (line, level) => { send('log', { line, level }); watchOpenFiles(line); }, lang: settings.lang, userData: dataDir,
       // the macOS health check, and on a router the gateway's own watch on its sing-box
       onUnexpectedExit: () => {
         if (userDisconnecting || isQuitting || tun !== selected) return;
@@ -577,7 +639,7 @@ function createService(opts = {}) {
     // deadline a config counts as unverified (fix 20) — give it room there
     testTimeoutMs: OPENWRT ? 30000 : undefined,
     extraBinDirs: [userBinDir, ...systemBinDirs],
-    onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
+    onLog: (line, level) => { send('log', { line, level }); healCertPin(line); watchOpenFiles(line); },
     onStatus: (state, info) => {
       if (state === 'stopped') { coreStops++; lastCoreExit = info || null; }
       if ((xrayReloading || quietStops > 0) && state === 'stopped') return;
@@ -935,6 +997,41 @@ function createService(opts = {}) {
     if (changed) store.set('settings', settings);
   }
 
+  /**
+   * v1.16.2, once per router (`routerRepair`): what a desktop backup restored
+   * before v1.16.1 overwrote — the restore kept nothing of the router's then
+   * (fix 9 came later). The owner's AC-1304 connected with bypass-ir's
+   * in-country DNS set to 1.1.1.1 / 8.8.8.8, asked in plain text from inside
+   * Iran; a desktop's backup also always carries lanBlockQuic:false (the
+   * desktop has no such switch, and every LAN QUIC flow then held a SOCKS UDP
+   * session — descriptors the gateway ran out of) and autoConnect:false (every
+   * restart then left the LAN direct, the kill switch unarmed).
+   *
+   * Only with a desktop's TRACE in the stored settings: an in-country list of
+   * public resolvers alone (the router's menu offers Iranian ones only), or a
+   * value the router's UI has not been able to set since v1.13.0 — a choice
+   * made on the router itself is left alone. Never touched: the kill switch,
+   * the routing mode, the DoH list, sniffing, LAN access, the rules. Said once
+   * at warn; each value can be set back under Settings, and it never runs again.
+   */
+  function repairRouterSettings() {
+    const raw = Object.assign({}, store.get('settings', {}));
+    const direct = Array.isArray(raw.dnsDirect) ? raw.dnsDirect : null;
+    const publicDirect = !!direct && direct.length > 0 && direct.every(e => PUBLIC_ANYCAST_DNS.has(resolverIp(e) || ''));
+    const fromDesktop = publicDirect || raw.systemProxy === true || raw.launchAtLogin === true
+      || (typeof raw.tunBackend === 'string' && raw.tunBackend !== 'sing-box')
+      || (typeof raw.tunAppMode === 'string' && raw.tunAppMode !== 'off');
+    const did = [];
+    if (fromDesktop && raw.lanBlockQuic === false) { raw.lanBlockQuic = true; did.push('QUIC (UDP 443) from the LAN is refused again'); }
+    if (fromDesktop && raw.autoConnect === false) { raw.autoConnect = true; did.push('"Connect when the router starts" is on again'); }
+    if (publicDirect) {
+      did.push(`the in-country DNS is ${DEFAULT_SETTINGS.dnsDirect.join(', ')} instead of the public ${direct.join(', ')}`);
+      raw.dnsDirect = DEFAULT_SETTINGS.dnsDirect.slice();
+    }
+    store.assign(did.length ? { settings: raw, routerRepair: 1 } : { routerRepair: 1 });
+    if (did.length) send('log', { line: `Router settings repaired once (a desktop backup restored before v1.16.1 had overwritten them): ${did.join('; ')} — each can be set back under Settings`, level: 'warn' });
+  }
+
   function getChains() {
     const chains = store.get('chains', null);
     if (Array.isArray(chains)) return chains;
@@ -1124,6 +1221,11 @@ function createService(opts = {}) {
     if (!config) {
       config = buildConfig(Object.assign({}, plan), Object.assign({}, settings, { geoAssets }));
     }
+    // The router's DNS block (v1.16.2, dnsBuilder.routerDnsTuning): 8 s per
+    // DoH server, the DoH servers raced, a known name answered from cache
+    // through an outage of the exit's DoH. Here, after buildConfig, so the
+    // connect and every rebuild get it and a desktop's config never does.
+    if (OPENWRT && engineFormat(engine) === 'xray' && config.dns) config.dns = routerDnsTuning(config.dns);
     return { plan, label, entryAddrs, config, geoWarn, engine };
   }
 
@@ -1742,6 +1844,7 @@ function createService(opts = {}) {
             tunAdapterDns,
             { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] });   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
+          noteOpenFiles();   // the router's descriptor budget, now that sing-box runs (v1.16.2)
           if (tunApps) {
             send('log', {
               line: `Per-app routing: ${tunApps.mode === 'exclude' ? 'these apps go around the tunnel' : 'only these apps use the tunnel'} — ${tunApps.names.join(', ')}`,
@@ -3304,6 +3407,7 @@ function createService(opts = {}) {
     const m = memInfo();
     if (m.memAvailableKb != null) lines.push(`MemAvailable: ${m.memAvailableKb} kB`);
     if (Object.keys(m.rss).length) lines.push('RSS: ' + Object.entries(m.rss).map(([k, v]) => `${k}=${v} kB`).join(', '));
+    if (OPENWRT) { const of = openFilesText(); if (of) lines.push(`open files (in use/Max open files): ${of}`); }
     lines.push(`gateway: ${tun && tun.active ? 'up' : 'down'}, core: ${xray && xray.running ? 'running' : 'stopped'}, kill switch: ${JSON.stringify(killSwitchState())}`);
     if (OPENWRT) {
       try { lines.push('ip rule:', String(await lanRun('ip', ['rule', 'show'])).trim()); }
