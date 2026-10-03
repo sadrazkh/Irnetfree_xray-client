@@ -38,14 +38,14 @@ const BASE = Object.assign({ autoUpdateSubs: false, autoUpdateAssets: 'off', aut
 const dirs = [];
 test.after(() => { for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } });
 
-/** A service on a fresh data dir with this store; events and syslog lines recorded. */
-function start(store = {}, extraDeps = {}) {
+/** A service on a fresh data dir with this store; events and syslog lines recorded. `prime(state)`: see startIn. */
+function start(store = {}, extraDeps = {}, prime = null) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-svc-gw-'));
   dirs.push(dir);
   const content = Object.assign({ servers: [SERVER], routerDefaultsApplied: true }, store);
   content.settings = Object.assign({}, BASE, store.settings || {});
   fs.writeFileSync(path.join(dir, 'store.json'), JSON.stringify(content));
-  return startIn(dir, extraDeps);
+  return startIn(dir, extraDeps, prime);
 }
 
 /** A service on an existing data dir — "the next boot". `prime(state)` runs before it is created. */
@@ -188,7 +188,7 @@ test('R4: a gateway that does not come up fails the connect — the core is stop
   const s = start();
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
-  await assert.rejects(s.service.invoke('connect', SERVER.id), /Gateway did not come up \(sing-box\)/);
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /The whole-network tunnel did not come up \(sing-box\)/);
   assert.equal(s.state.xray.running, false, 'the core this connect started is stopped again');
   assert.equal(connectedCount(s), 0, 'no "connected, proxy only"');
   assert.equal((await s.service.invoke('app:init')).activeServerId, null);
@@ -204,12 +204,16 @@ test('R4: no sing-box on the router is a failed connect before any core starts',
   assert.equal(s.state.xray.starts.length, 0);
 });
 
-test('R4: TUN turned off on a router is still a plain proxy connect (the user’s choice, not a failure)', async (t) => {
+// v1.16.1 (field report fix 5): TUN is forced on a router — "proxy only" there
+// was the whole LAN going direct behind a panel that said connected, and a LAN
+// with no internet under an armed kill switch. A stored "off" still connects,
+// with the gateway (routerFieldFixes.test.js pins the settings side).
+test('R4: TUN turned off in a router’s store is overridden — the connect builds the gateway', async (t) => {
   const s = start({ settings: { tunMode: false } });
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', SERVER.id);
   assert.equal(connectedCount(s), 1);
-  assert.equal(s.statuses.find(x => x.state === 'connected').tun, false);
+  assert.equal(s.statuses.find(x => x.state === 'connected').tun, true);
 });
 
 /* ----------------------------- R3: dead cores are rebuilt ----------------------------- */
@@ -448,12 +452,12 @@ test('a first connect by hand whose gateway fails ends every open panel on the e
   const s = start();
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
-  await assert.rejects(s.service.invoke('connect', SERVER.id), /Gateway did not come up/);
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /The whole-network tunnel did not come up/);
   const last = s.statuses.at(-1);
   assert.equal(last.state, 'error', JSON.stringify(s.statuses.map(x => x.state)));
-  assert.match(last.message, /Gateway did not come up \(sing-box\)/);
+  assert.match(last.message, /The whole-network tunnel did not come up \(sing-box\)/);
   assert.ok(!s.syslog.some(([, l]) => /^irnetfree: error — /.test(l)), 'syslog has the reason once, from the log line');
-  assert.ok(s.syslog.some(([, l]) => /\[error\] .*Gateway did not come up/.test(l)));
+  assert.ok(s.syslog.some(([, l]) => /\[error\] .*The whole-network tunnel did not come up/.test(l)));
 });
 
 const withTiming = (over) => ({ timing: Object.assign({}, fakes.deps(fakes.makeState()).timing, over) });
@@ -474,27 +478,141 @@ test('a drop queued behind a recovery is replayed through the crash window, not 
   assert.ok(s.logs.some(l => /dropped again \d+s after it was rebuilt \(core-exited\)/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
 });
 
-test('a core that dies while its connect is still bringing the gateway up is rebuilt AFTER that connect — never a second gateway beside it', async (t) => {
+test('a core that dies while its connect waits for the SOCKS port fails that connect — no gateway into the dead port, none beside it', async (t) => {
   // The core binds its SOCKS port while the connect waits (waitPort): a kill -9
   // there used to start the recovery's connect at once, beside the first — a
   // second TunOpenwrt built while the first was inside start(), and the loser's
   // undo deleted the shared nft table by name: a gateway "up" with no
-  // exclusions and no QUIC rule.
+  // exclusions and no QUIC rule. v1.16.0 then built the first connect's
+  // gateway anyway, into the dead port, and rebuilt after it. Now (field
+  // report fix 20) a connect by hand fails, with the core's own last lines,
+  // and nothing is rebuilt behind the user's back.
   const slowPort = { waitForLocalPort: () => new Promise((r) => setTimeout(() => r(true), 150)) };
   const s = start({}, slowPort);
   t.after(() => s.service.shutdown());
   const first = s.service.invoke('connect', SERVER.id);
   await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
-  s.state.xray.crash();
-  await first;
-  await until(() => connectedCount(s) === 2, 'the rebuild');
-  assert.equal(s.state.inners.filter(i => i.starts > 0).length, 1, 'one gateway, rebuilt in place — never a second one beside it');
-  assert.equal(s.state.inners.filter(i => i.active).length, 1);
-  assert.equal(s.state.xray.running, true);
+  s.state.xray.crash(['panic: the core went']);
+  await assert.rejects(first, /The core exited \(code=- signal=SIGKILL\) before it opened 127\.0\.0\.1:\d+ — the whole-network tunnel was not started\. Its last lines: panic: the core went/);
+  await sleep(100);
+  assert.equal(s.state.events.includes('gateway:start'), false, 'no gateway at all');
+  assert.equal(s.state.xray.starts.length, 1, 'no rebuild of a connect by hand that failed');
+  assert.equal(connectedCount(s), 0);
+});
+
+test('…at boot the same death is retried by the boot loop: one gateway, once a core lives', async (t) => {
+  let calls = 0;
+  let s = null;
+  const dying = { waitForLocalPort: async () => { if (++calls === 1) s.state.xray.crash(['panic: the core went']); return true; } };
+  s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } }, dying);
+  t.after(() => s.service.shutdown());
+  await until(() => connectedCount(s) === 1, 'the boot connect’s second attempt');
   assert.equal(s.state.xray.starts.length, 2);
-  // the rebuild started only once the first connect had finished
+  assert.equal(s.state.inners.filter(i => i.starts > 0).length, 1, 'one gateway — none was built for the dead core');
   const ev = s.state.events.filter(e => e === 'gateway:start' || e === 'xray:start');
-  assert.deepEqual(ev, ['xray:start', 'gateway:start', 'xray:start', 'gateway:start'], ev.join(', '));
+  assert.deepEqual(ev, ['xray:start', 'xray:start', 'gateway:start'], ev.join(', '));
+  assert.ok(!s.logs.some(l => /starting the gateway anyway/.test(l.line)));
+});
+
+/**
+ * deps.waitForLocalPort for a core that dies while the connect waits for its
+ * SOCKS port — whenever `dying()` says so; it returns as the real one does,
+ * once `opts.stop()` sees the core gone.
+ */
+function portOfDyingCore(get, dying, lines = ['panic: out of memory']) {
+  return async (port, ms, opts) => {
+    if (!dying()) return true;
+    get().state.xray.crash(lines);
+    const deadline = Date.now() + Math.min(ms, 2000);
+    while (Date.now() < deadline && !(opts && typeof opts.stop === 'function' && opts.stop())) await sleep(5);
+    return false;
+  };
+}
+
+test('a recovery whose core dies before its SOCKS port opens, attempt after attempt, keeps the backoff — never a restart at once', async (t) => {
+  // v1.16.1 review (critical): each attempt's connect fails with the core's own
+  // words (fix 20) — and the same death, a drop queued behind that recovery,
+  // was replayed through recoverFromDrop as a FIRST drop (no successful
+  // rebuild to count from), which ran attempt 0 again at once and cancelled
+  // the backoff timer: 127 core starts in 1.5 s, forever, on the A7.
+  let s = null;
+  let dying = false;
+  s = start({}, Object.assign(withTiming({ routerBackoffMs: [1000, 1000, 1000], crashWindowMs: 120000 }), { waitForLocalPort: portOfDyingCore(() => s, () => dying) }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  dying = true;
+  const n0 = s.state.xray.starts.length;
+  s.state.xray.crash();   // the drop: its rebuild's core dies before its port opens, and so does every retry's
+  await sleep(1500);
+  const n = s.state.xray.starts.length - n0;
+  assert.ok(n >= 1 && n <= 2, `at most two core starts in 1.5 s with a 1 s backoff, got ${n}: ${s.logs.map(l => l.line).slice(-8).join(' / ')}`);
+  assert.ok(s.statuses.some(x => x.state === 'reconnecting' && x.retryInMs === 1000), 'the retry waits its turn');
+  // …and once a core lives again, the next retry brings the connection back
+  dying = false;
+  await until(() => connectedCount(s) === 2, 'back once the core lives', 5000);
+});
+
+test('…and a Connect by hand on a pending edit whose core dies the same way is handed to the recovery AFTER the first wait', async (t) => {
+  // The hand Connect on the live server (item 18) keeps the intent when it
+  // fails (abortGateway): it used to be taken up by the drop at once — a
+  // second start right behind the first — and then looped like the above.
+  let s = null;
+  let dying = false;
+  s = start({}, Object.assign(withTiming({ routerBackoffMs: [1000, 1000, 1000], crashWindowMs: 120000 }), { waitForLocalPort: portOfDyingCore(() => s, () => dying) }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  await s.service.invoke('servers:update', { id: SERVER.id, fields: { address: '192.0.2.10', port: 1081 } });
+  dying = true;
+  const n0 = s.state.xray.starts.length;
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /before it opened 127\.0\.0\.1:47808/);
+  await sleep(1500);
+  const n = s.state.xray.starts.length - n0;
+  assert.ok(n >= 1 && n <= 2, `the Connect and at most one retry after the 1 s wait, got ${n}: ${s.logs.map(l => l.line).slice(-8).join(' / ')}`);
+  assert.ok(s.statuses.some(x => x.state === 'reconnecting' && x.retryInMs === 1000), 'the hand-over says when it retries');
+  dying = false;
+  await until(() => connectedCount(s) === 2, 'back without another click', 5000);
+  assert.equal(s.state.xray.starts.at(-1).config.outbounds.find(o => o.tag === 'proxy').settings.servers[0].port, 1081, 'with the edit');
+});
+
+test('…but a Connect on the live connection refused before anything was torn down (a bad edit) leaves the running connection alone', async (t) => {
+  const s = start({}, withTiming({ routerBackoffMs: [20, 20, 20], crashWindowMs: 120000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  await s.service.invoke('servers:update', { id: SERVER.id, fields: { port: 1082 } });
+  s.state.check = { ok: false, error: 'infra/conf: something the core refuses' };
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /Config error: infra\/conf: something the core refuses/);
+  await sleep(100);
+  assert.equal(s.state.xray.starts.length, 1, 'no retry tears down what still works');
+  assert.ok(!s.statuses.some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.equal(s.state.xray.running, true);
+  assert.ok(s.state.inners.some(i => i.active), 'the gateway is still up');
+});
+
+test('a connect by hand whose core dies before its port opens: no "rebuilding" for a rebuild that never comes; the error names the signal and the panic, not its stack', async (t) => {
+  const stack = [
+    '2026/10/02 10:00:00 [Warning] core: Xray 26.3.27 started',
+    'panic: runtime error: invalid memory address or nil pointer dereference',
+    '[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x5c1a2c]',
+    'goroutine 1 [running]:',
+    'github.com/xtls/xray-core/app/dns.(*Server).Start(0x0)',
+    '\t/build/app/dns/server.go:123 +0x1c',
+    'main.main()',
+    '\t/build/main/main.go:45 +0x2a8'
+  ];
+  let s = null;
+  s = start({ settings: { killSwitch: true } }, { waitForLocalPort: portOfDyingCore(() => s, () => true, stack) });
+  t.after(() => s.service.shutdown());
+  await assert.rejects(s.service.invoke('connect', SERVER.id), (e) => {
+    assert.match(e.message, /^The core exited \(code=- signal=SIGKILL\) before it opened 127\.0\.0\.1:47808 — the whole-network tunnel was not started\. Its last lines: panic: runtime error: invalid memory address or nil pointer dereference( mem:.*)?$/);
+    return true;
+  });
+  await sleep(50);
+  const text = s.logs.map(l => `[${l.level}] ${l.line}`);
+  assert.ok(!text.some(l => /rebuilding the connection/.test(l)), text.join('\n'));
+  assert.ok(text.some(l => /^\[error\] The core exited on its own \(code=- signal=SIGKILL\) while connecting/.test(l)), text.join('\n'));
+  // the kill switch stays armed (the intent is the user's), and says what that means now
+  assert.ok(text.some(l => /^\[warn\] Kill switch: the connect failed and nothing retries it — LAN internet stays blocked until a connect succeeds or you press Disconnect/.test(l)), text.join('\n'));
+  assert.equal(s.state.xray.starts.length, 1);
 });
 
 test('a drop that lands inside a connect which then comes up whole is not rebuilt', async (t) => {
@@ -504,8 +622,12 @@ test('a drop that lands inside a connect which then comes up whole is not rebuil
   t.after(() => s.service.shutdown());
   const first = s.service.invoke('connect', SERVER.id);
   await until(() => s.state.events.includes('xray:start'), 'the connect’s core');
+  const own = s.state.xray.proc;
   s.state.xray.crash();
-  s.state.xray.running = true;   // …a stale "stopped" of a core already replaced: the connect’s own is up
+  // …a stale "stopped" of a core already replaced: the connect’s own is up (the
+  // real XrayManager never clears `proc` for a late exit of an old one)
+  s.state.xray.running = true;
+  s.state.xray.proc = own;
   await first;
   await sleep(100);
   assert.equal(connectedCount(s), 1);
@@ -527,11 +649,212 @@ test('a connect by hand starts with no crash history — its first drop is rebui
   assert.ok(!s.logs.some(l => /dropped again/.test(l.line)));
 });
 
+test('a Reconnect by hand that fails while the drop’s own recovery brings the connection back leaves no retry behind — the next crash is still rebuilt', async (t) => {
+  // v1.16.1 re-review: the hand-over armed its retry while that recovery was
+  // running; the timer fired into it (only queued there), its handle stayed,
+  // and recoverFromDrop took the dead handle for a retry still to come — every
+  // later core or sing-box death ignored, every WAN change "not judged".
+  let s = null;
+  let mode = 'ok';
+  const port = async () => {
+    // the Reconnect's core binds and dies 5 ms later: a drop, not that connect's own failure
+    if (mode === 'die-after-bind') { mode = 'slow'; setTimeout(() => s.state.xray.crash(), 5); return true; }
+    if (mode === 'slow') { mode = 'ok'; await sleep(1500); return true; }   // the recovery's core, slow to bind (the A7)
+    return true;
+  };
+  s = start({}, Object.assign(withTiming({ routerBackoffMs: [1000, 1000, 1000], crashWindowMs: 120000 }), { waitForLocalPort: port }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  let open = null;
+  s.state.gatewayGate = new Promise((r) => { open = r; });
+  mode = 'die-after-bind';
+  const reconnect = s.service.invoke('vpn:reconnect');
+  await until(() => gatewayStarts(s) === 2, 'the Reconnect’s gateway start, held');
+  await until(() => s.logs.some(l => /^The core exited on its own .* while connecting/.test(l.line)), 'its core’s death');
+  s.state.gatewayFails = true;   // …and then that gateway fails too
+  s.state.gatewayGate = null;
+  open();
+  assert.equal((await reconnect).ok, false);
+  s.state.gatewayFails = false;  // the recovery's core is still waiting for its port
+  await until(() => connectedCount(s) === 2, 'the drop’s recovery bringing it back', 5000);
+  await sleep(1300);             // past the hand-over's 1 s: nothing rebuilds what is up
+  const lines = () => s.logs.map(l => l.line).slice(-10).join(' / ');
+  assert.equal(connectedCount(s), 2, 'the restored connection is not rebuilt again: ' + lines());
+  assert.ok(!s.logs.some(l => /Reconnect failed — retrying/.test(l.line)), 'one chain, the recovery’s: ' + lines());
+  const n = s.state.xray.starts.length;
+  s.state.xray.crash();
+  await until(() => connectedCount(s) === 3, 'the next crash rebuilt', 5000);
+  assert.ok(s.state.xray.starts.length > n);
+});
+
+test('a Connect by hand whose core dies while a recovery’s gateway start is held is retried once that recovery gives way', async (t) => {
+  // v1.16.1 re-review: the Connect overtakes the recovery, which then goes
+  // stale and retries nothing; the hand-over's timer fired into it and was
+  // only queued, and its dead handle stopped every retry after it — the
+  // status stuck at "Reconnecting… (attempt 2)", the LAN blocked for good.
+  let s = null;
+  let dying = false;
+  const once = () => { const d = dying; dying = false; return d; };
+  s = start({}, Object.assign(withTiming({ routerBackoffMs: [300, 300, 300], crashWindowMs: 120000 }), { waitForLocalPort: portOfDyingCore(() => s, once) }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  let open = null;
+  s.state.gatewayGate = new Promise((r) => { open = r; });
+  s.state.xray.crash();          // the drop: its recovery's gateway start is held (a slow A7)
+  await until(() => gatewayStarts(s) === 2, 'the recovery’s gateway start, held');
+  dying = true;                  // the Connect's own core dies before its port opens
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /before it opened 127\.0\.0\.1:47808/);
+  await sleep(600);              // past the 300 ms wait, the recovery still held
+  const n = s.state.xray.starts.length;
+  s.state.gatewayGate = null;
+  open();                        // the overtaken recovery gives way
+  await until(() => s.state.xray.starts.length > n, 'another core start', 3000);
+  await until(() => connectedCount(s) === 2, 'connected again', 5000);
+});
+
+test('every recovery timer lets go of its handle as it fires — a handle left behind reads as a retry still to come', () => {
+  // recoverFromDrop, judgeWanChange's busy() and alreadyUp() all read
+  // `recoverTimer`; a call that fired into an early return (queued behind a
+  // recovery, an intent gone, auto-reconnect turned off mid-backoff) must not
+  // leave it set. Pinned as text: every arm, present and future.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
+  const arms = src.match(/recoverTimer = setTimeout\(\(\) => \{?\s*[^\n]*/g) || [];
+  assert.ok(arms.length >= 3, arms.join('\n'));
+  for (const a of arms) assert.match(a, /^recoverTimer = setTimeout\(\(\) => \{\s*recoverTimer = null;/, a);
+});
+
+// what xrayManager.validateWithFallback answers for a finalmask server on a feed core (24.12.31) with no Xray-PattN
+const PATTN_REFUSAL = {
+  ok: false, engine: 'xray', pattnNeeded: true, finalmaskIgnored: true, coreVersion: '24.12.31',
+  error: 'xray 24.12.31 does not know finalmask (26.3.27 and newer do) — it would run this server without its mask'
+};
+
+test('a boot connect the core refuses (a finalmask server, no Xray-PattN) is an error that says why — not "waiting for internet" every 15 s', async (t) => {
+  const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true, killSwitch: true } },
+    withTiming({ refusedRetryMs: 700 }), (st) => { st.check = PATTN_REFUSAL; });
+  t.after(() => s.service.shutdown());
+  await until(() => s.statuses.some(x => x.state === 'error'), 'the refusal said');
+  const err = s.statuses.find(x => x.state === 'error');
+  assert.match(err.message, /^This server needs Xray-PattN — install it under Settings → Required files \(the official core 24\.12\.31 does not know finalmask/);
+  assert.equal(err.cause, 'boot');
+  await sleep(300);              // bootEveryMs is 20 ms: a retry as for a missing WAN would have run a dozen times
+  assert.equal(s.state.xray.validated.length, 1, 'refused once, not retried at the boot loop’s pace');
+  assert.ok(!s.statuses.some(x => x.state === 'waiting'), JSON.stringify(s.statuses.map(x => x.state)));
+  const snap = s.service.connSnapshot();
+  assert.equal(snap.state, 'error');
+  assert.match(snap.reason, /needs Xray-PattN/);
+  assert.ok(s.syslog.some(([, l]) => /^irnetfree: error — This server needs Xray-PattN/.test(l)), JSON.stringify(s.syslog));
+  assert.ok(s.logs.some(l => l.level === 'warn' && /^Kill switch: the core refuses this connection — LAN internet stays blocked/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+  // tried again rarely: once the fork is there, it connects with nobody pressing a button
+  delete s.state.check;
+  await until(() => connectedCount(s) === 1, 'the rare retry', 3000);
+});
+
+test('a rebuild the core refuses (the store changed under the live connection) stops the quick retries and says why; the rare retry brings it back', async (t) => {
+  const s = start({}, withTiming({ refusedRetryMs: 700 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.check = PATTN_REFUSAL;
+  const v0 = s.state.xray.validated.length;
+  s.state.xray.crash();
+  await until(() => s.statuses.some(x => x.state === 'error'), 'the refusal said');
+  await sleep(300);              // routerBackoffMs is 5 ms: quick retries would have run dozens of times
+  assert.equal(s.state.xray.validated.length - v0, 1, 'one refused attempt');
+  assert.equal(s.statuses.at(-1).state, 'error');
+  assert.match(s.statuses.at(-1).message, /needs Xray-PattN/);
+  assert.equal(s.service.connSnapshot().state, 'error');
+  delete s.state.check;
+  await until(() => connectedCount(s) === 2, 'the rare retry', 3000);
+});
+
+test('…but a binary that is gone for a while (sing-box or the core: an opkg upgrade, a file held) is no refusal — the recovery keeps its quick backoff and comes back by itself', async (t) => {
+  // the QEMU smoke holds /usr/bin/sing-box during a recovery and gives it back: run 37080745024 waited out
+  // the 10-minute refusal retry on 23.05.5 when a missing sing-box was taken for one
+  const s = start({}, withTiming({ refusedRetryMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.singboxMissing = true;
+  s.state.inners.find(i => i.active).crash();
+  await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= 4, 'retries at the backoff’s pace', RETRIES_MS);
+  assert.ok(!s.statuses.some(x => x.state === 'error'), JSON.stringify(s.statuses.map(x => x.state)));
+  s.state.singboxMissing = false;
+  await until(() => connectedCount(s) === 2, 'back once sing-box is', 5000);
+  // the core's file, the same way: what its check says when there is none, or when the spawn finds it gone or busy
+  for (const error of ['core binary not found', 'spawn /usr/bin/xray ENOENT', 'spawn /usr/bin/xray ETXTBSY']) {
+    s.state.check = { ok: false, error };
+    const n = s.statuses.filter(x => x.state === 'reconnecting').length;
+    s.state.xray.crash();
+    await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= n + 3, `retries for "${error}"`, RETRIES_MS);
+    assert.ok(!s.statuses.some(x => x.state === 'error'), error + ': ' + JSON.stringify(s.statuses.map(x => x.state)));
+    delete s.state.check;
+    const c = connectedCount(s);
+    await until(() => connectedCount(s) === c + 1, `back after "${error}"`, 5000);
+  }
+});
+
+// What xrayManager.validate answers for a -test that never gave a verdict: killed by a signal after its banner (the
+// kernel's OOM killer on the 512 MB AC-1304), or ended by Go's runtime out of memory. The first carries the banner's
+// last line as its text, as the manager used to answer it: the flag is what says so, never the words.
+const KILLED_CHECKS = [
+  { ok: false, killed: true, error: '[Info] infra/conf/serial: Reading config: &{Name:/etc/irnetfree/test-cfg-1.json Format:json}' },
+  { ok: false, killed: true, error: 'xray -test was killed (SIGKILL) — the config was not checked' },
+  { ok: false, killed: true, error: 'xray -test ran out of memory (fatal error: runtime: out of memory) — the config was not checked' }
+];
+
+test('…nor is a config check that was killed or ran out of memory — the recovery keeps its quick backoff, no "error", and comes back by itself', async (t) => {
+  // v1.16.1 re-review: the banner's last line was taken for the core's verdict, and a 512 MB router waited 10 minutes
+  const s = start({}, withTiming({ refusedRetryMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  for (const check of KILLED_CHECKS) {
+    s.state.check = check;
+    const n = s.statuses.filter(x => x.state === 'reconnecting').length;
+    s.state.xray.crash();
+    await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= n + 3, `retries for "${check.error}"`, RETRIES_MS);
+    assert.ok(!s.statuses.some(x => x.state === 'error'), check.error + ': ' + JSON.stringify(s.statuses.map(x => x.state)));
+    assert.notEqual(s.service.connSnapshot().state, 'error');
+    delete s.state.check;
+    const c = connectedCount(s);
+    await until(() => connectedCount(s) === c + 1, `back after "${check.error}"`, 5000);
+  }
+});
+
+test('…and at boot (the cache is empty there): a killed config check is "waiting", retried at the boot loop\'s pace', async (t) => {
+  const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true, killSwitch: true } },
+    withTiming({ refusedRetryMs: 60000 }), (st) => { st.check = KILLED_CHECKS[1]; });
+  t.after(() => s.service.shutdown());
+  await until(() => s.state.xray.validated.length >= 3, 'the boot loop’s retries', RETRIES_MS);
+  assert.ok(!s.statuses.some(x => x.state === 'error'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.ok(s.statuses.some(x => x.state === 'waiting'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.ok(!s.logs.some(l => /Config rejected by xray|refuses this connection/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+  delete s.state.check;
+  await until(() => connectedCount(s) === 1, 'connected once the check finishes', 5000);
+});
+
+test('…and a Reconnect by hand the core refuses is not handed to the quick retries either', async (t) => {
+  const s = start({}, withTiming({ refusedRetryMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.check = PATTN_REFUSAL;
+  const v0 = s.state.xray.validated.length;
+  const r = await s.service.invoke('vpn:reconnect');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /needs Xray-PattN/);
+  await sleep(300);
+  assert.equal(s.state.xray.validated.length - v0, 1);
+  assert.ok(!s.statuses.some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.equal(s.service.connSnapshot().state, 'error');
+  // a Connect by hand still tries at once
+  delete s.state.check;
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(connectedCount(s), 2);
+});
+
 test('the give-up of a crash loop says whether the proxy is still up', () => {
   // Reached only on the desktop (a router never gives up) and only after 2+5+15 s of
   // waits, so pinned as text: a tunnel that keeps dying over a live core leaves the proxy up.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
-  const body = src.slice(src.indexOf('function recoverFromDrop(reason) {'), src.indexOf('async function recoverFromNetworkChange('));
+  const body = src.slice(src.indexOf('function recoverFromDrop(reason, seq = null) {'), src.indexOf('async function recoverFromNetworkChange('));
   assert.match(body, /send\('status', \{ state: 'reconnect-failed', reason, proxyUp: !!\(xray && xray\.running\), tunError: null \}\);/);
 });
 
@@ -607,10 +930,10 @@ test('R13: warnings, errors and the connection’s state reach syslog marked irn
   await s.service.invoke('connect', SERVER.id);
   await s.service.invoke('disconnect');
   const text = s.syslog.map(([lvl, l]) => `${lvl} ${l}`).join('\n');
-  assert.match(text, /^err irnetfree: \[error\] .*Gateway did not come up/m);
+  assert.match(text, /^err irnetfree: \[error\] .*The whole-network tunnel did not come up/m);
   assert.match(text, /^info irnetfree: connected — ci-upstream, gateway up$/m);
   assert.match(text, /^info irnetfree: disconnected$/m);
-  assert.doesNotMatch(text, /Gateway up on br-lan/, 'an info log line stays out of syslog');
+  assert.doesNotMatch(text, /Whole-network tunnel \(gateway\) up on br-lan/, 'an info log line stays out of syslog');
   for (const [, l] of s.syslog) assert.ok(!l.includes('\n'), 'one line per entry');
 });
 
@@ -664,7 +987,7 @@ test('A1: a rebuild where nothing resolves keeps the address of the last connect
   assert.deepEqual(configAt(s, 2).dns.hosts, { 'upstream.invalid': ['198.51.100.8'] });
 });
 
-test('A1: a name nothing ever resolved is left to the core, and said so; a proxy-only connect resolves nothing', async (t) => {
+test('A1: a name nothing ever resolved is left to the core, and said so; a router’s stored "TUN off" still pins it', async (t) => {
   const none = fakeResolver(() => []);
   const s = start({ servers: [NAMED] }, { resolveHost: none });
   t.after(() => s.service.shutdown());
@@ -673,13 +996,16 @@ test('A1: a name nothing ever resolved is left to the core, and said so; a proxy
   assert.equal('domainStrategy' in outboundOf(configAt(s, 0), 'proxy').streamSettings.sockopt, false);
   assert.ok(s.logs.some(l => l.level === 'warn' && /Could not resolve the server upstream\.invalid/.test(l.line)));
 
-  // no tunnel, no recursion: the OS answers the core as it always did
+  // A proxy-only connect resolves nothing (`if (!settings.tunMode) return
+  // settings;`, pinned in both mirrors by connectPath.test.js) — but a router
+  // has no proxy-only connect any more (field report fix 5): a stored "off"
+  // is still a tunnel, so the name is pinned like under any other gateway.
   const asked = fakeResolver(() => ['198.51.100.7']);
   const p = start({ servers: [NAMED], settings: { tunMode: false } }, { resolveHost: asked });
   t.after(() => p.service.shutdown());
   await p.service.invoke('connect', NAMED.id);
-  assert.deepEqual(asked.asked, []);
-  assert.equal('hosts' in configAt(p, 0).dns, false);
+  assert.deepEqual(asked.asked, ['upstream.invalid']);
+  assert.deepEqual(configAt(p, 0).dns.hosts, { 'upstream.invalid': ['198.51.100.7'] });
 });
 
 test('A2: a chain that lost a member refuses to connect, by name, instead of becoming a shorter chain', async (t) => {

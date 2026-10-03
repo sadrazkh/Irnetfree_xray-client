@@ -261,6 +261,9 @@ function plugin(env, args, input) {
     child.stderr.on('data', (d) => { err += d; });
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('the plugin hung: ' + err)); }, 30000);
     child.on('error', reject);
+    // `list` never reads stdin: when the shell is gone before our end('') lands,
+    // the write fails with EPIPE — the plugin's answer is what is asserted, not that
+    child.stdin.on('error', () => {});
     child.on('close', (code) => {
       clearTimeout(timer);
       let json = null;

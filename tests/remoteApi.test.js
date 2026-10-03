@@ -142,6 +142,74 @@ test('cloudflared: enabled + token is applied to the driver; disabling applies o
   assert.deepEqual(cloudflared.calls, [['install'], ['apply', { enabled: true, token: CF_TOKEN }]]);
 });
 
+/* ----------------------------- v1.16.1: «فعال» must be honest ----------------------------- */
+
+const flush = () => new Promise((res) => setImmediate(res));
+const applies = (cloudflared) => cloudflared.calls.filter((c) => c[0] === 'apply');
+
+test('remote_set refuses to enable Cloudflare Tunnel before cloudflared is installed or without a tunnel token (it used to say "applied" and start nothing)', async (t) => {
+  const { api: r, cloudflared, store } = setup(t);   // not installed
+  assert.throws(() => r.remote_set({ cloudflared: { enabled: true, token: CF_TOKEN } }), /enabling needs cloudflared — install it first/);
+  assert.deepEqual(r.remote_get().cloudflared, { installed: false, enabled: false, tokenSet: false }, 'a refused set writes nothing, not even the token');
+  await flush();
+  assert.deepEqual(applies(cloudflared), [], 'and applies nothing');
+  // a token alone (to switch on later) and switching off are always taken
+  assert.deepEqual(r.remote_set({ cloudflared: { token: CF_TOKEN } }), { ok: true });
+  assert.deepEqual(r.remote_set({ cloudflared: { enabled: false } }), { ok: true });
+  assert.equal(r.remote_get().cloudflared.tokenSet, true);
+
+  const b = setup(t, { installed: true });
+  assert.throws(() => b.api.remote_set({ cloudflared: { enabled: true } }), /enabling needs the Cloudflare tunnel token/);
+  assert.equal(b.api.remote_get().cloudflared.enabled, false);
+  assert.deepEqual(b.api.remote_set({ cloudflared: { enabled: true, token: CF_TOKEN } }), { ok: true });
+  assert.deepEqual(b.api.remote_get().cloudflared, { installed: true, enabled: true, tokenSet: true });
+  // a tick saved by v1.16.0 (no such check then) is not re-judged when only the relay changes
+  store.set('cloudflared', { enabled: true, token: '' });
+  assert.deepEqual(r.remote_set({ relay: { name: 'Home' } }), { ok: true });
+  assert.equal(r.remote_get().relay.name, 'Home');
+});
+
+test('remote_set judges both halves before it writes either: a refused half leaves the other one unsaved and the agent untouched', async (t) => {
+  const { api: r, agent, cloudflared } = setup(t);   // cloudflared not installed
+  assert.throws(() => r.remote_set({ relay: { relayUrl: 'https://relay.example', token: TOKEN, enabled: true }, cloudflared: { enabled: true, token: CF_TOKEN } }), /install it first/);
+  assert.deepEqual(r.remote_get().relay, { enabled: false, relayUrl: '', name: '', tokenSet: false }, 'the relay half was not saved');
+  assert.deepEqual(agent.calls, [], 'nor started');
+  assert.throws(() => r.remote_set({ relay: { name: 'Office' }, cloudflared: { token: 'not a tunnel token' } }), /token/);
+  assert.equal(r.remote_get().relay.name, '', 'a bad Cloudflare token keeps a good relay name out too');
+  await flush();
+  assert.deepEqual(applies(cloudflared), []);
+  // the relay's own refusal still comes first and says what it always said
+  assert.throws(() => r.remote_set({ relay: { enabled: true } }), /enabling needs the relay URL and the device token/);
+});
+
+test('remote_status: the Cloudflare half says whether it is meant to run, whether a token is set, an apply in flight and how the last one went — never the token', async (t) => {
+  const { api: r, cloudflared } = setup(t, { installed: true });
+  let release;
+  cloudflared.apply = (arg) => { cloudflared.calls.push(['apply', arg]); return new Promise((res) => { release = res; }); };
+  let s = await r.remote_status();
+  assert.equal(s.cloudflared.enabled, false);
+  assert.equal(s.cloudflared.tokenSet, false);
+  assert.equal(s.cloudflared.applying, false);
+  assert.equal(s.cloudflared.apply, null, 'nothing applied yet');
+  r.remote_set({ cloudflared: { enabled: true, token: CF_TOKEN } });
+  await flush();
+  s = await r.remote_status();
+  assert.equal(s.cloudflared.applying, true, 'the apply is running');
+  assert.equal(s.cloudflared.enabled, true);
+  assert.equal(s.cloudflared.tokenSet, true);
+  release({ ok: false, error: 'uci' });
+  await flush();
+  s = await r.remote_status();
+  assert.equal(s.cloudflared.applying, false);
+  assert.deepEqual(s.cloudflared.apply, { ok: false, error: 'uci' }, 'the result nobody used to read');
+  assert.ok(!JSON.stringify(s).includes(CF_TOKEN), 'no token in the status');
+  // an apply that throws is a failed apply too (and a log line)
+  cloudflared.apply = async () => { throw new Error('uci batch crashed'); };
+  r.remote_set({ cloudflared: { enabled: false } });
+  await flush(); await flush();
+  assert.deepEqual((await r.remote_status()).cloudflared.apply, { ok: false, error: 'uci batch crashed' });
+});
+
 test('boot(): the agent starts only when enabled; the module-level methods reach the started instance', (t) => {
   const { api: r, agent } = setup(t);
   r.boot();

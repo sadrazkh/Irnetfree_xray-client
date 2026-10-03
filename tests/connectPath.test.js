@@ -79,8 +79,15 @@ test('the connect resolves both kinds of name BEFORE the tunnel and the guard, a
     }
     assert.match(body, /settings = Object\.assign\(\{\}, settings, \{ wgEndpointIps: wgSet\.wgEndpointIps, entryHostIps: entrySet\.entryHostIps \}\);/);
     assert.match(body, /const pinnedIps = \[\.\.\.Object\.values\(settings\.wgEndpointIps \|\| \{\}\), \.\.\.Object\.values\(settings\.entryHostIps \|\| \{\}\)\.flat\(\)\];/);
-    assert.match(body, /await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverBypassIpsOf\(config\), \.\.\.pinnedIps\],/,
-      `${label}: the tunnel must keep every pinned address off itself`);
+    // the router keeps the in-country resolvers IN its whole-LAN tunnel (field
+    // report D3, driven in routerFieldFixes.test.js); everywhere else they are a hole
+    if (label === 'main.js') {
+      assert.match(body, /await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverBypassIpsOf\(config\), \.\.\.pinnedIps\],/,
+        `${label}: the tunnel must keep every pinned address off itself`);
+    } else {
+      assert.match(body, /const resolverHoles = OPENWRT \? \[\] : resolverBypassIpsOf\(config\);\n\s*await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverHoles, \.\.\.pinnedIps\],/,
+        `${label}: the tunnel must keep every pinned address off itself — and, off a router, the direct resolvers`);
+    }
     assert.match(body, /excludes: await tunPlatform\.resolveServerIps\(\[\.\.\.entryAddrs, \.\.\.pinnedIps\], \{ ipv6: true \}\)/,
       `${label}: a held rebuild's firewall holes must cover the addresses the new core will dial`);
     assert.doesNotMatch(body, /wgEndpoints/, `${label}: the WireGuard endpoints travel inside pinnedIps now`);
@@ -189,6 +196,26 @@ test('both mirrors re-apply the DNS guard only over a core that is actually runn
   };
   assert.equal(isActive(SERVICE, 'service.js'), isActive(MAIN, 'main.js'));
   assert.match(isActive(SERVICE, 'service.js'), /&& !!xray\?\.running$/);
+});
+
+/* ------------------- fix 18: a server edit waits for a reconnect ------------------- */
+
+test('both mirrors count an edit of a server the live connection dials as a pending change (the renderer is shared)', () => {
+  // driven for real on the router in routerFieldFixes.test.js; the desktop must answer servers:update the same way
+  const [[, mainIds], [, serviceIds]] = both('function planServerIds(plan) {');
+  assert.equal(mainIds, serviceIds);
+  const [[, mainKeys], [, serviceKeys]] = both('function pendingKeys() {');
+  assert.equal(mainKeys, serviceKeys);
+  // a rename or a Save with nothing changed is no pending edit, in either (review of v1.16.1)
+  const [[, mainDial], [, serviceDial]] = both('function dialChanged(a, b) {');
+  assert.equal(mainDial, serviceDial);
+  assert.match(mainDial, /Object\.assign\(\{\}, s, \{ name: null, _edited: null \}\)/);
+  assert.match(mainKeys, /if \(appliedSettings && serverEditPending\) keys\.push\('servers'\);/);
+  for (const [label, src] of [['main.js', MAIN], ['service.js', SERVICE]]) {
+    assert.match(src, /appliedSettings = snapshotApplied\(getSettings\(\)\);\n\s*liveServerIds = planServerIds\(plan\);\n\s*serverEditPending = false;/, `${label}: the connect records what it dials`);
+    const upd = slice(src, label, "'servers:update'", 'return { ok: true, server: servers[idx], servers, live, pendingReconnect: pendingKeys() };');
+    assert.match(upd, /const live = !!appliedSettings && liveServerIds\.has\(id\) && dialChanged\(before, servers\[idx\]\);\n\s*if \(live\) serverEditPending = true;/, label);
+  }
 });
 
 /* ------------------------------ A3: the live NIC ------------------------------ */

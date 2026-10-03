@@ -581,6 +581,29 @@ test('a live tunnel whose sing-box exits on its own tells the owner — once, as
   }
 });
 
+test('Linux: the "set your resolver to the peer" advice is a desktop one — the router’s gateway composing this backend never says it', async (t) => {
+  // On a router dnsmasq stays the LAN's resolver and every port-53 packet
+  // already enters the tunnel; the line reached syslog as a warning on every
+  // router connect, telling the owner to change something he must not
+  // (field report G2/fix 7). A plain Linux machine still hears it.
+  const realGetuid = process.getuid;
+  process.getuid = () => 0;   // startLinux wants root
+  t.after(() => { process.getuid = realGetuid; });
+  for (const composedBy of [null, 'openwrt']) {
+    await withBin(['sing-box'], 'linux', async (tun, dir, logs) => {
+      tun.composedBy = composedBy;
+      fakeSpawn = () => stubChild();
+      canned([]);
+      await tun.start(10808, ['1.2.3.4'], ['172.19.0.2'], {});
+      assert.equal(tun.active, true);
+      const advice = logs.filter(([, l]) => /set your resolver/.test(l));
+      if (composedBy) assert.deepEqual(advice, [], 'not a word about the resolver on a router: ' + JSON.stringify(logs));
+      else assert.deepEqual(advice.map(([lvl]) => lvl), ['warn'], 'a desktop Linux keeps its advice');
+      await tun.stop();
+    });
+  }
+});
+
 test('an exit we asked for, or a start that fails, is not a lost tunnel', async () => {
   await withBin(['sing-box.exe', 'wintun.dll'], 'win32', async (tun) => {
     tun.isElevated = () => true;

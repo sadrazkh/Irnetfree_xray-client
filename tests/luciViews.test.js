@@ -198,6 +198,17 @@ function fakeForm(env) {
     }
     value(key, label) { this.keylist.push(String(key)); this.vallist.push(String(label != null ? label : key)); }
     cfgvalue(sid) { return this.map.data.get(this.map.config, sid, this.option); }
+    /* form.js reaches a widget through map.root.querySelectorAll: before the map is rendered that throws */
+    widget() { if (!this.map.root) throw new TypeError("Cannot read properties of undefined (reading 'querySelectorAll')"); }
+    /* form.js: what the widget holds now — typed or ticked, else what it was rendered with */
+    formvalue(sid) { this.widget(); return this.formValue !== undefined ? this.formValue : this.cfgvalue(sid); }
+    /* form.js → ui.js: run the widget's validator again (its red mark follows the result) */
+    triggerValidation(sid) {
+      this.widget();
+      this.validations = (this.validations || 0) + 1;
+      this.validState = typeof this.validate === 'function' ? this.validate(sid, this.formvalue(sid)) : true;
+      return this.validState;
+    }
     parse(sid) {
       if (this.formValue === undefined) return;
       const v = this.formValue;
@@ -212,7 +223,24 @@ function fakeForm(env) {
   }
   class Flag extends Opt {
     constructor(...a) { super(...a); this.enabled = '1'; this.disabled = '0'; this.default = '0'; }
+    formvalue(sid) {
+      this.widget();
+      if (this.formValue !== undefined) return this.formValue ? this.enabled : this.disabled;
+      return this.cfgvalue(sid) === this.enabled ? this.enabled : this.disabled;
+    }
+    /* LuCI's validator reads the <input>'s value attribute — the enabled value, ticked or not:
+     * a Flag's validate() must read the tick itself (formvalue), never trust its argument */
+    triggerValidation(sid) {
+      this.widget();
+      this.validations = (this.validations || 0) + 1;
+      this.validState = typeof this.validate === 'function' ? this.validate(sid, this.enabled) : true;
+      return this.validState;
+    }
     parse(sid) {
+      if (typeof this.validate === 'function') {
+        const ok = this.validate(sid, this.enabled);
+        if (ok !== true) throw new TypeError(`Option "${this.title}" contains an invalid input value. ${ok}`);
+      }
       if (this.formValue === undefined) return;
       const v = this.formValue ? this.enabled : this.disabled;
       if (v === this.default && (this.optional || this.rmempty)) this.map.data.unset(this.map.config, sid, this.option);
@@ -237,6 +265,8 @@ function fakeForm(env) {
       this.options.push(o);
       return o;
     }
+    /* CBIAbstractSection.formvalue(section_id, option): the widgets once rendered, the stored values before */
+    formvalue(sid, option) { const o = this.options.find((x) => x.option === option); return o ? (this.map.root ? o.formvalue(sid) : o.cfgvalue(sid)) : null; }
   }
   NamedSection.isSection = true;
   class Map {
@@ -256,6 +286,7 @@ function fakeForm(env) {
       this.renders++;
       const root = E('div', { 'class': 'cbi-map', 'data-config': this.config });
       root.map = this;
+      this.root = root;
       for (const s of this.sections) for (const o of s.options) {
         // a page's own widget runs here, as LuCI would run it
         if (Object.prototype.hasOwnProperty.call(o, 'renderWidget')) {
@@ -782,7 +813,7 @@ test('Settings, Remote access, Log: a rejected call says why and leaves nothing 
   assert.match(rv.v.el.cfInstalled.textContent, /Not installed/, 'no "Installing…" left behind');
   r.maps[0].option('relay', 'name').formValue = 'office';
   await assert.rejects(rv.v.handleSave());
-  assert.match(r.ui.notes.pop().textContent, /did not answer in time/);
+  assert.match(r.ui.modals.pop().node.textContent, /did not answer in time/, 'a Save that did not get through is a dialog (v1.16.1)');
 
   const l = fakeLuci({ replies: healthy() });
   const lv = await openView('log', l);
@@ -822,6 +853,48 @@ test('Overview in Persian', async () => {
   const text = page.textContent;
   for (const s of ['متصل', 'وضعیت', 'کیل سوییچ', 'تست اتصال', 'به‌روزرسانی ساب‌ها', 'باز کردن رابط وب کامل']) assert.ok(text.includes(s), s);
   assert.deepEqual(v.el.picker.byTag('optgroup').map((g) => g.getAttribute('label')), ['My provider', 'کانفیگ‌های دستی']);
+});
+
+/* ------------------------------ v1.16.1: the owner's first install ------------------------------ */
+
+test('Overview: a "Whole-network tunnel" row says whether every device behind the router goes through the VPN (st.tun)', async () => {
+  const env = fakeLuci({ replies: healthy() });
+  const { v, page } = await openView('overview', env);
+  assert.match(page.textContent, /Whole-network tunnel/);
+  assert.equal(v.el.tun.textContent, 'On — every device behind the router goes through the VPN');
+  env.replies.status = Object.assign({}, STATUS, { tun: false });
+  await v.refresh();
+  assert.equal(v.el.tun.textContent, 'Off', 'connected without the gateway: the LAN goes direct');
+  env.replies.status = Object.assign({}, STATUS, { state: 'reconnecting', attempt: 1, tun: false });
+  await v.refresh();
+  assert.equal(v.el.tun.textContent, 'Off');
+  env.replies.status = Object.assign({}, STATUS, { state: 'disconnected', tun: undefined });
+  await v.refresh();
+  assert.equal(v.el.tun.textContent, 'Off', 'an older service without the key');
+
+  const fa = fakeLuci({ lang: 'fa', replies: healthy() });
+  const f = await openView('overview', fa);
+  assert.match(f.page.textContent, /تونل کل شبکه/);
+  assert.equal(f.v.el.tun.textContent, 'روشن — همهٔ دستگاه‌های پشت روتر از VPN می‌روند');
+});
+
+test('Overview: Connect on the config that is already up says so — press Reconnect to apply changes — instead of nothing (L4)', async () => {
+  const env = fakeLuci({ replies: healthy({ connect: { accepted: true, already: true } }) });
+  const { v, page } = await openView('overview', env);
+  await page.button('Connect').fire('click')[0];
+  const said = 'This config is already connected — press Reconnect to apply changes.';
+  assert.equal(v.el.result.textContent, said, 'next to the buttons');
+  assert.equal(env.ui.notes.pop().textContent, said, 'and at the top');
+  // a real connect clears it
+  env.replies.connect = { accepted: true };
+  await v.handleConnect();
+  assert.equal(v.el.result.textContent, '');
+  assert.equal(env.ui.notes.length, 0);
+
+  const fa = fakeLuci({ lang: 'fa', replies: healthy({ connect: { accepted: true, already: true } }) });
+  const f = await openView('overview', fa);
+  await f.v.handleConnect();
+  assert.equal(f.v.el.result.textContent, 'همین کانفیگ الان وصل است — برای اعمال تغییرها «اتصال مجدد» را بزن.');
 });
 
 /* ------------------------------ Settings ------------------------------ */
@@ -925,7 +998,7 @@ test('Remote access: relay and Cloudflare Tunnel with their live states; tokens 
   const { v, page } = await openView('remote', env);
   const m = env.maps[0];
   assert.deepEqual(m.sections.map((s) => s.section), ['relay', 'cloudflared']);
-  assert.deepEqual(m.sections[0].options.map((o) => o.option), ['enabled', 'relayUrl', 'name', 'token', '_state']);
+  assert.deepEqual(m.sections[0].options.map((o) => o.option), ['_about', 'enabled', 'relayUrl', 'name', 'token', '_state']);
   assert.deepEqual(m.sections[1].options.map((o) => o.option), ['_installed', 'enabled', 'token', '_state']);
   const relayToken = m.option('relay', 'token'), cfToken = m.option('cloudflared', 'token');
   assert.equal(relayToken.password, true);
@@ -953,6 +1026,9 @@ test('Remote access: relay and Cloudflare Tunnel with their live states; tokens 
   assert.equal(m.resets, 1);
 
   relayToken.formValue = undefined;
+  // cloudflared is installed (the page follows remote_status), then Cloudflare is switched on with its token
+  env.replies.remote_status = { relay: { state: 'online', path: 'direct' }, cloudflared: { installed: true, running: false } };
+  await env.poll.added[0].fn();
   m.option('cloudflared', 'enabled').formValue = true;
   cfToken.formValue = 'cf-token';
   await v.handleSave();
@@ -991,6 +1067,225 @@ test('Remote access: a service without the remote module, or not running', async
   const d = await openView('remote', down);
   assert.ok(d.page.button('Start the service'));
   assert.equal(await d.v.handleSave(), undefined, 'Save does nothing without a form');
+});
+
+/* ------------------------------ Remote access, v1.16.1: «فعال» made honest ------------------------------ */
+
+const NOTHING_SET = { relay: { enabled: false, relayUrl: '', name: '', tokenSet: false }, cloudflared: { installed: false, enabled: false, tokenSet: false } };
+const DOCS = 'https://github.com/sadrazkh/Irnetfree_xray-client/blob/main/docs/remote.md';
+
+test('Remote access: the page says changes take effect only with Save; the relay section says you run the relay yourself, with the guide', async () => {
+  const env = fakeLuci({ replies: healthy() });
+  const { page } = await openView('remote', env);
+  const m = env.maps[0];
+  assert.match(m.description, /Changes take effect only when you press Save at the bottom of the page\.$/);
+  assert.equal(m.sections[0].options[0].option, '_about', 'the box comes first in the relay section');
+  const box = m.sections[0].options[0].renderWidget('relay');
+  assert.match(box.textContent, /^The relay is a server you run yourself; IRNetFree does not provide one\. Deploy relay\/ on Harbora or any Docker host, press Add router on the relay’s page, then paste the relay URL and the 43-character device token here\./);
+  const guide = box.byTag('a')[0];
+  assert.equal(guide.getAttribute('href'), DOCS);
+  assert.equal(guide.getAttribute('target'), '_blank');
+  assert.equal(guide.getAttribute('rel'), 'noopener');
+  assert.ok(page.byTag('a').some((a) => a.getAttribute('href') === DOCS), 'and it is on the page');
+
+  const fa = fakeLuci({ lang: 'fa', replies: healthy() });
+  const f = await openView('remote', fa);
+  assert.match(fa.maps[0].description, /تغییرها فقط با دکمهٔ «ذخیره» پایین صفحه اعمال می‌شوند\.$/);
+  assert.match(f.page.textContent, /رله سرور خودِ توست؛ IRNetFree رله‌ای نمی‌دهد\./);
+});
+
+test('Remote access: each «Enabled» validates on the page — the relay needs its URL and token, Cloudflare needs cloudflared and a token', async () => {
+  const env = fakeLuci({ replies: healthy({ remote_get: NOTHING_SET }) });
+  await openView('remote', env);
+  const m = env.maps[0];
+  const relayOn = m.option('relay', 'enabled'), cfOn = m.option('cloudflared', 'enabled');
+  // LuCI hands a Flag's validator the input's value ("1") ticked or not: off is judged by the tick
+  assert.equal(relayOn.validate('relay', '1'), true, 'not ticked: nothing to check');
+  relayOn.formValue = true;
+  assert.equal(relayOn.validate('relay', '1'), 'To enable, first enter the relay URL and the device token');
+  m.option('relay', 'relayUrl').formValue = 'https://relay.example.com';
+  assert.equal(relayOn.validate('relay', '1'), 'To enable, first enter the relay URL and the device token', 'a URL alone is not enough');
+  m.option('relay', 'token').formValue = 'x'.repeat(43);
+  assert.equal(relayOn.validate('relay', '1'), true);
+  m.option('relay', 'relayUrl').formValue = '';
+  assert.equal(relayOn.validate('relay', '1'), 'To enable, first enter the relay URL and the device token', 'a token alone is not enough');
+
+  cfOn.formValue = true;
+  assert.equal(cfOn.validate('cloudflared', '1'), 'Install cloudflared first (the Install button above)');
+  env.replies.remote_status = { relay: { state: 'off' }, cloudflared: { installed: true, running: false, enabled: false, tokenSet: false } };
+  await env.poll.added[0].fn();
+  assert.equal(cfOn.validate('cloudflared', '1'), 'Paste the Cloudflare tunnel token first');
+  m.option('cloudflared', 'token').formValue = 'cf-token';
+  assert.equal(cfOn.validate('cloudflared', '1'), true);
+  // typing the missing piece judges the tick again, so its red mark goes
+  const before = relayOn.validations || 0;
+  m.option('relay', 'relayUrl').validate('relay', 'https://relay.example.com');
+  m.option('relay', 'token').validate('relay', 'x'.repeat(43));
+  assert.equal(relayOn.validations, before + 2);
+
+  // a relay token already on the router counts
+  const set = fakeLuci({ replies: healthy({ remote_get: { relay: { enabled: false, relayUrl: 'https://relay.example.com', name: '', tokenSet: true }, cloudflared: { installed: true, enabled: false, tokenSet: true } } }) });
+  await openView('remote', set);
+  set.maps[0].option('relay', 'enabled').formValue = true;
+  set.maps[0].option('cloudflared', 'enabled').formValue = true;
+  assert.equal(set.maps[0].option('relay', 'enabled').validate('relay', '1'), true);
+  assert.equal(set.maps[0].option('cloudflared', 'enabled').validate('cloudflared', '1'), true);
+  // a tick v1.16.0 saved without cloudflared is not re-judged while it is left alone (the State line says what is wrong)
+  const old = fakeLuci({ replies: healthy({ remote_get: { relay: NOTHING_SET.relay, cloudflared: { installed: false, enabled: true, tokenSet: false } } }) });
+  await openView('remote', old);
+  assert.equal(old.maps[0].option('cloudflared', 'enabled').validate('cloudflared', '1'), true);
+
+  const fa = fakeLuci({ lang: 'fa', replies: healthy({ remote_get: NOTHING_SET }) });
+  await openView('remote', fa);
+  fa.maps[0].option('relay', 'enabled').formValue = true;
+  fa.maps[0].option('cloudflared', 'enabled').formValue = true;
+  assert.equal(fa.maps[0].option('relay', 'enabled').validate('relay', '1'), 'برای فعال‌کردن، اول آدرس رله و توکن دستگاه را وارد کن');
+  assert.equal(fa.maps[0].option('cloudflared', 'enabled').validate('cloudflared', '1'), 'اول cloudflared را نصب کن (دکمهٔ «نصب» بالا)');
+});
+
+test('Remote access: a Save the page or the service refuses is a dialog with the reason — and the page sends nothing it would refuse', async () => {
+  const env = fakeLuci({ replies: healthy({ remote_get: NOTHING_SET }) });
+  const { v } = await openView('remote', env);
+  const m = env.maps[0];
+  m.option('relay', 'enabled').formValue = true;
+  env.calls.length = 0;
+  await assert.rejects(v.handleSave());
+  assert.equal(callsOf(env, 'remote_set').length, 0, 'nothing sent');
+  let modal = env.ui.modals.pop();
+  assert.equal(modal.title, 'Not saved');
+  assert.match(modal.node.textContent, /To enable, first enter the relay URL and the device token/);
+  assert.ok(modal.node.button('Close'));
+  assert.ok(m.option('relay', 'enabled').validations >= 1, 'the tick is judged again, so LuCI marks it');
+  m.option('relay', 'enabled').formValue = false;
+  m.option('cloudflared', 'enabled').formValue = true;
+  await assert.rejects(v.handleSave());
+  assert.match(env.ui.modals.pop().node.textContent, /Install cloudflared first/);
+  assert.equal(callsOf(env, 'remote_set').length, 0);
+
+  // the service's own refusal, in words
+  m.option('cloudflared', 'enabled').formValue = false;
+  m.option('relay', 'token').formValue = 'short';
+  env.replies.remote_set = { error: 'token must be the 43-character device token the relay showed' };
+  await assert.rejects(v.handleSave());
+  modal = env.ui.modals.pop();
+  assert.equal(modal.title, 'Not saved');
+  assert.match(modal.node.textContent, /The token must be the 43-character device token the relay showed\./);
+  // a call that never got through is a dialog too
+  env.replies.remote_set = TIMED_OUT();
+  await assert.rejects(v.handleSave());
+  assert.match(env.ui.modals.pop().node.textContent, /did not answer in time/);
+
+  const fa = fakeLuci({ lang: 'fa', replies: healthy({ remote_set: { error: 'token must be the 43-character device token the relay showed' } }) });
+  const f = await openView('remote', fa);
+  fa.maps[0].option('relay', 'token').formValue = 'short';
+  await assert.rejects(f.v.handleSave());
+  modal = fa.ui.modals.pop();
+  assert.equal(modal.title, 'ذخیره نشد');
+  assert.match(modal.node.textContent, /توکن باید همان توکن ۴۳ کاراکتری‌ای باشد که رله نشان داد/);
+});
+
+test('errorOf: every refusal the remote api throws is a sentence of the page, in English and Persian', () => {
+  const c = fakeLuci().common;
+  const said = {
+    'enabling needs the relay URL and the device token': 'To enable, first enter the relay URL and the device token',
+    'enabling needs cloudflared — install it first': 'Install cloudflared first (the Install button above)',
+    'enabling needs the Cloudflare tunnel token': 'Paste the Cloudflare tunnel token first',
+    'token must be the 43-character device token the relay showed': 'The token must be the 43-character device token the relay showed.',
+    'relayUrl must be https://<host>[:port]/ with no path': 'Use https:// and a host name, with no path.',
+    'name must be at most 40 printable characters': 'Up to 40 characters.',
+    'the Cloudflare tunnel token does not look right': 'The Cloudflare tunnel token does not look right.'
+  };
+  for (const [e, s] of Object.entries(said)) assert.equal(c.errorOf({ error: e }), s, e);
+  // the service's messages, read off its source: none falls through to "Error: <English>"
+  const api = read(path.join(__dirname, '..', 'src', 'server', 'remote', 'api.js'));
+  const thrown = [...api.matchAll(/throw new Error\('([^']+)'\)/g)].map((x) => x[1]).filter((x) => !/not started/.test(x));
+  assert.ok(thrown.length >= 7, thrown.join(' | '));
+  for (const e of thrown) assert.ok(e in said, `remote/api.js throws "${e}", which errorOf does not put in words`);
+  const fa = fakeLuci({ lang: 'fa' }).common;
+  assert.equal(fa.errorOf({ error: 'token must be the 43-character device token the relay showed' }), 'توکن باید همان توکن ۴۳ کاراکتری‌ای باشد که رله نشان داد.');
+  assert.equal(fa.errorOf({ error: 'enabling needs the Cloudflare tunnel token' }), 'اول توکن تونل کلودفلر را بچسبان');
+});
+
+test('relayText / cloudflaredText: the attempt and the last error while the relay is connecting; why Cloudflare is enabled but not running', () => {
+  const c = fakeLuci().common;
+  assert.equal(c.relayText({ state: 'connecting', attempt: 0 }), 'connecting…');
+  assert.equal(c.relayText({ state: 'connecting', attempt: 2, lastError: null }), 'connecting… (attempt 2)');
+  assert.equal(c.relayText({ state: 'connecting', attempt: 3, lastError: 'the direct dial to relay.example failed: ECONNREFUSED' }),
+    'connecting… (attempt 3) — the direct dial to relay.example failed: ECONNREFUSED');
+  const cf = c.cloudflaredText;
+  assert.equal(cf({ installed: false, enabled: true }), 'Enabled but not running: cloudflared is not installed');
+  assert.equal(cf({ installed: true, running: false, enabled: true, tokenSet: false }), 'Enabled but not running: no tunnel token');
+  assert.equal(cf({ installed: true, running: false, enabled: true, tokenSet: true, apply: { ok: false, error: 'uci' }, lastLine: 'x' }), 'Enabled but not running: uci');
+  assert.equal(cf({ installed: true, running: false, enabled: true, tokenSet: true, apply: { ok: true }, lastLine: 'ERR Unauthorized: Invalid tunnel secret' }), 'Enabled but not running: ERR Unauthorized: Invalid tunnel secret');
+  assert.equal(cf({ installed: true, running: false, enabled: true, tokenSet: true }), 'Enabled but not running: see the Log tab');
+  assert.equal(cf({ installed: true, running: false, enabled: true, tokenSet: true, applying: true }), 'applying…');
+  assert.equal(cf({ installed: false, installing: true }), 'installing…');
+  assert.equal(cf({ installed: true, running: true, enabled: true }), 'running');
+  assert.equal(cf({ installed: true, running: false, enabled: false }), 'stopped');
+  assert.equal(cf({ installed: false, running: false }), 'not installed');
+  assert.equal(cf({ installed: true, running: false }), 'stopped', 'an older service without "enabled": as before');
+  const fa = fakeLuci({ lang: 'fa' }).common;
+  assert.equal(fa.relayText({ state: 'connecting', attempt: 4, lastError: 'boom' }), 'در حال اتصال… (تلاش 4) — boom');
+  assert.equal(fa.cloudflaredText({ installed: false, enabled: true }), 'فعال ولی اجرا نمی‌شود: cloudflared نصب نشده است');
+});
+
+test('Remote access: the State lines — the relay attempt, Cloudflare enabled but not running with the reason', async () => {
+  const env = fakeLuci({ replies: healthy({ remote_status: {
+    relay: { state: 'connecting', path: 'direct', attempt: 2, lastError: 'the relay refused the device token (401)' },
+    cloudflared: { installed: true, running: false, enabled: true, tokenSet: true, lastLine: 'ERR Unauthorized: Invalid tunnel secret' }
+  } }) });
+  const { v } = await openView('remote', env);
+  assert.equal(v.el.relayState.textContent, 'connecting… (attempt 2) — the relay refused the device token (401)');
+  assert.equal(v.el.cfState.textContent, 'Enabled but not running: ERR Unauthorized: Invalid tunnel secret', 'the reason once, not twice');
+  env.replies.remote_status = { relay: { state: 'off' }, cloudflared: { installed: true, running: true, enabled: true, tokenSet: true, lastLine: 'Registered tunnel connection' } };
+  await env.poll.added[0].fn();
+  assert.equal(v.el.cfState.textContent, 'running — Registered tunnel connection');
+  // the Overview's remote line says the same
+  const o = fakeLuci({ replies: healthy({ status: Object.assign({}, STATUS, { remote: { relay: { state: 'off' }, cloudflared: { installed: false, enabled: true } } }) }) });
+  const ov = await openView('overview', o);
+  assert.equal(ov.v.el.remote.textContent, 'Relay: off · Cloudflare Tunnel: Enabled but not running: cloudflared is not installed');
+});
+
+test('Remote access: a failed cloudflared install says why and offers Install again — no endless «Installing…» (L6)', async () => {
+  const env = fakeLuci({ replies: healthy() });
+  const { v, page } = await openView('remote', env);
+  // a status read that left before Install was pressed and answers after it is not the end of the install
+  let answer;
+  env.replies.remote_status = () => new Promise((r) => { answer = r; });
+  const inFlight = env.poll.added[0].fn();
+  await page.button('Install').fire('click')[0];
+  answer({ relay: { state: 'off' }, cloudflared: { installed: false, running: false, installing: false, lastInstall: { ok: false, at: 1, error: 'an older failure' } } });
+  await inFlight;
+  assert.match(v.el.cfInstalled.textContent, /^Installing…/);
+  env.replies.remote_status = { relay: { state: 'off' }, cloudflared: { installed: false, running: false, installing: true, lastInstall: null } };
+  await env.poll.added[0].fn();
+  assert.match(v.el.cfInstalled.textContent, /^Installing…/);
+  env.replies.remote_status = { relay: { state: 'off' }, cloudflared: { installed: false, running: false, installing: false, lastInstall: { ok: false, at: 2, error: 'Unknown package \'cloudflared\'.' } } };
+  await env.poll.added[0].fn();
+  assert.match(v.el.cfInstalled.textContent, /^Not installed — Install failed: Unknown package 'cloudflared'\./);
+  assert.ok(v.el.cfInstalled.button('Install'), 'Install again');
+  const note = env.ui.notes.pop();
+  assert.equal(note.kind, 'danger');
+  assert.match(note.textContent, /Install failed: Unknown package 'cloudflared'\./);
+
+  // a page opened while an install runs, and one opened after a failed one
+  const busy = fakeLuci({ replies: healthy({ remote_get: NOTHING_SET, remote_status: { relay: { state: 'off' }, cloudflared: { installed: false, installing: true } } }) });
+  const b = await openView('remote', busy);
+  assert.match(b.v.el.cfInstalled.textContent, /^Installing…/);
+  busy.replies.remote_status = { relay: { state: 'off' }, cloudflared: { installed: true, running: false, installing: false, lastInstall: { ok: true, at: 3 } } };
+  await busy.poll.added[0].fn();
+  assert.equal(b.v.el.cfInstalled.textContent, 'Installed');
+  // an install that ended between the page's two reads: rendered, not a TypeError from a form not on the page yet
+  const race = fakeLuci({ replies: healthy({ remote_get: NOTHING_SET, remote_status: { relay: { state: 'off' }, cloudflared: { installed: true, running: false, installing: false, lastInstall: { ok: true, at: 4 } } } }) });
+  const rr = await openView('remote', race);
+  assert.equal(rr.v.el.cfInstalled.textContent, 'Installed');
+  race.maps[0].option('cloudflared', 'enabled').formValue = true;
+  race.maps[0].option('cloudflared', 'token').formValue = 'cf-token';
+  assert.equal(race.maps[0].option('cloudflared', 'enabled').validate('cloudflared', '1'), true, 'and the page knows it is installed');
+  const failed = fakeLuci({ lang: 'fa', replies: healthy({ remote_status: { relay: { state: 'off' }, cloudflared: { installed: false, installing: false, lastInstall: { ok: false, at: 1, error: 'wget returned 4' } } } }) });
+  const fv = await openView('remote', failed);
+  assert.match(fv.v.el.cfInstalled.textContent, /نصب ناموفق بود: wget returned 4/);
+  assert.ok(fv.v.el.cfInstalled.button('نصب'));
 });
 
 /* ------------------------------ Log ------------------------------ */

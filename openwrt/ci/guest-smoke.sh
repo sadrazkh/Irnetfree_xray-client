@@ -38,6 +38,11 @@ uci show firewall | grep -E "^firewall\.irnetfree_(lan|guest)\." || true
 [ "$(uci -q get firewall.irnetfree_guest.src)" = guest ] && [ "$(uci -q get firewall.irnetfree_guest.dest)" = irnetfree ] \
 	|| { echo "the guest zone forwards to wan but not to the tunnel zone — no internet for it while connected"; exit 1; }
 [ "$(uci show firewall | grep -c "\.dest='irnetfree'")" = 2 ] || { echo "a forwarding to the tunnel zone is missing or doubled"; uci show firewall | grep irnetfree; exit 1; }
+# the installed files are not dated 1970 (build-ipk stamps the commit's time): uhttpd hands a view's mtime to the
+# browser as Last-Modified, and a 1970 view stayed "fresh" in the browser for years after an upgrade
+m="$(date -r /www/luci-static/resources/view/irnetfree/overview.js +%s 2>/dev/null || echo '?')"
+echo "LuCI overview.js mtime: $m ($(date -u -r /www/luci-static/resources/view/irnetfree/overview.js 2>/dev/null || echo '?'))"
+case "$m" in ''|*[!0-9]*) echo "(date -r cannot read it on this image: not asserted)" ;; *) [ "$m" -gt 31536000 ] || { echo "the LuCI views landed dated 1970: browsers keep the old ones after an upgrade"; exit 1; } ;; esac
 
 say "test tools and the feed cores (kmod-veth: the WAN-change interface and the LAN-side namespace below)"
 opkg install sing-box xray-core curl jq kmod-veth >/dev/null
@@ -112,19 +117,28 @@ if opkg install cloudflared > /tmp/cf-install.log 2>&1; then
 	# the real apply path, on then off, with a token that cannot work (base64 of a made-up JSON): the UCI
 	# write through uci batch on stdin, protocol pinned to http2, the service enabled/started, the dnsmasq
 	# drop-in written into the dir dnsmasq really reads (23.05: /tmp/dnsmasq.d; 24.10: /tmp/dnsmasq.<cfg>.d)
-	# and still there after the reload apply does — then everything undone
+	# and READ by dnsmasq — apply restarts it (a reload is a SIGHUP: dnsmasq re-reads no config on one)
+	# — then everything undone
 	CF_DIRS="$(grep -h '^conf-dir=' /var/etc/dnsmasq.conf.* 2>/dev/null | cut -d= -f2 | cut -d, -f1 | sort -u | tr '\n' ' ')"
 	echo "dnsmasq conf-dir(s): ${CF_DIRS:-none}"
 	[ -n "$CF_DIRS" ] || { echo "dnsmasq's generated config names no conf-dir"; grep -hs 'conf-dir\|conf-file' /var/etc/dnsmasq.conf.* || true; exit 1; }
+	CF_MARK="irnf-smoke-cf-on-$$"; logger -t irnf-smoke "$CF_MARK"
 	node -e "const c = require('/usr/lib/irnetfree/src/server/remote/cloudflared').createCloudflared({ log: (l) => console.log('  ' + l) }); c.apply({ enabled: true, token: 'eyJhIjoiMDAwIiwidCI6IjAwMCIsInMiOiIwMDAifQ==' }).then((r) => { console.log('apply on: ' + JSON.stringify(r)); return c.status(); }).then((s) => { console.log('status while on: ' + JSON.stringify(s)); process.exit(0); }).catch((e) => { console.log('apply failed: ' + e.message); process.exit(1); })" \
 		|| { echo "apply on failed"; exit 1; }
 	[ "$(uci -q get cloudflared.config.protocol)" = http2 ] || { echo "protocol was not pinned to http2 in UCI"; uci show cloudflared; exit 1; }
 	[ "$(uci -q get cloudflared.config.enabled)" = 1 ] || { echo "apply on did not write enabled=1"; uci show cloudflared; exit 1; }
 	for d in $CF_DIRS; do
-		[ -s "$d/irnetfree-cloudflared.conf" ] || { echo "no drop-in in $d (where dnsmasq reads) after apply on + dnsmasq reload"; ls -la "$d" 2>&1 || true; exit 1; }
+		[ -s "$d/irnetfree-cloudflared.conf" ] || { echo "no drop-in in $d (where dnsmasq reads) after apply on + dnsmasq restart"; ls -la "$d" 2>&1 || true; exit 1; }
 	done
 	echo "--- the drop-in, as written"; cat "${CF_DIRS%% *}/irnetfree-cloudflared.conf"
 	grep -q '^server=/argotunnel.com/' "${CF_DIRS%% *}/irnetfree-cloudflared.conf" || { echo "the drop-in does not name argotunnel.com"; exit 1; }
+	i=0
+	until logread | sed -n "/$CF_MARK/,\$p" | grep -q 'for domain argotunnel\.com'; do
+		i=$((i+1))
+		[ $i -lt 10 ] || { echo "dnsmasq did not read the drop-in after apply on (no 'for domain argotunnel.com' since it)"; logread | sed -n "/$CF_MARK/,\$p" | grep -i dnsmasq | tail -n 10; exit 1; }
+		sleep 1
+	done
+	echo "dnsmasq read it: $(logread | sed -n "/$CF_MARK/,\$p" | grep 'for domain argotunnel\.com' | tail -n 1)"
 	node -e "require('/usr/lib/irnetfree/src/server/remote/cloudflared').createCloudflared({ log: (l) => console.log('  ' + l) }).apply({ enabled: false, token: '' }).then((r) => { console.log('apply off: ' + JSON.stringify(r)); process.exit(0); }).catch((e) => { console.log('apply off failed: ' + e.message); process.exit(1); })" \
 		|| { echo "apply off failed"; exit 1; }
 	[ "$(uci -q get cloudflared.config.enabled)" = 0 ] || { echo "apply off did not write enabled=0"; uci show cloudflared; exit 1; }
@@ -756,5 +770,303 @@ curl -s -b /tmp/luci.jar -o /tmp/luci-fa.js http://127.0.0.1/cgi-bin/luci/admin/
 grep -qF '"45517f0a":"دسترسی از راه دور"' /tmp/luci-fa.js \
 	|| { echo "the Persian tab names are not in LuCI's fa catalog"; head -c 300 /tmp/luci-fa.js; echo; exit 1; }
 echo "LuCI's fa catalog has the IRNetFree tab names ($(grep -o '"[0-9a-f]\{8\}":' /tmp/luci-fa.js | wc -l) strings in all)"
+
+# ===========================================================================
+# v1.16.1 LuCI (fix/v1161-luci) — the owner's first install: «فعال» on Remote
+# access must be honest (a setting that cannot work is refused with the reason,
+# and the refusal is a warn line in syslog), the status carries what the
+# Overview's "Whole-network tunnel" row and the Cloudflare state line read,
+# and a Connect on the config that is already up answers already:true (the
+# page then says: press Reconnect to apply changes).
+# ===========================================================================
+say "LuCI v1.16.1: Remote access refuses an «Enabled» that cannot work, says why, and syslog has it"
+mark luci161
+r="$(lu remote_set '{"relay":{"enabled":true}}')"; echo "$r"
+echo "$r" | jq -e '.error == "enabling needs the relay URL and the device token"' >/dev/null \
+	|| { echo "remote_set took the relay enabled without its URL and device token"; exit 1; }
+if [ -x /usr/bin/cloudflared ]; then want='enabling needs the Cloudflare tunnel token'; else want='enabling needs cloudflared'; fi
+r="$(lu remote_set '{"cloudflared":{"enabled":true}}')"; echo "$r"
+echo "$r" | jq -e --arg w "$want" '.error | startswith($w)' >/dev/null \
+	|| { echo "remote_set took Cloudflare enabled (cloudflared $([ -x /usr/bin/cloudflared ] && echo installed || echo 'not installed'), no token) — expected: $want"; exit 1; }
+lu remote_get | jq -e '.relay.enabled == false and .cloudflared.enabled == false' >/dev/null || { echo "a refused remote_set saved something"; lu remote_get; exit 1; }
+i=0
+until since_mark | grep -q 'LuCI: remote_set refused: enabling needs the relay URL and the device token'; do
+	i=$((i+1))
+	[ $i -lt 10 ] || { echo "the refusal is not in syslog (warn)"; since_mark | tail -10; exit 1; }
+	sleep 1
+done
+since_mark | grep 'LuCI: remote_set refused' | tail -2
+r="$(lu remote_status)"; echo "$r" | jq -c '.cloudflared | {installed, running, enabled, tokenSet, applying, apply}'
+echo "$r" | jq -e '.cloudflared | (.enabled == false) and (.tokenSet == false) and (.applying == false) and has("apply")' >/dev/null \
+	|| { echo "remote_status does not say whether Cloudflare is meant to run (the page's «Enabled but not running» line)"; exit 1; }
+
+say "LuCI v1.16.1: the Overview's whole-network row (tun), and Connect on the live config answers already:true without a rebuild"
+r="$(lu connect "{\"id\":\"$ID\"}")"; echo "$r"
+echo "$r" | jq -e '.accepted == true and .already != true' >/dev/null || { echo "a connect from disconnected was not accepted as a real connect"; exit 1; }
+wait_back "LuCI v1.16.1 connect" 180
+lu status | jq -e '.state == "connected" and .tun == true' >/dev/null || { echo "status does not say tun:true while the gateway is up"; lu status | head -30; exit 1; }
+sleep 3   # the connect's own bookkeeping ends just after "connected"
+GW="$(gw_singbox | tr '\n' ' ')"; CORE="$(core_xray | tr '\n' ' ')"
+r="$(lu connect "{\"id\":\"$ID\"}")"; echo "$r"
+echo "$r" | jq -e '.accepted == true and .already == true' >/dev/null || { echo "a Connect on the config that is already up did not answer already:true"; exit 1; }
+sleep 5
+[ "$(gw_singbox | tr '\n' ' ')" = "$GW" ] && [ "$(core_xray | tr '\n' ' ')" = "$CORE" ] \
+	|| { echo "the Connect on the live config rebuilt the gateway (sing-box $GW -> $(gw_singbox | tr '\n' ' '), xray $CORE -> $(core_xray | tr '\n' ' '))"; exit 1; }
+gateway_up || { echo "the gateway is not up after the Connect on the live config"; exit 1; }
+echo "already:true — the same sing-box ($GW) and xray ($CORE), nothing rebuilt"
+lu disconnect | jq -e '.accepted == true' >/dev/null || { echo "disconnect through LuCI was not accepted"; exit 1; }
+i=0
+while ip link show IRNetFree >/dev/null 2>&1; do
+	i=$((i+1))
+	[ $i -lt 60 ] || { echo "the TUN device stayed after the disconnect"; exit 1; }
+	sleep 1
+done
+lu status | jq -e '.tun == false' >/dev/null || { echo "status says tun while disconnected"; exit 1; }
+
+# v1.16.1 core (fix/v1161-core, field report D3): in bypass-ir the in-country
+# resolvers the core dials `direct` stay IN the whole-LAN tunnel. v1.16.0 cut
+# them out of sing-box's table for every device and every port — dnsmasq's
+# upstream (or a phone's hard-coded resolver) then left in plain text by the
+# ISP. Only the core's own query to them leaves direct, its socket bound to
+# the WAN device — and the router's own control path (review of v1.16.1):
+# the service's UDP 53 to them by a rule for its user alone, cloudflared's
+# edge discovery by dnsmasq server lines bound to the WAN device.
+# The router is disconnected here (the LuCI section ends so).
+# Quad9 stands in for the in-country pair: CI can reach it, Iran's cannot be
+# relied on from a runner; "Iranian names" come from hand-made geo files
+# (geosite CATEGORY-IR = digikala.com, aparat.com; geoip IR = all of IPv4 —
+# the only codes bypass-ir loads), so nothing is downloaded.
+# ===========================================================================
+say "D3: bypass-ir with hand-made geo files and Quad9 as the in-country resolvers"
+WANDEV="$(ip route show default | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)"
+WANIP="$(ip -4 addr show dev "$WANDEV" | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n 1)"
+echo "WAN device: $WANDEV ($WANIP)"
+[ -n "$WANDEV" ] && [ -n "$WANIP" ] || { echo "no WAN device/address before the D3 connect"; ip route; exit 1; }
+# (the service's weekly geo refresh may have put real ones there already while
+# it sat disconnected — those are used as they are; only a missing one is made)
+cat > /tmp/irnf-mkgeo.js <<'EOF'
+// protobuf by hand (xray's routercommon): GeoIPList{entry=1} GeoIP{country_code=1, cidr=2} CIDR{ip=1, prefix=2};
+// GeoSiteList{entry=1} GeoSite{country_code=1, domain=2} Domain{type=1 (2: a domain and its subdomains), value=2}
+const fs = require('fs');
+fs.mkdirSync('/tmp/irnf-geo', { recursive: true });
+const varint = (n) => { const b = []; while (n > 127) { b.push((n & 127) | 128); n >>>= 7; } b.push(n); return Buffer.from(b); };
+const bytes = (no, buf) => Buffer.concat([varint((no << 3) | 2), varint(buf.length), buf]);
+const str = (no, s) => bytes(no, Buffer.from(s, 'utf8'));
+const num = (no, n) => Buffer.concat([varint(no << 3), varint(n)]);
+const cidr = (ip, prefix) => bytes(2, Buffer.concat([bytes(1, Buffer.from(ip.split('.').map(Number))), num(2, prefix)]));
+const domain = (v) => bytes(2, Buffer.concat([num(1, 2), str(2, v)]));
+fs.writeFileSync('/tmp/irnf-geo/geoip.dat', bytes(1, Buffer.concat([str(1, 'IR'), cidr('0.0.0.0', 1), cidr('128.0.0.0', 1)])));
+fs.writeFileSync('/tmp/irnf-geo/geosite.dat', bytes(1, Buffer.concat([str(1, 'CATEGORY-IR'), domain('digikala.com'), domain('aparat.com')])));
+EOF
+node /tmp/irnf-mkgeo.js
+D3_GEO=
+for f in geoip.dat geosite.dat; do
+	if [ -s "/etc/irnetfree/bin/$f" ]; then echo "$f: the service's own ($(wc -c < "/etc/irnetfree/bin/$f") bytes)"
+	else cp "/tmp/irnf-geo/$f" "/etc/irnetfree/bin/$f"; D3_GEO="$D3_GEO $f"; echo "$f: hand-made"; fi
+done
+rpc '{"channel":"assets:status"}' | jq -e '.result.geoip == true and .result.geosite == true' >/dev/null || { echo "the service does not see the geo files"; ls -la /etc/irnetfree/bin; exit 1; }
+D3_DIRECT_WAS="$(rpc '{"channel":"settings:get"}' | jq -c '.result.dnsDirect')"
+rpc '{"channel":"settings:set","arg":{"routingMode":"bypass-ir","dnsDirect":["9.9.9.9","149.112.112.112"]}}' \
+	| jq -e '.result.settings.routingMode == "bypass-ir"' >/dev/null || { echo "settings:set bypass-ir failed"; exit 1; }
+mark d3
+rpc "{\"channel\":\"connect\",\"arg\":\"$ID\"}" > /tmp/connect-d3.json || true
+jq -c '.result // .error' /tmp/connect-d3.json
+wait_back "D3 connect (bypass-ir)" 180
+# Quad9 is no in-country resolver, and the service says so for a real router (field report D3)
+since_mark | grep -E '(holds public resolvers|رزولورهای عمومی دارد) \(9\.9\.9\.9, 149\.112\.112\.112\)' || { echo "no warning that the in-country DNS holds public resolvers"; exit 1; }
+
+say "D3: the core's config — the DNS module asks the in-country pair direct, the direct dial bound to the WAN device"
+C=/etc/irnetfree/config.json
+jq -c '.routing.rules[] | select((.inboundTag // []) | index("dns-internal"))' "$C"
+jq -e '[.routing.rules[] | select(((.inboundTag // []) | index("dns-internal")) and .outboundTag == "direct" and .port == "53" and .ip == ["9.9.9.9","149.112.112.112"])] | length == 1' "$C" >/dev/null \
+	|| { echo "no dns-internal -> direct rule for the in-country resolvers on :53"; exit 1; }
+jq -e --arg dev "$WANDEV" '[.outbounds[] | select(.tag == "direct")][0].streamSettings.sockopt.interface == $dev' "$C" >/dev/null \
+	|| { echo "the direct outbound is not bound to the WAN device $WANDEV"; jq -c '.outbounds[] | select(.tag == "direct")' "$C"; exit 1; }
+SB_CFG="$(cmdline "$(gw_singbox | head -n 1)" | grep -o '/[^ ]*irnf-sb-[^ ]*/sing-box\.json' | head -n 1)"
+[ -s "$SB_CFG" ] || { echo "the gateway's sing-box config was not found ($SB_CFG)"; exit 1; }
+echo "sing-box route_exclude_address: $(jq -c '.inbounds[0].route_exclude_address' "$SB_CFG")"
+jq -e '.inbounds[0].route_exclude_address | index("192.168.1.1/32")' "$SB_CFG" >/dev/null || { echo "the entry server is no longer kept off the tunnel"; exit 1; }
+for ip in 9.9.9.9 149.112.112.112; do
+	if jq -e --arg c "$ip/32" '.inbounds[0].route_exclude_address | index($c)' "$SB_CFG" >/dev/null; then echo "$ip is cut out of the whole-LAN tunnel again (D3)"; exit 1; fi
+done
+
+say "D3: where packets to the in-country resolvers go — a LAN device's DNS and HTTPS and dnsmasq's upstream in the tunnel; only the service's own UDP 53 out the WAN"
+# The service's own lookups through them (the relay link resolves its relay
+# there) must not need the tunnel: one rule per resolver at pref 8997,
+# `iif lo uidrange <service uid> … ipproto udp dport 53 lookup main`
+# (TunOpenwrt.layOwnDirect). `iif lo` because the kernel looks up a FORWARDED
+# packet's route with uid 0 — without it the rule would take every LAN
+# device's DNS to them out again (the `from 192.168.1.50 iif br-lan` lookups
+# below are such packets). dnsmasq must run as a user of its own (OpenWrt
+# starts it --user=dnsmasq), or the rule would take its upstream out too.
+# (procd jails dnsmasq: the jail, named after it, stays root as the parent of
+# the dnsmasq that forwards, which runs as its own user — run 37067447979)
+DNSMASQ_PID=; DNSMASQ_UID=
+for p in $(pidof dnsmasq); do
+	pp="$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null)"
+	u="$(awk '/^Uid:/{print $2}' "/proc/$p/status" 2>/dev/null)"
+	echo "dnsmasq: pid $p, parent $pp ($(cat "/proc/$pp/comm" 2>/dev/null)), uid $u"
+	[ -n "$u" ] && [ "$u" != 0 ] && { DNSMASQ_PID=$p; DNSMASQ_UID=$u; }
+done
+echo "the dnsmasq that forwards: pid ${DNSMASQ_PID:-?}, uid ${DNSMASQ_UID:-?}"
+[ -n "$DNSMASQ_UID" ] && [ "$DNSMASQ_UID" != 0 ] || { echo "dnsmasq runs as root here — the own-lookup rule cannot tell it from the service"; exit 1; }
+echo "own-lookup rules:"; ip rule show | grep -F 'uidrange' || true
+for ip in 9.9.9.9 149.112.112.112; do
+	ip rule show | grep '^8997:' | grep -F "to $ip " | grep -F 'iif lo' | grep -F 'uidrange 0-0' | grep -qE 'ipproto (udp|17) dport 53' \
+		|| { echo "no own-lookup rule for $ip"; ip rule show; exit 1; }
+	r="$(ip route get "$ip" from 192.168.1.50 iif br-lan ipproto udp dport 53)"; echo "LAN client -> $ip:53/udp:  $r"
+	echo "$r" | grep -q 'dev IRNetFree' || { echo "a LAN device's DNS to $ip leaves outside the tunnel"; exit 1; }
+	r="$(ip route get "$ip" from 192.168.1.50 iif br-lan ipproto tcp dport 443)"; echo "LAN client -> $ip:443/tcp: $r"
+	echo "$r" | grep -q 'dev IRNetFree' || { echo "a LAN device's HTTPS to $ip leaves outside the tunnel"; exit 1; }
+	r="$(ip route get "$ip" ipproto udp dport 53 uid "$DNSMASQ_UID")"; echo "dnsmasq -> $ip:53/udp:     $r"
+	echo "$r" | grep -q 'dev IRNetFree' || { echo "dnsmasq's upstream to $ip leaves outside the tunnel"; exit 1; }
+	r="$(ip route get "$ip" ipproto udp dport 53 uid 0)"; echo "service -> $ip:53/udp:     $r"
+	if echo "$r" | grep -q 'dev IRNetFree'; then echo "the service's own DNS to $ip (the relay link's lookup) rides the tunnel"; exit 1; fi
+	echo "$r" | grep -q "dev $WANDEV" || { echo "the service's own DNS to $ip does not leave by the WAN device $WANDEV"; exit 1; }
+	r="$(ip route get "$ip" ipproto tcp dport 443 uid 0)"; echo "service -> $ip:443/tcp:    $r"
+	echo "$r" | grep -q 'dev IRNetFree' || { echo "the own-lookup rule let more than UDP 53 to $ip out"; exit 1; }
+	r="$(ip route get "$ip" ipproto udp dport 53 uid 65534)"; echo "nobody -> $ip:53/udp:      $r"
+	echo "$r" | grep -q 'dev IRNetFree' || { echo "another user's DNS to $ip leaves outside the tunnel — the rule is wider than the service's user"; exit 1; }
+done
+
+say "D3: the router still resolves an Iranian name — through the core's direct resolver path, out the WAN"
+out=; i=0
+until echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address'; do
+	i=$((i+1))
+	[ $i -le 6 ] || { echo "www.digikala.com did not resolve through the hijack"; echo "$out"; logread | tail -20; exit 1; }
+	out="$(nslookup www.digikala.com 1.1.1.1 2>&1 || true)"
+	echo "$out" | sed -n '/^Name:/,$p' | grep -q '^Address' || sleep 5
+done
+echo "$out" | sed -n '/^Name:/,$p'
+if [ -r /proc/net/nf_conntrack ]; then
+	# (run 37068874055: the answer above came before the core's query showed up
+	# here — it asked a moment later — so a few looks, each after a name the core
+	# has not cached: its own query to the in-country pair, then)
+	ct=; i=0
+	while :; do
+		ct="$(grep -E "src=$WANIP dst=(9\.9\.9\.9|149\.112\.112\.112) sport=[0-9]+ dport=53 " /proc/net/nf_conntrack | head -n 2 || true)"
+		[ -n "$ct" ] && break
+		i=$((i+1)); [ $i -le 5 ] || break
+		nslookup "ci$i.digikala.com" 1.1.1.1 >/dev/null 2>&1 || true
+		sleep 1
+	done
+	echo "conntrack, the core's own query: ${ct:-none}"
+	[ -n "$ct" ] || { echo "no query from the WAN address ($WANIP) to the in-country resolvers — the core's direct path did not leave by the WAN"; grep -E 'dport=53 ' /proc/net/nf_conntrack | head -n 10 || true; exit 1; }
+	if grep -qE "src=172\.19\.0\.1 dst=(9\.9\.9\.9|149\.112\.112\.112) .*dport=53 " /proc/net/nf_conntrack; then echo "the core's query to the in-country resolvers looped into the tunnel"; exit 1; fi
+else
+	echo "no /proc/net/nf_conntrack in this image — the config's direct rule and its WAN binding (above) are the proof"
+fi
+
+say "D3: real packets — the service's user's query to an in-country resolver leaves from the WAN address, another user's enters the tunnel"
+# (after the conntrack check above: the second query leaves a tunnel-side entry)
+if [ -r /proc/net/nf_conntrack ]; then
+	cat > /tmp/irnf-own-dns.js <<'EOF'
+// one A query (example.com) to <ip>:53 from a fixed source port — as this user, or as <uid>, set BEFORE
+// the socket exists: the kernel routes by the socket's owner, fixed when the socket is made
+const [ip, port, uid] = process.argv.slice(2);
+if (uid) process.setuid(Number(uid));
+const s = require('dgram').createSocket('udp4');
+const q = Buffer.from('123401000001000000000000076578616d706c6503636f6d0000010001', 'hex');
+s.bind(Number(port), () => s.send(q, 53, ip));
+s.on('message', () => { console.log(`uid ${process.getuid()} -> ${ip}:53 from :${port}: answered`); process.exit(0); });
+setTimeout(() => { console.log(`uid ${process.getuid()} -> ${ip}:53 from :${port}: no answer in 5 s`); process.exit(0); }, 5000);
+EOF
+	# one query from <port> [as <uid>], then its conntrack entry — asked again from a new port when
+	# none is there: run 37071843770 answered the query and then had no entry for it (one gone
+	# between the two, as the core's own query above went missing once; the next entry was there)
+	own_ct() {
+		node /tmp/irnf-own-dns.js 9.9.9.9 "$1" ${2:-} >&2
+		grep -E "dst=9\.9\.9\.9 sport=$1 dport=53 " /proc/net/nf_conntrack | head -n 1 || true
+	}
+	ct1=; for port in 53531 53533 53535 53537; do ct1="$(own_ct "$port")"; [ -n "$ct1" ] && break; done
+	ct2=; for port in 53532 53534 53536 53538; do ct2="$(own_ct "$port" 65534)"; [ -n "$ct2" ] && break; done
+	echo "conntrack, uid 0:     ${ct1:-none}"
+	echo "conntrack, uid 65534: ${ct2:-none}"
+	echo "$ct1" | grep -q "src=$WANIP " || { echo "the service's own query to 9.9.9.9 did not leave from the WAN address $WANIP"; exit 1; }
+	[ -n "$ct2" ] || { echo "the other user's query left no conntrack entry at all"; exit 1; }
+	if echo "$ct2" | grep -q "src=$WANIP "; then echo "another user's query to 9.9.9.9 left from the WAN address — the rule is wider than the service's user"; exit 1; fi
+else
+	echo "no /proc/net/nf_conntrack in this image — the route lookups above are the proof"
+fi
+
+say "D3: cloudflared's edge discovery (an SRV lookup through dnsmasq) — answered with the drop-in's lines bound to the WAN device, refused without the binding"
+# dnsmasq (its own user) has no way around the tunnel but SO_BINDTODEVICE:
+# `server=/<domain>/<resolver>@<WAN device>` (cloudflared.dnsmasqDropIn, the
+# device from service.directDevice()). The control first: the same lines
+# unbound enter the tunnel, where SRV gets no answer (the hijack refuses it;
+# the feed's older cores leave it unanswered — ETIMEOUT on 24.10, run 37068874055).
+CF_JS=/usr/lib/irnetfree/src/server/remote/cloudflared
+cf_dirs() { node -e "process.stdout.write(require('$CF_JS').dnsmasqConfDirs().join(' '))"; }
+# cloudflared's own question, asked of dnsmasq the way it asks it (node's resolver: busybox nslookup's -type is optional)
+srv_lookup() {
+	node -e "const d = require('dns'); d.setServers(['127.0.0.1']); d.resolveSrv('_v2-origintunneld._tcp.argotunnel.com', (e, a) => console.log(e ? 'SRV error ' + e.code : 'SRV ' + JSON.stringify(a)));" 2>&1 || true
+}
+node -e "
+const fs = require('fs');
+const cf = require('$CF_JS');
+const text = cf.dnsmasqDropIn(['9.9.9.9', '149.112.112.112']);
+for (const d of cf.dnsmasqConfDirs()) { fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(d + '/irnf-smoke-srv.conf', text); }
+process.stdout.write(text);
+"
+/etc/init.d/dnsmasq restart; sleep 3
+out="$(srv_lookup)"; echo "unbound: $out"
+if echo "$out" | grep -q '"port":7844'; then echo "the UNBOUND lines answered SRV — the tunnel did not refuse it, so the binding below would prove nothing"; exit 1; fi
+for d in $(cf_dirs); do rm -f "$d/irnf-smoke-srv.conf"; done
+CF_REAL=
+if [ -x /usr/bin/cloudflared ]; then
+	# the real path: the service's own remote api (LuCI's remote_set) — its drop-in names what
+	# service.directDevice() and service.directResolvers() say now, and apply restarts dnsmasq
+	CF_REAL=1
+	luci remote_set '{"cloudflared":{"enabled":true,"token":"eyJhIjoiMDAwIiwidCI6IjAwMCIsInMiOiIwMDAifQ=="}}' | jq -e '.ok == true' >/dev/null \
+		|| { echo "remote_set (cloudflared on) was refused"; exit 1; }
+	for d in $(cf_dirs); do
+		i=0
+		until grep -q "^server=/argotunnel.com/9.9.9.9@$WANDEV\$" "$d/irnetfree-cloudflared.conf" 2>/dev/null; do
+			i=$((i+1))
+			[ $i -lt 30 ] || { echo "the service's drop-in in $d is not bound to $WANDEV"; cat "$d/irnetfree-cloudflared.conf" 2>&1; logread | grep -i cloudflared | tail -n 5; exit 1; }
+			sleep 1
+		done
+	done
+	echo "--- the service's drop-in"; cat "$(cf_dirs | cut -d' ' -f1)/irnetfree-cloudflared.conf"
+else
+	echo "cloudflared is not installed in this image — the drop-in text with the WAN device, written here"
+	node -e "
+const cf = require('$CF_JS');
+const text = cf.dnsmasqDropIn(['9.9.9.9', '149.112.112.112'], process.argv[1]);
+for (const d of cf.dnsmasqConfDirs()) require('fs').writeFileSync(d + '/irnf-smoke-srv.conf', text);
+process.stdout.write(text);
+" "$WANDEV"
+	/etc/init.d/dnsmasq restart
+fi
+out=; i=0
+until echo "$out" | grep -q '"port":7844'; do
+	i=$((i+1))
+	[ $i -le 8 ] || { echo "no SRV answer for _v2-origintunneld._tcp.argotunnel.com through the bound drop-in"; echo "$out"; logread | grep -i dnsmasq | tail -10; exit 1; }
+	sleep 3
+	out="$(srv_lookup)"
+done
+echo "bound: $out" | cut -c1-300
+logread | grep 'for domain argotunnel\.com' | tail -n 2
+if [ -n "$CF_REAL" ]; then
+	luci remote_set '{"cloudflared":{"enabled":false}}' | jq -e '.ok == true' >/dev/null || { echo "remote_set (cloudflared off) was refused"; exit 1; }
+	for d in $(cf_dirs); do
+		i=0
+		while [ -e "$d/irnetfree-cloudflared.conf" ]; do i=$((i+1)); [ $i -lt 30 ] || { echo "the drop-in in $d stayed after cloudflared off"; exit 1; }; sleep 1; done
+	done
+	i=0
+	while pidof cloudflared >/dev/null; do i=$((i+1)); [ $i -lt 20 ] || { echo "cloudflared still runs after off"; exit 1; }; sleep 1; done
+else
+	for d in $(cf_dirs); do rm -f "$d/irnf-smoke-srv.conf"; done
+	/etc/init.d/dnsmasq restart; sleep 2
+fi
+
+say "D3: back to global, disconnected, the hand-made geo files gone"
+rpc '{"channel":"disconnect"}' >/dev/null
+i=0
+while ip link show IRNetFree >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 60 ] || { echo "the TUN device stayed after the D3 disconnect"; exit 1; }; sleep 1; done
+i=0
+while ip rule show | grep -q 'uidrange'; do i=$((i+1)); [ $i -lt 15 ] || { echo "the own-lookup rules stayed after the D3 disconnect"; ip rule show; exit 1; }; sleep 1; done
+rpc "{\"channel\":\"settings:set\",\"arg\":{\"routingMode\":\"global\",\"dnsDirect\":$D3_DIRECT_WAS}}" | jq -e '.result.settings.routingMode == "global"' >/dev/null
+for f in $D3_GEO; do rm -f "/etc/irnetfree/bin/$f"; done
 
 say "SMOKE OK"

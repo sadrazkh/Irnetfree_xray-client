@@ -11,9 +11,17 @@
  * request; the link pings every 25 s and is redialed after 75 s of silence;
  * reconnects with backoff 2/5/10/30/60 s + jitter.
  *
- * The control path never rides the tunnel: while the gateway is up the relay
- * host is resolved through the config's direct, route-excluded in-country
- * resolvers (`service.directResolvers()`), the resolved addresses are handed
+ * The control path does not ride the tunnel. While the gateway is up the
+ * relay host is resolved through `service.directResolvers()` — in a bypass
+ * routing mode the in-country resolvers the config dials direct. Since
+ * v1.16.1 those are inside the whole-LAN tunnel (field report D3: cut out of
+ * it, every LAN device's DNS to them left by the ISP); only this process's
+ * UDP 53 to them leaves by the WAN, by a rule for the service's own user
+ * (TunOpenwrt.layOwnDirect). In global mode the config dials none:
+ * directResolvers() names the dnsDirect setting, that lookup rides the tunnel
+ * (as in v1.16.0), and with a dead exit it fails — so does the system
+ * resolver — and the remembered addresses carry the link. The resolved
+ * addresses are handed
  * to `service.setRemoteBypass('relay', {hosts, cidrs})` BEFORE the dial, and
  * the last good addresses are remembered (`saveLastIps`) so the relay is
  * reachable with SNI = host even when DNS fails. Three direct failures in a
