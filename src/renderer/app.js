@@ -2265,7 +2265,8 @@ function connectToasts(d) {
   for (const n of (d && Array.isArray(d.notices)) ? d.notices : []) {
     if (!n || !n.id) continue;
     const key = JSON.stringify(n);
-    const said = (n.id === 'wgSharedKey' || n.id === 'wgSharedAddress') ? state.noticesOnce : state.noticesToasted;
+    // wgSharedKey / wgSharedAddress and their …Sub forms (the twin in a subscription): the store's, once per run
+    const said = /^wgShared(Key|Address)(Sub)?$/.test(n.id) ? state.noticesOnce : state.noticesToasted;
     if (said.has(key)) continue;
     said.add(key);
     out.push({ msg: noticeText(n), kind: 'warn', ms: 12000 });
