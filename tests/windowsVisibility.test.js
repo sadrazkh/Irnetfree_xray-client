@@ -179,6 +179,32 @@ test('W4 is a fact about the tunnel’s routes: with TUN off (the system proxy b
   assert.equal(notices.needsTun(null), false);
 });
 
+test('W3: managed DNS off is said for a WireGuard resolver the plan routes to — not for every record an advanced or pool plan carries', () => {
+  const { wgResolverAddresses } = require('../src/main/configBuilder');
+  const ctx = vm.createContext({ wgResolverAddresses });
+  vm.runInContext([fnOf(MAIN, 'planServerIds'), fnOf(MAIN, 'routedWgResolvers')].join('\n'), ctx);
+  const corp = wg('b47f', 'cobra.tes.ca');
+  const DNS = wgResolverAddresses({ mode: 'single', server: corp });
+  assert.ok(DNS.includes('192.168.60.1'));
+  const byId = { hop: HOP, b47f: corp };
+  const chains = { tes: [HOP, corp] };
+  const routed = (plan) => plain(ctx.routedWgResolvers(plan));
+  // advanced: buildPlan hands it EVERY stored server; only the rules' targets and the default count
+  assert.deepEqual(routed({ mode: 'advanced', serversById: byId, chainsById: chains, chain: [], rules: [{ type: 'domain', value: 'x.ir', target: 'hop' }], def: 'hop' }), [],
+    'a corporate WireGuard no rule routes to: nothing missing from this config');
+  assert.deepEqual(routed({ mode: 'advanced', serversById: byId, chainsById: chains, chain: [], rules: OWNER_RULES, def: 'hop' }), DNS, 'a rule to the chain it ends');
+  assert.deepEqual(routed({ mode: 'advanced', serversById: byId, chainsById: chains, chain: [], rules: [], def: 'b47f' }), DNS, 'the default');
+  // pool: only the enabled entries' targets
+  assert.deepEqual(routed({ mode: 'pool', entries: [{ target: 'hop' }], serversById: byId, chainsById: chains, chain: [] }), []);
+  assert.deepEqual(routed({ mode: 'pool', entries: [{ target: 'hop' }, { target: 'chain:tes' }], serversById: byId, chainsById: chains, chain: [] }), DNS);
+  // a single server and a chain, as before
+  assert.deepEqual(routed({ mode: 'single', server: corp }), DNS);
+  assert.deepEqual(routed({ mode: 'chain', chain: [HOP, corp] }), DNS);
+  assert.deepEqual(routed(null), []);
+  // the connect asks it, for the log line and the notice alike
+  assert.match(CONNECT, /if \(settings\.dnsManaged === false\) \{\n\s*const corp = routedWgResolvers\(plan\);/);
+});
+
 test('the connect asks for the notices on Windows only, after the plan is built and before anything is started, and the connected status carries them', () => {
   // W3: the existing managed-DNS line stays exactly as it was, and on Windows becomes a notice too
   assert.match(CONNECT, /line: `Managed DNS is off, so the resolver of your WireGuard \(\$\{corp\.join\(', '\)\}\) is not in this config and names inside that network will not resolve — turn Settings → DNS → "DNS managed by the app" back on`,\n\s*level: 'warn'\n\s*\}\);\n\s*if \(process\.platform === 'win32'\) notices\.push\(\{ id: 'corpDnsOff', servers: corp\.join\(', '\) \}\);/);

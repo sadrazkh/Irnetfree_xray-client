@@ -1224,7 +1224,7 @@ async function connectOnce(serverId, opts = {}) {
   // corporate WireGuard's own DNS above all. The names inside that network
   // then never resolve, and nothing else in the log says why.
   if (settings.dnsManaged === false) {
-    const corp = wgResolverAddresses(plan);
+    const corp = routedWgResolvers(plan);
     if (corp.length) {
       send('log', {
         line: `Managed DNS is off, so the resolver of your WireGuard (${corp.join(', ')}) is not in this config and names inside that network will not resolve — turn Settings → DNS → "DNS managed by the app" back on`,
@@ -1662,6 +1662,19 @@ function planServerIds(plan) {
     default: break;
   }
   return ids;
+}
+
+/**
+ * The resolvers of the WireGuard records this plan dials (planServerIds), for
+ * the "managed DNS is off" warning. An advanced or pool plan carries EVERY
+ * stored server in serversById, and wgResolverAddresses reads them all — so a
+ * corporate WireGuard that no rule routes to was warned about on every connect.
+ * A single server and a chain are what they dial, as before.
+ */
+function routedWgResolvers(plan) {
+  if (!plan || (plan.mode !== 'advanced' && plan.mode !== 'pool')) return plan ? wgResolverAddresses(plan) : [];
+  const byId = plan.serversById || {};
+  return wgResolverAddresses({ mode: 'chain', chain: [...planServerIds(plan)].map((id) => byId[id]).filter(Boolean) });
 }
 
 /**
