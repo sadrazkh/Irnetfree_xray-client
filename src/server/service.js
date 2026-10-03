@@ -199,6 +199,7 @@ function createService(opts = {}) {
   const T = Object.assign({
     bootDelayMs: 1000, bootEveryMs: 15000, bootSlowAfter: 20, bootSlowMs: 60000,
     routerBackoffMs: [2000, 5000, 15000, 30000, 60000],
+    refusedRetryMs: 600000,      // a connect the core refused (holdRefused): tried again this rarely — no WAN to wait for
     crashWindowMs: 120000,       // a drop this soon after a rebuild continues that rebuild's backoff
     syslogTunQuietMs: 10000,     // one sing-box line of a kind per this, into syslog
     // the router's WAN watcher (wanWatch.js): the poll, how long a change must hold still, the gap between the two probes
@@ -1344,6 +1345,15 @@ function createService(opts = {}) {
     return p;
   }
 
+  /**
+   * A connect refused before anything starts: the core's own verdict on the
+   * config, a plan that cannot be built, a missing sing-box. No quick retry
+   * changes that — a file installed, an edit or a subscription refresh does —
+   * so the router's boot loop and recovery say it as an error and try again
+   * rarely (holdRefused), instead of "Waiting for internet…" every 15-60 s.
+   */
+  const refusal = (e) => Object.assign(e instanceof Error ? e : new Error(String(e)), { refused: true });
+
   async function connectOnce(serverId, opts = {}) {
     if (networkRepairing) throw new Error('Network recovery is still running');
     // Every await below is a window in which the operator can hit disconnect.
@@ -1424,7 +1434,7 @@ function createService(opts = {}) {
     // a gateway that says it is up — so there the gateway is not optional: a
     // missing sing-box / nft is a failed connect, before any core is started.
     if (OPENWRT && settings.tunMode && !myTun.isAvailable()) {
-      throw new Error(settings.lang === 'en'
+      throw refusal(settings.lang === 'en'
         ? 'The whole-network tunnel needs sing-box and nft on the router: opkg install sing-box nftables (or Settings → Required files for sing-box)'
         : 'تونل کل شبکه روی روتر به sing-box و nft نیاز دارد: opkg install sing-box nftables (یا sing-box از تنظیمات → فایل‌های موردنیاز)');
     }
@@ -1456,7 +1466,9 @@ function createService(opts = {}) {
     // keeps the tunnel, whose bypass was cut for exactly these addresses.
     livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
 
-    const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+    let active;
+    try { active = buildActive(serverId, settings); } catch (e) { throw refusal(e); }   // a target gone, a chain short of a member
+    const { plan, label, entryAddrs, config, geoWarn, engine } = active;
     // A router carries a house: one access-log line per connection, through the
     // service's stdout into syslog, is real CPU on a Cortex-A7 (the AC-1304 log
     // was a wall of `accepted udp:…`). Kept when the user asks for a verbose
@@ -1496,7 +1508,7 @@ function createService(opts = {}) {
           ? (en ? `the official core ${check.coreVersion} does not know finalmask and would run it without its mask`
             : `هستهٔ رسمی ${check.coreVersion} finalmask را نمی‌شناسد و آن را بدون ماسکش اجرا می‌کرد`)
           : (en ? `the official core refuses it: ${check.error}` : `هستهٔ رسمی آن را رد می‌کند: ${check.error}`);
-        throw new Error(en
+        throw refusal(en
           ? `This server needs Xray-PattN — install it under Settings → Required files (${why})`
           : `این سرور به Xray-PattN نیاز دارد — از تنظیمات ← فایل‌های موردنیاز نصبش کن (${why})`);
       }
@@ -1514,7 +1526,11 @@ function createService(opts = {}) {
       // new Error(data.error)), so the hint IS the signal: the renderer keys off
       // the (untranslated) product name in it. A property set here would be
       // dropped in transit — don't add one.
-      throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
+      const refused = new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
+      // the core's verdict, unless its check itself was killed or never ran (a
+      // signal, a spawn short of memory). (`refused` is read in this process
+      // only — the boot loop and the recovery — never by the renderer.)
+      throw /exited with code null|\bE(NOMEM|AGAIN|MFILE|NFILE)\b/.test(String(check.error || '')) ? refused : refusal(refused);
     }
     const runEngine = check.engine;
     // The LAN's DNS plan (the hijack's `rules` form, `expectedIPs`) is verified
@@ -2079,7 +2095,7 @@ function createService(opts = {}) {
       // clients: runRecovery says "reconnecting" with the next wait at once,
       // and the log line carries the reason (S4). A rebuild by hand says it.
       if (!opts.recovery) send('status', { state: 'error', message: e.message, serverId, cause });
-      return { ok: false, error: e.message };
+      return { ok: false, error: e.message, refused: !!(e && e.refused) };
     }
     // A disconnect overtook the connect: it emitted nothing and started nothing,
     // so neither may we.
@@ -2099,7 +2115,8 @@ function createService(opts = {}) {
   async function reapplyByHand() {
     endPendingRecovery();
     const r = await reapplyConnection();
-    if (OPENWRT && r && !r.ok && !r.stale) handToRecovery('gateway-failed');
+    // (its 'error' status is said already: reapplyConnection, by hand)
+    if (OPENWRT && r && !r.ok && !r.stale) handToRecovery('gateway-failed', { refused: !!r.refused, message: r.error, said: true });
     return r;
   }
 
@@ -2113,9 +2130,10 @@ function createService(opts = {}) {
    * attempt, after the first wait — the try by hand was the first. Taken up at
    * once instead, a core that dies before its port opens was started twice in
    * a row, and then (through the drop its death also was) again and again with
-   * no backoff at all (review of v1.16.1, critical).
+   * no backoff at all (review of v1.16.1, critical). `failure`: the core
+   * refused it ({ refused, message, said }) — no quick retry (holdRefused).
    */
-  function handToRecovery(reason) {
+  function handToRecovery(reason, failure = null) {
     if (!OPENWRT || !store.get('activeServerId', null) || recoverTimer) return;
     // A recovery in flight is either the one this hand action overtook (it
     // goes stale and retries nothing) or one a drop started after it (it owns
@@ -2127,8 +2145,9 @@ function createService(opts = {}) {
     // A drop already queued behind it goes first: that one rebuilds too.
     if (recovering) { if (recoverQueued == null) recoverQueued = HAND_OVER; return; }
     if ((xray && xray.running) || (tun && tun.active)) return;   // refused before anything was torn down: the old connection still runs
-    const wait = backoffAfter(0);
     recoveryCause = causeOf(reason);
+    if (failure && failure.refused) { holdRefused(reason, failure.message, { said: !!failure.said }); return; }
+    const wait = backoffAfter(0);
     send('log', { line: `Reconnect failed — retrying in ${wait / 1000}s`, level: 'warn' });
     send('status', { state: 'reconnecting', reason, attempt: 2, retryInMs: wait, cause: recoveryCause });
     // every recovery timer lets go of its handle as it fires: whatever the
@@ -2142,6 +2161,37 @@ function createService(opts = {}) {
     }, wait);
     if (recoverTimer.unref) recoverTimer.unref();
   }
+
+  /**
+   * On a router: a connect the core refused (refusal() — the config, a plan
+   * that cannot be built, sing-box missing), from the recovery or a hand-over.
+   * The intent stays; the clients hear why as an error (LuCI: "Error: …"), not
+   * "Reconnecting… (attempt n)" with the reason only in syslog; it is tried
+   * again rarely (T.refusedRetryMs) — a file installed, an edit or a
+   * subscription refresh may have changed it — or at once by a Connect.
+   * (v1.16.1 re-review: a finalmask server with no Xray-PattN on a feed core.)
+   */
+  function holdRefused(reason, message, { said = false } = {}) {
+    const wait = T.refusedRetryMs;
+    send('log', { line: `The core refuses this connection — tried again in ${inWords(wait)}, or at once by Connect: ${message}`, level: 'error' });
+    if (!said) send('status', { state: 'error', message, serverId: store.get('activeServerId', null), cause: recoveryCause });
+    sayRefusedBlocking();
+    clearTimeout(recoverTimer);
+    recoverTimer = setTimeout(() => {
+      recoverTimer = null;
+      recoverFromNetworkChange(reason, 0).catch((e) => {
+        send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' });
+      });
+    }, wait);
+    if (recoverTimer.unref) recoverTimer.unref();
+  }
+  /** An armed kill switch holds the LAN through a refusal — said, with the way out. */
+  function sayRefusedBlocking() {
+    if (killSwitchState().blocking) {
+      send('log', { line: 'Kill switch: the core refuses this connection — LAN internet stays blocked until it connects or you press Disconnect', level: 'warn' });
+    }
+  }
+  const inWords = (ms) => (ms >= 60000 ? `${Math.round(ms / 60000)} min` : `${ms / 1000}s`);
 
   /**
    * A connect or a reconnect by hand ends a drop's pending retry, as a
@@ -2360,13 +2410,17 @@ function createService(opts = {}) {
       res = (xray && xray.running) ? await reapplyConnection({ recovery: true }) : await doConnect(serverId, { recovery: true });
     } catch (e) {
       // doConnect() throws where reapplyConnection() returns { ok: false }.
-      res = { ok: false, error: (e && e.message) || String(e) };
+      res = { ok: false, error: (e && e.message) || String(e), refused: !!(e && e.refused) };
     }
 
     // The operator disconnected (or connected somewhere else) while we were
     // rebuilding. The rebuild abandoned itself without emitting anything; a log
     // line or a retry here would be about a tunnel nobody asked for any more.
     if (res && res.stale) return;
+
+    // Refused by the core before anything started: no backoff step changes
+    // that — said as an error, tried again rarely (holdRefused).
+    if (OPENWRT && res && !res.ok && res.refused) { holdRefused(reason, res.error); return; }
 
     // doConnect() does not throw when TUN was asked for and did not come up: it
     // reports tunError and carries on proxy-only. Calling that a restored
@@ -2795,7 +2849,7 @@ function createService(opts = {}) {
       // recovery takes it over like a failed Reconnect. A first connect or a
       // switch ends disconnected, and is not retried.
       return p.catch((e) => {
-        if (store.get('activeServerId', null) === id) handToRecovery('gateway-failed');
+        if (store.get('activeServerId', null) === id) handToRecovery('gateway-failed', { refused: !!(e && e.refused), message: e && e.message });
         throw e;
       });
     },
@@ -3328,10 +3382,23 @@ function createService(opts = {}) {
       bootAttempt = 0;
       if (bootCancelled || isQuitting) return;
       const more = attempt < AUTO_RETRY.tries;
-      const wait = attempt >= AUTO_RETRY.slowAfter ? AUTO_RETRY.slowMs : AUTO_RETRY.everyMs;
+      // Refused by the core (refusal(): a finalmask server with no Xray-PattN
+      // on a feed core, a config it rejects, sing-box missing) — not the WAN,
+      // the modem or the clock: "Waiting for internet…" every 15-60 s would
+      // hide it (v1.16.1 re-review). Said as an error, tried again rarely.
+      const refused = OPENWRT && !!(e && e.refused);
+      const wait = refused ? T.refusedRetryMs : attempt >= AUTO_RETRY.slowAfter ? AUTO_RETRY.slowMs : AUTO_RETRY.everyMs;
       const of = Number.isFinite(AUTO_RETRY.tries) ? `/${AUTO_RETRY.tries}` : '';
-      send('log', { line: `Auto-connect failed (${attempt}${of}): ${e.message}` + (more ? ` — retrying in ${wait / 1000}s` : ''), level: 'error' });
+      send('log', { line: `Auto-connect failed (${attempt}${of}): ${e.message}` + (more ? ` — retrying in ${inWords(wait)}` : ''), level: 'error' });
       if (!more) return;
+      if (refused) {
+        send('status', { state: 'error', message: e.message, serverId: target, cause: 'boot' });
+        sayRefusedBlocking();
+        // afresh then: a plain connect, not a "waiting" retry
+        const t = setTimeout(() => autoConnectAtLaunch(1), wait);
+        if (t.unref) t.unref();
+        return;
+      }
       // "waiting for internet", not an error, between the attempts (B3)
       send('status', { state: 'waiting', serverId: target, attempt, retryInMs: wait, reason: e.message, cause: 'boot' });
       const t = setTimeout(() => autoConnectAtLaunch(attempt + 1), wait);
