@@ -217,7 +217,14 @@ function createCoreVersionsApi({ downloader, installedVersion, busy, afterInstal
       return Object.assign({ ok: true, component, tag, version: (res && res.version) || fullVersion(tag) }, result());
     } catch (e) {
       if (e && e.refused) return { ok: false, refused: e.refused, component, tag };
+      // an Update (or the weekly updater) is writing this core right now: the page says so in its language
+      if (e && e.code === 'ECOREBUSY') return { ok: false, refused: 'core-busy', component, tag };
       const error = (e && e.message) || String(e);
+      // Windows: the core file held by a latency test or a config check — nothing broke, nothing was replaced
+      if (e && e.code === 'ECOREINUSE') {
+        onLog(`Installing ${name}: ${error}`, 'warn');
+        return { ok: false, component, tag, error, reason: 'in-use', assets: result().assets };
+      }
       onLog(`Installing ${name} failed: ${error}`, 'error');
       return { ok: false, component, tag, error, assets: result().assets };
     } finally {

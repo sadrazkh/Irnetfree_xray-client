@@ -303,7 +303,21 @@ class Downloader {
     this.arch = opts.arch || os.arch();
     this.releaseCache = new Map();     // core → { at, value } (listReleases)
     this.releaseFetches = new Map();   // core → the listing in flight, shared by every caller
+    this.coresBusy = new Set();        // cores whose file a download or a version install is writing now
     fs.mkdirSync(this.destDir, { recursive: true });
+  }
+
+  /**
+   * One writer per core file: the update button (download), the weekly updater
+   * and a version install of the same core never run at once — on the router two
+   * browser tabs can ask for both. The second is refused (ECOREBUSY) rather than
+   * racing the first to place(): the last writer would win, and the picker's card
+   * would say "installed" for a core already overwritten. Returns the release.
+   */
+  holdCore(id) {
+    if (this.coresBusy.has(id)) throw Object.assign(new Error('another download or install of this core is running'), { code: 'ECOREBUSY' });
+    this.coresBusy.add(id);
+    return () => this.coresBusy.delete(id);
   }
 
   log(msg, level = 'info') { this.onLog('[download] ' + msg, level); }
@@ -336,16 +350,21 @@ class Downloader {
     return `tun2socks-linux-${LINUX_ARCH.tun2socks[arch] || 'amd64'}.zip`;
   }
 
-  /** Download + integrate one component. Returns { ok, files } or throws. */
+  /** Download + integrate one component. Returns { ok, files } or throws. A core is held while it runs (holdCore). */
   async download(component) {
-    switch (component) {
-      case 'xray': return this.getXray('xray');
-      case 'xray-pattn': return this.getXray('xray-pattn');
-      case 'sing-box': return this.getSingbox();
-      case 'geo': return this.getGeo();
-      case 'tun2socks': return this.getTun2socks();
-      case 'wintun': return this.getWintun();
-      default: throw new Error('unknown component: ' + component);
+    const release = CORE_IDS.includes(component) ? this.holdCore(component) : null;
+    try {
+      switch (component) {
+        case 'xray': return await this.getXray('xray');
+        case 'xray-pattn': return await this.getXray('xray-pattn');
+        case 'sing-box': return await this.getSingbox();
+        case 'geo': return await this.getGeo();
+        case 'tun2socks': return await this.getTun2socks();
+        case 'wintun': return await this.getWintun();
+        default: throw new Error('unknown component: ' + component);
+      }
+    } finally {
+      if (release) release();
     }
   }
 
@@ -520,13 +539,24 @@ class Downloader {
    * download. `beforePlace` runs right before that (the IPC asks again whether a
    * connection started meanwhile, and throws). Any failure leaves the installed
    * binary as it was. The geo files in an Xray archive are NOT put in place:
-   * a version install changes the core and nothing else.
+   * a version install changes the core and nothing else. The core is held for
+   * the whole install (holdCore): an Update of it meanwhile is refused, and so
+   * is this install while an Update of it runs.
    * Returns { ok, component, tag, version, file }.
    */
-  async installVersion(component, tag, { beforePlace } = {}) {
+  async installVersion(component, tag, opts = {}) {
     const id = coreId(component);
     const want = versionNumber(tag);
     if (!TAG_RE.test(String(tag || '')) || !want) throw new Error('not a release tag: ' + tag);
+    const release = this.holdCore(id);
+    try {
+      return await this.installHeld(id, tag, want, opts);
+    } finally {
+      release();
+    }
+  }
+
+  async installHeld(id, tag, want, { beforePlace } = {}) {
     const name = `${CORE_NAMES[id]} ${tag}`;
     const rel = await this.releaseByTag(id, tag);
     const match = this.assetMatcher(id);
@@ -554,7 +584,18 @@ class Downloader {
       if (!got) throw new Error(`the downloaded ${CORE_NAMES[id]} did not say its version (${JSON.stringify(out.trim().split(/\r?\n/)[0].slice(0, 120))}) — nothing was replaced`);
       if (got !== want) throw new Error(`the downloaded ${CORE_NAMES[id]} says it is ${got}, not ${want} — nothing was replaced`);
       if (beforePlace) await beforePlace();
-      const placed = this.place(exe, engineExe(id, this.platform), true);
+      let placed;
+      try {
+        placed = this.place(exe, engineExe(id, this.platform), true);
+      } catch (e) {
+        // Windows: a core image that is running cannot be renamed over — a
+        // latency test ("ping all") or a config check holds it for a few seconds,
+        // and nothing else the IPC can see does. place() left it untouched.
+        if (this.platform === 'win32' && ['EPERM', 'EBUSY', 'EACCES'].includes(e && e.code)) {
+          throw Object.assign(new Error(`the ${CORE_NAMES[id]} file is in use (a latency test or a config check is running it) — close it and try again; nothing was replaced`), { code: 'ECOREINUSE', cause: e });
+        }
+        throw e;
+      }
       this.log(`✓ ${name} integrated: ${placed}`);
       return { ok: true, component: id, tag, version: fullVersion(tag) || want, file: placed };
     } finally {

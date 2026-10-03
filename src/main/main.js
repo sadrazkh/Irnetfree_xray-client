@@ -2988,7 +2988,8 @@ function registerIpc() {
       return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(), xrayReady: xray.binExists() };
     } catch (err) {
       send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' });
-      return { ok: false, error: err.message, assets: assetStatus() };
+      // coreBusy: a version install holds this core (Downloader.holdCore) — the page words it
+      return { ok: false, error: err.message, coreBusy: err.code === 'ECOREBUSY', assets: assetStatus() };
     }
   });
 
