@@ -85,6 +85,9 @@ contextBridge.exposeInMainWorld('api', {
   assetsStatus: () => ipcRenderer.invoke('assets:status'),
   downloadAsset: (component) => ipcRenderer.invoke('assets:download', component),
   removeAssets: () => ipcRenderer.invoke('assets:remove'),
+  // the version picker: a core's releases ({ prerelease, force }), and one installed by its tag
+  coreVersions: (component, opts) => ipcRenderer.invoke('cores:versions', Object.assign({}, opts, { component })),
+  installCoreVersion: (component, tag) => ipcRenderer.invoke('cores:install', { component, tag }),
 
   // LAN sharing info + kill switch
   lanInfo: () => ipcRenderer.invoke('net:lanInfo'),

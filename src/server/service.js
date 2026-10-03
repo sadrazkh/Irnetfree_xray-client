@@ -49,6 +49,7 @@ const { NetWatcher, fingerprint } = require('../main/netWatcher');
 const { createWanWatcher, decide: decideWanChange } = require('../main/wanWatch');
 const { exportBundle, importBundle } = require('../main/backup');
 const { AssetUpdater } = require('../main/assetUpdater');
+const { CORE_IDS, createCoreVersionsApi } = require('../main/coreVersions');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
 // list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
 // deliberately NOT given this: Electron never runs on a router.
@@ -747,10 +748,46 @@ function createService(opts = {}) {
     onRaw: (vars) => reportSilentTunnels(vars)
   });
 
-  const downloader = new Downloader({
+  const downloaderOpts = {
     destDir: userBinDir,
     onLog: (line, level) => send('log', { line, level }),
     onProgress: (component, pct) => send('asset-progress', { component, pct })
+  };
+  // deps.downloader: a test's Downloader over a fake GitHub (coreVersionsIpc.test.js)
+  const downloader = deps.downloader ? deps.downloader(downloaderOpts) : new Downloader(downloaderOpts);
+
+  /**
+   * After a core's binary changed — a download, or a version chosen in the
+   * picker: what was cached about it. binPath caches ONLY the official core
+   * (and holds a user-located path), so a change to the fork must not clear it.
+   */
+  function afterCoreChanged(component) {
+    if (component === 'xray') xray.binPath = null;
+    xray.forgetVersions();
+    stats.setBin(xray.anyBin());
+  }
+
+  /**
+   * A core is never replaced under a connection (the version picker's
+   * 'cores:install'): a core or the gateway up, a connect in flight, a recovery
+   * between its attempts, or a boot connect waiting for the WAN — anything the
+   * clients are shown as other than disconnected or an error.
+   */
+  function coreChangeBlocked() {
+    return connectsInFlight.size > 0 || recovering || !!recoverTimer
+      || !!store.get('activeServerId', null)
+      || !!(xray && xray.running) || !!(tun && tun.active)
+      || ['connecting', 'waiting', 'reconnecting', 'connected'].includes(conn.state);
+  }
+
+  // the version picker (Settings → Required files → Choose version): the handlers main.js has too
+  const coreVersions = createCoreVersionsApi({
+    downloader,
+    installedVersion: (id) => xray.version(id),
+    busy: coreChangeBlocked,
+    afterInstall: afterCoreChanged,
+    result: () => ({ assets: assetStatus(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(), xrayReady: xray.binExists() }),
+    onLog: (line, level) => send('log', { line, level })
   });
 
   // The weekly refresh of what the downloader put in place — same as main.js.
@@ -3093,12 +3130,14 @@ function createService(opts = {}) {
     'assets:download': async (component) => {
       try {
         const res = await downloader.download(component);
-        // binPath caches ONLY the official core (and holds a user-located path),
-        // so downloading the fork must not clear it.
-        if (component === 'xray' || component === 'xray-pattn') { if (component === 'xray') xray.binPath = null; xray.forgetVersions(); stats.setBin(xray.anyBin()); }
+        // a core (sing-box too: its version is shown beside it now) — see afterCoreChanged
+        if (CORE_IDS.includes(component)) afterCoreChanged(component);
         return { ok: true, files: res.files, assets: assetStatus(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(), xrayReady: xray.binExists() };
       } catch (err) { send('log', { line: 'Download failed (' + component + '): ' + err.message, level: 'error' }); return { ok: false, error: err.message, assets: assetStatus() }; }
     },
+    // a core's releases for the picker, and one installed by its tag (refused while connected or connecting)
+    'cores:versions': (arg) => coreVersions.versions(arg),
+    'cores:install': (arg) => coreVersions.install(arg),
     'assets:remove': async () => {
       if (xray.running || (tun && tun.active)) return { ok: false, error: 'disconnect first', assets: assetStatus() };
       const names = downloadedFileNames();
