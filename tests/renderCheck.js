@@ -8,19 +8,28 @@
  * innerHeight, 0 visible pixels) while every test that read `hidden === false`
  * passed. Only a layout engine says that; this module drives one.
  *
- *   serveRenderer(checkJs)  src/renderer on 127.0.0.1, index.html WITHOUT its
- *                           scripts (the app needs Electron's bridge) and WITH
- *                           `checkJs` run at the end of <body> — after every
- *                           stylesheet, so it measures the real layout
+ *   serveRenderer(checkJs)  src/renderer on 127.0.0.1: `/` is index.html
+ *                           WITHOUT its scripts (the app needs Electron's
+ *                           bridge) and WITH `checkJs` run at the end of <body>
+ *                           — after every stylesheet, so it measures the real
+ *                           layout. `/__harness.html?sizes=1080x720,…` holds
+ *                           one iframe of exactly each size around that page
+ *                           and POSTs what each measured back to the server.
  *   bannerCheckJs(texts)    that check for the banners: each one alone, then
  *                           all at once, right-to-left and left-to-right
- *   renderInBrowser(...)    a headless Chromium (Chrome or Edge) at one window
- *                           size: the page's measurements, as an object
+ *   bannerTexts()           the app's own texts for the two banners it fills in
+ *   renderInBrowser(...)    a headless Chromium (Chrome or Edge) on the
+ *                           harness: the measurements per size
  *   findBrowser()           IRNF_RENDER_BROWSER, or on CI a known install path;
  *                           null elsewhere (the owner's daily PC: never launched)
  *
- * `node tests/renderCheck.js` serves the page and prints its URL, to look at
- * it in any browser.
+ * The sizes are iframes, not the browser's window: a headless window's size is
+ * not the same on every OS (Windows CI gave 884x449 for --window-size=1080,720),
+ * an iframe's viewport is exactly its CSS size. The answer comes back as a POST,
+ * not from --dump-dom, which never returned on macOS CI.
+ *
+ * `node tests/renderCheck.js` serves both pages and prints their URLs, to look
+ * at them in any browser.
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -36,6 +45,9 @@ const TYPES = {
   '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf', '.otf': 'font/otf'
 };
 const CHECK_PATH = '/__render-check.js';
+const HARNESS_PATH = '/__harness.html';
+const HARNESS_JS = '/__harness.js';
+const RESULT_PATH = '/__result';
 const BANNERS = ['killBanner', 'guardBanner', 'pendingBanner', 'autostartBanner'];
 
 /** index.html without its <script> tags and with the check at the end of <body>. */
@@ -46,16 +58,73 @@ function checkPage() {
     .replace('</body>', `<script src="${CHECK_PATH}"></script>\n</body>`);
 }
 
-/** src/renderer on 127.0.0.1 (a free port): resolves { url, close }. */
+/** '1080x720,900x600' → [{ width, height }] (garbage dropped). */
+function parseSizes(s) {
+  return String(s || '').split(',').map((x) => /^(\d{2,4})x(\d{2,4})$/.exec(x.trim())).filter(Boolean)
+    .map((m) => ({ width: Number(m[1]), height: Number(m[2]) }));
+}
+
+/** The harness: one iframe of exactly each size around the check page, scaled down so all of it is on screen. */
+function harnessPage(sizes) {
+  const frames = sizes.map((s, i) =>
+    `<iframe id="f${i}" data-width="${s.width}" data-height="${s.height}" src="/?frame=${i}" style="width:${s.width}px;height:${s.height}px"></iframe>`);
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>IRNetFree render check</title>
+<style>body { margin: 0; } iframe { position: absolute; top: 0; left: 0; border: 0; transform-origin: 0 0; transform: scale(.25); }</style>
+</head><body>
+${frames.join('\n')}
+<script src="${HARNESS_JS}"></script>
+</body></html>
+`;
+}
+
+/** Once every frame has loaded: what each measured, POSTed to the server. */
+const HARNESS_SCRIPT = `window.addEventListener('load', function () {
+  var out = Array.prototype.map.call(document.querySelectorAll('iframe'), function (f) {
+    var size = { width: Number(f.dataset.width), height: Number(f.dataset.height) };
+    try {
+      var pre = f.contentDocument.getElementById('render-result');
+      if (!pre) return { size: size, error: 'no #render-result in the frame' };
+      var r = JSON.parse(decodeURIComponent(pre.textContent));
+      r.size = size;
+      return r;
+    } catch (e) { return { size: size, error: String(e && e.message || e) }; }
+  });
+  fetch('${RESULT_PATH}', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(out) });
+});
+`;
+
+/**
+ * src/renderer on 127.0.0.1 (a free port). Resolves { url, harnessUrl(sizes),
+ * nextResult(timeoutMs), close }: nextResult is the next POSTed result.
+ */
 function serveRenderer(checkJs) {
+  const waiting = [];
   const server = http.createServer((req, res) => {
     const send = (code, type, body) => { res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' }); res.end(body); };
-    let p;
-    try { p = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname); } catch { return send(400, 'text/plain', 'bad'); }
+    let u;
+    try { u = new URL(req.url, 'http://127.0.0.1'); } catch { return send(400, 'text/plain', 'bad'); }
+    const p = u.pathname;
+    if (req.method === 'POST' && p === RESULT_PATH) {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        send(204, 'text/plain', '');
+        let value, error = null;
+        try { value = JSON.parse(body); } catch (e) { error = e; }
+        const w = waiting.shift();
+        if (w) w(error, value);
+      });
+      return;
+    }
     // read on every request, like the stylesheets: the page as it is on disk now
     if (p === '/' || p === '/index.html') return send(200, TYPES['.html'], checkPage());
     if (p === CHECK_PATH) return send(200, TYPES['.js'], checkJs);
-    const file = path.join(ROOT, path.normalize(p).replace(/^[\\/]+/, ''));
+    if (p === HARNESS_PATH) return send(200, TYPES['.html'], harnessPage(parseSizes(u.searchParams.get('sizes'))));
+    if (p === HARNESS_JS) return send(200, TYPES['.js'], HARNESS_SCRIPT);
+    let file;
+    try { file = path.join(ROOT, path.normalize(decodeURIComponent(p)).replace(/^[\\/]+/, '')); } catch { return send(400, 'text/plain', 'bad'); }
     if (file !== ROOT && !file.startsWith(ROOT + path.sep)) return send(404, 'text/plain', 'no');
     fs.readFile(file, (err, buf) => {
       if (err) return send(404, 'text/plain', 'no');
@@ -66,7 +135,17 @@ function serveRenderer(checkJs) {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
-      resolve({ url: `http://127.0.0.1:${port}/`, close: () => new Promise((r) => server.close(() => r())) });
+      const url = `http://127.0.0.1:${port}/`;
+      resolve({
+        url,
+        harnessUrl: (sizes) => `${url}${HARNESS_PATH.slice(1)}?sizes=${sizes.map((s) => `${s.width}x${s.height}`).join(',')}`,
+        nextResult: (timeoutMs) => new Promise((ok, fail) => {
+          const timer = setTimeout(() => { const i = waiting.indexOf(take); if (i > -1) waiting.splice(i, 1); fail(new Error(`no result in ${timeoutMs} ms`)); }, timeoutMs);
+          const take = (err, value) => { clearTimeout(timer); if (err) fail(err); else ok(value); };
+          waiting.push(take);
+        }),
+        close: () => new Promise((r) => { server.closeAllConnections && server.closeAllConnections(); server.close(() => r()); })
+      });
     });
   });
 }
@@ -110,6 +189,7 @@ function bannerCheckJs(texts) {
   });
   var pre = document.createElement('pre');
   pre.id = 'render-result';
+  pre.hidden = true;
   pre.textContent = encodeURIComponent(JSON.stringify(out));
   document.body.appendChild(pre);
 })();
@@ -151,42 +231,54 @@ function findBrowser(env = process.env, platform = process.platform) {
 }
 
 /**
- * Load `url` in a headless Chromium with a `width`×`height` window and a
- * throwaway profile, and return what the check wrote into #render-result.
- * Nothing is installed or kept: the profile is a temp dir, removed after.
+ * Open the harness for `sizes` in a headless Chromium with a throwaway profile,
+ * wait for its POST, then end the browser: the measurements, one per size
+ * ({ size, width, height, runs } or { size, error }). Nothing is installed or
+ * kept: the profile is a temp dir, removed after.
  */
-function renderInBrowser(browser, url, { width, height, timeoutMs = 60000 } = {}) {
+async function renderInBrowser(browser, served, sizes, { timeoutMs = 90000 } = {}) {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-render-'));
   const args = [
     '--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--mute-audio', '--hide-scrollbars', '--use-mock-keychain', '--password-store=basic',
-    `--user-data-dir=${profile}`, `--window-size=${width},${height}`, '--virtual-time-budget=5000', '--dump-dom', url
+    `--user-data-dir=${profile}`, '--window-size=1280,900', served.harnessUrl(sizes)
   ];
-  return new Promise((resolve, reject) => {
-    let stdout = '', stderr = '', done = false;
-    const child = spawn(browser, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    const finish = (err, value) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* a temp dir */ }
-      if (err) reject(err); else resolve(value);
-    };
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } finish(new Error(`no answer from ${browser} in ${timeoutMs} ms\n${stderr.slice(-2000)}`)); }, timeoutMs);
-    child.stdout.on('data', (b) => { stdout += b; });
-    child.stderr.on('data', (b) => { stderr += b; });
-    child.on('error', (e) => finish(e));
-    child.on('close', (code) => {
-      const m = /<pre id="render-result">([^<]*)<\/pre>/.exec(stdout);
-      if (!m) return finish(new Error(`${browser} exited ${code} without a result\n${stderr.slice(-2000)}\n${stdout.slice(-500)}`));
-      try { finish(null, JSON.parse(decodeURIComponent(m[1]))); } catch (e) { finish(e); }
-    });
-  });
+  const result = served.nextResult(timeoutMs);
+  let stderr = '';
+  const child = spawn(browser, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
+  child.stderr.on('data', (b) => { stderr = (stderr + b).slice(-4000); });
+  const exited = new Promise((resolve) => child.once('close', resolve));
+  const failedToStart = new Promise((resolve, reject) => child.once('error', reject));
+  const end = async () => {
+    try {
+      if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
+      else child.kill();
+    } catch { /* already gone */ }
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+    try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 }); } catch { /* a temp dir */ }
+  };
+  try {
+    return await Promise.race([
+      result,
+      failedToStart,
+      exited.then((code) => new Promise((resolve, reject) => setTimeout(() =>
+        reject(new Error(`${browser} exited (${code}) before the page answered\n${stderr}`)), 2000)))
+    ]);
+  } catch (e) {
+    e.message += stderr && !e.message.includes(stderr) ? `\n${stderr}` : '';
+    throw e;
+  } finally {
+    await end();
+  }
 }
 
-module.exports = { BANNERS, checkPage, serveRenderer, bannerCheckJs, bannerTexts, findBrowser, renderInBrowser };
+module.exports = { BANNERS, checkPage, harnessPage, parseSizes, serveRenderer, bannerCheckJs, bannerTexts, findBrowser, renderInBrowser };
 
 if (require.main === module) {
-  serveRenderer(bannerCheckJs(bannerTexts())).then(({ url }) => console.log(`serving the banner check at ${url} — Ctrl+C to stop`));
+  serveRenderer(bannerCheckJs(bannerTexts())).then((s) => {
+    console.log(`the page:    ${s.url}`);
+    console.log(`the harness: ${s.harnessUrl([{ width: 1080, height: 720 }, { width: 900, height: 600 }, { width: 390, height: 760 }])}`);
+    console.log('Ctrl+C to stop');
+  });
 }
