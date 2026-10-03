@@ -649,6 +649,80 @@ test('a connect by hand starts with no crash history — its first drop is rebui
   assert.ok(!s.logs.some(l => /dropped again/.test(l.line)));
 });
 
+test('a Reconnect by hand that fails while the drop’s own recovery brings the connection back leaves no retry behind — the next crash is still rebuilt', async (t) => {
+  // v1.16.1 re-review: the hand-over armed its retry while that recovery was
+  // running; the timer fired into it (only queued there), its handle stayed,
+  // and recoverFromDrop took the dead handle for a retry still to come — every
+  // later core or sing-box death ignored, every WAN change "not judged".
+  let s = null;
+  let mode = 'ok';
+  const port = async () => {
+    // the Reconnect's core binds and dies 5 ms later: a drop, not that connect's own failure
+    if (mode === 'die-after-bind') { mode = 'slow'; setTimeout(() => s.state.xray.crash(), 5); return true; }
+    if (mode === 'slow') { mode = 'ok'; await sleep(1500); return true; }   // the recovery's core, slow to bind (the A7)
+    return true;
+  };
+  s = start({}, Object.assign(withTiming({ routerBackoffMs: [1000, 1000, 1000], crashWindowMs: 120000 }), { waitForLocalPort: port }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  let open = null;
+  s.state.gatewayGate = new Promise((r) => { open = r; });
+  mode = 'die-after-bind';
+  const reconnect = s.service.invoke('vpn:reconnect');
+  await until(() => gatewayStarts(s) === 2, 'the Reconnect’s gateway start, held');
+  await until(() => s.logs.some(l => /^The core exited on its own .* while connecting/.test(l.line)), 'its core’s death');
+  s.state.gatewayFails = true;   // …and then that gateway fails too
+  s.state.gatewayGate = null;
+  open();
+  assert.equal((await reconnect).ok, false);
+  s.state.gatewayFails = false;  // the recovery's core is still waiting for its port
+  await until(() => connectedCount(s) === 2, 'the drop’s recovery bringing it back', 5000);
+  await sleep(1300);             // past the hand-over's 1 s: nothing rebuilds what is up
+  const lines = () => s.logs.map(l => l.line).slice(-10).join(' / ');
+  assert.equal(connectedCount(s), 2, 'the restored connection is not rebuilt again: ' + lines());
+  assert.ok(!s.logs.some(l => /Reconnect failed — retrying/.test(l.line)), 'one chain, the recovery’s: ' + lines());
+  const n = s.state.xray.starts.length;
+  s.state.xray.crash();
+  await until(() => connectedCount(s) === 3, 'the next crash rebuilt', 5000);
+  assert.ok(s.state.xray.starts.length > n);
+});
+
+test('a Connect by hand whose core dies while a recovery’s gateway start is held is retried once that recovery gives way', async (t) => {
+  // v1.16.1 re-review: the Connect overtakes the recovery, which then goes
+  // stale and retries nothing; the hand-over's timer fired into it and was
+  // only queued, and its dead handle stopped every retry after it — the
+  // status stuck at "Reconnecting… (attempt 2)", the LAN blocked for good.
+  let s = null;
+  let dying = false;
+  const once = () => { const d = dying; dying = false; return d; };
+  s = start({}, Object.assign(withTiming({ routerBackoffMs: [300, 300, 300], crashWindowMs: 120000 }), { waitForLocalPort: portOfDyingCore(() => s, once) }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  let open = null;
+  s.state.gatewayGate = new Promise((r) => { open = r; });
+  s.state.xray.crash();          // the drop: its recovery's gateway start is held (a slow A7)
+  await until(() => gatewayStarts(s) === 2, 'the recovery’s gateway start, held');
+  dying = true;                  // the Connect's own core dies before its port opens
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /before it opened 127\.0\.0\.1:47808/);
+  await sleep(600);              // past the 300 ms wait, the recovery still held
+  const n = s.state.xray.starts.length;
+  s.state.gatewayGate = null;
+  open();                        // the overtaken recovery gives way
+  await until(() => s.state.xray.starts.length > n, 'another core start', 3000);
+  await until(() => connectedCount(s) === 2, 'connected again', 5000);
+});
+
+test('every recovery timer lets go of its handle as it fires — a handle left behind reads as a retry still to come', () => {
+  // recoverFromDrop, judgeWanChange's busy() and alreadyUp() all read
+  // `recoverTimer`; a call that fired into an early return (queued behind a
+  // recovery, an intent gone, auto-reconnect turned off mid-backoff) must not
+  // leave it set. Pinned as text: every arm, present and future.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8');
+  const arms = src.match(/recoverTimer = setTimeout\(\(\) => \{?\s*[^\n]*/g) || [];
+  assert.ok(arms.length >= 3, arms.join('\n'));
+  for (const a of arms) assert.match(a, /^recoverTimer = setTimeout\(\(\) => \{\s*recoverTimer = null;/, a);
+});
+
 test('the give-up of a crash loop says whether the proxy is still up', () => {
   // Reached only on the desktop (a router never gives up) and only after 2+5+15 s of
   // waits, so pinned as text: a tunnel that keeps dying over a live core leaves the proxy up.

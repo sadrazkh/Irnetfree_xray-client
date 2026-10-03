@@ -2103,6 +2103,9 @@ function createService(opts = {}) {
     return r;
   }
 
+  /** recoverQueued's mark for a hand-over that came while a recovery was in flight (handToRecovery). */
+  const HAND_OVER = 'hand-over';
+
   /**
    * A rebuild by hand — a Reconnect, an Apply, a Connect on the live
    * connection — that failed and kept the intent (abortGateway), with nothing
@@ -2114,14 +2117,29 @@ function createService(opts = {}) {
    */
   function handToRecovery(reason) {
     if (!OPENWRT || !store.get('activeServerId', null) || recoverTimer) return;
+    // A recovery in flight is either the one this hand action overtook (it
+    // goes stale and retries nothing) or one a drop started after it (it owns
+    // the retry, and backs off by itself if it fails). Only its end tells
+    // which, so the hand-over is asked again then — when the connection is up,
+    // or a retry armed, or neither and the hand-over is due. A timer armed
+    // here instead fired into that recovery, was only queued, and left a
+    // handle that read as "a retry is coming" for good (v1.16.1 re-review).
+    // A drop already queued behind it goes first: that one rebuilds too.
+    if (recovering) { if (recoverQueued == null) recoverQueued = HAND_OVER; return; }
     if ((xray && xray.running) || (tun && tun.active)) return;   // refused before anything was torn down: the old connection still runs
     const wait = backoffAfter(0);
     recoveryCause = causeOf(reason);
     send('log', { line: `Reconnect failed — retrying in ${wait / 1000}s`, level: 'warn' });
     send('status', { state: 'reconnecting', reason, attempt: 2, retryInMs: wait, cause: recoveryCause });
-    recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, 1).catch((e) => {
-      send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' });
-    }), wait);
+    // every recovery timer lets go of its handle as it fires: whatever the
+    // call then does (queued behind a recovery, an intent gone), a handle
+    // left behind would read as a retry still to come (recoverFromDrop, judgeWanChange, alreadyUp)
+    recoverTimer = setTimeout(() => {
+      recoverTimer = null;
+      recoverFromNetworkChange(reason, 1).catch((e) => {
+        send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' });
+      });
+    }, wait);
     if (recoverTimer.unref) recoverTimer.unref();
   }
 
@@ -2247,7 +2265,7 @@ function createService(opts = {}) {
     // about to run — the number runRecovery will report for it.
     send('status', { state: 'reconnecting', reason, attempt: attempt + 1, retryInMs: wait, cause: causeOf(reason) });
     clearTimeout(recoverTimer);
-    recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt).catch(fail), wait);
+    recoverTimer = setTimeout(() => { recoverTimer = null; recoverFromNetworkChange(reason, attempt).catch(fail); }, wait);
     if (recoverTimer.unref) recoverTimer.unref();
   }
 
@@ -2305,6 +2323,8 @@ function createService(opts = {}) {
     const queued = recoverQueued;
     if (queued == null) return;
     recoverQueued = null;
+    // a hand action that failed during this recovery: asked again now (see handToRecovery)
+    if (queued === HAND_OVER) { handToRecovery('gateway-failed'); return; }
     if (DROP_REASONS.has(queued)) { recoverFromDrop(queued); return; }
     // the router's WAN verdict is never replayed blind: the rebuild that just
     // finished built for the network we have now (review I3; judgeWanChange
@@ -2403,7 +2423,12 @@ function createService(opts = {}) {
     send('log', { line: `Reconnect failed — retrying in ${delay / 1000}s`, level: 'warn' });
     // still "reconnecting" through the wait, with the attempt about to run (S4)
     send('status', { state: 'reconnecting', reason, attempt: attempt + 2, retryInMs: delay, cause: recoveryCause });
-    recoverTimer = setTimeout(() => recoverFromNetworkChange(reason, attempt + 1), delay);
+    recoverTimer = setTimeout(() => {
+      recoverTimer = null;   // fired: no longer a retry to come, whatever the call below does (see handToRecovery)
+      recoverFromNetworkChange(reason, attempt + 1).catch((e) => {
+        send('log', { line: 'Recovery failed: ' + ((e && e.message) || e), level: 'error' });
+      });
+    }, delay);
     if (recoverTimer.unref) recoverTimer.unref();
   }
 
