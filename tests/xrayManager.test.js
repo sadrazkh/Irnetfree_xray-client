@@ -260,6 +260,24 @@ test('validateWithFallback passes other errors through untouched', async () => {
   });
 });
 
+test('validateWithFallback: a check that was killed stays flagged on every path — the caller must not take it for a verdict', async () => {
+  const KILLED = { ok: false, killed: true, error: 'xray -test was killed (SIGKILL) — the config was not checked' };
+  const PLAINTEXT = 'vless without TLS or other encryption is prohibited unless the server address is a private IP or domain';
+  await withBin([exe('xray')], async (xm) => {
+    xm.validate = async () => KILLED;
+    assert.deepEqual(await xm.validateWithFallback({}, 'xray'), { ok: false, engine: 'xray', error: KILLED.error, plaintextRejected: false, killed: true });
+    // a finalmask config on the official core, no fork: no "install Xray-PattN" either
+    assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: false, engine: 'xray', error: KILLED.error, plaintextRejected: false, killed: true });
+  });
+  await withBin([exe('xray'), exe('xray-pattn')], async (xm) => {
+    xm.validate = async () => KILLED;
+    assert.deepEqual(await xm.validateWithFallback(FINALMASK_CFG, 'xray'), { ok: false, engine: 'xray-pattn', error: KILLED.error, plaintextRejected: false, killed: true });
+    // the official core refuses the plaintext, the fork's check is killed
+    xm.validate = async (cfg, id) => (id === 'xray' ? { ok: false, error: PLAINTEXT } : KILLED);
+    assert.deepEqual(await xm.validateWithFallback({}, 'xray'), { ok: false, engine: 'xray-pattn', error: KILLED.error, plaintextRejected: false, killed: true });
+  });
+});
+
 test('startTest spawns the RESOLVED engine with that engine\'s own argv', async () => {
   // A temporary core with a DIFFERENT argv shape: the three real Xray-format
   // entries happen to share `run -c <cfg>`, so only this can tell a registry
@@ -449,6 +467,57 @@ test('validate: the key follows the core file — a replaced binary is checked a
       fs.utimesSync(bin, t, t);                       // "re-downloaded": a new mtime
       assert.deepEqual(await xm.validate(cfg, 'xray'), { ok: true });
       assert.equal(spawns.length - before, 2);
+    } finally { fakeSpawn = null; }
+  });
+});
+
+// What `xray run -test` prints before it loads the geo files (checked on a local
+// xray 26.3.27 by the v1.16.1 re-review). A check killed after it leaves only
+// this, and its last line — the one extractXrayError picks — is no verdict.
+const TEST_BANNER = 'Xray 26.3.27 (Xray, Penetrates Everything.) Custom (go1.26.1 linux/arm)\n'
+  + 'A unified platform for anti-censorship.\n'
+  + '[Info] infra/conf/serial: Reading config: &{Name:/etc/irnetfree/test-cfg-1.json Format:json}\n';
+/** A -test that prints `out` (on stdout, or the stream named) and then ends with (code, signal). */
+const endsWith = (out, code, signal, stream = 'stdout') => () => {
+  const p = stubChild();
+  setImmediate(() => { p[stream].emit('data', Buffer.from(out)); p.emit('exit', code, signal); });
+  return p;
+};
+const TEST_CFG = { log: { loglevel: 'none' }, inbounds: [], outbounds: [] };
+
+test('validate: a -test killed by a signal after its banner (the kernel\'s OOM killer on a 512 MB router) is no verdict — it says it was killed, is flagged, and is not cached', async () => {
+  // was: { ok:false, error:'[Info] infra/conf/serial: Reading config: …' }, which the
+  // router's service took for the core refusing the config and waited 10 minutes on
+  await withBin([exe('xray')], async (xm) => {
+    const before = spawns.length;
+    fakeSpawn = endsWith(TEST_BANNER, null, 'SIGKILL');
+    try {
+      const r = await xm.validate(TEST_CFG, 'xray');
+      assert.equal(r.ok, false);
+      assert.equal(r.killed, true);
+      assert.match(r.error, /^xray(\.exe)? -test was killed \(SIGKILL\) — the config was not checked$/);
+      assert.equal((await xm.validate(TEST_CFG, 'xray')).killed, true);
+      assert.equal(spawns.length - before, 2, 'never cached');
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('validate: …and so is a -test that Go\'s own runtime ended out of memory (exit 2) — either form the runtime prints', async () => {
+  const heap = 'fatal error: runtime: out of memory\n\nruntime stack:\nruntime.throw({0x1c2d4f3, 0x16})\n\t/usr/local/go/src/runtime/panic.go:1023 +0x4c\n\ngoroutine 1 [running]:\nmain.main()\n';
+  const block = 'runtime: out of memory: cannot allocate 4194304-byte block (3866624 in use)\nfatal error: out of memory\n\ngoroutine 1 [running]:\nruntime.throw({0x1c2d4f3, 0xd})\n\t/usr/local/go/src/runtime/panic.go:1023 +0x4c\n';
+  await withBin([exe('xray')], async (xm) => {
+    try {
+      for (const tail of [heap, block]) {
+        fakeSpawn = endsWith(TEST_BANNER + tail, 2, null, 'stderr');
+        const r = await xm.validate(TEST_CFG, 'xray');
+        assert.equal(r.ok, false);
+        assert.equal(r.killed, true, tail);
+        assert.match(r.error, /^xray(\.exe)? -test ran out of memory \(.*out of memory.*\) — the config was not checked$/);
+      }
+      // the core's own verdict after the same banner stays one: "Failed to start", exit 23
+      fakeSpawn = endsWith(TEST_BANNER + 'Failed to start: main: failed to load config files: [/etc/irnetfree/test-cfg-1.json] > infra/conf: unknown transport protocol: foo\n', 23, null);
+      const refused = await xm.validate(TEST_CFG, 'xray');
+      assert.deepEqual(refused, { ok: false, error: 'infra/conf: unknown transport protocol: foo' });
     } finally { fakeSpawn = null; }
   });
 });

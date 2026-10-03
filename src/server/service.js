@@ -1499,6 +1499,15 @@ function createService(opts = {}) {
     const check = await xray.validateWithFallback(config, engine);
     if (stale()) return abandoned;
     if (!check.ok) {
+      // Its check never gave a verdict: killed (the kernel's OOM killer on a
+      // 512 MB router) or out of memory in Go's runtime (xrayManager.validate).
+      // No refusal() — that would wait 10 minutes with the LAN blocked or
+      // direct; the boot loop's and the recovery's own pace try it again, and
+      // memory freed by then lets it finish (v1.16.1 re-review).
+      if (check.killed) {
+        send('log', { line: 'The config check did not finish: ' + check.error, level: 'error' });
+        throw new Error((settings.lang === 'en' ? 'The config check did not finish: ' : 'بررسی کانفیگ تمام نشد: ') + check.error);
+      }
       send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
       // The fork's finalmask, refused by the official core, and no fork to
       // fall back to (xrayManager.validateWithFallback): what to install is
@@ -1530,11 +1539,12 @@ function createService(opts = {}) {
       // the (untranslated) product name in it. A property set here would be
       // dropped in transit — don't add one.
       const refused = new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
-      // the core's verdict, unless its check was killed or never ran: a
-      // signal, a spawn short of memory, its file gone or being replaced (an
-      // opkg upgrade) — those come back by themselves. (`refused` is read in
-      // this process only — the boot loop and the recovery — never by the renderer.)
-      throw /exited with code null|binary not found|\bE(NOENT|TXTBSY|NOMEM|AGAIN|MFILE|NFILE)\b/.test(String(check.error || '')) ? refused : refusal(refused);
+      // the core's verdict, unless its check never ran: a spawn short of
+      // memory, its file gone or being replaced (an opkg upgrade) — those come
+      // back by themselves (a check killed while it ran is check.killed, above).
+      // (`refused` is read in this process only — the boot loop and the
+      // recovery — never by the renderer.)
+      throw /binary not found|\bE(NOENT|TXTBSY|NOMEM|AGAIN|MFILE|NFILE)\b/.test(String(check.error || '')) ? refused : refusal(refused);
     }
     const runEngine = check.engine;
     // The LAN's DNS plan (the hijack's `rules` form, `expectedIPs`) is verified

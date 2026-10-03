@@ -792,6 +792,45 @@ test('…but a binary that is gone for a while (sing-box or the core: an opkg up
   }
 });
 
+// What xrayManager.validate answers for a -test that never gave a verdict: killed by a signal after its banner (the
+// kernel's OOM killer on the 512 MB AC-1304), or ended by Go's runtime out of memory. The first carries the banner's
+// last line as its text, as the manager used to answer it: the flag is what says so, never the words.
+const KILLED_CHECKS = [
+  { ok: false, killed: true, error: '[Info] infra/conf/serial: Reading config: &{Name:/etc/irnetfree/test-cfg-1.json Format:json}' },
+  { ok: false, killed: true, error: 'xray -test was killed (SIGKILL) — the config was not checked' },
+  { ok: false, killed: true, error: 'xray -test ran out of memory (fatal error: runtime: out of memory) — the config was not checked' }
+];
+
+test('…nor is a config check that was killed or ran out of memory — the recovery keeps its quick backoff, no "error", and comes back by itself', async (t) => {
+  // v1.16.1 re-review: the banner's last line was taken for the core's verdict, and a 512 MB router waited 10 minutes
+  const s = start({}, withTiming({ refusedRetryMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  for (const check of KILLED_CHECKS) {
+    s.state.check = check;
+    const n = s.statuses.filter(x => x.state === 'reconnecting').length;
+    s.state.xray.crash();
+    await until(() => s.statuses.filter(x => x.state === 'reconnecting').length >= n + 3, `retries for "${check.error}"`, RETRIES_MS);
+    assert.ok(!s.statuses.some(x => x.state === 'error'), check.error + ': ' + JSON.stringify(s.statuses.map(x => x.state)));
+    assert.notEqual(s.service.connSnapshot().state, 'error');
+    delete s.state.check;
+    const c = connectedCount(s);
+    await until(() => connectedCount(s) === c + 1, `back after "${check.error}"`, 5000);
+  }
+});
+
+test('…and at boot (the cache is empty there): a killed config check is "waiting", retried at the boot loop\'s pace', async (t) => {
+  const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true, killSwitch: true } },
+    withTiming({ refusedRetryMs: 60000 }), (st) => { st.check = KILLED_CHECKS[1]; });
+  t.after(() => s.service.shutdown());
+  await until(() => s.state.xray.validated.length >= 3, 'the boot loop’s retries', RETRIES_MS);
+  assert.ok(!s.statuses.some(x => x.state === 'error'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.ok(s.statuses.some(x => x.state === 'waiting'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.ok(!s.logs.some(l => /Config rejected by xray|refuses this connection/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+  delete s.state.check;
+  await until(() => connectedCount(s) === 1, 'connected once the check finishes', 5000);
+});
+
 test('…and a Reconnect by hand the core refuses is not handed to the quick retries either', async (t) => {
   const s = start({}, withTiming({ refusedRetryMs: 60000 }));
   t.after(() => s.service.shutdown());
