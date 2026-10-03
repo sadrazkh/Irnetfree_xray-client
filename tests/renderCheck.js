@@ -53,12 +53,17 @@ const HARNESS_JS = '/__harness.js';
 const RESULT_PATH = '/__result';
 const BANNERS = ['killBanner', 'guardBanner', 'pendingBanner', 'autostartBanner'];
 
-/** index.html without its <script> tags and with the check at the end of <body>. */
-function checkPage() {
+/**
+ * index.html without its <script> tags and with the check at the end of <body>.
+ * `scripts`: renderer files the check needs (i18n.js, corePicker.js), loaded
+ * just before it — never app.js, which needs Electron's bridge.
+ */
+function checkPage({ scripts = [] } = {}) {
   const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const before = scripts.map((s) => `<script src="${s}"></script>\n`).join('');
   return html
     .replace(/<script\b[^>]*><\/script>[ \t]*\r?\n?/g, '')
-    .replace('</body>', `<script src="${CHECK_PATH}"></script>\n</body>`);
+    .replace('</body>', `${before}<script src="${CHECK_PATH}"></script>\n</body>`);
 }
 
 /** '1080x720,900x600' → [{ width, height }] (garbage dropped). */
@@ -81,19 +86,30 @@ ${frames.join('\n')}
 `;
 }
 
-/** Once every frame has loaded: what each measured, POSTed to the server. */
+/**
+ * Once every frame has loaded and written its #render-result — at once for a
+ * check that measures as it runs, later for one that waits on the page (the
+ * version picker's answers are promises) — what each measured, POSTed to the
+ * server. A frame that never writes one is reported as such after a minute.
+ */
 const HARNESS_SCRIPT = `window.addEventListener('load', function () {
-  var out = Array.prototype.map.call(document.querySelectorAll('iframe'), function (f) {
-    var size = { width: Number(f.dataset.width), height: Number(f.dataset.height) };
-    try {
-      var pre = f.contentDocument.getElementById('render-result');
-      if (!pre) return { size: size, error: 'no #render-result in the frame' };
-      var r = JSON.parse(decodeURIComponent(pre.textContent));
-      r.size = size;
-      return r;
-    } catch (e) { return { size: size, error: String(e && e.message || e) }; }
-  });
-  fetch('${RESULT_PATH}', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(out) });
+  var frames = Array.prototype.slice.call(document.querySelectorAll('iframe'));
+  var deadline = Date.now() + 60000;
+  var written = function (f) { try { return !!f.contentDocument.getElementById('render-result'); } catch (e) { return true; } };
+  (function wait() {
+    if (!frames.every(written) && Date.now() < deadline) { setTimeout(wait, 50); return; }
+    var out = frames.map(function (f) {
+      var size = { width: Number(f.dataset.width), height: Number(f.dataset.height) };
+      try {
+        var pre = f.contentDocument.getElementById('render-result');
+        if (!pre) return { size: size, error: 'no #render-result in the frame' };
+        var r = JSON.parse(decodeURIComponent(pre.textContent));
+        r.size = size;
+        return r;
+      } catch (e) { return { size: size, error: String(e && e.message || e) }; }
+    });
+    fetch('${RESULT_PATH}', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(out) });
+  })();
 });
 `;
 
@@ -101,7 +117,7 @@ const HARNESS_SCRIPT = `window.addEventListener('load', function () {
  * src/renderer on 127.0.0.1 (a free port). Resolves { url, harnessUrl(sizes),
  * nextResult(timeoutMs), close }: nextResult is the next POSTed result.
  */
-function serveRenderer(checkJs) {
+function serveRenderer(checkJs, { scripts = [] } = {}) {
   const waiting = [];
   const server = http.createServer((req, res) => {
     const send = (code, type, body) => { res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' }); res.end(body); };
@@ -122,7 +138,7 @@ function serveRenderer(checkJs) {
       return;
     }
     // read on every request, like the stylesheets: the page as it is on disk now
-    if (p === '/' || p === '/index.html') return send(200, TYPES['.html'], checkPage());
+    if (p === '/' || p === '/index.html') return send(200, TYPES['.html'], checkPage({ scripts }));
     if (p === CHECK_PATH) return send(200, TYPES['.js'], checkJs);
     if (p === HARNESS_PATH) return send(200, TYPES['.html'], harnessPage(parseSizes(u.searchParams.get('sizes'))));
     if (p === HARNESS_JS) return send(200, TYPES['.js'], HARNESS_SCRIPT);
@@ -220,6 +236,126 @@ function bannerCheckJs(texts) {
       out.toasts.push(measureToast(dir, text, true));
     });
   });
+  var pre = document.createElement('pre');
+  pre.id = 'render-result';
+  pre.hidden = true;
+  pre.textContent = encodeURIComponent(JSON.stringify(out));
+  document.body.appendChild(pre);
+})();
+`;
+}
+
+/** What the version picker's check puts on screen, in this order, in each direction. */
+const PICKER_STATES = ['loading', 'stable', 'pre', 'badges', 'warn', 'progress', 'failed', 'busy', 'listError'];
+
+/**
+ * The version picker's check, as page script (with i18n.js and corePicker.js
+ * loaded before it — serveRenderer's `scripts`): window.api answers with
+ * `f.answers`, then the real modal is driven through PICKER_STATES in Persian
+ * and in English — opened on a request that has not answered (the skeleton),
+ * the stable list, the list with pre-releases, the card with three badges, the
+ * warning before a version older than the suggested one, an install at 42 %, a
+ * failed install with a long reason, connected, and a list GitHub refused. For
+ * each: the dialog's box and horizontal overflow, its head and switch controls
+ * (box, and whether the point at their centre is them), the "disconnect first"
+ * note and the foot; then every card, scrolled into view: its box against the
+ * scrolling body's, its overflow, every piece of its text against the card, and
+ * every button's box and hit. Animations are off: the boxes are where things rest.
+ */
+function corePickerCheckJs(f) {
+  return `(async function () {
+  var F = ${JSON.stringify(f)};
+  var STATES = ${JSON.stringify(PICKER_STATES)};
+  var out = { width: window.innerWidth, height: window.innerHeight, runs: [] };
+  var calm = document.createElement('style');
+  calm.textContent = '*, *::before, *::after { animation: none !important; transition: none !important; }';
+  document.head.appendChild(calm);
+  document.documentElement.setAttribute('data-skin', 'console');
+  document.documentElement.setAttribute('data-theme', 'dark');
+  var copy = function (x) { return JSON.parse(JSON.stringify(x)); };
+  var listAnswer = null, pendingInstall = null, busy = false;
+  window.api = {
+    coreVersions: function (component, opts) {
+      if (listAnswer === 'never') return new Promise(function () {});
+      if (listAnswer) return Promise.resolve(copy(listAnswer));
+      return Promise.resolve(copy(F.answers[component][opts && opts.prerelease ? 'pre' : 'stable']));
+    },
+    installCoreVersion: function () { return new Promise(function (resolve) { pendingInstall = resolve; }); },
+    onStatus: function () {}, onXrayStatus: function () {}
+  };
+  var hooks = { busy: function () { return busy; }, toast: function () {}, onInstalled: function () {} };
+  var settle = function () { return new Promise(function (r) { setTimeout(r, 0); }); };
+  function box(e) { var r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height }; }
+  function hits(e) { var r = e.getBoundingClientRect(); var at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!at && e.contains(at); }
+  function shown(e) { return !!e && !e.hidden && e.getClientRects().length > 0; }
+  function control(b) { return { text: b.textContent, box: box(b), hit: hits(b) }; }
+  function measure(state, dir, component) {
+    var m = document.getElementById('cvModal');
+    var dialog = m.querySelector('.cv-modal');
+    var body = m.querySelector('.cv-body');
+    var note = m.querySelector('.cv-busy');
+    var run = {
+      state: state, dir: dir, component: component, modal: box(dialog), overflowX: dialog.scrollWidth - dialog.clientWidth,
+      title: box(m.querySelector('.cv-title')), titleOverflow: m.querySelector('.cv-title').scrollWidth - m.querySelector('.cv-title').clientWidth,
+      chips: Array.prototype.filter.call(m.querySelectorAll('.cv-chip'), shown).map(box),
+      controls: Array.prototype.map.call(m.querySelectorAll('.cv-head button, .cv-bar button'), control),
+      busy: shown(note) ? box(note) : null, body: box(body), cards: [], panels: []
+    };
+    var foot = m.querySelector('.cv-foot');
+    foot.scrollIntoView({ block: 'nearest' });
+    run.foot = box(foot);
+    run.footBody = box(body);
+    Array.prototype.forEach.call(m.querySelectorAll('.cv-card'), function (card) {
+      card.scrollIntoView({ block: 'nearest' });
+      var b = box(card), bb = box(body);
+      run.cards.push({
+        tag: card.getAttribute('data-tag') || 'skeleton', box: b, body: bb, overflowX: card.scrollWidth - card.clientWidth,
+        texts: Array.prototype.filter.call(card.querySelectorAll('.cv-ver, .cv-badge, .cv-age, .cv-size, .cv-warn-text, .cv-fail-text, .cv-fail-why, .cv-progress-text, .cv-done, .cv-track'), shown)
+          .map(function (t) { return { cls: t.className, box: box(t), overflow: t.scrollWidth - t.clientWidth }; }),
+        buttons: Array.prototype.filter.call(card.querySelectorAll('button'), shown).map(control)
+      });
+    });
+    Array.prototype.forEach.call(m.querySelectorAll('.cv-empty'), function (p) {
+      p.scrollIntoView({ block: 'nearest' });
+      run.panels.push({ box: box(p), overflowX: p.scrollWidth - p.clientWidth, buttons: Array.prototype.filter.call(p.querySelectorAll('button'), shown).map(control),
+        texts: Array.prototype.map.call(p.querySelectorAll('.cv-empty-title, .cv-fail-why'), function (t) { return { cls: t.className, box: box(t), overflow: t.scrollWidth - t.clientWidth }; }) });
+    });
+    body.scrollTop = 0;
+    out.runs.push(run);
+  }
+  async function open(component, prerelease) {
+    window.corePicker.close();
+    window.corePicker.open(component, hooks);
+    await settle();
+    if (prerelease) { document.querySelector('#cvModal .seg-btn[data-channel="pre"]').click(); await settle(); }
+    await settle();
+  }
+  var cardOf = function (version) { return Array.prototype.find.call(document.querySelectorAll('#cvModal .cv-card'), function (c) { return c.querySelector('.cv-ver').textContent === 'v' + version; }); };
+  try {
+    for (var d = 0; d < 2; d++) {
+      var dir = d === 0 ? 'rtl' : 'ltr';
+      window.i18n.applyI18n(dir === 'rtl' ? 'fa' : 'en');
+      for (var s = 0; s < STATES.length; s++) {
+        var state = STATES[s];
+        busy = false; listAnswer = null;
+        var component = state === 'badges' || state === 'warn' ? 'xray' : 'sing-box';
+        if (state === 'loading') { listAnswer = 'never'; await open(component, false); }
+        else if (state === 'listError') { listAnswer = F.listError; await open(component, false); }
+        else if (state === 'busy') { busy = true; await open(component, false); }
+        else await open(component, state === 'pre' || state === 'progress' || state === 'failed');
+        if (state === 'warn') { cardOf(F.older).querySelector('.cv-btn').click(); await settle(); }
+        if (state === 'progress' || state === 'failed') {
+          cardOf(F.newer).querySelector('.cv-btn').click();
+          await settle();
+          window.corePicker.progress({ component: component, pct: 42 });
+          if (state === 'failed') { pendingInstall({ ok: false, error: F.installError }); await settle(); await settle(); }
+        }
+        measure(state, dir, component);
+        if (state === 'progress') { pendingInstall({ ok: false, error: 'x' }); await settle(); await settle(); }
+      }
+    }
+  } catch (e) { out.error = String(e && e.stack || e); }
+  window.corePicker.close();
   var pre = document.createElement('pre');
   pre.id = 'render-result';
   pre.hidden = true;
@@ -337,7 +473,7 @@ async function renderInBrowser(browser, served, sizes, { timeoutMs = 90000 } = {
   }
 }
 
-module.exports = { BANNERS, checkPage, harnessPage, parseSizes, serveRenderer, bannerCheckJs, bannerTexts, longestNotice, findBrowser, renderInBrowser };
+module.exports = { BANNERS, PICKER_STATES, checkPage, harnessPage, parseSizes, serveRenderer, bannerCheckJs, corePickerCheckJs, bannerTexts, longestNotice, findBrowser, renderInBrowser };
 
 if (require.main === module) {
   serveRenderer(bannerCheckJs(bannerTexts())).then((s) => {
