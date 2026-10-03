@@ -16,8 +16,11 @@
  *                           one iframe of exactly each size around that page
  *                           and POSTs what each measured back to the server.
  *   bannerCheckJs(texts)    that check for the banners: each one alone, then
- *                           all at once, right-to-left and left-to-right
- *   bannerTexts()           the app's own texts for the two banners it fills in
+ *                           all at once, right-to-left and left-to-right — and
+ *                           #toast with each of `texts.toasts`, plain and with
+ *                           its button, in both directions
+ *   bannerTexts()           the app's own texts for the two banners it fills in,
+ *                           and its longest notice (fa, en) for the toast
  *   renderInBrowser(...)    a headless Chromium (Chrome or Edge) on the
  *                           harness: the measurements per size
  *   findBrowser()           IRNF_RENDER_BROWSER, or on CI a known install path;
@@ -155,8 +158,9 @@ function serveRenderer(checkJs) {
  * sets (with `texts.pending` / `texts.autostart`), then shows each banner
  * alone and all four together, in both directions, and measures each: its box,
  * whether the point at its centre is the banner (not something over it), its
- * text's box and horizontal overflow, and each button's box and hit. The
- * result goes, URI-encoded JSON, into <pre id="render-result">.
+ * text's box and horizontal overflow, and each button's box and hit. Then the
+ * toast's box with each of `texts.toasts` in it. The result goes, URI-encoded
+ * JSON, into <pre id="render-result">.
  */
 function bannerCheckJs(texts) {
   return `(function () {
@@ -176,7 +180,32 @@ function bannerCheckJs(texts) {
       buttons: Array.prototype.map.call(b.querySelectorAll('button'), function (x) { return { id: x.id, box: box(x), hit: hits(x) }; })
     };
   }
-  var out = { width: window.innerWidth, height: window.innerHeight, runs: [] };
+  // #toast showing a text, plain (toast()) or with its button (toastAction()), as app.js fills it;
+  // no transition, so the box is where the toast rests
+  function measureToast(dir, text, action) {
+    var t = el('toast');
+    t.style.transition = 'none';
+    t.textContent = '';
+    if (action) {
+      var span = document.createElement('span');
+      span.textContent = text;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn small toast-action';
+      btn.textContent = 'OK';
+      t.appendChild(span);
+      t.appendChild(btn);
+      t.className = 'toast show has-action warn';
+    } else {
+      t.textContent = text;
+      t.className = 'toast show warn';
+    }
+    var r = { dir: dir, action: !!action, length: text.length, box: box(t) };
+    t.className = 'toast';
+    t.textContent = '';
+    return r;
+  }
+  var out = { width: window.innerWidth, height: window.innerHeight, runs: [], toasts: [] };
   ['rtl', 'ltr'].forEach(function (dir) {
     document.documentElement.dir = dir;
     IDS.forEach(function (id) {
@@ -186,6 +215,10 @@ function bannerCheckJs(texts) {
     IDS.forEach(function (x) { el(x).hidden = false; });
     out.runs.push({ dir: dir, shown: IDS.slice(), banners: IDS.map(measure) });
     IDS.forEach(function (x) { el(x).hidden = true; });
+    (TEXTS.toasts || []).forEach(function (text) {
+      out.toasts.push(measureToast(dir, text, false));
+      out.toasts.push(measureToast(dir, text, true));
+    });
   });
   var pre = document.createElement('pre');
   pre.id = 'render-result';
@@ -196,22 +229,53 @@ function bannerCheckJs(texts) {
 `;
 }
 
+/** The renderer's real t(), in one language. */
+function rendererT(lang) {
+  const ctx = vm.createContext({ window: {}, document: { documentElement: {}, querySelectorAll: () => [] } });
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'i18n.js'), 'utf8'), ctx);
+  ctx.window.i18n.applyI18n(lang);
+  return ctx.window.i18n.t;
+}
+
+/**
+ * What a notice's {fields} are filled with in the render: values as long as
+ * the owner's own (the subscription's group name, a sing-box error, two
+ * Windows paths with no space to break at).
+ */
+const SAMPLE_FIELDS = {
+  name: 'cobra.tes.ca', other: 'cobra.tes.ca', group: 'tes-vpn-service.platform.irnetfree.info', address: '10.10.10.42',
+  lan: '192.168.60.0/24', iface: 'Ethernet 2', range: '192.168.0.0/16', target: 'Tes Chain', key: 'AllowedIPs', servers: '192.168.60.1, 192.168.60.2',
+  reason: 'sing-box exited before the TUN adapter came up — FATAL[0000] start inbound/tun[tun-in]: configure tun interface: set ipv6 address: Element not found.',
+  error: 'Access is denied.',
+  task: 'C:\\Users\\someone-with-a-long-name\\Desktop\\Programs\\IRNetFree-Portable-1.13.0-x64-setup-copy.exe',
+  current: 'C:\\Users\\someone-with-a-long-name\\AppData\\Local\\Programs\\IRNetFree\\IRNetFree.exe'
+};
+
 /**
  * The texts the app puts into the two banners whose markup is empty, at their
  * longest: the renderer's own Persian strings, the logon-task one with two
- * Windows paths that have no space to break at.
+ * Windows paths that have no space to break at. `toasts`: the longest notice
+ * the window can toast (every 'notice.*' string filled from SAMPLE_FIELDS), in
+ * Persian and in English.
  */
 function bannerTexts() {
-  const ctx = vm.createContext({ window: {}, document: { documentElement: {}, querySelectorAll: () => [] } });
-  vm.runInContext(fs.readFileSync(path.join(ROOT, 'i18n.js'), 'utf8'), ctx);
-  ctx.window.i18n.applyI18n('fa');
-  const t = ctx.window.i18n.t;
+  const t = rendererT('fa');
   return {
     pending: t('apply.intro'),
     autostart: t('notice.autostartStale')
-      .replace('{task}', 'C:\\Users\\someone-with-a-long-name\\Desktop\\Programs\\IRNetFree-Portable-1.13.0-x64-setup-copy.exe')
-      .replace('{current}', 'C:\\Users\\someone-with-a-long-name\\AppData\\Local\\Programs\\IRNetFree\\IRNetFree.exe')
+      .replace('{task}', SAMPLE_FIELDS.task)
+      .replace('{current}', SAMPLE_FIELDS.current),
+    toasts: ['fa', 'en'].map(longestNotice)
   };
+}
+
+/** The longest 'notice.*' string of one language, every {field} filled. */
+function longestNotice(lang) {
+  const src = fs.readFileSync(path.join(ROOT, 'i18n.js'), 'utf8');
+  const keys = [...new Set([...src.matchAll(/'(notice\.\w+)':/g)].map((m) => m[1]))];
+  const t = rendererT(lang);
+  return keys.map((k) => t(k).replace(/\{(\w+)\}/g, (m, f) => SAMPLE_FIELDS[f] || m))
+    .reduce((a, b) => (b.length > a.length ? b : a), '');
 }
 
 /** A Chromium to render with: IRNF_RENDER_BROWSER, or — on CI only — a known install path. */
@@ -273,7 +337,7 @@ async function renderInBrowser(browser, served, sizes, { timeoutMs = 90000 } = {
   }
 }
 
-module.exports = { BANNERS, checkPage, harnessPage, parseSizes, serveRenderer, bannerCheckJs, bannerTexts, findBrowser, renderInBrowser };
+module.exports = { BANNERS, checkPage, harnessPage, parseSizes, serveRenderer, bannerCheckJs, bannerTexts, longestNotice, findBrowser, renderInBrowser };
 
 if (require.main === module) {
   serveRenderer(bannerCheckJs(bannerTexts())).then((s) => {
