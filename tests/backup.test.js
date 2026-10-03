@@ -148,3 +148,33 @@ test('imported ports and counts are integers: pool ports, the subscription’s s
   assert.deepEqual(r.next.pool.map(p => [p.socksPort, p.httpPort]), [[60001, 0]]);
   assert.deepEqual(r.next.settings, { socksPort: 20808, httpPort: 10809, apiPort: 10085, theme: 'dark' }, 'a bad port leaves the current one in place');
 });
+
+test('keep: the keys a machine needs as they are stay as they are — and the answer names those the backup wanted changed', () => {
+  // A desktop backup restored on a router carried tunMode:false, the system
+  // proxy, autoConnect:false, lanBlockQuic:false… (field report D5 / fix 9):
+  // the router keeps its own values for exactly the keys it is handed.
+  const here = Object.assign({}, current, { settings: { lang: 'fa', autoConnect: true, lanBlockQuic: true, killSwitch: false, tunMode: true } });
+  const b = exportBundle({ store: { settings: { lang: 'en', routingMode: 'bypass-ir', autoConnect: false, lanBlockQuic: false, killSwitch: true, tunMode: true, systemProxy: true } } });
+  const keep = ['tunMode', 'autoConnect', 'lanBlockQuic', 'killSwitch', 'systemProxy', 'leakGuard'];
+  const r = importBundle(b, here, { keep });
+  assert.equal(r.next.settings.lang, 'en', 'everything else is restored');
+  assert.equal(r.next.settings.routingMode, 'bypass-ir');
+  assert.equal(r.next.settings.autoConnect, true);
+  assert.equal(r.next.settings.lanBlockQuic, true);
+  assert.equal(r.next.settings.killSwitch, false);
+  assert.equal(r.next.settings.tunMode, true);
+  assert.equal('systemProxy' in r.next.settings, false, 'a kept key this machine never had is not invented either');
+  assert.deepEqual(r.kept, ['autoConnect', 'lanBlockQuic', 'killSwitch', 'systemProxy'], 'only those the backup carried with another value — tunMode was the same');
+  // without `keep`, the old overlay — the desktop restores everything
+  const all = importBundle(b, here);
+  assert.equal(all.next.settings.autoConnect, false);
+  assert.deepEqual(all.kept, []);
+});
+
+test('flavor: a backup says where it was made when asked to (the router), and only then', () => {
+  // The router's restore keeps its own settings only from a backup made
+  // elsewhere — its own backup, restored after a reset, must bring them back.
+  assert.equal(exportBundle({ store: current, flavor: 'openwrt' }).flavor, 'openwrt');
+  assert.equal('flavor' in exportBundle({ store: current }), false, 'a desktop backup is as it always was');
+  assert.equal('flavor' in exportBundle({ store: current, flavor: null }), false);
+});

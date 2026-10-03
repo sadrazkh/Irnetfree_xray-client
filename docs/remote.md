@@ -9,7 +9,7 @@ at once:
 | Who runs it | You — `relay/` in this repo, on Harbora or any Docker host | Cloudflare |
 | What the router does | keeps an outbound WebSocket link to your relay | runs the feed's `cloudflared`, which keeps connections to Cloudflare's edge |
 | What you open | `https://<your relay>/` — your password, then the router's own IRNetFree UI | `https://<your hostname>/?token=<UI token>` behind Cloudflare Access |
-| When the VPN on the router is broken | works: the link never rides the tunnel, and falls back **through** the tunnel if the direct way is blocked; the relay's name is looked up through the tunnel (v1.16.1+), so while the tunnel is up but dead the link dials the last address it reached | open connections keep working: its edge addresses bypass the tunnel (no fallback through it — cloudflared cannot use a proxy); but finding the edge is a DNS lookup through the tunnel (v1.16.1+), so cloudflared cannot start or restart while the tunnel is up but dead |
+| When the VPN on the router is broken | works: the link's dial bypasses the tunnel, and so does its DNS in a bypass routing mode (in global mode the relay's name is looked up through the tunnel — the last good address carries the link then); falls back **through** the tunnel if the direct way is blocked | works: its edge addresses bypass the tunnel and its edge discovery asks the direct resolvers out the WAN (no fallback through the tunnel — cloudflared cannot use a proxy) |
 | During an internet shutdown in Iran | works if the relay runs on a server **inside** Iran (same image) | expected to fail (Cloudflare's addresses were reopened only for allow-listed names in 2026) |
 
 Either way you end up in the same IRNetFree web UI the LAN uses: turn the VPN on and off, switch configs,
@@ -81,14 +81,16 @@ says hello (name, app version, path), and from then on executes what the relay f
 own IRNetFree UI on `127.0.0.1:<port>`, injecting the router's UI token itself (the UI token never leaves
 the router), refusing anything aimed at LuCI or `/_relay/`.
 
-The link never rides the VPN: while the tunnel is up the relay's name is looked up at the config's direct
-(in-country) resolvers and the addresses it gets are routed past the tunnel (`service.setRemoteBypass`). On
-the router, since v1.16.1, that lookup itself enters the tunnel like every DNS query the router sends, and the
-core answers it ([`docs/openwrt.md`](openwrt.md), «DNS و نشت»). The last addresses it reached directly are
-remembered: when the lookup fails (a DNS outage, or a tunnel that is up but not working) the link dials those —
-so a relay the router has never reached waits until the tunnel works. After three failed direct dials in a row
-it dials **through** the tunnel (the local SOCKS inbound) and shows **online (via VPN)**, trying direct again
-every 10 minutes. Reconnects back off 2/5/10/30/60 s.
+The link does not ride the VPN: while the tunnel is up the relay's address is resolved through the config's
+direct (in-country) resolvers and routed past the tunnel (`service.setRemoteBypass`). From v1.16.1 those
+resolvers are inside the whole-LAN tunnel for every LAN device and for dnsmasq (cut out of it, their DNS left
+by the ISP in plain text); only the IRNetFree service's own UDP 53 to them leaves by the WAN — an `ip rule`
+at pref 8997 for the service's user, from the router itself (`iif lo`), laid and removed with the gateway. In
+**global** mode the config has no direct resolvers: the lookup goes to the `dnsDirect` setting through the
+tunnel, as in v1.16.0, and fails while the VPN's exit is dead. The last good addresses are remembered for that
+and for any DNS outage, and after three failed direct dials in a row it dials **through** the tunnel
+(the local SOCKS inbound) and shows **online (via VPN)**, trying direct again every 10 minutes. Reconnects
+back off 2/5/10/30/60 s.
 
 ### The relay's pages
 
@@ -128,10 +130,13 @@ Notes:
   198.41.192.0/24, 198.41.200.0/24 and the two IPv6 ranges) bypass the VPN, and the edge-discovery names
   (`argotunnel.com`, `cftunnel.com`) are sent to the config's direct resolvers (a dnsmasq drop-in
   `irnetfree-cloudflared.conf` in the dir dnsmasq reads — `/tmp/dnsmasq.d` on 23.05, `/tmp/dnsmasq.<instance>.d`
-  on 24.10 — there only while the tunnel is enabled). Since v1.16.1 that lookup enters the VPN tunnel like every
-  DNS query the router sends, and the core answers it: cloudflared finds the edge only while the VPN tunnel
-  works. Connections already open are not affected (they go direct); a start or restart while the VPN tunnel is
-  up but not working fails until it works again. With the VPN off the lookup goes direct.
+  on 24.10 — there only while the tunnel is enabled). Each line is bound to the WAN device,
+  `server=/argotunnel.com/<resolver>@<WAN device>`: from v1.16.1 those resolvers are inside the whole-LAN
+  tunnel, whose DNS does not answer the SRV lookup edge discovery is (the hijack refuses it, or the feed's older
+  cores leave it unanswered), and the binding (SO_BINDTODEVICE) takes dnsmasq's
+  query for these two names out by the WAN in every routing mode. A drop-in written before the WAN had a device
+  (at boot) is rewritten within a minute of one appearing. dnsmasq is restarted for every change of it: its
+  reload re-reads no config.
 - **No fallback through the VPN**: cloudflared cannot use a SOCKS/HTTP proxy for its own connections. If the
   direct way to Cloudflare is blocked, this path is down; the relay is the one to rely on.
 - **Package version.** OpenWrt 23.05's feed ships `cloudflared 2024.4.1` (8 MB), 24.10's `2025.5.0` (both
@@ -190,7 +195,7 @@ only thing between the internet and the router's UI.
 | چه کسی اجرایش می‌کند | خودت — `relay/` در همین مخزن، روی هاربورا یا هر سرور داکر | کلادفلر |
 | روتر چه می‌کند | یک اتصال WebSocket خروجی به رله‌ات نگه می‌دارد | `cloudflared` فید را اجرا می‌کند که به لبهٔ کلادفلر وصل می‌ماند |
 | چه چیزی باز می‌کنی | `https://<رله>/` — رمز، بعد همان UI خود IRNetFree روتر | `https://<دامنه>/?token=<توکن UI>` پشت Cloudflare Access |
-| وقتی VPN روتر خراب است | کار می‌کند: این اتصال هیچ‌وقت از تونل نمی‌رود و اگر راه مستقیم بسته باشد **از داخل تونل** می‌رود؛ نام رله از داخل تونل حل می‌شود (از v1.16.1)، پس وقتی تونل بالاست ولی کار نمی‌کند، به آخرین آدرسی که به آن رسیده وصل می‌شود | اتصال‌های باز کار می‌کنند: آدرس‌های لبه‌اش تونل را دور می‌زنند (ولی راه جایگزین از داخل تونل ندارد — cloudflared پراکسی نمی‌پذیرد)؛ ولی پیدا کردن لبه یک پرسش DNS از داخل تونل است (از v1.16.1)، پس وقتی تونل بالاست ولی کار نمی‌کند cloudflared نمی‌تواند شروع یا ری‌استارت شود |
+| وقتی VPN روتر خراب است | کار می‌کند: اتصالش تونل را دور می‌زند و در حالت‌های bypass، DNSاش هم (در حالت global نام رله از داخل تونل پرسیده می‌شود — آن وقت آخرین آدرس خوب اتصال را نگه می‌دارد)؛ اگر راه مستقیم بسته باشد **از داخل تونل** می‌رود | کار می‌کند: آدرس‌های لبه‌اش تونل را دور می‌زنند و کشف لبه‌اش از راه WAN از رزولورهای مستقیم می‌پرسد (ولی راه جایگزین از داخل تونل ندارد — cloudflared پراکسی نمی‌پذیرد) |
 | در قطعی اینترنت ایران | اگر رله روی سروری **داخل ایران** باشد کار می‌کند (همین image) | انتظار می‌رود کار نکند (در ۲۰۲۶ آدرس‌های کلادفلر فقط برای نام‌های سفید باز شدند) |
 
 در هر دو، به همان UI وب IRNetFree می‌رسی که در خانه می‌بینی: VPN را روشن/خاموش کن، کانفیگ عوض کن، تنظیمات را
@@ -257,13 +262,15 @@ docker run -d --name irnetfree-relay --restart unless-stopped \
 `127.0.0.1:<پورت>`، توکن UI روتر را خودش می‌گذارد (توکن UI هیچ‌وقت از روتر بیرون نمی‌رود)، و هر چیزی به سمت
 LuCI یا `/_relay/` را رد می‌کند.
 
-این اتصال هیچ‌وقت از VPN نمی‌رود: وقتی تونل بالاست نام رله از رزولورهای مستقیم (داخل کشور) کانفیگ پرسیده می‌شود
-و آدرس‌هایی که می‌گیرد از کنار تونل مسیریابی می‌شوند (`service.setRemoteBypass`). روی روتر، از v1.16.1 خودِ این
-پرسش مثل هر پرسش DNS روتر وارد تونل می‌شود و هستهٔ خودمان جواب می‌دهد ([`docs/openwrt.md`](openwrt.md)، «DNS و
-نشت»). آخرین آدرس‌هایی که مستقیم به آن‌ها رسیده به خاطر سپرده می‌شوند: وقتی پرسش جواب نگیرد (DNS قطع است، یا تونل
-بالاست ولی کار نمی‌کند) به همان‌ها وصل می‌شود — پس رله‌ای که روتر هیچ‌وقت به آن نرسیده تا درست شدن تونل منتظر می‌ماند.
-بعد از سه شکست پشت‌سرهم در راه مستقیم، **از داخل تونل** (SOCKS محلی) وصل می‌شود و **online (via VPN)** نشان
-می‌دهد؛ هر ۱۰ دقیقه راه مستقیم را دوباره امتحان می‌کند. اتصال مجدد با فاصله‌های ۲/۵/۱۰/۳۰/۶۰ ثانیه.
+این اتصال از VPN نمی‌رود: وقتی تونل بالاست آدرس رله از رزولورهای مستقیم (داخل کشور) کانفیگ حل می‌شود و از
+کنار تونل مسیریابی می‌شود (`service.setRemoteBypass`). از v1.16.1 این رزولورها برای همهٔ دستگاه‌های LAN و
+برای dnsmasq داخل تونل کل شبکه‌اند (بیرون از آن، DNSشان بی‌رمز از راه ISP می‌رفت)؛ فقط UDP 53 خود سرویس
+IRNetFree به آن‌ها از راه WAN می‌رود — یک `ip rule` در pref 8997 برای کاربر سرویس، فقط از خود روتر (`iif lo`)،
+که با گیت‌وی گذاشته و برداشته می‌شود. در حالت **global** کانفیگ رزولور مستقیم ندارد: پرسش به تنظیم `dnsDirect`
+از داخل تونل می‌رود، مثل v1.16.0، و تا خروجی VPN مرده است جواب نمی‌گیرد. آخرین آدرس‌های خوب برای همین و برای
+هر قطعی DNS به خاطر سپرده می‌شوند، و بعد از سه شکست پشت‌سرهم در راه مستقیم، **از داخل تونل** (SOCKS محلی) وصل می‌شود و
+**online (via VPN)** نشان می‌دهد؛ هر ۱۰ دقیقه راه مستقیم را دوباره امتحان می‌کند. اتصال مجدد با فاصله‌های
+۲/۵/۱۰/۳۰/۶۰ ثانیه.
 
 ### صفحه‌های رله
 
@@ -299,12 +306,15 @@ LuCI یا `/_relay/` را رد می‌کند.
 
 - **فقط http2.** QUIC از نیمهٔ ۲۰۲۵ روی ISPهای ایران محدود یا بسته است، پس تونل روی `--protocol http2`
   (TCP 7844) ثابت شده. آدرس‌های لبه‌ای که می‌گیرد (فهرست منتشرشدهٔ کلادفلر: 198.41.192.0/24، 198.41.200.0/24 و
-  دو بازهٔ IPv6) VPN را دور می‌زنند و نام‌های کشف لبه (`argotunnel.com`، `cftunnel.com`) به رزولورهای مستقیم
-  کانفیگ فرستاده می‌شوند (یک drop-in به نام `irnetfree-cloudflared.conf` در پوشه‌ای که dnsmasq می‌خواند — در 23.05
-  `/tmp/dnsmasq.d`، در 24.10 `/tmp/dnsmasq.<instance>.d` — فقط تا وقتی تونل فعال است). از v1.16.1 این پرسش مثل هر
-  پرسش DNS روتر وارد تونل VPN می‌شود و هستهٔ خودمان جواب می‌دهد: cloudflared فقط وقتی تونل VPN کار می‌کند لبه را پیدا
-  می‌کند. اتصال‌هایی که باز است آسیبی نمی‌بیند (مستقیم می‌روند)؛ شروع یا ری‌استارت وقتی تونل VPN بالاست ولی کار
-  نمی‌کند تا درست شدنش ناموفق است. وقتی VPN قطع است پرسش مستقیم می‌رود.
+  دو بازهٔ IPv6) VPN را دور می‌زنند و نام‌های کشف لبه (`argotunnel.com`، `cftunnel.com`) از رزولورهای مستقیم
+  کانفیگ حل می‌شوند (یک drop-in به نام `irnetfree-cloudflared.conf` در پوشه‌ای که dnsmasq می‌خواند — در 23.05
+  `/tmp/dnsmasq.d`، در 24.10 `/tmp/dnsmasq.<instance>.d` — فقط تا وقتی تونل فعال است). هر خط به دستگاه WAN
+  بسته شده، `server=/argotunnel.com/<رزولور>@<دستگاه WAN>`: از v1.16.1 این رزولورها داخل تونل کل شبکه‌اند که
+  DNSاش به پرسش SRV کشف لبه جواب نمی‌دهد (hijack آن را رد می‌کند، یا هسته‌های قدیمی‌تر فید بی‌جواب می‌گذارندش)، و
+  این بستن (SO_BINDTODEVICE) پرسش dnsmasq برای این دو نام را در هر
+  حالت مسیریابی از راه WAN بیرون می‌برد. drop-in‌ای که پیش از داشتن دستگاه WAN نوشته شده (هنگام بوت) حداکثر یک
+  دقیقه بعد از پیدا شدن آن دوباره نوشته می‌شود. با هر تغییرش dnsmasq ری‌استارت می‌شود: reload آن هیچ کانفیگی را
+  دوباره نمی‌خواند.
 - **راه جایگزین از داخل VPN ندارد**: cloudflared برای اتصال‌های خودش پراکسی SOCKS/HTTP نمی‌پذیرد. اگر راه مستقیم
   به کلادفلر بسته باشد این مسیر پایین است؛ رله همانی است که باید رویش حساب کرد.
 - **نسخهٔ بسته.** فید OpenWrt 23.05 نسخهٔ `cloudflared 2024.4.1` (۸ مگابایت) و فید 24.10 نسخهٔ `2025.5.0` را دارد

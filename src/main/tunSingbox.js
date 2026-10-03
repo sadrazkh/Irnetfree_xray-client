@@ -174,6 +174,10 @@ class TunSingbox {
     this.onLog = opts.onLog || (() => {});
     this.lang = opts.lang || 'fa';   // user-facing error language
     this.platform = opts.platform || os.platform();
+    // Who wraps this backend: 'openwrt' when the router's gateway
+    // (tunOpenwrt.js) composes it — the advice meant for a desktop Linux
+    // ("set your resolver to the peer") is then wrong, so it is not given.
+    this.composedBy = opts.composedBy || null;
     this.backendId = 'sing-box';
     this.interfaceName = TUN_IF;
     this.dnsPeer = TUN_PEER4;
@@ -714,7 +718,10 @@ class TunSingbox {
     }
     // auto_route lays the routes; the resolver is left alone (resolv.conf /
     // systemd-resolved differ per distro) — point it at the peer if needed.
-    this.onLog(`TUN started on ${TUN_IF} (routes by sing-box; set your resolver to ${TUN_PEER4} if needed).`, 'warn');
+    // Not on a router: dnsmasq stays the LAN's resolver there and every
+    // port-53 packet already enters the tunnel; the gateway says its own line
+    // once it has verified the routes (TunOpenwrt.start).
+    if (this.composedBy !== 'openwrt') this.onLog(`TUN started on ${TUN_IF} (routes by sing-box; set your resolver to ${TUN_PEER4} if needed).`, 'warn');
     this.active = true;
   }
 
