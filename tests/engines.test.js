@@ -12,6 +12,11 @@ test('the patterniha fork is an Xray-format engine with its own exe and repo', (
   assert.equal(ENGINES.xray.repo, 'XTLS/Xray-core');
 });
 
+test('every core names the GitHub repo its releases come from (the version picker lists them)', () => {
+  assert.equal(ENGINES['sing-box'].repo, 'SagerNet/sing-box');
+  for (const id of Object.keys(ENGINES)) assert.match(ENGINES[id].repo, /^[\w.-]+\/[\w.-]+$/, id);
+});
+
 test('both Xray engines run and test a config with the same argv', () => {
   assert.deepEqual(engineRunArgs('xray-pattn', 'c.json'), engineRunArgs('xray', 'c.json'));
   assert.deepEqual(engineTestArgs('xray-pattn', 'c.json'), ['run', '-test', '-c', 'c.json']);
