@@ -148,8 +148,11 @@ test('login: the session cookie is HttpOnly, Secure, SameSite=Strict; a tampered
   const value = setCookie.split(';')[0].split('=')[1];
   const dash = await request(port, 'GET', '/_relay/', { jar: { relay_session: value } });
   assert.equal(dash.status, 200);
-  // flip one character of the signature
-  const tampered = value.slice(0, -2) + (value.endsWith('a') ? 'b' : 'a') + value.slice(-1);
+  // flip one character of the signature — the one before the last, chosen by what IS there: chosen by the last
+  // character, a signature whose one before the last already was the replacement came back untouched (1 run in 64)
+  const at = value.length - 2;
+  const tampered = value.slice(0, at) + (value[at] === 'a' ? 'b' : 'a') + value.slice(at + 1);
+  assert.notEqual(tampered, value);
   const bad = await request(port, 'GET', '/_relay/', { jar: { relay_session: tampered } });
   assert.equal(bad.status, 302);
   assert.equal(bad.headers.location, '/_relay/login');
