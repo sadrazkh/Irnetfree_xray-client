@@ -38,14 +38,14 @@ const BASE = Object.assign({ autoUpdateSubs: false, autoUpdateAssets: 'off', aut
 const dirs = [];
 test.after(() => { for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } });
 
-/** A service on a fresh data dir with this store; events and syslog lines recorded. */
-function start(store = {}, extraDeps = {}) {
+/** A service on a fresh data dir with this store; events and syslog lines recorded. `prime(state)`: see startIn. */
+function start(store = {}, extraDeps = {}, prime = null) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-svc-gw-'));
   dirs.push(dir);
   const content = Object.assign({ servers: [SERVER], routerDefaultsApplied: true }, store);
   content.settings = Object.assign({}, BASE, store.settings || {});
   fs.writeFileSync(path.join(dir, 'store.json'), JSON.stringify(content));
-  return startIn(dir, extraDeps);
+  return startIn(dir, extraDeps, prime);
 }
 
 /** A service on an existing data dir — "the next boot". `prime(state)` runs before it is created. */
@@ -721,6 +721,69 @@ test('every recovery timer lets go of its handle as it fires — a handle left b
   const arms = src.match(/recoverTimer = setTimeout\(\(\) => \{?\s*[^\n]*/g) || [];
   assert.ok(arms.length >= 3, arms.join('\n'));
   for (const a of arms) assert.match(a, /^recoverTimer = setTimeout\(\(\) => \{\s*recoverTimer = null;/, a);
+});
+
+// what xrayManager.validateWithFallback answers for a finalmask server on a feed core (24.12.31) with no Xray-PattN
+const PATTN_REFUSAL = {
+  ok: false, engine: 'xray', pattnNeeded: true, finalmaskIgnored: true, coreVersion: '24.12.31',
+  error: 'xray 24.12.31 does not know finalmask (26.3.27 and newer do) — it would run this server without its mask'
+};
+
+test('a boot connect the core refuses (a finalmask server, no Xray-PattN) is an error that says why — not "waiting for internet" every 15 s', async (t) => {
+  const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true, killSwitch: true } },
+    withTiming({ refusedRetryMs: 700 }), (st) => { st.check = PATTN_REFUSAL; });
+  t.after(() => s.service.shutdown());
+  await until(() => s.statuses.some(x => x.state === 'error'), 'the refusal said');
+  const err = s.statuses.find(x => x.state === 'error');
+  assert.match(err.message, /^This server needs Xray-PattN — install it under Settings → Required files \(the official core 24\.12\.31 does not know finalmask/);
+  assert.equal(err.cause, 'boot');
+  await sleep(300);              // bootEveryMs is 20 ms: a retry as for a missing WAN would have run a dozen times
+  assert.equal(s.state.xray.validated.length, 1, 'refused once, not retried at the boot loop’s pace');
+  assert.ok(!s.statuses.some(x => x.state === 'waiting'), JSON.stringify(s.statuses.map(x => x.state)));
+  const snap = s.service.connSnapshot();
+  assert.equal(snap.state, 'error');
+  assert.match(snap.reason, /needs Xray-PattN/);
+  assert.ok(s.syslog.some(([, l]) => /^irnetfree: error — This server needs Xray-PattN/.test(l)), JSON.stringify(s.syslog));
+  assert.ok(s.logs.some(l => l.level === 'warn' && /^Kill switch: the core refuses this connection — LAN internet stays blocked/.test(l.line)), JSON.stringify(s.logs.map(l => l.line)));
+  // tried again rarely: once the fork is there, it connects with nobody pressing a button
+  delete s.state.check;
+  await until(() => connectedCount(s) === 1, 'the rare retry', 3000);
+});
+
+test('a rebuild the core refuses (the store changed under the live connection) stops the quick retries and says why; the rare retry brings it back', async (t) => {
+  const s = start({}, withTiming({ refusedRetryMs: 700 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.check = PATTN_REFUSAL;
+  const v0 = s.state.xray.validated.length;
+  s.state.xray.crash();
+  await until(() => s.statuses.some(x => x.state === 'error'), 'the refusal said');
+  await sleep(300);              // routerBackoffMs is 5 ms: quick retries would have run dozens of times
+  assert.equal(s.state.xray.validated.length - v0, 1, 'one refused attempt');
+  assert.equal(s.statuses.at(-1).state, 'error');
+  assert.match(s.statuses.at(-1).message, /needs Xray-PattN/);
+  assert.equal(s.service.connSnapshot().state, 'error');
+  delete s.state.check;
+  await until(() => connectedCount(s) === 2, 'the rare retry', 3000);
+});
+
+test('…and a Reconnect by hand the core refuses is not handed to the quick retries either', async (t) => {
+  const s = start({}, withTiming({ refusedRetryMs: 60000 }));
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  s.state.check = PATTN_REFUSAL;
+  const v0 = s.state.xray.validated.length;
+  const r = await s.service.invoke('vpn:reconnect');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /needs Xray-PattN/);
+  await sleep(300);
+  assert.equal(s.state.xray.validated.length - v0, 1);
+  assert.ok(!s.statuses.some(x => x.state === 'reconnecting'), JSON.stringify(s.statuses.map(x => x.state)));
+  assert.equal(s.service.connSnapshot().state, 'error');
+  // a Connect by hand still tries at once
+  delete s.state.check;
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(connectedCount(s), 2);
 });
 
 test('the give-up of a crash loop says whether the proxy is still up', () => {
