@@ -152,10 +152,20 @@ object CertPin {
         return out
     }
 
-    /** The record asked for "allow insecure" (allowInsecure=1 in its link) over plain TLS. REALITY verifies its own way. */
+    /**
+     * The record asked for "allow insecure" (allowInsecure=1 in its link) over TLS
+     * on TCP, and its link says nothing better (certPin.js wantsPin). REALITY
+     * verifies its own way; a link that names the certificate (`pcs`) or the name
+     * to check it against (`vcn`) has said what allowInsecure only gestured at.
+     * Hysteria is QUIC: a TCP handshake to its port reaches some other service,
+     * or nothing (EngineChoice runs it on sing-box).
+     */
     fun wantsPin(server: ServerConfig?): Boolean {
         val st = server?.outbound?.optJSONObject("streamSettings") ?: return false
-        return st.optString("security") == "tls" && (st.optJSONObject("tlsSettings")?.optBoolean("allowInsecure") == true)
+        val tls = st.optJSONObject("tlsSettings") ?: return false
+        if (st.optString("security") != "tls" || !tls.optBoolean("allowInsecure")) return false
+        if (st.optString("network") == "hysteria") return false
+        return tls.optString("pinnedPeerCertSha256").isBlank() && tls.optString("verifyPeerCertByName").isBlank()
     }
 
     class Targets(val probe: List<ServerConfig>, val behind: List<ServerConfig>)

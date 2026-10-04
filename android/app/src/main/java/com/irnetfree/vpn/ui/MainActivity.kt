@@ -1671,7 +1671,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         Column(Modifier.fillMaxWidth().imePadding().padding(16.dp).padding(bottom = 16.dp)) {
             Text("Add config", color = TXT, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
-            Text("vless/vmess/trojan/ss/socks/wireguard link, or a subscription URL / base64", color = MUTED, fontSize = 11.sp)
+            Text("vless/vmess/trojan/ss/hysteria2/socks/wireguard link, or a subscription URL / base64", color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(value, onValue, Modifier.fillMaxWidth(), placeholder = { Text("Paste or type here…", fontSize = 12.sp) }, minLines = 3, maxLines = 8, shape = RoundedCornerShape(14.dp), colors = tfColors())
             Spacer(Modifier.height(10.dp))
@@ -1923,6 +1923,7 @@ private fun protoColor(proto: String): Color = when (proto) {
     "trojan" -> AMBER
     "shadowsocks" -> Color(0xFFCDA9FF)
     "wireguard" -> Color(0xFF8FB3AA)
+    "hysteria2" -> Color(0xFF7FB4FF)
     "socks", "http" -> Color(0xFFF19DC8)
     else -> MUTED
 }
@@ -1990,8 +1991,12 @@ private fun protoColor(proto: String): Color = when (proto) {
     val effectiveNoise = when (noisePreset) { "off" -> ""; "custom" -> noiseCustom.trim(); else -> noisePreset }
     var cipherSuites by remember { mutableStateOf(f.cipherSuites) }
     var finalMask by remember { mutableStateOf(f.finalMask) }
+    var ech by remember { mutableStateOf(f.ech) }; var pcs by remember { mutableStateOf(f.pcs) }
+    var vcn by remember { mutableStateOf(f.vcn) }; var pqv by remember { mutableStateOf(f.pqv) }
+    var hy2Obfs by remember { mutableStateOf(f.hy2Obfs) }; var hy2Ports by remember { mutableStateOf(f.hy2Ports) }
     var engine by remember { mutableStateOf(f.engine) }
     val isStd = server.protocol == "vless" || server.protocol == "vmess" || server.protocol == "trojan"
+    val isHy2 = server.protocol == "hysteria2"
 
     // Open FULLY expanded: a partially-expanded sheet swallows the drag as a sheet
     // gesture instead of scrolling the content, which made everything below the
@@ -2008,13 +2013,24 @@ private fun protoColor(proto: String): Color = when (proto) {
                 "shadowsocks" -> { Fld("Password", cred) { cred = it }; Fld("Method", method) { method = it } }
                 "socks", "http" -> { Fld("Username (optional)", pUser) { pUser = it }; Fld("Password (optional)", pPass) { pPass = it } }
                 "wireguard" -> Fld("Private Key", cred) { cred = it }
+                "hysteria2" -> Fld("Password (auth)", cred) { cred = it }
+            }
+            if (isHy2) {
+                Text("🛡  TLS (over QUIC)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                Fld("SNI — must match the server certificate", sni) { sni = it }
+                // QUIC: no first-use pin. Allow insecure without a pin runs on sing-box (EngineChoice.needsInsecureCore).
+                SwitchRow("Allow insecure (runs on sing-box unless a pcs is set)", allowInsecure) { allowInsecure = it }
+                Text("The Xray cores can no longer skip the certificate check, and pinning on first use cannot work over QUIC — so a Hysteria2 with this on and no pcs runs on sing-box. Put the certificate's SHA-256 in pcs to run it on Xray.", color = MUTED, fontSize = 11.sp)
+                Fld("Obfs password (salamander)", hy2Obfs) { hy2Obfs = it }
+                Fld("Port hopping (e.g. 20000-50000)", hy2Ports) { hy2Ports = it }
+                TlsExtraFields(ech, { ech = it }, pcs, { pcs = it }, vcn, { vcn = it })
             }
             if (isStd) {
-                DropPick("Transport", listOf("tcp" to "tcp", "ws" to "ws", "grpc" to "grpc", "h2" to "h2", "xhttp" to "xhttp", "kcp" to "kcp"), network) { network = it }
+                DropPick("Transport", listOf("tcp" to "tcp", "ws" to "ws", "grpc" to "grpc", "h2" to "h2", "xhttp" to "xhttp", "httpupgrade" to "httpupgrade", "kcp" to "kcp"), network) { network = it }
                 DropPick("Security", listOf("none" to "none", "tls" to "tls", "reality" to "reality"), security) { security = it }
                 // Context-aware SNI section: it means different things for
                 // reality / CDN-fronting / plain-TLS, so say the right thing.
-                val frontable = network in listOf("ws", "grpc", "xhttp", "splithttp", "h2", "http")
+                val frontable = network in listOf("ws", "grpc", "xhttp", "splithttp", "h2", "http", "httpupgrade")
                 if (security == "tls" || security == "reality") {
                     val head = if (security == "reality") "🛡  REALITY (mimic a real site)" else "🛡  TLS / CDN — SNI & bypass"
                     val sniLabel = when { security == "reality" -> "SNI — must match server's serverNames"; frontable -> "SNI — real domain (CDN reads this; = Host)"; else -> "SNI — must match the server certificate" }
@@ -2034,7 +2050,11 @@ private fun protoColor(proto: String): Color = when (proto) {
                 }
                 Fld("Path / ServiceName", path) { path = it }
                 DropPick("Fake ClientHello (browser fingerprint / uTLS)", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized", "unsafe" to "unsafe (custom cipherSuites)"), fp) { fp = it }
-                if (security == "reality") { Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it } }
+                if (security == "reality") {
+                    Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it }
+                    Fld("ML-DSA-65 verify key (pqv)", pqv) { pqv = it }
+                }
+                if (security == "tls") TlsExtraFields(ech, { ech = it }, pcs, { pcs = it }, vcn, { vcn = it })
                 // The core no longer accepts allowInsecure: the switch means "pin the
                 // certificate this server presents on first use" (CertPin.kt).
                 SwitchRow("Allow insecure — pin the server's certificate on first use", allowInsecure) { allowInsecure = it }
@@ -2078,11 +2098,32 @@ private fun protoColor(proto: String): Color = when (proto) {
             }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
-                val nf = ServerEditor.Fields(name, address, port, cred, network, security, sni, host, path, fp, pbk, sid, allowInsecure, f.alpn, method, pUser, pPass, wgPub, wgAddr, wgPsk, wgMtu, wgReserved, wgAllowed, wgDns, fragment, effectiveNoise, cipherSuites, finalMask, engine, f.spx, f.xmode, f.seed, f.headerType, f.xhttpExtra)
+                val nf = ServerEditor.Fields(
+                    name = name, address = address, port = port, cred = cred, network = network, security = security,
+                    sni = sni, host = host, path = path, fp = fp, pbk = pbk, sid = sid, allowInsecure = allowInsecure, alpn = f.alpn,
+                    method = method, proxyUser = pUser, proxyPass = pPass,
+                    wgPub = wgPub, wgAddr = wgAddr, wgPsk = wgPsk, wgMtu = wgMtu, wgReserved = wgReserved, wgAllowed = wgAllowed, wgDns = wgDns,
+                    fragment = fragment, noise = effectiveNoise, cipherSuites = cipherSuites, finalMask = finalMask,
+                    ech = ech, pcs = pcs, vcn = vcn, pqv = pqv, hy2Obfs = hy2Obfs, hy2Ports = hy2Ports,
+                    engine = engine, spx = f.spx, xmode = f.xmode, seed = f.seed, headerType = f.headerType, xhttpExtra = f.xhttpExtra)
                 onSave(ServerEditor.apply(server, nf))
             }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
     }
+}
+
+/**
+ * The newer TLS knobs (LinkParser.tlsExtras): Encrypted Client Hello, a
+ * certificate pin and the name to verify the certificate against.
+ */
+@Composable private fun TlsExtraFields(
+    ech: String, onEch: (String) -> Unit, pcs: String, onPcs: (String) -> Unit, vcn: String, onVcn: (String) -> Unit
+) {
+    Fld("ECH — Encrypted Client Hello (e.g. cloudflare-ech.com+udp://1.1.1.1)", ech, onEch)
+    Text("Hides the real SNI inside an encrypted ClientHello: the ECH config itself (base64) or where to fetch it — name+udp://resolver or name+https://resolver/dns-query. Empty = off.", color = MUTED, fontSize = 11.sp)
+    Fld("Certificate SHA-256 (pcs)", pcs, onPcs)
+    Fld("Verify certificate as (vcn)", vcn, onVcn)
+    Text("pcs: accept exactly this certificate (a self-signed one too) — what replaced Allow Insecure. vcn: check the certificate against this name instead of the SNI.", color = MUTED, fontSize = 11.sp)
 }
 
 /* ================================ SUBS ================================ */
@@ -2567,5 +2608,5 @@ private fun fmtDuration(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0); return "%02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
 }
 private fun msLabel(ms: Long) = if (ms >= 0) "${ms}ms" else "×"
-private fun badge(p: String) = when (p) { "vless" -> "VLESS"; "vmess" -> "VMESS"; "trojan" -> "TROJAN"; "shadowsocks" -> "SS"; "wireguard" -> "WG"; "socks" -> "SOCKS"; "http" -> "HTTP"; else -> p.uppercase() }
+private fun badge(p: String) = when (p) { "vless" -> "VLESS"; "vmess" -> "VMESS"; "trojan" -> "TROJAN"; "shadowsocks" -> "SS"; "wireguard" -> "WG"; "hysteria2" -> "HY2"; "socks" -> "SOCKS"; "http" -> "HTTP"; else -> p.uppercase() }
 private fun flag(cc: String): String { if (cc.length != 2) return "🏳"; val base = 0x1F1E6; return String(Character.toChars(base + (cc[0].uppercaseChar() - 'A'))) + String(Character.toChars(base + (cc[1].uppercaseChar() - 'A'))) }
