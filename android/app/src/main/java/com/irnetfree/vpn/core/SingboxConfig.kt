@@ -176,7 +176,8 @@ object SingboxConfig {
         if (ports.isNotEmpty()) {
             out.remove("server_port")
             out.put("server_ports", JSONArray(ports.map { if (it.contains('-')) it.replace('-', ':') else "$it:$it" }))
-            (h["hopInterval"] ?: "").toIntOrNull()?.takeIf { it > 0 }?.let { out.put("hop_interval", "${it}s") }
+            // "10-20" (the core's range): its first number, as the desktop's parseInt reads it
+            Regex("^\\d+").find(h["hopInterval"] ?: "")?.value?.toIntOrNull()?.takeIf { it > 0 }?.let { out.put("hop_interval", "${it}s") }
         }
         (h["obfs-password"] ?: "").takeIf { it.isNotEmpty() }?.let { out.put("obfs", JSONObject().put("type", "salamander").put("password", it)) }
         fun mbps(v: String?): Int = Regex("^(\\d+(?:\\.\\d+)?)\\s*m", RegexOption.IGNORE_CASE).find(v ?: "")?.groupValues?.get(1)?.toDouble()?.let { Math.round(it).toInt() } ?: 0

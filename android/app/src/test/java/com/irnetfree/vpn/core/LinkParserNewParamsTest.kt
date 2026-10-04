@@ -15,6 +15,8 @@ import org.junit.Test
  * authority, mKCP mtu, vmess' second values, SIP002 plugins, hysteria2://.
  */
 class LinkParserNewParamsTest {
+    /** A well-formed ML-DSA-65 key: 1952 bytes as unpadded base64url. */
+    private val PQV = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(1952) { 7 })
     private fun st(link: String): JSONObject = LinkParser.parseLink(link).outbound.getJSONObject("streamSettings")
     private fun tls(link: String): JSONObject = st(link).getJSONObject("tlsSettings")
 
@@ -39,7 +41,10 @@ class LinkParserNewParamsTest {
 
     @Test fun vcnPqvAndTheInsecureSpellings() {
         assertEquals("real.example,b.example", tls("vless://u@a.example.com:443?security=tls&sni=front.example&vcn=real.example,b.example").getString("verifyPeerCertByName"))
-        assertEquals("MLDSAKEY", st("vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=MLDSAKEY").getJSONObject("realitySettings").getString("mldsa65Verify"))
+        assertEquals(PQV, st("vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=$PQV").getJSONObject("realitySettings").getString("mldsa65Verify"))
+        val std = java.util.Base64.getEncoder().encodeToString(ByteArray(1952) { 7 })
+        assertEquals(PQV, st("vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=" + java.net.URLEncoder.encode(std, "UTF-8")).getJSONObject("realitySettings").getString("mldsa65Verify"))
+        for (bad in listOf("abc", PQV.drop(1), PQV + "A")) assertFalse(st("vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=$bad").getJSONObject("realitySettings").has("mldsa65Verify"))
         assertTrue(tls("trojan://pw@a.example.com:443?insecure=1").getBoolean("allowInsecure"))
         assertTrue(tls("trojan://pw@a.example.com:443?allow_insecure=true").getBoolean("allowInsecure"))
         assertFalse(tls("trojan://pw@a.example.com:443?insecure=0").getBoolean("allowInsecure"))
@@ -64,7 +69,7 @@ class LinkParserNewParamsTest {
     @Test fun shareLinkRoundTrip() {
         for (l in listOf(
             "vless://u@a.example.com:443?type=ws&security=tls&sni=s.example&host=h.example&path=%2F&ech=cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1&pcs=${"d".repeat(64)}&vcn=v.example#A",
-            "vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=PQ#B",
+            "vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=$PQV#B",
             "trojan://pw@g.example.com:443?type=grpc&serviceName=svc&authority=auth.example#C",
             "vless://u@k.example.com:443?type=kcp&headerType=srtp&seed=S&mtu=1350#D"
         )) {
@@ -159,8 +164,8 @@ class LinkParserNewParamsTest {
         assertEquals(listOf("ech", "pcs"), ech.edited.sorted())
         val auth = ServerEditor.apply(s, ServerEditor.read(s).apply { host = "new.example" })
         assertEquals("new.example", auth.outbound.getJSONObject("streamSettings").getJSONObject("grpcSettings").getString("authority"))
-        val r = LinkParser.parseLink("vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=PQ#B")
-        assertEquals("PQ", ServerEditor.apply(r, ServerEditor.read(r).apply { sni = "x.example" }).outbound.getJSONObject("streamSettings").getJSONObject("realitySettings").getString("mldsa65Verify"))
+        val r = LinkParser.parseLink("vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=$PQV#B")
+        assertEquals(PQV, ServerEditor.apply(r, ServerEditor.read(r).apply { sni = "x.example" }).outbound.getJSONObject("streamSettings").getJSONObject("realitySettings").getString("mldsa65Verify"))
         assertNull(ServerEditor.apply(r, ServerEditor.read(r).apply { pqv = "" }).outbound.getJSONObject("streamSettings").getJSONObject("realitySettings").optString("mldsa65Verify").ifEmpty { null })
     }
 
@@ -174,5 +179,20 @@ class LinkParserNewParamsTest {
         assertEquals(EngineChoice.PATTN, EngineChoice.chooseEngine(ConnectionPlan.Single(hy.copy(engine = EngineChoice.PATTN))))
         assertEquals(EngineChoice.XRAY, EngineChoice.chooseEngine(ConnectionPlan.Single(LinkParser.parseLink("hysteria2://pw@h.example.com:443?insecure=1&pinSHA256=" + "ab".repeat(32)))))
         assertEquals(EngineChoice.XRAY, EngineChoice.chooseEngine(ConnectionPlan.Single(hy.copy(certPin = "cd".repeat(32)))))
+    }
+
+    @Test fun reviewRound() {
+        fun qp(q: String) = LinkParser.parseLink("hysteria2://pw@h.example.com:443/?$q").outbound.getJSONObject("streamSettings").optJSONObject("finalmask")?.optJSONObject("quicParams")
+        assertNull(qp("up=100kbps&down=100ps"))
+        assertTrue(Canon.same("""{"brutalDown":"600kbps"}""", qp("up=0.4&down=600kbps")))
+        assertTrue(Canon.same("""{"brutalUp":"1gbps","brutalDown":"0.5 mbps"}""", qp("up=1gbps&down=0.5")))
+        assertEquals("xray-pattn", LinkParser.parseLink("hysteria2://pw@h.example.com:443/?engine=xray-pattn").engine)
+        val h = LinkParser.parseLink("hysteria2://pw@h.example.com:443/?mport=20000-30000&hopInterval=10-20#H")
+        assertEquals(Canon.of(h.outbound), Canon.of(LinkParser.parseLink(LinkParser.buildShareLink(h)).outbound))
+        assertFalse(LinkParser.buildShareLink(LinkParser.parseLink("hysteria2://pw@h.example.com:443/?mport=20000-30000#H")).contains("hopInterval"))
+        val sb = SingboxConfig.build(h, AppSettings()).getJSONArray("outbounds").getJSONObject(0)
+        assertEquals("10s", sb.getString("hop_interval"))
+        val o = LinkParser.parseLink("ss://aes-256-gcm:pw@o.example.com:8388/?plugin=" + java.net.URLEncoder.encode("obfs-local;obfs=http;obfs-host=b.example;obfs-uri=/x", "UTF-8") + "#O")
+        assertEquals("obfs-local;obfs=http;obfs-host=b.example;obfs-uri=/x", LinkParser.ssPluginOf(o.outbound.getJSONObject("streamSettings")))
     }
 }

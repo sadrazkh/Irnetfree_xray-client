@@ -294,8 +294,10 @@ object LinkParser {
         }
         val h = st.optJSONObject("tcpSettings")?.optJSONObject("header")
         if ((net.isEmpty() || net == "tcp" || net == "raw") && h != null && h.optString("type") == "http") {
-            val host = h.optJSONObject("request")?.optJSONObject("headers")?.optJSONArray("Host")?.optString(0) ?: ""
-            return "obfs-local;obfs=http" + if (host.isNotBlank()) ";obfs-host=" + esc(host) else ""
+            val rq = h.optJSONObject("request")
+            val host = rq?.optJSONObject("headers")?.optJSONArray("Host")?.optString(0) ?: ""
+            val uri = rq?.optJSONArray("path")?.optString(0)?.ifBlank { "/" } ?: "/"
+            return "obfs-local;obfs=http" + (if (host.isNotBlank()) ";obfs-host=" + esc(host) else "") + (if (uri != "/") ";obfs-uri=" + esc(uri) else "")
         }
         return ""
     }
@@ -335,12 +337,19 @@ object LinkParser {
         return if (s.isNotEmpty() && Regex("^\\d+(-\\d+)?(,\\d+(-\\d+)?)*$").matches(s)) s else ""
     }
 
-    /** A bandwidth for the core ("100 mbps"); a bare number is Mbps, as hysteria's links mean it. */
+    /**
+     * A bandwidth for the core ("100 mbps"); a bare number is Mbps, as hysteria's
+     * links mean it. The core counts bits per second in powers of 1024 and refuses
+     * the whole config below 65536 bytes a second (0.5 mbps): under that, or in a
+     * unit it does not know, "" (parser.js bandwidth).
+     */
     private fun bandwidth(v: String?): String {
         val s = (v ?: "").trim().lowercase()
-        if (s.isEmpty()) return ""
-        if (Regex("^\\d+(\\.\\d+)?$").matches(s)) return "$s mbps"
-        return if (Regex("^\\d+(\\.\\d+)?\\s*[kmgt]?b?(ps)?$").matches(s)) s else ""
+        val m = Regex("^(\\d+(?:\\.\\d+)?)\\s*(|b|bps|k|kb|kbps|m|mb|mbps|g|gb|gbps|t|tb|tbps)$").find(s) ?: return ""
+        val unit = m.groupValues[2].ifEmpty { "mbps" }
+        val mul = Math.pow(1024.0, " kmgt".indexOf(if (unit[0] == 'b') ' ' else unit[0]).toDouble())
+        if ((m.groupValues[1].toDoubleOrNull() ?: 0.0) * mul < 524288.0) return ""
+        return if (m.groupValues[2].isNotEmpty()) s else "$s mbps"
     }
 
     /**
@@ -528,6 +537,18 @@ object LinkParser {
 
     /* ------------------------- shared stream builder ------------------------- */
 
+    /**
+     * `pqv` — an ML-DSA-65 public key: 1952 bytes as unpadded base64url, the only
+     * form the core reads (a malformed one makes it refuse the WHOLE config).
+     * The standard alphabet and padding are mapped to it; anything else is "".
+     * parser.js mldsaKey.
+     */
+    internal fun mldsaKey(v: String?): String {
+        val s = (v ?: "").trim().replace('+', '-').replace('/', '_').trimEnd('=')
+        if (s.length != 2603 || !Regex("^[A-Za-z0-9_-]+$").matches(s)) return ""
+        return try { if (java.util.Base64.getUrlDecoder().decode(s).size == 1952) s else "" } catch (e: Exception) { "" }
+    }
+
     /** A link's boolean flag: `1` / `true`, any case. */
     internal fun isTrue(v: String?): Boolean { val s = (v ?: "").trim().lowercase(); return s == "1" || s == "true" }
 
@@ -669,7 +690,7 @@ object LinkParser {
                 .put("shortId", q.given("sid") ?: "")
                 .put("spiderX", q.given("spx") ?: "")
                 // `pqv`: the server's ML-DSA-65 public key — REALITY's post-quantum check
-                .apply { (q.given("pqv") ?: q.given("mldsa65Verify"))?.let { put("mldsa65Verify", it.trim()) } })
+                .apply { mldsaKey(q.given("pqv") ?: q.given("mldsa65Verify")).takeIf { it.isNotEmpty() }?.let { put("mldsa65Verify", it) } })
         }
         // finalMask (transport-level masking: fragment, noise, header-custom, …).
         // Stored VERBATIM: the core takes the plural `lengths`/`delays` arrays, and an
@@ -894,6 +915,7 @@ object LinkParser {
                 q["sni"] = h["sni"] ?: ""; q["insecure"] = h["insecure"] ?: ""; q["alpn"] = h["alpn"] ?: ""
                 q["pinSHA256"] = h["pcs"] ?: ""; q["ech"] = h["ech"] ?: ""; q["vcn"] = h["vcn"] ?: ""
                 q["obfs"] = h["obfs"] ?: ""; q["obfs-password"] = h["obfs-password"] ?: ""; q["mport"] = h["mport"] ?: ""
+                q["hopInterval"] = (h["hopInterval"] ?: "").takeIf { it.isNotEmpty() && (h["mport"] ?: "").isNotEmpty() && it != HOP_INTERVAL } ?: ""
                 q["up"] = (h["up"] ?: "").replace(Regex("\\s*mbps$", RegexOption.IGNORE_CASE), "")
                 q["down"] = (h["down"] ?: "").replace(Regex("\\s*mbps$", RegexOption.IGNORE_CASE), "")
                 extras["engine"]?.let { q["engine"] = it }
