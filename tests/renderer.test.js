@@ -449,6 +449,51 @@ test('a no-op save through the real edit form records nothing, for every shape t
   }
 });
 
+test('the edit form shows and sends back ECH, pcs, vcn, pqv, gRPC authority and Hysteria2\'s fields — a no-op save stays a no-op', () => {
+  const { parseLink, applyServerEdits } = require('../src/main/parser');
+  const form = editFormHarness();
+  const b64 = (s) => Buffer.from(s).toString('base64');
+  const PIN = 'ab'.repeat(32);
+  const shapes = {
+    'ws+tls+ech': parseLink('vless://cd5539e6-96b9-4daf-a09d-0d2a59804129@104.21.44.18:2087?encryption=none&type=ws&host=ircd-uk.irnetfree.xyz&path=/&security=tls&fp=firefox&sni=ircd-uk.irnetfree.xyz&ech=cloudflare-ech.com+udp://1.1.1.1#E'),
+    'pcs+vcn': parseLink(`trojan://pw@a.example.com:443?sni=front.example&pcs=${PIN}&vcn=real.example#P`),
+    'reality+pqv': parseLink('vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=PQKEY#R'),
+    'grpc authority': parseLink('vless://u@g.example.com:443?type=grpc&serviceName=svc&authority=auth.example&security=tls&sni=g.example.com#G'),
+    hysteria2: parseLink(`hysteria2://p%40ss@h.example.com:443/?sni=s.example&insecure=1&obfs=salamander&obfs-password=OB&mport=20000-30000&pinSHA256=${PIN}&ech=AEXX#H`),
+    'hysteria2 bare': parseLink('hy2://pw@1.2.3.4:443#H2'),
+    'ss v2ray-plugin': parseLink('ss://' + b64('aes-256-gcm:pw') + '@v.example.com:443/?plugin=' + encodeURIComponent('v2ray-plugin;tls;host=cdn.example.com;path=/ws') + '#V')
+  };
+  for (const [name, rec] of Object.entries(shapes)) {
+    form.fillEditForm(form.readServerFields(rec), rec.protocol);
+    const fields = form.collectEditFields(rec, false);
+    const out = applyServerEdits(rec, fields);
+    assert.equal('_edited' in out, false, `${name}: recorded ${JSON.stringify(out._edited)}`);
+    assert.deepEqual(out, rec, `${name}: a no-op save changed the server`);
+  }
+  // what the form shows
+  const ech = form.readServerFields(shapes['ws+tls+ech']);
+  assert.equal(ech.ech, 'cloudflare-ech.com+udp://1.1.1.1');
+  assert.equal(form.readServerFields(shapes['grpc authority']).host, 'auth.example');
+  assert.equal(form.readServerFields(shapes['reality+pqv']).pqv, 'PQKEY');
+  const hy = form.readServerFields(shapes.hysteria2);
+  assert.deepEqual([hy.cred, hy.sni, hy.allowInsecure, hy.hy2Obfs, hy.hy2Ports, hy.pcs, hy.ech], ['p@ss', 's.example', true, 'OB', '20000-30000', PIN, 'AEXX']);
+  // and an edit through it: ECH typed in, the pin cleared, Hysteria2's ports changed
+  const rec = shapes['pcs+vcn'];
+  form.fillEditForm(form.readServerFields(rec), rec.protocol);
+  form.$('#edEch').value = 'cloudflare-ech.com+https://1.1.1.1/dns-query';
+  form.$('#edPcs').value = '';
+  const edited = applyServerEdits(rec, form.collectEditFields(rec, false));
+  assert.equal(edited.outbound.streamSettings.tlsSettings.echConfigList, 'cloudflare-ech.com+https://1.1.1.1/dns-query');
+  assert.equal(edited.outbound.streamSettings.tlsSettings.pinnedPeerCertSha256, undefined);
+  assert.deepEqual(edited._edited, ['ech', 'pcs']);
+  const h = shapes.hysteria2;
+  form.fillEditForm(form.readServerFields(h), h.protocol);
+  form.$('#edHy2Ports').value = '40000-41000';
+  const hEd = applyServerEdits(h, form.collectEditFields(h, false));
+  assert.equal(hEd.outbound.streamSettings.finalmask.udp[1].settings.remotePorts, '40000-41000');
+  assert.deepEqual(hEd._edited, ['mport']);
+});
+
 /* --------------------------- the connection snapshot (v1.16 S1 / S4) --------------------------- */
 
 /** A top-level (async) function of app.js, as source. */
