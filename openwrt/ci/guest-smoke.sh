@@ -43,6 +43,10 @@ uci show firewall | grep -E "^firewall\.irnetfree_(lan|guest)\." || true
 m="$(date -r /www/luci-static/resources/view/irnetfree/overview.js +%s 2>/dev/null || echo '?')"
 echo "LuCI overview.js mtime: $m ($(date -u -r /www/luci-static/resources/view/irnetfree/overview.js 2>/dev/null || echo '?'))"
 case "$m" in ''|*[!0-9]*) echo "(date -r cannot read it on this image: not asserted)" ;; *) [ "$m" -gt 31536000 ] || { echo "the LuCI views landed dated 1970: browsers keep the old ones after an upgrade"; exit 1; } ;; esac
+# a pre-release's package (build-ipk opkgVersion: 1.18.0~beta.1) ranks below its release here, so re-running
+# install.sh for the release upgrades a router on the beta instead of answering "Not downgrading"
+opkg compare-versions '1.18.0~beta.1' '<<' '1.18.0' && opkg compare-versions '1.18.0~beta.1' '>>' '1.17.2' \
+	|| { echo "opkg does not order 1.17.2 < 1.18.0~beta.1 < 1.18.0"; exit 1; }
 
 say "test tools and the feed cores (kmod-veth: the WAN-change interface and the LAN-side namespace below)"
 opkg install sing-box xray-core curl jq kmod-veth >/dev/null
