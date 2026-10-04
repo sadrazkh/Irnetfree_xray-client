@@ -51,3 +51,23 @@ test('every core is handed a WireGuard endpoint as an address: the gate is gone'
   // trustedDns); nothing here may bring the per-engine gate back.
   assert.equal('needsWgEndpointIp' in require('../src/main/engineChoice'), false);
 });
+
+test('a Hysteria2 that asked for insecure and names no certificate runs on sing-box, unless the record chose a core', () => {
+  const { chooseEngine, needsInsecureCore } = require('../src/main/engineChoice');
+  const { parseLink } = require('../src/main/parser');
+  const hy = parseLink('hysteria2://pw@h.example.com:443?insecure=1');
+  assert.equal(needsInsecureCore(hy), true);
+  assert.equal(chooseEngine({ mode: 'single', server: hy }), 'sing-box');
+  assert.equal(chooseEngine({ mode: 'single', server: Object.assign({}, hy, { engine: 'xray-pattn' }) }), 'xray-pattn');
+  for (const ok of [
+    parseLink('hysteria2://pw@h.example.com:443'),
+    parseLink('hysteria2://pw@h.example.com:443?insecure=1&pinSHA256=' + 'ab'.repeat(32)),
+    Object.assign(parseLink('hysteria2://pw@h.example.com:443?insecure=1'), { certPin: 'cd'.repeat(32) }),
+    parseLink('trojan://pw@a.example.com:443?allowInsecure=1')
+  ]) {
+    assert.equal(needsInsecureCore(ok), false);
+    assert.equal(chooseEngine({ mode: 'single', server: ok }), 'xray');
+  }
+  // a chain is Xray's whatever its members are
+  assert.equal(chooseEngine({ mode: 'chain', chain: [hy, hy] }), 'xray');
+});

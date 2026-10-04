@@ -251,3 +251,15 @@ test('recheckDue: a pin checked within the window is left alone; older, missing 
   assert.equal(recheckDue(fresh, now, 0), true, 'a zero window asks every time');
   assert.equal(RECHECK_AFTER_MS, 6 * 3600 * 1000);
 });
+
+/* --------------------- a link that already says how to verify (pcs / vcn), and QUIC --------------------- */
+
+test('wantsPin: not for a link that names its certificate (pcs) or the name to check (vcn), nor for Hysteria', () => {
+  const { wantsPin } = require('../src/main/certPin');
+  const { parseLink } = require('../src/main/parser');
+  assert.equal(wantsPin(parseLink('trojan://pw@a.example.com:443?allowInsecure=1')), true);
+  assert.equal(wantsPin(parseLink('trojan://pw@a.example.com:443?allowInsecure=1&pcs=' + 'ab'.repeat(32))), false);
+  assert.equal(wantsPin(parseLink('trojan://pw@a.example.com:443?allowInsecure=1&vcn=real.example')), false);
+  assert.equal(wantsPin(parseLink('hysteria2://pw@h.example.com:443?insecure=1')), false, 'a TCP handshake would reach another service');
+  assert.equal(wantsPin(parseLink('trojan://pw@a.example.com:443')), false);
+});

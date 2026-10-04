@@ -15,7 +15,8 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('../main/configBuilder');
+const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
@@ -1876,7 +1877,9 @@ function createService(opts = {}) {
           // around the tunnel — this process's UDP 53 only, by a rule for its
           // user from the router itself (`ownDirect`, TunOpenwrt.layOwnDirect):
           // the remote way in must not need the VPN.
-          const resolverHoles = OPENWRT ? [] : resolverBypassIpsOf(config);
+          // Likewise the resolver an ECH config is fetched from: bound, so a
+          // hole only where the strict guard firewalls a desktop's adapter.
+          const resolverHoles = OPENWRT ? [] : [...resolverBypassIpsOf(config), ...(settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [])];
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverHoles, ...pinnedIps],
             tunAdapterDns,
             { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] });   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect
@@ -2822,6 +2825,13 @@ function createService(opts = {}) {
     return c[0] || null;
   }
 
+  // What latencyTest needs to know about this machine: a server that runs on
+  // sing-box is measured on it, when it is installed.
+  function latencyOpts() {
+    const s = getSettings();
+    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote };
+  }
+
   function resolveTarget(id) {
     const servers = store.get('servers', []);
     const server = servers.find(s => s.id === id);
@@ -3063,7 +3073,12 @@ function createService(opts = {}) {
     'settings:pending': () => pendingKeys(),
     'settings:apply': () => reapplyByHand(),
 
-    'ping:tcp': async (id) => { const { server } = resolveTarget(id); if (!server) return { ok: false, error: 'not found' }; return tcpPing(server.address, server.port); },
+    'ping:tcp': async (id) => {
+      const { server } = resolveTarget(id);
+      if (!server) return { ok: false, error: 'not found' };
+      if (udpOnly(server)) return { ok: false, na: true, error: 'UDP only — no TCP port to ping' };
+      return tcpPing(server.address, server.port);
+    },
     'ping:real': async (id) => {
       const { server, chain } = resolveTarget(id);
       if (!server) return { ok: false, error: 'not found' };
@@ -3071,9 +3086,8 @@ function createService(opts = {}) {
       let test;
       try {
         const port = await getFreePort();
-        const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-        const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
-        test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
+        const t = latencyTest(chain && chain.length >= 2 ? chain : server, port, latencyOpts());
+        test = await xray.startTest(t.config, t.engine);
         return await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
       } catch (err) { return { ok: false, error: err.message }; }
       finally { if (test) test.cleanup(); }
@@ -3085,9 +3099,8 @@ function createService(opts = {}) {
       let test;
       try {
         const port = await getFreePort();
-        const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-        const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
-        test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
+        const t = latencyTest(chain && chain.length >= 2 ? chain : server, port, latencyOpts());
+        test = await xray.startTest(t.config, t.engine);
         return await uploadThroughProxy(port, {});
       } catch (err) { return { ok: false, error: err.message }; }
       finally { if (test) test.cleanup(); }
@@ -3097,16 +3110,29 @@ function createService(opts = {}) {
       const list = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
       if (!xray.binExists()) { for (const id of list) out[id] = { ok: false, error: 'xray binary missing' }; return out; }
       const byEngine = new Map();
+      const alone = [];   // measured on a core of their own (latencyTest: sing-box)
+      const opts = latencyOpts();
       for (const id of list) {
         const { server, chain } = resolveTarget(id);
         if (!server) { out[id] = { ok: false, error: 'not found' }; continue; }
         const isChain = chain && chain.length >= 2;
         const plan = isChain ? { mode: 'chain', chain } : { mode: 'single', server };
+        if (!isChain && testsAlone(server, opts)) { alone.push({ id, target: server }); continue; }
         const eng = testEngineFor(chooseEngine(plan, getSettings().defaultEngine));
         if (!byEngine.has(eng)) byEngine.set(eng, []);
         byEngine.get(eng).push({ id, target: isChain ? chain : server });
       }
       const limit = pLimit(REAL_PARALLEL);
+      await Promise.all(alone.map(a => limit(async () => {
+        let test = null;
+        try {
+          const port = await getFreePort();
+          const t = latencyTest(a.target, port, opts);
+          test = await xray.startTest(t.config, t.engine);
+          out[a.id] = await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
+        } catch (err) { out[a.id] = { ok: false, error: err.message }; }
+        finally { if (test) test.cleanup(); }
+      })));
       for (const [eng, targets] of byEngine) {
         for (let i = 0; i < targets.length; i += REAL_BATCH) {
           const batch = targets.slice(i, i + REAL_BATCH);

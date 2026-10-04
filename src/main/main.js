@@ -6,7 +6,8 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('./configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('./configBuilder');
+const { latencyTest, testsAlone, udpOnly } = require('./latencyTest');
 const { adapterDnsServers, guardPeers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
 const { engineFormat } = require('./engines');
@@ -1446,7 +1447,11 @@ async function connectOnce(serverId, opts = {}) {
         // nothing here, but one dialled on its own would loop back into the
         // tunnel it is building) — kept off it even when the backend's own
         // lookup of a name answers otherwise, or nothing, under a held rebuild.
-        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...pinnedIps],
+        // The strict guard firewalls the physical adapter, so the resolver the
+        // core fetches an ECH config from needs its hole too (configBuilder:
+        // its socket is bound to the NIC — elsewhere that alone is enough).
+        const echHoles = settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [];
+        await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...echHoles, ...pinnedIps],
           tunAdapterDns,
           { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
@@ -2845,6 +2850,13 @@ function registerIpc() {
   ipcMain.handle('settings:apply', () => reapplyConnection());
 
   // Resolve a ping/test target: a single server OR a named chain's entry hop.
+  // What latencyTest needs to know about this machine: a server that runs on
+  // sing-box is measured on it, when it is installed.
+  function latencyOpts() {
+    const s = getSettings();
+    return { defaultEngine: s.defaultEngine, hasSingbox: !!xray.resolveBin('sing-box'), dnsRemote: s.dnsRemote };
+  }
+
   function resolveTarget(id) {
     const servers = store.get('servers', []);
     const server = servers.find(s => s.id === id);
@@ -2863,6 +2875,7 @@ function registerIpc() {
   ipcMain.handle('ping:tcp', async (e, id) => {
     const { server } = resolveTarget(id);
     if (!server) return { ok: false, error: 'not found' };
+    if (udpOnly(server)) return { ok: false, na: true, error: 'UDP only — no TCP port to ping' };
     return tcpPing(server.address, server.port);
   });
 
@@ -2875,9 +2888,8 @@ function registerIpc() {
     let test;
     try {
       const port = await getFreePort();
-      const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-      const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
-      test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
+      const t = latencyTest(chain && chain.length >= 2 ? chain : server, port, latencyOpts());
+      test = await xray.startTest(t.config, t.engine);
       const result = await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
       return result;
     } catch (err) {
@@ -2896,9 +2908,8 @@ function registerIpc() {
     let test;
     try {
       const port = await getFreePort();
-      const cfg = buildTestConfig(chain && chain.length >= 2 ? chain : server, port);
-      const plan = chain && chain.length >= 2 ? { mode: 'chain', chain } : { mode: 'single', server };
-      test = await xray.startTest(cfg, testEngineFor(chooseEngine(plan, getSettings().defaultEngine)));
+      const t = latencyTest(chain && chain.length >= 2 ? chain : server, port, latencyOpts());
+      test = await xray.startTest(t.config, t.engine);
       return await uploadThroughProxy(port, {});
     } catch (err) {
       return { ok: false, error: err.message };
@@ -2917,16 +2928,29 @@ function registerIpc() {
     const list = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
     if (!xray.binExists()) { for (const id of list) out[id] = { ok: false, error: 'xray binary missing' }; return out; }
     const byEngine = new Map();
+    const alone = [];   // measured on a core of their own (latencyTest: sing-box)
+    const opts = latencyOpts();
     for (const id of list) {
       const { server, chain } = resolveTarget(id);
       if (!server) { out[id] = { ok: false, error: 'not found' }; continue; }
       const isChain = chain && chain.length >= 2;
       const plan = isChain ? { mode: 'chain', chain } : { mode: 'single', server };
+      if (!isChain && testsAlone(server, opts)) { alone.push({ id, target: server }); continue; }
       const eng = testEngineFor(chooseEngine(plan, getSettings().defaultEngine));
       if (!byEngine.has(eng)) byEngine.set(eng, []);
       byEngine.get(eng).push({ id, target: isChain ? chain : server });
     }
     const limit = pLimit(REAL_PARALLEL);
+    await Promise.all(alone.map(a => limit(async () => {
+      let test = null;
+      try {
+        const port = await getFreePort();
+        const t = latencyTest(a.target, port, opts);
+        test = await xray.startTest(t.config, t.engine);
+        out[a.id] = await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
+      } catch (err) { out[a.id] = { ok: false, error: err.message }; }
+      finally { if (test) test.cleanup(); }
+    })));
     for (const [eng, targets] of byEngine) {
       for (let i = 0; i < targets.length; i += REAL_BATCH) {
         const batch = targets.slice(i, i + REAL_BATCH);

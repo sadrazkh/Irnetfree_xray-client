@@ -33,9 +33,27 @@ function targetsServers(targets, plan) {
   return out;
 }
 
+/**
+ * A Hysteria2 server that asked for "allow insecure" and names no certificate:
+ * the Xray cores have no way left to accept an unverified certificate
+ * (allowInsecure is gone; certPin's trust-on-first-use is a TCP handshake,
+ * and Hysteria is QUIC), sing-box still has one. Such links are common — a
+ * self-signed certificate is how most Hysteria2 servers are set up.
+ */
+function needsInsecureCore(server) {
+  const st = server && server.outbound && server.outbound.streamSettings;
+  const tls = st && st.tlsSettings;
+  return !!(st && st.network === 'hysteria' && tls && tls.allowInsecure &&
+    !String(tls.pinnedPeerCertSha256 || '').trim() && !String(tls.verifyPeerCertByName || '').trim() &&
+    !String(server.certPin || '').trim());
+}
+
 function chooseEngine(plan, defaultEngine = 'xray') {
   const def = defaultEngine === 'xray-pattn' ? 'xray-pattn' : 'xray';
-  if (plan && plan.mode === 'single') return (plan.server && plan.server.engine) || def;
+  if (plan && plan.mode === 'single') {
+    const s = plan.server;
+    return (s && s.engine) || (needsInsecureCore(s) ? 'sing-box' : def);
+  }
   const wantsPattn = planServers(plan).some(s => s && s.engine === 'xray-pattn');
   return wantsPattn ? 'xray-pattn' : def;
 }
@@ -66,4 +84,4 @@ function testEngineFor(engineId) {
  * a DoH answer when the network's own is a fake-IP address. A name that cannot
  * be resolved at all is still left to the core.
  */
-module.exports = { chooseEngine, planServers, testEngineFor };
+module.exports = { chooseEngine, planServers, testEngineFor, needsInsecureCore };
