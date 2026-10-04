@@ -6,6 +6,7 @@ name: Build & Release
 # Trigger: push a version tag, e.g.
 #   git tag v0.5.0
 #   git push origin v0.5.0
+# A tag with a suffix (v0.5.0-beta.1) is published as a PRE-release.
 # (You can also run it manually from the Actions tab — it will only build,
 #  without publishing, when there is no tag.)
 
@@ -115,6 +116,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # A tag with a suffix (v1.18.0-beta.1) is a pre-release: the in-app
+          # update checks ask for releases/latest, which never names one, so
+          # only those who download it on purpose get it. Every job says the
+          # same, whichever creates the release first.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/*.exe
             dist/*.dmg
@@ -238,6 +244,11 @@ jobs:
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
+          # A tag with a suffix (v1.18.0-beta.1) is a pre-release: the in-app
+          # update checks ask for releases/latest, which never names one, so
+          # only those who download it on purpose get it. Every job says the
+          # same, whichever creates the release first.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             android/build-log.txt
             android/hev-build.txt
@@ -310,6 +321,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # A tag with a suffix (v1.18.0-beta.1) is a pre-release: the in-app
+          # update checks ask for releases/latest, which never names one, so
+          # only those who download it on purpose get it. Every job says the
+          # same, whichever creates the release first.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: android/IRNetFree-*.apk
           fail_on_unmatched_files: false
 
@@ -362,6 +378,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # A tag with a suffix (v1.18.0-beta.1) is a pre-release: the in-app
+          # update checks ask for releases/latest, which never names one, so
+          # only those who download it on purpose get it. Every job says the
+          # same, whichever creates the release first.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/irnetfree_*_all.ipk
             dist/SHA256SUMS-openwrt.txt
