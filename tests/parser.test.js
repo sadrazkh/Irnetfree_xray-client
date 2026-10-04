@@ -1257,6 +1257,8 @@ test('parser.js declares each top-level function exactly once and exports each n
 /* ---------------- newer link parameters (v2rayN / Xray 26): ech, pcs, vcn, pqv ---------------- */
 
 const { editFields } = require('../src/main/parser');
+/** A well-formed ML-DSA-65 public key (1952 bytes, unpadded base64url) — the only shape the core takes. */
+const PQV = Buffer.alloc(1952, 7).toString('base64url');
 
 test('ech: the DNS form is kept verbatim — the `+` is part of the value, never a space', () => {
   const s = parseLink('vless://cd5539e6-96b9-4daf-a09d-0d2a59804129@104.21.44.18:2087?encryption=none&type=ws&host=ircd-uk.irnetfree.xyz&path=/&security=tls&fp=firefox&sni=ircd-uk.irnetfree.xyz&ech=cloudflare-ech.com+udp://1.1.1.1#%F0%9F%87%AC%F0%9F%87%A7-1');
@@ -1285,8 +1287,14 @@ test('pcs: pins are normalised (colons, case), malformed ones dropped, several k
 test('vcn and pqv land in the core\'s own fields; the hysteria spellings of insecure count', () => {
   const t = parseLink('vless://u@a.example.com:443?security=tls&sni=front.example&vcn=real.example,b.example').outbound.streamSettings.tlsSettings;
   assert.equal(t.verifyPeerCertByName, 'real.example,b.example');
-  const r = parseLink('vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=MLDSAKEY').outbound.streamSettings.realitySettings;
-  assert.equal(r.mldsa65Verify, 'MLDSAKEY');
+  const r = parseLink(`vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=${PQV}`).outbound.streamSettings.realitySettings;
+  assert.equal(r.mldsa65Verify, PQV);
+  // the standard alphabet with padding is the same key; anything else is left out (the core refuses the config over it)
+  const std = Buffer.from(PQV, 'base64url').toString('base64');
+  assert.equal(parseLink(`vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=${encodeURIComponent(std)}`).outbound.streamSettings.realitySettings.mldsa65Verify, PQV);
+  for (const bad of ['abc', PQV.slice(1), PQV + 'A', PQV.slice(0, -1) + '*']) {
+    assert.equal(parseLink(`vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=${encodeURIComponent(bad)}`).outbound.streamSettings.realitySettings.mldsa65Verify, undefined, bad.slice(0, 8));
+  }
   assert.equal(parseLink('trojan://pw@a.example.com:443?insecure=1').outbound.streamSettings.tlsSettings.allowInsecure, true);
   assert.equal(parseLink('trojan://pw@a.example.com:443?allow_insecure=true').outbound.streamSettings.tlsSettings.allowInsecure, true);
   assert.equal(parseLink('trojan://pw@a.example.com:443?insecure=0').outbound.streamSettings.tlsSettings.allowInsecure, false);
@@ -1315,7 +1323,7 @@ test('grpc authority and kcp mtu are read; vmess carries them where v2rayN puts 
 test('share link round trip carries ech, pcs, vcn, pqv, authority and mtu', () => {
   const links = [
     'vless://u@a.example.com:443?type=ws&security=tls&sni=s.example&host=h.example&path=%2F&ech=cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1&pcs=' + 'd'.repeat(64) + '&vcn=v.example#A',
-    'vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=PQ#B',
+    `vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=${PQV}#B`,
     'trojan://pw@g.example.com:443?type=grpc&serviceName=svc&authority=auth.example#C',
     'vless://u@k.example.com:443?type=kcp&headerType=srtp&seed=S&mtu=1350#D'
   ];
@@ -1348,8 +1356,8 @@ test('an edit keeps ech / pcs / vcn / pqv / authority it does not touch, and cha
   assert.equal(ech.outbound.streamSettings.tlsSettings.echConfigList, 'AEXX');
   assert.equal(ech.outbound.streamSettings.tlsSettings.pinnedPeerCertSha256, undefined);
   assert.deepEqual(ech._edited, ['ech', 'pcs']);
-  const r = parseLink('vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=PQ#B');
-  assert.equal(applyServerEdits(r, { sni: 'x.example' }).outbound.streamSettings.realitySettings.mldsa65Verify, 'PQ');
+  const r = parseLink(`vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=${PQV}#B`);
+  assert.equal(applyServerEdits(r, { sni: 'x.example' }).outbound.streamSettings.realitySettings.mldsa65Verify, PQV);
 });
 
 /* ------------------------------ Shadowsocks plugins ------------------------------ */
@@ -1461,4 +1469,35 @@ test('hysteria2: share link round trip, and an edit that changes only what it sa
   assert.equal(ed.outbound.streamSettings.tlsSettings.pinnedPeerCertSha256, undefined);
   assert.equal(ed.outbound.streamSettings.tlsSettings.echConfigList, 'e.example+udp://1.1.1.1');
   assert.deepEqual(ed._edited, ['address', 'mport', 'obfsPassword', 'password', 'pcs', 'port']);
+});
+
+/* ------------------------------ review round (v1.18.0-beta) ------------------------------ */
+
+test('a gRPC link with an authority and no SNI: a rename leaves the SNI empty (the Host field is the authority, not the SNI\'s fallback)', () => {
+  const s = parseLink('vless://u@front.example.com:443?type=grpc&security=tls&serviceName=s&authority=real.example.com#G');
+  assert.equal(s.outbound.streamSettings.tlsSettings.serverName, '');
+  const renamed = applyServerEdits(s, Object.assign({}, editFields(s), { name: 'G2' }));
+  assert.deepEqual(renamed.outbound, s.outbound);
+  // a link that names its host and no sni keeps what it parsed to
+  const h = parseLink('vless://u@a.example.com:443?type=grpc&security=tls&serviceName=s&host=h.example#H');
+  assert.deepEqual(applyServerEdits(h, Object.assign({}, editFields(h), { name: 'H2' })).outbound, h.outbound);
+});
+
+test('hysteria2: bandwidth below the core\'s minimum or in a unit it does not know is left out; engine= is read', () => {
+  const qp = (q) => { const fm = parseLink('hysteria2://pw@h.example.com:443/?' + q).outbound.streamSettings.finalmask; return fm && fm.quicParams; };
+  assert.deepEqual(qp('up=100kbps&down=100ps'), undefined);
+  assert.deepEqual(qp('up=0.4&down=600kbps'), { brutalDown: '600kbps' });
+  assert.deepEqual(qp('up=1gbps&down=0.5'), { brutalUp: '1gbps', brutalDown: '0.5 mbps' });
+  assert.equal(parseLink('hysteria2://pw@h.example.com:443/?engine=xray-pattn').engine, 'xray-pattn');
+  assert.equal(parseLink('hysteria2://pw@h.example.com:443/?engine=xray').engine, undefined);
+});
+
+test('share links keep a hop interval other than 30 and obfs-local\'s obfs-uri', () => {
+  const h = parseLink('hysteria2://pw@h.example.com:443/?mport=20000-30000&hopInterval=10-20#H');
+  assert.equal(h.outbound.streamSettings.finalmask.udp[0].settings.interval, '10-20');
+  assert.deepEqual(parseLink(buildShareLink(h)).outbound, h.outbound);
+  assert.equal(buildShareLink(parseLink('hysteria2://pw@h.example.com:443/?mport=20000-30000#H')).includes('hopInterval'), false);
+  const o = parseLink(`ss://${b64url('aes-256-gcm:pw')}@o.example.com:8388/?plugin=${encodeURIComponent('obfs-local;obfs=http;obfs-host=b.example;obfs-uri=/x')}#O`);
+  assert.deepEqual(o.outbound.streamSettings.tcpSettings.header.request.path, ['/x']);
+  assert.deepEqual(parseLink(buildShareLink(o)).outbound, o.outbound);
 });

@@ -35,10 +35,17 @@ const FINALMASK_REJECT = /LengthMin can't be 0|finalmask/i;
  */
 const GO_OUT_OF_MEMORY = /\bruntime: (out of memory|cannot allocate memory|failed to create new OS thread)|\bfatal error: out of memory/;
 
-/** Does any outbound carry a (non-empty) `streamSettings.finalmask`? */
+/**
+ * Does any outbound carry a (non-empty) `streamSettings.finalmask`? Not one on
+ * Hysteria or mKCP: their masks (salamander, hopping, mKCP's header and seed)
+ * are the official core's own, written for its version (coreCompat.js) — no
+ * reason to move them onto the fork.
+ */
 function usesFinalmask(config) {
   return ((config && config.outbounds) || []).some((o) => {
-    const fm = o && o.streamSettings && o.streamSettings.finalmask;
+    const ss = o && o.streamSettings;
+    const fm = ss && ss.finalmask;
+    if (/^(hysteria|kcp|mkcp)$/i.test(String((ss && ss.network) || ''))) return false;
     return !!fm && typeof fm === 'object' && Object.keys(fm).length > 0;
   });
 }

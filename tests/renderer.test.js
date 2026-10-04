@@ -454,10 +454,11 @@ test('the edit form shows and sends back ECH, pcs, vcn, pqv, gRPC authority and 
   const form = editFormHarness();
   const b64 = (s) => Buffer.from(s).toString('base64');
   const PIN = 'ab'.repeat(32);
+  const PQV = Buffer.alloc(1952, 7).toString('base64url');
   const shapes = {
     'ws+tls+ech': parseLink('vless://cd5539e6-96b9-4daf-a09d-0d2a59804129@104.21.44.18:2087?encryption=none&type=ws&host=ircd-uk.irnetfree.xyz&path=/&security=tls&fp=firefox&sni=ircd-uk.irnetfree.xyz&ech=cloudflare-ech.com+udp://1.1.1.1#E'),
     'pcs+vcn': parseLink(`trojan://pw@a.example.com:443?sni=front.example&pcs=${PIN}&vcn=real.example#P`),
-    'reality+pqv': parseLink('vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=PQKEY#R'),
+    'reality+pqv': parseLink(`vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=${PQV}#R`),
     'grpc authority': parseLink('vless://u@g.example.com:443?type=grpc&serviceName=svc&authority=auth.example&security=tls&sni=g.example.com#G'),
     hysteria2: parseLink(`hysteria2://p%40ss@h.example.com:443/?sni=s.example&insecure=1&obfs=salamander&obfs-password=OB&mport=20000-30000&pinSHA256=${PIN}&ech=AEXX#H`),
     'hysteria2 bare': parseLink('hy2://pw@1.2.3.4:443#H2'),
@@ -474,7 +475,7 @@ test('the edit form shows and sends back ECH, pcs, vcn, pqv, gRPC authority and 
   const ech = form.readServerFields(shapes['ws+tls+ech']);
   assert.equal(ech.ech, 'cloudflare-ech.com+udp://1.1.1.1');
   assert.equal(form.readServerFields(shapes['grpc authority']).host, 'auth.example');
-  assert.equal(form.readServerFields(shapes['reality+pqv']).pqv, 'PQKEY');
+  assert.equal(form.readServerFields(shapes['reality+pqv']).pqv, PQV);
   const hy = form.readServerFields(shapes.hysteria2);
   assert.deepEqual([hy.cred, hy.sni, hy.allowInsecure, hy.hy2Obfs, hy.hy2Ports, hy.pcs, hy.ech], ['p@ss', 's.example', true, 'OB', '20000-30000', PIN, 'AEXX']);
   // and an edit through it: ECH typed in, the pin cleared, Hysteria2's ports changed

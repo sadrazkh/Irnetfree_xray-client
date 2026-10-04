@@ -3930,6 +3930,10 @@ async function saveEdit() {
     try { JSON.parse(fmText); }
     catch { return toast(t('edit.finalMaskBad'), 'err'); }
   }
+  // an ML-DSA-65 key is 1952 bytes as base64url (2603 characters); the parser
+  // leaves anything else out, so say so rather than drop it in silence
+  const pqvText = $('#edPqv') && $('#edPqvRow') && !$('#edPqvRow').hidden ? $('#edPqv').value.trim() : '';
+  if (pqvText && !/^[A-Za-z0-9_\-+/]{2603}={0,2}$/.test(pqvText)) return toast(t('edit.pqvBad'), 'err');
 
   const res = await window.api.updateServer(id, fields);
   if (res.ok) {

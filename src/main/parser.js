@@ -67,6 +67,19 @@ function pinList(v) {
 }
 
 /**
+ * `pqv` — an ML-DSA-65 public key: 1952 bytes as unpadded base64url, the only
+ * form the core reads; a malformed one makes it refuse the WHOLE config. The
+ * standard alphabet and padding are mapped to that form; anything that is not
+ * such a key is ''. Left out, REALITY still authenticates the server by its
+ * x25519 key (`pbk`) — the post-quantum check is the one that is lost.
+ */
+function mldsaKey(v) {
+  const s = String(v == null ? '' : v).trim().replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  if (s.length !== 2603 || !/^[A-Za-z0-9_-]+$/.test(s)) return '';
+  return Buffer.from(s, 'base64url').length === 1952 ? s : '';
+}
+
+/**
  * What newer links carry for TLS beyond SNI, ALPN and the fingerprint
  * (v2rayN's names; the core's in brackets):
  *  - `ech` (echConfigList): Encrypted Client Hello — a base64 ECHConfigList, or
@@ -194,7 +207,7 @@ function buildStreamSettings(q) {
     };
     // `pqv`: the server's ML-DSA-65 public key — REALITY's post-quantum
     // signature check on the certificate it forges.
-    const pqv = String(q.pqv || q.mldsa65Verify || '').trim();
+    const pqv = mldsaKey(q.pqv || q.mldsa65Verify);
     if (pqv) stream.realitySettings.mldsa65Verify = pqv;
   }
 
@@ -501,8 +514,10 @@ function parseHysteria2(link) {
   const spec = String(portSpec || '').trim();
   const port = parseInt(spec, 10) || 443;
   const hop = hopPorts(q.mport || q.ports || (/[,-]/.test(spec) ? spec : ''));
-  return mkServer(name || address, 'hysteria2', address, port, link,
+  const srv = mkServer(name || address, 'hysteria2', address, port, link,
     buildHysteria2Outbound(Object.assign({}, q, { address, port, auth, mport: hop })));
+  if (q.engine && q.engine !== 'xray') srv.engine = q.engine;
+  return srv;
 }
 
 /** A port-hopping list as the core takes it ("20000-30000,443"); '' when it names no port. */
@@ -512,12 +527,20 @@ function hopPorts(v) {
   return s;
 }
 
-/** A bandwidth for the core ("100 mbps"); a bare number is Mbps, as hysteria's links mean it. */
+/**
+ * A bandwidth for the core ("100 mbps"); a bare number is Mbps, as hysteria's
+ * links mean it. The core's units are bits per second in powers of 1024, and
+ * it refuses the whole config below 65536 bytes a second (0.5 mbps) — so a
+ * value under that, or one in a unit it does not know, is ''.
+ */
 function bandwidth(v) {
   const s = String(v == null ? '' : v).trim().toLowerCase();
-  if (!s) return '';
-  if (/^\d+(\.\d+)?$/.test(s)) return s + ' mbps';
-  return /^\d+(\.\d+)?\s*[kmgt]?b?(ps)?$/.test(s) ? s : '';
+  const m = /^(\d+(?:\.\d+)?)\s*(|b|bps|k|kb|kbps|m|mb|mbps|g|gb|gbps|t|tb|tbps)$/.exec(s);
+  if (!m) return '';
+  const unit = m[2] || 'mbps';
+  const mul = Math.pow(1024, ' kmgt'.indexOf(unit[0] === 'b' ? ' ' : unit[0]));
+  if (Number(m[1]) * mul < 524288) return '';
+  return m[2] ? s : s + ' mbps';
 }
 
 /**
@@ -1186,7 +1209,10 @@ function rebuildStream(ob, f) {
     security: f.security || cur.security || 'none',
     sni: f.sni,
     path: f.path,
-    host: f.host,
+    // gRPC's Host field is its :authority (below) — never the SNI's fallback,
+    // which an empty SNI would otherwise take it as (a fronted server renamed
+    // with its SNI rewritten to the real host)
+    host: String(f.network || cur.network || '').toLowerCase() === 'grpc' ? '' : f.host,
     serviceName: f.serviceName,
     fp: f.fp,
     pbk: f.pbk,
@@ -1414,7 +1440,8 @@ function ssPluginOf(st) {
   if ((!st.network || st.network === 'tcp' || st.network === 'raw') && h && h.type === 'http') {
     const rq = h.request || {};
     const host = [].concat((rq.headers && rq.headers.Host) || [])[0] || '';
-    return 'obfs-local;obfs=http' + (host ? ';obfs-host=' + esc(host) : '');
+    const uri = [].concat(rq.path || [])[0] || '/';
+    return 'obfs-local;obfs=http' + (host ? ';obfs-host=' + esc(host) : '') + (uri !== '/' ? ';obfs-uri=' + esc(uri) : '');
   }
   return '';
 }
@@ -1485,6 +1512,7 @@ function buildShareLink(server) {
       obfs: salamander ? 'salamander' : '',
       'obfs-password': salamander && salamander.settings ? salamander.settings.password || '' : '',
       mport: hop && hop.settings ? String(hop.settings.remotePorts || '') : '',
+      hopInterval: hop && hop.settings && hop.settings.interval != null && String(hop.settings.interval) !== HOP_INTERVAL ? String(hop.settings.interval) : '',
       up: String(qp.brutalUp || '').replace(/\s*mbps$/i, ''),
       down: String(qp.brutalDown || '').replace(/\s*mbps$/i, ''),
       engine: extras.engine
