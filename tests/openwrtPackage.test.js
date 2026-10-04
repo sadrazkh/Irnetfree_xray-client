@@ -13,7 +13,7 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
 const { tar, untar, tgz, untgz } = require('../openwrt/tar');
-const { buildIpk, sourceDateEpoch, PKG, DEPENDS, PREFIX } = require('../openwrt/build-ipk');
+const { buildIpk, sourceDateEpoch, opkgVersion, PKG, DEPENDS, PREFIX } = require('../openwrt/build-ipk');
 
 const ROOT = path.join(__dirname, '..');
 const VERSION = require('../package.json').version;
@@ -146,7 +146,7 @@ test('mtimes: a SOURCE_DATE_EPOCH that is not whole seconds refuses to build', (
 test('control: the fields, the dependencies the router needs, conffiles, and the standard OpenWrt scripts', () => {
   const c = control['./control'].data.toString();
   assert.match(c, /^Package: irnetfree$/m);
-  assert.match(c, new RegExp(`^Version: ${VERSION.replace(/\./g, '\\.')}$`, 'm'));
+  assert.match(c, new RegExp(`^Version: ${opkgVersion(VERSION).replace(/\./g, '\\.')}$`, 'm'));
   assert.match(c, /^Architecture: all$/m);
   assert.match(c, /^Section: net$/m);
   assert.match(c, /^Depends: node, kmod-tun, nftables, ip-full, unzip, ca-bundle$/m);
@@ -621,4 +621,16 @@ test('LuCI: every tab\'s view and the shared module ship verbatim, where the men
   const overview = data['./www/luci-static/resources/view/irnetfree/overview.js'].data.toString();
   assert.match(overview, /fs\.read\('\/etc\/irnetfree\/token'\)/);
   assert.match(common.data.toString(), /'\?token=' \+ encodeURIComponent\(token\)/);
+});
+
+test('a pre-release ranks below its release in opkg: 1.18.0~beta.1, while the file keeps the tag\'s spelling', () => {
+  assert.equal(opkgVersion('1.18.0'), '1.18.0');
+  assert.equal(opkgVersion('1.18.0-beta.1'), '1.18.0~beta.1');
+  assert.equal(opkgVersion('2.0.0-rc.1-2'), '2.0.0~rc.1-2');
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'ipk-pre-'));
+  try {
+    const r = buildIpk({ outDir: out, version: '1.18.0-beta.1', mtime: 1790000000 });
+    assert.equal(path.basename(r.out), 'irnetfree_1.18.0-beta.1_all.ipk');
+    assert.match(r.control, /^Version: 1\.18\.0~beta\.1$/m);
+  } finally { fs.rmSync(out, { recursive: true, force: true }); }
 });
