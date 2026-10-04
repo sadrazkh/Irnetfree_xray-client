@@ -1715,3 +1715,68 @@ test('buildMultiTestConfig with nothing to test is an empty, valid shape', () =>
   assert.deepEqual(c.routing.rules, []);
   assert.deepEqual(c.outbounds.map(o => o.tag), ['direct']);
 });
+
+/* ----------------------------- ECH fetched from DNS, and pins from the link ----------------------------- */
+
+const { echResolverIpsOf, echQueryOf } = require('../src/main/configBuilder');
+
+/** The fixture with an ECH config list (and anything else) on its TLS. */
+function withTls(base, tls, over) {
+  const s = JSON.parse(JSON.stringify(base));
+  Object.assign(s.outbound.streamSettings.tlsSettings, tls);
+  return Object.assign(s, over || {});
+}
+
+test('echQueryOf: the DNS forms, the name before the +, a base64 list is no query', () => {
+  assert.deepEqual(echQueryOf('cloudflare-ech.com+udp://1.1.1.1'), { name: 'cloudflare-ech.com', server: 'udp://1.1.1.1', scheme: 'udp', host: '1.1.1.1', port: null });
+  assert.deepEqual(echQueryOf('https://dns.google/dns-query'), { name: '', server: 'https://dns.google/dns-query', scheme: 'https', host: 'dns.google', port: null });
+  assert.equal(echQueryOf('a.example+udp://[2606:4700::1111]:53').host, '2606:4700::1111');
+  assert.equal(echQueryOf('AEX+/xyz=='), null, 'a + in base64 is not a query');
+  assert.equal(echQueryOf(''), null);
+});
+
+test('ECH under TUN: the core\'s own query is bound to the NIC, for a hop behind another hop too', () => {
+  const ech = withTls(VLESS_WS_TLS, { echConfigList: 'cloudflare-ech.com+udp://1.1.1.1' });
+  const c = buildConfig({ mode: 'chain', chain: [TROJAN_TCP_TLS, ech] }, settings({ directInterface: 'Wi-Fi' }));
+  assert.deepEqual(tlsOf(c, 'proxy').echSockopt, { interface: 'Wi-Fi' });
+  assert.equal(tlsOf(c, 'proxy').echConfigList, 'cloudflare-ech.com+udp://1.1.1.1');
+  assert.equal(tlsOf(c, 'proxy-h0').echSockopt, undefined, 'no ECH there, nothing to bind');
+  // without TUN nothing is bound, and a base64 list never is
+  assert.equal(tlsOf(buildConfig(single(ech), settings()), 'proxy').echSockopt, undefined);
+  const b64 = withTls(VLESS_WS_TLS, { echConfigList: 'AEXX' });
+  assert.equal(tlsOf(buildConfig(single(b64), settings({ directInterface: 'Wi-Fi' })), 'proxy').echSockopt, undefined);
+});
+
+test('ECH under the strict guard: UDP to a public resolver becomes DoH on the same address; the hole is named', () => {
+  const ech = withTls(VLESS_WS_TLS, { echConfigList: 'cloudflare-ech.com+udp://1.1.1.1' });
+  const strict = buildConfig(single(ech), settings({ tunMode: true, leakGuard: 'strict', directInterface: 'Ethernet' }));
+  assert.equal(tlsOf(strict, 'proxy').echConfigList, 'cloudflare-ech.com+https://1.1.1.1/dns-query');
+  assert.deepEqual(echResolverIpsOf(strict), ['1.1.1.1']);
+  // standard guard: left as the link said it
+  const std = buildConfig(single(ech), settings({ tunMode: true, leakGuard: 'standard', directInterface: 'Ethernet' }));
+  assert.equal(tlsOf(std, 'proxy').echConfigList, 'cloudflare-ech.com+udp://1.1.1.1');
+  // an unknown resolver, or a port other than 53, is not guessed at
+  const other = withTls(VLESS_WS_TLS, { echConfigList: 'x.example+udp://5.6.7.8' });
+  assert.equal(tlsOf(buildConfig(single(other), settings({ tunMode: true, leakGuard: 'strict' })), 'proxy').echConfigList, 'x.example+udp://5.6.7.8');
+  assert.deepEqual(echResolverIpsOf(buildConfig(single(VLESS_WS_TLS), settings())), []);
+});
+
+test('ECH from a DoH server by NAME: the name is an entry host, answered from the config', () => {
+  const ech = withTls(VLESS_WS_TLS, { echConfigList: 'cloudflare-ech.com+https://dns.google/dns-query' });
+  assert.deepEqual(entryHosts(single(ech)), ['a.example.com', 'dns.google']);
+  assert.deepEqual(entryHosts({ mode: 'chain', chain: [TROJAN_TCP_TLS, ech] }), ['b.example.com', 'dns.google'], 'a hop behind another asks it directly too');
+  const c = buildConfig(single(ech), settings({ entryHostIps: { 'a.example.com': ['1.2.3.4'], 'dns.google': ['8.8.8.8', '8.8.4.4'] }, directInterface: 'Wi-Fi' }));
+  assert.deepEqual(c.dns.hosts['dns.google'], ['8.8.8.8', '8.8.4.4']);
+  assert.deepEqual(tlsOf(c, 'proxy').echSockopt, { domainStrategy: 'UseIPv4', interface: 'Wi-Fi' });
+});
+
+test('pins: the link\'s pcs and the one learnt on first use are emitted together, deduplicated', () => {
+  const both = withTls(VLESS_WS_TLS, { pinnedPeerCertSha256: 'cd'.repeat(32) }, { certPin: PIN });
+  assert.equal(tlsOf(buildConfig(single(both), settings()), 'proxy').pinnedPeerCertSha256, 'cd'.repeat(32) + ',' + PIN);
+  const same = withTls(VLESS_WS_TLS, { pinnedPeerCertSha256: PIN.toUpperCase() }, { certPin: PIN });
+  assert.equal(tlsOf(buildConfig(single(same), settings()), 'proxy').pinnedPeerCertSha256, PIN);
+  const linkOnly = withTls(VLESS_WS_TLS, { pinnedPeerCertSha256: 'cd'.repeat(32), verifyPeerCertByName: 'real.example' });
+  const tls = tlsOf(buildConfig(single(linkOnly), settings()), 'proxy');
+  assert.equal(tls.pinnedPeerCertSha256, 'cd'.repeat(32));
+  assert.equal(tls.verifyPeerCertByName, 'real.example');
+});

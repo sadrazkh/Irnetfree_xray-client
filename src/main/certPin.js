@@ -100,10 +100,20 @@ function directServers(plan) {
   return out;
 }
 
-/** The record asked for "allow insecure" (allowInsecure=1 in its link) over plain TLS. REALITY verifies its own way. */
+/**
+ * The record asked for "allow insecure" (allowInsecure=1 in its link) over TLS
+ * on TCP, and its link says nothing better. REALITY verifies its own way; a
+ * link that names the certificate (`pcs`) or the name to check it against
+ * (`vcn`) has already said what allowInsecure only gestured at. Hysteria is
+ * QUIC: a TCP handshake to its port reaches some other service, or nothing,
+ * and would pin the wrong certificate (engineChoice runs it on sing-box).
+ */
 function wantsPin(server) {
   const st = server && server.outbound && server.outbound.streamSettings;
-  return !!(st && st.security === 'tls' && st.tlsSettings && st.tlsSettings.allowInsecure);
+  if (!st || st.security !== 'tls' || !st.tlsSettings || !st.tlsSettings.allowInsecure) return false;
+  if (st.network === 'hysteria') return false;
+  const tls = st.tlsSettings;
+  return !String(tls.pinnedPeerCertSha256 || '').trim() && !String(tls.verifyPeerCertByName || '').trim();
 }
 
 /**

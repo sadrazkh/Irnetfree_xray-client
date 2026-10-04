@@ -82,10 +82,11 @@ test('the connect resolves both kinds of name BEFORE the tunnel and the guard, a
     // the router keeps the in-country resolvers IN its whole-LAN tunnel (field
     // report D3, driven in routerFieldFixes.test.js); everywhere else they are a hole
     if (label === 'main.js') {
-      assert.match(body, /await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverBypassIpsOf\(config\), \.\.\.pinnedIps\],/,
+      // (and, under the strict guard only, the resolver an ECH config is fetched from)
+      assert.match(body, /const echHoles = settings\.leakGuard === 'strict' \? echResolverIpsOf\(config\) : \[\];\n\s*await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverBypassIpsOf\(config\), \.\.\.echHoles, \.\.\.pinnedIps\],/,
         `${label}: the tunnel must keep every pinned address off itself`);
     } else {
-      assert.match(body, /const resolverHoles = OPENWRT \? \[\] : resolverBypassIpsOf\(config\);\n\s*await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverHoles, \.\.\.pinnedIps\],/,
+      assert.match(body, /const resolverHoles = OPENWRT \? \[\] : \[\.\.\.resolverBypassIpsOf\(config\), \.\.\.\(settings\.leakGuard === 'strict' \? echResolverIpsOf\(config\) : \[\]\)\];\n\s*await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverHoles, \.\.\.pinnedIps\],/,
         `${label}: the tunnel must keep every pinned address off itself — and, off a router, the direct resolvers`);
     }
     assert.match(body, /excludes: await tunPlatform\.resolveServerIps\(\[\.\.\.entryAddrs, \.\.\.pinnedIps\], \{ ipv6: true \}\)/,

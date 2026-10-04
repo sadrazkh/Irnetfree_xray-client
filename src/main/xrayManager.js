@@ -12,7 +12,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { DEFAULT_ENGINE, engineExe, engineRunArgs, engineTestArgs, engineLabel, xrayEngines } = require('./engines');
+const { DEFAULT_ENGINE, engineExe, engineRunArgs, engineTestArgs, engineLabel, xrayEngines, engineFormat } = require('./engines');
+const { adaptForCore, needsCoreVersion } = require('./coreCompat');
 const net = require('net');
 
 /** Upstream's plaintext-outbound refusal (infra/conf/xray.go); the patterniha fork lifts it. */
@@ -223,6 +224,18 @@ class XrayManager {
   /** Forget cached versions (after a download / removal). */
   forgetVersions() { this._versions = {}; this._validated.clear(); }
 
+  /**
+   * The config in the form THIS core's version takes (coreCompat.js: mKCP's
+   * header and seed, hysteria's port hopping moved between 2026 releases).
+   * Only a config holding such a transport costs the `version` call.
+   */
+  async forCore(config, engineId) {
+    if (!needsCoreVersion(config)) return config;
+    const { id } = this.resolveEngine(engineId, { quiet: true });
+    if (engineFormat(id) !== 'xray') return config;
+    return adaptForCore(config, await this.version(id));
+  }
+
   /** Write config to disk. */
   writeConfig(config, file) {
     const target = file || this.currentConfigPath;
@@ -250,6 +263,11 @@ class XrayManager {
   }
 
   validate(config, engineId) {
+    if (!needsCoreVersion(config)) return this._validate(config, engineId);
+    return this.forCore(config, engineId).then(c => this._validate(c, engineId));
+  }
+
+  _validate(config, engineId) {
     return new Promise((resolve) => {
       const { id, bin } = this.resolveEngine(engineId);
       if (!bin) return resolve({ ok: false, error: 'core binary not found' });
@@ -376,7 +394,9 @@ class XrayManager {
       throw new Error('xray binary not found');
     }
 
-    const cfgPath = this.writeConfig(config);
+    // (awaited only when there is something to adapt: start() spawns in the
+    // same tick it was called in otherwise, which the callers' ordering relies on)
+    const cfgPath = this.writeConfig(needsCoreVersion(config) ? await this.forCore(config, id) : config);
     this.onLog(`Starting ${path.basename(bin)} with ${path.basename(cfgPath)}`, 'info');
 
     this.proc = spawn(bin, engineRunArgs(id, cfgPath), {
@@ -479,7 +499,7 @@ class XrayManager {
     const { id, bin } = this.resolveEngine(engineId, { quiet: true });
     if (!bin) throw new Error('xray binary not found');
     const cfgPath = path.join(this.dataDir, `test-${Date.now()}.json`);
-    fs.writeFileSync(cfgPath, JSON.stringify(testConfig, null, 2), 'utf8');
+    fs.writeFileSync(cfgPath, JSON.stringify(needsCoreVersion(testConfig) ? await this.forCore(testConfig, id) : testConfig, null, 2), 'utf8');
 
     const proc = spawn(bin, engineRunArgs(id, cfgPath), { cwd: path.dirname(bin), windowsHide: true, env: this.spawnEnv() });
 
