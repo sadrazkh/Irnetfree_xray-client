@@ -166,6 +166,10 @@ class MuxTest {
         assertEquals(Mux.Probe(true, now), Mux.record(marked.copy(retryAfter = now + 60_000L), Mux.OK, now))
         assertEquals(Mux.Probe(false, now), Mux.record(expiredOk, Mux.UNSUPPORTED, now))
         assertEquals(Mux.Probe(true, now), Mux.record(Mux.Probe(null, now - hour, retryAfter = now), Mux.OK, now))
+        // nothing answered at all: nothing learnt — the entry stays exactly as it was, or stays absent
+        assertEquals(expiredOk, Mux.record(expiredOk, Mux.UNREACHABLE, now))
+        assertEquals(marked, Mux.record(marked, Mux.UNREACHABLE, now))
+        assertNull(Mux.record(null, Mux.UNREACHABLE, now))
     }
 
     @Test fun aDropMarksTheOkForARecheck_keptAsOk() {
@@ -184,12 +188,13 @@ class MuxTest {
         assertEquals(Mux.OK, Mux.verdict(Mux.OK, null))
         assertEquals(Mux.OK, Mux.verdict(Mux.OK, false))
         assertEquals(Mux.UNSUPPORTED, Mux.verdict(Mux.FAILED, true))
-        assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.FAILED, false))
-        assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.FAILED, null))
-        // a slow moment is not a refusal: a mux attempt that ran out of time says nothing, whatever the control says
+        // a slow moment is not a refusal: mux ran out of time while the line works — unknown, kept for an hour
         assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.TIMEOUT, true))
-        assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.TIMEOUT, false))
-        assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.TIMEOUT, null))
+        // the control did not answer either (the phone offline, the server down): nothing learnt, nothing kept
+        assertEquals(Mux.UNREACHABLE, Mux.verdict(Mux.FAILED, false))
+        assertEquals(Mux.UNREACHABLE, Mux.verdict(Mux.FAILED, null))
+        assertEquals(Mux.UNREACHABLE, Mux.verdict(Mux.TIMEOUT, false))
+        assertEquals(Mux.UNREACHABLE, Mux.verdict(Mux.TIMEOUT, null))
     }
 
     /* ---------------- plan: what a connect muxes, and what it tests ---------------- */
@@ -344,16 +349,23 @@ class MuxTest {
         assertEquals(listOf("start mux", "request mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), second.log)
     }
 
-    @Test fun probe_aMuxAttemptThatRanOutOfTimeIsUnknown_evenWhenTheControlWouldAnswer() {
+    @Test fun probe_aMuxAttemptThatRanOutOfTime_isUnknownWhenTheControlAnswers_unreachableWhenItDoesNot() {
         // The router's field case: a slow moment, not a refusal. Through mux the first request needs 6 s, more
-        // than the 5 s it is given; a control without mux would answer in 0.3 s — and made it "unsupported",
-        // remembered for three days. A timeout says nothing whatever the control says, so none is run.
+        // than the 5 s it is given; the control without mux answers in 0.3 s: the line works, mux was only slow —
+        // unknown (never "unsupported", which had been remembered for three days).
         val slow = Cores(mux = listOf(6_000L, 150L), plain = listOf(300L), requestMs = 6_000L, plainMs = 300L)
         assertEquals(Mux.UNKNOWN, slow.probe())
-        assertEquals(listOf("start mux", "request mux", "stop mux"), slow.log)
-        // the second request through mux running out of what is left of the budget: the same
+        assertEquals(listOf("start mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), slow.log)
+        // the control does not answer either — refused, or out of time: nothing is reachable
+        val refused = Cores(mux = listOf(6_000L), plain = listOf(-1L), requestMs = 6_000L, plainMs = 300L)
+        assertEquals(Mux.UNREACHABLE, refused.probe())
+        val silent = Cores(mux = listOf(6_000L), plain = listOf(300L), requestMs = 6_000L, plainMs = 60_000L)
+        assertEquals(Mux.UNREACHABLE, silent.probe())
+        assertTrue("took ${silent.t} ms", silent.t <= Mux.PROBE_BUDGET_MS)
+        // the second request through mux runs out of what is left of the budget: no time for the control,
+        // so nothing is learnt
         val late = Cores(mux = listOf(4_000L, 4_000L), plain = listOf(300L), requestMs = 4_000L, plainMs = 300L)
-        assertEquals(Mux.UNKNOWN, late.probe())
+        assertEquals(Mux.UNREACHABLE, late.probe())
         assertEquals(listOf("start mux", "request mux", "request mux", "stop mux"), late.log)
     }
 
@@ -361,60 +373,62 @@ class MuxTest {
         val c = Cores(mux = emptyList(), plain = listOf(300L), muxStarts = false)
         assertEquals(Mux.UNSUPPORTED, c.probe())
         assertEquals(listOf("start mux", "start plain", "request plain", "stop plain"), c.log)
-        // a control that does not answer either: nothing is known
+        // a control that does not answer either: nothing is reachable
         val d = Cores(mux = emptyList(), plain = listOf(-1L), muxStarts = false)
-        assertEquals(Mux.UNKNOWN, d.probe())
+        assertEquals(Mux.UNREACHABLE, d.probe())
     }
 
     @Test fun probe_aMinusOneWithin150msOfItsTimeIsATimeout_anEarlierOneAFailure() {
         // The round trip says -1 for a refusal and for a timeout alike; the time it took against the time it was
-        // given (5 s for the first request here) tells them apart.
+        // given (5 s for the first request here) tells them apart. The control answers in both cases: after a
+        // timeout that is "unknown", after a refusal "unsupported".
         assertEquals(150L, Mux.TIMEOUT_SLACK_MS)
         val atItsTime = Cores(mux = listOf(-1L), plain = listOf(300L), requestMs = 4_900L, plainMs = 300L)
         assertEquals(Mux.UNKNOWN, atItsTime.probe())
-        assertEquals(listOf("start mux", "request mux", "stop mux"), atItsTime.log)
+        assertEquals(listOf("start mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), atItsTime.log)
         val before = Cores(mux = listOf(-1L), plain = listOf(300L), requestMs = 4_800L, plainMs = 300L)
         assertEquals(Mux.UNSUPPORTED, before.probe())
         assertEquals(listOf("start mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), before.log)
     }
 
-    @Test fun probe_bothFailIsUnknown_andEveryCoreStartedIsStopped() {
+    @Test fun probe_bothFailIsUnreachable_andEveryCoreStartedIsStopped() {
         val c = Cores(mux = listOf(-1L), plain = listOf(-1L))
-        assertEquals(Mux.UNKNOWN, c.probe())
+        assertEquals(Mux.UNREACHABLE, c.probe())
         assertEquals(listOf("start mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), c.log)
         // a control core that does not start: the control did not answer
         val noPlain = Cores(mux = listOf(-1L), plain = emptyList(), plainStarts = false)
-        assertEquals(Mux.UNKNOWN, noPlain.probe())
+        assertEquals(Mux.UNREACHABLE, noPlain.probe())
         assertEquals(listOf("start mux", "request mux", "stop mux", "start plain"), noPlain.log)
     }
 
     @Test fun probe_neverOutlastsItsBudget() {
         assertEquals(8_000L, Mux.PROBE_BUDGET_MS)
-        // nothing ever answers: the first request waits as long as it is given — a timeout, so nothing is known
-        // and no control is run
+        // nothing ever answers: each request waits as long as it is given — the control included, in what is
+        // left — and that is never past the budget
         val dead = Cores(mux = emptyList(), plain = emptyList(), requestMs = 60_000L)
-        assertEquals(Mux.UNKNOWN, dead.probe())
-        assertEquals(listOf(5000), dead.timeouts)
-        assertEquals(listOf("start mux", "request mux", "stop mux"), dead.log)
+        assertEquals(Mux.UNREACHABLE, dead.probe())
+        assertEquals(listOf(5000, 1800), dead.timeouts)
+        assertEquals(listOf("start mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), dead.log)
         assertTrue("took ${dead.t} ms", dead.t <= Mux.PROBE_BUDGET_MS)
         // a slow line that answers in 3 s through mux: both requests fit, the second in what is left
         val slow = Cores(mux = listOf(3000L, 3000L), plain = emptyList(), requestMs = 3_000L)
         assertEquals(Mux.OK, slow.probe())
         assertEquals(listOf(5000, 4400), slow.timeouts)
-        // a refusal late in a small budget: no time left to start the control, so nothing is known
+        // a refusal late in a small budget: no time left to start the control, so nothing is learnt
         val tight = Cores(mux = listOf(-1L), plain = listOf(300L), requestMs = 1_500L, plainMs = 300L)
-        assertEquals(Mux.UNKNOWN, tight.probe(budget = 3_000L))
+        assertEquals(Mux.UNREACHABLE, tight.probe(budget = 3_000L))
         assertEquals(listOf("start mux", "request mux", "stop mux"), tight.log)
         assertTrue("took ${tight.t} ms", tight.t <= 3_000L)
     }
 
     @Test fun probe_aConnectOvertakenStartsNothingMore() {
+        // nothing learnt: nothing is kept either
         val c = Cores(mux = listOf(150L, 140L), plain = listOf(300L))
-        assertEquals(Mux.UNKNOWN, c.probe(wanted = { false }))
+        assertEquals(Mux.UNREACHABLE, c.probe(wanted = { false }))
         assertTrue(c.log.toString(), c.log.isEmpty())
         // overtaken after the first request through mux: no second one, no control
         val d = Cores(mux = listOf(150L, 140L), plain = listOf(300L))
-        assertEquals(Mux.UNKNOWN, d.probe(wanted = { d.log.size < 2 }))
+        assertEquals(Mux.UNREACHABLE, d.probe(wanted = { d.log.size < 2 }))
         assertEquals(listOf("start mux", "request mux", "stop mux"), d.log)
     }
 
@@ -466,18 +480,73 @@ class MuxTest {
     }
 
     @Test fun choose_unknownConnectsAsToday_andIsNotTestedAgainForAnHour() {
+        // unknown: mux ran out of time while the control answered — the line works
         val a = vless("a", name = "Germany WS")
         val fp = Mux.fingerprint(a)
         val seen = Seen()
         assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), answer = Mux.UNKNOWN, seen = seen))
         assertEquals(listOf("a"), seen.probed)
         assertEquals(listOf(Pair(fp, Mux.Probe(null, now, retryAfter = now + hour))), seen.remembered)
-        assertEquals(listOf("Mux: Germany WS did not answer either way — connecting without it"), seen.lines)
+        assertEquals(listOf("Mux off for Germany WS (no clear answer — mux ran out of time, the server answered without it; tested again in an hour)"), seen.lines)
         // the next connect within the hour does not test it
         val again = Seen()
         assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), mapOf(Pair(fp, Mux.Probe(null, now, retryAfter = now + hour))), seen = again))
         assertTrue(again.probed.isEmpty())
         assertEquals(listOf("Mux off for Germany WS (the last test had no clear answer — tested again within the hour)"), again.lines)
+    }
+
+    @Test fun choose_nothingReachableKeepsNothing_andTheNextConnectTestsAgain() {
+        val a = vless("a", name = "A")
+        val fp = Mux.fingerprint(a)
+        // nothing kept before: still nothing — no retry stamped — and the next connect tests again
+        val fresh = Seen()
+        assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), emptyMap(), answer = Mux.UNREACHABLE, seen = fresh))
+        assertEquals(listOf("a"), fresh.probed)
+        assertTrue(fresh.remembered.isEmpty())
+        assertEquals(listOf("Mux: A did not answer either way — connecting without it"), fresh.lines)
+        assertEquals(listOf("a"), Mux.plan(Mux.AUTO, listOf(a), emptyMap(), now).toProbe.map { s: ServerConfig -> s.id })
+        // an expired ok stays exactly as it was: off now, tested again next time
+        val expired = mapOf(fp to Mux.Probe(true, now - 8 * day))
+        val e = Seen()
+        assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), expired, answer = Mux.UNREACHABLE, seen = e))
+        assertTrue(e.remembered.isEmpty())
+        assertEquals(listOf("a"), Mux.plan(Mux.AUTO, listOf(a), expired, now).toProbe.map { s: ServerConfig -> s.id })
+        // an ok marked for a recheck stays on and marked: tested again next time
+        val marked = mapOf(fp to Mux.Probe(true, now - day, recheck = true))
+        val m = Seen()
+        assertEquals(Mux.Pick(setOf("a"), listOf(fp)), choose(Mux.AUTO, ConnectionPlan.Single(a), marked, answer = Mux.UNREACHABLE, seen = m))
+        assertTrue(m.remembered.isEmpty())
+        assertEquals(listOf("Mux on for A (no answer either way this time — the earlier result stands)"), m.lines)
+        assertEquals(listOf("a"), Mux.plan(Mux.AUTO, listOf(a), marked, now).toProbe.map { s: ServerConfig -> s.id })
+    }
+
+    @Test fun choose_withTheProbe_aSlowMuxOnAWorkingLineIsKeptAnHour_nothingReachableKeepsNothing() {
+        val a = vless("a", name = "A")
+        val fp = Mux.fingerprint(a)
+        fun connect(cores: Cores, cache: Map<String, Mux.Probe>): Seen {
+            val seen = Seen()
+            Mux.choose(
+                mode = Mux.AUTO, connection = ConnectionPlan.Single(a), cache = cache, now = { now },
+                test = { s: ServerConfig -> seen.probed.add(s.id); cores.probe() },
+                remember = { f: String, p: Mux.Probe -> seen.remembered.add(Pair(f, p)) },
+                log = { line: String -> seen.lines.add(line) }
+            )
+            return seen
+        }
+        // mux ran out of time and the control answered: the line works — an unknown, not tested again for an hour
+        val slow = connect(Cores(mux = listOf(6_000L), plain = listOf(300L), requestMs = 6_000L, plainMs = 300L), emptyMap())
+        assertEquals(listOf(Pair(fp, Mux.Probe(null, now, retryAfter = now + hour))), slow.remembered)
+        // a refusal or a timeout through mux, and no answer without it: nothing kept, the next connect tests again
+        val expiredOk = mapOf(fp to Mux.Probe(true, now - 8 * day))
+        val nothing = listOf(
+            Cores(mux = listOf(-1L), plain = listOf(-1L)),
+            Cores(mux = emptyList(), plain = emptyList(), requestMs = 60_000L))
+        for (cores in nothing) {
+            val seen = connect(cores, expiredOk)
+            assertEquals(listOf("a"), seen.probed)
+            assertTrue(seen.remembered.toString(), seen.remembered.isEmpty())
+            assertEquals(listOf("a"), Mux.plan(Mux.AUTO, listOf(a), expiredOk, now).toProbe.map { s: ServerConfig -> s.id })
+        }
     }
 
     @Test fun choose_anExpiredOkTestedWithoutAClearAnswer_staysOn_andWaitsAnHour() {

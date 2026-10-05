@@ -20,9 +20,12 @@ import java.security.MessageDigest
  * before, byte for byte.
  *
  * After the review (the same rules as the desktop's): a test without a clear
- * answer never replaces a verdict — it keeps the one there was (expired, or
- * marked for a recheck) and is not repeated for an hour (`retryAfter`); with
- * none, it is kept as an unknown for that hour. A muxed connection that drops
+ * answer on a line that works (mux ran out of time, the control answered)
+ * never replaces a verdict — it keeps the one there was (expired, or marked
+ * for a recheck) and is not repeated for an hour (`retryAfter`); with none,
+ * it is kept as an unknown for that hour. A test where nothing answered at
+ * all (the phone offline, the server down) keeps nothing: the next connect
+ * tests again. A muxed connection that drops
  * keeps its servers' ok, marked `recheck`: the user's (or the boot's) next
  * connect tests them again; a reconnect of the service's own never tests — it
  * uses what is kept, a recheck counting as ok.
@@ -39,13 +42,22 @@ object Mux {
 
     /**
      * A test's verdict: mux carried both requests / mux definitively failed
-     * and plain worked / nothing definite — a timeout, or no answer either way
-     * (it never replaces a verdict: see [record]). [OK] is also the mux
-     * attempt's outcome when it worked.
+     * and the control without it answered / mux ran out of time while the
+     * control answered — the line works, mux was only slow: kept as unknown,
+     * never replacing a verdict, retried in an hour ([record]). [OK] is also
+     * the mux attempt's outcome when it worked.
      */
     const val OK = "ok"
     const val UNSUPPORTED = "unsupported"
     const val UNKNOWN = "unknown"
+
+    /**
+     * A test that learnt nothing: the control did not answer either (the
+     * phone offline, the server down), or the test was cut short. Nothing is
+     * kept — no retry, any verdict untouched — so the next connect that may
+     * test, tests again.
+     */
+    const val UNREACHABLE = "unreachable"
 
     /**
      * The mux attempt's other outcomes: it did not answer before its time ran
@@ -238,15 +250,18 @@ object Mux {
 
     /**
      * What a test's [verdict] leaves kept for a server whose entry was
-     * [previous]: "ok" / "unsupported" replace it (no recheck, no retry); a
-     * test without a clear answer never does — it keeps the verdict there was
-     * (past its age, or marked for a recheck, included) and stamps a retry an
-     * hour on; with no verdict, it is kept as an unknown with that retry.
+     * [previous]: "ok" / "unsupported" replace it (no recheck, no retry); an
+     * unknown (mux out of time on a line that works) never does — it keeps the
+     * verdict there was (past its age, or marked for a recheck, included) and
+     * stamps a retry an hour on; with no verdict, it is kept as an unknown with
+     * that retry. "unreachable" learnt nothing: [previous] as it was (null
+     * stays null) — the caller writes nothing.
      */
-    fun record(previous: Probe?, verdict: String, now: Long): Probe = when (verdict) {
+    fun record(previous: Probe?, verdict: String, now: Long): Probe? = when (verdict) {
         OK -> Probe(true, now)
         UNSUPPORTED -> Probe(false, now)
-        else -> if (previous != null && previous.ok != null) previous.copy(retryAfter = now + RETRY_MS) else Probe(null, now, retryAfter = now + RETRY_MS)
+        UNKNOWN -> if (previous != null && previous.ok != null) previous.copy(retryAfter = now + RETRY_MS) else Probe(null, now, retryAfter = now + RETRY_MS)
+        else -> previous
     }
 
     /** A muxed connection dropped: the ok verdicts of its servers ([fingerprints]) are kept, marked for a recheck. */
@@ -261,13 +276,15 @@ object Mux {
 
     /**
      * The test's verdict, from the mux attempt's outcome — [OK] | [TIMEOUT] |
-     * [FAILED] — and the control's (null = not run): mux ok → "ok"; mux failed
-     * and the control answered → "unsupported"; a mux timeout, whatever the
-     * control says, or a control that did not answer → "unknown".
+     * [FAILED] — and the control's (null = not run): mux ok → "ok"; the
+     * control did not answer (or never ran) → "unreachable", nothing learnt;
+     * mux failed and the control answered → "unsupported"; mux ran out of time
+     * and the control answered → "unknown" — the line works, mux was only slow.
      */
     fun verdict(mux: String, plainOk: Boolean?): String = when {
         mux == OK -> OK
-        mux == FAILED && plainOk == true -> UNSUPPORTED
+        plainOk != true -> UNREACHABLE
+        mux == FAILED -> UNSUPPORTED
         else -> UNKNOWN
     }
 
@@ -277,19 +294,21 @@ object Mux {
      * the other — both must answer. That attempt is [OK]; a [TIMEOUT] when a
      * request did not answer before its time ran out, or the budget did; or
      * [FAILED] when a request failed before its time (refused, reset, closed)
-     * or the core could not start. Only after FAILED does one request go
-     * through a core without mux ([start] false), and only then can a server be
-     * "unsupported". A slow moment is not a refusal: a mux attempt that ran out
-     * of time says nothing whatever a control would say (the router's field
-     * case — a timeout, then an answering control, was remembered as
-     * "unsupported" for three days), so after a TIMEOUT no control is run.
+     * or the core could not start. After a TIMEOUT or a FAILED, one request
+     * goes through a core without mux ([start] false), the control: it tells a
+     * server that refuses mux ("unsupported", only after a FAILED) and a line
+     * that works while mux was only slow ("unknown", after a TIMEOUT — a slow
+     * moment is not a refusal: the router's field case had been remembered as
+     * "unsupported" for three days) from nothing reachable at all
+     * ("unreachable": the phone offline, the server down — nothing is kept).
      *
      * Every core started is stopped, and the whole test stays within
      * [budgetMs]: each request gets at most what is left ([REQUEST_MS] at the
      * most), and nothing more is started once too little is. [request] makes
      * one request through a core within the ms it is given: its round trip, or
      * a negative number when it did not answer. [wanted]: false once the
-     * connect this is for has been overtaken — nothing more starts, "unknown".
+     * connect this is for has been overtaken — nothing more starts, and nothing
+     * was learnt: "unreachable".
      */
     fun <H : Any> probe(
         start: (Boolean) -> H?,
@@ -324,10 +343,11 @@ object Mux {
                 try { stop(h) } catch (e: Exception) { }
             }
         }
-        val muxOutcome = attempt(true, 2) ?: return UNKNOWN
-        if (muxOutcome != FAILED) return verdict(muxOutcome, null)
+        val muxOutcome = attempt(true, 2) ?: return UNREACHABLE
+        if (muxOutcome == OK) return OK
+        // refused or out of time: the control tells the server, the line or nothing at all
         val plain = attempt(false, 1)
-        return verdict(FAILED, if (plain == null) null else plain == OK)
+        return verdict(muxOutcome, if (plain == null) null else plain == OK)
     }
 
     /**
@@ -373,7 +393,8 @@ object Mux {
      * in. In auto the SELECTED server — a single-server plan's — is tested
      * ([test]) when [plan] says so: nothing known, a verdict past its age, or
      * an ok marked for a recheck, and not before its retryAfter. What a test
-     * says is kept through [record] ([remember] stores it). A pool's or an
+     * says is kept through [record] ([remember] stores it) — nothing at all
+     * when it says "unreachable". A pool's or an
      * advanced plan's servers are not tested on a phone, one throwaway core per
      * server before every connect: they use what is kept. [recovery]: a
      * reconnect of the service's own — no test at all. One log line per server
@@ -407,7 +428,9 @@ object Mux {
             val fp = fingerprint(s)
             val v = test(s)
             testedNow[fp] = v
-            val p = record(known[fp], v, now())
+            // nothing reachable (or the test cut short): nothing is written — the next connect tests again
+            if (v != OK && v != UNSUPPORTED && v != UNKNOWN) continue
+            val p = record(known[fp], v, now()) ?: continue
             known[fp] = p
             remember(fp, p)
         }
@@ -431,9 +454,14 @@ object Mux {
         val state = if (on) "on" else "off"
         if (testedNow == OK) return "Mux on for $name (tested: works)"
         if (testedNow == UNSUPPORTED) return "Mux off for $name (this server does not accept it)"
-        if (testedNow != null) {
-            if (e?.ok == null) return "Mux: $name did not answer either way — connecting without it"
+        if (testedNow == UNKNOWN) {
+            if (e?.ok == null) return "Mux off for $name (no clear answer — mux ran out of time, the server answered without it; tested again in an hour)"
             return "Mux $state for $name (no clear answer this time — keeping the earlier result, tested again in an hour)"
+        }
+        if (testedNow != null) {
+            // unreachable: nothing was kept, whatever was there stands
+            if (on) return "Mux on for $name (no answer either way this time — the earlier result stands)"
+            return "Mux: $name did not answer either way — connecting without it"
         }
         val earlier = when (e?.ok) {
             true -> "tested earlier: works"
