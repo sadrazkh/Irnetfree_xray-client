@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
@@ -50,6 +51,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -62,6 +64,8 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.window.Dialog
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -105,6 +109,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 
 /* The palette and the two type families live in Theme.kt. */
 
@@ -175,6 +182,10 @@ private fun App(store: Store) {
         }
     }
     AutoConnect(store)
+    // Is a newer IRNetFree out? GitHub is asked at most once a day
+    // (AppWork.checkForUpdate); Home shows the card.
+    val ctx = LocalContext.current
+    LaunchedEffect(Unit) { AppWork.checkForUpdate(ctx, store) }
 
     Scaffold(containerColor = BG, snackbarHost = {
         SnackbarHost(snackHost) { d -> Snackbar(d, containerColor = CARD2, contentColor = TXT, actionColor = PRIMARY) }
@@ -332,28 +343,13 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         else { spark.add(traffic.rxSpeed to traffic.txSpeed); while (spark.size > 60) spark.removeAt(0) }
     }
 
-    // What to do once Android has said yes: "fastest", or a plain connect.
-    // Saveable, because both system dialogs are other activities and this one
-    // can be recreated behind them.
-    var afterConsent by rememberSaveable { mutableStateOf("connect") }
-    fun proceed() { if (afterConsent == "fastest") AppWork.connectFastest(ctx, store) else doConnect(ctx, store) }
-    val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        if (res.resultCode == android.app.Activity.RESULT_OK) proceed()
-        else AppWork.snack("Android’s VPN permission was not given — nothing was connected")
+    // What to do once Android has said yes (rememberConsent): "fastest", or a
+    // plain connect.
+    val withConsent = rememberConsent(store) { then: String ->
+        if (then == "fastest") AppWork.connectFastest(ctx, store) else doConnect(ctx, store)
     }
-    fun vpnConsentThenProceed() {
-        val prep: Intent? = VpnService.prepare(ctx)
-        if (prep != null) vpnPrepare.launch(prep) else proceed()
-    }
-    // Android 13+ shows no notification without POST_NOTIFICATIONS — and the
-    // VPN's status notification is where its Disconnect button lives. Asked
-    // once, before the first connect; granted or refused, the connect goes on.
-    val notifAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> vpnConsentThenProceed() }
-    fun withConsent(then: String) {
-        afterConsent = then
-        if (needsNotificationAsk(ctx, store)) { store.notifAsked = true; notifAsk.launch(Manifest.permission.POST_NOTIFICATIONS) }
-        else vpnConsentThenProceed()
-    }
+    // A newer IRNetFree, from the once-a-day check ("" = none, or put off with Later).
+    val update by AppWork.updateAvailable.collectAsState()
     /**
      * The ring and the button under your thumb. While something is on its way
      * it CANCELS: ⚡ stops measuring (a tunnel already up stays up), and a
@@ -453,6 +449,12 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         HorizontalDivider(color = STROKE)
 
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 20.dp)) {
+            /* ---- a newer IRNetFree: on a phone, the way newer cores arrive ---- */
+            if (update.isNotEmpty()) {
+                UpdateCard(update, onDownload = { openUpdate(ctx, store) }, onLater = { AppWork.dismissUpdate(store) })
+                Spacer(Modifier.height(16.dp))
+            }
+
             /* ---- the ring ---- */
             PowerRing(state, busy, ::onPower)
             Spacer(Modifier.height(14.dp))
@@ -838,6 +840,38 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     }
 }
 
+/**
+ * "IRNetFree vX is out" (AppWork.checkForUpdate). Android runs no core an app
+ * downloads, so on a phone the newer cores come inside the newer APK — the
+ * card says so. Download opens the release's APK (the browser takes it from
+ * there); Later puts this version off for good, and a newer one is said again.
+ */
+@Composable private fun UpdateCard(version: String, onDownload: () -> Unit, onLater: () -> Unit) {
+    val v = if (version.startsWith("v")) version else "v$version"
+    Card(
+        Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = CARD), border = BorderStroke(1.dp, PRIMARY_DIM)
+    ) {
+        Column(Modifier.padding(start = 14.dp, end = 6.dp, top = 12.dp)) {
+            Text("IRNetFree $v is out — the cores and fixes come with the app", color = TXT, fontSize = 13.sp, modifier = Modifier.padding(end = 8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onLater) { Text("Later", color = MUTED, fontSize = 13.sp) }
+                TextButton(onClick = onDownload) { Text("Download", color = PRIMARY, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
+            }
+        }
+    }
+}
+
+/** Where Download goes when GitHub named no page at all. */
+private const val RELEASES_PAGE = "https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"
+
+/** Open the newer release's APK (else its page) in whatever handles a link. */
+private fun openUpdate(ctx: Context, store: Store) {
+    val url = store.updateUrl.ifBlank { RELEASES_PAGE }
+    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+        .onFailure { AppWork.snack("Nothing on this phone can open $url") }
+}
+
 private fun doConnect(ctx: Context, store: Store) {
     try { VpnState.set(ConnState.CONNECTING, store.selectionLabel()); XrayVpnService.connect(ctx, store) }
     catch (e: Exception) { VpnState.set(ConnState.ERROR, error = e.message ?: "connect failed") }
@@ -1131,10 +1165,14 @@ private object AppWork {
      * ⚡: measure, choose, save the choice, connect to it. Android's permissions
      * were asked for by the screen before this started, so the end of the run
      * needs no screen at all.
+     *
+     * [scope]: only these servers — a group's ⚡ on its header — named
+     * [scopeName] wherever the run speaks; null = every server (Home's ⚡).
      */
-    fun connectFastest(ctx: Context, store: Store) {
-        val list = store.servers.toList()
+    fun connectFastest(ctx: Context, store: Store, scope: List<ServerConfig>? = null, scopeName: String? = null) {
+        val list = (scope ?: store.servers).toList()
         if (list.size < 2 || fastestPhase.value.isNotEmpty()) return
+        val inScope = if (scope != null && !scopeName.isNullOrBlank()) " in $scopeName" else ""
         val app = ctx.applicationContext
         val run = ++fastestRun
         // Only this run's words reach the screen: one cancelled a moment ago
@@ -1145,7 +1183,8 @@ private object AppWork {
         // A connect or a disconnect asked for while ⚡ measures (it takes seconds)
         // is the user's newer word: ⚡ then applies nothing at its end.
         val ticket = XrayVpnService.moves
-        fastestJob = scope.launch {
+        // this.scope: AppWork's coroutines — `scope` alone is the servers parameter
+        fastestJob = this.scope.launch {
             try {
                 val out = pickFastest(app, list, phase)
                 if (XrayVpnService.moves != ticket) {
@@ -1161,8 +1200,8 @@ private object AppWork {
                     val gone = best?.let { b -> list.firstOrNull { it.id == b.id }?.name ?: "the winner" }
                     val why = when {
                         gone != null -> "$gone won but was removed during the test"
-                        out.answered == 0 -> "no server answered"
-                        else -> "none of the ${out.tried} quickest carried traffic"
+                        out.answered == 0 -> "no server$inScope answered"
+                        else -> "none of the ${out.tried} quickest$inScope carried traffic"
                     }
                     fastestNote.value = "$why — the selection was left alone"
                     VpnState.addLog("Auto (fastest): $why; kept ${store.selectionLabel()}")
@@ -1173,9 +1212,9 @@ private object AppWork {
                 val how = if (real >= 0) "$real ms through it" else "${best.tcp ?: -1L} ms handshake"
                 store.saveSelection(best.id)
                 storeRev.value = storeRev.value + 1
-                fastestNote.value = "⚡ fastest of ${list.size}: ${srv.name} · $how"
-                VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers")
-                snack("Fastest: ${srv.name} · $how")
+                fastestNote.value = "⚡ fastest of ${list.size}$inScope: ${srv.name} · $how"
+                VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers$inScope")
+                snack("Fastest$inScope: ${srv.name} · $how")
                 // Already up on something else: the service switches a live tunnel
                 // onto the new choice itself (one tunnel, no gap without the VPN),
                 // so there is no disconnect first any more.
@@ -1200,6 +1239,73 @@ private object AppWork {
         pendingConnect?.cancel()
         pendingConnect = scope.launch { delay(600); pendingConnect = null; doConnect(app, store) }
     }
+
+    /** A newer IRNetFree than this one, for the card on Home ("" = none, or put off with Later). */
+    val updateAvailable = MutableStateFlow("")
+    private var updateJob: Job? = null
+
+    /**
+     * "A newer IRNetFree is out": GitHub's latest release, asked for at most
+     * once a day (UpdateCheck) — directly, the app being outside its own tunnel.
+     * Android runs no core an app downloads, so a newer core reaches a phone
+     * only inside a newer APK, and this is how the phone hears of one. What the
+     * last answer said is shown at once; only a 200 counts as an answer, a
+     * failure is one log line and nothing on screen, and the next start asks again.
+     */
+    fun checkForUpdate(ctx: Context, store: Store) {
+        val current = appVersion(ctx)
+        publishUpdate(store, current)
+        if (updateJob?.isActive == true || !UpdateCheck.due(store.updateCheckedAt, System.currentTimeMillis())) return
+        updateJob = scope.launch {
+            try {
+                val (tag, url) = withContext(Dispatchers.IO) { latestRelease() }
+                store.updateLatest = tag
+                store.updateUrl = url
+                store.updateCheckedAt = System.currentTimeMillis()
+                publishUpdate(store, current)
+                if (UpdateCheck.newer(tag, current)) VpnState.addLog("Update check: IRNetFree $tag is out (this is $current) — $url")
+                else VpnState.addLog("Update check: the latest release is $tag — this build ($current) is not older")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                VpnState.addLog("Update check: GitHub could not be asked — ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /** "Later" on the card: this version is not mentioned again; a newer one will be. */
+    fun dismissUpdate(store: Store) {
+        val v = updateAvailable.value
+        if (v.isEmpty()) return
+        store.updateDismissed = v
+        updateAvailable.value = ""
+    }
+
+    /** The newest release GitHub named, when it is newer than this build and was not put off. */
+    private fun publishUpdate(store: Store, current: String) {
+        val latest = store.updateLatest
+        val show = latest.isNotEmpty() && latest != store.updateDismissed && UpdateCheck.newer(latest, current)
+        updateAvailable.value = if (show) latest else ""
+    }
+
+    /** GitHub's latest release: its tag, and its APK (else its page). Blocking — IO only. */
+    private fun latestRelease(): Pair<String, String> {
+        val c = URL(UpdateCheck.LATEST_URL).openConnection() as HttpURLConnection
+        try {
+            c.connectTimeout = 10_000
+            c.readTimeout = 10_000
+            c.setRequestProperty("User-Agent", "IRNetFree-Android")
+            c.setRequestProperty("Accept", "application/vnd.github+json")
+            val code = c.responseCode
+            if (code != 200) throw IllegalStateException("HTTP $code")
+            val release = JSONObject(c.inputStream.bufferedReader().use { r -> r.readText() })
+            val tag = release.optString("tag_name")
+            if (tag.isEmpty()) throw IllegalStateException("the latest release names no version")
+            return Pair(tag, UpdateCheck.downloadUrl(release))
+        } finally {
+            c.disconnect()
+        }
+    }
 }
 
 /**
@@ -1214,6 +1320,37 @@ private object AppWork {
 private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
     Build.VERSION.SDK_INT >= 33 && !store.notifAsked &&
         ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+
+/**
+ * Android's permissions before anything connects, asked by the screen that is
+ * about to connect (Home's ring and ⚡, a group's ⚡ on Servers). The returned
+ * function takes the word for what follows — "connect", "fastest", a group's
+ * key — and [proceed] gets it back once Android has said yes. The word is
+ * saveable, because both system dialogs are other activities and the screen
+ * can be recreated behind them.
+ *
+ * Android 13+ shows no notification without POST_NOTIFICATIONS — and the VPN's
+ * status notification is where its Disconnect button lives. Asked once, before
+ * the first connect; granted or refused, the connect goes on to the VPN consent.
+ */
+@Composable private fun rememberConsent(store: Store, proceed: (String) -> Unit): (String) -> Unit {
+    val ctx = LocalContext.current
+    var afterConsent by rememberSaveable { mutableStateOf("connect") }
+    val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        if (res.resultCode == android.app.Activity.RESULT_OK) proceed(afterConsent)
+        else AppWork.snack("Android’s VPN permission was not given — nothing was connected")
+    }
+    fun vpnConsentThenProceed() {
+        val prep: Intent? = VpnService.prepare(ctx)
+        if (prep != null) vpnPrepare.launch(prep) else proceed(afterConsent)
+    }
+    val notifAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> vpnConsentThenProceed() }
+    return { then: String ->
+        afterConsent = then
+        if (needsNotificationAsk(ctx, store)) { store.notifAsked = true; notifAsk.launch(Manifest.permission.POST_NOTIFICATIONS) }
+        else vpnConsentThenProceed()
+    }
+}
 
 
 /**
@@ -1348,6 +1485,21 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     val tests = AppWork.tests
     val testingAll by AppWork.testingAll.collectAsState()
     val busy by AppWork.subsBusy.collectAsState()
+    // 📶 and ⚡ on a group's header, acting on the whole group. ⚡ is AppWork's
+    // run, as on Home, after Android's permissions (rememberConsent): the group
+    // goes through the consent dialogs as its key, and its servers are looked
+    // up again once Android has answered. Which header asked is kept here only
+    // to put the spinner, and ⚡'s progress, on that header.
+    val fastestPhase by AppWork.fastestPhase.collectAsState()
+    var fastestKey by remember { mutableStateOf("") }
+    var testKey by remember { mutableStateOf("") }
+    val haptic = LocalHapticFeedback.current
+    val groupFastest = rememberConsent(store) { then: String ->
+        val key = then.removePrefix("group:")
+        val g = ServerGroups.build(store.servers, store.subs, "", emptySet(), "").firstOrNull { it.key == key }
+        if (g == null || g.all.size < 2) AppWork.snack("That group no longer has two servers to choose from")
+        else { fastestKey = g.key; AppWork.connectFastest(ctx, store, g.all, g.title) }
+    }
     // The row whose actions are showing. Only ever one, and nothing to begin
     // with: arriving at the list should show the list, not a card mid-flight.
     var openId by remember { mutableStateOf("") }
@@ -1382,7 +1534,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
             if (store.servers.isNotEmpty()) Box(
                 Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(50))
                     .clickable(onClickLabel = if (testingAll) "stop testing" else "test every server") {
-                        if (testingAll) AppWork.stopTests() else AppWork.testAll(ctx, store.servers.toList())
+                        if (testingAll) AppWork.stopTests() else { testKey = ""; AppWork.testAll(ctx, store.servers.toList()) }
                     }
                     .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.Center
@@ -1449,7 +1601,15 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                             GroupHeader(
                                 g, now, refreshing = sub != null && sub.id in busy, foldable = !searching,
                                 onToggle = { collapsed = ServerGroups.toggle(collapsed, g.key); store.collapsedGroups = collapsed },
-                                onRefresh = refresh
+                                onRefresh = refresh,
+                                onTest = { testKey = g.key; AppWork.testAll(ctx, g.all) },
+                                onFastest = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    AutoConnectOnce.manual = true
+                                    groupFastest("group:" + g.key)
+                                },
+                                testBusy = testingAll, testingHere = testingAll && testKey == g.key,
+                                fastestBusy = fastestPhase.isNotEmpty(), fastestPhase = if (fastestKey == g.key) fastestPhase else ""
                             )
                         }
                         is ServerGroups.ListEntry.Item -> {
@@ -1541,6 +1701,13 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
  * A group's header: tap it to fold or unfold the group. A subscription's shows
  * its usage, expiry and last update, and a refresh button of its own; a folded
  * group holding the server in use says so.
+ *
+ * A group of two or more also gets 📶 — test every server in it, as "ping all"
+ * does — and ⚡ — connect to its fastest, as Home's ⚡ does for every server.
+ * Both act on the whole group, whatever a search shows of it. 📶 waits while a
+ * test is running ([testBusy]; "stop testing" up top stops it), ⚡ while a ⚡ is
+ * ([fastestBusy]); the group whose own run it is shows a spinner instead, and
+ * [fastestPhase] — what ⚡ is measuring in it — where its summary was.
  */
 @Composable private fun GroupHeader(
     g: ServerGroups.Group,
@@ -1548,15 +1715,28 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
     refreshing: Boolean,
     foldable: Boolean,
     onToggle: () -> Unit,
-    onRefresh: (() -> Unit)?
+    onRefresh: (() -> Unit)?,
+    onTest: (() -> Unit)?,
+    onFastest: (() -> Unit)?,
+    testBusy: Boolean,
+    testingHere: Boolean,
+    fastestBusy: Boolean,
+    fastestPhase: String
 ) {
     val summary = g.sub?.let { ServerGroups.summary(it, now) }
-    val line = summary?.text ?: if (g.key == ServerGroups.MANUAL) "added by hand" else "their subscription was deleted"
-    val tint = when (summary?.level) {
-        ServerGroups.LEVEL_BAD -> BAD
-        ServerGroups.LEVEL_WARN -> AMBER
+    val line = when {
+        fastestPhase.isNotEmpty() -> "⚡ $fastestPhase"
+        summary != null -> summary.text
+        g.key == ServerGroups.MANUAL -> "added by hand"
+        else -> "their subscription was deleted"
+    }
+    val tint = when {
+        fastestPhase.isNotEmpty() -> AMBER
+        summary?.level == ServerGroups.LEVEL_BAD -> BAD
+        summary?.level == ServerGroups.LEVEL_WARN -> AMBER
         else -> MUTED2
     }
+    val actions = g.total >= 2
     Row(
         Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp).heightIn(min = 52.dp).clip(RoundedCornerShape(12.dp))
             .clickable(enabled = foldable, onClickLabel = if (g.open) "fold" else "unfold") { onToggle() }
@@ -1590,11 +1770,28 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
                     )
                 }
             }
-            Text(line, color = tint, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // two lines: with 📶 and ⚡ beside it a phone leaves the line half its width
+            Text(line, color = tint, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
+        if (actions && onTest != null) GroupAction("📶", "test every server in ${g.title}", enabled = !testBusy, running = testingHere, onClick = onTest)
+        if (actions && onFastest != null) GroupAction("⚡", "connect to the fastest in ${g.title}", enabled = !fastestBusy, running = fastestPhase.isNotEmpty(), onClick = onFastest)
         if (onRefresh != null) IconButton(onClick = onRefresh, enabled = !refreshing) {
             if (refreshing) CircularProgressIndicator(color = PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
             else Icon(Icons.Filled.Refresh, "refresh ${g.title}", tint = MUTED)
+        }
+    }
+}
+
+/**
+ * One of a group header's emoji buttons, the size of the refresh beside it. An
+ * emoji keeps its own colours whatever the button's, so a button that has to
+ * wait is dimmed by hand; one whose run is going shows a spinner instead.
+ */
+@Composable private fun GroupAction(glyph: String, label: String, enabled: Boolean, running: Boolean, onClick: () -> Unit) {
+    IconButton(onClick = onClick, enabled = enabled && !running) {
+        Box(Modifier.clearAndSetSemantics { contentDescription = label }, contentAlignment = Alignment.Center) {
+            if (running) CircularProgressIndicator(color = PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+            else Text(glyph, fontSize = 16.sp, modifier = Modifier.alpha(if (enabled) 1f else 0.35f))
         }
     }
 }
@@ -2409,6 +2606,14 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             else "PattN is upstream Xray plus one thing: it does not refuse a plaintext VLESS/Trojan config to a public address, which the official core rejects at load. Everything else behaves identically.",
             color = MUTED, fontSize = 11.sp
         )
+        // What this APK carries, as the cores themselves say it — off the main
+        // thread, since PattN is asked by running it. Android runs no core an
+        // app downloads, so these change only with a newer IRNetFree.
+        val cores by produceState(coresKnown.ifEmpty { "Cores in this app: …" }) {
+            if (coresKnown.isEmpty()) coresKnown = withContext(Dispatchers.IO) { coresLine(ctx) }
+            value = coresKnown
+        }
+        Text(cores, color = MUTED, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.padding(top = 6.dp))
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
         Text("Per-app routing", color = TXT, fontWeight = FontWeight.Bold)
         listOf("off" to "Off (whole system)", "allow" to "Only these apps", "disallow" to "All except these").forEach { (v, l) ->
@@ -2417,6 +2622,26 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         if (s.perAppMode != "off") AppPicker(s.perApps) { save(s.copy(perApps = it)) }
         LanShareSection(store)
     }
+}
+
+/**
+ * Settings' cores line once worked out: the cores inside an APK do not change
+ * while it runs, and every setting saved rebuilds the screen (no "…" flash).
+ */
+private var coresKnown = ""
+
+/**
+ * "Cores in this app: Xray 26.9.30 · Xray-PattN 26.10.3 · sing-box —" — the
+ * in-process core's own answer (Libv2ray.checkVersionX, "Lib v…, Xray-core
+ * v26.9.30", trimmed to its number) and PattN's `version`; "—" for a core that
+ * is not bundled here or cannot say (sing-box has no version call in this app).
+ * Blocking: PattN is run once.
+ */
+private fun coresLine(ctx: Context): String {
+    val num = Regex("""\d+\.\d+\.\d+""")
+    val xray = XrayCore.version().let { v -> num.find(v)?.value ?: v.ifBlank { "—" } }
+    val pattn = XrayPattnCore.version(ctx).ifBlank { "—" }
+    return "Cores in this app: Xray $xray · Xray-PattN $pattn · sing-box —"
 }
 
 @Composable private fun AppPicker(selected: List<String>, onChange: (List<String>) -> Unit) {

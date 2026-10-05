@@ -71,6 +71,22 @@ class ServerGroupsTest {
         assertTrue(ServerGroups.entries(none, searching = true).isEmpty())
     }
 
+    @Test fun aGroupHoldsAllOfItsServersWhateverTheSearchShows() {
+        // 📶 and ⚡ on a header act on the whole group, not on what a search left of it
+        val searched = ServerGroups.build(servers, listOf(panel, work), "cdn", emptySet(), "")
+        val p = searched.first { it.key == "sub:p" }
+        assertEquals(listOf("p2"), p.servers.map { it.id })
+        assertEquals(listOf("p1", "p2"), p.all.map { it.id })
+        assertEquals(p.total, p.all.size)
+        // a folded group holds them too
+        val folded = ServerGroups.build(servers, listOf(panel, work), "", setOf("manual"), "")
+        assertEquals(listOf("m1", "m2"), folded.first { it.key == "manual" }.all.map { it.id })
+        // no search: the two lists are the same, group by group
+        val plain = ServerGroups.build(servers, listOf(panel, work), "", emptySet(), "")
+        assertEquals(plain.map { g -> g.servers.map { it.id } }, plain.map { g -> g.all.map { it.id } })
+        assertEquals(listOf("o1"), plain.first { it.key == "orphan" }.all.map { it.id })
+    }
+
     @Test fun everyLineHasAUniqueKeyEvenWhenAnIdRepeats() {
         val twice = listOf(srv("x", "one"), srv("x", "two"), srv("x", "three", "p"), srv("y", "four", "p"))
         // the same subscription listed twice is shown once
