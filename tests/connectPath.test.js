@@ -219,6 +219,31 @@ test('both mirrors count an edit of a server the live connection dials as a pend
   }
 });
 
+/* --------------- v1.18: ECH asked of an official Xray too old to know it --------------- */
+
+test('ECH on an official Xray older than 25.8.3, no Xray-PattN: both mirrors refuse the connect in the same plain words — the router as a refusal', () => {
+  // xrayManager.validateWithFallback answers { echUnsupported, coreVersion }:
+  // the old core would pass the config and connect WITHOUT the ECH it asks for
+  const EN = '`This server uses ECH, which Xray ${check.coreVersion} does not know (it would connect without it) — update Xray under Settings → Required files`';
+  const FA = '`این سرور از ECH استفاده می‌کند و Xray ${check.coreVersion} آن را نمی‌شناسد (بدون ECH وصل می‌شد) — از تنظیمات ← فایل‌های موردنیاز، Xray را به‌روز کن`';
+  const LOGGED = "send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });";
+  for (const [label, body] of Object.entries(CONNECT)) {
+    const at = body.indexOf('if (check.echUnsupported) {');
+    assert.notEqual(at, -1, `${label}: an official core too old for ECH is not refused`);
+    const branch = body.slice(at, body.indexOf('\n', body.indexOf(FA, at)));
+    assert.ok(branch.includes(EN), `${label}: the English words`);
+    assert.ok(branch.includes(FA), `${label}: the Persian words`);
+    assert.match(branch, /settings\.lang === 'en'\s*\n\s*\? `This server uses ECH/, `${label}: in the user’s language`);
+    // inside the refused check, after its log line: the core’s error is still in the log
+    assert.ok(body.indexOf('if (!check.ok) {') < body.indexOf(LOGGED) && body.indexOf(LOGGED) < at, `${label}: after the log line of a refused check`);
+  }
+  assert.match(CONNECT['main.js'], /if \(check\.echUnsupported\) \{\n\s*throw new Error\(settings\.lang === 'en'/);
+  // the router: a refusal (the boot loop and the recovery do not hammer a core that cannot learn ECH by retrying), before the Xray-PattN one
+  const service = CONNECT['service.js'];
+  assert.match(service, /if \(check\.echUnsupported\) \{\n\s*throw refusal\(settings\.lang === 'en'/);
+  assert.ok(service.indexOf('if (check.echUnsupported) {') < service.indexOf('if (check.pattnNeeded) {'));
+});
+
 /* ------------------------------ A3: the live NIC ------------------------------ */
 
 test('every connect reads the NIC again — a live tunnel keeps its old name only when the read names nothing usable', () => {
