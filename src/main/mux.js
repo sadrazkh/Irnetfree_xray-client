@@ -74,9 +74,13 @@ const PROTOCOLS = new Set(['vless', 'vmess', 'trojan']);
 // `websocket` is the core's other name for ws
 const NETWORKS = new Set(['ws', 'websocket', 'httpupgrade']);
 
-/** The setting, read: 'on' and 'off' as they are, anything else the default 'auto'. */
+/**
+ * The setting, read: 'auto' and 'on' as they are, anything else the default
+ * 'off' — the owner's choice: nothing changes unless he turns it on, so a
+ * settings file without the key (or with junk in it) reads Off.
+ */
 function muxMode(v) {
-  return v === 'on' || v === 'off' ? v : 'auto';
+  return v === 'auto' || v === 'on' ? v : 'off';
 }
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);

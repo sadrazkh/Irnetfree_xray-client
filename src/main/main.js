@@ -225,8 +225,9 @@ const DEFAULT_SETTINGS = {
   defaultEngine: 'xray',
   // mux on the servers' own outbounds (mux.js): 'auto' tests each ws /
   // httpupgrade server once and muxes it where it works, 'on' every such
-  // server untested, 'off' never. Written into the config: a reconnect key.
-  mux: 'auto'
+  // server untested, 'off' never — the default: nothing changes unless the
+  // user turns it on. Written into the config: a reconnect key.
+  mux: 'off'
 };
 
 function dataDir() {

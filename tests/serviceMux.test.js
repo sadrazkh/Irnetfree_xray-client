@@ -43,8 +43,9 @@ const WS = Object.assign(parseLink(`vless://${UUID}@104.21.44.18:2087?encryption
 const FP = muxFingerprint(WS);
 
 /**
- * A router with the ws server; `answers` is what the probe says, in order (the
- * last one repeats); `memory` is the store's muxProbes it starts with.
+ * A router with the ws server and mux set to Auto (the default is off);
+ * `answers` is what the probe says, in order (the last one repeats); `memory`
+ * is the store's muxProbes it starts with.
  */
 function router(settings = {}, answers = ['ok'], memory = undefined) {
   const probes = [];
@@ -53,7 +54,7 @@ function router(settings = {}, answers = ['ok'], memory = undefined) {
     s.state.events.push('mux:probe ' + server.id);
     return answers[Math.min(probes.length - 1, answers.length - 1)];
   };
-  const s = h.start(Object.assign({ servers: [WS, h.SERVER], settings }, memory ? { muxProbes: memory } : {}), { probeMux });
+  const s = h.start(Object.assign({ servers: [WS, h.SERVER], settings: Object.assign({ mux: 'auto' }, settings) }, memory ? { muxProbes: memory } : {}), { probeMux });
   s.probes = probes;
   return s;
 }
@@ -61,7 +62,19 @@ const liveProxy = (s) => s.state.xray.starts.at(-1).config.outbounds.find((o) =>
 const saved = (s) => JSON.parse(fs.readFileSync(path.join(s.dir, 'store.json'), 'utf8'));
 const lines = (s, re) => s.logs.filter((l) => re.test(l.line));
 
-test('auto (the default): the first connect tests the server before its core starts, muxes it, and remembers the answer', async (t) => {
+test('the default is off (a settings file without the key reads Off): nothing is tested, nothing said, and the config is the one without mux', async (t) => {
+  // The owner has never run mux on any client: nothing changes unless he turns it on.
+  const probes = [];
+  const s = h.start({ servers: [WS, h.SERVER] }, { probeMux: async () => { probes.push(1); return 'ok'; } });
+  t.after(() => s.service.shutdown());
+  assert.equal((await s.service.invoke('settings:get')).mux, 'off');
+  await s.service.invoke('connect', WS.id);
+  assert.equal(probes.length, 0);
+  assert.equal(JSON.stringify(s.state.xray.starts.at(-1).config).includes('"mux"'), false);
+  assert.deepEqual(lines(s, /^Mux/), []);
+});
+
+test('auto: the first connect tests the server before its core starts, muxes it, and remembers the answer', async (t) => {
   const s = router();
   t.after(() => s.service.shutdown());
   const before = Date.now();
@@ -204,7 +217,7 @@ test('a boot connect whose probe finds nothing reachable remembers nothing — t
     s.state.gatewayFails = false;                     // the WAN is up now
     return 'ok';
   };
-  const s = h.start({ servers: [WS, h.SERVER], connectIntent: WS.id, lastServerId: WS.id, settings: { autoConnect: true } }, { probeMux });
+  const s = h.start({ servers: [WS, h.SERVER], connectIntent: WS.id, lastServerId: WS.id, settings: { autoConnect: true, mux: 'auto' } }, { probeMux });
   t.after(() => s.service.shutdown());
   s.state.gatewayFails = true;
   await h.until(() => h.connectedCount(s) === 1, 'the boot loop’s second attempt');
@@ -224,7 +237,7 @@ test('the router tests one server at a time — three test cores at once on its 
   const probeMux = async (server) => { probed.push(server.id); inFlight++; most = Math.max(most, inFlight); await h.sleep(20); inFlight--; return 'ok'; };
   const s = h.start({
     servers: [WS, two, three],
-    settings: { routeDefault: WS.id, routeRules: [{ id: 'r1', type: 'domain', value: 'a.example', target: two.id }, { id: 'r2', type: 'domain', value: 'b.example', target: three.id }] }
+    settings: { mux: 'auto', routeDefault: WS.id, routeRules: [{ id: 'r1', type: 'domain', value: 'a.example', target: two.id }, { id: 'r2', type: 'domain', value: 'b.example', target: three.id }] }
   }, { probeMux });
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', '__advanced__');
