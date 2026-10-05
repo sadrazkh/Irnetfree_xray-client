@@ -2614,6 +2614,19 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             value = coresKnown
         }
         Text(cores, color = MUTED, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.padding(top = 6.dp))
+        // Mux (Mux.kt, spec §4). Its own key, like LAN sharing — not in this
+        // screen's copy of AppSettings; read by the next connect.
+        var mux by remember { mutableStateOf(store.muxMode) }
+        fun pickMux(v: String) { store.muxMode = v; mux = v }
+        Text("Mux (multiplexing)", color = TXT, modifier = Modifier.padding(top = 10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            listOf(Mux.AUTO to "Auto", Mux.ON to "On", Mux.OFF to "Off").forEach { (v, l) ->
+                Row(Modifier.clickable { pickMux(v) }.padding(end = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(mux == v, { pickMux(v) }); Text(l, color = TXT)
+                }
+            }
+        }
+        Text(muxHelp(mux), color = MUTED, fontSize = 11.sp)
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
         Text("Per-app routing", color = TXT, fontWeight = FontWeight.Bold)
         listOf("off" to "Off (whole system)", "allow" to "Only these apps", "disallow" to "All except these").forEach { (v, l) ->
@@ -2622,6 +2635,13 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         if (s.perAppMode != "off") AppPicker(s.perApps) { save(s.copy(perApps = it)) }
         LanShareSection(store)
     }
+}
+
+/** Settings → Mux: one line of help, for the choice it is on. */
+private fun muxHelp(mode: String): String = when (mode) {
+    Mux.ON -> "On: every VLESS (without flow), VMess and Trojan server over WebSocket or HTTPUpgrade uses mux, untested."
+    Mux.OFF -> "Off: every connection makes its own handshake with the server, as before."
+    else -> "Auto: each WebSocket / HTTPUpgrade server is tested once and uses mux where it works — far fewer handshakes, less battery."
 }
 
 /**
@@ -2709,7 +2729,7 @@ private fun coresLine(ctx: Context): String {
                     add(MoreRow("pool", "Proxy Pool", "several exits, each on its own port", "${store.pool.size}", Icons.Filled.Hub))
                     add(MoreRow("routing", "Routing", if (s.advancedRouting) "advanced rules" else routingModeLabel(s.routingMode), if (s.advancedRouting) "${s.routeRules.size} rules" else "", Icons.Filled.CallSplit))
                 }
-                add(MoreRow("settings", "Settings", "ports, DNS, core, per-app", "", Icons.Filled.Settings))
+                add(MoreRow("settings", "Settings", "ports, DNS, core, mux, per-app", "", Icons.Filled.Settings))
                 if (s.advancedMode) add(MoreRow("logs", "Logs", "what the core actually said", "", Icons.Filled.Article))
             }
             rows.forEach { r ->

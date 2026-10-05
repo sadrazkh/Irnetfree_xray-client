@@ -63,10 +63,13 @@ object TunnelSetup {
      * the Xray format on the in-process core, and says so through [log].
      * (XrayVpnService.prepare has already moved a non-single plan, or a
      * sing-box that is not bundled, onto the in-process core.)
+     *
+     * [muxIds]: the servers whose outbounds carry Xray's mux (Mux.choose) — in
+     * the Xray format only; sing-box's config never has it.
      */
     fun coreConfig(
         engine: String, plan: ConnectionPlan, s: AppSettings, geo: Boolean, wgIps: Map<String, String>,
-        auth: LocalAuth?, lan: LanShare?, coreVersion: (String) -> String = { "" }, log: (String) -> Unit
+        auth: LocalAuth?, lan: LanShare?, muxIds: Set<String> = emptySet(), coreVersion: (String) -> String = { "" }, log: (String) -> Unit
     ): CoreConfig {
         val single = plan as? ConnectionPlan.Single
         if (engine == EngineChoice.SINGBOX && single != null) {
@@ -77,7 +80,7 @@ object TunnelSetup {
             }
         }
         val e = if (engine == EngineChoice.SINGBOX) EngineChoice.XRAY else engine
-        val config = ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps, inboundAuth = auth, lan = lan)
+        val config = ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps, inboundAuth = auth, lan = lan, muxIds = muxIds)
         // mKCP's and Hysteria's settings, in the form THIS core's version takes
         // (CoreCompat) — its version is asked only for a config that has them
         val adapted = if (CoreCompat.needsCoreVersion(config)) CoreCompat.adaptForCore(config, coreVersion(e)) else config
