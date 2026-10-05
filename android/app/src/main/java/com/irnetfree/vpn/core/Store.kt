@@ -118,20 +118,27 @@ class Store(context: Context) {
         get() = Mux.modeOf(prefs.getString("muxMode", null))
         set(v) { prefs.edit().putString("muxMode", Mux.modeOf(v)).apply() }
 
-    /** What the mux tests found, by server fingerprint (Mux.fingerprint) → {ok, at}; at most 500, the oldest dropped. */
+    /**
+     * What the mux tests found, by server fingerprint (Mux.fingerprint) →
+     * {ok, at, recheck?, retryAfter?} (Mux.Probe); at most 500, the oldest dropped.
+     */
     var muxProbes: Map<String, Mux.Probe>
         get() = Mux.probesFromJson(prefs.getString("muxProbes", null))
         set(v) { prefs.edit().putString("muxProbes", Mux.probesToJson(Mux.capped(v))).apply() }
 
-    /** A test's verdict, kept (ok: 7 days, unsupported: 3 — Mux.freshVerdict). Any thread. */
+    /** What a test left for a server (Mux.record: ok 7 days, unsupported 1, an unclear one retried in an hour). Any thread. */
     fun rememberMux(fingerprint: String, probe: Mux.Probe) {
         synchronized(MUX_LOCK) { muxProbes = muxProbes + Pair(fingerprint, probe) }
     }
 
-    /** These servers are tested again on their next connect (a muxed connection that dropped). Any thread. */
-    fun forgetMux(fingerprints: Collection<String>) {
+    /**
+     * A muxed connection dropped: these servers' ok verdicts are kept and
+     * marked for a recheck — the next connect that may test, tests them again
+     * (Mux.markRecheck). Any thread.
+     */
+    fun markMuxRecheck(fingerprints: Collection<String>) {
         if (fingerprints.isEmpty()) return
-        synchronized(MUX_LOCK) { muxProbes = muxProbes - fingerprints }
+        synchronized(MUX_LOCK) { muxProbes = Mux.markRecheck(muxProbes, fingerprints) }
     }
 
     private fun <T> read(key: String, map: (JSONObject) -> T): MutableList<T> {
