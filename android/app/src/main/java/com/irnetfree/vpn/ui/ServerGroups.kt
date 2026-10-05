@@ -20,8 +20,9 @@ object ServerGroups {
 
     /**
      * One group. [servers] is what the search left; [total] what the group
-     * holds. [open]: its servers are listed — a folded group is opened while a
-     * search is running, or its matches would be hidden behind a header.
+     * holds, and [all] those servers — what the header's 📶 and ⚡ act on,
+     * search or not. [open]: its servers are listed — a folded group is opened
+     * while a search is running, or its matches would be hidden behind a header.
      * [hasSelected]: the selected server is in it (the header says so when folded).
      */
     class Group(
@@ -31,7 +32,8 @@ object ServerGroups {
         val servers: List<ServerConfig>,
         val total: Int,
         val open: Boolean,
-        val hasSelected: Boolean
+        val hasSelected: Boolean,
+        val all: List<ServerConfig> = servers
     )
 
     /**
@@ -50,7 +52,7 @@ object ServerGroups {
             if (!seen.add(key)) return            // a subscription listed twice: its servers are already shown
             val shown = if (searching) all.filter { s -> s.name.contains(q, true) || s.address.contains(q, true) } else all
             if (shown.isEmpty() && (searching || !showEmpty)) return
-            out.add(Group(key, title, sub, shown, all.size, searching || key !in collapsed, all.any { s -> s.id == selectedId }))
+            out.add(Group(key, title, sub, shown, all.size, searching || key !in collapsed, all.any { s -> s.id == selectedId }, all))
         }
         add(MANUAL, "Manual", null, bySub[null] ?: emptyList(), false)
         for (sub in subs) add(subKey(sub.id), sub.name.ifBlank { "Subscription" }, sub, bySub[sub.id] ?: emptyList(), true)
