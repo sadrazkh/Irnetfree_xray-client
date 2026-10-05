@@ -98,8 +98,9 @@ object XrayTester {
      * Does [server] carry traffic with Xray's mux? The test of spec §4
      * (Mux.probe): a throwaway core with Mux.MUX makes two requests, one after
      * the other, each on a connection of its own — the second a second stream
-     * through the same mux connection — and, if they fail, a core without it
-     * makes one. "ok" | "unsupported" | "unknown". At most
+     * through the same mux connection — and, only if they definitively failed
+     * (refused, reset, closed, or the core would not start; not merely slow), a
+     * core without it makes one. "ok" | "unsupported" | "unknown". At most
      * Mux.PROBE_BUDGET_MS: a request is abandoned at the time it was given, and
      * its core stopped. Blocking — the connect thread (XrayVpnService.prepare).
      * [wanted]: false once that connect has been overtaken; nothing more starts.
@@ -119,6 +120,11 @@ object XrayTester {
      * it failed or has not answered within [ms]. Waited for on this thread, so
      * a request that overruns its timeouts cannot hold the connect up past the
      * budget: the caller stops the core, and the request dies with it.
+     *
+     * -1 is the same for a refusal and for a timeout. Mux.probe tells them
+     * apart by the time this took against [ms]: within Mux.TIMEOUT_SLACK_MS
+     * (150 ms) of it is a timeout — Diagnostics' own timeouts and the wait
+     * below both end at [ms] or later — and earlier is a refusal.
      */
     private fun roundTrip(port: Int, ms: Int): Long {
         val task = FutureTask(Callable { Diagnostics.httpLatency(port, timeout = ms, fresh = true) })
