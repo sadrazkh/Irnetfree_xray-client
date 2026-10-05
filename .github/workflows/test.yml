@@ -24,6 +24,40 @@ jobs:
       # No `npm ci` on purpose — the tests use only Node core modules.
       - run: npm test
 
+  cores:
+    # The only place a core is handed what this app writes: every config shape
+    # (plans, DNS modes, TUN, the v1.18 link forms) through `xray run -test` on
+    # the suggested Xray and Xray-PattN, the TUN configs through `sing-box check`.
+    # The versions come from src/main/coreVersions.js, so a bump is checked here.
+    name: cores accept the configs (suggested versions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch the suggested cores
+        run: |
+          set -euo pipefail
+          XV=$(node -p "require('./src/main/coreVersions').SUGGESTED.xray")
+          PV=$(node -p "require('./src/main/coreVersions').SUGGESTED['xray-pattn']")
+          SV=$(node -p "require('./src/main/coreVersions').SUGGESTED['sing-box']")
+          echo "xray $XV · xray-pattn $PV · sing-box $SV"
+          mkdir -p "$RUNNER_TEMP/x" "$RUNNER_TEMP/p" "$RUNNER_TEMP/s"
+          curl -fsSL --retry 3 -o x.zip "https://github.com/XTLS/Xray-core/releases/download/v$XV/Xray-linux-64.zip"
+          unzip -q x.zip -d "$RUNNER_TEMP/x"
+          curl -fsSL --retry 3 -o p.zip "https://github.com/patterniha/Xray-core/releases/download/v$PV/Xray-linux-64.zip"
+          unzip -q p.zip -d "$RUNNER_TEMP/p"
+          curl -fsSL --retry 3 -o s.tgz "https://github.com/SagerNet/sing-box/releases/download/v$SV/sing-box-$SV-linux-amd64.tar.gz"
+          tar -xzf s.tgz -C "$RUNNER_TEMP/s" --strip-components=1
+          chmod +x "$RUNNER_TEMP/x/xray" "$RUNNER_TEMP/p/xray" "$RUNNER_TEMP/s/sing-box"
+      - name: Xray (suggested) accepts every config, sing-box every TUN config
+        run: IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/validate-configs.js
+      - name: Xray-PattN (suggested) accepts every config
+        # also when the official core refused something: one run says it for both
+        if: ${{ !cancelled() }}
+        run: IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" node scripts/validate-configs.js
+
   android:
     # The Android app is a hand-written port of src/main/parser.js and
     # configBuilder.js, and nobody working on it can compile Kotlin locally
