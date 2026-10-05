@@ -107,6 +107,33 @@ class Store(context: Context) {
         get() = prefs.getString("updateDismissed", "") ?: ""
         set(v) { prefs.edit().putString("updateDismissed", v).apply() }
 
+    /*
+     * Mux (Mux.kt, spec §4). Kept under keys of their own, not inside
+     * AppSettings: the Settings screen writes AppSettings back whole from the
+     * copy it opened with, and the connect path writes verdicts meanwhile.
+     */
+
+    /** Settings → Mux: "auto" (the default) | "on" | "off". */
+    var muxMode: String
+        get() = Mux.modeOf(prefs.getString("muxMode", null))
+        set(v) { prefs.edit().putString("muxMode", Mux.modeOf(v)).apply() }
+
+    /** What the mux tests found, by server fingerprint (Mux.fingerprint) → {ok, at}; at most 500, the oldest dropped. */
+    var muxProbes: Map<String, Mux.Probe>
+        get() = Mux.probesFromJson(prefs.getString("muxProbes", null))
+        set(v) { prefs.edit().putString("muxProbes", Mux.probesToJson(Mux.capped(v))).apply() }
+
+    /** A test's verdict, kept (ok: 7 days, unsupported: 3 — Mux.freshVerdict). Any thread. */
+    fun rememberMux(fingerprint: String, probe: Mux.Probe) {
+        synchronized(MUX_LOCK) { muxProbes = muxProbes + Pair(fingerprint, probe) }
+    }
+
+    /** These servers are tested again on their next connect (a muxed connection that dropped). Any thread. */
+    fun forgetMux(fingerprints: Collection<String>) {
+        if (fingerprints.isEmpty()) return
+        synchronized(MUX_LOCK) { muxProbes = muxProbes - fingerprints }
+    }
+
     private fun <T> read(key: String, map: (JSONObject) -> T): MutableList<T> {
         val out = ArrayList<T>()
         try { val a = JSONArray(prefs.getString(key, "[]")); for (i in 0 until a.length()) out.add(map(a.getJSONObject(i))) } catch (_: Exception) {}
@@ -201,6 +228,9 @@ class Store(context: Context) {
     companion object {
         const val POOL_ID = Selection.POOL
         const val ADV_ID = Selection.ADVANCED
+
+        /** The mux verdicts' read-modify-write: the connect thread remembers, the service forgets. */
+        private val MUX_LOCK = Any()
 
         @Volatile private var shared: Store? = null
 
