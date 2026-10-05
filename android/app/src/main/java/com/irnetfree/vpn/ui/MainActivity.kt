@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
@@ -108,6 +109,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 
 /* The palette and the two type families live in Theme.kt. */
 
@@ -178,6 +182,10 @@ private fun App(store: Store) {
         }
     }
     AutoConnect(store)
+    // Is a newer IRNetFree out? GitHub is asked at most once a day
+    // (AppWork.checkForUpdate); Home shows the card.
+    val ctx = LocalContext.current
+    LaunchedEffect(Unit) { AppWork.checkForUpdate(ctx, store) }
 
     Scaffold(containerColor = BG, snackbarHost = {
         SnackbarHost(snackHost) { d -> Snackbar(d, containerColor = CARD2, contentColor = TXT, actionColor = PRIMARY) }
@@ -340,6 +348,8 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     val withConsent = rememberConsent(store) { then: String ->
         if (then == "fastest") AppWork.connectFastest(ctx, store) else doConnect(ctx, store)
     }
+    // A newer IRNetFree, from the once-a-day check ("" = none, or put off with Later).
+    val update by AppWork.updateAvailable.collectAsState()
     /**
      * The ring and the button under your thumb. While something is on its way
      * it CANCELS: ⚡ stops measuring (a tunnel already up stays up), and a
@@ -439,6 +449,12 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         HorizontalDivider(color = STROKE)
 
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 20.dp)) {
+            /* ---- a newer IRNetFree: on a phone, the way newer cores arrive ---- */
+            if (update.isNotEmpty()) {
+                UpdateCard(update, onDownload = { openUpdate(ctx, store) }, onLater = { AppWork.dismissUpdate(store) })
+                Spacer(Modifier.height(16.dp))
+            }
+
             /* ---- the ring ---- */
             PowerRing(state, busy, ::onPower)
             Spacer(Modifier.height(14.dp))
@@ -824,6 +840,38 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     }
 }
 
+/**
+ * "IRNetFree vX is out" (AppWork.checkForUpdate). Android runs no core an app
+ * downloads, so on a phone the newer cores come inside the newer APK — the
+ * card says so. Download opens the release's APK (the browser takes it from
+ * there); Later puts this version off for good, and a newer one is said again.
+ */
+@Composable private fun UpdateCard(version: String, onDownload: () -> Unit, onLater: () -> Unit) {
+    val v = if (version.startsWith("v")) version else "v$version"
+    Card(
+        Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = CARD), border = BorderStroke(1.dp, PRIMARY_DIM)
+    ) {
+        Column(Modifier.padding(start = 14.dp, end = 6.dp, top = 12.dp)) {
+            Text("IRNetFree $v is out — the cores and fixes come with the app", color = TXT, fontSize = 13.sp, modifier = Modifier.padding(end = 8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onLater) { Text("Later", color = MUTED, fontSize = 13.sp) }
+                TextButton(onClick = onDownload) { Text("Download", color = PRIMARY, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
+            }
+        }
+    }
+}
+
+/** Where Download goes when GitHub named no page at all. */
+private const val RELEASES_PAGE = "https://github.com/sadrazkh/Irnetfree_xray-client/releases/latest"
+
+/** Open the newer release's APK (else its page) in whatever handles a link. */
+private fun openUpdate(ctx: Context, store: Store) {
+    val url = store.updateUrl.ifBlank { RELEASES_PAGE }
+    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+        .onFailure { AppWork.snack("Nothing on this phone can open $url") }
+}
+
 private fun doConnect(ctx: Context, store: Store) {
     try { VpnState.set(ConnState.CONNECTING, store.selectionLabel()); XrayVpnService.connect(ctx, store) }
     catch (e: Exception) { VpnState.set(ConnState.ERROR, error = e.message ?: "connect failed") }
@@ -1189,6 +1237,73 @@ private object AppWork {
         runCatching { XrayVpnService.disconnect(app) }
         pendingConnect?.cancel()
         pendingConnect = scope.launch { delay(600); pendingConnect = null; doConnect(app, store) }
+    }
+
+    /** A newer IRNetFree than this one, for the card on Home ("" = none, or put off with Later). */
+    val updateAvailable = MutableStateFlow("")
+    private var updateJob: Job? = null
+
+    /**
+     * "A newer IRNetFree is out": GitHub's latest release, asked for at most
+     * once a day (UpdateCheck) — directly, the app being outside its own tunnel.
+     * Android runs no core an app downloads, so a newer core reaches a phone
+     * only inside a newer APK, and this is how the phone hears of one. What the
+     * last answer said is shown at once; only a 200 counts as an answer, a
+     * failure is one log line and nothing on screen, and the next start asks again.
+     */
+    fun checkForUpdate(ctx: Context, store: Store) {
+        val current = appVersion(ctx)
+        publishUpdate(store, current)
+        if (updateJob?.isActive == true || !UpdateCheck.due(store.updateCheckedAt, System.currentTimeMillis())) return
+        updateJob = scope.launch {
+            try {
+                val (tag, url) = withContext(Dispatchers.IO) { latestRelease() }
+                store.updateLatest = tag
+                store.updateUrl = url
+                store.updateCheckedAt = System.currentTimeMillis()
+                publishUpdate(store, current)
+                if (UpdateCheck.newer(tag, current)) VpnState.addLog("Update check: IRNetFree $tag is out (this is $current) — $url")
+                else VpnState.addLog("Update check: the latest release is $tag — this build ($current) is not older")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                VpnState.addLog("Update check: GitHub could not be asked — ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /** "Later" on the card: this version is not mentioned again; a newer one will be. */
+    fun dismissUpdate(store: Store) {
+        val v = updateAvailable.value
+        if (v.isEmpty()) return
+        store.updateDismissed = v
+        updateAvailable.value = ""
+    }
+
+    /** The newest release GitHub named, when it is newer than this build and was not put off. */
+    private fun publishUpdate(store: Store, current: String) {
+        val latest = store.updateLatest
+        val show = latest.isNotEmpty() && latest != store.updateDismissed && UpdateCheck.newer(latest, current)
+        updateAvailable.value = if (show) latest else ""
+    }
+
+    /** GitHub's latest release: its tag, and its APK (else its page). Blocking — IO only. */
+    private fun latestRelease(): Pair<String, String> {
+        val c = URL(UpdateCheck.LATEST_URL).openConnection() as HttpURLConnection
+        try {
+            c.connectTimeout = 10_000
+            c.readTimeout = 10_000
+            c.setRequestProperty("User-Agent", "IRNetFree-Android")
+            c.setRequestProperty("Accept", "application/vnd.github+json")
+            val code = c.responseCode
+            if (code != 200) throw IllegalStateException("HTTP $code")
+            val release = JSONObject(c.inputStream.bufferedReader().use { r -> r.readText() })
+            val tag = release.optString("tag_name")
+            if (tag.isEmpty()) throw IllegalStateException("the latest release names no version")
+            return Pair(tag, UpdateCheck.downloadUrl(release))
+        } finally {
+            c.disconnect()
+        }
     }
 }
 
@@ -2490,6 +2605,14 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             else "PattN is upstream Xray plus one thing: it does not refuse a plaintext VLESS/Trojan config to a public address, which the official core rejects at load. Everything else behaves identically.",
             color = MUTED, fontSize = 11.sp
         )
+        // What this APK carries, as the cores themselves say it — off the main
+        // thread, since PattN is asked by running it. Android runs no core an
+        // app downloads, so these change only with a newer IRNetFree.
+        val cores by produceState(coresKnown.ifEmpty { "Cores in this app: …" }) {
+            if (coresKnown.isEmpty()) coresKnown = withContext(Dispatchers.IO) { coresLine(ctx) }
+            value = coresKnown
+        }
+        Text(cores, color = MUTED, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.padding(top = 6.dp))
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
         Text("Per-app routing", color = TXT, fontWeight = FontWeight.Bold)
         listOf("off" to "Off (whole system)", "allow" to "Only these apps", "disallow" to "All except these").forEach { (v, l) ->
@@ -2498,6 +2621,26 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         if (s.perAppMode != "off") AppPicker(s.perApps) { save(s.copy(perApps = it)) }
         LanShareSection(store)
     }
+}
+
+/**
+ * Settings' cores line once worked out: the cores inside an APK do not change
+ * while it runs, and every setting saved rebuilds the screen (no "…" flash).
+ */
+private var coresKnown = ""
+
+/**
+ * "Cores in this app: Xray 26.9.30 · Xray-PattN 26.10.3 · sing-box —" — the
+ * in-process core's own answer (Libv2ray.checkVersionX, "Lib v…, Xray-core
+ * v26.9.30", trimmed to its number) and PattN's `version`; "—" for a core that
+ * is not bundled here or cannot say (sing-box has no version call in this app).
+ * Blocking: PattN is run once.
+ */
+private fun coresLine(ctx: Context): String {
+    val num = Regex("""\d+\.\d+\.\d+""")
+    val xray = XrayCore.version().let { v -> num.find(v)?.value ?: v.ifBlank { "—" } }
+    val pattn = XrayPattnCore.version(ctx).ifBlank { "—" }
+    return "Cores in this app: Xray $xray · Xray-PattN $pattn · sing-box —"
 }
 
 @Composable private fun AppPicker(selected: List<String>, onChange: (List<String>) -> Unit) {
