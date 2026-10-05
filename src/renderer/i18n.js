@@ -419,6 +419,10 @@ const I18N = {
     'set.servers': 'ویرایش سرورِ متصل',
     'set.defaultEngine': 'هستهٔ پیش‌فرض',
     'set.defaultEngineHint': 'کانفیگ‌هایی که هسته‌ی مشخصی انتخاب نکرده‌اند، و زنجیره/استخر/روتینگ پیشرفته، روی این هسته اجرا می‌شوند. اگر عضوی PattN بخواهد، کل plan روی PattN می‌رود.',
+    /* mux per server (spec §4): the control in Settings and the name the apply dialog lists */
+    'set.mux': 'Mux (مالتی‌پلکس)',
+    'mux.auto': 'خودکار', 'mux.on': 'روشن', 'mux.off': 'خاموش',
+    'mux.hint': '«خودکار» هر سرورِ WebSocket / HTTPUpgrade را یک بار می‌آزماید و mux را فقط جایی روشن می‌کند که کار کند: اتصال‌های زیاد روی چند اتصال سوار می‌شوند و شبکهٔ شلوغ سریع می‌ماند.',
     'comp.xrayPattn': 'هستهٔ Xray-PattN (fork پترنیها — کانفیگ بدون TLS را می‌پذیرد)',
     'engine.pattn': 'Xray-PattN (patterniha)',
     'engine.official': 'Xray (رسمی)',
@@ -1005,6 +1009,10 @@ const I18N = {
     'set.servers': 'Edit of the connected server',
     'set.defaultEngine': 'Default core',
     'set.defaultEngineHint': 'Configs without their own core choice, and chains / pool / advanced routing, run on this core. If any member asks for PattN the whole plan runs on PattN.',
+    /* mux per server (spec §4): the control in Settings and the name the apply dialog lists */
+    'set.mux': 'Mux (multiplexing)',
+    'mux.auto': 'Auto', 'mux.on': 'On', 'mux.off': 'Off',
+    'mux.hint': 'Auto tests each WebSocket / HTTPUpgrade server once and turns mux on only where it works: many connections then ride a few, so a busy network stays fast.',
     'comp.xrayPattn': 'Xray-PattN core (patterniha fork — accepts plaintext configs)',
     'engine.pattn': 'Xray-PattN (patterniha)',
     'engine.official': 'Xray (official)',

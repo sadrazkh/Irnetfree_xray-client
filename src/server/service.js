@@ -21,6 +21,7 @@ const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor } = require('../main/engineChoice');
+const { muxMode, muxCandidates, decideMux, probeMux, rememberVerdicts, forgetVerdicts, muxFingerprint } = require('../main/mux');
 const { resolveHost } = require('../main/trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
 const { assetStatus: scanAssets, downloadedFileNames } = require('../main/assets');
@@ -160,6 +161,10 @@ const DEFAULT_SETTINGS = {
   skin: 'console',
   theme: 'dark',
   defaultEngine: 'xray',
+  // mux on the servers' own outbounds (mux.js): 'auto' tests each ws /
+  // httpupgrade server once and muxes it where it works, 'on' every such
+  // server untested, 'off' never. Written into the config: a reconnect key.
+  mux: 'auto',
   lang: 'fa'
 };
 
@@ -501,6 +506,9 @@ function createService(opts = {}) {
   // The addresses the LIVE connection pinned ({ wgEndpointIps, entryHostIps },
   // see doConnect); rebuildActiveConfig() reuses them for the same reason.
   let livePins = null;
+  // The servers the LIVE connection muxes ({ ids, fps }, see muxFor); null when
+  // none. rebuildActiveConfig() keeps them; a drop forgets their verdicts.
+  let liveMux = null;
   let liveDiagnostics = null;
   let macRepairPromise = Promise.resolve();
   let macRepairError = null;
@@ -1461,6 +1469,53 @@ function createService(opts = {}) {
     return Object.assign({}, settings, { entryHostIps: map });
   }
 
+  // The probe behind muxFor; the mux tests hand in their own verdicts — no test may start a core
+  const muxProbe = deps.probeMux || probeMux;
+
+  /**
+   * Mux for this connect (mux.js, spec §4). `auto` tests every eligible server
+   * the plan dials as a target of its own that has no fresh verdict — before
+   * the config is built, with the names this connect resolved, at most three at
+   * once and 8 s each — and remembers the answers (the store's `muxProbes`);
+   * `on` takes them all untested; `off` changes nothing. `ids` go to
+   * buildConfig as `muxServerIds`; `fps` stay with the live connection, for a
+   * drop to forget (forgetLiveMux). A chain's hops never get mux, nor a config
+   * on the sing-box engine.
+   */
+  async function muxFor(serverId, settings) {
+    const none = { ids: [], fps: [] };
+    const mode = muxMode(settings.mux);
+    if (mode === 'off') return none;
+    let plan;
+    try { plan = buildPlan(serverId, settings).plan; } catch { return none; }   // buildActive reports it
+    let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine), { quiet: true }).id;
+    if (OPENWRT && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray', { quiet: true }).id;   // as buildActive runs it
+    if (engineFormat(engine) === 'sing-box') return none;
+    const servers = muxCandidates(plan);
+    if (!servers.length) return none;
+    const { muxIds, learnt } = await decideMux({
+      mode, servers, cache: store.get('muxProbes', {}), now: Date.now(),
+      probe: (server) => muxProbe(server, {
+        buildTestConfig: (target, port) => buildTestConfig(target, port, { entryHostIps: settings.entryHostIps, ipv6: settings.ipv6 }),
+        startTest: (config) => xray.startTest(config, testEngineFor(engine)),
+        getFreePort,
+        httpThroughProxy
+      }),
+      log: (line, level) => send('log', { line, level })
+    });
+    if (learnt.length) store.set('muxProbes', rememberVerdicts(store.get('muxProbes', {}), learnt, Date.now()));
+    return { ids: muxIds, fps: servers.filter((s) => muxIds.includes(s.id)).map(muxFingerprint) };
+  }
+
+  /** A muxed connection that dropped: its servers are tested again on the next connect. */
+  function forgetLiveMux() {
+    if (!liveMux) return;
+    const cache = store.get('muxProbes', {});
+    const next = forgetVerdicts(cache, liveMux.fps);
+    liveMux = null;
+    if (next !== cache) store.set('muxProbes', next);
+  }
+
   /**
    * A connect, tracked while it is in flight. A drop that lands inside one —
    * the core dying while the gateway is still being built — waits for it
@@ -1559,6 +1614,12 @@ function createService(opts = {}) {
     settings = Object.assign({}, settings, { wgEndpointIps: wgSet.wgEndpointIps, entryHostIps: entrySet.entryHostIps });
     // Every address the core will dial by itself, for the gateway's bypass.
     const pinnedIps = [...Object.values(settings.wgEndpointIps || {}), ...Object.values(settings.entryHostIps || {}).flat()];
+
+    // Mux, decided per server (muxFor): in `auto` a server with no fresh verdict
+    // is tested now — with the names just resolved, before the config is built.
+    const mux = await muxFor(serverId, settings);
+    if (stale()) return abandoned;
+    if (mux.ids.length) settings = Object.assign({}, settings, { muxServerIds: mux.ids });
 
     // The TUN layer for this connect — the backend setting plus what is
     // installed. A LIVE instance is never replaced: switching servers keeps the
@@ -1778,6 +1839,7 @@ function createService(opts = {}) {
     appliedSettings = snapshotApplied(getSettings());
     liveServerIds = planServerIds(plan);
     serverEditPending = false;
+    liveMux = mux.ids.length ? mux : null;
 
     if (settings.systemProxy) {
       try {
@@ -2381,6 +2443,8 @@ function createService(opts = {}) {
     // …and the addresses it pinned: the tunnel's bypass names exactly these, and
     // a name asked again now could answer another (see doConnect)
     if (livePins) settings = Object.assign({}, settings, livePins);
+    // …and what it muxed: a reload is no new connect, and tests nothing
+    if (liveMux) settings = Object.assign({}, settings, { muxServerIds: liveMux.ids });
     // `plan` too: the usage meter needs it to attribute the new core's bytes
     const { plan, config, engine } = buildActive(serverId, settings);
     const prevReloading = xrayReloading;
@@ -2446,6 +2510,8 @@ function createService(opts = {}) {
     if (reported()) return;
     // the same gates as recoverFromNetworkChange(), before anything is said or armed
     if (!store.get('activeServerId', null)) return;
+    // what the dropped connection muxed is tested again on the next connect
+    forgetLiveMux();
     if (!OPENWRT && !getSettings().autoReconnectOnNetworkChange) return;
     // A retry already scheduled (a failed attempt's backoff, a hand-over, an
     // earlier drop's wait) is the rebuild for this drop too. Taken up again
@@ -2802,6 +2868,7 @@ function createService(opts = {}) {
       pinWatch.clear();
       appliedSettings = null;          // nothing live to be out of sync with
       liveDirectInterface = null;
+      liveMux = null;
       cleanupFailed = false;
       send('status', { state: 'disconnected', cause: 'user' });
     } catch (e) {

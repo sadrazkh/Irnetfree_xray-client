@@ -74,6 +74,26 @@ test('the core gate builds every config without a core — the v1.18 link forms 
   assert.deepEqual([ws.network, ws.security, ws.wsSettings.path], ['ws', 'tls', '/ws']);
 });
 
+test('the core gate hands the cores every mux shape (v1.18, spec §4): a single server, the anti-DPI dialer with pins under TUN, advanced, pool, the field report’s ECH-over-ws link, and the probe’s own test core', { timeout: 60000 }, (t) => {
+  const { MUX } = require('../src/main/mux');
+  const run = dryRun(t);
+  assert.equal(run.status, 0, run.out);
+  const muxed = (name) => run.read(name).outbounds.filter((o) => o.mux).map((o) => o.tag);
+  assert.deepEqual(run.proxy('shape-single-mux').mux, MUX);
+  assert.deepEqual(muxed('shape-single-mux-pinned-fragment-bound'), ['proxy']);
+  const frag = run.proxy('shape-single-mux-pinned-fragment-bound').streamSettings.sockopt;
+  assert.deepEqual([frag.dialerProxy, frag.domainStrategy], ['dpi-1', 'UseIPv4'], 'mux beside the dialer and the pin');
+  assert.deepEqual(muxed('shape-advanced-mux').sort(), ['out-sv-vless'], 'the default; the chain’s VLESS hop never');
+  assert.deepEqual(muxed('shape-pool-mux'), ['out-sv-vless']);
+  for (const v of ['plain', 'tun', 'strict']) assert.deepEqual(run.proxy(`link-ech-udp-mux-${v}`).mux, MUX, v);
+  assert.equal(run.proxy('link-ech-udp-mux-tun').streamSettings.tlsSettings.echConfigList, 'cloudflare-ech.com+udp://1.1.1.1');
+  const probe = run.read('mux-probe');
+  assert.deepEqual(probe.outbounds.find((o) => o.tag === 'proxy').mux, MUX);
+  assert.deepEqual(probe.dns, { hosts: { 'a.example.com': ['203.0.113.10', '203.0.113.11'] } }, 'the probe dials the names its connect resolved');
+  // and not one of the configs built without the setting carries mux
+  for (const name of run.built.filter((n) => !/mux/.test(n))) assert.equal(JSON.stringify(run.read(name.replace(/\.json$/, ''))).includes('"mux"'), false, name);
+});
+
 test('the core gate writes every config for the core’s own version: mKCP’s header and seed, Hysteria’s hopping — as the suggested Xray takes them, and as a January 2026 core did', { timeout: 60000 }, (t) => {
   const now = dryRun(t);
   assert.equal(now.status, 0, now.out);
