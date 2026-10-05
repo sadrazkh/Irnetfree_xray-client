@@ -415,12 +415,14 @@ test('the global Auto is untouched: it tests only when nothing was ever tested, 
   assert.deepEqual(empty.calls, [['pingMany', ['a1', 'a2', 'b1', 'b2']], ['toast', 'Auto → B one', 'ok'], ['connect', 'b1']]);
 });
 
-test('while a connect is in flight, ⚡ — a group’s or the global — is its Cancel and tests nothing', async () => {
-  for (const scope of [SCOPE_A(), undefined]) {
-    const h = autoHarness({ state: { connecting: true } });
-    await h.ctx.connectAuto(scope);
-    assert.deepEqual(h.calls, [['cancel']]);
-  }
+test('while a connect is in flight, the global ⚡ is its Cancel; a group’s ⚡ cancels nothing and says so — neither tests anything', async () => {
+  // final review, minor 4: a group's ⚡ keeps its connect label, so it must not quietly cancel
+  const global = autoHarness({ state: { connecting: true } });
+  await global.ctx.connectAuto();
+  assert.deepEqual(global.calls, [['cancel']]);
+  const group = autoHarness({ state: { connecting: true } });
+  await group.ctx.connectAuto(SCOPE_A());
+  assert.deepEqual(group.calls, [['toast', 't.autoGroupBusy', 'warn']]);
 });
 
 test('a group’s ⚡ never turns into a disconnect, and never cancels a connect somebody else started meanwhile', async () => {

@@ -1907,6 +1907,22 @@ test('golden guard: without muxServerIds — absent, empty or not a list — eve
   }
 });
 
+test('golden guard: the default settings — mux off, the owner’s choice — never put mux into any config, whatever the plan', () => {
+  const { DEFAULT_SETTINGS } = require('../src/server/service');
+  assert.equal(DEFAULT_SETTINGS.mux, 'off');
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const plans = [
+    single(), single(frag), single(TROJAN_WS),
+    { mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_WS] },
+    advancedPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }], def: 'sv-vless' }),
+    poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001, httpPort: 60002 }])
+  ];
+  for (const p of plans) {
+    const fresh = Object.assign({}, DEFAULT_SETTINGS, { geoAssets: true });
+    assert.equal(JSON.stringify(buildConfig(p, fresh)).includes('"mux"'), false, p.mode);
+  }
+});
+
 test('buildTestConfig: a latency test never carries mux, and is as it was without the pins a mux probe hands it', () => {
   const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
   for (const target of [VLESS_WS_TLS, TROJAN_WS, frag, [VLESS_WS_TLS, TROJAN_WS]]) {
