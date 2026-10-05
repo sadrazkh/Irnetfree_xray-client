@@ -58,6 +58,23 @@ function usesFinalmask(config) {
  */
 const FINALMASK_SINCE = '26.3.27';
 
+/**
+ * ECH from a link: the official core knows `echConfigList` from 25.7.26 and
+ * `echSockopt` (the ECH query bound to the NIC under TUN) from 25.8.3. An older
+ * one passes the config — unknown keys — and connects WITHOUT ECH, the very
+ * thing the link asked to hide. The router's opkg fallback (24.12.31, 25.1.30)
+ * is such a core.
+ */
+const ECH_SINCE = '25.8.3';
+
+/** Does any outbound ask for ECH? */
+function usesEch(config) {
+  return ((config && config.outbounds) || []).some((o) => {
+    const tls = o && o.streamSettings && o.streamSettings.tlsSettings;
+    return !!tls && typeof tls.echConfigList === 'string' && tls.echConfigList.trim() !== '';
+  });
+}
+
 /** "24.12.31" below "26.3.27", compared as numbers; a string with no x.y.z in it is never below anything. */
 function versionBelow(v, min) {
   const parse = (s) => { const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(s || '')); return m ? m.slice(1, 4).map(Number) : null; };
@@ -345,10 +362,11 @@ class XrayManager {
    * carrying the fork's `finalmask` goes to the fork first (see below) —
    * those are the things the fork exists for. Returns { ok, engine, error?,
    * fellBack?, plaintextRejected?, pattnNeeded?, finalmaskIgnored?,
-   * coreVersion? } so the caller knows which core to start and can tell the
-   * user to install the fork when it is missing (`pattnNeeded`: a finalmask
-   * the official core refuses — or, `finalmaskIgnored`, one it is too old to
-   * know and would drop).
+   * echUnsupported?, coreVersion? } so the caller knows which core to start and
+   * can tell the user to install the fork when it is missing (`pattnNeeded`: a
+   * finalmask the official core refuses — or, `finalmaskIgnored`, one it is too
+   * old to know and would drop) or to update the official core
+   * (`echUnsupported`: ECH on a core older than ECH_SINCE, no fork to run it).
    */
   async validateWithFallback(config, engineId) {
     const first = this.resolveEngine(engineId);
@@ -376,6 +394,24 @@ class XrayManager {
         };
       }
       return { ok: true, engine: 'xray' };
+    }
+    // ECH on an official core too old to know it: -test would say
+    // "Configuration OK." and the core would connect without ECH. The fork
+    // (built from upstream's main) runs it; without the fork the connect is
+    // refused in plain words. A version that cannot be read takes the
+    // ordinary path, as it does for finalmask.
+    if (first.id === 'xray' && usesEch(config)) {
+      const v = await this.version('xray');
+      if (versionBelow(v, ECH_SINCE)) {
+        if (this.resolveBin('xray-pattn')) {
+          const onFork = await this.validate(config, 'xray-pattn');
+          if (!onFork.ok) return { ok: false, engine: 'xray-pattn', error: onFork.error, plaintextRejected: false, ...killedOf(onFork) };
+          this.onLog(`This config uses ECH, which xray ${v} does not know — running it on ${engineLabel('xray-pattn')}`, 'info');
+          return { ok: true, engine: 'xray-pattn', fellBack: true };
+        }
+        return { ok: false, engine: 'xray', echUnsupported: true, coreVersion: v, plaintextRejected: false,
+          error: `xray ${v} does not know ECH (${ECH_SINCE} and newer do) — it would connect without it` };
+      }
     }
     const r = await this.validate(config, first.id);
     if (r.ok) return { ok: true, engine: first.id };
@@ -598,4 +634,4 @@ function getFreePorts(n) {
   });
 }
 
-module.exports = { XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, versionBelow };
+module.exports = { XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, ECH_SINCE, usesEch, versionBelow };

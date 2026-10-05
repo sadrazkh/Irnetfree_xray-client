@@ -272,6 +272,20 @@ test('fix 20: a finalmask server on an official core too old to know finalmask (
   }
 });
 
+test('v1.18: an ECH server on an official core older than 25.8.3 (the feed’s 25.1.30), no Xray-PattN: refused in plain words — in both languages', async (t) => {
+  const check = { ok: false, echUnsupported: true, coreVersion: '25.1.30', plaintextRejected: false, error: 'xray 25.1.30 does not know ECH (25.8.3 and newer do) — it would connect without it' };
+  for (const [lang, want] of [
+    ['en', 'This server uses ECH, which Xray 25.1.30 does not know (it would connect without it) — update Xray under Settings → Required files'],
+    ['fa', 'این سرور از ECH استفاده می‌کند و Xray 25.1.30 آن را نمی‌شناسد (بدون ECH وصل می‌شد) — از تنظیمات ← فایل‌های موردنیاز، Xray را به‌روز کن']
+  ]) {
+    const s = H.start({ settings: { lang } });
+    t.after(() => s.service.shutdown());
+    s.state.check = check;
+    await assert.rejects(s.service.invoke('connect', SERVER.id), (e) => e.message === want || assert.fail(e.message));
+    assert.equal(s.state.xray.starts.length, 0, 'nothing started');
+  }
+});
+
 test('fix 20: a core that is still running when the 20 s are up is still given the gateway (a slow bind is not a death)', async (t) => {
   const s = H.start({}, { waitForLocalPort: async () => false });
   t.after(() => s.service.shutdown());

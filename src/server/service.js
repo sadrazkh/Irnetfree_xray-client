@@ -1649,6 +1649,15 @@ function createService(opts = {}) {
         throw new Error((settings.lang === 'en' ? 'The config check did not finish: ' : 'بررسی کانفیگ تمام نشد: ') + check.error);
       }
       send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
+      // ECH on an official core older than 25.8.3 — the opkg feed's 24.12.31 /
+      // 25.1.30 — with no Xray-PattN to run it (validateWithFallback): that core
+      // would pass the config and connect without ECH. A refusal: retrying
+      // does not teach the core ECH; updating it does.
+      if (check.echUnsupported) {
+        throw refusal(settings.lang === 'en'
+          ? `This server uses ECH, which Xray ${check.coreVersion} does not know (it would connect without it) — update Xray under Settings → Required files`
+          : `این سرور از ECH استفاده می‌کند و Xray ${check.coreVersion} آن را نمی‌شناسد (بدون ECH وصل می‌شد) — از تنظیمات ← فایل‌های موردنیاز، Xray را به‌روز کن`);
+      }
       // The fork's finalmask, refused by the official core, and no fork to
       // fall back to (xrayManager.validateWithFallback): what to install is
       // the message — the renderer offers the download on the product name.
