@@ -228,10 +228,15 @@ class MuxTest {
         // the same server twice (imported twice) is tested once
         val twice = Mux.plan(Mux.AUTO, listOf(vless("x1", path = "/same"), vless("x2", path = "/same")), emptyMap(), now)
         assertEquals(listOf("x1"), twice.toProbe.map { s: ServerConfig -> s.id })
-        // anything but on / off is auto, the default
-        assertEquals(listOf("new"), Mux.plan("garbage", listOf(fresh), emptyMap(), now).toProbe.map { s: ServerConfig -> s.id })
-        assertEquals(Mux.AUTO, Mux.modeOf(null))
-        assertEquals(Mux.AUTO, Mux.modeOf(""))
+        // anything but auto / on is off — the default, the owner's choice: an install without the setting reads Off
+        val garbage = Mux.plan("garbage", listOf(fresh, ok), cache, now)
+        assertTrue(garbage.muxIds.isEmpty())
+        assertTrue(garbage.toProbe.isEmpty())
+        assertEquals(Mux.OFF, Mux.DEFAULT_MODE)
+        assertEquals(Mux.OFF, Mux.modeOf(null))
+        assertEquals(Mux.OFF, Mux.modeOf(""))
+        assertEquals(Mux.OFF, Mux.modeOf("garbage"))
+        assertEquals(Mux.AUTO, Mux.modeOf(" Auto "))
         assertEquals(Mux.ON, Mux.modeOf(" On "))
         assertEquals(Mux.OFF, Mux.modeOf("off"))
     }

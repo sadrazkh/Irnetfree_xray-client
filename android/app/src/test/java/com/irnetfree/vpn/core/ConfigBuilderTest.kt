@@ -222,6 +222,29 @@ class ConfigBuilderTest {
         }
     }
 
+    @Test fun mux_theDefaultSettingWritesNoMux_evenForAServerTestedOk() {
+        // An install that never set Settings → Mux reads Off (Mux.modeOf(null), the owner's default): the
+        // connect path decides nothing, tests nothing, and no config carries mux — even for a server whose
+        // kept verdict is a fresh ok.
+        assertEquals(Mux.OFF, Mux.modeOf(null))
+        val stamp = System.currentTimeMillis()
+        val cache = mapOf(Mux.fingerprint(a) to Mux.Probe(true, stamp))
+        val plans = listOf<ConnectionPlan>(ConnectionPlan.Single(a), pool(), advanced(listOf(RouteRule("domain", "x.com", "a")), "a"))
+        for (p in plans) {
+            var tested = false
+            val pick = Mux.choose(
+                mode = Mux.modeOf(null), connection = p, cache = cache, now = { stamp },
+                test = { _: ServerConfig -> tested = true; Mux.OK },
+                remember = { _: String, _: Mux.Probe -> },
+                log = { _: String -> }
+            )
+            assertEquals(Mux.Pick.NONE, pick)
+            assertFalse(tested)
+            val c = ConfigBuilder.build(p, settings(), geoAssets = true, muxIds = pick.ids)
+            assertFalse(c.toString(), c.toString().contains("\"mux\""))
+        }
+    }
+
     @Test fun mux_theTestConfigCarriesItOnlyWhenAskedTo() {
         val today = ConfigBuilder.buildTestConfig(a, 39990)
         assertFalse(today.getJSONArray("outbounds").getJSONObject(0).has("mux"))

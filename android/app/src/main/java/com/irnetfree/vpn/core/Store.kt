@@ -113,7 +113,7 @@ class Store(context: Context) {
      * copy it opened with, and the connect path writes verdicts meanwhile.
      */
 
-    /** Settings → Mux: "auto" (the default) | "on" | "off". */
+    /** Settings → Mux: "off" (the default — also for an install that never set it) | "auto" | "on". */
     var muxMode: String
         get() = Mux.modeOf(prefs.getString("muxMode", null))
         set(v) { prefs.edit().putString("muxMode", Mux.modeOf(v)).apply() }
