@@ -1183,7 +1183,8 @@ private object AppWork {
         // A connect or a disconnect asked for while ⚡ measures (it takes seconds)
         // is the user's newer word: ⚡ then applies nothing at its end.
         val ticket = XrayVpnService.moves
-        fastestJob = scope.launch {
+        // this.scope: AppWork's coroutines — `scope` alone is the servers parameter
+        fastestJob = this.scope.launch {
             try {
                 val out = pickFastest(app, list, phase)
                 if (XrayVpnService.moves != ticket) {
