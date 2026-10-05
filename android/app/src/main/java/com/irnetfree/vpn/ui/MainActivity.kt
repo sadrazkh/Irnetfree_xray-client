@@ -50,6 +50,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -62,6 +63,8 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.window.Dialog
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -332,27 +335,10 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         else { spark.add(traffic.rxSpeed to traffic.txSpeed); while (spark.size > 60) spark.removeAt(0) }
     }
 
-    // What to do once Android has said yes: "fastest", or a plain connect.
-    // Saveable, because both system dialogs are other activities and this one
-    // can be recreated behind them.
-    var afterConsent by rememberSaveable { mutableStateOf("connect") }
-    fun proceed() { if (afterConsent == "fastest") AppWork.connectFastest(ctx, store) else doConnect(ctx, store) }
-    val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        if (res.resultCode == android.app.Activity.RESULT_OK) proceed()
-        else AppWork.snack("Android’s VPN permission was not given — nothing was connected")
-    }
-    fun vpnConsentThenProceed() {
-        val prep: Intent? = VpnService.prepare(ctx)
-        if (prep != null) vpnPrepare.launch(prep) else proceed()
-    }
-    // Android 13+ shows no notification without POST_NOTIFICATIONS — and the
-    // VPN's status notification is where its Disconnect button lives. Asked
-    // once, before the first connect; granted or refused, the connect goes on.
-    val notifAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> vpnConsentThenProceed() }
-    fun withConsent(then: String) {
-        afterConsent = then
-        if (needsNotificationAsk(ctx, store)) { store.notifAsked = true; notifAsk.launch(Manifest.permission.POST_NOTIFICATIONS) }
-        else vpnConsentThenProceed()
+    // What to do once Android has said yes (rememberConsent): "fastest", or a
+    // plain connect.
+    val withConsent = rememberConsent(store) { then: String ->
+        if (then == "fastest") AppWork.connectFastest(ctx, store) else doConnect(ctx, store)
     }
     /**
      * The ring and the button under your thumb. While something is on its way
@@ -1131,10 +1117,14 @@ private object AppWork {
      * ⚡: measure, choose, save the choice, connect to it. Android's permissions
      * were asked for by the screen before this started, so the end of the run
      * needs no screen at all.
+     *
+     * [scope]: only these servers — a group's ⚡ on its header — named
+     * [scopeName] wherever the run speaks; null = every server (Home's ⚡).
      */
-    fun connectFastest(ctx: Context, store: Store) {
-        val list = store.servers.toList()
+    fun connectFastest(ctx: Context, store: Store, scope: List<ServerConfig>? = null, scopeName: String? = null) {
+        val list = (scope ?: store.servers).toList()
         if (list.size < 2 || fastestPhase.value.isNotEmpty()) return
+        val inScope = if (scope != null && !scopeName.isNullOrBlank()) " in $scopeName" else ""
         val app = ctx.applicationContext
         val run = ++fastestRun
         // Only this run's words reach the screen: one cancelled a moment ago
@@ -1161,8 +1151,8 @@ private object AppWork {
                     val gone = best?.let { b -> list.firstOrNull { it.id == b.id }?.name ?: "the winner" }
                     val why = when {
                         gone != null -> "$gone won but was removed during the test"
-                        out.answered == 0 -> "no server answered"
-                        else -> "none of the ${out.tried} quickest carried traffic"
+                        out.answered == 0 -> "no server$inScope answered"
+                        else -> "none of the ${out.tried} quickest$inScope carried traffic"
                     }
                     fastestNote.value = "$why — the selection was left alone"
                     VpnState.addLog("Auto (fastest): $why; kept ${store.selectionLabel()}")
@@ -1173,9 +1163,9 @@ private object AppWork {
                 val how = if (real >= 0) "$real ms through it" else "${best.tcp ?: -1L} ms handshake"
                 store.saveSelection(best.id)
                 storeRev.value = storeRev.value + 1
-                fastestNote.value = "⚡ fastest of ${list.size}: ${srv.name} · $how"
-                VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers")
-                snack("Fastest: ${srv.name} · $how")
+                fastestNote.value = "⚡ fastest of ${list.size}$inScope: ${srv.name} · $how"
+                VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers$inScope")
+                snack("Fastest$inScope: ${srv.name} · $how")
                 // Already up on something else: the service switches a live tunnel
                 // onto the new choice itself (one tunnel, no gap without the VPN),
                 // so there is no disconnect first any more.
@@ -1214,6 +1204,37 @@ private object AppWork {
 private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
     Build.VERSION.SDK_INT >= 33 && !store.notifAsked &&
         ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+
+/**
+ * Android's permissions before anything connects, asked by the screen that is
+ * about to connect (Home's ring and ⚡, a group's ⚡ on Servers). The returned
+ * function takes the word for what follows — "connect", "fastest", a group's
+ * key — and [proceed] gets it back once Android has said yes. The word is
+ * saveable, because both system dialogs are other activities and the screen
+ * can be recreated behind them.
+ *
+ * Android 13+ shows no notification without POST_NOTIFICATIONS — and the VPN's
+ * status notification is where its Disconnect button lives. Asked once, before
+ * the first connect; granted or refused, the connect goes on to the VPN consent.
+ */
+@Composable private fun rememberConsent(store: Store, proceed: (String) -> Unit): (String) -> Unit {
+    val ctx = LocalContext.current
+    var afterConsent by rememberSaveable { mutableStateOf("connect") }
+    val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        if (res.resultCode == android.app.Activity.RESULT_OK) proceed(afterConsent)
+        else AppWork.snack("Android’s VPN permission was not given — nothing was connected")
+    }
+    fun vpnConsentThenProceed() {
+        val prep: Intent? = VpnService.prepare(ctx)
+        if (prep != null) vpnPrepare.launch(prep) else proceed(afterConsent)
+    }
+    val notifAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> vpnConsentThenProceed() }
+    return { then: String ->
+        afterConsent = then
+        if (needsNotificationAsk(ctx, store)) { store.notifAsked = true; notifAsk.launch(Manifest.permission.POST_NOTIFICATIONS) }
+        else vpnConsentThenProceed()
+    }
+}
 
 
 /**
@@ -1348,6 +1369,21 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     val tests = AppWork.tests
     val testingAll by AppWork.testingAll.collectAsState()
     val busy by AppWork.subsBusy.collectAsState()
+    // 📶 and ⚡ on a group's header, acting on the whole group. ⚡ is AppWork's
+    // run, as on Home, after Android's permissions (rememberConsent): the group
+    // goes through the consent dialogs as its key, and its servers are looked
+    // up again once Android has answered. Which header asked is kept here only
+    // to put the spinner, and ⚡'s progress, on that header.
+    val fastestPhase by AppWork.fastestPhase.collectAsState()
+    var fastestKey by remember { mutableStateOf("") }
+    var testKey by remember { mutableStateOf("") }
+    val haptic = LocalHapticFeedback.current
+    val groupFastest = rememberConsent(store) { then: String ->
+        val key = then.removePrefix("group:")
+        val g = ServerGroups.build(store.servers, store.subs, "", emptySet(), "").firstOrNull { it.key == key }
+        if (g == null || g.all.size < 2) AppWork.snack("That group no longer has two servers to choose from")
+        else { fastestKey = g.key; AppWork.connectFastest(ctx, store, g.all, g.title) }
+    }
     // The row whose actions are showing. Only ever one, and nothing to begin
     // with: arriving at the list should show the list, not a card mid-flight.
     var openId by remember { mutableStateOf("") }
@@ -1382,7 +1418,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
             if (store.servers.isNotEmpty()) Box(
                 Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(50))
                     .clickable(onClickLabel = if (testingAll) "stop testing" else "test every server") {
-                        if (testingAll) AppWork.stopTests() else AppWork.testAll(ctx, store.servers.toList())
+                        if (testingAll) AppWork.stopTests() else { testKey = ""; AppWork.testAll(ctx, store.servers.toList()) }
                     }
                     .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.Center
@@ -1449,7 +1485,15 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                             GroupHeader(
                                 g, now, refreshing = sub != null && sub.id in busy, foldable = !searching,
                                 onToggle = { collapsed = ServerGroups.toggle(collapsed, g.key); store.collapsedGroups = collapsed },
-                                onRefresh = refresh
+                                onRefresh = refresh,
+                                onTest = { testKey = g.key; AppWork.testAll(ctx, g.all) },
+                                onFastest = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    AutoConnectOnce.manual = true
+                                    groupFastest("group:" + g.key)
+                                },
+                                testBusy = testingAll, testingHere = testingAll && testKey == g.key,
+                                fastestBusy = fastestPhase.isNotEmpty(), fastestPhase = if (fastestKey == g.key) fastestPhase else ""
                             )
                         }
                         is ServerGroups.ListEntry.Item -> {
@@ -1541,6 +1585,13 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
  * A group's header: tap it to fold or unfold the group. A subscription's shows
  * its usage, expiry and last update, and a refresh button of its own; a folded
  * group holding the server in use says so.
+ *
+ * A group of two or more also gets 📶 — test every server in it, as "ping all"
+ * does — and ⚡ — connect to its fastest, as Home's ⚡ does for every server.
+ * Both act on the whole group, whatever a search shows of it. 📶 waits while a
+ * test is running ([testBusy]; "stop testing" up top stops it), ⚡ while a ⚡ is
+ * ([fastestBusy]); the group whose own run it is shows a spinner instead, and
+ * [fastestPhase] — what ⚡ is measuring in it — where its summary was.
  */
 @Composable private fun GroupHeader(
     g: ServerGroups.Group,
@@ -1548,15 +1599,28 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
     refreshing: Boolean,
     foldable: Boolean,
     onToggle: () -> Unit,
-    onRefresh: (() -> Unit)?
+    onRefresh: (() -> Unit)?,
+    onTest: (() -> Unit)?,
+    onFastest: (() -> Unit)?,
+    testBusy: Boolean,
+    testingHere: Boolean,
+    fastestBusy: Boolean,
+    fastestPhase: String
 ) {
     val summary = g.sub?.let { ServerGroups.summary(it, now) }
-    val line = summary?.text ?: if (g.key == ServerGroups.MANUAL) "added by hand" else "their subscription was deleted"
-    val tint = when (summary?.level) {
-        ServerGroups.LEVEL_BAD -> BAD
-        ServerGroups.LEVEL_WARN -> AMBER
+    val line = when {
+        fastestPhase.isNotEmpty() -> "⚡ $fastestPhase"
+        summary != null -> summary.text
+        g.key == ServerGroups.MANUAL -> "added by hand"
+        else -> "their subscription was deleted"
+    }
+    val tint = when {
+        fastestPhase.isNotEmpty() -> AMBER
+        summary?.level == ServerGroups.LEVEL_BAD -> BAD
+        summary?.level == ServerGroups.LEVEL_WARN -> AMBER
         else -> MUTED2
     }
+    val actions = g.total >= 2
     Row(
         Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp).heightIn(min = 52.dp).clip(RoundedCornerShape(12.dp))
             .clickable(enabled = foldable, onClickLabel = if (g.open) "fold" else "unfold") { onToggle() }
@@ -1590,11 +1654,28 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
                     )
                 }
             }
-            Text(line, color = tint, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // two lines: with 📶 and ⚡ beside it a phone leaves the line half its width
+            Text(line, color = tint, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
+        if (actions && onTest != null) GroupAction("📶", "test every server in ${g.title}", enabled = !testBusy, running = testingHere, onClick = onTest)
+        if (actions && onFastest != null) GroupAction("⚡", "connect to the fastest in ${g.title}", enabled = !fastestBusy, running = fastestPhase.isNotEmpty(), onClick = onFastest)
         if (onRefresh != null) IconButton(onClick = onRefresh, enabled = !refreshing) {
             if (refreshing) CircularProgressIndicator(color = PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
             else Icon(Icons.Filled.Refresh, "refresh ${g.title}", tint = MUTED)
+        }
+    }
+}
+
+/**
+ * One of a group header's emoji buttons, the size of the refresh beside it. An
+ * emoji keeps its own colours whatever the button's, so a button that has to
+ * wait is dimmed by hand; one whose run is going shows a spinner instead.
+ */
+@Composable private fun GroupAction(glyph: String, label: String, enabled: Boolean, running: Boolean, onClick: () -> Unit) {
+    IconButton(onClick = onClick, enabled = enabled && !running) {
+        Box(Modifier.clearAndSetSemantics { contentDescription = label }, contentAlignment = Alignment.Center) {
+            if (running) CircularProgressIndicator(color = PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+            else Text(glyph, fontSize = 16.sp, modifier = Modifier.alpha(if (enabled) 1f else 0.35f))
         }
     }
 }
