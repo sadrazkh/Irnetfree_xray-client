@@ -2637,11 +2637,11 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     }
 }
 
-/** Settings → Mux: one line of help, for the choice it is on. */
+/** Settings → Mux: one line of help, for the choice it is on (Off is the default). */
 private fun muxHelp(mode: String): String = when (mode) {
+    Mux.AUTO -> "Auto: each WebSocket / HTTPUpgrade server is tested once and uses mux where it works — far fewer handshakes, less battery."
     Mux.ON -> "On: every VLESS (without flow), VMess and Trojan server over WebSocket or HTTPUpgrade uses mux, untested."
-    Mux.OFF -> "Off: every connection makes its own handshake with the server, as before."
-    else -> "Auto: each WebSocket / HTTPUpgrade server is tested once and uses mux where it works — far fewer handshakes, less battery."
+    else -> "Off (the default): every connection makes its own handshake with the server, as before."
 }
 
 /**

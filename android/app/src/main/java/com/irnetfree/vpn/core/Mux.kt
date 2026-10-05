@@ -12,12 +12,12 @@ import java.security.MessageDigest
  * its own TLS (+ECH) + WS handshake. On the owner's line one took 0.6–3.7 s,
  * and with mux the same server answered each new connection in about 150 ms,
  * over a handful of real connections — fewer handshakes, less CPU and battery.
- * Not every server accepts it, so in Settings → Mux "auto" (the default) a
+ * Not every server accepts it, so in Settings → Mux "auto" a
  * server is tested once before the connect that needs it, and the verdict is
  * kept: "ok" for 7 days, "unsupported" for 1 — per server FINGERPRINT, so an
  * edited server, or a subscription refresh with new parameters, is tested
- * again. "on" muxes every eligible server untested; "off" writes the configs of
- * before, byte for byte.
+ * again. "on" muxes every eligible server untested; "off" — the default, the
+ * owner's choice — writes the configs of before, byte for byte.
  *
  * After the review (the same rules as the desktop's): a test without a clear
  * answer on a line that works (mux ran out of time, the control answered)
@@ -97,11 +97,18 @@ object Mux {
     val MUX: JSONObject
         get() = JSONObject().put("enabled", true).put("concurrency", 8).put("xudpConcurrency", 16).put("xudpProxyUDP443", "skip")
 
-    /** Settings → Mux as stored: anything but "on" / "off" is "auto", the default. */
+    /**
+     * Settings → Mux when nothing (or nothing readable) is stored: off — the
+     * owner's choice (he has run mux on no client yet); Auto and On are a tap
+     * away in Settings.
+     */
+    const val DEFAULT_MODE = OFF
+
+    /** Settings → Mux as stored: "auto" and "on" as they are, anything else [DEFAULT_MODE] (off). */
     fun modeOf(raw: String?): String = when (raw?.trim()?.lowercase()) {
+        AUTO -> AUTO
         ON -> ON
-        OFF -> OFF
-        else -> AUTO
+        else -> DEFAULT_MODE
     }
 
     /**
