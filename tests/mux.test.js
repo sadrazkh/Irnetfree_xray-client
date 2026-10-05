@@ -24,6 +24,7 @@ const { parseLink } = require('../src/main/parser');
 const { server, VLESS_WS_TLS, TROJAN_TCP_TLS, SS_TCP, WG_BAD_MASK } = require('./fixtures');
 
 const DAY = 24 * 60 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -148,21 +149,22 @@ test('muxFingerprint changes with what the server is: address, port, id/password
 
 /* ----------------------------- verdicts and their age ----------------------------- */
 
-test('freshVerdict: ok for 7 days, unsupported for 3 — and nothing else is a verdict', () => {
+test('freshVerdict: ok for 7 days, unsupported for 1 — and nothing else is a verdict', () => {
   const now = 100 * DAY;
   assert.equal(freshVerdict({ verdict: 'ok', at: now }, now), 'ok');
   assert.equal(freshVerdict({ verdict: 'ok', at: now - 7 * DAY + 1 }, now), 'ok');
   assert.equal(freshVerdict({ verdict: 'ok', at: now - 7 * DAY }, now), null, 'seven days old: tested again');
-  assert.equal(freshVerdict({ verdict: 'unsupported', at: now - 3 * DAY + 1 }, now), 'unsupported');
-  assert.equal(freshVerdict({ verdict: 'unsupported', at: now - 3 * DAY }, now), null, 'three days old: tested again');
-  assert.equal(freshVerdict({ verdict: 'unsupported', at: now - 5 * DAY }, now), null);
-  assert.equal(freshVerdict({ verdict: 'unknown', at: now }, now), null, 'unknown is never remembered');
+  assert.equal(freshVerdict({ verdict: 'unsupported', at: now - DAY + 1 }, now), 'unsupported');
+  assert.equal(freshVerdict({ verdict: 'unsupported', at: now - DAY }, now), null, 'a day old: tested again');
+  assert.equal(freshVerdict({ verdict: 'unsupported', at: now - 2 * DAY }, now), null);
+  assert.equal(freshVerdict({ verdict: 'unknown', at: now, retryAfter: now + HOUR }, now), null, 'an inconclusive test is no verdict');
   assert.equal(freshVerdict({ verdict: 'ok', at: now + DAY }, now), null, 'a verdict from the future (a clock set back) is not trusted');
   for (const junk of [null, undefined, {}, { verdict: 'ok' }, { verdict: 'ok', at: 'yesterday' }, 'ok', 7]) {
     assert.equal(freshVerdict(junk, now), null, JSON.stringify(junk));
   }
   assert.equal(mux.OK_TTL_MS, 7 * DAY);
-  assert.equal(mux.UNSUPPORTED_TTL_MS, 3 * DAY);
+  assert.equal(mux.UNSUPPORTED_TTL_MS, DAY);
+  assert.equal(mux.RETRY_UNKNOWN_MS, HOUR);
 });
 
 /* ----------------------------- what each mode asks for ----------------------------- */
@@ -189,7 +191,7 @@ test('planMux: auto — a fresh ok is muxed, a fresh unsupported is not, the res
   const fresh = shaped('new', 'vless', 'httpupgrade');
   const cache = {
     [muxFingerprint(ok)]: { verdict: 'ok', at: now - DAY },
-    [muxFingerprint(no)]: { verdict: 'unsupported', at: now - DAY },
+    [muxFingerprint(no)]: { verdict: 'unsupported', at: now - 12 * HOUR },
     [muxFingerprint(stale)]: { verdict: 'ok', at: now - 8 * DAY }
   };
   const plan = planMux({ mode: 'auto', servers: [ok, no, stale, fresh, TROJAN_TCP_TLS, ok], cache, now });
@@ -199,6 +201,47 @@ test('planMux: auto — a fresh ok is muxed, a fresh unsupported is not, the res
   assert.deepEqual(planMux({ servers: [ok, fresh], cache, now }).muxIds, ['ok']);
   assert.deepEqual(planMux({ mode: 'sometimes', servers: [ok, fresh], cache, now }).toProbe.map((s) => s.id), ['new']);
   assert.deepEqual(planMux({ mode: 'auto', servers: [fresh], cache: undefined, now }).toProbe.map((s) => s.id), ['new'], 'no cache yet');
+});
+
+test('planMux: a recovery’s connect never tests — a remembered ok, marked for a re-test or expired, still muxes; nothing else does', () => {
+  // The review (I1): a rebuild after a drop tested inside the outage — on a
+  // router the LAN offline (or direct) for those seconds, behind Windows' kill
+  // switch a test that could never reach the server, and a slow line's
+  // timeout turned mux off in the very storm it was added for.
+  const now = 50 * DAY;
+  const recheck = shaped('recheck', 'vless', 'ws');
+  const expired = shaped('expired', 'vmess', 'ws');
+  const no = shaped('no', 'trojan', 'ws');
+  const unknown = shaped('unknown', 'vless', 'httpupgrade');
+  const untested = shaped('untested', 'trojan', 'httpupgrade');
+  const cache = {
+    [muxFingerprint(recheck)]: { verdict: 'ok', at: now - 2 * DAY, recheck: true },
+    [muxFingerprint(expired)]: { verdict: 'ok', at: now - 9 * DAY },
+    [muxFingerprint(no)]: { verdict: 'unsupported', at: now - 3 * DAY },
+    [muxFingerprint(unknown)]: { verdict: 'unknown', at: now - 2 * HOUR, retryAfter: now - HOUR }
+  };
+  const servers = [recheck, expired, no, unknown, untested];
+  assert.deepEqual(planMux({ mode: 'auto', servers, cache, now, recovery: true }), { muxIds: ['recheck', 'expired'], toProbe: [] });
+  // the next connect the user or the boot makes tests every one of them
+  const user = planMux({ mode: 'auto', servers, cache, now });
+  assert.deepEqual(user.muxIds, []);
+  assert.deepEqual(user.toProbe.map((s) => s.id), ['recheck', 'expired', 'no', 'unknown', 'untested']);
+});
+
+test('planMux: no test before retryAfter — meanwhile the verdict an inconclusive test kept decides', () => {
+  const now = 50 * DAY;
+  const keptOk = shaped('kept-ok', 'vless', 'ws');
+  const keptNo = shaped('kept-no', 'vmess', 'ws');
+  const unknown = shaped('unknown', 'trojan', 'ws');
+  const servers = [keptOk, keptNo, unknown];
+  const cache = {
+    [muxFingerprint(keptOk)]: { verdict: 'ok', at: now - 9 * DAY, recheck: true, retryAfter: now + 30 * 60 * 1000 },
+    [muxFingerprint(keptNo)]: { verdict: 'unsupported', at: now - 2 * DAY, retryAfter: now + 1 },
+    [muxFingerprint(unknown)]: { verdict: 'unknown', at: now - 10 * 60 * 1000, retryAfter: now + 50 * 60 * 1000 }
+  };
+  assert.deepEqual(planMux({ mode: 'auto', servers, cache, now }), { muxIds: ['kept-ok'], toProbe: [] });
+  // the hour over: tested again
+  assert.deepEqual(planMux({ mode: 'auto', servers, cache, now: now + HOUR }).toProbe.map((s) => s.id), ['kept-ok', 'kept-no', 'unknown']);
 });
 
 test('muxMode: auto unless on or off', () => {
@@ -413,14 +456,14 @@ test('probeMux: a core still starting (its port refused, the core alive) is aske
 
 /* ----------------------------- one connect’s decision ----------------------------- */
 
-test('decideMux: remembered answers stand, the rest are tested — one line per server, unknown never learnt', async () => {
+test('decideMux: remembered answers stand, the rest are tested — one line per server; an unknown is learnt too (for its retry hour)', async () => {
   const now = 30 * DAY;
   const ok = shaped('ok', 'vless', 'ws');
   const no = shaped('no', 'vmess', 'ws');
   const fresh = shaped('fresh', 'trojan', 'ws');
   const refuses = shaped('refuses', 'vless', 'httpupgrade');
   const silent = shaped('silent', 'vless', 'ws', (s) => { s.outbound.streamSettings.wsSettings.path = '/silent'; });
-  const cache = { [muxFingerprint(ok)]: { verdict: 'ok', at: now - DAY }, [muxFingerprint(no)]: { verdict: 'unsupported', at: now - DAY } };
+  const cache = { [muxFingerprint(ok)]: { verdict: 'ok', at: now - DAY }, [muxFingerprint(no)]: { verdict: 'unsupported', at: now - 12 * HOUR } };
   const answers = { fresh: 'ok', refuses: 'unsupported', silent: 'unknown' };
   const probed = [];
   const lines = [];
@@ -431,7 +474,11 @@ test('decideMux: remembered answers stand, the rest are tested — one line per 
   });
   assert.deepEqual(probed.sort(), ['fresh', 'refuses', 'silent']);
   assert.deepEqual(res.muxIds, ['ok', 'fresh']);
-  assert.deepEqual(res.learnt, [{ fp: muxFingerprint(fresh), verdict: 'ok' }, { fp: muxFingerprint(refuses), verdict: 'unsupported' }]);
+  assert.deepEqual(res.learnt, [
+    { fp: muxFingerprint(fresh), verdict: 'ok' },
+    { fp: muxFingerprint(refuses), verdict: 'unsupported' },
+    { fp: muxFingerprint(silent), verdict: 'unknown' }
+  ]);
   assert.deepEqual(lines, [
     ['info', 'Mux on for Server ok (tested: works)'],
     ['info', 'Mux off for Server no (this server does not accept it)'],
@@ -439,6 +486,16 @@ test('decideMux: remembered answers stand, the rest are tested — one line per 
     ['info', 'Mux off for Server refuses (this server does not accept it)'],
     ['warn', 'Mux: Server silent did not answer either way — connecting without it']
   ]);
+  // within its retry hour the remembered unknown is not tested again — said once more, quietly
+  const memo = mux.rememberVerdicts(cache, res.learnt, now);
+  const again = [];
+  const res2 = await mux.decideMux({
+    mode: 'auto', servers: [silent], cache: memo, now: now + 10 * 60 * 1000,
+    probe: async () => { throw new Error('not within the hour'); },
+    log: (line, level) => again.push([level, line])
+  });
+  assert.deepEqual(res2, { muxIds: [], learnt: [] });
+  assert.deepEqual(again, [['info', 'Mux: Server silent did not answer either way — connecting without it']]);
 });
 
 test('decideMux: a probe that throws, or answers nonsense, is an unknown', async () => {
@@ -450,9 +507,62 @@ test('decideMux: a probe that throws, or answers nonsense, is an unknown', async
     probe: async (s) => { if (s.id === 'a') throw new Error('boom'); return 'maybe'; },
     log: (line) => lines.push(line)
   });
-  assert.deepEqual(res, { muxIds: [], learnt: [] });
+  assert.deepEqual(res, { muxIds: [], learnt: [{ fp: muxFingerprint(a), verdict: 'unknown' }, { fp: muxFingerprint(b), verdict: 'unknown' }] });
   assert.equal(lines.length, 2);
   assert.ok(lines.every((l) => /did not answer either way — connecting without it$/.test(l)));
+});
+
+test('decideMux: a recovery’s connect never tests — a re-test mark is kept as ok and muxed; nothing usable goes without', async () => {
+  const now = 30 * DAY;
+  const marked = shaped('marked', 'vless', 'ws');
+  const fresh = shaped('fresh', 'vmess', 'ws');
+  const lines = [];
+  const cache = { [muxFingerprint(marked)]: { verdict: 'ok', at: now - 3 * DAY, recheck: true } };
+  const res = await mux.decideMux({
+    mode: 'auto', servers: [marked, fresh], cache, now, recovery: true,
+    probe: async () => { throw new Error('a rebuild never tests'); },
+    log: (line, level) => lines.push([level, line])
+  });
+  assert.deepEqual(res, { muxIds: ['marked'], learnt: [] });
+  assert.deepEqual(lines, [
+    ['info', 'Mux on for Server marked (tested: works)'],
+    ['info', 'Mux: Server fresh not tested yet — connecting without it']
+  ]);
+});
+
+test('decideMux: an inconclusive re-test keeps mux on — the ok it had stands, the unknown only earns a retry hour', async () => {
+  const now = 30 * DAY;
+  const marked = shaped('marked', 'vless', 'ws');
+  const expired = shaped('expired', 'vmess', 'ws');
+  const lines = [];
+  const cache = {
+    [muxFingerprint(marked)]: { verdict: 'ok', at: now - 3 * DAY, recheck: true },
+    [muxFingerprint(expired)]: { verdict: 'unsupported', at: now - 2 * DAY }
+  };
+  const res = await mux.decideMux({
+    mode: 'auto', servers: [marked, expired], cache, now,
+    probe: async () => 'unknown',
+    log: (line, level) => lines.push([level, line])
+  });
+  assert.deepEqual(res.muxIds, ['marked'], 'mux stays on');
+  assert.deepEqual(res.learnt, [{ fp: muxFingerprint(marked), verdict: 'unknown' }, { fp: muxFingerprint(expired), verdict: 'unknown' }]);
+  assert.deepEqual(lines, [
+    ['info', 'Mux on for Server marked (tested before: works — this test did not answer)'],
+    ['info', 'Mux off for Server expired (this server does not accept it)']
+  ]);
+});
+
+test('decideMux: `parallel` caps the probes at once — one at a time for the router', async () => {
+  const servers = [];
+  for (let i = 0; i < 4; i++) servers.push(shaped('r' + i, 'vless', 'ws'));
+  let inFlight = 0, most = 0;
+  const res = await mux.decideMux({
+    mode: 'auto', servers, cache: {}, now: 1, parallel: 1,
+    probe: async () => { inFlight++; most = Math.max(most, inFlight); await sleep(10); inFlight--; return 'ok'; },
+    log: () => {}
+  });
+  assert.equal(most, 1);
+  assert.equal(res.muxIds.length, 4);
 });
 
 test('decideMux: at most three probes at once, each server once — two records of one server are one probe', async () => {
@@ -503,32 +613,51 @@ test('rememberVerdicts: newest wins, the input is never changed, at most 500 ent
   assert.deepEqual(mux.rememberVerdicts([], [{ fp: 'x', verdict: 'ok' }], 5), { x: { verdict: 'ok', at: 5 } });
 });
 
-test('forgetVerdicts: a drop forgets the named verdicts at least 10 minutes old — a younger one stays; nothing to forget is the same object (no store write)', () => {
-  // A core that keeps crashing for a reason that has nothing to do with mux
-  // must not rewrite store.json (the router's flash) twice per crash: the
-  // forget, then the probe that learns the same answer again. A server that
-  // really stopped taking mux is still caught on the first drop after those
-  // 10 minutes.
-  const MIN = 60 * 1000;
-  const now = 1000 * DAY;
-  assert.equal(mux.FORGET_MIN_AGE_MS, 10 * MIN);
+test('rememberVerdicts: an unknown never replaces an ok or unsupported verdict — it keeps it (expired or marked included) and stamps a retry hour; with nothing before, it is remembered as unknown', () => {
+  const now = 40 * DAY;
   const cache = {
-    young: { verdict: 'ok', at: now - 5 * MIN },
-    old: { verdict: 'ok', at: now - 11 * MIN },
-    edge: { verdict: 'unsupported', at: now - 10 * MIN },
-    other: { verdict: 'ok', at: now - 11 * MIN }
+    marked: { verdict: 'ok', at: now - 3 * DAY, recheck: true },
+    expiredOk: { verdict: 'ok', at: now - 9 * DAY },
+    expiredNo: { verdict: 'unsupported', at: now - 2 * DAY },
+    gone: { verdict: 'unknown', at: now - 2 * HOUR, retryAfter: now - HOUR }
   };
   const before = clone(cache);
-  const next = mux.forgetVerdicts(cache, ['young', 'old', 'edge', 'zz'], now);
-  assert.deepEqual(Object.keys(next).sort(), ['other', 'young'], 'the 5-minute-old answer survives the drop; 10 minutes and older go');
-  assert.deepEqual(next.young, cache.young);
+  const next = mux.rememberVerdicts(cache, ['marked', 'expiredOk', 'expiredNo', 'gone', 'fresh'].map((fp) => ({ fp, verdict: 'unknown' })), now);
+  assert.deepEqual(next.marked, { verdict: 'ok', at: now - 3 * DAY, recheck: true, retryAfter: now + HOUR }, 'still ok: mux stays on, tested again after the hour');
+  assert.deepEqual(next.expiredOk, { verdict: 'ok', at: now - 9 * DAY, retryAfter: now + HOUR });
+  assert.deepEqual(next.expiredNo, { verdict: 'unsupported', at: now - 2 * DAY, retryAfter: now + HOUR });
+  assert.deepEqual(next.gone, { verdict: 'unknown', at: now, retryAfter: now + HOUR });
+  assert.deepEqual(next.fresh, { verdict: 'unknown', at: now, retryAfter: now + HOUR });
+  assert.deepEqual(cache, before, 'a new object');
+  // a definitive answer clears the mark and the retry hour
+  const settled = mux.rememberVerdicts(next, [{ fp: 'marked', verdict: 'ok' }, { fp: 'expiredNo', verdict: 'ok' }, { fp: 'gone', verdict: 'unsupported' }], now + 2 * HOUR);
+  assert.deepEqual(settled.marked, { verdict: 'ok', at: now + 2 * HOUR });
+  assert.deepEqual(settled.expiredNo, { verdict: 'ok', at: now + 2 * HOUR });
+  assert.deepEqual(settled.gone, { verdict: 'unsupported', at: now + 2 * HOUR });
+});
+
+test('markRecheck: a drop marks the ok verdicts of what it muxed for a re-test — kept as ok; nothing to mark is the same object (no store write)', () => {
+  const now = 40 * DAY;
+  const cache = {
+    a: { verdict: 'ok', at: now - 2 * DAY },
+    b: { verdict: 'ok', at: now - 5 * 60 * 1000 },
+    done: { verdict: 'ok', at: now - DAY, recheck: true },
+    no: { verdict: 'unsupported', at: now - HOUR },
+    unknown: { verdict: 'unknown', at: now - HOUR, retryAfter: now }
+  };
+  const before = clone(cache);
+  const next = mux.markRecheck(cache, ['a', 'b', 'done', 'no', 'unknown', 'zz', 'a']);
+  assert.deepEqual(next.a, { verdict: 'ok', at: now - 2 * DAY, recheck: true });
+  assert.deepEqual(next.b, { verdict: 'ok', at: now - 5 * 60 * 1000, recheck: true }, 'however young: a drop is a drop');
+  assert.deepEqual(next.done, cache.done);
+  assert.deepEqual(next.no, cache.no, 'only an ok is marked');
+  assert.deepEqual(next.unknown, cache.unknown);
+  assert.equal('zz' in next, false);
   assert.deepEqual(cache, before, 'a new object; the input is untouched');
-  // nothing qualifies — too young, or not remembered at all: the very same object, so the caller writes nothing
-  assert.equal(mux.forgetVerdicts(cache, ['young'], now), cache);
-  assert.equal(mux.forgetVerdicts(cache, ['zz'], now), cache);
-  assert.equal(mux.forgetVerdicts(cache, [], now), cache);
-  // the same young answer, once it is 10 minutes old, goes with the next drop
-  assert.deepEqual(Object.keys(mux.forgetVerdicts(cache, ['young'], now + 5 * MIN)).sort(), ['edge', 'old', 'other']);
+  // nothing to mark — already marked, not an ok, not remembered: the very same object, so the caller writes nothing
+  assert.equal(mux.markRecheck(cache, ['done', 'no', 'unknown', 'zz']), cache);
+  assert.equal(mux.markRecheck(cache, []), cache);
+  assert.equal(mux.markRecheck(next, ['a', 'b']), next, 'a second drop writes nothing more');
 });
 
 /* ----------------------------- which servers a plan asks about ----------------------------- */

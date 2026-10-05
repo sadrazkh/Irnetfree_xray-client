@@ -35,7 +35,7 @@ Store.prototype.set = function (key, value) {
   return realSet.call(this, key, value);
 };
 const muxWritesOf = (s) => muxWrites.filter((f) => f === path.join(s.dir, 'store.json')).length;
-const MIN = 60 * 1000;
+const HOUR = 60 * 60 * 1000;
 
 const UUID = '11111111-2222-3333-4444-555555555555';
 // The field report's shape: VLESS over WebSocket + TLS with ECH, by address (no name to resolve here)
@@ -103,25 +103,30 @@ test('auto: the probe is handed the connect’s own tools — the live core’s 
   assert.deepEqual(asked, ['xray']);
 });
 
-test('auto: a muxed connection that drops forgets an answer at least 10 minutes old — the rebuild tests the server again', async (t) => {
-  const learnt = Date.now() - 11 * MIN;
-  const s = router({}, ['ok'], { [FP]: { verdict: 'ok', at: learnt } });
+test('auto: a drop marks the live answer for a re-test — the recovery’s connect tests nothing and stays muxed; the user’s next connect tests it again', async (t) => {
+  // Final review I1: a re-test inside the recovery ran in the outage (the LAN
+  // offline or direct meanwhile), and a slow line turned mux off for good.
+  const s = router();
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', WS.id);
-  assert.equal(s.probes.length, 0, 'muxed from memory');
-  assert.deepEqual(liveProxy(s).mux, MUX);
+  assert.equal(s.probes.length, 1);
   s.state.xray.crash();
   await h.until(() => h.connectedCount(s) === 2, 'the rebuilt connection');
-  assert.equal(s.probes.length, 1, 'tested again on the rebuild');
+  assert.equal(s.probes.length, 1, 'no test inside the recovery');
+  assert.deepEqual(liveProxy(s).mux, MUX, 'the rebuild is muxed as before');
+  assert.equal(saved(s).muxProbes[FP].verdict, 'ok', 'still ok');
+  assert.equal(saved(s).muxProbes[FP].recheck, true, 'marked for a re-test');
+  // the next connect the user makes tests it again, and the answer clears the mark
+  await s.service.invoke('disconnect');
+  await s.service.invoke('connect', WS.id);
+  assert.equal(s.probes.length, 2);
+  assert.deepEqual(Object.keys(saved(s).muxProbes[FP]).sort(), ['at', 'verdict']);
   assert.deepEqual(liveProxy(s).mux, MUX);
-  assert.equal(saved(s).muxProbes[FP].verdict, 'ok', 'and remembered again');
-  assert.ok(saved(s).muxProbes[FP].at > learnt, 'as of now');
 });
 
-test('auto: drops within 10 minutes of the probe forget nothing — no store write for muxProbes, no test again', async (t) => {
+test('auto: a drop then a recovery connect — zero probes, mux still on; a second drop writes nothing more', async (t) => {
   // A core that keeps crashing for a reason that has nothing to do with mux:
-  // a forget and a re-learnt answer per crash were two rewrites of store.json
-  // on the router's flash, for as long as the crashes went on.
+  // no test in any of its rebuilds, and one store write (the mark) in all.
   const s = router();
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', WS.id);
@@ -132,9 +137,28 @@ test('auto: drops within 10 minutes of the probe forget nothing — no store wri
   await h.until(() => h.connectedCount(s) === 2, 'the first rebuild');
   s.state.xray.crash();
   await h.until(() => h.connectedCount(s) === 3, 'the second rebuild');
-  assert.equal(muxWritesOf(s) - written, 0, 'two drops, no store.set(\'muxProbes\', …)');
-  assert.equal(s.probes.length, 1, 'the answer from minutes ago stands');
-  assert.deepEqual(liveProxy(s).mux, MUX, 'and the rebuilt connections are muxed with it');
+  assert.equal(s.probes.length, 1, 'zero probes in the recoveries');
+  assert.equal(muxWritesOf(s) - written, 1, 'the mark — and nothing for the second drop');
+  assert.deepEqual(liveProxy(s).mux, MUX, 'and the rebuilt connections are muxed');
+  assert.deepEqual(lines(s, /^Mux /).map((l) => l.line), Array(3).fill('Mux on for ws-server (tested: works)'));
+});
+
+test('auto: an inconclusive re-test keeps mux on — the ok from before stands, tested again after an hour', async (t) => {
+  const s = router({}, ['ok', 'unknown']);
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', WS.id);
+  s.state.xray.crash();
+  await h.until(() => h.connectedCount(s) === 2, 'the rebuilt connection');
+  await s.service.invoke('disconnect');
+  const before = Date.now();
+  await s.service.invoke('connect', WS.id);
+  assert.equal(s.probes.length, 2, 'the re-test ran');
+  assert.deepEqual(liveProxy(s).mux, MUX, 'mux stays on');
+  const memo = saved(s).muxProbes[FP];
+  assert.equal(memo.verdict, 'ok');
+  assert.equal(memo.recheck, true, 'still to be re-tested');
+  assert.ok(memo.retryAfter >= before + HOUR && memo.retryAfter <= Date.now() + HOUR, 'but not for an hour');
+  assert.equal(lines(s, /^Mux on for ws-server \(tested before: works — this test did not answer\)$/).length, 1);
 });
 
 test('auto: "does not accept it" — no mux, remembered; the next connect is not tested', async (t) => {
@@ -150,19 +174,41 @@ test('auto: "does not accept it" — no mux, remembered; the next connect is not
   assert.equal(s.probes.length, 1);
 });
 
-test('auto: no answer either way — connected without mux, nothing remembered, tested again next time', async (t) => {
+test('auto: no answer either way — connected without mux, remembered for an hour: the next connect does not test it again', async (t) => {
   const s = router({}, ['unknown', 'ok']);
   t.after(() => s.service.shutdown());
+  const before = Date.now();
   await s.service.invoke('connect', WS.id);
   assert.equal(liveProxy(s).mux, undefined);
-  assert.equal(saved(s).muxProbes, undefined, 'an unknown is never written');
+  const memo = saved(s).muxProbes[FP];
+  assert.equal(memo.verdict, 'unknown');
+  assert.ok(memo.retryAfter >= before + HOUR && memo.retryAfter <= Date.now() + HOUR, 'tested again after an hour');
   assert.deepEqual(lines(s, /^Mux/).map((l) => [l.level, l.line]), [['warn', 'Mux: ws-server did not answer either way — connecting without it']]);
   // a warning: on a router it reaches syslog too
   assert.ok(s.syslog.some(([, text]) => text.includes('Mux: ws-server did not answer either way')));
   await s.service.invoke('disconnect');
   await s.service.invoke('connect', WS.id);
-  assert.equal(s.probes.length, 2);
-  assert.deepEqual(liveProxy(s).mux, MUX);
+  assert.equal(s.probes.length, 1, 'not tested again within the hour');
+  assert.equal(liveProxy(s).mux, undefined);
+});
+
+test('the router tests one server at a time — three test cores at once on its CPU miss the 5 s share', async (t) => {
+  const wsLike = (id, p) => { const s = JSON.parse(JSON.stringify(WS)); s.id = id; s.name = id; s.outbound.streamSettings.wsSettings.path = p; return s; };
+  const two = wsLike('srv-ws2', '/two');
+  const three = wsLike('srv-ws3', '/three');
+  let inFlight = 0, most = 0;
+  const probed = [];
+  const probeMux = async (server) => { probed.push(server.id); inFlight++; most = Math.max(most, inFlight); await h.sleep(20); inFlight--; return 'ok'; };
+  const s = h.start({
+    servers: [WS, two, three],
+    settings: { routeDefault: WS.id, routeRules: [{ id: 'r1', type: 'domain', value: 'a.example', target: two.id }, { id: 'r2', type: 'domain', value: 'b.example', target: three.id }] }
+  }, { probeMux });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', '__advanced__');
+  assert.deepEqual(probed.sort(), ['srv-ws', 'srv-ws2', 'srv-ws3']);
+  assert.equal(most, 1, 'one at a time');
+  const muxed = s.state.xray.starts.at(-1).config.outbounds.filter((o) => o.mux).map((o) => o.tag).sort();
+  assert.deepEqual(muxed, ['out-srv-ws', 'out-srv-ws2', 'out-srv-ws3']);
 });
 
 test('on: every eligible server is muxed untested; off: nothing is tested and no config carries mux', async (t) => {
