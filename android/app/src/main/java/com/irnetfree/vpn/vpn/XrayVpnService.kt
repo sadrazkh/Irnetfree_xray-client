@@ -22,7 +22,9 @@ import com.irnetfree.vpn.core.EngineChoice
 import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.LocalAuth
 import com.irnetfree.vpn.core.LocalProxyAuth
+import com.irnetfree.vpn.core.Mux
 import com.irnetfree.vpn.core.PoolEntry
+import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.TrustedDns
 import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.core.Store
@@ -43,6 +45,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Whole-device tunnel:
@@ -107,8 +110,14 @@ class XrayVpnService : VpnService() {
     /**
      * [gen]: the connect this session came from — a newer one, or a disconnect, overtakes it. [startId]: its start command.
      * [lan]: the LAN share its config opens (null = none), for VpnState.lanShared.
+     * [muxTested]: the fingerprints of the servers auto mode put mux on by their verdict (Mux.Pick.onDrop) —
+     * marked for a recheck when this session drops (markMuxRecheck), so the next connect that may test, tests
+     * them again; their ok is kept meanwhile.
      */
-    private class Launch(val engine: String, val config: String, val socksPort: Int, val gen: Long, val startId: Int, val lan: LanShare?)
+    private class Launch(val engine: String, val config: String, val socksPort: Int, val gen: Long, val startId: Int, val lan: LanShare?, val muxTested: List<String> = emptyList()) {
+        /** Its mux verdicts have been marked: one drop, one log line. */
+        val muxMarked = AtomicBoolean(false)
+    }
 
     private class Shown(val text: String, val connected: Boolean, val action: String?)
 
@@ -154,10 +163,14 @@ class XrayVpnService : VpnService() {
             null, VpnService.SERVICE_INTERFACE -> {
                 val gen = generation.next()
                 val why = if (intent == null) "restarted after the app was stopped" else "always-on VPN"
+                // A START_STICKY restart is this service's own reconnect after the
+                // tunnel went down with the process: it never runs a mux test
+                // (Mux.choose recovery). Always-on starts — at boot too — may.
+                val recovery = intent == null
                 val wait = if (intent == null) stickyRestartWait() else 0L
                 if (wait <= 0L) {
                     goForeground("IRNetFree")
-                    autoStart(gen, startId, why)
+                    autoStart(gen, startId, why, recovery)
                 } else {
                     // A crash loop (StickyRestart): try again later, and say when
                     // — on screen and in the notification, whose Stop ends it. A
@@ -179,7 +192,7 @@ class XrayVpnService : VpnService() {
                             if (next > 0L) { main.postDelayed(this, next); return }
                             pendingRestart = false
                             goForeground("IRNetFree")      // the countdown and its Stop are over
-                            autoStart(gen, startId, why)
+                            autoStart(gen, startId, why, recovery)
                         }
                     }
                     pendingAutoStart = r
@@ -205,8 +218,11 @@ class XrayVpnService : VpnService() {
         return n.waitMs
     }
 
-    /** The stored selection, through the same prepare() as the Connect button — off the main thread. */
-    private fun autoStart(gen: Long, startId: Int, why: String) {
+    /**
+     * The stored selection, through the same prepare() as the Connect button — off the main thread.
+     * [recovery]: a reconnect of the service's own (a START_STICKY restart) — no mux test.
+     */
+    private fun autoStart(gen: Long, startId: Int, why: String, recovery: Boolean) {
         Thread {
             val intent = try {
                 // The process's one Store, the screens' own (Store.get): a second
@@ -220,7 +236,7 @@ class XrayVpnService : VpnService() {
                 // that nothing would clear (checked and set under one lock, Generation).
                 if (!generation.ifCurrent(gen) { VpnState.set(ConnState.CONNECTING, label) }) { worker.execute { finishIfIdle(startId) }; return@Thread }
                 VpnState.addLog("Connecting by itself ($why): $label")
-                prepare(this@XrayVpnService, store, plan, label)
+                prepare(this@XrayVpnService, store, plan, label, wanted = { gen == generation.get() }, recovery = recovery)
             } catch (e: Throwable) {
                 Log.e(TAG, "auto start failed", e)
                 val msg = "Could not connect by itself ($why): ${e.message ?: "nothing to connect to"}"
@@ -247,6 +263,7 @@ class XrayVpnService : VpnService() {
         val pass = intent.getStringExtra(EXTRA_SOCKS_PASS)
         val sessionAuth = if (!user.isNullOrEmpty() && !pass.isNullOrEmpty()) LocalAuth(user, pass) else null
         val lan0: LanShare? = intent.getStringExtra(EXTRA_LAN)?.let { j -> runCatching { LanShare.fromJson(JSONObject(j)) }.getOrNull() }
+        val muxTested: List<String> = intent.getStringArrayListExtra(EXTRA_MUX)?.toList() ?: emptyList()
 
         // A connect onto a live service: the old core, hev and TUN go first.
         // Otherwise the new core cannot bind the port, hev ignores a second
@@ -284,7 +301,7 @@ class XrayVpnService : VpnService() {
             // 1) Proxy core with a local SOCKS inbound (no internal tun).
             //    EngineChoice already decided which, and prepare() already checked
             //    it is bundled for this ABI; anything else here is a real failure.
-            val first = Launch(engine, config, socksPort, gen, startId, lan)
+            val first = Launch(engine, config, socksPort, gen, startId, lan, muxTested)
             val firstErr = startCore(first)
             val launch: Launch
             if (firstErr != null && lan != null && gen == generation.get()) {
@@ -296,7 +313,7 @@ class XrayVpnService : VpnService() {
                 val held = LocalPort.takenNow(listOf(lan.socksPort, lan.httpPort), LocalPort.ANY, graceMs = 0L)
                 val why = if (held.isNotEmpty()) "port ${held.joinToString(" and ")} is in use by another app" else "the core would not start with it ($firstErr)"
                 VpnState.addLog("⚠ LAN sharing skipped: $why — connecting without it; choose other ports under Settings → LAN sharing")
-                launch = Launch(engine, TunnelSetup.withoutLan(config), socksPort, gen, startId, null)
+                launch = Launch(engine, TunnelSetup.withoutLan(config), socksPort, gen, startId, null, muxTested)
                 startCore(launch)?.let { err -> return fail(gen, startId, err, unattended) }
             } else {
                 launch = first
@@ -353,6 +370,20 @@ class XrayVpnService : VpnService() {
             Log.e(TAG, "startTunnel failed", e)
             fail(gen, startId, e.message ?: "connect failed", unattended)
         }
+    }
+
+    /**
+     * A muxed session that broke — its core exited by itself, it carried
+     * nothing, or it stalled: the ok verdicts that put mux on it are kept and
+     * marked for a recheck (Mux.markRecheck) — the user's next connect tests
+     * them again; a reconnect of the service's own uses them as they are. Only
+     * auto's (Launch.muxTested), once per session. Prefs only — any thread.
+     */
+    private fun markMuxRecheck(l: Launch, why: String) {
+        if (l.muxTested.isEmpty() || l.muxMarked.getAndSet(true)) return
+        runCatching { Store.get(this).markMuxRecheck(l.muxTested) }
+            .onFailure { e -> Log.w(TAG, "could not mark the mux verdicts: ${e.message}") }
+        VpnState.addLog("Mux: $why while muxed — mux stays on; the server is tested again on your next connect")
     }
 
     /** Where the other devices point their proxy settings — never the password (logs get shared). */
@@ -426,6 +457,7 @@ class XrayVpnService : VpnService() {
             val name = if (core === singbox) "sing-box" else "Xray-PattN"
             if (core === singbox) { singbox = null } else { pattn = null }
             VpnState.addLog("⚠ The $name core exited by itself (code $code)")
+            markMuxRecheck(l, "the connection dropped")
             if (l.gen != generation.get()) { dropOvertaken(l, "Not restarting it — a disconnect or a new connect is next"); return@execute }
             val now = SystemClock.elapsedRealtime()
             if (coreRestartedAt != 0L && now - coreRestartedAt < 60_000) {
@@ -529,6 +561,7 @@ class XrayVpnService : VpnService() {
             if (ms < 0) {
                 VpnState.addLog("✗ Self-check: the core could NOT reach the internet — the server/config is the problem (not the tunnel).")
                 VpnState.setHealth(false, "Server unreachable — try another config")
+                markMuxRecheck(l, "the connection carried nothing")
                 return@launch
             }
             val ip = runCatching { Diagnostics.ipInfo(socksPort) }.getOrNull()
@@ -544,7 +577,7 @@ class XrayVpnService : VpnService() {
             when {
                 tx < 0 -> VpnState.addLog("? Tunnel stats unavailable (tun2socks may not be running).")
                 tx == 0L -> { VpnState.addLog("✗ Tunnel: no packets entered the TUN in 12s — other apps aren't being routed into the VPN."); VpnState.setHealth(false, "Apps aren't reaching the tunnel") }
-                rx == 0L -> { VpnState.addLog("✗ Tunnel: sent $tx B but received 0 — packets enter the TUN but nothing returns."); VpnState.setHealth(false, "Tunnel stalled — no data returning") }
+                rx == 0L -> { VpnState.addLog("✗ Tunnel: sent $tx B but received 0 — packets enter the TUN but nothing returns."); VpnState.setHealth(false, "Tunnel stalled — no data returning"); markMuxRecheck(l, "the connection stalled") }
                 else -> VpnState.addLog("✓ Tunnel carrying traffic (↑$tx B ↓$rx B).")
             }
         }
@@ -771,6 +804,8 @@ class XrayVpnService : VpnService() {
         const val EXTRA_GEN = "gen"; const val EXTRA_SOCKS_USER = "socksUser"; const val EXTRA_SOCKS_PASS = "socksPass"
         /** The LAN share the config opens (LanShare JSON); absent = none. */
         const val EXTRA_LAN = "lan"
+        /** The fingerprints a drop of this session marks for a mux recheck (Mux.Pick.onDrop); absent = none. */
+        const val EXTRA_MUX = "muxTested"
 
         /** Moved on by every connect and disconnect: a prepare or a start carrying an older value was overtaken. */
         private val generation = Generation()
@@ -842,7 +877,7 @@ class XrayVpnService : VpnService() {
             }
             Thread {
                 try {
-                    val intent = prepare(ctx, store, plan, label)
+                    val intent = prepare(ctx, store, plan, label, wanted = { gen == generation.get() })
                     if (gen != generation.get()) { VpnState.addLog("Connect cancelled"); return@Thread }
                     intent.putExtra(EXTRA_GEN, gen)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(intent) else ctx.startService(intent)
@@ -867,8 +902,13 @@ class XrayVpnService : VpnService() {
         /** What prepare() reads from the store in one go, on the main thread. */
         private class Fresh(val plan: ConnectionPlan, val settings: AppSettings, val pool: List<PoolEntry>)
 
-        /** Everything before the service: pins, endpoints, the config. Blocks; never on the main thread. */
-        fun prepare(ctx: Context, store: Store, plan0: ConnectionPlan, label: String): Intent {
+        /**
+         * Everything before the service: pins, endpoints, mux, the config. Blocks; never on the main thread.
+         * [wanted]: false once this connect has been overtaken — the mux test then starts nothing more.
+         * [recovery]: a reconnect of the service's own after a drop (not the user's Connect, nor
+         * connect-on-open, nor always-on) — it never runs a mux test, it uses what is kept (Mux.choose).
+         */
+        fun prepare(ctx: Context, store: Store, plan0: ConnectionPlan, label: String, wanted: () -> Boolean = { true }, recovery: Boolean = false): Intent {
             // Certificate pinning on first use (CertPin.kt): a server whose link
             // asked for allowInsecure is dialled once, its leaf certificate hashed
             // and stored; the config then pins it. The core refuses allowInsecure
@@ -930,13 +970,29 @@ class XrayVpnService : VpnService() {
                 VpnState.addLog("Xray-PattN is not bundled for this device (arm64 only) — using the in-process core. A config that needs plaintext VLESS/Trojan will be refused by it.")
                 engine = EngineChoice.XRAY
             }
+            // Mux (Mux.kt, spec §4): which of the plan's servers carry it —
+            // Settings → Mux, and in auto the selected server's own test, run
+            // here (a throwaway core, at most 8 s) when it has no fresh verdict,
+            // its verdict is past its age, or a drop marked it for a recheck —
+            // never before a retry is due, never on a reconnect of the
+            // service's own. sing-box and a chain's hops never get it; off,
+            // the config is the one of before.
+            val mux = if (engine == EngineChoice.SINGBOX) Mux.Pick.NONE else Mux.choose(
+                mode = store.muxMode, connection = plan, cache = store.muxProbes,
+                now = { System.currentTimeMillis() },
+                test = { srv: ServerConfig -> XrayTester.probeMux(ctx, srv, s, wanted) },
+                remember = { fp: String, p: Mux.Probe -> store.rememberMux(fp, p) },
+                log = { line: String -> VpnState.addLog(line) },
+                wanted = wanted,
+                recovery = recovery
+            )
             // This session's credentials for the tunnel's own inbounds (LocalAuth.kt):
             // hev and the app's clients present them, no other app has them.
             val auth = LocalAuth.random()
             // LAN sharing, when on and when it fits beside this connection's own
             // ports (the tunnel's may have been moved onto it since it was set).
             val lan = lanShareFor(ctx, s, fresh.pool)
-            val built = TunnelSetup.coreConfig(engine, plan, s, geo, wgIps, auth, lan,
+            val built = TunnelSetup.coreConfig(engine, plan, s, geo, wgIps, auth, lan, muxIds = mux.ids,
                 coreVersion = { e -> if (e == EngineChoice.PATTN) XrayPattnCore.version(ctx) else XrayCore.version() }) { line -> VpnState.addLog(line) }
             engine = built.engine
             val config = built.json
@@ -960,6 +1016,7 @@ class XrayVpnService : VpnService() {
                 putExtra(EXTRA_PERAPP_MODE, s.perAppMode)
                 putStringArrayListExtra(EXTRA_PERAPPS, ArrayList(s.perApps))
                 if (lan != null) putExtra(EXTRA_LAN, lan.toJson().toString())
+                if (mux.onDrop.isNotEmpty() && built.engine != EngineChoice.SINGBOX) putStringArrayListExtra(EXTRA_MUX, ArrayList(mux.onDrop))
             }
         }
 

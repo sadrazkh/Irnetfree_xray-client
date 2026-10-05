@@ -89,6 +89,58 @@ class Store(context: Context) {
         get() = try { ServerConfig.strList(JSONArray(prefs.getString("collapsedGroups", "[]"))).toSet() } catch (_: Exception) { emptySet() }
         set(v) { prefs.edit().putString("collapsedGroups", JSONArray(v.toList()).toString()).apply() }
 
+    /*
+     * The update notice (UpdateCheck): when GitHub last answered (0 = never),
+     * the newest release it named ("v1.18.1") and that release's APK (or its
+     * page), and the version "Later" was tapped on — not mentioned again.
+     */
+    var updateCheckedAt: Long
+        get() = prefs.getLong("updateCheckedAt", 0L)
+        set(v) { prefs.edit().putLong("updateCheckedAt", v).apply() }
+    var updateLatest: String
+        get() = prefs.getString("updateLatest", "") ?: ""
+        set(v) { prefs.edit().putString("updateLatest", v).apply() }
+    var updateUrl: String
+        get() = prefs.getString("updateUrl", "") ?: ""
+        set(v) { prefs.edit().putString("updateUrl", v).apply() }
+    var updateDismissed: String
+        get() = prefs.getString("updateDismissed", "") ?: ""
+        set(v) { prefs.edit().putString("updateDismissed", v).apply() }
+
+    /*
+     * Mux (Mux.kt, spec §4). Kept under keys of their own, not inside
+     * AppSettings: the Settings screen writes AppSettings back whole from the
+     * copy it opened with, and the connect path writes verdicts meanwhile.
+     */
+
+    /** Settings → Mux: "off" (the default — also for an install that never set it) | "auto" | "on". */
+    var muxMode: String
+        get() = Mux.modeOf(prefs.getString("muxMode", null))
+        set(v) { prefs.edit().putString("muxMode", Mux.modeOf(v)).apply() }
+
+    /**
+     * What the mux tests found, by server fingerprint (Mux.fingerprint) →
+     * {ok, at, recheck?, retryAfter?} (Mux.Probe); at most 500, the oldest dropped.
+     */
+    var muxProbes: Map<String, Mux.Probe>
+        get() = Mux.probesFromJson(prefs.getString("muxProbes", null))
+        set(v) { prefs.edit().putString("muxProbes", Mux.probesToJson(Mux.capped(v))).apply() }
+
+    /** What a test left for a server (Mux.record: ok 7 days, unsupported 1, an unclear one retried in an hour). Any thread. */
+    fun rememberMux(fingerprint: String, probe: Mux.Probe) {
+        synchronized(MUX_LOCK) { muxProbes = muxProbes + Pair(fingerprint, probe) }
+    }
+
+    /**
+     * A muxed connection dropped: these servers' ok verdicts are kept and
+     * marked for a recheck — the next connect that may test, tests them again
+     * (Mux.markRecheck). Any thread.
+     */
+    fun markMuxRecheck(fingerprints: Collection<String>) {
+        if (fingerprints.isEmpty()) return
+        synchronized(MUX_LOCK) { muxProbes = Mux.markRecheck(muxProbes, fingerprints) }
+    }
+
     private fun <T> read(key: String, map: (JSONObject) -> T): MutableList<T> {
         val out = ArrayList<T>()
         try { val a = JSONArray(prefs.getString(key, "[]")); for (i in 0 until a.length()) out.add(map(a.getJSONObject(i))) } catch (_: Exception) {}
@@ -183,6 +235,9 @@ class Store(context: Context) {
     companion object {
         const val POOL_ID = Selection.POOL
         const val ADV_ID = Selection.ADVANCED
+
+        /** The mux verdicts' read-modify-write: the connect thread remembers, the service forgets. */
+        private val MUX_LOCK = Any()
 
         @Volatile private var shared: Store? = null
 

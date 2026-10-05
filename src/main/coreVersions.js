@@ -10,8 +10,10 @@
  * writes. createCoreVersionsApi() is the pair of IPC handlers main.js and the
  * router's service.js share — every effect it has goes through what they hand in.
  *
- * «به‌روزرسانی» / Update is not this: it still installs GitHub's latest stable
- * release, and the weekly updater still does what the user chose there.
+ * «به‌روزرسانی» / Update is not this: it installs the default target — GitHub's
+ * latest stable release, or SUGGESTED below when that is newer
+ * (Downloader.defaultRelease) — and the weekly updater still does what the
+ * user chose there.
  */
 const { cmpVersion } = require('./assetUpdater');
 
@@ -26,12 +28,19 @@ const CORE_NAMES = { xray: 'Xray', 'xray-pattn': 'Xray-PattN', 'sing-box': 'sing
  * with. One value per core; each comment says where it was verified.
  */
 const SUGGESTED = Object.freeze({
-  // XTLS/Xray-core 26.3.27, verified throughout: the DNS block's server objects and
-  // the REFUSED hijack rules (dnsBuilder.js), the certificate pins (certPin.js,
-  // tests/certPin.test.js), the finalmask line (xrayManager.js FINALMASK_SINCE),
-  // the router's LAN DNS (service.js CORE_DNS_VERIFIED, openwrt/install.sh).
-  // It is also GitHub's latest stable: every 2026 build after it is a pre-release.
-  xray: '26.3.27',
+  // XTLS/Xray-core 26.9.30, verified in CI: the `cores` job (.github/workflows/
+  // test.yml) hands it every config shape this app writes — the plans, the DNS
+  // modes, TUN, the v1.18 link forms (scripts/validate-configs.js) — through
+  // `xray run -test`, the version read from this table. XTLS has marked every
+  // release after 26.3.27 a pre-release, so 26.3.27 is still the newest one it
+  // calls stable; v2rayN 7.25.4 (a stable release) and v2rayNG 2.3.10 ship
+  // 26.9.30. A plain download installs the newer of the two
+  // (Downloader.defaultRelease). The oldest official core each part was checked
+  // on stays 26.3.27: the DNS block's server objects and the REFUSED hijack
+  // rules (dnsBuilder.js), the certificate pins (certPin.js), the finalmask line
+  // (xrayManager.js FINALMASK_SINCE), the router's LAN DNS (service.js
+  // CORE_DNS_VERIFIED, openwrt/install.sh).
+  xray: '26.9.30',
 
   // patterniha/Xray-core 26.9.22, verified on the owner's router: the AC-1304 has
   // run this release line on it since the v1.16.2 field round, whose log
