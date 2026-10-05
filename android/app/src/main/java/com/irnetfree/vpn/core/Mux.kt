@@ -29,10 +29,23 @@ object Mux {
     const val ON = "on"
     const val OFF = "off"
 
-    /** A test's verdict: mux carried both requests / mux failed and plain worked / both failed (never remembered). */
+    /**
+     * A test's verdict: mux carried both requests / mux definitively failed
+     * and plain worked / nothing definite — a timeout, or no answer either way
+     * (never remembered). [OK] is also the mux attempt's outcome when it worked.
+     */
     const val OK = "ok"
     const val UNSUPPORTED = "unsupported"
     const val UNKNOWN = "unknown"
+
+    /**
+     * The mux attempt's other outcomes: it did not answer before its time ran
+     * out (or the budget did) — a slow moment, which says nothing — or it
+     * definitively failed: refused, reset or closed before its time, or its
+     * test core could not start.
+     */
+    const val TIMEOUT = "timeout"
+    const val FAILED = "failed"
 
     const val DAY_MS: Long = 24L * 3600 * 1000
     /** How long a verdict holds. */
@@ -41,8 +54,10 @@ object Mux {
 
     /** One server's whole test, from the first core started to the last one stopped. */
     const val PROBE_BUDGET_MS: Long = 8_000
-    /** The most one request is given: a mux test that hangs leaves time for the control request. */
+    /** The most one request is given: a server that does not answer holds the connect up 5 s, not the whole budget. */
     const val REQUEST_MS: Long = 5_000
+    /** A request that failed this close to the end of its time ran out of it: a timeout, not a refusal. */
+    const val TIMEOUT_SLACK_MS: Long = 150
     /** Less left than this and no further core is started. */
     const val MIN_START_MS: Long = 1_500
     /** Less left than this and no further request is made. */
@@ -173,25 +188,37 @@ object Mux {
         return Plan(ids, toProbe)
     }
 
-    /** The test's verdict: mux carried it → "ok"; mux failed, plain worked → "unsupported"; else "unknown". */
-    fun verdict(muxOk: Boolean, plainOk: Boolean?): String = when {
-        muxOk -> OK
-        plainOk == true -> UNSUPPORTED
+    /**
+     * The test's verdict, from the mux attempt's outcome — [OK] | [TIMEOUT] |
+     * [FAILED] — and the control's (null = not run): mux ok → "ok"; mux failed
+     * and the control answered → "unsupported"; a mux timeout, whatever the
+     * control says, or a control that did not answer → "unknown".
+     */
+    fun verdict(mux: String, plainOk: Boolean?): String = when {
+        mux == OK -> OK
+        mux == FAILED && plainOk == true -> UNSUPPORTED
         else -> UNKNOWN
     }
 
     /**
      * The test (spec §4), with the cores handed in: a throwaway core whose
      * proxy outbound carries [MUX] ([start] true) makes two requests, one after
-     * the other — both must answer; if they do not, one request goes through a
-     * core without it ([start] false). Every core started is stopped, and the
-     * whole test stays within [budgetMs]: each request gets at most what is left
-     * ([REQUEST_MS] at the most), and nothing more is started once too little is.
+     * the other — both must answer. That attempt is [OK]; a [TIMEOUT] when a
+     * request did not answer before its time ran out, or the budget did; or
+     * [FAILED] when a request failed before its time (refused, reset, closed)
+     * or the core could not start. Only after FAILED does one request go
+     * through a core without mux ([start] false), and only then can a server be
+     * "unsupported". A slow moment is not a refusal: a mux attempt that ran out
+     * of time says nothing whatever a control would say (the router's field
+     * case — a timeout, then an answering control, was remembered as
+     * "unsupported" for three days), so after a TIMEOUT no control is run.
      *
-     * [request] makes one request through a core within the ms it is given:
-     * its round trip, or a negative number when it failed. A mux core that did
-     * not start says nothing about the server: "unknown". [wanted]: false once
-     * the connect this is for has been overtaken — nothing more is started.
+     * Every core started is stopped, and the whole test stays within
+     * [budgetMs]: each request gets at most what is left ([REQUEST_MS] at the
+     * most), and nothing more is started once too little is. [request] makes
+     * one request through a core within the ms it is given: its round trip, or
+     * a negative number when it did not answer. [wanted]: false once the
+     * connect this is for has been overtaken — nothing more starts, "unknown".
      */
     fun <H : Any> probe(
         start: (Boolean) -> H?,
@@ -202,27 +229,34 @@ object Mux {
         budgetMs: Long = PROBE_BUDGET_MS
     ): String {
         val deadline = now() + budgetMs
-        // One core, with mux or without, asked [times] requests that must all answer.
-        // null: it never ran — no time left, not wanted any more, or it did not start.
-        fun attempt(mux: Boolean, times: Int): Boolean? {
-            if (!wanted() || deadline - now() < MIN_START_MS) return null
-            val h: H = (try { start(mux) } catch (e: Exception) { null }) ?: return null
+        // One core, with mux or without, asked [times] requests that must all
+        // answer: OK, TIMEOUT or FAILED as above; null when the connect was overtaken.
+        fun attempt(mux: Boolean, times: Int): String? {
+            if (!wanted()) return null
+            if (deadline - now() < MIN_START_MS) return TIMEOUT
+            val h: H = (try { start(mux) } catch (e: Exception) { null }) ?: return FAILED
             try {
                 for (i in 0 until times) {
+                    if (!wanted()) return null
                     val left = deadline - now()
-                    if (left < MIN_REQUEST_MS || !wanted()) return false
-                    val ms = try { request(h, minOf(left, REQUEST_MS).toInt()) } catch (e: Exception) { -1L }
-                    if (ms < 0L) return false
+                    if (left < MIN_REQUEST_MS) return TIMEOUT
+                    val given = minOf(left, REQUEST_MS)
+                    val t0 = now()
+                    val ms = try { request(h, given.toInt()) } catch (e: Exception) { -1L }
+                    // The round trip (Diagnostics, through XrayTester) is -1 for a refusal and for a
+                    // timeout alike; the time it took tells them apart: within TIMEOUT_SLACK_MS of the
+                    // time it was given, it ran out of time; earlier, it was refused, reset or closed.
+                    if (ms < 0L) return if (now() - t0 >= given - TIMEOUT_SLACK_MS) TIMEOUT else FAILED
                 }
-                return true
+                return OK
             } finally {
                 try { stop(h) } catch (e: Exception) { }
             }
         }
-        val muxOk = attempt(true, 2)
-        if (muxOk == true) return verdict(true, null)
-        if (muxOk == null) return verdict(false, null)
-        return verdict(false, attempt(false, 1))
+        val muxOutcome = attempt(true, 2) ?: return UNKNOWN
+        if (muxOutcome != FAILED) return verdict(muxOutcome, null)
+        val plain = attempt(false, 1)
+        return verdict(FAILED, if (plain == null) null else plain == OK)
     }
 
     /**

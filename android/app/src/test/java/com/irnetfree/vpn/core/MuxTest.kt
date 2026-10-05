@@ -141,11 +141,16 @@ class MuxTest {
     }
 
     @Test fun theVerdictTable() {
-        assertEquals(Mux.OK, Mux.verdict(true, null))
-        assertEquals(Mux.OK, Mux.verdict(true, false))
-        assertEquals(Mux.UNSUPPORTED, Mux.verdict(false, true))
-        assertEquals(Mux.UNKNOWN, Mux.verdict(false, false))
-        assertEquals(Mux.UNKNOWN, Mux.verdict(false, null))
+        // the mux attempt's outcome is ok | timeout | failed; the control's is ok, not ok, or not run (null)
+        assertEquals(Mux.OK, Mux.verdict(Mux.OK, null))
+        assertEquals(Mux.OK, Mux.verdict(Mux.OK, false))
+        assertEquals(Mux.UNSUPPORTED, Mux.verdict(Mux.FAILED, true))
+        assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.FAILED, false))
+        assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.FAILED, null))
+        // a slow moment is not a refusal: a mux attempt that ran out of time says nothing, whatever the control says
+        assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.TIMEOUT, true))
+        assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.TIMEOUT, false))
+        assertEquals(Mux.UNKNOWN, Mux.verdict(Mux.TIMEOUT, null))
     }
 
     /* ---------------- plan: what a connect muxes, and what it tests ---------------- */
@@ -208,12 +213,13 @@ class MuxTest {
 
     /**
      * Two fake cores: what each request through the mux one and the plain one answers (ms, -1 = failed), how
-     * long a request takes (one that would take longer than it is given times out), and the clock they move.
+     * long a request takes on each ([requestMs] through mux, [plainMs] without), and the clock they move. A
+     * request that would take longer than it is given times out the way Diagnostics does: -1, once its time is up.
      */
     private class Cores(
         val mux: List<Long>, val plain: List<Long>,
         val muxStarts: Boolean = true, val plainStarts: Boolean = true,
-        val requestMs: Long = 200L, val startMs: Long = 600L
+        val requestMs: Long = 200L, val plainMs: Long = requestMs, val startMs: Long = 600L
     ) {
         var t = 0L
         val log = ArrayList<String>()
@@ -232,7 +238,8 @@ class MuxTest {
                 log.add("request $h")
                 timeouts.add(timeout)
                 val answer: Long = if (h == "mux") (mux.getOrNull(nMux++) ?: -1L) else (plain.getOrNull(nPlain++) ?: -1L)
-                if (requestMs > timeout) { t += timeout; -1L } else { t += requestMs; answer }
+                val takes = if (h == "mux") requestMs else plainMs
+                if (takes > timeout) { t += timeout; -1L } else { t += takes; answer }
             },
             stop = { h: String -> log.add("stop $h") },
             now = { t },
@@ -247,7 +254,8 @@ class MuxTest {
         assertEquals(listOf("start mux", "request mux", "request mux", "stop mux"), c.log)
     }
 
-    @Test fun probe_muxFailsAndPlainWorksIsUnsupported() {
+    @Test fun probe_muxFailedBeforeItsTimeAndPlainWorksIsUnsupported() {
+        // refused / reset / closed: a -1 long before the request's time was up
         val first = Cores(mux = listOf(-1L), plain = listOf(300L))
         assertEquals(Mux.UNSUPPORTED, first.probe())
         assertEquals(listOf("start mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), first.log)
@@ -257,14 +265,45 @@ class MuxTest {
         assertEquals(listOf("start mux", "request mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), second.log)
     }
 
+    @Test fun probe_aMuxAttemptThatRanOutOfTimeIsUnknown_evenWhenTheControlWouldAnswer() {
+        // The router's field case: a slow moment, not a refusal. Through mux the first request needs 6 s, more
+        // than the 5 s it is given; a control without mux would answer in 0.3 s — and made it "unsupported",
+        // remembered for three days. A timeout says nothing whatever the control says, so none is run.
+        val slow = Cores(mux = listOf(6_000L, 150L), plain = listOf(300L), requestMs = 6_000L, plainMs = 300L)
+        assertEquals(Mux.UNKNOWN, slow.probe())
+        assertEquals(listOf("start mux", "request mux", "stop mux"), slow.log)
+        // the second request through mux running out of what is left of the budget: the same
+        val late = Cores(mux = listOf(4_000L, 4_000L), plain = listOf(300L), requestMs = 4_000L, plainMs = 300L)
+        assertEquals(Mux.UNKNOWN, late.probe())
+        assertEquals(listOf("start mux", "request mux", "request mux", "stop mux"), late.log)
+    }
+
+    @Test fun probe_aMuxCoreThatCannotStartIsAFailure_soAnAnsweringControlMakesItUnsupported() {
+        val c = Cores(mux = emptyList(), plain = listOf(300L), muxStarts = false)
+        assertEquals(Mux.UNSUPPORTED, c.probe())
+        assertEquals(listOf("start mux", "start plain", "request plain", "stop plain"), c.log)
+        // a control that does not answer either: nothing is known
+        val d = Cores(mux = emptyList(), plain = listOf(-1L), muxStarts = false)
+        assertEquals(Mux.UNKNOWN, d.probe())
+    }
+
+    @Test fun probe_aMinusOneWithin150msOfItsTimeIsATimeout_anEarlierOneAFailure() {
+        // The round trip says -1 for a refusal and for a timeout alike; the time it took against the time it was
+        // given (5 s for the first request here) tells them apart.
+        assertEquals(150L, Mux.TIMEOUT_SLACK_MS)
+        val atItsTime = Cores(mux = listOf(-1L), plain = listOf(300L), requestMs = 4_900L, plainMs = 300L)
+        assertEquals(Mux.UNKNOWN, atItsTime.probe())
+        assertEquals(listOf("start mux", "request mux", "stop mux"), atItsTime.log)
+        val before = Cores(mux = listOf(-1L), plain = listOf(300L), requestMs = 4_800L, plainMs = 300L)
+        assertEquals(Mux.UNSUPPORTED, before.probe())
+        assertEquals(listOf("start mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), before.log)
+    }
+
     @Test fun probe_bothFailIsUnknown_andEveryCoreStartedIsStopped() {
         val c = Cores(mux = listOf(-1L), plain = listOf(-1L))
         assertEquals(Mux.UNKNOWN, c.probe())
         assertEquals(listOf("start mux", "request mux", "stop mux", "start plain", "request plain", "stop plain"), c.log)
-        // a core that did not start says nothing about the server
-        val noMux = Cores(mux = emptyList(), plain = listOf(300L), muxStarts = false)
-        assertEquals(Mux.UNKNOWN, noMux.probe())
-        assertEquals(listOf("start mux"), noMux.log)
+        // a control core that does not start: the control did not answer
         val noPlain = Cores(mux = listOf(-1L), plain = emptyList(), plainStarts = false)
         assertEquals(Mux.UNKNOWN, noPlain.probe())
         assertEquals(listOf("start mux", "request mux", "stop mux", "start plain"), noPlain.log)
@@ -272,17 +311,19 @@ class MuxTest {
 
     @Test fun probe_neverOutlastsItsBudget() {
         assertEquals(8_000L, Mux.PROBE_BUDGET_MS)
-        // nothing ever answers: each request waits as long as it is given, and that is never past the budget
+        // nothing ever answers: the first request waits as long as it is given — a timeout, so nothing is known
+        // and no control is run
         val dead = Cores(mux = emptyList(), plain = emptyList(), requestMs = 60_000L)
         assertEquals(Mux.UNKNOWN, dead.probe())
+        assertEquals(listOf(5000), dead.timeouts)
+        assertEquals(listOf("start mux", "request mux", "stop mux"), dead.log)
         assertTrue("took ${dead.t} ms", dead.t <= Mux.PROBE_BUDGET_MS)
-        assertEquals(listOf(5000, 1800), dead.timeouts)
         // a slow line that answers in 3 s through mux: both requests fit, the second in what is left
         val slow = Cores(mux = listOf(3000L, 3000L), plain = emptyList(), requestMs = 3_000L)
         assertEquals(Mux.OK, slow.probe())
         assertEquals(listOf(5000, 4400), slow.timeouts)
-        // no time left for the control request: nothing is known
-        val tight = Cores(mux = listOf(-1L), plain = listOf(300L), requestMs = 60_000L)
+        // a refusal late in a small budget: no time left to start the control, so nothing is known
+        val tight = Cores(mux = listOf(-1L), plain = listOf(300L), requestMs = 1_500L, plainMs = 300L)
         assertEquals(Mux.UNKNOWN, tight.probe(budget = 3_000L))
         assertEquals(listOf("start mux", "request mux", "stop mux"), tight.log)
         assertTrue("took ${tight.t} ms", tight.t <= 3_000L)
