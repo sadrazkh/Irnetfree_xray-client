@@ -21,24 +21,39 @@ const path = require('node:path');
 const h = require('./serviceHarness');
 const { parseLink } = require('../src/main/parser');
 const { MUX, muxFingerprint } = require('../src/main/mux');
+const { Store } = require('../src/main/store');
 
 process.setMaxListeners(40);   // every service registers its own exit hook
 test.after(() => h.cleanupDirs());
+
+// Every store.set('muxProbes', …) in this process, with the store's file: on a
+// router each one rewrites the whole store.json on flash.
+const muxWrites = [];
+const realSet = Store.prototype.set;
+Store.prototype.set = function (key, value) {
+  if (key === 'muxProbes') muxWrites.push(this.filePath);
+  return realSet.call(this, key, value);
+};
+const muxWritesOf = (s) => muxWrites.filter((f) => f === path.join(s.dir, 'store.json')).length;
+const MIN = 60 * 1000;
 
 const UUID = '11111111-2222-3333-4444-555555555555';
 // The field report's shape: VLESS over WebSocket + TLS with ECH, by address (no name to resolve here)
 const WS = Object.assign(parseLink(`vless://${UUID}@104.21.44.18:2087?encryption=none&type=ws&host=h.example&path=/&security=tls&sni=h.example&ech=cloudflare-ech.com+udp://1.1.1.1#ws-server`), { id: 'srv-ws' });
 const FP = muxFingerprint(WS);
 
-/** A router with the ws server; `answers` is what the probe says, in order (the last one repeats). */
-function router(settings = {}, answers = ['ok']) {
+/**
+ * A router with the ws server; `answers` is what the probe says, in order (the
+ * last one repeats); `memory` is the store's muxProbes it starts with.
+ */
+function router(settings = {}, answers = ['ok'], memory = undefined) {
   const probes = [];
   const probeMux = async (server, deps) => {
     probes.push({ server, deps });
     s.state.events.push('mux:probe ' + server.id);
     return answers[Math.min(probes.length - 1, answers.length - 1)];
   };
-  const s = h.start({ servers: [WS, h.SERVER], settings }, { probeMux });
+  const s = h.start(Object.assign({ servers: [WS, h.SERVER], settings }, memory ? { muxProbes: memory } : {}), { probeMux });
   s.probes = probes;
   return s;
 }
@@ -88,16 +103,38 @@ test('auto: the probe is handed the connect’s own tools — the live core’s 
   assert.deepEqual(asked, ['xray']);
 });
 
-test('auto: a muxed connection that drops forgets its answer — the rebuild tests the server again', async (t) => {
+test('auto: a muxed connection that drops forgets an answer at least 10 minutes old — the rebuild tests the server again', async (t) => {
+  const learnt = Date.now() - 11 * MIN;
+  const s = router({}, ['ok'], { [FP]: { verdict: 'ok', at: learnt } });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', WS.id);
+  assert.equal(s.probes.length, 0, 'muxed from memory');
+  assert.deepEqual(liveProxy(s).mux, MUX);
+  s.state.xray.crash();
+  await h.until(() => h.connectedCount(s) === 2, 'the rebuilt connection');
+  assert.equal(s.probes.length, 1, 'tested again on the rebuild');
+  assert.deepEqual(liveProxy(s).mux, MUX);
+  assert.equal(saved(s).muxProbes[FP].verdict, 'ok', 'and remembered again');
+  assert.ok(saved(s).muxProbes[FP].at > learnt, 'as of now');
+});
+
+test('auto: drops within 10 minutes of the probe forget nothing — no store write for muxProbes, no test again', async (t) => {
+  // A core that keeps crashing for a reason that has nothing to do with mux:
+  // a forget and a re-learnt answer per crash were two rewrites of store.json
+  // on the router's flash, for as long as the crashes went on.
   const s = router();
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', WS.id);
   assert.equal(s.probes.length, 1);
+  const written = muxWritesOf(s);
+  assert.equal(written, 1, 'the probe’s answer, once');
   s.state.xray.crash();
-  await h.until(() => h.connectedCount(s) === 2, 'the rebuilt connection');
-  assert.equal(s.probes.length, 2, 'tested again on the rebuild');
-  assert.deepEqual(liveProxy(s).mux, MUX);
-  assert.equal(saved(s).muxProbes[FP].verdict, 'ok', 'and remembered again');
+  await h.until(() => h.connectedCount(s) === 2, 'the first rebuild');
+  s.state.xray.crash();
+  await h.until(() => h.connectedCount(s) === 3, 'the second rebuild');
+  assert.equal(muxWritesOf(s) - written, 0, 'two drops, no store.set(\'muxProbes\', …)');
+  assert.equal(s.probes.length, 1, 'the answer from minutes ago stands');
+  assert.deepEqual(liveProxy(s).mux, MUX, 'and the rebuilt connections are muxed with it');
 });
 
 test('auto: "does not accept it" — no mux, remembered; the next connect is not tested', async (t) => {

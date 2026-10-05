@@ -43,6 +43,14 @@ const PROBE_PARALLEL = 3;
 const MUX_SHARE = 5 / 8;
 /** Remembered verdicts kept in the store (`muxProbes`); the oldest go first. */
 const CACHE_MAX = 500;
+/**
+ * A drop forgets only a verdict at least this old. A core that keeps crashing
+ * for a reason that has nothing to do with mux rewrote store.json — on a
+ * router, its flash — twice per crash: the forget, then the probe learning the
+ * same answer again. A server that really stopped taking mux is still caught,
+ * on the first drop after these 10 minutes.
+ */
+const FORGET_MIN_AGE_MS = 10 * 60 * 1000;
 /** What the requests ask for: what ping:real asks. */
 const PROBE_TARGET = Object.freeze({ host: 'cp.cloudflare.com', port: 80, path: '/' });
 
@@ -283,10 +291,17 @@ function rememberVerdicts(cache, learnt, now) {
   return next;
 }
 
-/** The store's muxProbes without these fingerprints — the same object when none of them is there (nothing to write). */
-function forgetVerdicts(cache, fps) {
+/**
+ * The store's muxProbes without those of these fingerprints that are at least
+ * FORGET_MIN_AGE_MS old at `now` (a drop's forgetting) — the same object when
+ * none qualifies, so the caller has nothing to write.
+ */
+function forgetVerdicts(cache, fps, now = Date.now()) {
   if (!isObj(cache)) return cache;
-  const gone = (Array.isArray(fps) ? fps : []).filter((fp) => own(cache, fp) !== undefined);
+  const gone = (Array.isArray(fps) ? fps : []).filter((fp) => {
+    const entry = own(cache, fp);
+    return isObj(entry) && now - entry.at >= FORGET_MIN_AGE_MS;
+  });
   if (!gone.length) return cache;
   const next = Object.assign({}, cache);
   for (const fp of gone) delete next[fp];
@@ -317,7 +332,7 @@ function muxCandidates(plan) {
 }
 
 module.exports = {
-  MUX, OK_TTL_MS, UNSUPPORTED_TTL_MS, PROBE_MS, PROBE_PARALLEL, CACHE_MAX,
+  MUX, OK_TTL_MS, UNSUPPORTED_TTL_MS, PROBE_MS, PROBE_PARALLEL, CACHE_MAX, FORGET_MIN_AGE_MS,
   muxMode, muxEligible, muxFingerprint, freshVerdict, planMux, probeMux,
   decideMux, rememberVerdicts, forgetVerdicts, muxCandidates
 };
