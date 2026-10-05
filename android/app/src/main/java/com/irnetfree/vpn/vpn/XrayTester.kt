@@ -98,9 +98,10 @@ object XrayTester {
      * Does [server] carry traffic with Xray's mux? The test of spec §4
      * (Mux.probe): a throwaway core with Mux.MUX makes two requests, one after
      * the other, each on a connection of its own — the second a second stream
-     * through the same mux connection — and, only if they definitively failed
-     * (refused, reset, closed, or the core would not start; not merely slow), a
-     * core without it makes one. "ok" | "unsupported" | "unknown". At most
+     * through the same mux connection — and, if they did not both answer, a
+     * core without it makes one, the control: "ok" | "unsupported" (mux
+     * refused, the control answered) | "unknown" (mux only slow, the control
+     * answered) | "unreachable" (the control did not answer either). At most
      * Mux.PROBE_BUDGET_MS: a request is abandoned at the time it was given, and
      * its core stopped. Blocking — the connect thread (XrayVpnService.prepare).
      * [wanted]: false once that connect has been overtaken; nothing more starts.
