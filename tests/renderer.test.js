@@ -776,6 +776,30 @@ test('the mux select shows what is stored — auto unless on or off — and Save
   }
 });
 
+test('a group ⚡ or a "⚡ Fastest — <subscription>" row tapped while a connect is in flight does not cancel it — it says so; the global ⚡ Auto row still cancels', async () => {
+  // Final review, minor 4: those rows act as Cancel while connecting but keep
+  // their connect label — only the main Auto row says "Cancel connecting".
+  const vm = require('node:vm');
+  const calls = [];
+  const ctx = vm.createContext({
+    state: { connecting: true, connected: false, servers: [], pings: {} },
+    cancelConnect: () => { calls.push('cancel'); },
+    toast: (msg, kind) => { calls.push(['toast', msg, kind]); },
+    t: (k) => k,
+    connect: () => { calls.push('connect'); },
+    pingMany: async () => { calls.push('ping'); },
+    bestServerId: () => null, srvById: () => null, pingAt: {}, GROUP_FRESH_MS: 180000
+  });
+  vm.runInContext(fnSource('connectAuto'), ctx);
+  await ctx.connectAuto({ ids: ['a', 'b'], name: 'My sub' });
+  assert.deepEqual(calls, [['toast', 't.autoGroupBusy', 'warn']], 'no cancel, no test, no connect: said');
+  calls.length = 0;
+  await ctx.connectAuto();
+  assert.deepEqual(calls, ['cancel'], 'the global Auto row is the Cancel while connecting');
+  assert.equal(I18N.split("'t.autoGroupBusy':").length - 1, 2, 't.autoGroupBusy in fa and en');
+  for (const m of I18N.matchAll(/'t\.autoGroupBusy': '([^']*)'/g)) assert.ok(m[1].length > 10 && m[1].length < 120, m[1]);
+});
+
 test('the edit form reads an httpupgrade path and Host, and shows a stored raw server as tcp', () => {
   const readServerFields = appFunction('readServerFields');
   const rec = (streamSettings) => ({
