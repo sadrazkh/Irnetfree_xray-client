@@ -52,6 +52,8 @@ test('the table says beside each value where it was verified — and those place
   assert.match(read('src', 'main', 'certPin.js'), /Xray 26\.3\.27, PattN 26\.9\.1/);
   assert.match(read('src', 'main', 'tunSingbox.js'), /sing-box check` on 1\.13\.14/);
   assert.match(read('scripts', 'build-mac-native.js'), /const VERSION = '1\.13\.14';/);
+  // the official core: CI's `cores` job reads its version out of this table (tests/validateConfigs.test.js)
+  assert.match(read('.github', 'workflows', 'test.yml'), /require\('\.\/src\/main\/coreVersions'\)\.SUGGESTED\.xray/);
 });
 
 test('fullVersion: a tag or a core’s own output, its pre-release part kept', () => {

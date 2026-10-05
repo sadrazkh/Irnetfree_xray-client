@@ -1,0 +1,111 @@
+'use strict';
+/**
+ * The gate CI hands the suggested cores: scripts/validate-configs.js, run by
+ * the `cores` job of .github/workflows/test.yml — the only place a core is run
+ * on what this app writes, never the machine running this suite.
+ *
+ * Here the script runs dry (IRNF_VALIDATE_DRY=1: every config built, written
+ * for the core's version and saved, no core run), so a link form the parser
+ * stops taking, or a shape that stops carrying what it is there to check, is
+ * found by `npm test` on every platform — not by a red `cores` job, or by a
+ * green one that checked nothing.
+ */
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { SUGGESTED } = require('../src/main/coreVersions');
+
+const SCRIPT = path.join(__dirname, '..', 'scripts', 'validate-configs.js');
+
+/** The script, dry, into a fresh dir: its exit status and output, and its configs by name. */
+function dryRun(t, env = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-vc-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const base = Object.assign({}, process.env);
+  for (const k of ['IRNF_XRAY_EXE', 'IRNF_SINGBOX_EXE', 'IRNF_CORE_VERSION']) delete base[k];
+  const r = spawnSync(process.execPath, [SCRIPT], {
+    env: Object.assign(base, { IRNF_VALIDATE_DRY: '1', IRNF_VALIDATE_OUT: dir }, env),
+    encoding: 'utf8', timeout: 60000, windowsHide: true
+  });
+  const read = (name) => JSON.parse(fs.readFileSync(path.join(dir, `${name}.json`), 'utf8'));
+  return {
+    status: r.status, out: `${r.stdout || ''}${r.stderr || ''}`, dir, read,
+    proxy: (name) => read(name).outbounds.find((o) => o.tag === 'proxy'),
+    built: `${r.stdout || ''}`.split(/\r?\n/).filter((l) => l.startsWith('built ')).map((l) => l.slice(6))
+  };
+}
+
+const FORMS = ['ech-udp', 'ech-doh', 'ech-b64', 'pins', 'grpc-authority', 'kcp', 'hy2', 'ss-obfs', 'ss-v2ray', 'reality-pqv'];
+
+test('the core gate builds every config without a core — the v1.18 link forms plain, under TUN and under the strict leak guard', { timeout: 60000 }, (t) => {
+  const run = dryRun(t);
+  assert.equal(run.status, 0, run.out);
+  assert.equal(fs.readdirSync(run.dir).length, run.built.length, 'every config it names is on disk');
+  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(13 of them sing-box TUN configs\\)`, 'm'));
+  assert.ok(run.built.length > 200, `the plans × DNS modes matrix and the shapes are still there: ${run.built.length}`);
+  for (const form of FORMS) {
+    for (const v of ['plain', 'tun', 'strict']) assert.ok(run.built.includes(`link-${form}-${v}.json`), `link-${form}-${v}`);
+  }
+  // ECH: as the link says; under TUN its DNS query bound to the NIC; under the strict guard asked over DoH
+  const ech = (v) => run.proxy(`link-ech-udp-${v}`).streamSettings.tlsSettings;
+  assert.deepEqual([ech('plain').echConfigList, ech('plain').echSockopt], ['cloudflare-ech.com+udp://1.1.1.1', undefined]);
+  assert.deepEqual([ech('tun').echConfigList, ech('tun').echSockopt], ['cloudflare-ech.com+udp://1.1.1.1', { interface: 'eth0' }]);
+  assert.deepEqual([ech('strict').echConfigList, ech('strict').echSockopt], ['cloudflare-ech.com+https://1.1.1.1/dns-query', { interface: 'eth0' }]);
+  assert.equal(run.proxy('link-ech-doh-plain').streamSettings.tlsSettings.echConfigList, 'cloudflare-ech.com+https://1.1.1.1/dns-query');
+  // …and the list itself (base64): nothing to ask, nothing to bind
+  const b64 = run.proxy('link-ech-b64-tun').streamSettings.tlsSettings;
+  assert.match(b64.echConfigList, /^[A-Za-z0-9+/]+=*$/);
+  assert.equal(b64.echSockopt, undefined);
+  // the certificate pins and the name to verify, gRPC's :authority, REALITY's ML-DSA-65 key
+  const pins = run.proxy('link-pins-plain').streamSettings.tlsSettings;
+  assert.deepEqual([pins.pinnedPeerCertSha256, pins.verifyPeerCertByName], ['ab'.repeat(32), 'real.example']);
+  assert.equal(run.proxy('link-grpc-authority-plain').streamSettings.grpcSettings.authority, 'auth.example');
+  assert.equal(Buffer.from(run.proxy('link-reality-pqv-plain').streamSettings.realitySettings.mldsa65Verify, 'base64url').length, 1952);
+  // Hysteria2: salamander, the port hopping and the bandwidth
+  const hy = run.proxy('link-hy2-plain').streamSettings.finalmask;
+  assert.deepEqual(hy.udp.map((m) => m.type), ['salamander', 'udphop']);
+  assert.deepEqual(hy.quicParams, { brutalUp: '50 mbps', brutalDown: '100 mbps' });
+  // Shadowsocks' plugins as the transports the core has
+  assert.equal(run.proxy('link-ss-obfs-plain').streamSettings.tcpSettings.header.type, 'http');
+  const ws = run.proxy('link-ss-v2ray-plain').streamSettings;
+  assert.deepEqual([ws.network, ws.security, ws.wsSettings.path], ['ws', 'tls', '/ws']);
+});
+
+test('the core gate writes every config for the core’s own version: mKCP’s header and seed, Hysteria’s hopping — as the suggested Xray takes them, and as a January 2026 core did', { timeout: 60000 }, (t) => {
+  const now = dryRun(t);
+  assert.equal(now.status, 0, now.out);
+  const kcp = now.proxy('link-kcp-plain').streamSettings;
+  assert.deepEqual(kcp.kcpSettings, { mtu: 1350 });
+  assert.deepEqual(kcp.finalmask.udp, [{ type: 'mkcp-legacy', settings: { value: 'S' } }, { type: 'mkcp-legacy', settings: { header: 'wechat' } }]);
+  const old = dryRun(t, { IRNF_CORE_VERSION: '26.1.23' });
+  assert.equal(old.status, 0, old.out);
+  assert.match(old.out, /configs built for xray 26\.1\.23 /);
+  const oldKcp = old.proxy('link-kcp-plain').streamSettings;
+  assert.deepEqual(oldKcp.kcpSettings, { header: { type: 'wechat-video' }, seed: 'S', mtu: 1350 });
+  assert.equal(oldKcp.finalmask, undefined);
+  const oldHy = old.proxy('link-hy2-plain').streamSettings;
+  assert.deepEqual(oldHy.hysteriaSettings, { version: 2, auth: 'pw', udphop: { ports: '20000-30000', interval: '30' }, up: '50 mbps', down: '100 mbps' });
+  assert.deepEqual(oldHy.finalmask, { udp: [{ type: 'salamander', settings: { password: 'OB' } }] });
+});
+
+test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every config — the versions read from coreVersions.js, the gate never dry', () => {
+  const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8').replace(/\r\n/g, '\n');
+  const at = yml.indexOf('\n  cores:\n');
+  assert.ok(at >= 0, 'test.yml has a cores job');
+  const rest = yml.slice(at + 1);
+  const end = rest.slice(1).search(/\n {2}[a-z][\w-]*:\n/);
+  const job = end === -1 ? rest : rest.slice(0, end + 1);
+  assert.match(job, /runs-on: ubuntu-latest/);
+  for (const read of ['SUGGESTED.xray', "SUGGESTED['xray-pattn']", "SUGGESTED['sing-box']"]) {
+    assert.ok(job.includes(`require('./src/main/coreVersions').${read}`), `the version is read from the table: ${read}`);
+  }
+  assert.match(job, /https:\/\/github\.com\/XTLS\/Xray-core\/releases\/download\/v\$XV\/Xray-linux-64\.zip/);
+  assert.match(job, /https:\/\/github\.com\/patterniha\/Xray-core\/releases\/download\/v\$PV\/Xray-linux-64\.zip/);
+  assert.match(job, /https:\/\/github\.com\/SagerNet\/sing-box\/releases\/download\/v\$SV\/sing-box-\$SV-linux-amd64\.tar\.gz/);
+  assert.match(job, /IRNF_XRAY_EXE="\$RUNNER_TEMP\/x\/xray" IRNF_SINGBOX_EXE="\$RUNNER_TEMP\/s\/sing-box" node scripts\/validate-configs\.js/);
+  assert.match(job, /IRNF_XRAY_EXE="\$RUNNER_TEMP\/p\/xray" node scripts\/validate-configs\.js/);
+  assert.doesNotMatch(job, /IRNF_VALIDATE_DRY/, 'a dry run checks nothing');
+});
