@@ -401,16 +401,22 @@ button.pool-item:hover .pool-add { color: var(--accent); }
 .srv-group-meta {
   display: inline-flex;
   gap: 8px;
-  flex: 0 0 auto;
+  /* With 📶 ⚡ ⟳ beside it the row can run out (a long name, or the router's page
+     in a narrow browser window): the quota may fold, each part with its own
+     ellipsis as the name already does, rather than the row overflow. */
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: 11px;
   color: var(--ink3);
   white-space: nowrap;
 }
+.srv-group-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .srv-group-meta [dir="ltr"] { font-family: var(--mono); }   /* the figures; "12 days left" reads in the UI face */
 .srv-group-meta.mid { color: var(--warn); }
 .srv-group-meta.bad { color: var(--danger); }
-/* its refresh sits past the rule, at the end of the row */
-.srv-group-refresh { order: 1; font-size: 13px; }
+/* its tools sit past the rule, at the end of the row: 📶 test the group, ⚡ connect
+   to its fastest, and a subscription's ⟳ refresh — one rule, so they cannot drift */
+.srv-group-ping, .srv-group-fastest, .srv-group-refresh { order: 1; font-size: 13px; }
 
 /* ----------------------------- selection ----------------------------- */
 

@@ -102,7 +102,7 @@ test('D1: the power button, the pool’s button and the picker’s Auto row are 
   assert.match(power, /^\$\('#powerBtn'\)\.onclick = \(\) => \{\n\s*if \(state\.connecting\) return cancelConnect\(\);\n\s*if \(state\.connected\) return disconnect\(\);/);
   const pool = APP.slice(APP.indexOf("$('#btnPoolConnect').onclick = () => {"));
   assert.match(pool, /^\$\('#btnPoolConnect'\)\.onclick = \(\) => \{\n\s*if \(state\.connecting\) return cancelConnect\(\);/);
-  assert.match(fnSource('connectAuto'), /^\nasync function connectAuto\(\) \{\n\s*if \(state\.connecting\) return cancelConnect\(\);/);
+  assert.match(fnSource('connectAuto'), /^\nasync function connectAuto\(scope\) \{\n\s*if \(state\.connecting\) return cancelConnect\(\);/);
   assert.match(fnSource('connect'), /^\nasync function connect\(id\) \{\n(?:\s*\/\/[^\n]*\n)*\s*if \(state\.connecting\) return cancelConnect\(\);/);
   // every ▶ is drawn by connectGlyph, and every state change redraws them
   assert.match(APP, /connectGlyph\(card\.querySelector\('\.connect-srv'\)\)\.onclick = /);

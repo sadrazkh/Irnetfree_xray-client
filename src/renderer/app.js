@@ -1300,6 +1300,8 @@ function renderServers() {
  * count always on it — and a subscription's head carries that subscription's
  * own refresh, and its quota and time left when it reports them, so it can be
  * looked after from here (adding and editing stay on the Subscriptions page).
+ * Any group of two or more configs also carries 📶 (test them all) and ⚡
+ * (connect to the fastest of them).
  * A folded group builds no cards until it is opened: a 300-server
  * subscription folded away costs one row.
  */
@@ -1340,6 +1342,31 @@ function serverGroup(g, n) {
       }
       head.appendChild(meta);
     }
+  }
+
+  // 📶 tests every config of the group, ⚡ connects to its fastest (connectAuto);
+  // with one config there is nothing to rank or to choose between
+  if (g.items.length >= 2) {
+    const ids = g.items.map(s => s.id);
+    const ping = document.createElement('button');
+    ping.className = 'icon-btn srv-group-ping';
+    ping.type = 'button';
+    ping.textContent = '📶';
+    ping.title = t('srv.groupPing');
+    ping.setAttribute('aria-label', ping.title);
+    ping.onclick = () => { ping.disabled = true; pingMany(ids).finally(() => { ping.disabled = false; }); };
+    const fast = document.createElement('button');
+    fast.className = 'icon-btn srv-group-fastest';
+    fast.type = 'button';
+    fast.textContent = '⚡';
+    fast.title = t('srv.groupFastest');
+    fast.setAttribute('aria-label', fast.title);
+    fast.onclick = () => connectAuto({ ids, name: g.name });
+    head.appendChild(ping);
+    head.appendChild(fast);
+  }
+
+  if (g.sub) {
     const refresh = document.createElement('button');
     refresh.className = 'icon-btn srv-group-refresh';
     refresh.type = 'button';
@@ -1468,13 +1495,19 @@ const POOL_ID = '__pool__';
 /** The picker's "Auto" row: not a selection but an action — test, then connect to the fastest. */
 const AUTO_ID = '__auto__';
 
+/** When each target's last test finished — a group's ⚡ trusts results younger than GROUP_FRESH_MS. */
+const pingAt = {};
+const GROUP_FRESH_MS = 3 * 60 * 1000;
+
 /**
- * The fastest tested server: real delay first (it proves the tunnel carries
- * traffic), TCP handshake as the fallback for servers that only have that.
- * null when nothing has been tested — the caller runs the test first.
+ * The fastest tested server — of `ids` when given (a group's ⚡), else of every
+ * server: real delay first (it proves the tunnel carries traffic), the TCP
+ * handshake as the fallback for servers that only have that. null when nothing
+ * in it has been tested — the caller runs the test first.
  */
-function bestServerId() {
-  const scored = state.servers.map((s) => {
+function bestServerId(ids) {
+  const pool = ids ? ids.map(srvById).filter(Boolean) : state.servers;
+  const scored = pool.map((s) => {
     const p = state.pings[s.id] || {};
     const real = p.real && p.real.ok ? p.real.ms : null;
     const tcp = p.tcp && p.tcp.ok ? p.tcp.ms : null;
@@ -1483,13 +1516,27 @@ function bestServerId() {
   return scored.length ? scored[0].id : null;
 }
 
-async function connectAuto() {
+/**
+ * ⚡: test, then connect to the fastest — of every server (the picker's Auto
+ * row: tested only when nothing ever was, as before), or of one group
+ * (`scope` = { ids, name }: a group head's ⚡ and the "Fastest — <subscription>"
+ * rows), tested again unless all of it was tested in the last GROUP_FRESH_MS.
+ */
+async function connectAuto(scope) {
   if (state.connecting) return cancelConnect();   // the row is the Cancel while connecting
-  let best = bestServerId();
-  if (!best) { await pingMany(state.servers.map(s => s.id)); best = bestServerId(); }
-  if (!best) return toast(t('t.autoNone'), 'err');
+  const ids = scope ? scope.ids : null;
+  let best = bestServerId(ids);
+  const stale = !!scope && ids.some((id) => !(pingAt[id] > Date.now() - GROUP_FRESH_MS));
+  if (!best || stale) { await pingMany(ids || state.servers.map(s => s.id)); best = bestServerId(ids); }
+  if (!best) return toast(t(scope ? 't.autoGroupNone' : 't.autoNone'), 'err');
+  // The test takes a while. A connect that began meanwhile (another ⚡, a ▶) is
+  // the later choice, and connect() below would be its Cancel: leave it be.
+  if (scope && state.connecting) return;
   const s = srvById(best);
-  toast(`${t('picker.auto')} → ${s ? s.name : best}`, 'ok');
+  const label = scope ? t('picker.autoSub').replace('{name}', () => scope.name) : t('picker.auto');
+  toast(`${label} → ${s ? s.name : best}`, 'ok');
+  // Already on the group's fastest: connect() would be that connection's toggle.
+  if (scope && state.connected && state.activeServerId === best) return;
   return connect(best);
 }
 function chainById(id) { return state.chains.find(c => c.id === id); }
@@ -1664,6 +1711,20 @@ function renderPicker() {
     row.innerHTML = `<span class="q-dot"></span><span class="proto-badge proto-auto">⚡</span><span class="pi-name">${escapeHtml(t(state.connecting ? 'power.cancelHint' : 'picker.auto'))}</span>`;
     row.onclick = () => { closePicker(); connectAuto(); };
     menu.appendChild(row);
+  }
+  // "Fastest — <subscription>": the same ⚡ for one subscription, when there are
+  // groups to choose between. The Servers page has the hand-added pile's own.
+  const groups = serverGroups();
+  if (groups.length >= 2) {
+    for (const g of groups) {
+      if (!g.id || g.items.length < 2) continue;
+      const row = document.createElement('div');
+      row.className = 'picker-item picker-special picker-auto picker-auto-sub';
+      row.innerHTML = '<span class="q-dot"></span><span class="proto-badge proto-auto">⚡</span><span class="pi-name"></span>';
+      row.querySelector('.pi-name').textContent = t('picker.autoSub').replace('{name}', () => g.name);
+      row.onclick = () => { closePicker(); connectAuto({ ids: g.items.map(s => s.id), name: g.name }); };
+      menu.appendChild(row);
+    }
   }
   if (poolReady()) addRow(POOL_ID, '<span class="proto-badge proto-pool">🧩</span>', t('picker.pool') + ' (' + poolEnabledValid().length + ')', null, true);
   if (advancedReady()) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
@@ -1843,6 +1904,7 @@ async function pingServer(id) {
   setPhasePending(id, 'data-ping-real');           // ← testing download now
   const real = await window.api.pingReal(id);
   state.pings[id] = Object.assign(state.pings[id] || {}, { real });
+  pingAt[id] = Date.now();
   applyPingDisplays(id);
   setPhasePending(id, 'data-ping-up');             // ← testing upload now
   const upload = await window.api.pingUpload(id);
@@ -1861,6 +1923,7 @@ async function pingTcpOnly(id) {
 async function pingRealOnly(id) {
   const real = await window.api.pingReal(id);
   state.pings[id] = Object.assign(state.pings[id] || {}, { real });
+  pingAt[id] = Date.now();
   applyPingDisplays(id);
   return real;
 }
@@ -1879,6 +1942,7 @@ async function pingMany(ids) {
     const res = await window.api.pingRealMany(ids);
     for (const id of ids) {
       state.pings[id] = Object.assign(state.pings[id] || {}, { real: (res && res[id]) || { ok: false, error: 'no result' } });
+      pingAt[id] = Date.now();
       applyPingDisplays(id);
     }
   } else {
@@ -1901,6 +1965,7 @@ async function quickPing(id) {
   const real = await window.api.pingReal(id);
   $('#statReal').textContent = real.ok ? real.ms + 'ms' : t('t.error');
   state.pings[id] = Object.assign(state.pings[id] || {}, { tcp, real });
+  pingAt[id] = Date.now();
   applyPingDisplays(id);
   renderPicker();
 }
