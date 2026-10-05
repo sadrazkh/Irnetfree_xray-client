@@ -333,30 +333,30 @@ test('probeMux: the second request through the mux connection fails — that is 
   assert.equal(r.cleanups, 2);
 });
 
-test('probeMux: neither answers — unknown; every core cleaned up', async () => {
+test('probeMux: neither answers — unreachable (nothing to learn); every core cleaned up', async () => {
   const r = fakeRunner({ mux: [false], plain: [false] });
-  assert.equal(await probeMux(shaped('p', 'vless', 'httpupgrade'), r.deps), 'unknown');
+  assert.equal(await probeMux(shaped('p', 'vless', 'httpupgrade'), r.deps), 'unreachable');
   assert.equal(r.starts.length, 2);
   assert.equal(r.cleanups, 2);
 });
 
-test('probeMux: a failing dependency is an unknown, never a throw — and what was started is cleaned up', async () => {
+test('probeMux: a failing dependency is unreachable, never a throw — and what was started is cleaned up', async () => {
   const noCore = fakeRunner({ startThrows: true });
-  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), noCore.deps), 'unknown');
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), noCore.deps), 'unreachable');
   assert.equal(noCore.cleanups, 0, 'nothing started, nothing to clean');
   const broken = fakeRunner({ requestThrows: true });
-  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), broken.deps), 'unknown');
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), broken.deps), 'unreachable');
   assert.equal(broken.cleanups, broken.starts.length);
   assert.equal(broken.starts.length, 2);
   const badConfig = fakeRunner();
   badConfig.deps.buildTestConfig = () => { throw new Error('no outbound'); };
-  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), badConfig.deps), 'unknown');
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), badConfig.deps), 'unreachable');
 });
 
-test('probeMux: never longer than its budget — a request that hangs ends as unknown, its core cleaned up', async () => {
+test('probeMux: never longer than its budget — a request that hangs ends as unreachable, its core cleaned up', async () => {
   const r = fakeRunner({ hang: true, timeoutMs: 120 });
   const t0 = Date.now();
-  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'unknown');
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'unreachable');
   const took = Date.now() - t0;
   assert.ok(took < 1000, `took ${took} ms for a 120 ms budget`);
   assert.equal(r.cleanups, r.starts.length, 'every core that was started is cleaned up');
@@ -367,7 +367,7 @@ test('probeMux: never longer than its budget — a request that hangs ends as un
 test('probeMux: a core that only comes up after the deadline is cleaned up at once and never used', async () => {
   const r = fakeRunner({ startDelayMs: 400, timeoutMs: 40 });
   const t0 = Date.now();
-  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'unknown');
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'unreachable');
   assert.ok(Date.now() - t0 < 350, 'answered at the deadline, not when the core came up');
   await sleep(500);
   assert.equal(r.starts.length, 1, 'the late core, and no second one after it');
@@ -375,11 +375,12 @@ test('probeMux: a core that only comes up after the deadline is cleaned up at on
   assert.deepEqual(r.requests, [], 'nothing was asked through it');
 });
 
-test('probeMux: a mux that runs out of its share is unknown — whatever the control would say; no control is asked', async () => {
+test('probeMux: a mux that runs out of its share, on a line the control proves working, is unknown — never unsupported', async () => {
   // The owner's line (live run, Xray 26.3.27, the ECH server): the mux attempt
   // used up its 5 s on a slow moment, the control asked after it answered, and
   // that TIMEOUT was read as "refuses mux" — mux off for three days exactly
-  // where it is needed. A slow line says nothing about the server.
+  // where it is needed. A slow line says nothing about the server; the control
+  // still runs, to tell a working line (unknown) from nothing reachable.
   const r = fakeRunner({ plain: [true], timeoutMs: 400 });
   r.deps.httpThroughProxy = async (p, o) => {
     const core = r.starts.find((c) => c.port === p);
@@ -389,11 +390,23 @@ test('probeMux: a mux that runs out of its share is unknown — whatever the con
   };
   const t0 = Date.now();
   assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'unknown');
-  assert.ok(Date.now() - t0 < 390, 'over when the mux share is, not at the end of the budget');
-  assert.deepEqual(r.requests.map((q) => q.kind), ['mux']);
+  assert.ok(Date.now() - t0 < 390, 'within the budget');
+  assert.deepEqual(r.requests.map((q) => q.kind), ['mux', 'plain']);
   assert.ok(r.requests[0].opts.timeout <= 250, `the mux half keeps its 5/8 share: ${r.requests[0].opts.timeout}`);
-  assert.equal(r.starts.length, 1);
-  assert.equal(r.cleanups, 1);
+  assert.ok(r.requests[1].opts.timeout > 0, 'the control gets the rest');
+  assert.equal(r.starts.length, 2);
+  assert.equal(r.cleanups, 2);
+});
+
+test('probeMux: mux timed out or refused, and the control does not answer either — unreachable', async () => {
+  // Nothing reachable — the WAN not up yet on a router's first boot connect,
+  // the server down: no verdict to keep, nothing to remember, tested again by
+  // the next connect (the boot loop's next attempt).
+  for (const [muxed, control] of [[TIMED_OUT, false], [TIMED_OUT, TIMED_OUT], [false, false], [false, TIMED_OUT], [REFUSED_PORT, false]]) {
+    const r = fakeRunner({ exited: muxed === REFUSED_PORT ? 'mux' : undefined, mux: [muxed], plain: [control] });
+    assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'unreachable', JSON.stringify([muxed, control]));
+    assert.equal(r.cleanups, r.starts.length);
+  }
 });
 
 test('probeMux: mux times out and the control answers — unknown, never unsupported', async () => {
@@ -420,10 +433,10 @@ test('probeMux: mux closed (a definitive no) and the control answers — unsuppo
     assert.deepEqual(r.requests.map((q) => q.kind), ['mux', 'plain']);
     assert.equal(r.cleanups, 2);
   }
-  // …and the control not answering makes it unknown, whatever the mux said
+  // …and the control not answering makes it unreachable, whatever the mux said
   for (const control of [false, TIMED_OUT]) {
     const r = fakeRunner({ mux: [false], plain: [control] });
-    assert.equal(await probeMux(shaped('p', 'trojan', 'ws'), r.deps), 'unknown', JSON.stringify(control));
+    assert.equal(await probeMux(shaped('p', 'trojan', 'ws'), r.deps), 'unreachable', JSON.stringify(control));
   }
 });
 
@@ -447,11 +460,11 @@ test('probeMux: a core still starting (its port refused, the core alive) is aske
   assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'ok');
   assert.deepEqual(r.requests.map((q) => q.kind), ['mux', 'mux', 'mux', 'mux']);
   assert.equal(r.starts.length, 1);
-  // …and one that never opens its port within the mux share is a timeout: unknown
+  // …and one that never opens its port within the mux share is a timeout: unknown, the control answering
   const never = fakeRunner({ mux: Array(100).fill(REFUSED_PORT), plain: [true], timeoutMs: 400 });
   assert.equal(await probeMux(shaped('p', 'vless', 'ws'), never.deps), 'unknown');
-  assert.equal(never.starts.length, 1, 'no control after a timeout');
-  assert.equal(never.cleanups, 1);
+  assert.deepEqual(never.starts.map((c) => c.muxed), [true, false]);
+  assert.equal(never.cleanups, 2);
 });
 
 /* ----------------------------- one connect’s decision ----------------------------- */
@@ -484,7 +497,7 @@ test('decideMux: remembered answers stand, the rest are tested — one line per 
     ['info', 'Mux off for Server no (this server does not accept it)'],
     ['info', 'Mux on for Server fresh (tested: works)'],
     ['info', 'Mux off for Server refuses (this server does not accept it)'],
-    ['warn', 'Mux: Server silent did not answer either way — connecting without it']
+    ['warn', 'Mux: Server silent did not answer through mux in time — connecting without it']
   ]);
   // within its retry hour the remembered unknown is not tested again — said once more, quietly
   const memo = mux.rememberVerdicts(cache, res.learnt, now);
@@ -495,21 +508,60 @@ test('decideMux: remembered answers stand, the rest are tested — one line per 
     log: (line, level) => again.push([level, line])
   });
   assert.deepEqual(res2, { muxIds: [], learnt: [] });
-  assert.deepEqual(again, [['info', 'Mux: Server silent did not answer either way — connecting without it']]);
+  assert.deepEqual(again, [['info', 'Mux: Server silent did not answer through mux in time — connecting without it']]);
 });
 
-test('decideMux: a probe that throws, or answers nonsense, is an unknown', async () => {
+test('decideMux: a probe that throws, or answers nonsense, is unreachable — nothing learnt', async () => {
   const a = shaped('a', 'vless', 'ws');
   const b = shaped('b', 'vless', 'httpupgrade');
   const lines = [];
   const res = await mux.decideMux({
     mode: 'auto', servers: [a, b], cache: {}, now: 1,
     probe: async (s) => { if (s.id === 'a') throw new Error('boom'); return 'maybe'; },
-    log: (line) => lines.push(line)
+    log: (line, level) => lines.push([level, line])
   });
-  assert.deepEqual(res, { muxIds: [], learnt: [{ fp: muxFingerprint(a), verdict: 'unknown' }, { fp: muxFingerprint(b), verdict: 'unknown' }] });
-  assert.equal(lines.length, 2);
-  assert.ok(lines.every((l) => /did not answer either way — connecting without it$/.test(l)));
+  assert.deepEqual(res, { muxIds: [], learnt: [] });
+  assert.deepEqual(lines.map(([level]) => level), ['warn', 'warn']);
+  assert.ok(lines.every(([, l]) => /did not answer either way — connecting without it$/.test(l)));
+});
+
+test('decideMux + probeMux: a mux timeout beside a control that answers is an unknown with its retry hour stamped', async () => {
+  const now = 30 * DAY;
+  const s = shaped('slow', 'vless', 'ws');
+  const res = await mux.decideMux({
+    mode: 'auto', servers: [s], cache: {}, now,
+    probe: (server) => probeMux(server, fakeRunner({ mux: [TIMED_OUT], plain: [true] }).deps),
+    log: () => {}
+  });
+  assert.deepEqual(res.learnt, [{ fp: muxFingerprint(s), verdict: 'unknown' }]);
+  assert.deepEqual(mux.rememberVerdicts({}, res.learnt, now)[muxFingerprint(s)], { verdict: 'unknown', at: now, retryAfter: now + HOUR });
+});
+
+test('decideMux + probeMux: mux failed or timed out and the control failed too — nothing learnt, the cache is the same object, the next connect tests again', async () => {
+  // A router's first boot connect before its WAN is up: remembered as unknown
+  // for an hour, every later rebuild — which never tests — went without mux
+  // until the next boot. Nothing reachable is nothing learnt.
+  const now = 30 * DAY;
+  const fresh = shaped('fresh', 'vless', 'ws');
+  const marked = shaped('marked', 'vmess', 'ws');
+  const cache = { [muxFingerprint(marked)]: { verdict: 'ok', at: now - 3 * DAY, recheck: true } };
+  for (const [muxed, control] of [[false, false], [TIMED_OUT, false], [TIMED_OUT, TIMED_OUT]]) {
+    const lines = [];
+    const res = await mux.decideMux({
+      mode: 'auto', servers: [fresh, marked], cache, now,
+      probe: (server) => probeMux(server, fakeRunner({ mux: [muxed], plain: [control] }).deps),
+      log: (line, level) => lines.push([level, line])
+    });
+    assert.deepEqual(res.learnt, [], JSON.stringify([muxed, control]));
+    assert.equal(mux.rememberVerdicts(cache, res.learnt, now), cache, 'no store write');
+    assert.deepEqual(res.muxIds, ['marked'], 'the ok from before stands for this connect');
+    assert.deepEqual(lines, [
+      ['warn', 'Mux: Server fresh did not answer either way — connecting without it'],
+      ['info', 'Mux on for Server marked (tested before: works — this test did not answer)']
+    ]);
+    // the next connect — the boot loop's next attempt — tests both again
+    assert.deepEqual(planMux({ mode: 'auto', servers: [fresh, marked], cache, now: now + 1000 }).toProbe.map((x) => x.id), ['fresh', 'marked']);
+  }
 });
 
 test('decideMux: a recovery’s connect never tests — a re-test mark is kept as ok and muxed; nothing usable goes without', async () => {
@@ -634,6 +686,14 @@ test('rememberVerdicts: an unknown never replaces an ok or unsupported verdict �
   assert.deepEqual(settled.marked, { verdict: 'ok', at: now + 2 * HOUR });
   assert.deepEqual(settled.expiredNo, { verdict: 'ok', at: now + 2 * HOUR });
   assert.deepEqual(settled.gone, { verdict: 'unsupported', at: now + 2 * HOUR });
+});
+
+test('rememberVerdicts: nothing to remember — no answers, an unreachable, junk — is the same object (no store write)', () => {
+  const cache = { a: { verdict: 'ok', at: 1 } };
+  assert.equal(mux.rememberVerdicts(cache, [], 5), cache);
+  assert.equal(mux.rememberVerdicts(cache, [{ fp: 'a', verdict: 'unreachable' }, { fp: 'b', verdict: 'unreachable' }], 5), cache);
+  assert.equal(mux.rememberVerdicts(cache, [{ fp: 'a', verdict: 'maybe' }, null, { verdict: 'ok' }], 5), cache);
+  assert.deepEqual(cache, { a: { verdict: 'ok', at: 1 } });
 });
 
 test('markRecheck: a drop marks the ok verdicts of what it muxed for a re-test — kept as ok; nothing to mark is the same object (no store write)', () => {

@@ -25,10 +25,13 @@
  * mux attempt that times out is `unknown`, whatever a control would say. The
  * verdict is remembered per server fingerprint — ok for 7 days, unsupported
  * for 1 — so an edited server, or a refreshed subscription with new
- * parameters, is tested again. An `unknown` never replaces an ok or
- * unsupported verdict: it keeps it and is not tried again for an hour
- * (`retryAfter`); with nothing before, it is remembered as unknown for that
- * hour — a slow line is not tested on every connect.
+ * parameters, is tested again. An `unknown` — the control answered, only
+ * the mux attempt ran out of time — never replaces an ok or unsupported
+ * verdict: it keeps it and is not tried again for an hour (`retryAfter`);
+ * with nothing before, it is remembered as unknown for that hour — a slow
+ * line is not tested on every connect. When the control does not answer
+ * either (`unreachable`: the WAN not up yet at a router's boot, the server
+ * down) nothing at all is remembered, and the next connect tests again.
  *
  * Only a connect the user or the boot makes tests. A recovery's connect (a
  * rebuild after a drop or a network change) never does: it runs in the outage
@@ -207,15 +210,19 @@ const exited = (core) => !!(core && core.proc && (core.proc.exitCode != null || 
  *   1. a throwaway core whose proxy outbound carries MUX makes two requests,
  *      one after the other, through one mux connection, within its share of
  *      the budget (MUX_SHARE) — both answer: 'ok';
- *   2. it runs out of time instead: 'unknown' — a slow line says nothing about
- *      the server (see the top of this file), so no control is asked;
- *   3. it gets a definitive no — closed, reset, refused, an error status, or
- *      the core did not start — then one request through a core without mux:
- *      it answers: 'unsupported'; it does not: 'unknown'.
+ *   2. otherwise one request through a core without mux, the control, in the
+ *      rest of the budget — it tells a working line from nothing reachable:
+ *      - it answers, and the mux attempt got a definitive no (closed, reset,
+ *        refused, an error status, or the core did not start): 'unsupported';
+ *      - it answers, and the mux attempt ran out of time: 'unknown' — a slow
+ *        line says nothing about the server (see the top of this file);
+ *      - it does not answer either: 'unreachable' — the WAN not up yet (a
+ *        router's first boot connect), the server down. Nothing to learn:
+ *        decideMux remembers nothing, the next connect tests again.
  * A refused port on a core that is still running is a core still starting,
  * not an answer: asked again while there is time. Every core it starts is
  * cleaned up, one that only comes up after the deadline included; nothing it
- * is handed can make it throw.
+ * is handed can make it throw (anything that goes wrong is 'unreachable').
  *
  * deps = { buildTestConfig(server, port), startTest(config) → { proc, cleanup },
  *          getFreePort(), httpThroughProxy(port, opts) → { ok, error?, status? } }
@@ -280,11 +287,12 @@ async function probeMux(server, deps = {}) {
   const run = (async () => {
     const muxed = await through(true, 2, t0 + Math.round(budget * MUX_SHARE));
     if (muxed === 'ok') return 'ok';
-    if (muxed !== 'failed') return 'unknown';   // a timeout proves nothing, whatever a control would say
-    return (await through(false, 1, t0 + budget)) === 'ok' ? 'unsupported' : 'unknown';
-  })().catch(() => 'unknown');
+    if ((await through(false, 1, t0 + budget)) !== 'ok') return 'unreachable';   // nothing answered: nothing learnt
+    // the line works: a definitive no is the server's; a timeout proves nothing
+    return muxed === 'failed' ? 'unsupported' : 'unknown';
+  })().catch(() => 'unreachable');
   let timer = null;
-  const expired = new Promise((resolve) => { timer = setTimeout(() => resolve('unknown'), budget); });
+  const expired = new Promise((resolve) => { timer = setTimeout(() => resolve('unreachable'), budget); });
   try {
     return await Promise.race([run, expired]);
   } finally {
@@ -295,6 +303,8 @@ async function probeMux(server, deps = {}) {
 }
 
 const VERDICTS = new Set(['ok', 'unsupported']);
+/** What a probe can answer (probeMux); anything else — a throw, nonsense — counts as 'unreachable'. */
+const PROBED = new Set(['ok', 'unsupported', 'unknown', 'unreachable']);
 const nameOf = (s) => s.name || s.address || s.id;
 
 /**
@@ -304,8 +314,10 @@ const nameOf = (s) => s.name || s.address || s.id;
  * line per server. A recovery's connect (`recovery`) probes nothing. An
  * inconclusive probe keeps the verdict the server had: an ok stays mux on.
  * Returns the ids to mux and what the probes `learnt` ([{ fp, verdict }] — ok,
- * unsupported or unknown; rememberVerdicts says what an unknown keeps). `on`
- * and `off` probe nothing and say nothing.
+ * unsupported or unknown; rememberVerdicts says what an unknown keeps). An
+ * 'unreachable' (nothing answered, mux or not) teaches nothing and is not in
+ * `learnt`: no store write, and the next connect tests again. `on` and `off`
+ * probe nothing and say nothing.
  */
 async function decideMux({ mode, servers, cache, now = Date.now(), probe, log = () => {}, recovery = false, parallel = PROBE_PARALLEL } = {}) {
   const m = muxMode(mode);
@@ -321,8 +333,8 @@ async function decideMux({ mode, servers, cache, now = Date.now(), probe, log = 
   const worker = async () => {
     for (let job = queue.shift(); job; job = queue.shift()) {
       let v;
-      try { v = await probe(job.server); } catch { v = 'unknown'; }
-      asked.set(job.fp, VERDICTS.has(v) ? v : 'unknown');
+      try { v = await probe(job.server); } catch { v = 'unreachable'; }
+      asked.set(job.fp, PROBED.has(v) ? v : 'unreachable');
     }
   };
   const lanes = Math.max(1, Math.floor(Number(parallel)) || PROBE_PARALLEL);
@@ -336,7 +348,7 @@ async function decideMux({ mode, servers, cache, now = Date.now(), probe, log = 
     const held = judge(own(cache, fp), now, recovery).verdict;   // memory — also what an inconclusive test keeps
     const tested = asked.has(fp);
     const v = tested ? asked.get(fp) : held;
-    if (tested && !learnt.some((l) => l.fp === fp)) learnt.push({ fp, verdict: v });
+    if (tested && v !== 'unreachable' && !learnt.some((l) => l.fp === fp)) learnt.push({ fp, verdict: v });
     if (v === 'ok') {
       muxIds.push(s.id);
       log(`Mux on for ${name} (tested: works)`, 'info');
@@ -348,8 +360,11 @@ async function decideMux({ mode, servers, cache, now = Date.now(), probe, log = 
     } else if (tested && held === 'unsupported') {
       log(`Mux off for ${name} (this server does not accept it)`, 'info');
     } else if (v === 'unknown') {
-      // said at warn when a test just found it; a remembered one again, quietly
-      log(`Mux: ${name} did not answer either way — connecting without it`, tested ? 'warn' : 'info');
+      // the line works, mux ran out of time: said at warn when a test just
+      // found it, a remembered one (its retry hour) again quietly
+      log(`Mux: ${name} did not answer through mux in time — connecting without it`, tested ? 'warn' : 'info');
+    } else if (v === 'unreachable') {
+      log(`Mux: ${name} did not answer either way — connecting without it`, 'warn');
     } else {
       log(`Mux: ${name} not tested yet — connecting without it`, 'info');   // a recovery's connect, which never tests
     }
@@ -363,13 +378,16 @@ async function decideMux({ mode, servers, cache, now = Date.now(), probe, log = 
  * server's verdict from now on (any `recheck` mark or `retryAfter` gone). An
  * unknown never replaces an ok or unsupported — expired or marked included —
  * it keeps it and stamps `retryAfter` an hour on; with nothing before, it is
- * remembered as `{ verdict: 'unknown', retryAfter }`. A value that is not a
- * map (a store from before, a hand edit) starts over.
+ * remembered as `{ verdict: 'unknown', retryAfter }`. Nothing else (an
+ * 'unreachable', junk) is remembered; with nothing to remember the very same
+ * object comes back — the caller writes nothing. A value that is not a map (a
+ * store from before, a hand edit) starts over.
  */
 function rememberVerdicts(cache, learnt, now) {
+  const apply = (Array.isArray(learnt) ? learnt : []).filter((l) => l && l.fp && (VERDICTS.has(l.verdict) || l.verdict === 'unknown'));
+  if (!apply.length) return cache;
   const next = Object.assign({}, isObj(cache) ? cache : {});
-  for (const l of Array.isArray(learnt) ? learnt : []) {
-    if (!l || !l.fp) continue;
+  for (const l of apply) {
     if (VERDICTS.has(l.verdict)) {
       delete next[l.fp];   // re-inserted: the newest last
       next[l.fp] = { verdict: l.verdict, at: now };

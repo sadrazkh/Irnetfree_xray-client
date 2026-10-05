@@ -174,7 +174,7 @@ test('auto: "does not accept it" — no mux, remembered; the next connect is not
   assert.equal(s.probes.length, 1);
 });
 
-test('auto: no answer either way — connected without mux, remembered for an hour: the next connect does not test it again', async (t) => {
+test('auto: mux timed out on a line that works — connected without mux, remembered for an hour: the next connect does not test it again', async (t) => {
   const s = router({}, ['unknown', 'ok']);
   t.after(() => s.service.shutdown());
   const before = Date.now();
@@ -183,13 +183,36 @@ test('auto: no answer either way — connected without mux, remembered for an ho
   const memo = saved(s).muxProbes[FP];
   assert.equal(memo.verdict, 'unknown');
   assert.ok(memo.retryAfter >= before + HOUR && memo.retryAfter <= Date.now() + HOUR, 'tested again after an hour');
-  assert.deepEqual(lines(s, /^Mux/).map((l) => [l.level, l.line]), [['warn', 'Mux: ws-server did not answer either way — connecting without it']]);
+  assert.deepEqual(lines(s, /^Mux/).map((l) => [l.level, l.line]), [['warn', 'Mux: ws-server did not answer through mux in time — connecting without it']]);
   // a warning: on a router it reaches syslog too
-  assert.ok(s.syslog.some(([, text]) => text.includes('Mux: ws-server did not answer either way')));
+  assert.ok(s.syslog.some(([, text]) => text.includes('Mux: ws-server did not answer through mux in time')));
   await s.service.invoke('disconnect');
   await s.service.invoke('connect', WS.id);
   assert.equal(s.probes.length, 1, 'not tested again within the hour');
   assert.equal(liveProxy(s).mux, undefined);
+});
+
+test('a boot connect whose probe finds nothing reachable remembers nothing — the boot loop’s next attempt tests again, and the router ends up with mux', async (t) => {
+  // The router's first boot connect can come before its WAN is up: neither
+  // the mux attempt nor the control answers. Remembered as unknown for an
+  // hour, every later rebuild — which never tests — went without mux until
+  // the next boot.
+  const probes = [];
+  const probeMux = async (server) => {
+    probes.push(server.id);
+    if (probes.length === 1) return 'unreachable';   // the WAN is not up yet: and this attempt's gateway fails too
+    s.state.gatewayFails = false;                     // the WAN is up now
+    return 'ok';
+  };
+  const s = h.start({ servers: [WS, h.SERVER], connectIntent: WS.id, lastServerId: WS.id, settings: { autoConnect: true } }, { probeMux });
+  t.after(() => s.service.shutdown());
+  s.state.gatewayFails = true;
+  await h.until(() => h.connectedCount(s) === 1, 'the boot loop’s second attempt');
+  assert.deepEqual(probes, [WS.id, WS.id], 'tested again by the next boot attempt');
+  assert.deepEqual(liveProxy(s).mux, MUX, 'and connected with mux');
+  assert.equal(muxWritesOf(s), 1, 'the unreachable attempt wrote nothing; the ok, once');
+  assert.deepEqual(Object.keys(saved(s).muxProbes[FP]).sort(), ['at', 'verdict']);
+  assert.ok(s.logs.some((l) => l.level === 'warn' && l.line === 'Mux: ws-server did not answer either way — connecting without it'));
 });
 
 test('the router tests one server at a time — three test cores at once on its CPU miss the 5 s share', async (t) => {
