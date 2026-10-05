@@ -433,13 +433,32 @@ test('rememberVerdicts: newest wins, the input is never changed, at most 500 ent
   assert.deepEqual(mux.rememberVerdicts([], [{ fp: 'x', verdict: 'ok' }], 5), { x: { verdict: 'ok', at: 5 } });
 });
 
-test('forgetVerdicts: the named fingerprints go; nothing to forget is the same object (no store write)', () => {
-  const cache = { a: { verdict: 'ok', at: 1 }, b: { verdict: 'ok', at: 2 } };
-  const next = mux.forgetVerdicts(cache, ['a', 'zz']);
-  assert.deepEqual(next, { b: { verdict: 'ok', at: 2 } });
-  assert.deepEqual(cache, { a: { verdict: 'ok', at: 1 }, b: { verdict: 'ok', at: 2 } }, 'a new object');
-  assert.equal(mux.forgetVerdicts(cache, ['zz']), cache);
-  assert.equal(mux.forgetVerdicts(cache, []), cache);
+test('forgetVerdicts: a drop forgets the named verdicts at least 10 minutes old — a younger one stays; nothing to forget is the same object (no store write)', () => {
+  // A core that keeps crashing for a reason that has nothing to do with mux
+  // must not rewrite store.json (the router's flash) twice per crash: the
+  // forget, then the probe that learns the same answer again. A server that
+  // really stopped taking mux is still caught on the first drop after those
+  // 10 minutes.
+  const MIN = 60 * 1000;
+  const now = 1000 * DAY;
+  assert.equal(mux.FORGET_MIN_AGE_MS, 10 * MIN);
+  const cache = {
+    young: { verdict: 'ok', at: now - 5 * MIN },
+    old: { verdict: 'ok', at: now - 11 * MIN },
+    edge: { verdict: 'unsupported', at: now - 10 * MIN },
+    other: { verdict: 'ok', at: now - 11 * MIN }
+  };
+  const before = clone(cache);
+  const next = mux.forgetVerdicts(cache, ['young', 'old', 'edge', 'zz'], now);
+  assert.deepEqual(Object.keys(next).sort(), ['other', 'young'], 'the 5-minute-old answer survives the drop; 10 minutes and older go');
+  assert.deepEqual(next.young, cache.young);
+  assert.deepEqual(cache, before, 'a new object; the input is untouched');
+  // nothing qualifies — too young, or not remembered at all: the very same object, so the caller writes nothing
+  assert.equal(mux.forgetVerdicts(cache, ['young'], now), cache);
+  assert.equal(mux.forgetVerdicts(cache, ['zz'], now), cache);
+  assert.equal(mux.forgetVerdicts(cache, [], now), cache);
+  // the same young answer, once it is 10 minutes old, goes with the next drop
+  assert.deepEqual(Object.keys(mux.forgetVerdicts(cache, ['young'], now + 5 * MIN)).sort(), ['edge', 'old', 'other']);
 });
 
 /* ----------------------------- which servers a plan asks about ----------------------------- */

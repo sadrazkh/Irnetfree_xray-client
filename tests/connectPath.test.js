@@ -283,7 +283,8 @@ test('both mirrors: muxFor is one function — but for the router, which runs a 
 test('both mirrors: a drop forgets what the live connection muxed; a reload keeps it; a disconnect lets it go', () => {
   const [[, mainForget], [, serviceForget]] = both('function forgetLiveMux() {');
   assert.equal(mainForget, serviceForget);
-  assert.match(mainForget, /const next = forgetVerdicts\(cache, liveMux\.fps\);\nliveMux = null;\nif \(next !== cache\) store\.set\('muxProbes', next\);/);
+  // only verdicts at least 10 minutes old, as of now — and no write when none is (mux.test.js, serviceMux.test.js)
+  assert.match(mainForget, /const next = forgetVerdicts\(cache, liveMux\.fps, Date\.now\(\)\);\nliveMux = null;\nif \(next !== cache\) store\.set\('muxProbes', next\);/);
   // the drop: main.js's onConnectionDrop, the service's recoverFromDrop — past the "not a drop" gates, before any rebuild is decided
   const mainDrop = slice(MAIN, 'main.js', 'async function onConnectionDrop(reason) {', 'updateOverlay(\'off\');');
   assert.match(mainDrop, /return;\n\s*\/\/ what the dropped connection muxed is tested again on the next connect\n\s*forgetLiveMux\(\);\n\s*updateOverlay\('off'\);$/);

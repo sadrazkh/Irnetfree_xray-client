@@ -1507,11 +1507,15 @@ function createService(opts = {}) {
     return { ids: muxIds, fps: servers.filter((s) => muxIds.includes(s.id)).map(muxFingerprint) };
   }
 
-  /** A muxed connection that dropped: its servers are tested again on the next connect. */
+  /**
+   * A muxed connection that dropped: its servers are tested again on the next
+   * connect — those whose verdict is at least 10 minutes old (forgetVerdicts):
+   * a core crashing over and over for another reason costs no store write.
+   */
   function forgetLiveMux() {
     if (!liveMux) return;
     const cache = store.get('muxProbes', {});
-    const next = forgetVerdicts(cache, liveMux.fps);
+    const next = forgetVerdicts(cache, liveMux.fps, Date.now());
     liveMux = null;
     if (next !== cache) store.set('muxProbes', next);
   }
