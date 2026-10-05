@@ -206,6 +206,7 @@ const I18N = {
 
     'nav.pool': 'استخر پروکسی', 'picker.pool': 'استخر پروکسی',
     'picker.auto': 'خودکار (سریع‌ترین)', 't.autoNone': 'هیچ سروری جواب نداد',
+    'picker.autoSub': 'سریع‌ترین — {name}', 't.autoGroupNone': 'هیچ کانفیگی در این گروه جواب نداد',
     'pool.title': 'استخر پروکسی (چند کانفیگ هم‌زمان)',
     'pool.connect': 'اتصال استخر', 'pool.new': '+ پروکسی جدید',
     'pool.intro': 'چند کانفیگ/زنجیره/ساکس را هم‌زمان اجرا کن؛ هر کدام روی پورت محلی خودش (مثلاً 60001، 60002 و …). هر برنامه را به پورت دلخواه وصل کن تا از خروجی همان کانفیگ عبور کند.',
@@ -571,6 +572,7 @@ const I18N = {
     'state.cancelling': 'در حال لغو…',
     // the Servers page's groups
     'srv.groupToggle': 'باز یا بسته کردن این گروه', 'srv.subRefresh': 'به‌روزرسانی همین ساب',
+    'srv.groupPing': 'پینگ همهٔ کانفیگ‌های این گروه', 'srv.groupFastest': 'وصل به سریع‌ترینِ این گروه',
     // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
     'notice.proxyOnly': 'فقط پراکسی — تونل بالا نیامد: {reason}',
     'notice.guardFailed': 'محافظ نشت DNS فعال نشد — ممکن است DNS بیرون از تونل برود: {reason}',
@@ -790,6 +792,7 @@ const I18N = {
 
     'nav.pool': 'Proxy Pool', 'picker.pool': 'Proxy Pool',
     'picker.auto': 'Auto (fastest)', 't.autoNone': 'No server answered',
+    'picker.autoSub': 'Fastest — {name}', 't.autoGroupNone': 'Nothing in this group answered',
     'pool.title': 'Proxy Pool (several configs at once)',
     'pool.connect': 'Connect pool', 'pool.new': '+ New proxy',
     'pool.intro': 'Run several configs/chains/SOCKS at once — each on its own local port (e.g. 60001, 60002, …). Point any app at a port to send it through that config’s exit.',
@@ -1155,6 +1158,7 @@ const I18N = {
     'state.cancelling': 'Cancelling…',
     // the Servers page's groups
     'srv.groupToggle': 'Show or hide this group', 'srv.subRefresh': 'Refresh this subscription',
+    'srv.groupPing': 'Test every config in this group', 'srv.groupFastest': 'Connect to the fastest in this group',
     // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
     'notice.proxyOnly': 'Proxy only — the tunnel did not start: {reason}',
     'notice.guardFailed': 'Leak guard failed — DNS may leave outside the tunnel: {reason}',
