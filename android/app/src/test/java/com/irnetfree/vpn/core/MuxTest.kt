@@ -23,7 +23,7 @@ class MuxTest {
     private fun stream(net: String, security: String = "tls", path: String = "/ws", host: String = "cdn.example", sni: String = "cdn.example"): JSONObject {
         val s = JSONObject().put("network", net).put("security", security)
         when (net) {
-            "ws" -> s.put("wsSettings", JSONObject().put("path", path).put("headers", JSONObject().put("Host", host)))
+            "ws", "websocket" -> s.put("wsSettings", JSONObject().put("path", path).put("headers", JSONObject().put("Host", host)))
             "httpupgrade" -> s.put("httpupgradeSettings", JSONObject().put("path", path).put("host", host))
             "grpc" -> s.put("grpcSettings", JSONObject().put("serviceName", "svc"))
             "xhttp" -> s.put("xhttpSettings", JSONObject().put("path", path).put("host", host).put("mode", "auto"))
@@ -77,6 +77,10 @@ class MuxTest {
         assertTrue(Mux.eligible(vmess(net = "httpupgrade").outbound))
         assertTrue(Mux.eligible(trojan(net = "ws").outbound))
         assertTrue(Mux.eligible(trojan(net = "httpupgrade").outbound))
+        // `websocket` is the core's other name for ws (the desktop takes it too)
+        assertTrue(Mux.eligible(vless(net = "websocket").outbound))
+        assertTrue(Mux.eligible(vmess(net = "websocket").outbound))
+        assertNotEquals(Mux.fingerprint(vless(net = "websocket")), Mux.fingerprint(vless(net = "websocket", path = "/other")))
     }
 
     @Test fun notEligible_visionGrpcXhttpH2RawAndTheOtherProtocols() {
