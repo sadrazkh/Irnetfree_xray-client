@@ -14,11 +14,18 @@
  * Not every server takes mux — one that reads `v1.mux.cool` as a destination
  * answers nothing through it — so `auto` asks each eligible server once,
  * before the connect that needs it: a throwaway core with mux makes two
- * requests through one mux connection; if they do not both answer, a control
- * request without mux tells "does not take mux" (unsupported) from "did not
- * answer at all" (unknown). The verdict is remembered per server fingerprint
- * — ok for 7 days, unsupported for 3, unknown never — so an edited server, or
- * a refreshed subscription with new parameters, is tested again.
+ * requests through one mux connection; if one of them gets a definitive no
+ * (closed, reset, refused, an error status — or the core did not start), a
+ * control request without mux tells "does not take mux" (unsupported) from
+ * "did not answer at all" (unknown). A TIMEOUT is no answer: on a slow moment
+ * of the line the mux connection's first handshake alone can use up its share
+ * (measured: 0.6-3.7 s each with ECH), and a control asked after it may well
+ * answer — read as "refuses mux", that turned mux off for three days on the
+ * owner's ECH server, exactly where it is needed (a live run on 26.3.27). So a
+ * mux attempt that times out is `unknown`, whatever a control would say. The
+ * verdict is remembered per server fingerprint — ok for 7 days, unsupported
+ * for 3, unknown never — so an edited server, or a refreshed subscription with
+ * new parameters, is tested again.
  *
  * Eligible: VLESS without `flow`, VMess and Trojan, over ws or httpupgrade.
  * gRPC, XHTTP and H2 multiplex already; Vision, REALITY-raw, mKCP, Hysteria,
@@ -39,7 +46,7 @@ const UNSUPPORTED_TTL_MS = 3 * DAY_MS;
 /** A probe's whole budget, both of its cores — and how many run at once. */
 const PROBE_MS = 8000;
 const PROBE_PARALLEL = 3;
-/** The muxed core's share of the budget: a mux that hangs leaves the control the rest. */
+/** The muxed core's share of the budget; a definitive no there leaves the control the rest. */
 const MUX_SHARE = 5 / 8;
 /** Remembered verdicts kept in the store (`muxProbes`); the oldest go first. */
 const CACHE_MAX = 500;
@@ -151,17 +158,33 @@ function planMux({ mode, servers, cache, now } = {}) {
   return { muxIds, toProbe };
 }
 
+/** A reply that ran out of time: the request's own timer, the SOCKS handshake's, the socket's (ETIMEDOUT). */
+const TIMED_OUT = /timed?\s?out/i;
+/** The throwaway core's own port refused the connection: a core not listening (yet, or any more). */
+const PORT_REFUSED = /ECONNREFUSED/;
+/** How often a core still starting is asked again. */
+const RETRY_MS = 150;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Has this test core's process exited — its config refused, its binary gone? */
+const exited = (core) => !!(core && core.proc && (core.proc.exitCode != null || core.proc.signalCode != null));
+
 /**
  * Does this server take mux? Within PROBE_MS (`deps.timeoutMs` in a test):
  *   1. a throwaway core whose proxy outbound carries MUX makes two requests,
- *      one after the other, through one mux connection — both answer: 'ok';
- *   2. otherwise one request through a core without mux — it answers:
- *      'unsupported'; it does not either: 'unknown'.
- * Every core it starts is cleaned up, one that only comes up after the
- * deadline included; nothing it is handed can make it throw.
+ *      one after the other, through one mux connection, within its share of
+ *      the budget (MUX_SHARE) — both answer: 'ok';
+ *   2. it runs out of time instead: 'unknown' — a slow line says nothing about
+ *      the server (see the top of this file), so no control is asked;
+ *   3. it gets a definitive no — closed, reset, refused, an error status, or
+ *      the core did not start — then one request through a core without mux:
+ *      it answers: 'unsupported'; it does not: 'unknown'.
+ * A refused port on a core that is still running is a core still starting,
+ * not an answer: asked again while there is time. Every core it starts is
+ * cleaned up, one that only comes up after the deadline included; nothing it
+ * is handed can make it throw.
  *
- * deps = { buildTestConfig(server, port), startTest(config) → { cleanup },
- *          getFreePort(), httpThroughProxy(port, opts) → { ok } }
+ * deps = { buildTestConfig(server, port), startTest(config) → { proc, cleanup },
+ *          getFreePort(), httpThroughProxy(port, opts) → { ok, error?, status? } }
  */
 async function probeMux(server, deps = {}) {
   const { buildTestConfig, startTest, getFreePort, httpThroughProxy } = deps;
@@ -174,41 +197,58 @@ async function probeMux(server, deps = {}) {
     try { core.cleanup(); } catch { /* a core already gone */ }
   };
 
-  /** One core, `requests` requests through it one after the other, all answered before `deadline`. */
+  /**
+   * One core, `requests` requests through it one after the other, before
+   * `deadline`: 'ok' — every one answered; 'timeout' — the deadline, or the
+   * whole budget, ran out first; 'failed' — a definitive no.
+   */
   async function through(withMux, requests, deadline) {
     let core = null;
     try {
-      if (over) return false;
+      if (over) return 'timeout';
       const port = await getFreePort();
       const config = buildTestConfig(server, port);
       if (withMux) {
         const proxy = ((config && config.outbounds) || []).find((o) => o && o.tag === 'proxy');
-        if (!proxy) return false;
+        if (!proxy) return 'failed';
         proxy.mux = Object.assign({}, MUX);
       }
-      if (over) return false;
-      core = await startTest(config);
+      if (over) return 'timeout';
+      try { core = await startTest(config); } catch { return over ? 'timeout' : 'failed'; }   // the core did not start
       if (core) live.add(core);
-      if (over) return false;   // came up after the deadline: cleaned below, never used
+      if (over) return 'timeout';   // came up after the deadline: cleaned below, never used
       for (let i = 0; i < requests; i++) {
-        const left = deadline - Date.now();
-        if (over || left <= 0) return false;
-        const r = await httpThroughProxy(port, Object.assign({}, PROBE_TARGET, { timeout: left }));
-        if (!r || !r.ok) return false;
+        for (;;) {
+          const left = deadline - Date.now();
+          if (over || left <= 0) return 'timeout';
+          const r = await httpThroughProxy(port, Object.assign({}, PROBE_TARGET, { timeout: left }));
+          if (over) return 'timeout';
+          if (r && r.ok) break;
+          const error = String((r && r.error) || '');
+          if (TIMED_OUT.test(error)) return 'timeout';
+          // startTest gives a core 500 ms; a router's first core after a boot
+          // runs from a cold binary — not listening yet is no answer either
+          if (PORT_REFUSED.test(error) && !exited(core)) {
+            await sleep(Math.max(0, Math.min(RETRY_MS, deadline - Date.now())));
+            continue;
+          }
+          return 'failed';
+        }
       }
-      return true;
+      return 'ok';
     } catch {
-      return false;
+      return over ? 'timeout' : 'failed';
     } finally {
       clean(core);
     }
   }
 
   const run = (async () => {
-    if (await through(true, 2, t0 + Math.round(budget * MUX_SHARE))) return 'ok';
-    if (await through(false, 1, t0 + budget)) return 'unsupported';
-    return 'unknown';
-  })();
+    const muxed = await through(true, 2, t0 + Math.round(budget * MUX_SHARE));
+    if (muxed === 'ok') return 'ok';
+    if (muxed !== 'failed') return 'unknown';   // a timeout proves nothing, whatever a control would say
+    return (await through(false, 1, t0 + budget)) === 'ok' ? 'unsupported' : 'unknown';
+  })().catch(() => 'unknown');
   let timer = null;
   const expired = new Promise((resolve) => { timer = setTimeout(() => resolve('unknown'), budget); });
   try {
