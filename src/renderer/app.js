@@ -455,6 +455,7 @@ function applySettingsToUI() {
   $('#optLaunchAtLogin').checked = !!s.launchAtLogin;
   $('#optAutoConnect').checked = !!s.autoConnect;
   $('#optAutoUpdateAssets').value = ['off', 'geo', 'all'].includes(s.autoUpdateAssets) ? s.autoUpdateAssets : 'geo';
+  $('#optMux').value = ['auto', 'on', 'off'].includes(s.mux) ? s.mux : 'auto';
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
@@ -649,6 +650,7 @@ function readSettingsForm() {
     notifications: $('#optNotify').checked,
     autoConnect: $('#optAutoConnect').checked,
     autoUpdateAssets: $('#optAutoUpdateAssets').value,
+    mux: $('#optMux').value,
     blockAds: $('#optBlockAds').checked,
     enableSniffing: $('#optSniff').checked
   };
@@ -919,6 +921,8 @@ $('#optNetAuto').onchange = () => saveSettings({ autoReconnectOnNetworkChange: $
 $('#optNotify').onchange = () => saveSettings({ notifications: $('#optNotify').checked });
 $('#optAutoConnect').onchange = () => saveSettings({ autoConnect: $('#optAutoConnect').checked });
 $('#optAutoUpdateAssets').onchange = () => saveSettings({ autoUpdateAssets: $('#optAutoUpdateAssets').value });
+// mux is written into the config: saved, then offered as a reconnect like the other config keys
+$('#optMux').onchange = () => saveSettings({ mux: $('#optMux').value });
 // Deliberately NOT in readSettingsForm(): a plain "save" must never re-run the
 // OS registration. Main refuses and reverts when the OS says no — the switch
 // then follows what was actually stored, and the reason is shown.

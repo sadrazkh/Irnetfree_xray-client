@@ -15,6 +15,7 @@ const net = require('net');
 const { buildDnsPlan, DNS_TAG } = require('./dnsBuilder');
 const { normalizePin } = require('./certPin');
 const { planServers } = require('./engineChoice');
+const { MUX, muxEligible } = require('./mux');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -85,6 +86,18 @@ function cloneOut(outbound, tag, server) {
   const o = JSON.parse(JSON.stringify(outbound));
   o.tag = tag;
   return applyCertPin(o, server);
+}
+
+/**
+ * The mux object (mux.js) on the outbound of a server the connect chose it
+ * for — `settings.muxServerIds`, decided per server by a test (auto) or for
+ * every one (on). Only a server's OWN outbound, never a chain's hop, and only
+ * one that can carry it; anything but a list leaves the outbound as it was.
+ */
+function applyMux(o, server, muxIds) {
+  if (!Array.isArray(muxIds) || !muxIds.length || !server || !muxIds.includes(server.id) || !muxEligible(o)) return o;
+  o.mux = Object.assign({}, MUX);
+  return o;
 }
 
 /**
@@ -453,8 +466,10 @@ function buildChainOutbounds(servers, exitTag) {
  *   '<serverId>'        a single config
  *   'chain'             the legacy single chain (plan.chain)
  *   'chain:<chainId>'   a named chain (plan.chainsById[chainId])
+ * `muxIds`: settings.muxServerIds — a server target's own outbound carries
+ * mux (applyMux); a chain target's hops never do.
  */
-function makeRegistry(plan) {
+function makeRegistry(plan, muxIds) {
   const outs = [];
   const seen = new Set();
   const add = (o) => { if (o && !seen.has(o.tag)) { seen.add(o.tag); outs.push(o); } };
@@ -476,7 +491,7 @@ function makeRegistry(plan) {
       return chainTag(list, 'out-chain-' + cid);
     }
     const s = (plan.serversById || {})[target];
-    if (s && s.outbound) { const tag = 'out-' + target; add(cloneOut(s.outbound, tag, s)); return tag; }
+    if (s && s.outbound) { const tag = 'out-' + target; add(applyMux(cloneOut(s.outbound, tag, s), s, muxIds)); return tag; }
     return 'direct';
   }
 
@@ -740,7 +755,7 @@ function buildConfig(planArg, settings) {
   const targets = [];
 
   if (plan.mode === 'advanced') {
-    const reg = makeRegistry(plan);
+    const reg = makeRegistry(plan, s.muxServerIds);
     // The default carries everything no rule claims: gone, there is nothing
     // honest to send that traffic to. Refuse, rather than connect `direct`.
     if (!reg.exists(plan.def)) {
@@ -813,7 +828,7 @@ function buildConfig(planArg, settings) {
   } else {
     const proxyOutbounds = plan.mode === 'chain'
       ? buildChainOutbounds(plan.chain, 'proxy')
-      : [cloneOut(plan.server.outbound, 'proxy', plan.server)];
+      : [applyMux(cloneOut(plan.server.outbound, 'proxy', plan.server), plan.server, s.muxServerIds)];
     outbounds = [...proxyOutbounds, freedom(s), Object.assign({}, BLACKHOLE)];
     exitTag = s.routingMode === 'direct' ? 'direct' : 'proxy';
     // The exit carries the resolver — unless it is `direct` (routingMode
@@ -892,7 +907,7 @@ function buildConfig(planArg, settings) {
  * exactly as in single-config mode; the per-entry ports are extra exits on top.
  */
 function buildPoolConfig(plan, s, listen, sniffing) {
-  const reg = makeRegistry(plan);
+  const reg = makeRegistry(plan, s.muxServerIds);
   const inbounds = [];
   // The metrics listener binds apiPort itself, outside the inbound list: reserve
   // it up front so a pool entry cannot take it (xray refuses to start on a
@@ -977,15 +992,23 @@ function buildPoolConfig(plan, s, listen, sniffing) {
 /**
  * Build a *test* config used only to measure real proxy latency.
  * `target` may be a single server object OR an array of servers (a chain).
+ *
+ * `opts` = { entryHostIps, ipv6 }: a mux probe (mux.js) runs inside a connect,
+ * and is handed the names that connect already resolved — under TUN a
+ * rebuild's held guard answers no name, so its core dials the address, as the
+ * live core will (pinEntryHosts, before the dialers like there). A latency
+ * test passes none, and its config is exactly as it was.
  */
-function buildTestConfig(target, socksPort) {
+function buildTestConfig(target, socksPort, opts) {
   const proxyOutbounds = Array.isArray(target)
     ? buildChainOutbounds(target, 'proxy')
     : [cloneOut(target.outbound, 'proxy', target)];
+  const hosts = opts ? pinEntryHosts(proxyOutbounds, opts.entryHostIps, opts.ipv6) : null;
   // apply TLS fragment (if the config carries one) so the test matches reality
   const outbounds = applyFragments(proxyOutbounds).concat([{ tag: 'direct', protocol: 'freedom' }]);
   return {
     log: { loglevel: 'none' },
+    ...(hosts ? { dns: { hosts } } : {}),
     inbounds: [{
       tag: 'socks-in',
       port: socksPort,

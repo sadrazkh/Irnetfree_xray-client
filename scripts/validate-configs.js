@@ -28,7 +28,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { buildConfig, buildMultiTestConfig } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig } = require('../src/main/configBuilder');
+const { MUX } = require('../src/main/mux');
 const { adaptForCore } = require('../src/main/coreCompat');
 const { parseLink } = require('../src/main/parser');
 const { SUGGESTED } = require('../src/main/coreVersions');
@@ -177,7 +178,14 @@ const shapes = {
   'chain-pinned-bound': [chain, Object.assign({ directInterface: 'Wi-Fi', entryHostIps: PINS }, managed)],
   'advanced-pinned-wgChain-unmanaged': [advancedWgChain, Object.assign({ directInterface: 'Wi-Fi', entryHostIps: PINS, wgEndpointIps: { 'cobra.example': '198.51.100.21' } }, dnsModes.unmanaged)],
   'advanced-pinned-wgChain-managed': [advancedWgChain, Object.assign({ routingMode: 'bypass-ir', directInterface: 'Wi-Fi', entryHostIps: PINS, wgEndpointIps: { 'cobra.example': '198.51.100.21' } }, managed)],
-  'pool-pinned': [pool, Object.assign({ directInterface: 'Wi-Fi', entryHostIps: PINS }, managed)]
+  'pool-pinned': [pool, Object.assign({ directInterface: 'Wi-Fi', entryHostIps: PINS }, managed)],
+  // Mux on a server's own outbound (v1.18, spec §4 — src/main/mux.js): the
+  // object the app writes, beside the anti-DPI dialer, the pin and the NIC
+  // binding; an advanced default and a pool exit (a chain's hops never carry it).
+  'single-mux': [single, Object.assign({ muxServerIds: ['sv-vless'] }, managed)],
+  'single-mux-pinned-fragment-bound': [{ mode: 'single', server: F.vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' }) }, Object.assign({ routingMode: 'bypass-ir', directInterface: 'Wi-Fi', entryHostIps: PINS, muxServerIds: ['sv-frag'] }, managed)],
+  'advanced-mux': [advanced, Object.assign({ muxServerIds: ['sv-vless', 'sv-trojan'] }, managed)],
+  'pool-mux': [pool, Object.assign({ muxServerIds: ['sv-vless', 'sv-trojan'] }, managed)]
 };
 for (const [name, [plan, over]] of Object.entries(shapes)) check(`shape-${name}`, buildConfig(plan, F.settings(over)));
 
@@ -235,6 +243,18 @@ for (const link of NEW_FORMS) {
   const server = parseLink(link);
   for (const [variant, over] of Object.entries(LINK_SETTINGS)) check(`link-${server.name}-${variant}`, buildConfig({ mode: 'single', server }, F.settings(over)));
 }
+
+// The router's field report (spec §4): ECH over WebSocket, with mux on — plain,
+// under TUN and under the strict guard. And the mux probe's own throwaway core:
+// the test config with MUX on its proxy outbound and the connect's names
+// answered from dns.hosts (what mux.probeMux starts).
+const echWs = parseLink(NEW_FORMS[0]);
+for (const [variant, over] of Object.entries(LINK_SETTINGS)) {
+  check(`link-${echWs.name}-mux-${variant}`, buildConfig({ mode: 'single', server: echWs }, F.settings(Object.assign({ muxServerIds: [echWs.id] }, over))));
+}
+const probe = buildTestConfig(F.VLESS_WS_TLS, 41010, { entryHostIps: PINS, ipv6: false });
+probe.outbounds.find((o) => o.tag === 'proxy').mux = Object.assign({}, MUX);
+check('mux-probe', probe);
 
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
