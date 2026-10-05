@@ -42,16 +42,22 @@ object ConfigBuilder {
      * `lan`: LAN sharing (LanShare) — when enabled, two more inbounds on every
      * interface, routed by the very rules the tunnel's traffic takes; the only
      * rule of their own keeps them off the phone's loopback (lanGuardRules).
+     *
+     * `muxIds`: the servers whose outbounds carry Xray's mux (Mux.kt — Settings
+     * → Mux, and in auto each server's own test, decided by the connect path).
+     * Only a non-chain target's outbound, and only one that can carry it
+     * (Mux.eligible); a chain's hops never. Empty: the config of before, byte
+     * for byte.
      */
-    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null): JSONObject {
+    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet()): JSONObject {
         val listen = "127.0.0.1"
         val sniffing = if (s.enableSniffing)
             JSONObject().put("enabled", true).put("destOverride", JSONArray().put("http").put("tls").put("quic")).put("routeOnly", false)
         else JSONObject().put("enabled", false)
         val share = lan?.takeIf { it.enabled }
 
-        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share)
-        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share)
+        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds)
+        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds)
 
         val outbounds = JSONArray()
         // Every target the plan routes to, with its outbound tag — the resolver a
@@ -59,7 +65,7 @@ object ConfigBuilder {
         val targets = ArrayList<Pair<Any?, String>>()
         when (plan) {
             is ConnectionPlan.Chain -> { buildChainOutbounds(plan.members, "proxy").forEach { outbounds.put(it) }; targets.add(plan.members to "proxy") }
-            is ConnectionPlan.Single -> { outbounds.put(cloneOut(plan.server.outbound, "proxy", plan.server)); targets.add(plan.server to "proxy") }
+            is ConnectionPlan.Single -> { outbounds.put(withMux(cloneOut(plan.server.outbound, "proxy", plan.server), plan.server, muxIds)); targets.add(plan.server to "proxy") }
             else -> {}
         }
         outbounds.put(freedom(s)).put(blackhole())
@@ -111,8 +117,8 @@ object ConfigBuilder {
 
     /* ----------------------------- advanced ----------------------------- */
 
-    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?): JSONObject {
-        val reg = Registry(plan.serversById, plan.chainsById)
+    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>): JSONObject {
+        val reg = Registry(plan.serversById, plan.chainsById, muxIds)
         val advRules = JSONArray()
         val targets = ArrayList<Pair<Any?, String>>()
         for (r in plan.rules) {
@@ -179,8 +185,8 @@ object ConfigBuilder {
 
     /* ----------------------------- pool ----------------------------- */
 
-    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?): JSONObject {
-        val reg = Registry(plan.serversById, plan.chainsById)
+    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>): JSONObject {
+        val reg = Registry(plan.serversById, plan.chainsById, muxIds)
         val inbounds = JSONArray()
         // apiPort stays reserved although this config no longer opens the
         // metrics listener on it: the settings screen still counts it as taken,
@@ -247,9 +253,11 @@ object ConfigBuilder {
         return outs
     }
 
+    /** The outbounds a pool / advanced plan routes to, each once; [muxIds] as in build(). */
     private class Registry(
         val serversById: Map<String, ServerConfig>,
-        val chainsById: Map<String, List<ServerConfig>>
+        val chainsById: Map<String, List<ServerConfig>>,
+        val muxIds: Set<String> = emptySet()
     ) {
         val outs = ArrayList<JSONObject>()
         private val seen = HashSet<String>()
@@ -270,7 +278,7 @@ object ConfigBuilder {
             if (target == "block") return "block"
             if (target.startsWith("chain:")) return chainTag(chainsById[target.substring(6)], "out-chain-" + target.substring(6))
             val s = serversById[target]
-            if (s != null && s.outbound.length() > 0) { val tag = "out-$target"; add(ConfigBuilder.cloneOut(s.outbound, tag, s)); return tag }
+            if (s != null && s.outbound.length() > 0) { val tag = "out-$target"; add(ConfigBuilder.withMux(ConfigBuilder.cloneOut(s.outbound, tag, s), s, muxIds)); return tag }
             return "direct"
         }
 
@@ -278,7 +286,7 @@ object ConfigBuilder {
         private fun proxyFallback(): String {
             val first = serversById.values.firstOrNull { it.outbound.length() > 0 } ?: return "direct"
             val tag = "out-proxy"
-            if (!seen.contains(tag)) add(ConfigBuilder.cloneOut(first.outbound, tag, first))
+            if (!seen.contains(tag)) add(ConfigBuilder.withMux(ConfigBuilder.cloneOut(first.outbound, tag, first), first, muxIds))
             return tag
         }
     }
@@ -597,9 +605,13 @@ object ConfigBuilder {
      * address the tester resolved (`wgEndpointIps`, XrayTester.testEndpoints):
      * the throwaway core shares the live tunnel's process, and one that has to
      * resolve the name itself and fails can panic it (`close of closed channel`).
+     *
+     * `mux`: the proxy outbound carries Mux.MUX (when it can) — only the mux
+     * test asks for it (XrayTester.probeMux); latency tests stay without.
      */
-    fun buildTestConfig(server: ServerConfig, socksPort: Int, wgEndpointIps: Map<String, String> = emptyMap()): JSONObject {
+    fun buildTestConfig(server: ServerConfig, socksPort: Int, wgEndpointIps: Map<String, String> = emptyMap(), mux: Boolean = false): JSONObject {
         val proxy = cloneOut(server.outbound, "proxy", server)
+        if (mux && Mux.eligible(proxy)) proxy.put("mux", Mux.MUX)
         widenWgAllowedIps(proxy); sanitizeWgAddress(proxy); applyWgEndpointIps(proxy, wgEndpointIps)
         val outs = applyFragments(JSONArray().put(proxy))
         outs.put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
@@ -686,6 +698,15 @@ object ConfigBuilder {
     private fun cloneOut(outbound: JSONObject, tag: String, server: ServerConfig?): JSONObject {
         val o = JSONObject(outbound.toString()).put("tag", tag)
         applyCertPin(o, server)
+        return o
+    }
+    /**
+     * Xray's mux on [o], the outbound of [server] as a NON-CHAIN target, when the
+     * connect chose it for that server and the outbound can carry it (Mux.kt).
+     * No ids, no change. A chain's hops never come through here.
+     */
+    private fun withMux(o: JSONObject, server: ServerConfig, muxIds: Set<String>): JSONObject {
+        if (server.id in muxIds && Mux.eligible(o)) o.put("mux", Mux.MUX)
         return o
     }
     private fun dialThrough(outbound: JSONObject, viaTag: String) {

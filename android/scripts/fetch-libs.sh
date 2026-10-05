@@ -8,12 +8,18 @@
 #      app still builds; the tunnel just won't start until the .so is present).
 #
 # Env overrides:
-#   LIBV2RAY_TAG            pin a specific AndroidLibXrayLite tag (default: latest)
+#   LIBV2RAY_TAG            pin a specific AndroidLibXrayLite tag (default: pinned below)
 #   PATTN_TAG               pin the patterniha/Xray-core release (default: pinned below)
 #   PATTN_ABIS              "<abi>:<asset.zip> ..." (default: arm64-v8a only)
 #   HEV_SO_URL_ARM64_V8A   URL to libhev-socks5-tunnel.so for arm64-v8a
 #   HEV_SO_URL_ARMEABI_V7A URL for armeabi-v7a
 #   HEV_SO_URL_X86_64      URL for x86_64
+#
+# Android 10+ will not execute a file an app downloads into its own storage, so
+# the cores cannot be updated by hand on a phone the way Required files does on
+# the desktop: they ship inside the APK, and a newer core arrives with a newer
+# IRNetFree (the app says when one is out). Bump the pins below with the
+# desktop's defaults.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,7 +32,9 @@ mkdir -p "$libs"
 # CI runners share IPs, which was killing the build with a 403). A release-asset
 # download redirects to a CDN and is not rate-limited. Override the tag with
 # LIBV2RAY_TAG=vX.Y.Z if you want a different core version.
-TAG="${LIBV2RAY_TAG:-v26.7.11}"
+# v26.9.30 carries Xray-core 26.9.30 — the desktop's default Xray (SUGGESTED.xray
+# in src/main/coreVersions.js), the one v2rayN and v2rayNG ship.
+TAG="${LIBV2RAY_TAG:-v26.9.30}"
 url="https://github.com/2dust/AndroidLibXrayLite/releases/download/${TAG}/libv2ray.aar"
 echo "==> Fetching libv2ray.aar (Xray core, $TAG)"
 if curl -fSL --retry 3 --retry-delay 2 "$url" -o "$libs/libv2ray.aar"; then
@@ -117,7 +125,9 @@ fetch_pattn() {
 
 echo "==> Fetching Xray-PattN (the second Xray-format core)"
 # Pinned like the others so a shared CI runner never hits the rate-limited API.
-PATTN_TAG="${PATTN_TAG:-v26.9.13}"
+# v26.10.3 is the fork's latest stable release (the desktop installs the newer of
+# that and its ⭐; a phone gets what the APK carries).
+PATTN_TAG="${PATTN_TAG:-v26.10.3}"
 echo "    Xray-PattN $PATTN_TAG"
 for pair in ${PATTN_ABIS:-"arm64-v8a:Xray-android-arm64-v8a.zip"}; do
   fetch_pattn "${pair%%:*}" "${pair##*:}" "$PATTN_TAG"

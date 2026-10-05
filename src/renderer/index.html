@@ -709,6 +709,18 @@
           <div class="setting-row" id="gwRemoteRow" hidden>
             <p class="hint" id="gwRemote" data-i18n="gw.remote"></p>
           </div>
+          <!-- mux on the servers' own outbounds (src/main/mux.js): auto tests each
+               WebSocket / HTTPUpgrade server once. Written into the config, so a
+               change waits for a reconnect, like the settings around it. -->
+          <div class="setting-row" id="muxRow">
+            <label class="field-label" for="optMux" data-i18n="set.mux">Mux (مالتی‌پلکس)</label>
+            <select id="optMux" class="select">
+              <option value="auto" data-i18n="mux.auto">خودکار</option>
+              <option value="on" data-i18n="mux.on">روشن</option>
+              <option value="off" data-i18n="mux.off" selected>خاموش</option>
+            </select>
+            <p class="hint" data-i18n="mux.hint"></p>
+          </div>
           <div class="switch-row">
             <div><div class="switch-title" data-i18n="kill.title">کیل سوییچ (Kill switch)</div>
               <div class="switch-sub" data-i18n="kill.sub">اگر اتصال ناگهانی قطع شد، کل اینترنت بسته می‌شود تا نشتی نباشد (ویندوز، نیازمند ادمین)</div></div>

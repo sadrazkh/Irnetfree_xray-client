@@ -15,7 +15,7 @@ let fakeSpawn = null;
 const spawns = [];
 cp.spawn = (...args) => { spawns.push(args); return fakeSpawn ? fakeSpawn(...args) : realSpawn(...args); };
 
-const { XrayManager, getFreePorts, PLAINTEXT_REJECT } = require('../src/main/xrayManager');
+const { XrayManager, getFreePorts, PLAINTEXT_REJECT, usesEch, ECH_SINCE, floodGate, floodKey } = require('../src/main/xrayManager');
 const { ENGINES } = require('../src/main/engines');
 
 /** Stand-in for a spawned core, so no real binary has to exist / run. */
@@ -278,6 +278,89 @@ test('validateWithFallback: a check that was killed stays flagged on every path 
   });
 });
 
+/* -------------- v1.18: ECH asked of an official core too old to know it -------------- */
+
+/**
+ * A manager whose cores are stand-ins: `bins` are installed, `versions[id]` is
+ * what `<core> version` says, and `-test` passes on the cores in `validOn`.
+ * `calls` lists the cores each -test ran on; `logs` the log lines.
+ */
+function managerWith({ versions = {}, bins = [], validOn = [] } = {}) {
+  const m = new XrayManager({ dataDir: os.tmpdir(), onLog: (line) => m.logs.push(line) });
+  m.logs = [];
+  m.calls = [];
+  m.resolveBin = (id = 'xray') => (bins.includes(id) ? path.join(os.tmpdir(), exe(id)) : null);
+  m.version = async (id = 'xray') => (versions[id] == null ? '' : versions[id]);
+  m.validate = async (cfg, id) => { m.calls.push(id); return validOn.includes(id) ? { ok: true } : { ok: false, error: `infra/conf: refused by ${id}` }; };
+  return m;
+}
+
+const ECH_CONFIG = { outbounds: [{ protocol: 'vless', streamSettings: { network: 'ws', security: 'tls',
+  tlsSettings: { serverName: 'a.example', echConfigList: 'cloudflare-ech.com+udp://1.1.1.1' } } }] };
+
+test('ECH on an official core older than 25.8.3 runs on Xray-PattN when it is installed', async () => {
+  const m = managerWith({ versions: { xray: '25.1.30', 'xray-pattn': '26.9.22' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  const r = await m.validateWithFallback(ECH_CONFIG, 'xray');
+  assert.deepEqual([r.ok, r.engine, r.fellBack], [true, 'xray-pattn', true]);
+  assert.deepEqual(m.calls, ['xray-pattn'], 'the official core is not asked: it would pass the config and drop the ECH');
+  assert.match(m.logs.at(-1), /uses ECH, which xray 25\.1\.30 does not know — running it on Xray-PattN/);
+  // what the fork refuses is the fork's own error
+  const n = managerWith({ versions: { xray: '25.1.30' }, bins: ['xray', 'xray-pattn'], validOn: [] });
+  assert.deepEqual(await n.validateWithFallback(ECH_CONFIG, 'xray'), { ok: false, engine: 'xray-pattn', error: 'infra/conf: refused by xray-pattn', plaintextRejected: false });
+});
+
+test('ECH on an old official core with no fork is refused with the version in the answer', async () => {
+  const m = managerWith({ versions: { xray: '25.1.30' }, bins: ['xray'], validOn: ['xray'] });
+  const r = await m.validateWithFallback(ECH_CONFIG, 'xray');
+  assert.equal(r.ok, false);
+  assert.equal(r.echUnsupported, true);
+  assert.equal(r.coreVersion, '25.1.30');
+  assert.equal(r.engine, 'xray');
+  assert.equal(r.plaintextRejected, false);
+  assert.equal(r.error, 'xray 25.1.30 does not know ECH (25.8.3 and newer do) — it would connect without it');
+  assert.deepEqual(m.calls, [], 'not even -test: that would say "Configuration OK."');
+  // the router's opkg feed (24.12.31), and the release right before echSockopt
+  for (const v of ['24.12.31', '25.8.2']) {
+    const old = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    assert.equal((await old.validateWithFallback(ECH_CONFIG, 'xray')).echUnsupported, true, v);
+  }
+});
+
+test('ECH on 26.9.30, or on a core whose version cannot be read, takes the ordinary path', async () => {
+  for (const v of ['26.9.30', '']) {
+    const m = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    const r = await m.validateWithFallback(ECH_CONFIG, 'xray');
+    assert.deepEqual([r.ok, r.engine], [true, 'xray']);
+  }
+  // 25.8.3 itself knows it
+  const edge = managerWith({ versions: { xray: '25.8.3' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await edge.validateWithFallback(ECH_CONFIG, 'xray'), { ok: true, engine: 'xray' });
+  assert.deepEqual(edge.calls, ['xray']);
+  assert.equal(ECH_SINCE, '25.8.3');
+});
+
+test('ECH: a config without it is never asked the core’s version, and a config sent to Xray-PattN is the fork’s alone', async () => {
+  const m = managerWith({ versions: { xray: '25.1.30', 'xray-pattn': '26.9.22' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  let asked = 0;
+  m.version = async () => { asked++; return '25.1.30'; };
+  const plain = { outbounds: [{ protocol: 'vless', streamSettings: { network: 'ws', security: 'tls', tlsSettings: { serverName: 'a.example' } } }] };
+  assert.deepEqual(await m.validateWithFallback(plain, 'xray'), { ok: true, engine: 'xray' });
+  assert.equal(asked, 0);
+  assert.deepEqual(await m.validateWithFallback(ECH_CONFIG, 'xray-pattn'), { ok: true, engine: 'xray-pattn' });
+  assert.equal(asked, 0);
+});
+
+test('usesEch: only a non-empty echConfigList counts', () => {
+  assert.equal(usesEch(ECH_CONFIG), true);
+  assert.equal(usesEch({ outbounds: [{ streamSettings: { tlsSettings: { echConfigList: '  ' } } }] }), false);
+  assert.equal(usesEch({ outbounds: [{ streamSettings: { tlsSettings: {} } }] }), false);
+  // the second hop of a chain carries it as much as the first; nothing at all is no ECH
+  assert.equal(usesEch({ outbounds: [{ protocol: 'freedom' }, null, ECH_CONFIG.outbounds[0]] }), true);
+  for (const none of [null, undefined, {}, { outbounds: null }, { outbounds: [{ streamSettings: { realitySettings: { serverName: 'r' } } }] }]) {
+    assert.equal(usesEch(none), false, JSON.stringify(none));
+  }
+});
+
 test('startTest spawns the RESOLVED engine with that engine\'s own argv', async () => {
   // A temporary core with a DIFFERENT argv shape: the three real Xray-format
   // entries happen to share `run -c <cfg>`, so only this can tell a registry
@@ -306,6 +389,32 @@ test('startTest spawns the RESOLVED engine with that engine\'s own argv', async 
     delete ENGINES['xray-argvprobe'];
     fakeSpawn = null;
   }
+});
+
+test('startTest: cores started in the same millisecond get a config file each — one’s cleanup leaves the other’s', async () => {
+  // The mux probes (mux.js) start up to three test cores at once: a shared
+  // `test-<ms>.json` was overwritten by the next core's config before the
+  // first core read it, and the first cleanup deleted the file of both.
+  await withBin([exe('xray')], async (xm) => {
+    spawns.length = 0;
+    fakeSpawn = () => stubChild();
+    const realNow = Date.now;
+    Date.now = () => 1727000000000;
+    try {
+      const [a, b] = await Promise.all([xm.startTest({ inbounds: [{ port: 1 }] }, 'xray'), xm.startTest({ inbounds: [{ port: 2 }] }, 'xray')]);
+      const [fa, fb] = spawns.map(([, args]) => args[args.length - 1]);
+      assert.notEqual(fa, fb);
+      assert.deepEqual([fa, fb].map((f) => JSON.parse(fs.readFileSync(f, 'utf8')).inbounds[0].port), [1, 2], 'each core reads its own config');
+      assert.match(path.basename(fa), /^test-[^/]+\.json$/, 'still a name the router’s orphan sweep knows as ours');
+      a.cleanup();
+      assert.equal(fs.existsSync(fb), true, 'the other core’s config is still there');
+      b.cleanup();
+      assert.equal(fs.existsSync(fb), false);
+    } finally {
+      Date.now = realNow;
+      fakeSpawn = null;
+    }
+  });
 });
 
 test('startTest resolves quietly — a batch ping must not repeat the fallback warning', async () => {
@@ -603,6 +712,98 @@ test('start rejects a spawn failure promptly and does not keep the failed child'
       await assert.rejects(starting, /ENOENT/);
       assert.equal(xm.proc, null);
       assert.equal(xm.running, false);
+    } finally { fakeSpawn = null; }
+  });
+});
+
+/* ------------------- core log flood control (v1.18, spec §4) ------------------- */
+// The router's field report: hundreds of identical WebSocket dial errors in the
+// same milliseconds, each one a line through syslog and the window's log on a
+// slow CPU. A repeated core line (timestamp and connection id aside) is
+// forwarded at most 5 times per 10 s; the rest become one "×N more" line.
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// what Xray prints: a timestamp, the level, the connection id, the message
+const DIAL_EOF = (ts, id) => `2026/10/05 12:00:${ts} [Warning] [${id}] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > transport/internet/websocket: failed to dial WebSocket > EOF`;
+const DIAL_KEY = '[Warning] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > transport/internet/websocket: failed to dial WebSocket > EOF';
+
+test('floodKey: the timestamp and the [connection id] are not part of what is compared', () => {
+  assert.equal(floodKey(DIAL_EOF('01.123456', 2394738294)), DIAL_KEY);
+  assert.equal(floodKey(DIAL_EOF('59.000001', 17)), DIAL_KEY);
+  assert.equal(floodKey('2026/10/05 12:00:01 [Info] [42] proxy/vless/outbound: tunneling request to tcp:a.example:443 via 104.21.44.18:2087'),
+    '[Info] proxy/vless/outbound: tunneling request to tcp:a.example:443 via 104.21.44.18:2087');
+  // the rest of the line stays: another destination is another line, an address in brackets is not an id
+  assert.notEqual(floodKey('2026/10/05 12:00:01 [Info] [1] dial tcp:a.example:443'), floodKey('2026/10/05 12:00:01 [Info] [1] dial tcp:b.example:443'));
+  assert.equal(floodKey('[2001:db8::1]:443 refused'), '[2001:db8::1]:443 refused');
+  assert.equal(floodKey('  plain line  '), 'plain line');
+});
+
+test('floodGate: six identical lines in the window — five forwarded, then one "×1 more" line when the window closes', async () => {
+  const out = [];
+  const gate = floodGate((line, level) => out.push([level, line]), { windowMs: 80 });
+  for (let i = 0; i < 6; i++) gate.line(DIAL_EOF('0' + i + '.000001', 1000 + i), 'log');
+  assert.deepEqual(out.map(([, l]) => l), [0, 1, 2, 3, 4].map((i) => DIAL_EOF('0' + i + '.000001', 1000 + i)), 'the first five as the core wrote them');
+  await sleep(160);
+  assert.deepEqual(out.at(-1), ['log', '×1 more: ' + DIAL_KEY]);
+  assert.equal(out.length, 6);
+  // a new window: the line is forwarded again
+  gate.line(DIAL_EOF('09.000001', 99), 'log');
+  assert.equal(out.length, 7);
+  assert.equal(out.at(-1)[1], DIAL_EOF('09.000001', 99));
+});
+
+test('floodGate: …or as soon as the next different line arrives, before that line', () => {
+  const out = [];
+  const gate = floodGate((line, level) => out.push([level, line]), { windowMs: 60000 });
+  for (let i = 0; i < 8; i++) gate.line(DIAL_EOF('01.0', i), 'warn');
+  gate.line('2026/10/05 12:00:02 [Info] [77] something else', 'log');
+  assert.deepEqual(out.slice(5), [['warn', '×3 more: ' + DIAL_KEY], ['log', '2026/10/05 12:00:02 [Info] [77] something else']]);
+  gate.flush();
+  assert.equal(out.length, 7, 'nothing left to say');
+});
+
+test('floodGate: two lines storming together are each held, and each said once the window closes', async () => {
+  const out = [];
+  const gate = floodGate((line) => out.push(line), { windowMs: 80 });
+  const pipe = (id) => `2026/10/05 12:00:01.5 [Warning] [${id}] transport/internet/websocket: failed to dial WebSocket > write: broken pipe`;
+  for (let i = 0; i < 20; i++) { gate.line(DIAL_EOF('01.0', i), 'log'); gate.line(pipe(i), 'log'); }
+  assert.equal(out.length, 10, 'five of each');
+  await sleep(160);
+  assert.deepEqual(out.slice(10).sort(), ['×15 more: ' + DIAL_KEY, '×15 more: [Warning] transport/internet/websocket: failed to dial WebSocket > write: broken pipe'].sort());
+});
+
+test('the running core’s output goes through the gate: five of a storm, the count, then the next line — the crash report keeps every line', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const child = stubChild();
+    fakeSpawn = () => child;
+    const logs = [];
+    xm.onLog = (line, level) => logs.push([level, line]);
+    try {
+      const started = xm.start({ inbounds: [] }, 'xray');
+      child.stdout.emit('data', Buffer.from([0, 1, 2, 3, 4, 5].map((i) => DIAL_EOF('01.00000' + i, 500 + i)).join('\n') + '\n'));
+      child.stdout.emit('data', Buffer.from('2026/10/05 12:00:02.000001 [Info] [9] proxy/vless/outbound: tunneling request to tcp:b.example:443\n'));
+      await started;
+      const core = logs.filter(([, l]) => !/^Starting /.test(l));
+      assert.equal(core.length, 7);
+      assert.deepEqual(core.slice(5), [['log', '×1 more: ' + DIAL_KEY], ['log', '2026/10/05 12:00:02.000001 [Info] [9] proxy/vless/outbound: tunneling request to tcp:b.example:443']]);
+      assert.equal(xm.recentLines(10).filter((l) => l.endsWith('> EOF')).length, 6, 'a crash is still reported with the core’s own lines');
+    } finally { fakeSpawn = null; }
+  });
+});
+
+test('what was held is said before the core’s exit is', async () => {
+  await withBin([exe('xray')], async (xm) => {
+    const child = stubChild();
+    fakeSpawn = () => child;
+    const logs = [];
+    xm.onLog = (line) => logs.push(line);
+    try {
+      const started = xm.start({ inbounds: [] }, 'xray');
+      await started.catch(() => {}).then(() => {});   // past the grace: a running core
+      child.stdout.emit('data', Buffer.from([0, 1, 2, 3, 4, 5, 6].map((i) => DIAL_EOF('03.0', i)).join('\n')));
+      child.emit('exit', 1, null);
+      const tail = logs.slice(-2);
+      assert.deepEqual(tail, ['×2 more: ' + DIAL_KEY, 'xray exited (code=1 signal=-)']);
     } finally { fakeSpawn = null; }
   });
 });

@@ -29,11 +29,17 @@ object Diagnostics {
         } catch (e: Exception) { -1 }
     }
 
-    /** Real HTTP round-trip. When `socksPort` is set, it goes through the tunnel. */
-    fun httpLatency(socksPort: Int? = null, url: String = "https://cp.cloudflare.com/generate_204", timeout: Int = 9000): Long {
+    /**
+     * Real HTTP round-trip. When `socksPort` is set, it goes through the tunnel.
+     * `fresh`: on a connection of its own, closed after it (`Connection: close`)
+     * — never one kept alive from the request before. The mux test needs that:
+     * its second request has to be a second stream through the core's mux.
+     */
+    fun httpLatency(socksPort: Int? = null, url: String = "https://cp.cloudflare.com/generate_204", timeout: Int = 9000, fresh: Boolean = false): Long {
         return try {
             val t0 = System.nanoTime()
             val c = open(url, timeout, proxyFor(socksPort)); c.requestMethod = "GET"
+            if (fresh) c.setRequestProperty("Connection", "close")
             c.responseCode; c.disconnect()
             (System.nanoTime() - t0) / 1_000_000
         } catch (e: Exception) { -1 }

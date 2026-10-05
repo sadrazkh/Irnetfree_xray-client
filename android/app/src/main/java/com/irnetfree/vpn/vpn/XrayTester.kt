@@ -1,16 +1,22 @@
 package com.irnetfree.vpn.vpn
 
 import android.content.Context
+import android.os.SystemClock
 import com.irnetfree.vpn.core.AppSettings
 import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.CoreCompat
 import com.irnetfree.vpn.core.EngineChoice
+import com.irnetfree.vpn.core.Mux
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.SingboxConfig
 import com.irnetfree.vpn.core.TrustedDns
+import com.irnetfree.vpn.net.Diagnostics
 import org.json.JSONObject
 import java.net.ServerSocket
+import java.util.concurrent.Callable
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 
 /**
  * Per-config testing: spins up a THROWAWAY xray instance (tunFd=0, so just a
@@ -42,8 +48,13 @@ object XrayTester {
     /**
      * Start a throwaway core for [server]; returns a handle, or null on failure.
      * [settings] defaults to the stored ones (Default core, IPv6, the DoH list).
+     *
+     * [mux]: null for a latency test — the core connecting to the server would
+     * use, sing-box included. true / false: the mux test's cores (probeMux) — an
+     * Xray-format core, never sing-box (it has no mux of Xray's), whose proxy
+     * outbound carries Mux.MUX or not.
      */
-    fun start(ctx: Context, server: ServerConfig, settings: AppSettings? = null): Handle? {
+    fun start(ctx: Context, server: ServerConfig, settings: AppSettings? = null, mux: Boolean? = null): Handle? {
         val s = settings ?: storedSettings(ctx)
         val wgIps = testEndpoints(server) { h -> TrustedDns.resolveHost(h, ipv6 = s.ipv6, doh = s.dnsRemote).ips.firstOrNull() }
         if (wgIps == null) {
@@ -55,14 +66,15 @@ object XrayTester {
         // Hysteria2 with a certificate only sing-box can accept
         // (EngineChoice.needsInsecureCore) — is measured on sing-box when it is
         // bundled: on Xray it would fail while connecting to it works.
-        if (EngineChoice.chooseEngine(ConnectionPlan.Single(server), s.defaultEngine) == EngineChoice.SINGBOX && SingboxCore.available(ctx)) {
+        if (mux == null && EngineChoice.chooseEngine(ConnectionPlan.Single(server), s.defaultEngine) == EngineChoice.SINGBOX && SingboxCore.available(ctx)) {
             val sb = try { SingboxConfig.build(server, s.copy(socksPort = port, httpPort = 0)).toString() } catch (e: Throwable) { null }
             if (sb != null) {
                 val core = SingboxCore()
                 return if (core.start(ctx, sb, port, onLog = {})) Handle(port, null, null, core) else { core.stop(); null }
             }
         }
-        val built = try { ConfigBuilder.buildTestConfig(server, port, wgIps) } catch (e: Throwable) { return null }
+        val withMux = mux == true
+        val built = try { ConfigBuilder.buildTestConfig(server, port, wgIps, withMux) } catch (e: Throwable) { return null }
         val onPattn = EngineChoice.testEngineFor(server, s.defaultEngine) == EngineChoice.PATTN && XrayPattnCore.available(ctx)
         // mKCP's and Hysteria's settings in the form the testing core takes (CoreCompat)
         val config = (if (CoreCompat.needsCoreVersion(built))
@@ -81,6 +93,45 @@ object XrayTester {
     }
 
     fun stop(h: Handle) { h.stop() }
+
+    /**
+     * Does [server] carry traffic with Xray's mux? The test of spec §4
+     * (Mux.probe): a throwaway core with Mux.MUX makes two requests, one after
+     * the other, each on a connection of its own — the second a second stream
+     * through the same mux connection — and, if they did not both answer, a
+     * core without it makes one, the control: "ok" | "unsupported" (mux
+     * refused, the control answered) | "unknown" (mux only slow, the control
+     * answered) | "unreachable" (the control did not answer either). At most
+     * Mux.PROBE_BUDGET_MS: a request is abandoned at the time it was given, and
+     * its core stopped. Blocking — the connect thread (XrayVpnService.prepare).
+     * [wanted]: false once that connect has been overtaken; nothing more starts.
+     */
+    fun probeMux(ctx: Context, server: ServerConfig, settings: AppSettings, wanted: () -> Boolean = { true }): String =
+        Mux.probe<Handle>(
+            start = { m: Boolean -> start(ctx, server, settings, m) },
+            request = { h: Handle, ms: Int -> roundTrip(h.port, ms) },
+            stop = { h: Handle -> h.stop() },
+            now = { SystemClock.elapsedRealtime() },
+            wanted = wanted
+        )
+
+    /**
+     * One real round trip through the throwaway on [port] (Diagnostics, the
+     * same measurement as every test here), on a connection of its own; -1 when
+     * it failed or has not answered within [ms]. Waited for on this thread, so
+     * a request that overruns its timeouts cannot hold the connect up past the
+     * budget: the caller stops the core, and the request dies with it.
+     *
+     * -1 is the same for a refusal and for a timeout. Mux.probe tells them
+     * apart by the time this took against [ms]: within Mux.TIMEOUT_SLACK_MS
+     * (150 ms) of it is a timeout — Diagnostics' own timeouts and the wait
+     * below both end at [ms] or later — and earlier is a refusal.
+     */
+    private fun roundTrip(port: Int, ms: Int): Long {
+        val task = FutureTask(Callable { Diagnostics.httpLatency(port, timeout = ms, fresh = true) })
+        Thread(task, "irnf-mux-test").apply { isDaemon = true }.start()
+        return try { task.get(ms + 300L, TimeUnit.MILLISECONDS) } catch (e: Exception) { task.cancel(true); -1L }
+    }
 
     /**
      * Every WireGuard endpoint name of [server] with the address [resolve] found

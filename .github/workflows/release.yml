@@ -302,8 +302,13 @@ jobs:
           apksigner="$(ls -d "$sdk"/build-tools/*/ 2>/dev/null | sort -V | tail -n1)apksigner"
           [ -x "$apksigner" ] || { echo "::error::apksigner not found under $sdk/build-tools"; exit 1; }
           out="$("$apksigner" verify --print-certs "$GITHUB_WORKSPACE/${{ steps.apk.outputs.file }}" 2>&1)" || { echo "$out"; echo "::error::apksigner could not verify the APK"; exit 1; }
-          echo "$out" | grep -E 'Signer #1 certificate (DN|SHA-256)' || true
-          got="$(echo "$out" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr -d ' :' | tr 'A-F' 'a-f')"
+          # The whole answer goes in the log: a certificate is public, and when apksigner's
+          # wording is not the one read below, the log shows what it said instead.
+          echo "$out"
+          # Every signer's certificate, whatever apksigner calls the line ("Signer #1 …",
+          # "Signer (minSdkVersion=…) …", "V2 Signer: …" — the last is what the runner's
+          # build-tools print), a source stamp's certificate aside: all must be this one key.
+          got="$(echo "$out" | grep -v -i 'source stamp' | sed -n 's/^.*certificate SHA-256 digest: *//p' | tr -d ' :' | tr 'A-F' 'a-f' | sort -u)"
           if [ "$got" != "$EXPECTED_CERT_SHA256" ]; then
             echo "::error::the APK is signed with $got, not IRNetFree's release certificate $EXPECTED_CERT_SHA256"
             exit 1

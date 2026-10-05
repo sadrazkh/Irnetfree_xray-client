@@ -725,6 +725,81 @@ test('S4: the attempt strings exist in both languages, verbatim', () => {
   assert.match(I18N, /'state\.waiting': 'منتظر اینترنت… \(تلاش \{n\}\)'/);
 });
 
+/**
+ * v1.18 (spec §4): mux, decided per server by a test. One select among the
+ * connection settings — Auto / On / Off — with one line of help in both
+ * languages. It saves itself; the change is written into the config, so main
+ * reports it pending and the apply dialog names it (set.mux).
+ */
+test('the mux select: Auto / On / Off with one line of help, among the connection settings, fully translated', () => {
+  for (const id of ['muxRow', 'optMux']) assert.ok(htmlIds.has(id), `#${id} is missing`);
+  const at = HTML.indexOf('id="muxRow"');
+  const row = HTML.slice(at, HTML.indexOf('</select>', at));
+  assert.match(row, /<label class="field-label" for="optMux" data-i18n="set\.mux">/);
+  const options = [...row.matchAll(/<option value="([^"]+)" data-i18n="([^"]+)"( selected)?>/g)].map((m) => [m[1], m[2], !!m[3]]);
+  assert.deepEqual(options, [['auto', 'mux.auto', false], ['on', 'mux.on', false], ['off', 'mux.off', true]], 'Auto / On / Off — Off, the default, selected before the settings arrive');
+  assert.match(HTML.slice(at, HTML.indexOf('</div>', at)), /<p class="hint" data-i18n="mux\.hint">/, 'one line of help');
+  // in the connection card: after LAN sharing (and the router's rows under it), before the kill switch
+  const between = HTML.slice(HTML.indexOf('id="optAllowLan"'), HTML.indexOf('id="optKillSwitch"'));
+  assert.ok(between.includes('id="muxRow"'), 'among the connection settings');
+  assert.ok(between.indexOf('id="gwRow"') < between.indexOf('id="muxRow"'), 'the device list stays right under LAN sharing');
+  for (const key of ['set.mux', 'mux.auto', 'mux.on', 'mux.off', 'mux.hint']) {
+    assert.equal(I18N.split(`'${key}':`).length - 1, 2, `${key} must be defined in both fa and en`);
+  }
+  // the help is one line: one sentence of text, no markup, in each language
+  for (const m of I18N.matchAll(/'mux\.hint': '([^']*)'/g)) {
+    assert.ok(m[1].length > 40 && m[1].length < 260 && !/[<\n]/.test(m[1]), m[1]);
+  }
+  // the select saves itself, like the other selects of that card
+  assert.match(APP, /\n\$\('#optMux'\)\.onchange = \(\) => saveSettings\(\{ mux: \$\('#optMux'\)\.value \}\);/);
+});
+
+test('the mux select shows what is stored — off unless auto or on — and Save sends what it shows', () => {
+  const vm = require('node:vm');
+  const els = new Map();
+  const $ = (sel) => {
+    const id = String(sel).replace(/^#/, '');
+    if (!els.has(id)) els.set(id, { id, value: '', checked: false, hidden: false });
+    return els.get(id);
+  };
+  const ctx = vm.createContext({
+    state: { settings: {}, platform: 'win32' }, $, $$: () => [],
+    renderSettingCards() {}, syncPreset() {}, updateGuardRows() {}, updateTunAppRows() {},
+    customRulesToText: () => '', listFromInput: () => [], readTunApps: () => []
+  });
+  vm.runInContext([fnSource('applySettingsToUI'), fnSource('readSettingsForm')].join('\n'), ctx);
+  for (const [stored, shown] of [[undefined, 'off'], ['auto', 'auto'], ['on', 'on'], ['off', 'off'], ['always', 'off'], [true, 'off']]) {
+    ctx.state.settings = { mux: stored };
+    ctx.applySettingsToUI();
+    assert.equal($('#optMux').value, shown, `stored ${JSON.stringify(stored)}`);
+    assert.equal(ctx.readSettingsForm().mux, shown);
+  }
+});
+
+test('a group ⚡ or a "⚡ Fastest — <subscription>" row tapped while a connect is in flight does not cancel it — it says so; the global ⚡ Auto row still cancels', async () => {
+  // Final review, minor 4: those rows act as Cancel while connecting but keep
+  // their connect label — only the main Auto row says "Cancel connecting".
+  const vm = require('node:vm');
+  const calls = [];
+  const ctx = vm.createContext({
+    state: { connecting: true, connected: false, servers: [], pings: {} },
+    cancelConnect: () => { calls.push('cancel'); },
+    toast: (msg, kind) => { calls.push(['toast', msg, kind]); },
+    t: (k) => k,
+    connect: () => { calls.push('connect'); },
+    pingMany: async () => { calls.push('ping'); },
+    bestServerId: () => null, srvById: () => null, pingAt: {}, GROUP_FRESH_MS: 180000
+  });
+  vm.runInContext(fnSource('connectAuto'), ctx);
+  await ctx.connectAuto({ ids: ['a', 'b'], name: 'My sub' });
+  assert.deepEqual(calls, [['toast', 't.autoGroupBusy', 'warn']], 'no cancel, no test, no connect: said');
+  calls.length = 0;
+  await ctx.connectAuto();
+  assert.deepEqual(calls, ['cancel'], 'the global Auto row is the Cancel while connecting');
+  assert.equal(I18N.split("'t.autoGroupBusy':").length - 1, 2, 't.autoGroupBusy in fa and en');
+  for (const m of I18N.matchAll(/'t\.autoGroupBusy': '([^']*)'/g)) assert.ok(m[1].length > 10 && m[1].length < 120, m[1]);
+});
+
 test('the edit form reads an httpupgrade path and Host, and shows a stored raw server as tcp', () => {
   const readServerFields = appFunction('readServerFields');
   const rec = (streamSettings) => ({

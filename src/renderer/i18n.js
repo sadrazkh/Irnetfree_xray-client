@@ -206,6 +206,8 @@ const I18N = {
 
     'nav.pool': 'استخر پروکسی', 'picker.pool': 'استخر پروکسی',
     'picker.auto': 'خودکار (سریع‌ترین)', 't.autoNone': 'هیچ سروری جواب نداد',
+    'picker.autoSub': 'سریع‌ترین — {name}', 't.autoGroupNone': 'هیچ کانفیگی در این گروه جواب نداد',
+    't.autoGroupBusy': 'در حال اتصال است — برای عوض‌کردن، اول آن را لغو کن',
     'pool.title': 'استخر پروکسی (چند کانفیگ هم‌زمان)',
     'pool.connect': 'اتصال استخر', 'pool.new': '+ پروکسی جدید',
     'pool.intro': 'چند کانفیگ/زنجیره/ساکس را هم‌زمان اجرا کن؛ هر کدام روی پورت محلی خودش (مثلاً 60001، 60002 و …). هر برنامه را به پورت دلخواه وصل کن تا از خروجی همان کانفیگ عبور کند.',
@@ -418,6 +420,10 @@ const I18N = {
     'set.servers': 'ویرایش سرورِ متصل',
     'set.defaultEngine': 'هستهٔ پیش‌فرض',
     'set.defaultEngineHint': 'کانفیگ‌هایی که هسته‌ی مشخصی انتخاب نکرده‌اند، و زنجیره/استخر/روتینگ پیشرفته، روی این هسته اجرا می‌شوند. اگر عضوی PattN بخواهد، کل plan روی PattN می‌رود.',
+    /* mux per server (spec §4): the control in Settings and the name the apply dialog lists */
+    'set.mux': 'Mux (مالتی‌پلکس)',
+    'mux.auto': 'خودکار', 'mux.on': 'روشن', 'mux.off': 'خاموش',
+    'mux.hint': '«خودکار» هر سرورِ WebSocket / HTTPUpgrade را یک بار می‌آزماید و mux را فقط جایی روشن می‌کند که کار کند: اتصال‌های زیاد روی چند اتصال سوار می‌شوند و شبکهٔ شلوغ سریع می‌ماند.',
     'comp.xrayPattn': 'هستهٔ Xray-PattN (fork پترنیها — کانفیگ بدون TLS را می‌پذیرد)',
     'engine.pattn': 'Xray-PattN (patterniha)',
     'engine.official': 'Xray (رسمی)',
@@ -571,6 +577,7 @@ const I18N = {
     'state.cancelling': 'در حال لغو…',
     // the Servers page's groups
     'srv.groupToggle': 'باز یا بسته کردن این گروه', 'srv.subRefresh': 'به‌روزرسانی همین ساب',
+    'srv.groupPing': 'پینگ همهٔ کانفیگ‌های این گروه', 'srv.groupFastest': 'وصل به سریع‌ترینِ این گروه',
     // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
     'notice.proxyOnly': 'فقط پراکسی — تونل بالا نیامد: {reason}',
     'notice.guardFailed': 'محافظ نشت DNS فعال نشد — ممکن است DNS بیرون از تونل برود: {reason}',
@@ -790,6 +797,8 @@ const I18N = {
 
     'nav.pool': 'Proxy Pool', 'picker.pool': 'Proxy Pool',
     'picker.auto': 'Auto (fastest)', 't.autoNone': 'No server answered',
+    'picker.autoSub': 'Fastest — {name}', 't.autoGroupNone': 'Nothing in this group answered',
+    't.autoGroupBusy': 'A connection is being made — cancel it first to switch',
     'pool.title': 'Proxy Pool (several configs at once)',
     'pool.connect': 'Connect pool', 'pool.new': '+ New proxy',
     'pool.intro': 'Run several configs/chains/SOCKS at once — each on its own local port (e.g. 60001, 60002, …). Point any app at a port to send it through that config’s exit.',
@@ -1002,6 +1011,10 @@ const I18N = {
     'set.servers': 'Edit of the connected server',
     'set.defaultEngine': 'Default core',
     'set.defaultEngineHint': 'Configs without their own core choice, and chains / pool / advanced routing, run on this core. If any member asks for PattN the whole plan runs on PattN.',
+    /* mux per server (spec §4): the control in Settings and the name the apply dialog lists */
+    'set.mux': 'Mux (multiplexing)',
+    'mux.auto': 'Auto', 'mux.on': 'On', 'mux.off': 'Off',
+    'mux.hint': 'Auto tests each WebSocket / HTTPUpgrade server once and turns mux on only where it works: many connections then ride a few, so a busy network stays fast.',
     'comp.xrayPattn': 'Xray-PattN core (patterniha fork — accepts plaintext configs)',
     'engine.pattn': 'Xray-PattN (patterniha)',
     'engine.official': 'Xray (official)',
@@ -1155,6 +1168,7 @@ const I18N = {
     'state.cancelling': 'Cancelling…',
     // the Servers page's groups
     'srv.groupToggle': 'Show or hide this group', 'srv.subRefresh': 'Refresh this subscription',
+    'srv.groupPing': 'Test every config in this group', 'srv.groupFastest': 'Connect to the fastest in this group',
     // what the live connection did not do, and what this PC does to it (app.js noticeText; {fields} are filled in)
     'notice.proxyOnly': 'Proxy only — the tunnel did not start: {reason}',
     'notice.guardFailed': 'Leak guard failed — DNS may leave outside the tunnel: {reason}',

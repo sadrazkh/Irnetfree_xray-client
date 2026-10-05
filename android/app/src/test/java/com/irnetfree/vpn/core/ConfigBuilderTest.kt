@@ -171,4 +171,89 @@ class ConfigBuilderTest {
         assertNull(t.opt("dns"))
         assertFalse(t.getJSONArray("outbounds").getJSONObject(0).getJSONObject("streamSettings").getJSONObject("tlsSettings").has("allowInsecure"))
     }
+
+    /* ---------------- mux (Mux.kt, spec §4): only on the servers the connect chose ---------------- */
+
+    private val muxCanon = Canon.of(JSONObject("""{"enabled":true,"concurrency":8,"xudpConcurrency":16,"xudpProxyUDP443":"skip"}"""))
+    private fun withoutMux(c: JSONObject): String { for (o in outs(c)) o.remove("mux"); return Canon.of(c) }
+    private fun pool() = ConnectionPlan.Pool(listOf(PoolEntry("p1", "P", "a", 60001, 60002, true)), "a", mapOf("a" to a), emptyMap())
+
+    @Test fun mux_onlyOnTheOutboundsOfTheGivenServers() {
+        val today = ConfigBuilder.build(ConnectionPlan.Single(a), settings(), geoAssets = true)
+        val c = ConfigBuilder.build(ConnectionPlan.Single(a), settings(), geoAssets = true, muxIds = setOf("a"))
+        assertEquals(muxCanon, Canon.of(tagged(c, "proxy").getJSONObject("mux")))
+        assertEquals("nothing but the mux key moved", Canon.of(today), withoutMux(c))
+        assertFalse(tagged(ConfigBuilder.build(ConnectionPlan.Single(a), settings(), geoAssets = true, muxIds = setOf("b")), "proxy").has("mux"))
+        // a pool's and an advanced plan's server targets — a literal "proxy" (the first server) too
+        assertEquals(muxCanon, Canon.of(tagged(ConfigBuilder.build(pool(), settings(), geoAssets = true, muxIds = setOf("a")), "out-a").getJSONObject("mux")))
+        val adv = ConfigBuilder.build(advanced(listOf(RouteRule("domain", "x.com", "proxy"), RouteRule("domain", "y.com", "a")), "a"), settings(), geoAssets = true, muxIds = setOf("a"))
+        assertTrue(tagged(adv, "out-a").has("mux"))
+        assertTrue(tagged(adv, "out-proxy").has("mux"))
+    }
+
+    @Test fun mux_neverOnAChainsHops_norOnAnOutboundThatCannotCarryIt() {
+        val b = vless("b", "b.example")
+        val chain = ConfigBuilder.build(ConnectionPlan.Chain("c", listOf(a, b)), settings(), geoAssets = true, muxIds = setOf("a", "b"))
+        assertTrue(outs(chain).none { o: JSONObject -> o.has("mux") })
+        val adv = ConfigBuilder.build(advanced(listOf(RouteRule("ip", "10.0.0.0/8", "chain:c1"), RouteRule("domain", "a.com", "a")), "wgcorp"),
+            settings(), geoAssets = true, muxIds = setOf("a", "wgcorp"))
+        assertTrue(tagged(adv, "out-a").has("mux"))
+        assertFalse(tagged(adv, "out-chain-c1-h0").has("mux"))
+        assertFalse(tagged(adv, "out-chain-c1").has("mux"))
+        assertFalse(tagged(adv, "out-wgcorp").has("mux"))          // WireGuard
+        val vision = vless("v", "v.example")
+        vision.outbound.getJSONObject("settings").getJSONArray("vnext").getJSONObject(0).getJSONArray("users").getJSONObject(0).put("flow", "xtls-rprx-vision")
+        assertFalse(tagged(ConfigBuilder.build(ConnectionPlan.Single(vision), settings(), geoAssets = true, muxIds = setOf("v")), "proxy").has("mux"))
+        val grpc = vless("g", "g.example")
+        grpc.outbound.getJSONObject("streamSettings").put("network", "grpc").remove("wsSettings")
+        assertFalse(tagged(ConfigBuilder.build(ConnectionPlan.Single(grpc), settings(), geoAssets = true, muxIds = setOf("g")), "proxy").has("mux"))
+    }
+
+    @Test fun mux_noIdsIsTodaysConfig_everyPlan() {
+        val plans = listOf<ConnectionPlan>(
+            ConnectionPlan.Single(a),
+            ConnectionPlan.Chain("c", listOf(a, corpWg)),
+            pool(),
+            advanced(listOf(RouteRule("ip", "10.0.0.0/8", "chain:c1"), RouteRule("domain", "x.com", "proxy")), "a"))
+        for (p in plans) {
+            val today = Canon.of(ConfigBuilder.build(p, settings(), geoAssets = true))
+            assertEquals("$p", today, Canon.of(ConfigBuilder.build(p, settings(), geoAssets = true, muxIds = emptySet())))
+            assertEquals("$p", today, Canon.of(ConfigBuilder.build(p, settings(), geoAssets = true, muxIds = setOf("not-in-this-plan"))))
+        }
+    }
+
+    @Test fun mux_theDefaultSettingWritesNoMux_evenForAServerTestedOk() {
+        // An install that never set Settings → Mux reads Off (Mux.modeOf(null), the owner's default): the
+        // connect path decides nothing, tests nothing, and no config carries mux — even for a server whose
+        // kept verdict is a fresh ok.
+        assertEquals(Mux.OFF, Mux.modeOf(null))
+        val stamp = System.currentTimeMillis()
+        val cache = mapOf(Mux.fingerprint(a) to Mux.Probe(true, stamp))
+        val plans = listOf<ConnectionPlan>(ConnectionPlan.Single(a), pool(), advanced(listOf(RouteRule("domain", "x.com", "a")), "a"))
+        for (p in plans) {
+            var tested = false
+            val pick = Mux.choose(
+                mode = Mux.modeOf(null), connection = p, cache = cache, now = { stamp },
+                test = { _: ServerConfig -> tested = true; Mux.OK },
+                remember = { _: String, _: Mux.Probe -> },
+                log = { _: String -> }
+            )
+            assertEquals(Mux.Pick.NONE, pick)
+            assertFalse(tested)
+            val c = ConfigBuilder.build(p, settings(), geoAssets = true, muxIds = pick.ids)
+            assertFalse(c.toString(), c.toString().contains("\"mux\""))
+        }
+    }
+
+    @Test fun mux_theTestConfigCarriesItOnlyWhenAskedTo() {
+        val today = ConfigBuilder.buildTestConfig(a, 39990)
+        assertFalse(today.getJSONArray("outbounds").getJSONObject(0).has("mux"))
+        val m = ConfigBuilder.buildTestConfig(a, 39990, mux = true)
+        assertEquals(muxCanon, Canon.of(m.getJSONArray("outbounds").getJSONObject(0).getJSONObject("mux")))
+        m.getJSONArray("outbounds").getJSONObject(0).remove("mux")
+        assertEquals(Canon.of(today), Canon.of(m))
+        // an outbound that cannot carry it is tested as it is
+        val wgTest = ConfigBuilder.buildTestConfig(corpWg, 39990, mapOf("cobra.example" to "51.222.52.23"), mux = true)
+        assertFalse(wgTest.getJSONArray("outbounds").getJSONObject(0).has("mux"))
+    }
 }
