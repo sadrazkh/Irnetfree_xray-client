@@ -21,7 +21,7 @@ const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('
 const { buildSingboxConfig } = require('../main/singboxBuilder');
 const { engineFormat } = require('../main/engines');
 const { chooseEngine, testEngineFor } = require('../main/engineChoice');
-const { muxMode, muxCandidates, decideMux, probeMux, rememberVerdicts, forgetVerdicts, muxFingerprint } = require('../main/mux');
+const { muxMode, muxCandidates, decideMux, probeMux, rememberVerdicts, markRecheck, muxFingerprint, PROBE_PARALLEL } = require('../main/mux');
 const { resolveHost } = require('../main/trustedDns');
 const { fetchLeafPin, pinTargets, directServers, staleCertPins, recheckDue, PinWatch } = require('../main/certPin');
 const { assetStatus: scanAssets, downloadedFileNames } = require('../main/assets');
@@ -1471,18 +1471,23 @@ function createService(opts = {}) {
 
   // The probe behind muxFor; the mux tests hand in their own verdicts — no test may start a core
   const muxProbe = deps.probeMux || probeMux;
+  // A router tests one server at a time: three cold test cores at once on its
+  // CPU make the 5 s mux share easy to miss (final review, minor 7)
+  const MUX_PARALLEL = OPENWRT ? 1 : PROBE_PARALLEL;
 
   /**
    * Mux for this connect (mux.js, spec §4). `auto` tests every eligible server
-   * the plan dials as a target of its own that has no fresh verdict — before
-   * the config is built, with the names this connect resolved, at most three at
-   * once and 8 s each — and remembers the answers (the store's `muxProbes`);
+   * the plan dials as a target of its own that has no fresh verdict, or one
+   * marked for a re-test — before the config is built, with the names this
+   * connect resolved, at most three at once (one on a router) and 8 s each —
+   * and remembers the answers (the store's `muxProbes`). A recovery's connect
+   * (`recovery`) tests nothing: it takes what is remembered (mux.js judge).
    * `on` takes them all untested; `off` changes nothing. `ids` go to
    * buildConfig as `muxServerIds`; `fps` stay with the live connection, for a
-   * drop to forget (forgetLiveMux). A chain's hops never get mux, nor a config
-   * on the sing-box engine.
+   * drop to mark for a re-test (recheckLiveMux). A chain's hops never get mux,
+   * nor a config on the sing-box engine.
    */
-  async function muxFor(serverId, settings) {
+  async function muxFor(serverId, settings, recovery) {
     const none = { ids: [], fps: [] };
     const mode = muxMode(settings.mux);
     if (mode === 'off') return none;
@@ -1494,7 +1499,8 @@ function createService(opts = {}) {
     const servers = muxCandidates(plan);
     if (!servers.length) return none;
     const { muxIds, learnt } = await decideMux({
-      mode, servers, cache: store.get('muxProbes', {}), now: Date.now(),
+      mode, servers, cache: store.get('muxProbes', {}), now: Date.now(), recovery: !!recovery,
+      parallel: MUX_PARALLEL,
       probe: (server) => muxProbe(server, {
         buildTestConfig: (target, port) => buildTestConfig(target, port, { entryHostIps: settings.entryHostIps, ipv6: settings.ipv6 }),
         startTest: (config) => xray.startTest(config, testEngineFor(engine)),
@@ -1508,14 +1514,15 @@ function createService(opts = {}) {
   }
 
   /**
-   * A muxed connection that dropped: its servers are tested again on the next
-   * connect — those whose verdict is at least 10 minutes old (forgetVerdicts):
-   * a core crashing over and over for another reason costs no store write.
+   * A muxed connection that dropped: its servers' ok verdicts are marked for a
+   * re-test (markRecheck) — the recovery's connect still muxes them (it never
+   * tests), the next connect the user or the boot makes tests them again.
+   * Nothing is written when they are marked already.
    */
-  function forgetLiveMux() {
+  function recheckLiveMux() {
     if (!liveMux) return;
     const cache = store.get('muxProbes', {});
-    const next = forgetVerdicts(cache, liveMux.fps, Date.now());
+    const next = markRecheck(cache, liveMux.fps);
     liveMux = null;
     if (next !== cache) store.set('muxProbes', next);
   }
@@ -1621,7 +1628,8 @@ function createService(opts = {}) {
 
     // Mux, decided per server (muxFor): in `auto` a server with no fresh verdict
     // is tested now — with the names just resolved, before the config is built.
-    const mux = await muxFor(serverId, settings);
+    // Never in a recovery's rebuild, which takes what is remembered.
+    const mux = await muxFor(serverId, settings, !!opts.recovery);
     if (stale()) return abandoned;
     if (mux.ids.length) settings = Object.assign({}, settings, { muxServerIds: mux.ids });
 
@@ -2514,8 +2522,8 @@ function createService(opts = {}) {
     if (reported()) return;
     // the same gates as recoverFromNetworkChange(), before anything is said or armed
     if (!store.get('activeServerId', null)) return;
-    // what the dropped connection muxed is tested again on the next connect
-    forgetLiveMux();
+    // what the dropped connection muxed: kept for the rebuild, re-tested by the next connect the user or the boot makes
+    recheckLiveMux();
     if (!OPENWRT && !getSettings().autoReconnectOnNetworkChange) return;
     // A retry already scheduled (a failed attempt's backoff, a hand-over, an
     // earlier drop's wait) is the rebuild for this drop too. Taken up again

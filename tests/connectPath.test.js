@@ -246,30 +246,39 @@ test('ECH on an official Xray older than 25.8.3, no Xray-PattN: both mirrors ref
 
 /* ---------------- v1.18: mux, decided per server by a test (spec §4) ---------------- */
 // Driven for real through the service in serviceMux.test.js (the probe before
-// the core, the store's memory, the drop that forgets); the decision itself in
-// mux.test.js. Pinned here: main.js does it at the same points, in the same words.
+// the core, the store's memory, the drop that marks for a re-test, the
+// recovery that never tests); the decision itself in mux.test.js. Pinned here:
+// main.js does it at the same points, in the same words.
 
-test('both mirrors decide mux after the names are resolved and before the config is built — the ids go to buildConfig, the live connection keeps them', () => {
-  const DECIDE = 'const mux = await muxFor(serverId, settings);';
+test('both mirrors decide mux after the names are resolved and before the config is built — a recovery’s rebuild never tests; the ids go to buildConfig, the live connection keeps them', () => {
+  const DECIDE = 'const mux = await muxFor(serverId, settings, !!opts.recovery);';
   for (const [label, body] of Object.entries(CONNECT)) {
     const decide = body.indexOf(DECIDE);
-    assert.notEqual(decide, -1, `${label}: the connect no longer decides mux`);
+    assert.notEqual(decide, -1, `${label}: the connect no longer decides mux, or no longer tells it a recovery's rebuild`);
     assert.ok(body.indexOf('await Promise.all([withWgEndpointIps(serverId, settings), withEntryHostIps(serverId, settings)]);') < decide, `${label}: the probe dials the names this connect resolved`);
     assert.ok(decide < body.indexOf('buildActive(serverId, settings)'), `${label}: before the live config is built`);
     assert.ok(decide < body.indexOf('await xray.start(config, runEngine)'), `${label}: before the live core starts`);
-    assert.match(body.slice(decide), /^const mux = await muxFor\(serverId, settings\);\n\s*if \(stale\(\)\) return abandoned;\n\s*if \(mux\.ids\.length\) settings = Object\.assign\(\{\}, settings, \{ muxServerIds: mux\.ids \}\);/,
+    assert.match(body.slice(decide), /^const mux = await muxFor\(serverId, settings, !!opts\.recovery\);\n\s*if \(stale\(\)\) return abandoned;\n\s*if \(mux\.ids\.length\) settings = Object\.assign\(\{\}, settings, \{ muxServerIds: mux\.ids \}\);/,
       `${label}: a Cancel during the probe still wins, and an empty decision changes no setting (the configs stay byte-identical)`);
     assert.match(body, /serverEditPending = false;\n\s*liveMux = mux\.ids\.length \? mux : null;/, `${label}: the connect records what it muxed`);
   }
+  // `opts.recovery` is what every recovery's rebuild passes, in both mirrors (runRecovery → doConnect / reapplyConnection)
+  assert.match(MAIN, /res = await doConnect\(serverId, \{ holdKillSwitch: held, recovery: true \}\);/);
+  assert.match(MAIN, /r = await doConnect\(serverId, \{ holdKillSwitch: armed, recovery: !!opts\.recovery \}\);/);
+  assert.match(SERVICE, /res = \(xray && xray\.running\) \? await reapplyConnection\(\{ recovery: true \}\) : await doConnect\(serverId, \{ recovery: true \}\);/);
   assert.match(MAIN, /^let liveMux = null;$/m);
   assert.match(SERVICE, /^ {2}let liveMux = null;$/m);
 });
 
-test('both mirrors: muxFor is one function — but for the router, which runs a sing-box config on Xray, and its test seam', () => {
-  const [[, main], [, service]] = both('async function muxFor(serverId, settings) {');
+test('both mirrors: muxFor is one function — but for the router, which runs a sing-box config on Xray and tests one server at a time, and its test seam', () => {
+  const [[, main], [, service]] = both('async function muxFor(serverId, settings, recovery) {');
   const routerOnly = "if (OPENWRT && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray', { quiet: true }).id;   // as buildActive runs it\n";
+  const oneAtATime = 'parallel: MUX_PARALLEL,\n';
   assert.ok(service.includes(routerOnly), 'the router muxes what buildActive moves to Xray');
-  assert.equal(main, service.replace(routerOnly, '').replace(/\bmuxProbe\(/g, 'probeMux('));
+  assert.ok(service.includes(oneAtATime), 'the router hands its own number of probes at once');
+  assert.equal(main, service.replace(routerOnly, '').replace(oneAtATime, '').replace(/\bmuxProbe\(/g, 'probeMux('));
+  assert.match(SERVICE, /^ {2}const MUX_PARALLEL = OPENWRT \? 1 : PROBE_PARALLEL;$/m);
+  assert.match(main, /now: Date\.now\(\), recovery: !!recovery,/, 'a recovery’s rebuild is said to decideMux');
   assert.match(main, /const mode = muxMode\(settings\.mux\);\nif \(mode === 'off'\) return none;/, 'off: not a probe, not a store read');
   assert.match(main, /if \(engineFormat\(engine\) === 'sing-box'\) return none;/, 'the sing-box engine never gets mux');
   assert.match(main, /const servers = muxCandidates\(plan\);/, 'a chain’s hops are never asked about');
@@ -280,18 +289,18 @@ test('both mirrors: muxFor is one function — but for the router, which runs a 
   assert.match(SERVICE, /^ {2}const muxProbe = deps\.probeMux \|\| probeMux;$/m);
 });
 
-test('both mirrors: a drop forgets what the live connection muxed; a reload keeps it; a disconnect lets it go', () => {
-  const [[, mainForget], [, serviceForget]] = both('function forgetLiveMux() {');
-  assert.equal(mainForget, serviceForget);
-  // only verdicts at least 10 minutes old, as of now — and no write when none is (mux.test.js, serviceMux.test.js)
-  assert.match(mainForget, /const next = forgetVerdicts\(cache, liveMux\.fps, Date\.now\(\)\);\nliveMux = null;\nif \(next !== cache\) store\.set\('muxProbes', next\);/);
+test('both mirrors: a drop marks what the live connection muxed for a re-test; a reload keeps it; a disconnect lets it go', () => {
+  const [[, mainMark], [, serviceMark]] = both('function recheckLiveMux() {');
+  assert.equal(mainMark, serviceMark);
+  // kept as ok, and no write when everything is marked already (mux.test.js, serviceMux.test.js)
+  assert.match(mainMark, /const next = markRecheck\(cache, liveMux\.fps\);\nliveMux = null;\nif \(next !== cache\) store\.set\('muxProbes', next\);/);
   // the drop: main.js's onConnectionDrop, the service's recoverFromDrop — past the "not a drop" gates, before any rebuild is decided
   const mainDrop = slice(MAIN, 'main.js', 'async function onConnectionDrop(reason) {', 'updateOverlay(\'off\');');
-  assert.match(mainDrop, /return;\n\s*\/\/ what the dropped connection muxed is tested again on the next connect\n\s*forgetLiveMux\(\);\n\s*updateOverlay\('off'\);$/);
+  assert.match(mainDrop, /return;\n\s*\/\/ what the dropped connection muxed: kept for the rebuild, re-tested by the next connect the user or the boot makes\n\s*recheckLiveMux\(\);\n\s*updateOverlay\('off'\);$/);
   const serviceDrop = slice(SERVICE, 'service.js', 'function recoverFromDrop(reason, seq = null) {', 'if (recoverTimer) return;');
-  assert.ok(serviceDrop.indexOf('if (reported()) return;') < serviceDrop.indexOf('forgetLiveMux();'), 'a death its own connect reported is no drop of a live connection');
-  assert.ok(serviceDrop.indexOf("if (!store.get('activeServerId', null)) return;") < serviceDrop.indexOf('forgetLiveMux();'));
-  assert.ok(serviceDrop.indexOf('forgetLiveMux();') < serviceDrop.indexOf('autoReconnectOnNetworkChange'), 'forgotten whether or not anything rebuilds it');
+  assert.ok(serviceDrop.indexOf('if (reported()) return;') < serviceDrop.indexOf('recheckLiveMux();'), 'a death its own connect reported is no drop of a live connection');
+  assert.ok(serviceDrop.indexOf("if (!store.get('activeServerId', null)) return;") < serviceDrop.indexOf('recheckLiveMux();'));
+  assert.ok(serviceDrop.indexOf('recheckLiveMux();') < serviceDrop.indexOf('autoReconnectOnNetworkChange'), 'marked whether or not anything rebuilds it');
   for (const [label, source] of [['main.js', MAIN], ['service.js', SERVICE]]) {
     const reload = slice(source, label, 'async function rebuildActiveConfig() {', 'buildActive(serverId, settings);');
     assert.match(reload, /if \(liveMux\) settings = Object\.assign\(\{\}, settings, \{ muxServerIds: liveMux\.ids \}\);/, `${label}: a process-route reload keeps the live connection's mux`);
