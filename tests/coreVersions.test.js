@@ -27,7 +27,7 @@ test('one suggested version per core, each a plain x.y.z, for exactly the three 
   assert.deepEqual(CORE_IDS, ['xray', 'xray-pattn', 'sing-box']);
   assert.deepEqual(Object.keys(SUGGESTED).sort(), [...CORE_IDS].sort());
   for (const id of CORE_IDS) assert.match(SUGGESTED[id], /^\d+\.\d+\.\d+$/, id);
-  assert.equal(SUGGESTED.xray, '26.3.27');
+  assert.equal(SUGGESTED.xray, '26.9.30');
   assert.equal(SUGGESTED['xray-pattn'], '26.9.22');
   assert.equal(SUGGESTED['sing-box'], '1.13.14');
   assert.equal(STABLE_COUNT, 6);
@@ -88,12 +88,14 @@ test('Xray-PattN, stable: the 6 newest with this platform’s build, newest firs
   assert.equal(cards.filter((c) => c.isLatest).length, 1);
 });
 
-test('Xray (official), stable: 26.3.27 is GitHub’s latest and the suggested one; every 2026 pre-release stays out', () => {
+test('Xray (official), stable: 26.3.27 is GitHub’s latest, the suggested 26.9.30 is offered though XTLS calls it a pre-release; the other 2026 pre-releases stay out', () => {
   const cards = buildCards({ releases: rel.xtls(), matchAsset: xrayRouter, installed: '26.3.27', latestTag: 'v26.3.27', suggested: SUGGESTED.xray, prerelease: false });
-  assert.deepEqual(versions(cards), ['26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
-  assert.equal(cards[0].isLatest && cards[0].isSuggested && cards[0].isInstalled, true);
+  assert.deepEqual(versions(cards), ['26.9.30', '26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
+  const [suggested, latest] = cards;
+  assert.deepEqual([suggested.isSuggested, suggested.prerelease, suggested.isLatest, suggested.isInstalled, suggested.action], [true, true, false, false, 'upgrade']);
+  assert.deepEqual([latest.isLatest, latest.isInstalled, latest.isSuggested, latest.olderThanSuggested, latest.action], [true, true, false, true, 'reinstall']);
   assert.equal(cards[0].asset, 'Xray-linux-arm32-v7a.zip', 'the router’s build');
-  assert.ok(cards.slice(1).every((c) => c.action === 'downgrade' && c.olderThanSuggested && !c.prerelease));
+  assert.ok(cards.slice(2).every((c) => c.action === 'downgrade' && c.olderThanSuggested && !c.prerelease));
 });
 
 test('with pre-releases: the 4 newest pre-releases join the stables, ordered by version', () => {
@@ -118,9 +120,10 @@ test('sing-box: alphas sort by their number, the suggested 1.13.14 is offered al
 
 test('the installed version is always a card — a pre-release in the stable list, marked as one', () => {
   const cards = buildCards({ releases: rel.xtls(), matchAsset: xrayWin, installed: '26.9.9', latestTag: 'v26.3.27', suggested: SUGGESTED.xray, prerelease: false });
-  assert.deepEqual(versions(cards), ['26.9.9', '26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
-  assert.deepEqual([cards[0].isInstalled, cards[0].prerelease, cards[0].action], [true, true, 'reinstall']);
-  assert.equal(cards[1].action, 'downgrade');
+  assert.deepEqual(versions(cards), ['26.9.30', '26.9.9', '26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
+  assert.deepEqual([cards[1].isInstalled, cards[1].prerelease, cards[1].action], [true, true, 'reinstall']);
+  assert.deepEqual([cards[0].isSuggested, cards[0].action], [true, 'upgrade'], 'the suggested 26.9.30, a pre-release too');
+  assert.equal(cards[2].action, 'downgrade');
   // a pre-release sing-box reads its suffix from the core's own output, not just x.y.z
   const sb = buildCards({ releases: rel.singbox(), matchAsset: sbWin, installed: fullVersion('sing-box version 1.15.0-alpha.9'), latestTag: 'v1.14.2', suggested: SUGGESTED['sing-box'], prerelease: true });
   assert.deepEqual(sb.filter((c) => c.isInstalled).map((c) => c.version), ['1.15.0-alpha.9']);

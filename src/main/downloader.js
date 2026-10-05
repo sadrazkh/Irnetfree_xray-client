@@ -26,10 +26,11 @@ const path = require('path');
 const os = require('os');
 const { execFile, execFileSync } = require('child_process');
 const { engine, engineExe } = require('./engines');
-const { versionNumber } = require('./assetUpdater');
+const { versionNumber, cmpVersion } = require('./assetUpdater');
 const { CORE_IDS, CORE_NAMES, SUGGESTED, TAG_RE, fullVersion } = require('./coreVersions');
 
 const GEO_BASE = 'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download';
+const SINGBOX_LATEST = 'https://api.github.com/repos/SagerNet/sing-box/releases/latest';
 const WINTUN_URL = 'https://www.wintun.net/builds/wintun-0.14.1.zip';
 
 /** The picker's release list per core is kept this long (spec: ten minutes). */
@@ -78,8 +79,9 @@ function pickModule(u) {
 }
 
 /**
- * GitHub's API for the version picker, stricter than getJSON (which the update
- * button and the weekly check keep using as they always did): an HTTP error is
+ * GitHub's API for the version picker, the update button and the weekly check
+ * (defaultRelease, latestVersion) — stricter than getJSON, which only
+ * tun2socks's download still uses: an HTTP error is
  * an error carrying GitHub's own message — `status`, and `rateLimited` for the
  * unauthenticated 60-an-hour limit — not an object that looks like a release;
  * a server silent for `idleTimeoutMs` is ETIMEDOUT; an answer larger than
@@ -368,6 +370,29 @@ class Downloader {
     }
   }
 
+  /**
+   * The release a plain download installs — the first install, the Update
+   * button, the weekly updater: GitHub's latest stable, unless this release's
+   * suggested version (coreVersions.js SUGGESTED) is newer. XTLS has marked
+   * every Xray after 26.3.27 a pre-release, so "latest stable" alone kept
+   * every new install on March's core. Never older than the latest stable; a
+   * suggested tag that cannot be fetched falls back to it.
+   */
+  async defaultRelease(id) {
+    const latest = await this.fetchJSON(id === 'sing-box' ? SINGBOX_LATEST : Downloader.releaseApiUrl(id));
+    const suggested = SUGGESTED[id];
+    const have = versionNumber(latest && latest.tag_name);
+    if (!suggested || (have && cmpVersion(suggested, have) <= 0)) return latest;
+    try {
+      const rel = await this.fetchJSON(`${Downloader.releasesUrl(id)}/tags/v${suggested}`);
+      if (rel && Array.isArray(rel.assets)) return rel;
+      throw new Error('no release v' + suggested);
+    } catch (e) {
+      this.log(`${CORE_NAMES[id]} ${suggested} could not be fetched (${e.message}) — installing ${latest.tag_name} instead`, 'warn');
+      return latest;
+    }
+  }
+
   /** Regex matching a platform's sing-box release asset (version varies). */
   singboxAssetPattern(platform = os.platform(), arch = os.arch()) {
     const a = arch === 'arm64' ? 'arm64' : 'amd64';
@@ -377,8 +402,8 @@ class Downloader {
   }
 
   async getSingbox() {
-    this.log('Fetching latest sing-box release info…');
-    const rel = await getJSON('https://api.github.com/repos/SagerNet/sing-box/releases/latest');
+    this.log('Fetching sing-box release info…');
+    const rel = await this.defaultRelease('sing-box');
     const pat = this.singboxAssetPattern();
     const asset = (rel.assets || []).find(a => pat.test(a.name));
     if (!asset) throw new Error('sing-box asset not found for this platform');
@@ -398,14 +423,15 @@ class Downloader {
   }
 
   /**
-   * Download an Xray-format core. Both the official core and the patterniha fork
-   * publish the same asset names; the binary is placed under the engine's own exe
-   * name so they coexist. Geo files inside the archive are placed too.
+   * Download an Xray-format core — the release defaultRelease names. Both the
+   * official core and the patterniha fork publish the same asset names; the
+   * binary is placed under the engine's own exe name so they coexist. Geo files
+   * inside the archive are placed too.
    */
   async getXray(engineId = 'xray') {
     const eng = engine(engineId);
-    this.log(`Fetching latest ${eng.label} release info…`);
-    const rel = await getJSON(Downloader.releaseApiUrl(engineId));
+    this.log(`Fetching ${eng.label} release info…`);
+    const rel = await this.defaultRelease(engineId);
     const want = this.xrayAssetName();
     const asset = (rel.assets || []).find(a => a.name === want);
     if (!asset) throw new Error('asset not found: ' + want);
@@ -429,13 +455,18 @@ class Downloader {
     return { ok: true, files: out };
   }
 
-  /** The latest release tag of an engine, without a leading v — for the weekly check (assetUpdater.js). */
+  /**
+   * The version a download of an engine installs (defaultRelease's choice),
+   * without a leading v — for the weekly check (assetUpdater.js): GitHub's
+   * latest stable, or the suggested version when that is newer. So the weekly
+   * updater moves an Xray 26.3.27 to the suggested one; a newer one installed
+   * (a version the user picked) it leaves alone, as it always did.
+   */
   async latestVersion(engineId) {
-    const url = engineId === 'sing-box'
-      ? 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
-      : Downloader.releaseApiUrl(engineId);
-    const rel = await getJSON(url);
-    return String(rel.tag_name || '').replace(/^v/i, '').trim();
+    const rel = await this.fetchJSON(engineId === 'sing-box' ? SINGBOX_LATEST : Downloader.releaseApiUrl(engineId));
+    const latest = String((rel && rel.tag_name) || '').replace(/^v/i, '').trim();
+    const suggested = SUGGESTED[engineId];
+    return suggested && (!versionNumber(latest) || cmpVersion(suggested, versionNumber(latest)) > 0) ? suggested : latest;
   }
 
   /* ----------------------------- the version picker ----------------------------- */
