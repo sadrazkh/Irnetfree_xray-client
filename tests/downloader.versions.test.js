@@ -209,6 +209,111 @@ test('listReleases: anything but a list (GitHub’s error object, null) is an er
   await assert.rejects(h.d.listReleases('geo'), /unknown core/);
 });
 
+/* ------------------------------ the default target: what a plain download installs ------------------------------ */
+
+/** A downloader whose GitHub is `fetchJSON`; its log lines in `.logs`. */
+function makeDownloader({ fetchJSON }) {
+  const logs = [];
+  const d = new Downloader({ destDir: tmp('def'), platform: 'win32', arch: 'x64', fetchJSON, onLog: (line, level) => logs.push([level, line]) });
+  d.logs = logs;
+  return d;
+}
+
+test('a plain download installs the suggested Xray when it is newer than GitHub’s latest stable', async () => {
+  const asked = [];
+  const d = makeDownloader({ fetchJSON: async (url) => {
+    asked.push(url);
+    if (url.endsWith('/releases/latest')) return { tag_name: 'v26.3.27', assets: [] };
+    if (url.endsWith('/releases/tags/v26.9.30')) return { tag_name: 'v26.9.30', assets: [] };
+    throw new Error('unexpected ' + url);
+  } });
+  const rel = await d.defaultRelease('xray');
+  assert.equal(rel.tag_name, 'v26.9.30');
+  assert.ok(asked.some(u => u.endsWith('/tags/v26.9.30')));
+  assert.deepEqual(asked, [
+    'https://api.github.com/repos/XTLS/Xray-core/releases/latest',
+    'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.9.30'
+  ], 'the official core’s own repo');
+});
+
+test('a newer stable than the suggested one wins, and the suggested tag is not even fetched', async () => {
+  const d = makeDownloader({ fetchJSON: async (url) => {
+    if (url.endsWith('/releases/latest')) return { tag_name: 'v27.1.1', assets: [] };
+    throw new Error('should not ask ' + url);
+  } });
+  assert.equal((await d.defaultRelease('xray')).tag_name, 'v27.1.1');
+  // the same release as the suggested one: nothing more to ask either
+  const same = makeDownloader({ fetchJSON: async (url) => {
+    if (url.endsWith('/releases/latest')) return { tag_name: 'v26.9.30', assets: [] };
+    throw new Error('should not ask ' + url);
+  } });
+  assert.equal((await same.defaultRelease('xray')).tag_name, 'v26.9.30');
+});
+
+test('the suggested release that cannot be fetched falls back to the latest stable', async () => {
+  const d = makeDownloader({ fetchJSON: async (url) => {
+    if (url.endsWith('/releases/latest')) return { tag_name: 'v26.3.27', assets: [] };
+    throw new Error('HTTP 404');
+  } });
+  assert.equal((await d.defaultRelease('xray')).tag_name, 'v26.3.27');
+  assert.ok(d.logs.some(([level, line]) => level === 'warn' && /Xray 26\.9\.30 could not be fetched \(HTTP 404\).*v26\.3\.27/.test(line)), JSON.stringify(d.logs));
+  // an answer that is no release (no assets list) is the same miss
+  const odd = makeDownloader({ fetchJSON: async (url) => (url.endsWith('/releases/latest') ? { tag_name: 'v26.3.27', assets: [] } : { message: 'Not Found' }) });
+  assert.equal((await odd.defaultRelease('xray')).tag_name, 'v26.3.27');
+});
+
+test('Xray-PattN and sing-box: their latest stable is newer than the suggested one — installed as today, from their own repos', async () => {
+  for (const [id, url, tag] of [
+    ['xray-pattn', 'https://api.github.com/repos/patterniha/Xray-core/releases/latest', 'v26.10.3'],
+    ['sing-box', 'https://api.github.com/repos/SagerNet/sing-box/releases/latest', 'v1.14.2']
+  ]) {
+    const asked = [];
+    const d = makeDownloader({ fetchJSON: async (u) => { asked.push(u); return { tag_name: tag, assets: [] }; } });
+    assert.equal((await d.defaultRelease(id)).tag_name, tag, id);
+    assert.deepEqual(asked, [url], id);
+  }
+});
+
+test('latestVersion names the default target: the weekly updater moves 26.3.27 to 26.9.30, never below', async () => {
+  const d = makeDownloader({ fetchJSON: async () => ({ tag_name: 'v26.3.27', assets: [] }) });
+  assert.equal(await d.latestVersion('xray'), '26.9.30');
+  const e = makeDownloader({ fetchJSON: async () => ({ tag_name: 'v1.14.2', assets: [] }) });
+  assert.equal(await e.latestVersion('sing-box'), '1.14.2');   // latest stable above ⭐ 1.13.14
+  const f = makeDownloader({ fetchJSON: async () => ({ tag_name: 'v27.1.1', assets: [] }) });
+  assert.equal(await f.latestVersion('xray'), '27.1.1');
+});
+
+test('Update (download) of a core goes through the default target: the suggested Xray’s release is the one searched for this platform’s build', async (t) => {
+  // getXray / getSingbox download with the real https helpers, so this stops at
+  // the asset lookup: the release they searched is the one the API calls name.
+  // The preload blocks commands, not sockets: a lookup that went past the seam
+  // (the module's own getJSON) must fail here, never reach GitHub.
+  const https = require('node:https');
+  const offline = () => { throw new Error('this test reached the real network'); };
+  t.mock.method(https, 'get', offline);
+  t.mock.method(http, 'get', offline);
+  const asked = [];
+  const answers = {
+    'https://api.github.com/repos/XTLS/Xray-core/releases/latest': 'v26.3.27',
+    'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.9.30': 'v26.9.30',
+    'https://api.github.com/repos/SagerNet/sing-box/releases/latest': 'v1.14.2'
+  };
+  const d = makeDownloader({ fetchJSON: async (url) => {
+    asked.push(url);
+    if (!answers[url]) throw new Error('unexpected ' + url);
+    return { tag_name: answers[url], assets: [] };
+  } });
+  await assert.rejects(d.download('xray'), /asset not found/);
+  assert.deepEqual(asked, [
+    'https://api.github.com/repos/XTLS/Xray-core/releases/latest',
+    'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.9.30'
+  ]);
+  assert.ok(d.logs.some(([, line]) => line === '[download] Fetching Xray (official) release info…'), JSON.stringify(d.logs));
+  asked.length = 0;
+  await assert.rejects(d.download('sing-box'), /sing-box asset not found/);
+  assert.deepEqual(asked, ['https://api.github.com/repos/SagerNet/sing-box/releases/latest']);
+});
+
 /* ------------------------------ installing one version ------------------------------ */
 
 /**
