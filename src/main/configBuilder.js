@@ -14,6 +14,7 @@
 const net = require('net');
 const { buildDnsPlan, DNS_TAG } = require('./dnsBuilder');
 const { normalizePin } = require('./certPin');
+const { planServers } = require('./engineChoice');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -97,9 +98,78 @@ function applyCertPin(o, server) {
   const tls = o && o.streamSettings && o.streamSettings.tlsSettings;
   if (!tls) return o;
   delete tls.allowInsecure;
-  const pin = normalizePin(server && server.certPin);
-  if (pin) tls.pinnedPeerCertSha256 = pin;
+  // The link's own pins (`pcs`) and the one learnt on first use, together:
+  // the core accepts a certificate that matches any of them.
+  const pins = [...String(tls.pinnedPeerCertSha256 || '').split(','), server && server.certPin]
+    .map(normalizePin).filter(Boolean);
+  if (pins.length) tls.pinnedPeerCertSha256 = [...new Set(pins)].join(',');
+  else delete tls.pinnedPeerCertSha256;
   return o;
+}
+
+/**
+ * An ECH config list that is a DNS QUERY rather than the config itself:
+ * `name+udp://1.1.1.1`, `name+https://1.1.1.1/dns-query`, or the server alone
+ * (the SNI is then the name asked for). { name, server, scheme, host, port } —
+ * `host` the resolver's address or name; null for a base64 list (nothing to
+ * dial) or anything unreadable. The `+` counts only before the `://`.
+ */
+function echQueryOf(list) {
+  const s = String(list == null ? '' : list).trim();
+  const sep = s.indexOf('://');
+  if (sep === -1) return null;
+  const plus = s.indexOf('+');
+  const name = plus > -1 && plus < sep ? s.slice(0, plus) : '';
+  const server = plus > -1 && plus < sep ? s.slice(plus + 1) : s;
+  const m = /^([a-z0-9]+):\/\/(\[[^\]]+\]|[^/:?#]+)(?::(\d+))?/i.exec(server);
+  if (!m) return null;
+  return { name, server, scheme: m[1].toLowerCase(), host: m[2].replace(/^\[|\]$/g, ''), port: m[3] ? parseInt(m[3], 10) : null };
+}
+
+/** The TLS settings of every outbound whose ECH config is fetched from DNS. */
+function echQueryTls(outbounds) {
+  const out = [];
+  for (const o of outbounds || []) {
+    const tls = o && o.streamSettings && o.streamSettings.tlsSettings;
+    if (tls && echQueryOf(tls.echConfigList)) out.push(tls);
+  }
+  return out;
+}
+
+/**
+ * Public resolvers that answer DoH on the very address they answer port 53 on.
+ * Under the strict leak guard nothing leaves for port 53 off the tunnel (see
+ * dropsUdpDirect), so an ECH config asked of one of these over UDP is asked
+ * over DoH instead — same resolver, same answer, port 443.
+ */
+const DOH_ON_SAME_IP = {
+  '1.1.1.1': 'https://1.1.1.1/dns-query', '1.0.0.1': 'https://1.0.0.1/dns-query',
+  '8.8.8.8': 'https://8.8.8.8/dns-query', '8.8.4.4': 'https://8.8.4.4/dns-query',
+  '9.9.9.9': 'https://9.9.9.9/dns-query', '149.112.112.112': 'https://149.112.112.112/dns-query'
+};
+
+function echOverDoh(outbounds) {
+  for (const tls of echQueryTls(outbounds)) {
+    const q = echQueryOf(tls.echConfigList);
+    if (q.scheme !== 'udp' || (q.port && q.port !== 53) || !DOH_ON_SAME_IP[q.host]) continue;
+    tls.echConfigList = (q.name ? q.name + '+' : '') + DOH_ON_SAME_IP[q.host];
+  }
+  return outbounds;
+}
+
+/**
+ * The resolver addresses the running config fetches ECH configs from — what
+ * the strict leak guard has to leave a hole for (the query is the core's own,
+ * from the physical adapter). A resolver given by name is resolved before the
+ * connect (entryHosts) and its addresses travel with the entry servers'.
+ */
+function echResolverIpsOf(config) {
+  const out = [];
+  for (const tls of echQueryTls(config && config.outbounds)) {
+    const q = echQueryOf(tls.echConfigList);
+    if (q && net.isIP(q.host) && !out.includes(q.host)) out.push(q.host);
+  }
+  return out;
 }
 
 /** "host:port" / "[v6]:port" → { host, port }; anything else → null. */
@@ -200,6 +270,15 @@ function entryHosts(planArg) {
     const host = serverAddressOf(s && s.outbound);
     if (host && !net.isIP(host) && !out.includes(host)) out.push(host);
   }
+  // A DoH resolver an ECH config is fetched from, given by name: the core asks
+  // it directly, before its tunnel exists — so its name must not wait on the
+  // tunnel either. Any server of the plan, hops behind others included (the
+  // query never rides the chain).
+  for (const s of planServers(plan)) {
+    const tls = s && s.outbound && s.outbound.streamSettings && s.outbound.streamSettings.tlsSettings;
+    const q = tls && echQueryOf(tls.echConfigList);
+    if (q && q.host && !net.isIP(q.host) && !out.includes(q.host)) out.push(q.host);
+  }
   return out;
 }
 
@@ -251,6 +330,17 @@ function pinEntryHosts(outbounds, map, ipv6) {
     const ss = o.streamSettings || (o.streamSettings = {});
     ss.sockopt = Object.assign({}, ss.sockopt, { domainStrategy: ipv6 ? 'UseIP' : 'UseIPv4' });
     hosts[host] = ips;
+  }
+  // The ECH query's own dial (echSockopt) the same way: its resolver's name
+  // answered from the config, never asked of the OS — under TUN that is the
+  // tunnel, which is waiting on this very query.
+  for (const tls of echQueryTls(outbounds)) {
+    const q = echQueryOf(tls.echConfigList);
+    if (!q.host || net.isIP(q.host) || !Object.prototype.hasOwnProperty.call(map, q.host)) continue;
+    const ips = pinnable(map[q.host], ipv6);
+    if (!ips.length) continue;
+    tls.echSockopt = Object.assign({}, tls.echSockopt, { domainStrategy: ipv6 ? 'UseIP' : 'UseIPv4' });
+    hosts[q.host] = ips;
   }
   return Object.keys(hosts).length ? hosts : null;
 }
@@ -748,6 +838,7 @@ function buildConfig(planArg, settings) {
   outbounds = (outbounds || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outbounds, s.entryHostIps, s.ipv6);
   outbounds = applyFragments(outbounds);
+  if (dropsUdpDirect(s)) echOverDoh(outbounds);
   bindDirectDials(outbounds, s.directInterface);
 
   // No `bufferSize: 0` any more. It was set whenever a WireGuard was dialled
@@ -849,6 +940,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const outs = (reg.outs || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outs, s.entryHostIps, s.ipv6);   // see buildConfig
   const outbounds = applyFragments(outs);
+  if (dropsUdpDirect(s)) echOverDoh(outbounds);
   bindDirectDials(outbounds, s.directInterface);
 
   // Resolver rules first (see buildConfig), then private/LAN direct, THEN
@@ -1036,6 +1128,13 @@ function bindDirectDials(outbounds, name) {
     if (ss.sockopt && ss.sockopt.dialerProxy) continue;
     ss.sockopt = Object.assign({}, ss.sockopt, { interface: name });
   }
+  // An ECH config fetched from DNS is fetched by the core itself, with its own
+  // socket options (echSockopt), for a hop behind another hop as much as for
+  // the first: bound to the NIC like any direct dial, or the query enters the
+  // tunnel that cannot come up without its answer.
+  for (const tls of echQueryTls(outbounds)) {
+    tls.echSockopt = Object.assign({}, tls.echSockopt, { interface: name });
+  }
   return outbounds;
 }
 
@@ -1101,4 +1200,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts };

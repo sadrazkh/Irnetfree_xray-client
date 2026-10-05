@@ -892,6 +892,31 @@
           <div><label class="field-label" data-i18n="edit.sid">Short ID (sid)</label>
             <input type="text" id="edSid" class="input" dir="ltr" /></div>
         </div>
+        <!-- REALITY's post-quantum check (pqv): the server's ML-DSA-65 public key -->
+        <div id="edPqvRow" hidden>
+          <label class="field-label" data-i18n="edit.pqv">ML-DSA-65 verify key (pqv)</label>
+          <input type="text" id="edPqv" class="input" dir="ltr" spellcheck="false" />
+        </div>
+        <!-- Hysteria2: the salamander obfuscation and port hopping -->
+        <div class="grid2" id="edHy2Row" hidden>
+          <div><label class="field-label" data-i18n="edit.hy2Obfs">Obfs password (salamander)</label>
+            <input type="text" id="edHy2Obfs" class="input" dir="ltr" spellcheck="false" /></div>
+          <div><label class="field-label" data-i18n="edit.hy2Ports">Port hopping</label>
+            <input type="text" id="edHy2Ports" class="input" dir="ltr" placeholder="20000-50000" spellcheck="false" /></div>
+        </div>
+        <!-- newer TLS knobs: Encrypted Client Hello, a certificate pin, the name to verify against -->
+        <div id="edTlsExtra" hidden>
+          <label class="field-label" data-i18n="edit.ech">ECH — Encrypted Client Hello</label>
+          <input type="text" id="edEch" class="input" dir="ltr" spellcheck="false" placeholder="cloudflare-ech.com+udp://1.1.1.1" />
+          <p class="hint" data-i18n="edit.echHint">Hides the real SNI inside an encrypted ClientHello. Either the ECH config itself (base64) or where to fetch it: name+udp://resolver or name+https://resolver/dns-query. Empty = off.</p>
+          <div class="grid2">
+            <div><label class="field-label" data-i18n="edit.pcs">Certificate SHA-256 (pcs)</label>
+              <input type="text" id="edPcs" class="input" dir="ltr" spellcheck="false" placeholder="e3b0c442…, …" /></div>
+            <div><label class="field-label" data-i18n="edit.vcn">Verify certificate as (vcn)</label>
+              <input type="text" id="edVcn" class="input" dir="ltr" spellcheck="false" placeholder="real.example.com" /></div>
+          </div>
+          <p class="hint" data-i18n="edit.pcsHint">pcs: accept exactly this certificate (a self-signed one too) — what replaced Allow Insecure. vcn: check the certificate against this name instead of the SNI.</p>
+        </div>
         <label class="switch-row inline-switch" id="edInsecureRow">
           <span class="switch-title" data-i18n="edit.allowInsecure">Allow Insecure</span>
           <span class="switch"><input type="checkbox" id="edInsecure" /><span class="slider"></span></span>

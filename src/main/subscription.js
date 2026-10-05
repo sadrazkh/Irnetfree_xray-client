@@ -54,6 +54,8 @@ function serverIdentity(s, strict) {
     cred = u ? [u.user || '', u.pass || ''].join(':') : '';
   } else if (ob.protocol === 'wireguard') {
     cred = set.secretKey || '';
+  } else if (ob.protocol === 'hysteria') {
+    cred = (st.hysteriaSettings && st.hysteriaSettings.auth) || '';
   }
   const net = st.network || 'tcp';
   let path = '', host = '';
@@ -130,9 +132,11 @@ function linkOf(old) {
 /** The connection fields of the edit form (parser.editFields names). */
 const CONNECTION_KEYS = ['address', 'port', 'uuid', 'password', 'username',
   'privateKey', 'publicKey', 'presharedKey', 'localAddress', 'mtu', 'reserved', 'allowedIPs',
-  'network', 'security', 'sni', 'host', 'path', 'fp', 'pbk', 'sid', 'allowInsecure'];
+  'network', 'security', 'sni', 'host', 'path', 'fp', 'pbk', 'sid', 'allowInsecure',
+  'ech', 'pcs', 'vcn', 'pqv', 'obfsPassword', 'mport'];
 /** The ones the stream is rebuilt from, as the form sends them all on a save. */
-const STREAM_KEYS = ['network', 'security', 'sni', 'host', 'path', 'serviceName', 'fp', 'pbk', 'sid', 'allowInsecure', 'alpn'];
+const STREAM_KEYS = ['network', 'security', 'sni', 'host', 'path', 'serviceName', 'fp', 'pbk', 'sid', 'allowInsecure', 'alpn',
+  'ech', 'pcs', 'vcn', 'pqv', 'obfsPassword', 'mport'];
 
 /** The field names applyServerEdits recorded as the user's edits. */
 function recordedEdits(s) {

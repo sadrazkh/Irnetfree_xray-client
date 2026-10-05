@@ -45,10 +45,26 @@ object EngineChoice {
         return out
     }
 
+    /**
+     * A Hysteria2 server that asked for "allow insecure" and names no certificate
+     * (engineChoice.js needsInsecureCore): the Xray cores have no way left to
+     * accept an unverified certificate (allowInsecure is gone; CertPin's
+     * trust-on-first-use is a TCP handshake, and Hysteria is QUIC) — sing-box
+     * still has one. A self-signed certificate is how most of them are set up.
+     */
+    fun needsInsecureCore(server: ServerConfig?): Boolean {
+        val st = server?.outbound?.optJSONObject("streamSettings") ?: return false
+        val tls = st.optJSONObject("tlsSettings") ?: return false
+        return st.optString("network") == "hysteria" && tls.optBoolean("allowInsecure") &&
+            tls.optString("pinnedPeerCertSha256").isBlank() && tls.optString("verifyPeerCertByName").isBlank() &&
+            server.certPin.isBlank()
+    }
+
     /** The core for this plan. `defaultEngine` is the app-wide setting. */
     fun chooseEngine(plan: ConnectionPlan?, defaultEngine: String = XRAY): String {
         val def = if (defaultEngine == PATTN) PATTN else XRAY
-        if (plan is ConnectionPlan.Single) return plan.server.engine?.takeIf { it.isNotBlank() } ?: def
+        if (plan is ConnectionPlan.Single) return plan.server.engine?.takeIf { it.isNotBlank() }
+            ?: if (needsInsecureCore(plan.server)) SINGBOX else def
         return if (planServers(plan).any { it.engine == PATTN }) PATTN else def
     }
 

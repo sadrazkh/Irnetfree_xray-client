@@ -24,6 +24,11 @@ object ServerEditor {
         var wgDns: String = "",                // `DNS = 10.0.0.53, corp.local`: resolvers + search domains
         var fragment: String = "", var noise: String = "",
         var cipherSuites: String = "", var finalMask: String = "",   // patterniha
+        // newer TLS / REALITY knobs: Encrypted Client Hello, a certificate pin, the
+        // name to verify it against, REALITY's ML-DSA-65 key (parser.js tlsExtras)
+        var ech: String = "", var pcs: String = "", var vcn: String = "", var pqv: String = "",
+        // Hysteria2: the salamander password and the hopping ports
+        var hy2Obfs: String = "", var hy2Ports: String = "",
         var engine: String = "xray",                // 'xray' (default) | 'sing-box'
         // preserved passthroughs the edit form doesn't expose (so editing anything
         // doesn't silently drop them): reality spiderX, xhttp mode/extra, kcp bits.
@@ -45,6 +50,10 @@ object ServerEditor {
             "trojan" -> serverObj(ob)?.let { f.cred = it.optString("password") }
             "shadowsocks" -> serverObj(ob)?.let { f.cred = it.optString("password"); f.method = it.optString("method") }
             "socks", "http" -> serverObj(ob)?.optJSONArray("users")?.optJSONObject(0)?.let { f.proxyUser = it.optString("user"); f.proxyPass = it.optString("pass") }
+            "hysteria2" -> {
+                val h = LinkParser.hy2Values(ob)
+                f.cred = h["auth"] ?: ""; f.hy2Obfs = h["obfs-password"] ?: ""; f.hy2Ports = h["mport"] ?: ""
+            }
             "wireguard" -> {
                 val set = ob.optJSONObject("settings") ?: JSONObject()
                 f.cred = set.optString("secretKey")
@@ -60,18 +69,23 @@ object ServerEditor {
         }
         // transport / tls details
         st.optJSONObject("wsSettings")?.let { f.path = it.optString("path"); f.host = it.optJSONObject("headers")?.optString("Host") ?: "" }
-        st.optJSONObject("grpcSettings")?.let { f.path = it.optString("serviceName"); if (it.optBoolean("multiMode")) f.xmode = "multi" }
+        // gRPC's :authority is what the sheet's Host field shows for it
+        st.optJSONObject("grpcSettings")?.let { f.path = it.optString("serviceName"); f.host = it.optString("authority"); if (it.optBoolean("multiMode")) f.xmode = "multi" }
         if (f.network == "h2" || f.network == "http") st.optJSONObject("httpSettings")?.let { f.path = it.optString("path"); f.host = arr(it.optJSONArray("host")).joinToString(",") }
         if (f.network == "tcp" || f.network == "raw") httpHeaderRequest(st)?.let { rq ->
             f.path = arr(rq.optJSONArray("path")).joinToString(",")
             f.host = arr(rq.optJSONObject("headers")?.optJSONArray("Host")).joinToString(",")
         }
         st.optJSONObject("xhttpSettings")?.let { f.path = it.optString("path"); f.host = it.optString("host"); f.xmode = it.optString("mode"); f.xhttpExtra = it.optJSONObject("extra") }
+        st.optJSONObject("httpupgradeSettings")?.let { f.path = it.optString("path"); f.host = it.optString("host") }
         st.optJSONObject("kcpSettings")?.let { f.seed = it.optString("seed"); f.headerType = it.optJSONObject("header")?.optString("type") ?: "" }
         st.optJSONObject("tlsSettings")?.let { f.sni = it.optString("serverName"); f.allowInsecure = it.optBoolean("allowInsecure"); f.fp = it.optString("fingerprint", "chrome"); f.alpn = arr(it.optJSONArray("alpn")).joinToString(",") }
         st.optJSONObject("realitySettings")?.let { f.sni = it.optString("serverName"); f.fp = it.optString("fingerprint", "chrome"); f.pbk = it.optString("publicKey"); f.sid = it.optString("shortId"); f.spx = it.optString("spiderX") }
         st.optJSONObject("tlsSettings")?.optString("cipherSuites")?.takeIf { it.isNotBlank() }?.let { f.cipherSuites = it }
-        st.optJSONObject("finalmask")?.let { f.finalMask = it.toString() }
+        st.optJSONObject("tlsSettings")?.let { f.ech = it.optString("echConfigList"); f.pcs = it.optString("pinnedPeerCertSha256"); f.vcn = it.optString("verifyPeerCertByName") }
+        st.optJSONObject("realitySettings")?.let { f.pqv = it.optString("mldsa65Verify") }
+        // Hysteria2's masks are its obfs and hopping fields (hy2Obfs / hy2Ports), not text to edit
+        if (s.protocol != "hysteria2") st.optJSONObject("finalmask")?.let { f.finalMask = it.toString() }
         return f
     }
 
@@ -126,6 +140,7 @@ object ServerEditor {
                 }
             }
             "wireguard" -> patchWireguard(ob, was, f, if (moved) "$addr:$port" else null)
+            "hysteria2" -> { patchHysteria2(ob, was, f, addr, port, moved); true }
             else -> true
         }
         val out = if (patched) ob else rebuilt(s, f, addr, port)
@@ -164,7 +179,9 @@ object ServerEditor {
         "method" to Fields::method, "proxyUser" to Fields::proxyUser, "proxyPass" to Fields::proxyPass,
         "wgPub" to Fields::wgPub, "wgAddr" to Fields::wgAddr, "wgPsk" to Fields::wgPsk, "wgMtu" to Fields::wgMtu,
         "wgReserved" to Fields::wgReserved, "wgAllowed" to Fields::wgAllowed, "wgDns" to Fields::wgDns,
-        "cipherSuites" to Fields::cipherSuites, "finalMask" to Fields::finalMask
+        "cipherSuites" to Fields::cipherSuites, "finalMask" to Fields::finalMask,
+        "ech" to Fields::ech, "pcs" to Fields::pcs, "vcn" to Fields::vcn, "pqv" to Fields::pqv,
+        "hy2Obfs" to Fields::hy2Obfs, "hy2Ports" to Fields::hy2Ports
     )
 
     /** Everything [ServerConfig.edited] can name: the text fields, then the switch, the fragment, the noise, the core. */
@@ -221,7 +238,8 @@ object ServerEditor {
     private fun patchStream(ob: JSONObject, was: Fields, f: Fields) {
         val changed = f.network != was.network || f.security != was.security || f.sni != was.sni || f.host != was.host ||
             f.path != was.path || f.fp != was.fp || f.pbk != was.pbk || f.sid != was.sid ||
-            f.allowInsecure != was.allowInsecure || f.cipherSuites != was.cipherSuites || f.finalMask != was.finalMask
+            f.allowInsecure != was.allowInsecure || f.cipherSuites != was.cipherSuites || f.finalMask != was.finalMask ||
+            f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn || f.pqv != was.pqv
         if (!changed) return
         // What the form says, built as a link would be — the old transport's
         // passthroughs (mode, seed, header type) mean nothing to a new one.
@@ -247,20 +265,23 @@ object ServerEditor {
             fresh.optJSONObject("tlsSettings")?.let { cur.put("tlsSettings", it) }
             fresh.optJSONObject("realitySettings")?.let { cur.put("realitySettings", it) }
         } else if (secWas == "tls") {
-            if (f.sni != was.sni || f.fp != was.fp || f.allowInsecure != was.allowInsecure || f.cipherSuites != was.cipherSuites) {
+            if (f.sni != was.sni || f.fp != was.fp || f.allowInsecure != was.allowInsecure || f.cipherSuites != was.cipherSuites ||
+                f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn) {
                 val tls = child(cur, "tlsSettings")
                 if (f.sni != was.sni) tls.put("serverName", f.sni.trim().ifEmpty { f.host.trim() })
                 if (f.fp != was.fp) tls.put("fingerprint", f.fp.trim().ifEmpty { "chrome" })
                 if (f.allowInsecure != was.allowInsecure) tls.put("allowInsecure", f.allowInsecure)
                 if (f.cipherSuites != was.cipherSuites) { if (f.cipherSuites.isBlank()) tls.remove("cipherSuites") else tls.put("cipherSuites", f.cipherSuites.trim()) }
+                patchTlsExtras(tls, was, f)
             }
         } else if (secWas == "reality") {
-            if (f.sni != was.sni || f.fp != was.fp || f.pbk != was.pbk || f.sid != was.sid) {
+            if (f.sni != was.sni || f.fp != was.fp || f.pbk != was.pbk || f.sid != was.sid || f.pqv != was.pqv) {
                 val rs = child(cur, "realitySettings")
                 if (f.sni != was.sni) rs.put("serverName", f.sni.trim())
                 if (f.fp != was.fp) rs.put("fingerprint", f.fp.trim().ifEmpty { "chrome" })
                 if (f.pbk != was.pbk) rs.put("publicKey", f.pbk.trim())
                 if (f.sid != was.sid) rs.put("shortId", f.sid.trim())
+                if (f.pqv != was.pqv) { if (f.pqv.isBlank()) rs.remove("mldsa65Verify") else rs.put("mldsa65Verify", f.pqv.trim()) }
             }
         }
 
@@ -268,6 +289,50 @@ object ServerEditor {
             val fm = fresh.optJSONObject("finalmask")
             if (fm != null) cur.put("finalmask", fm) else cur.remove("finalmask")
         }
+    }
+
+    /** ECH, the pin and the verify-name the sheet changed, in the core's own fields (an emptied one clears). */
+    private fun patchTlsExtras(tls: JSONObject, was: Fields, f: Fields) {
+        if (f.ech != was.ech) { val v = f.ech.trim(); if (v.isEmpty()) tls.remove("echConfigList") else tls.put("echConfigList", v) }
+        if (f.pcs != was.pcs) { val v = LinkParser.pinList(f.pcs); if (v.isEmpty()) tls.remove("pinnedPeerCertSha256") else tls.put("pinnedPeerCertSha256", v) }
+        if (f.vcn != was.vcn) { val v = list(f.vcn).joinToString(","); if (v.isEmpty()) tls.remove("verifyPeerCertByName") else tls.put("verifyPeerCertByName", v) }
+    }
+
+    /**
+     * Hysteria2: rebuilt (LinkParser.buildHysteria2Outbound) from everything it
+     * had, with what the sheet changed over it; masks and QUIC knobs the sheet
+     * does not model stay as they were (parser.js applyServerEdits).
+     */
+    private fun patchHysteria2(ob: JSONObject, was: Fields, f: Fields, addr: String, port: Int, moved: Boolean) {
+        val touched = moved || f.cred != was.cred || f.sni != was.sni || f.allowInsecure != was.allowInsecure ||
+            f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn || f.hy2Obfs != was.hy2Obfs || f.hy2Ports != was.hy2Ports
+        if (!touched) return
+        val h = LinkParser.hy2Values(ob)
+        h["address"] = addr; h["port"] = port.toString()
+        if (f.cred != was.cred && f.cred.isNotBlank()) h["auth"] = f.cred.trim()
+        if (f.sni != was.sni) h["sni"] = f.sni.trim()
+        if (f.allowInsecure != was.allowInsecure) h["insecure"] = if (f.allowInsecure) "1" else ""
+        if (f.ech != was.ech) h["ech"] = f.ech.trim()
+        if (f.pcs != was.pcs) h["pcs"] = f.pcs.trim()
+        if (f.vcn != was.vcn) h["vcn"] = f.vcn.trim()
+        if (f.hy2Obfs != was.hy2Obfs) h["obfs-password"] = f.hy2Obfs.trim()
+        if (f.hy2Ports != was.hy2Ports) h["mport"] = f.hy2Ports.trim()
+        h["obfs"] = ""
+        val rebuilt = LinkParser.buildHysteria2Outbound(h)
+        val st = ob.optJSONObject("streamSettings") ?: JSONObject().also { ob.put("streamSettings", it) }
+        val fmWas = st.optJSONObject("finalmask") ?: JSONObject()
+        val rs = rebuilt.getJSONObject("streamSettings")
+        val keep = JSONArray()
+        fmWas.optJSONArray("udp")?.let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.takeIf { it.optString("type") != "salamander" && it.optString("type") != "udphop" }?.let { keep.put(it) } }
+        val qpWas = fmWas.optJSONObject("quicParams")
+        if (keep.length() > 0 || (qpWas != null && qpWas.length() > 0)) {
+            val fm = rs.optJSONObject("finalmask") ?: JSONObject().also { rs.put("finalmask", it) }
+            if (keep.length() > 0) { val u = fm.optJSONArray("udp"); if (u != null) for (i in 0 until u.length()) keep.put(u.get(i)); fm.put("udp", keep) }
+            if (qpWas != null) { val merged = JSONObject(qpWas.toString()); fm.optJSONObject("quicParams")?.let { q -> q.keys().forEach { k -> merged.put(k, q.get(k)) } }; fm.put("quicParams", merged) }
+        }
+        ob.put("settings", rebuilt.getJSONObject("settings"))
+        for (k in listOf("network", "security", "tlsSettings", "hysteriaSettings")) st.put(k, rs.get(k))
+        if (rs.has("finalmask")) st.put("finalmask", rs.getJSONObject("finalmask")) else st.remove("finalmask")
     }
 
     /** The same transport, a new path and/or Host. */
@@ -280,7 +345,11 @@ object ServerEditor {
                 if (pathChanged) ws.put("path", path.ifEmpty { "/" })
                 if (hostChanged) { val h = child(ws, "headers"); if (host.isEmpty()) h.remove("Host") else h.put("Host", host) }
             }
-            "grpc" -> if (pathChanged) child(cur, "grpcSettings").put("serviceName", path)
+            "grpc" -> {
+                val gs = child(cur, "grpcSettings")
+                if (pathChanged) gs.put("serviceName", path)
+                if (hostChanged) { if (host.isEmpty()) gs.remove("authority") else gs.put("authority", host) }
+            }
             "h2" -> {
                 val hs = child(cur, "httpSettings")
                 if (pathChanged) hs.put("path", path.ifEmpty { "/" })
@@ -290,6 +359,11 @@ object ServerEditor {
                 val xs = child(cur, "xhttpSettings")
                 if (pathChanged) xs.put("path", path.ifEmpty { "/" })
                 if (hostChanged) xs.put("host", host)
+            }
+            "httpupgrade" -> {
+                val hs = child(cur, "httpupgradeSettings")
+                if (pathChanged) hs.put("path", path.ifEmpty { "/" })
+                if (hostChanged) hs.put("host", host)
             }
             "tcp", "raw" -> {
                 val rq = httpHeaderRequest(cur)
@@ -359,6 +433,8 @@ object ServerEditor {
         "path" to f.path, "serviceName" to f.path, "fp" to f.fp, "pbk" to f.pbk, "sid" to f.sid,
         "alpn" to f.alpn, "allowInsecure" to if (f.allowInsecure) "1" else "0",
         "cipherSuites" to f.cipherSuites, "finalMask" to f.finalMask,
+        "ech" to f.ech, "pcs" to f.pcs, "vcn" to f.vcn, "pqv" to f.pqv,
+        "authority" to if (normNet(f.network) == "grpc") f.host else "",
         // preserved passthroughs (see Fields)
         "spx" to f.spx,
         "mode" to if (passthroughs) f.xmode else "", "seed" to if (passthroughs) f.seed else "",
