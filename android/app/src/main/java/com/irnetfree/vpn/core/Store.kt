@@ -89,6 +89,24 @@ class Store(context: Context) {
         get() = try { ServerConfig.strList(JSONArray(prefs.getString("collapsedGroups", "[]"))).toSet() } catch (_: Exception) { emptySet() }
         set(v) { prefs.edit().putString("collapsedGroups", JSONArray(v.toList()).toString()).apply() }
 
+    /*
+     * The update notice (UpdateCheck): when GitHub last answered (0 = never),
+     * the newest release it named ("v1.18.1") and that release's APK (or its
+     * page), and the version "Later" was tapped on — not mentioned again.
+     */
+    var updateCheckedAt: Long
+        get() = prefs.getLong("updateCheckedAt", 0L)
+        set(v) { prefs.edit().putLong("updateCheckedAt", v).apply() }
+    var updateLatest: String
+        get() = prefs.getString("updateLatest", "") ?: ""
+        set(v) { prefs.edit().putString("updateLatest", v).apply() }
+    var updateUrl: String
+        get() = prefs.getString("updateUrl", "") ?: ""
+        set(v) { prefs.edit().putString("updateUrl", v).apply() }
+    var updateDismissed: String
+        get() = prefs.getString("updateDismissed", "") ?: ""
+        set(v) { prefs.edit().putString("updateDismissed", v).apply() }
+
     private fun <T> read(key: String, map: (JSONObject) -> T): MutableList<T> {
         val out = ArrayList<T>()
         try { val a = JSONArray(prefs.getString(key, "[]")); for (i in 0 until a.length()) out.add(map(a.getJSONObject(i))) } catch (_: Exception) {}
