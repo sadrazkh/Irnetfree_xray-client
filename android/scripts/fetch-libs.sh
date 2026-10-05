@@ -10,16 +10,16 @@
 # Env overrides:
 #   LIBV2RAY_TAG            pin a specific AndroidLibXrayLite tag (default: pinned below)
 #   PATTN_TAG               pin the patterniha/Xray-core release (default: pinned below)
+#   PATTN_ABIS              "<abi>:<asset.zip> ..." (default: arm64-v8a only)
+#   HEV_SO_URL_ARM64_V8A   URL to libhev-socks5-tunnel.so for arm64-v8a
+#   HEV_SO_URL_ARMEABI_V7A URL for armeabi-v7a
+#   HEV_SO_URL_X86_64      URL for x86_64
 #
 # Android 10+ will not execute a file an app downloads into its own storage, so
 # the cores cannot be updated by hand on a phone the way Required files does on
 # the desktop: they ship inside the APK, and a newer core arrives with a newer
 # IRNetFree (the app says when one is out). Bump the pins below with the
 # desktop's defaults.
-#   PATTN_ABIS              "<abi>:<asset.zip> ..." (default: arm64-v8a only)
-#   HEV_SO_URL_ARM64_V8A   URL to libhev-socks5-tunnel.so for arm64-v8a
-#   HEV_SO_URL_ARMEABI_V7A URL for armeabi-v7a
-#   HEV_SO_URL_X86_64      URL for x86_64
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
