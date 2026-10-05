@@ -82,6 +82,15 @@ class AssetUpdater {
     this.now = o.now || (() => Date.now());
     this.timer = null;
     this.firstTimer = null;
+    /**
+     * Cores whose last download put back the version they had: { installed,
+     * target } by id. The release the target names could not be fetched (a
+     * 404, or the API's 60-an-hour limit) and the downloader installed the
+     * latest stable again (downloader.defaultRelease). Not downloaded again
+     * while the installed version and the target are the same — a restart, or
+     * a newer target, tries again.
+     */
+    this.unmoved = {};
   }
 
   mode() {
@@ -108,7 +117,19 @@ class AssetUpdater {
           const cur = versionNumber(await this.o.currentVersion(id));
           const latest = versionNumber(await this.o.latestVersion(id));
           // An unreadable version on either side is not a reason to download.
-          if (cur && latest && cmpVersion(latest, cur) > 0) { await this.o.download(id); done.push(id); }
+          if (!(cur && latest && cmpVersion(latest, cur) > 0)) continue;
+          const miss = this.unmoved[id];
+          if (miss && miss.installed === cur && miss.target === latest) continue;   // the same miss as last time
+          await this.o.download(id);
+          // Updated is what the core says now — not that a download ran.
+          const after = versionNumber(await this.o.currentVersion(id));
+          if (after && after !== cur) { done.push(id); delete this.unmoved[id]; continue; }
+          if (after) {
+            this.unmoved[id] = { installed: cur, target: latest };
+            this.o.onLog(`${id}: the update put ${cur} back (${latest} could not be fetched) — not downloaded again while ${latest} is the newest`, 'warn');
+          } else {
+            this.o.onLog(`${id}: downloaded, but its version cannot be read — not counted as updated`, 'warn');
+          }
         } catch (e) { this.o.onLog(`Update check failed for ${id}: ` + e.message, 'warn'); }
       }
     }

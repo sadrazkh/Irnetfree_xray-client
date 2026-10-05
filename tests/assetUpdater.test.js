@@ -9,22 +9,30 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { AssetUpdater, cmpVersion, versionNumber, WEEK_MS } = require('../src/main/assetUpdater');
 
+/**
+ * `ver`: what each core answers `version` with now; a download installs what
+ * `h.installs(id)` says — the latest release by default, as the downloader
+ * does when it can fetch it (a test may make it put the same version back).
+ */
 function make(over) {
   const log = [], dl = [];
   let checkedAt = 0, now = 10 * WEEK_MS;
+  const ver = { xray: 'Xray 26.3.27 (Xray, Penetrates Everything.)', 'xray-pattn': '26.9.1' };
+  const latest = { xray: '26.4.1', 'xray-pattn': 'v26.9.1' };
+  const h = { dl, log, ver, latest, installs: (id) => latest[id] };
   const u = new AssetUpdater(Object.assign({
     getSettings: () => ({ autoUpdateAssets: 'all' }),
     getCheckedAt: () => checkedAt,
     setCheckedAt: (t) => { checkedAt = t; },
-    download: async (c) => { dl.push(c); },
+    download: async (c) => { dl.push(c); if (c in ver) ver[c] = h.installs(c); },
     installed: (id) => id !== 'sing-box',
-    currentVersion: async (id) => (id === 'xray' ? 'Xray 26.3.27 (Xray, Penetrates Everything.)' : '26.9.1'),
-    latestVersion: async (id) => (id === 'xray' ? '26.4.1' : 'v26.9.1'),
+    currentVersion: async (id) => ver[id],
+    latestVersion: async (id) => latest[id],
     busy: () => false,
-    onLog: (l) => log.push(l),
+    onLog: (l, level) => log.push(level ? `[${level}] ${l}` : l),
     now: () => now
   }, over || {}));
-  return { u, dl, log, set: (t) => { now = t; }, checked: () => checkedAt };
+  return Object.assign(h, { u, set: (t) => { now = t; }, checked: () => checkedAt });
 }
 
 test('cmpVersion and versionNumber', () => {
@@ -85,12 +93,45 @@ test('off: never; busy (a tunnel is up): deferred without moving the stamp', asy
 });
 
 test('a failing download or an unreadable version is a log line, not a stuck week', async () => {
-  const f = make({ download: async (c) => { if (c === 'geo') throw new Error('net'); } });
+  const f = make();
+  const install = f.u.o.download;   // the cores still install; only the geo download fails
+  f.u.o.download = async (c) => { if (c === 'geo') throw new Error('net'); return install(c); };
   assert.deepEqual(await f.u.tick(), { ran: true, done: ['xray'] });
   assert.ok(f.log.some(l => /Geo update failed: net/.test(l)));
   assert.equal(f.checked(), 10 * WEEK_MS, 'the week still counts');
   const v = make({ currentVersion: async () => 'garbage' });
   assert.deepEqual(await v.u.tick(), { ran: true, done: ['geo'] }, 'no version, no download');
+});
+
+test('a core download that puts the same version back is not "Updated automatically" — and is not downloaded again until the target moves', async () => {
+  // Final review, minor 5 (downloader.defaultRelease): `tags/v26.9.30` could
+  // not be fetched — a 404, or the API's 60-an-hour limit — while
+  // `releases/latest` could, so the weekly tick reinstalled the same 26.3.27
+  // every week and logged "Updated automatically: xray".
+  const h = make();
+  h.latest.xray = '26.9.30';
+  h.installs = (id) => (id === 'xray' ? 'Xray 26.3.27 (Xray, Penetrates Everything.)' : h.latest[id]);
+  assert.deepEqual(await h.u.tick(), { ran: true, done: ['geo'] }, 'tried, but nothing changed');
+  assert.deepEqual(h.dl, ['geo', 'xray']);
+  assert.ok(!h.log.some((l) => /Updated automatically: .*xray/.test(l)), JSON.stringify(h.log));
+  assert.ok(h.log.some((l) => /^\[warn\] .*xray.*26\.3\.27.*26\.9\.30/.test(l)), 'said, with both versions: ' + JSON.stringify(h.log));
+  // a week on, the same target: not downloaded again
+  h.set(11 * WEEK_MS + 1);
+  assert.deepEqual(await h.u.tick(), { ran: true, done: ['geo'] });
+  assert.deepEqual(h.dl, ['geo', 'xray', 'geo'], 'no second download of the same miss');
+  // the target moves (a newer release, or the suggested one reachable now): tried again — and this time it took
+  h.latest.xray = '26.10.1';
+  h.installs = (id) => h.latest[id];
+  h.set(12 * WEEK_MS + 2);
+  assert.deepEqual(await h.u.tick(), { ran: true, done: ['geo', 'xray'] });
+  assert.ok(h.log.some((l) => /Updated automatically: geo, xray/.test(l)));
+});
+
+test('a core download whose version cannot be read afterwards is not claimed as an update either', async () => {
+  const h = make();
+  h.installs = (id) => (id === 'xray' ? 'garbage' : h.latest[id]);
+  assert.deepEqual(await h.u.tick(), { ran: true, done: ['geo'] });
+  assert.deepEqual(h.dl, ['geo', 'xray']);
 });
 
 test('start() arms an interval and a first run; stop() clears both; neither holds the process', async () => {
