@@ -1,5 +1,8 @@
 package com.irnetfree.vpn.vpn
 
+import com.irnetfree.vpn.core.AppSettings
+import com.irnetfree.vpn.core.ConnectionPlan
+import com.irnetfree.vpn.core.EngineChoice
 import com.irnetfree.vpn.core.LocalAuth
 import com.irnetfree.vpn.core.ServerConfig
 import org.json.JSONArray
@@ -167,6 +170,33 @@ class TunnelSetupTest {
         } finally { taken.close() }
         assertTrue(LocalPort.isFree(port))
         assertTrue(LocalPort.waitFree(port, 300))
+    }
+
+    @Test fun muxReachesTheXrayFormatConfigs_neverSingBox() {
+        // Mux (Mux.kt, spec §4): the ids the connect chose reach the config the
+        // in-process core and PattN run; sing-box has no mux of Xray's.
+        val ob = JSONObject().put("protocol", "vless")
+            .put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().put("address", "a.example").put("port", 443)
+                .put("users", JSONArray().put(JSONObject().put("id", "u-a").put("encryption", "none"))))))
+            .put("streamSettings", JSONObject().put("network", "ws").put("security", "tls")
+                .put("tlsSettings", JSONObject().put("serverName", "a.example"))
+                .put("wsSettings", JSONObject().put("path", "/ws").put("headers", JSONObject().put("Host", "a.example"))))
+        val a = ServerConfig("a", "a", "vless", "a.example", 443, ob)
+        val s = AppSettings(blockAds = false)
+        fun proxy(json: String): JSONObject {
+            val outs = JSONObject(json).getJSONArray("outbounds")
+            return (0 until outs.length()).map { i: Int -> outs.getJSONObject(i) }.first { o: JSONObject -> o.optString("tag") == "proxy" }
+        }
+        for (e in listOf(EngineChoice.XRAY, EngineChoice.PATTN)) {
+            val muxed = TunnelSetup.coreConfig(e, ConnectionPlan.Single(a), s, true, emptyMap(), null, null, muxIds = setOf("a")) { _ -> }
+            assertEquals(e, muxed.engine)
+            assertEquals(8, proxy(muxed.json).getJSONObject("mux").getInt("concurrency"))
+            val today = TunnelSetup.coreConfig(e, ConnectionPlan.Single(a), s, true, emptyMap(), null, null) { _ -> }
+            assertFalse(proxy(today.json).has("mux"))
+        }
+        val sb = TunnelSetup.coreConfig(EngineChoice.SINGBOX, ConnectionPlan.Single(a), s, true, emptyMap(), null, null, muxIds = setOf("a")) { _ -> }
+        assertEquals(EngineChoice.SINGBOX, sb.engine)
+        assertFalse(sb.json, sb.json.contains("\"mux\""))
     }
 
     @Test fun anErrorOutlivesTheTeardownAndEndsTheSessionClock() {
