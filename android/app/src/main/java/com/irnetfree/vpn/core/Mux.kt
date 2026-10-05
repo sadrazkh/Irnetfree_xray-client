@@ -94,13 +94,14 @@ object Mux {
 
     /**
      * May this outbound carry mux? VLESS without a `flow`, VMess and Trojan,
-     * over `ws` or `httpupgrade`. gRPC, XHTTP and H2 multiplex already; Vision,
-     * REALITY on raw, mKCP, Hysteria, WireGuard and Shadowsocks are never touched.
+     * over `ws` (or `websocket`, the core's other name for it) or
+     * `httpupgrade`. gRPC, XHTTP and H2 multiplex already; Vision, REALITY on
+     * raw, mKCP, Hysteria, WireGuard and Shadowsocks are never touched.
      */
     fun eligible(outbound: JSONObject?): Boolean {
         if (outbound == null) return false
         val network = str(outbound.optJSONObject("streamSettings"), "network").lowercase()
-        if (network != "ws" && network != "httpupgrade") return false
+        if (network != "ws" && network != "websocket" && network != "httpupgrade") return false
         return when (str(outbound, "protocol").lowercase()) {
             "vmess", "trojan" -> true
             "vless" -> noFlow(outbound.optJSONObject("settings"))
@@ -141,7 +142,7 @@ object Mux {
         val path: String
         val host: String
         when (network) {
-            "ws" -> {
+            "ws", "websocket" -> {
                 val w = ss?.optJSONObject("wsSettings")
                 path = str(w, "path")
                 host = str(w?.optJSONObject("headers"), "Host").ifEmpty { str(w, "host") }
