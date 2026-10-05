@@ -212,7 +212,11 @@ const proxyOf = (config) => config.outbounds.find((o) => o.tag === 'proxy');
 /**
  * A fake of what probeMux is handed: free ports, the REAL test-config builder,
  * cores that only record themselves, and requests answered from `mux` / `plain`
- * (true = it answered) in order. `events` is the order things happened in.
+ * in order — true: it answered; false (or nothing left): the connection was
+ * closed; an object: that very reply. `startThrows` fails every start,
+ * `startThrowsFor` the starts of one kind ('mux' / 'plain'); `exited` names a
+ * kind whose core has already exited (its proc's exitCode). `events` is the
+ * order things happened in.
  */
 function fakeRunner(opts = {}) {
   const r = { starts: [], cleanups: 0, requests: [], events: [], muxAnswers: (opts.mux || []).slice(), plainAnswers: (opts.plain || []).slice() };
@@ -222,11 +226,13 @@ function fakeRunner(opts = {}) {
     buildTestConfig: (target, p) => buildTestConfig(target, p),
     startTest: async (config) => {
       if (opts.startDelayMs) await sleep(opts.startDelayMs);
-      if (opts.startThrows) throw new Error('xray binary not found');
-      const core = { config, port: config.inbounds[0].port, muxed: !!proxyOf(config).mux, cleaned: 0 };
-      core.cleanup = () => { core.cleaned++; r.cleanups++; r.events.push('cleanup ' + (core.muxed ? 'mux' : 'plain')); };
+      const kind = proxyOf(config).mux ? 'mux' : 'plain';
+      if (opts.startThrows || opts.startThrowsFor === kind) throw new Error('spawn xray ENOENT');
+      const proc = { pid: 4000 + r.starts.length, exitCode: opts.exited === kind ? 23 : null, signalCode: null };
+      const core = { config, proc, port: config.inbounds[0].port, muxed: kind === 'mux', cleaned: 0 };
+      core.cleanup = () => { core.cleaned++; r.cleanups++; r.events.push('cleanup ' + kind); };
       r.starts.push(core);
-      r.events.push('start ' + (core.muxed ? 'mux' : 'plain'));
+      r.events.push('start ' + kind);
       return core;
     },
     httpThroughProxy: async (p, o) => {
@@ -238,13 +244,16 @@ function fakeRunner(opts = {}) {
       if (opts.requestThrows) throw new Error('boom');
       if (opts.answerMs) await sleep(opts.answerMs);
       r.events.push('answered ' + kind);
-      const ok = (kind === 'mux' ? r.muxAnswers : r.plainAnswers).shift();
-      return ok ? { ok: true, ms: 120, status: 204 } : { ok: false, ms: -1, error: 'closed' };
+      const a = (kind === 'mux' ? r.muxAnswers : r.plainAnswers).shift();
+      if (a && typeof a === 'object') return a;
+      return a ? { ok: true, ms: 120, status: 204 } : { ok: false, ms: -1, error: 'closed' };
     }
   };
   if (opts.timeoutMs) r.deps.timeoutMs = opts.timeoutMs;
   return r;
 }
+const TIMED_OUT = { ok: false, ms: -1, error: 'timeout' };
+const REFUSED_PORT = { ok: false, ms: -1, error: 'connect ECONNREFUSED 127.0.0.1:46100' };
 
 test('probeMux: two requests through one muxed core both answer — ok; one core, cleaned up', async () => {
   const r = fakeRunner({ mux: [true, true] });
@@ -323,10 +332,11 @@ test('probeMux: a core that only comes up after the deadline is cleaned up at on
   assert.deepEqual(r.requests, [], 'nothing was asked through it');
 });
 
-test('probeMux: a mux that hangs leaves the control its share of the budget', async () => {
-  // A server that never answers through mux (rather than refusing it) would
-  // otherwise spend the whole budget there and end as unknown — tested again
-  // on every connect. The control still gets to say "this server works".
+test('probeMux: a mux that runs out of its share is unknown — whatever the control would say; no control is asked', async () => {
+  // The owner's line (live run, Xray 26.3.27, the ECH server): the mux attempt
+  // used up its 5 s on a slow moment, the control asked after it answered, and
+  // that TIMEOUT was read as "refuses mux" — mux off for three days exactly
+  // where it is needed. A slow line says nothing about the server.
   const r = fakeRunner({ plain: [true], timeoutMs: 400 });
   r.deps.httpThroughProxy = async (p, o) => {
     const core = r.starts.find((c) => c.port === p);
@@ -334,11 +344,71 @@ test('probeMux: a mux that hangs leaves the control its share of the budget', as
     if (core.muxed) return new Promise((resolve) => setTimeout(() => resolve({ ok: false, ms: -1, error: 'timeout' }), o.timeout));
     return { ok: true, ms: 50, status: 204 };
   };
+  const t0 = Date.now();
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'unknown');
+  assert.ok(Date.now() - t0 < 390, 'over when the mux share is, not at the end of the budget');
+  assert.deepEqual(r.requests.map((q) => q.kind), ['mux']);
+  assert.ok(r.requests[0].opts.timeout <= 250, `the mux half keeps its 5/8 share: ${r.requests[0].opts.timeout}`);
+  assert.equal(r.starts.length, 1);
+  assert.equal(r.cleanups, 1);
+});
+
+test('probeMux: mux times out and the control answers — unknown, never unsupported', async () => {
+  for (const timedOut of [TIMED_OUT, { ok: false, ms: -1, error: 'socks timeout' }, { ok: false, ms: -1, error: 'ETIMEDOUT' }]) {
+    const r = fakeRunner({ mux: [timedOut], plain: [true] });
+    assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'unknown', timedOut.error);
+    assert.equal(r.cleanups, r.starts.length);
+  }
+  // …the second request through the mux connection timing out is no answer either
+  const second = fakeRunner({ mux: [true, TIMED_OUT], plain: [true] });
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), second.deps), 'unknown');
+});
+
+test('probeMux: mux closed (a definitive no) and the control answers — unsupported; any other definitive no likewise', async () => {
+  const definitive = [
+    { ok: false, ms: -1, error: 'closed' },                      // the server dropped the muxed stream
+    { ok: false, ms: -1, error: 'ECONNRESET' },                  // reset
+    { ok: false, ms: -1, error: 'socks connect failed code 5' }, // the core refused the request
+    { ok: false, ms: 80, status: 503 }                           // answered, with an error status
+  ];
+  for (const no of definitive) {
+    const r = fakeRunner({ mux: [no], plain: [true] });
+    assert.equal(await probeMux(shaped('p', 'trojan', 'ws'), r.deps), 'unsupported', JSON.stringify(no));
+    assert.deepEqual(r.requests.map((q) => q.kind), ['mux', 'plain']);
+    assert.equal(r.cleanups, 2);
+  }
+  // …and the control not answering makes it unknown, whatever the mux said
+  for (const control of [false, TIMED_OUT]) {
+    const r = fakeRunner({ mux: [false], plain: [control] });
+    assert.equal(await probeMux(shaped('p', 'trojan', 'ws'), r.deps), 'unknown', JSON.stringify(control));
+  }
+});
+
+test('probeMux: the muxed core does not start and the control answers — unsupported (the config with mux is what failed)', async () => {
+  const r = fakeRunner({ startThrowsFor: 'mux', plain: [true] });
   assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'unsupported');
-  const [m, p] = r.requests;
-  assert.ok(m.opts.timeout < 400, `the mux half is capped: ${m.opts.timeout}`);
-  assert.ok(p.opts.timeout > 0);
-  assert.equal(r.cleanups, 2);
+  assert.deepEqual(r.starts.map((c) => c.muxed), [false], 'only the control core came up');
+  assert.equal(r.cleanups, 1);
+  // a core that exited (its config refused) answers its port with a refusal: the same "did not start"
+  const exited = fakeRunner({ exited: 'mux', mux: [REFUSED_PORT], plain: [true] });
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), exited.deps), 'unsupported');
+  assert.deepEqual(exited.requests.map((q) => q.kind), ['mux', 'plain'], 'not asked again: it is gone');
+});
+
+test('probeMux: a core still starting (its port refused, the core alive) is asked again — not a refusal', async () => {
+  // startTest gives a core 500 ms. On a router's slow CPU the first core after
+  // a boot runs from a cold binary: a refused port then is a core not yet
+  // listening — taken for "refuses mux", a control on the now warm binary would
+  // have made it unsupported for three days.
+  const r = fakeRunner({ mux: [REFUSED_PORT, REFUSED_PORT, true, true] });
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), r.deps), 'ok');
+  assert.deepEqual(r.requests.map((q) => q.kind), ['mux', 'mux', 'mux', 'mux']);
+  assert.equal(r.starts.length, 1);
+  // …and one that never opens its port within the mux share is a timeout: unknown
+  const never = fakeRunner({ mux: Array(100).fill(REFUSED_PORT), plain: [true], timeoutMs: 400 });
+  assert.equal(await probeMux(shaped('p', 'vless', 'ws'), never.deps), 'unknown');
+  assert.equal(never.starts.length, 1, 'no control after a timeout');
+  assert.equal(never.cleanups, 1);
 });
 
 /* ----------------------------- one connect’s decision ----------------------------- */
