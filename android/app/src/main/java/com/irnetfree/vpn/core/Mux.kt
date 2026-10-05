@@ -14,10 +14,18 @@ import java.security.MessageDigest
  * over a handful of real connections — fewer handshakes, less CPU and battery.
  * Not every server accepts it, so in Settings → Mux "auto" (the default) a
  * server is tested once before the connect that needs it, and the verdict is
- * kept: "ok" for 7 days, "unsupported" for 3 — per server FINGERPRINT, so an
+ * kept: "ok" for 7 days, "unsupported" for 1 — per server FINGERPRINT, so an
  * edited server, or a subscription refresh with new parameters, is tested
  * again. "on" muxes every eligible server untested; "off" writes the configs of
  * before, byte for byte.
+ *
+ * After the review (the same rules as the desktop's): a test without a clear
+ * answer never replaces a verdict — it keeps the one there was (expired, or
+ * marked for a recheck) and is not repeated for an hour (`retryAfter`); with
+ * none, it is kept as an unknown for that hour. A muxed connection that drops
+ * keeps its servers' ok, marked `recheck`: the user's (or the boot's) next
+ * connect tests them again; a reconnect of the service's own never tests — it
+ * uses what is kept, a recheck counting as ok.
  *
  * Everything here is pure — the cores, the store and the log are handed in —
  * so the rules are tested off a device (MuxTest). The real test runs through
@@ -32,7 +40,8 @@ object Mux {
     /**
      * A test's verdict: mux carried both requests / mux definitively failed
      * and plain worked / nothing definite — a timeout, or no answer either way
-     * (never remembered). [OK] is also the mux attempt's outcome when it worked.
+     * (it never replaces a verdict: see [record]). [OK] is also the mux
+     * attempt's outcome when it worked.
      */
     const val OK = "ok"
     const val UNSUPPORTED = "unsupported"
@@ -50,7 +59,9 @@ object Mux {
     const val DAY_MS: Long = 24L * 3600 * 1000
     /** How long a verdict holds. */
     const val OK_TTL_MS: Long = 7 * DAY_MS
-    const val UNSUPPORTED_TTL_MS: Long = 3 * DAY_MS
+    const val UNSUPPORTED_TTL_MS: Long = 1 * DAY_MS
+    /** After a test without a clear answer, the server is not tested again for this long. */
+    const val RETRY_MS: Long = 3600L * 1000
 
     /** One server's whole test, from the first core started to the last one stopped. */
     const val PROBE_BUDGET_MS: Long = 8_000
@@ -152,26 +163,58 @@ object Mux {
         return digest.take(16).joinToString("") { b: Byte -> "%02x".format(b.toInt() and 0xFF) }
     }
 
-    /** A remembered verdict: mux worked (or the server did not accept it), [at] epoch ms. Stored as {ok, at}. */
-    data class Probe(val ok: Boolean, val at: Long)
+    /**
+     * What is kept about a server, stored as {ok, at, recheck?, retryAfter?}:
+     * [ok] true / false — the verdict "ok" / "unsupported", reached at [at]
+     * (epoch ms) — or null: no verdict, only a test without a clear answer at
+     * [at]. [recheck]: a muxed connection through it dropped since — still ok,
+     * to be tested again by the next connect that may test. [retryAfter]: a
+     * test without a clear answer was made; none again before this.
+     */
+    data class Probe(val ok: Boolean?, val at: Long, val recheck: Boolean = false, val retryAfter: Long = 0L)
 
-    /** "ok" / "unsupported" while [entry] still holds (7 / 3 days), else null: test again. */
+    /** "ok" / "unsupported" while [entry]'s verdict still holds by its age (7 days / 1 day), else null. */
     fun freshVerdict(entry: Probe?, now: Long): String? {
-        if (entry == null || entry.at <= 0L) return null
+        if (entry == null || entry.ok == null || entry.at <= 0L) return null
         val age = now - entry.at
         if (age < 0L) return null              // stamped by a clock that has since gone back
         return if (entry.ok) (if (age < OK_TTL_MS) OK else null) else (if (age < UNSUPPORTED_TTL_MS) UNSUPPORTED else null)
     }
 
-    /** What a connect does: the server ids that get mux, and the servers that have no fresh verdict yet. */
+    /**
+     * Mux on without a test now: an ok within its 7 days (marked for a recheck
+     * or not), or an ok a test without a clear answer kept, before its retry.
+     */
+    private fun usable(e: Probe?, now: Long): Boolean =
+        e != null && e.ok == true && (freshVerdict(e, now) == OK || e.retryAfter > now)
+
+    /**
+     * Tested by a connect that may test (the user's, the boot's): nothing
+     * known, a verdict past its age, or an ok marked for a recheck — never
+     * before its retryAfter.
+     */
+    private fun needsTest(e: Probe?, now: Long): Boolean {
+        if (e == null) return true
+        if (e.retryAfter > now) return false
+        return freshVerdict(e, now) == null || e.recheck
+    }
+
+    /**
+     * What a connect does: the server ids that get mux with no further test,
+     * and the servers a connect that may test should test first (a server may
+     * be in both: an ok marked for a recheck stays on until its test says
+     * otherwise).
+     */
     data class Plan(val muxIds: Set<String>, val toProbe: List<ServerConfig>)
 
     /**
-     * off → nothing. on → every eligible id, no test. auto → the ids with a
-     * fresh "ok", and the eligible servers with no fresh verdict to test (one
-     * per fingerprint). A fresh "unsupported" is neither.
+     * off → nothing. on → every eligible id, no test. auto → the ids that may
+     * have mux without a test (usable), and the eligible servers to test (one
+     * per fingerprint): nothing known, past its age, or marked for a recheck,
+     * and not before its retryAfter. [recovery]: a reconnect of the service's
+     * own — never a test; the kept verdict whatever its age, a recheck as ok.
      */
-    fun plan(mode: String, servers: List<ServerConfig>, cache: Map<String, Probe>, now: Long): Plan {
+    fun plan(mode: String, servers: List<ServerConfig>, cache: Map<String, Probe>, now: Long, recovery: Boolean = false): Plan {
         val m = modeOf(mode)
         if (m == OFF) return Plan(emptySet(), emptyList())
         val ids = LinkedHashSet<String>()
@@ -181,11 +224,38 @@ object Mux {
             if (!eligible(s.outbound)) continue
             if (m == ON) { ids.add(s.id); continue }
             val fp = fingerprint(s)
-            val v = freshVerdict(cache[fp], now)
-            if (v == OK) ids.add(s.id)
-            else if (v == null && queued.add(fp)) toProbe.add(s)
+            val e = cache[fp]
+            if (recovery) {
+                if (e?.ok == true) ids.add(s.id)
+                continue
+            }
+            if (usable(e, now)) ids.add(s.id)
+            if (needsTest(e, now) && queued.add(fp)) toProbe.add(s)
         }
         return Plan(ids, toProbe)
+    }
+
+    /**
+     * What a test's [verdict] leaves kept for a server whose entry was
+     * [previous]: "ok" / "unsupported" replace it (no recheck, no retry); a
+     * test without a clear answer never does — it keeps the verdict there was
+     * (past its age, or marked for a recheck, included) and stamps a retry an
+     * hour on; with no verdict, it is kept as an unknown with that retry.
+     */
+    fun record(previous: Probe?, verdict: String, now: Long): Probe = when (verdict) {
+        OK -> Probe(true, now)
+        UNSUPPORTED -> Probe(false, now)
+        else -> if (previous != null && previous.ok != null) previous.copy(retryAfter = now + RETRY_MS) else Probe(null, now, retryAfter = now + RETRY_MS)
+    }
+
+    /** A muxed connection dropped: the ok verdicts of its servers ([fingerprints]) are kept, marked for a recheck. */
+    fun markRecheck(probes: Map<String, Probe>, fingerprints: Collection<String>): Map<String, Probe> {
+        val out = HashMap(probes)
+        for (fp in fingerprints) {
+            val e = out[fp] ?: continue
+            if (e.ok == true && !e.recheck) out[fp] = e.copy(recheck = true)
+        }
+        return out
     }
 
     /**
@@ -287,8 +357,11 @@ object Mux {
         return out.values.toList()
     }
 
-    /** A connect's mux: the server ids whose outbounds get it, and (auto) the fingerprints a drop forgets. */
-    data class Pick(val ids: Set<String>, val forget: List<String>) {
+    /**
+     * A connect's mux: the server ids whose outbounds get it, and (auto) the
+     * fingerprints a drop of this connection marks for a recheck.
+     */
+    data class Pick(val ids: Set<String>, val onDrop: List<String>) {
         companion object {
             val NONE = Pick(emptySet(), emptyList())
         }
@@ -296,13 +369,14 @@ object Mux {
 
     /**
      * The connect path's decision, with the test, the store and the log handed
-     * in. In auto the SELECTED server — a single-server plan's — is tested once
-     * ([test]) when it has no fresh verdict; "ok" and "unsupported" are
-     * remembered, "unknown" is not (connect as today, test again next time). A
-     * pool's or an advanced plan's servers are not tested on a phone, one
-     * throwaway core per server before every connect: they use what their own
-     * connects found. One log line per server decided. [wanted] false (the
-     * connect was overtaken): nothing is decided.
+     * in. In auto the SELECTED server — a single-server plan's — is tested
+     * ([test]) when [plan] says so: nothing known, a verdict past its age, or
+     * an ok marked for a recheck, and not before its retryAfter. What a test
+     * says is kept through [record] ([remember] stores it). A pool's or an
+     * advanced plan's servers are not tested on a phone, one throwaway core per
+     * server before every connect: they use what is kept. [recovery]: a
+     * reconnect of the service's own — no test at all. One log line per server
+     * decided. [wanted] false (the connect was overtaken): nothing is decided.
      */
     fun choose(
         mode: String,
@@ -312,13 +386,14 @@ object Mux {
         test: (ServerConfig) -> String,
         remember: (String, Probe) -> Unit,
         log: (String) -> Unit,
-        wanted: () -> Boolean = { true }
+        wanted: () -> Boolean = { true },
+        recovery: Boolean = false
     ): Pick {
         val m = modeOf(mode)
         if (m == OFF) return Pick.NONE
         val servers = targets(connection).filter { s: ServerConfig -> eligible(s.outbound) }
         if (servers.isEmpty()) return Pick.NONE
-        val first = plan(m, servers, cache, now())
+        val first = plan(m, servers, cache, now(), recovery)
         if (m == ON) {
             for (s in servers) if (s.id in first.muxIds) log("Mux on for ${s.name} (Settings → Mux: On)")
             return Pick(first.muxIds, emptyList())
@@ -331,34 +406,51 @@ object Mux {
             val fp = fingerprint(s)
             val v = test(s)
             testedNow[fp] = v
-            if (v == OK || v == UNSUPPORTED) {
-                val p = Probe(v == OK, now())
-                known[fp] = p
-                remember(fp, p)
-            }
+            val p = record(known[fp], v, now())
+            known[fp] = p
+            remember(fp, p)
         }
         if (!wanted()) return Pick.NONE
         val t = now()
-        val second = plan(m, servers, known, t)
+        val second = plan(m, servers, known, t, recovery)
         for (s in servers) {
             val fp = fingerprint(s)
-            log(line(s.name, testedNow[fp], freshVerdict(known[fp], t)))
+            log(line(s.name, s.id in second.muxIds, testedNow[fp], known[fp], t, recovery))
         }
-        val forget = servers.filter { s: ServerConfig -> s.id in second.muxIds }.map { s: ServerConfig -> fingerprint(s) }.distinct()
-        return Pick(second.muxIds, forget)
+        val onDrop = servers.filter { s: ServerConfig -> s.id in second.muxIds }.map { s: ServerConfig -> fingerprint(s) }.distinct()
+        return Pick(second.muxIds, onDrop)
     }
 
-    /** One server's decision in the log: [testedNow] what this connect's test said, else [remembered]. */
-    private fun line(name: String, testedNow: String?, remembered: String?): String = when {
-        testedNow == OK -> "Mux on for $name (tested: works)"
-        testedNow == UNSUPPORTED -> "Mux off for $name (this server does not accept it)"
-        testedNow != null -> "Mux: $name did not answer either way — connecting without it"
-        remembered == OK -> "Mux on for $name (tested earlier: works)"
-        remembered == UNSUPPORTED -> "Mux off for $name (tested earlier: this server does not accept it)"
-        else -> "Mux off for $name (not tested yet — it is tested when you connect to it on its own)"
+    /**
+     * One server's decision in the log: [on] what was decided, [testedNow]
+     * what this connect's test said (null: none ran), [e] what is kept now,
+     * [recovery] a reconnect of the service's own.
+     */
+    private fun line(name: String, on: Boolean, testedNow: String?, e: Probe?, now: Long, recovery: Boolean): String {
+        val state = if (on) "on" else "off"
+        if (testedNow == OK) return "Mux on for $name (tested: works)"
+        if (testedNow == UNSUPPORTED) return "Mux off for $name (this server does not accept it)"
+        if (testedNow != null) {
+            if (e?.ok == null) return "Mux: $name did not answer either way — connecting without it"
+            return "Mux $state for $name (no clear answer this time — keeping the earlier result, tested again in an hour)"
+        }
+        val earlier = when (e?.ok) {
+            true -> "tested earlier: works"
+            false -> "tested earlier: this server does not accept it"
+            else -> "not tested yet"
+        }
+        if (recovery) return "Mux $state for $name (reconnecting, no test — $earlier)"
+        if (e != null && e.retryAfter > now) {
+            if (e.ok == null) return "Mux off for $name (the last test had no clear answer — tested again within the hour)"
+            return "Mux $state for $name ($earlier; the last test had no clear answer)"
+        }
+        if (e == null || e.ok == null) return "Mux off for $name (not tested yet — it is tested when you connect to it on its own)"
+        if (freshVerdict(e, now) == null) return "Mux off for $name (tested too long ago — it is tested when you connect to it on its own)"
+        if (on && e.recheck) return "Mux on for $name ($earlier; tested again when you connect to it on its own)"
+        return "Mux $state for $name ($earlier)"
     }
 
-    /* ---------------- the stored verdicts: {fingerprint: {ok, at}} (Store.muxProbes) ---------------- */
+    /* ------ the kept verdicts: {fingerprint: {ok, at, recheck?, retryAfter?}} (Store.muxProbes) ------ */
 
     fun probesFromJson(text: String?): Map<String, Probe> {
         if (text.isNullOrBlank()) return emptyMap()
@@ -366,15 +458,25 @@ object Mux {
         val out = HashMap<String, Probe>()
         for (k in o.keys().asSequence()) {
             val e = o.optJSONObject(k) ?: continue
+            val ok: Boolean? = if (e.has("ok") && !e.isNull("ok")) e.optBoolean("ok", false) else null
             val at = e.optLong("at", 0L)
-            if (at > 0L) out[k] = Probe(e.optBoolean("ok", false), at)
+            val retryAfter = e.optLong("retryAfter", 0L)
+            // a verdict with its time, or an unknown waiting out its retry; anything else is no entry
+            if ((ok != null && at > 0L) || retryAfter > 0L) out[k] = Probe(ok, at, e.optBoolean("recheck", false), retryAfter)
         }
         return out
     }
 
     fun probesToJson(probes: Map<String, Probe>): String {
         val o = JSONObject()
-        for ((k, p) in probes) o.put(k, JSONObject().put("ok", p.ok).put("at", p.at))
+        for ((k, p) in probes) {
+            val e = JSONObject().put("at", p.at)
+            val ok = p.ok
+            if (ok != null) e.put("ok", ok)
+            if (p.recheck) e.put("recheck", true)
+            if (p.retryAfter > 0L) e.put("retryAfter", p.retryAfter)
+            o.put(k, e)
+        }
         return o.toString()
     }
 

@@ -17,6 +17,7 @@ import org.junit.Test
  */
 class MuxTest {
     private val day = 24L * 3600 * 1000
+    private val hour = 3600L * 1000
     private val now = 1_760_000_000_000L
 
     private fun stream(net: String, security: String = "tls", path: String = "/ws", host: String = "cdn.example", sni: String = "cdn.example"): JSONObject {
@@ -126,18 +127,52 @@ class MuxTest {
         assertTrue(base, Regex("^[0-9a-f]{32}$").matches(base))
     }
 
-    @Test fun aVerdictHoldsSevenDaysWhenItWorked_threeWhenItDidNot() {
+    @Test fun aVerdictHoldsSevenDaysWhenItWorked_oneDayWhenItDidNot() {
         assertEquals(7 * day, Mux.OK_TTL_MS)
-        assertEquals(3 * day, Mux.UNSUPPORTED_TTL_MS)
+        assertEquals(day, Mux.UNSUPPORTED_TTL_MS)
         assertEquals(Mux.OK, Mux.freshVerdict(Mux.Probe(true, now), now))
         assertEquals(Mux.OK, Mux.freshVerdict(Mux.Probe(true, now - 7 * day + 1), now))
         assertNull(Mux.freshVerdict(Mux.Probe(true, now - 7 * day), now))
-        assertEquals(Mux.UNSUPPORTED, Mux.freshVerdict(Mux.Probe(false, now - 3 * day + 1), now))
-        assertNull(Mux.freshVerdict(Mux.Probe(false, now - 3 * day), now))
-        // never tested, never stamped, or stamped by a clock that has since gone back: test again
+        assertEquals(Mux.UNSUPPORTED, Mux.freshVerdict(Mux.Probe(false, now - day + 1), now))
+        assertNull(Mux.freshVerdict(Mux.Probe(false, now - day), now))
+        // never tested, never stamped, stamped by a clock that has since gone back, or no verdict at all: none
         assertNull(Mux.freshVerdict(null, now))
         assertNull(Mux.freshVerdict(Mux.Probe(true, 0L), now))
         assertNull(Mux.freshVerdict(Mux.Probe(true, now + 60_000L), now))
+        assertNull(Mux.freshVerdict(Mux.Probe(null, now, retryAfter = now + hour), now))
+        // an unsupported a day old is tested again on the next connect
+        val no = vless("no")
+        val p = Mux.plan(Mux.AUTO, listOf(no), mapOf(Mux.fingerprint(no) to Mux.Probe(false, now - day)), now)
+        assertEquals(listOf("no"), p.toProbe.map { s: ServerConfig -> s.id })
+    }
+
+    @Test fun anInconclusiveTestKeepsTheEarlierVerdict_andWaitsAnHour() {
+        assertEquals(hour, Mux.RETRY_MS)
+        // an expired ok, an ok marked for a recheck, an unsupported: kept as they are, retried in an hour
+        val expiredOk = Mux.Probe(true, now - 8 * day)
+        assertEquals(Mux.Probe(true, now - 8 * day, retryAfter = now + hour), Mux.record(expiredOk, Mux.UNKNOWN, now))
+        val marked = Mux.Probe(true, now - day, recheck = true)
+        assertEquals(Mux.Probe(true, now - day, recheck = true, retryAfter = now + hour), Mux.record(marked, Mux.UNKNOWN, now))
+        val no = Mux.Probe(false, now - 2 * day)
+        assertEquals(Mux.Probe(false, now - 2 * day, retryAfter = now + hour), Mux.record(no, Mux.UNKNOWN, now))
+        // with no earlier verdict: an unknown of its own, retried in an hour
+        assertEquals(Mux.Probe(null, now, retryAfter = now + hour), Mux.record(null, Mux.UNKNOWN, now))
+        assertEquals(Mux.Probe(null, now, retryAfter = now + hour), Mux.record(Mux.Probe(null, now - 2 * hour, retryAfter = now - hour), Mux.UNKNOWN, now))
+        // ok / unsupported replace whatever was there: the mark and the retry go
+        assertEquals(Mux.Probe(true, now), Mux.record(marked.copy(retryAfter = now + 60_000L), Mux.OK, now))
+        assertEquals(Mux.Probe(false, now), Mux.record(expiredOk, Mux.UNSUPPORTED, now))
+        assertEquals(Mux.Probe(true, now), Mux.record(Mux.Probe(null, now - hour, retryAfter = now), Mux.OK, now))
+    }
+
+    @Test fun aDropMarksTheOkForARecheck_keptAsOk() {
+        val ok = Mux.Probe(true, now - day)
+        val cache = mapOf("a" to ok, "b" to Mux.Probe(false, now - hour), "c" to Mux.Probe(null, now, retryAfter = now + hour))
+        val marked = Mux.markRecheck(cache, listOf("a", "b", "c", "gone"))
+        assertEquals(ok.copy(recheck = true), marked["a"])
+        // only an ok is marked; nothing else changes, nothing is added
+        assertEquals(cache["b"], marked["b"])
+        assertEquals(cache["c"], marked["c"])
+        assertEquals(setOf("a", "b", "c"), marked.keys)
     }
 
     @Test fun theVerdictTable() {
@@ -176,7 +211,7 @@ class MuxTest {
         val fresh = vless("new", path = "/new")
         val cache = mapOf(
             Mux.fingerprint(ok) to Mux.Probe(true, now - day),
-            Mux.fingerprint(no) to Mux.Probe(false, now - day),
+            Mux.fingerprint(no) to Mux.Probe(false, now - hour),
             Mux.fingerprint(stale) to Mux.Probe(true, now - 8 * day))
         val p = Mux.plan(Mux.AUTO, listOf(ok, no, stale, fresh, vless("g", net = "grpc")), cache, now)
         assertEquals(setOf("ok"), p.muxIds)
@@ -190,6 +225,46 @@ class MuxTest {
         assertEquals(Mux.AUTO, Mux.modeOf(""))
         assertEquals(Mux.ON, Mux.modeOf(" On "))
         assertEquals(Mux.OFF, Mux.modeOf("off"))
+    }
+
+    @Test fun planAuto_noTestBeforeItsRetryAfter() {
+        val a = vless("a", path = "/a")
+        val fp = Mux.fingerprint(a)
+        // an inconclusive test and no earlier verdict: off, and not tested again before its hour is up
+        val unknown = mapOf(fp to Mux.Probe(null, now - 10 * 60_000L, retryAfter = now + 50 * 60_000L))
+        val p = Mux.plan(Mux.AUTO, listOf(a), unknown, now)
+        assertTrue(p.muxIds.isEmpty())
+        assertTrue(p.toProbe.isEmpty())
+        assertEquals(listOf("a"), Mux.plan(Mux.AUTO, listOf(a), unknown, now + hour).toProbe.map { s: ServerConfig -> s.id })
+        // an expired ok an inconclusive test kept: still on, and not tested before its hour is up
+        val kept = mapOf(fp to Mux.Probe(true, now - 8 * day, retryAfter = now + 30 * 60_000L))
+        val k = Mux.plan(Mux.AUTO, listOf(a), kept, now)
+        assertEquals(setOf("a"), k.muxIds)
+        assertTrue(k.toProbe.isEmpty())
+        // once it is due: tested again, and on in the meantime only if still within its seven days
+        val due = Mux.plan(Mux.AUTO, listOf(a), kept, now + hour)
+        assertTrue(due.muxIds.isEmpty())
+        assertEquals(listOf("a"), due.toProbe.map { s: ServerConfig -> s.id })
+    }
+
+    @Test fun planAuto_aRecheckIsOnAndTested_aRecoveryConnectUsesTheCacheAndTestsNothing() {
+        val marked = vless("m", path = "/m")
+        val expired = vless("e", path = "/e")
+        val refused = vless("r", path = "/r")
+        val untested = vless("u", path = "/u")
+        val cache = mapOf(
+            Mux.fingerprint(marked) to Mux.Probe(true, now - day, recheck = true),
+            Mux.fingerprint(expired) to Mux.Probe(true, now - 30 * day),
+            Mux.fingerprint(refused) to Mux.Probe(false, now - 5 * day))
+        val servers = listOf(marked, expired, refused, untested)
+        // the user's (or the boot's) connect: a recheck stays on and is tested; so are the expired and the untested
+        val user = Mux.plan(Mux.AUTO, servers, cache, now)
+        assertEquals(setOf("m"), user.muxIds)
+        assertEquals(listOf("m", "e", "r", "u"), user.toProbe.map { s: ServerConfig -> s.id })
+        // a reconnect of the service's own: the cached verdict, whatever its age, a recheck as ok — never a test
+        val recovery = Mux.plan(Mux.AUTO, servers, cache, now, recovery = true)
+        assertEquals(setOf("m", "e"), recovery.muxIds)
+        assertTrue(recovery.toProbe.isEmpty())
     }
 
     @Test fun theServersAPlanDialsAsNonChainTargets() {
@@ -361,13 +436,14 @@ class MuxTest {
 
     private fun choose(
         mode: String, plan: ConnectionPlan, cache: Map<String, Mux.Probe> = emptyMap(), answer: String = Mux.OK,
-        wanted: () -> Boolean = { true }, seen: Seen = Seen()
+        wanted: () -> Boolean = { true }, seen: Seen = Seen(), recovery: Boolean = false
     ): Mux.Pick = Mux.choose(
         mode = mode, connection = plan, cache = cache, now = { now },
         test = { s: ServerConfig -> seen.probed.add(s.id); answer },
         remember = { fp: String, p: Mux.Probe -> seen.remembered.add(Pair(fp, p)) },
         log = { line: String -> seen.lines.add(line) },
-        wanted = wanted
+        wanted = wanted,
+        recovery = recovery
     )
 
     @Test fun choose_autoTestsTheSelectedServer_andRemembersOkAndUnsupported() {
@@ -385,13 +461,71 @@ class MuxTest {
         assertEquals(listOf("Mux off for Germany WS (this server does not accept it)"), no.lines)
     }
 
-    @Test fun choose_unknownConnectsAsTodayAndIsNotRemembered() {
+    @Test fun choose_unknownConnectsAsToday_andIsNotTestedAgainForAnHour() {
         val a = vless("a", name = "Germany WS")
+        val fp = Mux.fingerprint(a)
         val seen = Seen()
         assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), answer = Mux.UNKNOWN, seen = seen))
         assertEquals(listOf("a"), seen.probed)
-        assertTrue(seen.remembered.isEmpty())
+        assertEquals(listOf(Pair(fp, Mux.Probe(null, now, retryAfter = now + hour))), seen.remembered)
         assertEquals(listOf("Mux: Germany WS did not answer either way — connecting without it"), seen.lines)
+        // the next connect within the hour does not test it
+        val again = Seen()
+        assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), mapOf(Pair(fp, Mux.Probe(null, now, retryAfter = now + hour))), seen = again))
+        assertTrue(again.probed.isEmpty())
+        assertEquals(listOf("Mux off for Germany WS (the last test had no clear answer — tested again within the hour)"), again.lines)
+    }
+
+    @Test fun choose_anExpiredOkTestedWithoutAClearAnswer_staysOn_andWaitsAnHour() {
+        val a = vless("a", name = "A")
+        val fp = Mux.fingerprint(a)
+        val expired = Mux.Probe(true, now - 8 * day)
+        val seen = Seen()
+        assertEquals(Mux.Pick(setOf("a"), listOf(fp)), choose(Mux.AUTO, ConnectionPlan.Single(a), mapOf(fp to expired), answer = Mux.UNKNOWN, seen = seen))
+        assertEquals(listOf("a"), seen.probed)
+        assertEquals(listOf(Pair(fp, expired.copy(retryAfter = now + hour))), seen.remembered)
+        assertEquals(listOf("Mux on for A (no clear answer this time — keeping the earlier result, tested again in an hour)"), seen.lines)
+    }
+
+    @Test fun choose_aReconnectOfTheServicesOwnNeverTests_andARecheckCountsAsOk() {
+        val a = vless("a", name = "A")
+        val fp = Mux.fingerprint(a)
+        val marked = Mux.markRecheck(mapOf(fp to Mux.Probe(true, now - day)), listOf(fp))
+        val seen = Seen()
+        assertEquals(Mux.Pick(setOf("a"), listOf(fp)), choose(Mux.AUTO, ConnectionPlan.Single(a), marked, recovery = true, seen = seen))
+        assertTrue(seen.probed.isEmpty())
+        assertTrue(seen.remembered.isEmpty())
+        assertEquals(listOf("Mux on for A (reconnecting, no test — tested earlier: works)"), seen.lines)
+        // whatever the cache holds — an expired ok, nothing, an unsupported — a reconnect tests nothing
+        val old = Seen()
+        assertEquals(Mux.Pick(setOf("a"), listOf(fp)), choose(Mux.AUTO, ConnectionPlan.Single(a), mapOf(fp to Mux.Probe(true, now - 30 * day)), recovery = true, seen = old))
+        val none = Seen()
+        assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), emptyMap(), recovery = true, seen = none))
+        assertEquals(listOf("Mux off for A (reconnecting, no test — not tested yet)"), none.lines)
+        val no = Seen()
+        assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), mapOf(fp to Mux.Probe(false, now - 5 * day)), recovery = true, seen = no))
+        assertTrue(old.probed.isEmpty())
+        assertTrue(none.probed.isEmpty())
+        assertTrue(no.probed.isEmpty())
+    }
+
+    @Test fun choose_theUsersNextConnectTestsARecheck_anInconclusiveOneKeepsMuxOn() {
+        val a = vless("a", name = "A")
+        val fp = Mux.fingerprint(a)
+        val marked = Mux.markRecheck(mapOf(fp to Mux.Probe(true, now - day)), listOf(fp))
+        // works: the mark goes
+        val works = Seen()
+        assertEquals(Mux.Pick(setOf("a"), listOf(fp)), choose(Mux.AUTO, ConnectionPlan.Single(a), marked, answer = Mux.OK, seen = works))
+        assertEquals(listOf("a"), works.probed)
+        assertEquals(listOf(Pair(fp, Mux.Probe(true, now))), works.remembered)
+        // no clear answer: still on, still marked, not tested again for an hour
+        val unclear = Seen()
+        assertEquals(Mux.Pick(setOf("a"), listOf(fp)), choose(Mux.AUTO, ConnectionPlan.Single(a), marked, answer = Mux.UNKNOWN, seen = unclear))
+        assertEquals(listOf(Pair(fp, Mux.Probe(true, now - day, recheck = true, retryAfter = now + hour))), unclear.remembered)
+        // refused: off
+        val refused = Seen()
+        assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), marked, answer = Mux.UNSUPPORTED, seen = refused))
+        assertEquals(listOf(Pair(fp, Mux.Probe(false, now))), refused.remembered)
     }
 
     @Test fun choose_aFreshVerdictIsUsedWithoutATest_aStaleOneIsTestedAgain() {
@@ -404,7 +538,7 @@ class MuxTest {
         assertEquals(listOf("Mux on for A (tested earlier: works)"), fresh.lines)
 
         val refused = Seen()
-        assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), mapOf(fp to Mux.Probe(false, now - day)), seen = refused))
+        assertEquals(Mux.Pick.NONE, choose(Mux.AUTO, ConnectionPlan.Single(a), mapOf(fp to Mux.Probe(false, now - hour)), seen = refused))
         assertTrue(refused.probed.isEmpty())
         assertEquals(listOf("Mux off for A (tested earlier: this server does not accept it)"), refused.lines)
 
@@ -443,11 +577,11 @@ class MuxTest {
         val plan = ConnectionPlan.Advanced(
             listOf(RouteRule("domain", "x.com", "a"), RouteRule("ip", "10.0.0.0/8", "chain:k"), RouteRule("domain", "y.com", "b")),
             "c", mapOf("a" to a, "b" to b, "c" to c), mapOf("k" to listOf(a, c)))
-        val cache = mapOf(Mux.fingerprint(a) to Mux.Probe(true, now - day), Mux.fingerprint(b) to Mux.Probe(false, now - day))
+        val cache = mapOf(Mux.fingerprint(a) to Mux.Probe(true, now - day), Mux.fingerprint(b) to Mux.Probe(false, now - hour))
         val seen = Seen()
         val pick = choose(Mux.AUTO, plan, cache, seen = seen)
         assertEquals(setOf("a"), pick.ids)
-        assertEquals(listOf(Mux.fingerprint(a)), pick.forget)
+        assertEquals(listOf(Mux.fingerprint(a)), pick.onDrop)
         assertTrue(seen.probed.isEmpty())
         assertEquals(listOf(
             "Mux on for A (tested earlier: works)",
@@ -471,10 +605,20 @@ class MuxTest {
     @Test fun theStoredVerdicts_roundTrip_andKeepTheNewest500() {
         val m = mapOf("f1" to Mux.Probe(true, 1000L), "f2" to Mux.Probe(false, 2000L))
         assertEquals(m, Mux.probesFromJson(Mux.probesToJson(m)))
-        // {fingerprint: {ok, at}}
+        // {fingerprint: {ok, at}} — plus recheck and retryAfter when set, and an unknown with no ok at all
         val o = JSONObject(Mux.probesToJson(m))
         assertTrue(o.getJSONObject("f1").getBoolean("ok"))
         assertEquals(2000L, o.getJSONObject("f2").getLong("at"))
+        assertFalse(o.getJSONObject("f1").has("recheck"))
+        assertFalse(o.getJSONObject("f1").has("retryAfter"))
+        val more = mapOf(
+            "r" to Mux.Probe(true, 3000L, recheck = true),
+            "k" to Mux.Probe(true, 4000L, recheck = true, retryAfter = 9000L),
+            "u" to Mux.Probe(null, 5000L, retryAfter = 8000L))
+        assertEquals(more, Mux.probesFromJson(Mux.probesToJson(more)))
+        val u = JSONObject(Mux.probesToJson(more)).getJSONObject("u")
+        assertFalse(u.has("ok"))
+        assertEquals(8000L, u.getLong("retryAfter"))
         // anything unreadable is no verdict
         assertTrue(Mux.probesFromJson(null).isEmpty())
         assertTrue(Mux.probesFromJson("not json").isEmpty())
