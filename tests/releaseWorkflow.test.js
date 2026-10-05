@@ -390,7 +390,9 @@ test("the APK's certificate is pinned to IRNetFree's release key", () => {
   assert.match(text, /if: steps\.keystore\.outputs\.path != ''/, 'only where the real key was used (a fork without it still builds)');
   assert.match(text, /EXPECTED_CERT_SHA256: aabda682057fde3ea565c0d972ea103eed0d6c9ee20232bee98f0b6fc8ce3fc6/);
   assert.match(run, /apksigner" verify --print-certs "\$GITHUB_WORKSPACE\/\$\{\{ steps\.apk\.outputs\.file \}\}"/);
-  assert.match(run, /Signer #1 certificate SHA-256 digest/);
+  assert.ok(run.includes("sed -n 's/^Signer[^:]*certificate SHA-256 digest: //p' | head -n1"),
+    'reads the first signer, numbered ("Signer #1") or bound to an SDK range ("Signer (minSdkVersion=…)")');
+  assert.match(run, /^\s*echo "\$out"\s*$/m, 'apksigner\'s whole answer is in the log');
   assert.match(run, /exit 1/);
   const lines = YML.split(/\r?\n/);
   const verify = lines.findIndex(l => l.includes("- name: Verify the APK's certificate"));
