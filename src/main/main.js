@@ -1262,6 +1262,14 @@ async function connectOnce(serverId, opts = {}) {
   if (stale()) return abandoned;
   if (!check.ok) {
     send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });
+    // ECH on an official core older than 25.8.3 with no Xray-PattN to run it
+    // (xrayManager.validateWithFallback): that core would pass the config and
+    // connect without ECH — what to update is the message.
+    if (check.echUnsupported) {
+      throw new Error(settings.lang === 'en'
+        ? `This server uses ECH, which Xray ${check.coreVersion} does not know (it would connect without it) — update Xray under Settings → Required files`
+        : `این سرور از ECH استفاده می‌کند و Xray ${check.coreVersion} آن را نمی‌شناسد (بدون ECH وصل می‌شد) — از تنظیمات ← فایل‌های موردنیاز، Xray را به‌روز کن`);
+    }
     // The official core refuses plaintext VLESS/Trojan to public addresses and the
     // fork that accepts them is not installed — say so, the renderer offers the download.
     const hint = check.plaintextRejected

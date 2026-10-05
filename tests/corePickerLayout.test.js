@@ -40,9 +40,11 @@ function fixtures() {
   return {
     answers: {
       'sing-box': { stable: answer(router, 'sing-box', sbList, '1.14.2', 'v1.14.2', false), pre: answer(router, 'sing-box', sbList, '1.14.2', 'v1.14.2', true) },
-      xray: { stable: answer(pc, 'xray', rel.xtls(), '26.3.27', 'v26.3.27', false), pre: answer(pc, 'xray', rel.xtls(), '26.3.27', 'v26.3.27', true) }
+      // Xray as a download installs it now: the suggested 26.9.30, which XTLS
+      // calls a pre-release — its card the one with three badges; 26.3.27 GitHub's latest
+      xray: { stable: answer(pc, 'xray', rel.xtls(), '26.9.30', 'v26.3.27', false), pre: answer(pc, 'xray', rel.xtls(), '26.9.30', 'v26.3.27', true) }
     },
-    older: '26.2.6',            // Xray, older than the suggested 26.3.27: the warning
+    older: '26.2.6',            // Xray, older than the suggested 26.9.30: the warning
     newer: '1.15.0-alpha.10',   // sing-box's newest pre-release: the install
     // a reason as long as a real one, with a path that has no space to break at
     installError: 'the downloaded sing-box did not run (spawn C:\\Users\\someone-with-a-long-name\\AppData\\Local\\Temp\\irnf-sing-box-1727999999999\\sing-box-1.15.0-alpha.10-windows-amd64\\sing-box.exe EACCES) — nothing was replaced',
@@ -63,7 +65,8 @@ test('the picker’s render check serves the real markup and CSS with i18n.js an
   const f = fixtures();
   assert.equal(f.answers['sing-box'].pre.cards[0].version, '1.15.0-alpha.10');
   assert.ok(f.answers.xray.stable.cards.some((c) => c.version === f.older && c.olderThanSuggested));
-  assert.ok(f.answers.xray.stable.cards.some((c) => c.isSuggested && c.isLatest && c.isInstalled), 'one card with three badges');
+  assert.ok(f.answers.xray.stable.cards.some((c) => c.version === '26.9.30' && c.isSuggested && c.isInstalled && c.prerelease), 'one card with three badges');
+  assert.equal(f.answers.xray.stable.cards.length, 7, 'the 6 stables and the suggested pre-release');
   assert.doesNotThrow(() => new vm.Script(corePickerCheckJs(f)));
   assert.deepEqual(PICKER_STATES, ['loading', 'stable', 'pre', 'badges', 'warn', 'progress', 'failed', 'busy', 'listError']);
 });
@@ -107,7 +110,7 @@ test('a real render: the version picker, in every state, both directions, three 
           assert.ok(inView(p.buttons[0].box) && p.buttons[0].hit, `Retry not clickable — ${at}`);
           continue;
         }
-        const want = { loading: 4, stable: 7, pre: 11, badges: 6, warn: 6, progress: 11, failed: 11, busy: 7 }[run.state];
+        const want = { loading: 4, stable: 7, pre: 11, badges: 7, warn: 7, progress: 11, failed: 11, busy: 7 }[run.state];
         assert.equal(run.cards.length, want, `${want} cards — ${at}`);
         for (const card of run.cards) {
           const where = `${card.tag} — ${at}`;
@@ -126,7 +129,7 @@ test('a real render: the version picker, in every state, both directions, three 
         if (run.state === 'warn') assert.ok(tagged('v26.2.6').texts.some((t) => /cv-warn-text/.test(t.cls)) && tagged('v26.2.6').buttons.length === 3, `the warning and its two buttons — ${at}`);
         if (run.state === 'progress') assert.ok(tagged('v1.15.0-alpha.10').texts.some((t) => /cv-track/.test(t.cls) && t.box.width > 40), `the progress bar — ${at}`);
         if (run.state === 'failed') assert.ok(tagged('v1.15.0-alpha.10').texts.some((t) => /cv-fail-why/.test(t.cls)), `the reason — ${at}`);
-        if (run.state === 'badges') assert.ok(tagged('v26.3.27').texts.filter((t) => /cv-badge/.test(t.cls)).length === 3, `three badges — ${at}`);
+        if (run.state === 'badges') assert.ok(tagged('v26.9.30').texts.filter((t) => /cv-badge/.test(t.cls)).length === 3, `three badges — ${at}`);
       }
     }
   } finally {

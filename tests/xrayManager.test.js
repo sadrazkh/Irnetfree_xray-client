@@ -15,7 +15,7 @@ let fakeSpawn = null;
 const spawns = [];
 cp.spawn = (...args) => { spawns.push(args); return fakeSpawn ? fakeSpawn(...args) : realSpawn(...args); };
 
-const { XrayManager, getFreePorts, PLAINTEXT_REJECT } = require('../src/main/xrayManager');
+const { XrayManager, getFreePorts, PLAINTEXT_REJECT, usesEch, ECH_SINCE } = require('../src/main/xrayManager');
 const { ENGINES } = require('../src/main/engines');
 
 /** Stand-in for a spawned core, so no real binary has to exist / run. */
@@ -276,6 +276,89 @@ test('validateWithFallback: a check that was killed stays flagged on every path 
     xm.validate = async (cfg, id) => (id === 'xray' ? { ok: false, error: PLAINTEXT } : KILLED);
     assert.deepEqual(await xm.validateWithFallback({}, 'xray'), { ok: false, engine: 'xray-pattn', error: KILLED.error, plaintextRejected: false, killed: true });
   });
+});
+
+/* -------------- v1.18: ECH asked of an official core too old to know it -------------- */
+
+/**
+ * A manager whose cores are stand-ins: `bins` are installed, `versions[id]` is
+ * what `<core> version` says, and `-test` passes on the cores in `validOn`.
+ * `calls` lists the cores each -test ran on; `logs` the log lines.
+ */
+function managerWith({ versions = {}, bins = [], validOn = [] } = {}) {
+  const m = new XrayManager({ dataDir: os.tmpdir(), onLog: (line) => m.logs.push(line) });
+  m.logs = [];
+  m.calls = [];
+  m.resolveBin = (id = 'xray') => (bins.includes(id) ? path.join(os.tmpdir(), exe(id)) : null);
+  m.version = async (id = 'xray') => (versions[id] == null ? '' : versions[id]);
+  m.validate = async (cfg, id) => { m.calls.push(id); return validOn.includes(id) ? { ok: true } : { ok: false, error: `infra/conf: refused by ${id}` }; };
+  return m;
+}
+
+const ECH_CONFIG = { outbounds: [{ protocol: 'vless', streamSettings: { network: 'ws', security: 'tls',
+  tlsSettings: { serverName: 'a.example', echConfigList: 'cloudflare-ech.com+udp://1.1.1.1' } } }] };
+
+test('ECH on an official core older than 25.8.3 runs on Xray-PattN when it is installed', async () => {
+  const m = managerWith({ versions: { xray: '25.1.30', 'xray-pattn': '26.9.22' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  const r = await m.validateWithFallback(ECH_CONFIG, 'xray');
+  assert.deepEqual([r.ok, r.engine, r.fellBack], [true, 'xray-pattn', true]);
+  assert.deepEqual(m.calls, ['xray-pattn'], 'the official core is not asked: it would pass the config and drop the ECH');
+  assert.match(m.logs.at(-1), /uses ECH, which xray 25\.1\.30 does not know — running it on Xray-PattN/);
+  // what the fork refuses is the fork's own error
+  const n = managerWith({ versions: { xray: '25.1.30' }, bins: ['xray', 'xray-pattn'], validOn: [] });
+  assert.deepEqual(await n.validateWithFallback(ECH_CONFIG, 'xray'), { ok: false, engine: 'xray-pattn', error: 'infra/conf: refused by xray-pattn', plaintextRejected: false });
+});
+
+test('ECH on an old official core with no fork is refused with the version in the answer', async () => {
+  const m = managerWith({ versions: { xray: '25.1.30' }, bins: ['xray'], validOn: ['xray'] });
+  const r = await m.validateWithFallback(ECH_CONFIG, 'xray');
+  assert.equal(r.ok, false);
+  assert.equal(r.echUnsupported, true);
+  assert.equal(r.coreVersion, '25.1.30');
+  assert.equal(r.engine, 'xray');
+  assert.equal(r.plaintextRejected, false);
+  assert.equal(r.error, 'xray 25.1.30 does not know ECH (25.8.3 and newer do) — it would connect without it');
+  assert.deepEqual(m.calls, [], 'not even -test: that would say "Configuration OK."');
+  // the router's opkg feed (24.12.31), and the release right before echSockopt
+  for (const v of ['24.12.31', '25.8.2']) {
+    const old = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    assert.equal((await old.validateWithFallback(ECH_CONFIG, 'xray')).echUnsupported, true, v);
+  }
+});
+
+test('ECH on 26.9.30, or on a core whose version cannot be read, takes the ordinary path', async () => {
+  for (const v of ['26.9.30', '']) {
+    const m = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    const r = await m.validateWithFallback(ECH_CONFIG, 'xray');
+    assert.deepEqual([r.ok, r.engine], [true, 'xray']);
+  }
+  // 25.8.3 itself knows it
+  const edge = managerWith({ versions: { xray: '25.8.3' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await edge.validateWithFallback(ECH_CONFIG, 'xray'), { ok: true, engine: 'xray' });
+  assert.deepEqual(edge.calls, ['xray']);
+  assert.equal(ECH_SINCE, '25.8.3');
+});
+
+test('ECH: a config without it is never asked the core’s version, and a config sent to Xray-PattN is the fork’s alone', async () => {
+  const m = managerWith({ versions: { xray: '25.1.30', 'xray-pattn': '26.9.22' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  let asked = 0;
+  m.version = async () => { asked++; return '25.1.30'; };
+  const plain = { outbounds: [{ protocol: 'vless', streamSettings: { network: 'ws', security: 'tls', tlsSettings: { serverName: 'a.example' } } }] };
+  assert.deepEqual(await m.validateWithFallback(plain, 'xray'), { ok: true, engine: 'xray' });
+  assert.equal(asked, 0);
+  assert.deepEqual(await m.validateWithFallback(ECH_CONFIG, 'xray-pattn'), { ok: true, engine: 'xray-pattn' });
+  assert.equal(asked, 0);
+});
+
+test('usesEch: only a non-empty echConfigList counts', () => {
+  assert.equal(usesEch(ECH_CONFIG), true);
+  assert.equal(usesEch({ outbounds: [{ streamSettings: { tlsSettings: { echConfigList: '  ' } } }] }), false);
+  assert.equal(usesEch({ outbounds: [{ streamSettings: { tlsSettings: {} } }] }), false);
+  // the second hop of a chain carries it as much as the first; nothing at all is no ECH
+  assert.equal(usesEch({ outbounds: [{ protocol: 'freedom' }, null, ECH_CONFIG.outbounds[0]] }), true);
+  for (const none of [null, undefined, {}, { outbounds: null }, { outbounds: [{ streamSettings: { realitySettings: { serverName: 'r' } } }] }]) {
+    assert.equal(usesEch(none), false, JSON.stringify(none));
+  }
 });
 
 test('startTest spawns the RESOLVED engine with that engine\'s own argv', async () => {
