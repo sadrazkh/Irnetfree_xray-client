@@ -49,6 +49,7 @@ function baseSettings(over) {
     killSwitch: false,
     theme: 'dark',
     defaultEngine: 'xray',
+    mux: 'auto',
     lang: 'fa'
   }, over || {});
 }
@@ -103,7 +104,8 @@ test('every reconnect-relevant key is detected when it changes', () => {
     systemProxy: false, tunMode: true,
     tunBackend: 'tun2socks', leakGuard: 'strict', blockUdpInProxyMode: true,
     tunAppMode: 'exclude', tunApps: ['chrome.exe'],
-    defaultEngine: 'xray-pattn'
+    defaultEngine: 'xray-pattn',
+    mux: 'off'
   };
   // the fixture must cover the whole list, or this test silently stops guarding
   assert.deepEqual(Object.keys(changes).sort(), [...RECONNECT_KEYS].sort());
@@ -168,6 +170,19 @@ test('snapshotApplied deep-copies, so later mutation cannot hide a change', () =
   live.dnsRemote.push('https://8.8.4.4/dns-query');
 
   assert.deepEqual(pendingReconnectKeys(snap, live), ['dnsRemote', 'routeRules']);
+});
+
+/* ------------------------- mux (v1.18, spec §4) ------------------------- */
+
+test('mux defaults to auto in both processes, and changing it waits for a reconnect like every config-shaping key', () => {
+  // the service's table is exported; main.js requires Electron at load, so it is read as text
+  const { DEFAULT_SETTINGS } = require('../src/server/service');
+  assert.equal(DEFAULT_SETTINGS.mux, 'auto');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
+  const block = main.slice(main.indexOf('const DEFAULT_SETTINGS = {'));
+  assert.match(block.slice(0, block.indexOf('\n};')), /^ {2}mux: 'auto'$/m, 'main.js DEFAULT_SETTINGS has the same default');
+  assert.ok(RECONNECT_KEYS.includes('mux'));
+  for (const to of ['on', 'off']) assert.deepEqual(pendingReconnectKeys(applied(), baseSettings({ mux: to })), ['mux'], `auto → ${to}`);
 });
 
 /* ------------------------------ i18n drift ------------------------------ */

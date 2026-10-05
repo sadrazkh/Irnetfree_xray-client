@@ -41,7 +41,9 @@ const RECONNECT_KEYS = [
   // that ignored it would have to sort a copy on every settings save.
   'tunAppMode', 'tunApps',
   // which core the config is validated on and started with
-  'defaultEngine'
+  'defaultEngine',
+  // mux on the servers' own outbounds (mux.js) — written into the config
+  'mux'
 ];
 
 /**

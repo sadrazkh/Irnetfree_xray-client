@@ -499,6 +499,9 @@ function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false, 
     recoverFromNetworkChange: async (reason) => { calls.push('recover:' + reason); },
     stopAllTuns: async () => {},
     setSystemProxy: async () => {},
+    // the mux verdicts of the dropped connection (v1.18): counted apart, `calls` is the kill switch's story
+    forgot: 0,
+    forgetLiveMux: () => { env.forgot++; },
     killEngaged
   };
   const make = new Function('env', `
@@ -506,7 +509,7 @@ function dropHarness({ settings = {}, xrayRunning = false, killEngaged = false, 
         recoverTimer = null, recoverQueued = null, connGen = 0;
     let killEngaged = env.killEngaged;
     const { store, xray, tun, send, notify, isEn, updateOverlay, getSettings, connectsInFlight, drops,
-            doDisconnect, reportReconnectFailed, recoverFromNetworkChange, stopAllTuns, setSystemProxy } = env;
+            doDisconnect, reportReconnectFailed, recoverFromNetworkChange, stopAllTuns, setSystemProxy, forgetLiveMux } = env;
     // the real one: { ok, added } — added is whether THIS call put the rule in
     // (the belief killEngaged is re-checked against the rule: ruleMissing)
     async function armKillSwitch() {
@@ -568,6 +571,19 @@ test('killSwitch ON: a drop that found the block already in place leaves it to w
   await h.onConnectionDrop('core-exited');
   assert.equal(h.killEngaged(), true);
   assert.deepEqual(h.calls, ['arm']);
+});
+
+test('a drop forgets the mux verdicts of the connection it ended — whether anything rebuilds it or not (v1.18)', async () => {
+  // rebuilt: the recovery's connect tests those servers again
+  const rebuilt = dropHarness({ settings: { killSwitch: false } });
+  await rebuilt.onConnectionDrop('core-exited');
+  assert.equal(rebuilt.env.forgot, 1);
+  assert.deepEqual(rebuilt.calls, ['recover:core-exited']);
+  // automatic reconnect off: nothing rebuilds it — the next connect, by hand, tests them again
+  const byHand = dropHarness({ settings: { killSwitch: false, autoReconnectOnNetworkChange: false } });
+  await byHand.onConnectionDrop('core-exited');
+  assert.equal(byHand.env.forgot, 1);
+  assert.deepEqual(byHand.calls, ['doDisconnect']);
 });
 
 /* ------------------------------- final wave F4 ------------------------------- */
