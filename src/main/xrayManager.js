@@ -75,6 +75,81 @@ function usesEch(config) {
   });
 }
 
+/**
+ * Core log flood control (spec 2026-10-05 §4). The router's field report:
+ * hundreds of identical WebSocket dial errors within the same milliseconds,
+ * each one a line through syslog and the window's log on a slow CPU, in the
+ * very storm the core was trying to get out of. A line the core repeats is
+ * forwarded at most FLOOD_MAX times per FLOOD_WINDOW_MS; the rest become one
+ * "×N more" line, said when the window closes or as soon as a different line
+ * is forwarded. The lines are compared without their timestamp and their
+ * [connection id] — what makes every one of a storm's lines different.
+ */
+const FLOOD_MAX = 5;
+const FLOOD_WINDOW_MS = 10000;
+// "2026/10/05 12:34:56.123456 " (Xray); "+0330 2026-10-05 12:34:56 " (sing-box)
+const LOG_TIMESTAMP = /^(?:[+-]\d{4} )?\d{4}[/-]\d{2}[/-]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*/;
+// "[2394738294] " (Xray); "[3524466123 1.2s] " (sing-box)
+const LOG_CONN_ID = /\[\d+(?: [^\]\s]+)?\]\s*/g;
+
+/** A core line as the gate compares it: no timestamp, no connection id. */
+function floodKey(line) {
+  return String(line == null ? '' : line).trim().replace(LOG_TIMESTAMP, '').replace(LOG_CONN_ID, '').trim();
+}
+
+/**
+ * The gate one running core's lines pass through: `line(text, level)` forwards
+ * to `emit(text, level)` or holds it back; `flush()` says what is held (the
+ * core exited). `opts.max` / `opts.windowMs` for a test.
+ */
+function floodGate(emit, opts = {}) {
+  const max = opts.max || FLOOD_MAX;
+  const windowMs = opts.windowMs || FLOOD_WINDOW_MS;
+  // key → { start, sent, held, level, timer }, in the order the windows opened
+  const windows = new Map();
+  const pending = new Set();   // keys with lines held back
+  const sayHeld = (key) => {
+    const w = windows.get(key);
+    pending.delete(key);
+    if (!w || !w.held) return;
+    const n = w.held;
+    w.held = 0;
+    if (w.timer) { clearTimeout(w.timer); w.timer = null; }
+    emit(`×${n} more: ${key}`, w.level);
+  };
+  const close = (key) => { sayHeld(key); windows.delete(key); };
+  function line(text, level) {
+    const key = floodKey(text);
+    const now = Date.now();
+    let w = windows.get(key);
+    if (w && now - w.start >= windowMs) { close(key); w = null; }
+    if (!w) {
+      // windows long closed, oldest first: a line the core printed once is not kept for ever
+      for (const [k, old] of windows) {
+        if (now - old.start < windowMs) break;
+        if (!old.held) windows.delete(k);
+      }
+      w = { start: now, sent: 0, held: 0, level, timer: null };
+      windows.set(key, w);
+    }
+    if (w.sent < max) {
+      // a different line: what is held back is said first, in the order it happened
+      for (const k of [...pending]) if (k !== key) sayHeld(k);
+      w.sent++;
+      emit(text, level);
+      return;
+    }
+    w.held++;
+    w.level = level;
+    pending.add(key);
+    if (!w.timer) {
+      w.timer = setTimeout(() => close(key), Math.max(0, w.start + windowMs - now));
+      if (w.timer.unref) w.timer.unref();
+    }
+  }
+  return { line, flush: () => { for (const k of [...pending]) sayHeld(k); } };
+}
+
 /** "24.12.31" below "26.3.27", compared as numbers; a string with no x.y.z in it is never below anything. */
 function versionBelow(v, min) {
   const parse = (s) => { const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(s || '')); return m ? m.slice(1, 4).map(Number) : null; };
@@ -105,6 +180,8 @@ class XrayManager {
     this._versions = {};                  // engineId -> version string
     /** Validations that PASSED, keyed by core file + geo files + config bytes (see validationKey). */
     this._validated = new Map();
+    /** Test cores started so far: each one's config file is its own (startTest). */
+    this._testSeq = 0;
     this.currentConfigPath = path.join(this.dataDir, 'config.json');
   }
 
@@ -459,18 +536,22 @@ class XrayManager {
     this.recent = '';
     this._recentOf = proc;
 
+    // A storm of one line reaches the log five times per 10 s, then as a count
+    // (floodGate); `recent` — what a crash is reported with — keeps every line.
+    const gate = floodGate((line, level) => this.onLog(line, level));
     const handleData = (buf, level) => {
       const text = buf.toString('utf8');
       recent = (recent + text).slice(-4000);
       if (this._recentOf === proc) this.recent = recent;
       for (const line of text.split(/\r?\n/)) {
-        if (line.trim()) this.onLog(line.trim(), level);
+        if (line.trim()) gate.line(line.trim(), level);
       }
     };
     this.proc.stdout.on('data', (d) => handleData(d, 'log'));
     this.proc.stderr.on('data', (d) => handleData(d, 'warn'));
 
     this.proc.on('exit', (code, signal) => {
+      gate.flush();   // what was held back is said before the exit is
       if (earlyExit) earlyExit({ code, signal });
       // stop() has a bounded wait. A late exit from the previous child must
       // never clear the replacement child or trigger its recovery callback.
@@ -541,7 +622,9 @@ class XrayManager {
   async startTest(testConfig, engineId) {
     const { id, bin } = this.resolveEngine(engineId, { quiet: true });
     if (!bin) throw new Error('xray binary not found');
-    const cfgPath = path.join(this.dataDir, `test-${Date.now()}.json`);
+    // numbered as well: the mux probes start up to three at once, and two in
+    // the same millisecond shared one file — and one's cleanup deleted both's
+    const cfgPath = path.join(this.dataDir, `test-${Date.now()}-${++this._testSeq}.json`);
     fs.writeFileSync(cfgPath, JSON.stringify(needsCoreVersion(testConfig) ? await this.forCore(testConfig, id) : testConfig, null, 2), 'utf8');
 
     const proc = spawn(bin, engineRunArgs(id, cfgPath), { cwd: path.dirname(bin), windowsHide: true, env: this.spawnEnv() });
@@ -634,4 +717,4 @@ function getFreePorts(n) {
   });
 }
 
-module.exports = { XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, ECH_SINCE, usesEch, versionBelow };
+module.exports = { XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, ECH_SINCE, usesEch, versionBelow, floodGate, floodKey };

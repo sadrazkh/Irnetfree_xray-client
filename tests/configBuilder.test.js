@@ -1780,3 +1780,160 @@ test('pins: the link\'s pcs and the one learnt on first use are emitted together
   assert.equal(tls.pinnedPeerCertSha256, 'cd'.repeat(32));
   assert.equal(tls.verifyPeerCertByName, 'real.example');
 });
+
+/* ----------------------------- v1.18: mux, decided per server ----------------------------- */
+// `muxServerIds` (main.js / service.js, decided by src/main/mux.js): the
+// servers whose OWN outbound carries mux — a single server, an advanced
+// plan's server targets, a pool's exits. Never a chain's hops, never an
+// outbound that cannot carry it (muxEligible), and without the setting not a
+// byte of any config changes.
+
+const { MUX } = require('../src/main/mux');
+const muxOf = (c, tag) => outboundTagged(c, tag).mux;
+/** A copy of `s` under another id whose outbound is `protocol` over `network` (ws/grpc), TLS kept. */
+function retyped(s, id, network, protocol) {
+  const out = JSON.parse(JSON.stringify(s));
+  out.id = id;
+  out.name = id;
+  if (protocol) out.outbound.protocol = protocol;
+  const st = out.outbound.streamSettings;
+  st.network = network;
+  delete st.wsSettings;
+  if (network === 'ws') st.wsSettings = { path: '/ws', headers: { Host: out.address } };
+  if (network === 'grpc') st.grpcSettings = { serviceName: 'svc', multiMode: false };
+  return out;
+}
+const TROJAN_WS = retyped(TROJAN_TCP_TLS, 'sv-trojan-ws', 'ws');
+const VLESS_GRPC = retyped(VLESS_WS_TLS, 'sv-grpc', 'grpc');
+const VISION = (() => {
+  const s = retyped(VLESS_WS_TLS, 'sv-vision', 'tcp');
+  s.outbound.settings.vnext[0].users[0].flow = 'xtls-rprx-vision';
+  return s;
+})();
+
+test('mux: the single ws+tls server named in muxServerIds carries the mux object on its proxy outbound — and nothing else changes', () => {
+  for (const base of [settings(), managed(), settings(BOUND), settings(PINS), managed(Object.assign({}, BOUND, PINS))]) {
+    const plain = buildConfig(single(), base);
+    const c = buildConfig(single(), Object.assign({}, base, { muxServerIds: ['sv-vless'] }));
+    assert.deepEqual(muxOf(c, 'proxy'), MUX);
+    assert.notEqual(muxOf(c, 'proxy'), MUX, 'a copy — the frozen object never goes into a config');
+    const { mux, ...rest } = outboundTagged(c, 'proxy');
+    assert.deepEqual(rest, outboundTagged(plain, 'proxy'), 'the outbound is otherwise the one built without it');
+    assert.deepEqual(Object.assign({}, c, { outbounds: c.outbounds.map((o) => (o.tag === 'proxy' ? rest : o)) }), plain, 'and so is the rest of the config');
+    assert.deepEqual(c.outbounds.filter((o) => o.mux).map((o) => o.tag), ['proxy'], 'direct, block, dns-out and the dialers never');
+  }
+  // Trojan and VMess over ws, httpupgrade
+  assert.deepEqual(muxOf(buildConfig(single(TROJAN_WS), settings({ muxServerIds: ['sv-trojan-ws'] })), 'proxy'), MUX);
+  const vmess = retyped(VLESS_WS_TLS, 'sv-vmess', 'ws', 'vmess');
+  assert.deepEqual(muxOf(buildConfig(single(vmess), settings({ muxServerIds: ['sv-vmess'] })), 'proxy'), MUX);
+  const hu = retyped(VLESS_WS_TLS, 'sv-hu', 'httpupgrade');
+  hu.outbound.streamSettings.httpupgradeSettings = { path: '/up', host: 'a.example.com' };
+  assert.deepEqual(muxOf(buildConfig(single(hu), settings({ muxServerIds: ['sv-hu'] })), 'proxy'), MUX);
+});
+
+test('mux: with the anti-DPI dialer the proxy carries mux and still dials through it; the dialer carries none', () => {
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const c = buildConfig(single(frag), managed({ muxServerIds: ['sv-frag'] }));
+  assert.deepEqual(muxOf(c, 'proxy'), MUX);
+  assert.equal(sockoptOf(c, 'proxy').dialerProxy, 'dpi-1');
+  assert.equal(muxOf(c, 'dpi-1'), undefined);
+});
+
+test('mux: a server muxServerIds does not name gets none', () => {
+  const c = buildConfig(single(), settings({ muxServerIds: ['sv-trojan-ws', 'sv-other'] }));
+  assert.equal(muxOf(c, 'proxy'), undefined);
+});
+
+test('mux: a chain’s hops never carry it — not even when every hop is named', () => {
+  const ids = { muxServerIds: ['sv-vless', 'sv-trojan-ws'] };
+  const c = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_WS] }, settings(ids));
+  assert.deepEqual(c.outbounds.filter((o) => 'mux' in o), []);
+  const plain = buildConfig({ mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_WS] }, settings());
+  assert.equal(JSON.stringify(c), JSON.stringify(plain));
+});
+
+test('mux: an outbound that cannot carry it never gets it, named or not — TCP, gRPC, Vision, Shadowsocks, WireGuard', () => {
+  for (const s of [TROJAN_TCP_TLS, VLESS_GRPC, VISION, SS_TCP, WG_BAD_MASK]) {
+    const c = buildConfig(single(s), settings({ muxServerIds: [s.id] }));
+    assert.equal(JSON.stringify(c), JSON.stringify(buildConfig(single(s), settings())), s.id);
+  }
+});
+
+test('mux: advanced — a named server target and the default carry it; the same server as a chain hop does not', () => {
+  const plan = advancedPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-trojan-ws': TROJAN_WS },
+    chainsById: { c1: [VLESS_WS_TLS, TROJAN_WS] },
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan-ws' }, { type: 'domain', value: 'b.com', target: 'sv-trojan' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c1' }],
+    def: 'sv-vless'
+  });
+  const c = buildConfig(plan, managed({ muxServerIds: ['sv-vless', 'sv-trojan-ws', 'sv-trojan'] }));
+  assert.deepEqual(c.outbounds.filter((o) => o.mux).map((o) => o.tag).sort(), ['out-sv-trojan-ws', 'out-sv-vless']);
+  assert.deepEqual(muxOf(c, 'out-sv-vless'), MUX);
+  assert.equal(muxOf(c, 'out-chain-c1-h0'), undefined, 'the chain’s VLESS hop');
+  assert.equal(muxOf(c, 'out-chain-c1'), undefined, 'the chain’s Trojan-ws exit');
+  // only what is named
+  const one = buildConfig(plan, managed({ muxServerIds: ['sv-trojan-ws'] }));
+  assert.deepEqual(one.outbounds.filter((o) => o.mux).map((o) => o.tag), ['out-sv-trojan-ws']);
+});
+
+test('mux: pool — the primary and a named exit carry it; a chain: entry does not', () => {
+  const plan = {
+    mode: 'pool', primary: 'sv-vless', chain: [],
+    entries: [{ id: 'e1', target: 'sv-trojan-ws', socksPort: 60001 }, { id: 'e2', target: 'chain:c1', socksPort: 60002 }, { id: 'e3', target: 'sv-trojan', socksPort: 60003 }],
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-trojan-ws': TROJAN_WS },
+    chainsById: { c1: [VLESS_WS_TLS, TROJAN_WS] }
+  };
+  const c = buildConfig(plan, managed({ muxServerIds: ['sv-vless', 'sv-trojan-ws', 'sv-trojan'] }));
+  assert.deepEqual(c.outbounds.filter((o) => o.mux).map((o) => o.tag).sort(), ['out-sv-trojan-ws', 'out-sv-vless']);
+});
+
+test('golden guard: without muxServerIds — absent, empty or not a list — every config is byte-identical', () => {
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const plans = [
+    single(), single(frag), single(TROJAN_WS), single(WG_CORP),
+    { mode: 'chain', chain: [VLESS_WS_TLS, TROJAN_WS] },
+    advancedPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c1' }], def: 'sv-vless' }),
+    poolPlan([{ id: 'e1', target: 'sv-trojan', socksPort: 60001, httpPort: 60002 }])
+  ];
+  for (const p of plans) {
+    for (const base of [settings(), managed(), settings(BOUND), settings(PINS)]) {
+      const golden = JSON.stringify(buildConfig(p, base));
+      assert.equal(golden.includes('"mux"'), false, p.mode);
+      for (const none of [undefined, null, [], 'sv-vless', { 'sv-vless': true }, 7]) {
+        assert.equal(JSON.stringify(buildConfig(p, Object.assign({}, base, { muxServerIds: none }))), golden,
+          `${p.mode}: muxServerIds ${JSON.stringify(none)} changed the config`);
+      }
+    }
+  }
+});
+
+test('buildTestConfig: a latency test never carries mux, and is as it was without the pins a mux probe hands it', () => {
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  for (const target of [VLESS_WS_TLS, TROJAN_WS, frag, [VLESS_WS_TLS, TROJAN_WS]]) {
+    const before = JSON.stringify(buildTestConfig(target, 47160));
+    assert.equal(before.includes('"mux"'), false);
+    assert.equal(JSON.stringify(buildTestConfig(target, 47160, undefined)), before);
+    assert.equal(JSON.stringify(buildTestConfig(target, 47160, {})), before, 'no pins, nothing changes');
+    assert.equal(JSON.stringify(buildTestConfig(target, 47160, { entryHostIps: { 'elsewhere.example': ['203.0.113.9'] } })), before, 'pins for other names');
+  }
+});
+
+test('buildTestConfig with the connect’s pins (a mux probe): the server’s name answered from dns.hosts — the name itself stays', () => {
+  // A probe runs inside a connect, and under TUN a rebuild's held guard
+  // answers no name (see pinEntryHosts): the probe's core dials the address
+  // the connect already resolved, like the live core will.
+  const c = buildTestConfig(VLESS_WS_TLS, 47161, { entryHostIps: PINS.entryHostIps, ipv6: false });
+  assert.deepEqual(c.dns, { hosts: { 'a.example.com': ['203.0.113.10'] } });
+  assert.deepEqual(sockoptOf(c, 'proxy'), { domainStrategy: 'UseIPv4' });
+  assert.equal(outboundTagged(c, 'proxy').settings.vnext[0].address, 'a.example.com');
+  // with the anti-DPI dialer the strategy rides the dialer too, as in the live config
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const f = buildTestConfig(frag, 47162, { entryHostIps: PINS.entryHostIps, ipv6: true });
+  assert.deepEqual(sockoptOf(f, 'proxy'), { domainStrategy: 'UseIP', dialerProxy: 'dpi-1' });
+  assert.equal(outboundTagged(f, 'dpi-1').settings.domainStrategy, 'UseIP');
+  assert.deepEqual(f.dns, { hosts: { 'a.example.com': ['203.0.113.10'] } });
+  // a chain: the first hop only, as in the live config
+  const ch = buildTestConfig([VLESS_WS_TLS, TROJAN_TCP_TLS], 47163, { entryHostIps: PINS.entryHostIps });
+  assert.deepEqual(ch.dns, { hosts: { 'a.example.com': ['203.0.113.10'] } });
+  assert.deepEqual(sockoptOf(ch, 'proxy'), { dialerProxy: 'proxy-h0' });
+});
