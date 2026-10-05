@@ -31,8 +31,11 @@ object UpdateCheck {
         return a.second > b.second
     }
 
-    /** Ask again a day after the last answer — or at once when the clock went back. */
-    fun due(lastCheck: Long, now: Long): Boolean = now < lastCheck || now - lastCheck >= EVERY_MS
+    /**
+     * Ask again a day after the last answer — at once when there never was one
+     * (0: a fresh install, or every try so far failed), or when the clock went back.
+     */
+    fun due(lastCheck: Long, now: Long): Boolean = lastCheck <= 0L || now < lastCheck || now - lastCheck >= EVERY_MS
 
     /** The release's APK, else its page. */
     fun downloadUrl(release: JSONObject): String {
