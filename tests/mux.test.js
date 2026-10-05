@@ -197,9 +197,9 @@ test('planMux: auto — a fresh ok is muxed, a fresh unsupported is not, the res
   const plan = planMux({ mode: 'auto', servers: [ok, no, stale, fresh, TROJAN_TCP_TLS, ok], cache, now });
   assert.deepEqual(plan.muxIds, ['ok']);
   assert.deepEqual(plan.toProbe.map((s) => s.id), ['stale', 'new'], 'once each, ineligible ones never');
-  // an unset or unknown mode is the default, auto
-  assert.deepEqual(planMux({ servers: [ok, fresh], cache, now }).muxIds, ['ok']);
-  assert.deepEqual(planMux({ mode: 'sometimes', servers: [ok, fresh], cache, now }).toProbe.map((s) => s.id), ['new']);
+  // an unset or unknown mode is the default, off (the owner's choice): nothing tested, nothing muxed
+  assert.deepEqual(planMux({ servers: [ok, fresh], cache, now }), { muxIds: [], toProbe: [] });
+  assert.deepEqual(planMux({ mode: 'sometimes', servers: [ok, fresh], cache, now }), { muxIds: [], toProbe: [] });
   assert.deepEqual(planMux({ mode: 'auto', servers: [fresh], cache: undefined, now }).toProbe.map((s) => s.id), ['new'], 'no cache yet');
 });
 
@@ -244,8 +244,18 @@ test('planMux: no test before retryAfter — meanwhile the verdict an inconclusi
   assert.deepEqual(planMux({ mode: 'auto', servers, cache, now: now + HOUR }).toProbe.map((s) => s.id), ['kept-ok', 'kept-no', 'unknown']);
 });
 
-test('muxMode: auto unless on or off', () => {
-  assert.deepEqual(['auto', 'on', 'off', undefined, null, '', 'ON', true].map(mux.muxMode), ['auto', 'on', 'off', 'auto', 'auto', 'auto', 'auto', 'auto']);
+test('muxMode: off unless auto or on — a settings file without the key reads Off', () => {
+  assert.deepEqual(['auto', 'on', 'off', undefined, null, '', 'ON', 'Auto', true].map(mux.muxMode), ['auto', 'on', 'off', 'off', 'off', 'off', 'off', 'off', 'off']);
+});
+
+test('decideMux with no mode, or one it does not know, is off: nothing tested, nothing said', async () => {
+  const a = shaped('a', 'vless', 'ws');
+  const lines = [];
+  for (const mode of [undefined, 'sometimes']) {
+    const res = await mux.decideMux({ mode, servers: [a], cache: {}, now: 1, probe: async () => { throw new Error('off tests nothing'); }, log: (l) => lines.push(l) });
+    assert.deepEqual(res, { muxIds: [], learnt: [] });
+  }
+  assert.deepEqual(lines, []);
 });
 
 /* ----------------------------- the probe ----------------------------- */

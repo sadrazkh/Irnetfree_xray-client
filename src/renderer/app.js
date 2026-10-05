@@ -455,7 +455,7 @@ function applySettingsToUI() {
   $('#optLaunchAtLogin').checked = !!s.launchAtLogin;
   $('#optAutoConnect').checked = !!s.autoConnect;
   $('#optAutoUpdateAssets').value = ['off', 'geo', 'all'].includes(s.autoUpdateAssets) ? s.autoUpdateAssets : 'geo';
-  $('#optMux').value = ['auto', 'on', 'off'].includes(s.mux) ? s.mux : 'auto';
+  $('#optMux').value = ['auto', 'on', 'off'].includes(s.mux) ? s.mux : 'off';   // off unless the user turned it on
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
