@@ -1200,8 +1200,8 @@ test('WireGuard endpoints bracket an IPv6 host: link, form, edit, repair', () =>
 
 test('parseMany reports a scheme it cannot import instead of dropping the line in silence', () => {
   const { servers, errors } = parseMany([
-    'hysteria2://pw@h.example.com:443#H',
-    'hy2://pw@h.example.com:443#H2',
+    'juicity://u:p@j.example.com:443#J',
+    'naive+https://u:p@n.example.com:443#N',
     'tuic://u:p@t.example.com:443#T',
     'anytls://pw@a.example.com:443#A',
     'vless://u1@a.example.com:443#ok',
@@ -1210,15 +1210,15 @@ test('parseMany reports a scheme it cannot import instead of dropping the line i
   ].join('\n'));
   assert.deepEqual(servers.map(s => s.name), ['ok']);
   assert.deepEqual(errors.map(e => e.error), [
-    'unsupported protocol: hysteria2', 'unsupported protocol: hy2', 'unsupported protocol: tuic', 'unsupported protocol: anytls'
+    'unsupported protocol: juicity', 'unsupported protocol: naive+https', 'unsupported protocol: tuic', 'unsupported protocol: anytls'
   ]);
-  assert.equal(errors[0].line, 'hysteria2://pw@h.example.com:443#H');
+  assert.equal(errors[0].line, 'juicity://u:p@j.example.com:443#J');
 });
 
 test('a base64 subscription of nothing but unsupported lines is decoded and reported, not silently empty', () => {
-  const { servers, errors } = parseMany(b64('hysteria2://pw@h.example.com:443#H\ntuic://u:p@t.example.com:443#T\n'));
+  const { servers, errors } = parseMany(b64('juicity://u:p@j.example.com:443#J\ntuic://u:p@t.example.com:443#T\n'));
   assert.equal(servers.length, 0);
-  assert.deepEqual(errors.map(e => e.error), ['unsupported protocol: hysteria2', 'unsupported protocol: tuic']);
+  assert.deepEqual(errors.map(e => e.error), ['unsupported protocol: juicity', 'unsupported protocol: tuic']);
 });
 
 test('the scheme is case-insensitive: VLESS://, Trojan://, SS://, VMESS:// import', () => {
@@ -1252,4 +1252,252 @@ test('parser.js declares each top-level function exactly once and exports each n
   const block = src.slice(src.indexOf('module.exports = {'));
   const exported = [...block.matchAll(/([A-Za-z0-9_$]+)\s*[,}]/g)].map(m => m[1]);
   assert.deepEqual(exported.filter((n, i) => exported.indexOf(n) !== i), [], 'exported more than once');
+});
+
+/* ---------------- newer link parameters (v2rayN / Xray 26): ech, pcs, vcn, pqv ---------------- */
+
+const { editFields } = require('../src/main/parser');
+/** A well-formed ML-DSA-65 public key (1952 bytes, unpadded base64url) — the only shape the core takes. */
+const PQV = Buffer.alloc(1952, 7).toString('base64url');
+
+test('ech: the DNS form is kept verbatim — the `+` is part of the value, never a space', () => {
+  const s = parseLink('vless://cd5539e6-96b9-4daf-a09d-0d2a59804129@104.21.44.18:2087?encryption=none&type=ws&host=ircd-uk.irnetfree.xyz&path=/&security=tls&fp=firefox&sni=ircd-uk.irnetfree.xyz&ech=cloudflare-ech.com+udp://1.1.1.1#%F0%9F%87%AC%F0%9F%87%A7-1');
+  const tls = s.outbound.streamSettings.tlsSettings;
+  assert.equal(tls.echConfigList, 'cloudflare-ech.com+udp://1.1.1.1');
+  assert.equal(tls.serverName, 'ircd-uk.irnetfree.xyz');
+  assert.equal(tls.fingerprint, 'firefox');
+  assert.equal(s.name, '🇬🇧-1');
+  // percent-encoded the same value arrives the same; a base64 list is taken as it is
+  assert.equal(parseLink('vless://u@a.example.com:443?security=tls&ech=cloudflare-ech.com%2Bhttps%3A%2F%2F1.1.1.1%2Fdns-query').outbound.streamSettings.tlsSettings.echConfigList,
+    'cloudflare-ech.com+https://1.1.1.1/dns-query');
+  assert.equal(parseLink('trojan://pw@a.example.com:443?ech=AEX%2B%2F%3D%3D').outbound.streamSettings.tlsSettings.echConfigList, 'AEX+/==');
+  // ECH is a TLS knob: a REALITY or plain link carries none
+  assert.equal(parseLink('vless://u@a.example.com:443?security=reality&ech=x').outbound.streamSettings.tlsSettings, undefined);
+});
+
+test('pcs: pins are normalised (colons, case), malformed ones dropped, several kept', () => {
+  const pin = 'AB:CD:' + 'ef'.repeat(30);
+  const one = parseLink(`vless://u@a.example.com:443?security=tls&pcs=${encodeURIComponent(pin)}`).outbound.streamSettings.tlsSettings;
+  assert.equal(one.pinnedPeerCertSha256, 'abcd' + 'ef'.repeat(30));
+  const two = parseLink(`trojan://pw@a.example.com:443?pcs=${'a'.repeat(64)},nothex,${'b'.repeat(64)}`).outbound.streamSettings.tlsSettings;
+  assert.equal(two.pinnedPeerCertSha256, 'a'.repeat(64) + ',' + 'b'.repeat(64));
+  assert.equal(parseLink('vless://u@a.example.com:443?security=tls&pcs=1234').outbound.streamSettings.tlsSettings.pinnedPeerCertSha256, undefined);
+});
+
+test('vcn and pqv land in the core\'s own fields; the hysteria spellings of insecure count', () => {
+  const t = parseLink('vless://u@a.example.com:443?security=tls&sni=front.example&vcn=real.example,b.example').outbound.streamSettings.tlsSettings;
+  assert.equal(t.verifyPeerCertByName, 'real.example,b.example');
+  const r = parseLink(`vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=${PQV}`).outbound.streamSettings.realitySettings;
+  assert.equal(r.mldsa65Verify, PQV);
+  // the standard alphabet with padding is the same key; anything else is left out (the core refuses the config over it)
+  const std = Buffer.from(PQV, 'base64url').toString('base64');
+  assert.equal(parseLink(`vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=${encodeURIComponent(std)}`).outbound.streamSettings.realitySettings.mldsa65Verify, PQV);
+  for (const bad of ['abc', PQV.slice(1), PQV + 'A', PQV.slice(0, -1) + '*']) {
+    assert.equal(parseLink(`vless://u@1.2.3.4:443?security=reality&pbk=K&sid=1&pqv=${encodeURIComponent(bad)}`).outbound.streamSettings.realitySettings.mldsa65Verify, undefined, bad.slice(0, 8));
+  }
+  assert.equal(parseLink('trojan://pw@a.example.com:443?insecure=1').outbound.streamSettings.tlsSettings.allowInsecure, true);
+  assert.equal(parseLink('trojan://pw@a.example.com:443?allow_insecure=true').outbound.streamSettings.tlsSettings.allowInsecure, true);
+  assert.equal(parseLink('trojan://pw@a.example.com:443?insecure=0').outbound.streamSettings.tlsSettings.allowInsecure, false);
+});
+
+test('grpc authority and kcp mtu are read; vmess carries them where v2rayN puts them', () => {
+  const g = parseLink('vless://u@g.example.com:443?type=grpc&serviceName=svc&authority=cdn.example&mode=gun').outbound.streamSettings.grpcSettings;
+  assert.deepEqual(g, { serviceName: 'svc', multiMode: false, authority: 'cdn.example' });
+  const k = parseLink('vless://u@k.example.com:443?type=kcp&headerType=wechat-video&seed=S&mtu=1350').outbound.streamSettings.kcpSettings;
+  assert.deepEqual(k, { header: { type: 'wechat-video' }, seed: 'S', mtu: 1350 });
+
+  const vm = (o) => 'vmess://' + b64(JSON.stringify(Object.assign({ v: '2', ps: 'M', add: 'm.example.com', port: '443', id: 'u' }, o)));
+  const vg = parseLink(vm({ net: 'grpc', type: 'multi', host: 'auth.example', path: 'svc', tls: 'tls', sni: 's.example' })).outbound.streamSettings;
+  assert.deepEqual(vg.grpcSettings, { serviceName: 'svc', multiMode: true, authority: 'auth.example' });
+  const vk = parseLink(vm({ net: 'kcp', type: 'srtp', path: 'SEED' })).outbound.streamSettings;
+  assert.deepEqual(vk.kcpSettings, { header: { type: 'srtp' }, seed: 'SEED' });
+  const vx = parseLink(vm({ net: 'xhttp', type: 'stream-one', path: '/x', host: 'h.example' })).outbound.streamSettings;
+  assert.equal(vx.xhttpSettings.mode, 'stream-one');
+  const vt = parseLink(vm({ net: 'ws', tls: 'tls', insecure: '1', ech: 'e.example+udp://1.1.1.1', pcs: 'c'.repeat(64), vcn: 'n.example' })).outbound.streamSettings.tlsSettings;
+  assert.equal(vt.allowInsecure, true);
+  assert.equal(vt.echConfigList, 'e.example+udp://1.1.1.1');
+  assert.equal(vt.pinnedPeerCertSha256, 'c'.repeat(64));
+  assert.equal(vt.verifyPeerCertByName, 'n.example');
+});
+
+test('share link round trip carries ech, pcs, vcn, pqv, authority and mtu', () => {
+  const links = [
+    'vless://u@a.example.com:443?type=ws&security=tls&sni=s.example&host=h.example&path=%2F&ech=cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1&pcs=' + 'd'.repeat(64) + '&vcn=v.example#A',
+    `vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=${PQV}#B`,
+    'trojan://pw@g.example.com:443?type=grpc&serviceName=svc&authority=auth.example#C',
+    'vless://u@k.example.com:443?type=kcp&headerType=srtp&seed=S&mtu=1350#D'
+  ];
+  for (const l of links) {
+    const a = parseLink(l);
+    const b = parseLink(buildShareLink(a));
+    assert.deepEqual(b.outbound, a.outbound, l);
+  }
+  const vm = 'vmess://' + b64(JSON.stringify({ v: '2', ps: 'M', add: 'm.example.com', port: '443', id: 'u', net: 'grpc', type: 'multi', host: 'auth.example', path: 'svc', tls: 'tls', sni: 's.example', ech: 'x.example+udp://9.9.9.9', insecure: '1' }));
+  const a = parseLink(vm);
+  assert.deepEqual(parseLink(buildShareLink(a)).outbound, a.outbound);
+});
+
+test('an edit keeps ech / pcs / vcn / pqv / authority it does not touch, and changes the one it does', () => {
+  const s = parseLink('vless://u@a.example.com:443?type=grpc&serviceName=svc&authority=auth.example&security=tls&sni=s.example&ech=e.example%2Budp%3A%2F%2F1.1.1.1&pcs=' + 'a'.repeat(64) + '&vcn=v.example#A');
+  const shown = editFields(s);
+  assert.equal(shown.ech, 'e.example+udp://1.1.1.1');
+  assert.equal(shown.pcs, 'a'.repeat(64));
+  assert.equal(shown.vcn, 'v.example');
+  assert.equal(shown.host, 'auth.example', 'the form\'s Host is gRPC\'s authority');
+  // a rename re-sends every field as shown: nothing changes
+  const renamed = applyServerEdits(s, Object.assign({}, shown, { name: 'B' }));
+  assert.deepEqual(renamed.outbound.streamSettings, s.outbound.streamSettings);
+  // a field the form never sends survives a rebuild of the stream
+  const other = applyServerEdits(s, { sni: 'other.example' });
+  assert.equal(other.outbound.streamSettings.tlsSettings.echConfigList, 'e.example+udp://1.1.1.1');
+  assert.equal(other.outbound.streamSettings.grpcSettings.authority, 'auth.example');
+  // the edited value wins, an emptied one clears
+  const ech = applyServerEdits(s, Object.assign({}, shown, { ech: 'AEXX', pcs: '' }));
+  assert.equal(ech.outbound.streamSettings.tlsSettings.echConfigList, 'AEXX');
+  assert.equal(ech.outbound.streamSettings.tlsSettings.pinnedPeerCertSha256, undefined);
+  assert.deepEqual(ech._edited, ['ech', 'pcs']);
+  const r = parseLink(`vless://u@1.2.3.4:443?security=reality&sni=r.example&pbk=K&sid=ab&pqv=${PQV}#B`);
+  assert.equal(applyServerEdits(r, { sni: 'x.example' }).outbound.streamSettings.realitySettings.mldsa65Verify, PQV);
+});
+
+/* ------------------------------ Shadowsocks plugins ------------------------------ */
+
+test('ss: obfs-local http becomes RAW with an HTTP header; v2ray-plugin websocket+tls becomes WS over TLS', () => {
+  const ui = b64url('chacha20-ietf-poly1305:pw');
+  const obfs = parseLink(`ss://${ui}@o.example.com:8388/?plugin=${encodeURIComponent('obfs-local;obfs=http;obfs-host=www.bing.com')}#O`);
+  assert.deepEqual(obfs.outbound.streamSettings, {
+    network: 'tcp', security: 'none',
+    tcpSettings: { header: { type: 'http', request: { path: ['/'], headers: { Host: ['www.bing.com'] } } } }
+  });
+  assert.equal(obfs.outbound.settings.servers[0].password, 'pw');
+  const v2 = parseLink(`ss://${ui}@v.example.com:443?plugin=${encodeURIComponent('v2ray-plugin;mode=websocket;tls;host=cdn.example.com;path=/ws\\;x')}#V`);
+  const st = v2.outbound.streamSettings;
+  assert.equal(st.network, 'ws');
+  assert.deepEqual(st.wsSettings, { path: '/ws;x', headers: { Host: 'cdn.example.com' } });
+  assert.equal(st.security, 'tls');
+  assert.equal(st.tlsSettings.serverName, 'cdn.example.com');
+  // and back: the plugin is in the exported link, and it parses to the same thing
+  for (const s of [obfs, v2]) assert.deepEqual(parseLink(buildShareLink(s)).outbound, s.outbound);
+  // a plain link stays plain TCP, exactly as before
+  assert.deepEqual(parseLink(`ss://${ui}@p.example.com:8388#P`).outbound.streamSettings, { network: 'tcp' });
+});
+
+test('ss: a plugin the core cannot stand in for is refused by name, not imported dead', () => {
+  const ui = b64url('aes-256-gcm:pw');
+  const { servers, errors } = parseMany([
+    `ss://${ui}@a.example.com:8388/?plugin=${encodeURIComponent('obfs-local;obfs=tls;obfs-host=x')}#A`,
+    `ss://${ui}@b.example.com:8388/?plugin=${encodeURIComponent('v2ray-plugin;mode=quic')}#B`,
+    `ss://${ui}@c.example.com:8388/?plugin=${encodeURIComponent('v2ray-plugin;mux=4')}#C`,
+    `ss://${ui}@d.example.com:8388/?plugin=shadow-tls#D`
+  ].join('\n'));
+  assert.equal(servers.length, 0);
+  assert.equal(errors.length, 4);
+  assert.match(errors[0].error, /obfs=tls/);
+  assert.match(errors[1].error, /mode=quic/);
+  assert.match(errors[2].error, /mux/);
+  assert.match(errors[3].error, /shadow-tls/);
+});
+
+/* ------------------------------ Hysteria2 ------------------------------ */
+
+test('hysteria2: the link becomes the core\'s hysteria outbound (version 2) over the hysteria transport', () => {
+  const s = parseLink('hysteria2://p%40ss@h.example.com:8443/?sni=s.example&insecure=1&obfs=salamander&obfs-password=OB&alpn=h3#%F0%9F%9A%80%20H');
+  assert.equal(s.protocol, 'hysteria2');
+  assert.equal(s.name, '🚀 H');
+  assert.equal(s.address, 'h.example.com');
+  assert.equal(s.port, 8443);
+  assert.deepEqual(s.outbound, {
+    protocol: 'hysteria',
+    settings: { version: 2, address: 'h.example.com', port: 8443 },
+    streamSettings: {
+      network: 'hysteria',
+      security: 'tls',
+      tlsSettings: { serverName: 's.example', allowInsecure: true, alpn: ['h3'] },
+      hysteriaSettings: { version: 2, auth: 'p@ss' },
+      finalmask: { udp: [{ type: 'salamander', settings: { password: 'OB' } }] }
+    }
+  });
+});
+
+test('hysteria2: hy2://, a pin, ECH, the SNI defaulting to the host, and no fingerprint', () => {
+  const s = parseLink('hy2://pw@h.example.com:443?pinSHA256=' + 'AB:'.repeat(31) + 'AB&ech=AEXX#H');
+  const tls = s.outbound.streamSettings.tlsSettings;
+  assert.equal(tls.serverName, 'h.example.com');
+  assert.equal(tls.pinnedPeerCertSha256, 'ab'.repeat(32));
+  assert.equal(tls.echConfigList, 'AEXX');
+  assert.equal(tls.allowInsecure, false);
+  assert.equal(tls.fingerprint, undefined, 'QUIC has no uTLS fingerprint');
+  assert.equal(s.outbound.streamSettings.finalmask, undefined);
+  // an IP host sends no SNI of its own
+  assert.equal(parseLink('hy2://pw@1.2.3.4:443').outbound.streamSettings.tlsSettings.serverName, '');
+  assert.equal(parseLink('hy2://pw@[2001:db8::1]:443').address, '2001:db8::1');
+});
+
+test('hysteria2: port hopping from the host part or mport becomes a udphop mask, last in the list', () => {
+  const a = parseLink('hysteria2://pw@h.example.com:20000-30000/?obfs=salamander&obfs-password=X#A');
+  assert.equal(a.port, 20000);
+  assert.deepEqual(a.outbound.streamSettings.finalmask.udp, [
+    { type: 'salamander', settings: { password: 'X' } },
+    { type: 'udphop', settings: { mode: 'intervalLocal,intervalRemote', interval: '30', remotePorts: '20000-30000' } }
+  ]);
+  const b = parseLink('hysteria2://pw@h.example.com:443/?mport=443,5000:6000#B');
+  assert.equal(b.port, 443);
+  assert.deepEqual(b.outbound.streamSettings.finalmask.udp, [
+    { type: 'udphop', settings: { mode: 'intervalLocal,intervalRemote', interval: '30', remotePorts: '443,5000-6000' } }
+  ]);
+  const c = parseLink('hysteria2://pw@h.example.com:443/?up=50&down=200%20mbps#C');
+  assert.deepEqual(c.outbound.streamSettings.finalmask, { quicParams: { brutalUp: '50 mbps', brutalDown: '200 mbps' } });
+  assert.equal(parseLink('hysteria2://pw@h.example.com:443/?mport=junk').outbound.streamSettings.finalmask, undefined);
+});
+
+test('hysteria2: share link round trip, and an edit that changes only what it says', () => {
+  const s = parseLink('hysteria2://pw@h.example.com:443/?sni=s.example&insecure=1&obfs=salamander&obfs-password=OB&mport=20000-30000&ech=e.example%2Budp%3A%2F%2F1.1.1.1&pinSHA256=' + 'c'.repeat(64) + '#H');
+  assert.deepEqual(parseLink(buildShareLink(s)).outbound, s.outbound);
+  const shown = editFields(s);
+  assert.deepEqual(
+    { password: shown.password, sni: shown.sni, allowInsecure: shown.allowInsecure, obfsPassword: shown.obfsPassword, mport: shown.mport, ech: shown.ech, pcs: shown.pcs },
+    { password: 'pw', sni: 's.example', allowInsecure: true, obfsPassword: 'OB', mport: '20000-30000', ech: 'e.example+udp://1.1.1.1', pcs: 'c'.repeat(64) });
+  // the form sends everything back unchanged: the record does not change
+  const same = applyServerEdits(s, Object.assign({}, shown));
+  assert.deepEqual(same.outbound, s.outbound);
+  assert.equal(same._edited, undefined);
+  // a new address, password and obfs password; hopping and the pin cleared
+  const ed = applyServerEdits(s, Object.assign({}, shown, { address: '5.6.7.8', port: '8443', password: 'NEW', obfsPassword: 'OB2', mport: '', pcs: '' }));
+  assert.deepEqual(ed.outbound.settings, { version: 2, address: '5.6.7.8', port: 8443 });
+  assert.equal(ed.outbound.streamSettings.hysteriaSettings.auth, 'NEW');
+  assert.deepEqual(ed.outbound.streamSettings.finalmask, { udp: [{ type: 'salamander', settings: { password: 'OB2' } }] });
+  assert.equal(ed.outbound.streamSettings.tlsSettings.pinnedPeerCertSha256, undefined);
+  assert.equal(ed.outbound.streamSettings.tlsSettings.echConfigList, 'e.example+udp://1.1.1.1');
+  assert.deepEqual(ed._edited, ['address', 'mport', 'obfsPassword', 'password', 'pcs', 'port']);
+});
+
+/* ------------------------------ review round (v1.18.0-beta) ------------------------------ */
+
+test('a gRPC link with an authority and no SNI: a rename leaves the SNI empty (the Host field is the authority, not the SNI\'s fallback)', () => {
+  const s = parseLink('vless://u@front.example.com:443?type=grpc&security=tls&serviceName=s&authority=real.example.com#G');
+  assert.equal(s.outbound.streamSettings.tlsSettings.serverName, '');
+  const renamed = applyServerEdits(s, Object.assign({}, editFields(s), { name: 'G2' }));
+  assert.deepEqual(renamed.outbound, s.outbound);
+  // a link that names its host and no sni keeps what it parsed to
+  const h = parseLink('vless://u@a.example.com:443?type=grpc&security=tls&serviceName=s&host=h.example#H');
+  assert.deepEqual(applyServerEdits(h, Object.assign({}, editFields(h), { name: 'H2' })).outbound, h.outbound);
+});
+
+test('hysteria2: bandwidth below the core\'s minimum or in a unit it does not know is left out; engine= is read', () => {
+  const qp = (q) => { const fm = parseLink('hysteria2://pw@h.example.com:443/?' + q).outbound.streamSettings.finalmask; return fm && fm.quicParams; };
+  assert.deepEqual(qp('up=100kbps&down=100ps'), undefined);
+  assert.deepEqual(qp('up=0.4&down=600kbps'), { brutalDown: '600kbps' });
+  assert.deepEqual(qp('up=1gbps&down=0.5'), { brutalUp: '1gbps', brutalDown: '0.5 mbps' });
+  assert.equal(parseLink('hysteria2://pw@h.example.com:443/?engine=xray-pattn').engine, 'xray-pattn');
+  assert.equal(parseLink('hysteria2://pw@h.example.com:443/?engine=xray').engine, undefined);
+});
+
+test('share links keep a hop interval other than 30 and obfs-local\'s obfs-uri', () => {
+  const h = parseLink('hysteria2://pw@h.example.com:443/?mport=20000-30000&hopInterval=10-20#H');
+  assert.equal(h.outbound.streamSettings.finalmask.udp[0].settings.interval, '10-20');
+  assert.deepEqual(parseLink(buildShareLink(h)).outbound, h.outbound);
+  assert.equal(buildShareLink(parseLink('hysteria2://pw@h.example.com:443/?mport=20000-30000#H')).includes('hopInterval'), false);
+  const o = parseLink(`ss://${b64url('aes-256-gcm:pw')}@o.example.com:8388/?plugin=${encodeURIComponent('obfs-local;obfs=http;obfs-host=b.example;obfs-uri=/x')}#O`);
+  assert.deepEqual(o.outbound.streamSettings.tcpSettings.header.request.path, ['/x']);
+  assert.deepEqual(parseLink(buildShareLink(o)).outbound, o.outbound);
 });

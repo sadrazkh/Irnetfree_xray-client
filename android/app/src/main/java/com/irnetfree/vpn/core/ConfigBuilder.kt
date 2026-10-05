@@ -536,8 +536,11 @@ object ConfigBuilder {
     private fun applyCertPin(o: JSONObject, server: ServerConfig?) {
         val tls = o.optJSONObject("streamSettings")?.optJSONObject("tlsSettings") ?: return
         tls.remove("allowInsecure")
-        val pin = CertPin.normalizePin(server?.certPin)
-        if (pin.isNotEmpty()) tls.put("pinnedPeerCertSha256", pin)
+        // The link's own pins (`pcs`) and the one learnt on first use, together:
+        // the core accepts a certificate that matches any of them.
+        val pins = (tls.optString("pinnedPeerCertSha256").split(",") + listOf(server?.certPin ?: ""))
+            .map { CertPin.normalizePin(it) }.filter { it.isNotEmpty() }.distinct()
+        if (pins.isNotEmpty()) tls.put("pinnedPeerCertSha256", pins.joinToString(",")) else tls.remove("pinnedPeerCertSha256")
     }
 
     private fun assemble(

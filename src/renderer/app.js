@@ -1163,13 +1163,14 @@ function fmtMs(ms) {
 function pingLabel(id) {
   const p = state.pings[id] || {};
   const tcp = p.tcp;
-  if (!tcp) return { txt: '—', cls: '' };
+  if (!tcp || tcp.na) return { txt: '—', cls: '' };
   return { txt: tcp.ok ? fmtMs(tcp.ms) : '×', cls: pingClass(tcp.ok ? tcp.ms : -1) };
 }
 
 /** Label for any ping result ({ ok, ms } or undefined). */
 function pingResultLabel(res) {
-  if (!res) return { txt: '—', cls: '' };
+  // `na`: nothing to measure this way (a UDP-only server has no TCP port)
+  if (!res || res.na) return { txt: '—', cls: '' };
   return { txt: res.ok ? fmtMs(res.ms) : '×', cls: pingClass(res.ok ? res.ms : -1) };
 }
 
@@ -1776,7 +1777,7 @@ document.addEventListener('paste', (e) => {
   const text = cd && cd.getData('text');
   if (!text || !text.trim()) return;
   // ignore unrelated clipboard text; a .conf blob counts as importable too
-  const looksImportable = /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|socks:\/\/|socks5:\/\/|wireguard:\/\/|wg:\/\/)/im.test(text.trim())
+  const looksImportable = /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|socks:\/\/|socks5:\/\/|wireguard:\/\/|wg:\/\/|hysteria2:\/\/|hy2:\/\/)/im.test(text.trim())
     || /[A-Za-z0-9+/=]{24,}/.test(text.trim())
     || (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text));
   if (!looksImportable) return;
@@ -1896,7 +1897,7 @@ async function quickPing(id) {
   $('#statTcp').textContent = '...';
   $('#statReal').textContent = '...';
   const tcp = await window.api.pingTcp(id);
-  $('#statTcp').textContent = tcp.ok ? tcp.ms + 'ms' : t('t.error');
+  $('#statTcp').textContent = tcp.ok ? tcp.ms + 'ms' : (tcp.na ? '—' : t('t.error'));
   const real = await window.api.pingReal(id);
   $('#statReal').textContent = real.ok ? real.ms + 'ms' : t('t.error');
   state.pings[id] = Object.assign(state.pings[id] || {}, { tcp, real });
@@ -3476,7 +3477,8 @@ function readServerFields(s) {
     cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
     finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
     engine: s.engine || 'xray',
-    certPin: s.certPin || ''
+    certPin: s.certPin || '',
+    ech: '', pcs: '', vcn: '', pqv: '', hy2Obfs: '', hy2Ports: ''
   };
 
   if (s.protocol === 'vless' || s.protocol === 'vmess') {
@@ -3488,6 +3490,13 @@ function readServerFields(s) {
   } else if (s.protocol === 'shadowsocks') {
     const srv = ob.settings && ob.settings.servers && ob.settings.servers[0];
     if (srv) { f.cred = srv.password || ''; f.method = srv.method || ''; }
+  } else if (s.protocol === 'hysteria2') {
+    f.cred = (st.hysteriaSettings && st.hysteriaSettings.auth) || '';
+    const masks = (st.finalmask && Array.isArray(st.finalmask.udp)) ? st.finalmask.udp : [];
+    const sal = masks.find(m => m && m.type === 'salamander');
+    const hop = masks.find(m => m && m.type === 'udphop');
+    f.hy2Obfs = (sal && sal.settings && sal.settings.password) || '';
+    f.hy2Ports = hop && hop.settings ? String(hop.settings.remotePorts || '') : '';
   } else if (s.protocol === 'socks' || s.protocol === 'http') {
     const srv = ob.settings && ob.settings.servers && ob.settings.servers[0];
     const u = srv && srv.users && srv.users[0];
@@ -3508,7 +3517,7 @@ function readServerFields(s) {
 
   // transport details
   if (st.wsSettings) { f.path = st.wsSettings.path || ''; f.host = (st.wsSettings.headers && st.wsSettings.headers.Host) || ''; }
-  else if (st.grpcSettings) { f.path = st.grpcSettings.serviceName || ''; }
+  else if (st.grpcSettings) { f.path = st.grpcSettings.serviceName || ''; f.host = st.grpcSettings.authority || ''; }
   else if (st.httpSettings) { f.path = st.httpSettings.path || ''; f.host = (st.httpSettings.host || []).join(','); }
   else if (st.xhttpSettings) { f.path = st.xhttpSettings.path || ''; f.host = st.xhttpSettings.host || ''; }
   else if (st.httpupgradeSettings) { f.path = st.httpupgradeSettings.path || ''; f.host = st.httpupgradeSettings.host || ''; }
@@ -3523,11 +3532,15 @@ function readServerFields(s) {
     f.fp = st.tlsSettings.fingerprint || '';
     f.alpn = (st.tlsSettings.alpn || []).join(',');
     if (!f.host && st.tlsSettings.serverName) f.host = '';
+    f.ech = st.tlsSettings.echConfigList || '';
+    f.pcs = st.tlsSettings.pinnedPeerCertSha256 || '';
+    f.vcn = st.tlsSettings.verifyPeerCertByName || '';
   } else if (st.realitySettings) {
     f.sni = st.realitySettings.serverName || '';
     f.fp = st.realitySettings.fingerprint || '';
     f.pbk = st.realitySettings.publicKey || '';
     f.sid = st.realitySettings.shortId || '';
+    f.pqv = st.realitySettings.mldsa65Verify || '';
   }
   return f;
 }
@@ -3617,6 +3630,7 @@ function openEdit(id) {
   // credential label per protocol
   const credLabel = $('#edCredLabel');
   const isStd = (proto === 'vless' || proto === 'vmess' || proto === 'trojan');
+  const isHy2 = proto === 'hysteria2';
   credLabel.textContent = proto === 'wireguard' ? t('wg.privateKey')
     : (proto === 'vless' || proto === 'vmess') ? t('edit.uuid')
     : t('edit.password');
@@ -3630,12 +3644,15 @@ function openEdit(id) {
   const isSs = proto === 'shadowsocks';
   const isProxy = proto === 'socks' || proto === 'http';
   show('#edTransportRow', isStd);
-  show('#edTlsRow', isStd);
+  show('#edTlsRow', isStd || isHy2);
   show('#edPathRow', isStd);
   show('#edPattWrap', isStd);
-  show('#edInsecureRow', isStd);
-  show('#edInsecureHint', isStd);
-  show('#edCertPinRow', isStd && !!f.certPin);
+  show('#edInsecureRow', isStd || isHy2);
+  show('#edInsecureHint', isStd || isHy2);
+  // Hysteria2 is QUIC: no first-use pin — what the switch does there is its own
+  $('#edInsecureHint').textContent = t(isHy2 ? 'edit.insecureHintHy2' : 'edit.insecureHint');
+  show('#edCertPinRow', (isStd || isHy2) && !!f.certPin);
+  show('#edHy2Row', isHy2);
   show('#edWgExtra', isWg);
   show('#edProxyRow', isProxy);
   // socks/http carry no single "credential" field — user/pass live in edProxyRow
@@ -3671,6 +3688,12 @@ function fillEditForm(f, proto) {
   if ($('#edFinalMask')) $('#edFinalMask').value = f.finalMask || '';
   if ($('#edEngine')) selectValue($('#edEngine'), f.engine || 'xray');
   $('#edInsecure').checked = !!f.allowInsecure;
+  $('#edEch').value = f.ech || '';
+  $('#edPcs').value = f.pcs || '';
+  $('#edVcn').value = f.vcn || '';
+  $('#edPqv').value = f.pqv || '';
+  $('#edHy2Obfs').value = f.hy2Obfs || '';
+  $('#edHy2Ports').value = f.hy2Ports || '';
 
   if (proto === 'socks' || proto === 'http') {
     $('#edProxyUser').value = f.pxUser || '';
@@ -3719,11 +3742,16 @@ function show(sel, on) { const el = $(sel); if (el) el.hidden = !on; }
  */
 function updateSpoofLabels() {
   const isStd = editOriginal && ['vless', 'vmess', 'trojan'].includes(editOriginal.protocol);
-  const sec = $('#edSecurity').value || 'none';
-  const net = $('#edNetwork').value || 'tcp';
-  const on = isStd && (sec === 'tls' || sec === 'reality');
+  // Hysteria2 is always TLS (over QUIC), with no transport of its own to pick
+  const isHy2 = !!editOriginal && editOriginal.protocol === 'hysteria2';
+  const sec = isHy2 ? 'tls' : ($('#edSecurity').value || 'none');
+  const net = isHy2 ? 'hysteria' : ($('#edNetwork').value || 'tcp');
+  const on = (isStd || isHy2) && (sec === 'tls' || sec === 'reality');
   show('#edSpoofHead', on); show('#edTlsRow', on);
-  show('#edHideSniRow', on);
+  show('#edTlsExtra', on && sec === 'tls');
+  show('#edPqvRow', isStd && sec === 'reality');
+  // the TLS fragment splits a TCP ClientHello: nothing to split in QUIC
+  show('#edHideSniRow', on && !isHy2);
   updateHideSniNote();   // follows the switch row, shown or not
   const hintEl = $('#edSpoofHint'); if (hintEl) hintEl.hidden = !on;
   if (!on) return;
@@ -3801,7 +3829,7 @@ function collectEditFields(orig, clearPin) {
   };
   const cred = $('#edCred').value.trim();
   if (proto === 'vless' || proto === 'vmess') { if (cred) fields.uuid = cred; }
-  else if (proto === 'trojan' || proto === 'shadowsocks') { if (cred) fields.password = cred; }
+  else if (proto === 'trojan' || proto === 'shadowsocks' || proto === 'hysteria2') { if (cred) fields.password = cred; }
   else if (proto === 'wireguard') { if (cred) fields.privateKey = cred; }
 
   if (['vless', 'vmess', 'trojan'].includes(proto)) {
@@ -3822,6 +3850,20 @@ function collectEditFields(orig, clearPin) {
     // preserve alpn from original (no field for it)
     const shown = readServerFields(orig);
     if (shown.alpn) fields.alpn = shown.alpn;
+    // newer TLS / REALITY knobs ('' clears them)
+    fields.ech = $('#edEch').value.trim();
+    fields.pcs = $('#edPcs').value.trim();
+    fields.vcn = $('#edVcn').value.trim();
+    fields.pqv = $('#edPqv').value.trim();
+  } else if (proto === 'hysteria2') {
+    fields.sni = $('#edSni').value.trim();
+    fields.allowInsecure = $('#edInsecure').checked;
+    if (clearPin) fields.clearCertPin = true;
+    fields.ech = $('#edEch').value.trim();
+    fields.pcs = $('#edPcs').value.trim();
+    fields.vcn = $('#edVcn').value.trim();
+    fields.obfsPassword = $('#edHy2Obfs').value.trim();
+    fields.mport = $('#edHy2Ports').value.trim();
   } else if (proto === 'wireguard') {
     fields.publicKey = $('#edWgPub').value.trim();
     // `address` above is the ENDPOINT host (#edAddress); the interface address
@@ -3888,6 +3930,10 @@ async function saveEdit() {
     try { JSON.parse(fmText); }
     catch { return toast(t('edit.finalMaskBad'), 'err'); }
   }
+  // an ML-DSA-65 key is 1952 bytes as base64url (2603 characters); the parser
+  // leaves anything else out, so say so rather than drop it in silence
+  const pqvText = $('#edPqv') && $('#edPqvRow') && !$('#edPqvRow').hidden ? $('#edPqv').value.trim() : '';
+  if (pqvText && !/^[A-Za-z0-9_\-+/]{2603}={0,2}$/.test(pqvText)) return toast(t('edit.pqvBad'), 'err');
 
   const res = await window.api.updateServer(id, fields);
   if (res.ok) {

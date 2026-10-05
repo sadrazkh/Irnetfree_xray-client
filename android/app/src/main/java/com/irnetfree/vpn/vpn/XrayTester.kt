@@ -4,8 +4,10 @@ import android.content.Context
 import com.irnetfree.vpn.core.AppSettings
 import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
+import com.irnetfree.vpn.core.CoreCompat
 import com.irnetfree.vpn.core.EngineChoice
 import com.irnetfree.vpn.core.ServerConfig
+import com.irnetfree.vpn.core.SingboxConfig
 import com.irnetfree.vpn.core.TrustedDns
 import org.json.JSONObject
 import java.net.ServerSocket
@@ -33,8 +35,8 @@ import java.net.ServerSocket
  */
 object XrayTester {
     /** One throwaway core, whichever kind it turned out to be. */
-    class Handle(val port: Int, private val xray: XrayCore?, private val pattn: XrayPattnCore?) {
-        fun stop() { runCatching { xray?.stop() }; runCatching { pattn?.stop() } }
+    class Handle(val port: Int, private val xray: XrayCore?, private val pattn: XrayPattnCore?, private val singbox: SingboxCore? = null) {
+        fun stop() { runCatching { xray?.stop() }; runCatching { pattn?.stop() }; runCatching { singbox?.stop() } }
     }
 
     /**
@@ -49,8 +51,23 @@ object XrayTester {
             return null
         }
         val port = freePort() ?: return null
-        val config = try { ConfigBuilder.buildTestConfig(server, port, wgIps).toString() } catch (e: Throwable) { return null }
-        if (EngineChoice.testEngineFor(server, s.defaultEngine) == EngineChoice.PATTN && XrayPattnCore.available(ctx)) {
+        // A server whose connection runs on sing-box — its own choice, or a
+        // Hysteria2 with a certificate only sing-box can accept
+        // (EngineChoice.needsInsecureCore) — is measured on sing-box when it is
+        // bundled: on Xray it would fail while connecting to it works.
+        if (EngineChoice.chooseEngine(ConnectionPlan.Single(server), s.defaultEngine) == EngineChoice.SINGBOX && SingboxCore.available(ctx)) {
+            val sb = try { SingboxConfig.build(server, s.copy(socksPort = port, httpPort = 0)).toString() } catch (e: Throwable) { null }
+            if (sb != null) {
+                val core = SingboxCore()
+                return if (core.start(ctx, sb, port, onLog = {})) Handle(port, null, null, core) else { core.stop(); null }
+            }
+        }
+        val built = try { ConfigBuilder.buildTestConfig(server, port, wgIps) } catch (e: Throwable) { return null }
+        val onPattn = EngineChoice.testEngineFor(server, s.defaultEngine) == EngineChoice.PATTN && XrayPattnCore.available(ctx)
+        // mKCP's and Hysteria's settings in the form the testing core takes (CoreCompat)
+        val config = (if (CoreCompat.needsCoreVersion(built))
+            CoreCompat.adaptForCore(built, if (onPattn) XrayPattnCore.version(ctx) else XrayCore.version()) else built).toString()
+        if (onPattn) {
             val core = XrayPattnCore()
             // start() already waits for the port, and stops what it launched on failure.
             val ok = core.start(ctx, config, port, onLog = {})

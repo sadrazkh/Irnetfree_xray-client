@@ -75,6 +75,17 @@ function sourceDateEpoch({ env = process.env, root = ROOT, now = Date.now } = {}
   return Math.floor(now() / 1000);
 }
 
+/**
+ * The control file's Version for a release version. opkg reads what follows a
+ * '-' as the package revision, so 1.18.0-beta.1 would rank ABOVE 1.18.0 and
+ * install.sh, re-run for the final release, would answer "Not downgrading" and
+ * leave the router on the beta. '~' ranks below everything, as in dpkg:
+ * 1.18.0~beta.1 < 1.18.0. The file name keeps the tag's spelling.
+ */
+function opkgVersion(ver) {
+  return String(ver).replace('-', '~');
+}
+
 function buildIpk({ root = ROOT, outDir = path.join(ROOT, 'dist'), version, mtime = sourceDateEpoch({ root }) } = {}) {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const ver = version || pkg.version;
@@ -121,7 +132,7 @@ function buildIpk({ root = ROOT, outDir = path.join(ROOT, 'dist'), version, mtim
   const installed = data.reduce((n, e) => n + (e.data ? e.data.length : 0), 0);
   const control = [
     `Package: ${PKG}`,
-    `Version: ${ver}`,
+    `Version: ${opkgVersion(ver)}`,
     'Architecture: all',
     'Section: net',
     'Priority: optional',
@@ -154,4 +165,4 @@ if (require.main === module) {
   console.log(`${r.out}  (${r.files.length} files, ${(r.installed / 1048576).toFixed(1)} MB installed, files dated ${new Date(r.mtime * 1000).toISOString()})`);
 }
 
-module.exports = { buildIpk, sourceDateEpoch, PKG, DEPENDS, PREFIX };
+module.exports = { buildIpk, sourceDateEpoch, opkgVersion, PKG, DEPENDS, PREFIX };

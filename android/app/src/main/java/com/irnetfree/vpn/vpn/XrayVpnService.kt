@@ -936,7 +936,8 @@ class XrayVpnService : VpnService() {
             // LAN sharing, when on and when it fits beside this connection's own
             // ports (the tunnel's may have been moved onto it since it was set).
             val lan = lanShareFor(ctx, s, fresh.pool)
-            val built = TunnelSetup.coreConfig(engine, plan, s, geo, wgIps, auth, lan) { line -> VpnState.addLog(line) }
+            val built = TunnelSetup.coreConfig(engine, plan, s, geo, wgIps, auth, lan,
+                coreVersion = { e -> if (e == EngineChoice.PATTN) XrayPattnCore.version(ctx) else XrayCore.version() }) { line -> VpnState.addLog(line) }
             engine = built.engine
             val config = built.json
 

@@ -595,7 +595,7 @@ test('a refresh with zero usable servers keeps the old list and reports an error
     '<html><body>Please log in to the hotel Wi-Fi</body></html>',
     '',
     '{"error":"subscription expired"}',
-    'hysteria2://pw@h.example.com:443#H'
+    'tuic://u:p@t.example.com:443#T'
   ]) {
     const mine = sub([XH + '#DE', TR + '#NL']);
     const subs = [{ id: 'sub1', url: 'https://a', serverCount: 2, lastUpdated: 1234 }];

@@ -15,7 +15,7 @@ import java.nio.charset.CodingErrorAction
  */
 object LinkParser {
 
-    private val SCHEME_RE = Regex("^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg)://", RegexOption.IGNORE_CASE)
+    private val SCHEME_RE = Regex("^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg|hysteria2|hy2)://", RegexOption.IGNORE_CASE)
 
     /**
      * v2rayN shares an HTTP proxy exactly like a SOCKS one —
@@ -71,6 +71,7 @@ object LinkParser {
             l.startsWith("ss://", true) -> parseShadowsocks(l)
             l.startsWith("socks://", true) || l.startsWith("socks5://", true) -> parseProxyLink(l, "socks")
             l.startsWith("wireguard://", true) || l.startsWith("wg://", true) -> parseWireguard(l)
+            l.startsWith("hysteria2://", true) || l.startsWith("hy2://", true) -> parseHysteria2(l)
             // case-insensitive to match HTTP_PROXY_LINK (and parseMany's line filter),
             // so an uppercase scheme imports instead of being reported as an error
             l.startsWith("http://", true) && isHttpProxyLink(l) -> parseProxyLink(l, "http")
@@ -135,6 +136,12 @@ object LinkParser {
         val port = portOf(v.optString("port"), 443)
         val net = v.optString("net").ifBlank { "tcp" }.lowercase()
         val tls = v.optString("tls").lowercase()
+        // VMess JSON puts a transport's second value in `type` and `host`, as
+        // v2rayN writes them: the mode of grpc and xhttp, the :authority of
+        // grpc; mKCP carries its seed in `path` (parser.js parseVmess).
+        val isKcp = net == "kcp" || net == "mkcp"
+        val isXhttp = net == "xhttp" || net == "splithttp"
+        val type = v.optString("type").trim()
         val q = hashMapOf(
             "type" to net,
             "security" to if (tls == "tls") "tls" else "none",
@@ -144,7 +151,15 @@ object LinkParser {
             "fp" to v.optString("fp").ifBlank { "chrome" },
             "alpn" to v.optString("alpn"),
             "serviceName" to v.optString("path"),
-            "headerType" to v.optString("type").ifBlank { "none" },
+            "headerType" to if (net == "grpc" || isXhttp) "none" else type.ifBlank { "none" },
+            "mode" to v.optString("mode").ifBlank { if ((net == "grpc" || isXhttp) && type.isNotEmpty() && type != "none") type else "" },
+            "authority" to if (net == "grpc") v.optString("authority").ifBlank { v.optString("host") } else "",
+            "seed" to if (isKcp) v.optString("seed").ifBlank { v.optString("path").takeIf { it.isNotBlank() && it != "/" } ?: "" } else "",
+            "extra" to if (isXhttp) (v.opt("extra")?.toString() ?: "") else "",
+            "allowInsecure" to v.optString("allowInsecure").ifBlank { v.optString("insecure") },
+            "ech" to v.optString("ech"),
+            "pcs" to v.optString("pcs"),
+            "vcn" to v.optString("vcn"),
             // `cs` / `fm` are the standard short keys; the long ones are the form we used to emit
             "cipherSuites" to v.optString("cs").ifBlank { v.optString("cipherSuites") },
             "finalMask" to v.optString("fm").ifBlank { v.optString("finalMask").ifBlank { v.optString("finalmask") } }
@@ -190,8 +205,11 @@ object LinkParser {
         val body = link.substring("ss://".length)
         val (mainWithHash, name) = splitHash(body)
         var main = mainWithHash
+        // SIP002 puts a plugin in the query (`/?plugin=…`)
         val qi = main.indexOf('?')
+        val q = if (qi == -1) emptyMap() else parseQuery(main.substring(qi + 1))
         if (qi != -1) main = main.substring(0, qi)
+        main = main.trimEnd('/')
 
         val method: String; val password: String; val address: String; var portStr: String
         if (main.contains("@")) {
@@ -215,8 +233,197 @@ object LinkParser {
             .put("settings", JSONObject().put("servers", JSONArray().put(
                 JSONObject().put("address", address).put("port", port)
                     .put("method", method).put("password", password).put("uot", true))))
-            .put("streamSettings", JSONObject().put("network", "tcp"))
+            .put("streamSettings", ssStream(q, address))
         return ServerConfig(newId("s"), name.ifBlank { address }, "shadowsocks", address, port, ob, link)
+    }
+
+    /**
+     * The transport a Shadowsocks link asks for (parser.js ssStream). A SIP002
+     * `plugin` the core can stand in for becomes its transport, as v2rayN does
+     * it: obfs-local's `obfs=http` is RAW with an HTTP header, v2ray-plugin's
+     * websocket (with or without `tls`) is WebSocket. Any other plugin is refused
+     * BY NAME — imported, the server would never connect, the plugin missing.
+     * Without a plugin: what an Xray panel's `type`/`security` say, else TCP.
+     */
+    internal fun ssStream(q: Map<String, String>, address: String): JSONObject {
+        val plugin = (q["plugin"] ?: "").trim()
+        if (plugin.isNotEmpty()) {
+            // `;` separates options; `\;`, `\=`, `\,` and `\\` are escapes inside a value
+            val parts = plugin.split(Regex("(?<!\\\\);")).map { it.trim() }.filter { it.isNotEmpty() }
+            fun unesc(x: String) = x.replace(Regex("\\\\([;=,\\\\])"), "$1")
+            val opt = HashMap<String, String>(); val flags = HashSet<String>()
+            for (p in parts.drop(1)) {
+                val eq = Regex("(?<!\\\\)=").find(p)?.range?.first ?: -1
+                if (eq == -1) flags.add(unesc(p).lowercase()) else opt[unesc(p.substring(0, eq)).lowercase()] = unesc(p.substring(eq + 1))
+            }
+            val name = parts[0].lowercase()
+            if (name == "obfs-local" || name == "simple-obfs") {
+                val mode = (opt["obfs"] ?: "http").lowercase()
+                if (mode != "http") throw IllegalArgumentException("Shadowsocks: the $name plugin with obfs=$mode is not supported (obfs=http is)")
+                return buildStream(mapOf("type" to "tcp", "headerType" to "http", "host" to (opt["obfs-host"]?.takeIf { it.isNotBlank() } ?: address), "path" to (opt["obfs-uri"]?.takeIf { it.isNotBlank() } ?: "/")))
+            }
+            if (name == "v2ray-plugin") {
+                val mode = (opt["mode"] ?: "websocket").lowercase()
+                if (mode != "websocket") throw IllegalArgumentException("Shadowsocks: v2ray-plugin mode=$mode is not supported (websocket is)")
+                if ((opt["mux"]?.toIntOrNull() ?: 0) > 0) throw IllegalArgumentException("Shadowsocks: v2ray-plugin with mux is not supported — ask for a link with mux=0")
+                val host = opt["host"] ?: ""
+                val tls = "tls" in flags || isTrue(opt["tls"])
+                return buildStream(mapOf("type" to "ws", "host" to host, "path" to (opt["path"]?.takeIf { it.isNotBlank() } ?: "/"), "security" to if (tls) "tls" else "none", "sni" to host))
+            }
+            throw IllegalArgumentException("Shadowsocks: plugin ${parts[0]} is not supported")
+        }
+        val net = (q["type"] ?: q["network"] ?: "").lowercase()
+        val sec = (q["security"] ?: "").lowercase()
+        if ((net.isNotEmpty() && net != "tcp" && net != "raw") || (sec.isNotEmpty() && sec != "none") || q["headerType"] == "http") return buildStream(q)
+        return JSONObject().put("network", "tcp")
+    }
+
+    /** The SIP002 plugin a Shadowsocks stream stands for (ssStream's inverse); "" for plain TCP. */
+    fun ssPluginOf(st: JSONObject?): String {
+        if (st == null) return ""
+        fun esc(x: String) = x.replace(Regex("[\\\\;=,]")) { "\\" + it.value }
+        val net = st.optString("network")
+        if (net == "ws" && st.has("wsSettings")) {
+            val w = st.optJSONObject("wsSettings") ?: JSONObject()
+            val host = w.optJSONObject("headers")?.let { it.optString("Host").ifBlank { it.optString("host") } } ?: ""
+            val parts = arrayListOf("v2ray-plugin", "mode=websocket")
+            if (st.optString("security") == "tls") parts.add("tls")
+            if (host.isNotBlank()) parts.add("host=" + esc(host))
+            parts.add("path=" + esc(w.optString("path").ifBlank { "/" })); parts.add("mux=0")
+            return parts.joinToString(";")
+        }
+        val h = st.optJSONObject("tcpSettings")?.optJSONObject("header")
+        if ((net.isEmpty() || net == "tcp" || net == "raw") && h != null && h.optString("type") == "http") {
+            val rq = h.optJSONObject("request")
+            val host = rq?.optJSONObject("headers")?.optJSONArray("Host")?.optString(0) ?: ""
+            val uri = rq?.optJSONArray("path")?.optString(0)?.ifBlank { "/" } ?: "/"
+            return "obfs-local;obfs=http" + (if (host.isNotBlank()) ";obfs-host=" + esc(host) else "") + (if (uri != "/") ";obfs-uri=" + esc(uri) else "")
+        }
+        return ""
+    }
+
+    /* ------------------------- Hysteria2 ------------------------- */
+
+    private const val HOP_INTERVAL = "30"
+
+    /**
+     * hysteria2://auth@host:port/?sni=…&insecure=1&obfs=salamander&obfs-password=…&pinSHA256=…&mport=…#name
+     * (or hy2://) — parser.js parseHysteria2. Both cores speak it natively since
+     * 26.1: outbound `hysteria` (version 2) over the `hysteria` transport, the
+     * obfuscation and the port hopping as finalmask, stored here in the newest
+     * core's form (CoreCompat writes an older core's). A port list or range in
+     * the host part ("443,8443-8500") is port hopping: the first port is dialled.
+     */
+    private fun parseHysteria2(link: String): ServerConfig {
+        val scheme = if (link.startsWith("hy2://", true)) "hy2://" else "hysteria2://"
+        val (main, name) = splitHash(link.substring(scheme.length))
+        val (beforeQ0, q) = splitQuery(main)
+        val beforeQ = beforeQ0.trimEnd('/')
+        val at = beforeQ.lastIndexOf('@')
+        val auth = if (at == -1) (q["auth"] ?: "") else dec(beforeQ.substring(0, at))
+        val hostPart = if (at == -1) beforeQ else beforeQ.substring(at + 1)
+        // the port's text is kept whole: "443,8443-8500" is a hopping list
+        val (address, spec) = splitHostPort(hostPart)
+        val port = portOf(spec, 443)
+        val hop = hopPorts(q.given("mport") ?: q.given("ports") ?: if (spec.contains(',') || spec.contains('-')) spec else "")
+        val f = HashMap<String, String>(q); f["address"] = address; f["port"] = port.toString(); f["auth"] = auth; f["mport"] = hop
+        return ServerConfig(newId("s"), name.ifBlank { address }, "hysteria2", address, port, buildHysteria2Outbound(f), link,
+            engine = q["engine"]?.takeIf { it.isNotBlank() && it != "xray" })
+    }
+
+    /** A port-hopping list as the core takes it ("20000-30000,443"); "" when it names no port. */
+    internal fun hopPorts(v: String?): String {
+        val s = (v ?: "").replace(Regex("\\s+"), "").replace(':', '-')
+        return if (s.isNotEmpty() && Regex("^\\d+(-\\d+)?(,\\d+(-\\d+)?)*$").matches(s)) s else ""
+    }
+
+    /**
+     * A bandwidth for the core ("100 mbps"); a bare number is Mbps, as hysteria's
+     * links mean it. The core counts bits per second in powers of 1024 and refuses
+     * the whole config below 65536 bytes a second (0.5 mbps): under that, or in a
+     * unit it does not know, "" (parser.js bandwidth).
+     */
+    private fun bandwidth(v: String?): String {
+        val s = (v ?: "").trim().lowercase()
+        val m = Regex("^(\\d+(?:\\.\\d+)?)\\s*(|b|bps|k|kb|kbps|m|mb|mbps|g|gb|gbps|t|tb|tbps)$").find(s) ?: return ""
+        val unit = m.groupValues[2].ifEmpty { "mbps" }
+        val mul = Math.pow(1024.0, " kmgt".indexOf(if (unit[0] == 'b') ' ' else unit[0]).toDouble())
+        if ((m.groupValues[1].toDoubleOrNull() ?: 0.0) * mul < 524288.0) return ""
+        return if (m.groupValues[2].isNotEmpty()) s else "$s mbps"
+    }
+
+    /**
+     * The hysteria outbound from a link's (or the edit sheet's) values: `address`,
+     * `port`, `auth`, `sni`, `insecure`, `alpn`, `ech`, `pcs`/`pinSHA256`, `vcn`,
+     * `obfs` + `obfs-password`, `mport` (+ `hopInterval`), `up`/`down`.
+     */
+    fun buildHysteria2Outbound(f: Map<String, String?>): JSONObject {
+        val address = (f["address"] ?: "").trim()
+        val tls = JSONObject()
+            .put("serverName", (f["sni"] ?: f["peer"] ?: "").trim().ifBlank { if (DnsPlan.isIp(address)) "" else address })
+            .put("allowInsecure", isTrue(f["insecure"]) || isTrue(f["allowInsecure"]) || isTrue(f["allow_insecure"]))
+        f["alpn"]?.takeIf { it.isNotBlank() }?.let { a -> tls.put("alpn", JSONArray(a.split(",").map { it.trim() }.filter { it.isNotEmpty() })) }
+        tlsExtras(tls, f)
+        val stream = JSONObject().put("network", "hysteria").put("security", "tls").put("tlsSettings", tls)
+            .put("hysteriaSettings", JSONObject().put("version", 2).put("auth", f["auth"] ?: ""))
+        val udp = JSONArray()
+        val obfs = (f["obfs"] ?: "").trim().lowercase()
+        val obfsPassword = f["obfs-password"] ?: f["obfsPassword"] ?: ""
+        if ((obfs == "salamander" || (obfs.isEmpty() && obfsPassword.isNotEmpty())) && obfsPassword.isNotEmpty()) {
+            udp.put(JSONObject().put("type", "salamander").put("settings", JSONObject().put("password", obfsPassword)))
+        }
+        val hop = hopPorts(f["mport"])
+        if (hop.isNotEmpty()) {
+            val iv = (f["hopInterval"] ?: f["hop_interval"] ?: "").trim().removeSuffix("s").removeSuffix("S").trim()
+            udp.put(JSONObject().put("type", "udphop").put("settings", JSONObject()
+                .put("mode", "intervalLocal,intervalRemote")
+                .put("interval", if (Regex("^\\d+(-\\d+)?$").matches(iv)) iv else HOP_INTERVAL)
+                .put("remotePorts", hop)))
+        }
+        val fm = JSONObject()
+        if (udp.length() > 0) fm.put("udp", udp)
+        val up = bandwidth(f["up"] ?: f["upmbps"]); val down = bandwidth(f["down"] ?: f["downmbps"])
+        if (up.isNotEmpty() || down.isNotEmpty()) {
+            val qp = JSONObject()
+            if (up.isNotEmpty()) qp.put("brutalUp", up)
+            if (down.isNotEmpty()) qp.put("brutalDown", down)
+            fm.put("quicParams", qp)
+        }
+        if (fm.length() > 0) stream.put("finalmask", fm)
+        return JSONObject().put("protocol", "hysteria")
+            .put("settings", JSONObject().put("version", 2).put("address", address).put("port", portOf(f["port"] ?: "", 443)))
+            .put("streamSettings", stream)
+    }
+
+    /**
+     * A hysteria outbound's values in buildHysteria2Outbound's terms (parser.js
+     * hy2Values) — so an edit rebuilds it from everything it had.
+     */
+    fun hy2Values(ob: JSONObject): HashMap<String, String> {
+        val st = ob.optJSONObject("streamSettings") ?: JSONObject()
+        val tls = st.optJSONObject("tlsSettings") ?: JSONObject()
+        val set = ob.optJSONObject("settings") ?: JSONObject()
+        val fm = st.optJSONObject("finalmask") ?: JSONObject()
+        val masks = fm.optJSONArray("udp") ?: JSONArray()
+        var sal: JSONObject? = null; var hop: JSONObject? = null
+        for (i in 0 until masks.length()) {
+            val m = masks.optJSONObject(i) ?: continue
+            if (sal == null && m.optString("type") == "salamander") sal = m
+            if (hop == null && m.optString("type") == "udphop") hop = m
+        }
+        val qp = fm.optJSONObject("quicParams") ?: JSONObject()
+        return hashMapOf(
+            "address" to set.optString("address"), "port" to set.optInt("port", 443).toString(),
+            "auth" to (st.optJSONObject("hysteriaSettings")?.optString("auth") ?: ""),
+            "sni" to tls.optString("serverName"), "insecure" to if (tls.optBoolean("allowInsecure")) "1" else "",
+            "alpn" to jarr(tls.optJSONArray("alpn")).joinToString(","),
+            "ech" to tls.optString("echConfigList"), "pcs" to tls.optString("pinnedPeerCertSha256"), "vcn" to tls.optString("verifyPeerCertByName"),
+            "obfs" to if (sal != null) "salamander" else "",
+            "obfs-password" to (sal?.optJSONObject("settings")?.optString("password") ?: ""),
+            "mport" to (hop?.optJSONObject("settings")?.opt("remotePorts")?.toString() ?: ""),
+            "hopInterval" to (hop?.optJSONObject("settings")?.opt("interval")?.toString() ?: ""),
+            "up" to qp.optString("brutalUp"), "down" to qp.optString("brutalDown")
+        )
     }
 
     /**
@@ -330,6 +537,52 @@ object LinkParser {
 
     /* ------------------------- shared stream builder ------------------------- */
 
+    /**
+     * `pqv` — an ML-DSA-65 public key: 1952 bytes as unpadded base64url, the only
+     * form the core reads (a malformed one makes it refuse the WHOLE config).
+     * The standard alphabet and padding are mapped to it; anything else is "".
+     * parser.js mldsaKey.
+     */
+    internal fun mldsaKey(v: String?): String {
+        val s = (v ?: "").trim().replace('+', '-').replace('/', '_').trimEnd('=')
+        if (s.length != 2603 || !Regex("^[A-Za-z0-9_-]+$").matches(s)) return ""
+        return try { if (java.util.Base64.getUrlDecoder().decode(s).size == 1952) s else "" } catch (e: Exception) { "" }
+    }
+
+    /** A link's boolean flag: `1` / `true`, any case. */
+    internal fun isTrue(v: String?): Boolean { val s = (v ?: "").trim().lowercase(); return s == "1" || s == "true" }
+
+    /**
+     * `pcs` — the certificate hash(es) to accept, comma separated: SHA-256 of the
+     * certificate's DER as hex, colons allowed. The core refuses the WHOLE config
+     * over one malformed entry, so only well-formed ones are kept, in one form.
+     */
+    internal fun pinList(v: String?): String {
+        val out = ArrayList<String>()
+        for (part in (v ?: "").split(",")) {
+            val hex = part.replace(Regex("[\\s:]"), "").lowercase()
+            if (Regex("^[0-9a-f]{64}$").matches(hex) && hex !in out) out.add(hex)
+        }
+        return out.joinToString(",")
+    }
+
+    /**
+     * What newer links carry for TLS (v2rayN's names; the core's in brackets):
+     * `ech` (echConfigList) — a base64 ECHConfigList or where to fetch one,
+     * `cloudflare-ech.com+udp://1.1.1.1`, kept verbatim (the `+` is no space);
+     * `pcs` (pinnedPeerCertSha256) — the certificate to accept; `vcn`
+     * (verifyPeerCertByName) — the name(s) to check it against. parser.js tlsExtras.
+     */
+    internal fun tlsExtras(tls: JSONObject, q: Map<String, String?>): JSONObject {
+        val ech = (q["ech"]?.takeIf { it.isNotBlank() } ?: q["echConfigList"] ?: "").trim()
+        if (ech.isNotEmpty()) tls.put("echConfigList", ech)
+        val pcs = pinList(q["pcs"]?.takeIf { it.isNotBlank() } ?: q["pinnedPeerCertSha256"]?.takeIf { it.isNotBlank() } ?: q["pinSHA256"])
+        if (pcs.isNotEmpty()) tls.put("pinnedPeerCertSha256", pcs)
+        val vcn = (q["vcn"]?.takeIf { it.isNotBlank() } ?: q["verifyPeerCertByName"] ?: "").split(",").map { it.trim() }.filter { it.isNotEmpty() }.joinToString(",")
+        if (vcn.isNotEmpty()) tls.put("verifyPeerCertByName", vcn)
+        return tls
+    }
+
     /** The xhttp `extra` query value as an object; null when absent or not one. */
     fun parseXhttpExtra(raw: String?): JSONObject? {
         val s = raw?.trim() ?: return null
@@ -374,13 +627,19 @@ object LinkParser {
                 .put("headers", JSONObject().apply { q.given("host")?.let { put("Host", it) } }))
             "grpc" -> stream.put("grpcSettings", JSONObject()
                 .put("serviceName", q.given("serviceName") ?: q.given("path") ?: "")
-                .put("multiMode", q["mode"] == "multi"))
+                .put("multiMode", q["mode"] == "multi")
+                // the :authority the gRPC stream announces — what a CDN routes by
+                .apply { q.given("authority")?.let { put("authority", it.trim()) } })
             "h2", "http" -> {
                 stream.put("network", "h2")
                 stream.put("httpSettings", JSONObject()
                     .put("path", q.given("path") ?: "/")
                     .put("host", JSONArray().apply { q.given("host")?.split(",")?.forEach { put(it) } }))
             }
+            // Without its own settings the core dials `/` with Host = the address —
+            // a 404 from every CDN-fronted httpupgrade server (parser.js).
+            "httpupgrade" -> stream.put("httpupgradeSettings", JSONObject()
+                .put("path", q.given("path") ?: "/").put("host", q.given("host") ?: ""))
             "xhttp", "splithttp" -> {
                 stream.put("network", "xhttp")
                 val xs = JSONObject().put("path", q.given("path") ?: "/").put("host", q.given("host") ?: "").put("mode", q.given("mode") ?: "auto")
@@ -393,8 +652,11 @@ object LinkParser {
             }
             "kcp", "mkcp" -> {
                 stream.put("network", "kcp")
+                // Stored in the link's own terms; CoreCompat writes the masks the
+                // running core takes (the 2026 cores refuse header/seed here).
                 stream.put("kcpSettings", JSONObject()
-                    .put("header", JSONObject().put("type", q.given("headerType") ?: "none")).put("seed", q.given("seed") ?: ""))
+                    .put("header", JSONObject().put("type", q.given("headerType") ?: "none")).put("seed", q.given("seed") ?: "")
+                    .apply { q["mtu"]?.trim()?.toIntOrNull()?.takeIf { it > 0 }?.let { put("mtu", it) } })
             }
             "tcp" -> if (q["headerType"] == "http") {
                 stream.put("tcpSettings", JSONObject().put("header", JSONObject()
@@ -410,13 +672,15 @@ object LinkParser {
         if (security == "tls") {
             val tls = JSONObject()
                 .put("serverName", q.given("sni") ?: q.given("host") ?: "")
-                .put("allowInsecure", q["allowInsecure"] == "1" || q["allowInsecure"] == "true")
+                // `insecure` / `allow_insecure`: hysteria2's, anytls' and tuic's spelling
+                .put("allowInsecure", isTrue(q["allowInsecure"]) || isTrue(q["insecure"]) || isTrue(q["allow_insecure"]))
                 .put("fingerprint", q.given("fp") ?: "chrome")
             q["alpn"]?.takeIf { it.isNotEmpty() }?.let { tls.put("alpn", JSONArray().apply { it.split(",").forEach { a -> put(a) } }) }
             // patterniha custom TLS: `unsafe` fingerprint + pinned cipherSuites.
             // `cs` is the standard share-link name, `cipherSuites` the long legacy one.
             val cs = q["cs"]?.takeIf { it.isNotBlank() } ?: q["cipherSuites"]
             cs?.takeIf { it.isNotBlank() }?.let { tls.put("cipherSuites", it.trim()) }
+            tlsExtras(tls, q)
             stream.put("tlsSettings", tls)
         } else if (security == "reality") {
             stream.put("realitySettings", JSONObject()
@@ -424,7 +688,9 @@ object LinkParser {
                 .put("fingerprint", q.given("fp") ?: "chrome")
                 .put("publicKey", q.given("pbk") ?: "")
                 .put("shortId", q.given("sid") ?: "")
-                .put("spiderX", q.given("spx") ?: ""))
+                .put("spiderX", q.given("spx") ?: "")
+                // `pqv`: the server's ML-DSA-65 public key — REALITY's post-quantum check
+                .apply { mldsaKey(q.given("pqv") ?: q.given("mldsa65Verify")).takeIf { it.isNotEmpty() }?.let { put("mldsa65Verify", it) } })
         }
         // finalMask (transport-level masking: fragment, noise, header-custom, …).
         // Stored VERBATIM: the core takes the plural `lengths`/`delays` arrays, and an
@@ -571,14 +837,26 @@ object LinkParser {
         val net = st.optString("network", "tcp"); q["type"] = net; q["security"] = st.optString("security", "none")
         when (net) {
             "ws" -> st.optJSONObject("wsSettings")?.let { q["path"] = it.optString("path"); it.optJSONObject("headers")?.optString("Host")?.takeIf { h -> h.isNotBlank() }?.let { h -> q["host"] = h } }
-            "grpc" -> st.optJSONObject("grpcSettings")?.let { q["serviceName"] = it.optString("serviceName"); if (it.optBoolean("multiMode")) q["mode"] = "multi" }
+            "grpc" -> st.optJSONObject("grpcSettings")?.let { q["serviceName"] = it.optString("serviceName"); if (it.optBoolean("multiMode")) q["mode"] = "multi"; it.optString("authority").takeIf { a -> a.isNotBlank() }?.let { a -> q["authority"] = a } }
             "h2", "http" -> st.optJSONObject("httpSettings")?.let { q["path"] = it.optString("path"); q["host"] = jarr(it.optJSONArray("host")).joinToString(",") }
+            "httpupgrade" -> st.optJSONObject("httpupgradeSettings")?.let { q["path"] = it.optString("path"); it.optString("host").takeIf { h -> h.isNotBlank() }?.let { h -> q["host"] = h } }
             "xhttp" -> st.optJSONObject("xhttpSettings")?.let { q["path"] = it.optString("path"); q["host"] = it.optString("host"); it.optString("mode").takeIf { m -> m.isNotBlank() }?.let { m -> q["mode"] = m }; it.optJSONObject("extra")?.takeIf { x -> x.length() > 0 }?.let { x -> q["extra"] = x.toString() } }
-            "kcp" -> st.optJSONObject("kcpSettings")?.let { q["headerType"] = it.optJSONObject("header")?.optString("type") ?: "none"; it.optString("seed").takeIf { sd -> sd.isNotBlank() }?.let { sd -> q["seed"] = sd } }
+            "kcp" -> st.optJSONObject("kcpSettings")?.let { q["headerType"] = it.optJSONObject("header")?.optString("type") ?: "none"; it.optString("seed").takeIf { sd -> sd.isNotBlank() }?.let { sd -> q["seed"] = sd }; it.optInt("mtu", 0).takeIf { m -> m > 0 }?.let { m -> q["mtu"] = m.toString() } }
             "tcp" -> st.optJSONObject("tcpSettings")?.optJSONObject("header")?.takeIf { it.optString("type") == "http" }?.let { h -> q["headerType"] = "http"; val rq = h.optJSONObject("request"); q["path"] = rq?.optJSONArray("path")?.optString(0) ?: ""; q["host"] = rq?.optJSONObject("headers")?.optJSONArray("Host")?.optString(0) ?: "" }
         }
-        st.optJSONObject("tlsSettings")?.let { q["sni"] = it.optString("serverName"); q["fp"] = it.optString("fingerprint"); if (it.optBoolean("allowInsecure")) q["allowInsecure"] = "1"; jarr(it.optJSONArray("alpn")).joinToString(",").takeIf { a -> a.isNotBlank() }?.let { a -> q["alpn"] = a }; it.optString("cipherSuites").takeIf { c -> c.isNotBlank() }?.let { c -> q["cs"] = c } }
-        st.optJSONObject("realitySettings")?.let { q["sni"] = it.optString("serverName"); q["fp"] = it.optString("fingerprint"); q["pbk"] = it.optString("publicKey"); q["sid"] = it.optString("shortId"); it.optString("spiderX").takeIf { x -> x.isNotBlank() }?.let { x -> q["spx"] = x } }
+        st.optJSONObject("tlsSettings")?.let {
+            q["sni"] = it.optString("serverName"); q["fp"] = it.optString("fingerprint"); if (it.optBoolean("allowInsecure")) q["allowInsecure"] = "1"
+            jarr(it.optJSONArray("alpn")).joinToString(",").takeIf { a -> a.isNotBlank() }?.let { a -> q["alpn"] = a }
+            it.optString("cipherSuites").takeIf { c -> c.isNotBlank() }?.let { c -> q["cs"] = c }
+            it.optString("echConfigList").takeIf { x -> x.isNotBlank() }?.let { x -> q["ech"] = x }
+            it.optString("pinnedPeerCertSha256").takeIf { x -> x.isNotBlank() }?.let { x -> q["pcs"] = x }
+            it.optString("verifyPeerCertByName").takeIf { x -> x.isNotBlank() }?.let { x -> q["vcn"] = x }
+        }
+        st.optJSONObject("realitySettings")?.let {
+            q["sni"] = it.optString("serverName"); q["fp"] = it.optString("fingerprint"); q["pbk"] = it.optString("publicKey"); q["sid"] = it.optString("shortId")
+            it.optString("spiderX").takeIf { x -> x.isNotBlank() }?.let { x -> q["spx"] = x }
+            it.optString("mldsa65Verify").takeIf { x -> x.isNotBlank() }?.let { x -> q["pqv"] = x }
+        }
         st.optJSONObject("finalmask")?.let { q["fm"] = it.toString() }
     }
 
@@ -612,12 +890,37 @@ object LinkParser {
                     .put("net", p["type"] ?: "tcp").put("type", p["headerType"] ?: "none").put("host", p["host"] ?: "")
                     .put("path", p["path"] ?: (p["serviceName"] ?: "")).put("tls", if (p["security"] == "tls") "tls" else "")
                     .put("sni", p["sni"] ?: "").put("fp", p["fp"] ?: "").put("alpn", p["alpn"] ?: "")
+                // the second value of a transport, where vmessFromJson reads it back (v2rayN's places)
+                when (p["type"]) {
+                    "grpc" -> { v.put("host", p["authority"] ?: ""); p["mode"]?.let { v.put("type", it) } }
+                    "xhttp" -> { p["mode"]?.let { v.put("type", it) }; p["extra"]?.let { v.put("extra", it) } }
+                    "kcp" -> p["seed"]?.let { v.put("path", it) }
+                }
+                if (p["allowInsecure"] == "1") v.put("insecure", "1")
+                p["ech"]?.let { v.put("ech", it) }; p["pcs"]?.let { v.put("pcs", it) }; p["vcn"]?.let { v.put("vcn", it) }
                 p["cs"]?.let { v.put("cs", it) }; p["fm"]?.let { v.put("fm", it) }
                 extras["fragment"]?.let { v.put("fragment", it) }; extras["noise"]?.let { v.put("noise", it) }
                 extras["engine"]?.let { v.put("engine", it) }
                 "vmess://" + b64e(v.toString())
             }
-            "shadowsocks" -> { val srv = srv0(ob); "ss://${b64e("${srv.optString("method")}:${srv.optString("password")}")}@${s.address}:${s.port}$name" }
+            "shadowsocks" -> {
+                val srv = srv0(ob)
+                val plugin = ssPluginOf(st)
+                val query = if (plugin.isNotEmpty()) "/?plugin=" + enc(plugin) else ""
+                "ss://${b64e("${srv.optString("method")}:${srv.optString("password")}")}@${s.address}:${s.port}$query$name"
+            }
+            "hysteria2" -> {
+                val h = hy2Values(ob)
+                val q = LinkedHashMap<String, String>()
+                q["sni"] = h["sni"] ?: ""; q["insecure"] = h["insecure"] ?: ""; q["alpn"] = h["alpn"] ?: ""
+                q["pinSHA256"] = h["pcs"] ?: ""; q["ech"] = h["ech"] ?: ""; q["vcn"] = h["vcn"] ?: ""
+                q["obfs"] = h["obfs"] ?: ""; q["obfs-password"] = h["obfs-password"] ?: ""; q["mport"] = h["mport"] ?: ""
+                q["hopInterval"] = (h["hopInterval"] ?: "").takeIf { it.isNotEmpty() && (h["mport"] ?: "").isNotEmpty() && it != HOP_INTERVAL } ?: ""
+                q["up"] = (h["up"] ?: "").replace(Regex("\\s*mbps$", RegexOption.IGNORE_CASE), "")
+                q["down"] = (h["down"] ?: "").replace(Regex("\\s*mbps$", RegexOption.IGNORE_CASE), "")
+                extras["engine"]?.let { q["engine"] = it }
+                "hysteria2://${enc(h["auth"] ?: "")}@${s.address}:${s.port}/?${qstr(q)}$name"
+            }
             "socks", "http" -> {
                 val srv = srv0(ob); val c = srv.optJSONArray("users")?.optJSONObject(0)
                 val auth = if (c != null) b64e("${c.optString("user")}:${c.optString("pass")}") + "@" else ""

@@ -3,6 +3,7 @@ package com.irnetfree.vpn.vpn
 import com.irnetfree.vpn.core.AppSettings
 import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
+import com.irnetfree.vpn.core.CoreCompat
 import com.irnetfree.vpn.core.EngineChoice
 import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.LocalAuth
@@ -65,7 +66,7 @@ object TunnelSetup {
      */
     fun coreConfig(
         engine: String, plan: ConnectionPlan, s: AppSettings, geo: Boolean, wgIps: Map<String, String>,
-        auth: LocalAuth?, lan: LanShare?, log: (String) -> Unit
+        auth: LocalAuth?, lan: LanShare?, coreVersion: (String) -> String = { "" }, log: (String) -> Unit
     ): CoreConfig {
         val single = plan as? ConnectionPlan.Single
         if (engine == EngineChoice.SINGBOX && single != null) {
@@ -76,7 +77,11 @@ object TunnelSetup {
             }
         }
         val e = if (engine == EngineChoice.SINGBOX) EngineChoice.XRAY else engine
-        return CoreConfig(e, ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps, inboundAuth = auth, lan = lan).toString())
+        val config = ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps, inboundAuth = auth, lan = lan)
+        // mKCP's and Hysteria's settings, in the form THIS core's version takes
+        // (CoreCompat) — its version is asked only for a config that has them
+        val adapted = if (CoreCompat.needsCoreVersion(config)) CoreCompat.adaptForCore(config, coreVersion(e)) else config
+        return CoreConfig(e, adapted.toString())
     }
 
     /**

@@ -23,7 +23,7 @@ const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
  * and is not re-checked.
  */
 const ID = /^[\w-]+$/;
-const PROTOCOLS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard']);
+const PROTOCOLS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria2']);
 const validId = (v) => typeof v === 'string' && ID.test(v);
 
 /** A TCP port 1–65535 as a number, or null. */
@@ -36,7 +36,8 @@ function portOf(v) {
 function cleanServer(s) {
   if (!isObj(s.outbound)) return null;
   // the outbound is the truth when the record lost its copy (configBuilder.isWgServer)
-  const protocol = s.protocol == null || s.protocol === '' ? s.outbound.protocol : s.protocol;
+  let protocol = s.protocol == null || s.protocol === '' ? s.outbound.protocol : s.protocol;
+  if (protocol === 'hysteria') protocol = 'hysteria2';   // the core's name for it
   if (!PROTOCOLS.has(protocol)) return null;
   const out = Object.assign({}, s, { protocol });
   if ('port' in s) {
