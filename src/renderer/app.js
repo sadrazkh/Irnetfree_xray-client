@@ -455,7 +455,7 @@ function applySettingsToUI() {
   $('#optLaunchAtLogin').checked = !!s.launchAtLogin;
   $('#optAutoConnect').checked = !!s.autoConnect;
   $('#optAutoUpdateAssets').value = ['off', 'geo', 'all'].includes(s.autoUpdateAssets) ? s.autoUpdateAssets : 'geo';
-  $('#optMux').value = ['auto', 'on', 'off'].includes(s.mux) ? s.mux : 'auto';
+  $('#optMux').value = ['auto', 'on', 'off'].includes(s.mux) ? s.mux : 'off';   // off unless the user turned it on
   $('#optBlockAds').checked = !!s.blockAds;
   $('#optSniff').checked = s.enableSniffing !== false;
   $('#optAutoUpdate').checked = s.autoUpdateSubs !== false;
@@ -1527,7 +1527,14 @@ function bestServerId(ids) {
  * rows), tested again unless all of it was tested in the last GROUP_FRESH_MS.
  */
 async function connectAuto(scope) {
-  if (state.connecting) return cancelConnect();   // the row is the Cancel while connecting
+  if (state.connecting) {
+    // The picker's ⚡ Auto row is the Cancel while connecting (it says so:
+    // power.cancelHint). A group's ⚡ and a "⚡ Fastest — <subscription>" row
+    // keep their connect label, so a tap there must not quietly cancel the
+    // connect in flight: it says what is happening instead.
+    if (!scope) return cancelConnect();
+    return toast(t('t.autoGroupBusy'), 'warn');
+  }
   const ids = scope ? scope.ids : null;
   let best = bestServerId(ids);
   const stale = !!scope && ids.some((id) => !(pingAt[id] > Date.now() - GROUP_FRESH_MS));
