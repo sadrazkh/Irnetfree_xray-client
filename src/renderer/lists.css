@@ -142,9 +142,9 @@
 }
 .qr-body { display: grid; place-items: center; gap: 12px; padding: 18px; }
 .qr-body .hint { margin: 0; text-align: center; }
-/* A QR has to read as black on white to scan at all — these two literals are
-   the code itself, not theme colours, and stay put in every skin. */
-.qr-image { width: 232px; height: 232px; background: #fff; padding: 12px; border-radius: var(--r4); }
+/* .qr-image is styled once, in styles.css (the white plate a QR needs in every
+   skin, and its width). A second rule here, fixed at 232px, used to win the
+   cascade over it and squeezed every code to 208px of drawing. */
 
 /* ----------------------------- subscriptions ----------------------------- */
 

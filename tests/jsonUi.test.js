@@ -276,8 +276,8 @@ function editHarness({ servers, updateServer } = {}) {
   // the module-level state app.js keeps for the open form, then the real functions over it
   vm.runInContext([
     "let editOriginal = null; let editClearPin = false; let editJsonMode = 'full';",
-    ...['show', 'closeEdit', 'setEditKind', 'showJsonError', 'renderJsonInfo', 'setJsonMode', 'openEditJson', 'collectJsonFields',
-      'copyEditJson', 'openEdit', 'saveEdit'].map(fnSource)
+    ...['show', 'closeEdit', 'setEditKind', 'showJsonError', 'renderJsonInfo', 'setJsonMode', 'refreshJsonFormLang', 'openEditJson',
+      'collectJsonFields', 'copyEditJson', 'openEdit', 'saveEdit'].map(fnSource)
   ].join('\n'), ctx);
   return { ctx, get, calls, segButtons, mode: () => vm.runInContext('editJsonMode', ctx) };
 }
@@ -354,6 +354,40 @@ test('Full: the not-applied summary lists the rule count, each “match → to�
   const h4 = editHarness({ servers: [J({ jsonInfo: undefined })] });
   h4.ctx.openEdit('j1');
   assert.equal(h4.get('edJsonInfo').hidden, true);
+});
+
+test('a language switch with the JSON form open says its help line and summary again; with no JSON form open it does nothing', () => {
+  const h = editHarness();
+  h.ctx.openEdit('j1');
+  assert.equal(h.get('edJsonHelp').textContent, en('ed.jsonFullHelp'));
+  const fa = (key) => { try { return str('fa', key); } catch { return key; } };
+  h.ctx.t = fa;                       // setLang('fa') has changed what t() answers
+  h.ctx.refreshJsonFormLang();
+  assert.equal(h.get('edJsonHelp').textContent, fa('ed.jsonFullHelp'));
+  const text = textOf(h.get('edJsonInfo'));
+  assert.ok(text.includes(fa('ed.jsonNotApplied')), 'the summary heading');
+  assert.ok(text.includes(fa('ed.jsonNaDns')), 'and its lines');
+  assert.ok(text.includes('geoip:ir → direct'), 'the rules themselves are the config’s own text and stay');
+  // Raw stays Raw
+  h.ctx.setJsonMode('raw');
+  h.ctx.t = en;
+  h.ctx.refreshJsonFormLang();
+  assert.equal(h.mode(), 'raw');
+  assert.equal(h.get('edJsonHelp').textContent, en('ed.jsonRawHelp'));
+  assert.equal(h.get('edJsonInfo').hidden, true);
+
+  // no form open (also: setLang runs at start-up, before any edit state exists): nothing is touched
+  const idle = editHarness();
+  idle.ctx.refreshJsonFormLang();
+  assert.equal(idle.get('edJsonHelp').textContent, '');
+  // a link form open: not this form's business
+  const link = Object.assign({}, linkServer, { id: 'l1' });
+  const l = editHarness({ servers: [link] });
+  l.ctx.openEdit('l1');
+  l.ctx.refreshJsonFormLang();
+  assert.equal(l.get('edJsonHelp').textContent, '');
+  // and setLang calls it
+  assert.match(fnSource('setLang'), /refreshJsonFormLang\(\);/);
 });
 
 test('the config’s own text goes in as text, never as markup', () => {
@@ -520,7 +554,7 @@ function configOfSize(bytes) {
   return JSON.parse(head + 'x'.repeat(pad) + '"}');
 }
 
-test('QR of a JSON server: the minified JSON when it fits (2,900 bytes at most)', async () => {
+test('QR of a JSON server: the minified JSON when it fits (1,700 bytes at most)', async () => {
   const h = qrHarness({ servers: [J()], link: PRETTY(CONFIG) });
   await h.ctx.showServerQr('j1');
   assert.deepEqual(h.drawn, [JSON.stringify(CONFIG)], 'minified, one line, exactly the config');
@@ -529,17 +563,24 @@ test('QR of a JSON server: the minified JSON when it fits (2,900 bytes at most)'
   assert.equal(h.get('qrModal').hidden, false);
   assert.equal(h.get('qrCopy').textContent, en('ed.jsonCopy'), 'the dialog’s button says what it copies');
 
-  // the edge: 2,900 fits, 2,901 does not
-  const fit = configOfSize(2900);
-  assert.equal(JSON.stringify(fit).length, 2900);
+  // the edge: 1,700 fits, 1,701 does not (and well under is drawn too)
+  const fit = configOfSize(1700);
+  assert.equal(JSON.stringify(fit).length, 1700);
   const a = qrHarness({ servers: [J()], link: PRETTY(fit) });
   await a.ctx.showServerQr('j1');
-  assert.equal(a.drawn.length, 1, '2,900 bytes is drawn');
+  assert.equal(a.drawn.length, 1, '1,700 bytes is drawn');
+  assert.deepEqual(a.drawn, [JSON.stringify(fit)]);
   assert.match(a.get('qrImage').innerHTML, /^<svg /);
-  const over = configOfSize(2901);
+  const over = configOfSize(1701);
   const b = qrHarness({ servers: [J()], link: PRETTY(over) });
   await b.ctx.showServerQr('j1');
-  assert.equal(b.drawn.length, 0, '2,901 bytes is not even offered to the encoder');
+  assert.equal(b.drawn.length, 0, '1,701 bytes is not even offered to the encoder');
+  assert.ok(b.get('qrImage').innerHTML.includes(en('qr.tooLarge')));
+  assert.ok(!b.get('qrImage').innerHTML.includes('<svg'));
+  // what used to fit (2,900) no longer does
+  const old = qrHarness({ servers: [J()], link: PRETTY(configOfSize(2900)) });
+  await old.ctx.showServerQr('j1');
+  assert.equal(old.drawn.length, 0);
 });
 
 test('QR of a JSON server too large for a code: the qr.tooLarge message, the dialog still opens, and the JSON stays there to copy', async () => {
@@ -580,16 +621,29 @@ test('QR of a link server is as it was: the link itself, and the old message whe
   assert.equal(bad.get('qrLink').value, link);
 });
 
-test('the real QR library encodes a 2,900-byte JSON at level L — the limit leaves room under the symbol’s capacity', () => {
+test('the largest JSON the app draws (1,700 bytes) keeps 2 px per module in the QR box — the same bar qrShare.test.js sets for links', () => {
+  assert.equal(Number(APP.match(/const QR_JSON_MAX_BYTES = (\d+);/)[1]), 1700);
   const ctx = vm.createContext({ window: {}, self: {} });
   vm.runInContext(R('src', 'renderer', 'vendor', 'qrcode.js'), ctx);
   const qrcode = ctx.qrcode || ctx.window.qrcode;
-  const text = JSON.stringify(configOfSize(2900));
   const qr = qrcode(0, 'L');
-  qr.addData(text);
+  qr.addData(JSON.stringify(configOfSize(1700)));
   qr.make();
-  assert.equal(qr.getModuleCount(), 177, 'version 40, the largest');
+  assert.equal(qr.getModuleCount(), 137, 'version 30');
   assert.match(qr.createSvgTag({ cellSize: 4, margin: 16, scalable: true }), /viewBox/);
+  // What the CSS grants the code: the .qr-image cap less its own padding (the quiet zone, 4 modules a side, is inside it).
+  // Only if that is the rule in force: a second .qr-image width in a later sheet (lists.css once had 232px) wins the
+  // cascade and squeezed every code to 208px.
+  assert.equal([...CSS.matchAll(/\.qr-image\s*\{[^}]*\bwidth:/g)].length, 1, '.qr-image must set its width in one place only');
+  const cap = Number(CSS.match(/\.qr-image\s*\{[^}]*width:\s*min\(\s*(\d+)px/)[1]);
+  const pad = Number((CSS.match(/\.qr-image\s*\{[^}]*padding:\s*(\d+)px/) || [0, 0])[1]);
+  const pxPerModule = (cap - pad * 2) / (qr.getModuleCount() + 8);
+  assert.ok(pxPerModule >= 2, `${pxPerModule.toFixed(2)} px per module — under 2 px a phone camera cannot resolve it`);
+  // and the old limit is what this one exists to keep out
+  const bigger = qrcode(0, 'L');
+  bigger.addData(JSON.stringify(configOfSize(2900)));
+  bigger.make();
+  assert.ok((cap - pad * 2) / (bigger.getModuleCount() + 8) < 2, '2,900 bytes (version 40) is what the limit exists to keep out');
   // the escape stays below the byte-per-character trap: 'ا' & 0xff would be an apostrophe
   assert.equal('ا'.charCodeAt(0) & 0xff, 0x27);
 });
