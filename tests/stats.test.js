@@ -48,6 +48,18 @@ test('a JSON server’s helper outbounds (<tag>~<helper>) carry its own bytes ag
   assert.deepEqual(byOutbound(v), { proxy: { up: 10, down: 20 }, 'out-ja': { up: 100, down: 200 } });
 });
 
+test('a raw config’s dialers (the tags its outbounds dial through) are left out too — the speed of a raw JSON server is counted once', () => {
+  const v = vars({ proxy: { uplink: 10, downlink: 20 }, hop1: { uplink: 11, downlink: 21 }, frag: { uplink: 12, downlink: 22 }, direct: { uplink: 1, downlink: 1 } });
+  const skip = new Set(['hop1', 'frag']);
+  assert.deepEqual(sumOutbounds(v, skip), { up: 10, down: 20 });
+  assert.deepEqual(byOutbound(v, skip), { proxy: { up: 10, down: 20 }, direct: { up: 1, down: 1 } });
+  // without a list, as every config the app writes itself: as before
+  assert.deepEqual(sumOutbounds(v), { up: 33, down: 63 });
+  assert.deepEqual(sumOutbounds(v, null), { up: 33, down: 63 });
+  const p = new StatsPoller({ apiPort: 1 });
+  assert.equal(p.skipTags, null, 'the poller counts everything until told otherwise');
+});
+
 test('missing or malformed payloads read as zero, never NaN', () => {
   for (const v of [null, undefined, {}, { stats: {} }, { stats: { outbound: null } }, 'nonsense']) {
     assert.deepEqual(sumOutbounds(v), { up: 0, down: 0 }, JSON.stringify(v));

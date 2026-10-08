@@ -42,23 +42,21 @@ const level = (s) => s.split('\n').map((l) => l.trim()).join('\n');
 
 /* ------------------------------ the router, for real ------------------------------ */
 
-test('the router runs a raw JSON server’s own config: its routing, DNS and outbounds as written, the app’s inbounds, said once in the log', async (t) => {
+test('the router runs a raw JSON server in its full form — the LAN’s port-53 answer and the entry names answered from the config — and says why, once', async (t) => {
   const raw = jsonServer('xray-fragment.json', { id: 'js-raw', jsonMode: 'raw' });
-  const fx = JSON.parse(FIX('xray-fragment.json'));
   const s = H.start({ servers: [raw] }, DEPS);
   t.after(() => s.service.shutdown());
   await s.service.invoke('connect', raw.id);
   assert.equal(s.state.xray.starts.length, 1);
-  const { config, engine } = s.state.xray.starts[0];
-  assert.equal(engine, 'xray');
-  assert.deepEqual(config.routing, fx.routing);
-  assert.deepEqual(config.dns, fx.dns, 'no DNS plan of the app’s, and not the router’s DNS block either');
-  assert.deepEqual(config.inbounds.map((i) => [i.tag, i.port]), [['socks-in', H.PORTS.socksPort], ['http-in', H.PORTS.httpPort]]);
-  assert.deepEqual(config.outbounds.map((o) => o.tag), ['proxy', 'fragment', 'direct', 'block']);
-  assert.equal(config.outbounds[0].streamSettings.sockopt.dialerProxy, 'fragment');
-  assert.equal(config.metrics.listen, `127.0.0.1:${H.PORTS.apiPort}`);
-  const said = s.logs.filter((l) => /raw JSON/.test(l.line));
-  assert.deepEqual(said.map((l) => l.line), ['Running "🇩🇪 frag" exactly as written (raw JSON) — the app\'s DNS management, leak guard and routing mode do not apply']);
+  const { config } = s.state.xray.starts[0];
+  const tags = config.outbounds.map((o) => o.tag);
+  assert.deepEqual(tags.slice(0, 2), ['proxy', 'proxy~fragment']);
+  assert.ok(tags.includes('dns-out'), 'the hijack the LAN lives on');
+  assert.ok(config.routing.rules.some((r) => r.outboundTag === 'dns-out' && r.port === '53'));
+  assert.deepEqual(config.dns.hosts['edge1.example.com'], ['203.0.113.7'], 'its server answered from the config, never asked of the tunnel');
+  assert.equal(s.logs.some((l) => /exactly as written/.test(l.line)), false);
+  const said = s.logs.filter((l) => /set to run raw/.test(l.line)).map((l) => l.line);
+  assert.deepEqual(said, ['"🇩🇪 frag" is set to run raw — under TUN (and on the router) its full form runs, so the app\'s DNS and tunnel rules apply']);
   await s.service.invoke('disconnect');
 });
 
@@ -143,24 +141,31 @@ test('both mirrors take a server’s entry addresses from entryAddressesOf — a
     assert.match(body, /if \(serversById\[tg\]\) entryAddrs\.push\(\.\.\.entryAddressesOf\(serversById\[tg\]\)\);/, label);
     assert.match(body, /entryAddrs = entryAddressesOf\(members\[0\]\);/, label);
     assert.match(body, /entryAddrs = entryAddressesOf\(legacyChain\[0\]\);/, label);
-    assert.match(body, /entryAddrs = entryAddressesOf\(server, isRawJson\(server\)\);/, label);
   }
+  // a raw connect's entries are its whole config's — only where raw runs (rawApplies)
+  for (const src of [MAIN, SERVICE]) assert.match(src, /entryAddrs = entryAddressesOf\(server, rawApplies\(server, settings, RAW_OPTS\)\);/);
+  assert.match(MAIN, /^const RAW_OPTS = \{ openwrt: false \};$/m);
+  assert.match(SERVICE, /^ {2}const RAW_OPTS = \{ openwrt: OPENWRT \};$/m);
 });
 
-test('a raw single server is no mux candidate — its config runs as written; in full mode it is one like any server', () => {
+test('a raw single server is no mux candidate where it runs as written; under TUN, on the router and in full mode it is one like any server', () => {
   const raw = jsonServer('xray-subscription.json', { id: 'r', jsonMode: 'raw' });
   const full = jsonServer('xray-subscription.json', { id: 'f' });
-  assert.deepEqual(muxCandidates({ mode: 'single', server: raw }), []);
+  assert.deepEqual(muxCandidates({ mode: 'single', server: raw }, raw), [], 'runs raw: nothing to test');
+  assert.deepEqual(muxCandidates({ mode: 'single', server: raw }, null).map((x) => x.id), ['r'], 'its full form runs');
   assert.deepEqual(muxCandidates({ mode: 'single', server: full }).map((x) => x.id), ['f']);
   assert.deepEqual(muxCandidates({ mode: 'advanced', serversById: { r: raw }, rules: [], def: 'r' }).map((x) => x.id), ['r'], 'routed to: its full form');
+  for (const [label, src] of [['main.js', MAIN], ['service.js', SERVICE]]) {
+    assert.ok(src.includes('const servers = muxCandidates(plan, rawServerOf(plan, settings, RAW_OPTS));'), label);
+  }
 });
 
 /* ------------------------------ the desktop, as text ------------------------------ */
 
-test('the desktop builds a raw JSON server the way the router does: rawServerOf → buildRawConfig on an Xray core', () => {
-  for (const [label, src, end] of [['main.js', MAIN, '\n}\n'], ['service.js', SERVICE, '\n  }\n']]) {
+test('raw runs only where rawApplies: the desktop in proxy mode — main.js and service.js choose it with the one predicate', () => {
+  for (const [label, src, end, args] of [['main.js', MAIN, '\n}\n', 'plan, settings, RAW_OPTS'], ['service.js', SERVICE, '\n  }\n', 'plan, settings, RAW_OPTS']]) {
     const body = level(slice(src, 'function buildActive(serverId, settings) {', end));
-    assert.match(body, /const rawServer = rawServerOf\(plan\);/, label);
+    assert.ok(body.includes(`const rawServer = rawServerOf(${args});`), label);
     assert.match(body, /if \(rawServer && engineFormat\(engine\) === 'sing-box'\) engine = xray\.resolveEngine\('xray'\)\.id;/, label);
     assert.match(body, /if \(rawServer\) \{\nconfig = buildRawConfig\(rawServer, settings\);\n\} else if \(engineFormat\(engine\) === 'sing-box'\) \{/, label);
     assert.match(body, /if \(!geoAssets && usesGeo && !rawServer\) \{/, `${label}: no geo warning for a config the app did not write`);
@@ -168,17 +173,18 @@ test('the desktop builds a raw JSON server the way the router does: rawServerOf 
   assert.match(SERVICE, /if \(OPENWRT && !rawServer && engineFormat\(engine\) === 'xray' && config\.dns\) config\.dns = routerDnsTuning\(config\.dns\);/);
 });
 
-test('both connects say raw mode once, right after the config is built, and hand a raw config’s TUN the plain resolvers', () => {
-  for (const [label, src, start, end] of [
-    ['main.js', MAIN, 'async function connectOnce(serverId, opts = {}) {', '\n  return { ok: true, tunError };\n}'],
-    ['service.js', SERVICE, 'async function connectOnce(serverId, opts = {}) {', '\n    return { ok: true, tunError };\n  }']
+test('both connects say raw mode once, right after the config is built; a TUN is never raw, so its DNS hijack is the app’s as before; the meter skips a raw config’s dialers', () => {
+  for (const [label, src, start, end, args] of [
+    ['main.js', MAIN, 'async function connectOnce(serverId, opts = {}) {', '\n  return { ok: true, tunError };\n}', 'plan, settings, RAW_OPTS'],
+    ['service.js', SERVICE, 'async function connectOnce(serverId, opts = {}) {', '\n    return { ok: true, tunError };\n  }', 'plan, settings, RAW_OPTS']
   ]) {
     const body = level(slice(src, start, end));
     const built = body.indexOf('buildActive(serverId, settings)');
-    const note = body.indexOf('for (const note of rawModeNotes(plan)) send(\'log\', note);');
+    const note = body.indexOf(`for (const note of rawModeNotes(${args})) send('log', note);`);
     assert.ok(built > -1 && note > built, `${label}: the note follows the build`);
     assert.equal(body.split('rawModeNotes(').length, 2, `${label}: once`);
-    assert.match(body, /const hijacks = engineFormat\(runEngine\) !== 'sing-box' && !rawServerOf\(plan\);/, label);
+    assert.match(body, /const hijacks = engineFormat\(runEngine\) !== 'sing-box';\n/, label);
+    assert.ok(body.includes(`stats.apiPort = settings.apiPort;\nstats.skipTags = rawServerOf(${args}) ? dialerTagsOf(config) : null;`), label);
   }
 });
 

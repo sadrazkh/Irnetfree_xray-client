@@ -281,7 +281,7 @@ test('both mirrors: muxFor is one function — but for the router, which runs a 
   assert.match(main, /now: Date\.now\(\), recovery: !!recovery,/, 'a recovery’s rebuild is said to decideMux');
   assert.match(main, /const mode = muxMode\(settings\.mux\);\nif \(mode === 'off'\) return none;/, 'off: not a probe, not a store read');
   assert.match(main, /if \(engineFormat\(engine\) === 'sing-box'\) return none;/, 'the sing-box engine never gets mux');
-  assert.match(main, /const servers = muxCandidates\(plan\);/, 'a chain’s hops are never asked about');
+  assert.match(main, /const servers = muxCandidates\(plan, rawServerOf\(plan, settings, RAW_OPTS\)\);/, 'a chain’s hops are never asked about, nor a JSON server that runs raw');
   assert.match(main, /buildTestConfig: \(target, port\) => buildTestConfig\(target, port, \{ entryHostIps: settings\.entryHostIps, ipv6: settings\.ipv6 \}\),/);
   assert.match(main, /startTest: \(config\) => xray\.startTest\(config, testEngineFor\(engine\)\),/, 'on the core the connect runs');
   assert.match(main, /if \(learnt\.length\) store\.set\('muxProbes', rememberVerdicts\(store\.get\('muxProbes', \{\}\), learnt, Date\.now\(\)\)\);/);
