@@ -841,12 +841,34 @@
         <button class="tb-btn" id="editClose">&#x2715;</button>
       </div>
       <div class="modal-body" id="editBody">
-        <div class="grid2">
+        <div class="grid2" id="edNameRow">
           <div><label class="field-label" data-i18n="edit.name">نام</label>
             <input type="text" id="edName" class="input" /></div>
-          <div><label class="field-label" id="edAddrLabel" data-i18n="edit.address">آدرس</label>
+          <div id="edAddrWrap"><label class="field-label" id="edAddrLabel" data-i18n="edit.address">آدرس</label>
             <input type="text" id="edAddress" class="input" dir="ltr" /></div>
         </div>
+        <!-- A JSON server (source 'json'): the config itself is the one source, so the link fields
+             below are hidden for it and this block stands in. Always LTR and monospace. -->
+        <div class="ed-json" id="edJsonWrap" hidden>
+          <div>
+            <label class="field-label" id="edJsonModeLabel" data-i18n="ed.jsonMode">نحوهٔ اجرا</label>
+            <div class="seg" id="edJsonMode" role="radiogroup" aria-labelledby="edJsonModeLabel">
+              <button type="button" class="seg-btn active" role="radio" aria-checked="true" data-json-mode="full" data-i18n="ed.jsonFull">کامل</button>
+              <button type="button" class="seg-btn" role="radio" aria-checked="false" data-json-mode="raw" data-i18n="ed.jsonRaw">خام</button>
+            </div>
+            <p class="hint" id="edJsonHelp"></p>
+          </div>
+          <div class="ed-json-info" id="edJsonInfo" hidden></div>
+          <div>
+            <label class="field-label" for="edJson" data-i18n="ed.jsonEditor">کانفیگ (JSON)</label>
+            <textarea id="edJson" class="textarea ed-json-text" dir="ltr" rows="14" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+            <p class="hint warn" id="edJsonError" dir="auto" role="alert" hidden></p>
+          </div>
+          <div class="ed-json-actions">
+            <button type="button" class="btn ghost small" id="edJsonCopy" data-i18n="ed.jsonCopy">کپی JSON</button>
+          </div>
+        </div>
+        <div class="ed-fields" id="edLinkFields">
         <div class="grid2">
           <div><label class="field-label" id="edPortLabel" data-i18n="edit.port">پورت</label>
             <input type="number" id="edPort" class="input" dir="ltr" /></div>
@@ -1008,6 +1030,7 @@
           <label class="field-label u-mbs-8 u-block" data-i18n="edit.finalMask">finalmask (JSON — همان چیزی که در لینک با fm می‌آید)</label>
           <textarea id="edFinalMask" class="input" dir="ltr" rows="3" spellcheck="false" placeholder='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5","6-8"],"delays":["10-20"],"maxSplit":"3-6"}}]}'></textarea>
           <p class="hint" data-i18n="edit.pattHint">دقیقاً همان JSON را بچسبان؛ برنامه دست‌کاری‌اش نمی‌کند. برای روش پترنیها: Address یک IP تمیز کلودفلر، fingerprint = unsafe، بعد cipherSuites و finalmask.</p>
+        </div>
         </div>
       </div>
       <div class="modal-foot">
