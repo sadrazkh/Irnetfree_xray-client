@@ -146,6 +146,14 @@ test('the core gate hands the cores every JSON shape: each fixture server in ful
   assert.deepEqual(tags('json-chain-first').slice(0, 3), ['proxy-h0', 'proxy-h0~fragment', 'proxy']);
   assert.ok(tags('json-advanced').includes('out-jf~fragment') && tags('json-advanced').includes('out-jc~hop1'));
   assert.deepEqual(tags('json-test-chain'), ['proxy', 'proxy~hop1', 'proxy~frag', 'direct']);
+  // what the cores refuse is never handed to them: allowInsecure, proxySettings
+  for (const name of run.built.filter((n) => /^json-/.test(n))) {
+    const text = JSON.stringify(run.read(name.replace(/\.json$/, '')));
+    assert.equal(text.includes('allowInsecure'), false, name);
+    assert.equal(text.includes('proxySettings'), false, name);
+  }
+  assert.equal(run.proxy('json-raw-pinned').streamSettings.tlsSettings.pinnedPeerCertSha256, 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde');
+  assert.equal(run.read('json-raw-wg-resolved').outbounds[0].settings.peers[0].endpoint, '198.51.100.7:51820');
 });
 
 test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every config — the versions read from coreVersions.js, the gate never dry', () => {

@@ -2088,6 +2088,42 @@ test('buildRawConfig: the config itself, with the app’s own inbounds, its log 
   assert.deepEqual(ch.routing, cfx.routing);
 });
 
+test('buildRawConfig writes what the cores take: no allowInsecure anywhere, the learnt pin on the main outbound, a WireGuard endpoint as the address it was resolved to', () => {
+  const { buildRawConfig } = require('../src/main/configBuilder');
+  // the owner's subscription: every server carries "allowInsecure": false
+  const sub = jsonServer('xray-subscription.json', 'js');
+  assert.equal(JSON.stringify(sub.json).includes('allowInsecure'), true);
+  const c = buildRawConfig(sub, settings());
+  assert.equal(JSON.stringify(c).includes('allowInsecure'), false);
+  const fxTls = JSON.parse(JSON_FIX('xray-subscription.json'))[2].outbounds[0].streamSettings.tlsSettings;
+  const { allowInsecure, ...rest } = fxTls;
+  assert.equal(allowInsecure, false);
+  assert.deepEqual(outboundTagged(c, 'proxy').streamSettings.tlsSettings, rest, 'only the removed key goes');
+  // a server that asked for allowInsecure: its learnt pin, as in full mode (applyCertPin), joined to the config's own
+  const pin = 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde';
+  const own = 'cd'.repeat(32);
+  const insecure = JSON.parse(JSON.stringify(sub));
+  insecure.json.outbounds[0].streamSettings.tlsSettings.allowInsecure = true;
+  insecure.json.outbounds[0].streamSettings.tlsSettings.pinnedPeerCertSha256 = own;
+  insecure.outbound.streamSettings.tlsSettings.allowInsecure = true;
+  insecure.outbound.streamSettings.tlsSettings.pinnedPeerCertSha256 = own;
+  insecure.certPin = pin;
+  const p = outboundTagged(buildRawConfig(insecure, settings()), 'proxy').streamSettings.tlsSettings;
+  assert.equal(p.allowInsecure, undefined);
+  assert.equal(p.pinnedPeerCertSha256, `${own},${pin}`);
+  // the pin is the main outbound's server's: a helper with TLS of its own never gets it
+  const chain = jsonServer('xray-chain.json', 'jc');
+  chain.certPin = pin;
+  const hop = outboundTagged(buildRawConfig(chain, settings()), 'hop1').streamSettings.tlsSettings;
+  assert.equal(hop.pinnedPeerCertSha256, undefined);
+  // WireGuard: the endpoint name the connect resolved (settings.wgEndpointIps), as full mode writes it
+  const wg = jsonServer('xray-wireguard.json', 'jw');
+  const w = buildRawConfig(wg, settings({ wgEndpointIps: { 'wg.example.com': '198.51.100.7' } }));
+  assert.equal(outboundTagged(w, 'wg').settings.peers[0].endpoint, '198.51.100.7:51820');
+  assert.equal(outboundTagged(buildRawConfig(wg, settings()), 'wg').settings.peers[0].endpoint, 'wg.example.com:51820', 'nothing resolved: as written');
+  assert.equal(wg.json.outbounds[0].settings.peers[0].endpoint, 'wg.example.com:51820', 'the record is not changed');
+});
+
 test('buildRawConfig under TUN: every outbound that dials itself is bound to the NIC — nothing else changes', () => {
   const { buildRawConfig } = require('../src/main/configBuilder');
   const s = jsonServer('xray-fragment.json', 'jf');

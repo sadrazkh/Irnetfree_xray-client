@@ -952,6 +952,16 @@ function localInbounds(s, listen, sniffing) {
 
 const isPlainObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
+/** Is config outbound `o` the record's outbound `stored` (stored without its tag; key order aside)? */
+function sameOutbound(o, stored) {
+  if (!isPlainObj(o) || !isPlainObj(stored)) return false;
+  const canon = (v) => (Array.isArray(v) ? v.map(canon)
+    : (isPlainObj(v) ? Object.keys(v).sort().reduce((x, k) => { x[k] = canon(v[k]); return x; }, {}) : v));
+  const c = Object.assign({}, o);
+  delete c.tag;
+  return JSON.stringify(canon(c)) === JSON.stringify(canon(stored));
+}
+
 /** A JSON server set to run exactly as written (jsonMode 'raw'). */
 function isRawJson(server) {
   return !!server && server.source === 'json' && server.jsonMode === 'raw' && isPlainObj(server.json);
@@ -997,10 +1007,15 @@ function rawModeNotes(planArg) {
  *  - under TUN (`directInterface`) every outbound that dials itself bound to
  *    the NIC (bindDirectDials) — a `direct` dial would otherwise re-enter the
  *    tunnel it is meant to go around;
- *  - a `proxySettings` hop as the dialerProxy the cores migrated it to (they
- *    refuse the old key at load: proxySettingsToDialer).
- * The app's DNS plan, leak-guard rules, routing mode and certificate pins are
- * not applied. Never changes the record.
+ *  - what the cores refuse or trip over, written as full mode writes it: a
+ *    `proxySettings` hop as the dialerProxy it was migrated to
+ *    (proxySettingsToDialer); `allowInsecure` never — the certificate pin
+ *    learnt for the record's server on its main outbound instead
+ *    (applyCertPin); a WireGuard endpoint name as the address the connect
+ *    resolved (applyWgEndpointIps — a failed lookup panics the handler).
+ * The app's DNS plan, leak-guard rules and routing mode are not applied.
+ * Never changes the record. (xrayManager still writes the result for the
+ * core's version — coreCompat.adaptForCore — as it does every config.)
  */
 function buildRawConfig(server, settings) {
   const s = Object.assign({}, SETTINGS_DEFAULTS, settings || {});
@@ -1020,7 +1035,14 @@ function buildRawConfig(server, settings) {
   cfg.policy = policy;
   if (Array.isArray(cfg.outbounds)) {
     const outs = cfg.outbounds.filter(isPlainObj);
-    outs.forEach(proxySettingsToDialer);
+    // the record's main outbound, found before anything is changed: the
+    // certificate pin learnt for its server is that outbound's alone
+    const main = outs.find(o => sameOutbound(o, server && server.outbound));
+    for (const o of outs) {
+      proxySettingsToDialer(o);
+      applyCertPin(o, o === main ? server : null);
+      applyWgEndpointIps(o, s.wgEndpointIps);
+    }
     bindDirectDials(outs, s.directInterface);
   }
   return cfg;
