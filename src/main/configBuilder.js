@@ -241,6 +241,69 @@ function serverAddressOf(o) {
   return a || null;
 }
 
+/** The protocols that carry traffic to a server; freedom, blackhole, dns, loopback do not. */
+const PROXY_OUT = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria']);
+
+/** The tag an outbound dials through: its dialerProxy, else (a JSON config's older form) its proxySettings.tag. */
+function dialsThrough(o) {
+  const so = o && o.streamSettings && o.streamSettings.sockopt;
+  if (so && so.dialerProxy) return String(so.dialerProxy);
+  return o && o.proxySettings && o.proxySettings.tag ? String(o.proxySettings.tag) : '';
+}
+
+/**
+ * The outbounds of a server that this machine dials ITSELF. A link server:
+ * its outbound. A JSON server: every proxy outbound of [main, ...helpers] that
+ * dials by itself — directly, or through a freedom helper (a fragment or noise
+ * dialer dials the address of whoever dialled through it, so it adds nothing).
+ * One that dials through another proxy (the exit behind a chain's hop) is
+ * reached by that proxy, never from here. `whole`: a raw connect runs the
+ * whole config, so every outbound in it is looked at.
+ */
+function entryOutbounds(server, whole) {
+  if (!server || !server.outbound) return [];
+  if (server.source !== 'json') return [server.outbound];
+  const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  const list = whole && isObj(server.json) && Array.isArray(server.json.outbounds)
+    ? server.json.outbounds.filter(isObj)
+    : [server.outbound, ...(Array.isArray(server.extraOutbounds) ? server.extraOutbounds.filter(isObj) : [])];
+  const byTag = new Map(list.filter(o => typeof o.tag === 'string' && o.tag).map(o => [o.tag, o]));
+  return list.filter(o => {
+    if (!PROXY_OUT.has(o.protocol)) return false;
+    const via = dialsThrough(o);
+    const dialer = via ? byTag.get(via) : null;
+    return !via || !dialer || !PROXY_OUT.has(dialer.protocol);
+  });
+}
+
+/** Where an outbound dials: its server's address, a WireGuard's peer endpoint host. '' when it names none. */
+function dialAddressOf(o) {
+  if (o && o.protocol === 'wireguard') {
+    const peer = o.settings && Array.isArray(o.settings.peers) && o.settings.peers[0];
+    const ep = splitEndpoint(peer && peer.endpoint);
+    return ep ? ep.host : '';
+  }
+  return serverAddressOf(o) || '';
+}
+
+/**
+ * The addresses a connect to this server dials directly — what the tunnel's
+ * bypass, the strict guard's firewall holes and the UDP block's exclusions
+ * are cut for. A link server: its record's address, as always. A JSON server:
+ * the address of each of its entry outbounds (entryOutbounds); `whole` for a
+ * raw connect.
+ */
+function entryAddressesOf(server, whole) {
+  if (!server) return [];
+  if (server.source !== 'json') return [server.address];
+  const out = [];
+  for (const o of entryOutbounds(server, whole)) {
+    const a = dialAddressOf(o);
+    if (a && !out.includes(a)) out.push(a);
+  }
+  return out;
+}
+
 /**
  * The server a routing target is ENTERED through: a chain's first hop, a
  * server looked up by id. targetServer's twin, from the other end.
@@ -262,7 +325,9 @@ function targetEntry(target, plan) {
  * to. A hop behind another hop is not one (its name travels through that hop
  * and is resolved at the far end), nor is a WireGuard, an address, or a server
  * the plan does not route to — the store behind an advanced plan holds every
- * server the user has. See pinEntryHosts for what the answers are for.
+ * server the user has. See pinEntryHosts for what the answers are for. A JSON
+ * server's are its entry outbounds' (entryOutbounds): the chain fixture is
+ * entered at its hop, never at the exit behind it.
  */
 function entryHosts(planArg) {
   const plan = normalizePlan(planArg);
@@ -279,9 +344,12 @@ function entryHosts(planArg) {
     entries.push(plan.server || null);
   }
   const out = [];
+  const whole = !!rawServerOf(plan);
   for (const s of entries) {
-    const host = serverAddressOf(s && s.outbound);
-    if (host && !net.isIP(host) && !out.includes(host)) out.push(host);
+    for (const o of entryOutbounds(s, whole)) {
+      const host = serverAddressOf(o);
+      if (host && !net.isIP(host) && !out.includes(host)) out.push(host);
+    }
   }
   // A DoH resolver an ECH config is fetched from, given by name: the core asks
   // it directly, before its tunnel exists — so its name must not wait on the
@@ -330,18 +398,27 @@ function pinnable(list, ipv6) {
  * redirect, so the dpi dialer is then handed the address — and it carries the
  * same strategy, for when it is handed the name. Returns the hosts table, or
  * null when nothing was pinned (the config is then as it was; see withHosts).
+ *
+ * A JSON server's outbound that already dials through a freedom helper of its
+ * own (a fragment or noise dialer, helpersFor) still dials its server from
+ * here: it is pinned, and that dialer carries the strategy as a dpi dialer
+ * does (unless it names one of its own). One behind another proxy is not.
  */
 function pinEntryHosts(outbounds, map, ipv6) {
   if (!map || typeof map !== 'object') return null;
   const hosts = {};
+  const strategy = ipv6 ? 'UseIP' : 'UseIPv4';
   for (const o of outbounds) {
     const host = serverAddressOf(o);
     if (!host || net.isIP(host) || !Object.prototype.hasOwnProperty.call(map, host)) continue;
-    if (o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy) continue;
+    const via = o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy;
+    const dialer = via ? outbounds.find(x => x && x.tag === via) : null;
+    if (via && !(dialer && dialer.protocol === 'freedom')) continue;
     const ips = pinnable(map[host], ipv6);
     if (!ips.length) continue;
     const ss = o.streamSettings || (o.streamSettings = {});
-    ss.sockopt = Object.assign({}, ss.sockopt, { domainStrategy: ipv6 ? 'UseIP' : 'UseIPv4' });
+    ss.sockopt = Object.assign({}, ss.sockopt, { domainStrategy: strategy });
+    if (dialer && !(dialer.settings && dialer.settings.domainStrategy)) dialer.settings = Object.assign({}, dialer.settings, { domainStrategy: strategy });
     hosts[host] = ips;
   }
   // The ECH query's own dial (echSockopt) the same way: its resolver's name
@@ -1382,4 +1459,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson };

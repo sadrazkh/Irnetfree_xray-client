@@ -110,6 +110,43 @@ test('servers:update answers a refused JSON edit with the reason and keeps the r
   assert.equal(await s.service.invoke('servers:link', full.id), JSON.stringify(full.json, null, 2));
 });
 
+test('the router enters a JSON server where it really dials: the chain fixture at hop.example.com — its name resolved, the gateway’s bypass cut for it — never at the exit behind it', async (t) => {
+  const asked = [];
+  const deps = { resolveHost: async (h) => { asked.push(h); return { ips: [h === 'hop.example.com' ? '203.0.113.40' : '203.0.113.41'] }; } };
+  const ch = jsonServer('xray-chain.json', { id: 'js-chain' });
+  const fr = jsonServer('xray-fragment.json', { id: 'js-frag' });
+  const s = H.start({ servers: [ch, fr] }, deps);
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', ch.id);
+  const bypass = s.state.inners.at(-1).bypass;
+  assert.ok(bypass.includes('hop.example.com') && bypass.includes('203.0.113.40'), JSON.stringify(bypass));
+  assert.equal(bypass.includes('exit.example.com'), false, JSON.stringify(bypass));
+  assert.deepEqual(asked, ['hop.example.com']);
+  const { config } = s.state.xray.starts.at(-1);
+  assert.deepEqual(config.dns.hosts['hop.example.com'], ['203.0.113.40']);
+  assert.equal('exit.example.com' in config.dns.hosts, false);
+  // the fragment fixture: its own server stays its one entry
+  asked.length = 0;
+  await s.service.invoke('connect', fr.id);
+  assert.deepEqual(asked, ['edge1.example.com']);
+  const b2 = s.state.inners.at(-1).bypass;
+  assert.ok(b2.includes('edge1.example.com'), JSON.stringify(b2));
+  await s.service.invoke('disconnect');
+});
+
+test('both mirrors take a server’s entry addresses from entryAddressesOf — a link server’s address as always, a JSON server’s entries, a raw one’s whole config', () => {
+  for (const [label, src, end] of [['main.js', MAIN, '\n}\n'], ['service.js', SERVICE, '\n  }\n']]) {
+    const body = level(slice(src, 'function buildPlan(serverId, settings) {', end));
+    assert.equal(/\.address\)/.test(body), false, `${label}: no entry read off a record's address any more`);
+    assert.match(body, /if \(tg === 'chain'\) \{ if \(legacyChain\[0\]\) entryAddrs\.push\(\.\.\.entryAddressesOf\(legacyChain\[0\]\)\); return; \}/, label);
+    assert.match(body, /if \(m && m\[0\]\) entryAddrs\.push\(\.\.\.entryAddressesOf\(m\[0\]\)\);/, label);
+    assert.match(body, /if \(serversById\[tg\]\) entryAddrs\.push\(\.\.\.entryAddressesOf\(serversById\[tg\]\)\);/, label);
+    assert.match(body, /entryAddrs = entryAddressesOf\(members\[0\]\);/, label);
+    assert.match(body, /entryAddrs = entryAddressesOf\(legacyChain\[0\]\);/, label);
+    assert.match(body, /entryAddrs = entryAddressesOf\(server, isRawJson\(server\)\);/, label);
+  }
+});
+
 test('a raw single server is no mux candidate — its config runs as written; in full mode it is one like any server', () => {
   const raw = jsonServer('xray-subscription.json', { id: 'r', jsonMode: 'raw' });
   const full = jsonServer('xray-subscription.json', { id: 'f' });

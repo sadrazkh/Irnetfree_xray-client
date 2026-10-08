@@ -235,8 +235,13 @@ function nameFor(config, main, balancer) {
   return balancer ? `${base} · ${main.tag}` : base;
 }
 
-/** The fields a JSON server derives from its config — re-derived on every edit. */
-const DERIVED = ['protocol', 'address', 'port', 'raw', 'outbound', 'json', 'extraOutbounds', 'jsonInfo'];
+/**
+ * The fields a JSON server derives from its config — re-derived on every edit,
+ * and carried with an edited config across a subscription refresh. Never
+ * `raw`: that stays the PROVIDER's text, as a link server keeps its link, so a
+ * refresh finds an edited server by raw first, whatever the user changed.
+ */
+const DERIVED = ['protocol', 'address', 'port', 'outbound', 'json', 'extraOutbounds', 'jsonInfo'];
 
 /** The record for `main` of `config`: the link record's fields, then source/json/extraOutbounds/jsonMode/jsonInfo. */
 function recordFor(config, main, balancer) {
@@ -464,8 +469,8 @@ function mainFor(config, server) {
 /**
  * An edit of a JSON server — { name, jsonMode, json } — on a copy. `json` (text
  * or an object) re-derives the main outbound, the helpers, the protocol,
- * address, port, raw and jsonInfo; one with no proxy outbound left throws
- * with the reason. What the user changed is recorded in `_edited` (a union
+ * address, port and jsonInfo — `raw` stays the provider's text (DERIVED); one
+ * with no proxy outbound left throws with the reason. What the user changed is recorded in `_edited` (a union
  * over every edit), as for a link server's fields: a name back to the
  * config's own, or the mode back to full, is released.
  */

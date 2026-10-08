@@ -191,6 +191,19 @@ const MAP = { proxy: 'sv-a', direct: DIRECT_ID };
 const per = (o) => o;   // reads better at the call sites below
 const at = (t) => ({ now: t });
 
+test('a JSON server’s lifetime total is its main outbound’s: its helpers (<tag>~<helper>) are never attributed', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const { importJson } = require('../src/main/jsonImport');
+  const s = Object.assign(importJson(fs.readFileSync(path.join(__dirname, 'fixtures/json/xray-chain.json'), 'utf8')).servers[0], { id: 'jc' });
+  const single = tagMapFor({ mode: 'single', server: s }, 'jc');
+  assert.deepEqual(single, { proxy: 'jc', direct: DIRECT_ID });
+  const adv = tagMapFor({ mode: 'advanced', serversById: { jc: s }, rules: [], def: 'jc' }, '__advanced__');
+  assert.equal(Object.keys(adv).some((k) => k.includes('~')), false);
+  const t = accumulate(null, { proxy: { up: 40, down: 60 }, 'proxy~hop1': { up: 41, down: 61 }, 'proxy~frag': { up: 42, down: 62 } }, single, {}, at(9));
+  assert.deepEqual(t, { jc: { up: 40, down: 60, lastUsed: 9 } });
+});
+
 test('the ordinary tick adds the difference', () => {
   const t = accumulate(per({ proxy: { up: 100, down: 200 } }), per({ proxy: { up: 150, down: 500 } }),
     MAP, { 'sv-a': { up: 1000, down: 2000, lastUsed: 1 } }, at(9));

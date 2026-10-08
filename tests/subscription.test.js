@@ -773,9 +773,33 @@ test('a JSON subscription refreshed with one config’s remarks changed keeps ev
     assert.deepEqual(store.servers[2]._edited, ['jsonMode']);
     assert.deepEqual(store.servers[3].json, mine);
     assert.deepEqual(store.servers[3].extraOutbounds.map((o) => o.tag), ['frag']);
-    assert.equal(store.servers[3].raw, JSON.stringify(mine));
+    assert.equal(store.servers[3].raw, JSON.stringify(next[5]), 'raw is the provider’s current text');
     assert.deepEqual(store.servers[3]._edited, ['json']);
     assert.equal(store.servers[4].jsonMode, 'full');
+  }
+});
+
+test('a JSON server whose config the user edited — even who it connects to — is found again by the provider’s raw: same id, the edited config kept, no duplicate', async () => {
+  const { store, mgr } = harness({ servers: [], bodies: [JSON_SUB, JSON_SUB, JSON_SUB] });
+  await mgr.refresh('sub1');
+  const ids = store.servers.map((s) => s.id);
+  const providerRaw = store.servers[1].raw;
+  // the user points the server at a clean IP of their own and changes its path
+  const mine = JSON.parse(JSON.stringify(store.servers[1].json));
+  mine.outbounds[0].settings.vnext[0].address = '104.16.0.1';
+  mine.outbounds[0].streamSettings.wsSettings.path = '/mine';
+  store.servers = store.servers.map((s, i) => (i === 1 ? applyServerEdits(s, { name: s.name, jsonMode: 'full', json: mine }) : s));
+  assert.equal(store.servers[1].raw, providerRaw, 'an edit keeps the provider’s text');
+  assert.equal(store.servers[1].address, '104.16.0.1');
+  for (const _ of [1, 2]) {
+    await mgr.refresh('sub1');
+    assert.equal(store.servers.length, 5, 'no duplicate');
+    assert.deepEqual(store.servers.map((s) => s.id), ids);
+    assert.deepEqual(store.servers[1].json, mine);
+    assert.equal(store.servers[1].outbound.settings.vnext[0].address, '104.16.0.1');
+    assert.equal(store.servers[1].address, '104.16.0.1');
+    assert.equal(store.servers[1].raw, providerRaw);
+    assert.deepEqual(store.servers[1]._edited, ['json']);
   }
 });
 
