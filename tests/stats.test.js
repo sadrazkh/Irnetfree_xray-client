@@ -33,6 +33,21 @@ test('direct, block, dns and the DPI dialers are not proxied traffic', () => {
   })), { up: 10, down: 20 });
 });
 
+test('a JSON server’s helper outbounds (<tag>~<helper>) carry its own bytes again: counted once, under its main outbound', () => {
+  // A fragment freedom, the hops of a JSON server's own chain: everything the
+  // main outbound sends passes through them too (configBuilder.helpersFor).
+  const v = vars({
+    proxy: { uplink: 10, downlink: 20 },
+    'proxy~fragment': { uplink: 11, downlink: 21 },
+    'out-ja': { uplink: 100, downlink: 200 },
+    'out-ja~hop1': { uplink: 101, downlink: 201 },
+    'out-ja~frag': { uplink: 102, downlink: 202 },
+    'test-out-0~fragment': { uplink: 5, downlink: 5 }
+  });
+  assert.deepEqual(sumOutbounds(v), { up: 110, down: 220 });
+  assert.deepEqual(byOutbound(v), { proxy: { up: 10, down: 20 }, 'out-ja': { up: 100, down: 200 } });
+});
+
 test('missing or malformed payloads read as zero, never NaN', () => {
   for (const v of [null, undefined, {}, { stats: {} }, { stats: { outbound: null } }, 'nonsense']) {
     assert.deepEqual(sumOutbounds(v), { up: 0, down: 0 }, JSON.stringify(v));

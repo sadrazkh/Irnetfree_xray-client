@@ -17,7 +17,13 @@ const http = require('http');
 
 /** Outbound tags that exist but never carry user traffic through the proxy. */
 const NOT_PROXY = new Set(['direct', 'block', 'dns-out']);
-const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-');
+/**
+ * A JSON server's helper outbounds (`<tag>~<helper>`, configBuilder.helpersFor:
+ * its fragment dialer, the hops of its own chain) carry the bytes its main
+ * outbound already counted — like the dpi-* dialers, never counted again.
+ */
+const isHelperTag = (tag) => tag.includes('~');
+const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-') && !isHelperTag(tag);
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
@@ -197,7 +203,7 @@ function byOutbound(vars) {
   if (!out || typeof out !== 'object') return {};
   const res = {};
   for (const tag of Object.keys(out)) {
-    if (tag === 'block' || tag === 'dns-out' || tag.startsWith('dpi-')) continue;
+    if (tag === 'block' || tag === 'dns-out' || tag.startsWith('dpi-') || isHelperTag(tag)) continue;
     const c = out[tag] || {};
     res[tag] = { up: num(c.uplink), down: num(c.downlink) };
   }
