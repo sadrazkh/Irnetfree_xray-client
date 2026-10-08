@@ -86,6 +86,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.irnetfree.vpn.IRApp
 import com.irnetfree.vpn.core.*
+// by name: another star import here also has a Selection, and the star imports tie
+import com.irnetfree.vpn.core.Selection
 import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.vpn.ConnState
 import com.irnetfree.vpn.vpn.GeoAssets
