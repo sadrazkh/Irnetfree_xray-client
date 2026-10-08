@@ -30,6 +30,8 @@ Fixtures (committed, sanitized): `tests/fixtures/json/`:
   - `json` (the config object);
   - `extraOutbounds` (an array of helper outbounds, with their original tags);
   - `jsonMode: 'full' | 'raw'` (default `'full'`).
+
+  Plus one derived field, `jsonInfo`, re-computed from `json` on import and on every save.
 - `raw` of a JSON server = `JSON.stringify(config)`, the minified single config, `remarks` included.
 - **Main outbound**, in order:
   1. the catch-all rule's outboundTag — the last rule with none of domain/ip/port/sourcePort/protocol/inboundTag/user/attrs, or the rule with `network: "tcp,udp"`;
