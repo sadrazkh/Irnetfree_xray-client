@@ -81,6 +81,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.irnetfree.vpn.IRApp
@@ -215,7 +216,7 @@ private fun App(store: Store) {
                     Tab.MORE -> when (more) {
                         "chains" -> ChainsScreen(store, bump) { more = null }
                         "pool" -> PoolScreen(store, bump) { more = null }
-                        "routing" -> RoutingScreen(store, bump) { more = null }
+                        "routing" -> RoutingScreen(store, back = { more = null }, openChains = { more = "chains" })
                         "settings" -> SettingsScreen(store, bump) { more = null }
                         "logs" -> LogsScreen { more = null }
                         else -> MoreMenu(store, bump) { more = it }
@@ -761,6 +762,8 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
 @Composable private fun ExitChip(store: Store, result: TestState?, pinging: Boolean, modifier: Modifier, onPick: () -> Unit, onPing: () -> Unit) {
     val srv = store.serverById(store.selection)
     val (flag, label) = if (srv != null) ServerLabel.split(srv.name) else null to store.selectionLabel()
+    // a routing profile whose traffic rides on a base says which (spec §3: the small path's "via <base>")
+    val viaBase = if (srv != null) null else store.selectedProfile()?.let { p: RoutingProfile -> RoutingProfiles.effectiveDefVia(p) ?: p.base }
     Row(
         modifier.heightIn(min = 56.dp).clip(RoundedCornerShape(14.dp)).background(CARD)
             .border(1.dp, STROKE, RoundedCornerShape(14.dp)).clickable(onClickLabel = "choose a server") { onPick() }
@@ -772,7 +775,11 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
             Text(label, color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                if (srv != null) badge(srv.protocol) + " · tap to change" else "tap to change",
+                when {
+                    srv != null -> badge(srv.protocol) + " · tap to change"
+                    viaBase != null -> "via ${store.targetLabel(viaBase)} · tap to change"
+                    else -> "tap to change"
+                },
                 color = MUTED2, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
@@ -1372,9 +1379,12 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
         observeStore()
         val modes = buildList {
             if (store.poolEnabledValid().isNotEmpty()) add(Store.POOL_ID to "🧩 Proxy Pool (${store.poolEnabledValid().size})")
-            if (store.advancedReady()) add(Store.ADV_ID to "🧭 Advanced routing")
+            // one row per routing profile that has rules or a default (spec §1)
+            store.profiles.filter { p: RoutingProfile -> store.profileReady(p) }.forEach { p: RoutingProfile -> add(Selection.forProfile(p.id) to "🧭 ${p.name}") }
             store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }
         }
+        // an old plain "__advanced__" selection is the first profile's row
+        val selKey = store.selectedProfile()?.let { p: RoutingProfile -> Selection.forProfile(p.id) } ?: store.selection
         val groups = ServerGroups.build(store.servers, store.subs, "", emptySet(), store.selection)
         val pick: (String) -> Unit = { id -> store.saveSelection(id); onPick() }
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -1399,7 +1409,7 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
                 }
             }
             if (modes.isEmpty() && store.servers.isEmpty()) item { Text("No servers yet", color = MUTED, modifier = Modifier.padding(16.dp)) }
-            items(modes) { (id, lbl) -> PickRow(lbl, null, null, null, store.selection == id, null) { pick(id) } }
+            items(modes) { (id, lbl) -> PickRow(lbl, null, null, null, selKey == id, null) { pick(id) } }
             for (g in groups) {
                 if (g.servers.isEmpty()) continue
                 item {
@@ -1825,6 +1835,9 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
 private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) -> Unit, bump: () -> Unit) {
     val ctx = LocalContext.current
     var importText by remember { mutableStateOf("") }
+    // An irnetfree://routing/ link (a profile or a chain, RouteShare) waiting
+    // for its preview. Set WITHOUT bump(): the rebuild would take it away.
+    var routeLink by remember { mutableStateOf<String?>(null) }
     // The fetch runs in AppWork: the bump() that shows the new subscription
     // used to cancel its own fetch, so a first run imported nothing.
     fun addSubAndFetch(url: String) {
@@ -1865,7 +1878,11 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         bump()
     }
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
-        val t = res.contents; if (!t.isNullOrBlank()) { smartImport(t); setSheet(null); bump() }
+        val t = res.contents
+        if (!t.isNullOrBlank()) {
+            if (RouteShare.looksLikeShare(t)) { routeLink = t.trim(); setSheet(null) }
+            else { smartImport(t); setSheet(null); bump() }
+        }
     }
     fun launchQr() = qrLauncher.launch(ScanOptions().setOrientationLocked(false).setBeepEnabled(false).setPrompt("Point the camera at the config QR"))
     fun pasteClip() {
@@ -1877,12 +1894,15 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         "import" -> AddLinkSheet(importText, { importText = it }, { pasteClip() }, { launchQr() }, { setSheet(null) }) {
             // An empty Add used to close the sheet as if something had been added.
             if (importText.isBlank()) Toast.makeText(ctx, "Paste a link first, or scan a QR code", Toast.LENGTH_SHORT).show()
+            else if (RouteShare.looksLikeShare(importText)) { routeLink = importText.trim(); importText = ""; setSheet(null) }
             else { smartImport(importText); importText = ""; setSheet(null); bump() }
         }
         "wg" -> WgSheet(store, { setSheet(null) }) { setSheet(null); bump() }
         "proxy" -> ProxySheet(store, { setSheet(null) }) { setSheet(null); bump() }
         else -> {}
     }
+    // the import itself moves AppWork.storeRev, which the screens observe: no rebuild needed
+    routeLink?.let { t: String -> RouteImportDialog(store, t) { routeLink = null } }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1891,7 +1911,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         Column(Modifier.fillMaxWidth().imePadding().padding(16.dp).padding(bottom = 16.dp)) {
             Text("Add config", color = TXT, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
-            Text("vless/vmess/trojan/ss/hysteria2/socks/wireguard link, an Xray or sing-box JSON config, or a subscription URL / base64", color = MUTED, fontSize = 11.sp)
+            Text("vless/vmess/trojan/ss/hysteria2/socks/wireguard link, an Xray or sing-box JSON config, a subscription URL / base64, or an irnetfree://routing/ link (a routing profile or a chain)", color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(value, onValue, Modifier.fillMaxWidth(), placeholder = { Text("Paste or type here…", fontSize = 12.sp) }, minLines = 3, maxLines = 8, shape = RoundedCornerShape(14.dp), colors = tfColors())
             Spacer(Modifier.height(10.dp))
@@ -2589,6 +2609,8 @@ private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 @Composable
 private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     observeStore()
+    // a chain's share link (RouteShare): copy, and a QR when it fits
+    var shared by remember { mutableStateOf<SharedText?>(null) }
     Screen("Proxy Chain", back, { IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), "Chain ${store.chains.size + 1}", emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) } }) {
         if (store.chains.isEmpty()) EmptyHint("No chains yet.")
         store.chains.toList().forEachIndexed { idx, c ->
@@ -2597,6 +2619,7 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
                 Column(Modifier.padding(14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("⛓ ${c.name}", color = TXT, modifier = Modifier.weight(1f))
+                        if (members.isNotEmpty()) IconButton(onClick = { shared = chainShare(store, c) }) { Icon(Icons.Filled.Share, "share this chain", tint = TXT2) }
                         if (store.chainReady(c)) IconButton(onClick = { store.saveSelection("chain:${c.id}"); bump() }) { Icon(Icons.Filled.CheckCircle, null, tint = if (store.selection == "chain:${c.id}") PRIMARY else MUTED) }
                         IconButton(onClick = {
                             val wasSelected = store.selection == "chain:${c.id}"
@@ -2612,18 +2635,69 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             }
         }
     }
+    shared?.let { st: SharedText -> RouteShareDialog(st) { shared = null } }
 }
 
 /* ================================ ROUTING ================================ */
+/**
+ * Routing: the simple modes, then advanced routing as PROFILES — several saved
+ * rule sets, each with an optional base its targets ride on ("via a base"),
+ * and the profile drawn as a vertical flow, rule → target → base (RoutingProfiles
+ * .kt; spec 2026-10-09 §1–§3, the desktop's routing page in the app's style).
+ *
+ * Saves recompose through the store (AppWork.touch) instead of rebuilding the
+ * screen (bump): a long profile keeps its place while it is edited, and the
+ * rule dialog opened from the flow stays open while it is changed. A rule's
+ * row is keyed by what it holds, so a deleted rule's draft never shows up in
+ * the one that took its place.
+ */
 @Composable
-private fun RoutingScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
+private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit) {
     val ctx = LocalContext.current
     observeStore()
     var s by remember { mutableStateOf(store.settings) }
     // Without geoip.dat/geosite.dat the core drops every geo rule, so the two
     // bypass modes and Block ads would do exactly nothing. Show that instead.
     val geo = remember { GeoAssets.available(ctx) }
-    fun save(n: AppSettings) { s = n; store.saveSettings(n); bump() }
+    fun save(n: AppSettings) { store.saveSettings(n); s = store.settings; AppWork.touch() }
+    // The profile being edited: one just imported, else the one Connect uses, else the first.
+    var editId by remember { mutableStateOf(RoutingUi.focus.ifEmpty { store.selectedProfile()?.id ?: "" }) }
+    LaunchedEffect(Unit) { RoutingUi.focus = "" }
+    val prof = store.profileById(editId) ?: store.profiles.firstOrNull()
+    var edited by remember { mutableStateOf(false) }
+    var shared by remember { mutableStateOf<SharedText?>(null) }
+    var confirmDelete by remember { mutableStateOf<RoutingProfile?>(null) }
+    var ruleDialog by remember { mutableIntStateOf(-1) }
+    var editServerId by remember { mutableStateOf<String?>(null) }
+    var sheet by remember { mutableStateOf<String?>(null) }
+    val state by VpnState.state.collectAsState()
+
+    /** [f] applied to the profile as the store holds it NOW (a field's late commit must not bring an older copy back). */
+    fun update(id: String, f: (RoutingProfile) -> RoutingProfile) {
+        val i = store.profiles.indexOfFirst { x: RoutingProfile -> x.id == id }
+        if (i < 0) return
+        val cur = store.profiles[i]
+        val next = RoutingProfiles.normalize(f(cur))
+        if (next == cur) return
+        store.profiles[i] = next
+        store.saveProfiles()
+        s = store.settings
+        edited = true
+        AppWork.touch()
+    }
+    /** Rule [i] of profile [id] becomes [nr] — only while it is still [old] (it may have been moved or deleted meanwhile). */
+    fun setRule(id: String, i: Int, old: RouteRule, nr: RouteRule) = update(id) { cur: RoutingProfile ->
+        if (i < cur.rules.size && cur.rules[i] == old) cur.copy(rules = cur.rules.toMutableList().also { m: MutableList<RouteRule> -> m[i] = nr }) else cur
+    }
+    fun deleteRule(id: String, i: Int, old: RouteRule) = update(id) { cur: RoutingProfile ->
+        if (i < cur.rules.size && cur.rules[i] == old) cur.copy(rules = cur.rules.filterIndexed { x: Int, _: RouteRule -> x != i }) else cur
+    }
+    // a chain opens the chains screen, a server its edit sheet; direct/block are nothing to open
+    val onNode: (String) -> Unit = { t: String ->
+        if (t.startsWith("chain:")) openChains()
+        if (store.serverById(t) != null) editServerId = t
+    }
+
     Screen("Routing", back, {}) {
         Text("Routing mode", color = TXT, fontWeight = FontWeight.Bold)
         listOf(Triple("global", "Global (all via proxy)", false), Triple("bypass-ir", "Bypass Iran", true),
@@ -2635,38 +2709,474 @@ private fun RoutingScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             }
         }
         if (!geo) Text("Bypass Iran, Bypass China and Block ads need the routing data files (geoip.dat / geosite.dat), which this build doesn't include — those rules would be dropped and the traffic would go through the proxy anyway.", color = MUTED, fontSize = 12.sp)
-        SwitchRow("Block ads" + (if (geo) "" else " — unavailable"), s.blockAds && geo, enabled = geo) { save(s.copy(blockAds = it)) }
-        SwitchRow("Sniffing", s.enableSniffing) { save(s.copy(enableSniffing = it)) }
+        SwitchRow("Block ads" + (if (geo) "" else " — unavailable"), s.blockAds && geo, enabled = geo) { v: Boolean -> save(s.copy(blockAds = v)) }
+        SwitchRow("Sniffing", s.enableSniffing) { v: Boolean -> save(s.copy(enableSniffing = v)) }
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
-        SwitchRow("Advanced routing", s.advancedRouting) { save(s.copy(advancedRouting = it)) }
-        if (s.advancedRouting) {
-            Text("Pick 🧭 on the Home screen to use it.", color = MUTED, fontSize = 12.sp)
-            // The simple routing mode UNDER the user's rules: an explicit corporate
+        SwitchRow("Advanced routing", s.advancedRouting) { v: Boolean -> save(s.copy(advancedRouting = v)) }
+        if (s.advancedRouting && prof != null) {
+            Text("Each profile is a set of rules of its own. Pick 🧭 and its name on the Home screen to connect with it.", color = MUTED, fontSize = 12.sp)
+            Spacer(Modifier.height(10.dp))
+            Text("PROFILES", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+            Spacer(Modifier.height(4.dp))
+            val inUseId = store.selectedProfile()?.id
+            store.profiles.toList().forEach { p: RoutingProfile ->
+                ProfileRow(
+                    store, p, editing = p.id == prof.id, inUse = p.id == inUseId,
+                    onEdit = { editId = p.id },
+                    onUse = {
+                        store.saveSelection(Selection.forProfile(p.id))
+                        AppWork.touch()
+                        AppWork.snack("Connect now uses 🧭 ${p.name}")
+                    },
+                    onShare = { shared = profileShare(store, p) },
+                    onDuplicate = {
+                        val copy = p.copy(id = RoutingProfiles.newProfileId(), name = RoutingProfiles.uniqueName(p.name, store.profiles.map { x: RoutingProfile -> x.name }))
+                        store.profiles.add(copy); store.saveProfiles()
+                        editId = copy.id
+                        AppWork.touch()
+                    },
+                    // the last one stays: Connect's plain 🧭 always has a profile to mean
+                    onDelete = if (store.profiles.size > 1) ({ confirmDelete = p }) else null
+                )
+            }
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    val np = RoutingProfile(
+                        RoutingProfiles.newProfileId(),
+                        RoutingProfiles.uniqueName("Routing", store.profiles.map { x: RoutingProfile -> x.name }),
+                        def = store.servers.firstOrNull()?.id ?: "direct"
+                    )
+                    store.profiles.add(np); store.saveProfiles()
+                    editId = np.id
+                    AppWork.touch()
+                }, modifier = Modifier.weight(1f)) { Text("+ New profile", fontSize = 13.sp) }
+                OutlinedButton(onClick = { sheet = "import" }, modifier = Modifier.weight(1f)) { Text("Import a link", fontSize = 13.sp) }
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
+            // edits to the profile the tunnel is running on reach it at the next connect
+            if (edited && state == ConnState.CONNECTED && inUseId == prof.id) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Connected on this profile — changes apply on the next connect.", color = AMBER, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { edited = false; AppWork.reconnect(ctx, store) }) { Text("Reconnect now", color = PRIMARY) }
+                }
+            }
+            key(prof.id, prof.name) {
+                DraftField(prof.name, Modifier.fillMaxWidth(), label = { Text("Profile name") }) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(name = v) } }
+            }
+            // The simple routing mode UNDER the profile's rules: an explicit corporate
             // rule still wins over a country bypass (configBuilder.js advancedUseMode).
-            SwitchRow("Apply the routing mode (Bypass Iran/China) under these rules" + (if (geo) "" else " — needs the geo files"), s.advancedUseMode && geo, enabled = geo) { save(s.copy(advancedUseMode = it)) }
-            s.routeRules.forEachIndexed { i, r ->
-                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
-                    Column(Modifier.padding(10.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            DropPick("Type", listOf("domain" to "Domain", "ip" to "IP", "port" to "Port"), r.type) { nt -> save(s.copy(routeRules = s.routeRules.toMutableList().also { it[i] = r.copy(type = nt) })) }
-                            Spacer(Modifier.weight(1f)); IconButton(onClick = { save(s.copy(routeRules = s.routeRules.filterIndexed { x, _ -> x != i })) }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
+            SwitchRow("Apply the routing mode (Bypass Iran/China) under these rules" + (if (geo) "" else " — needs the geo files"), prof.useMode && geo, enabled = geo) { v: Boolean ->
+                update(prof.id) { cur: RoutingProfile -> cur.copy(useMode = v) }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            Text("Base", color = TXT, fontWeight = FontWeight.Bold)
+            Text("A config the targets below ride on, unless a rule says otherwise — for example two chains that both leave through one server.", color = MUTED, fontSize = 11.sp)
+            val base = prof.base
+            DropPick(if (base == null) "No base" else "⚠ ${store.targetLabel(base)}", listOf("" to "No base") + targetOptions(store), base ?: "") { b: String ->
+                update(prof.id) { cur: RoutingProfile -> cur.copy(base = b.ifEmpty { null }) }
+            }
+            if (base != null && !store.targetExists(base)) Text("⚠ The base is gone — connecting is refused while something rides on it. Pick another.", color = BAD, fontSize = 11.sp)
+
+            Spacer(Modifier.height(6.dp))
+            Text("Rules", color = TXT, fontWeight = FontWeight.Bold)
+            prof.rules.forEachIndexed { i: Int, r: RouteRule ->
+                key(prof.id, i, r) {
+                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
+                        Column(Modifier.padding(10.dp)) {
+                            RuleEditor(store, prof, r,
+                                onChange = { nr: RouteRule -> setRule(prof.id, i, r, nr) },
+                                onDelete = { deleteRule(prof.id, i, r) })
                         }
-                        // Saved when editing ends, not per keystroke: save() rebuilds
-                        // the screen, which used to steal focus after every character.
-                        DraftField(r.value, Modifier.fillMaxWidth(), placeholder = { Text("value (geosite:google / 1.2.3.0/24 / 443)", fontSize = 11.sp) }) { nv ->
-                            val m = s.routeRules.toMutableList()
-                            // the rule may have been deleted/moved by the save that rebuilt us
-                            if (i < m.size && m[i] == r) { m[i] = r.copy(value = nv); save(s.copy(routeRules = m)) }
-                        }
-                        DropPick("Target", targetOptionsFull(store), r.target) { save(s.copy(routeRules = s.routeRules.toMutableList().also { m -> m[i] = r.copy(target = it) })) }
                     }
                 }
             }
-            Button(onClick = { save(s.copy(routeRules = s.routeRules + RouteRule("domain", "", store.servers.firstOrNull()?.id ?: "direct"))) }, modifier = Modifier.fillMaxWidth()) { Text("+ Add rule") }
+            Button(onClick = {
+                update(prof.id) { cur: RoutingProfile -> cur.copy(rules = cur.rules + RouteRule("domain", "", store.servers.firstOrNull()?.id ?: "direct")) }
+            }, modifier = Modifier.fillMaxWidth()) { Text("+ Add rule") }
+
             Spacer(Modifier.height(8.dp)); Text("Rest of traffic via:", color = MUTED)
-            DropPick("Default", targetOptionsFull(store), s.routeDefault) { save(s.copy(routeDefault = it)) }
+            DropPick("Default", targetOptionsFull(store), prof.def) { t: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(def = t) } }
+            if (!store.targetExists(prof.def)) Text("⚠ The default is gone — connecting is refused until you pick another.", color = BAD, fontSize = 11.sp)
+            if (RoutingProfiles.takesVia(prof.def)) {
+                DropPick("Base", viaOptions(store, prof, prof.def), prof.defVia) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(defVia = v) } }
+                val dv = RoutingProfiles.effectiveDefVia(prof)
+                if (dv != null && !store.targetExists(dv)) Text("⚠ Its base is gone — connecting is refused until you pick another.", color = BAD, fontSize = 11.sp)
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 12.dp), color = STROKE)
+            FlowList(store, prof, onRule = { i: Int -> ruleDialog = i }, onNode = onNode)
+            Spacer(Modifier.height(16.dp))
         }
     }
+
+    // The rule a flow node was tapped for, in its editor row.
+    val rd = ruleDialog
+    if (prof != null && rd >= 0 && rd < prof.rules.size) {
+        val r = prof.rules[rd]
+        Dialog(onDismissRequest = { ruleDialog = -1 }) {
+            Surface(shape = RoundedCornerShape(16.dp), color = CARD) {
+                Column(Modifier.padding(16.dp).widthIn(max = 360.dp)) {
+                    Text("Rule ${rd + 1}", color = TXT, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(6.dp))
+                    key(prof.id, rd, r) {
+                        RuleEditor(store, prof, r,
+                            onChange = { nr: RouteRule -> setRule(prof.id, rd, r, nr) },
+                            onDelete = { deleteRule(prof.id, rd, r); ruleDialog = -1 })
+                    }
+                    TextButton(onClick = { ruleDialog = -1 }, modifier = Modifier.align(Alignment.End)) { Text("Done", color = PRIMARY) }
+                }
+            }
+        }
+    }
+    confirmDelete?.let { victim: RoutingProfile ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            containerColor = CARD,
+            title = { Text("Delete this routing profile?", color = TXT, fontSize = 16.sp) },
+            text = { Text("${victim.name} · ${victim.rules.size} rule(s)", color = MUTED, fontSize = 13.sp, fontFamily = MONO) },
+            confirmButton = {
+                TextButton(onClick = {
+                    store.profiles.removeAll { x: RoutingProfile -> x.id == victim.id }
+                    store.saveProfiles()
+                    val moved = store.repairSelection()   // a selection that named it falls back
+                    if (editId == victim.id) editId = store.profiles.firstOrNull()?.id ?: ""
+                    confirmDelete = null
+                    AppWork.touch()
+                    AppWork.snack(if (moved && store.selection.isNotEmpty()) "Deleted ${victim.name} — now using ${store.selectionLabel()}" else "Deleted ${victim.name}")
+                }) { Text("Delete", color = BAD) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel", color = MUTED) } }
+        )
+    }
+    shared?.let { st: SharedText -> RouteShareDialog(st) { shared = null } }
+    // a server tapped in the flow, in the same editor as on Servers
+    val editing = editServerId?.let { id: String -> store.serverById(id) }
+    if (editing != null) {
+        val saveEdit: (ServerConfig) -> Unit = { updated: ServerConfig ->
+            val idx = store.servers.indexOfFirst { x: ServerConfig -> x.id == updated.id }
+            if (idx >= 0) { store.servers[idx] = updated; store.saveServers() }
+            editServerId = null
+            AppWork.touch()
+        }
+        if (editing.isJson) EditJsonSheet(editing, onDismiss = { editServerId = null }, onSave = saveEdit)
+        else EditConfigSheet(editing, onDismiss = { editServerId = null }, onSave = saveEdit)
+    }
+    AddConfigSheets(store, sheet, { v: String? -> sheet = v }, { AppWork.touch() })
+}
+
+/** What Routing remembers across its own rebuilds: the profile an import just brought, to open at. */
+private object RoutingUi { @Volatile var focus = "" }
+
+/** One profile in Routing's list: tap to edit it; use it for Connect, share it, duplicate or delete it. */
+@Composable private fun ProfileRow(
+    store: Store, p: RoutingProfile, editing: Boolean, inUse: Boolean,
+    onEdit: () -> Unit, onUse: () -> Unit, onShare: () -> Unit, onDuplicate: () -> Unit, onDelete: (() -> Unit)?
+) {
+    var menu by remember { mutableStateOf(false) }
+    val dv = RoutingProfiles.effectiveDefVia(p)
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(12.dp))
+            .background(if (editing) CARD_SEL else CARD)
+            .border(if (editing) 1.5.dp else 1.dp, if (editing) PRIMARY else STROKE, RoundedCornerShape(12.dp))
+            .clickable(onClickLabel = "edit this profile") { onEdit() }
+            .padding(start = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "🧭 ${p.name}", color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
+                )
+                if (inUse) {
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        "IN USE", color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO,
+                        fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.em, maxLines = 1,
+                        modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(PRIMARY).padding(horizontal = 5.dp, vertical = 3.dp)
+                    )
+                }
+            }
+            Text(
+                "${p.rules.size} rule(s) · rest → ${store.targetLabel(p.def)}" + (if (dv != null) " via ${store.targetLabel(dv)}" else ""),
+                color = MUTED2, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+        IconButton(onClick = onUse) { Icon(Icons.Filled.CheckCircle, "use this profile for Connect", tint = if (inUse) PRIMARY else MUTED) }
+        IconButton(onClick = onShare) { Icon(Icons.Filled.Share, "share this profile", tint = TXT2) }
+        Box {
+            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "more", tint = MUTED) }
+            DropdownMenu(menu, { menu = false }, modifier = Modifier.background(CARD)) {
+                DropdownMenuItem(text = { Text("Duplicate", color = TXT) }, onClick = { menu = false; onDuplicate() })
+                if (onDelete != null) {
+                    DropdownMenuItem(text = { Text("Delete", color = BAD) }, onClick = { menu = false; onDelete() })
+                }
+            }
+        }
+    }
+}
+
+/** One rule's editor row: type, value, target, and — for a target that can take one — the base it rides on. */
+@Composable private fun RuleEditor(store: Store, p: RoutingProfile, r: RouteRule, onChange: (RouteRule) -> Unit, onDelete: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        DropPick("Type", listOf("domain" to "Domain", "ip" to "IP", "port" to "Port"), r.type) { nt: String -> onChange(r.copy(type = nt)) }
+        Spacer(Modifier.weight(1f))
+        IconButton(onClick = onDelete) { Icon(Icons.Filled.DeleteOutline, "delete this rule", tint = BAD) }
+    }
+    // Saved when editing ends, not per keystroke (DraftField).
+    DraftField(r.value, Modifier.fillMaxWidth(), placeholder = { Text("value (geosite:google / 1.2.3.0/24 / 443)", fontSize = 11.sp) }) { nv: String -> onChange(r.copy(value = nv)) }
+    DropPick("⚠ ${store.targetLabel(r.target)}", targetOptionsFull(store), r.target) { t: String -> onChange(r.copy(target = t)) }
+    if (!store.targetExists(r.target)) Text("⚠ This target is gone — the rule is skipped (its traffic follows the default) until you pick another.", color = BAD, fontSize = 11.sp)
+    if (RoutingProfiles.takesVia(r.target)) {
+        DropPick("⚠ via ${store.targetLabel(r.via)}", viaOptions(store, p, r.target), r.via.ifEmpty { RoutingProfiles.VIA_INHERIT }) { v: String -> onChange(r.copy(via = v)) }
+        val eff = RoutingProfiles.effectiveVia(r, p)
+        if (eff != null && !store.targetExists(eff)) Text("⚠ Its base is gone — connecting is refused until you pick another.", color = BAD, fontSize = 11.sp)
+    }
+}
+
+/** What a target can ride on: the profile's base, nothing, or any server or chain but itself. */
+private fun viaOptions(store: Store, p: RoutingProfile, target: String): List<Pair<String, String>> = buildList {
+    val base = p.base
+    add(RoutingProfiles.VIA_INHERIT to (if (base != null) "via the profile’s base (${store.targetLabel(base)})" else "via the profile’s base (none set)"))
+    add(RoutingProfiles.VIA_NONE to "No base — dial it directly")
+    targetOptions(store).filter { o: Pair<String, String> -> o.first != target }.forEach { o: Pair<String, String> -> add(o.first to "via ${o.second}") }
+}
+
+/** One step of the flow: a glyph, what it is, and why it is red when it is. */
+@Composable private fun FlowNode(glyph: String, label: String, tint: Color, note: String?, indent: Dp, onClick: (() -> Unit)?) {
+    val click = if (onClick == null) Modifier else Modifier.clickable { onClick() }
+    Row(
+        Modifier.fillMaxWidth().padding(start = indent).heightIn(min = 40.dp).clip(RoundedCornerShape(8.dp))
+            .then(click).padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(glyph, color = tint, fontSize = 13.sp, fontFamily = MONO, modifier = Modifier.width(24.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, color = if (note != null) BAD else TXT, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (note != null) Text(note, color = BAD, fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable private fun FlowArrow(text: String, indent: Dp) {
+    Text(text, color = MUTED2, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.padding(start = indent + 10.dp))
+}
+
+/** The rule's values, short: the first two and how many more. */
+private fun ruleSummary(r: RouteRule): String {
+    val vals = r.value.split(Regex("[|,]")).map { v: String -> v.trim() }.filter { v: String -> v.isNotEmpty() }
+    if (vals.isEmpty()) return "(no value — skipped)"
+    return vals.take(2).joinToString(", ") + (if (vals.size > 2) " +${vals.size - 2}" else "")
+}
+
+private fun ruleGlyph(type: String): String = when (type) {
+    "domain" -> "🌐"
+    "ip" -> "#"
+    "port" -> ":"
+    else -> "•"
+}
+
+private fun targetGlyph(t: String): String = when {
+    t == "direct" -> "→"
+    t == "block" -> "⛔"
+    t.startsWith("chain:") -> "⛓"
+    else -> "▣"
+}
+
+/**
+ * The profile as a vertical flow (spec §3, Android): each step is the rules
+ * (consecutive ones to the same place grouped) → where they go → the base it
+ * rides on; the default last, as "everything else". Then each base once, with
+ * every target through it. A rule opens its editor; a server its edit sheet; a
+ * chain the chains screen. What is gone is red, with what connecting does about it.
+ */
+@Composable private fun FlowList(store: Store, p: RoutingProfile, onRule: (Int) -> Unit, onNode: (String) -> Unit) {
+    val lanes = RoutingProfiles.lanes(p) { t: String -> store.targetExists(t) }
+    Text("FLOW", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+    Text("Top to bottom: the first rule that matches decides where the traffic goes, then what that rides on.", color = MUTED, fontSize = 11.sp)
+    Spacer(Modifier.height(6.dp))
+    lanes.forEach { lane: RoutingProfiles.Lane ->
+        Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
+            Column(Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
+                if (lane.isDefault) {
+                    FlowNode("★", "Everything else", TXT2, null, 0.dp, null)
+                } else {
+                    lane.rules.forEach { i: Int ->
+                        val r = p.rules[i]
+                        FlowNode(ruleGlyph(r.type), ruleSummary(r), TXT2, null, 0.dp) { onRule(i) }
+                    }
+                }
+                FlowArrow("↓", 12.dp)
+                val targetNote = if (!lane.targetMissing) null
+                    else if (lane.isDefault) "gone — connecting is refused"
+                    else "gone — skipped, its traffic follows the default"
+                val target = if (lane.target.isEmpty() && lane.isDefault) (store.servers.firstOrNull()?.id ?: "direct") else lane.target
+                FlowNode(targetGlyph(target), store.targetLabel(target), PRIMARY, targetNote, 12.dp) { onNode(target) }
+                val via = lane.via
+                if (via != null) {
+                    FlowArrow("↓ via", 24.dp)
+                    FlowNode("◆", store.targetLabel(via), AMBER, if (lane.viaMissing) "base gone — connecting is refused" else null, 24.dp) { onNode(via) }
+                }
+            }
+        }
+    }
+    val bases = RoutingProfiles.lanesByBase(lanes)
+    if (bases.isNotEmpty()) {
+        Spacer(Modifier.height(8.dp))
+        Text("BASES", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+        bases.forEach { e: Pair<String, List<RoutingProfiles.Lane>> ->
+            val base = e.first
+            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
+                Column(Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
+                    FlowNode("◆", store.targetLabel(base), AMBER, if (store.targetExists(base)) null else "gone — connecting is refused", 0.dp) { onNode(base) }
+                    e.second.forEach { l: RoutingProfiles.Lane ->
+                        Text(
+                            "← " + store.targetLabel(l.target) + (if (l.isDefault) " (everything else)" else ""),
+                            color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = 34.dp, top = 2.dp, bottom = 2.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A routing link ready to hand over: what it is called, the text, and how many servers it carries. */
+private class SharedText(val title: String, val text: String, val servers: Int)
+
+/** A profile's share link (RouteShare), or null after saying why there is none. */
+private fun profileShare(store: Store, p: RoutingProfile): SharedText? = try {
+    val payload = RouteShare.profilePayload(p, store.servers.toList(), store.chains.toList()) { srv: ServerConfig -> LinkParser.buildShareLink(srv) }
+    SharedText("Share “${p.name}”", RouteShare.encode(payload), payload.getJSONArray("servers").length())
+} catch (e: Exception) {
+    AppWork.snack("Can’t share ${p.name}: ${e.message ?: "error"}")
+    null
+}
+
+/** A chain's share link, or null after saying why there is none. */
+private fun chainShare(store: Store, c: ChainConfig): SharedText? = try {
+    val payload = RouteShare.chainPayload(c, store.servers.toList()) { srv: ServerConfig -> LinkParser.buildShareLink(srv) }
+    SharedText("Share ⛓ ${c.name}", RouteShare.encode(payload), payload.getJSONArray("servers").length())
+} catch (e: Exception) {
+    AppWork.snack("Can’t share ${c.name}: ${e.message ?: "error"}")
+    null
+}
+
+/**
+ * Copy (and QR, when it fits — the desktop's 1,700 bytes) a routing link. It
+ * says, every time, that the servers' details are inside: whoever has the
+ * link can connect to them.
+ */
+@Composable private fun RouteShareDialog(st: SharedText, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val fits = RouteShare.fitsQr(st.text)
+    val bmp = remember(st.text) { if (fits) qrBitmap(st.text) else null }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(16.dp), color = CARD) {
+            Column(Modifier.padding(18.dp).widthIn(max = 320.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(st.title, color = TXT, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "⚠ This link carries everything needed to connect — ${st.servers} server(s), with their addresses and keys. Give it only to someone you would give those servers to.",
+                    color = AMBER, fontSize = 12.sp
+                )
+                Spacer(Modifier.height(12.dp))
+                if (bmp != null) Image(
+                    bmp.asImageBitmap(), "QR",
+                    Modifier.size(248.dp).clip(RoundedCornerShape(10.dp)).background(Color.White).padding(6.dp),
+                    filterQuality = FilterQuality.None
+                )
+                else Text("Too large for a QR — use Copy.", color = MUTED, fontSize = 12.sp)
+                Spacer(Modifier.height(8.dp))
+                Text("${st.text.toByteArray(Charsets.UTF_8).size} bytes", color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { copyConfigText(ctx, st.text); onDismiss() }, modifier = Modifier.fillMaxWidth()) { Text("Copy link") }
+            }
+        }
+    }
+}
+
+/**
+ * The preview of an `irnetfree://routing/` link (pasted, typed or scanned):
+ * what it is, its rules and chains, the servers already here and the new ones,
+ * anything this app cannot read — then Import. A link that cannot be read says
+ * why, and nothing is written.
+ */
+@Composable private fun RouteImportDialog(store: Store, text: String, onClose: () -> Unit) {
+    val decoded = remember(text) { runCatching { RouteShare.decode(text) } }
+    val payload = decoded.getOrNull()
+    val summary = remember(text) {
+        payload?.let { p: JSONObject ->
+            runCatching {
+                RouteShare.previewImport(p, store.servers.toList(), store.chains.toList(), store.profiles.toList(),
+                    { l: String -> RouteShare.parseServer(l) }, { srv: ServerConfig -> SubRefresh.strictIdentity(srv) })
+            }.getOrNull()
+        }
+    }
+    val why = decoded.exceptionOrNull()?.message ?: "This link could not be read."
+    AlertDialog(
+        onDismissRequest = onClose,
+        containerColor = CARD,
+        title = {
+            Text(
+                when {
+                    summary == null -> "Can’t import this link"
+                    summary.kind == RouteShare.KIND_CHAIN -> "Import chain “${summary.name}”"
+                    else -> "Import routing “${summary.name}”"
+                },
+                color = TXT, fontSize = 16.sp
+            )
+        },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (summary == null) {
+                    Text(why, color = BAD, fontSize = 13.sp)
+                } else {
+                    if (summary.kind == RouteShare.KIND_PROFILE) Text("${summary.rules} rule(s) — added as a new profile", color = TXT, fontSize = 13.sp)
+                    Text("${summary.chains} chain(s)", color = TXT, fontSize = 13.sp)
+                    Text("${summary.serversNew} new server(s) · ${summary.serversExisting} already here", color = TXT, fontSize = 13.sp)
+                    if (summary.unreadable.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text("Not readable here — what names them is marked missing:", color = AMBER, fontSize = 12.sp)
+                        summary.unreadable.forEach { u: String -> Text("· $u", color = AMBER, fontSize = 11.sp) }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "New servers are added by hand, not to a subscription. Of the settings only “routing mode under these rules” comes with it — your routing mode, DNS and the rest stay yours.",
+                        color = MUTED, fontSize = 11.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (summary != null && payload != null) {
+                TextButton(onClick = { importRouting(store, payload); onClose() }) { Text("Import", color = PRIMARY) }
+            }
+        },
+        dismissButton = { TextButton(onClick = onClose) { Text(if (summary == null) "Close" else "Cancel", color = MUTED) } }
+    )
+}
+
+/** Take a decoded routing link into the store (RouteShare.applyImport) and say what came of it. */
+private fun importRouting(store: Store, payload: JSONObject) {
+    val r = try {
+        RouteShare.applyImport(payload, store.servers.toList(), store.chains.toList(), store.profiles.toList(),
+            { l: String -> RouteShare.parseServer(l) }, { srv: ServerConfig -> SubRefresh.strictIdentity(srv) }, { prefix: String -> newId(prefix) })
+    } catch (e: Exception) {
+        AppWork.snack("Nothing imported — ${e.message ?: "the link could not be read"}")
+        return
+    }
+    store.applyImported(r)
+    if (store.selection.isEmpty()) r.servers.firstOrNull()?.let { srv: ServerConfig -> store.saveSelection(srv.id) }
+    val pid = r.profileId
+    if (pid != null) RoutingUi.focus = pid
+    val what = if (pid != null) "🧭 ${store.profileById(pid)?.name ?: "the profile"}" else "the chain"
+    val hint = if (pid != null && !store.settings.advancedRouting) " — turn on Routing → Advanced routing to use it" else ""
+    AppWork.snack("Imported $what: ${r.addedServers} new server(s), ${r.addedChains} new chain(s)$hint")
+    AppWork.touch()
 }
 
 /* ================================ SETTINGS ================================ */
@@ -2837,7 +3347,7 @@ private fun coresLine(ctx: Context): String {
                 if (s.advancedMode) {
                     add(MoreRow("chains", "Proxy Chain", "several hops, in order", "${store.chains.size}", Icons.Filled.Link))
                     add(MoreRow("pool", "Proxy Pool", "several exits, each on its own port", "${store.pool.size}", Icons.Filled.Hub))
-                    add(MoreRow("routing", "Routing", if (s.advancedRouting) "advanced rules" else routingModeLabel(s.routingMode), if (s.advancedRouting) "${s.routeRules.size} rules" else "", Icons.Filled.CallSplit))
+                    add(MoreRow("routing", "Routing", if (s.advancedRouting) "advanced routing profiles" else routingModeLabel(s.routingMode), if (s.advancedRouting) "${store.profiles.size} profile(s)" else "", Icons.Filled.CallSplit))
                 }
                 add(MoreRow("settings", "Settings", "ports, DNS, core, mux, per-app", "", Icons.Filled.Settings))
                 if (s.advancedMode) add(MoreRow("logs", "Logs", "what the core actually said", "", Icons.Filled.Article))
