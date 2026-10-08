@@ -2656,7 +2656,7 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 @Composable
 private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit) {
     val ctx = LocalContext.current
-    observeStore()
+    val rev = observeStore()
     var s by remember { mutableStateOf(store.settings) }
     // Without geoip.dat/geosite.dat the core drops every geo rule, so the two
     // bypass modes and Block ads would do exactly nothing. Show that instead.
@@ -2664,7 +2664,14 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
     fun save(n: AppSettings) { store.saveSettings(n); s = store.settings; AppWork.touch() }
     // The profile being edited: one just imported, else the one Connect uses, else the first.
     var editId by remember { mutableStateOf(RoutingUi.focus.ifEmpty { store.selectedProfile()?.id ?: "" }) }
-    LaunchedEffect(Unit) { RoutingUi.focus = "" }
+    // an import made here (or on Home since) opens the profile it brought
+    LaunchedEffect(rev) {
+        val f = RoutingUi.focus
+        if (f.isNotEmpty()) {
+            if (store.profileById(f) != null) editId = f
+            RoutingUi.focus = ""
+        }
+    }
     val prof = store.profileById(editId) ?: store.profiles.firstOrNull()
     var edited by remember { mutableStateOf(false) }
     var shared by remember { mutableStateOf<SharedText?>(null) }
