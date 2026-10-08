@@ -2186,9 +2186,9 @@ test('entryHosts: the names a connect resolves for a JSON server are its entries
   assert.deepEqual(entryHosts({ mode: 'chain', chain: [ch, TROJAN_TCP_TLS] }), ['hop.example.com']);
   assert.deepEqual(entryHosts({ mode: 'chain', chain: [TROJAN_TCP_TLS, ch] }), ['b.example.com'], 'a later hop is entered through the hop before it');
   assert.deepEqual(entryHosts(advancedPlan({ serversById: { jc: ch, jf: fr }, rules: [{ type: 'domain', value: 'a.com', target: 'jc' }], def: 'jf' })), ['hop.example.com', 'edge1.example.com']);
-  // a raw single server runs its whole config
+  // names are resolved under TUN only, where a raw server runs its full form (rawApplies)
   const bal = Object.assign(jsonServer('xray-balancer.json', 'jb'), { jsonMode: 'raw' });
-  assert.deepEqual(entryHosts(single(bal)), ['edge1.example.com', 'edge2.example.com']);
+  assert.deepEqual(entryHosts(single(bal)), ['edge1.example.com']);
   assert.deepEqual(entryHosts(single(Object.assign({}, bal, { jsonMode: 'full' }))), ['edge1.example.com']);
 });
 
@@ -2208,4 +2208,45 @@ test('pinEntryHosts answers a JSON server’s entries from the config: the hop b
   assert.equal(plain.dns.hosts, undefined);
   assert.deepEqual(sockoptOf(plain, 'proxy~hop1'), { dialerProxy: 'proxy~frag' });
   assert.equal(outboundTagged(plain, 'proxy~frag').settings.domainStrategy, undefined);
+});
+
+/* ------------------- raw mode runs in proxy mode on the desktop only ------------------- */
+// Under TUN — and always on the router — the app's DNS (the LAN's port-53
+// answer, the entry names answered from the config) and its tunnel rules are
+// what keep names resolving: a raw server runs its full form there.
+
+test('rawApplies: a raw JSON server runs as written in proxy mode on the desktop; under TUN and on the router its full form runs', () => {
+  const { rawApplies, rawServerOf } = require('../src/main/configBuilder');
+  const raw = Object.assign(jsonServer('xray-fragment.json', 'jr'), { jsonMode: 'raw', name: 'R' });
+  const full = jsonServer('xray-fragment.json', 'jf');
+  assert.equal(rawApplies(raw, { tunMode: false }), true, 'desktop, proxy mode');
+  assert.equal(rawApplies(raw, { tunMode: true }), false, 'desktop, TUN');
+  assert.equal(rawApplies(raw, { tunMode: false }, { openwrt: true }), false, 'the router, always');
+  assert.equal(rawApplies(raw, { tunMode: true }, { openwrt: true }), false);
+  assert.equal(rawApplies(full, { tunMode: false }), false, 'full mode is full mode');
+  assert.equal(rawApplies(VLESS_WS_TLS, { tunMode: false }), false);
+  assert.equal(rawServerOf(single(raw), { tunMode: false }), raw);
+  assert.equal(rawServerOf(single(raw), { tunMode: true }), null);
+  assert.equal(rawServerOf(single(raw), { tunMode: false }, { openwrt: true }), null);
+});
+
+test('rawModeNotes says once why a raw server runs its full form under TUN or on the router', () => {
+  const { rawModeNotes } = require('../src/main/configBuilder');
+  const raw = Object.assign(jsonServer('xray-fragment.json', 'jr'), { jsonMode: 'raw', name: 'R' });
+  const running = [{ line: 'Running "R" exactly as written (raw JSON) — the app\'s DNS management, leak guard and routing mode do not apply', level: 'info' }];
+  const full = [{ line: '"R" is set to run raw — under TUN (and on the router) its full form runs, so the app\'s DNS and tunnel rules apply', level: 'warn' }];
+  assert.deepEqual(rawModeNotes(single(raw), { tunMode: false }), running);
+  assert.deepEqual(rawModeNotes(single(raw), { tunMode: true }), full);
+  assert.deepEqual(rawModeNotes(single(raw), { tunMode: false }, { openwrt: true }), full);
+  assert.deepEqual(rawModeNotes({ mode: 'chain', chain: [VLESS_WS_TLS, raw] }, { tunMode: true }),
+    [{ line: '"R" is set to run raw, but a chain/routing target uses its full form', level: 'warn' }]);
+  assert.deepEqual(rawModeNotes(single(jsonServer('xray-chain.json', 'jc')), { tunMode: true }), []);
+});
+
+test('dialerTagsOf names the outbounds a running config dials through — a raw config’s helpers, whose bytes its main outbound already counted', () => {
+  const { buildRawConfig, dialerTagsOf } = require('../src/main/configBuilder');
+  assert.deepEqual([...dialerTagsOf(buildRawConfig(jsonServer('xray-chain.json', 'jc'), settings()))].sort(), ['frag', 'hop1']);
+  assert.deepEqual([...dialerTagsOf(buildRawConfig(jsonServer('xray-fragment.json', 'jf'), settings()))], ['fragment']);
+  assert.deepEqual([...dialerTagsOf(buildRawConfig(jsonServer('xray-balancer.json', 'jb'), settings()))], [], 'both balancer members carry their own traffic');
+  assert.deepEqual([...dialerTagsOf(null)], []);
 });

@@ -294,7 +294,19 @@ function transportQuery(t) {
   throw new Error('unsupported transport: ' + type);
 }
 
-/** sing-box `tls` → a link's security/sni/fp/alpn/pbk/sid. */
+/**
+ * sing-box `tls.ech` → a link's `ech` (the core's echConfigList): its ECH
+ * config list, base64, out of the PEM block sing-box writes (lines or one
+ * string). One fetched by name only (`query_server_name`) has no link form,
+ * and one switched off is none: '' — left out, nothing else changed.
+ */
+function echOf(tls) {
+  const ech = isObj(tls) && isObj(tls.ech) ? tls.ech : null;
+  if (!ech || !ech.enabled || ech.config == null) return '';
+  return [].concat(ech.config).join('\n').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^-----/.test(l)).join('');
+}
+
+/** sing-box `tls` → a link's security/sni/fp/alpn/pbk/sid/ech. */
 function tlsQuery(tls) {
   if (!isObj(tls) || !tls.enabled) return { security: 'none' };
   const fp = isObj(tls.utls) && tls.utls.enabled !== false && tls.utls.fingerprint ? String(tls.utls.fingerprint) : '';
@@ -302,7 +314,7 @@ function tlsQuery(tls) {
   if (isObj(tls.reality) && tls.reality.enabled) {
     return { security: 'reality', sni, fp, pbk: tls.reality.public_key || '', sid: tls.reality.short_id || '' };
   }
-  return { security: 'tls', sni, fp, alpn: [].concat(tls.alpn || []).join(','), allowInsecure: tls.insecure ? '1' : '' };
+  return { security: 'tls', sni, fp, alpn: [].concat(tls.alpn || []).join(','), allowInsecure: tls.insecure ? '1' : '', ech: echOf(tls) };
 }
 
 /** A WireGuard `reserved`: [0, 0, 0] or its base64 → "0,0,0". */
@@ -352,6 +364,7 @@ function singboxLink(o, type) {
       tls: s.security === 'tls' ? 'tls' : '', sni: s.sni || '', fp: s.fp || '', alpn: s.alpn || ''
     };
     if (s.allowInsecure) v.insecure = '1';
+    if (s.ech) v.ech = s.ech;
     return 'vmess://' + b64(JSON.stringify(v));
   }
   if (type === 'shadowsocks') {
@@ -362,7 +375,7 @@ function singboxLink(o, type) {
     const tls = isObj(o.tls) ? o.tls : {};
     const obfs = isObj(o.obfs) ? o.obfs : {};
     const q = {
-      sni: tls.server_name, insecure: tls.insecure ? '1' : '', alpn: [].concat(tls.alpn || []).join(','),
+      sni: tls.server_name, insecure: tls.insecure ? '1' : '', alpn: [].concat(tls.alpn || []).join(','), ech: echOf(tls),
       obfs: obfs.type, 'obfs-password': obfs.password, mport: [].concat(o.server_ports || []).join(','),
       hopInterval: o.hop_interval, up: o.up_mbps, down: o.down_mbps
     };

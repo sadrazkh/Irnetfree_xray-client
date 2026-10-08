@@ -343,10 +343,11 @@ function entryHosts(planArg) {
   } else {
     entries.push(plan.server || null);
   }
+  // Asked under TUN only (withEntryHostIps), where a raw server runs its full
+  // form (rawApplies): a server's entries are its full form's.
   const out = [];
-  const whole = !!rawServerOf(plan);
   for (const s of entries) {
-    for (const o of entryOutbounds(s, whole)) {
+    for (const o of entryOutbounds(s)) {
       const host = serverAddressOf(o);
       if (host && !net.isIP(host) && !out.includes(host)) out.push(host);
     }
@@ -1045,23 +1046,55 @@ function isRawJson(server) {
 }
 
 /**
- * The raw JSON server a plan runs as written — a single-server connect only;
- * null for every other plan (a raw server in a chain, advanced routing or the
- * pool is used in its full form: buildConfig).
+ * The tags a running config's outbounds dial THROUGH (sockopt.dialerProxy): a
+ * raw config's fragment dialer, the hops of its own chain. Their bytes are the
+ * ones the outbound dialling through them already counted — the traffic meter
+ * leaves them out (stats.js), as it does `<tag>~<helper>` in the full form.
  */
-function rawServerOf(planArg) {
+function dialerTagsOf(config) {
+  const out = new Set();
+  for (const o of (config && Array.isArray(config.outbounds) ? config.outbounds : [])) {
+    const via = o && o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy;
+    if (typeof via === 'string' && via) out.add(via);
+  }
+  return out;
+}
+
+/**
+ * Does raw mode run for this server on this connect? A raw JSON server, in
+ * proxy mode on the desktop only. Under TUN — and always on the router
+ * (`opts.openwrt`) — names resolve only through the app's own DNS: the port-53
+ * answer a router's LAN lives on, the entry names answered from the config
+ * (pinEntryHosts) so the core never asks the OS resolver that is the tunnel
+ * itself. A raw config carries neither, so there its full form runs.
+ */
+function rawApplies(server, settings, opts) {
+  return isRawJson(server) && !(settings && settings.tunMode) && !(opts && opts.openwrt);
+}
+
+/**
+ * The raw JSON server a plan runs as written — a single-server connect where
+ * rawApplies; null for every other plan (a raw server in a chain, advanced
+ * routing or the pool, under TUN or on the router is used in its full form:
+ * buildConfig).
+ */
+function rawServerOf(planArg, settings, opts) {
   const plan = normalizePlan(planArg);
-  return plan.mode === 'single' && isRawJson(plan.server) ? plan.server : null;
+  return plan.mode === 'single' && rawApplies(plan.server, settings, opts) ? plan.server : null;
 }
 
 /**
  * What a connect says about raw mode, once: [{ line, level }]. A single raw
- * server runs as written; one in any other plan is used in its full form.
+ * server runs as written — or, under TUN and on the router, in its full form;
+ * one in any other plan is used in its full form.
  */
-function rawModeNotes(planArg) {
+function rawModeNotes(planArg, settings, opts) {
   const plan = normalizePlan(planArg);
-  const raw = rawServerOf(plan);
+  const raw = rawServerOf(plan, settings, opts);
   if (raw) return [{ line: `Running "${raw.name}" exactly as written (raw JSON) — the app's DNS management, leak guard and routing mode do not apply`, level: 'info' }];
+  if (plan.mode === 'single' && isRawJson(plan.server)) {
+    return [{ line: `"${plan.server.name}" is set to run raw — under TUN (and on the router) its full form runs, so the app's DNS and tunnel rules apply`, level: 'warn' }];
+  }
   const seen = new Set();
   const out = [];
   for (const s of planServers(plan)) {
@@ -1459,4 +1492,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };

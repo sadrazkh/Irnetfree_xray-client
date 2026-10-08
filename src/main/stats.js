@@ -27,13 +27,18 @@ const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-') && !i
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
-/** { up, down } summed from a parsed /debug/vars body. Never throws, never NaN. */
-function sumOutbounds(vars) {
+/**
+ * { up, down } summed from a parsed /debug/vars body. Never throws, never NaN.
+ * `skip`: tags to leave out besides the usual — a raw config's dialers
+ * (configBuilder.dialerTagsOf), whose bytes the outbound dialling through them
+ * already counted.
+ */
+function sumOutbounds(vars, skip) {
   const out = vars && vars.stats && vars.stats.outbound;
   if (!out || typeof out !== 'object') return { up: 0, down: 0 };
   let up = 0, down = 0;
   for (const tag of Object.keys(out)) {
-    if (!isProxyTag(tag)) continue;
+    if (!isProxyTag(tag) || (skip && skip.has(tag))) continue;
     const c = out[tag] || {};
     up += num(c.uplink);
     down += num(c.downlink);
@@ -48,6 +53,8 @@ class StatsPoller {
   constructor(opts) {
     this.binPath = opts.binPath;
     this.apiPort = opts.apiPort || 10085;
+    // a raw JSON config's dialers (configBuilder.dialerTagsOf), set per connect; null: none
+    this.skipTags = null;
     this.onStats = opts.onStats || (() => {});
     // the whole parsed body, for callers that need per-outbound counters and
     // not just the sum (see SilenceWatch)
@@ -101,7 +108,7 @@ class StatsPoller {
           let parsed;
           try { parsed = JSON.parse(body); } catch { return finish(null); }
           try { this.onRaw(parsed); } catch { /* a watcher must never stop the meter */ }
-          finish(Object.assign(sumOutbounds(parsed), { per: byOutbound(parsed) }));
+          finish(Object.assign(sumOutbounds(parsed, this.skipTags), { per: byOutbound(parsed, this.skipTags) }));
         });
       });
       this.cancelQuery = cancel;
@@ -198,12 +205,12 @@ class StatsPoller {
  * though sumOutbounds leaves it out of the proxy total; `block`, `dns-out` and
  * the anti-DPI dialers are not traffic anybody chose and stay out.
  */
-function byOutbound(vars) {
+function byOutbound(vars, skip) {
   const out = vars && vars.stats && vars.stats.outbound;
   if (!out || typeof out !== 'object') return {};
   const res = {};
   for (const tag of Object.keys(out)) {
-    if (tag === 'block' || tag === 'dns-out' || tag.startsWith('dpi-') || isHelperTag(tag)) continue;
+    if (tag === 'block' || tag === 'dns-out' || tag.startsWith('dpi-') || isHelperTag(tag) || (skip && skip.has(tag))) continue;
     const c = out[tag] || {};
     res[tag] = { up: num(c.uplink), down: num(c.downlink) };
   }
