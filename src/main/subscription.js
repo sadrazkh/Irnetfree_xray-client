@@ -545,4 +545,4 @@ function hostnameOf(url) {
   try { return new URL(url).hostname; } catch { return ''; }
 }
 
-module.exports = { SubscriptionManager, fetchSubscription, reconcileServers, fetchUrl, redirectTarget, MAX_BODY_BYTES };
+module.exports = { SubscriptionManager, fetchSubscription, reconcileServers, fetchUrl, redirectTarget, MAX_BODY_BYTES, serverIdentity };
