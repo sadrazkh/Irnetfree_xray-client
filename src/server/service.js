@@ -15,7 +15,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
@@ -235,6 +235,9 @@ function createService(opts = {}) {
   // OpenWrt: `opkg install xray-core sing-box` puts the official cores in
   // /usr/bin. Searched LAST — a core downloaded into userBinDir still wins.
   const OPENWRT = isOpenwrt();
+  // Raw JSON mode (configBuilder.rawApplies): never on a router, whose LAN
+  // lives on the app's port-53 answer — there a raw server runs its full form.
+  const RAW_OPTS = { openwrt: OPENWRT };
   const systemBinDirs = OPENWRT ? ['/usr/bin'] : [];
   // A router is headless: after a power cut the tunnel has to come back by
   // itself, so "connect at start" is the default THERE (the user can still turn
@@ -1219,7 +1222,7 @@ function createService(opts = {}) {
       if (!server) throw new Error(settings.lang === 'en' ? 'Server not found' : 'سرور پیدا نشد');
       plan = { mode: 'single', server };
       label = server.name;
-      entryAddrs = entryAddressesOf(server, isRawJson(server));
+      entryAddrs = entryAddressesOf(server, rawApplies(server, settings, RAW_OPTS));
     }
     entryAddrs = [...new Set(entryAddrs.filter(Boolean))];
     return { plan, label, entryAddrs };
@@ -1230,7 +1233,7 @@ function createService(opts = {}) {
     // A JSON server set to run raw: its own config, as written — a single-server
     // connect only (configBuilder.buildRawConfig). The app's routing mode, the
     // geo rules it would have skipped and the router's DNS block are not in it.
-    const rawServer = rawServerOf(plan);
+    const rawServer = rawServerOf(plan, settings, RAW_OPTS);
 
     const geoSt = assetStatus();
     const geoAssets = !!(geoSt.geoip && geoSt.geosite);
@@ -1506,7 +1509,7 @@ function createService(opts = {}) {
     let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine), { quiet: true }).id;
     if (OPENWRT && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray', { quiet: true }).id;   // as buildActive runs it
     if (engineFormat(engine) === 'sing-box') return none;
-    const servers = muxCandidates(plan);
+    const servers = muxCandidates(plan, rawServerOf(plan, settings, RAW_OPTS));
     if (!servers.length) return none;
     const { muxIds, learnt } = await decideMux({
       mode, servers, cache: store.get('muxProbes', {}), now: Date.now(), recovery: !!recovery,
@@ -1697,7 +1700,7 @@ function createService(opts = {}) {
     const { plan, label, entryAddrs, config, geoWarn, engine } = active;
     // A JSON server set to run raw, said once per connect: run as written, or —
     // in a chain, advanced routing or the pool — used in its full form.
-    for (const note of rawModeNotes(plan)) send('log', note);
+    for (const note of rawModeNotes(plan, settings, RAW_OPTS)) send('log', note);
     // A router carries a house: one access-log line per connection, through the
     // service's stdout into syslog, is real CPU on a Cortex-A7 (the AC-1304 log
     // was a wall of `accepted udp:…`). Kept when the user asks for a verbose
@@ -1901,9 +1904,7 @@ function createService(opts = {}) {
         // The in-country resolver is dialled `direct` — under TUN that would
         // re-enter the tunnel, so it needs a bypass route exactly like the
         // server addresses (the direct outbound is also bound to the NIC).
-        // A raw JSON config (buildRawConfig) carries none of the app's DNS
-        // plan, so no hijack either: the adapter gets the plain resolvers.
-        const hijacks = engineFormat(runEngine) !== 'sing-box' && !rawServerOf(plan);
+        const hijacks = engineFormat(runEngine) !== 'sing-box';
         const dnsPeer = myTun.dnsPeer || TUN_GW;
         // A tunnel that is already up was built for the PREVIOUS server: its
         // route exclusions — and, at the strict level, the firewall holes cut
@@ -2101,6 +2102,7 @@ function createService(opts = {}) {
 
     stats.setBin(xray.anyBin());
     stats.apiPort = settings.apiPort;
+    stats.skipTags = rawServerOf(plan, settings, RAW_OPTS) ? dialerTagsOf(config) : null;
     watchWgSilence(config);
     // a fresh core counts from zero — tell the meter, or the first poll of the
     // new session reads as growth on the old one (see main.js)

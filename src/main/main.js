@@ -6,7 +6,9 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson } = require('./configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('./configBuilder');
+// Raw JSON mode (configBuilder.rawApplies): in proxy mode only — the desktop is no router.
+const RAW_OPTS = { openwrt: false };
 const { latencyTest, testsAlone, udpOnly } = require('./latencyTest');
 const { adapterDnsServers, guardPeers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
@@ -819,7 +821,7 @@ function buildPlan(serverId, settings) {
     if (!server) throw new Error(settings.lang === 'en' ? 'Server not found' : 'سرور پیدا نشد');
     plan = { mode: 'single', server };
     label = server.name;
-    entryAddrs = entryAddressesOf(server, isRawJson(server));
+    entryAddrs = entryAddressesOf(server, rawApplies(server, settings, RAW_OPTS));
   }
   entryAddrs = [...new Set(entryAddrs.filter(Boolean))];
   return { plan, label, entryAddrs };
@@ -835,7 +837,7 @@ function buildActive(serverId, settings) {
   // A JSON server set to run raw: its own config, as written — a single-server
   // connect only (configBuilder.buildRawConfig). The app's routing mode, and
   // the geo rules it would have skipped, are not in that config.
-  const rawServer = rawServerOf(plan);
+  const rawServer = rawServerOf(plan, settings, RAW_OPTS);
 
   // Are the geo databases installed? If not, geosite:/geoip: rules would make
   // xray refuse to start — buildConfig drops them and we warn the user.
@@ -1085,7 +1087,7 @@ async function muxFor(serverId, settings, recovery) {
   try { plan = buildPlan(serverId, settings).plan; } catch { return none; }   // buildActive reports it
   let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine), { quiet: true }).id;
   if (engineFormat(engine) === 'sing-box') return none;
-  const servers = muxCandidates(plan);
+  const servers = muxCandidates(plan, rawServerOf(plan, settings, RAW_OPTS));
   if (!servers.length) return none;
   const { muxIds, learnt } = await decideMux({
     mode, servers, cache: store.get('muxProbes', {}), now: Date.now(), recovery: !!recovery,
@@ -1315,7 +1317,7 @@ async function connectOnce(serverId, opts = {}) {
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
   // A JSON server set to run raw, said once per connect: run as written, or —
   // in a chain, advanced routing or the pool — used in its full form.
-  for (const note of rawModeNotes(plan)) send('log', note);
+  for (const note of rawModeNotes(plan, settings, RAW_OPTS)) send('log', note);
   // What the window is told besides the log, on Windows (v1.16.3): each one a
   // toast once this connect stands. Said only — nothing below reads them.
   const notices = [];
@@ -1473,9 +1475,7 @@ async function connectOnce(serverId, opts = {}) {
         // The in-country resolver is dialled `direct` — under TUN that would
         // re-enter the tunnel, so it needs a bypass route exactly like the
         // server addresses (the direct outbound is also bound to the NIC).
-        // A raw JSON config (buildRawConfig) carries none of the app's DNS
-        // plan, so no hijack either: the adapter gets the plain resolvers.
-        const hijacks = engineFormat(runEngine) !== 'sing-box' && !rawServerOf(plan);
+        const hijacks = engineFormat(runEngine) !== 'sing-box';
         const dnsPeer = myTun.dnsPeer || TUN_GW;
         // A tunnel that is already up was built for the PREVIOUS server: its
         // route exclusions — and, at the strict level, the firewall holes cut
@@ -1700,6 +1700,7 @@ async function connectOnce(serverId, opts = {}) {
   // Start live traffic stats
   stats.setBin(xray.anyBin());
   stats.apiPort = settings.apiPort;
+  stats.skipTags = rawServerOf(plan, settings, RAW_OPTS) ? dialerTagsOf(config) : null;
   watchWgSilence(config);
   // A fresh core starts its counters at zero, so the meter has to be told —
   // otherwise the first poll of the new session reads as growth on the old one
