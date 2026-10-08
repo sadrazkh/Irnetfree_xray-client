@@ -208,11 +208,62 @@ data class Subscription(
     }
 }
 
-/** One advanced-routing rule: match a kind/value and send it to a target. */
-data class RouteRule(val type: String, val value: String, val target: String) {
-    fun toJson(): JSONObject = JSONObject().apply { put("type", type); put("value", value); put("target", target) }
+/**
+ * One advanced-routing rule: match a kind/value and send it to a target.
+ * `via` (RoutingProfiles): "" or "inherit" = the profile's base, if it has
+ * one; "none" = dial the target directly; a server id or `chain:<id>` = ride
+ * on that base. Written only when set, so a rule without one stores as before.
+ */
+data class RouteRule(val type: String, val value: String, val target: String, val via: String = "") {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("type", type); put("value", value); put("target", target)
+        if (via.isNotEmpty()) put("via", via)
+    }
     companion object {
-        fun fromJson(o: JSONObject) = RouteRule(o.optString("type", "domain"), o.optString("value"), o.optString("target", "proxy"))
+        fun fromJson(o: JSONObject) = RouteRule(
+            o.optString("type", "domain"), o.optString("value"), o.optString("target", "proxy"),
+            // isNull first: Android's org.json hands back "null" for a JSON null
+            if (o.isNull("via")) "" else o.optString("via", "")
+        )
+    }
+}
+
+/**
+ * One saved advanced routing (RoutingProfiles.kt, the desktop's
+ * routingProfiles.js): its rules, the default for everything else, the
+ * default's via, whether the simple routing mode applies under the rules, and
+ * an optional base every target inherits ("via a base"). `base` is a server id
+ * or `chain:<id>`, null = none.
+ */
+data class RoutingProfile(
+    val id: String,
+    val name: String,
+    val rules: List<RouteRule> = emptyList(),
+    val def: String = "",
+    val defVia: String = RoutingProfiles.VIA_INHERIT,
+    val useMode: Boolean = false,
+    val base: String? = null
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id); put("name", name)
+        put("rules", JSONArray().apply { rules.forEach { r: RouteRule -> put(r.toJson()) } })
+        put("def", def); put("defVia", defVia); put("useMode", useMode)
+        put("base", base ?: JSONObject.NULL)
+    }
+    companion object {
+        fun fromJson(o: JSONObject): RoutingProfile {
+            val a = o.optJSONArray("rules") ?: JSONArray()
+            val rules = (0 until a.length()).mapNotNull { i: Int -> a.optJSONObject(i) }.map { r: JSONObject -> RouteRule.fromJson(r) }
+            return RoutingProfiles.normalize(RoutingProfile(
+                id = if (o.isNull("id")) "" else o.optString("id"),
+                name = if (o.isNull("name")) "" else o.optString("name"),
+                rules = rules,
+                def = if (o.isNull("def")) "" else o.optString("def"),
+                defVia = if (o.isNull("defVia")) RoutingProfiles.VIA_INHERIT else o.optString("defVia"),
+                useMode = o.optBoolean("useMode", false),
+                base = if (o.isNull("base")) null else o.optString("base")
+            ))
+        }
     }
 }
 
@@ -459,9 +510,17 @@ sealed class ConnectionPlan {
         val entries: List<PoolEntry>, val primary: String,
         val serversById: Map<String, ServerConfig>, val chainsById: Map<String, List<ServerConfig>>
     ) : ConnectionPlan()
+    /**
+     * A routing profile's plan. [defVia] and [base] are the profile's ("via a
+     * base", RoutingProfiles.effectiveVia); without them nothing goes through a
+     * base and the config is the one of before. [useMode] is the profile's
+     * "apply the routing mode under these rules" — null = the settings' own.
+     */
     data class Advanced(
         val rules: List<RouteRule>, val def: String,
-        val serversById: Map<String, ServerConfig>, val chainsById: Map<String, List<ServerConfig>>
+        val serversById: Map<String, ServerConfig>, val chainsById: Map<String, List<ServerConfig>>,
+        val defVia: String = RoutingProfiles.VIA_INHERIT, val base: String? = null,
+        val useMode: Boolean? = null, val profileId: String = ""
     ) : ConnectionPlan()
 
     /**

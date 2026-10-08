@@ -82,7 +82,8 @@ object TunnelSetup {
             is ConnectionPlan.Chain -> plan.members
             is ConnectionPlan.Pool -> (plan.entries.map { e: PoolEntry -> e.target } + plan.primary)
                 .flatMap { t: String -> resolve(t, plan.serversById, plan.chainsById) }
-            is ConnectionPlan.Advanced -> (plan.rules.map { r: RouteRule -> r.target } + plan.def)
+            // the bases the targets ride on are routed to as well (RoutingProfiles.basesOf)
+            is ConnectionPlan.Advanced -> (plan.rules.map { r: RouteRule -> r.target } + plan.def + RoutingProfiles.basesOf(plan))
                 .flatMap { t: String -> resolve(t, plan.serversById, plan.chainsById) }
         }
     }
