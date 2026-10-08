@@ -8,7 +8,7 @@ import org.json.JSONObject
  * Local JSON store (SharedPreferences) for servers, chains, pool, subscriptions
  * and settings. Also resolves a UI "selection" into a concrete ConnectionPlan.
  *
- * Selection ids:  "<serverId>" | "chain:<id>" | "__pool__" | "__advanced__"
+ * Selection ids:  "<serverId>" | "chain:<id>" | "__pool__" | "__advanced__" | "__advanced__:<profileId>"
  */
 class Store(context: Context) {
     private val prefs = context.getSharedPreferences("irnetfree", Context.MODE_PRIVATE)
@@ -18,6 +18,8 @@ class Store(context: Context) {
     val pool: MutableList<PoolEntry> = read("pool") { PoolEntry.fromJson(it) }
     val subs: MutableList<Subscription> = read("subs") { Subscription.fromJson(it) }
     var settings: AppSettings = loadSettings()
+    /** The routing profiles (RoutingProfiles.kt); never empty once the store is open. */
+    val profiles: MutableList<RoutingProfile> = ArrayList()
     var selection: String = prefs.getString("selection", "") ?: ""
     /** The choice before [selection]: where a selection whose server is gone falls back to (Selection.repair). */
     var previousSelection: String = prefs.getString("selectionPrev", "") ?: ""
@@ -26,7 +28,23 @@ class Store(context: Context) {
     // The selection is checked on every start as well: one saved before ids
     // were stable, or naming a server removed while the app was not running,
     // comes back as the choice before it (or the first server), not as "—".
-    init { migrateServers(); repairSelection() }
+    init { migrateServers(); migrateProfiles(); repairSelection() }
+
+    /**
+     * The routing profiles at start (RoutingProfiles.migrate): the first start
+     * of this version turns today's settings into `rp-default`; a store whose
+     * settings were changed since by an older app takes them back into
+     * `rp-default`. Then `rp-default` is mirrored into the settings keys.
+     */
+    private fun migrateProfiles() {
+        val stored: List<RoutingProfile>? = if (!prefs.contains(RoutingProfiles.STORE_KEY)) null
+            else read(RoutingProfiles.STORE_KEY) { o: JSONObject -> RoutingProfile.fromJson(o) }
+        val m = RoutingProfiles.migrate(stored, settings)
+        profiles.clear(); profiles.addAll(m.profiles)
+        if (m.changed) writeProfiles()
+        val mirrored = RoutingProfiles.mirrorToSettings(profiles, settings)
+        if (mirrored != settings) saveSettings(mirrored)
+    }
 
     /**
      * One-time upgrade of the saved servers to the shape the current parser and
@@ -51,18 +69,36 @@ class Store(context: Context) {
     fun savePool() = prefs.edit().putString("pool", JSONArray(pool.map { it.toJson() }).toString()).apply()
     fun saveSubs() = prefs.edit().putString("subs", JSONArray(subs.map { it.toJson() }).toString()).apply()
     fun saveSelection(sel: String) {
-        previousSelection = Selection.previousAfterPick(selection, previousSelection, sel, serverIds(), chainIds())
+        previousSelection = Selection.previousAfterPick(selection, previousSelection, sel, serverIds(), chainIds(), profileIds())
         selection = sel
         writeSelection()
     }
-    fun saveSettings(sNew: AppSettings) { settings = sNew; prefs.edit().putString("settings", sNew.toJson().toString()).apply() }
+    /**
+     * The settings, with `rp-default` mirrored into routeRules / routeDefault /
+     * advancedUseMode whatever copy the caller held: a screen writes back the
+     * whole AppSettings it opened with, and an older copy must not put old
+     * rules back under the profile's name.
+     */
+    fun saveSettings(sNew: AppSettings) {
+        val s = RoutingProfiles.mirrorToSettings(profiles, sNew)
+        settings = s; prefs.edit().putString("settings", s.toJson().toString()).apply()
+    }
+
+    /** Write the routing profiles, and `rp-default` into the settings keys (an older app and an old backup read those). */
+    fun saveProfiles() {
+        writeProfiles()
+        val mirrored = RoutingProfiles.mirrorToSettings(profiles, settings)
+        if (mirrored != settings) saveSettings(mirrored)
+    }
+    private fun writeProfiles() = prefs.edit().putString(RoutingProfiles.STORE_KEY, JSONArray(profiles.map { p: RoutingProfile -> p.toJson() }).toString()).apply()
 
     private fun writeSelection() = prefs.edit().putString("selection", selection).putString("selectionPrev", previousSelection).apply()
     private fun serverIds(): Set<String> = servers.mapTo(HashSet()) { it.id }
     private fun chainIds(): Set<String> = chains.mapTo(HashSet()) { it.id }
+    private fun profileIds(): Set<String> = profiles.mapTo(HashSet()) { p: RoutingProfile -> p.id }
 
-    /** Does the selection name something that exists (a server, a chain, the pool, advanced routing)? */
-    fun selectionResolves(): Boolean = Selection.resolves(selection, serverIds(), chainIds())
+    /** Does the selection name something that exists (a server, a chain, the pool, a routing profile)? */
+    fun selectionResolves(): Boolean = Selection.resolves(selection, serverIds(), chainIds(), profileIds())
 
     /**
      * Point the selection at something that exists — after a server or chain
@@ -71,7 +107,7 @@ class Store(context: Context) {
      * True when it moved (the caller says so).
      */
     fun repairSelection(): Boolean {
-        val next = Selection.repair(selection, previousSelection, servers.map { it.id }, chains.map { it.id })
+        val next = Selection.repair(selection, previousSelection, servers.map { it.id }, chains.map { it.id }, profiles.map { p: RoutingProfile -> p.id })
         if (next == selection) return false
         selection = next
         previousSelection = ""   // what it fell back from is gone, and what it fell back to is now current
@@ -161,7 +197,40 @@ class Store(context: Context) {
         else -> serverById(t) != null
     }
     fun poolEnabledValid() = pool.filter { it.enabled && it.socksPort > 0 && poolTargetValid(it.target) }
-    fun advancedReady() = settings.advancedRouting && (settings.routeRules.isNotEmpty() || settings.routeDefault.isNotEmpty())
+    /** A profile the home picker offers: advanced routing is on, and it has rules or a default. */
+    fun profileReady(p: RoutingProfile) = settings.advancedRouting && (p.rules.isNotEmpty() || p.def.isNotEmpty())
+    fun advancedReady() = profiles.any { p: RoutingProfile -> profileReady(p) }
+    fun profileById(id: String) = profiles.firstOrNull { p: RoutingProfile -> p.id == id }
+    /** The profile the selection connects (`__advanced__` = the first one), or null when it names none. */
+    fun selectedProfile(): RoutingProfile? = RoutingProfiles.profileIdOf(selection, profiles)?.let { id: String -> profileById(id) }
+
+    /**
+     * Does a routing target still name something the builder can dial — a
+     * server, or a chain with at least one server left? direct, block, "" and
+     * the legacy 'proxy' always do (ConfigBuilder's Registry.exists).
+     */
+    fun targetExists(t: String): Boolean = when {
+        t.isEmpty() || t == "direct" || t == "block" || t == "proxy" -> true
+        t.startsWith("chain:") -> chainById(t.substring(6))?.let { c: ChainConfig -> chainMembers(c).isNotEmpty() } == true
+        else -> serverById(t) != null
+    }
+
+    /** A routing target in words: a server's name, "⛓ chain", Direct, Block, or what is missing. */
+    fun targetLabel(t: String): String = when {
+        t.isEmpty() -> "first server"
+        t == "direct" -> "Direct"
+        t == "block" -> "Block"
+        t == "proxy" -> "Proxy (first server)"
+        t.startsWith("chain:") -> chainById(t.substring(6))?.let { c: ChainConfig -> "⛓ ${c.name}" } ?: "missing chain"
+        else -> serverById(t)?.name ?: "missing server"
+    }
+
+    /** Replace the lists with what an import made of them (RouteShare.applyImport), and write them. */
+    fun applyImported(r: RouteShare.Imported) {
+        servers.clear(); servers.addAll(r.servers); saveServers()
+        chains.clear(); chains.addAll(r.chains); saveChains()
+        profiles.clear(); profiles.addAll(r.profiles); saveProfiles()
+    }
 
     /** Delete a server and prune it from chains/pool; a selection that named it falls back (repairSelection). */
     fun deleteServer(id: String) {
@@ -187,7 +256,7 @@ class Store(context: Context) {
 
     fun selectionLabel(): String = when {
         selection == POOL_ID -> "🧩 Proxy Pool (${poolEnabledValid().size})"
-        selection == ADV_ID -> "🧭 Advanced routing"
+        Selection.isAdvanced(selection) -> "🧭 " + (selectedProfile()?.name ?: "—")
         selection.startsWith("chain:") -> "⛓ " + (chainById(selection.substring(6))?.name ?: "—")
         else -> serverById(selection)?.name ?: "—"
     }
@@ -202,9 +271,11 @@ class Store(context: Context) {
                 if (entries.isEmpty()) throw IllegalStateException("Enable at least one valid proxy in the pool")
                 ConnectionPlan.Pool(entries, entries.first().target, serversById, chainsById)
             }
-            sel == ADV_ID -> {
-                if (settings.routeRules.isEmpty() && settings.routeDefault.isBlank()) throw IllegalStateException("Add at least one routing rule")
-                ConnectionPlan.Advanced(settings.routeRules, settings.routeDefault.ifBlank { servers.firstOrNull()?.id ?: "direct" }, serversById, chainsById)
+            Selection.isAdvanced(sel) -> {
+                val p = selectedProfile() ?: throw IllegalStateException("This routing profile no longer exists — pick another one")
+                if (p.rules.isEmpty() && p.def.isBlank()) throw IllegalStateException("Add at least one routing rule")
+                ConnectionPlan.Advanced(p.rules, p.def.ifBlank { servers.firstOrNull()?.id ?: "direct" }, serversById, chainsById,
+                    defVia = p.defVia, base = p.base, useMode = p.useMode, profileId = p.id)
             }
             sel.startsWith("chain:") -> {
                 val c = chainById(sel.substring(6)) ?: throw IllegalStateException("Chain not found")
@@ -221,8 +292,9 @@ class Store(context: Context) {
         is ConnectionPlan.Single -> listOf(plan.server.address)
         is ConnectionPlan.Chain -> plan.members.firstOrNull()?.let { listOf(it.address) } ?: emptyList()
         is ConnectionPlan.Pool -> plan.entries.mapNotNull { entryAddr(it.target, plan.serversById, plan.chainsById) }.distinct()
+        // a target through a base is not an entry; its base is (RoutingProfiles.dialTargets)
         is ConnectionPlan.Advanced -> {
-            val ts = (plan.rules.map { it.target } + plan.def).toSet()
+            val ts = RoutingProfiles.dialTargets(plan).toSet()
             ts.mapNotNull { entryAddr(it, plan.serversById, plan.chainsById) }.distinct()
         }
     }
