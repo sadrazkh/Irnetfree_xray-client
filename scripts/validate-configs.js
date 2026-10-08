@@ -283,6 +283,13 @@ check('json-advanced', buildConfig({
   rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }, { type: 'ip', value: '10.20.0.0/16', target: 'jc' }], def: 'jf'
 }, F.settings(Object.assign({ routingMode: 'bypass-ir' }, JSON_SETTINGS.tun))));
 check('json-test-chain', buildTestConfig(jc, 41020));
+// raw, as the cores take it: a server that asked for allowInsecure, with the
+// pin learnt for it; a WireGuard whose endpoint name the connect resolved
+const insecure = JSON.parse(JSON.stringify(jsonServers['xray-subscription'][0]));
+for (const o of [insecure.json.outbounds.find((x) => x.tag === 'proxy'), insecure.outbound]) o.streamSettings.tlsSettings.allowInsecure = true;
+insecure.certPin = 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde';
+check('json-raw-pinned', buildRawConfig(insecure, F.settings(managed)));
+check('json-raw-wg-resolved', buildRawConfig(jsonServers['xray-wireguard'][0], F.settings(Object.assign({ wgEndpointIps: { 'wg.example.com': '198.51.100.7' } }, JSON_SETTINGS.tun))));
 
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
