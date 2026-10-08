@@ -400,6 +400,33 @@
           </div>
 
           <div id="advBody">
+            <!-- Routing profiles: several advanced routings, the list and then the one being
+                 edited. Hidden on a back end without them (today's single advanced routing). -->
+            <div class="rp-bar" id="rpBar" hidden>
+              <div class="rp-list" id="rpList" role="tablist"></div>
+              <button type="button" class="btn ghost rp-add" id="btnRpAdd" data-i18n="rp.add">+ روتینگ جدید</button>
+            </div>
+            <div class="empty small" id="rpEmpty" data-i18n="rp.none" hidden>هنوز روتینگی نیست. «روتینگ جدید» را بزن.</div>
+            <div class="rp-head" id="rpHead" hidden>
+              <input class="input rp-name" id="rpName" dir="auto" maxlength="60" data-i18n-ph="rp.rename" data-i18n-title="rp.rename" />
+              <span class="rp-def-badge" id="rpDefBadge" data-i18n="rp.isDefault" data-i18n-title="rp.defaultHint" hidden>★ پیش‌فرض</span>
+              <button type="button" class="btn ghost rp-make-def" id="btnRpDefault" data-i18n="rp.setDefault" data-i18n-title="rp.defaultHint">★ پیش‌فرض شود</button>
+              <div class="rp-actions">
+                <button type="button" class="icon-btn" id="btnRpDup" data-i18n-title="rp.duplicate">⧉</button>
+                <button type="button" class="icon-btn" id="btnRpShare" data-i18n-title="rp.copyLink">🔗</button>
+                <button type="button" class="icon-btn" id="btnRpDel" data-i18n-title="rp.delete">🗑</button>
+              </div>
+            </div>
+            <!-- the flow tree of the profile being edited: rules → targets → bases -->
+            <div class="rp-flow-wrap" id="rpFlowWrap" hidden>
+              <div class="rp-flow-head">
+                <span class="rp-flow-title" data-i18n="rp.flowTitle">مسیر ترافیک در این روتینگ</span>
+                <span class="rp-flow-live" id="rpFlowLive" data-i18n="rp.flowLive" hidden>● زنده</span>
+              </div>
+              <div class="rp-flow" id="rpFlow"></div>
+            </div>
+
+            <div id="advEditor">
             <p class="hint" data-i18n="adv.hint">قانون‌ها از بالا به پایین بررسی می‌شوند؛ هر درخواست با اولین قانونِ منطبق هدایت می‌شود.</p>
 
             <div class="adv-rules" id="advRules"></div>
@@ -408,6 +435,17 @@
             <div class="adv-default">
               <span class="adv-def-label" data-i18n="adv.default">بقیهٔ ترافیک از:</span>
               <span id="advDefaultMount" class="adv-target-mount"></span>
+              <span class="adv-via" id="advDefVia" hidden>
+                <span class="adv-via-label" data-i18n="rp.via">از طریق</span>
+                <span id="advDefViaMount" class="adv-via-mount"></span>
+              </span>
+            </div>
+            <!-- the profile's base: every proxy target dials through it unless its rule says otherwise -->
+            <div class="adv-base" id="advBaseRow" hidden>
+              <span class="adv-base-label" data-i18n="rp.base">پایه</span>
+              <span id="advBaseMount" class="adv-target-mount"></span>
+              <span class="adv-base-hint" data-i18n="rp.baseHint">هر مقصد پروکسی این روتینگ از طریق پایه وصل می‌شود، مگر قانونش چیز دیگری بگوید.</span>
+              <span class="adv-warn" id="advBaseWhy" hidden></span>
             </div>
 
             <!-- also apply the simple routing mode (bypass Iran/China) under the rules -->
@@ -436,6 +474,7 @@
 
             <button class="btn primary" id="btnSaveAdv" data-i18n="adv.save">ذخیره روتینگ پیشرفته</button>
             <span class="saved-hint" id="advSavedHint"></span>
+            </div><!-- /advEditor -->
           </div>
         </div>
 
@@ -1202,6 +1241,40 @@
         <p class="hint" data-i18n="qr.hint">این لینک همهٔ تنظیمات (شامل patterniha) را دارد. اسکن کن یا کپی و در کلاینت دیگر وارد کن.</p>
         <textarea id="qrLink" class="input" readonly rows="3" dir="ltr"></textarea>
         <button class="btn primary" id="qrCopy" data-i18n="qr.copy">کپی لینک</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- a routing profile's or a chain's share link: the warning first, then the QR and the text -->
+  <div class="modal-overlay" id="rpShareModal" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <span class="modal-title" id="rpShareTitle" data-i18n="rp.shareTitle">اشتراک روتینگ</span>
+        <button class="tb-btn" id="rpShareClose">&#x2715;</button>
+      </div>
+      <div class="modal-body qr-body">
+        <p class="hint rp-share-warn" id="rpShareWarn"></p>
+        <div id="rpShareQr" class="qr-image"></div>
+        <textarea id="rpShareLink" class="input" readonly rows="3" dir="ltr"></textarea>
+        <button class="btn primary" id="rpShareCopy" data-i18n="qr.copy">کپی لینک</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- an irnetfree://routing/ link pasted or added: what it holds, before anything is written -->
+  <div class="modal-overlay" id="rpImportModal" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <span class="modal-title" data-i18n="rp.importTitle">وارد کردن روتینگ</span>
+        <button class="tb-btn" id="rpImportClose">&#x2715;</button>
+      </div>
+      <div class="modal-body">
+        <div class="rp-im-sum" id="rpImportSum"></div>
+        <p class="hint" data-i18n="rp.importNote">سرورهایی که از قبل داری دوباره استفاده می‌شوند؛ سرورهای تازه به‌صورت دستی (بدون اشتراک) اضافه می‌شوند. روتینگ به‌عنوان یک روتینگ تازه اضافه می‌شود.</p>
+      </div>
+      <div class="modal-foot">
+        <button class="btn primary" id="rpImportGo" data-i18n="btn.import">وارد کردن</button>
+        <button class="btn ghost" id="rpImportCancel" data-i18n="btn.cancel">انصراف</button>
       </div>
     </div>
   </div>
