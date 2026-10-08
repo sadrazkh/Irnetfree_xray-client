@@ -186,6 +186,30 @@ test('each sing-box server is what its share link, written by hand, parses to', 
   assert.deepEqual(by('http-up').outbound.settings.servers[0], { address: 'p.example.com', port: 3128 });
 });
 
+test('sing-box: a TLS ECH config goes as the link’s ech (echConfigList); one only fetched by name has no link form and is left out, nothing else changed', () => {
+  const list = 'AEX+DQBBAQAgACBhbm90aGVyLWtleS1mb3ItdGVzdGluZy0xMjM0NTY3OA==';
+  const tls = (ech) => Object.assign({ enabled: true, server_name: 'e.example.com' }, ech ? { ech } : {});
+  const vless = (ech) => ({ type: 'vless', tag: 'v', server: 'e.example.com', server_port: 443, uuid: 'u', tls: tls(ech) });
+  const one = (o) => J.serversFromSingbox({ outbounds: [o] }).servers[0];
+  const plain = one(vless(null));
+  // the PEM block sing-box writes, as lines or as one string
+  const pem = ['-----BEGIN ECH CONFIGS-----', list, '-----END ECH CONFIGS-----'];
+  for (const config of [pem, pem.join('\n'), [list]]) {
+    const s = one(vless({ enabled: true, config }));
+    assert.equal(s.outbound.streamSettings.tlsSettings.echConfigList, list, JSON.stringify(config));
+    const { echConfigList, ...rest } = s.outbound.streamSettings.tlsSettings;
+    assert.deepEqual(rest, plain.outbound.streamSettings.tlsSettings, 'only the ECH list is added');
+  }
+  // fetched by name (query_server_name) or switched off: no link carries it
+  assert.deepEqual(one(vless({ enabled: true, query_server_name: 'cloudflare-ech.com' })).outbound, plain.outbound);
+  assert.deepEqual(one(vless({ enabled: false, config: pem })).outbound, plain.outbound);
+  // Hysteria2 and trojan the same way
+  const hy = one({ type: 'hysteria2', tag: 'h', server: 'h.example.com', server_port: 443, password: 'p', tls: tls({ enabled: true, config: pem }) });
+  assert.equal(hy.outbound.streamSettings.tlsSettings.echConfigList, list);
+  const tr = one({ type: 'trojan', tag: 't', server: 't.example.com', server_port: 443, password: 'p', tls: tls({ enabled: true, config: pem }) });
+  assert.equal(tr.outbound.streamSettings.tlsSettings.echConfigList, list);
+});
+
 test('sing-box: selector, urltest, direct, block and dns are skipped silently; an unsupported transport is an error by name', () => {
   const r = J.serversFromSingbox({ outbounds: [
     { type: 'selector', tag: 's', outbounds: [] }, { type: 'urltest', tag: 'u' }, { type: 'direct', tag: 'd' }, { type: 'block', tag: 'b' }, { type: 'dns', tag: 'x' },
