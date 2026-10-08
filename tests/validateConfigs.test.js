@@ -20,10 +20,21 @@ const { SUGGESTED } = require('../src/main/coreVersions');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'validate-configs.js');
 
-/** The script, dry, into a fresh dir: its exit status and output, and its configs by name. */
+/**
+ * The script, dry, into a fresh dir: its exit status and output, and its
+ * configs by name. One run per environment for the whole file — the tests
+ * only read what it wrote, and every run is a few hundred configs built on a
+ * CI runner the timing-sensitive service tests share.
+ */
+const runs = new Map();
+test.after(() => { for (const r of runs.values()) fs.rmSync(r.dir, { recursive: true, force: true }); });
 function dryRun(t, env = {}) {
+  const key = JSON.stringify(env);
+  if (!runs.has(key)) runs.set(key, freshRun(env));
+  return runs.get(key);
+}
+function freshRun(env) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-vc-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const base = Object.assign({}, process.env);
   for (const k of ['IRNF_XRAY_EXE', 'IRNF_SINGBOX_EXE', 'IRNF_CORE_VERSION']) delete base[k];
   const r = spawnSync(process.execPath, [SCRIPT], {
