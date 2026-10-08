@@ -254,45 +254,89 @@ object JsonImport {
         return found
     }
 
-    /** What full mode does not use of [config]: its routing rules, DNS, balancers and observatory. */
+    /**
+     * What full mode does not use of [config]: its routing rules, DNS, balancers
+     * and observatory — in the desktop's neutral tokens (jsonImport.js jsonInfo),
+     * which the edit sheet puts in words (matchInWords / targetInWords).
+     */
     fun jsonInfo(config: JSONObject): JsonInfo {
         val routing = config.optJSONObject("routing")
-        val rules = objects(routing?.optJSONArray("rules")).map { r: JSONObject -> JsonRule(describe(r), target(r)) }
+        val rules = objects(routing?.optJSONArray("rules")).map { r: JSONObject -> ruleInfo(r) }
         val dns = (config.optJSONObject("dns")?.length() ?: 0) > 0
-        val balancers = routing?.optJSONArray("balancers")?.length() ?: 0
-        val observatory = config.optJSONObject("observatory") != null || config.optJSONObject("burstObservatory") != null
+        val balancers = objects(routing?.optJSONArray("balancers")).size
+        val observatory = truthy(config.opt("observatory")) || truthy(config.opt("burstObservatory"))
         return JsonInfo(rules, dns, balancers, observatory)
     }
 
-    private fun target(r: JSONObject): String {
-        val o = r.optString("outboundTag")
-        if (o.isNotEmpty()) return o
-        val b = r.optString("balancerTag")
-        return if (b.isNotEmpty()) "⚖ $b" else "—"
+    /** Present as the desktop reads it: not null, not "", not an empty array or object. */
+    private fun present(v: Any?): Boolean = when {
+        v == null || v == JSONObject.NULL -> false
+        v is String -> v.isNotEmpty()
+        v is JSONArray -> v.length() > 0
+        v is JSONObject -> v.length() > 0
+        else -> true
     }
 
-    /** A rule's match in a few words: "geosite:private", "port 443", "everything else". */
-    private fun describe(r: JSONObject): String {
-        if (RULE_KEYS.none { k: String -> truthy(r.opt(k)) }) return "everything else"
-        fun list(v: Any?): String {
-            val items = when (v) {
-                is JSONArray -> strings(v)
-                null -> emptyList<String>()
-                else -> listOf(v.toString())
-            }.map { s: String -> s.trim() }.filter { s: String -> s.isNotEmpty() }
-            return if (items.size > 3) items.take(3).joinToString(", ") + " +" + (items.size - 3) else items.joinToString(", ")
-        }
+    /** A value as JavaScript's String() writes it (an array: its items joined by commas). */
+    private fun jsString(v: Any?): String = if (v is JSONArray) strings(v).joinToString(",") else (v?.toString() ?: "")
+
+    /** Its items as text, empty ones left out. */
+    private fun vals(v: Any?): List<String> = (if (v is JSONArray) strings(v) else listOf(jsString(v))).filter { s: String -> s.isNotEmpty() }
+
+    /** Up to three items, then how many more. */
+    private fun short(v: Any?): String {
+        val l = vals(v)
+        return if (l.size > 3) l.take(3).joinToString(", ") + " +" + (l.size - 3) else l.joinToString(", ")
+    }
+
+    /** A port condition that is every port (the app's own catch-all is `port: 0-65535`). */
+    private fun anyPort(v: Any?): Boolean = Regex("^\\s*[01]\\s*-\\s*65535\\s*$").matches(jsString(v))
+
+    /** `network` absent, or naming both TCP and UDP. */
+    private fun coversBoth(n: Any?): Boolean {
+        if (!present(n)) return true
+        val set = vals(n).joinToString(",").lowercase().split(",").map { x: String -> x.trim() }.toSet()
+        return "tcp" in set && "udp" in set
+    }
+
+    /**
+     * One routing rule as the edit sheet says it (jsonImport.js ruleInfo): its
+     * conditions joined by " + ", or `*` when it has none → its outbound, or
+     * `balancer:<tag>`, or "" when it names neither.
+     */
+    private fun ruleInfo(r: JSONObject): JsonRule {
         val parts = ArrayList<String>()
-        if (truthy(r.opt("domain"))) parts.add(list(r.opt("domain")))
-        if (truthy(r.opt("ip"))) parts.add(list(r.opt("ip")))
-        if (truthy(r.opt("port"))) parts.add("port " + list(r.opt("port")))
-        if (truthy(r.opt("sourcePort"))) parts.add("source port " + list(r.opt("sourcePort")))
-        if (truthy(r.opt("protocol"))) parts.add(list(r.opt("protocol")))
-        if (truthy(r.opt("inboundTag"))) parts.add("inbound " + list(r.opt("inboundTag")))
-        if (truthy(r.opt("user"))) parts.add("user " + list(r.opt("user")))
-        if (truthy(r.opt("attrs"))) parts.add("attrs")
-        if (truthy(r.opt("network")) && !networkIsAll(r.opt("network"))) parts.add("network " + list(r.opt("network")))
-        return parts.filter { p: String -> p.isNotBlank() }.joinToString(" · ")
+        if (present(r.opt("domain"))) parts.add(short(r.opt("domain")))
+        if (present(r.opt("ip"))) parts.add(short(r.opt("ip")))
+        if (present(r.opt("port")) && !anyPort(r.opt("port"))) parts.add("port " + jsString(r.opt("port")))
+        if (present(r.opt("sourcePort"))) parts.add("source port " + jsString(r.opt("sourcePort")))
+        if (present(r.opt("source")) || present(r.opt("sourceIP"))) parts.add("source " + short(if (present(r.opt("source"))) r.opt("source") else r.opt("sourceIP")))
+        if (present(r.opt("localIP"))) parts.add("local " + short(r.opt("localIP")))
+        if (present(r.opt("localPort"))) parts.add("local port " + jsString(r.opt("localPort")))
+        if (present(r.opt("protocol"))) parts.add(short(r.opt("protocol")))
+        if (present(r.opt("inboundTag"))) parts.add("inbound " + short(r.opt("inboundTag")))
+        if (present(r.opt("user"))) parts.add("user " + short(r.opt("user")))
+        if (present(r.opt("process"))) parts.add("process " + short(r.opt("process")))
+        if (present(r.opt("vlessRoute"))) parts.add("vlessRoute " + jsString(r.opt("vlessRoute")))
+        if (present(r.opt("attrs"))) parts.add("attrs")
+        if (!coversBoth(r.opt("network"))) parts.add(vals(r.opt("network")).joinToString(","))
+        val match = if (parts.isEmpty()) "*" else parts.joinToString(" + ")
+        val to = when {
+            truthy(r.opt("outboundTag")) -> jsString(r.opt("outboundTag"))
+            truthy(r.opt("balancerTag")) -> "balancer:" + jsString(r.opt("balancerTag"))
+            else -> ""
+        }
+        return JsonRule(match, to)
+    }
+
+    /** A rule's match in words: `*` is everything else, nothing is "—". */
+    fun matchInWords(match: String): String = if (match == "*") "everything else" else match.ifEmpty { "—" }
+
+    /** A rule's target in words: `balancer:<tag>` is "balancer <tag>", nothing is "—". */
+    fun targetInWords(to: String): String = when {
+        to.startsWith("balancer:") -> "balancer " + to.removePrefix("balancer:")
+        to.isEmpty() -> "—"
+        else -> to
     }
 
     private fun nameOf(c: JSONObject): String = c.optString("remarks").trim().ifBlank { c.optString("ps").trim() }
@@ -376,17 +420,19 @@ object JsonImport {
 
     /**
      * A JSON server saved from the edit sheet: its name, its mode and its config
-     * text. The main outbound, the helpers, protocol, address, port, `raw` and
+     * text. The main outbound, the helpers, protocol, address, port and
      * `jsonInfo` are derived again from the config; the keys this save changed
-     * join [ServerConfig.edited]. Throws IllegalArgumentException with the reason
-     * when the text is no JSON, or no Xray config with a proxy outbound.
+     * join [ServerConfig.edited]. `raw` stays the provider's own text, so a
+     * subscription refresh still finds this server by it first and keeps the
+     * edit (SubRefresh). Throws IllegalArgumentException with the reason when
+     * the text is no JSON, or no Xray config with a proxy outbound.
      */
     fun applyEdits(s: ServerConfig, name: String, jsonMode: String, jsonText: String): ServerConfig {
         val cfg = parseConfig(jsonText)
         val choice = mainOutboundTag(cfg) ?: throw IllegalArgumentException(NO_PROXY)
         val tag = if (choice.tags.size == 1) choice.tags[0] else (sameMain(s, cfg, choice.tags) ?: choice.tags[0])
         val main = outboundByTag(cfg, tag) ?: throw IllegalArgumentException(NO_PROXY)
-        val raw = JsonText.minify(cfg)
+        val raw = s.raw.ifEmpty { JsonText.minify(cfg) }
         val fresh = record(cfg, main, helperClosure(cfg, tag), s.name, raw, jsonInfo(cfg)) ?: throw IllegalArgumentException(NO_PROXY)
         val newName = name.trim().ifEmpty { s.name }
         val mode = modeOf(jsonMode)

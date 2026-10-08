@@ -163,14 +163,15 @@ object SubRefresh {
      * A fresh JSON server that is [old]: the old id and first-use pin, and what
      * the user did — a config they edited (kept whole, with everything derived
      * from it), a name they gave it, a core they chose. Its mode is always the
-     * old one's: no panel ever sets it. Everything else is the panel's.
+     * old one's: no panel ever sets it. Everything else is the panel's — `raw`
+     * too, the provider's own text, which the next refresh matches by first.
      */
     private fun carryJson(old: ServerConfig, fresh: ServerConfig): ServerConfig {
         val kept = old.edited.filter { f: String -> f == "name" || f == "engine" || (old.isJson && f in JSON_FIELDS) }
         val mine = old.json
         val base = if ("json" in kept && old.isJson && mine != null) fresh.copy(
             protocol = old.protocol, address = old.address, port = old.port,
-            outbound = JSONObject(old.outbound.toString()), raw = old.raw,
+            outbound = JSONObject(old.outbound.toString()),
             json = JSONObject(mine.toString()),
             extraOutbounds = old.extraOutbounds.map { h: JSONObject -> JSONObject(h.toString()) },
             jsonInfo = old.jsonInfo

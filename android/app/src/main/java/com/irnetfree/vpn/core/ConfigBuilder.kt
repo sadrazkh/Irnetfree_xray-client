@@ -729,11 +729,15 @@ object ConfigBuilder {
      * helper outbounds beside it (full mode): each helper's tag becomes
      * `<tag>~<helper>`, and every dialerProxy / proxySettings.tag that named a
      * helper is rewritten to match, so two JSON servers in one config never
-     * collide. Like any outbound, a helper loses `allowInsecure`, which the
-     * cores refuse. Any other server: [main] alone, untouched.
+     * collide — a proxySettings as the dialerProxy the cores now take
+     * (proxySettingsToDialer). Like any outbound, a helper loses
+     * `allowInsecure`, which the cores refuse. Any other server: [main] alone,
+     * untouched. (configBuilder.js helpersFor)
      */
     private fun withHelpers(main: JSONObject, server: ServerConfig, tag: String): List<JSONObject> {
-        if (!server.isJson || server.extraOutbounds.isEmpty()) return listOf(main)
+        if (!server.isJson) return listOf(main)
+        proxySettingsToDialer(main)
+        if (server.extraOutbounds.isEmpty()) return listOf(main)
         val names = server.extraOutbounds.map { h: JSONObject -> h.optString("tag") }.filter { t: String -> t.isNotEmpty() }.toSet()
         val out = arrayListOf(main)
         for (h0 in server.extraOutbounds) {
@@ -741,17 +745,36 @@ object ConfigBuilder {
             if (own.isEmpty()) continue
             val h = JSONObject(h0.toString()).put("tag", "$tag~$own")
             applyCertPin(h, null)
+            proxySettingsToDialer(h)
             out.add(h)
         }
         for (o in out) {
             val so = o.optJSONObject("streamSettings")?.optJSONObject("sockopt")
             val dialer = so?.optString("dialerProxy") ?: ""
             if (so != null && dialer in names) so.put("dialerProxy", "$tag~$dialer")
-            val ps = o.optJSONObject("proxySettings")
-            val via = ps?.optString("tag") ?: ""
-            if (ps != null && via in names) ps.put("tag", "$tag~$via")
         }
         return out
+    }
+
+    /**
+     * `proxySettings.tag` → `streamSettings.sockopt.dialerProxy`, in place. The
+     * 2026 cores (and PattN) refuse proxySettings at config load — "has been
+     * removed and migrated to streamSettings.sockopt.dialerProxy" — and a JSON
+     * config written for an older one still carries it (a chain's hop). A
+     * dialerProxy the outbound has already wins. Only a JSON server's outbounds
+     * ever carry it; the stored record keeps its config as written.
+     * (configBuilder.js proxySettingsToDialer)
+     */
+    private fun proxySettingsToDialer(o: JSONObject): JSONObject {
+        val ps = o.optJSONObject("proxySettings") ?: return o
+        val via = ps.optString("tag")
+        o.remove("proxySettings")
+        if (via.isNotEmpty()) {
+            val ss = o.optJSONObject("streamSettings") ?: JSONObject().also { o.put("streamSettings", it) }
+            val so = ss.optJSONObject("sockopt") ?: JSONObject().also { ss.put("sockopt", it) }
+            if (so.optString("dialerProxy").isEmpty()) so.put("dialerProxy", via)
+        }
+        return o
     }
 
     /**
@@ -761,7 +784,8 @@ object ConfigBuilder {
      * is Settings'. Its routing, DNS, balancers, observatory and policy run as
      * they are. What the cores themselves refuse is still kept out — the
      * `allowInsecure` of every outbound (the main one takes its first-use pin
-     * instead) — and a WireGuard endpoint name takes the address the connect
+     * instead), a `proxySettings` (written as the dialerProxy it was migrated
+     * to) — and a WireGuard endpoint name takes the address the connect
      * resolved for it, as everywhere (a core that has to resolve one and fails
      * takes the app's process down). LAN sharing's loopback guard goes first in
      * its rules, to a blackhole of its own.
@@ -781,6 +805,8 @@ object ConfigBuilder {
             val o = outs.optJSONObject(i) ?: continue
             applyCertPin(o, if (mainTag != null && o.optString("tag") == mainTag) server else null)
             applyWgEndpointIps(o, wgEndpointIps)
+            // a proxySettings hop as the dialerProxy the cores migrated it to (its original tag)
+            proxySettingsToDialer(o)
         }
         if (lanTags.isNotEmpty()) {
             outs.put(JSONObject().put("tag", RAW_LAN_BLOCK).put("protocol", "blackhole"))
