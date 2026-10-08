@@ -10,6 +10,8 @@
  * it returns.
  */
 
+const { normalizeProfile, mirrorToSettings, mirrorFromSettings } = require('./routingProfiles');
+
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
 /*
@@ -71,6 +73,27 @@ function cleanPoolEntry(e, refused) {
   return out;
 }
 
+/**
+ * A routing profile (routingProfiles.js) as it may come in: normalized, and
+ * every target, via and base in a shape the app writes — '' / direct / block /
+ * chain / chain:<id> / <id> (a via also inherit / none). A rule naming
+ * anything else is dropped, a via goes back to inherit, a default to none, a
+ * base to none. A reference to a server this machine does not have stays: the
+ * connect refuses a gone base, and a rule to a gone target follows the default.
+ */
+function cleanProfile(p) {
+  const n = normalizeProfile(p);
+  if (!n) return null;
+  const target = (t) => t === '' || t === 'direct' || t === 'block' || t === 'chain' || validId(t.indexOf('chain:') === 0 ? t.slice('chain:'.length) : t);
+  const via = (v) => v === 'inherit' || v === 'none' || target(v);
+  n.rules = n.rules.filter((r) => target(r.target) && (r.id === undefined || validId(r.id)));
+  for (const r of n.rules) if (r.via !== undefined && !via(r.via)) delete r.via;
+  if (!target(n.def)) n.def = '';
+  if (!via(n.defVia)) n.defVia = 'inherit';
+  if (n.base !== null && !target(n.base)) n.base = null;
+  return n;
+}
+
 /** The settings overlay, with its ports as integers; a bad one leaves the current value. */
 function cleanSettings(s) {
   const out = Object.assign({}, s);
@@ -100,6 +123,8 @@ function exportBundle({ version, store, usage, flavor }) {
     subscriptions: Array.isArray(s.subscriptions) ? s.subscriptions : [],
     chains: Array.isArray(s.chains) ? s.chains : [],
     pool: Array.isArray(s.pool) ? s.pool : [],
+    // the routing profiles, when the store has them (routingProfiles.js)
+    ...(Array.isArray(s.routingProfiles) ? { routingProfiles: s.routingProfiles } : {}),
     settings: isObj(s.settings) ? s.settings : {},
     usage: isObj(usage) ? usage : {}
   };
@@ -115,7 +140,8 @@ const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  * never had stays absent. `kept` names the ones the backup carried with
  * another value, so the caller can say so.
  *
- * @returns {{ next: object, added: { servers, subscriptions, chains, pool }, kept: string[] }}
+ * @returns {{ next: object, added: { servers, subscriptions, chains, pool, routingProfiles }, kept: string[] }}
+ *   `next.routingProfiles` only when the machine or the backup has them.
  * @throws when the bundle is not an IRNetFree backup
  */
 function importBundle(bundle, current, opts = {}) {
@@ -148,16 +174,28 @@ function importBundle(bundle, current, opts = {}) {
     if (!sameJson(incoming[k], have[k])) kept.push(k);
     delete incoming[k];
   }
+  let settings = Object.assign({}, have, incoming);
+  // Routing profiles, merged by id like the rest. The settings' advanced keys
+  // are profile rp-default's mirror (routingProfiles.js): a backup that carries
+  // profiles leaves the settings mirroring rp-default as it now is (this
+  // machine's when it had one); one made before them carries its advanced
+  // routing in the settings alone — rp-default follows them, as the settings
+  // have always followed a restore.
+  const profiles = merge(c.routingProfiles, bundle.routingProfiles, cleanProfile);
+  let routingProfiles = profiles.list;
+  if (Array.isArray(bundle.routingProfiles)) settings = mirrorToSettings(routingProfiles, settings);
+  else routingProfiles = mirrorFromSettings(routingProfiles, settings);
   return {
     next: {
       servers: servers.list,
       subscriptions: subscriptions.list,
       chains: chains.list,
       pool: pool.list,
-      settings: Object.assign({}, have, incoming),
+      settings,
+      ...(Array.isArray(c.routingProfiles) || Array.isArray(bundle.routingProfiles) ? { routingProfiles } : {}),
       usage: Object.assign({}, isObj(c.usage) ? c.usage : {}, isObj(bundle.usage) ? bundle.usage : {})
     },
-    added: { servers: servers.n, subscriptions: subscriptions.n, chains: chains.n, pool: pool.n },
+    added: { servers: servers.n, subscriptions: subscriptions.n, chains: chains.n, pool: pool.n, routingProfiles: profiles.n },
     kept
   };
 }

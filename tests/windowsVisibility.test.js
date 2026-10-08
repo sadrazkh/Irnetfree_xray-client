@@ -33,6 +33,7 @@ const vm = require('node:vm');
 const notices = require('../src/main/connectNotices');
 const autostart = require('../src/main/autostart');
 const { makeWireguardServer } = require('../src/main/parser');
+const { advancedTargets } = require('../src/main/routingProfiles');
 
 // CRLF on a Windows checkout (core.autocrlf): the patterns below are written with \n.
 const R = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8').replace(/\r\n/g, '\n');
@@ -87,6 +88,9 @@ function hintsHarness({ servers, subs = SUBS, rules = [], ifaces = {}, platform 
     send: (ch, p) => { if (ch === 'log') logs.push(p); },
     getSettings: () => ({ routeRules: rules }),
     getChains: () => [{ id: 'tes', name: 'Tes Chain', members: ['hop', 'b47f'] }],
+    // no routing profile here: the rules are the settings' (rp-default's mirror)
+    getRoutingProfiles: () => [],
+    advancedTargets,
     isOwnTunInterface: (n) => n === 'IRNetFree' || n === 'XrayTun',
     TUN_LOCAL_IP: '10.255.0.2',
     TUN_ADDR4: '172.19.0.1/30',
@@ -181,7 +185,7 @@ test('W4 is a fact about the tunnel’s routes: with TUN off (the system proxy b
 
 test('W3: managed DNS off is said for a WireGuard resolver the plan routes to — not for every record an advanced or pool plan carries', () => {
   const { wgResolverAddresses } = require('../src/main/configBuilder');
-  const ctx = vm.createContext({ wgResolverAddresses });
+  const ctx = vm.createContext({ wgResolverAddresses, advancedTargets });
   vm.runInContext([fnOf(MAIN, 'planServerIds'), fnOf(MAIN, 'routedWgResolvers')].join('\n'), ctx);
   const corp = wg('b47f', 'cobra.tes.ca');
   const DNS = wgResolverAddresses({ mode: 'single', server: corp });
