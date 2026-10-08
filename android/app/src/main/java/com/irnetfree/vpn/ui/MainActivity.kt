@@ -64,6 +64,9 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.window.Dialog
@@ -1668,10 +1671,16 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     }
     AddConfigSheets(store, sheet, { sheet = it }, bump)
     val editing = editId?.let { store.serverById(it) }
-    if (editing != null) EditConfigSheet(editing, onDismiss = { editId = null }) { updated ->
+    val saveEdit: (ServerConfig) -> Unit = { updated: ServerConfig ->
         val idx = store.servers.indexOfFirst { it.id == updated.id }
         if (idx >= 0) { store.servers[idx] = updated; store.saveServers() }
-        editId = null; AppWork.touch()
+        editId = null
+        AppWork.touch()
+    }
+    if (editing != null) {
+        // a JSON server is edited as its config, never through link fields
+        if (editing.isJson) EditJsonSheet(editing, onDismiss = { editId = null }, onSave = saveEdit)
+        else EditConfigSheet(editing, onDismiss = { editId = null }, onSave = saveEdit)
     }
 }
 
@@ -1827,7 +1836,23 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     // Auto-detect: http(s) lines -> subscriptions (fetched); the rest -> config(s).
     // An HTTP proxy link (`http://user@host:port#name`) is a config, not a
     // subscription URL — renderer/app.js isSubUrl.
+    fun addParsed(parsed: List<ServerConfig>, errs: List<String>, quiet: Boolean) {
+        store.servers.addAll(parsed); store.saveServers()
+        if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
+        if (quiet) return
+        // nothing came of it: say why (a Clash YAML, an unsupported sing-box type…), not "0 added"
+        if (parsed.isEmpty() && errs.isNotEmpty()) AppWork.snack("Nothing added — " + errs.first())
+        else AppWork.snack("${parsed.size} config(s) added" + if (errs.isNotEmpty()) " · ${errs.size} line(s) not recognised" else "")
+    }
     fun smartImport(text: String) {
+        // A whole JSON config (one, an array, several) is one text, not lines
+        // that might be subscription URLs (LinkParser.parseMany → JsonImport).
+        if (JsonImport.looksLikeJson(text)) {
+            val (parsed, errs) = LinkParser.parseMany(text)
+            addParsed(parsed, errs, quiet = false)
+            bump()
+            return
+        }
         val lines = text.split(Regex("\\r?\\n")).map { it.trim() }.filter { it.isNotEmpty() }
         val isUrl = { s: String -> LinkParser.isSubUrl(s) }
         val urls = lines.filter(isUrl)
@@ -1835,10 +1860,8 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         urls.forEach { addSubAndFetch(it) }
         if (rest.isNotBlank()) {
             val (parsed, errs) = LinkParser.parseMany(rest)
-            store.servers.addAll(parsed); store.saveServers()
-            if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
-            if (urls.isEmpty()) AppWork.snack("${parsed.size} config(s) added" + if (errs.isNotEmpty()) " · ${errs.size} line(s) not recognised" else "")
-        } else if (urls.isEmpty()) AppWork.snack("Nothing recognised — paste a vless/vmess/trojan/ss/wireguard link or a subscription URL")
+            addParsed(parsed, errs, quiet = urls.isNotEmpty())
+        } else if (urls.isEmpty()) AppWork.snack("Nothing recognised — paste a vless/vmess/trojan/ss/wireguard link, a JSON config or a subscription URL")
         bump()
     }
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
@@ -1868,7 +1891,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         Column(Modifier.fillMaxWidth().imePadding().padding(16.dp).padding(bottom = 16.dp)) {
             Text("Add config", color = TXT, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
-            Text("vless/vmess/trojan/ss/hysteria2/socks/wireguard link, or a subscription URL / base64", color = MUTED, fontSize = 11.sp)
+            Text("vless/vmess/trojan/ss/hysteria2/socks/wireguard link, an Xray or sing-box JSON config, or a subscription URL / base64", color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(value, onValue, Modifier.fillMaxWidth(), placeholder = { Text("Paste or type here…", fontSize = 12.sp) }, minLines = 3, maxLines = 8, shape = RoundedCornerShape(14.dp), colors = tfColors())
             Spacer(Modifier.height(10.dp))
@@ -1954,6 +1977,17 @@ private fun latColor(ms: Long?): Color = when {
                         label, color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
                     )
+                    // imported from a whole JSON config (JsonImport) — RAW when it runs as written
+                    if (s.isJson) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (s.jsonMode == JsonImport.MODE_RAW) "JSON·RAW" else "JSON", color = AMBER, fontSize = 8.sp, fontFamily = MONO,
+                            fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.em, maxLines = 1,
+                            modifier = Modifier.clip(RoundedCornerShape(4.dp))
+                                .border(1.dp, AMBER.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
                     if (selected) {
                         Spacer(Modifier.width(7.dp))
                         Text(
@@ -2055,8 +2089,13 @@ private fun latColor(ms: Long?): Color = when {
 /** QR + copy for a config link that carries ALL settings (incl. patterniha). */
 @Composable private fun QrDialog(s: ServerConfig, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
-    val link = remember(s.id) { LinkParser.buildShareLink(s) }
-    val bmp = remember(link) { qrBitmap(link) }
+    // A JSON server's QR holds its config, minified — when it fits one (the
+    // desktop's 2,900 bytes); Copy gives it pretty-printed either way.
+    val cfg = s.json
+    val isJson = s.isJson && cfg != null
+    val link = remember(s.id) { if (isJson && cfg != null) JsonText.minify(cfg) else LinkParser.buildShareLink(s) }
+    val tooLarge = isJson && link.toByteArray(Charsets.UTF_8).size > QR_MAX_JSON_BYTES
+    val bmp = remember(link) { if (tooLarge) null else qrBitmap(link) }
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(16.dp), color = CARD) {
             Column(Modifier.padding(18.dp).widthIn(max = 320.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -2070,11 +2109,11 @@ private fun latColor(ms: Long?): Color = when {
                     Modifier.size(248.dp).clip(RoundedCornerShape(10.dp)).background(Color.White).padding(6.dp),
                     filterQuality = FilterQuality.None
                 )
-                else Text("Link too long for a QR — use Copy.", color = MUTED, fontSize = 12.sp)
+                else Text(if (isJson) "Too large for a QR — use Copy." else "Link too long for a QR — use Copy.", color = MUTED, fontSize = 12.sp)
                 Spacer(Modifier.height(10.dp))
                 Text(link, color = MUTED, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = { copyLink(ctx, s); onDismiss() }, modifier = Modifier.fillMaxWidth()) { Text("Copy link") }
+                Button(onClick = { copyLink(ctx, s); onDismiss() }, modifier = Modifier.fillMaxWidth()) { Text(if (isJson) "Copy JSON" else "Copy link") }
             }
         }
     }
@@ -2106,9 +2145,17 @@ private fun qrBitmap(text: String): android.graphics.Bitmap? = try {
     android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.RGB_565)
 } catch (e: Exception) { null }
 
+/** The most a JSON server's QR holds (the minified config, UTF-8) — the desktop's limit. */
+private const val QR_MAX_JSON_BYTES = 2900
+
+/** Its share link — a JSON server's config, pretty-printed (LinkParser.buildShareLink). */
 private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
+    copyConfigText(ctx, LinkParser.buildShareLink(s))
+}
+
+private fun copyConfigText(ctx: android.content.Context, text: String) {
     val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-    cm.setPrimaryClip(android.content.ClipData.newPlainText("config", LinkParser.buildShareLink(s)))
+    cm.setPrimaryClip(android.content.ClipData.newPlainText("config", text))
     android.widget.Toast.makeText(ctx, "Copied ✓", android.widget.Toast.LENGTH_SHORT).show()
 }
 
@@ -2162,6 +2209,71 @@ private fun protoColor(proto: String): Color = when (proto) {
                 if (host.isNotBlank() && port.isNotBlank()) { val s = LinkParser.makeProxyServer(type, name, host, port.toIntOrNull() ?: 1080, user, pass); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() }
                 else Toast.makeText(ctx, "Host and port are needed", Toast.LENGTH_SHORT).show()
             }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
+        }
+    }
+}
+
+/**
+ * A JSON server's edit sheet (the desktop's JSON edit view): its name, the
+ * Full / Raw switch with what each means, the config itself as text — checked
+ * on Save, which re-derives the main outbound and helpers from it — Copy JSON,
+ * and in full mode what the config holds that the app does not use. No link
+ * fields: the JSON stays the one source.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun EditJsonSheet(server: ServerConfig, onDismiss: () -> Unit, onSave: (ServerConfig) -> Unit) {
+    val ctx = LocalContext.current
+    var name by remember(server.id) { mutableStateOf(server.name) }
+    var mode by remember(server.id) { mutableStateOf(server.jsonMode) }
+    var text by remember(server.id) { mutableStateOf(server.json?.let { c: JSONObject -> JsonText.pretty(c) } ?: "") }
+    var error by remember(server.id) { mutableStateOf("") }
+    val info = server.jsonInfo
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
+            Text("Edit · JSON · ${badge(server.protocol)}", color = TXT, fontWeight = FontWeight.Bold)
+            Fld("Name", name) { name = it }
+            Text("Mode", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(mode == JsonImport.MODE_FULL, { mode = JsonImport.MODE_FULL }, { Text("Full") })
+                FilterChip(mode == JsonImport.MODE_RAW, { mode = JsonImport.MODE_RAW }, { Text("Raw") })
+            }
+            Text(
+                if (mode == JsonImport.MODE_RAW) "Raw: runs exactly as written, when it is connected on its own — the app's DNS management, leak guard and routing mode do not apply. In a chain, the pool or advanced routing it runs in full."
+                else "Full: runs inside the app — its outbound with its helpers (fragment, chain hops), under the app's routing mode, DNS and leak guard.",
+                color = MUTED, fontSize = 11.sp
+            )
+            Text("Config (JSON)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 4.dp))
+            // JSON reads left to right in either language
+            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                OutlinedTextField(
+                    text, { v: String -> text = v; error = "" }, Modifier.fillMaxWidth(),
+                    textStyle = TextStyle(fontFamily = MONO, fontSize = 11.sp, color = TXT),
+                    minLines = 8, maxLines = 18, shape = RoundedCornerShape(10.dp), colors = tfColors()
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = { copyConfigText(ctx, text) }, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Copy JSON")
+            }
+            if (mode == JsonImport.MODE_FULL && info != null) {
+                Text("Not used in full mode — the app's own apply instead", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                Text("Its own routing: ${info.rules.size} rule" + (if (info.rules.size == 1) "" else "s"), color = TXT2, fontSize = 11.sp)
+                info.rules.forEach { r: JsonRule -> Text("   ${r.match} → ${r.to}", color = MUTED, fontSize = 11.sp, fontFamily = MONO) }
+                if (info.dns) Text("Its own DNS servers", color = TXT2, fontSize = 11.sp)
+                if (info.balancers > 0) Text("${info.balancers} balancer" + (if (info.balancers == 1) "" else "s") + " — each member is its own server here", color = TXT2, fontSize = 11.sp)
+                if (info.observatory) Text("Its observatory", color = TXT2, fontSize = 11.sp)
+            }
+            if (error.isNotEmpty()) Text(error, color = BAD, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = {
+                // a config that no longer parses, or has no proxy outbound, is refused with the reason
+                try {
+                    onSave(JsonImport.applyEdits(server, name, mode, text))
+                } catch (e: Exception) {
+                    error = "Not saved — " + (e.message ?: "the config is not valid")
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
         }
     }
 }

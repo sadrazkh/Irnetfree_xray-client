@@ -36,8 +36,22 @@ data class ServerConfig(
     // field names, accumulated over every save). A subscription refresh keeps
     // these and nothing else of the old record's connection (SubRefresh.carry):
     // what the user did is recorded when they do it, never inferred afterwards.
-    val edited: List<String> = emptyList()
+    val edited: List<String> = emptyList(),
+    // A server imported from a whole Xray JSON config (JsonImport.kt): source
+    // "json", the config itself, the helper outbounds its main outbound dials
+    // through (with their original tags), and how it runs — "full" inside the
+    // app (the default) or "raw", exactly as written. `outbound` is still the
+    // main outbound, so ping, chains, routing and mux see an ordinary server.
+    // `jsonInfo` is derived from `json` on import and on every save.
+    val source: String = "",
+    val json: JSONObject? = null,
+    val extraOutbounds: List<JSONObject> = emptyList(),
+    val jsonMode: String = JsonImport.MODE_FULL,
+    val jsonInfo: JsonInfo? = null
 ) {
+    /** Imported from an Xray JSON config, with the config at hand. */
+    val isJson: Boolean get() = source == JsonImport.SOURCE && json != null
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("name", name); put("protocol", protocol)
         put("address", address); put("port", port); put("outbound", outbound)
@@ -47,6 +61,14 @@ data class ServerConfig(
         if (dnsDomains.isNotEmpty()) put("dnsDomains", JSONArray(dnsDomains))
         if (certPin.isNotEmpty()) { put("certPin", certPin); put("certPinAt", certPinAt); put("certPinCheckedAt", certPinCheckedAt) }
         if (edited.isNotEmpty()) put("edited", JSONArray(edited))
+        if (source.isNotEmpty()) put("source", source)
+        val cfg = json
+        if (cfg != null) {
+            put("json", cfg)
+            put("extraOutbounds", JSONArray().apply { extraOutbounds.forEach { o: JSONObject -> put(o) } })
+            put("jsonMode", jsonMode)
+            jsonInfo?.let { info: JsonInfo -> put("jsonInfo", info.toJson()) }
+        }
     }
 
     companion object {
@@ -75,12 +97,50 @@ data class ServerConfig(
                 certPin = CertPin.normalizePin(o.optString("certPin")),
                 certPinAt = o.optString("certPinAt"),
                 certPinCheckedAt = o.optLong("certPinCheckedAt", 0),
-                edited = strList(o.optJSONArray("edited"))
+                edited = strList(o.optJSONArray("edited")),
+                source = o.optString("source", ""),
+                json = o.optJSONObject("json"),
+                extraOutbounds = objList(o.optJSONArray("extraOutbounds")),
+                jsonMode = JsonImport.modeOf(o.optString("jsonMode", JsonImport.MODE_FULL)),
+                // derived: re-read from the config when an older record lacks it
+                jsonInfo = JsonInfo.fromJson(o.optJSONObject("jsonInfo")) ?: o.optJSONObject("json")?.let { c: JSONObject -> JsonImport.jsonInfo(c) }
             )
         }
 
+        fun objList(a: JSONArray?): List<JSONObject> =
+            if (a == null) emptyList() else (0 until a.length()).mapNotNull { i: Int -> a.optJSONObject(i) }
+
         fun strList(a: JSONArray?): List<String> =
             if (a == null) emptyList() else (0 until a.length()).mapNotNull { a.opt(it) as? String }.map { it.trim() }.filter { it.isNotEmpty() }
+    }
+}
+
+/** One routing rule of a JSON config, in words: what it matches → where it sends it. */
+data class JsonRule(val match: String, val to: String)
+
+/**
+ * What a JSON server's own config holds that full mode does not use — its
+ * routing rules, its DNS, its balancers, its observatory (JsonImport.jsonInfo,
+ * the desktop's jsonInfo). The edit sheet lists it; nothing else reads it.
+ */
+data class JsonInfo(
+    val rules: List<JsonRule> = emptyList(),
+    val dns: Boolean = false,
+    val balancers: Int = 0,
+    val observatory: Boolean = false
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("rules", JSONArray().apply { rules.forEach { r: JsonRule -> put(JSONObject().put("match", r.match).put("to", r.to)) } })
+        .put("dns", dns).put("balancers", balancers).put("observatory", observatory)
+
+    companion object {
+        fun fromJson(o: JSONObject?): JsonInfo? {
+            if (o == null) return null
+            val a = o.optJSONArray("rules") ?: JSONArray()
+            val rules = (0 until a.length()).mapNotNull { i: Int -> a.optJSONObject(i) }
+                .map { r: JSONObject -> JsonRule(r.optString("match"), r.optString("to")) }
+            return JsonInfo(rules, o.optBoolean("dns"), o.optInt("balancers"), o.optBoolean("observatory"))
+        }
     }
 }
 
