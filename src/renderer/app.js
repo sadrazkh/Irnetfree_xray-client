@@ -3791,6 +3791,20 @@ function showJsonError(reason) {
 }
 
 /**
+ * One of jsonInfo's rules, in words: "<match> → <to>". The core writes neutral
+ * tokens — match `*` for the rule that catches everything left over (else its
+ * conditions joined with " + "), to `balancer:<tag>` for a balancer and empty
+ * for none. The other condition words are the config's own and stay as written.
+ */
+function jsonRuleText(r) {
+  const m = r && r.match != null ? String(r.match) : '';
+  const to = r && r.to != null ? String(r.to) : '';
+  const match = m === '*' ? t('ed.jsonNaAll') : (m || '?');
+  const target = !to ? '—' : to.startsWith('balancer:') ? t('ed.jsonNaBalancer').replace('{tag}', () => to.slice(9)) : to;
+  return match + ' → ' + target;
+}
+
+/**
  * What full mode leaves unused, from the record's jsonInfo: the config's own
  * routing rules (each "match → to"), and a line each for its DNS, balancers and
  * observatory. Shown in full mode only — raw runs all of it. Values are the
@@ -3818,7 +3832,7 @@ function renderJsonInfo(info, mode) {
       const row = document.createElement('li');
       const text = document.createElement('bdi');
       text.dir = 'ltr';
-      text.textContent = (r && r.match != null ? String(r.match) : '?') + ' → ' + (r && r.to != null ? String(r.to) : '?');
+      text.textContent = jsonRuleText(r);
       row.appendChild(text);
       sub.appendChild(row);
     }
