@@ -96,7 +96,7 @@ const walk = (el, fn) => { fn(el); el.children.forEach((c) => walk(c, fn)); };
 /* ------------------------------------ strings ------------------------------------ */
 
 const NEW_KEYS = ['srv.jsonBadge', 'ed.jsonMode', 'ed.jsonFull', 'ed.jsonRaw', 'ed.jsonFullHelp', 'ed.jsonRawHelp', 'ed.jsonEditor',
-  'ed.jsonCopy', 'ed.jsonNotApplied', 'ed.jsonNaRules', 'ed.jsonNaDns', 'ed.jsonNaBalancers', 'ed.jsonNaObservatory',
+  'ed.jsonCopy', 'ed.jsonNotApplied', 'ed.jsonNaRules', 'ed.jsonNaAll', 'ed.jsonNaBalancer', 'ed.jsonNaDns', 'ed.jsonNaBalancers', 'ed.jsonNaObservatory',
   'ed.jsonInvalid', 'ed.jsonNotObject', 'qr.tooLarge'];
 
 test('every JSON string exists once in fa and once in en, with no straight apostrophe inside a single-quoted string', () => {
@@ -239,7 +239,7 @@ test('a hostile remark or address cannot break out of the card', () => {
 /* ------------------------------------ the edit form ------------------------------------ */
 
 const INFO = {
-  rules: [{ match: 'geosite:private', to: 'direct' }, { match: 'geoip:ir', to: 'direct' }, { match: 'everything else', to: 'proxy' }],
+  rules: [{ match: 'geosite:private', to: 'direct' }, { match: 'geoip:ir', to: 'direct' }, { match: '*', to: 'proxy' }],
   dns: true, balancers: 1, observatory: true
 };
 const CONFIG = {
@@ -247,6 +247,8 @@ const CONFIG = {
   outbounds: [{ tag: 'proxy', protocol: 'vless', settings: { vnext: [{ address: 'de.example.com', port: 443, users: [{ id: 'u', encryption: 'none' }] }] } }, { tag: 'direct', protocol: 'freedom' }],
   routing: { rules: [{ type: 'field', outboundTag: 'proxy', network: 'tcp,udp' }] }
 };
+/** INFO's rules as the edit form says them in English: the core's `*` is "everything else". */
+const RULE_LINES = ['geosite:private → direct', 'geoip:ir → direct', 'everything else → proxy'];
 const J = (extra) => Object.assign({}, linkServer, {
   id: 'j1', name: 'DE-2', source: 'json', jsonMode: 'full', json: CONFIG, jsonInfo: INFO
 }, extra);
@@ -276,7 +278,7 @@ function editHarness({ servers, updateServer } = {}) {
   // the module-level state app.js keeps for the open form, then the real functions over it
   vm.runInContext([
     "let editOriginal = null; let editClearPin = false; let editJsonMode = 'full';",
-    ...['show', 'closeEdit', 'setEditKind', 'showJsonError', 'renderJsonInfo', 'setJsonMode', 'refreshJsonFormLang', 'openEditJson',
+    ...['show', 'closeEdit', 'setEditKind', 'showJsonError', 'jsonRuleText', 'renderJsonInfo', 'setJsonMode', 'refreshJsonFormLang', 'openEditJson',
       'collectJsonFields', 'copyEditJson', 'openEdit', 'saveEdit'].map(fnSource)
   ].join('\n'), ctx);
   return { ctx, get, calls, segButtons, mode: () => vm.runInContext('editJsonMode', ctx) };
@@ -329,7 +331,8 @@ test('Full: the not-applied summary lists the rule count, each “match → to�
   const text = textOf(box);
   assert.match(text, new RegExp(en('ed.jsonNotApplied').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(text, /Its own routing — 3 rule\(s\):/, 'the count');
-  for (const r of INFO.rules) assert.ok(text.includes(`${r.match} → ${r.to}`), `${r.match} → ${r.to}`);
+  for (const line of RULE_LINES) assert.ok(text.includes(line), line);
+  assert.ok(!text.includes('* →'), 'the core’s * token is never printed raw');
   assert.match(text, /Its own DNS settings/);
   assert.match(text, /Its own balancers/);
   assert.match(text, /Its own observatory/);
@@ -338,7 +341,7 @@ test('Full: the not-applied summary lists the rule count, each “match → to�
   walk(box, (e) => { if (e.tagName === 'BDI') bdis.push(e); });
   assert.equal(bdis.length, 3);
   assert.ok(bdis.every((b) => b.dir === 'ltr'));
-  assert.deepEqual(bdis.map((b) => b.textContent), INFO.rules.map((r) => `${r.match} → ${r.to}`));
+  assert.deepEqual(bdis.map((b) => b.textContent), RULE_LINES);
 
   // only what is true gets a line
   const h2 = editHarness({ servers: [J({ jsonInfo: { rules: [], dns: false, balancers: 0, observatory: false } })] });
@@ -388,6 +391,46 @@ test('a language switch with the JSON form open says its help line and summary a
   assert.equal(l.get('edJsonHelp').textContent, '');
   // and setLang calls it
   assert.match(fnSource('setLang'), /refreshJsonFormLang\(\);/);
+});
+
+test('the core’s neutral rule tokens are said in words, in both languages: * = everything else, balancer:<tag> = balancer <tag>, empty = —', () => {
+  const info = {
+    rules: [
+      { match: 'geosite:private', to: 'direct' },
+      { match: 'geoip:ir + port 443', to: 'direct' },
+      { match: 'domain:example.com', to: 'balancer:auto' },
+      { match: 'inbound api', to: '' },
+      { match: '*', to: 'proxy' },
+      { match: '*', to: 'balancer:my balancer' }
+    ],
+    dns: false, balancers: 1, observatory: false
+  };
+  const want = {
+    en: ['geosite:private → direct', 'geoip:ir + port 443 → direct', 'domain:example.com → balancer auto', 'inbound api → —',
+      'everything else → proxy', 'everything else → balancer my balancer'],
+    fa: ['geosite:private → direct', 'geoip:ir + port 443 → direct', 'domain:example.com → بالانسر auto', 'inbound api → —',
+      'بقیهٔ ترافیک → proxy', 'بقیهٔ ترافیک → بالانسر my balancer']
+  };
+  assert.equal(str('en', 'ed.jsonNaAll'), 'everything else');
+  assert.equal(str('fa', 'ed.jsonNaAll'), 'بقیهٔ ترافیک');
+  assert.equal(str('en', 'ed.jsonNaBalancer'), 'balancer {tag}');
+  assert.equal(str('fa', 'ed.jsonNaBalancer'), 'بالانسر {tag}');
+  for (const lang of ['en', 'fa']) {
+    const h = editHarness({ servers: [J({ jsonInfo: info })] });
+    h.ctx.t = (key) => { try { return str(lang, key); } catch { return key; } };
+    h.ctx.openEdit('j1');
+    const bdis = [];
+    walk(h.get('edJsonInfo'), (e) => { if (e.tagName === 'BDI') bdis.push(e); });
+    assert.deepEqual(bdis.map((b) => b.textContent), want[lang], lang);
+    assert.ok(bdis.every((b) => b.dir === 'ltr'), `${lang}: each rule stays left-to-right`);
+    assert.ok(!bdis.some((b) => /^\*|balancer:/.test(b.textContent)), `${lang}: no raw token left`);
+  }
+  // a rule missing its fields does not print "undefined"
+  const h = editHarness({ servers: [J({ jsonInfo: { rules: [{}, null, { match: '*' }], dns: false, balancers: 0, observatory: false } })] });
+  h.ctx.openEdit('j1');
+  const texts = [];
+  walk(h.get('edJsonInfo'), (e) => { if (e.tagName === 'BDI') texts.push(e.textContent); });
+  assert.deepEqual(texts, ['? → —', '? → —', 'everything else → —']);
 });
 
 test('the config’s own text goes in as text, never as markup', () => {
