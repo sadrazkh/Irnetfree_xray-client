@@ -1,0 +1,29 @@
+{
+  "remarks": "🛡 wg",
+  "outbounds": [
+    {
+      "tag": "wg",
+      "protocol": "wireguard",
+      "settings": {
+        "secretKey": "SECRETKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "address": [
+          "10.7.0.2/32"
+        ],
+        "peers": [
+          {
+            "publicKey": "PUBKEYBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+            "endpoint": "wg.example.com:51820",
+            "allowedIPs": [
+              "0.0.0.0/0"
+            ]
+          }
+        ],
+        "mtu": 1280
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ]
+}
