@@ -437,7 +437,9 @@ function markRecheck(cache, fps) {
 /**
  * The servers a plan dials as targets of their own: the single server; an
  * advanced plan's server targets and default; a pool's primary and entries.
- * Never a chain's hops, nor `direct` / `block` / a target that is gone.
+ * Never a chain's hops, nor `direct` / `block` / a target that is gone — nor
+ * a JSON server connected alone in raw mode: its own config runs as written
+ * (configBuilder.buildRawConfig), mux and all, so there is nothing to test.
  */
 function muxCandidates(plan) {
   const out = [];
@@ -449,7 +451,7 @@ function muxCandidates(plan) {
     add(own(byId, tg));
   };
   switch (plan.mode) {
-    case 'single': add(plan.server); break;
+    case 'single': if (!(plan.server && plan.server.source === 'json' && plan.server.jsonMode === 'raw')) add(plan.server); break;
     case 'advanced': for (const r of plan.rules || []) if (r) target(r.target); target(plan.def); break;
     case 'pool': target(plan.primary); for (const e of plan.entries || []) if (e) target(e.target); break;
     default: break;   // a chain: hops only

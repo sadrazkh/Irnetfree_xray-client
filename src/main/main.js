@@ -6,7 +6,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('./configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes } = require('./configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('./latencyTest');
 const { adapterDnsServers, guardPeers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
@@ -829,6 +829,10 @@ function buildPlan(serverId, settings) {
  */
 function buildActive(serverId, settings) {
   const { plan, label, entryAddrs } = buildPlan(serverId, settings);
+  // A JSON server set to run raw: its own config, as written — a single-server
+  // connect only (configBuilder.buildRawConfig). The app's routing mode, and
+  // the geo rules it would have skipped, are not in that config.
+  const rawServer = rawServerOf(plan);
 
   // Are the geo databases installed? If not, geosite:/geoip: rules would make
   // xray refuse to start — buildConfig drops them and we warn the user.
@@ -841,7 +845,7 @@ function buildActive(serverId, settings) {
     (plan.mode !== 'advanced' &&
       (settings.routingMode === 'bypass-ir' || settings.routingMode === 'bypass-cn' ||
         (settings.blockAds && plan.mode !== 'advanced'))));
-  if (!geoAssets && usesGeo) {
+  if (!geoAssets && usesGeo && !rawServer) {
     geoWarn = settings.lang === 'en'
       ? 'Geo files (geoip/geosite) are missing — geo-based rules were skipped. Download them under Settings → Required files.'
       : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
@@ -852,9 +856,13 @@ function buildActive(serverId, settings) {
   // member needs it. The EFFECTIVE engine (after fallback when the binary is
   // missing) decides the config format.
   let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
+  // A raw config is Xray's own format: it runs on an Xray core, whatever the choice.
+  if (rawServer && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray').id;
 
   let config;
-  if (engineFormat(engine) === 'sing-box') {
+  if (rawServer) {
+    config = buildRawConfig(rawServer, settings);
+  } else if (engineFormat(engine) === 'sing-box') {
     try {
       config = buildSingboxConfig(plan.server, settings);
     } catch (e) {
@@ -1302,6 +1310,9 @@ async function connectOnce(serverId, opts = {}) {
   livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
 
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+  // A JSON server set to run raw, said once per connect: run as written, or —
+  // in a chain, advanced routing or the pool — used in its full form.
+  for (const note of rawModeNotes(plan)) send('log', note);
   // What the window is told besides the log, on Windows (v1.16.3): each one a
   // toast once this connect stands. Said only — nothing below reads them.
   const notices = [];
@@ -1459,7 +1470,9 @@ async function connectOnce(serverId, opts = {}) {
         // The in-country resolver is dialled `direct` — under TUN that would
         // re-enter the tunnel, so it needs a bypass route exactly like the
         // server addresses (the direct outbound is also bound to the NIC).
-        const hijacks = engineFormat(runEngine) !== 'sing-box';
+        // A raw JSON config (buildRawConfig) carries none of the app's DNS
+        // plan, so no hijack either: the adapter gets the plain resolvers.
+        const hijacks = engineFormat(runEngine) !== 'sing-box' && !rawServerOf(plan);
         const dnsPeer = myTun.dnsPeer || TUN_GW;
         // A tunnel that is already up was built for the PREVIOUS server: its
         // route exclusions — and, at the strict level, the firewall holes cut
@@ -2753,7 +2766,9 @@ function registerIpc() {
     const idx = servers.findIndex(s => s.id === id);
     if (idx === -1) return { ok: false, error: 'not found', servers };
     const before = servers[idx];
-    servers[idx] = applyServerEdits(before, fields || {});
+    // An edit can be refused — a JSON config that does not parse, or has no
+    // proxy outbound left: the reason goes back, the record stays as it was.
+    try { servers[idx] = applyServerEdits(before, fields || {}); } catch (err) { return { ok: false, error: err.message, servers }; }
     setServers(servers);
     // an edit of a server the live connection dials waits for a reconnect (see liveServerIds)
     // — one that changes what is dialled: a rename, or a Save with nothing changed, is none

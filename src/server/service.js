@@ -15,7 +15,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
@@ -1227,6 +1227,10 @@ function createService(opts = {}) {
 
   function buildActive(serverId, settings) {
     const { plan, label, entryAddrs } = buildPlan(serverId, settings);
+    // A JSON server set to run raw: its own config, as written — a single-server
+    // connect only (configBuilder.buildRawConfig). The app's routing mode, the
+    // geo rules it would have skipped and the router's DNS block are not in it.
+    const rawServer = rawServerOf(plan);
 
     const geoSt = assetStatus();
     const geoAssets = !!(geoSt.geoip && geoSt.geosite);
@@ -1234,7 +1238,7 @@ function createService(opts = {}) {
     const usesGeo = plan.mode === 'pool' ? false : (
       (plan.mode === 'advanced' && ((settings.routeRules || []).some(r => r && /^(geoip|geosite):/i.test(String(r.value || ''))))) ||
       (plan.mode !== 'advanced' && (settings.routingMode === 'bypass-ir' || settings.routingMode === 'bypass-cn' || (settings.blockAds && plan.mode !== 'advanced'))));
-    if (!geoAssets && usesGeo) {
+    if (!geoAssets && usesGeo && !rawServer) {
       geoWarn = settings.lang === 'en'
         ? 'Geo files (geoip/geosite) are missing — geo-based rules were skipped. Download them under Settings → Required files.'
         : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
@@ -1249,6 +1253,8 @@ function createService(opts = {}) {
     // missing) decides the config format.
     let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
     let config;
+    // A raw config is Xray's own format: it runs on an Xray core, whatever the choice.
+    if (rawServer && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray').id;
     // A router's LAN has names only because the core answers every port-53
     // packet (dnsBuilder's hijack), and a config on the sing-box core carries
     // none — every device behind the router without DNS, the v1.13.4 failure.
@@ -1257,7 +1263,9 @@ function createService(opts = {}) {
       send('log', { line: 'This config is set to the sing-box core, which has no port-53 hijack: the LAN behind the router would have no DNS — running it on Xray instead', level: 'warn' });
       engine = xray.resolveEngine('xray').id;
     }
-    if (engineFormat(engine) === 'sing-box') {
+    if (rawServer) {
+      config = buildRawConfig(rawServer, settings);
+    } else if (engineFormat(engine) === 'sing-box') {
       try {
         config = buildSingboxConfig(plan.server, settings);
       } catch (e) {
@@ -1271,8 +1279,9 @@ function createService(opts = {}) {
     // The router's DNS block (v1.16.2, dnsBuilder.routerDnsTuning): 8 s per
     // DoH server, the DoH servers raced, a known name answered from cache
     // through an outage of the exit's DoH. Here, after buildConfig, so the
-    // connect and every rebuild get it and a desktop's config never does.
-    if (OPENWRT && engineFormat(engine) === 'xray' && config.dns) config.dns = routerDnsTuning(config.dns);
+    // connect and every rebuild get it and a desktop's config never does —
+    // nor a raw config, whose DNS runs as written.
+    if (OPENWRT && !rawServer && engineFormat(engine) === 'xray' && config.dns) config.dns = routerDnsTuning(config.dns);
     return { plan, label, entryAddrs, config, geoWarn, engine };
   }
 
@@ -1686,6 +1695,9 @@ function createService(opts = {}) {
     let active;
     try { active = buildActive(serverId, settings); } catch (e) { throw refusal(e); }   // a target gone, a chain short of a member
     const { plan, label, entryAddrs, config, geoWarn, engine } = active;
+    // A JSON server set to run raw, said once per connect: run as written, or —
+    // in a chain, advanced routing or the pool — used in its full form.
+    for (const note of rawModeNotes(plan)) send('log', note);
     // A router carries a house: one access-log line per connection, through the
     // service's stdout into syslog, is real CPU on a Cortex-A7 (the AC-1304 log
     // was a wall of `accepted udp:…`). Kept when the user asks for a verbose
@@ -1889,7 +1901,9 @@ function createService(opts = {}) {
         // The in-country resolver is dialled `direct` — under TUN that would
         // re-enter the tunnel, so it needs a bypass route exactly like the
         // server addresses (the direct outbound is also bound to the NIC).
-        const hijacks = engineFormat(runEngine) !== 'sing-box';
+        // A raw JSON config (buildRawConfig) carries none of the app's DNS
+        // plan, so no hijack either: the adapter gets the plain resolvers.
+        const hijacks = engineFormat(runEngine) !== 'sing-box' && !rawServerOf(plan);
         const dnsPeer = myTun.dnsPeer || TUN_GW;
         // A tunnel that is already up was built for the PREVIOUS server: its
         // route exclusions — and, at the strict level, the firewall holes cut
@@ -3045,7 +3059,9 @@ function createService(opts = {}) {
       const idx = servers.findIndex(s => s.id === id);
       if (idx === -1) return { ok: false, error: 'not found', servers };
       const before = servers[idx];
-      servers[idx] = applyServerEdits(before, fields || {});
+      // An edit can be refused — a JSON config that does not parse, or has no
+      // proxy outbound left: the reason goes back, the record stays as it was.
+      try { servers[idx] = applyServerEdits(before, fields || {}); } catch (err) { return { ok: false, error: err.message, servers }; }
       store.set('servers', servers);
       // an edit of a server the live connection dials waits for a reconnect (see liveServerIds)
       // — one that changes what is dialled: a rename, or a Save with nothing changed, is none
