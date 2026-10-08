@@ -75,10 +75,26 @@ class JsonImportTest {
         val info = s.jsonInfo!!
         assertEquals(3, info.rules.size)
         assertTrue(info.dns)
+        // the desktop's neutral tokens: `*` = no condition
         assertEquals(JsonRule("geosite:private", "direct"), info.rules[0])
         assertEquals(JsonRule("geoip:ir", "direct"), info.rules[1])
-        assertEquals(JsonRule("everything else", "proxy"), info.rules[2])
+        assertEquals(JsonRule("*", "proxy"), info.rules[2])
         assertEquals(0, info.balancers); assertFalse(info.observatory)
+    }
+
+    @Test fun notAppliedSummary_putsTheTokensInWords() {
+        assertEquals("everything else", JsonImport.matchInWords("*"))
+        assertEquals("geoip:ir", JsonImport.matchInWords("geoip:ir"))
+        assertEquals("—", JsonImport.matchInWords(""))
+        assertEquals("balancer auto", JsonImport.targetInWords("balancer:auto"))
+        assertEquals("direct", JsonImport.targetInWords("direct"))
+        assertEquals("—", JsonImport.targetInWords(""))
+        // a rule naming no outbound, the app's own catch-all port, several conditions
+        val info = JsonImport.jsonInfo(JSONObject("{\"outbounds\":[],\"routing\":{\"rules\":[" +
+            "{\"type\":\"field\",\"port\":\"0-65535\"}," +
+            "{\"type\":\"field\",\"domain\":[\"a\",\"b\",\"c\",\"d\",\"e\"],\"port\":\"443\",\"network\":\"udp\",\"outboundTag\":\"x\"}]}}"))
+        assertEquals(JsonRule("*", ""), info.rules[0])
+        assertEquals(JsonRule("a, b, c +2 + port 443 + udp", "x"), info.rules[1])
     }
 
     @Test fun chain_theMainOutboundKeepsItsMux_helpersAreTheHops() {
@@ -98,7 +114,7 @@ class JsonImportTest {
         assertEquals(listOf("vless", "trojan"), r.servers.map { s: ServerConfig -> s.protocol })
         assertEquals(1, r.servers[0].jsonInfo!!.balancers)
         assertTrue(r.servers[0].jsonInfo!!.observatory)
-        assertEquals("⚖ auto", r.servers[0].jsonInfo!!.rules[1].to)
+        assertEquals(JsonRule("*", "balancer:auto"), r.servers[0].jsonInfo!!.rules[1])
         assertEquals(JsonImport.MainChoice(listOf("proxy-1", "proxy-2"), "auto"), JsonImport.mainOutboundTag(JSONObject(fixture("xray-balancer.json"))))
         assertEquals("proxy-2", JsonImport.mainTagOf(r.servers[1]))
     }
@@ -240,7 +256,10 @@ class JsonImportTest {
         assertEquals("104.16.1.1", e.address)
         assertEquals("104.16.1.1", e.outbound.getJSONObject("settings").getJSONArray("vnext").getJSONObject(0).getString("address"))
         assertEquals(listOf("fragment"), tags(e.extraOutbounds))
-        assertEquals(JsonText.minify(e.json), e.raw)
+        // raw stays the provider's own text: a refresh finds the server by it first
+        assertEquals(s.raw, e.raw)
+        assertTrue(e.raw.contains("edge1.example.com"))
+        assertTrue(JsonText.minify(e.json).contains("104.16.1.1"))
         assertTrue(e.edited.containsAll(listOf("name", "jsonMode", "json")))
         try {
             JsonImport.applyEdits(s, "x", JsonImport.MODE_FULL, "{ not json")
@@ -278,7 +297,11 @@ class JsonImportTest {
         val s = imp("xray-chain.json").servers.single()
         val c = ConfigBuilder.build(ConnectionPlan.Single(s), settings())
         val proxy = tagged(c, "proxy")
-        assertEquals("proxy~hop1", proxy.getJSONObject("proxySettings").getString("tag"))
+        // Xray 26 / PattN refuse proxySettings at load: the hop goes as the dialerProxy it was migrated to
+        assertFalse(proxy.has("proxySettings"))
+        assertEquals("proxy~hop1", dialer(proxy))
+        assertEquals("hop1", s.outbound.getJSONObject("proxySettings").getString("tag"))
+        assertTrue(outs(c).none { o: JSONObject -> o.has("proxySettings") })
         assertEquals(8, proxy.getJSONObject("mux").getInt("concurrency"))
         assertEquals("proxy~frag", dialer(tagged(c, "proxy~hop1")))
         assertEquals("freedom", tagged(c, "proxy~frag").getString("protocol"))
@@ -291,7 +314,8 @@ class JsonImportTest {
         val c = ConfigBuilder.build(plan, settings())
         assertEquals("out-${frag.id}~fragment", dialer(tagged(c, "out-${frag.id}")))
         assertEquals("freedom", tagged(c, "out-${frag.id}~fragment").getString("protocol"))
-        assertEquals("out-${chain.id}~hop1", tagged(c, "out-${chain.id}").getJSONObject("proxySettings").getString("tag"))
+        assertEquals("out-${chain.id}~hop1", dialer(tagged(c, "out-${chain.id}")))
+        assertFalse(tagged(c, "out-${chain.id}").has("proxySettings"))
         assertEquals("out-${chain.id}~frag", dialer(tagged(c, "out-${chain.id}~hop1")))
         val all = tags(outs(c))
         assertEquals(all.size, all.toSet().size)
@@ -350,6 +374,18 @@ class JsonImportTest {
         val sub = imp("xray-subscription.json").servers[0]
         val tls = stream(tagged(ConfigBuilder.buildRawConfig(sub, st), "proxy")).getJSONObject("tlsSettings")
         assertFalse(tls.has("allowInsecure")); assertEquals("chrome", tls.getString("fingerprint")); assertEquals("host1.example.org", tls.getString("serverName"))
+        // a proxySettings hop, which Xray 26 refuses at load, goes as the dialerProxy it was migrated to — its own tag
+        val chain = imp("xray-chain.json").servers.single()
+        val rc = ConfigBuilder.buildRawConfig(chain, st)
+        val cfx = JSONArray(fixture("xray-chain.json")).getJSONObject(0)
+        val fxOuts = outs(cfx)
+        assertFalse(tagged(rc, "proxy").has("proxySettings"))
+        val wantStream = JSONObject(fxOuts[0].getJSONObject("streamSettings").toString()).put("sockopt", JSONObject().put("dialerProxy", "hop1"))
+        assertEquals(Canon.of(wantStream), Canon.of(stream(tagged(rc, "proxy"))))
+        assertEquals(fxOuts.drop(1).map { o: JSONObject -> Canon.of(o) }, outs(rc).drop(1).map { o: JSONObject -> Canon.of(o) })
+        assertEquals(Canon.of(cfx.getJSONObject("routing")), Canon.of(rc.getJSONObject("routing")))
+        // the stored record keeps its config as written
+        assertEquals("hop1", outs(chain.json!!)[0].getJSONObject("proxySettings").getString("tag"))
     }
 
     @Test fun raw_lanSharing_hasItsInboundsAndItsLoopbackGuardFirst() {
@@ -415,5 +451,19 @@ class JsonImportTest {
         assertEquals(mine.id, carried.id)
         assertEquals("104.16.1.1", carried.address)
         assertEquals(Canon.of(mine.json), Canon.of(carried.json))
+        // ...through a whole refresh too: its raw is still the provider's text, so it is
+        // found by it first — even with its address edited, the identity no longer the panel's
+        val edited = first.toMutableList()
+        edited[2] = mine
+        val again = imp("xray-subscription.json").servers
+        val m2 = SubRefresh.merge(edited, again, sub.id)
+        assertEquals(edited.map { s: ServerConfig -> s.id }, m2.servers.map { s: ServerConfig -> s.id })
+        assertEquals(5, m2.kept)
+        val back = m2.servers[2]
+        assertEquals("104.16.1.1", back.address)
+        assertEquals("104.16.1.1", back.outbound.getJSONObject("settings").getJSONArray("vnext").getJSONObject(0).getString("address"))
+        assertEquals(Canon.of(mine.json), Canon.of(back.json))
+        assertEquals(again[2].raw, back.raw)
+        assertTrue(back.edited.contains("json"))
     }
 }
