@@ -14,14 +14,25 @@ const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
 const { parseMany, parseLink, applyServerEdits, editFields } = require('./parser');
+const { JSON_DERIVED } = require('./jsonImport');
 
 function uid() { return crypto.randomBytes(8).toString('hex'); }
 
 /* ------------------------- a refresh keeps who a server is ------------------------- */
 
-/** The share link without its `#remark` — panels rewrite the remark (traffic left, days left) on every fetch. */
+/**
+ * The share link without its `#remark` — panels rewrite the remark (traffic
+ * left, days left) on every fetch. A JSON server's `raw` is its config: the
+ * same config without its `remarks` (and `ps`), the rest of it untouched.
+ */
 function withoutRemark(raw) {
   const s = String(raw || '');
+  if (s[0] === '{') {
+    try {
+      const c = JSON.parse(s);
+      if (c && typeof c === 'object' && !Array.isArray(c)) { delete c.remarks; delete c.ps; return JSON.stringify(c); }
+    } catch { /* not a config after all: read as a link */ }
+  }
   const i = s.indexOf('#');
   return i === -1 ? s : s.slice(0, i);
 }
@@ -221,6 +232,19 @@ function carryOver(old, fresh, said) {
     if (norm(f.get(out)) === norm(mine)) kept.push(f.key); else missed.add(f.key);
   }
   for (const k of missed) while (kept.includes(k)) kept.splice(kept.indexOf(k), 1);
+  // A JSON server's own, recorded like everything else: the mode the user
+  // chose, and a config they edited — with all it derives (jsonImport.js),
+  // so the record stays one config's.
+  if (fresh.source === 'json' && old.source === 'json') {
+    if (recorded.includes('json') && old.json && typeof old.json === 'object') {
+      for (const k of JSON_DERIVED) out[k] = clone(old[k]);
+      kept.push('json');
+    }
+    if (recorded.includes('jsonMode') && (old.jsonMode === 'raw' || old.jsonMode === 'full')) {
+      out.jsonMode = old.jsonMode;
+      kept.push('jsonMode');
+    }
+  }
   // A rename when recorded, or when the old link proves one: otherwise the
   // provider's name (which often carries the traffic left) is the current one.
   // A rename proven against the old link (made by a version that recorded
