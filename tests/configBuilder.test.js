@@ -2155,3 +2155,57 @@ test('raw mode is for a single-server connect only: rawServerOf and the notes th
   const c = buildConfig({ mode: 'chain', chain: [raw, VLESS_WS_TLS] }, settings());
   assert.deepEqual(tagsOf(c), ['proxy-h0', 'proxy-h0~fragment', 'proxy', 'direct', 'block']);
 });
+
+/* ------------------- JSON servers: what this machine dials itself ------------------- */
+// A JSON server's entries are the proxy outbounds of [main, ...helpers] that
+// dial by themselves — directly, or through a freedom helper (a fragment or
+// noise dialer dials the address of whoever dialled through it). One that
+// dials through another proxy (the chain fixture's exit, behind hop1) is
+// reached by that proxy, never from here.
+
+test('entry addresses: the chain fixture is entered at its hop, the fragment fixture at its own server; a link server at its address as always', () => {
+  const { entryAddressesOf } = require('../src/main/configBuilder');
+  const ch = jsonServer('xray-chain.json', 'jc');
+  const fr = jsonServer('xray-fragment.json', 'jf');
+  assert.deepEqual(entryAddressesOf(ch), ['hop.example.com']);
+  assert.deepEqual(entryAddressesOf(fr), ['edge1.example.com']);
+  assert.deepEqual(entryAddressesOf(jsonServer('xray-wireguard.json', 'jw')), ['wg.example.com']);
+  assert.deepEqual(entryAddressesOf(VLESS_WS_TLS), ['a.example.com']);
+  assert.deepEqual(entryAddressesOf(WG_BAD_MASK), ['d.example.com']);
+  // raw: the whole config runs, so every proxy outbound in it that dials by itself
+  const bal = Object.assign(jsonServer('xray-balancer.json', 'jb'), { jsonMode: 'raw' });
+  assert.deepEqual(entryAddressesOf(bal), ['edge1.example.com']);
+  assert.deepEqual(entryAddressesOf(bal, true), ['edge1.example.com', 'edge2.example.com']);
+});
+
+test('entryHosts: the names a connect resolves for a JSON server are its entries’ — hop.example.com, never exit.example.com', () => {
+  const ch = jsonServer('xray-chain.json', 'jc');
+  const fr = jsonServer('xray-fragment.json', 'jf');
+  assert.deepEqual(entryHosts(single(ch)), ['hop.example.com']);
+  assert.deepEqual(entryHosts(single(fr)), ['edge1.example.com']);
+  assert.deepEqual(entryHosts({ mode: 'chain', chain: [ch, TROJAN_TCP_TLS] }), ['hop.example.com']);
+  assert.deepEqual(entryHosts({ mode: 'chain', chain: [TROJAN_TCP_TLS, ch] }), ['b.example.com'], 'a later hop is entered through the hop before it');
+  assert.deepEqual(entryHosts(advancedPlan({ serversById: { jc: ch, jf: fr }, rules: [{ type: 'domain', value: 'a.com', target: 'jc' }], def: 'jf' })), ['hop.example.com', 'edge1.example.com']);
+  // a raw single server runs its whole config
+  const bal = Object.assign(jsonServer('xray-balancer.json', 'jb'), { jsonMode: 'raw' });
+  assert.deepEqual(entryHosts(single(bal)), ['edge1.example.com', 'edge2.example.com']);
+  assert.deepEqual(entryHosts(single(Object.assign({}, bal, { jsonMode: 'full' }))), ['edge1.example.com']);
+});
+
+test('pinEntryHosts answers a JSON server’s entries from the config: the hop behind a fragment dialer is pinned, the exit behind the hop is not', () => {
+  const pins = { entryHostIps: { 'hop.example.com': ['203.0.113.30'], 'exit.example.com': ['203.0.113.31'], 'edge1.example.com': ['203.0.113.32'] } };
+  const c = buildConfig(single(jsonServer('xray-chain.json', 'jc')), settings(pins));
+  assert.deepEqual(c.dns.hosts, { 'hop.example.com': ['203.0.113.30'] });
+  assert.deepEqual(sockoptOf(c, 'proxy~hop1'), { dialerProxy: 'proxy~frag', domainStrategy: 'UseIPv4' });
+  assert.deepEqual(sockoptOf(c, 'proxy'), { dialerProxy: 'proxy~hop1' });
+  assert.equal(outboundTagged(c, 'proxy~frag').settings.domainStrategy, 'UseIPv4', 'the dialer carries the strategy, as a dpi dialer does');
+  const f = buildConfig(single(jsonServer('xray-fragment.json', 'jf')), settings(pins));
+  assert.deepEqual(f.dns.hosts, { 'edge1.example.com': ['203.0.113.32'] });
+  assert.deepEqual(sockoptOf(f, 'proxy'), { dialerProxy: 'proxy~fragment', domainStrategy: 'UseIPv4' });
+  assert.equal(outboundTagged(f, 'proxy~fragment').settings.domainStrategy, 'UseIPv4');
+  // without pins nothing of it is there
+  const plain = buildConfig(single(jsonServer('xray-chain.json', 'jc')), settings());
+  assert.equal(plain.dns.hosts, undefined);
+  assert.deepEqual(sockoptOf(plain, 'proxy~hop1'), { dialerProxy: 'proxy~frag' });
+  assert.equal(outboundTagged(plain, 'proxy~frag').settings.domainStrategy, undefined);
+});
