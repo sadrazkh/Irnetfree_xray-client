@@ -252,7 +252,7 @@ function liveRoutingOf({ serverId, plan, profiles, chains } = {}) {
 
 /**
  * The pending-reconnect keys an edit since `live` (liveRoutingOf) raises:
- * 'routeRules' — the live profile changed or is gone; 'chains' — a chain the
+ * 'routingProfiles' — the live profile changed or is gone; 'chains' — a chain the
  * connection uses changed or is gone.
  */
 function routingPendingKeys(live, profiles, chains) {
@@ -260,7 +260,7 @@ function routingPendingKeys(live, profiles, chains) {
   const keys = [];
   if (live.profileId) {
     const now = (Array.isArray(profiles) ? profiles : []).find((x) => x && x.id === live.profileId);
-    if (profileState(now) !== live.profile) keys.push('routeRules');
+    if (profileState(now) !== live.profile) keys.push('routingProfiles');
   }
   const byId = new Map((Array.isArray(chains) ? chains : []).filter((c) => c && c.id).map((c) => [c.id, c]));
   if (Object.keys(live.chains || {}).some((id) => chainState(byId.get(id)) !== live.chains[id])) keys.push('chains');

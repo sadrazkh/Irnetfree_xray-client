@@ -2326,6 +2326,11 @@ test('via: the default through the profile’s base; a default with via none is 
   // the base as the default itself goes direct to it: a target is never its own base
   const self = buildConfig(Object.assign({}, plan, { def: 'sv-vless' }), settings({ blockAds: false }));
   assert.deepEqual(tagsOf(self), ['out-sv-vless', 'direct', 'block']);
+  // …nor its own explicit via: no @ tag, no dialerProxy to itself
+  const own = buildConfig(viaPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan', via: 'sv-trojan' }, { type: 'ip', value: '10.0.0.0/8', target: 'chain:c1', via: 'chain:c1' }] }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(own), ['out-sv-trojan', 'out-chain-c1-h0', 'out-chain-c1', 'direct', 'block']);
+  assert.equal(dialer(own, 'out-sv-trojan'), null);
+  assert.equal(dialer(own, 'out-chain-c1-h0'), null);
 });
 
 test('via: a JSON server through a base dials the base — its own fragment helper left out', () => {

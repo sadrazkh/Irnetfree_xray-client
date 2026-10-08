@@ -108,7 +108,7 @@ test('an edit of the live profile, or of a chain it uses, waits for a reconnect;
   const renamed = await s.service.invoke('routing:setProfiles', [Object.assign({}, work, { name: 'Office' })]);
   assert.deepEqual(renamed.pendingReconnect, [], 'a name is never in the config');
   const edited = await s.service.invoke('routing:setProfiles', [Object.assign({}, work, { name: 'Office', def: SERVER_B.id })]);
-  assert.deepEqual(edited.pendingReconnect, ['routeRules']);
+  assert.deepEqual(edited.pendingReconnect, ['routingProfiles']);
   await s.service.invoke('routing:setProfiles', [Object.assign({}, work, { name: 'Office' })]);
   assert.deepEqual(await s.service.invoke('settings:pending'), [], 'put back: nothing to reconnect for');
   await s.service.invoke('chains:set', [Object.assign({}, tes, { members: [SERVER_B.id, SERVER.id] })]);
