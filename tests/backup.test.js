@@ -184,7 +184,7 @@ test('flavor: a backup says where it was made when asked to (the router), and on
 const RP_DEFAULT = { id: 'rp-default', name: 'Advanced routing', rules: [{ type: 'domain', value: 'a.com', target: 's1' }], def: 's1', defVia: 'inherit', useMode: false, base: null };
 const RP_WORK = { id: 'rp-work', name: 'Work', rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'chain:c1', via: 's1' }], def: 'direct', defVia: 'inherit', useMode: true, base: 's1' };
 
-test('routing profiles travel in the backup and merge by id: what is here is kept, the new are added, the settings mirror rp-default as kept', () => {
+test('routing profiles travel in the backup and merge by id: what is here is kept, the new are added; rp-default (the settings’ advanced routing) comes back from the backup, as the settings always did', () => {
   const here = Object.assign({}, current, {
     routingProfiles: [RP_DEFAULT],
     settings: { lang: 'fa', routeRules: RP_DEFAULT.rules, routeDefault: 's1', advancedUseMode: false }
@@ -192,16 +192,28 @@ test('routing profiles travel in the backup and merge by id: what is here is kep
   const b = exportBundle({ store: here });
   assert.deepEqual(b.routingProfiles, [RP_DEFAULT], 'exported');
   assert.equal('routingProfiles' in exportBundle({ store: current }), false, 'a store without them exports as before');
+  const THEIR_DEFAULT = Object.assign({}, RP_DEFAULT, { def: 'direct', rules: [{ type: 'ip', value: '9.9.9.9', target: 'block' }] });
   const theirs = exportBundle({ store: {
-    routingProfiles: [Object.assign({}, RP_DEFAULT, { def: 'direct', rules: [] }), RP_WORK],
-    settings: { routeRules: [], routeDefault: 'direct', theme: 'light' }
+    routingProfiles: [THEIR_DEFAULT, RP_WORK],
+    settings: { routeRules: THEIR_DEFAULT.rules, routeDefault: 'direct', theme: 'light' }
   } });
   const r = importBundle(theirs, here);
-  assert.deepEqual(r.next.routingProfiles, [RP_DEFAULT, RP_WORK], 'rp-default here kept, Work added');
+  assert.deepEqual(r.next.routingProfiles, [THEIR_DEFAULT, RP_WORK], 'rp-default restored in its place, Work added');
   assert.equal(r.added.routingProfiles, 1);
-  assert.deepEqual([r.next.settings.routeRules, r.next.settings.routeDefault], [RP_DEFAULT.rules, 's1'], 'the settings follow the kept rp-default');
+  assert.deepEqual([r.next.settings.routeRules, r.next.settings.routeDefault], [THEIR_DEFAULT.rules, 'direct'], 'the settings mirror the restored rp-default');
   assert.equal(r.next.settings.theme, 'light', 'the rest of the settings restored');
   assert.deepEqual(importBundle(theirs, r.next).next.routingProfiles, r.next.routingProfiles, 'restoring twice is restoring once');
+  // another profile already here keeps its own version
+  const mine = Object.assign({}, RP_WORK, { name: 'Mine' });
+  assert.deepEqual(importBundle(theirs, Object.assign({}, here, { routingProfiles: [RP_DEFAULT, mine] })).next.routingProfiles, [THEIR_DEFAULT, mine]);
+});
+
+test('a backup restored on a fresh install brings its advanced routing back (the empty rp-default made at start does not win)', () => {
+  const fresh = { servers: [], routingProfiles: [{ id: 'rp-default', name: 'روتینگ ویژه', rules: [], def: '', defVia: 'inherit', useMode: false, base: null }], settings: { routeRules: [], routeDefault: '', advancedUseMode: false } };
+  const b = exportBundle({ store: { routingProfiles: [RP_DEFAULT, RP_WORK], settings: { routeRules: RP_DEFAULT.rules, routeDefault: 's1', advancedRouting: true } } });
+  const r = importBundle(b, fresh);
+  assert.deepEqual(r.next.routingProfiles, [RP_DEFAULT, RP_WORK]);
+  assert.deepEqual([r.next.settings.routeRules, r.next.settings.routeDefault, r.next.settings.advancedRouting], [RP_DEFAULT.rules, 's1', true]);
 });
 
 test('a backup made before routing profiles: its advanced routing (the settings) becomes rp-default’s, as a restore always did', () => {

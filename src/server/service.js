@@ -3479,9 +3479,21 @@ function createService(opts = {}) {
     return await h(arg);
   }
 
+  /**
+   * Do two connect ids name the same thing? A plain `__advanced__` (an old boot
+   * intent) and `__advanced__:<id>` (what LuCI lists for it) are the same profile.
+   */
+  function sameTarget(a, b) {
+    if (a === b) return true;
+    if (!isAdvancedSelection(a) || !isAdvancedSelection(b)) return false;
+    const profiles = getRoutingProfiles();
+    const p = profileIdOf(a, profiles);
+    return !!p && p === profileIdOf(b, profiles);
+  }
+
   /** Connected to exactly `id`, core running, gateway up, nothing rebuilding or in flight: a Connect has nothing to do. */
   function alreadyUp(id) {
-    return !!id && id === store.get('activeServerId', null) && !!(xray && xray.running) && !!(tun && tun.active)
+    return !!id && sameTarget(id, store.get('activeServerId', null)) && !!(xray && xray.running) && !!(tun && tun.active)
       && !recovering && !recoverTimer && !connectsInFlight.size && conn.state === 'connected'
       && !pendingKeys().length;   // settings waiting for a reconnect: that is what the Connect is for (review M5)
   }

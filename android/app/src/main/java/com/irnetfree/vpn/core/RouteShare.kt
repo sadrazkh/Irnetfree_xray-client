@@ -195,10 +195,14 @@ object RouteShare {
         fun chain(id: String): String {
             chainKeys[id]?.let { k: String -> return k }
             val c = chains.firstOrNull { x: ChainConfig -> x.id == id } ?: throw IllegalArgumentException("It names a chain that no longer exists — fix it under Routing first")
+            // a chain that lost a server is refused, not shared shorter: the receiver would dial the rest from where it is (routeShare.js chainLost)
+            if (c.members.isEmpty() || c.members.any { m: String -> servers.none { s: ServerConfig -> s.id == m } }) {
+                throw IllegalArgumentException("The chain “${c.name}” lost a server (it was removed, or replaced by a subscription update) — put it back under Chains, then copy again")
+            }
             val k = "c${chainKeys.size + 1}"
             chainKeys[id] = k
             // its members get their keys as the chain is met
-            for (m in c.members) if (servers.any { s: ServerConfig -> s.id == m }) server(m)
+            for (m in c.members) server(m)
             return k
         }
 
@@ -245,7 +249,8 @@ object RouteShare {
         // the order keys are handed out in: the base, the default, then each rule's target and via
         val base = p.base?.let { b: String -> k.target(b) }
         val def = k.target(p.def)
-        val defVia = k.via(p.defVia)
+        // a default that takes no via (direct, block, none) carries none — no server travels for it (routeShare.js)
+        val defVia = if (RoutingProfiles.takesVia(def)) k.via(p.defVia) else RoutingProfiles.VIA_INHERIT
         val rules = JSONArray()
         for (r in p.rules) {
             val t = k.target(r.target)
@@ -418,7 +423,9 @@ object RouteShare {
             val key = str(c, "key")
             val name = str(c, "name").ifBlank { "Chain" }
             val m = c.optJSONArray("members") ?: JSONArray()
-            val members = (0 until m.length()).mapNotNull { j: Int -> idOf[m.optString(j)] }
+            // a member this phone could not read stays named (`unreadable-sN`): Store.chainMembers then
+            // makes the chain unusable instead of a shorter one that dials the rest from here (routeShare.js)
+            val members = (0 until m.length()).map { j: Int -> idOf[m.optString(j)] ?: (UNREADABLE_PREFIX + m.optString(j)) }
             val same = outChains.firstOrNull { x: ChainConfig -> x.name == name && x.members == members }
             if (same != null) {
                 chainIdOf[key] = same.id

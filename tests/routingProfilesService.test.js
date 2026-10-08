@@ -47,6 +47,11 @@ test('plain __advanced__ and __advanced__:rp-default build the very same config 
   assert.equal(JSON.stringify(configAt(a, 0)), JSON.stringify(configAt(b, 0)));
   assert.deepEqual(tags(configAt(a, 0)).filter((x) => x.startsWith('out-')), ['out-srv-2', 'out-srv-1']);
   assert.equal(a.statuses.find((x) => x.state === 'connected').serverId, '__advanced__');
+  // up on a plain `__advanced__` (an old boot intent), LuCI lists it as `__advanced__:rp-default`:
+  // a Connect on that item is the no-op, not a 20-40 s gateway rebuild
+  assert.equal((await a.service.invoke('connect', '__advanced__:rp-default')).already, true);
+  assert.equal(connectedCount(a), 1);
+  assert.equal((await b.service.invoke('connect', '__advanced__')).already, true);
 });
 
 test('a profile connected by its id: a target through the base dials it; the gateway’s bypass names the base, never the target behind it', async (t) => {

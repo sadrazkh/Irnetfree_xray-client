@@ -188,7 +188,13 @@ class Store(context: Context) {
     /* ------------- helpers ------------- */
     fun serverById(id: String) = servers.firstOrNull { it.id == id }
     fun chainById(id: String) = chains.firstOrNull { it.id == id }
-    fun chainMembers(c: ChainConfig) = c.members.mapNotNull { serverById(it) }
+    /**
+     * A chain's servers. One imported with a member this phone could not read (RouteShare's
+     * `unreadable-…`) has none: a shorter chain would dial the rest straight from here.
+     */
+    fun chainMembers(c: ChainConfig): List<ServerConfig> =
+        if (c.members.any { m: String -> m.startsWith(RouteShare.UNREADABLE_PREFIX) }) emptyList()
+        else c.members.mapNotNull { serverById(it) }
     fun chainReady(c: ChainConfig) = chainMembers(c).size >= 2
 
     fun poolTargetValid(t: String): Boolean = when {

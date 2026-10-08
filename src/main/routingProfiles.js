@@ -96,7 +96,8 @@ function profileFromSettings(settings) {
 
 /**
  * The stored profiles, migrated: none stored yet (not a list) → today's
- * settings as `rp-default`; a list → each normalized, a duplicate id once.
+ * settings as `rp-default`; a list → each normalized, a duplicate id once;
+ * a list of none (empty, or nothing usable) → today's settings again.
  * `changed`: what is returned differs from what is stored — write it.
  */
 function migrateProfiles({ stored, settings } = {}) {
@@ -109,6 +110,9 @@ function migrateProfiles({ stored, settings } = {}) {
     seen.add(n.id);
     profiles.push(n);
   }
+  // never none: a plain `__advanced__` (LuCI, the boot intent) needs a first profile — an
+  // empty list is today's settings again, as on Android
+  if (!profiles.length) return { profiles: [profileFromSettings(settings)], changed: true };
   return { profiles, changed: JSON.stringify(profiles) !== JSON.stringify(stored) };
 }
 
