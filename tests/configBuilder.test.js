@@ -1994,11 +1994,14 @@ test('JSON full mode: an advanced-routing target’s helpers are out-<id>~<tag>;
   assert.deepEqual(tagsOf(p).filter((t) => t.includes('~')), ['out-ja~fragment', 'out-jb~fragment']);
 });
 
-test('JSON full mode: a two-hop chain through proxySettings — proxySettings.tag → proxy~hop1, hop1’s dialerProxy → proxy~frag, the mux kept', () => {
+test('JSON full mode: a two-hop chain through proxySettings — its hop rewritten to proxy~hop1 (as the dialerProxy the cores now take), hop1’s dialerProxy → proxy~frag, the mux kept', () => {
   const s = jsonServer('xray-chain.json', 'js-chain');
   const c = buildConfig(single(s), settings());
   assert.deepEqual(tagsOf(c), ['proxy', 'proxy~hop1', 'proxy~frag', 'direct', 'block']);
-  assert.deepEqual(outboundTagged(c, 'proxy').proxySettings, { tag: 'proxy~hop1' });
+  // Xray 26 refuses proxySettings at load: "removed and migrated to streamSettings.sockopt.dialerProxy"
+  assert.equal(outboundTagged(c, 'proxy').proxySettings, undefined);
+  assert.deepEqual(outboundTagged(c, 'proxy').streamSettings.sockopt, { dialerProxy: 'proxy~hop1' });
+  assert.deepEqual(s.outbound.proxySettings, { tag: 'hop1' }, 'the stored record keeps it as written');
   assert.deepEqual(outboundTagged(c, 'proxy').mux, { enabled: true, concurrency: 8 });
   assert.equal(outboundTagged(c, 'proxy~hop1').streamSettings.sockopt.dialerProxy, 'proxy~frag');
   assert.equal(outboundTagged(c, 'proxy~frag').settings.fragment.packets, '1-3');
@@ -2027,6 +2030,7 @@ test('JSON full mode under TUN: the helpers that dial themselves are bound to th
   const ch = buildConfig(single(jsonServer('xray-chain.json', 'jc')), settings({ directInterface: 'Wi-Fi' }));
   assert.deepEqual(outboundTagged(ch, 'proxy~frag').streamSettings, { sockopt: { interface: 'Wi-Fi' } });
   assert.deepEqual(outboundTagged(ch, 'proxy~hop1').streamSettings.sockopt, { dialerProxy: 'proxy~frag' });
+  assert.deepEqual(outboundTagged(ch, 'proxy').streamSettings.sockopt, { dialerProxy: 'proxy~hop1' });
 });
 
 test('JSON full mode: a latency test and the multi-target test carry the helpers too — the main outbound cannot dial without them', () => {
@@ -2075,6 +2079,13 @@ test('buildRawConfig: the config itself, with the app’s own inbounds, its log 
   // a subscription config: its own socks inbound on 10808 is replaced, never added to
   const sub = jsonServer('xray-subscription.json', 'js');
   assert.deepEqual(buildRawConfig(sub, settings()).inbounds.map((i) => i.tag), ['socks-in', 'http-in']);
+  // a hop through proxySettings, which Xray 26 refuses at load, goes as the dialerProxy it was migrated to
+  const ch = buildRawConfig(jsonServer('xray-chain.json', 'jc'), settings());
+  const cfx = JSON.parse(JSON_FIX('xray-chain.json'))[0];
+  assert.equal(outboundTagged(ch, 'proxy').proxySettings, undefined);
+  assert.deepEqual(outboundTagged(ch, 'proxy').streamSettings, Object.assign({}, cfx.outbounds[0].streamSettings, { sockopt: { dialerProxy: 'hop1' } }));
+  assert.deepEqual(ch.outbounds.slice(1), cfx.outbounds.slice(1), 'every other outbound as written');
+  assert.deepEqual(ch.routing, cfx.routing);
 });
 
 test('buildRawConfig under TUN: every outbound that dials itself is bound to the NIC — nothing else changes', () => {

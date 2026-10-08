@@ -71,7 +71,8 @@ test('the router runs a full-mode JSON server inside its own config: the helpers
   const tags = config.outbounds.map((o) => o.tag);
   assert.deepEqual(tags.slice(0, 3), ['proxy', 'proxy~hop1', 'proxy~frag']);
   assert.ok(tags.includes('dns-out'), 'the app’s hijack is there');
-  assert.equal(config.outbounds[0].proxySettings.tag, 'proxy~hop1');
+  assert.deepEqual(config.outbounds[0].streamSettings.sockopt.dialerProxy, 'proxy~hop1', 'its hop as the dialerProxy the cores take');
+  assert.equal(config.outbounds[0].proxySettings, undefined);
   assert.equal(s.logs.some((l) => /raw/.test(l.line)), false, 'nothing to say about raw');
   await s.service.invoke('disconnect');
 });

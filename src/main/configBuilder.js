@@ -441,22 +441,42 @@ function dialThrough(outbound, viaTag) {
  * dials THROUGH — a fragment freedom, the hops of its own chain), for its
  * outbound `o` tagged `tag` in this config: each helper's tag becomes
  * `<tag>~<helperTag>`, and every dialerProxy / proxySettings.tag that named a
- * helper is rewritten — in `o` and in the helpers — so two JSON servers in one
- * config never collide. Copies, `allowInsecure` handled as for every outbound
- * (applyCertPin). A link server has none: [] and `o` untouched.
+ * helper is rewritten — in `o` and in the helpers, a proxySettings as the
+ * dialerProxy the cores now take (proxySettingsToDialer) — so two JSON servers
+ * in one config never collide. Copies, `allowInsecure` handled as for every
+ * outbound (applyCertPin). A link server has none: [] and `o` untouched.
  */
 function helpersFor(server, o, tag) {
-  const extra = server && server.source === 'json' && Array.isArray(server.extraOutbounds)
+  if (!server || server.source !== 'json') return [];
+  proxySettingsToDialer(o);
+  const extra = Array.isArray(server.extraOutbounds)
     ? server.extraOutbounds.filter(h => h && typeof h.tag === 'string' && h.tag) : [];
   if (!extra.length) return [];
   const named = new Map(extra.map(h => [h.tag, `${tag}~${h.tag}`]));
-  const helpers = extra.map(h => applyCertPin(Object.assign(JSON.parse(JSON.stringify(h)), { tag: named.get(h.tag) }), null));
+  const helpers = extra.map(h => proxySettingsToDialer(applyCertPin(Object.assign(JSON.parse(JSON.stringify(h)), { tag: named.get(h.tag) }), null)));
   for (const x of [o, ...helpers]) {
     const so = x.streamSettings && x.streamSettings.sockopt;
     if (so && named.has(so.dialerProxy)) so.dialerProxy = named.get(so.dialerProxy);
-    if (x.proxySettings && named.has(x.proxySettings.tag)) x.proxySettings.tag = named.get(x.proxySettings.tag);
   }
   return helpers;
+}
+
+/**
+ * `proxySettings.tag` → `streamSettings.sockopt.dialerProxy`, in place. The
+ * 2026 cores refuse proxySettings at config load — "has been removed and
+ * migrated to streamSettings.sockopt.dialerProxy" — and a JSON config written
+ * for an older one still carries it (a chain's hop). A dialerProxy the
+ * outbound has already wins. Only a JSON server's outbounds ever carry it.
+ */
+function proxySettingsToDialer(o) {
+  if (!o || !o.proxySettings || typeof o.proxySettings !== 'object') return o;
+  const via = o.proxySettings.tag;
+  delete o.proxySettings;
+  if (typeof via === 'string' && via) {
+    const ss = o.streamSettings || (o.streamSettings = {});
+    if (!(ss.sockopt && ss.sockopt.dialerProxy)) ss.sockopt = Object.assign({}, ss.sockopt, { dialerProxy: via });
+  }
+  return o;
 }
 
 /** An outbound followed by the helpers its server dials through (helpersFor). */
@@ -976,7 +996,9 @@ function rawModeNotes(planArg) {
  *  - the traffic meter's metrics listener and the counters it reads;
  *  - under TUN (`directInterface`) every outbound that dials itself bound to
  *    the NIC (bindDirectDials) — a `direct` dial would otherwise re-enter the
- *    tunnel it is meant to go around.
+ *    tunnel it is meant to go around;
+ *  - a `proxySettings` hop as the dialerProxy the cores migrated it to (they
+ *    refuse the old key at load: proxySettingsToDialer).
  * The app's DNS plan, leak-guard rules, routing mode and certificate pins are
  * not applied. Never changes the record.
  */
@@ -996,7 +1018,11 @@ function buildRawConfig(server, settings) {
   policy.system = Object.assign({}, isPlainObj(policy.system) ? policy.system : {},
     { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true });
   cfg.policy = policy;
-  if (Array.isArray(cfg.outbounds)) bindDirectDials(cfg.outbounds.filter(isPlainObj), s.directInterface);
+  if (Array.isArray(cfg.outbounds)) {
+    const outs = cfg.outbounds.filter(isPlainObj);
+    outs.forEach(proxySettingsToDialer);
+    bindDirectDials(outs, s.directInterface);
+  }
   return cfg;
 }
 
