@@ -10,14 +10,20 @@
  *  - 'sing-box' is a single-config engine only (it has no chain/pool translator).
  */
 
-/** Every server object a plan can dial (duplicates allowed). */
+const { advancedTargets } = require('./routingProfiles');
+
+/**
+ * Every server object a plan can dial (duplicates allowed). An advanced plan:
+ * every rule target and the default, then every base they go through
+ * (a routing profile's via).
+ */
 function planServers(plan) {
   if (!plan) return [];
   switch (plan.mode) {
     case 'single': return plan.server ? [plan.server] : [];
     case 'chain': return plan.chain || [];
     case 'pool': return targetsServers((plan.entries || []).map(e => e && e.target), plan);
-    case 'advanced': return targetsServers([...(plan.rules || []).map(r => r && r.target), plan.def], plan);
+    case 'advanced': return targetsServers([...(plan.rules || []).map(r => r && r.target), plan.def, ...advancedTargets(plan).vias], plan);
     default: return [];
   }
 }

@@ -751,3 +751,15 @@ test('muxCandidates: the servers a plan dials as targets of their own — never 
   assert.deepEqual(mux.muxCandidates(pool).map((s) => s.id), ['a', 'c']);
   assert.deepEqual(mux.muxCandidates(null), []);
 });
+
+test('muxCandidates: a routing profile’s target through a base is never a candidate, nor the base — mux stays on direct server targets', () => {
+  const a = shaped('a', 'vless', 'ws');
+  const b = shaped('b', 'trojan', 'ws');
+  const c = shaped('c', 'vmess', 'ws');
+  const plan = {
+    mode: 'advanced', profileId: 'p1', serversById: { a, b, c }, chainsById: {}, chain: [], base: 'a',
+    rules: [{ type: 'domain', value: 'x.com', target: 'b' }, { type: 'domain', value: 'y.com', target: 'c', via: 'none' }],
+    def: 'b', defVia: 'inherit'
+  };
+  assert.deepEqual(mux.muxCandidates(plan).map((s) => s.id), ['c']);
+});

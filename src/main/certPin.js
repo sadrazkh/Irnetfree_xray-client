@@ -15,6 +15,7 @@ const tls = require('tls');
 const net = require('net');
 const crypto = require('crypto');
 const { planServers } = require('./engineChoice');
+const { advancedTargets } = require('./routingProfiles');
 
 /** SHA-256 (hex, lowercase) of a certificate's DER. */
 function pinOf(der) {
@@ -76,7 +77,8 @@ function firstHop(list) {
 
 /**
  * The servers the machine dials directly: a single server, a chain's first hop,
- * and for advanced / pool plans each target's server or chain first hop. Same
+ * and for advanced / pool plans each target's server or chain first hop — for
+ * a target through a base (a routing profile's via), the base's instead. Same
  * member filter and target grammar as configBuilder's registry. Only these can
  * be probed from here — a later hop is reached through the previous one.
  */
@@ -94,7 +96,7 @@ function directServers(plan) {
     case 'single': add(plan.server); break;
     case 'chain': add(firstHop(plan.chain)); break;
     case 'pool': for (const e of plan.entries || []) if (e) target(e.target); break;
-    case 'advanced': for (const r of plan.rules || []) if (r) target(r.target); target(plan.def); break;
+    case 'advanced': for (const tg of advancedTargets(plan).entries) target(tg); break;
     default: break;
   }
   return out;

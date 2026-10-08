@@ -23,7 +23,7 @@ const { XrayManager, getFreePort, getFreePorts } = require('./xrayManager');
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { Store } = require('./store');
-const { SubscriptionManager } = require('./subscription');
+const { SubscriptionManager, serverIdentity } = require('./subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
 const { TunSingbox, TUN_ADDR4 } = require('./tunSingbox');
 const { NativeMacTun } = require('./nativeMacTun');
@@ -41,6 +41,7 @@ const { pickUpdateAsset, parseSha256Sums, sha256File } = require('./appUpdate');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
+const { migrateProfiles, mirrorToSettings, mirrorFromSettings, isAdvancedSelection, profileIdOf, advancedTargets, resolveProcessRules, liveRoutingOf, routingPendingKeys } = require('./routingProfiles');
 const { NetWatcher, fingerprint } = require('./netWatcher');
 const { DropBudget } = require('./dropBudget');
 const { isWebUrl, isAppPage } = require('./urlGuard');
@@ -49,6 +50,7 @@ const { schtasksCreateArgs, schtasksDeleteArgs, schtasksQueryXmlArgs, taskExeFro
 const { sharedWgIdentities, localSubnets, lanOverlaps, targetNeeds, routeTargetName, noticeLine, noticeLevel, forWindow, needsTun } = require('./connectNotices');
 const { trayGroups, trayStopItem } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
+const { createRouteShareApi } = require('./routeShare');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
 const { CORE_IDS, createCoreVersionsApi } = require('./coreVersions');
 const https = require('https');
@@ -127,6 +129,10 @@ let appliedSettings = null;
 // 'servers'). The router's service does the same (field report fix 18).
 let liveServerIds = new Set();
 let serverEditPending = false;
+// The routing profile and the chains the live connection was built from
+// (routingProfiles.liveRoutingOf): an edit of either since waits for a
+// reconnect too (pendingKeys, 'routingProfiles' / 'chains').
+let liveRouting = null;
 // The physical interface the LIVE connection's direct dials are bound to (see
 // doConnect); null when not under TUN. rebuildActiveConfig() reuses it rather
 // than asking the OS again — with the tunnel up, the default route IS the tunnel.
@@ -673,12 +679,27 @@ function setSelection(id) {
 
 /* ----------------------------- core actions ----------------------------- */
 
-/** Process names referenced by advanced routing 'process' rules. */
-function activeProcNames(settings) {
+/**
+ * Process names referenced by advanced routing 'process' rules — the rules of
+ * the routing profile `serverId` connects (the live connection's when not
+ * given), else the settings' own (rp-default's mirror), as before.
+ */
+function activeProcNames(settings, serverId) {
   if (!settings || !settings.advancedRouting) return [];
-  return [...new Set((settings.routeRules || [])
+  return [...new Set(procRules(settings, serverId)
     .filter(r => r && r.type === 'process' && r.value)
     .map(r => String(r.value)))];
+}
+
+function procRules(settings, serverId) {
+  const id = serverId === undefined ? store.get('activeServerId', null) : serverId;
+  if (isAdvancedSelection(id)) {
+    const profiles = getRoutingProfiles();
+    const pid = profileIdOf(id, profiles);
+    const profile = pid && profiles.find(p => p.id === pid);
+    if (profile) return profile.rules || [];
+  }
+  return settings.routeRules || [];
 }
 
 function loadProcCache() { return store.get('procIpCache', {}) || {}; }
@@ -687,13 +708,15 @@ function loadProcCache() { return store.get('procIpCache', {}) || {}; }
 function saveProcCache(c) { store.setLazy('procIpCache', c); }
 
 /**
- * Return a settings copy in which every 'process' route rule is rewritten into
- * a concrete 'ip' rule (live connections of that process unioned with the
- * persisted per-process cache). The stored rules keep type:'process'.
+ * Return a settings copy carrying `procIps`: for every process the connect's
+ * 'process' route rules name (activeProcNames), the addresses it uses — live
+ * connections of that process unioned with the persisted per-process cache.
+ * buildPlan turns each such rule into a concrete 'ip' rule with them
+ * (routingProfiles.resolveProcessRules); the stored rules keep type:'process'.
  */
-async function effectiveSettings() {
+async function effectiveSettings(serverId) {
   const s = getSettings();
-  const names = activeProcNames(s);
+  const names = activeProcNames(s, serverId);
   if (!names.length) return s;
   const cache = loadProcCache();
   pruneProcCache(cache);
@@ -705,14 +728,9 @@ async function effectiveSettings() {
   } catch (e) {
     send('log', { line: 'Process routing resolve failed: ' + e.message, level: 'warn' });
   }
-  const rules = (s.routeRules || []).map(r => {
-    if (r && r.type === 'process' && r.value) {
-      const list = ipsByName[r.value] || (cache[r.value] && cache[r.value].ips) || [];
-      return { type: 'ip', value: list.join(','), target: r.target };
-    }
-    return r;
-  });
-  return Object.assign({}, s, { routeRules: rules });
+  const procIps = {};
+  for (const n of names) procIps[n] = ipsByName[n] || (cache[n] && cache[n].ips) || [];
+  return Object.assign({}, s, { procIps });
 }
 
 /**
@@ -791,14 +809,25 @@ function buildPlan(serverId, settings) {
     plan = { mode: 'pool', entries, primary, serversById, chainsById, chain: legacyChain };
     label = (settings.lang === 'en' ? '🧩 Proxy Pool' : '🧩 استخر پروکسی') + ` (${entries.length})`;
     for (const e of entries) addEntryForTarget(e.target);
-  } else if (serverId === '__advanced__') {
-    const rules = Array.isArray(settings.routeRules) ? settings.routeRules : [];
-    const def = settings.routeDefault || (servers[0] && servers[0].id) || 'direct';
-    plan = { mode: 'advanced', serversById, chainsById, chain: legacyChain, rules, def };
-    label = '🧭 ' + (settings.lang === 'en' ? 'Advanced routing' : 'روتینگ ویژه');
-    const targets = new Set(rules.map(r => r && r.target));
-    targets.add(def);
-    for (const tg of targets) { refuseBroken(tg); addEntryForTarget(tg); }
+  } else if (isAdvancedSelection(serverId)) {
+    // A routing profile (routingProfiles.js): `__advanced__:<id>`, or plain
+    // `__advanced__` — the first one (LuCI, old stores, old selections).
+    const profiles = getRoutingProfiles();
+    const pid = profileIdOf(serverId, profiles);
+    const profile = pid && profiles.find(p => p.id === pid);
+    if (!profile) throw new Error(settings.lang === 'en'
+      ? 'This routing profile no longer exists — choose another one under Routing.'
+      : 'این پروفایلِ روتینگ دیگر وجود ندارد — در بخشِ روتینگ یکی دیگر انتخاب کن.');
+    // its process rules as the addresses those processes use now (effectiveSettings)
+    const rules = resolveProcessRules(Array.isArray(profile.rules) ? profile.rules : [], settings.procIps);
+    const def = profile.def || (servers[0] && servers[0].id) || 'direct';
+    plan = { mode: 'advanced', profileId: profile.id, serversById, chainsById, chain: legacyChain, rules, def, defVia: profile.defVia, base: profile.base, useMode: profile.useMode };
+    label = '🧭 ' + (profile.name || (settings.lang === 'en' ? 'Advanced routing' : 'روتینگ ویژه'));
+    // every target and every base one goes through is refused when broken; the
+    // bypass is cut for what is dialled directly — a base, never a target behind it
+    const { targets, vias, entries } = advancedTargets(plan);
+    for (const tg of [...targets, ...vias]) refuseBroken(tg);
+    for (const tg of entries) addEntryForTarget(tg);
   } else if (chainById[serverId]) {
     refuseBroken('chain:' + serverId);
     const members = membersOf(chainById[serverId]);
@@ -846,7 +875,7 @@ function buildActive(serverId, settings) {
   let geoWarn = null;
   const usesGeo = plan.mode === 'pool' ? false : (
     (plan.mode === 'advanced' &&
-      ((settings.routeRules || []).some(r => r && /^(geoip|geosite):/i.test(String(r.value || ''))))) ||
+      ((plan.rules || []).some(r => r && /^(geoip|geosite):/i.test(String(r.value || ''))))) ||
     (plan.mode !== 'advanced' &&
       (settings.routingMode === 'bypass-ir' || settings.routingMode === 'bypass-cn' ||
         (settings.blockAds && plan.mode !== 'advanced'))));
@@ -1231,7 +1260,7 @@ async function connectOnce(serverId, opts = {}) {
     if (stale()) return abandoned;
     send('killswitch', { engaged: false });
   }
-  let settings = await effectiveSettings();
+  let settings = await effectiveSettings(serverId);
   if (stale()) return abandoned;
   const byId = (id) => store.get('servers', []).find(s => s.id === id);
 
@@ -1432,6 +1461,7 @@ async function connectOnce(serverId, opts = {}) {
   liveServerIds = planServerIds(plan);
   serverEditPending = false;
   liveMux = mux.ids.length ? mux : null;
+  liveRouting = liveRoutingOf({ serverId, plan, profiles: getRoutingProfiles(), chains: getChains() });
 
   if (settings.systemProxy) {
     try {
@@ -1744,10 +1774,15 @@ async function connectOnce(serverId, opts = {}) {
   return { ok: true, tunError };
 }
 
-/** Reconnect-relevant settings the user changed since the live tunnel was built — and 'servers' for an edit of one it dials. */
+/**
+ * Reconnect-relevant settings the user changed since the live tunnel was built
+ * — and 'servers' for an edit of one it dials, 'routingProfiles' / 'chains' for an
+ * edit of the routing profile / a chain it was built from.
+ */
 function pendingKeys() {
   const keys = pendingReconnectKeys(appliedSettings, getSettings());
   if (appliedSettings && serverEditPending) keys.push('servers');
+  if (appliedSettings) for (const k of routingPendingKeys(liveRouting, getRoutingProfiles(), getChains())) if (!keys.includes(k)) keys.push(k);
   return keys;
 }
 
@@ -1758,7 +1793,7 @@ function dialChanged(a, b) {
   return dialled(a) !== dialled(b);
 }
 
-/** The ids of every saved server a plan dials: each hop of a chain, every pool and advanced-routing target. */
+/** The ids of every saved server a plan dials: each hop of a chain, every pool and advanced-routing target, every base one goes through. */
 function planServerIds(plan) {
   const ids = new Set();
   const add = (s) => { if (s && s.id) ids.add(s.id); };
@@ -1773,7 +1808,7 @@ function planServerIds(plan) {
     case 'single': add(plan.server); break;
     case 'chain': hops(plan.chain); break;
     case 'pool': for (const e of plan.entries || []) if (e) target(e.target); break;
-    case 'advanced': for (const r of plan.rules || []) if (r) target(r.target); target(plan.def); break;
+    case 'advanced': { const t = advancedTargets(plan); for (const tg of [...t.targets, ...t.vias]) target(tg); break; }
     default: break;
   }
   return ids;
@@ -1813,7 +1848,9 @@ function connectHints(plan, { tun = false } = {}) {
       const own = [TUN_LOCAL_IP, String(TUN_ADDR4).split('/')[0]];
       const lans = localSubnets(os.networkInterfaces(), (name, address) => isOwnTunInterface(name) || own.includes(address));
       const chains = getChains();
-      found.push(...lanOverlaps(lans, getSettings().routeRules, (tg) => routeTargetName(tg, plan, chains), (tg) => targetNeeds(tg, plan)));
+      // the rules as stored (the routing profile's), not the connect's resolved process rules
+      const profile = getRoutingProfiles().find(p => p.id === plan.profileId);
+      found.push(...lanOverlaps(lans, profile ? profile.rules : getSettings().routeRules, (tg) => routeTargetName(tg, plan, chains), (tg) => targetNeeds(tg, plan)));
     }
     for (const n of found) {
       send('log', { line: noticeLine(n), level: noticeLevel(n) });
@@ -1980,7 +2017,7 @@ async function reapplyConnection(opts = {}) {
 async function rebuildActiveConfig() {
   const serverId = store.get('activeServerId', null);
   if (!serverId || !xray.running) return;
-  let settings = await effectiveSettings();
+  let settings = await effectiveSettings(serverId);
   // Keep the binding the live connection was built with (see doConnect): the
   // tunnel stays up across this reload, and asking the OS now would name it.
   if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
@@ -2607,6 +2644,32 @@ function getChains() {
   return seed;
 }
 
+/**
+ * The routing profiles (routingProfiles.js), migrated: none stored yet → today's
+ * advanced-routing settings as `rp-default`, written once — at start, beside
+ * the other store migrations; any later caller finds them stored.
+ */
+function getRoutingProfiles() {
+  const { profiles, changed } = migrateProfiles({ stored: store.get('routingProfiles', null), settings: getSettings() });
+  if (changed) store.set('routingProfiles', profiles);
+  return profiles;
+}
+
+/**
+ * Save the routing profiles (routing:setProfiles): each normalized, rp-default
+ * mirrored into the settings' routeRules / routeDefault / advancedUseMode. An
+ * edit of the live profile waits for a reconnect (pendingKeys).
+ */
+function setRoutingProfiles(list) {
+  if (!Array.isArray(list)) return { ok: false, error: 'not a list of profiles', profiles: getRoutingProfiles(), pendingReconnect: pendingKeys() };
+  const { profiles } = migrateProfiles({ stored: list, settings: getSettings() });
+  store.set('routingProfiles', profiles);
+  const stored = store.get('settings', {});
+  const mirrored = mirrorToSettings(profiles, stored);
+  if (mirrored !== stored) store.set('settings', mirrored);
+  return { ok: true, profiles, pendingReconnect: pendingKeys() };
+}
+
 /* ----------------------------- IPC handlers ----------------------------- */
 async function connectionDiagnostics(probe) {
   return collectDiagnostics(Object.assign({}, liveDiagnostics || {}, {
@@ -2800,6 +2863,10 @@ function registerIpc() {
     return valid;
   });
 
+  // Routing profiles (routingProfiles.js): several saved advanced routings
+  ipcMain.handle('routing:profiles', () => ({ profiles: getRoutingProfiles() }));
+  ipcMain.handle('routing:setProfiles', (e, profiles) => setRoutingProfiles(profiles));
+
   // Proxy pool (multi-config): each enabled entry becomes its own local
   // SOCKS/HTTP port routed to its own exit.
   ipcMain.handle('pool:list', () => getPool());
@@ -2819,6 +2886,27 @@ function registerIpc() {
     store.set('pool', valid);
     return valid;
   });
+
+  // Routing share links (routeShare.js): a profile or a chain with every server
+  // and chain it needs, as one irnetfree://routing/ text — copy, preview, import.
+  // The same handlers the router's service has.
+  const routeShare = createRouteShareApi({
+    store,
+    getSettings,
+    getChains,
+    linkOf: buildShareLink,
+    parseMany,
+    identityOf: (s) => serverIdentity(s, true),
+    afterWrite: () => refreshTray(),
+    // an import only adds; it raises the reconnect state when it moves what the live selection connects
+    liveSelection: () => (appliedSettings ? store.get('activeServerId', null) : null),
+    markLive: () => { serverEditPending = true; },
+    pendingKeys
+  });
+  ipcMain.handle('routing:shareProfile', (e, arg) => routeShare.shareProfile(arg));
+  ipcMain.handle('routing:shareChain', (e, arg) => routeShare.shareChain(arg));
+  ipcMain.handle('routing:importPreview', (e, arg) => routeShare.importPreview(arg));
+  ipcMain.handle('routing:import', (e, arg) => routeShare.importShare(arg));
 
   // Relaunch the app elevated (Windows) so TUN mode can configure routes.
   ipcMain.handle('app:relaunchAdmin', async () => {
@@ -2907,6 +2995,12 @@ function registerIpc() {
     const prev = getSettings();
     const next = Object.assign({}, prev, partial);
     store.set('settings', next);
+    // the advanced-routing keys are profile rp-default's mirror (routingProfiles.js)
+    if (['routeRules', 'routeDefault', 'advancedUseMode'].some(k => k in partial)) {
+      const profiles = getRoutingProfiles();
+      const synced = mirrorFromSettings(profiles, next);
+      if (synced !== profiles) store.set('routingProfiles', synced);
+    }
     // react to auto-update changes live
     if ('autoUpdateSubs' in partial || 'autoUpdateInterval' in partial) {
       if (next.autoUpdateSubs) subs.startAuto(next.autoUpdateInterval);
@@ -3257,7 +3351,7 @@ function registerIpc() {
   // Backup: everything the user has, as one JSON string the renderer saves.
   ipcMain.handle('backup:export', () => JSON.stringify(exportBundle({
     version: app.getVersion(),
-    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), settings: getSettings() },
+    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), settings: getSettings() },
     usage: usage ? usage.totals : {}
   }), null, 2));
   // Restore: a merge by id (backup.js) — nothing on this machine is lost, and
@@ -3269,13 +3363,13 @@ function registerIpc() {
     try {
       r = importBundle(bundle, {
         servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
-        chains: getChains(), pool: getPool(), settings: getSettings(), usage: usage ? usage.totals : {}
+        chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), settings: getSettings(), usage: usage ? usage.totals : {}
       });
     } catch (err) { return { ok: false, error: err.message }; }
-    store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, settings: r.next.settings });
+    store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, settings: r.next.settings });
     if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
     refreshTray();
-    send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries added`, level: 'info' });
+    send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles added`, level: 'info' });
     return { ok: true, added: r.added };
   });
 
@@ -3400,6 +3494,7 @@ app.whenReady().then(() => {
 
   migrateServers();
   migrateSettingsStore();
+  getRoutingProfiles();   // today's advanced routing becomes profile rp-default, once
   // A new process has no live connection. An activeServerId still in the store
   // is what a crash or a kill left: the tray marked it "●", and a network change
   // at launch would "recover" a connection nobody asked for. Connect-on-launch

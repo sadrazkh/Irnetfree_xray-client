@@ -487,6 +487,17 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
 }
 .path-node .pr-traffic { margin-inline-start: 0; padding-inline-start: 0; }
 .path-rule .pr-cond.is-label { font-family: var(--ui); color: var(--ink3); }
+/* "via <base>" on a routing profile's line: the base its target dials through.
+   Whole, like the target beside it — the condition is what gives way. */
+.path-rule .pr-via {
+  flex: 0 0 auto;
+  max-width: 30%;
+  font-size: 10px;
+  color: var(--ink3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* A readable, resolution-aware traffic plot with a shared rate scale. */
 .traffic-chart { grid-column: 1 / -1; margin: 0; padding: 14px 16px 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); min-inline-size: 0; }

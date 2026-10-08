@@ -6,6 +6,9 @@
  *   { mode: 'single',   server }                       single proxy
  *   { mode: 'chain',    chain: [server,…] }            client → s0 → s1 → … → exit
  *   { mode: 'advanced', serversById, chain, rules, def } per-rule routing
+ *     — a routing profile's plan also carries profileId, defVia, base and
+ *       useMode (routingProfiles.js): a rule's `via` and the default's
+ *       `defVia` send a target through a base (makeRegistry)
  *
  * Legacy callers may still pass a bare server object or an array of servers;
  * normalizePlan() converts those into the structured form above.
@@ -16,6 +19,7 @@ const { buildDnsPlan, DNS_TAG } = require('./dnsBuilder');
 const { normalizePin } = require('./certPin');
 const { planServers } = require('./engineChoice');
 const { MUX, muxEligible } = require('./mux');
+const { effectiveVia, advancedTargets } = require('./routingProfiles');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -333,8 +337,8 @@ function entryHosts(planArg) {
   const plan = normalizePlan(planArg);
   const entries = [];
   if (plan.mode === 'advanced') {
-    for (const r of plan.rules || []) if (r) entries.push(targetEntry(r.target, plan));
-    entries.push(targetEntry(plan.def, plan));
+    // a target through a base is entered at the base (routingProfiles.advancedTargets)
+    for (const tg of advancedTargets(plan).entries) entries.push(targetEntry(tg, plan));
   } else if (plan.mode === 'pool') {
     entries.push(targetEntry(plan.primary, plan));
     for (const e of plan.entries || []) if (e) entries.push(targetEntry(e.target, plan));
@@ -574,22 +578,33 @@ function withHelpers(o, server) {
  * the FIRST hop. A later hop dials through the hop before it: its own way out
  * — the helper its dialerProxy or proxySettings named — goes, and with it
  * every helper (as a link's anti-DPI dialer does for a chained hop).
+ *
+ * `viaTag`: the chain itself rides a base (makeRegistry) — its first hop then
+ * dials through that, exactly as a later hop dials the hop before it.
  */
-function buildChainOutbounds(servers, exitTag) {
+function buildChainOutbounds(servers, exitTag, viaTag) {
   exitTag = exitTag || 'proxy';
   const list = (servers || []).filter(s => s && s.outbound);
   const last = list.length - 1;
   const outs = [];
   for (let i = 0; i <= last; i++) {
     const tag = i === last ? exitTag : `${exitTag}-h${i}`;
-    const ob = cloneOut(list[i].outbound, tag, list[i]);
-    if (i > 0) {
-      if (list[i].source === 'json') delete ob.proxySettings;
-      dialThrough(ob, `${exitTag}-h${i - 1}`);
-    }
-    outs.push(...(i === 0 ? withHelpers(ob, list[i]) : [ob]));
+    const prev = i > 0 ? `${exitTag}-h${i - 1}` : (viaTag || null);
+    outs.push(...(prev ? [behind(list[i], tag, prev)] : withHelpers(cloneOut(list[i].outbound, tag, list[i]), list[i])));
   }
   return outs;
+}
+
+/**
+ * A server's outbound tagged `tag`, dialing THROUGH `viaTag` — a chain's later
+ * hop, or a target riding a base: a JSON server's own way out (proxySettings,
+ * or the dialerProxy that named its helper) is replaced, and its helpers are
+ * left out.
+ */
+function behind(server, tag, viaTag) {
+  const ob = cloneOut(server.outbound, tag, server);
+  if (server.source === 'json') delete ob.proxySettings;
+  return dialThrough(ob, viaTag);
 }
 
 /**
@@ -602,22 +617,49 @@ function buildChainOutbounds(servers, exitTag) {
  *   'chain:<chainId>'   a named chain (plan.chainsById[chainId])
  * `muxIds`: settings.muxServerIds — a server target's own outbound carries
  * mux (applyMux); a chain target's hops never do.
+ *
+ * `tagFor(target, via)`: the target through a base (a routing profile's via,
+ * routingProfiles.effectiveVia — a server id or `chain:<id>`). The base is one
+ * outbound group shared by every target through it: `base-<id>`, a chain
+ * `base-chain-<cid>` with its hops `base-chain-<cid>-h<i>`. The target is an
+ * outbound of its own, `out-<id>@<baseKey>` (a chain `out-chain-<cid>@<baseKey>`,
+ * hops `…-h<i>`), whose outbound that would dial by itself dials the base's
+ * exit (behind); `<baseKey>` is the base's server id or `chain-<cid>`. Neither
+ * ever carries mux. The caller checks exists(via) first: a base that is gone
+ * is a refusal (buildConfig), never a silent direct.
  */
 function makeRegistry(plan, muxIds) {
   const outs = [];
   const seen = new Set();
   const add = (o) => { if (o && !seen.has(o.tag)) { seen.add(o.tag); outs.push(o); } };
 
-  function chainTag(list, tag) {
+  function chainTag(list, tag, viaTag) {
     const arr = (list || []).filter(s => s && s.outbound);
-    if (arr.length >= 2) { buildChainOutbounds(arr, tag).forEach(add); return tag; }
-    if (arr.length === 1) { withHelpers(cloneOut(arr[0].outbound, tag, arr[0]), arr[0]).forEach(add); return tag; }
+    if (arr.length >= 2) { buildChainOutbounds(arr, tag, viaTag).forEach(add); return tag; }
+    if (arr.length === 1) {
+      (viaTag ? [behind(arr[0], tag, viaTag)] : withHelpers(cloneOut(arr[0].outbound, tag, arr[0]), arr[0])).forEach(add);
+      return tag;
+    }
     return 'direct';
   }
 
-  function tagFor(target) {
+  /** A via's base group, registered once: { key, tag } — its exit tag and the key a target through it is named by. */
+  function baseOf(via) {
+    if (via === 'chain') return { key: 'chain', tag: chainTag(plan.chain, 'base-chain') };
+    if (via.indexOf('chain:') === 0) {
+      const cid = via.slice('chain:'.length);
+      return { key: 'chain-' + cid, tag: chainTag((plan.chainsById || {})[cid], 'base-chain-' + cid) };
+    }
+    const s = (plan.serversById || {})[via];
+    const tag = 'base-' + via;
+    if (s && s.outbound) withHelpers(cloneOut(s.outbound, tag, s), s).forEach(add);
+    return { key: via, tag };
+  }
+
+  function tagFor(target, via) {
     if (!target || target === 'direct') return 'direct';
     if (target === 'block') return 'block';
+    if (typeof via === 'string' && via) return tagThrough(target, baseOf(via));
     if (target === 'chain') return chainTag(plan.chain, 'out-chain');
     if (typeof target === 'string' && target.indexOf('chain:') === 0) {
       const cid = target.slice('chain:'.length);
@@ -626,6 +668,19 @@ function makeRegistry(plan, muxIds) {
     }
     const s = (plan.serversById || {})[target];
     if (s && s.outbound) { const tag = 'out-' + target; withHelpers(applyMux(cloneOut(s.outbound, tag, s), s, muxIds), s).forEach(add); return tag; }
+    return 'direct';
+  }
+
+  /** `target` riding `base` (baseOf): its own outbound(s), the one that would dial by itself dialing the base. */
+  function tagThrough(target, base) {
+    const at = '@' + base.key;
+    if (target === 'chain') return chainTag(plan.chain, 'out-chain' + at, base.tag);
+    if (typeof target === 'string' && target.indexOf('chain:') === 0) {
+      const cid = target.slice('chain:'.length);
+      return chainTag((plan.chainsById || {})[cid], 'out-chain-' + cid + at, base.tag);
+    }
+    const s = (plan.serversById || {})[target];
+    if (s && s.outbound) { const tag = 'out-' + target + at; add(behind(s, tag, base.tag)); return tag; }
     return 'direct';
   }
 
@@ -731,12 +786,12 @@ function targetServer(target, plan) {
  * outbounds, so the caller passes the tags it has rather than asking again).
  * Deduplicated by resolver address: first entry wins, except that a chain to
  * the same WireGuard replaces the direct dial — its UDP endpoint is what the
- * chain exists to avoid.
+ * chain exists to avoid. So does the WireGuard through a base (`…@<base>`).
  */
 function targetResolversFor(entries, plan) {
   const out = [];
   const at = new Map();   // address → index in out
-  const viaChain = (tag) => /^out-chain/.test(String(tag));
+  const viaChain = (tag) => /^out-chain|@/.test(String(tag));
   for (const e of entries || []) {
     if (!e) continue;
     for (const r of wgResolvers(targetServer(e.target, plan), e.tag)) {
@@ -786,8 +841,19 @@ function dropsUdpDirect(s) {
   return !!(s && s.tunMode && s.leakGuard === 'strict');
 }
 
+/**
+ * Does this advanced plan apply the simple routing mode under its rules? A
+ * routing profile's own `useMode`; a plan without one (today's), the setting.
+ */
+function useModeOf(s, plan) {
+  return typeof plan.useMode === 'boolean' ? plan.useMode : s.advancedUseMode;
+}
+
 function dnsSettingsFor(s, plan) {
-  if (plan.mode === 'advanced') return Object.assign({}, s, { advancedRouting: true, routeRules: plan.rules || [] });
+  if (plan.mode === 'advanced') {
+    return Object.assign({}, s, { advancedRouting: true, routeRules: plan.rules || [] },
+      typeof plan.useMode === 'boolean' ? { advancedUseMode: plan.useMode } : {});
+  }
   // Pool emits no bypass rules, so an in-country resolver would only hand the
   // primary exit an Iranian IP to dial from abroad — routingMode is not its.
   if (plan.mode === 'pool') return Object.assign({}, s, { advancedRouting: false, routingMode: 'global' });
@@ -897,6 +963,14 @@ function buildConfig(planArg, settings) {
         ? 'Advanced routing: the default target no longer exists (it was removed, or replaced by a subscription update) — choose a new default under Routing.'
         : 'روتینگ ویژه: مقصدِ پیش‌فرض دیگر وجود ندارد (حذف شده، یا با به‌روزرسانیِ اشتراک عوض شده) — در بخش روتینگ یک مقصدِ پیش‌فرضِ تازه انتخاب کن.');
     }
+    // A base a target goes through (a routing profile's via) that is gone —
+    // a deleted server, an emptied chain: the target would be dialled from
+    // here, the very thing the base is there for. Refused the same way.
+    const baseGone = () => new Error(s.lang === 'en'
+      ? 'Advanced routing: a base that a target goes through no longer exists (it was removed, or replaced by a subscription update) — choose another base under Routing.'
+      : 'روتینگ ویژه: پایه‌ای که یک مقصد از طریقِ آن می‌رود دیگر وجود ندارد (حذف شده، یا با به‌روزرسانیِ اشتراک عوض شده) — در بخش روتینگ پایهٔ دیگری انتخاب کن.');
+    const defVia = effectiveVia('def', plan);
+    if (defVia && !reg.exists(defVia)) throw baseGone();
     const advRules = [];
     for (const r of plan.rules || []) {
       if (!r) continue;
@@ -920,18 +994,20 @@ function buildConfig(planArg, settings) {
       // A rule to a target that no longer exists is left out: its traffic
       // then follows the default like everything else no rule claims.
       if (!reg.exists(r.target)) continue;
+      const via = effectiveVia(r, plan);
+      if (via && !reg.exists(via)) throw baseGone();
 
       // Resolve the target only once the rule is known to survive: tagFor()
       // REGISTERS the outbound(s), so doing it earlier leaves a dead outbound
       // behind for every dropped rule — writing an unused server's address and
       // credentials into config.json (and materializing a whole chain for a
       // `chain:` target).
-      const rule = { type: 'field', outboundTag: reg.tagFor(r.target) };
+      const rule = { type: 'field', outboundTag: reg.tagFor(r.target, via) };
       rule[field] = value;
       advRules.push(rule);
       targets.push({ target: r.target, tag: rule.outboundTag });
     }
-    const defTag = reg.tagFor(plan.def);
+    const defTag = reg.tagFor(plan.def, defVia);
     targets.push({ target: plan.def, tag: defTag });
     // The resolver's exit. A `block` default is a legitimate allow-list, but
     // the blackhole can never answer a DoH query: use the first proxy the
@@ -956,7 +1032,7 @@ function buildConfig(planArg, settings) {
       ...(s.blockAds && geo ? [{ type: 'field', domain: ['geosite:category-ads-all'], outboundTag: 'block' }] : []),
       ...advRules,
       { type: 'field', ip: PRIVATE_IPS.slice(), outboundTag: 'direct' },
-      ...(s.advancedUseMode ? modeBypassRules(s.routingMode, geo) : []),
+      ...(useModeOf(s, plan) ? modeBypassRules(s.routingMode, geo) : []),
       { type: 'field', port: '0-65535', outboundTag: defTag }
     ];
   } else {

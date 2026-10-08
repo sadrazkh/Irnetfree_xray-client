@@ -66,6 +66,14 @@
     listPool: () => invoke('pool:list'),
     setPool: (entries) => invoke('pool:set', entries),
 
+    // routing profiles (several advanced routings, a base per target) and their share links
+    routingProfiles: () => invoke('routing:profiles'),
+    setRoutingProfiles: (profiles) => invoke('routing:setProfiles', profiles),
+    shareRoutingProfile: (id) => invoke('routing:shareProfile', id),
+    shareChain: (id) => invoke('routing:shareChain', id),
+    routingImportPreview: (text) => invoke('routing:importPreview', text),
+    routingImport: (text) => invoke('routing:import', text),
+
     // subscriptions
     listSubs: () => invoke('subs:list'),
     addSub: (url, name) => invoke('subs:add', { url, name }),

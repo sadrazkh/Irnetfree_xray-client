@@ -101,6 +101,27 @@ test('advanced routing: a target that no longer exists lands on direct, exactly 
   assert.deepEqual(tagMapFor(plan, '__advanced__'), { direct: DIRECT_ID });
 });
 
+test('routing profiles: a target through a base counts as that target under its @ tag; the base’s own outbounds count for nobody', () => {
+  const plan = {
+    mode: 'advanced', profileId: 'p1', serversById: { 'sv-a': srv('sv-a'), 'sv-b': srv('sv-b'), 'sv-c': srv('sv-c') },
+    chainsById: { c1: [srv('sv-a'), srv('sv-b')] }, chain: [], base: 'sv-c',
+    rules: [{ type: 'domain', value: 'x.com', target: 'sv-a' }, { type: 'ip', value: '10.0.0.0/8', target: 'chain:c1', via: 'sv-a' }, { type: 'domain', value: 'y.com', target: 'sv-a', via: 'none' }],
+    def: 'sv-b', defVia: 'chain:c1'
+  };
+  assert.deepEqual(tagMapFor(plan, '__advanced__:p1'), {
+    direct: DIRECT_ID,
+    'out-sv-a@sv-c': 'sv-a',
+    'out-chain-c1@sv-a': 'chain:c1',
+    'out-sv-a': 'sv-a',
+    'out-sv-b@chain-c1': 'sv-b'
+  });
+  assert.equal(idForTag('out-sv-a@sv-c'), 'sv-a');
+  assert.equal(idForTag('out-chain-c1@chain-c2'), 'chain:c1');
+  assert.equal(idForTag('out-chain-c1@sv-c-h0'), null, 'a hop');
+  assert.equal(idForTag('base-sv-c'), null);
+  assert.equal(idForTag('base-chain-c1'), null);
+});
+
 test('advanced routing: a one-member chain keeps the chain id (the config keeps the tag)', () => {
   const plan = {
     mode: 'advanced', serversById: {}, chainsById: { c1: [srv('sv-a')] },
