@@ -103,7 +103,8 @@ test('the core gate hands the cores every mux shape (v1.18, spec §4): a single 
   assert.deepEqual(probe.dns, { hosts: { 'a.example.com': ['203.0.113.10', '203.0.113.11'] } }, 'the probe dials the names its connect resolved');
   // and not one of the configs built without the setting carries mux — but a
   // JSON server's own: its main outbound is kept as written, its mux with it
-  for (const name of run.built.filter((n) => !/mux/.test(n) && !/^json-/.test(n))) assert.equal(JSON.stringify(run.read(name.replace(/\.json$/, ''))).includes('"mux"'), false, name);
+  // (the "via a base" shapes carry mux under TUN on purpose, and JSON servers: their own test)
+  for (const name of run.built.filter((n) => !/mux/.test(n) && !/^(json|via)-/.test(n))) assert.equal(JSON.stringify(run.read(name.replace(/\.json$/, ''))).includes('"mux"'), false, name);
 });
 
 test('the core gate writes every config for the core’s own version: mKCP’s header and seed, Hysteria’s hopping — as the suggested Xray takes them, and as a January 2026 core did', { timeout: 60000 }, (t) => {
@@ -168,6 +169,44 @@ test('the core gate hands the cores every JSON shape: each fixture server in ful
   const pinned = run.read('json-chain-pinned');
   assert.deepEqual(pinned.dns.hosts['hop.example.com'], ['203.0.113.30']);
   assert.equal(pinned.outbounds.find((o) => o.tag === 'proxy~hop1').streamSettings.sockopt.domainStrategy, 'UseIPv4');
+});
+
+test('the core gate hands the cores every "via a base" shape (routing profiles): a server and a chain base, explicit / none, a WireGuard and JSON servers through a base and as one — plain, under TUN with pins and mux, under the strict guard', { timeout: 60000 }, (t) => {
+  const run = dryRun(t);
+  assert.equal(run.status, 0, run.out);
+  const names = ['server-base', 'chain-base', 'explicit-and-none', 'wg-through-base', 'json-through-base', 'json-as-base'];
+  for (const n of names) for (const v of ['managed', 'tun', 'strict']) assert.ok(run.built.includes(`via-${n}-${v}.json`), `via-${n}-${v}`);
+  const outs = (name) => run.read(name).outbounds;
+  const dialer = (name, tag) => {
+    const o = outs(name).find((x) => x.tag === tag);
+    assert.ok(o, `${name}: ${tag}`);
+    return (o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy) || null;
+  };
+  // one base, every target through it dialing its exit
+  assert.deepEqual(outs('via-server-base-managed').map((o) => o.tag).filter((x) => /^(base-|out-)/.test(x)),
+    ['base-sv-vless', 'out-sv-trojan@sv-vless', 'out-sv-ss@sv-vless', 'out-chain-c2@sv-vless-h0', 'out-chain-c2@sv-vless', 'out-sv-vless']);
+  assert.equal(dialer('via-server-base-managed', 'out-sv-trojan@sv-vless'), 'base-sv-vless');
+  assert.equal(dialer('via-server-base-managed', 'out-chain-c2@sv-vless-h0'), 'base-sv-vless');
+  assert.equal(dialer('via-chain-base-managed', 'base-chain-c1'), 'base-chain-c1-h0');
+  assert.equal(dialer('via-chain-base-managed', 'out-sv-trojan@chain-c1'), 'base-chain-c1');
+  assert.equal(dialer('via-explicit-and-none-managed', 'out-sv-trojan@chain-c1'), 'base-chain-c1');
+  assert.equal(dialer('via-explicit-and-none-managed', 'out-sv-trojan'), null);
+  assert.equal(dialer('via-wg-through-base-tun', 'out-sv-wgcorp@sv-vless'), 'base-sv-vless');
+  assert.equal(dialer('via-json-through-base-managed', 'out-jf@sv-vless'), 'base-sv-vless');
+  assert.equal(outs('via-json-through-base-managed').some((o) => o.tag.includes('~')), false, 'a JSON server behind a base brings no helper');
+  assert.equal(dialer('via-json-as-base-managed', 'base-jf'), 'base-jf~fragment');
+  // under TUN: only what dials by itself is bound and pinned; mux only on the direct server target
+  const tun = outs('via-server-base-tun');
+  assert.equal(tun.find((o) => o.tag === 'base-sv-vless').streamSettings.sockopt.interface, 'Wi-Fi');
+  assert.equal(tun.find((o) => o.tag === 'out-sv-trojan@sv-vless').streamSettings.sockopt.interface, undefined);
+  assert.deepEqual(tun.filter((o) => o.mux).map((o) => o.tag), ['out-sv-vless']);
+  assert.deepEqual(Object.keys(run.read('via-server-base-tun').dns.hosts).sort(), ['a.example.com']);
+  // the app's mux never on a base or a target behind one (a JSON server's own, as written, is its own)
+  const { MUX } = require('../src/main/mux');
+  for (const n of names) for (const v of ['managed', 'tun', 'strict']) {
+    for (const o of outs(`via-${n}-${v}`)) if (o.tag.includes('@') || o.tag.startsWith('base-')) assert.notDeepEqual(o.mux, MUX, `${n}-${v}: ${o.tag}`);
+  }
+  assert.deepEqual(outs('via-json-through-base-tun').find((o) => o.tag === 'out-jc@sv-vless').mux, { enabled: true, concurrency: 8 });
 });
 
 test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every config — the versions read from coreVersions.js, the gate never dry', () => {

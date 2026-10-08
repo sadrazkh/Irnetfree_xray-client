@@ -47,6 +47,7 @@ const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 const { migrateSettings } = require('../main/settingsMigrate');
+const { migrateProfiles, mirrorToSettings, mirrorFromSettings, isAdvancedSelection, profileIdOf, selectionIdOf, advancedTargets, resolveProcessRules, liveRoutingOf, routingPendingKeys } = require('../main/routingProfiles');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
 const { createWanWatcher, decide: decideWanChange } = require('../main/wanWatch');
 const { exportBundle, importBundle } = require('../main/backup');
@@ -504,6 +505,10 @@ function createService(opts = {}) {
   // rebuild" while it waits (field report S3, fix 18).
   let liveServerIds = new Set();
   let serverEditPending = false;
+  // The routing profile and the chains the live connection was built from
+  // (routingProfiles.liveRoutingOf): an edit of either since waits for a
+  // reconnect too (pendingKeys, 'routingProfiles' / 'chains').
+  let liveRouting = null;
   // The physical interface the LIVE connection's direct dials are bound to (see
   // doConnect); null when not under TUN. rebuildActiveConfig() reuses it rather
   // than asking the OS again — with the tunnel up, the default route IS the tunnel.
@@ -582,6 +587,7 @@ function createService(opts = {}) {
     store.set('routerDefaultsApplied', true);
   }
   if (OPENWRT && !(store.get('routerRepair', 0) >= 1)) repairRouterSettings();
+  getRoutingProfiles();   // today's advanced routing becomes profile rp-default, once
   // A new process has no live connection. `activeServerId` means "connected
   // to this, in THIS process" and lives in the store — only a disconnect ever
   // cleared it, so after a reboot, a power cut or a crash it was still there,
@@ -1106,6 +1112,24 @@ function createService(opts = {}) {
     return seed;
   }
 
+  /** The routing profiles, migrated (see main.js): none stored yet → today's advanced-routing settings as `rp-default`, written once. */
+  function getRoutingProfiles() {
+    const { profiles, changed } = migrateProfiles({ stored: store.get('routingProfiles', null), settings: getSettings() });
+    if (changed) store.set('routingProfiles', profiles);
+    return profiles;
+  }
+
+  /** routing:setProfiles (see main.js): each normalized, rp-default mirrored into the settings. */
+  function setRoutingProfiles(list) {
+    if (!Array.isArray(list)) return { ok: false, error: 'not a list of profiles', profiles: getRoutingProfiles(), pendingReconnect: pendingKeys() };
+    const { profiles } = migrateProfiles({ stored: list, settings: getSettings() });
+    store.set('routingProfiles', profiles);
+    const stored = store.get('settings', {});
+    const mirrored = mirrorToSettings(profiles, stored);
+    if (mirrored !== stored) store.set('settings', mirrored);
+    return { ok: true, profiles, pendingReconnect: pendingKeys() };
+  }
+
   function getPool() {
     const raw = store.get('pool', []);
     if (!Array.isArray(raw)) return [];
@@ -1120,32 +1144,46 @@ function createService(opts = {}) {
   }
 
   /* ----------------------------- process routing ----------------------------- */
-  function activeProcNames(settings) {
+  /**
+   * Process names referenced by advanced routing 'process' rules — the rules of
+   * the routing profile `serverId` connects (the live connection's when not
+   * given), else the settings' own (rp-default's mirror), as before.
+   */
+  function activeProcNames(settings, serverId) {
     if (!settings || !settings.advancedRouting) return [];
-    return [...new Set((settings.routeRules || []).filter(r => r && r.type === 'process' && r.value).map(r => String(r.value)))];
+    return [...new Set(procRules(settings, serverId)
+      .filter(r => r && r.type === 'process' && r.value)
+      .map(r => String(r.value)))];
+  }
+
+  function procRules(settings, serverId) {
+    const id = serverId === undefined ? store.get('activeServerId', null) : serverId;
+    if (isAdvancedSelection(id)) {
+      const profiles = getRoutingProfiles();
+      const pid = profileIdOf(id, profiles);
+      const profile = pid && profiles.find(p => p.id === pid);
+      if (profile) return profile.rules || [];
+    }
+    return settings.routeRules || [];
   }
   const loadProcCache = () => store.get('procIpCache', {}) || {};
   // Coalesced: the watcher rewrites this every 20 s for the life of a tunnel,
   // and a save() rewrites the whole store (every server, fsync, rename) for it.
   const saveProcCache = (c) => store.setLazy('procIpCache', c);
 
-  async function effectiveSettings() {
+  /** See main.js: the settings with `procIps` — what each process the connect's rules name uses now. */
+  async function effectiveSettings(serverId) {
     const s = getSettings();
-    const names = activeProcNames(s);
+    const names = activeProcNames(s, serverId);
     if (!names.length) return s;
     const cache = loadProcCache();
     pruneProcCache(cache);
     let ipsByName = {};
     try { const r = await collectProcessIps(names, cache); ipsByName = r.ips; saveProcCache(cache); }
     catch (e) { send('log', { line: 'Process routing resolve failed: ' + e.message, level: 'warn' }); }
-    const rules = (s.routeRules || []).map(r => {
-      if (r && r.type === 'process' && r.value) {
-        const list = ipsByName[r.value] || (cache[r.value] && cache[r.value].ips) || [];
-        return { type: 'ip', value: list.join(','), target: r.target };
-      }
-      return r;
-    });
-    return Object.assign({}, s, { routeRules: rules });
+    const procIps = {};
+    for (const n of names) procIps[n] = ipsByName[n] || (cache[n] && cache[n].ips) || [];
+    return Object.assign({}, s, { procIps });
   }
 
   /* ----------------------------- plan / config ----------------------------- */
@@ -1211,14 +1249,25 @@ function createService(opts = {}) {
       plan = { mode: 'pool', entries, primary: entries[0].target, serversById, chainsById, chain: legacyChain };
       label = (settings.lang === 'en' ? '🧩 Proxy Pool' : '🧩 استخر پروکسی') + ` (${entries.length})`;
       for (const e of entries) addEntryForTarget(e.target);
-    } else if (serverId === '__advanced__') {
-      const rules = Array.isArray(settings.routeRules) ? settings.routeRules : [];
-      const def = settings.routeDefault || (servers[0] && servers[0].id) || 'direct';
-      plan = { mode: 'advanced', serversById, chainsById, chain: legacyChain, rules, def };
-      label = '🧭 ' + (settings.lang === 'en' ? 'Advanced routing' : 'روتینگ ویژه');
-      const targets = new Set(rules.map(r => r && r.target));
-      targets.add(def);
-      for (const tg of targets) { refuseBroken(tg); addEntryForTarget(tg); }
+    } else if (isAdvancedSelection(serverId)) {
+      // A routing profile (routingProfiles.js): `__advanced__:<id>`, or plain
+      // `__advanced__` — the first one (LuCI, old stores, old selections).
+      const profiles = getRoutingProfiles();
+      const pid = profileIdOf(serverId, profiles);
+      const profile = pid && profiles.find(p => p.id === pid);
+      if (!profile) throw new Error(settings.lang === 'en'
+        ? 'This routing profile no longer exists — choose another one under Routing.'
+        : 'این پروفایلِ روتینگ دیگر وجود ندارد — در بخشِ روتینگ یکی دیگر انتخاب کن.');
+      // its process rules as the addresses those processes use now (effectiveSettings)
+      const rules = resolveProcessRules(Array.isArray(profile.rules) ? profile.rules : [], settings.procIps);
+      const def = profile.def || (servers[0] && servers[0].id) || 'direct';
+      plan = { mode: 'advanced', profileId: profile.id, serversById, chainsById, chain: legacyChain, rules, def, defVia: profile.defVia, base: profile.base, useMode: profile.useMode };
+      label = '🧭 ' + (profile.name || (settings.lang === 'en' ? 'Advanced routing' : 'روتینگ ویژه'));
+      // every target and every base one goes through is refused when broken; the
+      // bypass is cut for what is dialled directly — a base, never a target behind it
+      const { targets, vias, entries } = advancedTargets(plan);
+      for (const tg of [...targets, ...vias]) refuseBroken(tg);
+      for (const tg of entries) addEntryForTarget(tg);
     } else if (chainById[serverId]) {
       refuseBroken('chain:' + serverId);
       const members = membersOf(chainById[serverId]);
@@ -1254,7 +1303,7 @@ function createService(opts = {}) {
     const geoAssets = !!(geoSt.geoip && geoSt.geosite);
     let geoWarn = null;
     const usesGeo = plan.mode === 'pool' ? false : (
-      (plan.mode === 'advanced' && ((settings.routeRules || []).some(r => r && /^(geoip|geosite):/i.test(String(r.value || ''))))) ||
+      (plan.mode === 'advanced' && ((plan.rules || []).some(r => r && /^(geoip|geosite):/i.test(String(r.value || ''))))) ||
       (plan.mode !== 'advanced' && (settings.routingMode === 'bypass-ir' || settings.routingMode === 'bypass-cn' || (settings.blockAds && plan.mode !== 'advanced'))));
     if (!geoAssets && usesGeo && !rawServer) {
       geoWarn = settings.lang === 'en'
@@ -1621,7 +1670,7 @@ function createService(opts = {}) {
     // notice. A connect that finds a watcher already running is covered by it.
     const netBefore = netWatcher ? null : currentNetFingerprint();
 
-    let settings = await effectiveSettings();
+    let settings = await effectiveSettings(serverId);
     if (stale()) return abandoned;
     const byId = (id) => store.get('servers', []).find(s => s.id === id);
 
@@ -1883,6 +1932,7 @@ function createService(opts = {}) {
     liveServerIds = planServerIds(plan);
     serverEditPending = false;
     liveMux = mux.ids.length ? mux : null;
+    liveRouting = liveRoutingOf({ serverId, plan, profiles: getRoutingProfiles(), chains: getChains() });
 
     if (settings.systemProxy) {
       try {
@@ -2255,10 +2305,15 @@ function createService(opts = {}) {
     return false;
   }
 
-  /** Reconnect-relevant settings changed since the live tunnel was built — and 'servers' for an edit of one it dials. */
+  /**
+   * Reconnect-relevant settings changed since the live tunnel was built — and
+   * 'servers' for an edit of one it dials, 'routingProfiles' / 'chains' for an edit
+   * of the routing profile / a chain it was built from.
+   */
   function pendingKeys() {
     const keys = pendingReconnectKeys(appliedSettings, getSettings());
     if (appliedSettings && serverEditPending) keys.push('servers');
+    if (appliedSettings) for (const k of routingPendingKeys(liveRouting, getRoutingProfiles(), getChains())) if (!keys.includes(k)) keys.push(k);
     return keys;
   }
 
@@ -2269,7 +2324,7 @@ function createService(opts = {}) {
     return dialled(a) !== dialled(b);
   }
 
-  /** The ids of every saved server a plan dials: each hop of a chain, every pool and advanced-routing target. */
+  /** The ids of every saved server a plan dials: each hop of a chain, every pool and advanced-routing target, every base one goes through. */
   function planServerIds(plan) {
     const ids = new Set();
     const add = (s) => { if (s && s.id) ids.add(s.id); };
@@ -2284,7 +2339,7 @@ function createService(opts = {}) {
       case 'single': add(plan.server); break;
       case 'chain': hops(plan.chain); break;
       case 'pool': for (const e of plan.entries || []) if (e) target(e.target); break;
-      case 'advanced': for (const r of plan.rules || []) if (r) target(r.target); target(plan.def); break;
+      case 'advanced': { const t = advancedTargets(plan); for (const tg of [...t.targets, ...t.vias]) target(tg); break; }
       default: break;
     }
     return ids;
@@ -2480,7 +2535,7 @@ function createService(opts = {}) {
   async function rebuildActiveConfig() {
     const serverId = store.get('activeServerId', null);
     if (!serverId || !xray.running) return;
-    let settings = await effectiveSettings();
+    let settings = await effectiveSettings(serverId);
     // Keep the binding the live connection was built with (see doConnect): the
     // tunnel stays up across this reload, and asking the OS now would name it.
     if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
@@ -3099,6 +3154,9 @@ function createService(opts = {}) {
       const v = Array.isArray(chains) ? chains.filter(c => c && c.id).map(c => ({ id: c.id, name: String(c.name || 'Chain').trim() || 'Chain', members: Array.isArray(c.members) ? c.members.filter(Boolean) : [] })) : [];
       store.set('chains', v); return v;
     },
+    // Routing profiles (routingProfiles.js): several saved advanced routings
+    'routing:profiles': () => ({ profiles: getRoutingProfiles() }),
+    'routing:setProfiles': (profiles) => setRoutingProfiles(profiles),
     'pool:list': () => getPool(),
     'pool:set': (entries) => {
       const v = Array.isArray(entries) ? entries.filter(c => c && c.id).map(c => ({
@@ -3167,6 +3225,12 @@ function createService(opts = {}) {
     'settings:set': async (partial) => {
       const next = Object.assign(getSettings(), partial);
       store.set('settings', next);
+      // the advanced-routing keys are profile rp-default's mirror (routingProfiles.js)
+      if (['routeRules', 'routeDefault', 'advancedUseMode'].some(k => k in partial)) {
+        const profiles = getRoutingProfiles();
+        const synced = mirrorFromSettings(profiles, next);
+        if (synced !== profiles) store.set('routingProfiles', synced);
+      }
       if ('autoUpdateSubs' in partial || 'autoUpdateInterval' in partial) {
         if (next.autoUpdateSubs) subs.startAuto(next.autoUpdateInterval); else subs.stopAuto();
       }
@@ -3367,7 +3431,7 @@ function createService(opts = {}) {
     // Backup and restore — see backup.js; the same merge-by-id the desktop does.
     'backup:export': () => JSON.stringify(exportBundle({
       version: appVersion,
-      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), settings: getSettings() },
+      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), settings: getSettings() },
       usage: usage ? usage.totals : {},
       flavor: OPENWRT ? 'openwrt' : null   // a router's own backup brings its router-only settings back (backup:import)
     }), null, 2),
@@ -3378,15 +3442,15 @@ function createService(opts = {}) {
       try {
         r = importBundle(bundle, {
           servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
-          chains: getChains(), pool: getPool(), settings: getSettings(), usage: usage ? usage.totals : {}
+          chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), settings: getSettings(), usage: usage ? usage.totals : {}
         // the keep list is for a backup made elsewhere (a desktop's, or one
         // from before the mark): the router's own, restored after a reset or
         // a re-flash, is exactly what should bring its kill switch back
         }, { keep: OPENWRT && !(bundle && bundle.flavor === 'openwrt') ? ROUTER_KEEPS_ON_IMPORT : [] });
       } catch (err) { return { ok: false, error: err.message }; }
-      store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, settings: r.next.settings });
+      store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, settings: r.next.settings });
       if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
-      send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries added`, level: 'info' });
+      send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles added`, level: 'info' });
       // `kept`: the router-only keys the backup wanted changed — for the renderer's own words
       if (r.kept.length) send('log', { line: 'Backup restored on a router: desktop-only settings were kept as the router needs them (TUN, system proxy, per-app routing, leak guard, connect at start, QUIC refusal, kill switch)', level: 'warn' });
       return { ok: true, added: r.added, kept: r.kept };
@@ -3522,11 +3586,16 @@ function createService(opts = {}) {
     if (chains.length) groups.push({ id: 'chains', name: 'Chains', kind: 'chains', items: chains });
     const pool = getPool().filter(e => e.enabled && e.socksPort);
     if (pool.length) groups.push({ id: 'pools', name: 'Proxy pool', kind: 'pools', items: [{ id: '__pool__', name: `Proxy pool (${pool.length})`, proto: 'pool' }] });
+    // one item per routing profile that has rules or a default (routingProfiles.js)
     const s = getSettings();
-    if (s.advancedRouting && ((s.routeRules || []).length || s.routeDefault)) {
-      groups.push({ id: 'routing', name: 'Advanced routing', kind: 'routing', items: [{ id: '__advanced__', name: 'Advanced routing', proto: 'advanced' }] });
-    }
-    return { selectedId: store.get('selectedServerId', null), activeId: store.get('activeServerId', null), groups };
+    const profiles = getRoutingProfiles();
+    const routing = profiles.filter(p => (p.rules || []).length || p.def)
+      .map(p => ({ id: selectionIdOf(p.id), name: p.name || 'Advanced routing', proto: 'advanced' }));
+    if (s.advancedRouting && routing.length) groups.push({ id: 'routing', name: 'Advanced routing', kind: 'routing', items: routing });
+    // a plain `__advanced__` (an older selection, the boot intent) is the first profile's item
+    const first = profiles[0] ? selectionIdOf(profiles[0].id) : null;
+    const listed = (id) => (id === '__advanced__' && first ? first : id);
+    return { selectedId: listed(store.get('selectedServerId', null)), activeId: listed(store.get('activeServerId', null)), groups };
   }
 
   /** The four router settings LuCI edits. */
