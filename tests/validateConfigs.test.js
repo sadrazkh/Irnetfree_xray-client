@@ -90,8 +90,9 @@ test('the core gate hands the cores every mux shape (v1.18, spec §4): a single 
   const probe = run.read('mux-probe');
   assert.deepEqual(probe.outbounds.find((o) => o.tag === 'proxy').mux, MUX);
   assert.deepEqual(probe.dns, { hosts: { 'a.example.com': ['203.0.113.10', '203.0.113.11'] } }, 'the probe dials the names its connect resolved');
-  // and not one of the configs built without the setting carries mux
-  for (const name of run.built.filter((n) => !/mux/.test(n))) assert.equal(JSON.stringify(run.read(name.replace(/\.json$/, ''))).includes('"mux"'), false, name);
+  // and not one of the configs built without the setting carries mux — but a
+  // JSON server's own: its main outbound is kept as written, its mux with it
+  for (const name of run.built.filter((n) => !/mux/.test(n) && !/^json-/.test(n))) assert.equal(JSON.stringify(run.read(name.replace(/\.json$/, ''))).includes('"mux"'), false, name);
 });
 
 test('the core gate writes every config for the core’s own version: mKCP’s header and seed, Hysteria’s hopping — as the suggested Xray takes them, and as a January 2026 core did', { timeout: 60000 }, (t) => {
@@ -109,6 +110,42 @@ test('the core gate writes every config for the core’s own version: mKCP’s h
   const oldHy = old.proxy('link-hy2-plain').streamSettings;
   assert.deepEqual(oldHy.hysteriaSettings, { version: 2, auth: 'pw', udphop: { ports: '20000-30000', interval: '30' }, up: '50 mbps', down: '100 mbps' });
   assert.deepEqual(oldHy.finalmask, { udp: [{ type: 'salamander', settings: { password: 'OB' } }] });
+});
+
+test('the core gate hands the cores every JSON shape: each fixture server in full mode (plain and under TUN), the Xray fixtures raw, JSON servers in a chain, advanced routing and a latency test', { timeout: 60000 }, (t) => {
+  const { importJson } = require('../src/main/jsonImport');
+  const run = dryRun(t);
+  assert.equal(run.status, 0, run.out);
+  const fixtures = ['xray-subscription', 'xray-fragment', 'xray-chain', 'xray-balancer', 'xray-wireguard', 'singbox'];
+  let xrayServers = 0;
+  for (const f of fixtures) {
+    const servers = importJson(fs.readFileSync(path.join(__dirname, 'fixtures', 'json', `${f}.json`), 'utf8')).servers;
+    assert.ok(servers.length > 0, f);
+    servers.forEach((s, i) => {
+      for (const v of ['plain', 'tun']) assert.ok(run.built.includes(`json-${f}-${i}-full-${v}.json`), `json-${f}-${i}-full-${v}`);
+      for (const v of ['plain', 'tun']) {
+        assert.equal(run.built.includes(`json-${f}-${i}-raw-${v}.json`), s.source === 'json', `json-${f}-${i}-raw-${v}: raw is for Xray JSON only`);
+      }
+      if (s.source === 'json') xrayServers++;
+    });
+  }
+  assert.equal(xrayServers, 5 + 1 + 1 + 2 + 1);
+  // full mode: the helpers beside the main outbound, renamed; raw: the config as written, the app's inbounds
+  const tags = (name) => run.read(name).outbounds.map((o) => o.tag);
+  assert.deepEqual(tags('json-xray-fragment-0-full-plain').slice(0, 2), ['proxy', 'proxy~fragment']);
+  assert.deepEqual(tags('json-xray-chain-0-full-plain').slice(0, 3), ['proxy', 'proxy~hop1', 'proxy~frag']);
+  assert.equal(run.read('json-xray-chain-0-full-tun').outbounds[2].streamSettings.sockopt.interface, 'eth0');
+  const raw = run.read('json-xray-balancer-0-raw-plain');
+  const fx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'json', 'xray-balancer.json'), 'utf8'));
+  assert.deepEqual(raw.routing, fx.routing);
+  assert.deepEqual(raw.observatory, fx.observatory);
+  assert.deepEqual(raw.inbounds.map((i) => i.tag), ['socks-in', 'http-in']);
+  assert.deepEqual(tags('json-xray-subscription-0-raw-plain'), ['proxy', 'direct', 'block']);
+  // a JSON server as either hop of a chain, two of them under advanced routing, the latency test
+  assert.deepEqual(tags('json-chain-later').slice(0, 2), ['proxy-h0', 'proxy']);
+  assert.deepEqual(tags('json-chain-first').slice(0, 3), ['proxy-h0', 'proxy-h0~fragment', 'proxy']);
+  assert.ok(tags('json-advanced').includes('out-jf~fragment') && tags('json-advanced').includes('out-jc~hop1'));
+  assert.deepEqual(tags('json-test-chain'), ['proxy', 'proxy~hop1', 'proxy~frag', 'direct']);
 });
 
 test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every config — the versions read from coreVersions.js, the gate never dry', () => {
