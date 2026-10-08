@@ -234,7 +234,8 @@ function carryOver(old, fresh, said) {
   for (const k of missed) while (kept.includes(k)) kept.splice(kept.indexOf(k), 1);
   // A JSON server's own, recorded like everything else: the mode the user
   // chose, and a config they edited — with all it derives (jsonImport.js),
-  // so the record stays one config's.
+  // so the record stays one config's. `raw` is not among them: it stays the
+  // provider's current text, so the next refresh finds the server by it.
   if (fresh.source === 'json' && old.source === 'json') {
     if (recorded.includes('json') && old.json && typeof old.json === 'object') {
       for (const k of JSON_DERIVED) out[k] = clone(old[k]);

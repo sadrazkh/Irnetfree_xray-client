@@ -261,7 +261,7 @@ test('an edit of a JSON server re-derives everything from the new config, and re
   assert.equal(out.outbound.settings.vnext[0].address, 'moved.example.com');
   assert.equal(out.extraOutbounds[0].settings.fragment.packets, '1-3');
   assert.deepEqual(out.json, cfg);
-  assert.equal(out.raw, JSON.stringify(cfg));
+  assert.equal(out.raw, s.raw, 'raw stays the provider’s text, as a link keeps its link: the next refresh finds it by raw first');
   assert.equal(out.jsonMode, 'raw');
   assert.equal(out.jsonInfo.rules.length, 2);
   assert.deepEqual(out._edited, ['json', 'jsonMode']);
