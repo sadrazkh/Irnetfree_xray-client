@@ -27,6 +27,11 @@ const state = {
   chain: [],               // legacy: ordered server ids (first hop → exit)
   chains: [],              // [{ id, name, members:[serverId,...] }] — first-class chains
   pool: [],                // [{ id, name, target, socksPort, httpPort, enabled }] — multi-proxy pool
+  // [{ id, name, rules, def, defVia, useMode, base }] — routing profiles (several
+  // advanced routings); null on a back end without them, which keeps the
+  // routing page today's single advanced routing
+  profiles: null,
+  profileSel: null,        // the profile the routing page edits
   editingId: null,         // server being edited in the modal
   // Settings saved while connected that the live tunnel is NOT using yet.
   // Owned by main (it knows what the running config was built from) — the
@@ -348,6 +353,10 @@ async function init() {
     id: e.id, name: e.name || 'Proxy', target: e.target || '',
     socksPort: e.socksPort || 0, httpPort: e.httpPort || 0, enabled: e.enabled !== false
   }));
+  // Routing profiles, before the selection is resolved: '__advanced__:<id>' is
+  // selectable only once they are in. null on a back end without them.
+  state.profiles = await loadRoutingProfiles(data);
+  state.profileSel = (profileOfSel(data.selectedServerId) || (state.profiles && state.profiles[0]) || {}).id || null;
   // The picker's choice survives a restart: the one main stored, then the live
   // connection (a reload of a connected window), then the last one made, then
   // the first server. Resolved once the chains, the pool and the settings are
@@ -557,8 +566,9 @@ function updateGuardRows() {
     const bypasses = s.advancedRouting
       // an advanced plan can send traffic direct through its own rules, and —
       // since v0.15 — through the routing mode it applies underneath them
-      ? (s.routeRules || []).some(r => r && r.target === 'direct') || s.routeDefault === 'direct' ||
-        (!!s.advancedUseMode && modeBypasses)
+      // (any routing profile that does: each of them can be the one connected)
+      ? advPlans().some(p => (p.rules || []).some(r => r && r.target === 'direct') || p.def === 'direct' ||
+        (!!p.useMode && modeBypasses))
       : modeBypasses;
     $('#guardStrictRouting').hidden = !(tunOn && $('#optLeakGuard').value === 'strict' && bypasses);
   }
@@ -1565,7 +1575,7 @@ function isChainId(id) { return !!chainById(id); }
 function chainMembers(c) { return ((c && c.members) || []).map(srvById).filter(Boolean); }
 function chainReady(c) { return chainMembers(c).length >= 2; }
 function anyChainReady() { return state.chains.some(chainReady); }
-function isPseudo(id) { return id === ADV_ID || id === POOL_ID || isChainId(id); }
+function isPseudo(id) { return id === ADV_ID || String(id).startsWith(ADV_ID + ':') || id === POOL_ID || isChainId(id); }
 
 /** A pool target ('chain:<id>' or a server id) that currently resolves. */
 function poolTargetValid(target) {
@@ -1586,9 +1596,20 @@ function poolEnabledValid() {
   return state.pool.filter(e => e.enabled && e.socksPort && poolTargetValid(e.target));
 }
 function poolReady() { return poolEnabledValid().length > 0; }
-function advancedReady() {
-  return !!state.settings.advancedRouting &&
-    (((state.settings.routeRules || []).length > 0) || !!state.settings.routeDefault);
+/**
+ * Whether advanced routing can be connected: `id` one selection of it
+ * ('__advanced__' = the first profile, '__advanced__:<id>' = that one), or —
+ * without `id` — any of it. With routing profiles a profile counts once it has
+ * rules or a default; without them (an older back end) today's settings do,
+ * and a profile id means nothing.
+ */
+function advancedReady(id) {
+  if (!state.settings.advancedRouting) return false;
+  if (!Array.isArray(state.profiles)) {
+    if (id !== undefined && id !== ADV_ID) return false;
+    return ((state.settings.routeRules || []).length > 0) || !!state.settings.routeDefault;
+  }
+  return id === undefined ? state.profiles.some(profileReady) : profileReady(profileOfSel(id));
 }
 
 /**
@@ -1603,7 +1624,7 @@ function resolveSelection(candidates, valid, servers) {
 
 /** Whether `id` can be connected right now: a server, a ready chain, advanced routing or the pool once set up. */
 function selectable(id) {
-  if (id === ADV_ID) return advancedReady();
+  if (id === ADV_ID || String(id).startsWith(ADV_ID + ':')) return advancedReady(id);
   if (id === POOL_ID) return poolReady();
   if (isChainId(id)) return chainReady(chainById(id));
   return !!srvById(id);
@@ -1634,7 +1655,7 @@ function selectServer(id) {
   // the path draws the SELECTED config's route, so it follows this choice
   refreshConnLabels();
   // immediate ping feedback for the chosen target (chains ping too; skip adv/pool)
-  if (id && id !== ADV_ID && id !== POOL_ID && !state.pings[id]) pingServer(id);
+  if (id && id !== ADV_ID && id !== POOL_ID && !String(id).startsWith(ADV_ID + ':') && !state.pings[id]) pingServer(id);
 }
 
 function renderPicker() {
@@ -1652,6 +1673,9 @@ function renderPicker() {
   const sel = state.servers.find(s => s.id === selId);
   const selChain = chainById(selId);
   const hasAny = state.servers.length || anyChainReady() || advancedReady() || poolReady();
+  // the plain '__advanced__' selection (LuCI, an older store) is the first
+  // routing profile, and that profile's row is the one marked
+  const selKey = selId === ADV_ID && Array.isArray(state.profiles) && state.profiles[0] ? ADV_ID + ':' + state.profiles[0].id : selId;
 
   if (!hasAny) {
     btnProto.hidden = true;
@@ -1665,11 +1689,11 @@ function renderPicker() {
     const pl = pingLabel(selChain.id);
     btnPing.textContent = pl.txt === '—' ? '' : pl.txt;
     btnPing.className = 'picker-ping ' + pl.cls;
-  } else if (selId === ADV_ID) {
+  } else if (selId === ADV_ID || String(selId).startsWith(ADV_ID + ':')) {
     btnProto.hidden = false;
     btnProto.textContent = '🧭';
     btnProto.className = 'proto-badge proto-advanced';
-    btnName.textContent = t('picker.advanced');
+    btnName.textContent = advSelName(selId);
     btnPing.textContent = '';
   } else if (selId === POOL_ID) {
     btnProto.hidden = false;
@@ -1706,7 +1730,7 @@ function renderPicker() {
     const rl = pingId ? pingResultLabel((state.pings[pingId] || {}).real) : null;
     const ul = pingId ? pingResultLabel((state.pings[pingId] || {}).upload) : null;
     const row = document.createElement('div');
-    row.className = 'picker-item' + (isSpecial ? ' picker-special' : '') + (id === selId ? ' active' : '');
+    row.className = 'picker-item' + (isSpecial ? ' picker-special' : '') + (id === selId || id === selKey ? ' active' : '');
     const pingPart = pingId
       ? `<span class="stat-group">` +
           `<span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>⚡</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${escapeHtml(id)}">${tl.txt}</b></span>` +
@@ -1748,7 +1772,14 @@ function renderPicker() {
     }
   }
   if (poolReady()) addRow(POOL_ID, '<span class="proto-badge proto-pool">🧩</span>', t('picker.pool') + ' (' + poolEnabledValid().length + ')', null, true);
-  if (advancedReady()) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
+  if (Array.isArray(state.profiles)) {
+    // one 🧭 row per routing profile that has rules or a default
+    if (state.settings.advancedRouting) {
+      for (const p of state.profiles) {
+        if (profileReady(p)) addRow(ADV_ID + ':' + p.id, '<span class="proto-badge proto-advanced">🧭</span>', p.name || t('picker.advanced'), null, true);
+      }
+    }
+  } else if (advancedReady()) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
   for (const c of state.chains) {
     if (chainReady(c)) addRow(c.id, '<span class="proto-badge proto-chain">⛓</span>', c.name, c.id, true);
   }
@@ -1809,11 +1840,15 @@ function importErrorReason(errors) {
  *  - http proxy link -> imported as a server (see HTTP_PROXY_LINK above)
  *  - base64 blob    -> decoded & imported as servers (handled by parseMany)
  *  - JSON config(s) -> sent whole to parseMany (one server per config, or per balancer outbound)
+ *  - irnetfree://routing/… -> a routing profile's or a chain's share link: its own preview, then import
  * Mixed input works too (URLs become subs, the rest become servers).
  */
 async function smartImport(text) {
   text = String(text || '').trim();
   if (!text) return;
+  // A routing or chain share link carries servers, chains and a profile in one
+  // line: nothing is written before its preview has been seen and accepted.
+  if (/^irnetfree:\/\/routing\//i.test(text)) return openRoutingImport(text);
   // A pasted WireGuard .conf is one multi-line config, not a list of links —
   // hand the whole blob to parseMany (main-side) before the per-line split.
   if (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text)) {
@@ -1895,8 +1930,9 @@ document.addEventListener('paste', (e) => {
   const cd = e.clipboardData || window.clipboardData;
   const text = cd && cd.getData('text');
   if (!text || !text.trim()) return;
-  // ignore unrelated clipboard text; a .conf blob counts as importable too
-  const looksImportable = /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|socks:\/\/|socks5:\/\/|wireguard:\/\/|wg:\/\/|hysteria2:\/\/|hy2:\/\/)/im.test(text.trim())
+  // ignore unrelated clipboard text; a .conf blob counts as importable too, and
+  // so does a routing / chain share link (smartImport opens its preview)
+  const looksImportable = /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|socks:\/\/|socks5:\/\/|wireguard:\/\/|wg:\/\/|hysteria2:\/\/|hy2:\/\/|irnetfree:\/\/routing\/)/im.test(text.trim())
     || /[A-Za-z0-9+/=]{24,}/.test(text.trim())
     || (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text))
     || (looksLikeJsonText(text) && text.includes('"outbounds"'));   // an Xray / sing-box config
@@ -1934,6 +1970,7 @@ $('#btnClearServers').onclick = async () => {
   renderPicker();
   renderChains();
   renderPool();
+  renderAdvanced();   // every target is gone: the rules and the flow tree say so
   toast(t('t.allServersDeleted'));
 };
 
@@ -2016,7 +2053,7 @@ $('#btnClearUsage').onclick = () => clearUsageFor(null);
 
 /* quick ping (home) — fills the TCP ping + Real delay cards for one target */
 async function quickPing(id) {
-  if (!id || id === ADV_ID || id === POOL_ID) return;
+  if (!id || id === ADV_ID || id === POOL_ID || String(id).startsWith(ADV_ID + ':')) return;
   $('#statTcp').textContent = '...';
   $('#statReal').textContent = '...';
   const tcp = await window.api.pingTcp(id);
@@ -2145,8 +2182,8 @@ function setConnUI(stateStr, id) {
   if (effChain) {
     const names = chainMembers(effChain).map(s => s.name);
     srv.textContent = '⛓ ' + effChain.name + (names.length ? ' (' + names.join(' → ') + ')' : '');
-  } else if (effId === ADV_ID) {
-    srv.textContent = '🧭 ' + t('picker.advanced');
+  } else if (effId === ADV_ID || String(effId).startsWith(ADV_ID + ':')) {
+    srv.textContent = '🧭 ' + advSelName(effId);
   } else if (effId === POOL_ID) {
     const list = poolEnabledValid();
     srv.textContent = '🧩 ' + t('picker.pool') + ' — ' +
@@ -2540,6 +2577,17 @@ function outboundTagFor(target) {
   return 'out-' + target;
 }
 
+/** A base's key inside configBuilder's tags: the server's id, or 'chain-<cid>' for a chain. */
+function baseKeyOf(base) {
+  return String(base).indexOf('chain:') === 0 ? 'chain-' + String(base).slice(6) : String(base);
+}
+
+/** The tag of a target dialled through a base: 'out-<id>@<baseKey>' / 'out-chain-<cid>@<baseKey>'. */
+function viaTagFor(target, base) { return outboundTagFor(target) + '@' + baseKeyOf(base); }
+
+/** A base's own outbound (its exit, shared by everything through it): 'base-<id>' / 'base-chain-<cid>'. */
+function baseTagFor(base) { return 'base-' + baseKeyOf(base); }
+
 /** First of `tags` the core actually reported, so single/chain ('proxy') and
  *  advanced ('out-…') plans can share one lookup. */
 function pickTag(per, tags) {
@@ -2591,15 +2639,19 @@ function renderTrafficPath(stateStr) {
 
   frag.appendChild(pathNode('🖥', t('path.device'), s.tunMode ? 'TUN' : 'SOCKS/HTTP'));
 
-  if (id === ADV_ID) {
-    // the fan-out: one line per rule, each with its own figures
+  if (id === ADV_ID || String(id).startsWith(ADV_ID + ':')) {
+    // the fan-out: one line per rule, each with its own figures — of the
+    // routing profile this selection connects, with the base a line dials
+    // through ("via …"); today's settings on a back end without profiles
     frag.appendChild(pathLink(live, 'pathCapIn'));
     const rules = document.createElement('div');
     rules.className = 'path-rules';
-    const list = (s.routeRules || []).filter(r => r && r.value && r.target);
+    const prof = profileOfSel(id);
+    const src = prof || { rules: s.routeRules || [], def: s.routeDefault };
+    const list = (src.rules || []).filter(r => r && r.value && r.target);
     const SHOWN = 4;
     list.slice(0, SHOWN).forEach((r, i) => {
-      rules.appendChild(pathRule(String(i + 1).padStart(2, '0'), r.value, r.target));
+      rules.appendChild(pathRule(String(i + 1).padStart(2, '0'), r.value, r.target, prof ? ruleVia(r, prof) : null));
     });
     if (list.length > SHOWN) {
       const more = document.createElement('div');
@@ -2608,7 +2660,9 @@ function renderTrafficPath(stateStr) {
       more.querySelector('.pr-cond').textContent = t('path.andMore').replace('{n}', list.length - SHOWN);
       rules.appendChild(more);
     }
-    const def = pathRule('↓', t('path.rest'), s.routeDefault || 'direct');
+    // a profile without a default takes the first server, as the builder does (and its flow tree says)
+    const defTarget = src.def || (prof && state.servers[0] && state.servers[0].id) || 'direct';
+    const def = pathRule('↓', t('path.rest'), defTarget, prof ? ruleVia({ target: defTarget, via: prof.defVia }, prof) : null);
     def.classList.add('is-default');
     def.querySelector('.pr-cond').classList.add('is-label');
     rules.appendChild(def);
@@ -2649,10 +2703,16 @@ function renderTrafficPath(stateStr) {
   frag.appendChild(pathNode('🌐', t('path.internet'), live ? ip : t('path.offline')));
   host.replaceChildren(frag);
   applyPathTraffic(lastPerOutbound);
+  // the routing page's flow tree is live only while its profile is the one up
+  applyFlowTraffic(lastPerOutbound);
 }
 
-/** One "condition → target" line, with its own traffic caption. */
-function pathRule(idx, cond, target) {
+/**
+ * One "condition → target" line, with its own traffic caption. `via`: the base
+ * the target dials through (a routing profile's), said as "via <base>" — its
+ * figures are then that target's own outbound through the base.
+ */
+function pathRule(idx, cond, target, via) {
   const row = document.createElement('div');
   row.className = 'path-rule';
   const kind = target === 'direct' ? ' to-direct' : target === 'block' ? ' to-block' : ' to-proxy';
@@ -2661,7 +2721,13 @@ function pathRule(idx, cond, target) {
   row.querySelector('.pr-idx').textContent = idx;
   row.querySelector('.pr-cond').textContent = cond;
   row.querySelector('.pr-to').textContent = targetLabel(target);
-  row.appendChild(trafficSpan([outboundTagFor(target)]));
+  if (via) {
+    const v = document.createElement('span');
+    v.className = 'pr-via';
+    v.textContent = t('rp.viaBase').replace('{base}', () => targetLabel(via));
+    row.appendChild(v);
+  }
+  row.appendChild(trafficSpan([via ? viaTagFor(target, via) : outboundTagFor(target)]));
   return row;
 }
 
@@ -2701,8 +2767,11 @@ function renderInspector() {
   set('#insCore', state.activeEngine || (s.defaultEngine === 'xray-pattn' ? 'xray-pattn' : 'xray'));
   const insRouting = $('#insRouting');
   if (insRouting) {
+    // the rules of the routing profile in use (connected, else selected, else the first)
+    const advProf = Array.isArray(state.profiles)
+      ? (profileOfSel(state.activeServerId || state.selectedServerId) || state.profiles[0] || { rules: [] }) : null;
     insRouting.textContent = s.advancedRouting
-      ? t('path.rules').replace('{n}', (s.routeRules || []).length)
+      ? t('path.rules').replace('{n}', (advProf ? advProf.rules : (s.routeRules || [])).length)
       : (s.routingMode || 'global');
   }
   if (state.flavor === 'openwrt') {
@@ -3017,7 +3086,8 @@ $('#btnClearLogs').onclick = () => { $('#logBox').innerHTML = ''; };
 function defaultUiMode() {
   const s = state.settings || {};
   const hasPro = (state.chains || []).length > 0 || (state.pool || []).length > 0 ||
-    (s.routeRules || []).length > 0 || !!s.advancedRouting;
+    (s.routeRules || []).length > 0 || !!s.advancedRouting ||
+    (state.profiles || []).some(p => (p.rules || []).length > 0);
   return hasPro ? 'advanced' : 'simple';
 }
 
@@ -3581,6 +3651,8 @@ window.api.onSubsUpdated((d) => {
   state.subscriptions = d.subs;
   state.servers = d.servers;
   renderSubs(); renderServers(); renderPicker(); renderChains(); renderPool();
+  // a refresh that dropped a server a routing profile uses: its rule and its tree say so
+  if (Array.isArray(state.profiles)) renderAdvanced();
 });
 
 /* ----------------------------- edit server modal ----------------------------- */
@@ -4196,9 +4268,17 @@ function serverInLivePlan(id) {
   if (live === '__chain__') return (state.chain || []).includes(id);
   // the pool runs the entries that are enabled AND have a port (as main builds it)
   if (live === '__pool__') return (state.pool || []).some(e => e && e.enabled && e.socksPort && targetHas(e.target));
-  if (live === '__advanced__') {
+  if (live === '__advanced__' || String(live).startsWith('__advanced__:')) {
     const s = state.settings || {};
     const first = (state.servers || [])[0];
+    if (Array.isArray(state.profiles)) {
+      // the routing profile that is up: its targets, its rules' vias and its base all dial
+      const p = profileOfSel(live);
+      if (!p) return false;
+      const refs = [...p.rules.map(r => r && r.target), p.def || (first && first.id) || 'direct',
+        ...p.rules.map(r => r && r.via), p.defVia, p.base];
+      return refs.filter(v => v && v !== 'inherit' && v !== 'none').some(targetHas);
+    }
     const def = s.routeDefault || (first && first.id) || 'direct';
     return [...(s.routeRules || []).map(r => r && r.target), def].some(targetHas);
   }
@@ -4436,10 +4516,15 @@ function renderChains() {
     chain.members = (chain.members || []).filter(srvById);
     const card = document.createElement('div');
     card.className = 'card chain-card';
+    card.dataset.chainId = chain.id;   // the routing page's flow tree opens a chain by it
 
     const tl = pingResultLabel((state.pings[chain.id] || {}).tcp);
     const rl = pingResultLabel((state.pings[chain.id] || {}).real);
     const ready = chain.members.length >= 2;
+    // its share link comes with routing profiles (the same back end writes both)
+    const share = Array.isArray(state.profiles)
+      ? `<button class="icon-btn ch-share" title="${escapeHtml(t('rp.copyLink'))}" aria-label="${escapeHtml(t('rp.copyLink'))}"${ready ? '' : ' disabled'}>🔗</button>`
+      : '';
 
     card.innerHTML = `
       <div class="chain-card-head">
@@ -4453,6 +4538,7 @@ function renderChains() {
         <div class="chain-card-actions">
           <button class="icon-btn ch-ping" title="ping">⚡</button>
           <button class="icon-btn ch-connect" title="connect"${ready ? '' : ' disabled'}>▶</button>
+          ${share}
           <button class="icon-btn ch-del" title="delete">🗑</button>
         </div>
       </div>
@@ -4475,6 +4561,8 @@ function renderChains() {
     // actions
     card.querySelector('.ch-ping').onclick = () => pingServer(chain.id);
     connectGlyph(card.querySelector('.ch-connect')).onclick = () => { if (ready) connect(chain.id); };
+    const shareBtn = card.querySelector('.ch-share');
+    if (shareBtn) shareBtn.onclick = () => { if (ready) shareRouting('chain', chain.id); };
     card.querySelector('.ch-del').onclick = () => {
       state.chains = state.chains.filter(c => c.id !== chain.id);
       if (state.selectedServerId === chain.id) state.selectedServerId = null;
@@ -4862,7 +4950,8 @@ function renderDefaultSuggest() {
   const defRow = body && body.querySelector('.adv-default');
   if (!defRow) return;
   body.querySelectorAll('.adv-suggest-default').forEach(n => n.remove());
-  const def = state.settings.routeDefault || (state.servers[0] && state.servers[0].id) || 'direct';
+  const prof = Array.isArray(state.profiles) ? advDraft() : null;
+  const def = (prof ? prof.def : state.settings.routeDefault) || (state.servers[0] && state.servers[0].id) || 'direct';
   const el = wgSuggestEl(wgOfTarget(def), {});
   if (!el) return;
   el.classList.add('adv-suggest-default');
@@ -4879,11 +4968,17 @@ function renderAdvanced() {
   optAdv.checked = !!state.settings.advancedRouting;
   if (body) body.hidden = !state.settings.advancedRouting;
 
+  // Routing profiles: the list, and the draft of the one being edited (its rule
+  // edits wait for Save, as today's did). null on a back end without them —
+  // then everything below is today's single advanced routing.
+  const prof = Array.isArray(state.profiles) ? advDraft() : null;
+  renderProfileBar();
+
   // "…and apply the routing mode too": show which mode that currently is, so
   // the switch is not a promise the user has to go and verify somewhere else.
   const useMode = $('#optAdvUseMode');
   if (useMode) {
-    useMode.checked = !!state.settings.advancedUseMode;
+    useMode.checked = prof ? !!prof.useMode : !!state.settings.advancedUseMode;
     const now = $('#advUseModeNow');
     if (now) {
       const mode = state.settings.routingMode || 'global';
@@ -4897,7 +4992,8 @@ function renderAdvanced() {
   const simple = $('#simpleRulesCard');
   if (simple) simple.hidden = !!state.settings.advancedRouting;
 
-  const rules = state.settings.routeRules || [];
+  // (profiles but none at all: the editor is hidden, and there is nothing to list)
+  const rules = prof ? prof.rules : Array.isArray(state.profiles) ? [] : (state.settings.routeRules || []);
   wrap.innerHTML = '';
   if (!rules.length) {
     wrap.innerHTML = `<div class="empty small">${escapeHtml(t('adv.empty'))}</div>`;
@@ -4907,6 +5003,12 @@ function renderAdvanced() {
     if (r.type === 'process') hasProc = true;
     const row = document.createElement('div');
     row.className = 'adv-rule';
+    row.dataset.idx = String(idx);   // the flow tree's rule nodes open their row by it
+    // a profile's proxy target can dial through a base: its "via" picker
+    const viaOn = !!prof && !!r.target && r.target !== 'direct' && r.target !== 'block';
+    const viaCell = viaOn
+      ? `<span class="adv-via"><span class="adv-via-label">${escapeHtml(t('rp.via'))}</span><span class="adv-via-mount"></span></span>`
+      : '';
     const typeOpts = RULE_TYPES.map(tp =>
       `<option value="${tp}"${tp === r.type ? ' selected' : ''}>${escapeHtml(t('adv.type.' + tp))}</option>`).join('');
     // process rules use a dropdown of running processes; ip/domain get a
@@ -4922,6 +5024,7 @@ function renderAdvanced() {
       ${valueCell}
       <span class="adv-arrow">→</span>
       <span class="adv-target-mount"></span>
+      ${viaCell}
       <button class="icon-btn adv-del" title="remove">🗑</button>`;
     row.querySelector('.adv-type').onchange = (e) => {
       rules[idx].type = e.target.value;
@@ -4929,8 +5032,9 @@ function renderAdvanced() {
       else renderAdvanced();
     };
     const valEl = row.querySelector('.adv-value');
-    if (r.type === 'process') valEl.onchange = (e) => { rules[idx].value = e.target.value; };
-    else valEl.oninput = (e) => { rules[idx].value = e.target.value; };
+    // the flow tree follows the value as it is typed (its rules are the draft)
+    if (r.type === 'process') valEl.onchange = (e) => { rules[idx].value = e.target.value; if (prof) renderFlowSoon(); };
+    else valEl.oninput = (e) => { rules[idx].value = e.target.value; if (prof) renderFlowSoon(); };
     const refresh = row.querySelector('.adv-proc-refresh');
     if (refresh) refresh.onclick = () => loadProcList();
     // searchable target dropdown (handles long config lists)
@@ -4942,8 +5046,23 @@ function renderAdvanced() {
         onChange: (v) => { rules[idx].target = v; renderAdvanced(); }
       })
     );
+    if (viaOn) {
+      row.querySelector('.adv-via-mount').appendChild(makeSearchSelect({
+        options: viaOptionList(prof, r.target), value: r.via || 'inherit',
+        onChange: (v) => { rules[idx].via = v; renderAdvanced(); }
+      }));
+    }
     row.querySelector('.adv-del').onclick = () => { rules.splice(idx, 1); renderAdvanced(); };
     wrap.appendChild(row);
+    // a target or a base that is gone: the rule says so, in the danger colour
+    const why = prof ? ruleProblem(r, prof) : '';
+    if (why) {
+      row.classList.add('danger');
+      const warn = document.createElement('div');
+      warn.className = 'adv-warn';
+      warn.textContent = '⚠ ' + t(why);
+      wrap.appendChild(warn);
+    }
     // when the target ends in a WireGuard, offer its ranges and say where its
     // internal names resolve
     const sug = wgSuggestEl(wgOfTarget(r.target), {
@@ -4954,14 +5073,21 @@ function renderAdvanced() {
   });
 
   // default target — searchable dropdown
-  const def = state.settings.routeDefault || (state.servers[0] && state.servers[0].id) || 'direct';
+  const def = (prof ? prof.def : state.settings.routeDefault) || (state.servers[0] && state.servers[0].id) || 'direct';
   defMount.innerHTML = '';
   advDefaultSel = makeSearchSelect({
     options: targetOptionList(), value: def,
-    onChange: (v) => { state.settings.routeDefault = v; renderDefaultSuggest(); }
+    onChange: (v) => {
+      if (prof) { prof.def = v; renderProfileExtras(); renderFlowTree(); }
+      else state.settings.routeDefault = v;
+      renderDefaultSuggest();
+    }
   });
   defMount.appendChild(advDefaultSel);
   renderDefaultSuggest();
+  // a profile's default via and its base sit next to the default target
+  renderProfileExtras();
+  renderFlowTree();
 
   // process-routing options panel (only when a process rule exists)
   const procOpts = $('#procOpts');
@@ -4975,11 +5101,14 @@ function renderAdvanced() {
 $('#optAdvanced').onchange = async () => {
   const on = $('#optAdvanced').checked;
   const extra = { advancedRouting: on };
+  const seed = (state.servers[0] && state.servers[0].id) || 'direct';
   // Seed a default target so the 🧭 entry is immediately usable on the home page.
-  if (on && !state.settings.routeDefault) {
-    extra.routeDefault = (state.servers[0] && state.servers[0].id) || 'direct';
-  }
+  if (on && !Array.isArray(state.profiles) && !state.settings.routeDefault) extra.routeDefault = seed;
   await saveSettings(extra);
+  // …with profiles: the first one, when none of them could be connected yet
+  if (on && Array.isArray(state.profiles) && state.profiles[0] && !state.profiles.some(profileReady)) {
+    await patchProfile(state.profiles[0].id, { def: seed });
+  }
   renderAdvanced();
   renderPicker();
   toast(on ? t('t.advOn') : t('t.advOff'), 'ok');
@@ -4987,15 +5116,19 @@ $('#optAdvanced').onchange = async () => {
 
 // Saved on its own rather than with the Save button: it changes nothing about
 // the rules, and leaving it pending would make the mode note lie about what the
-// next connect will do.
+// next connect will do. With profiles it is the edited profile's own.
 $('#optAdvUseMode').onchange = async () => {
-  await saveSettings({ advancedUseMode: $('#optAdvUseMode').checked });
+  const on = $('#optAdvUseMode').checked;
+  const prof = Array.isArray(state.profiles) ? advDraft() : null;
+  if (prof) await patchProfile(prof.id, { useMode: on });
+  else await saveSettings({ advancedUseMode: on });
   updateGuardRows();   // a country bypass under the rules is a direct route too
   renderAdvanced();
 };
 
 $('#btnAddRule').onclick = () => {
-  const rules = state.settings.routeRules || (state.settings.routeRules = []);
+  const prof = Array.isArray(state.profiles) ? advDraft() : null;
+  const rules = prof ? prof.rules : (state.settings.routeRules || (state.settings.routeRules = []));
   const firstTarget = (state.servers[0] && state.servers[0].id) || 'direct';
   rules.push({ type: 'ip', value: '', target: firstTarget });
   renderAdvanced();
@@ -5013,7 +5146,9 @@ $('#btnClearProcCache').onclick = async () => {
 // load the running-process list when opening Routing (for the process picker)
 const routingNav = document.querySelector('.nav-item[data-view="routing"]');
 if (routingNav) routingNav.addEventListener('click', () => {
-  if ((state.settings.routeRules || []).some(r => r && r.type === 'process')) loadProcList();
+  if (advPlans().some(p => (p.rules || []).some(r => r && r.type === 'process'))) loadProcList();
+  // the flow tree was drawn while the page was hidden: its lines need the real boxes
+  drawFlowSoon();
 });
 
 /**
@@ -5035,6 +5170,20 @@ async function warnAboutGeoCodes(rules) {
 }
 
 $('#btnSaveAdv').onclick = async () => {
+  // a routing profile: its draft becomes the saved profile (routing:setProfiles)
+  if (Array.isArray(state.profiles)) {
+    const rules = await saveProfileDraft();
+    if (!rules) return;
+    if ($('#optAdvanced').checked !== !!state.settings.advancedRouting) await saveSettings({ advancedRouting: $('#optAdvanced').checked });
+    updateGuardRows();
+    renderAdvanced();
+    renderPicker();
+    $('#advSavedHint').textContent = t('saved');
+    setTimeout(() => ($('#advSavedHint').textContent = ''), 1800);
+    toast(t('t.advSaved') + ' (' + rules.length + ')', 'ok');
+    await warnAboutGeoCodes(rules);
+    return;
+  }
   // collect from current state (kept in sync by the row handlers) + default select
   const rules = (state.settings.routeRules || [])
     .map(r => ({ type: r.type, value: (r.value || '').trim(), target: r.target }))
@@ -5054,6 +5203,887 @@ $('#btnSaveAdv').onclick = async () => {
   toast(t('t.advSaved') + ' (' + rules.length + ')', 'ok');
   await warnAboutGeoCodes(rules);
 };
+
+/* ----------------------------- routing profiles ----------------------------- */
+// Several advanced routings ("profiles"), each with its own rules, default and
+// an optional base that its proxy targets dial through. The list is the main
+// process's (routing:profiles). On a back end without it state.profiles stays
+// null, and every function here leaves today's single advanced routing as it was.
+
+/** The profile a selection connects: '__advanced__' = the first, '__advanced__:<id>' = that one; null otherwise or without profiles. */
+function profileOfSel(id) {
+  if (!Array.isArray(state.profiles) || id == null) return null;
+  if (id === ADV_ID) return state.profiles[0] || null;
+  const s = String(id);
+  if (!s.startsWith(ADV_ID + ':')) return null;
+  const pid = s.slice(ADV_ID.length + 1);
+  return state.profiles.find(p => p.id === pid) || null;
+}
+
+/** A profile the home picker offers: it has rules or a default. */
+function profileReady(p) { return !!p && ((p.rules || []).length > 0 || !!p.def); }
+
+/** The name an advanced-routing selection goes by: its profile's, else "Advanced routing". */
+function advSelName(id) {
+  const p = profileOfSel(id);
+  return (p && p.name) || t('picker.advanced');
+}
+
+/** Everything advanced routing holds: the profiles, or today's settings as one. */
+function advPlans() {
+  if (Array.isArray(state.profiles)) return state.profiles;
+  const s = state.settings || {};
+  return [{ rules: s.routeRules || [], def: s.routeDefault, useMode: !!s.advancedUseMode }];
+}
+
+/** A target that never takes a via: direct, block (or none at all). */
+function terminalTarget(tg) { return !tg || tg === 'direct' || tg === 'block'; }
+
+/**
+ * A profile as the renderer keeps it: { id, name, rules, def, defVia, useMode,
+ * base } (anything else the back end sent rides along untouched). A via is
+ * kept only where it means something — on a proxy target, and not 'inherit',
+ * which is what a missing one says — so a saved profile and its draft compare
+ * equal however either was written.
+ */
+function normalizeUiProfile(p) {
+  const src = (p && typeof p === 'object') ? p : {};
+  const rules = (Array.isArray(src.rules) ? src.rules : []).filter(r => r && typeof r === 'object').map((r) => {
+    const out = { type: r.type, value: r.value == null ? '' : String(r.value), target: r.target ? String(r.target) : '' };
+    if (!terminalTarget(out.target) && r.via && r.via !== 'inherit') out.via = String(r.via);
+    return out;
+  });
+  const def = src.def ? String(src.def) : '';
+  return Object.assign({}, src, {
+    id: String(src.id || ''),
+    name: String(src.name || ''),
+    rules,
+    def,
+    defVia: !terminalTarget(def) && src.defVia && src.defVia !== 'inherit' ? String(src.defVia) : 'inherit',
+    useMode: !!src.useMode,
+    base: src.base ? String(src.base) : null
+  });
+}
+
+/**
+ * The profiles, from init's data when main sends them there, else asked for.
+ * null when the back end has none: the bridge is missing, or its handler is
+ * (Electron's "No handler registered", the service's "unknown channel").
+ */
+async function loadRoutingProfiles(data) {
+  if (data && Array.isArray(data.routingProfiles)) return data.routingProfiles.map(normalizeUiProfile);
+  if (!window.api || typeof window.api.routingProfiles !== 'function') return null;
+  try {
+    const res = await window.api.routingProfiles();
+    const list = Array.isArray(res) ? res : (res && res.profiles);
+    return Array.isArray(list) ? list.map(normalizeUiProfile) : null;
+  } catch { return null; }
+}
+
+function newProfileId() { return 'rp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+/** `name`, or "name (2)", "name (3)"… — the first that no other profile (but `exceptId`) goes by. */
+function uniqueProfileName(name, exceptId) {
+  const want = String(name || '').trim() || t('picker.advanced');
+  const taken = new Set((state.profiles || []).filter(p => p.id !== exceptId).map(p => p.name));
+  if (!taken.has(want)) return want;
+  const stem = want.replace(/ \(\d+\)$/, '');
+  for (let n = 2; ; n++) {
+    const next = `${stem} (${n})`;
+    if (!taken.has(next)) return next;
+  }
+}
+
+/* The draft: the profile being edited. Its rules, default, default via and
+   base wait for Save, as today's rule edits do; its name and "apply the
+   routing mode too" are saved the moment they change. */
+let rpDraft = null;
+
+/** The draft of the profile the routing page edits (the first when none is chosen); null without profiles. */
+function advDraft() {
+  if (!Array.isArray(state.profiles)) return null;
+  let p = state.profiles.find(x => x.id === state.profileSel);
+  if (!p) { p = state.profiles[0] || null; state.profileSel = p ? p.id : null; }
+  if (!p) { rpDraft = null; return null; }
+  if (!rpDraft || rpDraft.id !== p.id) rpDraft = normalizeUiProfile(JSON.parse(JSON.stringify(p)));
+  return rpDraft;
+}
+
+/** What Save writes of a profile. */
+function draftKey(p) {
+  const n = normalizeUiProfile(p);
+  return JSON.stringify([n.rules, n.def, n.defVia, n.base]);
+}
+
+/** Whether the draft holds edits that are not saved. */
+function draftDirty() {
+  if (!rpDraft || !Array.isArray(state.profiles)) return false;
+  const saved = state.profiles.find(p => p.id === rpDraft.id);
+  return !!saved && draftKey(rpDraft) !== draftKey(saved);
+}
+
+/** Leave the draft: at once when nothing in it is unsaved, else only once the user says so. */
+function confirmDiscardDraft() {
+  return !draftDirty() || window.confirm(t('rp.discard'));
+}
+
+/**
+ * The base a rule's target dials through — the default's too, as { target:
+ * def, via: defVia }: its own via, else ('inherit') the profile's base. None
+ * for 'none', for direct and block, and for a target that IS that base.
+ */
+function ruleVia(r, prof) {
+  const target = r && r.target;
+  if (terminalTarget(target)) return null;
+  const v = r.via;
+  const via = !v || v === 'inherit' ? ((prof && prof.base) || null) : (v === 'none' ? null : v);
+  return via && via !== target ? via : null;
+}
+
+/** Why a target or a base cannot be dialled — an i18n key, '' when it can: a server gone, a chain gone or short. */
+function refProblem(ref) {
+  if (terminalTarget(ref)) return '';
+  if (String(ref).startsWith('chain:')) return chainReady(chainById(String(ref).slice(6))) ? '' : 'rp.why.chainGone';
+  return srvById(ref) ? '' : 'rp.why.serverGone';
+}
+
+/** What is wrong with one rule of a profile ('' when nothing): its target, else the base it dials through. */
+function ruleProblem(r, prof) {
+  const own = refProblem(r && r.target);
+  if (own) return own;
+  const via = ruleVia(r, prof);
+  return via && refProblem(via) ? 'rp.why.baseGone' : '';
+}
+
+/** Whether a profile could not be connected as it stands: a rule, its default or its base points at nothing. */
+function profileBroken(p) {
+  if (!p) return false;
+  if ((p.rules || []).some(r => r && String(r.value || '').trim() && ruleProblem(r, p))) return true;
+  const def = p.def || (state.servers[0] && state.servers[0].id) || 'direct';
+  return !!ruleProblem({ target: def, via: p.defVia }, p) || !!(p.base && refProblem(p.base));
+}
+
+/** The name of a server or chain reference, plain ('—' when it is gone). */
+function refName(ref) {
+  if (String(ref).startsWith('chain:')) {
+    const c = chainById(String(ref).slice(6));
+    return c ? c.name : '—';
+  }
+  const s = srvById(ref);
+  return s ? s.name : '—';
+}
+
+/**
+ * [{value,label}] for a via picker: the profile's base (inherit, named), none,
+ * then every server and ready chain but the target itself — and the current
+ * choice when it is gone, so the picker shows it rather than a blank.
+ */
+function viaOptionList(prof, target, current) {
+  const base = prof && prof.base;
+  const opts = [
+    { value: 'inherit', label: base ? t('rp.viaInherit').replace('{base}', () => targetLabel(base)) : t('rp.viaInheritNone') },
+    { value: 'none', label: t('rp.viaNone') }
+  ];
+  for (const o of poolTargetOptions()) if (o.value !== target) opts.push(o);
+  if (current && !opts.some(o => o.value === current)) opts.push({ value: current, label: '⚠ ' + targetLabel(current) });
+  return opts;
+}
+
+/** [{value,label}] for the base picker: none, then every server and ready chain (and a gone current one). */
+function baseOptionList(current) {
+  const opts = [{ value: '', label: t('rp.baseNone') }, ...poolTargetOptions()];
+  if (current && !opts.some(o => o.value === current)) opts.push({ value: current, label: '⚠ ' + targetLabel(current) });
+  return opts;
+}
+
+/**
+ * Write the list (routing:setProfiles) and take the back end's answer as the
+ * truth. `opts.select` moves the editor to that profile, `opts.resetDraft`
+ * drops the draft (it is what was just saved). An edit of the profile that is
+ * up is saved, not live: main says so in pendingReconnect, and a key that is
+ * new there brings the same offer to reconnect a settings save does.
+ */
+async function persistProfiles(list, opts = {}) {
+  let res = null;
+  try { res = await window.api.setRoutingProfiles(list); }
+  catch (e) { res = { ok: false, error: (e && e.message) || String(e) }; }
+  if (!res || res.ok === false) {
+    toast(t('t.failed') + (res && res.error ? ': ' + res.error : ''), 'err');
+    return false;
+  }
+  const before = (state.pendingReconnect || []).slice();
+  state.profiles = (Array.isArray(res.profiles) ? res.profiles : list).map(normalizeUiProfile);
+  if (opts.select) state.profileSel = opts.select;
+  if (opts.resetDraft) rpDraft = null;
+  if (Array.isArray(res.pendingReconnect)) setPending(res.pendingReconnect);
+  afterProfilesChanged();
+  if (state.connected && (state.pendingReconnect || []).some(k => !before.includes(k))) await promptApplySettings();
+  return true;
+}
+
+/** Everything drawn from the profiles: the routing page, the picker, the home path and the guard note. */
+function afterProfilesChanged() {
+  renderAdvanced();
+  renderPicker();
+  refreshConnLabels();
+  updateGuardRows();
+}
+
+/** Change fields of a saved profile at once (its name, useMode or default), and the draft's with it. */
+async function patchProfile(id, patch) {
+  if (!Array.isArray(state.profiles)) return false;
+  const list = state.profiles.map(p => (p.id === id ? normalizeUiProfile(Object.assign({}, p, patch)) : p));
+  if (rpDraft && rpDraft.id === id) Object.assign(rpDraft, patch);
+  const ok = await persistProfiles(list);
+  if (!ok && rpDraft && rpDraft.id === id) {
+    const saved = state.profiles.find(p => p.id === id);
+    if (saved) for (const k of Object.keys(patch)) rpDraft[k] = saved[k];
+    renderAdvanced();
+  }
+  return ok;
+}
+
+/** Save: the draft's rules (the empty ones dropped), default, default via and base. Resolves to the saved rules, or null. */
+async function saveProfileDraft() {
+  const d = Array.isArray(state.profiles) ? advDraft() : null;
+  if (!d) return null;
+  const rules = d.rules
+    .map(r => Object.assign({ type: r.type, value: String(r.value || '').trim(), target: r.target }, r.via ? { via: r.via } : {}))
+    .filter(r => r.value && r.target);
+  const def = (advDefaultSel && advDefaultSel.getValue()) || d.def;
+  const useMode = $('#optAdvUseMode') ? !!$('#optAdvUseMode').checked : !!d.useMode;
+  const next = normalizeUiProfile(Object.assign({}, d, { rules, def, useMode }));
+  const list = state.profiles.map(p => (p.id === d.id ? next : p));
+  return (await persistProfiles(list, { resetDraft: true })) ? next.rules : null;
+}
+
+async function addProfile() {
+  if (!Array.isArray(state.profiles) || !confirmDiscardDraft()) return;
+  const p = normalizeUiProfile({
+    id: newProfileId(),
+    name: uniqueProfileName(t('rp.newName').replace('{n}', state.profiles.length + 1)),
+    rules: [], def: (state.servers[0] && state.servers[0].id) || 'direct', defVia: 'inherit', useMode: false, base: null
+  });
+  await persistProfiles([...state.profiles, p], { select: p.id, resetDraft: true });
+}
+
+async function renameProfile(id, name) {
+  const p = (state.profiles || []).find(x => x.id === id);
+  const clean = String(name || '').trim();
+  if (!p || !clean || clean === p.name) { renderProfileBar(); return; }
+  await patchProfile(id, { name: uniqueProfileName(clean, id) });
+  // the field still has focus, so the redraw left it alone: show the name it got ("Work (2)")
+  const saved = (state.profiles || []).find(x => x.id === id);
+  const field = $('#rpName');
+  if (saved && field && state.profileSel === id) field.value = saved.name;
+}
+
+/** A copy of the saved profile, named "<name> (2)", right after it — and edited next. */
+async function duplicateProfile(id) {
+  const p = (state.profiles || []).find(x => x.id === id);
+  if (!p || !confirmDiscardDraft()) return;
+  const copy = normalizeUiProfile(Object.assign(JSON.parse(JSON.stringify(p)), { id: newProfileId(), name: uniqueProfileName(p.name) }));
+  const list = state.profiles.slice();
+  list.splice(list.indexOf(p) + 1, 0, copy);
+  await persistProfiles(list, { select: copy.id, resetDraft: true });
+}
+
+async function deleteProfile(id) {
+  const p = (state.profiles || []).find(x => x.id === id);
+  if (!p) return;
+  if (state.profiles.length <= 1) { toast(t('rp.lastOne'), 'warn'); return; }
+  if (!window.confirm(t('rp.confirmDelete').replace('{name}', () => p.name))) return;
+  const list = state.profiles.filter(x => x.id !== id);
+  await persistProfiles(list, { select: list[0].id, resetDraft: true });
+}
+
+/** The default profile is the first: what plain '__advanced__' (LuCI, an older selection) connects. */
+async function makeDefaultProfile(id) {
+  const p = (state.profiles || []).find(x => x.id === id);
+  if (!p || state.profiles[0] === p) return;
+  await persistProfiles([p, ...state.profiles.filter(x => x !== p)]);
+}
+
+function selectProfileForEdit(id) {
+  if (id === state.profileSel || !confirmDiscardDraft()) return;
+  state.profileSel = id;
+  rpDraft = null;
+  renderAdvanced();
+}
+
+/** A <span> of `cls` holding `text`, appended to `parent`. */
+function spanIn(parent, cls, text) {
+  const s = document.createElement('span');
+  s.className = cls;
+  s.textContent = text;
+  parent.appendChild(s);
+  return s;
+}
+
+/** The profile list (tabs: ★ the default, ● the one up, the danger colour for one that points at nothing) and the edited one's head. */
+function renderProfileBar() {
+  const bar = $('#rpBar');
+  const list = $('#rpList');
+  const head = $('#rpHead');
+  if (!bar || !list || !head) return;
+  const on = Array.isArray(state.profiles);
+  const prof = on ? advDraft() : null;
+  bar.hidden = !on;
+  head.hidden = !prof;
+  const empty = $('#rpEmpty');
+  if (empty) empty.hidden = !on || !!prof;
+  const editor = $('#advEditor');
+  if (editor) editor.hidden = on && !prof;
+  list.innerHTML = '';
+  if (!on) return;
+  list.setAttribute('aria-label', t('rp.listLabel'));
+  state.profiles.forEach((p, i) => {
+    const active = !!prof && p.id === prof.id;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'rp-tab' + (active ? ' active' : '') + (profileBroken(p) ? ' danger' : '');
+    b.dataset.id = p.id;
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', active ? 'true' : 'false');
+    spanIn(b, 'rp-tab-ico', '🧭');
+    spanIn(b, 'rp-tab-name', p.name || t('picker.advanced'));
+    if (i === 0) spanIn(b, 'rp-tab-def', '★').title = t('rp.isDefault');
+    if (profileLive(p.id)) spanIn(b, 'rp-tab-live', '●').title = t('rp.flowLive');
+    b.onclick = () => selectProfileForEdit(p.id);
+    list.appendChild(b);
+  });
+  if (!prof) return;
+  const saved = state.profiles.find(p => p.id === prof.id) || prof;
+  const nameIn = $('#rpName');
+  if (nameIn && document.activeElement !== nameIn) nameIn.value = saved.name;
+  const isDefault = state.profiles[0] === saved;
+  $('#rpDefBadge').hidden = !isDefault;
+  $('#btnRpDefault').hidden = isDefault;
+  for (const [sel, key] of [['#btnRpDup', 'rp.duplicate'], ['#btnRpShare', 'rp.copyLink'], ['#btnRpDel', 'rp.delete']]) {
+    const el = $(sel);
+    el.title = t(key);
+    el.setAttribute('aria-label', t(key));
+  }
+  const del = $('#btnRpDel');
+  del.disabled = state.profiles.length <= 1;
+  if (del.disabled) del.title = t('rp.lastOne');
+}
+
+/** Next to the default target: its via picker (a proxy default only) and the profile's base picker. */
+function renderProfileExtras() {
+  const viaWrap = $('#advDefVia');
+  const viaMount = $('#advDefViaMount');
+  const baseRow = $('#advBaseRow');
+  const baseMount = $('#advBaseMount');
+  if (!viaWrap || !viaMount || !baseRow || !baseMount) return;
+  const prof = Array.isArray(state.profiles) ? advDraft() : null;
+  viaMount.innerHTML = '';
+  baseMount.innerHTML = '';
+  baseRow.hidden = !prof;
+  const def = prof ? ((advDefaultSel && advDefaultSel.getValue()) || prof.def) : '';
+  viaWrap.hidden = !prof || terminalTarget(def);
+  const why = $('#advBaseWhy');
+  if (!prof) { if (why) why.hidden = true; return; }
+  if (!terminalTarget(def)) {
+    viaMount.appendChild(makeSearchSelect({
+      options: viaOptionList(prof, def, prof.defVia), value: prof.defVia || 'inherit',
+      onChange: (v) => { prof.defVia = v; renderFlowTree(); }
+    }));
+  }
+  baseMount.appendChild(makeSearchSelect({
+    options: baseOptionList(prof.base), value: prof.base || '',
+    // every "inherit" label and every rule's danger note follow the base
+    onChange: (v) => { prof.base = v || null; renderAdvanced(); }
+  }));
+  const k = prof.base ? refProblem(prof.base) : '';
+  if (why) {
+    why.hidden = !k;
+    why.textContent = k ? '⚠ ' + t('rp.why.baseGone') : '';
+  }
+}
+
+/* ------------------------- the flow tree (rules → targets → bases) ------------------------- */
+
+/** The glyph of a rule type in the flow tree. */
+function ruleTypeIcon(type) {
+  return type === 'ip' ? '📍' : type === 'port' ? '🔌' : type === 'process' ? '⚙' : '🌐';
+}
+
+/** A group's values, short: the first two, how many more, and all of them (the tooltip). */
+function ruleSummary(items) {
+  const all = [];
+  for (const it of items || []) {
+    for (const v of String((it && it.value) || '').split(',')) {
+      const s = v.trim();
+      if (s) all.push(s);
+    }
+  }
+  return { text: all.slice(0, 2).join(', '), more: Math.max(0, all.length - 2), full: all.join(', ') };
+}
+
+/**
+ * A profile's flow, as data. Left to right (RTL mirrors it):
+ *   groups  — the rules, consecutive ones to the same target and base as one
+ *             node, then the default as "everything else";
+ *   targets — one node per target and base it dials through (a server used
+ *             both directly and via a base is two: two outbounds);
+ *   bases   — each drawn once, every target through it pointing at it.
+ * Edges run rule → target → base; direct and block end where they are. A
+ * target or base that is gone carries `why` (an i18n key) and its edges are
+ * danger. `tags` are the outbounds whose live counters a node shows.
+ */
+function flowModel(prof) {
+  const groups = [], targets = [], bases = [], ruleEdges = [], baseEdges = [];
+  const tIndex = {}, bIndex = {};
+  const baseNode = (ref, first) => {
+    const key = 'b:' + ref;
+    if (!bIndex[key]) {
+      bIndex[key] = { key, kind: 'base', ref, why: refProblem(ref) ? 'rp.why.baseGone' : '', tags: [baseTagFor(ref)], first, into: 0 };
+      bases.push(bIndex[key]);
+    }
+    return bIndex[key];
+  };
+  const targetNode = (ref, via, first) => {
+    const key = 't:' + ref + (via ? '@' + via : '');
+    if (!tIndex[key]) {
+      const kind = ref === 'direct' || ref === 'block' ? ref : (String(ref).startsWith('chain:') ? 'chain' : 'server');
+      tIndex[key] = { key, kind, ref, via: via || null, why: refProblem(ref), tags: [via ? viaTagFor(ref, via) : outboundTagFor(ref)], first };
+      targets.push(tIndex[key]);
+      if (via) {
+        const b = baseNode(via, first);
+        b.into++;
+        baseEdges.push({ from: key, to: b.key, danger: !!b.why });
+      }
+    }
+    return tIndex[key];
+  };
+  (prof.rules || []).forEach((r, idx) => {
+    // a row still being written (no value yet) does nothing — Save drops it
+    if (!r || !r.target || !String(r.value || '').trim()) return;
+    const via = ruleVia(r, prof);
+    const last = groups[groups.length - 1];
+    if (last && last.target === r.target && last.via === via && last.idxs[last.idxs.length - 1] === idx - 1) {
+      last.idxs.push(idx);
+      last.items.push({ type: r.type, value: r.value });
+      return;
+    }
+    const tn = targetNode(r.target, via, idx);
+    const g = { key: 'g' + idx, kind: 'rule', isDefault: false, idxs: [idx], items: [{ type: r.type, value: r.value }], target: r.target, via, to: tn.key };
+    groups.push(g);
+    ruleEdges.push({ from: g.key, to: tn.key, danger: !!tn.why });
+  });
+  // what the builder takes when no default is set: the first server, else direct
+  const def = prof.def || (state.servers[0] && state.servers[0].id) || 'direct';
+  const dv = ruleVia({ target: def, via: prof.defVia }, prof);
+  const dt = targetNode(def, dv, 'def');
+  groups.push({ key: 'def', kind: 'rule', isDefault: true, idxs: [], items: [], target: def, via: dv, to: dt.key });
+  ruleEdges.push({ from: 'def', to: dt.key, danger: !!dt.why });
+  return { profileId: prof.id, groups, targets, bases, edges: ruleEdges.concat(baseEdges) };
+}
+
+let rfModel = null;   // the flow tree on screen (its edges are drawn from it)
+
+/** A node of the flow tree: a real button (keyboard-reachable), keyed for its edges. */
+function flowButton(cls, key) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'rf-node ' + cls;
+  b.dataset.key = key;
+  return b;
+}
+
+function flowRuleNode(g) {
+  const b = flowButton('rf-rule' + (g.isDefault ? ' rf-default' : ''), g.key);
+  const to = (g.target === 'direct' ? t('adv.direct') : g.target === 'block' ? t('adv.block') : refName(g.target)) +
+    (g.via ? ' · ' + t('rp.viaBase').replace('{base}', () => refName(g.via)) : '');
+  if (g.isDefault) {
+    spanIn(b, 'rf-ico', '↓');
+    spanIn(b, 'rf-label', t('rp.everythingElse'));
+    b.title = t('rp.everythingElse') + ' → ' + to;
+  } else {
+    const nums = g.idxs.map(i => String(i + 1).padStart(2, '0'));
+    spanIn(b, 'rf-idx', nums.length > 1 ? nums[0] + '–' + nums[nums.length - 1] : nums[0]);
+    spanIn(b, 'rf-ico', [...new Set(g.items.map(it => it.type))].map(ruleTypeIcon).join(''));
+    const sum = ruleSummary(g.items);
+    spanIn(b, 'rf-label', sum.text || '—').dir = 'ltr';
+    if (sum.more) spanIn(b, 'rf-more', '+' + sum.more);
+    b.title = sum.full + ' → ' + to;
+  }
+  // the narrow (stacked) layout has no lines: this says where the rule goes instead
+  spanIn(b, 'rf-to', '→ ' + to);
+  b.setAttribute('aria-label', b.title);
+  b.onclick = () => flowNodeClick(g);
+  return b;
+}
+
+/** A target or a base node: what it is, the base it dials through, why it is broken, its live speed. */
+function flowRefNode(n) {
+  const isBase = n.kind === 'base';
+  const terminal = n.kind === 'direct' || n.kind === 'block';
+  const cls = isBase ? 'rf-base' : 'rf-target to-' + (terminal ? n.kind : 'proxy');
+  const b = flowButton(cls + (n.why ? ' danger' : ''), n.key);
+  const icon = isBase ? '⚓' : n.kind === 'direct' ? '↗' : n.kind === 'block' ? '⛔' : n.kind === 'chain' ? '⛓' : '🛡';
+  const label = n.kind === 'direct' ? t('adv.direct') : n.kind === 'block' ? t('adv.block') : refName(n.ref);
+  spanIn(b, 'rf-ico', icon);
+  spanIn(b, 'rf-label', label);
+  const parts = [label];
+  if (isBase) {
+    spanIn(b, 'rf-tag', t('rp.base'));
+    parts.push(t('rp.base'));
+  } else if (n.via) {
+    const via = t('rp.viaBase').replace('{base}', () => refName(n.via));
+    spanIn(b, 'rf-sub', via);
+    parts.push(via);
+  }
+  if (n.why) {
+    spanIn(b, 'rf-why', '⚠ ' + t(n.why));
+    parts.push(t(n.why));
+  }
+  // block carries nothing worth counting
+  if (n.kind !== 'block') spanIn(b, 'rf-traffic', '').dataset.tags = n.tags.join(',');
+  b.title = parts.join(' — ');
+  b.setAttribute('aria-label', b.title);
+  b.onclick = () => flowNodeClick(n);
+  return b;
+}
+
+/** Draw the flow tree of the profile being edited — its draft, so an edit shows before it is saved. */
+function renderFlowTree() {
+  const wrap = $('#rpFlowWrap');
+  const host = $('#rpFlow');
+  if (!wrap || !host) return;
+  const prof = Array.isArray(state.profiles) ? advDraft() : null;
+  wrap.hidden = !prof;
+  host.innerHTML = '';
+  rfModel = prof ? flowModel(prof) : null;
+  if (!rfModel) return;
+  const grid = document.createElement('div');
+  grid.className = 'rf' + (rfModel.bases.length ? '' : ' no-bases');
+  const column = (cls, label) => {
+    const box = document.createElement('div');
+    box.className = 'rf-colwrap';
+    spanIn(box, 'rf-head', label);
+    const col = document.createElement('div');
+    col.className = 'rf-col ' + cls;
+    col.setAttribute('role', 'group');
+    col.setAttribute('aria-label', label);
+    box.appendChild(col);
+    grid.appendChild(box);
+    return col;
+  };
+  const rulesCol = column('rf-rules', t('rp.colRules'));
+  const targetsCol = column('rf-targets', t('rp.colTargets'));
+  for (const g of rfModel.groups) rulesCol.appendChild(flowRuleNode(g));
+  for (const n of rfModel.targets) targetsCol.appendChild(flowRefNode(n));
+  if (rfModel.bases.length) {
+    const basesCol = column('rf-bases', t('rp.colBases'));
+    for (const n of rfModel.bases) basesCol.appendChild(flowRefNode(n));
+  }
+  // the lines: one SVG under the nodes, drawn once the boxes are laid out
+  const layer = document.createElement('div');
+  layer.className = 'rf-edges';
+  layer.setAttribute('aria-hidden', 'true');
+  grid.appendChild(layer);
+  host.appendChild(grid);
+  applyFlowTraffic(lastPerOutbound);
+  drawFlowSoon();
+}
+
+/**
+ * A click on a node opens what it stands for: a rule its row in the editor,
+ * the default its row; a server its edit form, a chain its card. Direct,
+ * block and anything gone have no editor — the rule that uses them opens, and
+ * a gone base its picker.
+ */
+function flowNodeClick(n) {
+  if (n.kind === 'rule') return focusAdvRow(n.isDefault ? null : n.idxs[0]);
+  const ref = n.ref;
+  if (!n.why && String(ref).startsWith('chain:')) return openChainCard(String(ref).slice(6));
+  if (!n.why && !terminalTarget(ref)) return openEdit(ref);
+  if (n.kind === 'base') return flashInto($('#advBaseRow'), '.ss-current');
+  return focusAdvRow(n.first === 'def' || n.first == null ? null : n.first);
+}
+
+/** Scroll to an element, light it up for a moment and focus `focusSel` inside it. */
+function flashInto(el, focusSel) {
+  if (!el) return;
+  if (el.scrollIntoView) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 1600);
+  const f = focusSel && el.querySelector ? el.querySelector(focusSel) : null;
+  if (f && f.focus) f.focus({ preventScroll: true });
+}
+
+/** A rule's row in the editor (idx null: the default's). */
+function focusAdvRow(idx) {
+  let el = null;
+  if (idx == null) el = $('#advBody') ? $('#advBody').querySelector('.adv-default') : null;
+  else el = $$('#advRules .adv-rule').find(r => r.dataset.idx === String(idx)) || null;
+  flashInto(el, '.adv-value, .ss-current');
+}
+
+/** A chain's card on the chains page. */
+function openChainCard(cid) {
+  showView('chain');
+  flashInto($$('#chainsWrap .chain-card').find(c => c.dataset.chainId === cid) || null, '.chain-name');
+}
+
+/**
+ * Each edge as an SVG path, from the boxes of its two nodes (`rects` by key,
+ * `box` the tree's own): the source's far side to the target's near side — in
+ * RTL the far side is the left — as an S-curve between the columns.
+ */
+function flowEdgePaths(edges, rects, box, rtl) {
+  const r1 = (v) => Math.round(v * 10) / 10;
+  const out = [];
+  for (const e of edges || []) {
+    const a = rects[e.from], b = rects[e.to];
+    if (!a || !b) continue;
+    const x1 = (rtl ? a.left : a.right) - box.left;
+    const y1 = a.top + a.height / 2 - box.top;
+    const x2 = (rtl ? b.right : b.left) - box.left;
+    const y2 = b.top + b.height / 2 - box.top;
+    const c = (x2 - x1) / 2;
+    out.push({ from: e.from, to: e.to, danger: !!e.danger,
+      d: `M${r1(x1)} ${r1(y1)} C${r1(x1 + c)} ${r1(y1)} ${r1(x2 - c)} ${r1(y2)} ${r1(x2)} ${r1(y2)}` });
+  }
+  return out;
+}
+
+/** Draw the tree's lines from where its nodes landed. Nothing while it is hidden — the ResizeObserver draws it when it shows. */
+function drawFlowEdges() {
+  const host = $('#rpFlow');
+  const grid = host && host.querySelector ? host.querySelector('.rf') : null;
+  const layer = grid ? grid.querySelector('.rf-edges') : null;
+  if (!layer || !rfModel || typeof grid.getBoundingClientRect !== 'function') return;
+  const box = grid.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  const rects = {};
+  for (const n of grid.querySelectorAll('.rf-node')) rects[n.dataset.key] = n.getBoundingClientRect();
+  const rtl = getComputedStyle(grid).direction === 'rtl';
+  const w = Math.ceil(box.width), h = Math.ceil(box.height);
+  // everything below is a literal or a number: the boxes' coordinates
+  const head = '<path d="M0 0 L8 4 L0 8 z"/></marker>';
+  const markers = '<marker id="rfArrow" class="rf-mark" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">' + head +
+    '<marker id="rfArrowBad" class="rf-mark bad" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">' + head;
+  layer.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" focusable="false"><defs>${markers}</defs>` +
+    flowEdgePaths(rfModel.edges, rects, box, rtl)
+      .map(line => `<path class="rf-edge${line.danger ? ' danger' : ''}" d="${line.d}" marker-end="url(#${line.danger ? 'rfArrowBad' : 'rfArrow'})"/>`).join('') +
+    '</svg>';
+}
+
+let rfDrawPending = false;
+/** Draw the lines on the next frame (once, however many renders asked). */
+function drawFlowSoon() {
+  if (rfDrawPending) return;
+  rfDrawPending = true;
+  const run = () => { rfDrawPending = false; drawFlowEdges(); };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 0);
+}
+
+let rfRenderTimer = null;
+/** Redraw the tree a moment after the last keystroke in a rule's value. */
+function renderFlowSoon() {
+  clearTimeout(rfRenderTimer);
+  rfRenderTimer = setTimeout(renderFlowTree, 150);
+}
+// the window, the column or the page resizing moves every node: the lines follow
+if (typeof ResizeObserver !== 'undefined' && $('#rpFlow')) new ResizeObserver(() => drawFlowSoon()).observe($('#rpFlow'));
+
+/** Whether profile `id` is the one connected right now. */
+function profileLive(id) {
+  if (!state.connected || !id) return false;
+  const p = profileOfSel(state.activeServerId);
+  return !!p && p.id === id;
+}
+
+/**
+ * Each branch's live speed in the flow tree, from the core's per-outbound
+ * counters (a target through a base is 'out-…@<base>', a base 'base-…') —
+ * only while the profile on screen is the one up. Text only, like the home path.
+ */
+function applyFlowTraffic(per) {
+  const host = $('#rpFlow');
+  if (!host || typeof host.querySelectorAll !== 'function') return;
+  const live = !!rfModel && profileLive(rfModel.profileId);
+  const grid = host.querySelector('.rf');
+  if (grid) grid.classList.toggle('live', live);
+  const badge = $('#rpFlowLive');
+  if (badge) badge.hidden = !live;
+  for (const el of host.querySelectorAll('.rf-traffic')) {
+    const v = live && per ? per[String(el.dataset.tags || '').split(',')[0]] : null;
+    el.textContent = v ? `↓${fmtSpeed(v.downSpeed)} ↑${fmtSpeed(v.upSpeed)}` : '';
+    el.title = v ? `↓${fmtBytes(v.down)} ↑${fmtBytes(v.up)}` : '';
+  }
+}
+
+$('#btnRpAdd').onclick = () => addProfile();
+$('#btnRpDup').onclick = () => duplicateProfile(state.profileSel);
+$('#btnRpDel').onclick = () => deleteProfile(state.profileSel);
+$('#btnRpDefault').onclick = () => makeDefaultProfile(state.profileSel);
+$('#btnRpShare').onclick = () => shareRouting('profile', state.profileSel);
+$('#rpName').onchange = () => renameProfile(state.profileSel, $('#rpName').value);
+
+/* ------------------------- share links (irnetfree://routing/…) ------------------------- */
+
+/** A share link is QR-coded when its text is ≤ 1,700 bytes (the JSON QR's limit, for the same 320px box; the link is ASCII). */
+function shareQrFits(link) { return String(link || '').length <= QR_JSON_MAX_BYTES; }
+
+/**
+ * "Copy link" of a profile or a chain: main builds the link (it carries every
+ * server it needs, in full); the dialog says so before the Copy button.
+ */
+async function shareRouting(kind, id) {
+  const call = kind === 'chain' ? window.api.shareChain : window.api.shareRoutingProfile;
+  if (!id || typeof call !== 'function') return toast(t('t.failed'), 'err');
+  // the link is built from what is saved
+  if (kind !== 'chain' && rpDraft && rpDraft.id === id && draftDirty()) toast(t('rp.shareSaved'), 'warn');
+  let res = null;
+  try { res = await call(id); } catch (e) { res = { ok: false, error: (e && e.message) || String(e) }; }
+  if (!res || !res.ok || !res.link) return toast(t('t.failed') + (res && res.error ? ': ' + res.error : ''), 'err');
+  openShareModal(kind, res);
+}
+
+/** The share dialog: the warning, a QR when the link fits one, the link and its Copy. Returns whether a QR was drawn. */
+function openShareModal(kind, res) {
+  const link = String(res.link);
+  const n = Array.isArray(res.servers) ? res.servers.length : (Number(res.servers) || 0);
+  $('#rpShareTitle').textContent = t(kind === 'chain' ? 'rp.shareChainTitle' : 'rp.shareTitle');
+  $('#rpShareWarn').textContent = '⚠ ' + t('rp.shareWarn').replace('{n}', n);
+  const box = $('#rpShareQr');
+  box.innerHTML = '';
+  let drawn = false;
+  if (shareQrFits(link) && typeof qrcode === 'function') {
+    try {
+      const qr = qrcode(0, 'L'); qr.addData(link); qr.make();
+      box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 16, scalable: true });
+      drawn = true;
+    } catch { drawn = false; }
+  }
+  if (!drawn) box.innerHTML = `<p class="hint rp-share-big">${escapeHtml(t('qr.tooBig'))}</p>`;
+  $('#rpShareLink').value = link;
+  $('#rpShareModal').hidden = false;
+  return drawn;
+}
+$('#rpShareClose').onclick = () => { $('#rpShareModal').hidden = true; };
+$('#rpShareModal').onclick = (e) => { if (e.target === $('#rpShareModal')) $('#rpShareModal').hidden = true; };
+$('#rpShareCopy').onclick = () => { copyText($('#rpShareLink').value); toast(t('t.copied'), 'ok'); };
+
+/* the import: preview first, nothing written before Import */
+let rpImportText = '';
+
+/** A count in a summary: an array's length or a number. */
+function importCount(v) { return Array.isArray(v) ? v.length : (Number(v) || 0); }
+
+/** The names in a summary list (strings, or { name|key, error }); [] for a bare count. */
+function importNames(v) {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => {
+    if (typeof x === 'string') return x;
+    if (!x || typeof x !== 'object') return '';
+    return [x.name || x.key || '', x.error || x.reason || ''].filter(Boolean).join(': ');
+  }).filter(Boolean);
+}
+
+/** Ask main what a pasted link holds, and show it. Resolves to whether the preview opened. */
+async function openRoutingImport(text) {
+  const link = String(text || '').trim().split(/\s+/)[0];
+  const fail = (why) => { toast(t('rp.importFailed').replace('{reason}', () => why || '—'), 'err'); return false; };
+  if (!window.api || typeof window.api.routingImportPreview !== 'function') return fail('');
+  let res = null;
+  try { res = await window.api.routingImportPreview(link); } catch (e) { res = { ok: false, error: (e && e.message) || String(e) }; }
+  if (!res || !res.ok || !res.summary) return fail(res && res.error);
+  rpImportText = link;
+  renderImportSummary(res.summary);
+  $('#rpImportGo').disabled = false;
+  $('#rpImportModal').hidden = false;
+  return true;
+}
+
+/** The preview: what it is and its name, its rules and chains, the servers already here, the new ones and what could not be read. */
+function renderImportSummary(sum) {
+  const box = $('#rpImportSum');
+  box.innerHTML = '';
+  const row = (key, value, names, cls) => {
+    const r = document.createElement('div');
+    r.className = 'rp-im-row' + (cls ? ' ' + cls : '');
+    spanIn(r, 'rp-im-k', t(key));
+    spanIn(r, 'rp-im-v', value);
+    if (names && names.length) {
+      const l = document.createElement('div');
+      l.className = 'rp-im-names';
+      for (const n of names) {
+        const b = document.createElement('bdi');
+        b.textContent = n;
+        l.appendChild(b);
+      }
+      r.appendChild(l);
+    }
+    box.appendChild(r);
+  };
+  const chain = sum.kind === 'chain';
+  row('rp.imKind', t(chain ? 'rp.imKindChain' : 'rp.imKindProfile'));
+  if (sum.name) row('rp.imName', String(sum.name));
+  if (!chain) row('rp.imRules', String(importCount(sum.rules)));
+  row('rp.imChains', String(importCount(sum.chains)), importNames(sum.chains));
+  row('rp.imExisting', String(importCount(sum.serversExisting)), importNames(sum.serversExisting));
+  row('rp.imNew', String(importCount(sum.serversNew)), importNames(sum.serversNew));
+  if (importCount(sum.unreadable)) row('rp.imUnreadable', String(importCount(sum.unreadable)), importNames(sum.unreadable), 'danger');
+}
+
+function closeRoutingImport() {
+  $('#rpImportModal').hidden = true;
+  rpImportText = '';
+}
+
+/** Import: main writes it all; the lists come back and every page that draws them is redrawn. */
+async function runRoutingImport() {
+  if (!rpImportText) return false;
+  const go = $('#rpImportGo');
+  go.disabled = true;
+  let res = null;
+  try { res = await window.api.routingImport(rpImportText); } catch (e) { res = { ok: false, error: (e && e.message) || String(e) }; }
+  go.disabled = false;
+  if (!res || !res.ok) {
+    toast(t('rp.importFailed').replace('{reason}', () => (res && res.error) || '—'), 'err');
+    return false;
+  }
+  closeRoutingImport();
+  await refreshAfterImport(res);
+  const a = res.added || {};
+  let msg = t('rp.imported').replace('{servers}', importCount(a.servers)).replace('{chains}', importCount(a.chains)).replace('{profiles}', importCount(a.profiles));
+  if (res.profileId && !state.settings.advancedRouting) msg += ' — ' + t('rp.importedOff');
+  toast(msg, 'ok', 5000);
+  return true;
+}
+
+/** The servers, chains and profiles after an import: from its answer where it carries them, else asked for. */
+async function refreshAfterImport(res) {
+  try { state.servers = Array.isArray(res.servers) ? res.servers : await window.api.listServers(); } catch { /* the lists stay as they were */ }
+  try {
+    const chains = Array.isArray(res.chains) ? res.chains : await window.api.listChains();
+    if (Array.isArray(chains)) {
+      state.chains = chains.map(c => ({ id: c.id, name: c.name || 'Chain', members: (c.members || []).filter(id => state.servers.some(s => s.id === id)) }));
+    }
+  } catch { /* as above */ }
+  const profiles = Array.isArray(res.profiles) ? res.profiles.map(normalizeUiProfile) : await loadRoutingProfiles(null);
+  if (profiles) state.profiles = profiles;
+  // the imported profile is edited next — unless that would drop unsaved edits
+  if (res.profileId && Array.isArray(state.profiles) && state.profiles.some(p => p.id === res.profileId) && !draftDirty()) {
+    state.profileSel = res.profileId;
+    rpDraft = null;
+  }
+  if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
+  renderServers(); renderPicker(); renderChains(); renderPool(); renderAdvanced();
+  refreshConnLabels();
+  if (res.profileId) showView('routing');
+  else if (res.chainId) showView('chain');
+}
+$('#rpImportGo').onclick = () => runRoutingImport();
+$('#rpImportCancel').onclick = closeRoutingImport;
+$('#rpImportClose').onclick = closeRoutingImport;
+$('#rpImportModal').onclick = (e) => { if (e.target === $('#rpImportModal')) closeRoutingImport(); };
 
 /* ----------------------------- live traffic stats ----------------------------- */
 // Lifetime totals arrive every few seconds — the per-second figures ride the
@@ -5087,6 +6117,8 @@ window.api.onStats((s) => {
   // and each hop's own figures, so the path answers "how much went through
   // THIS config" instead of showing one total for everything at once
   if (s.per) applyPathTraffic(s.per);
+  // …and each branch of the routing page's flow tree, while its profile is the one up
+  if (s.per) applyFlowTraffic(s.per);
 });
 
 function resetTraffic() {
