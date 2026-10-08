@@ -2250,3 +2250,218 @@ test('dialerTagsOf names the outbounds a running config dials through — a raw 
   assert.deepEqual([...dialerTagsOf(buildRawConfig(jsonServer('xray-balancer.json', 'jb'), settings()))], [], 'both balancer members carry their own traffic');
   assert.deepEqual([...dialerTagsOf(null)], []);
 });
+
+/* ------------------------- routing profiles: "via a base" ------------------------- */
+// docs/superpowers/specs/2026-10-09-routing-profiles-design.md §2. A base is one
+// outbound group (`base-<id>`, a chain's hops `base-chain-<cid>-h<i>`), shared
+// by every target through it; a target through a base is its own outbound
+// (`out-<id>@<baseKey>`, a chain `out-chain-<cid>@<baseKey>` with `…-h<i>`)
+// whose self-dialing outbound dials the base. Without a via: today's tags.
+
+const { MUX: MUX_OBJ } = require('../src/main/mux');
+const { planServers } = require('../src/main/engineChoice');
+/** A profile's plan: today's advanced plan plus the profile's own fields. */
+const viaPlan = (over) => advancedPlan(Object.assign({ profileId: 'p1', defVia: 'inherit', base: null }, over));
+const dialer = (c, tag) => {
+  const o = outboundTagged(c, tag);
+  assert.ok(o, `${tag} is in the config`);
+  return (o.streamSettings && o.streamSettings.sockopt && o.streamSettings.sockopt.dialerProxy) || null;
+};
+const V2 = vlessWithMarkers('sv-v2', {});
+const V3 = vlessWithMarkers('sv-v3', {});
+
+test('via: two rules to different servers through one server base — one base-<id>, and out-<id>@<base> for each, dialing it', () => {
+  const c = buildConfig(viaPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-ss': SS_TCP },
+    base: 'sv-vless',
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'domain', value: 'c.com', target: 'sv-ss', via: 'inherit' }]
+  }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(c), ['base-sv-vless', 'out-sv-trojan@sv-vless', 'out-sv-ss@sv-vless', 'direct', 'block']);
+  assert.equal(dialer(c, 'out-sv-trojan@sv-vless'), 'base-sv-vless');
+  assert.equal(dialer(c, 'out-sv-ss@sv-vless'), 'base-sv-vless');
+  assert.equal(dialer(c, 'base-sv-vless'), null, 'the base dials by itself');
+  const own = outboundTagged(buildConfig(advancedPlan({ def: 'sv-vless' }), settings()), 'out-sv-vless');
+  assert.deepEqual(Object.assign({}, outboundTagged(c, 'base-sv-vless'), { tag: 'out-sv-vless' }), own, 'the base is the server’s own outbound');
+  assert.deepEqual(outboundTagged(c, 'out-sv-trojan@sv-vless').settings, TROJAN_TCP_TLS.outbound.settings);
+  assert.deepEqual(ruleTags(c), ['out-sv-trojan@sv-vless', 'out-sv-ss@sv-vless', 'direct', 'direct']);
+});
+
+test('via: a chain target through a base — its first hop dials the base, the rest dial the hop before', () => {
+  const c = buildConfig(viaPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-ss': SS_TCP },
+    rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'chain:c1', via: 'sv-ss' }]
+  }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(c), ['base-sv-ss', 'out-chain-c1@sv-ss-h0', 'out-chain-c1@sv-ss', 'direct', 'block']);
+  assert.equal(dialer(c, 'out-chain-c1@sv-ss-h0'), 'base-sv-ss');
+  assert.equal(dialer(c, 'out-chain-c1@sv-ss'), 'out-chain-c1@sv-ss-h0');
+  assert.equal(c.routing.rules.find((r) => r.ip && r.ip[0] === '10.0.0.0/8').outboundTag, 'out-chain-c1@sv-ss');
+});
+
+test('via: a chain base — hops base-chain-<cid>-h<i>, exit base-chain-<cid>; a target through it is out-<id>@chain-<cid>', () => {
+  const c = buildConfig(viaPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-ss': SS_TCP },
+    base: 'chain:c1',
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-ss' }]
+  }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(c), ['base-chain-c1-h0', 'base-chain-c1', 'out-sv-ss@chain-c1', 'direct', 'block']);
+  assert.equal(dialer(c, 'base-chain-c1-h0'), null);
+  assert.equal(dialer(c, 'base-chain-c1'), 'base-chain-c1-h0');
+  assert.equal(dialer(c, 'out-sv-ss@chain-c1'), 'base-chain-c1');
+  // a chain through a chain base
+  const cc = buildConfig(viaPlan({ chainsById: { c1: [VLESS_WS_TLS, TROJAN_TCP_TLS], c2: [SS_TCP, TROJAN_TCP_TLS] }, base: 'chain:c1', def: 'chain:c2' }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(cc), ['base-chain-c1-h0', 'base-chain-c1', 'out-chain-c2@chain-c1-h0', 'out-chain-c2@chain-c1', 'direct', 'block']);
+  assert.equal(dialer(cc, 'out-chain-c2@chain-c1-h0'), 'base-chain-c1');
+  assert.equal(ruleTags(cc).at(-1), 'out-chain-c2@chain-c1');
+});
+
+test('via: the default through the profile’s base; a default with via none is today’s out-<id>', () => {
+  const plan = viaPlan({ base: 'sv-vless', def: 'sv-trojan' });
+  const c = buildConfig(plan, settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(c), ['base-sv-vless', 'out-sv-trojan@sv-vless', 'direct', 'block']);
+  assert.equal(ruleTags(c).at(-1), 'out-sv-trojan@sv-vless');
+  const none = buildConfig(Object.assign({}, plan, { defVia: 'none' }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(none), ['out-sv-trojan', 'direct', 'block']);
+  const explicit = buildConfig(Object.assign({}, plan, { base: null, defVia: 'chain:c1' }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(explicit), ['base-chain-c1-h0', 'base-chain-c1', 'out-sv-trojan@chain-c1', 'direct', 'block']);
+  // the base as the default itself goes direct to it: a target is never its own base
+  const self = buildConfig(Object.assign({}, plan, { def: 'sv-vless' }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(self), ['out-sv-vless', 'direct', 'block']);
+});
+
+test('via: a JSON server through a base dials the base — its own fragment helper left out', () => {
+  const jf = jsonServer('xray-fragment.json', 'jf');
+  const c = buildConfig(viaPlan({ serversById: { 'sv-vless': VLESS_WS_TLS, jf }, base: 'sv-vless', def: 'jf' }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(c), ['base-sv-vless', 'out-jf@sv-vless', 'direct', 'block']);
+  assert.deepEqual(outboundTagged(c, 'out-jf@sv-vless').streamSettings.sockopt, { dialerProxy: 'base-sv-vless' });
+  assert.equal(tagsOf(c).some((t) => t.includes('~')), false, 'no ~fragment helper');
+  // a JSON server AS the base dials through its helpers, as any outbound that dials by itself
+  const b = buildConfig(viaPlan({ serversById: { 'sv-vless': VLESS_WS_TLS, jf }, base: 'jf', def: 'sv-vless' }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(b), ['base-jf', 'base-jf~fragment', 'out-sv-vless@jf', 'direct', 'block']);
+  assert.equal(dialer(b, 'base-jf'), 'base-jf~fragment');
+  assert.equal(dialer(b, 'out-sv-vless@jf'), 'base-jf');
+  // a JSON chain's own hop (proxySettings) is dropped with its helpers
+  const jc = jsonServer('xray-chain.json', 'jc');
+  const ch = buildConfig(viaPlan({ serversById: { 'sv-vless': VLESS_WS_TLS, jc }, base: 'sv-vless', def: 'jc' }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(ch), ['base-sv-vless', 'out-jc@sv-vless', 'direct', 'block']);
+  assert.equal(outboundTagged(ch, 'out-jc@sv-vless').proxySettings, undefined);
+  assert.equal(dialer(ch, 'out-jc@sv-vless'), 'base-sv-vless');
+});
+
+test('via: the same server with and without a via — out-<id> and out-<id>@<base> side by side', () => {
+  const c = buildConfig(viaPlan({
+    base: 'sv-vless',
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan', via: 'none' }, { type: 'domain', value: 'b.com', target: 'sv-trojan' }]
+  }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(c), ['out-sv-trojan', 'base-sv-vless', 'out-sv-trojan@sv-vless', 'direct', 'block']);
+  assert.equal(dialer(c, 'out-sv-trojan'), null);
+  assert.equal(dialer(c, 'out-sv-trojan@sv-vless'), 'base-sv-vless');
+  assert.deepEqual(ruleTags(c).slice(0, 2), ['out-sv-trojan', 'out-sv-trojan@sv-vless']);
+});
+
+test('via: a base that no longer exists refuses the connect in plain words (fa / en), like a missing default', () => {
+  for (const over of [
+    { base: 'sv-gone', rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }] },
+    { base: 'chain:emptied', def: 'sv-trojan' },
+    { rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan', via: 'chain:missing' }] },
+    { def: 'sv-trojan', defVia: 'sv-gone' }
+  ]) {
+    const plan = viaPlan(Object.assign({ chainsById: { c1: [VLESS_WS_TLS, TROJAN_TCP_TLS], emptied: [] } }, over));
+    assert.throws(() => buildConfig(plan, settings({ lang: 'en' })), /base .*no longer exists/i, JSON.stringify(over));
+    assert.throws(() => buildConfig(plan, settings({ lang: 'fa' })), /پایه/, JSON.stringify(over) + ' (fa)');
+  }
+  // a base nothing goes through, and a rule whose own target is gone, stop nothing
+  assert.doesNotThrow(() => buildConfig(viaPlan({ base: 'sv-gone', def: 'sv-trojan', defVia: 'none' }), settings()));
+  assert.doesNotThrow(() => buildConfig(viaPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-also-gone', via: 'sv-gone' }] }), settings()));
+});
+
+test('via: mux only on a direct server target — never on a base, nor on anything through one', () => {
+  const c = buildConfig(viaPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-v2': V2, 'sv-v3': V3 },
+    chainsById: { cv: [V2, V3] },
+    base: 'sv-vless',
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-v2' }, { type: 'domain', value: 'b.com', target: 'chain:cv' }],
+    def: 'sv-v3', defVia: 'none'
+  }), settings({ blockAds: false, muxServerIds: ['sv-vless', 'sv-v2', 'sv-v3'] }));
+  const muxed = c.outbounds.filter((o) => o.mux).map((o) => o.tag);
+  assert.deepEqual(muxed, ['out-sv-v3']);
+  assert.deepEqual(outboundTagged(c, 'out-sv-v3').mux, MUX_OBJ);
+  for (const t of tagsOf(c)) if (t.includes('@') || t.startsWith('base-')) assert.equal(outboundTagged(c, t).mux, undefined, t);
+});
+
+test('via: the entry hosts are the base’s, never a target behind it; only the base is pinned', () => {
+  const plan = viaPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS, 'sv-ss': SS_TCP },
+    base: 'sv-vless',
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }],
+    def: 'sv-ss', defVia: 'none'
+  });
+  assert.deepEqual(entryHosts(plan), ['a.example.com', 'c.example.com']);
+  const pins = { 'a.example.com': ['203.0.113.1'], 'b.example.com': ['203.0.113.2'], 'c.example.com': ['203.0.113.3'] };
+  const c = buildConfig(plan, settings({ blockAds: false, entryHostIps: pins }));
+  assert.deepEqual(c.dns.hosts, { 'a.example.com': ['203.0.113.1'], 'c.example.com': ['203.0.113.3'] });
+  assert.deepEqual(outboundTagged(c, 'out-sv-trojan@sv-vless').streamSettings.sockopt, { dialerProxy: 'base-sv-vless' }, 'its name travels through the base');
+  assert.equal(outboundTagged(c, 'base-sv-vless').streamSettings.sockopt.domainStrategy, 'UseIPv4');
+  // …and under TUN only the base is bound to the NIC
+  const tun = buildConfig(plan, settings({ blockAds: false, directInterface: 'Wi-Fi' }));
+  assert.equal(outboundTagged(tun, 'base-sv-vless').streamSettings.sockopt.interface, 'Wi-Fi');
+  assert.equal(outboundTagged(tun, 'out-sv-trojan@sv-vless').streamSettings.sockopt.interface, undefined);
+  // a link server's anti-DPI dialer is a chained hop's: dropped behind a base
+  const frag = vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
+  const f = buildConfig(viaPlan({ serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-frag': frag }, base: 'sv-vless', def: 'sv-frag' }), settings({ blockAds: false }));
+  assert.equal(tagsOf(f).some((t) => t.startsWith('dpi-')), false);
+  assert.equal(dialer(f, 'out-sv-frag@sv-vless'), 'base-sv-vless');
+});
+
+test('via: planServers includes the bases — a PattN base runs the whole plan on PattN', () => {
+  const pattn = Object.assign({}, SS_TCP, { engine: 'xray-pattn' });
+  const plan = viaPlan({ serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-ss': pattn }, base: 'sv-ss', def: 'sv-vless' });
+  assert.deepEqual(planServers(plan).map((s) => s.id), ['sv-vless', 'sv-ss']);
+  assert.equal(require('../src/main/engineChoice').chooseEngine(plan, 'xray'), 'xray-pattn');
+  const chainBase = viaPlan({ base: 'chain:c1', def: 'sv-wg' });
+  assert.deepEqual(planServers(chainBase).map((s) => s.id), ['sv-wg', 'sv-vless', 'sv-trojan']);
+});
+
+test('via: a corporate WireGuard through a base carries its resolver through that outbound', () => {
+  const c = buildConfig(viaPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-wgcorp': WG_CORP },
+    base: 'sv-vless',
+    rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'sv-wgcorp' }],
+    def: 'sv-vless', defVia: 'none'
+  }), settings({ blockAds: false, dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: [] }));
+  assert.equal(dialer(c, 'out-sv-wgcorp@sv-vless'), 'base-sv-vless');
+  const corp = c.routing.rules.find((r) => Array.isArray(r.ip) && r.ip.includes('192.168.60.1') && r.inboundTag);
+  assert.ok(corp, 'the corporate resolver is routed');
+  assert.equal(corp.outboundTag, 'out-sv-wgcorp@sv-vless');
+});
+
+test('via: a profile’s own useMode decides the country bypass under its rules', () => {
+  const plan = viaPlan({ def: 'sv-vless' });
+  const on = buildConfig(Object.assign({}, plan, { useMode: true }), settings({ blockAds: false, routingMode: 'bypass-ir', advancedUseMode: false }));
+  assert.ok(on.routing.rules.some((r) => r.ip && r.ip[0] === 'geoip:ir'), 'the profile asks for it');
+  const off = buildConfig(Object.assign({}, plan, { useMode: false }), settings({ blockAds: false, routingMode: 'bypass-ir', advancedUseMode: true }));
+  assert.equal(off.routing.rules.some((r) => r.ip && r.ip[0] === 'geoip:ir'), false, 'the profile does not');
+});
+
+test('via: a migrated profile (no vias, no base) builds exactly today’s advanced config', () => {
+  const { profileFromSettings } = require('../src/main/routingProfiles');
+  const rules = [
+    { type: 'domain', value: 'geosite:category-ir', target: 'direct' },
+    { type: 'ip', value: '10.20.0.0/16', target: 'chain:c1' },
+    { type: 'domain', value: 'a.com', target: 'sv-trojan' },
+    { type: 'port', value: '5060', target: 'sv-wg' }
+  ];
+  for (const def of ['sv-vless', 'chain:c1', 'direct', 'block']) {
+    for (const advancedUseMode of [false, true]) {
+      const s = { routeRules: rules, routeDefault: def, advancedUseMode };
+      const p = profileFromSettings(s);
+      const today = advancedPlan({ rules, def });
+      const profile = advancedPlan({ profileId: p.id, rules: p.rules, def: p.def, defVia: p.defVia, base: p.base, useMode: p.useMode });
+      for (const over of [{}, { routingMode: 'bypass-ir', dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: ['178.22.122.100'] }, { directInterface: 'eth0', entryHostIps: { 'a.example.com': ['203.0.113.1'] }, muxServerIds: ['sv-vless'] }]) {
+        const set = settings(Object.assign({ advancedUseMode }, over));
+        assert.equal(JSON.stringify(buildConfig(profile, set)), JSON.stringify(buildConfig(today, set)), `${def} ${advancedUseMode} ${JSON.stringify(over)}`);
+      }
+      assert.deepEqual(entryHosts(profile), entryHosts(today));
+      assert.deepEqual(planServers(profile), planServers(today));
+    }
+  }
+});

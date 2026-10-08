@@ -50,6 +50,7 @@
  * Pure but for the probe, which is handed everything it runs (`deps`).
  */
 const crypto = require('crypto');
+const { effectiveVia } = require('./routingProfiles');
 
 /** The mux object an eligible outbound carries. UDP 443 (QUIC) keeps its own way. */
 const MUX = Object.freeze({ enabled: true, concurrency: 8, xudpConcurrency: 16, xudpProxyUDP443: 'skip' });
@@ -441,6 +442,8 @@ function markRecheck(cache, fps) {
  * `rawServer`, the JSON server this connect runs as written
  * (configBuilder.rawServerOf / buildRawConfig): its own config, mux and all,
  * so there is nothing to test. Where its full form runs it is a candidate.
+ * Nor a target through a base (a routing profile's via), nor the base: mux
+ * stays on direct server targets (configBuilder never writes it there).
  */
 function muxCandidates(plan, rawServer) {
   const out = [];
@@ -453,7 +456,10 @@ function muxCandidates(plan, rawServer) {
   };
   switch (plan.mode) {
     case 'single': if (!rawServer || rawServer !== plan.server) add(plan.server); break;
-    case 'advanced': for (const r of plan.rules || []) if (r) target(r.target); target(plan.def); break;
+    case 'advanced':
+      for (const r of plan.rules || []) if (r && !effectiveVia(r, plan)) target(r.target);
+      if (!effectiveVia('def', plan)) target(plan.def);
+      break;
     case 'pool': target(plan.primary); for (const e of plan.entries || []) if (e) target(e.target); break;
     default: break;   // a chain: hops only
   }
