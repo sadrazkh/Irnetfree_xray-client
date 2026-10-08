@@ -294,6 +294,41 @@ insecure.certPin = 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c2
 check('json-raw-pinned', buildRawConfig(insecure, F.settings(managed)));
 check('json-raw-wg-resolved', buildRawConfig(jsonServers['xray-wireguard'][0], F.settings(Object.assign({ wgEndpointIps: { 'wg.example.com': '198.51.100.7' } }, JSON_SETTINGS.tun))));
 
+// Routing profiles: "via a base" (docs/superpowers/specs/2026-10-09-routing-profiles-design.md §2).
+// A base is one outbound group (`base-<id>`, a chain's `base-chain-<cid>` with
+// its hops) shared by every target through it; a target through it is its own
+// outbound (`out-<id>@<base>`, a chain's hops `…-h<i>`) dialing the base's exit
+// by dialerProxy — a server and a chain through a server base and through a
+// chain base, the default through it, a corporate WireGuard through it with its
+// resolver, a JSON server through it and as the base, and all of it under TUN
+// with the names pinned and mux on the one direct server target.
+const VIA_SERVERS = { 'sv-vless': F.VLESS_WS_TLS, 'sv-trojan': F.TROJAN_TCP_TLS, 'sv-ss': F.SS_TCP, 'sv-wgcorp': F.WG_CORP, jf, jc };
+const viaPlan = (over) => Object.assign({
+  mode: 'advanced', profileId: 'rp-ci', serversById: VIA_SERVERS, chain: [],
+  chainsById: { c1: [F.VLESS_WS_TLS, F.TROJAN_TCP_TLS], c2: [F.SS_TCP, F.TROJAN_TCP_TLS] },
+  rules: [], def: 'direct', defVia: 'inherit', base: null, useMode: false
+}, over);
+const VIA_SHAPES = {
+  'server-base': viaPlan({ base: 'sv-vless', rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'domain', value: 'b.com', target: 'sv-ss' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c2' }], def: 'sv-vless', defVia: 'none' }),
+  'chain-base': viaPlan({ base: 'chain:c1', rules: [{ type: 'domain', value: 'a.com', target: 'sv-ss' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c2' }, { type: 'domain', value: 'geosite:category-ir', target: 'direct' }], def: 'sv-trojan' }),
+  'explicit-and-none': viaPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan', via: 'chain:c1' }, { type: 'domain', value: 'b.com', target: 'sv-trojan', via: 'none' }, { type: 'port', value: '5060', target: 'chain:c2', via: 'sv-vless' }], def: 'sv-ss', defVia: 'sv-vless' }),
+  'wg-through-base': viaPlan({ base: 'sv-vless', rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'sv-wgcorp' }], def: 'sv-vless', defVia: 'none' }),
+  'json-through-base': viaPlan({ base: 'sv-vless', rules: [{ type: 'domain', value: 'a.com', target: 'jf' }, { type: 'domain', value: 'b.com', target: 'jc' }], def: 'sv-trojan', defVia: 'none' }),
+  'json-as-base': viaPlan({ base: 'jf', rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c2' }], def: 'sv-ss' })
+};
+const VIA_SETTINGS = {
+  managed,
+  tun: Object.assign({ routingMode: 'bypass-ir', tunMode: true, directInterface: 'Wi-Fi', entryHostIps: Object.assign({ 'edge1.example.com': ['203.0.113.40'] }, PINS), wgEndpointIps: { 'cobra.example': '198.51.100.21' }, muxServerIds: ['sv-vless', 'sv-trojan', 'sv-ss'] }, managed),
+  strict: Object.assign({ tunMode: true, leakGuard: 'strict', directInterface: 'eth0' }, managed)
+};
+for (const [name, plan] of Object.entries(VIA_SHAPES)) {
+  for (const [variant, over] of Object.entries(VIA_SETTINGS)) {
+    // under the strict guard the profile applies the routing mode under its rules (its own useMode)
+    const p = variant === 'strict' ? Object.assign({}, plan, { useMode: true }) : plan;
+    check(`via-${name}-${variant}`, buildConfig(p, F.settings(Object.assign({ routingMode: 'bypass-ir' }, over))));
+  }
+}
+
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
 // sing-tun there only accepts utun<N> and names the device itself — plus the

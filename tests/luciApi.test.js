@@ -102,13 +102,39 @@ test('configs groups subscriptions by name, manual servers under manual, chains 
   assert.deepEqual(c.groups[1].items.map(i => i.id), [SERVER.id, SERVER_B.id]);
   assert.deepEqual(c.groups[2].items, [{ id: 'ch1', name: 'Chain one', proto: 'chain' }], 'a chain with one member is not connectable');
   assert.deepEqual(c.groups[3].items, [{ id: '__pool__', name: 'Proxy pool (1)', proto: 'pool' }]);
-  assert.deepEqual(c.groups[4].items, [{ id: '__advanced__', name: 'Advanced routing', proto: 'advanced' }]);
+  // one item per routing profile: today's advanced routing is profile rp-default (routingProfiles.js)
+  assert.deepEqual(c.groups[4].items, [{ id: '__advanced__:rp-default', name: 'Advanced routing', proto: 'advanced' }]);
   await s.service.invoke('connect', SERVER.id);
   assert.equal((await api.handle('configs', {})).activeId, SERVER.id);
   // nothing but manual servers: one group
   const plain = H.start();
   t.after(() => plain.service.shutdown());
   assert.deepEqual((await createLuciApi({ service: plain.service }).handle('configs', {})).groups.map(g => g.kind), ['manual']);
+});
+
+test('configs lists each routing profile that has rules or a default; a plain __advanced__ selection or connection is the first profile’s item', async (t) => {
+  const work = { id: 'rp-work', name: 'Work', rules: [{ type: 'domain', value: 'a.com', target: SERVER_B.id }], def: SERVER.id, defVia: 'inherit', useMode: false, base: null };
+  const empty = { id: 'rp-empty', name: 'Empty', rules: [], def: '', defVia: 'inherit', useMode: false, base: null };
+  const s = H.start({
+    routingProfiles: [{ id: 'rp-default', name: 'Advanced routing', rules: [], def: SERVER.id, defVia: 'inherit', useMode: false, base: null }, work, empty],
+    selectedServerId: '__advanced__',
+    settings: { advancedRouting: true, routeDefault: SERVER.id, routeRules: [] }
+  });
+  t.after(() => s.service.shutdown());
+  const api = createLuciApi({ service: s.service });
+  const c = await api.handle('configs', {});
+  assert.deepEqual(c.groups.find(g => g.kind === 'routing').items, [
+    { id: '__advanced__:rp-default', name: 'Advanced routing', proto: 'advanced' },
+    { id: '__advanced__:rp-work', name: 'Work', proto: 'advanced' }
+  ], 'a profile with neither rules nor a default is not connectable');
+  assert.equal(c.selectedId, '__advanced__:rp-default');
+  // LuCI connects a profile by its item id; the router connects it
+  await api.handle('connect', { id: '__advanced__:rp-work' });
+  await until(() => s.statuses.some(x => x.state === 'connected'), 'the profile connected');
+  assert.equal((await api.handle('configs', {})).activeId, '__advanced__:rp-work');
+  // the switch off: no routing group, as before
+  await s.service.invoke('settings:set', { advancedRouting: false });
+  assert.equal((await api.handle('configs', {})).groups.some(g => g.kind === 'routing'), false);
 });
 
 test('devices, log and diagnostics answer their shapes; test without a connection says so', async (t) => {

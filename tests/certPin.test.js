@@ -142,6 +142,16 @@ test('pinTargets: probe = directly dialled, asked for allowInsecure, no pin yet;
   assert.deepEqual(pinTargets(twice), { probe: [A, B], behind: [C] });
 });
 
+test('a routing profile’s target through a base is reached through it: the base is dialled directly, the target is behind', () => {
+  // profile base `a`; rule → b through it; default c with no via; a chain base for the second rule
+  const adv = { mode: 'advanced', profileId: 'p1', serversById: byId, chainsById: { c1: [B, A] }, chain: [],
+    base: 'a', rules: [{ target: 'b' }, { target: 'c', via: 'chain:c1' }], def: 'safe', defVia: 'none' };
+  assert.deepEqual(directServers(adv).map(s => s.id), ['a', 'b', 'safe'], 'the base, the chain base’s first hop, the default');
+  const viaOnly = Object.assign({}, adv, { rules: [{ target: 'c' }] });
+  assert.deepEqual(directServers(viaOnly).map(s => s.id), ['a', 'safe']);
+  assert.deepEqual(pinTargets(viaOnly), { probe: [A], behind: [C] }, 'c is only reachable through a');
+});
+
 /* ----------------------------- the core’s mismatch line ----------------------------- */
 
 // Captured from Xray 26.3.27 and PattN 26.9.1 dialling the fixture server with a wrong

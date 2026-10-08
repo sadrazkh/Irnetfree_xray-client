@@ -116,7 +116,8 @@ test('both mirrors refuse a chain that lost a member, with the same words, where
     const plan = slice(source, label, 'function buildPlan(serverId, settings) {', 'return { plan, label, entryAddrs };');
     for (const call of [
       'for (const e of enabled) refuseBroken(e.target);',                   // a pool entry
-      'for (const tg of targets) { refuseBroken(tg); addEntryForTarget(tg); }', // every advanced rule and the default
+      'for (const tg of [...targets, ...vias]) refuseBroken(tg);',           // every advanced rule, the default, every base (routing profiles)
+      'for (const tg of entries) addEntryForTarget(tg);',                    // …the bypass cut for a base, never a target behind it
       "refuseBroken('chain:' + serverId);",                                  // a chain connected to directly
       "refuseBroken('chain');"                                               // the legacy chain
     ]) assert.ok(plan.includes(call), `${label}: buildPlan no longer calls ${call}`);
@@ -317,4 +318,46 @@ test('every connect reads the NIC again — a live tunnel keeps its old name onl
     assert.match(body, /if \(settings\.tunMode\) \{\n\s*const phys = await tun\.physicalInterface\(\)\.catch\(\(\) => null\);\n\s*if \(stale\(\)\) return abandoned;\n\s*const name = \(phys && phys\.name && !isOwnTunInterface\(phys\.name\)\) \? phys\.name : \(\(tun\.active && liveDirectInterface\) \|\| null\);/,
       `${label}: the read is unconditional, the live name only its fallback`);
   }
+});
+
+/* ------------------- routing profiles (docs/superpowers/specs/2026-10-09-routing-profiles-design.md) ------------------- */
+// Driven for real on the router in routingProfilesService.test.js; main.js
+// must plan, migrate, answer and mirror the same way.
+
+test('both mirrors plan a routing profile the same way, line for line: either selection form, its own rules / default / via / base / useMode, every base refused when broken, the bypass cut for a base', () => {
+  const [[, main], [, service]] = both('} else if (isAdvancedSelection(serverId)) {', '} else if (chainById[serverId]) {');
+  assert.equal(main, service);
+  assert.match(main, /const pid = profileIdOf\(serverId, profiles\);/);
+  assert.match(main, /This routing profile no longer exists/);
+  assert.match(main, /این پروفایلِ روتینگ دیگر وجود ندارد/, 'bilingual, like every connect error');
+  assert.match(main, /const rules = resolveProcessRules\(Array\.isArray\(profile\.rules\) \? profile\.rules : \[\], settings\.procIps\);/);
+  assert.match(main, /plan = \{ mode: 'advanced', profileId: profile\.id, serversById, chainsById, chain: legacyChain, rules, def, defVia: profile\.defVia, base: profile\.base, useMode: profile\.useMode \};/);
+  for (const name of ['getRoutingProfiles() {', 'setRoutingProfiles(list) {', 'procRules(settings, serverId) {', 'activeProcNames(settings, serverId) {']) {
+    const [[, m], [, s]] = both('function ' + name);
+    assert.equal(m, s, name);
+  }
+  for (const [label, source] of [['main.js', MAIN], ['service.js', SERVICE]]) {
+    // the migration at start, beside the other store migrations
+    assert.match(source, /migrateSettingsStore\(\);\n[\s\S]{0,1200}getRoutingProfiles\(\);   \/\/ today's advanced routing becomes profile rp-default, once/, label);
+    // process rules: the connect's own profile's, resolved per connect and per reload
+    assert.equal((source.match(/let settings = await effectiveSettings\(serverId\);/g) || []).length, 2, `${label}: the connect and the process-route reload`);
+    assert.match(source, /for \(const n of names\) procIps\[n\] = ipsByName\[n\] \|\| \(cache\[n\] && cache\[n\]\.ips\) \|\| \[\];\n\s*return Object\.assign\(\{\}, s, \{ procIps \}\);/, label);
+    // the geo warning reads the plan's rules, not the settings'
+    assert.match(source, /plan\.mode === 'advanced' &&\s*\(\(plan\.rules \|\| \[\]\)\.some\(r => r && \/\^\(geoip\|geosite\):\/i/, label);
+    // the reconnect state: the profile and the chains the live connection was built from
+    assert.match(source, /liveMux = mux\.ids\.length \? mux : null;\n\s*liveRouting = liveRoutingOf\(\{ serverId, plan, profiles: getRoutingProfiles\(\), chains: getChains\(\) \}\);/, label);
+    // the old settings path mirrors into rp-default
+    assert.match(source, /if \(\['routeRules', 'routeDefault', 'advancedUseMode'\]\.some\(k => k in partial\)\) \{\n\s*const profiles = getRoutingProfiles\(\);\n\s*const synced = mirrorFromSettings\(profiles, next\);\n\s*if \(synced !== profiles\) store\.set\('routingProfiles', synced\);/, label);
+    // the backup carries and restores them
+    assert.equal((source.match(/routingProfiles: getRoutingProfiles\(\), settings: getSettings\(\)/g) || []).length, 2, `${label}: export and import`);
+    assert.match(source, /pool: r\.next\.pool, routingProfiles: r\.next\.routingProfiles, settings: r\.next\.settings \}\);/, label);
+  }
+  assert.match(MAIN, /ipcMain\.handle\('routing:profiles', \(\) => \(\{ profiles: getRoutingProfiles\(\) \}\)\);/);
+  assert.match(MAIN, /ipcMain\.handle\('routing:setProfiles', \(e, profiles\) => setRoutingProfiles\(profiles\)\);/);
+  assert.match(SERVICE, /'routing:profiles': \(\) => \(\{ profiles: getRoutingProfiles\(\) \}\),/);
+  assert.match(SERVICE, /'routing:setProfiles': \(profiles\) => setRoutingProfiles\(profiles\),/);
+  assert.match(MAIN, /^let liveRouting = null;$/m);
+  assert.match(SERVICE, /^ {2}let liveRouting = null;$/m);
+  // Windows' W4 hint reads the live profile's stored rules
+  assert.match(MAIN, /const profile = getRoutingProfiles\(\)\.find\(p => p\.id === plan\.profileId\);\n\s*found\.push\(\.\.\.lanOverlaps\(lans, profile \? profile\.rules : getSettings\(\)\.routeRules,/);
 });
