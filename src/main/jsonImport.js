@@ -519,5 +519,5 @@ function jsonEditFields(server) {
 
 module.exports = {
   looksLikeJson, importJson, serversFromXray, serversFromSingbox, mainOutboundTag, helperClosure, jsonInfo,
-  applyJsonEdits, jsonEditFields, PROXY_PROTOCOLS
+  applyJsonEdits, jsonEditFields, PROXY_PROTOCOLS, JSON_DERIVED: DERIVED
 };
