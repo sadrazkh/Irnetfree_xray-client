@@ -10,6 +10,7 @@ import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.LocalAuth
 import com.irnetfree.vpn.core.PoolEntry
 import com.irnetfree.vpn.core.RouteRule
+import com.irnetfree.vpn.core.RoutingProfiles
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.SingboxConfig
 import org.json.JSONArray
