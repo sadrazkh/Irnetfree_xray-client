@@ -56,15 +56,15 @@ object TunnelSetup {
         append("misc:\n  task-stack-size: 20480\n  connect-timeout: 5000\n  read-write-timeout: 60000\n  log-level: warn\n")
     }
 
-    /**
-     * The core a connect really runs, and its config. [raw]: a raw-mode JSON
-     * server's own config — it carries no DNS hijack of the app's, so the OS
-     * must not be handed the tunnel peer as its resolver.
-     */
-    class CoreConfig(val engine: String, val json: String, val raw: Boolean = false)
+    /** The core a connect really runs, and its config. */
+    class CoreConfig(val engine: String, val json: String)
 
-    /** Does [server] run exactly as written — a JSON server switched to raw? */
-    fun runsRaw(server: ServerConfig): Boolean = server.isJson && server.jsonMode == JsonImport.MODE_RAW
+    /**
+     * A JSON server set to run raw (exactly as written) — which the desktop
+     * does in proxy mode only. Android's VPN is always a TUN, so here it runs
+     * in its full form; the stored mode is kept, so a backup round-trips.
+     */
+    fun setToRaw(server: ServerConfig): Boolean = server.isJson && server.jsonMode == JsonImport.MODE_RAW
 
     /**
      * The servers a plan routes to: a single server, a chain's hops, the
@@ -104,21 +104,11 @@ object TunnelSetup {
         auth: LocalAuth?, lan: LanShare?, muxIds: Set<String> = emptySet(), coreVersion: (String) -> String = { "" }, log: (String) -> Unit
     ): CoreConfig {
         val single = plan as? ConnectionPlan.Single
-        // A raw-mode JSON server connected on its own: its config as written
-        // (ConfigBuilder.buildRawConfig), on an Xray core — sing-box cannot run it.
-        val raw = single?.server?.takeIf { srv: ServerConfig -> runsRaw(srv) }
-        if (raw != null) {
-            val e = if (engine == EngineChoice.SINGBOX) EngineChoice.XRAY else engine
-            if (engine == EngineChoice.SINGBOX) log("sing-box cannot run an Xray config as written — using the in-process core")
-            log("Running \"${raw.name}\" exactly as written (raw JSON) — the app's DNS management, leak guard and routing mode do not apply")
-            val config = ConfigBuilder.buildRawConfig(raw, s, inboundAuth = auth, lan = lan, wgEndpointIps = wgIps)
-            val adapted = if (CoreCompat.needsCoreVersion(config)) CoreCompat.adaptForCore(config, coreVersion(e)) else config
-            return CoreConfig(e, adapted.toString(), raw = true)
-        }
-        // Raw is for a single connect only: in a chain, a pool or advanced
-        // routing such a server runs in its full form — said once per connect.
-        planTargets(plan).filter { srv: ServerConfig -> runsRaw(srv) }.distinctBy { srv: ServerConfig -> srv.id }
-            .forEach { srv: ServerConfig -> log("\"${srv.name}\" is set to run raw, but a chain/routing target uses its full form") }
+        // Raw (exactly as written) runs on the desktop in proxy mode; Android's
+        // VPN is always a TUN, so a JSON server set to raw runs in its full form
+        // here, wherever the plan uses it — said once per connect.
+        planTargets(plan).filter { srv: ServerConfig -> setToRaw(srv) }.distinctBy { srv: ServerConfig -> srv.id }
+            .forEach { srv: ServerConfig -> log("\"${srv.name}\" is set to run raw — on Android its full form runs, so the app's DNS and tunnel rules apply") }
         if (engine == EngineChoice.SINGBOX && single != null) {
             try {
                 return CoreConfig(engine, SingboxConfig.build(single.server, s, auth, lan).toString())

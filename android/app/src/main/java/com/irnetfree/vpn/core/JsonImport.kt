@@ -27,6 +27,10 @@ object JsonImport {
     const val MODE_RAW = "raw"
     const val CLASH_ERROR = "Clash YAML is not supported — use the subscription link"
     const val NO_PROXY = "This config has no proxy outbound (vless, vmess, trojan, shadowsocks, socks, http, wireguard or hysteria)"
+    const val TOO_DEEP = "JSON nested too deeply"
+
+    /** The deepest objects/arrays go in a text read as JSON; a real config is under 15. */
+    const val MAX_DEPTH = 64
 
     /** "raw" stays raw; anything else (absent, unknown) is full. */
     fun modeOf(v: String?): String = if (v == MODE_RAW) MODE_RAW else MODE_FULL
@@ -110,15 +114,65 @@ object JsonImport {
     }
 
     /**
+     * How deep [s] nests objects and arrays, strings skipped — counting stops
+     * once it passes [limit]. Checked BEFORE org.json reads a text: its parser
+     * (and every walk of the result) recurses, and a body nested thousands deep
+     * — a subscription answers what it likes — ran the thread out of stack,
+     * a StackOverflowError no `catch (e: Exception)` sees, and the app went down.
+     */
+    internal fun nestingDepth(s: String, limit: Int = MAX_DEPTH): Int {
+        var depth = 0
+        var max = 0
+        var inString = false
+        var escaped = false
+        for (c in s) {
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (c == '\\') {
+                    escaped = true
+                } else if (c == '"') {
+                    inString = false
+                }
+                continue
+            }
+            when (c) {
+                '"' -> { inString = true }
+                '{', '[' -> {
+                    depth++
+                    if (depth > max) max = depth
+                    if (max > limit) return max
+                }
+                '}', ']' -> { if (depth > 0) depth-- }
+                else -> {}
+            }
+        }
+        return max
+    }
+
+    private fun tooDeep(): Result = Result(emptyList(), listOf(Problem("", TOO_DEEP)))
+
+    /**
      * [text] as servers, or null when it is not JSON at all (LinkParser.parseMany
      * then reads it as links, exactly as before). A config that holds no proxy
      * outbound — a panel's "expires on" / "volume left" rows — is no server and
-     * no error.
+     * no error. A body nested deeper than [MAX_DEPTH] is an error, never a crash
+     * — and a StackOverflowError anywhere in reading it is caught here, at the
+     * one door every pasted text and subscription body comes through.
      */
     fun importJson(text: String): Result? {
         val t = clean(text)
         if (!looksLikeJson(t) && CLASH.containsMatchIn(t)) return Result(emptyList(), listOf(Problem("", CLASH_ERROR)))
         val body = jsonText(t) ?: return null
+        if (nestingDepth(body) > MAX_DEPTH) return tooDeep()
+        return try {
+            importBody(body)
+        } catch (e: StackOverflowError) {
+            tooDeep()
+        }
+    }
+
+    private fun importBody(body: String): Result {
         val values: List<Any> = try {
             readValues(body)
         } catch (e: Exception) {
@@ -392,16 +446,9 @@ object JsonImport {
     }
 
     /**
-     * The tag of [s]'s main outbound inside its own config — for a balancer's
-     * member, the member it is (the same outbound, else the one its name ends
-     * with, else the one at its address). Null when the config has none.
+     * Which balancer member [s] is inside [cfg]: the same outbound, else the one
+     * its name ends with, else the one at its address. Null when none fits.
      */
-    fun mainTagOf(s: ServerConfig): String? {
-        val cfg = s.json ?: return null
-        val choice = mainOutboundTag(cfg) ?: return null
-        return if (choice.tags.size == 1) choice.tags[0] else sameMain(s, cfg, choice.tags)
-    }
-
     private fun sameMain(s: ServerConfig, cfg: JSONObject, tags: List<String>): String? {
         val mine = JsonText.canonical(s.outbound)
         for (t in tags) {
@@ -453,8 +500,11 @@ object JsonImport {
     private fun parseConfig(text: String): JSONObject {
         val t = clean(text)
         if (!t.startsWith("{")) throw IllegalArgumentException("The config must be one JSON object, starting with {")
+        if (nestingDepth(t) > MAX_DEPTH) throw IllegalArgumentException(TOO_DEEP)
         val v: Any = try {
             JSONTokener(t).nextValue()
+        } catch (e: StackOverflowError) {
+            throw IllegalArgumentException(TOO_DEEP)
         } catch (e: Exception) {
             throw IllegalArgumentException("Not valid JSON: " + (e.message ?: "parse error"))
         }

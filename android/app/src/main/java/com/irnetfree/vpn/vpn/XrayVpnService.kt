@@ -977,10 +977,7 @@ class XrayVpnService : VpnService() {
             // never before a retry is due, never on a reconnect of the
             // service's own. sing-box and a chain's hops never get it; off,
             // the config is the one of before.
-            // A raw-mode JSON server runs its own config as written (TunnelSetup.coreConfig):
-            // the app's mux is not put on it, so it is not tested either.
-            val rawSingle = single != null && TunnelSetup.runsRaw(single.server)
-            val mux = if (engine == EngineChoice.SINGBOX || rawSingle) Mux.Pick.NONE else Mux.choose(
+            val mux = if (engine == EngineChoice.SINGBOX) Mux.Pick.NONE else Mux.choose(
                 mode = store.muxMode, connection = plan, cache = store.muxProbes,
                 now = { System.currentTimeMillis() },
                 test = { srv: ServerConfig -> XrayTester.probeMux(ctx, srv, s, wanted) },
@@ -1002,9 +999,8 @@ class XrayVpnService : VpnService() {
 
             // What the OS resolves at: the tunnel peer under managed DNS (every
             // query enters the TUN and dns-out answers it), the user's own public
-            // resolvers otherwise. A sing-box-format config carries no hijack,
-            // nor does a raw JSON config (its own DNS, if any, answers its own core).
-            val hijacks = engine != EngineChoice.SINGBOX && !built.raw
+            // resolvers otherwise. A sing-box-format config carries no hijack.
+            val hijacks = engine != EngineChoice.SINGBOX
             val adapterDns = DnsPlan.adapterDnsServers(s, if (hijacks) TUN_DNS4 else null)
 
             return Intent(ctx, XrayVpnService::class.java).apply {
