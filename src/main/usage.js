@@ -41,6 +41,8 @@
  */
 const DIRECT_ID = 'direct';
 
+const { effectiveVia } = require('./routingProfiles');
+
 /** Bytes as reported: garbage, negatives and NaN all read as nothing. */
 function num(v) {
   return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
@@ -61,15 +63,19 @@ const isHopTag = (tag) => /-h\d+$/.test(tag);
  *
  * `proxy` is deliberately NOT resolvable here: a single server and a chain both
  * exit through it, so only the plan knows which. Ask tagMapFor.
+ *
+ * A target through a base (`out-<id>@<baseKey>`) is that target's; the base's
+ * own `base-…` outbounds are nobody's (tagForTarget).
  */
 function idForTag(tag) {
   if (typeof tag !== 'string' || !tag) return null;
   if (tag === DIRECT_ID) return DIRECT_ID;
   if (isHopTag(tag)) return null;
-  if (tag === 'out-chain') return 'chain';
-  if (tag.startsWith('out-chain-')) return 'chain:' + tag.slice('out-chain-'.length);
-  if (tag.startsWith('out-')) return tag.slice('out-'.length);
-  return null;   // block, dns-out, dpi-*, metrics, anything unknown
+  const t = tag.startsWith('out-') && tag.includes('@') ? tag.slice(0, tag.indexOf('@')) : tag;
+  if (t === 'out-chain') return 'chain';
+  if (t.startsWith('out-chain-')) return 'chain:' + t.slice('out-chain-'.length);
+  if (t.startsWith('out-')) return t.slice('out-'.length);
+  return null;   // block, dns-out, dpi-*, base-*, metrics, anything unknown
 }
 
 /** buildConfig's own view of a plan, so this module and the config agree. */
@@ -86,19 +92,26 @@ function normalizePlan(plan) {
  * has since been deleted, or a chain with nothing usable left in it, gets
  * `direct` in the config — so its bytes are direct traffic here too, not usage
  * invented for a config that is not carrying anything.
+ *
+ * `via`: the base the target goes through (a routing profile's,
+ * routingProfiles.effectiveVia) — its outbound is then `…@<baseKey>`, the
+ * base's server id or `chain-<cid>`. The base's own `base-…` outbounds carry
+ * the same bytes wrapped once more, like a chain's hops, and are never counted.
  */
-function tagForTarget(target, plan) {
+function tagForTarget(target, plan, via) {
   const p = plan || {};
   if (!target || target === DIRECT_ID) return DIRECT_ID;
   if (target === 'block') return 'block';
+  const v = typeof via === 'string' ? via : '';
+  const at = !v ? '' : '@' + (v === 'chain' ? 'chain' : v.indexOf('chain:') === 0 ? 'chain-' + v.slice('chain:'.length) : v);
   const usable = (list) => (Array.isArray(list) ? list : []).filter(s => s && s.outbound).length > 0;
-  if (target === 'chain') return usable(p.chain) ? 'out-chain' : DIRECT_ID;
+  if (target === 'chain') return usable(p.chain) ? 'out-chain' + at : DIRECT_ID;
   if (typeof target === 'string' && target.indexOf('chain:') === 0) {
     const cid = target.slice('chain:'.length);
-    return usable((p.chainsById || {})[cid]) ? 'out-chain-' + cid : DIRECT_ID;
+    return usable((p.chainsById || {})[cid]) ? 'out-chain-' + cid + at : DIRECT_ID;
   }
   const s = (p.serversById || {})[target];
-  return s && s.outbound ? 'out-' + target : DIRECT_ID;
+  return s && s.outbound ? 'out-' + target + at : DIRECT_ID;
 }
 
 /**
@@ -123,15 +136,16 @@ function tagMapFor(plan, selectedId) {
   // pool and the renderer already use. Deliberately NOT idForTag(tag): the
   // target is the id, and reading it back out of the tag would make a config
   // whose id happened to look like a hop ('…-h0') silently uncountable.
-  const put = (target) => {
-    const tag = tagForTarget(target, p);
+  const put = (target, via) => {
+    const tag = tagForTarget(target, p, via);
     if (tag === 'block') return;                 // a blackholed request used nobody's bandwidth
     map[tag] = tag === DIRECT_ID ? DIRECT_ID : String(target);
   };
 
   if (p.mode === 'advanced') {
-    for (const r of p.rules || []) if (r) put(r.target);
-    put(p.def);
+    // a routing profile's target through a base counts as that target
+    for (const r of p.rules || []) if (r) put(r.target, effectiveVia(r, p));
+    put(p.def, effectiveVia('def', p));
   } else if (p.mode === 'pool') {
     for (const e of p.entries || []) if (e) put(e.target);
     put(p.primary);

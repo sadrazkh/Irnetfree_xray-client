@@ -1,0 +1,73 @@
+{
+  "v": 1,
+  "kind": "profile",
+  "servers": [
+    {
+      "key": "s1",
+      "name": "🇩🇪 Base DE",
+      "link": "vless://00000000-0000-4000-8000-0000000000d1@base.example.com:443?encryption=none&type=ws&security=tls&sni=base.example.com&host=base.example.com&path=%2Fws#%F0%9F%87%A9%F0%9F%87%AA%20Base%20DE"
+    },
+    {
+      "key": "s2",
+      "name": "Corp WG",
+      "link": "wireguard://SECRETKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D@wg.corp.example:51820?publickey=PUBKEYBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB%3D&address=10.7.0.2%2F32&mtu=1280#Corp%20WG"
+    },
+    {
+      "key": "s3",
+      "name": "Netflix US",
+      "link": "trojan://pw-us@us.example.com:443?security=tls&sni=us.example.com&type=grpc&serviceName=g#Netflix%20US"
+    },
+    {
+      "key": "s4",
+      "name": "Hop NL",
+      "link": "vless://00000000-0000-4000-8000-0000000000d4@nl.example.com:443?encryption=none&type=tcp&security=tls&sni=nl.example.com#Hop%20NL"
+    }
+  ],
+  "chains": [
+    {
+      "key": "c1",
+      "name": "NL→US",
+      "members": [
+        "s4",
+        "s3"
+      ]
+    }
+  ],
+  "profile": {
+    "name": "Work",
+    "useMode": true,
+    "base": "s1",
+    "def": "s1",
+    "defVia": "none",
+    "rules": [
+      {
+        "type": "domain",
+        "value": "corp.example,intranet.example",
+        "target": "s2",
+        "via": "inherit"
+      },
+      {
+        "type": "domain",
+        "value": "geosite:netflix",
+        "target": "s3",
+        "via": "inherit"
+      },
+      {
+        "type": "domain",
+        "value": "geosite:category-ir",
+        "target": "direct"
+      },
+      {
+        "type": "ip",
+        "value": "geoip:ir",
+        "target": "direct"
+      },
+      {
+        "type": "port",
+        "value": "5060",
+        "target": "chain:c1",
+        "via": "none"
+      }
+    ]
+  }
+}

@@ -367,3 +367,262 @@
   .adv-arrow { margin-inline: 0 var(--rt-3); }
   .adv-target-mount { flex: 1 1 200px; }
 }
+
+/* ----------------------------- routing profiles ----------------------------- */
+
+/* Several advanced routings: the list reads as a row of tabs over the editor,
+   the one being edited in the accent. Hidden on a back end without profiles,
+   where the card is today's single advanced routing. */
+.rp-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--rt-2);
+  flex-wrap: wrap;
+  margin-block-end: var(--rt-3);
+}
+.rp-list { display: flex; align-items: center; gap: var(--rt-2); flex-wrap: wrap; min-width: 0; }
+.rp-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rt-1);
+  min-height: var(--rt-ctl);
+  max-width: 240px;
+  padding-block: 0;
+  padding-inline: var(--rt-3);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink2);
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-radius: var(--r4);
+  cursor: pointer;
+  transition: background 140ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
+}
+.rp-tab:hover { border-color: var(--dim); }
+.rp-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rp-tab.active { background: var(--accentSoft); border-color: var(--accent); color: var(--accentInk); }
+.rp-tab.danger { border-color: var(--danger); }
+.rp-tab-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-tab-def { color: var(--warn); }
+.rp-tab-live { color: var(--ok); font-size: 10px; }
+.rp-add { min-height: var(--rt-ctl); }
+
+/* the edited profile's head: its name, whether it is the default, its tools */
+.rp-head {
+  display: flex;
+  align-items: center;
+  gap: var(--rt-2);
+  row-gap: var(--rt-3);
+  flex-wrap: wrap;
+  padding-block: var(--rt-3);
+  margin-block-end: var(--rt-3);
+  border-block: 1px solid var(--line);
+}
+.rp-name { flex: 1 1 var(--rt-field); min-width: 0; height: var(--rt-ctl); font-size: 13px; font-weight: 600; }
+.rp-def-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--rt-ctl);
+  padding-inline: var(--rt-3);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--warn);
+  background: var(--warnSoft);
+  border-radius: var(--r4);
+  white-space: nowrap;
+}
+.rp-make-def { min-height: var(--rt-ctl); font-size: 12px; }
+.rp-actions { display: flex; align-items: center; gap: var(--rt-1); }
+.rp-actions .icon-btn { min-width: var(--rt-icon); min-height: var(--rt-icon); }
+
+/* a rule's "via" picker sits after its target, one group with its label */
+.adv-via { display: inline-flex; align-items: center; gap: var(--rt-2); flex: 2 1 160px; min-width: 0; }
+.adv-via[hidden] { display: none; }
+.adv-via-label { font-size: 11px; font-weight: 600; color: var(--ink3); white-space: nowrap; }
+.adv-via-mount { display: block; flex: 1 1 auto; min-width: 0; }
+.adv-via .ss { display: block; width: 100%; min-width: 0; }
+.adv-default .adv-via { flex: 0 1 var(--rt-field); }
+
+/* the profile's base: the default's neighbour, so it shares its dashed look */
+.adv-base {
+  display: flex;
+  align-items: center;
+  gap: var(--rt-3);
+  flex-wrap: wrap;
+  margin-block-start: var(--rt-2);
+  margin-inline-start: var(--rt-gutter);
+  padding: var(--rt-4);
+  background: var(--bg);
+  border: 1px dashed var(--softline);
+  border-radius: var(--r5);
+}
+.adv-base[hidden] { display: none; }
+.adv-base-label { font-size: 13px; font-weight: 600; color: var(--ink2); }
+.adv-base-label::before { content: "⚓ "; }
+.adv-base .adv-target-mount { flex: 0 1 var(--rt-field); }
+.adv-base-hint { flex: 1 1 var(--rt-field); min-width: 0; font-size: 11px; line-height: 1.7; color: var(--ink3); }
+.adv-base + .switch-row,
+.adv-base + .adv-suggest-default { margin-block-start: var(--rt-5); }
+
+/* a target or a base that is gone: the rule, its note and the base row say so */
+.adv-rule.danger { border-color: var(--danger); border-inline-start-color: var(--danger); background: var(--dangerSoft); }
+.adv-warn {
+  position: relative;
+  padding: var(--rt-2) var(--rt-3);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--danger);
+  background: var(--dangerSoft);
+  border: 1px solid var(--danger);
+  border-inline-start-width: var(--rt-edge);
+  border-radius: var(--r4);
+}
+.adv-warn[hidden] { display: none; }
+.adv-base .adv-warn { flex: 1 1 100%; }
+/* the chain's spine runs on behind a rule's warning, as behind its WireGuard note */
+.adv-rules > .adv-warn::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset-block: 0 calc(-1 * var(--rt-4));
+  inset-inline-start: calc(-1 * (var(--rt-edge) + (var(--rt-gutter) + var(--rt-spine)) / 2));
+  width: var(--rt-spine);
+  border-radius: var(--r1);
+  background: var(--line);
+  pointer-events: none;
+}
+.adv-warn + .adv-rule { margin-block-start: var(--rt-2); }
+
+/* a row opened from the flow tree lights up for a moment */
+.adv-rule.flash,
+.adv-default.flash,
+.adv-base.flash { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accentLine); }
+
+/* ------------------------- the flow tree: rules → targets → bases ------------------------- */
+
+.rp-flow-wrap {
+  margin-block-end: var(--rt-4);
+  padding: var(--rt-4);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r6);
+}
+.rp-flow-head { display: flex; align-items: center; gap: var(--rt-3); margin-block-end: var(--rt-3); }
+.rp-flow-title { font-size: 12px; font-weight: 700; color: var(--ink2); }
+.rp-flow-live { font-size: 11px; font-weight: 700; color: var(--ok); }
+
+/* Three columns in the reading direction (a grid follows `direction`, so
+   Persian mirrors it), wide gutters for the lines, one SVG under the nodes.
+   Each column is its head over its nodes, the nodes centred against the
+   tallest column so the lines between them stay short. */
+.rf {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  column-gap: 56px;
+  align-items: stretch;
+}
+.rf.no-bases { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.rf-colwrap { display: flex; flex-direction: column; gap: var(--rt-2); min-width: 0; position: relative; z-index: 1; }
+.rf-head {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.rf-col { display: flex; flex-direction: column; justify-content: center; gap: var(--rt-2); flex: 1 1 auto; min-width: 0; }
+
+.rf-node {
+  display: flex;
+  align-items: center;
+  gap: var(--rt-1) var(--rt-2);
+  flex-wrap: wrap;
+  width: 100%;
+  min-height: var(--rt-ctl);
+  padding: var(--rt-2) var(--rt-3);
+  font: inherit;
+  font-size: 12px;
+  text-align: start;
+  color: var(--ink2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r5);
+  cursor: pointer;
+  transition: background 140ms ease-out, border-color 140ms ease-out;
+}
+.rf-node:hover { background: var(--soft); border-color: var(--softline); }
+.rf-node:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rf-ico { flex: 0 0 auto; line-height: 1; }
+.rf-label { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.rf-rule .rf-label { font-family: var(--mono); font-weight: 400; unicode-bidi: isolate; }
+/* "03–04" is a range of numbers: left to right in Persian too, or it reads 04–03 */
+.rf-idx { font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--dim); direction: ltr; unicode-bidi: isolate; }
+.rf-more { font-family: var(--mono); font-size: 10px; color: var(--ink3); }
+.rf-default { border-style: dashed; color: var(--ink3); }
+.rf-default .rf-label { font-family: var(--ui); }
+/* a target's kind is its leading edge: the accent for a proxy, ok for direct, danger for block */
+.rf-target { border-inline-start: var(--rt-edge) solid var(--accent); }
+.rf-target.to-direct { border-inline-start-color: var(--ok); }
+.rf-target.to-block { border-inline-start-color: var(--danger); }
+.rf-base { background: var(--accentSoft); border-color: var(--accentLine); }
+.rf-tag {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accentInk);
+  padding-inline: var(--rt-1);
+  border: 1px solid var(--accentLine);
+  border-radius: var(--r2);
+}
+.rf-sub,
+.rf-why,
+.rf-traffic { flex: 1 1 100%; min-width: 0; font-size: 11px; line-height: 1.5; }
+.rf-sub { color: var(--ink3); }
+.rf-why { color: var(--danger); }
+.rf-traffic { font-family: var(--mono); color: var(--ok); direction: ltr; text-align: end; }
+.rf-traffic:empty { display: none; }
+/* the words that replace an edge in the stacked layout — the wide one draws the edge */
+.rf-to { display: none; }
+.rf-node.danger { color: var(--danger); background: var(--dangerSoft); border-color: var(--danger); }
+
+.rf-edges { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: visible; }
+.rf-edges svg { display: block; overflow: visible; }
+.rf-edge { fill: none; stroke: var(--softline); stroke-width: 1.5; }
+.rf-edge.danger { stroke: var(--danger); stroke-dasharray: 4 3; }
+.rf-mark path { fill: var(--softline); }
+.rf-mark.bad path { fill: var(--danger); }
+/* live: the branches of the profile that is up carry a moving dash */
+.rf.live .rf-edge:not(.danger) { stroke: var(--accent); stroke-dasharray: 6 4; animation: rf-flow 1.2s linear infinite; }
+.rf.live .rf-mark:not(.bad) path { fill: var(--accent); }
+@keyframes rf-flow { to { stroke-dashoffset: -20; } }
+@media (prefers-reduced-motion: reduce) {
+  .rf.live .rf-edge { animation: none; }
+}
+
+/* A narrow column (the router's page on a phone): the columns stack, the
+   lines go, and each rule says in words where it leads. */
+@container routecol (max-width: 560px) {
+  .rf { display: flex; flex-direction: column; gap: var(--rt-4); }
+  .rf-edges { display: none; }
+  .rf-to { display: block; flex: 1 1 100%; font-size: 11px; color: var(--ink3); }
+}
+
+/* The two dialogs live outside #view-routing, where the --rt-* scale is not
+   declared: they take the same steps as numbers (4 / 8 / 12 / 28). */
+
+/* the share dialog: the warning comes before the Copy button, in the warning colour */
+.qr-body .rp-share-warn { color: var(--warn); text-align: start; }
+.rp-share-big { padding: 28px 8px; }
+
+/* the import preview: what a link holds, a line per fact */
+.rp-im-sum { display: flex; flex-direction: column; gap: 8px; }
+.rp-im-row { display: flex; align-items: baseline; gap: 8px 12px; flex-wrap: wrap; font-size: 12px; }
+.rp-im-k { flex: 1 1 auto; color: var(--ink3); }
+.rp-im-v { font-family: var(--mono); font-weight: 700; color: var(--ink); }
+.rp-im-names { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 11px; color: var(--ink2); }
+.rp-im-names bdi { padding-inline: 4px; background: var(--soft); border-radius: var(--r2); }
+.rp-im-row.danger .rp-im-k,
+.rp-im-row.danger .rp-im-v,
+.rp-im-row.danger .rp-im-names { color: var(--danger); }

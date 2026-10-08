@@ -378,8 +378,11 @@ object Mux {
             is ConnectionPlan.Single -> keep(connection.server)
             is ConnectionPlan.Chain -> {}
             is ConnectionPlan.Pool -> fromTargets(listOf(connection.primary) + connection.entries.map { e: PoolEntry -> e.target }, connection.serversById)
+            // a target through a base never carries mux (spec §2), nor does the base
             is ConnectionPlan.Advanced -> fromTargets(
-                connection.rules.filter { r: RouteRule -> r.value.isNotBlank() }.map { r: RouteRule -> r.target } + connection.def,
+                connection.rules.filter { r: RouteRule -> r.value.isNotBlank() && RoutingProfiles.effectiveVia(r.target, r.via, connection.base) == null }
+                    .map { r: RouteRule -> r.target } +
+                    listOfNotNull(connection.def.takeIf { d: String -> RoutingProfiles.effectiveVia(d, connection.defVia, connection.base) == null }),
                 connection.serversById)
         }
         return out.values.toList()

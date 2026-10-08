@@ -118,8 +118,33 @@ object ConfigBuilder {
 
     /* ----------------------------- advanced ----------------------------- */
 
-    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>): JSONObject {
+    /** The default carries everything no rule claims: gone, there is nothing honest to send it to (configBuilder.js). */
+    const val MISSING_DEFAULT = "Advanced routing: the default target no longer exists (it was removed, or replaced by a subscription update) — choose a new default under Routing."
+    /** A base a target rides on is gone: connecting through nothing would leave in the clear. */
+    const val MISSING_BASE = "Advanced routing: a base this profile goes through no longer exists (a server removed or replaced by a subscription update, or a chain left empty) — choose another base under Routing."
+
+    /**
+     * A routing profile's config ("via a base", RoutingProfiles.kt). A target
+     * with a via gets an outbound of its own, `out-<id>@<baseKey>` (a chain:
+     * `out-chain-<cid>@<baseKey>` and its hops), whose self-dialing outbound
+     * dials the base's exit; each base is one outbound group (`base-<id>`, or
+     * `base-chain-<cid>` with hops `base-chain-<cid>-h<i>`), shared by every
+     * target through it. Mux stays on direct server targets only. Without a
+     * via anywhere, the config of before, byte for byte.
+     *
+     * Refuses (IllegalStateException, said to the user as it is) a default
+     * that no longer exists and a base that no longer exists. A rule whose
+     * target is gone is left out — its traffic follows the default, as on the
+     * desktop; Android used to send it `direct` without a word.
+     */
+    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s0: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>): JSONObject {
+        // the profile's own "routing mode under these rules"; a plan without one uses the settings'
+        val um = plan.useMode
+        val s = if (um != null && um != s0.advancedUseMode) s0.copy(advancedUseMode = um) else s0
         val reg = Registry(plan.serversById, plan.chainsById, muxIds)
+        if (!reg.exists(plan.def)) throw IllegalStateException(MISSING_DEFAULT)
+        val defVia = RoutingProfiles.effectiveVia(plan.def, plan.defVia, plan.base)
+        if (defVia != null && !reg.exists(defVia)) throw IllegalStateException(ConfigBuilder.MISSING_BASE)
         val advRules = JSONArray()
         val targets = ArrayList<Pair<Any?, String>>()
         for (r in plan.rules) {
@@ -144,16 +169,24 @@ object ConfigBuilder {
                 else -> continue
             }
 
+            // A rule to a target that no longer exists is left out: its traffic
+            // then follows the default like everything else no rule claims.
+            if (!reg.exists(r.target)) continue
+            // ...but a base that is gone refuses the connect: the target would
+            // otherwise be dialled from here, which is what the base was for.
+            val via = RoutingProfiles.effectiveVia(r.target, r.via, plan.base)
+            if (via != null && !reg.exists(via)) throw IllegalStateException(ConfigBuilder.MISSING_BASE)
+
             // Resolve the target only once the rule is known to survive: tagFor()
             // REGISTERS the outbound(s), so doing it earlier leaves a dead outbound
             // behind for every dropped rule — writing an unused server's address and
             // credentials into the config (and materializing a whole chain for a
             // "chain:" target). Mirrors configBuilder.js.
-            val tag = reg.tagFor(r.target)
+            val tag = if (via == null) reg.tagFor(r.target) else reg.tagVia(r.target, via)
             advRules.put(fieldRule().put("outboundTag", tag).put(ruleField, ruleValue))
             targets.add(targetServer(r.target, plan) to tag)
         }
-        val defTag = reg.tagFor(plan.def)
+        val defTag = if (defVia == null) reg.tagFor(plan.def) else reg.tagVia(plan.def, defVia)
         targets.add(targetServer(plan.def, plan) to defTag)
         // The resolver's exit. A `block` default is a legitimate allow-list, but
         // the blackhole can never answer a DoH query: use the first proxy the
@@ -241,25 +274,43 @@ object ConfigBuilder {
 
     /* ----------------------------- chain / registry ----------------------------- */
 
-    private fun buildChainOutbounds(members: List<ServerConfig>, exitTag: String): List<JSONObject> {
+    /**
+     * [firstVia]: the tag the first hop dials through (a chain riding on a
+     * base) — it then loses its own dialer and helpers like any later hop.
+     * null: the first hop dials by itself, as always.
+     */
+    private fun buildChainOutbounds(members: List<ServerConfig>, exitTag: String, firstVia: String? = null): List<JSONObject> {
         val list = members.filter { it.outbound.length() > 0 }
         val last = list.size - 1
         val outs = ArrayList<JSONObject>()
         for (i in 0..last) {
             val tag = if (i == last) exitTag else "$exitTag-h$i"
             val ob = cloneOut(list[i].outbound, tag, list[i])
-            if (i > 0) {
+            val dialVia = if (i > 0) "$exitTag-h${i - 1}" else firstVia
+            if (dialVia != null) {
                 // A JSON server behind another hop dials through that hop: its
                 // own way to its helpers (proxySettings, its dialerProxy) goes,
                 // and so do the helpers — nothing else uses them.
                 if (list[i].isJson) ob.remove("proxySettings")
-                dialThrough(ob, "$exitTag-h${i - 1}")
+                dialThrough(ob, dialVia)
                 outs.add(ob)
             } else {
                 outs.addAll(withHelpers(ob, list[i], tag))
             }
         }
         return outs
+    }
+
+    /**
+     * [server]'s outbound tagged [tag], dialling through [via] (a base's exit):
+     * a JSON server's own helper dialer is replaced and its helpers left out,
+     * as for a chain's later hop. Never mux.
+     */
+    private fun throughBase(server: ServerConfig, tag: String, via: String): JSONObject {
+        val ob = cloneOut(server.outbound, tag, server)
+        if (server.isJson) ob.remove("proxySettings")
+        dialThrough(ob, via)
+        return ob
     }
 
     /** The outbounds a pool / advanced plan routes to, each once; [muxIds] as in build(). */
@@ -302,6 +353,69 @@ object ConfigBuilder {
             if (!seen.contains(tag)) {
                 ConfigBuilder.withHelpers(ConfigBuilder.withMux(ConfigBuilder.cloneOut(first.outbound, tag, first), first, muxIds), first, tag).forEach { o: JSONObject -> add(o) }
             }
+            return tag
+        }
+
+        /**
+         * Does the target still name something? A server deleted (or replaced
+         * by a subscription refresh), a chain removed or left with no members:
+         * tagFor() would send that `direct`. An empty target is the user's own
+         * "not routed anywhere"; a literal 'proxy' is whichever server is first
+         * (direct with none at all, as it always was). (configBuilder.js exists)
+         */
+        fun exists(target: String?): Boolean {
+            if (target.isNullOrEmpty() || target == "direct" || target == "block" || target == "proxy") return true
+            if (target.startsWith("chain:")) return (chainsById[target.substring(6)]?.count { it.outbound.length() > 0 } ?: 0) > 0
+            val s = serversById[target]
+            return s != null && s.outbound.length() > 0
+        }
+
+        /** `<baseKey>`: the base's server id, or `chain-<cid>`. */
+        private fun baseKey(via: String): String = if (via.startsWith("chain:")) "chain-" + via.substring(6) else via
+
+        /**
+         * The base [via]'s outbound group, registered once and shared by every
+         * target through it; its exit tag. A server: `base-<id>` (a JSON
+         * server with its helpers). A chain: hops `base-chain-<cid>-h<i>`, exit
+         * `base-chain-<cid>`. Never mux. A base that is gone refuses.
+         */
+        fun baseTag(via: String): String {
+            if (via.startsWith("chain:")) {
+                val cid = via.substring(6)
+                val tag = "base-chain-$cid"
+                val arr = chainsById[cid]?.filter { it.outbound.length() > 0 } ?: emptyList()
+                if (arr.isEmpty()) throw IllegalStateException(ConfigBuilder.MISSING_BASE)
+                if (!seen.contains(tag)) ConfigBuilder.buildChainOutbounds(arr, tag).forEach { o: JSONObject -> add(o) }
+                return tag
+            }
+            val s = serversById[via]
+            if (s == null || s.outbound.length() == 0) throw IllegalStateException(ConfigBuilder.MISSING_BASE)
+            val tag = "base-$via"
+            if (!seen.contains(tag)) ConfigBuilder.withHelpers(ConfigBuilder.cloneOut(s.outbound, tag, s), s, tag).forEach { o: JSONObject -> add(o) }
+            return tag
+        }
+
+        /**
+         * [target] riding on the base [via]: `out-<id>@<baseKey>` (a chain:
+         * `out-chain-<cid>@<baseKey>` with hops `…-h<i>`), its self-dialing
+         * outbound — the server's own, the chain's first hop — dialling the
+         * base's exit. The same target without a via keeps its own `out-<id>`.
+         */
+        fun tagVia(target: String, via: String): String {
+            val exit = baseTag(via)
+            val key = baseKey(via)
+            if (target.startsWith("chain:")) {
+                val cid = target.substring(6)
+                val arr = chainsById[cid]?.filter { it.outbound.length() > 0 } ?: emptyList()
+                if (arr.isEmpty()) return "direct"   // exists() has said otherwise already
+                val tag = "out-chain-$cid@$key"
+                if (!seen.contains(tag)) ConfigBuilder.buildChainOutbounds(arr, tag, exit).forEach { o: JSONObject -> add(o) }
+                return tag
+            }
+            val s = if (target == "proxy") serversById.values.firstOrNull { it.outbound.length() > 0 } else serversById[target]
+            if (s == null || s.outbound.length() == 0) return "direct"
+            val tag = "out-$target@$key"
+            if (!seen.contains(tag)) add(ConfigBuilder.throughBase(s, tag, exit))
             return tag
         }
     }
