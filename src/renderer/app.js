@@ -315,6 +315,7 @@ function setLang(lang) {
   applyUiMode(state.settings.uiMode || defaultUiMode());
   renderTrafficPath(state.connected ? 'connected' : state.connecting ? 'connecting' : 'disconnected');
   renderInspector();
+  refreshJsonFormLang();   // an open JSON edit form: its help line and summary are built with t()
   if ($('#xrayVersion')) $('#xrayVersion').textContent = state.xrayVersion ? (t('xray.version') + ': ' + state.xrayVersion) : '';
   saveSettings({ lang });
 }
@@ -3714,11 +3715,14 @@ async function copyText(text) {
   catch { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
 }
 /**
- * A JSON server's QR carries its config as minified JSON — when it fits. A QR
- * of the largest version holds 2,953 bytes; 2,900 leaves room for the mode and
- * length header. Above that nothing is drawn, and the dialog says so.
+ * A JSON server's QR carries its config as minified JSON — when it is small
+ * enough to scan. 1,700 bytes is about version 30 at level L (137 modules):
+ * the 320px box (.qr-image, less its padding and the quiet zone) then keeps
+ * 2 px per module, which a phone camera can still resolve; the largest code
+ * (2,953 bytes, 177 modules) gets 1.6 px and does not scan. Above the limit
+ * nothing is drawn, and the dialog says so.
  */
-const QR_JSON_MAX_BYTES = 2900;
+const QR_JSON_MAX_BYTES = 1700;
 
 /**
  * The text a QR encodes for a JSON server: the config minified, with every
@@ -3843,6 +3847,13 @@ function setJsonMode(mode) {
   });
   $('#edJsonHelp').textContent = t(editJsonMode === 'raw' ? 'ed.jsonRawHelp' : 'ed.jsonFullHelp');
   renderJsonInfo(editOriginal && editOriginal.jsonInfo, editJsonMode);
+}
+
+/** The language changed with a JSON edit form open: say its help line and summary again. */
+function refreshJsonFormLang() {
+  // editingId first: setLang also runs at start-up, before the edit state below exists
+  if (!state.editingId || !editOriginal || editOriginal.source !== 'json') return;
+  setJsonMode(editJsonMode);
 }
 
 function openEditJson(s) {
