@@ -6,7 +6,9 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('./configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('./configBuilder');
+// Raw JSON mode (configBuilder.rawApplies): in proxy mode only — the desktop is no router.
+const RAW_OPTS = { openwrt: false };
 const { latencyTest, testsAlone, udpOnly } = require('./latencyTest');
 const { adapterDnsServers, guardPeers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
@@ -716,7 +718,10 @@ async function effectiveSettings() {
 /**
  * The connection plan for a target id: { plan, label, entryAddrs }.
  * `entryAddrs` are the addresses the machine dials *directly* (must be bypassed
- * under TUN so the tunnel doesn't loop on itself). No side effects.
+ * under TUN so the tunnel doesn't loop on itself). A server's own are
+ * configBuilder.entryAddressesOf: a link server's address, a JSON server's
+ * entry outbounds (the hop of its own chain, not the exit behind it). No side
+ * effects.
  */
 function buildPlan(serverId, settings) {
   const servers = store.get('servers', []);
@@ -757,13 +762,13 @@ function buildPlan(serverId, settings) {
 
   const addEntryForTarget = (tg) => {
     if (!tg || tg === 'direct' || tg === 'block') return;
-    if (tg === 'chain') { if (legacyChain[0]) entryAddrs.push(legacyChain[0].address); return; }
+    if (tg === 'chain') { if (legacyChain[0]) entryAddrs.push(...entryAddressesOf(legacyChain[0])); return; }
     if (String(tg).indexOf('chain:') === 0) {
       const m = chainsById[String(tg).slice('chain:'.length)];
-      if (m && m[0]) entryAddrs.push(m[0].address);
+      if (m && m[0]) entryAddrs.push(...entryAddressesOf(m[0]));
       return;
     }
-    if (serversById[tg]) entryAddrs.push(serversById[tg].address);
+    if (serversById[tg]) entryAddrs.push(...entryAddressesOf(serversById[tg]));
   };
 
   if (serverId === '__pool__') {
@@ -802,7 +807,7 @@ function buildPlan(serverId, settings) {
       : 'این زنجیره حداقل به ۲ سرور نیاز دارد');
     plan = { mode: 'chain', chain: members, name: chainById[serverId].name };
     label = chainById[serverId].name;
-    entryAddrs = [members[0].address];
+    entryAddrs = entryAddressesOf(members[0]);
   } else if (serverId === '__chain__') {
     refuseBroken('chain');
     if (legacyChain.length < 2) throw new Error(settings.lang === 'en'
@@ -810,13 +815,13 @@ function buildPlan(serverId, settings) {
       : 'زنجیره حداقل به ۲ سرور نیاز دارد');
     plan = { mode: 'chain', chain: legacyChain };
     label = legacyChain.map(s => s.name).join(' → ');
-    entryAddrs = [legacyChain[0].address];
+    entryAddrs = entryAddressesOf(legacyChain[0]);
   } else {
     const server = byId(serverId);
     if (!server) throw new Error(settings.lang === 'en' ? 'Server not found' : 'سرور پیدا نشد');
     plan = { mode: 'single', server };
     label = server.name;
-    entryAddrs = [server.address];
+    entryAddrs = entryAddressesOf(server, rawApplies(server, settings, RAW_OPTS));
   }
   entryAddrs = [...new Set(entryAddrs.filter(Boolean))];
   return { plan, label, entryAddrs };
@@ -829,6 +834,10 @@ function buildPlan(serverId, settings) {
  */
 function buildActive(serverId, settings) {
   const { plan, label, entryAddrs } = buildPlan(serverId, settings);
+  // A JSON server set to run raw: its own config, as written — a single-server
+  // connect only (configBuilder.buildRawConfig). The app's routing mode, and
+  // the geo rules it would have skipped, are not in that config.
+  const rawServer = rawServerOf(plan, settings, RAW_OPTS);
 
   // Are the geo databases installed? If not, geosite:/geoip: rules would make
   // xray refuse to start — buildConfig drops them and we warn the user.
@@ -841,7 +850,7 @@ function buildActive(serverId, settings) {
     (plan.mode !== 'advanced' &&
       (settings.routingMode === 'bypass-ir' || settings.routingMode === 'bypass-cn' ||
         (settings.blockAds && plan.mode !== 'advanced'))));
-  if (!geoAssets && usesGeo) {
+  if (!geoAssets && usesGeo && !rawServer) {
     geoWarn = settings.lang === 'en'
       ? 'Geo files (geoip/geosite) are missing — geo-based rules were skipped. Download them under Settings → Required files.'
       : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
@@ -852,9 +861,13 @@ function buildActive(serverId, settings) {
   // member needs it. The EFFECTIVE engine (after fallback when the binary is
   // missing) decides the config format.
   let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
+  // A raw config is Xray's own format: it runs on an Xray core, whatever the choice.
+  if (rawServer && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray').id;
 
   let config;
-  if (engineFormat(engine) === 'sing-box') {
+  if (rawServer) {
+    config = buildRawConfig(rawServer, settings);
+  } else if (engineFormat(engine) === 'sing-box') {
     try {
       config = buildSingboxConfig(plan.server, settings);
     } catch (e) {
@@ -1074,7 +1087,7 @@ async function muxFor(serverId, settings, recovery) {
   try { plan = buildPlan(serverId, settings).plan; } catch { return none; }   // buildActive reports it
   let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine), { quiet: true }).id;
   if (engineFormat(engine) === 'sing-box') return none;
-  const servers = muxCandidates(plan);
+  const servers = muxCandidates(plan, rawServerOf(plan, settings, RAW_OPTS));
   if (!servers.length) return none;
   const { muxIds, learnt } = await decideMux({
     mode, servers, cache: store.get('muxProbes', {}), now: Date.now(), recovery: !!recovery,
@@ -1302,6 +1315,9 @@ async function connectOnce(serverId, opts = {}) {
   livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
 
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
+  // A JSON server set to run raw, said once per connect: run as written, or —
+  // in a chain, advanced routing or the pool — used in its full form.
+  for (const note of rawModeNotes(plan, settings, RAW_OPTS)) send('log', note);
   // What the window is told besides the log, on Windows (v1.16.3): each one a
   // toast once this connect stands. Said only — nothing below reads them.
   const notices = [];
@@ -1684,6 +1700,7 @@ async function connectOnce(serverId, opts = {}) {
   // Start live traffic stats
   stats.setBin(xray.anyBin());
   stats.apiPort = settings.apiPort;
+  stats.skipTags = rawServerOf(plan, settings, RAW_OPTS) ? dialerTagsOf(config) : null;
   watchWgSilence(config);
   // A fresh core starts its counters at zero, so the meter has to be told —
   // otherwise the first poll of the new session reads as growth on the old one
@@ -2753,7 +2770,9 @@ function registerIpc() {
     const idx = servers.findIndex(s => s.id === id);
     if (idx === -1) return { ok: false, error: 'not found', servers };
     const before = servers[idx];
-    servers[idx] = applyServerEdits(before, fields || {});
+    // An edit can be refused — a JSON config that does not parse, or has no
+    // proxy outbound left: the reason goes back, the record stays as it was.
+    try { servers[idx] = applyServerEdits(before, fields || {}); } catch (err) { return { ok: false, error: err.message, servers }; }
     setServers(servers);
     // an edit of a server the live connection dials waits for a reconnect (see liveServerIds)
     // — one that changes what is dialled: a rename, or a Save with nothing changed, is none

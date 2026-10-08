@@ -138,6 +138,9 @@ object SubRefresh {
      * a noise spec's base64 as a space, and that would have passed for an edit.
      */
     fun carry(old: ServerConfig, fresh: ServerConfig, linked: ServerConfig? = linkedForm(old)): ServerConfig {
+        if (fresh.isJson) return carryJson(old, fresh)
+        // a JSON server the panel now sends as a link: its JSON-only edits mean nothing to the link
+        if (old.isJson) return carry(old.copy(edited = old.edited.filter { f: String -> f !in JSON_FIELDS }, source = "", json = null, extraOutbounds = emptyList()), fresh, linked)
         val (base, kept) = withUsersEdits(old, linked, fresh)
         val ob = JSONObject(base.outbound.toString())
         for ((field, k) in listOf("fragment" to "_fragment", "noise" to "_noise")) {
@@ -148,6 +151,36 @@ object SubRefresh {
         val engine = if ("engine" in kept) old.engine else fresh.engine
         return base.copy(
             id = old.id, outbound = ob, engine = engine,
+            certPin = old.certPin, certPinAt = old.certPinAt, certPinCheckedAt = old.certPinCheckedAt,
+            edited = kept
+        )
+    }
+
+    /** What the edit sheet records for a JSON server besides its name: its config text and its mode. */
+    private val JSON_FIELDS = setOf("json", "jsonMode")
+
+    /**
+     * A fresh JSON server that is [old]: the old id and first-use pin, and what
+     * the user did — a config they edited (kept whole, with everything derived
+     * from it), a name they gave it, a core they chose. Its mode is always the
+     * old one's: no panel ever sets it. Everything else is the panel's — `raw`
+     * too, the provider's own text, which the next refresh matches by first.
+     */
+    private fun carryJson(old: ServerConfig, fresh: ServerConfig): ServerConfig {
+        val kept = old.edited.filter { f: String -> f == "name" || f == "engine" || (old.isJson && f in JSON_FIELDS) }
+        val mine = old.json
+        val base = if ("json" in kept && old.isJson && mine != null) fresh.copy(
+            protocol = old.protocol, address = old.address, port = old.port,
+            outbound = JSONObject(old.outbound.toString()),
+            json = JSONObject(mine.toString()),
+            extraOutbounds = old.extraOutbounds.map { h: JSONObject -> JSONObject(h.toString()) },
+            jsonInfo = old.jsonInfo
+        ) else fresh
+        return base.copy(
+            id = old.id,
+            name = if ("name" in kept) old.name else fresh.name,
+            engine = if ("engine" in kept) old.engine else fresh.engine,
+            jsonMode = if (old.isJson) old.jsonMode else fresh.jsonMode,
             certPin = old.certPin, certPinAt = old.certPinAt, certPinCheckedAt = old.certPinCheckedAt,
             edited = kept
         )

@@ -1,0 +1,176 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "listen": "127.0.0.1",
+      "listen_port": 2080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "select",
+      "outbounds": [
+        "vless-reality",
+        "vmess-ws"
+      ]
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": [
+        "vless-reality",
+        "vmess-ws"
+      ]
+    },
+    {
+      "type": "vless",
+      "tag": "vless-reality",
+      "server": "r.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-0000000000c1",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.net",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKK",
+          "short_id": "0a1b"
+        }
+      }
+    },
+    {
+      "type": "vmess",
+      "tag": "vmess-ws",
+      "server": "v.example.com",
+      "server_port": 8443,
+      "uuid": "00000000-0000-4000-8000-0000000000c2",
+      "security": "auto",
+      "alter_id": 0,
+      "tls": {
+        "enabled": true,
+        "server_name": "v.example.com"
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/vm",
+        "headers": {
+          "Host": "v.example.com"
+        }
+      }
+    },
+    {
+      "type": "trojan",
+      "tag": "trojan-grpc",
+      "server": "t.example.com",
+      "server_port": 443,
+      "password": "tpw",
+      "tls": {
+        "enabled": true,
+        "server_name": "t.example.com",
+        "insecure": false
+      },
+      "transport": {
+        "type": "grpc",
+        "service_name": "tg"
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "ss",
+      "server": "s.example.com",
+      "server_port": 8388,
+      "method": "chacha20-ietf-poly1305",
+      "password": "spw"
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2",
+      "server": "h.example.com",
+      "server_port": 443,
+      "server_ports": [
+        "20000:30000"
+      ],
+      "password": "hpw",
+      "obfs": {
+        "type": "salamander",
+        "password": "ob"
+      },
+      "up_mbps": 50,
+      "down_mbps": 100,
+      "tls": {
+        "enabled": true,
+        "server_name": "h.example.com"
+      }
+    },
+    {
+      "type": "wireguard",
+      "tag": "wg",
+      "server": "w.example.com",
+      "server_port": 51820,
+      "local_address": [
+        "10.8.0.2/32"
+      ],
+      "private_key": "SECRETKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "peer_public_key": "PUBKEYBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+      "mtu": 1280
+    },
+    {
+      "type": "socks",
+      "tag": "socks-up",
+      "server": "p.example.com",
+      "server_port": 1080,
+      "username": "u",
+      "password": "p"
+    },
+    {
+      "type": "http",
+      "tag": "http-up",
+      "server": "p.example.com",
+      "server_port": 3128
+    },
+    {
+      "type": "vless",
+      "tag": "vless-detour",
+      "server": "d.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-0000000000c3",
+      "tls": {
+        "enabled": true,
+        "server_name": "d.example.com"
+      },
+      "detour": "trojan-grpc"
+    },
+    {
+      "type": "tuic",
+      "tag": "tuic",
+      "server": "q.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-0000000000c4",
+      "password": "qpw"
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    },
+    {
+      "type": "dns",
+      "tag": "dns-out"
+    }
+  ],
+  "route": {
+    "final": "select"
+  }
+}

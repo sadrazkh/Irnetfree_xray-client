@@ -20,10 +20,21 @@ const { SUGGESTED } = require('../src/main/coreVersions');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'validate-configs.js');
 
-/** The script, dry, into a fresh dir: its exit status and output, and its configs by name. */
+/**
+ * The script, dry, into a fresh dir: its exit status and output, and its
+ * configs by name. One run per environment for the whole file — the tests
+ * only read what it wrote, and every run is a few hundred configs built on a
+ * CI runner the timing-sensitive service tests share.
+ */
+const runs = new Map();
+test.after(() => { for (const r of runs.values()) fs.rmSync(r.dir, { recursive: true, force: true }); });
 function dryRun(t, env = {}) {
+  const key = JSON.stringify(env);
+  if (!runs.has(key)) runs.set(key, freshRun(env));
+  return runs.get(key);
+}
+function freshRun(env) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-vc-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const base = Object.assign({}, process.env);
   for (const k of ['IRNF_XRAY_EXE', 'IRNF_SINGBOX_EXE', 'IRNF_CORE_VERSION']) delete base[k];
   const r = spawnSync(process.execPath, [SCRIPT], {
@@ -90,8 +101,9 @@ test('the core gate hands the cores every mux shape (v1.18, spec §4): a single 
   const probe = run.read('mux-probe');
   assert.deepEqual(probe.outbounds.find((o) => o.tag === 'proxy').mux, MUX);
   assert.deepEqual(probe.dns, { hosts: { 'a.example.com': ['203.0.113.10', '203.0.113.11'] } }, 'the probe dials the names its connect resolved');
-  // and not one of the configs built without the setting carries mux
-  for (const name of run.built.filter((n) => !/mux/.test(n))) assert.equal(JSON.stringify(run.read(name.replace(/\.json$/, ''))).includes('"mux"'), false, name);
+  // and not one of the configs built without the setting carries mux — but a
+  // JSON server's own: its main outbound is kept as written, its mux with it
+  for (const name of run.built.filter((n) => !/mux/.test(n) && !/^json-/.test(n))) assert.equal(JSON.stringify(run.read(name.replace(/\.json$/, ''))).includes('"mux"'), false, name);
 });
 
 test('the core gate writes every config for the core’s own version: mKCP’s header and seed, Hysteria’s hopping — as the suggested Xray takes them, and as a January 2026 core did', { timeout: 60000 }, (t) => {
@@ -109,6 +121,53 @@ test('the core gate writes every config for the core’s own version: mKCP’s h
   const oldHy = old.proxy('link-hy2-plain').streamSettings;
   assert.deepEqual(oldHy.hysteriaSettings, { version: 2, auth: 'pw', udphop: { ports: '20000-30000', interval: '30' }, up: '50 mbps', down: '100 mbps' });
   assert.deepEqual(oldHy.finalmask, { udp: [{ type: 'salamander', settings: { password: 'OB' } }] });
+});
+
+test('the core gate hands the cores every JSON shape: each fixture server in full mode (plain and under TUN), the Xray fixtures raw, JSON servers in a chain, advanced routing and a latency test', { timeout: 60000 }, (t) => {
+  const { importJson } = require('../src/main/jsonImport');
+  const run = dryRun(t);
+  assert.equal(run.status, 0, run.out);
+  const fixtures = ['xray-subscription', 'xray-fragment', 'xray-chain', 'xray-balancer', 'xray-wireguard', 'singbox'];
+  let xrayServers = 0;
+  for (const f of fixtures) {
+    const servers = importJson(fs.readFileSync(path.join(__dirname, 'fixtures', 'json', `${f}.json`), 'utf8')).servers;
+    assert.ok(servers.length > 0, f);
+    servers.forEach((s, i) => {
+      for (const v of ['plain', 'tun']) assert.ok(run.built.includes(`json-${f}-${i}-full-${v}.json`), `json-${f}-${i}-full-${v}`);
+      for (const v of ['plain', 'tun']) {
+        assert.equal(run.built.includes(`json-${f}-${i}-raw-${v}.json`), s.source === 'json', `json-${f}-${i}-raw-${v}: raw is for Xray JSON only`);
+      }
+      if (s.source === 'json') xrayServers++;
+    });
+  }
+  assert.equal(xrayServers, 5 + 1 + 1 + 2 + 1);
+  // full mode: the helpers beside the main outbound, renamed; raw: the config as written, the app's inbounds
+  const tags = (name) => run.read(name).outbounds.map((o) => o.tag);
+  assert.deepEqual(tags('json-xray-fragment-0-full-plain').slice(0, 2), ['proxy', 'proxy~fragment']);
+  assert.deepEqual(tags('json-xray-chain-0-full-plain').slice(0, 3), ['proxy', 'proxy~hop1', 'proxy~frag']);
+  assert.equal(run.read('json-xray-chain-0-full-tun').outbounds[2].streamSettings.sockopt.interface, 'eth0');
+  const raw = run.read('json-xray-balancer-0-raw-plain');
+  const fx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'json', 'xray-balancer.json'), 'utf8'));
+  assert.deepEqual(raw.routing, fx.routing);
+  assert.deepEqual(raw.observatory, fx.observatory);
+  assert.deepEqual(raw.inbounds.map((i) => i.tag), ['socks-in', 'http-in']);
+  assert.deepEqual(tags('json-xray-subscription-0-raw-plain'), ['proxy', 'direct', 'block']);
+  // a JSON server as either hop of a chain, two of them under advanced routing, the latency test
+  assert.deepEqual(tags('json-chain-later').slice(0, 2), ['proxy-h0', 'proxy']);
+  assert.deepEqual(tags('json-chain-first').slice(0, 3), ['proxy-h0', 'proxy-h0~fragment', 'proxy']);
+  assert.ok(tags('json-advanced').includes('out-jf~fragment') && tags('json-advanced').includes('out-jc~hop1'));
+  assert.deepEqual(tags('json-test-chain'), ['proxy', 'proxy~hop1', 'proxy~frag', 'direct']);
+  // what the cores refuse is never handed to them: allowInsecure, proxySettings
+  for (const name of run.built.filter((n) => /^json-/.test(n))) {
+    const text = JSON.stringify(run.read(name.replace(/\.json$/, '')));
+    assert.equal(text.includes('allowInsecure'), false, name);
+    assert.equal(text.includes('proxySettings'), false, name);
+  }
+  assert.equal(run.proxy('json-raw-pinned').streamSettings.tlsSettings.pinnedPeerCertSha256, 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde');
+  assert.equal(run.read('json-raw-wg-resolved').outbounds[0].settings.peers[0].endpoint, '198.51.100.7:51820');
+  const pinned = run.read('json-chain-pinned');
+  assert.deepEqual(pinned.dns.hosts['hop.example.com'], ['203.0.113.30']);
+  assert.equal(pinned.outbounds.find((o) => o.tag === 'proxy~hop1').streamSettings.sockopt.domainStrategy, 'UseIPv4');
 });
 
 test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every config — the versions read from coreVersions.js, the gate never dry', () => {

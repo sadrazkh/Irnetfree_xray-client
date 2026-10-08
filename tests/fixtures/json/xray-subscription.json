@@ -1,0 +1,594 @@
+[
+    {
+        "log": {
+            "loglevel": "none"
+        },
+        "inbounds": [
+            {
+                "listen": "127.0.0.1",
+                "port": 10808,
+                "protocol": "socks",
+                "settings": {
+                    "auth": "noauth",
+                    "udp": true
+                }
+            }
+        ],
+        "outbounds": [
+            {
+                "protocol": "freedom",
+                "tag": "direct"
+            }
+        ],
+        "routing": {
+            "rules": []
+        },
+        "remarks": "📅 انقضا: 1405/08/12"
+    },
+    {
+        "log": {
+            "loglevel": "none"
+        },
+        "inbounds": [
+            {
+                "listen": "127.0.0.1",
+                "port": 10808,
+                "protocol": "socks",
+                "settings": {
+                    "auth": "noauth",
+                    "udp": true
+                }
+            }
+        ],
+        "outbounds": [
+            {
+                "protocol": "freedom",
+                "tag": "direct"
+            }
+        ],
+        "routing": {
+            "rules": []
+        },
+        "remarks": "📦 حجم باقی مانده: 6.91 گیگ از 10 گیگ"
+    },
+    {
+        "remarks": "🇩🇪 DE-1",
+        "log": {
+            "loglevel": "warning"
+        },
+        "inbounds": [
+            {
+                "listen": "127.0.0.1",
+                "port": 10808,
+                "protocol": "socks",
+                "settings": {
+                    "auth": "noauth",
+                    "udp": true,
+                    "userLevel": 8
+                },
+                "sniffing": {
+                    "destOverride": [
+                        "fakedns"
+                    ],
+                    "enabled": true,
+                    "routeOnly": false
+                },
+                "tag": "socks"
+            }
+        ],
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "vless",
+                "mux": {
+                    "enabled": false,
+                    "concurrency": -1
+                },
+                "streamSettings": {
+                    "network": "ws",
+                    "security": "tls",
+                    "tlsSettings": {
+                        "allowInsecure": false,
+                        "fingerprint": "chrome",
+                        "show": false,
+                        "serverName": "host1.example.org"
+                    },
+                    "wsSettings": {
+                        "path": "/ws1",
+                        "headers": {
+                            "Host": "host1.example.org"
+                        }
+                    }
+                },
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": "edge1.example.com",
+                            "port": 443,
+                            "users": [
+                                {
+                                    "id": "00000000-0000-4000-8000-000000000001",
+                                    "encryption": "none",
+                                    "flow": "",
+                                    "level": 8
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "protocol": "freedom",
+                "settings": {
+                    "domainStrategy": "UseIP"
+                },
+                "tag": "direct"
+            },
+            {
+                "protocol": "blackhole",
+                "settings": {
+                    "response": {
+                        "type": "http"
+                    }
+                },
+                "tag": "block"
+            }
+        ],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "domain": [
+                        "geosite:private"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "ip": [
+                        "geoip:ir"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "network": "tcp,udp",
+                    "outboundTag": "proxy"
+                }
+            ]
+        }
+    },
+    {
+        "remarks": "🇩🇪 DE-2",
+        "log": {
+            "loglevel": "warning"
+        },
+        "inbounds": [
+            {
+                "listen": "127.0.0.1",
+                "port": 10808,
+                "protocol": "socks",
+                "settings": {
+                    "auth": "noauth",
+                    "udp": true,
+                    "userLevel": 8
+                },
+                "sniffing": {
+                    "destOverride": [
+                        "fakedns"
+                    ],
+                    "enabled": true,
+                    "routeOnly": false
+                },
+                "tag": "socks"
+            }
+        ],
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "vless",
+                "mux": {
+                    "enabled": false,
+                    "concurrency": -1
+                },
+                "streamSettings": {
+                    "network": "ws",
+                    "security": "tls",
+                    "tlsSettings": {
+                        "allowInsecure": false,
+                        "fingerprint": "chrome",
+                        "show": false,
+                        "serverName": "host2.example.org"
+                    },
+                    "wsSettings": {
+                        "path": "/ws2",
+                        "headers": {
+                            "Host": "host2.example.org"
+                        }
+                    }
+                },
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": "edge2.example.com",
+                            "port": 443,
+                            "users": [
+                                {
+                                    "id": "00000000-0000-4000-8000-000000000002",
+                                    "encryption": "none",
+                                    "flow": "",
+                                    "level": 8
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "protocol": "freedom",
+                "settings": {
+                    "domainStrategy": "UseIP"
+                },
+                "tag": "direct"
+            },
+            {
+                "protocol": "blackhole",
+                "settings": {
+                    "response": {
+                        "type": "http"
+                    }
+                },
+                "tag": "block"
+            }
+        ],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "domain": [
+                        "geosite:private"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "ip": [
+                        "geoip:ir"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "network": "tcp,udp",
+                    "outboundTag": "proxy"
+                }
+            ]
+        }
+    },
+    {
+        "remarks": "🇳🇱 NL-1",
+        "log": {
+            "loglevel": "warning"
+        },
+        "inbounds": [
+            {
+                "listen": "127.0.0.1",
+                "port": 10808,
+                "protocol": "socks",
+                "settings": {
+                    "auth": "noauth",
+                    "udp": true,
+                    "userLevel": 8
+                },
+                "sniffing": {
+                    "destOverride": [
+                        "fakedns"
+                    ],
+                    "enabled": true,
+                    "routeOnly": false
+                },
+                "tag": "socks"
+            }
+        ],
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "vless",
+                "mux": {
+                    "enabled": false,
+                    "concurrency": -1
+                },
+                "streamSettings": {
+                    "network": "ws",
+                    "security": "tls",
+                    "tlsSettings": {
+                        "allowInsecure": false,
+                        "fingerprint": "chrome",
+                        "show": false,
+                        "serverName": "host3.example.org"
+                    },
+                    "wsSettings": {
+                        "path": "/ws3",
+                        "headers": {
+                            "Host": "host3.example.org"
+                        }
+                    }
+                },
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": "edge3.example.com",
+                            "port": 443,
+                            "users": [
+                                {
+                                    "id": "00000000-0000-4000-8000-000000000003",
+                                    "encryption": "none",
+                                    "flow": "",
+                                    "level": 8
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "protocol": "freedom",
+                "settings": {
+                    "domainStrategy": "UseIP"
+                },
+                "tag": "direct"
+            },
+            {
+                "protocol": "blackhole",
+                "settings": {
+                    "response": {
+                        "type": "http"
+                    }
+                },
+                "tag": "block"
+            }
+        ],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "domain": [
+                        "geosite:private"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "ip": [
+                        "geoip:ir"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "network": "tcp,udp",
+                    "outboundTag": "proxy"
+                }
+            ]
+        }
+    },
+    {
+        "remarks": "🇫🇮 FI-1",
+        "log": {
+            "loglevel": "warning"
+        },
+        "inbounds": [
+            {
+                "listen": "127.0.0.1",
+                "port": 10808,
+                "protocol": "socks",
+                "settings": {
+                    "auth": "noauth",
+                    "udp": true,
+                    "userLevel": 8
+                },
+                "sniffing": {
+                    "destOverride": [
+                        "fakedns"
+                    ],
+                    "enabled": true,
+                    "routeOnly": false
+                },
+                "tag": "socks"
+            }
+        ],
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "vless",
+                "mux": {
+                    "enabled": false,
+                    "concurrency": -1
+                },
+                "streamSettings": {
+                    "network": "ws",
+                    "security": "tls",
+                    "tlsSettings": {
+                        "allowInsecure": false,
+                        "fingerprint": "chrome",
+                        "show": false,
+                        "serverName": "host4.example.org"
+                    },
+                    "wsSettings": {
+                        "path": "/ws4",
+                        "headers": {
+                            "Host": "host4.example.org"
+                        }
+                    }
+                },
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": "edge4.example.com",
+                            "port": 443,
+                            "users": [
+                                {
+                                    "id": "00000000-0000-4000-8000-000000000004",
+                                    "encryption": "none",
+                                    "flow": "",
+                                    "level": 8
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "protocol": "freedom",
+                "settings": {
+                    "domainStrategy": "UseIP"
+                },
+                "tag": "direct"
+            },
+            {
+                "protocol": "blackhole",
+                "settings": {
+                    "response": {
+                        "type": "http"
+                    }
+                },
+                "tag": "block"
+            }
+        ],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "domain": [
+                        "geosite:private"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "ip": [
+                        "geoip:ir"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "network": "tcp,udp",
+                    "outboundTag": "proxy"
+                }
+            ]
+        }
+    },
+    {
+        "remarks": "🇺🇸 US-1",
+        "log": {
+            "loglevel": "warning"
+        },
+        "inbounds": [
+            {
+                "listen": "127.0.0.1",
+                "port": 10808,
+                "protocol": "socks",
+                "settings": {
+                    "auth": "noauth",
+                    "udp": true,
+                    "userLevel": 8
+                },
+                "sniffing": {
+                    "destOverride": [
+                        "fakedns"
+                    ],
+                    "enabled": true,
+                    "routeOnly": false
+                },
+                "tag": "socks"
+            }
+        ],
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "vless",
+                "mux": {
+                    "enabled": false,
+                    "concurrency": -1
+                },
+                "streamSettings": {
+                    "network": "ws",
+                    "security": "tls",
+                    "tlsSettings": {
+                        "allowInsecure": false,
+                        "fingerprint": "chrome",
+                        "show": false,
+                        "serverName": "host5.example.org"
+                    },
+                    "wsSettings": {
+                        "path": "/ws5",
+                        "headers": {
+                            "Host": "host5.example.org"
+                        }
+                    }
+                },
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": "edge5.example.com",
+                            "port": 443,
+                            "users": [
+                                {
+                                    "id": "00000000-0000-4000-8000-000000000005",
+                                    "encryption": "none",
+                                    "flow": "",
+                                    "level": 8
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "protocol": "freedom",
+                "settings": {
+                    "domainStrategy": "UseIP"
+                },
+                "tag": "direct"
+            },
+            {
+                "protocol": "blackhole",
+                "settings": {
+                    "response": {
+                        "type": "http"
+                    }
+                },
+                "tag": "block"
+            }
+        ],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "domain": [
+                        "geosite:private"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "ip": [
+                        "geoip:ir"
+                    ],
+                    "outboundTag": "direct"
+                },
+                {
+                    "type": "field",
+                    "network": "tcp,udp",
+                    "outboundTag": "proxy"
+                }
+            ]
+        }
+    }
+]

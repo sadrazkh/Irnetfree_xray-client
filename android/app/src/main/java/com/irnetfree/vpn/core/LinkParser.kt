@@ -43,6 +43,11 @@ object LinkParser {
     }
 
     fun parseMany(text: String): Pair<List<ServerConfig>, List<String>> {
+        // A whole JSON config (Xray or sing-box; one, an array, or base64 of
+        // either) or a Clash YAML is JsonImport's. Anything else is not JSON at
+        // all (null) and is read as links, exactly as before.
+        val json = JsonImport.importJson(text)
+        if (json != null) return json.servers to json.errors.map { p: JsonImport.Problem -> p.text() }
         var body = text.trim()
         if (!SCHEME_RE.containsMatchIn(body)) {
             val decoded = b64(body)
@@ -863,8 +868,13 @@ object LinkParser {
     private fun srv0(ob: JSONObject) = ob.optJSONObject("settings")?.optJSONArray("servers")?.optJSONObject(0) ?: JSONObject()
     private fun user0(ob: JSONObject) = ob.optJSONObject("settings")?.optJSONArray("vnext")?.optJSONObject(0)?.optJSONArray("users")?.optJSONObject(0) ?: JSONObject()
 
-    /** Serialize a server (with ALL its settings) back into a shareable link. */
+    /**
+     * Serialize a server (with ALL its settings) back into a shareable link. A
+     * JSON server shares its config itself, pretty-printed (parser.js buildShareLink).
+     */
     fun buildShareLink(s: ServerConfig): String {
+        val cfg = s.json
+        if (s.isJson && cfg != null) return JsonText.pretty(cfg)
         val ob = s.outbound
         val name = if (s.name.isNotBlank()) "#" + enc(s.name) else ""
         val st = ob.optJSONObject("streamSettings") ?: JSONObject()
@@ -1000,6 +1010,9 @@ object LinkParser {
      * and nothing throws.
      */
     fun migrateStoredServer(s: ServerConfig): ServerConfig {
+        // A JSON server's outbound is derived from its config, which is the
+        // user's own text: neither is rewritten behind their back.
+        if (s.isJson) return s
         val dropFakeSni = s.outbound.has("_fakesni")
         val hasMask = s.outbound.optJSONObject("streamSettings")?.optJSONObject("finalmask") != null
         if (!dropFakeSni && !hasMask) return s
