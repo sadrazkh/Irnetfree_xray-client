@@ -23,7 +23,7 @@ const { XrayManager, getFreePort, getFreePorts } = require('./xrayManager');
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('./sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('./netutils');
 const { Store } = require('./store');
-const { SubscriptionManager } = require('./subscription');
+const { SubscriptionManager, serverIdentity } = require('./subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('./tunManager');
 const { TunSingbox, TUN_ADDR4 } = require('./tunSingbox');
 const { NativeMacTun } = require('./nativeMacTun');
@@ -49,6 +49,7 @@ const { schtasksCreateArgs, schtasksDeleteArgs, schtasksQueryXmlArgs, taskExeFro
 const { sharedWgIdentities, localSubnets, lanOverlaps, targetNeeds, routeTargetName, noticeLine, noticeLevel, forWindow, needsTun } = require('./connectNotices');
 const { trayGroups, trayStopItem } = require('./trayMenu');
 const { exportBundle, importBundle } = require('./backup');
+const { createRouteShareApi } = require('./routeShare');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
 const { CORE_IDS, createCoreVersionsApi } = require('./coreVersions');
 const https = require('https');
@@ -2819,6 +2820,27 @@ function registerIpc() {
     store.set('pool', valid);
     return valid;
   });
+
+  // Routing share links (routeShare.js): a profile or a chain with every server
+  // and chain it needs, as one irnetfree://routing/ text — copy, preview, import.
+  // The same handlers the router's service has.
+  const routeShare = createRouteShareApi({
+    store,
+    getSettings,
+    getChains,
+    linkOf: buildShareLink,
+    parseMany,
+    identityOf: (s) => serverIdentity(s, true),
+    afterWrite: () => refreshTray(),
+    // an import only adds; it raises the reconnect state when it moves what the live selection connects
+    liveSelection: () => (appliedSettings ? store.get('activeServerId', null) : null),
+    markLive: () => { serverEditPending = true; },
+    pendingKeys
+  });
+  ipcMain.handle('routing:shareProfile', (e, arg) => routeShare.shareProfile(arg));
+  ipcMain.handle('routing:shareChain', (e, arg) => routeShare.shareChain(arg));
+  ipcMain.handle('routing:importPreview', (e, arg) => routeShare.importPreview(arg));
+  ipcMain.handle('routing:import', (e, arg) => routeShare.importShare(arg));
 
   // Relaunch the app elevated (Windows) so TUN mode can configure routes.
   ipcMain.handle('app:relaunchAdmin', async () => {
