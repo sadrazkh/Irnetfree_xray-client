@@ -1417,13 +1417,22 @@ function serverCard(s) {
   // always in the markup, hidden when not selected: refreshSelection() can
   // then move it between cards without rebuilding either of them
   const selBadge = `<span class="sel-badge"${isSel ? '' : ' hidden'}>✓ ${escapeHtml(t('srv.selected'))}</span>`;
+  // A JSON config (source 'json'): the badge says so and, on hover, how it runs
+  const isJson = s.source === 'json';
+  const jsonRaw = isJson && s.jsonMode === 'raw';
+  const jsonBadge = isJson
+    ? ` <span class="proto-badge proto-json json-badge${jsonRaw ? ' raw' : ''}" title="${escapeHtml(t(jsonRaw ? 'ed.jsonRaw' : 'ed.jsonFull'))}">${escapeHtml(t('srv.jsonBadge'))}</span>`
+    : '';
+  // what Copy copies: the config itself for a JSON server, the share link otherwise
+  const copyKey = isJson ? 'ed.jsonCopy' : 'btn.copy';
+  const copyTitle = isJson ? escapeHtml(t('ed.jsonCopy')) : 'copy';
 
   card.innerHTML = `
     <span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(s.id)}"></span>
     <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>
     <div class="srv-info">
       <div class="srv-name">${escapeHtml(s.name)} ${selBadge}</div>
-      <div class="srv-addr">${escapeHtml(s.address)}:${escapeHtml(s.port)}</div>
+      <div class="srv-addr">${escapeHtml(s.address)}:${escapeHtml(s.port)}${jsonBadge}</div>
     </div>
     <div class="stat-group">
       <span class="stat" title="${escapeHtml(t('ping.tcp'))}"><i>⚡</i><b class="stat-v ${tl.cls}" data-pbase="stat-v" data-ping="${escapeHtml(s.id)}">${tl.txt}</b></span>
@@ -1433,7 +1442,7 @@ function serverCard(s) {
     <span class="srv-usage" data-usage="${escapeHtml(s.id)}" title="${escapeHtml(t('srv.usage'))} — ${escapeHtml(t('srv.usageClick'))}">${usageLabel(s.id)}</span>
     <div class="srv-actions">
       <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
-      <button class="icon-btn copy-srv" data-i18n-title="btn.copy" title="copy">⧉</button>
+      <button class="icon-btn copy-srv" data-i18n-title="${copyKey}" title="${copyTitle}">⧉</button>
       <button class="icon-btn qr-srv" data-i18n-title="btn.qr" title="QR">▦</button>
       <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="edit">✎</button>
       <button class="icon-btn connect-srv" title="▶">▶</button>
@@ -1775,11 +1784,30 @@ $('#btnImportCancel').onclick = () => { $('#importBox').hidden = true; $('#impor
 const HTTP_PROXY_LINK = /^http:\/\/(?:(?:[A-Za-z0-9+/=]+|[^/?#\s@]+)@)?[^/?#\s@]+:\d{1,5}(?:#\S*)?$/i;
 
 /**
+ * Text that opens like a JSON document: an object, or an array of them. Only a
+ * routing hint — whether it is a config at all is parseMany's call (main side),
+ * which also reads a WireGuard `[Interface]` blob first (smartImport checks that
+ * before this, so an `[` here is never a .conf).
+ */
+function looksLikeJsonText(text) {
+  // \x7b is "{" — an escape, so the tests that cut functions out of this file by counting braces keep their count
+  return /^\s*[\[\x7b]/.test(String(text || ''));
+}
+
+/** The first import error's reason, short enough for a toast ('' when there is none). */
+function importErrorReason(errors) {
+  const e = (errors || [])[0];
+  const why = e ? String((e && e.error) || (typeof e === 'string' ? e : '')) : '';
+  return why.length > 140 ? why.slice(0, 137) + '…' : why;
+}
+
+/**
  * Smart import: figures out what was pasted and routes it correctly.
  *  - http(s) lines  -> added & fetched as subscriptions (auto-update capable)
  *  - vless/vmess/…  -> imported as servers
  *  - http proxy link -> imported as a server (see HTTP_PROXY_LINK above)
  *  - base64 blob    -> decoded & imported as servers (handled by parseMany)
+ *  - JSON config(s) -> sent whole to parseMany (one server per config, or per balancer outbound)
  * Mixed input works too (URLs become subs, the rest become servers).
  */
 async function smartImport(text) {
@@ -1796,12 +1824,27 @@ async function smartImport(text) {
     toast(failed ? `${t('t.failed')}: ${res.errors[0].error}` : t('t.wgAdded'), failed ? 'err' : 'ok');
     return;
   }
+  // Pasted JSON — one Xray / sing-box config, or an array of them — is one
+  // document: it goes to the main process exactly as typed, never split into
+  // lines (parseMany reads it before it looks for links).
+  if (looksLikeJsonText(text)) {
+    const res = await window.api.importServers(text);
+    state.servers = res.servers;
+    if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
+    renderServers(); renderPicker(); renderChains(); renderPool();
+    const errCount = (res.errors || []).length;
+    const why = importErrorReason(res.errors);
+    const added = res.added || 0;
+    toast(added ? `${added} ${t('t.serversAdded')}` + (errCount ? ` (${errCount} ${t('t.errors')}${why ? ': ' + why : ''})` : '')
+      : (why ? `${t('t.failed')}: ${why}` : t('t.nothingFound')), added ? 'ok' : 'err');
+    return;
+  }
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const isSubUrl = (l) => /^https?:\/\//i.test(l) && !HTTP_PROXY_LINK.test(l);
   const urlLines = lines.filter(isSubUrl);
   const configText = lines.filter(l => !isSubUrl(l)).join('\n');
 
-  let subCount = 0, subAdded = 0, srvAdded = 0, errCount = 0;
+  let subCount = 0, subAdded = 0, srvAdded = 0, errCount = 0, firstWhy = '';
 
   for (const url of urlLines) {
     try { const res = await window.api.addSub(url, ''); subCount++; subAdded += res.added || 0; }
@@ -1816,6 +1859,7 @@ async function smartImport(text) {
     state.servers = res.servers;
     srvAdded = res.added || 0;
     errCount += (res.errors || []).length;
+    firstWhy = importErrorReason(res.errors);
   }
 
   if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
@@ -1825,7 +1869,9 @@ async function smartImport(text) {
   if (subCount) parts.push(`${subCount} ${t('t.subAddedShort')} • ${subAdded} ${t('sub.servers')}`);
   if (srvAdded || (configText && !subCount)) parts.push(`${srvAdded} ${t('t.serversAdded')}`);
   const ok = subCount || srvAdded;
-  const msg = (parts.join(' • ') || t('t.nothingFound')) + (errCount ? ` (${errCount} ${t('t.errors')})` : '');
+  // the first error's reason rides along: "Clash YAML is not supported — use the
+  // subscription link" is the whole point of that refusal
+  const msg = (parts.join(' • ') || t('t.nothingFound')) + (errCount ? ` (${errCount} ${t('t.errors')}${firstWhy ? ': ' + firstWhy : ''})` : '');
   toast(msg, ok ? 'ok' : 'err');
   return { subCount, subAdded, srvAdded, errCount };
 }
@@ -1851,7 +1897,8 @@ document.addEventListener('paste', (e) => {
   // ignore unrelated clipboard text; a .conf blob counts as importable too
   const looksImportable = /^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/|socks:\/\/|socks5:\/\/|wireguard:\/\/|wg:\/\/|hysteria2:\/\/|hy2:\/\/)/im.test(text.trim())
     || /[A-Za-z0-9+/=]{24,}/.test(text.trim())
-    || (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text));
+    || (/^\s*\[interface\]/im.test(text) && /^\s*\[peer\]/im.test(text))
+    || (looksLikeJsonText(text) && text.includes('"outbounds"'));   // an Xray / sing-box config
   if (!looksImportable) return;
   e.preventDefault();
   toast(t('t.pasteDetected'));
@@ -3666,12 +3713,37 @@ async function copyText(text) {
   try { await navigator.clipboard.writeText(text); }
   catch { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
 }
+/**
+ * A JSON server's QR carries its config as minified JSON — when it fits. A QR
+ * of the largest version holds 2,953 bytes; 2,900 leaves room for the mode and
+ * length header. Above that nothing is drawn, and the dialog says so.
+ */
+const QR_JSON_MAX_BYTES = 2900;
+
+/**
+ * The text a QR encodes for a JSON server: the config minified, with every
+ * non-ASCII character written as a \uXXXX escape. The QR library keeps one
+ * byte per character (the low 8 bits), so a Persian remark or an emoji would
+ * come out scrambled; the escape is plain ASCII that any scanner reads, and
+ * JSON.parse gives the same config back. ASCII only, so its length is its
+ * size in bytes.
+ */
+function qrJsonText(pretty) {
+  let min = pretty;
+  try { min = JSON.stringify(JSON.parse(pretty)); } catch {}
+  return min.replace(/[\u0080-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
 async function showServerQr(id) {
   const link = await window.api.serverLink(id);
   if (!link) return toast('—', 'err');
+  const srv = (state.servers || []).find(x => x.id === id);
+  const isJson = !!srv && srv.source === 'json';
+  const text = isJson ? qrJsonText(link) : link;
   const box = $('#qrImage'); box.innerHTML = '';
   try {
-    const qr = qrcode(0, 'L'); qr.addData(link); qr.make();
+    if (isJson && text.length > QR_JSON_MAX_BYTES) throw new Error('too large for a QR');
+    const qr = qrcode(0, 'L'); qr.addData(text); qr.make();
     // A scalable SVG, not createImgTag's fixed-size GIF: a long link (an xhttp
     // `extra` object, a WireGuard peer) makes a 350px+ bitmap that overflowed the
     // modal and could not shrink. The SVG takes whatever width the box gives it
@@ -3679,20 +3751,134 @@ async function showServerQr(id) {
     // for; 6px was 1.5 modules, which scanners refuse.
     box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 16, scalable: true });
   } catch (e) {
-    box.innerHTML = '<p class="hint" style="padding:24px 8px">' + (t('qr.tooBig') || 'Link too long for a QR — use Copy.') + '</p>';
+    box.innerHTML = '<p class="hint" style="padding:24px 8px">' + (t(isJson ? 'qr.tooLarge' : 'qr.tooBig') || 'Link too long for a QR — use Copy.') + '</p>';
   }
-  $('#qrLink').value = link;
+  // too large to draw: the readable (pretty) JSON stays in the box to copy
+  $('#qrLink').value = isJson && text.length > QR_JSON_MAX_BYTES ? link : text;
+  $('#qrCopy').textContent = t(isJson ? 'ed.jsonCopy' : 'qr.copy');
   $('#qrModal').hidden = false;
 }
 if ($('#qrClose')) $('#qrClose').onclick = () => { $('#qrModal').hidden = true; };
 if ($('#qrModal')) $('#qrModal').onclick = (e) => { if (e.target === $('#qrModal')) $('#qrModal').hidden = true; };
 if ($('#qrCopy')) $('#qrCopy').onclick = () => { copyText($('#qrLink').value); toast(t('t.copied') || 'Copied ✓', 'ok'); };
 
+/* ---------- a JSON server's edit form: the config itself, no link fields ---------- */
+let editJsonMode = 'full';   // the Full / Raw switch of the open JSON form
+
+/** Show the JSON form or the link form in the edit modal (never both). */
+function setEditKind(isJson) {
+  show('#edJsonWrap', isJson);
+  show('#edLinkFields', !isJson);
+  show('#edAddrWrap', !isJson);       // the name stays, alone in its row
+  $('#edNameRow').classList.toggle('single', isJson);
+}
+
+/** The reason a save was refused, under the editor; null clears it. */
+function showJsonError(reason) {
+  const el = $('#edJsonError');
+  if (!el) return;
+  const text = reason === null || reason === undefined ? '' : (t('ed.jsonInvalid') + (reason ? ': ' + reason : ''));
+  el.textContent = text;
+  el.hidden = !text;
+  if (text) {
+    toast(text, 'err');
+    if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+/**
+ * What full mode leaves unused, from the record's jsonInfo: the config's own
+ * routing rules (each "match → to"), and a line each for its DNS, balancers and
+ * observatory. Shown in full mode only — raw runs all of it. Values are the
+ * config's own text, so they go in as text nodes, never as markup.
+ */
+function renderJsonInfo(info, mode) {
+  const box = $('#edJsonInfo');
+  if (!box) return;
+  box.innerHTML = '';
+  const i = info || {};
+  const rules = Array.isArray(i.rules) ? i.rules : [];
+  const list = document.createElement('ul');
+  list.className = 'ed-json-list';
+  const item = (text) => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    list.appendChild(li);
+    return li;
+  };
+  if (rules.length) {
+    const li = item(t('ed.jsonNaRules').replace('{n}', () => String(rules.length)));
+    const sub = document.createElement('ul');
+    sub.className = 'ed-json-rules';
+    for (const r of rules) {
+      const row = document.createElement('li');
+      const text = document.createElement('bdi');
+      text.dir = 'ltr';
+      text.textContent = (r && r.match != null ? String(r.match) : '?') + ' → ' + (r && r.to != null ? String(r.to) : '?');
+      row.appendChild(text);
+      sub.appendChild(row);
+    }
+    li.appendChild(sub);
+  }
+  if (i.dns) item(t('ed.jsonNaDns'));
+  if (i.balancers) item(t('ed.jsonNaBalancers'));
+  if (i.observatory) item(t('ed.jsonNaObservatory'));
+  if (list.children.length) {
+    const head = document.createElement('div');
+    head.className = 'field-label';
+    head.textContent = t('ed.jsonNotApplied');
+    box.appendChild(head);
+    box.appendChild(list);
+  }
+  box.hidden = mode !== 'full' || !list.children.length;
+}
+
+/** Full / Raw: the switch, its one line, and the not-applied summary that only full has. */
+function setJsonMode(mode) {
+  editJsonMode = mode === 'raw' ? 'raw' : 'full';
+  $$('#edJsonMode .seg-btn').forEach((b) => {
+    const on = b.dataset.jsonMode === editJsonMode;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-checked', String(on));
+  });
+  $('#edJsonHelp').textContent = t(editJsonMode === 'raw' ? 'ed.jsonRawHelp' : 'ed.jsonFullHelp');
+  renderJsonInfo(editOriginal && editOriginal.jsonInfo, editJsonMode);
+}
+
+function openEditJson(s) {
+  $('#edName').value = s.name || '';
+  $('#edJson').value = JSON.stringify(s.json || {}, null, 2);
+  showJsonError(null);
+  setJsonMode(s.jsonMode);
+  $('#editModal').hidden = false;
+  $('#edJson').scrollTop = 0;
+}
+
+/** { name, jsonMode, json } for a save — or null, with the reason on screen, when the text is not a JSON object. */
+function collectJsonFields() {
+  let json;
+  try { json = JSON.parse($('#edJson').value); }
+  catch (e) { showJsonError(e && e.message ? e.message : String(e)); return null; }
+  if (!json || typeof json !== 'object' || Array.isArray(json)) { showJsonError(t('ed.jsonNotObject')); return null; }
+  showJsonError(null);
+  return { name: $('#edName').value, jsonMode: editJsonMode, json };
+}
+
+$$('#edJsonMode .seg-btn').forEach((b) => { b.onclick = () => setJsonMode(b.dataset.jsonMode); });
+/** Copy JSON: what is in the editor (edits included), pretty as shown. */
+async function copyEditJson() {
+  await copyText($('#edJson').value);
+  toast(t('t.copied') || 'Copied ✓', 'ok');
+}
+if ($('#edJsonCopy')) $('#edJsonCopy').onclick = copyEditJson;
+
 function openEdit(id) {
   const s = state.servers.find(x => x.id === id);
   if (!s) return;
   state.editingId = id;
   editOriginal = s;
+  setEditKind(s.source === 'json');
+  if (s.source === 'json') return openEditJson(s);
   const f = readServerFields(s);
   const proto = s.protocol;
   fillEditForm(f, proto);
@@ -3992,24 +4178,30 @@ function serverInLivePlan(id) {
 async function saveEdit() {
   const id = state.editingId;
   if (!id || !editOriginal) return;
+  // a JSON server sends its mode and config, not the link form's fields
+  const isJson = editOriginal.source === 'json';
   const proto = editOriginal.protocol;
-  const fields = collectEditFields(editOriginal, editClearPin);
+  const fields = isJson ? collectJsonFields() : collectEditFields(editOriginal, editClearPin);
+  if (!fields) return;   // a JSON form has said why, under the editor
 
-  // the endpoint field must hold the PUBLIC host — the interface address
-  // pasted here is exactly how the record used to get corrupted
-  if (proto === 'wireguard' && (!String(fields.address).trim() || String(fields.address).includes('/'))) return toast(t('t.wgBadEndpoint'), 'err');
+  // the link form's own checks; its inputs are hidden (and stale) for a JSON server
+  if (!isJson) {
+    // the endpoint field must hold the PUBLIC host — the interface address
+    // pasted here is exactly how the record used to get corrupted
+    if (proto === 'wireguard' && (!String(fields.address).trim() || String(fields.address).includes('/'))) return toast(t('t.wgBadEndpoint'), 'err');
 
-  // finalmask goes to the core untouched, so catch bad JSON here rather than
-  // letting xray refuse the whole config at connect time
-  const fmText = $('#edFinalMask') ? $('#edFinalMask').value.trim() : '';
-  if (fmText) {
-    try { JSON.parse(fmText); }
-    catch { return toast(t('edit.finalMaskBad'), 'err'); }
+    // finalmask goes to the core untouched, so catch bad JSON here rather than
+    // letting xray refuse the whole config at connect time
+    const fmText = $('#edFinalMask') ? $('#edFinalMask').value.trim() : '';
+    if (fmText) {
+      try { JSON.parse(fmText); }
+      catch { return toast(t('edit.finalMaskBad'), 'err'); }
+    }
+    // an ML-DSA-65 key is 1952 bytes as base64url (2603 characters); the parser
+    // leaves anything else out, so say so rather than drop it in silence
+    const pqvText = $('#edPqv') && $('#edPqvRow') && !$('#edPqvRow').hidden ? $('#edPqv').value.trim() : '';
+    if (pqvText && !/^[A-Za-z0-9_\-+/]{2603}={0,2}$/.test(pqvText)) return toast(t('edit.pqvBad'), 'err');
   }
-  // an ML-DSA-65 key is 1952 bytes as base64url (2603 characters); the parser
-  // leaves anything else out, so say so rather than drop it in silence
-  const pqvText = $('#edPqv') && $('#edPqvRow') && !$('#edPqvRow').hidden ? $('#edPqv').value.trim() : '';
-  if (pqvText && !/^[A-Za-z0-9_\-+/]{2603}={0,2}$/.test(pqvText)) return toast(t('edit.pqvBad'), 'err');
 
   const res = await window.api.updateServer(id, fields);
   if (res.ok) {
@@ -4027,6 +4219,9 @@ async function saveEdit() {
     // button) — a Disconnect + Connect would go direct in between.
     if (live) toastAction(t('t.serverUpdatedLive'), t('btn.reconnect'), doReconnect);
     else toast(t('t.serverUpdated'), 'ok');
+  } else if (isJson) {
+    // refused (bad JSON, no proxy outbound left…): the reason stays under the editor and the form stays open
+    showJsonError(res.error || '');
   } else {
     toast(t('t.failed'), 'err');
   }

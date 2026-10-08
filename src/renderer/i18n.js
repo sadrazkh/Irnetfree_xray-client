@@ -591,7 +591,25 @@ const I18N = {
     'notice.autostartStale': 'ویندوز هنگام ورود نسخهٔ دیگری از IRNetFree را اجرا می‌کند — {task} — نه همین نسخه ({current}). آن نسخه کد شبکهٔ خودش را دارد که شاید قدیمی‌تر باشد.',
     'notice.autostartFix': 'هنگام ورود همین نسخه اجرا شود',
     'notice.autostartFixed': 'از این به بعد هنگام ورود به ویندوز همین نسخه اجرا می‌شود',
-    'notice.autostartFixFailed': 'تغییر اجرای خودکار ناموفق بود: {error}'
+    'notice.autostartFixFailed': 'تغییر اجرای خودکار ناموفق بود: {error}',
+
+    // JSON configs — a server imported from an Xray / sing-box JSON (task J2)
+    'srv.jsonBadge': 'JSON',
+    'ed.jsonMode': 'نحوهٔ اجرا',
+    'ed.jsonFull': 'کامل',
+    'ed.jsonRaw': 'خام',
+    'ed.jsonFullHelp': 'داخل برنامه اجرا می‌شود: خروجیِ این کانفیگ به کار می‌رود و روتینگ، DNS و محافظ نشتیِ برنامه همچنان اعمال می‌شوند.',
+    'ed.jsonRawHelp': 'دقیقاً همان‌طور که نوشته شده اجرا می‌شود؛ مدیریت DNS، محافظ نشتی و حالت روتینگِ برنامه اعمال نمی‌شوند. فقط وقتی همین یک سرور تنها وصل شود — در زنجیره، روتینگ ویژه یا استخر پروکسی به شکل کامل اجرا می‌شود.',
+    'ed.jsonEditor': 'کانفیگ (JSON)',
+    'ed.jsonCopy': 'کپی JSON',
+    'ed.jsonNotApplied': 'حالت کامل این بخش‌های کانفیگ را به کار نمی‌برد:',
+    'ed.jsonNaRules': 'روتینگ خودِ کانفیگ — {n} قانون:',
+    'ed.jsonNaDns': 'تنظیمات DNS خودِ کانفیگ',
+    'ed.jsonNaBalancers': 'بالانسرهای خودِ کانفیگ',
+    'ed.jsonNaObservatory': 'رصدخانهٔ (بررسی سلامت) خودِ کانفیگ',
+    'ed.jsonInvalid': 'این کانفیگ پذیرفته نشد',
+    'ed.jsonNotObject': 'باید یک شیء JSON (یک کانفیگ) باشد',
+    'qr.tooLarge': 'برای QR خیلی بزرگ است — از «کپی JSON» استفاده کن.'
   },
 
   en: {
@@ -1182,7 +1200,25 @@ const I18N = {
     'notice.autostartStale': 'At logon Windows starts another copy of IRNetFree — {task} — not this one ({current}). That copy keeps its own, possibly older, network code.',
     'notice.autostartFix': 'Start this version at logon',
     'notice.autostartFixed': 'At logon Windows now starts this version',
-    'notice.autostartFixFailed': 'Could not update the logon task: {error}'
+    'notice.autostartFixFailed': 'Could not update the logon task: {error}',
+
+    // JSON configs — a server imported from an Xray / sing-box JSON (task J2)
+    'srv.jsonBadge': 'JSON',
+    'ed.jsonMode': 'How it runs',
+    'ed.jsonFull': 'Full',
+    'ed.jsonRaw': 'Raw',
+    'ed.jsonFullHelp': 'Runs inside the app: this config’s outbound is used, and the app’s routing, DNS and leak guard still apply.',
+    'ed.jsonRawHelp': 'Runs exactly as written; the app’s DNS management, leak guard and routing mode do not apply. Only when this server is connected on its own — in a chain, advanced routing or the pool it runs in its full form.',
+    'ed.jsonEditor': 'Config (JSON)',
+    'ed.jsonCopy': 'Copy JSON',
+    'ed.jsonNotApplied': 'Full mode does not use these parts of the config:',
+    'ed.jsonNaRules': 'Its own routing — {n} rule(s):',
+    'ed.jsonNaDns': 'Its own DNS settings',
+    'ed.jsonNaBalancers': 'Its own balancers',
+    'ed.jsonNaObservatory': 'Its own observatory (health checks)',
+    'ed.jsonInvalid': 'This config was not accepted',
+    'ed.jsonNotObject': 'It must be one JSON object (a config)',
+    'qr.tooLarge': 'Too large for a QR — use Copy JSON.'
   }
 };
 

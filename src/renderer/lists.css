@@ -466,3 +466,42 @@ button.pool-item:hover .pool-add { color: var(--accent); }
    missing — TUN is the default now, so this is a first-run surface */
 .mode-note.bad { color: var(--danger); line-height: 1.7; }
 .mode-fix { width: 100%; margin-top: 4px; }
+
+/* ----------------------------- JSON configs ----------------------------- */
+
+/*
+ * A server imported from an Xray / sing-box JSON (source 'json'). Its card
+ * carries a small JSON tag beside the address (Raw mode in the warning hue, so
+ * a config that runs outside the app's DNS and routing is told apart at a
+ * glance), and its edit form is the config itself: the link fields are hidden
+ * and this block stands in. The editor is monospace and LTR in Persian too —
+ * JSON is code.
+ */
+.proto-json { color: var(--info); border-color: var(--infoSoft); background: var(--infoSoft); }
+.json-badge {
+  margin-inline-start: 8px;
+  padding-block: 1px;
+  vertical-align: middle;
+  letter-spacing: .08em;
+}
+.json-badge.raw { color: var(--warn); border-color: var(--warnSoft); background: var(--warnSoft); }
+
+/* the edit modal: one column when the address field is gone, and the two
+   stand-in blocks laid out like the modal body they replace */
+.grid2.single { grid-template-columns: minmax(0, 1fr); }
+.ed-fields, .ed-json { display: flex; flex-direction: column; gap: 12px; }
+.ed-json-text {
+  direction: ltr;
+  text-align: left;
+  min-height: 280px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+.ed-json-info .field-label { margin-block-end: 4px; }
+.ed-json-list, .ed-json-rules { margin: 0; padding-inline-start: 20px; font-size: 12px; line-height: 1.7; color: var(--ink3); }
+.ed-json-rules { margin-block-start: 2px; font-family: var(--mono); }
+.ed-json-actions { display: flex; gap: 8px; }
