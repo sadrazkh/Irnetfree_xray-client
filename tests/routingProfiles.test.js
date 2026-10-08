@@ -46,7 +46,7 @@ test('migration: no stored profiles → one rp-default from today’s settings, 
   assert.ok(p.rules.every((r) => !('via' in r)), 'no via');
   // fa by default, as the spec names it; an empty store gives an empty profile
   const fa = migrateProfiles({ stored: null, settings: {} }).profiles[0];
-  assert.deepEqual(fa, { id: 'rp-default', name: 'روتینگ پیشرفته', rules: [], def: '', defVia: 'inherit', useMode: false, base: null });
+  assert.deepEqual(fa, { id: 'rp-default', name: 'روتینگ ویژه', rules: [], def: '', defVia: 'inherit', useMode: false, base: null });
   // a stored list is kept (normalized): nothing to migrate, nothing written
   const again = migrateProfiles({ stored: profiles, settings: { routeRules: [] } });
   assert.equal(again.changed, false);
@@ -103,7 +103,7 @@ test('mirror both ways: rp-default → routeRules / routeDefault / advancedUseMo
 
 test('profileFromSettings is the settings’ advanced routing as a profile', () => {
   assert.deepEqual(profileFromSettings({ routeRules: 'not a list', routeDefault: 5, advancedUseMode: 'yes' }),
-    { id: 'rp-default', name: 'روتینگ پیشرفته', rules: [], def: '5', defVia: 'inherit', useMode: true, base: null });
+    { id: 'rp-default', name: 'روتینگ ویژه', rules: [], def: '5', defVia: 'inherit', useMode: true, base: null });
 });
 
 test('selection ids: plain __advanced__ is the first profile; __advanced__:<id> that profile when it exists, else null', () => {

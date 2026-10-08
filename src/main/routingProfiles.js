@@ -42,7 +42,7 @@ function newProfileId() {
 
 /** The migrated profile's name, in the language the app speaks. */
 function defaultName(lang) {
-  return lang === 'en' ? 'Advanced routing' : 'روتینگ پیشرفته';
+  return lang === 'en' ? 'Advanced routing' : 'روتینگ ویژه';
 }
 
 /** A rule as a profile keeps it: `{ id?, type, value, target, via? }`, strings. */

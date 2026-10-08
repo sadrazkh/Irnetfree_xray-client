@@ -502,7 +502,7 @@ function storedProfiles({ stored, settings, rp, lang }) {
   }
   return [{
     id: 'rp-default',
-    name: lang === 'en' ? 'Advanced routing' : 'روتینگ پیشرفته',
+    name: lang === 'en' ? 'Advanced routing' : 'روتینگ ویژه',
     rules: Array.isArray(s.routeRules) ? s.routeRules.filter(isObj).map((r) => ({ type: r.type, value: r.value, target: r.target })) : [],
     def: s.routeDefault || '',
     defVia: VIA_INHERIT,
