@@ -2259,7 +2259,10 @@ private fun protoColor(proto: String): Color = when (proto) {
             if (mode == JsonImport.MODE_FULL && info != null) {
                 Text("Not used in full mode — the app's own apply instead", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
                 Text("Its own routing: ${info.rules.size} rule" + (if (info.rules.size == 1) "" else "s"), color = TXT2, fontSize = 11.sp)
-                info.rules.forEach { r: JsonRule -> Text("   ${r.match} → ${r.to}", color = MUTED, fontSize = 11.sp, fontFamily = MONO) }
+                // the record's neutral tokens (`*`, `balancer:<tag>`, "") in words
+                info.rules.forEach { r: JsonRule ->
+                    Text("   ${JsonImport.matchInWords(r.match)} → ${JsonImport.targetInWords(r.to)}", color = MUTED, fontSize = 11.sp, fontFamily = MONO)
+                }
                 if (info.dns) Text("Its own DNS servers", color = TXT2, fontSize = 11.sp)
                 if (info.balancers > 0) Text("${info.balancers} balancer" + (if (info.balancers == 1) "" else "s") + " — each member is its own server here", color = TXT2, fontSize = 11.sp)
                 if (info.observatory) Text("Its observatory", color = TXT2, fontSize = 11.sp)
