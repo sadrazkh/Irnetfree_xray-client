@@ -113,7 +113,7 @@ check), engine choice, mux, chains and advanced routing for non-JSON servers.
 ## Tests and checks
 
 - **Sanitized fixtures** in `tests/fixtures/json/`, shared by the JVM tests through `../../tests/fixtures/json/`:
-  - the 40-entry subscription with fake ids;
+  - a sanitized excerpt of the owner's subscription (2 info rows + 5 servers, fake ids and example.com hosts);
   - a fragment helper through `dialerProxy`;
   - a 2-hop chain through `proxySettings`;
   - a balancer;
