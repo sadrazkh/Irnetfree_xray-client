@@ -1977,11 +1977,11 @@ private fun latColor(ms: Long?): Color = when {
                         label, color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
                     )
-                    // imported from a whole JSON config (JsonImport) — RAW when it runs as written
+                    // imported from a whole JSON config (JsonImport); on Android it always runs in full
                     if (s.isJson) {
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            if (s.jsonMode == JsonImport.MODE_RAW) "JSON·RAW" else "JSON", color = AMBER, fontSize = 8.sp, fontFamily = MONO,
+                            "JSON", color = AMBER, fontSize = 8.sp, fontFamily = MONO,
                             fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.em, maxLines = 1,
                             modifier = Modifier.clip(RoundedCornerShape(4.dp))
                                 .border(1.dp, AMBER.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
@@ -2090,7 +2090,7 @@ private fun latColor(ms: Long?): Color = when {
 @Composable private fun QrDialog(s: ServerConfig, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     // A JSON server's QR holds its config, minified — when it fits one (the
-    // desktop's 2,900 bytes); Copy gives it pretty-printed either way.
+    // desktop's 1,700 bytes); Copy gives it pretty-printed either way.
     val cfg = s.json
     val isJson = s.isJson && cfg != null
     val link = remember(s.id) { if (isJson && cfg != null) JsonText.minify(cfg) else LinkParser.buildShareLink(s) }
@@ -2145,8 +2145,8 @@ private fun qrBitmap(text: String): android.graphics.Bitmap? = try {
     android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.RGB_565)
 } catch (e: Exception) { null }
 
-/** The most a JSON server's QR holds (the minified config, UTF-8) — the desktop's limit. */
-private const val QR_MAX_JSON_BYTES = 2900
+/** The most a JSON server's QR holds (the minified config, UTF-8) — the desktop's limit: larger codes do not scan. */
+private const val QR_MAX_JSON_BYTES = 1700
 
 /** Its share link — a JSON server's config, pretty-printed (LinkParser.buildShareLink). */
 private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
@@ -2214,17 +2214,18 @@ private fun protoColor(proto: String): Color = when (proto) {
 }
 
 /**
- * A JSON server's edit sheet (the desktop's JSON edit view): its name, the
- * Full / Raw switch with what each means, the config itself as text — checked
- * on Save, which re-derives the main outbound and helpers from it — Copy JSON,
- * and in full mode what the config holds that the app does not use. No link
- * fields: the JSON stays the one source.
+ * A JSON server's edit sheet (the desktop's JSON edit view): its name, its
+ * mode as a note — raw runs on the desktop in proxy mode; Android's VPN is
+ * always a TUN, so here the full form runs whatever the mode, which is kept as
+ * stored — the config itself as text, checked on Save, which re-derives the
+ * main outbound and helpers from it; Copy JSON; and what the config holds that
+ * the app does not use. No link fields: the JSON stays the one source.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun EditJsonSheet(server: ServerConfig, onDismiss: () -> Unit, onSave: (ServerConfig) -> Unit) {
     val ctx = LocalContext.current
     var name by remember(server.id) { mutableStateOf(server.name) }
-    var mode by remember(server.id) { mutableStateOf(server.jsonMode) }
+    val mode = server.jsonMode
     var text by remember(server.id) { mutableStateOf(server.json?.let { c: JSONObject -> JsonText.pretty(c) } ?: "") }
     var error by remember(server.id) { mutableStateOf("") }
     val info = server.jsonInfo
@@ -2233,16 +2234,9 @@ private fun protoColor(proto: String): Color = when (proto) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
             Text("Edit · JSON · ${badge(server.protocol)}", color = TXT, fontWeight = FontWeight.Bold)
             Fld("Name", name) { name = it }
-            Text("Mode", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(mode == JsonImport.MODE_FULL, { mode = JsonImport.MODE_FULL }, { Text("Full") })
-                FilterChip(mode == JsonImport.MODE_RAW, { mode = JsonImport.MODE_RAW }, { Text("Raw") })
-            }
-            Text(
-                if (mode == JsonImport.MODE_RAW) "Raw: runs exactly as written, when it is connected on its own — the app's DNS management, leak guard and routing mode do not apply. In a chain, the pool or advanced routing it runs in full."
-                else "Full: runs inside the app — its outbound with its helpers (fragment, chain hops), under the app's routing mode, DNS and leak guard.",
-                color = MUTED, fontSize = 11.sp
-            )
+            // The mode is a note here, not a switch: it is kept as stored, so a backup round-trips.
+            Text("Mode: " + (if (mode == JsonImport.MODE_RAW) "Raw" else "Full"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+            Text("Raw (exactly as written) runs on Windows/macOS/Linux in proxy mode; here the full form runs.", color = MUTED, fontSize = 11.sp)
             Text("Config (JSON)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 4.dp))
             // JSON reads left to right in either language
             CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
@@ -2256,7 +2250,8 @@ private fun protoColor(proto: String): Color = when (proto) {
             OutlinedButton(onClick = { copyConfigText(ctx, text) }, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Filled.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Copy JSON")
             }
-            if (mode == JsonImport.MODE_FULL && info != null) {
+            // the full form is what runs here, raw or not: what it leaves out is always worth saying
+            if (info != null) {
                 Text("Not used in full mode — the app's own apply instead", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
                 Text("Its own routing: ${info.rules.size} rule" + (if (info.rules.size == 1) "" else "s"), color = TXT2, fontSize = 11.sp)
                 // the record's neutral tokens (`*`, `balancer:<tag>`, "") in words

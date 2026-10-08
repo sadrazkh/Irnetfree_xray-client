@@ -116,7 +116,8 @@ class JsonImportTest {
         assertTrue(r.servers[0].jsonInfo!!.observatory)
         assertEquals(JsonRule("*", "balancer:auto"), r.servers[0].jsonInfo!!.rules[1])
         assertEquals(JsonImport.MainChoice(listOf("proxy-1", "proxy-2"), "auto"), JsonImport.mainOutboundTag(JSONObject(fixture("xray-balancer.json"))))
-        assertEquals("proxy-2", JsonImport.mainTagOf(r.servers[1]))
+        // a save keeps a member the member it was
+        assertEquals("trojan", JsonImport.applyEdits(r.servers[1], r.servers[1].name, JsonImport.MODE_FULL, JsonText.pretty(r.servers[1].json)).protocol)
     }
 
     @Test fun wireguard_anObjectWithNoRouting() {
@@ -349,81 +350,68 @@ class JsonImportTest {
         assertFalse(stream(tagged(c, "proxy")).getJSONObject("tlsSettings").has("allowInsecure"))
     }
 
-    /* ------------------------------ raw mode ------------------------------ */
+    /* ------------------------------ raw mode on Android ------------------------------ */
 
-    @Test fun raw_theConfigAsWritten_withTheAppsInbounds() {
-        val s = imp("xray-fragment.json").servers.single()
-        val st = settings().copy(logLevel = "debug")
-        val auth = LocalAuth("u", "p")
-        val raw = ConfigBuilder.buildRawConfig(s, st, inboundAuth = auth)
-        val full = ConfigBuilder.build(ConnectionPlan.Single(s), st, inboundAuth = auth)
-        assertEquals(Canon.of(full.getJSONArray("inbounds")), Canon.of(raw.getJSONArray("inbounds")))
-        assertEquals("debug", raw.getJSONObject("log").getString("loglevel"))
-        val cfg = JSONObject(fixture("xray-fragment.json"))
-        assertEquals(Canon.of(cfg.getJSONObject("routing")), Canon.of(raw.getJSONObject("routing")))
-        assertEquals(Canon.of(cfg.getJSONObject("dns")), Canon.of(raw.getJSONObject("dns")))
-        assertEquals(tags(outs(cfg)), tags(outs(raw)))
-        assertEquals("fragment", dialer(tagged(raw, "proxy")))
-        // a balancer runs as a balancer
-        val b = imp("xray-balancer.json").servers[1]
-        val rb = ConfigBuilder.buildRawConfig(b, st)
-        val bcfg = JSONObject(fixture("xray-balancer.json"))
-        assertEquals(Canon.of(bcfg.getJSONObject("routing")), Canon.of(rb.getJSONObject("routing")))
-        assertEquals(Canon.of(bcfg.getJSONObject("observatory")), Canon.of(rb.getJSONObject("observatory")))
-        // the cores refuse allowInsecure, so it goes; the rest of the TLS stays
-        val sub = imp("xray-subscription.json").servers[0]
-        val tls = stream(tagged(ConfigBuilder.buildRawConfig(sub, st), "proxy")).getJSONObject("tlsSettings")
-        assertFalse(tls.has("allowInsecure")); assertEquals("chrome", tls.getString("fingerprint")); assertEquals("host1.example.org", tls.getString("serverName"))
-        // a proxySettings hop, which Xray 26 refuses at load, goes as the dialerProxy it was migrated to — its own tag
-        val chain = imp("xray-chain.json").servers.single()
-        val rc = ConfigBuilder.buildRawConfig(chain, st)
-        val cfx = JSONArray(fixture("xray-chain.json")).getJSONObject(0)
-        val fxOuts = outs(cfx)
-        assertFalse(tagged(rc, "proxy").has("proxySettings"))
-        val wantStream = JSONObject(fxOuts[0].getJSONObject("streamSettings").toString()).put("sockopt", JSONObject().put("dialerProxy", "hop1"))
-        assertEquals(Canon.of(wantStream), Canon.of(stream(tagged(rc, "proxy"))))
-        assertEquals(fxOuts.drop(1).map { o: JSONObject -> Canon.of(o) }, outs(rc).drop(1).map { o: JSONObject -> Canon.of(o) })
-        assertEquals(Canon.of(cfx.getJSONObject("routing")), Canon.of(rc.getJSONObject("routing")))
-        // the stored record keeps its config as written
-        assertEquals("hop1", outs(chain.json!!)[0].getJSONObject("proxySettings").getString("tag"))
-    }
-
-    @Test fun raw_lanSharing_hasItsInboundsAndItsLoopbackGuardFirst() {
-        val s = imp("xray-fragment.json").servers.single()
-        val lan = LanShare(enabled = true, user = "u1", pass = "p1")
-        val c = ConfigBuilder.buildRawConfig(s, settings(), lan = lan)
-        val inTags = (0 until c.getJSONArray("inbounds").length()).map { i: Int -> c.getJSONArray("inbounds").getJSONObject(i).getString("tag") }
-        assertEquals(listOf("socks-in", "http-in", LanShare.SOCKS_TAG, LanShare.HTTP_TAG), inTags)
-        val r = rules(c)
-        assertEquals(ConfigBuilder.RAW_LAN_BLOCK, r[0].getString("outboundTag"))
-        assertEquals(ConfigBuilder.RAW_LAN_BLOCK, r[1].getString("outboundTag"))
-        assertEquals("blackhole", tagged(c, ConfigBuilder.RAW_LAN_BLOCK).getString("protocol"))
-        assertEquals(5, r.size)
-        // without LAN sharing (its port taken), the config's own three rules
-        val without = JSONObject(TunnelSetup.withoutLan(c.toString()))
-        assertEquals(3, rules(without).size)
-    }
-
-    @Test fun raw_runsOnlyForASingleConnect_elsewhereTheFullFormAndALogLine() {
+    @Test fun rawMode_onAndroid_theFullFormRuns_saidOncePerConnect_theModeKept() {
         val s = imp("xray-fragment.json").servers.single().copy(jsonMode = JsonImport.MODE_RAW)
         val st = settings()
+        val line = "\"🇩🇪 frag\" is set to run raw — on Android its full form runs, so the app's DNS and tunnel rules apply"
         val log = ArrayList<String>()
         val cc = TunnelSetup.coreConfig(EngineChoice.XRAY, ConnectionPlan.Single(s), st, false, emptyMap(), null, null) { l: String -> log.add(l) }
-        assertTrue(cc.raw); assertEquals(EngineChoice.XRAY, cc.engine)
-        assertEquals(Canon.of(JSONObject(fixture("xray-fragment.json")).getJSONObject("routing")), Canon.of(JSONObject(cc.json).getJSONObject("routing")))
-        assertTrue(log.toString(), log.any { l: String -> l.startsWith("Running \"🇩🇪 frag\" exactly as written (raw JSON)") })
-        // sing-box cannot run it: an Xray core all the same
-        val sb = TunnelSetup.coreConfig(EngineChoice.SINGBOX, ConnectionPlan.Single(s), st, false, emptyMap(), null, null) { l: String -> log.add(l) }
-        assertTrue(sb.raw); assertEquals(EngineChoice.XRAY, sb.engine)
-        // in a chain: its full form, said once
+        assertEquals(EngineChoice.XRAY, cc.engine)
+        // exactly what a full-mode server builds: its helper beside it, the app's routing and DNS
+        val full = TunnelSetup.coreConfig(EngineChoice.XRAY, ConnectionPlan.Single(s.copy(jsonMode = JsonImport.MODE_FULL)), st, false, emptyMap(), null, null) { _: String -> }
+        assertEquals(Canon.of(JSONObject(full.json)), Canon.of(JSONObject(cc.json)))
+        val c = JSONObject(cc.json)
+        assertEquals("proxy~fragment", dialer(tagged(c, "proxy")))
+        assertEquals("proxy", rules(c).last().getString("outboundTag")); assertEquals("0-65535", rules(c).last().getString("port"))
+        assertTrue(outs(c).any { o: JSONObject -> o.optString("tag") == "dns-out" })
+        assertEquals(listOf(line), log)
+        // in a chain too, once
         log.clear()
         val entry = LinkParser.parseLink("trojan://pw@entry.example:443?security=tls&sni=entry.example&type=tcp#entry")
         val ch = TunnelSetup.coreConfig(EngineChoice.XRAY, ConnectionPlan.Chain("c", listOf(s, entry)), st, false, emptyMap(), null, null) { l: String -> log.add(l) }
-        assertFalse(ch.raw)
-        assertEquals(1, log.count { l: String -> l == "\"🇩🇪 frag\" is set to run raw, but a chain/routing target uses its full form" })
+        assertEquals(1, log.count { l: String -> l == line })
         assertEquals("proxy-h0~fragment", dialer(tagged(JSONObject(ch.json), "proxy-h0")))
-        // full mode is not raw
-        assertFalse(TunnelSetup.coreConfig(EngineChoice.XRAY, ConnectionPlan.Single(s.copy(jsonMode = JsonImport.MODE_FULL)), st, false, emptyMap(), null, null) { _: String -> }.raw)
+        // a full-mode server says nothing
+        log.clear()
+        TunnelSetup.coreConfig(EngineChoice.XRAY, ConnectionPlan.Single(s.copy(jsonMode = JsonImport.MODE_FULL)), st, false, emptyMap(), null, null) { l: String -> log.add(l) }
+        assertTrue(log.isEmpty())
+        // the stored mode survives the store (a backup round-trips) and a save from the sheet
+        assertEquals(JsonImport.MODE_RAW, ServerConfig.fromJson(JSONObject(s.toJson().toString())).jsonMode)
+        assertEquals(JsonImport.MODE_RAW, JsonImport.applyEdits(s, "x", s.jsonMode, JsonText.pretty(s.json)).jsonMode)
+    }
+
+    /* ------------------------------ nesting ------------------------------ */
+
+    @Test fun deeplyNestedJson_isAnImportError_neverACrash() {
+        val n = 10_000
+        // a plain nested array, 10,000 deep: no crash (it is not even taken for a config)
+        val plain = "[".repeat(n) + "]".repeat(n)
+        val p = JsonImport.importJson(plain)
+        assertTrue(p == null || p.servers.isEmpty())
+        assertTrue(LinkParser.parseMany(plain).first.isEmpty())
+        // one that opens like a config: "JSON nested too deeply"
+        val deep = "[{\"outbounds\":" + "[".repeat(n) + "]".repeat(n) + "}]"
+        val r = JsonImport.importJson(deep) ?: throw AssertionError("not read as JSON")
+        assertTrue(r.servers.isEmpty())
+        assertEquals(listOf(JsonImport.Problem("", "JSON nested too deeply")), r.errors)
+        assertEquals(listOf("JSON nested too deeply"), LinkParser.parseMany(deep).second)
+        // in base64, as a subscription might send it
+        val b64 = java.util.Base64.getEncoder().encodeToString(deep.toByteArray(Charsets.UTF_8))
+        assertEquals(listOf("JSON nested too deeply"), JsonImport.importJson(b64)?.errors?.map { e: JsonImport.Problem -> e.error })
+        // the edit sheet refuses it with the same reason
+        val s = imp("xray-fragment.json").servers.single()
+        try {
+            JsonImport.applyEdits(s, s.name, s.jsonMode, "{\"outbounds\":" + "[".repeat(n) + "]".repeat(n) + "}")
+            fail("a 10,000-deep config saved")
+        } catch (ex: IllegalArgumentException) {
+            assertEquals(JsonImport.TOO_DEEP, ex.message)
+        }
+        // the depth counts brackets, not the text inside strings; real configs pass
+        assertEquals(1, JsonImport.nestingDepth("{\"a\":\"" + "[".repeat(100) + "\\\"{\"}"))
+        assertEquals(JsonImport.MAX_DEPTH + 1, JsonImport.nestingDepth("[".repeat(n)))
+        assertTrue(JsonImport.nestingDepth(fixture("xray-subscription.json")) < 15)
     }
 
     /* ------------------------------ a refresh ------------------------------ */
