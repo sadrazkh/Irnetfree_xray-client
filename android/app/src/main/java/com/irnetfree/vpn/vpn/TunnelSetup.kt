@@ -5,8 +5,12 @@ import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.CoreCompat
 import com.irnetfree.vpn.core.EngineChoice
+import com.irnetfree.vpn.core.JsonImport
 import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.LocalAuth
+import com.irnetfree.vpn.core.PoolEntry
+import com.irnetfree.vpn.core.RouteRule
+import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.SingboxConfig
 import org.json.JSONArray
 import org.json.JSONObject
@@ -52,8 +56,36 @@ object TunnelSetup {
         append("misc:\n  task-stack-size: 20480\n  connect-timeout: 5000\n  read-write-timeout: 60000\n  log-level: warn\n")
     }
 
-    /** The core a connect really runs, and its config. */
-    class CoreConfig(val engine: String, val json: String)
+    /**
+     * The core a connect really runs, and its config. [raw]: a raw-mode JSON
+     * server's own config — it carries no DNS hijack of the app's, so the OS
+     * must not be handed the tunnel peer as its resolver.
+     */
+    class CoreConfig(val engine: String, val json: String, val raw: Boolean = false)
+
+    /** Does [server] run exactly as written — a JSON server switched to raw? */
+    fun runsRaw(server: ServerConfig): Boolean = server.isJson && server.jsonMode == JsonImport.MODE_RAW
+
+    /**
+     * The servers a plan routes to: a single server, a chain's hops, the
+     * targets of a pool's entries or of advanced routing's rules (not every
+     * server the store holds, which those plans carry along).
+     */
+    fun planTargets(plan: ConnectionPlan): List<ServerConfig> {
+        fun resolve(t: String, byId: Map<String, ServerConfig>, chains: Map<String, List<ServerConfig>>): List<ServerConfig> = when {
+            t.startsWith("chain:") -> chains[t.substring(6)] ?: emptyList()
+            t == "proxy" -> listOfNotNull(byId.values.firstOrNull { srv: ServerConfig -> srv.outbound.length() > 0 })
+            else -> listOfNotNull(byId[t])
+        }
+        return when (plan) {
+            is ConnectionPlan.Single -> listOf(plan.server)
+            is ConnectionPlan.Chain -> plan.members
+            is ConnectionPlan.Pool -> (plan.entries.map { e: PoolEntry -> e.target } + plan.primary)
+                .flatMap { t: String -> resolve(t, plan.serversById, plan.chainsById) }
+            is ConnectionPlan.Advanced -> (plan.rules.map { r: RouteRule -> r.target } + plan.def)
+                .flatMap { t: String -> resolve(t, plan.serversById, plan.chainsById) }
+        }
+    }
 
     /**
      * The config for [engine]: sing-box's own format for a single server, the
@@ -72,6 +104,21 @@ object TunnelSetup {
         auth: LocalAuth?, lan: LanShare?, muxIds: Set<String> = emptySet(), coreVersion: (String) -> String = { "" }, log: (String) -> Unit
     ): CoreConfig {
         val single = plan as? ConnectionPlan.Single
+        // A raw-mode JSON server connected on its own: its config as written
+        // (ConfigBuilder.buildRawConfig), on an Xray core — sing-box cannot run it.
+        val raw = single?.server?.takeIf { srv: ServerConfig -> runsRaw(srv) }
+        if (raw != null) {
+            val e = if (engine == EngineChoice.SINGBOX) EngineChoice.XRAY else engine
+            if (engine == EngineChoice.SINGBOX) log("sing-box cannot run an Xray config as written — using the in-process core")
+            log("Running \"${raw.name}\" exactly as written (raw JSON) — the app's DNS management, leak guard and routing mode do not apply")
+            val config = ConfigBuilder.buildRawConfig(raw, s, inboundAuth = auth, lan = lan, wgEndpointIps = wgIps)
+            val adapted = if (CoreCompat.needsCoreVersion(config)) CoreCompat.adaptForCore(config, coreVersion(e)) else config
+            return CoreConfig(e, adapted.toString(), raw = true)
+        }
+        // Raw is for a single connect only: in a chain, a pool or advanced
+        // routing such a server runs in its full form — said once per connect.
+        planTargets(plan).filter { srv: ServerConfig -> runsRaw(srv) }.distinctBy { srv: ServerConfig -> srv.id }
+            .forEach { srv: ServerConfig -> log("\"${srv.name}\" is set to run raw, but a chain/routing target uses its full form") }
         if (engine == EngineChoice.SINGBOX && single != null) {
             try {
                 return CoreConfig(engine, SingboxConfig.build(single.server, s, auth, lan).toString())

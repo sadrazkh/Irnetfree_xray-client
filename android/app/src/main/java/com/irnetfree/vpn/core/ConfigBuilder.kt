@@ -51,9 +51,7 @@ object ConfigBuilder {
      */
     fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet()): JSONObject {
         val listen = "127.0.0.1"
-        val sniffing = if (s.enableSniffing)
-            JSONObject().put("enabled", true).put("destOverride", JSONArray().put("http").put("tls").put("quic")).put("routeOnly", false)
-        else JSONObject().put("enabled", false)
+        val sniffing = sniffingFor(s)
         val share = lan?.takeIf { it.enabled }
 
         if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds)
@@ -65,7 +63,10 @@ object ConfigBuilder {
         val targets = ArrayList<Pair<Any?, String>>()
         when (plan) {
             is ConnectionPlan.Chain -> { buildChainOutbounds(plan.members, "proxy").forEach { outbounds.put(it) }; targets.add(plan.members to "proxy") }
-            is ConnectionPlan.Single -> { outbounds.put(withMux(cloneOut(plan.server.outbound, "proxy", plan.server), plan.server, muxIds)); targets.add(plan.server to "proxy") }
+            is ConnectionPlan.Single -> {
+                withHelpers(withMux(cloneOut(plan.server.outbound, "proxy", plan.server), plan.server, muxIds), plan.server, "proxy").forEach { o: JSONObject -> outbounds.put(o) }
+                targets.add(plan.server to "proxy")
+            }
             else -> {}
         }
         outbounds.put(freedom(s)).put(blackhole())
@@ -247,8 +248,16 @@ object ConfigBuilder {
         for (i in 0..last) {
             val tag = if (i == last) exitTag else "$exitTag-h$i"
             val ob = cloneOut(list[i].outbound, tag, list[i])
-            if (i > 0) dialThrough(ob, "$exitTag-h${i - 1}")
-            outs.add(ob)
+            if (i > 0) {
+                // A JSON server behind another hop dials through that hop: its
+                // own way to its helpers (proxySettings, its dialerProxy) goes,
+                // and so do the helpers — nothing else uses them.
+                if (list[i].isJson) ob.remove("proxySettings")
+                dialThrough(ob, "$exitTag-h${i - 1}")
+                outs.add(ob)
+            } else {
+                outs.addAll(withHelpers(ob, list[i], tag))
+            }
         }
         return outs
     }
@@ -267,7 +276,7 @@ object ConfigBuilder {
             val arr = list?.filter { it.outbound.length() > 0 } ?: emptyList()
             return when {
                 arr.size >= 2 -> { ConfigBuilder.buildChainOutbounds(arr, tag).forEach { add(it) }; tag }
-                arr.size == 1 -> { add(ConfigBuilder.cloneOut(arr[0].outbound, tag, arr[0])); tag }
+                arr.size == 1 -> { ConfigBuilder.withHelpers(ConfigBuilder.cloneOut(arr[0].outbound, tag, arr[0]), arr[0], tag).forEach { o: JSONObject -> add(o) }; tag }
                 else -> "direct"
             }
         }
@@ -278,7 +287,11 @@ object ConfigBuilder {
             if (target == "block") return "block"
             if (target.startsWith("chain:")) return chainTag(chainsById[target.substring(6)], "out-chain-" + target.substring(6))
             val s = serversById[target]
-            if (s != null && s.outbound.length() > 0) { val tag = "out-$target"; add(ConfigBuilder.withMux(ConfigBuilder.cloneOut(s.outbound, tag, s), s, muxIds)); return tag }
+            if (s != null && s.outbound.length() > 0) {
+                val tag = "out-$target"
+                ConfigBuilder.withHelpers(ConfigBuilder.withMux(ConfigBuilder.cloneOut(s.outbound, tag, s), s, muxIds), s, tag).forEach { o: JSONObject -> add(o) }
+                return tag
+            }
             return "direct"
         }
 
@@ -286,7 +299,9 @@ object ConfigBuilder {
         private fun proxyFallback(): String {
             val first = serversById.values.firstOrNull { it.outbound.length() > 0 } ?: return "direct"
             val tag = "out-proxy"
-            if (!seen.contains(tag)) add(ConfigBuilder.withMux(ConfigBuilder.cloneOut(first.outbound, tag, first), first, muxIds))
+            if (!seen.contains(tag)) {
+                ConfigBuilder.withHelpers(ConfigBuilder.withMux(ConfigBuilder.cloneOut(first.outbound, tag, first), first, muxIds), first, tag).forEach { o: JSONObject -> add(o) }
+            }
             return tag
         }
     }
@@ -376,13 +391,19 @@ object ConfigBuilder {
      */
     fun wgEndpointHosts(plan: ConnectionPlan): List<String> {
         val out = ArrayList<String>()
-        fun visit(s: ServerConfig?) {
-            if (s == null || s.outbound.optString("protocol") != "wireguard") return
-            val peers = s.outbound.optJSONObject("settings")?.optJSONArray("peers") ?: return
+        fun visitOut(o: JSONObject) {
+            if (o.optString("protocol") != "wireguard") return
+            val peers = o.optJSONObject("settings")?.optJSONArray("peers") ?: return
             for (i in 0 until peers.length()) {
                 val ep = splitEndpoint(peers.optJSONObject(i)?.optString("endpoint")) ?: continue
                 if (!DnsPlan.isIp(ep.first) && ep.first !in out) out.add(ep.first)
             }
+        }
+        // a JSON server's helpers dial too (a WireGuard hop of its own)
+        fun visit(s: ServerConfig?) {
+            if (s == null) return
+            visitOut(s.outbound)
+            if (s.isJson) s.extraOutbounds.forEach { h: JSONObject -> visitOut(h) }
         }
         when (plan) {
             is ConnectionPlan.Single -> visit(plan.server)
@@ -496,9 +517,9 @@ object ConfigBuilder {
      * traffic cannot get there either (loopback never enters the TUN); through
      * the proxy it would, since private ranges go direct. First of all rules.
      */
-    private fun lanGuardRules(tags: List<String>): List<JSONObject> = if (tags.isEmpty()) emptyList() else listOf(
-        fieldRule().put("inboundTag", JSONArray(tags)).put("ip", JSONArray(LOOPBACK)).put("outboundTag", "block"),
-        fieldRule().put("inboundTag", JSONArray(tags)).put("domain", JSONArray().put("domain:localhost")).put("outboundTag", "block"))
+    private fun lanGuardRules(tags: List<String>, blockTag: String = "block"): List<JSONObject> = if (tags.isEmpty()) emptyList() else listOf(
+        fieldRule().put("inboundTag", JSONArray(tags)).put("ip", JSONArray(LOOPBACK)).put("outboundTag", blockTag),
+        fieldRule().put("inboundTag", JSONArray(tags)).put("domain", JSONArray().put("domain:localhost")).put("outboundTag", blockTag))
 
     // No metrics listener (the desktop's GET /debug/vars on apiPort): nothing on
     // Android reads it — the traffic figures come from hev — and it answered any
@@ -612,8 +633,13 @@ object ConfigBuilder {
     fun buildTestConfig(server: ServerConfig, socksPort: Int, wgEndpointIps: Map<String, String> = emptyMap(), mux: Boolean = false): JSONObject {
         val proxy = cloneOut(server.outbound, "proxy", server)
         if (mux && Mux.eligible(proxy)) proxy.put("mux", Mux.MUX)
-        widenWgAllowedIps(proxy); sanitizeWgAddress(proxy); applyWgEndpointIps(proxy, wgEndpointIps)
-        val outs = applyFragments(JSONArray().put(proxy))
+        // a JSON server is measured in its full form: its helpers come along
+        val all = JSONArray()
+        for (o in withHelpers(proxy, server, "proxy")) {
+            widenWgAllowedIps(o); sanitizeWgAddress(o); applyWgEndpointIps(o, wgEndpointIps)
+            all.put(o)
+        }
+        val outs = applyFragments(all)
         outs.put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
         return JSONObject()
             .put("log", JSONObject().put("loglevel", "none"))
@@ -692,6 +718,86 @@ object ConfigBuilder {
         if (max < min) max = min
         return "$min-$max"
     }
+
+    /* ----------------------------- JSON servers ----------------------------- */
+
+    /** The tag of the blackhole a raw config's LAN-sharing guard sends to (one of the config's own may not exist). */
+    const val RAW_LAN_BLOCK = "irnf-lan-block"
+
+    /**
+     * [main] — a server's outbound, already tagged [tag] — with a JSON server's
+     * helper outbounds beside it (full mode): each helper's tag becomes
+     * `<tag>~<helper>`, and every dialerProxy / proxySettings.tag that named a
+     * helper is rewritten to match, so two JSON servers in one config never
+     * collide. Like any outbound, a helper loses `allowInsecure`, which the
+     * cores refuse. Any other server: [main] alone, untouched.
+     */
+    private fun withHelpers(main: JSONObject, server: ServerConfig, tag: String): List<JSONObject> {
+        if (!server.isJson || server.extraOutbounds.isEmpty()) return listOf(main)
+        val names = server.extraOutbounds.map { h: JSONObject -> h.optString("tag") }.filter { t: String -> t.isNotEmpty() }.toSet()
+        val out = arrayListOf(main)
+        for (h0 in server.extraOutbounds) {
+            val own = h0.optString("tag")
+            if (own.isEmpty()) continue
+            val h = JSONObject(h0.toString()).put("tag", "$tag~$own")
+            applyCertPin(h, null)
+            out.add(h)
+        }
+        for (o in out) {
+            val so = o.optJSONObject("streamSettings")?.optJSONObject("sockopt")
+            val dialer = so?.optString("dialerProxy") ?: ""
+            if (so != null && dialer in names) so.put("dialerProxy", "$tag~$dialer")
+            val ps = o.optJSONObject("proxySettings")
+            val via = ps?.optString("tag") ?: ""
+            if (ps != null && via in names) ps.put("tag", "$tag~$via")
+        }
+        return out
+    }
+
+    /**
+     * A raw-mode JSON server's config: its JSON exactly as written, with two
+     * changes — its inbounds are the app's own (SOCKS/HTTP from Settings, with
+     * the session's credentials, plus LAN sharing's when on), and `log.loglevel`
+     * is Settings'. Its routing, DNS, balancers, observatory and policy run as
+     * they are. What the cores themselves refuse is still kept out — the
+     * `allowInsecure` of every outbound (the main one takes its first-use pin
+     * instead) — and a WireGuard endpoint name takes the address the connect
+     * resolved for it, as everywhere (a core that has to resolve one and fails
+     * takes the app's process down). LAN sharing's loopback guard goes first in
+     * its rules, to a blackhole of its own.
+     */
+    fun buildRawConfig(server: ServerConfig, s: AppSettings, inboundAuth: LocalAuth? = null, lan: LanShare? = null, wgEndpointIps: Map<String, String> = emptyMap()): JSONObject {
+        val src = server.json ?: throw IllegalArgumentException("${server.name} has no JSON config")
+        val c = JSONObject(src.toString())
+        val sniffing = sniffingFor(s)
+        val inbounds = standardInbounds(s, "127.0.0.1", sniffing, inboundAuth)
+        val lanTags = addLanInbounds(inbounds, lan?.takeIf { it.enabled }, sniffing, setOf(s.socksPort, s.httpPort))
+        c.put("inbounds", inbounds)
+        val log = c.optJSONObject("log") ?: JSONObject().also { c.put("log", it) }
+        log.put("loglevel", s.logLevel)
+        val mainTag = JsonImport.mainTagOf(server)
+        val outs = c.optJSONArray("outbounds") ?: JSONArray().also { c.put("outbounds", it) }
+        for (i in 0 until outs.length()) {
+            val o = outs.optJSONObject(i) ?: continue
+            applyCertPin(o, if (mainTag != null && o.optString("tag") == mainTag) server else null)
+            applyWgEndpointIps(o, wgEndpointIps)
+        }
+        if (lanTags.isNotEmpty()) {
+            outs.put(JSONObject().put("tag", RAW_LAN_BLOCK).put("protocol", "blackhole"))
+            val routing = c.optJSONObject("routing") ?: JSONObject().also { c.put("routing", it) }
+            val old = routing.optJSONArray("rules") ?: JSONArray()
+            val rules = JSONArray()
+            lanGuardRules(lanTags, RAW_LAN_BLOCK).forEach { r: JSONObject -> rules.put(r) }
+            for (i in 0 until old.length()) rules.put(old.get(i))
+            routing.put("rules", rules)
+        }
+        return c
+    }
+
+    /** The local inbounds' sniffing, as Settings asks for it. */
+    private fun sniffingFor(s: AppSettings): JSONObject = if (s.enableSniffing)
+        JSONObject().put("enabled", true).put("destOverride", JSONArray().put("http").put("tls").put("quic")).put("routeOnly", false)
+    else JSONObject().put("enabled", false)
 
     private fun jarr(a: JSONArray?): List<String> = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
     /** A server's outbound as the config will carry it: a deep copy, tagged, its certificate pin applied. */
