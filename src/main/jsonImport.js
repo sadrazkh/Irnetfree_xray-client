@@ -473,13 +473,16 @@ function applyJsonEdits(server, f) {
   f = f || {};
   const out = clone(server);
   const changed = [];
-  if (f.json != null) {
-    const cfg = configFromEdit(f.json);
+  const cfg = f.json != null ? configFromEdit(f.json) : null;
+  // The same config, whatever its spacing or key order (the edit view sends
+  // the object it parsed): nothing to re-derive, and nothing was edited — a
+  // Save with nothing changed leaves the record exactly as it was.
+  if (cfg && canon(cfg) !== canon(server.json)) {
     const pick = mainFor(cfg, server);
     if (!pick) throw new Error(NO_PROXY);
     const fresh = recordFor(cfg, pick.main, pick.balancer);
     for (const k of DERIVED) out[k] = fresh[k];
-    if (canon(cfg) !== canon(server.json)) changed.push('json');
+    changed.push('json');
   } else if (isObj(out.json)) {
     out.jsonInfo = jsonInfo(out.json);
   }

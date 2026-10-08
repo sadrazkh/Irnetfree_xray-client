@@ -274,6 +274,21 @@ test('an edit of a JSON server re-derives everything from the new config, and re
   assert.equal(applyServerEdits(s, { name: s.name, jsonMode: 'full', json: s.json })._edited, undefined);
 });
 
+test('a Save with nothing changed — the edit view sends the object it parsed, keys in any order — leaves the record exactly as it was', () => {
+  const [s] = J.importJson(fixture('xray-chain.json')).servers;
+  const reorder = (v) => (Array.isArray(v) ? v.map(reorder)
+    : (v && typeof v === 'object' ? Object.keys(v).reverse().reduce((o, k) => { o[k] = reorder(v[k]); return o; }, {}) : v));
+  const shuffled = reorder(JSON.parse(JSON.stringify(s.json)));
+  assert.notEqual(JSON.stringify(shuffled), JSON.stringify(s.json), 'the keys really are in another order');
+  for (const json of [shuffled, JSON.stringify(shuffled), JSON.parse(editFields(s).json), editFields(s).json]) {
+    assert.deepEqual(applyServerEdits(s, { name: s.name, jsonMode: 'full', json }), s);
+  }
+  // an edited server keeps what it had recorded
+  const raw = applyServerEdits(s, { name: s.name, jsonMode: 'raw', json: shuffled });
+  assert.deepEqual(raw._edited, ['jsonMode']);
+  assert.equal(raw.raw, s.raw, 'the same config: raw is not re-derived');
+});
+
 test('an edit that breaks the config is refused with the reason, and the record is left as it was', () => {
   const [s] = J.importJson(fixture('xray-fragment.json')).servers;
   assert.throws(() => applyServerEdits(s, { json: '{"outbounds": [' }), /invalid JSON/);
