@@ -32,6 +32,14 @@ contextBridge.exposeInMainWorld('api', {
   listPool: () => ipcRenderer.invoke('pool:list'),
   setPool: (entries) => ipcRenderer.invoke('pool:set', entries),
 
+  // routing profiles (several advanced routings, a base per target) and their share links
+  routingProfiles: () => ipcRenderer.invoke('routing:profiles'),
+  setRoutingProfiles: (profiles) => ipcRenderer.invoke('routing:setProfiles', profiles),
+  shareRoutingProfile: (id) => ipcRenderer.invoke('routing:shareProfile', id),
+  shareChain: (id) => ipcRenderer.invoke('routing:shareChain', id),
+  routingImportPreview: (text) => ipcRenderer.invoke('routing:importPreview', text),
+  routingImport: (text) => ipcRenderer.invoke('routing:import', text),
+
   // subscriptions
   listSubs: () => ipcRenderer.invoke('subs:list'),
   addSub: (url, name) => ipcRenderer.invoke('subs:add', { url, name }),
