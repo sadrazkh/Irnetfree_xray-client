@@ -27,7 +27,7 @@ His choices (2026-10-09):
   - `base`: an optional profile base — a server id or `chain:<id>`; `null` = none.
 - **Migration**:
   - On first start with no `routingProfiles`, today's settings become profile `rp-default`, named "Advanced routing"
-    / «روتینگ پیشرفته»: `rules` = `routeRules`, `def` = `routeDefault`, `useMode` = `advancedUseMode`, no vias, no
+    / «روتینگ ویژه»: `rules` = `routeRules`, `def` = `routeDefault`, `useMode` = `advancedUseMode`, no vias, no
     base.
   - The settings keys stay and mirror profile `rp-default`: an old backup, an older app on the same store and
     Android's legacy reader still see them.
