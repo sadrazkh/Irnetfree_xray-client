@@ -531,7 +531,11 @@ test('the one-line installer is POSIX sh, refuses anything but OpenWrt 24, and t
   assert.match(src, /^set -eu$/m);
   assert.match(src, /\. \/etc\/openwrt_release/);
   assert.match(src, /\t24\.\*\|23\.05\*\) ;;/, '24.x (node 20) and 23.05 (node 18); 25/SNAPSHOT use apk');
-  assert.match(src, /opkg install node kmod-tun nftables ip-full unzip ca-bundle$/m, 'the same dependency list as the package');
+  assert.match(src, /^opkg_retry node kmod-tun nftables ip-full unzip ca-bundle$/m, 'the same dependency list as the package');
+  // downloads.openwrt.org drops a package now and then (the 24.10 QEMU job, 2026-10) — and a router's
+  // line in Iran more often: a failed install is asked again instead of ending the install there
+  assert.match(src, /^opkg_retry\(\) \{[\s\S]*?until opkg install "\$@"; do[\s\S]*?\[ "\$n" -lt 3 \] \|\| return 1/m,
+    'a download the mirror dropped is asked again — three tries in all');
   assert.match(src, /\[ "\$\{NODE_MAJOR:-0\}" -ge 18 \]/, 'and the node that arrived is checked, not assumed');
   assert.match(src, /IPK="\$\{1:-\}"/, 'a local package as the first argument');
   assert.match(src, /releases\/latest.*grep -o 'https:\/\/\[\^"\]\*_all\\\.ipk'/, 'else the newest release, found without jq');

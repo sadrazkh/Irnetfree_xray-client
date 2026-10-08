@@ -49,7 +49,9 @@ opkg compare-versions '1.18.0~beta.1' '<<' '1.18.0' && opkg compare-versions '1.
 	|| { echo "opkg does not order 1.17.2 < 1.18.0~beta.1 < 1.18.0"; exit 1; }
 
 say "test tools and the feed cores (kmod-veth: the WAN-change interface and the LAN-side namespace below)"
-opkg install sing-box xray-core curl jq kmod-veth >/dev/null
+# the mirror drops a download now and then (24.10, since 2026-10): asked again, three tries in all
+n=0
+until opkg install sing-box xray-core curl jq kmod-veth >/dev/null; do n=$((n + 1)); [ $n -lt 3 ] || { echo "the feed cores did not install"; exit 1; }; sleep 3; opkg update >/dev/null 2>&1 || true; done
 
 say "service up"
 i=0
@@ -643,7 +645,8 @@ for p in rpcd uhttpd uhttpd-mod-ubus luci-base luci-mod-admin-full luci-theme-bo
 done
 if ! opkg list-installed | grep -q '^luci-base ' || ! opkg list-installed | grep -q '^rpcd '; then
 	echo "installing LuCI from the feed (opkg install luci: luci-base, the admin pages, the theme, uhttpd, rpcd)"
-	opkg install luci >/dev/null || { echo "could not install LuCI from the feed"; exit 1; }
+	n=0
+	until opkg install luci >/dev/null; do n=$((n + 1)); [ $n -lt 3 ] || { echo "could not install LuCI from the feed"; exit 1; }; sleep 3; opkg update >/dev/null 2>&1 || true; done
 	/etc/init.d/rpcd restart >/dev/null 2>&1 || true
 	/etc/init.d/uhttpd enable >/dev/null 2>&1 || true
 	/etc/init.d/uhttpd restart >/dev/null 2>&1 || true
