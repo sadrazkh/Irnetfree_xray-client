@@ -15,7 +15,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
@@ -1169,13 +1169,13 @@ function createService(opts = {}) {
     let entryAddrs = [];
     const addEntryForTarget = (tg) => {
       if (!tg || tg === 'direct' || tg === 'block') return;
-      if (tg === 'chain') { if (legacyChain[0]) entryAddrs.push(legacyChain[0].address); return; }
+      if (tg === 'chain') { if (legacyChain[0]) entryAddrs.push(...entryAddressesOf(legacyChain[0])); return; }
       if (String(tg).indexOf('chain:') === 0) {
         const m = chainsById[String(tg).slice('chain:'.length)];
-        if (m && m[0]) entryAddrs.push(m[0].address);
+        if (m && m[0]) entryAddrs.push(...entryAddressesOf(m[0]));
         return;
       }
-      if (serversById[tg]) entryAddrs.push(serversById[tg].address);
+      if (serversById[tg]) entryAddrs.push(...entryAddressesOf(serversById[tg]));
     };
 
     if (serverId === '__pool__') {
@@ -1207,19 +1207,19 @@ function createService(opts = {}) {
       if (members.length < 2) throw new Error(settings.lang === 'en' ? 'This chain needs at least 2 servers' : 'این زنجیره حداقل به ۲ سرور نیاز دارد');
       plan = { mode: 'chain', chain: members, name: chainById[serverId].name };
       label = chainById[serverId].name;
-      entryAddrs = [members[0].address];
+      entryAddrs = entryAddressesOf(members[0]);
     } else if (serverId === '__chain__') {
       refuseBroken('chain');
       if (legacyChain.length < 2) throw new Error(settings.lang === 'en' ? 'The chain needs at least 2 servers' : 'زنجیره حداقل به ۲ سرور نیاز دارد');
       plan = { mode: 'chain', chain: legacyChain };
       label = legacyChain.map(s => s.name).join(' → ');
-      entryAddrs = [legacyChain[0].address];
+      entryAddrs = entryAddressesOf(legacyChain[0]);
     } else {
       const server = byId(serverId);
       if (!server) throw new Error(settings.lang === 'en' ? 'Server not found' : 'سرور پیدا نشد');
       plan = { mode: 'single', server };
       label = server.name;
-      entryAddrs = [server.address];
+      entryAddrs = entryAddressesOf(server, isRawJson(server));
     }
     entryAddrs = [...new Set(entryAddrs.filter(Boolean))];
     return { plan, label, entryAddrs };

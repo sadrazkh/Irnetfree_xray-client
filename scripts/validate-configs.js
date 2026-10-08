@@ -283,6 +283,9 @@ check('json-advanced', buildConfig({
   rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }, { type: 'ip', value: '10.20.0.0/16', target: 'jc' }], def: 'jf'
 }, F.settings(Object.assign({ routingMode: 'bypass-ir' }, JSON_SETTINGS.tun))));
 check('json-test-chain', buildTestConfig(jc, 41020));
+// entered where it really dials (configBuilder.entryOutbounds): the chain
+// fixture's hop answered from dns.hosts, its fragment dialer carrying the strategy
+check('json-chain-pinned', buildConfig({ mode: 'single', server: jc }, F.settings(Object.assign({ entryHostIps: { 'hop.example.com': ['203.0.113.30'] } }, JSON_SETTINGS.tun))));
 // raw, as the cores take it: a server that asked for allowInsecure, with the
 // pin learnt for it; a WireGuard whose endpoint name the connect resolved
 const insecure = JSON.parse(JSON.stringify(jsonServers['xray-subscription'][0]));

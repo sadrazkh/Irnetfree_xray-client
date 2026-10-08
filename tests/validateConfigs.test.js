@@ -165,6 +165,9 @@ test('the core gate hands the cores every JSON shape: each fixture server in ful
   }
   assert.equal(run.proxy('json-raw-pinned').streamSettings.tlsSettings.pinnedPeerCertSha256, 'ab11bf7ac877baa539294f5a3c864b8ed43e6fe3a9a8230fc2db7fff85c27fde');
   assert.equal(run.read('json-raw-wg-resolved').outbounds[0].settings.peers[0].endpoint, '198.51.100.7:51820');
+  const pinned = run.read('json-chain-pinned');
+  assert.deepEqual(pinned.dns.hosts['hop.example.com'], ['203.0.113.30']);
+  assert.equal(pinned.outbounds.find((o) => o.tag === 'proxy~hop1').streamSettings.sockopt.domainStrategy, 'UseIPv4');
 });
 
 test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every config — the versions read from coreVersions.js, the gate never dry', () => {

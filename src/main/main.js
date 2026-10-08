@@ -6,7 +6,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes } = require('./configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson } = require('./configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('./latencyTest');
 const { adapterDnsServers, guardPeers } = require('./dnsBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
@@ -716,7 +716,10 @@ async function effectiveSettings() {
 /**
  * The connection plan for a target id: { plan, label, entryAddrs }.
  * `entryAddrs` are the addresses the machine dials *directly* (must be bypassed
- * under TUN so the tunnel doesn't loop on itself). No side effects.
+ * under TUN so the tunnel doesn't loop on itself). A server's own are
+ * configBuilder.entryAddressesOf: a link server's address, a JSON server's
+ * entry outbounds (the hop of its own chain, not the exit behind it). No side
+ * effects.
  */
 function buildPlan(serverId, settings) {
   const servers = store.get('servers', []);
@@ -757,13 +760,13 @@ function buildPlan(serverId, settings) {
 
   const addEntryForTarget = (tg) => {
     if (!tg || tg === 'direct' || tg === 'block') return;
-    if (tg === 'chain') { if (legacyChain[0]) entryAddrs.push(legacyChain[0].address); return; }
+    if (tg === 'chain') { if (legacyChain[0]) entryAddrs.push(...entryAddressesOf(legacyChain[0])); return; }
     if (String(tg).indexOf('chain:') === 0) {
       const m = chainsById[String(tg).slice('chain:'.length)];
-      if (m && m[0]) entryAddrs.push(m[0].address);
+      if (m && m[0]) entryAddrs.push(...entryAddressesOf(m[0]));
       return;
     }
-    if (serversById[tg]) entryAddrs.push(serversById[tg].address);
+    if (serversById[tg]) entryAddrs.push(...entryAddressesOf(serversById[tg]));
   };
 
   if (serverId === '__pool__') {
@@ -802,7 +805,7 @@ function buildPlan(serverId, settings) {
       : 'این زنجیره حداقل به ۲ سرور نیاز دارد');
     plan = { mode: 'chain', chain: members, name: chainById[serverId].name };
     label = chainById[serverId].name;
-    entryAddrs = [members[0].address];
+    entryAddrs = entryAddressesOf(members[0]);
   } else if (serverId === '__chain__') {
     refuseBroken('chain');
     if (legacyChain.length < 2) throw new Error(settings.lang === 'en'
@@ -810,13 +813,13 @@ function buildPlan(serverId, settings) {
       : 'زنجیره حداقل به ۲ سرور نیاز دارد');
     plan = { mode: 'chain', chain: legacyChain };
     label = legacyChain.map(s => s.name).join(' → ');
-    entryAddrs = [legacyChain[0].address];
+    entryAddrs = entryAddressesOf(legacyChain[0]);
   } else {
     const server = byId(serverId);
     if (!server) throw new Error(settings.lang === 'en' ? 'Server not found' : 'سرور پیدا نشد');
     plan = { mode: 'single', server };
     label = server.name;
-    entryAddrs = [server.address];
+    entryAddrs = entryAddressesOf(server, isRawJson(server));
   }
   entryAddrs = [...new Set(entryAddrs.filter(Boolean))];
   return { plan, label, entryAddrs };
