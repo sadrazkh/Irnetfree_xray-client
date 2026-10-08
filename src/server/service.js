@@ -506,7 +506,7 @@ function createService(opts = {}) {
   let serverEditPending = false;
   // The routing profile and the chains the live connection was built from
   // (routingProfiles.liveRoutingOf): an edit of either since waits for a
-  // reconnect too (pendingKeys, 'routeRules' / 'chains').
+  // reconnect too (pendingKeys, 'routingProfiles' / 'chains').
   let liveRouting = null;
   // The physical interface the LIVE connection's direct dials are bound to (see
   // doConnect); null when not under TUN. rebuildActiveConfig() reuses it rather
@@ -2292,7 +2292,7 @@ function createService(opts = {}) {
 
   /**
    * Reconnect-relevant settings changed since the live tunnel was built — and
-   * 'servers' for an edit of one it dials, 'routeRules' / 'chains' for an edit
+   * 'servers' for an edit of one it dials, 'routingProfiles' / 'chains' for an edit
    * of the routing profile / a chain it was built from.
    */
   function pendingKeys() {
