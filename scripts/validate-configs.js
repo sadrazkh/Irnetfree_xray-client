@@ -28,7 +28,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { buildConfig, buildTestConfig, buildMultiTestConfig } = require('../src/main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, buildRawConfig } = require('../src/main/configBuilder');
 const { MUX } = require('../src/main/mux');
 const { adaptForCore } = require('../src/main/coreCompat');
 const { parseLink } = require('../src/main/parser');
@@ -255,6 +255,34 @@ for (const [variant, over] of Object.entries(LINK_SETTINGS)) {
 const probe = buildTestConfig(F.VLESS_WS_TLS, 41010, { entryHostIps: PINS, ipv6: false });
 probe.outbounds.find((o) => o.tag === 'proxy').mux = Object.assign({}, MUX);
 check('mux-probe', probe);
+
+// JSON configs (docs/superpowers/specs/2026-10-08-json-configs-design.md), as
+// an import reads the fixtures: every server in full mode — its helpers beside
+// it, renamed — plain and under TUN; every Xray-JSON server raw too (its own
+// config with the app's inbounds); a JSON server as either hop of a chain, two
+// of them under advanced routing, and a latency test of one with helpers.
+const { importJson } = require('../src/main/jsonImport');
+const JSON_FIXTURES = ['xray-subscription', 'xray-fragment', 'xray-chain', 'xray-balancer', 'xray-wireguard', 'singbox'];
+const JSON_SETTINGS = { plain: managed, tun: Object.assign({}, managed, LINK_SETTINGS.tun) };
+const jsonServers = {};
+for (const f of JSON_FIXTURES) {
+  jsonServers[f] = importJson(fs.readFileSync(path.join(__dirname, '..', 'tests', 'fixtures', 'json', `${f}.json`), 'utf8')).servers;
+  jsonServers[f].forEach((server, i) => {
+    for (const [variant, over] of Object.entries(JSON_SETTINGS)) {
+      check(`json-${f}-${i}-full-${variant}`, buildConfig({ mode: 'single', server }, F.settings(over)));
+      if (server.source === 'json') check(`json-${f}-${i}-raw-${variant}`, buildRawConfig(server, F.settings(over)));
+    }
+  });
+}
+const jf = Object.assign({}, jsonServers['xray-fragment'][0], { id: 'jf' });
+const jc = Object.assign({}, jsonServers['xray-chain'][0], { id: 'jc' });
+check('json-chain-later', buildConfig({ mode: 'chain', chain: [F.VLESS_WS_TLS, jc] }, F.settings(managed)));
+check('json-chain-first', buildConfig({ mode: 'chain', chain: [jf, F.TROJAN_TCP_TLS] }, F.settings(JSON_SETTINGS.tun)));
+check('json-advanced', buildConfig({
+  mode: 'advanced', serversById: { jf, jc, 'sv-vless': F.VLESS_WS_TLS }, chainsById: {}, chain: [],
+  rules: [{ type: 'domain', value: 'geosite:category-ir', target: 'direct' }, { type: 'ip', value: '10.20.0.0/16', target: 'jc' }], def: 'jf'
+}, F.settings(Object.assign({ routingMode: 'bypass-ir' }, JSON_SETTINGS.tun))));
+check('json-test-chain', buildTestConfig(jc, 41020));
 
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
