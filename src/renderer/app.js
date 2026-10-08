@@ -3860,6 +3860,11 @@ function setJsonMode(mode) {
     b.setAttribute('aria-checked', String(on));
   });
   $('#edJsonHelp').textContent = t(editJsonMode === 'raw' ? 'ed.jsonRawHelp' : 'ed.jsonFullHelp');
+  // the router's web UI keeps the Raw option, but the router always runs the full form
+  const note = $('#edJsonRouterNote');
+  const onRouter = state.flavor === 'openwrt';
+  note.textContent = onRouter ? t('ed.jsonRawRouter') : '';
+  note.hidden = !(onRouter && editJsonMode === 'raw');
   renderJsonInfo(editOriginal && editOriginal.jsonInfo, editJsonMode);
 }
 

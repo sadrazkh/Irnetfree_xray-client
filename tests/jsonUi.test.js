@@ -97,7 +97,7 @@ const walk = (el, fn) => { fn(el); el.children.forEach((c) => walk(c, fn)); };
 
 const NEW_KEYS = ['srv.jsonBadge', 'ed.jsonMode', 'ed.jsonFull', 'ed.jsonRaw', 'ed.jsonFullHelp', 'ed.jsonRawHelp', 'ed.jsonEditor',
   'ed.jsonCopy', 'ed.jsonNotApplied', 'ed.jsonNaRules', 'ed.jsonNaAll', 'ed.jsonNaBalancer', 'ed.jsonNaDns', 'ed.jsonNaBalancers', 'ed.jsonNaObservatory',
-  'ed.jsonInvalid', 'ed.jsonNotObject', 'qr.tooLarge'];
+  'ed.jsonInvalid', 'ed.jsonNotObject', 'ed.jsonRawRouter', 'qr.tooLarge'];
 
 test('every JSON string exists once in fa and once in en, with no straight apostrophe inside a single-quoted string', () => {
   for (const key of NEW_KEYS) {
@@ -122,7 +122,7 @@ test('every JSON string exists once in fa and once in en, with no straight apost
 test('the markup’s JSON strings are keys i18n.js knows, and every id the new code reaches exists', () => {
   const ids = new Set([...HTML.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
   for (const id of ['edNameRow', 'edAddrWrap', 'edJsonWrap', 'edLinkFields', 'edJsonMode', 'edJsonHelp', 'edJsonInfo', 'edJson',
-    'edJsonError', 'edJsonCopy', 'qrCopy', 'qrLink', 'qrImage']) assert.ok(ids.has(id), `#${id} is missing`);
+    'edJsonError', 'edJsonRouterNote', 'edJsonCopy', 'qrCopy', 'qrLink', 'qrImage']) assert.ok(ids.has(id), `#${id} is missing`);
   const used = new Set();
   const block = HTML.slice(HTML.indexOf('id="edJsonWrap"'), HTML.indexOf('id="edLinkFields"'));
   for (const m of block.matchAll(/data-i18n(?:-ph|-title)?="([^"]+)"/g)) used.add(m[1]);
@@ -253,7 +253,7 @@ const J = (extra) => Object.assign({}, linkServer, {
   id: 'j1', name: 'DE-2', source: 'json', jsonMode: 'full', json: CONFIG, jsonInfo: INFO
 }, extra);
 
-function editHarness({ servers, updateServer } = {}) {
+function editHarness({ servers, updateServer, flavor } = {}) {
   const els = new Map();
   const get = (id) => { if (!els.has(id)) { const e = fakeEl('div'); e.id = id; els.set(id, e); } return els.get(id); };
   const segButtons = ['full', 'raw'].map((m) => { const b = fakeEl('button'); b.dataset.jsonMode = m; if (m === 'full') b.className = 'seg-btn active'; else b.className = 'seg-btn'; return b; });
@@ -267,7 +267,7 @@ function editHarness({ servers, updateServer } = {}) {
     toast: (msg, kind) => calls.push(['toast', msg, kind || '']),
     toastAction: (msg, label) => calls.push(['toastAction', msg, label]),
     copyText: async (text) => calls.push(['copyText', text]),
-    state: { servers: servers || [J()], editingId: null, connected: false, activeServerId: null },
+    state: { servers: servers || [J()], editingId: null, connected: false, activeServerId: null, flavor: flavor || null },
     // the link form, which a JSON server never reaches
     readServerFields: () => ({}), fillEditForm() {}, updateSpoofLabels() {}, collectEditFields: () => ({ name: 'link' }),
     setPending() {}, serverInLivePlan: () => false, doReconnect() {},
@@ -303,12 +303,13 @@ test('opening a JSON server: the link fields go, the JSON form comes — the nam
     [['full', true, 'true'], ['raw', false, 'false']]);
 });
 
-test('Raw: its one line says the app’s DNS, leak guard and routing do not apply, and the not-applied summary goes', () => {
+test('Raw: its line says it runs as written in proxy mode, and in full form under TUN and on the router; the not-applied summary goes', () => {
   const h = editHarness({ servers: [J({ jsonMode: 'raw' })] });
   h.ctx.openEdit('j1');
   assert.equal(h.mode(), 'raw');
   assert.equal(h.get('edJsonHelp').textContent, en('ed.jsonRawHelp'));
-  assert.match(en('ed.jsonRawHelp'), /DNS.*leak guard.*routing/i);
+  assert.equal(en('ed.jsonRawHelp'), 'Runs this config exactly as written — its own routing and DNS — in proxy mode. Under TUN, and on the router, its full form runs so the app’s DNS and tunnel rules apply. In a chain, advanced routing or the pool it also runs in its full form.');
+  assert.match(str('fa', 'ed.jsonRawHelp'), /^این کانفیگ را دقیقاً همان‌طور که نوشته شده اجرا می‌کند — با روتینگ و DNS خودش — در حالت پروکسی\. در حالت TUN و روی روتر، شکل کاملش اجرا می‌شود تا DNS و قواعد تونل برنامه اعمال شوند\./);
   assert.equal(h.get('edJsonInfo').hidden, true, 'raw runs all of it, so there is nothing "not applied"');
   assert.deepEqual(h.segButtons.map((b) => hasClass(b, 'active')), [false, true]);
   // switching to Full brings the summary back, and back again
@@ -321,6 +322,41 @@ test('Raw: its one line says the app’s DNS, leak guard and routing do not appl
   // anything but 'raw' is full
   h.ctx.setJsonMode(undefined);
   assert.equal(h.mode(), 'full');
+});
+
+test('the router’s web UI keeps the Raw option and says the full form always runs there — in both languages; the desktop never shows that note', () => {
+  const fa = (key) => { try { return str('fa', key); } catch { return key; } };
+  assert.equal(str('en', 'ed.jsonRawRouter'), 'On the router the full form always runs.');
+  assert.equal(str('fa', 'ed.jsonRawRouter'), 'روی روتر همیشه شکل کامل اجرا می‌شود.');
+  for (const [lang, say] of [['en', en], ['fa', fa]]) {
+    // the router: flavor 'openwrt' (what applyFlavor and tests/rendererRouter.test.js key on)
+    const r = editHarness({ servers: [J({ jsonMode: 'raw' })], flavor: 'openwrt' });
+    r.ctx.t = say;
+    r.ctx.openEdit('j1');
+    assert.equal(r.segButtons[1].dataset.jsonMode, 'raw');
+    assert.deepEqual(r.segButtons.map((b) => hasClass(b, 'active')), [false, true], `${lang}: Raw can be chosen on the router`);
+    assert.equal(r.get('edJsonRouterNote').hidden, false, `${lang}: the note shows with Raw chosen`);
+    assert.equal(r.get('edJsonRouterNote').textContent, say('ed.jsonRawRouter'));
+    assert.equal(r.get('edJsonHelp').textContent, say('ed.jsonRawHelp'));
+    // Full: nothing to warn about
+    r.ctx.setJsonMode('full');
+    assert.equal(r.get('edJsonRouterNote').hidden, true, `${lang}: no note under Full`);
+    r.ctx.setJsonMode('raw');
+    assert.equal(r.get('edJsonRouterNote').hidden, false);
+    // the desktop: never
+    const d = editHarness({ servers: [J({ jsonMode: 'raw' })], flavor: null });
+    d.ctx.t = say;
+    d.ctx.openEdit('j1');
+    assert.equal(d.get('edJsonRouterNote').hidden, true, `${lang}: not on the desktop`);
+    assert.equal(d.get('edJsonRouterNote').textContent, '');
+  }
+  // a language switch with the router’s form open says the note again
+  const r = editHarness({ servers: [J({ jsonMode: 'raw' })], flavor: 'openwrt' });
+  r.ctx.openEdit('j1');
+  assert.equal(r.get('edJsonRouterNote').textContent, en('ed.jsonRawRouter'));
+  r.ctx.t = fa;
+  r.ctx.refreshJsonFormLang();
+  assert.equal(r.get('edJsonRouterNote').textContent, fa('ed.jsonRawRouter'));
 });
 
 test('Full: the not-applied summary lists the rule count, each “match → to”, and a line for DNS, balancers and observatory when they are there', () => {
