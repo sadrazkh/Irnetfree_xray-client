@@ -30,7 +30,7 @@ const { XrayManager, getFreePort, getFreePorts, versionBelow } = require('../mai
 const { setSystemProxy, useProxyJournal, repairSystemProxy, restoreSystemProxySync } = require('../main/sysproxy');
 const { tcpPing, httpThroughProxy, uploadThroughProxy, ipInfo, pLimit } = require('../main/netutils');
 const { Store } = require('../main/store');
-const { SubscriptionManager } = require('../main/subscription');
+const { SubscriptionManager, serverIdentity } = require('../main/subscription');
 const { TunManager, isOwnTunInterface, TUN_GW } = require('../main/tunManager');
 const { TunSingbox } = require('../main/tunSingbox');
 const { NativeMacTun } = require('../main/nativeMacTun');
@@ -50,6 +50,7 @@ const { migrateSettings } = require('../main/settingsMigrate');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
 const { createWanWatcher, decide: decideWanChange } = require('../main/wanWatch');
 const { exportBundle, importBundle } = require('../main/backup');
+const { createRouteShareApi } = require('../main/routeShare');
 const { AssetUpdater } = require('../main/assetUpdater');
 const { CORE_IDS, createCoreVersionsApi } = require('../main/coreVersions');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
@@ -801,6 +802,20 @@ function createService(opts = {}) {
     afterInstall: afterCoreChanged,
     result: () => ({ assets: assetStatus(), tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(), xrayReady: xray.binExists() }),
     onLog: (line, level) => send('log', { line, level })
+  });
+
+  // Routing share links (routeShare.js): the handlers main.js has too
+  const routeShare = createRouteShareApi({
+    store,
+    getSettings,
+    getChains,
+    linkOf: buildShareLink,
+    parseMany,
+    identityOf: (s) => serverIdentity(s, true),
+    // an import only adds; it raises the reconnect state when it moves what the live selection connects
+    liveSelection: () => (appliedSettings ? store.get('activeServerId', null) : null),
+    markLive: () => { serverEditPending = true; },
+    pendingKeys
   });
 
   // The weekly refresh of what the downloader put in place — same as main.js.
@@ -3092,6 +3107,10 @@ function createService(opts = {}) {
       })) : [];
       store.set('pool', v); return v;
     },
+    'routing:shareProfile': (arg) => routeShare.shareProfile(arg),
+    'routing:shareChain': (arg) => routeShare.shareChain(arg),
+    'routing:importPreview': (arg) => routeShare.importPreview(arg),
+    'routing:import': (arg) => routeShare.importShare(arg),
 
     'subs:list': () => subs.list(),
     'subs:add': async ({ url, name }) => { const res = await subs.add(url, name); return { sub: res.sub, added: res.added, servers: store.get('servers', []) }; },
