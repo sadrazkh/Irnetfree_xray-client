@@ -27,8 +27,9 @@ object EngineChoice {
         is ConnectionPlan.Single -> listOf(plan.server)
         is ConnectionPlan.Chain -> plan.members
         is ConnectionPlan.Pool -> targetsServers(plan.entries.map { it.target }, plan.serversById, plan.chainsById)
+        // the bases a profile's targets ride on are dialled too (spec §2: planServers includes bases)
         is ConnectionPlan.Advanced ->
-            targetsServers(plan.rules.map { it.target } + plan.def, plan.serversById, plan.chainsById)
+            targetsServers(plan.rules.map { it.target } + plan.def + RoutingProfiles.basesOf(plan), plan.serversById, plan.chainsById)
     }
 
     private fun targetsServers(

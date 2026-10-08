@@ -129,7 +129,8 @@ object CertPin {
             is ConnectionPlan.Single -> add(plan.server)
             is ConnectionPlan.Chain -> add(firstHop(plan.members))
             is ConnectionPlan.Pool -> for (e in plan.entries) target(e.target, plan.serversById, plan.chainsById)
-            is ConnectionPlan.Advanced -> { for (r in plan.rules) target(r.target, plan.serversById, plan.chainsById); target(plan.def, plan.serversById, plan.chainsById) }
+            // a target through a base is reached through it; the base is what the phone dials
+            is ConnectionPlan.Advanced -> { for (t in RoutingProfiles.dialTargets(plan)) target(t, plan.serversById, plan.chainsById) }
         }
         return out
     }
@@ -147,7 +148,11 @@ object CertPin {
             is ConnectionPlan.Single -> add(plan.server)
             is ConnectionPlan.Chain -> plan.members.forEach { add(it) }
             is ConnectionPlan.Pool -> for (e in plan.entries) target(e.target, plan.serversById, plan.chainsById)
-            is ConnectionPlan.Advanced -> { for (r in plan.rules) target(r.target, plan.serversById, plan.chainsById); target(plan.def, plan.serversById, plan.chainsById) }
+            is ConnectionPlan.Advanced -> {
+                for (r in plan.rules) target(r.target, plan.serversById, plan.chainsById)
+                target(plan.def, plan.serversById, plan.chainsById)
+                for (b in RoutingProfiles.basesOf(plan)) target(b, plan.serversById, plan.chainsById)
+            }
         }
         return out
     }
