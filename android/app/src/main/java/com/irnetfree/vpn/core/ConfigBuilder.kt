@@ -517,9 +517,9 @@ object ConfigBuilder {
      * traffic cannot get there either (loopback never enters the TUN); through
      * the proxy it would, since private ranges go direct. First of all rules.
      */
-    private fun lanGuardRules(tags: List<String>, blockTag: String = "block"): List<JSONObject> = if (tags.isEmpty()) emptyList() else listOf(
-        fieldRule().put("inboundTag", JSONArray(tags)).put("ip", JSONArray(LOOPBACK)).put("outboundTag", blockTag),
-        fieldRule().put("inboundTag", JSONArray(tags)).put("domain", JSONArray().put("domain:localhost")).put("outboundTag", blockTag))
+    private fun lanGuardRules(tags: List<String>): List<JSONObject> = if (tags.isEmpty()) emptyList() else listOf(
+        fieldRule().put("inboundTag", JSONArray(tags)).put("ip", JSONArray(LOOPBACK)).put("outboundTag", "block"),
+        fieldRule().put("inboundTag", JSONArray(tags)).put("domain", JSONArray().put("domain:localhost")).put("outboundTag", "block"))
 
     // No metrics listener (the desktop's GET /debug/vars on apiPort): nothing on
     // Android reads it — the traffic figures come from hev — and it answered any
@@ -721,9 +721,6 @@ object ConfigBuilder {
 
     /* ----------------------------- JSON servers ----------------------------- */
 
-    /** The tag of the blackhole a raw config's LAN-sharing guard sends to (one of the config's own may not exist). */
-    const val RAW_LAN_BLOCK = "irnf-lan-block"
-
     /**
      * [main] — a server's outbound, already tagged [tag] — with a JSON server's
      * helper outbounds beside it (full mode): each helper's tag becomes
@@ -775,49 +772,6 @@ object ConfigBuilder {
             if (so.optString("dialerProxy").isEmpty()) so.put("dialerProxy", via)
         }
         return o
-    }
-
-    /**
-     * A raw-mode JSON server's config: its JSON exactly as written, with two
-     * changes — its inbounds are the app's own (SOCKS/HTTP from Settings, with
-     * the session's credentials, plus LAN sharing's when on), and `log.loglevel`
-     * is Settings'. Its routing, DNS, balancers, observatory and policy run as
-     * they are. What the cores themselves refuse is still kept out — the
-     * `allowInsecure` of every outbound (the main one takes its first-use pin
-     * instead), a `proxySettings` (written as the dialerProxy it was migrated
-     * to) — and a WireGuard endpoint name takes the address the connect
-     * resolved for it, as everywhere (a core that has to resolve one and fails
-     * takes the app's process down). LAN sharing's loopback guard goes first in
-     * its rules, to a blackhole of its own.
-     */
-    fun buildRawConfig(server: ServerConfig, s: AppSettings, inboundAuth: LocalAuth? = null, lan: LanShare? = null, wgEndpointIps: Map<String, String> = emptyMap()): JSONObject {
-        val src = server.json ?: throw IllegalArgumentException("${server.name} has no JSON config")
-        val c = JSONObject(src.toString())
-        val sniffing = sniffingFor(s)
-        val inbounds = standardInbounds(s, "127.0.0.1", sniffing, inboundAuth)
-        val lanTags = addLanInbounds(inbounds, lan?.takeIf { it.enabled }, sniffing, setOf(s.socksPort, s.httpPort))
-        c.put("inbounds", inbounds)
-        val log = c.optJSONObject("log") ?: JSONObject().also { c.put("log", it) }
-        log.put("loglevel", s.logLevel)
-        val mainTag = JsonImport.mainTagOf(server)
-        val outs = c.optJSONArray("outbounds") ?: JSONArray().also { c.put("outbounds", it) }
-        for (i in 0 until outs.length()) {
-            val o = outs.optJSONObject(i) ?: continue
-            applyCertPin(o, if (mainTag != null && o.optString("tag") == mainTag) server else null)
-            applyWgEndpointIps(o, wgEndpointIps)
-            // a proxySettings hop as the dialerProxy the cores migrated it to (its original tag)
-            proxySettingsToDialer(o)
-        }
-        if (lanTags.isNotEmpty()) {
-            outs.put(JSONObject().put("tag", RAW_LAN_BLOCK).put("protocol", "blackhole"))
-            val routing = c.optJSONObject("routing") ?: JSONObject().also { c.put("routing", it) }
-            val old = routing.optJSONArray("rules") ?: JSONArray()
-            val rules = JSONArray()
-            lanGuardRules(lanTags, RAW_LAN_BLOCK).forEach { r: JSONObject -> rules.put(r) }
-            for (i in 0 until old.length()) rules.put(old.get(i))
-            routing.put("rules", rules)
-        }
-        return c
     }
 
     /** The local inbounds' sniffing, as Settings asks for it. */
