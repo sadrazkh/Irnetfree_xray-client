@@ -10,6 +10,8 @@
 
 const crypto = require('crypto');
 const { isIP } = require('net');
+// JSON configs (an Xray config, an array of them, sing-box): read before any link
+const { importJson, applyJsonEdits, jsonEditFields } = require('./jsonImport');
 
 function uid() {
   return crypto.randomBytes(8).toString('hex');
@@ -899,6 +901,9 @@ function makeWireguardServer(fields) {
  * Credential/transport fields depend on protocol.
  */
 function applyServerEdits(server, f) {
+  // A JSON server's one source is its config: { name, jsonMode, json }, the
+  // rest re-derived from it — or an Error saying why the config is refused.
+  if (server && server.source === 'json') return applyJsonEdits(server, f);
   const before = editFields(server);
   const out = JSON.parse(JSON.stringify(server));
   if (f.name != null) out.name = String(f.name).trim() || out.name;
@@ -1086,6 +1091,7 @@ function formText(k, v) {
  * value read here can be handed straight back to it.
  */
 function editFields(s) {
+  if (s && s.source === 'json') return jsonEditFields(s);
   const ob = (s && s.outbound) || {};
   const set = ob.settings || {};
   const srv = (set.servers && set.servers[0]) || {};
@@ -1334,6 +1340,12 @@ function parseLink(link) {
 function parseMany(text) {
   let body = String(text || '').trim();
 
+  // JSON — one Xray config, an array of them (a JSON subscription), the same
+  // base64-encoded, or a sing-box config — is read whole (jsonImport.js);
+  // Clash YAML is refused by name. Anything else: null, and on to the links.
+  const j = importJson(body);
+  if (j) return j;
+
   // A pasted .conf is ONE config spanning many lines — handle it before the
   // per-line loop, which would otherwise see [Interface] and skip everything.
   if (isWireguardConf(body)) {
@@ -1450,6 +1462,8 @@ const qs = (o) => Object.keys(o).filter(k => o[k] !== undefined && o[k] !== null
 
 /** Serialize a server (with ALL its settings) back into a shareable link. */
 function buildShareLink(server) {
+  // A JSON server is shared as its config, pretty-printed: there is no link for it.
+  if (server && server.source === 'json') return JSON.stringify(server.json, null, 2);
   const ob = server.outbound || {};
   const proto = server.protocol;
   const name = server.name ? '#' + enc(server.name) : '';

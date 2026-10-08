@@ -723,3 +723,92 @@ test('a redirect chain is followed, and the body arrives whole', async () => {
     assert.equal(r.body, 'vless://u@a.example.com:443#A');
   } finally { await s.close(); }
 });
+
+/* ------------------------------ JSON subscriptions ------------------------------ */
+// A panel answers this app's User-Agent with an array of full Xray configs
+// (docs/superpowers/specs/2026-10-08-json-configs-design.md): read through the
+// same fetch and parse path, and refreshed like links — the same server keeps
+// its id and what the user set on it.
+
+const JSON_SUB = require('fs').readFileSync(require('path').join(__dirname, 'fixtures/json/xray-subscription.json'), 'utf8');
+const { fetchSubscription } = require('../src/main/subscription');
+
+test('a JSON subscription body through the fetch path: five servers, the info rows neither servers nor errors', async () => {
+  const s = await serve((req, res) => {
+    assert.equal(req.headers['user-agent'], 'XrayClient/1.0 (subscription)');
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Subscription-Userinfo': 'upload=1; download=2; total=10737418240; expire=1800000000' });
+    res.end(JSON_SUB);
+  });
+  try {
+    const r = await fetchSubscription(s.url + '/sub/x', 'sub1');
+    assert.deepEqual(r.errors, []);
+    assert.equal(r.servers.length, 5);
+    assert.deepEqual(r.servers.map((x) => [x.source, x.subId, x.protocol]), Array(5).fill(['json', 'sub1', 'vless']));
+    assert.deepEqual(r.usage, { upload: 1, download: 2, total: 10737418240, expire: 1800000000 });
+  } finally { await s.close(); }
+});
+
+test('a JSON subscription refreshed with one config’s remarks changed keeps every id, the user’s rename, raw mode and edited config', async () => {
+  const next = JSON.parse(JSON_SUB);
+  next[3].remarks = '🇩🇪 DE-2 · 4.1 GB left';
+  next[0].remarks = '📅 انقضا: 1405/08/13';
+  const { store, mgr } = harness({ servers: [], bodies: [JSON_SUB, JSON.stringify(next, null, 4), JSON.stringify(next)] });
+  await mgr.refresh('sub1');
+  const first = store.servers.map((s) => s.id);
+  assert.equal(first.length, 5);
+  // what the user does in the edit view: a rename, raw mode, a config of their own
+  const mine = JSON.parse(JSON.stringify(store.servers[3].json));
+  mine.outbounds[0].streamSettings.sockopt = { dialerProxy: 'frag' };
+  mine.outbounds.push({ tag: 'frag', protocol: 'freedom', settings: { fragment: { packets: 'tlshello', length: '100-200', interval: '10-20' } } });
+  store.servers = store.servers.map((s, i) => (i === 0 ? applyServerEdits(s, { name: 'mine' })
+    : i === 2 ? applyServerEdits(s, { jsonMode: 'raw' })
+      : i === 3 ? applyServerEdits(s, { json: mine }) : s));
+  for (const _ of [1, 2]) {   // twice: what was carried stays recorded
+    await mgr.refresh('sub1');
+    assert.deepEqual(store.servers.map((s) => s.id), first);
+    assert.equal(store.servers[0].name, 'mine');
+    assert.deepEqual(store.servers[0]._edited, ['name']);
+    assert.equal(store.servers[1].name, '🇩🇪 DE-2 · 4.1 GB left', 'the provider’s new remark is the name');
+    assert.equal(store.servers[2].jsonMode, 'raw');
+    assert.deepEqual(store.servers[2]._edited, ['jsonMode']);
+    assert.deepEqual(store.servers[3].json, mine);
+    assert.deepEqual(store.servers[3].extraOutbounds.map((o) => o.tag), ['frag']);
+    assert.equal(store.servers[3].raw, JSON.stringify(next[5]), 'raw is the provider’s current text');
+    assert.deepEqual(store.servers[3]._edited, ['json']);
+    assert.equal(store.servers[4].jsonMode, 'full');
+  }
+});
+
+test('a JSON server whose config the user edited — even who it connects to — is found again by the provider’s raw: same id, the edited config kept, no duplicate', async () => {
+  const { store, mgr } = harness({ servers: [], bodies: [JSON_SUB, JSON_SUB, JSON_SUB] });
+  await mgr.refresh('sub1');
+  const ids = store.servers.map((s) => s.id);
+  const providerRaw = store.servers[1].raw;
+  // the user points the server at a clean IP of their own and changes its path
+  const mine = JSON.parse(JSON.stringify(store.servers[1].json));
+  mine.outbounds[0].settings.vnext[0].address = '104.16.0.1';
+  mine.outbounds[0].streamSettings.wsSettings.path = '/mine';
+  store.servers = store.servers.map((s, i) => (i === 1 ? applyServerEdits(s, { name: s.name, jsonMode: 'full', json: mine }) : s));
+  assert.equal(store.servers[1].raw, providerRaw, 'an edit keeps the provider’s text');
+  assert.equal(store.servers[1].address, '104.16.0.1');
+  for (const _ of [1, 2]) {
+    await mgr.refresh('sub1');
+    assert.equal(store.servers.length, 5, 'no duplicate');
+    assert.deepEqual(store.servers.map((s) => s.id), ids);
+    assert.deepEqual(store.servers[1].json, mine);
+    assert.equal(store.servers[1].outbound.settings.vnext[0].address, '104.16.0.1');
+    assert.equal(store.servers[1].address, '104.16.0.1');
+    assert.equal(store.servers[1].raw, providerRaw);
+    assert.deepEqual(store.servers[1]._edited, ['json']);
+  }
+});
+
+test('JSON servers that differ only past their main outbound keep their own ids when the panel reorders them and rewrites the remarks', () => {
+  const vless = { tag: 'proxy', protocol: 'vless', settings: { vnext: [{ address: 'a.example.com', port: 443, users: [{ id: 'u', encryption: 'none' }] }] }, streamSettings: { network: 'tcp', security: 'tls', tlsSettings: { serverName: 'a.example.com' } } };
+  const plain = { remarks: 'A #1', outbounds: [vless] };
+  const frag = { remarks: 'A #2', outbounds: [Object.assign({}, vless, { streamSettings: Object.assign({}, vless.streamSettings, { sockopt: { dialerProxy: 'f' } }) }), { tag: 'f', protocol: 'freedom', settings: { fragment: { packets: 'tlshello', length: '100-200', interval: '10-20' } } }] };
+  const old = parseMany(JSON.stringify([plain, frag])).servers.map((s, i) => Object.assign(s, { id: 'old' + i, subId: 'sub1' }));
+  const fresh = parseMany(JSON.stringify([Object.assign({}, frag, { remarks: 'A #2 (9 GB)' }), Object.assign({}, plain, { remarks: 'A #1 (9 GB)' })])).servers;
+  const out = reconcileServers(old, fresh);
+  assert.deepEqual(out.map((s) => [s.id, s.name]), [['old1', 'A #2 (9 GB)'], ['old0', 'A #1 (9 GB)']]);
+});

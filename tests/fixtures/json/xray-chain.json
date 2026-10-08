@@ -1,0 +1,108 @@
+[
+  {
+    "remarks": "⛓ chain via hop",
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vless",
+        "mux": {
+          "enabled": true,
+          "concurrency": 8
+        },
+        "settings": {
+          "vnext": [
+            {
+              "address": "exit.example.com",
+              "port": 443,
+              "users": [
+                {
+                  "id": "00000000-0000-4000-8000-0000000000b1",
+                  "encryption": "none",
+                  "flow": ""
+                }
+              ]
+            }
+          ]
+        },
+        "streamSettings": {
+          "network": "tcp",
+          "security": "reality",
+          "realitySettings": {
+            "serverName": "www.example.net",
+            "fingerprint": "firefox",
+            "publicKey": "AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKK",
+            "shortId": "0a1b2c3d"
+          }
+        },
+        "proxySettings": {
+          "tag": "hop1"
+        }
+      },
+      {
+        "tag": "hop1",
+        "protocol": "trojan",
+        "settings": {
+          "servers": [
+            {
+              "address": "hop.example.com",
+              "port": 443,
+              "password": "secret-hop"
+            }
+          ]
+        },
+        "streamSettings": {
+          "network": "grpc",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "hop.example.com"
+          },
+          "grpcSettings": {
+            "serviceName": "svc"
+          },
+          "sockopt": {
+            "dialerProxy": "frag"
+          }
+        }
+      },
+      {
+        "tag": "frag",
+        "protocol": "freedom",
+        "settings": {
+          "fragment": {
+            "packets": "1-3",
+            "length": "10-20",
+            "interval": "5"
+          }
+        }
+      },
+      {
+        "tag": "direct",
+        "protocol": "freedom"
+      }
+    ],
+    "routing": {
+      "domainStrategy": "AsIs",
+      "rules": [
+        {
+          "type": "field",
+          "domain": [
+            "geosite:private"
+          ],
+          "outboundTag": "direct"
+        },
+        {
+          "type": "field",
+          "ip": [
+            "geoip:ir"
+          ],
+          "outboundTag": "direct"
+        },
+        {
+          "type": "field",
+          "network": "tcp,udp",
+          "outboundTag": "proxy"
+        }
+      ]
+    }
+  }
+]

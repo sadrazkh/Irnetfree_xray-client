@@ -15,7 +15,7 @@ const fs = require('fs');
 const os = require('os');
 
 const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
-const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts } = require('../main/configBuilder');
+const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
 const { buildSingboxConfig } = require('../main/singboxBuilder');
@@ -235,6 +235,9 @@ function createService(opts = {}) {
   // OpenWrt: `opkg install xray-core sing-box` puts the official cores in
   // /usr/bin. Searched LAST — a core downloaded into userBinDir still wins.
   const OPENWRT = isOpenwrt();
+  // Raw JSON mode (configBuilder.rawApplies): never on a router, whose LAN
+  // lives on the app's port-53 answer — there a raw server runs its full form.
+  const RAW_OPTS = { openwrt: OPENWRT };
   const systemBinDirs = OPENWRT ? ['/usr/bin'] : [];
   // A router is headless: after a power cut the tunnel has to come back by
   // itself, so "connect at start" is the default THERE (the user can still turn
@@ -1169,13 +1172,13 @@ function createService(opts = {}) {
     let entryAddrs = [];
     const addEntryForTarget = (tg) => {
       if (!tg || tg === 'direct' || tg === 'block') return;
-      if (tg === 'chain') { if (legacyChain[0]) entryAddrs.push(legacyChain[0].address); return; }
+      if (tg === 'chain') { if (legacyChain[0]) entryAddrs.push(...entryAddressesOf(legacyChain[0])); return; }
       if (String(tg).indexOf('chain:') === 0) {
         const m = chainsById[String(tg).slice('chain:'.length)];
-        if (m && m[0]) entryAddrs.push(m[0].address);
+        if (m && m[0]) entryAddrs.push(...entryAddressesOf(m[0]));
         return;
       }
-      if (serversById[tg]) entryAddrs.push(serversById[tg].address);
+      if (serversById[tg]) entryAddrs.push(...entryAddressesOf(serversById[tg]));
     };
 
     if (serverId === '__pool__') {
@@ -1207,19 +1210,19 @@ function createService(opts = {}) {
       if (members.length < 2) throw new Error(settings.lang === 'en' ? 'This chain needs at least 2 servers' : 'این زنجیره حداقل به ۲ سرور نیاز دارد');
       plan = { mode: 'chain', chain: members, name: chainById[serverId].name };
       label = chainById[serverId].name;
-      entryAddrs = [members[0].address];
+      entryAddrs = entryAddressesOf(members[0]);
     } else if (serverId === '__chain__') {
       refuseBroken('chain');
       if (legacyChain.length < 2) throw new Error(settings.lang === 'en' ? 'The chain needs at least 2 servers' : 'زنجیره حداقل به ۲ سرور نیاز دارد');
       plan = { mode: 'chain', chain: legacyChain };
       label = legacyChain.map(s => s.name).join(' → ');
-      entryAddrs = [legacyChain[0].address];
+      entryAddrs = entryAddressesOf(legacyChain[0]);
     } else {
       const server = byId(serverId);
       if (!server) throw new Error(settings.lang === 'en' ? 'Server not found' : 'سرور پیدا نشد');
       plan = { mode: 'single', server };
       label = server.name;
-      entryAddrs = [server.address];
+      entryAddrs = entryAddressesOf(server, rawApplies(server, settings, RAW_OPTS));
     }
     entryAddrs = [...new Set(entryAddrs.filter(Boolean))];
     return { plan, label, entryAddrs };
@@ -1227,6 +1230,10 @@ function createService(opts = {}) {
 
   function buildActive(serverId, settings) {
     const { plan, label, entryAddrs } = buildPlan(serverId, settings);
+    // A JSON server set to run raw: its own config, as written — a single-server
+    // connect only (configBuilder.buildRawConfig). The app's routing mode, the
+    // geo rules it would have skipped and the router's DNS block are not in it.
+    const rawServer = rawServerOf(plan, settings, RAW_OPTS);
 
     const geoSt = assetStatus();
     const geoAssets = !!(geoSt.geoip && geoSt.geosite);
@@ -1234,7 +1241,7 @@ function createService(opts = {}) {
     const usesGeo = plan.mode === 'pool' ? false : (
       (plan.mode === 'advanced' && ((settings.routeRules || []).some(r => r && /^(geoip|geosite):/i.test(String(r.value || ''))))) ||
       (plan.mode !== 'advanced' && (settings.routingMode === 'bypass-ir' || settings.routingMode === 'bypass-cn' || (settings.blockAds && plan.mode !== 'advanced'))));
-    if (!geoAssets && usesGeo) {
+    if (!geoAssets && usesGeo && !rawServer) {
       geoWarn = settings.lang === 'en'
         ? 'Geo files (geoip/geosite) are missing — geo-based rules were skipped. Download them under Settings → Required files.'
         : 'فایل‌های geo (geoip/geosite) موجود نیست — قوانین مبتنی بر geo نادیده گرفته شد. از تنظیمات → فایل‌های موردنیاز دانلودشان کن.';
@@ -1249,6 +1256,8 @@ function createService(opts = {}) {
     // missing) decides the config format.
     let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine)).id;
     let config;
+    // A raw config is Xray's own format: it runs on an Xray core, whatever the choice.
+    if (rawServer && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray').id;
     // A router's LAN has names only because the core answers every port-53
     // packet (dnsBuilder's hijack), and a config on the sing-box core carries
     // none — every device behind the router without DNS, the v1.13.4 failure.
@@ -1257,7 +1266,9 @@ function createService(opts = {}) {
       send('log', { line: 'This config is set to the sing-box core, which has no port-53 hijack: the LAN behind the router would have no DNS — running it on Xray instead', level: 'warn' });
       engine = xray.resolveEngine('xray').id;
     }
-    if (engineFormat(engine) === 'sing-box') {
+    if (rawServer) {
+      config = buildRawConfig(rawServer, settings);
+    } else if (engineFormat(engine) === 'sing-box') {
       try {
         config = buildSingboxConfig(plan.server, settings);
       } catch (e) {
@@ -1271,8 +1282,9 @@ function createService(opts = {}) {
     // The router's DNS block (v1.16.2, dnsBuilder.routerDnsTuning): 8 s per
     // DoH server, the DoH servers raced, a known name answered from cache
     // through an outage of the exit's DoH. Here, after buildConfig, so the
-    // connect and every rebuild get it and a desktop's config never does.
-    if (OPENWRT && engineFormat(engine) === 'xray' && config.dns) config.dns = routerDnsTuning(config.dns);
+    // connect and every rebuild get it and a desktop's config never does —
+    // nor a raw config, whose DNS runs as written.
+    if (OPENWRT && !rawServer && engineFormat(engine) === 'xray' && config.dns) config.dns = routerDnsTuning(config.dns);
     return { plan, label, entryAddrs, config, geoWarn, engine };
   }
 
@@ -1497,7 +1509,7 @@ function createService(opts = {}) {
     let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine), { quiet: true }).id;
     if (OPENWRT && engineFormat(engine) === 'sing-box') engine = xray.resolveEngine('xray', { quiet: true }).id;   // as buildActive runs it
     if (engineFormat(engine) === 'sing-box') return none;
-    const servers = muxCandidates(plan);
+    const servers = muxCandidates(plan, rawServerOf(plan, settings, RAW_OPTS));
     if (!servers.length) return none;
     const { muxIds, learnt } = await decideMux({
       mode, servers, cache: store.get('muxProbes', {}), now: Date.now(), recovery: !!recovery,
@@ -1686,6 +1698,9 @@ function createService(opts = {}) {
     let active;
     try { active = buildActive(serverId, settings); } catch (e) { throw refusal(e); }   // a target gone, a chain short of a member
     const { plan, label, entryAddrs, config, geoWarn, engine } = active;
+    // A JSON server set to run raw, said once per connect: run as written, or —
+    // in a chain, advanced routing or the pool — used in its full form.
+    for (const note of rawModeNotes(plan, settings, RAW_OPTS)) send('log', note);
     // A router carries a house: one access-log line per connection, through the
     // service's stdout into syslog, is real CPU on a Cortex-A7 (the AC-1304 log
     // was a wall of `accepted udp:…`). Kept when the user asks for a verbose
@@ -2087,6 +2102,7 @@ function createService(opts = {}) {
 
     stats.setBin(xray.anyBin());
     stats.apiPort = settings.apiPort;
+    stats.skipTags = rawServerOf(plan, settings, RAW_OPTS) ? dialerTagsOf(config) : null;
     watchWgSilence(config);
     // a fresh core counts from zero — tell the meter, or the first poll of the
     // new session reads as growth on the old one (see main.js)
@@ -3045,7 +3061,9 @@ function createService(opts = {}) {
       const idx = servers.findIndex(s => s.id === id);
       if (idx === -1) return { ok: false, error: 'not found', servers };
       const before = servers[idx];
-      servers[idx] = applyServerEdits(before, fields || {});
+      // An edit can be refused — a JSON config that does not parse, or has no
+      // proxy outbound left: the reason goes back, the record stays as it was.
+      try { servers[idx] = applyServerEdits(before, fields || {}); } catch (err) { return { ok: false, error: err.message, servers }; }
       store.set('servers', servers);
       // an edit of a server the live connection dials waits for a reconnect (see liveServerIds)
       // — one that changes what is dialled: a rename, or a Save with nothing changed, is none

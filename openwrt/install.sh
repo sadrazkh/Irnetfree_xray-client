@@ -25,8 +25,20 @@ case "${DISTRIB_RELEASE:-}" in
 esac
 
 say "packages IRNetFree needs"
+# The feeds' mirror drops a download now and then — on a router's line even more. opkg install
+# skips what is already in place, so a run that failed half-way is simply asked again (three tries).
+opkg_retry() {
+	n=0
+	until opkg install "$@"; do
+		n=$((n + 1))
+		[ "$n" -lt 3 ] || return 1
+		echo "opkg: a download failed — trying again ($n of 2)"
+		sleep 3
+		opkg update >/dev/null 2>&1 || true
+	done
+}
 opkg update >/dev/null
-opkg install node kmod-tun nftables ip-full unzip ca-bundle
+opkg_retry node kmod-tun nftables ip-full unzip ca-bundle
 NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
 [ "${NODE_MAJOR:-0}" -ge 18 ] || { echo "node $(node -v 2>/dev/null || echo missing) is too old: IRNetFree needs 18 or newer"; exit 1; }
 echo "node $(node -v)"

@@ -5,8 +5,12 @@ import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.CoreCompat
 import com.irnetfree.vpn.core.EngineChoice
+import com.irnetfree.vpn.core.JsonImport
 import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.LocalAuth
+import com.irnetfree.vpn.core.PoolEntry
+import com.irnetfree.vpn.core.RouteRule
+import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.SingboxConfig
 import org.json.JSONArray
 import org.json.JSONObject
@@ -56,6 +60,34 @@ object TunnelSetup {
     class CoreConfig(val engine: String, val json: String)
 
     /**
+     * A JSON server set to run raw (exactly as written) — which the desktop
+     * does in proxy mode only. Android's VPN is always a TUN, so here it runs
+     * in its full form; the stored mode is kept, so a backup round-trips.
+     */
+    fun setToRaw(server: ServerConfig): Boolean = server.isJson && server.jsonMode == JsonImport.MODE_RAW
+
+    /**
+     * The servers a plan routes to: a single server, a chain's hops, the
+     * targets of a pool's entries or of advanced routing's rules (not every
+     * server the store holds, which those plans carry along).
+     */
+    fun planTargets(plan: ConnectionPlan): List<ServerConfig> {
+        fun resolve(t: String, byId: Map<String, ServerConfig>, chains: Map<String, List<ServerConfig>>): List<ServerConfig> = when {
+            t.startsWith("chain:") -> chains[t.substring(6)] ?: emptyList()
+            t == "proxy" -> listOfNotNull(byId.values.firstOrNull { srv: ServerConfig -> srv.outbound.length() > 0 })
+            else -> listOfNotNull(byId[t])
+        }
+        return when (plan) {
+            is ConnectionPlan.Single -> listOf(plan.server)
+            is ConnectionPlan.Chain -> plan.members
+            is ConnectionPlan.Pool -> (plan.entries.map { e: PoolEntry -> e.target } + plan.primary)
+                .flatMap { t: String -> resolve(t, plan.serversById, plan.chainsById) }
+            is ConnectionPlan.Advanced -> (plan.rules.map { r: RouteRule -> r.target } + plan.def)
+                .flatMap { t: String -> resolve(t, plan.serversById, plan.chainsById) }
+        }
+    }
+
+    /**
      * The config for [engine]: sing-box's own format for a single server, the
      * Xray format for everything else — PattN takes that very JSON, so the
      * in-process core and PattN carry LAN sharing identically. A server
@@ -72,6 +104,11 @@ object TunnelSetup {
         auth: LocalAuth?, lan: LanShare?, muxIds: Set<String> = emptySet(), coreVersion: (String) -> String = { "" }, log: (String) -> Unit
     ): CoreConfig {
         val single = plan as? ConnectionPlan.Single
+        // Raw (exactly as written) runs on the desktop in proxy mode; Android's
+        // VPN is always a TUN, so a JSON server set to raw runs in its full form
+        // here, wherever the plan uses it — said once per connect.
+        planTargets(plan).filter { srv: ServerConfig -> setToRaw(srv) }.distinctBy { srv: ServerConfig -> srv.id }
+            .forEach { srv: ServerConfig -> log("\"${srv.name}\" is set to run raw — on Android its full form runs, so the app's DNS and tunnel rules apply") }
         if (engine == EngineChoice.SINGBOX && single != null) {
             try {
                 return CoreConfig(engine, SingboxConfig.build(single.server, s, auth, lan).toString())
