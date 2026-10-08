@@ -90,13 +90,25 @@ class RouteShareTest {
         val proxied = RouteShare.profilePayload(RoutingProfile("rp-p", "P", def = "proxy"), servers, chains, linkOf)
         assertEquals("s1", proxied.getJSONObject("profile").getString("def"))
         assertEquals("other", servers.first().id)
+        // a default that takes no via carries none: no server travels for a stale defVia, a gone one refuses nothing
+        val plain = RouteShare.profilePayload(RoutingProfile("rp-d", "D", listOf(RouteRule("ip", "geoip:ir", "direct")), def = "direct", defVia = "wg"), servers, chains, linkOf)
+        assertEquals("inherit", plain.getJSONObject("profile").getString("defVia"))
+        assertEquals(0, plain.getJSONArray("servers").length())
+        RouteShare.profilePayload(RoutingProfile("rp-g", "G", def = "block", defVia = "gone"), servers, chains, linkOf)
+        // a chain that lost a server refuses the profile that names it
+        val lost = chains + ChainConfig("ch-lost", "Lost", listOf("nl", "gone"))
+        assertThrows(IllegalArgumentException::class.java) { RouteShare.profilePayload(RoutingProfile("rp-l", "L", def = "chain:ch-lost"), servers, lost, linkOf) }
     }
 
     @Test fun chainPayload_theChainAndItsServers() {
         val s = listOf(ServerConfig("x", "X", "vless", "x.example", 443, JSONObject().put("protocol", "vless")),
             ServerConfig("y", "Y", "vless", "y.example", 443, JSONObject().put("protocol", "vless")),
             ServerConfig("z", "Z", "vless", "z.example", 443, JSONObject().put("protocol", "vless")))
-        val out = RouteShare.chainPayload(ChainConfig("c-9", "Y→X", listOf("y", "x", "gone")), s) { srv: ServerConfig -> "vless://u@${srv.address}:443#${srv.name}" }
+        val linkOf = { srv: ServerConfig -> "vless://u@${srv.address}:443#${srv.name}" }
+        // a chain that lost a server is refused, not shared shorter (the desktop's chainLost)
+        assertThrows(IllegalArgumentException::class.java) { RouteShare.chainPayload(ChainConfig("c-9", "Y→X", listOf("y", "x", "gone")), s, linkOf) }
+        assertThrows(IllegalArgumentException::class.java) { RouteShare.chainPayload(ChainConfig("c-0", "Empty", emptyList()), s, linkOf) }
+        val out = RouteShare.chainPayload(ChainConfig("c-9", "Y→X", listOf("y", "x")), s, linkOf)
         assertEquals(1, out.getInt("v"))
         assertEquals("chain", out.getString("kind"))
         assertFalse(out.has("profile"))
@@ -209,6 +221,15 @@ class RouteShareTest {
         assertEquals(3, r.addedServers)
         // the rule keeps naming something that is not there — Routing marks it, connecting leaves it out
         assertTrue(r.profiles.single().rules[0].target.startsWith(RouteShare.UNREADABLE_PREFIX))
+        // a chain with that server keeps naming it too, instead of becoming a shorter chain
+        val c = RouteShare.decode(link)
+        val chainMember = c.getJSONArray("chains").getJSONObject(0).getJSONArray("members").getString(0)
+        val keys = (0 until c.getJSONArray("servers").length()).map { i: Int -> c.getJSONArray("servers").getJSONObject(i).getString("key") }
+        c.getJSONArray("servers").getJSONObject(keys.indexOf(chainMember)).put("link", "nonsense://what")
+        val rc = RouteShare.applyImport(c, emptyList(), emptyList(), emptyList(), { l: String -> parse(l) }, identity, newId)
+        val made = rc.chains.single()
+        assertEquals(RouteShare.UNREADABLE_PREFIX + chainMember, made.members[0])
+        assertEquals(2, made.members.size)
     }
 
     @Test fun hostileText_isRefusedWithAReason() {

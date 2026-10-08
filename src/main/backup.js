@@ -10,7 +10,7 @@
  * it returns.
  */
 
-const { normalizeProfile, mirrorToSettings, mirrorFromSettings } = require('./routingProfiles');
+const { DEFAULT_PROFILE_ID, normalizeProfile, mirrorToSettings, mirrorFromSettings } = require('./routingProfiles');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -175,16 +175,21 @@ function importBundle(bundle, current, opts = {}) {
     delete incoming[k];
   }
   let settings = Object.assign({}, have, incoming);
-  // Routing profiles, merged by id like the rest. The settings' advanced keys
-  // are profile rp-default's mirror (routingProfiles.js): a backup that carries
-  // profiles leaves the settings mirroring rp-default as it now is (this
-  // machine's when it had one); one made before them carries its advanced
-  // routing in the settings alone — rp-default follows them, as the settings
-  // have always followed a restore.
+  // Routing profiles, merged by id like the rest — except rp-default, which IS
+  // the settings' advanced routing (routingProfiles.js mirrors it into
+  // routeRules / routeDefault / advancedUseMode), and those have always come
+  // back with a restore: the backup's rp-default replaces the one here (on a
+  // fresh install only the empty one made at start), and the settings mirror
+  // it. A backup made before profiles carries its advanced routing in the
+  // settings alone — rp-default follows them.
   const profiles = merge(c.routingProfiles, bundle.routingProfiles, cleanProfile);
   let routingProfiles = profiles.list;
-  if (Array.isArray(bundle.routingProfiles)) settings = mirrorToSettings(routingProfiles, settings);
-  else routingProfiles = mirrorFromSettings(routingProfiles, settings);
+  if (Array.isArray(bundle.routingProfiles)) {
+    const theirs = bundle.routingProfiles.find((p) => isObj(p) && p.id === DEFAULT_PROFILE_ID);
+    const restored = theirs ? cleanProfile(theirs) : null;
+    if (restored) routingProfiles = routingProfiles.map((p) => (p && p.id === DEFAULT_PROFILE_ID ? restored : p));
+    settings = mirrorToSettings(routingProfiles, settings);
+  } else routingProfiles = mirrorFromSettings(routingProfiles, settings);
   return {
     next: {
       servers: servers.list,

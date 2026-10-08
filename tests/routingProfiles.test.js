@@ -51,8 +51,9 @@ test('migration: no stored profiles → one rp-default from today’s settings, 
   const again = migrateProfiles({ stored: profiles, settings: { routeRules: [] } });
   assert.equal(again.changed, false);
   assert.deepEqual(again.profiles, profiles);
-  // an empty list is the user’s own choice: no re-migration
-  assert.deepEqual(migrateProfiles({ stored: [], settings: SETTINGS }), { profiles: [], changed: false });
+  // never none (as on Android): an empty list, or one of nothing usable, is today’s settings again
+  assert.deepEqual(migrateProfiles({ stored: [], settings: SETTINGS }), { profiles: [profileFromSettings(SETTINGS)], changed: true });
+  assert.deepEqual(migrateProfiles({ stored: [null, 'x'], settings: SETTINGS }).profiles, [profileFromSettings(SETTINGS)]);
 });
 
 test('migration of a stored list: junk dropped, duplicate ids once, a bad id replaced, unknown fields gone', () => {
