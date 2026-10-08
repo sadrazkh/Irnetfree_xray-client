@@ -437,12 +437,45 @@ function dialThrough(outbound, viaTag) {
 }
 
 /**
+ * A JSON server's helper outbounds (jsonImport.js: what its main outbound
+ * dials THROUGH — a fragment freedom, the hops of its own chain), for its
+ * outbound `o` tagged `tag` in this config: each helper's tag becomes
+ * `<tag>~<helperTag>`, and every dialerProxy / proxySettings.tag that named a
+ * helper is rewritten — in `o` and in the helpers — so two JSON servers in one
+ * config never collide. Copies, `allowInsecure` handled as for every outbound
+ * (applyCertPin). A link server has none: [] and `o` untouched.
+ */
+function helpersFor(server, o, tag) {
+  const extra = server && server.source === 'json' && Array.isArray(server.extraOutbounds)
+    ? server.extraOutbounds.filter(h => h && typeof h.tag === 'string' && h.tag) : [];
+  if (!extra.length) return [];
+  const named = new Map(extra.map(h => [h.tag, `${tag}~${h.tag}`]));
+  const helpers = extra.map(h => applyCertPin(Object.assign(JSON.parse(JSON.stringify(h)), { tag: named.get(h.tag) }), null));
+  for (const x of [o, ...helpers]) {
+    const so = x.streamSettings && x.streamSettings.sockopt;
+    if (so && named.has(so.dialerProxy)) so.dialerProxy = named.get(so.dialerProxy);
+    if (x.proxySettings && named.has(x.proxySettings.tag)) x.proxySettings.tag = named.get(x.proxySettings.tag);
+  }
+  return helpers;
+}
+
+/** An outbound followed by the helpers its server dials through (helpersFor). */
+function withHelpers(o, server) {
+  return [o, ...helpersFor(server, o, o.tag)];
+}
+
+/**
  * Build chained outbounds. `servers` is ordered first-hop → exit.
  * Each hop after the first dials THROUGH the previous via sockopt.dialerProxy.
  * The exit gets `exitTag` (what routing targets); default 'proxy'.
  *
  * Inner hop tags are namespaced under `exitTag` (`<exitTag>-h<i>`) so multiple
  * chains can coexist in one config (advanced routing) without tag collisions.
+ *
+ * A JSON server dials the network through its helpers (helpersFor) only as
+ * the FIRST hop. A later hop dials through the hop before it: its own way out
+ * — the helper its dialerProxy or proxySettings named — goes, and with it
+ * every helper (as a link's anti-DPI dialer does for a chained hop).
  */
 function buildChainOutbounds(servers, exitTag) {
   exitTag = exitTag || 'proxy';
@@ -452,8 +485,11 @@ function buildChainOutbounds(servers, exitTag) {
   for (let i = 0; i <= last; i++) {
     const tag = i === last ? exitTag : `${exitTag}-h${i}`;
     const ob = cloneOut(list[i].outbound, tag, list[i]);
-    if (i > 0) dialThrough(ob, `${exitTag}-h${i - 1}`);
-    outs.push(ob);
+    if (i > 0) {
+      if (list[i].source === 'json') delete ob.proxySettings;
+      dialThrough(ob, `${exitTag}-h${i - 1}`);
+    }
+    outs.push(...(i === 0 ? withHelpers(ob, list[i]) : [ob]));
   }
   return outs;
 }
@@ -477,7 +513,7 @@ function makeRegistry(plan, muxIds) {
   function chainTag(list, tag) {
     const arr = (list || []).filter(s => s && s.outbound);
     if (arr.length >= 2) { buildChainOutbounds(arr, tag).forEach(add); return tag; }
-    if (arr.length === 1) { add(cloneOut(arr[0].outbound, tag, arr[0])); return tag; }
+    if (arr.length === 1) { withHelpers(cloneOut(arr[0].outbound, tag, arr[0]), arr[0]).forEach(add); return tag; }
     return 'direct';
   }
 
@@ -491,7 +527,7 @@ function makeRegistry(plan, muxIds) {
       return chainTag(list, 'out-chain-' + cid);
     }
     const s = (plan.serversById || {})[target];
-    if (s && s.outbound) { const tag = 'out-' + target; add(applyMux(cloneOut(s.outbound, tag, s), s, muxIds)); return tag; }
+    if (s && s.outbound) { const tag = 'out-' + target; withHelpers(applyMux(cloneOut(s.outbound, tag, s), s, muxIds), s).forEach(add); return tag; }
     return 'direct';
   }
 
@@ -828,7 +864,7 @@ function buildConfig(planArg, settings) {
   } else {
     const proxyOutbounds = plan.mode === 'chain'
       ? buildChainOutbounds(plan.chain, 'proxy')
-      : [applyMux(cloneOut(plan.server.outbound, 'proxy', plan.server), plan.server, s.muxServerIds)];
+      : withHelpers(applyMux(cloneOut(plan.server.outbound, 'proxy', plan.server), plan.server, s.muxServerIds), plan.server);
     outbounds = [...proxyOutbounds, freedom(s), Object.assign({}, BLACKHOLE)];
     exitTag = s.routingMode === 'direct' ? 'direct' : 'proxy';
     // The exit carries the resolver — unless it is `direct` (routingMode
@@ -880,13 +916,88 @@ function buildConfig(planArg, settings) {
       system: { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true }
     },
     dns: withHosts(dnsPlan.dns, hosts),
-    inbounds: [
-      { tag: 'socks-in', port: s.socksPort, listen, protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing },
-      { tag: 'http-in', port: s.httpPort, listen, protocol: 'http', settings: {}, sniffing }
-    ],
+    inbounds: localInbounds(s, listen, sniffing),
     outbounds,
     routing: { domainStrategy: routingStrategy(s), rules }
   };
+}
+
+/** The app's own local inbounds: SOCKS and HTTP on the ports from Settings (what the system proxy and TUN reach). */
+function localInbounds(s, listen, sniffing) {
+  return [
+    { tag: 'socks-in', port: s.socksPort, listen, protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing },
+    { tag: 'http-in', port: s.httpPort, listen, protocol: 'http', settings: {}, sniffing }
+  ];
+}
+
+const isPlainObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** A JSON server set to run exactly as written (jsonMode 'raw'). */
+function isRawJson(server) {
+  return !!server && server.source === 'json' && server.jsonMode === 'raw' && isPlainObj(server.json);
+}
+
+/**
+ * The raw JSON server a plan runs as written — a single-server connect only;
+ * null for every other plan (a raw server in a chain, advanced routing or the
+ * pool is used in its full form: buildConfig).
+ */
+function rawServerOf(planArg) {
+  const plan = normalizePlan(planArg);
+  return plan.mode === 'single' && isRawJson(plan.server) ? plan.server : null;
+}
+
+/**
+ * What a connect says about raw mode, once: [{ line, level }]. A single raw
+ * server runs as written; one in any other plan is used in its full form.
+ */
+function rawModeNotes(planArg) {
+  const plan = normalizePlan(planArg);
+  const raw = rawServerOf(plan);
+  if (raw) return [{ line: `Running "${raw.name}" exactly as written (raw JSON) — the app's DNS management, leak guard and routing mode do not apply`, level: 'info' }];
+  const seen = new Set();
+  const out = [];
+  for (const s of planServers(plan)) {
+    if (!isRawJson(s) || seen.has(s.id || s)) continue;
+    seen.add(s.id || s);
+    out.push({ line: `"${s.name}" is set to run raw, but a chain/routing target uses its full form`, level: 'warn' });
+  }
+  return out;
+}
+
+/**
+ * Raw mode: a JSON server's own config, run exactly as written — its routing,
+ * DNS, balancers, observatory, policy and fakedns — with only what the app
+ * needs to reach it and to read it:
+ *  - its `inbounds` are the app's own (localInbounds, as buildConfig makes
+ *    them for these settings), so the system proxy and TUN reach it — with
+ *    `fakedns` sniffed when the config keeps a fake-IP pool;
+ *  - `log.loglevel` from Settings;
+ *  - the traffic meter's metrics listener and the counters it reads;
+ *  - under TUN (`directInterface`) every outbound that dials itself bound to
+ *    the NIC (bindDirectDials) — a `direct` dial would otherwise re-enter the
+ *    tunnel it is meant to go around.
+ * The app's DNS plan, leak-guard rules, routing mode and certificate pins are
+ * not applied. Never changes the record.
+ */
+function buildRawConfig(server, settings) {
+  const s = Object.assign({}, SETTINGS_DEFAULTS, settings || {});
+  const cfg = JSON.parse(JSON.stringify((server && server.json) || {}));
+  const listen = s.allowLan ? '0.0.0.0' : '127.0.0.1';
+  let sniffing = s.enableSniffing
+    ? { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false }
+    : { enabled: false };
+  if (cfg.fakedns) sniffing = { enabled: true, destOverride: [...(sniffing.destOverride || []), 'fakedns'], routeOnly: false };
+  cfg.log = Object.assign({}, isPlainObj(cfg.log) ? cfg.log : {}, { loglevel: s.logLevel });
+  cfg.inbounds = localInbounds(s, listen, sniffing);
+  cfg.metrics = { tag: 'metrics', listen: `127.0.0.1:${s.apiPort}` };
+  cfg.stats = {};
+  const policy = isPlainObj(cfg.policy) ? cfg.policy : {};
+  policy.system = Object.assign({}, isPlainObj(policy.system) ? policy.system : {},
+    { statsInboundUplink: true, statsInboundDownlink: true, statsOutboundUplink: true, statsOutboundDownlink: true });
+  cfg.policy = policy;
+  if (Array.isArray(cfg.outbounds)) bindDirectDials(cfg.outbounds.filter(isPlainObj), s.directInterface);
+  return cfg;
 }
 
 /**
@@ -1002,7 +1113,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
 function buildTestConfig(target, socksPort, opts) {
   const proxyOutbounds = Array.isArray(target)
     ? buildChainOutbounds(target, 'proxy')
-    : [cloneOut(target.outbound, 'proxy', target)];
+    : withHelpers(cloneOut(target.outbound, 'proxy', target), target);
   const hosts = opts ? pinEntryHosts(proxyOutbounds, opts.entryHostIps, opts.ipv6) : null;
   // apply TLS fragment (if the config carries one) so the test matches reality
   const outbounds = applyFragments(proxyOutbounds).concat([{ tag: 'direct', protocol: 'freedom' }]);
@@ -1037,7 +1148,7 @@ function buildMultiTestConfig(targets, ports) {
   (targets || []).forEach((target, i) => {
     const inTag = `test-in-${i}`, outTag = `test-out-${i}`;
     inbounds.push({ tag: inTag, port: ports[i], listen: '127.0.0.1', protocol: 'socks', settings: { auth: 'noauth', udp: false } });
-    const outs = Array.isArray(target) ? buildChainOutbounds(target, outTag) : [cloneOut(target.outbound, outTag, target)];
+    const outs = Array.isArray(target) ? buildChainOutbounds(target, outTag) : withHelpers(cloneOut(target.outbound, outTag, target), target);
     outbounds.push(...outs);
     rules.push({ type: 'field', inboundTag: [inTag], outboundTag: outTag });
   });
@@ -1223,4 +1334,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf };
+module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes };
