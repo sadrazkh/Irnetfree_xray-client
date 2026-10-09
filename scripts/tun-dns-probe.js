@@ -95,7 +95,21 @@ function parseAnswer(buf) {
 
 /** One A query to `server`, its answer as one JSON line (run inside the namespace by askInNs). */
 function queryMode() {
-  const [server, name] = process.argv.slice(3);
+  const [server, name, proto] = process.argv.slice(3);
+  if (proto === 'tcp') {
+    // DNS over TCP: a two-byte length before the message, both ways
+    const msg = query(name, 4243);
+    const len = Buffer.alloc(2); len.writeUInt16BE(msg.length, 0);
+    let buf = Buffer.alloc(0);
+    const s = require('net').connect({ host: server, port: 53 }, () => s.write(Buffer.concat([len, msg])));
+    const timer = setTimeout(() => { console.log(JSON.stringify({ error: 'timeout' })); s.destroy(); }, 4000);
+    s.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (buf.length >= 2 && buf.length >= 2 + buf.readUInt16BE(0)) { clearTimeout(timer); console.log(JSON.stringify(parseAnswer(buf.slice(2)))); s.destroy(); }
+    });
+    s.on('error', (e) => { clearTimeout(timer); console.log(JSON.stringify({ error: e.message })); });
+    return;
+  }
   const sock = dgram.createSocket('udp4');
   const timer = setTimeout(() => { console.log(JSON.stringify({ error: 'timeout' })); sock.close(); }, 4000);
   sock.on('message', (msg) => { clearTimeout(timer); console.log(JSON.stringify(parseAnswer(msg))); sock.close(); });
@@ -191,8 +205,8 @@ async function stop(p) {
   for (let i = 0; i < 30 && p.exitCode === null; i++) await sleep(100);
   if (p.exitCode === null) p.kill('SIGKILL');
 }
-function askInNs(name) {
-  const r = inNs([process.execPath, __filename, '--query', PEER, name], { mayFail: true });
+function askInNs(name, proto) {
+  const r = inNs([process.execPath, __filename, '--query', PEER, name, proto || 'udp'], { mayFail: true });
   try { return JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch { return { error: (r.stderr || 'no answer').toString().trim() }; }
 }
 
@@ -272,10 +286,14 @@ async function main() {
       if (!up) { fail(`${variant}: the TUN did not come up\n${sb.output()}`); await stop(sb); continue; }
       await sleep(500);
       const got = {};
-      for (const name of Object.keys(NAMES)) got[name] = askInNs(name);
+      // each name over UDP, and over TCP when UDP got nothing (a socks UDP relay is one more thing that can fail here)
+      for (const name of Object.keys(NAMES)) {
+        got[name] = askInNs(name, 'udp');
+        if (got[name].error) { const t = askInNs(name, 'tcp'); got[name] = Object.assign(t, { via: 'tcp', udp: got[name].error }); }
+      }
       const leaked = Object.keys(NAMES).filter((n) => isp.heard.includes(n));
       const byXray = Object.keys(NAMES).every((n) => (got[n].a || []).includes(NAMES[n]));
-      const line = Object.keys(NAMES).map((n) => `${n} → ${got[n].error || (got[n].a || []).join(',') || 'rcode ' + got[n].rcode}`).join('; ');
+      const line = Object.keys(NAMES).map((n) => `${n} → ${got[n].error || (got[n].a || []).join(',') || 'rcode ' + got[n].rcode}${got[n].via ? ` (tcp; udp: ${got[n].udp})` : ''}`).join('; ');
       const clean = byXray && !leaked.length;
       // the bug's own signature: sing-box answered from the ISP resolver, or the ISP heard the name — not a mere timeout
       const ispAnswered = Object.keys(NAMES).some((n) => (got[n].a || []).includes(ISP_ANSWER));
