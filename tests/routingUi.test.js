@@ -202,7 +202,7 @@ function store() {
 }
 
 const PRELUDE_CONSTS = constSource('ADV_ID') + constSource('POOL_ID') + constSource('TARGET_BASE') + constSource('RULE_TYPES') + constSource('QR_JSON_MAX_BYTES');
-const MODEL_FNS = ['profileOfSel', 'profileReady', 'advSelName', 'terminalTarget', 'takesNoVia', 'atBase', 'appRouteRules', 'normalizeUiProfile', 'ruleVia', 'refProblem', 'ruleProblem',
+const MODEL_FNS = ['profileOfSel', 'profileReady', 'advSelName', 'terminalTarget', 'takesNoVia', 'atBase', 'appRouteRules', 'geoReady', 'normalizeUiProfile', 'ruleVia', 'refProblem', 'ruleProblem',
   'profileBroken', 'refName', 'flowModel', 'outboundTagFor', 'baseKeyOf', 'viaTagFor', 'baseTagFor', 'chainById', 'chainMembers', 'chainReady',
   'srvById', 'isChainId', 'targetLabel', 'poolTargetOptions'];
 
@@ -1016,7 +1016,7 @@ test('the home screen’s small path: a profile’s lines put the base between t
   const page = fakePage();
   page.get('statIp').textContent = '—';
   const ctx = compile(['renderTrafficPath', 'pathRule', 'pathNode', 'pathLink', 'trafficSpan', 'targetLabel', 'outboundTagFor', 'baseKeyOf', 'viaTagFor',
-    'profileOfSel', 'ruleVia', 'terminalTarget', 'takesNoVia', 'modeCountryRule', 'appRuleWords', 'chainById', 'chainMembers', 'srvById'], {
+    'profileOfSel', 'ruleVia', 'terminalTarget', 'takesNoVia', 'modeCountryRule', 'appRuleWords', 'geoReady', 'chainById', 'chainMembers', 'srvById'], {
     state: { servers: s.servers, chains: s.chains, pool: [], settings: { tunMode: false, routeRules: [], routeDefault: 'direct' },
       profiles: [s.def, s.work], selectedServerId: '__advanced__:rp-work', activeServerId: null },
     t: en, $: page.$, document: page.document,
@@ -1319,7 +1319,7 @@ test('the home path: "exit at the base" leaves from the base; the routing mode�
   const page = fakePage();
   page.get('statIp').textContent = '—';
   const x = { id: 'rp-x', name: 'X', useMode: true, base: 's1', def: 'base', defVia: 'inherit', rules: [{ type: 'domain', value: 'news.example', target: 'base' }] };
-  const ctx = compile(['renderTrafficPath', 'pathRule', 'modeCountryRule', 'appRuleWords', 'pathNode', 'pathLink', 'trafficSpan', 'targetLabel', 'outboundTagFor', 'baseKeyOf',
+  const ctx = compile(['renderTrafficPath', 'pathRule', 'modeCountryRule', 'appRuleWords', 'geoReady', 'pathNode', 'pathLink', 'trafficSpan', 'targetLabel', 'outboundTagFor', 'baseKeyOf',
     'viaTagFor', 'profileOfSel', 'ruleVia', 'terminalTarget', 'takesNoVia', 'chainById', 'chainMembers', 'srvById'], {
     state: { servers: s.servers, chains: s.chains, pool: [], settings: { tunMode: false, routingMode: 'bypass-ir', routeRules: [], routeDefault: 'direct' },
       profiles: [s.def, x], selectedServerId: '__advanced__:rp-x', activeServerId: null },
@@ -1349,4 +1349,31 @@ test('the home path: "exit at the base" leaves from the base; the routing mode�
   ctx.state.settings.routingMode = 'global';
   ctx.renderTrafficPath('disconnected');
   assert.equal(page.get('trafficPath').children.some((c) => hasClass(c, 'path-bypass')), false);
+});
+
+test('without the geo files the tree and the home path draw no geo rule (the core has none); a raw JSON server in proxy mode gets no mode line', () => {
+  const h = modelHarness({ settings: { advancedRouting: true, blockAds: true, routingMode: 'bypass-ir' }, assets: { xray: true } });
+  assert.deepEqual(plain(h.ctx.flowModel(h.s.work)).groups.map((g) => g.key), ['g0', 'g1', 'g2', 'g4', 'sys-lan', 'def'], 'no ads, no Iran: only the local network');
+  h.state.assets = { xray: true, geoip: true, geosite: true };
+  assert.deepEqual(plain(h.ctx.flowModel(h.s.work)).groups.map((g) => g.sys).filter(Boolean), ['ads', 'lan', 'ir']);
+  const s = store();
+  const page = fakePage();
+  page.get('statIp').textContent = '—';
+  const raw = Object.assign({}, s.servers[2], { id: 'raw1', name: 'Raw', jsonMode: 'raw' });
+  const ctx = compile(['renderTrafficPath', 'pathRule', 'modeCountryRule', 'appRuleWords', 'geoReady', 'pathNode', 'pathLink', 'trafficSpan', 'targetLabel',
+    'outboundTagFor', 'baseKeyOf', 'viaTagFor', 'profileOfSel', 'ruleVia', 'terminalTarget', 'takesNoVia', 'chainById', 'chainMembers', 'srvById'], {
+    state: { servers: s.servers.concat([raw]), chains: s.chains, pool: [], settings: { tunMode: false, routingMode: 'bypass-ir' }, assets: {},
+      profiles: [s.def], selectedServerId: 's2', activeServerId: null },
+    t: en, $: page.$, document: page.document,
+    applyPathTraffic: () => {}, applyFlowTraffic: () => {}, poolEnabledValid: () => [],
+    String, Array, Object
+  }, PRELUDE_CONSTS + 'let lastPerOutbound = {};');
+  const bypass = () => { ctx.renderTrafficPath('disconnected'); return page.get('trafficPath').children.some((c) => hasClass(c, 'path-bypass')); };
+  assert.equal(bypass(), false, 'no geo files: Iran is not routed direct');
+  ctx.state.assets = { geoip: true, geosite: true };
+  assert.equal(bypass(), true);
+  ctx.state.selectedServerId = 'raw1';
+  assert.equal(bypass(), false, 'a raw config runs its own routing in proxy mode');
+  ctx.state.settings.tunMode = true;
+  assert.equal(bypass(), true, 'under TUN it runs in full, the mode with it');
 });
