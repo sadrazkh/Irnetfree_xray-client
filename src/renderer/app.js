@@ -5820,7 +5820,8 @@ function flowRuleNode(g, prof) {
     const [icon, label, note] = appRuleWords(g.sys);
     spanIn(b, 'rf-ico', icon);
     spanIn(b, 'rf-label', t(label));
-    spanIn(b, 'rf-tag', t(note));
+    // where it comes from, on its own line: the label keeps the room it has
+    spanIn(b, 'rf-sub', t(note));
     b.title = t(label) + ' → ' + to + ' — ' + t(note);
   } else if (g.isDefault) {
     spanIn(b, 'rf-ico', '↓');
