@@ -40,33 +40,22 @@
 
 .mf {
   --mf-node: 30px;
-  --mf-c1: #5ab0ff;
-  --mf-c2: #b48cff;
-  --mf-c3: #f5b54a;
-  --mf-c4: #ff7eb6;
-  --mf-c5: #ff9a6b;
+  /* a proxy lane's colour is its hue (laneHue: as many as there are targets); the theme sets the rest */
+  --lane-s: 88%;
+  --lane-l: 70%;
   flex: 1 1 100%;
   min-width: 0;
   position: relative;
   display: grid;
-  grid-template-columns: auto minmax(0, 1.15fr) minmax(0, .8fr) minmax(0, 1.3fr);
+  /* the device's column never follows its live numbers: the lines would be left behind */
+  grid-template-columns: minmax(9.5rem, max-content) minmax(0, 1.15fr) minmax(0, .8fr) minmax(0, 1.3fr);
   column-gap: 38px;
   row-gap: 10px;
   align-items: center;
 }
-[data-theme="light"] .mf {
-  --mf-c1: #1f6fd1;
-  --mf-c2: #7a4fd6;
-  --mf-c3: #a86a00;
-  --mf-c4: #c2357a;
-  --mf-c5: #c2531f;
-}
-.mf.no-bases { grid-template-columns: auto minmax(0, 1.3fr) minmax(0, 1.2fr); }
-.mf .lane-c1 { --lane: var(--mf-c1); }
-.mf .lane-c2 { --lane: var(--mf-c2); }
-.mf .lane-c3 { --lane: var(--mf-c3); }
-.mf .lane-c4 { --lane: var(--mf-c4); }
-.mf .lane-c5 { --lane: var(--mf-c5); }
+[data-theme="light"] .mf { --lane-s: 62%; --lane-l: 40%; }
+.mf.no-bases { grid-template-columns: minmax(9.5rem, max-content) minmax(0, 1.3fr) minmax(0, 1.2fr); }
+.mf .lane-p { --lane: hsl(var(--lane-h, 212) var(--lane-s) var(--lane-l)); }
 .mf .lane-direct { --lane: var(--ok); }
 .mf .lane-block { --lane: var(--danger); }
 .mf .lane-none { --lane: var(--softline); }
@@ -119,7 +108,8 @@
 }
 .mf-origin .mf-label { font-family: var(--ui); font-size: 12px; font-weight: 600; color: var(--ink); }
 .mf-meta { font-family: var(--mono); font-size: 10.5px; color: var(--ink3); direction: ltr; }
-.mf-speed { font-family: var(--mono); font-size: 11px; color: var(--ok); direction: ltr; white-space: nowrap; }
+/* down over up (the stats tick writes them on two lines): one width whatever the numbers */
+.mf-speed { font-family: var(--mono); font-size: 11px; line-height: 1.35; color: var(--ok); direction: ltr; white-space: pre; font-variant-numeric: tabular-nums; }
 .mf-speed:empty { display: none; }
 
 /* the base: between the rules and their targets */
@@ -139,6 +129,10 @@
   direction: ltr;
   white-space: nowrap;
   margin-inline-start: 6px;
+  /* room for the widest figure, so a label does not twitch as the numbers grow */
+  min-width: 15ch;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
 }
 .mf-node.danger { color: var(--danger); background: var(--dangerSoft); border-color: var(--danger); }
 
