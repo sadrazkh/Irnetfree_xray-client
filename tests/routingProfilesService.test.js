@@ -160,3 +160,31 @@ test('the backup carries the routing profiles, and a restore merges them by id',
   assert.equal(r.added.routingProfiles, 1);
   assert.deepEqual((await fresh.service.invoke('routing:profiles')).profiles.map((p) => p.id), ['rp-default', 'rp-work']);
 });
+
+test('"exit at the base": the default and a rule leave from the base itself — its own outbound, dialled directly; without a base the default refuses in plain words', async (t) => {
+  const work = profile({ base: SERVER.id, def: 'base', rules: [
+    { type: 'domain', value: 'b.example', target: SERVER_B.id },
+    { type: 'domain', value: 'c.example', target: 'base' }
+  ] });
+  const s = start({ servers: [SERVER, SERVER_B, SERVER_C], routingProfiles: [work], settings: SETTINGS });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', '__advanced__:rp-work');
+  const cfg = configAt(s, 0);
+  assert.deepEqual(tags(cfg).slice(0, 3), ['base-srv-1', 'out-srv-2@srv-1', 'out-srv-1']);
+  const out = cfg.outbounds.find((o) => o.tag === 'out-srv-1');
+  assert.equal(((out.streamSettings || {}).sockopt || {}).dialerProxy, undefined, 'the base itself dials directly');
+  const rule = cfg.routing.rules.find((r) => (r.domain || []).includes('c.example'));
+  assert.equal(rule.outboundTag, 'out-srv-1');
+  assert.equal(cfg.routing.rules.at(-1).outboundTag, 'out-srv-1', 'everything else leaves from the base');
+  const gw = s.state.inners.find((i) => i.active);
+  assert.deepEqual([gw.bypass.includes('192.0.2.10'), gw.bypass.includes('192.0.2.11')], [true, false]);
+  // the base moves: "exit at the base" follows it
+  await s.service.invoke('routing:setProfiles', [Object.assign({}, work, { base: SERVER_C.id })]);
+  await s.service.invoke('connect', '__advanced__:rp-work');
+  assert.equal(configAt(s, 1).routing.rules.at(-1).outboundTag, 'out-srv-3');
+  // no base at all
+  const n = start({ servers: [SERVER, SERVER_B], routingProfiles: [profile({ def: 'base' })], settings: SETTINGS });
+  t.after(() => n.service.shutdown());
+  await assert.rejects(n.service.invoke('connect', '__advanced__:rp-work'), /through its base, but it has no base/);
+  assert.equal(n.state.xray.starts.length, 0);
+});
