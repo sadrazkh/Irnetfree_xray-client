@@ -54,7 +54,12 @@ const SUGGESTED = Object.freeze({
 
   // SagerNet/sing-box 1.13.14, verified for the TUN configs (tunSingbox.js: the
   // shape passed `sing-box check` on 1.13.14) and the build the macOS app
-  // bundles (scripts/build-mac-native.js VERSION).
+  // bundles (scripts/build-mac-native.js VERSION). It is the floor, not what a
+  // download installs: that is GitHub's latest stable when newer — 1.14.3 as of
+  // v1.21.1 — and both lines are verified on a REAL TUN in CI (test.yml
+  // `tun-dns`, scripts/tun-dns-probe.js): with the dns_mode "disabled"
+  // tunSingbox writes from 1.14 on, a WireGuard's private names reach Xray and
+  // no query leaves past the tunnel; without it they never reach Xray.
   'sing-box': '1.13.14'
 });
 
