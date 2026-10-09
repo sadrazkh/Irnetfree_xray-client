@@ -55,7 +55,9 @@
 /* When the row wraps, the destination should still read as the END of the
    path rather than as a second box under the device. A no-op while everything
    fits on one line, where the growing parts already push it to the edge. */
-.path-panel > .path-node:last-child { margin-inline-start: auto; }
+.path-panel > .path-node.path-dest { margin-inline-start: auto; }
+/* a simple mode's "country → direct" share, on a line of its own under the path */
+.path-panel > .path-bypass { flex: 1 1 100%; padding: 10px 0 0; border-top: 1px dashed var(--softline); }
 .path-ico { font-size: 20px; line-height: 1; }
 .path-name { font-size: 12px; font-weight: 600; color: var(--ink2); }
 .path-meta { font-family: var(--mono); font-size: 11px; color: var(--ink3); direction: ltr; }
@@ -487,13 +489,18 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
 }
 .path-node .pr-traffic { margin-inline-start: 0; padding-inline-start: 0; }
 .path-rule .pr-cond.is-label { font-family: var(--ui); color: var(--ink3); }
-/* "via <base>" on a routing profile's line: the base its target dials through.
-   Whole, like the target beside it — the condition is what gives way. */
+/* "⚓ <base>" on a routing profile's line: the base its target dials through,
+   between the condition and the target, as the traffic goes. Whole, like the
+   target beside it — the condition is what gives way. */
 .path-rule .pr-via {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   max-width: 30%;
-  font-size: 10px;
-  color: var(--ink3);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: var(--r2);
+  border: 1px dashed var(--accentLine);
+  color: var(--ink2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

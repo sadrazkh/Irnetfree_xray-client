@@ -1516,6 +1516,8 @@ async function clearUsageFor(id) {
 /* ----------------------------- unified picker (home) ----------------------------- */
 const ADV_ID = '__advanced__';
 const POOL_ID = '__pool__';
+/** "Exit at the base": a routing target that is the profile's own base (routingProfiles.TARGET_BASE) — it follows the base. */
+const TARGET_BASE = 'base';
 /** The picker's "Auto" row: not a selection but an action — test, then connect to the fastest. */
 const AUTO_ID = '__auto__';
 
@@ -2651,7 +2653,7 @@ function renderTrafficPath(stateStr) {
     const list = (src.rules || []).filter(r => r && r.value && r.target);
     const SHOWN = 4;
     list.slice(0, SHOWN).forEach((r, i) => {
-      rules.appendChild(pathRule(String(i + 1).padStart(2, '0'), r.value, r.target, prof ? ruleVia(r, prof) : null));
+      rules.appendChild(pathRule(String(i + 1).padStart(2, '0'), r.value, r.target, prof ? ruleVia(r, prof) : null, prof));
     });
     if (list.length > SHOWN) {
       const more = document.createElement('div');
@@ -2662,7 +2664,12 @@ function renderTrafficPath(stateStr) {
     }
     // a profile without a default takes the first server, as the builder does (and its flow tree says)
     const defTarget = src.def || (prof && state.servers[0] && state.servers[0].id) || 'direct';
-    const def = pathRule('↓', t('path.rest'), defTarget, prof ? ruleVia({ target: defTarget, via: prof.defVia }, prof) : null);
+    // the simple routing mode's country, when the profile applies it ("Iran direct"): its own
+    // line, so what went past the tunnel is there to read
+    const useMode = prof ? !!prof.useMode : !!s.advancedUseMode;
+    const country = useMode ? modeCountryRule(s.routingMode) : null;
+    if (country) rules.appendChild(country);
+    const def = pathRule('↓', t('path.rest'), defTarget, prof ? ruleVia({ target: defTarget, via: prof.defVia }, prof) : null, prof);
     def.classList.add('is-default');
     def.querySelector('.pr-cond').classList.add('is-label');
     rules.appendChild(def);
@@ -2700,7 +2707,18 @@ function renderTrafficPath(stateStr) {
   // already holds it rather than keeping a second copy in sync
   const ipEl = $('#statIp');
   const ip = ipEl && ipEl.textContent !== '—' ? ipEl.textContent : '';
-  frag.appendChild(pathNode('🌐', t('path.internet'), live ? ip : t('path.offline')));
+  frag.appendChild(pathNode('🌐', t('path.internet'), live ? ip : t('path.offline'), 'path-dest'));
+  // a server or a chain under a simple mode that sends a country (or everything)
+  // direct: that share of the traffic, on a line of its own under the path
+  if (!(id === ADV_ID || String(id).startsWith(ADV_ID + ':')) && id !== POOL_ID) {
+    const country = modeCountryRule(s.routingMode) || (s.routingMode === 'direct' ? pathRule('↗', t('path.allDirect'), 'direct') : null);
+    if (country) {
+      const box = document.createElement('div');
+      box.className = 'path-rules path-bypass';
+      box.appendChild(country);
+      frag.appendChild(box);
+    }
+  }
   host.replaceChildren(frag);
   applyPathTraffic(lastPerOutbound);
   // the routing page's flow tree is live only while its profile is the one up
@@ -2709,25 +2727,36 @@ function renderTrafficPath(stateStr) {
 
 /**
  * One "condition → target" line, with its own traffic caption. `via`: the base
- * the target dials through (a routing profile's), said as "via <base>" — its
- * figures are then that target's own outbound through the base.
+ * the target dials through (a routing profile's) — drawn between the two, as
+ * the traffic goes: "condition → ⚓ base → target"; the figures are then that
+ * target's own outbound through the base. "Exit at the base" (`prof`'s) is
+ * "condition → ⚓ base", counted on the base's own outbound.
  */
-function pathRule(idx, cond, target, via) {
+function pathRule(idx, cond, target, via, prof) {
   const row = document.createElement('div');
   row.className = 'path-rule';
+  const exit = target === TARGET_BASE;
+  const base = exit ? ((prof && prof.base) || null) : via;
   const kind = target === 'direct' ? ' to-direct' : target === 'block' ? ' to-block' : ' to-proxy';
   row.innerHTML = `<span class="pr-idx"></span><span class="pr-cond"></span>
-    <span class="pr-arrow">→</span><span class="pr-to${kind}"></span>`;
+    <span class="pr-arrow">→</span>${base && !exit ? '<span class="pr-via"></span><span class="pr-arrow">→</span>' : ''}<span class="pr-to${kind}"></span>`;
   row.querySelector('.pr-idx').textContent = idx;
   row.querySelector('.pr-cond').textContent = cond;
-  row.querySelector('.pr-to').textContent = targetLabel(target);
-  if (via) {
-    const v = document.createElement('span');
-    v.className = 'pr-via';
-    v.textContent = t('rp.viaBase').replace('{base}', () => targetLabel(via));
-    row.appendChild(v);
-  }
-  row.appendChild(trafficSpan([via ? viaTagFor(target, via) : outboundTagFor(target)]));
+  if (base && !exit) row.querySelector('.pr-via').textContent = '⚓ ' + targetLabel(base);
+  row.querySelector('.pr-to').textContent = exit ? (base ? '⚓ ' + targetLabel(base) : '⚠ ' + t('rp.exitAtBaseNone')) : targetLabel(target);
+  if (exit && base) row.querySelector('.pr-to').title = t('rp.exitAtBase').replace('{base}', () => targetLabel(base));
+  row.appendChild(trafficSpan([exit ? (base ? outboundTagFor(base) : 'out-' + TARGET_BASE) : via ? viaTagFor(target, via) : outboundTagFor(target)]));
+  return row;
+}
+
+/** The simple routing mode's "country → direct" line (bypass Iran / bypass China), or null for any other mode. */
+function modeCountryRule(mode) {
+  const sys = mode === 'bypass-ir' ? 'ir' : mode === 'bypass-cn' ? 'cn' : null;
+  if (!sys) return null;
+  const [icon, label] = appRuleWords(sys);
+  const row = pathRule(icon, t(label) + ' · ' + t('rp.sys.modeNote'), 'direct');
+  row.classList.add('is-mode');
+  row.querySelector('.pr-cond').classList.add('is-label');
   return row;
 }
 
@@ -4817,6 +4846,19 @@ function targetOptionList() {
   return opts;
 }
 
+/**
+ * A routing profile's target picker: "⚓ exit at the base" first while it has a
+ * base (or while `current` already is it — then said as broken), then every
+ * server, ready chain, direct and block.
+ */
+function profileTargetOptions(prof, current) {
+  const opts = targetOptionList();
+  if (!prof) return opts;
+  if (prof.base) opts.unshift({ value: TARGET_BASE, label: '⚓ ' + t('rp.exitAtBase').replace('{base}', () => refName(prof.base)) });
+  else if (current === TARGET_BASE) opts.unshift({ value: TARGET_BASE, label: '⚠ ' + t('rp.exitAtBaseNone') });
+  return opts;
+}
+
 let advDefaultSel = null;
 
 /**
@@ -4952,7 +4994,7 @@ function renderDefaultSuggest() {
   body.querySelectorAll('.adv-suggest-default').forEach(n => n.remove());
   const prof = Array.isArray(state.profiles) ? advDraft() : null;
   const def = (prof ? prof.def : state.settings.routeDefault) || (state.servers[0] && state.servers[0].id) || 'direct';
-  const el = wgSuggestEl(wgOfTarget(def), {});
+  const el = wgSuggestEl(wgOfTarget(prof ? atBase(def, prof) : def), {});
   if (!el) return;
   el.classList.add('adv-suggest-default');
   defRow.insertAdjacentElement('afterend', el);
@@ -5005,7 +5047,7 @@ function renderAdvanced() {
     row.className = 'adv-rule';
     row.dataset.idx = String(idx);   // the flow tree's rule nodes open their row by it
     // a profile's proxy target can dial through a base: its "via" picker
-    const viaOn = !!prof && !!r.target && r.target !== 'direct' && r.target !== 'block';
+    const viaOn = !!prof && !takesNoVia(r.target);
     const viaCell = viaOn
       ? `<span class="adv-via"><span class="adv-via-label">${escapeHtml(t('rp.via'))}</span><span class="adv-via-mount"></span></span>`
       : '';
@@ -5040,7 +5082,7 @@ function renderAdvanced() {
     // searchable target dropdown (handles long config lists)
     row.querySelector('.adv-target-mount').appendChild(
       makeSearchSelect({
-        options: targetOptionList(), value: r.target,
+        options: profileTargetOptions(prof, r.target), value: r.target,
         // re-render so the AllowedIPs note follows the new target (the dropdown
         // has already closed itself by the time onChange runs)
         onChange: (v) => { rules[idx].target = v; renderAdvanced(); }
@@ -5065,7 +5107,7 @@ function renderAdvanced() {
     }
     // when the target ends in a WireGuard, offer its ranges and say where its
     // internal names resolve
-    const sug = wgSuggestEl(wgOfTarget(r.target), {
+    const sug = wgSuggestEl(wgOfTarget(prof ? atBase(r.target, prof) : r.target), {
       value: r.value,
       onUse: (list) => { rules[idx].type = 'ip'; rules[idx].value = list; renderAdvanced(); }
     });
@@ -5076,7 +5118,7 @@ function renderAdvanced() {
   const def = (prof ? prof.def : state.settings.routeDefault) || (state.servers[0] && state.servers[0].id) || 'direct';
   defMount.innerHTML = '';
   advDefaultSel = makeSearchSelect({
-    options: targetOptionList(), value: def,
+    options: profileTargetOptions(prof, def), value: def,
     onChange: (v) => {
       if (prof) { prof.def = v; renderProfileExtras(); renderFlowTree(); }
       else state.settings.routeDefault = v;
@@ -5236,8 +5278,14 @@ function advPlans() {
   return [{ rules: s.routeRules || [], def: s.routeDefault, useMode: !!s.advancedUseMode }];
 }
 
-/** A target that never takes a via: direct, block (or none at all). */
+/** A target that ends where it is: direct, block (or none at all). */
 function terminalTarget(tg) { return !tg || tg === 'direct' || tg === 'block'; }
+
+/** A target that never rides on a base: direct, block, none — and the base itself ("exit at the base"). */
+function takesNoVia(tg) { return terminalTarget(tg) || tg === TARGET_BASE; }
+
+/** What a target dials: "exit at the base" is the profile's base (null without one); anything else is itself. */
+function atBase(tg, prof) { return tg === TARGET_BASE ? ((prof && prof.base) || null) : tg; }
 
 /**
  * A profile as the renderer keeps it: { id, name, rules, def, defVia, useMode,
@@ -5250,7 +5298,7 @@ function normalizeUiProfile(p) {
   const src = (p && typeof p === 'object') ? p : {};
   const rules = (Array.isArray(src.rules) ? src.rules : []).filter(r => r && typeof r === 'object').map((r) => {
     const out = { type: r.type, value: r.value == null ? '' : String(r.value), target: r.target ? String(r.target) : '' };
-    if (!terminalTarget(out.target) && r.via && r.via !== 'inherit') out.via = String(r.via);
+    if (!takesNoVia(out.target) && r.via && r.via !== 'inherit') out.via = String(r.via);
     return out;
   });
   const def = src.def ? String(src.def) : '';
@@ -5259,7 +5307,7 @@ function normalizeUiProfile(p) {
     name: String(src.name || ''),
     rules,
     def,
-    defVia: !terminalTarget(def) && src.defVia && src.defVia !== 'inherit' ? String(src.defVia) : 'inherit',
+    defVia: !takesNoVia(def) && src.defVia && src.defVia !== 'inherit' ? String(src.defVia) : 'inherit',
     useMode: !!src.useMode,
     base: src.base ? String(src.base) : null
   });
@@ -5330,18 +5378,27 @@ function confirmDiscardDraft() {
 /**
  * The base a rule's target dials through — the default's too, as { target:
  * def, via: defVia }: its own via, else ('inherit') the profile's base. None
- * for 'none', for direct and block, and for a target that IS that base.
+ * for 'none', for direct and block, and for a target that IS that base
+ * ("exit at the base", or the base's own server or chain).
  */
 function ruleVia(r, prof) {
   const target = r && r.target;
-  if (terminalTarget(target)) return null;
+  if (takesNoVia(target)) return null;
   const v = r.via;
   const via = !v || v === 'inherit' ? ((prof && prof.base) || null) : (v === 'none' ? null : v);
   return via && via !== target ? via : null;
 }
 
-/** Why a target or a base cannot be dialled — an i18n key, '' when it can: a server gone, a chain gone or short. */
-function refProblem(ref) {
+/**
+ * Why a target or a base cannot be dialled — an i18n key, '' when it can: a
+ * server gone, a chain gone or short; "exit at the base" of a profile (`prof`)
+ * without a base, or whose base is gone.
+ */
+function refProblem(ref, prof) {
+  if (ref === TARGET_BASE) {
+    const base = prof && prof.base;
+    return !base ? 'rp.why.noBase' : refProblem(base) ? 'rp.why.baseGone' : '';
+  }
   if (terminalTarget(ref)) return '';
   if (String(ref).startsWith('chain:')) return chainReady(chainById(String(ref).slice(6))) ? '' : 'rp.why.chainGone';
   return srvById(ref) ? '' : 'rp.why.serverGone';
@@ -5349,7 +5406,7 @@ function refProblem(ref) {
 
 /** What is wrong with one rule of a profile ('' when nothing): its target, else the base it dials through. */
 function ruleProblem(r, prof) {
-  const own = refProblem(r && r.target);
+  const own = refProblem(r && r.target, prof);
   if (own) return own;
   const via = ruleVia(r, prof);
   return via && refProblem(via) ? 'rp.why.baseGone' : '';
@@ -5363,8 +5420,9 @@ function profileBroken(p) {
   return !!ruleProblem({ target: def, via: p.defVia }, p) || !!(p.base && refProblem(p.base));
 }
 
-/** The name of a server or chain reference, plain ('—' when it is gone). */
-function refName(ref) {
+/** The name of a server or chain reference, plain ('—' when it is gone). "Exit at the base" needs its profile (`prof`). */
+function refName(ref, prof) {
+  if (ref === TARGET_BASE) return prof && prof.base ? refName(prof.base) : '—';
   if (String(ref).startsWith('chain:')) {
     const c = chainById(String(ref).slice(6));
     return c ? c.name : '—';
@@ -5581,10 +5639,10 @@ function renderProfileExtras() {
   baseMount.innerHTML = '';
   baseRow.hidden = !prof;
   const def = prof ? ((advDefaultSel && advDefaultSel.getValue()) || prof.def) : '';
-  viaWrap.hidden = !prof || terminalTarget(def);
+  viaWrap.hidden = !prof || takesNoVia(def);
   const why = $('#advBaseWhy');
   if (!prof) { if (why) why.hidden = true; return; }
-  if (!terminalTarget(def)) {
+  if (!takesNoVia(def)) {
     viaMount.appendChild(makeSearchSelect({
       options: viaOptionList(prof, def, prof.defVia), value: prof.defVia || 'inherit',
       onChange: (v) => { prof.defVia = v; renderFlowTree(); }
@@ -5602,7 +5660,7 @@ function renderProfileExtras() {
   }
 }
 
-/* ------------------------- the flow tree (rules → targets → bases) ------------------------- */
+/* ------------------------- the flow tree (rules → bases → targets) ------------------------- */
 
 /** The glyph of a rule type in the flow tree. */
 function ruleTypeIcon(type) {
@@ -5622,19 +5680,57 @@ function ruleSummary(items) {
 }
 
 /**
- * A profile's flow, as data. Left to right (RTL mirrors it):
- *   groups  — the rules, consecutive ones to the same target and base as one
- *             node, then the default as "everything else";
+ * The rules the app lays around a profile's own (configBuilder, advanced
+ * plan), in the order the core matches them: ads → block before the user's
+ * rules (while ad blocking is on); after them the local network → direct
+ * (always), then the routing mode's country → direct when the profile
+ * applies the mode ("Iran direct"). `at`: 'before' | 'after' the user's rules.
+ */
+function appRouteRules(prof) {
+  const s = state.settings || {};
+  const out = [];
+  if (s.blockAds) out.push({ sys: 'ads', at: 'before', target: 'block' });
+  out.push({ sys: 'lan', at: 'after', target: 'direct' });
+  const mode = s.routingMode || 'global';
+  if (prof && prof.useMode && (mode === 'bypass-ir' || mode === 'bypass-cn')) out.push({ sys: mode === 'bypass-ir' ? 'ir' : 'cn', at: 'after', target: 'direct' });
+  return out;
+}
+
+/** An app rule's glyph and words: [icon, label key, note key]. */
+function appRuleWords(sys) {
+  return sys === 'ads' ? ['🚫', 'rp.sys.ads', 'rp.sys.adsNote']
+    : sys === 'lan' ? ['🏠', 'rp.sys.lan', 'rp.sys.lanNote']
+    : sys === 'ir' ? ['🇮🇷', 'rp.sys.ir', 'rp.sys.modeNote']
+    : ['🇨🇳', 'rp.sys.cn', 'rp.sys.modeNote'];
+}
+
+/**
+ * A profile's flow, as data. Left to right (RTL mirrors it), the way traffic
+ * goes — from here, through a base, to where it leaves:
+ *   groups  — the rules in the order the core matches them: the app's own
+ *             (ads before the user's; the local network and the routing
+ *             mode's country after), the user's (consecutive ones to the same
+ *             target and base as one node), then the default as "everything
+ *             else";
+ *   bases   — each drawn once, between the rules and the targets: every rule
+ *             through it points at it, and it points on at each target;
  *   targets — one node per target and base it dials through (a server used
- *             both directly and via a base is two: two outbounds);
- *   bases   — each drawn once, every target through it pointing at it.
- * Edges run rule → target → base; direct and block end where they are. A
- * target or base that is gone carries `why` (an i18n key) and its edges are
- * danger. `tags` are the outbounds whose live counters a node shows.
+ *             both directly and via a base is two: two outbounds). "Exit at
+ *             the base" is the base's own exit (kind 'exit').
+ * Edges run rule → base → target, or rule → target without a base; direct and
+ * block end where they are. A target or base that is gone carries `why` (an
+ * i18n key) and its edges are danger. `tags` are the outbounds whose live
+ * counters a node shows.
  */
 function flowModel(prof) {
-  const groups = [], targets = [], bases = [], ruleEdges = [], baseEdges = [];
-  const tIndex = {}, bIndex = {};
+  const groups = [], targets = [], bases = [], edges = [];
+  const tIndex = {}, bIndex = {}, drawn = new Set();
+  const edge = (from, to, danger) => {
+    const k = from + '\u0000' + to;
+    if (drawn.has(k)) return;
+    drawn.add(k);
+    edges.push({ from, to, danger: !!danger });
+  };
   const baseNode = (ref, first) => {
     const key = 'b:' + ref;
     if (!bIndex[key]) {
@@ -5646,23 +5742,37 @@ function flowModel(prof) {
   const targetNode = (ref, via, first) => {
     const key = 't:' + ref + (via ? '@' + via : '');
     if (!tIndex[key]) {
-      const kind = ref === 'direct' || ref === 'block' ? ref : (String(ref).startsWith('chain:') ? 'chain' : 'server');
-      tIndex[key] = { key, kind, ref, via: via || null, why: refProblem(ref), tags: [via ? viaTagFor(ref, via) : outboundTagFor(ref)], first };
+      const exit = ref === TARGET_BASE;
+      const base = exit ? (prof.base || null) : via;
+      const kind = exit ? 'exit' : ref === 'direct' || ref === 'block' ? ref : (String(ref).startsWith('chain:') ? 'chain' : 'server');
+      // "exit at the base" is the base's own outbound, dialled directly
+      const tags = exit ? (base ? [outboundTagFor(base)] : []) : [via ? viaTagFor(ref, via) : outboundTagFor(ref)];
+      tIndex[key] = { key, kind, ref, via: base, why: refProblem(ref, prof), tags, first };
       targets.push(tIndex[key]);
-      if (via) {
-        const b = baseNode(via, first);
+      if (base) {
+        const b = baseNode(base, first);
         b.into++;
-        baseEdges.push({ from: key, to: b.key, danger: !!b.why });
+        edge(b.key, key, !!b.why || !!tIndex[key].why);
       }
     }
     return tIndex[key];
   };
+  // a rule's line enters at the base it rides on, else at its target
+  const ruleEdge = (g, tn) => edge(g.key, tn.via ? 'b:' + tn.via : tn.key, !!tn.why || (!!tn.via && !!bIndex['b:' + tn.via].why));
+  const appRule = (r) => {
+    const tn = targetNode(r.target, null, null);
+    const g = { key: 'sys-' + r.sys, kind: 'rule', sys: r.sys, isDefault: false, idxs: [], items: [], target: r.target, via: null, to: tn.key };
+    groups.push(g);
+    ruleEdge(g, tn);
+  };
+  const app = appRouteRules(prof);
+  app.filter(r => r.at === 'before').forEach(appRule);
   (prof.rules || []).forEach((r, idx) => {
     // a row still being written (no value yet) does nothing — Save drops it
     if (!r || !r.target || !String(r.value || '').trim()) return;
     const via = ruleVia(r, prof);
     const last = groups[groups.length - 1];
-    if (last && last.target === r.target && last.via === via && last.idxs[last.idxs.length - 1] === idx - 1) {
+    if (last && !last.sys && last.target === r.target && last.via === via && last.idxs[last.idxs.length - 1] === idx - 1) {
       last.idxs.push(idx);
       last.items.push({ type: r.type, value: r.value });
       return;
@@ -5670,15 +5780,17 @@ function flowModel(prof) {
     const tn = targetNode(r.target, via, idx);
     const g = { key: 'g' + idx, kind: 'rule', isDefault: false, idxs: [idx], items: [{ type: r.type, value: r.value }], target: r.target, via, to: tn.key };
     groups.push(g);
-    ruleEdges.push({ from: g.key, to: tn.key, danger: !!tn.why });
+    ruleEdge(g, tn);
   });
+  app.filter(r => r.at === 'after').forEach(appRule);
   // what the builder takes when no default is set: the first server, else direct
   const def = prof.def || (state.servers[0] && state.servers[0].id) || 'direct';
   const dv = ruleVia({ target: def, via: prof.defVia }, prof);
   const dt = targetNode(def, dv, 'def');
-  groups.push({ key: 'def', kind: 'rule', isDefault: true, idxs: [], items: [], target: def, via: dv, to: dt.key });
-  ruleEdges.push({ from: 'def', to: dt.key, danger: !!dt.why });
-  return { profileId: prof.id, groups, targets, bases, edges: ruleEdges.concat(baseEdges) };
+  const dg = { key: 'def', kind: 'rule', isDefault: true, idxs: [], items: [], target: def, via: dv, to: dt.key };
+  groups.push(dg);
+  ruleEdge(dg, dt);
+  return { profileId: prof.id, groups, targets, bases, edges };
 }
 
 let rfModel = null;   // the flow tree on screen (its edges are drawn from it)
@@ -5692,11 +5804,25 @@ function flowButton(cls, key) {
   return b;
 }
 
-function flowRuleNode(g) {
-  const b = flowButton('rf-rule' + (g.isDefault ? ' rf-default' : ''), g.key);
-  const to = (g.target === 'direct' ? t('adv.direct') : g.target === 'block' ? t('adv.block') : refName(g.target)) +
-    (g.via ? ' · ' + t('rp.viaBase').replace('{base}', () => refName(g.via)) : '');
-  if (g.isDefault) {
+/** Where a rule leads, in words: "<base> → <target>" ("exit at the base": "<base> → out from there"). */
+function flowRuleTo(g, prof) {
+  if (g.target === TARGET_BASE) {
+    return prof && prof.base ? '⚓ ' + refName(prof.base) + ' → ' + t('rp.exitHere') : t('rp.exitAtBaseNone');
+  }
+  const to = g.target === 'direct' ? t('adv.direct') : g.target === 'block' ? t('adv.block') : refName(g.target);
+  return g.via ? '⚓ ' + refName(g.via) + ' → ' + to : to;
+}
+
+function flowRuleNode(g, prof) {
+  const b = flowButton('rf-rule' + (g.isDefault ? ' rf-default' : '') + (g.sys ? ' rf-app' : ''), g.key);
+  const to = flowRuleTo(g, prof);
+  if (g.sys) {
+    const [icon, label, note] = appRuleWords(g.sys);
+    spanIn(b, 'rf-ico', icon);
+    spanIn(b, 'rf-label', t(label));
+    spanIn(b, 'rf-tag', t(note));
+    b.title = t(label) + ' → ' + to + ' — ' + t(note);
+  } else if (g.isDefault) {
     spanIn(b, 'rf-ico', '↓');
     spanIn(b, 'rf-label', t('rp.everythingElse'));
     b.title = t('rp.everythingElse') + ' → ' + to;
@@ -5716,14 +5842,15 @@ function flowRuleNode(g) {
   return b;
 }
 
-/** A target or a base node: what it is, the base it dials through, why it is broken, its live speed. */
+/** A base or a target node: what it is, the base it is reached through, why it is broken, its live speed. */
 function flowRefNode(n) {
   const isBase = n.kind === 'base';
   const terminal = n.kind === 'direct' || n.kind === 'block';
-  const cls = isBase ? 'rf-base' : 'rf-target to-' + (terminal ? n.kind : 'proxy');
+  const cls = isBase ? 'rf-base' : 'rf-target to-' + (terminal ? n.kind : n.kind === 'exit' ? 'exit' : 'proxy');
   const b = flowButton(cls + (n.why ? ' danger' : ''), n.key);
-  const icon = isBase ? '⚓' : n.kind === 'direct' ? '↗' : n.kind === 'block' ? '⛔' : n.kind === 'chain' ? '⛓' : '🛡';
-  const label = n.kind === 'direct' ? t('adv.direct') : n.kind === 'block' ? t('adv.block') : refName(n.ref);
+  const icon = isBase ? '⚓' : n.kind === 'exit' ? '🌐' : n.kind === 'direct' ? '↗' : n.kind === 'block' ? '⛔' : n.kind === 'chain' ? '⛓' : '🛡';
+  const label = n.kind === 'direct' ? t('adv.direct') : n.kind === 'block' ? t('adv.block')
+    : n.kind === 'exit' ? t('rp.exitHere') : refName(n.ref);
   spanIn(b, 'rf-ico', icon);
   spanIn(b, 'rf-label', label);
   const parts = [label];
@@ -5731,7 +5858,7 @@ function flowRefNode(n) {
     spanIn(b, 'rf-tag', t('rp.base'));
     parts.push(t('rp.base'));
   } else if (n.via) {
-    const via = t('rp.viaBase').replace('{base}', () => refName(n.via));
+    const via = (n.kind === 'exit' ? t('rp.fromBase') : t('rp.viaBase')).replace('{base}', () => refName(n.via));
     spanIn(b, 'rf-sub', via);
     parts.push(via);
   }
@@ -5740,7 +5867,7 @@ function flowRefNode(n) {
     parts.push(t(n.why));
   }
   // block carries nothing worth counting
-  if (n.kind !== 'block') spanIn(b, 'rf-traffic', '').dataset.tags = n.tags.join(',');
+  if (n.kind !== 'block' && n.tags.length) spanIn(b, 'rf-traffic', '').dataset.tags = n.tags.join(',');
   b.title = parts.join(' — ');
   b.setAttribute('aria-label', b.title);
   b.onclick = () => flowNodeClick(n);
@@ -5771,14 +5898,15 @@ function renderFlowTree() {
     grid.appendChild(box);
     return col;
   };
+  // in the order traffic takes them: the rule, the base it rides on, where it leaves
   const rulesCol = column('rf-rules', t('rp.colRules'));
-  const targetsCol = column('rf-targets', t('rp.colTargets'));
-  for (const g of rfModel.groups) rulesCol.appendChild(flowRuleNode(g));
-  for (const n of rfModel.targets) targetsCol.appendChild(flowRefNode(n));
+  for (const g of rfModel.groups) rulesCol.appendChild(flowRuleNode(g, prof));
   if (rfModel.bases.length) {
     const basesCol = column('rf-bases', t('rp.colBases'));
     for (const n of rfModel.bases) basesCol.appendChild(flowRefNode(n));
   }
+  const targetsCol = column('rf-targets', t('rp.colTargets'));
+  for (const n of rfModel.targets) targetsCol.appendChild(flowRefNode(n));
   // the lines: one SVG under the nodes, drawn once the boxes are laid out
   const layer = document.createElement('div');
   layer.className = 'rf-edges';
@@ -5793,10 +5921,18 @@ function renderFlowTree() {
  * A click on a node opens what it stands for: a rule its row in the editor,
  * the default its row; a server its edit form, a chain its card. Direct,
  * block and anything gone have no editor — the rule that uses them opens, and
- * a gone base its picker.
+ * a gone base its picker. The app's own rules open their switch (ads, the
+ * routing mode); "exit at the base" opens the base picker.
  */
 function flowNodeClick(n) {
+  if (n.kind === 'rule' && n.sys) {
+    const ads = $('#optBlockAds');
+    if (n.sys === 'ads') return flashInto(ads && ads.closest ? ads.closest('.switch-row') : null);
+    if (n.sys === 'ir' || n.sys === 'cn') return flashInto($('#routingSeg'));
+    return undefined;
+  }
   if (n.kind === 'rule') return focusAdvRow(n.isDefault ? null : n.idxs[0]);
+  if (n.kind === 'exit') return flashInto($('#advBaseRow'), '.ss-current');
   const ref = n.ref;
   if (!n.why && String(ref).startsWith('chain:')) return openChainCard(String(ref).slice(6));
   if (!n.why && !terminalTarget(ref)) return openEdit(ref);
