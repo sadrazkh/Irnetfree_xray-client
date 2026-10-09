@@ -518,7 +518,7 @@ function treeHarness(over = {}) {
   const calls = [];
   const state = Object.assign({ servers: s.servers, chains: s.chains, pool: [], settings: { advancedRouting: true }, profiles: [s.def, s.work],
     profileSel: 'rp-work', connected: false, activeServerId: null }, over);
-  const ctx = compile([...MODEL_FNS, 'advDraft', 'renderFlowTree', 'flowRuleNode', 'flowRuleTo', 'appRuleWords', 'flowRefNode', 'flowButton', 'spanIn', 'applyFlowTraffic', 'profileLive',
+  const ctx = compile([...MODEL_FNS, 'advDraft', 'renderFlowTree', 'flowRuleNode', 'flowRuleTo', 'flowArrow', 'appRuleWords', 'flowRefNode', 'flowButton', 'spanIn', 'applyFlowTraffic', 'profileLive',
     'ruleTypeIcon', 'ruleSummary', 'fmtBytes', 'fmtSpeed', 'flowNodeClick', 'flashInto', 'focusAdvRow', 'openChainCard'], {
     state, t: en, $: page.$, $$: page.$$, document: page.document,
     drawFlowSoon: () => calls.push(['draw']),
@@ -1286,8 +1286,9 @@ test('without the geo files the flow draws no geo rule (the core has none)', () 
 });
 
 const HOME_FNS = [...MODEL_FNS, 'homeFlowModel', 'homeFlowNode', 'buildHomeFlow', 'homeFlowTo', 'drawHomeFlow', 'flowEdgePaths', 'trafficSpan', 'spanIn',
+  'laneHue', 'paintLane', 'flowArrow',
   'appRuleWords', 'ruleSummary', 'ruleTypeIcon', 'geoReady'];
-const HOME_CONSTS = PRELUDE_CONSTS + constSource('HOME_FLOW_RULES') + constSource('HOME_FLOW_LANES') + 'var hfModel = null; let lastPerOutbound = {};';   // var: the test sets it on the context
+const HOME_CONSTS = PRELUDE_CONSTS + constSource('HOME_FLOW_RULES') + 'var hfModel = null; var hfColumns = null; let lastPerOutbound = {};';   // var: the test sets it on the context
 
 function homeHarness(over = {}) {
   const s = store();
@@ -1307,15 +1308,17 @@ test('the home flow of a profile: the device starts a line to every rule, rule �
   const m = plain(h.ctx.homeFlowModel('__advanced__:rp-work'));
   assert.deepEqual(m.groups.map((g) => g.key), ['g0', 'g1', 'g2', 'g4', 'sys-lan', 'sys-ir', 'def']);
   assert.deepEqual(m.targets.map((tg) => [tg.key, tg.lane]), [
-    ['t:s2@s1', 'c1'], ['t:s3@s1', 'c2'], ['t:direct', 'direct'], ['t:chain:c1', 'c3'], ['t:s1', 'c4']
+    ['t:s2@s1', 'p1'], ['t:s3@s1', 'p2'], ['t:direct', 'direct'], ['t:chain:c1', 'p3'], ['t:s1', 'p4']
   ]);
   const lane = (from, to) => m.edges.find((e) => e.from === from && e.to === to).lane;
   // every line is its target's colour: the device's to a rule, the rule's to the base, the base's to the target
-  assert.equal(lane('o', 'g0'), 'c1');
-  assert.equal(lane('g0', 'b:s1'), 'c1');
-  assert.equal(lane('b:s1', 't:s2@s1'), 'c1');
-  assert.equal(lane('g1', 'b:s1'), 'c2', 'two rules into the same base keep their own colours');
-  assert.equal(lane('b:s1', 't:s3@s1'), 'c2');
+  assert.equal(lane('o', 'g0'), 'p1');
+  assert.equal(lane('g0', 'b:s1'), 'p1');
+  assert.equal(lane('b:s1', 't:s2@s1'), 'p1');
+  assert.equal(lane('g1', 'b:s1'), 'p2', 'two rules into the same base keep their own colours');
+  assert.equal(lane('b:s1', 't:s3@s1'), 'p2');
+  assert.deepEqual(m.targets.map((tg) => tg.hue), [212, 268, null, 38, 325], 'a hue per proxy lane; direct keeps its green');
+  assert.equal(m.edges.find((e) => e.from === 'b:s1' && e.to === 't:s3@s1').hue, 268);
   assert.equal(lane('o', 'sys-ir'), 'direct');
   assert.equal(lane('sys-ir', 't:direct'), 'direct', 'what goes direct is green all the way');
   assert.equal(m.edges.filter((e) => e.from === 'o').length, 7, 'one line from the device to each rule');
@@ -1338,7 +1341,7 @@ test('the home flow of one server under a simple mode: ads, the local network an
   const h = homeHarness({ selectedServerId: 's2', settings: { routingMode: 'bypass-ir', blockAds: true, tunMode: false } });
   let m = plain(h.ctx.homeFlowModel('s2'));
   assert.deepEqual(m.groups.map((g) => [g.key, g.target]), [['sys-ads', 'block'], ['sys-lan', 'direct'], ['sys-ir', 'direct'], ['def', 's2']]);
-  assert.deepEqual(m.targets.map((tg) => [tg.kind, tg.lane, tg.tags]), [['block', 'block', ['block']], ['direct', 'direct', ['direct']], ['server', 'c1', ['proxy', 'out-s2']]]);
+  assert.deepEqual(m.targets.map((tg) => [tg.kind, tg.lane, tg.tags]), [['block', 'block', ['block']], ['direct', 'direct', ['direct']], ['server', 'p1', ['proxy', 'out-s2']]]);
   // global: nothing direct but the local network; the direct mode: everything direct
   h.state.settings = { routingMode: 'global', tunMode: true };
   assert.deepEqual(plain(h.ctx.homeFlowModel('s2')).groups.map((g) => g.key), ['sys-lan', 'def']);
@@ -1370,9 +1373,10 @@ test('the home flow on screen: device, rules, base, targets — each target its 
   assert.equal(byKey('o').querySelector('.mf-label').textContent, '🖥 This device');
   assert.equal(byKey('o').querySelector('.mf-speed').id, 'pathCapIn', 'the stats tick writes the device’s live speed there');
   assert.equal(hasClass(byKey('t:direct'), 'lane-direct'), true);
-  assert.equal(hasClass(byKey('t:s2@s1'), 'lane-c1'), true);
+  assert.equal(hasClass(byKey('t:s2@s1'), 'lane-p'), true);
+  assert.equal(byKey('t:s2@s1').style['--lane-h'], '212', 'its hue');
   assert.equal(byKey('t:s2@s1').querySelector('.pr-traffic').dataset.tags, 'out-s2@s1');
-  assert.equal(hasClass(byKey('g0'), 'lane-c1'), true, 'a rule carries its target’s colour (its dot)');
+  assert.equal(hasClass(byKey('g0'), 'lane-p') && byKey('g0').style['--lane-h'] === '212', true, 'a rule carries its target’s colour (its dot)');
   assert.equal(byKey('g0').querySelector('.mf-to').textContent, '→ ⚓ 🇩🇪 Base DE → Corp WG', 'the words that stand in for the lines when stacked');
   assert.equal(byKey('sys-ir').querySelector('.mf-label').textContent, 'Iran');
   assert.equal(grid.querySelector('.mf-ip').textContent, '185.220.101.4');
@@ -1385,9 +1389,9 @@ test('the home flow on screen: device, rules, base, targets — each target its 
   h.ctx.drawHomeFlow();
   const svg = grid.querySelector('.mf-edges').innerHTML;
   assert.equal((svg.match(/<path /g) || []).length, m.edges.length);
-  assert.match(svg, /class="mf-edge lane-c1" d="M[\d. C-]+"/);
+  assert.match(svg, /<path d="M[\d. CL-]+" class="mf-edge lane-p" style="--lane-h:212"\/>/);
   assert.match(svg, /class="mf-edge lane-direct"/);
-  assert.doesNotMatch(svg.replace(/class="mf-edge lane-(c[1-5]|direct|block|none)( danger)?"/g, '').replace(/ d="[\d. MC-]+"/g, '').replace(' focusable="false"', ''), /[a-z]="[^"]*[^\d. "]/i, 'nothing in the SVG but literals and numbers');
+  assert.doesNotMatch(svg.replace(/ class="mf-edge( danger)? lane-(p|direct|block|none)"( style="--lane-h:\d+")?/g, '').replace(/ d="[\d. MCL-]+"/g, '').replace(' focusable="false"', ''), /[a-z]="[^"]*[^\d. "]/i, 'nothing in the SVG but literals and numbers');
   // without a profile's base: three columns
   const one = h.ctx.buildHomeFlow(h.ctx.homeFlowModel('s2'), { live: false, ip: '', mode: 'TUN' });
   assert.equal(hasClass(one, 'no-bases'), true);
@@ -1396,10 +1400,13 @@ test('the home flow on screen: device, rules, base, targets — each target its 
 
 test('the home flow’s styles: a colour per lane for dark and light, the lines in them, moving while live, and a stacked layout for a narrow panel', () => {
   const HOME = R('src', 'renderer', 'home.css');
-  for (const k of ['c1', 'c2', 'c3', 'c4', 'c5']) {
-    assert.match(HOME, new RegExp(`--mf-${k}: #[0-9a-f]{6};[\\s\\S]*\\[data-theme="light"\\] \\.mf \\{[\\s\\S]*--mf-${k}: #[0-9a-f]{6};`), k);
-    assert.match(HOME, new RegExp(`\\.mf \\.lane-${k} \\{ --lane: var\\(--mf-${k}\\); \\}`));
-  }
+  // a proxy lane is a hue (as many as there are targets), its saturation and lightness the theme's
+  assert.match(HOME, /\.mf \.lane-p \{ --lane: hsl\(var\(--lane-h, 212\) var\(--lane-s\) var\(--lane-l\)\); \}/);
+  assert.match(HOME, /--lane-s: 88%;\s*--lane-l: 70%;/);
+  assert.match(HOME, /\[data-theme="light"\] \.mf \{ --lane-s: 62%; --lane-l: 40%; \}/);
+  // the device's column does not follow its live numbers
+  assert.match(HOME, /grid-template-columns: minmax\(9\.5rem, max-content\)/);
+  assert.match(HOME, /\.mf-speed \{[^}]*white-space: pre;/);
   assert.match(HOME, /\.mf \.lane-direct \{ --lane: var\(--ok\); \}/);
   assert.match(HOME, /\.mf-edge \{[^}]*stroke: var\(--lane/);
   assert.match(HOME, /\.mf\.live \.mf-edge:not\(\.danger\) \{[^}]*animation:/);
@@ -1409,4 +1416,41 @@ test('the home flow’s styles: a colour per lane for dark and light, the lines 
   assert.match(narrow[1], /\.mf-edges \{ display: none; \}/);
   assert.match(narrow[1], /\.mf-to \{ display: block;/);
   assert.match(HOME, /\.path-panel \{[^}]*container-type: inline-size;/);
+});
+
+test('the home flow’s colours never run out: five chosen hues, then as many more as there are targets — none near direct’s green or block’s red', () => {
+  const h = homeHarness();
+  assert.deepEqual([1, 2, 3, 4, 5].map((n) => h.ctx.laneHue(n)), [212, 268, 38, 325, 18]);
+  const more = Array.from({ length: 40 }, (_, i) => h.ctx.laneHue(i + 6));
+  for (const hue of more) {
+    assert.ok(Number.isInteger(hue) && hue >= 0 && hue < 360, String(hue));
+    assert.ok(!(hue >= 80 && hue <= 175) && !(hue >= 345 || hue <= 10), `hue ${hue} is too near direct or block`);
+  }
+  assert.ok(new Set(more.slice(0, 10)).size === 10, 'ten more targets, ten more colours');
+});
+
+test('a line that would cut through a base goes around it, level across that column; one that does not keeps its curve', () => {
+  const ctx = compile(['flowEdgePaths'], { Math }, '');
+  const box = { left: 0, top: 0 };
+  const rects = {
+    rule: { left: 0, right: 100, top: 90, height: 30 },          // y 105
+    target: { left: 400, right: 500, top: 90, height: 30 },      // y 105
+    high: { left: 0, right: 100, top: 0, height: 30 }             // y 15
+  };
+  const base = { left: 200, right: 300, top: 95, bottom: 140 }; // in the way of the rule's line at y 105, nearer its top
+  const [through] = plain(ctx.flowEdgePaths([{ from: 'rule', to: 'target' }], rects, box, false, [base]));
+  // level above the base by the clearance (83, the nearer side), in before its left side (188), out after its right (312)
+  assert.equal(through.d, 'M100 105 C144 105 144 83 188 83 L312 83 C356 83 356 105 400 105');
+  const [clear] = plain(ctx.flowEdgePaths([{ from: 'high', to: 'target' }], rects, box, false, [{ left: 200, right: 300, top: 200, bottom: 230 }]));
+  assert.doesNotMatch(clear.d, / L/, 'a line that passes clear is the plain curve');
+  // RTL: the same, mirrored
+  const r = { rule: { left: 400, right: 500, top: 90, height: 30 }, target: { left: 0, right: 100, top: 90, height: 30 } };
+  const [rtl] = plain(ctx.flowEdgePaths([{ from: 'rule', to: 'target' }], r, box, true, [base]));
+  assert.equal(rtl.d, 'M400 105 C356 105 356 83 312 83 L188 83 C144 83 144 105 100 105');
+});
+
+test('the flows’ arrows follow the reading direction: → in English, ← in Persian', () => {
+  const run = (dir) => compile(['flowArrow'], { document: { documentElement: { dir } } }, '').flowArrow();
+  assert.equal(run('ltr'), '→');
+  assert.equal(run('rtl'), '←');
 });

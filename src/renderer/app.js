@@ -2645,11 +2645,22 @@ function renderTrafficPath(stateStr) {
 }
 
 let hfModel = null;   // the home flow on screen (its lines are drawn from it)
+let hfColumns = null;  // watches its columns: when their boxes move, the lines are drawn again
 
 /** How many of a profile's own rule nodes the home flow shows before "+N more". */
 const HOME_FLOW_RULES = 4;
-/** The colours a proxy target's lines take, in order (direct and block keep theirs). */
-const HOME_FLOW_LANES = 5;
+/**
+ * The hue of proxy lane `n` (1, 2, …): five chosen ones — sky, violet, amber,
+ * pink, coral — then the golden angle for as many more as a profile has,
+ * never near direct's green or block's red. The theme picks the lightness.
+ */
+function laneHue(n) {
+  const CHOSEN = [212, 268, 38, 325, 18];
+  if (n >= 1 && n <= CHOSEN.length) return CHOSEN[n - 1];
+  let h = Math.round((212 + (n - 1) * 137.508) % 360);
+  for (let i = 0; i < 12 && ((h >= 80 && h <= 175) || h >= 345 || h <= 10); i++) h = (h + 47) % 360;
+  return h;
+}
 
 /**
  * The home flow as data: { groups, bases, targets, edges, more } — the shapes
@@ -2727,21 +2738,35 @@ function homeFlowModel(id) {
   }
   // the device starts every line
   m.edges = m.groups.map(g => ({ from: 'o', to: g.key, danger: false })).concat(m.edges);
-  // one colour per target: direct and block keep theirs, every other one the next of the lanes
+  // one colour per target: direct and block keep theirs, every other one a lane of its own (p1, p2, … without end)
   let n = 0;
-  const laneOf = {};
+  const laneOf = {}, hueOf = {};
   for (const t of m.targets) {
-    t.lane = t.kind === 'direct' ? 'direct' : t.kind === 'block' ? 'block' : t.kind === 'none' ? 'none' : 'c' + ((n++ % HOME_FLOW_LANES) + 1);
+    t.lane = t.kind === 'direct' ? 'direct' : t.kind === 'block' ? 'block' : t.kind === 'none' ? 'none' : 'p' + (++n);
+    t.hue = t.lane.charAt(0) === 'p' ? laneHue(n) : null;
     laneOf[t.key] = t.lane;
+    hueOf[t.key] = t.hue;
   }
-  const groupLane = {};
-  for (const g of m.groups) groupLane[g.key] = laneOf[g.to] || 'none';
+  const groupTo = {};
+  for (const g of m.groups) groupTo[g.key] = g.to;
   for (const e of m.edges) {
     // a rule's line is its target's colour; a base's line to a target, that target's
-    e.lane = e.from === 'o' ? groupLane[e.to] : e.from.startsWith('b:') ? (laneOf[e.to] || 'none') : (groupLane[e.from] || 'none');
+    const tk = e.from === 'o' ? groupTo[e.to] : e.from.startsWith('b:') ? e.to : groupTo[e.from];
+    e.lane = laneOf[tk] || 'none';
+    e.hue = hueOf[tk] == null ? null : hueOf[tk];
   }
   m.more = more;
   return m;
+}
+
+/** Give a home-flow box its target's colour: direct / block / none by class, a proxy lane by its hue. */
+function paintLane(el, target) {
+  const lane = target ? target.lane : 'none';
+  if (/^p\d+$/.test(lane)) {
+    el.classList.add('lane-p');
+    if (el.style && typeof el.style.setProperty === 'function') el.style.setProperty('--lane-h', String(target.hue));
+    else if (el.style) el.style['--lane-h'] = String(target.hue);
+  } else el.classList.add('lane-' + (lane === 'direct' || lane === 'block' ? lane : 'none'));
 }
 
 /** One box of the home flow: its number (a rule's, a pool port), icon, words; the rest as the caller adds it. */
@@ -2775,8 +2800,8 @@ function buildHomeFlow(m, { live, ip, mode }) {
 
   const prof = m.prof || null;
   const rules = column('rules');
-  const laneOf = {};
-  for (const tg of m.targets) laneOf[tg.key] = tg.lane;
+  const byKey = {};
+  for (const tg of m.targets) byKey[tg.key] = tg;
   for (const g of m.groups) {
     let el;
     if (g.sys) {
@@ -2796,10 +2821,10 @@ function buildHomeFlow(m, { live, ip, mode }) {
       if (sum.more) spanIn(el, 'mf-more', '+' + sum.more);
       el.title = sum.full;
     }
-    el.classList.add('lane-' + (laneOf[g.to] || 'none'));
+    paintLane(el, byKey[g.to]);
     // the stacked (narrow) layout has no lines: this says where the rule goes instead
-    spanIn(el, 'mf-to', '→ ' + homeFlowTo(g, prof));
-    el.title = (el.title || el.querySelector('.mf-label').textContent) + ' → ' + homeFlowTo(g, prof);
+    spanIn(el, 'mf-to', flowArrow() + ' ' + homeFlowTo(g, prof));
+    el.title = (el.title || el.querySelector('.mf-label').textContent) + ' ' + flowArrow() + ' ' + homeFlowTo(g, prof);
     rules.appendChild(el);
   }
   if (m.more) spanIn(rules, 'mf-morerules', t('path.andMore').replace('{n}', m.more));
@@ -2819,7 +2844,8 @@ function buildHomeFlow(m, { live, ip, mode }) {
     const label = tg.kind === 'direct' ? t('path.direct') : tg.kind === 'block' ? t('path.block')
       : tg.kind === 'exit' ? t('path.exitHere') : tg.kind === 'none' ? t('path.noServer')
         : tg.chain ? tg.chain.name : refName(tg.ref, prof);
-    const el = homeFlowNode('mf-target lane-' + tg.lane + (tg.why ? ' danger' : ''), tg.key, icon, label);
+    const el = homeFlowNode('mf-target' + (tg.why ? ' danger' : ''), tg.key, icon, label);
+    paintLane(el, tg);
     // a chain says its hops when asked; a target behind a base, which one
     const ch = tg.chain || (String(tg.ref).startsWith('chain:') ? chainById(String(tg.ref).slice(6)) : null);
     const hops = ch ? chainMembers(ch).map(x => x.name).join(' → ') : '';
@@ -2833,6 +2859,12 @@ function buildHomeFlow(m, { live, ip, mode }) {
   layer.className = 'mf-edges';
   layer.setAttribute('aria-hidden', 'true');
   grid.appendChild(layer);
+  // the boxes move when a column does (a font arriving, a label growing): the lines follow every one of them
+  if (hfColumns) hfColumns.disconnect();
+  if (typeof ResizeObserver !== 'undefined') {
+    hfColumns = new ResizeObserver(() => drawHomeFlowSoon());
+    for (const col of grid.children) if (col.classList && col.classList.contains('mf-col')) hfColumns.observe(col);
+  }
 
   const foot = document.createElement('div');
   foot.className = 'mf-foot';
@@ -2842,11 +2874,17 @@ function buildHomeFlow(m, { live, ip, mode }) {
   return grid;
 }
 
+/** The arrow of a flow's words, the way the page reads: → in English, ← in Persian. */
+function flowArrow() {
+  return typeof document !== 'undefined' && document.documentElement && document.documentElement.dir === 'rtl' ? '←' : '→';
+}
+
 /** Where a rule of the home flow leads, in words: "⚓ base → target". */
 function homeFlowTo(g, prof) {
-  if (g.target === TARGET_BASE) return prof && prof.base ? '⚓ ' + refName(prof.base) + ' → ' + t('path.exitHere') : t('rp.exitAtBaseNone');
+  const ar = ' ' + flowArrow() + ' ';
+  if (g.target === TARGET_BASE) return prof && prof.base ? '⚓ ' + refName(prof.base) + ar + t('path.exitHere') : t('rp.exitAtBaseNone');
   const to = !g.target ? t('path.noServer') : g.target === 'direct' ? t('path.direct') : g.target === 'block' ? t('path.block') : targetLabel(g.target);
-  return g.via ? '⚓ ' + refName(g.via) + ' → ' + to : to;
+  return g.via ? '⚓ ' + refName(g.via) + ar + to : to;
 }
 
 /** Draw the home flow's lines from where its boxes landed — each in its target's colour. Nothing while hidden. */
@@ -2861,12 +2899,18 @@ function drawHomeFlow() {
   for (const n of grid.querySelectorAll('.mf-node')) rects[n.dataset.key] = n.getBoundingClientRect();
   const rtl = getComputedStyle(grid).direction === 'rtl';
   const w = Math.ceil(box.width), h = Math.ceil(box.height);
-  const lane = {};
-  for (const e of hfModel.edges) lane[e.from + '>' + e.to] = /^(c[1-5]|direct|block|none)$/.test(e.lane) ? e.lane : 'none';
+  // each line's colour: direct / block / none by name, a proxy lane by its hue (a number)
+  const paint = {};
+  for (const e of hfModel.edges) {
+    const hue = Number(e.hue);
+    paint[e.from + '>' + e.to] = /^(direct|block|none)$/.test(e.lane) ? `lane-${e.lane}"`
+      : (e.hue != null && Number.isFinite(hue) ? `lane-p" style="--lane-h:${Math.round(hue)}"` : 'lane-none"');
+  }
+  const bases = [...grid.querySelectorAll('.mf-base')].map(n => n.getBoundingClientRect());
   // everything below is a literal, a number or one of the lane names above
   layer.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" focusable="false">` +
-    flowEdgePaths(hfModel.edges, rects, box, rtl)
-      .map(line => `<path class="mf-edge lane-${lane[line.from + '>' + line.to]}${line.danger ? ' danger' : ''}" d="${line.d}"/>`).join('') +
+    flowEdgePaths(hfModel.edges, rects, box, rtl, bases)
+      .map(line => `<path d="${line.d}" class="mf-edge${line.danger ? ' danger' : ''} ${paint[line.from + '>' + line.to]}/>`).join('') +
     '</svg>';
 }
 
@@ -5937,10 +5981,10 @@ function flowButton(cls, key) {
 /** Where a rule leads, in words: "<base> → <target>" ("exit at the base": "<base> → out from there"). */
 function flowRuleTo(g, prof) {
   if (g.target === TARGET_BASE) {
-    return prof && prof.base ? '⚓ ' + refName(prof.base) + ' → ' + t('rp.exitHere') : t('rp.exitAtBaseNone');
+    return prof && prof.base ? '⚓ ' + refName(prof.base) + ' ' + flowArrow() + ' ' + t('rp.exitHere') : t('rp.exitAtBaseNone');
   }
   const to = g.target === 'direct' ? t('adv.direct') : g.target === 'block' ? t('adv.block') : refName(g.target);
-  return g.via ? '⚓ ' + refName(g.via) + ' → ' + to : to;
+  return g.via ? '⚓ ' + refName(g.via) + ' ' + flowArrow() + ' ' + to : to;
 }
 
 function flowRuleNode(g, prof) {
@@ -5967,7 +6011,7 @@ function flowRuleNode(g, prof) {
     b.title = sum.full + ' → ' + to;
   }
   // the narrow (stacked) layout has no lines: this says where the rule goes instead
-  spanIn(b, 'rf-to', '→ ' + to);
+  spanIn(b, 'rf-to', flowArrow() + ' ' + to);
   b.setAttribute('aria-label', b.title);
   b.onclick = () => flowNodeClick(g);
   return b;
@@ -6099,9 +6143,17 @@ function openChainCard(cid) {
  * Each edge as an SVG path, from the boxes of its two nodes (`rects` by key,
  * `box` the tree's own): the source's far side to the target's near side — in
  * RTL the far side is the left — as an S-curve between the columns.
+ *
+ * `avoid`: boxes a line must not run through (the bases, for a rule that goes
+ * straight to its target past their column). A line whose curve would cross
+ * one bends around it instead: through the nearest clear height of that
+ * column — above it, below it, or a gap between two — level there, so it reads
+ * as passing by rather than going in. Without `avoid`, the curves of before.
  */
-function flowEdgePaths(edges, rects, box, rtl) {
+function flowEdgePaths(edges, rects, box, rtl, avoid) {
   const r1 = (v) => Math.round(v * 10) / 10;
+  const PAD = 12;   // the clearance a line keeps from a box it passes
+  const blocks = (avoid || []).map(r => ({ l: r.left - box.left - PAD, r: r.right - box.left + PAD, t: r.top - box.top - PAD, b: r.bottom - box.top + PAD }));
   const out = [];
   for (const e of edges || []) {
     const a = rects[e.from], b = rects[e.to];
@@ -6111,8 +6163,41 @@ function flowEdgePaths(edges, rects, box, rtl) {
     const x2 = (rtl ? b.right : b.left) - box.left;
     const y2 = b.top + b.height / 2 - box.top;
     const c = (x2 - x1) / 2;
-    out.push({ from: e.from, to: e.to, danger: !!e.danger,
-      d: `M${r1(x1)} ${r1(y1)} C${r1(x1 + c)} ${r1(y1)} ${r1(x2 - c)} ${r1(y2)} ${r1(x2)} ${r1(y2)}` });
+    const curve = `M${r1(x1)} ${r1(y1)} C${r1(x1 + c)} ${r1(y1)} ${r1(x2 - c)} ${r1(y2)} ${r1(x2)} ${r1(y2)}`;
+    // the boxes strictly between the two ends (never the ones it starts or ends at)
+    const lo = Math.min(x1, x2), hi = Math.max(x1, x2);
+    const between = blocks.filter(o => o.l > lo && o.r < hi);
+    let d = curve;
+    if (between.length) {
+      const at = (t) => {
+        const u = 1 - t;
+        return {
+          x: u * u * u * x1 + 3 * u * u * t * (x1 + c) + 3 * u * t * t * (x2 - c) + t * t * t * x2,
+          y: u * u * u * y1 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y2
+        };
+      };
+      let hit = false;
+      for (let i = 1; i < 32 && !hit; i++) {
+        const p = at(i / 32);
+        hit = between.some(o => p.x > o.l && p.x < o.r && p.y > o.t && p.y < o.b);
+      }
+      if (hit) {
+        // the clear heights of that column: above the first box, below the last, a gap wide enough between two
+        const col = between.slice().sort((p, q) => p.t - q.t);
+        const xw = col.reduce((s, o) => s + (o.l + o.r) / 2, 0) / col.length;
+        const ys = [col[0].t, col[col.length - 1].b];
+        for (let i = 1; i < col.length; i++) if (col[i].t - col[i - 1].b >= 4) ys.push((col[i].t + col[i - 1].b) / 2);
+        const straight = y1 + (y2 - y1) * (xw - x1) / ((x2 - x1) || 1);
+        const yw = ys.reduce((best, y) => (Math.abs(y - straight) < Math.abs(best - straight) ? y : best), ys[0]);
+        // level across the whole column — in before its first box, out after its last — never cutting a corner
+        const L = Math.min(...col.map(o => o.l)), R = Math.max(...col.map(o => o.r));
+        const wa = x1 < x2 ? L : R, wb = x1 < x2 ? R : L;
+        const c1 = (wa - x1) / 2, c2 = (x2 - wb) / 2;
+        d = `M${r1(x1)} ${r1(y1)} C${r1(x1 + c1)} ${r1(y1)} ${r1(wa - c1)} ${r1(yw)} ${r1(wa)} ${r1(yw)}` +
+          ` L${r1(wb)} ${r1(yw)} C${r1(wb + c2)} ${r1(yw)} ${r1(x2 - c2)} ${r1(y2)} ${r1(x2)} ${r1(y2)}`;
+      }
+    }
+    out.push({ from: e.from, to: e.to, danger: !!e.danger, d });
   }
   return out;
 }
@@ -6134,7 +6219,7 @@ function drawFlowEdges() {
   const markers = '<marker id="rfArrow" class="rf-mark" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">' + head +
     '<marker id="rfArrowBad" class="rf-mark bad" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">' + head;
   layer.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" focusable="false"><defs>${markers}</defs>` +
-    flowEdgePaths(rfModel.edges, rects, box, rtl)
+    flowEdgePaths(rfModel.edges, rects, box, rtl, [...grid.querySelectorAll('.rf-base')].map(n => n.getBoundingClientRect()))
       .map(line => `<path class="rf-edge${line.danger ? ' danger' : ''}" d="${line.d}" marker-end="url(#${line.danger ? 'rfArrowBad' : 'rfArrow'})"/>`).join('') +
     '</svg>';
 }
@@ -6380,7 +6465,7 @@ window.api.onStats((s) => {
   // write per second onto a node the path already built — the diagram itself is
   // never rebuilt here.
   const cap = $('#pathCapIn');
-  if (cap) cap.textContent = `↓${fmtSpeed(s.downSpeed)}  ↑${fmtSpeed(s.upSpeed)}`;
+  if (cap) cap.textContent = `↓${fmtSpeed(s.downSpeed)}\n↑${fmtSpeed(s.upSpeed)}`;
   // and each hop's own figures, so the path answers "how much went through
   // THIS config" instead of showing one total for everything at once
   if (s.per) applyPathTraffic(s.per);
