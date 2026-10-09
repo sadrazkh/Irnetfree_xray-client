@@ -35,6 +35,13 @@ object RouteShare {
     private val SERVER_KEY = Regex("^s\\d+$")
     private val CHAIN_KEY = Regex("^c\\d+$")
 
+    /**
+     * A target that names no server or chain of the payload: none (""),
+     * direct, block, or "exit at the base" — the profile's own base, carried
+     * as it is (routeShare.js plainTarget).
+     */
+    private fun plainTarget(t: String): Boolean = t.isEmpty() || t == "direct" || t == "block" || t == RoutingProfiles.TARGET_BASE
+
     /** Does [text] look like one of these links (the add box, paste, a scanned QR)? */
     fun looksLikeShare(text: String): Boolean = text.trim().startsWith(PREFIX, ignoreCase = true)
 
@@ -142,17 +149,19 @@ object RouteShare {
                 if (m !in sKeys) throw bad("chain $key names server $m, which the link does not carry")
             }
         }
+        // "exit at the base" (RoutingProfiles.TARGET_BASE) is a target that names no key: carried as it is
         fun target(t: String, what: String) {
             when {
-                t.isEmpty() || t == "direct" || t == "block" -> {}
+                plainTarget(t) -> {}
                 t.startsWith("chain:") -> { if (t.substring(6) !in cKeys) throw bad("$what names chain ${t.substring(6)}, which the link does not carry") }
                 t in sKeys -> {}
                 else -> throw bad("$what names \"$t\", which the link does not carry")
             }
         }
+        // a via or a base is a server or a chain: never direct/block, nor the base itself
         fun via(t: String, what: String) {
             if (t.isEmpty() || t == RoutingProfiles.VIA_INHERIT || t == RoutingProfiles.VIA_NONE) return
-            if (t == "direct" || t == "block") throw bad("$what goes via $t")
+            if (plainTarget(t)) throw bad("$what goes via $t")
             target(t, what)
         }
         if (kind == KIND_CHAIN) {
@@ -170,6 +179,7 @@ object RouteShare {
         via(str(p, "defVia"), "the default")
         val base = str(p, "base")
         if (base == "direct" || base == "block") throw bad("the base is $base")
+        if (base == RoutingProfiles.TARGET_BASE) throw bad("the base is \"exit at the base\" — a base is a server or a chain")
         target(base, "the base")
     }
 
@@ -207,7 +217,7 @@ object RouteShare {
         }
 
         fun target(t: String): String = when {
-            t.isEmpty() || t == "direct" || t == "block" -> t
+            RouteShare.plainTarget(t) -> t
             // Android's legacy "Proxy (first server)" is that server — the desktop has no such target
             t == "proxy" -> servers.firstOrNull { s: ServerConfig -> s.outbound.length() > 0 }?.let { s: ServerConfig -> server(s.id) } ?: "direct"
             t.startsWith("chain:") -> "chain:" + chain(t.substring(6))
@@ -438,7 +448,7 @@ object RouteShare {
         }
 
         fun mapTarget(t: String): String = when {
-            t.isEmpty() || t == "direct" || t == "block" -> t
+            plainTarget(t) -> t
             t.startsWith("chain:") -> chainIdOf[t.substring(6)]?.let { id: String -> "chain:$id" } ?: (UNREADABLE_PREFIX + t.substring(6))
             else -> idOf[t] ?: (UNREADABLE_PREFIX + t)
         }

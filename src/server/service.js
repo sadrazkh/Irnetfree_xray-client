@@ -47,7 +47,7 @@ const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 const { migrateSettings } = require('../main/settingsMigrate');
-const { migrateProfiles, mirrorToSettings, mirrorFromSettings, isAdvancedSelection, profileIdOf, selectionIdOf, advancedTargets, resolveProcessRules, liveRoutingOf, routingPendingKeys } = require('../main/routingProfiles');
+const { migrateProfiles, mirrorToSettings, mirrorFromSettings, isAdvancedSelection, profileIdOf, selectionIdOf, resolveBaseTargets, advancedTargets, resolveProcessRules, liveRoutingOf, routingPendingKeys } = require('../main/routingProfiles');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
 const { createWanWatcher, decide: decideWanChange } = require('../main/wanWatch');
 const { exportBundle, importBundle } = require('../main/backup');
@@ -1260,8 +1260,21 @@ function createService(opts = {}) {
         : 'این پروفایلِ روتینگ دیگر وجود ندارد — در بخشِ روتینگ یکی دیگر انتخاب کن.');
       // its process rules as the addresses those processes use now (effectiveSettings)
       const rules = resolveProcessRules(Array.isArray(profile.rules) ? profile.rules : [], settings.procIps);
-      const def = profile.def || (servers[0] && servers[0].id) || 'direct';
-      plan = { mode: 'advanced', profileId: profile.id, serversById, chainsById, chain: legacyChain, rules, def, defVia: profile.defVia, base: profile.base, useMode: profile.useMode };
+      const def0 = profile.def || (servers[0] && servers[0].id) || 'direct';
+      if (def0 === 'base' && !profile.base) throw new Error(settings.lang === 'en'
+        ? 'This routing sends everything else out through its base, but it has no base — choose one under Routing.'
+        : 'این روتینگ بقیهٔ ترافیک را از پایه خارج می‌کند ولی پایه‌ای ندارد — در بخشِ روتینگ یک پایه انتخاب کن.');
+      // "exit at the base" is the base itself from here on (routingProfiles.resolveBaseTargets)
+      const { rules: atBase, def, defVia } = resolveBaseTargets({ rules, def: def0, defVia: profile.defVia, base: profile.base });
+      // leaving from a base that is gone is refused, as riding on one is (configBuilder's baseGone):
+      // left out, a rule's traffic would follow the default — perhaps direct
+      const baseHere = (b) => String(b).indexOf('chain:') === 0
+        ? ((chainsById[String(b).slice('chain:'.length)] || []).some(x => x && x.outbound))
+        : !!(serversById[b] && serversById[b].outbound);
+      if (profile.base && (def0 === 'base' || rules.some(r => r && r.target === 'base')) && !baseHere(profile.base)) throw new Error(settings.lang === 'en'
+        ? 'Advanced routing: the base this routing leaves from no longer exists (it was removed, or replaced by a subscription update) — choose another base under Routing.'
+        : 'روتینگ ویژه: پایه‌ای که این روتینگ از آن خارج می‌شود دیگر وجود ندارد (حذف شده، یا با به‌روزرسانیِ اشتراک عوض شده) — در بخش روتینگ پایهٔ دیگری انتخاب کن.');
+      plan = { mode: 'advanced', profileId: profile.id, serversById, chainsById, chain: legacyChain, rules: atBase, def, defVia, base: profile.base, useMode: profile.useMode };
       label = '🧭 ' + (profile.name || (settings.lang === 'en' ? 'Advanced routing' : 'روتینگ ویژه'));
       // every target and every base one goes through is refused when broken; the
       // bypass is cut for what is dialled directly — a base, never a target behind it

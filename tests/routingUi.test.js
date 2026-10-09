@@ -201,8 +201,8 @@ function store() {
   return { servers, chains, work, def };
 }
 
-const PRELUDE_CONSTS = constSource('ADV_ID') + constSource('POOL_ID') + constSource('RULE_TYPES') + constSource('QR_JSON_MAX_BYTES');
-const MODEL_FNS = ['profileOfSel', 'profileReady', 'advSelName', 'terminalTarget', 'normalizeUiProfile', 'ruleVia', 'refProblem', 'ruleProblem',
+const PRELUDE_CONSTS = constSource('ADV_ID') + constSource('POOL_ID') + constSource('TARGET_BASE') + constSource('RULE_TYPES') + constSource('QR_JSON_MAX_BYTES');
+const MODEL_FNS = ['profileOfSel', 'profileReady', 'advSelName', 'terminalTarget', 'takesNoVia', 'atBase', 'appRouteRules', 'geoReady', 'normalizeUiProfile', 'ruleVia', 'refProblem', 'ruleProblem',
   'profileBroken', 'refName', 'flowModel', 'outboundTagFor', 'baseKeyOf', 'viaTagFor', 'baseTagFor', 'chainById', 'chainMembers', 'chainReady',
   'srvById', 'isChainId', 'targetLabel', 'poolTargetOptions'];
 
@@ -375,7 +375,7 @@ test('init loads the profiles before it resolves the stored selection, so "__adv
 
 test('loadRoutingProfiles: init’s data when main sends it, else the bridge; null when the back end has none', async () => {
   const run = async (api, data) => {
-    const ctx = compile(['loadRoutingProfiles', 'normalizeUiProfile', 'terminalTarget'], { window: { api }, String, Array, Object }, '');
+    const ctx = compile(['loadRoutingProfiles', 'normalizeUiProfile', 'terminalTarget', 'takesNoVia'], { window: { api }, String, Array, Object }, constSource('TARGET_BASE'));
     return ctx.loadRoutingProfiles(data);
   };
   assert.equal(await run({}, {}), null, 'no bridge');
@@ -430,7 +430,7 @@ test('the tags of a target through a base and of a base are the ones the builder
 
 /* ------------------------------------ the flow tree as data ------------------------------------ */
 
-test('the fixture’s flow: rules (two direct ones grouped) → targets → ONE base with both of its incoming edges; the default is “everything else”', () => {
+test('the fixture’s flow: rules (two direct ones grouped, the local network after them) → ONE base between them and its targets → targets; the default is “everything else”', () => {
   const { ctx, s } = modelHarness();
   const m = plain(ctx.flowModel(s.work));
   assert.deepEqual(m.groups.map((g) => [g.key, g.idxs, g.target, g.via]), [
@@ -438,9 +438,11 @@ test('the fixture’s flow: rules (two direct ones grouped) → targets → ONE 
     ['g1', [1], 's3', 's1'],
     ['g2', [2, 3], 'direct', null],
     ['g4', [4], 'chain:c1', null],
+    ['sys-lan', [], 'direct', null],
     ['def', [], 's1', null]
   ]);
-  assert.equal(m.groups[4].isDefault, true);
+  assert.equal(m.groups[5].isDefault, true);
+  assert.equal(m.groups[4].sys, 'lan', 'the app’s own rule, where the core matches it');
   assert.deepEqual(m.groups[2].items.map((i) => i.type), ['domain', 'ip'], 'one node, both rules');
   assert.deepEqual(m.targets.map((t) => [t.key, t.kind, t.tags[0]]), [
     ['t:s2@s1', 'server', 'out-s2@s1'],
@@ -451,10 +453,10 @@ test('the fixture’s flow: rules (two direct ones grouped) → targets → ONE 
   ], 's1 as the default (no via) and s1 as the base are two outbounds, two nodes');
   assert.deepEqual(m.bases.map((b) => [b.key, b.tags[0], b.into]), [['b:s1', 'base-s1', 2]], 'drawn once, both targets point at it');
   assert.deepEqual(m.edges.map((e) => `${e.from}>${e.to}`), [
-    'g0>t:s2@s1', 'g1>t:s3@s1', 'g2>t:direct', 'g4>t:chain:c1', 'def>t:s1', 't:s2@s1>b:s1', 't:s3@s1>b:s1'
-  ]);
+    'b:s1>t:s2@s1', 'g0>b:s1', 'b:s1>t:s3@s1', 'g1>b:s1', 'g2>t:direct', 'g4>t:chain:c1', 'sys-lan>t:direct', 'def>t:s1'
+  ], 'a rule through the base enters at the base, and the base leads on to the target');
   assert.ok(m.edges.every((e) => !e.danger), 'nothing is gone');
-  assert.ok(!m.edges.some((e) => e.from === 't:direct'), 'direct ends where it is');
+  assert.ok(m.edges.every((e) => !e.from.startsWith('t:')), 'a target is where traffic leaves: no line goes on from it');
   assert.equal(m.profileId, 'rp-work');
 });
 
@@ -468,7 +470,7 @@ test('a gone server, base or chain is a danger node with its reason, and so is e
   assert.equal(node('t:chain:c1').why, 'rp.why.chainGone', 'one hop left is no chain');
   assert.equal(node('t:s2@s1').why, '', 'the target itself is fine');
   const danger = m.edges.filter((e) => e.danger).map((e) => `${e.from}>${e.to}`);
-  assert.deepEqual(danger, ['g4>t:chain:c1', 'def>t:s1', 't:s2@s1>b:s1', 't:s3@s1>b:s1']);
+  assert.deepEqual(danger, ['b:s1>t:s2@s1', 'g0>b:s1', 'b:s1>t:s3@s1', 'g1>b:s1', 'g4>t:chain:c1', 'def>t:s1']);
   // and the rule editor's note for each rule
   assert.equal(h.ctx.ruleProblem(h.s.work.rules[0], h.s.work), 'rp.why.baseGone');
   assert.equal(h.ctx.ruleProblem(h.s.work.rules[2], h.s.work), '');
@@ -486,13 +488,13 @@ test('a chain base: its tags, and an explicit via overriding the profile’s bas
   // a value still being typed is not a rule yet; the same target with another base is another node
   const q = { id: 'rp-q', base: 's1', rules: [{ type: 'ip', value: ' ', target: 's2' }, { type: 'ip', value: '1.1.1.1', target: 's2' }, { type: 'ip', value: '2.2.2.2', target: 's2', via: 'none' }], def: '' };
   const n = plain(ctx.flowModel(q));
-  assert.deepEqual(n.groups.map((g) => g.key), ['g1', 'g2', 'def']);
-  assert.deepEqual(n.targets.map((t) => t.key), ['t:s2@s1', 't:s2', 't:s1']);
-  assert.equal(n.groups[2].target, 's1', 'no default: the first server, as the builder takes it');
-  assert.equal(n.groups[2].via, null, 'which is the base itself: it dials directly');
+  assert.deepEqual(n.groups.map((g) => g.key), ['g1', 'g2', 'sys-lan', 'def']);
+  assert.deepEqual(n.targets.map((t) => t.key), ['t:s2@s1', 't:s2', 't:direct', 't:s1']);
+  assert.equal(n.groups[3].target, 's1', 'no default: the first server, as the builder takes it');
+  assert.equal(n.groups[3].via, null, 'which is the base itself: it dials directly');
   // the same target and base on consecutive rules is one node, whichever way the via is written
   const r = { id: 'rp-r', base: null, rules: [{ type: 'ip', value: '1.1.1.1', target: 's2' }, { type: 'ip', value: '2.2.2.2', target: 's2', via: 'none' }], def: 'direct' };
-  assert.deepEqual(plain(ctx.flowModel(r)).groups.map((g) => [g.key, g.idxs]), [['g0', [0, 1]], ['def', []]]);
+  assert.deepEqual(plain(ctx.flowModel(r)).groups.map((g) => [g.key, g.idxs]), [['g0', [0, 1]], ['sys-lan', []], ['def', []]]);
 });
 
 test('the edges are S-curves from the source’s far side to the target’s near side — mirrored in RTL', () => {
@@ -516,7 +518,7 @@ function treeHarness(over = {}) {
   const calls = [];
   const state = Object.assign({ servers: s.servers, chains: s.chains, pool: [], settings: { advancedRouting: true }, profiles: [s.def, s.work],
     profileSel: 'rp-work', connected: false, activeServerId: null }, over);
-  const ctx = compile([...MODEL_FNS, 'advDraft', 'renderFlowTree', 'flowRuleNode', 'flowRefNode', 'flowButton', 'spanIn', 'applyFlowTraffic', 'profileLive',
+  const ctx = compile([...MODEL_FNS, 'advDraft', 'renderFlowTree', 'flowRuleNode', 'flowRuleTo', 'appRuleWords', 'flowRefNode', 'flowButton', 'spanIn', 'applyFlowTraffic', 'profileLive',
     'ruleTypeIcon', 'ruleSummary', 'fmtBytes', 'fmtSpeed', 'flowNodeClick', 'flashInto', 'focusAdvRow', 'openChainCard'], {
     state, t: en, $: page.$, $$: page.$$, document: page.document,
     drawFlowSoon: () => calls.push(['draw']),
@@ -538,8 +540,8 @@ test('the tree on screen: three columns of buttons, keyed for their edges, the d
   assert.equal(hasClass(grid, 'rf'), true);
   assert.equal(hasClass(grid, 'no-bases'), false);
   const heads = grid.querySelectorAll('.rf-head').map((x) => x.textContent);
-  assert.deepEqual(heads, ['Rules', 'Targets', 'Bases']);
-  assert.deepEqual(nodesOf(h.flow()).map((n) => n.dataset.key), ['g0', 'g1', 'g2', 'g4', 'def', 't:s2@s1', 't:s3@s1', 't:direct', 't:chain:c1', 't:s1', 'b:s1']);
+  assert.deepEqual(heads, ['Rules', 'Bases', 'Targets'], 'the way traffic goes: the base between the rule and its target');
+  assert.deepEqual(nodesOf(h.flow()).map((n) => n.dataset.key), ['g0', 'g1', 'g2', 'g4', 'sys-lan', 'def', 'b:s1', 't:s2@s1', 't:s3@s1', 't:direct', 't:chain:c1', 't:s1']);
   assert.ok(nodesOf(h.flow()).every((n) => n.tagName === 'BUTTON' && n.type === 'button'), 'keyboard-reachable, never a submit');
   assert.ok(nodesOf(h.flow()).every((n) => n.getAttribute('aria-label')), 'an accessible name for every node');
   // the grouped rule: its two rules, both type icons, a short value summary (left-to-right)
@@ -551,7 +553,11 @@ test('the tree on screen: three columns of buttons, keyed for their edges, the d
   assert.equal(g2.querySelector('.rf-to').textContent, '→ Direct', 'the words that stand in for the line when the columns stack');
   const g0 = byKey(h.flow(), 'g0');
   assert.equal(g0.querySelector('.rf-label').textContent, 'corp.example, intranet.example');
-  assert.equal(g0.title, 'corp.example, intranet.example → Corp WG · via 🇩🇪 Base DE');
+  assert.equal(g0.title, 'corp.example, intranet.example → ⚓ 🇩🇪 Base DE → Corp WG');
+  assert.equal(g0.querySelector('.rf-to').textContent, '→ ⚓ 🇩🇪 Base DE → Corp WG');
+  const lan = byKey(h.flow(), 'sys-lan');
+  assert.equal(hasClass(lan, 'rf-app'), true, 'the app’s own rule, said as such');
+  assert.deepEqual([lan.querySelector('.rf-label').textContent, lan.querySelector('.rf-sub').textContent], ['Local network', 'always']);
   const def = byKey(h.flow(), 'def');
   assert.equal(hasClass(def, 'rf-default'), true);
   assert.equal(def.querySelector('.rf-label').textContent, 'everything else');
@@ -664,7 +670,7 @@ function pageHarness(over = {}) {
   const state = Object.assign({ servers: s.servers, chains: s.chains, pool: [], settings: { advancedRouting: true, routingMode: 'global' },
     profiles: [s.def, s.work], profileSel: 'rp-work', connected: false, activeServerId: null, procList: [], pendingReconnect: [] }, over);
   const ctx = compile([...MODEL_FNS, 'advDraft', 'renderAdvanced', 'renderProfileBar', 'renderProfileExtras', 'viaOptionList', 'baseOptionList',
-    'targetOptionList', 'spanIn', 'profileLive', 'escapeHtml'], {
+    'targetOptionList', 'profileTargetOptions', 'spanIn', 'profileLive', 'escapeHtml'], {
     state, t: en, $: page.$, $$: page.$$, document: page.document,
     makeSearchSelect: (o) => {
       const el = fakeEl('div');
@@ -787,7 +793,7 @@ function opsHarness({ reply, confirm = () => true, connected = false } = {}) {
     profileSel: 'rp-work', connected, pendingReconnect: [] };
   const page = fakePage();
   page.get('optAdvUseMode').checked = false;
-  const ctx = compile(['normalizeUiProfile', 'terminalTarget', 'advDraft', 'draftKey', 'draftDirty', 'confirmDiscardDraft', 'persistProfiles', 'patchProfile',
+  const ctx = compile(['normalizeUiProfile', 'terminalTarget', 'takesNoVia', 'advDraft', 'draftKey', 'draftDirty', 'confirmDiscardDraft', 'persistProfiles', 'patchProfile',
     'saveProfileDraft', 'addProfile', 'renameProfile', 'duplicateProfile', 'deleteProfile', 'makeDefaultProfile', 'selectProfileForEdit',
     'uniqueProfileName', 'newProfileId'], {
     state, t: en, $: page.$,
@@ -1005,12 +1011,12 @@ test('the rest of the window knows a profile selection: no ping for it, its name
 
 /* ------------------------------------ the home path ------------------------------------ */
 
-test('the home screen’s small path: a profile’s lines say “via <base>” and count the outbound through it', () => {
+test('the home screen’s small path: a profile’s lines put the base between the condition and the target, and count the outbound through it', () => {
   const s = store();
   const page = fakePage();
   page.get('statIp').textContent = '—';
   const ctx = compile(['renderTrafficPath', 'pathRule', 'pathNode', 'pathLink', 'trafficSpan', 'targetLabel', 'outboundTagFor', 'baseKeyOf', 'viaTagFor',
-    'profileOfSel', 'ruleVia', 'terminalTarget', 'chainById', 'chainMembers', 'srvById'], {
+    'profileOfSel', 'ruleVia', 'terminalTarget', 'takesNoVia', 'modeCountryRule', 'appRuleWords', 'geoReady', 'chainById', 'chainMembers', 'srvById'], {
     state: { servers: s.servers, chains: s.chains, pool: [], settings: { tunMode: false, routeRules: [], routeDefault: 'direct' },
       profiles: [s.def, s.work], selectedServerId: '__advanced__:rp-work', activeServerId: null },
     t: en, $: page.$, document: page.document,
@@ -1022,15 +1028,18 @@ test('the home screen’s small path: a profile’s lines say “via <base>” a
   const rules = host.children.find((c) => hasClass(c, 'path-rules'));
   const lines = rules.children;
   assert.equal(lines.length, 6, 'four rules, "+1 more", the default');
-  const via = (row) => row.children.find((c) => hasClass(c, 'pr-via'));
+  const via = (row) => row.querySelector('.pr-via');
   const tags = (row) => row.children.find((c) => hasClass(c, 'pr-traffic')).dataset.tags;
-  assert.equal(via(lines[0]).textContent, 'via 🇩🇪 Base DE');
+  assert.equal(via(lines[0]).textContent, '⚓ 🇩🇪 Base DE');
+  const order = (row) => [...row.innerHTML.matchAll(/class="(pr-[a-z-]+)/g)].map((m) => m[1]);
+  assert.deepEqual(order(lines[0]), ['pr-idx', 'pr-cond', 'pr-arrow', 'pr-via', 'pr-arrow', 'pr-to'], 'condition → ⚓ base → target');
+  assert.equal(lines[0].querySelector('.pr-to').textContent, 'Corp WG');
   assert.equal(tags(lines[0]), 'out-s2@s1');
-  assert.equal(via(lines[2]), undefined, 'direct: no via');
+  assert.equal(via(lines[2]), null, 'direct: no via');
   assert.equal(tags(lines[2]), 'direct');
   const def = lines[5];
   assert.equal(hasClass(def, 'is-default'), true);
-  assert.equal(via(def), undefined, 'the default dials s1 itself (defVia none)');
+  assert.equal(via(def), null, 'the default dials s1 itself (defVia none)');
   assert.equal(tags(def), 'out-s1');
   // the plain selection draws the first profile
   ctx.state.selectedServerId = '__advanced__';
@@ -1045,7 +1054,7 @@ test('the home screen’s small path: a profile’s lines say “via <base>” a
 function shareHarness(reply) {
   const page = fakePage();
   const calls = [];
-  const ctx = compile(['shareRouting', 'openShareModal', 'shareQrFits', 'escapeHtml', 'draftDirty', 'draftKey', 'normalizeUiProfile', 'terminalTarget'], {
+  const ctx = compile(['shareRouting', 'openShareModal', 'shareQrFits', 'escapeHtml', 'draftDirty', 'draftKey', 'normalizeUiProfile', 'terminalTarget', 'takesNoVia'], {
     state: { profiles: [] }, t: en, $: page.$,
     window: {
       api: {
@@ -1116,7 +1125,7 @@ function importHarness({ preview, imported, after = {} } = {}) {
   const calls = [];
   const state = { servers: [], chains: [], subscriptions: [], selectedServerId: null, settings: { advancedRouting: true }, profiles: [s.def], profileSel: 'rp-default' };
   const ctx = compile(['smartImport', 'looksLikeJsonText', 'importErrorReason', 'openRoutingImport', 'renderImportSummary', 'runRoutingImport', 'closeRoutingImport',
-    'refreshAfterImport', 'importCount', 'importNames', 'spanIn', 'loadRoutingProfiles', 'normalizeUiProfile', 'terminalTarget', 'draftDirty', 'draftKey'], {
+    'refreshAfterImport', 'importCount', 'importNames', 'spanIn', 'loadRoutingProfiles', 'normalizeUiProfile', 'terminalTarget', 'takesNoVia', 'draftDirty', 'draftKey'], {
     state, t: en, $: page.$, document: page.document,
     window: {
       api: {
@@ -1219,4 +1228,152 @@ test('the add box, the paste handler and smartImport all know the link; other te
   // the dialog's buttons
   assert.match(APP, /\$\('#rpImportGo'\)\.onclick = \(\) => runRoutingImport\(\);/);
   assert.match(APP, /\$\('#rpImportCancel'\)\.onclick = closeRoutingImport;/);
+});
+
+/* ---------------- v1.21: the app's own rules, "exit at the base", the direct share on the home path ---------------- */
+
+test('the tree shows the app’s own rules where the core matches them: ads before the user’s, the local network and the routing mode’s country after', () => {
+  const h = modelHarness({ settings: { advancedRouting: true, blockAds: true, routingMode: 'bypass-ir' } });
+  const m = plain(h.ctx.flowModel(h.s.work));   // Work applies the routing mode (useMode)
+  assert.deepEqual(m.groups.map((g) => [g.key, g.sys || null, g.target]), [
+    ['sys-ads', 'ads', 'block'], ['g0', null, 's2'], ['g1', null, 's3'], ['g2', null, 'direct'], ['g4', null, 'chain:c1'],
+    ['sys-lan', 'lan', 'direct'], ['sys-ir', 'ir', 'direct'], ['def', null, 's1']
+  ]);
+  assert.ok(m.edges.some((e) => e.from === 'sys-ir' && e.to === 't:direct'), 'Iran → direct, drawn');
+  assert.ok(m.edges.some((e) => e.from === 'sys-ads' && e.to === 't:block'));
+  // a profile that does not apply the mode, or a mode that sends nothing direct: no country
+  const off = plain(h.ctx.flowModel(Object.assign({}, h.s.work, { useMode: false })));
+  assert.equal(off.groups.some((g) => g.sys === 'ir'), false);
+  h.state.settings.routingMode = 'global';
+  assert.equal(plain(h.ctx.flowModel(h.s.work)).groups.some((g) => g.sys === 'ir'), false);
+  h.state.settings.routingMode = 'bypass-cn';
+  assert.equal(plain(h.ctx.flowModel(h.s.work)).groups.find((g) => g.sys === 'cn').target, 'direct');
+  // on screen: read-only, named, and it says where it leads
+  const t = treeHarness({ settings: { advancedRouting: true, routingMode: 'bypass-ir' } });
+  t.ctx.renderFlowTree();
+  const ir = byKey(t.flow(), 'sys-ir');
+  assert.equal(hasClass(ir, 'rf-app'), true);
+  assert.deepEqual([ir.querySelector('.rf-ico').textContent, ir.querySelector('.rf-label').textContent, ir.querySelector('.rf-sub').textContent],
+    ['🇮🇷', 'Iran', 'simple routing mode']);
+  assert.equal(ir.querySelector('.rf-to').textContent, '→ Direct');
+  ir.onclick();
+  assert.equal(hasClass(t.page.get('routingSeg'), 'flash'), true, 'it opens the mode it comes from');
+});
+
+test('"exit at the base": the base between the rule and the internet, counted on the base’s own outbound; without a base it is marked', () => {
+  const h = modelHarness();
+  const p = { id: 'rp-x', base: 's1', def: 'base', defVia: 'inherit', rules: [
+    { type: 'domain', value: 'news.example', target: 'base' }, { type: 'ip', value: '10.0.0.0/8', target: 's2' }
+  ] };
+  assert.equal(h.ctx.ruleVia({ target: 'base', via: 's3' }, p), null, 'the base itself rides on nothing');
+  const m = plain(h.ctx.flowModel(p));
+  assert.deepEqual(m.targets.map((t) => [t.key, t.kind, t.via, t.tags]), [
+    ['t:base', 'exit', 's1', ['out-s1']], ['t:s2@s1', 'server', 's1', ['out-s2@s1']], ['t:direct', 'direct', null, ['direct']]
+  ]);
+  assert.deepEqual(m.edges.map((e) => e.from + '>' + e.to), [
+    'b:s1>t:base', 'g0>b:s1', 'b:s1>t:s2@s1', 'g1>b:s1', 'sys-lan>t:direct', 'def>b:s1'
+  ], 'one line from the base out, however many rules leave there');
+  assert.equal(h.ctx.profileBroken(p), false);
+  // no base: marked, and so is the rule and the profile
+  const q = Object.assign({}, p, { base: null });
+  const n = plain(h.ctx.flowModel(q));
+  assert.equal(n.targets[0].why, 'rp.why.noBase');
+  assert.ok(n.edges.find((e) => e.from === 'g0').danger);
+  assert.equal(h.ctx.ruleProblem(q.rules[0], q), 'rp.why.noBase');
+  assert.equal(h.ctx.profileBroken(q), true);
+  // a base that is gone: the base's reason
+  h.state.servers = h.state.servers.filter((x) => x.id !== 's1');
+  assert.equal(h.ctx.ruleProblem(p.rules[0], p), 'rp.why.baseGone');
+  // on screen
+  const t = treeHarness({ profiles: [store().def, Object.assign({ name: 'X', useMode: false }, p)], profileSel: 'rp-x' });
+  t.ctx.renderFlowTree();
+  const exit = byKey(t.flow(), 't:base');
+  assert.equal(hasClass(exit, 'to-exit'), true);
+  assert.deepEqual([exit.querySelector('.rf-ico').textContent, exit.querySelector('.rf-label').textContent, exit.querySelector('.rf-sub').textContent],
+    ['🌐', 'Out to the internet', 'from 🇩🇪 Base DE itself']);
+  assert.equal(exit.querySelector('.rf-traffic').dataset.tags, 'out-s1');
+  assert.equal(byKey(t.flow(), 'g0').querySelector('.rf-to').textContent, '→ ⚓ 🇩🇪 Base DE → Out to the internet');
+  exit.onclick();
+  assert.equal(hasClass(t.page.get('advBaseRow'), 'flash'), true, 'it opens the base it stands for');
+});
+
+test('"exit at the base" in the pickers: first while the profile has a base, marked when it has none, and never with a via', () => {
+  const x = { id: 'rp-x', name: 'X', useMode: false, base: 's1', def: 'base', defVia: 'inherit',
+    rules: [{ type: 'domain', value: 'news.example', target: 'base' }, { type: 'ip', value: '10.0.0.0/8', target: 's2' }] };
+  const h = pageHarness({ profiles: [store().def, x], profileSel: 'rp-x' });
+  const opts = plain(h.ctx.profileTargetOptions({ base: 's1' }, 's2'));
+  assert.deepEqual(opts[0], { value: 'base', label: '⚓ Exit at the base (🇩🇪 Base DE)' });
+  assert.equal(plain(h.ctx.profileTargetOptions({ base: null }, 's2')).some((o) => o.value === 'base'), false);
+  assert.deepEqual(plain(h.ctx.profileTargetOptions({ base: null }, 'base'))[0], { value: 'base', label: '⚠ Exit at the base — no base chosen' });
+  h.ctx.renderAdvanced();
+  const rows = ruleRows(h);
+  assert.deepEqual(rows.map((r) => /adv-via-mount/.test(r.innerHTML)), [false, true], 'the base itself takes no via');
+  assert.equal(h.el('advDefVia').hidden, true, 'nor does a default at the base');
+  // normalized: a via on the base itself is dropped
+  const n = plain(h.ctx.normalizeUiProfile({ id: 'rp-y', def: 'base', defVia: 's2', rules: [{ type: 'ip', value: '1.1.1.1', target: 'base', via: 's3' }] }));
+  assert.deepEqual([n.defVia, n.rules[0].via], ['inherit', undefined]);
+});
+
+test('the home path: "exit at the base" leaves from the base; the routing mode’s country gets its own direct line, on a profile and under a simple mode', () => {
+  const s = store();
+  const page = fakePage();
+  page.get('statIp').textContent = '—';
+  const x = { id: 'rp-x', name: 'X', useMode: true, base: 's1', def: 'base', defVia: 'inherit', rules: [{ type: 'domain', value: 'news.example', target: 'base' }] };
+  const ctx = compile(['renderTrafficPath', 'pathRule', 'modeCountryRule', 'appRuleWords', 'geoReady', 'pathNode', 'pathLink', 'trafficSpan', 'targetLabel', 'outboundTagFor', 'baseKeyOf',
+    'viaTagFor', 'profileOfSel', 'ruleVia', 'terminalTarget', 'takesNoVia', 'chainById', 'chainMembers', 'srvById'], {
+    state: { servers: s.servers, chains: s.chains, pool: [], settings: { tunMode: false, routingMode: 'bypass-ir', routeRules: [], routeDefault: 'direct' },
+      profiles: [s.def, x], selectedServerId: '__advanced__:rp-x', activeServerId: null },
+    t: en, $: page.$, document: page.document,
+    applyPathTraffic: () => {}, applyFlowTraffic: () => {}, poolEnabledValid: () => [],
+    String, Array, Object
+  }, PRELUDE_CONSTS + 'let lastPerOutbound = {};');
+  ctx.renderTrafficPath('disconnected');
+  const host = page.get('trafficPath');
+  const lines = host.children.find((c) => hasClass(c, 'path-rules')).children;
+  const tags = (row) => row.children.find((c) => hasClass(c, 'pr-traffic')).dataset.tags;
+  assert.equal(lines.length, 3, 'the rule, Iran, the default');
+  assert.equal(lines[0].querySelector('.pr-to').textContent, '⚓ 🇩🇪 Base DE');
+  assert.equal(lines[0].querySelector('.pr-via'), null, 'the base is the end of the line');
+  assert.equal(tags(lines[0]), 'out-s1');
+  assert.equal(hasClass(lines[1], 'is-mode'), true);
+  assert.deepEqual([lines[1].querySelector('.pr-cond').textContent, tags(lines[1])], ['Iran · simple routing mode', 'direct']);
+  assert.equal(tags(lines[2]), 'out-s1', 'everything else leaves from the base too');
+  assert.ok(host.children.some((c) => hasClass(c, 'path-dest')), 'the internet is marked as the end');
+  // a server under bypass Iran: the direct share on its own line under the path
+  ctx.state.selectedServerId = 's2';
+  ctx.renderTrafficPath('disconnected');
+  const box = page.get('trafficPath').children.find((c) => hasClass(c, 'path-bypass'));
+  assert.ok(box, 'a line under the path');
+  assert.equal(tags(box.children[0]), 'direct');
+  // global sends nothing direct: no such line
+  ctx.state.settings.routingMode = 'global';
+  ctx.renderTrafficPath('disconnected');
+  assert.equal(page.get('trafficPath').children.some((c) => hasClass(c, 'path-bypass')), false);
+});
+
+test('without the geo files the tree and the home path draw no geo rule (the core has none); a raw JSON server in proxy mode gets no mode line', () => {
+  const h = modelHarness({ settings: { advancedRouting: true, blockAds: true, routingMode: 'bypass-ir' }, assets: { xray: true } });
+  assert.deepEqual(plain(h.ctx.flowModel(h.s.work)).groups.map((g) => g.key), ['g0', 'g1', 'g2', 'g4', 'sys-lan', 'def'], 'no ads, no Iran: only the local network');
+  h.state.assets = { xray: true, geoip: true, geosite: true };
+  assert.deepEqual(plain(h.ctx.flowModel(h.s.work)).groups.map((g) => g.sys).filter(Boolean), ['ads', 'lan', 'ir']);
+  const s = store();
+  const page = fakePage();
+  page.get('statIp').textContent = '—';
+  const raw = Object.assign({}, s.servers[2], { id: 'raw1', name: 'Raw', jsonMode: 'raw' });
+  const ctx = compile(['renderTrafficPath', 'pathRule', 'modeCountryRule', 'appRuleWords', 'geoReady', 'pathNode', 'pathLink', 'trafficSpan', 'targetLabel',
+    'outboundTagFor', 'baseKeyOf', 'viaTagFor', 'profileOfSel', 'ruleVia', 'terminalTarget', 'takesNoVia', 'chainById', 'chainMembers', 'srvById'], {
+    state: { servers: s.servers.concat([raw]), chains: s.chains, pool: [], settings: { tunMode: false, routingMode: 'bypass-ir' }, assets: {},
+      profiles: [s.def], selectedServerId: 's2', activeServerId: null },
+    t: en, $: page.$, document: page.document,
+    applyPathTraffic: () => {}, applyFlowTraffic: () => {}, poolEnabledValid: () => [],
+    String, Array, Object
+  }, PRELUDE_CONSTS + 'let lastPerOutbound = {};');
+  const bypass = () => { ctx.renderTrafficPath('disconnected'); return page.get('trafficPath').children.some((c) => hasClass(c, 'path-bypass')); };
+  assert.equal(bypass(), false, 'no geo files: Iran is not routed direct');
+  ctx.state.assets = { geoip: true, geosite: true };
+  assert.equal(bypass(), true);
+  ctx.state.selectedServerId = 'raw1';
+  assert.equal(bypass(), false, 'a raw config runs its own routing in proxy mode');
+  ctx.state.settings.tunMode = true;
+  assert.equal(bypass(), true, 'under TUN it runs in full, the mode with it');
 });

@@ -221,14 +221,26 @@ class Store(context: Context) {
         else -> serverById(t) != null
     }
 
-    /** A routing target in words: a server's name, "⛓ chain", Direct, Block, or what is missing. */
+    /** A routing target in words: a server's name, "⛓ chain", Direct, Block, "⚓ Exit at the base", or what is missing. */
     fun targetLabel(t: String): String = when {
         t.isEmpty() -> "first server"
         t == "direct" -> "Direct"
         t == "block" -> "Block"
         t == "proxy" -> "Proxy (first server)"
+        t == RoutingProfiles.TARGET_BASE -> "⚓ Exit at the base"
         t.startsWith("chain:") -> chainById(t.substring(6))?.let { c: ChainConfig -> "⛓ ${c.name}" } ?: "missing chain"
         else -> serverById(t)?.name ?: "missing server"
+    }
+
+    /** [t] as a target of [p]: "exit at the base" is there while [p]'s base is (no base: it is not). */
+    fun targetExists(t: String, p: RoutingProfile): Boolean =
+        if (t == RoutingProfiles.TARGET_BASE) p.base?.let { b: String -> targetExists(b) } == true else targetExists(t)
+
+    /** [t] as a target of [p] in words: "exit at the base" names the base it stands for. */
+    fun targetLabel(t: String, p: RoutingProfile): String {
+        if (t != RoutingProfiles.TARGET_BASE) return targetLabel(t)
+        val b = p.base ?: return "⚓ Exit at the base (no base)"
+        return "⚓ Exit at the base (${targetLabel(b)})"
     }
 
     /** Replace the lists with what an import made of them (RouteShare.applyImport), and write them. */
@@ -280,8 +292,10 @@ class Store(context: Context) {
             Selection.isAdvanced(sel) -> {
                 val p = selectedProfile() ?: throw IllegalStateException("This routing profile no longer exists — pick another one")
                 if (p.rules.isEmpty() && p.def.isBlank()) throw IllegalStateException("Add at least one routing rule")
-                ConnectionPlan.Advanced(p.rules, p.def.ifBlank { servers.firstOrNull()?.id ?: "direct" }, serversById, chainsById,
-                    defVia = p.defVia, base = p.base, useMode = p.useMode, profileId = p.id)
+                // "exit at the base" is the base itself from here on; a default there without a base refuses
+                val r = RoutingProfiles.planRoutes(p, servers.firstOrNull()?.id ?: "direct")
+                ConnectionPlan.Advanced(r.rules, r.def, serversById, chainsById,
+                    defVia = r.defVia, base = p.base, useMode = p.useMode, profileId = p.id)
             }
             sel.startsWith("chain:") -> {
                 val c = chainById(sel.substring(6)) ?: throw IllegalStateException("Chain not found")
