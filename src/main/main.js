@@ -184,6 +184,11 @@ const DEFAULT_SETTINGS = {
   // leak guard under TUN: 'off' | 'standard' (adapter DNS override) | 'strict'
   // (+ strict_route and a firewall for everything off the tunnel)
   leakGuard: 'standard',
+  // who answers DNS inside the sing-box TUN (tunSingbox.tunDnsModeFor): 'app' —
+  // sing-box 1.14+ gets dns_mode "disabled" and every query reaches Xray — or
+  // 'core', sing-box's own default (1.14+: it answers them itself). Never 'core'
+  // under the strict guard; the router's is always the app's.
+  singboxDns: 'app',
   // proxy mode only: block outbound UDP except :53 on physical adapters (WebRTC)
   blockUdpInProxyMode: false,
   // per-app split under the sing-box TUN (see tunApps.js): 'off' | 'exclude'
@@ -1587,7 +1592,9 @@ async function connectOnce(serverId, opts = {}) {
         const echHoles = settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [];
         await myTun.start(settings.socksPort, [...entryAddrs, ...resolverBypassIpsOf(config), ...echHoles, ...pinnedIps],
           tunAdapterDns,
-          { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps });   // tun2socks ignores the 4th
+          { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps,
+            // sing-box 1.14+: the app's DNS unless the user left it to sing-box — never under the strict guard
+            dnsPolicy: settings.leakGuard !== 'strict' && settings.singboxDns === 'core' ? 'core' : 'app' });   // tun2socks ignores the 4th
         send('log', { line: 'TUN mode active (whole system)', level: 'info' });
         if (tunApps) {
           send('log', {

@@ -119,6 +119,11 @@ const DEFAULT_SETTINGS = {
   // leak guard under TUN: 'off' | 'standard' (adapter DNS override) | 'strict'
   // (+ strict_route and a firewall for everything off the tunnel)
   leakGuard: 'standard',
+  // who answers DNS inside the sing-box TUN (tunSingbox.tunDnsModeFor): 'app' —
+  // sing-box 1.14+ gets dns_mode "disabled" and every query reaches Xray — or
+  // 'core', sing-box's own default (1.14+: it answers them itself). Never 'core'
+  // under the strict guard; the router's is always the app's.
+  singboxDns: 'app',
   // proxy mode only: block outbound UDP except :53 on physical adapters (WebRTC)
   blockUdpInProxyMode: false,
   // per-app split under the sing-box TUN (see tunApps.js): 'off' | 'exclude'

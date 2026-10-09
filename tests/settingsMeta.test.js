@@ -102,7 +102,7 @@ test('every reconnect-relevant key is detected when it changes', () => {
     routeRules: [{ type: 'ip', value: '10.0.0.0/8', target: 'srv' }],
     routeDefault: 'direct', procRouteWatch: true,
     systemProxy: false, tunMode: true,
-    tunBackend: 'tun2socks', leakGuard: 'strict', blockUdpInProxyMode: true,
+    tunBackend: 'tun2socks', leakGuard: 'strict', blockUdpInProxyMode: true, singboxDns: 'core',
     tunAppMode: 'exclude', tunApps: ['chrome.exe'],
     defaultEngine: 'xray-pattn',
     mux: 'auto'
