@@ -2643,9 +2643,10 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
 /* ================================ ROUTING ================================ */
 /**
  * Routing: the simple modes, then advanced routing as PROFILES — several saved
- * rule sets, each with an optional base its targets ride on ("via a base"),
- * and the profile drawn as a vertical flow, rule → target → base (RoutingProfiles
- * .kt; spec 2026-10-09 §1–§3, the desktop's routing page in the app's style).
+ * rule sets, each with an optional base its targets ride on ("via a base") or
+ * leave from ("exit at the base"), and the profile drawn as a vertical flow,
+ * rule → base → target, among the app's own rules (RoutingProfiles.kt; spec
+ * 2026-10-09 §1–§3, the desktop's routing page in the app's style).
  *
  * Saves recompose through the store (AppWork.touch) instead of rebuilding the
  * screen (bump): a long profile keeps its place while it is edited, and the
@@ -2781,7 +2782,7 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
 
             Spacer(Modifier.height(6.dp))
             Text("Base", color = TXT, fontWeight = FontWeight.Bold)
-            Text("A config the targets below ride on, unless a rule says otherwise — for example two chains that both leave through one server.", color = MUTED, fontSize = 11.sp)
+            Text("A config the targets below ride on, unless a rule says otherwise — for example two chains that both leave through one server. A rule or the default can also leave from the base itself: ⚓ Exit at the base.", color = MUTED, fontSize = 11.sp)
             val base = prof.base
             DropPick(if (base == null) "No base" else "⚠ ${store.targetLabel(base)}", listOf("" to "No base") + targetOptions(store), base ?: "") { b: String ->
                 update(prof.id) { cur: RoutingProfile -> cur.copy(base = b.ifEmpty { null }) }
@@ -2806,8 +2807,13 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
             }, modifier = Modifier.fillMaxWidth()) { Text("+ Add rule") }
 
             Spacer(Modifier.height(8.dp)); Text("Rest of traffic via:", color = MUTED)
-            DropPick("Default", targetOptionsFull(store), prof.def) { t: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(def = t) } }
-            if (!store.targetExists(prof.def)) Text("⚠ The default is gone — connecting is refused until you pick another.", color = BAD, fontSize = 11.sp)
+            val defAtBase = prof.def == RoutingProfiles.TARGET_BASE
+            DropPick(if (defAtBase) store.targetLabel(prof.def, prof) else "Default", targetOptionsFor(store, prof), prof.def) { t: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(def = t) } }
+            when {
+                defAtBase && prof.base == null -> Text("⚠ This routing has no base — connecting is refused until you choose a base above or another default.", color = BAD, fontSize = 11.sp)
+                !store.targetExists(prof.def, prof) -> Text("⚠ The default is gone — connecting is refused until you pick another.", color = BAD, fontSize = 11.sp)
+            }
+            // "exit at the base" IS the base: nothing to ride on
             if (RoutingProfiles.takesVia(prof.def)) {
                 DropPick("Base", viaOptions(store, prof, prof.def), prof.defVia) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(defVia = v) } }
                 val dv = RoutingProfiles.effectiveDefVia(prof)
@@ -2815,7 +2821,7 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
             }
 
             HorizontalDivider(Modifier.padding(vertical = 12.dp), color = STROKE)
-            FlowList(store, prof, onRule = { i: Int -> ruleDialog = i }, onNode = onNode)
+            FlowList(store, prof, s, geo, onRule = { i: Int -> ruleDialog = i }, onNode = onNode)
             Spacer(Modifier.height(16.dp))
         }
     }
@@ -2909,7 +2915,7 @@ private object RoutingUi { @Volatile var focus = "" }
                 }
             }
             Text(
-                "${p.rules.size} rule(s) · rest → ${store.targetLabel(p.def)}" + (if (dv != null) " via ${store.targetLabel(dv)}" else ""),
+                "${p.rules.size} rule(s) · rest → ${store.targetLabel(p.def, p)}" + (if (dv != null) " via ${store.targetLabel(dv)}" else ""),
                 color = MUTED2, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
@@ -2936,13 +2942,25 @@ private object RoutingUi { @Volatile var focus = "" }
     }
     // Saved when editing ends, not per keystroke (DraftField).
     DraftField(r.value, Modifier.fillMaxWidth(), placeholder = { Text("value (geosite:google / 1.2.3.0/24 / 443)", fontSize = 11.sp) }) { nv: String -> onChange(r.copy(value = nv)) }
-    DropPick("⚠ ${store.targetLabel(r.target)}", targetOptionsFull(store), r.target) { t: String -> onChange(r.copy(target = t)) }
-    if (!store.targetExists(r.target)) Text("⚠ This target is gone — the rule is skipped (its traffic follows the default) until you pick another.", color = BAD, fontSize = 11.sp)
+    DropPick("⚠ ${store.targetLabel(r.target, p)}", targetOptionsFor(store, p), r.target) { t: String -> onChange(r.copy(target = t)) }
+    when {
+        r.target == RoutingProfiles.TARGET_BASE && p.base == null -> Text("⚠ This routing has no base — the rule is skipped (its traffic follows the default) until you choose a base or another target.", color = BAD, fontSize = 11.sp)
+        !store.targetExists(r.target, p) -> Text("⚠ This target is gone — the rule is skipped (its traffic follows the default) until you pick another.", color = BAD, fontSize = 11.sp)
+    }
+    // "exit at the base" IS the base: no via picker
     if (RoutingProfiles.takesVia(r.target)) {
         DropPick("⚠ via ${store.targetLabel(r.via)}", viaOptions(store, p, r.target), r.via.ifEmpty { RoutingProfiles.VIA_INHERIT }) { v: String -> onChange(r.copy(via = v)) }
         val eff = RoutingProfiles.effectiveVia(r, p)
         if (eff != null && !store.targetExists(eff)) Text("⚠ Its base is gone — connecting is refused until you pick another.", color = BAD, fontSize = 11.sp)
     }
+}
+
+/** A rule's or the default's targets in [p]: every target, and — while [p] has a base — "exit at the base" (it follows the base). */
+private fun targetOptionsFor(store: Store, p: RoutingProfile): List<Pair<String, String>> {
+    val all = targetOptionsFull(store)
+    val base = p.base ?: return all
+    // after Direct and Block: the words, then the servers and chains
+    return all.take(3) + (RoutingProfiles.TARGET_BASE to "⚓ Exit at the base (${store.targetLabel(base)})") + all.drop(3)
 }
 
 /** What a target can ride on: the profile's base, nothing, or any server or chain but itself. */
@@ -2995,42 +3013,30 @@ private fun targetGlyph(t: String): String = when {
 }
 
 /**
- * The profile as a vertical flow (spec §3, Android): each step is the rules
- * (consecutive ones to the same place grouped) → where they go → the base it
- * rides on; the default last, as "everything else". Then each base once, with
- * every target through it. A rule opens its editor; a server its edit sheet; a
- * chain the chains screen. What is gone is red, with what connecting does about it.
+ * The profile as a vertical flow (spec §3, Android), in the order the
+ * connection applies it (ConfigBuilder.buildAdvanced): Block ads, the
+ * profile's rules, the local network, the routing mode's country bypass, then
+ * everything else. A step of the profile's is its rules (consecutive ones to
+ * the same place grouped) → the base they go through, when they do — it sits
+ * between the phone and the target: the phone dials the base, the base the
+ * target → where they go ("leaves here" at the base). The app's own steps are
+ * dimmed and read-only. Then each base once, with every target through it. A
+ * rule opens its editor; a server its edit sheet; a chain the chains screen.
+ * What is gone is red, with what connecting does about it.
  */
-@Composable private fun FlowList(store: Store, p: RoutingProfile, onRule: (Int) -> Unit, onNode: (String) -> Unit) {
+@Composable private fun FlowList(store: Store, p: RoutingProfile, s: AppSettings, geo: Boolean, onRule: (Int) -> Unit, onNode: (String) -> Unit) {
     val lanes = RoutingProfiles.lanes(p) { t: String -> store.targetExists(t) }
     Text("FLOW", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
-    Text("Top to bottom: the first rule that matches decides where the traffic goes, then what that rides on.", color = MUTED, fontSize = 11.sp)
+    Text("Top to bottom, as the connection applies them: the first rule that matches decides. A base (⚓) sits between you and the target. Dimmed rows are the app’s own.", color = MUTED, fontSize = 11.sp)
     Spacer(Modifier.height(6.dp))
-    lanes.forEach { lane: RoutingProfiles.Lane ->
-        Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
-            Column(Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
-                if (lane.isDefault) {
-                    FlowNode("★", "Everything else", TXT2, null, 0.dp, null)
-                } else {
-                    lane.rules.forEach { i: Int ->
-                        val r = p.rules[i]
-                        FlowNode(ruleGlyph(r.type), ruleSummary(r), TXT2, null, 0.dp) { onRule(i) }
-                    }
-                }
-                FlowArrow("↓", 12.dp)
-                val targetNote = if (!lane.targetMissing) null
-                    else if (lane.isDefault) "gone — connecting is refused"
-                    else "gone — skipped, its traffic follows the default"
-                val target = if (lane.target.isEmpty() && lane.isDefault) (store.servers.firstOrNull()?.id ?: "direct") else lane.target
-                FlowNode(targetGlyph(target), store.targetLabel(target), PRIMARY, targetNote, 12.dp) { onNode(target) }
-                val via = lane.via
-                if (via != null) {
-                    FlowArrow("↓ via", 24.dp)
-                    FlowNode("◆", store.targetLabel(via), AMBER, if (lane.viaMissing) "base gone — connecting is refused" else null, 24.dp) { onNode(via) }
-                }
-            }
-        }
-    }
+    // without the geo files the config has no geo rule at all (ConfigBuilder's `&& geo`)
+    if (s.blockAds && geo) FlowAppRow("🚫", "Ads", "Block", "app")
+    lanes.filter { l: RoutingProfiles.Lane -> !l.isDefault }.forEach { l: RoutingProfiles.Lane -> FlowLane(store, p, l, onRule, onNode) }
+    FlowAppRow("🏠", "Local network", "Direct", "app")
+    // the simple routing mode under the rules, when the profile applies it (its useMode)
+    if (p.useMode && geo && s.routingMode == "bypass-ir") FlowAppRow("🇮🇷", "Iran (routing mode)", "Direct", "mode")
+    if (p.useMode && geo && s.routingMode == "bypass-cn") FlowAppRow("🇨🇳", "China (routing mode)", "Direct", "mode")
+    lanes.filter { l: RoutingProfiles.Lane -> l.isDefault }.forEach { l: RoutingProfiles.Lane -> FlowLane(store, p, l, onRule, onNode) }
     val bases = RoutingProfiles.lanesByBase(lanes)
     if (bases.isNotEmpty()) {
         Spacer(Modifier.height(8.dp))
@@ -3039,10 +3045,10 @@ private fun targetGlyph(t: String): String = when {
             val base = e.first
             Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
                 Column(Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
-                    FlowNode("◆", store.targetLabel(base), AMBER, if (store.targetExists(base)) null else "gone — connecting is refused", 0.dp) { onNode(base) }
+                    FlowNode("⚓", store.targetLabel(base), AMBER, if (store.targetExists(base)) null else "gone — connecting is refused", 0.dp) { onNode(base) }
                     e.second.forEach { l: RoutingProfiles.Lane ->
                         Text(
-                            "← " + store.targetLabel(l.target) + (if (l.isDefault) " (everything else)" else ""),
+                            "→ " + store.targetLabel(l.target) + (if (l.isDefault) " (everything else)" else ""),
                             color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(start = 34.dp, top = 2.dp, bottom = 2.dp)
                         )
@@ -3050,6 +3056,67 @@ private fun targetGlyph(t: String): String = when {
                 }
             }
         }
+    }
+}
+
+/**
+ * One step of the profile's flow: its rules (or "everything else") → the base
+ * they go through, when they do → where they go. A step at the base ("exit at
+ * the base") reads rules → ⚓ the base → 🌐 leaves here; without a base it is
+ * red, with what connecting does about it.
+ */
+@Composable private fun FlowLane(store: Store, p: RoutingProfile, lane: RoutingProfiles.Lane, onRule: (Int) -> Unit, onNode: (String) -> Unit) {
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
+        Column(Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
+            if (lane.isDefault) {
+                FlowNode("★", "Everything else", TXT2, null, 0.dp, null)
+            } else {
+                lane.rules.forEach { i: Int ->
+                    val r = p.rules[i]
+                    FlowNode(ruleGlyph(r.type), ruleSummary(r), TXT2, null, 0.dp) { onRule(i) }
+                }
+            }
+            // what connecting does about a step whose target is not there
+            val missing = if (lane.isDefault) "connecting is refused" else "skipped, its traffic follows the default"
+            if (lane.target == RoutingProfiles.TARGET_BASE) {
+                val base = p.base
+                FlowArrow("↓", 12.dp)
+                if (base == null) {
+                    FlowNode("⚓", "Exit at the base", BAD, "This routing has no base — $missing", 12.dp, null)
+                } else {
+                    FlowNode("⚓", store.targetLabel(base), AMBER, if (lane.targetMissing) "base gone — $missing" else null, 12.dp) { onNode(base) }
+                    FlowArrow("↓", 24.dp)
+                    FlowNode("🌐", "leaves here", PRIMARY, null, 24.dp, null)
+                }
+            } else {
+                // the base first: the phone dials it, and it dials the target
+                val via = lane.via
+                if (via != null) {
+                    FlowArrow("↓ through", 12.dp)
+                    FlowNode("⚓", store.targetLabel(via), AMBER, if (lane.viaMissing) "base gone — connecting is refused" else null, 12.dp) { onNode(via) }
+                }
+                val indent = if (via != null) 24.dp else 12.dp
+                FlowArrow("↓", indent)
+                val target = if (lane.target.isEmpty() && lane.isDefault) (store.servers.firstOrNull()?.id ?: "direct") else lane.target
+                FlowNode(targetGlyph(target), store.targetLabel(target), PRIMARY, if (lane.targetMissing) "gone — $missing" else null, indent) { onNode(target) }
+            }
+        }
+    }
+}
+
+/** One of the app's own rules in the flow: read-only, dimmed, tagged with where it comes from ("app", "mode"). */
+@Composable private fun FlowAppRow(glyph: String, what: String, target: String, tag: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 3.dp).alpha(0.6f)
+            .border(1.dp, STROKE, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(glyph, fontSize = 13.sp, modifier = Modifier.width(24.dp))
+        Text("$what → $target", color = TXT2, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Text(
+            tag.uppercase(), color = MUTED, fontSize = 8.sp, fontFamily = MONO, letterSpacing = 0.1.em, maxLines = 1,
+            modifier = Modifier.border(1.dp, STROKE, RoundedCornerShape(4.dp)).padding(horizontal = 5.dp, vertical = 2.dp)
+        )
     }
 }
 
