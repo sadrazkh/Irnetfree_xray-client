@@ -66,9 +66,10 @@ class RouteShareTest {
     @Test fun profilePayload_keysTargetsAndOnlyWhatItNames() {
         val links = fixtureServers()
         fun srv(id: String, name: String, key: String) = parse(links.getValue(key)).copy(id = id, name = name)
+        // (the base server is "de": "base" is a target word of its own — RoutingProfiles.TARGET_BASE)
         val servers = listOf(
             srv("other", "Unrelated", "s4").copy(id = "other"),
-            srv("base", "🇩🇪 Base DE", "s1"), srv("wg", "Corp WG", "s2"), srv("us", "Netflix US", "s3"), srv("nl", "Hop NL", "s4")
+            srv("de", "🇩🇪 Base DE", "s1"), srv("wg", "Corp WG", "s2"), srv("us", "Netflix US", "s3"), srv("nl", "Hop NL", "s4")
         )
         val chains = listOf(ChainConfig("ch-unused", "Spare", listOf("wg", "nl")), ChainConfig("ch1", "NL→US", listOf("nl", "us")))
         val profile = RoutingProfile("rp-work", "Work", listOf(
@@ -77,13 +78,13 @@ class RouteShareTest {
             RouteRule("domain", "geosite:category-ir", "direct"),
             RouteRule("ip", "geoip:ir", "direct"),
             RouteRule("port", "5060", "chain:ch1", "none")
-        ), def = "base", defVia = "none", useMode = true, base = "base")
-        val linkOf = { s: ServerConfig -> if (s.id == "other") "vless://unused" else links.getValue(mapOf("base" to "s1", "wg" to "s2", "us" to "s3", "nl" to "s4").getValue(s.id)) }
+        ), def = "de", defVia = "none", useMode = true, base = "de")
+        val linkOf = { s: ServerConfig -> if (s.id == "other") "vless://unused" else links.getValue(mapOf("de" to "s1", "wg" to "s2", "us" to "s3", "nl" to "s4").getValue(s.id)) }
         val out = RouteShare.profilePayload(profile, servers, chains, linkOf)
         assertEquals(Canon.of(payload), Canon.of(out))
         // nothing of the sender's ids travels
         val text = out.toString()
-        assertFalse(text.contains("rp-work") || text.contains("\"ch1\"") || text.contains("\"base\":\"base\""))
+        assertFalse(text.contains("rp-work") || text.contains("\"ch1\"") || text.contains("\"base\":\"de\""))
         // a target that no longer exists refuses the share
         assertThrows(IllegalArgumentException::class.java) { RouteShare.profilePayload(profile.copy(def = "gone"), servers, chains, linkOf) }
         // Android's legacy "proxy" target travels as the first server
@@ -269,6 +270,80 @@ class RouteShareTest {
         assertThrows(IllegalArgumentException::class.java) {
             RouteShare.applyImport(badTarget, emptyList(), emptyList(), emptyList(), { x: String -> parse(x) }, identity, newId)
         }
+    }
+
+    /* ----------------------------- exit at the base ----------------------------- */
+
+    private val exitLink: String get() = fixture("exit-base-link.txt").trim()
+    private val exitPayload: JSONObject get() = JSONObject(fixture("exit-base-payload.json"))
+
+    @Test fun exitAtTheBase_theDesktopsLinkDecodesToThePayload() {
+        assertEquals(Canon.of(exitPayload), Canon.of(RouteShare.decode(exitLink)))
+        // and what this side makes of it decodes back to it
+        assertEquals(Canon.of(exitPayload), Canon.of(RouteShare.decode(RouteShare.encode(exitPayload))))
+    }
+
+    @Test fun exitAtTheBase_profilePayloadCarriesItAsItIs_withNoVia() {
+        val a = exitPayload.getJSONArray("servers")
+        val links = (0 until a.length()).associate { i: Int -> a.getJSONObject(i).getString("key") to a.getJSONObject(i).getString("link") }
+        val servers = listOf(parse(links.getValue("s1")).copy(id = "de", name = "🇩🇪 Base DE"), parse(links.getValue("s2")).copy(id = "wg", name = "Corp WG"))
+        val profile = RoutingProfile("rp-x", "Exit at the base", listOf(
+            RouteRule("ip", "10.0.0.0/8,192.168.0.0/16", "wg"),
+            RouteRule("domain", "geosite:category-ir", "direct"),
+            // a stale via on it is not carried: "exit at the base" rides on nothing
+            RouteRule("domain", "news.example", RoutingProfiles.TARGET_BASE, "wg")
+        ), def = RoutingProfiles.TARGET_BASE, defVia = "wg", useMode = true, base = "de")
+        val linkOf = { s: ServerConfig -> links.getValue(if (s.id == "de") "s1" else "s2") }
+        val out = RouteShare.profilePayload(profile, servers, emptyList(), linkOf)
+        assertEquals(Canon.of(exitPayload), Canon.of(out))
+        val po = out.getJSONObject("profile")
+        assertEquals("base", po.getString("def"))
+        assertEquals("inherit", po.getString("defVia"))
+        assertEquals("base", po.getJSONArray("rules").getJSONObject(2).getString("target"))
+        assertFalse(po.getJSONArray("rules").getJSONObject(2).has("via"))
+        // without a base it still travels as it is (the receiver's Routing marks it, as the sender's does)
+        val noBase = RouteShare.profilePayload(RoutingProfile("rp-n", "N", def = RoutingProfiles.TARGET_BASE), servers, emptyList(), linkOf)
+        assertEquals("base", noBase.getJSONObject("profile").getString("def"))
+        assertTrue(noBase.getJSONObject("profile").isNull("base"))
+        assertEquals(0, noBase.getJSONArray("servers").length())
+    }
+
+    @Test fun exitAtTheBase_importKeepsItAndMapsTheBase() {
+        val r = RouteShare.applyImport(RouteShare.decode(exitLink), emptyList(), emptyList(), emptyList(), { l: String -> parse(l) }, identity, newId)
+        assertEquals(2, r.addedServers)
+        val prof = r.profiles.single()
+        val byName = r.servers.associateBy { s: ServerConfig -> s.name }
+        assertEquals("Exit at the base", prof.name)
+        assertEquals(byName.getValue("🇩🇪 Base DE").id, prof.base)
+        assertEquals(RoutingProfiles.TARGET_BASE, prof.def)
+        assertEquals("inherit", prof.defVia)
+        assertEquals(byName.getValue("Corp WG").id, prof.rules[0].target)
+        assertEquals("inherit", prof.rules[0].via)
+        assertEquals("direct", prof.rules[1].target)
+        assertEquals(RoutingProfiles.TARGET_BASE, prof.rules[2].target)
+        assertEquals("", prof.rules[2].via)
+        // a stale via on it in a link is dropped on the way in
+        val withVia = RouteShare.decode(exitLink)
+        withVia.getJSONObject("profile").getJSONArray("rules").getJSONObject(2).put("via", "s2")
+        val r2 = RouteShare.applyImport(withVia, emptyList(), emptyList(), emptyList(), { l: String -> parse(l) }, identity, newId)
+        assertEquals("", r2.profiles.single().rules[2].via)
+    }
+
+    @Test fun exitAtTheBase_isNeverAViaNorTheBase() {
+        fun refused(p: JSONObject) {
+            assertThrows(IllegalArgumentException::class.java) { RouteShare.decode(wrap(p.toString())) }
+            assertThrows(IllegalArgumentException::class.java) {
+                RouteShare.applyImport(p, emptyList(), emptyList(), emptyList(), { x: String -> parse(x) }, identity, newId)
+            }
+        }
+        val ruleVia = JSONObject(exitPayload.toString()); ruleVia.getJSONObject("profile").getJSONArray("rules").getJSONObject(0).put("via", "base")
+        refused(ruleVia)
+        val defVia = JSONObject(exitPayload.toString()); defVia.getJSONObject("profile").put("def", "s2").put("defVia", "base")
+        refused(defVia)
+        val base = JSONObject(exitPayload.toString()); base.getJSONObject("profile").put("base", "base")
+        refused(base)
+        // as a target and the default it is fine
+        RouteShare.decode(wrap(exitPayload.toString()))
     }
 
     @Test fun theQrDecision() {
