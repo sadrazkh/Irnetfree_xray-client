@@ -414,6 +414,11 @@ const I18N = {
     'set.systemProxy': 'پروکسی سیستمی', 'set.tunMode': 'حالت TUN',
     /* هم برچسب کنترل در تنظیمات‌اند، هم نامی که پنجره‌ی «اعمال تنظیمات» نشان می‌دهد */
     'set.tunBackend': 'بک‌اندِ TUN', 'set.leakGuard': 'گارد نشتی',
+    'set.singboxDns': 'DNS در TUN (sing-box)',
+    'sbdns.app': 'برنامه — sing-box به DNS دست نمی‌زند و همهٔ پرس‌وجوها به Xray می‌رسند: DNS مدیریت‌شده و اسم‌های داخلیِ وایرگارد کار می‌کنند. پیشنهادی',
+    'sbdns.core': 'خودِ sing-box — از نسخهٔ 1.14، sing-box پرس‌وجوها را خودش جواب می‌دهد: قواعد DNS برنامه و اسم‌های داخلیِ وایرگارد دور زده می‌شوند و ممکن است DNS نشت کند',
+    'sbdns.hint': 'فقط sing-box 1.14 به بعد این را دارد؛ با نسخه‌های قدیمی‌تر DNS همیشه دست برنامه است. تغییرش در اتصال بعدی اعمال می‌شود.',
+    'sbdns.strictNote': 'گارد نشتیِ سخت‌گیرانه DNS را همیشه دست برنامه نگه می‌دارد.',
     'set.tunAppMode': 'روتینگ به‌تفکیک برنامه زیر TUN', 'set.tunApps': 'برنامه‌های انتخاب‌شده',
     'set.blockUdpInProxyMode': 'بستن UDP در حالت پروکسی',
     // not a setting: an edit of a server the live connection dials (pendingKeys pushes 'servers')
@@ -1091,6 +1096,11 @@ const I18N = {
     'set.systemProxy': 'System proxy', 'set.tunMode': 'TUN mode',
     /* both the control labels in Settings and the names the apply dialog lists */
     'set.tunBackend': 'TUN backend', 'set.leakGuard': 'Leak guard',
+    'set.singboxDns': 'DNS in TUN (sing-box)',
+    'sbdns.app': 'The app — sing-box leaves DNS alone and every query reaches Xray: the managed DNS and a WireGuard’s private names work. Recommended',
+    'sbdns.core': 'sing-box itself — from 1.14, sing-box answers the queries itself: the app’s DNS rules and a WireGuard’s private names are bypassed, and DNS may leak',
+    'sbdns.hint': 'Only sing-box 1.14 and later have this; with older versions DNS is always the app’s. A change applies on the next connect.',
+    'sbdns.strictNote': 'The strict leak guard always keeps DNS with the app.',
     'set.tunAppMode': 'Per-app routing under TUN', 'set.tunApps': 'Selected apps',
     'set.blockUdpInProxyMode': 'Block UDP in proxy mode',
     // not a setting: an edit of a server the live connection dials (pendingKeys pushes 'servers')
