@@ -302,9 +302,12 @@ async function main() {
         if (clean) ok(`fixed (dns_mode ${dnsMode || 'none'}): every name answered by Xray, none reached the ISP resolver — ${line}`);
         else fail(`fixed (dns_mode ${dnsMode || 'none'}): ${line}${leaked.length ? ' · LEAKED to the ISP resolver: ' + leaked.join(', ') : ''}${why()}`);
       } else if (newer) {
-        // the bug must show without the key, or this probe cannot tell it apart
-        if (leaked.length || ispAnswered) ok(`control (no dns_mode) on ${version}: the bug reproduces — ${line}${leaked.length ? ' · leaked to the ISP resolver: ' + leaked.join(', ') : ''}`);
-        else fail(`control (no dns_mode) on ${version}: the bug's signature (an ISP answer, a name the ISP heard) did not show — the probe cannot tell what dns_mode fixes — ${line}${why()}`);
+        // the bug must show without the key, or this probe cannot tell it apart: the very names Xray
+        // answered a moment ago (fixed) do not come from Xray now — sing-box took them (an ISP answer,
+        // a name the ISP heard, or nothing at all: "name not resolved")
+        const how = leaked.length ? 'leaked to the ISP resolver: ' + leaked.join(', ') : ispAnswered ? 'answered by the ISP resolver' : 'not resolved at all';
+        if (!byXray) ok(`control (no dns_mode) on ${version}: the bug reproduces — Xray never saw the names, ${how} — ${line}`);
+        else fail(`control (no dns_mode) on ${version}: Xray still answered — the probe does not reproduce what dns_mode fixes — ${line}${why()}`);
       } else if (clean) ok(`control on ${version}: the same config as fixed, clean — ${line}`);
       else fail(`control on ${version}: ${line}${leaked.length ? ' · leaked: ' + leaked.join(', ') : ''}${why()}`);
       await stop(sb);
