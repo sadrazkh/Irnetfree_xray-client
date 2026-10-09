@@ -35,6 +35,10 @@ const MAX_BODY_CHARS = Math.ceil((MAX_DECODED + 1024) / 3) * 4;
 const RULE_TYPES = ['ip', 'domain', 'port', 'process'];
 const VIA_INHERIT = 'inherit';
 const VIA_NONE = 'none';
+/** "Exit at the base" (routingProfiles.TARGET_BASE): a target that is the profile's own base — carried as it is. */
+const TARGET_BASE = 'base';
+/** A target that names no server or chain of the payload: direct, block, the profile's own base. */
+const plainTarget = (t) => t === 'direct' || t === 'block' || t === TARGET_BASE;
 const SERVER_KEY = /^s[1-9]\d*$/;
 const CHAIN_KEY = /^c[1-9]\d*$/;
 
@@ -188,12 +192,12 @@ function validatePayload(p, lang) {
     chainKeys.add(c.key);
   }
   const target = (t) => {
-    if (t === 'direct' || t === 'block') return;
+    if (plainTarget(t)) return;
     const ok = isText(t) && (t.startsWith('chain:') ? chainKeys.has(t.slice(6)) : serverKeys.has(t));
     if (!ok) throw fail('missing', lang, { ref: String(t).slice(0, 40) });
   };
-  const proxy = (t) => {   // a via or a base: a server or a chain, never direct/block
-    if (t === 'direct' || t === 'block') throw fail('missing', lang, { ref: t });
+  const proxy = (t) => {   // a via or a base: a server or a chain, never direct/block/the base itself
+    if (plainTarget(t)) throw fail('missing', lang, { ref: t });
     target(t);
   };
   const via = (v) => { if (v !== undefined && v !== null && v !== VIA_INHERIT && v !== VIA_NONE) proxy(v); };
@@ -258,7 +262,7 @@ function makeKeys({ servers, chains, linkOf, legacyChain, lang }) {
     return { id: '\u0000legacy', name, members: ids };
   };
   const ref = (t, at) => {
-    if (t === 'direct' || t === 'block') return t;
+    if (plainTarget(t)) return t;
     if (t === 'chain') {
       const c = legacy();
       if (!c.members.length) throw fail('gone', lang, { where: whereLabel(lang, at) });
@@ -278,7 +282,7 @@ function makeKeys({ servers, chains, linkOf, legacyChain, lang }) {
 function viaRef(v, keys, at) {
   if (v === undefined || v === null || v === '') return undefined;
   if (v === VIA_INHERIT || v === VIA_NONE) return v;
-  if (v === 'direct' || v === 'block') return undefined;
+  if (plainTarget(v)) return undefined;
   return keys.ref(v, at);
 }
 
@@ -294,10 +298,10 @@ function profilePayload({ profile, servers, chains, linkOf, legacyChain, lang })
   const base = p.base ? keys.ref(p.base, { what: 'base' }) : null;
   const rawDef = p.def || ((servers || [])[0] && servers[0].id) || 'direct';
   const def = keys.ref(rawDef, { what: 'def' });
-  const defVia = (def === 'direct' || def === 'block') ? VIA_INHERIT : (viaRef(p.defVia, keys, { what: 'defVia' }) || VIA_INHERIT);
+  const defVia = plainTarget(def) ? VIA_INHERIT : (viaRef(p.defVia, keys, { what: 'defVia' }) || VIA_INHERIT);
   const rules = (Array.isArray(p.rules) ? p.rules : []).filter(Boolean).map((r, i) => {
     const out = { type: r.type, value: String(r.value == null ? '' : r.value), target: keys.ref(r.target, { rule: i + 1 }) };
-    if (out.target !== 'direct' && out.target !== 'block') {
+    if (!plainTarget(out.target)) {
       const v = viaRef(r.via, keys, { rule: i + 1, via: true });
       if (v !== undefined) out.via = v;
     }
@@ -454,7 +458,7 @@ function applyImport(payload, { servers = [], chains = [], profiles = [], parse,
     res.chainId = chainOfKey[payload.chains[0].key];
     return res;
   }
-  const ref = (t) => (t === 'direct' || t === 'block' ? t : t.startsWith('chain:') ? 'chain:' + chainOfKey[t.slice(6)] : idOfKey[t]);
+  const ref = (t) => (plainTarget(t) ? t : t.startsWith('chain:') ? 'chain:' + chainOfKey[t.slice(6)] : idOfKey[t]);
   const via = (v) => (v === undefined || v === null || v === '' ? undefined : v === VIA_INHERIT || v === VIA_NONE ? v : ref(v));
   const p = payload.profile;
   const profileIds = new Set(profiles.map((x) => x && x.id));
@@ -463,7 +467,7 @@ function applyImport(payload, { servers = [], chains = [], profiles = [], parse,
     name: uniqueName((isText(p.name) && p.name.trim()) || 'Routing', profiles.map((x) => x && x.name)),
     rules: p.rules.map((r) => {
       const out = { type: r.type, value: String(r.value == null ? '' : r.value), target: ref(r.target) };
-      const v = out.target === 'direct' || out.target === 'block' ? undefined : via(r.via);
+      const v = plainTarget(out.target) ? undefined : via(r.via);
       if (v !== undefined) out.via = v;
       return out;
     }),

@@ -1,0 +1,42 @@
+{
+  "v": 1,
+  "kind": "profile",
+  "servers": [
+    {
+      "key": "s1",
+      "name": "🇩🇪 Base DE",
+      "link": "vless://00000000-0000-4000-8000-0000000000d1@base.example.com:443?encryption=none&type=ws&security=tls&sni=base.example.com&host=base.example.com&path=%2Fws#%F0%9F%87%A9%F0%9F%87%AA%20Base%20DE"
+    },
+    {
+      "key": "s2",
+      "name": "Corp WG",
+      "link": "wireguard://SECRETKEYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D@wg.corp.example:51820?publickey=PUBKEYBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB%3D&address=10.7.0.2%2F32&mtu=1280#Corp%20WG"
+    }
+  ],
+  "chains": [],
+  "profile": {
+    "name": "Exit at the base",
+    "useMode": true,
+    "base": "s1",
+    "def": "base",
+    "defVia": "inherit",
+    "rules": [
+      {
+        "type": "ip",
+        "value": "10.0.0.0/8,192.168.0.0/16",
+        "target": "s2",
+        "via": "inherit"
+      },
+      {
+        "type": "domain",
+        "value": "geosite:category-ir",
+        "target": "direct"
+      },
+      {
+        "type": "domain",
+        "value": "news.example",
+        "target": "base"
+      }
+    ]
+  }
+}
