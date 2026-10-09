@@ -557,7 +557,7 @@ test('the tree on screen: three columns of buttons, keyed for their edges, the d
   assert.equal(g0.querySelector('.rf-to').textContent, '→ ⚓ 🇩🇪 Base DE → Corp WG');
   const lan = byKey(h.flow(), 'sys-lan');
   assert.equal(hasClass(lan, 'rf-app'), true, 'the app’s own rule, said as such');
-  assert.deepEqual([lan.querySelector('.rf-label').textContent, lan.querySelector('.rf-tag').textContent], ['Local network', 'always']);
+  assert.deepEqual([lan.querySelector('.rf-label').textContent, lan.querySelector('.rf-sub').textContent], ['Local network', 'always']);
   const def = byKey(h.flow(), 'def');
   assert.equal(hasClass(def, 'rf-default'), true);
   assert.equal(def.querySelector('.rf-label').textContent, 'everything else');
@@ -1253,7 +1253,7 @@ test('the tree shows the app’s own rules where the core matches them: ads befo
   t.ctx.renderFlowTree();
   const ir = byKey(t.flow(), 'sys-ir');
   assert.equal(hasClass(ir, 'rf-app'), true);
-  assert.deepEqual([ir.querySelector('.rf-ico').textContent, ir.querySelector('.rf-label').textContent, ir.querySelector('.rf-tag').textContent],
+  assert.deepEqual([ir.querySelector('.rf-ico').textContent, ir.querySelector('.rf-label').textContent, ir.querySelector('.rf-sub').textContent],
     ['🇮🇷', 'Iran', 'simple routing mode']);
   assert.equal(ir.querySelector('.rf-to').textContent, '→ Direct');
   ir.onclick();

@@ -567,7 +567,6 @@
 /* the app's own rules (ads, the local network, the routing mode's country): read-only, said as such */
 .rf-rule.rf-app { border-style: dashed; color: var(--ink3); }
 .rf-rule.rf-app .rf-label { font-family: var(--ui); }
-.rf-rule.rf-app .rf-tag { color: var(--ink3); border-color: var(--softline); font-weight: 600; }
 /* a target's kind is its leading edge: the accent for a proxy, ok for direct, danger for block */
 .rf-target { border-inline-start: var(--rt-edge) solid var(--accent); }
 .rf-target.to-direct { border-inline-start-color: var(--ok); }
