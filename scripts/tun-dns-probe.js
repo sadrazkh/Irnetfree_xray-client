@@ -177,8 +177,13 @@ function spawnInNs(exe, args, label) {
   let out = '';
   p.stdout.on('data', (d) => { out += d; });
   p.stderr.on('data', (d) => { out += d; });
-  p.output = () => out.split('\n').slice(-8).map((l) => `      [${label}] ${l}`).join('\n');
+  p.output = () => out.split('\n').slice(-40).map((l) => `      [${label}] ${l}`).join('\n');
   return p;
+}
+/** The namespace's addresses, routes and rules, for a variant that went wrong. */
+function diag() {
+  const show = (args) => (inNs(args, { mayFail: true }).stdout || '').trim().split('\n').map((l) => `      [${args.slice(1, 3).join(' ')}] ${l}`).join('\n');
+  return [show(['ip', 'addr']), show(['ip', 'rule']), show(['ip', 'route', 'show', 'table', 'all'])].join('\n');
 }
 async function stop(p) {
   if (!p || p.exitCode !== null) return;
@@ -229,7 +234,9 @@ async function main() {
   log(`sing-box ${version} → the app writes dns_mode: ${mode || '(none)'}`);
 
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-tunprobe-'));
-  fs.writeFileSync(path.join(work, 'xray.json'), JSON.stringify(cfg.xray, null, 2));
+  // the cores say what they did with every packet: printed when a variant goes wrong
+  const loud = (o, isXray) => Object.assign({}, o, { log: isXray ? Object.assign({}, o.log, { loglevel: 'debug' }) : { level: 'debug', timestamp: false } });
+  fs.writeFileSync(path.join(work, 'xray.json'), JSON.stringify(loud(cfg.xray, true), null, 2));
 
   const results = [];
   const fail = (msg) => { results.push(['FAIL', msg]); };
@@ -253,7 +260,7 @@ async function main() {
     for (const variant of ['fixed', 'control']) {
       const dnsMode = variant === 'fixed' ? mode : null;
       const file = path.join(work, `sb-${variant}.json`);
-      fs.writeFileSync(file, JSON.stringify(variant === 'fixed' ? cfg.sbFixed : cfg.sbControl, null, 2));
+      fs.writeFileSync(file, JSON.stringify(loud(variant === 'fixed' ? cfg.sbFixed : cfg.sbControl, false), null, 2));
       isp.heard.length = 0;
       sb = spawnInNs(sbExe, ['run', '-c', file], 'sing-box');
       let up = false;
@@ -270,15 +277,18 @@ async function main() {
       const byXray = Object.keys(NAMES).every((n) => (got[n].a || []).includes(NAMES[n]));
       const line = Object.keys(NAMES).map((n) => `${n} → ${got[n].error || (got[n].a || []).join(',') || 'rcode ' + got[n].rcode}`).join('; ');
       const clean = byXray && !leaked.length;
+      // the bug's own signature: sing-box answered from the ISP resolver, or the ISP heard the name — not a mere timeout
+      const ispAnswered = Object.keys(NAMES).some((n) => (got[n].a || []).includes(ISP_ANSWER));
+      const why = () => `\n${sb.output()}\n${xray.output()}\n${diag()}`;
       if (variant === 'fixed') {
         if (clean) ok(`fixed (dns_mode ${dnsMode || 'none'}): every name answered by Xray, none reached the ISP resolver — ${line}`);
-        else fail(`fixed (dns_mode ${dnsMode || 'none'}): ${line}${leaked.length ? ' · LEAKED to the ISP resolver: ' + leaked.join(', ') : ''}\n${sb.output()}`);
+        else fail(`fixed (dns_mode ${dnsMode || 'none'}): ${line}${leaked.length ? ' · LEAKED to the ISP resolver: ' + leaked.join(', ') : ''}${why()}`);
       } else if (newer) {
         // the bug must show without the key, or this probe cannot tell it apart
-        if (!clean) ok(`control (no dns_mode) on ${version}: the bug reproduces — ${line}${leaked.length ? ' · leaked: ' + leaked.join(', ') : ''}`);
-        else fail(`control (no dns_mode) on ${version}: no bug seen — the probe does not reproduce what dns_mode fixes, so its "fixed" proves nothing — ${line}`);
+        if (leaked.length || ispAnswered) ok(`control (no dns_mode) on ${version}: the bug reproduces — ${line}${leaked.length ? ' · leaked to the ISP resolver: ' + leaked.join(', ') : ''}`);
+        else fail(`control (no dns_mode) on ${version}: the bug's signature (an ISP answer, a name the ISP heard) did not show — the probe cannot tell what dns_mode fixes — ${line}${why()}`);
       } else if (clean) ok(`control on ${version}: the same config as fixed, clean — ${line}`);
-      else fail(`control on ${version}: ${line}${leaked.length ? ' · leaked: ' + leaked.join(', ') : ''}\n${sb.output()}`);
+      else fail(`control on ${version}: ${line}${leaked.length ? ' · leaked: ' + leaked.join(', ') : ''}${why()}`);
       await stop(sb);
       sb = null;
       await sleep(700);
