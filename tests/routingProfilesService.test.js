@@ -188,3 +188,13 @@ test('"exit at the base": the default and a rule leave from the base itself — 
   await assert.rejects(n.service.invoke('connect', '__advanced__:rp-work'), /through its base, but it has no base/);
   assert.equal(n.state.xray.starts.length, 0);
 });
+
+test('"exit at the base" from a base that is gone refuses the connect in plain words — a rule there is never quietly left to the default', async (t) => {
+  const s = start({ servers: [SERVER, SERVER_B], routingProfiles: [profile({ base: 'srv-gone', def: SERVER_B.id, rules: [{ type: 'domain', value: 'c.example', target: 'base' }] })], settings: SETTINGS });
+  t.after(() => s.service.shutdown());
+  await assert.rejects(s.service.invoke('connect', '__advanced__:rp-work'), /the base this routing leaves from no longer exists/);
+  const d = start({ servers: [SERVER, SERVER_B], chains: [{ id: 'empty', name: 'Empty', members: [] }], routingProfiles: [profile({ base: 'chain:empty', def: 'base' })], settings: SETTINGS });
+  t.after(() => d.service.shutdown());
+  await assert.rejects(d.service.invoke('connect', '__advanced__:rp-work'), /the base this routing leaves from no longer exists/);
+  assert.equal(s.state.xray.starts.length + d.state.xray.starts.length, 0);
+});

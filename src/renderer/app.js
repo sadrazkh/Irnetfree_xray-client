@@ -2710,7 +2710,9 @@ function renderTrafficPath(stateStr) {
   frag.appendChild(pathNode('🌐', t('path.internet'), live ? ip : t('path.offline'), 'path-dest'));
   // a server or a chain under a simple mode that sends a country (or everything)
   // direct: that share of the traffic, on a line of its own under the path
-  if (!(id === ADV_ID || String(id).startsWith(ADV_ID + ':')) && id !== POOL_ID) {
+  // (a raw JSON server in proxy mode runs its own routing: the mode is not its)
+  const rawRun = (srv) => !!srv && srv.jsonMode === 'raw' && !s.tunMode;
+  if (!(id === ADV_ID || String(id).startsWith(ADV_ID + ':')) && id !== POOL_ID && !rawRun(srvById(id))) {
     const country = modeCountryRule(s.routingMode) || (s.routingMode === 'direct' ? pathRule('↗', t('path.allDirect'), 'direct') : null);
     if (country) {
       const box = document.createElement('div');
@@ -2752,7 +2754,7 @@ function pathRule(idx, cond, target, via, prof) {
 /** The simple routing mode's "country → direct" line (bypass Iran / bypass China), or null for any other mode. */
 function modeCountryRule(mode) {
   const sys = mode === 'bypass-ir' ? 'ir' : mode === 'bypass-cn' ? 'cn' : null;
-  if (!sys) return null;
+  if (!sys || !geoReady()) return null;
   const [icon, label] = appRuleWords(sys);
   const row = pathRule(icon, t(label) + ' · ' + t('rp.sys.modeNote'), 'direct');
   row.classList.add('is-mode');
@@ -5689,11 +5691,19 @@ function ruleSummary(items) {
 function appRouteRules(prof) {
   const s = state.settings || {};
   const out = [];
-  if (s.blockAds) out.push({ sys: 'ads', at: 'before', target: 'block' });
+  // without the geo files the core has no geo rule at all (configBuilder's `geo`)
+  const geo = geoReady();
+  if (s.blockAds && geo) out.push({ sys: 'ads', at: 'before', target: 'block' });
   out.push({ sys: 'lan', at: 'after', target: 'direct' });
   const mode = s.routingMode || 'global';
-  if (prof && prof.useMode && (mode === 'bypass-ir' || mode === 'bypass-cn')) out.push({ sys: mode === 'bypass-ir' ? 'ir' : 'cn', at: 'after', target: 'direct' });
+  if (geo && prof && prof.useMode && (mode === 'bypass-ir' || mode === 'bypass-cn')) out.push({ sys: mode === 'bypass-ir' ? 'ir' : 'cn', at: 'after', target: 'direct' });
   return out;
+}
+
+/** Are the geo files there (the geosite/geoip rules exist only with them)? Not known yet: yes. */
+function geoReady() {
+  const a = state.assets;
+  return !a || !!(a.geoip && a.geosite);
 }
 
 /** An app rule's glyph and words: [icon, label key, note key]. */
