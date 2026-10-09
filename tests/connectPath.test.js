@@ -331,7 +331,10 @@ test('both mirrors plan a routing profile the same way, line for line: either se
   assert.match(main, /This routing profile no longer exists/);
   assert.match(main, /این پروفایلِ روتینگ دیگر وجود ندارد/, 'bilingual, like every connect error');
   assert.match(main, /const rules = resolveProcessRules\(Array\.isArray\(profile\.rules\) \? profile\.rules : \[\], settings\.procIps\);/);
-  assert.match(main, /plan = \{ mode: 'advanced', profileId: profile\.id, serversById, chainsById, chain: legacyChain, rules, def, defVia: profile\.defVia, base: profile\.base, useMode: profile\.useMode \};/);
+  // "exit at the base" becomes the base itself before anything reads the plan; without a base the default refuses in words
+  assert.match(main, /const \{ rules: atBase, def, defVia \} = resolveBaseTargets\(\{ rules, def: def0, defVia: profile\.defVia, base: profile\.base \}\);/);
+  assert.match(main, /if \(def0 === 'base' && !profile\.base\) throw new Error\(/);
+  assert.match(main, /plan = \{ mode: 'advanced', profileId: profile\.id, serversById, chainsById, chain: legacyChain, rules: atBase, def, defVia, base: profile\.base, useMode: profile\.useMode \};/);
   for (const name of ['getRoutingProfiles() {', 'setRoutingProfiles(list) {', 'procRules(settings, serverId) {', 'activeProcNames(settings, serverId) {']) {
     const [[, m], [, s]] = both('function ' + name);
     assert.equal(m, s, name);

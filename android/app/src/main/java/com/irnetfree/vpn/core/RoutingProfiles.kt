@@ -16,15 +16,23 @@ package com.irnetfree.vpn.core
  *    base, when it has one), "none" (dial the target directly) or a target
  *    (a server id or `chain:<id>`) the target rides on. `direct` and `block`
  *    never take one ([effectiveVia]).
+ *  - A rule or default target "base" ([TARGET_BASE]) is the profile's own
+ *    base: the traffic leaves from the base itself, and follows it when the
+ *    base changes. It takes no via; a connect resolves it to the base
+ *    ([resolveBaseTargets], [planRoutes]).
  */
 object RoutingProfiles {
     const val VIA_INHERIT = "inherit"
     const val VIA_NONE = "none"
+    /** A target that is the profile's own base — "exit at the base": traffic leaves from it, and it follows the base. */
+    const val TARGET_BASE = "base"
     /** The profile today's settings became, and that they keep mirroring. */
     const val DEFAULT_ID = "rp-default"
     const val DEFAULT_NAME = "Advanced routing"
     /** The store key (SharedPreferences "irnetfree"). */
     const val STORE_KEY = "routingProfiles"
+    /** A default at the base in a profile without one: there is nowhere to send everything else (main.js buildPlan). */
+    const val NO_BASE = "This routing sends everything else out through its base, but it has no base — choose one under Routing."
 
     private val ID_RE = Regex("^[\\w-]+$")
 
@@ -33,18 +41,25 @@ object RoutingProfiles {
 
     fun isValidId(id: String): Boolean = ID_RE.matches(id)
 
-    /** A target that can ride on a base: anything but direct, block and "not routed anywhere". */
-    fun takesVia(target: String): Boolean = target.isNotBlank() && target != "direct" && target != "block"
+    /** A target that can ride on a base: anything but direct, block, "exit at the base" (it IS the base) and "not routed anywhere". */
+    fun takesVia(target: String): Boolean = target.isNotBlank() && target != "direct" && target != "block" && target != TARGET_BASE
 
-    /** A via as stored: "inherit" | "none" | a target. direct/block/proxy are no base at all. */
+    /** A via as stored: "inherit" | "none" | a target. direct/block/proxy are no base at all; "base" is the profile's base, i.e. inherit. */
     private fun normalizeVia(v: String, emptyAs: String): String {
         val t = v.trim()
         return when {
             t.isEmpty() -> emptyAs
             t == VIA_INHERIT || t == VIA_NONE -> t
+            t == TARGET_BASE -> VIA_INHERIT
             t == "direct" || t == "block" || t == "proxy" -> VIA_NONE
             else -> t
         }
+    }
+
+    /** [b] as a base: a server or a chain — never direct/block/proxy, a via word or "exit at the base" itself (null then). */
+    private fun baseOrNull(b: String?): String? {
+        val t = (b ?: "").trim()
+        return if (t.isEmpty() || t == "direct" || t == "block" || t == "proxy" || t == VIA_NONE || t == VIA_INHERIT || t == TARGET_BASE) null else t
     }
 
     /**
@@ -61,15 +76,13 @@ object RoutingProfiles {
                 via = if (takesVia(target)) normalizeVia(r.via, "") else ""
             )
         }
-        val b = (p.base ?: "").trim()
-        val base = if (b.isEmpty() || b == "direct" || b == "block" || b == "proxy" || b == VIA_NONE || b == VIA_INHERIT) null else b
         return p.copy(
             id = p.id.trim().takeIf { id: String -> isValidId(id) } ?: newProfileId(),
             name = p.name.trim().ifEmpty { "Routing" },
             rules = rules,
             def = p.def.trim(),
             defVia = normalizeVia(p.defVia, VIA_INHERIT),
-            base = base
+            base = baseOrNull(p.base)
         )
     }
 
@@ -121,14 +134,14 @@ object RoutingProfiles {
     /**
      * The base [target] rides on, given its [via] and the profile's [base]:
      * "inherit" (or unset) → the base when there is one; "none" → nothing; a
-     * target → that. direct/block never ride on anything, and a target never
-     * rides on itself. null = it dials by itself.
+     * target → that. direct/block never ride on anything, "exit at the base"
+     * IS the base, and a target never rides on itself. null = it dials by itself.
      */
     fun effectiveVia(target: String, via: String, base: String?): String? {
         if (!takesVia(target)) return null
         val v = via.trim()
         val eff = when {
-            v.isEmpty() || v == VIA_INHERIT -> base?.trim()?.takeIf { b: String -> b.isNotEmpty() }
+            v.isEmpty() || v == VIA_INHERIT || v == TARGET_BASE -> base?.trim()?.takeIf { b: String -> b.isNotEmpty() }
             v == VIA_NONE || v == "direct" || v == "block" || v == "proxy" -> null
             else -> v
         }
@@ -138,6 +151,36 @@ object RoutingProfiles {
     fun effectiveVia(rule: RouteRule, p: RoutingProfile): String? = effectiveVia(rule.target, rule.via, p.base)
     /** The default's base. */
     fun effectiveDefVia(p: RoutingProfile): String? = effectiveVia(p.def, p.defVia, p.base)
+
+    /** A profile's rules, default and default's via as a connect routes them ([resolveBaseTargets]). */
+    data class Routes(val rules: List<RouteRule>, val def: String, val defVia: String)
+
+    /**
+     * [rules], [def] and [defVia] with "exit at the base" ([TARGET_BASE]) as
+     * the [base] it stands for — the server or chain the builder, the bypass
+     * and the certificate pins then see, dialled directly (via "none": it is
+     * the base). Without a base they stay as they are: a target that names
+     * nothing, which the builder leaves out (a rule) and [planRoutes] refuses
+     * (the default). Nothing at the base → the very same list and values
+     * (routingProfiles.js resolveBaseTargets).
+     */
+    fun resolveBaseTargets(rules: List<RouteRule>, def: String, defVia: String, base: String?): Routes {
+        val b = baseOrNull(base) ?: return Routes(rules, def, defVia)
+        val atBase = rules.any { r: RouteRule -> r.target == TARGET_BASE }
+        val rs = if (!atBase) rules else rules.map { r: RouteRule -> if (r.target == TARGET_BASE) r.copy(target = b, via = VIA_NONE) else r }
+        return if (def == TARGET_BASE) Routes(rs, b, VIA_NONE) else Routes(rs, def, defVia)
+    }
+
+    /**
+     * What a connect on [p] routes (Store.buildPlan): its rules and default
+     * (an empty default: [fallbackDef]) with "exit at the base" resolved. A
+     * default at the base in a profile without one is refused ([NO_BASE]).
+     */
+    fun planRoutes(p: RoutingProfile, fallbackDef: String): Routes {
+        val r = resolveBaseTargets(p.rules, p.def.ifBlank { fallbackDef }, p.defVia, p.base)
+        if (r.def == TARGET_BASE) throw IllegalStateException(NO_BASE)
+        return r
+    }
 
     /** Every target of an advanced plan with the base it rides on (null = none): the rules in order, then the default. */
     fun routes(plan: ConnectionPlan.Advanced): List<Pair<String, String?>> =
@@ -183,8 +226,13 @@ object RoutingProfiles {
         val isDefault: Boolean get() = rules.isEmpty()
     }
 
-    /** The profile as lanes; [exists] says whether a target (server id or `chain:<id>`) is still there. */
+    /**
+     * The profile as lanes; [exists] says whether a target (server id or
+     * `chain:<id>`) is still there. "Exit at the base" is there while the
+     * profile has a base that is: no base, or one that is gone, marks it missing.
+     */
     fun lanes(p: RoutingProfile, exists: (String) -> Boolean): List<Lane> {
+        val there = { t: String -> if (t == TARGET_BASE) p.base?.let { b: String -> exists(b) } == true else exists(t) }
         val out = ArrayList<Lane>()
         p.rules.forEachIndexed { i: Int, r: RouteRule ->
             val via = effectiveVia(r, p)
@@ -192,11 +240,11 @@ object RoutingProfiles {
             if (last != null && last.target == r.target && last.via == via) {
                 out[out.size - 1] = last.copy(rules = last.rules + i)
             } else {
-                out.add(Lane(listOf(i), r.target, via, !exists(r.target), via != null && !exists(via)))
+                out.add(Lane(listOf(i), r.target, via, !there(r.target), via != null && !exists(via)))
             }
         }
         val dv = effectiveDefVia(p)
-        out.add(Lane(emptyList(), p.def, dv, !exists(p.def), dv != null && !exists(dv)))
+        out.add(Lane(emptyList(), p.def, dv, !there(p.def), dv != null && !exists(dv)))
         return out
     }
 

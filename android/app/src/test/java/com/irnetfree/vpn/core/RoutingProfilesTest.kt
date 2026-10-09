@@ -287,6 +287,104 @@ class RoutingProfilesTest {
         assertTrue(RoutingProfiles.basesOf(plain).isEmpty())
     }
 
+    /* ----------------------------- exit at the base ----------------------------- */
+
+    @Test fun exitAtTheBase_takesNoVia_andIsNeverABase() {
+        assertEquals("base", RoutingProfiles.TARGET_BASE)
+        assertFalse(RoutingProfiles.takesVia(RoutingProfiles.TARGET_BASE))
+        val p = RoutingProfile("rp-1", "P", listOf(RouteRule("domain", "x.com", "base", "c")), def = "base", defVia = "c", base = "b")
+        // it IS the base: it rides on nothing, whatever via it carries
+        assertNull(RoutingProfiles.effectiveVia(p.rules[0], p))
+        assertNull(RoutingProfiles.effectiveDefVia(p))
+        val n = RoutingProfiles.normalize(p)
+        assertEquals("base", n.rules[0].target)
+        assertEquals("", n.rules[0].via)
+        assertEquals("base", n.def)
+        assertEquals("b", n.base)
+        // a base of "base" is no base, stored or normalized
+        assertNull(RoutingProfiles.normalize(p.copy(base = "base")).base)
+        assertNull(RoutingProfiles.normalize(p.copy(base = " base ")).base)
+        assertNull(RoutingProfile.fromJson(JSONObject().put("id", "rp-x").put("name", "X").put("base", "base")).base)
+        // a via of "base" is the profile's base: inherit
+        assertEquals("inherit", RoutingProfiles.normalize(p.copy(rules = listOf(RouteRule("domain", "x.com", "a", "base")))).rules[0].via)
+        assertEquals("b", RoutingProfiles.effectiveVia("a", "base", "b"))
+        // the flow marks it missing without a base, or with a base that is gone
+        val exists = { t: String -> t in setOf("a", "b") }
+        assertFalse(RoutingProfiles.lanes(p, exists)[0].targetMissing)
+        assertNull(RoutingProfiles.lanes(p, exists)[0].via)
+        assertTrue(RoutingProfiles.lanes(p.copy(base = null), exists)[0].targetMissing)
+        assertTrue(RoutingProfiles.lanes(p.copy(base = null), exists).last().targetMissing)
+        assertTrue(RoutingProfiles.lanes(p.copy(base = "zzz"), exists)[0].targetMissing)
+    }
+
+    @Test fun resolveBaseTargets_withABase_withoutOne_andNothingToResolve() {
+        val rs = listOf(RouteRule("domain", "x.com", "base"), RouteRule("domain", "y.com", "a", "inherit"), RouteRule("ip", "1.1.1.1", "direct"))
+        val r = RoutingProfiles.resolveBaseTargets(rs, "base", "inherit", "chain:base1")
+        assertEquals(RouteRule("domain", "x.com", "chain:base1", "none"), r.rules[0])
+        assertSame(rs[1], r.rules[1])
+        assertSame(rs[2], r.rules[2])
+        assertEquals("chain:base1", r.def)
+        assertEquals("none", r.defVia)
+        // only the rules at the base: the default keeps its own target and via
+        val ruleOnly = RoutingProfiles.resolveBaseTargets(rs, "c", "inherit", "b")
+        assertEquals(RouteRule("domain", "x.com", "b", "none"), ruleOnly.rules[0])
+        assertEquals("c", ruleOnly.def)
+        assertEquals("inherit", ruleOnly.defVia)
+        // without a base: as it is — the rule names nothing (left out), the default is refused
+        val none = RoutingProfiles.resolveBaseTargets(rs, "base", "inherit", null)
+        assertSame(rs, none.rules)
+        assertEquals("base", none.def)
+        assertEquals("inherit", none.defVia)
+        assertSame(rs, RoutingProfiles.resolveBaseTargets(rs, "base", "inherit", "base").rules)
+        // nothing at the base: the very same list and values
+        val plain = listOf(RouteRule("domain", "y.com", "a"))
+        val same = RoutingProfiles.resolveBaseTargets(plain, "c", "none", "b")
+        assertSame(plain, same.rules)
+        assertEquals("c", same.def)
+        assertEquals("none", same.defVia)
+    }
+
+    @Test fun planRoutes_theDefaultAtTheBaseWithoutOneIsRefused() {
+        val p = RoutingProfile("rp-1", "P", listOf(RouteRule("domain", "x.com", "base")), def = "base", base = "b")
+        val r = RoutingProfiles.planRoutes(p, "a")
+        assertEquals("b", r.def)
+        assertEquals("b", r.rules[0].target)
+        val e = assertThrows(IllegalStateException::class.java) { RoutingProfiles.planRoutes(p.copy(base = null), "a") }
+        assertEquals(RoutingProfiles.NO_BASE, e.message)
+        // a rule at the base without one is no refusal: the builder leaves it out
+        val ruleOnly = RoutingProfiles.planRoutes(p.copy(def = "c", base = null), "a")
+        assertEquals("base", ruleOnly.rules[0].target)
+        // an empty default is the fallback, as before
+        assertEquals("a", RoutingProfiles.planRoutes(RoutingProfile("rp-2", "Q", def = ""), "a").def)
+    }
+
+    @Test fun exitAtTheBase_inTheConfig_theBaseDialledDirectly() {
+        val p = RoutingProfile("rp-1", "P", listOf(RouteRule("domain", "x.com", "base"), RouteRule("domain", "y.com", "a")), def = "base", base = "b")
+        val r = RoutingProfiles.planRoutes(p, "a")
+        val resolved = plan(r.rules, r.def, r.defVia, p.base)
+        val cfg = build(resolved)
+        // at the base: the base's own outbound, dialling by itself
+        assertEquals("out-b", ruleFor(cfg, "x.com").getString("outboundTag"))
+        assertEquals("", dialer(tagged(cfg, "out-b")))
+        assertEquals("out-b", rules(cfg).last().getString("outboundTag"))
+        // through the base: as before
+        assertEquals("out-a@b", ruleFor(cfg, "y.com").getString("outboundTag"))
+        assertEquals("base-b", dialer(tagged(cfg, "out-a@b")))
+        // the phone dials the base for both
+        assertEquals(listOf("b", "b", "b"), RoutingProfiles.dialTargets(resolved))
+        assertTrue(CertPin.directServers(resolved).any { s: ServerConfig -> s.id == "b" })
+        assertFalse(CertPin.directServers(resolved).any { s: ServerConfig -> s.id == "a" })
+        // without a base a rule at the base is left out — its traffic follows the default
+        val noBase = build(plan(listOf(RouteRule("domain", "x.com", "base"), RouteRule("domain", "y.com", "a")), "c"))
+        assertTrue(rules(noBase).none { x: JSONObject -> domains(x).contains("x.com") })
+        assertEquals("out-a", ruleFor(noBase, "y.com").getString("outboundTag"))
+        // a profile with nothing at the base: the config of before, byte for byte
+        val rs = listOf(RouteRule("domain", "x.com", "a"), RouteRule("ip", "10.0.0.0/8", "chain:k1", "none"))
+        val plainP = RoutingProfile("rp-2", "Q", rs, def = "c", base = "b")
+        val pr = RoutingProfiles.planRoutes(plainP, "a")
+        assertEquals(Canon.of(build(plan(rs, "c", "inherit", "b"))), Canon.of(build(plan(pr.rules, pr.def, pr.defVia, plainP.base))))
+    }
+
     /* ----------------------------- the flow list ----------------------------- */
 
     @Test fun flowLanes_groupedRulesTargetsBasesAndWhatIsMissing() {

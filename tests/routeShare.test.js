@@ -575,3 +575,37 @@ test('router: service.js wires the same four channels', () => {
   assert.match(SVC, /identityOf: \(s\) => serverIdentity\(s, true\)/);
   assert.match(SVC, /markLive: \(\) => \{ serverEditPending = true; \}/);
 });
+
+/* ---------------- "exit at the base" (target 'base'): carried as it is ---------------- */
+
+const XLINK = fs.readFileSync(path.join(FIX, 'exit-base-link.txt'), 'utf8').trim();
+const XPAYLOAD = JSON.parse(fs.readFileSync(path.join(FIX, 'exit-base-payload.json'), 'utf8'));
+
+test('"exit at the base": the shared fixture decodes to its payload; a profile at its base shares and imports with the target as it is, no via on it', () => {
+  assert.deepEqual(RS.decodeShare(XLINK), XPAYLOAD);
+  const { servers, byKey } = senderStore();
+  const profile = { id: 'rp-x', name: 'Exit at the base', useMode: true, base: 'id-s1', def: 'base', defVia: 'chain:gone',
+    rules: [
+      { type: 'ip', value: '10.0.0.0/8,192.168.0.0/16', target: 'id-s2', via: 'inherit' },
+      { type: 'domain', value: 'geosite:category-ir', target: 'direct' },
+      { type: 'domain', value: 'news.example', target: 'base', via: 'id-s3' }
+    ] };
+  const linkOf = (srv) => PAYLOAD.servers.find((e) => 'id-' + e.key === srv.id).link;
+  const out = RS.profilePayload({ profile, servers, chains: [], linkOf });
+  assert.deepEqual(out, XPAYLOAD, 'the very payload the fixture holds (a stale via on the base, or on a default at it, never travels)');
+  assert.ok(byKey.s1);
+  const r = RS.applyImport(XPAYLOAD, { servers: [], chains: [], profiles: [], parse, identityOf, newId: counterIds() });
+  const base = r.servers.find((x) => x.name === '🇩🇪 Base DE').id;
+  assert.deepEqual([r.profiles[0].def, r.profiles[0].defVia, r.profiles[0].base], ['base', 'inherit', base]);
+  assert.deepEqual(r.profiles[0].rules[2], { type: 'domain', value: 'news.example', target: 'base' });
+  // the base itself is a target only: as a via or as the base it names nothing
+  for (const bad of [
+    (p) => { p.profile.rules[0].via = 'base'; },
+    (p) => { p.profile.defVia = 'base'; p.profile.def = 's2'; },
+    (p) => { p.profile.base = 'base'; }
+  ]) {
+    const p = clone(XPAYLOAD);
+    bad(p);
+    assert.throws(() => RS.decodeShare(RS.encodeShare(p)), /base/);
+  }
+});

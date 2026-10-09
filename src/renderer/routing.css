@@ -513,7 +513,8 @@
 .rp-flow-live { font-size: 11px; font-weight: 700; color: var(--ok); }
 
 /* Three columns in the reading direction (a grid follows `direction`, so
-   Persian mirrors it), wide gutters for the lines, one SVG under the nodes.
+   Persian mirrors it) — rules, the bases they ride on, the targets: the way
+   traffic goes — wide gutters for the lines, one SVG under the nodes.
    Each column is its head over its nodes, the nodes centred against the
    tallest column so the lines between them stay short. */
 .rf {
@@ -563,6 +564,9 @@
 .rf-more { font-family: var(--mono); font-size: 10px; color: var(--ink3); }
 .rf-default { border-style: dashed; color: var(--ink3); }
 .rf-default .rf-label { font-family: var(--ui); }
+/* the app's own rules (ads, the local network, the routing mode's country): read-only, said as such */
+.rf-rule.rf-app { border-style: dashed; color: var(--ink3); }
+.rf-rule.rf-app .rf-label { font-family: var(--ui); }
 /* a target's kind is its leading edge: the accent for a proxy, ok for direct, danger for block */
 .rf-target { border-inline-start: var(--rt-edge) solid var(--accent); }
 .rf-target.to-direct { border-inline-start-color: var(--ok); }
