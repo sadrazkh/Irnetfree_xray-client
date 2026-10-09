@@ -254,37 +254,26 @@ test('the markup carries no inline style attributes', () => {
 });
 
 /**
- * The traffic path has to survive a narrow window. The owner's report was a
- * throughput caption printed on top of the "This device" node: the caption was
- * absolutely positioned and centred on a link that flexbox had shrunk to 56px,
- * while the caption itself needed 115px, so it escaped onto its neighbour — and
- * the panel scrolled sideways instead of reflowing, hiding the rest.
- *
- * Measured in the browser at 900px (the window's own minimum) across all three
- * skins and all three path shapes after the fix: no overlap, no overflow, no
- * scrollbar, nothing truncated. These assertions pin the properties that make
- * that true, because none of them can be checked without a layout engine.
+ * The traffic path has to survive a narrow window. The owner's first report was
+ * a throughput caption printed on top of the "This device" node and a panel
+ * that scrolled sideways instead of reflowing. Since v1.22 the path is the
+ * routing page's flow, minimal (renderTrafficPath): the device's live speed is
+ * inside its own box, the panel never scrolls, and a narrow panel stacks the
+ * columns — the lines go and each rule says in words where it leads.
  */
-test('the traffic path reflows instead of scrolling, and its caption cannot escape its link', () => {
+test('the traffic path reflows instead of scrolling: its speed sits in the device box, a narrow panel stacks the flow', () => {
   const rule = (selector) => {
     const i = CSS.indexOf(selector + ' {');
     assert.ok(i !== -1, `no rule for ${selector}`);
     return CSS.slice(i, CSS.indexOf('}', i));
   };
-
   const panel = rule('.path-panel');
-  assert.match(panel, /flex-wrap:\s*wrap/, 'the panel must wrap; a single row clips at 900px');
+  assert.match(panel, /flex-wrap:\s*wrap/);
   assert.doesNotMatch(panel, /overflow-x:\s*auto/, 'wrapping replaces the sideways scrollbar');
-
-  const link = rule('.path-link');
-  assert.match(link, /flex-direction:\s*column/, 'the caption sits above the line, in flow');
-  assert.match(link, /min-width:\s*auto/,
-    'a numeric min-width lets flexbox shrink the link under its own caption — the original bug');
-
-  // The caption must take part in layout: positioned out of flow, its width
-  // says nothing about the link's, and it lands on whatever is next to it.
-  const cap = rule('.path-cap');
-  assert.doesNotMatch(cap, /position:\s*absolute/);
+  assert.match(panel, /container-type:\s*inline-size/, 'the flow stacks by the panel’s own width');
+  assert.match(CSS, /@container homepath \(max-width: 620px\)/);
+  const speed = rule('.mf-speed');
+  assert.doesNotMatch(speed, /position:\s*absolute/, 'the live speed takes part in layout, inside the device box');
 });
 
 /* --------------------------- stored values in the markup --------------------------- */

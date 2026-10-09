@@ -2549,30 +2549,6 @@ function applyKillSwitchState(ks) {
 
 /* ---------------------------- the traffic path ---------------------------- */
 
-/** A node in the path diagram. */
-function pathNode(ico, name, meta, cls) {
-  const el = document.createElement('div');
-  el.className = 'path-node' + (cls ? ' ' + cls : '');
-  el.innerHTML = `<span class="path-ico">${ico}</span>
-    <span class="path-name"></span>
-    <span class="path-meta"></span>`;
-  el.querySelector('.path-name').textContent = name;
-  el.querySelector('.path-meta').textContent = meta || '';
-  return el;
-}
-
-function pathLink(live, capId) {
-  const el = document.createElement('div');
-  el.className = 'path-link' + (live ? ' live' : '');
-  if (capId) {
-    const cap = document.createElement('span');
-    cap.className = 'path-cap';
-    cap.id = capId;
-    el.appendChild(cap);
-  }
-  return el;
-}
-
 /** Short label for a routing target, in the user's language. */
 function targetLabel(target) {
   if (!target || target === 'direct') return t('path.direct');
@@ -2624,7 +2600,10 @@ function trafficSpan(tags) {
 }
 
 /**
- * What is going where.
+ * What is going where — the routing page's flow tree, minimal: this device →
+ * the rules → ⚓ the base they ride on → the targets, each target with its own
+ * traffic and every line in its target's colour, so what goes direct, what
+ * rides the base and what goes anywhere else never mix.
  *
  * Two things it must get right, both of which it used to get wrong:
  *
@@ -2632,13 +2611,13 @@ function trafficSpan(tags) {
  *     are drawn only when the advanced entry is the one being connected —
  *     picking a single server used to still show the rule fan-out, which is
  *     why the picture looked unrelated to the choice above it.
- *  2. Every hop carries ITS OWN traffic, read per outbound from the core's
+ *  2. Every target carries ITS OWN traffic, read per outbound from the core's
  *     counters, so "how much went through this config" is answerable at a
  *     glance instead of being one grand total for everything at once.
  *
  * Built on a status change and on a settings save — NEVER on a stats tick. The
  * per-second update is applyPathTraffic(), which only writes text into the
- * captions this function created.
+ * captions this function created; the lines follow the boxes (drawHomeFlow).
  */
 function renderTrafficPath(stateStr) {
   const host = $('#trafficPath');
@@ -2653,131 +2632,255 @@ function renderTrafficPath(stateStr) {
   const id = busy
     ? (state.activeServerId || state.selectedServerId)
     : (state.selectedServerId || state.activeServerId);
-  const chain = chainById(id);
-  const frag = document.createDocumentFragment();
-
-  frag.appendChild(pathNode('🖥', t('path.device'), s.tunMode ? 'TUN' : 'SOCKS/HTTP'));
-
-  if (id === ADV_ID || String(id).startsWith(ADV_ID + ':')) {
-    // the fan-out: one line per rule, each with its own figures — of the
-    // routing profile this selection connects, with the base a line dials
-    // through ("via …"); today's settings on a back end without profiles
-    frag.appendChild(pathLink(live, 'pathCapIn'));
-    const rules = document.createElement('div');
-    rules.className = 'path-rules';
-    const prof = profileOfSel(id);
-    const src = prof || { rules: s.routeRules || [], def: s.routeDefault };
-    const list = (src.rules || []).filter(r => r && r.value && r.target);
-    const SHOWN = 4;
-    list.slice(0, SHOWN).forEach((r, i) => {
-      rules.appendChild(pathRule(String(i + 1).padStart(2, '0'), r.value, r.target, prof ? ruleVia(r, prof) : null, prof));
-    });
-    if (list.length > SHOWN) {
-      const more = document.createElement('div');
-      more.className = 'path-rule';
-      more.innerHTML = '<span class="pr-idx">··</span><span class="pr-cond"></span>';
-      more.querySelector('.pr-cond').textContent = t('path.andMore').replace('{n}', list.length - SHOWN);
-      rules.appendChild(more);
-    }
-    // a profile without a default takes the first server, as the builder does (and its flow tree says)
-    const defTarget = src.def || (prof && state.servers[0] && state.servers[0].id) || 'direct';
-    // the simple routing mode's country, when the profile applies it ("Iran direct"): its own
-    // line, so what went past the tunnel is there to read
-    const useMode = prof ? !!prof.useMode : !!s.advancedUseMode;
-    const country = useMode ? modeCountryRule(s.routingMode) : null;
-    if (country) rules.appendChild(country);
-    const def = pathRule('↓', t('path.rest'), defTarget, prof ? ruleVia({ target: defTarget, via: prof.defVia }, prof) : null, prof);
-    def.classList.add('is-default');
-    def.querySelector('.pr-cond').classList.add('is-label');
-    rules.appendChild(def);
-    frag.appendChild(rules);
-  } else if (chain) {
-    // every hop, in order, with the exit carrying the figures
-    const members = chainMembers(chain);
-    members.forEach((m, i) => {
-      frag.appendChild(pathLink(live, i === 0 ? 'pathCapIn' : null));
-      const node = pathNode('🛡', m.name, (m.protocol || '').toUpperCase(),
-        live && i === members.length - 1 ? 'exit' : '');
-      if (i === members.length - 1) node.appendChild(trafficSpan(['proxy', outboundTagFor(chain.id ? 'chain:' + chain.id : 'chain')]));
-      frag.appendChild(node);
-    });
-    if (!members.length) frag.appendChild(pathNode('🛡', chain.name, '', ''));
-  } else if (id === POOL_ID) {
-    frag.appendChild(pathLink(live, 'pathCapIn'));
-    const rules = document.createElement('div');
-    rules.className = 'path-rules';
-    for (const e of poolEnabledValid()) {
-      rules.appendChild(pathRule(String(e.socksPort), e.name, e.target));
-    }
-    frag.appendChild(rules);
-  } else {
-    frag.appendChild(pathLink(live, 'pathCapIn'));
-    const srv = srvById(id);
-    const node = pathNode('🛡', srv ? srv.name : t('path.noServer'),
-      srv ? (srv.protocol || '').toUpperCase() : '', live ? 'exit' : '');
-    node.appendChild(trafficSpan(['proxy', outboundTagFor(id)]));
-    frag.appendChild(node);
-    frag.appendChild(pathLink(live));
-  }
-
+  hfModel = homeFlowModel(id);
   // the exit IP is whatever the last check found — read from the readout that
   // already holds it rather than keeping a second copy in sync
   const ipEl = $('#statIp');
   const ip = ipEl && ipEl.textContent !== '—' ? ipEl.textContent : '';
-  frag.appendChild(pathNode('🌐', t('path.internet'), live ? ip : t('path.offline'), 'path-dest'));
-  // a server or a chain under a simple mode that sends a country (or everything)
-  // direct: that share of the traffic, on a line of its own under the path
-  // (a raw JSON server in proxy mode runs its own routing: the mode is not its)
-  const rawRun = (srv) => !!srv && srv.jsonMode === 'raw' && !s.tunMode;
-  if (!(id === ADV_ID || String(id).startsWith(ADV_ID + ':')) && id !== POOL_ID && !rawRun(srvById(id))) {
-    const country = modeCountryRule(s.routingMode) || (s.routingMode === 'direct' ? pathRule('↗', t('path.allDirect'), 'direct') : null);
-    if (country) {
-      const box = document.createElement('div');
-      box.className = 'path-rules path-bypass';
-      box.appendChild(country);
-      frag.appendChild(box);
-    }
-  }
-  host.replaceChildren(frag);
+  host.replaceChildren(buildHomeFlow(hfModel, { live, ip, mode: s.tunMode ? 'TUN' : 'SOCKS/HTTP' }));
   applyPathTraffic(lastPerOutbound);
   // the routing page's flow tree is live only while its profile is the one up
   applyFlowTraffic(lastPerOutbound);
+  drawHomeFlowSoon();
 }
+
+let hfModel = null;   // the home flow on screen (its lines are drawn from it)
+
+/** How many of a profile's own rule nodes the home flow shows before "+N more". */
+const HOME_FLOW_RULES = 4;
+/** The colours a proxy target's lines take, in order (direct and block keep theirs). */
+const HOME_FLOW_LANES = 5;
 
 /**
- * One "condition → target" line, with its own traffic caption. `via`: the base
- * the target dials through (a routing profile's) — drawn between the two, as
- * the traffic goes: "condition → ⚓ base → target"; the figures are then that
- * target's own outbound through the base. "Exit at the base" (`prof`'s) is
- * "condition → ⚓ base", counted on the base's own outbound.
+ * The home flow as data: { groups, bases, targets, edges, more } — the shapes
+ * of flowModel (routing page), plus `lane` on every target and edge (its
+ * target's colour: 'direct', 'block', or 'c1'…'c5' in order of appearance)
+ * and the device's own edge to every rule ('o' → group).
+ *
+ *   a routing profile  its flow (flowModel: the app's own rules, the bases,
+ *                      "exit at the base"), its own rules cut at
+ *                      HOME_FLOW_RULES with the rest counted in `more`
+ *   the pool           an entry per local port
+ *   a chain or server  the simple mode's: ads → block, the local network →
+ *                      direct, the mode's country → direct, everything else →
+ *                      the config (direct in the direct mode); a raw JSON
+ *                      server in proxy mode runs its own routing: just it
  */
-function pathRule(idx, cond, target, via, prof) {
-  const row = document.createElement('div');
-  row.className = 'path-rule';
-  const exit = target === TARGET_BASE;
-  const base = exit ? ((prof && prof.base) || null) : via;
-  const kind = target === 'direct' ? ' to-direct' : target === 'block' ? ' to-block' : ' to-proxy';
-  row.innerHTML = `<span class="pr-idx"></span><span class="pr-cond"></span>
-    <span class="pr-arrow">→</span>${base && !exit ? '<span class="pr-via"></span><span class="pr-arrow">→</span>' : ''}<span class="pr-to${kind}"></span>`;
-  row.querySelector('.pr-idx').textContent = idx;
-  row.querySelector('.pr-cond').textContent = cond;
-  if (base && !exit) row.querySelector('.pr-via').textContent = '⚓ ' + targetLabel(base);
-  row.querySelector('.pr-to').textContent = exit ? (base ? '⚓ ' + targetLabel(base) : '⚠ ' + t('rp.exitAtBaseNone')) : targetLabel(target);
-  if (exit && base) row.querySelector('.pr-to').title = t('rp.exitAtBase').replace('{base}', () => targetLabel(base));
-  row.appendChild(trafficSpan([exit ? (base ? outboundTagFor(base) : 'out-' + TARGET_BASE) : via ? viaTagFor(target, via) : outboundTagFor(target)]));
-  return row;
+function homeFlowModel(id) {
+  const s = state.settings || {};
+  let m;
+  let more = 0;
+  if (id === ADV_ID || String(id).startsWith(ADV_ID + ':')) {
+    const prof = profileOfSel(id) || { id: '', rules: s.routeRules || [], def: s.routeDefault, defVia: 'inherit', base: null, useMode: !!s.advancedUseMode };
+    m = flowModel(prof);
+    // its own rules beyond HOME_FLOW_RULES are counted, not drawn — and so is whatever only they lead to
+    const own = m.groups.filter(g => !g.sys && !g.isDefault);
+    const cut = new Set(own.slice(HOME_FLOW_RULES).map(g => g.key));
+    more = own.slice(HOME_FLOW_RULES).reduce((n, g) => n + g.idxs.length, 0);
+    const groups = m.groups.filter(g => !cut.has(g.key));
+    const kept = new Set(groups.map(g => g.to));
+    const targets = m.targets.filter(t => kept.has(t.key));
+    const edges = m.edges.filter(e => (e.from.startsWith('b:') ? kept.has(e.to) : !cut.has(e.from)));
+    const baseKeys = new Set(edges.filter(e => e.from.startsWith('b:')).map(e => e.from).concat(edges.filter(e => e.to.startsWith('b:')).map(e => e.to)));
+    m = { groups, targets, bases: m.bases.filter(b => baseKeys.has(b.key)), edges, prof };
+  } else if (id === POOL_ID) {
+    m = { groups: [], targets: [], bases: [], edges: [] };
+    const seen = {};
+    for (const e of poolEnabledValid()) {
+      const key = 't:' + e.target;
+      if (!seen[key]) {
+        const kind = String(e.target).startsWith('chain:') ? 'chain' : 'server';
+        seen[key] = { key, kind, ref: e.target, via: null, why: refProblem(e.target), tags: [outboundTagFor(e.target)] };
+        m.targets.push(seen[key]);
+      }
+      const g = { key: 'p' + e.socksPort, kind: 'rule', pool: true, port: e.socksPort, name: e.name, idxs: [], items: [], target: e.target, via: null, to: key };
+      m.groups.push(g);
+      m.edges.push({ from: g.key, to: key, danger: !!seen[key].why });
+    }
+  } else {
+    const chain = chainById(id);
+    const srv = chain ? null : srvById(id);
+    const raw = !!srv && srv.jsonMode === 'raw' && !s.tunMode;
+    const mode = s.routingMode || 'global';
+    const exit = mode === 'direct' && !raw ? 'direct' : (chain ? 'chain:' + chain.id : (srv ? srv.id : ''));
+    const targets = {};
+    const target = (ref) => {
+      if (!targets[ref]) {
+        const kind = ref === 'direct' || ref === 'block' ? ref : chain && ref === 'chain:' + chain.id ? 'chain' : 'server';
+        const tags = !ref ? [] : ref === 'direct' ? ['direct'] : ref === 'block' ? ['block'] : ['proxy', outboundTagFor(ref)];
+        targets[ref] = { key: 't:' + (ref || 'none'), kind: ref ? kind : 'none', ref, via: null, why: '', tags, chain: kind === 'chain' ? chain : null };
+      }
+      return targets[ref];
+    };
+    const groups = [];
+    const geo = geoReady();
+    const add = (g) => { groups.push(Object.assign({ kind: 'rule', idxs: [], items: [], via: null, to: target(g.target).key }, g)); };
+    if (!raw) {
+      if (s.blockAds && geo) add({ key: 'sys-ads', sys: 'ads', target: 'block' });
+      add({ key: 'sys-lan', sys: 'lan', target: 'direct' });
+      if (geo && (mode === 'bypass-ir' || mode === 'bypass-cn')) add({ key: 'sys-' + (mode === 'bypass-ir' ? 'ir' : 'cn'), sys: mode === 'bypass-ir' ? 'ir' : 'cn', target: 'direct' });
+    }
+    add({ key: 'def', isDefault: true, target: exit });
+    const ordered = [];
+    for (const g of groups) { const t = targets[g.target]; if (!ordered.includes(t)) ordered.push(t); }
+    m = { groups, targets: ordered, bases: [], edges: groups.map(g => ({ from: g.key, to: g.to, danger: false })) };
+  }
+  // the device starts every line
+  m.edges = m.groups.map(g => ({ from: 'o', to: g.key, danger: false })).concat(m.edges);
+  // one colour per target: direct and block keep theirs, every other one the next of the lanes
+  let n = 0;
+  const laneOf = {};
+  for (const t of m.targets) {
+    t.lane = t.kind === 'direct' ? 'direct' : t.kind === 'block' ? 'block' : t.kind === 'none' ? 'none' : 'c' + ((n++ % HOME_FLOW_LANES) + 1);
+    laneOf[t.key] = t.lane;
+  }
+  const groupLane = {};
+  for (const g of m.groups) groupLane[g.key] = laneOf[g.to] || 'none';
+  for (const e of m.edges) {
+    // a rule's line is its target's colour; a base's line to a target, that target's
+    e.lane = e.from === 'o' ? groupLane[e.to] : e.from.startsWith('b:') ? (laneOf[e.to] || 'none') : (groupLane[e.from] || 'none');
+  }
+  m.more = more;
+  return m;
 }
 
-/** The simple routing mode's "country → direct" line (bypass Iran / bypass China), or null for any other mode. */
-function modeCountryRule(mode) {
-  const sys = mode === 'bypass-ir' ? 'ir' : mode === 'bypass-cn' ? 'cn' : null;
-  if (!sys || !geoReady()) return null;
-  const [icon, label] = appRuleWords(sys);
-  const row = pathRule(icon, t(label) + ' · ' + t('rp.sys.modeNote'), 'direct');
-  row.classList.add('is-mode');
-  row.querySelector('.pr-cond').classList.add('is-label');
-  return row;
+/** One box of the home flow: its number (a rule's, a pool port), icon, words; the rest as the caller adds it. */
+function homeFlowNode(cls, key, icon, label, idx) {
+  const el = document.createElement('div');
+  el.className = 'mf-node ' + cls;
+  el.dataset.key = key;
+  if (idx) spanIn(el, 'mf-idx', idx);
+  if (icon) spanIn(el, 'mf-ico', icon);
+  spanIn(el, 'mf-label', label);
+  return el;
 }
+
+/** The home flow on screen: four columns (three without a base), the lines drawn under them once laid out. */
+function buildHomeFlow(m, { live, ip, mode }) {
+  const grid = document.createElement('div');
+  grid.className = 'mf' + (m.bases.length ? '' : ' no-bases') + (live ? ' live' : '');
+  const column = (name) => {
+    const col = document.createElement('div');
+    col.className = 'mf-col';
+    col.dataset.col = name;
+    grid.appendChild(col);
+    return col;
+  };
+  // this device, with the session's live speed (the stats tick writes #pathCapIn)
+  const origin = homeFlowNode('mf-origin', 'o', '', '🖥 ' + t('path.device'));
+  spanIn(origin, 'mf-meta', mode);
+  const cap = spanIn(origin, 'mf-speed', '');
+  cap.id = 'pathCapIn';
+  column('origin').appendChild(origin);
+
+  const prof = m.prof || null;
+  const rules = column('rules');
+  const laneOf = {};
+  for (const tg of m.targets) laneOf[tg.key] = tg.lane;
+  for (const g of m.groups) {
+    let el;
+    if (g.sys) {
+      const [icon, label, note] = appRuleWords(g.sys);
+      el = homeFlowNode('mf-rule app', g.key, icon, t(label));
+      el.title = t(label) + ' (' + t(note) + ')';
+    } else if (g.isDefault) {
+      el = homeFlowNode('mf-rule rest', g.key, '↓', t('path.rest'));
+    } else if (g.pool) {
+      el = homeFlowNode('mf-rule', g.key, '', g.name || 'SOCKS', ':' + g.port);
+    } else {
+      const sum = ruleSummary(g.items);
+      const nums = g.idxs.map(i => String(i + 1).padStart(2, '0'));
+      el = homeFlowNode('mf-rule', g.key, [...new Set(g.items.map(it => it.type))].map(ruleTypeIcon).join(''), sum.text || '—',
+        nums.length > 1 ? nums[0] + '–' + nums[nums.length - 1] : nums[0]);
+      el.querySelector('.mf-label').dir = 'ltr';
+      if (sum.more) spanIn(el, 'mf-more', '+' + sum.more);
+      el.title = sum.full;
+    }
+    el.classList.add('lane-' + (laneOf[g.to] || 'none'));
+    // the stacked (narrow) layout has no lines: this says where the rule goes instead
+    spanIn(el, 'mf-to', '→ ' + homeFlowTo(g, prof));
+    el.title = (el.title || el.querySelector('.mf-label').textContent) + ' → ' + homeFlowTo(g, prof);
+    rules.appendChild(el);
+  }
+  if (m.more) spanIn(rules, 'mf-morerules', t('path.andMore').replace('{n}', m.more));
+
+  if (m.bases.length) {
+    const bases = column('bases');
+    for (const b of m.bases) {
+      const el = homeFlowNode('mf-base' + (b.why ? ' danger' : ''), b.key, '⚓', refName(b.ref));
+      el.title = refName(b.ref) + ' — ' + t('rp.base') + (b.why ? ' — ' + t(b.why) : '');
+      bases.appendChild(el);
+    }
+  }
+
+  const targets = column('targets');
+  for (const tg of m.targets) {
+    const icon = tg.kind === 'direct' ? '↗' : tg.kind === 'block' ? '⛔' : tg.kind === 'exit' ? '🌐' : tg.kind === 'chain' ? '⛓' : '🛡';
+    const label = tg.kind === 'direct' ? t('path.direct') : tg.kind === 'block' ? t('path.block')
+      : tg.kind === 'exit' ? t('path.exitHere') : tg.kind === 'none' ? t('path.noServer')
+        : tg.chain ? tg.chain.name : refName(tg.ref, prof);
+    const el = homeFlowNode('mf-target lane-' + tg.lane + (tg.why ? ' danger' : ''), tg.key, icon, label);
+    // a chain says its hops when asked; a target behind a base, which one
+    const ch = tg.chain || (String(tg.ref).startsWith('chain:') ? chainById(String(tg.ref).slice(6)) : null);
+    const hops = ch ? chainMembers(ch).map(x => x.name).join(' → ') : '';
+    el.title = [label, hops, tg.via ? t('rp.viaBase').replace('{base}', () => refName(tg.via)) : '', tg.why ? t(tg.why) : ''].filter(Boolean).join(' — ');
+    // block carries nothing worth counting
+    if (tg.kind !== 'block' && tg.tags.length) el.appendChild(trafficSpan(tg.tags));
+    targets.appendChild(el);
+  }
+
+  const layer = document.createElement('div');
+  layer.className = 'mf-edges';
+  layer.setAttribute('aria-hidden', 'true');
+  grid.appendChild(layer);
+
+  const foot = document.createElement('div');
+  foot.className = 'mf-foot';
+  spanIn(foot, 'mf-exit', '🌐 ' + t('path.internet'));
+  spanIn(foot, 'mf-ip', live ? (ip || '—') : t('path.offline'));
+  grid.appendChild(foot);
+  return grid;
+}
+
+/** Where a rule of the home flow leads, in words: "⚓ base → target". */
+function homeFlowTo(g, prof) {
+  if (g.target === TARGET_BASE) return prof && prof.base ? '⚓ ' + refName(prof.base) + ' → ' + t('path.exitHere') : t('rp.exitAtBaseNone');
+  const to = !g.target ? t('path.noServer') : g.target === 'direct' ? t('path.direct') : g.target === 'block' ? t('path.block') : targetLabel(g.target);
+  return g.via ? '⚓ ' + refName(g.via) + ' → ' + to : to;
+}
+
+/** Draw the home flow's lines from where its boxes landed — each in its target's colour. Nothing while hidden. */
+function drawHomeFlow() {
+  const host = $('#trafficPath');
+  const grid = host && host.querySelector ? host.querySelector('.mf') : null;
+  const layer = grid ? grid.querySelector('.mf-edges') : null;
+  if (!layer || !hfModel || typeof grid.getBoundingClientRect !== 'function') return;
+  const box = grid.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  const rects = {};
+  for (const n of grid.querySelectorAll('.mf-node')) rects[n.dataset.key] = n.getBoundingClientRect();
+  const rtl = getComputedStyle(grid).direction === 'rtl';
+  const w = Math.ceil(box.width), h = Math.ceil(box.height);
+  const lane = {};
+  for (const e of hfModel.edges) lane[e.from + '>' + e.to] = /^(c[1-5]|direct|block|none)$/.test(e.lane) ? e.lane : 'none';
+  // everything below is a literal, a number or one of the lane names above
+  layer.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" focusable="false">` +
+    flowEdgePaths(hfModel.edges, rects, box, rtl)
+      .map(line => `<path class="mf-edge lane-${lane[line.from + '>' + line.to]}${line.danger ? ' danger' : ''}" d="${line.d}"/>`).join('') +
+    '</svg>';
+}
+
+let hfDrawPending = false;
+/** Draw the home flow's lines on the next frame (once, however many renders asked). */
+function drawHomeFlowSoon() {
+  if (hfDrawPending) return;
+  hfDrawPending = true;
+  const run = () => { hfDrawPending = false; drawHomeFlow(); };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 0);
+}
+// the window or the rail resizing moves every box: the lines follow
+if (typeof ResizeObserver !== 'undefined' && $('#trafficPath')) new ResizeObserver(() => drawHomeFlowSoon()).observe($('#trafficPath'));
 
 /**
  * Fill every caption from the core's per-outbound counters. Text only — the

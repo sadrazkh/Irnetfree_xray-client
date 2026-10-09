@@ -18,146 +18,158 @@
 /* --- traffic path --------------------------------------------------- */
 
 /*
- * The panel REFLOWS, it does not scroll. It used to be a single non-wrapping
- * row with `overflow-x: auto`, so narrowing the window (the minimum is 900px,
- * and the rail eats up to 220px of it) left the diagram clipped behind a
- * scrollbar nobody looks for. Wrapping is driven by the content — each part
- * carries the width it actually needs — so it behaves the same in all three
- * skins and at every window size, with no breakpoint to keep in sync.
+ * The routing page's flow tree, minimal (renderTrafficPath): this device →
+ * the rules → ⚓ the base → the targets. Every target has a colour of its own —
+ * direct green, block red, each proxy target the next of five lanes — and so
+ * does every line to it, so what goes direct, what rides the base and what
+ * goes anywhere else never mix. Lines are one SVG under the boxes, drawn once
+ * they are laid out (drawHomeFlow); a narrow panel stacks the columns and each
+ * rule says in words where it leads.
  */
 .path-panel {
   display: flex;
   flex-wrap: wrap;
-  align-items: stretch;
-  column-gap: 0;
-  row-gap: 14px;
-  padding: 20px 22px;
+  container-type: inline-size;
+  container-name: homepath;
+  padding: 16px 18px 12px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r6);
   overflow-x: hidden;
 }
-.path-node {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: 13px 17px;
-  min-width: 118px;
-  background: var(--soft);
-  border: 1px solid var(--softline);
-  border-radius: var(--r6);
-  flex: 0 0 auto;
-}
-.path-node.exit { background: var(--accentSoft); border-color: var(--accentLine); }
-/* When the row wraps, the destination should still read as the END of the
-   path rather than as a second box under the device. A no-op while everything
-   fits on one line, where the growing parts already push it to the edge. */
-.path-panel > .path-node.path-dest { margin-inline-start: auto; }
-/* a simple mode's "country → direct" share, on a line of its own under the path */
-.path-panel > .path-bypass { flex: 1 1 100%; padding: 10px 0 0; border-top: 1px dashed var(--softline); }
-.path-ico { font-size: 20px; line-height: 1; }
-.path-name { font-size: 12px; font-weight: 600; color: var(--ink2); }
-.path-meta { font-family: var(--mono); font-size: 11px; color: var(--ink3); direction: ltr; }
-/*
- * The link carries the throughput caption ABOVE its line, as a real flex item.
- * It used to be absolutely positioned and centred on the line, which meant the
- * link's width said nothing about the caption's: at 900px the line was 56px
- * and "↓13.8 MB/s ↑250 B/s" is 115px, so the caption escaped 29px into the
- * "This device" node next to it. In flow, the link can never be narrower than
- * the numbers it has to show, so they cannot land on a neighbour.
- */
-.path-link {
-  flex: 1 1 60px;
-  /* NOT a fixed min-width: `auto` is what makes the link at least as wide as
-     the caption inside it. A number here would let flexbox shrink the link
-     under the numbers again, which is the whole bug. */
-  min-width: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding-inline: 10px;
-}
-.path-link::after {
-  content: "";
-  display: block;
-  align-self: stretch;
-  min-width: 56px;      /* a captionless link still draws a line worth seeing */
-  height: 2px;
-  border-radius: 1px;
-  background: var(--softline);
-}
-.path-link.live::after { background: linear-gradient(90deg, var(--accent), var(--ok)); }
-.path-cap {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--ink3);
-  white-space: nowrap;
-  direction: ltr;
-}
-/* A link with no caption keeps the line vertically where a captioned one has
-   it, so the row of lines stays level across the diagram. */
-.path-link:not(:has(.path-cap))::after { margin-block-start: 21px; }
-/* the rule fan-out: one line per advanced rule, built once (not per tick) */
-/* The fan-out asks for 320px. Given less — a narrow window, a wide rail — it
-   wraps onto its own row instead of squeezing every rule into an ellipsis:
-   at 900px the condition column was losing 123px of text that way. */
-.path-rules {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  flex: 1 1 420px;
+
+.mf {
+  --mf-node: 30px;
+  --mf-c1: #5ab0ff;
+  --mf-c2: #b48cff;
+  --mf-c3: #f5b54a;
+  --mf-c4: #ff7eb6;
+  --mf-c5: #ff9a6b;
+  flex: 1 1 100%;
   min-width: 0;
-  padding-inline: 14px;
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1.15fr) minmax(0, .8fr) minmax(0, 1.3fr);
+  column-gap: 38px;
+  row-gap: 10px;
+  align-items: center;
 }
-.path-rule {
+[data-theme="light"] .mf {
+  --mf-c1: #1f6fd1;
+  --mf-c2: #7a4fd6;
+  --mf-c3: #a86a00;
+  --mf-c4: #c2357a;
+  --mf-c5: #c2531f;
+}
+.mf.no-bases { grid-template-columns: auto minmax(0, 1.3fr) minmax(0, 1.2fr); }
+.mf .lane-c1 { --lane: var(--mf-c1); }
+.mf .lane-c2 { --lane: var(--mf-c2); }
+.mf .lane-c3 { --lane: var(--mf-c3); }
+.mf .lane-c4 { --lane: var(--mf-c4); }
+.mf .lane-c5 { --lane: var(--mf-c5); }
+.mf .lane-direct { --lane: var(--ok); }
+.mf .lane-block { --lane: var(--danger); }
+.mf .lane-none { --lane: var(--softline); }
+
+.mf-col { position: relative; z-index: 1; display: flex; flex-direction: column; justify-content: center; gap: 6px; min-width: 0; }
+
+.mf-node {
   display: flex;
   align-items: center;
-  gap: 9px;
-  font-size: 11px;
-  color: var(--ink3);
+  gap: 7px;
+  min-height: var(--mf-node);
+  padding: 0 10px;
   min-width: 0;
-}
-.path-rule .pr-idx {
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--dim);
-  flex: 0 0 auto;
-}
-.path-rule .pr-cond {
-  font-family: var(--mono);
-  direction: ltr;
-  color: var(--ink2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-.path-rule .pr-arrow { color: var(--dim); flex: 0 0 auto; }
-.path-rule .pr-to {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 7px;
-  border-radius: var(--r2);
-  background: var(--soft);
-  border: 1px solid var(--softline);
+  font-size: 12px;
   color: var(--ink2);
   white-space: nowrap;
-  flex: 0 0 auto;
-  max-width: 42%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  background: var(--soft);
+  border: 1px solid var(--softline);
+  border-radius: var(--r5);
 }
-.path-rule .pr-to.to-direct { color: var(--ok); }
-.path-rule .pr-to.to-block { color: var(--danger); }
-.path-rule .pr-to.to-proxy { color: var(--accentInk); border-color: var(--accentLine); background: var(--accentSoft); }
-.path-rule.is-default .pr-cond { color: var(--ink3); font-family: var(--ui); }
+.mf-ico { flex: 0 0 auto; font-size: 12px; line-height: 1; }
+.mf-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mf-idx { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--dim); direction: ltr; unicode-bidi: isolate; }
+.mf-more { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; color: var(--ink3); }
+
+/* a rule: its values in mono, a dot of its target's colour at its far end */
+.mf-rule .mf-label { font-family: var(--mono); font-size: 11.5px; unicode-bidi: isolate; }
+.mf-rule::after {
+  content: '';
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--lane, var(--softline));
+}
+.mf-rule.app,
+.mf-rule.rest { border-style: dashed; background: transparent; color: var(--ink3); }
+.mf-rule.app .mf-label,
+.mf-rule.rest .mf-label { font-family: var(--ui); font-size: 12px; }
+.mf-morerules { font-size: 11px; color: var(--ink3); padding-inline-start: 4px; }
+
+/* this device: where every line starts, with the session's live speed */
+.mf-origin {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 9px 12px;
+  background: transparent;
+  border-color: var(--line);
+}
+.mf-origin .mf-label { font-family: var(--ui); font-size: 12px; font-weight: 600; color: var(--ink); }
+.mf-meta { font-family: var(--mono); font-size: 10.5px; color: var(--ink3); direction: ltr; }
+.mf-speed { font-family: var(--mono); font-size: 11px; color: var(--ok); direction: ltr; white-space: nowrap; }
+.mf-speed:empty { display: none; }
+
+/* the base: between the rules and their targets */
+.mf-base { background: var(--accentSoft); border-color: var(--accentLine); color: var(--accentInk); font-weight: 600; }
+
+/* a target: tinted in its colour, where its lines end; its own traffic at its end */
+.mf-target {
+  border-color: color-mix(in srgb, var(--lane, var(--accent)) 55%, transparent);
+  background: color-mix(in srgb, var(--lane, var(--accent)) 11%, var(--soft));
+}
+.mf-target .mf-label { font-weight: 600; color: var(--ink); }
+.mf-target .pr-traffic {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--lane, var(--ok));
+  direction: ltr;
+  white-space: nowrap;
+  margin-inline-start: 6px;
+}
+.mf-node.danger { color: var(--danger); background: var(--dangerSoft); border-color: var(--danger); }
+
+/* the lines, each in its target's colour; moving while the tunnel is up */
+.mf-edges { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.mf-edges svg { display: block; overflow: visible; }
+.mf-edge { fill: none; stroke: var(--lane, var(--softline)); stroke-width: 1.5; stroke-opacity: .5; }
+.mf-edge.danger { stroke: var(--danger); stroke-dasharray: 4 3; }
+.mf.live .mf-edge:not(.danger) { stroke-opacity: .9; stroke-dasharray: 5 4; animation: mf-flow 1.1s linear infinite; }
+@keyframes mf-flow { to { stroke-dashoffset: -18; } }
+@media (prefers-reduced-motion: reduce) {
+  .mf.live .mf-edge { animation: none; }
+}
+
+/* the exit, quietly in the corner */
+.mf-foot { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 6px; font-size: 11px; color: var(--ink3); }
+.mf-ip { font-family: var(--mono); color: var(--ink2); direction: ltr; unicode-bidi: isolate; }
+
+/* the words that stand in for the lines when the columns stack */
+.mf-to { display: none; }
+
+/* A narrow panel (a small window, a wide rail): the columns stack, the lines
+   go, and each rule says in words where it leads. */
+@container homepath (max-width: 620px) {
+  .mf, .mf.no-bases { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+  .mf-edges { display: none; }
+  .mf-col[data-col="bases"] { display: none; }
+  .mf-rule { flex-wrap: wrap; white-space: normal; padding-block: 5px; }
+  .mf-rule::after { order: -1; }   /* its colour first, where the eye starts the line */
+  .mf-to { display: block; flex: 1 1 100%; font-size: 11px; color: var(--ink3); }
+}
 
 /* --- connect panel + readouts --------------------------------------- */
 
@@ -474,37 +486,6 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
 .ss-item.active,
 .ss-item.selected { background: var(--accentSoft); color: var(--accentInk); font-weight: 600; }
 .ss-empty { padding: 12px; text-align: center; color: var(--dim); font-size: 11px; }
-
-/* Each hop's own throughput, written by applyPathTraffic on the stats tick.
-   Sits at the end of its row/node so the numbers line up in a column. */
-.pr-traffic {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--dim);
-  direction: ltr;
-  white-space: nowrap;
-  flex: 0 0 auto;
-  margin-inline-start: auto;
-  padding-inline-start: 10px;
-}
-.path-node .pr-traffic { margin-inline-start: 0; padding-inline-start: 0; }
-.path-rule .pr-cond.is-label { font-family: var(--ui); color: var(--ink3); }
-/* "⚓ <base>" on a routing profile's line: the base its target dials through,
-   between the condition and the target, as the traffic goes. Whole, like the
-   target beside it — the condition is what gives way. */
-.path-rule .pr-via {
-  flex: 0 1 auto;
-  max-width: 30%;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 7px;
-  border-radius: var(--r2);
-  border: 1px dashed var(--accentLine);
-  color: var(--ink2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
 /* A readable, resolution-aware traffic plot with a shared rate scale. */
 .traffic-chart { grid-column: 1 / -1; margin: 0; padding: 14px 16px 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); min-inline-size: 0; }
