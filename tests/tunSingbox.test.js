@@ -926,3 +926,62 @@ test('macOS health loss notifies once and retains state for DNS recovery', async
     assert.equal(calls, 1); assert.equal(tun.active, false); assert.ok(tun.macState);
   } finally { platform.run = realRun; }
 });
+
+/* ------------------------------ dns_mode (sing-box 1.14+) ------------------------------ */
+
+const { tunDnsModeFor } = require('../src/main/tunSingbox');
+
+test('tunDnsModeFor: "disabled" from sing-box 1.14 on (its default there hijacks the peer’s DNS); nothing before, nothing unreadable, nothing when DNS is left to sing-box', () => {
+  for (const v of ['1.14.0', '1.14.3', 'sing-box version 1.14.3', '1.14.0-alpha.21', '1.15.0-alpha.11', '2.0.0']) assert.equal(tunDnsModeFor(v, 'app'), 'disabled', v);
+  for (const v of ['1.13.14', '1.12.0', '1.7.8', 'sing-box version 1.13.14', '', null, undefined, 'junk']) assert.equal(tunDnsModeFor(v, 'app'), null, String(v));
+  assert.equal(tunDnsModeFor('1.14.3', 'core'), null, 'the user’s "leave DNS to sing-box"');
+  assert.equal(tunDnsModeFor('1.14.3'), 'disabled', 'no policy is the app’s');
+});
+
+test('buildTunConfig: dns_mode only when asked, after every other key; nothing else changes — a 1.13 config is byte for byte the one before', () => {
+  const plain = buildTunConfig({ socksPort: 10808, excludeIps: ['1.2.3.4'], strict: true, udpTimeout: 120 });
+  const withMode = buildTunConfig({ socksPort: 10808, excludeIps: ['1.2.3.4'], strict: true, udpTimeout: 120, dnsMode: 'disabled' });
+  assert.equal('dns_mode' in plain.inbounds[0], false);
+  assert.equal(withMode.inbounds[0].dns_mode, 'disabled');
+  assert.equal(Object.keys(withMode.inbounds[0]).at(-1), 'dns_mode');
+  const { dns_mode: _gone, ...rest } = withMode.inbounds[0];
+  assert.deepEqual(rest, plain.inbounds[0]);
+  assert.deepEqual(withMode.outbounds, plain.outbounds);
+  assert.deepEqual(withMode.route, plain.route);
+  assert.equal('dns' in withMode, false, 'sing-box still carries no DNS of its own');
+  assert.equal('dns_mode' in buildTunConfig({ socksPort: 1, dnsMode: 'whatever' }).inbounds[0], false, 'only a value sing-box knows');
+});
+
+test('writeConfig: the binary’s own version decides — 1.14+ gets dns_mode "disabled", 1.13 the config of before; the router always keeps DNS with the app', () => {
+  const read = (file) => JSON.parse(fs.readFileSync(file, 'utf8')).inbounds[0];
+  const make = (version, over = {}) => {
+    const logs = [];
+    const tun = new TunSingbox(Object.assign({ extraDirs: [], onLog: (line, level) => logs.push([level, line]) }, over));
+    tun.singboxPath = () => '/fake/sing-box';
+    tun.singboxVersion = () => version;
+    return { tun, logs };
+  };
+  const a = make('1.14.3');
+  assert.equal(read(a.tun.writeConfig(10808, [], {}, 'IRNetFree').cfgFile).dns_mode, 'disabled');
+  assert.ok(a.logs.some(([lv, l]) => lv === 'info' && /sing-box 1\.14\.3: dns_mode disabled/.test(l)));
+  const b = make('1.13.14');
+  assert.equal('dns_mode' in read(b.tun.writeConfig(10808, [], {}, 'IRNetFree').cfgFile), false);
+  // left to sing-box by the user: its own default, said as a warning
+  const c = make('1.14.3');
+  assert.equal('dns_mode' in read(c.tun.writeConfig(10808, [], { dnsPolicy: 'core' }, 'IRNetFree').cfgFile), false);
+  assert.ok(c.logs.some(([lv, l]) => lv === 'warn' && /DNS left to sing-box/.test(l)));
+  // the router: dnsmasq is the resolver — never sing-box, whatever is asked
+  const r = make('1.14.3', { composedBy: 'openwrt' });
+  assert.equal(read(r.tun.writeConfig(30808, [], { dnsPolicy: 'core' }, 'IRNetFree').cfgFile).dns_mode, 'disabled');
+  // a version that cannot be read: the config of before, and the log says why
+  const u = make('');
+  assert.equal('dns_mode' in read(u.tun.writeConfig(10808, [], {}, 'IRNetFree').cfgFile), false);
+  assert.ok(u.logs.some(([lv, l]) => lv === 'warn' && /version could not be read/.test(l)));
+});
+
+test('the connect hands the TUN its DNS policy: the user’s choice, never "core" under the strict guard; a reconnect-relevant setting, the app’s by default', () => {
+  const MAIN = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
+  assert.match(MAIN, /dnsPolicy: settings\.leakGuard !== 'strict' && settings\.singboxDns === 'core' \? 'core' : 'app'/);
+  assert.match(MAIN, /\n {2}singboxDns: 'app',\r?\n/);
+  assert.ok(require('../src/main/settingsMeta').RECONNECT_KEYS.includes('singboxDns'));
+});

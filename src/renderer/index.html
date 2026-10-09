@@ -710,6 +710,17 @@
             <p class="hint warn" id="guardStrictRouting" data-i18n="guard.strictRouting" hidden></p>
             <p class="hint warn" id="guardNeedsTun" data-i18n="guard.needsTun" hidden></p>
           </div>
+          <!-- sing-box 1.14+ answers the tunnel's DNS itself unless told not to (tunSingbox.tunDnsModeFor) -->
+          <div class="setting-row" id="singboxDnsRow">
+            <label class="field-label" for="optSingboxDns" data-i18n="set.singboxDns">DNS در TUN (sing-box)</label>
+            <select id="optSingboxDns" class="select vis-hidden">
+              <option value="app" data-i18n="sbdns.app">برنامه</option>
+              <option value="core" data-i18n="sbdns.core">خودِ sing-box</option>
+            </select>
+            <div class="opt-cards" id="singboxDnsCards"></div>
+            <p class="hint" data-i18n="sbdns.hint"></p>
+            <p class="hint warn" id="sbdnsStrictNote" data-i18n="sbdns.strictNote" hidden></p>
+          </div>
           <!-- the proxy-mode counterpart: TUN already carries UDP, so it is the other way round -->
           <div class="switch-row" id="udpBlockRow">
             <div><div class="switch-title" data-i18n="udpblock.title">بستن UDP در حالت پروکسی</div>
