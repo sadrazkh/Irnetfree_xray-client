@@ -41,7 +41,7 @@ const { pickUpdateAsset, parseSha256Sums, sha256File } = require('./appUpdate');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
-const { migrateProfiles, mirrorToSettings, mirrorFromSettings, isAdvancedSelection, profileIdOf, advancedTargets, resolveProcessRules, liveRoutingOf, routingPendingKeys } = require('./routingProfiles');
+const { migrateProfiles, mirrorToSettings, mirrorFromSettings, isAdvancedSelection, profileIdOf, resolveBaseTargets, advancedTargets, resolveProcessRules, liveRoutingOf, routingPendingKeys } = require('./routingProfiles');
 const { NetWatcher, fingerprint } = require('./netWatcher');
 const { DropBudget } = require('./dropBudget');
 const { isWebUrl, isAppPage } = require('./urlGuard');
@@ -820,8 +820,13 @@ function buildPlan(serverId, settings) {
       : 'این پروفایلِ روتینگ دیگر وجود ندارد — در بخشِ روتینگ یکی دیگر انتخاب کن.');
     // its process rules as the addresses those processes use now (effectiveSettings)
     const rules = resolveProcessRules(Array.isArray(profile.rules) ? profile.rules : [], settings.procIps);
-    const def = profile.def || (servers[0] && servers[0].id) || 'direct';
-    plan = { mode: 'advanced', profileId: profile.id, serversById, chainsById, chain: legacyChain, rules, def, defVia: profile.defVia, base: profile.base, useMode: profile.useMode };
+    const def0 = profile.def || (servers[0] && servers[0].id) || 'direct';
+    if (def0 === 'base' && !profile.base) throw new Error(settings.lang === 'en'
+      ? 'This routing sends everything else out through its base, but it has no base — choose one under Routing.'
+      : 'این روتینگ بقیهٔ ترافیک را از پایه خارج می‌کند ولی پایه‌ای ندارد — در بخشِ روتینگ یک پایه انتخاب کن.');
+    // "exit at the base" is the base itself from here on (routingProfiles.resolveBaseTargets)
+    const { rules: atBase, def, defVia } = resolveBaseTargets({ rules, def: def0, defVia: profile.defVia, base: profile.base });
+    plan = { mode: 'advanced', profileId: profile.id, serversById, chainsById, chain: legacyChain, rules: atBase, def, defVia, base: profile.base, useMode: profile.useMode };
     label = '🧭 ' + (profile.name || (settings.lang === 'en' ? 'Advanced routing' : 'روتینگ ویژه'));
     // every target and every base one goes through is refused when broken; the
     // bypass is cut for what is dialled directly — a base, never a target behind it

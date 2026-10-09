@@ -26,6 +26,8 @@ const crypto = require('crypto');
 const VIA_INHERIT = 'inherit';
 const VIA_NONE = 'none';
 const DEFAULT_PROFILE_ID = 'rp-default';
+/** A target that is the profile's own base — "exit at the base": traffic leaves from it, and it follows the base. */
+const TARGET_BASE = 'base';
 const ADVANCED = '__advanced__';
 const ID = /^[\w-]+$/;
 
@@ -73,7 +75,8 @@ function normalizeProfile(p) {
     def: str(p.def),
     defVia: defVia || VIA_INHERIT,
     useMode: !!p.useMode,
-    base: !base || LOCAL.has(base) || base === VIA_INHERIT || base === VIA_NONE ? null : base
+    // a base is a server or a chain — never direct/block, a via word or "exit at the base" itself
+    base: !base || LOCAL.has(base) || base === VIA_INHERIT || base === VIA_NONE || base === TARGET_BASE ? null : base
   };
 }
 
@@ -179,10 +182,31 @@ function effectiveVia(ruleOrDef, profile) {
   const isDef = ruleOrDef === 'def';
   const target = isDef ? p.def : (isObj(ruleOrDef) ? ruleOrDef.target : null);
   const via = isDef ? p.defVia : (isObj(ruleOrDef) ? ruleOrDef.via : null);
-  if (!target || LOCAL.has(target)) return null;
+  // "exit at the base" IS the base: it rides on nothing
+  if (!target || LOCAL.has(target) || target === TARGET_BASE) return null;
   const v = via == null || via === '' || via === VIA_INHERIT ? (p.base || null) : (via === VIA_NONE ? null : str(via));
   if (!v || LOCAL.has(v) || v === VIA_INHERIT || v === VIA_NONE || v === target) return null;
   return v;
+}
+
+/**
+ * A profile's rules and default with "exit at the base" (TARGET_BASE) as the
+ * base it stands for — the server or chain the builder, the bypass and the
+ * certificate pins then see, dialled directly (via 'none': it is the base).
+ * Without a base it stays as it is: a target that names nothing, which the
+ * connect leaves out (a rule) or refuses (the default), and Routing marks.
+ * Nothing to resolve → the very same arrays and values.
+ */
+function resolveBaseTargets({ rules, def, defVia, base } = {}) {
+  const list = Array.isArray(rules) ? rules : [];
+  const b = typeof base === 'string' && base && !LOCAL.has(base) ? base : null;
+  if (!b) return { rules, def, defVia };
+  const atBase = (r) => isObj(r) && r.target === TARGET_BASE;
+  return {
+    rules: list.some(atBase) ? list.map((r) => (atBase(r) ? Object.assign({}, r, { target: b, via: VIA_NONE }) : r)) : rules,
+    def: def === TARGET_BASE ? b : def,
+    defVia: def === TARGET_BASE ? VIA_NONE : defVia
+  };
 }
 
 /**
@@ -272,8 +296,8 @@ function routingPendingKeys(live, profiles, chains) {
 }
 
 module.exports = {
-  VIA_INHERIT, VIA_NONE, DEFAULT_PROFILE_ID, ADVANCED,
+  VIA_INHERIT, VIA_NONE, DEFAULT_PROFILE_ID, ADVANCED, TARGET_BASE,
   newProfileId, normalizeProfile, migrateProfiles, mirrorToSettings, mirrorFromSettings, profileFromSettings,
-  isAdvancedSelection, selectionIdOf, profileIdOf, effectiveVia, advancedTargets, resolveProcessRules,
+  isAdvancedSelection, selectionIdOf, profileIdOf, effectiveVia, resolveBaseTargets, advancedTargets, resolveProcessRules,
   liveRoutingOf, routingPendingKeys
 };
