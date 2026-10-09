@@ -58,6 +58,41 @@ jobs:
         if: ${{ !cancelled() }}
         run: IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" node scripts/validate-configs.js
 
+  tun-dns:
+    # The real TUN, which `sing-box check` cannot speak for: does a name asked
+    # through the app's sing-box TUN reach Xray (the managed DNS, a WireGuard's
+    # private names) — or does sing-box answer it itself and send it past the
+    # tunnel, as 1.14's default dns_mode "hijack" does? In a network namespace of
+    # its own (the runner's network is not touched), with the app's own configs
+    # (scripts/tun-dns-probe.js). Both lines the app runs: the last 1.13 and the
+    # 1.14 GitHub calls latest. On 1.14 a control run without dns_mode must show
+    # the bug, or the probe could not see it.
+    name: real TUN DNS (sing-box ${{ matrix.singbox }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        singbox: ['1.13.14', '1.14.3']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch Xray (suggested) and sing-box ${{ matrix.singbox }}
+        run: |
+          set -euo pipefail
+          XV=$(node -p "require('./src/main/coreVersions').SUGGESTED.xray")
+          SV='${{ matrix.singbox }}'
+          echo "xray $XV · sing-box $SV"
+          mkdir -p "$RUNNER_TEMP/x" "$RUNNER_TEMP/s"
+          curl -fsSL --retry 3 -o x.zip "https://github.com/XTLS/Xray-core/releases/download/v$XV/Xray-linux-64.zip"
+          unzip -q x.zip -d "$RUNNER_TEMP/x"
+          curl -fsSL --retry 3 -o s.tgz "https://github.com/SagerNet/sing-box/releases/download/v$SV/sing-box-$SV-linux-amd64.tar.gz"
+          tar -xzf s.tgz -C "$RUNNER_TEMP/s" --strip-components=1
+          chmod +x "$RUNNER_TEMP/x/xray" "$RUNNER_TEMP/s/sing-box"
+      - name: A name asked through the TUN reaches Xray and never the ISP resolver
+        run: sudo IRNF_TUN_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" "$(command -v node)" scripts/tun-dns-probe.js
+
   android:
     # The Android app is a hand-written port of src/main/parser.js and
     # configBuilder.js, and nobody working on it can compile Kotlin locally

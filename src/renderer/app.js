@@ -457,6 +457,7 @@ function applySettingsToUI() {
   $('#optTunBackend option[value="native-macos"]').hidden = state.platform !== 'darwin';
   $('#nativeMacControls').hidden = state.platform !== 'darwin';
   $('#optLeakGuard').value = s.leakGuard || 'standard';
+  $('#optSingboxDns').value = s.singboxDns === 'core' ? 'core' : 'app';
   $('#optBlockUdpProxy').checked = !!s.blockUdpInProxyMode;
   $('#optAllowLan').checked = !!s.allowLan;
   $('#optKillSwitch').checked = !!s.killSwitch;
@@ -539,12 +540,14 @@ function renderOptionCards(selectId, hostId, icons) {
 const GUARD_ICONS = { off: '⚪', standard: '🛡', strict: '🔒' };
 const BACKEND_ICONS = { 'native-macos': '🍎', 'sing-box': '📦', tun2socks: '🧩' };
 const TUNAPP_ICONS = { off: '⚪', exclude: '↩', only: '🎯' };
+const SBDNS_ICONS = { app: '🛡', core: '📦' };
 
 /** Every card group, from whatever the selects currently hold. */
 function renderSettingCards() {
   renderOptionCards('#optLeakGuard', '#leakGuardCards', GUARD_ICONS);
   renderOptionCards('#optTunBackend', '#tunBackendCards', BACKEND_ICONS);
   renderOptionCards('#optTunAppMode', '#tunAppModeCards', TUNAPP_ICONS);
+  renderOptionCards('#optSingboxDns', '#singboxDnsCards', SBDNS_ICONS);
 }
 
 function updateGuardRows() {
@@ -571,6 +574,16 @@ function updateGuardRows() {
         (!!p.useMode && modeBypasses))
       : modeBypasses;
     $('#guardStrictRouting').hidden = !(tunOn && $('#optLeakGuard').value === 'strict' && bypasses);
+  }
+  // who answers DNS inside the sing-box TUN: a sing-box matter, and the strict
+  // guard always keeps it with the app (main.js passes 'app' there)
+  const sbRow = $('#singboxDnsRow');
+  if (sbRow) {
+    const strict = $('#optLeakGuard').value === 'strict';
+    const usable = tunOn && $('#optTunBackend').value === 'sing-box';
+    sbRow.classList.toggle('disabled', !usable || strict);
+    $('#optSingboxDns').disabled = !usable || strict;
+    $('#sbdnsStrictNote').hidden = !(usable && strict);
   }
   // the cards carry the row's disabled state too
   renderSettingCards();
@@ -655,6 +668,7 @@ function readSettingsForm() {
     tunAppMode: $('#optTunAppMode').value,
     tunApps: readTunApps(),
     leakGuard: $('#optLeakGuard').value,
+    singboxDns: $('#optSingboxDns').value,
     blockUdpInProxyMode: $('#optBlockUdpProxy').checked,
     allowLan: $('#optAllowLan').checked,
     killSwitch: $('#optKillSwitch').checked,
@@ -869,6 +883,7 @@ $$('[data-native-service]').forEach(button => {
   };
 });
 $('#optLeakGuard').onchange = () => { saveSettings({ leakGuard: $('#optLeakGuard').value }); updateGuardRows(); updateTunAppRows(); };
+$('#optSingboxDns').onchange = () => { saveSettings({ singboxDns: $('#optSingboxDns').value }); updateGuardRows(); };
 $('#optBlockUdpProxy').onchange = () => saveSettings({ blockUdpInProxyMode: $('#optBlockUdpProxy').checked });
 
 /* per-app routing — the mode saves itself, the list is cleaned up before it is stored */
@@ -1028,6 +1043,8 @@ function applyFlavor() {
     relabel(acRow.querySelector('.switch-sub'), rt ? 'autoconn.routerSub' : 'autoconn.sub');
   }
   $('#tunBackendRow').hidden = rt;
+  // the router's resolver is dnsmasq: its tunnel's DNS is always the app's (tunSingbox.dnsModeFor)
+  $('#singboxDnsRow').hidden = rt;
   $('#tunAppRow').hidden = rt;
   // The router's tunnel is the whole network's, always (field report G2): no
   // TUN switch (its wording is the desktop's — admin rights, "the system"), in
