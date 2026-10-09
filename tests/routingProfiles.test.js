@@ -12,7 +12,7 @@ const RP = require('../src/main/routingProfiles');
 const {
   VIA_INHERIT, VIA_NONE, DEFAULT_PROFILE_ID, newProfileId, normalizeProfile, migrateProfiles, mirrorToSettings,
   mirrorFromSettings, profileFromSettings, profileIdOf, effectiveVia, advancedTargets, isAdvancedSelection,
-  resolveProcessRules, liveRoutingOf, routingPendingKeys
+  resolveProcessRules, liveRoutingOf, routingPendingKeys, TARGET_BASE, resolveBaseTargets
 } = RP;
 
 const RULES = [
@@ -195,4 +195,30 @@ test('reconnect state: an edit of the live profile or of a chain the live connec
   const single = liveRoutingOf({ serverId: 'sv-a', plan: { mode: 'single' }, profiles: [profile], chains });
   assert.deepEqual(routingPendingKeys(single, [], []), []);
   assert.deepEqual(routingPendingKeys(null, [], []), []);
+});
+
+test('"exit at the base": the target “base” rides on nothing, is never a base itself, and becomes the base at connect — dialled directly', () => {
+  assert.equal(TARGET_BASE, 'base');
+  const prof = { base: 's1', def: 'base', defVia: 'chain:c9', rules: [] };
+  assert.equal(effectiveVia('def', prof), null, 'the base itself takes no via, whatever is stored');
+  assert.equal(effectiveVia({ target: 'base', via: 's2' }, prof), null);
+  assert.equal(normalizeProfile({ id: 'rp-x', base: 'base' }).base, null, 'a base of "base" means nothing');
+  const rules = [{ type: 'ip', value: '10.0.0.0/8', target: 's2' }, { type: 'domain', value: 'a.example', target: 'base', via: 'inherit' }];
+  const r = resolveBaseTargets({ rules, def: 'base', defVia: 'inherit', base: 'chain:c1' });
+  assert.deepEqual(r, {
+    rules: [rules[0], { type: 'domain', value: 'a.example', target: 'chain:c1', via: 'none' }],
+    def: 'chain:c1', defVia: 'none'
+  });
+  assert.equal(r.rules[0], rules[0], 'the other rules are the same objects');
+  assert.equal(rules[1].target, 'base', 'the profile is not touched');
+  // nothing at the base: the very same values
+  const plain = [{ type: 'ip', value: '1.1.1.1', target: 'direct' }];
+  const same = resolveBaseTargets({ rules: plain, def: 's1', defVia: 'inherit', base: 's9' });
+  assert.equal(same.rules, plain);
+  assert.deepEqual([same.def, same.defVia], ['s1', 'inherit']);
+  // no base: left as it is (the connect leaves such a rule out, refuses such a default)
+  assert.deepEqual(resolveBaseTargets({ rules, def: 'base', defVia: 'inherit', base: null }), { rules, def: 'base', defVia: 'inherit' });
+  // the plan's targets and what is dialled: the base, once
+  const plan = Object.assign({ base: 's1' }, resolveBaseTargets({ rules: [{ type: 'domain', value: 'x', target: 'base' }, { type: 'ip', value: 'y', target: 's2' }], def: 'base', defVia: 'inherit', base: 's1' }));
+  assert.deepEqual(advancedTargets(plan), { targets: ['s1', 's2'], vias: ['s1'], entries: ['s1'] });
 });
