@@ -72,23 +72,23 @@ const PATTN_ROWS = [
 ];
 
 const SINGBOX_ROWS = [
-  ['v1.15.0-alpha.10', '2026-10-03', true], ['v1.15.0-alpha.9', '2026-09-26', true], ['v1.15.0-alpha.8', '2026-09-24', true],
-  ['v1.14.2', '2026-09-24', false], ['v1.15.0-alpha.7', '2026-09-22', true], ['v1.15.0-alpha.6', '2026-09-18', true],
-  ['v1.15.0-alpha.5', '2026-09-16', true], ['v1.15.0-alpha.4', '2026-09-15', true], ['v1.14.1', '2026-09-15', false],
-  ['v1.15.0-alpha.3', '2026-09-13', true], ['v1.15.0-alpha.2', '2026-09-05', true], ['v1.15.0-alpha.1', '2026-09-04', true],
-  ['v1.14.0', '2026-08-31', false], ['v1.14.0-rc.5', '2026-08-30', true], ['v1.13.21', '2026-08-30', false],
-  ['v1.14.0-rc.4', '2026-08-29', true], ['v1.13.20', '2026-08-29', false], ['v1.14.0-rc.2', '2026-08-28', true],
-  ['v1.14.0-rc.1', '2026-08-24', true], ['v1.14.0-beta.17', '2026-08-17', true], ['v1.13.19', '2026-08-17', false],
-  ['v1.14.0-beta.15', '2026-08-15', true], ['v1.14.0-beta.14', '2026-08-11', true], ['v1.14.0-beta.13', '2026-08-10', true],
-  ['v1.14.0-beta.12', '2026-08-09', true], ['v1.13.18', '2026-08-09', false], ['v1.14.0-beta.10', '2026-08-08', true],
-  ['v1.14.0-beta.9', '2026-08-07', true], ['v1.14.0-beta.8', '2026-08-06', true], ['v1.14.0-beta.7', '2026-08-05', true]
+  ['v1.14.3', '2026-10-06', false], ['v1.15.0-alpha.10', '2026-10-03', true], ['v1.15.0-alpha.9', '2026-09-26', true],
+  ['v1.15.0-alpha.8', '2026-09-24', true], ['v1.14.2', '2026-09-24', false], ['v1.15.0-alpha.7', '2026-09-22', true],
+  ['v1.15.0-alpha.6', '2026-09-18', true], ['v1.15.0-alpha.5', '2026-09-16', true], ['v1.15.0-alpha.4', '2026-09-15', true],
+  ['v1.14.1', '2026-09-15', false], ['v1.15.0-alpha.3', '2026-09-13', true], ['v1.15.0-alpha.2', '2026-09-05', true],
+  ['v1.15.0-alpha.1', '2026-09-04', true], ['v1.14.0', '2026-08-31', false], ['v1.14.0-rc.5', '2026-08-30', true],
+  ['v1.13.21', '2026-08-30', false], ['v1.14.0-rc.4', '2026-08-29', true], ['v1.13.20', '2026-08-29', false],
+  ['v1.14.0-rc.2', '2026-08-28', true], ['v1.14.0-rc.1', '2026-08-24', true], ['v1.14.0-beta.17', '2026-08-17', true],
+  ['v1.13.19', '2026-08-17', false], ['v1.14.0-beta.15', '2026-08-15', true], ['v1.14.0-beta.14', '2026-08-11', true],
+  ['v1.14.0-beta.13', '2026-08-10', true], ['v1.14.0-beta.12', '2026-08-09', true], ['v1.13.18', '2026-08-09', false],
+  ['v1.14.0-beta.10', '2026-08-08', true], ['v1.14.0-beta.9', '2026-08-07', true], ['v1.14.0-beta.8', '2026-08-06', true]
 ];
 
 /** Fresh copies every call: a test may change what it got. */
 const xtls = () => releases('XTLS/Xray-core', XTLS_ROWS, (tag) => xrayAssets('XTLS/Xray-core', tag));
 const pattn = () => releases('patterniha/Xray-core', PATTN_ROWS, (tag) => xrayAssets('patterniha/Xray-core', tag));
 const singbox = () => releases('SagerNet/sing-box', SINGBOX_ROWS, singboxAssets);
-/** `GET /releases/tags/v1.13.14` — sing-box's suggested release, older than the 30 newest. */
+/** `GET /releases/tags/<tag>` — one sing-box release by its tag (a suggested one the 30 newest do not hold). */
 const singboxTag = (tag) => releases('SagerNet/sing-box', [[tag, '2026-07-02', /-/.test(tag)]], singboxAssets)[0];
 
 module.exports = { xtls, pattn, singbox, singboxTag, xrayAssets, singboxAssets, releases };

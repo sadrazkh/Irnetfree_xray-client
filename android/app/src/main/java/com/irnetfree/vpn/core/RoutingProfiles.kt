@@ -33,6 +33,8 @@ object RoutingProfiles {
     const val STORE_KEY = "routingProfiles"
     /** A default at the base in a profile without one: there is nowhere to send everything else (main.js buildPlan). */
     const val NO_BASE = "This routing sends everything else out through its base, but it has no base — choose one under Routing."
+    /** Something leaves from a base that is gone: refused, as riding on one is (main.js buildPlan, ConfigBuilder.MISSING_BASE). */
+    const val GONE_BASE = "Advanced routing: the base this routing leaves from no longer exists (it was removed, or replaced by a subscription update) — choose another base under Routing."
 
     private val ID_RE = Regex("^[\\w-]+$")
 
@@ -174,10 +176,17 @@ object RoutingProfiles {
     /**
      * What a connect on [p] routes (Store.buildPlan): its rules and default
      * (an empty default: [fallbackDef]) with "exit at the base" resolved. A
-     * default at the base in a profile without one is refused ([NO_BASE]).
+     * default at the base in a profile without one is refused ([NO_BASE]);
+     * anything at a base that is gone — [exists] says no — is refused too
+     * ([GONE_BASE]): a rule left out would send its traffic to the default,
+     * perhaps direct, while the app says connected. (main.js buildPlan)
      */
-    fun planRoutes(p: RoutingProfile, fallbackDef: String): Routes {
-        val r = resolveBaseTargets(p.rules, p.def.ifBlank { fallbackDef }, p.defVia, p.base)
+    fun planRoutes(p: RoutingProfile, fallbackDef: String, exists: (String) -> Boolean = { _: String -> true }): Routes {
+        val def0 = p.def.ifBlank { fallbackDef }
+        val b = baseOrNull(p.base)
+        val atBase = def0 == TARGET_BASE || p.rules.any { r: RouteRule -> r.target == TARGET_BASE }
+        if (b != null && atBase && !exists(b)) throw IllegalStateException(GONE_BASE)
+        val r = resolveBaseTargets(p.rules, def0, p.defVia, p.base)
         if (r.def == TARGET_BASE) throw IllegalStateException(NO_BASE)
         return r
     }
