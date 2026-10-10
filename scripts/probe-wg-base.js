@@ -26,6 +26,7 @@
  *   IRNF_SINGBOX_EXE   the WireGuard peer (default bin/sing-box)
  *   IRNF_PROBE_PORT    base port, default 39800
  *   IRNF_PROBE_ROUNDS  requests per line, default 10
+ *   IRNF_PROBE_WG_HOST the address the WireGuard dials its peer at (default 127.0.0.1)
  */
 const fs = require('fs');
 const os = require('os');
@@ -40,6 +41,7 @@ const { buildConfig } = require('../src/main/configBuilder');
 const BASE = Number(process.env.IRNF_PROBE_PORT || 39800);
 const P = { hop: BASE + 1, wg: BASE + 2, front: BASE + 3, socks: BASE + 10, dns: BASE + 20, web: BASE + 21, web2: BASE + 22 };
 const ROUNDS = Number(process.env.IRNF_PROBE_ROUNDS || 10);
+const WG_HOST = process.env.IRNF_PROBE_WG_HOST || '127.0.0.1';
 const CORP_IP = '192.168.45.7';
 // inside the WireGuard's AllowedIPs (10.0.0.0/8), outside the peer's own subnet (10.99.0.1/24)
 const HOP_ADDR = '10.88.0.5';
@@ -195,13 +197,13 @@ function probePlan(wg, chained) {
 
 async function scenario(work, chained, cli, srv, dnsSrv) {
   const wg = {
-    id: 'wg', name: 'Corp WG', protocol: 'wireguard', address: '127.0.0.1', port: P.wg,
+    id: 'wg', name: 'Corp WG', protocol: 'wireguard', address: WG_HOST, port: P.wg,
     dns: ['192.168.60.1'], dnsDomains: ['corp.test'],
     outbound: {
       protocol: 'wireguard',
       settings: {
         secretKey: cli.priv, address: ['10.10.10.42/32'], mtu: 1420,
-        peers: [{ publicKey: srv.pub, endpoint: '127.0.0.1:' + P.wg, allowedIPs: ['192.168.0.0/16', '10.0.0.0/8'] }]
+        peers: [{ publicKey: srv.pub, endpoint: WG_HOST + ':' + P.wg, allowedIPs: ['192.168.0.0/16', '10.0.0.0/8'] }]
       },
       streamSettings: { sockopt: {} }
     }
