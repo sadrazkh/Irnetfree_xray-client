@@ -62,6 +62,7 @@ jobs:
         # "exit at the base" and a target through it — both lines must answer every
         # time, on the suggested Xray and Xray-PattN, with sing-box as the peer
         if: ${{ !cancelled() }}
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-wg-base.js
