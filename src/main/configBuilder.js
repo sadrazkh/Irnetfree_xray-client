@@ -627,11 +627,36 @@ function behind(server, tag, viaTag) {
  * exit (behind); `<baseKey>` is the base's server id or `chain-<cid>`. Neither
  * ever carries mux. The caller checks exists(via) first: a base that is gone
  * is a refusal (buildConfig), never a silent direct.
+ *
+ * A base that carries a WireGuard, also dialled as a target of its own ("exit
+ * at the base", or the base picked as a target): two outbounds would be two
+ * sessions on one key, and the peer keeps only the newest — each handshake cut
+ * the other off, and both lines dropped in turn. Its `out-…` is then a freedom
+ * dialling through the base's exit (exitAtBase): one session, and the target's
+ * own figure stays its own.
  */
 function makeRegistry(plan, muxIds) {
   const outs = [];
   const seen = new Set();
   const add = (o) => { if (o && !seen.has(o.tag)) { seen.add(o.tag); outs.push(o); } };
+  // what this plan rides on: a target among these is a base as well
+  const bases = new Set(plan && plan.mode === 'advanced' ? advancedTargets(plan).vias : []);
+
+  /** The servers a target dials: a server, a chain's members. */
+  function members(target) {
+    if (typeof target !== 'string') return [];
+    if (target === 'chain') return plan.chain || [];
+    if (target.indexOf('chain:') === 0) return (plan.chainsById || {})[target.slice('chain:'.length)] || [];
+    const s = (plan.serversById || {})[target];
+    return s ? [s] : [];
+  }
+  const sharesBase = (target) => bases.has(target) && members(target).some(s => s && s.outbound && isWgServer(s));
+
+  /** A target that is its own base's WireGuard: a freedom out through the base's exit (see above). */
+  function exitAtBase(target, tag) {
+    add({ tag, protocol: 'freedom', settings: {}, streamSettings: { sockopt: { dialerProxy: baseOf(target).tag } } });
+    return tag;
+  }
 
   function chainTag(list, tag, viaTag) {
     const arr = (list || []).filter(s => s && s.outbound);
@@ -660,13 +685,15 @@ function makeRegistry(plan, muxIds) {
     if (!target || target === 'direct') return 'direct';
     if (target === 'block') return 'block';
     if (typeof via === 'string' && via) return tagThrough(target, baseOf(via));
-    if (target === 'chain') return chainTag(plan.chain, 'out-chain');
+    if (target === 'chain') return sharesBase(target) ? exitAtBase(target, 'out-chain') : chainTag(plan.chain, 'out-chain');
     if (typeof target === 'string' && target.indexOf('chain:') === 0) {
       const cid = target.slice('chain:'.length);
+      if (sharesBase(target)) return exitAtBase(target, 'out-chain-' + cid);
       const list = (plan.chainsById || {})[cid];
       return chainTag(list, 'out-chain-' + cid);
     }
     const s = (plan.serversById || {})[target];
+    if (s && s.outbound && sharesBase(target)) return exitAtBase(target, 'out-' + target);
     if (s && s.outbound) { const tag = 'out-' + target; withHelpers(applyMux(cloneOut(s.outbound, tag, s), s, muxIds), s).forEach(add); return tag; }
     return 'direct';
   }
