@@ -67,16 +67,19 @@ jobs:
           curl -fsSL --retry 3 -o x0.zip "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip" && unzip -q x0.zip -d "$RUNNER_TEMP/x0"
           curl -fsSL --retry 3 -o s0.tgz "https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-1.13.14-linux-amd64.tar.gz" && tar -xzf s0.tgz -C "$RUNNER_TEMP/s0" --strip-components=1
           chmod +x "$RUNNER_TEMP/x0/xray" "$RUNNER_TEMP/s0/sing-box"
-          for X in x x0; do for S in s s0; do
-            echo "=== base probe: xray $X · sing-box $S"
-            IRNF_PROBE_ROUNDS=4 IRNF_XRAY_EXE="$RUNNER_TEMP/$X/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/$S/sing-box" timeout 400 node scripts/probe-wg-base.js 2>&1 | grep -v "^$"
-          done; done
+          echo "=== base probe: client 26.9.30, hops 26.3.27"
+          IRNF_PROBE_ROUNDS=4 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_HOP_EXE="$RUNNER_TEMP/x0/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" timeout 400 node scripts/probe-wg-base.js 2>&1 | grep -v "^$"
+          echo "=== base probe: client 26.3.27, hops 26.9.30"
+          IRNF_PROBE_ROUNDS=4 IRNF_XRAY_EXE="$RUNNER_TEMP/x0/xray" IRNF_HOP_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" timeout 400 node scripts/probe-wg-base.js 2>&1 | grep -v "^$"
+          echo "=== base probe: Xray-PattN 26.9.22 throughout"
+          IRNF_PROBE_ROUNDS=4 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" timeout 400 node scripts/probe-wg-base.js 2>&1 | grep -v "^$"
           mkdir -p bin
-          for X in x x0; do for S in s s0; do
-            echo "=== chain probe: xray $X · sing-box $S"
-            cp "$RUNNER_TEMP/$X/xray" bin/xray
-            IRNF_SINGBOX_EXE="$RUNNER_TEMP/$S/sing-box" timeout 150 node scripts/probe-wg-chain.js 2>&1 | grep -v "^$" | tail -6
-          done; done
+          echo "=== chain probe: hop 26.3.27 (bin/xray), clients 26.3.27 and 26.9.30"
+          cp "$RUNNER_TEMP/x0/xray" bin/xray
+          IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" timeout 200 node scripts/probe-wg-chain.js 2>&1 | grep -v "^$" | tail -12
+          echo "=== chain probe: hop 26.9.30 (bin/xray), clients 26.9.30 and 26.3.27"
+          cp "$RUNNER_TEMP/x/xray" bin/xray
+          IRNF_XRAY_EXE="$RUNNER_TEMP/x0/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" timeout 200 node scripts/probe-wg-chain.js 2>&1 | grep -v "^$" | tail -12
           rm -f bin/xray
       - name: A WireGuard base that is also the exit is one session (a real peer, loopback)
         # scripts/probe-wg-base.js: a WireGuard base, then a chain ending in one, with
