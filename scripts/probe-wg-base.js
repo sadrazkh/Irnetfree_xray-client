@@ -148,7 +148,7 @@ function keypair() {
 /** The last few lines of a core's log that say something failed. */
 function whyNot(log) {
   const lines = String(log).split(/\r?\n/).filter((l) => /fail|error|refused|timeout|closed/i.test(l));
-  return lines.slice(-6).map((l) => l.replace(/^\S+ \S+ /, '').slice(0, 300)).join(' | ') || '(nothing failed in its log)';
+  return lines.slice(-6).map((l) => '\n      ' + l.replace(/^\S+ \S+ /, '').slice(0, 280)).join('') || '(nothing failed in its log)';
 }
 
 /** The core's own per-outbound counters (the metrics listener the app reads). */
