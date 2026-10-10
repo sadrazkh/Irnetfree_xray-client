@@ -2439,6 +2439,64 @@ test('via: a corporate WireGuard through a base carries its resolver through tha
   assert.equal(corp.outboundTag, 'out-sv-wgcorp@sv-vless');
 });
 
+/* A WireGuard dialled twice is two sessions on one key: the peer keeps only the
+   newest, so "exit at the base" and every target through the base cut each
+   other off in turn (scripts/probe-wg-base.js, against a real peer). */
+const wgOuts = (c) => c.outbounds.filter((o) => o.protocol === 'wireguard').map((o) => o.tag);
+const overBase = (tag, baseTag) => ({ tag, protocol: 'freedom', settings: {}, streamSettings: { sockopt: { dialerProxy: baseTag } } });
+
+test('via: a WireGuard base that is also “exit at the base” is one WireGuard — the exit a freedom through the base, its own tag kept', () => {
+  const wgBase = (over) => viaPlan(Object.assign({
+    serversById: { 'sv-wgcorp': WG_CORP, 'sv-trojan': TROJAN_TCP_TLS },
+    base: 'sv-wgcorp'
+  }, over));
+  const s = settings({ blockAds: false, dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: [] });
+  for (const [why, plan] of [
+    ['a rule at the base', wgBase({ rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'sv-wgcorp', via: 'none' }, { type: 'domain', value: 'a.com', target: 'sv-trojan' }] })],
+    ['the default at the base', wgBase({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }], def: 'sv-wgcorp', defVia: 'none' })],
+    ['the base picked as a target', wgBase({ rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'sv-wgcorp' }, { type: 'domain', value: 'a.com', target: 'sv-trojan' }] })]
+  ]) {
+    const c = buildConfig(plan, s);
+    assert.deepEqual(wgOuts(c), ['base-sv-wgcorp'], why);
+    assert.deepEqual(outboundTagged(c, 'out-sv-wgcorp'), overBase('out-sv-wgcorp', 'base-sv-wgcorp'), why);
+    assert.equal(dialer(c, 'out-sv-trojan@sv-wgcorp'), 'base-sv-wgcorp', why);
+    assert.ok(ruleTags(c).includes('out-sv-wgcorp'), `${why}: its traffic keeps its own figure`);
+    // the corporate resolver still goes through that one session
+    const corp = c.routing.rules.find((r) => Array.isArray(r.ip) && r.ip.includes('192.168.60.1') && r.inboundTag);
+    assert.equal(corp.outboundTag, 'out-sv-wgcorp', why);
+  }
+});
+
+test('via: a chain base ending in a WireGuard, also “exit at the base”, is that one chain — no second copy of its hops', () => {
+  const c = buildConfig(viaPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-wgcorp': WG_CORP, 'sv-ss': SS_TCP },
+    chainsById: { tes: [VLESS_WS_TLS, WG_CORP] },
+    base: 'chain:tes',
+    rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:tes', via: 'none' }, { type: 'domain', value: 'a.com', target: 'sv-ss' }],
+    def: 'direct'
+  }), settings({ blockAds: false }));
+  assert.deepEqual(tagsOf(c), ['base-chain-tes-h0', 'base-chain-tes', 'out-chain-tes', 'out-sv-ss@chain-tes', 'direct', 'block']);
+  assert.deepEqual(wgOuts(c), ['base-chain-tes']);
+  assert.deepEqual(outboundTagged(c, 'out-chain-tes'), overBase('out-chain-tes', 'base-chain-tes'));
+  assert.equal(dialer(c, 'out-sv-ss@chain-tes'), 'base-chain-tes');
+});
+
+test('via: anything without a WireGuard base dialled twice builds as before — a base of another kind keeps its own exit, with its mux', () => {
+  const c = buildConfig(viaPlan({
+    serversById: { 'sv-vless': VLESS_WS_TLS, 'sv-trojan': TROJAN_TCP_TLS },
+    base: 'sv-vless',
+    rules: [{ type: 'domain', value: 'a.com', target: 'sv-vless', via: 'none' }, { type: 'domain', value: 'b.com', target: 'sv-trojan' }]
+  }), settings({ blockAds: false, muxServerIds: ['sv-vless'] }));
+  assert.equal(outboundTagged(c, 'out-sv-vless').protocol, 'vless');
+  assert.deepEqual(outboundTagged(c, 'out-sv-vless').mux, MUX_OBJ);
+  // a WireGuard base no target dials directly; a WireGuard target with no base
+  const through = buildConfig(viaPlan({ serversById: { 'sv-wgcorp': WG_CORP, 'sv-trojan': TROJAN_TCP_TLS }, base: 'sv-wgcorp', rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }] }), settings({ blockAds: false }));
+  assert.deepEqual(wgOuts(through), ['base-sv-wgcorp']);
+  assert.equal(outboundTagged(through, 'out-sv-wgcorp'), undefined);
+  const plain = buildConfig(viaPlan({ serversById: { 'sv-wgcorp': WG_CORP }, rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'sv-wgcorp' }] }), settings({ blockAds: false }));
+  assert.deepEqual(wgOuts(plain), ['out-sv-wgcorp']);
+});
+
 test('via: a profile’s own useMode decides the country bypass under its rules', () => {
   const plan = viaPlan({ def: 'sv-vless' });
   const on = buildConfig(Object.assign({}, plan, { useMode: true }), settings({ blockAds: false, routingMode: 'bypass-ir', advancedUseMode: false }));

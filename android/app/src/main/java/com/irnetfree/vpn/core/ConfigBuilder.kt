@@ -141,7 +141,7 @@ object ConfigBuilder {
         // the profile's own "routing mode under these rules"; a plan without one uses the settings'
         val um = plan.useMode
         val s = if (um != null && um != s0.advancedUseMode) s0.copy(advancedUseMode = um) else s0
-        val reg = Registry(plan.serversById, plan.chainsById, muxIds)
+        val reg = Registry(plan.serversById, plan.chainsById, muxIds, RoutingProfiles.basesOf(plan).toSet())
         if (!reg.exists(plan.def)) throw IllegalStateException(MISSING_DEFAULT)
         val defVia = RoutingProfiles.effectiveVia(plan.def, plan.defVia, plan.base)
         if (defVia != null && !reg.exists(defVia)) throw IllegalStateException(ConfigBuilder.MISSING_BASE)
@@ -313,15 +313,42 @@ object ConfigBuilder {
         return ob
     }
 
-    /** The outbounds a pool / advanced plan routes to, each once; [muxIds] as in build(). */
+    /**
+     * The outbounds a pool / advanced plan routes to, each once; [muxIds] as in
+     * build(). [bases]: what the plan rides on (RoutingProfiles.basesOf) — a
+     * target among them that carries a WireGuard is a freedom through the
+     * base's exit ([exitAtBase]): two outbounds would be two sessions on one
+     * key, and the peer keeps only the newest. (configBuilder.js makeRegistry)
+     */
     private class Registry(
         val serversById: Map<String, ServerConfig>,
         val chainsById: Map<String, List<ServerConfig>>,
-        val muxIds: Set<String> = emptySet()
+        val muxIds: Set<String> = emptySet(),
+        val bases: Set<String> = emptySet()
     ) {
         val outs = ArrayList<JSONObject>()
         private val seen = HashSet<String>()
         fun add(o: JSONObject) { val t = o.optString("tag"); if (t.isNotEmpty() && seen.add(t)) outs.add(o) }
+
+        /** The servers [target] dials: a server, a chain's members. */
+        private fun members(target: String): List<ServerConfig> {
+            if (target.startsWith("chain:")) return chainsById[target.substring(6)] ?: emptyList()
+            val s = serversById[target]
+            return if (s == null) emptyList() else listOf(s)
+        }
+
+        private fun sharesBase(target: String): Boolean =
+            bases.contains(target) && members(target).any { m: ServerConfig -> m.outbound.length() > 0 && ConfigBuilder.isWgServer(m) }
+
+        /** [target] is its own base's WireGuard: a freedom out through the base's exit, its own [tag] kept. */
+        private fun exitAtBase(target: String, tag: String): String {
+            val exit = baseTag(target)
+            if (!seen.contains(tag)) {
+                add(JSONObject().put("tag", tag).put("protocol", "freedom").put("settings", JSONObject())
+                    .put("streamSettings", JSONObject().put("sockopt", JSONObject().put("dialerProxy", exit))))
+            }
+            return tag
+        }
 
         private fun chainTag(list: List<ServerConfig>?, tag: String): String {
             val arr = list?.filter { it.outbound.length() > 0 } ?: emptyList()
@@ -336,8 +363,12 @@ object ConfigBuilder {
             if (target.isNullOrEmpty() || target == "direct") return "direct"
             if (target == "proxy") return proxyFallback()
             if (target == "block") return "block"
-            if (target.startsWith("chain:")) return chainTag(chainsById[target.substring(6)], "out-chain-" + target.substring(6))
+            if (target.startsWith("chain:")) {
+                val tag = "out-chain-" + target.substring(6)
+                return if (sharesBase(target)) exitAtBase(target, tag) else chainTag(chainsById[target.substring(6)], tag)
+            }
             val s = serversById[target]
+            if (s != null && s.outbound.length() > 0 && sharesBase(target)) return exitAtBase(target, "out-$target")
             if (s != null && s.outbound.length() > 0) {
                 val tag = "out-$target"
                 ConfigBuilder.withHelpers(ConfigBuilder.withMux(ConfigBuilder.cloneOut(s.outbound, tag, s), s, muxIds), s, tag).forEach { o: JSONObject -> add(o) }

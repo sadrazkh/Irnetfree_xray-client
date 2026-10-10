@@ -254,6 +254,46 @@ class RoutingProfilesTest {
         assertEquals(listOf("c"), Mux.targets(p).map { s: ServerConfig -> s.id })
     }
 
+    private fun wg(id: String): ServerConfig {
+        val ob = JSONObject().put("protocol", "wireguard")
+            .put("settings", JSONObject().put("secretKey", "k-$id").put("address", JSONArray().put("10.10.10.42/32"))
+                .put("peers", JSONArray().put(JSONObject().put("publicKey", "p-$id").put("endpoint", "wg.example:51820")
+                    .put("allowedIPs", JSONArray().put("0.0.0.0/0")))))
+        return ServerConfig(id, id, "wireguard", "wg.example", 51820, ob)
+    }
+    private fun wgTags(c: JSONObject): List<String> =
+        outs(c).filter { o: JSONObject -> o.optString("protocol") == "wireguard" }.map { o: JSONObject -> o.optString("tag") }
+
+    /** A WireGuard dialled twice is two sessions on one key — the peer keeps only the newest (scripts/probe-wg-base.js). */
+    @Test fun aWireGuardBaseThatIsAlsoTheExit_isOneWireGuard() {
+        val w = wg("w")
+        val k = vless("k", "k.example")
+        val ids = byId + (w.id to w) + (k.id to k)
+        val chs = chains + ("tes" to listOf(k, w))
+        // a rule at the base (resolved: the base itself, via none) and a target through it
+        val cfg = build(ConnectionPlan.Advanced(listOf(RouteRule("ip", "192.168.0.0/16", "w", "none"), RouteRule("domain", "a.com", "a")), "direct", ids, chs, base = "w"))
+        assertEquals(listOf("base-w"), wgTags(cfg))
+        val exit = tagged(cfg, "out-w")
+        assertEquals("freedom", exit.getString("protocol"))
+        assertEquals("base-w", dialer(exit))
+        assertEquals("base-w", dialer(tagged(cfg, "out-a@w")))
+        assertEquals("out-w", rules(cfg).first { r: JSONObject -> r.optJSONArray("ip")?.optString(0) == "192.168.0.0/16" }.getString("outboundTag"))
+        // the default at the base
+        val def = build(ConnectionPlan.Advanced(listOf(RouteRule("domain", "a.com", "a")), "w", ids, chs, "none", "w"))
+        assertEquals(listOf("base-w"), wgTags(def))
+        assertEquals("base-w", dialer(tagged(def, "out-w")))
+        // a chain base ending in it: that one chain, no second copy of its hops
+        val chain = build(ConnectionPlan.Advanced(listOf(RouteRule("ip", "192.168.0.0/16", "chain:tes", "none"), RouteRule("domain", "a.com", "a")), "direct", ids, chs, base = "chain:tes"))
+        assertEquals(listOf("base-chain-tes"), wgTags(chain))
+        assertEquals("base-chain-tes", dialer(tagged(chain, "out-chain-tes")))
+        assertFalse(tags(chain).contains("out-chain-tes-h0"))
+        // a base of another kind keeps its own exit; a WireGuard nobody dials twice is as before
+        val other = build(ConnectionPlan.Advanced(listOf(RouteRule("domain", "x.com", "b", "none"), RouteRule("domain", "a.com", "a")), "direct", ids, chs, base = "b"))
+        assertEquals("vless", tagged(other, "out-b").getString("protocol"))
+        val plain = build(ConnectionPlan.Advanced(listOf(RouteRule("ip", "192.168.0.0/16", "w")), "direct", ids, chs))
+        assertEquals(listOf("out-w"), wgTags(plain))
+    }
+
     @Test fun refusals_aGoneBaseOrDefault_andAGoneRuleTargetIsLeftOut() {
         val gone = assertThrows(IllegalStateException::class.java) { build(plan(listOf(RouteRule("domain", "x.com", "a", "zzz")), "direct")) }
         assertEquals(ConfigBuilder.MISSING_BASE, gone.message)
@@ -356,6 +396,20 @@ class RoutingProfilesTest {
         assertEquals("base", ruleOnly.rules[0].target)
         // an empty default is the fallback, as before
         assertEquals("a", RoutingProfiles.planRoutes(RoutingProfile("rp-2", "Q", def = ""), "a").def)
+    }
+
+    /** As the desktop (main.js buildPlan): left out, the rule's traffic would follow the default — perhaps direct. */
+    @Test fun planRoutes_anythingAtABaseThatIsGoneIsRefused() {
+        val gone = { t: String -> t != "b" }
+        val rule = RoutingProfile("rp-1", "P", listOf(RouteRule("ip", "192.168.0.0/16", "base"), RouteRule("domain", "y.com", "a")), def = "direct", base = "b")
+        val e = assertThrows(IllegalStateException::class.java) { RoutingProfiles.planRoutes(rule, "a", gone) }
+        assertEquals(RoutingProfiles.GONE_BASE, e.message)
+        val def = RoutingProfile("rp-2", "Q", listOf(RouteRule("domain", "y.com", "a", "none")), def = "base", base = "chain:k9")
+        assertEquals(RoutingProfiles.GONE_BASE, assertThrows(IllegalStateException::class.java) { RoutingProfiles.planRoutes(def, "a") { t: String -> t != "chain:k9" } }.message)
+        // the base there: as before; nothing at the base: no refusal here (a target through a gone base is the builder's MISSING_BASE)
+        assertEquals("b", RoutingProfiles.planRoutes(rule, "a") { _: String -> true }.rules[0].target)
+        val through = RoutingProfile("rp-3", "R", listOf(RouteRule("domain", "y.com", "a")), def = "direct", base = "b")
+        assertEquals("a", RoutingProfiles.planRoutes(through, "a", gone).rules[0].target)
     }
 
     @Test fun exitAtTheBase_inTheConfig_theBaseDialledDirectly() {

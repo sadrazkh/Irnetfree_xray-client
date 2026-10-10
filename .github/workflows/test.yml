@@ -57,6 +57,25 @@ jobs:
         # also when the official core refused something: one run says it for both
         if: ${{ !cancelled() }}
         run: IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" node scripts/validate-configs.js
+      - name: A WireGuard base that is also the exit is one session (a real peer, loopback)
+        # scripts/probe-wg-base.js: a WireGuard base, then a chain ending in one, with
+        # "exit at the base" and a target through it — both lines must answer every
+        # time. The client is the suggested Xray, the peer the suggested sing-box. The
+        # two hops stand for remote servers and run Xray 26.3.27: with the hops on
+        # 26.9.30 nothing passes through them in this harness, whatever the client.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/h"
+          curl -fsSL --retry 3 -o h.zip "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
+          unzip -q h.zip -d "$RUNNER_TEMP/h" && chmod +x "$RUNNER_TEMP/h/xray"
+          IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-wg-base.js
+          # Xray-PattN 26.9.22 asks the DNS for a WireGuard endpoint that is an IP ("failed
+          # to set endpoint <ip>: … returning nil for domain <ip>"), so no WireGuard comes
+          # up at all, base or not (26.9.1 and 26.9.9 do). Shown, not gating, until fixed.
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=39900 IRNF_PROBE_ROUNDS=3 node scripts/probe-wg-base.js \
+            || echo "::warning title=Xray-PattN and WireGuard::Xray-PattN cannot bring up a WireGuard whose endpoint is an IP (it asks the DNS for it) — see this step's log"
 
   tun-dns:
     # The real TUN, which `sing-box check` cannot speak for: does a name asked
