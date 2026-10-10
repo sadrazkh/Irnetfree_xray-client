@@ -40,7 +40,8 @@ const BASE = Number(process.env.IRNF_PROBE_PORT || 39800);
 const P = { hop: BASE + 1, wg: BASE + 2, front: BASE + 3, socks: BASE + 10, dns: BASE + 20, web: BASE + 21, web2: BASE + 22 };
 const ROUNDS = Number(process.env.IRNF_PROBE_ROUNDS || 10);
 const CORP_IP = '192.168.45.7';
-const HOP_ADDR = '10.99.0.5';
+// inside the WireGuard's AllowedIPs (10.0.0.0/8), outside the peer's own subnet (10.99.0.1/24)
+const HOP_ADDR = '10.88.0.5';
 const HOP_PORT = 8443;
 const BIG = 2 * 1024 * 1024;
 const UUID = '2c0f0d9a-6b3a-4f0e-9a1f-8c2b4d6e7a10';
@@ -144,6 +145,12 @@ function keypair() {
     pub: publicKey.export({ type: 'spki', format: 'der' }).slice(-32).toString('base64')
   };
 }
+/** The last few lines of a core's log that say something failed. */
+function whyNot(log) {
+  const lines = String(log).split(/\r?\n/).filter((l) => /fail|error|refused|timeout|closed/i.test(l));
+  return lines.slice(-6).map((l) => l.replace(/^\S+ \S+ /, '').slice(0, 300)).join(' | ') || '(nothing failed in its log)';
+}
+
 /** The core's own per-outbound counters (the metrics listener the app reads). */
 function outboundStats(port) {
   return new Promise((resolve) => {
@@ -201,7 +208,7 @@ async function scenario(work, chained, cli, srv, dnsSrv) {
     socksPort: P.socks, httpPort: P.socks + 1, apiPort: P.socks + 2,
     routingMode: 'global', blockAds: false, enableSniffing: true,
     dnsManaged: true, dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: ['8.8.8.8'],
-    ipv6: false, logLevel: 'warning', geoAssets: false
+    ipv6: false, logLevel: 'info', geoAssets: false
   });
   const file = path.join(work, (chained ? 'chain' : 'server') + '-client.json');
   fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
@@ -225,12 +232,20 @@ async function scenario(work, chained, cli, srv, dnsSrv) {
   const tally = { exit: 0, via: 0 };
   const errors = new Map();
   const miss = (what, e) => errors.set(what + ': ' + e.message, (errors.get(what + ': ' + e.message) || 0) + 1);
+  let rounds = 0;
   for (let r = 0; r < ROUNDS; r++) {
     // a fresh corporate name each round: each is a DNS query through the exit too
     try { const b = await get(`r${r}.corp.test`, '/'); if (b === 'CORP-OK') tally.exit++; else miss('exit at the base', new Error('body ' + JSON.stringify(b.slice(0, 20)))); } catch (e) { miss('exit at the base', e); }
     try { const b = await get('via.test', '/'); if (b === 'HOP-OK') tally.via++; else miss('through the base', new Error('body ' + JSON.stringify(b.slice(0, 20)))); } catch (e) { miss('through the base', e); }
+    rounds++;
+    // nothing at all through the tunnel: the rest would only wait out the same timeouts
+    if (rounds === 3 && tally.exit + tally.via === 0) break;
   }
-  const big = await Promise.allSettled([get('big1.corp.test', '/big', 40000), get('via.test', '/big', 40000), get('big2.corp.test', '/big', 40000), get('via.test', '/big', 40000)]);
+  if (rounds < ROUNDS) {
+    problems.push(`nothing answered on either line in ${rounds} rounds — stopped there`);
+    problems.push('client log: ' + whyNot(client.text()));
+  }
+  const big = rounds < ROUNDS ? [] : await Promise.allSettled([get('big1.corp.test', '/big', 40000), get('via.test', '/big', 40000), get('big2.corp.test', '/big', 40000), get('via.test', '/big', 40000)]);
   const bigOk = big.filter((b) => b.status === 'fulfilled' && b.value.length === BIG).length;
   const stats = await outboundStats(P.socks + 2);
   try { client.proc.kill(); } catch { /* already gone */ }
@@ -243,6 +258,7 @@ async function scenario(work, chained, cli, srv, dnsSrv) {
   const own = (stats[exitTag] || {}).downlink || 0;
   if (own < 2 * BIG) problems.push(`the exit's own figure (${exitTag}) is ${own} bytes, not its 4 MB`);
   for (const [k, n] of errors) problems.push(`${n}× ${k}`);
+  if (problems.length && rounds === ROUNDS) problems.push('client log: ' + whyNot(client.text()));
   const mb = (v) => ((v || 0) / 1048576).toFixed(1);
   return {
     name, problems,
@@ -282,6 +298,12 @@ async function main() {
   fs.writeFileSync(path.join(work, 'hop.json'), relay(P.hop, '/x', '127.0.0.1:' + P.web2));
   fs.writeFileSync(path.join(work, 'front.json'), relay(P.front, '/f', null));
 
+  // the peer has no TCP port to wait on: its config is checked first, its process after
+  const check = spawnSync(singbox, ['check', '-c', path.join(work, 'peer.json')], { encoding: 'utf8', timeout: 20000, windowsHide: true });
+  if (check.status !== 0) {
+    console.error('the WireGuard peer refused its config:\n' + ((check.stdout || '') + (check.stderr || '')).trim());
+    process.exit(1);
+  }
   const dnsSrv = await corpDns();
   const corpPage = await page(P.web, 'CORP-OK');
   const hopPage = await page(P.web2, 'HOP-OK');
@@ -292,7 +314,11 @@ async function main() {
     console.error('a hop never came up:\n' + hop.text() + peer.text());
     killAll(); process.exit(1);
   }
-  await sleep(500);   // the peer's UDP listener has no TCP port to wait on
+  await sleep(800);
+  if (peer.proc.exitCode !== null) {
+    console.error('the WireGuard peer stopped:\n' + peer.text());
+    killAll(); process.exit(1);
+  }
 
   const version = (spawnSync(xray, ['version'], { encoding: 'utf8', windowsHide: true }).stdout || '').split(/\r?\n/)[0];
   console.log(`${version} · peer ${(spawnSync(singbox, ['version'], { encoding: 'utf8', windowsHide: true }).stdout || '').split(/\r?\n/)[0]} · ${work}`);
@@ -303,6 +329,7 @@ async function main() {
     console.log(`${r.problems.length ? '✗' : '✓'} ${r.name}${r.note ? ' — ' + r.note : ''}`);
     for (const p of r.problems) console.log('    ' + p);
   }
+  if (failed) console.log('peer log: ' + (peer.text().split(/\r?\n/).filter(Boolean).slice(-8).join(' | ') || '(nothing)'));
   killAll();
   dnsSrv.close(); corpPage.close(); hopPage.close();
   console.log(failed ? `\n${failed}/2 failed` : '\nboth lines through one WireGuard session, both times');

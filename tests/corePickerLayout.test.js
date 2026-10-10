@@ -32,14 +32,14 @@ test.after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } cat
 function fixtures() {
   const router = new Downloader({ destDir: tmp, platform: 'linux', arch: 'arm' });
   const pc = new Downloader({ destDir: tmp, platform: 'win32', arch: 'x64' });
-  const sbList = rel.singbox().concat(rel.singboxTag('v1.13.14'));
+  const sbList = rel.singbox();   // the 30 newest hold the suggested 1.14.3: nothing fetched by its tag
   const answer = (d, component, releases, installed, latestTag, prerelease) => ({
     ok: true, component, installed, suggested: SUGGESTED[component], latest: latestTag.replace(/^v/, ''), platform: d.target(component), prerelease, busy: false, installing: null,
     cards: buildCards({ releases, matchAsset: d.assetMatcher(component), installed, latestTag, suggested: SUGGESTED[component], prerelease })
   });
   return {
     answers: {
-      'sing-box': { stable: answer(router, 'sing-box', sbList, '1.14.2', 'v1.14.2', false), pre: answer(router, 'sing-box', sbList, '1.14.2', 'v1.14.2', true) },
+      'sing-box': { stable: answer(router, 'sing-box', sbList, '1.14.2', 'v1.14.3', false), pre: answer(router, 'sing-box', sbList, '1.14.2', 'v1.14.3', true) },
       // Xray as a download installs it now: the suggested 26.9.30, which XTLS
       // calls a pre-release — its card the one with three badges; 26.3.27 GitHub's latest
       xray: { stable: answer(pc, 'xray', rel.xtls(), '26.9.30', 'v26.3.27', false), pre: answer(pc, 'xray', rel.xtls(), '26.9.30', 'v26.3.27', true) }
@@ -110,7 +110,8 @@ test('a real render: the version picker, in every state, both directions, three 
           assert.ok(inView(p.buttons[0].box) && p.buttons[0].hit, `Retry not clickable — ${at}`);
           continue;
         }
-        const want = { loading: 4, stable: 7, pre: 11, badges: 7, warn: 7, progress: 11, failed: 11, busy: 7 }[run.state];
+        // sing-box: its 6 newest stable (the suggested 1.14.3 first), + 4 pre-releases; Xray (badges, warn): 6 + the suggested pre-release
+        const want = { loading: 4, stable: 6, pre: 10, badges: 7, warn: 7, progress: 10, failed: 10, busy: 6 }[run.state];
         assert.equal(run.cards.length, want, `${want} cards — ${at}`);
         for (const card of run.cards) {
           const where = `${card.tag} — ${at}`;
