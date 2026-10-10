@@ -22,6 +22,7 @@
  * lines, the exit's own traffic figure — and exactly one WireGuard outbound.
  *
  *   IRNF_XRAY_EXE      the core under test (default bin/xray)
+ *   IRNF_HOP_EXE       the core the two hops run (default: the core under test)
  *   IRNF_SINGBOX_EXE   the WireGuard peer (default bin/sing-box)
  *   IRNF_PROBE_PORT    base port, default 39800
  *   IRNF_PROBE_ROUNDS  requests per line, default 10
@@ -48,6 +49,7 @@ const UUID = '2c0f0d9a-6b3a-4f0e-9a1f-8c2b4d6e7a10';
 const CRLF = String.fromCharCode(13, 10);
 const exeName = (n) => (process.platform === 'win32' ? n + '.exe' : n);
 const xray = process.env.IRNF_XRAY_EXE || path.join(__dirname, '..', 'bin', exeName('xray'));
+const hopXray = process.env.IRNF_HOP_EXE || xray;
 const singbox = process.env.IRNF_SINGBOX_EXE || path.join(__dirname, '..', 'bin', exeName('sing-box'));
 
 /* ------------------------------ the far side ------------------------------ */
@@ -308,8 +310,8 @@ async function main() {
   const corpPage = await page(P.web, 'CORP-OK');
   const hopPage = await page(P.web2, 'HOP-OK');
   const peer = run(singbox, ['run', '-c', path.join(work, 'peer.json')], work);
-  const hop = run(xray, ['run', '-c', path.join(work, 'hop.json')], work);
-  run(xray, ['run', '-c', path.join(work, 'front.json')], work);
+  const hop = run(hopXray, ['run', '-c', path.join(work, 'hop.json')], work);
+  run(hopXray, ['run', '-c', path.join(work, 'front.json')], work);
   if (!await waitPort(P.hop) || !await waitPort(P.front)) {
     console.error('a hop never came up:\n' + hop.text() + peer.text());
     killAll(); process.exit(1);
@@ -321,7 +323,8 @@ async function main() {
   }
 
   const version = (spawnSync(xray, ['version'], { encoding: 'utf8', windowsHide: true }).stdout || '').split(/\r?\n/)[0];
-  console.log(`${version} · peer ${(spawnSync(singbox, ['version'], { encoding: 'utf8', windowsHide: true }).stdout || '').split(/\r?\n/)[0]} · ${work}`);
+  const hopVersion = hopXray === xray ? '' : ' · hops ' + (spawnSync(hopXray, ['version'], { encoding: 'utf8', windowsHide: true }).stdout || '').split(/\r?\n/)[0];
+  console.log(`${version}${hopVersion} · peer ${(spawnSync(singbox, ['version'], { encoding: 'utf8', windowsHide: true }).stdout || '').split(/\r?\n/)[0]} · ${work}`);
   let failed = 0;
   for (const chained of [false, true]) {
     const r = await scenario(work, chained, cli, srv, dnsSrv);
