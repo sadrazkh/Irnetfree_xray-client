@@ -314,7 +314,11 @@ const VIA_SHAPES = {
   'explicit-and-none': viaPlan({ rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan', via: 'chain:c1' }, { type: 'domain', value: 'b.com', target: 'sv-trojan', via: 'none' }, { type: 'port', value: '5060', target: 'chain:c2', via: 'sv-vless' }], def: 'sv-ss', defVia: 'sv-vless' }),
   'wg-through-base': viaPlan({ base: 'sv-vless', rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'sv-wgcorp' }], def: 'sv-vless', defVia: 'none' }),
   'json-through-base': viaPlan({ base: 'sv-vless', rules: [{ type: 'domain', value: 'a.com', target: 'jf' }, { type: 'domain', value: 'b.com', target: 'jc' }], def: 'sv-trojan', defVia: 'none' }),
-  'json-as-base': viaPlan({ base: 'jf', rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c2' }], def: 'sv-ss' })
+  'json-as-base': viaPlan({ base: 'jf', rules: [{ type: 'domain', value: 'a.com', target: 'sv-trojan' }, { type: 'ip', value: '10.20.0.0/16', target: 'chain:c2' }], def: 'sv-ss' }),
+  // a WireGuard base (a server, a chain ending in one) that is also "exit at the
+  // base": its exit is a freedom dialling through the base's own outbound
+  'wg-base-exit-at-base': viaPlan({ base: 'sv-wgcorp', rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'sv-wgcorp', via: 'none' }, { type: 'domain', value: 'a.com', target: 'sv-trojan' }], def: 'sv-vless', defVia: 'none' }),
+  'wg-chain-base-exit-at-base': viaPlan({ chainsById: { c3: [F.VLESS_WS_TLS, F.WG_CORP] }, base: 'chain:c3', rules: [{ type: 'ip', value: '192.168.0.0/16', target: 'chain:c3', via: 'none' }, { type: 'domain', value: 'a.com', target: 'sv-ss' }], def: 'chain:c3', defVia: 'none' })
 };
 const VIA_SETTINGS = {
   managed,

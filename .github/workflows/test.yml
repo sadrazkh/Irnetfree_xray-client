@@ -57,6 +57,15 @@ jobs:
         # also when the official core refused something: one run says it for both
         if: ${{ !cancelled() }}
         run: IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" node scripts/validate-configs.js
+      - name: A WireGuard base that is also the exit is one session (a real peer, loopback)
+        # scripts/probe-wg-base.js: a WireGuard base, then a chain ending in one, with
+        # "exit at the base" and a target through it — both lines must answer every
+        # time, on the suggested Xray and Xray-PattN, with sing-box as the peer
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-wg-base.js
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=39900 node scripts/probe-wg-base.js
 
   tun-dns:
     # The real TUN, which `sing-box check` cannot speak for: does a name asked

@@ -29,7 +29,7 @@ test('one suggested version per core, each a plain x.y.z, for exactly the three 
   for (const id of CORE_IDS) assert.match(SUGGESTED[id], /^\d+\.\d+\.\d+$/, id);
   assert.equal(SUGGESTED.xray, '26.9.30');
   assert.equal(SUGGESTED['xray-pattn'], '26.9.22');
-  assert.equal(SUGGESTED['sing-box'], '1.13.14');
+  assert.equal(SUGGESTED['sing-box'], '1.14.3');
   assert.equal(STABLE_COUNT, 6);
   assert.equal(PRERELEASE_COUNT, 4);
   assert.throws(() => { SUGGESTED.xray = '1.0.0'; }, TypeError, 'the table is frozen');
@@ -106,18 +106,27 @@ test('with pre-releases: the 4 newest pre-releases join the stables, ordered by 
   assert.deepEqual(cards.slice(0, 4).map((c) => [c.prerelease, c.action, c.isLatest]), Array(4).fill([true, 'upgrade', false]));
 });
 
-test('sing-box: alphas sort by their number, the suggested 1.13.14 is offered although it is older than the 6 newest', () => {
-  const releases = rel.singbox().concat(rel.singboxTag('v1.13.14'));   // the downloader adds the suggested tag (listReleases)
-  const pre = buildCards({ releases, matchAsset: sbWin, installed: '1.14.2', latestTag: 'v1.14.2', suggested: SUGGESTED['sing-box'], prerelease: true });
+test('sing-box: alphas sort by their number; a suggested version older than the 6 newest is still offered', () => {
+  // the suggested before v1.23.0, 1.13.14: older than the 30 newest, the downloader adds its tag (listReleases)
+  const releases = rel.singbox().concat(rel.singboxTag('v1.13.14'));
+  const pre = buildCards({ releases, matchAsset: sbWin, installed: '1.14.2', latestTag: 'v1.14.3', suggested: '1.13.14', prerelease: true });
   assert.deepEqual(versions(pre), ['1.15.0-alpha.10', '1.15.0-alpha.9', '1.15.0-alpha.8', '1.15.0-alpha.7',
-    '1.14.2', '1.14.1', '1.14.0', '1.13.21', '1.13.20', '1.13.19', '1.13.14']);
+    '1.14.3', '1.14.2', '1.14.1', '1.14.0', '1.13.21', '1.13.20', '1.13.14']);
   assert.equal(pre[0].asset, 'sing-box-1.15.0-alpha.10-windows-amd64.zip', 'not the -legacy build');
   const sug = pre.at(-1);
   assert.equal(sug.isSuggested && sug.action === 'downgrade' && !sug.olderThanSuggested, true);
-  assert.equal(pre.find((c) => c.version === '1.13.19').olderThanSuggested, false, 'newer than 1.13.14');
-  const stable = buildCards({ releases, matchAsset: sbWin, installed: '1.14.2', latestTag: 'v1.14.2', suggested: SUGGESTED['sing-box'], prerelease: false });
-  assert.deepEqual(versions(stable), ['1.14.2', '1.14.1', '1.14.0', '1.13.21', '1.13.20', '1.13.19', '1.13.14']);
-  assert.equal(stable[0].isInstalled && stable[0].isLatest && stable[0].action === 'reinstall', true);
+  assert.equal(pre.find((c) => c.version === '1.13.20').olderThanSuggested, false, 'newer than 1.13.14');
+  const stable = buildCards({ releases, matchAsset: sbWin, installed: '1.14.2', latestTag: 'v1.14.3', suggested: '1.13.14', prerelease: false });
+  assert.deepEqual(versions(stable), ['1.14.3', '1.14.2', '1.14.1', '1.14.0', '1.13.21', '1.13.20', '1.13.14']);
+  assert.equal(stable[1].isInstalled && stable[1].action === 'reinstall', true);
+});
+
+test('sing-box: the suggested 1.14.3 is GitHub’s latest stable — the first card, and what an older install upgrades to', () => {
+  const cards = buildCards({ releases: rel.singbox(), matchAsset: sbWin, installed: '1.14.2', latestTag: 'v1.14.3', suggested: SUGGESTED['sing-box'], prerelease: false });
+  assert.deepEqual(versions(cards), ['1.14.3', '1.14.2', '1.14.1', '1.14.0', '1.13.21', '1.13.20']);
+  assert.equal(cards[0].isSuggested && cards[0].isLatest && cards[0].action === 'upgrade', true);
+  // anything older asks first (corePicker's confirm), the installed one too
+  assert.ok(cards.slice(1).every((c) => c.olderThanSuggested), JSON.stringify(cards.map((c) => [c.version, c.olderThanSuggested])));
 });
 
 test('the installed version is always a card — a pre-release in the stable list, marked as one', () => {

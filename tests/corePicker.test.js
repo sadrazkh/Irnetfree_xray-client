@@ -136,8 +136,8 @@ test.after(() => { try { fs.rmSync(dl.destDir, { recursive: true, force: true })
 
 /** What main answers to cores:versions — built by the real card builder. */
 function answer({ component = 'xray-pattn', installed = '26.9.22', prerelease = false, busy = false, releases, installing = null } = {}) {
-  const list = releases || (component === 'sing-box' ? rel.singbox().concat(rel.singboxTag('v1.13.14')) : component === 'xray' ? rel.xtls() : rel.pattn());
-  const cards = buildCards({ releases: list, matchAsset: dl.assetMatcher(component), installed, latestTag: component === 'xray' ? 'v26.3.27' : component === 'sing-box' ? 'v1.14.2' : 'v26.10.3', suggested: SUGGESTED[component], prerelease });
+  const list = releases || (component === 'sing-box' ? rel.singbox() : component === 'xray' ? rel.xtls() : rel.pattn());
+  const cards = buildCards({ releases: list, matchAsset: dl.assetMatcher(component), installed, latestTag: component === 'xray' ? 'v26.3.27' : component === 'sing-box' ? 'v1.14.3' : 'v26.10.3', suggested: SUGGESTED[component], prerelease });
   return { ok: true, component, installed, suggested: SUGGESTED[component], latest: component === 'xray-pattn' ? '26.10.3' : '', platform: dl.target(component), prerelease, busy, installing, cards };
 }
 
@@ -438,7 +438,7 @@ test('GitHub unreachable or rate-limited: a friendly message with the reason, an
   const h = harness();
   h.picker.open('sing-box', h.hooks);
   await flush();
-  await h.answerVersions({ ok: false, component: 'sing-box', installed: '1.13.14', suggested: '1.13.14', platform: dl.target('sing-box'), busy: false, installing: null, cards: [], error: 'GitHub: HTTP 403 — API rate limit exceeded for 5.6.7.8', reason: 'rate-limit' });
+  await h.answerVersions({ ok: false, component: 'sing-box', installed: '1.13.14', suggested: '1.14.3', platform: dl.target('sing-box'), busy: false, installing: null, cards: [], error: 'GitHub: HTTP 403 — API rate limit exceeded for 5.6.7.8', reason: 'rate-limit' });
   const err = h.modal().one('cv-error');
   assert.equal(err.one('cv-empty-title').textContent, 'cv.rateLimited');
   assert.equal(err.one('cv-fail-why').textContent, 'GitHub: HTTP 403 — API rate limit exceeded for 5.6.7.8');
@@ -447,12 +447,12 @@ test('GitHub unreachable or rate-limited: a friendly message with the reason, an
   await flush();
   assert.deepEqual(h.calls.at(-1), ['versions', 'sing-box', { prerelease: false, force: true }]);
   assert.equal(h.modal().byClass('cv-skel').length, 4);
-  await h.answerVersions({ ok: false, cards: [], error: 'getaddrinfo ENOTFOUND api.github.com', reason: 'network', installed: '', suggested: '1.13.14', platform: dl.target('sing-box') });
+  await h.answerVersions({ ok: false, cards: [], error: 'getaddrinfo ENOTFOUND api.github.com', reason: 'network', installed: '', suggested: '1.14.3', platform: dl.target('sing-box') });
   assert.equal(h.modal().one('cv-error').one('cv-empty-title').textContent, 'cv.loadFailed');
   h.modal().one('cv-retry').click();
   await flush();
   await h.answerVersions(answer({ component: 'sing-box', installed: '1.13.14' }));
-  assert.equal(h.cards().length, 7);
+  assert.equal(h.cards().length, 6, 'the six newest stable — 1.13.14 is older than the 30 newest, and no longer the suggested one');
   // nothing for this platform
   const e = await opened('xray', { answer: { releases: [] } });
   assert.equal(e.modal().one('cv-empty').one('cv-empty-title').textContent, tt('cv.empty', { asset: 'Xray-windows-64.zip' }));
@@ -510,15 +510,15 @@ test('Esc, ✕ and the backdrop close it; the focus goes back to the button that
 
 test('closed during an install: it goes on, its progress stays out of the toasts, and the end is a toast and a refresh', async () => {
   const h = await opened('sing-box', { answer: { installed: '1.14.2' } });
-  h.actionOf(h.card('1.14.1')).click();
+  h.actionOf(h.card('1.14.3')).click();
   await flush();
   h.picker.close();
   h.runTimers();
   assert.equal(h.picker.progress({ component: 'sing-box', pct: 30 }), true, 'still its own: no "Downloading sing-box 30%" toast');
-  h.pending.install.shift().resolve({ ok: true, component: 'sing-box', tag: 'v1.14.1', version: '1.14.1', assets: {}, tunAvailable: true, xrayReady: true });
+  h.pending.install.shift().resolve({ ok: true, component: 'sing-box', tag: 'v1.14.3', version: '1.14.3', assets: {}, tunAvailable: true, xrayReady: true });
   await flush();
   assert.equal(h.installed.length, 1);
-  assert.deepEqual(h.toasts, [[tt('cv.installedToast', { core: 'sing-box', v: 'v1.14.1' }), 'ok']]);
+  assert.deepEqual(h.toasts, [[tt('cv.installedToast', { core: 'sing-box', v: 'v1.14.3' }), 'ok']]);
   // reopened while another install runs: the card shows it
   const g = await opened('xray-pattn');
   g.actionOf(g.card('26.9.27')).click();

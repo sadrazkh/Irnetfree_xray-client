@@ -182,17 +182,21 @@ test('listReleases: two windows asking at once share one request', async () => {
   assert.equal(h.asked.length, 2);
 });
 
-test('listReleases: the suggested release older than the 30 newest is fetched by its tag — sing-box’s 1.13.14', async () => {
+test('listReleases: a suggested release missing from the 30 newest is fetched by its tag — sing-box’s 1.14.3 on a list from before it', async () => {
   const h = lister((url) => {
-    if (url.endsWith('/releases/tags/v1.13.14')) return rel.singboxTag('v1.13.14');
-    if (url.endsWith('/latest')) return rel.singbox()[3];
-    return rel.singbox();
+    if (url.endsWith('/releases/tags/v1.14.3')) return rel.singboxTag('v1.14.3');
+    if (url.endsWith('/latest')) return rel.singbox()[4];       // v1.14.2
+    return rel.singbox().slice(1);                              // the list of 2026-10-03, before 1.14.3
   });
   const got = await h.d.listReleases('sing-box');
-  assert.ok(h.asked.includes('https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.13.14'), h.asked.join('\n'));
-  assert.equal(got.releases.at(-1).tag_name, 'v1.13.14');
-  assert.deepEqual(got.releases.at(-1).assets.map((a) => a.name), ['sing-box-1.13.14-windows-amd64.zip']);
+  assert.ok(h.asked.includes('https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.3'), h.asked.join('\n'));
+  assert.equal(got.releases.at(-1).tag_name, 'v1.14.3');
+  assert.deepEqual(got.releases.at(-1).assets.map((a) => a.name), ['sing-box-1.14.3-windows-amd64.zip']);
   assert.equal(got.latestTag, 'v1.14.2');
+  // today's list holds it: no request by tag
+  const now = lister((url) => (url.endsWith('/latest') ? rel.singbox()[0] : rel.singbox()));
+  await now.d.listReleases('sing-box');
+  assert.equal(now.asked.filter((u) => /\/tags\//.test(u)).length, 0);
   // in the list already: no extra request; that request failing, or /latest failing, costs nothing
   const p = lister((url) => (url.endsWith('/latest') ? rel.pattn()[0] : rel.pattn()));
   await p.d.listReleases('xray-pattn');
@@ -265,7 +269,9 @@ test('the suggested release that cannot be fetched falls back to the latest stab
 test('Xray-PattN and sing-box: their latest stable is newer than the suggested one — installed as today, from their own repos', async () => {
   for (const [id, url, tag] of [
     ['xray-pattn', 'https://api.github.com/repos/patterniha/Xray-core/releases/latest', 'v26.10.3'],
-    ['sing-box', 'https://api.github.com/repos/SagerNet/sing-box/releases/latest', 'v1.14.2']
+    ['sing-box', 'https://api.github.com/repos/SagerNet/sing-box/releases/latest', 'v1.14.4'],
+    // the same as the suggested one: nothing more to ask
+    ['sing-box', 'https://api.github.com/repos/SagerNet/sing-box/releases/latest', 'v1.14.3']
   ]) {
     const asked = [];
     const d = makeDownloader({ fetchJSON: async (u) => { asked.push(u); return { tag_name: tag, assets: [] }; } });
@@ -277,8 +283,10 @@ test('Xray-PattN and sing-box: their latest stable is newer than the suggested o
 test('latestVersion names the default target: the weekly updater moves 26.3.27 to 26.9.30, never below', async () => {
   const d = makeDownloader({ fetchJSON: async () => ({ tag_name: 'v26.3.27', assets: [] }) });
   assert.equal(await d.latestVersion('xray'), '26.9.30');
-  const e = makeDownloader({ fetchJSON: async () => ({ tag_name: 'v1.14.2', assets: [] }) });
-  assert.equal(await e.latestVersion('sing-box'), '1.14.2');   // latest stable above ⭐ 1.13.14
+  const e = makeDownloader({ fetchJSON: async () => ({ tag_name: 'v1.14.4', assets: [] }) });
+  assert.equal(await e.latestVersion('sing-box'), '1.14.4');   // latest stable above ⭐ 1.14.3
+  const older = makeDownloader({ fetchJSON: async (u) => ({ tag_name: /\/tags\//.test(u) ? 'v1.14.3' : 'v1.14.2', assets: [] }) });
+  assert.equal(await older.latestVersion('sing-box'), '1.14.3', 'never below the suggested one');
   const f = makeDownloader({ fetchJSON: async () => ({ tag_name: 'v27.1.1', assets: [] }) });
   assert.equal(await f.latestVersion('xray'), '27.1.1');
 });
@@ -296,7 +304,7 @@ test('Update (download) of a core goes through the default target: the suggested
   const answers = {
     'https://api.github.com/repos/XTLS/Xray-core/releases/latest': 'v26.3.27',
     'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.9.30': 'v26.9.30',
-    'https://api.github.com/repos/SagerNet/sing-box/releases/latest': 'v1.14.2'
+    'https://api.github.com/repos/SagerNet/sing-box/releases/latest': 'v1.14.3'
   };
   const d = makeDownloader({ fetchJSON: async (url) => {
     asked.push(url);

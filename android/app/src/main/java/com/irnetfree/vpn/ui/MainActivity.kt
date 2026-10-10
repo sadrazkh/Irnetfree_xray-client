@@ -2945,6 +2945,8 @@ private object RoutingUi { @Volatile var focus = "" }
     DropPick("⚠ ${store.targetLabel(r.target, p)}", targetOptionsFor(store, p), r.target) { t: String -> onChange(r.copy(target = t)) }
     when {
         r.target == RoutingProfiles.TARGET_BASE && p.base == null -> Text("⚠ This routing has no base — the rule is skipped (its traffic follows the default) until you choose a base or another target.", color = BAD, fontSize = 11.sp)
+        // left out, its traffic would follow the default — perhaps direct (RoutingProfiles.planRoutes)
+        r.target == RoutingProfiles.TARGET_BASE && !store.targetExists(r.target, p) -> Text("⚠ Its base is gone — connecting is refused until you pick another base.", color = BAD, fontSize = 11.sp)
         !store.targetExists(r.target, p) -> Text("⚠ This target is gone — the rule is skipped (its traffic follows the default) until you pick another.", color = BAD, fontSize = 11.sp)
     }
     // "exit at the base" IS the base: no via picker

@@ -292,8 +292,9 @@ class Store(context: Context) {
             Selection.isAdvanced(sel) -> {
                 val p = selectedProfile() ?: throw IllegalStateException("This routing profile no longer exists — pick another one")
                 if (p.rules.isEmpty() && p.def.isBlank()) throw IllegalStateException("Add at least one routing rule")
-                // "exit at the base" is the base itself from here on; a default there without a base refuses
-                val r = RoutingProfiles.planRoutes(p, servers.firstOrNull()?.id ?: "direct")
+                // "exit at the base" is the base itself from here on; a default there without a base,
+                // or anything there when the base is gone, refuses
+                val r = RoutingProfiles.planRoutes(p, servers.firstOrNull()?.id ?: "direct") { t: String -> targetExists(t) }
                 ConnectionPlan.Advanced(r.rules, r.def, serversById, chainsById,
                     defVia = r.defVia, base = p.base, useMode = p.useMode, profileId = p.id)
             }
