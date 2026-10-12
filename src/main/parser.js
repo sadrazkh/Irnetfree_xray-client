@@ -12,6 +12,8 @@ const crypto = require('crypto');
 const { isIP } = require('net');
 // JSON configs (an Xray config, an array of them, sing-box): read before any link
 const { importJson, applyJsonEdits, jsonEditFields } = require('./jsonImport');
+// the editor's field table — the window draws it, this reads and writes through it
+const SF = require('../renderer/serverFields');
 
 function uid() {
   return crypto.randomBytes(8).toString('hex');
@@ -894,6 +896,48 @@ function makeWireguardServer(fields) {
   );
 }
 
+/* --------------------------- a server from scratch --------------------------- */
+/** What a new server cannot be made without, by protocol (beside an address and a port). */
+const CREATE_NEEDS = { vless: ['uuid'], vmess: ['uuid'], trojan: ['password'], shadowsocks: ['password'], hysteria2: ['password'], wireguard: ['privateKey', 'publicKey'] };
+
+/**
+ * A server made from the editor's fields alone (its "new server" form): the
+ * protocol's bare outbound, then applyServerEdits with everything the form
+ * holds — the very code an edit runs — and its own share link as `raw`.
+ * Throws, saying what is missing, when the form cannot make one.
+ */
+function createServer(fields) {
+  const f = Object.assign({}, fields || {});
+  const proto = String(f.protocol || '').trim().toLowerCase();
+  if (!SF.PROTOCOLS.includes(proto)) throw new Error('Unknown protocol: ' + (f.protocol || '—'));
+  const address = String(f.address || '').trim();
+  const port = parseInt(f.port, 10);
+  if (!address) throw new Error('The server address is empty');
+  if (!(port > 0 && port < 65536)) throw new Error('The port must be between 1 and 65535');
+  for (const k of CREATE_NEEDS[proto] || []) if (!String(f[k] == null ? '' : f[k]).trim()) throw new Error(k + ' is empty');
+  let server;
+  if (proto === 'wireguard') {
+    server = makeWireguardServer({
+      name: f.name, privateKey: f.privateKey, publicKey: f.publicKey, endpoint: joinHostPort(address, port),
+      address: f.localAddress, presharedKey: f.presharedKey, mtu: f.mtu, reserved: f.reserved, allowedIPs: f.allowedIPs, dns: f.dns
+    });
+  } else if (proto === 'socks' || proto === 'http') {
+    server = makeProxyServer({ type: proto, name: f.name, address, port, username: f.username, password: f.password });
+  } else if (proto === 'hysteria2') {
+    server = mkServer(f.name, 'hysteria2', address, port, '', buildHysteria2Outbound({ address, port, auth: f.password, sni: f.sni }));
+  } else {
+    const user = proto === 'vless' ? { id: '', encryption: 'none', flow: '' }
+      : proto === 'vmess' ? { id: '', alterId: 0, security: 'auto' } : null;
+    const settings = user ? { vnext: [{ address, port, users: [user] }] }
+      : { servers: [proto === 'shadowsocks' ? { address, port, method: f.method || SF.SS_METHODS[0], password: '', uot: true } : { address, port, password: '' }] };
+    server = mkServer(f.name, proto, address, port, '', { protocol: proto, settings, streamSettings: { network: 'tcp', security: 'none' } });
+  }
+  const made = applyServerEdits(server, f);
+  delete made._edited;   // nothing to keep apart from a provider's version: there is none
+  made.raw = buildShareLink(made);
+  return made;
+}
+
 /* ------------------------------ editing ------------------------------ */
 /**
  * Apply edited fields to an existing server (mutates a clone, returns it).
@@ -905,6 +949,9 @@ function applyServerEdits(server, f) {
   // rest re-derived from it — or an Error saying why the config is refused.
   if (server && server.source === 'json') return applyJsonEdits(server, f);
   const before = editFields(server);
+  // the table's path fields as the record has them, before anything below
+  // rebuilds what holds them (serverFields.applyPathFields writes them back)
+  const keptPaths = SF.readPathFields(server);
   const out = JSON.parse(JSON.stringify(server));
   if (f.name != null) out.name = String(f.name).trim() || out.name;
   const addr = f.address != null ? String(f.address).trim() : out.address;
@@ -941,6 +988,17 @@ function applyServerEdits(server, f) {
       if (f.password) srv.password = f.password;
       if (f.method) srv.method = f.method;
     }
+    // Its transport, only when the user changed it: a SIP003 plugin typed in
+    // becomes the stream it stands for (ssStream), else the Pro view's
+    // transport and security fields rebuild it. The Simple view sends what it
+    // showed, which changes nothing.
+    const changed = (k) => f[k] != null && formText(k, f[k]) !== formText(k, before[k]);
+    if (changed('plugin')) {
+      ob.streamSettings = ssStream({ plugin: f.plugin }, addr);
+    } else if (SS_STREAM_KEYS.some(changed)) {
+      if (!ob.streamSettings) ob.streamSettings = { network: 'tcp' };
+      rebuildStream(ob, f);
+    }
   } else if (proto === 'hysteria2') {
     // Rebuilt from everything it had, the form's values over them: the obfs
     // password, the hopping ports, a pin or an ECH an empty field clears.
@@ -953,7 +1011,8 @@ function applyServerEdits(server, f) {
       insecure: f.allowInsecure != null ? (f.allowInsecure ? '1' : '') : h.insecure,
       ech: pick('ech', h.ech), pcs: pick('pcs', h.pcs), vcn: pick('vcn', h.vcn),
       'obfs-password': pick('obfsPassword', h['obfs-password']),
-      obfs: '', mport: pick('mport', h.mport)
+      obfs: '', mport: pick('mport', h.mport),
+      hopInterval: pick('hopInterval', h.hopInterval), up: pick('up', h.up), down: pick('down', h.down)
     }));
     // Masks and QUIC knobs the form does not model stay as they were.
     const fmWas = (ob.streamSettings && ob.streamSettings.finalmask) || {};
@@ -961,7 +1020,15 @@ function applyServerEdits(server, f) {
     if (keep.length || (fmWas.quicParams && Object.keys(fmWas.quicParams).length)) {
       const fm = rebuilt.streamSettings.finalmask || (rebuilt.streamSettings.finalmask = {});
       if (keep.length) fm.udp = [...keep, ...(fm.udp || [])];
-      if (fmWas.quicParams) fm.quicParams = Object.assign({}, fmWas.quicParams, fm.quicParams);
+      if (fmWas.quicParams) {
+        // the bandwidth is the form's now (brutalUp / brutalDown): what it cleared stays cleared
+        const qpWas = Object.assign({}, fmWas.quicParams);
+        if (f.up != null) delete qpWas.brutalUp;
+        if (f.down != null) delete qpWas.brutalDown;
+        fm.quicParams = Object.assign(qpWas, fm.quicParams);
+        if (!Object.keys(fm.quicParams).length) delete fm.quicParams;
+        if (!Object.keys(fm).length) delete rebuilt.streamSettings.finalmask;
+      }
     }
     ob.settings = rebuilt.settings;
     ob.streamSettings = Object.assign({}, ob.streamSettings, rebuilt.streamSettings);
@@ -1028,6 +1095,13 @@ function applyServerEdits(server, f) {
   // it; clearing it makes the next connect read the certificate again.
   if (f.clearCertPin) { delete out.certPin; delete out.certPinAt; }
 
+  // Everything else the editor has a field for (serverFields.js path fields:
+  // VLESS flow and Encryption, the transports' and TLS's finer knobs, sockopt,
+  // Mux for this server …): the form's value where it changed one, else the
+  // record's own from before the rebuild above; one that no longer applies to
+  // the protocol / transport / security the server has now is left out.
+  SF.applyPathFields(out, f, keptPaths);
+
   // Which fields the user edited, kept on the record (a union over every
   // edit). The form re-sends every field on every save, so a field counts
   // only when the value SUBMITTED differs from what the form SHOWED for it
@@ -1062,6 +1136,10 @@ function applyServerEdits(server, f) {
 
   return out;
 }
+
+/** What a Shadowsocks stream is rebuilt from, when one of them changed (applyServerEdits). */
+const SS_STREAM_KEYS = ['network', 'security', 'sni', 'host', 'path', 'fp', 'pbk', 'sid', 'alpn', 'allowInsecure',
+  'ech', 'pcs', 'vcn', 'pqv', 'headerType', 'grpcMode', 'xhttpMode', 'kcpHeader', 'kcpSeed', 'spx', 'cipherSuites', 'finalMask'];
 
 /** Fields of the view that follow another one (serviceName is the path) or have no input (alpn). */
 const DERIVED_FIELDS = ['serviceName', 'alpn'];
@@ -1123,10 +1201,12 @@ function editFields(s) {
     const h = hy2Values(ob);
     Object.assign(v, {
       password: h.auth, sni: h.sni, allowInsecure: isTrue(h.insecure), ech: h.ech, pcs: h.pcs, vcn: h.vcn,
-      alpn: h.alpn, obfsPassword: h['obfs-password'], mport: h.mport
+      alpn: h.alpn, obfsPassword: h['obfs-password'], mport: h.mport,
+      hopInterval: h.hopInterval, up: h.up, down: h.down
     });
   }
-  if (proto === 'vless' || proto === 'vmess' || proto === 'trojan') {
+  if (proto === 'shadowsocks') v.plugin = ssPluginOf(st);
+  if (proto === 'vless' || proto === 'vmess' || proto === 'trojan' || proto === 'shadowsocks') {
     const tls = st.tlsSettings || st.realitySettings || {};
     const rs = st.realitySettings || {};
     const ts = st.tlsSettings || {};
@@ -1150,8 +1230,20 @@ function editFields(s) {
       cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
       finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
       ech: ts.echConfigList || '', pcs: ts.pinnedPeerCertSha256 || '', vcn: ts.verifyPeerCertByName || '',
-      pqv: rs.mldsa65Verify || ''
+      pqv: rs.mldsa65Verify || '',
+      // the Pro view's transport fields the parser itself builds the stream from
+      headerType: st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.type === 'http' ? 'http' : 'none',
+      grpcMode: st.grpcSettings && st.grpcSettings.multiMode ? 'multi' : 'gun',
+      xhttpMode: (st.xhttpSettings && st.xhttpSettings.mode) || 'auto',
+      kcpHeader: (st.kcpSettings && st.kcpSettings.header && st.kcpSettings.header.type) || 'none',
+      kcpSeed: (st.kcpSettings && st.kcpSettings.seed) || '',
+      spx: rs.spiderX || ''
     });
+  }
+  // every other field the editor has (serverFields.js), where it applies
+  const ctx = SF.contextOf(s);
+  for (const fld of SF.PATH_FIELDS) {
+    if (SF.fieldApplies(fld, ctx)) v[fld.id] = SF.toForm(fld, SF.getPath(s, fld.path));
   }
   return v;
 }
@@ -1188,7 +1280,7 @@ function rebuildStream(ob, f) {
   const cur = ob.streamSettings;
   // Only rebuild if the user touched transport/security fields.
   const touched = ['network', 'security', 'sni', 'path', 'host', 'allowInsecure', 'fp', 'pbk', 'sid', 'serviceName', 'alpn', 'cipherSuites', 'finalMask',
-    'ech', 'pcs', 'vcn', 'pqv']
+    'ech', 'pcs', 'vcn', 'pqv', 'headerType', 'grpcMode', 'xhttpMode', 'kcpHeader', 'kcpSeed', 'spx']
     .some(k => f[k] != null && f[k] !== '');
   if (!touched) return;
 
@@ -1206,9 +1298,17 @@ function rebuildStream(ob, f) {
   // working config stopped connecting. It stays while the server stays on TCP.
   const net = String(f.network || cur.network || 'tcp').toLowerCase();
   const isTcp = (n) => n === 'tcp' || n === 'raw';
-  const th = isTcp(String(cur.network || 'tcp').toLowerCase()) && isTcp(net) &&
+  // (the Pro view can turn it off: header type `none`)
+  const th = f.headerType !== 'none' && isTcp(String(cur.network || 'tcp').toLowerCase()) && isTcp(net) &&
     cur.tcpSettings && cur.tcpSettings.header && cur.tcpSettings.header.type === 'http'
     ? cur.tcpSettings.header : null;
+  const pick = (k, was) => (f[k] != null ? String(f[k]).trim() : was);
+  // gRPC's gun / multi and XHTTP's mode: the Pro view's, else what the record had
+  const mode = net === 'grpc'
+    ? (f.grpcMode != null ? (f.grpcMode === 'multi' ? 'multi' : '') : (gs.multiMode ? 'multi' : ''))
+    : net === 'xhttp' && f.xhttpMode ? String(f.xhttpMode).trim()
+      : (xs.mode || (gs.multiMode ? 'multi' : ''));
+  const tcpHeader = f.headerType != null ? (f.headerType === 'http' ? 'http' : '') : (th ? 'http' : '');
 
   const q = {
     type: f.network || cur.network || 'tcp',
@@ -1225,12 +1325,12 @@ function rebuildStream(ob, f) {
     sid: f.sid,
     alpn: f.alpn,
     allowInsecure: f.allowInsecure ? '1' : '0',
-    // preserved passthroughs
-    spx: rs.spiderX || '',
-    mode: xs.mode || (gs.multiMode ? 'multi' : ''),
-    seed: ks.seed || '',
+    // what the Simple view has no field for: the Pro view's value, else the record's
+    spx: pick('spx', rs.spiderX || ''),
+    mode,
+    seed: pick('kcpSeed', ks.seed || ''),
     // each transport's own header type: kcp's never lands on tcp, nor the reverse
-    headerType: (net === 'kcp' || net === 'mkcp') ? ((ks.header && ks.header.type) || '') : (th ? 'http' : ''),
+    headerType: (net === 'kcp' || net === 'mkcp') ? pick('kcpHeader', (ks.header && ks.header.type) || '') : tcpHeader,
     // patterniha: cipherSuites (tls) + finalMask (stream). Edited value wins,
     // else keep whatever the config already had.
     cipherSuites: f.cipherSuites != null ? f.cipherSuites : ((cur.tlsSettings && cur.tlsSettings.cipherSuites) || ''),
@@ -1264,6 +1364,9 @@ function rebuildStream(ob, f) {
     }
     rebuilt.tcpSettings = Object.assign({}, cur.tcpSettings, { header });
   }
+  // The socket options are no transport's and no handshake's: they stay
+  // (a rebuild used to drop them, and every edit with them)
+  if (cur.sockopt) rebuilt.sockopt = cur.sockopt;
 
   ob.streamSettings = rebuilt;
 }
@@ -1721,7 +1824,7 @@ function migrateStoredServer(server) {
 
 module.exports = {
   parseLink, parseMany, b64decode, isHttpProxyLink,
-  buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits, editFields,
+  buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits, editFields, createServer,
   parseWireguardConf, isWireguardConf, splitDnsField,
   buildShareLink, migrateStoredServer, ssPluginOf
 };
