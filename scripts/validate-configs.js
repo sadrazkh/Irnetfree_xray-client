@@ -377,6 +377,9 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
         if (net === 'xhttp') f.xhttpMode = 'packet-up';
         if (net === 'kcp') Object.assign(f, { kcpHeader: 'wechat-video', kcpSeed: 'irnf-seed' });
         if (p === 'vless' && net === 'tcp' && sec === 'reality') { f.flow = 'xtls-rprx-vision'; f.headerType = 'none'; }
+        // Xray 26.9+ refuses Trojan without TLS to a public address ("prohibited unless the server address is a
+        // private IP or domain"); a private one keeps the check on the fields rather than on that rule
+        if (p === 'trojan' && sec === 'none') f.address = '10.0.0.2';
         cases.push([`${p}-${net}-${sec}`, f]);
       }
     }
