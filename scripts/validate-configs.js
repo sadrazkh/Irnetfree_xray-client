@@ -333,6 +333,73 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
   }
 }
 
+// The full server editor (docs/superpowers/specs/2026-10-12-server-editor-design.md):
+// a server made from the editor's fields (parser.createServer) for every
+// protocol and every transport × security it takes, with EVERY field of the
+// table that applies set — the values the form would write — so a core that
+// refuses one of them says so here, not at a user's connect.
+{
+  const SFT = require('../src/renderer/serverFields');
+  const { createServer } = require('../src/main/parser');
+  const ENC = 'mlkem768x25519plus.native.0rtt.p7sTtcQlhzr21By6QMbFOEFjtHJa8dquXhK7pboK9GE';
+  const DOWNLOAD = '{"address":"dl.example.com","port":443,"network":"xhttp","security":"tls","tlsSettings":{"serverName":"dl.example.com"},"xhttpSettings":{"path":"/dl"}}';
+  const VALUES = {
+    encryption: ENC, flow: '', vmessSecurity: 'chacha20-poly1305', alterId: '0', method: 'aes-256-gcm', uot: true,
+    wgKeepAlive: '25', wgDomainStrategy: 'ForceIPv4', httpHeaders: '{"User-Agent":"irnf-ci"}',
+    wsHeartbeat: '30', grpcUserAgent: 'irnf-ci', grpcIdleTimeout: '60', grpcHealthTimeout: '20', grpcInitialWindow: '65535',
+    grpcPermitWithoutStream: true, xPaddingBytes: '100-1000', noGRPCHeader: true, scMaxEachPostBytes: '1000000',
+    scMinPostsIntervalMs: '30', xmuxMaxConcurrency: '16-32', xmuxMaxConnections: '0', xmuxCMaxReuseTimes: '0',
+    xmuxHMaxRequestTimes: '600-900', xmuxHMaxReusableSecs: '1800-3000', xmuxHKeepAlivePeriod: '0', downloadSettings: DOWNLOAD,
+    kcpMtu: '1350', kcpTti: '50', kcpUplink: '5', kcpDownlink: '20', kcpCongestion: true, kcpReadBuffer: '2', kcpWriteBuffer: '2',
+    echForceQuery: 'none', minVersion: '1.2', maxVersion: '1.3', curvePreferences: 'X25519MLKEM768, X25519',
+    mux: 'on', muxConcurrency: '4', xudpConcurrency: '16',
+    tcpFastOpen: true, tcpMptcp: true, tcpKeepAliveInterval: '15', tcpKeepAliveIdle: '300', tcpCongestion: 'bbr'
+  };
+  const base = (protocol) => {
+    const f = { protocol, name: 'editor-' + protocol, address: 'ed.example.com', port: '443' };
+    if (protocol === 'vless' || protocol === 'vmess') f.uuid = '2c0f0d9a-6b3a-4f0e-9a1f-8c2b4d6e7a10';
+    if (['trojan', 'shadowsocks', 'hysteria2'].includes(protocol)) f.password = 'irnf-ci-secret';
+    if (protocol === 'wireguard') Object.assign(f, { privateKey: '2K2GILDj0FUWeLh2MhyzOfVm3cpC7evzkWZGRNL7yUA=', publicKey: 'HtCo1A5bqv1JjSdv4ynUqF1ZVCXDpPtd4292Md+AIko=' });
+    if (protocol === 'hysteria2') Object.assign(f, { sni: 'ed.example.com', mport: '20000-30000', hopInterval: '45', up: '50 mbps', down: '200 mbps' });
+    return f;
+  };
+  // REALITY: RAW, XHTTP and gRPC; TLS on every transport but mKCP; none where it makes sense
+  const SECS = { tcp: ['tls', 'reality'], ws: ['tls', 'none'], grpc: ['tls', 'reality'], httpupgrade: ['tls'], xhttp: ['tls', 'reality'], kcp: ['none'] };
+  const cases = [];
+  for (const p of SFT.PROTOCOLS) {
+    if (!SFT.hasTransport(p)) { cases.push([p, base(p)]); continue; }
+    for (const net of SFT.NETWORKS) {
+      for (const sec of SECS[net].filter((x) => SFT.securitiesOf(p).includes(x))) {
+        const f = Object.assign(base(p), { network: net, security: sec, path: net === 'grpc' ? 'svc' : '/p', host: 'cdn.example.com', headerType: net === 'tcp' ? 'http' : undefined });
+        if (sec === 'tls') Object.assign(f, { sni: 'cdn.example.com', fp: 'chrome', alpn: 'h2,http/1.1' });
+        if (sec === 'reality') Object.assign(f, { sni: 'www.microsoft.com', fp: 'chrome', pbk: 'Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw', sid: '6ba85179', spx: '/start' });
+        if (net === 'grpc') f.grpcMode = 'multi';
+        if (net === 'xhttp') f.xhttpMode = 'packet-up';
+        if (net === 'kcp') Object.assign(f, { kcpHeader: 'wechat-video', kcpSeed: 'irnf-seed' });
+        if (p === 'vless' && net === 'tcp' && sec === 'reality') { f.flow = 'xtls-rprx-vision'; f.headerType = 'none'; }
+        // Xray 26.9+ refuses Trojan without TLS to a public address ("prohibited unless the server address is a
+        // private IP or domain"); a private one keeps the check on the fields rather than on that rule
+        if (p === 'trojan' && sec === 'none') f.address = '10.0.0.2';
+        cases.push([`${p}-${net}-${sec}`, f]);
+      }
+    }
+  }
+  let made = 0;
+  for (const [name, f] of cases) {
+    const fields = Object.assign({}, f);
+    for (const fld of SFT.PATH_FIELDS) {
+      if (!(fld.id in VALUES) || fields[fld.id] !== undefined) continue;
+      // a flow belongs to RAW + TLS/REALITY only; VLESS Encryption with a flow on its own row above
+      if (fld.id === 'flow') continue;
+      fields[fld.id] = VALUES[fld.id];
+    }
+    const server = createServer(fields);
+    made++;
+    check(`editor-${name}`, buildConfig({ mode: 'single', server }, F.settings({ routingMode: 'bypass-ir', muxServerIds: [server.id] })));
+  }
+  if (made < 20) throw new Error('the editor’s configs: only ' + made);
+}
+
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
 // sing-tun there only accepts utun<N> and names the device itself — plus the

@@ -280,7 +280,8 @@ test('both mirrors: muxFor is one function — but for the router, which runs a 
   assert.equal(main, service.replace(routerOnly, '').replace(oneAtATime, '').replace(/\bmuxProbe\(/g, 'probeMux('));
   assert.match(SERVICE, /^ {2}const MUX_PARALLEL = OPENWRT \? 1 : PROBE_PARALLEL;$/m);
   assert.match(main, /now: Date\.now\(\), recovery: !!recovery,/, 'a recovery’s rebuild is said to decideMux');
-  assert.match(main, /const mode = muxMode\(settings\.mux\);\nif \(mode === 'off'\) return none;/, 'off: not a probe, not a store read');
+  // off: no probe, no verdict read — unless a server is set to Mux on (the editor's Advanced tab)
+  assert.ok(main.includes("const mode = muxMode(settings.mux);\n// off — unless a server is set to Mux on (its own `mux`, the editor's Advanced tab)\nif (mode === 'off' && !(store.get('servers', []) || []).some((s) => s && s.mux === 'on')) return none;"), 'off: not a probe, not a verdict read');
   assert.match(main, /if \(engineFormat\(engine\) === 'sing-box'\) return none;/, 'the sing-box engine never gets mux');
   assert.match(main, /const servers = muxCandidates\(plan, rawServerOf\(plan, settings, RAW_OPTS\)\);/, 'a chain’s hops are never asked about, nor a JSON server that runs raw');
   assert.match(main, /buildTestConfig: \(target, port\) => buildTestConfig\(target, port, \{ entryHostIps: settings\.entryHostIps, ipv6: settings\.ipv6 \}\),/);

@@ -146,6 +146,129 @@
    skin, and its width). A second rule here, fixed at 232px, used to win the
    cascade over it and squeezed every code to 208px of drawing. */
 
+/* ------------------------------ the server editor ------------------------------ */
+/* docs/superpowers/specs/2026-10-12-server-editor-design.md: one window, a Simple
+   view (the form above, #edSimple) and a Pro view (#edPro, five tabs drawn from
+   serverFields.js). The app's tokens and type scale only: 11 / 12 / 14. */
+.modal.ed-modal { width: min(640px, 100%); }
+.ed-modal .modal-title { flex: 0 1 auto; }
+.ed-modal .modal-head .tb-btn { margin-inline-start: auto; }
+.ed-head-proto:not(:empty) {
+  font: 600 11px var(--mono); color: var(--accentInk);
+  background: var(--accentSoft); border: 1px solid var(--accentLine);
+  padding: 3px 8px; border-radius: var(--r2);
+}
+.ed-view { padding: 2px; }
+.ed-view .seg-btn { padding: 5px 12px; font-size: 11px; }
+/* the Simple form's children stay children of the body: its gap, its order */
+.ed-simple { display: contents; }
+.ed-simple-extra { display: flex; flex-direction: column; gap: 12px; }
+.ed-more { margin: 0; }
+.ed-pro-link {
+  appearance: none; background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--accentInk); font: 600 12px var(--ui);
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.ed-pro, .ed-pane { display: flex; flex-direction: column; gap: 14px; }
+.ed-pane { min-height: 300px; }
+
+/* the tabs: full width under the head, kept in view while a long tab scrolls */
+.ed-tabs {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; gap: 2px;
+  margin: -18px -18px 0; padding: 0 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto; scrollbar-width: none;
+}
+.ed-tab {
+  appearance: none; background: none; border: 0; cursor: pointer;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  padding: 11px 13px 9px; margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: var(--ink3); font: 600 12px var(--ui); white-space: nowrap;
+  transition: color 140ms ease-out, border-color 140ms ease-out;
+}
+.ed-tab small { font: 500 11px var(--mono); color: var(--dim); }
+.ed-tab:hover { color: var(--ink2); }
+.ed-tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+.ed-tab.active small { color: var(--accentInk); }
+.ed-tab[aria-disabled="true"] { opacity: .38; cursor: not-allowed; }
+.ed-tab-bad { color: var(--danger); font-size: 11px; margin-inline-start: 5px; }
+
+/* fields */
+/* Each field is label, control, hint on three rows of the grid (subgrid): a
+   label that wraps in one column keeps the control beside it on its line. */
+.ed-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 14px; row-gap: 0; }
+.ed-grid > .span2 { grid-column: 1 / -1; }
+.ed-f { min-width: 0; display: grid; grid-row: span 3; grid-template-rows: subgrid; align-content: start; margin-bottom: 13px; }
+.ed-f > .field-label { align-self: end; }
+.ed-grid > .ed-sub { grid-row: span 1; margin-bottom: 10px; }
+.ed-f .field-label { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.ed-key { font: 500 11px var(--mono); color: var(--dim); unicode-bidi: isolate; }
+.ed-local {
+  font-size: 11px; font-weight: 500; color: var(--ink3); white-space: nowrap;
+  border: 1px dashed var(--softline); border-radius: 999px; padding: 0 6px; line-height: 16px;
+}
+.ed-f .hint { margin-top: 5px; }
+.ed-f.is-bad .input, .ed-f.is-bad .select, .ed-f.is-bad .textarea { border-color: var(--danger); }
+.ed-sub {
+  margin: 4px 0 -2px; padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-weight: 600; font-size: 12px; color: var(--ink2);
+}
+.ed-inline { display: flex; gap: 8px; }
+.ed-inline .input { flex: 1; min-width: 0; }
+.ed-inline .btn { flex: 0 0 auto; }
+.ed-seg-wide { display: flex; width: 100%; }
+.ed-seg-wide .seg-btn { flex: 1 1 0; padding: 7px 6px; font-family: var(--mono); font-size: 11px; }
+.ed-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.ed-chip {
+  appearance: none; cursor: pointer; font: 600 11px var(--mono);
+  padding: 6px 11px; border-radius: 999px;
+  background: var(--soft); border: 1px solid var(--softline); color: var(--ink3);
+}
+.ed-chip.on { background: var(--accentSoft); border-color: var(--accentLine); color: var(--accentInk); }
+.ed-switch {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 12px;
+  background: var(--soft); border: 1px solid var(--softline); border-radius: var(--r4);
+}
+.ed-switch .switch-title { font-size: 12px; color: var(--ink2); display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; }
+
+/* a new server's protocol */
+.ed-protos { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.ed-proto {
+  appearance: none; cursor: pointer; text-align: start;
+  display: flex; flex-direction: column; gap: 3px; padding: 10px 11px;
+  background: var(--soft); border: 1px solid var(--softline); border-radius: var(--r4);
+  color: var(--ink2); font: 600 12px var(--mono);
+}
+.ed-proto small { font: 500 11px var(--ui); color: var(--ink3); }
+.ed-proto.on { border-color: var(--accent); background: var(--accentSoft); color: var(--ink); }
+.ed-proto[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+
+/* VLESS Encryption, read back */
+.ed-enc-body { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.ed-enc-body .field-label { margin-bottom: 0; }
+.ed-mono { font-family: var(--mono); font-size: 11px; line-height: 1.6; word-break: break-all; white-space: pre-wrap; }
+.ed-enc-read { display: flex; flex-wrap: wrap; gap: 6px; }
+.ed-enc-read span {
+  font: 600 11px var(--ui); padding: 3px 9px; border-radius: 999px;
+  background: var(--okSoft); color: var(--ok);
+}
+.ed-enc-read span.pq { background: var(--infoSoft); color: var(--info); }
+.ed-enc-read span.bad { background: var(--dangerSoft); color: var(--danger); }
+
+.ed-empty { display: grid; place-items: center; min-height: 220px; margin: 0; text-align: center; color: var(--ink3); font-size: 12px; line-height: 1.9; }
+.ed-warn { margin: 0; font-size: 12px; line-height: 1.7; color: var(--warn); background: var(--warnSoft); border-radius: var(--r4); padding: 8px 11px; }
+.ed-foot .ed-foot-note { margin-inline-start: auto; font-size: 11px; color: var(--ink3); }
+
+@media (max-width: 560px) {
+  .ed-grid { grid-template-columns: minmax(0, 1fr); }
+  .ed-protos { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* ----------------------------- subscriptions ----------------------------- */
 
 .sub-list { display: flex; flex-direction: column; gap: 10px; }

@@ -98,6 +98,9 @@ object SingboxConfig {
         when (proto) {
             "vless" -> {
                 val u = vnextUser(ob)
+                // Xray's VLESS Encryption: sing-box has none — dialled without it the server never answers
+                val enc = u.optString("encryption").trim()
+                if (enc.isNotEmpty() && enc != "none") throw Unsupported("sing-box: VLESS Encryption is not supported (use Xray)")
                 out.put("type", "vless").put("uuid", u.optString("id"))
                 val flow = u.optString("flow"); if (flow.isNotBlank()) out.put("flow", flow)
                 out.put("packet_encoding", "xudp")

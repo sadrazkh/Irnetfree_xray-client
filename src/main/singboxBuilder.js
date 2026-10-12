@@ -78,6 +78,9 @@ function translateOutbound(server, tag) {
 
   if (proto === 'vless') {
     const u = user(ob);
+    // Xray's VLESS Encryption (mlkem768x25519plus): sing-box has no such
+    // thing — dialled without it the server would never answer
+    if (u.encryption && u.encryption !== 'none') throw new UnsupportedEngineConfig('sing-box: VLESS Encryption is not supported (use Xray)');
     out = Object.assign({ type: 'vless', uuid: u.id || '', flow: u.flow || undefined }, base);
     // sing-box needs packet_encoding for vless UDP; xrudp is the common default
     out.packet_encoding = 'xudp';

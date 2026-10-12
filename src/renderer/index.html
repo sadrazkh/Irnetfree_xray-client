@@ -204,6 +204,7 @@
             <button class="btn ghost" id="btnClearServers" data-i18n="btn.clearAll">حذف همه</button>
             <button class="btn ghost" id="btnWgOpen" data-i18n="btn.addWg">+ WireGuard</button>
             <button class="btn ghost" id="btnProxyOpen" data-i18n="btn.addProxy">+ SOCKS/HTTP</button>
+            <button class="btn ghost" id="btnManualOpen" data-i18n="btn.addManual">+ دستی</button>
             <button class="btn primary" id="btnAddOpen" data-i18n="btn.add">+ افزودن</button>
           </div>
         </div>
@@ -885,12 +886,19 @@
 
   <!-- edit server modal -->
   <div class="modal-overlay" id="editModal" hidden>
-    <div class="modal">
+    <div class="modal ed-modal">
       <div class="modal-head">
-        <span class="modal-title" data-i18n="edit.title">ویرایش سرور</span>
+        <span class="modal-title" id="edTitle" data-i18n="edit.title">ویرایش سرور</span>
+        <span class="ed-head-proto" id="edHeadProto" dir="ltr"></span>
+        <!-- one draft, two views (app.js setEditView): today's form, or every field in five tabs -->
+        <div class="seg ed-view" id="edView" role="radiogroup" data-i18n-title="edit.view.label">
+          <button type="button" class="seg-btn active" role="radio" aria-checked="true" data-edit-view="simple" data-i18n="edit.view.simple">ساده</button>
+          <button type="button" class="seg-btn" role="radio" aria-checked="false" data-edit-view="pro" data-i18n="edit.view.pro">حرفه‌ای</button>
+        </div>
         <button class="tb-btn" id="editClose">&#x2715;</button>
       </div>
       <div class="modal-body" id="editBody">
+        <div class="ed-simple" id="edSimple">
         <div class="grid2" id="edNameRow">
           <div><label class="field-label" data-i18n="edit.name">نام</label>
             <input type="text" id="edName" class="input" /></div>
@@ -927,6 +935,8 @@
           <div id="edCredWrap"><label class="field-label" id="edCredLabel" data-i18n="edit.uuid">شناسه</label>
             <input type="text" id="edCred" class="input" dir="ltr" /></div>
         </div>
+        <!-- what the Simple view lacked (VLESS flow and Encryption, the VMess cipher, the SS method): drawn from serverFields.js -->
+        <div class="ed-simple-extra" id="edSimpleExtra" hidden></div>
         <!-- transport row (hidden for ss/wireguard) -->
         <div class="grid2" id="edTransportRow">
           <div><label class="field-label" data-i18n="edit.network">ترنسپورت</label>
@@ -1083,11 +1093,20 @@
           <textarea id="edFinalMask" class="input" dir="ltr" rows="3" spellcheck="false" placeholder='{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5","6-8"],"delays":["10-20"],"maxSplit":"3-6"}}]}'></textarea>
           <p class="hint" data-i18n="edit.pattHint">دقیقاً همان JSON را بچسبان؛ برنامه دست‌کاری‌اش نمی‌کند. برای روش پترنیها: Address یک IP تمیز کلودفلر، fingerprint = unsafe، بعد cipherSuites و finalmask.</p>
         </div>
+        <!-- the Simple view's last line: everything else is in the Pro view (filled by app.js) -->
+        <p class="hint ed-more" id="edMoreInPro"></p>
+        </div>
+        </div>
+        <!-- the Pro view: every field of serverFields.js, in five tabs (app.js renderEditPro) -->
+        <div class="ed-pro" id="edPro" hidden>
+          <nav class="ed-tabs" id="edTabs" role="tablist"></nav>
+          <div class="ed-pane" id="edProPane" role="tabpanel"></div>
         </div>
       </div>
-      <div class="modal-foot">
+      <div class="modal-foot ed-foot">
         <button class="btn primary" id="editSave" data-i18n="btn.save">ذخیره</button>
         <button class="btn ghost" id="editCancel" data-i18n="btn.cancel">انصراف</button>
+        <span class="ed-foot-note" id="edFootNote"></span>
       </div>
     </div>
   </div>
@@ -1294,6 +1313,7 @@
   <script src="diagnostics.js"></script>
   <script src="settingsExperience.js"></script>
   <script src="corePicker.js"></script>
+  <script src="serverFields.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
