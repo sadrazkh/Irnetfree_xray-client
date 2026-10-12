@@ -270,6 +270,9 @@ function editHarness({ servers, updateServer, flavor } = {}) {
     state: { servers: servers || [J()], editingId: null, connected: false, activeServerId: null, flavor: flavor || null },
     // the link form, which a JSON server never reaches
     readServerFields: () => ({}), fillEditForm() {}, updateSpoofLabels() {}, collectEditFields: () => ({ name: 'link' }),
+    // the full editor, which a JSON server never reaches (tests/serverEditorUi.test.js has it)
+    draftOf: () => ({}), savedEditView: () => 'simple', showEditView() {}, draftProblem: () => null, draftCtx: () => ({}),
+    renderEditPro() {}, renderSimpleExtras() {}, fillMoreInPro() {}, saveNewServer: async () => {},
     setPending() {}, serverInLivePlan: () => false, doReconnect() {},
     renderServers: () => calls.push(['renderServers']), renderPicker() {}, renderChains() {}, renderPool() {}, renderAdvanced() {},
     window: { api: { updateServer: updateServer || (async () => ({ ok: true, servers: [] })) } },
@@ -278,8 +281,10 @@ function editHarness({ servers, updateServer, flavor } = {}) {
   // the module-level state app.js keeps for the open form, then the real functions over it
   vm.runInContext([
     "let editOriginal = null; let editClearPin = false; let editJsonMode = 'full';",
+    // the full editor's state (app.js): one draft for the Simple and Pro views
+    "let editDraft = null; let editView = 'simple'; let editTab = 'protocol'; let editNew = false; let editBad = null; const PROTO_NAMES = { vless: 'VLESS' };",
     ...['show', 'closeEdit', 'setEditKind', 'showJsonError', 'jsonRuleText', 'renderJsonInfo', 'setJsonMode', 'refreshJsonFormLang', 'openEditJson',
-      'collectJsonFields', 'copyEditJson', 'openEdit', 'saveEdit'].map(fnSource)
+      'collectJsonFields', 'copyEditJson', 'openEdit', 'saveEdit', 'absorbSimple', 'draftFields'].map(fnSource)
   ].join('\n'), ctx);
   return { ctx, get, calls, segButtons, mode: () => vm.runInContext('editJsonMode', ctx) };
 }
@@ -576,7 +581,9 @@ test('a link server still saves through the link form, and a refusal there is st
   const h = editHarness({ servers: [link], updateServer: async (id, f) => { sent.push([id, plain(f)]); return { ok: false }; } });
   h.ctx.openEdit('l1');
   await h.ctx.saveEdit();
-  assert.deepEqual(sent, [['l1', { name: 'link' }]], 'collectEditFields’s fields, as before');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][0], 'l1');
+  assert.equal(sent[0][1].name, 'link', 'collectEditFields’s fields, taken into the draft the save sends');
   assert.ok(h.calls.some((c) => c[0] === 'toast' && c[2] === 'err' && c[1] === en('t.failed')));
   assert.equal(h.get('editModal').hidden, false, 'and the form stays');
 });
@@ -598,7 +605,7 @@ test('the JSON form is wired: the switch sets the mode, Copy JSON copies, the fo
   const open = fnSource('openEdit');
   assert.ok(open.indexOf("s.source === 'json'") > -1 && open.indexOf("s.source === 'json'") < open.indexOf('readServerFields'));
   const save = fnSource('saveEdit');
-  assert.ok(save.indexOf("source === 'json'") > -1 && save.indexOf("source === 'json'") < save.indexOf('collectEditFields'));
+  assert.ok(save.indexOf("source === 'json'") > -1 && save.indexOf("source === 'json'") < save.indexOf('absorbSimple'));
 });
 
 /* ------------------------------------ the QR ------------------------------------ */

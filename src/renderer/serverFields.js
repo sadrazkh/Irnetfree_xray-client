@@ -21,8 +21,9 @@
  *   local    a share link cannot carry it: it stays on this device
  *   simple   also in the Simple view
  *   key      the technical name shown beside the label
- *   options  values; `optionLabels` → each value's label is `sfo.<id>.<value>`
- *            (`_` for the empty value)
+ *   options  values; a value shows as itself, but with `optionLabels` the empty
+ *            one is labelled `sfo.<id>._` — and with `optionLabels: 'all'`
+ *            every one, `sfo.<id>.<value>`
  *   emptyAs  what an empty value is written as, instead of deleting the key
  *
  * Labels are `sf.<id>`, hints `sf.<id>.hint` (when `hint: true`), both
@@ -173,9 +174,9 @@
     { id: 'pqv', tab: 'security', kind: 'text', special: true, key: 'mldsa65Verify · pqv', when: on(STREAM, null, ['reality']), simple: true, span: 2 },
 
     /* ------------------------------- advanced ------------------------------- */
-    { id: 'engine', tab: 'advanced', kind: 'select', special: true, key: 'engine', simple: true, options: ['xray', 'xray-pattn', 'sing-box'], optionLabels: true, hint: true },
+    { id: 'engine', tab: 'advanced', kind: 'select', special: true, key: 'engine', simple: true, options: ['xray', 'xray-pattn', 'sing-box'], optionLabels: 'all', hint: true },
     { id: 'mux', tab: 'advanced', group: 'mux', kind: 'select', path: '@mux', key: 'mux', when: on(['vless', 'vmess', 'trojan']), local: true,
-      options: ['', 'on', 'off'], optionLabels: true, hint: true },
+      options: ['', 'on', 'off'], optionLabels: 'all', hint: true },
     { id: 'muxConcurrency', tab: 'advanced', group: 'mux', kind: 'number', path: '@muxConcurrency', key: 'concurrency', when: on(['vless', 'vmess', 'trojan']), local: true, placeholder: '8' },
     { id: 'xudpConcurrency', tab: 'advanced', group: 'mux', kind: 'number', path: '@xudpConcurrency', key: 'xudpConcurrency', when: on(['vless', 'vmess', 'trojan']), local: true, placeholder: '16' },
     { id: 'tcpFastOpen', tab: 'advanced', group: 'sockopt', kind: 'switch', path: SO + 'tcpFastOpen', key: 'tcpFastOpen', when: on(STREAM), local: true },
@@ -332,6 +333,66 @@
     return { auth: key.length > 200 ? 'ML-KEM-768' : 'X25519', mode: p[1], rtt: p[2], padded: rest.length > 1 };
   }
 
+  /**
+   * The SIP002 plugin a Shadowsocks stream stands for (parser.ssStream's
+   * inverse); '' for plain TCP. Here so the window shows it as the share link
+   * writes it.
+   */
+  function ssPluginOf(st) {
+    if (!st) return '';
+    const esc = (s) => String(s).replace(/[\\;=,]/g, '\\$&');
+    if (st.network === 'ws' && st.wsSettings) {
+      const host = (st.wsSettings.headers && (st.wsSettings.headers.Host || st.wsSettings.headers.host)) || '';
+      const parts = ['v2ray-plugin', 'mode=websocket'];
+      if (st.security === 'tls') parts.push('tls');
+      if (host) parts.push('host=' + esc(host));
+      parts.push('path=' + esc(st.wsSettings.path || '/'), 'mux=0');
+      return parts.join(';');
+    }
+    const h = st.tcpSettings && st.tcpSettings.header;
+    if ((!st.network || st.network === 'tcp' || st.network === 'raw') && h && h.type === 'http') {
+      const rq = h.request || {};
+      const host = [].concat((rq.headers && rq.headers.Host) || [])[0] || '';
+      const uri = [].concat(rq.path || [])[0] || '/';
+      return 'obfs-local;obfs=http' + (host ? ';obfs-host=' + esc(host) : '') + (uri !== '/' ? ';obfs-uri=' + esc(uri) : '');
+    }
+    return '';
+  }
+
+  /**
+   * The special fields the parser builds the outbound from, read off a record
+   * (parser.editFields and the window both show these): TCP's header, gRPC's
+   * and XHTTP's mode, mKCP's header and seed, REALITY's spiderX; Hysteria2's
+   * hop interval and bandwidth; a Shadowsocks plugin.
+   */
+  function specialsOf(server) {
+    const ob = (server && server.outbound) || {};
+    const st = ob.streamSettings || {};
+    const ctx = contextOf(server);
+    const out = {};
+    if (hasTransport(ctx.protocol)) {
+      const rs = st.realitySettings || {};
+      Object.assign(out, {
+        headerType: st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.type === 'http' ? 'http' : 'none',
+        grpcMode: st.grpcSettings && st.grpcSettings.multiMode ? 'multi' : 'gun',
+        xhttpMode: (st.xhttpSettings && st.xhttpSettings.mode) || 'auto',
+        kcpHeader: (st.kcpSettings && st.kcpSettings.header && st.kcpSettings.header.type) || 'none',
+        kcpSeed: (st.kcpSettings && st.kcpSettings.seed) || '',
+        spx: rs.spiderX || ''
+      });
+    }
+    if (ctx.protocol === 'shadowsocks') out.plugin = ssPluginOf(st);
+    if (ctx.protocol === 'hysteria2') {
+      const fm = st.finalmask || {};
+      const hop = (Array.isArray(fm.udp) ? fm.udp : []).find((m) => m && m.type === 'udphop');
+      const qp = fm.quicParams || {};
+      out.hopInterval = hop && hop.settings && hop.settings.interval != null ? String(hop.settings.interval) : '';
+      out.up = qp.brutalUp || '';
+      out.down = qp.brutalDown || '';
+    }
+    return out;
+  }
+
   const PATH_FIELDS = FIELDS.filter((f) => f.path);
 
   /** Every path field's stored value, by id (raw, as the record has it). */
@@ -368,6 +429,6 @@
   return {
     FIELDS, TABS, PROTOCOLS, NETWORKS, FINGERPRINTS, SS_METHODS, PATH_FIELDS,
     securitiesOf, hasTransport, contextOf, fieldApplies,
-    getPath, setPath, toForm, fromForm, validate, readEncryption, readPathFields, applyPathFields
+    getPath, setPath, toForm, fromForm, validate, readEncryption, readPathFields, applyPathFields, specialsOf, ssPluginOf
   };
 }));

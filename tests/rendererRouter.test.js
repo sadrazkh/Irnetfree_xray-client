@@ -469,9 +469,10 @@ test('18: saving an edit of the live server says it is not applied yet and offer
       const fresh = harness({
         flavor,
         fns: ['serverInLivePlan', 'toastAction', 'saveEdit'],
-        prelude: 'var editOriginal = { protocol: "vless" }; var editClearPin = false;',
+        prelude: 'var editOriginal = { protocol: "vless" }; var editClearPin = false; var editNew = false; var editView = "simple"; var editDraft = {};',
         extra: {
           collectEditFields: () => ({ name: 'x' }),
+          absorbSimple() {}, draftProblem: () => null, draftFields: () => ({ name: 'x' }), draftCtx: () => ({}),
           renderServers() {}, renderPicker() {}, renderChains() {}, renderPool() {}, renderAdvanced() {},
           closeEdit() {},
           doReconnect: () => { fresh.calls.push(['reconnect']); },
@@ -524,9 +525,10 @@ test('18 (review): a save takes the service’s word — its "live" verdict and 
   const run = async ({ reply, activeServerId = 's1' }) => {
     const h = harness({
       fns: ['serverInLivePlan', 'toastAction', 'setPending', 'saveEdit'],
-      prelude: 'var editOriginal = { protocol: "vless" }; var editClearPin = false;',
+      prelude: 'var editOriginal = { protocol: "vless" }; var editClearPin = false; var editNew = false; var editView = "simple"; var editDraft = {};',
       extra: {
         collectEditFields: () => ({ name: 'x' }),
+        absorbSimple() {}, draftProblem: () => null, draftFields: () => ({ name: 'x' }), draftCtx: () => ({}),
         renderServers() {}, renderPicker() {}, renderChains() {}, renderPool() {}, renderAdvanced() {}, closeEdit() {},
         renderPendingBanner: () => h.calls.push(['banner', [...h.ctx.state.pendingReconnect].join(',')]),
         doReconnect: () => {},
