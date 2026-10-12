@@ -937,7 +937,13 @@ object ConfigBuilder {
      * No ids, no change. A chain's hops never come through here.
      */
     private fun withMux(o: JSONObject, server: ServerConfig, muxIds: Set<String>): JSONObject {
-        if (server.id in muxIds && Mux.eligible(o)) o.put("mux", Mux.MUX)
+        if (server.id in muxIds && Mux.eligible(o)) {
+            // the server's own numbers (the editor's Mux fields), where it has them
+            val m = JSONObject(Mux.MUX.toString())
+            server.muxConcurrency?.let { n: Int -> m.put("concurrency", n) }
+            server.xudpConcurrency?.let { n: Int -> m.put("xudpConcurrency", n) }
+            o.put("mux", m)
+        }
         return o
     }
     private fun dialThrough(outbound: JSONObject, viaTag: String) {

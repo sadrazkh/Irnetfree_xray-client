@@ -236,13 +236,15 @@ object Mux {
      */
     fun plan(mode: String, servers: List<ServerConfig>, cache: Map<String, Probe>, now: Long, recovery: Boolean = false): Plan {
         val m = modeOf(mode)
-        if (m == OFF) return Plan(emptySet(), emptyList())
         val ids = LinkedHashSet<String>()
         val toProbe = ArrayList<ServerConfig>()
         val queued = HashSet<String>()
         for (s in servers) {
             if (!eligible(s.outbound)) continue
-            if (m == ON) { ids.add(s.id); continue }
+            // a server's own Mux (the editor's Advanced tab) comes before the app's
+            if (s.mux == OFF) continue
+            if (s.mux == ON || m == ON) { ids.add(s.id); continue }
+            if (m == OFF) continue
             val fp = fingerprint(s)
             val e = cache[fp]
             if (recovery) {
@@ -422,12 +424,13 @@ object Mux {
         recovery: Boolean = false
     ): Pick {
         val m = modeOf(mode)
-        if (m == OFF) return Pick.NONE
         val servers = targets(connection).filter { s: ServerConfig -> eligible(s.outbound) }
         if (servers.isEmpty()) return Pick.NONE
+        // off — unless a server is set to Mux on (its own, the editor's Advanced tab)
+        if (m == OFF && servers.none { s: ServerConfig -> s.mux == ON }) return Pick.NONE
         val first = plan(m, servers, cache, now(), recovery)
-        if (m == ON) {
-            for (s in servers) if (s.id in first.muxIds) log("Mux on for ${s.name} (Settings → Mux: On)")
+        if (m != AUTO) {
+            for (s in servers) if (s.id in first.muxIds) log(if (s.mux == ON) "Mux on for ${s.name} (set for this server)" else "Mux on for ${s.name} (Settings → Mux: On)")
             return Pick(first.muxIds, emptyList())
         }
         val known = HashMap(cache)
@@ -449,7 +452,11 @@ object Mux {
         val second = plan(m, servers, known, t, recovery)
         for (s in servers) {
             val fp = fingerprint(s)
-            log(line(s.name, s.id in second.muxIds, testedNow[fp], known[fp], t, recovery))
+            when (s.mux) {
+                ON -> log("Mux on for ${s.name} (set for this server)")
+                OFF -> log("Mux off for ${s.name} (set for this server)")
+                else -> log(line(s.name, s.id in second.muxIds, testedNow[fp], known[fp], t, recovery))
+            }
         }
         val onDrop = servers.filter { s: ServerConfig -> s.id in second.muxIds }.map { s: ServerConfig -> fingerprint(s) }.distinct()
         return Pick(second.muxIds, onDrop)

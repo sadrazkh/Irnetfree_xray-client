@@ -217,6 +217,8 @@ object SubRefresh {
             if (name in kept) { p.set(f, p.get(mine)); changed = true }
         }
         if ("allowInsecure" in kept) { f.allowInsecure = mine.allowInsecure; changed = true }
+        // the editor's table fields (ServerFields): Encryption, the finer knobs, Mux for this server
+        for (id in ServerEditor.PATH_IDS) if (id in kept) { f.pro[id] = mine.pro[id] ?: ""; changed = true }
         return (if (changed) ServerEditor.apply(fresh, f) else fresh) to kept
     }
 
