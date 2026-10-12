@@ -33,8 +33,18 @@ object ServerEditor {
         // preserved passthroughs the edit form doesn't expose (so editing anything
         // doesn't silently drop them): reality spiderX, xhttp mode/extra, kcp bits.
         var spx: String = "", var xmode: String = "", var seed: String = "",
-        var headerType: String = "", var xhttpExtra: JSONObject? = null
+        var headerType: String = "", var xhttpExtra: JSONObject? = null,
+        // the Pro view's own: TCP's HTTP header (none / http), Hysteria2's hop
+        // interval and bandwidth, a Shadowsocks SIP003 plugin
+        var tcpHeader: String = "none", var hy2Hop: String = "", var hy2Up: String = "", var hy2Down: String = "", var plugin: String = "",
+        // every path field of ServerFields (the desktop's serverFields.js) that
+        // applies, as the form shows it ("true" / "" for a switch) — VLESS flow and
+        // Encryption, the finer transport and TLS knobs, sockopt, Mux for this server
+        var pro: MutableMap<String, String> = mutableMapOf()
     )
+
+    /** Path fields of the table this sheet keeps a field of its own for (the SS method). */
+    private val OWN = setOf("method")
 
     fun read(s: ServerConfig): Fields {
         val f = Fields(name = s.name, address = s.address, port = s.port.toString())
@@ -86,6 +96,20 @@ object ServerEditor {
         st.optJSONObject("realitySettings")?.let { f.pqv = it.optString("mldsa65Verify") }
         // Hysteria2's masks are its obfs and hopping fields (hy2Obfs / hy2Ports), not text to edit
         if (s.protocol != "hysteria2") st.optJSONObject("finalmask")?.let { f.finalMask = it.toString() }
+        // the Pro view's: TCP's header, Hysteria2's hop interval and bandwidth, a Shadowsocks plugin
+        val tcpH = (st.optJSONObject("tcpSettings") ?: st.optJSONObject("rawSettings"))?.optJSONObject("header")?.optString("type")
+        f.tcpHeader = if (tcpH == "http") "http" else "none"
+        if (s.protocol == "hysteria2") {
+            val h = LinkParser.hy2Values(ob)
+            f.hy2Hop = h["hopInterval"] ?: ""; f.hy2Up = h["up"] ?: ""; f.hy2Down = h["down"] ?: ""
+        }
+        if (s.protocol == "shadowsocks") f.plugin = LinkParser.ssPluginOf(st)
+        // every other field of the table, where it applies
+        val ctx = ServerFields.contextOf(s)
+        for (fld in ServerFields.PATH_FIELDS) {
+            if (fld.id in OWN || !ServerFields.applies(fld, ctx)) continue
+            f.pro[fld.id] = ServerFields.toForm(fld, ServerFields.get(s, fld))
+        }
         return f
     }
 
@@ -135,7 +159,10 @@ object ServerEditor {
                         if (u.isEmpty() && p.isEmpty()) srv.remove("users")
                         else srv.put("users", JSONArray().put(JSONObject().put("user", u).put("pass", p)))
                     }
-                    if (s.protocol == "trojan") patchStream(ob, was, f)
+                    if (s.protocol == "shadowsocks" && f.plugin != was.plugin) {
+                        // a SIP003 plugin typed in becomes the stream it stands for (LinkParser.ssStream)
+                        ob.put("streamSettings", LinkParser.ssStream(mapOf("plugin" to f.plugin.trim()), addr))
+                    } else if (s.protocol == "trojan" || s.protocol == "shadowsocks") patchStream(ob, was, f)
                     true
                 }
             }
@@ -144,13 +171,33 @@ object ServerEditor {
             else -> true
         }
         val out = if (patched) ob else rebuilt(s, f, addr, port)
+        if (patched) patchStreamExtras(out, was, f)
+        // every other field of the table (ServerFields): where the form changed one,
+        // written; one that no longer applies to the server's transport / security, dropped
+        val ctxNow = ServerFields.contextOf(s.protocol, out)
+        for (fld in ServerFields.PATH_FIELDS) {
+            val p = fld.path ?: continue
+            if (fld.id in OWN || p.startsWith("@")) continue
+            if (!ServerFields.applies(fld, ctxNow)) {
+                if (ServerFields.getPath(out, p) != null) ServerFields.setPath(out, p, null)
+                continue
+            }
+            val now = f.pro[fld.id] ?: continue
+            if (now == (was.pro[fld.id] ?: "")) continue
+            ServerFields.setPath(out, p, ServerFields.fromForm(fld, now))
+        }
+        // the record's own (Mux for this server): the form's where it holds one
+        val muxNow = f.pro["mux"]?.let { v: String -> if (v == "on" || v == "off") v else "" } ?: s.mux
+        val muxC = recordNumber(f, "muxConcurrency", s.muxConcurrency)
+        val xudpC = recordNumber(f, "xudpConcurrency", s.xudpConcurrency)
         // TLS fragmentation / noise: an emptied field clears it.
         if (!patched || f.fragment != was.fragment) { if (f.fragment.isBlank()) out.remove("_fragment") else out.put("_fragment", f.fragment.trim()) }
         if (!patched || f.noise != was.noise) { if (f.noise.isBlank()) out.remove("_noise") else out.put("_noise", f.noise.trim()) }
         val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" }
         val (dns, dnsDomains) = if (s.protocol == "wireguard") LinkParser.splitDnsField(f.wgDns) else (s.dns to s.dnsDomains)
-        val saved = s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = out, engine = engine, dns = dns, dnsDomains = dnsDomains)
-        return saved.copy(edited = record(s, was, read(saved)))
+        val saved = s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = out, engine = engine, dns = dns, dnsDomains = dnsDomains,
+            mux = muxNow, muxConcurrency = muxC, xudpConcurrency = xudpC)
+        return saved.copy(edited = record(s, was, read(saved), f))
     }
 
     /**
@@ -161,8 +208,10 @@ object ServerEditor {
      * holds exactly what the server's own link gives: saving the link's value
      * releases the field, and it follows the panel again.
      */
-    private fun record(s: ServerConfig, before: Fields, after: Fields): List<String> {
-        val changed = RECORDABLE.filter { valueOf(it, before) != valueOf(it, after) }
+    private fun record(s: ServerConfig, before: Fields, after: Fields, sent: Fields): List<String> {
+        // changed on the record AND sent differently: a value a save derived from another
+        // (a cleared hopping's interval) is not the user's (parser.js applyServerEdits)
+        val changed = RECORDABLE.filter { valueOf(it, before) != valueOf(it, after) && valueOf(it, sent) != valueOf(it, before) }
         val linked = SubRefresh.linkedForm(s)?.let { read(it) }
         return (s.edited + changed).distinct().filter { linked == null || valueOf(it, after) != valueOf(it, linked) }
     }
@@ -181,11 +230,17 @@ object ServerEditor {
         "wgReserved" to Fields::wgReserved, "wgAllowed" to Fields::wgAllowed, "wgDns" to Fields::wgDns,
         "cipherSuites" to Fields::cipherSuites, "finalMask" to Fields::finalMask,
         "ech" to Fields::ech, "pcs" to Fields::pcs, "vcn" to Fields::vcn, "pqv" to Fields::pqv,
-        "hy2Obfs" to Fields::hy2Obfs, "hy2Ports" to Fields::hy2Ports
+        "hy2Obfs" to Fields::hy2Obfs, "hy2Ports" to Fields::hy2Ports,
+        // the Pro view's
+        "tcpHeader" to Fields::tcpHeader, "hy2Hop" to Fields::hy2Hop, "hy2Up" to Fields::hy2Up, "hy2Down" to Fields::hy2Down,
+        "plugin" to Fields::plugin, "xmode" to Fields::xmode, "seed" to Fields::seed, "headerType" to Fields::headerType, "spx" to Fields::spx
     )
 
+    /** The table's path fields this record keeps under their own id (ServerFields; the SS method is [Fields.method]). */
+    internal val PATH_IDS: List<String> by lazy { ServerFields.PATH_FIELDS.map { x: SfField -> x.id }.filter { id: String -> id !in OWN } }
+
     /** Everything [ServerConfig.edited] can name: the text fields, then the switch, the fragment, the noise, the core. */
-    private val RECORDABLE: List<String> = EDITABLE.map { it.first } + listOf("allowInsecure", "fragment", "noise", "engine")
+    private val RECORDABLE: List<String> by lazy { EDITABLE.map { it.first } + listOf("allowInsecure", "fragment", "noise", "engine") + PATH_IDS }
 
     /** One recordable field of [f], in the form a save writes it (so two spellings of one value compare equal). */
     private fun valueOf(name: String, f: Fields): String = when (name) {
@@ -193,7 +248,7 @@ object ServerEditor {
         "fragment" -> f.fragment.trim()
         "noise" -> noiseKey(f.noise)
         "engine" -> f.engine.trim().takeIf { it.isNotBlank() && it != "xray" } ?: ""
-        else -> EDITABLE.firstOrNull { it.first == name }?.second?.get(f)?.trim() ?: ""
+        else -> EDITABLE.firstOrNull { it.first == name }?.second?.get(f)?.trim() ?: (f.pro[name]?.trim() ?: "")
     }
 
     /**
@@ -291,6 +346,202 @@ object ServerEditor {
         }
     }
 
+    /**
+     * The stream fields the Pro view adds (parser.js rebuildStream): TCP's HTTP
+     * header on or off, gRPC's gun / multi and XHTTP's mode, mKCP's header and
+     * seed, REALITY's spiderX — where the form changed them.
+     */
+    private fun patchStreamExtras(ob: JSONObject, was: Fields, f: Fields) {
+        val st = ob.optJSONObject("streamSettings") ?: return
+        val net = normNet(st.optString("network", "tcp"))
+        if ((net == "tcp" || net == "raw") && f.tcpHeader != was.tcpHeader) {
+            if (f.tcpHeader == "http") {
+                val headers = JSONObject()
+                if (list(f.host).isNotEmpty()) headers.put("Host", JSONArray(list(f.host)))
+                child(st, "tcpSettings").put("header", JSONObject().put("type", "http")
+                    .put("request", JSONObject().put("path", JSONArray(list(f.path).ifEmpty { listOf("/") })).put("headers", headers)))
+            } else {
+                for (k in listOf("tcpSettings", "rawSettings")) {
+                    val t = st.optJSONObject(k) ?: continue
+                    t.remove("header")
+                    if (t.length() == 0) st.remove(k)
+                }
+            }
+        }
+        if (f.xmode != was.xmode) {
+            if (net == "grpc") child(st, "grpcSettings").put("multiMode", f.xmode == "multi")
+            if (net == "xhttp") child(st, "xhttpSettings").put("mode", f.xmode.trim().ifEmpty { "auto" })
+        }
+        if (net == "kcp") {
+            if (f.seed != was.seed) { val k = child(st, "kcpSettings"); if (f.seed.isBlank()) k.remove("seed") else k.put("seed", f.seed.trim()) }
+            if (f.headerType != was.headerType) child(child(st, "kcpSettings"), "header").put("type", f.headerType.trim().ifEmpty { "none" })
+        }
+        if (f.spx != was.spx && st.optString("security") == "reality") child(st, "realitySettings").put("spiderX", f.spx.trim())
+    }
+
+    /** A record number of the form ([Fields.pro]): its value when the form holds the key ("" clears it), else [was]. */
+    private fun recordNumber(f: Fields, key: String, was: Int?): Int? =
+        if (f.pro.containsKey(key)) f.pro[key]?.trim()?.toIntOrNull()?.takeIf { n: Int -> n > 0 } else was
+
+    /**
+     * A server made from the editor's fields alone — the "new server" sheet; the
+     * desktop's parser.createServer: the protocol's bare outbound, then [apply]
+     * with everything the form holds, and its own share link as `raw`. Throws
+     * IllegalArgumentException saying what is missing.
+     */
+    fun create(protocol: String, f: Fields): ServerConfig {
+        require(protocol in ServerFields.PROTOCOLS) { "Unknown protocol: $protocol" }
+        val addr = f.address.trim()
+        val port = f.port.trim().toIntOrNull() ?: 0
+        require(addr.isNotEmpty()) { "The server address is empty" }
+        require(port in 1..65535) { "The port must be between 1 and 65535" }
+        val needs: List<Pair<String, String>> = when (protocol) {
+            "vless", "vmess" -> listOf("uuid" to f.cred)
+            "trojan", "shadowsocks", "hysteria2" -> listOf("password" to f.cred)
+            "wireguard" -> listOf("privateKey" to f.cred, "publicKey" to f.wgPub)
+            else -> emptyList()
+        }
+        for ((k, v) in needs) require(v.isNotBlank()) { "$k is empty" }
+        val ob: JSONObject = when (protocol) {
+            "vless" -> JSONObject().put("protocol", "vless")
+                .put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().put("address", addr).put("port", port)
+                    .put("users", JSONArray().put(JSONObject().put("id", f.cred.trim()).put("encryption", "none").put("flow", ""))))))
+                .put("streamSettings", JSONObject().put("network", "tcp").put("security", "none"))
+            "vmess" -> JSONObject().put("protocol", "vmess")
+                .put("settings", JSONObject().put("vnext", JSONArray().put(JSONObject().put("address", addr).put("port", port)
+                    .put("users", JSONArray().put(JSONObject().put("id", f.cred.trim()).put("alterId", 0).put("security", "auto"))))))
+                .put("streamSettings", JSONObject().put("network", "tcp").put("security", "none"))
+            "trojan" -> JSONObject().put("protocol", "trojan")
+                .put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().put("address", addr).put("port", port).put("password", f.cred.trim()))))
+                .put("streamSettings", JSONObject().put("network", "tcp").put("security", "none"))
+            "shadowsocks" -> JSONObject().put("protocol", "shadowsocks")
+                .put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().put("address", addr).put("port", port)
+                    .put("method", f.method.trim().ifEmpty { ServerFields.SS_METHODS[0] }).put("password", f.cred.trim()).put("uot", true))))
+                .put("streamSettings", JSONObject().put("network", "tcp"))
+            "hysteria2" -> LinkParser.buildHysteria2Outbound(mapOf("address" to addr, "port" to port.toString(), "auth" to f.cred.trim(), "sni" to f.sni.trim()))
+            "wireguard" -> LinkParser.buildWireguardOutbound(f.cred.trim(), f.wgPub.trim(), "$addr:$port", f.wgAddr.trim(), f.wgPsk.trim(), f.wgMtu, f.wgReserved, f.wgAllowed)
+            else -> LinkParser.proxyOutbound(protocol, addr, port, f.proxyUser.trim(), f.proxyPass.trim())
+        }
+        val (dns, dnsDomains) = if (protocol == "wireguard") LinkParser.splitDnsField(f.wgDns) else (emptyList<String>() to emptyList<String>())
+        val bare = ServerConfig(id = newId("s"), name = f.name.trim().ifEmpty { "$protocol-$addr" }, protocol = protocol,
+            address = addr, port = port, outbound = ob, dns = dns, dnsDomains = dnsDomains)
+        val made = apply(bare, f).copy(edited = emptyList())
+        return made.copy(raw = LinkParser.buildShareLink(made))
+    }
+
+    /**
+     * The Pro view's draft of [f]: every field id of the table → the form's text
+     * ("true" / "" for a switch). [fromDraft] is its inverse.
+     */
+    fun toDraft(protocol: String, f: Fields): MutableMap<String, String> {
+        val d = HashMap<String, String>(f.pro)
+        d["name"] = f.name; d["address"] = f.address; d["port"] = f.port
+        when (protocol) {
+            "vless", "vmess" -> d["uuid"] = f.cred
+            "trojan", "shadowsocks", "hysteria2" -> d["password"] = f.cred
+            "wireguard" -> d["privateKey"] = f.cred
+            "socks", "http" -> { d["username"] = f.proxyUser; d["password"] = f.proxyPass }
+            else -> {}
+        }
+        val net = normNet(f.network)
+        d["network"] = if (net == "raw") "tcp" else net
+        d["security"] = if (protocol == "hysteria2") "tls" else f.security
+        d["sni"] = f.sni; d["host"] = f.host; d["path"] = f.path; d["fp"] = f.fp; d["pbk"] = f.pbk; d["sid"] = f.sid; d["alpn"] = f.alpn
+        d["allowInsecure"] = if (f.allowInsecure) "true" else ""
+        d["method"] = f.method
+        d["publicKey"] = f.wgPub; d["localAddress"] = f.wgAddr; d["presharedKey"] = f.wgPsk; d["mtu"] = f.wgMtu
+        d["reserved"] = f.wgReserved; d["allowedIPs"] = f.wgAllowed; d["dns"] = f.wgDns
+        d["fragment"] = f.fragment; d["noise"] = f.noise; d["cipherSuites"] = f.cipherSuites; d["finalMask"] = f.finalMask
+        d["ech"] = f.ech; d["pcs"] = f.pcs; d["vcn"] = f.vcn; d["pqv"] = f.pqv; d["engine"] = f.engine.ifBlank { "xray" }
+        d["obfsPassword"] = f.hy2Obfs; d["mport"] = f.hy2Ports; d["hopInterval"] = f.hy2Hop; d["up"] = f.hy2Up; d["down"] = f.hy2Down; d["plugin"] = f.plugin
+        d["headerType"] = f.tcpHeader; d["kcpHeader"] = f.headerType.ifBlank { "none" }; d["kcpSeed"] = f.seed; d["spx"] = f.spx
+        d["grpcMode"] = if (f.xmode == "multi") "multi" else "gun"
+        d["xhttpMode"] = if (f.xmode.isBlank() || f.xmode == "multi") "auto" else f.xmode
+        return d
+    }
+
+    /** [base] with the Pro view's draft [d] written into it ([toDraft]'s inverse). */
+    fun fromDraft(protocol: String, d: Map<String, String>, base: Fields): Fields {
+        val f = base.copy(pro = HashMap(base.pro))
+        fun v(k: String, was: String): String = d[k] ?: was
+        f.name = v("name", f.name); f.address = v("address", f.address); f.port = v("port", f.port)
+        when (protocol) {
+            "vless", "vmess" -> f.cred = v("uuid", f.cred)
+            "trojan", "shadowsocks", "hysteria2" -> f.cred = v("password", f.cred)
+            "wireguard" -> f.cred = v("privateKey", f.cred)
+            "socks", "http" -> { f.proxyUser = v("username", f.proxyUser); f.proxyPass = v("password", f.proxyPass) }
+            else -> {}
+        }
+        // the same transport under another name (raw for tcp) is no change
+        val net = d["network"]
+        if (net != null && normNet(net) != normNet(f.network).let { n: String -> if (n == "raw") "tcp" else n }) f.network = net
+        if (protocol != "hysteria2") f.security = v("security", f.security)
+        f.sni = v("sni", f.sni); f.host = v("host", f.host); f.path = v("path", f.path); f.fp = v("fp", f.fp)
+        f.pbk = v("pbk", f.pbk); f.sid = v("sid", f.sid); f.alpn = v("alpn", f.alpn)
+        f.allowInsecure = (d["allowInsecure"] ?: (if (f.allowInsecure) "true" else "")) == "true"
+        f.method = v("method", f.method)
+        f.wgPub = v("publicKey", f.wgPub); f.wgAddr = v("localAddress", f.wgAddr); f.wgPsk = v("presharedKey", f.wgPsk); f.wgMtu = v("mtu", f.wgMtu)
+        f.wgReserved = v("reserved", f.wgReserved); f.wgAllowed = v("allowedIPs", f.wgAllowed); f.wgDns = v("dns", f.wgDns)
+        f.fragment = v("fragment", f.fragment); f.noise = v("noise", f.noise); f.cipherSuites = v("cipherSuites", f.cipherSuites); f.finalMask = v("finalMask", f.finalMask)
+        f.ech = v("ech", f.ech); f.pcs = v("pcs", f.pcs); f.vcn = v("vcn", f.vcn); f.pqv = v("pqv", f.pqv); f.engine = v("engine", f.engine)
+        f.hy2Obfs = v("obfsPassword", f.hy2Obfs); f.hy2Ports = v("mport", f.hy2Ports); f.hy2Hop = v("hopInterval", f.hy2Hop)
+        f.hy2Up = v("up", f.hy2Up); f.hy2Down = v("down", f.hy2Down); f.plugin = v("plugin", f.plugin)
+        f.tcpHeader = v("headerType", f.tcpHeader); f.headerType = v("kcpHeader", f.headerType); f.seed = v("kcpSeed", f.seed); f.spx = v("spx", f.spx)
+        when (normNet(f.network)) {
+            "grpc" -> f.xmode = if (d["grpcMode"] == "multi") "multi" else if (d.containsKey("grpcMode")) "" else f.xmode
+            "xhttp" -> f.xmode = d["xhttpMode"]?.let { m: String -> if (m == "auto" && base.xmode.isBlank()) "" else m } ?: f.xmode
+            else -> {}
+        }
+        for (id in PATH_IDS) d[id]?.let { x: String -> f.pro[id] = x }
+        return f
+    }
+
+    /** A new server's draft: the protocol's defaults, and the name / address the form already had. */
+    fun newDraft(protocol: String, keep: Map<String, String>? = null): MutableMap<String, String> {
+        val port = when (protocol) { "wireguard" -> "51820"; "socks" -> "1080"; "http" -> "8080"; else -> "443" }
+        val d = toDraft(protocol, Fields(port = port, method = ServerFields.SS_METHODS[0]))
+        d["encryption"] = "none"; d["flow"] = ""; d["vmessSecurity"] = "auto"; d["alterId"] = "0"
+        d["uot"] = if (protocol == "shadowsocks") "true" else ""
+        d["engine"] = "xray"
+        if (keep != null) for (k in listOf("name", "address")) { val v = keep[k]; if (!v.isNullOrBlank()) d[k] = v }
+        return d
+    }
+
+    /** What [problem] found, said: "Field: why", or "“Field” is empty". */
+    fun problemText(protocol: String, p: Triple<String, String, String>): String {
+        val label = ServerFields.str("sf.${p.first}.$protocol").takeIf { x: String -> !x.startsWith("sf.") } ?: ServerFields.str("sf.${p.first}")
+        return if (p.third == "edit.err.required") ServerFields.str(p.third).replace("{field}", label)
+        else ServerFields.str("edit.err.in").replace("{field}", label).replace("{why}", ServerFields.str(p.third))
+    }
+
+    /** Is this field part of the form for draft [d]? The table says, and TCP's Host and path only with its HTTP header. */
+    fun shown(protocol: String, d: Map<String, String>, fld: SfField): Boolean {
+        val ctx = ServerFields.Ctx(protocol, d["network"] ?: "tcp", if (protocol == "hysteria2") "tls" else (d["security"] ?: "none"))
+        if (!ServerFields.applies(fld, ctx)) return false
+        if ((fld.id == "host" || fld.id == "path") && ctx.network == "tcp") return d["headerType"] == "http"
+        return true
+    }
+
+    /** What a save of draft [d] cannot send: (field id, tab, i18n key), or null (the desktop's draftProblem). */
+    fun problem(protocol: String, d: Map<String, String>, isNew: Boolean, encryptionOn: Boolean): Triple<String, String, String>? {
+        for (fld in ServerFields.FIELDS) {
+            if (fld.kind == "protocol" || !shown(protocol, d, fld)) continue
+            val why = ServerFields.validate(fld, d[fld.id] ?: "")
+            if (why != null) return Triple(fld.id, fld.tab, why)
+        }
+        if (protocol == "vless" && encryptionOn && (d["encryption"] ?: "").isBlank()) return Triple("encryption", "protocol", "edit.err.encKey")
+        if (isNew) {
+            val need = listOf("address", "port") + when (protocol) {
+                "vless", "vmess" -> listOf("uuid")
+                "trojan", "shadowsocks", "hysteria2" -> listOf("password")
+                "wireguard" -> listOf("privateKey", "publicKey")
+                else -> emptyList()
+            }
+            for (id in need) if ((d[id] ?: "").isBlank()) return Triple(id, if (id == "address" || id == "port") "basics" else "protocol", "edit.err.required")
+        }
+        return null
+    }
+
     /** ECH, the pin and the verify-name the sheet changed, in the core's own fields (an emptied one clears). */
     private fun patchTlsExtras(tls: JSONObject, was: Fields, f: Fields) {
         if (f.ech != was.ech) { val v = f.ech.trim(); if (v.isEmpty()) tls.remove("echConfigList") else tls.put("echConfigList", v) }
@@ -305,7 +556,8 @@ object ServerEditor {
      */
     private fun patchHysteria2(ob: JSONObject, was: Fields, f: Fields, addr: String, port: Int, moved: Boolean) {
         val touched = moved || f.cred != was.cred || f.sni != was.sni || f.allowInsecure != was.allowInsecure ||
-            f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn || f.hy2Obfs != was.hy2Obfs || f.hy2Ports != was.hy2Ports
+            f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn || f.hy2Obfs != was.hy2Obfs || f.hy2Ports != was.hy2Ports ||
+            f.hy2Hop != was.hy2Hop || f.hy2Up != was.hy2Up || f.hy2Down != was.hy2Down
         if (!touched) return
         val h = LinkParser.hy2Values(ob)
         h["address"] = addr; h["port"] = port.toString()
@@ -317,6 +569,9 @@ object ServerEditor {
         if (f.vcn != was.vcn) h["vcn"] = f.vcn.trim()
         if (f.hy2Obfs != was.hy2Obfs) h["obfs-password"] = f.hy2Obfs.trim()
         if (f.hy2Ports != was.hy2Ports) h["mport"] = f.hy2Ports.trim()
+        if (f.hy2Hop != was.hy2Hop) h["hopInterval"] = f.hy2Hop.trim()
+        if (f.hy2Up != was.hy2Up) h["up"] = f.hy2Up.trim()
+        if (f.hy2Down != was.hy2Down) h["down"] = f.hy2Down.trim()
         h["obfs"] = ""
         val rebuilt = LinkParser.buildHysteria2Outbound(h)
         val st = ob.optJSONObject("streamSettings") ?: JSONObject().also { ob.put("streamSettings", it) }
@@ -328,7 +583,15 @@ object ServerEditor {
         if (keep.length() > 0 || (qpWas != null && qpWas.length() > 0)) {
             val fm = rs.optJSONObject("finalmask") ?: JSONObject().also { rs.put("finalmask", it) }
             if (keep.length() > 0) { val u = fm.optJSONArray("udp"); if (u != null) for (i in 0 until u.length()) keep.put(u.get(i)); fm.put("udp", keep) }
-            if (qpWas != null) { val merged = JSONObject(qpWas.toString()); fm.optJSONObject("quicParams")?.let { q -> q.keys().forEach { k -> merged.put(k, q.get(k)) } }; fm.put("quicParams", merged) }
+            if (qpWas != null) {
+                val merged = JSONObject(qpWas.toString())
+                // the bandwidth is the form's now: what it cleared stays cleared
+                if (f.hy2Up != was.hy2Up) merged.remove("brutalUp")
+                if (f.hy2Down != was.hy2Down) merged.remove("brutalDown")
+                fm.optJSONObject("quicParams")?.let { q -> q.keys().forEach { k -> merged.put(k, q.get(k)) } }
+                if (merged.length() > 0) fm.put("quicParams", merged) else fm.remove("quicParams")
+                if (fm.length() == 0) rs.remove("finalmask")
+            }
         }
         ob.put("settings", rebuilt.getJSONObject("settings"))
         for (k in listOf("network", "security", "tlsSettings", "hysteriaSettings")) st.put(k, rs.get(k))

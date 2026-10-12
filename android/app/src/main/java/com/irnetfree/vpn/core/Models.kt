@@ -47,7 +47,13 @@ data class ServerConfig(
     val json: JSONObject? = null,
     val extraOutbounds: List<JSONObject> = emptyList(),
     val jsonMode: String = JsonImport.MODE_FULL,
-    val jsonInfo: JsonInfo? = null
+    val jsonInfo: JsonInfo? = null,
+    // Mux for this server (the editor's Advanced tab, the desktop's `mux`):
+    // "" the app's setting, "on" muxed untested (when eligible), "off" never;
+    // its own concurrency numbers over Mux.MUX's. Never in a link.
+    val mux: String = "",
+    val muxConcurrency: Int? = null,
+    val xudpConcurrency: Int? = null
 ) {
     /** Imported from an Xray JSON config, with the config at hand. */
     val isJson: Boolean get() = source == JsonImport.SOURCE && json != null
@@ -61,6 +67,9 @@ data class ServerConfig(
         if (dnsDomains.isNotEmpty()) put("dnsDomains", JSONArray(dnsDomains))
         if (certPin.isNotEmpty()) { put("certPin", certPin); put("certPinAt", certPinAt); put("certPinCheckedAt", certPinCheckedAt) }
         if (edited.isNotEmpty()) put("edited", JSONArray(edited))
+        if (mux.isNotEmpty()) put("mux", mux)
+        muxConcurrency?.let { n: Int -> put("muxConcurrency", n) }
+        xudpConcurrency?.let { n: Int -> put("xudpConcurrency", n) }
         if (source.isNotEmpty()) put("source", source)
         val cfg = json
         if (cfg != null) {
@@ -103,7 +112,10 @@ data class ServerConfig(
                 extraOutbounds = objList(o.optJSONArray("extraOutbounds")),
                 jsonMode = JsonImport.modeOf(o.optString("jsonMode", JsonImport.MODE_FULL)),
                 // derived: re-read from the config when an older record lacks it
-                jsonInfo = JsonInfo.fromJson(o.optJSONObject("jsonInfo")) ?: o.optJSONObject("json")?.let { c: JSONObject -> JsonImport.jsonInfo(c) }
+                jsonInfo = JsonInfo.fromJson(o.optJSONObject("jsonInfo")) ?: o.optJSONObject("json")?.let { c: JSONObject -> JsonImport.jsonInfo(c) },
+                mux = o.optString("mux", "").let { v: String -> if (v == "on" || v == "off") v else "" },
+                muxConcurrency = if (o.has("muxConcurrency")) o.optInt("muxConcurrency").takeIf { n: Int -> n > 0 } else null,
+                xudpConcurrency = if (o.has("xudpConcurrency")) o.optInt("xudpConcurrency").takeIf { n: Int -> n > 0 } else null
             )
         }
 

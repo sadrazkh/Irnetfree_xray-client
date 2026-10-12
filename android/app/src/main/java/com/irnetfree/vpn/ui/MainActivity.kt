@@ -36,6 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -43,6 +44,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -1573,7 +1575,8 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     listOf(
                         "import" to "Link or subscription",
                         "wg" to "WireGuard",
-                        "proxy" to "SOCKS / HTTP"
+                        "proxy" to "SOCKS / HTTP",
+                        "manual" to "Manual (any protocol)"
                     ).forEach { (key, label) ->
                         DropdownMenuItem(
                             text = { Text(label, color = TXT, fontSize = 14.sp) },
@@ -1901,6 +1904,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         }
         "wg" -> WgSheet(store, { setSheet(null) }) { setSheet(null); bump() }
         "proxy" -> ProxySheet(store, { setSheet(null) }) { setSheet(null); bump() }
+        "manual" -> NewServerSheet(store, { setSheet(null) }) { setSheet(null); bump() }
         else -> {}
     }
     // the import itself moves AppWork.storeRev, which the screens observe: no rebuild needed
@@ -2326,6 +2330,39 @@ private fun protoColor(proto: String): Color = when (proto) {
     var engine by remember { mutableStateOf(f.engine) }
     val isStd = server.protocol == "vless" || server.protocol == "vmess" || server.protocol == "trojan"
     val isHy2 = server.protocol == "hysteria2"
+    // the full editor (ServerFields): the table's fields this sheet has no input of
+    // its own for (flow, Encryption, …), and the Pro view over one draft
+    val ctx = LocalContext.current
+    val pro = remember(server.id) { mutableStateMapOf<String, String>().apply { putAll(f.pro) } }
+    val encOn = remember(server.id) { mutableStateOf((f.pro["encryption"] ?: "none").let { e: String -> e.isNotBlank() && e != "none" }) }
+    var proView by remember { mutableStateOf(EditView.pro) }
+    val draft = remember(server.id) { mutableStateMapOf<String, String>() }
+    val tab = remember(server.id) { mutableStateOf("protocol") }
+    /** The Simple view's inputs, as a save sends them. */
+    fun simpleFields(): ServerEditor.Fields = ServerEditor.Fields(
+        name = name, address = address, port = port, cred = cred, network = network, security = security,
+        sni = sni, host = host, path = path, fp = fp, pbk = pbk, sid = sid, allowInsecure = allowInsecure, alpn = f.alpn,
+        method = method, proxyUser = pUser, proxyPass = pPass,
+        wgPub = wgPub, wgAddr = wgAddr, wgPsk = wgPsk, wgMtu = wgMtu, wgReserved = wgReserved, wgAllowed = wgAllowed, wgDns = wgDns,
+        fragment = fragment, noise = effectiveNoise, cipherSuites = cipherSuites, finalMask = finalMask,
+        ech = ech, pcs = pcs, vcn = vcn, pqv = pqv, hy2Obfs = hy2Obfs, hy2Ports = hy2Ports,
+        engine = engine, spx = f.spx, xmode = f.xmode, seed = f.seed, headerType = f.headerType, xhttpExtra = f.xhttpExtra,
+        tcpHeader = f.tcpHeader, hy2Hop = f.hy2Hop, hy2Up = f.hy2Up, hy2Down = f.hy2Down, plugin = f.plugin,
+        pro = HashMap(pro))
+    /** The Pro view's draft, back into the Simple view's inputs. */
+    fun loadSimple(nf: ServerEditor.Fields) {
+        name = nf.name; address = nf.address; port = nf.port; cred = nf.cred; network = nf.network; security = nf.security
+        sni = nf.sni; host = nf.host; path = nf.path; fp = nf.fp; pbk = nf.pbk; sid = nf.sid; allowInsecure = nf.allowInsecure; method = nf.method
+        pUser = nf.proxyUser; pPass = nf.proxyPass; wgPub = nf.wgPub; wgAddr = nf.wgAddr; wgPsk = nf.wgPsk; wgMtu = nf.wgMtu
+        wgReserved = nf.wgReserved; wgAllowed = nf.wgAllowed; wgDns = nf.wgDns; fragment = nf.fragment
+        cipherSuites = nf.cipherSuites; finalMask = nf.finalMask; ech = nf.ech; pcs = nf.pcs; vcn = nf.vcn; pqv = nf.pqv
+        hy2Obfs = nf.hy2Obfs; hy2Ports = nf.hy2Ports; engine = nf.engine
+        noisePreset = when { nf.noise.isBlank() -> "off"; nf.noise.lowercase() in noisePresetKeys -> if (nf.noise.lowercase() == "fakehello") "faketls" else nf.noise.lowercase(); else -> "custom" }
+        noiseCustom = if (noisePreset == "custom") nf.noise else ""
+        pro.clear(); pro.putAll(nf.pro)
+        f.spx = nf.spx; f.xmode = nf.xmode; f.seed = nf.seed; f.headerType = nf.headerType
+        f.tcpHeader = nf.tcpHeader; f.hy2Hop = nf.hy2Hop; f.hy2Up = nf.hy2Up; f.hy2Down = nf.hy2Down; f.plugin = nf.plugin
+    }
 
     // Open FULLY expanded: a partially-expanded sheet swallows the drag as a sheet
     // gesture instead of scrolling the content, which made everything below the
@@ -2334,15 +2371,40 @@ private fun protoColor(proto: String): Color = when (proto) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
-            Text("Edit · ${badge(server.protocol)}", color = TXT, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Edit · ${badge(server.protocol)}", color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                ViewSwitch(proView) { toPro: Boolean ->
+                    if (toPro && !proView) { draft.clear(); draft.putAll(ServerEditor.toDraft(server.protocol, simpleFields())) }
+                    if (!toPro && proView) loadSimple(ServerEditor.fromDraft(server.protocol, draft, simpleFields()))
+                    proView = toPro
+                    EditView.pro = toPro
+                }
+            }
+            if (proView) ProFields(server.protocol, draft, false, {}, tab, encOn) else {
             Fld("Name", name) { name = it }; Fld("Address — real server/IP (connection goes here)", address) { address = it }; Fld("Port", port) { port = it }
             when (server.protocol) {
                 "vless", "vmess" -> Fld("UUID", cred) { cred = it }
                 "trojan" -> Fld("Password", cred) { cred = it }
-                "shadowsocks" -> { Fld("Password", cred) { cred = it }; Fld("Method", method) { method = it } }
+                "shadowsocks" -> {
+                    Fld("Password", cred) { cred = it }
+                    val methods = ServerFields.SS_METHODS.map { m: String -> m to "Method: $m" } + (if (method.isNotBlank() && method !in ServerFields.SS_METHODS) listOf(method to "Method: $method") else emptyList())
+                    DropPick("Method", methods, method) { m: String -> method = m }
+                }
                 "socks", "http" -> { Fld("Username (optional)", pUser) { pUser = it }; Fld("Password (optional)", pPass) { pPass = it } }
                 "wireguard" -> Fld("Private Key", cred) { cred = it }
                 "hysteria2" -> Fld("Password (auth)", cred) { cred = it }
+            }
+            // what the sheet lacked (the full editor's table): VLESS flow and Encryption, the VMess cipher
+            when (server.protocol) {
+                "vless" -> {
+                    DropPick("Flow", listOf("" to "Flow: — none —", "xtls-rprx-vision" to "Flow: xtls-rprx-vision", "xtls-rprx-vision-udp443" to "Flow: xtls-rprx-vision-udp443"), pro["flow"] ?: "") { x: String -> pro["flow"] = x }
+                    EncryptionField(pro["encryption"] ?: "none", encOn) { x: String -> pro["encryption"] = x }
+                }
+                "vmess" -> {
+                    DropPick("Cipher", listOf("auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero").map { c: String -> c to "Cipher: $c" }, pro["vmessSecurity"] ?: "auto") { x: String -> pro["vmessSecurity"] = x }
+                    Fld("Alter ID (0 = VMess AEAD)", pro["alterId"] ?: "0") { x: String -> pro["alterId"] = x }
+                }
+                else -> {}
             }
             if (isHy2) {
                 Text("🛡  TLS (over QUIC)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
@@ -2425,18 +2487,203 @@ private fun protoColor(proto: String): Color = when (proto) {
                 Fld("Noise spec (type:packet:delay; …)", noiseCustom) { noiseCustom = it }
                 Text("Decoy packets before the real handshake. type = rand/str/base64/hex.", color = MUTED, fontSize = 11.sp)
             }
+            }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
-                val nf = ServerEditor.Fields(
-                    name = name, address = address, port = port, cred = cred, network = network, security = security,
-                    sni = sni, host = host, path = path, fp = fp, pbk = pbk, sid = sid, allowInsecure = allowInsecure, alpn = f.alpn,
-                    method = method, proxyUser = pUser, proxyPass = pPass,
-                    wgPub = wgPub, wgAddr = wgAddr, wgPsk = wgPsk, wgMtu = wgMtu, wgReserved = wgReserved, wgAllowed = wgAllowed, wgDns = wgDns,
-                    fragment = fragment, noise = effectiveNoise, cipherSuites = cipherSuites, finalMask = finalMask,
-                    ech = ech, pcs = pcs, vcn = vcn, pqv = pqv, hy2Obfs = hy2Obfs, hy2Ports = hy2Ports,
-                    engine = engine, spx = f.spx, xmode = f.xmode, seed = f.seed, headerType = f.headerType, xhttpExtra = f.xhttpExtra)
-                onSave(ServerEditor.apply(server, nf))
+                // the whole draft from whichever view is open; what it cannot send is said, its tab shown
+                val nf = if (proView) ServerEditor.fromDraft(server.protocol, draft, simpleFields()) else simpleFields()
+                val p = ServerEditor.problem(server.protocol, if (proView) HashMap<String, String>(draft) else ServerEditor.toDraft(server.protocol, nf), false, encOn.value)
+                if (p != null) {
+                    Toast.makeText(ctx, ServerEditor.problemText(server.protocol, p), Toast.LENGTH_LONG).show()
+                    if (proView) tab.value = p.second
+                } else {
+                    try { onSave(ServerEditor.apply(server, nf)) }
+                    catch (e: Exception) { Toast.makeText(ctx, e.message ?: "Could not save", Toast.LENGTH_LONG).show() }
+                }
             }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
+        }
+    }
+}
+
+/* ---------- the full server editor: the Pro view and a server made by hand (ServerFields) ---------- */
+
+/** The editor's view, remembered while the app runs: the sheet opens in the one used last. */
+private object EditView { var pro: Boolean = false }
+
+/** A field's label: by protocol or transport where it reads differently, its key, "this device only". */
+private fun proLabel(protocol: String, d: Map<String, String>, fld: SfField): String {
+    val net = d["network"] ?: "tcp"
+    val own = listOf("sf.${fld.id}.$protocol", "sf.${fld.id}.$net", "sf.${fld.id}").map { k: String -> ServerFields.str(k) }.firstOrNull { v: String -> !v.startsWith("sf.") } ?: fld.id
+    return if (fld.local) "$own · ${fld.key} · ${ServerFields.str("edit.local")}" else "$own · ${fld.key}"
+}
+
+/** An option's label: its own string where it has one (the empty one, Mux, the core), else the value. */
+private fun proOption(fld: SfField, o: String): String {
+    if (fld.optionLabels.isEmpty() || (fld.optionLabels != "all" && o.isNotEmpty())) return o
+    val k = "sfo.${fld.id}.${o.ifEmpty { "_" }}"
+    val v = ServerFields.str(k)
+    return if (v == k) o.ifEmpty { "—" } else v
+}
+
+/** Simple | Pro, beside the sheet's title. */
+@Composable private fun ViewSwitch(pro: Boolean, onPick: (Boolean) -> Unit) {
+    Row(Modifier.clip(RoundedCornerShape(8.dp)).border(1.dp, STROKE, RoundedCornerShape(8.dp))) {
+        for (p in listOf(false, true)) {
+            val on = p == pro
+            Text(
+                ServerFields.str(if (p) "edit.view.pro" else "edit.view.simple"),
+                color = if (on) ON_PRIMARY else MUTED, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.background(if (on) PRIMARY else Color.Transparent).clickable { onPick(p) }.padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+    }
+}
+
+/** VLESS Encryption: none, or the panel's value — read back (auth, mode, RTT) or why it is not one. */
+@Composable private fun EncryptionField(value: String, encOn: MutableState<Boolean>, onChange: (String) -> Unit) {
+    Text("${ServerFields.str("sf.encryption")} · encryption", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+    DropPick(
+        ServerFields.str("sf.encryption"),
+        listOf("none" to ServerFields.str("sfo.encMode.none"), "mlkem" to ServerFields.str("sfo.encMode.mlkem")),
+        if (encOn.value) "mlkem" else "none"
+    ) { m: String ->
+        encOn.value = m == "mlkem"
+        onChange(if (m == "mlkem") (if (value == "none") "" else value) else "none")
+    }
+    if (encOn.value) {
+        OutlinedTextField(
+            if (value == "none") "" else value, { x: String -> onChange(x.trim()) },
+            Modifier.fillMaxWidth().padding(vertical = 3.dp), label = { Text(ServerFields.str("sf.encryptionValue")) }, colors = tfColors()
+        )
+        val r = ServerFields.readEncryption(value)
+        if (r != null) {
+            val bad = r.bad
+            if (bad != null) Text("✗ " + ServerFields.str(bad), color = BAD, fontSize = 11.sp)
+            else {
+                val auth = ServerFields.str("edit.enc.auth").replace("{v}", r.auth + if (r.auth == "ML-KEM-768") " — " + ServerFields.str("edit.enc.pq") else "")
+                val mode = ServerFields.str("edit.enc.mode").replace("{v}", r.mode)
+                Text("$auth · $mode · ${if (r.rtt == "0rtt") "0-RTT" else "1-RTT"}", color = PRIMARY, fontSize = 11.sp)
+            }
+        }
+        Text(ServerFields.str("sf.encryption.hint"), color = MUTED, fontSize = 11.sp)
+    }
+}
+
+/** One field of the draft, by its kind; every input writes straight back to [d]. */
+@Composable private fun ProField(protocol: String, fld: SfField, d: SnapshotStateMap<String, String>, encOn: MutableState<Boolean>) {
+    val label = proLabel(protocol, d, fld)
+    val v = d[fld.id] ?: ""
+    when (fld.kind) {
+        "switch" -> SwitchRow(label, v == "true") { on: Boolean -> d[fld.id] = if (on) "true" else "" }
+        "select", "seg" -> {
+            Text(label, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            val opts = fld.options.map { o: String -> o to proOption(fld, o) } + (if (v.isNotEmpty() && v !in fld.options) listOf(v to v) else emptyList())
+            DropPick(label, opts, v) { x: String -> d[fld.id] = x }
+        }
+        "network" -> {
+            Text(label, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            val opts = ServerFields.NETWORKS.map { n: String -> n to ServerFields.str("sfo.network.$n") } + (if (v.isNotEmpty() && v !in ServerFields.NETWORKS) listOf(v to v) else emptyList())
+            DropPick(label, opts, v) { x: String -> d[fld.id] = x }
+        }
+        "security" -> {
+            Text(label, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            DropPick(label, ServerFields.securitiesOf(protocol).map { s: String -> s to ServerFields.str("sfo.security.$s") }, v) { x: String -> d[fld.id] = x }
+        }
+        "encryption" -> EncryptionField(v.ifEmpty { "none" }, encOn) { x: String -> d[fld.id] = x }
+        "uuid" -> {
+            Fld(label, v) { x: String -> d[fld.id] = x }
+            TextButton(onClick = { d[fld.id] = java.util.UUID.randomUUID().toString() }) { Text(ServerFields.str("edit.genUuid"), color = PRIMARY, fontSize = 12.sp) }
+        }
+        else -> Fld(label, v) { x: String -> d[fld.id] = x }
+    }
+    if (fld.hint) Text(ServerFields.str("sf.${fld.id}.hint"), color = MUTED, fontSize = 11.sp)
+}
+
+/**
+ * The Pro view: the five tabs and the open tab's fields, from the table
+ * (ServerFields). [isNew]: a server made by hand — its protocol is picked on
+ * Basics; an edited server keeps the one it has.
+ */
+@Composable private fun ProFields(protocol: String, d: SnapshotStateMap<String, String>, isNew: Boolean, onProtocol: (String) -> Unit, tab: MutableState<String>, encOn: MutableState<Boolean>) {
+    val noTransport = !ServerFields.hasTransport(protocol)
+    val noSecurity = ServerFields.securitiesOf(protocol).isEmpty()
+    // a tab this protocol has none of shows the Protocol tab (never written to the state while composing)
+    val cur = if ((tab.value == "transport" && noTransport) || (tab.value == "security" && noSecurity)) "protocol" else tab.value
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+        for (t in ServerFields.TABS) {
+            val off = (t == "transport" && noTransport) || (t == "security" && noSecurity)
+            val on = t == cur
+            Text(
+                ServerFields.str("edit.tab.$t"),
+                color = when { off -> STROKE; on -> PRIMARY; else -> MUTED }, fontSize = 13.sp,
+                fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.clickable(enabled = !off) { tab.value = t }.padding(horizontal = 10.dp, vertical = 8.dp)
+            )
+        }
+    }
+    HorizontalDivider(color = STROKE)
+    if (cur == "basics") {
+        if (isNew) {
+            Text(ServerFields.str("sf.protocol"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            DropPick(ServerFields.str("sf.protocol"), ServerFields.PROTOCOLS.map { p: String -> p to "${badge(p)} — ${ServerFields.str("sfp.$p")}" }, protocol) { p: String -> onProtocol(p) }
+            Text(ServerFields.str("edit.protoPick"), color = MUTED, fontSize = 11.sp)
+        } else Text(ServerFields.str("edit.protoFixed"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+    }
+    val name = badge(protocol)
+    when {
+        cur == "transport" && noTransport -> Text(ServerFields.str("edit.noTransport").replace("{proto}", name), color = MUTED, fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
+        cur == "security" && noSecurity -> Text(ServerFields.str("edit.noSecurity").replace("{proto}", name), color = MUTED, fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
+        else -> {
+            var group: String? = null
+            for (fld in ServerFields.FIELDS) {
+                if (fld.tab != cur || fld.kind == "protocol" || !ServerEditor.shown(protocol, d, fld)) continue
+                val g = fld.group
+                if (g != null && g != group) Text(ServerFields.str("sfg.$g"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
+                group = g
+                ProField(protocol, fld, d, encOn)
+            }
+        }
+    }
+    if (cur == "security" && !noSecurity && (d["security"] ?: "none") == "none") Text(ServerFields.str("edit.noTls"), color = AMBER, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+    Text(ServerFields.str("edit.localNote"), color = MUTED, fontSize = 10.sp, modifier = Modifier.padding(top = 10.dp))
+}
+
+/** A server made by hand: the Pro view on Basics, its protocol picked first (ServerEditor.create). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun NewServerSheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
+    val ctx = LocalContext.current
+    var protocol by remember { mutableStateOf("vless") }
+    val draft = remember { mutableStateMapOf<String, String>().apply { putAll(ServerEditor.newDraft("vless")) } }
+    val tab = remember { mutableStateOf("basics") }
+    val encOn = remember { mutableStateOf(false) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
+            Text(ServerFields.str("edit.newTitle") + " · " + badge(protocol), color = TXT, fontWeight = FontWeight.Bold)
+            ProFields(protocol, draft, true, { p: String ->
+                val keep = HashMap<String, String>(draft)
+                draft.clear(); draft.putAll(ServerEditor.newDraft(p, keep))
+                encOn.value = false
+                protocol = p
+            }, tab, encOn)
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = {
+                val p = ServerEditor.problem(protocol, draft, true, encOn.value)
+                if (p != null) {
+                    Toast.makeText(ctx, ServerEditor.problemText(protocol, p), Toast.LENGTH_LONG).show()
+                    tab.value = p.second
+                } else {
+                    try {
+                        val s = ServerEditor.create(protocol, ServerEditor.fromDraft(protocol, draft, ServerEditor.Fields()))
+                        store.servers.add(s); store.saveServers()
+                        if (store.selection.isEmpty()) store.saveSelection(s.id)
+                        Toast.makeText(ctx, ServerFields.str("t.serverCreated").replace("{name}", s.name), Toast.LENGTH_SHORT).show()
+                        done()
+                    } catch (e: Exception) {
+                        Toast.makeText(ctx, e.message ?: "Could not add the server", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
         }
     }
 }

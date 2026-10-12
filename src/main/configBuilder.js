@@ -101,6 +101,10 @@ function cloneOut(outbound, tag, server) {
 function applyMux(o, server, muxIds) {
   if (!Array.isArray(muxIds) || !muxIds.length || !server || !muxIds.includes(server.id) || !muxEligible(o)) return o;
   o.mux = Object.assign({}, MUX);
+  // the server's own numbers (the editor's Mux fields), where it has them
+  const n = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  if (n(server.muxConcurrency)) o.mux.concurrency = n(server.muxConcurrency);
+  if (n(server.xudpConcurrency)) o.mux.xudpConcurrency = n(server.xudpConcurrency);
   return o;
 }
 
