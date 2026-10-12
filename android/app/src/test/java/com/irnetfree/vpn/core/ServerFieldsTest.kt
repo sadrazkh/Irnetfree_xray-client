@@ -100,6 +100,7 @@ class ServerFieldsTest {
         d["network"] = "xhttp"; d["xmuxMaxConcurrency"] = "16 to 32"
         assertEquals(Triple("xmuxMaxConcurrency", "transport", "edit.err.range"), ServerEditor.problem("vless", d, true, false))
         d["xmuxMaxConcurrency"] = "16-32"
+        d["encryption"] = ""   // Encryption turned on, its value not pasted yet
         assertEquals("encryption", ServerEditor.problem("vless", d, true, true)?.first)
         val t = ServerEditor.newDraft("trojan").also { x: MutableMap<String, String> -> x["address"] = "t.example" }
         assertEquals(Triple("password", "protocol", "edit.err.required"), ServerEditor.problem("trojan", t, true, false))
