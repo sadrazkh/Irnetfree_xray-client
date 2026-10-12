@@ -1201,11 +1201,9 @@ function editFields(s) {
     const h = hy2Values(ob);
     Object.assign(v, {
       password: h.auth, sni: h.sni, allowInsecure: isTrue(h.insecure), ech: h.ech, pcs: h.pcs, vcn: h.vcn,
-      alpn: h.alpn, obfsPassword: h['obfs-password'], mport: h.mport,
-      hopInterval: h.hopInterval, up: h.up, down: h.down
+      alpn: h.alpn, obfsPassword: h['obfs-password'], mport: h.mport
     });
   }
-  if (proto === 'shadowsocks') v.plugin = ssPluginOf(st);
   if (proto === 'vless' || proto === 'vmess' || proto === 'trojan' || proto === 'shadowsocks') {
     const tls = st.tlsSettings || st.realitySettings || {};
     const rs = st.realitySettings || {};
@@ -1230,16 +1228,12 @@ function editFields(s) {
       cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
       finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
       ech: ts.echConfigList || '', pcs: ts.pinnedPeerCertSha256 || '', vcn: ts.verifyPeerCertByName || '',
-      pqv: rs.mldsa65Verify || '',
-      // the Pro view's transport fields the parser itself builds the stream from
-      headerType: st.tcpSettings && st.tcpSettings.header && st.tcpSettings.header.type === 'http' ? 'http' : 'none',
-      grpcMode: st.grpcSettings && st.grpcSettings.multiMode ? 'multi' : 'gun',
-      xhttpMode: (st.xhttpSettings && st.xhttpSettings.mode) || 'auto',
-      kcpHeader: (st.kcpSettings && st.kcpSettings.header && st.kcpSettings.header.type) || 'none',
-      kcpSeed: (st.kcpSettings && st.kcpSettings.seed) || '',
-      spx: rs.spiderX || ''
+      pqv: rs.mldsa65Verify || ''
     });
   }
+  // what else the stream is built from (TCP's header, the modes, mKCP, spiderX),
+  // Hysteria2's hop interval and bandwidth, a Shadowsocks plugin — read as the window reads them
+  Object.assign(v, SF.specialsOf(s));
   // every other field the editor has (serverFields.js), where it applies
   const ctx = SF.contextOf(s);
   for (const fld of SF.PATH_FIELDS) {
@@ -1539,27 +1533,8 @@ function streamToQuery(st) {
   return q;
 }
 
-/** The SIP002 plugin a Shadowsocks stream stands for (ssStream's inverse); '' for plain TCP. */
-function ssPluginOf(st) {
-  if (!st) return '';
-  const esc = (s) => String(s).replace(/[\\;=,]/g, '\\$&');
-  if (st.network === 'ws' && st.wsSettings) {
-    const host = (st.wsSettings.headers && (st.wsSettings.headers.Host || st.wsSettings.headers.host)) || '';
-    const parts = ['v2ray-plugin', 'mode=websocket'];
-    if (st.security === 'tls') parts.push('tls');
-    if (host) parts.push('host=' + esc(host));
-    parts.push('path=' + esc(st.wsSettings.path || '/'), 'mux=0');
-    return parts.join(';');
-  }
-  const h = st.tcpSettings && st.tcpSettings.header;
-  if ((!st.network || st.network === 'tcp' || st.network === 'raw') && h && h.type === 'http') {
-    const rq = h.request || {};
-    const host = [].concat((rq.headers && rq.headers.Host) || [])[0] || '';
-    const uri = [].concat(rq.path || [])[0] || '/';
-    return 'obfs-local;obfs=http' + (host ? ';obfs-host=' + esc(host) : '') + (uri !== '/' ? ';obfs-uri=' + esc(uri) : '');
-  }
-  return '';
-}
+/** The SIP002 plugin a Shadowsocks stream stands for (ssStream's inverse); '' for plain TCP — serverFields.js's. */
+const ssPluginOf = SF.ssPluginOf;
 
 const qs = (o) => Object.keys(o).filter(k => o[k] !== undefined && o[k] !== null && o[k] !== '').map(k => `${k}=${enc(o[k])}`).join('&');
 

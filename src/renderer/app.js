@@ -4137,6 +4137,11 @@ function setJsonMode(mode) {
 
 /** The language changed with a JSON edit form open: say its help line and summary again. */
 function refreshJsonFormLang() {
+  if (editDraft && $('#editModal') && !$('#editModal').hidden) {
+    if (editView === 'pro') renderEditPro(); else { renderSimpleExtras(); fillMoreInPro(); }
+    $('#edFootNote').textContent = editView === 'pro' ? t('edit.localNote') : '';
+    if (editNew) $('#edTitle').textContent = t('edit.newTitle');
+  }
   // editingId first: setLang also runs at start-up, before the edit state below exists
   if (!state.editingId || !editOriginal || editOriginal.source !== 'json') return;
   setJsonMode(editJsonMode);
@@ -4175,7 +4180,17 @@ function openEdit(id) {
   state.editingId = id;
   editOriginal = s;
   setEditKind(s.source === 'json');
-  if (s.source === 'json') return openEditJson(s);
+  editNew = false;
+  editBad = null;
+  $('#edTitle').textContent = t('edit.title');
+  if (s.source === 'json') {
+    // a JSON server is its config: one form, no Simple or Pro
+    editDraft = null;
+    show('#edView', false); show('#edPro', false); show('#edSimple', true); show('#edMoreInPro', false);
+    $('#edHeadProto').textContent = '';
+    $('#edFootNote').textContent = '';
+    return openEditJson(s);
+  }
   const f = readServerFields(s);
   const proto = s.protocol;
   fillEditForm(f, proto);
@@ -4218,6 +4233,15 @@ function openEdit(id) {
   show('#edCredWrap', !isProxy);
   $('#edRealityRow').hidden = !(isStd && $('#edSecurity').value === 'reality');
   updateSpoofLabels();
+
+  // one draft for both views, opened in the view used last
+  editDraft = draftOf(s);
+  editView = savedEditView();
+  editTab = 'protocol';
+  show('#edView', true);
+  show('#edMoreInPro', true);
+  $('#edHeadProto').textContent = PROTO_NAMES[proto] || proto;
+  showEditView();
 
   $('#editModal').hidden = false;
 }
@@ -4363,10 +4387,16 @@ if ($('#edHideSni')) $('#edHideSni').onchange = () => {
   else frag.value = '';
 };
 
-function closeEdit() { $('#editModal').hidden = true; state.editingId = null; editOriginal = null; editClearPin = false; }
+function closeEdit() {
+  $('#editModal').hidden = true;
+  state.editingId = null; editOriginal = null; editClearPin = false;
+  editNew = false; editDraft = null; editBad = null;
+}
 
 // The pin goes when the form is saved; until then the row just disappears.
 $('#edCertPinClear').onclick = () => { editClearPin = true; show('#edCertPinRow', false); };
+for (const b of document.querySelectorAll('#edView [data-edit-view]')) b.onclick = () => setEditView(b.dataset.editView);
+if ($('#btnManualOpen')) $('#btnManualOpen').onclick = openNewServer;
 $('#editClose').onclick = closeEdit;
 $('#editCancel').onclick = closeEdit;
 $('#editModal').onclick = (e) => { if (e.target === $('#editModal')) closeEdit(); };
@@ -4480,13 +4510,534 @@ function serverInLivePlan(id) {
   return chainHas(live);
 }
 
+/* ---------- the full editor: Simple and Pro over one draft (serverFields.js) ---------- */
+// docs/superpowers/specs/2026-10-12-server-editor-design.md. The Simple view is
+// the form above, with what it lacked (flow, VLESS Encryption, the VMess cipher,
+// the Shadowsocks method) drawn from the table into #edSimpleExtra; the Pro view
+// is the whole table, in five tabs, drawn into #edPro. Both read and write ONE
+// draft — field id → what the form holds — so switching never loses a value,
+// and a save sends all of it (parser.applyServerEdits keeps what did not change).
+
+let editDraft = null;       // field id → text, or a boolean for a switch
+let editView = 'simple';    // 'simple' | 'pro' — the last one used, remembered
+let editTab = 'protocol';   // the Pro view's open tab
+let editNew = false;        // a server made from scratch: Pro, Basics first
+let editBad = null;         // { id, tab } of the field a save refused, marked until it changes
+const EDIT_VIEW_KEY = 'irnf.editView';
+const PROTO_NAMES = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'Shadowsocks', hysteria2: 'Hysteria2', wireguard: 'WireGuard', socks: 'SOCKS5', http: 'HTTP' };
+
+/** append(), leaving out what is not there: DOM append() writes null as the text "null". */
+function appendSome(node, ...kids) { node.append(...kids.filter((k) => k != null && k !== false)); return node; }
+
+/** The field table (serverFields.js, loaded before this file). */
+function sfTable() { return window.ServerFields; }
+
+/** The view the editor opens in: the one used last. */
+function savedEditView() {
+  try { return localStorage.getItem(EDIT_VIEW_KEY) === 'pro' ? 'pro' : 'simple'; } catch { return 'simple'; }
+}
+
+/** A small element: `props` as attributes (`text` → textContent), `kids` appended. */
+function edNode(tag, props, kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'text') n.textContent = v;
+    else if (k === 'class') n.className = v;
+    else n.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const c of [].concat(kids || [])) if (c != null) appendSome(n, c);
+  return n;
+}
+
+/** A record's values in the table's terms — what parser.editFields says, read here. */
+function draftOf(s) {
+  const F = sfTable();
+  const f = readServerFields(s);
+  const p = s.protocol;
+  const d = {
+    protocol: p, name: f.name || '', address: f.address || '', port: f.port != null ? String(f.port) : '',
+    engine: f.engine || 'xray', fragment: f.fragment || '', noise: f.noise || '',
+    cipherSuites: f.cipherSuites || '', finalMask: f.finalMask || '',
+    network: f.network || 'tcp', security: p === 'hysteria2' ? 'tls' : (f.security || 'none'),
+    sni: f.sni || '', host: f.host || '', path: f.path || '', fp: f.fp || 'chrome', pbk: f.pbk || '', sid: f.sid || '',
+    alpn: f.alpn || '', allowInsecure: !!f.allowInsecure, ech: f.ech || '', pcs: f.pcs || '', vcn: f.vcn || '', pqv: f.pqv || ''
+  };
+  if (p === 'vless' || p === 'vmess') d.uuid = f.cred || '';
+  if (p === 'trojan' || p === 'shadowsocks' || p === 'hysteria2') d.password = f.cred || '';
+  if (p === 'hysteria2') Object.assign(d, { obfsPassword: f.hy2Obfs || '', mport: f.hy2Ports || '' });
+  if (p === 'wireguard') {
+    Object.assign(d, {
+      privateKey: f.cred || '', publicKey: f.wgPub || '', localAddress: f.wgAddr || '', presharedKey: f.wgPsk || '',
+      mtu: f.wgMtu != null ? String(f.wgMtu) : '', reserved: f.wgReserved || '', allowedIPs: f.wgAllowed || '', dns: f.wgDns || ''
+    });
+  }
+  if (p === 'socks' || p === 'http') Object.assign(d, { username: f.pxUser || '', password: f.pxPass || '' });
+  Object.assign(d, F.specialsOf(s));
+  const ctx = F.contextOf(s);
+  for (const fld of F.PATH_FIELDS) if (F.fieldApplies(fld, ctx)) d[fld.id] = F.toForm(fld, F.getPath(s, fld.path));
+  return d;
+}
+
+/** A new server's draft: the protocol's defaults, and what the form had in common with another protocol. */
+function newDraft(protocol, keep) {
+  const F = sfTable();
+  const d = {
+    protocol, name: '', address: '', port: '443', engine: 'xray', fragment: '', noise: '', cipherSuites: '', finalMask: '',
+    network: 'tcp', security: protocol === 'hysteria2' ? 'tls' : 'none', sni: '', host: '', path: '', fp: 'chrome', pbk: '', sid: '',
+    alpn: '', allowInsecure: false, ech: '', pcs: '', vcn: '', pqv: '', uuid: '', password: '', username: '',
+    flow: '', encryption: 'none', vmessSecurity: 'auto', alterId: '0', method: F.SS_METHODS[0], uot: protocol === 'shadowsocks',
+    plugin: '', headerType: 'none', grpcMode: 'gun', xhttpMode: 'auto', kcpHeader: 'none', kcpSeed: '', spx: '',
+    privateKey: '', publicKey: '', localAddress: '', presharedKey: '', allowedIPs: '0.0.0.0/0, ::/0', reserved: '', mtu: '1420', dns: '',
+    obfsPassword: '', mport: '', hopInterval: '', up: '', down: '', mux: ''
+  };
+  if (protocol === 'wireguard') d.port = '51820';
+  if (protocol === 'socks') d.port = '1080';
+  if (protocol === 'http') d.port = '8080';
+  if (keep) for (const k of ['name', 'address']) if (keep[k]) d[k] = keep[k];
+  return d;
+}
+
+/** The draft's protocol / transport / security, in the table's terms. */
+function draftCtx() {
+  const d = editDraft || {};
+  return { protocol: d.protocol, network: d.network || 'tcp', security: d.protocol === 'hysteria2' ? 'tls' : (d.security || 'none') };
+}
+
+/** Is this field part of the form right now? The table says, and TCP's Host and path only with its HTTP header. */
+function fieldShown(fld) {
+  const F = sfTable();
+  const ctx = draftCtx();
+  if (!F.fieldApplies(fld, ctx)) return false;
+  if ((fld.id === 'host' || fld.id === 'path') && ctx.network === 'tcp') return editDraft.headerType === 'http';
+  if (fld.id === 'protocol') return true;
+  return true;
+}
+
+/** A field's label: by protocol or transport where it reads differently (a Hysteria2 password, gRPC's Host). */
+function fieldLabel(fld) {
+  const ctx = draftCtx();
+  for (const k of [`sf.${fld.id}.${ctx.protocol}`, `sf.${fld.id}.${ctx.network}`, `sf.${fld.id}`]) {
+    const v = t(k);
+    if (v !== k) return v;
+  }
+  return fld.id;
+}
+
+/** An option's label: its own key where it has one (`_` = the empty one), else the value itself. */
+function optionLabel(fld, o) {
+  if (!fld.optionLabels || (fld.optionLabels !== 'all' && o)) return o;
+  const k = `sfo.${fld.id}.${o || '_'}`;
+  const v = t(k);
+  return v === k ? (o || '—') : v;
+}
+
+/** The draft changed: what it shows may have too (a new transport, a protocol). */
+function draftChanged(id) {
+  if (editBad && editBad.id === id) editBad = null;
+  if (['protocol', 'network', 'security', 'headerType'].includes(id)) {
+    if (editView === 'pro') renderEditPro(); else renderSimpleExtras();
+  }
+  if (id === 'protocol' || id === 'network' || id === 'security' || id === 'address') renderEditTabs();
+}
+
+/** The label row of a field: its name, its technical key, and the "this device only" tag. */
+function fieldHead(fld, forId) {
+  return edNode('label', { class: 'field-label', for: forId }, [
+    edNode('span', { text: fieldLabel(fld) }), ' ',
+    edNode('span', { class: 'ed-key', dir: 'ltr', text: fld.key }),
+    fld.local ? edNode('span', { class: 'ed-local', title: t('edit.localTip'), text: t('edit.local') }) : null
+  ]);
+}
+
+/** VLESS Encryption read back: the auth, its mode, 0-RTT or 1-RTT — or why it is not one. */
+function encryptionChips(box, v) {
+  const r = sfTable().readEncryption(v);
+  box.textContent = '';
+  if (!r) return;
+  if (r.bad) { appendSome(box, edNode('span', { class: 'bad', text: '✗ ' + t(r.bad) })); return; }
+  const pq = r.auth === 'ML-KEM-768';
+  appendSome(box, 
+    edNode('span', { class: pq ? 'pq' : '' }, [t('edit.enc.auth').replace('{v}', ''), edNode('bdi', { text: r.auth + (pq ? ' — ' + t('edit.enc.pq') : '') })]),
+    edNode('span', {}, [t('edit.enc.mode').replace('{v}', ''), edNode('bdi', { text: r.mode })]),
+    edNode('span', {}, [edNode('bdi', { text: r.rtt === '0rtt' ? '0-RTT' : '1-RTT' })]),
+    r.padded ? edNode('span', { text: t('edit.enc.padding') }) : null
+  );
+}
+
+/** A random v4 UUID — getRandomValues, which a router's plain-http page still has. */
+function newUuid() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+/** One field of the draft, as the form shows it; every input writes straight back to the draft. */
+function fieldNode(fld) {
+  const d = editDraft;
+  const id = 'edf-' + fld.id;
+  const bad = editBad && editBad.id === fld.id;
+  const wrap = edNode('div', { class: 'ed-f' + (fld.span === 2 || ['seg', 'chips', 'json', 'encryption', 'network', 'security'].includes(fld.kind) ? ' span2' : '') + (bad ? ' is-bad' : ''), 'data-field': fld.id });
+  const put = (v) => { d[fld.id] = v; draftChanged(fld.id); };
+  const hint = fld.hint ? edNode('p', { class: 'hint', text: t(`sf.${fld.id}.hint`) }) : null;
+  const val = d[fld.id] == null ? '' : d[fld.id];
+  const text = (kind) => {
+    const inp = edNode('input', { class: 'input', id, dir: 'ltr', placeholder: fld.placeholder || null, inputmode: kind === 'number' ? 'numeric' : null, spellcheck: 'false' });
+    inp.value = String(val);
+    inp.oninput = () => { d[fld.id] = inp.value; if (editBad && editBad.id === fld.id) { editBad = null; wrap.classList.remove('is-bad'); renderEditTabs(); } };
+    inp.onchange = () => put(inp.value);
+    return inp;
+  };
+  const seg = (options, label) => {
+    const box = edNode('div', { class: 'seg ed-seg-wide', role: 'radiogroup', 'aria-label': fieldLabel(fld) });
+    for (const o of options) {
+      const b = edNode('button', { type: 'button', class: 'seg-btn' + (String(val) === o ? ' active' : ''), role: 'radio', 'aria-checked': String(String(val) === o), dir: 'ltr', text: label ? label(o) : o });
+      b.onclick = () => put(o);
+      appendSome(box, b);
+    }
+    return box;
+  };
+  switch (fld.kind) {
+    case 'switch': {
+      const inp = edNode('input', { type: 'checkbox', id });
+      inp.checked = !!val;
+      inp.onchange = () => put(inp.checked);
+      appendSome(wrap, edNode('label', { class: 'ed-switch', for: id }, [
+        edNode('span', { class: 'switch-title' }, [edNode('span', { text: fieldLabel(fld) }), edNode('span', { class: 'ed-key', dir: 'ltr', text: fld.key }),
+          fld.local ? edNode('span', { class: 'ed-local', title: t('edit.localTip'), text: t('edit.local') }) : null]),
+        edNode('span', { class: 'switch' }, [inp, edNode('span', { class: 'slider' })])
+      ]), hint);
+      if (fld.id === 'allowInsecure' && editOriginal && editOriginal.certPin && !editClearPin) {
+        const pin = edNode('p', { class: 'hint', dir: 'ltr' }, [t('edit.certPinShown').replace('{pin}', editOriginal.certPin.slice(0, 6) + '…' + editOriginal.certPin.slice(-4)) + ' ']);
+        const clear = edNode('button', { type: 'button', class: 'btn ghost tiny', text: t('edit.certPinClear') });
+        clear.onclick = () => { editClearPin = true; pin.remove(); show('#edCertPinRow', false); };
+        appendSome(pin, clear);
+        appendSome(wrap, pin);
+      }
+      return wrap;
+    }
+    case 'select': {
+      const sel = edNode('select', { class: 'select', id });
+      const opts = [...fld.options];
+      if (val !== '' && !opts.includes(String(val))) opts.push(String(val));   // a value the list does not have stays as it is
+      for (const o of opts) appendSome(sel, edNode('option', { value: o, text: optionLabel(fld, o) }));
+      sel.value = String(val);
+      sel.onchange = () => put(sel.value);
+      appendSome(wrap, fieldHead(fld, id), sel, hint);
+      return wrap;
+    }
+    case 'json': {
+      const ta = edNode('textarea', { class: 'textarea', id, dir: 'ltr', rows: '3', spellcheck: 'false', placeholder: fld.placeholder || null });
+      ta.value = String(val);
+      ta.oninput = () => { d[fld.id] = ta.value; };
+      appendSome(wrap, fieldHead(fld, id), ta, hint);
+      return wrap;
+    }
+    case 'chips': {
+      const on = String(val).split(/[,\s]+/).filter(Boolean);
+      const box = edNode('div', { class: 'ed-chips', role: 'group', 'aria-label': fieldLabel(fld) });
+      for (const o of fld.options) {
+        const b = edNode('button', { type: 'button', class: 'ed-chip' + (on.includes(o) ? ' on' : ''), 'aria-pressed': String(on.includes(o)), dir: 'ltr', text: o });
+        b.onclick = () => {
+          const next = on.includes(o) ? on.filter((x) => x !== o) : fld.options.filter((x) => x === o || on.includes(x));
+          put(next.join(','));
+          if (editView === 'pro') renderEditPro(); else renderSimpleExtras();
+        };
+        appendSome(box, b);
+      }
+      appendSome(wrap, edNode('div', { class: 'field-label' }, [edNode('span', { text: fieldLabel(fld) }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: fld.key })]), box, hint);
+      return wrap;
+    }
+    case 'seg':
+      appendSome(wrap, edNode('div', { class: 'field-label' }, [edNode('span', { text: fieldLabel(fld) }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: fld.key })]), seg(fld.options), hint);
+      return wrap;
+    case 'network':
+      appendSome(wrap, edNode('div', { class: 'field-label' }, [edNode('span', { text: fieldLabel(fld) }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: fld.key })]),
+        seg(sfTable().NETWORKS, (o) => t('sfo.network.' + o)));
+      return wrap;
+    case 'security':
+      appendSome(wrap, edNode('div', { class: 'field-label' }, [edNode('span', { text: fieldLabel(fld) }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: fld.key })]),
+        seg(sfTable().securitiesOf(draftCtx().protocol), (o) => t('sfo.security.' + o)));
+      return wrap;
+    case 'uuid': {
+      const inp = text('text');
+      const gen = edNode('button', { type: 'button', class: 'btn small', text: t('edit.genUuid') });
+      gen.onclick = () => { inp.value = newUuid(); d[fld.id] = inp.value; };
+      appendSome(wrap, fieldHead(fld, id), edNode('div', { class: 'ed-inline' }, [inp, gen]), hint);
+      return wrap;
+    }
+    case 'encryption': {
+      const isOn = d._encOn != null ? d._encOn : (String(val) !== '' && String(val) !== 'none');
+      const sel = edNode('select', { class: 'select', id: id + '-mode' }, [
+        edNode('option', { value: 'none', text: t('sfo.encMode.none') }), edNode('option', { value: 'mlkem', text: t('sfo.encMode.mlkem') })]);
+      sel.value = isOn ? 'mlkem' : 'none';
+      const ta = edNode('textarea', { class: 'textarea ed-mono', id, dir: 'ltr', rows: '2', spellcheck: 'false', placeholder: 'mlkem768x25519plus.native.0rtt.…' });
+      ta.value = isOn && String(val) !== 'none' ? String(val) : '';
+      const chips = edNode('div', { class: 'ed-enc-read', 'aria-live': 'polite' });
+      encryptionChips(chips, ta.value);
+      const body = edNode('div', { class: 'ed-enc-body', hidden: !isOn }, [
+        edNode('label', { class: 'field-label', for: id }, [edNode('span', { text: t('sf.encryptionValue') }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: 'mlkem768x25519plus.…' })]),
+        ta, chips, hint]);
+      sel.onchange = () => {
+        d._encOn = sel.value === 'mlkem';
+        body.hidden = !d._encOn;
+        d.encryption = d._encOn ? ta.value.trim() : 'none';
+      };
+      ta.oninput = () => { d.encryption = ta.value.trim(); encryptionChips(chips, d.encryption); };
+      appendSome(wrap, edNode('div', { class: 'ed-grid' }, [edNode('div', { class: 'ed-f' }, [fieldHead(fld, id + '-mode'), sel])]), body);
+      return wrap;
+    }
+    default:
+      appendSome(wrap, fieldHead(fld, id), text(fld.kind), hint);
+      return wrap;
+  }
+}
+
+/** Fields in a grid, with a heading where a group starts. */
+function fieldGrid(list) {
+  const grid = edNode('div', { class: 'ed-grid' });
+  let group = null;
+  for (const fld of list) {
+    if (fld.group && fld.group !== group) {
+      appendSome(grid, edNode('div', { class: 'ed-sub span2', text: t('sfg.' + fld.group) }));
+    }
+    group = fld.group || null;
+    appendSome(grid, fieldNode(fld));
+  }
+  return grid;
+}
+
+/** The Pro view's tab bar: each tab with what is chosen in it underneath, a dot where a save found something wrong. */
+function renderEditTabs() {
+  const bar = $('#edTabs');
+  if (!bar || !editDraft) return;
+  const F = sfTable();
+  const ctx = draftCtx();
+  const d = editDraft;
+  const sub = {
+    basics: editNew ? t('edit.tabNew') : (d.address || '—'),
+    protocol: PROTO_NAMES[ctx.protocol] || ctx.protocol,
+    transport: F.hasTransport(ctx.protocol) ? t('sfo.network.' + ctx.network) : '—',
+    security: F.securitiesOf(ctx.protocol).length ? ctx.security : '—',
+    advanced: 'engine · dpi'
+  };
+  bar.textContent = '';
+  for (const tab of F.TABS) {
+    const off = (tab === 'transport' && !F.hasTransport(ctx.protocol)) || (tab === 'security' && !F.securitiesOf(ctx.protocol).length);
+    const b = edNode('button', {
+      type: 'button', class: 'ed-tab' + (tab === editTab ? ' active' : ''), role: 'tab', 'aria-selected': String(tab === editTab),
+      'aria-disabled': off ? 'true' : null, 'data-tab': tab
+    }, [edNode('span', { class: 'ed-tab-name' }, [t('edit.tab.' + tab), editBad && editBad.tab === tab ? edNode('span', { class: 'ed-tab-bad', 'aria-hidden': 'true', text: '●' }) : null]),
+      edNode('small', { dir: 'ltr', text: sub[tab] })]);
+    b.onclick = () => { if (off) return; editTab = tab; renderEditPro(); };
+    appendSome(bar, b);
+  }
+}
+
+/** The Pro view: the open tab's fields, from the table. */
+function renderEditPro() {
+  const pane = $('#edProPane');
+  if (!pane || !editDraft) return;
+  const F = sfTable();
+  const ctx = draftCtx();
+  const name = PROTO_NAMES[ctx.protocol] || ctx.protocol;
+  if ((editTab === 'transport' && !F.hasTransport(ctx.protocol)) || (editTab === 'security' && !F.securitiesOf(ctx.protocol).length)) editTab = 'protocol';
+  renderEditTabs();
+  pane.textContent = '';
+  const fields = F.FIELDS.filter((f) => f.tab === editTab && f.kind !== 'protocol' && fieldShown(f));
+  if (editTab === 'basics') {
+    const picker = edNode('div', { class: 'ed-protos', role: 'radiogroup', 'aria-label': t('sf.protocol') });
+    for (const p of F.PROTOCOLS) {
+      const on = p === ctx.protocol;
+      const fixed = !editNew && !on;
+      const b = edNode('button', { type: 'button', class: 'ed-proto' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on), 'aria-disabled': fixed ? 'true' : null, dir: 'ltr' },
+        [PROTO_NAMES[p], edNode('small', { text: t('sfp.' + p) })]);
+      b.onclick = () => {
+        if (fixed || on) return;
+        editDraft = newDraft(p, editDraft);
+        draftChanged('protocol');
+      };
+      appendSome(picker, b);
+    }
+    appendSome(pane, edNode('div', { class: 'ed-f' }, [edNode('div', { class: 'field-label', text: t('sf.protocol') }), picker,
+      edNode('p', { class: 'hint', text: t(editNew ? 'edit.protoPick' : 'edit.protoFixed') })]));
+  }
+  if (editTab === 'transport' && !F.hasTransport(ctx.protocol)) appendSome(pane, edNode('p', { class: 'ed-empty', text: t('edit.noTransport').replace('{proto}', name) }));
+  else if (editTab === 'security' && !F.securitiesOf(ctx.protocol).length) appendSome(pane, edNode('p', { class: 'ed-empty', text: t('edit.noSecurity').replace('{proto}', name) }));
+  else appendSome(pane, fieldGrid(fields));
+  if (editTab === 'security' && ctx.security === 'none' && F.securitiesOf(ctx.protocol).length) appendSome(pane, edNode('p', { class: 'ed-warn', text: t('edit.noTls') }));
+  $('#edHeadProto').textContent = name;
+}
+
+/** The Simple view's additions: what the form above lacked, for this protocol. */
+function renderSimpleExtras() {
+  const box = $('#edSimpleExtra');
+  if (!box || !editDraft) return;
+  const F = sfTable();
+  const ids = { vless: ['flow', 'encryption'], vmess: ['vmessSecurity', 'alterId'], shadowsocks: ['method'] }[draftCtx().protocol] || [];
+  box.textContent = '';
+  if (ids.length) appendSome(box, fieldGrid(ids.map((id) => F.FIELDS.find((f) => f.id === id))));
+  box.hidden = !ids.length;
+}
+
+/** The Simple form's inputs, into the draft (the parser's names, as a save sends them). */
+function absorbSimple() {
+  if (!editDraft || !editOriginal) return;
+  const f = collectEditFields(editOriginal, editClearPin);
+  delete f.clearCertPin;
+  Object.assign(editDraft, f);
+}
+
+/** The draft, into the Simple form's inputs. */
+function fillSimple() {
+  if (!editDraft || !editOriginal) return;
+  const d = editDraft;
+  const p = editOriginal.protocol;
+  fillEditForm({
+    name: d.name, address: d.address, port: d.port,
+    cred: p === 'wireguard' ? d.privateKey : (p === 'vless' || p === 'vmess') ? d.uuid : d.password,
+    network: d.network, security: d.security, sni: d.sni, host: d.host, path: d.path, fp: d.fp, pbk: d.pbk, sid: d.sid,
+    fragment: d.fragment, noise: d.noise, cipherSuites: d.cipherSuites, finalMask: d.finalMask, engine: d.engine,
+    allowInsecure: d.allowInsecure, ech: d.ech, pcs: d.pcs, vcn: d.vcn, pqv: d.pqv, hy2Obfs: d.obfsPassword, hy2Ports: d.mport,
+    pxUser: d.username, pxPass: d.password, wgPub: d.publicKey, wgAddr: d.localAddress, wgPsk: d.presharedKey,
+    wgMtu: d.mtu, wgReserved: d.reserved, wgAllowed: d.allowedIPs, wgDns: d.dns
+  }, p);
+  const isStd = ['vless', 'vmess', 'trojan'].includes(p);
+  $('#edRealityRow').hidden = !(isStd && $('#edSecurity').value === 'reality');
+  updateSpoofLabels();
+  renderSimpleExtras();
+}
+
+/** The Simple view's last line: everything else is one click away, in the Pro view. */
+function fillMoreInPro() {
+  const more = $('#edMoreInPro');
+  if (!more) return;
+  const [a, b] = t('edit.moreInPro').split('{link}');
+  const go = edNode('button', { type: 'button', class: 'ed-pro-link', text: t('edit.proLink') });
+  go.onclick = () => setEditView('pro');
+  more.textContent = '';
+  appendSome(more, a || '', go, b || '');
+}
+
+/** Show the view the editor is in (`editView`). */
+function showEditView() {
+  const pro = editView === 'pro';
+  show('#edSimple', !pro);
+  show('#edPro', pro);
+  for (const b of document.querySelectorAll('#edView [data-edit-view]')) {
+    const on = b.dataset.editView === editView;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-checked', String(on));
+  }
+  $('#edFootNote').textContent = pro ? t('edit.localNote') : '';
+  if (pro) renderEditPro(); else { fillSimple(); fillMoreInPro(); }
+}
+
+/** Switch views, the draft carried across; remembered for the next time. */
+function setEditView(v) {
+  if (!editDraft || (v !== 'simple' && v !== 'pro') || v === editView) return;
+  if (editView === 'simple') absorbSimple();
+  editView = v;
+  if (!editNew) { try { localStorage.setItem(EDIT_VIEW_KEY, v); } catch { /* private mode */ } }
+  showEditView();
+}
+
+/**
+ * What a save cannot send, the first thing found: a field the table says is
+ * wrong (a number, a range, JSON, the Encryption), an Encryption chosen but
+ * empty, a new server's address, port or credential. { id, tab, why } or null.
+ */
+function draftProblem() {
+  const F = sfTable();
+  const d = editDraft;
+  for (const fld of F.FIELDS) {
+    if (!fieldShown(fld)) continue;
+    const why = F.validate(fld, d[fld.id]);
+    if (why) return { id: fld.id, tab: fld.tab, why };
+  }
+  if (draftCtx().protocol === 'vless' && d._encOn && !String(d.encryption || '').trim()) return { id: 'encryption', tab: 'protocol', why: 'edit.err.encKey' };
+  if (editNew) {
+    const need = ['address', 'port'].concat({ vless: ['uuid'], vmess: ['uuid'], trojan: ['password'], shadowsocks: ['password'], hysteria2: ['password'], wireguard: ['privateKey', 'publicKey'] }[d.protocol] || []);
+    for (const id of need) {
+      if (!String(d[id] == null ? '' : d[id]).trim()) return { id, tab: id === 'address' || id === 'port' ? 'basics' : 'protocol', why: 'edit.err.required' };
+    }
+  }
+  return null;
+}
+
+/** Say what a save refused, and show it: the Pro view opens its tab. */
+function showDraftProblem(p) {
+  const fld = sfTable().FIELDS.find((f) => f.id === p.id);
+  const label = fld ? fieldLabel(fld) : p.id;
+  editBad = { id: p.id, tab: p.tab };
+  const msg = p.why === 'edit.err.required' ? t(p.why).replace('{field}', label) : t('edit.err.in').replace('{field}', label).replace('{why}', t(p.why));
+  if (editView === 'simple' && !(fld && fld.simple)) { editView = 'pro'; }
+  if (editView === 'pro') { editTab = p.tab; showEditView(); } else renderSimpleExtras();
+  toast(msg, 'err');
+  const at = document.querySelector(`[data-field="${p.id}"]`);
+  if (at && at.scrollIntoView) at.scrollIntoView({ block: 'center' });
+}
+
+/** The fields a save sends: the whole draft, in the parser's names. */
+function draftFields() {
+  const f = Object.assign({}, editDraft);
+  delete f._encOn;
+  delete f.protocol;
+  f.serviceName = f.path;   // gRPC's service name is the path field
+  if (f.encryption === '' || f.encryption == null) f.encryption = 'none';
+  return f;
+}
+
+/** Add a server by hand: the Pro view on its Basics tab, the protocol picker first. */
+function openNewServer() {
+  state.editingId = null;
+  editOriginal = null;
+  editNew = true;
+  editClearPin = false;
+  editBad = null;
+  editDraft = newDraft('vless');
+  editTab = 'basics';
+  editView = 'pro';
+  setEditKind(false);
+  $('#edTitle').textContent = t('edit.newTitle');
+  show('#edView', false);
+  showEditView();
+  $('#editModal').hidden = false;
+}
+
+/** Save a server made from scratch (parser.createServer, in main or the router). */
+async function saveNewServer() {
+  const problem = draftProblem();
+  if (problem) return showDraftProblem(problem);
+  const fields = Object.assign(draftFields(), { protocol: editDraft.protocol });
+  const res = await window.api.createServer(fields);
+  if (!res || !res.ok) return toast((res && res.error) || 'error', 'err');
+  state.servers = res.servers;
+  renderServers(); renderPicker(); renderChains(); renderPool(); renderAdvanced();
+  closeEdit();
+  toast(t('t.serverCreated').replace('{name}', res.server.name), 'ok');
+}
+
 async function saveEdit() {
+  if (editNew) return saveNewServer();
   const id = state.editingId;
   if (!id || !editOriginal) return;
   // a JSON server sends its mode and config, not the link form's fields
   const isJson = editOriginal.source === 'json';
   const proto = editOriginal.protocol;
-  const fields = isJson ? collectJsonFields() : collectEditFields(editOriginal, editClearPin);
+  let fields;
+  if (isJson) fields = collectJsonFields();
+  else {
+    // the whole draft — the Simple form's inputs taken in first when that is the view open
+    if (editView === 'simple') absorbSimple();
+    const problem = draftProblem();
+    if (problem) return showDraftProblem(problem);
+    fields = draftFields();
+    if (editClearPin) fields.clearCertPin = true;
+  }
   if (!fields) return;   // a JSON form has said why, under the editor
 
   // the link form's own checks; its inputs are hidden (and stale) for a JSON server
@@ -4497,14 +5048,14 @@ async function saveEdit() {
 
     // finalmask goes to the core untouched, so catch bad JSON here rather than
     // letting xray refuse the whole config at connect time
-    const fmText = $('#edFinalMask') ? $('#edFinalMask').value.trim() : '';
+    const fmText = String(fields.finalMask || '').trim();
     if (fmText) {
       try { JSON.parse(fmText); }
       catch { return toast(t('edit.finalMaskBad'), 'err'); }
     }
     // an ML-DSA-65 key is 1952 bytes as base64url (2603 characters); the parser
     // leaves anything else out, so say so rather than drop it in silence
-    const pqvText = $('#edPqv') && $('#edPqvRow') && !$('#edPqvRow').hidden ? $('#edPqv').value.trim() : '';
+    const pqvText = draftCtx().security === 'reality' ? String(fields.pqv || '').trim() : '';
     if (pqvText && !/^[A-Za-z0-9_\-+/]{2603}={0,2}$/.test(pqvText)) return toast(t('edit.pqvBad'), 'err');
   }
 
