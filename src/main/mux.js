@@ -140,6 +140,15 @@ function freshVerdict(entry, now) {
   return null;
 }
 
+/**
+ * The server's own Mux (the editor's `mux` field): 'on' muxes it — eligible
+ * still decides — without a test, 'off' never; '' follows the app's setting.
+ */
+function serverMux(s) {
+  const v = s && s.mux;
+  return v === 'on' || v === 'off' ? v : '';
+}
+
 /** Each eligible server once (by record id), in order. */
 function eligibleOnce(servers) {
   const seen = new Set();
@@ -190,9 +199,11 @@ function planMux({ mode, servers, cache, now, recovery = false } = {}) {
   const m = muxMode(mode);
   const muxIds = [];
   const toProbe = [];
-  if (m === 'off') return { muxIds, toProbe };
   for (const s of eligibleOnce(servers)) {
-    if (m === 'on') { muxIds.push(s.id); continue; }
+    const mine = serverMux(s);   // a server's own setting comes before the app's
+    if (mine === 'off') continue;
+    if (mine === 'on' || m === 'on') { muxIds.push(s.id); continue; }
+    if (m === 'off') continue;
     const j = judge(own(cache, muxFingerprint(s)), now, recovery);
     if (j.probe) toProbe.push(s);
     else if (j.verdict === 'ok') muxIds.push(s.id);
@@ -350,6 +361,9 @@ async function decideMux({ mode, servers, cache, now = Date.now(), probe, log = 
   for (const s of eligibleOnce(servers)) {
     const fp = muxFingerprint(s);
     const name = nameOf(s);
+    const mine = serverMux(s);
+    if (mine === 'on') { muxIds.push(s.id); log(`Mux on for ${name} (set for this server)`, 'info'); continue; }
+    if (mine === 'off') { log(`Mux off for ${name} (set for this server)`, 'info'); continue; }
     const held = judge(own(cache, fp), now, recovery).verdict;   // memory — also what an inconclusive test keeps
     const tested = asked.has(fp);
     const v = tested ? asked.get(fp) : held;
@@ -468,6 +482,6 @@ function muxCandidates(plan, rawServer) {
 
 module.exports = {
   MUX, OK_TTL_MS, UNSUPPORTED_TTL_MS, RETRY_UNKNOWN_MS, PROBE_MS, PROBE_PARALLEL, CACHE_MAX,
-  muxMode, muxEligible, muxFingerprint, freshVerdict, planMux, probeMux,
+  muxMode, muxEligible, muxFingerprint, freshVerdict, planMux, probeMux, serverMux,
   decideMux, rememberVerdicts, markRecheck, muxCandidates
 };

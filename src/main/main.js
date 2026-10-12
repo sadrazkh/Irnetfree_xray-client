@@ -1129,7 +1129,8 @@ async function withEntryHostIps(serverId, settings) {
 async function muxFor(serverId, settings, recovery) {
   const none = { ids: [], fps: [] };
   const mode = muxMode(settings.mux);
-  if (mode === 'off') return none;
+  // off — unless a server is set to Mux on (its own `mux`, the editor's Advanced tab)
+  if (mode === 'off' && !(store.get('servers', []) || []).some((s) => s && s.mux === 'on')) return none;
   let plan;
   try { plan = buildPlan(serverId, settings).plan; } catch { return none; }   // buildActive reports it
   let engine = xray.resolveEngine(chooseEngine(plan, settings.defaultEngine), { quiet: true }).id;
