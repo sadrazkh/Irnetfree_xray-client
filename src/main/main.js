@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
+const { parseMany, parseLink, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('./parser');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('./configBuilder');
 // Raw JSON mode (configBuilder.rawApplies): in proxy mode only — the desktop is no router.
 const RAW_OPTS = { openwrt: false };
@@ -2831,6 +2831,16 @@ function registerIpc() {
     existing.push(server);
     setServers(existing);
     return { server, servers: existing };
+  });
+
+  // a server made in the editor from scratch (parser.createServer); what it lacks, said
+  ipcMain.handle('servers:create', (e, fields) => {
+    let server;
+    try { server = createServer(fields || {}); } catch (err) { return { ok: false, error: err.message }; }
+    const existing = store.get('servers', []);
+    existing.push(server);
+    setServers(existing);
+    return { ok: true, server, servers: existing };
   });
 
   // Read a WireGuard .conf the user picks, and parse .conf text into form fields.

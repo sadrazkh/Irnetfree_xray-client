@@ -14,7 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const { parseMany, parseLink, makeWireguardServer, makeProxyServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
+const { parseMany, parseLink, makeWireguardServer, makeProxyServer, createServer, applyServerEdits, buildShareLink, migrateStoredServer, parseWireguardConf } = require('../main/parser');
 const { buildConfig, buildTestConfig, buildMultiTestConfig, resolverBypassIpsOf, echResolverIpsOf, wgEndpointHosts, wgResolverAddresses, entryHosts, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, rawApplies, dialerTagsOf } = require('../main/configBuilder');
 const { latencyTest, testsAlone, udpOnly } = require('../main/latencyTest');
 const { adapterDnsServers, guardPeers, resolverIp, routerDnsTuning } = require('../main/dnsBuilder');
@@ -3139,6 +3139,13 @@ function createService(opts = {}) {
     'servers:add': (link) => { const server = parseLink(link); const e = store.get('servers', []); e.push(server); store.set('servers', e); return server; },
     'servers:addWireguard': (fields) => { const server = makeWireguardServer(fields || {}); const e = store.get('servers', []); e.push(server); store.set('servers', e); return { server, servers: e }; },
     'servers:addProxy': (fields) => { const server = makeProxyServer(fields || {}); const e = store.get('servers', []); e.push(server); store.set('servers', e); return { server, servers: e }; },
+    // a server made in the editor from scratch (parser.createServer); what it lacks, said
+    'servers:create': (fields) => {
+      let server;
+      try { server = createServer(fields || {}); } catch (err) { return { ok: false, error: err.message }; }
+      const e = store.get('servers', []); e.push(server); store.set('servers', e);
+      return { ok: true, server, servers: e };
+    },
     // headless: no native dialog; the browser picks the file itself
     'wg:pickConf': () => ({ ok: false, error: 'not available in server mode' }),
     'wg:parseConf': (text) => {
