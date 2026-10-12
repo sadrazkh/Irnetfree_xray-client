@@ -197,7 +197,7 @@ object ServerEditor {
         val (dns, dnsDomains) = if (s.protocol == "wireguard") LinkParser.splitDnsField(f.wgDns) else (s.dns to s.dnsDomains)
         val saved = s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = out, engine = engine, dns = dns, dnsDomains = dnsDomains,
             mux = muxNow, muxConcurrency = muxC, xudpConcurrency = xudpC)
-        return saved.copy(edited = record(s, was, read(saved)))
+        return saved.copy(edited = record(s, was, read(saved), f))
     }
 
     /**
@@ -208,8 +208,10 @@ object ServerEditor {
      * holds exactly what the server's own link gives: saving the link's value
      * releases the field, and it follows the panel again.
      */
-    private fun record(s: ServerConfig, before: Fields, after: Fields): List<String> {
-        val changed = RECORDABLE.filter { valueOf(it, before) != valueOf(it, after) }
+    private fun record(s: ServerConfig, before: Fields, after: Fields, sent: Fields): List<String> {
+        // changed on the record AND sent differently: a value a save derived from another
+        // (a cleared hopping's interval) is not the user's (parser.js applyServerEdits)
+        val changed = RECORDABLE.filter { valueOf(it, before) != valueOf(it, after) && valueOf(it, sent) != valueOf(it, before) }
         val linked = SubRefresh.linkedForm(s)?.let { read(it) }
         return (s.edited + changed).distinct().filter { linked == null || valueOf(it, after) != valueOf(it, linked) }
     }

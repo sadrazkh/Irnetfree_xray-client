@@ -104,7 +104,9 @@ test('the core gate hands the cores every mux shape (v1.18, spec §4): a single 
   // and not one of the configs built without the setting carries mux — but a
   // JSON server's own: its main outbound is kept as written, its mux with it
   // (the "via a base" shapes carry mux under TUN on purpose, and JSON servers: their own test)
-  for (const name of run.built.filter((n) => !/mux/.test(n) && !/^(json|via)-/.test(n))) assert.equal(JSON.stringify(run.read(name.replace(/\.json$/, ''))).includes('"mux"'), false, name);
+  // the editor's servers are set to Mux on, with their own numbers
+  assert.deepEqual(run.proxy('editor-vless-ws-tls').mux, Object.assign({}, MUX, { concurrency: 4, xudpConcurrency: 16 }));
+  for (const name of run.built.filter((n) => !/mux/.test(n) && !/^(json|via|editor)-/.test(n))) assert.equal(JSON.stringify(run.read(name.replace(/\.json$/, ''))).includes('"mux"'), false, name);
 });
 
 test('the core gate writes every config for the core’s own version: mKCP’s header and seed, Hysteria’s hopping — as the suggested Xray takes them, and as a January 2026 core did', { timeout: 60000 }, (t) => {
