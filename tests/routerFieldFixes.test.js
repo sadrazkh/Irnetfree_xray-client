@@ -286,6 +286,26 @@ test('v1.18: an ECH server on an official core older than 25.8.3 (the feed’s 2
   }
 });
 
+test('v1.25: a MASQUE server on a core too old for it (the feed’s 25.1.30), no core new enough: refused in plain words — in both languages', async (t) => {
+  const check = { ok: false, engine: 'xray', masqueUnsupported: true, coreVersion: '25.1.30', need: '26.9.30', plaintextRejected: false, error: 'xray 25.1.30 does not know MASQUE (26.9.30 and newer do)' };
+  for (const [lang, want] of [
+    ['en', 'This MASQUE server needs Xray 26.9.30 or newer — update it under Settings → Required files'],
+    ['fa', 'این سرور MASQUE است و به Xray نسخهٔ ≥ 26.9.30 نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن']
+  ]) {
+    const s = H.start({ settings: { lang } });
+    t.after(() => s.service.shutdown());
+    s.state.check = check;
+    await assert.rejects(s.service.invoke('connect', SERVER.id), (e) => e.message === want || assert.fail(e.message));
+    assert.equal(s.state.xray.starts.length, 0, 'nothing started');
+    assert.ok(s.logs.some(l => l.level === 'error' && l.line === 'Config rejected by xray: ' + check.error), 'the core’s own words stay in the log');
+  }
+  // a WARP account names the version it needs
+  const s = H.start({ settings: { lang: 'en' } });
+  t.after(() => s.service.shutdown());
+  s.state.check = Object.assign({}, check, { coreVersion: '26.9.30', need: '26.10.10' });
+  await assert.rejects(s.service.invoke('connect', SERVER.id), /^Error: This MASQUE server needs Xray 26\.10\.10 or newer/);
+});
+
 test('fix 20: a core that is still running when the 20 s are up is still given the gateway (a slow bind is not a death)', async (t) => {
   const s = H.start({}, { waitForLocalPort: async () => false });
   t.after(() => s.service.shutdown());
