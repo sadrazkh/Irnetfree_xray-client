@@ -594,7 +594,9 @@ async function addWarp(args, deps = {}) {
   const log = typeof deps.log === 'function' ? deps.log : () => {};
   let reg = null;
   try {
-    const opts = warpOptions(a);
+    // checked first, so a typo costs no device; warpServers checks the same raw args again
+    // (it takes the dialog's words, not this checked form: «IP تمیز خودم» is `address`, not `custom`)
+    warpOptions(a);
     if (a.mode === 'import') {
       reg = importWarp(a.importText);
       log('WARP: an existing account was imported', 'info');
@@ -609,7 +611,7 @@ async function addWarp(args, deps = {}) {
       log(`WARP: signing up ${via === 'proxy' ? 'through the app\'s connection' : 'directly'}`, 'info');
       reg = await registerWarp({ license, request, now: deps.now, log });
     }
-    const fields = warpServers(reg, opts);
+    const fields = warpServers(reg, a);
     let added;
     try { added = fields.map((f) => deps.createServer(f)); } catch (e) {
       const why = scrub((e && e.message) || String(e), [reg.privateKey, pemBody(reg.privateKey)]);

@@ -82,7 +82,12 @@ test('router: an import needs no network; a bad one, a bad cover, a sign-up thro
   assert.deepEqual(res.added.map((x) => x.name), ['☁ WARP · H3']);
   assert.equal(parser.made[0].vcn, 'www.example.com');
   assert.equal(JSON.stringify(parser.made).includes('never-carried'), false);
+  // «IP تمیز خودم»: the dialog's own address reaches the servers (it was checked twice, the second time without it)
+  res = await s.service.invoke('servers:addWarp', { mode: 'import', importText: usque(), http: 'both', endpoint: 'custom', address: '162.159.198.7:4443' });
+  assert.equal(res.ok, true, res.error);
+  assert.deepEqual(parser.made.slice(-2).map((f) => [f.masqueHttp, f.address, f.port]), [['h3', '162.159.198.7', 4443], ['h2', '162.159.198.7', 4443]]);
   for (const [args, code] of [
+    [{ mode: 'import', importText: usque(), endpoint: 'custom', address: '' }, 'badAddress'],
     [{ mode: 'import', importText: 'vless://nope' }, 'badImport'],
     [{ mode: 'new', cover: 'not a domain' }, 'badCover'],
     [{ mode: 'new', via: 'proxy' }, 'notConnected']
@@ -92,7 +97,7 @@ test('router: an import needs no network; a bad one, a bad cover, a sign-up thro
     assert.ok(res.error);
   }
   assert.equal(api.calls.length, 0);
-  assert.equal((await s.service.invoke('servers:list')).length, 3);
+  assert.equal((await s.service.invoke('servers:list')).length, 5);
 });
 
 test('router: connected, "through the connection" dials the API by name through the gateway’s own SOCKS port — a SOCKS here that refuses, so nothing leaves; said as blocked', async (t) => {
