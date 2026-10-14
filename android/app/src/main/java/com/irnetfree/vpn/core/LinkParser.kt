@@ -871,10 +871,13 @@ object LinkParser {
     /**
      * Serialize a server (with ALL its settings) back into a shareable link. A
      * JSON server shares its config itself, pretty-printed (parser.js buildShareLink).
+     * MASQUE has no link anywhere: it is shared as the one line of Xray JSON it
+     * is (Masque.shareJson), which JsonImport reads back as this very server.
      */
     fun buildShareLink(s: ServerConfig): String {
         val cfg = s.json
         if (s.isJson && cfg != null) return JsonText.pretty(cfg)
+        if (s.protocol == Masque.PROTOCOL) return Masque.shareJson(s)
         val ob = s.outbound
         val name = if (s.name.isNotBlank()) "#" + enc(s.name) else ""
         val st = ob.optJSONObject("streamSettings") ?: JSONObject()
