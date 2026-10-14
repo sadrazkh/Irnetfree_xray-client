@@ -130,7 +130,7 @@ test('the core gate hands the cores every JSON shape: each fixture server in ful
   const { importJson } = require('../src/main/jsonImport');
   const run = dryRun(t);
   assert.equal(run.status, 0, run.out);
-  const fixtures = ['xray-subscription', 'xray-fragment', 'xray-chain', 'xray-balancer', 'xray-wireguard', 'singbox'];
+  const fixtures = ['xray-subscription', 'xray-fragment', 'xray-chain', 'xray-balancer', 'xray-wireguard', 'xray-masque', 'singbox'];
   let xrayServers = 0;
   for (const f of fixtures) {
     const servers = importJson(fs.readFileSync(path.join(__dirname, 'fixtures', 'json', `${f}.json`), 'utf8')).servers;
@@ -143,7 +143,8 @@ test('the core gate hands the cores every JSON shape: each fixture server in ful
       if (s.source === 'json') xrayServers++;
     });
   }
-  assert.equal(xrayServers, 5 + 1 + 1 + 2 + 1);
+  // (xray-masque: its WARP and HTTP/2 servers are ordinary ones, its panel config the one JSON server)
+  assert.equal(xrayServers, 5 + 1 + 1 + 2 + 1 + 1);
   // full mode: the helpers beside the main outbound, renamed; raw: the config as written, the app's inbounds
   const tags = (name) => run.read(name).outbounds.map((o) => o.tag);
   assert.deepEqual(tags('json-xray-fragment-0-full-plain').slice(0, 2), ['proxy', 'proxy~fragment']);
@@ -171,6 +172,39 @@ test('the core gate hands the cores every JSON shape: each fixture server in ful
   const pinned = run.read('json-chain-pinned');
   assert.deepEqual(pinned.dns.hosts['hop.example.com'], ['203.0.113.30']);
   assert.equal(pinned.outbounds.find((o) => o.tag === 'proxy~hop1').streamSettings.sockopt.domainStrategy, 'UseIPv4');
+});
+
+test('the core gate hands the cores every MASQUE shape: HTTP/3 and HTTP/2 with a user, a WARP account over both and behind a cover domain, noise before QUIC and a fragment of the TCP — never Mux, never allowInsecure', { timeout: 60000 }, (t) => {
+  const run = dryRun(t);
+  assert.equal(run.status, 0, run.out);
+  const names = ['h3', 'h2', 'warp-h3', 'warp-h2', 'warp-cover', 'warp-h3-noise', 'warp-h2-fragment'];
+  for (const n of names) for (const v of ['plain', 'tun', 'strict']) assert.ok(run.built.includes(`editor-masque-${n}-${v}.json`), `editor-masque-${n}-${v}`);
+  const st = (name) => run.proxy(name).streamSettings;
+  assert.deepEqual(st('editor-masque-h3-plain').masqueSettings, { user: 'irnf-ci', pass: 'irnf-ci-pass' });
+  assert.equal(st('editor-masque-h3-plain').tlsSettings.alpn, undefined, 'HTTP/3: no ALPN');
+  assert.deepEqual([st('editor-masque-h2-plain').tlsSettings.alpn, st('editor-masque-h2-plain').tlsSettings.fingerprint], [['h2'], 'chrome']);
+  const w = st('editor-masque-warp-h3-plain').masqueSettings.warp;
+  assert.match(w.privateKey, /^MIG/, 'the sign-up’s PEM, as the one line of base64 the record keeps');
+  assert.deepEqual(w.address, ['172.16.0.2/32', '2606:4700:110:8a36::2/128']);
+  assert.equal(run.proxy('editor-masque-warp-h2-plain').settings.address, '162.159.198.2');
+  const cover = st('editor-masque-warp-cover-plain').tlsSettings;
+  assert.deepEqual([cover.serverName, cover.verifyPeerCertByName], ['www.example.com', 'www.example.com']);
+  // anti-DPI: a noise dialer for HTTP/3, a fragment one for HTTP/2 — bound to the NIC under TUN
+  const dpi = (name) => run.read(name).outbounds.filter((o) => /^dpi-/.test(o.tag));
+  assert.deepEqual(dpi('editor-masque-warp-h3-noise-plain').map((o) => [!!o.settings.noises, !!o.settings.fragment]), [[true, false]]);
+  assert.deepEqual(dpi('editor-masque-warp-h2-fragment-plain').map((o) => [!!o.settings.noises, !!o.settings.fragment]), [[false, true]]);
+  assert.equal(dpi('editor-masque-warp-h3-noise-tun')[0].streamSettings.sockopt.interface, 'eth0');
+  assert.equal(st('editor-masque-warp-h3-noise-plain').sockopt.dialerProxy, 'dpi-1');
+  // the table's generic MASQUE server: every field it has but WARP's
+  const ed = run.proxy('editor-masque');
+  assert.deepEqual(ed.settings.remoteDNS, ['1.1.1.1', '2606:4700:4700::1111']);
+  assert.deepEqual(ed.streamSettings.masqueSettings.headers, { 'User-Agent': 'chrome' });
+  assert.equal(ed.streamSettings.tlsSettings.useSystemCA, true);
+  for (const name of run.built.filter((n) => /^editor-masque/.test(n))) {
+    const text = JSON.stringify(run.read(name.replace(/\.json$/, '')));
+    assert.equal(text.includes('"mux"'), false, name);
+    assert.equal(text.includes('allowInsecure'), false, name);
+  }
 });
 
 test('the core gate hands the cores every "via a base" shape (routing profiles): a server and a chain base, explicit / none, a WireGuard and JSON servers through a base and as one — plain, under TUN with pins and mux, under the strict guard', { timeout: 60000 }, (t) => {
