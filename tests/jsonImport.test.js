@@ -18,7 +18,7 @@ const J = require('../src/main/jsonImport');
 const { parseMany, parseLink, applyServerEdits, editFields, buildShareLink } = require('../src/main/parser');
 
 const fixture = (f) => fs.readFileSync(path.join(__dirname, 'fixtures/json', f), 'utf8');
-const FIXTURES = ['xray-subscription.json', 'xray-fragment.json', 'xray-chain.json', 'xray-balancer.json', 'xray-wireguard.json', 'singbox.json'];
+const FIXTURES = ['xray-subscription.json', 'xray-fragment.json', 'xray-chain.json', 'xray-balancer.json', 'xray-wireguard.json', 'xray-masque.json', 'singbox.json'];
 /** A record without its random id, for comparing two imports of the same text. */
 const noId = (s) => Object.assign({}, s, { id: null });
 
