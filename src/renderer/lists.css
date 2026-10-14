@@ -236,8 +236,8 @@
 }
 .ed-switch .switch-title { font-size: 12px; color: var(--ink2); display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; }
 
-/* a new server's protocol */
-.ed-protos { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+/* a new server's protocol: nine of them, three by three */
+.ed-protos { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .ed-proto {
   appearance: none; cursor: pointer; text-align: start;
   display: flex; flex-direction: column; gap: 3px; padding: 10px 11px;
@@ -247,6 +247,44 @@
 .ed-proto small { font: 500 11px var(--ui); color: var(--ink3); }
 .ed-proto.on { border-color: var(--accent); background: var(--accentSoft); color: var(--ink); }
 .ed-proto[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+.ed-proto-top { display: flex; align-items: baseline; }
+.ed-proto .ed-new { font: 600 11px var(--ui); color: var(--ok); margin-inline-start: 6px; }
+
+/* MASQUE: the HTTP version as cards (the + WARP dialog adds a third, "both") */
+.ed-masque { display: flex; flex-direction: column; gap: 12px; }
+.ed-masque > .field-label { display: flex; align-items: baseline; gap: 6px; margin-bottom: -6px; }
+.ed-http { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.ed-http.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.ed-http-opt {
+  appearance: none; cursor: pointer; text-align: start;
+  display: flex; flex-direction: column; gap: 4px; padding: 10px 12px;
+  background: var(--soft); border: 1px solid var(--softline); border-radius: var(--r4);
+  color: var(--ink2); font: 600 12px var(--mono);
+}
+.ed-http-opt .ui { font-family: var(--ui); }
+.ed-http-opt small { font: 500 11px var(--ui); color: var(--ink3); line-height: 1.6; }
+.ed-http-opt.on { border-color: var(--accent); background: var(--accentSoft); color: var(--ink); }
+/* a seg whose options are words, not values: the UI face, never the mono one */
+.ed-seg-wide.ui .seg-btn { font-family: var(--ui); }
+/* a card inside a tab (MASQUE's WARP account): a head with its own switch, its fields under it */
+.ed-card {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 13px 14px; border: 1px solid var(--softline); border-radius: var(--r6);
+  background: color-mix(in srgb, var(--soft) 60%, transparent);
+}
+.ed-card-head { display: flex; align-items: center; gap: 10px; }
+.ed-card-head .ttl { font-weight: 600; font-size: 12px; color: var(--ink); }
+.ed-card-head .sub { font-size: 11px; color: var(--ink3); }
+.ed-card-head .switch { margin-inline-start: auto; }
+.ed-card .ed-grid { margin-bottom: -13px; }
+.ed-chips-read { display: flex; flex-wrap: wrap; gap: 6px; }
+.ed-chips-read span { font: 600 11px var(--ui); padding: 3px 9px; border-radius: 999px; background: var(--okSoft); color: var(--ok); }
+.ed-chips-read span.info { background: var(--infoSoft); color: var(--info); }
+.ed-chips-read span.dim { background: var(--soft); color: var(--ink3); border: 1px solid var(--softline); }
+.ed-chips-read span.bad { background: var(--dangerSoft); color: var(--danger); }
+.ed-chips-read:empty { display: none; }
+/* a line of the grid between two fields (MASQUE's certificate note) */
+.ed-grid > .ed-gridnote { grid-row: span 1; margin: -6px 0 12px; }
 
 /* VLESS Encryption, read back */
 .ed-enc-body { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
@@ -267,6 +305,7 @@
 @media (max-width: 560px) {
   .ed-grid { grid-template-columns: minmax(0, 1fr); }
   .ed-protos { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ed-http, .ed-http.three { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ----------------------------- subscriptions ----------------------------- */
@@ -628,3 +667,62 @@ button.pool-item:hover .pool-add { color: var(--accent); }
 .ed-json-list, .ed-json-rules { margin: 0; padding-inline-start: 20px; font-size: 12px; line-height: 1.7; color: var(--ink3); }
 .ed-json-rules { margin-block-start: 2px; font-family: var(--mono); }
 .ed-json-actions { display: flex; gap: 8px; }
+
+/* ----------------------------- MASQUE and + WARP ----------------------------- */
+
+/*
+ * .superpowers/sdd/masque/design.md §6, the approved sample (mockups/masque.html).
+ * A MASQUE server's card says what it is beside its name — WARP when it holds a
+ * WARP account, h3 or h2 by its HTTP version — and the + WARP dialog makes one
+ * or two of them from a WARP account (app.js renderWarp). Its form controls are
+ * the server editor's own classes (.ed-http, .ed-f, .ed-switch, .ed-chips-read).
+ */
+.btn.is-new { position: relative; }
+.btn.is-new::after {
+  content: ''; position: absolute; top: 5px; inset-inline-end: 5px;
+  width: 6px; height: 6px; border-radius: 99px; background: var(--accent);
+}
+.srv-tags { display: inline-flex; gap: 5px; margin-inline-start: 6px; vertical-align: 1px; }
+.srv-tag {
+  font: 600 11px var(--mono); padding: 0 6px; line-height: 17px;
+  border-radius: 999px; border: 1px solid var(--softline); color: var(--ink3);
+}
+.srv-tag.warp { color: var(--warn); border-color: transparent; background: var(--warnSoft); }
+
+.modal.warp-modal { width: min(600px, 100%); }
+.warp-ico {
+  width: 28px; height: 28px; flex: 0 0 auto; display: grid; place-items: center;
+  border-radius: var(--r4); background: var(--accentSoft); border: 1px solid var(--accentLine);
+  color: var(--accentInk); font-size: 15px;
+}
+.warp-ico.sm { width: 24px; height: 24px; font-size: 13px; }
+.warp-lede { margin: 0; font-size: 12px; line-height: 1.8; color: var(--ink2); }
+.warp-lede b, .warp-modal .hint b { color: var(--ink); font-weight: 600; }
+.warp-step { display: flex; flex-direction: column; gap: 10px; }
+.warp-step + .warp-step { padding-top: 14px; border-top: 1px solid var(--line); }
+.warp-step-head { display: flex; align-items: baseline; gap: 8px; font-weight: 600; font-size: 12px; color: var(--ink); }
+.warp-step-head .n {
+  width: 18px; height: 18px; display: inline-grid; place-items: center; border-radius: 999px;
+  background: var(--soft); border: 1px solid var(--softline); color: var(--ink3); font: 600 11px var(--ui);
+}
+.warp-modal .hint { margin: 0; }
+.warp-modal .ed-grid { margin-bottom: -13px; }
+.warp-route { display: flex; flex-direction: column; gap: 6px; }
+.warp-radio { display: flex; align-items: flex-start; gap: 9px; font-size: 12px; color: var(--ink2); line-height: 1.6; cursor: pointer; }
+.warp-radio input { margin-top: 3px; accent-color: var(--accent); }
+.warp-radio small { display: block; color: var(--ink3); font-size: 11px; }
+.warp-radio.off { cursor: not-allowed; }
+.warp-radio.off > span > span { opacity: .55; }
+.warp-radio.off small { color: var(--warn); }
+.warp-ep .seg { margin-top: 0; }
+.warp-ep .hint { margin-top: 6px; }
+.warp-progress { margin: 0; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--softline); border-radius: var(--r6); background: var(--soft); }
+.warp-progress li { list-style: none; display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--ink2); }
+.warp-progress .ok { color: var(--ok); font-weight: 600; }
+.warp-progress .run { color: var(--accentInk); animation: warp-pulse 1.2s ease-in-out infinite; }
+.warp-progress .k { font: 500 11px var(--mono); color: var(--dim); margin-inline-start: auto; unicode-bidi: isolate; }
+.warp-progress .k.ui { font-family: var(--ui); }
+@keyframes warp-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .warp-progress .run { animation: none; } }
+.warp-error { margin: 0; font-size: 12px; line-height: 1.7; color: var(--danger); background: var(--dangerSoft); border-radius: var(--r4); padding: 8px 11px; }
+.warp-progress .warn { color: var(--warn); font-weight: 600; }

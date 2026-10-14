@@ -184,8 +184,9 @@ test('the stylesheet covers what the JSON surfaces use', () => {
 /* ------------------------------------ the card ------------------------------------ */
 
 function cardHarness() {
-  const src = ['escapeHtml', 'serverCard'].map(fnSource).join('\n');
+  const src = ['escapeHtml', 'sfTable', 'srvTags', 'serverCard'].map(fnSource).join('\n');
   const ctx = vm.createContext({
+    window: { ServerFields: require('../src/renderer/serverFields') },
     document: { createElement: fakeEl },
     state: { activeServerId: null, connected: false, selectedServerId: null, pings: {} },
     t: en,
@@ -272,7 +273,7 @@ function editHarness({ servers, updateServer, flavor } = {}) {
     readServerFields: () => ({}), fillEditForm() {}, updateSpoofLabels() {}, collectEditFields: () => ({ name: 'link' }),
     // the full editor, which a JSON server never reaches (tests/serverEditorUi.test.js has it)
     draftOf: () => ({}), savedEditView: () => 'simple', showEditView() {}, draftProblem: () => null, draftCtx: () => ({}),
-    renderEditPro() {}, renderSimpleExtras() {}, fillMoreInPro() {}, saveNewServer: async () => {},
+    renderEditPro() {}, renderSimpleExtras() {}, renderMasqueSimple() {}, fillMoreInPro() {}, saveNewServer: async () => {},
     setPending() {}, serverInLivePlan: () => false, doReconnect() {},
     renderServers: () => calls.push(['renderServers']), renderPicker() {}, renderChains() {}, renderPool() {}, renderAdvanced() {},
     window: { api: { updateServer: updateServer || (async () => ({ ok: true, servers: [] })) } },

@@ -203,6 +203,7 @@
             <button class="btn ghost" id="btnClearUsage" data-i18n="btn.clearUsage">پاک‌کردن مصرف</button>
             <button class="btn ghost" id="btnClearServers" data-i18n="btn.clearAll">حذف همه</button>
             <button class="btn ghost" id="btnWgOpen" data-i18n="btn.addWg">+ WireGuard</button>
+            <button class="btn ghost" id="btnWarpOpen" data-i18n="btn.addWarp">+ WARP</button>
             <button class="btn ghost" id="btnProxyOpen" data-i18n="btn.addProxy">+ SOCKS/HTTP</button>
             <button class="btn ghost" id="btnManualOpen" data-i18n="btn.addManual">+ دستی</button>
             <button class="btn primary" id="btnAddOpen" data-i18n="btn.add">+ افزودن</button>
@@ -935,6 +936,14 @@
           <div id="edCredWrap"><label class="field-label" id="edCredLabel" data-i18n="edit.uuid">شناسه</label>
             <input type="text" id="edCred" class="input" dir="ltr" /></div>
         </div>
+        <!-- MASQUE: its HTTP version, as two cards (app.js setMasqueHttpForm) -->
+        <div class="ed-masque" id="edMasqueRow" hidden>
+          <div class="field-label"><span data-i18n="sf.masqueHttp">نسخهٔ HTTP</span> <span class="ed-key" dir="ltr">alpn</span></div>
+          <div class="ed-http" id="edMasqueHttp" role="radiogroup">
+            <button type="button" class="ed-http-opt" role="radio" aria-checked="false" data-masque-http="h3"><span><bdi dir="ltr">HTTP/3</bdi></span><small data-i18n="masque.h3Desc">روی QUIC (UDP 443)</small></button>
+            <button type="button" class="ed-http-opt" role="radio" aria-checked="false" data-masque-http="h2"><span><bdi dir="ltr">HTTP/2</bdi></span><small data-i18n="masque.h2Desc">روی TCP 443</small></button>
+          </div>
+        </div>
         <!-- what the Simple view lacked (VLESS flow and Encryption, the VMess cipher, the SS method): drawn from serverFields.js -->
         <div class="ed-simple-extra" id="edSimpleExtra" hidden></div>
         <!-- transport row (hidden for ss/wireguard) -->
@@ -958,6 +967,22 @@
             <input type="text" id="edSni" class="input" dir="ltr" placeholder="e.g. www.google.com" /></div>
           <div id="edHostWrap"><label class="field-label" id="edHostLabel">Host</label>
             <input type="text" id="edHost" class="input" dir="ltr" /></div>
+        </div>
+        <!-- MASQUE: a WARP account's summary (app.js renderMasqueSimple), or a Basic user and password -->
+        <div class="ed-masque" id="edMasqueAuth" hidden>
+          <div class="ed-card" id="edWarpCard" hidden>
+            <div class="ed-card-head">
+              <span class="warp-ico sm" aria-hidden="true">☁</span>
+              <span><span class="ttl" data-i18n="masque.warpTitle">WARP کلادفلر</span><br><span class="sub" data-i18n="masque.warpFromSignup">کلیدها از ثبت‌نام آمده‌اند.</span></span>
+            </div>
+            <div class="ed-chips-read" id="edWarpChips"></div>
+          </div>
+          <div class="grid2" id="edMasqueCred">
+            <div><label class="field-label" data-i18n="sf.masqueUser">نام کاربری</label>
+              <input type="text" id="edMasqueUser" class="input" dir="ltr" spellcheck="false" data-i18n-ph="masque.optional" /></div>
+            <div><label class="field-label" data-i18n="sf.masquePass">رمز عبور</label>
+              <input type="text" id="edMasquePass" class="input" dir="ltr" spellcheck="false" data-i18n-ph="masque.optional" /></div>
+          </div>
         </div>
         <p class="hint" id="edSpoofHint">The SNI is the domain sent in the TLS handshake.</p>
         <label class="switch-row inline-switch" id="edHideSniRow">
@@ -1065,13 +1090,15 @@
               <option value="xray-pattn" data-i18n="engine.pattn">Xray-PattN (patterniha)</option>
               <option value="sing-box" data-i18n="engine.singbox">sing-box (fake ClientHello / uTLS)</option>
             </select></div>
-          <div class="engine-hint"><p class="hint" data-i18n="edit.engineHint">Only this config runs on the chosen core. sing-box needs its binary in bin/; falls back to Xray if missing.</p></div>
+          <div class="engine-hint"><p class="hint" id="edEngineHint" data-i18n="edit.engineHint">Only this config runs on the chosen core. sing-box needs its binary in bin/; falls back to Xray if missing.</p>
+            <!-- MASQUE runs on Xray or Xray-PattN only (app.js hides the sing-box option for it) -->
+            <p class="hint" id="edEngineHintMasque" data-i18n="sf.engine.hint.masque" hidden>sing-box MASQUE ندارد.</p></div>
         </div>
-        <!-- TLS fragmentation (all protocols) -->
+        <!-- TLS fragmentation (all protocols); MASQUE shows one of the two: a fragment over HTTP/2, noise over HTTP/3 -->
         <div class="grid2" id="edFragmentRow">
-          <div><label class="field-label" data-i18n="edit.fragment">Fragment (packets,length,interval — خالی = خاموش)</label>
+          <div id="edFragmentWrap"><label class="field-label" data-i18n="edit.fragment">Fragment (packets,length,interval — خالی = خاموش)</label>
             <input type="text" id="edFragment" class="input" dir="ltr" placeholder="tlshello,100-200,10-20" /></div>
-          <div><label class="field-label" data-i18n="edit.noise">Noise (anti-DPI / fake ClientHello)</label>
+          <div id="edNoiseWrap"><label class="field-label" data-i18n="edit.noise">Noise (anti-DPI / fake ClientHello)</label>
             <select id="edNoise" class="select">
               <option value="off" data-i18n="noise.off">Off</option>
               <option value="random" data-i18n="noise.random">Random</option>
@@ -1108,6 +1135,19 @@
         <button class="btn ghost" id="editCancel" data-i18n="btn.cancel">انصراف</button>
         <span class="ed-foot-note" id="edFootNote"></span>
       </div>
+    </div>
+  </div>
+
+  <!-- + WARP: a WARP account, made here or imported, as MASQUE servers (app.js renderWarp draws the body and foot) -->
+  <div class="modal-overlay" id="warpModal" hidden>
+    <div class="modal warp-modal" role="dialog" aria-modal="true" aria-labelledby="warpTitle">
+      <div class="modal-head">
+        <span class="warp-ico" aria-hidden="true">☁</span>
+        <span class="modal-title" id="warpTitle" data-i18n="warp.title">WARP روی MASQUE</span>
+        <button class="tb-btn" id="warpClose" data-i18n-title="tb.close">&#x2715;</button>
+      </div>
+      <div class="modal-body" id="warpBody"></div>
+      <div class="modal-foot ed-foot" id="warpFoot"></div>
     </div>
   </div>
 
