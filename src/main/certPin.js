@@ -16,6 +16,7 @@ const net = require('net');
 const crypto = require('crypto');
 const { planServers } = require('./engineChoice');
 const { advancedTargets } = require('./routingProfiles');
+const { masqueHttpOf } = require('../renderer/serverFields');
 
 /** SHA-256 (hex, lowercase) of a certificate's DER. */
 function pinOf(der) {
@@ -109,11 +110,13 @@ function directServers(plan) {
  * (`vcn`) has already said what allowInsecure only gestured at. Hysteria is
  * QUIC: a TCP handshake to its port reaches some other service, or nothing,
  * and would pin the wrong certificate (engineChoice runs it on sing-box).
+ * MASQUE never asks: the core refuses allowInsecure there outright (a JSON
+ * config that carries it anyway is refused by the core, not pinned).
  */
 function wantsPin(server) {
   const st = server && server.outbound && server.outbound.streamSettings;
   if (!st || st.security !== 'tls' || !st.tlsSettings || !st.tlsSettings.allowInsecure) return false;
-  if (st.network === 'hysteria') return false;
+  if (st.network === 'hysteria' || st.network === 'masque') return false;
   const tls = st.tlsSettings;
   return !String(tls.pinnedPeerCertSha256 || '').trim() && !String(tls.verifyPeerCertByName || '').trim();
 }
@@ -224,8 +227,18 @@ function recheckDue(server, now, maxAgeMs) {
   return t - at >= max;
 }
 
+/**
+ * A MASQUE server over HTTP/3 listens on QUIC: the TLS dial of the probe is
+ * TCP, which reaches some other service on that port, or nothing — never the
+ * certificate it pinned. Left out of the re-check, like an unreachable one.
+ */
+function quicMasque(s) {
+  const ob = s && s.outbound;
+  return !!ob && ob.protocol === 'masque' && masqueHttpOf(ob.streamSettings && ob.streamSettings.tlsSettings) === 'h3';
+}
+
 async function staleCertPins(servers, probe = fetchLeafPin) {
-  const pinned = (servers || []).filter(s => s && s.certPin && s.address && s.port);
+  const pinned = (servers || []).filter(s => s && s.certPin && s.address && s.port && !quicMasque(s));
   const out = [];
   await Promise.all(pinned.map(async (s) => {
     const st = (s.outbound && s.outbound.streamSettings) || {};
