@@ -109,16 +109,28 @@ function readSocksAddr(b, off) {
   return { host, port: b.readUInt16BE(at), end: at + 2 };
 }
 
-/** GET http://<host>/<pathname> through SOCKS5; resolves the body as a Buffer. */
-function get(socksPort, host, pathname, timeoutMs = 20000) {
+/**
+ * GET http://<host>/<pathname> through SOCKS5. Done when Content-Length bytes
+ * are in (or, with `waitClose`, when the connection closes too):
+ * { body, ms: until the whole body, closeMs: until the close (waitClose only) }.
+ */
+function get(socksPort, host, pathname, timeoutMs = 20000, waitClose = false) {
   return new Promise((resolve, reject) => {
+    const t0 = Date.now();
     const s = net.connect(socksPort, '127.0.0.1');
     let settled = false;
     const fail = (e) => { if (settled) return; settled = true; s.destroy(); reject(e instanceof Error ? e : new Error(String(e))); };
     s.setTimeout(timeoutMs, () => fail(new Error('timed out')));
     s.on('error', fail);
-    let stage = 0;
+    let stage = 0, total = 0, headEnd = -1, want = -1, bodyAt = 0;
     const chunks = [];
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      const raw = Buffer.concat(chunks);
+      s.destroy();
+      resolve({ body: raw.slice(headEnd + 4, want >= 0 ? headEnd + 4 + want : undefined), ms: (bodyAt || Date.now()) - t0, closeMs: Date.now() - t0 });
+    };
     s.on('connect', () => s.write(Buffer.from([5, 1, 0])));
     s.on('data', (d) => {
       if (stage === 0) {
@@ -132,14 +144,25 @@ function get(socksPort, host, pathname, timeoutMs = 20000) {
         return void s.write('GET ' + pathname + ' HTTP/1.1\r\nHost: ' + name + '\r\nConnection: close\r\n\r\n');
       }
       chunks.push(d);
+      total += d.length;
+      if (headEnd < 0) {
+        const raw = Buffer.concat(chunks.splice(0));
+        chunks.push(raw);
+        headEnd = raw.indexOf('\r\n\r\n');
+        if (headEnd >= 0) {
+          const m = /\r\ncontent-length:\s*(\d+)/i.exec(raw.slice(0, headEnd).toString('latin1'));
+          want = m ? Number(m[1]) : -1;
+        }
+      }
+      if (headEnd >= 0 && want >= 0 && !bodyAt && total - headEnd - 4 >= want) {
+        bodyAt = Date.now();
+        if (!waitClose) finish();
+      }
     });
     s.on('close', () => {
       if (settled) return;
-      settled = true;
-      const raw = Buffer.concat(chunks);
-      const cut = raw.indexOf('\r\n\r\n');
-      if (cut < 0) return reject(new Error(raw.length ? 'no HTTP response' : 'closed with nothing'));
-      resolve(raw.slice(cut + 4));
+      if (headEnd < 0) return fail(new Error(total ? 'no HTTP response' : 'closed with nothing'));
+      finish();
     });
   });
 }
@@ -341,11 +364,10 @@ async function tunnel(label, socksPort, pin, h2, server) {
   const took = [];
   for (let r = 0; r < ROUNDS; r++) {
     rounds++;
-    const t0 = Date.now();
     try {
-      const b = await get(socksPort, TARGET4, '/');
-      if (b.toString() === 'MASQUE-OK') { ok++; took.push(Date.now() - t0); }
-      else miss('body ' + JSON.stringify(b.toString('latin1').slice(0, 20)));
+      const { body, ms } = await get(socksPort, TARGET4, '/');
+      if (body.toString() === 'MASQUE-OK') { ok++; took.push(ms); }
+      else miss('body ' + JSON.stringify(body.toString('latin1').slice(0, 20)));
     } catch (e) { miss(e.message); }
     if (rounds === 3 && ok === 0) break; // nothing through the tunnel: the rest would only wait out the same timeouts
   }
@@ -361,17 +383,25 @@ async function tunnel(label, socksPort, pin, h2, server) {
     ok === ROUNDS ? [] : detail);
 
   try {
-    const b = await get(socksPort, TARGET6, '/');
-    report(b.toString() === 'MASQUE-OK', `${label} · page through ${TARGET6} (IPv6 in the tunnel)`, b.toString() === 'MASQUE-OK' ? 'answered' : 'body ' + JSON.stringify(b.toString('latin1').slice(0, 20)));
+    const { body, ms } = await get(socksPort, TARGET6, '/');
+    const good = body.toString() === 'MASQUE-OK';
+    report(good, `${label} · page through ${TARGET6} (IPv6 in the tunnel)`, good ? `answered in ${ms} ms` : 'body ' + JSON.stringify(body.toString('latin1').slice(0, 20)));
   } catch (e) { report(false, `${label} · page through ${TARGET6} (IPv6 in the tunnel)`, e.message); }
 
   const t0 = Date.now();
   try {
-    const b = await get(socksPort, TARGET4, '/big', 60000);
-    const s = (Date.now() - t0) / 1000;
-    const same = b.length === BIG && crypto.createHash('sha256').update(b).digest('hex') === BIG_SHA;
-    report(same, `${label} · 2 MB in one piece`, same ? `${s.toFixed(2)} s, ${(BIG / 1048576 / s).toFixed(1)} MB/s` : `${b.length} bytes, ${b.length === BIG ? 'other bytes' : 'cut short'}`);
+    const { body, ms } = await get(socksPort, TARGET4, '/big', 60000);
+    const s = ms / 1000;
+    const same = body.length === BIG && crypto.createHash('sha256').update(body).digest('hex') === BIG_SHA;
+    report(same, `${label} · 2 MB in one piece`, same ? `${s.toFixed(2)} s, ${(BIG / 1048576 / s).toFixed(1)} MB/s` : `${body.length} bytes, ${body.length === BIG ? 'other bytes' : 'cut short'}`);
   } catch (e) { report(false, `${label} · 2 MB in one piece`, e.message + ' after ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s'); }
+
+  // For the record: how long after the whole body the server's close (Connection:
+  // close) reaches the client — a client that reads to EOF waits this long.
+  try {
+    const { ms, closeMs } = await get(socksPort, TARGET4, '/', 20000, true);
+    report(null, `${label} · the server's close reaches the client`, `${closeMs - ms} ms after the body (not gated)`);
+  } catch (e) { report(null, `${label} · the server's close reaches the client`, e.message + ' (not gated)'); }
 
   try {
     const u = await udpEcho(socksPort);
@@ -385,8 +415,8 @@ async function tunnel(label, socksPort, pin, h2, server) {
     const before = server.text().length;
     let what;
     try {
-      const b = await get(socksPort, '127.0.0.1', '/', 8000);
-      what = b.toString() === 'MASQUE-OK' ? 'answered' : 'answered something else';
+      const { body } = await get(socksPort, '127.0.0.1', '/', 8000);
+      what = body.toString() === 'MASQUE-OK' ? 'answered' : 'answered something else';
     } catch (e) { what = 'no answer: ' + e.message; }
     const seen = /127\.0\.0\.1:80(?!\d)/.test(server.text().slice(before));
     report(null, `${label} · target 127.0.0.1 inside the tunnel`, `${what}; the server ${seen ? 'saw' : 'never saw'} that flow (not gated)`);
@@ -405,9 +435,9 @@ async function refused(label, socksPort, pin, h2, server) {
   const why = [];
   for (let i = 0; i < 2; i++) {
     try {
-      const b = await get(socksPort, TARGET4, '/', 15000);
-      if (b.toString() === 'MASQUE-OK') through++;
-      else why.push('body ' + JSON.stringify(b.toString('latin1').slice(0, 20)));
+      const { body } = await get(socksPort, TARGET4, '/', 15000);
+      if (body.toString() === 'MASQUE-OK') through++;
+      else why.push('body ' + JSON.stringify(body.toString('latin1').slice(0, 20)));
     } catch (e) { why.push(e.message); }
   }
   await sleep(300);
