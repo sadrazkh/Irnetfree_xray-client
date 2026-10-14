@@ -53,6 +53,7 @@ const { exportBundle, importBundle } = require('./backup');
 const { createRouteShareApi } = require('./routeShare');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
 const { CORE_IDS, createCoreVersionsApi } = require('./coreVersions');
+const { warpHandler } = require('./warp');
 const https = require('https');
 
 let mainWindow = null;
@@ -2842,6 +2843,20 @@ function registerIpc() {
     setServers(existing);
     return { ok: true, server, servers: existing };
   });
+
+  // + WARP (warp.js): a WARP device registered — straight out, or through the
+  // live connection's own SOCKS port — or imported, and one MASQUE server per
+  // HTTP version made by createServer and saved like servers:create. One
+  // sign-up at a time; the reason a refusal has comes back as a code.
+  const addWarp = warpHandler({
+    createServer,
+    connected: () => conn.state === 'connected',
+    socksPort: () => (appliedSettings || getSettings()).socksPort,
+    getServers: () => store.get('servers', []),
+    setServers,
+    log: (line, level) => send('log', { line, level: level || 'info' })
+  });
+  ipcMain.handle('servers:addWarp', (e, args) => addWarp(args || {}));
 
   // Read a WireGuard .conf the user picks, and parse .conf text into form fields.
   ipcMain.handle('wg:pickConf', async () => {
