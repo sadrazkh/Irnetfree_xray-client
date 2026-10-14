@@ -28,29 +28,35 @@ const CORE_NAMES = { xray: 'Xray', 'xray-pattn': 'Xray-PattN', 'sing-box': 'sing
  * with. One value per core; each comment says where it was verified.
  */
 const SUGGESTED = Object.freeze({
-  // XTLS/Xray-core 26.9.30, verified in CI: the `cores` job (.github/workflows/
+  // XTLS/Xray-core 26.10.10, verified in CI: the `cores` job (.github/workflows/
   // test.yml) hands it every config shape this app writes — the plans, the DNS
-  // modes, TUN, the v1.18 link forms (scripts/validate-configs.js) — through
-  // `xray run -test`, the version read from this table. XTLS has marked every
-  // release after 26.3.27 a pre-release, so 26.3.27 is still the newest one it
-  // calls stable; v2rayN 7.25.4 (a stable release) and v2rayNG 2.3.10 ship
-  // 26.9.30. A plain download installs the newer of the two
-  // (Downloader.defaultRelease). The oldest official core each part was checked
-  // on stays 26.3.27: the DNS block's server objects and the REFUSED hijack
-  // rules (dnsBuilder.js), the certificate pins (certPin.js), the finalmask line
-  // (xrayManager.js FINALMASK_SINCE), the router's LAN DNS (service.js
-  // CORE_DNS_VERIFIED, openwrt/install.sh).
-  xray: '26.9.30',
+  // modes, TUN, the v1.18 link forms, the server editor's every field
+  // (scripts/validate-configs.js) — through `xray run -test`, the version read
+  // from this table, and it is the client of the real-peer WireGuard probe
+  // (scripts/probe-wg-base.js). Over 26.9.30 it fixes a gRPC outbound that never
+  // redialled after a lost connection (XTLS/Xray-core#6876), two Mux client bugs
+  // (#6870, #6822) and Hysteria's QUIC clients outliving the core (#7100); TLS
+  // now checks certificates against its own root store, not the OS's (#7105).
+  // XTLS has marked every release after 26.3.27 a pre-release, so 26.3.27 is
+  // still the newest one it calls stable. A plain download installs the newer of
+  // the two (Downloader.defaultRelease). The oldest official core each part was
+  // checked on stays 26.3.27: the DNS block's server objects and the REFUSED
+  // hijack rules (dnsBuilder.js), the certificate pins (certPin.js), the
+  // finalmask line (xrayManager.js FINALMASK_SINCE), the router's LAN DNS
+  // (service.js CORE_DNS_VERIFIED, openwrt/install.sh).
+  xray: '26.10.10',
 
-  // patterniha/Xray-core 26.9.22, verified on the owner's router: the AC-1304 has
-  // run this release line on it since the v1.16.2 field round, whose log
-  // (xray-pattn 26.9.22) the router's DNS and open-files fixes were made from and
-  // confirmed on. 26.9.1 is where the desktop's DNS hijack rules, certificate
-  // pins and chained WireGuard were first verified (dnsBuilder.js, certPin.js,
-  // docs/releases/v1.7.2.md); 26.9.22 runs those same config builders (the
-  // desktop's are pinned byte for byte, tests/desktopPin.test.js) and is the
-  // newest build known to work with them end to end.
-  'xray-pattn': '26.9.22',
+  // patterniha/Xray-core 26.10.13, verified in CI like the official core (every
+  // config through `xray run -test`) and as the client of the real-peer
+  // WireGuard probe, which 26.9.22 failed: from XTLS/Xray-core#6771 until #6804
+  // (in the fork from 26.9.24) a WireGuard endpoint that is an IP went to
+  // app/dns as a name and came back nil whenever the DNS block names a server —
+  // and the app writes WireGuard endpoints as IPs. 26.9.22 is still what the
+  // owner's router field rounds ran (v1.16.2: its DNS and open-files fixes);
+  // 26.9.1 is where the desktop's DNS hijack rules, certificate pins and chained
+  // WireGuard were first verified (dnsBuilder.js, certPin.js,
+  // docs/releases/v1.7.2.md).
+  'xray-pattn': '26.10.13',
 
   // SagerNet/sing-box 1.14.3, verified on a REAL TUN in CI (test.yml `tun-dns`,
   // scripts/tun-dns-probe.js): with the dns_mode "disabled" tunSingbox writes

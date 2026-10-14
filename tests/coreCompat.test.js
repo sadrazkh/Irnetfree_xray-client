@@ -112,3 +112,43 @@ test('adaptForCore never changes its input', () => {
   adaptForCore(c, '26.3.27');
   assert.equal(JSON.stringify(c), before);
 });
+
+// XDNS (XTLS/Xray-core#7090): a domain's `name` became `names`, a resolver's
+// { type, settings: { addr } } became { addrs }. Each core ignores the other's
+// keys — the config builds and every dial fails "empty domains".
+const XDNS_OLD = { type: 'xdns', settings: { domains: [{ name: 't.example.com', types: [16] }], resolvers: [{ type: 'udp', settings: { addr: '1.1.1.1:53' } }, { type: 'tcp', settings: { addr: '8.8.8.8:53' } }], extraPoll: 0 } };
+const XDNS_NEW = { type: 'xdns', settings: { domains: [{ names: ['a.example', 'b.example'], edns0: 1232 }], resolvers: [{ addrs: ['1.1.1.1', 'tcp://8.8.8.8', '[2606:4700::1111]:5353', '2606:4700::1001'] }] } };
+const NOISE = { type: 'noise', settings: { noise: [{ type: 'rand', packet: '10-20' }] } };
+
+test('XDNS from 26.10.5: a link\'s older domains and resolvers become names / addrs, on any transport', () => {
+  const c = cfg({ network: 'xhttp', security: 'tls', finalmask: { udp: [NOISE, XDNS_OLD] } });
+  assert.equal(needsCoreVersion(c), true);
+  for (const v of ['26.10.10', '26.10.13', '']) {
+    assert.deepEqual(ss(adaptForCore(c, v)).finalmask.udp, [NOISE, { type: 'xdns', settings: {
+      domains: [{ types: [16], names: ['t.example.com'] }],
+      resolvers: [{ addrs: ['udp://1.1.1.1:53'] }, { addrs: ['tcp://8.8.8.8:53'] }], extraPoll: 0
+    } }], v);
+  }
+  // already in that form: nothing to do, the same object back
+  const fresh = cfg({ network: 'xhttp', finalmask: { udp: [XDNS_NEW] } });
+  assert.equal(adaptForCore(fresh, '26.10.10'), fresh);
+});
+
+test('XDNS up to 26.10.3: names / addrs become one domain per name and one resolver per address, port 53 by default', () => {
+  for (const v of ['26.9.30', '26.10.3']) {
+    assert.deepEqual(ss(adaptForCore(cfg({ network: 'kcp', finalmask: { udp: [XDNS_NEW] } }), v)).finalmask.udp, [{ type: 'xdns', settings: {
+      domains: [{ name: 'a.example', edns0: 1232 }, { name: 'b.example', edns0: 1232 }],
+      resolvers: [
+        { type: 'udp', settings: { addr: '1.1.1.1:53' } }, { type: 'tcp', settings: { addr: '8.8.8.8:53' } },
+        { type: 'udp', settings: { addr: '[2606:4700::1111]:5353' } }, { type: 'udp', settings: { addr: '[2606:4700::1001]:53' } }
+      ]
+    } }], v);
+  }
+  // already in the older form: the same object back
+  const old = cfg({ network: 'kcp', finalmask: { udp: [XDNS_OLD] } });
+  assert.equal(adaptForCore(old, '26.9.30'), old);
+  // beside a link's mKCP header and seed: both adapt
+  const both = ss(adaptForCore(cfg(Object.assign({}, KCP, { finalmask: { udp: [XDNS_OLD] } })), '26.10.10'));
+  assert.deepEqual(both.finalmask.udp.map((m) => m.type), ['mkcp-legacy', 'mkcp-legacy', 'xdns']);
+  assert.deepEqual(both.finalmask.udp[2].settings.domains, [{ types: [16], names: ['t.example.com'] }]);
+});
