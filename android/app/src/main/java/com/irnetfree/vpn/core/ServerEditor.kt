@@ -37,6 +37,8 @@ object ServerEditor {
         // the Pro view's own: TCP's HTTP header (none / http), Hysteria2's hop
         // interval and bandwidth, a Shadowsocks SIP003 plugin
         var tcpHeader: String = "none", var hy2Hop: String = "", var hy2Up: String = "", var hy2Down: String = "", var plugin: String = "",
+        // MASQUE's HTTP version: "h3" (QUIC, no ALPN) or "h2" (TCP, ALPN h2) — Masque.httpOf
+        var masqueHttp: String = "h3",
         // every path field of ServerFields (the desktop's serverFields.js) that
         // applies, as the form shows it ("true" / "" for a switch) — VLESS flow and
         // Encryption, the finer transport and TLS knobs, sockopt, Mux for this server
@@ -76,6 +78,15 @@ object ServerEditor {
                 }
                 f.wgDns = (s.dns + s.dnsDomains).joinToString(", ")
             }
+            "masque" -> {
+                // what a subscription refresh knows the server by (SubRefresh.identity, the
+                // desktop's serverIdentity): a WARP account by its device key, a server of
+                // one's own by its user and password — the editor writes them as the
+                // table's fields (masqueUser, masquePass, warp*), not these
+                val ms = st.optJSONObject("masqueSettings") ?: JSONObject()
+                f.cred = Masque.text(ms.optJSONObject("warp"), "privateKey")
+                f.proxyUser = Masque.text(ms, "user"); f.proxyPass = Masque.text(ms, "pass")
+            }
         }
         // transport / tls details
         st.optJSONObject("wsSettings")?.let { f.path = it.optString("path"); f.host = it.optJSONObject("headers")?.optString("Host") ?: "" }
@@ -104,6 +115,16 @@ object ServerEditor {
             f.hy2Hop = h["hopInterval"] ?: ""; f.hy2Up = h["up"] ?: ""; f.hy2Down = h["down"] ?: ""
         }
         if (s.protocol == "shadowsocks") f.plugin = LinkParser.ssPluginOf(st)
+        if (s.protocol == "masque") {
+            // always MASQUE over TLS; no fingerprint unless the record names one (HTTP/3 has none);
+            // never allowInsecure (the core refuses it); its path and host for the identity
+            val tls = st.optJSONObject("tlsSettings")
+            val ms = st.optJSONObject("masqueSettings")
+            f.network = "masque"; f.security = "tls"
+            f.fp = Masque.text(tls, "fingerprint"); f.allowInsecure = false
+            f.masqueHttp = Masque.httpOf(tls)
+            f.path = Masque.text(ms, "path"); f.host = Masque.text(ms, "host")
+        }
         // every other field of the table, where it applies
         val ctx = ServerFields.contextOf(s)
         for (fld in ServerFields.PATH_FIELDS) {
@@ -168,6 +189,7 @@ object ServerEditor {
             }
             "wireguard" -> patchWireguard(ob, was, f, if (moved) "$addr:$port" else null)
             "hysteria2" -> { patchHysteria2(ob, was, f, addr, port, moved); true }
+            "masque" -> { patchMasque(ob, was, f, addr, port); true }
             else -> true
         }
         val out = if (patched) ob else rebuilt(s, f, addr, port)
@@ -186,14 +208,20 @@ object ServerEditor {
             if (now == (was.pro[fld.id] ?: "")) continue
             ServerFields.setPath(out, p, ServerFields.fromForm(fld, now))
         }
-        // the record's own (Mux for this server): the form's where it holds one
-        val muxNow = f.pro["mux"]?.let { v: String -> if (v == "on" || v == "off") v else "" } ?: s.mux
-        val muxC = recordNumber(f, "muxConcurrency", s.muxConcurrency)
-        val xudpC = recordNumber(f, "xudpConcurrency", s.xudpConcurrency)
+        // the record's own (Mux for this server): the form's where it holds one —
+        // never MASQUE's (the core refuses a MASQUE outbound with Mux)
+        val masque = s.protocol == "masque"
+        val muxNow = if (masque) "" else f.pro["mux"]?.let { v: String -> if (v == "on" || v == "off") v else "" } ?: s.mux
+        val muxC = if (masque) null else recordNumber(f, "muxConcurrency", s.muxConcurrency)
+        val xudpC = if (masque) null else recordNumber(f, "xudpConcurrency", s.xudpConcurrency)
         // TLS fragmentation / noise: an emptied field clears it.
         if (!patched || f.fragment != was.fragment) { if (f.fragment.isBlank()) out.remove("_fragment") else out.put("_fragment", f.fragment.trim()) }
         if (!patched || f.noise != was.noise) { if (f.noise.isBlank()) out.remove("_noise") else out.put("_noise", f.noise.trim()) }
-        val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" }
+        // what the core would refuse a MASQUE server for, said now — or put right
+        // (a WARP key's PEM made one line, anti-DPI for the HTTP version it has)
+        if (masque) Masque.check(out)
+        // sing-box has no MASQUE (EngineChoice runs it on Xray): never stored for it
+        val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" && !(masque && it == EngineChoice.SINGBOX) }
         val (dns, dnsDomains) = if (s.protocol == "wireguard") LinkParser.splitDnsField(f.wgDns) else (s.dns to s.dnsDomains)
         val saved = s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = out, engine = engine, dns = dns, dnsDomains = dnsDomains,
             mux = muxNow, muxConcurrency = muxC, xudpConcurrency = xudpC)
@@ -233,7 +261,9 @@ object ServerEditor {
         "hy2Obfs" to Fields::hy2Obfs, "hy2Ports" to Fields::hy2Ports,
         // the Pro view's
         "tcpHeader" to Fields::tcpHeader, "hy2Hop" to Fields::hy2Hop, "hy2Up" to Fields::hy2Up, "hy2Down" to Fields::hy2Down,
-        "plugin" to Fields::plugin, "xmode" to Fields::xmode, "seed" to Fields::seed, "headerType" to Fields::headerType, "spx" to Fields::spx
+        "plugin" to Fields::plugin, "xmode" to Fields::xmode, "seed" to Fields::seed, "headerType" to Fields::headerType, "spx" to Fields::spx,
+        // MASQUE's HTTP version (its other fields are the table's)
+        "masqueHttp" to Fields::masqueHttp
     )
 
     /** The table's path fields this record keeps under their own id (ServerFields; the SS method is [Fields.method]). */
@@ -379,6 +409,37 @@ object ServerEditor {
         if (f.spx != was.spx && st.optString("security") == "reality") child(st, "realitySettings").put("spiderX", f.spx.trim())
     }
 
+    /**
+     * MASQUE: the core's flat settings and its own stream, always MASQUE over
+     * TLS (`method` is the core's other spelling of the network, and goes).
+     * The TLS basics the sheet changed are written, an emptied one clearing its
+     * key; HTTP/2 is ALPN h2 and HTTP/3 no ALPN at all — an ALPN that already
+     * says the version asked for is left as it is (parser.js applyServerEdits).
+     * Everything else is the table's path fields; Masque.check comes last.
+     */
+    private fun patchMasque(ob: JSONObject, was: Fields, f: Fields, addr: String, port: Int) {
+        child(ob, "settings").put("address", addr).put("port", port)
+        val st = child(ob, "streamSettings")
+        st.put("network", "masque").put("security", "tls")
+        st.remove("method"); st.remove("realitySettings")
+        child(st, "masqueSettings")
+        val tls = child(st, "tlsSettings")
+        fun put(key: String, v: String) { if (v.isEmpty()) tls.remove(key) else tls.put(key, v) }
+        if (f.sni != was.sni) put("serverName", f.sni.trim())
+        if (f.fp != was.fp) put("fingerprint", f.fp.trim())
+        if (f.ech != was.ech) put("echConfigList", f.ech.trim())
+        if (f.pcs != was.pcs) put("pinnedPeerCertSha256", LinkParser.pinList(f.pcs))
+        if (f.vcn != was.vcn) put("verifyPeerCertByName", list(f.vcn).joinToString(","))
+        val http = f.masqueHttp.trim().lowercase()
+        if ((http == "h2" || http == "h3") && http != Masque.httpOf(tls)) {
+            if (http == "h2") tls.put("alpn", JSONArray().put("h2")) else tls.remove("alpn")
+        }
+        if (f.finalMask != was.finalMask) {
+            val fm = f.finalMask.trim().takeIf { x: String -> x.isNotEmpty() }?.let { x: String -> try { JSONObject(x) } catch (e: Exception) { null } }
+            if (fm != null && fm.length() > 0) st.put("finalmask", fm) else st.remove("finalmask")
+        }
+    }
+
     /** A record number of the form ([Fields.pro]): its value when the form holds the key ("" clears it), else [was]. */
     private fun recordNumber(f: Fields, key: String, was: Int?): Int? =
         if (f.pro.containsKey(key)) f.pro[key]?.trim()?.toIntOrNull()?.takeIf { n: Int -> n > 0 } else was
@@ -420,7 +481,12 @@ object ServerEditor {
                 .put("streamSettings", JSONObject().put("network", "tcp"))
             "hysteria2" -> LinkParser.buildHysteria2Outbound(mapOf("address" to addr, "port" to port.toString(), "auth" to f.cred.trim(), "sni" to f.sni.trim()))
             "wireguard" -> LinkParser.buildWireguardOutbound(f.cred.trim(), f.wgPub.trim(), "$addr:$port", f.wgAddr.trim(), f.wgPsk.trim(), f.wgMtu, f.wgReserved, f.wgAllowed)
-            else -> LinkParser.proxyOutbound(protocol, addr, port, f.proxyUser.trim(), f.proxyPass.trim())
+            // the bare outbound: apply below writes every field into it and checks it (Masque.check);
+            // nothing is required beyond the address — its user and password are optional, a WARP
+            // account's three fields all-or-none
+            "masque" -> Masque.bareOutbound(addr, port)
+            "socks", "http" -> LinkParser.proxyOutbound(protocol, addr, port, f.proxyUser.trim(), f.proxyPass.trim())
+            else -> throw IllegalArgumentException("Unknown protocol: $protocol")
         }
         val (dns, dnsDomains) = if (protocol == "wireguard") LinkParser.splitDnsField(f.wgDns) else (emptyList<String>() to emptyList<String>())
         val bare = ServerConfig(id = newId("s"), name = f.name.trim().ifEmpty { "$protocol-$addr" }, protocol = protocol,
@@ -445,7 +511,8 @@ object ServerEditor {
         }
         val net = normNet(f.network)
         d["network"] = if (net == "raw") "tcp" else net
-        d["security"] = if (protocol == "hysteria2") "tls" else f.security
+        d["security"] = if (ServerFields.tlsOnly(protocol)) "tls" else f.security
+        d["masqueHttp"] = if (f.masqueHttp == "h2") "h2" else "h3"
         d["sni"] = f.sni; d["host"] = f.host; d["path"] = f.path; d["fp"] = f.fp; d["pbk"] = f.pbk; d["sid"] = f.sid; d["alpn"] = f.alpn
         d["allowInsecure"] = if (f.allowInsecure) "true" else ""
         d["method"] = f.method
@@ -475,7 +542,8 @@ object ServerEditor {
         // the same transport under another name (raw for tcp) is no change
         val net = d["network"]
         if (net != null && normNet(net) != normNet(f.network).let { n: String -> if (n == "raw") "tcp" else n }) f.network = net
-        if (protocol != "hysteria2") f.security = v("security", f.security)
+        if (!ServerFields.tlsOnly(protocol)) f.security = v("security", f.security)
+        f.masqueHttp = v("masqueHttp", f.masqueHttp)
         f.sni = v("sni", f.sni); f.host = v("host", f.host); f.path = v("path", f.path); f.fp = v("fp", f.fp)
         f.pbk = v("pbk", f.pbk); f.sid = v("sid", f.sid); f.alpn = v("alpn", f.alpn)
         f.allowInsecure = (d["allowInsecure"] ?: (if (f.allowInsecure) "true" else "")) == "true"
@@ -503,6 +571,8 @@ object ServerEditor {
         d["encryption"] = "none"; d["flow"] = ""; d["vmessSecurity"] = "auto"; d["alterId"] = "0"
         d["uot"] = if (protocol == "shadowsocks") "true" else ""
         d["engine"] = "xray"
+        // MASQUE: HTTP/3 by default, and no browser fingerprint (HTTP/3 has none; HTTP/2 may take one)
+        if (protocol == "masque") { d["masqueHttp"] = "h3"; d["fp"] = "" }
         if (keep != null) for (k in listOf("name", "address")) { val v = keep[k]; if (!v.isNullOrBlank()) d[k] = v }
         return d
     }
@@ -514,13 +584,24 @@ object ServerEditor {
         else ServerFields.str("edit.err.in").replace("{field}", label).replace("{why}", ServerFields.str(p.third))
     }
 
-    /** Is this field part of the form for draft [d]? The table says, and TCP's Host and path only with its HTTP header. */
+    /**
+     * Is this field part of the form for draft [d]? The table says, and TCP's
+     * Host and path only with its HTTP header; MASQUE's anti-DPI only where it
+     * does anything — a fragment over HTTP/2 (TCP), noise over HTTP/3 (UDP).
+     */
     fun shown(protocol: String, d: Map<String, String>, fld: SfField): Boolean {
-        val ctx = ServerFields.Ctx(protocol, d["network"] ?: "tcp", if (protocol == "hysteria2") "tls" else (d["security"] ?: "none"))
+        val net = if (protocol == "masque") "masque" else (d["network"] ?: "tcp")
+        val ctx = ServerFields.Ctx(protocol, net, if (ServerFields.tlsOnly(protocol)) "tls" else (d["security"] ?: "none"))
         if (!ServerFields.applies(fld, ctx)) return false
         if ((fld.id == "host" || fld.id == "path") && ctx.network == "tcp") return d["headerType"] == "http"
+        if (protocol == "masque" && fld.id == "fragment") return d["masqueHttp"] == "h2"
+        if (protocol == "masque" && fld.id == "noise") return d["masqueHttp"] != "h2"
         return true
     }
+
+    /** The cores a server of [protocol] may ask for: sing-box has no MASQUE (EngineChoice runs it on Xray). */
+    fun engineOptions(protocol: String): List<String> =
+        if (protocol == "masque") listOf(EngineChoice.XRAY, EngineChoice.PATTN) else listOf(EngineChoice.XRAY, EngineChoice.PATTN, EngineChoice.SINGBOX)
 
     /** What a save of draft [d] cannot send: (field id, tab, i18n key), or null (the desktop's draftProblem). */
     fun problem(protocol: String, d: Map<String, String>, isNew: Boolean, encryptionOn: Boolean): Triple<String, String, String>? {

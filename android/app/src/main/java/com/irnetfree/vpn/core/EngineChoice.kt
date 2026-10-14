@@ -61,9 +61,16 @@ object EngineChoice {
             server.certPin.isBlank()
     }
 
+    /**
+     * A MASQUE server (a JSON one too): only the Xray cores run it — sing-box
+     * has no MASQUE and no WARP at all — whatever the record says (engineChoice.js isMasque).
+     */
+    fun isMasque(server: ServerConfig?): Boolean = Masque.isMasque(server)
+
     /** The core for this plan. `defaultEngine` is the app-wide setting. */
     fun chooseEngine(plan: ConnectionPlan?, defaultEngine: String = XRAY): String {
         val def = if (defaultEngine == PATTN) PATTN else XRAY
+        if (plan is ConnectionPlan.Single && isMasque(plan.server)) return if (plan.server.engine == PATTN) PATTN else def
         if (plan is ConnectionPlan.Single) return plan.server.engine?.takeIf { it.isNotBlank() }
             ?: if (needsInsecureCore(plan.server)) SINGBOX else def
         return if (planServers(plan).any { it.engine == PATTN }) PATTN else def

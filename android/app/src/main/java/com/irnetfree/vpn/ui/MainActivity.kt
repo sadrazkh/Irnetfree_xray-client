@@ -1575,6 +1575,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     listOf(
                         "import" to "Link or subscription",
                         "wg" to "WireGuard",
+                        "warp" to "WARP (MASQUE)",
                         "proxy" to "SOCKS / HTTP",
                         "manual" to "Manual (any protocol)"
                     ).forEach { (key, label) ->
@@ -1903,6 +1904,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             else { smartImport(importText); importText = ""; setSheet(null); bump() }
         }
         "wg" -> WgSheet(store, { setSheet(null) }) { setSheet(null); bump() }
+        "warp" -> WarpSheet(store, { setSheet(null) }) { setSheet(null); bump() }
         "proxy" -> ProxySheet(store, { setSheet(null) }) { setSheet(null); bump() }
         "manual" -> NewServerSheet(store, { setSheet(null) }) { setSheet(null); bump() }
         else -> {}
@@ -1974,7 +1976,7 @@ private fun latColor(ms: Long?): Color = when {
     onDelete: () -> Unit
 ) {
     val (flag, label) = ServerLabel.split(s.name)
-    val where = "${badge(s.protocol)} · ${s.address}" + if (s.port > 0) ":${s.port}" else ""
+    val where = "${badge(s.protocol)}${protoTags(s)} · ${s.address}" + if (s.port > 0) ":${s.port}" else ""
 
     Column(
         Modifier.fillMaxWidth()
@@ -2118,8 +2120,9 @@ private fun latColor(ms: Long?): Color = when {
     // A JSON server's QR holds its config, minified — when it fits one (the
     // desktop's 1,700 bytes); Copy gives it pretty-printed either way.
     val cfg = s.json
-    val isJson = s.isJson && cfg != null
-    val link = remember(s.id) { if (isJson && cfg != null) JsonText.minify(cfg) else LinkParser.buildShareLink(s) }
+    // a MASQUE server has no link: it is shared as its one line of Xray JSON (Masque.shareJson)
+    val isJson = (s.isJson && cfg != null) || s.protocol == Masque.PROTOCOL
+    val link = remember(s.id) { if (s.isJson && cfg != null) JsonText.minify(cfg) else LinkParser.buildShareLink(s) }
     val tooLarge = isJson && link.toByteArray(Charsets.UTF_8).size > QR_MAX_JSON_BYTES
     val bmp = remember(link) { if (tooLarge) null else qrBitmap(link) }
     Dialog(onDismissRequest = onDismiss) {
@@ -2194,8 +2197,155 @@ private fun protoColor(proto: String): Color = when (proto) {
     "shadowsocks" -> Color(0xFFCDA9FF)
     "wireguard" -> Color(0xFF8FB3AA)
     "hysteria2" -> Color(0xFF7FB4FF)
+    "masque" -> Color(0xFFF6A35C)
     "socks", "http" -> Color(0xFFF19DC8)
     else -> MUTED
+}
+
+/** The card's tags beside the badge: a MASQUE server's WARP and its HTTP version — derived, never stored. */
+private fun protoTags(s: ServerConfig): String {
+    if (s.protocol != Masque.PROTOCOL) return ""
+    val http = Masque.httpOf(s.outbound.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")).uppercase()
+    return (if (Masque.isWarp(s)) " · WARP" else "") + " · " + http
+}
+
+/**
+ * WARP (MASQUE): a WARP device registered with Cloudflare from the phone —
+ * straight out, or through the running tunnel's own SOCKS port — or an
+ * existing account imported (usque's config.json, an Xray WARP outbound),
+ * then one MASQUE server per HTTP version (Warp.addWarpOnce, the desktop's
+ * «+ WARP» dialog). The work runs in AppWork's scope, so a sheet closed
+ * mid-way still saves what Cloudflare already made.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun WarpSheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
+    val ctx = LocalContext.current
+    var mode by remember { mutableStateOf("new") }
+    var via by remember { mutableStateOf("direct") }
+    var license by remember { mutableStateOf("") }
+    var importText by remember { mutableStateOf("") }
+    var http by remember { mutableStateOf("both") }
+    var endpoint by remember { mutableStateOf("auto") }
+    var address by remember { mutableStateOf("") }
+    var cover by remember { mutableStateOf("") }
+    var antiDpi by remember { mutableStateOf(true) }
+    var running by remember { mutableStateOf(false) }
+    val progress = remember { mutableStateListOf<String>() }
+    var error by remember { mutableStateOf("") }
+    var result by remember { mutableStateOf<Warp.AddResult?>(null) }
+    val connState by VpnState.state.collectAsState()
+    val connected = connState == ConnState.CONNECTED
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
+            Text("Add WARP (MASQUE)", color = TXT, fontWeight = FontWeight.Bold)
+            Text("Cloudflare WARP over MASQUE (HTTP/3 or HTTP/2) — it runs on Xray or Xray-PattN, never sing-box.", color = MUTED, fontSize = 11.sp)
+            val res = result
+            if (res != null && res.ok) {
+                Text("Added ✓", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+                for (s in res.added) Text("• ${s.name} — ${s.address}:${s.port}", color = TXT2, fontSize = 12.sp, fontFamily = MONO)
+                val acct = res.account
+                if (acct != null && acct.id.isNotEmpty()) {
+                    Text("Account: " + (if (acct.warpPlus) "WARP+" else "free") + (if (acct.type.isNotEmpty()) " (${acct.type})" else ""), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+                }
+                for (w in res.warnings) Text("⚠ " + Warp.warningText(w), color = AMBER, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+                Text("Pick one in the list and connect. If HTTP/3 does not connect on this network, try the HTTP/2 one.", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+                Spacer(Modifier.height(10.dp))
+                Button(onClick = done, modifier = Modifier.fillMaxWidth()) { Text("See them in the list") }
+            } else {
+                Text("1 · Account", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(mode == "new", { mode = "new" }, { Text("New account") })
+                    FilterChip(mode == "import", { mode = "import" }, { Text("Import existing") })
+                }
+                if (mode == "new") {
+                    Text("Sign up", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(via == "direct", { via = "direct" }, { Text("Direct") })
+                        FilterChip(via == "proxy", { via = "proxy" }, { Text("Through the app’s connection") })
+                    }
+                    Text(
+                        if (via == "proxy") "Through the running connection — for when api.cloudflareclient.com is blocked on this network."
+                        else "From this phone’s own network (the app is outside its own VPN, so even while connected).",
+                        color = MUTED, fontSize = 11.sp
+                    )
+                    if (via == "proxy" && !connected) Text("Connect to a server first.", color = AMBER, fontSize = 11.sp)
+                    Fld("WARP+ key (optional)", license) { license = it }
+                    Text("Creating an account accepts Cloudflare’s terms of service for WARP.", color = MUTED, fontSize = 11.sp)
+                } else {
+                    OutlinedTextField(
+                        importText, { v: String -> importText = v; error = "" }, Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        placeholder = { Text("usque’s config.json, or an Xray WARP outbound / its share JSON", fontSize = 12.sp) },
+                        textStyle = TextStyle(fontFamily = MONO, fontSize = 11.sp, color = TXT),
+                        minLines = 4, maxLines = 10, shape = RoundedCornerShape(10.dp), colors = tfColors()
+                    )
+                    OutlinedButton(onClick = {
+                        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val t = cm.primaryClip?.takeIf { c: android.content.ClipData -> c.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString()
+                        if (!t.isNullOrBlank()) importText = t else Toast.makeText(ctx, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+                    }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Filled.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Paste") }
+                }
+
+                Text("2 · Servers", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
+                Text("HTTP version", color = MUTED, fontSize = 11.sp)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(http == "both", { http = "both" }, { Text("Both") })
+                    FilterChip(http == "h3", { http = "h3" }, { Text("HTTP/3") })
+                    FilterChip(http == "h2", { http = "h2" }, { Text("HTTP/2") })
+                }
+                Text("Both: one server for each — HTTP/3 runs over QUIC (UDP), HTTP/2 over TCP.", color = MUTED, fontSize = 11.sp)
+                Text("Endpoint", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(endpoint == "auto", { endpoint = "auto" }, { Text("Auto") })
+                    FilterChip(endpoint == "v6", { endpoint = "v6" }, { Text("IPv6") })
+                    FilterChip(endpoint == "custom", { endpoint = "custom" }, { Text("My clean IP") })
+                }
+                if (endpoint == "custom") Fld("IP or domain, optional :port (e.g. 162.159.198.2)", address) { address = it }
+                Fld("Cover domain (optional)", cover) { cover = it }
+                Text("A domain behind Cloudflare, sent as the SNI instead of WARP’s own name; the server’s IP must still be WARP’s.", color = MUTED, fontSize = 11.sp)
+                SwitchRow("Anti-DPI (noise for HTTP/3, a fragment for HTTP/2)", antiDpi) { antiDpi = it }
+
+                if (progress.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    for (line in progress) Text(line, color = MUTED, fontSize = 10.sp, fontFamily = MONO)
+                }
+                if (error.isNotEmpty()) Text(error, color = BAD, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                Spacer(Modifier.height(10.dp))
+                Button(enabled = !running, onClick = {
+                    running = true; error = ""; progress.clear()
+                    val args = Warp.AddArgs(
+                        mode = mode, license = license, via = via, importText = importText,
+                        options = Warp.Options(http = http, endpoint = endpoint, address = address, cover = cover, antiDpi = antiDpi))
+                    // the tunnel's own SOCKS port, the one it really runs on (SubFetch's choice)
+                    val port = LocalProxyAuth.activePort ?: store.settings.socksPort
+                    AppWork.scope.launch {
+                        val r = withContext(Dispatchers.IO) {
+                            Warp.addWarpOnce(args, Warp.Deps(
+                                connected = { VpnState.state.value == ConnState.CONNECTED },
+                                socksPort = { port },
+                                log = { line: String, _: String ->
+                                    VpnState.addLog(line)
+                                    AppWork.scope.launch { progress.add(line) }
+                                }))
+                        }
+                        if (r.ok) {
+                            store.servers.addAll(r.added); store.saveServers()
+                            if (store.selection.isEmpty() && r.added.isNotEmpty()) store.saveSelection(r.added[0].id)
+                            AppWork.touch()
+                            AppWork.snack("WARP: " + r.added.joinToString(", ") { s: ServerConfig -> s.name } + " added")
+                        } else {
+                            error = Warp.messageFor(r.code, r.detail)
+                        }
+                        result = r
+                        running = false
+                    }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    if (running) CircularProgressIndicator(color = ON_PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                    else Text(if (mode == "import") "Import" else "Create")
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2328,8 +2478,10 @@ private fun protoColor(proto: String): Color = when (proto) {
     var vcn by remember { mutableStateOf(f.vcn) }; var pqv by remember { mutableStateOf(f.pqv) }
     var hy2Obfs by remember { mutableStateOf(f.hy2Obfs) }; var hy2Ports by remember { mutableStateOf(f.hy2Ports) }
     var engine by remember { mutableStateOf(f.engine) }
+    var masqueHttp by remember { mutableStateOf(f.masqueHttp) }
     val isStd = server.protocol == "vless" || server.protocol == "vmess" || server.protocol == "trojan"
     val isHy2 = server.protocol == "hysteria2"
+    val isMasque = server.protocol == Masque.PROTOCOL
     // the full editor (ServerFields): the table's fields this sheet has no input of
     // its own for (flow, Encryption, …), and the Pro view over one draft
     val ctx = LocalContext.current
@@ -2348,7 +2500,7 @@ private fun protoColor(proto: String): Color = when (proto) {
         ech = ech, pcs = pcs, vcn = vcn, pqv = pqv, hy2Obfs = hy2Obfs, hy2Ports = hy2Ports,
         engine = engine, spx = f.spx, xmode = f.xmode, seed = f.seed, headerType = f.headerType, xhttpExtra = f.xhttpExtra,
         tcpHeader = f.tcpHeader, hy2Hop = f.hy2Hop, hy2Up = f.hy2Up, hy2Down = f.hy2Down, plugin = f.plugin,
-        pro = HashMap(pro))
+        masqueHttp = masqueHttp, pro = HashMap(pro))
     /** The Pro view's draft, back into the Simple view's inputs. */
     fun loadSimple(nf: ServerEditor.Fields) {
         name = nf.name; address = nf.address; port = nf.port; cred = nf.cred; network = nf.network; security = nf.security
@@ -2356,7 +2508,7 @@ private fun protoColor(proto: String): Color = when (proto) {
         pUser = nf.proxyUser; pPass = nf.proxyPass; wgPub = nf.wgPub; wgAddr = nf.wgAddr; wgPsk = nf.wgPsk; wgMtu = nf.wgMtu
         wgReserved = nf.wgReserved; wgAllowed = nf.wgAllowed; wgDns = nf.wgDns; fragment = nf.fragment
         cipherSuites = nf.cipherSuites; finalMask = nf.finalMask; ech = nf.ech; pcs = nf.pcs; vcn = nf.vcn; pqv = nf.pqv
-        hy2Obfs = nf.hy2Obfs; hy2Ports = nf.hy2Ports; engine = nf.engine
+        hy2Obfs = nf.hy2Obfs; hy2Ports = nf.hy2Ports; engine = nf.engine; masqueHttp = nf.masqueHttp
         noisePreset = when { nf.noise.isBlank() -> "off"; nf.noise.lowercase() in noisePresetKeys -> if (nf.noise.lowercase() == "fakehello") "faketls" else nf.noise.lowercase(); else -> "custom" }
         noiseCustom = if (noisePreset == "custom") nf.noise else ""
         pro.clear(); pro.putAll(nf.pro)
@@ -2460,6 +2612,41 @@ private fun protoColor(proto: String): Color = when (proto) {
                 Fld("MTU", wgMtu) { wgMtu = it }; Fld("Reserved", wgReserved) { wgReserved = it }; Fld("Allowed IPs", wgAllowed) { wgAllowed = it }
                 Fld("DNS — resolver and search domains (e.g. 192.168.60.1, corp.example)", wgDns) { wgDns = it }
             }
+            if (isMasque) {
+                // MASQUE: its HTTP version, the SNI, a user and password or the WARP account's
+                // summary (its keys live in the Pro view), the certificate knobs; then anti-DPI by
+                // HTTP version and the core — Xray or Xray-PattN only
+                Text("🛡  MASQUE — IP over HTTP/3 or HTTP/2", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                DropPick(ServerFields.str("sf.masqueHttp"), listOf("h3" to ServerFields.str("sfo.masqueHttp.h3"), "h2" to ServerFields.str("sfo.masqueHttp.h2")), masqueHttp) { x: String -> masqueHttp = x }
+                Text(ServerFields.str("sf.masqueHttp.hint"), color = MUTED, fontSize = 11.sp)
+                Fld("SNI", sni) { sni = it }
+                val warpAddr = pro["warpAddress"] ?: ""
+                if ((pro["warpPrivateKey"] ?: "").isNotBlank()) {
+                    Text(ServerFields.str("sfg.warp"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
+                    Text("Addresses: " + warpAddr.ifBlank { "—" }, color = TXT2, fontSize = 11.sp, fontFamily = MONO)
+                    Text("Device key and endpoint key: set — they are kept with this server (a copy of it carries them); change them in the Pro view.", color = MUTED, fontSize = 11.sp)
+                } else {
+                    Fld("Username (optional)", pro["masqueUser"] ?: "") { x: String -> pro["masqueUser"] = x }
+                    Fld("Password (optional)", pro["masquePass"] ?: "") { x: String -> pro["masquePass"] = x }
+                }
+                if (masqueHttp == "h2") {
+                    val fps = listOf("" to "Browser fingerprint: — none —") + listOf("chrome", "firefox", "safari", "ios", "android", "edge", "random", "randomized").map { x: String -> x to "Browser fingerprint: $x" }
+                    DropPick(ServerFields.str("sf.fp.masque"), fps, fp) { x: String -> fp = x }
+                }
+                TlsExtraFields(ech, { ech = it }, pcs, { pcs = it }, vcn, { vcn = it })
+                HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
+                Text("⚙  Anti-DPI and core", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
+                if (masqueHttp == "h2") {
+                    SwitchRow("🕵 Fragment the TLS hello (HTTP/2 runs over TCP)", fragment.isNotBlank()) { on: Boolean ->
+                        fragment = if (on) (if (fragment.isBlank()) "tlshello,100-200,10-20" else fragment) else ""
+                    }
+                } else {
+                    SwitchRow("🕵 Noise before QUIC (HTTP/3 runs over UDP)", noisePreset != "off") { on: Boolean -> noisePreset = if (on) "random" else "off" }
+                }
+                DropPick("Core / Engine", listOf("xray" to "Xray (default)", "xray-pattn" to "Xray-PattN"), if (engine == "xray-pattn") "xray-pattn" else "xray") { x: String -> engine = x }
+                Text("MASQUE runs on an Xray core only — sing-box has none.", color = MUTED, fontSize = 11.sp)
+            }
+            if (!isMasque) {
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
             Text("⚙  Advanced — DPI evasion (optional)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
             DropPick(
@@ -2486,6 +2673,7 @@ private fun protoColor(proto: String): Color = when (proto) {
             if (noisePreset == "custom") {
                 Fld("Noise spec (type:packet:delay; …)", noiseCustom) { noiseCustom = it }
                 Text("Decoy packets before the real handshake. type = rand/str/base64/hex.", color = MUTED, fontSize = 11.sp)
+            }
             }
             }
             Spacer(Modifier.height(10.dp))
@@ -2577,7 +2765,14 @@ private fun proOption(fld: SfField, o: String): String {
         "switch" -> SwitchRow(label, v == "true") { on: Boolean -> d[fld.id] = if (on) "true" else "" }
         "select", "seg" -> {
             Text(label, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-            val opts = fld.options.map { o: String -> o to proOption(fld, o) } + (if (v.isNotEmpty() && v !in fld.options) listOf(v to v) else emptyList())
+            // MASQUE: no sing-box core (it has no MASQUE), and no fingerprint at all is a choice (HTTP/3 has none)
+            val options = when {
+                fld.id == "engine" -> ServerEditor.engineOptions(protocol)
+                fld.id == "fp" && protocol == Masque.PROTOCOL -> listOf("") + fld.options
+                else -> fld.options
+            }
+            val opts = options.map { o: String -> o to (if (o.isEmpty() && fld.id == "fp") "—" else proOption(fld, o)) } +
+                (if (v.isNotEmpty() && v !in options) listOf(v to v) else emptyList())
             DropPick(label, opts, v) { x: String -> d[fld.id] = x }
         }
         "network" -> {
@@ -3798,5 +3993,5 @@ private fun fmtDuration(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0); return "%02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
 }
 private fun msLabel(ms: Long) = if (ms >= 0) "${ms}ms" else "×"
-private fun badge(p: String) = when (p) { "vless" -> "VLESS"; "vmess" -> "VMESS"; "trojan" -> "TROJAN"; "shadowsocks" -> "SS"; "wireguard" -> "WG"; "hysteria2" -> "HY2"; "socks" -> "SOCKS"; "http" -> "HTTP"; else -> p.uppercase() }
+private fun badge(p: String) = when (p) { "vless" -> "VLESS"; "vmess" -> "VMESS"; "trojan" -> "TROJAN"; "shadowsocks" -> "SS"; "wireguard" -> "WG"; "hysteria2" -> "HY2"; "masque" -> "MASQUE"; "socks" -> "SOCKS"; "http" -> "HTTP"; else -> p.uppercase() }
 private fun flag(cc: String): String { if (cc.length != 2) return "🏳"; val base = 0x1F1E6; return String(Character.toChars(base + (cc[0].uppercaseChar() - 'A'))) + String(Character.toChars(base + (cc[1].uppercaseChar() - 'A'))) }
