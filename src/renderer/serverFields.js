@@ -39,7 +39,9 @@
 }(typeof self !== 'undefined' ? self : this, function () {
 
   const STREAM = ['vless', 'vmess', 'trojan', 'shadowsocks'];
-  const PROTOCOLS = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'wireguard', 'socks', 'http'];
+  const PROTOCOLS = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'masque', 'wireguard', 'socks', 'http'];
+  /** Every protocol that can speak TLS: Hysteria2 and MASQUE never speak anything else. */
+  const TLS_ANY = STREAM.concat('hysteria2', 'masque');
   /** The transports the editor offers, in the core's own names (`tcp` is RAW). */
   const NETWORKS = ['tcp', 'ws', 'grpc', 'httpupgrade', 'xhttp', 'kcp'];
   const FINGERPRINTS = ['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized', 'unsafe'];
@@ -50,10 +52,20 @@
   function securitiesOf(protocol) {
     if (protocol === 'vless' || protocol === 'trojan') return ['none', 'tls', 'reality'];
     if (protocol === 'vmess' || protocol === 'shadowsocks') return ['none', 'tls'];
-    if (protocol === 'hysteria2') return ['tls'];
+    if (protocol === 'hysteria2' || protocol === 'masque') return ['tls'];
     return [];
   }
   const hasTransport = (protocol) => STREAM.includes(protocol);
+
+  /**
+   * The HTTP version a MASQUE outbound dials, by the core's own rule: HTTP/2
+   * over TCP when its ALPN names h2 and not h3, HTTP/3 over QUIC otherwise
+   * (no ALPN at all included). `tls` is its tlsSettings.
+   */
+  function masqueHttpOf(tls) {
+    const alpn = [].concat((tls && tls.alpn) || []).join(',').toLowerCase().split(',').map((x) => x.trim());
+    return alpn.includes('h2') && !alpn.includes('h3') ? 'h2' : 'h3';
+  }
 
   const XH = 'streamSettings.xhttpSettings.extra.';
   const GR = 'streamSettings.grpcSettings.';
@@ -61,6 +73,7 @@
   const TL = 'streamSettings.tlsSettings.';
   const SO = 'streamSettings.sockopt.';
   const U0 = 'settings.vnext.0.users.0.';
+  const MQ = 'streamSettings.masqueSettings.';
 
   const on = (protocols, networks, securities) => {
     const w = {};
@@ -113,6 +126,22 @@
       placeholder: '192.168.60.1, corp.example' },
     { id: 'httpHeaders', tab: 'protocol', kind: 'json', path: 'settings.headers', key: 'headers', when: on(['http']), local: true, span: 2,
       placeholder: '{"User-Agent": "…"}' },
+    // MASQUE (Xray 26.9.30+): IP over HTTP/3 or HTTP/2. The HTTP version is the
+    // ALPN the core reads (masqueHttpOf); a server of one's own takes a Basic
+    // user and password, a WARP account its key pair and addresses instead
+    // (26.10.10+) — host and path then default to WARP's own.
+    { id: 'masqueHttp', tab: 'protocol', kind: 'seg', special: true, key: 'alpn', when: on(['masque']), simple: true,
+      options: ['h3', 'h2'], optionLabels: 'all', span: 2, hint: true },
+    { id: 'masqueUser', tab: 'protocol', kind: 'text', path: MQ + 'user', key: 'user', when: on(['masque']), simple: true },
+    { id: 'masquePass', tab: 'protocol', kind: 'text', path: MQ + 'pass', key: 'pass', when: on(['masque']), simple: true },
+    { id: 'masqueHost', tab: 'protocol', kind: 'text', path: MQ + 'host', key: 'host', when: on(['masque']), hint: true, placeholder: 'masque.example.com' },
+    { id: 'masquePath', tab: 'protocol', kind: 'text', path: MQ + 'path', key: 'path', when: on(['masque']), hint: true, placeholder: '/.well-known/masque/ip/*/*/' },
+    { id: 'masqueHeaders', tab: 'protocol', kind: 'json', path: MQ + 'headers', key: 'headers', when: on(['masque']), local: true, span: 2,
+      placeholder: '{"User-Agent": "chrome"}' },
+    { id: 'warpPrivateKey', tab: 'protocol', group: 'warp', kind: 'text', path: MQ + 'warp.privateKey', key: 'warp.privateKey', when: on(['masque']), span: 2, hint: true },
+    { id: 'warpPublicKey', tab: 'protocol', group: 'warp', kind: 'text', path: MQ + 'warp.publicKey', key: 'warp.publicKey', when: on(['masque']), span: 2 },
+    { id: 'warpAddress', tab: 'protocol', group: 'warp', kind: 'list', path: MQ + 'warp.address', key: 'warp.address', when: on(['masque']), span: 2,
+      placeholder: '172.16.0.2/32, 2606:4700:110:8a36::2/128' },
 
     /* ------------------------------- transport ------------------------------ */
     { id: 'network', tab: 'transport', kind: 'network', special: true, key: 'network', when: on(STREAM), simple: true, span: 2 },
@@ -152,21 +181,25 @@
 
     /* ------------------------------- security ------------------------------- */
     { id: 'security', tab: 'security', kind: 'security', special: true, key: 'security', when: on(STREAM), simple: true, span: 2 },
-    { id: 'sni', tab: 'security', kind: 'text', special: true, key: 'serverName', when: on(STREAM.concat('hysteria2'), null, ['tls', 'reality']), simple: true },
-    { id: 'fp', tab: 'security', kind: 'select', special: true, key: 'fingerprint', when: on(STREAM, null, ['tls', 'reality']), simple: true, options: FINGERPRINTS },
+    { id: 'sni', tab: 'security', kind: 'text', special: true, key: 'serverName', when: on(TLS_ANY, null, ['tls', 'reality']), simple: true },
+    // MASQUE uses it over HTTP/2 only (uTLS); HTTP/3 is Go's own TLS
+    { id: 'fp', tab: 'security', kind: 'select', special: true, key: 'fingerprint', when: on(STREAM.concat('masque'), null, ['tls', 'reality']), simple: true, options: FINGERPRINTS },
     { id: 'alpn', tab: 'security', kind: 'chips', special: true, key: 'alpn', when: on(STREAM.concat('hysteria2'), null, ['tls']), options: ['h3', 'h2', 'http/1.1'], span: 2, hint: true },
-    { id: 'pcs', tab: 'security', group: 'certificate', kind: 'text', special: true, key: 'pinnedPeerCertSha256', when: on(STREAM.concat('hysteria2'), null, ['tls']), simple: true, placeholder: 'e3b0c442…, …' },
-    { id: 'vcn', tab: 'security', group: 'certificate', kind: 'text', special: true, key: 'verifyPeerCertByName', when: on(STREAM.concat('hysteria2'), null, ['tls']), simple: true, placeholder: 'real.example.com' },
+    { id: 'pcs', tab: 'security', group: 'certificate', kind: 'text', special: true, key: 'pinnedPeerCertSha256', when: on(TLS_ANY, null, ['tls']), simple: true, placeholder: 'e3b0c442…, …' },
+    { id: 'vcn', tab: 'security', group: 'certificate', kind: 'text', special: true, key: 'verifyPeerCertByName', when: on(TLS_ANY, null, ['tls']), simple: true, placeholder: 'real.example.com' },
+    // never MASQUE's: the core refuses allowInsecure there outright (a pin is the way)
     { id: 'allowInsecure', tab: 'security', group: 'certificate', kind: 'switch', special: true, key: 'allowInsecure', when: on(STREAM.concat('hysteria2'), null, ['tls']), simple: true, span: 2, hint: true },
-    { id: 'ech', tab: 'security', group: 'ech', kind: 'text', special: true, key: 'echConfigList', when: on(STREAM.concat('hysteria2'), null, ['tls']), simple: true, span: 2, hint: true,
+    // the OS's CA store beside the core's own Mozilla roots (Xray 26.10.10+): a server with a private CA
+    { id: 'useSystemCA', tab: 'security', group: 'certificate', kind: 'switch', path: TL + 'useSystemCA', key: 'useSystemCA', when: on(TLS_ANY, null, ['tls']), local: true, span: 2, hint: true },
+    { id: 'ech', tab: 'security', group: 'ech', kind: 'text', special: true, key: 'echConfigList', when: on(TLS_ANY, null, ['tls']), simple: true, span: 2, hint: true,
       placeholder: 'cloudflare-ech.com+udp://1.1.1.1' },
-    { id: 'echForceQuery', tab: 'security', group: 'ech', kind: 'select', path: TL + 'echForceQuery', key: 'echForceQuery', when: on(STREAM.concat('hysteria2'), null, ['tls']), local: true,
+    { id: 'echForceQuery', tab: 'security', group: 'ech', kind: 'select', path: TL + 'echForceQuery', key: 'echForceQuery', when: on(TLS_ANY, null, ['tls']), local: true,
       options: ['', 'none', 'half', 'full'], optionLabels: true },
-    { id: 'minVersion', tab: 'security', group: 'ech', kind: 'select', path: TL + 'minVersion', key: 'minVersion', when: on(STREAM.concat('hysteria2'), null, ['tls']), local: true,
+    { id: 'minVersion', tab: 'security', group: 'ech', kind: 'select', path: TL + 'minVersion', key: 'minVersion', when: on(TLS_ANY, null, ['tls']), local: true,
       options: ['', '1.0', '1.1', '1.2', '1.3'], optionLabels: true },
-    { id: 'maxVersion', tab: 'security', group: 'ech', kind: 'select', path: TL + 'maxVersion', key: 'maxVersion', when: on(STREAM.concat('hysteria2'), null, ['tls']), local: true,
+    { id: 'maxVersion', tab: 'security', group: 'ech', kind: 'select', path: TL + 'maxVersion', key: 'maxVersion', when: on(TLS_ANY, null, ['tls']), local: true,
       options: ['', '1.0', '1.1', '1.2', '1.3'], optionLabels: true },
-    { id: 'curvePreferences', tab: 'security', group: 'ech', kind: 'list', path: TL + 'curvePreferences', key: 'curvePreferences', when: on(STREAM.concat('hysteria2'), null, ['tls']), local: true, span: 2,
+    { id: 'curvePreferences', tab: 'security', group: 'ech', kind: 'list', path: TL + 'curvePreferences', key: 'curvePreferences', when: on(TLS_ANY, null, ['tls']), local: true, span: 2,
       placeholder: 'X25519MLKEM768, X25519' },
     { id: 'pbk', tab: 'security', kind: 'text', special: true, key: 'publicKey · pbk', when: on(STREAM, null, ['reality']), simple: true, span: 2 },
     { id: 'sid', tab: 'security', kind: 'text', special: true, key: 'shortId · sid', when: on(STREAM, null, ['reality']), simple: true },
@@ -174,7 +207,10 @@
     { id: 'pqv', tab: 'security', kind: 'text', special: true, key: 'mldsa65Verify · pqv', when: on(STREAM, null, ['reality']), simple: true, span: 2 },
 
     /* ------------------------------- advanced ------------------------------- */
+    // (MASQUE runs on an Xray core only: the parser never stores sing-box for it, engineChoice never picks it)
     { id: 'engine', tab: 'advanced', kind: 'select', special: true, key: 'engine', simple: true, options: ['xray', 'xray-pattn', 'sing-box'], optionLabels: 'all', hint: true },
+    { id: 'remoteDNS', tab: 'advanced', kind: 'list', path: 'settings.remoteDNS', key: 'remoteDNS', when: on(['masque']), local: true, span: 2, hint: true,
+      placeholder: '1.1.1.1, 1.0.0.1' },
     { id: 'mux', tab: 'advanced', group: 'mux', kind: 'select', path: '@mux', key: 'mux', when: on(['vless', 'vmess', 'trojan']), local: true,
       options: ['', 'on', 'off'], optionLabels: 'all', hint: true },
     { id: 'muxConcurrency', tab: 'advanced', group: 'mux', kind: 'number', path: '@muxConcurrency', key: 'concurrency', when: on(['vless', 'vmess', 'trojan']), local: true, placeholder: '8' },
@@ -185,11 +221,15 @@
     { id: 'tcpKeepAliveIdle', tab: 'advanced', group: 'sockopt', kind: 'number', path: SO + 'tcpKeepAliveIdle', key: 'tcpKeepAliveIdle', when: on(STREAM), local: true, placeholder: '0' },
     { id: 'tcpCongestion', tab: 'advanced', group: 'sockopt', kind: 'select', path: SO + 'tcpCongestion', key: 'tcpCongestion', when: on(STREAM), local: true,
       options: ['', 'bbr', 'cubic', 'reno'], optionLabels: true },
+    // MASQUE: a fragment only over HTTP/2 (TCP), noise only over HTTP/3 (UDP) —
+    // the `when` cannot say an HTTP version, so the parser drops the other one
+    // and configBuilder.applyFragments never dials it
     { id: 'fragment', tab: 'advanced', group: 'dpi', kind: 'text', special: true, key: 'fragment', simple: true, placeholder: 'tlshello,100-200,10-20', hint: true },
     { id: 'noise', tab: 'advanced', group: 'dpi', kind: 'text', special: true, key: 'noise', simple: true, placeholder: 'rand:50-100:0;base64:FgMBAAA=:10-20', hint: true },
     { id: 'cipherSuites', tab: 'advanced', group: 'pattn', kind: 'text', special: true, key: 'cipherSuites · cs', when: on(STREAM), simple: true, span: 2,
       placeholder: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256' },
-    { id: 'finalMask', tab: 'advanced', group: 'pattn', kind: 'json', special: true, key: 'finalmask · fm', when: on(STREAM), simple: true, span: 2, hint: true,
+    // MASQUE's is the official core's own: UDP masks and quicParams over HTTP/3, TCP masks over HTTP/2
+    { id: 'finalMask', tab: 'advanced', group: 'pattn', kind: 'json', special: true, key: 'finalmask · fm', when: on(STREAM.concat('masque')), simple: true, span: 2, hint: true,
       placeholder: '{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5"],"delays":["10-20"]}}]}' }
   ];
 
@@ -204,6 +244,7 @@
     if (network === 'raw') network = 'tcp';
     else if (network === 'splithttp') network = 'xhttp';
     else if (network === 'mkcp') network = 'kcp';
+    if (protocol === 'masque') network = 'masque';   // its transport is its own, whatever a hand-written stream says
     return { protocol: protocol === 'hysteria' ? 'hysteria2' : protocol, network, security: String(st.security || 'none').toLowerCase() };
   }
 
@@ -215,7 +256,7 @@
     if (w.protocols && !w.protocols.includes(c.protocol)) return false;
     if (w.networks && !(hasTransport(c.protocol) && w.networks.includes(c.network))) return false;
     if (w.securities) {
-      const sec = c.protocol === 'hysteria2' ? 'tls' : c.security;
+      const sec = c.protocol === 'hysteria2' || c.protocol === 'masque' ? 'tls' : c.security;
       if (!w.securities.includes(sec)) return false;
     }
     return true;
@@ -363,7 +404,7 @@
    * The special fields the parser builds the outbound from, read off a record
    * (parser.editFields and the window both show these): TCP's header, gRPC's
    * and XHTTP's mode, mKCP's header and seed, REALITY's spiderX; Hysteria2's
-   * hop interval and bandwidth; a Shadowsocks plugin.
+   * hop interval and bandwidth; a Shadowsocks plugin; MASQUE's HTTP version.
    */
   function specialsOf(server) {
     const ob = (server && server.outbound) || {};
@@ -390,6 +431,7 @@
       out.up = qp.brutalUp || '';
       out.down = qp.brutalDown || '';
     }
+    if (ctx.protocol === 'masque') out.masqueHttp = masqueHttpOf(st.tlsSettings);
     return out;
   }
 
@@ -428,7 +470,7 @@
 
   return {
     FIELDS, TABS, PROTOCOLS, NETWORKS, FINGERPRINTS, SS_METHODS, PATH_FIELDS,
-    securitiesOf, hasTransport, contextOf, fieldApplies,
+    securitiesOf, hasTransport, masqueHttpOf, contextOf, fieldApplies,
     getPath, setPath, toForm, fromForm, validate, readEncryption, readPathFields, applyPathFields, specialsOf, ssPluginOf
   };
 }));

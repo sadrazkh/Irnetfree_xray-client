@@ -7,8 +7,10 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const SF = require('../src/renderer/serverFields');
 const { parseLink, applyServerEdits, editFields, createServer, buildShareLink } = require('../src/main/parser');
+const { importJson } = require('../src/main/jsonImport');
 const { reconcileServers } = require('../src/main/subscription');
 
 const UUID = '2c0f0d9a-6b3a-4f0e-9a1f-8c2b4d6e7a10';
@@ -16,6 +18,15 @@ const ENC = 'mlkem768x25519plus.native.0rtt.p7sTtcQlhzr21By6QMbFOEFjtHJa8dquXhK7
 const WG_PRIV = 'aGVsbG8gd29ybGQgdGhpcyBpcyBhIGtleSAzMiBi';
 const WG_PUB = 'cGVlciBrZXkgdGhpcyBpcyBhIGtleSAzMiBieXRlcw==';
 const PBK = 'Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw';
+/** A WARP account's key pair as the record keeps it: the base64 of each DER (a new pair per call). */
+function warpKeys() {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  return {
+    priv: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+    pub: publicKey.export({ format: 'der', type: 'spki' }).toString('base64')
+  };
+}
+const WARP = warpKeys();
 
 /** The fields a new server of this protocol cannot be made without. */
 function baseFields(protocol, network, security) {
@@ -23,6 +34,7 @@ function baseFields(protocol, network, security) {
   if (protocol === 'vless' || protocol === 'vmess') f.uuid = UUID;
   if (['trojan', 'shadowsocks', 'hysteria2'].includes(protocol)) f.password = 'secret-1';
   if (protocol === 'wireguard') Object.assign(f, { privateKey: WG_PRIV, publicKey: WG_PUB });
+  // MASQUE needs nothing more: its user and password are optional (a WARP account: serverFor)
   if (SF.hasTransport(protocol)) {
     f.network = network || 'ws';
     f.security = security || 'none';
@@ -38,15 +50,24 @@ function serverFor(field) {
   const protocol = (w.protocols || ['vless'])[0];
   const network = (w.networks || ['ws'])[0];
   const sec = (w.securities || [protocol === 'hysteria2' ? 'tls' : 'tls'])[0];
-  return createServer(baseFields(protocol, network, SF.securitiesOf(protocol).includes(sec) ? sec : SF.securitiesOf(protocol)[0]));
+  const f = baseFields(protocol, network, SF.securitiesOf(protocol).includes(sec) ? sec : SF.securitiesOf(protocol)[0]);
+  // a WARP account's fields are all-or-none: they are edited on a server that has them all
+  if (field.group === 'warp') Object.assign(f, { warpPrivateKey: WARP.priv, warpPublicKey: WARP.pub, warpAddress: '172.16.0.2/32, 2606:4700:110:8a36::2/128' });
+  return createServer(f);
 }
 /** A value the form could hold for this field, different from what a new server has. */
 function sample(field) {
+  // what only a real key, an address, a path or a header can be
+  if (field.id === 'warpPrivateKey') return warpKeys().priv;
+  if (field.id === 'warpPublicKey') return warpKeys().pub;
+  if (field.id === 'warpAddress') return '172.16.0.9/32, 2606:4700:110:8f00::9/128';
+  if (field.id === 'remoteDNS') return '9.9.9.9, 149.112.112.112';
+  if (field.id === 'masquePath') return '/irnf-masquePath';
   switch (field.kind) {
     case 'number': return '25';
     case 'range': return '16-32';
     case 'switch': return true;
-    case 'json': return field.id === 'httpHeaders' ? '{"User-Agent":"irnf-test"}' : '{"address":"dl.example.com","port":443}';
+    case 'json': return field.id === 'httpHeaders' || field.id === 'masqueHeaders' ? '{"User-Agent":"irnf-test"}' : '{"address":"dl.example.com","port":443}';
     case 'list': return 'X25519MLKEM768, X25519';
     case 'encryption': return ENC;
     case 'select': return field.options.find((o) => o && o !== 'none' && o !== 'auto' && o !== SF.SS_METHODS[0]) || field.options[1];
@@ -118,7 +139,9 @@ test('createServer: every protocol, round-tripped through its own share link; wh
     assert.equal(s.address, 'de.example.com');
     assert.equal(s.port, 443);
     assert.ok(s.id && s.raw, p + ' has an id and its link');
-    const back = parseLink(s.raw);
+    // MASQUE has no link: its raw is the share JSON, which the JSON reader makes this server again
+    const back = p === 'masque' ? importJson(s.raw).servers[0] : parseLink(s.raw);
+    if (p === 'masque') assert.equal(back.source, undefined, 'an ordinary server, not a JSON one');
     const mine = editFields(s), theirs = editFields(back);
     for (const k of Object.keys(mine)) {
       const field = SF.FIELDS.find((x) => x.id === k);

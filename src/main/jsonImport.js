@@ -90,7 +90,7 @@ function isSingbox(c) {
 /* ------------------------------ Xray JSON ------------------------------ */
 
 /** The protocols a server is made of; freedom, blackhole, dns, loopback… are not. */
-const PROXY_PROTOCOLS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria']);
+const PROXY_PROTOCOLS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria', 'masque']);
 const isProxy = (o) => isObj(o) && PROXY_PROTOCOLS.has(o.protocol);
 
 /** What a routing rule can match on — a rule with none of them catches everything left over. */
@@ -264,9 +264,37 @@ function recordFor(config, main, balancer) {
   };
 }
 
-/** One Xray config → its server(s). A config with no proxy outbound (an info row) → none. */
+/** What a config may carry beside its outbounds and still be just one server. */
+const SERVER_ONLY_KEYS = new Set(['remarks', 'ps', 'log', 'outbounds']);
+
+/**
+ * The MASQUE outbound of a config that is just one MASQUE server — the
+ * one-line JSON a MASQUE server's Copy gives (parser.buildShareLink), or the
+ * like from elsewhere: its one proxy outbound is MASQUE and dials by itself,
+ * nothing beside it but freedom / blackhole / dns, and nothing of its own
+ * (inbounds, routing, DNS) that only running the config whole would use.
+ * null otherwise — a panel's full config stays a JSON server, raw mode and all.
+ */
+function lonelyMasque(config) {
+  const outs = outboundsOf(config);
+  const proxies = outs.filter(isProxy);
+  if (proxies.length !== 1 || proxies[0].protocol !== 'masque' || refsOf(proxies[0]).length) return null;
+  if (!outs.every((o) => isProxy(o) || ['freedom', 'blackhole', 'dns'].includes(o.protocol))) return null;
+  return Object.keys(config).every((k) => SERVER_ONLY_KEYS.has(k)) ? proxies[0] : null;
+}
+
+/**
+ * One Xray config → its server(s). A config with no proxy outbound (an info
+ * row) → none. One that is just a MASQUE server (lonelyMasque) is an ordinary
+ * one, its fields editable — unless the editor could not hold it, when it is
+ * kept as the config it is.
+ */
 function serversFromXray(config) {
   if (!isObj(config)) return [];
+  const masque = lonelyMasque(config);
+  if (masque) {
+    try { return [parser().masqueServer(masque, nameFor(config, masque, false))]; } catch { /* a JSON server, below */ }
+  }
   const m = mainOutbounds(config);
   return m.list.map((main) => recordFor(config, main, m.balancer));
 }
@@ -441,7 +469,7 @@ function importJson(text) {
 
 /* ------------------------------ editing ------------------------------ */
 
-const NO_PROXY = 'no proxy outbound in this config (vless, vmess, trojan, shadowsocks, socks, http, wireguard or hysteria)';
+const NO_PROXY = 'no proxy outbound in this config (vless, vmess, trojan, shadowsocks, socks, http, wireguard, hysteria or masque)';
 
 /** The config an edit sends — text or an object — or an Error saying why it is none. */
 function configFromEdit(v) {
