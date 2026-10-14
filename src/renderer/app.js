@@ -321,6 +321,7 @@ function setLang(lang) {
   renderTrafficPath(state.connected ? 'connected' : state.connecting ? 'connecting' : 'disconnected');
   renderInspector();
   refreshJsonFormLang();   // an open JSON edit form: its help line and summary are built with t()
+  if (warpShown()) renderWarp();   // the + WARP dialog is drawn with t() too
   if ($('#xrayVersion')) $('#xrayVersion').textContent = state.xrayVersion ? (t('xray.version') + ': ' + state.xrayVersion) : '';
   saveSettings({ lang });
 }
@@ -1431,6 +1432,21 @@ function serverGroup(g, n) {
   return wrap;
 }
 
+/**
+ * What a card says beside a server's name, derived from its outbound and never
+ * stored: a MASQUE server's `WARP` when it holds a WARP account, and its HTTP
+ * version (`h3` / `h2`, serverFields.masqueHttpOf — the core's own rule).
+ */
+function srvTags(s) {
+  if (!s || s.protocol !== 'masque') return [];
+  const st = (s.outbound && s.outbound.streamSettings) || {};
+  const ms = st.masqueSettings || {};
+  const tags = [];
+  if (ms.warp && typeof ms.warp === 'object') tags.push('WARP');
+  tags.push(sfTable().masqueHttpOf(st.tlsSettings));
+  return tags;
+}
+
 /** One server's card, wired. */
 function serverCard(s) {
   const card = document.createElement('div');
@@ -1451,15 +1467,23 @@ function serverCard(s) {
   const jsonBadge = isJson
     ? ` <span class="proto-badge proto-json json-badge${jsonRaw ? ' raw' : ''}" title="${escapeHtml(t(jsonRaw ? 'ed.jsonRaw' : 'ed.jsonFull'))}">${escapeHtml(t('srv.jsonBadge'))}</span>`
     : '';
-  // what Copy copies: the config itself for a JSON server, the share link otherwise
-  const copyKey = isJson ? 'ed.jsonCopy' : 'btn.copy';
-  const copyTitle = isJson ? escapeHtml(t('ed.jsonCopy')) : 'copy';
+  // what Copy copies: the config itself for a JSON server, the share link otherwise —
+  // which for MASQUE is its one-line JSON too (no client has a standard link for it)
+  const isMasque = s.protocol === 'masque';
+  const copyKey = isJson ? 'ed.jsonCopy' : isMasque ? 'srv.copyJson' : 'btn.copy';
+  const copyTitle = isJson || isMasque ? escapeHtml(t(copyKey)) : 'copy';
+  const qrKey = isMasque ? 'btn.qrJson' : 'btn.qr';
+  // what the record is, beside its name: WARP, and the HTTP version (MASQUE)
+  const tags = srvTags(s);
+  const tagsHtml = tags.length
+    ? `<span class="srv-tags">${tags.map((x) => `<span class="srv-tag${x === 'WARP' ? ' warp' : ''}" dir="ltr">${escapeHtml(x)}</span>`).join('')}</span>`
+    : '';
 
   card.innerHTML = `
     <span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(s.id)}"></span>
     <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>
     <div class="srv-info">
-      <div class="srv-name">${escapeHtml(s.name)} ${selBadge}</div>
+      <div class="srv-name">${escapeHtml(s.name)}${tagsHtml} ${selBadge}</div>
       <div class="srv-addr">${escapeHtml(s.address)}:${escapeHtml(s.port)}${jsonBadge}</div>
     </div>
     <div class="stat-group">
@@ -1471,7 +1495,7 @@ function serverCard(s) {
     <div class="srv-actions">
       <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
       <button class="icon-btn copy-srv" data-i18n-title="${copyKey}" title="${copyTitle}">⧉</button>
-      <button class="icon-btn qr-srv" data-i18n-title="btn.qr" title="QR">▦</button>
+      <button class="icon-btn qr-srv" data-i18n-title="${qrKey}" title="${isMasque ? escapeHtml(t(qrKey)) : 'QR'}">▦</button>
       <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="edit">✎</button>
       <button class="icon-btn connect-srv" title="▶">▶</button>
       <button class="icon-btn del-srv" title="🗑">🗑</button>
@@ -3904,6 +3928,16 @@ function readServerFields(s) {
     f.wgAllowed = (peer && peer.allowedIPs || []).join(', ');
     // One field, as wg-quick writes it: resolvers first, then search domains.
     f.wgDns = [...(Array.isArray(s.dns) ? s.dns : []), ...(Array.isArray(s.dnsDomains) ? s.dnsDomains : [])].join(', ');
+  } else if (s.protocol === 'masque') {
+    // its HTTP version (the core's rule on the ALPN), a Basic user and password,
+    // or a WARP account — which the Simple view only summarises
+    const ms = st.masqueSettings || {};
+    const w = ms.warp && typeof ms.warp === 'object' ? ms.warp : null;
+    f.masqueHttp = sfTable().masqueHttpOf(st.tlsSettings);
+    f.masqueUser = ms.user || '';
+    f.masquePass = ms.pass || '';
+    f.warpAddress = w ? [].concat(w.address || []).join(', ') : '';
+    f.warp = !!w;
   }
 
   // transport details
@@ -3962,10 +3996,11 @@ function readNoiseField() {
   return v; // preset keyword, expanded at build time
 }
 
-// Show the custom spec input only when the dropdown is set to Custom.
+// Show the custom spec input only when the dropdown is set to Custom (and shown: MASQUE over HTTP/2 takes no noise).
 function syncNoiseCustom() {
   const sel = $('#edNoise'); if (!sel) return;
-  show('#edNoiseCustomRow', sel.value === 'custom');
+  const wrap = $('#edNoiseWrap');
+  show('#edNoiseCustomRow', sel.value === 'custom' && !(wrap && wrap.hidden));
 }
 
 /* --------------------- copy / QR share link (carries ALL settings) --------------------- */
@@ -4009,7 +4044,8 @@ async function showServerQr(id) {
   const link = await window.api.serverLink(id);
   if (!link) return toast('—', 'err');
   const srv = (state.servers || []).find(x => x.id === id);
-  const isJson = !!srv && srv.source === 'json';
+  // a MASQUE server's link IS its JSON (parser.buildShareLink): the same ASCII-only text and size limit
+  const isJson = !!srv && (srv.source === 'json' || srv.protocol === 'masque');
   const text = isJson ? qrJsonText(link) : link;
   const box = $('#qrImage'); box.innerHTML = '';
   try {
@@ -4138,7 +4174,7 @@ function setJsonMode(mode) {
 /** The language changed with a JSON edit form open: say its help line and summary again. */
 function refreshJsonFormLang() {
   if (editDraft && $('#editModal') && !$('#editModal').hidden) {
-    if (editView === 'pro') renderEditPro(); else { renderSimpleExtras(); fillMoreInPro(); }
+    if (editView === 'pro') renderEditPro(); else { renderSimpleExtras(); renderMasqueSimple(); fillMoreInPro(); if (editDraft.protocol === 'masque') updateSpoofLabels(); }
     $('#edFootNote').textContent = editView === 'pro' ? t('edit.localNote') : '';
     if (editNew) $('#edTitle').textContent = t('edit.newTitle');
   }
@@ -4217,8 +4253,9 @@ function openEdit(id) {
   const isWg = proto === 'wireguard';
   const isSs = proto === 'shadowsocks';
   const isProxy = proto === 'socks' || proto === 'http';
+  const isMasque = proto === 'masque';
   show('#edTransportRow', isStd);
-  show('#edTlsRow', isStd || isHy2);
+  show('#edTlsRow', isStd || isHy2 || isMasque);
   show('#edPathRow', isStd);
   show('#edPattWrap', isStd);
   show('#edInsecureRow', isStd || isHy2);
@@ -4229,8 +4266,16 @@ function openEdit(id) {
   show('#edHy2Row', isHy2);
   show('#edWgExtra', isWg);
   show('#edProxyRow', isProxy);
-  // socks/http carry no single "credential" field — user/pass live in edProxyRow
-  show('#edCredWrap', !isProxy);
+  // socks/http carry no single "credential" field — user/pass live in edProxyRow;
+  // MASQUE's (a user and password, or a WARP account) are its own block
+  show('#edCredWrap', !isProxy && !isMasque);
+  show('#edMasqueRow', isMasque);
+  show('#edMasqueAuth', isMasque);
+  // MASQUE runs on Xray or Xray-PattN — sing-box has no MASQUE (the parser never stores it)
+  const singbox = $('#edEngine') && $('#edEngine').querySelector('option[value="sing-box"]');
+  if (singbox) { singbox.hidden = isMasque; singbox.disabled = isMasque; }
+  show('#edEngineHint', !isMasque);
+  show('#edEngineHintMasque', isMasque);
   $('#edRealityRow').hidden = !(isStd && $('#edSecurity').value === 'reality');
   updateSpoofLabels();
 
@@ -4292,6 +4337,36 @@ function fillEditForm(f, proto) {
     $('#edWgAllowed').value = f.wgAllowed || '';
     $('#edWgDns').value = f.wgDns || '';
   }
+
+  if (proto === 'masque') {
+    $('#edMasqueUser').value = f.masqueUser || '';
+    $('#edMasquePass').value = f.masquePass || '';
+    setMasqueHttpForm(f.masqueHttp);
+  } else {
+    // every other protocol takes both anti-DPI fields
+    show('#edFragmentWrap', true);
+    show('#edNoiseWrap', true);
+    syncNoiseCustom();
+  }
+}
+
+/**
+ * The Simple form's MASQUE HTTP version: its two cards, and the one anti-DPI
+ * field that version takes — a fragment cuts TCP (HTTP/2), noise goes before
+ * UDP (HTTP/3); the parser drops the other (checkMasque).
+ */
+function setMasqueHttpForm(v) {
+  const http = v === 'h2' ? 'h2' : 'h3';
+  const box = $('#edMasqueHttp');
+  box.dataset.value = http;
+  for (const b of box.querySelectorAll('[data-masque-http]')) {
+    const on = b.dataset.masqueHttp === http;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', String(on));
+  }
+  show('#edFragmentWrap', http === 'h2');
+  show('#edNoiseWrap', http === 'h3');
+  syncNoiseCustom();
 }
 
 /**
@@ -4324,6 +4399,18 @@ function show(sel, on) { const el = $(sel); if (el) el.hidden = !on; }
  *  - none → no TLS SNI at all (section hidden)
  */
 function updateSpoofLabels() {
+  // MASQUE is always TLS, with no transport to front: its SNI alone, one wide
+  // field — the pin, ECH and the rest of TLS are in the Pro view
+  const isMasque = !!editOriginal && editOriginal.protocol === 'masque';
+  $('#edTlsRow').classList.toggle('single', isMasque);
+  if (isMasque) {
+    show('#edSpoofHead', false); show('#edTlsRow', true); show('#edTlsExtra', false); show('#edPqvRow', false);
+    show('#edHideSniRow', false); show('#edSpoofHint', false);
+    updateHideSniNote();
+    $('#edSniLabel').textContent = t('sf.sni');
+    const hostWrap = $('#edHostWrap'); if (hostWrap) hostWrap.style.display = 'none';
+    return;
+  }
   const isStd = editOriginal && ['vless', 'vmess', 'trojan'].includes(editOriginal.protocol);
   // Hysteria2 is always TLS (over QUIC), with no transport of its own to pick
   const isHy2 = !!editOriginal && editOriginal.protocol === 'hysteria2';
@@ -4401,6 +4488,7 @@ $('#editClose').onclick = closeEdit;
 $('#editCancel').onclick = closeEdit;
 $('#editModal').onclick = (e) => { if (e.target === $('#editModal')) closeEdit(); };
 if ($('#edNoise')) $('#edNoise').onchange = syncNoiseCustom;
+for (const b of document.querySelectorAll('#edMasqueHttp [data-masque-http]')) b.onclick = () => setMasqueHttpForm(b.dataset.masqueHttp);
 
 /**
  * What a save sends: every field of the form, read back from the inputs that
@@ -4467,6 +4555,15 @@ function collectEditFields(orig, clearPin) {
   } else if (proto === 'socks' || proto === 'http') {
     fields.username = $('#edProxyUser').value.trim();
     fields.password = $('#edProxyPass').value.trim();
+  } else if (proto === 'masque') {
+    fields.sni = $('#edSni').value.trim();
+    const http = $('#edMasqueHttp').dataset.value;
+    if (http) fields.masqueHttp = http;
+    // a WARP account takes no user and password: the form shows neither for one
+    if (!$('#edMasqueCred').hidden) {
+      fields.masqueUser = $('#edMasqueUser').value.trim();
+      fields.masquePass = $('#edMasquePass').value.trim();
+    }
   }
 
   return fields;
@@ -4524,7 +4621,11 @@ let editTab = 'protocol';   // the Pro view's open tab
 let editNew = false;        // a server made from scratch: Pro, Basics first
 let editBad = null;         // { id, tab } of the field a save refused, marked until it changes
 const EDIT_VIEW_KEY = 'irnf.editView';
-const PROTO_NAMES = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'Shadowsocks', hysteria2: 'Hysteria2', wireguard: 'WireGuard', socks: 'SOCKS5', http: 'HTTP' };
+const PROTO_NAMES = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'Shadowsocks', hysteria2: 'Hysteria2', masque: 'MASQUE', wireguard: 'WireGuard', socks: 'SOCKS5', http: 'HTTP' };
+/** The picker's «new» tag (the sample's): protocols this release added. */
+const NEW_PROTOCOLS = ['masque'];
+/** The fields of a WARP account (MASQUE): all three or none. */
+const WARP_FIELDS = ['warpPrivateKey', 'warpPublicKey', 'warpAddress'];
 
 /** append(), leaving out what is not there: DOM append() writes null as the text "null". */
 function appendSome(node, ...kids) { node.append(...kids.filter((k) => k != null && k !== false)); return node; }
@@ -4559,8 +4660,9 @@ function draftOf(s) {
     protocol: p, name: f.name || '', address: f.address || '', port: f.port != null ? String(f.port) : '',
     engine: f.engine || 'xray', fragment: f.fragment || '', noise: f.noise || '',
     cipherSuites: f.cipherSuites || '', finalMask: f.finalMask || '',
-    network: f.network || 'tcp', security: p === 'hysteria2' ? 'tls' : (f.security || 'none'),
-    sni: f.sni || '', host: f.host || '', path: f.path || '', fp: f.fp || 'chrome', pbk: f.pbk || '', sid: f.sid || '',
+    network: f.network || 'tcp', security: p === 'hysteria2' || p === 'masque' ? 'tls' : (f.security || 'none'),
+    // MASQUE writes the fingerprint where the form says one (parser.applyServerEdits): none stays none
+    sni: f.sni || '', host: f.host || '', path: f.path || '', fp: f.fp || (p === 'masque' ? '' : 'chrome'), pbk: f.pbk || '', sid: f.sid || '',
     alpn: f.alpn || '', allowInsecure: !!f.allowInsecure, ech: f.ech || '', pcs: f.pcs || '', vcn: f.vcn || '', pqv: f.pqv || ''
   };
   if (p === 'vless' || p === 'vmess') d.uuid = f.cred || '';
@@ -4594,6 +4696,8 @@ function newDraft(protocol, keep) {
   if (protocol === 'wireguard') d.port = '51820';
   if (protocol === 'socks') d.port = '1080';
   if (protocol === 'http') d.port = '8080';
+  // MASQUE: over TLS always, HTTP/3 until told otherwise, the core's own fingerprint; a WARP account is added in its card
+  if (protocol === 'masque') Object.assign(d, { network: 'masque', security: 'tls', fp: '', masqueHttp: 'h3' });
   if (keep) for (const k of ['name', 'address']) if (keep[k]) d[k] = keep[k];
   return d;
 }
@@ -4601,16 +4705,38 @@ function newDraft(protocol, keep) {
 /** The draft's protocol / transport / security, in the table's terms. */
 function draftCtx() {
   const d = editDraft || {};
-  return { protocol: d.protocol, network: d.network || 'tcp', security: d.protocol === 'hysteria2' ? 'tls' : (d.security || 'none') };
+  const tlsOnly = d.protocol === 'hysteria2' || d.protocol === 'masque';
+  return { protocol: d.protocol, network: d.network || 'tcp', security: tlsOnly ? 'tls' : (d.security || 'none') };
 }
 
-/** Is this field part of the form right now? The table says, and TCP's Host and path only with its HTTP header. */
+/** MASQUE: does the draft hold a WARP account? The card's switch once touched, else whether one of its fields is filled. */
+function masqueWarpOn(d) {
+  if (!d) return false;
+  if (d._warpOn != null) return !!d._warpOn;
+  return WARP_FIELDS.some((k) => String(d[k] == null ? '' : d[k]).trim() !== '');
+}
+
+/**
+ * Is this field part of the form right now? The table says, and TCP's Host and
+ * path only with its HTTP header. MASQUE: the anti-DPI field of its HTTP
+ * version only (a fragment over HTTP/2, noise over HTTP/3); a WARP account's
+ * fields while its card is on — and then no user or password, and the host,
+ * path and headers only when they hold something (WARP's own are the default).
+ */
 function fieldShown(fld) {
   const F = sfTable();
   const ctx = draftCtx();
   if (!F.fieldApplies(fld, ctx)) return false;
   if ((fld.id === 'host' || fld.id === 'path') && ctx.network === 'tcp') return editDraft.headerType === 'http';
-  if (fld.id === 'protocol') return true;
+  if (ctx.protocol === 'masque') {
+    const h2 = editDraft.masqueHttp === 'h2';
+    if (fld.id === 'fragment') return h2;
+    if (fld.id === 'noise') return !h2;
+    const warp = masqueWarpOn(editDraft);
+    if (WARP_FIELDS.includes(fld.id)) return warp;
+    if (fld.id === 'masqueUser' || fld.id === 'masquePass') return !warp;
+    if (['masqueHost', 'masquePath', 'masqueHeaders'].includes(fld.id)) return !warp || String(editDraft[fld.id] || '').trim() !== '';
+  }
   return true;
 }
 
@@ -4632,10 +4758,37 @@ function optionLabel(fld, o) {
   return v === k ? (o || '—') : v;
 }
 
-/** The draft changed: what it shows may have too (a new transport, a protocol). */
+/**
+ * A field's hint: by context first where it reads differently — a MASQUE
+ * server's with a WARP account (`sf.<id>.hint.warp`), over its HTTP version
+ * (`.h3` / `.h2`), any MASQUE one (`.masque`) — then the table's own.
+ */
+function fieldHint(fld) {
+  const ctx = draftCtx();
+  const keys = [];
+  if (ctx.protocol === 'masque') {
+    if (masqueWarpOn(editDraft)) keys.push(`sf.${fld.id}.hint.warp`);
+    keys.push(`sf.${fld.id}.hint.${editDraft.masqueHttp === 'h2' ? 'h2' : 'h3'}`, `sf.${fld.id}.hint.masque`);
+  }
+  if (fld.hint) keys.push(`sf.${fld.id}.hint`);
+  for (const k of keys) {
+    const v = t(k);
+    if (v !== k) return v;
+  }
+  return '';
+}
+
+/** A group's heading: by protocol where it reads differently (MASQUE's finalmask is no patterniha's). */
+function groupLabel(group) {
+  const k = `sfg.${group}.${draftCtx().protocol}`;
+  const v = t(k);
+  return v !== k ? v : t('sfg.' + group);
+}
+
+/** The draft changed: what it shows may have too (a new transport, a protocol, MASQUE's HTTP version or WARP card). */
 function draftChanged(id) {
   if (editBad && editBad.id === id) editBad = null;
-  if (['protocol', 'network', 'security', 'headerType'].includes(id)) {
+  if (['protocol', 'network', 'security', 'headerType', 'masqueHttp', 'warp'].includes(id)) {
     if (editView === 'pro') renderEditPro(); else renderSimpleExtras();
   }
   if (id === 'protocol' || id === 'network' || id === 'security' || id === 'address') renderEditTabs();
@@ -4682,8 +4835,10 @@ function fieldNode(fld) {
   const bad = editBad && editBad.id === fld.id;
   const wrap = edNode('div', { class: 'ed-f' + (fld.span === 2 || ['seg', 'chips', 'json', 'encryption', 'network', 'security'].includes(fld.kind) ? ' span2' : '') + (bad ? ' is-bad' : ''), 'data-field': fld.id });
   const put = (v) => { d[fld.id] = v; draftChanged(fld.id); };
-  const hint = fld.hint ? edNode('p', { class: 'hint', text: t(`sf.${fld.id}.hint`) }) : null;
+  const hintText = fieldHint(fld);
+  const hint = hintText ? edNode('p', { class: 'hint', text: hintText }) : null;
   const val = d[fld.id] == null ? '' : d[fld.id];
+  const isMasque = draftCtx().protocol === 'masque';
   const text = (kind) => {
     const inp = edNode('input', { class: 'input', id, dir: 'ltr', placeholder: fld.placeholder || null, inputmode: kind === 'number' ? 'numeric' : null, spellcheck: 'false' });
     inp.value = String(val);
@@ -4721,10 +4876,14 @@ function fieldNode(fld) {
     }
     case 'select': {
       const sel = edNode('select', { class: 'select', id });
-      const opts = [...fld.options];
-      if (val !== '' && !opts.includes(String(val))) opts.push(String(val));   // a value the list does not have stays as it is
-      for (const o of opts) appendSome(sel, edNode('option', { value: o, text: optionLabel(fld, o) }));
-      sel.value = String(val);
+      let opts = [...fld.options];
+      let cur = String(val);
+      // MASQUE runs on Xray or Xray-PattN only (sing-box has none); its fingerprint may be none at all — the core's own
+      if (isMasque && fld.id === 'engine') { opts = opts.filter((o) => o !== 'sing-box'); if (cur === 'sing-box') cur = 'xray'; }
+      if (isMasque && fld.id === 'fp') opts.unshift('');
+      if (cur !== '' && !opts.includes(cur)) opts.push(cur);   // a value the list does not have stays as it is
+      for (const o of opts) appendSome(sel, edNode('option', { value: o, text: fld.id === 'fp' && o === '' ? t('sfo.fp._') : optionLabel(fld, o) }));
+      sel.value = cur;
       sel.onchange = () => put(sel.value);
       appendSome(wrap, fieldHead(fld, id), sel, hint);
       return wrap;
@@ -4752,6 +4911,12 @@ function fieldNode(fld) {
       return wrap;
     }
     case 'seg':
+      // MASQUE's HTTP version: the sample's two cards, each saying what it runs over (they carry the hint)
+      if (fld.id === 'masqueHttp') {
+        appendSome(wrap, edNode('div', { class: 'field-label' }, [edNode('span', { text: fieldLabel(fld) }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: fld.key })]),
+          httpCards(String(val) === 'h2' ? 'h2' : 'h3', (o) => put(o)));
+        return wrap;
+      }
       appendSome(wrap, edNode('div', { class: 'field-label' }, [edNode('span', { text: fieldLabel(fld) }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: fld.key })]), seg(fld.options), hint);
       return wrap;
     case 'network':
@@ -4791,23 +4956,161 @@ function fieldNode(fld) {
       return wrap;
     }
     default:
+      if (fld.id === 'warpPrivateKey' || fld.id === 'warpPublicKey') {
+        // a key is long: two lines of monospace, as in the sample
+        const ta = edNode('textarea', { class: 'textarea ed-mono', id, dir: 'ltr', rows: '2', spellcheck: 'false', autocomplete: 'off' });
+        ta.value = String(val);
+        ta.oninput = () => { d[fld.id] = ta.value; if (editBad && editBad.id === fld.id) { editBad = null; wrap.classList.remove('is-bad'); renderEditTabs(); } };
+        ta.onchange = () => put(ta.value);
+        appendSome(wrap, fieldHead(fld, id), ta, hint);
+        return wrap;
+      }
       appendSome(wrap, fieldHead(fld, id), text(fld.kind), hint);
       return wrap;
   }
 }
 
-/** Fields in a grid, with a heading where a group starts. */
-function fieldGrid(list) {
+/**
+ * MASQUE's HTTP version as the sample's cards — HTTP/3 and HTTP/2, each with
+ * what it runs over — and, in the + WARP dialog, a third: both (two servers).
+ * `pick(id)` on a click.
+ */
+function httpCards(cur, pick, withBoth) {
+  const opts = [['h3', 'HTTP/3', 'masque.h3Desc'], ['h2', 'HTTP/2', 'masque.h2Desc']];
+  if (withBoth) opts.push(['both', t('warp.httpBoth'), 'warp.httpBothDesc']);
+  const box = edNode('div', { class: 'ed-http' + (withBoth ? ' three' : ''), role: 'radiogroup' });
+  for (const [id, name, desc] of opts) {
+    const on = id === cur;
+    const b = edNode('button', { type: 'button', class: 'ed-http-opt' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on), 'data-http': id }, [
+      id === 'both' ? edNode('span', { class: 'ui', text: name }) : edNode('span', {}, [edNode('bdi', { dir: 'ltr', text: name })]),
+      edNode('small', { text: t(desc) })]);
+    b.onclick = () => pick(id);
+    appendSome(box, b);
+  }
+  return box;
+}
+
+/** A field MASQUE does not take, shown off with the reason why (the sample's disabled select). */
+function offField(label, key, value, why) {
+  return edNode('div', { class: 'ed-f' }, [
+    edNode('div', { class: 'field-label' }, [edNode('span', { text: label }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: key })]),
+    edNode('select', { class: 'select', disabled: true, 'aria-label': label }, [edNode('option', { text: value })]),
+    edNode('p', { class: 'hint', text: why })]);
+}
+
+/**
+ * What a MASQUE server's Pro view shows after a field, beyond the table: the
+ * certificate note of a WARP account after vcn, Mux shown off after the core,
+ * and the anti-DPI field its HTTP version does not take, off, beside the one it does.
+ */
+function fieldExtras(fld) {
+  if (!editDraft || draftCtx().protocol !== 'masque') return [];
+  const h2 = editDraft.masqueHttp === 'h2';
+  const byId = (id) => sfTable().FIELDS.find((f) => f.id === id);
+  if (fld.id === 'vcn' && masqueWarpOn(editDraft)) return [edNode('p', { class: 'hint span2 ed-gridnote', text: t('masque.certNoteWarp') })];
+  if (fld.id === 'engine') return [offField(t('sf.mux'), 'mux', t('masque.muxNone'), t('masque.muxHint'))];
+  if (fld.id === 'noise' && !h2) return [offField(fieldLabel(byId('fragment')), 'fragment', t('masque.off'), t('masque.fragmentOffH3'))];
+  if (fld.id === 'fragment' && h2) return [offField(fieldLabel(byId('noise')), 'noise', t('masque.off'), t('masque.noiseOffH2'))];
+  return [];
+}
+
+/**
+ * A translated line with **bold** parts and {name} slots: a slot's text goes
+ * in isolated left-to-right (an IP, a key, a path inside Persian), a node as it is.
+ */
+function richLine(text, slots) {
+  const out = [];
+  for (const part of String(text).split(/(\*\*[^*]+\*\*|\{\w+\})/)) {
+    if (!part) continue;
+    const b = /^\*\*([^*]+)\*\*$/.exec(part);
+    const s = /^\{(\w+)\}$/.exec(part);
+    if (b) out.push(edNode('b', { text: b[1] }));
+    else if (s && slots && Object.prototype.hasOwnProperty.call(slots, s[1])) {
+      const v = slots[s[1]];
+      out.push(typeof v === 'string' ? edNode('bdi', { dir: 'ltr', text: v }) : v);
+    } else out.push(part);
+  }
+  return out;
+}
+
+/** Fields in a grid, with a heading where a group starts (none inside a card that is its own heading); MASQUE's extras after their field. */
+function fieldGrid(list, opts) {
+  const heads = !(opts && opts.heads === false);
   const grid = edNode('div', { class: 'ed-grid' });
   let group = null;
   for (const fld of list) {
-    if (fld.group && fld.group !== group) {
-      appendSome(grid, edNode('div', { class: 'ed-sub span2', text: t('sfg.' + fld.group) }));
+    if (heads && fld.group && fld.group !== group) {
+      appendSome(grid, edNode('div', { class: 'ed-sub span2', text: groupLabel(fld.group) }));
     }
     group = fld.group || null;
-    appendSome(grid, fieldNode(fld));
+    appendSome(grid, fieldNode(fld), ...fieldExtras(fld));
   }
   return grid;
+}
+
+/** The WARP account of a MASQUE server: the sample's card — its switch in the head, its three fields under it while on. */
+function masqueWarpCard(list) {
+  const on = masqueWarpOn(editDraft);
+  const sw = edNode('input', { type: 'checkbox', id: 'edf-warp', 'aria-label': t('masque.warpTitle') });
+  sw.checked = on;
+  sw.onchange = () => setMasqueWarp(sw.checked);
+  return edNode('div', { class: 'ed-card', 'data-field': 'warp' }, [
+    edNode('div', { class: 'ed-card-head' }, [
+      edNode('span', { class: 'warp-ico sm', 'aria-hidden': 'true', text: '☁' }),
+      edNode('span', {}, [edNode('span', { class: 'ttl', text: t('masque.warpTitle') }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: 'warp' }),
+        edNode('br'), edNode('span', { class: 'sub', text: t('masque.warpOff') })]),
+      edNode('label', { class: 'switch', title: 'WARP' }, [sw, edNode('span', { class: 'slider' })])
+    ]),
+    on && list.length ? fieldGrid(list, { heads: false }) : null
+  ]);
+}
+
+/**
+ * The WARP card's switch. On: its fields (as they were, when it was on before)
+ * and no user or password — a WARP account takes none (parser.checkMasque);
+ * off: its fields cleared, so the save writes no account. What one side clears
+ * the other side's switch gives back.
+ */
+function setMasqueWarp(on) {
+  const d = editDraft;
+  const clear = on ? ['masqueUser', 'masquePass'] : WARP_FIELDS;
+  const back = on ? WARP_FIELDS : ['masqueUser', 'masquePass'];
+  d._stash = Object.assign({}, d._stash);
+  for (const k of clear) {
+    if (String(d[k] == null ? '' : d[k]) !== '') d._stash[k] = d[k];
+    d[k] = '';
+  }
+  for (const k of back) {
+    if (String(d[k] == null ? '' : d[k]) === '' && d._stash[k] != null) { d[k] = d._stash[k]; delete d._stash[k]; }
+  }
+  d._warpOn = !!on;
+  draftChanged('warp');
+}
+
+/** MASQUE's Protocol tab, as the sample lays it out: the HTTP version, the WARP card, then a server of one's own's fields. */
+function masqueProtocolPane(fields) {
+  const warp = masqueWarpOn(editDraft);
+  const own = fields.filter((f) => f.id !== 'masqueHttp' && !WARP_FIELDS.includes(f.id));
+  const out = [fieldGrid(fields.filter((f) => f.id === 'masqueHttp')), masqueWarpCard(fields.filter((f) => WARP_FIELDS.includes(f.id)))];
+  if (own.length) out.push(fieldGrid(own));
+  if (warp && !own.some((f) => f.id === 'masqueHost' || f.id === 'masquePath')) {
+    out.push(edNode('p', { class: 'hint' }, richLine(t('masque.warpAuto'), { host: 'cloudflareaccess.com', path: '/' })));
+  }
+  return out;
+}
+
+/** MASQUE has no transport of its own: the line its (disabled) Transport tab says. */
+function masqueNoTransport() {
+  return richLine(t('masque.noTransport'), { over: editDraft && editDraft.masqueHttp === 'h2' ? 'TCP (HTTP/2)' : 'QUIC (HTTP/3)' });
+}
+
+/** MASQUE's Security tab head: TLS, the only choice there is, said so. */
+function masqueTlsOnly() {
+  return edNode('div', { class: 'ed-f' }, [
+    edNode('div', { class: 'field-label' }, [edNode('span', { text: t('sf.security') }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: 'security' })]),
+    edNode('div', { class: 'seg ed-seg-wide', role: 'radiogroup', 'aria-label': t('sf.security') }, [
+      edNode('button', { type: 'button', class: 'seg-btn active', role: 'radio', 'aria-checked': 'true', dir: 'ltr', text: 'TLS' })]),
+    edNode('p', { class: 'hint', text: t('masque.tlsOnly') })]);
 }
 
 /** The Pro view's tab bar: each tab with what is chosen in it underneath, a dot where a save found something wrong. */
@@ -4817,9 +5120,10 @@ function renderEditTabs() {
   const F = sfTable();
   const ctx = draftCtx();
   const d = editDraft;
+  const isMasque = ctx.protocol === 'masque';
   const sub = {
     basics: editNew ? t('edit.tabNew') : (d.address || '—'),
-    protocol: PROTO_NAMES[ctx.protocol] || ctx.protocol,
+    protocol: (PROTO_NAMES[ctx.protocol] || ctx.protocol) + (isMasque && masqueWarpOn(d) ? ' · WARP' : ''),
     transport: F.hasTransport(ctx.protocol) ? t('sfo.network.' + ctx.network) : '—',
     security: F.securitiesOf(ctx.protocol).length ? ctx.security : '—',
     advanced: 'engine · dpi'
@@ -4827,9 +5131,11 @@ function renderEditTabs() {
   bar.textContent = '';
   for (const tab of F.TABS) {
     const off = (tab === 'transport' && !F.hasTransport(ctx.protocol)) || (tab === 'security' && !F.securitiesOf(ctx.protocol).length);
+    // MASQUE's Transport tab says why it is off, on hover (its transport is its HTTP version)
+    const why = off && isMasque && tab === 'transport' ? masqueNoTransport().map((n) => (typeof n === 'string' ? n : n.textContent)).join('') : null;
     const b = edNode('button', {
       type: 'button', class: 'ed-tab' + (tab === editTab ? ' active' : ''), role: 'tab', 'aria-selected': String(tab === editTab),
-      'aria-disabled': off ? 'true' : null, 'data-tab': tab
+      'aria-disabled': off ? 'true' : null, 'data-tab': tab, title: why
     }, [edNode('span', { class: 'ed-tab-name' }, [t('edit.tab.' + tab), editBad && editBad.tab === tab ? edNode('span', { class: 'ed-tab-bad', 'aria-hidden': 'true', text: '●' }) : null]),
       edNode('small', { dir: 'ltr', text: sub[tab] })]);
     b.onclick = () => { if (off) return; editTab = tab; renderEditPro(); };
@@ -4853,8 +5159,11 @@ function renderEditPro() {
     for (const p of F.PROTOCOLS) {
       const on = p === ctx.protocol;
       const fixed = !editNew && !on;
-      const b = edNode('button', { type: 'button', class: 'ed-proto' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on), 'aria-disabled': fixed ? 'true' : null, dir: 'ltr' },
-        [PROTO_NAMES[p], edNode('small', { text: t('sfp.' + p) })]);
+      // the name left-to-right in its own box, the «new» tag beside it, the line under it in the page's direction
+      const b = edNode('button', { type: 'button', class: 'ed-proto' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on), 'aria-disabled': fixed ? 'true' : null, 'data-proto': p },
+        [edNode('span', { class: 'ed-proto-top' }, [edNode('bdi', { dir: 'ltr', text: PROTO_NAMES[p] || p }),
+          NEW_PROTOCOLS.includes(p) ? edNode('span', { class: 'ed-new', text: t('edit.protoNew') }) : null]),
+        edNode('small', { text: t('sfp.' + p) })]);
       b.onclick = () => {
         if (fixed || on) return;
         editDraft = newDraft(p, editDraft);
@@ -4865,9 +5174,16 @@ function renderEditPro() {
     appendSome(pane, edNode('div', { class: 'ed-f' }, [edNode('div', { class: 'field-label', text: t('sf.protocol') }), picker,
       edNode('p', { class: 'hint', text: t(editNew ? 'edit.protoPick' : 'edit.protoFixed') })]));
   }
-  if (editTab === 'transport' && !F.hasTransport(ctx.protocol)) appendSome(pane, edNode('p', { class: 'ed-empty', text: t('edit.noTransport').replace('{proto}', name) }));
-  else if (editTab === 'security' && !F.securitiesOf(ctx.protocol).length) appendSome(pane, edNode('p', { class: 'ed-empty', text: t('edit.noSecurity').replace('{proto}', name) }));
-  else appendSome(pane, fieldGrid(fields));
+  const isMasque = ctx.protocol === 'masque';
+  if (editTab === 'transport' && !F.hasTransport(ctx.protocol)) {
+    appendSome(pane, isMasque ? edNode('p', { class: 'ed-empty' }, [edNode('span', {}, masqueNoTransport())])
+      : edNode('p', { class: 'ed-empty', text: t('edit.noTransport').replace('{proto}', name) }));
+  } else if (editTab === 'security' && !F.securitiesOf(ctx.protocol).length) appendSome(pane, edNode('p', { class: 'ed-empty', text: t('edit.noSecurity').replace('{proto}', name) }));
+  else if (isMasque && editTab === 'protocol') appendSome(pane, ...masqueProtocolPane(fields));
+  else {
+    if (isMasque && editTab === 'security') appendSome(pane, masqueTlsOnly());
+    appendSome(pane, fieldGrid(fields));
+  }
   if (editTab === 'security' && ctx.security === 'none' && F.securitiesOf(ctx.protocol).length) appendSome(pane, edNode('p', { class: 'ed-warn', text: t('edit.noTls') }));
   $('#edHeadProto').textContent = name;
 }
@@ -4903,19 +5219,59 @@ function fillSimple() {
     fragment: d.fragment, noise: d.noise, cipherSuites: d.cipherSuites, finalMask: d.finalMask, engine: d.engine,
     allowInsecure: d.allowInsecure, ech: d.ech, pcs: d.pcs, vcn: d.vcn, pqv: d.pqv, hy2Obfs: d.obfsPassword, hy2Ports: d.mport,
     pxUser: d.username, pxPass: d.password, wgPub: d.publicKey, wgAddr: d.localAddress, wgPsk: d.presharedKey,
-    wgMtu: d.mtu, wgReserved: d.reserved, wgAllowed: d.allowedIPs, wgDns: d.dns
+    wgMtu: d.mtu, wgReserved: d.reserved, wgAllowed: d.allowedIPs, wgDns: d.dns,
+    masqueHttp: d.masqueHttp, masqueUser: d.masqueUser, masquePass: d.masquePass
   }, p);
   const isStd = ['vless', 'vmess', 'trojan'].includes(p);
   $('#edRealityRow').hidden = !(isStd && $('#edSecurity').value === 'reality');
   updateSpoofLabels();
   renderSimpleExtras();
+  renderMasqueSimple();
+}
+
+/**
+ * The Simple view's MASQUE account: a WARP account's summary — its two keys,
+ * its addresses — or the user and password of a server of one's own. The WARP
+ * keys themselves are edited in the Pro view.
+ */
+function renderMasqueSimple() {
+  const d = editDraft;
+  if (!d || d.protocol !== 'masque') return;
+  const warp = masqueWarpOn(d);
+  show('#edWarpCard', warp);
+  show('#edMasqueCred', !warp);
+  const box = $('#edWarpChips');
+  box.textContent = '';
+  if (warp) {
+    const has = (k) => String(d[k] == null ? '' : d[k]).trim() !== '';
+    appendSome(box, ...warpChips({ key: has('warpPrivateKey'), pub: has('warpPublicKey'), addrs: String(d.warpAddress || '').split(/[,\s]+/) }));
+  }
+}
+
+/**
+ * A WARP account read back as chips: its device key (P-256 when that is seen),
+ * the endpoint's key, then each tunnel address without its /32 or /128 — with
+ * its family named when `family` (the + WARP dialog's import).
+ */
+function warpChips(r, family) {
+  const chips = [
+    edNode('span', { class: r.key ? null : 'bad', text: t(!r.key ? 'warp.chipNoKey' : r.p256 ? 'warp.chipKeyP256' : 'warp.chipKey') }),
+    edNode('span', { class: r.pub ? null : 'bad', text: t(r.pub ? 'warp.chipPub' : 'warp.chipNoPub') })
+  ];
+  for (const a of r.addrs || []) {
+    const ip = String(a == null ? '' : a).trim().replace(/\/\d+$/, '');
+    if (!ip) continue;
+    // one left-to-right run, the family first: "IPv4 172.16.0.2" in Persian too
+    chips.push(edNode('span', { class: 'info' }, [edNode('bdi', { dir: 'ltr', text: (family ? (ip.includes(':') ? 'IPv6 ' : 'IPv4 ') : '') + ip })]));
+  }
+  return chips;
 }
 
 /** The Simple view's last line: everything else is one click away, in the Pro view. */
 function fillMoreInPro() {
   const more = $('#edMoreInPro');
   if (!more) return;
-  const [a, b] = t('edit.moreInPro').split('{link}');
+  const [a, b] = t(editDraft && editDraft.protocol === 'masque' ? 'edit.moreInPro.masque' : 'edit.moreInPro').split('{link}');
   const go = edNode('button', { type: 'button', class: 'ed-pro-link', text: t('edit.proLink') });
   go.onclick = () => setEditView('pro');
   more.textContent = '';
@@ -4959,6 +5315,10 @@ function draftProblem() {
     if (why) return { id: fld.id, tab: fld.tab, why };
   }
   if (draftCtx().protocol === 'vless' && d._encOn && !String(d.encryption || '').trim()) return { id: 'encryption', tab: 'protocol', why: 'edit.err.encKey' };
+  // a WARP account is all three of its fields or none (the card's switch is the "none")
+  if (draftCtx().protocol === 'masque' && masqueWarpOn(d)) {
+    for (const id of WARP_FIELDS) if (!String(d[id] == null ? '' : d[id]).trim()) return { id, tab: 'protocol', why: 'edit.err.required' };
+  }
   if (editNew) {
     const need = ['address', 'port'].concat({ vless: ['uuid'], vmess: ['uuid'], trojan: ['password'], shadowsocks: ['password'], hysteria2: ['password'], wireguard: ['privateKey', 'publicKey'] }[d.protocol] || []);
     for (const id of need) {
@@ -4984,7 +5344,8 @@ function showDraftProblem(p) {
 /** The fields a save sends: the whole draft, in the parser's names. */
 function draftFields() {
   const f = Object.assign({}, editDraft);
-  delete f._encOn;
+  // the form's own state (`_encOn`, MASQUE's `_warpOn` and what its switch put aside) is no field
+  for (const k of Object.keys(f)) if (k[0] === '_') delete f[k];
   delete f.protocol;
   f.serviceName = f.path;   // gRPC's service name is the path field
   if (f.encryption === '' || f.encryption == null) f.encryption = 'none';
@@ -5079,7 +5440,16 @@ async function saveEdit() {
     // refused (bad JSON, no proxy outbound left…): the reason stays under the editor and the form stays open
     showJsonError(res.error || '');
   } else {
-    toast(t('t.failed'), 'err');
+    // the parser's own reason; one that starts with a field's name (MASQUE's
+    // checks: "warpPrivateKey: not a P-256 private key") marks that field
+    const why = String((res && res.error) || '');
+    const m = /^(\w+)[:,\s]/.exec(why);
+    const fld = m && ((sfTable() || {}).FIELDS || []).find((f) => f.id === m[1]);
+    if (fld) {
+      editBad = { id: fld.id, tab: fld.tab };
+      if (editView === 'pro') { editTab = fld.tab; renderEditPro(); }
+    }
+    toast(why ? t('t.failed') + ' — ' + why : t('t.failed'), 'err');
   }
 }
 $('#editSave').onclick = saveEdit;
@@ -5201,6 +5571,319 @@ $('#btnWgAdd').onclick = async () => {
   $('#wgMtu').value = 1420;
   toast(t('t.wgAdded'), 'ok');
 };
+
+/* ----------------------------- + WARP (MASQUE) ----------------------------- */
+// .superpowers/sdd/masque/design.md §5-6 and the approved sample: a WARP
+// account — registered here (warp.js, in main or on the router) or brought in
+// from usque or an Xray outbound — becomes one MASQUE server per HTTP version.
+// The dialog is drawn from `warpForm`; servers:addWarp does the work and does
+// not stream, so its steps read pending until it answers, then done.
+
+const WARP_SEEN_KEY = 'irnf.warpSeen';
+const WARP_TERMS_URL = 'https://www.cloudflare.com/application/terms/';
+/** Cloudflare's MASQUE edges (warp.js DEFAULT_ENDPOINTS): HTTP/3, then HTTP/2. */
+const WARP_EDGES = { v4: ['162.159.198.1', '162.159.198.2'], v6: ['2606:4700:103::1', '2606:4700:103::2'] };
+const WARP_IMPORT_PH = '{\n  "private_key": "MHcCAQEE…",\n  "endpoint_v4": "162.159.198.1", "endpoint_h2_v4": "162.159.198.2",\n  "endpoint_pub_key": "-----BEGIN PUBLIC KEY-----…",\n  "ipv4": "172.16.0.2", "ipv6": "2606:4700:110:…"\n}';
+/** The P-256 curve's OID (1.2.840.10045.3.1.7) in DER: a PKCS#8 or SEC1 key of that curve carries it. */
+const P256_OID = '\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07';
+let warpForm = null;   // the dialog: its choices, then phase 'running', then 'done' with the answer
+
+function warpFresh() {
+  return { way: 'new', route: 'direct', license: '', importText: '', http: 'both', endpoint: 'auto', address: '', cover: '', antiDpi: true, phase: 'form', error: '', res: null, args: null };
+}
+
+function warpShown() { const m = $('#warpModal'); return !!m && !m.hidden; }
+
+/** + WARP: the other add boxes close (one add form at a time), the dialog opens — on its last choices, unless it finished. */
+function openWarp() {
+  for (const id of ['#importBox', '#wgBox', '#proxyBox']) { const box = $(id); if (box) box.hidden = true; }
+  if (!warpForm || warpForm.phase === 'done') warpForm = warpFresh();
+  try { localStorage.setItem(WARP_SEEN_KEY, '1'); } catch { /* only costs the dot coming back */ }
+  $('#btnWarpOpen').classList.remove('is-new');
+  $('#warpModal').hidden = false;
+  renderWarp();
+}
+
+function closeWarp() { $('#warpModal').hidden = true; }
+
+/**
+ * servers:addWarp's arguments, from the dialog: a new account (how to reach
+ * the sign-up, a WARP+ key) or an imported one (the pasted text), then the
+ * servers — HTTP version, endpoint, cover domain, anti-DPI.
+ */
+function warpArgs(w) {
+  const a = { mode: w.way === 'import' ? 'import' : 'new' };
+  if (a.mode === 'import') a.importText = String(w.importText || '');
+  else {
+    a.via = w.route === 'proxy' ? 'proxy' : 'direct';
+    a.license = String(w.license || '').trim();
+  }
+  a.http = ['h3', 'h2', 'both'].includes(w.http) ? w.http : 'both';
+  a.endpoint = ['auto', 'v6', 'custom'].includes(w.endpoint) ? w.endpoint : 'auto';
+  if (a.endpoint === 'custom') a.address = String(w.address || '').trim();
+  a.cover = String(w.cover || '').trim();
+  a.antiDpi = w.antiDpi !== false;
+  return a;
+}
+
+/** A refusal in the window's words: `warp.err.<code>`, `{msg}` the detail it carries (Cloudflare's own, the reason). */
+function warpErrorText(res) {
+  const r = res || {};
+  const code = r.code && t('warp.err.' + r.code) !== 'warp.err.' + r.code ? r.code : 'failed';
+  const msg = String(r.detail || r.error || '').trim() || '—';
+  return t('warp.err.' + code).replace('{msg}', () => msg);
+}
+
+/** What went half right (`warp.warn.<code>`): shown with the servers made. */
+function warpWarningTexts(res) {
+  return ((res && res.warnings) || []).map((w) => {
+    const k = 'warp.warn.' + (w && w.code);
+    const msg = String((w && w.message) || '').trim() || '—';
+    return t(k) !== k ? t(k).replace('{msg}', () => msg) : msg;
+  });
+}
+
+/** A P-256 key, by a cheap look: its base64 (or PEM) holds the curve's OID. */
+function looksP256(key) {
+  const b64 = String(key == null ? '' : key).replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+  if (!b64) return false;
+  try { return atob(b64).includes(P256_OID); } catch { return false; }
+}
+
+/**
+ * The account in a pasted text, read back cheaply (warp.js importWarp is the
+ * real check): usque's config.json, an Xray WARP outbound (alone, in a list or
+ * a whole config) or its warp object. null for nothing pasted.
+ */
+function warpReadImport(text) {
+  const s = String(text == null ? '' : text).trim();
+  if (!s) return null;
+  let j;
+  try { j = JSON.parse(s); } catch { return { notJson: true }; }
+  const plain = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  let key, pub, addrs;
+  if (plain(j) && (j.private_key != null || j['private-key'] != null)) {
+    key = j.private_key != null ? j.private_key : j['private-key'];
+    pub = j.endpoint_pub_key || j.public_key || j['public-key'];
+    addrs = [j.ipv4 || j.ip, j.ipv6];
+  } else {
+    const list = Array.isArray(j) ? j : plain(j) && Array.isArray(j.outbounds) ? j.outbounds : plain(j) && j.protocol ? [j] : [];
+    const ob = list.find((o) => plain(o) && o.protocol === 'masque' && plain(o.streamSettings) && plain(o.streamSettings.masqueSettings) && plain(o.streamSettings.masqueSettings.warp));
+    const w = ob ? ob.streamSettings.masqueSettings.warp : plain(j) && plain(j.warp) ? j.warp : plain(j) && j.privateKey != null ? j : null;
+    if (!w) return { noAccount: true };
+    key = w.privateKey;
+    pub = w.publicKey;
+    addrs = [].concat(w.address == null ? [] : w.address);
+  }
+  const has = (v) => String(v == null ? '' : v).trim() !== '';
+  return { key: has(key), p256: looksP256(key), pub: has(pub), addrs: addrs.filter(has).map((a) => String(a).trim()) };
+}
+
+/** The read-back chips under the pasted account. */
+function warpImportChips(text) {
+  const r = warpReadImport(text);
+  if (!r) return [];
+  if (r.notJson) return [edNode('span', { class: 'dim', text: t('warp.chipNotJson') })];
+  if (r.noAccount) return [edNode('span', { class: 'bad', text: t('warp.chipNoAccount') })];
+  return warpChips(r, true);
+}
+
+/** A step's number, in the page's digits. */
+function warpNum(n) { return window.i18n && window.i18n.lang === 'fa' ? String.fromCharCode(0x06F0 + n) : String(n); }
+
+/** One input of the dialog, as an editor field: its label and technical key, the input writing `warpForm[key]`, a hint. */
+function warpField(key, label, techKey, o) {
+  const id = 'warp-' + key;
+  const inp = edNode(o.area ? 'textarea' : 'input', {
+    class: o.area ? 'textarea ed-mono' : 'input', id, dir: 'ltr', spellcheck: 'false', autocomplete: 'off',
+    placeholder: o.ph || null, rows: o.area ? String(o.rows || 5) : null
+  });
+  inp.value = warpForm[key] || '';
+  inp.oninput = () => { warpForm[key] = inp.value; if (o.onInput) o.onInput(inp.value); };
+  return edNode('div', { class: 'ed-f' + (o.span ? ' span2' : '') }, [
+    edNode('label', { class: 'field-label', for: id }, [edNode('span', { text: t(label) }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: techKey })]),
+    inp, o.hint ? edNode('p', { class: 'hint', text: t(o.hint) }) : edNode('span')]);
+}
+
+/** A segmented choice of the dialog: a click sets `warpForm[key]` and draws it again. */
+function warpSeg(items, key) {
+  const box = edNode('div', { class: 'seg ed-seg-wide ui', role: 'radiogroup' });
+  for (const [id, label] of items) {
+    const on = warpForm[key] === id;
+    const b = edNode('button', { type: 'button', class: 'seg-btn' + (on ? ' active' : ''), role: 'radio', 'aria-checked': String(on), 'data-warp': key + ':' + id, text: label });
+    b.onclick = () => { warpForm[key] = id; renderWarp(); };
+    appendSome(box, b);
+  }
+  return box;
+}
+
+/** The form: step 1 the account (new or imported), step 2 how to connect — as the sample has them. */
+function warpFormNodes(w) {
+  const step = (n, key) => edNode('div', { class: 'warp-step-head' }, [edNode('span', { class: 'n', text: warpNum(n) }), t(key)]);
+  const one = edNode('div', { class: 'warp-step' }, [step(1, 'warp.step1'), warpSeg([['new', t('warp.wayNew')], ['import', t('warp.wayImport')]], 'way')]);
+  if (w.way === 'new') {
+    // through the app's own connection only while there is one (warp.js refuses it otherwise: notConnected)
+    const connected = !!state.connected;
+    if (!connected && w.route === 'proxy') w.route = 'direct';
+    const radio = (id, label, sub, off) => {
+      const inp = edNode('input', { type: 'radio', name: 'warpRoute', value: id, disabled: off });
+      inp.checked = w.route === id;
+      inp.onchange = () => { if (inp.checked) w.route = id; };
+      return edNode('label', { class: 'warp-radio' + (off ? ' off' : '') }, [inp, edNode('span', {}, [edNode('span', { text: label }), edNode('small', { text: sub })])]);
+    };
+    const terms = edNode('button', { type: 'button', class: 'ed-pro-link', text: t('warp.tosLink') });
+    terms.onclick = () => window.api.openExternal(WARP_TERMS_URL);
+    appendSome(one,
+      edNode('p', { class: 'hint' }, richLine(t('warp.newLede'))),
+      edNode('div', { class: 'warp-route', role: 'radiogroup' }, [
+        radio('direct', t('warp.routeDirect'), t('warp.routeDirectSub'), false),
+        radio('proxy', t('warp.routeProxy'), t(connected ? 'warp.routeProxySub' : 'warp.routeProxyOff'), !connected)]),
+      edNode('p', { class: 'hint' }, richLine(t('warp.tos'), { terms })),
+      edNode('div', { class: 'ed-grid' }, [warpField('license', 'warp.license', 'license', { ph: t('warp.licensePh'), hint: 'warp.licenseHint', span: true })]));
+  } else {
+    const chips = edNode('div', { class: 'ed-chips-read', 'aria-live': 'polite' });
+    const fill = (text) => { chips.textContent = ''; appendSome(chips, ...warpImportChips(text)); };
+    fill(w.importText);
+    appendSome(one,
+      edNode('div', { class: 'ed-grid' }, [warpField('importText', 'warp.importLabel', 'private_key · endpoint_pub_key · ipv4 · ipv6',
+        { area: true, rows: 5, ph: WARP_IMPORT_PH, hint: 'warp.importHint', span: true, onInput: fill })]),
+      chips);
+  }
+
+  const edges = w.endpoint === 'v6' ? WARP_EDGES.v6 : WARP_EDGES.v4;
+  const two = edNode('div', { class: 'warp-step' }, [step(2, 'warp.step2'),
+    httpCards(w.http, (id) => { w.http = id; renderWarp(); }, true),
+    edNode('div', { class: 'warp-ep' }, [
+      edNode('div', { class: 'field-label' }, [edNode('span', { text: t('warp.endpoint') }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: 'address:443' })]),
+      warpSeg([['auto', t('warp.epAuto')], ['v6', t('warp.epV6')], ['custom', t('warp.epCustom')]], 'endpoint'),
+      edNode('p', { class: 'hint' }, richLine(t(w.endpoint === 'v6' ? 'warp.epV6Hint' : 'warp.epAutoHint'), { h3: edges[0], h2: edges[1] }))])]);
+  if (w.endpoint === 'custom') {
+    appendSome(two, edNode('div', { class: 'ed-grid' }, [warpField('address', 'warp.address', 'address', { ph: WARP_EDGES.v4[1], hint: 'warp.addressHint', span: true })]));
+  }
+  const sw = edNode('input', { type: 'checkbox', id: 'warp-antiDpi' });
+  sw.checked = w.antiDpi !== false;
+  sw.onchange = () => { w.antiDpi = sw.checked; };
+  appendSome(two,
+    edNode('div', { class: 'ed-grid' }, [warpField('cover', 'warp.cover', 'serverName', { ph: t('warp.coverPh'), hint: 'warp.coverHint', span: true })]),
+    edNode('div', { class: 'ed-grid' }, [edNode('div', { class: 'ed-f span2' }, [
+      edNode('label', { class: 'ed-switch', for: 'warp-antiDpi' }, [
+        edNode('span', { class: 'switch-title' }, [edNode('span', { text: t('warp.antiDpi') }), edNode('span', { class: 'ed-key', dir: 'ltr', text: 'noise · fragment' })]),
+        edNode('span', { class: 'switch' }, [sw, edNode('span', { class: 'slider' })])]),
+      edNode('p', { class: 'hint', text: t('warp.antiDpiHint') })])]));
+
+  return [edNode('p', { class: 'warp-lede' }, richLine(t('warp.lede'))), one, two,
+    w.error ? edNode('p', { class: 'warp-error', role: 'alert', text: w.error }) : null];
+}
+
+/**
+ * The steps the call goes through — a new account's five (six with a WARP+
+ * key), an imported one's two — pending while it runs, done when it answers;
+ * a step Cloudflare left half done (a warning) says so.
+ */
+function warpProgressNodes(w) {
+  const a = w.args || warpArgs(w);
+  const res = w.phase === 'done' ? w.res : null;
+  const warned = new Set(((res && res.warnings) || []).map((x) => x && x.code));
+  const added = res && Array.isArray(res.added) ? res.added : null;
+  const steps = a.mode === 'import'
+    ? [['warp.pRead', 'usque · Xray']]
+    : [['warp.pKey', t('warp.pKeyAt'), 'ui'], ['warp.pReg', 'api.cloudflareclient.com'], ['warp.pEnroll', 'secp256r1'], ['warp.pEnable', 'warp_enabled', '', 'warpNotEnabled']]
+      .concat(a.license ? [['warp.pLicense', 'license', '', 'licenseFailed']] : []);
+  const two = added ? added.length > 1 : a.http === 'both';
+  steps.push([!added ? 'warp.pAdd' : two ? 'warp.pAddedTwo' : 'warp.pAddedOne',
+    added ? added.map((s) => s.name).join(' / ') : (two ? 'WARP · H3 / WARP · H2' : 'WARP · ' + String(a.http).toUpperCase())]);
+  const list = edNode('ul', { class: 'warp-progress', role: 'status', 'aria-busy': res ? 'false' : 'true' });
+  for (const [key, k, kcls, warn] of steps) {
+    const mark = !res ? edNode('span', { class: 'run', text: '◌' }) : warned.has(warn) ? edNode('span', { class: 'warn', text: '!' }) : edNode('span', { class: 'ok', text: '✓' });
+    // the technical part at the far end: the span keeps the page's direction (its margin is the line's), the value inside is left-to-right
+    appendSome(list, edNode('li', {}, [mark, ' ', t(key), edNode('span', { class: 'k' + (kcls ? ' ' + kcls : '') }, kcls ? k : [edNode('bdi', { dir: 'ltr', text: k })])]));
+  }
+  const out = [list];
+  if (res) {
+    out.push(edNode('p', { class: 'warp-lede' }, richLine(t(two ? 'warp.doneLede' : 'warp.doneLedeOne'))));
+    for (const text of warpWarningTexts(res)) out.push(edNode('p', { class: 'ed-warn', role: 'alert', text }));
+  }
+  return out;
+}
+
+/** The dialog's foot: Make (Add, for an import), Cancel and how many servers — or, when done, see them in the list. */
+function warpFootNodes(w) {
+  if (w.phase === 'done') {
+    const see = edNode('button', { type: 'button', class: 'btn primary', id: 'warpSee', text: t('warp.see') });
+    see.onclick = warpSeeInList;
+    const close = edNode('button', { type: 'button', class: 'btn ghost', text: t('tb.close') });
+    close.onclick = closeWarp;
+    return [see, close];
+  }
+  const running = w.phase === 'running';
+  const go = edNode('button', { type: 'button', class: 'btn primary', id: 'warpGo', disabled: running,
+    text: running ? t('warp.working') : t(w.way === 'import' ? 'warp.add' : 'warp.make') });
+  go.onclick = runWarp;
+  const cancel = edNode('button', { type: 'button', class: 'btn ghost', text: t('btn.cancel') });
+  cancel.onclick = closeWarp;
+  return [go, cancel, edNode('span', { class: 'ed-foot-note', text: t(w.http === 'both' ? 'warp.noteTwo' : 'warp.noteOne') })];
+}
+
+/** Draw the dialog from `warpForm`. */
+function renderWarp() {
+  const body = $('#warpBody');
+  const foot = $('#warpFoot');
+  if (!body || !foot || !warpForm) return;
+  body.textContent = '';
+  foot.textContent = '';
+  appendSome(body, ...(warpForm.phase === 'form' ? warpFormNodes(warpForm) : warpProgressNodes(warpForm)));
+  appendSome(foot, ...warpFootNodes(warpForm));
+}
+
+/**
+ * Make (or add): api.addWarp with the dialog's choices. A refusal goes back to
+ * the form with its reason; the servers made join the list at once. Closed
+ * meanwhile, the dialog says how it ended in a toast instead.
+ */
+async function runWarp() {
+  const w = warpForm;
+  if (!w || w.phase === 'running') return;
+  w.args = warpArgs(w);
+  w.phase = 'running';
+  w.error = '';
+  renderWarp();
+  let res;
+  try { res = await window.api.addWarp(w.args); } catch (e) { res = { ok: false, code: 'failed', error: (e && e.message) || String(e) }; }
+  if (!res || !res.ok) {
+    w.phase = 'form';
+    w.error = warpErrorText(res);
+    if (warpForm === w && warpShown()) renderWarp(); else toast(w.error, 'err');
+    return;
+  }
+  w.phase = 'done';
+  w.res = res;
+  if (Array.isArray(res.servers)) state.servers = res.servers;
+  const added = Array.isArray(res.added) ? res.added : [];
+  if (!state.selectedServerId && added[0]) state.selectedServerId = added[0].id;
+  renderServers(); renderPicker(); renderChains(); renderPool(); renderAdvanced();
+  if (warpForm === w && warpShown()) renderWarp();
+  else toast(t('t.warpAdded').replace('{names}', () => added.map((s) => s.name).join('، ')), 'ok');
+}
+
+/** Done: the list, its first new server selected and scrolled to (its group unfolded). */
+function warpSeeInList() {
+  const added = (warpForm && warpForm.res && warpForm.res.added) || [];
+  closeWarp();
+  showView('servers');
+  const first = added[0] && srvById(added[0].id);
+  if (!first) return;
+  const key = groupKey(first.subId);
+  if (foldedGroups.has(key)) { setGroupFolded(key, false); renderServers(); }
+  selectServer(first.id);
+  const card = $$('#serverList .server-card').find((c) => c.dataset.srvId === first.id);
+  if (card && card.scrollIntoView) card.scrollIntoView({ block: 'center' });
+}
+
+$('#btnWarpOpen').onclick = openWarp;
+$('#warpClose').onclick = closeWarp;
+$('#warpModal').onclick = (e) => { if (e.target === $('#warpModal')) closeWarp(); };
+// the dot on the button until the dialog has been opened once
+try { if (!localStorage.getItem(WARP_SEEN_KEY)) $('#btnWarpOpen').classList.add('is-new'); } catch { /* no dot without storage */ }
 
 /* ----------------------------- SOCKS / HTTP proxy add ----------------------------- */
 $('#btnProxyOpen').onclick = () => {
