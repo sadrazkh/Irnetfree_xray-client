@@ -1400,6 +1400,14 @@ async function connectOnce(serverId, opts = {}) {
         ? `This server uses ECH, which Xray ${check.coreVersion} does not know (it would connect without it) — update Xray under Settings → Required files`
         : `این سرور از ECH استفاده می‌کند و Xray ${check.coreVersion} آن را نمی‌شناسد (بدون ECH وصل می‌شد) — از تنظیمات ← فایل‌های موردنیاز، Xray را به‌روز کن`);
     }
+    // MASQUE on a core older than it (26.9.30; a WARP account 26.10.10) and no
+    // other core new enough (xrayManager.validateWithFallback): the old core
+    // refuses it in words that name no version, or dials WARP without its key.
+    if (check.masqueUnsupported) {
+      throw new Error(settings.lang === 'en'
+        ? `This MASQUE server needs Xray ${check.need} or newer — update it under Settings → Required files`
+        : `این سرور MASQUE است و به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
+    }
     // The official core refuses plaintext VLESS/Trojan to public addresses and the
     // fork that accepts them is not installed — say so, the renderer offers the download.
     const hint = check.plaintextRejected

@@ -25,7 +25,7 @@ const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
  * and is not re-checked.
  */
 const ID = /^[\w-]+$/;
-const PROTOCOLS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria2']);
+const PROTOCOLS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria2', 'masque']);
 const validId = (v) => typeof v === 'string' && ID.test(v);
 
 /** A TCP port 1–65535 as a number, or null. */

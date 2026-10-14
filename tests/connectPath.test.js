@@ -245,6 +245,33 @@ test('ECH on an official Xray older than 25.8.3, no Xray-PattN: both mirrors ref
   assert.ok(service.indexOf('if (check.echUnsupported) {') < service.indexOf('if (check.pattnNeeded) {'));
 });
 
+/* --------------- v1.25: MASQUE asked of a core too old to know it --------------- */
+
+test('MASQUE on a core older than it (26.9.30; WARP 26.10.10), no other core new enough: both mirrors refuse the connect in the same plain words — the router as a refusal', () => {
+  // xrayManager.validateWithFallback answers { masqueUnsupported, coreVersion, need }:
+  // the old core refuses the config in words that name no version, or dials WARP without its key
+  const EN = '`This MASQUE server needs Xray ${check.need} or newer — update it under Settings → Required files`';
+  const FA = '`این سرور MASQUE است و به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`';
+  const LOGGED = "send('log', { line: 'Config rejected by xray: ' + check.error, level: 'error' });";
+  for (const [label, body] of Object.entries(CONNECT)) {
+    const at = body.indexOf('if (check.masqueUnsupported) {');
+    assert.notEqual(at, -1, `${label}: a core too old for MASQUE is not refused`);
+    const branch = body.slice(at, body.indexOf('\n', body.indexOf(FA, at)));
+    assert.ok(branch.includes(EN), `${label}: the English words`);
+    assert.ok(branch.includes(FA), `${label}: the Persian words`);
+    assert.match(branch, /settings\.lang === 'en'\s*\n\s*\? `This MASQUE server needs Xray/, `${label}: in the user’s language`);
+    // inside the refused check, after its log line: the core’s own words are still in the log
+    assert.ok(body.indexOf('if (!check.ok) {') < body.indexOf(LOGGED) && body.indexOf(LOGGED) < at, `${label}: after the log line of a refused check`);
+    // before the generic "Config error" the hint-less refusal would otherwise say
+    assert.ok(at < body.indexOf('const hint = check.plaintextRejected'), `${label}: before the generic config error`);
+  }
+  assert.match(CONNECT['main.js'], /if \(check\.masqueUnsupported\) \{\n\s*throw new Error\(settings\.lang === 'en'/);
+  // the router: a refusal (the boot loop and the recovery do not hammer a core that cannot learn MASQUE by retrying), before the Xray-PattN one
+  const service = CONNECT['service.js'];
+  assert.match(service, /if \(check\.masqueUnsupported\) \{\n\s*throw refusal\(settings\.lang === 'en'/);
+  assert.ok(service.indexOf('if (check.masqueUnsupported) {') < service.indexOf('if (check.pattnNeeded) {'));
+});
+
 /* ---------------- v1.18: mux, decided per server by a test (spec §4) ---------------- */
 // Driven for real through the service in serviceMux.test.js (the probe before
 // the core, the store's memory, the drop that marks for a re-test, the
