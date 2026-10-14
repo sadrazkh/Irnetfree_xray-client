@@ -38,6 +38,16 @@ function usque() {
     ipv4: '172.16.0.2', ipv6: '2606:4700:110:8a36::2', id: 'u1', access_token: 'never-carried'
   });
 }
+/** The public half of a key the core would read (PEM or base64; PKCS#8, SEC1 or SPKI), as base64 SPKI. */
+function spkiOf(v, isPrivate) {
+  const s = String(v).trim();
+  const der = (type) => ({ key: Buffer.from(s, 'base64'), format: 'der', type });
+  let k;
+  if (/-----BEGIN/.test(s)) k = isPrivate ? crypto.createPrivateKey(s) : crypto.createPublicKey(s);
+  else if (!isPrivate) k = crypto.createPublicKey(der('spki'));
+  else { try { k = crypto.createPrivateKey(der('pkcs8')); } catch { k = crypto.createPrivateKey(der('sec1')); } }
+  return (k.type === 'public' ? k : crypto.createPublicKey(k)).export({ type: 'spki', format: 'der' }).toString('base64');
+}
 const stub = () => {
   const made = [];
   return { made, createServer: (f) => { made.push(f); return { id: 'warp-' + made.length, name: f.name, protocol: f.protocol, address: f.address, port: f.port, outbound: {} }; } };
@@ -112,8 +122,9 @@ test('the real parser takes warpServers’ fields — once it knows MASQUE (T1)'
       const st = ob.streamSettings;
       assert.equal(st.security, 'tls');
       const w = st.masqueSettings.warp;
-      assert.equal(w.privateKey, reg.privateKey);
-      assert.equal(w.publicKey, reg.publicKey);
+      // the editor may keep a key as PEM or as its base64 body: the same key either way
+      assert.equal(spkiOf(w.privateKey, true), spkiOf(reg.privateKey, true));
+      assert.equal(spkiOf(w.publicKey, false), spkiOf(reg.publicKey, false));
       assert.deepEqual(w.address, reg.address);
       assert.equal(st.masqueSettings.user, undefined);
       assert.equal(st.tlsSettings.serverName, f.sni);

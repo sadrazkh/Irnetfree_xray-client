@@ -507,5 +507,22 @@ test('servers:addWarp: import needs no network; bad options are refused BEFORE a
   res = await h.add({ mode: 'new' });
   assert.deepEqual([res.ok, res.code], [false, 'createFailed']);
   assert.match(res.error, /Unknown protocol/);
+  assert.equal(res.detail, 'Unknown protocol: masque', 'the window puts the detail in its own sentence');
   assert.deepEqual(h.store.servers.map((s) => s.id), ['old'], 'nothing half-saved');
+});
+
+test('servers:addWarp: every refusal carries a detail for the window’s {msg} — Cloudflare’s words, the network error, the reason', async () => {
+  const cases = [
+    [{ request: F.fakeApi({ status: { 'POST /reg': 400 }, errorBody: { errors: [{ message: 'Invalid locale' }] } }) }, 'rejected', 'Invalid locale'],
+    [{ request: async () => { throw Object.assign(new Error('x'), { code: 'ECONNRESET' }); } }, 'blocked', 'ECONNRESET'],
+    [{ request: F.fakeApi({ status: { 'POST /reg': 429 } }) }, 'rateLimited', /429/]
+  ];
+  for (const [over, code, detail] of cases) {
+    const res = await handler(over).add({ mode: 'new' });
+    assert.equal(res.code, code);
+    if (detail instanceof RegExp) assert.match(res.detail, detail); else assert.equal(res.detail, detail);
+  }
+  const res = await handler({}).add({ mode: 'import', importText: '[]' });
+  assert.equal(res.code, 'badImport');
+  assert.match(res.detail, /No WARP account/);
 });

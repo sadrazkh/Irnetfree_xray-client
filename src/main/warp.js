@@ -109,7 +109,7 @@ function scrub(text, secrets) {
 function netError(e, host) {
   if (e instanceof WarpError) return e;
   const why = (e && (e.code || e.message)) || 'unknown error';
-  return new WarpError('blocked', `Could not reach ${host}: ${why}`);
+  return new WarpError('blocked', `Could not reach ${host}: ${why}`, String(why));
 }
 
 /* --------------------------------- the transport --------------------------------- */
@@ -165,7 +165,7 @@ function makeRequest(opts = {}) {
       };
       const track = (s) => { if (done) s.destroy(); else socks.push(s); };
       const after = timeoutMs >= 1000 ? Math.round(timeoutMs / 1000) + ' s' : timeoutMs + ' ms';
-      const timer = setTimeout(() => finish(new WarpError('blocked', `No answer from ${host}: timed out after ${after}`)), timeoutMs);
+      const timer = setTimeout(() => finish(new WarpError('blocked', `No answer from ${host}: timed out after ${after}`, 'timed out after ' + after)), timeoutMs);
       let opening;
       try { opening = open(track); } catch (e) { opening = Promise.reject(e); }   // tls.connect can throw at once
       opening.then((s) => {
@@ -612,7 +612,8 @@ async function addWarp(args, deps = {}) {
     const fields = warpServers(reg, opts);
     let added;
     try { added = fields.map((f) => deps.createServer(f)); } catch (e) {
-      throw new WarpError('createFailed', 'The servers could not be made: ' + scrub(e && e.message, [reg.privateKey, pemBody(reg.privateKey)]));
+      const why = scrub((e && e.message) || String(e), [reg.privateKey, pemBody(reg.privateKey)]);
+      throw new WarpError('createFailed', 'The servers could not be made: ' + why, why);
     }
     log(`WARP: ${added.length === 1 ? 'one server' : added.length + ' servers'} added (${added.map((s) => s.name).join(', ')})`, 'info');
     return { ok: true, added, account: reg.account, warnings: reg.warnings || [] };
@@ -622,7 +623,8 @@ async function addWarp(args, deps = {}) {
     const message = scrub(err.message, secrets);
     log('WARP: ' + message, 'warn');
     const out = { ok: false, code: err.code, error: message };
-    if (err.detail) out.detail = err.detail;
+    // what the window puts in {msg}: Cloudflare's words, the network error, or the reason
+    out.detail = err.detail ? scrub(err.detail, secrets) : message;
     return out;
   }
 }
