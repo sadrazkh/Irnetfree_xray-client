@@ -103,7 +103,8 @@ const pem = (buf, label) => `-----BEGIN ${label}-----\n${buf.toString('base64').
 
 function selfSigned(host = 'localhost') {
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-  const serial = crypto.randomBytes(8); serial[0] &= 0x7f;
+  // positive AND minimal: a first byte of 0 before one under 0x80 is padding OpenSSL 3 refuses ("illegal padding", ~1 run in 256)
+  const serial = crypto.randomBytes(8); serial[0] = (serial[0] & 0x3f) | 0x40;
   const sigAlg = SEQ(OID('1.2.840.10045.4.3.2'));                          // ecdsa-with-SHA256
   const name = SEQ(SET(SEQ(OID('2.5.4.3'), der(0x0c, Buffer.from(host)))));
   const now = Date.now();

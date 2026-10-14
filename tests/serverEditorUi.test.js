@@ -27,6 +27,12 @@ function fnSource(name) {
   const end = APP.indexOf('\n}\n', eol);
   return APP.slice(start, end + 2);
 }
+/** A top-level one-line `const NAME = …;` of app.js, as source. */
+function constSource(name) {
+  const m = APP.match(new RegExp(`\\nconst ${name} = [^\\n]*;\\n`));
+  assert.ok(m, `app.js has no const ${name}`);
+  return m[0];
+}
 /** Both languages' tables, as the renderer has them. */
 function i18n() {
   const ctx = { window: {}, document: { documentElement: {}, querySelectorAll: () => [] } };
@@ -47,8 +53,8 @@ function harness(lang = 'en') {
   });
   vm.runInContext([
     "let editDraft = null; let editView = 'pro'; let editTab = 'protocol'; let editNew = false; let editBad = null; let editOriginal = null; let editClearPin = false;",
-    "const PROTO_NAMES = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', shadowsocks: 'Shadowsocks', hysteria2: 'Hysteria2', wireguard: 'WireGuard', socks: 'SOCKS5', http: 'HTTP' };",
-    ...['sfTable', 'readServerFields', 'draftOf', 'newDraft', 'draftCtx', 'fieldShown', 'fieldLabel', 'optionLabel', 'draftProblem', 'draftFields', 'newUuid'].map(fnSource)
+    ...['PROTO_NAMES', 'NEW_PROTOCOLS', 'WARP_FIELDS'].map(constSource),
+    ...['sfTable', 'readServerFields', 'draftOf', 'newDraft', 'draftCtx', 'masqueWarpOn', 'fieldShown', 'fieldLabel', 'fieldHint', 'optionLabel', 'draftProblem', 'draftFields', 'newUuid'].map(fnSource)
   ].join('\n'), ctx);
   ctx.setDraft = (d) => vm.runInContext('editDraft = ' + JSON.stringify(d), ctx);
   ctx.draft = () => vm.runInContext('editDraft', ctx);
@@ -140,6 +146,103 @@ test('what a save sends: the whole draft in the parser’s names — none for an
   assert.equal('_encOn' in f, false);
   assert.equal('protocol' in f, false, 'an edit never changes the protocol');
   assert.match(ctx.newUuid(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+/* ------------------------------ MASQUE (v1.25.0, design §6) ------------------------------ */
+
+const { createServer } = require('../src/main/parser');
+const WARP_KEY = require('node:crypto').generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+const masqueWarp = (more) => createServer(Object.assign({
+  protocol: 'masque', name: '☁ WARP · H3', address: '162.159.198.1', port: '443', sni: 'consumer-masque.cloudflareclient.com',
+  warpPrivateKey: WARP_KEY.privateKey.export({ type: 'pkcs8', format: 'pem' }), warpPublicKey: WARP_KEY.publicKey.export({ type: 'spki', format: 'pem' }),
+  warpAddress: '172.16.0.2, 2606:4700:110:8a36::2', noise: 'random'
+}, more));
+const masqueOwn = (more) => createServer(Object.assign({ protocol: 'masque', name: 'M', address: 'm.example.com', port: '443', masqueHttp: 'h2', masqueUser: 'u', masquePass: 'p' }, more));
+
+test('MASQUE: the Pro view’s draft is what parser.editFields says, and saving it unchanged changes nothing — WARP, a user and password, with and without a fingerprint', () => {
+  const { ctx } = harness();
+  for (const s of [masqueWarp(), masqueWarp({ masqueHttp: 'h2', fragment: 'tlshello,100-200,10-20' }), masqueOwn(), masqueOwn({ fp: 'firefox', remoteDNS: '9.9.9.9', useSystemCA: true, masqueHeaders: '{"X-A":"1"}' })]) {
+    const d = ctx.draftOf(s);
+    const want = editFields(s);
+    for (const k of Object.keys(want)) {
+      if (['name', 'engine'].includes(k)) continue;
+      const field = SF.FIELDS.find((f) => f.id === k);
+      const norm = (v) => (field && field.kind === 'switch' ? !!v : String(v == null ? '' : v));
+      assert.equal(norm(d[k]), norm(want[k]), `${s.name} ${k}`);
+    }
+    assert.equal(d.security, 'tls');
+    ctx.setDraft(d);
+    const again = applyServerEdits(s, ctx.draftFields());
+    assert.equal(again._edited, undefined, `${s.name}: recorded ${JSON.stringify(again._edited)}`);
+    assert.deepEqual(again.outbound, s.outbound, `${s.name}: a no-op Pro save changed the outbound (a fingerprint the record never had?)`);
+  }
+});
+
+test('MASQUE: what the Pro view shows — the anti-DPI field of its HTTP version, the WARP fields with the card on (no user or password then), TLS fields but no allowInsecure, Mux or transport', () => {
+  const { ctx } = harness();
+  const shown = (d) => { ctx.setDraft(d); return SF.FIELDS.filter((f) => ctx.fieldShown(f)).map((f) => f.id); };
+  const h3 = shown(ctx.draftOf(masqueWarp()));
+  assert.ok(h3.includes('noise') && !h3.includes('fragment'), 'HTTP/3: noise, no fragment');
+  assert.ok(h3.includes('warpPrivateKey') && h3.includes('warpPublicKey') && h3.includes('warpAddress'));
+  assert.ok(!h3.includes('masqueUser') && !h3.includes('masquePass'), 'a WARP account takes no user and password');
+  assert.ok(!h3.includes('masqueHost') && !h3.includes('masquePath') && !h3.includes('masqueHeaders'), 'WARP’s host, path and headers are the core’s own, unless set');
+  for (const id of ['sni', 'fp', 'pcs', 'vcn', 'useSystemCA', 'ech', 'remoteDNS', 'engine', 'finalMask']) assert.ok(h3.includes(id), id);
+  for (const id of ['allowInsecure', 'alpn', 'mux', 'network', 'security', 'pbk', 'tcpFastOpen', 'cipherSuites']) assert.ok(!h3.includes(id), id);
+  const set = shown(Object.assign(ctx.draftOf(masqueWarp()), { masquePath: '/x' }));
+  assert.ok(set.includes('masquePath') && !set.includes('masqueHost'), 'a path a WARP server has is shown');
+  const h2 = shown(ctx.draftOf(masqueOwn()));
+  assert.ok(h2.includes('fragment') && !h2.includes('noise'), 'HTTP/2: a fragment, no noise');
+  assert.ok(h2.includes('masqueUser') && h2.includes('masqueHost') && h2.includes('masqueHeaders') && !h2.includes('warpPrivateKey'));
+  // the card's switch decides, whatever the fields hold
+  const off = shown(Object.assign(ctx.draftOf(masqueWarp()), { _warpOn: false }));
+  assert.ok(!off.includes('warpAddress') && off.includes('masqueUser'));
+});
+
+test('MASQUE: a new one from + Manual — TLS, HTTP/3, the core’s fingerprint; a WARP card switched on needs all three of its fields; the form’s own state is never sent', () => {
+  const { ctx } = harness();
+  const d = ctx.newDraft('masque');
+  assert.deepEqual([d.security, d.masqueHttp, d.fp, d.port, d.network], ['tls', 'h3', '', '443', 'masque']);
+  ctx.setDraft(d);
+  assert.deepEqual(JSON.parse(JSON.stringify(ctx.draftCtx())), { protocol: 'masque', network: 'masque', security: 'tls' });
+  ctx.setNew(true);
+  assert.equal(ctx.draftProblem().id, 'address', 'MASQUE needs no credential, only where the server is');
+  ctx.setDraft(Object.assign(ctx.newDraft('masque'), { address: 'm.example.com', _warpOn: true, warpPrivateKey: 'k' }));
+  assert.deepEqual(JSON.parse(JSON.stringify(ctx.draftProblem())), { id: 'warpPublicKey', tab: 'protocol', why: 'edit.err.required' });
+  ctx.setDraft(Object.assign(ctx.newDraft('masque'), { address: 'm.example.com', _warpOn: false, warpPrivateKey: 'k' }));
+  assert.equal(ctx.draftProblem(), null, 'the switch off: no account asked for');
+  ctx.setNew(false);
+  ctx.setDraft(Object.assign(ctx.newDraft('masque'), { _warpOn: true, _stash: { masqueUser: 'u' }, _encOn: false }));
+  const f = ctx.draftFields();
+  assert.deepEqual(Object.keys(f).filter((k) => k[0] === '_'), []);
+  // and it is a server the parser makes
+  const made = createServer(Object.assign(ctx.draftFields(), { protocol: 'masque', address: 'm.example.com', masqueUser: 'u' }));
+  assert.equal(made.outbound.streamSettings.network, 'masque');
+  assert.equal(made.outbound.streamSettings.tlsSettings.fingerprint, undefined);
+});
+
+test('MASQUE: hints by context — a WARP account’s, the HTTP version’s, any MASQUE one’s — before the table’s own; both languages', () => {
+  const { ctx } = harness('en');
+  const tr = i18n();
+  const by = (id) => SF.FIELDS.find((f) => f.id === id);
+  ctx.setDraft(ctx.draftOf(masqueWarp()));
+  assert.equal(ctx.fieldHint(by('sni')), tr('en', 'sf.sni.hint.warp'));
+  assert.equal(ctx.fieldHint(by('fp')), tr('en', 'sf.fp.hint.h3'), 'a fingerprint does nothing over HTTP/3');
+  assert.equal(ctx.fieldHint(by('ech')), tr('en', 'sf.ech.hint.warp'));
+  assert.equal(ctx.fieldHint(by('engine')), tr('en', 'sf.engine.hint.masque'));
+  assert.equal(ctx.fieldHint(by('warpPrivateKey')), tr('en', 'sf.warpPrivateKey.hint'), 'the table’s own where no other says');
+  ctx.setDraft(ctx.draftOf(masqueOwn()));
+  assert.equal(ctx.fieldHint(by('fp')), '', 'HTTP/2 takes it: no hint');
+  assert.equal(ctx.fieldHint(by('sni')), '');
+  ctx.setDraft(ctx.newDraft('vless'));
+  assert.equal(ctx.fieldHint(by('engine')), tr('en', 'sf.engine.hint'));
+  assert.equal(ctx.fieldLabel(by('fragment')), 'Fragment');
+  for (const k of ['sf.sni.hint.warp', 'sf.fp.hint.h3', 'sf.ech.hint.warp', 'sf.warpPublicKey.hint.masque', 'sf.warpAddress.hint.masque', 'sf.engine.hint.masque',
+    'sf.finalMask.hint.masque', 'sfo.fp._', 'sfg.pattn.masque', 'edit.protoNew', 'edit.moreInPro.masque']) {
+    for (const lang of ['fa', 'en']) assert.notEqual(tr(lang, k), k, `${lang} has no '${k}'`);
+    assert.doesNotMatch(tr('en', k), /[؀-ۿ]/, `en '${k}' is Persian`);
+  }
+  assert.match(APP, /const PROTO_NAMES = \{[^}]*masque: 'MASQUE'/);
+  assert.match(APP, /const NEW_PROTOCOLS = \['masque'\];/);
 });
 
 test('every label, hint, group heading and labelled option of the table — and the window’s own strings — in Persian and English', () => {
