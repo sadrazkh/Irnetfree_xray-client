@@ -17,7 +17,8 @@
  *
  * Every check answers: the page on every round, the same over IPv6, 2 MB in one
  * piece, UDP datagrams echoed through SOCKS5 UDP ASSOCIATE — and a wrong
- * password fetches nothing, on either version.
+ * password fetches nothing, on either version, with the server logging that it
+ * refused the credentials. Latencies are printed, not gated.
  *
  * The page is asked for at 192.0.2.1 / 2001:db8::1 (documentation ranges), not
  * 127.0.0.1: the target is an address INSIDE the tunnel, and the server's
@@ -180,10 +181,12 @@ async function udpEcho(socksPort) {
     sock.on('message', (m) => { inbox.push(m); if (wake) wake(); });
     const head = Buffer.concat([Buffer.from([0, 0, 0]), socksAddr(TARGET4, UDP_DEST_PORT)]);
     let got = 0, resent = 0;
+    const rtt = [];
     for (let i = 0; i < UDP_COUNT; i++) {
       const payload = crypto.randomBytes(UDP_SIZE);
       const want = Buffer.concat([Buffer.from('ECHO'), payload]);
       let ok = false;
+      const t0 = Date.now();
       for (let attempt = 0; attempt < 3 && !ok; attempt++) {
         if (attempt) resent++;
         sock.send(Buffer.concat([head, payload]), relay.port, relay.host);
@@ -200,10 +203,10 @@ async function udpEcho(socksPort) {
           }
         }
       }
-      if (ok) got++;
+      if (ok) { got++; rtt.push(Date.now() - t0); }
       else if (got === 0 && i >= 2) break; // nothing came back at all: do not wait out the rest
     }
-    return { got, resent };
+    return { got, resent, rtt };
   } finally {
     ctl.destroy();
     try { sock.close(); } catch { /* never bound */ }
@@ -325,19 +328,23 @@ async function startClient(id, label, socksPort, pin, h2, pass) {
   return client;
 }
 
+const median = (a) => (a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : NaN);
+
 /** One version with the right password: every check must answer. */
-async function tunnel(label, socksPort, pin, h2) {
+async function tunnel(label, socksPort, pin, h2, server) {
   const client = await startClient(h2 ? 'h2' : 'h3', label, socksPort, pin, h2, PASS);
   if (!client) return;
   const failedBefore = failed;
   let ok = 0, rounds = 0;
   const errors = new Map();
   const miss = (k) => errors.set(k, (errors.get(k) || 0) + 1);
+  const took = [];
   for (let r = 0; r < ROUNDS; r++) {
     rounds++;
+    const t0 = Date.now();
     try {
       const b = await get(socksPort, TARGET4, '/');
-      if (b.toString() === 'MASQUE-OK') ok++;
+      if (b.toString() === 'MASQUE-OK') { ok++; took.push(Date.now() - t0); }
       else miss('body ' + JSON.stringify(b.toString('latin1').slice(0, 20)));
     } catch (e) { miss(e.message); }
     if (rounds === 3 && ok === 0) break; // nothing through the tunnel: the rest would only wait out the same timeouts
@@ -348,7 +355,10 @@ async function tunnel(label, socksPort, pin, h2) {
     stop(client);
     return;
   }
-  report(ok === ROUNDS, `${label} · page through ${TARGET4}`, `${ok}/${ROUNDS}`, ok === ROUNDS ? [] : detail);
+  // the first request also builds the tunnel; the rest show what one connection through it costs
+  report(ok === ROUNDS, `${label} · page through ${TARGET4}`,
+    `${ok}/${ROUNDS} · first ${took[0]} ms (builds the tunnel), then median ${median(took.slice(1))} ms, max ${Math.max(...took.slice(1))} ms`,
+    ok === ROUNDS ? [] : detail);
 
   try {
     const b = await get(socksPort, TARGET6, '/');
@@ -360,19 +370,27 @@ async function tunnel(label, socksPort, pin, h2) {
     const b = await get(socksPort, TARGET4, '/big', 60000);
     const s = (Date.now() - t0) / 1000;
     const same = b.length === BIG && crypto.createHash('sha256').update(b).digest('hex') === BIG_SHA;
-    report(same, `${label} · 2 MB in one piece`, same ? `${s.toFixed(1)} s, ${(BIG / 1048576 / s).toFixed(1)} MB/s` : `${b.length} bytes, ${b.length === BIG ? 'other bytes' : 'cut short'}`);
+    report(same, `${label} · 2 MB in one piece`, same ? `${s.toFixed(2)} s, ${(BIG / 1048576 / s).toFixed(1)} MB/s` : `${b.length} bytes, ${b.length === BIG ? 'other bytes' : 'cut short'}`);
   } catch (e) { report(false, `${label} · 2 MB in one piece`, e.message + ' after ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s'); }
 
   try {
     const u = await udpEcho(socksPort);
-    report(u.got === UDP_COUNT, `${label} · UDP through the tunnel (SOCKS5 UDP ASSOCIATE → echo)`, `${u.got}/${UDP_COUNT} echoed, ${u.resent} resent`);
+    report(u.got === UDP_COUNT, `${label} · UDP through the tunnel (SOCKS5 UDP ASSOCIATE → echo)`,
+      `${u.got}/${UDP_COUNT} echoed, ${u.resent} resent` + (u.rtt.length ? `, first ${u.rtt[0]} ms, then median ${median(u.rtt.slice(1))} ms` : ''));
   } catch (e) { report(false, `${label} · UDP through the tunnel (SOCKS5 UDP ASSOCIATE → echo)`, e.message); }
 
-  // for the record: does a loopback target travel the tunnel? (why the checks use 192.0.2.1)
-  try {
-    const b = await get(socksPort, '127.0.0.1', '/', 8000);
-    report(null, `${label} · target 127.0.0.1 inside the tunnel`, (b.toString() === 'MASQUE-OK' ? 'answered' : 'answered something else') + ' (not gated)');
-  } catch (e) { report(null, `${label} · target 127.0.0.1 inside the tunnel`, 'no answer: ' + e.message + ' (not gated)'); }
+  // For the record, once (the client's netstack is the same for both versions):
+  // does a loopback target travel the tunnel? Why the checks use 192.0.2.1.
+  if (!h2) {
+    const before = server.text().length;
+    let what;
+    try {
+      const b = await get(socksPort, '127.0.0.1', '/', 8000);
+      what = b.toString() === 'MASQUE-OK' ? 'answered' : 'answered something else';
+    } catch (e) { what = 'no answer: ' + e.message; }
+    const seen = /127\.0\.0\.1:80(?!\d)/.test(server.text().slice(before));
+    report(null, `${label} · target 127.0.0.1 inside the tunnel`, `${what}; the server ${seen ? 'saw' : 'never saw'} that flow (not gated)`);
+  }
 
   if (failed > failedBefore) console.log('    client log: ' + whyNot(client.text()));
   stop(client);
@@ -393,8 +411,9 @@ async function refused(label, socksPort, pin, h2, server) {
     } catch (e) { why.push(e.message); }
   }
   await sleep(300);
+  // the server's own word that it was the credentials (a failed build is cached for 1 s: one line for both)
   const said = (server.text().slice(before).match(/authentication failed/gi) || []).length;
-  report(through === 0, `${label} · refused`,
+  report(through === 0 && said > 0, `${label} · refused`,
     `${through}/2 fetched (${[...new Set(why)].join(', ') || '-'}); the server logged "authentication failed" ×${said}`);
   stop(client);
 }
@@ -442,8 +461,8 @@ async function main() {
   }
 
   const lines = [
-    () => tunnel('HTTP/3', P.socks, pin, false),
-    () => tunnel('HTTP/2', P.socks + 1, pin, true),
+    () => tunnel('HTTP/3', P.socks, pin, false, server),
+    () => tunnel('HTTP/2', P.socks + 1, pin, true, server),
     () => refused('HTTP/3, wrong password', P.socks + 2, pin, false, server),
     () => refused('HTTP/2, wrong password', P.socks + 3, pin, true, server)
   ];
