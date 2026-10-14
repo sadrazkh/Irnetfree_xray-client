@@ -3596,9 +3596,9 @@ private fun muxHelp(mode: String): String = when (mode) {
 private var coresKnown = ""
 
 /**
- * "Cores in this app: Xray 26.9.30 · Xray-PattN 26.10.3 · sing-box —" — the
+ * "Cores in this app: Xray 26.10.10 · Xray-PattN 26.10.13 · sing-box —" — the
  * in-process core's own answer (Libv2ray.checkVersionX, "Lib v…, Xray-core
- * v26.9.30", trimmed to its number) and PattN's `version`; "—" for a core that
+ * v26.10.10", trimmed to its number) and PattN's `version`; "—" for a core that
  * is not bundled here or cannot say (sing-box has no version call in this app).
  * Blocking: PattN is run once.
  */
