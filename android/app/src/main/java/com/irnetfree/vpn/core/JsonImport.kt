@@ -26,7 +26,7 @@ object JsonImport {
     const val MODE_FULL = "full"
     const val MODE_RAW = "raw"
     const val CLASH_ERROR = "Clash YAML is not supported — use the subscription link"
-    const val NO_PROXY = "This config has no proxy outbound (vless, vmess, trojan, shadowsocks, socks, http, wireguard or hysteria)"
+    const val NO_PROXY = "This config has no proxy outbound (vless, vmess, trojan, shadowsocks, socks, http, wireguard, hysteria or masque)"
     const val TOO_DEEP = "JSON nested too deeply"
 
     /** The deepest objects/arrays go in a text read as JSON; a real config is under 15. */
@@ -47,7 +47,12 @@ object JsonImport {
     data class MainChoice(val tags: List<String>, val balancer: String? = null)
 
     /** Outbound protocols that reach a server; freedom, blackhole, dns and loopback do not. */
-    val PROXY_PROTOCOLS: Set<String> = setOf("vless", "vmess", "trojan", "shadowsocks", "socks", "http", "wireguard", "hysteria")
+    val PROXY_PROTOCOLS: Set<String> = setOf("vless", "vmess", "trojan", "shadowsocks", "socks", "http", "wireguard", "hysteria", "masque")
+
+    /** What a config may carry beside its outbounds and still be just one server (a MASQUE share). */
+    private val SERVER_ONLY_KEYS = setOf("remarks", "ps", "log", "outbounds")
+    /** The outbounds a one-server config may hold beside its proxy. */
+    private val PLAIN_OUTBOUNDS = setOf("freedom", "blackhole", "dns")
 
     /** A routing rule holding none of these catches whatever the rules before it left. */
     private val RULE_KEYS = listOf("domain", "ip", "port", "sourcePort", "protocol", "inboundTag", "user", "attrs")
@@ -430,8 +435,37 @@ object JsonImport {
         )
     }
 
-    /** One Xray config as its server(s): none for an info row, one per member for a balancer. */
+    /**
+     * The MASQUE outbound of a config that is just one MASQUE server — the
+     * one-line JSON a MASQUE server's Copy gives (Masque.shareJson), or the like
+     * from elsewhere: its one proxy outbound is MASQUE and dials by itself,
+     * nothing beside it but freedom / blackhole / dns, and nothing of its own
+     * (inbounds, routing, DNS) that only running the config whole would use.
+     * Null otherwise — a panel's full config stays a JSON server (jsonImport.js lonelyMasque).
+     */
+    internal fun lonelyMasque(config: JSONObject): JSONObject? {
+        val outs = objects(config.optJSONArray("outbounds"))
+        val proxies = outs.filter { o: JSONObject -> proxyProtocol(o) }
+        if (proxies.size != 1 || proxies[0].optString("protocol").lowercase() != Masque.PROTOCOL || refsOf(proxies[0]).isNotEmpty()) return null
+        if (!outs.all { o: JSONObject -> proxyProtocol(o) || o.optString("protocol") in PLAIN_OUTBOUNDS }) return null
+        return if (config.keys().asSequence().all { k: String -> k in SERVER_ONLY_KEYS }) proxies[0] else null
+    }
+
+    /**
+     * One Xray config as its server(s): none for an info row, one per member for
+     * a balancer. One that is just a MASQUE server ([lonelyMasque]) is an
+     * ordinary one, its fields editable — unless the editor could not hold it,
+     * when it is kept as the config it is.
+     */
     fun serversFromXray(config: JSONObject): List<ServerConfig> {
+        val masque = lonelyMasque(config)
+        if (masque != null) {
+            try {
+                return listOf(Masque.serverFromOutbound(masque, nameOf(config)))
+            } catch (e: Exception) {
+                // a JSON server, below
+            }
+        }
         val choice = mainOutboundTag(config) ?: return emptyList()
         val raw = JsonText.minify(config)
         val info = jsonInfo(config)
