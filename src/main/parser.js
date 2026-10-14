@@ -896,9 +896,155 @@ function makeWireguardServer(fields) {
   );
 }
 
+/* ------------------------------- MASQUE ------------------------------- */
+/**
+ * MASQUE (Xray 26.9.30+, XTLS/Xray-core #6807 #6810): IP over HTTP/3, or over
+ * HTTP/2 when the ALPN says h2 (serverFields.masqueHttpOf). The record is the
+ * core's own outbound — `settings` { address, port, remoteDNS }, the stream
+ * `network: 'masque'` over TLS with `masqueSettings` { host, path, user, pass,
+ * headers, warp } — so the editor writes it field by field. A WARP account
+ * (26.10.10+) is `warp` { privateKey, publicKey, address }: the device's
+ * P-256 key, the endpoint's public key, the tunnel's addresses.
+ *
+ * There is no share link for it anywhere (four clients, four invented
+ * `masque://`): a MASQUE server is shared as the Xray JSON it is
+ * (buildShareLink), which jsonImport.js reads back as this very server.
+ */
+
+/**
+ * A WARP key as the core takes it and a one-line text box keeps it: the
+ * base64 of its DER. A PEM block — its BEGIN / END lines, perhaps flattened
+ * onto one line by an input — and base64 broken over lines both become that.
+ * null when it is neither.
+ */
+function warpKeyBase64(v) {
+  const body = String(v == null ? '' : v).replace(/-----(BEGIN|END)[^-]*-----/g, '').replace(/\s+/g, '');
+  if (!body || !/^[A-Za-z0-9+/]+={0,2}$/.test(body)) return null;
+  return Buffer.from(body, 'base64').toString('base64');
+}
+
+/** The device key: a P-256 private key, PKCS#8 or SEC1 — the only ones the core reads. */
+function isWarpPrivateKey(b64) {
+  const der = Buffer.from(b64, 'base64');
+  for (const type of ['pkcs8', 'sec1']) {
+    try {
+      const k = crypto.createPrivateKey({ key: der, format: 'der', type });
+      return k.asymmetricKeyType === 'ec' && !!k.asymmetricKeyDetails && k.asymmetricKeyDetails.namedCurve === 'prime256v1';
+    } catch { /* the other encoding */ }
+  }
+  return false;
+}
+
+/** The endpoint's key: any public key in PKIX (SPKI) form, as the core checks it. */
+function isWarpPublicKey(b64) {
+  try { crypto.createPublicKey({ key: Buffer.from(b64, 'base64'), format: 'der', type: 'spki' }); return true; } catch { return false; }
+}
+
+/**
+ * WARP's tunnel addresses as the core takes them: at most one IPv4 and one
+ * IPv6, a bare address made a /32 or /128. Throws naming what it refuses.
+ */
+function warpAddresses(list) {
+  const out = [];
+  let v4 = false, v6 = false;
+  for (const a of [].concat(list || []).map((x) => String(x).trim()).filter(Boolean)) {
+    const slash = a.indexOf('/');
+    const host = slash === -1 ? a : a.slice(0, slash);
+    const fam = isIP(host);
+    const bits = slash === -1 ? (fam === 6 ? 128 : 32) : Number(a.slice(slash + 1));
+    if (!fam || !Number.isInteger(bits) || bits < 0 || bits > (fam === 6 ? 128 : 32) || (slash !== -1 && !/^\d+$/.test(a.slice(slash + 1)))) {
+      throw new Error(`warpAddress: "${a}" is not an IP address`);
+    }
+    if ((fam === 4 && v4) || (fam === 6 && v6)) throw new Error('warpAddress: at most one IPv4 and one IPv6 address');
+    if (fam === 4) v4 = true; else v6 = true;
+    out.push(`${host}/${bits}`);
+  }
+  return out;
+}
+
+/**
+ * Bring a MASQUE record to the shape the core takes, or throw saying which
+ * field it refuses — what the core itself would refuse the whole config for,
+ * said at the save instead of at a connect (infra/conf MasqueConfig.Build):
+ * a WARP account is all three of its fields or none, and no Basic user and
+ * password beside it; a user name has no `:`; the path starts with `/`; the
+ * headers are text, never Host or Capsule-Protocol (nor Authorization beside
+ * a user and password); remoteDNS holds IPs. Never allowInsecure (a hard
+ * error with MASQUE), never Mux, never sing-box — and the anti-DPI dialer
+ * only where it does anything: a fragment cuts TCP (HTTP/2), noise goes
+ * before UDP (HTTP/3).
+ */
+function checkMasque(server) {
+  const ob = server.outbound;
+  const st = ob.streamSettings;
+  const ms = st.masqueSettings;
+  const tls = st.tlsSettings || (st.tlsSettings = {});
+  delete tls.allowInsecure;
+  if (ob.mux && ob.mux.enabled) delete ob.mux;   // the core refuses the outbound with it
+  if (server.engine === 'sing-box') delete server.engine;   // no MASQUE there (engineChoice runs it on Xray)
+  if (SF.masqueHttpOf(tls) === 'h2') delete ob._noise; else delete ob._fragment;
+
+  const warp = ms.warp;
+  if (warp != null) {
+    if (!isPlainObject(warp)) throw new Error('warp: not a WARP account');
+    const missing = [['privateKey', 'warpPrivateKey'], ['publicKey', 'warpPublicKey'], ['address', 'warpAddress']]
+      .filter(([k]) => !String(warp[k] == null ? '' : warp[k]).trim()).map(([, id]) => id);
+    if (missing.length) throw new Error(`${missing.join(', ')} ${missing.length > 1 ? 'are' : 'is'} empty: a WARP account needs its private key, the public key and its addresses together`);
+    if (String(ms.user || '') || String(ms.pass || '')) throw new Error('masqueUser: a WARP account takes no user and password');
+    const priv = warpKeyBase64(warp.privateKey);
+    if (!priv || !isWarpPrivateKey(priv)) throw new Error('warpPrivateKey: not a P-256 private key (PEM or base64, PKCS#8 or SEC1)');
+    const pub = warpKeyBase64(warp.publicKey);
+    if (!pub || !isWarpPublicKey(pub)) throw new Error('warpPublicKey: not a public key (PEM or base64)');
+    warp.privateKey = priv;
+    warp.publicKey = pub;
+    warp.address = warpAddresses(warp.address);
+  }
+  if (String(ms.user || '').includes(':')) throw new Error('masqueUser: a user name cannot contain ":"');
+  if (ms.path != null && ms.path !== '' && !String(ms.path).startsWith('/')) throw new Error('masquePath: the path starts with /');
+  if (ms.host != null && /[\s/?#@]/.test(String(ms.host))) throw new Error('masqueHost: a host name only (no scheme or path)');
+  if (ms.headers != null) {
+    if (!isPlainObject(ms.headers)) throw new Error('masqueHeaders: a JSON object of headers');
+    for (const [k, v] of Object.entries(ms.headers)) {
+      if (typeof v !== 'string') throw new Error(`masqueHeaders: the value of ${k} is not text`);
+      const name = k.toLowerCase();
+      if (name === 'host' || name === 'capsule-protocol') throw new Error(`masqueHeaders: ${k} is the core's own`);
+      if (name === 'authorization' && (ms.user || ms.pass)) throw new Error('masqueHeaders: Authorization beside a user and password');
+    }
+  }
+  const dns = ob.settings.remoteDNS;
+  if (dns != null) {
+    if (!Array.isArray(dns) || dns.some((ip) => !isIP(String(ip)))) throw new Error('remoteDNS: IP addresses only');
+  }
+  return server;
+}
+
+/**
+ * A MASQUE server from an Xray outbound — a pasted share JSON (jsonImport.js):
+ * the outbound as written, its tag aside, in the record's shape and checked
+ * as an edit checks it. Throws, saying why, when the editor could not hold it.
+ */
+function masqueServer(outbound, name) {
+  const ob = JSON.parse(JSON.stringify(outbound || {}));
+  delete ob.tag;
+  if (!isPlainObject(ob.settings)) ob.settings = {};
+  if (!isPlainObject(ob.streamSettings)) ob.streamSettings = {};
+  const address = String(ob.settings.address == null ? '' : ob.settings.address).trim();
+  const port = parseInt(ob.settings.port, 10);
+  if (!address) throw new Error('MASQUE: the server address is empty');
+  if (!(port > 0 && port < 65536)) throw new Error('MASQUE: the port must be between 1 and 65535');
+  const made = applyServerEdits(mkServer(name || joinHostPort(address, port), 'masque', address, port, '', ob), {});
+  delete made._edited;
+  made.raw = buildShareLink(made);
+  return made;
+}
+
 /* --------------------------- a server from scratch --------------------------- */
-/** What a new server cannot be made without, by protocol (beside an address and a port). */
-const CREATE_NEEDS = { vless: ['uuid'], vmess: ['uuid'], trojan: ['password'], shadowsocks: ['password'], hysteria2: ['password'], wireguard: ['privateKey', 'publicKey'] };
+/**
+ * What a new server cannot be made without, by protocol (beside an address
+ * and a port). MASQUE: nothing — its user and password are optional, and a
+ * WARP account's three fields are all-or-none (checkMasque).
+ */
+const CREATE_NEEDS = { vless: ['uuid'], vmess: ['uuid'], trojan: ['password'], shadowsocks: ['password'], hysteria2: ['password'], wireguard: ['privateKey', 'publicKey'], masque: [] };
 
 /**
  * A server made from the editor's fields alone (its "new server" form): the
@@ -925,6 +1071,12 @@ function createServer(fields) {
     server = makeProxyServer({ type: proto, name: f.name, address, port, username: f.username, password: f.password });
   } else if (proto === 'hysteria2') {
     server = mkServer(f.name, 'hysteria2', address, port, '', buildHysteria2Outbound({ address, port, auth: f.password, sni: f.sni }));
+  } else if (proto === 'masque') {
+    // the bare outbound; applyServerEdits below writes every field into it and checks it (checkMasque)
+    server = mkServer(f.name, 'masque', address, port, '', {
+      protocol: 'masque', settings: { address, port },
+      streamSettings: { network: 'masque', security: 'tls', tlsSettings: {}, masqueSettings: {} }
+    });
   } else {
     const user = proto === 'vless' ? { id: '', encryption: 'none', flow: '' }
       : proto === 'vmess' ? { id: '', alterId: 0, security: 'auto' } : null;
@@ -1033,6 +1185,34 @@ function applyServerEdits(server, f) {
     ob.settings = rebuilt.settings;
     ob.streamSettings = Object.assign({}, ob.streamSettings, rebuilt.streamSettings);
     if (!rebuilt.streamSettings.finalmask) delete ob.streamSettings.finalmask;
+  } else if (proto === 'masque') {
+    // The core's flat settings and its own stream, always MASQUE over TLS
+    // (`method` is the core's other spelling of the network, and wins over
+    // it). The form's TLS basics are written where it sent them, an empty
+    // one clearing its key; the rest are the table's path fields (below).
+    ob.settings = Object.assign({}, ob.settings, { address: addr, port });
+    const st = ob.streamSettings = Object.assign({}, ob.streamSettings, { network: 'masque', security: 'tls' });
+    delete st.method;
+    delete st.realitySettings;
+    if (!isPlainObject(st.masqueSettings)) st.masqueSettings = {};
+    const tls = st.tlsSettings = Object.assign({}, st.tlsSettings);
+    const put = (key, v) => { if (v == null) return; if (v) tls[key] = v; else delete tls[key]; };
+    const text = (k) => (f[k] == null ? null : String(f[k]).trim());
+    put('serverName', text('sni'));
+    put('fingerprint', text('fp'));
+    put('echConfigList', text('ech'));
+    put('pinnedPeerCertSha256', f.pcs == null ? null : pinList(f.pcs));
+    put('verifyPeerCertByName', f.vcn == null ? null : String(f.vcn).split(',').map(x => x.trim()).filter(Boolean).join(','));
+    // HTTP/2 is ALPN h2; HTTP/3 is the core's default, no ALPN at all — an
+    // ALPN that already says the version asked for is left as it is
+    const http = (text('masqueHttp') || '').toLowerCase();
+    if (http && http !== SF.masqueHttpOf(tls)) {
+      if (http === 'h2') tls.alpn = ['h2']; else delete tls.alpn;
+    }
+    if (f.finalMask != null) {
+      const fm = String(f.finalMask).trim() ? parseFinalMask(f.finalMask) : null;
+      if (fm && Object.keys(fm).length) st.finalmask = fm; else delete st.finalmask;
+    }
   } else if (proto === 'socks' || proto === 'http') {
     const srv = ob.settings && ob.settings.servers && ob.settings.servers[0];
     if (srv) {
@@ -1101,6 +1281,9 @@ function applyServerEdits(server, f) {
   // record's own from before the rebuild above; one that no longer applies to
   // the protocol / transport / security the server has now is left out.
   SF.applyPathFields(out, f, keptPaths);
+  // what the core would refuse a MASQUE server for, said now — or put right
+  // (a WARP key's PEM made one line, anti-DPI for the HTTP version it has)
+  if (proto === 'masque') checkMasque(out);
 
   // Which fields the user edited, kept on the record (a union over every
   // edit). The form re-sends every field on every save, so a field counts
@@ -1202,6 +1385,14 @@ function editFields(s) {
     Object.assign(v, {
       password: h.auth, sni: h.sni, allowInsecure: isTrue(h.insecure), ech: h.ech, pcs: h.pcs, vcn: h.vcn,
       alpn: h.alpn, obfsPassword: h['obfs-password'], mport: h.mport
+    });
+  }
+  if (proto === 'masque') {
+    // its HTTP version (masqueHttp) is read below with the other special fields
+    const ts = st.tlsSettings || {};
+    Object.assign(v, {
+      sni: ts.serverName || '', fp: ts.fingerprint || '', ech: ts.echConfigList || '', pcs: ts.pinnedPeerCertSha256 || '',
+      vcn: ts.verifyPeerCertByName || '', finalMask: st.finalmask ? JSON.stringify(st.finalmask) : ''
     });
   }
   if (proto === 'vless' || proto === 'vmess' || proto === 'trojan' || proto === 'shadowsocks') {
@@ -1631,6 +1822,18 @@ function buildShareLink(server) {
     };
     return `wireguard://${enc(st.secretKey || '')}@${joinHostPort(server.address, server.port)}?${qs(q)}${name}`;
   }
+  if (proto === 'masque') {
+    // No link (see the MASQUE section): the Xray config it is, on one line —
+    // its remarks and its one outbound, without what is this device's own
+    // (the table's `local` fields; anti-DPI and the core are the device's
+    // choice too) — which jsonImport.js reads back as this very server.
+    const shared = { outbound: JSON.parse(JSON.stringify(ob)) };
+    for (const fld of SF.PATH_FIELDS) if (fld.local && fld.path[0] !== '@') SF.setPath(shared, fld.path, undefined);
+    delete shared.outbound._fragment;
+    delete shared.outbound._noise;
+    delete shared.outbound.tag;
+    return JSON.stringify({ remarks: server.name || '', outbounds: [Object.assign({ tag: 'proxy' }, shared.outbound)] });
+  }
   return server.raw || '';   // unknown protocol: fall back to the imported link
 }
 
@@ -1800,6 +2003,6 @@ function migrateStoredServer(server) {
 module.exports = {
   parseLink, parseMany, b64decode, isHttpProxyLink,
   buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits, editFields, createServer,
-  parseWireguardConf, isWireguardConf, splitDnsField,
+  parseWireguardConf, isWireguardConf, splitDnsField, masqueServer,
   buildShareLink, migrateStoredServer, ssPluginOf
 };

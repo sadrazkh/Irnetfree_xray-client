@@ -1,0 +1,136 @@
+[
+  {
+    "remarks": "☁ WARP · H3",
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "masque",
+        "settings": {
+          "address": "162.159.198.1",
+          "port": 443
+        },
+        "streamSettings": {
+          "network": "masque",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "consumer-masque.cloudflareclient.com"
+          },
+          "masqueSettings": {
+            "warp": {
+              "privateKey": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgxPScw+6G4krk122F\nJuhbnLpF/neuAVZRRo/cNyqBQs2hRANCAARel8JBIk6e6GyhFz1pTEB23os9YEuJ\niH0WwDwnXb46m15qtbkyCjW3zwV18U/CP8vSKZdLTeWtS0bd1BgZcX7T\n-----END PRIVATE KEY-----\n",
+              "publicKey": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG\n7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w==\n-----END PUBLIC KEY-----\n",
+              "address": [
+                "172.16.0.2",
+                "2606:4700:110:8a36:4d2e:7c3a:9f11:5b20"
+              ]
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "remarks": "Ⓜ MASQUE · H2",
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "masque",
+        "settings": {
+          "address": "masque.example.com",
+          "port": 8443,
+          "remoteDNS": [
+            "1.1.1.1",
+            "2606:4700:4700::1111"
+          ]
+        },
+        "streamSettings": {
+          "network": "masque",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "masque.example.com",
+            "alpn": [
+              "h2"
+            ],
+            "fingerprint": "chrome"
+          },
+          "masqueSettings": {
+            "user": "ci",
+            "pass": "ci-pass",
+            "path": "/masque/ip/{target}/{ipproto}/"
+          }
+        }
+      },
+      {
+        "tag": "direct",
+        "protocol": "freedom"
+      },
+      {
+        "tag": "block",
+        "protocol": "blackhole"
+      }
+    ]
+  },
+  {
+    "remarks": "🏛 panel MASQUE",
+    "log": {
+      "loglevel": "warning"
+    },
+    "inbounds": [
+      {
+        "tag": "socks",
+        "listen": "127.0.0.1",
+        "port": 10808,
+        "protocol": "socks",
+        "settings": {
+          "auth": "noauth",
+          "udp": true
+        }
+      }
+    ],
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "masque",
+        "settings": {
+          "address": "panel.example.com",
+          "port": 443
+        },
+        "streamSettings": {
+          "network": "masque",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "panel.example.com"
+          },
+          "masqueSettings": {
+            "user": "user1",
+            "pass": "pw1"
+          }
+        }
+      },
+      {
+        "tag": "direct",
+        "protocol": "freedom"
+      },
+      {
+        "tag": "block",
+        "protocol": "blackhole"
+      }
+    ],
+    "routing": {
+      "rules": [
+        {
+          "type": "field",
+          "ip": [
+            "geoip:private"
+          ],
+          "outboundTag": "direct"
+        },
+        {
+          "type": "field",
+          "port": "0-65535",
+          "outboundTag": "proxy"
+        }
+      ]
+    }
+  }
+]
