@@ -16,6 +16,11 @@
  *    from 26.3.23 `finalmask.quicParams.udpHop`; from 26.9.9 a udp mask of its
  *    own, `udphop` — and each newer core ignores the older key without a word,
  *    so the hopping just stops.
+ *  - XDNS (a DNS tunnel as a finalmask udp mask, `xdns`). Up to 26.10.3 a domain
+ *    is `{ name }` and a resolver `{ type: 'udp'|'tcp', settings: { addr } }`;
+ *    from 26.10.5 (XTLS/Xray-core#7090) a domain is `{ names: [...] }` and a
+ *    resolver `{ addrs: ['1.1.1.1', 'tcp://8.8.8.8:53'] }`. Each core ignores the
+ *    other's keys: the config builds, and every dial fails "empty domains".
  *
  * A stored record keeps a link's own terms (kcp: `kcpSettings.header`/`seed`)
  * or the NEWEST core's form (hysteria: the `udphop` mask). Which core runs a
@@ -34,6 +39,7 @@ const KCP_MASKS_SINCE = '26.1.31';
 const KCP_LEGACY_MASK_SINCE = '26.6.1';
 const QUIC_PARAMS_SINCE = '26.3.23';
 const UDPHOP_MASK_SINCE = '26.9.9';
+const XDNS_NAMES_SINCE = '26.10.5';
 
 /** "24.12.31" below "26.3.27", compared as numbers. No x.y.z in it (unknown) is never below anything. */
 function below(v, min) {
@@ -187,18 +193,89 @@ function adaptHysteria(ss, version) {
   return true;
 }
 
+/** Does this stream carry an XDNS mask? */
+function hasXdns(ss) {
+  const fm = isObj(ss.finalmask) ? ss.finalmask : null;
+  return !!fm && Array.isArray(fm.udp) && fm.udp.some((m) => isObj(m) && m.type === 'xdns');
+}
+
+/** A resolver of the newer form ('1.1.1.1', 'tcp://8.8.8.8', '[2606:4700::1111]:53') → the older { type, addr: host:port }. */
+function olderResolver(a) {
+  const text = String(a == null ? '' : a).trim();
+  const m = /^([a-z]+):\/\/(.*)$/i.exec(text);
+  const type = m ? m[1].toLowerCase() : 'udp';
+  const hp = (m ? m[2] : text).replace(/\/.*$/, '');
+  if (/^\[[^\]]*\]:\d+$/.test(hp) || /^[^:]+:\d+$/.test(hp)) return { type, addr: hp };
+  if (/^\[[^\]]*\]$/.test(hp)) return { type, addr: hp + ':53' };
+  return { type, addr: hp.includes(':') ? `[${hp}]:53` : hp + ':53' };
+}
+
+/** XDNS: its domains and resolvers in the form this core reads. Mutates `ss`; true when it changed. */
+function adaptXdns(ss, version) {
+  const fm = ss.finalmask;
+  const plural = !below(version, XDNS_NAMES_SINCE);
+  let changed = false;
+  const udp = fm.udp.map((m) => {
+    if (!isObj(m) || m.type !== 'xdns' || !isObj(m.settings)) return m;
+    const st = m.settings;
+    const domains = Array.isArray(st.domains) ? st.domains : [];
+    const resolvers = Array.isArray(st.resolvers) ? st.resolvers : [];
+    let next;
+    if (plural) {
+      const oldDomain = (d) => isObj(d) && d.name != null && d.names == null;
+      const oldResolver = (r) => isObj(r) && r.addrs == null && (r.type != null || isObj(r.settings));
+      if (!domains.some(oldDomain) && !resolvers.some(oldResolver)) return m;
+      next = Object.assign({}, st, {
+        domains: domains.map((d) => {
+          if (!oldDomain(d)) return d;
+          const o = Object.assign({}, d, { names: [String(d.name)] });
+          delete o.name;
+          return o;
+        }),
+        resolvers: resolvers.map((r) => {
+          if (!oldResolver(r)) return r;
+          const addr = isObj(r.settings) && r.settings.addr != null ? String(r.settings.addr) : '';
+          return { addrs: addr ? [`${String(r.type || 'udp').toLowerCase()}://${addr}`] : [] };
+        })
+      });
+    } else {
+      const newDomain = (d) => isObj(d) && Array.isArray(d.names);
+      const newResolver = (r) => isObj(r) && Array.isArray(r.addrs);
+      if (!domains.some(newDomain) && !resolvers.some(newResolver)) return m;
+      next = Object.assign({}, st, {
+        domains: domains.flatMap((d) => {
+          if (!newDomain(d)) return [d];
+          const rest = Object.assign({}, d);
+          delete rest.names;
+          return d.names.map((n) => Object.assign({ name: String(n) }, rest));
+        }),
+        resolvers: resolvers.flatMap((r) => {
+          if (!newResolver(r)) return [r];
+          return r.addrs.map((a) => { const o = olderResolver(a); return { type: o.type, settings: { addr: o.addr } }; });
+        })
+      });
+    }
+    changed = true;
+    return Object.assign({}, m, { settings: next });
+  });
+  if (changed) ss.finalmask = Object.assign({}, fm, { udp });
+  return changed;
+}
+
+/** Does this outbound hold anything adaptForCore may rewrite? */
+function touches(o) {
+  const ss = o && o.streamSettings;
+  if (!isObj(ss)) return false;
+  const net = String(ss.network || '').toLowerCase();
+  return net === 'kcp' || net === 'mkcp' || net === 'hysteria' || hasXdns(ss);
+}
+
 /**
  * The config, in the form the core of `version` takes. Every outbound with a
  * streamSettings is looked at; anything else is left as it is.
  */
 function adaptForCore(config, version) {
   if (!config || !Array.isArray(config.outbounds)) return config;
-  const touches = (o) => {
-    const ss = o && o.streamSettings;
-    if (!isObj(ss)) return false;
-    const net = String(ss.network || '').toLowerCase();
-    return net === 'kcp' || net === 'mkcp' || net === 'hysteria';
-  };
   if (!config.outbounds.some(touches)) return config;
   const out = clone(config);
   let changed = false;
@@ -207,21 +284,18 @@ function adaptForCore(config, version) {
     const ss = o.streamSettings;
     const net = String(ss.network || '').toLowerCase();
     if (net === 'hysteria') changed = adaptHysteria(ss, version) || changed;
-    else changed = adaptKcp(ss, version) || changed;
+    else if (net === 'kcp' || net === 'mkcp') changed = adaptKcp(ss, version) || changed;
+    if (hasXdns(ss)) changed = adaptXdns(ss, version) || changed;
   }
   return changed ? out : config;
 }
 
 /** Does this config hold anything adaptForCore may rewrite? (Callers skip asking the core its version otherwise.) */
 function needsCoreVersion(config) {
-  return !!config && Array.isArray(config.outbounds) && config.outbounds.some((o) => {
-    const ss = o && o.streamSettings;
-    const net = ss && String(ss.network || '').toLowerCase();
-    return net === 'kcp' || net === 'mkcp' || net === 'hysteria';
-  });
+  return !!config && Array.isArray(config.outbounds) && config.outbounds.some(touches);
 }
 
 module.exports = {
   adaptForCore, needsCoreVersion, kcpHeaderName,
-  KCP_MASKS_SINCE, KCP_LEGACY_MASK_SINCE, QUIC_PARAMS_SINCE, UDPHOP_MASK_SINCE
+  KCP_MASKS_SINCE, KCP_LEGACY_MASK_SINCE, QUIC_PARAMS_SINCE, UDPHOP_MASK_SINCE, XDNS_NAMES_SINCE
 };

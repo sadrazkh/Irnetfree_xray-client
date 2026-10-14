@@ -32,9 +32,9 @@ mkdir -p "$libs"
 # CI runners share IPs, which was killing the build with a 403). A release-asset
 # download redirects to a CDN and is not rate-limited. Override the tag with
 # LIBV2RAY_TAG=vX.Y.Z if you want a different core version.
-# v26.9.30 carries Xray-core 26.9.30 — the desktop's default Xray (SUGGESTED.xray
-# in src/main/coreVersions.js), the one v2rayN and v2rayNG ship.
-TAG="${LIBV2RAY_TAG:-v26.9.30}"
+# v26.10.10 carries Xray-core 26.10.10 — the desktop's default Xray (SUGGESTED.xray
+# in src/main/coreVersions.js).
+TAG="${LIBV2RAY_TAG:-v26.10.10}"
 url="https://github.com/2dust/AndroidLibXrayLite/releases/download/${TAG}/libv2ray.aar"
 echo "==> Fetching libv2ray.aar (Xray core, $TAG)"
 if curl -fSL --retry 3 --retry-delay 2 "$url" -o "$libs/libv2ray.aar"; then
@@ -125,9 +125,9 @@ fetch_pattn() {
 
 echo "==> Fetching Xray-PattN (the second Xray-format core)"
 # Pinned like the others so a shared CI runner never hits the rate-limited API.
-# v26.10.3 is the fork's latest stable release (the desktop installs the newer of
-# that and its ⭐; a phone gets what the APK carries).
-PATTN_TAG="${PATTN_TAG:-v26.10.3}"
+# v26.10.13 is the desktop's ⭐ (SUGGESTED['xray-pattn']) and the fork's latest stable
+# release (the desktop installs the newer of the two; a phone gets what the APK carries).
+PATTN_TAG="${PATTN_TAG:-v26.10.13}"
 echo "    Xray-PattN $PATTN_TAG"
 for pair in ${PATTN_ABIS:-"arm64-v8a:Xray-android-arm64-v8a.zip"}; do
   fetch_pattn "${pair%%:*}" "${pair##*:}" "$PATTN_TAG"

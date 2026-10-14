@@ -58,6 +58,33 @@ class CoreCompatTest {
         assertTrue(Canon.same("""{"udp":[$SAL,{"type":"udphop","settings":{"mode":"intervalLocal,intervalRemote","interval":"20","remotePorts":"1000-2000"}}],"quicParams":{"brutalUp":"50 mbps"}}""", moved.getJSONObject("finalmask")))
     }
 
+    private val XDNS_OLD = """{"type":"xdns","settings":{"domains":[{"name":"t.example.com","types":[16]}],"resolvers":[{"type":"udp","settings":{"addr":"1.1.1.1:53"}},{"type":"tcp","settings":{"addr":"8.8.8.8:53"}}],"extraPoll":0}}"""
+    private val XDNS_NEW = """{"type":"xdns","settings":{"domains":[{"names":["a.example","b.example"],"edns0":1232}],"resolvers":[{"addrs":["1.1.1.1","tcp://8.8.8.8","[2606:4700::1111]:5353","2606:4700::1001"]}]}}"""
+
+    @Test fun xdnsNamesAndAddrsFrom26_10_5() {
+        val c = cfg("""{"network":"xhttp","security":"tls","finalmask":{"udp":[$XDNS_OLD]}}""")
+        assertTrue(CoreCompat.needsCoreVersion(c))
+        for (v in listOf("26.10.10", "Lib v37, Xray-core v26.10.10", "")) {
+            assertTrue(v, Canon.same("""{"udp":[{"type":"xdns","settings":{"domains":[{"types":[16],"names":["t.example.com"]}],
+                "resolvers":[{"addrs":["udp://1.1.1.1:53"]},{"addrs":["tcp://8.8.8.8:53"]}],"extraPoll":0}}]}""",
+                ss(CoreCompat.adaptForCore(c, v)).getJSONObject("finalmask")))
+        }
+        val fresh = cfg("""{"network":"xhttp","finalmask":{"udp":[$XDNS_NEW]}}""")
+        assertSame(fresh, CoreCompat.adaptForCore(fresh, "26.10.10"))
+    }
+
+    @Test fun xdnsNameAndTypedResolversUpTo26_10_3() {
+        for (v in listOf("26.9.30", "26.10.3")) {
+            assertTrue(v, Canon.same("""{"udp":[{"type":"xdns","settings":{
+                "domains":[{"name":"a.example","edns0":1232},{"name":"b.example","edns0":1232}],
+                "resolvers":[{"type":"udp","settings":{"addr":"1.1.1.1:53"}},{"type":"tcp","settings":{"addr":"8.8.8.8:53"}},
+                  {"type":"udp","settings":{"addr":"[2606:4700::1111]:5353"}},{"type":"udp","settings":{"addr":"[2606:4700::1001]:53"}}]}}]}""",
+                ss(CoreCompat.adaptForCore(cfg("""{"network":"kcp","finalmask":{"udp":[$XDNS_NEW]}}"""), v)).getJSONObject("finalmask")))
+        }
+        val old = cfg("""{"network":"kcp","finalmask":{"udp":[$XDNS_OLD]}}""")
+        assertSame(old, CoreCompat.adaptForCore(old, "26.9.30"))
+    }
+
     @Test fun neverChangesItsInput() {
         val c = cfg(KCP); val before = c.toString()
         CoreCompat.adaptForCore(c, "26.9.30"); CoreCompat.adaptForCore(c, "26.3.27")
