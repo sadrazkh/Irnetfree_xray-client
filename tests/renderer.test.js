@@ -379,13 +379,21 @@ function editFormHarness() {
     } else {
       let v = '';
       Object.defineProperty(e, 'value', { get: () => v, set: (x) => { v = String(x == null ? '' : x); } });
+      // MASQUE's HTTP version: two cards (index.html #edMasqueHttp), marked by class and aria-checked
+      const card = (http) => {
+        const cls = new Set();
+        return { dataset: { masqueHttp: http }, attrs: {}, cls, classList: { toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)) }, setAttribute(k, x) { this.attrs[k] = String(x); } };
+      };
+      e.cards = id === 'edMasqueHttp' ? [card('h3'), card('h2')] : [];
+      e.querySelectorAll = () => e.cards;
+      e.classList = { toggle() {}, add() {}, remove() {}, contains: () => false };
     }
     els.set(id, e);
     return e;
   };
   const $ = (sel) => (typeof sel === 'string' && sel[0] === '#' ? el(sel.slice(1)) : null);
   const document = { createElement: () => makeOption('') };
-  const ctx = vm.createContext({ $, document });
+  const ctx = vm.createContext({ $, document, window: { ServerFields: require('../src/renderer/serverFields') } });
   const src = (name) => {
     const start = APP.indexOf(`\nfunction ${name}(`);
     assert.ok(start > -1, `app.js has no function ${name}`);
@@ -399,9 +407,67 @@ function editFormHarness() {
   const consts = APP.match(/^const NOISE_PRESET_KEYS = .*;$/m);
   assert.ok(consts, 'no NOISE_PRESET_KEYS in app.js');
   vm.runInContext([consts[0], ...['readServerFields', 'fillEditForm', 'collectEditFields', 'setNoiseFields', 'readNoiseField',
-    'syncNoiseCustom', 'show', 'selectValue'].map(src)].join('\n'), ctx);
+    'syncNoiseCustom', 'show', 'selectValue', 'sfTable', 'setMasqueHttpForm'].map(src)].join('\n'), ctx);
   return ctx;
 }
+
+/* ------------------- MASQUE in the Simple form (v1.25.0, design §6) ------------------- */
+
+test('MASQUE in the Simple form: a Save with nothing changed changes nothing — WARP over HTTP/3, a user and password over HTTP/2', () => {
+  const crypto = require('node:crypto');
+  const { createServer, applyServerEdits } = require('../src/main/parser');
+  const form = editFormHarness();
+  const key = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const warp = createServer({
+    protocol: 'masque', name: '☁ WARP · H3', address: '162.159.198.1', port: '443', masqueHttp: 'h3', sni: 'consumer-masque.cloudflareclient.com',
+    warpPrivateKey: key.privateKey.export({ type: 'pkcs8', format: 'pem' }), warpPublicKey: key.publicKey.export({ type: 'spki', format: 'pem' }),
+    warpAddress: '172.16.0.2, 2606:4700:110:8a36::2', noise: 'random'
+  });
+  const own = createServer({ protocol: 'masque', name: 'M', address: 'm.example.com', port: '8443', masqueHttp: 'h2', masqueUser: 'ci', masquePass: 'pw', fp: 'firefox', fragment: 'tlshello,100-200,10-20', engine: 'xray-pattn' });
+  for (const [name, rec, warpShown] of [['warp', warp, true], ['own', own, false]]) {
+    form.fillEditForm(form.readServerFields(rec), rec.protocol);
+    // what renderMasqueSimple does with the draft: the WARP summary instead of the user and password
+    form.$('#edMasqueCred').hidden = warpShown;
+    const fields = form.collectEditFields(rec, false);
+    assert.equal('masqueUser' in fields, !warpShown, `${name}: a WARP account's form sends no user and password`);
+    const out = applyServerEdits(rec, fields);
+    assert.equal('_edited' in out, false, `${name}: recorded ${JSON.stringify(out._edited)}`);
+    assert.deepEqual(out, rec, `${name}: a no-op save changed the server`);
+  }
+  // the form shows the HTTP version's card, and only that version's anti-DPI field
+  form.fillEditForm(form.readServerFields(own), 'masque');
+  assert.deepEqual(form.$('#edMasqueHttp').cards.map((c) => c.attrs['aria-checked']), ['false', 'true']);
+  assert.equal(form.$('#edMasqueHttp').dataset.value, 'h2');
+  assert.deepEqual([form.$('#edFragmentWrap').hidden, form.$('#edNoiseWrap').hidden], [false, true], 'HTTP/2: the fragment, no noise');
+  assert.equal(form.$('#edFragment').value, 'tlshello,100-200,10-20');
+  form.fillEditForm(form.readServerFields(warp), 'masque');
+  assert.deepEqual([form.$('#edFragmentWrap').hidden, form.$('#edNoiseWrap').hidden], [true, false], 'HTTP/3: noise, no fragment');
+  // another protocol after it: both anti-DPI fields again
+  form.fillEditForm(form.readServerFields(require('../src/main/parser').parseLink('vless://u@h.example.com:443?security=tls&sni=h.example.com#V')), 'vless');
+  assert.deepEqual([form.$('#edFragmentWrap').hidden, form.$('#edNoiseWrap').hidden], [false, false]);
+});
+
+test('MASQUE in the Simple form: an edit through it — HTTP/3 to HTTP/2, a user, the SNI — round-trips through the parser, the Pro values kept', () => {
+  const { createServer, applyServerEdits } = require('../src/main/parser');
+  const form = editFormHarness();
+  const rec = createServer({ protocol: 'masque', name: 'M', address: 'm.example.com', port: '443', masqueHost: 'front.example', masquePath: '/m/', remoteDNS: '9.9.9.9', useSystemCA: true });
+  form.fillEditForm(form.readServerFields(rec), 'masque');
+  form.$('#edMasqueCred').hidden = false;
+  form.setMasqueHttpForm('h2');
+  form.$('#edMasqueUser').value = 'alice';
+  form.$('#edMasquePass').value = 'secret';
+  form.$('#edSni').value = 'cdn.example';
+  form.$('#edFragment').value = 'tlshello,100-200,10-20';
+  const out = applyServerEdits(rec, form.collectEditFields(rec, false));
+  const st = out.outbound.streamSettings;
+  assert.deepEqual(st.tlsSettings.alpn, ['h2']);
+  assert.equal(st.tlsSettings.serverName, 'cdn.example');
+  assert.equal(st.tlsSettings.useSystemCA, true, 'a Pro-only field the Simple form never showed stays');
+  assert.deepEqual([st.masqueSettings.user, st.masqueSettings.pass, st.masqueSettings.host, st.masqueSettings.path], ['alice', 'secret', 'front.example', '/m/']);
+  assert.deepEqual(out.outbound.settings.remoteDNS, ['9.9.9.9']);
+  assert.equal(out.outbound._fragment, 'tlshello,100-200,10-20');
+  assert.deepEqual([...out._edited].sort(), ['fragment', 'masqueHttp', 'masqueUser', 'masquePass', 'sni'].sort());
+});
 
 test('a no-op save through the real edit form records nothing, for every shape the parser builds', () => {
   const { parseLink, applyServerEdits } = require('../src/main/parser');
