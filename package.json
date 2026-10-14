@@ -16,6 +16,7 @@
     "validate": "node scripts/validate-configs.js",
     "probe:wg": "node scripts/probe-wg-chain.js",
     "probe:wg-base": "node scripts/probe-wg-base.js",
+    "probe:masque": "node scripts/probe-masque.js",
     "selfcheck:mac": "bash scripts/mac-selfcheck.sh",
     "gen-icons": "node scripts/gen-icons.js",
     "dist": "electron-builder",
