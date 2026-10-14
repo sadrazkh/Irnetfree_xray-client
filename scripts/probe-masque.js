@@ -11,9 +11,11 @@
  *                                                └─ udp ─▶ freedom ─▶ the echo
  *
  * Xray 26.9.30 brought the MASQUE outbound and inbound (XTLS/Xray-core #6807,
- * #6810, #6844). Before the app writes the outbound, this shows that the cores
- * it suggests carry a tunnel at all — both ways the outbound speaks: HTTP/3
- * (alpn unset) and HTTP/2 (alpn ["h2"]), against one server port serving both.
+ * #6810, #6844). The client config is the app's own (a server from the
+ * editor's fields, the config buildConfig writes), so this shows that what the
+ * app writes carries a tunnel on the cores it suggests — both ways the outbound
+ * speaks: HTTP/3 (alpn unset) and HTTP/2 (alpn ["h2"]), against one server
+ * port serving both.
  *
  * Every check answers: the page on every round, the same over IPv6, 2 MB in one
  * piece, UDP datagrams echoed through SOCKS5 UDP ASSOCIATE — and a wrong
@@ -40,6 +42,8 @@ const http = require('http');
 const dgram = require('dgram');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
+const { createServer } = require('../src/main/parser');
+const { buildConfig } = require('../src/main/configBuilder');
 
 const BASE = Number(process.env.IRNF_PROBE_PORT || 39950);
 const P = { masque: BASE, socks: BASE + 10, web: BASE + 20, echo: BASE + 21 };
@@ -308,22 +312,23 @@ function serverConfig(cert) {
 }
 
 /**
- * The client, WRITTEN BY HAND: src/main/configBuilder.js does not know MASQUE
- * yet. The app's builder writes it in a later task; this probe then switches
- * to buildConfig, as probe-wg-base.js does for WireGuard.
+ * The client is the APP'S OWN: a server made from the editor's fields
+ * (parser.createServer, as the window and servers:addWarp make it) and the
+ * config buildConfig writes for it — as probe-wg-base.js does for WireGuard.
+ * Global routing: 192.0.2.1 / 2001:db8::1 are not in the builder's direct
+ * (private) list, so every flow takes the MASQUE outbound.
  */
 function clientConfig(socksPort, pin, h2, pass) {
-  const tlsSettings = { serverName: 'localhost', pinnedPeerCertSha256: pin };
-  if (h2) tlsSettings.alpn = ['h2']; // HTTP/2 only when alpn has h2 and not h3; anything else is HTTP/3
-  return {
-    log: { loglevel: 'info' },
-    inbounds: [{ tag: 'socks-in', listen: '127.0.0.1', port: socksPort, protocol: 'socks', settings: { auth: 'noauth', udp: true, ip: '127.0.0.1' } }],
-    outbounds: [{
-      tag: 'out-masque', protocol: 'masque',
-      settings: { address: '127.0.0.1', port: P.masque },
-      streamSettings: { network: 'masque', security: 'tls', masqueSettings: { user: USER, pass }, tlsSettings }
-    }]
-  };
+  const server = createServer({
+    protocol: 'masque', name: 'probe', address: '127.0.0.1', port: String(P.masque),
+    masqueHttp: h2 ? 'h2' : 'h3', masqueUser: USER, masquePass: pass, sni: 'localhost', pcs: pin
+  });
+  return buildConfig({ mode: 'single', server }, {
+    // the four clients take socks BASE+10..13; their HTTP and API inbounds stay clear of those
+    socksPort, httpPort: socksPort + 100, apiPort: socksPort + 200,
+    routingMode: 'global', blockAds: false, enableSniffing: false,
+    dnsManaged: false, ipv6: true, logLevel: 'info', geoAssets: false
+  });
 }
 
 /* --------------------------------- the run --------------------------------- */
