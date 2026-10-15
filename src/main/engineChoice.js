@@ -54,10 +54,19 @@ function needsInsecureCore(server) {
     !String(server.certPin || '').trim());
 }
 
+/**
+ * A MASQUE server (a JSON one too): only the Xray cores run it — sing-box has
+ * no MASQUE (1.15 alphas only) and no WARP at all — whatever the record says.
+ */
+function isMasque(server) {
+  return !!server && (server.protocol === 'masque' || !!(server.outbound && server.outbound.protocol === 'masque'));
+}
+
 function chooseEngine(plan, defaultEngine = 'xray') {
   const def = defaultEngine === 'xray-pattn' ? 'xray-pattn' : 'xray';
   if (plan && plan.mode === 'single') {
     const s = plan.server;
+    if (isMasque(s)) return s.engine === 'xray-pattn' ? 'xray-pattn' : def;
     return (s && s.engine) || (needsInsecureCore(s) ? 'sing-box' : def);
   }
   const wantsPattn = planServers(plan).some(s => s && s.engine === 'xray-pattn');
@@ -90,4 +99,4 @@ function testEngineFor(engineId) {
  * a DoH answer when the network's own is a fake-IP address. A name that cannot
  * be resolved at all is still left to the core.
  */
-module.exports = { chooseEngine, planServers, testEngineFor, needsInsecureCore };
+module.exports = { chooseEngine, planServers, testEngineFor, needsInsecureCore, isMasque };

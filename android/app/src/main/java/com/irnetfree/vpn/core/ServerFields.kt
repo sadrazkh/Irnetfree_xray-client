@@ -24,7 +24,7 @@ object ServerFields {
     val FIELDS: List<SfField> get() = ServerFieldsTable.FIELDS
     val PATH_FIELDS: List<SfField> by lazy { ServerFieldsTable.FIELDS.filter { f: SfField -> f.path != null } }
     val TABS = listOf("basics", "protocol", "transport", "security", "advanced")
-    val PROTOCOLS = listOf("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "wireguard", "socks", "http")
+    val PROTOCOLS = listOf("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "masque", "wireguard", "socks", "http")
     val NETWORKS = listOf("tcp", "ws", "grpc", "httpupgrade", "xhttp", "kcp")
     val SS_METHODS = listOf("2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
         "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305", "none")
@@ -40,16 +40,24 @@ object ServerFields {
     fun securitiesOf(protocol: String): List<String> = when (protocol) {
         "vless", "trojan" -> listOf("none", "tls", "reality")
         "vmess", "shadowsocks" -> listOf("none", "tls")
-        "hysteria2" -> listOf("tls")
+        "hysteria2", "masque" -> listOf("tls")
         else -> emptyList()
     }
+
+    /** Hysteria2 and MASQUE speak TLS and nothing else, whatever a hand-written stream says. */
+    fun tlsOnly(protocol: String): Boolean = protocol == "hysteria2" || protocol == "masque"
+
+    /** The HTTP version a MASQUE outbound dials (serverFields.js masqueHttpOf): "h2" or "h3". */
+    fun masqueHttpOf(tls: JSONObject?): String = Masque.httpOf(tls)
 
     data class Ctx(val protocol: String, val network: String, val security: String)
 
     /** A protocol and an outbound's stream, in the table's terms. */
     fun contextOf(protocol: String, outbound: JSONObject): Ctx {
         val st = outbound.optJSONObject("streamSettings") ?: JSONObject()
-        val net = when (val n = st.optString("network", "tcp").lowercase().ifEmpty { "tcp" }) { "raw" -> "tcp"; "splithttp" -> "xhttp"; "mkcp" -> "kcp"; else -> n }
+        val n0 = when (val n = st.optString("network", "tcp").lowercase().ifEmpty { "tcp" }) { "raw" -> "tcp"; "splithttp" -> "xhttp"; "mkcp" -> "kcp"; else -> n }
+        // MASQUE's transport is its own, whatever a hand-written stream says
+        val net = if (protocol == "masque") "masque" else n0
         val p = if (protocol == "hysteria") "hysteria2" else protocol
         return Ctx(p, net, st.optString("security", "none").lowercase().ifEmpty { "none" })
     }
@@ -64,7 +72,7 @@ object ServerFields {
         if (ns != null && !(hasTransport(c.protocol) && c.network in ns)) return false
         val ss = f.securities
         if (ss != null) {
-            val sec = if (c.protocol == "hysteria2") "tls" else c.security
+            val sec = if (tlsOnly(c.protocol)) "tls" else c.security
             if (sec !in ss) return false
         }
         return true

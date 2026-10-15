@@ -54,6 +54,7 @@ const { exportBundle, importBundle } = require('../main/backup');
 const { createRouteShareApi } = require('../main/routeShare');
 const { AssetUpdater } = require('../main/assetUpdater');
 const { CORE_IDS, createCoreVersionsApi } = require('../main/coreVersions');
+const { warpHandler } = require('../main/warp');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
 // list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
 // deliberately NOT given this: Electron never runs on a router.
@@ -1830,6 +1831,14 @@ function createService(opts = {}) {
           ? `This server uses ECH, which Xray ${check.coreVersion} does not know (it would connect without it) — update Xray under Settings → Required files`
           : `این سرور از ECH استفاده می‌کند و Xray ${check.coreVersion} آن را نمی‌شناسد (بدون ECH وصل می‌شد) — از تنظیمات ← فایل‌های موردنیاز، Xray را به‌روز کن`);
       }
+      // MASQUE on a core older than it (26.9.30; a WARP account 26.10.10) and
+      // no other core new enough — the opkg feed's cores are such — a refusal
+      // like ECH's: retrying does not teach the core MASQUE; updating it does.
+      if (check.masqueUnsupported) {
+        throw refusal(settings.lang === 'en'
+          ? `This MASQUE server needs Xray ${check.need} or newer — update it under Settings → Required files`
+          : `این سرور MASQUE است و به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
+      }
       // The fork's finalmask, refused by the official core, and no fork to
       // fall back to (xrayManager.validateWithFallback): what to install is
       // the message — the renderer offers the download on the product name.
@@ -3094,6 +3103,18 @@ function createService(opts = {}) {
     } finally { networkRepairing = false; }
   }
 
+  // + WARP (warp.js), as on the desktop: registered straight out or through the
+  // gateway's own SOCKS port, or imported; one MASQUE server per HTTP version.
+  // deps.warp: a test's fake API (`request`) and parser stub (`createServer`).
+  const addWarp = warpHandler(Object.assign({
+    createServer,
+    connected: () => conn.state === 'connected',
+    socksPort: () => (appliedSettings || getSettings()).socksPort,
+    getServers: () => store.get('servers', []),
+    setServers: (list) => store.set('servers', list),
+    log: (line, level) => send('log', { line, level: level || 'info' })
+  }, deps.warp || {}));
+
   const handlers = {
     'diagnostics:connection': connectionDiagnostics,
     'network:repair': repairNetwork,
@@ -3146,6 +3167,7 @@ function createService(opts = {}) {
       const e = store.get('servers', []); e.push(server); store.set('servers', e);
       return { ok: true, server, servers: e };
     },
+    'servers:addWarp': (args) => addWarp(args || {}),
     // headless: no native dialog; the browser picks the file itself
     'wg:pickConf': () => ({ ok: false, error: 'not available in server mode' }),
     'wg:parseConf': (text) => {

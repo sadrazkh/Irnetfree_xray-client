@@ -123,6 +123,11 @@ class ServerFieldsTest {
             assertEquals("de.example.com", s.address)
             assertTrue(p, s.raw.isNotBlank())
             assertTrue(p, s.edited.isEmpty())
+            // MASQUE has no link: its raw is its one line of Xray JSON, which reads back as this server
+            if (p == "masque") {
+                assertTrue(s.raw, s.raw.startsWith("{\"") && !s.raw.contains("\n"))
+                assertEquals("masque", LinkParser.parseMany(s.raw).first.single().protocol)
+            }
             if (p == "vless") {
                 val xs = s.outbound.getJSONObject("streamSettings").getJSONObject("xhttpSettings")
                 assertEquals("/x", xs.getString("path"))

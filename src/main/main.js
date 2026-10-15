@@ -53,6 +53,7 @@ const { exportBundle, importBundle } = require('./backup');
 const { createRouteShareApi } = require('./routeShare');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
 const { CORE_IDS, createCoreVersionsApi } = require('./coreVersions');
+const { warpHandler } = require('./warp');
 const https = require('https');
 
 let mainWindow = null;
@@ -1399,6 +1400,14 @@ async function connectOnce(serverId, opts = {}) {
       throw new Error(settings.lang === 'en'
         ? `This server uses ECH, which Xray ${check.coreVersion} does not know (it would connect without it) — update Xray under Settings → Required files`
         : `این سرور از ECH استفاده می‌کند و Xray ${check.coreVersion} آن را نمی‌شناسد (بدون ECH وصل می‌شد) — از تنظیمات ← فایل‌های موردنیاز، Xray را به‌روز کن`);
+    }
+    // MASQUE on a core older than it (26.9.30; a WARP account 26.10.10) and no
+    // other core new enough (xrayManager.validateWithFallback): the old core
+    // refuses it in words that name no version, or dials WARP without its key.
+    if (check.masqueUnsupported) {
+      throw new Error(settings.lang === 'en'
+        ? `This MASQUE server needs Xray ${check.need} or newer — update it under Settings → Required files`
+        : `این سرور MASQUE است و به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
     }
     // The official core refuses plaintext VLESS/Trojan to public addresses and the
     // fork that accepts them is not installed — say so, the renderer offers the download.
@@ -2842,6 +2851,20 @@ function registerIpc() {
     setServers(existing);
     return { ok: true, server, servers: existing };
   });
+
+  // + WARP (warp.js): a WARP device registered — straight out, or through the
+  // live connection's own SOCKS port — or imported, and one MASQUE server per
+  // HTTP version made by createServer and saved like servers:create. One
+  // sign-up at a time; the reason a refusal has comes back as a code.
+  const addWarp = warpHandler({
+    createServer,
+    connected: () => conn.state === 'connected',
+    socksPort: () => (appliedSettings || getSettings()).socksPort,
+    getServers: () => store.get('servers', []),
+    setServers,
+    log: (line, level) => send('log', { line, level: level || 'info' })
+  });
+  ipcMain.handle('servers:addWarp', (e, args) => addWarp(args || {}));
 
   // Read a WireGuard .conf the user picks, and parse .conf text into form fields.
   ipcMain.handle('wg:pickConf', async () => {

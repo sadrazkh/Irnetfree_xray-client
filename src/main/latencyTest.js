@@ -14,6 +14,7 @@ const { chooseEngine, testEngineFor } = require('./engineChoice');
 const { engineFormat } = require('./engines');
 const { buildTestConfig } = require('./configBuilder');
 const { buildSingboxConfig } = require('./singboxBuilder');
+const { masqueHttpOf } = require('../renderer/serverFields');
 
 /**
  * @param target  a server record, or a chain (an array of them)
@@ -45,9 +46,12 @@ function testsAlone(target, opts = {}) {
  * A server that has no TCP port to knock on: WireGuard and Hysteria2 listen
  * on UDP only, so a TCP ping of them says nothing at all about the server
  * (it failed for every one of them). The real-delay test still measures them.
+ * MASQUE likewise over HTTP/3 (QUIC); over HTTP/2 it is TCP like any other.
  */
 function udpOnly(server) {
-  const p = server && ((server.outbound && server.outbound.protocol) || server.protocol);
+  const ob = server && server.outbound;
+  const p = server && ((ob && ob.protocol) || server.protocol);
+  if (p === 'masque') return masqueHttpOf(ob && ob.streamSettings && ob.streamSettings.tlsSettings) !== 'h2';
   return p === 'wireguard' || p === 'hysteria' || p === 'hysteria2';
 }
 

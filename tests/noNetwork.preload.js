@@ -106,4 +106,30 @@ cp.execSync = function (command, ...rest) {
 };
 for (const fn of Object.keys(real)) cp[fn].irnfGuard = true;
 
-module.exports = { BLOCKED, commandName, blocked };
+/**
+ * Cloudflare's WARP API (src/main/warp.js) registers a real device on every
+ * sign-up — and sign-ups are rate-limited per network. No test may reach it:
+ * tests talk to a local fake (tests/warpFakes.js). A TLS connection to it —
+ * https.request, the app's own transport — throws here, synchronously, before
+ * anything is dialled.
+ */
+const tls = require('tls');
+const WARP_API = /(^|\.)cloudflareclient\.com\.?$/i;
+const realTlsConnect = tls.connect;
+function warpApiNamed(args) {
+  const names = [];
+  for (const a of args) {
+    if (typeof a === 'string') names.push(a);
+    else if (a && typeof a === 'object' && !Buffer.isBuffer(a)) names.push(a.servername, a.host);
+  }
+  return names.some((n) => typeof n === 'string' && WARP_API.test(n.trim()));
+}
+tls.connect = function (...args) {
+  if (warpApiNamed(args)) {
+    throw Object.assign(new Error('tests/noNetwork.preload.js: a test tried to reach Cloudflare\'s WARP API — use tests/warpFakes.js'), { code: 'EIRNF_GUARD' });
+  }
+  return realTlsConnect.apply(this, args);
+};
+tls.connect.irnfGuard = true;
+
+module.exports = { BLOCKED, commandName, blocked, warpApiNamed };

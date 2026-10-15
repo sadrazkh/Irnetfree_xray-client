@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('api', {
   addWireguard: (fields) => ipcRenderer.invoke('servers:addWireguard', fields),
   addProxy: (fields) => ipcRenderer.invoke('servers:addProxy', fields),
   createServer: (fields) => ipcRenderer.invoke('servers:create', fields),
+  // + WARP: { mode, license, via, importText, http, endpoint, address, cover, antiDpi } → { ok, servers, added, account, warnings } | { ok: false, code, error }
+  addWarp: (args) => ipcRenderer.invoke('servers:addWarp', args),
   pickWireguardConf: () => ipcRenderer.invoke('wg:pickConf'),
   parseWireguardConf: (text) => ipcRenderer.invoke('wg:parseConf', text),
   updateServer: (id, fields) => ipcRenderer.invoke('servers:update', { id, fields }),

@@ -796,16 +796,25 @@ object ConfigBuilder {
     /** DPI-evasion dialer: outbounds marked with `_fragment` (TLS fragmentation)
      *  and/or `_noise` (fake ClientHello / decoy packet injection) dial through a
      *  freedom outbound carrying the matching settings (skipping chain inner hops
-     *  that already dial-through). */
+     *  that already dial-through).
+     *
+     *  MASQUE dials TCP for HTTP/2 and QUIC (UDP) for HTTP/3: a fragment cuts
+     *  only the first, noise goes only before the second, so the one that would
+     *  do nothing is dropped (the editor drops it from the record too) — a record
+     *  left with neither dials directly (configBuilder.js applyFragments). */
     private fun applyFragments(outbounds: JSONArray): JSONArray {
         val byKey = HashMap<String, String>()
         val extra = JSONArray()
         for (i in 0 until outbounds.length()) {
             val o = outbounds.getJSONObject(i)
-            val frag = o.optString("_fragment", "")
-            val noise = o.optString("_noise", "")
+            var frag = o.optString("_fragment", "")
+            var noise = o.optString("_noise", "")
             if (frag.isEmpty() && noise.isEmpty()) continue
             o.remove("_fragment"); o.remove("_noise")
+            if (o.optString("protocol") == Masque.PROTOCOL) {
+                if (Masque.httpOf(o.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")) == "h2") noise = "" else frag = ""
+                if (frag.isEmpty() && noise.isEmpty()) continue
+            }
             val ss = o.optJSONObject("streamSettings") ?: JSONObject().also { o.put("streamSettings", it) }
             val sockopt = ss.optJSONObject("sockopt") ?: JSONObject().also { ss.put("sockopt", it) }
             if (sockopt.has("dialerProxy")) continue

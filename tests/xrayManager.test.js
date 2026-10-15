@@ -15,7 +15,7 @@ let fakeSpawn = null;
 const spawns = [];
 cp.spawn = (...args) => { spawns.push(args); return fakeSpawn ? fakeSpawn(...args) : realSpawn(...args); };
 
-const { XrayManager, getFreePorts, PLAINTEXT_REJECT, usesEch, ECH_SINCE, floodGate, floodKey } = require('../src/main/xrayManager');
+const { XrayManager, getFreePorts, PLAINTEXT_REJECT, usesEch, ECH_SINCE, MASQUE_SINCE, MASQUE_WARP_SINCE, usesMasque, usesMasqueWarp, floodGate, floodKey } = require('../src/main/xrayManager');
 const { ENGINES } = require('../src/main/engines');
 
 /** Stand-in for a spawned core, so no real binary has to exist / run. */
@@ -358,6 +358,81 @@ test('usesEch: only a non-empty echConfigList counts', () => {
   assert.equal(usesEch({ outbounds: [{ protocol: 'freedom' }, null, ECH_CONFIG.outbounds[0]] }), true);
   for (const none of [null, undefined, {}, { outbounds: null }, { outbounds: [{ streamSettings: { realitySettings: { serverName: 'r' } } }] }]) {
     assert.equal(usesEch(none), false, JSON.stringify(none));
+  }
+});
+
+/* -------------- v1.25: MASQUE asked of a core too old to know it -------------- */
+
+const MASQUE_OUT = { tag: 'proxy', protocol: 'masque', settings: { address: 'm.example', port: 443 },
+  streamSettings: { network: 'masque', security: 'tls', tlsSettings: { serverName: 'm.example' }, masqueSettings: { user: 'u', pass: 'p' } } };
+const MASQUE_CONFIG = { outbounds: [MASQUE_OUT, { tag: 'direct', protocol: 'freedom' }] };
+const WARP_CONFIG = { outbounds: [Object.assign({}, MASQUE_OUT, { streamSettings: Object.assign({}, MASQUE_OUT.streamSettings, {
+  masqueSettings: { warp: { privateKey: 'K', publicKey: 'P', address: ['172.16.0.2/32'] } } }) })] };
+
+test('MASQUE on an official core older than 26.9.30, no other core: refused with the version it needs — not even -test, whose words name none', async () => {
+  const m = managerWith({ versions: { xray: '26.3.27' }, bins: ['xray'], validOn: ['xray'] });
+  const r = await m.validateWithFallback(MASQUE_CONFIG, 'xray');
+  assert.deepEqual(r, { ok: false, engine: 'xray', masqueUnsupported: true, coreVersion: '26.3.27', need: '26.9.30', plaintextRejected: false,
+    error: 'xray 26.3.27 does not know MASQUE (26.9.30 and newer do)' });
+  assert.deepEqual(m.calls, []);
+  // the router's opkg feed, and the release right before MASQUE
+  for (const v of ['24.12.31', '25.1.30', '26.9.22']) {
+    const old = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    assert.equal((await old.validateWithFallback(MASQUE_CONFIG, 'xray')).masqueUnsupported, true, v);
+  }
+});
+
+test('a WARP account needs 26.10.10: 26.9.30 would pass it (an unknown key) and dial WARP with no key — refused; a plain MASQUE server runs there', async () => {
+  const m = managerWith({ versions: { xray: '26.9.30' }, bins: ['xray'], validOn: ['xray'] });
+  const r = await m.validateWithFallback(WARP_CONFIG, 'xray');
+  assert.deepEqual([r.ok, r.masqueUnsupported, r.coreVersion, r.need], [false, true, '26.9.30', '26.10.10']);
+  assert.equal(r.error, 'xray 26.9.30 does not know MASQUE with a WARP account (26.10.10 and newer do)');
+  assert.deepEqual(await m.validateWithFallback(MASQUE_CONFIG, 'xray'), { ok: true, engine: 'xray' });
+  for (const v of ['26.10.10', '26.10.13', '27.1.1', '']) {
+    const ok = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    assert.deepEqual(await ok.validateWithFallback(WARP_CONFIG, 'xray'), { ok: true, engine: 'xray' }, v || 'a version that cannot be read: the ordinary path');
+  }
+  assert.deepEqual([MASQUE_SINCE, MASQUE_WARP_SINCE], ['26.9.30', '26.10.10']);
+});
+
+test('MASQUE on a core too old for it runs on the other Xray core when that one is new enough — either way round', async () => {
+  const m = managerWith({ versions: { xray: '26.3.27', 'xray-pattn': '26.10.13' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await m.validateWithFallback(WARP_CONFIG, 'xray'), { ok: true, engine: 'xray-pattn', fellBack: true });
+  assert.deepEqual(m.calls, ['xray-pattn']);
+  assert.match(m.logs.at(-1), /needs Xray 26\.10\.10 or newer and Xray \(official\) is 26\.3\.27 — running it on Xray-PattN \(patterniha\) 26\.10\.13/);
+  const p = managerWith({ versions: { xray: '26.10.10', 'xray-pattn': '26.9.22' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await p.validateWithFallback(MASQUE_CONFIG, 'xray-pattn'), { ok: true, engine: 'xray', fellBack: true });
+  // what the other core refuses is its own error
+  const n = managerWith({ versions: { xray: '26.3.27', 'xray-pattn': '26.10.13' }, bins: ['xray', 'xray-pattn'], validOn: [] });
+  assert.deepEqual(await n.validateWithFallback(MASQUE_CONFIG, 'xray'), { ok: false, engine: 'xray-pattn', error: 'infra/conf: refused by xray-pattn', plaintextRejected: false });
+  // the other one too old, or saying no version at all: refused, not tried
+  for (const ov of ['26.9.22', '']) {
+    const o = managerWith({ versions: { xray: '26.3.27', 'xray-pattn': ov }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+    const r = await o.validateWithFallback(MASQUE_CONFIG, 'xray');
+    assert.deepEqual([r.ok, r.engine, r.masqueUnsupported], [false, 'xray', true], ov);
+    assert.deepEqual(o.calls, []);
+  }
+});
+
+test('MASQUE’s own finalmask is the official core’s: it never sends the config to Xray-PattN — and a config without MASQUE never asks the version', async () => {
+  const fm = { outbounds: [Object.assign({}, MASQUE_OUT, { streamSettings: Object.assign({}, MASQUE_OUT.streamSettings, { finalmask: { quicParams: { congestion: 'reno' } } }) })] };
+  const m = managerWith({ versions: { xray: '26.10.10', 'xray-pattn': '26.10.13' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await m.validateWithFallback(fm, 'xray'), { ok: true, engine: 'xray' });
+  assert.deepEqual(m.calls, ['xray']);
+  let asked = 0;
+  const q = managerWith({ versions: { xray: '26.3.27' }, bins: ['xray'], validOn: ['xray'] });
+  q.version = async () => { asked++; return '26.3.27'; };
+  assert.deepEqual(await q.validateWithFallback({ outbounds: [{ protocol: 'vless', streamSettings: { network: 'ws' } }] }, 'xray'), { ok: true, engine: 'xray' });
+  assert.equal(asked, 0);
+});
+
+test('usesMasque / usesMasqueWarp: any MASQUE outbound, any WARP account on one', () => {
+  assert.deepEqual([usesMasque(MASQUE_CONFIG), usesMasqueWarp(MASQUE_CONFIG)], [true, false]);
+  assert.deepEqual([usesMasque(WARP_CONFIG), usesMasqueWarp(WARP_CONFIG)], [true, true]);
+  // the second hop of a chain counts as much as the first
+  assert.equal(usesMasqueWarp({ outbounds: [{ protocol: 'freedom' }, null, WARP_CONFIG.outbounds[0]] }), true);
+  for (const none of [null, undefined, {}, { outbounds: null }, ECH_CONFIG]) {
+    assert.deepEqual([usesMasque(none), usesMasqueWarp(none)], [false, false], JSON.stringify(none));
   }
 });
 
