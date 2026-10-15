@@ -5,7 +5,7 @@
 // private information, so none of those are copied to the result.
 const net = require('net');
 const { socks5Connect } = require('./netutils');
-const PROTOCOLS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria', 'hysteria2', 'tuic', 'freedom', 'direct', 'blackhole', 'block', 'dns']);
+const PROTOCOLS = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria', 'hysteria2', 'masque', 'tuic', 'freedom', 'direct', 'blackhole', 'block', 'dns']);
 const FIELDS = ['domain', 'ip', 'port', 'network', 'inboundTag', 'protocol', 'source', 'sourcePort', 'user', 'domain_suffix', 'domain_keyword', 'domain_regex', 'ip_cidr', 'port_range', 'inbound', 'process_name', 'process_path', 'rule_set'];
 
 function explainRoutes(config, plan = {}) {

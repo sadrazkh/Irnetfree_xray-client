@@ -261,8 +261,10 @@ check('mux-probe', probe);
 // it, renamed — plain and under TUN; every Xray-JSON server raw too (its own
 // config with the app's inbounds); a JSON server as either hop of a chain, two
 // of them under advanced routing, and a latency test of one with helpers.
+// (xray-masque: a WARP and an HTTP/2 MASQUE server read as ordinary ones, a
+// panel's full config with a MASQUE outbound as a JSON server.)
 const { importJson } = require('../src/main/jsonImport');
-const JSON_FIXTURES = ['xray-subscription', 'xray-fragment', 'xray-chain', 'xray-balancer', 'xray-wireguard', 'singbox'];
+const JSON_FIXTURES = ['xray-subscription', 'xray-fragment', 'xray-chain', 'xray-balancer', 'xray-wireguard', 'xray-masque', 'singbox'];
 const JSON_SETTINGS = { plain: managed, tun: Object.assign({}, managed, LINK_SETTINGS.tun) };
 const jsonServers = {};
 for (const f of JSON_FIXTURES) {
@@ -351,9 +353,12 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
     scMinPostsIntervalMs: '30', xmuxMaxConcurrency: '16-32', xmuxMaxConnections: '0', xmuxCMaxReuseTimes: '0',
     xmuxHMaxRequestTimes: '600-900', xmuxHMaxReusableSecs: '1800-3000', xmuxHKeepAlivePeriod: '0', downloadSettings: DOWNLOAD,
     kcpMtu: '1350', kcpTti: '50', kcpUplink: '5', kcpDownlink: '20', kcpCongestion: true, kcpReadBuffer: '2', kcpWriteBuffer: '2',
-    echForceQuery: 'none', minVersion: '1.2', maxVersion: '1.3', curvePreferences: 'X25519MLKEM768, X25519',
+    echForceQuery: 'none', minVersion: '1.2', maxVersion: '1.3', curvePreferences: 'X25519MLKEM768, X25519', useSystemCA: true,
     mux: 'on', muxConcurrency: '4', xudpConcurrency: '16',
-    tcpFastOpen: true, tcpMptcp: true, tcpKeepAliveInterval: '15', tcpKeepAliveIdle: '300', tcpCongestion: 'bbr'
+    tcpFastOpen: true, tcpMptcp: true, tcpKeepAliveInterval: '15', tcpKeepAliveIdle: '300', tcpCongestion: 'bbr',
+    // MASQUE's, bar the WARP account (all-or-none: its own cases below)
+    masqueUser: 'irnf-ci', masquePass: 'irnf-ci-pass', masqueHost: 'ed.example.com', masquePath: '/.well-known/masque/ip/{target}/{ipproto}/',
+    masqueHeaders: '{"User-Agent":"chrome"}', remoteDNS: '1.1.1.1, 2606:4700:4700::1111'
   };
   const base = (protocol) => {
     const f = { protocol, name: 'editor-' + protocol, address: 'ed.example.com', port: '443' };
@@ -398,6 +403,38 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
     check(`editor-${name}`, buildConfig({ mode: 'single', server }, F.settings({ routingMode: 'bypass-ir', muxServerIds: [server.id] })));
   }
   if (made < 20) throw new Error('the editor’s configs: only ' + made);
+
+  // MASQUE (.superpowers/sdd/masque/design.md §8), made by the editor as a
+  // hand-made server and a WARP sign-up make it: HTTP/3 and HTTP/2 with a user
+  // and password; a WARP account over both — a device key made here (PKCS#8
+  // PEM, as the sign-up writes it) and the endpoint's real public key; WARP
+  // behind a cover domain (the SNI, and the name its certificate is verified
+  // as); and the anti-DPI each HTTP version takes — noise before QUIC, a
+  // fragment of the TCP handshake. Plain, under TUN and under the strict guard.
+  const DEVICE_KEY = require('crypto').generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey.export({ format: 'pem', type: 'pkcs8' });
+  const WARP_PUB = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w==';
+  const own = { address: 'mq.example.com', sni: 'mq.example.com', masqueUser: 'irnf-ci', masquePass: 'irnf-ci-pass' };
+  const warp = { address: '162.159.198.1', sni: 'consumer-masque.cloudflareclient.com',
+    warpPrivateKey: DEVICE_KEY, warpPublicKey: WARP_PUB, warpAddress: '172.16.0.2, 2606:4700:110:8a36::2' };
+  const H2 = { masqueHttp: 'h2', fp: 'chrome' };
+  const MASQUE = {
+    h3: own,
+    h2: Object.assign({}, own, H2),
+    'warp-h3': warp,
+    'warp-h2': Object.assign({}, warp, H2, { address: '162.159.198.2' }),
+    'warp-cover': Object.assign({}, warp, { sni: 'www.example.com', vcn: 'www.example.com' }),
+    'warp-h3-noise': Object.assign({}, warp, { noise: 'rand:50-100:0;base64:FgMBAAA=:10-20' }),
+    'warp-h2-fragment': Object.assign({}, warp, H2, { address: '162.159.198.2', fragment: 'tlshello,100-200,10-20' })
+  };
+  let masqueMade = 0;
+  for (const [name, f] of Object.entries(MASQUE)) {
+    const server = createServer(Object.assign({ protocol: 'masque', name: 'editor-masque-' + name, port: '443' }, f));
+    masqueMade++;
+    for (const [variant, over] of Object.entries(LINK_SETTINGS)) {
+      check(`editor-masque-${name}-${variant}`, buildConfig({ mode: 'single', server }, F.settings(Object.assign({ routingMode: 'bypass-ir' }, over))));
+    }
+  }
+  if (masqueMade < 7) throw new Error('the editor’s MASQUE configs: only ' + masqueMade);
 }
 
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6

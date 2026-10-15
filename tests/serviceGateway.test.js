@@ -770,6 +770,22 @@ test('a boot connect of an ECH server on a core too old for ECH is refused like 
   assert.ok(s.logs.some(l => l.level === 'error' && l.line === 'Config rejected by xray: ' + ECH_REFUSAL.error), 'the core’s own words stay in the log');
 });
 
+test('a boot connect of a MASQUE server on a core too old for it is refused like ECH’s: said once, not retried at the boot loop’s pace', async (t) => {
+  const MASQUE_REFUSAL = {
+    ok: false, engine: 'xray', masqueUnsupported: true, coreVersion: '25.1.30', need: '26.9.30', plaintextRejected: false,
+    error: 'xray 25.1.30 does not know MASQUE (26.9.30 and newer do)'
+  };
+  const s = start({ connectIntent: SERVER.id, lastServerId: SERVER.id, settings: { autoConnect: true } },
+    withTiming({ refusedRetryMs: 60000 }), (st) => { st.check = MASQUE_REFUSAL; });
+  t.after(() => s.service.shutdown());
+  await until(() => s.statuses.some(x => x.state === 'error'), 'the refusal said');
+  assert.equal(s.statuses.find(x => x.state === 'error').message, 'This MASQUE server needs Xray 26.9.30 or newer — update it under Settings → Required files');
+  await sleep(300);              // bootEveryMs is 20 ms: a retry as for a missing WAN would have run a dozen times
+  assert.equal(s.state.xray.validated.length, 1, 'refused once, not retried at the boot loop’s pace');
+  assert.equal(s.state.xray.starts.length, 0);
+  assert.equal(s.service.connSnapshot().state, 'error');
+});
+
 test('a rebuild the core refuses (the store changed under the live connection) stops the quick retries and says why; the rare retry brings it back', async (t) => {
   const s = start({}, withTiming({ refusedRetryMs: 700 }));
   t.after(() => s.service.shutdown());

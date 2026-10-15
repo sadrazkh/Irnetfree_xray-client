@@ -163,13 +163,16 @@ object CertPin {
      * verifies its own way; a link that names the certificate (`pcs`) or the name
      * to check it against (`vcn`) has said what allowInsecure only gestured at.
      * Hysteria is QUIC: a TCP handshake to its port reaches some other service,
-     * or nothing (EngineChoice runs it on sing-box).
+     * or nothing (EngineChoice runs it on sing-box). MASQUE never asks: the core
+     * refuses allowInsecure there outright (a JSON config that carries it anyway
+     * is refused by the core, not pinned).
      */
     fun wantsPin(server: ServerConfig?): Boolean {
         val st = server?.outbound?.optJSONObject("streamSettings") ?: return false
         val tls = st.optJSONObject("tlsSettings") ?: return false
         if (st.optString("security") != "tls" || !tls.optBoolean("allowInsecure")) return false
-        if (st.optString("network") == "hysteria") return false
+        val net = st.optString("network")
+        if (net == "hysteria" || net == "masque") return false
         return tls.optString("pinnedPeerCertSha256").isBlank() && tls.optString("verifyPeerCertByName").isBlank()
     }
 
@@ -188,9 +191,14 @@ object CertPin {
         return Targets(probe, behind)
     }
 
-    /** Should this record's pin be checked against the server now? No pin, nothing to re-check. */
+    /**
+     * Should this record's pin be checked against the server now? No pin,
+     * nothing to re-check. A MASQUE server over HTTP/3 listens on QUIC: the
+     * probe's TCP handshake reaches some other service on that port, or
+     * nothing — never the certificate it pinned (certPin.js staleCertPins).
+     */
     fun recheckDue(server: ServerConfig, now: Long = System.currentTimeMillis(), maxAgeMs: Long = RECHECK_AFTER_MS): Boolean {
-        if (normalizePin(server.certPin).isEmpty()) return false
+        if (normalizePin(server.certPin).isEmpty() || Masque.isQuic(server)) return false
         return now - server.certPinCheckedAt >= maxAgeMs
     }
 

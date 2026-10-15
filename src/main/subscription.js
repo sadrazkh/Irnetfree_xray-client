@@ -68,10 +68,15 @@ function serverIdentity(s, strict) {
     cred = set.secretKey || '';
   } else if (ob.protocol === 'hysteria') {
     cred = (st.hysteriaSettings && st.hysteriaSettings.auth) || '';
+  } else if (ob.protocol === 'masque') {
+    // a WARP account is its device key; a server of one's own, its user and password
+    const ms = st.masqueSettings || {};
+    cred = ms.warp && typeof ms.warp === 'object' ? String(ms.warp.privateKey || '') : [ms.user || '', ms.pass || ''].join(':');
   }
   const net = st.network || 'tcp';
   let path = '', host = '';
-  if (st.wsSettings) { path = st.wsSettings.path; host = st.wsSettings.headers && (st.wsSettings.headers.Host || st.wsSettings.headers.host); }
+  if (st.masqueSettings) { path = st.masqueSettings.path; host = st.masqueSettings.host; }
+  else if (st.wsSettings) { path = st.wsSettings.path; host = st.wsSettings.headers && (st.wsSettings.headers.Host || st.wsSettings.headers.host); }
   else if (st.grpcSettings) path = st.grpcSettings.serviceName;
   else if (st.httpSettings) { path = st.httpSettings.path; host = [].concat(st.httpSettings.host || []).join(','); }
   else if (st.xhttpSettings) { path = st.xhttpSettings.path; host = st.xhttpSettings.host; }

@@ -39,13 +39,14 @@ const GO_OUT_OF_MEMORY = /\bruntime: (out of memory|cannot allocate memory|faile
  * Does any outbound carry a (non-empty) `streamSettings.finalmask`? Not one on
  * Hysteria or mKCP: their masks (salamander, hopping, mKCP's header and seed)
  * are the official core's own, written for its version (coreCompat.js) — no
- * reason to move them onto the fork.
+ * reason to move them onto the fork. Nor MASQUE's: the official core applies
+ * its UDP masks and quicParams to HTTP/3 and its TCP masks to HTTP/2 itself.
  */
 function usesFinalmask(config) {
   return ((config && config.outbounds) || []).some((o) => {
     const ss = o && o.streamSettings;
     const fm = ss && ss.finalmask;
-    if (/^(hysteria|kcp|mkcp)$/i.test(String((ss && ss.network) || ''))) return false;
+    if (/^(hysteria|kcp|mkcp|masque)$/i.test(String((ss && ss.network) || ''))) return false;
     return !!fm && typeof fm === 'object' && Object.keys(fm).length > 0;
   });
 }
@@ -72,6 +73,32 @@ function usesEch(config) {
   return ((config && config.outbounds) || []).some((o) => {
     const tls = o && o.streamSettings && o.streamSettings.tlsSettings;
     return !!tls && typeof tls.echConfigList === 'string' && tls.echConfigList.trim() !== '';
+  });
+}
+
+/**
+ * MASQUE (XTLS/Xray-core #6807, #6810): the outbound and its transport from
+ * 26.9.30 — an older core refuses the config in words that never name a
+ * version ("unknown config id: masque"). A WARP account (`masqueSettings.warp`,
+ * #6878) from 26.10.10: 26.9.30 PASSES it, an unknown key, and dials WARP with
+ * no key at all — every handshake refused, nothing in the log saying why. Both
+ * are asked of the core that would run it, before its -test.
+ */
+const MASQUE_SINCE = '26.9.30';
+const MASQUE_WARP_SINCE = '26.10.10';
+
+const masqueOutbounds = (config) => ((config && config.outbounds) || []).filter((o) => o && o.protocol === 'masque');
+
+/** Does any outbound dial MASQUE? */
+function usesMasque(config) {
+  return masqueOutbounds(config).length > 0;
+}
+
+/** Does any MASQUE outbound carry a WARP account? */
+function usesMasqueWarp(config) {
+  return masqueOutbounds(config).some((o) => {
+    const ms = o.streamSettings && o.streamSettings.masqueSettings;
+    return !!ms && !!ms.warp && typeof ms.warp === 'object';
   });
 }
 
@@ -439,14 +466,37 @@ class XrayManager {
    * carrying the fork's `finalmask` goes to the fork first (see below) —
    * those are the things the fork exists for. Returns { ok, engine, error?,
    * fellBack?, plaintextRejected?, pattnNeeded?, finalmaskIgnored?,
-   * echUnsupported?, coreVersion? } so the caller knows which core to start and
-   * can tell the user to install the fork when it is missing (`pattnNeeded`: a
-   * finalmask the official core refuses — or, `finalmaskIgnored`, one it is too
-   * old to know and would drop) or to update the official core
-   * (`echUnsupported`: ECH on a core older than ECH_SINCE, no fork to run it).
+   * echUnsupported?, masqueUnsupported?, coreVersion?, need? } so the caller
+   * knows which core to start and can tell the user to install the fork when
+   * it is missing (`pattnNeeded`: a finalmask the official core refuses — or,
+   * `finalmaskIgnored`, one it is too old to know and would drop) or to update
+   * the official core (`echUnsupported`: ECH on a core older than ECH_SINCE,
+   * no fork to run it; `masqueUnsupported`: MASQUE on a core older than
+   * `need`, no other core new enough to run it).
    */
   async validateWithFallback(config, engineId) {
     const first = this.resolveEngine(engineId);
+    // MASQUE on a core older than it (MASQUE_SINCE; a WARP account
+    // MASQUE_WARP_SINCE): the other Xray core when it is installed and says
+    // a version new enough, else refused in plain words — updating the core
+    // is the answer, a retry is not. A version that cannot be read takes the
+    // ordinary path, as for ECH.
+    const need = usesMasqueWarp(config) ? MASQUE_WARP_SINCE : (usesMasque(config) ? MASQUE_SINCE : '');
+    if (need && engineFormat(first.id) === 'xray') {
+      const v = await this.version(first.id);
+      if (versionBelow(v, need)) {
+        const other = first.id === 'xray' ? 'xray-pattn' : 'xray';
+        const ov = this.resolveBin(other) ? await this.version(other) : '';
+        if (/\d+\.\d+\.\d+/.test(ov) && !versionBelow(ov, need)) {
+          const onOther = await this.validate(config, other);
+          if (!onOther.ok) return { ok: false, engine: other, error: onOther.error, plaintextRejected: false, ...killedOf(onOther) };
+          this.onLog(`This MASQUE server needs Xray ${need} or newer and ${engineLabel(first.id)} is ${v} — running it on ${engineLabel(other)} ${ov}`, 'info');
+          return { ok: true, engine: other, fellBack: true };
+        }
+        return { ok: false, engine: first.id, masqueUnsupported: true, coreVersion: v, need, plaintextRejected: false,
+          error: `${first.id} ${v} does not know MASQUE${need === MASQUE_WARP_SINCE ? ' with a WARP account' : ''} (${need} and newer do)` };
+      }
+    }
     // A config carrying the fork's `finalmask` runs on the fork when it is
     // there, and the official core is not asked: one older than 26.3.27
     // PASSES it (an unknown key) and runs the server unmasked; a newer one
@@ -717,4 +767,7 @@ function getFreePorts(n) {
   });
 }
 
-module.exports = { XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, ECH_SINCE, usesEch, versionBelow, floodGate, floodKey };
+module.exports = {
+  XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, ECH_SINCE, usesEch,
+  MASQUE_SINCE, MASQUE_WARP_SINCE, usesMasque, usesMasqueWarp, versionBelow, floodGate, floodKey
+};

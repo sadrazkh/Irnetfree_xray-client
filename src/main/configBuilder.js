@@ -20,6 +20,7 @@ const { normalizePin } = require('./certPin');
 const { planServers } = require('./engineChoice');
 const { MUX, muxEligible } = require('./mux');
 const { effectiveVia, advancedTargets } = require('./routingProfiles');
+const { masqueHttpOf } = require('../renderer/serverFields');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -250,7 +251,7 @@ function serverAddressOf(o) {
 }
 
 /** The protocols that carry traffic to a server; freedom, blackhole, dns, loopback do not. */
-const PROXY_OUT = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria']);
+const PROXY_OUT = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'wireguard', 'hysteria', 'masque']);
 
 /** The tag an outbound dials through: its dialerProxy, else (a JSON config's older form) its proxySettings.tag. */
 function dialsThrough(o) {
@@ -1470,15 +1471,24 @@ function splitList(v) {
  * `noises` settings. Outbounds that already dial through something (chain inner
  * hops) are left alone. Returns the outbound list with the extra freedom
  * outbounds appended; the markers are stripped.
+ *
+ * MASQUE dials TCP for HTTP/2 and QUIC (UDP) for HTTP/3: a fragment cuts
+ * only the first, noise goes only before the second, so the one that would
+ * do nothing is dropped (the parser drops it from the record too) — a record
+ * left with neither dials directly.
  */
 function applyFragments(outbounds) {
   const byKey = {};   // "frag|noise|strategy" -> tag
   const extra = [];
   for (const o of outbounds) {
     if (!o || (!o._fragment && !o._noise)) continue;
-    const frag = o._fragment ? String(o._fragment) : '';
-    const noise = o._noise ? String(o._noise) : '';
+    let frag = o._fragment ? String(o._fragment) : '';
+    let noise = o._noise ? String(o._noise) : '';
     delete o._fragment; delete o._noise;
+    if (o.protocol === 'masque') {
+      if (masqueHttpOf(o.streamSettings && o.streamSettings.tlsSettings) === 'h2') noise = ''; else frag = '';
+      if (!frag && !noise) continue;
+    }
     const ss = o.streamSettings || (o.streamSettings = {});
     const sockopt = ss.sockopt || (ss.sockopt = {});
     if (sockopt.dialerProxy) continue;   // chained hop — don't override

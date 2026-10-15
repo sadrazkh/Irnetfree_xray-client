@@ -93,8 +93,9 @@ class MuxTest {
             assertFalse(net, Mux.eligible(vmess(net = net).outbound))
             assertFalse(net, Mux.eligible(trojan(net = net).outbound))
         }
-        // Shadowsocks (even over a v2ray-plugin WebSocket), WireGuard, Hysteria, SOCKS, HTTP: never
-        for (p in listOf("shadowsocks", "wireguard", "hysteria", "socks", "http")) assertFalse(p, Mux.eligible(other(p).outbound))
+        // Shadowsocks (even over a v2ray-plugin WebSocket), WireGuard, Hysteria, SOCKS, HTTP, MASQUE (the core refuses it with Mux): never
+        for (p in listOf("shadowsocks", "wireguard", "hysteria", "socks", "http", "masque")) assertFalse(p, Mux.eligible(other(p).outbound))
+        assertFalse(Mux.eligible(JSONObject().put("protocol", "masque").put("streamSettings", JSONObject().put("network", "masque").put("security", "tls"))))
         // nothing to go by
         assertFalse(Mux.eligible(JSONObject()))
         assertFalse(Mux.eligible(JSONObject().put("protocol", "vless")))
