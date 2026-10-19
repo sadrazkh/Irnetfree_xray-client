@@ -749,3 +749,49 @@ button.pool-item:hover .pool-add { color: var(--accent); }
   .warp-acct-rows { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
   .warp-acct-rows dd { margin-bottom: 6px; }
 }
+
+/* ----------------------------- groups (v1.27) ----------------------------- */
+
+/*
+ * .superpowers/sdd/groups/design.md §5: the chains page's other half. A group's
+ * card is a chain card (.chain-card) whose body is its configs as chips; its
+ * editor is a dialog of the server editor's own pieces (.ed-http cards for the
+ * strategy, .ed-chips-read for the clean IPs read back as they are typed).
+ */
+.proto-group { color: var(--info); }
+/* "Chains & groups" is the labelled rail's longest word: two lines, not an ellipsis */
+[data-skin="console"] .nav-item[data-view="chain"] > span:not(.nav-ico) { white-space: normal; line-height: 1.25; }
+.grp-section { margin-block-start: 28px; }
+.grp-sec .head-actions { order: 3; }
+.grp-title { display: flex; flex-direction: column; gap: 2px; flex: 1 1 200px; min-width: 0; }
+.grp-name { font-size: 13px; font-weight: 600; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grp-meta { font-size: 11px; color: var(--ink3); }
+.grp-dead .grp-name { color: var(--ink3); }
+.grp-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.grp-chip { padding: 7px 10px; min-width: 0; }
+.grp-addr { font: 500 11px var(--mono); color: var(--ink3); unicode-bidi: isolate; }
+.grp-chip.own .grp-addr, .grp-member.own .grp-addr { color: var(--accentInk); }
+.grp-chip.missing, .grp-member.missing { border-style: dashed; }
+.grp-chip.missing .cn-name, .grp-member.missing .grp-mname { color: var(--danger); }
+
+.modal.grp-modal { width: min(600px, 100%); }
+.grp-field { display: flex; flex-direction: column; gap: 6px; }
+.grp-field > .field-label { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin-bottom: 0; }
+.grp-members { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.grp-member {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px; min-width: 0;
+  background: var(--soft); border: 1px solid var(--softline); border-radius: var(--r4); font-size: 12px;
+}
+.grp-mname { flex: 1 1 auto; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grp-member .grp-addr { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.grp-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.grp-panel {
+  display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
+  border: 1px solid var(--softline); border-radius: var(--r6);
+  background: color-mix(in srgb, var(--soft) 60%, transparent);
+}
+.grp-panel .field-label { margin-bottom: 0; }
+.grp-panel .hint, .grp-modal .grp-hint { margin: 0; }
+.grp-panel .chain-pool-search { max-width: none; margin-block-end: 0; }
+.grp-pool { max-height: 220px; overflow-y: auto; gap: 6px; }
+.grp-ipnote { font-size: 12px; line-height: 1.6; color: var(--ink2); }
