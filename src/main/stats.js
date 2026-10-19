@@ -360,7 +360,7 @@ class WgHopWatch {
  */
 function groupsLive(map, members, lastMembers, health, dt) {
   return map.map((g) => ({
-    tag: g.tag, groupId: g.groupId, name: g.name, strategy: g.strategy,
+    tag: g.tag, groupId: g.groupId, name: g.name, strategy: g.strategy, direct: g.direct !== false,
     members: (g.members || []).map((m, i) => {
       const tag = `${g.tag}~gm${i}`;
       const c = members[tag] || { up: 0, down: 0 };

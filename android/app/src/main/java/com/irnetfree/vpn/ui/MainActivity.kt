@@ -141,6 +141,9 @@ class MainActivity : ComponentActivity() {
             setContent { AppTheme { CrashScreen("onCreate failed:\n" + e.stackTraceToString()) { finish() } } }
         }
     }
+    // the per-second figures run only while the app is on screen (VpnState.uiVisible)
+    override fun onStart() { super.onStart(); VpnState.setUiVisible(true) }
+    override fun onStop() { VpnState.setUiVisible(false); super.onStop() }
 }
 
 @Composable
@@ -344,7 +347,11 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     var pinging by remember { mutableStateOf(false) }
     var elapsed by remember { mutableStateOf(0L) }
     LaunchedEffect(connectedSince) {
-        while (connectedSince > 0) { elapsed = System.currentTimeMillis() - connectedSince; delay(1000) }
+        while (connectedSince > 0) {
+            // off screen: no tick until the app is seen again (VpnState.uiVisible)
+            if (!VpnState.uiVisible.value) VpnState.uiVisible.first { v: Boolean -> v }
+            elapsed = System.currentTimeMillis() - connectedSince; delay(1000)
+        }
         elapsed = 0L
     }
     // The sparkline's own history: VpnState publishes a rate, not a series, and
@@ -595,14 +602,16 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
 
             /* ---- the tunnel's real scope ---- */
             Spacer(Modifier.height(10.dp))
+            ApplyBar(store, settings)
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                 Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("VPN tunnel", color = TXT, fontSize = 13.sp)
                         Text(
-                            when (settings.perAppMode) {
-                                "allow" -> "only ${settings.perApps.size} app(s) go through it"
-                                "disallow" -> "every app except ${settings.perApps.size}"
+                            // as the VPN takes it: "only these" with none of them left is the whole device (TunnelSetup.perApp)
+                            when {
+                                settings.perAppMode == "allow" && settings.perApps.isNotEmpty() -> "only ${settings.perApps.size} app(s) go through it"
+                                settings.perAppMode == "disallow" && settings.perApps.isNotEmpty() -> "every app except ${settings.perApps.size}"
                                 else -> "whole system"
                             },
                             color = MUTED, fontSize = 11.sp, fontFamily = MONO
@@ -3518,7 +3527,6 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
         }
     }
     val prof = store.profileById(editId) ?: store.profiles.firstOrNull()
-    var edited by remember { mutableStateOf(false) }
     var shared by remember { mutableStateOf<SharedText?>(null) }
     var confirmDelete by remember { mutableStateOf<RoutingProfile?>(null) }
     var ruleDialog by remember { mutableIntStateOf(-1) }
@@ -3536,7 +3544,6 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
         store.profiles[i] = next
         store.saveProfiles()
         s = store.settings
-        edited = true
         AppWork.touch()
     }
     /** Rule [i] of profile [id] becomes [nr] — only while it is still [old] (it may have been moved or deleted meanwhile). */
@@ -3553,6 +3560,7 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
     }
 
     Screen("Routing", back, {}) {
+        ApplyBar(store, s)
         Text("Routing mode", color = TXT, fontWeight = FontWeight.Bold)
         listOf(Triple("global", "Global (all via proxy)", false), Triple("bypass-ir", "Bypass Iran", true),
             Triple("bypass-cn", "Bypass China", true), Triple("direct", "Direct", false)).forEach { (v, l, needsGeo) ->
@@ -3608,13 +3616,7 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
             }
 
             HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
-            // edits to the profile the tunnel is running on reach it at the next connect
-            if (edited && state == ConnState.CONNECTED && inUseId == prof.id) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Connected on this profile — changes apply on the next connect.", color = AMBER, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    TextButton(onClick = { edited = false; AppWork.reconnect(ctx, store) }) { Text("Reconnect now", color = PRIMARY) }
-                }
-            }
+            // edits to the profile the tunnel is running on reach it at the next connect: ApplyBar, at the top, says so
             key(prof.id, prof.name) {
                 DraftField(prof.name, Modifier.fillMaxWidth(), label = { Text("Profile name") }) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(name = v) } }
             }
@@ -3623,6 +3625,9 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
             SwitchRow("Apply the routing mode (Bypass Iran/China) under these rules" + (if (geo) "" else " — needs the geo files"), prof.useMode && geo, enabled = geo) { v: Boolean ->
                 update(prof.id) { cur: RoutingProfile -> cur.copy(useMode = v) }
             }
+            // the switch adds the mode chosen at the top — with Global there, it adds nothing
+            if (prof.useMode && geo && !s.routingMode.startsWith("bypass"))
+                Text("The Routing mode at the top is “${routingModeLabel(s.routingMode)}” — this switch adds nothing until it is Bypass Iran or Bypass China.", color = AMBER, fontSize = 11.sp)
 
             Spacer(Modifier.height(6.dp))
             Text("Base", color = TXT, fontWeight = FontWeight.Bold)
@@ -3841,6 +3846,8 @@ private fun viaOptions(store: Store, p: RoutingProfile, target: String): List<Pa
 private fun ruleSummary(r: RouteRule): String {
     val vals = r.value.split(Regex("[|,]")).map { v: String -> v.trim() }.filter { v: String -> v.isNotEmpty() }
     if (vals.isEmpty()) return "(no value — skipped)"
+    // an app rule from a Windows profile: Android never says which app opened a connection (TunnelSetup.routingNotes)
+    if (r.type == "process") return "app " + vals.take(2).joinToString(", ") + " — Windows only, skipped here"
     return vals.take(2).joinToString(", ") + (if (vals.size > 2) " +${vals.size - 2}" else "")
 }
 
@@ -3848,6 +3855,7 @@ private fun ruleGlyph(type: String): String = when (type) {
     "domain" -> "🌐"
     "ip" -> "#"
     "port" -> ":"
+    "process" -> "▣"
     else -> "•"
 }
 
@@ -4109,6 +4117,7 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     var s by remember { mutableStateOf(store.settings) }
     fun save(n: AppSettings) { s = n; store.saveSettings(n); bump() }
     Screen("Settings", back, {}) {
+        ApplyBar(store, s)
         Text("Ports & DNS", color = TXT, fontWeight = FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { NumFld("SOCKS", s.socksPort, Modifier.weight(1f)) { save(s.copy(socksPort = it)) }; NumFld("HTTP", s.httpPort, Modifier.weight(1f)) { save(s.copy(httpPort = it)) } }
         // The managed resolver plan (DnsPlan.kt, the desktop's dnsBuilder.js).
@@ -4176,6 +4185,11 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             Row(Modifier.fillMaxWidth().clickable { save(s.copy(perAppMode = v)) }, verticalAlignment = Alignment.CenterVertically) { RadioButton(s.perAppMode == v, { save(s.copy(perAppMode = v)) }); Text(l, color = TXT) }
         }
         if (s.perAppMode != "off") AppPicker(s.perApps) { save(s.copy(perApps = it)) }
+        Text("Android lets a VPN choose which apps use it, but never tells it which app opened a connection — so here an app is either in the VPN (and follows the routing) or out of it (direct). App rules made on Windows are left out on the phone.",
+            color = MUTED, fontSize = 11.sp)
+        val lockdown by VpnState.lockdown.collectAsState()
+        if (lockdown && s.perAppMode != "off")
+            Text("Android's “Block connections without VPN” is on: the apps left out of the VPN have no internet at all instead of going direct. Turn it off under Android Settings → VPN → IRNetFree (⚙).", color = AMBER, fontSize = 11.sp)
         LanShareSection(store)
     }
 }
@@ -4250,7 +4264,10 @@ private fun coresLine(ctx: Context): String {
     val connectedSince by VpnState.connectedSince.collectAsState()
     var elapsed by remember { mutableStateOf(0L) }
     LaunchedEffect(connectedSince) {
-        while (connectedSince > 0) { elapsed = System.currentTimeMillis() - connectedSince; delay(1000) }
+        while (connectedSince > 0) {
+            if (!VpnState.uiVisible.value) VpnState.uiVisible.first { v: Boolean -> v }
+            elapsed = System.currentTimeMillis() - connectedSince; delay(1000)
+        }
         elapsed = 0L
     }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -4334,6 +4351,27 @@ private fun routingModeLabel(mode: String): String = when (mode) {
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp), content = content)
     }
 }
+/**
+ * Connected, and the settings changed since the connect in ways the running
+ * tunnel does not carry (SettingsApply — the core has no hot reload): what
+ * changed, said by name, and a Reconnect. [now]: the settings as the screen
+ * holds them (each screen saves its own copy).
+ */
+@Composable private fun ApplyBar(store: Store, now: AppSettings) {
+    val ctx = LocalContext.current
+    observeStore()
+    val state by VpnState.state.collectAsState()
+    val applied by VpnState.applied.collectAsState()
+    if (state != ConnState.CONNECTED) return
+    val keys = SettingsApply.pending(applied, now, applied?.profile?.let { p: RoutingProfile -> store.profileById(p.id) })
+    if (keys.isEmpty()) return
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(10.dp)).background(CARD2).padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Text("Not in the running connection yet: ${keys.joinToString(", ")}", color = AMBER, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        TextButton(onClick = { AppWork.reconnect(ctx, store) }) { Text("Reconnect now", color = PRIMARY) }
+    }
+}
+
 @Composable private fun SwitchRow(label: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { Text(label, color = if (enabled) TXT else MUTED, modifier = Modifier.weight(1f)); Switch(checked, onChange, enabled = enabled) }
 }
