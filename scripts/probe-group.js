@@ -18,7 +18,10 @@
  *      → WARP] would be; the page and 2 MB through it.
  * Each round also reads the core's traffic counters as the app's meter does
  * (stats.sumOutbounds): a group's bytes must show — on its loopback, since the
- * members' `~` tags are left out of the total like a JSON server's helpers.
+ * members' `~` tags are left out of the total like a JSON server's helpers —
+ * and the live view the window gets (a StatsPoller handed the config's
+ * groupTags): every member's health as the core's check found it, the dead
+ * member dead and the others alive.
  * The health check asks a local page here instead of cp.cloudflare.com (the
  * only change made to what the builder wrote), so it needs no internet.
  *
@@ -35,7 +38,7 @@ const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 const { buildConfig } = require('../src/main/configBuilder');
 const { groupRecord } = require('../src/main/groups');
-const { sumOutbounds } = require('../src/main/stats');
+const { sumOutbounds, StatsPoller } = require('../src/main/stats');
 
 const BASE = Number(process.env.IRNF_PROBE_PORT || 40400);
 const P = { s1: BASE + 1, s2: BASE + 2, s3: BASE + 3, h: BASE + 4, s1b: BASE + 5, s2b: BASE + 6, wg: BASE + 7, dead: BASE + 9,
@@ -213,6 +216,21 @@ async function main() {
       const total = sumOutbounds(vars);
       if (!(total.down > 0)) throw new Error('the traffic meter saw nothing: ' + JSON.stringify((vars.stats || {}).outbound || {}));
       note = seen.join(' ') + ` — the meter saw ${total.down} B down`;
+      // the window's live view: the poller with this config's groups
+      if (!cfg.groupTags) throw new Error('the builder gave no groupTags');
+      const poller = new StatsPoller({ apiPort: settings.apiPort });
+      poller.groupMap = cfg.groupTags;
+      let live = null;
+      poller.onStats = (st) => { live = st; };
+      poller.last.t = Date.now() - 1000;
+      await poller.tick();
+      if (!live || !live.groups) throw new Error('the poller gave no groups');
+      for (const g of live.groups) {
+        for (const m of g.members) {
+          if (m.alive !== (m.id !== 'dead')) throw new Error(`the health of ${m.id} in ${g.tag} reads ${m.alive}`);
+        }
+      }
+      note += ' — health ' + live.groups.map((g) => g.members.map((m) => (m.alive ? '●' : '○')).join('')).join(' ');
     } catch (e) {
       failed++;
       note = 'FAILED — ' + e.message + '\n  ' + client.text().split('\n').filter(Boolean).slice(-6).join('\n  ');

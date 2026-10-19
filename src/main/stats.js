@@ -71,6 +71,34 @@ function sumOutbounds(vars, skip) {
   return { up, down };
 }
 
+/** Each group member's own counters (`T~gm<i>`), as read — what foldGroups adds into its group. */
+function memberCounters(vars) {
+  const out = vars && vars.stats && vars.stats.outbound;
+  const res = {};
+  if (!out || typeof out !== 'object') return res;
+  for (const [tag, c] of Object.entries(out)) {
+    if (GROUP_MEMBER.test(tag)) res[tag] = { up: num(c && c.uplink), down: num(c && c.downlink) };
+  }
+  return res;
+}
+
+/**
+ * What the core's health check (the observatory a group runs) says of each
+ * member it probed: { tag: { alive, delay } } — a delay only for a live one
+ * (a dead one reads 99999999).
+ */
+function healthOf(vars) {
+  const obs = vars && vars.observatory;
+  const res = {};
+  if (!obs || typeof obs !== 'object') return res;
+  for (const [tag, o] of Object.entries(obs)) {
+    if (!o || typeof o !== 'object') continue;
+    const alive = o.alive === true;
+    res[tag] = { alive, delay: alive && Number.isFinite(o.delay) ? o.delay : null };
+  }
+  return res;
+}
+
 class StatsPoller {
   /**
    * @param {object} opts { binPath, apiPort, onStats(stats) }
@@ -80,6 +108,9 @@ class StatsPoller {
     this.apiPort = opts.apiPort || 10085;
     // a raw JSON config's dialers (configBuilder.dialerTagsOf), set per connect; null: none
     this.skipTags = null;
+    // the running config's groups (configBuilder's groupTags), set per connect; null: none
+    this.groupMap = null;
+    this.lastMembers = {};
     this.onStats = opts.onStats || (() => {});
     // the whole parsed body, for callers that need per-outbound counters and
     // not just the sum (see SilenceWatch)
@@ -133,7 +164,9 @@ class StatsPoller {
           let parsed;
           try { parsed = JSON.parse(body); } catch { return finish(null); }
           try { this.onRaw(parsed); } catch { /* a watcher must never stop the meter */ }
-          finish(Object.assign(sumOutbounds(parsed, this.skipTags), { per: byOutbound(parsed, this.skipTags) }));
+          const sample = Object.assign(sumOutbounds(parsed, this.skipTags), { per: byOutbound(parsed, this.skipTags) });
+          if (this.groupMap) Object.assign(sample, { members: memberCounters(parsed), health: healthOf(parsed) });
+          finish(sample);
         });
       });
       this.cancelQuery = cancel;
@@ -199,15 +232,17 @@ class StatsPoller {
       };
     }
     this.lastPer = cur.per || {};
+    const groups = this.groupMap ? groupsLive(this.groupMap, cur.members || {}, this.lastMembers, cur.health || {}, dt) : null;
+    this.lastMembers = cur.members || {};
 
     this.totals = { up: cur.up, down: cur.down };
     this.last = { up: cur.up, down: cur.down, t: now };
 
-    this.onStats({
+    this.onStats(Object.assign({
       upSpeed, downSpeed,
       totalUp: cur.up, totalDown: cur.down,
       per
-    });
+    }, groups ? { groups } : {}));
   }
 
   stop() {
@@ -217,7 +252,32 @@ class StatsPoller {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     this.last = { up: 0, down: 0, t: 0 };
     this.lastPer = {};
+    this.lastMembers = {};
   }
+}
+
+/**
+ * The running groups as the window shows them, one tick: each group of the
+ * map with its members' bytes, bytes per second and health — member i is
+ * `<tag>~gm<i>`. (groups-ui/design.md §3)
+ */
+function groupsLive(map, members, lastMembers, health, dt) {
+  return map.map((g) => ({
+    tag: g.tag, groupId: g.groupId, name: g.name, strategy: g.strategy,
+    members: (g.members || []).map((m, i) => {
+      const tag = `${g.tag}~gm${i}`;
+      const c = members[tag] || { up: 0, down: 0 };
+      const p = lastMembers[tag] || { up: c.up, down: c.down };
+      const h = health[tag];
+      return Object.assign({}, m, {
+        up: c.up, down: c.down,
+        upSpeed: Math.max(0, (c.up - p.up) / dt),
+        downSpeed: Math.max(0, (c.down - p.down) / dt),
+        alive: h ? h.alive : null,
+        delay: h ? h.delay : null
+      });
+    })
+  }));
 }
 
 /**
@@ -286,4 +346,4 @@ class SilenceWatch {
   }
 }
 
-module.exports = { StatsPoller, sumOutbounds, byOutbound, foldGroups, SilenceWatch };
+module.exports = { StatsPoller, sumOutbounds, byOutbound, foldGroups, memberCounters, healthOf, groupsLive, SilenceWatch };

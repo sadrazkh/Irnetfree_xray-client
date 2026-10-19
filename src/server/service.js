@@ -2205,6 +2205,8 @@ function createService(opts = {}) {
     stats.setBin(xray.anyBin());
     stats.apiPort = settings.apiPort;
     stats.skipTags = rawServerOf(plan, settings, RAW_OPTS) ? dialerTagsOf(config) : null;
+    // the groups it runs, member by member, for the window's live view (groups-ui/design.md §3)
+    stats.groupMap = config.groupTags || null;
     watchWgSilence(config);
     // a fresh core counts from zero — tell the meter, or the first poll of the
     // new session reads as growth on the old one (see main.js)

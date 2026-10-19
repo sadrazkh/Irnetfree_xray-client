@@ -342,28 +342,39 @@
         <div class="view-head">
           <h2 data-i18n="chain.title">زنجیره و گروه</h2>
           <div class="head-actions">
+            <!-- the head button follows the tab (app.js cgApplyTab) -->
             <button class="btn primary" id="btnAddChain" data-i18n="chain.new">+ زنجیره جدید</button>
+            <button class="btn primary" hidden id="btnAddGroup" data-i18n="grp.new">+ گروه تازه</button>
           </div>
         </div>
 
-        <div class="sec"><span class="sec-label" data-i18n="chain.sec">زنجیره‌ها</span></div>
-        <p class="hint" data-i18n="chain.intro">هر زنجیره مثل یک کانفیگ ساخته می‌شود: یک نام بده، چند سرور را به‌ترتیب بچین، و از صفحهٔ «اتصال» یا در «روتینگ ویژه» مثل یک کانفیگ ازش استفاده کن.</p>
-        <p class="hint" data-i18n="chain.wgHint">برای دسترسی به دیتابیس وقتی WireGuard مستقیم کار نمی‌کند: یک کانفیگ را اول بگذار و WireGuard را آخرِ زنجیره؛ سپس در «روتینگ ویژه» رنج IP دیتابیس را به این زنجیره بفرست.</p>
-
-        <div id="chainsWrap"></div>
-        <div class="empty" id="chainsEmpty" data-i18n="chain.noneYet">هنوز زنجیره‌ای ساخته نشده. روی «زنجیره جدید» بزن.</div>
-
-        <!-- groups (v1.27): several configs used together as one — app.js renderGroups draws the cards; hidden on a back end without groups:set -->
-        <div class="grp-section" id="groupsSection">
-          <div class="sec grp-sec">
-            <span class="sec-label" data-i18n="grp.title">گروه‌ها</span>
-            <div class="head-actions">
-              <button class="btn primary" id="btnAddGroup" data-i18n="grp.new">+ گروه تازه</button>
-            </div>
+        <!-- v1.28: two tabs with their counts, open / close all; every card folds to its head (app.js cgApplyTab, cgSetOpen) -->
+        <div class="cg-tabs">
+          <div class="seg" role="tablist" id="cgTabs">
+            <button class="seg-btn active" type="button" role="tab" id="cgTabChains" aria-selected="true" aria-controls="cgPaneChains"><span aria-hidden="true">⛓</span> <span data-i18n="chain.sec">زنجیره‌ها</span> <span class="cg-count" id="cgCountChains">۰</span></button>
+            <button class="seg-btn" type="button" role="tab" id="cgTabGroups" aria-selected="false" aria-controls="cgPaneGroups"><span aria-hidden="true">⧉</span> <span data-i18n="grp.title">گروه‌ها</span> <span class="cg-count" id="cgCountGroups">۰</span></button>
           </div>
-          <p class="hint" data-i18n="grp.intro">گروه چند کانفیگ است که با هم مثل یک کانفیگ کار می‌کنند.</p>
-          <div id="groupsWrap"></div>
-          <div class="empty" id="groupsEmpty" data-i18n="grp.noneYet">هنوز گروهی ساخته نشده. روی «گروه تازه» بزن.</div>
+          <div class="cg-tools">
+            <button class="cg-link" type="button" id="cgOpenAll" data-i18n="cg.openAll">همه را باز کن</button>
+            <button class="cg-link" type="button" id="cgCloseAll" data-i18n="cg.closeAll">همه را ببند</button>
+          </div>
+        </div>
+
+        <div class="cg-pane" id="cgPaneChains" role="tabpanel" aria-labelledby="cgTabChains">
+          <p class="hint" data-i18n="chain.intro">هر زنجیره یک کانفیگ است: سرورها پشت سر هم. روی هر کارت بزن تا باز شود و حلقه‌هایش را عوض کنی.</p>
+          <p class="hint" data-i18n="chain.wgHint">برای دسترسی به دیتابیس وقتی WireGuard مستقیم کار نمی‌کند: یک کانفیگ را اول بگذار و WireGuard را آخرِ زنجیره؛ سپس در «روتینگ ویژه» رنج IP دیتابیس را به این زنجیره بفرست.</p>
+
+          <div id="chainsWrap"></div>
+          <div class="empty" id="chainsEmpty" data-i18n="chain.noneYet">هنوز زنجیره‌ای ساخته نشده. روی «زنجیره جدید» بزن.</div>
+        </div>
+
+        <div class="cg-pane" id="cgPaneGroups" role="tabpanel" aria-labelledby="cgTabGroups" hidden>
+          <!-- groups (v1.27): several configs used together as one — app.js renderGroups draws the cards; hidden on a back end without groups:set -->
+          <div class="grp-section" id="groupsSection">
+            <p class="hint" data-i18n="grp.intro">هر گروه چند کانفیگ است که مثل یک کانفیگ کار می‌کنند. وقتی وصلی، سهم هرکدام از ترافیک همین‌جا دیده می‌شود.</p>
+            <div id="groupsWrap"></div>
+            <div class="empty" id="groupsEmpty" data-i18n="grp.noneYet">هنوز گروهی ساخته نشده. روی «گروه تازه» بزن.</div>
+          </div>
         </div>
       </section>
 
