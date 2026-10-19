@@ -41,7 +41,7 @@ const tunPlatform = require('../main/tunPlatform');
 const { appsForTun } = require('../main/tunApps');
 const { LeakGuard } = require('../main/leakGuard');
 const { DnsGuardWatch } = require('../main/dnsGuardWatch');
-const { StatsPoller, SilenceWatch } = require('../main/stats');
+const { StatsPoller, SilenceWatch, GroupHealthWatch, WgHopWatch } = require('../main/stats');
 const { UsageMeter, grandTotal } = require('../main/usage');
 const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
@@ -660,6 +660,7 @@ function createService(opts = {}) {
     return (selected = sb);   // neither: the sing-box error message names what to install
   }
 
+  const wgHops = new WgHopWatch();   // a WireGuard dropped by the config it goes through, named in the log
   const xrayOpts = {
     binPath: store.get('xrayPath', null),
     dataDir,
@@ -667,7 +668,13 @@ function createService(opts = {}) {
     // deadline a config counts as unverified (fix 20) — give it room there
     testTimeoutMs: OPENWRT ? 30000 : undefined,
     extraBinDirs: [userBinDir, ...systemBinDirs],
-    onLog: (line, level) => { send('log', { line, level }); healCertPin(line); watchOpenFiles(line); },
+    onLog: (line, level) => {
+      send('log', { line, level });
+      healCertPin(line);
+      watchOpenFiles(line);
+      const hop = wgHops.onLine(line, getSettings().lang);
+      if (hop) send('log', hop);
+    },
     onStatus: (state, info) => {
       if (state === 'stopped') { coreStops++; lastCoreExit = info || null; }
       if ((xrayReloading || quietStops > 0) && state === 'stopped') return;
@@ -758,12 +765,15 @@ function createService(opts = {}) {
   }
 
   let lastStats = null;   // the poller's last sample, for the facade's traffic line
+  const groupHealth = new GroupHealthWatch();   // a group's members leaving and rejoining the rotation, said in the log
   const stats = new StatsPoller({
     binPath: xray.anyBin(),
     apiPort: getSettings().apiPort,
     onStats: (s) => {
       lastStats = s;
       send('stats', s);
+      // a group's members leaving and rejoining the rotation, said in the log
+      for (const l of groupHealth.update(s.groups)) send('log', l);
       if (!usage) return;
       usage.tick(s.per);
       // the live figures ride `s.per`; the lifetime total needs neither that
@@ -2207,6 +2217,8 @@ function createService(opts = {}) {
     stats.skipTags = rawServerOf(plan, settings, RAW_OPTS) ? dialerTagsOf(config) : null;
     // the groups it runs, member by member, for the window's live view (groups-ui/design.md §3)
     stats.groupMap = config.groupTags || null;
+    groupHealth.reset();
+    wgHops.reset(plan);
     watchWgSilence(config);
     // a fresh core counts from zero — tell the meter, or the first poll of the
     // new session reads as growth on the old one (see main.js)
@@ -2594,6 +2606,7 @@ function createService(opts = {}) {
       await xray.start(config, check.engine);
       liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first
       watchWgSilence(config);   // the plan may have changed under the live tunnel
+      wgHops.reset(plan);
       if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
     } finally { xrayReloading = prevReloading; }
     stats.setBin(xray.anyBin());

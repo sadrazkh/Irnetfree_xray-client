@@ -162,7 +162,7 @@ test('every MASQUE and + WARP string: once in fa and once in en, one clean liter
 const DIALOG_FNS = ['edNode', 'appendSome', 'richLine', 'httpCards', 'warpChips', 'warpFresh', 'warpShown', 'openWarp', 'closeWarp', 'warpArgs',
   'warpErrorText', 'warpWarningTexts', 'looksP256', 'warpReadImport', 'warpImportChips', 'warpNum', 'warpField', 'warpSeg', 'warpFormNodes',
   'warpProgressNodes', 'warpFootNodes', 'renderWarp', 'runWarp', 'warpUseChain', 'warpSeeInList',
-  'fmtBytes', 'warpLicenses', 'warpCount', 'warpHops', 'warpHop', 'warpStoppedText', 'warpFill', 'warpReadWgImport', 'warpWgImportChips', 'warpBytes',
+  'fmtBytes', 'warpLicenses', 'warpCount', 'serverGroups', 'groupKey', 'warpHops', 'warpHop', 'warpStoppedText', 'warpFill', 'warpReadWgImport', 'warpWgImportChips', 'warpBytes',
   'warpDate', 'warpTypeChip', 'warpAccountBody', 'warpAccountBox', 'warpLicenseNodes', 'warpNewNodes', 'warpTwoWg', 'warpTwoMasque', 'warpNoteText',
   'warpRenderFoot'];
 
