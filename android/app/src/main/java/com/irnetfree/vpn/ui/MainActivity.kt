@@ -90,6 +90,10 @@ import com.irnetfree.vpn.IRApp
 import com.irnetfree.vpn.core.*
 // by name: another star import here also has a Selection, and the star imports tie
 import com.irnetfree.vpn.core.Selection
+// by name too: the extended icons' star import has a `Groups` of its own (Icons.Filled.Groups)
+import com.irnetfree.vpn.core.Groups
+import com.irnetfree.vpn.core.GroupConfig
+import com.irnetfree.vpn.core.GroupMember
 import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.vpn.ConnState
 import com.irnetfree.vpn.vpn.GeoAssets
@@ -384,12 +388,25 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     }
     fun selectedServer(): ServerConfig? {
         val sel = store.selection
-        return store.serverById(sel) ?: store.chainById(sel.removePrefix("chain:"))?.let { store.chainMembers(it).firstOrNull() }
+        val s = store.serverById(sel) ?: store.chainById(sel.removePrefix("chain:"))?.let { store.chainMembers(it).firstOrNull() }
+        // a group (or a chain entered through one) has no one address to knock on
+        return if (Groups.isGroupRecord(s)) null else s
+    }
+    /** Is the selection a group, or a chain whose first hop is one? */
+    fun selectedViaGroup(): Boolean {
+        val sel = store.selection
+        if (store.groupById(sel) != null) return true
+        val c = store.chainById(sel.removePrefix("chain:")) ?: return false
+        return Groups.isGroupRecord(store.chainMembers(c).firstOrNull())
     }
     /** A TCP ping of the selected server, asked for by a tap; the result is kept with the other tests. */
     fun pingSelected() {
         val srv = selectedServer()
-        if (srv == null) { AppWork.snack("Nothing to ping — select a server first"); return }
+        if (srv == null) {
+            // a group has no one address to knock on (the desktop's ping:tcp says the same)
+            AppWork.snack(if (selectedViaGroup()) "A group has no one address to ping — test it under More → Chains & groups" else "Nothing to ping — select a server first")
+            return
+        }
         if (pinging) return
         pinging = true
         scope.launch {
@@ -768,6 +785,8 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     val (flag, label) = if (srv != null) ServerLabel.split(srv.name) else null to store.selectionLabel()
     // a routing profile whose traffic rides on a base says which (spec §3: the small path's "via <base>")
     val viaBase = if (srv != null) null else store.selectedProfile()?.let { p: RoutingProfile -> RoutingProfiles.effectiveDefVia(p) ?: p.base }
+    // a group (Groups.kt) says how many configs it spreads over, and how
+    val grp = if (srv != null) null else store.groupById(store.selection)
     Row(
         modifier.heightIn(min = 56.dp).clip(RoundedCornerShape(14.dp)).background(CARD)
             .border(1.dp, STROKE, RoundedCornerShape(14.dp)).clickable(onClickLabel = "choose a server") { onPick() }
@@ -781,6 +800,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             Text(
                 when {
                     srv != null -> badge(srv.protocol) + " · tap to change"
+                    grp != null -> configsWord(Groups.sizeOf(store.groupRecord(grp.id))) + " · " + Groups.strategyLabel(grp.strategy).lowercase() + " · tap to change"
                     viaBase != null -> "via ${store.targetLabel(viaBase)} · tap to change"
                     else -> "tap to change"
                 },
@@ -1025,6 +1045,22 @@ private object AppWork {
     fun putPing(id: String, ms: Long) {
         val t = tests[id]
         if (t == null || t.phase.isEmpty()) tests[id] = (t ?: TestState()).copy(tcp = ms, error = null)
+    }
+
+    /**
+     * A group's real delay (Groups.kt): one round trip through a throwaway
+     * core carrying its members and balancer (ConfigBuilder.buildTestConfig),
+     * one core at a time like every test here; kept under the group's id. A
+     * group has no one address, so there is no handshake to time.
+     */
+    fun testGroup(ctx: Context, rec: ServerConfig) {
+        val id = rec.id
+        if (tests[id]?.phase?.isNotEmpty() == true) return
+        tests[id] = TestState(phase = "down")
+        scope.launch {
+            val ms: Long = try { realDelayThrough(ctx, rec) } catch (e: Exception) { -1L }
+            tests[id] = TestState(down = ms)
+        }
     }
 
     /**
@@ -1386,6 +1422,11 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
             // one row per routing profile that has rules or a default (spec §1)
             store.profiles.filter { p: RoutingProfile -> store.profileReady(p) }.forEach { p: RoutingProfile -> add(Selection.forProfile(p.id) to "🧭 ${p.name}") }
             store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }
+            // a group (Groups.kt) is selected by its bare id, like a server
+            store.groups.forEach { g: GroupConfig ->
+                val n = Groups.sizeOf(store.groupRecord(g.id))
+                if (n > 0) add(g.id to "⧉ ${g.name} · ${configsWord(n)}")
+            }
         }
         // an old plain "__advanced__" selection is the first profile's row
         val selKey = store.selectedProfile()?.let { p: RoutingProfile -> Selection.forProfile(p.id) } ?: store.selection
@@ -3191,13 +3232,24 @@ private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     }
 }
 
-/* ================================ CHAINS ================================ */
+/* ================================ CHAINS & GROUPS ================================ */
+/**
+ * Chains (several hops, in order) and groups (several configs used as one —
+ * Groups.kt): a group is a hop like a server, and the chain's member picker
+ * offers them too. A chain's rows come from its ids, so a hop that is gone (a
+ * group with no server left, say) is shown — and can be removed — instead of
+ * silently missing from the list.
+ */
 @Composable
 private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     observeStore()
     // a chain's share link (RouteShare): copy, and a QR when it fits
     var shared by remember { mutableStateOf<SharedText?>(null) }
-    Screen("Proxy Chain", back, { IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), "Chain ${store.chains.size + 1}", emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) } }) {
+    // the group open in the editor (null = none), and whether it is a new one
+    var editing by remember { mutableStateOf<GroupConfig?>(null) }
+    var editingNew by remember { mutableStateOf(false) }
+    Screen("Chains & groups", back, { IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), "Chain ${store.chains.size + 1}", emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, "add a chain", tint = PRIMARY) } }) {
+        Text("CHAINS", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
         if (store.chains.isEmpty()) EmptyHint("No chains yet.")
         store.chains.toList().forEachIndexed { idx, c ->
             val members = store.chainMembers(c)
@@ -3214,14 +3266,222 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
                             bump()
                         }) { Icon(Icons.Filled.DeleteOutline, "delete chain", tint = BAD) }
                     }
-                    Text("Path: " + (members.joinToString(" → ") { it.name }.ifEmpty { "empty — add at least 2 servers" }), color = MUTED, fontSize = 12.sp)
-                    members.forEachIndexed { mi, s -> Row(verticalAlignment = Alignment.CenterVertically) { Text("${mi + 1}. ${s.name}", color = TXT, fontSize = 13.sp, modifier = Modifier.weight(1f)); IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filter { it != s.id }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, null, tint = BAD) } } }
-                    DropPick("+ add server", store.servers.filter { !c.members.contains(it.id) }.map { it.id to it.name }, "") { if (it.isNotEmpty()) { store.chains[idx] = c.copy(members = c.members + it); store.saveChains(); bump() } }
+                    Text("Path: " + (members.joinToString(" → ") { s: ServerConfig -> hopName(s) }.ifEmpty { "empty — add at least 2 servers" }), color = MUTED, fontSize = 12.sp)
+                    c.members.forEachIndexed { mi: Int, id: String ->
+                        val hop = chainHopLabel(store, id)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("${mi + 1}. ${hop.first}", color = if (hop.second) TXT else BAD, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filterIndexed { x: Int, _: String -> x != mi }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, "remove this hop", tint = BAD) }
+                        }
+                    }
+                    DropPick("+ add server or group", chainHopOptions(store, c), "") { id: String -> if (id.isNotEmpty()) { store.chains[idx] = c.copy(members = c.members + id); store.saveChains(); bump() } }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Text("GROUPS", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+        Text(
+            "Several configs used as one: every new connection goes out through one member, and a member that stops answering is left out until it answers again. Use a group wherever a server goes — Connect, routing, a base, the pool, a chain hop.",
+            color = MUTED, fontSize = 12.sp
+        )
+        OutlinedButton(
+            onClick = { editingNew = true; editing = GroupConfig(Groups.newGroupId(), "Group ${store.groups.size + 1}") },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+        ) { Text("+ New group") }
+        if (store.groups.isEmpty()) EmptyHint("No groups yet.")
+        store.groups.toList().forEach { g: GroupConfig ->
+            GroupCard(store, g, onEdit = { editingNew = false; editing = g }, bump = bump)
+        }
+        Spacer(Modifier.height(16.dp))
+    }
+    shared?.let { st: SharedText -> RouteShareDialog(st) { shared = null } }
+    editing?.let { g: GroupConfig ->
+        GroupEditorSheet(store, g, editingNew, onDismiss = { editing = null }, onSave = { saved: GroupConfig ->
+            val i = store.groups.indexOfFirst { x: GroupConfig -> x.id == saved.id }
+            if (i >= 0) { store.groups[i] = saved } else { store.groups.add(saved) }
+            store.saveGroups()
+            editing = null
+            AppWork.snack("Saved ⧉ ${saved.name}")
+            bump()
+        })
+    }
+}
+
+/** A chain hop's name: a group's with its mark. */
+private fun hopName(s: ServerConfig): String = if (Groups.isGroupRecord(s)) "⧉ ${s.name}" else s.name
+
+/** One hop of a chain by its id, in words, and whether it is there: a server, a group (with a server left), or what is missing. */
+private fun chainHopLabel(store: Store, id: String): Pair<String, Boolean> {
+    val s = store.serverById(id)
+    if (s != null) return Pair(s.name, true)
+    val g = store.groupById(id) ?: return Pair(if (Groups.isGroupId(id)) "missing group" else "missing server", false)
+    return if (store.groupRecord(id) != null) Pair("⧉ ${g.name}", true) else Pair("⧉ ${g.name} — no server left", false)
+}
+
+/** What can be added to [c]: every server and every group with a server left, not already in it. */
+private fun chainHopOptions(store: Store, c: ChainConfig): List<Pair<String, String>> = buildList {
+    store.servers.filter { s: ServerConfig -> !c.members.contains(s.id) }.forEach { s: ServerConfig -> add(s.id to s.name) }
+    groupOptions(store).filter { o: Pair<String, String> -> !c.members.contains(o.first) }.forEach { o: Pair<String, String> -> add(o) }
+}
+
+/** Every group that has a server left, as a picker option: its bare id, "⧉ name". */
+private fun groupOptions(store: Store): List<Pair<String, String>> =
+    store.groups.filter { g: GroupConfig -> store.groupRecord(g.id) != null }.map { g: GroupConfig -> g.id to "⧉ ${g.name}" }
+
+/** "1 config" / "3 configs". */
+private fun configsWord(n: Int): String = if (n == 1) "1 config" else "$n configs"
+
+/**
+ * One group on the chains screen: its name, how many configs it has (and how
+ * many are gone), its strategy, the last real delay through it — select it
+ * for Connect, test it, edit it, delete it.
+ */
+@Composable private fun GroupCard(store: Store, g: GroupConfig, onEdit: () -> Unit, bump: () -> Unit) {
+    val ctx = LocalContext.current
+    val rec = store.groupRecord(g.id)
+    val size = Groups.sizeOf(rec)
+    val gone = g.members.size - size
+    val selected = store.selection == g.id
+    val test = AppWork.tests[g.id]
+    Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("⧉ ${g.name}", color = TXT, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                if (rec != null) IconButton(onClick = { store.saveSelection(g.id); bump() }) {
+                    Icon(Icons.Filled.CheckCircle, "use this group for Connect", tint = if (selected) PRIMARY else MUTED)
+                }
+                IconButton(onClick = onEdit) { Icon(Icons.Filled.Edit, "edit this group", tint = TXT2) }
+                IconButton(onClick = {
+                    store.deleteGroup(g.id)   // a selection that named it falls back; chains lose it as a hop
+                    if (selected && store.selection.isNotEmpty()) AppWork.snack("Deleted ${g.name} — now using ${store.selectionLabel()}")
+                    bump()
+                }) { Icon(Icons.Filled.DeleteOutline, "delete this group", tint = BAD) }
+            }
+            Text(
+                configsWord(size) + " · " + Groups.strategyLabel(g.strategy) + (if (gone > 0) " · $gone missing" else ""),
+                color = MUTED, fontSize = 12.sp, fontFamily = MONO
+            )
+            if (rec == null) {
+                Text("⚠ None of its servers is left — edit it to add some.", color = BAD, fontSize = 11.sp)
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val down = test?.down
+                    Text(
+                        when {
+                            test != null && test.phase.isNotEmpty() -> "measuring through the group…"
+                            down != null && down >= 0 -> "real delay ${down} ms"
+                            down != null -> "no answer through the group"
+                            else -> "real delay not measured"
+                        },
+                        color = if (down != null && down < 0) BAD else MUTED2, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { AppWork.testGroup(ctx, rec) }) { Text("test", color = PRIMARY, fontSize = 12.sp) }
                 }
             }
         }
     }
-    shared?.let { st: SharedText -> RouteShareDialog(st) { shared = null } }
+}
+
+/**
+ * A group's editor: its name; its strategy — round-robin (the default),
+ * fastest, random — one line each on what it does; its members: servers added
+ * from a picker, or one server at several addresses ("+ clean IPs": pasted one
+ * per line, a bad line flagged by its number); a member whose server is gone
+ * shown as missing; any removed. Save hands the group back; nothing is written
+ * before it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun GroupEditorSheet(store: Store, initial: GroupConfig, isNew: Boolean, onDismiss: () -> Unit, onSave: (GroupConfig) -> Unit) {
+    val ctx = LocalContext.current
+    var name by remember(initial.id) { mutableStateOf(initial.name) }
+    var strategy by remember(initial.id) { mutableStateOf(initial.strategy) }
+    var members by remember(initial.id) { mutableStateOf(initial.members) }
+    var cleanOpen by remember(initial.id) { mutableStateOf(false) }
+    var cleanServer by remember(initial.id) { mutableStateOf("") }
+    var cleanText by remember(initial.id) { mutableStateOf("") }
+    var cleanError by remember(initial.id) { mutableStateOf("") }
+    val serverOptions = store.servers.map { s: ServerConfig -> s.id to s.name }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
+            Text(if (isNew) "New group" else "Edit group", color = TXT, fontWeight = FontWeight.Bold)
+            Fld("Name", name) { v: String -> name = v }
+
+            Text("Strategy", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+            Groups.STRATEGIES.forEach { st: String ->
+                Row(Modifier.fillMaxWidth().clickable { strategy = st }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(strategy == st, { strategy = st })
+                    Column(Modifier.weight(1f)) {
+                        Text(Groups.strategyLabel(st) + (if (st == Groups.DEFAULT_STRATEGY) " (default)" else ""), color = TXT, fontSize = 14.sp)
+                        Text(Groups.strategyHelp(st), color = MUTED, fontSize = 11.sp)
+                    }
+                }
+            }
+
+            Text("Members", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+            if (members.isEmpty()) Text("No configs yet — add servers below.", color = MUTED, fontSize = 12.sp)
+            members.forEachIndexed { i: Int, m: GroupMember ->
+                val srv = store.serverById(m.id)
+                val at = Groups.memberAddress(m)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "${i + 1}. " + (srv?.name ?: "missing server"), color = if (srv == null) BAD else TXT,
+                            fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                        if (at.isNotEmpty()) Text("at $at", color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
+                        if (srv == null) Text("removed, or replaced by a subscription update — left out when connecting", color = BAD, fontSize = 10.sp)
+                    }
+                    IconButton(onClick = { members = members.filterIndexed { x: Int, _: GroupMember -> x != i } }) {
+                        Icon(Icons.Filled.Close, "remove this member", tint = BAD)
+                    }
+                }
+            }
+            DropPick("+ add server", serverOptions, "") { id: String -> if (id.isNotEmpty()) { members = members + GroupMember(id) } }
+            OutlinedButton(onClick = { cleanOpen = !cleanOpen; cleanError = "" }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (cleanOpen) "Close clean IPs" else "+ clean IPs")
+            }
+            if (cleanOpen) {
+                Text(
+                    "One server at several addresses — clean CDN IPs, say. Each address becomes a member; its SNI and Host stay on the server's own name.",
+                    color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp)
+                )
+                DropPick("Pick the server", serverOptions, cleanServer) { id: String -> cleanServer = id; cleanError = "" }
+                // addresses read left to right in either language
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                    OutlinedTextField(
+                        cleanText, { v: String -> cleanText = v; cleanError = "" }, Modifier.fillMaxWidth(),
+                        placeholder = { Text("104.16.1.1\n104.17.2.2:2053\n[2606:4700::1]:443", fontSize = 11.sp, fontFamily = MONO) },
+                        textStyle = TextStyle(fontFamily = MONO, fontSize = 12.sp, color = TXT),
+                        minLines = 4, maxLines = 10, shape = RoundedCornerShape(10.dp), colors = tfColors()
+                    )
+                }
+                if (cleanError.isNotEmpty()) Text(cleanError, color = BAD, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                Button(onClick = {
+                    val srv = store.serverById(cleanServer)
+                    val parsed = Groups.parseCleanIps(cleanText)
+                    val why = Groups.cleanIpProblem(srv, parsed)
+                    if (why != null || srv == null) {
+                        cleanError = why ?: "Pick the server these addresses are for"
+                    } else {
+                        members = members + parsed.targets.map { t: Pair<String, Int?> -> GroupMember(srv.id, t.first, t.second) }
+                        cleanText = ""
+                        cleanOpen = false
+                    }
+                }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) { Text("Add these addresses") }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = {
+                if (members.isEmpty()) {
+                    Toast.makeText(ctx, "Add at least one server", Toast.LENGTH_SHORT).show()
+                } else {
+                    onSave(initial.copy(name = name.trim().ifEmpty { "Group" }, strategy = strategy, members = members))
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
+        }
+    }
 }
 
 /* ================================ ROUTING ================================ */
@@ -3286,9 +3546,9 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
     fun deleteRule(id: String, i: Int, old: RouteRule) = update(id) { cur: RoutingProfile ->
         if (i < cur.rules.size && cur.rules[i] == old) cur.copy(rules = cur.rules.filterIndexed { x: Int, _: RouteRule -> x != i }) else cur
     }
-    // a chain opens the chains screen, a server its edit sheet; direct/block are nothing to open
+    // a chain or a group opens the chains & groups screen, a server its edit sheet; direct/block are nothing to open
     val onNode: (String) -> Unit = { t: String ->
-        if (t.startsWith("chain:")) openChains()
+        if (t.startsWith("chain:") || store.groupById(t) != null) openChains()
         if (store.serverById(t) != null) editServerId = t
     }
 
@@ -3595,6 +3855,7 @@ private fun targetGlyph(t: String): String = when {
     t == "direct" -> "→"
     t == "block" -> "⛔"
     t.startsWith("chain:") -> "⛓"
+    Groups.isGroupId(t) -> "⧉"
     else -> "▣"
 }
 
@@ -4007,7 +4268,7 @@ private fun coresLine(ctx: Context): String {
             }
             val rows = buildList {
                 if (s.advancedMode) {
-                    add(MoreRow("chains", "Proxy Chain", "several hops, in order", "${store.chains.size}", Icons.Filled.Link))
+                    add(MoreRow("chains", "Chains & groups", "several hops in order, or several configs as one", "${store.chains.size} · ${store.groups.size}", Icons.Filled.Link))
                     add(MoreRow("pool", "Proxy Pool", "several exits, each on its own port", "${store.pool.size}", Icons.Filled.Hub))
                     add(MoreRow("routing", "Routing", if (s.advancedRouting) "advanced routing profiles" else routingModeLabel(s.routingMode), if (s.advancedRouting) "${store.profiles.size} profile(s)" else "", Icons.Filled.CallSplit))
                 }
@@ -4115,7 +4376,8 @@ private fun routingModeLabel(mode: String): String = when (mode) {
 @Composable private fun EmptyHint(text: String) { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { Text(text, color = MUTED) } }
 @Composable private fun tfColors() = OutlinedTextFieldDefaults.colors(focusedBorderColor = PRIMARY, unfocusedBorderColor = STROKE, focusedTextColor = TXT, unfocusedTextColor = TXT, cursorColor = PRIMARY)
 
-private fun targetOptions(store: Store): List<Pair<String, String>> = buildList { store.servers.forEach { add(it.id to it.name) }; store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") } }
+/** Every server, chain and group a picker offers — a routing target, a base, a pool exit: a group by its bare id, "⧉ name" (Groups.kt). */
+private fun targetOptions(store: Store): List<Pair<String, String>> = buildList { store.servers.forEach { add(it.id to it.name) }; store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }; addAll(groupOptions(store)) }
 private fun targetOptionsFull(store: Store): List<Pair<String, String>> = buildList { add("proxy" to "Proxy (first server)"); add("direct" to "Direct"); add("block" to "Block"); addAll(targetOptions(store)) }
 // apiPort belongs here too: it is the core's own metrics/API listener, and a
 // pool entry handed that port makes the config fail to build.
