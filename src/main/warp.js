@@ -1,23 +1,30 @@
 'use strict';
 /**
- * Cloudflare WARP on MASQUE (v1.25.0): a WARP device registered from the app —
- * or one brought in from usque's config.json or a pasted Xray WARP outbound —
- * and the editor's fields for parser.createServer, one MASQUE server per HTTP
- * version. Desktop (main.js) and the router (service.js) share all of it.
- * .superpowers/sdd/masque/design.md §5 and research.md (git-ignored).
+ * Cloudflare WARP (v1.25.0 MASQUE, v1.26.0 WireGuard): a WARP device registered
+ * from the app — or one brought in (usque's config.json or an Xray WARP
+ * outbound for MASQUE; a WireGuard .conf or wireguard:// link) — and the
+ * editor's fields for parser.createServer: one MASQUE server per HTTP version,
+ * or one WireGuard server, alone or as the exit of a chain over a config the
+ * user already has. Several accounts in one go, each with a WARP+ key or
+ * none, and what Cloudflare says of each account kept on its servers
+ * (`server.warp`). Desktop (main.js) and the router (service.js) share all of
+ * it. .superpowers/sdd/masque/design.md §5 and warp-wg/design.md (git-ignored).
  *
- *   registerWarp({ license, request, now, log })  → reg (below)
- *   importWarp(text)                              → reg
+ *   registerWarp({ license, request, now, log })    → reg (MASQUE, below)
+ *   registerWarpWg({ license, request, now, log })  → reg (WireGuard)
+ *   importWarp(text)                                → reg (MASQUE)
  *   warpServers(reg, { http, endpoint, address, cover, antiDpi, name }) → [fields]   (pure)
- *   warpHandler(deps)                             → the servers:addWarp handler
+ *   wgServerFields(reg, opts, name)                 → fields                        (pure)
+ *   warpHandler(deps)                               → the servers:addWarp handler
  *
- *   reg = { privateKey (PKCS#8 PEM), publicKey (PEM), address: [v4/32, v6/128],
- *           endpoints: { h3v4, h3v6, h2v4, h2v6 }, account: { id, type, warpPlus }, warnings: [{ code, message }] }
+ *   reg = { privateKey (MASQUE: PKCS#8 PEM; WireGuard: base64 X25519), publicKey,
+ *           address: [v4/32, v6/128], endpoints, reserved (WireGuard),
+ *           account: { id, type, warpPlus }, info (AccountInfo), warnings: [{ code, message }] }
  *
- * The device key is made HERE (P-256) and never leaves the machine except to
- * the core; Cloudflare gets its public half. The API token is used for the
- * three calls of one registration and then dropped. Neither is ever logged,
- * nor put in an error: whatever Cloudflare says back is scrubbed of both.
+ * The device key is made HERE and never leaves the machine except to the core;
+ * Cloudflare gets its public half. The API token is used for the calls of one
+ * registration and then dropped. Neither is ever logged, nor put in an error,
+ * nor is a WARP+ key: whatever Cloudflare says back is scrubbed of all three.
  */
 const crypto = require('crypto');
 const http = require('http');
@@ -44,14 +51,15 @@ const API = {
 const MAX_ANSWER = 512 * 1024;
 
 /**
- * usque's registration body (api/cloudflare.go): a throwaway X25519 key — the
- * MASQUE key replaces it at once —, `tos` the moment the user accepted the
- * terms (pressing «ساختن» is that), a random 16-hex serial.
+ * usque's registration body (api/cloudflare.go): an X25519 key — a throwaway
+ * one the MASQUE key replaces at once, or the WireGuard device's own (`key`) —,
+ * `tos` the moment the user accepted the terms (pressing «ساختن» is that), a
+ * random 16-hex serial.
  */
-function regBody(now) {
-  const x = crypto.generateKeyPairSync('x25519').publicKey.export({ type: 'spki', format: 'der' });
+function regBody(now, key) {
+  const x = key ? null : crypto.generateKeyPairSync('x25519').publicKey.export({ type: 'spki', format: 'der' });
   return {
-    key: x.subarray(x.length - 32).toString('base64'),
+    key: key || x.subarray(x.length - 32).toString('base64'),
     install_id: '',
     fcm_token: '',
     tos: new Date(now()).toISOString(),
@@ -75,10 +83,21 @@ const LICENSE_RE = /^[A-Za-z0-9]{8}-[A-Za-z0-9]{8}-[A-Za-z0-9]{8}$/;
 /** A domain name with a dot and a non-numeric last label (so no IP passes for one). */
 const HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
 
+/** Cloudflare's WireGuard edge when a record names none, and its port (2408; 500, 1701, 4500 answer too). */
+const WG_ENDPOINTS = { v4: '162.159.192.1', v6: '2606:4700:d0::a29f:c001' };
+const WG_PORT = 2408;
+/** WARP's own MTU — and room for the hop a chained WARP rides inside. */
+const WG_MTU = 1280;
+/** Accounts in one go, and the pause between two sign-ups (they are rate-limited). */
+const MAX_ACCOUNTS = 10;
+const PAUSE_MS = 2000;
+const ACCOUNT_TYPES = ['free', 'limited', 'unlimited', 'team'];
+const BASE_NAME = '☁ WARP';
+
 /** The codes the window translates (`warp.err.<code>`, `warp.warn.<code>` in i18n.js). */
 const ERROR_CODES = ['rateLimited', 'blocked', 'rejected', 'notConnected', 'badLicense', 'badAnswer', 'badImport',
-  'badCover', 'badAddress', 'busy', 'createFailed', 'failed'];
-const WARNING_CODES = ['warpNotEnabled', 'licenseFailed'];
+  'badCover', 'badAddress', 'busy', 'createFailed', 'failed', 'badHop', 'badConf'];
+const WARNING_CODES = ['warpNotEnabled', 'licenseFailed', 'accountUnread'];
 
 class WarpError extends Error {
   /** `detail`: Cloudflare's own words, already scrubbed — what the window shows in `{msg}`. */
@@ -207,8 +226,12 @@ function cfMessage(json, text) {
   return t.replace(/\s+/g, ' ').slice(0, 200);
 }
 
-/** One API call: the headers, the version prefix, the status mapped. Resolves the answer's JSON object. */
-async function call(request, method, path, { token, body, step, secrets }) {
+/**
+ * One API call: the headers, the version prefix, the status mapped. Resolves
+ * the answer's JSON object — `{}` for an empty one when `empty` allows it (PUT
+ * …/account may answer 204), the array when `list` asks for one.
+ */
+async function call(request, method, path, { token, body, step, secrets, empty, list }) {
   const headers = { 'User-Agent': API.userAgent, 'CF-Client-Version': API.clientVersion, Accept: 'application/json', 'Accept-Encoding': 'identity' };
   if (body !== undefined) headers['Content-Type'] = API.contentType;
   if (token) headers.Authorization = 'Bearer ' + token;
@@ -228,8 +251,86 @@ async function call(request, method, path, { token, body, step, secrets }) {
     const detail = scrub(cfMessage(json, text), secrets);
     throw new WarpError('rejected', `Cloudflare refused the ${step} (${status || 'no status'})${detail ? ': ' + detail : ''}`, detail);
   }
+  if (empty && (status === 204 || !text.trim())) return {};
+  if (list) {
+    if (!Array.isArray(json)) throw new WarpError('badAnswer', `Cloudflare's answer to the ${step} is not a list`);
+    return json;
+  }
   if (!isPlain(json)) throw new WarpError('badAnswer', `Cloudflare's answer to the ${step} is not JSON`);
   return json;
+}
+
+/* ---------------------------------- the account ---------------------------------- */
+const numberOf = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v
+  : (typeof v === 'string' && /^\d{1,20}$/.test(v.trim()) ? Number(v) : null));
+
+/**
+ * What the window and the server's card show of an account (`server.warp`):
+ * Cloudflare's account object, read as it is — premium_data, quota and usage
+ * in bytes under their own names (their meaning is not documented) — plus how
+ * the WARP+ key went and the devices it is on. Never the key itself: its last
+ * four characters say which one it was.
+ */
+function accountInfo(kind, deviceId, acc, extra, now) {
+  const a = isPlain(acc) ? acc : {};
+  const type = str(a.account_type).toLowerCase();
+  const role = str(a.role).toLowerCase();
+  return Object.assign({
+    kind,
+    deviceId: str(deviceId),
+    type: ACCOUNT_TYPES.includes(type) ? type : '',
+    warpPlus: a.warp_plus === true,
+    premiumData: numberOf(a.premium_data),
+    quota: numberOf(a.quota),
+    usage: numberOf(a.usage),
+    role: role === 'parent' || role === 'child' ? role : '',
+    referralCount: numberOf(a.referral_count),
+    devices: null,
+    license: 'none',
+    licenseTail: '',
+    licenseError: '',
+    checkedAt: new Date((now || Date.now)()).toISOString()
+  }, extra);
+}
+
+/**
+ * A registered device's account, both kinds: the WARP+ key when there is one
+ * (PUT …/account; a refusal is a warning — the device exists by then, and a
+ * free account beats none), then the account and its devices read back. A
+ * read that fails is a warning too: the servers work without it.
+ */
+async function accountStep({ request, dev, token, license, secrets, say, warnings, base, kind, id, now }) {
+  let acc = isPlain(base) ? base : {};
+  const extra = {};
+  if (license) {
+    extra.licenseTail = license.slice(-4);
+    try {
+      const put = await call(request, 'PUT', dev + '/account', { token, body: { license }, step: 'WARP+ license', secrets, empty: true });
+      acc = Object.assign({}, acc, put);
+      extra.license = 'applied';
+      say(`WARP: the WARP+ key …${extra.licenseTail} is applied`);
+    } catch (e) {
+      const why = scrub(e.detail || e.message, secrets);
+      extra.license = 'refused';
+      extra.licenseError = why;
+      warnings.push({ code: 'licenseFailed', cause: e.code, message: why });
+      say(`WARP: the WARP+ key …${extra.licenseTail} was not applied — ` + why, 'warn');
+    }
+  }
+  const unread = [];
+  try {
+    acc = Object.assign({}, acc, await call(request, 'GET', dev + '/account', { token, step: 'account', secrets }));
+  } catch (e) { unread.push(scrub(e.detail || e.message, secrets)); }
+  try {
+    extra.devices = (await call(request, 'GET', dev + '/account/devices', { token, step: 'account devices', secrets, list: true })).length;
+  } catch (e) { unread.push(scrub(e.detail || e.message, secrets)); }
+  if (unread.length) {
+    warnings.push({ code: 'accountUnread', message: unread.join('; ') });
+    say('WARP: the account could not be read in full — ' + unread.join('; '), 'warn');
+  }
+  const info = accountInfo(kind, id, acc, extra, now);
+  say(`WARP: the account is ${info.type || 'of an unknown type'}${info.warpPlus ? ' (WARP+)' : ''}`);
+  return info;
 }
 
 /* ------------------------------ keys, addresses, endpoints ------------------------------ */
@@ -340,7 +441,7 @@ async function registerWarp(opts = {}) {
   const license = str(opts.license);
   if (license && !LICENSE_RE.test(license)) throw new WarpError('badLicense', 'A WARP+ license looks like xxxxxxxx-xxxxxxxx-xxxxxxxx');
 
-  const secrets = [];
+  const secrets = license ? [license] : [];
   const say = (line, level) => { try { log(scrub(line, secrets), level || 'info'); } catch { /* a log never fails a sign-up */ } };
 
   const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
@@ -377,18 +478,8 @@ async function registerWarp(opts = {}) {
     rec = Object.assign({}, got, { warp_enabled: rec.warp_enabled === true || got.warp_enabled === true });
   }
 
-  let account = isPlain(rec.account) ? rec.account : (isPlain(made.account) ? made.account : {});
-  if (license) {
-    try {
-      const acc = await call(request, 'PUT', dev + '/account', { token, body: { license }, step: 'WARP+ license', secrets });
-      account = Object.assign({}, account, acc);
-      say(`WARP: the WARP+ license is applied (account ${str(acc.account_type) || 'updated'})`);
-    } catch (e) {
-      const why = scrub(e.detail || e.message, secrets);
-      warnings.push({ code: 'licenseFailed', cause: e.code, message: why });
-      say('WARP: the WARP+ license was not applied — ' + why, 'warn');
-    }
-  }
+  const base = isPlain(rec.account) ? rec.account : (isPlain(made.account) ? made.account : {});
+  const info = await accountStep({ request, dev, token, license, secrets, say, warnings, base, kind: 'masque', id, now });
 
   const mapped = fromRecord(rec);
   say(`WARP: the device's addresses ${mapped.address.join(', ')}; HTTP/3 edge ${mapped.endpoints.h3v4}`);
@@ -397,7 +488,109 @@ async function registerWarp(opts = {}) {
     publicKey: mapped.publicKey,
     address: mapped.address,
     endpoints: mapped.endpoints,
-    account: { id, type: str(account.account_type), warpPlus: account.warp_plus === true },
+    account: { id, type: info.type, warpPlus: info.warpPlus },
+    info,
+    warnings
+  };
+}
+
+/* ------------------------------ WireGuard (v1.26.0) ------------------------------ */
+/** A WireGuard key: 32 bytes, base64. */
+const isWgKey = (v) => /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/.test(str(v));
+
+/** `config.client_id` (base64) → its bytes: Xray's `reserved`, the three Cloudflare reads off each packet. */
+function clientIdBytes(v) {
+  const s = str(v);
+  if (!s || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(s)) return [];
+  const b = Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  return b.length >= 1 && b.length <= 8 ? Array.from(b) : [];
+}
+
+/** A WireGuard device record → the peer's key, the addresses, the endpoints, `reserved`. */
+function fromWgRecord(rec) {
+  const cfg = isPlain(rec.config) ? rec.config : {};
+  const peer = (Array.isArray(cfg.peers) && isPlain(cfg.peers[0])) ? cfg.peers[0] : null;
+  if (!peer) throw new WarpError('badAnswer', 'Cloudflare\'s device record has no endpoint (config.peers is empty)');
+  const publicKey = str(peer.public_key);
+  if (!isWgKey(publicKey)) throw new WarpError('badAnswer', 'Cloudflare\'s device record has no WireGuard key (config.peers[0].public_key)');
+  const a = (isPlain(cfg.interface) && isPlain(cfg.interface.addresses)) ? cfg.interface.addresses : {};
+  const address = addressList([a.v4, a.v6]);
+  if (!address || !address.length) throw new WarpError('badAnswer', 'Cloudflare\'s device record has no usable address (config.interface.addresses)');
+  const ep = isPlain(peer.endpoint) ? peer.endpoint : {};
+  return {
+    publicKey,
+    address,
+    endpoints: { v4: hostOf(ep.v4, 4) || WG_ENDPOINTS.v4, v6: hostOf(ep.v6, 6) || WG_ENDPOINTS.v6 },
+    reserved: clientIdBytes(cfg.client_id)
+  };
+}
+
+/**
+ * A new WARP device for WireGuard (wgcf's way):
+ *   1. an X25519 key pair, made here;
+ *   2. POST /reg with its public half (key_type curve25519, tunnel_type wireguard);
+ *   3. warp_enabled switched on when the answer does not say it is — as for MASQUE;
+ *   4. the WARP+ key, the account and its devices (accountStep);
+ *   5. the record → the peer's key, the addresses, the endpoints, `reserved`.
+ */
+async function registerWarpWg(opts = {}) {
+  const request = opts.request || makeRequest();
+  const now = opts.now || Date.now;
+  const log = typeof opts.log === 'function' ? opts.log : () => {};
+  const license = str(opts.license);
+  if (license && !LICENSE_RE.test(license)) throw new WarpError('badLicense', 'A WARP+ license looks like xxxxxxxx-xxxxxxxx-xxxxxxxx');
+
+  const secrets = license ? [license] : [];
+  const say = (line, level) => { try { log(scrub(line, secrets), level || 'info'); } catch { /* a log never fails a sign-up */ } };
+
+  const pair = crypto.generateKeyPairSync('x25519');
+  const priv = pair.privateKey.export({ type: 'pkcs8', format: 'der' });
+  const pub = pair.publicKey.export({ type: 'spki', format: 'der' });
+  const privateKey = priv.subarray(priv.length - 32).toString('base64');
+  secrets.push(privateKey);
+  const ownKey = pub.subarray(pub.length - 32).toString('base64');
+
+  say('WARP: registering a new WireGuard device with Cloudflare…');
+  const made = await call(request, 'POST', '/reg', { body: regBody(now, ownKey), step: 'registration', secrets });
+  const id = str(made.id);
+  const token = str(made.token);
+  if (!id || !token) throw new WarpError('badAnswer', 'Cloudflare\'s registration answer has no device id or token');
+  secrets.push(token);
+  const dev = '/reg/' + encodeURIComponent(id);
+  say(`WARP: device ${id} registered (WireGuard)`);
+
+  const warnings = [];
+  let rec = made;
+  if (rec.warp_enabled !== true) {
+    const on = await call(request, 'PATCH', dev, { token, body: { warp_enabled: true }, step: 'activation (warp_enabled)', secrets });
+    if (on.warp_enabled === true) {
+      rec = peersOf(on).length ? on : Object.assign({}, rec, { warp_enabled: true });
+      say('WARP: switched on for the device (warp_enabled)');
+    } else {
+      warnings.push({ code: 'warpNotEnabled', message: 'Cloudflare still reports warp_enabled: false for this device; the edge may not answer' });
+      say('WARP: Cloudflare did not switch the device on (warp_enabled stays false) — the edge may not answer', 'warn');
+    }
+  }
+  if (!peersOf(rec).length) {
+    say('WARP: the answer names no endpoint — reading the device record');
+    const got = await call(request, 'GET', dev, { token, step: 'device record', secrets });
+    rec = Object.assign({}, got, { warp_enabled: rec.warp_enabled === true || got.warp_enabled === true });
+  }
+
+  const base = isPlain(rec.account) ? rec.account : (isPlain(made.account) ? made.account : {});
+  const info = await accountStep({ request, dev, token, license, secrets, say, warnings, base, kind: 'wireguard', id, now });
+
+  const mapped = fromWgRecord(rec);
+  say(`WARP: the device's addresses ${mapped.address.join(', ')}; edge ${mapped.endpoints.v4}:${WG_PORT}`);
+  return {
+    kind: 'wireguard',
+    privateKey,
+    publicKey: mapped.publicKey,
+    address: mapped.address,
+    endpoints: mapped.endpoints,
+    reserved: mapped.reserved,
+    account: { id, type: info.type, warpPlus: info.warpPlus },
+    info,
     warnings
   };
 }
@@ -492,12 +685,12 @@ function importWarp(text) {
 }
 
 /* ---------------------------------- the servers ---------------------------------- */
-/** `ip`, `ip:port`, `[v6]:port`, a bare v6 or a domain → { host, port }; null when it is none of them. */
-function parseEndpoint(v) {
+/** `ip`, `ip:port`, `[v6]:port`, a bare v6 or a domain → { host, port } (443, or `defaultPort`, when none is given); null when it is none of them. */
+function parseEndpoint(v, defaultPort) {
   const s = str(v);
   if (!s || /[\s/@]/.test(s)) return null;
   let host;
-  let port = 443;
+  let port = defaultPort || 443;
   if (s[0] === '[') {
     const m = /^\[([^\]]+)\](?::(\d+))?$/.exec(s);
     if (!m || net.isIP(m[1]) !== 6) return null;
@@ -581,47 +774,270 @@ function warpServers(reg, opts) {
   });
 }
 
+/* ------------------------------ WireGuard servers ------------------------------ */
+/** The window's WireGuard choices, checked — before a registration, so a typo costs no device. */
+function wgOptions(opts) {
+  const o = opts || {};
+  const use = str(o.use).toLowerCase() === 'direct' ? 'direct' : 'chain';
+  const e = str(o.endpoint).toLowerCase();
+  const out = {
+    use,
+    chainWith: str(o.chainWith),
+    // a chained WARP is dialled from the hop's server: Cloudflare's own edge, no clean IP, no noise
+    endpoint: use === 'direct' && ['auto', 'v6', 'custom'].includes(e) ? e : 'auto',
+    custom: null,
+    antiDpi: use === 'direct' && o.antiDpi !== false && o.antiDpi !== 'false',
+    name: str(o.name)
+  };
+  if (out.endpoint === 'custom') {
+    out.custom = parseEndpoint(o.address, WG_PORT);
+    if (!out.custom) throw new WarpError('badAddress', 'The endpoint must be an IP or a domain, with an optional port');
+  }
+  return out;
+}
+
+/**
+ * A WireGuard WARP device as the editor's fields for parser.createServer:
+ * Cloudflare's edge (the record's v4, or its v6, or the user's clean IP) on
+ * 2408, the device's own key, the peer's, the tunnel's addresses, `reserved`
+ * from the client id, MTU 1280, everything through it. Noise only for a WARP
+ * dialled from here; a chained one rides its hop.
+ */
+function wgServerFields(reg, opts, name) {
+  const o = wgOptions(opts);
+  const r = reg || {};
+  if (!isWgKey(r.privateKey) || !isWgKey(r.publicKey) || !Array.isArray(r.address) || !r.address.length) {
+    throw new WarpError('badAnswer', 'The WARP account lacks its keys or its addresses');
+  }
+  const ep = Object.assign({}, WG_ENDPOINTS);
+  for (const k of ['v4', 'v6']) if (isPlain(r.endpoints) && str(r.endpoints[k])) ep[k] = str(r.endpoints[k]);
+  const f = {
+    protocol: 'wireguard',
+    name: str(name) || o.name || BASE_NAME,
+    address: o.custom ? o.custom.host : ep[o.endpoint === 'v6' ? 'v6' : 'v4'],
+    port: o.custom ? o.custom.port : WG_PORT,
+    privateKey: r.privateKey,
+    publicKey: r.publicKey,
+    localAddress: r.address.join(', '),
+    mtu: String(WG_MTU),
+    allowedIPs: '0.0.0.0/0, ::/0'
+  };
+  if (Array.isArray(r.reserved) && r.reserved.length) f.reserved = r.reserved.join(',');
+  if (o.antiDpi) f.noise = ANTI_DPI.noise;
+  return f;
+}
+
+/** A WireGuard .conf or a wireguard:// link pasted in «وارد کردن حساب موجود» → its server (parser.js, as + WireGuard makes it). */
+function importWg(text) {
+  const s = str(text);
+  if (!s) throw new WarpError('badConf', 'Nothing was pasted');
+  const P = require('./parser');
+  let server = null;
+  try {
+    if (P.isWireguardConf(s)) server = P.makeWireguardServer(P.parseWireguardConf(s));
+    else if (/^(wireguard|wg):\/\//i.test(s)) server = P.parseLink(s);
+  } catch (e) {
+    // the parser's own words say which line is missing; a message quoting a key is not repeated
+    const why = (e && e.message) || '';
+    throw new WarpError('badConf', 'The WireGuard config could not be read' + (why && !/[A-Za-z0-9+/]{20,}/.test(why) ? ': ' + why : ''));
+  }
+  if (!server || server.protocol !== 'wireguard') {
+    throw new WarpError('badConf', 'Paste a WireGuard .conf ([Interface] and [Peer]) or a wireguard:// link');
+  }
+  return server;
+}
+
+/* ------------------------------ names, keys, the chain ------------------------------ */
+/**
+ * Each account's label: the base alone for one account no server uses yet
+ * («☁ WARP», MASQUE «☁ WARP · H3»), else the next free numbers — «☁ WARP 2»
+ * when the bare base is there already, «☁ WARP 1» … for a batch. A label is
+ * taken by a server of that name, or of that name + « · …».
+ */
+function accountLabels(n, base, servers) {
+  const names = (Array.isArray(servers) ? servers : []).map((s) => str(s && s.name));
+  const taken = (label) => names.some((x) => x === label || x.startsWith(label + ' · '));
+  if (n === 1 && !taken(base)) return [base];
+  const out = [];
+  for (let k = taken(base) ? 2 : 1; out.length < n; k++) if (!taken(`${base} ${k}`)) out.push(`${base} ${k}`);
+  return out;
+}
+
+/**
+ * The WARP+ keys and how many accounts: one key goes on every account, several
+ * one each in order (the accounts past them free), more keys than accounts
+ * raise the count. Every key is checked here — the message names the line,
+ * never the key.
+ */
+function licensePlan(a) {
+  const raw = Array.isArray(a.licenses) ? a.licenses : (a.license != null ? [a.license] : []);
+  const keys = raw.map(str).filter(Boolean);
+  if (keys.length > MAX_ACCOUNTS) throw new WarpError('badLicense', `At most ${MAX_ACCOUNTS} WARP+ keys at once`);
+  keys.forEach((k, i) => {
+    if (!LICENSE_RE.test(k)) {
+      throw new WarpError('badLicense', (keys.length > 1 ? `Key ${i + 1} is not a WARP+ key: ` : '') + 'a WARP+ license looks like xxxxxxxx-xxxxxxxx-xxxxxxxx');
+    }
+  });
+  const asked = parseInt(a.count, 10);
+  const n = Math.min(MAX_ACCOUNTS, Math.max(1, Number.isFinite(asked) ? asked : 1, keys.length));
+  return { count: n, keys: Array.from({ length: n }, (_, i) => (keys.length === 1 ? keys[0] : keys[i] || '')) };
+}
+
+/**
+ * What a chained WARP rides: a server (`<id>`) or a chain (`chain:<id>`, its
+ * members) — each still there, the last not an HTTP proxy: WireGuard's UDP
+ * goes through that one (the hops before it only carry its stream).
+ */
+function resolveHop(chainWith, servers, chains) {
+  const v = str(chainWith);
+  const bad = (why) => new WarpError('badHop', why);
+  if (!v) throw bad('Choose the config WARP goes through');
+  const byId = new Map((Array.isArray(servers) ? servers : []).filter(isPlain).map((s) => [s.id, s]));
+  let members;
+  let name;
+  if (v.startsWith('chain:')) {
+    const c = (Array.isArray(chains) ? chains : []).find((x) => isPlain(x) && x.id === v.slice(6));
+    if (!c) throw bad('That chain is no longer there');
+    members = (Array.isArray(c.members) ? c.members : []).filter(Boolean);
+    if (!members.length) throw bad('That chain has no servers');
+    name = str(c.name) || 'Chain';
+  } else {
+    if (!byId.has(v)) throw bad('That config is no longer there');
+    members = [v];
+    name = str(byId.get(v).name) || v;
+  }
+  for (const id of members) if (!byId.has(id)) throw bad('A server of that chain is no longer there');
+  const last = byId.get(members[members.length - 1]);
+  if (last.protocol === 'http') throw bad(`${str(last.name) || last.id} is an HTTP proxy: it carries no UDP, so WireGuard cannot ride it`);
+  return { members, name };
+}
+
+/** A new chain id, as the window's own: `chain-<base36 time><4 hex>`. */
+function chainId(now) {
+  return 'chain-' + Number((now || Date.now)()).toString(36) + crypto.randomBytes(2).toString('hex');
+}
+
 /* -------------------------------- servers:addWarp -------------------------------- */
 /**
- * servers:addWarp({ mode: 'new'|'import', license, via: 'direct'|'proxy',
- * importText, http, endpoint, address, cover, antiDpi, name }): register (or
- * import), the fields, createServer for each. deps: createServer, connected(),
- * socksPort(), log(line, level), and for tests request / now.
- * → { ok: true, added, account, warnings } | { ok: false, code, error, detail? }
+ * servers:addWarp (warp-wg/design.md §1-2): { kind: 'masque'|'wireguard',
+ * mode: 'new'|'import', via, count, licenses (or the older single license),
+ * importText; MASQUE http, endpoint, address, cover, antiDpi, name; WireGuard
+ * use: 'chain'|'direct', chainWith, endpoint, address, antiDpi, name }.
+ * Every choice is checked before the first registration. The accounts are made
+ * one after another, a pause between; the first failing fails the call, a
+ * later one stops the batch and keeps what was made (`stopped`). Each
+ * account's servers carry what Cloudflare said of it (`server.warp`); a
+ * chained WireGuard gets its chain. deps: createServer, connected(),
+ * socksPort(), getServers(), getChains(), log(line, level), and for tests
+ * request / now / pause(ms).
+ * → { ok: true, added, addedChains, accounts, account, warnings, stopped? }
+ *   | { ok: false, code, error, detail }
  */
 async function addWarp(args, deps = {}) {
   const a = args || {};
+  const kind = str(a.kind).toLowerCase() === 'wireguard' ? 'wireguard' : 'masque';
   const log = typeof deps.log === 'function' ? deps.log : () => {};
-  let reg = null;
+  const pause = typeof deps.pause === 'function' ? deps.pause : (ms) => new Promise((r) => setTimeout(r, ms));
+  const servers = typeof deps.getServers === 'function' ? deps.getServers() || [] : [];
+  const chains = typeof deps.getChains === 'function' ? deps.getChains() || [] : [];
+  const secrets = [];
+  const accounts = [];
+  let stopped = null;
+  const hide = (reg) => (reg && reg.privateKey ? [reg.privateKey, pemBody(reg.privateKey)] : []);
+
+  // one account's servers (and its chain): createServer for each, the account kept on them
+  function build(reg, label, hop) {
+    const fields = kind === 'wireguard' ? [wgServerFields(reg, a, label)] : warpServers(reg, Object.assign({}, a, { name: label }));
+    let added;
+    try { added = fields.map((f) => deps.createServer(f)); } catch (e) {
+      const why = scrub((e && e.message) || String(e), secrets.concat(hide(reg)));
+      throw new WarpError('createFailed', 'The servers could not be made: ' + why, why);
+    }
+    const info = reg.info || { kind, imported: true };
+    for (const s of added) if (isPlain(s)) s.warp = Object.assign({}, info);
+    const chain = hop ? { id: chainId(deps.now), name: `${hop.name} → ${label}`, members: hop.members.concat(added[0].id) } : null;
+    log(`WARP: ${added.length === 1 ? 'one server' : added.length + ' servers'} added (${added.map((s) => s.name).join(', ')})${chain ? '; chain ' + chain.name : ''}`, 'info');
+    return { name: label, added, chain, info, warnings: reg.warnings || [], account: reg.account };
+  }
+
   try {
-    // checked first, so a typo costs no device; warpServers checks the same raw args again
-    // (it takes the dialog's words, not this checked form: «IP تمیز خودم» is `address`, not `custom`)
-    warpOptions(a);
+    // checked first, so a typo costs no device; warpServers / wgServerFields check the same raw args again
+    // (they take the dialog's words, not this checked form: «IP تمیز خودم» is `address`, not `custom`)
+    const opt = kind === 'wireguard' ? wgOptions(a) : warpOptions(a);
+    const hop = kind === 'wireguard' && opt.use === 'chain' ? resolveHop(opt.chainWith, servers, chains) : null;
+    const base = opt.name || BASE_NAME;
     if (a.mode === 'import') {
-      reg = importWarp(a.importText);
-      log('WARP: an existing account was imported', 'info');
+      const [label] = accountLabels(1, base, servers);
+      if (kind === 'wireguard') {
+        let server = importWg(a.importText);
+        // used directly: my clean IP and the noise, as for a new one; else the config's own endpoint, untouched
+        const edits = {};
+        if (opt.custom) { edits.address = opt.custom.host; edits.port = opt.custom.port; }
+        if (opt.antiDpi) edits.noise = ANTI_DPI.noise;
+        if (Object.keys(edits).length) {
+          const P = require('./parser');
+          server = P.applyServerEdits(server, edits);
+          delete server._edited;
+          server.raw = P.buildShareLink(server);
+        }
+        server.name = label;
+        server.warp = { kind, imported: true };
+        const chain = hop ? { id: chainId(deps.now), name: `${hop.name} → ${label}`, members: hop.members.concat(server.id) } : null;
+        log(`WARP: a WireGuard account was imported (${label})${chain ? '; chain ' + chain.name : ''}`, 'info');
+        accounts.push({ name: label, added: [server], chain, info: server.warp, warnings: [], account: { id: '', type: '', warpPlus: false } });
+      } else {
+        const reg = importWarp(a.importText);
+        log('WARP: an existing account was imported', 'info');
+        accounts.push(build(reg, label, null));
+      }
     } else {
-      const license = str(a.license);
-      if (license && !LICENSE_RE.test(license)) throw new WarpError('badLicense', 'A WARP+ license looks like xxxxxxxx-xxxxxxxx-xxxxxxxx');
+      const plan = licensePlan(a);
+      for (const k of plan.keys) if (k && !secrets.includes(k)) secrets.push(k);
       const via = a.via === 'proxy' ? 'proxy' : 'direct';
       if (via === 'proxy' && !(deps.connected && deps.connected())) {
         throw new WarpError('notConnected', 'Registering through the app\'s connection needs one: connect to a server first');
       }
       const request = deps.request || makeRequest({ via, socksPort: via === 'proxy' && deps.socksPort ? deps.socksPort() : 0 });
-      log(`WARP: signing up ${via === 'proxy' ? 'through the app\'s connection' : 'directly'}`, 'info');
-      reg = await registerWarp({ license, request, now: deps.now, log });
+      const labels = accountLabels(plan.count, base, servers);
+      log(`WARP: signing up ${plan.count === 1 ? 'one account' : plan.count + ' accounts'} (${kind === 'wireguard' ? 'WireGuard' : 'MASQUE'}) ${via === 'proxy' ? 'through the app\'s connection' : 'directly'}`, 'info');
+      const register = kind === 'wireguard' ? registerWarpWg : registerWarp;
+      for (let i = 0; i < plan.count; i++) {
+        if (i) await pause(PAUSE_MS);
+        if (plan.count > 1) log(`WARP: account ${i + 1} of ${plan.count}`, 'info');
+        let reg = null;
+        try {
+          reg = await register({ license: plan.keys[i], request, now: deps.now, log });
+          accounts.push(build(reg, labels[i], hop));
+        } catch (e) {
+          if (!accounts.length) throw e;
+          const err = e instanceof WarpError ? e : new WarpError('failed', (e && e.message) || String(e));
+          const message = scrub(err.message, secrets.concat(hide(reg)));
+          stopped = { code: err.code, error: message, detail: err.detail ? scrub(err.detail, secrets.concat(hide(reg))) : message, made: accounts.length, wanted: plan.count };
+          log(`WARP: stopped after ${accounts.length} of ${plan.count} accounts — ${message}`, 'warn');
+          break;
+        }
+      }
     }
-    const fields = warpServers(reg, a);
-    let added;
-    try { added = fields.map((f) => deps.createServer(f)); } catch (e) {
-      const why = scrub((e && e.message) || String(e), [reg.privateKey, pemBody(reg.privateKey)]);
-      throw new WarpError('createFailed', 'The servers could not be made: ' + why, why);
-    }
-    log(`WARP: ${added.length === 1 ? 'one server' : added.length + ' servers'} added (${added.map((s) => s.name).join(', ')})`, 'info');
-    return { ok: true, added, account: reg.account, warnings: reg.warnings || [] };
+    const out = {
+      ok: true,
+      added: accounts.flatMap((x) => x.added),
+      addedChains: accounts.map((x) => x.chain).filter(Boolean),
+      accounts: accounts.map((x) => ({
+        name: x.name,
+        serverIds: x.added.map((s) => s.id),
+        chainId: x.chain ? x.chain.id : null,
+        chainName: x.chain ? x.chain.name : null,
+        info: x.info,
+        warnings: x.warnings
+      })),
+      // the first account as before v1.26, and every account's warnings with its name
+      account: accounts[0].account,
+      warnings: accounts.flatMap((x) => x.warnings.map((w) => Object.assign({}, w, { name: x.name })))
+    };
+    if (stopped) out.stopped = stopped;
+    return out;
   } catch (e) {
     const err = e instanceof WarpError ? e : new WarpError('failed', (e && e.message) || String(e));
-    const secrets = reg ? [reg.privateKey, pemBody(reg.privateKey)] : [];
     const message = scrub(err.message, secrets);
     log('WARP: ' + message, 'warn');
     const out = { ok: false, code: err.code, error: message };
@@ -633,10 +1049,11 @@ async function addWarp(args, deps = {}) {
 
 /**
  * The servers:addWarp handler main.js and service.js both register: addWarp,
- * then the new servers saved after the existing ones. One sign-up at a time —
- * a second click would register a second device (and spend a rate limit).
- * deps: as addWarp, plus getServers() and setServers(list).
- * → { ok, servers (the whole list), added, account, warnings } or the refusal.
+ * then the new servers saved after the existing ones, and the new chains after
+ * theirs. One sign-up at a time — a second click would register more devices
+ * (and spend a rate limit). deps: as addWarp, plus setServers(list) and
+ * setChains(list).
+ * → { ok, servers (the whole list), chains (the whole list, when any was made), …addWarp's answer } or the refusal.
  */
 function warpHandler(deps) {
   let running = false;
@@ -648,7 +1065,13 @@ function warpHandler(deps) {
       if (!res.ok) return res;
       const servers = deps.getServers().concat(res.added);
       deps.setServers(servers);
-      return Object.assign({ servers }, res);
+      const out = Object.assign({ servers }, res);
+      if (res.addedChains.length && typeof deps.setChains === 'function') {
+        const chains = (typeof deps.getChains === 'function' ? deps.getChains() || [] : []).concat(res.addedChains);
+        deps.setChains(chains);
+        out.chains = chains;
+      }
+      return out;
     } finally {
       running = false;
     }
@@ -657,5 +1080,7 @@ function warpHandler(deps) {
 
 module.exports = {
   API, DEFAULT_ENDPOINTS, WARP_SNI, ANTI_DPI, ERROR_CODES, WARNING_CODES, WarpError,
-  makeRequest, registerWarp, importWarp, warpServers, warpOptions, addWarp, warpHandler
+  WG_ENDPOINTS, WG_PORT, WG_MTU, MAX_ACCOUNTS, LICENSE_RE,
+  makeRequest, registerWarp, registerWarpWg, importWarp, importWg, warpServers, warpOptions,
+  wgOptions, wgServerFields, accountInfo, accountLabels, licensePlan, resolveHop, addWarp, warpHandler
 };

@@ -170,5 +170,6 @@ test('every WARP error and warning code reads in Persian and English', () => {
     assert.doesNotMatch(en, arabicScript, `en has no '${k}' (the Persian shows through)`);
   }
   // the codes addWarp can answer are exactly these
-  assert.deepEqual(W.ERROR_CODES.slice().sort(), ['badAddress', 'badAnswer', 'badCover', 'badImport', 'badLicense', 'blocked', 'busy', 'createFailed', 'failed', 'notConnected', 'rateLimited', 'rejected']);
+  assert.deepEqual(W.ERROR_CODES.slice().sort(), ['badAddress', 'badAnswer', 'badConf', 'badCover', 'badHop', 'badImport', 'badLicense', 'blocked', 'busy', 'createFailed', 'failed', 'notConnected', 'rateLimited', 'rejected']);
+  assert.deepEqual(W.WARNING_CODES.slice().sort(), ['accountUnread', 'licenseFailed', 'warpNotEnabled']);
 });

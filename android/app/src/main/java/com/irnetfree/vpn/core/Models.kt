@@ -53,7 +53,12 @@ data class ServerConfig(
     // its own concurrency numbers over Mux.MUX's. Never in a link.
     val mux: String = "",
     val muxConcurrency: Int? = null,
-    val xudpConcurrency: Int? = null
+    val xudpConcurrency: Int? = null,
+    // A WARP server's account, as Cloudflare told it when the + WARP sheet
+    // made it (Warp.AccountInfo, the desktop's `server.warp`): its type, how
+    // the WARP+ key went, its data figures, its devices — or only that it was
+    // imported. Written only when there is one, so other records are unchanged.
+    val warp: Warp.AccountInfo? = null
 ) {
     /** Imported from an Xray JSON config, with the config at hand. */
     val isJson: Boolean get() = source == JsonImport.SOURCE && json != null
@@ -70,6 +75,7 @@ data class ServerConfig(
         if (mux.isNotEmpty()) put("mux", mux)
         muxConcurrency?.let { n: Int -> put("muxConcurrency", n) }
         xudpConcurrency?.let { n: Int -> put("xudpConcurrency", n) }
+        warp?.let { w: Warp.AccountInfo -> put("warp", w.toJson()) }
         if (source.isNotEmpty()) put("source", source)
         val cfg = json
         if (cfg != null) {
@@ -115,7 +121,8 @@ data class ServerConfig(
                 jsonInfo = JsonInfo.fromJson(o.optJSONObject("jsonInfo")) ?: o.optJSONObject("json")?.let { c: JSONObject -> JsonImport.jsonInfo(c) },
                 mux = o.optString("mux", "").let { v: String -> if (v == "on" || v == "off") v else "" },
                 muxConcurrency = if (o.has("muxConcurrency")) o.optInt("muxConcurrency").takeIf { n: Int -> n > 0 } else null,
-                xudpConcurrency = if (o.has("xudpConcurrency")) o.optInt("xudpConcurrency").takeIf { n: Int -> n > 0 } else null
+                xudpConcurrency = if (o.has("xudpConcurrency")) o.optInt("xudpConcurrency").takeIf { n: Int -> n > 0 } else null,
+                warp = Warp.AccountInfo.fromJson(o.optJSONObject("warp"))
             )
         }
 

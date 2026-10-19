@@ -1575,7 +1575,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     listOf(
                         "import" to "Link or subscription",
                         "wg" to "WireGuard",
-                        "warp" to "WARP (MASQUE)",
+                        "warp" to "WARP (WireGuard or MASQUE)",
                         "proxy" to "SOCKS / HTTP",
                         "manual" to "Manual (any protocol)"
                     ).forEach { (key, label) ->
@@ -2202,28 +2202,50 @@ private fun protoColor(proto: String): Color = when (proto) {
     else -> MUTED
 }
 
-/** The card's tags beside the badge: a MASQUE server's WARP and its HTTP version — derived, never stored. */
+/**
+ * The card's tags beside the badge: WARP for a server the + WARP sheet made
+ * (either kind, `warp` on its record) or a MASQUE WARP account, WARP+ when its
+ * account has it; a MASQUE server's HTTP version — derived, never stored.
+ */
 private fun protoTags(s: ServerConfig): String {
-    if (s.protocol != Masque.PROTOCOL) return ""
+    val acct = s.warp
+    val warp = when {
+        acct != null && acct.warpPlus -> " · WARP+"
+        acct != null || Masque.isWarp(s) -> " · WARP"
+        else -> ""
+    }
+    if (s.protocol != Masque.PROTOCOL) return warp
     val http = Masque.httpOf(s.outbound.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")).uppercase()
-    return (if (Masque.isWarp(s)) " · WARP" else "") + " · " + http
+    return "$warp · $http"
 }
 
 /**
- * WARP (MASQUE): a WARP device registered with Cloudflare from the phone —
- * straight out, or through the running tunnel's own SOCKS port — or an
- * existing account imported (usque's config.json, an Xray WARP outbound),
- * then one MASQUE server per HTTP version (Warp.addWarpOnce, the desktop's
- * «+ WARP» dialog). The work runs in AppWork's scope, so a sheet closed
- * mid-way still saves what Cloudflare already made.
+ * WARP: a WARP device registered with Cloudflare from the phone — straight
+ * out, or through the running tunnel's own SOCKS port — one account or
+ * several from a list of WARP+ keys, or an existing account imported; on
+ * WireGuard (the default: the exit of a chain over a config of the user's, or
+ * dialled from here) or on MASQUE (one server per HTTP version).
+ * Warp.addWarpOnce, the desktop's «+ WARP» window (warp-wg/design.md §8).
+ * The work runs in AppWork's scope, so a sheet closed mid-way still saves
+ * what Cloudflare already made.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun WarpSheet(store: Store, onDismiss: () -> Unit, done: () -> Unit) {
     val ctx = LocalContext.current
+    var kind by remember { mutableStateOf(Warp.KIND_WIREGUARD) }
     var mode by remember { mutableStateOf("new") }
     var via by remember { mutableStateOf("direct") }
-    var license by remember { mutableStateOf("") }
+    var count by remember { mutableStateOf("1") }
+    var keysText by remember { mutableStateOf("") }
     var importText by remember { mutableStateOf("") }
+    // WireGuard: chained over a config of mine (the default), or dialled from here
+    val hops = remember { warpHopOptions(store) }
+    var use by remember { mutableStateOf("chain") }
+    var chainWith by remember { mutableStateOf(defaultWarpHop(store, hops)) }
+    var wgEndpoint by remember { mutableStateOf("auto") }
+    var wgAddress by remember { mutableStateOf("") }
+    var wgAntiDpi by remember { mutableStateOf(true) }
+    // MASQUE
     var http by remember { mutableStateOf("both") }
     var endpoint by remember { mutableStateOf("auto") }
     var address by remember { mutableStateOf("") }
@@ -2238,21 +2260,21 @@ private fun protoTags(s: ServerConfig): String {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
-            Text("Add WARP (MASQUE)", color = TXT, fontWeight = FontWeight.Bold)
-            Text("Cloudflare WARP over MASQUE (HTTP/3 or HTTP/2) — it runs on Xray or Xray-PattN, never sing-box.", color = MUTED, fontSize = 11.sp)
+            Text("Add WARP", color = TXT, fontWeight = FontWeight.Bold)
             val res = result
             if (res != null && res.ok) {
-                Text("Added ✓", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
-                for (s in res.added) Text("• ${s.name} — ${s.address}:${s.port}", color = TXT2, fontSize = 12.sp, fontFamily = MONO)
-                val acct = res.account
-                if (acct != null && acct.id.isNotEmpty()) {
-                    Text("Account: " + (if (acct.warpPlus) "WARP+" else "free") + (if (acct.type.isNotEmpty()) " (${acct.type})" else ""), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-                }
-                for (w in res.warnings) Text("⚠ " + Warp.warningText(w), color = AMBER, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-                Text("Pick one in the list and connect. If HTTP/3 does not connect on this network, try the HTTP/2 one.", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
-                Spacer(Modifier.height(10.dp))
-                Button(onClick = done, modifier = Modifier.fillMaxWidth()) { Text("See them in the list") }
+                WarpDone(res, kind, done)
             } else {
+                Text(
+                    if (kind == Warp.KIND_WIREGUARD) "Cloudflare WARP on WireGuard — best as the exit of a chain over a config you already have: the network sees your config, the sites see WARP."
+                    else "Cloudflare WARP over MASQUE (HTTP/3 or HTTP/2) — it runs on Xray or Xray-PattN, never sing-box.",
+                    color = MUTED, fontSize = 11.sp
+                )
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(kind == Warp.KIND_WIREGUARD, { kind = Warp.KIND_WIREGUARD; error = "" }, { Text("WireGuard — for a Chain") })
+                    FilterChip(kind == Warp.KIND_MASQUE, { kind = Warp.KIND_MASQUE; error = "" }, { Text("MASQUE") })
+                }
+
                 Text("1 · Account", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(mode == "new", { mode = "new" }, { Text("New account") })
@@ -2270,12 +2292,31 @@ private fun protoTags(s: ServerConfig): String {
                         color = MUTED, fontSize = 11.sp
                     )
                     if (via == "proxy" && !connected) Text("Connect to a server first.", color = AMBER, fontSize = 11.sp)
-                    Fld("WARP+ key (optional)", license) { license = it }
+                    OutlinedTextField(
+                        count, { v: String -> count = v.filter { c: Char -> c.isDigit() }.take(2); error = "" },
+                        Modifier.fillMaxWidth().padding(vertical = 3.dp), label = { Text("Accounts (1–${Warp.MAX_ACCOUNTS})") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = tfColors()
+                    )
+                    OutlinedTextField(
+                        keysText, { v: String -> keysText = v; error = "" }, Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        label = { Text("WARP+ keys (optional, one per line)") },
+                        placeholder = { Text("xxxxxxxx-xxxxxxxx-xxxxxxxx", fontSize = 12.sp) },
+                        textStyle = TextStyle(fontFamily = MONO, fontSize = 12.sp, color = TXT),
+                        minLines = 2, maxLines = 10, shape = RoundedCornerShape(10.dp), colors = tfColors()
+                    )
+                    // read back as it is typed: how many accounts, how many with WARP+ — a bad key named by its number, never shown
+                    val readBack = Warp.licenseReadBack(keysText, count.toIntOrNull() ?: 1)
+                    Text(readBack.text, color = if (readBack.ok) TXT2 else AMBER, fontSize = 12.sp)
+                    Text("One key goes on every account; several go one each, in order, and the accounts past them are free. Accounts are made one after another, a pause between.",
+                        color = MUTED, fontSize = 11.sp)
                     Text("Creating an account accepts Cloudflare’s terms of service for WARP.", color = MUTED, fontSize = 11.sp)
                 } else {
                     OutlinedTextField(
                         importText, { v: String -> importText = v; error = "" }, Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        placeholder = { Text("usque’s config.json, or an Xray WARP outbound / its share JSON", fontSize = 12.sp) },
+                        placeholder = {
+                            Text(if (kind == Warp.KIND_WIREGUARD) "A WireGuard .conf ([Interface] and [Peer]) or a wireguard:// link"
+                                 else "usque’s config.json, or an Xray WARP outbound / its share JSON", fontSize = 12.sp)
+                        },
                         textStyle = TextStyle(fontFamily = MONO, fontSize = 11.sp, color = TXT),
                         minLines = 4, maxLines = 10, shape = RoundedCornerShape(10.dp), colors = tfColors()
                     )
@@ -2287,23 +2328,48 @@ private fun protoTags(s: ServerConfig): String {
                 }
 
                 Text("2 · Servers", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
-                Text("HTTP version", color = MUTED, fontSize = 11.sp)
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(http == "both", { http = "both" }, { Text("Both") })
-                    FilterChip(http == "h3", { http = "h3" }, { Text("HTTP/3") })
-                    FilterChip(http == "h2", { http = "h2" }, { Text("HTTP/2") })
+                if (kind == Warp.KIND_WIREGUARD) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(use == "chain", { use = "chain"; error = "" }, { Text("Chain over a config") })
+                        FilterChip(use == "direct", { use = "direct"; error = "" }, { Text("Direct") })
+                    }
+                    if (use == "chain") {
+                        if (hops.isEmpty()) {
+                            Text("Add a config first — WARP rides inside it. An HTTP proxy cannot carry WireGuard (no UDP).", color = AMBER, fontSize = 11.sp)
+                        } else {
+                            DropPick("Choose the config WARP goes through", hops, chainWith) { v: String -> chainWith = v; error = "" }
+                        }
+                        Text("Your config’s server dials Cloudflare and WARP is the chain’s exit: a ⛓ chain is made for each account — connect it to use WARP.",
+                            color = MUTED, fontSize = 11.sp)
+                    } else {
+                        Text("Endpoint", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(wgEndpoint == "auto", { wgEndpoint = "auto" }, { Text("Auto") })
+                            FilterChip(wgEndpoint == "v6", { wgEndpoint = "v6" }, { Text("IPv6") })
+                            FilterChip(wgEndpoint == "custom", { wgEndpoint = "custom" }, { Text("My clean IP") })
+                        }
+                        if (wgEndpoint == "custom") Fld("IP, optional :port (e.g. 162.159.192.7 — port ${Warp.WG_PORT})", wgAddress) { wgAddress = it }
+                        SwitchRow("Anti-DPI (noise)", wgAntiDpi) { wgAntiDpi = it }
+                    }
+                } else {
+                    Text("HTTP version", color = MUTED, fontSize = 11.sp)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(http == "both", { http = "both" }, { Text("Both") })
+                        FilterChip(http == "h3", { http = "h3" }, { Text("HTTP/3") })
+                        FilterChip(http == "h2", { http = "h2" }, { Text("HTTP/2") })
+                    }
+                    Text("Both: one server for each — HTTP/3 runs over QUIC (UDP), HTTP/2 over TCP.", color = MUTED, fontSize = 11.sp)
+                    Text("Endpoint", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(endpoint == "auto", { endpoint = "auto" }, { Text("Auto") })
+                        FilterChip(endpoint == "v6", { endpoint = "v6" }, { Text("IPv6") })
+                        FilterChip(endpoint == "custom", { endpoint = "custom" }, { Text("My clean IP") })
+                    }
+                    if (endpoint == "custom") Fld("IP or domain, optional :port (e.g. 162.159.198.2)", address) { address = it }
+                    Fld("Cover domain (optional)", cover) { cover = it }
+                    Text("A domain behind Cloudflare, sent as the SNI instead of WARP’s own name; the server’s IP must still be WARP’s.", color = MUTED, fontSize = 11.sp)
+                    SwitchRow("Anti-DPI (noise for HTTP/3, a fragment for HTTP/2)", antiDpi) { antiDpi = it }
                 }
-                Text("Both: one server for each — HTTP/3 runs over QUIC (UDP), HTTP/2 over TCP.", color = MUTED, fontSize = 11.sp)
-                Text("Endpoint", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(endpoint == "auto", { endpoint = "auto" }, { Text("Auto") })
-                    FilterChip(endpoint == "v6", { endpoint = "v6" }, { Text("IPv6") })
-                    FilterChip(endpoint == "custom", { endpoint = "custom" }, { Text("My clean IP") })
-                }
-                if (endpoint == "custom") Fld("IP or domain, optional :port (e.g. 162.159.198.2)", address) { address = it }
-                Fld("Cover domain (optional)", cover) { cover = it }
-                Text("A domain behind Cloudflare, sent as the SNI instead of WARP’s own name; the server’s IP must still be WARP’s.", color = MUTED, fontSize = 11.sp)
-                SwitchRow("Anti-DPI (noise for HTTP/3, a fragment for HTTP/2)", antiDpi) { antiDpi = it }
 
                 if (progress.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
@@ -2313,16 +2379,24 @@ private fun protoTags(s: ServerConfig): String {
                 Spacer(Modifier.height(10.dp))
                 Button(enabled = !running, onClick = {
                     running = true; error = ""; progress.clear()
+                    val keys = keysText.split(Regex("\\r?\\n")).map { l: String -> l.trim() }.filter { l: String -> l.isNotEmpty() }
                     val args = Warp.AddArgs(
-                        mode = mode, license = license, via = via, importText = importText,
-                        options = Warp.Options(http = http, endpoint = endpoint, address = address, cover = cover, antiDpi = antiDpi))
+                        kind = kind, mode = mode, via = via, importText = importText,
+                        count = (count.toIntOrNull() ?: 1).coerceIn(1, Warp.MAX_ACCOUNTS), licenses = keys,
+                        options = Warp.Options(http = http, endpoint = endpoint, address = address, cover = cover, antiDpi = antiDpi),
+                        wg = Warp.WgOptions(use = use, chainWith = chainWith, endpoint = wgEndpoint, address = wgAddress, antiDpi = wgAntiDpi))
                     // the tunnel's own SOCKS port, the one it really runs on (SubFetch's choice)
                     val port = LocalProxyAuth.activePort ?: store.settings.socksPort
+                    // what there is now (names, hops), read here on the main thread
+                    val serversNow = store.servers.toList()
+                    val chainsNow = store.chains.toList()
                     AppWork.scope.launch {
                         val r = withContext(Dispatchers.IO) {
                             Warp.addWarpOnce(args, Warp.Deps(
                                 connected = { VpnState.state.value == ConnState.CONNECTED },
                                 socksPort = { port },
+                                getServers = { serversNow },
+                                getChains = { chainsNow },
                                 log = { line: String, _: String ->
                                     VpnState.addLog(line)
                                     AppWork.scope.launch { progress.add(line) }
@@ -2330,9 +2404,14 @@ private fun protoTags(s: ServerConfig): String {
                         }
                         if (r.ok) {
                             store.servers.addAll(r.added); store.saveServers()
-                            if (store.selection.isEmpty() && r.added.isNotEmpty()) store.saveSelection(r.added[0].id)
+                            if (r.addedChains.isNotEmpty()) { store.chains.addAll(r.addedChains); store.saveChains() }
+                            // nothing chosen yet: the first chain made (WARP through my config), else the first server
+                            val pick: String? = r.addedChains.firstOrNull()?.let { c: ChainConfig -> "chain:" + c.id } ?: r.added.firstOrNull()?.id
+                            if (store.selection.isEmpty() && pick != null) store.saveSelection(pick)
                             AppWork.touch()
-                            AppWork.snack("WARP: " + r.added.joinToString(", ") { s: ServerConfig -> s.name } + " added")
+                            val st = r.stopped
+                            val note = if (st != null) " — stopped after ${st.made} of ${st.wanted}" else ""
+                            AppWork.snack("WARP: " + r.added.joinToString(", ") { s: ServerConfig -> s.name } + " added" + note)
                         } else {
                             error = Warp.messageFor(r.code, r.detail)
                         }
@@ -2345,6 +2424,66 @@ private fun protoTags(s: ServerConfig): String {
                 }
             }
         }
+    }
+}
+
+/** What a chained WireGuard WARP can ride: every server but an HTTP proxy (no UDP), and every chain whose servers are all there and whose last is not one. */
+private fun warpHopOptions(store: Store): List<Pair<String, String>> {
+    val out = ArrayList<Pair<String, String>>()
+    for (s in store.servers) {
+        if (s.protocol != "http") out.add(s.id to s.name)
+    }
+    for (c in store.chains) {
+        val members = store.chainMembers(c)
+        val whole = members.isNotEmpty() && members.size == c.members.size && members.last().protocol != "http"
+        if (whole) out.add("chain:${c.id}" to "⛓ ${c.name}")
+    }
+    return out
+}
+
+/** The hop the sheet starts on: the selected server (or chain) when WARP can ride it, else the first one there is. */
+private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): String {
+    val sel = store.selection
+    return if (hops.any { p: Pair<String, String> -> p.first == sel }) sel else (hops.firstOrNull()?.first ?: "")
+}
+
+/** The WARP sheet's answer: a batch stopped part-way, one box per account, and what to do next. */
+@Composable private fun WarpDone(res: Warp.AddResult, kind: String, done: () -> Unit) {
+    Text("Added ✓", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+    val st = res.stopped
+    if (st != null) {
+        Text("${st.made} of ${st.wanted} accounts made — " + Warp.messageFor(st.code, st.detail), color = AMBER, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
+    }
+    val byId = res.added.associateBy { s: ServerConfig -> s.id }
+    for (acct in res.accounts) {
+        WarpAccountBox(acct.name, acct.info, acct.serverIds.mapNotNull { id: String -> byId[id] }, acct.chainName, acct.warnings)
+    }
+    val hint = when {
+        res.addedChains.isNotEmpty() -> "Connect the new ⛓ chain (Chains, or pick it on Home): your config carries WARP, and the sites see WARP’s address."
+        kind == Warp.KIND_WIREGUARD -> "Pick it in the list and connect."
+        else -> "Pick one in the list and connect. If HTTP/3 does not connect on this network, try the HTTP/2 one."
+    }
+    Text(hint, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+    Spacer(Modifier.height(10.dp))
+    Button(onClick = done, modifier = Modifier.fillMaxWidth()) { Text("See them in the list") }
+}
+
+/**
+ * One WARP account as Cloudflare told it (Warp.accountLines — the desktop's
+ * account box): its name, its servers, its type, how the WARP+ key went,
+ * premium_data / quota / usage under Cloudflare's own names, the devices on
+ * it, its chain and its warnings. In the sheet's answer and in the editor.
+ */
+@Composable private fun WarpAccountBox(name: String, info: Warp.AccountInfo, servers: List<ServerConfig>, chainName: String?, warnings: List<Warp.Warning>) {
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp).border(1.dp, STROKE, RoundedCornerShape(10.dp)).padding(10.dp)) {
+        if (name.isNotEmpty()) Text(name, color = TXT, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        for (s in servers) Text("• ${s.name} — ${s.address}:${s.port}", color = TXT2, fontSize = 12.sp, fontFamily = MONO)
+        for (line in Warp.accountLines(info)) Text(line, color = MUTED, fontSize = 11.sp)
+        if (!info.imported && info.checkedAt.isNotEmpty()) {
+            Text("As Cloudflare said on " + info.checkedAt.replace('T', ' ').take(16) + " UTC", color = MUTED, fontSize = 10.sp)
+        }
+        if (chainName != null) Text("⛓ $chainName", color = PRIMARY, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
+        for (w in warnings) Text("⚠ " + Warp.warningText(w), color = AMBER, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
     }
 }
 
@@ -2532,6 +2671,9 @@ private fun protoTags(s: ServerConfig): String {
                     EditView.pro = toPro
                 }
             }
+            // a WARP server's account as Cloudflare told it when it was made — read-only
+            val warpInfo = server.warp
+            if (warpInfo != null) WarpAccountBox("WARP account", warpInfo, emptyList(), null, emptyList())
             if (proView) ProFields(server.protocol, draft, false, {}, tab, encOn) else {
             Fld("Name", name) { name = it }; Fld("Address — real server/IP (connection goes here)", address) { address = it }; Fld("Port", port) { port = it }
             when (server.protocol) {

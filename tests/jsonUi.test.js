@@ -274,6 +274,8 @@ function editHarness({ servers, updateServer, flavor } = {}) {
     // the full editor, which a JSON server never reaches (tests/serverEditorUi.test.js has it)
     draftOf: () => ({}), savedEditView: () => 'simple', showEditView() {}, draftProblem: () => null, draftCtx: () => ({}),
     renderEditPro() {}, renderSimpleExtras() {}, renderMasqueSimple() {}, fillMoreInPro() {}, saveNewServer: async () => {},
+    // the read-only WARP account box (tests/warpWgUi.test.js has it)
+    renderWarpAccount() {},
     setPending() {}, serverInLivePlan: () => false, doReconnect() {},
     renderServers: () => calls.push(['renderServers']), renderPicker() {}, renderChains() {}, renderPool() {}, renderAdvanced() {},
     window: { api: { updateServer: updateServer || (async () => ({ ok: true, servers: [] })) } },
