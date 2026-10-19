@@ -17,6 +17,8 @@ const net = require('node:net');
 const TOKEN = 'tok-3f9a1c0e-SECRET-5b7d2e48a1';
 const DEVICE = 'dev-0a1b2c3d';
 const LICENSE = 'A1b2C3d4-E5f6G7h8-I9j0K1l2';
+/** Cloudflare's WireGuard peer key (the same for every WARP device). */
+const WG_PEER = 'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=';
 /** The MASQUE edge's key, as Cloudflare hands it out: base64 SPKI DER (a key made here). */
 const EDGE_PUB = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
 
@@ -35,16 +37,26 @@ function device(over = {}) {
   }, over);
 }
 
+/** A WireGuard device record: the same, with the WireGuard peer and its edges. */
+function wgDevice(over = {}) {
+  return device(Object.assign({ key_type: 'curve25519', tunnel_type: 'wireguard',
+    config: Object.assign({}, device().config, { peers: [{ public_key: WG_PEER, endpoint: { v4: '162.159.192.1:0', v6: '[2606:4700:d0::a29f:c001]:0', host: 'engage.cloudflareclient.com:2408' } }] }) }, over));
+}
+
 /**
  * The API, step by step as Cloudflare answers it. opts:
  *   enrolled     the PATCH key answer (default: device() with warp_enabled false — a fresh device)
  *   activated    the PATCH warp_enabled answer (default: device())
  *   fetched      the GET /reg/{id} answer (default: device())
- *   license      the PUT …/account answer (default: a WARP+ account)
+ *   license      the PUT …/account answer (default: a WARP+ account; 204: no body, as the API may answer)
+ *   account      the GET …/account answer (default: the device's account, as the license left it)
+ *   devices      the GET …/account/devices answer (default: this one device)
  *   status       { 'POST /reg': 429, … } — a status (and `errorBody`) instead of the answer
  */
 function fakeApi(opts = {}) {
   const calls = [];
+  let licensed = null;   // what a PUT …/account made of the account
+  let tunnel = '';       // what the device is: WireGuard as registered, MASQUE once its key is enrolled
   const v = '/v0a5641';
   const answer = (status, obj) => ({ status, body: typeof obj === 'string' ? obj : JSON.stringify(obj) });
   const api = async (req) => {
@@ -57,18 +69,28 @@ function fakeApi(opts = {}) {
     const authed = auth === 'Bearer ' + TOKEN;
     switch (route) {
       case 'POST /reg':
-        return answer(200, device({ token: TOKEN, key_type: 'curve25519', tunnel_type: 'wireguard', warp_enabled: false,
-          config: Object.assign({}, device().config, { peers: [{ public_key: 'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', endpoint: { v4: '162.159.192.1:0', v6: '[2606:4700:d0::a29f:c001]:0' } }] }) }));
+        tunnel = 'wireguard';   // a new device: its own account
+        licensed = null;
+        return answer(200, wgDevice({ token: TOKEN, warp_enabled: false }));
       case 'PATCH /reg/{id}':
         if (!authed) return answer(401, { success: false, errors: [{ code: 10000, message: 'Authentication error' }] });
-        if (body && body.warp_enabled === true) return answer(200, opts.activated || device());
+        if (body && body.warp_enabled === true) return answer(200, opts.activated || (tunnel === 'wireguard' ? wgDevice() : device()));
+        tunnel = 'masque';
         return answer(200, opts.enrolled || device({ warp_enabled: false }));
       case 'GET /reg/{id}':
         if (!authed) return answer(401, { success: false, errors: [{ code: 10000, message: 'Authentication error' }] });
-        return answer(200, opts.fetched || device());
+        return answer(200, opts.fetched || (tunnel === 'wireguard' ? wgDevice() : device()));
       case 'PUT /reg/{id}/account':
         if (!authed) return answer(401, { success: false, errors: [{ code: 10000, message: 'Authentication error' }] });
-        return answer(200, opts.license || { id: 'acc-77', account_type: 'unlimited', warp_plus: true, premium_data: 1, license: body && body.license });
+        if (opts.license === 204) { licensed = { id: 'acc-77', account_type: 'unlimited', warp_plus: true, premium_data: 1 }; return { status: 204, body: '' }; }
+        licensed = opts.license || { id: 'acc-77', account_type: 'unlimited', warp_plus: true, premium_data: 1, license: body && body.license };
+        return answer(200, licensed);
+      case 'GET /reg/{id}/account':
+        if (!authed) return answer(401, { success: false, errors: [{ code: 10000, message: 'Authentication error' }] });
+        return answer(200, opts.account || Object.assign({}, device().account, licensed || {}));
+      case 'GET /reg/{id}/account/devices':
+        if (!authed) return answer(401, { success: false, errors: [{ code: 10000, message: 'Authentication error' }] });
+        return answer(200, opts.devices || [{ id: DEVICE, type: 'Android', model: 'PC', name: '', created: '2026-10-19T00:00:00Z', activated: '2026-10-19T00:00:00Z', active: true, role: 'child' }]);
       default:
         return answer(404, { success: false, errors: [{ code: 404, message: 'no route ' + route }] });
     }
@@ -180,4 +202,4 @@ async function deadPort() {
   return port;
 }
 
-module.exports = { TOKEN, DEVICE, LICENSE, EDGE_PUB, device, fakeApi, selfSigned, serveHttps, socksServer, deadPort };
+module.exports = { TOKEN, DEVICE, LICENSE, EDGE_PUB, WG_PEER, device, wgDevice, fakeApi, selfSigned, serveHttps, socksServer, deadPort };
