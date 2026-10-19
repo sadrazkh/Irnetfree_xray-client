@@ -3104,14 +3104,17 @@ function createService(opts = {}) {
   }
 
   // + WARP (warp.js), as on the desktop: registered straight out or through the
-  // gateway's own SOCKS port, or imported; one MASQUE server per HTTP version.
-  // deps.warp: a test's fake API (`request`) and parser stub (`createServer`).
+  // gateway's own SOCKS port, or imported; one MASQUE server per HTTP version,
+  // or one WireGuard server with its chain over a config of the user's.
+  // deps.warp: a test's fake API (`request`), parser stub (`createServer`) and `pause`.
   const addWarp = warpHandler(Object.assign({
     createServer,
     connected: () => conn.state === 'connected',
     socksPort: () => (appliedSettings || getSettings()).socksPort,
     getServers: () => store.get('servers', []),
     setServers: (list) => store.set('servers', list),
+    getChains,
+    setChains: (list) => store.set('chains', list),
     log: (line, level) => send('log', { line, level: level || 'info' })
   }, deps.warp || {}));
 

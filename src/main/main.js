@@ -2852,16 +2852,19 @@ function registerIpc() {
     return { ok: true, server, servers: existing };
   });
 
-  // + WARP (warp.js): a WARP device registered — straight out, or through the
-  // live connection's own SOCKS port — or imported, and one MASQUE server per
-  // HTTP version made by createServer and saved like servers:create. One
-  // sign-up at a time; the reason a refusal has comes back as a code.
+  // + WARP (warp.js): WARP devices registered — straight out, or through the
+  // live connection's own SOCKS port — or imported; one MASQUE server per HTTP
+  // version, or one WireGuard server (with its chain over a config of the
+  // user's), made by createServer and saved like servers:create. One sign-up
+  // at a time; the reason a refusal has comes back as a code.
   const addWarp = warpHandler({
     createServer,
     connected: () => conn.state === 'connected',
     socksPort: () => (appliedSettings || getSettings()).socksPort,
     getServers: () => store.get('servers', []),
     setServers,
+    getChains,
+    setChains: (list) => store.set('chains', list),
     log: (line, level) => send('log', { line, level: level || 'info' })
   });
   ipcMain.handle('servers:addWarp', (e, args) => addWarp(args || {}));
