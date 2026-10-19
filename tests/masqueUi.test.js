@@ -158,9 +158,13 @@ test('every MASQUE and + WARP string: once in fa and once in en, one clean liter
 
 /* ------------------------------------ the + WARP dialog ------------------------------------ */
 
+// v1.26 (tests/warpWgUi.test.js) split the form by its kind and reads the accounts back: their helpers come too
 const DIALOG_FNS = ['edNode', 'appendSome', 'richLine', 'httpCards', 'warpChips', 'warpFresh', 'warpShown', 'openWarp', 'closeWarp', 'warpArgs',
   'warpErrorText', 'warpWarningTexts', 'looksP256', 'warpReadImport', 'warpImportChips', 'warpNum', 'warpField', 'warpSeg', 'warpFormNodes',
-  'warpProgressNodes', 'warpFootNodes', 'renderWarp', 'runWarp', 'warpSeeInList'];
+  'warpProgressNodes', 'warpFootNodes', 'renderWarp', 'runWarp', 'warpSeeInList',
+  'fmtBytes', 'warpLicenses', 'warpCount', 'warpHops', 'warpHop', 'warpStoppedText', 'warpFill', 'warpReadWgImport', 'warpWgImportChips', 'warpBytes',
+  'warpDate', 'warpTypeChip', 'warpAccountBody', 'warpAccountBox', 'warpLicenseNodes', 'warpNewNodes', 'warpTwoWg', 'warpTwoMasque', 'warpNoteText',
+  'warpRenderFoot'];
 
 function dialogHarness({ lang = 'en', connected = false, addWarp, servers = [] } = {}) {
   const els = new Map();
@@ -194,7 +198,7 @@ function dialogHarness({ lang = 'en', connected = false, addWarp, servers = [] }
   });
   vm.runInContext([
     'let warpForm = null;',
-    ...['WARP_SEEN_KEY', 'WARP_TERMS_URL', 'WARP_EDGES', 'WARP_IMPORT_PH', 'P256_OID'].map(constSource),
+    ...['WARP_SEEN_KEY', 'WARP_TERMS_URL', 'WARP_EDGES', 'WARP_WG_EDGE', 'WARP_LICENSE_RE', 'WARP_IMPORT_PH', 'WARP_WG_IMPORT_PH', 'P256_OID'].map(constSource),
     ...DIALOG_FNS.map(fnSource),
     'function form() { return warpForm; }'
   ].join('\n'), ctx);
@@ -226,6 +230,8 @@ test('+ WARP, a new account: the sample’s two steps — via the connection off
   let sent = null;
   const h = dialogHarness({ addWarp: async (a) => { sent = plain(a); return { ok: false, code: 'busy', error: 'x' }; } });
   h.ctx.openWarp();
+  // WireGuard is the default kind since v1.26 (tests/warpWgUi.test.js): MASQUE is picked first
+  one(h.get('warpBody'), (e) => e.dataset.warp === 'kind:masque', 'MASQUE').onclick();
   const body = h.get('warpBody');
   const foot = h.get('warpFoot');
   const text = body.textContent;
@@ -250,8 +256,8 @@ test('+ WARP, a new account: the sample’s two steps — via the connection off
   one(h.get('warpBody'), (e) => e.dataset.warp === 'endpoint:v6', 'IPv6').onclick();
   assert.ok(all(h.get('warpBody'), (e) => e.tagName === 'BDI').some((e) => e.textContent === '2606:4700:103::1'));
   const input = (id) => one(h.get('warpBody'), (e) => e.id === id, id);
-  input('warp-license').value = ' abcdEFGH-12345678-ijklmnop ';
-  input('warp-license').oninput();
+  input('warp-licenses').value = ' abcdEFGH-12345678-ijklmnop ';
+  input('warp-licenses').oninput();
   input('warp-cover').value = 'www.example.com';
   input('warp-cover').oninput();
   const sw = input('warp-antiDpi');
@@ -259,25 +265,29 @@ test('+ WARP, a new account: the sample’s two steps — via the connection off
   sw.onchange();
   one(h.get('warpFoot'), (e) => e.id === 'warpGo', 'Make').onclick();
   await tick();
-  assert.deepEqual(sent, { mode: 'new', via: 'direct', license: 'abcdEFGH-12345678-ijklmnop', http: 'h3', endpoint: 'v6', cover: 'www.example.com', antiDpi: false });
+  assert.deepEqual(sent, { kind: 'masque', mode: 'new', via: 'direct', count: 1, licenses: ['abcdEFGH-12345678-ijklmnop'], http: 'h3', endpoint: 'v6', cover: 'www.example.com', antiDpi: false });
   // connected: the second route can be chosen, and is sent
   const c = dialogHarness({ connected: true, addWarp: async (a) => { sent = plain(a); return { ok: false, code: 'busy' }; } });
   c.ctx.openWarp();
+  one(c.get('warpBody'), (e) => e.dataset.warp === 'kind:masque', 'MASQUE').onclick();
   const proxy = all(c.get('warpBody'), (e) => e.tagName === 'INPUT' && e.attrs.value === 'proxy')[0];
   assert.equal(proxy.disabled, false);
   assert.ok(c.get('warpBody').textContent.includes(en('warp.routeProxySub')));
   proxy.checked = true;
   proxy.onchange();
   await c.ctx.runWarp();
-  assert.deepEqual(sent, { mode: 'new', via: 'proxy', license: '', http: 'both', endpoint: 'auto', cover: '', antiDpi: true });
+  assert.deepEqual(sent, { kind: 'masque', mode: 'new', via: 'proxy', count: 1, licenses: [], http: 'both', endpoint: 'auto', cover: '', antiDpi: true });
 });
 
-test('warpArgs: the dialog’s state as servers:addWarp takes it — an import carries its text and no route, a clean IP its address', () => {
+test('warpArgs, MASQUE: the dialog’s state as servers:addWarp takes it — its kind, the count and the keys as a list; an import carries its text and no route, a clean IP its address', () => {
   const { ctx } = dialogHarness();
-  const f = (o) => plain(ctx.warpArgs(Object.assign(ctx.warpFresh(), o)));
-  assert.deepEqual(f({}), { mode: 'new', via: 'direct', license: '', http: 'both', endpoint: 'auto', cover: '', antiDpi: true });
-  assert.deepEqual(f({ way: 'import', importText: '{"a":1}', route: 'proxy', license: 'x', endpoint: 'custom', address: ' 188.114.97.6:2408 ', http: 'h2', cover: ' a.example ' }),
-    { mode: 'import', importText: '{"a":1}', http: 'h2', endpoint: 'custom', address: '188.114.97.6:2408', cover: 'a.example', antiDpi: true });
+  const f = (o) => plain(ctx.warpArgs(Object.assign(ctx.warpFresh(), { kind: 'masque' }, o)));
+  assert.deepEqual(f({}), { kind: 'masque', mode: 'new', via: 'direct', count: 1, licenses: [], http: 'both', endpoint: 'auto', cover: '', antiDpi: true });
+  assert.deepEqual(f({ licenses: ' abcdEFGH-12345678-ijklmnop \n\n  ', count: '3' }).licenses, ['abcdEFGH-12345678-ijklmnop']);
+  assert.equal(f({ count: '3' }).count, 3);
+  assert.ok(!('license' in f({ licenses: 'abcdEFGH-12345678-ijklmnop' })), 'the pre-1.26 single license is never sent: licenses replaces it');
+  assert.deepEqual(f({ way: 'import', importText: '{"a":1}', route: 'proxy', licenses: 'x', count: '4', endpoint: 'custom', address: ' 188.114.97.6:2408 ', http: 'h2', cover: ' a.example ' }),
+    { kind: 'masque', mode: 'import', importText: '{"a":1}', http: 'h2', endpoint: 'custom', address: '188.114.97.6:2408', cover: 'a.example', antiDpi: true });
   assert.equal(f({ http: 'h4', endpoint: 'moon' }).http, 'both', 'only what warp.js knows');
   assert.equal(f({ endpoint: 'moon' }).endpoint, 'auto');
 });
@@ -290,6 +300,7 @@ test('+ WARP, while servers:addWarp runs: the steps pending, Make off; then done
     addWarp: () => new Promise((r) => { release = () => r({ ok: true, servers: [{ id: 'old', name: 'Old' }, ...added], added, account: { id: 'dev' }, warnings: [] }); })
   });
   h.ctx.openWarp();
+  h.form().kind = 'masque';
   const run = h.ctx.runWarp();
   const list = one(h.get('warpBody'), (e) => hasClass(e, 'warp-progress'), 'the steps');
   assert.equal(list.attrs['aria-busy'], 'true');
@@ -329,6 +340,7 @@ test('+ WARP, import: no network — the real servers:addWarp handler and create
   const handler = W.warpHandler({ createServer, connected: () => false, getServers: () => list, setServers: (l) => { list = l; } });
   const h = dialogHarness({ lang: 'fa', addWarp: handler });
   h.ctx.openWarp();
+  one(h.get('warpBody'), (e) => e.dataset.warp === 'kind:masque', 'MASQUE').onclick();
   one(h.get('warpBody'), (e) => e.dataset.warp === 'way:import', 'Import').onclick();
   assert.equal(buttonsOf(h.get('warpFoot'))[0].textContent, fa('warp.add'));
   const ta = one(h.get('warpBody'), (e) => e.id === 'warp-importText', 'the text box');
@@ -361,7 +373,7 @@ test('+ WARP, refused: back to the form with the reason in the window’s words 
   for (const [res, want] of answers) {
     const h = dialogHarness({ addWarp: async () => res });
     h.ctx.openWarp();
-    h.form().cover = 'kept.example';
+    Object.assign(h.form(), { kind: 'masque', cover: 'kept.example' });
     await h.ctx.runWarp();
     assert.equal(h.form().phase, 'form');
     assert.equal(one(h.get('warpBody'), (e) => hasClass(e, 'warp-error'), 'the reason').textContent, want);
@@ -392,7 +404,7 @@ test('+ WARP, made with warnings: Cloudflare left WARP off, the WARP+ key refuse
       warnings: [{ code: 'warpNotEnabled', message: 'still off' }, { code: 'licenseFailed', cause: 'rejected', message: 'Invalid license' }] })
   });
   h.ctx.openWarp();
-  Object.assign(h.form(), { license: 'abcdEFGH-12345678-ijklmnop', http: 'h3' });
+  Object.assign(h.form(), { kind: 'masque', licenses: 'abcdEFGH-12345678-ijklmnop', http: 'h3' });
   await h.ctx.runWarp();
   const steps = one(h.get('warpBody'), (e) => hasClass(e, 'warp-progress'), 'steps').children.map((li) => li.textContent);
   assert.ok(steps.find((l) => l.includes(en('warp.pEnable'))).startsWith('!'));
