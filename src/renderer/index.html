@@ -65,7 +65,7 @@
         <span class="nav-ico">🔗</span><span data-i18n="nav.subs">ساب‌ها</span>
       </button>
       <button class="nav-item pro-only" data-view="chain" data-i18n-title="nav.chain">
-        <span class="nav-ico">⛓</span><span data-i18n="nav.chain">زنجیره</span>
+        <span class="nav-ico">⛓</span><span data-i18n="nav.chain">زنجیره و گروه</span>
       </button>
       <button class="nav-item pro-only" data-view="pool" data-i18n-title="nav.pool">
         <span class="nav-ico">🧩</span><span data-i18n="nav.pool">استخر پروکسی</span>
@@ -337,20 +337,34 @@
         <div class="empty" id="subEmpty" data-i18n="subs.empty">هنوز ساب‌اسکریپشنی اضافه نشده.</div>
       </section>
 
-      <!-- CHAIN -->
+      <!-- CHAINS & GROUPS -->
       <section class="view" id="view-chain">
         <div class="view-head">
-          <h2 data-i18n="chain.title">زنجیره پروکسی</h2>
+          <h2 data-i18n="chain.title">زنجیره و گروه</h2>
           <div class="head-actions">
             <button class="btn primary" id="btnAddChain" data-i18n="chain.new">+ زنجیره جدید</button>
           </div>
         </div>
 
+        <div class="sec"><span class="sec-label" data-i18n="chain.sec">زنجیره‌ها</span></div>
         <p class="hint" data-i18n="chain.intro">هر زنجیره مثل یک کانفیگ ساخته می‌شود: یک نام بده، چند سرور را به‌ترتیب بچین، و از صفحهٔ «اتصال» یا در «روتینگ ویژه» مثل یک کانفیگ ازش استفاده کن.</p>
         <p class="hint" data-i18n="chain.wgHint">برای دسترسی به دیتابیس وقتی WireGuard مستقیم کار نمی‌کند: یک کانفیگ را اول بگذار و WireGuard را آخرِ زنجیره؛ سپس در «روتینگ ویژه» رنج IP دیتابیس را به این زنجیره بفرست.</p>
 
         <div id="chainsWrap"></div>
         <div class="empty" id="chainsEmpty" data-i18n="chain.noneYet">هنوز زنجیره‌ای ساخته نشده. روی «زنجیره جدید» بزن.</div>
+
+        <!-- groups (v1.27): several configs used together as one — app.js renderGroups draws the cards; hidden on a back end without groups:set -->
+        <div class="grp-section" id="groupsSection">
+          <div class="sec grp-sec">
+            <span class="sec-label" data-i18n="grp.title">گروه‌ها</span>
+            <div class="head-actions">
+              <button class="btn primary" id="btnAddGroup" data-i18n="grp.new">+ گروه تازه</button>
+            </div>
+          </div>
+          <p class="hint" data-i18n="grp.intro">گروه چند کانفیگ است که با هم مثل یک کانفیگ کار می‌کنند.</p>
+          <div id="groupsWrap"></div>
+          <div class="empty" id="groupsEmpty" data-i18n="grp.noneYet">هنوز گروهی ساخته نشده. روی «گروه تازه» بزن.</div>
+        </div>
       </section>
 
       <!-- PROXY POOL (multi-config) -->
@@ -1150,6 +1164,19 @@
       </div>
       <div class="modal-body" id="warpBody"></div>
       <div class="modal-foot ed-foot" id="warpFoot"></div>
+    </div>
+  </div>
+
+  <!-- a group (v1.27): several configs used together as one — app.js renderGroupEditor draws the title, body and foot -->
+  <div class="modal-overlay" id="grpModal" hidden>
+    <div class="modal grp-modal" role="dialog" aria-modal="true" aria-labelledby="grpTitle">
+      <div class="modal-head">
+        <span class="warp-ico" aria-hidden="true">⧉</span>
+        <span class="modal-title" id="grpTitle" data-i18n="grp.newTitle">گروه تازه</span>
+        <button class="tb-btn" id="grpClose" data-i18n-title="tb.close">&#x2715;</button>
+      </div>
+      <div class="modal-body" id="grpBody"></div>
+      <div class="modal-foot ed-foot" id="grpFoot"></div>
     </div>
   </div>
 
