@@ -795,3 +795,116 @@ button.pool-item:hover .pool-add { color: var(--accent); }
 .grp-panel .chain-pool-search { max-width: none; margin-block-end: 0; }
 .grp-pool { max-height: 220px; overflow-y: auto; gap: 6px; }
 .grp-ipnote { font-size: 12px; line-height: 1.6; color: var(--ink2); }
+
+/* ----------------------------- the chains & groups page (v1.28) ----------------------------- */
+
+/*
+ * .superpowers/sdd/groups-ui/design.md §1, the approved sample
+ * (mockups/chains-groups.html): the page's two tabs with their counts, every
+ * card folding to its head, the pick list in the Servers page's piles with its
+ * own scroll (so a long list never stretches the page), and a group's configs
+ * each with its health, speed and share.
+ */
+.cg-tabs { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 2px 0 12px; }
+.cg-tabs .seg { flex: 0 0 auto; }
+.cg-tabs .seg-btn { display: inline-flex; align-items: center; gap: 7px; padding: 7px 14px; }
+.cg-count { font: 600 11px var(--mono); color: var(--ink3); background: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; line-height: 17px; }
+.seg-btn.active .cg-count { color: var(--accentInk); border-color: var(--accentLine); }
+.cg-tools { margin-inline-start: auto; display: flex; gap: 6px; }
+.cg-link { background: none; border: 0; color: var(--ink3); font: 12px var(--ui); cursor: pointer; padding: 4px 6px; border-radius: var(--r5); }
+.cg-link:hover { color: var(--ink); background: var(--soft); }
+.cg-pane > .hint:first-child { margin-top: 0; }
+.cg-pane .grp-section { margin-block-start: 0; }
+.cg-pane .grp-section > .hint:first-child { margin-top: 0; }
+#chainsWrap, #groupsWrap { margin-block-start: 12px; }
+
+/* a card folds to its head: one line per chain / group */
+.cg-card .chain-card-head { cursor: pointer; }
+.cg-chev {
+  flex: 0 0 auto; width: 22px; height: 22px; display: grid; place-items: center; border: 0; background: none;
+  color: var(--ink3); border-radius: var(--r5); cursor: pointer; font-size: 12px; transition: transform 140ms ease-out;
+}
+.cg-chev:hover { background: var(--soft); color: var(--ink); }
+/* folded it points along the line (left in Persian, right in English); open, down */
+[dir="ltr"] .cg-chev { transform: scaleX(-1); }
+.cg-card.open .cg-chev { transform: rotate(-90deg); }
+.cg-card:not(.open) .cg-body { display: none; }
+.cg-card:not(.open) { padding-block: 12px; margin-block-end: 8px; }
+.cg-card:not(.open) .chain-card-head { padding-block-end: 0; margin-block-end: 0; border-block-end: 0; }
+.cg-title { display: flex; flex-direction: column; min-width: 0; flex: 1 1 200px; gap: 1px; }
+.cg-title .grp-name { font-weight: 600; color: var(--ink); }
+.cg-sum { font-size: 11.5px; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.cg-sum b { color: var(--ink2); font-weight: 500; unicode-bidi: isolate; }
+/* the chain's name, typed in place: it reads as the card's title until it is pointed at */
+.cg-title .chain-name {
+  flex: 0 0 auto; width: 100%; padding: 1px 6px; margin-inline-start: -7px;
+  background: transparent; border-color: transparent; font-size: 13px; font-weight: 600; cursor: text;
+}
+.cg-title .chain-name:focus { background: var(--soft); }
+.chain-card.flash, .server-card.flash { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accentLine); }
+
+/* the pick list: subscriptions folded like the Servers page, its own scroll */
+.cg-picker { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.cg-picker-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.cg-picker-head .field-label { margin: 0; white-space: nowrap; }
+.cg-picker-head .input { flex: 1 1 auto; }
+.cg-picker-list { max-height: 300px; overflow: auto; padding-inline-end: 4px; }
+.cg-picker-list .srv-group { margin-bottom: 6px; }
+.cg-picker-list .srv-group.folded .srv-group-body { display: none; }
+.cg-picker-list .srv-group-body { gap: 2px; }
+.cg-pick { display: flex; align-items: center; gap: 9px; padding: 6px 10px; border-radius: var(--r6); border: 1px solid transparent; cursor: pointer; min-width: 0; }
+.cg-pick:hover { background: var(--soft); border-color: var(--line); }
+.cg-pick .srv-name { font-size: 12.5px; min-width: 0; }
+.cg-pick .cg-addr { font: 11px var(--mono); color: var(--ink3); margin-inline-start: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cg-pick .cg-addr.ui { font-family: var(--ui); }
+.cg-pick .cg-add { flex: 0 0 auto; font-size: 11.5px; color: var(--accentInk); background: none; border: 1px solid var(--line); border-radius: var(--r5); padding: 2px 9px; cursor: pointer; }
+.cg-pick .cg-add:hover { border-color: var(--accentLine); }
+.cg-pick.in { opacity: .45; cursor: default; }
+.cg-pick.in .cg-add { pointer-events: none; }
+.grp-panel .cg-picker-list { max-height: 300px; }
+
+/* a group's live line on its head: speed + the share bar */
+.gm-live { display: flex; flex-direction: row-reverse; align-items: center; gap: 8px; font: 11.5px var(--mono); color: var(--ink2); }
+.gm-live .dn { color: var(--ok); }
+.gm-live .up { color: var(--accentInk); }
+.gm-bar { display: flex; width: 120px; height: 6px; border-radius: 4px; overflow: hidden; background: var(--soft); border: 1px solid var(--line); }
+.gm-bar > i { display: block; height: 100%; }
+.gm-bar > i + i { border-inline-start: 1px solid var(--bg); }
+
+/* a group's members, each with its share */
+.gm-list { display: grid; gap: 6px; }
+.gm-row {
+  display: grid; grid-template-columns: 12px minmax(0, 1fr) auto auto 92px; align-items: center; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r6); background: var(--soft); font-size: 12px;
+}
+.gm-row[role="button"] { cursor: pointer; }
+.gm-row[role="button"]:hover { border-color: var(--accentLine); }
+.gm-row[role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.gm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+.gm-row.dead .gm-dot { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent); }
+.gm-row.missing .gm-dot { background: var(--ink3); box-shadow: none; }
+/* not running (not connected), or not checked yet: no colour to claim */
+.gm-row.idle .gm-dot, .gm-row.unknown .gm-dot { background: var(--dim); box-shadow: none; }
+.gm-who { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* the name first: the address takes what room is left and ellipsises */
+.gm-who .cn-name { font-weight: 600; color: var(--ink); white-space: nowrap; flex: 0 1 auto; }
+.gm-who bdi { font: 11px var(--mono); color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 0; }
+.gm-rate { font: 11.5px var(--mono); white-space: nowrap; }
+.gm-rate .dn { color: var(--ok); }
+.gm-rate .up { color: var(--accentInk); margin-inline-start: 8px; }
+.gm-ms { font: 11px var(--mono); color: var(--ink3); white-space: nowrap; }
+.gm-share { display: flex; align-items: center; gap: 6px; font: 11px var(--mono); color: var(--ink2); }
+.gm-share > span { flex: 1 1 auto; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.gm-share > span > i { display: block; height: 100%; background: var(--accent); }
+.gm-share b { font-weight: 400; }
+.gm-why { font-size: 11.5px; grid-column: 3 / 6; }
+.gm-row.dead { background: var(--dangerSoft); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.gm-row.dead .gm-why { color: var(--danger); }
+.gm-row.missing { border-style: dashed; }
+.gm-row.missing .cn-name, .gm-row.missing .gm-why { color: var(--ink3); }
+@media (max-width: 640px) {
+  .gm-row { grid-template-columns: 12px minmax(0, 1fr) auto; }
+  .gm-row .gm-ms { display: none; }
+  .gm-row .gm-share { grid-column: 2 / -1; }
+  .gm-why { grid-column: 2 / -1; }
+}

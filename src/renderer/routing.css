@@ -589,6 +589,10 @@
 .rf-traffic:empty { display: none; }
 /* the words that replace an edge in the stacked layout — the wide one draws the edge */
 .rf-to { display: none; }
+/* a node carrying a running group (v1.28): its share bar in the box's own bottom padding — the node keeps its size — and «alive/total» (home.css .gm-health); a click pins its box */
+.rf-node.is-group { position: relative; }
+.rf-node.is-group > .gm-node-bar { position: absolute; inset-inline: var(--rt-3); bottom: 2px; width: auto; height: 3px; border: 0; border-radius: 2px; }
+.rf-node.is-group.pinned { box-shadow: 0 0 0 2px var(--accentLine); }
 .rf-node.danger { color: var(--danger); background: var(--dangerSoft); border-color: var(--danger); }
 
 .rf-edges { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: visible; }

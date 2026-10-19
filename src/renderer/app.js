@@ -2696,6 +2696,9 @@ function renderTrafficPath(stateStr) {
   // the routing page's flow tree is live only while its profile is the one up
   applyFlowTraffic(lastPerOutbound);
   drawHomeFlowSoon();
+  // the running groups (v1.28): none unless connected (the next tick says which); a node
+  // carrying one gets its share bar, its count and its box; the card of what connected opens
+  gmOnStatus(stateStr);
 }
 
 let hfModel = null;   // the home flow on screen (its lines are drawn from it)
@@ -6326,21 +6329,29 @@ async function persistChains() {
 
 $('#btnAddChain').onclick = () => {
   const n = state.chains.length + 1;
-  state.chains.push({ id: newChainId(), name: (window.i18n.lang === 'en' ? 'Chain ' : 'زنجیره ') + n, members: [] });
+  const id = newChainId();
+  state.chains.push({ id, name: (window.i18n.lang === 'en' ? 'Chain ' : 'زنجیره ') + n, members: [] });
+  // a new chain opens: its hops are added from its own pick list
+  cgSetOpen('c:' + id, true);
   persistChains();
 };
 
 function renderChains() {
   const wrap = $('#chainsWrap');
   if (!wrap) return;
+  // where each pick list was scrolled to: an added hop draws every card again
+  const scrolls = {};
+  for (const l of $$('#chainsWrap .cg-picker-list')) if (l.dataset.chain && l.scrollTop) scrolls[l.dataset.chain] = l.scrollTop;
   wrap.innerHTML = '';
   const empty = $('#chainsEmpty');
   if (empty) empty.hidden = state.chains.length > 0;
+  cgAutoOpen();
+  const lists = [];
 
   state.chains.forEach((chain) => {
     chain.members = (chain.members || []).filter(srvById);
     const card = document.createElement('div');
-    card.className = 'card chain-card';
+    card.className = 'card chain-card cg-card';
     card.dataset.chainId = chain.id;   // the routing page's flow tree opens a chain by it
 
     const tl = pingResultLabel((state.pings[chain.id] || {}).tcp);
@@ -6351,10 +6362,15 @@ function renderChains() {
       ? `<button class="icon-btn ch-share" title="${escapeHtml(t('rp.copyLink'))}" aria-label="${escapeHtml(t('rp.copyLink'))}"${ready ? '' : ' disabled'}>🔗</button>`
       : '';
 
+    // v1.28: the head is the whole card when folded — its name, a line of its hops, its readings and buttons
     card.innerHTML = `
       <div class="chain-card-head">
+        <button class="cg-chev" type="button" title="${escapeHtml(t('cg.toggle'))}" aria-label="${escapeHtml(t('cg.toggle'))}" aria-expanded="false">◀</button>
         <span class="proto-badge proto-chain">⛓</span>
-        <input class="input chain-name" value="${escapeHtml(chain.name)}" />
+        <div class="cg-title">
+          <input class="input chain-name" value="${escapeHtml(chain.name)}" />
+          <span class="cg-sum"></span>
+        </div>
         <span class="chain-pings">
           <span class="pi-ping-ico" title="${escapeHtml(t('ping.tcp'))}">⚡</span><span class="chain-ping ${tl.cls}" data-pbase="chain-ping" data-ping="${escapeHtml(chain.id)}">${tl.txt}</span>
           <span class="pi-ping-ico" title="${escapeHtml(t('ping.real'))}">⏱</span><span class="chain-ping ${rl.cls}" data-pbase="chain-ping" data-ping-real="${escapeHtml(chain.id)}">${rl.txt}</span>
@@ -6367,17 +6383,25 @@ function renderChains() {
           <button class="icon-btn ch-del" title="delete">🗑</button>
         </div>
       </div>
-      <div class="chain-flow">
-        <div class="flow-node fixed">${escapeHtml(t('chain.client'))}</div>
-        <span class="flow-arrow">→</span>
-        <div class="chain-nodes"></div>
-        <span class="flow-arrow">→</span>
-        <div class="flow-node fixed">${escapeHtml(t('chain.internet'))}</div>
-      </div>
-      <div class="chain-min ${ready ? '' : 'warn'}">${escapeHtml(ready ? '' : t('chain.empty'))}</div>
-      <label class="field-label">${escapeHtml(t('chain.available'))}</label>
-      <input class="input chain-pool-search" dir="auto" placeholder="${escapeHtml(t('ss.search'))}" />
-      <div class="chain-pool"></div>`;
+      <div class="cg-body">
+        <div class="chain-flow">
+          <div class="flow-node fixed">${escapeHtml(t('chain.client'))}</div>
+          <span class="flow-arrow">→</span>
+          <div class="chain-nodes"></div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node fixed">${escapeHtml(t('chain.internet'))}</div>
+        </div>
+        <div class="chain-min ${ready ? '' : 'warn'}">${escapeHtml(ready ? '' : t('chain.empty'))}</div>
+        <div class="cg-picker">
+          <div class="cg-picker-head">
+            <span class="field-label">${escapeHtml(t('chain.available'))}</span>
+            <input class="input cg-search" dir="auto" placeholder="${escapeHtml(t('ss.search'))}" aria-label="${escapeHtml(t('chain.available'))}" />
+          </div>
+          <div class="cg-picker-list"></div>
+        </div>
+      </div>`;
+    cgWireHead(card, card.querySelector('.chain-card-head'), 'c:' + chain.id);
+    cgChainSum(card.querySelector('.cg-sum'), chain);
 
     // name edit
     const nameInput = card.querySelector('.chain-name');
@@ -6434,40 +6458,279 @@ function renderChains() {
       nodes.appendChild(ph);
     }
 
-    // available pool (servers not already in THIS chain), then the groups (v1.27)
-    // not in it either — a hop like a server, while a member of each is here
-    const pool = card.querySelector('.chain-pool');
-    const poolSearch = card.querySelector('.chain-pool-search');
-    const available = state.servers.filter(s => !chain.members.includes(s.id))
-      .concat((state.groups || []).map(g => srvById(g.id)).filter(g => g && !chain.members.includes(g.id)));
-    if (!available.length) {
-      pool.innerHTML = `<div class="empty small">${escapeHtml(t('chain.poolEmpty'))}</div>`;
-      if (poolSearch) poolSearch.hidden = true;
-    }
-    for (const s of available) {
-      const grp = s.protocol === 'group';
-      const row = document.createElement('button');
-      row.className = 'pool-item';
-      row.dataset.name = s.name;
-      row.innerHTML = `
-        <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(grp ? '⧉' : s.protocol)}</span>
-        <span class="pi-name">${escapeHtml(grp ? s.name + ' · ' + grpCountText(s.group.size) : s.name)}</span>
-        <span class="pool-add">+ ${escapeHtml(t('chain.add'))}</span>`;
-      row.onclick = () => { chain.members.push(s.id); persistChains(); };
-      pool.appendChild(row);
-    }
-    // filter the pool as you type (handles long config lists)
-    if (poolSearch) poolSearch.oninput = () => {
-      const f = poolSearch.value.toLowerCase();
-      pool.querySelectorAll('.pool-item').forEach(it => {
-        it.style.display = (it.dataset.name || '').toLowerCase().includes(f) ? '' : 'none';
-      });
-    };
+    // «افزودن حلقه» (v1.28): every server by where it came from, then the groups —
+    // a hop like a server, while a member of each is here; one already in THIS
+    // chain is dimmed. Its own scroll, so a long list never stretches the page.
+    const list = card.querySelector('.cg-picker-list');
+    const search = card.querySelector('.cg-search');
+    list.dataset.chain = chain.id;
+    search.value = cgSearch[chain.id] || '';
+    const fill = () => cgFillPicker(list, {
+      query: search.value, withGroups: true,
+      isIn: (id) => chain.members.includes(id), inText: t('cg.inChain'),
+      onPick: (id) => { if (!chain.members.includes(id)) { chain.members.push(id); persistChains(); } }
+    });
+    search.oninput = () => { cgSearch[chain.id] = search.value; fill(); };
+    fill();
+    lists.push(list);
 
     wrap.appendChild(card);
+    cgPaintCard(card);
   });
+  // once every card is in: a scroll set before then would lay out half a page
+  for (const l of lists) if (scrolls[l.dataset.chain]) l.scrollTop = scrolls[l.dataset.chain];
   // the page's other half: the groups, whose members are servers too
   renderGroups();
+}
+
+/* ----------------------------- the chains & groups page (v1.28) ----------------------------- */
+// .superpowers/sdd/groups-ui/design.md §1 and the approved sample (mockups/chains-groups.html):
+// two tabs with their counts, the head button following the tab, open / close all; every
+// chain and group card folds to its head — chevron, name, a one-line summary, its readings
+// and buttons. The tab, each card's state and the pick list's folds are remembered in this
+// window (localStorage, as the Servers page's folds are). The card of what is connected
+// opens by itself — a group's too, once it runs — and stays as the user leaves it after.
+
+/** The page's choices: { tab, open: { 'c:<chain id>' | 'g:<group id>': open? }, pick: { pile key: folded? } }. */
+const CG_KEY = 'irnetfree.chainsGroups';
+const cgState = loadCgState();
+/** What the search of each chain's pick list holds (by chain id): it survives the redraw an added hop makes. */
+const cgSearch = {};
+function loadCgState() {
+  const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const flags = (v) => { const out = {}; for (const [k, b] of Object.entries(obj(v))) if (typeof b === 'boolean') out[k] = b; return out; };
+  try {
+    const v = obj(JSON.parse(localStorage.getItem(CG_KEY) || '{}'));
+    return { tab: v.tab === 'groups' ? 'groups' : 'chains', open: flags(v.open), pick: flags(v.pick) };
+  } catch { return { tab: 'chains', open: {}, pick: {} }; }
+}
+function saveCgState() {
+  try { localStorage.setItem(CG_KEY, JSON.stringify(cgState)); } catch { /* only costs remembering it */ }
+}
+
+/** Groups need a back end that stores them (groups:set): without one there is no groups tab. */
+function cgCanGroups() { return !!(window.api && typeof window.api.setGroups === 'function'); }
+
+/** The tab on show. */
+function cgTab() { return cgState.tab === 'groups' && cgCanGroups() ? 'groups' : 'chains'; }
+
+/** The tabs (active, their counts — Persian digits in Persian), the pane of the one on show and its head button. */
+function cgApplyTab() {
+  const tab = cgTab();
+  for (const [id, name] of [['cgTabChains', 'chains'], ['cgTabGroups', 'groups']]) {
+    const b = $('#' + id);
+    if (!b) continue;
+    b.classList.toggle('active', tab === name);
+    b.setAttribute('aria-selected', String(tab === name));
+  }
+  const show = (id, on) => { const el = $('#' + id); if (el) el.hidden = !on; };
+  show('cgTabGroups', cgCanGroups());
+  show('cgPaneChains', tab === 'chains');
+  show('cgPaneGroups', tab === 'groups');
+  show('btnAddChain', tab === 'chains');
+  show('btnAddGroup', tab === 'groups');
+  const count = (id, n) => { const el = $('#' + id); if (el) el.textContent = warpNum(n); };
+  count('cgCountChains', (state.chains || []).length);
+  count('cgCountGroups', (state.groups || []).length);
+}
+
+function cgSetTab(tab) {
+  cgState.tab = tab === 'groups' ? 'groups' : 'chains';
+  saveCgState();
+  cgApplyTab();
+}
+
+/** Is card `key` open — what the user left it at; folded until opened. */
+function cgIsOpen(key) { return cgState.open[key] === true; }
+
+/** The card of `key` on screen, if drawn. */
+function cgCardOf(key) {
+  const id = String(key).slice(2);
+  return String(key).startsWith('g:')
+    ? $$('#groupsWrap .cg-card').find(c => c.dataset.groupId === id) || null
+    : $$('#chainsWrap .cg-card').find(c => c.dataset.chainId === id) || null;
+}
+
+/** A card shows its state: open or folded to its head, and its chevron says which. */
+function cgPaintCard(card) {
+  if (!card) return;
+  const open = cgIsOpen(card.dataset.cg);
+  card.classList.toggle('open', open);
+  const chev = card.querySelector('.cg-chev');
+  if (chev) chev.setAttribute('aria-expanded', String(open));
+}
+
+/** Every card on the page shows its state. */
+function cgPaintAll() {
+  for (const c of $$('#chainsWrap .cg-card')) cgPaintCard(c);
+  for (const c of $$('#groupsWrap .cg-card')) cgPaintCard(c);
+}
+
+/** Open or fold card `key`; remembered, and the card on screen follows. */
+function cgSetOpen(key, open) {
+  cgState.open[key] = !!open;
+  saveCgState();
+  cgPaintCard(cgCardOf(key));
+}
+
+/** «همه را باز کن» / «همه را ببند»: every card of the tab on show. */
+function cgAll(open) {
+  const wrap = cgTab() === 'groups' ? '#groupsWrap' : '#chainsWrap';
+  for (const card of $$(wrap + ' .cg-card')) cgState.open[card.dataset.cg] = !!open;
+  saveCgState();
+  cgPaintAll();
+}
+
+/** The way to one card from elsewhere (the flow, its box): its tab, the card open. */
+function cgReveal(tab, key) {
+  cgSetTab(tab);
+  cgSetOpen(key, true);
+}
+
+/** Forget the cards of chains and groups that are gone. */
+function cgPrune() {
+  const here = new Set((state.chains || []).map(c => 'c:' + c.id).concat((state.groups || []).filter(Boolean).map(g => 'g:' + g.id)));
+  let gone = false;
+  for (const k of Object.keys(cgState.open)) if (!here.has(k)) { delete cgState.open[k]; gone = true; }
+  if (gone) saveCgState();
+}
+
+let cgConnKey = null;              // the connection the cards in use were opened for
+const cgOpened = new Set();        // …and the cards it has opened by itself
+
+/**
+ * The owner's choice: the card of what is connected opens by itself — the chain
+ * or group connected, and any group that runs (a rule's target, a hop, a base) —
+ * once per connection. Closed again by hand, it stays closed until the next one.
+ */
+function cgAutoOpen() {
+  const k = state.connected && state.activeServerId ? String(state.activeServerId) : null;
+  if (k !== cgConnKey) { cgConnKey = k; cgOpened.clear(); }
+  if (!k) return;
+  const keys = [];
+  if ((state.chains || []).some(c => c.id === k)) keys.push('c:' + k);
+  if (grpById(k)) keys.push('g:' + k);
+  for (const g of gmLive) if (g && grpById(g.groupId)) keys.push('g:' + g.groupId);
+  let changed = false;
+  for (const key of keys) {
+    if (cgOpened.has(key)) continue;
+    cgOpened.add(key);
+    if (cgState.open[key] !== true) { cgState.open[key] = true; changed = true; }
+  }
+  if (changed) { saveCgState(); cgPaintAll(); }
+}
+
+/** A card's head folds it: a click anywhere on it but its buttons (the chevron is one of it), the name being typed or a link. */
+function cgWireHead(card, head, key) {
+  card.dataset.cg = key;
+  head.onclick = (e) => {
+    for (let n = e && e.target; n && n !== head; n = n.parentNode) {
+      const tag = String(n.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'A' || (tag === 'BUTTON' && !(n.classList && n.classList.contains('cg-chev')))) return;
+    }
+    cgSetOpen(key, !cgIsOpen(key));
+  };
+}
+
+/** A chain's hops on one line, in the reading direction: «A ← ⧉ G ← B»; none yet, said. */
+function cgChainSum(el, chain) {
+  if (!el) return;
+  el.textContent = '';
+  const hops = chainMembers(chain);
+  if (!hops.length) { el.textContent = t('cg.noHops'); return; }
+  hops.forEach((s, i) => {
+    if (i) el.append(' ' + flowArrow() + ' ');
+    el.appendChild(edNode('b', { text: (s.protocol === 'group' ? '⧉ ' : '') + s.name }));
+  });
+}
+
+/**
+ * Fill a pick list — the chain editor's «افزودن حلقه», the group editor's «+ کانفیگ» —
+ * in piles like the Servers page: the hand-added configs, each subscription by
+ * its name, then the groups (`o.withGroups`). A pile's fold is remembered
+ * (cgState.pick); a subscription starts folded when there is more than one pile,
+ * the rest open; a folded pile builds no rows. A search shows only what matches
+ * — by name or address — and unfolds the piles that hold it.
+ *   o.isIn(id)   a row already in: dimmed, saying `o.inText`
+ *   o.skip(id)   a row not offered at all
+ *   o.onPick(id) one picked
+ *   o.empty      what to say when there is nothing to offer
+ * → how many rows match.
+ */
+function cgFillPicker(list, o) {
+  list.textContent = '';
+  const q = String(o.query || '').trim().toLowerCase();
+  const piles = serverGroups().map(g => ({ key: groupKey(g.id), name: g.name, ico: g.id ? '🔗' : '✎', items: g.items }));
+  if (o.withGroups) piles.push({ key: 'groups', name: t('grp.title'), ico: '⧉', items: (state.groups || []).map(g => srvById(g && g.id)).filter(Boolean) });
+  const offer = piles.map(p => Object.assign(p, { items: p.items.filter(s => !(o.skip && o.skip(s.id))) })).filter(p => p.items.length);
+  if (!offer.length) {
+    list.appendChild(edNode('div', { class: 'empty small', text: o.empty || t('grp.noServers') }));
+    return 0;
+  }
+  const match = (s) => !q || String(s.name || '').toLowerCase().includes(q) || String(s.address || '').toLowerCase().includes(q);
+  let shown = 0;
+  for (const p of offer) {
+    const items = p.items.filter(match);
+    if (!items.length) continue;
+    shown += items.length;
+    list.appendChild(cgPile(p, items, offer.length > 1, !!q, o));
+  }
+  if (!shown) list.appendChild(edNode('div', { class: 'empty small', text: t('ss.none') }));
+  return shown;
+}
+
+/** One pile of a pick list: its head folds it (a button with aria-expanded, its count always on it). */
+function cgPile(p, items, many, searching, o) {
+  const kept = cgState.pick[p.key];
+  const folded = !searching && (typeof kept === 'boolean' ? kept : many && p.key.startsWith('sub:'));
+  const wrap = edNode('div', { class: 'srv-group' + (folded ? ' folded' : ''), 'data-group': p.key });
+  const toggle = edNode('button', { type: 'button', class: 'srv-group-toggle', title: t('srv.groupToggle'), 'aria-expanded': String(!folded) }, [
+    edNode('span', { class: 'srv-group-chev', 'aria-hidden': 'true', text: '▾' }),
+    edNode('span', { class: 'srv-group-ico', 'aria-hidden': 'true', text: p.ico }),
+    edNode('span', { class: 'srv-group-name', text: p.name }),
+    edNode('span', { class: 'srv-group-count', text: String(items.length) })]);
+  const body = edNode('div', { class: 'srv-group-body' });
+  body.hidden = folded;
+  const fill = () => { for (const s of items) body.appendChild(cgPickRow(s, o)); };
+  if (!folded) fill();
+  toggle.onclick = () => {
+    const open = toggle.getAttribute('aria-expanded') !== 'true';
+    // a fold made while searching is the search's, not remembered
+    if (!searching) { cgState.pick[p.key] = !open; saveCgState(); }
+    toggle.setAttribute('aria-expanded', String(open));
+    wrap.classList.toggle('folded', !open);
+    body.hidden = !open;
+    if (open && !body.children.length) fill();
+  };
+  wrap.append(edNode('div', { class: 'srv-group-head' }, [toggle]), body);
+  return wrap;
+}
+
+/** One row of a pick list: its badge, name and address (a group: how many configs), «+ افزودن» — or dimmed, already in. */
+function cgPickRow(s, o) {
+  const grp = s.protocol === 'group';
+  const inside = !!(o.isIn && o.isIn(s.id));
+  const addr = grp ? grpCountText(s.group.size) : grpAddrText(null, s);
+  const add = edNode('button', { type: 'button', class: 'cg-add', disabled: inside, text: inside ? o.inText : t('cg.add') });
+  const row = edNode('div', { class: 'cg-pick' + (inside ? ' in' : ''), 'data-srv': s.id }, [
+    edNode('span', { class: 'proto-badge proto-' + s.protocol, text: grp ? '⧉' : s.protocol }),
+    edNode('span', { class: 'srv-name', text: s.name }),
+    addr ? edNode('span', { class: 'cg-addr' + (grp ? ' ui' : ''), dir: grp ? null : 'ltr', text: addr }) : null,
+    add]);
+  // the whole row picks (its button is the keyboard's way in): one already in, nothing
+  if (!inside) row.onclick = () => o.onPick(s.id);
+  return row;
+}
+
+/** A server's card on the Servers page — its pile unfolded, scrolled to and lit up for a moment (a group member's row, the flow's box). */
+function revealServer(id) {
+  const s = state.servers.find(x => x.id === id);
+  if (!s) return false;
+  showView('servers');
+  const key = groupKey(s.subId);
+  if (foldedGroups.has(key)) { setGroupFolded(key, false); renderServers(); }
+  flashInto($$('#serverList .server-card').find(c => c.dataset.srvId === id) || null);
+  return true;
 }
 
 /* ----------------------------- groups (v1.27): several configs used as one ----------------------------- */
@@ -6550,19 +6813,28 @@ function grpConnText(id) {
   return '⧉ ' + g.name + ' (' + grpCountText(grpLive(g).length) + ' · ' + t('grp.st.' + g.strategy) + ')';
 }
 
-/** The groups' cards — hidden, with their head, on a back end that cannot store them (no groups:set). */
+/** The groups' cards — hidden, with their tab, on a back end that cannot store them (no groups:set); then the page's tabs and counts. */
 function renderGroups() {
   const wrap = $('#groupsWrap');
   if (!wrap) return;
   const section = $('#groupsSection');
-  if (section) section.hidden = !(window.api && typeof window.api.setGroups === 'function');
+  if (section) section.hidden = !cgCanGroups();
   wrap.innerHTML = '';
   const empty = $('#groupsEmpty');
   if (empty) empty.hidden = (state.groups || []).length > 0;
   for (const g of state.groups || []) wrap.appendChild(groupCard(g));
+  cgPrune();
+  cgApplyTab();
 }
 
-/** One group's card: ⧉ its name, how many configs and how it spreads them, its delay; ping, connect, edit, delete; its configs. */
+/**
+ * One group's card: ⧉ its name, how many configs and how it spreads them —
+ * while it runs, its speed and a bar of each config's share — its delay; ping,
+ * connect, edit, delete. Opened: a row per config (v1.28, design §1) — the
+ * core's health check as a dot, its name and the address it is dialled at, and
+ * while it runs its own speed, the check's delay and its share; one that does
+ * not answer in red, one whose server is gone in grey. A row goes to its server.
+ */
 function groupCard(g) {
   const live = grpLive(g);
   const ready = live.length > 0;
@@ -6583,30 +6855,36 @@ function groupCard(g) {
   edit.onclick = () => openGroupEditor(g.id);
   del.onclick = () => deleteGroup(g.id);
   // a group has no TCP handshake of its own (ping:tcp answers na): its real delay and its upload
+  const chev = edNode('button', { type: 'button', class: 'cg-chev', title: t('cg.toggle'), 'aria-label': t('cg.toggle'), 'aria-expanded': 'false', text: '◀' });
+  // while it runs: its speed, and a bar of each config's share (gmFillCard)
+  const liveLine = edNode('div', { class: 'gm-live', dir: 'ltr' }, [edNode('span', { class: 'dn' }), edNode('span', { class: 'up' }),
+    edNode('span', { class: 'gm-bar', 'aria-hidden': 'true' })]);
+  liveLine.hidden = true;
   const head = edNode('div', { class: 'chain-card-head' }, [
+    chev,
     edNode('span', { class: 'proto-badge proto-group', text: '⧉' }),
-    edNode('div', { class: 'grp-title' }, [
+    edNode('div', { class: 'cg-title' }, [
       edNode('span', { class: 'grp-name', text: g.name || '—' }),
       edNode('span', { class: 'grp-meta', text: grpCountText(live.length) + ' · ' + t('grp.st.' + g.strategy) })]),
+    liveLine,
     edNode('span', { class: 'chain-pings' }, [...reading('⏱', 'ping.real', 'data-ping-real', rl), ...reading('↑', 'ping.upload', 'data-ping-up', ul)]),
     usage,
     edNode('div', { class: 'chain-card-actions' }, [ping, go, edit, del])]);
-  const members = edNode('div', { class: 'grp-chips' }, g.members.map((m) => {
-    const s = state.servers.find(x => x.id === m.id);
-    return edNode('div', { class: 'flow-node grp-chip' + (s ? '' : ' missing') + (m.address ? ' own' : '') }, [
-      edNode('span', { class: 'proto-badge proto-' + (s ? s.protocol : 'gone'), text: s ? s.protocol : '?' }),
-      edNode('span', { class: 'cn-name', text: s ? s.name : t('grp.missing') }),
-      grpAddrText(m, s) ? edNode('bdi', { class: 'grp-addr', dir: 'ltr', text: grpAddrText(m, s) }) : null]);
-  }));
-  const card = edNode('div', { class: 'card chain-card grp-card' + (ready ? '' : ' grp-dead') }, [head, members,
+  const members = edNode('div', { class: 'gm-list' }, g.members.map(gmCardRow));
+  const body = edNode('div', { class: 'cg-body' }, [members,
     ready ? null : edNode('div', { class: 'chain-min warn', text: t(g.members.length ? 'grp.noneLive' : 'grp.noMembers') })]);
+  const card = edNode('div', { class: 'card chain-card grp-card cg-card' + (ready ? '' : ' grp-dead') }, [head, body]);
   card.dataset.groupId = g.id;   // the routing page's flow tree opens a group by it
+  cgWireHead(card, head, 'g:' + g.id);
+  gmFillCard(card, g);
+  cgPaintCard(card);
   return card;
 }
 
-/** A group's card on the chains & groups page (the flow tree's click on a group). */
+/** A group's card on the chains & groups page — its tab, the card open (the flow tree's click on a group, the flow's box). */
 function openGroupCard(gid) {
   showView('chain');
+  cgReveal('groups', 'g:' + gid);
   flashInto($$('#groupsWrap .grp-card').find(c => c.dataset.groupId === gid) || null, '.grp-edit');
 }
 
@@ -6783,26 +7061,27 @@ function grpMembersNode(f) {
     list, edNode('div', { class: 'grp-tools' }, [add, ips])]);
 }
 
-/** «+ کانفیگ»: the servers (never a chain or a group), searchable; one already in it as itself is not offered again. */
+/**
+ * «+ کانفیگ»: the servers (never a chain or a group), in the pick list's piles
+ * (v1.28: by where each came from, folded as the chain editor's are) and
+ * searchable; one already in it as itself is not offered again.
+ */
 function grpServerPanel(f) {
-  const search = edNode('input', { class: 'input chain-pool-search', id: 'grp-search', dir: 'auto', autocomplete: 'off', placeholder: t('ss.search') });
+  const search = edNode('input', { class: 'input cg-search', id: 'grp-search', dir: 'auto', autocomplete: 'off', placeholder: t('ss.search'), 'aria-label': t('grp.addServer') });
   search.value = f.search;
-  const list = edNode('div', { class: 'chain-pool grp-pool' });
-  const fill = () => {
-    list.textContent = '';
-    const q = f.search.trim().toLowerCase();
-    const offer = state.servers.filter(s => !f.members.some(m => m.id === s.id && !m.address));
-    if (!offer.length) { list.appendChild(edNode('div', { class: 'empty small', text: t(state.servers.length ? 'grp.allIn' : 'grp.noServers') })); return; }
-    for (const s of offer.filter(x => !q || String(x.name || '').toLowerCase().includes(q))) {
-      const row = edNode('button', { type: 'button', class: 'pool-item', 'data-srv': s.id }, [
-        edNode('span', { class: 'proto-badge proto-' + s.protocol, text: s.protocol }), edNode('span', { class: 'pi-name', text: s.name }),
-        edNode('span', { class: 'pool-add', text: '+ ' + t('grp.addOne') })]);
-      row.onclick = () => { f.members.push({ id: s.id }); f.error = ''; renderGroupEditor(); };
-      list.appendChild(row);
-    }
-  };
+  const list = edNode('div', { class: 'cg-picker-list grp-pool' });
+  const fill = () => cgFillPicker(list, {
+    query: f.search,
+    skip: (id) => f.members.some(m => m.id === id && !m.address),
+    empty: t(state.servers.length ? 'grp.allIn' : 'grp.noServers'),
+    onPick: (id) => { f.members.push({ id }); f.error = ''; renderGroupEditor(); }
+  });
   search.oninput = () => { f.search = search.value; fill(); };
   fill();
+  // a pick draws the dialog again: the list stays where it was scrolled to
+  list.onscroll = () => { f.pickScroll = list.scrollTop; };
+  const keep = f.pickScroll;
+  if (keep && typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { list.scrollTop = keep; });
   return edNode('div', { class: 'grp-panel' }, [search, list]);
 }
 
@@ -6883,6 +7162,11 @@ async function saveGroupEditor() {
 }
 
 $('#btnAddGroup').onclick = () => openGroupEditor(null);
+// the page's tabs, and open / close all (v1.28)
+$('#cgTabChains').onclick = () => cgSetTab('chains');
+$('#cgTabGroups').onclick = () => cgSetTab('groups');
+$('#cgOpenAll').onclick = () => cgAll(true);
+$('#cgCloseAll').onclick = () => cgAll(false);
 $('#grpClose').onclick = closeGroupEditor;
 $('#grpModal').onclick = (e) => { if (e.target === $('#grpModal')) closeGroupEditor(); };
 
@@ -8147,6 +8431,8 @@ function renderFlowTree() {
   grid.appendChild(layer);
   host.appendChild(grid);
   applyFlowTraffic(lastPerOutbound);
+  // a node carrying a running group (v1.28): drawn again, marked again — its box follows it
+  gmDecorateFlows();
   drawFlowSoon();
 }
 
@@ -8193,9 +8479,10 @@ function focusAdvRow(idx) {
   flashInto(el, '.adv-value, .ss-current');
 }
 
-/** A chain's card on the chains page. */
+/** A chain's card on the chains page — its tab, the card open. */
 function openChainCard(cid) {
   showView('chain');
+  cgReveal('chains', 'c:' + cid);
   flashInto($$('#chainsWrap .chain-card').find(c => c.dataset.chainId === cid) || null, '.chain-name');
 }
 
@@ -8498,6 +8785,487 @@ $('#rpImportCancel').onclick = closeRoutingImport;
 $('#rpImportClose').onclick = closeRoutingImport;
 $('#rpImportModal').onclick = (e) => { if (e.target === $('#rpImportModal')) closeRoutingImport(); };
 
+/* ----------------------------- a group's members, live (v1.28) ----------------------------- */
+// .superpowers/sdd/groups-ui/design.md §1–§3. While a config with a group runs,
+// the stats event carries `groups`: per running group (its loopback outbound's
+// tag in the config, its id, name, strategy) its members with their bytes,
+// speeds and the core's health check (alive, delay). The group cards show each
+// member's speed and share; a node of the home flow or of the routing page's
+// tree that carries a running group gets a thin share bar inside its box and
+// «alive/total», and a small box with each member's share — hover opens it, a
+// click pins it, a click outside or Esc closes it. The box is position: fixed,
+// above the page, so no panel clips it. Without `groups` nothing changes: the
+// per-tag speeds (`per`) go on as before.
+
+let gmLive = [];   // the stats event's `groups` while connected; [] otherwise
+let gmPop = null;  // the box: { el, node, pinned, timer, sig, parts, host, key }
+
+/** A number of bytes or bytes/s as given; anything else 0. */
+function gmNum(v) { return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0; }
+
+/**
+ * The running groups a flow node carries (design §3): one of its outbound tags
+ * is the group's own, or the group sits on a hop of it (`<tag>-h…`: a group
+ * inside a chain).
+ */
+function groupsForTags(tags, groups) {
+  const ts = (tags || []).filter(x => typeof x === 'string' && x);
+  return (Array.isArray(groups) ? groups : []).filter(g => g && typeof g.tag === 'string' && Array.isArray(g.members)
+    && ts.some(x => g.tag === x || g.tag.startsWith(x + '-h')));
+}
+
+/** Members' speeds and bytes, summed: { up, down, upSpeed, downSpeed }. */
+function gmSum(members) {
+  const out = { up: 0, down: 0, upSpeed: 0, downSpeed: 0 };
+  for (const m of members || []) {
+    if (!m) continue;
+    for (const k of Object.keys(out)) out[k] += gmNum(m[k]);
+  }
+  return out;
+}
+
+/**
+ * Whole percents of a group's traffic per member, summing to 100 (largest
+ * remainder): by speed while anything moves, else by the bytes since it
+ * connected; all 0 while nothing has gone through it. A missing member (null) is 0.
+ */
+function gmShares(members) {
+  const list = members || [];
+  const speed = list.map(m => (m ? gmNum(m.downSpeed) + gmNum(m.upSpeed) : 0));
+  const w = speed.some(Boolean) ? speed : list.map(m => (m ? gmNum(m.down) + gmNum(m.up) : 0));
+  const total = w.reduce((a, b) => a + b, 0);
+  if (!total) return list.map(() => 0);
+  const raw = w.map(x => x * 100 / total);
+  const out = raw.map(Math.floor);
+  const order = raw.map((x, i) => [x - out[i], i]).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
+  const left = 100 - out.reduce((a, b) => a + b, 0);
+  for (let k = 0; k < left; k++) out[order[k][1]]++;
+  return out;
+}
+
+/** One group's running members, summed over every place it runs (a rule's target and a chain's hop are two): null while it does not run. */
+function gmAggregate(groupId) {
+  const inst = gmLive.filter(g => g && g.groupId === groupId && Array.isArray(g.members));
+  if (!inst.length) return null;
+  const key = (m) => [m.id, m.address || '', m.port || ''].join('|');
+  const out = [];
+  for (const g of inst) {
+    g.members.forEach((m, i) => {
+      if (!m || !m.id) return;
+      let into = out[i] && key(out[i]) === key(m) ? out[i] : out.find(x => key(x) === key(m));
+      if (!into) {
+        into = { id: m.id, name: m.name, address: m.address, port: m.port, up: 0, down: 0, upSpeed: 0, downSpeed: 0, alive: null, delay: null };
+        out.push(into);
+      }
+      for (const k of ['up', 'down', 'upSpeed', 'downSpeed']) into[k] += gmNum(m[k]);
+      // alive where any of its places answers; dead where none does and one said so
+      if (m.alive === true) into.alive = true;
+      else if (m.alive === false && into.alive !== true) into.alive = false;
+      if (typeof m.delay === 'number' && Number.isFinite(m.delay)) into.delay = into.delay == null ? m.delay : Math.min(into.delay, m.delay);
+    });
+  }
+  return Object.assign(gmSum(out), { members: out });
+}
+
+/**
+ * A group's configs as stored, each with its running counterpart (or null): by
+ * position among those whose server is here (the core's `T~gm<i>` order), else
+ * by id and the address it is dialled at.
+ */
+function gmPair(g, members) {
+  const used = new Set();
+  let k = 0;
+  return ((g && g.members) || []).map((m) => {
+    const s = state.servers.find(x => x.id === m.id) || null;
+    if (!s) return { m, s, lm: null };
+    const at = String(m.address || s.address || '');
+    const free = (x, j) => !!x && !used.has(j) && x.id === m.id;
+    let j = free(members[k], k) && (!m.address || String(members[k].address || '') === at) ? k : -1;
+    if (j < 0) j = members.findIndex((x, i) => free(x, i) && String(x.address || '') === at && (!m.port || x.port === m.port));
+    if (j < 0) j = members.findIndex(free);
+    k++;
+    if (j < 0) return { m, s, lm: null };
+    used.add(j);
+    return { m, s, lm: members[j] };
+  });
+}
+
+/** A share bar's segment colour: shades of the hue, member by member. */
+function gmShade(hue, i) {
+  const L = [64, 50, 38, 57, 44];
+  return 'hsl(' + Math.round(Number(hue) || 0) + ' 72% ' + L[i % L.length] + '%)';
+}
+
+/** A share bar: one segment per member with a share, in its shade. */
+function gmBarInto(bar, shares, hue) {
+  if (!bar) return;
+  bar.textContent = '';
+  (shares || []).forEach((v, i) => {
+    if (!(v > 0)) return;
+    const seg = document.createElement('i');
+    seg.style.width = v + '%';
+    seg.style.background = gmShade(hue, i);
+    bar.appendChild(seg);
+  });
+}
+
+/** The health check's delay: «84 ms», or — before one. */
+function gmMs(delay) { return typeof delay === 'number' && Number.isFinite(delay) && delay >= 0 ? Math.round(delay) + ' ms' : '—'; }
+
+/** A row of a group's card for config `m` as stored — its parts, filled by gmFillRow; one whose server is here goes to it. */
+function gmCardRow(m) {
+  const s = state.servers.find(x => x.id === m.id);
+  const addr = grpAddrText(m, s);
+  const row = edNode('div', { class: 'gm-row' }, [
+    edNode('span', { class: 'gm-dot' }),
+    edNode('span', { class: 'gm-who' }, [
+      edNode('span', { class: 'proto-badge proto-' + (s ? s.protocol : 'gone'), text: s ? s.protocol : '?' }),
+      edNode('span', { class: 'cn-name', text: s ? s.name : t('grp.missing') }),
+      addr ? edNode('bdi', { class: 'grp-addr', dir: 'ltr', text: addr }) : null]),
+    edNode('span', { class: 'gm-rate', dir: 'ltr' }, [edNode('span', { class: 'dn' }), edNode('span', { class: 'up' })]),
+    edNode('span', { class: 'gm-ms', dir: 'ltr', title: t('gm.delay') }),
+    edNode('span', { class: 'gm-share', dir: 'ltr', title: t('gm.share') }, [edNode('span', {}, [edNode('i')]), edNode('b')]),
+    edNode('span', { class: 'gm-why', text: t(s ? 'gm.dead' : 'gm.missingWhy') })]);
+  if (s) {
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    row.title = t('gm.goTo');
+    row.onclick = () => revealServer(m.id);
+    row.onkeydown = (e) => { if (e && (e.key === 'Enter' || e.key === ' ')) { if (e.preventDefault) e.preventDefault(); revealServer(m.id); } };
+  }
+  return row;
+}
+
+/** Fill a card's row: its state (missing, not answering, not running, not checked yet), and while it runs its speed, delay and share. */
+function gmFillRow(row, p, share) {
+  const { m, s, lm } = p;
+  const dead = !!lm && lm.alive === false;
+  const live = !!lm && !dead;
+  row.className = 'gm-row' + (!s ? ' missing' : dead ? ' dead' : !lm ? ' idle' : lm.alive === true ? '' : ' unknown') + (m.address ? ' own' : '');
+  const part = (sel) => row.querySelector(sel);
+  for (const sel of ['.gm-rate', '.gm-ms', '.gm-share']) part(sel).hidden = !live;
+  part('.gm-why').hidden = !!s && !dead;
+  part('.gm-dot').title = !s || !lm ? '' : dead ? t('gm.dead') : lm.alive === true ? t('gm.alive') : t('gm.unknown');
+  if (!live) return;
+  part('.gm-rate .dn').textContent = '↓ ' + fmtSpeed(gmNum(lm.downSpeed));
+  part('.gm-rate .up').textContent = '↑ ' + fmtSpeed(gmNum(lm.upSpeed));
+  part('.gm-ms').textContent = gmMs(lm.delay);
+  part('.gm-share i').style.width = share + '%';
+  part('.gm-share b').textContent = share + '%';
+}
+
+/** A group card, live: its rows, and on its head the group's speed and a bar of the shares — none while it does not run. */
+function gmFillCard(card, g) {
+  const agg = gmAggregate(g.id);
+  const pairs = gmPair(g, agg ? agg.members : []);
+  const shares = gmShares(pairs.map(p => p.lm));
+  const rows = card.querySelectorAll('.gm-row');
+  pairs.forEach((p, i) => { if (rows[i]) gmFillRow(rows[i], p, shares[i]); });
+  const line = card.querySelector('.gm-live');
+  if (!line) return;
+  line.hidden = !agg;
+  if (!agg) return;
+  line.querySelector('.dn').textContent = '↓ ' + fmtSpeed(agg.downSpeed);
+  line.querySelector('.up').textContent = '↑ ' + fmtSpeed(agg.upSpeed);
+  gmBarInto(line.querySelector('.gm-bar'), shares, 212);
+}
+
+/** Every group card, live. */
+function gmApplyCards() {
+  for (const card of $$('#groupsWrap .grp-card')) {
+    const g = grpById(card.dataset.groupId);
+    if (g) gmFillCard(card, g);
+  }
+}
+
+/**
+ * Mark (or unmark) a flow node as carrying `grps`: a thin share bar inside its
+ * box, «alive/total» after its label, and the box on hover / click. The bar is
+ * absolutely placed in the box's own padding, so the box keeps its size and the
+ * flow's lines still meet it. A routing-tree node's own click (its editor) comes
+ * back when it no longer carries one.
+ */
+function gmMark(el, grps, hue) {
+  const rf = el.classList.contains('rf-node');
+  if (!grps.length) {
+    if (!el._gm) return;
+    el._gm = null;
+    el.classList.remove('is-group', 'pinned');
+    for (const x of el.querySelectorAll('.gm-node-bar, .gm-health')) x.remove();
+    el.onclick = el._gmClick || null;
+    el.title = el._gmTitle || '';
+    if (!rf) { el.removeAttribute('tabindex'); el.removeAttribute('role'); el.onkeydown = null; }
+    el.removeAttribute('aria-haspopup');
+    el.removeAttribute('aria-expanded');
+    if (gmPop && gmPop.node === el) gmClose();
+    return;
+  }
+  if (!el._gm) {
+    el.classList.add('is-group');
+    const label = el.querySelector(rf ? '.rf-label' : '.mf-label');
+    const health = document.createElement('span');
+    health.className = 'gm-health';
+    health.dir = 'ltr';
+    if (label && label.nextSibling) el.insertBefore(health, label.nextSibling); else el.appendChild(health);
+    const bar = document.createElement('span');
+    bar.className = 'gm-bar gm-node-bar';
+    bar.setAttribute('aria-hidden', 'true');
+    el.appendChild(bar);
+    el._gmClick = el.onclick;
+    el._gmTitle = el.title;
+    el.title = '';   // the box says it all: no tooltip on top of it
+    el.onclick = () => gmToggle(el);
+    if (!rf) {
+      el.setAttribute('tabindex', '0');
+      el.setAttribute('role', 'button');
+      el.onkeydown = (e) => { if (e && (e.key === 'Enter' || e.key === ' ')) { if (e.preventDefault) e.preventDefault(); gmToggle(el); } };
+    }
+    el.setAttribute('aria-haspopup', 'dialog');
+    el.setAttribute('aria-expanded', String(!!(gmPop && gmPop.node === el)));
+    if (!el._gmBound) {
+      el._gmBound = true;
+      el.addEventListener('mouseenter', () => { if (el._gm) gmHover(el, true); });
+      el.addEventListener('mouseleave', () => { if (el._gm) gmHover(el, false); });
+    }
+  }
+  el._gm = { groups: grps, hue: hue == null ? 212 : hue };
+  const members = [].concat(...grps.map(g => g.members.filter(Boolean)));
+  const alive = members.filter(m => m.alive !== false).length;
+  const health = el.querySelector('.gm-health');
+  health.textContent = warpNum(alive) + '/' + warpNum(members.length);
+  health.title = t('gm.health').replace('{alive}', () => warpNum(alive)).replace('{total}', () => warpNum(members.length));
+  gmBarInto(el.querySelector('.gm-node-bar'), gmShares(grps[0].members), el._gm.hue);
+}
+
+/** One flow's nodes (`sel` in `host`), each marked by the running groups its model node (`nodes`, by key) carries. */
+function gmDecorate(host, sel, nodes) {
+  if (!host || typeof host.querySelectorAll !== 'function') return;
+  const byKey = {};
+  for (const n of nodes || []) byKey[n.key] = n;
+  for (const el of host.querySelectorAll(sel)) {
+    const n = byKey[el.dataset.key];
+    const grps = n && n.kind !== 'direct' && n.kind !== 'block' ? groupsForTags(n.tags, gmLive) : [];
+    gmMark(el, grps, n ? n.hue : null);
+  }
+}
+
+/** Both flows marked — the home flow, and the routing page's tree while its profile is the one up — and the box after its node. */
+function gmDecorateFlows() {
+  gmDecorate($('#trafficPath'), '.mf-target, .mf-base', hfModel ? hfModel.targets.concat(hfModel.bases || []) : null);
+  const live = !!rfModel && profileLive(rfModel.profileId);
+  gmDecorate($('#rpFlow'), '.rf-target, .rf-base', live ? rfModel.targets.concat(rfModel.bases) : null);
+  const p = gmPop;
+  if (!p || !p.node || p.el.hidden) return;
+  if (!p.node._gm || !p.node.isConnected) {
+    // the flow was drawn again: the same node, by its key, if it still carries a group
+    const host = $(p.host);
+    const again = host ? [...host.querySelectorAll(p.host === '#rpFlow' ? '.rf-node' : '.mf-node')].find(n => n.dataset.key === p.key && n._gm) : null;
+    if (!again) return gmClose();
+    p.node = again;
+    again.classList.toggle('pinned', p.pinned);
+    again.setAttribute('aria-expanded', 'true');
+  }
+  gmRenderPop();
+  gmPlace();
+}
+
+/** The box, made once: above the page (position: fixed), a dialog named after its groups. */
+function gmPopEl() {
+  if (gmPop) return gmPop;
+  const el = document.createElement('div');
+  el.className = 'gm-pop';
+  el.setAttribute('role', 'dialog');
+  el.hidden = true;
+  gmPop = { el, node: null, pinned: false, timer: 0, sig: '', parts: [], host: '', key: '' };
+  el.addEventListener('mouseenter', () => clearTimeout(gmPop.timer));
+  el.addEventListener('mouseleave', () => gmHover(null, false));
+  document.body.appendChild(el);
+  return gmPop;
+}
+
+/** The pointer on a node (or the box) and off it: open, unpinned; off both, closed a moment later — a pinned box stays. */
+function gmHover(node, enter) {
+  const p = gmPopEl();
+  clearTimeout(p.timer);
+  if (enter) {
+    if (!p.pinned || p.node === node) gmOpen(node, p.pinned);
+    return;
+  }
+  if (!p.pinned && !p.el.hidden) p.timer = setTimeout(gmClose, 180);
+}
+
+/** Open the box on `node`, pinned or not. */
+function gmOpen(node, pinned) {
+  const p = gmPopEl();
+  clearTimeout(p.timer);
+  if (p.node && p.node !== node) { p.node.classList.remove('pinned'); p.node.setAttribute('aria-expanded', 'false'); }
+  p.node = node;
+  p.pinned = !!pinned;
+  p.key = node.dataset.key;
+  p.host = node.classList.contains('rf-node') ? '#rpFlow' : '#trafficPath';
+  node.classList.toggle('pinned', p.pinned);
+  node.setAttribute('aria-expanded', 'true');
+  gmRenderPop();
+  p.el.hidden = false;
+  gmPlace();
+}
+
+/** Close the box. */
+function gmClose() {
+  const p = gmPop;
+  if (!p) return;
+  clearTimeout(p.timer);
+  if (p.node) { p.node.classList.remove('pinned'); p.node.setAttribute('aria-expanded', 'false'); }
+  p.node = null;
+  p.pinned = false;
+  p.el.hidden = true;
+}
+
+/** A click (or Enter) on a node: pin the box there — or, pinned there already, close it. */
+function gmToggle(node) {
+  const p = gmPopEl();
+  if (p.pinned && p.node === node && !p.el.hidden) return gmClose();
+  gmOpen(node, true);
+}
+
+/** A row of the box: dot, name and address, ↓ speed, share — its parts, filled by gmFillPopRow; one whose server is here goes to it. */
+function gmPopRow() {
+  const row = edNode('div', { class: 'gm-row' }, [
+    edNode('span', { class: 'gm-dot' }),
+    edNode('span', { class: 'gm-who' }, [edNode('span', { class: 'cn-name' }), edNode('bdi', { dir: 'ltr' })]),
+    edNode('span', { class: 'gm-rate', dir: 'ltr' }, [edNode('span', { class: 'dn' })]),
+    edNode('span', { class: 'gm-share', dir: 'ltr' }, [edNode('span', {}, [edNode('i')]), edNode('b')]),
+    edNode('span', { class: 'gm-why', text: t('gm.dead') })]);
+  const go = () => {
+    if (!state.servers.some(s => s.id === row.dataset.id)) return;
+    gmClose();
+    revealServer(row.dataset.id);
+  };
+  row.onclick = go;
+  row.onkeydown = (e) => { if (e && (e.key === 'Enter' || e.key === ' ')) { if (e.preventDefault) e.preventDefault(); go(); } };
+  return row;
+}
+
+/** Fill a row of the box from a running member. */
+function gmFillPopRow(row, m, share) {
+  const dead = m.alive === false;
+  const here = state.servers.some(s => s.id === m.id);
+  row.dataset.id = m.id;
+  row.className = 'gm-row' + (dead ? ' dead' : m.alive === true ? '' : ' unknown') + (here ? '' : ' gone');
+  row.querySelector('.cn-name').textContent = m.name || '—';
+  row.querySelector('bdi').textContent = grpAddrText({ address: m.address, port: m.port }, null);
+  row.querySelector('.gm-rate').hidden = dead;
+  row.querySelector('.gm-share').hidden = dead;
+  row.querySelector('.gm-why').hidden = !dead;
+  row.querySelector('.gm-rate .dn').textContent = '↓ ' + fmtSpeed(gmNum(m.downSpeed));
+  row.querySelector('.gm-share i').style.width = share + '%';
+  row.querySelector('.gm-share b').textContent = share + '%';
+  if (here) { row.setAttribute('role', 'button'); row.setAttribute('tabindex', '0'); row.title = t('gm.goTo'); }
+  else { row.removeAttribute('role'); row.removeAttribute('tabindex'); row.title = ''; }
+}
+
+/**
+ * The box's content for its node: per group its name, strategy and speed, a
+ * row per member; the foot says a row goes to its config and opens the group's
+ * card. Drawn whole when its shape changes, else only its figures (a row with
+ * the keyboard on it keeps it).
+ */
+function gmRenderPop() {
+  const p = gmPop;
+  if (!p || !p.node || !p.node._gm) return;
+  const groups = p.node._gm.groups;
+  const sig = groups.map(g => g.tag + '#' + g.groupId + '#' + g.members.length).join('|') + '|' + t('gm.popHint');
+  if (sig !== p.sig) {
+    p.sig = sig;
+    p.el.textContent = '';
+    p.parts = [];
+    for (const g of groups) {
+      const dn = edNode('span', { class: 'dn' });
+      const up = edNode('span', { class: 'up' });
+      p.el.appendChild(edNode('div', { class: 'gm-pop-head' }, [
+        edNode('b', { text: '⧉ ' + (g.name || '—') }),
+        edNode('span', { class: 'grp-meta', text: GROUP_STRATEGIES.includes(g.strategy) ? t('grp.st.' + g.strategy) : '' }),
+        edNode('span', { class: 'gm-live', dir: 'ltr' }, [dn, up])]));
+      const rows = g.members.map(() => p.el.appendChild(gmPopRow()));
+      p.parts.push({ dn, up, rows });
+    }
+    const foot = edNode('div', { class: 'gm-pop-foot' }, [edNode('span', { text: t('gm.popHint') })]);
+    for (const g of groups) {
+      if (!grpById(g.groupId)) continue;
+      const b = edNode('button', { type: 'button', class: 'gm-open', text: groups.length > 1 ? '⧉ ' + g.name + ' ' + flowArrow() : t('gm.openGroup') });
+      b.onclick = () => { gmClose(); openGroupCard(g.groupId); };
+      foot.appendChild(b);
+    }
+    p.el.appendChild(foot);
+    p.el.setAttribute('aria-label', groups.map(g => g.name || '—').join(' · '));
+  }
+  groups.forEach((g, k) => {
+    const part = p.parts[k];
+    const sum = gmSum(g.members);
+    part.dn.textContent = '↓ ' + fmtSpeed(sum.downSpeed);
+    part.up.textContent = '↑ ' + fmtSpeed(sum.upSpeed);
+    const shares = gmShares(g.members);
+    g.members.forEach((m, i) => { if (m && part.rows[i]) gmFillPopRow(part.rows[i], m, shares[i]); });
+  });
+}
+
+/**
+ * Put the box under its node — the reading direction's edge of it — inside the
+ * window; above it when there is no room below and there is above. A node no
+ * longer on screen (its page left) closes it.
+ */
+function gmPlace() {
+  const p = gmPop;
+  if (!p || !p.node || p.el.hidden) return;
+  const r = p.node.getBoundingClientRect();
+  if (!r.width && !r.height) return gmClose();
+  const vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+  const w = p.el.offsetWidth || 0, h = p.el.offsetHeight || 0;
+  const rtl = document.documentElement && document.documentElement.dir === 'rtl';
+  const left = Math.max(8, Math.min(vw - w - 8, rtl ? r.right - w : r.left));
+  let top = r.bottom + 8;
+  if (top + h > vh - 8 && r.top - 8 - h >= 8) top = r.top - 8 - h;
+  p.el.style.left = Math.round(left) + 'px';
+  p.el.style.top = Math.round(Math.max(8, top)) + 'px';
+}
+
+/** A stats tick: its `groups` (only while connected; none: none), and everything that shows them. */
+function gmOnStats(s) {
+  const before = gmLive.length;
+  gmLive = state.connected && s && Array.isArray(s.groups)
+    ? s.groups.filter(g => g && typeof g === 'object' && Array.isArray(g.members))
+      .map(g => Object.assign({}, g, { members: g.members.filter(m => m && typeof m === 'object') }))
+    : [];
+  if (!before && !gmLive.length) return;
+  cgAutoOpen();
+  gmApplyCards();
+  gmDecorateFlows();
+}
+
+/** The connection's state drawn (renderTrafficPath): no running groups unless connected; the card of what connected opens. */
+function gmOnStatus(stateStr) {
+  if (stateStr !== 'connected' || !state.connected) gmLive = [];
+  cgAutoOpen();
+  gmApplyCards();
+  gmDecorateFlows();
+}
+
+// the box: a click outside a pinned one closes it, Esc closes it (the keyboard back on its node), it follows its node
+document.addEventListener('click', (e) => {
+  const p = gmPop;
+  if (!p || !p.pinned || p.el.hidden) return;
+  if (p.el.contains(e.target) || (p.node && p.node.contains(e.target))) return;
+  gmClose();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !gmPop || gmPop.el.hidden) return;
+  const node = gmPop.node;
+  gmClose();
+  if (node && node.focus) node.focus();
+});
+window.addEventListener('scroll', () => gmPlace(), true);
+window.addEventListener('resize', () => gmPlace());
+
 /* ----------------------------- live traffic stats ----------------------------- */
 // Lifetime totals arrive every few seconds — the per-second figures ride the
 // stats event, so this one does not need that resolution. Rewrite the spans
@@ -8532,6 +9300,8 @@ window.api.onStats((s) => {
   if (s.per) applyPathTraffic(s.per);
   // …and each branch of the routing page's flow tree, while its profile is the one up
   if (s.per) applyFlowTraffic(s.per);
+  // a running group's members (v1.28, design §3): its card's rows, the flows' share bars and their box
+  gmOnStats(s);
 });
 
 function resetTraffic() {
