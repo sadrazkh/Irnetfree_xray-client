@@ -508,6 +508,23 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
   transition: background 140ms ease-out;
 }
 .ss-item:hover { background: var(--soft); color: var(--ink); }
+/* a pile's head (configOptions): where the configs under it come from — the Servers page's
+   look, folding on a click; its configs sit one step in */
+.ss-pile, .picker-pile {
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 8px 5px; margin-block-start: 4px;
+  font-size: 11.5px; font-weight: 600; color: var(--ink3);
+  border-block-start: 1px solid var(--line);
+  cursor: pointer; user-select: none;
+}
+.ss-pile:first-child, .picker-pile:first-child { margin-block-start: 0; border-block-start: 0; }
+.ss-pile:hover, .picker-pile:hover { color: var(--ink); }
+.ss-pile .pile-name, .picker-pile .pile-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-pile .pile-ico, .picker-pile .pile-ico { font-size: 12px; }
+.ss-pile.folded .srv-group-chev, .picker-pile.folded .srv-group-chev { transform: rotate(-90deg); }
+[dir="rtl"] .ss-pile.folded .srv-group-chev, [dir="rtl"] .picker-pile.folded .srv-group-chev { transform: rotate(90deg); }
+.ss-item.in-pile { padding-inline-start: 18px; }
+.ss-cur-pile { color: var(--ink3); font-weight: 400; }
 /* makeSearchSelect marks the current option `active`; `selected` is kept so a
    caller using either word gets the same highlight. Styling only `.selected`
    meant the chosen routing target was never marked in its own dropdown. */

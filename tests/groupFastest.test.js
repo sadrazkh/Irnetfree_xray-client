@@ -204,7 +204,7 @@ function pickerHarness({ servers, subscriptions = SUBS, connecting = false }) {
   const menu = $('#pickerMenu');
   // `menu.innerHTML = ''` clears the menu, as it does in a browser
   Object.defineProperty(menu, 'innerHTML', { configurable: true, get: () => menu.html, set: (v) => { menu.html = v; menu.children.length = 0; } });
-  const ctx = compile(['renderPicker', 'serverGroups'], {
+  const ctx = compile(['renderPicker', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead'], {
     state: { servers, subscriptions, chains: [], pool: [], settings: {}, pings: {}, selectedServerId: servers[0] && servers[0].id, connecting },
     $,
     document: { createElement: fakeEl },
@@ -234,9 +234,9 @@ test('the picker adds one “Fastest — <subscription>” row per subscription 
     assert.equal(hasClass(row, 'picker-item') && hasClass(row, 'picker-special') && hasClass(row, 'picker-auto'), true, 'looks like the Auto row it sits under');
     assert.match(row.html, /<span class="proto-badge proto-auto">⚡<\/span>/);
   }
-  // the Auto row first, the Fastest rows right after it, then the servers
-  const order = h.menu.children.map((c) => (hasClass(c, 'picker-head') ? 'head' : hasClass(c, 'picker-auto-sub') ? 'sub' : hasClass(c, 'picker-auto') ? 'auto' : 'server'));
-  assert.deepEqual(order, ['head', 'auto', 'sub', 'sub', 'server', 'server', 'server', 'server', 'server', 'server', 'server', 'server']);
+  // the Auto row first, the Fastest rows right after it, then the servers — each pile under its own head
+  const order = h.menu.children.map((c) => (hasClass(c, 'picker-head') ? 'head' : hasClass(c, 'picker-pile') ? 'pile' : hasClass(c, 'picker-auto-sub') ? 'sub' : hasClass(c, 'picker-auto') ? 'auto' : 'server'));
+  assert.deepEqual(order, ['head', 'auto', 'sub', 'sub', 'pile', 'server', 'server', 'pile', 'server', 'server', 'pile', 'server', 'server', 'server', 'pile', 'server']);
 });
 
 test('the rows appear only when there is something to tell apart, and never for the hand-added pile or a single config', () => {

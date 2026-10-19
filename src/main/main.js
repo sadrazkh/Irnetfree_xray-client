@@ -34,7 +34,9 @@ const tunPlatform = require('./tunPlatform');
 const { appsForTun } = require('./tunApps');
 const { LeakGuard } = require('./leakGuard');
 const { DnsGuardWatch } = require('./dnsGuardWatch');
-const { StatsPoller, SilenceWatch } = require('./stats');
+const { StatsPoller, SilenceWatch, GroupHealthWatch } = require('./stats');
+// a group's members leaving and rejoining the rotation (stats.js), said in the log
+const groupHealth = new GroupHealthWatch();
 const { UsageMeter, grandTotal } = require('./usage');
 const { Downloader, downloadFile } = require('./downloader');
 const { pickUpdateAsset, parseSha256Sums, sha256File } = require('./appUpdate');
@@ -1767,6 +1769,7 @@ async function connectOnce(serverId, opts = {}) {
   stats.skipTags = rawServerOf(plan, settings, RAW_OPTS) ? dialerTagsOf(config) : null;
   // the groups it runs, member by member, for the window's live view (groups-ui/design.md §3)
   stats.groupMap = config.groupTags || null;
+  groupHealth.reset();
   watchWgSilence(config);
   // A fresh core starts its counters at zero, so the meter has to be told —
   // otherwise the first poll of the new session reads as growth on the old one
@@ -3642,6 +3645,8 @@ app.whenReady().then(() => {
     apiPort: getSettings().apiPort,
     onStats: (s) => {
       send('stats', s);
+      // a group's members leaving and rejoining the rotation, said in the log
+      for (const l of groupHealth.update(s.groups)) send('log', l);
       if (!usage) return;
       usage.tick(s.per);
       // Two cadences on purpose: the live per-second figures already ride

@@ -501,7 +501,8 @@ test('+ Clean IPs: ONE server, an address a line — read back as typed, a bad l
   byId(h.body(), 'grpAddIps').onclick();
   const sel = byId(h.body(), 'grp-ipServer');
   assert.equal(sel.tagName, 'SELECT');
-  assert.deepEqual(kids(sel).map((o) => [o.attrs.value, o.textContent]), [['s1', 'DE'], ['s2', 'CDN'], ['s3', 'Office WG']], 'servers only');
+  assert.deepEqual(all(sel, (o) => o.tagName === 'OPTION').map((o) => [o.attrs.value, o.textContent]), [['s1', 'DE'], ['s2', 'CDN'], ['s3', 'Office WG']], 'servers only');
+  assert.deepEqual(kids(sel).map((g) => [g.tagName, kids(g).length]), [['OPTGROUP', 3]], 'under their pile, as every config picker lists them');
   assert.equal(sel.value, 's1', 'the first server when the group has none yet');
   sel.value = 's2';
   sel.onchange();
@@ -535,7 +536,7 @@ test('+ Clean IPs: ONE server, an address a line — read back as typed, a bad l
   e.ctx.openGroupEditor('grp-a');
   byId(e.body(), 'grpAddIps').onclick();
   assert.equal(byId(e.body(), 'grp-ipServer').value, 's2');
-  assert.deepEqual(kids(byId(e.body(), 'grp-ipServer')).filter((o) => o.selected).map((o) => o.attrs.value), ['s2']);
+  assert.deepEqual(all(byId(e.body(), 'grp-ipServer'), (o) => o.tagName === 'OPTION' && o.selected).map((o) => o.attrs.value), ['s2']);
   e.type('grp-ips', 'x\n1.1.1.1\ny');
   assert.deepEqual(kids(one(e.body(), (x) => hasClass(x, 'grp-ipread'), 'read')).map((c) => c.textContent), ['Addresses read: 1', 'Line 1 not read', 'Line 3 not read']);
   byId(e.body(), 'grpIpsAdd').onclick();
@@ -635,7 +636,7 @@ test('edit: a config whose server is gone is shown missing and kept until remove
 
 const MODEL_FNS = ['profileOfSel', 'profileReady', 'advSelName', 'terminalTarget', 'takesNoVia', 'atBase', 'appRouteRules', 'geoReady', 'normalizeUiProfile',
   'ruleVia', 'refProblem', 'ruleProblem', 'profileBroken', 'refName', 'flowModel', 'outboundTagFor', 'baseKeyOf', 'viaTagFor', 'baseTagFor', 'chainById',
-  'chainMembers', 'chainReady', 'srvById', 'isChainId', 'targetLabel', 'poolTargetOptions', 'targetOptionList', 'profileTargetOptions', 'viaOptionList',
+  'chainMembers', 'chainReady', 'srvById', 'isChainId', 'targetLabel', 'configOptions', 'serverGroups', 'groupKey', 'poolTargetOptions', 'targetOptionList', 'profileTargetOptions', 'viaOptionList',
   'baseOptionList', 'selectable', 'advancedReady', 'poolTargetValid', 'poolEnabledValid', 'poolReady', 'resolveSelection', 'homeFlowModel', 'laneHue',
   'serverInLivePlan', 'grpById', 'grpLive', 'grpCountText', 'grpConnText', 'grpMemberNames', 'grpAddrText', 'warpNum'];
 
@@ -653,10 +654,13 @@ const values = (opts) => plain(opts).map((o) => o.value);
 test('every routing picker offers a group by its bare id, «⧉ name»: a rule’s target and the default, a profile’s via and base, the pool — and never one that is gone', () => {
   const { ctx, work } = modelHarness();
   const grp = { value: 'grp-a', label: '⧉ Fast' };
-  assert.deepEqual(plain(ctx.poolTargetOptions()), [{ value: 's1', label: 'DE' }, { value: 's2', label: 'CDN' }, { value: 's3', label: 'Office WG' },
+  const bare = (opts) => plain(opts).map((o) => ({ value: o.value, label: o.label }));
+  assert.deepEqual(bare(ctx.poolTargetOptions()), [{ value: 's1', label: 'DE' }, { value: 's2', label: 'CDN' }, { value: 's3', label: 'Office WG' },
     { value: 'chain:c1', label: '⛓ DE→WG' }, grp], 'the pool (and the via and base pickers built on it)');
-  assert.deepEqual(values(ctx.targetOptionList()), ['s1', 's2', 's3', 'chain:c1', 'grp-a', 'direct', 'block'], 'a rule’s target and the default');
-  assert.deepEqual(plain(ctx.targetOptionList())[4], grp);
+  // each under its pile: the hand-added servers, the chains, the groups
+  assert.deepEqual(plain(ctx.poolTargetOptions()).map((o) => o.pile.key), ['manual', 'manual', 'manual', 'chains', 'groups']);
+  assert.deepEqual(values(ctx.targetOptionList()), ['direct', 'block', 's1', 's2', 's3', 'chain:c1', 'grp-a'], 'a rule’s target and the default: direct and block first');
+  assert.deepEqual(bare(ctx.targetOptionList())[6], grp);
   assert.deepEqual(values(ctx.profileTargetOptions(work, 's1')).slice(0, 1), ['base'], 'exit at the base first, then the rest');
   assert.ok(values(ctx.profileTargetOptions(work, 's1')).includes('grp-a'));
   assert.deepEqual(values(ctx.viaOptionList(work, 's1')), ['inherit', 'none', 's2', 's3', 'chain:c1', 'grp-a'], 'a via: never the target itself');
@@ -744,7 +748,7 @@ function pickerHarness(selected) {
     closePicker: () => {}, connectAuto: () => {}, selectServer: (id) => picked.push(id), pingServer: () => {}, pingAllVisible: () => {},
     String, Array
   });
-  vm.runInContext(PRELUDE + ['renderPicker', 'srvById', 'grpCountText', 'warpNum', 'pingResultLabel', 'fmtMs', 'pingClass'].map(fnSource).join('\n'), ctx);
+  vm.runInContext(PRELUDE + ['renderPicker', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead', 'srvById', 'grpCountText', 'warpNum', 'pingResultLabel', 'fmtMs', 'pingClass'].map(fnSource).join('\n'), ctx);
   ctx.renderPicker();
   return { page, picked, rows: kids(page.get('pickerMenu')).filter((c) => hasClass(c, 'picker-item')) };
 }

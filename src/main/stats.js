@@ -257,6 +257,42 @@ class StatsPoller {
 }
 
 /**
+ * What the log says of a group's members as the core's health check moves
+ * them: one line when a member stops answering (it is out of the rotation
+ * until it answers again), one when it is back, and a warning when no member
+ * of a group answers at all (its traffic then waits on the first). Nothing
+ * for the first verdict of a connection — only changes. reset() at connect.
+ *   update(groups) → [{ line, level }]
+ */
+class GroupHealthWatch {
+  constructor() { this.seen = new Map(); this.allDown = new Set(); }
+  reset() { this.seen.clear(); this.allDown.clear(); }
+  update(groups) {
+    const out = [];
+    for (const g of Array.isArray(groups) ? groups : []) {
+      if (!g || !Array.isArray(g.members)) continue;
+      const label = g.name || g.groupId || g.tag;
+      g.members.forEach((m, i) => {
+        if (!m || (m.alive !== true && m.alive !== false)) return;
+        const key = `${g.tag}~${i}`;
+        const was = this.seen.get(key);
+        this.seen.set(key, m.alive);
+        if (was === undefined || was === m.alive) return;
+        const who = (m.name || m.id || '#' + (i + 1)) + (m.address ? ` (${m.address}${m.port ? ':' + m.port : ''})` : '');
+        out.push(m.alive
+          ? { line: `Group ${label}: ${who} answers again — back in the rotation`, level: 'info' }
+          : { line: `Group ${label}: ${who} stopped answering — left out until it answers again`, level: 'warn' });
+      });
+      const checked = g.members.filter((m) => m && (m.alive === true || m.alive === false));
+      const none = checked.length > 0 && checked.length === g.members.length && checked.every((m) => m.alive === false);
+      if (none && !this.allDown.has(g.tag)) { this.allDown.add(g.tag); out.push({ line: `Group ${label}: no member answers — its traffic waits on the first until one does`, level: 'warn' }); }
+      if (!none) this.allDown.delete(g.tag);
+    }
+    return out;
+  }
+}
+
+/**
  * The running groups as the window shows them, one tick: each group of the
  * map with its members' bytes, bytes per second and health — member i is
  * `<tag>~gm<i>`. (groups-ui/design.md §3)
@@ -346,4 +382,4 @@ class SilenceWatch {
   }
 }
 
-module.exports = { StatsPoller, sumOutbounds, byOutbound, foldGroups, memberCounters, healthOf, groupsLive, SilenceWatch };
+module.exports = { StatsPoller, sumOutbounds, byOutbound, foldGroups, memberCounters, healthOf, groupsLive, GroupHealthWatch, SilenceWatch };

@@ -1269,6 +1269,50 @@ function serverGroups() {
   return out;
 }
 
+/**
+ * Every config a picker offers, in the piles the Servers page shows — the
+ * hand-added ones, each subscription by its name, then the ready chains and
+ * the groups — so a choice always says where it comes from:
+ * [{ value, label, pile: { key, name, ico } }]. `keep(server)`: which servers.
+ */
+function configOptions(keep) {
+  const out = [];
+  for (const g of serverGroups()) {
+    const pile = { key: groupKey(g.id), name: g.name, ico: g.id ? '🔗' : '✎' };
+    for (const s of g.items) if (!keep || keep(s)) out.push({ value: s.id, label: s.name, pile });
+  }
+  const chainPile = { key: 'chains', name: t('pile.chains'), ico: '⛓' };
+  for (const c of state.chains) if (chainReady(c)) out.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name, pile: chainPile });
+  // a group (v1.27) by its bare id, like a server, while a member of it is here
+  const groupPile = { key: 'groups', name: t('pile.groups'), ico: '⧉' };
+  for (const g of state.groups || []) if (srvById(g.id)) out.push({ value: g.id, label: '⧉ ' + g.name, pile: groupPile });
+  return out;
+}
+
+/** The piles folded in the pickers (the Servers page keeps its own): remembered under irnf.pileFold, never required. */
+function pileFolds() {
+  try { return new Set(JSON.parse(localStorage.getItem('irnf.pileFold') || '[]')); } catch { return new Set(); }
+}
+function setPileFold(key, folded) {
+  const s = pileFolds();
+  if (folded) s.add(key); else s.delete(key);
+  try { localStorage.setItem('irnf.pileFold', JSON.stringify([...s])); } catch { /* only costs the memory */ }
+}
+
+/** A pile's head in a picker: chevron, icon, name, count — a click folds or opens it. */
+function pileHead(cls, pile, count, folded, onToggle) {
+  const head = document.createElement('div');
+  head.className = cls + (folded ? ' folded' : '');
+  head.setAttribute('role', 'button');
+  head.setAttribute('aria-expanded', String(!folded));
+  head.innerHTML = '<span class="srv-group-chev" aria-hidden="true">▾</span><span class="pile-ico" aria-hidden="true"></span><span class="pile-name"></span><span class="srv-group-count"></span>';
+  head.querySelector('.pile-ico').textContent = pile.ico;
+  head.querySelector('.pile-name').textContent = pile.name;
+  head.querySelector('.srv-group-count').textContent = String(count);
+  head.onclick = (e) => { e.stopPropagation(); onToggle(); };
+  return head;
+}
+
 /* ------------------- folded groups (remembered per window) ------------------- */
 // The groups the user folded, by key ('manual', 'sub:<id>'). Kept the way the
 // theme is — in this window's storage, and per browser on the router — and
@@ -1851,8 +1895,20 @@ function renderPicker() {
     const rec = srvById(g.id);
     if (rec) addRow(g.id, '<span class="proto-badge proto-group">⧉</span>', g.name + ' · ' + grpCountText(rec.group.size), g.id, true);
   }
-  for (const s of state.servers) {
-    addRow(s.id, `<span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>`, s.name, s.id, false);
+  // the servers under the pile they come from (the hand-added ones, each subscription), folded
+  // as the pickers remember — the pile of the selected server stays open; one pile needs no head
+  const piles = serverGroups();
+  const folds = pileFolds();
+  for (const g of piles) {
+    const key = groupKey(g.id);
+    const folded = piles.length > 1 && folds.has(key) && !g.items.some(s => s.id === selId);
+    if (piles.length > 1) {
+      menu.appendChild(pileHead('picker-pile', { key, name: g.name, ico: g.id ? '🔗' : '✎' }, g.items.length, folded, () => { setPileFold(key, !folded); renderPicker(); }));
+    }
+    if (folded) continue;
+    for (const s of g.items) {
+      addRow(s.id, `<span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>`, s.name, s.id, false);
+    }
   }
 }
 
@@ -5679,10 +5735,16 @@ function warpCount(w) {
  */
 function warpHops() {
   const servers = state.servers || [];
-  const opts = servers.filter((s) => s && s.protocol !== 'http').map((s) => ({ value: s.id, label: s.name || s.id }));
+  // the servers under their pile (the subscription), as every picker lists them
+  const opts = [];
+  for (const g of serverGroups()) {
+    const pile = { key: groupKey(g.id), name: g.name, ico: g.id ? '🔗' : '✎' };
+    for (const s of g.items) if (s && s.protocol !== 'http') opts.push({ value: s.id, label: s.name || s.id, pile });
+  }
+  const chainPile = { key: 'chains', name: t('pile.chains'), ico: '⛓' };
   for (const c of state.chains || []) {
     const members = (c.members || []).map((id) => servers.find((s) => s.id === id)).filter(Boolean);
-    if (members.length && members[members.length - 1].protocol !== 'http') opts.push({ value: 'chain:' + c.id, label: '⛓ ' + (c.name || c.id) });
+    if (members.length && members[members.length - 1].protocol !== 'http') opts.push({ value: 'chain:' + c.id, label: '⛓ ' + (c.name || c.id), pile: chainPile });
   }
   return opts;
 }
@@ -6021,7 +6083,16 @@ function warpTwoWg(w, head) {
   if (w.use !== 'direct') {
     // the value wanted is read before the options are made: a select built again starts on its first one
     const cur = warpHop(w, hops);
-    const sel = edNode('select', { class: 'select', id: 'warp-chainWith' }, hops.map((o) => edNode('option', { value: o.value, selected: o.value === cur, text: o.label })));
+    // each pile an <optgroup>, so a hop says which subscription it comes from
+    const groupsOf = [];
+    for (const o of hops) {
+      const key = o.pile ? o.pile.key : '';
+      if (!groupsOf.length || groupsOf[groupsOf.length - 1].key !== key) groupsOf.push({ key, label: o.pile ? o.pile.ico + ' ' + o.pile.name : '', items: [] });
+      groupsOf[groupsOf.length - 1].items.push(o);
+    }
+    const optOf = (o) => edNode('option', { value: o.value, selected: o.value === cur, text: o.label });
+    const sel = edNode('select', { class: 'select', id: 'warp-chainWith' },
+      groupsOf.flatMap((g) => (g.label ? [edNode('optgroup', { label: g.label }, g.items.map(optOf))] : g.items.map(optOf))));
     sel.value = cur;
     w.chainWith = cur;
     sel.onchange = () => { w.chainWith = sel.value; };
@@ -7092,8 +7163,12 @@ function grpIpPanel(f) {
     const first = f.members.find(m => state.servers.some(s => s.id === m.id));
     f.ipServer = first ? first.id : state.servers[0].id;
   }
+  // each subscription an <optgroup>, as every config picker lists them
   const sel = edNode('select', { class: 'select', id: 'grp-ipServer' });
-  for (const s of state.servers) sel.appendChild(edNode('option', { value: s.id, selected: s.id === f.ipServer, text: s.name }));
+  for (const g of serverGroups()) {
+    sel.appendChild(edNode('optgroup', { label: (g.id ? '🔗 ' : '✎ ') + g.name },
+      g.items.map(s => edNode('option', { value: s.id, selected: s.id === f.ipServer, text: s.name }))));
+  }
   sel.value = f.ipServer;
   sel.onchange = () => { f.ipServer = sel.value; };
   const ta = edNode('textarea', { class: 'textarea ed-mono', id: 'grp-ips', dir: 'ltr', rows: '5', spellcheck: 'false', autocomplete: 'off',
@@ -7193,13 +7268,9 @@ function nextPoolPort(start) {
   return p;
 }
 
-/** [{value,label}] pool targets — servers + ready chains + groups (no direct/block). Also the via and base pickers. */
+/** [{value,label,pile}] pool targets — servers by subscription + ready chains + groups (no direct/block). Also the via and base pickers. */
 function poolTargetOptions() {
-  const opts = state.servers.map(s => ({ value: s.id, label: s.name }));
-  for (const c of state.chains) if (chainReady(c)) opts.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name });
-  // a group (v1.27) by its bare id, like a server, while a member of it is here
-  for (const g of state.groups || []) if (srvById(g.id)) opts.push({ value: g.id, label: '⧉ ' + g.name });
-  return opts;
+  return configOptions();
 }
 
 async function persistPool() {
@@ -7329,28 +7400,29 @@ function processOptions(selected, opts = {}) {
 }
 
 function targetOptions(selected) {
-  // [{ value, label }] — servers + named chains + direct/block
-  const opts = state.servers.map(s => ({ value: s.id, label: s.name }));
-  for (const c of state.chains) {
-    if (chainReady(c)) opts.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name });
+  // <option>s — direct/block, then every config under its pile (<optgroup>)
+  const opt = (o) => `<option value="${escapeHtml(o.value)}"${o.value === selected ? ' selected' : ''}>${escapeHtml(o.label)}</option>`;
+  const out = [opt({ value: 'direct', label: t('adv.direct') }), opt({ value: 'block', label: t('adv.block') })];
+  let pile = null;
+  for (const o of configOptions()) {
+    if (!pile || pile.key !== o.pile.key) {
+      if (pile) out.push('</optgroup>');
+      pile = o.pile;
+      out.push(`<optgroup label="${escapeHtml(pile.ico + ' ' + pile.name)}">`);
+    }
+    out.push(opt(o));
   }
-  for (const g of state.groups || []) if (srvById(g.id)) opts.push({ value: g.id, label: '⧉ ' + g.name });
-  opts.push({ value: 'direct', label: t('adv.direct') });
-  opts.push({ value: 'block', label: t('adv.block') });
-  return opts.map(o =>
-    `<option value="${escapeHtml(o.value)}"${o.value === selected ? ' selected' : ''}>${escapeHtml(o.label)}</option>`
-  ).join('');
+  if (pile) out.push('</optgroup>');
+  return out.join('');
 }
 
-/** [{value,label}] of routing targets — servers + ready chains + groups + direct/block. */
+/** [{value,label,pile?}] of routing targets — direct/block first, then every config by its pile (configOptions). */
 function targetOptionList() {
-  const opts = state.servers.map(s => ({ value: s.id, label: s.name }));
-  for (const c of state.chains) if (chainReady(c)) opts.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name });
-  // a group (v1.27) by its bare id, like a server, while a member of it is here
-  for (const g of state.groups || []) if (srvById(g.id)) opts.push({ value: g.id, label: '⧉ ' + g.name });
-  opts.push({ value: 'direct', label: t('adv.direct') });
-  opts.push({ value: 'block', label: t('adv.block') });
-  return opts;
+  return [
+    { value: 'direct', label: t('adv.direct') },
+    { value: 'block', label: t('adv.block') },
+    ...configOptions()
+  ];
 }
 
 /**
@@ -7391,16 +7463,39 @@ function makeSearchSelect({ options, value, onChange }) {
 
   let current = value;
   const labelFor = (v) => { const o = options.find(x => x.value === v); return o ? o.label : '—'; };
-  const renderCur = () => { cur.innerHTML = `<span class="ss-cur-label">${escapeHtml(labelFor(current))}</span><span class="ss-caret">▾</span>`; };
+  // closed too, a server says where it comes from: «name · its subscription»
+  const pileOf = (v) => { const o = options.find(x => x.value === v); return o && o.pile && o.pile.key !== 'chains' && o.pile.key !== 'groups' ? o.pile.name : ''; };
+  const renderCur = () => {
+    const p = pileOf(current);
+    cur.innerHTML = `<span class="ss-cur-label">${escapeHtml(labelFor(current))}${p ? `<span class="ss-cur-pile"> · ${escapeHtml(p)}</span>` : ''}</span><span class="ss-caret">▾</span>`;
+  };
   const close = () => { menu.hidden = true; };
   const renderList = (f) => {
     f = (f || '').toLowerCase();
     list.innerHTML = '';
-    const items = options.filter(o => o.label.toLowerCase().includes(f) || String(o.value).toLowerCase().includes(f));
+    const items = options.filter(o => o.label.toLowerCase().includes(f) || String(o.value).toLowerCase().includes(f)
+      || (o.pile && o.pile.name.toLowerCase().includes(f)));
     if (!items.length) { list.innerHTML = `<div class="ss-empty">${escapeHtml(t('ss.none'))}</div>`; return; }
+    // configs under the pile they come from (configOptions): a head per pile, folded as the
+    // pickers remember — a search shows every match, the pile of the current choice stays open
+    const folds = pileFolds();
+    const curOpt = options.find(x => x.value === current);
+    const curPile = curOpt && curOpt.pile ? curOpt.pile.key : null;
+    const count = {};
+    for (const o of items) if (o.pile) count[o.pile.key] = (count[o.pile.key] || 0) + 1;
+    let pile = null;
+    let folded = false;
     for (const o of items) {
+      if (o.pile && (!pile || pile.key !== o.pile.key)) {
+        pile = o.pile;
+        folded = !f && folds.has(pile.key) && pile.key !== curPile;
+        const key = pile.key;
+        const was = folded;
+        list.appendChild(pileHead('ss-pile', pile, count[key], folded, () => { setPileFold(key, !was); renderList(search.value); }));
+      }
+      if (o.pile && folded) continue;
       const it = document.createElement('div');
-      it.className = 'ss-item' + (o.value === current ? ' active' : '');
+      it.className = 'ss-item' + (o.value === current ? ' active' : '') + (o.pile ? ' in-pile' : '');
       it.textContent = o.label;
       it.onclick = () => { current = o.value; renderCur(); close(); if (onChange) onChange(current); };
       list.appendChild(it);
