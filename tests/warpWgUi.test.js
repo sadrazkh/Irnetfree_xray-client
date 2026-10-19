@@ -107,7 +107,7 @@ const seg = (el, key) => one(el, (e) => e.dataset.warp === key, key);
 /* ------------------------------------ the dialog ------------------------------------ */
 
 const DIALOG_FNS = ['edNode', 'appendSome', 'richLine', 'httpCards', 'warpChips', 'fmtBytes', 'warpFresh', 'warpShown', 'openWarp', 'closeWarp',
-  'warpLicenses', 'warpCount', 'warpHops', 'warpHop', 'warpArgs', 'warpErrorText', 'warpWarningTexts', 'warpStoppedText', 'warpFill', 'looksP256',
+  'warpLicenses', 'warpCount', 'serverGroups', 'groupKey', 'warpHops', 'warpHop', 'warpArgs', 'warpErrorText', 'warpWarningTexts', 'warpStoppedText', 'warpFill', 'looksP256',
   'warpReadImport', 'warpImportChips', 'warpReadWgImport', 'warpWgImportChips', 'warpNum', 'warpBytes', 'warpDate', 'warpTypeChip', 'warpAccountBody',
   'warpAccountBox', 'renderWarpAccount', 'warpField', 'warpSeg', 'warpLicenseNodes', 'warpNewNodes', 'warpTwoWg', 'warpTwoMasque', 'warpFormNodes',
   'warpProgressNodes', 'warpNoteText', 'warpFootNodes', 'warpRenderFoot', 'renderWarp', 'runWarp', 'warpUseChain', 'warpSeeInList'];
@@ -237,10 +237,13 @@ test('the Chain’s first hop: the servers but an HTTP proxy, the chains (marked
   h.ctx.openWarp();
   const sel = () => byId(h.body(), 'warp-chainWith');
   assert.equal(sel().tagName, 'SELECT');
-  assert.deepEqual(sel().children.map((o) => [o.attrs.value, o.textContent]),
+  assert.deepEqual(all(sel(), (e) => e.tagName === 'OPTION').map((o) => [o.attrs.value, o.textContent]),
     [['s1', 'DE'], ['s2', 'NL'], ['s3', 'FI'], ['chain:c1', '⛓ DE→NL']], 'no HTTP proxy, no empty chain, no chain ending on one');
+  // each under its pile, so a hop says where it comes from
+  assert.deepEqual(sel().children.map((g) => [g.tagName, g.attrs.label, g.children.length]),
+    [['OPTGROUP', '✎ ' + en('srv.manual'), 3], ['OPTGROUP', '⛓ ' + en('pile.chains'), 1]]);
   assert.equal(sel().value, 's2', 'the selected server');
-  assert.deepEqual(sel().children.filter((o) => 'selected' in o.attrs).map((o) => o.attrs.value), ['s2']);
+  assert.deepEqual(all(sel(), (o) => o.tagName === 'OPTION' && 'selected' in o.attrs).map((o) => o.attrs.value), ['s2']);
   assert.ok(h.body().textContent.includes(en('warp.hopHint')));
   // a pick, then the form drawn again (another tab of step 1 and back): the pick, not the first option
   sel().value = 'chain:c1';
@@ -248,7 +251,7 @@ test('the Chain’s first hop: the servers but an HTTP proxy, the chains (marked
   seg(h.body(), 'way:import').onclick();
   seg(h.body(), 'way:new').onclick();
   assert.equal(sel().value, 'chain:c1');
-  assert.deepEqual(sel().children.filter((o) => 'selected' in o.attrs).map((o) => o.attrs.value), ['chain:c1']);
+  assert.deepEqual(all(sel(), (o) => o.tagName === 'OPTION' && 'selected' in o.attrs).map((o) => o.attrs.value), ['chain:c1']);
   byId(h.foot(), 'warpGo').onclick();
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(h.sent[0], { kind: 'wireguard', mode: 'new', via: 'direct', count: 1, licenses: [], use: 'chain', chainWith: 'chain:c1' });

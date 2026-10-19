@@ -1207,8 +1207,13 @@ function buildConfig(planArg, settings) {
 }
 
 /* ----------------------------------- groups ----------------------------------- */
-/** How a group's health check asks: the page every ping here asks, every 30 s, all members at once. */
-const GROUP_PROBE = { url: 'http://cp.cloudflare.com/', interval: '30s' };
+/**
+ * How a group's health check asks: the page every ping here asks, all members
+ * at once, every 10 s — a member that stops answering is out of the rotation
+ * within seconds, and one that answers again is back as fast (one tiny request
+ * per member each time).
+ */
+const GROUP_PROBE = { url: 'http://cp.cloudflare.com/', interval: '10s' };
 
 /**
  * Groups (groups.js): every outbound a group record became — a `loopback`

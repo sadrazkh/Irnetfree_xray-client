@@ -41,7 +41,7 @@ const tunPlatform = require('../main/tunPlatform');
 const { appsForTun } = require('../main/tunApps');
 const { LeakGuard } = require('../main/leakGuard');
 const { DnsGuardWatch } = require('../main/dnsGuardWatch');
-const { StatsPoller, SilenceWatch } = require('../main/stats');
+const { StatsPoller, SilenceWatch, GroupHealthWatch } = require('../main/stats');
 const { UsageMeter, grandTotal } = require('../main/usage');
 const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
@@ -758,12 +758,15 @@ function createService(opts = {}) {
   }
 
   let lastStats = null;   // the poller's last sample, for the facade's traffic line
+  const groupHealth = new GroupHealthWatch();   // a group's members leaving and rejoining the rotation, said in the log
   const stats = new StatsPoller({
     binPath: xray.anyBin(),
     apiPort: getSettings().apiPort,
     onStats: (s) => {
       lastStats = s;
       send('stats', s);
+      // a group's members leaving and rejoining the rotation, said in the log
+      for (const l of groupHealth.update(s.groups)) send('log', l);
       if (!usage) return;
       usage.tick(s.per);
       // the live figures ride `s.per`; the lifetime total needs neither that
@@ -2207,6 +2210,7 @@ function createService(opts = {}) {
     stats.skipTags = rawServerOf(plan, settings, RAW_OPTS) ? dialerTagsOf(config) : null;
     // the groups it runs, member by member, for the window's live view (groups-ui/design.md §3)
     stats.groupMap = config.groupTags || null;
+    groupHealth.reset();
     watchWgSilence(config);
     // a fresh core counts from zero — tell the meter, or the first poll of the
     // new session reads as growth on the old one (see main.js)
