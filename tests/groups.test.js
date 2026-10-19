@@ -111,19 +111,33 @@ test('a group selected: the loopback as the exit, its members T~gm<i>, the balan
   assert.equal('observatory' in plain, false);
 });
 
-test('a group in a chain: first — the next hop dials its loopback; later — each member dials the hop before it; the loopback dials nothing', () => {
+test('a chain through a group is a group of whole chains — one variant per member in its place, hops named outside the member prefix; nothing dials a loopback', () => {
   const g = groupOf(['de', 'nl']);
+  const dials = (cfg, tag) => ((find(cfg, tag).streamSettings || {}).sockopt || {}).dialerProxy;
+  // [G → CDN]: CDN reached through DE, or through NL
   let cfg = B.buildConfig({ mode: 'chain', chain: [g, CDN] }, SETTINGS);
-  assert.equal(find(cfg, 'proxy').streamSettings.sockopt.dialerProxy, 'proxy-h0');
-  assert.equal(find(cfg, 'proxy-h0').protocol, 'loopback');
-  assert.equal(((find(cfg, 'proxy-h0~gm0').streamSettings || {}).sockopt || {}).dialerProxy, undefined, 'a first hop\'s members dial by themselves');
-  assert.equal(cfg.routing.rules[0].balancerTag, 'proxy-h0~bal');
-  cfg = B.buildConfig({ mode: 'chain', chain: [CDN, g] }, SETTINGS);
   assert.deepEqual(find(cfg, 'proxy'), { tag: 'proxy', protocol: 'loopback', settings: { inboundTag: 'proxy~in' } });
-  for (const t of ['proxy~gm0', 'proxy~gm1']) assert.equal(find(cfg, t).streamSettings.sockopt.dialerProxy, 'proxy-h0', t);
+  assert.equal(find(cfg, 'proxy~gm0').settings.vnext[0].address, 'cdn.example.com');
+  assert.equal(dials(cfg, 'proxy~gm0'), 'proxy~gh0-h0');
+  assert.equal(find(cfg, 'proxy~gh0-h0').settings.vnext[0].address, 'de.example.net');
+  assert.equal(dials(cfg, 'proxy~gm1'), 'proxy~gh1-h0');
+  assert.equal(find(cfg, 'proxy~gh1-h0').protocol, 'trojan');
+  assert.deepEqual(cfg.routing.balancers, [{ tag: 'proxy~bal', selector: ['proxy~gm'], strategy: { type: 'roundRobin' }, fallbackTag: 'proxy~gm0' }]);
+  // [CDN → G]: DE behind CDN, or NL behind CDN
+  cfg = B.buildConfig({ mode: 'chain', chain: [CDN, g] }, SETTINGS);
+  assert.equal(find(cfg, 'proxy~gm0').settings.vnext[0].address, 'de.example.net');
+  assert.equal(dials(cfg, 'proxy~gm0'), 'proxy~gh0-h0');
+  assert.equal(find(cfg, 'proxy~gh0-h0').settings.vnext[0].address, 'cdn.example.com');
+  // two groups: every combination
+  const g2 = G.groupRecord({ id: 'grp-2', name: 'G2', members: ['cdn', 'nl'] }, byId);
+  cfg = B.buildConfig({ mode: 'chain', chain: [g, g2] }, SETTINGS);
+  assert.equal(cfg.outbounds.filter((o) => /^proxy~gm\d+$/.test(o.tag)).length, 4);
+  // no outbound anywhere dials a loopback
+  const loops = new Set(cfg.outbounds.filter((o) => o.protocol === 'loopback').map((o) => o.tag));
+  assert.equal(cfg.outbounds.some((o) => loops.has(((o.streamSettings || {}).sockopt || {}).dialerProxy)), false);
 });
 
-test('a group in advanced routing: a rule target, the default, a base a target rides — each its own loopback; a group gone is a target that no longer exists', () => {
+test('a group in advanced routing: a rule target, the default — its own loopback; as a base, each target through it is [group → target]; a group gone is a target that no longer exists', () => {
   const g = groupOf(['de', 'nl']);
   const plan = {
     mode: 'advanced', serversById: Object.assign({}, byId, { 'grp-g': g }), chainsById: {}, chain: [],
@@ -134,12 +148,14 @@ test('a group in advanced routing: a rule target, the default, a base a target r
   const rule = cfg.routing.rules.find((r) => r.domain && r.domain.includes('example.org'));
   assert.equal(rule.outboundTag, 'out-grp-g');
   assert.equal(find(cfg, 'out-grp-g').protocol, 'loopback');
-  // the base: its own group instance, and the target dials its loopback
-  assert.equal(find(cfg, 'base-grp-g').protocol, 'loopback');
-  assert.equal(find(cfg, 'out-cdn@grp-g').streamSettings.sockopt.dialerProxy, 'base-grp-g');
-  assert.deepEqual(cfg.routing.balancers.map((b) => b.tag).sort(), ['base-grp-g~bal', 'out-grp-g~bal']);
-  assert.deepEqual(cfg.routing.rules.slice(0, 2).map((r) => r.balancerTag).sort(), ['base-grp-g~bal', 'out-grp-g~bal']);
-  assert.deepEqual(cfg.observatory.subjectSelector.sort(), ['base-grp-g~gm', 'out-grp-g~gm']);
+  // the base registers nothing of its own; the target is a group of [DE → CDN], [NL → CDN]
+  assert.equal(cfg.outbounds.some((o) => o.tag.startsWith('base-')), false);
+  assert.equal(find(cfg, 'out-cdn@grp-g').protocol, 'loopback');
+  assert.equal(find(cfg, 'out-cdn@grp-g~gm0').settings.vnext[0].address, 'cdn.example.com');
+  assert.equal(find(cfg, 'out-cdn@grp-g~gm0').streamSettings.sockopt.dialerProxy, 'out-cdn@grp-g~gh0-h0');
+  assert.deepEqual(cfg.routing.balancers.map((b) => b.tag).sort(), ['out-cdn@grp-g~bal', 'out-grp-g~bal']);
+  assert.deepEqual(cfg.routing.rules.slice(0, 2).map((r) => r.balancerTag).sort(), ['out-cdn@grp-g~bal', 'out-grp-g~bal']);
+  assert.deepEqual(cfg.observatory.subjectSelector.sort(), ['out-cdn@grp-g~gm', 'out-grp-g~gm']);
   // the default gone (a group whose members are all gone has no record) → refused, as a deleted server is
   assert.throws(() => B.buildConfig(Object.assign({}, plan, { def: 'grp-gone' }), SETTINGS), /no longer exists|دیگر وجود ندارد/);
 });
@@ -218,4 +234,21 @@ test('router: a group saved, selected, built and pinged through the real service
   assert.deepEqual((await s.service.invoke('app:init')).groups.map((g) => g.id), ['grp-r']);
   const ping = await s.service.invoke('ping:tcp', 'grp-r');
   assert.equal(ping.na, true);
+});
+
+test('the traffic meter: a group\'s members count as the group (the core counts nothing on its loopback) — once in the total, under the group\'s tag per outbound; hops and helpers stay out', () => {
+  const { sumOutbounds, byOutbound } = require('../src/main/stats');
+  const vars = { stats: { outbound: {
+    proxy: { uplink: 0, downlink: 0 },
+    'proxy~gm0': { uplink: 10, downlink: 100 }, 'proxy~gm1': { uplink: 5, downlink: 50 },
+    'proxy~gh0-h0': { uplink: 10, downlink: 100 }, 'proxy~gh1~frag': { uplink: 1, downlink: 1 },
+    'out-grp-x': { uplink: 0, downlink: 0 }, 'out-grp-x~gm0': { uplink: 2, downlink: 20 },
+    direct: { uplink: 3, downlink: 30 }
+  } } };
+  assert.deepEqual(sumOutbounds(vars), { up: 17, down: 170 });
+  const per = byOutbound(vars);
+  assert.deepEqual(per.proxy, { up: 15, down: 150 });
+  assert.deepEqual(per['out-grp-x'], { up: 2, down: 20 });
+  assert.equal(Object.keys(per).some((t) => t.includes('~')), false);
+  assert.deepEqual(per.direct, { up: 3, down: 30 });
 });
