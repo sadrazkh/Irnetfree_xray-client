@@ -24,4 +24,4 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
     res.end(buf);
   });
-}).listen(8765, () => console.log('renderer on http://localhost:8765'));
+}).listen(8765, '127.0.0.1', () => console.log('renderer on http://127.0.0.1:8765'));   // this machine only

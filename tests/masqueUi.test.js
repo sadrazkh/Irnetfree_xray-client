@@ -161,7 +161,7 @@ test('every MASQUE and + WARP string: once in fa and once in en, one clean liter
 // v1.26 (tests/warpWgUi.test.js) split the form by its kind and reads the accounts back: their helpers come too
 const DIALOG_FNS = ['edNode', 'appendSome', 'richLine', 'httpCards', 'warpChips', 'warpFresh', 'warpShown', 'openWarp', 'closeWarp', 'warpArgs',
   'warpErrorText', 'warpWarningTexts', 'looksP256', 'warpReadImport', 'warpImportChips', 'warpNum', 'warpField', 'warpSeg', 'warpFormNodes',
-  'warpProgressNodes', 'warpFootNodes', 'renderWarp', 'runWarp', 'warpSeeInList',
+  'warpProgressNodes', 'warpFootNodes', 'renderWarp', 'runWarp', 'warpUseChain', 'warpSeeInList',
   'fmtBytes', 'warpLicenses', 'warpCount', 'warpHops', 'warpHop', 'warpStoppedText', 'warpFill', 'warpReadWgImport', 'warpWgImportChips', 'warpBytes',
   'warpDate', 'warpTypeChip', 'warpAccountBody', 'warpAccountBox', 'warpLicenseNodes', 'warpNewNodes', 'warpTwoWg', 'warpTwoMasque', 'warpNoteText',
   'warpRenderFoot'];
