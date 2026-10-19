@@ -55,6 +55,7 @@ const { createRouteShareApi } = require('../main/routeShare');
 const { AssetUpdater } = require('../main/assetUpdater');
 const { CORE_IDS, createCoreVersionsApi } = require('../main/coreVersions');
 const { warpHandler } = require('../main/warp');
+const { normalizeGroups, groupRecordsById, isGroupRecord, serversOf } = require('../main/groups');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
 // list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
 // deliberately NOT given this: Electron never runs on a router.
@@ -1109,6 +1110,12 @@ function createService(opts = {}) {
     if (did.length) send('log', { line: `Router settings repaired once (a desktop backup restored before v1.16.1 had overwritten them): ${did.join('; ')} — each can be set back under Settings`, level: 'warn' });
   }
 
+  /** Groups (groups.js), as on the desktop. */
+  function getGroups() {
+    const groups = store.get('groups', []);
+    return Array.isArray(groups) ? groups : [];
+  }
+
   function getChains() {
     const chains = store.get('chains', null);
     if (Array.isArray(chains)) return chains;
@@ -1197,9 +1204,11 @@ function createService(opts = {}) {
   // (duplicated so the desktop app stays untouched).
   function buildPlan(serverId, settings) {
     const servers = store.get('servers', []);
-    const byId = (id) => servers.find(s => s.id === id);
     const serversById = {};
     for (const s of servers) serversById[s.id] = s;
+    // groups beside the servers, as main.js has them
+    Object.assign(serversById, groupRecordsById(getGroups(), Object.assign({}, serversById)));
+    const byId = (id) => servers.find(s => s.id === id) || (isGroupRecord(serversById[id]) ? serversById[id] : null);
 
     const chains = getChains();
     const chainById = {};
@@ -2355,7 +2364,8 @@ function createService(opts = {}) {
   /** The ids of every saved server a plan dials: each hop of a chain, every pool and advanced-routing target, every base one goes through. */
   function planServerIds(plan) {
     const ids = new Set();
-    const add = (s) => { if (s && s.id) ids.add(s.id); };
+    // a group: its own id and every member's (the servers it dials)
+    const add = (rec) => { if (rec && rec.id) ids.add(rec.id); for (const s of serversOf(rec)) if (s && s.id) ids.add(s.id); };
     const hops = (list) => { for (const s of list || []) add(s); };
     const target = (tg) => {
       if (!tg || tg === 'direct' || tg === 'block') return;
@@ -3039,6 +3049,12 @@ function createService(opts = {}) {
     const servers = store.get('servers', []);
     const server = servers.find(s => s.id === id);
     if (server) return { server, chain: null };
+    const group = getGroups().find(g => g && g.id === id);
+    if (group) {
+      const byId = {}; for (const s of servers) byId[s.id] = s;
+      const rec = groupRecordsById([group], byId)[group.id];
+      return rec ? { server: rec, chain: null } : { server: null, chain: null };
+    }
     const chain = getChains().find(c => c.id === id);
     if (chain) {
       const byId = {}; for (const s of servers) byId[s.id] = s;
@@ -3132,6 +3148,7 @@ function createService(opts = {}) {
       lastServerId: store.get('lastServerId', null),
       chain: store.get('chain', []),
       chains: getChains(),
+      groups: getGroups(),
       pool: getPool(),
       xrayReady: xray.binExists(),
       tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(),
@@ -3200,6 +3217,8 @@ function createService(opts = {}) {
 
     'chain:get': () => store.get('chain', []),
     'chain:set': (ids) => { const v = Array.isArray(ids) ? ids : []; store.set('chain', v); return v; },
+    'groups:list': () => getGroups(),
+    'groups:set': (groups) => { const v = normalizeGroups(groups); store.set('groups', v); return v; },
     'chains:list': () => getChains(),
     'chains:set': (chains) => {
       const v = Array.isArray(chains) ? chains.filter(c => c && c.id).map(c => ({ id: c.id, name: String(c.name || 'Chain').trim() || 'Chain', members: Array.isArray(c.members) ? c.members.filter(Boolean) : [] })) : [];
@@ -3317,6 +3336,7 @@ function createService(opts = {}) {
     'ping:tcp': async (id) => {
       const { server } = resolveTarget(id);
       if (!server) return { ok: false, error: 'not found' };
+      if (isGroupRecord(server)) return { ok: false, na: true, error: 'a group has no one address to knock on' };
       if (udpOnly(server)) return { ok: false, na: true, error: 'UDP only — no TCP port to ping' };
       return tcpPing(server.address, server.port);
     },
@@ -3482,7 +3502,7 @@ function createService(opts = {}) {
     // Backup and restore — see backup.js; the same merge-by-id the desktop does.
     'backup:export': () => JSON.stringify(exportBundle({
       version: appVersion,
-      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), settings: getSettings() },
+      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings() },
       usage: usage ? usage.totals : {},
       flavor: OPENWRT ? 'openwrt' : null   // a router's own backup brings its router-only settings back (backup:import)
     }), null, 2),
@@ -3493,15 +3513,15 @@ function createService(opts = {}) {
       try {
         r = importBundle(bundle, {
           servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
-          chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), settings: getSettings(), usage: usage ? usage.totals : {}
+          chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {}
         // the keep list is for a backup made elsewhere (a desktop's, or one
         // from before the mark): the router's own, restored after a reset or
         // a re-flash, is exactly what should bring its kill switch back
         }, { keep: OPENWRT && !(bundle && bundle.flavor === 'openwrt') ? ROUTER_KEEPS_ON_IMPORT : [] });
       } catch (err) { return { ok: false, error: err.message }; }
-      store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, settings: r.next.settings });
+      store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, groups: r.next.groups, settings: r.next.settings });
       if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
-      send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles added`, level: 'info' });
+      send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles, ${r.added.groups} groups added`, level: 'info' });
       // `kept`: the router-only keys the backup wanted changed — for the renderer's own words
       if (r.kept.length) send('log', { line: 'Backup restored on a router: desktop-only settings were kept as the router needs them (TUN, system proxy, per-app routing, leak guard, connect at start, QUIC refusal, kill switch)', level: 'warn' });
       return { ok: true, added: r.added, kept: r.kept };

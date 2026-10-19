@@ -196,6 +196,8 @@ object RouteShare {
 
         fun server(id: String): String {
             serverKeys[id]?.let { k: String -> return k }
+            // a group (Groups.kt) does not travel in a routing link: say so, not "gone"
+            if (Groups.isGroupId(id) && servers.none { s: ServerConfig -> s.id == id }) throw IllegalArgumentException("It names a group (⧉) — a routing link carries servers and chains only; pick a server or a chain there to share it")
             if (servers.none { s: ServerConfig -> s.id == id }) throw IllegalArgumentException("It names a server that no longer exists — fix it under Routing first")
             val k = "s${serverKeys.size + 1}"
             serverKeys[id] = k
@@ -205,6 +207,9 @@ object RouteShare {
         fun chain(id: String): String {
             chainKeys[id]?.let { k: String -> return k }
             val c = chains.firstOrNull { x: ChainConfig -> x.id == id } ?: throw IllegalArgumentException("It names a chain that no longer exists — fix it under Routing first")
+            if (c.members.any { m: String -> Groups.isGroupId(m) && servers.none { s: ServerConfig -> s.id == m } }) {
+                throw IllegalArgumentException("The chain “${c.name}” has a group (⧉) as a hop — a routing link carries servers only; share a chain of servers instead")
+            }
             // a chain that lost a server is refused, not shared shorter: the receiver would dial the rest from where it is (routeShare.js chainLost)
             if (c.members.isEmpty() || c.members.any { m: String -> servers.none { s: ServerConfig -> s.id == m } }) {
                 throw IllegalArgumentException("The chain “${c.name}” lost a server (it was removed, or replaced by a subscription update) — put it back under Chains, then copy again")

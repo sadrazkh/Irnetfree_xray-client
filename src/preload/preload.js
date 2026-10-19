@@ -31,6 +31,10 @@ contextBridge.exposeInMainWorld('api', {
   listChains: () => ipcRenderer.invoke('chains:list'),
   setChains: (chains) => ipcRenderer.invoke('chains:set', chains),
 
+  // groups (several configs used as one: groups.js)
+  listGroups: () => ipcRenderer.invoke('groups:list'),
+  setGroups: (groups) => ipcRenderer.invoke('groups:set', groups),
+
   // proxy pool (multi-config: several exits on several local ports at once)
   listPool: () => ipcRenderer.invoke('pool:list'),
   setPool: (entries) => ipcRenderer.invoke('pool:set', entries),

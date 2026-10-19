@@ -54,6 +54,7 @@ const { createRouteShareApi } = require('./routeShare');
 const { AssetUpdater, cmpVersion } = require('./assetUpdater');
 const { CORE_IDS, createCoreVersionsApi } = require('./coreVersions');
 const { warpHandler } = require('./warp');
+const { normalizeGroups, groupRecordsById, isGroupRecord, serversOf } = require('./groups');
 const https = require('https');
 
 let mainWindow = null;
@@ -749,9 +750,12 @@ async function effectiveSettings(serverId) {
  */
 function buildPlan(serverId, settings) {
   const servers = store.get('servers', []);
-  const byId = (id) => servers.find(s => s.id === id);
   const serversById = {};
   for (const s of servers) serversById[s.id] = s;
+  // a group is a record beside the servers (groups.groupRecord), so its id is a
+  // target, a base, a chain member and a selection like a server's
+  Object.assign(serversById, groupRecordsById(getGroups(), Object.assign({}, serversById)));
+  const byId = (id) => servers.find(s => s.id === id) || (isGroupRecord(serversById[id]) ? serversById[id] : null);
 
   // Named chains (first-class "configs"). Legacy single global chain (store.chain)
   // is kept only as a fallback for old routing rules that target 'chain'.
@@ -1826,7 +1830,8 @@ function dialChanged(a, b) {
 /** The ids of every saved server a plan dials: each hop of a chain, every pool and advanced-routing target, every base one goes through. */
 function planServerIds(plan) {
   const ids = new Set();
-  const add = (s) => { if (s && s.id) ids.add(s.id); };
+  // a group: its own id and every member's (the servers it dials)
+  const add = (rec) => { if (rec && rec.id) ids.add(rec.id); for (const s of serversOf(rec)) if (s && s.id) ids.add(s.id); };
   const hops = (list) => { for (const s of list || []) add(s); };
   const target = (tg) => {
     if (!tg || tg === 'direct' || tg === 'block') return;
@@ -2663,6 +2668,12 @@ function migrateSettingsStore() {
   if (changed) store.set('settings', settings);
 }
 
+/** Groups (groups.js): [{ id, name, strategy, members: [{ id, address?, port? }] }] — several configs used as one. */
+function getGroups() {
+  const groups = store.get('groups', []);
+  return Array.isArray(groups) ? groups : [];
+}
+
 /** Named proxy chains: [{ id, name, members:[serverId,...] }]. */
 function getChains() {
   const chains = store.get('chains', null);
@@ -2790,6 +2801,7 @@ function registerIpc() {
     lastServerId: store.get('lastServerId', null),
     chain: store.get('chain', []),
     chains: getChains(),
+    groups: getGroups(),
     pool: getPool(),
     xrayReady: xray.binExists(),
     tunAvailable: makeTun(getSettings(), { quiet: true }).isAvailable(),
@@ -2909,6 +2921,14 @@ function registerIpc() {
   });
 
   // Named proxy chains (first-class configs)
+  // Groups (groups.js): several configs used as one
+  ipcMain.handle('groups:list', () => getGroups());
+  ipcMain.handle('groups:set', (e, groups) => {
+    const valid = normalizeGroups(groups);
+    store.set('groups', valid);
+    return valid;
+  });
+
   ipcMain.handle('chains:list', () => getChains());
   ipcMain.handle('chains:set', (e, chains) => {
     const valid = Array.isArray(chains)
@@ -3111,6 +3131,14 @@ function registerIpc() {
     const servers = store.get('servers', []);
     const server = servers.find(s => s.id === id);
     if (server) return { server, chain: null };
+    // a group: its record, measured through its balancer (buildTestConfig)
+    const group = getGroups().find(g => g && g.id === id);
+    if (group) {
+      const byId = {};
+      for (const s of servers) byId[s.id] = s;
+      const rec = groupRecordsById([group], byId)[group.id];
+      return rec ? { server: rec, chain: null } : { server: null, chain: null };
+    }
     const chain = getChains().find(c => c.id === id);
     if (chain) {
       const byId = {};
@@ -3125,6 +3153,7 @@ function registerIpc() {
   ipcMain.handle('ping:tcp', async (e, id) => {
     const { server } = resolveTarget(id);
     if (!server) return { ok: false, error: 'not found' };
+    if (isGroupRecord(server)) return { ok: false, na: true, error: 'a group has no one address to knock on' };
     if (udpOnly(server)) return { ok: false, na: true, error: 'UDP only — no TCP port to ping' };
     return tcpPing(server.address, server.port);
   });
@@ -3408,7 +3437,7 @@ function registerIpc() {
   // Backup: everything the user has, as one JSON string the renderer saves.
   ipcMain.handle('backup:export', () => JSON.stringify(exportBundle({
     version: app.getVersion(),
-    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), settings: getSettings() },
+    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings() },
     usage: usage ? usage.totals : {}
   }), null, 2));
   // Restore: a merge by id (backup.js) — nothing on this machine is lost, and
@@ -3420,13 +3449,13 @@ function registerIpc() {
     try {
       r = importBundle(bundle, {
         servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
-        chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), settings: getSettings(), usage: usage ? usage.totals : {}
+        chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {}
       });
     } catch (err) { return { ok: false, error: err.message }; }
-    store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, settings: r.next.settings });
+    store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, groups: r.next.groups, settings: r.next.settings });
     if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
     refreshTray();
-    send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles added`, level: 'info' });
+    send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles, ${r.added.groups} groups added`, level: 'info' });
     return { ok: true, added: r.added };
   });
 

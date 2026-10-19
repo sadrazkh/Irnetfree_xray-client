@@ -380,8 +380,8 @@ test('both mirrors plan a routing profile the same way, line for line: either se
     // the old settings path mirrors into rp-default
     assert.match(source, /if \(\['routeRules', 'routeDefault', 'advancedUseMode'\]\.some\(k => k in partial\)\) \{\n\s*const profiles = getRoutingProfiles\(\);\n\s*const synced = mirrorFromSettings\(profiles, next\);\n\s*if \(synced !== profiles\) store\.set\('routingProfiles', synced\);/, label);
     // the backup carries and restores them
-    assert.equal((source.match(/routingProfiles: getRoutingProfiles\(\), settings: getSettings\(\)/g) || []).length, 2, `${label}: export and import`);
-    assert.match(source, /pool: r\.next\.pool, routingProfiles: r\.next\.routingProfiles, settings: r\.next\.settings \}\);/, label);
+    assert.equal((source.match(/routingProfiles: getRoutingProfiles\(\), groups: getGroups\(\), settings: getSettings\(\)/g) || []).length, 2, `${label}: export and import`);
+    assert.match(source, /pool: r\.next\.pool, routingProfiles: r\.next\.routingProfiles, groups: r\.next\.groups, settings: r\.next\.settings \}\);/, label);
   }
   assert.match(MAIN, /ipcMain\.handle\('routing:profiles', \(\) => \(\{ profiles: getRoutingProfiles\(\) \}\)\);/);
   assert.match(MAIN, /ipcMain\.handle\('routing:setProfiles', \(e, profiles\) => setRoutingProfiles\(profiles\)\);/);

@@ -91,6 +91,7 @@ function hintsHarness({ servers, subs = SUBS, rules = [], ifaces = {}, platform 
     // no routing profile here: the rules are the settings' (rp-default's mirror)
     getRoutingProfiles: () => [],
     advancedTargets,
+    serversOf: require('../src/main/groups').serversOf,
     isOwnTunInterface: (n) => n === 'IRNetFree' || n === 'XrayTun',
     TUN_LOCAL_IP: '10.255.0.2',
     TUN_ADDR4: '172.19.0.1/30',
@@ -185,7 +186,7 @@ test('W4 is a fact about the tunnel’s routes: with TUN off (the system proxy b
 
 test('W3: managed DNS off is said for a WireGuard resolver the plan routes to — not for every record an advanced or pool plan carries', () => {
   const { wgResolverAddresses } = require('../src/main/configBuilder');
-  const ctx = vm.createContext({ wgResolverAddresses, advancedTargets });
+  const ctx = vm.createContext({ wgResolverAddresses, advancedTargets, serversOf: require('../src/main/groups').serversOf });
   vm.runInContext([fnOf(MAIN, 'planServerIds'), fnOf(MAIN, 'routedWgResolvers')].join('\n'), ctx);
   const corp = wg('b47f', 'cobra.tes.ca');
   const DNS = wgResolverAddresses({ mode: 'single', server: corp });

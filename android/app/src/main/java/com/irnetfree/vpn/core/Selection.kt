@@ -5,12 +5,13 @@ package com.irnetfree.vpn.core
  * goes away. Pure — Store holds the two values and writes them — so the rule is
  * tested off a device.
  *
- * A selection is "<serverId>" | "chain:<id>" | "__pool__" | "__advanced__" |
- * "__advanced__:<profileId>".
+ * A selection is "<serverId>" | "<groupId>" | "chain:<id>" | "__pool__" |
+ * "__advanced__" | "__advanced__:<profileId>".
  * The pool and advanced routing are modes of the app, not records anybody can
  * delete, so they always resolve. A chain resolves while it exists: one that has
  * lost members is still the user's chain, and connecting says what it lacks —
  * quietly swapping a route the user built for some single server would be worse.
+ * A group (Groups.kt, a bare `grp-…` id) the same: it resolves while it exists.
  *
  * The owner's complaint was the selection "jumping back to the start". The
  * selection itself was stored; what it named was not always there any more —
@@ -36,27 +37,29 @@ object Selection {
     /**
      * Does [sel] name something that exists? "" never does. A profile's
      * selection resolves while that profile exists; plain [ADVANCED] always
-     * does (it is the first profile, and there always is one).
+     * does (it is the first profile, and there always is one). A group's
+     * while that group exists ([groupIds]).
      */
-    fun resolves(sel: String, serverIds: Set<String>, chainIds: Set<String>, profileIds: Set<String> = emptySet()): Boolean = when {
+    fun resolves(sel: String, serverIds: Set<String>, chainIds: Set<String>, profileIds: Set<String> = emptySet(), groupIds: Set<String> = emptySet()): Boolean = when {
         sel.isEmpty() -> false
         sel == POOL || sel == ADVANCED -> true
         sel.startsWith(ADVANCED_PREFIX) -> sel.substring(ADVANCED_PREFIX.length) in profileIds
         sel.startsWith(CHAIN) -> sel.substring(CHAIN.length) in chainIds
-        else -> sel in serverIds
+        else -> sel in serverIds || sel in groupIds
     }
 
     /**
      * What the selection should be now: [current] while it resolves; else the
      * choice before it; else the first server; else nothing ("").
      */
-    fun repair(current: String, previous: String, serverIds: List<String>, chainIds: Collection<String>, profileIds: Collection<String> = emptyList()): String {
+    fun repair(current: String, previous: String, serverIds: List<String>, chainIds: Collection<String>, profileIds: Collection<String> = emptyList(), groupIds: Collection<String> = emptyList()): String {
         val servers = serverIds.toHashSet()
         val chains = chainIds.toHashSet()
         val profiles = profileIds.toHashSet()
+        val groups = groupIds.toHashSet()
         return when {
-            resolves(current, servers, chains, profiles) -> current
-            resolves(previous, servers, chains, profiles) -> previous
+            resolves(current, servers, chains, profiles, groups) -> current
+            resolves(previous, servers, chains, profiles, groups) -> previous
             else -> serverIds.firstOrNull() ?: ""
         }
     }
@@ -67,6 +70,6 @@ object Selection {
      * whatever was kept already — a dangling id is never remembered as a
      * fallback, and picking the same thing twice does not erase the one before.
      */
-    fun previousAfterPick(current: String, previous: String, next: String, serverIds: Set<String>, chainIds: Set<String>, profileIds: Set<String> = emptySet()): String =
-        if (next != current && resolves(current, serverIds, chainIds, profileIds)) current else previous
+    fun previousAfterPick(current: String, previous: String, next: String, serverIds: Set<String>, chainIds: Set<String>, profileIds: Set<String> = emptySet(), groupIds: Set<String> = emptySet()): String =
+        if (next != current && resolves(current, serverIds, chainIds, profileIds, groupIds)) current else previous
 }
