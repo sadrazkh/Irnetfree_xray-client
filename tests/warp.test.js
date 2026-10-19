@@ -73,24 +73,27 @@ test('registerWarp: PATCH /reg/{id} with the Bearer token and exactly { key: bas
 test('registerWarp: warp_enabled — switched on with its own PATCH only when the answer says it is not; checked; a device that stays off is a warning, not a failure', async () => {
   // a fresh device answers warp_enabled:false → PATCH { warp_enabled: true }
   let { api, reg } = await register();
-  assert.deepEqual(api.calls.map((c) => c.method + ' ' + c.path.replace('/v0a5641', '')), ['POST /reg', `PATCH /reg/${F.DEVICE}`, `PATCH /reg/${F.DEVICE}`]);
+  // then the account and its devices read back (accountStep), every time
+  assert.deepEqual(api.calls.map((c) => c.method + ' ' + c.path.replace('/v0a5641', '')), ['POST /reg', `PATCH /reg/${F.DEVICE}`, `PATCH /reg/${F.DEVICE}`, `GET /reg/${F.DEVICE}/account`, `GET /reg/${F.DEVICE}/account/devices`]);
   assert.deepEqual(api.calls[2].body, { warp_enabled: true });
   assert.equal(api.calls[2].headers.Authorization, 'Bearer ' + F.TOKEN);
   assert.deepEqual(reg.warnings, []);
   // already on → no second PATCH
   ({ api, reg } = await register({ enrolled: F.device({ warp_enabled: true }) }));
-  assert.equal(api.calls.length, 2);
+  assert.equal(api.calls.filter((c) => c.method === 'PATCH').length, 1);
   assert.deepEqual(reg.warnings, []);
   // still off after the PATCH → said, and the servers are still made from the record
   ({ api, reg } = await register({ activated: F.device({ warp_enabled: false }) }));
-  assert.equal(api.calls.length, 3);
+  assert.equal(api.calls.filter((c) => c.method === 'PATCH').length, 2);
   assert.deepEqual(reg.warnings.map((w) => w.code), ['warpNotEnabled']);
   assert.equal(reg.address.length, 2);
 });
 
 test('registerWarp: a WARP+ license — PUT /reg/{id}/account { license } after the key; the account read from its answer; none without one', async () => {
   let { api, reg } = await register({}, { license: '  ' + F.LICENSE + ' ' });
-  const put = api.calls.at(-1);
+  const put = api.calls.find((c) => c.method === 'PUT');
+  // the key, then the account read back
+  assert.deepEqual(api.calls.slice(-3).map((c) => c.method + ' ' + c.path.replace('/v0a5641/reg/' + F.DEVICE, '')), ['PUT /account', 'GET /account', 'GET /account/devices']);
   assert.equal(put.method, 'PUT');
   assert.equal(put.path, `/v0a5641/reg/${F.DEVICE}/account`);
   assert.equal(put.headers.Authorization, 'Bearer ' + F.TOKEN);
@@ -119,7 +122,7 @@ test('registerWarp: the record mapped — the edge key as PEM, v4 /32 + v6 /128,
   assert.equal(spkiOfPublic(reg.publicKey), F.EDGE_PUB);
   assert.deepEqual(reg.address, ['172.16.0.2/32', '2606:4700:110:8a36:9c1:2b3:4d5:6e7f/128']);
   assert.deepEqual(reg.endpoints, { h3v4: '162.159.198.1', h3v6: '2606:4700:103::1', h2v4: '162.159.198.2', h2v6: '2606:4700:103::2' });
-  assert.deepEqual(Object.keys(reg).sort(), ['account', 'address', 'endpoints', 'privateKey', 'publicKey', 'warnings']);
+  assert.deepEqual(Object.keys(reg).sort(), ['account', 'address', 'endpoints', 'info', 'privateKey', 'publicKey', 'warnings']);
 });
 
 test('registerWarp: endpoints fall back to Cloudflare’s defaults; an endpoint with another port loses it; addresses already with a prefix kept', async () => {
@@ -140,7 +143,8 @@ test('registerWarp: endpoints fall back to Cloudflare’s defaults; an endpoint 
 test('registerWarp: an enroll answer without peers is no failure — the record is read back with GET /reg/{id}', async () => {
   const bare = F.device({ warp_enabled: true, config: { peers: [], interface: { addresses: {} } } });
   const { reg, api } = await register({ enrolled: bare });
-  assert.deepEqual(api.calls.map((c) => c.method), ['POST', 'PATCH', 'GET']);
+  assert.deepEqual(api.calls.map((c) => c.method), ['POST', 'PATCH', 'GET', 'GET', 'GET']);
+  assert.equal(api.calls[2].path, '/v0a5641/reg/' + F.DEVICE);
   assert.equal(api.calls[2].headers.Authorization, 'Bearer ' + F.TOKEN);
   assert.equal(api.calls[2].body, null);
   assert.equal(spkiOfPublic(reg.publicKey), F.EDGE_PUB);
