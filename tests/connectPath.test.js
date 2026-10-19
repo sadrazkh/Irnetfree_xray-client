@@ -97,7 +97,7 @@ test('the connect resolves both kinds of name BEFORE the tunnel and the guard, a
 
 test('a process-route reload keeps the addresses the live tunnel was built for', () => {
   for (const [label, source] of [['main.js', MAIN], ['service.js', SERVICE]]) {
-    const body = slice(source, label, 'async function rebuildActiveConfig() {', 'buildActive(serverId, settings);');
+    const body = slice(source, label, 'async function rebuildActiveConfig(why) {', 'buildActive(serverId, settings);');
     assert.match(body, /if \(livePins\) settings = Object\.assign\(\{\}, settings, livePins\);/, label);
     assert.match(CONNECT[label], /livePins = \{ wgEndpointIps: settings\.wgEndpointIps, entryHostIps: settings\.entryHostIps \};/, label);
   }
@@ -331,7 +331,7 @@ test('both mirrors: a drop marks what the live connection muxed for a re-test; a
   assert.ok(serviceDrop.indexOf("if (!store.get('activeServerId', null)) return;") < serviceDrop.indexOf('recheckLiveMux();'));
   assert.ok(serviceDrop.indexOf('recheckLiveMux();') < serviceDrop.indexOf('autoReconnectOnNetworkChange'), 'marked whether or not anything rebuilds it');
   for (const [label, source] of [['main.js', MAIN], ['service.js', SERVICE]]) {
-    const reload = slice(source, label, 'async function rebuildActiveConfig() {', 'buildActive(serverId, settings);');
+    const reload = slice(source, label, 'async function rebuildActiveConfig(why) {', 'buildActive(serverId, settings);');
     assert.match(reload, /if \(liveMux\) settings = Object\.assign\(\{\}, settings, \{ muxServerIds: liveMux\.ids \}\);/, `${label}: a process-route reload keeps the live connection's mux`);
     const off = slice(source, label, 'async function doDisconnect() {', 'cleanupFailed = false;');
     assert.match(off, /liveDirectInterface = null;\n\s*liveMux = null;/, label);

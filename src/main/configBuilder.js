@@ -1163,8 +1163,9 @@ function buildConfig(planArg, settings) {
   if (dnsPlan.hijackOutbound) outbounds.push(dnsPlan.hijackOutbound);
   rules = [...dnsPlan.rules, ...rules];
 
-  // groups: their members, balancers, rules (first of all) and health check
-  const grp = expandGroups(outbounds);
+  // groups: their members, balancers, rules (first of all) and health check —
+  // less any member the app has set aside for not answering (groupEvict.js)
+  const grp = expandGroups(outbounds, s.groupSkip);
   outbounds = grp.outbounds;
   rules = [...grp.rules, ...rules];
 
@@ -1237,9 +1238,14 @@ const GROUP_PROBE = { url: 'http://cp.cloudflare.com/', interval: '10s' };
  * `map`: each group in the config — its tag, its id and name, its strategy,
  * and who `T~gm<i>` is ({ id, name, address, port } of the server dialled; a
  * chain variant by the group member it takes) — for the live meter.
+ * `map` also says which members the app could test on their own: `direct`
+ * false for a group dialled through a hop and for a chain variant.
+ * `skip`: the member keys (groupMemberKey) the app has set aside — left out,
+ * unless that would leave the group empty.
  * → { outbounds, rules, balancers, observatory | null, map }
  */
-function expandGroups(outbounds) {
+function expandGroups(outbounds, skip) {
+  const skipped = new Set(Array.isArray(skip) ? skip : []);
   const out = [];
   const rules = [];
   const balancers = [];
@@ -1259,7 +1265,9 @@ function expandGroups(outbounds) {
     const so = o.streamSettings && o.streamSettings.sockopt;
     const via = so && so.dialerProxy ? String(so.dialerProxy) : '';
     out.push({ tag: T, protocol: 'loopback', settings: { inboundTag: T + '~in' } });
-    const members = (Array.isArray(g.members) ? g.members : []).filter(m => m && (m.outbound || Array.isArray(m.chain)));
+    const all = (Array.isArray(g.members) ? g.members : []).filter(m => m && (m.outbound || Array.isArray(m.chain)));
+    const kept = skipped.size ? all.filter(m => !skipped.has(groupMemberKey(g.id, who(m)))) : all;
+    const members = kept.length ? kept : all;
     members.forEach((m, i) => {
       const tag = `${T}~gm${i}`;
       // a chain variant (groupOfChains): its exit is the member, its hops `T~gh<i>-h<j>`
@@ -1276,12 +1284,18 @@ function expandGroups(outbounds) {
     });
     rules.push({ type: 'field', inboundTag: [T + '~in'], balancerTag: T + '~bal' });
     subjects.push(T + '~gm');
-    map.push({ tag: T, groupId: g.id || '', name: g.name || '', strategy: GROUP_STRATEGIES.includes(g.strategy) ? g.strategy : 'roundRobin', members: members.map(who) });
+    map.push({ tag: T, groupId: g.id || '', name: g.name || '', strategy: GROUP_STRATEGIES.includes(g.strategy) ? g.strategy : 'roundRobin', direct: !via,
+      members: members.map(m => Object.assign(who(m), { direct: !via && !Array.isArray(m.chain) })) });
   }
   const observatory = subjects.length
     ? { subjectSelector: subjects, probeUrl: GROUP_PROBE.url, probeInterval: GROUP_PROBE.interval, enableConcurrency: true }
     : null;
   return { outbounds: out, rules, balancers, observatory, map };
+}
+
+/** A group member as the app names it to set it aside: its group, the server dialled and the address it dials. */
+function groupMemberKey(groupId, m) {
+  return [groupId || '', (m && m.id) || '', (m && m.address) || '', (m && m.port) || 0].join('|');
 }
 
 /** The config, with the running groups (expandGroups' map) beside it — never written to disk: not enumerable. */
@@ -1496,7 +1510,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
     { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
-  const grp = expandGroups(reg.outs);   // see buildConfig
+  const grp = expandGroups(reg.outs, s.groupSkip);   // see buildConfig
   const outs = grp.outbounds.map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outs, s.entryHostIps, s.ipv6);   // see buildConfig
   const outbounds = applyFragments(outs);
@@ -1782,4 +1796,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { expandGroups, buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };
+module.exports = { expandGroups, groupMemberKey, buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };

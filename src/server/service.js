@@ -42,6 +42,7 @@ const { appsForTun } = require('../main/tunApps');
 const { LeakGuard } = require('../main/leakGuard');
 const { DnsGuardWatch } = require('../main/dnsGuardWatch');
 const { StatsPoller, SilenceWatch, GroupHealthWatch, WgHopWatch } = require('../main/stats');
+const { GroupEvictor } = require('../main/groupEvict');
 const { UsageMeter, grandTotal } = require('../main/usage');
 const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
@@ -661,6 +662,10 @@ function createService(opts = {}) {
   }
 
   const wgHops = new WgHopWatch();   // a WireGuard dropped by the config it goes through, named in the log
+  // a group's member that stays dead: out of the running config, tested by the app instead (groupEvict.js)
+  const groupEvict = new GroupEvictor();
+  let groupEvictAt = 0;
+  let groupEvictBusy = false;
   const xrayOpts = {
     binPath: store.get('xrayPath', null),
     dataDir,
@@ -774,6 +779,9 @@ function createService(opts = {}) {
       send('stats', s);
       // a group's members leaving and rejoining the rotation, said in the log
       for (const l of groupHealth.update(s.groups)) send('log', l);
+      // ...and one that stays dead set aside, tested by the app until it answers (groupEvict.js)
+      for (const l of groupEvict.update(s.groups)) send('log', l);
+      groupEvictTick();
       if (!usage) return;
       usage.tick(s.per);
       // the live figures ride `s.per`; the lifetime total needs neither that
@@ -2218,6 +2226,7 @@ function createService(opts = {}) {
     // the groups it runs, member by member, for the window's live view (groups-ui/design.md §3)
     stats.groupMap = config.groupTags || null;
     groupHealth.reset();
+    groupEvict.reset(plan);
     wgHops.reset(plan);
     watchWgSilence(config);
     // a fresh core counts from zero — tell the meter, or the first poll of the
@@ -2584,7 +2593,7 @@ function createService(opts = {}) {
     recoverQueued = null;
   }
 
-  async function rebuildActiveConfig() {
+  async function rebuildActiveConfig(why) {
     const serverId = store.get('activeServerId', null);
     if (!serverId || !xray.running) return;
     let settings = await effectiveSettings(serverId);
@@ -2596,6 +2605,8 @@ function createService(opts = {}) {
     if (livePins) settings = Object.assign({}, settings, livePins);
     // …and what it muxed: a reload is no new connect, and tests nothing
     if (liveMux) settings = Object.assign({}, settings, { muxServerIds: liveMux.ids });
+    // the group members set aside for not answering stay out (groupEvict.js)
+    settings = Object.assign({}, settings, { groupSkip: groupEvict.skip() });
     // `plan` too: the usage meter needs it to attribute the new core's bytes
     const { plan, config, engine } = buildActive(serverId, settings);
     const prevReloading = xrayReloading;
@@ -2607,10 +2618,45 @@ function createService(opts = {}) {
       liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first
       watchWgSilence(config);   // the plan may have changed under the live tunnel
       wgHops.reset(plan);
+      // the groups it runs now, member by member (a member set aside is no longer one of them)
+      stats.groupMap = config.groupTags || null;
+      groupHealth.reset();
       if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
     } finally { xrayReloading = prevReloading; }
     stats.setBin(xray.anyBin());
-    send('log', { line: 'Process routes applied (xray reloaded)', level: 'info' });
+    send('log', { line: why || 'Process routes applied (xray reloaded)', level: 'info' });
+  }
+
+  /** A server record measured the way a ping is: a throwaway core on a free port, one request through it (mirrors main.js). */
+  async function testRecordDelay(rec) {
+    let test;
+    try {
+      const port = await getFreePort();
+      const t = latencyTest(rec, port, latencyOpts());
+      test = await xray.startTest(t.config, t.engine);
+      return await httpThroughProxy(port, { host: 'cp.cloudflare.com', port: 80, path: '/' });
+    } catch (e) {
+      return { ok: false, ms: -1, error: (e && e.message) || String(e) };
+    } finally {
+      if (test) test.cleanup();
+    }
+  }
+
+  /** At most every 15 s, from the stats ticks: the due tests of the set-aside group members, then a reload when one went or came back (mirrors main.js). */
+  function groupEvictTick() {
+    const now = Date.now();
+    if (groupEvictBusy || now - groupEvictAt < 15000) return;
+    groupEvictAt = now;
+    if (!xray.running || connectsInFlight.size) return;
+    groupEvictBusy = true;
+    (async () => {
+      for (const d of groupEvict.due()) {
+        if (!xray.running) return;
+        const r = await testRecordDelay(d.record);
+        for (const l of groupEvict.tested(d.key, r.ok, r.ok ? r.ms : null)) send('log', l);
+      }
+      if (xray.running && !connectsInFlight.size && groupEvict.takeReload()) await rebuildActiveConfig('Groups: the core reloaded with the members that answer');
+    })().catch((e) => send('log', { line: 'Groups: ' + ((e && e.message) || e), level: 'warn' })).finally(() => { groupEvictBusy = false; });
   }
 
   function startProcWatcher() {
