@@ -522,6 +522,8 @@ function treeHarness(over = {}) {
     'ruleTypeIcon', 'ruleSummary', 'fmtBytes', 'fmtSpeed', 'flowNodeClick', 'flashInto', 'focusAdvRow', 'openChainCard'], {
     state, t: en, $: page.$, $$: page.$$, document: page.document,
     drawFlowSoon: () => calls.push(['draw']),
+    // v1.28 (tests/groupsUi2.test.js): a running group's marks on the tree, and a card's tab opened on the way to it
+    gmDecorateFlows: () => {}, cgReveal: () => {},
     openEdit: (id) => calls.push(['openEdit', id]),
     showView: (v) => calls.push(['view', v]),
     setTimeout: () => 0,
