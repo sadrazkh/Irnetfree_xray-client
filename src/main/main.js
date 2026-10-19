@@ -34,9 +34,11 @@ const tunPlatform = require('./tunPlatform');
 const { appsForTun } = require('./tunApps');
 const { LeakGuard } = require('./leakGuard');
 const { DnsGuardWatch } = require('./dnsGuardWatch');
-const { StatsPoller, SilenceWatch, GroupHealthWatch } = require('./stats');
+const { StatsPoller, SilenceWatch, GroupHealthWatch, WgHopWatch } = require('./stats');
 // a group's members leaving and rejoining the rotation (stats.js), said in the log
 const groupHealth = new GroupHealthWatch();
+// a WireGuard dropped by the config it goes through, named in the log (stats.js)
+const wgHops = new WgHopWatch();
 const { UsageMeter, grandTotal } = require('./usage');
 const { Downloader, downloadFile } = require('./downloader');
 const { pickUpdateAsset, parseSha256Sums, sha256File } = require('./appUpdate');
@@ -1770,6 +1772,7 @@ async function connectOnce(serverId, opts = {}) {
   // the groups it runs, member by member, for the window's live view (groups-ui/design.md §3)
   stats.groupMap = config.groupTags || null;
   groupHealth.reset();
+  wgHops.reset(plan);
   watchWgSilence(config);
   // A fresh core starts its counters at zero, so the meter has to be told —
   // otherwise the first poll of the new session reads as growth on the old one
@@ -2079,6 +2082,7 @@ async function rebuildActiveConfig() {
     await xray.start(config, check.engine);
     liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first
     watchWgSilence(config);   // the plan may have changed under the live tunnel
+    wgHops.reset(plan);
     // this restarts the core WITHOUT stopping the poller, so the meter has to
     // hear about it here too — same reason as the connect path
     if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
@@ -3609,7 +3613,12 @@ app.whenReady().then(() => {
     binPath: store.get('xrayPath', null),
     dataDir: dir,
     extraBinDirs: [ubin],
-    onLog: (line, level) => { send('log', { line, level }); healCertPin(line); },
+    onLog: (line, level) => {
+      send('log', { line, level });
+      healCertPin(line);
+      const hop = wgHops.onLine(line, getSettings().lang);
+      if (hop) send('log', hop);
+    },
     onStatus: (state, info) => {
       // The proc-routing watcher restarts xray in place; don't surface the
       // old instance's 'stopped' as a disconnect.
