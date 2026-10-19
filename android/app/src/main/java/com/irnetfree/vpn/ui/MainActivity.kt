@@ -3625,6 +3625,9 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
             SwitchRow("Apply the routing mode (Bypass Iran/China) under these rules" + (if (geo) "" else " — needs the geo files"), prof.useMode && geo, enabled = geo) { v: Boolean ->
                 update(prof.id) { cur: RoutingProfile -> cur.copy(useMode = v) }
             }
+            // the switch adds the mode chosen at the top — with Global there, it adds nothing
+            if (prof.useMode && geo && !s.routingMode.startsWith("bypass"))
+                Text("The Routing mode at the top is “${routingModeLabel(s.routingMode)}” — this switch adds nothing until it is Bypass Iran or Bypass China.", color = AMBER, fontSize = 11.sp)
 
             Spacer(Modifier.height(6.dp))
             Text("Base", color = TXT, fontWeight = FontWeight.Bold)
