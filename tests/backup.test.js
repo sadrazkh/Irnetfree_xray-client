@@ -39,7 +39,7 @@ test('import merges by id, keeps what is there, overlays settings and usage', ()
     usage: { s2: { down: 5, up: 5 } }
   });
   const r = importBundle(b, current);
-  assert.deepEqual(r.added, { servers: 1, subscriptions: 1, chains: 1, pool: 1, routingProfiles: 0 });
+  assert.deepEqual(r.added, { servers: 1, subscriptions: 1, chains: 1, pool: 1, routingProfiles: 0, groups: 0 });
   assert.deepEqual(r.next.servers, [{ id: 's1', outbound: {} }, { id: 's2', protocol: 'vless', port: 443, outbound: {} }], 'the existing s1 is kept as it was; a record without an outbound is not a server');
   assert.deepEqual(r.next.subscriptions.map(s => s.id), ['A', 'B']);
   assert.deepEqual(r.next.settings, { lang: 'fa', socksPort: 20808, theme: 'light' });
@@ -50,7 +50,7 @@ test('restoring twice is restoring once', () => {
   const b = exportBundle({ store: { servers: [{ id: 's9', protocol: 'trojan', port: 443, outbound: {} }] } });
   const once = importBundle(b, current);
   const twice = importBundle(b, once.next);
-  assert.deepEqual(twice.added, { servers: 0, subscriptions: 0, chains: 0, pool: 0, routingProfiles: 0 });
+  assert.deepEqual(twice.added, { servers: 0, subscriptions: 0, chains: 0, pool: 0, routingProfiles: 0, groups: 0 });
   assert.deepEqual(twice.next.servers, once.next.servers);
 });
 
@@ -89,7 +89,7 @@ test('an imported record with an id we never write is dropped, and so is every r
   assert.deepEqual(r.next.subscriptions.map(s => s.id), ['sub-ok']);
   assert.deepEqual(r.next.chains, [{ id: 'chain-ok', name: 'C', members: ['good1', 'gone'] }]);
   assert.deepEqual(r.next.pool.map(p => [p.id, p.target]), [['px-ok', 'good1'], ['px-chain', 'chain:chain-ok'], ['px-bad-target', '']]);
-  assert.deepEqual(r.added, { servers: 1, subscriptions: 1, chains: 1, pool: 3, routingProfiles: 0 });
+  assert.deepEqual(r.added, { servers: 1, subscriptions: 1, chains: 1, pool: 3, routingProfiles: 0, groups: 0 });
 });
 
 test('an imported server must be a protocol we build, with a real port', () => {

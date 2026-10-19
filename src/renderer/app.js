@@ -25,7 +25,10 @@ const state = {
   procList: [],            // running processes for the routing picker
   lan: null,               // { ip, socksPort, httpPort } when LAN sharing active
   chain: [],               // legacy: ordered server ids (first hop → exit)
-  chains: [],              // [{ id, name, members:[serverId,...] }] — first-class chains
+  chains: [],              // [{ id, name, members:[serverId | groupId,...] }] — first-class chains
+  // [{ id: 'grp-…', name, strategy, members: [{ id: serverId, address?, port? }] }] — groups
+  // (v1.27): several configs used together as one; a group id is a target like a server id
+  groups: [],
   pool: [],                // [{ id, name, target, socksPort, httpPort, enabled }] — multi-proxy pool
   // [{ id, name, rules, def, defVia, useMode, base }] — routing profiles (several
   // advanced routings); null on a back end without them, which keeps the
@@ -322,6 +325,7 @@ function setLang(lang) {
   renderInspector();
   refreshJsonFormLang();   // an open JSON edit form: its help line and summary are built with t()
   if (warpShown()) renderWarp();   // the + WARP dialog is drawn with t() too
+  if (grpShown()) renderGroupEditor();   // …and so is the group editor (renderChains drew the cards)
   if ($('#xrayVersion')) $('#xrayVersion').textContent = state.xrayVersion ? (t('xray.version') + ': ' + state.xrayVersion) : '';
   saveSettings({ lang });
 }
@@ -346,9 +350,11 @@ async function init() {
   state.pendingReconnect = data.pendingReconnect || [];
   state.usage = data.usage || {};
   state.chain = (data.chain || []).filter(id => state.servers.some(s => s.id === id));
+  // the groups before the chains: a chain's hop may be one of them
+  state.groups = await loadGroups(data);
   state.chains = (data.chains || []).map(c => ({
     id: c.id, name: c.name || 'Chain',
-    members: (c.members || []).filter(id => state.servers.some(s => s.id === id))
+    members: (c.members || []).filter(id => state.servers.some(s => s.id === id) || state.groups.some(g => g.id === id))
   }));
   state.pool = (data.pool || []).map(e => ({
     id: e.id, name: e.name || 'Proxy', target: e.target || '',
@@ -1532,7 +1538,8 @@ function refreshSelection() {
   });
   // a folded group has no cards to mark: its head says it holds the selection
   const selSrv = srvById(sel);
-  const selGroup = selSrv ? groupKey(selSrv.subId) : null;
+  // (a group of configs — v1.27 — lives in no subscription's pile)
+  const selGroup = selSrv && selSrv.protocol !== 'group' ? groupKey(selSrv.subId) : null;
   $$('#serverList .srv-group[data-group]').forEach((g) => g.classList.toggle('has-sel', g.dataset.group === selGroup));
 }
 
@@ -1717,6 +1724,8 @@ function renderPicker() {
   const selId = state.selectedServerId;
   const sel = state.servers.find(s => s.id === selId);
   const selChain = chainById(selId);
+  // a group (v1.27) is drawn like a chain: its record while a member of it is still here
+  const selGrp = (state.groups || []).some(g => g && g.id === selId) ? srvById(selId) : null;
   const hasAny = state.servers.length || anyChainReady() || advancedReady() || poolReady();
   // the plain '__advanced__' selection (LuCI, an older store) is the first
   // routing profile, and that profile's row is the one marked
@@ -1732,6 +1741,15 @@ function renderPicker() {
     btnProto.className = 'proto-badge proto-chain';
     btnName.textContent = selChain.name;
     const pl = pingLabel(selChain.id);
+    btnPing.textContent = pl.txt === '—' ? '' : pl.txt;
+    btnPing.className = 'picker-ping ' + pl.cls;
+  } else if (selGrp) {
+    btnProto.hidden = false;
+    btnProto.textContent = '⧉';
+    btnProto.className = 'proto-badge proto-group';
+    btnName.textContent = selGrp.name;
+    // a group has no TCP handshake of its own (ping:tcp answers na): its real delay
+    const pl = pingResultLabel((state.pings[selGrp.id] || {}).real);
     btnPing.textContent = pl.txt === '—' ? '' : pl.txt;
     btnPing.className = 'picker-ping ' + pl.cls;
   } else if (selId === ADV_ID || String(selId).startsWith(ADV_ID + ':')) {
@@ -1828,14 +1846,20 @@ function renderPicker() {
   for (const c of state.chains) {
     if (chainReady(c)) addRow(c.id, '<span class="proto-badge proto-chain">⛓</span>', c.name, c.id, true);
   }
+  // groups (v1.27): «⧉ name · n configs», while a member of it is still here
+  for (const g of state.groups || []) {
+    const rec = srvById(g.id);
+    if (rec) addRow(g.id, '<span class="proto-badge proto-group">⧉</span>', g.name + ' · ' + grpCountText(rec.group.size), g.id, true);
+  }
   for (const s of state.servers) {
     addRow(s.id, `<span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>`, s.name, s.id, false);
   }
 }
 
-/** Ping every server + ready chain shown in the picker (TCP + real delay). */
+/** Ping every server + ready chain + group shown in the picker (TCP + real delay). */
 async function pingAllVisible() {
-  await pingMany([...state.servers.map(s => s.id), ...state.chains.filter(chainReady).map(c => c.id)]);
+  await pingMany([...state.servers.map(s => s.id), ...state.chains.filter(chainReady).map(c => c.id),
+    ...(state.groups || []).filter(g => srvById(g.id)).map(g => g.id)]);
 }
 
 function openPicker() { if (state.servers.length || anyChainReady() || advancedReady() || poolReady()) $('#pickerMenu').hidden = false; }
@@ -2225,7 +2249,7 @@ function setConnUI(stateStr, id) {
   const effId = id || state.activeServerId || state.selectedServerId;
   const effChain = chainById(effId);
   if (effChain) {
-    const names = chainMembers(effChain).map(s => s.name);
+    const names = chainMembers(effChain).map(s => (s.protocol === 'group' ? '⧉ ' : '') + s.name);
     srv.textContent = '⛓ ' + effChain.name + (names.length ? ' (' + names.join(' → ') + ')' : '');
   } else if (effId === ADV_ID || String(effId).startsWith(ADV_ID + ':')) {
     srv.textContent = '🧭 ' + advSelName(effId);
@@ -2233,6 +2257,9 @@ function setConnUI(stateStr, id) {
     const list = poolEnabledValid();
     srv.textContent = '🧩 ' + t('picker.pool') + ' — ' +
       (list.map(e => `${e.name}:${e.socksPort}`).join(' · ') || '—');
+  } else if ((state.groups || []).some(g => g && g.id === effId)) {
+    // a group (v1.27): its name, how many of its configs are here and how it spreads the connections
+    srv.textContent = grpConnText(effId);
   } else {
     const server = state.servers.find(s => s.id === effId);
     srv.textContent = server ? `${server.name} — ${server.address}:${server.port}` : t('conn.noServer');
@@ -2584,8 +2611,9 @@ function targetLabel(target) {
     const c = (state.chains || []).find(x => x.id === String(target).slice(6));
     return '⛓ ' + (c ? c.name : '—');
   }
-  const s = (state.servers || []).find(x => x.id === target);
-  return s ? s.name : '—';
+  // a server, or a group (v1.27) — «⧉ name»
+  const s = srvById(target);
+  return s ? (s.protocol === 'group' ? '⧉ ' : '') + s.name : '—';
 }
 
 
@@ -2726,7 +2754,7 @@ function homeFlowModel(id) {
     for (const e of poolEnabledValid()) {
       const key = 't:' + e.target;
       if (!seen[key]) {
-        const kind = String(e.target).startsWith('chain:') ? 'chain' : 'server';
+        const kind = String(e.target).startsWith('chain:') ? 'chain' : (srvById(e.target) || {}).protocol === 'group' ? 'group' : 'server';
         seen[key] = { key, kind, ref: e.target, via: null, why: refProblem(e.target), tags: [outboundTagFor(e.target)] };
         m.targets.push(seen[key]);
       }
@@ -2743,7 +2771,8 @@ function homeFlowModel(id) {
     const targets = {};
     const target = (ref) => {
       if (!targets[ref]) {
-        const kind = ref === 'direct' || ref === 'block' ? ref : chain && ref === 'chain:' + chain.id ? 'chain' : 'server';
+        const kind = ref === 'direct' || ref === 'block' ? ref : chain && ref === 'chain:' + chain.id ? 'chain'
+          : srv && srv.protocol === 'group' && ref === srv.id ? 'group' : 'server';
         const tags = !ref ? [] : ref === 'direct' ? ['direct'] : ref === 'block' ? ['block'] : ['proxy', outboundTagFor(ref)];
         targets[ref] = { key: 't:' + (ref || 'none'), kind: ref ? kind : 'none', ref, via: null, why: '', tags, chain: kind === 'chain' ? chain : null };
       }
@@ -2866,15 +2895,16 @@ function buildHomeFlow(m, { live, ip, mode }) {
 
   const targets = column('targets');
   for (const tg of m.targets) {
-    const icon = tg.kind === 'direct' ? '↗' : tg.kind === 'block' ? '⛔' : tg.kind === 'exit' ? '🌐' : tg.kind === 'chain' ? '⛓' : '🛡';
+    const icon = tg.kind === 'direct' ? '↗' : tg.kind === 'block' ? '⛔' : tg.kind === 'exit' ? '🌐' : tg.kind === 'chain' ? '⛓' : tg.kind === 'group' ? '⧉' : '🛡';
     const label = tg.kind === 'direct' ? t('path.direct') : tg.kind === 'block' ? t('path.block')
       : tg.kind === 'exit' ? t('path.exitHere') : tg.kind === 'none' ? t('path.noServer')
         : tg.chain ? tg.chain.name : refName(tg.ref, prof);
     const el = homeFlowNode('mf-target' + (tg.why ? ' danger' : ''), tg.key, icon, label);
     paintLane(el, tg);
-    // a chain says its hops when asked; a target behind a base, which one
+    // a chain says its hops when asked, a group (v1.27) its configs; a target behind a base, which one
     const ch = tg.chain || (String(tg.ref).startsWith('chain:') ? chainById(String(tg.ref).slice(6)) : null);
-    const hops = ch ? chainMembers(ch).map(x => x.name).join(' → ') : '';
+    const hops = ch ? chainMembers(ch).map(x => (x.protocol === 'group' ? '⧉ ' : '') + x.name).join(' → ')
+      : tg.kind === 'group' ? grpMemberNames(tg.ref) : '';
     el.title = [label, hops, tg.via ? t('rp.viaBase').replace('{base}', () => refName(tg.via)) : '', tg.why ? t(tg.why) : ''].filter(Boolean).join(' — ');
     // block carries nothing worth counting
     if (tg.kind !== 'block' && tg.tags.length) el.appendChild(trafficSpan(tg.tags));
@@ -3306,7 +3336,7 @@ $('#btnClearLogs').onclick = () => { $('#logBox').innerHTML = ''; };
  */
 function defaultUiMode() {
   const s = state.settings || {};
-  const hasPro = (state.chains || []).length > 0 || (state.pool || []).length > 0 ||
+  const hasPro = (state.chains || []).length > 0 || (state.groups || []).length > 0 || (state.pool || []).length > 0 ||
     (s.routeRules || []).length > 0 || !!s.advancedRouting ||
     (state.profiles || []).some(p => (p.rules || []).length > 0);
   return hasPro ? 'advanced' : 'simple';
@@ -3557,7 +3587,8 @@ $('#backupFile').onchange = async () => {
   state.servers = data.servers || [];
   state.subscriptions = data.subscriptions || [];
   state.settings = data.settings || {};
-  state.chains = (data.chains || []).map(c => ({ id: c.id, name: c.name || 'Chain', members: (c.members || []).filter(id => state.servers.some(s => s.id === id)) }));
+  state.groups = await loadGroups(data);
+  state.chains = (data.chains || []).map(c => ({ id: c.id, name: c.name || 'Chain', members: (c.members || []).filter(id => state.servers.some(s => s.id === id) || state.groups.some(g => g.id === id)) }));
   state.pool = (data.pool || []).map(e => ({ id: e.id, name: e.name || 'Proxy', target: e.target || '', socksPort: e.socksPort || 0, httpPort: e.httpPort || 0, enabled: e.enabled !== false }));
   state.usage = data.usage || {};
   state.pendingReconnect = data.pendingReconnect || [];
@@ -4584,11 +4615,14 @@ function serverInLivePlan(id) {
   const live = state.activeServerId;
   if (!id || !live || !state.connected) return false;
   if (live === id) return true;
+  // a group (v1.27) dials each of its members: an edit of one is an edit of the group
+  const groupHas = (gid) => (state.groups || []).some(g => g && g.id === gid && (g.members || []).some(m => m && m.id === id));
+  if (groupHas(live)) return true;
   const chainHas = (cid) => {
     const c = (state.chains || []).find(x => x.id === cid);
-    return !!(c && (c.members || []).includes(id));
+    return !!(c && (c.members || []).some(m => m === id || groupHas(m)));
   };
-  const targetHas = (tg) => tg === id
+  const targetHas = (tg) => tg === id || groupHas(tg)
     || (tg === 'chain' && (state.chain || []).includes(id))
     || (String(tg).startsWith('chain:') && chainHas(String(tg).slice(6)));
   if (live === '__chain__') return (state.chain || []).includes(id);
@@ -6196,7 +6230,8 @@ async function runWarp() {
   if (Array.isArray(res.servers)) state.servers = res.servers;
   // a WireGuard WARP for a Chain: the whole list of chains comes back, the new ones in it
   if (Array.isArray(res.chains)) {
-    state.chains = res.chains.map((c) => ({ id: c.id, name: c.name || 'Chain', members: (c.members || []).filter((id) => state.servers.some((s) => s.id === id)) }));
+    state.chains = res.chains.map((c) => ({ id: c.id, name: c.name || 'Chain',
+      members: (c.members || []).filter((id) => state.servers.some((s) => s.id === id) || (state.groups || []).some((g) => g && g.id === id)) }));
   }
   const added = Array.isArray(res.added) ? res.added : [];
   if (!state.selectedServerId && added[0]) state.selectedServerId = added[0].id;
@@ -6263,7 +6298,19 @@ $('#btnProxyAdd').onclick = async () => {
 };
 
 /* ----------------------------- proxy chains (named, first-class) ----------------------------- */
-function srvById(id) { return state.servers.find(s => s.id === id); }
+/**
+ * A server by its id — or a group (v1.27) by its, as the record main makes of
+ * it (groups.groupRecord, protocol 'group'): a target like a server wherever
+ * one is used, while at least one of its members is still here. With none
+ * left it is gone, like a deleted server.
+ */
+function srvById(id) {
+  const s = state.servers.find(x => x.id === id);
+  if (s) return s;
+  const g = (state.groups || []).find(x => x && x.id === id);
+  const size = g ? (g.members || []).filter(m => m && state.servers.some(x => x.id === m.id)).length : 0;
+  return size ? { id: g.id, name: g.name, protocol: 'group', address: '', port: 0, group: { strategy: g.strategy, size } } : undefined;
+}
 
 function newChainId() { return 'chain-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
@@ -6351,12 +6398,13 @@ function renderChains() {
     const nodes = card.querySelector('.chain-nodes');
     chain.members.forEach((id, idx) => {
       const s = srvById(id);
+      const grp = s.protocol === 'group';   // a group (v1.27) as a hop: «⧉ name»
       const node = document.createElement('div');
       node.className = 'flow-node chain-node';
       node.draggable = true;
       node.dataset.idx = idx;
       node.innerHTML = `
-        <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>
+        <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(grp ? '⧉' : s.protocol)}</span>
         <span class="cn-name">${escapeHtml(s.name)}</span>
         <button class="cn-remove" title="remove">✕</button>`;
       node.querySelector('.cn-remove').onclick = (e) => { e.stopPropagation(); chain.members.splice(idx, 1); persistChains(); };
@@ -6386,21 +6434,24 @@ function renderChains() {
       nodes.appendChild(ph);
     }
 
-    // available pool (servers not already in THIS chain)
+    // available pool (servers not already in THIS chain), then the groups (v1.27)
+    // not in it either — a hop like a server, while a member of each is here
     const pool = card.querySelector('.chain-pool');
     const poolSearch = card.querySelector('.chain-pool-search');
-    const available = state.servers.filter(s => !chain.members.includes(s.id));
+    const available = state.servers.filter(s => !chain.members.includes(s.id))
+      .concat((state.groups || []).map(g => srvById(g.id)).filter(g => g && !chain.members.includes(g.id)));
     if (!available.length) {
       pool.innerHTML = `<div class="empty small">${escapeHtml(t('chain.poolEmpty'))}</div>`;
       if (poolSearch) poolSearch.hidden = true;
     }
     for (const s of available) {
+      const grp = s.protocol === 'group';
       const row = document.createElement('button');
       row.className = 'pool-item';
       row.dataset.name = s.name;
       row.innerHTML = `
-        <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>
-        <span class="pi-name">${escapeHtml(s.name)}</span>
+        <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(grp ? '⧉' : s.protocol)}</span>
+        <span class="pi-name">${escapeHtml(grp ? s.name + ' · ' + grpCountText(s.group.size) : s.name)}</span>
         <span class="pool-add">+ ${escapeHtml(t('chain.add'))}</span>`;
       row.onclick = () => { chain.members.push(s.id); persistChains(); };
       pool.appendChild(row);
@@ -6415,7 +6466,425 @@ function renderChains() {
 
     wrap.appendChild(card);
   });
+  // the page's other half: the groups, whose members are servers too
+  renderGroups();
 }
+
+/* ----------------------------- groups (v1.27): several configs used as one ----------------------------- */
+// .superpowers/sdd/groups/design.md §1 and §5. A group is several saved servers
+// used together as one config: each new connection goes out through one member
+// (round-robin unless the group says otherwise) and a member that is down is
+// skipped. Its id is a target like a server id everywhere (srvById) — the home
+// picker, advanced routing, a profile's base, the pool, a chain's hop. Main
+// stores the list (groups:set); a member may carry its own address, the same
+// server dialled at a clean IP with its SNI and Host kept.
+
+/** The three ways a group spreads the connections; anything else is the first. */
+const GROUP_STRATEGIES = ['roundRobin', 'leastPing', 'random'];
+
+/** A member as §1 stores it: its server's id, and the address (and port) it is dialled at when it has its own. */
+function grpMember(m) {
+  const out = { id: String(m.id) };
+  const address = String(m.address == null ? '' : m.address).trim();
+  if (address) {
+    out.address = address;
+    const port = Number(m.port);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) out.port = port;
+  }
+  return out;
+}
+
+/** A group as §1 stores it — { id, name, strategy, members } and nothing else; null for something that is not one. */
+function normalizeUiGroup(g) {
+  if (!g || typeof g !== 'object' || !g.id) return null;
+  return {
+    id: String(g.id),
+    name: String(g.name == null ? '' : g.name),
+    strategy: GROUP_STRATEGIES.includes(g.strategy) ? g.strategy : 'roundRobin',
+    members: (Array.isArray(g.members) ? g.members : []).filter(m => m && typeof m === 'object' && m.id).map(grpMember)
+  };
+}
+
+/** The groups, from init's data when main sends them there, else asked for; [] on a back end without them. */
+async function loadGroups(data) {
+  const clean = (list) => list.map(normalizeUiGroup).filter(Boolean);
+  if (data && Array.isArray(data.groups)) return clean(data.groups);
+  if (!window.api || typeof window.api.listGroups !== 'function') return [];
+  try {
+    const list = await window.api.listGroups();
+    return Array.isArray(list) ? clean(list) : [];
+  } catch { return []; }
+}
+
+function newGroupId() { return 'grp-' + Date.now().toString(36) + Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0'); }
+
+function grpById(id) { return (state.groups || []).find(g => g && g.id === id) || null; }
+
+/** «n configs», the number in Persian digits in Persian. */
+function grpCountText(n) { return n === 1 ? t('grp.countOne') : t('grp.count').replace('{n}', () => warpNum(n)); }
+
+/** The members whose server is still here. */
+function grpLive(g) { return ((g && g.members) || []).filter(m => state.servers.some(s => s.id === m.id)); }
+
+/** Where a member is dialled, as one would type it: its own address (and port) — else its server's. */
+function grpAddrText(m, s) {
+  const own = !!(m && m.address);
+  const host = String(own ? m.address : (s && s.address) || '');
+  const port = own ? m.port : s && s.port;
+  if (!host) return '';
+  return port ? (host.includes(':') ? '[' + host + ']' : host) + ':' + port : host;
+}
+
+/** A group's configs in words, for a tooltip: «name», or «name @ address» for a member with its own address. */
+function grpMemberNames(id) {
+  return grpLive(grpById(id)).map((m) => {
+    const s = state.servers.find(x => x.id === m.id);
+    return s.name + (m.address ? ' @ ' + grpAddrText(m, s) : '');
+  }).join(' · ');
+}
+
+/** Home's line for a selected group: «⧉ name (n configs · how it spreads them)». */
+function grpConnText(id) {
+  const g = grpById(id);
+  if (!g) return t('conn.noServer');
+  return '⧉ ' + g.name + ' (' + grpCountText(grpLive(g).length) + ' · ' + t('grp.st.' + g.strategy) + ')';
+}
+
+/** The groups' cards — hidden, with their head, on a back end that cannot store them (no groups:set). */
+function renderGroups() {
+  const wrap = $('#groupsWrap');
+  if (!wrap) return;
+  const section = $('#groupsSection');
+  if (section) section.hidden = !(window.api && typeof window.api.setGroups === 'function');
+  wrap.innerHTML = '';
+  const empty = $('#groupsEmpty');
+  if (empty) empty.hidden = (state.groups || []).length > 0;
+  for (const g of state.groups || []) wrap.appendChild(groupCard(g));
+}
+
+/** One group's card: ⧉ its name, how many configs and how it spreads them, its delay; ping, connect, edit, delete; its configs. */
+function groupCard(g) {
+  const live = grpLive(g);
+  const ready = live.length > 0;
+  const p = state.pings[g.id] || {};
+  const rl = pingResultLabel(p.real);
+  const ul = pingResultLabel(p.upload);
+  const reading = (ico, key, attr, l) => [edNode('span', { class: 'pi-ping-ico', title: t(key), text: ico }),
+    edNode('span', { class: 'chain-ping' + (l.cls ? ' ' + l.cls : ''), 'data-pbase': 'chain-ping', [attr]: g.id, text: l.txt })];
+  const usage = edNode('span', { class: 'srv-usage', 'data-usage': g.id, title: t('srv.usage') });
+  usage.innerHTML = usageLabel(g.id);
+  const btn = (cls, ico, key, off) => edNode('button', { type: 'button', class: 'icon-btn ' + cls, title: t(key), 'aria-label': t(key), disabled: !!off, text: ico });
+  const ping = btn('ch-ping grp-ping', '⚡', 'grp.ping', !ready);
+  const go = connectGlyph(btn('ch-connect', '▶', 'power.connect', !ready));
+  const edit = btn('grp-edit', '✎', 'grp.edit');
+  const del = btn('ch-del grp-del', '🗑', 'grp.delete');
+  ping.onclick = () => { if (ready) pingServer(g.id); };
+  go.onclick = () => { if (ready) connect(g.id); };
+  edit.onclick = () => openGroupEditor(g.id);
+  del.onclick = () => deleteGroup(g.id);
+  // a group has no TCP handshake of its own (ping:tcp answers na): its real delay and its upload
+  const head = edNode('div', { class: 'chain-card-head' }, [
+    edNode('span', { class: 'proto-badge proto-group', text: '⧉' }),
+    edNode('div', { class: 'grp-title' }, [
+      edNode('span', { class: 'grp-name', text: g.name || '—' }),
+      edNode('span', { class: 'grp-meta', text: grpCountText(live.length) + ' · ' + t('grp.st.' + g.strategy) })]),
+    edNode('span', { class: 'chain-pings' }, [...reading('⏱', 'ping.real', 'data-ping-real', rl), ...reading('↑', 'ping.upload', 'data-ping-up', ul)]),
+    usage,
+    edNode('div', { class: 'chain-card-actions' }, [ping, go, edit, del])]);
+  const members = edNode('div', { class: 'grp-chips' }, g.members.map((m) => {
+    const s = state.servers.find(x => x.id === m.id);
+    return edNode('div', { class: 'flow-node grp-chip' + (s ? '' : ' missing') + (m.address ? ' own' : '') }, [
+      edNode('span', { class: 'proto-badge proto-' + (s ? s.protocol : 'gone'), text: s ? s.protocol : '?' }),
+      edNode('span', { class: 'cn-name', text: s ? s.name : t('grp.missing') }),
+      grpAddrText(m, s) ? edNode('bdi', { class: 'grp-addr', dir: 'ltr', text: grpAddrText(m, s) }) : null]);
+  }));
+  const card = edNode('div', { class: 'card chain-card grp-card' + (ready ? '' : ' grp-dead') }, [head, members,
+    ready ? null : edNode('div', { class: 'chain-min warn', text: t(g.members.length ? 'grp.noneLive' : 'grp.noMembers') })]);
+  card.dataset.groupId = g.id;   // the routing page's flow tree opens a group by it
+  return card;
+}
+
+/** A group's card on the chains & groups page (the flow tree's click on a group). */
+function openGroupCard(gid) {
+  showView('chain');
+  flashInto($$('#groupsWrap .grp-card').find(c => c.dataset.groupId === gid) || null, '.grp-edit');
+}
+
+/** Everything that lists targets, drawn again: the chains (a group is a hop) and the groups, the picker, routing, the pool, home's line. */
+function afterGroupsChanged() {
+  renderChains();
+  renderPicker();
+  renderAdvanced();
+  renderPool();
+  refreshConnLabels();
+}
+
+/**
+ * Write the list (groups:set, §1's shape) and take the back end's answer — the
+ * list as saved, normalized — as the truth. A refusal is said; the lists stay
+ * as they were. Resolves to whether it was saved.
+ */
+async function persistGroups(list) {
+  const payload = list.map(normalizeUiGroup).filter(Boolean);
+  let res;
+  try { res = await window.api.setGroups(payload); } catch (e) { res = { ok: false, error: (e && e.message) || String(e) }; }
+  if (res && !Array.isArray(res) && res.ok === false) {
+    toast(t('grp.err.save').replace('{msg}', () => res.error || '—'), 'err');
+    return false;
+  }
+  const saved = Array.isArray(res) ? res : res && Array.isArray(res.groups) ? res.groups : payload;
+  state.groups = saved.map(normalizeUiGroup).filter(Boolean);
+  afterGroupsChanged();
+  return true;
+}
+
+/** Delete a group, once the user says so: it leaves the chains that hold it (as a deleted server does); a selection or target of it falls back. */
+async function deleteGroup(id) {
+  const g = grpById(id);
+  if (!g || !window.confirm(t('grp.confirmDelete').replace('{name}', () => g.name))) return false;
+  if (state.chains.some(c => (c.members || []).includes(id))) {
+    state.chains = state.chains.map(c => ({ ...c, members: (c.members || []).filter(x => x !== id) }));
+    await window.api.setChains(state.chains);
+  }
+  if (state.selectedServerId === id) state.selectedServerId = null;
+  delete state.pings[id];
+  const ok = await persistGroups(state.groups.filter(x => x.id !== id));
+  if (ok) toast(t('grp.deleted'), 'ok');
+  return ok;
+}
+
+/* the editor: a dialog over one draft — Save writes it, Cancel forgets it */
+let grpForm = null;
+
+function grpShown() { const m = $('#grpModal'); return !!m && !m.hidden; }
+
+/** The editor on group `id`, or on a new one (`id` null): roundRobin, no configs yet. */
+function openGroupEditor(id) {
+  const g = id ? grpById(id) : null;
+  grpForm = {
+    id: g ? g.id : null,
+    name: g ? g.name : t('grp.newName').replace('{n}', () => warpNum((state.groups || []).length + 1)),
+    strategy: g ? g.strategy : 'roundRobin',
+    members: g ? g.members.map(m => Object.assign({}, m)) : [],
+    panel: null, search: '', ipServer: '', ipText: '', ipNote: '', error: ''
+  };
+  $('#grpModal').hidden = false;
+  renderGroupEditor();
+}
+
+function closeGroupEditor() { $('#grpModal').hidden = true; grpForm = null; }
+
+/** An IPv4 address, four numbers of 0-255. */
+function grpIsV4(h) { return /^\d{1,3}(\.\d{1,3}){3}$/.test(h) && h.split('.').every(n => Number(n) <= 255); }
+
+/** An IPv6 address, as the URL parser reads one. */
+function grpIsV6(h) {
+  if (!/^[0-9A-Fa-f:.]+$/.test(h) || !h.includes(':')) return false;
+  try { new URL('http://[' + h + ']/'); return true; } catch { return false; }
+}
+
+/** A host name: dotted labels of letters, digits and dashes, a top label that is not a number. */
+function grpIsHost(h) {
+  return h.length <= 253 && /^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$/.test(h);
+}
+
+/** One line of the clean-IP box: { address, port? } — `ip`, `ip:port`, `[v6]:port`, a bare v6, a host name (and :port); null for a blank line, false for one that is none of these. */
+function grpParseAddress(line) {
+  const s = String(line == null ? '' : line).trim();
+  if (!s) return null;
+  let host = s, port = '';
+  const colons = (s.match(/:/g) || []).length;
+  const v6 = /^\[([^\]]+)\](?::(\d{1,5}))?$/.exec(s);
+  const hp = /^([^:\s]+):(\d{1,5})$/.exec(s);
+  if (v6) { host = v6[1]; port = v6[2] || ''; if (!grpIsV6(host)) return false; }
+  else if (colons > 1) { if (!grpIsV6(s)) return false; }
+  else if (colons === 1) { if (!hp) return false; host = hp[1]; port = hp[2]; }
+  if (!host.includes(':') && !grpIsV4(host) && !grpIsHost(host)) return false;
+  if (port && !(Number(port) >= 1 && Number(port) <= 65535)) return false;
+  return port ? { address: host, port: Number(port) } : { address: host };
+}
+
+/** The clean-IP box read: an address for each line it can read (with its line), and the numbers of the lines it cannot — blank lines count, as the user sees them. */
+function grpParseAddresses(text) {
+  const items = [], bad = [];
+  String(text == null ? '' : text).split(/\r?\n/).forEach((l, i) => {
+    const a = grpParseAddress(l);
+    if (a === false) bad.push(i + 1);
+    else if (a) items.push(Object.assign({ line: i + 1 }, a));
+  });
+  return { items, bad };
+}
+
+/** «+ IP تمیز»: one member for each address read, on the server picked — the same one twice is not added; a line that cannot be read stays in the box, said by its number. */
+function grpAddIps(f) {
+  const id = f.ipServer;
+  if (!state.servers.some(s => s.id === id)) return;
+  const r = grpParseAddresses(f.ipText);
+  const lines = String(f.ipText).split(/\r?\n/);
+  let added = 0, dup = 0;
+  for (const a of r.items) {
+    const m = grpMember({ id, address: a.address, port: a.port });
+    if (f.members.some(x => x.id === m.id && x.address === m.address && (x.port || 0) === (m.port || 0))) { dup++; continue; }
+    f.members.push(m);
+    added++;
+  }
+  f.ipText = r.bad.map(n => lines[n - 1]).join('\n');
+  f.ipNote = [
+    added ? t('grp.ipsAdded').replace('{n}', () => warpNum(added)) : '',
+    dup ? t('grp.ipsDup').replace('{n}', () => warpNum(dup)) : '',
+    r.bad.length ? t('grp.ipsNotAdded').replace('{lines}', () => r.bad.map(warpNum).join(window.i18n && window.i18n.lang === 'fa' ? '، ' : ', ')) : ''
+  ].filter(Boolean).join(' ');
+  f.error = '';
+  renderGroupEditor();
+}
+
+/** The name, as a field of the dialog. */
+function grpNameNode(f) {
+  const inp = edNode('input', { class: 'input', id: 'grp-name', dir: 'auto', autocomplete: 'off', spellcheck: 'false' });
+  inp.value = f.name;
+  inp.oninput = () => { f.name = inp.value; };
+  return edNode('div', { class: 'grp-field' }, [edNode('label', { class: 'field-label', for: 'grp-name', text: t('grp.name') }), inp]);
+}
+
+/** How it spreads the connections: three cards, each with its one line. */
+function grpStrategyNode(f) {
+  const box = edNode('div', { class: 'ed-http three grp-strats', role: 'radiogroup', 'aria-label': t('grp.strategy') });
+  for (const id of GROUP_STRATEGIES) {
+    const on = f.strategy === id;
+    const b = edNode('button', { type: 'button', class: 'ed-http-opt' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on), 'data-grp': 'strategy:' + id }, [
+      edNode('span', { class: 'ui', text: t('grp.st.' + id) }), edNode('small', { text: t('grp.stLine.' + id) })]);
+    b.onclick = () => { f.strategy = id; renderGroupEditor(); };
+    box.appendChild(b);
+  }
+  return edNode('div', { class: 'grp-field' }, [edNode('span', { class: 'field-label' }, [edNode('span', { text: t('grp.strategy') }), ' ',
+    edNode('span', { class: 'ed-key', dir: 'ltr', text: 'strategy' })]), box]);
+}
+
+/** The configs in it: each its server's name and the address it is dialled at, one that is gone said so (and kept until removed), a remove each. */
+function grpMembersNode(f) {
+  const list = edNode('div', { class: 'grp-members', role: 'list' });
+  f.members.forEach((m, i) => {
+    const s = state.servers.find(x => x.id === m.id);
+    const rm = edNode('button', { type: 'button', class: 'cn-remove', title: t('grp.remove'), 'aria-label': t('grp.remove'), text: '✕' });
+    rm.onclick = () => { f.members.splice(i, 1); renderGroupEditor(); };
+    const addr = grpAddrText(m, s);
+    list.appendChild(edNode('div', { class: 'grp-member' + (s ? '' : ' missing') + (m.address ? ' own' : ''), role: 'listitem' }, [
+      edNode('span', { class: 'proto-badge proto-' + (s ? s.protocol : 'gone'), text: s ? s.protocol : '?' }),
+      edNode('span', { class: 'grp-mname', text: s ? s.name : t('grp.missing') }),
+      addr ? edNode('bdi', { class: 'grp-addr', dir: 'ltr', text: addr }) : null, rm]));
+  });
+  if (!f.members.length) list.appendChild(edNode('div', { class: 'chain-nodes-empty', text: t('grp.noMembers') }));
+  const add = edNode('button', { type: 'button', class: 'btn small' + (f.panel === 'server' ? ' primary' : ''), id: 'grpAddServer', 'aria-expanded': String(f.panel === 'server'), text: t('grp.addServer') });
+  const ips = edNode('button', { type: 'button', class: 'btn small' + (f.panel === 'ips' ? ' primary' : ''), id: 'grpAddIps', 'aria-expanded': String(f.panel === 'ips'), text: t('grp.addIps') });
+  add.onclick = () => { f.panel = f.panel === 'server' ? null : 'server'; renderGroupEditor(); };
+  ips.onclick = () => { f.panel = f.panel === 'ips' ? null : 'ips'; f.ipNote = ''; renderGroupEditor(); };
+  return edNode('div', { class: 'grp-field' }, [
+    edNode('span', { class: 'field-label' }, [edNode('span', { text: t('grp.members') }), ' ', edNode('span', { class: 'ed-key', text: grpCountText(f.members.length) })]),
+    list, edNode('div', { class: 'grp-tools' }, [add, ips])]);
+}
+
+/** «+ کانفیگ»: the servers (never a chain or a group), searchable; one already in it as itself is not offered again. */
+function grpServerPanel(f) {
+  const search = edNode('input', { class: 'input chain-pool-search', id: 'grp-search', dir: 'auto', autocomplete: 'off', placeholder: t('ss.search') });
+  search.value = f.search;
+  const list = edNode('div', { class: 'chain-pool grp-pool' });
+  const fill = () => {
+    list.textContent = '';
+    const q = f.search.trim().toLowerCase();
+    const offer = state.servers.filter(s => !f.members.some(m => m.id === s.id && !m.address));
+    if (!offer.length) { list.appendChild(edNode('div', { class: 'empty small', text: t(state.servers.length ? 'grp.allIn' : 'grp.noServers') })); return; }
+    for (const s of offer.filter(x => !q || String(x.name || '').toLowerCase().includes(q))) {
+      const row = edNode('button', { type: 'button', class: 'pool-item', 'data-srv': s.id }, [
+        edNode('span', { class: 'proto-badge proto-' + s.protocol, text: s.protocol }), edNode('span', { class: 'pi-name', text: s.name }),
+        edNode('span', { class: 'pool-add', text: '+ ' + t('grp.addOne') })]);
+      row.onclick = () => { f.members.push({ id: s.id }); f.error = ''; renderGroupEditor(); };
+      list.appendChild(row);
+    }
+  };
+  search.oninput = () => { f.search = search.value; fill(); };
+  fill();
+  return edNode('div', { class: 'grp-panel' }, [search, list]);
+}
+
+/** «+ IP تمیز»: ONE server, and its clean addresses, one a line — read back as they are typed, a bad line by its number. */
+function grpIpPanel(f) {
+  if (!state.servers.length) return edNode('div', { class: 'grp-panel' }, [edNode('div', { class: 'empty small', text: t('grp.noServers') })]);
+  if (!state.servers.some(s => s.id === f.ipServer)) {
+    const first = f.members.find(m => state.servers.some(s => s.id === m.id));
+    f.ipServer = first ? first.id : state.servers[0].id;
+  }
+  const sel = edNode('select', { class: 'select', id: 'grp-ipServer' });
+  for (const s of state.servers) sel.appendChild(edNode('option', { value: s.id, selected: s.id === f.ipServer, text: s.name }));
+  sel.value = f.ipServer;
+  sel.onchange = () => { f.ipServer = sel.value; };
+  const ta = edNode('textarea', { class: 'textarea ed-mono', id: 'grp-ips', dir: 'ltr', rows: '5', spellcheck: 'false', autocomplete: 'off',
+    placeholder: '104.16.1.1\n104.17.2.2:2053\n[2606:4700::1]:443\ncdn.example.com' });
+  ta.value = f.ipText;
+  const read = edNode('div', { class: 'ed-chips-read grp-ipread', 'aria-live': 'polite' });
+  const fill = () => {
+    read.textContent = '';
+    const r = grpParseAddresses(f.ipText);
+    if (r.items.length) read.appendChild(edNode('span', { class: 'info', text: t('grp.ipsRead').replace('{n}', () => warpNum(r.items.length)) }));
+    for (const n of r.bad) read.appendChild(edNode('span', { class: 'bad', text: t('grp.ipsBadLine').replace('{line}', () => warpNum(n)) }));
+  };
+  ta.oninput = () => { f.ipText = ta.value; fill(); };
+  fill();
+  const add = edNode('button', { type: 'button', class: 'btn primary small', id: 'grpIpsAdd', text: t('grp.ipsAdd') });
+  add.onclick = () => grpAddIps(f);
+  return edNode('div', { class: 'grp-panel' }, [
+    edNode('label', { class: 'field-label', for: 'grp-ipServer', text: t('grp.ipsServer') }), sel,
+    edNode('label', { class: 'field-label', for: 'grp-ips', text: t('grp.ipsLabel') }), ta,
+    // the three forms left-to-right, inside a Persian line too
+    edNode('p', { class: 'hint' }, richLine(t('grp.ipsHint'), { forms: 'ip, ip:port, [v6]:port' })), read,
+    edNode('div', { class: 'grp-tools' }, [add, f.ipNote ? edNode('span', { class: 'grp-ipnote', role: 'status', text: f.ipNote }) : null])]);
+}
+
+/** Draw the dialog from `grpForm`: its title, the name, the strategy, the configs and how to add them, the hint; Save and Cancel. */
+function renderGroupEditor() {
+  const body = $('#grpBody');
+  const foot = $('#grpFoot');
+  if (!body || !foot || !grpForm) return;
+  const f = grpForm;
+  const title = $('#grpTitle');
+  if (title) title.textContent = t(f.id ? 'grp.editTitle' : 'grp.newTitle');
+  body.textContent = '';
+  appendSome(body, grpNameNode(f), grpStrategyNode(f), grpMembersNode(f),
+    f.panel === 'server' ? grpServerPanel(f) : f.panel === 'ips' ? grpIpPanel(f) : null,
+    edNode('p', { class: 'hint grp-hint', text: t('grp.hint') }),
+    f.error ? edNode('p', { class: 'warp-error', role: 'alert', text: f.error }) : null);
+  foot.textContent = '';
+  const save = edNode('button', { type: 'button', class: 'btn primary', id: 'grpSave', text: t('grp.save') });
+  save.onclick = saveGroupEditor;
+  const cancel = edNode('button', { type: 'button', class: 'btn ghost', id: 'grpCancel', text: t('btn.cancel') });
+  cancel.onclick = closeGroupEditor;
+  appendSome(foot, save, cancel);
+}
+
+/** Save: at least one config that is here; the group as §1 has it, into the list, through groups:set. The dialog stays open on a refusal. */
+async function saveGroupEditor() {
+  const f = grpForm;
+  if (!f) return false;
+  if (!grpLive(f).length) {
+    f.error = t('grp.err.noMember');
+    renderGroupEditor();
+    return false;
+  }
+  const old = f.id ? grpById(f.id) : null;
+  const name = String(f.name || '').trim() || (old && old.name) || t('grp.newName').replace('{n}', () => warpNum((state.groups || []).length + 1));
+  const next = normalizeUiGroup({ id: f.id || newGroupId(), name, strategy: f.strategy, members: f.members });
+  const list = old ? state.groups.map(g => (g.id === next.id ? next : g)) : [...(state.groups || []), next];
+  f.error = '';
+  if (!(await persistGroups(list))) return false;
+  // its configs may have changed: a delay measured before says nothing about it now
+  delete state.pings[next.id];
+  if (grpForm === f) closeGroupEditor();
+  toast(t('grp.saved'), 'ok');
+  return true;
+}
+
+$('#btnAddGroup').onclick = () => openGroupEditor(null);
+$('#grpClose').onclick = closeGroupEditor;
+$('#grpModal').onclick = (e) => { if (e.target === $('#grpModal')) closeGroupEditor(); };
 
 /* ----------------------------- proxy pool (multi-config) ----------------------------- */
 function newPoolId() { return 'px-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
@@ -6440,10 +6909,12 @@ function nextPoolPort(start) {
   return p;
 }
 
-/** [{value,label}] pool targets — servers + ready chains (no direct/block). */
+/** [{value,label}] pool targets — servers + ready chains + groups (no direct/block). Also the via and base pickers. */
 function poolTargetOptions() {
   const opts = state.servers.map(s => ({ value: s.id, label: s.name }));
   for (const c of state.chains) if (chainReady(c)) opts.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name });
+  // a group (v1.27) by its bare id, like a server, while a member of it is here
+  for (const g of state.groups || []) if (srvById(g.id)) opts.push({ value: g.id, label: '⧉ ' + g.name });
   return opts;
 }
 
@@ -6579,6 +7050,7 @@ function targetOptions(selected) {
   for (const c of state.chains) {
     if (chainReady(c)) opts.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name });
   }
+  for (const g of state.groups || []) if (srvById(g.id)) opts.push({ value: g.id, label: '⧉ ' + g.name });
   opts.push({ value: 'direct', label: t('adv.direct') });
   opts.push({ value: 'block', label: t('adv.block') });
   return opts.map(o =>
@@ -6586,10 +7058,12 @@ function targetOptions(selected) {
   ).join('');
 }
 
-/** [{value,label}] of routing targets — servers + ready chains + direct/block. */
+/** [{value,label}] of routing targets — servers + ready chains + groups + direct/block. */
 function targetOptionList() {
   const opts = state.servers.map(s => ({ value: s.id, label: s.name }));
   for (const c of state.chains) if (chainReady(c)) opts.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name });
+  // a group (v1.27) by its bare id, like a server, while a member of it is here
+  for (const g of state.groups || []) if (srvById(g.id)) opts.push({ value: g.id, label: '⧉ ' + g.name });
   opts.push({ value: 'direct', label: t('adv.direct') });
   opts.push({ value: 'block', label: t('adv.block') });
   return opts;
@@ -7501,7 +7975,8 @@ function flowModel(prof) {
     if (!tIndex[key]) {
       const exit = ref === TARGET_BASE;
       const base = exit ? (prof.base || null) : via;
-      const kind = exit ? 'exit' : ref === 'direct' || ref === 'block' ? ref : (String(ref).startsWith('chain:') ? 'chain' : 'server');
+      const kind = exit ? 'exit' : ref === 'direct' || ref === 'block' ? ref
+        : String(ref).startsWith('chain:') ? 'chain' : (srvById(ref) || {}).protocol === 'group' ? 'group' : 'server';
       // "exit at the base" is the base's own outbound, dialled directly
       const tags = exit ? (base ? [outboundTagFor(base)] : []) : [via ? viaTagFor(ref, via) : outboundTagFor(ref)];
       tIndex[key] = { key, kind, ref, via: base, why: refProblem(ref, prof), tags, first };
@@ -7606,7 +8081,7 @@ function flowRefNode(n) {
   const terminal = n.kind === 'direct' || n.kind === 'block';
   const cls = isBase ? 'rf-base' : 'rf-target to-' + (terminal ? n.kind : n.kind === 'exit' ? 'exit' : 'proxy');
   const b = flowButton(cls + (n.why ? ' danger' : ''), n.key);
-  const icon = isBase ? '⚓' : n.kind === 'exit' ? '🌐' : n.kind === 'direct' ? '↗' : n.kind === 'block' ? '⛔' : n.kind === 'chain' ? '⛓' : '🛡';
+  const icon = isBase ? '⚓' : n.kind === 'exit' ? '🌐' : n.kind === 'direct' ? '↗' : n.kind === 'block' ? '⛔' : n.kind === 'chain' ? '⛓' : n.kind === 'group' ? '⧉' : '🛡';
   const label = n.kind === 'direct' ? t('adv.direct') : n.kind === 'block' ? t('adv.block')
     : n.kind === 'exit' ? t('rp.exitHere') : refName(n.ref);
   spanIn(b, 'rf-ico', icon);
@@ -7693,6 +8168,8 @@ function flowNodeClick(n) {
   if (n.kind === 'exit') return flashInto($('#advBaseRow'), '.ss-current');
   const ref = n.ref;
   if (!n.why && String(ref).startsWith('chain:')) return openChainCard(String(ref).slice(6));
+  // a group (v1.27, as a target or a base): its card on the chains & groups page
+  if (!n.why && (state.groups || []).some(g => g && g.id === ref)) return openGroupCard(ref);
   if (!n.why && !terminalTarget(ref)) return openEdit(ref);
   if (n.kind === 'base') return flashInto($('#advBaseRow'), '.ss-current');
   return focusAdvRow(n.first === 'def' || n.first == null ? null : n.first);
@@ -7999,7 +8476,8 @@ async function refreshAfterImport(res) {
   try {
     const chains = Array.isArray(res.chains) ? res.chains : await window.api.listChains();
     if (Array.isArray(chains)) {
-      state.chains = chains.map(c => ({ id: c.id, name: c.name || 'Chain', members: (c.members || []).filter(id => state.servers.some(s => s.id === id)) }));
+      state.chains = chains.map(c => ({ id: c.id, name: c.name || 'Chain',
+        members: (c.members || []).filter(id => state.servers.some(s => s.id === id) || (state.groups || []).some(g => g && g.id === id)) }));
     }
   } catch { /* as above */ }
   const profiles = Array.isArray(res.profiles) ? res.profiles.map(normalizeUiProfile) : await loadRoutingProfiles(null);

@@ -28,14 +28,39 @@ const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-') && !i
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
 /**
+ * A group's members (`T~gm<i>`, configBuilder.expandGroups) carry its bytes —
+ * the core counts nothing on the group's loopback T itself. The counters as
+ * read, with each member's added into its group's T and the member gone: a
+ * group is one config to the meter, to usage and to the silence watch, as a
+ * server is. Anything else is passed through as it was.
+ */
+const GROUP_MEMBER = /^(.+)~gm\d+$/;
+function foldGroups(out) {
+  const res = {};
+  const add = (tag, c) => {
+    const r = res[tag] || (res[tag] = { uplink: 0, downlink: 0 });
+    r.uplink += num(c && c.uplink);
+    r.downlink += num(c && c.downlink);
+  };
+  for (const [tag, c] of Object.entries(out)) {
+    const m = GROUP_MEMBER.exec(tag);
+    if (m) add(m[1], c);
+    else if (!res[tag]) res[tag] = { uplink: num(c && c.uplink), downlink: num(c && c.downlink) };
+    else add(tag, c);
+  }
+  return res;
+}
+
+/**
  * { up, down } summed from a parsed /debug/vars body. Never throws, never NaN.
  * `skip`: tags to leave out besides the usual — a raw config's dialers
  * (configBuilder.dialerTagsOf), whose bytes the outbound dialling through them
  * already counted.
  */
 function sumOutbounds(vars, skip) {
-  const out = vars && vars.stats && vars.stats.outbound;
-  if (!out || typeof out !== 'object') return { up: 0, down: 0 };
+  const raw = vars && vars.stats && vars.stats.outbound;
+  if (!raw || typeof raw !== 'object') return { up: 0, down: 0 };
+  const out = foldGroups(raw);
   let up = 0, down = 0;
   for (const tag of Object.keys(out)) {
     if (!isProxyTag(tag) || (skip && skip.has(tag))) continue;
@@ -206,8 +231,9 @@ class StatsPoller {
  * the anti-DPI dialers are not traffic anybody chose and stay out.
  */
 function byOutbound(vars, skip) {
-  const out = vars && vars.stats && vars.stats.outbound;
-  if (!out || typeof out !== 'object') return {};
+  const raw = vars && vars.stats && vars.stats.outbound;
+  if (!raw || typeof raw !== 'object') return {};
+  const out = foldGroups(raw);
   const res = {};
   for (const tag of Object.keys(out)) {
     if (tag === 'block' || tag === 'dns-out' || tag.startsWith('dpi-') || isHelperTag(tag) || (skip && skip.has(tag))) continue;
@@ -260,4 +286,4 @@ class SilenceWatch {
   }
 }
 
-module.exports = { StatsPoller, sumOutbounds, byOutbound, SilenceWatch };
+module.exports = { StatsPoller, sumOutbounds, byOutbound, foldGroups, SilenceWatch };

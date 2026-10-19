@@ -11,6 +11,7 @@
  */
 
 const { DEFAULT_PROFILE_ID, normalizeProfile, mirrorToSettings, mirrorFromSettings } = require('./routingProfiles');
+const { normalizeGroup } = require('./groups');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -60,6 +61,13 @@ function cleanSubscription(s) {
 /** `refused`: ids of servers this import left out — a member naming one goes with it. */
 function cleanChain(c, refused) {
   return Array.isArray(c.members) ? Object.assign({}, c, { members: c.members.filter(m => validId(m) && !refused.has(m)) }) : c;
+}
+
+/** A group as it may come in (groups.normalizeGroup): its members without the servers left out. */
+function cleanGroup(g, refused) {
+  const n = normalizeGroup(g);
+  if (!n || n.id !== g.id) return null;
+  return Object.assign(n, { members: n.members.filter(m => validId(m.id) && !refused.has(m.id)) });
 }
 
 function cleanPoolEntry(e, refused) {
@@ -125,6 +133,8 @@ function exportBundle({ version, store, usage, flavor }) {
     pool: Array.isArray(s.pool) ? s.pool : [],
     // the routing profiles, when the store has them (routingProfiles.js)
     ...(Array.isArray(s.routingProfiles) ? { routingProfiles: s.routingProfiles } : {}),
+    // the groups (groups.js), when there are any
+    ...(Array.isArray(s.groups) && s.groups.length ? { groups: s.groups } : {}),
     settings: isObj(s.settings) ? s.settings : {},
     usage: isObj(usage) ? usage : {}
   };
@@ -140,7 +150,7 @@ const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  * never had stays absent. `kept` names the ones the backup carried with
  * another value, so the caller can say so.
  *
- * @returns {{ next: object, added: { servers, subscriptions, chains, pool, routingProfiles }, kept: string[] }}
+ * @returns {{ next: object, added: { servers, subscriptions, chains, pool, routingProfiles, groups }, kept: string[] }}
  *   `next.routingProfiles` only when the machine or the backup has them.
  * @throws when the bundle is not an IRNetFree backup
  */
@@ -166,6 +176,7 @@ function importBundle(bundle, current, opts = {}) {
   // a server left out for its protocol, port or outbound is not referenced either
   const chains = merge(c.chains, bundle.chains, (x) => cleanChain(x, servers.refused));
   const pool = merge(c.pool, bundle.pool, (x) => cleanPoolEntry(x, servers.refused));
+  const groups = merge(c.groups, bundle.groups, (x) => cleanGroup(x, servers.refused));
   const have = isObj(c.settings) ? c.settings : {};
   const incoming = isObj(bundle.settings) ? cleanSettings(bundle.settings) : {};
   const kept = [];
@@ -196,11 +207,12 @@ function importBundle(bundle, current, opts = {}) {
       subscriptions: subscriptions.list,
       chains: chains.list,
       pool: pool.list,
+      groups: groups.list,
       settings,
       ...(Array.isArray(c.routingProfiles) || Array.isArray(bundle.routingProfiles) ? { routingProfiles } : {}),
       usage: Object.assign({}, isObj(c.usage) ? c.usage : {}, isObj(bundle.usage) ? bundle.usage : {})
     },
-    added: { servers: servers.n, subscriptions: subscriptions.n, chains: chains.n, pool: pool.n, routingProfiles: profiles.n },
+    added: { servers: servers.n, subscriptions: subscriptions.n, chains: chains.n, pool: pool.n, routingProfiles: profiles.n, groups: groups.n },
     kept
   };
 }

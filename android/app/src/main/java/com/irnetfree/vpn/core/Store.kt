@@ -8,7 +8,7 @@ import org.json.JSONObject
  * Local JSON store (SharedPreferences) for servers, chains, pool, subscriptions
  * and settings. Also resolves a UI "selection" into a concrete ConnectionPlan.
  *
- * Selection ids:  "<serverId>" | "chain:<id>" | "__pool__" | "__advanced__" | "__advanced__:<profileId>"
+ * Selection ids:  "<serverId>" | "<groupId>" | "chain:<id>" | "__pool__" | "__advanced__" | "__advanced__:<profileId>"
  */
 class Store(context: Context) {
     private val prefs = context.getSharedPreferences("irnetfree", Context.MODE_PRIVATE)
@@ -17,6 +17,8 @@ class Store(context: Context) {
     val chains: MutableList<ChainConfig> = read("chains") { ChainConfig.fromJson(it) }
     val pool: MutableList<PoolEntry> = read("pool") { PoolEntry.fromJson(it) }
     val subs: MutableList<Subscription> = read("subs") { Subscription.fromJson(it) }
+    /** Groups (Groups.kt): several servers used as one config, under their own `grp-…` ids. */
+    val groups: MutableList<GroupConfig> = readGroups()
     var settings: AppSettings = loadSettings()
     /** The routing profiles (RoutingProfiles.kt); never empty once the store is open. */
     val profiles: MutableList<RoutingProfile> = ArrayList()
@@ -68,8 +70,14 @@ class Store(context: Context) {
     fun saveChains() = prefs.edit().putString("chains", JSONArray(chains.map { it.toJson() }).toString()).apply()
     fun savePool() = prefs.edit().putString("pool", JSONArray(pool.map { it.toJson() }).toString()).apply()
     fun saveSubs() = prefs.edit().putString("subs", JSONArray(subs.map { it.toJson() }).toString()).apply()
+    /** Write the groups, each normalized as the desktop's groups:set does (Groups.normalizeGroups). */
+    fun saveGroups() {
+        val n = Groups.normalizeGroups(groups.toList())
+        groups.clear(); groups.addAll(n)
+        prefs.edit().putString(Groups.STORE_KEY, JSONArray(groups.map { g: GroupConfig -> g.toJson() }).toString()).apply()
+    }
     fun saveSelection(sel: String) {
-        previousSelection = Selection.previousAfterPick(selection, previousSelection, sel, serverIds(), chainIds(), profileIds())
+        previousSelection = Selection.previousAfterPick(selection, previousSelection, sel, serverIds(), chainIds(), profileIds(), groupIds())
         selection = sel
         writeSelection()
     }
@@ -96,9 +104,10 @@ class Store(context: Context) {
     private fun serverIds(): Set<String> = servers.mapTo(HashSet()) { it.id }
     private fun chainIds(): Set<String> = chains.mapTo(HashSet()) { it.id }
     private fun profileIds(): Set<String> = profiles.mapTo(HashSet()) { p: RoutingProfile -> p.id }
+    private fun groupIds(): Set<String> = groups.mapTo(HashSet()) { g: GroupConfig -> g.id }
 
-    /** Does the selection name something that exists (a server, a chain, the pool, a routing profile)? */
-    fun selectionResolves(): Boolean = Selection.resolves(selection, serverIds(), chainIds(), profileIds())
+    /** Does the selection name something that exists (a server, a group, a chain, the pool, a routing profile)? */
+    fun selectionResolves(): Boolean = Selection.resolves(selection, serverIds(), chainIds(), profileIds(), groupIds())
 
     /**
      * Point the selection at something that exists — after a server or chain
@@ -107,7 +116,7 @@ class Store(context: Context) {
      * True when it moved (the caller says so).
      */
     fun repairSelection(): Boolean {
-        val next = Selection.repair(selection, previousSelection, servers.map { it.id }, chains.map { it.id }, profiles.map { p: RoutingProfile -> p.id })
+        val next = Selection.repair(selection, previousSelection, servers.map { it.id }, chains.map { it.id }, profiles.map { p: RoutingProfile -> p.id }, groups.map { g: GroupConfig -> g.id })
         if (next == selection) return false
         selection = next
         previousSelection = ""   // what it fell back from is gone, and what it fell back to is now current
@@ -182,25 +191,48 @@ class Store(context: Context) {
         try { val a = JSONArray(prefs.getString(key, "[]")); for (i in 0 until a.length()) out.add(map(a.getJSONObject(i))) } catch (_: Exception) {}
         return out
     }
+    private fun readGroups(): MutableList<GroupConfig> {
+        val out = ArrayList<GroupConfig>()
+        try { out.addAll(Groups.normalizeGroups(JSONArray(prefs.getString(Groups.STORE_KEY, "[]")))) } catch (_: Exception) {}
+        return out
+    }
     private fun loadSettings(): AppSettings =
         try { AppSettings.fromJson(JSONObject(prefs.getString("settings", "{}"))) } catch (_: Exception) { AppSettings() }
 
     /* ------------- helpers ------------- */
     fun serverById(id: String) = servers.firstOrNull { it.id == id }
     fun chainById(id: String) = chains.firstOrNull { it.id == id }
+    fun groupById(id: String) = groups.firstOrNull { g: GroupConfig -> g.id == id }
+    /** A group as a plan carries it (Groups.groupRecord): null when there is no such group, or none of its servers is left. */
+    fun groupRecord(id: String): ServerConfig? {
+        val g = groupById(id) ?: return null
+        return Groups.groupRecord(g, servers.associateBy { s: ServerConfig -> s.id })
+    }
+    /** What a server id or a group id names: the server, or the group as its record. */
+    fun recordById(id: String): ServerConfig? = serverById(id) ?: groupRecord(id)
     /**
-     * A chain's servers. One imported with a member this phone could not read (RouteShare's
-     * `unreadable-…`) has none: a shorter chain would dial the rest straight from here.
+     * A chain's hops: servers, and groups as their records (a group is a hop
+     * like a server). One imported with a member this phone could not read
+     * (RouteShare's `unreadable-…`) has none: a shorter chain would dial the
+     * rest straight from here — and so has one with a group that is gone or has
+     * no server left (the hop it stood for would be skipped the same way).
      */
-    fun chainMembers(c: ChainConfig): List<ServerConfig> =
-        if (c.members.any { m: String -> m.startsWith(RouteShare.UNREADABLE_PREFIX) }) emptyList()
-        else c.members.mapNotNull { serverById(it) }
+    fun chainMembers(c: ChainConfig): List<ServerConfig> {
+        if (c.members.any { m: String -> m.startsWith(RouteShare.UNREADABLE_PREFIX) }) return emptyList()
+        val out = ArrayList<ServerConfig>()
+        for (m in c.members) {
+            val s = serverById(m)
+            if (s != null) { out.add(s); continue }
+            if (Groups.isGroupId(m)) out.add(groupRecord(m) ?: return emptyList())
+        }
+        return out
+    }
     fun chainReady(c: ChainConfig) = chainMembers(c).size >= 2
 
     fun poolTargetValid(t: String): Boolean = when {
         t.isEmpty() -> false
         t.startsWith("chain:") -> chainById(t.substring(6))?.let { chainReady(it) } == true
-        else -> serverById(t) != null
+        else -> recordById(t) != null
     }
     fun poolEnabledValid() = pool.filter { it.enabled && it.socksPort > 0 && poolTargetValid(it.target) }
     /** A profile the home picker offers: advanced routing is on, and it has rules or a default. */
@@ -218,10 +250,11 @@ class Store(context: Context) {
     fun targetExists(t: String): Boolean = when {
         t.isEmpty() || t == "direct" || t == "block" || t == "proxy" -> true
         t.startsWith("chain:") -> chainById(t.substring(6))?.let { c: ChainConfig -> chainMembers(c).isNotEmpty() } == true
-        else -> serverById(t) != null
+        // a group is there while one of its servers is (Groups.groupRecord)
+        else -> recordById(t) != null
     }
 
-    /** A routing target in words: a server's name, "⛓ chain", Direct, Block, "⚓ Exit at the base", or what is missing. */
+    /** A routing target in words: a server's name, "⧉ group", "⛓ chain", Direct, Block, "⚓ Exit at the base", or what is missing. */
     fun targetLabel(t: String): String = when {
         t.isEmpty() -> "first server"
         t == "direct" -> "Direct"
@@ -229,6 +262,7 @@ class Store(context: Context) {
         t == "proxy" -> "Proxy (first server)"
         t == RoutingProfiles.TARGET_BASE -> "⚓ Exit at the base"
         t.startsWith("chain:") -> chainById(t.substring(6))?.let { c: ChainConfig -> "⛓ ${c.name}" } ?: "missing chain"
+        Groups.isGroupId(t) && serverById(t) == null -> groupById(t)?.let { g: GroupConfig -> "⧉ ${g.name}" } ?: "missing group"
         else -> serverById(t)?.name ?: "missing server"
     }
 
@@ -250,7 +284,11 @@ class Store(context: Context) {
         profiles.clear(); profiles.addAll(r.profiles); saveProfiles()
     }
 
-    /** Delete a server and prune it from chains/pool; a selection that named it falls back (repairSelection). */
+    /**
+     * Delete a server and prune it from chains/pool; a selection that named it
+     * falls back (repairSelection). Groups keep its id — their record skips a
+     * member that is gone, and the editor shows it as missing (groups.js).
+     */
     fun deleteServer(id: String) {
         servers.removeAll { it.id == id }; saveServers()
         var changed = false
@@ -272,16 +310,30 @@ class Store(context: Context) {
         repairSelection()
     }
 
+    /** Delete a group and prune it from the chains, as a server is; a selection that named it falls back. */
+    fun deleteGroup(id: String) {
+        groups.removeAll { g: GroupConfig -> g.id == id }; saveGroups()
+        var changed = false
+        for (i in chains.indices) if (chains[i].members.contains(id)) { chains[i] = chains[i].copy(members = chains[i].members.filter { m: String -> m != id }); changed = true }
+        if (changed) saveChains()
+        repairSelection()
+    }
+
     fun selectionLabel(): String = when {
         selection == POOL_ID -> "🧩 Proxy Pool (${poolEnabledValid().size})"
         Selection.isAdvanced(selection) -> "🧭 " + (selectedProfile()?.name ?: "—")
         selection.startsWith("chain:") -> "⛓ " + (chainById(selection.substring(6))?.name ?: "—")
-        else -> serverById(selection)?.name ?: "—"
+        else -> serverById(selection)?.name ?: groupById(selection)?.let { g: GroupConfig -> "⧉ ${g.name}" } ?: "—"
     }
 
     fun buildPlan(): ConnectionPlan {
         val sel = selection
-        val serversById = servers.associateBy { it.id }
+        val plainById = servers.associateBy { it.id }
+        // a group is a record beside the servers (Groups.groupRecord), so its id is a
+        // target, a base, a pool entry and a selection like a server's (main.js buildPlan)
+        val groupRecs = Groups.groupRecordsById(groups, plainById)
+        val serversById = LinkedHashMap<String, ServerConfig>(plainById)
+        for ((k, v) in groupRecs) { if (!serversById.containsKey(k)) serversById[k] = v }
         val chainsById = chains.associate { it.id to chainMembers(it) }
         return when {
             sel == POOL_ID -> {
@@ -304,25 +356,35 @@ class Store(context: Context) {
                 if (members.size < 2) throw IllegalStateException("This chain needs at least 2 servers")
                 ConnectionPlan.Chain(c.name, members)
             }
-            else -> ConnectionPlan.Single(serverById(sel) ?: throw IllegalStateException("Select a server first"))
+            else -> {
+                val server = serverById(sel)
+                val group = if (server == null) groupById(sel) else null
+                when {
+                    server != null -> ConnectionPlan.Single(server)
+                    group != null -> ConnectionPlan.Single(groupRecs[group.id]
+                        ?: throw IllegalStateException("The group “${group.name}” has no server left — add servers to it under Chains & groups"))
+                    else -> throw IllegalStateException("Select a server first")
+                }
+            }
         }
     }
 
-    /** Server addresses to bypass in the TUN (avoid loop). */
+    /** Server addresses to bypass in the TUN (avoid loop). A group is entered at each of its members. */
     fun entryAddresses(plan: ConnectionPlan): List<String> = when (plan) {
-        is ConnectionPlan.Single -> listOf(plan.server.address)
-        is ConnectionPlan.Chain -> plan.members.firstOrNull()?.let { listOf(it.address) } ?: emptyList()
-        is ConnectionPlan.Pool -> plan.entries.mapNotNull { entryAddr(it.target, plan.serversById, plan.chainsById) }.distinct()
+        is ConnectionPlan.Single -> entriesOf(plan.server)
+        is ConnectionPlan.Chain -> entriesOf(plan.members.firstOrNull())
+        is ConnectionPlan.Pool -> plan.entries.flatMap { e: PoolEntry -> entryAddr(e.target, plan.serversById, plan.chainsById) }.distinct()
         // a target through a base is not an entry; its base is (RoutingProfiles.dialTargets)
         is ConnectionPlan.Advanced -> {
             val ts = RoutingProfiles.dialTargets(plan).toSet()
-            ts.mapNotNull { entryAddr(it, plan.serversById, plan.chainsById) }.distinct()
+            ts.flatMap { t: String -> entryAddr(t, plan.serversById, plan.chainsById) }.distinct()
         }
     }
-    private fun entryAddr(t: String, sById: Map<String, ServerConfig>, cById: Map<String, List<ServerConfig>>): String? = when {
-        t.startsWith("chain:") -> cById[t.substring(6)]?.firstOrNull()?.address
-        t == "direct" || t == "block" || t == "proxy" -> null
-        else -> sById[t]?.address
+    private fun entriesOf(s: ServerConfig?): List<String> = Groups.serversOf(s).map { m: ServerConfig -> m.address }.distinct()
+    private fun entryAddr(t: String, sById: Map<String, ServerConfig>, cById: Map<String, List<ServerConfig>>): List<String> = when {
+        t.startsWith("chain:") -> entriesOf(cById[t.substring(6)]?.firstOrNull())
+        t == "direct" || t == "block" || t == "proxy" -> emptyList()
+        else -> entriesOf(sById[t])
     }
 
     companion object {
