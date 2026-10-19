@@ -1,6 +1,7 @@
 package com.irnetfree.vpn.vpn
 
 import com.irnetfree.vpn.core.LanShare
+import com.irnetfree.vpn.core.SettingsApply
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -55,6 +56,34 @@ object VpnState {
         if (s != ConnState.CONNECTED) _lanShared.value = null
     }
     fun setTraffic(t: Traffic) { _traffic.value = t }
+
+    /**
+     * Is the app on screen (MainActivity between onStart and onStop)? The
+     * per-second figures — the service's traffic reading, the screen's
+     * "connected for" clock — are only drawn, so they wait while nobody can
+     * see them instead of waking the phone every second (battery).
+     */
+    private val _uiVisible = MutableStateFlow(false)
+    val uiVisible: StateFlow<Boolean> = _uiVisible
+    fun setUiVisible(v: Boolean) { _uiVisible.value = v }
+
+    /**
+     * What the latest connect built its config from (SettingsApply): the
+     * screens name every change made since that the running tunnel does not
+     * carry, beside a Reconnect. Written by the connect's prepare.
+     */
+    private val _applied = MutableStateFlow<SettingsApply.Applied?>(null)
+    val applied: StateFlow<SettingsApply.Applied?> = _applied
+    fun setApplied(a: SettingsApply.Applied?) { _applied.value = a }
+
+    /**
+     * Android's "Block connections without VPN" is on (VpnService.isLockdownEnabled,
+     * read when the tunnel comes up): an app per-app routing leaves out of the
+     * VPN then has no internet at all instead of going direct.
+     */
+    private val _lockdown = MutableStateFlow(false)
+    val lockdown: StateFlow<Boolean> = _lockdown
+    fun setLockdown(v: Boolean) { _lockdown.value = v }
     fun addLog(line: String) { _log.value = (_log.value + line).takeLast(300) }
     fun clearLog() { _log.value = emptyList() }
 

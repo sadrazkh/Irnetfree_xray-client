@@ -303,13 +303,15 @@ test('the traffic meter: a group\'s members count as the group (the core counts 
 test('the live view: each group in the config with who T~gm<i> is (a chain variant by the member it takes) — beside the config, never in what is written', () => {
   const g = groupOf([{ id: 'cdn', address: '104.16.1.1' }, 'de']);
   const cfg = B.buildConfig({ mode: 'single', server: g }, SETTINGS);
-  assert.deepEqual(cfg.groupTags, [{ tag: 'proxy', groupId: 'grp-g', name: 'G', strategy: 'roundRobin', members: [
-    { id: 'cdn', name: 'CDN', address: '104.16.1.1', port: 443 }, { id: 'de', name: 'DE', address: 'de.example.net', port: 8443 }] }]);
+  assert.deepEqual(cfg.groupTags, [{ tag: 'proxy', groupId: 'grp-g', name: 'G', strategy: 'roundRobin', direct: true, members: [
+    { id: 'cdn', name: 'CDN', address: '104.16.1.1', port: 443, direct: true }, { id: 'de', name: 'DE', address: 'de.example.net', port: 8443, direct: true }] }]);
   assert.equal(JSON.stringify(cfg).includes('groupTags'), false);
   assert.equal(Object.keys(cfg).includes('groupTags'), false);
   // a chain through the group: the variants named by their member
   const c = B.buildConfig({ mode: 'chain', chain: [NL, g] }, SETTINGS);
   assert.deepEqual(c.groupTags.map((x) => [x.tag, x.members.map((m) => m.id)]), [['proxy', ['cdn', 'de']]]);
+  // ...which the app cannot test member by member as the core dials them (groupEvict.js leaves them to the core)
+  assert.deepEqual(c.groupTags[0].members.map((m) => m.direct), [false, false]);
   // advanced: one entry per instance, by its own tag
   const adv = B.buildConfig({ mode: 'advanced', serversById: Object.assign({}, byId, { 'grp-g': g }), chainsById: {}, chain: [],
     rules: [{ type: 'domain', value: 'example.org', target: 'grp-g' }], def: 'de' }, SETTINGS);

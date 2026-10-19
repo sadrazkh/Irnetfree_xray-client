@@ -6,6 +6,9 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -24,6 +27,8 @@ import com.irnetfree.vpn.core.LocalAuth
 import com.irnetfree.vpn.core.LocalProxyAuth
 import com.irnetfree.vpn.core.Mux
 import com.irnetfree.vpn.core.PoolEntry
+import com.irnetfree.vpn.core.RoutingProfile
+import com.irnetfree.vpn.core.SettingsApply
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.TrustedDns
 import com.irnetfree.vpn.net.Diagnostics
@@ -36,6 +41,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -342,6 +348,13 @@ class XrayVpnService : VpnService() {
             val fd = builder.establish() ?: return fail(gen, startId, "Android refused the VPN interface — VPN permission missing, or another VPN app holds it", unattended)
             tun = fd
             VpnState.addLog("TUN up (fd=${fd.fd}) · resolver ${dns.joinToString(", ")}")
+            // "Block connections without VPN" leaves an app per-app routing keeps
+            // out of the tunnel with no internet at all — it never goes direct.
+            var lockdown = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) lockdown = try { isLockdownEnabled } catch (e: Throwable) { false }
+            VpnState.setLockdown(lockdown)
+            if (lockdown && perAppMode != "off")
+                VpnState.addLog("⚠ Android's “Block connections without VPN” is on: the apps per-app routing leaves out of the VPN have no internet at all instead of going direct — turn it off under Android Settings → VPN → IRNetFree (⚙) to let them go direct.")
 
             // 3) hev tun2socks: TUN fd -> local SOCKS, with the session's credentials
             val cfgPath = writeTun2socksConfig(socksPort, ipv6, sessionAuth)
@@ -586,14 +599,21 @@ class XrayVpnService : VpnService() {
     private fun startStatsLoop() {
         statsJob?.cancel()
         statsJob = scope.launch {
-            var lastTx = 0L; var lastRx = 0L; var first = true
+            var lastTx = 0L; var lastRx = 0L; var lastAt = 0L
             while (isActive && tunnelRunning) {
+                // The figures are only drawn: with the app off screen nothing is
+                // read at all — no wake-up every second — until it is seen again
+                // (VpnState.uiVisible); the totals then catch up in one read.
+                if (!VpnState.uiVisible.value) { VpnState.uiVisible.first { v: Boolean -> v }; lastAt = 0L; continue }
                 val st = runCatching { TProxyService.TProxyGetStats() }.getOrNull()
                 if (st != null && st.size >= 4) {
                     val tx = st[1]; val rx = st[3]   // [tx_pkts, tx_bytes, rx_pkts, rx_bytes]
-                    val txSpeed = if (first) 0 else (tx - lastTx).coerceAtLeast(0)
-                    val rxSpeed = if (first) 0 else (rx - lastRx).coerceAtLeast(0)
-                    lastTx = tx; lastRx = rx; first = false
+                    val now = SystemClock.elapsedRealtime()
+                    // per second of the time that really passed (the first read after a pause has none)
+                    val ms = if (lastAt == 0L) 0L else (now - lastAt).coerceAtLeast(1L)
+                    val txSpeed = if (ms == 0L) 0L else (tx - lastTx).coerceAtLeast(0L) * 1000L / ms
+                    val rxSpeed = if (ms == 0L) 0L else (rx - lastRx).coerceAtLeast(0L) * 1000L / ms
+                    lastTx = tx; lastRx = rx; lastAt = now
                     VpnState.setTraffic(Traffic(tx, rx, txSpeed, rxSpeed))
                 }
                 delay(1000)
@@ -899,8 +919,27 @@ class XrayVpnService : VpnService() {
                 .onFailure { e -> Log.w(TAG, "could not stop the older tunnel: ${e.message}") }
         }
 
+        /**
+         * The hostname Android's Private DNS is set to on the phone's own network
+         * (strict mode), else null — Android 9+. Read from the networks that are
+         * not a VPN: with the tunnel up, the active network is the tunnel itself.
+         */
+        private fun privateDnsName(ctx: Context): String? {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+            return runCatching {
+                val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                @Suppress("DEPRECATION")
+                val nets: Array<Network> = cm.allNetworks
+                nets.firstNotNullOfOrNull { n: Network ->
+                    val caps = cm.getNetworkCapabilities(n)
+                    if (caps == null || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) null
+                    else cm.getLinkProperties(n)?.privateDnsServerName
+                }
+            }.getOrNull()
+        }
+
         /** What prepare() reads from the store in one go, on the main thread. */
-        private class Fresh(val plan: ConnectionPlan, val settings: AppSettings, val pool: List<PoolEntry>)
+        private class Fresh(val plan: ConnectionPlan, val settings: AppSettings, val pool: List<PoolEntry>, val profile: RoutingProfile?)
 
         /**
          * Everything before the service: pins, endpoints, mux, the config. Blocks; never on the main thread.
@@ -928,7 +967,8 @@ class XrayVpnService : VpnService() {
                 log = { line -> VpnState.addLog(line) })
             val fresh = onMain {
                 if (CertPin.applyPins(store.servers, pins)) store.saveServers()
-                Fresh(plan0.withRecords { id: String -> store.serverById(id) }, store.settings, store.pool.toList())
+                Fresh(plan0.withRecords { id: String -> store.serverById(id) }, store.settings, store.pool.toList(),
+                    (plan0 as? ConnectionPlan.Advanced)?.let { a: ConnectionPlan.Advanced -> store.profileById(a.profileId) })
             }
             val plan = fresh.plan
             val s = fresh.settings
@@ -1002,6 +1042,12 @@ class XrayVpnService : VpnService() {
             // resolvers otherwise. A sing-box-format config carries no hijack.
             val hijacks = engine != EngineChoice.SINGBOX
             val adapterDns = DnsPlan.adapterDnsServers(s, if (hijacks) TUN_DNS4 else null)
+
+            // What this connect is built from: the screens name every change made
+            // after it that the running tunnel does not carry (SettingsApply).
+            VpnState.setApplied(SettingsApply.Applied(s, fresh.profile))
+            // ...and what of the routing would not do what the screen says
+            TunnelSetup.routingNotes(plan, s, engine, geo, privateDnsName(ctx)).forEach { line: String -> VpnState.addLog(line) }
 
             return Intent(ctx, XrayVpnService::class.java).apply {
                 action = ACTION_CONNECT
