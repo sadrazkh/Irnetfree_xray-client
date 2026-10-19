@@ -160,6 +160,43 @@ object TunnelSetup {
         return c.toString()
     }
 
+    /**
+     * The log lines a connect owes about its routing — what it applies, and
+     * whatever of the screen's routing it cannot (each said once a connect):
+     *  - the simple mode it runs ("Routing: Bypass Iran …"), or the profile's rules;
+     *  - a server on sing-box carries none of the app's routing here (SingboxConfig
+     *    has no geo rules), so Bypass Iran and custom rules do not apply to it;
+     *  - app rules ('process', from a Windows profile): Android never tells a VPN
+     *    which app opened a connection, so they are left out;
+     *  - Android's Private DNS set to a host ([privateDns]): the phone asks it,
+     *    not the core's resolver, so a bypass can miss Iranian sites on foreign CDNs.
+     */
+    fun routingNotes(plan: ConnectionPlan, s: AppSettings, engine: String, geo: Boolean, privateDns: String?): List<String> {
+        val out = ArrayList<String>()
+        val adv = plan as? ConnectionPlan.Advanced
+        val modeOn = (adv == null || (adv.useMode ?: s.advancedUseMode)) && geo
+        val mode = when (s.routingMode) { "bypass-ir" -> "Bypass Iran"; "bypass-cn" -> "Bypass China"; "direct" -> "Direct"; else -> "Global" }
+        if (engine == EngineChoice.SINGBOX) {
+            if (s.routingMode != "global" || s.customRules.isNotEmpty())
+                out.add("⚠ This server runs on sing-box, which carries none of the app's routing here — $mode and the custom rules do not apply to it. Choose Xray as its core in its edit sheet to have them.")
+            return out
+        }
+        if (adv != null) {
+            val apps = adv.rules.count { r: RouteRule -> r.type == "process" }
+            out.add("Routing: the profile's ${adv.rules.size - apps} rule(s)" + (if (modeOn && s.routingMode.startsWith("bypass")) ", then $mode under them" else "") + ", the rest to its default")
+            if (apps > 0) out.add("⚠ ${if (apps == 1) "1 app rule" else "$apps app rules"} of this profile came from Windows and ${if (apps == 1) "is" else "are"} left out: Android does not tell a VPN which app opened a connection. Settings → Per-app routing chooses which apps use the VPN at all.")
+        } else {
+            out.add("Routing: $mode" + when {
+                s.routingMode == "bypass-ir" && geo -> " — Iranian sites go direct, by name (sniffing ${if (s.enableSniffing) "on" else "OFF — names are not seen"}) and by address"
+                s.routingMode.startsWith("bypass") && !geo -> " — not applied: no geo data on this device"
+                else -> ""
+            })
+        }
+        if (privateDns != null && s.routingMode.startsWith("bypass") && modeOn)
+            out.add("⚠ Android's Private DNS is set to $privateDns: the phone asks it (through the tunnel) instead of the app's resolver, so $mode can miss Iranian sites that sit on foreign CDNs. Set Private DNS to Automatic or Off (Android Settings → Network → Private DNS).")
+        return out
+    }
+
     private fun keep(a: JSONArray, pred: (JSONObject) -> Boolean): JSONArray {
         val out = JSONArray()
         for (i in 0 until a.length()) { val o = a.optJSONObject(i) ?: continue; if (pred(o)) out.put(o) }
