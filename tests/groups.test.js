@@ -123,18 +123,65 @@ test('a chain through a group is a group of whole chains — one variant per mem
   assert.equal(dials(cfg, 'proxy~gm1'), 'proxy~gh1-h0');
   assert.equal(find(cfg, 'proxy~gh1-h0').protocol, 'trojan');
   assert.deepEqual(cfg.routing.balancers, [{ tag: 'proxy~bal', selector: ['proxy~gm'], strategy: { type: 'roundRobin' }, fallbackTag: 'proxy~gm0' }]);
-  // [CDN → G]: DE behind CDN, or NL behind CDN
+  // [CDN → G]: CDN built ONCE, DE and NL each behind it
   cfg = B.buildConfig({ mode: 'chain', chain: [CDN, g] }, SETTINGS);
+  assert.equal(find(cfg, 'proxy-h0').settings.vnext[0].address, 'cdn.example.com');
   assert.equal(find(cfg, 'proxy~gm0').settings.vnext[0].address, 'de.example.net');
-  assert.equal(dials(cfg, 'proxy~gm0'), 'proxy~gh0-h0');
-  assert.equal(find(cfg, 'proxy~gh0-h0').settings.vnext[0].address, 'cdn.example.com');
+  assert.equal(dials(cfg, 'proxy~gm0'), 'proxy-h0');
+  assert.equal(dials(cfg, 'proxy~gm1'), 'proxy-h0');
+  assert.equal(cfg.outbounds.filter((o) => (o.settings && o.settings.vnext || [])[0] && o.settings.vnext[0].address === 'cdn.example.com').length, 1);
   // two groups: every combination
   const g2 = G.groupRecord({ id: 'grp-2', name: 'G2', members: ['cdn', 'nl'] }, byId);
   cfg = B.buildConfig({ mode: 'chain', chain: [g, g2] }, SETTINGS);
   assert.equal(cfg.outbounds.filter((o) => /^proxy~gm\d+$/.test(o.tag)).length, 4);
-  // no outbound anywhere dials a loopback
+  // no TCP hop anywhere dials a loopback
   const loops = new Set(cfg.outbounds.filter((o) => o.protocol === 'loopback').map((o) => o.tag));
   assert.equal(cfg.outbounds.some((o) => loops.has(((o.streamSettings || {}).sockopt || {}).dialerProxy)), false);
+});
+
+test('a WireGuard in a chain with a group is ONE outbound — after the group it dials the group\'s loopback (never one copy per member: one key, one session); before it, every member dials it', () => {
+  const wg = Object.assign(srv('w', 'wireguard://' + encodeURIComponent('cHJpdmF0ZS1rZXktQS1BQUFBQUFBQUFBQUFBQUFBQUE=') + '@162.159.192.1:2408?publickey=' + encodeURIComponent('Q29ycG9yYXRlU2VydmVyUHVibGljS2V5MDAwMDAwMDA=') + '&address=172.16.0.2%2F32#WARP'), {});
+  const ids = Object.assign({ w: wg }, byId);
+  const g = G.groupRecord({ id: 'grp-c', members: [{ id: 'cdn', address: '104.16.1.1' }, { id: 'cdn', address: '104.17.2.2' }] }, ids);
+  const dials = (cfg, tag) => ((find(cfg, tag).streamSettings || {}).sockopt || {}).dialerProxy;
+  const wgs = (cfg) => cfg.outbounds.filter((o) => o.protocol === 'wireguard');
+  // [G → WARP]: the group's loopback at hop 0, the one WireGuard dialling it
+  let cfg = B.buildConfig({ mode: 'chain', chain: [g, wg] }, SETTINGS);
+  assert.equal(wgs(cfg).length, 1);
+  assert.equal(wgs(cfg)[0].tag, 'proxy');
+  assert.equal(find(cfg, 'proxy-h0').protocol, 'loopback');
+  assert.equal(dials(cfg, 'proxy'), 'proxy-h0');
+  assert.deepEqual(['proxy-h0~gm0', 'proxy-h0~gm1'].map((t) => find(cfg, t).settings.vnext[0].address), ['104.16.1.1', '104.17.2.2']);
+  assert.equal(cfg.routing.rules[0].balancerTag, 'proxy-h0~bal');
+  // [G → DE → WARP]: the stretch [G → DE] varies, the WireGuard after it once
+  cfg = B.buildConfig({ mode: 'chain', chain: [g, DE, wg] }, SETTINGS);
+  assert.equal(wgs(cfg).length, 1);
+  assert.equal(dials(cfg, 'proxy'), 'proxy-h1');
+  assert.equal(find(cfg, 'proxy-h1').protocol, 'loopback');
+  assert.equal(find(cfg, 'proxy-h1~gm0').settings.vnext[0].address, 'de.example.net');
+  assert.equal(dials(cfg, 'proxy-h1~gm0'), 'proxy-h1~gh0-h0');
+  // [WARP → G]: the WireGuard first, once; both members behind it
+  const g2 = G.groupRecord({ id: 'grp-d', members: ['de', 'nl'] }, ids);
+  cfg = B.buildConfig({ mode: 'chain', chain: [wg, g2] }, SETTINGS);
+  assert.equal(wgs(cfg).length, 1);
+  assert.equal(wgs(cfg)[0].tag, 'proxy-h0');
+  assert.deepEqual(['proxy~gm0', 'proxy~gm1'].map((t) => dials(cfg, t)), ['proxy-h0', 'proxy-h0']);
+});
+
+test('a chain base with a group in it registers nothing: each target through it is the whole chain [base → target]', () => {
+  const g = groupOf(['de', 'nl']);
+  const plan = {
+    mode: 'advanced', serversById: Object.assign({}, byId, { 'grp-g': g }), chainsById: { c2: [g, NL] }, chain: [],
+    rules: [{ type: 'domain', value: 'example.com', target: 'cdn', via: 'chain:c2' }], def: 'de'
+  };
+  const cfg = B.buildConfig(plan, SETTINGS);
+  assert.equal(cfg.outbounds.some((o) => o.tag.startsWith('base-')), false);
+  assert.equal(find(cfg, 'out-cdn@chain-c2').protocol, 'loopback');
+  // the variant [DE → NL → CDN]: CDN at the exit, behind the variant's NL, behind its DE
+  const exit = find(cfg, 'out-cdn@chain-c2~gm0');
+  assert.equal(exit.settings.vnext[0].address, 'cdn.example.com');
+  assert.equal(exit.streamSettings.sockopt.dialerProxy, 'out-cdn@chain-c2~gh0-h1');
+  assert.equal(find(cfg, 'out-cdn@chain-c2~gh0-h1').protocol, 'trojan');
 });
 
 test('a group in advanced routing: a rule target, the default — its own loopback; as a base, each target through it is [group → target]; a group gone is a target that no longer exists', () => {
