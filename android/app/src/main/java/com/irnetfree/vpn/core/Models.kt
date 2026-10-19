@@ -178,6 +178,41 @@ data class ChainConfig(val id: String, val name: String, val members: List<Strin
     }
 }
 
+/**
+ * One member of a group (Groups.kt): a saved server's id, dialled as it is or
+ * at an address of its own — a clean CDN IP, another port — with its SNI and
+ * Host kept on the server's own name (AddressSwap). Written only when set.
+ */
+data class GroupMember(val id: String, val address: String? = null, val port: Int? = null) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id)
+        if (address != null) put("address", address)
+        if (port != null) put("port", port)
+    }
+}
+
+/**
+ * A group (Groups.kt, the desktop's groups.js): several servers used as one
+ * config — each new connection through one member, the [strategy] deciding
+ * which (roundRobin | leastPing | random). Used wherever a server is; its id
+ * (`grp-…`) is the target, the selection, the base, the chain hop.
+ */
+data class GroupConfig(
+    val id: String,
+    val name: String,
+    val strategy: String = Groups.DEFAULT_STRATEGY,
+    val members: List<GroupMember> = emptyList()
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id); put("name", name); put("strategy", strategy)
+        put("members", JSONArray().apply { members.forEach { m: GroupMember -> put(m.toJson()) } })
+    }
+    companion object {
+        /** A stored group read back, normalized as groups.js does (Groups.normalizeGroup); null when [o] is none. */
+        fun fromJson(o: JSONObject?): GroupConfig? = Groups.normalizeGroup(o)
+    }
+}
+
 /** A proxy-pool entry: an exit exposed on its own local SOCKS/HTTP port. */
 data class PoolEntry(
     val id: String, val name: String, val target: String,
@@ -521,7 +556,11 @@ data class LanShare(
     }
 }
 
-/** What to connect through. single / chain / pool / advanced. */
+/**
+ * What to connect through. single / chain / pool / advanced. A group
+ * (Groups.groupRecord) is a record like a server's: a Single's server, a
+ * Chain's hop, an entry of serversById under its `grp-…` id.
+ */
 sealed class ConnectionPlan {
     data class Single(val server: ServerConfig) : ConnectionPlan()
     data class Chain(val name: String, val members: List<ServerConfig>) : ConnectionPlan()
