@@ -594,19 +594,35 @@ function withHelpers(o, server) {
  * `hopBase`: what the hops are named after when not the exit (a group's chain
  * variants name theirs outside the group's member prefix — expandGroups).
  *
- * A chain with a group in it is a group of chains (groupOfChains).
+ * A chain with a group in it: the hops before the group are built once and
+ * every member dials through them; from the group up to (not including) the
+ * next WireGuard the chain is a group of whole chains (groupOfChains) — one
+ * variant per member, in that hop's place; a WireGuard after a group is built
+ * ONCE and dials through that group's loopback. Copied per variant it would be
+ * one session per copy on one key, and the peer keeps only the newest
+ * handshake — every copy would cut the others off.
  */
 function buildChainOutbounds(servers, exitTag, viaTag, hopBase) {
   exitTag = exitTag || 'proxy';
   const list = (servers || []).filter(s => s && s.outbound);
-  if (list.length > 1 && list.some(isGroupRecord)) return [groupOfChains(list, exitTag, viaTag)];
   const hops = hopBase || exitTag;
   const last = list.length - 1;
+  const tagAt = (i) => (i === last ? exitTag : `${hops}-h${i}`);
   const outs = [];
-  for (let i = 0; i <= last; i++) {
-    const tag = i === last ? exitTag : `${hops}-h${i}`;
-    const prev = i > 0 ? `${hops}-h${i - 1}` : (viaTag || null);
+  let prev = viaTag || null;
+  for (let i = 0; i <= last;) {
+    if (last > 0 && isGroupRecord(list[i])) {
+      let end = i + 1;
+      while (end <= last && !isWgServer(list[end])) end++;
+      outs.push(groupOfChains(list.slice(i, end), tagAt(end - 1), prev));
+      prev = tagAt(end - 1);
+      i = end;
+      continue;
+    }
+    const tag = tagAt(i);
     outs.push(...(prev ? [behind(list[i], tag, prev)] : withHelpers(cloneOut(list[i].outbound, tag, list[i]), list[i])));
+    prev = tag;
+    i++;
   }
   return outs;
 }
@@ -615,13 +631,16 @@ function buildChainOutbounds(servers, exitTag, viaTag, hopBase) {
 const MAX_CHAIN_VARIANTS = 64;
 
 /**
- * A chain with a group in it, as a group of whole chains: one variant per
- * member, the member in the group's place — [A → G(m1, m2) → B] is
- * G'([A → m1 → B], [A → m2 → B]); two groups make every combination (at most
- * MAX_CHAIN_VARIANTS). Nothing ever dials THROUGH a group: the next hop's
- * dialerProxy aimed at a group's loopback lost the end of a response now and
- * then on both cores (scripts/probe-group.js, 2026-10-19), while a loopback as
- * a route's target never did. The variants take the first group's strategy.
+ * A stretch of a chain that starts with a group, as a group of whole chains:
+ * one variant per member, the member in the group's place — [G(m1, m2) → B] is
+ * G'([m1 → B], [m2 → B]), each variant's first hop dialling `viaTag` (the hops
+ * before the group); two groups make every combination (at most
+ * MAX_CHAIN_VARIANTS). A TCP hop never dials THROUGH a group: aimed at a
+ * group's loopback, the next hop's dialerProxy lost the end of a response now
+ * and then on both cores (scripts/probe-group.js, 2026-10-19), while a loopback
+ * as a route's target never did. Only a WireGuard does (buildChainOutbounds),
+ * its UDP never ending with a response. The variants take the first group's
+ * strategy.
  */
 function groupOfChains(list, exitTag, viaTag) {
   let variants = [[]];
@@ -690,7 +709,7 @@ function makeRegistry(plan, muxIds) {
     const s = (plan.serversById || {})[target];
     return s ? [s] : [];
   }
-  const sharesBase = (target) => bases.has(target) && members(target).some(s => s && s.outbound && isWgServer(s));
+  const sharesBase = (target) => bases.has(target) && members(target).some(s => s && s.outbound && isWgServer(s)) && !members(target).some(isGroupRecord);
 
   /** A target that is its own base's WireGuard: a freedom out through the base's exit (see above). */
   function exitAtBase(target, tag) {
@@ -710,13 +729,16 @@ function makeRegistry(plan, muxIds) {
 
   /**
    * A via's base group, registered once: { key, tag } — its exit tag and the
-   * key a target through it is named by. A group as the base registers
-   * nothing: each target through it is a chain [group → target] of its own
-   * (tagThrough), since nothing may dial through a group (groupOfChains).
+   * key a target through it is named by. A base with a group in it (a group,
+   * or a chain holding one) registers nothing: each target through it is the
+   * whole chain [base → target] of its own (tagThrough) — a TCP hop never dials
+   * through a group (groupOfChains).
    */
   function baseOf(via) {
-    const g = (plan.serversById || {})[via];
-    if (isGroupRecord(g)) return { key: via, tag: null, group: g };
+    // a base with a group in it: nothing of its own — each target through it is the whole chain [base → target]
+    const hops = via === 'chain' ? (plan.chain || [])
+      : (via.indexOf('chain:') === 0 ? ((plan.chainsById || {})[via.slice('chain:'.length)] || []) : [(plan.serversById || {})[via]]);
+    if (hops.some(isGroupRecord)) return { key: via === 'chain' ? 'chain' : (via.indexOf('chain:') === 0 ? 'chain-' + via.slice('chain:'.length) : via), tag: null, hops };
     if (via === 'chain') return { key: 'chain', tag: chainTag(plan.chain, 'base-chain') };
     if (via.indexOf('chain:') === 0) {
       const cid = via.slice('chain:'.length);
@@ -748,9 +770,9 @@ function makeRegistry(plan, muxIds) {
   /** `target` riding `base` (baseOf): its own outbound(s), the one that would dial by itself dialing the base. */
   function tagThrough(target, base) {
     const at = '@' + base.key;
-    if (base.group) {
+    if (base.hops) {
       const name = target === 'chain' ? 'out-chain' : (typeof target === 'string' && target.indexOf('chain:') === 0 ? 'out-chain-' + target.slice('chain:'.length) : 'out-' + target);
-      return chainTag([base.group, ...members(target)], name + at);
+      return chainTag([...base.hops, ...members(target)], name + at);
     }
     if (target === 'chain') return chainTag(plan.chain, 'out-chain' + at, base.tag);
     if (typeof target === 'string' && target.indexOf('chain:') === 0) {
