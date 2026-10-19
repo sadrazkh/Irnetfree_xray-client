@@ -213,12 +213,13 @@ test('licensePlan: one key goes on every account; several one each in order, the
   });
 });
 
-test('resolveHop: a server or a chain’s members — each still there, none an HTTP proxy (no UDP); otherwise badHop', () => {
+test('resolveHop: a server or a chain’s members — each still there, the last not an HTTP proxy (no UDP; the ones before only carry its stream); otherwise badHop', () => {
   const servers = [{ id: 's1', name: 'UK xhttp', protocol: 'vless' }, { id: 's2', name: 'hy2', protocol: 'hysteria2' }, { id: 'p', name: 'office proxy', protocol: 'http' }];
-  const chains = [{ id: 'c1', name: 'Two hops', members: ['s1', 's2'] }, { id: 'c2', name: 'empty', members: [] }, { id: 'c3', name: 'via proxy', members: ['p', 's1'] }, { id: 'c4', name: 'gone', members: ['s1', 'zz'] }];
+  const chains = [{ id: 'c1', name: 'Two hops', members: ['s1', 's2'] }, { id: 'c2', name: 'empty', members: [] }, { id: 'c3', name: 'via proxy', members: ['p', 's1'] }, { id: 'c4', name: 'gone', members: ['s1', 'zz'] }, { id: 'c5', name: 'ends on proxy', members: ['s1', 'p'] }];
   assert.deepEqual(W.resolveHop('s1', servers, chains), { members: ['s1'], name: 'UK xhttp' });
   assert.deepEqual(W.resolveHop('chain:c1', servers, chains), { members: ['s1', 's2'], name: 'Two hops' });
-  for (const v of ['', 'nope', 'chain:nope', 'chain:c2', 'chain:c3', 'chain:c4', 'p']) {
+  assert.deepEqual(W.resolveHop('chain:c3', servers, chains), { members: ['p', 's1'], name: 'via proxy' }, 'an HTTP proxy first carries the VLESS stream');
+  for (const v of ['', 'nope', 'chain:nope', 'chain:c2', 'chain:c4', 'chain:c5', 'p']) {
     assert.throws(() => W.resolveHop(v, servers, chains), (e) => e.code === 'badHop', v);
   }
   assert.throws(() => W.resolveHop('p', servers, chains), /HTTP proxy/);
@@ -361,6 +362,15 @@ test('servers:addWarp, WireGuard import: a .conf or a wireguard:// link — no n
   assert.equal(res.ok, true, res.error);
   assert.deepEqual(res.added[0].outbound.settings.reserved, [1, 2, 3]);
   assert.equal(res.added[0].name, '☁ WARP');
+  assert.equal(res.added[0].outbound._noise, 'random', 'used directly: the noise, as for a new one');
+  // my clean IP replaces the config's endpoint; chained, the config's own endpoint stays and no noise
+  h = handler();
+  res = await h.add({ kind: 'wireguard', mode: 'import', importText: link, use: 'direct', endpoint: 'custom', address: '188.114.97.3:4500', antiDpi: false });
+  assert.deepEqual([res.added[0].address, res.added[0].port, res.added[0].outbound.settings.peers[0].endpoint, res.added[0].outbound._noise], ['188.114.97.3', 4500, '188.114.97.3:4500', undefined]);
+  assert.equal('_edited' in res.added[0], false);
+  h = handler();
+  res = await h.add({ kind: 'wireguard', mode: 'import', importText: conf, use: 'chain', chainWith: 'hop', endpoint: 'custom', address: '188.114.97.3', antiDpi: true });
+  assert.deepEqual([res.added[0].address, res.added[0].port, res.added[0].outbound._noise], ['engage.cloudflareclient.com', 2408, undefined]);
 
   for (const bad of ['', '{"private_key":"x"}', 'vless://u@h:1', '[Interface]\nAddress = 10.0.0.2/32\n']) {
     h = handler();

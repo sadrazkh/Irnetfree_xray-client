@@ -96,7 +96,7 @@ function pingClass(ms) {
 
 function fmtBytes(n) {
   n = Number(n) || 0;
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];   // PB: a WARP+ account's premium_data
   let i = 0;
   while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
   // Bytes are whole; everything else keeps ONE decimal so the text width stays
@@ -6133,11 +6133,15 @@ function warpNoteText(w) {
 /** The dialog's foot: Make (Add, for an import), Cancel and what will be added — or, when done, see them in the list. */
 function warpFootNodes(w) {
   if (w.phase === 'done') {
-    const see = edNode('button', { type: 'button', class: 'btn primary', id: 'warpSee', text: t('warp.see') });
+    // a chain made: the first one selected, ready to connect — the list stays one click away
+    const chainId = ((w.res && w.res.accounts) || []).map((x) => x && x.chainId).find(Boolean);
+    const use = chainId ? edNode('button', { type: 'button', class: 'btn primary', id: 'warpUseChain', text: t('warp.goChain') }) : null;
+    if (use) use.onclick = () => warpUseChain(chainId);
+    const see = edNode('button', { type: 'button', class: 'btn ' + (use ? 'ghost' : 'primary'), id: 'warpSee', text: t('warp.see') });
     see.onclick = warpSeeInList;
     const close = edNode('button', { type: 'button', class: 'btn ghost', text: t('tb.close') });
     close.onclick = closeWarp;
-    return [see, close];
+    return [use, see, close].filter(Boolean);
   }
   const running = w.phase === 'running';
   const go = edNode('button', { type: 'button', class: 'btn primary', id: 'warpGo', disabled: running,
@@ -6203,6 +6207,14 @@ async function runWarp() {
 }
 
 /** Done: the list, its first new server selected and scrolled to (its group unfolded). */
+/** Done with a chain: it is selected and the home page shows it, one press from connecting. */
+function warpUseChain(chainId) {
+  closeWarp();
+  if (!(state.chains || []).some((c) => c && c.id === chainId)) return;
+  showView('home');
+  selectServer(chainId);
+}
+
 function warpSeeInList() {
   const added = (warpForm && warpForm.res && warpForm.res.added) || [];
   closeWarp();

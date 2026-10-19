@@ -110,7 +110,7 @@ const DIALOG_FNS = ['edNode', 'appendSome', 'richLine', 'httpCards', 'warpChips'
   'warpLicenses', 'warpCount', 'warpHops', 'warpHop', 'warpArgs', 'warpErrorText', 'warpWarningTexts', 'warpStoppedText', 'warpFill', 'looksP256',
   'warpReadImport', 'warpImportChips', 'warpReadWgImport', 'warpWgImportChips', 'warpNum', 'warpBytes', 'warpDate', 'warpTypeChip', 'warpAccountBody',
   'warpAccountBox', 'renderWarpAccount', 'warpField', 'warpSeg', 'warpLicenseNodes', 'warpNewNodes', 'warpTwoWg', 'warpTwoMasque', 'warpFormNodes',
-  'warpProgressNodes', 'warpNoteText', 'warpFootNodes', 'warpRenderFoot', 'renderWarp', 'runWarp', 'warpSeeInList'];
+  'warpProgressNodes', 'warpNoteText', 'warpFootNodes', 'warpRenderFoot', 'renderWarp', 'runWarp', 'warpUseChain', 'warpSeeInList'];
 
 const SERVERS = [
   { id: 's1', name: 'DE', protocol: 'vless' },
@@ -138,7 +138,7 @@ function dialogHarness({ lang = 'en', connected = false, addWarp, servers = SERV
     toast: (msg, kind) => calls.push(['toast', msg, kind || '']),
     state: { servers: plain(servers), chains: plain(chains), connected, selectedServerId: selected },
     renderServers: () => calls.push(['renderServers']), renderPicker() {}, renderChains: () => calls.push(['renderChains']), renderPool() {}, renderAdvanced() {},
-    showView() {}, selectServer() {}, srvById: () => null, groupKey: () => 'manual', foldedGroups: new Set(), setGroupFolded() {},
+    showView: (v) => calls.push(['showView', v]), selectServer: (id) => calls.push(['selectServer', id]), srvById: () => null, groupKey: () => 'manual', foldedGroups: new Set(), setGroupFolded() {},
     localStorage: { getItem: () => null, setItem() {} },
     window: {
       i18n: { lang },
@@ -173,7 +173,7 @@ const NEW_KEYS = ['warp.titleWg', 'warp.kind', 'warp.kindWg', 'warp.kindMasque',
   'warp.antiDpiWg', 'warp.antiDpiWgHint', 'warp.noteN', 'warp.noteChainOne', 'warp.noteChain', 'warp.pKeyWg', 'warp.pAccount', 'warp.pAddChain',
   'warp.pAddedN', 'warp.pChainOne', 'warp.pChainsN', 'warp.pBatch', 'warp.doneLedeChain', 'warp.doneLedeMany', 'warp.stopped', 'warp.acctTitle',
   'warp.acctLicense', 'warp.licApplied', 'warp.licRefused', 'warp.licNone', 'warp.licStillFree', 'warp.acctPremium', 'warp.acctQuota', 'warp.acctUsage',
-  'warp.acctDevices', 'warp.acctChain', 'warp.acctChecked', 'warp.acctImported', 'warp.acctFieldsHint', 'warp.type.free', 'warp.type.limited',
+  'warp.acctDevices', 'warp.acctChain', 'warp.acctChecked', 'warp.acctImported', 'warp.acctFieldsHint', 'warp.goChain', 'warp.type.free', 'warp.type.limited',
   'warp.type.unlimited', 'warp.type.team', 'warp.type.unknown', 'warp.err.badHop', 'warp.err.badConf', 'warp.warn.accountUnread',
   // reworded for a list of keys
   'warp.license', 'warp.licensePh', 'warp.licenseHint'];
@@ -479,6 +479,11 @@ test('done, a batch that stopped: the alert «k of n made — why»; one box per
   assert.deepEqual(plain(h.ctx.state.chains.slice(3)), [{ id: 'k1', name: 'DE → ☁ WARP 1', members: ['s1', 'w1'] },
     { id: 'k2', name: 'DE → ☁ WARP 2', members: ['s1', 'w2'] }, { id: 'k3', name: 'DE → ☁ WARP 3', members: ['s1', 'w3'] }]);
   assert.ok(h.calls.some((c) => c[0] === 'renderChains') && h.calls.some((c) => c[0] === 'renderServers'));
+  // a chain made: «Select the chain» first — the first new chain selected, the home page shown, one press from connecting
+  assert.deepEqual(h.foot().children.filter((b) => b.tagName === 'BUTTON').map((b) => b.textContent), [en('warp.goChain'), en('warp.see'), en('tb.close')]);
+  byId(h.foot(), 'warpUseChain').onclick();
+  assert.equal(h.get('warpModal').hidden, true);
+  assert.deepEqual(h.calls.filter((c) => c[0] === 'showView' || c[0] === 'selectServer'), [['showView', 'home'], ['selectServer', 'k1']]);
   // in Persian: the alert's numbers in Persian digits
   const p = dialogHarness({ lang: 'fa', addWarp: async () => BATCH });
   p.ctx.openWarp();

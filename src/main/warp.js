@@ -885,7 +885,8 @@ function licensePlan(a) {
 
 /**
  * What a chained WARP rides: a server (`<id>`) or a chain (`chain:<id>`, its
- * members) — each still there, and none an HTTP proxy, which carries no UDP.
+ * members) — each still there, the last not an HTTP proxy: WireGuard's UDP
+ * goes through that one (the hops before it only carry its stream).
  */
 function resolveHop(chainWith, servers, chains) {
   const v = str(chainWith);
@@ -905,11 +906,9 @@ function resolveHop(chainWith, servers, chains) {
     members = [v];
     name = str(byId.get(v).name) || v;
   }
-  for (const id of members) {
-    const s = byId.get(id);
-    if (!s) throw bad('A server of that chain is no longer there');
-    if (s.protocol === 'http') throw bad(`${str(s.name) || id} is an HTTP proxy: it carries no UDP, so WireGuard cannot ride it`);
-  }
+  for (const id of members) if (!byId.has(id)) throw bad('A server of that chain is no longer there');
+  const last = byId.get(members[members.length - 1]);
+  if (last.protocol === 'http') throw bad(`${str(last.name) || last.id} is an HTTP proxy: it carries no UDP, so WireGuard cannot ride it`);
   return { members, name };
 }
 
@@ -970,7 +969,17 @@ async function addWarp(args, deps = {}) {
     if (a.mode === 'import') {
       const [label] = accountLabels(1, base, servers);
       if (kind === 'wireguard') {
-        const server = importWg(a.importText);
+        let server = importWg(a.importText);
+        // used directly: my clean IP and the noise, as for a new one; else the config's own endpoint, untouched
+        const edits = {};
+        if (opt.custom) { edits.address = opt.custom.host; edits.port = opt.custom.port; }
+        if (opt.antiDpi) edits.noise = ANTI_DPI.noise;
+        if (Object.keys(edits).length) {
+          const P = require('./parser');
+          server = P.applyServerEdits(server, edits);
+          delete server._edited;
+          server.raw = P.buildShareLink(server);
+        }
         server.name = label;
         server.warp = { kind, imported: true };
         const chain = hop ? { id: chainId(deps.now), name: `${hop.name} → ${label}`, members: hop.members.concat(server.id) } : null;
