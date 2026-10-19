@@ -48,6 +48,7 @@ import com.irnetfree.vpn.vpn.VpnState
 import com.irnetfree.vpn.vpn.XrayVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 
 /**
@@ -86,6 +87,8 @@ fun LanShareSection(store: Store) {
     // Network the system's connectivity callbacks report.
     LaunchedEffect(Unit) {
         while (true) {
+            // off screen (the app behind another): nothing asked until it is seen again (battery)
+            if (!VpnState.uiVisible.value) VpnState.uiVisible.first { v: Boolean -> v }
             addrs = withContext(Dispatchers.IO) { LanAddresses.current() }
             delay(3000)
         }
