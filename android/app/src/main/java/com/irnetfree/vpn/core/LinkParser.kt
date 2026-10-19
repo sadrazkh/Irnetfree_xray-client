@@ -540,6 +540,66 @@ object LinkParser {
         return ServerConfig(newId("s"), name.ifBlank { host.ifBlank { "WireGuard" } }, "wireguard", host, port, ob, "wireguard://$host:$port", dns = dns, dnsDomains = dnsDomains)
     }
 
+    private val WG_CONF_INTERFACE = Regex("^\\s*\\[interface\\]", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE))
+    private val WG_CONF_PEER = Regex("^\\s*\\[peer\\]", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE))
+    private val WG_CONF_SECTION = Regex("^\\[(\\w+)\\]$")
+    private val WG_CONF_COMMENT = Regex("[#;].*$")
+
+    /**
+     * The text form of a WireGuard config (what every provider hands out and
+     * what a `.conf` file holds). Both sections are required — an [Interface]
+     * alone is a server's config, nothing to dial. parser.js isWireguardConf.
+     */
+    fun isWireguardConf(text: String?): Boolean {
+        val t = text ?: ""
+        return WG_CONF_INTERFACE.containsMatchIn(t) && WG_CONF_PEER.containsMatchIn(t)
+    }
+
+    /**
+     * A WireGuard `.conf` as a server, as + WireGuard makes one
+     * ([makeWireguardServer]; parser.js parseWireguardConf). Keys are
+     * case-insensitive; `#` / `;` comments and CRLF are tolerated. Only the
+     * FIRST [Peer] is used — a multi-peer config is a router's, not a client's.
+     * Throws IllegalArgumentException naming the missing field.
+     */
+    fun parseWireguardConf(text: String): ServerConfig {
+        var section = ""
+        val iface = HashMap<String, String>()
+        val peer = HashMap<String, String>()
+        for (raw in text.split(Regex("\\r?\\n"))) {
+            val line = raw.replace(WG_CONF_COMMENT, "").trim()
+            if (line.isEmpty()) continue
+            val sec = WG_CONF_SECTION.find(line)
+            if (sec != null) {
+                section = sec.groupValues[1].lowercase()
+                continue
+            }
+            val eq = line.indexOf('=')
+            if (eq == -1) continue
+            val key = line.substring(0, eq).trim().lowercase()
+            val value = line.substring(eq + 1).trim()
+            // the first of each key wins, and the first peer's
+            val into: HashMap<String, String>? = when (section) {
+                "interface" -> iface
+                "peer" -> peer
+                else -> null
+            }
+            if (into != null && !into.containsKey(key)) into[key] = value
+        }
+        val privateKey = iface["privatekey"] ?: ""
+        val publicKey = peer["publickey"] ?: ""
+        val endpoint = peer["endpoint"] ?: ""
+        require(privateKey.isNotEmpty()) { "WireGuard config: PrivateKey is missing" }
+        require(publicKey.isNotEmpty()) { "WireGuard config: PublicKey is missing" }
+        require(endpoint.isNotEmpty()) { "WireGuard config: Endpoint is missing" }
+        val host = splitHostPort(endpoint).first
+        // an absent AllowedIPs stays "" so buildWireguardOutbound applies its own default (0.0.0.0/0, ::/0)
+        return makeWireguardServer(
+            name = host.ifBlank { "WireGuard" }, endpoint = endpoint, privateKey = privateKey, publicKey = publicKey,
+            address = iface["address"] ?: "", allowedIPs = peer["allowedips"] ?: "", presharedKey = peer["presharedkey"] ?: "",
+            mtu = iface["mtu"] ?: "", reserved = iface["reserved"] ?: "", dnsField = iface["dns"] ?: "")
+    }
+
     /* ------------------------- shared stream builder ------------------------- */
 
     /**
