@@ -21,6 +21,7 @@ const { planServers } = require('./engineChoice');
 const { MUX, muxEligible } = require('./mux');
 const { effectiveVia, advancedTargets } = require('./routingProfiles');
 const { masqueHttpOf } = require('../renderer/serverFields');
+const { isGroupRecord, serversOf, STRATEGIES: GROUP_STRATEGIES } = require('./groups');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -219,7 +220,8 @@ function splitEndpoint(ep) {
 function wgEndpointHosts(planArg) {
   const plan = normalizePlan(planArg);
   const out = [];
-  const visit = (s) => {
+  // a group stands for its members (groups.serversOf)
+  const visit = (rec) => serversOf(rec).forEach((s) => {
     const ob = s && s.outbound;
     if (!ob || ob.protocol !== 'wireguard') return;
     for (const p of (ob.settings && ob.settings.peers) || []) {
@@ -227,7 +229,7 @@ function wgEndpointHosts(planArg) {
       if (!ep || net.isIP(ep.host) || out.includes(ep.host)) continue;
       out.push(ep.host);
     }
-  };
+  });
   if (plan.server) visit(plan.server);
   for (const s of plan.chain || []) visit(s);
   for (const s of Object.values(plan.serversById || {})) visit(s);
@@ -271,6 +273,8 @@ function dialsThrough(o) {
  */
 function entryOutbounds(server, whole) {
   if (!server || !server.outbound) return [];
+  // a group is entered at each of its members
+  if (isGroupRecord(server)) return serversOf(server).flatMap((m) => entryOutbounds(m, whole));
   if (server.source !== 'json') return [server.outbound];
   const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
   const list = whole && isObj(server.json) && Array.isArray(server.json.outbounds)
@@ -304,6 +308,7 @@ function dialAddressOf(o) {
  */
 function entryAddressesOf(server, whole) {
   if (!server) return [];
+  if (isGroupRecord(server)) return [...new Set(serversOf(server).flatMap((m) => entryAddressesOf(m, whole)))];
   if (server.source !== 'json') return [server.address];
   const out = [];
   for (const o of entryOutbounds(server, whole)) {
@@ -775,13 +780,13 @@ function wgResolvers(server, outboundTag) {
 function wgResolverAddresses(planArg) {
   const plan = normalizePlan(planArg);
   const out = [];
-  const visit = (s) => {
+  const visit = (rec) => serversOf(rec).forEach((s) => {
     if (!isWgServer(s) || !Array.isArray(s.dns)) return;
     for (const d of s.dns) {
       const v = String(d == null ? '' : d).trim();
       if (v && !out.includes(v)) out.push(v);
     }
-  };
+  });
   if (plan.server) visit(plan.server);
   for (const s of plan.chain || []) visit(s);
   for (const s of Object.values(plan.serversById || {})) visit(s);
@@ -1091,6 +1096,11 @@ function buildConfig(planArg, settings) {
   if (dnsPlan.hijackOutbound) outbounds.push(dnsPlan.hijackOutbound);
   rules = [...dnsPlan.rules, ...rules];
 
+  // groups: their members, balancers, rules (first of all) and health check
+  const grp = expandGroups(outbounds);
+  outbounds = grp.outbounds;
+  rules = [...grp.rules, ...rules];
+
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
   outbounds = (outbounds || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outbounds, s.entryHostIps, s.ipv6);
@@ -1124,8 +1134,73 @@ function buildConfig(planArg, settings) {
     dns: withHosts(dnsPlan.dns, hosts),
     inbounds: localInbounds(s, listen, sniffing),
     outbounds,
-    routing: { domainStrategy: routingStrategy(s), rules }
+    routing: withBalancers({ domainStrategy: routingStrategy(s), rules }, grp),
+    ...(grp.observatory ? { observatory: grp.observatory } : {})
   };
+}
+
+/* ----------------------------------- groups ----------------------------------- */
+/** How a group's health check asks: the page every ping here asks, every 30 s, all members at once. */
+const GROUP_PROBE = { url: 'http://cp.cloudflare.com/', interval: '30s' };
+
+/**
+ * Groups (groups.js): every outbound a group record became — a `loopback`
+ * marked `_group`, tagged T wherever the plan put it (the selection, a rule's
+ * target, a base, a chain's hop) — expanded into what the core runs:
+ *  - its members `T~gm<i>`, each dialling through T's own dialerProxy when the
+ *    group rides one (a chain's later hop, a base) — the loopback itself dials
+ *    nothing; a JSON member's helpers are `T~gh<i>~<tag>`, outside the
+ *    balancer's prefix;
+ *  - T itself: `{ protocol: 'loopback', settings: { inboundTag: 'T~in' } }` —
+ *    what is routed to T comes back in on T~in;
+ *  - the balancer `T~bal` over the `T~gm` prefix, its fallback the first
+ *    member: Xray's roundRobin and random leave out a member the health check
+ *    found dead only when a fallback is set (app/router/balancing.go);
+ *  - the rule T~in → T~bal, which the caller puts FIRST in routing: what
+ *    loops back must meet its balancer before any other rule — a hop to a
+ *    bridge in Iran, say, before `geoip:ir → direct`;
+ *  - one observatory over every group's members.
+ * Runs before every pass that reads the outbounds (pinEntryHosts,
+ * applyFragments, bindDirectDials …) so the members get them all.
+ * → { outbounds, rules, balancers, observatory | null }
+ */
+function expandGroups(outbounds) {
+  const out = [];
+  const rules = [];
+  const balancers = [];
+  const subjects = [];
+  for (const o of outbounds || []) {
+    const g = o && o.protocol === 'loopback' && o._group;
+    if (!g || typeof g !== 'object') { out.push(o); continue; }
+    const T = o.tag;
+    const so = o.streamSettings && o.streamSettings.sockopt;
+    const via = so && so.dialerProxy ? String(so.dialerProxy) : '';
+    out.push({ tag: T, protocol: 'loopback', settings: { inboundTag: T + '~in' } });
+    const members = (Array.isArray(g.members) ? g.members : []).filter(m => m && m.outbound);
+    members.forEach((m, i) => {
+      const tag = `${T}~gm${i}`;
+      if (via) { out.push(behind(m, tag, via)); return; }
+      const ob = cloneOut(m.outbound, tag, m);
+      out.push(ob, ...helpersFor(m, ob, `${T}~gh${i}`));
+    });
+    if (!members.length) continue;
+    balancers.push({
+      tag: T + '~bal', selector: [T + '~gm'],
+      strategy: { type: GROUP_STRATEGIES.includes(g.strategy) ? g.strategy : 'roundRobin' },
+      fallbackTag: T + '~gm0'
+    });
+    rules.push({ type: 'field', inboundTag: [T + '~in'], balancerTag: T + '~bal' });
+    subjects.push(T + '~gm');
+  }
+  const observatory = subjects.length
+    ? { subjectSelector: subjects, probeUrl: GROUP_PROBE.url, probeInterval: GROUP_PROBE.interval, enableConcurrency: true }
+    : null;
+  return { outbounds: out, rules, balancers, observatory };
+}
+
+/** A routing object with the groups' balancers, when there are any. */
+function withBalancers(routing, grp) {
+  return grp && grp.balancers.length ? Object.assign(routing, { balancers: grp.balancers }) : routing;
 }
 
 /** The app's own local inbounds: SOCKS and HTTP on the ports from Settings (what the system proxy and TUN reach). */
@@ -1329,7 +1404,8 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
     { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
-  const outs = (reg.outs || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
+  const grp = expandGroups(reg.outs);   // see buildConfig
+  const outs = grp.outbounds.map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outs, s.entryHostIps, s.ipv6);   // see buildConfig
   const outbounds = applyFragments(outs);
   if (dropsUdpDirect(s)) echOverDoh(outbounds);
@@ -1342,6 +1418,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   rules.push({ type: 'field', ip: PRIVATE_IPS.slice(), outboundTag: 'direct' });
   rules.push(...perInboundRules);
   rules.push({ type: 'field', port: '0-65535', outboundTag: primaryTag });
+  rules.unshift(...grp.rules);   // a group's loop back meets its balancer before anything else
 
   // See buildConfig: no per-connection buffer cap for a chained WireGuard.
   const level0 = { statsUserUplink: true, statsUserDownlink: true };
@@ -1362,7 +1439,8 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     // IPIfNonMatch on purpose: the pool emits no user ip rule (only the private
     // bypass), and on demand every entry's hostname connections would wait on
     // the PRIMARY's DoH — a dead primary costing the others ~8 s per new name.
-    routing: { domainStrategy: 'IPIfNonMatch', rules }
+    routing: withBalancers({ domainStrategy: 'IPIfNonMatch', rules }, grp),
+    ...(grp.observatory ? { observatory: grp.observatory } : {})
   };
 }
 
@@ -1377,9 +1455,11 @@ function buildPoolConfig(plan, s, listen, sniffing) {
  * test passes none, and its config is exactly as it was.
  */
 function buildTestConfig(target, socksPort, opts) {
-  const proxyOutbounds = Array.isArray(target)
+  // a group: its members and balancer, no health check — a ping is over before one would answer
+  const grp = expandGroups(Array.isArray(target)
     ? buildChainOutbounds(target, 'proxy')
-    : withHelpers(cloneOut(target.outbound, 'proxy', target), target);
+    : withHelpers(cloneOut(target.outbound, 'proxy', target), target));
+  const proxyOutbounds = grp.outbounds;
   const hosts = opts ? pinEntryHosts(proxyOutbounds, opts.entryHostIps, opts.ipv6) : null;
   // apply TLS fragment (if the config carries one) so the test matches reality
   const outbounds = applyFragments(proxyOutbounds).concat([{ tag: 'direct', protocol: 'freedom' }]);
@@ -1396,7 +1476,7 @@ function buildTestConfig(target, socksPort, opts) {
     outbounds,
     // Unrouted traffic goes to the FIRST outbound — for a chain the entry hop
     // alone, so a dead exit measured green. Route the inbound to the exit.
-    routing: { rules: [{ type: 'field', inboundTag: ['socks-in'], outboundTag: 'proxy' }] }
+    routing: withBalancers({ rules: [...grp.rules, { type: 'field', inboundTag: ['socks-in'], outboundTag: 'proxy' }] }, grp)
   };
 }
 
@@ -1418,11 +1498,12 @@ function buildMultiTestConfig(targets, ports) {
     outbounds.push(...outs);
     rules.push({ type: 'field', inboundTag: [inTag], outboundTag: outTag });
   });
+  const grp = expandGroups(outbounds);   // see buildTestConfig
   return {
     log: { loglevel: 'none' },
     inbounds,
-    outbounds: applyFragments(outbounds).concat([{ tag: 'direct', protocol: 'freedom' }]),
-    routing: { rules }
+    outbounds: applyFragments(grp.outbounds).concat([{ tag: 'direct', protocol: 'freedom' }]),
+    routing: withBalancers({ rules: [...grp.rules, ...rules] }, grp)
   };
 }
 
@@ -1609,4 +1690,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };
+module.exports = { expandGroups, buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };

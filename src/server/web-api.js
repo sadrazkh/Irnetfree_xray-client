@@ -64,6 +64,10 @@
     listChains: () => invoke('chains:list'),
     setChains: (chains) => invoke('chains:set', chains),
 
+    // groups
+    listGroups: () => invoke('groups:list'),
+    setGroups: (groups) => invoke('groups:set', groups),
+
     // proxy pool
     listPool: () => invoke('pool:list'),
     setPool: (entries) => invoke('pool:set', entries),

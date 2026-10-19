@@ -11,6 +11,7 @@
  */
 
 const { advancedTargets } = require('./routingProfiles');
+const { isGroupRecord, serversOf } = require('./groups');
 
 /**
  * Every server object a plan can dial (duplicates allowed). An advanced plan:
@@ -19,6 +20,10 @@ const { advancedTargets } = require('./routingProfiles');
  */
 function planServers(plan) {
   if (!plan) return [];
+  return planRecords(plan).flatMap(serversOf);   // a group stands for its members
+}
+
+function planRecords(plan) {
   switch (plan.mode) {
     case 'single': return plan.server ? [plan.server] : [];
     case 'chain': return plan.chain || [];
@@ -64,11 +69,12 @@ function isMasque(server) {
 
 function chooseEngine(plan, defaultEngine = 'xray') {
   const def = defaultEngine === 'xray-pattn' ? 'xray-pattn' : 'xray';
-  if (plan && plan.mode === 'single') {
+  if (plan && plan.mode === 'single' && !isGroupRecord(plan.server)) {
     const s = plan.server;
     if (isMasque(s)) return s.engine === 'xray-pattn' ? 'xray-pattn' : def;
     return (s && s.engine) || (needsInsecureCore(s) ? 'sing-box' : def);
   }
+  // a group (groups.js) runs on an Xray core whatever its members ask: sing-box has no balancer
   const wantsPattn = planServers(plan).some(s => s && s.engine === 'xray-pattn');
   return wantsPattn ? 'xray-pattn' : def;
 }
