@@ -91,7 +91,7 @@ function memberRecord(server, m) {
 /**
  * The record a group is in a plan — null when none of its members is left:
  *   { id, name, protocol: 'group', address: '', port: 0, group: { strategy, size },
- *     outbound: { protocol: 'loopback', settings: {}, _group: { strategy, members: [records] } } }
+ *     outbound: { protocol: 'loopback', settings: {}, _group: { id, name, strategy, members: [records] } } }
  * `serversById`: the saved servers (never other groups).
  */
 function groupRecord(group, serversById) {
@@ -113,7 +113,7 @@ function groupRecord(group, serversById) {
     address: '',
     port: 0,
     group: { strategy: g.strategy, size: members.length },
-    outbound: { protocol: 'loopback', settings: {}, _group: { strategy: g.strategy, members } }
+    outbound: { protocol: 'loopback', settings: {}, _group: { id: g.id, name: g.name, strategy: g.strategy, members } }
   };
 }
 

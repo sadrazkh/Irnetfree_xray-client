@@ -1765,6 +1765,8 @@ async function connectOnce(serverId, opts = {}) {
   stats.setBin(xray.anyBin());
   stats.apiPort = settings.apiPort;
   stats.skipTags = rawServerOf(plan, settings, RAW_OPTS) ? dialerTagsOf(config) : null;
+  // the groups it runs, member by member, for the window's live view (groups-ui/design.md §3)
+  stats.groupMap = config.groupTags || null;
   watchWgSilence(config);
   // A fresh core starts its counters at zero, so the meter has to be told —
   // otherwise the first poll of the new session reads as growth on the old one

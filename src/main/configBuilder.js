@@ -649,7 +649,11 @@ function groupOfChains(list, exitTag, viaTag) {
     variants = variants.flatMap(v => opts.map(o => v.concat([o]))).slice(0, MAX_CHAIN_VARIANTS);
   }
   const g = list.find(isGroupRecord);
-  const o = { tag: exitTag, protocol: 'loopback', settings: {}, _group: { strategy: g.outbound._group.strategy, members: variants.map(chain => ({ chain })) } };
+  // each variant is known by the member(s) it takes from the group(s) — what the meter shows for it
+  const at = list.map((s, i) => (isGroupRecord(s) ? i : -1)).filter(i => i >= 0);
+  const mark = g.outbound._group;
+  const members = variants.map(chain => ({ chain, label: at.map(i => chain[i]) }));
+  const o = { tag: exitTag, protocol: 'loopback', settings: {}, _group: { id: mark.id, name: mark.name, strategy: mark.strategy, members } };
   if (viaTag) o.streamSettings = { sockopt: { dialerProxy: viaTag } };
   return o;
 }
@@ -1182,7 +1186,7 @@ function buildConfig(planArg, settings) {
   // line back for a comparison.
   const level0 = { statsUserUplink: true, statsUserDownlink: true };
 
-  return {
+  return withGroupTags({
     log: { loglevel: s.logLevel },
     // Live traffic counters over HTTP (GET /debug/vars) instead of the gRPC-only
     // StatsService: one cheap request per second instead of spawning `xray api
@@ -1199,7 +1203,7 @@ function buildConfig(planArg, settings) {
     outbounds,
     routing: withBalancers({ domainStrategy: routingStrategy(s), rules }, grp),
     ...(grp.observatory ? { observatory: grp.observatory } : {})
-  };
+  }, grp);
 }
 
 /* ----------------------------------- groups ----------------------------------- */
@@ -1225,13 +1229,22 @@ const GROUP_PROBE = { url: 'http://cp.cloudflare.com/', interval: '30s' };
  *  - one observatory over every group's members.
  * Runs before every pass that reads the outbounds (pinEntryHosts,
  * applyFragments, bindDirectDials …) so the members get them all.
- * → { outbounds, rules, balancers, observatory | null }
+ * `map`: each group in the config — its tag, its id and name, its strategy,
+ * and who `T~gm<i>` is ({ id, name, address, port } of the server dialled; a
+ * chain variant by the group member it takes) — for the live meter.
+ * → { outbounds, rules, balancers, observatory | null, map }
  */
 function expandGroups(outbounds) {
   const out = [];
   const rules = [];
   const balancers = [];
   const subjects = [];
+  const map = [];
+  const who = (m) => {
+    const recs = Array.isArray(m.label) && m.label.length ? m.label : [m];
+    const r = recs[0] || {};
+    return { id: r.id || '', name: recs.map(x => (x && x.name) || '').filter(Boolean).join(' + '), address: r.address || '', port: r.port || 0 };
+  };
   const queue = (outbounds || []).slice();
   while (queue.length) {
     const o = queue.shift();
@@ -1258,11 +1271,18 @@ function expandGroups(outbounds) {
     });
     rules.push({ type: 'field', inboundTag: [T + '~in'], balancerTag: T + '~bal' });
     subjects.push(T + '~gm');
+    map.push({ tag: T, groupId: g.id || '', name: g.name || '', strategy: GROUP_STRATEGIES.includes(g.strategy) ? g.strategy : 'roundRobin', members: members.map(who) });
   }
   const observatory = subjects.length
     ? { subjectSelector: subjects, probeUrl: GROUP_PROBE.url, probeInterval: GROUP_PROBE.interval, enableConcurrency: true }
     : null;
-  return { outbounds: out, rules, balancers, observatory };
+  return { outbounds: out, rules, balancers, observatory, map };
+}
+
+/** The config, with the running groups (expandGroups' map) beside it — never written to disk: not enumerable. */
+function withGroupTags(config, grp) {
+  Object.defineProperty(config, 'groupTags', { value: grp && grp.map && grp.map.length ? grp.map : null, enumerable: false });
+  return config;
 }
 
 /** A routing object with the groups' balancers, when there are any. */
@@ -1490,7 +1510,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   // See buildConfig: no per-connection buffer cap for a chained WireGuard.
   const level0 = { statsUserUplink: true, statsUserDownlink: true };
 
-  return {
+  return withGroupTags({
     log: { loglevel: s.logLevel },
     // See buildConfig: the metrics endpoint reports every outbound tag, which is
     // what makes the traffic meter work for a pool (exits are 'out-<serverId>').
@@ -1508,7 +1528,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     // the PRIMARY's DoH — a dead primary costing the others ~8 s per new name.
     routing: withBalancers({ domainStrategy: 'IPIfNonMatch', rules }, grp),
     ...(grp.observatory ? { observatory: grp.observatory } : {})
-  };
+  }, grp);
 }
 
 /**
