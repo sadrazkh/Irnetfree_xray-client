@@ -370,6 +370,9 @@ const I18N = {
     'engine.singbox': 'sing-box (ClientHello جعلی / uTLS)',
     'chain.title': 'زنجیره و گروه', 'chain.enable': 'فعال‌سازی زنجیره',
     'chain.sec': 'زنجیره‌ها',
+    // the piles a picker lists configs under (configOptions): after the subscriptions
+    'pile.chains': 'زنجیره‌ها',
+    'pile.groups': 'گروه‌ها',
     'chain.hint': 'ترافیک به‌ترتیب از این سرورها عبور می‌کند. با کشیدن و رها کردن، ترتیب را تغییر بده.',
     'chain.client': '💻 شما', 'chain.internet': '🌐 اینترنت',
     'chain.empty': 'هنوز سروری به زنجیره اضافه نشده. از پایین اضافه کن (حداقل ۲ سرور لازم است).',
@@ -1506,6 +1509,8 @@ const I18N = {
     'engine.singbox': 'sing-box (fake ClientHello / uTLS)',
     'chain.title': 'Chains & groups', 'chain.enable': 'Enable chain',
     'chain.sec': 'Chains',
+    'pile.chains': 'Chains',
+    'pile.groups': 'Groups',
     'chain.hint': 'Traffic passes through these servers in order. Drag and drop to reorder.',
     'chain.client': '💻 You', 'chain.internet': '🌐 Internet',
     'chain.empty': 'No servers in the chain yet. Add from below (at least 2 needed).',

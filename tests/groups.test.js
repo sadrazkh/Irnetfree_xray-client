@@ -99,7 +99,7 @@ test('a group selected: the loopback as the exit, its members T~gm<i>, the balan
   assert.equal(find(cfg, 'proxy~gm1').protocol, 'trojan');
   assert.deepEqual(cfg.routing.balancers, [{ tag: 'proxy~bal', selector: ['proxy~gm'], strategy: { type: 'roundRobin' }, fallbackTag: 'proxy~gm0' }]);
   assert.deepEqual(cfg.routing.rules[0], { type: 'field', inboundTag: ['proxy~in'], balancerTag: 'proxy~bal' });
-  assert.deepEqual(cfg.observatory, { subjectSelector: ['proxy~gm'], probeUrl: 'http://cp.cloudflare.com/', probeInterval: '30s', enableConcurrency: true });
+  assert.deepEqual(cfg.observatory, { subjectSelector: ['proxy~gm'], probeUrl: 'http://cp.cloudflare.com/', probeInterval: '10s', enableConcurrency: true });
   assert.equal(JSON.stringify(cfg).includes('_group'), false, 'no marker left for the core');
   // every outbound the plan dials still has a unique tag
   assert.equal(new Set(tagsOf(cfg)).size, tagsOf(cfg).length);
@@ -348,4 +348,24 @@ test('the poller sends groups only while a group runs; main.js and the router ha
     assert.deepEqual(seen[1].per.proxy.down, 20, 'the member still counts as its group');
   } finally { srv.close(); }
   for (const src of [R('src', 'main', 'main.js'), R('src', 'server', 'service.js')]) assert.match(src, /stats\.groupMap = config\.groupTags \|\| null;/);
+});
+
+test('the log says when a member leaves the rotation and when it rejoins — only changes, and once when no member answers', () => {
+  const { GroupHealthWatch } = require('../src/main/stats');
+  const w = new GroupHealthWatch();
+  const tick = (a, b) => [{ tag: 'proxy', groupId: 'grp-g', name: 'CDN', members: [{ id: 's1', name: 'DE', address: '1.2.3.4', port: 443, alive: a }, { id: 's2', name: 'NL', alive: b }] }];
+  assert.deepEqual(w.update(tick(null, null)), [], 'not checked yet: nothing');
+  assert.deepEqual(w.update(tick(true, true)), [], 'the first verdict is no change');
+  assert.deepEqual(w.update(tick(true, false)), [{ line: 'Group CDN: NL stopped answering — left out until it answers again', level: 'warn' }]);
+  assert.deepEqual(w.update(tick(true, false)), [], 'still down: said once');
+  const down = w.update(tick(false, false));
+  assert.deepEqual(down.map((x) => x.line), ['Group CDN: DE (1.2.3.4:443) stopped answering — left out until it answers again', 'Group CDN: no member answers — its traffic waits on the first until one does']);
+  assert.deepEqual(w.update(tick(false, true)).map((x) => [x.line, x.level]), [['Group CDN: NL answers again — back in the rotation', 'info']]);
+  w.reset();
+  assert.deepEqual(w.update(tick(false, false)).map((x) => x.line), ['Group CDN: no member answers — its traffic waits on the first until one does'], 'after a reconnect: no "stopped" for a first verdict, but the all-down warning');
+  assert.deepEqual(w.update(undefined), []);
+  for (const src of [R('src', 'main', 'main.js'), R('src', 'server', 'service.js')]) {
+    assert.match(src, /for \(const l of groupHealth\.update\(s\.groups\)\) send\('log', l\);/);
+    assert.match(src, /stats\.groupMap = config\.groupTags \|\| null;\n\s*groupHealth\.reset\(\);/);
+  }
 });

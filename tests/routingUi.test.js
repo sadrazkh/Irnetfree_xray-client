@@ -204,7 +204,7 @@ function store() {
 const PRELUDE_CONSTS = constSource('ADV_ID') + constSource('POOL_ID') + constSource('TARGET_BASE') + constSource('RULE_TYPES') + constSource('QR_JSON_MAX_BYTES');
 const MODEL_FNS = ['profileOfSel', 'profileReady', 'advSelName', 'terminalTarget', 'takesNoVia', 'atBase', 'appRouteRules', 'geoReady', 'normalizeUiProfile', 'ruleVia', 'refProblem', 'ruleProblem',
   'profileBroken', 'refName', 'flowModel', 'outboundTagFor', 'baseKeyOf', 'viaTagFor', 'baseTagFor', 'chainById', 'chainMembers', 'chainReady',
-  'srvById', 'isChainId', 'targetLabel', 'poolTargetOptions'];
+  'srvById', 'isChainId', 'targetLabel', 'configOptions', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead', 'poolTargetOptions'];
 
 function modelHarness(over = {}) {
   const s = store();
@@ -944,7 +944,7 @@ function pickerHarness({ profiles, selected, settings = { advancedRouting: true 
   const menu = $('#pickerMenu');
   const rows = [];
   const picked = [];
-  const ctx = compile(['renderPicker', 'profileOfSel', 'profileReady', 'advSelName', 'advancedReady'], {
+  const ctx = compile(['renderPicker', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead', 'profileOfSel', 'profileReady', 'advSelName', 'advancedReady'], {
     state: { servers: s.servers.slice(0, 1), subscriptions: [], chains: [], pool: [], settings, pings: {}, selectedServerId: selected, connecting: false, profiles },
     $, document: { createElement: (tag) => { const e = fakeEl(tag); rows.push(e); return e; } },
     t: en, escapeHtml: (x) => String(x),
