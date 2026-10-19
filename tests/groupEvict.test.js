@@ -51,6 +51,10 @@ test('dead for 90 s while another member answers: set aside, said, a reload want
   assert.deepEqual(e.skip(), [key('b', 'b.example.net', 443)]);
   assert.equal(e.takeReload(), true);
   assert.equal(e.takeReload(), false, 'taken once');
+  // still dead in the running config until the reload lands: said once, not again every 90 s
+  now += 95000;
+  assert.deepEqual(e.update(payload(cfg, [true, false, null])), []);
+  assert.deepEqual(e.skip(), [key('b', 'b.example.net', 443)]);
   // a member that comes back alive before 90 s: its streak ends
   const f = new GroupEvictor({ now: () => now });
   f.reset({ mode: 'single', server: grp });

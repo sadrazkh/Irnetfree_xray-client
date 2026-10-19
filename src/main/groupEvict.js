@@ -81,7 +81,8 @@ class GroupEvictor {
         if (!m || m.direct === false) continue;
         const key = groupMemberKey(g.groupId, m);
         seen.add(key);
-        if (m.alive !== false) { this.deadSince.delete(key); continue; }
+        // already set aside, still in the running config until the reload: once is enough
+        if (m.alive !== false || this.out.has(key)) { this.deadSince.delete(key); continue; }
         if (!this.deadSince.has(key)) this.deadSince.set(key, now);
         // never the last one that might answer, and only one the app can test
         if (alive === 0 || !this.records.has(key) || now - this.deadSince.get(key) < this.evictAfter) continue;
