@@ -12,6 +12,9 @@
  *   2. advanced routing — a rule sends 203.0.113.0/24 to the group;
  *   3. a chain [group → S3] — S3 is dialled through the group: always S3;
  *   4. a chain [H → group] — every member dials through H: S1 and S2 again.
+ * Each round also reads the core's traffic counters as the app's meter does
+ * (stats.sumOutbounds): a group's bytes must show — on its loopback, since the
+ * members' `~` tags are left out of the total like a JSON server's helpers.
  * The health check asks a local page here instead of cp.cloudflare.com (the
  * only change made to what the builder wrote), so it needs no internet.
  *
@@ -27,6 +30,7 @@ const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 const { buildConfig } = require('../src/main/configBuilder');
 const { groupRecord } = require('../src/main/groups');
+const { sumOutbounds } = require('../src/main/stats');
 
 const BASE = Number(process.env.IRNF_PROBE_PORT || 40400);
 const P = { s1: BASE + 1, s2: BASE + 2, s3: BASE + 3, h: BASE + 4, s1b: BASE + 5, s2b: BASE + 6, dead: BASE + 9,
@@ -153,7 +157,16 @@ async function main() {
         try { seen.push(await fetchOnce()); } catch (e) { seen.push('ERR:' + e.message); }
       }
       if (!good(seen)) throw new Error('got ' + seen.join(' '));
-      note = seen.join(' ');
+      const vars = await new Promise((resolve, reject) => {
+        http.get({ host: '127.0.0.1', port: settings.apiPort, path: '/debug/vars' }, (res) => {
+          let b = '';
+          res.on('data', (d) => { b += d; });
+          res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
+        }).on('error', reject);
+      });
+      const total = sumOutbounds(vars);
+      if (!(total.down > 0)) throw new Error('the traffic meter saw nothing: ' + JSON.stringify((vars.stats || {}).outbound || {}));
+      note = seen.join(' ') + ` — the meter saw ${total.down} B down`;
     } catch (e) {
       failed++;
       note = 'FAILED — ' + e.message + '\n  ' + client.text().split('\n').filter(Boolean).slice(-6).join('\n  ');

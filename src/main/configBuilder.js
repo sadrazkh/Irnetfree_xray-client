@@ -591,18 +591,48 @@ function withHelpers(o, server) {
  *
  * `viaTag`: the chain itself rides a base (makeRegistry) — its first hop then
  * dials through that, exactly as a later hop dials the hop before it.
+ * `hopBase`: what the hops are named after when not the exit (a group's chain
+ * variants name theirs outside the group's member prefix — expandGroups).
+ *
+ * A chain with a group in it is a group of chains (groupOfChains).
  */
-function buildChainOutbounds(servers, exitTag, viaTag) {
+function buildChainOutbounds(servers, exitTag, viaTag, hopBase) {
   exitTag = exitTag || 'proxy';
   const list = (servers || []).filter(s => s && s.outbound);
+  if (list.length > 1 && list.some(isGroupRecord)) return [groupOfChains(list, exitTag, viaTag)];
+  const hops = hopBase || exitTag;
   const last = list.length - 1;
   const outs = [];
   for (let i = 0; i <= last; i++) {
-    const tag = i === last ? exitTag : `${exitTag}-h${i}`;
-    const prev = i > 0 ? `${exitTag}-h${i - 1}` : (viaTag || null);
+    const tag = i === last ? exitTag : `${hops}-h${i}`;
+    const prev = i > 0 ? `${hops}-h${i - 1}` : (viaTag || null);
     outs.push(...(prev ? [behind(list[i], tag, prev)] : withHelpers(cloneOut(list[i].outbound, tag, list[i]), list[i])));
   }
   return outs;
+}
+
+/** At most this many variants for a chain through groups (one per combination of their members). */
+const MAX_CHAIN_VARIANTS = 64;
+
+/**
+ * A chain with a group in it, as a group of whole chains: one variant per
+ * member, the member in the group's place — [A → G(m1, m2) → B] is
+ * G'([A → m1 → B], [A → m2 → B]); two groups make every combination (at most
+ * MAX_CHAIN_VARIANTS). Nothing ever dials THROUGH a group: the next hop's
+ * dialerProxy aimed at a group's loopback lost the end of a response now and
+ * then on both cores (scripts/probe-group.js, 2026-10-19), while a loopback as
+ * a route's target never did. The variants take the first group's strategy.
+ */
+function groupOfChains(list, exitTag, viaTag) {
+  let variants = [[]];
+  for (const s of list) {
+    const opts = isGroupRecord(s) ? serversOf(s) : [s];
+    variants = variants.flatMap(v => opts.map(o => v.concat([o]))).slice(0, MAX_CHAIN_VARIANTS);
+  }
+  const g = list.find(isGroupRecord);
+  const o = { tag: exitTag, protocol: 'loopback', settings: {}, _group: { strategy: g.outbound._group.strategy, members: variants.map(chain => ({ chain })) } };
+  if (viaTag) o.streamSettings = { sockopt: { dialerProxy: viaTag } };
+  return o;
 }
 
 /**
@@ -678,8 +708,15 @@ function makeRegistry(plan, muxIds) {
     return 'direct';
   }
 
-  /** A via's base group, registered once: { key, tag } — its exit tag and the key a target through it is named by. */
+  /**
+   * A via's base group, registered once: { key, tag } — its exit tag and the
+   * key a target through it is named by. A group as the base registers
+   * nothing: each target through it is a chain [group → target] of its own
+   * (tagThrough), since nothing may dial through a group (groupOfChains).
+   */
   function baseOf(via) {
+    const g = (plan.serversById || {})[via];
+    if (isGroupRecord(g)) return { key: via, tag: null, group: g };
     if (via === 'chain') return { key: 'chain', tag: chainTag(plan.chain, 'base-chain') };
     if (via.indexOf('chain:') === 0) {
       const cid = via.slice('chain:'.length);
@@ -711,6 +748,10 @@ function makeRegistry(plan, muxIds) {
   /** `target` riding `base` (baseOf): its own outbound(s), the one that would dial by itself dialing the base. */
   function tagThrough(target, base) {
     const at = '@' + base.key;
+    if (base.group) {
+      const name = target === 'chain' ? 'out-chain' : (typeof target === 'string' && target.indexOf('chain:') === 0 ? 'out-chain-' + target.slice('chain:'.length) : 'out-' + target);
+      return chainTag([base.group, ...members(target)], name + at);
+    }
     if (target === 'chain') return chainTag(plan.chain, 'out-chain' + at, base.tag);
     if (typeof target === 'string' && target.indexOf('chain:') === 0) {
       const cid = target.slice('chain:'.length);
@@ -1169,16 +1210,20 @@ function expandGroups(outbounds) {
   const rules = [];
   const balancers = [];
   const subjects = [];
-  for (const o of outbounds || []) {
+  const queue = (outbounds || []).slice();
+  while (queue.length) {
+    const o = queue.shift();
     const g = o && o.protocol === 'loopback' && o._group;
     if (!g || typeof g !== 'object') { out.push(o); continue; }
     const T = o.tag;
     const so = o.streamSettings && o.streamSettings.sockopt;
     const via = so && so.dialerProxy ? String(so.dialerProxy) : '';
     out.push({ tag: T, protocol: 'loopback', settings: { inboundTag: T + '~in' } });
-    const members = (Array.isArray(g.members) ? g.members : []).filter(m => m && m.outbound);
+    const members = (Array.isArray(g.members) ? g.members : []).filter(m => m && (m.outbound || Array.isArray(m.chain)));
     members.forEach((m, i) => {
       const tag = `${T}~gm${i}`;
+      // a chain variant (groupOfChains): its exit is the member, its hops `T~gh<i>-h<j>`
+      if (Array.isArray(m.chain)) { out.push(...buildChainOutbounds(m.chain, tag, via || null, `${T}~gh${i}`)); return; }
       if (via) { out.push(behind(m, tag, via)); return; }
       const ob = cloneOut(m.outbound, tag, m);
       out.push(ob, ...helpersFor(m, ob, `${T}~gh${i}`));
