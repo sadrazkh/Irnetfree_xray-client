@@ -299,3 +299,53 @@ test('the traffic meter: a group\'s members count as the group (the core counts 
   assert.equal(Object.keys(per).some((t) => t.includes('~')), false);
   assert.deepEqual(per.direct, { up: 3, down: 30 });
 });
+
+test('the live view: each group in the config with who T~gm<i> is (a chain variant by the member it takes) — beside the config, never in what is written', () => {
+  const g = groupOf([{ id: 'cdn', address: '104.16.1.1' }, 'de']);
+  const cfg = B.buildConfig({ mode: 'single', server: g }, SETTINGS);
+  assert.deepEqual(cfg.groupTags, [{ tag: 'proxy', groupId: 'grp-g', name: 'G', strategy: 'roundRobin', members: [
+    { id: 'cdn', name: 'CDN', address: '104.16.1.1', port: 443 }, { id: 'de', name: 'DE', address: 'de.example.net', port: 8443 }] }]);
+  assert.equal(JSON.stringify(cfg).includes('groupTags'), false);
+  assert.equal(Object.keys(cfg).includes('groupTags'), false);
+  // a chain through the group: the variants named by their member
+  const c = B.buildConfig({ mode: 'chain', chain: [NL, g] }, SETTINGS);
+  assert.deepEqual(c.groupTags.map((x) => [x.tag, x.members.map((m) => m.id)]), [['proxy', ['cdn', 'de']]]);
+  // advanced: one entry per instance, by its own tag
+  const adv = B.buildConfig({ mode: 'advanced', serversById: Object.assign({}, byId, { 'grp-g': g }), chainsById: {}, chain: [],
+    rules: [{ type: 'domain', value: 'example.org', target: 'grp-g' }], def: 'de' }, SETTINGS);
+  assert.deepEqual(adv.groupTags.map((x) => x.tag), ['out-grp-g']);
+  // no group: null
+  assert.equal(B.buildConfig({ mode: 'single', server: DE }, SETTINGS).groupTags, null);
+});
+
+test('the meter\'s groups: each member\'s bytes, speed and health from the core (alive with its delay; a dead one false; not probed yet null)', () => {
+  const S = require('../src/main/stats');
+  const vars = { stats: { outbound: { proxy: { uplink: 0, downlink: 0 }, 'proxy~gm0': { uplink: 100, downlink: 5000 }, 'proxy~gm1': { uplink: 50, downlink: 1000 }, direct: { uplink: 1, downlink: 1 } } },
+    observatory: { 'proxy~gm0': { alive: true, delay: 84 }, 'proxy~gm2': { delay: 99999999, last_error_reason: 'dead' } } };
+  assert.deepEqual(S.memberCounters(vars), { 'proxy~gm0': { up: 100, down: 5000 }, 'proxy~gm1': { up: 50, down: 1000 } });
+  assert.deepEqual(S.healthOf(vars), { 'proxy~gm0': { alive: true, delay: 84 }, 'proxy~gm2': { alive: false, delay: null } });
+  const map = [{ tag: 'proxy', groupId: 'grp-g', name: 'G', strategy: 'roundRobin', members: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }];
+  const live = S.groupsLive(map, S.memberCounters(vars), { 'proxy~gm0': { up: 0, down: 3000 } }, S.healthOf(vars), 2);
+  assert.deepEqual(live[0].members.map((m) => [m.id, m.down, m.downSpeed, m.alive, m.delay]),
+    [['a', 5000, 1000, true, 84], ['b', 1000, 0, null, null], ['c', 0, 0, false, null]]);
+});
+
+test('the poller sends groups only while a group runs; main.js and the router hand it the map at every connect', async () => {
+  const http = require('node:http');
+  const { StatsPoller } = require('../src/main/stats');
+  const body = JSON.stringify({ stats: { outbound: { proxy: { uplink: 0, downlink: 0 }, 'proxy~gm0': { uplink: 10, downlink: 20 } } }, observatory: { 'proxy~gm0': { alive: true, delay: 5 } } });
+  const srv = http.createServer((q, r) => { r.writeHead(200); r.end(body); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const seen = [];
+    const p = new StatsPoller({ apiPort: srv.address().port, onStats: (s) => seen.push(s) });
+    p.last.t = Date.now() - 1000;
+    await p.tick();
+    assert.equal('groups' in seen[0], false, 'no map, no groups');
+    p.groupMap = [{ tag: 'proxy', groupId: 'grp-g', name: 'G', strategy: 'roundRobin', members: [{ id: 'a', name: 'A' }] }];
+    await p.tick();
+    assert.deepEqual(seen[1].groups[0].members.map((m) => [m.id, m.down, m.alive, m.delay]), [['a', 20, true, 5]]);
+    assert.deepEqual(seen[1].per.proxy.down, 20, 'the member still counts as its group');
+  } finally { srv.close(); }
+  for (const src of [R('src', 'main', 'main.js'), R('src', 'server', 'service.js')]) assert.match(src, /stats\.groupMap = config\.groupTags \|\| null;/);
+});
