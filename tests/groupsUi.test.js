@@ -191,11 +191,17 @@ const PRELUDE = constSource('ADV_ID') + constSource('POOL_ID') + constSource('TA
 
 /* ------------------------------------ the groups harness ------------------------------------ */
 
+// v1.28 (tests/groupsUi2.test.js): the page's tabs and folding cards, the pick list in piles, a group's members live
+const PAGE_FNS = ['loadCgState', 'saveCgState', 'cgCanGroups', 'cgTab', 'cgApplyTab', 'cgSetTab', 'cgIsOpen', 'cgCardOf', 'cgPaintCard', 'cgPaintAll',
+  'cgSetOpen', 'cgAll', 'cgReveal', 'cgPrune', 'cgAutoOpen', 'cgWireHead', 'cgChainSum', 'cgFillPicker', 'cgPile', 'cgPickRow', 'serverGroups', 'groupKey',
+  'gmNum', 'gmSum', 'gmShares', 'gmAggregate', 'gmPair', 'gmShade', 'gmBarInto', 'gmMs', 'gmCardRow', 'gmFillRow', 'gmFillCard', 'gmApplyCards',
+  'fmtBytes', 'fmtSpeed', 'flowArrow'];
+const PAGE_PRELUDE = constSource('CG_KEY') + constSource('cgState') + constSource('cgSearch') + 'let cgConnKey = null; const cgOpened = new Set(); let gmLive = [];\n';
 const GROUP_FNS = ['srvById', 'grpMember', 'normalizeUiGroup', 'loadGroups', 'newGroupId', 'grpById', 'grpCountText', 'grpLive', 'grpAddrText',
   'grpMemberNames', 'grpConnText', 'renderGroups', 'groupCard', 'openGroupCard', 'afterGroupsChanged', 'persistGroups', 'deleteGroup', 'grpShown',
   'openGroupEditor', 'closeGroupEditor', 'grpIsV4', 'grpIsV6', 'grpIsHost', 'grpParseAddress', 'grpParseAddresses', 'grpAddIps', 'grpNameNode',
   'grpStrategyNode', 'grpMembersNode', 'grpServerPanel', 'grpIpPanel', 'renderGroupEditor', 'saveGroupEditor', 'edNode', 'appendSome', 'richLine', 'warpNum',
-  'pingResultLabel', 'fmtMs', 'pingClass', 'connectGlyph'];
+  'pingResultLabel', 'fmtMs', 'pingClass', 'connectGlyph', ...PAGE_FNS];
 
 function harness({ lang = 'en', groups = GROUPS, servers = SERVERS, chains = CHAINS, setGroups, api = {}, confirm = () => true } = {}) {
   const page = fakePage();
@@ -211,6 +217,7 @@ function harness({ lang = 'en', groups = GROUPS, servers = SERVERS, chains = CHA
     showView: (v) => calls.push(['view', v]), flashInto: (el, f) => calls.push(['flash', el && el.dataset.groupId, f]),
     renderChains: () => calls.push(['renderChains']), renderPicker: () => calls.push(['renderPicker']), renderAdvanced: () => calls.push(['renderAdvanced']),
     renderPool: () => calls.push(['renderPool']), refreshConnLabels: () => calls.push(['refreshConnLabels']),
+    revealServer: (id) => calls.push(['reveal', id]),
     window: {
       i18n: { lang },
       confirm: (msg) => { calls.push(['confirm', msg]); return confirm(msg); },
@@ -221,7 +228,7 @@ function harness({ lang = 'en', groups = GROUPS, servers = SERVERS, chains = CHA
     },
     URL, String, Array, Object, Number, Math, Date, JSON, Set, Promise, Error
   });
-  vm.runInContext(PRELUDE + 'let grpForm = null;\n' + GROUP_FNS.map(fnSource).join('\n') + '\nfunction form() { return grpForm; }', ctx);
+  vm.runInContext(PRELUDE + PAGE_PRELUDE + 'let grpForm = null;\n' + GROUP_FNS.map(fnSource).join('\n') + '\nfunction form() { return grpForm; }', ctx);
   const body = () => page.get('grpBody');
   const foot = () => page.get('grpFoot');
   const type = (id, value) => { const i = byId(body(), id); i.value = value; i.oninput(); };
@@ -282,7 +289,8 @@ test('the markup: the Chain page is «زنجیره و گروه», its groups sec
   assert.match(HTML, /<span data-i18n="nav\.chain">زنجیره و گروه<\/span>/);
   for (const id of ['groupsSection', 'btnAddGroup', 'groupsWrap', 'groupsEmpty']) assert.ok(view.includes(`id="${id}"`), `#${id} inside #view-chain`);
   assert.ok(view.indexOf('id="chainsWrap"') < view.indexOf('id="groupsSection"'), 'the groups below the chains');
-  assert.match(view, /<span class="sec-label" data-i18n="grp\.title">گروه‌ها<\/span>/);
+  // v1.28: «گروه‌ها» is the second tab (tests/groupsUi2.test.js), its button in the page's head
+  assert.match(view, /id="cgTabGroups"[^\n]*<span data-i18n="grp\.title">گروه‌ها<\/span>/);
   assert.match(view, /id="btnAddGroup" data-i18n="grp\.new">\+ گروه تازه<\/button>/);
   assert.match(HTML, /<div class="modal-overlay" id="grpModal" hidden>\s*<div class="modal grp-modal" role="dialog" aria-modal="true" aria-labelledby="grpTitle">/);
   for (const id of ['grpTitle', 'grpClose', 'grpBody', 'grpFoot']) assert.ok(HTML.includes(`id="${id}"`), `#${id}`);
@@ -340,15 +348,15 @@ test('the section: one card per group — ⧉ name, «n configs · strategy», i
   assert.deepEqual(byCls(a, 'chain-ping').map((e) => [e.dataset.pingReal || e.dataset.pingUp, e.textContent, e.className]),
     [['grp-a', '182', 'chain-ping ping-good'], ['grp-a', '640', 'chain-ping ping-bad']]);
   assert.equal(byCls(a, 'chain-ping')[0].dataset.pbase, 'chain-ping', 'applyPingDisplays rewrites it in place');
-  // its configs: the server's name, and its own address when it has one, else the server's
-  assert.deepEqual(byCls(a, 'grp-chip').map((c) => [byCls(c, 'cn-name')[0].textContent, byCls(c, 'grp-addr')[0].textContent, hasClass(c, 'own')]),
+  // its configs (v1.28: a row each, tests/groupsUi2.test.js): the server's name, and its own address when it has one, else the server's
+  assert.deepEqual(byCls(a, 'gm-row').map((c) => [byCls(c, 'cn-name')[0].textContent, byCls(c, 'grp-addr')[0].textContent, hasClass(c, 'own')]),
     [['CDN', '104.16.1.1', true], ['CDN', '[2606:4700::6810:1]:2053', true], ['DE', 'de.example.com:443', false]]);
   assert.equal(byCls(a, 'grp-addr')[0].dir, 'ltr');
   assert.equal(one(a, (e) => hasClass(e, 'ch-connect'), '▶').disabled, false);
   // a group whose servers are all gone: said, each config missing, nothing to connect
   assert.ok(hasClass(gone, 'grp-dead'));
   assert.equal(byCls(gone, 'grp-meta')[0].textContent, `0 configs · ${en('grp.st.leastPing')}`);
-  assert.deepEqual(byCls(gone, 'grp-chip').map((c) => [hasClass(c, 'missing'), byCls(c, 'cn-name')[0].textContent]), [[true, en('grp.missing')], [true, en('grp.missing')]]);
+  assert.deepEqual(byCls(gone, 'gm-row').map((c) => [hasClass(c, 'missing'), byCls(c, 'cn-name')[0].textContent]), [[true, en('grp.missing')], [true, en('grp.missing')]]);
   assert.equal(byCls(gone, 'grp-addr')[0].textContent, '1.1.1.1', 'a gone config with its own address keeps showing it');
   assert.equal(one(gone, (e) => hasClass(e, 'ch-connect'), '▶').disabled, true);
   assert.equal(one(gone, (e) => hasClass(e, 'grp-ping'), '⚡').disabled, true);
@@ -445,9 +453,10 @@ test('+ Config offers servers only — never a chain or a group — searchable; 
   h.ctx.openGroupEditor(null);
   byId(h.body(), 'grpAddServer').onclick();
   assert.equal(byId(h.body(), 'grpAddServer').attrs['aria-expanded'], 'true');
-  const offered = () => all(h.body(), (e) => hasClass(e, 'pool-item')).map((b) => b.dataset.srv);
+  // v1.28: the pick list's compact rows, in piles (tests/groupsUi2.test.js)
+  const offered = () => all(h.body(), (e) => hasClass(e, 'cg-pick')).map((b) => b.dataset.srv);
   assert.deepEqual(offered(), ['s1', 's2', 's3'], 'servers only: no c1, no grp-a');
-  assert.equal(all(h.body(), (e) => hasClass(e, 'pool-item'))[0].textContent, 'vlessDE+ ' + en('grp.addOne'));
+  assert.equal(all(h.body(), (e) => hasClass(e, 'cg-pick'))[0].textContent, 'vlessDEde.example.com:443' + en('cg.add'));
   all(h.body(), (e) => e.dataset.srv === 's2')[0].onclick();
   assert.deepEqual(plain(h.form().members), [{ id: 's2' }]);
   assert.deepEqual(offered(), ['s1', 's3'], 'the one added is not offered again');
@@ -767,17 +776,19 @@ test('the chain editor offers groups as hops (⧉, by their bare id); a group ho
   const ctx = vm.createContext({
     state, $: page.$, $$: page.$$, document: page.document, t: en, escapeHtml: (s) => String(s), window: { i18n: { lang: 'en' }, api: { setChains: async (l) => { saved.push(plain(l)); } } },
     usageLabel: () => '', connect() {}, pingServer() {}, shareRouting() {}, renderGroups() {}, renderPicker() {}, renderAdvanced() {}, renderPool() {},
-    String, Array, Object, Number
+    revealServer() {}, String, Array, Object, Number, Math, JSON, Set
   });
-  vm.runInContext(PRELUDE + ['renderChains', 'persistChains', 'srvById', 'grpCountText', 'warpNum', 'pingResultLabel', 'fmtMs', 'pingClass', 'connectGlyph',
-    'chainMembers', 'chainReady'].map(fnSource).join('\n'), ctx);
+  vm.runInContext(PRELUDE + PAGE_PRELUDE + ['renderChains', 'persistChains', 'srvById', 'grpCountText', 'warpNum', 'pingResultLabel', 'fmtMs', 'pingClass', 'connectGlyph',
+    'chainMembers', 'chainReady', 'grpById', 'grpAddrText', 'edNode', 'appendSome', ...PAGE_FNS].map(fnSource).join('\n'), ctx);
   ctx.renderChains();
   const card = kids(page.get('chainsWrap'))[0];
-  const pool = card.querySelector('.chain-pool');
-  const rows = kids(pool).filter((r) => hasClass(r, 'pool-item'));
-  assert.deepEqual(rows.map((r) => r.dataset.name), ['CDN', 'Office WG', 'Fast'], 'the servers not in it, then the groups (the gone one not)');
-  assert.match(rows[2].innerHTML, /<span class="proto-badge proto-group">⧉<\/span>\s*<span class="pi-name">Fast · 3 configs<\/span>/);
-  rows[2].onclick();
+  // v1.28 (tests/groupsUi2.test.js): «افزودن حلقه» in piles — the hand-added configs, then the groups; one already in it dimmed
+  const pool = card.querySelector('.cg-picker-list');
+  const rows = all(pool, (r) => hasClass(r, 'cg-pick'));
+  assert.deepEqual(rows.map((r) => [r.dataset.srv, hasClass(r, 'in')]), [['s1', true], ['s2', false], ['s3', false], ['grp-a', false]],
+    'the servers (the one in it dimmed), then the groups (the gone one not)');
+  assert.deepEqual(kids(rows[3]).map((c) => [c.className, c.textContent]), [['proto-badge proto-group', '⧉'], ['srv-name', 'Fast'], ['cg-addr ui', '3 configs'], ['cg-add', en('cg.add')]]);
+  rows[3].onclick();
   await tick();
   assert.deepEqual(saved[0], [{ id: 'c1', name: 'One hop', members: ['s1', 'grp-a'] }], 'its bare id, kept by the prune');
   assert.equal(ctx.chainReady(state.chains[0]), true, 'a group hop counts: two hops');

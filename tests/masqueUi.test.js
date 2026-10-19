@@ -463,7 +463,8 @@ test('a MASQUE server’s card: WARP and its HTTP version beside the name, deriv
   assert.match(fnSource('showServerQr'), /const isJson = !!srv && \(srv\.source === 'json' \|\| srv\.protocol === 'masque'\);/);
   // the badge: in styles.css beside the others, the same in the picker, chains and the pool (they all write proto-<protocol>)
   assert.match(STYLES, /\.proto-hysteria2 \{[^}]*\}\n\.proto-masque \{ color: var\(--accentInk\); border-color: var\(--accentLine\); background: var\(--accentSoft\); \}/);
-  assert.ok((APP.match(/proto-\$\{escapeHtml\(s\.protocol\)\}/g) || []).length >= 4);
+  // (v1.28: the chain editor's pick list builds its rows as elements — 'proto-' + s.protocol, tests/groupsUi2.test.js)
+  assert.ok((APP.match(/proto-\$\{escapeHtml\(s\.protocol\)\}|'proto-badge proto-' \+ s\.protocol/g) || []).length >= 4);
   for (const sel of ['.srv-tags', '.srv-tag.warp', '.modal.warp-modal', '.warp-progress', '.ed-http-opt', '.ed-card-head', '.ed-chips-read', '.btn.is-new::after']) {
     assert.ok(LISTS.includes(sel + ' ') || LISTS.includes(sel + '{') || LISTS.includes(sel + ','), `lists.css has no ${sel}`);
   }
