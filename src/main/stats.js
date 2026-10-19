@@ -293,6 +293,67 @@ class GroupHealthWatch {
 }
 
 /**
+ * Every WireGuard of a plan that goes through another config, by name:
+ * [{ wg, hop }] — a rule's or the default's target through its via ('inherit'
+ * or none given: the base), a chain's WireGuard through the member before it.
+ * One dialled straight (via 'none', no base, a chain's first) is not here.
+ */
+function wgRides(plan) {
+  const out = [];
+  if (!plan) return out;
+  const recs = plan.serversById || {};
+  const chainOf = (ref) => (plan.chainsById || {})[String(ref).slice('chain:'.length)] || [];
+  const nameOf = (ref) => {
+    if (!ref || ref === 'direct' || ref === 'block') return '';
+    if (String(ref).startsWith('chain:')) return chainOf(ref).map((s) => s && s.name).filter(Boolean).join(' → ');
+    return recs[ref] ? recs[ref].name || ref : '';
+  };
+  const isWg = (s) => !!s && s.protocol === 'wireguard';
+  const add = (wg, hop) => { if (wg && hop && !out.some((x) => x.wg === wg && x.hop === hop)) out.push({ wg, hop }); };
+  const walk = (target, via) => {
+    const front = via === 'none' ? '' : (via == null || via === 'inherit' ? plan.base || '' : via);
+    if (String(target).startsWith('chain:')) {
+      const m = chainOf(target);
+      m.forEach((s, i) => { if (isWg(s)) add(s.name, i ? m[i - 1] && m[i - 1].name : nameOf(front)); });
+    } else if (isWg(recs[target])) add(recs[target].name, nameOf(front));
+  };
+  if (plan.mode === 'chain') (plan.chain || []).forEach((s, i) => { if (i && isWg(s)) add(s.name, plan.chain[i - 1] && plan.chain[i - 1].name); });
+  if (plan.mode === 'advanced') {
+    for (const r of plan.rules || []) if (r) walk(r.target, r.via);
+    walk(plan.def, plan.defVia);
+  }
+  return out;
+}
+
+/**
+ * The core's own word when the config a WireGuard goes through drops it —
+ * `proxy/wireguard: unexpected closed > io: read/write on closed pipe`, with
+ * no name — said once a connection with the WireGuard and the config named:
+ * that config is what is not working, not the WireGuard. reset(plan) at connect.
+ *   onLine(line, lang) → { line, level } | null
+ */
+class WgHopWatch {
+  constructor() { this.rides = []; this.said = false; }
+  reset(plan) { this.rides = wgRides(plan); this.said = false; }
+  onLine(line, lang) {
+    if (this.said || !this.rides.length || !/proxy\/wireguard: unexpected closed|proxy\/wireguard:.*closed pipe/.test(String(line))) return null;
+    this.said = true;
+    const fa = lang !== 'en';
+    const pairs = this.rides.map((r) => (fa ? `«${r.wg}» از «${r.hop}»` : `“${r.wg}” through “${r.hop}”`)).join(fa ? '، ' : ', ');
+    return {
+      line: this.rides.length === 1
+        ? (fa
+          ? `وایرگارد «${this.rides[0].wg}»: کانفیگی که از آن رد می‌شود («${this.rides[0].hop}») اتصالش را بست — آن کانفیگ الان ترافیک را عبور نمی‌دهد (خطای خودش معمولاً همین بالاست). در صفحهٔ اصلی تستش کن، یا برای این وایرگارد کانفیگ دیگری انتخاب کن.`
+          : `WireGuard “${this.rides[0].wg}”: the config it goes through (“${this.rides[0].hop}”) closed on it — that config is not carrying traffic right now (its own error is usually just above). Test it on Home, or choose another config for this WireGuard.`)
+        : (fa
+          ? `یک وایرگارد کانفیگی را که از آن رد می‌شود از دست داد (${pairs}) — یکی از این کانفیگ‌ها الان ترافیک را عبور نمی‌دهد (خطای خودش معمولاً همین بالاست). در صفحهٔ اصلی تستشان کن، یا برای وایرگارد کانفیگ دیگری انتخاب کن.`
+          : `A WireGuard lost the config it goes through (${pairs}) — one of those configs is not carrying traffic right now (its own error is usually just above). Test them on Home, or choose another config for the WireGuard.`),
+      level: 'warn'
+    };
+  }
+}
+
+/**
  * The running groups as the window shows them, one tick: each group of the
  * map with its members' bytes, bytes per second and health — member i is
  * `<tag>~gm<i>`. (groups-ui/design.md §3)
@@ -382,4 +443,4 @@ class SilenceWatch {
   }
 }
 
-module.exports = { StatsPoller, sumOutbounds, byOutbound, foldGroups, memberCounters, healthOf, groupsLive, GroupHealthWatch, SilenceWatch };
+module.exports = { StatsPoller, sumOutbounds, byOutbound, foldGroups, memberCounters, healthOf, groupsLive, GroupHealthWatch, wgRides, WgHopWatch, SilenceWatch };
