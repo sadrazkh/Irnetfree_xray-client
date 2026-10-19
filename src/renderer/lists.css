@@ -726,3 +726,26 @@ button.pool-item:hover .pool-add { color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { .warp-progress .run { animation: none; } }
 .warp-error { margin: 0; font-size: 12px; line-height: 1.7; color: var(--danger); background: var(--dangerSoft); border-radius: var(--r4); padding: 8px 11px; }
 .warp-progress .warn { color: var(--warn); font-weight: 600; }
+
+/*
+ * v1.26 (.superpowers/sdd/warp-wg/design.md §8): the kind first (WireGuard
+ * for a Chain, or MASQUE), the WARP+ keys read back as typed, and an account
+ * read back — one box per account when done, and the editor's «WARP account»
+ * above both of its views. Cloudflare's own field names stay in .ed-key.
+ */
+.warp-modal .seg-btn:disabled { opacity: .45; cursor: not-allowed; }
+.warp-modal .hint.warn { color: var(--warn); }
+.warp-lc { display: flex; flex-direction: column; gap: 6px; margin-top: -4px; }
+.warp-accts { display: flex; flex-direction: column; gap: 10px; }
+.warp-acct .ttl { font-weight: 600; font-size: 12px; color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+.ed-card-head .warp-acct-type { margin-inline-start: auto; flex: 0 0 auto; }
+.warp-acct-rows { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: 12px; line-height: 1.6; }
+.warp-acct-rows dt { color: var(--ink3); display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.warp-acct-rows dd { margin: 0; min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
+.warp-acct-rows dd.ok { color: var(--ok); }
+.warp-acct-rows dd.bad { color: var(--danger); }
+.ed-warp-acct .hint { margin: 0; }
+@media (max-width: 560px) {
+  .warp-acct-rows { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+  .warp-acct-rows dd { margin-bottom: 6px; }
+}

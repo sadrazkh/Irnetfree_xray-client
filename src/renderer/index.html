@@ -899,6 +899,8 @@
         <button class="tb-btn" id="editClose">&#x2715;</button>
       </div>
       <div class="modal-body" id="editBody">
+        <!-- the WARP account a server was made from, read-only, above both views (app.js renderWarpAccount) -->
+        <div class="ed-card ed-warp-acct" id="edWarpAcct" hidden></div>
         <div class="ed-simple" id="edSimple">
         <div class="grid2" id="edNameRow">
           <div><label class="field-label" data-i18n="edit.name">نام</label>
@@ -1138,7 +1140,7 @@
     </div>
   </div>
 
-  <!-- + WARP: a WARP account, made here or imported, as MASQUE servers (app.js renderWarp draws the body and foot) -->
+  <!-- + WARP: WARP accounts, made here or imported, as WireGuard servers (for a Chain) or MASQUE ones (app.js renderWarp draws the title, body and foot) -->
   <div class="modal-overlay" id="warpModal" hidden>
     <div class="modal warp-modal" role="dialog" aria-modal="true" aria-labelledby="warpTitle">
       <div class="modal-head">

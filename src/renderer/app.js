@@ -1433,17 +1433,19 @@ function serverGroup(g, n) {
 }
 
 /**
- * What a card says beside a server's name, derived from its outbound and never
- * stored: a MASQUE server's `WARP` when it holds a WARP account, and its HTTP
- * version (`h3` / `h2`, serverFields.masqueHttpOf — the core's own rule).
+ * What a card says beside a server's name, never stored: `WARP` for a server
+ * made from a WARP account (its `warp`, either protocol, or a MASQUE outbound
+ * holding one) — `WARP+` when the account is WARP+ — and a MASQUE server's
+ * HTTP version (`h3` / `h2`, serverFields.masqueHttpOf — the core's own rule).
  */
 function srvTags(s) {
-  if (!s || s.protocol !== 'masque') return [];
+  if (!s) return [];
   const st = (s.outbound && s.outbound.streamSettings) || {};
   const ms = st.masqueSettings || {};
+  const acct = s.warp && typeof s.warp === 'object' ? s.warp : null;
   const tags = [];
-  if (ms.warp && typeof ms.warp === 'object') tags.push('WARP');
-  tags.push(sfTable().masqueHttpOf(st.tlsSettings));
+  if (acct || (s.protocol === 'masque' && ms.warp && typeof ms.warp === 'object')) tags.push(acct && acct.warpPlus ? 'WARP+' : 'WARP');
+  if (s.protocol === 'masque') tags.push(sfTable().masqueHttpOf(st.tlsSettings));
   return tags;
 }
 
@@ -1473,10 +1475,10 @@ function serverCard(s) {
   const copyKey = isJson ? 'ed.jsonCopy' : isMasque ? 'srv.copyJson' : 'btn.copy';
   const copyTitle = isJson || isMasque ? escapeHtml(t(copyKey)) : 'copy';
   const qrKey = isMasque ? 'btn.qrJson' : 'btn.qr';
-  // what the record is, beside its name: WARP, and the HTTP version (MASQUE)
+  // what the record is, beside its name: WARP (WARP+), and the HTTP version (MASQUE)
   const tags = srvTags(s);
   const tagsHtml = tags.length
-    ? `<span class="srv-tags">${tags.map((x) => `<span class="srv-tag${x === 'WARP' ? ' warp' : ''}" dir="ltr">${escapeHtml(x)}</span>`).join('')}</span>`
+    ? `<span class="srv-tags">${tags.map((x) => `<span class="srv-tag${x.startsWith('WARP') ? ' warp' : ''}" dir="ltr">${escapeHtml(x)}</span>`).join('')}</span>`
     : '';
 
   card.innerHTML = `
@@ -4216,6 +4218,8 @@ function openEdit(id) {
   state.editingId = id;
   editOriginal = s;
   setEditKind(s.source === 'json');
+  // the WARP account it was made from, read-only, above both views
+  renderWarpAccount(s.source === 'json' ? null : s);
   editNew = false;
   editBad = null;
   $('#edTitle').textContent = t('edit.title');
@@ -5363,6 +5367,7 @@ function openNewServer() {
   editTab = 'basics';
   editView = 'pro';
   setEditKind(false);
+  renderWarpAccount(null);
   $('#edTitle').textContent = t('edit.newTitle');
   show('#edView', false);
   showEditView();
@@ -5572,24 +5577,38 @@ $('#btnWgAdd').onclick = async () => {
   toast(t('t.wgAdded'), 'ok');
 };
 
-/* ----------------------------- + WARP (MASQUE) ----------------------------- */
-// .superpowers/sdd/masque/design.md §5-6 and the approved sample: a WARP
-// account — registered here (warp.js, in main or on the router) or brought in
-// from usque or an Xray outbound — becomes one MASQUE server per HTTP version.
-// The dialog is drawn from `warpForm`; servers:addWarp does the work and does
-// not stream, so its steps read pending until it answers, then done.
+/* ----------------------------- + WARP (WireGuard or MASQUE) ----------------------------- */
+// .superpowers/sdd/masque/design.md §5-6, warp-wg/design.md §1-3 and §8: one
+// or more WARP accounts — registered here (warp.js, in main or on the router)
+// or brought in from a WireGuard .conf or link, usque or an Xray outbound —
+// become a WireGuard server each (for a Chain: a chain each too, the hop
+// first) or one MASQUE server per HTTP version. The dialog is drawn from
+// `warpForm`; servers:addWarp does the work and does not stream, so its steps
+// read pending until it answers, then done, with one box per account made.
 
 const WARP_SEEN_KEY = 'irnf.warpSeen';
 const WARP_TERMS_URL = 'https://www.cloudflare.com/application/terms/';
 /** Cloudflare's MASQUE edges (warp.js DEFAULT_ENDPOINTS): HTTP/3, then HTTP/2. */
 const WARP_EDGES = { v4: ['162.159.198.1', '162.159.198.2'], v6: ['2606:4700:103::1', '2606:4700:103::2'] };
+/** Cloudflare's WireGuard edge as a sign-up names it, v4 and v6, on WARP's own port. */
+const WARP_WG_EDGE = { v4: '162.159.192.1', v6: '2606:4700:d0::a29f:c001', port: 2408 };
+/** A WARP+ key: three groups of eight (warp.js LICENSE_RE). */
+const WARP_LICENSE_RE = /^[A-Za-z0-9]{8}-[A-Za-z0-9]{8}-[A-Za-z0-9]{8}$/;
 const WARP_IMPORT_PH = '{\n  "private_key": "MHcCAQEE…",\n  "endpoint_v4": "162.159.198.1", "endpoint_h2_v4": "162.159.198.2",\n  "endpoint_pub_key": "-----BEGIN PUBLIC KEY-----…",\n  "ipv4": "172.16.0.2", "ipv6": "2606:4700:110:…"\n}';
+const WARP_WG_IMPORT_PH = '[Interface]\nPrivateKey = …\nAddress = 172.16.0.2/32, 2606:4700:110:…/128\n\n[Peer]\nPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\nEndpoint = 162.159.192.1:2408';
 /** The P-256 curve's OID (1.2.840.10045.3.1.7) in DER: a PKCS#8 or SEC1 key of that curve carries it. */
 const P256_OID = '\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07';
 let warpForm = null;   // the dialog: its choices, then phase 'running', then 'done' with the answer
 
 function warpFresh() {
-  return { way: 'new', route: 'direct', license: '', importText: '', http: 'both', endpoint: 'auto', address: '', cover: '', antiDpi: true, phase: 'form', error: '', res: null, args: null };
+  return {
+    kind: 'wireguard', way: 'new', route: 'direct', count: '1', licenses: '', importText: '', wgImport: '',
+    // MASQUE's step 2
+    http: 'both', endpoint: 'auto', address: '', cover: '', antiDpi: true,
+    // WireGuard's: a Chain behind one of the servers (or chains), or straight to Cloudflare
+    use: 'chain', chainWith: '', wgEndpoint: 'auto', wgAddress: '', wgAntiDpi: true,
+    phase: 'form', error: '', res: null, args: null
+  };
 }
 
 function warpShown() { const m = $('#warpModal'); return !!m && !m.hidden; }
@@ -5606,17 +5625,66 @@ function openWarp() {
 
 function closeWarp() { $('#warpModal').hidden = true; }
 
+/** The WARP+ keys in their box: one a line, trimmed, blank lines dropped. */
+function warpLicenses(text) { return String(text == null ? '' : text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean); }
+
+/** How many accounts the form makes (design §1): its count, 1–10, raised to the number of keys; an import is one. */
+function warpCount(w) {
+  if (w.way === 'import') return 1;
+  const asked = Math.min(10, Math.max(1, Math.floor(Number(w.count)) || 1));
+  return Math.min(10, Math.max(asked, warpLicenses(w.licenses).length));
+}
+
 /**
- * servers:addWarp's arguments, from the dialog: a new account (how to reach
- * the sign-up, a WARP+ key) or an imported one (the pasted text), then the
- * servers — HTTP version, endpoint, cover domain, anti-DPI.
+ * What a WireGuard WARP can ride for a Chain: the servers but an HTTP proxy
+ * (it carries no UDP), then the chains whose last hop — the one WARP rides —
+ * is not one, as 'chain:<id>' and marked as a chain.
+ */
+function warpHops() {
+  const servers = state.servers || [];
+  const opts = servers.filter((s) => s && s.protocol !== 'http').map((s) => ({ value: s.id, label: s.name || s.id }));
+  for (const c of state.chains || []) {
+    const members = (c.members || []).map((id) => servers.find((s) => s.id === id)).filter(Boolean);
+    if (members.length && members[members.length - 1].protocol !== 'http') opts.push({ value: 'chain:' + c.id, label: '⛓ ' + (c.name || c.id) });
+  }
+  return opts;
+}
+
+/** The first hop the form stands on: the one picked while it is still there, else the selected server (or chain), else the first. */
+function warpHop(w, hops) {
+  const opts = hops || warpHops();
+  const has = (v) => !!v && opts.some((o) => o.value === v);
+  const sel = state.selectedServerId;
+  if (has(w.chainWith)) return w.chainWith;
+  if (has(sel)) return sel;
+  if (sel && has('chain:' + sel)) return 'chain:' + sel;
+  return opts.length ? opts[0].value : '';
+}
+
+/**
+ * servers:addWarp's arguments (warp-wg/design.md §1), from the dialog: the
+ * kind; new accounts (how to reach the sign-up, how many, the WARP+ keys) or
+ * an imported one (the pasted text); then WireGuard's Chain, or its endpoint
+ * and noise — or MASQUE's HTTP version, endpoint, cover domain, anti-DPI.
  */
 function warpArgs(w) {
-  const a = { mode: w.way === 'import' ? 'import' : 'new' };
-  if (a.mode === 'import') a.importText = String(w.importText || '');
+  const kind = w.kind === 'masque' ? 'masque' : 'wireguard';
+  const a = { kind, mode: w.way === 'import' ? 'import' : 'new' };
+  if (a.mode === 'import') a.importText = String((kind === 'masque' ? w.importText : w.wgImport) || '');
   else {
     a.via = w.route === 'proxy' ? 'proxy' : 'direct';
-    a.license = String(w.license || '').trim();
+    a.count = warpCount(w);
+    a.licenses = warpLicenses(w.licenses);
+  }
+  if (kind === 'wireguard') {
+    a.use = w.use === 'direct' ? 'direct' : 'chain';
+    if (a.use === 'chain') a.chainWith = warpHop(w);
+    else {
+      a.endpoint = ['auto', 'v6', 'custom'].includes(w.wgEndpoint) ? w.wgEndpoint : 'auto';
+      if (a.endpoint === 'custom') a.address = String(w.wgAddress || '').trim();
+      a.antiDpi = w.wgAntiDpi !== false;
+    }
+    return a;
   }
   a.http = ['h3', 'h2', 'both'].includes(w.http) ? w.http : 'both';
   a.endpoint = ['auto', 'v6', 'custom'].includes(w.endpoint) ? w.endpoint : 'auto';
@@ -5642,6 +5710,17 @@ function warpWarningTexts(res) {
     return t(k) !== k ? t(k).replace('{msg}', () => msg) : msg;
   });
 }
+
+/** A batch that stopped early (`res.stopped`): how many of how many were made, and why. */
+function warpStoppedText(res, a) {
+  const st = (res && res.stopped) || {};
+  const made = st.made != null ? st.made : ((res && res.accounts) || []).length;
+  const wanted = st.wanted != null ? st.wanted : (a && a.count) || made;
+  return warpFill('warp.stopped', { made: warpNum(made), wanted: warpNum(wanted), reason: warpErrorText(st) });
+}
+
+/** A translated line with its {slots} filled in as plain text (numbers, names). */
+function warpFill(key, vals) { return t(key).replace(/\{(\w+)\}/g, (m, k) => (vals && vals[k] != null ? String(vals[k]) : m)); }
 
 /** A P-256 key, by a cheap look: its base64 (or PEM) holds the curve's OID. */
 function looksP256(key) {
@@ -5688,70 +5767,259 @@ function warpImportChips(text) {
   return warpChips(r, true);
 }
 
-/** A step's number, in the page's digits. */
-function warpNum(n) { return window.i18n && window.i18n.lang === 'fa' ? String.fromCharCode(0x06F0 + n) : String(n); }
+/**
+ * A pasted WireGuard account, read back cheaply (parser.parseWireguardConf and
+ * parseLink are the real check): a .conf — [Interface] and [Peer] — with its
+ * endpoint and addresses, or a wireguard:// link with its host. Never its key.
+ */
+function warpReadWgImport(text) {
+  const s = String(text == null ? '' : text).trim();
+  if (!s) return null;
+  if (/^(?:wireguard|wg):\/\//i.test(s)) {
+    const m = /^[a-z]+:\/\/[^@\s]*@([^/?#\s]+)/i.exec(s);
+    return { link: true, endpoint: m ? m[1] : '', addrs: [] };
+  }
+  if (!/^\s*\[Interface\]\s*$/im.test(s) || !/^\s*\[Peer\]\s*$/im.test(s)) return { none: true };
+  const val = (k) => { const m = new RegExp('^\\s*' + k + '\\s*=\\s*(.*?)\\s*$', 'im').exec(s); return m ? m[1] : ''; };
+  return { conf: true, key: val('PrivateKey') !== '', endpoint: val('Endpoint'), addrs: val('Address').split(/[,\s]+/).filter(Boolean) };
+}
 
-/** One input of the dialog, as an editor field: its label and technical key, the input writing `warpForm[key]`, a hint. */
+/** The read-back chips under a pasted WireGuard account: a .conf or a link seen (or nothing usable), its endpoint, its addresses. */
+function warpWgImportChips(text) {
+  const r = warpReadWgImport(text);
+  if (!r) return [];
+  if (r.none) return [edNode('span', { class: 'bad', text: t('warp.chipWgNone') })];
+  const chips = [edNode('span', { text: t(r.link ? 'warp.chipWgLink' : 'warp.chipWgConf') })];
+  if (r.conf && !r.key) chips.push(edNode('span', { class: 'bad', text: t('warp.chipNoKey') }));
+  if (r.endpoint) chips.push(edNode('span', { class: 'info' }, [edNode('bdi', { dir: 'ltr', text: 'Endpoint ' + r.endpoint })]));
+  for (const a of r.addrs) {
+    const ip = a.replace(/\/\d+$/, '');
+    chips.push(edNode('span', { class: 'info' }, [edNode('bdi', { dir: 'ltr', text: (ip.includes(':') ? 'IPv6 ' : 'IPv4 ') + ip })]));
+  }
+  return chips;
+}
+
+/** A number in the page's digits (Persian ones in Persian). */
+function warpNum(n) { const s = String(n); return window.i18n && window.i18n.lang === 'fa' ? s.replace(/[0-9]/g, (d) => String.fromCharCode(0x06F0 + Number(d))) : s; }
+
+/** Bytes as Cloudflare gave them, made human (fmtBytes); none given: —. */
+function warpBytes(n) { return typeof n === 'number' && Number.isFinite(n) ? fmtBytes(n) : '—'; }
+
+/** When an account was read, in the page's language; none, or unreadable: —. */
+function warpDate(iso) {
+  const d = new Date(iso);
+  if (!iso || Number.isNaN(d.getTime())) return '—';
+  try {
+    return new Intl.DateTimeFormat(window.i18n && window.i18n.lang === 'fa' ? 'fa-IR' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(d);
+  } catch { return d.toISOString().slice(0, 16).replace('T', ' '); }
+}
+
+/** An account's type (account_type) in the window's words, as a chip: WARP+ green, a team blue, free or unknown grey. */
+function warpTypeChip(info) {
+  const type = ['free', 'limited', 'unlimited', 'team'].includes(info && info.type) ? info.type : 'unknown';
+  const cls = type === 'limited' || type === 'unlimited' ? null : type === 'team' ? 'info' : 'dim';
+  return edNode('span', { class: 'ed-chips-read warp-acct-type' }, [edNode('span', { class: cls, text: t('warp.type.' + type) })]);
+}
+
+/**
+ * An account's lines (warp-wg/design.md §2): its WARP+ key — taken (shown by
+ * its last four characters), refused (Cloudflare's words) or none — then
+ * premium_data, quota and usage under Cloudflare's own names (what each means
+ * exactly is not documented: none is called "remaining"), its devices, and the
+ * caller's `extra` rows ([label, technical key, value]). A key taken while the
+ * account stays free: a note of its own. An imported account: one line.
+ */
+function warpAccountBody(info, extra) {
+  const i = info || {};
+  const rows = edNode('dl', { class: 'warp-acct-rows' });
+  const row = (label, key, value, cls) => appendSome(rows,
+    edNode('dt', {}, [edNode('span', { text: t(label) }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: key })]),
+    edNode('dd', { class: cls || null }, value));
+  const out = [];
+  if (i.imported) out.push(edNode('p', { class: 'hint', text: t('warp.acctImported') }));
+  else {
+    const tail = String(i.licenseTail == null ? '' : i.licenseTail).slice(-4);
+    if (i.license === 'applied') row('warp.acctLicense', 'license', richLine(t('warp.licApplied'), { tail: tail ? '…' + tail : '—' }), 'ok');
+    else if (i.license === 'refused') row('warp.acctLicense', 'license', richLine(t('warp.licRefused'), { msg: String(i.licenseError || '').trim() || '—' }), 'bad');
+    else row('warp.acctLicense', 'license', t('warp.licNone'));
+    for (const [label, key, v] of [['warp.acctPremium', 'premium_data', i.premiumData], ['warp.acctQuota', 'quota', i.quota], ['warp.acctUsage', 'usage', i.usage]]) {
+      row(label, key, [edNode('bdi', { dir: 'ltr', title: typeof v === 'number' ? v + ' B' : null, text: warpBytes(v) })]);
+    }
+    row('warp.acctDevices', 'devices', typeof i.devices === 'number' ? warpNum(i.devices) : '—');
+  }
+  for (const [label, key, value] of extra || []) row(label, key, value);
+  if (rows.children.length) out.push(rows);
+  if (!i.imported && i.license === 'applied' && i.type === 'free') out.push(edNode('p', { class: 'ed-warn', text: t('warp.licStillFree') }));
+  return out;
+}
+
+/** One account the call made: its name and type, its lines, its chain, its warnings (`warp.warn.<code>`). */
+function warpAccountBox(acc) {
+  const a = acc || {};
+  const info = a.info && typeof a.info === 'object' ? a.info : {};
+  const box = edNode('div', { class: 'ed-card warp-acct' }, [edNode('div', { class: 'ed-card-head' }, [
+    edNode('span', { class: 'warp-ico sm', 'aria-hidden': 'true', text: '☁' }),
+    edNode('span', { class: 'ttl', dir: 'auto', text: a.name || '—' }),
+    info.imported ? null : warpTypeChip(info)])]);
+  appendSome(box, ...warpAccountBody(info, a.chainName ? [['warp.acctChain', 'chainName', [edNode('bdi', { dir: 'auto', text: a.chainName })]]] : []));
+  for (const text of warpWarningTexts({ warnings: a.warnings })) appendSome(box, edNode('p', { class: 'ed-warn', role: 'alert', text }));
+  return box;
+}
+
+/**
+ * The editor's read-only «WARP account» (warp-wg/design.md §8), above both
+ * views: what `server.warp` holds and when it was read — or, imported, that
+ * its details are unknown. Hidden for any other server.
+ */
+function renderWarpAccount(s) {
+  const box = $('#edWarpAcct');
+  if (!box) return;
+  box.textContent = '';
+  const info = s && s.warp && typeof s.warp === 'object' ? s.warp : null;
+  const known = !!info && (info.imported === true || ['type', 'license', 'deviceId', 'premiumData', 'quota', 'usage', 'devices', 'checkedAt'].some((k) => info[k] != null));
+  box.hidden = !known;
+  if (!known) return;
+  appendSome(box,
+    edNode('div', { class: 'ed-card-head' }, [
+      edNode('span', { class: 'warp-ico sm', 'aria-hidden': 'true', text: '☁' }),
+      edNode('span', {}, [edNode('span', { class: 'ttl', text: t('warp.acctTitle') }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: 'warp' }),
+        edNode('br'), edNode('span', { class: 'sub', dir: 'ltr', text: (info.kind || s.protocol) === 'masque' ? 'MASQUE' : 'WireGuard' })]),
+      info.imported ? null : warpTypeChip(info)]),
+    ...warpAccountBody(info, info.imported ? [] : [['warp.acctChecked', 'checkedAt', warpDate(info.checkedAt)]]),
+    info.imported ? null : edNode('p', { class: 'hint', text: t('warp.acctFieldsHint') }));
+}
+
+/** One input of the dialog, as an editor field: its label and technical key, the input writing `warpForm[key]`, a hint ({slots} left-to-right). */
 function warpField(key, label, techKey, o) {
   const id = 'warp-' + key;
   const inp = edNode(o.area ? 'textarea' : 'input', {
     class: o.area ? 'textarea ed-mono' : 'input', id, dir: 'ltr', spellcheck: 'false', autocomplete: 'off',
+    type: o.area ? null : o.type || null, min: o.min, max: o.max,
     placeholder: o.ph || null, rows: o.area ? String(o.rows || 5) : null
   });
-  inp.value = warpForm[key] || '';
+  inp.value = warpForm[key] == null ? '' : String(warpForm[key]);
   inp.oninput = () => { warpForm[key] = inp.value; if (o.onInput) o.onInput(inp.value); };
   return edNode('div', { class: 'ed-f' + (o.span ? ' span2' : '') }, [
     edNode('label', { class: 'field-label', for: id }, [edNode('span', { text: t(label) }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: techKey })]),
-    inp, o.hint ? edNode('p', { class: 'hint', text: t(o.hint) }) : edNode('span')]);
+    inp, !o.hint ? edNode('span') : o.slots ? edNode('p', { class: 'hint' }, richLine(t(o.hint), o.slots)) : edNode('p', { class: 'hint', text: t(o.hint) })]);
 }
 
-/** A segmented choice of the dialog: a click sets `warpForm[key]` and draws it again. */
+/** A segmented choice of the dialog: a click sets `warpForm[key]` and draws it again; an option marked off cannot be picked. */
 function warpSeg(items, key) {
   const box = edNode('div', { class: 'seg ed-seg-wide ui', role: 'radiogroup' });
-  for (const [id, label] of items) {
+  for (const [id, label, off] of items) {
     const on = warpForm[key] === id;
-    const b = edNode('button', { type: 'button', class: 'seg-btn' + (on ? ' active' : ''), role: 'radio', 'aria-checked': String(on), 'data-warp': key + ':' + id, text: label });
-    b.onclick = () => { warpForm[key] = id; renderWarp(); };
+    const b = edNode('button', { type: 'button', class: 'seg-btn' + (on ? ' active' : ''), role: 'radio', 'aria-checked': String(on), disabled: !!off, 'data-warp': key + ':' + id, text: label });
+    b.onclick = () => { if (off) return; warpForm[key] = id; renderWarp(); };
     appendSome(box, b);
   }
   return box;
 }
 
-/** The form: step 1 the account (new or imported), step 2 how to connect — as the sample has them. */
-function warpFormNodes(w) {
-  const step = (n, key) => edNode('div', { class: 'warp-step-head' }, [edNode('span', { class: 'n', text: warpNum(n) }), t(key)]);
-  const one = edNode('div', { class: 'warp-step' }, [step(1, 'warp.step1'), warpSeg([['new', t('warp.wayNew')], ['import', t('warp.wayImport')]], 'way')]);
-  if (w.way === 'new') {
-    // through the app's own connection only while there is one (warp.js refuses it otherwise: notConnected)
-    const connected = !!state.connected;
-    if (!connected && w.route === 'proxy') w.route = 'direct';
-    const radio = (id, label, sub, off) => {
-      const inp = edNode('input', { type: 'radio', name: 'warpRoute', value: id, disabled: off });
-      inp.checked = w.route === id;
-      inp.onchange = () => { if (inp.checked) w.route = id; };
-      return edNode('label', { class: 'warp-radio' + (off ? ' off' : '') }, [inp, edNode('span', {}, [edNode('span', { text: label }), edNode('small', { text: sub })])]);
-    };
-    const terms = edNode('button', { type: 'button', class: 'ed-pro-link', text: t('warp.tosLink') });
-    terms.onclick = () => window.api.openExternal(WARP_TERMS_URL);
-    appendSome(one,
-      edNode('p', { class: 'hint' }, richLine(t('warp.newLede'))),
-      edNode('div', { class: 'warp-route', role: 'radiogroup' }, [
-        radio('direct', t('warp.routeDirect'), t('warp.routeDirectSub'), false),
-        radio('proxy', t('warp.routeProxy'), t(connected ? 'warp.routeProxySub' : 'warp.routeProxyOff'), !connected)]),
-      edNode('p', { class: 'hint' }, richLine(t('warp.tos'), { terms })),
-      edNode('div', { class: 'ed-grid' }, [warpField('license', 'warp.license', 'license', { ph: t('warp.licensePh'), hint: 'warp.licenseHint', span: true })]));
-  } else {
-    const chips = edNode('div', { class: 'ed-chips-read', 'aria-live': 'polite' });
-    const fill = (text) => { chips.textContent = ''; appendSome(chips, ...warpImportChips(text)); };
-    fill(w.importText);
-    appendSome(one,
-      edNode('div', { class: 'ed-grid' }, [warpField('importText', 'warp.importLabel', 'private_key · endpoint_pub_key · ipv4 · ipv6',
-        { area: true, rows: 5, ph: WARP_IMPORT_PH, hint: 'warp.importHint', span: true, onInput: fill })]),
-      chips);
-  }
+/**
+ * The WARP+ keys read back as they are typed (design §1): how many accounts
+ * and which take a key — one key goes to every account, several one each in
+ * order and the rest are free, more keys than the count raise it (10 at most).
+ * A key is shown by its last four characters only; a malformed line by its number.
+ */
+function warpLicenseNodes(w) {
+  const lines = String(w.licenses == null ? '' : w.licenses).split(/\r?\n/).map((l, i) => ({ line: i + 1, key: l.trim() })).filter((l) => l.key);
+  const asked = Math.min(10, Math.max(1, Math.floor(Number(w.count)) || 1));
+  const n = warpCount(w);
+  const keys = lines.length;
+  const plus = Math.min(keys, n);
+  let text = !keys ? (n === 1 ? t('warp.lcFreeOne') : warpFill('warp.lcAllFree', { n: warpNum(n) }))
+    : keys === 1 ? (n === 1 ? t('warp.lcOneKeyOne') : warpFill('warp.lcOneKey', { n: warpNum(n) }))
+    : plus === n ? warpFill('warp.lcEach', { n: warpNum(n) })
+    : warpFill('warp.lcSplit', { n: warpNum(n), plus: warpNum(plus), free: warpNum(n - plus) });
+  if (n > asked) text += ' ' + t('warp.lcRaised');
+  if (keys > 10) text += ' ' + warpFill('warp.lcExtra', { n: warpNum(keys - 10) });
+  const chips = edNode('div', { class: 'ed-chips-read' });
+  lines.forEach((l, i) => {
+    if (!WARP_LICENSE_RE.test(l.key)) appendSome(chips, edNode('span', { class: 'bad', text: warpFill('warp.lcBadLine', { line: warpNum(l.line) }) }));
+    else appendSome(chips, edNode('span', { class: i < 10 ? 'info' : 'dim' }, [edNode('bdi', { dir: 'ltr', text: '…' + l.key.slice(-4) })]));
+  });
+  return [edNode('p', { class: 'hint', text }), chips];
+}
 
+/** Step 1, new accounts: how the sign-up goes out, the terms, how many, the WARP+ keys — read back as typed, what Make adds following. */
+function warpNewNodes(w) {
+  // through the app's own connection only while there is one (warp.js refuses it otherwise: notConnected)
+  const connected = !!state.connected;
+  if (!connected && w.route === 'proxy') w.route = 'direct';
+  const radio = (id, label, sub, off) => {
+    const inp = edNode('input', { type: 'radio', name: 'warpRoute', value: id, disabled: off });
+    inp.checked = w.route === id;
+    inp.onchange = () => { if (inp.checked) w.route = id; };
+    return edNode('label', { class: 'warp-radio' + (off ? ' off' : '') }, [inp, edNode('span', {}, [edNode('span', { text: label }), edNode('small', { text: sub })])]);
+  };
+  const terms = edNode('button', { type: 'button', class: 'ed-pro-link', text: t('warp.tosLink') });
+  terms.onclick = () => window.api.openExternal(WARP_TERMS_URL);
+  const lc = edNode('div', { class: 'warp-lc', 'aria-live': 'polite' });
+  const fill = () => { lc.textContent = ''; appendSome(lc, ...warpLicenseNodes(w)); };
+  const typed = () => { fill(); warpRenderFoot(); };
+  fill();
+  return [
+    edNode('p', { class: 'hint' }, richLine(t('warp.newLede'))),
+    edNode('div', { class: 'warp-route', role: 'radiogroup' }, [
+      radio('direct', t('warp.routeDirect'), t('warp.routeDirectSub'), false),
+      radio('proxy', t('warp.routeProxy'), t(connected ? 'warp.routeProxySub' : 'warp.routeProxyOff'), !connected)]),
+    edNode('p', { class: 'hint' }, richLine(t('warp.tos'), { terms })),
+    edNode('div', { class: 'ed-grid' }, [
+      warpField('count', 'warp.count', 'count', { type: 'number', min: 1, max: 10, hint: 'warp.countHint', onInput: typed }),
+      warpField('licenses', 'warp.license', 'license', { area: true, rows: 3, ph: t('warp.licensePh'), hint: 'warp.licenseHint', span: true, onInput: typed })]),
+    lc];
+}
+
+/**
+ * WireGuard's step 2: a Chain — WARP behind one of the servers or chains,
+ * picked here, the selected one by default — or straight to Cloudflare, with
+ * its endpoint and the noise. Nothing to chain through: said, and direct.
+ */
+function warpTwoWg(w, head) {
+  const hops = warpHops();
+  if (!hops.length) w.use = 'direct';
+  const two = edNode('div', { class: 'warp-step' }, [head, warpSeg([['chain', t('warp.useChain'), !hops.length], ['direct', t('warp.useDirect')]], 'use')]);
+  if (!hops.length) appendSome(two, edNode('p', { class: 'hint warn', text: t('warp.hopNone') }));
+  if (w.use !== 'direct') {
+    // the value wanted is read before the options are made: a select built again starts on its first one
+    const cur = warpHop(w, hops);
+    const sel = edNode('select', { class: 'select', id: 'warp-chainWith' }, hops.map((o) => edNode('option', { value: o.value, selected: o.value === cur, text: o.label })));
+    sel.value = cur;
+    w.chainWith = cur;
+    sel.onchange = () => { w.chainWith = sel.value; };
+    appendSome(two, edNode('div', { class: 'ed-grid' }, [edNode('div', { class: 'ed-f span2' }, [
+      edNode('label', { class: 'field-label', for: 'warp-chainWith' }, [edNode('span', { text: t('warp.hop') }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: 'chainWith' })]),
+      sel, edNode('p', { class: 'hint', text: t('warp.hopHint') })])]));
+    return two;
+  }
+  const ep = w.wgEndpoint;
+  const slots = { v4: WARP_WG_EDGE.v4 + ':' + WARP_WG_EDGE.port, v6: '[' + WARP_WG_EDGE.v6 + ']:' + WARP_WG_EDGE.port };
+  const epHint = ep === 'v6' ? 'warp.epV6HintWg' : w.way === 'import' ? 'warp.epAutoHintWgImport' : 'warp.epAutoHintWg';
+  appendSome(two,
+    edNode('p', { class: 'hint', text: t('warp.useDirectHint') }),
+    edNode('div', { class: 'warp-ep' }, [
+      edNode('div', { class: 'field-label' }, [edNode('span', { text: t('warp.endpoint') }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: 'address:' + WARP_WG_EDGE.port })]),
+      warpSeg([['auto', t('warp.epAuto')], ['v6', t('warp.epV6')], ['custom', t('warp.epCustom')]], 'wgEndpoint'),
+      ep === 'custom' ? null : edNode('p', { class: 'hint' }, richLine(t(epHint), slots))]));
+  if (ep === 'custom') {
+    appendSome(two, edNode('div', { class: 'ed-grid' }, [warpField('wgAddress', 'warp.address', 'address', { ph: slots.v4, hint: 'warp.addressHintWg', slots, span: true })]));
+  }
+  const sw = edNode('input', { type: 'checkbox', id: 'warp-wgAntiDpi' });
+  sw.checked = w.wgAntiDpi !== false;
+  sw.onchange = () => { w.wgAntiDpi = sw.checked; };
+  appendSome(two, edNode('div', { class: 'ed-grid' }, [edNode('div', { class: 'ed-f span2' }, [
+    edNode('label', { class: 'ed-switch', for: 'warp-wgAntiDpi' }, [
+      edNode('span', { class: 'switch-title' }, [edNode('span', { text: t('warp.antiDpiWg') }), edNode('span', { class: 'ed-key', dir: 'ltr', text: 'noise' })]),
+      edNode('span', { class: 'switch' }, [sw, edNode('span', { class: 'slider' })])]),
+    edNode('p', { class: 'hint', text: t('warp.antiDpiWgHint') })])]));
+  return two;
+}
+
+/** MASQUE's step 2, as the sample has it: the HTTP version (or both), the endpoint, a cover domain, anti-DPI. */
+function warpTwoMasque(w, head) {
   const edges = w.endpoint === 'v6' ? WARP_EDGES.v6 : WARP_EDGES.v4;
-  const two = edNode('div', { class: 'warp-step' }, [step(2, 'warp.step2'),
+  const two = edNode('div', { class: 'warp-step' }, [head,
     httpCards(w.http, (id) => { w.http = id; renderWarp(); }, true),
     edNode('div', { class: 'warp-ep' }, [
       edNode('div', { class: 'field-label' }, [edNode('span', { text: t('warp.endpoint') }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: 'address:443' })]),
@@ -5770,43 +6038,99 @@ function warpFormNodes(w) {
         edNode('span', { class: 'switch-title' }, [edNode('span', { text: t('warp.antiDpi') }), edNode('span', { class: 'ed-key', dir: 'ltr', text: 'noise · fragment' })]),
         edNode('span', { class: 'switch' }, [sw, edNode('span', { class: 'slider' })])]),
       edNode('p', { class: 'hint', text: t('warp.antiDpiHint') })])]));
+  return two;
+}
 
-  return [edNode('p', { class: 'warp-lede' }, richLine(t('warp.lede'))), one, two,
+/** The form: the kind first (WireGuard for a Chain, or MASQUE), then step 1 the account (new or imported) and step 2 how to connect. */
+function warpFormNodes(w) {
+  const wg = w.kind !== 'masque';
+  const step = (n, key) => edNode('div', { class: 'warp-step-head' }, [edNode('span', { class: 'n', text: warpNum(n) }), t(key)]);
+  const one = edNode('div', { class: 'warp-step' }, [step(1, 'warp.step1'), warpSeg([['new', t('warp.wayNew')], ['import', t('warp.wayImport')]], 'way')]);
+  if (w.way === 'new') appendSome(one, ...warpNewNodes(w));
+  else {
+    const chips = edNode('div', { class: 'ed-chips-read', 'aria-live': 'polite' });
+    const fill = (text) => { chips.textContent = ''; appendSome(chips, ...(wg ? warpWgImportChips(text) : warpImportChips(text))); };
+    fill(wg ? w.wgImport : w.importText);
+    appendSome(one,
+      edNode('div', { class: 'ed-grid' }, [wg
+        ? warpField('wgImport', 'warp.importLabelWg', '[Interface] · [Peer] · wireguard://', { area: true, rows: 7, ph: WARP_WG_IMPORT_PH, hint: 'warp.importHintWg', span: true, onInput: fill })
+        : warpField('importText', 'warp.importLabel', 'private_key · endpoint_pub_key · ipv4 · ipv6', { area: true, rows: 5, ph: WARP_IMPORT_PH, hint: 'warp.importHint', span: true, onInput: fill })]),
+      chips);
+  }
+  const two = wg ? warpTwoWg(w, step(2, 'warp.step2')) : warpTwoMasque(w, step(2, 'warp.step2'));
+  return [edNode('div', { class: 'warp-kind', role: 'group', 'aria-label': t('warp.kind') }, [warpSeg([['wireguard', t('warp.kindWg')], ['masque', t('warp.kindMasque')]], 'kind')]),
+    edNode('p', { class: 'warp-lede' }, richLine(t(wg ? 'warp.ledeWg' : 'warp.lede'))), one, two,
     w.error ? edNode('p', { class: 'warp-error', role: 'alert', text: w.error }) : null];
 }
 
 /**
- * The steps the call goes through — a new account's five (six with a WARP+
- * key), an imported one's two — pending while it runs, done when it answers;
- * a step Cloudflare left half done (a warning) says so.
+ * The steps the call goes through, pending while it runs and done when it
+ * answers (a step Cloudflare left half done says so): new WireGuard accounts'
+ * — the X25519 key, the sign-up, WARP on, the WARP+ key (with keys), the
+ * account read — new MASQUE ones' (the P-256 key enrolled too), an import's
+ * read; then the servers and the chains. Several accounts: said, one after
+ * another. Done: a box per account; a batch that stopped early, an alert.
  */
 function warpProgressNodes(w) {
   const a = w.args || warpArgs(w);
   const res = w.phase === 'done' ? w.res : null;
   const warned = new Set(((res && res.warnings) || []).map((x) => x && x.code));
   const added = res && Array.isArray(res.added) ? res.added : null;
-  const steps = a.mode === 'import'
-    ? [['warp.pRead', 'usque · Xray']]
-    : [['warp.pKey', t('warp.pKeyAt'), 'ui'], ['warp.pReg', 'api.cloudflareclient.com'], ['warp.pEnroll', 'secp256r1'], ['warp.pEnable', 'warp_enabled', '', 'warpNotEnabled']]
-      .concat(a.license ? [['warp.pLicense', 'license', '', 'licenseFailed']] : []);
-  const two = added ? added.length > 1 : a.http === 'both';
-  steps.push([!added ? 'warp.pAdd' : two ? 'warp.pAddedTwo' : 'warp.pAddedOne',
-    added ? added.map((s) => s.name).join(' / ') : (two ? 'WARP · H3 / WARP · H2' : 'WARP · ' + String(a.http).toUpperCase())]);
+  const chains = res && Array.isArray(res.addedChains) ? res.addedChains : [];
+  const wg = a.kind === 'wireguard';
+  const steps = [];   // [what, its technical part, that part's class, the warning that marks it]
+  if (a.mode === 'import') steps.push([t('warp.pRead'), wg ? '.conf · wireguard://' : 'usque · Xray']);
+  else {
+    steps.push([t(wg ? 'warp.pKeyWg' : 'warp.pKey'), t('warp.pKeyAt'), 'ui'], [t('warp.pReg'), 'api.cloudflareclient.com']);
+    if (!wg) steps.push([t('warp.pEnroll'), 'secp256r1']);
+    steps.push([t('warp.pEnable'), 'warp_enabled', '', 'warpNotEnabled']);
+    if (Array.isArray(a.licenses) ? a.licenses.length : a.license) steps.push([t('warp.pLicense'), 'license', '', 'licenseFailed']);
+    steps.push([t('warp.pAccount'), 'account · devices', '', 'accountUnread']);
+  }
+  const names = (list) => list.slice(0, 3).map((x) => x && x.name).join(' / ') + (list.length > 3 ? ' / …' : '');
+  if (!added) {
+    const chained = wg && a.use === 'chain';
+    steps.push(wg ? [t(chained ? 'warp.pAddChain' : 'warp.pAdd'), chained ? 'WARP · Chain' : 'WARP · WireGuard']
+      : [t('warp.pAdd'), a.http === 'both' ? 'WARP · H3 / WARP · H2' : 'WARP · ' + String(a.http).toUpperCase()]);
+  } else {
+    steps.push([added.length === 1 ? t('warp.pAddedOne') : added.length === 2 ? t('warp.pAddedTwo') : warpFill('warp.pAddedN', { n: warpNum(added.length) }), names(added)]);
+    if (chains.length) steps.push([chains.length === 1 ? t('warp.pChainOne') : warpFill('warp.pChainsN', { n: warpNum(chains.length) }), names(chains)]);
+  }
   const list = edNode('ul', { class: 'warp-progress', role: 'status', 'aria-busy': res ? 'false' : 'true' });
-  for (const [key, k, kcls, warn] of steps) {
+  for (const [text, k, kcls, warn] of steps) {
     const mark = !res ? edNode('span', { class: 'run', text: '◌' }) : warned.has(warn) ? edNode('span', { class: 'warn', text: '!' }) : edNode('span', { class: 'ok', text: '✓' });
     // the technical part at the far end: the span keeps the page's direction (its margin is the line's), the value inside is left-to-right
-    appendSome(list, edNode('li', {}, [mark, ' ', t(key), edNode('span', { class: 'k' + (kcls ? ' ' + kcls : '') }, kcls ? k : [edNode('bdi', { dir: 'ltr', text: k })])]));
+    appendSome(list, edNode('li', {}, [mark, ' ', text, edNode('span', { class: 'k' + (kcls ? ' ' + kcls : '') }, kcls ? k : [edNode('bdi', { dir: 'ltr', text: k })])]));
   }
-  const out = [list];
-  if (res) {
-    out.push(edNode('p', { class: 'warp-lede' }, richLine(t(two ? 'warp.doneLede' : 'warp.doneLedeOne'))));
+  const out = [];
+  if (!res && a.mode !== 'import' && a.count > 1) out.push(edNode('p', { class: 'warp-lede', text: warpFill('warp.pBatch', { n: warpNum(a.count) }) }));
+  out.push(list);
+  if (!res) return out;
+  if (res.stopped) out.push(edNode('p', { class: 'ed-warn', role: 'alert', text: warpStoppedText(res, a) }));
+  const many = added && added.length > 1;
+  out.push(edNode('p', { class: 'warp-lede' }, richLine(t(wg ? (chains.length ? 'warp.doneLedeChain' : many ? 'warp.doneLedeMany' : 'warp.doneLedeOne')
+    : a.http === 'both' ? 'warp.doneLede' : many ? 'warp.doneLedeMany' : 'warp.doneLedeOne'))));
+  const accounts = Array.isArray(res.accounts) ? res.accounts.filter(Boolean) : [];
+  if (accounts.length) {
+    out.push(edNode('div', { class: 'warp-accts' }, accounts.map((x) => warpAccountBox(x))));
+    if (accounts.some((x) => !(x.info && x.info.imported))) out.push(edNode('p', { class: 'hint', text: t('warp.acctFieldsHint') }));
+  } else {
+    // an answer without its accounts (before v1.26): the warnings, flattened
     for (const text of warpWarningTexts(res)) out.push(edNode('p', { class: 'ed-warn', role: 'alert', text }));
   }
   return out;
 }
 
-/** The dialog's foot: Make (Add, for an import), Cancel and how many servers — or, when done, see them in the list. */
+/** What Make will add (design §8): WireGuard n servers — and n chains, chained — MASQUE n times one or two servers. */
+function warpNoteText(w) {
+  const n = warpCount(w);
+  const servers = (k) => (k === 1 ? t('warp.noteOne') : k === 2 ? t('warp.noteTwo') : warpFill('warp.noteN', { n: warpNum(k) }));
+  if (w.kind === 'masque') return servers(n * (w.http === 'both' ? 2 : 1));
+  if (w.use !== 'direct' && warpHops().length) return n === 1 ? t('warp.noteChainOne') : warpFill('warp.noteChain', { n: warpNum(n) });
+  return servers(n);
+}
+
+/** The dialog's foot: Make (Add, for an import), Cancel and what will be added — or, when done, see them in the list. */
 function warpFootNodes(w) {
   if (w.phase === 'done') {
     const see = edNode('button', { type: 'button', class: 'btn primary', id: 'warpSee', text: t('warp.see') });
@@ -5821,24 +6145,32 @@ function warpFootNodes(w) {
   go.onclick = runWarp;
   const cancel = edNode('button', { type: 'button', class: 'btn ghost', text: t('btn.cancel') });
   cancel.onclick = closeWarp;
-  return [go, cancel, edNode('span', { class: 'ed-foot-note', text: t(w.http === 'both' ? 'warp.noteTwo' : 'warp.noteOne') })];
+  return [go, cancel, edNode('span', { class: 'ed-foot-note', text: warpNoteText(w) })];
 }
 
-/** Draw the dialog from `warpForm`. */
+/** Draw the dialog's foot again: what Make adds follows the count and the keys as they are typed. */
+function warpRenderFoot() {
+  const foot = $('#warpFoot');
+  if (!foot || !warpForm) return;
+  foot.textContent = '';
+  appendSome(foot, ...warpFootNodes(warpForm));
+}
+
+/** Draw the dialog from `warpForm` — its title too, which names the kind. */
 function renderWarp() {
   const body = $('#warpBody');
-  const foot = $('#warpFoot');
-  if (!body || !foot || !warpForm) return;
+  if (!body || !$('#warpFoot') || !warpForm) return;
+  const title = $('#warpTitle');
+  if (title) title.textContent = t(warpForm.kind === 'masque' ? 'warp.title' : 'warp.titleWg');
   body.textContent = '';
-  foot.textContent = '';
   appendSome(body, ...(warpForm.phase === 'form' ? warpFormNodes(warpForm) : warpProgressNodes(warpForm)));
-  appendSome(foot, ...warpFootNodes(warpForm));
+  warpRenderFoot();
 }
 
 /**
  * Make (or add): api.addWarp with the dialog's choices. A refusal goes back to
- * the form with its reason; the servers made join the list at once. Closed
- * meanwhile, the dialog says how it ended in a toast instead.
+ * the form with its reason; the servers (and chains) made join the lists at
+ * once. Closed meanwhile, the dialog says how it ended in a toast instead.
  */
 async function runWarp() {
   const w = warpForm;
@@ -5858,10 +6190,15 @@ async function runWarp() {
   w.phase = 'done';
   w.res = res;
   if (Array.isArray(res.servers)) state.servers = res.servers;
+  // a WireGuard WARP for a Chain: the whole list of chains comes back, the new ones in it
+  if (Array.isArray(res.chains)) {
+    state.chains = res.chains.map((c) => ({ id: c.id, name: c.name || 'Chain', members: (c.members || []).filter((id) => state.servers.some((s) => s.id === id)) }));
+  }
   const added = Array.isArray(res.added) ? res.added : [];
   if (!state.selectedServerId && added[0]) state.selectedServerId = added[0].id;
   renderServers(); renderPicker(); renderChains(); renderPool(); renderAdvanced();
   if (warpForm === w && warpShown()) renderWarp();
+  else if (res.stopped) toast(warpStoppedText(res, w.args), 'err');
   else toast(t('t.warpAdded').replace('{names}', () => added.map((s) => s.name).join('، ')), 'ok');
 }
 
