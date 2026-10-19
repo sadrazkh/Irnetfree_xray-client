@@ -154,6 +154,40 @@
 /* the words that stand in for the lines when the columns stack */
 .mf-to { display: none; }
 
+/* A node that carries a running group (v1.28, design §2): «alive/total» after
+   its name and a thin share bar — absolutely placed in the box's own bottom
+   padding, so the box keeps its size and nothing else in the diagram moves;
+   hover opens the small box (.gm-pop), a click pins it. */
+.mf-node.is-group { position: relative; cursor: pointer; }
+.mf-node.is-group > .gm-node-bar { position: absolute; inset-inline: 10px; bottom: 3px; width: auto; height: 3px; border: 0; border-radius: 2px; }
+.mf-node.is-group:hover, .mf-node.is-group.pinned, .mf-node.is-group:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lane, var(--accent)) 45%, transparent);
+}
+.gm-health { flex: 0 0 auto; font: 10.5px var(--mono); color: var(--ink3); direction: ltr; unicode-bidi: isolate; }
+
+/* the small box: above the page (position: fixed — no panel clips it), each member's share */
+.gm-pop {
+  position: fixed; z-index: 30; width: min(390px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto;
+  padding: 10px 10px 8px; border-radius: var(--r6); border: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow);
+  font-size: 12px; color: var(--ink2);
+}
+.gm-pop[hidden] { display: none; }
+.gm-pop-head { display: flex; align-items: baseline; gap: 8px; padding: 2px 4px 8px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.gm-pop-head + .gm-row { margin-top: 0; }
+.gm-row + .gm-pop-head { margin-top: 8px; }
+.gm-pop-head b { color: var(--ink); }
+.gm-pop-head .grp-meta { color: var(--ink3); font-size: 11.5px; }
+.gm-pop-head .gm-live { margin-inline-start: auto; }
+.gm-pop .gm-row { grid-template-columns: 12px minmax(0, 1fr) auto 64px; padding: 6px 8px; background: none; border-color: transparent; }
+.gm-pop .gm-row[role="button"]:hover { background: var(--soft); border-color: var(--line); }
+.gm-pop .gm-row.dead { background: var(--dangerSoft); }
+/* a member that does not answer: why, on a line of its own under its name */
+.gm-pop .gm-row.dead .gm-why { grid-column: 2 / -1; }
+.gm-pop-foot { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 4px 0; margin-top: 4px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--ink3); }
+.gm-pop-foot button { background: none; border: 0; color: var(--accentInk); cursor: pointer; font: 12px var(--ui); }
+.gm-pop-foot button:hover { text-decoration: underline; }
+
 /* A narrow panel (a small window, a wide rail): the columns stack, the lines
    go, and each rule says in words where it leads. */
 @container homepath (max-width: 620px) {
