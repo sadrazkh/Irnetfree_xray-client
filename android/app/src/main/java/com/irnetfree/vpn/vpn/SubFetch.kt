@@ -92,6 +92,8 @@ object SubFetch {
     private fun borrowServer(store: Store): ServerConfig? {
         val sel = store.selection
         store.serverById(sel)?.let { return it }
+        // a group (Groups.kt): its record — the throwaway core carries its members and balancer
+        store.groupRecord(sel)?.let { return it }
         store.chainById(sel.removePrefix("chain:"))?.let { c ->
             store.chainMembers(c).firstOrNull()?.let { return it }
         }

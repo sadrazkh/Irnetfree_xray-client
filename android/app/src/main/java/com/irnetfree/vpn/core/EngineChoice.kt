@@ -9,7 +9,9 @@ package com.irnetfree.vpn.core
  *    does plus plaintext VLESS/Trojan, so a chain with one plaintext hop must
  *    run on it. Otherwise the official core.
  *  - "sing-box" is a single-config engine only: it has no chain/pool translator,
- *    so a plan that is not a single server never resolves to it.
+ *    so a plan that is not a single server never resolves to it — nor does a
+ *    group (Groups.kt) selected alone: it has no balancer. A group runs on
+ *    PattN when one of its members asks for it, else on the official core.
  *
  * This is the app's decision, not the device's: whether the chosen core is
  * actually bundled for this ABI is a separate question, asked at connect time
@@ -21,8 +23,11 @@ object EngineChoice {
     const val PATTN = "xray-pattn"
     const val SINGBOX = "sing-box"
 
-    /** Every server a plan can dial, duplicates allowed (engineChoice.planServers). */
-    fun planServers(plan: ConnectionPlan?): List<ServerConfig> = when (plan) {
+    /** Every server a plan can dial, duplicates allowed (engineChoice.planServers); a group stands for its members. */
+    fun planServers(plan: ConnectionPlan?): List<ServerConfig> = planRecords(plan).flatMap { s: ServerConfig -> Groups.serversOf(s) }
+
+    /** Every record a plan names — a group as its record — duplicates allowed. */
+    private fun planRecords(plan: ConnectionPlan?): List<ServerConfig> = when (plan) {
         null -> emptyList()
         is ConnectionPlan.Single -> listOf(plan.server)
         is ConnectionPlan.Chain -> plan.members
@@ -70,9 +75,11 @@ object EngineChoice {
     /** The core for this plan. `defaultEngine` is the app-wide setting. */
     fun chooseEngine(plan: ConnectionPlan?, defaultEngine: String = XRAY): String {
         val def = if (defaultEngine == PATTN) PATTN else XRAY
-        if (plan is ConnectionPlan.Single && isMasque(plan.server)) return if (plan.server.engine == PATTN) PATTN else def
-        if (plan is ConnectionPlan.Single) return plan.server.engine?.takeIf { it.isNotBlank() }
-            ?: if (needsInsecureCore(plan.server)) SINGBOX else def
+        // a group (Groups.kt) runs on an Xray core whatever its members ask: sing-box has no balancer
+        val single: ServerConfig? = (plan as? ConnectionPlan.Single)?.server?.takeIf { s: ServerConfig -> !Groups.isGroupRecord(s) }
+        if (single != null && isMasque(single)) return if (single.engine == PATTN) PATTN else def
+        if (single != null) return single.engine?.takeIf { it.isNotBlank() }
+            ?: if (needsInsecureCore(single)) SINGBOX else def
         return if (planServers(plan).any { it.engine == PATTN }) PATTN else def
     }
 

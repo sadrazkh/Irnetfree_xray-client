@@ -5,6 +5,7 @@ import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.CoreCompat
 import com.irnetfree.vpn.core.EngineChoice
+import com.irnetfree.vpn.core.Groups
 import com.irnetfree.vpn.core.JsonImport
 import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.LocalAuth
@@ -70,9 +71,12 @@ object TunnelSetup {
     /**
      * The servers a plan routes to: a single server, a chain's hops, the
      * targets of a pool's entries or of advanced routing's rules (not every
-     * server the store holds, which those plans carry along).
+     * server the store holds, which those plans carry along). A group stands
+     * for its members (Groups.serversOf).
      */
-    fun planTargets(plan: ConnectionPlan): List<ServerConfig> {
+    fun planTargets(plan: ConnectionPlan): List<ServerConfig> = planRecords(plan).flatMap { srv: ServerConfig -> Groups.serversOf(srv) }
+
+    private fun planRecords(plan: ConnectionPlan): List<ServerConfig> {
         fun resolve(t: String, byId: Map<String, ServerConfig>, chains: Map<String, List<ServerConfig>>): List<ServerConfig> = when {
             t.startsWith("chain:") -> chains[t.substring(6)] ?: emptyList()
             t == "proxy" -> listOfNotNull(byId.values.firstOrNull { srv: ServerConfig -> srv.outbound.length() > 0 })

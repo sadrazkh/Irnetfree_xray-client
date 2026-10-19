@@ -135,10 +135,15 @@ object CertPin {
         return out
     }
 
-    /** Every server a plan names, in any position (engineChoice.planServers). */
+    /**
+     * Every server a plan names, in any position (engineChoice.planServers) —
+     * a group's members too. This pass probes only the records it dials itself
+     * (directServers, where a group is its record), so a member that wants a
+     * pin is told to connect to it directly once, as the desktop says.
+     */
     fun planServers(plan: ConnectionPlan): List<ServerConfig> {
         val out = ArrayList<ServerConfig>()
-        fun add(s: ServerConfig?) { if (s != null && out.none { it.id == s.id }) out.add(s) }
+        fun add(rec: ServerConfig?) { for (s in Groups.serversOf(rec)) if (out.none { it.id == s.id }) out.add(s) }
         fun target(tg: String?, sById: Map<String, ServerConfig>, cById: Map<String, List<ServerConfig>>) {
             if (tg.isNullOrEmpty() || tg == "direct" || tg == "block") return
             if (tg.startsWith("chain:")) { cById[tg.substring(6)]?.forEach { add(it) }; return }
