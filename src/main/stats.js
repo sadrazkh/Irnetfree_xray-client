@@ -23,7 +23,14 @@ const NOT_PROXY = new Set(['direct', 'block', 'dns-out']);
  * outbound already counted — like the dpi-* dialers, never counted again.
  */
 const isHelperTag = (tag) => tag.includes('~');
-const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-') && !isHelperTag(tag);
+/**
+ * A chain's hops (`…-h<i>`) and a base's own outbounds (`base-…`) carry the
+ * very bytes their exit already counted — counted again, the header read the
+ * corporate WireGuard through its base at twice its speed. usage.js has never
+ * counted them (idForTag); the live meter now agrees.
+ */
+const isRelayTag = (tag) => /-h\d+$/.test(tag) || tag.startsWith('base-');
+const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-') && !isHelperTag(tag) && !isRelayTag(tag);
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
