@@ -255,7 +255,7 @@ test('both mirrors: past the core’s start every gate gives way, and only a dis
     assert.match(body, /guardToken = \(udp && udp\.token\) \|\| guardToken;/, label);
   }
   // the desktop's quiet stop is its reload flag; the service's its counter (as abortGateway's)
-  assert.match(slice(CONNECT['main.js'], 'main.js', 'const giveWay = async (', 'return abandoned;'), /xrayReloading = true;[^\n]*\n\s*try \{ await xray\.stop\(\); \}/);
+  assert.match(slice(CONNECT['main.js'], 'main.js', 'const giveWay = async (', 'return abandoned;'), /xrayReloading\+\+;[^\n]*\n\s*try \{ await xray\.stop\(\); \}[^\n]*finally \{ xrayReloading--; \}/);
   assert.match(slice(CONNECT['service.js'], 'service.js', 'const giveWay = async (', 'return abandoned;'), /quietStops\+\+;\n\s*try \{ await xray\.stop\(\); \}[^\n]*finally \{ quietStops--; \}/);
 });
 

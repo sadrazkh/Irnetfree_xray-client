@@ -200,7 +200,7 @@ const PAGE_PRELUDE = constSource('CG_KEY') + constSource('cgState') + constSourc
 const GROUP_FNS = ['srvById', 'grpMember', 'normalizeUiGroup', 'loadGroups', 'newGroupId', 'grpById', 'grpCountText', 'grpLive', 'grpAddrText',
   'grpMemberNames', 'grpConnText', 'renderGroups', 'groupCard', 'openGroupCard', 'afterGroupsChanged', 'persistGroups', 'deleteGroup', 'grpShown',
   'openGroupEditor', 'closeGroupEditor', 'grpIsV4', 'grpIsV6', 'grpIsHost', 'grpParseAddress', 'grpParseAddresses', 'grpAddIps', 'grpNameNode',
-  'grpStrategyNode', 'grpMembersNode', 'grpServerPanel', 'grpIpPanel', 'renderGroupEditor', 'saveGroupEditor', 'edNode', 'appendSome', 'richLine', 'warpNum',
+  'grpStrategyNode', 'grpFallbackNode', 'grpMembersNode', 'grpServerPanel', 'grpIpPanel', 'renderGroupEditor', 'saveGroupEditor', 'edNode', 'appendSome', 'richLine', 'warpNum',
   'pingResultLabel', 'fmtMs', 'pingClass', 'connectGlyph', ...PAGE_FNS];
 
 function harness({ lang = 'en', groups = GROUPS, servers = SERVERS, chains = CHAINS, setGroups, api = {}, confirm = () => true } = {}) {
@@ -671,8 +671,15 @@ test('every routing picker offers a group by its bare id, «⧉ name»: a rule�
   for (const list of [ctx.poolTargetOptions(), ctx.targetOptionList(), ctx.viaOptionList(work, 's1'), ctx.baseOptionList('')]) {
     assert.ok(!values(list).some((v) => /^group:|grp-gone/.test(v)), JSON.stringify(values(list)));
   }
-  // a gone one already picked: said as a gone one, like a deleted server
-  assert.equal(plain(ctx.baseOptionList('grp-gone')).pop().label, '⚠ —');
+  // a gone one already picked: said as a gone one, like a deleted server — before the piles, where
+  // no folded head can hide it (after them it sat under the last head as if it were one of its configs)
+  const goneBase = plain(ctx.baseOptionList('grp-gone'));
+  assert.deepEqual([goneBase[1].value, goneBase[1].label, goneBase[1].pile], ['grp-gone', '⚠ —', undefined]);
+  assert.deepEqual(values(goneBase), ['', 'grp-gone', 's1', 's2', 's3', 'chain:c1', 'grp-a']);
+  assert.deepEqual(values(ctx.viaOptionList(work, 's1', 'grp-gone')), ['inherit', 'none', 'grp-gone', 's2', 's3', 'chain:c1', 'grp-a']);
+  assert.deepEqual(values(ctx.viaOptionList(work, 's1', 's1')), ['inherit', 'none', 's1', 's2', 's3', 'chain:c1', 'grp-a'], 'the target itself picked as its via: shown, first');
+  assert.equal(plain(ctx.viaOptionList(work, 's1', 's1'))[2].label, '⚠ DE');
+  assert.deepEqual(values(ctx.viaOptionList(work, 's1', 's2')), ['inherit', 'none', 's2', 's3', 'chain:c1', 'grp-a'], 'one that is there: in its pile, not twice');
   assert.equal(ctx.poolTargetValid('grp-a'), true);
   assert.equal(ctx.poolTargetValid('grp-gone'), false);
 });
@@ -804,6 +811,69 @@ test('the chain editor offers groups as hops (⧉, by their bare id); a group ho
   assert.deepEqual(plain(state.chains[0].members), ['s1']);
 });
 
+test('a hop dragged onto another chain’s card moves nothing there; within its own chain it reorders; the buttons are titled in the window’s language', async () => {
+  const page = fakePage();
+  const saved = [];
+  const state = { servers: plain(SERVERS), groups: plain(GROUPS), pings: {}, profiles: null, selectedServerId: null, connecting: false,
+    chains: [{ id: 'ca', name: 'A', members: ['s1', 's2', 's3'] }, { id: 'cb', name: 'B', members: ['s3', 's2', 's1'] }] };
+  const ctx = vm.createContext({
+    state, $: page.$, $$: page.$$, document: page.document, t: fa, escapeHtml: (s) => String(s), window: { i18n: { lang: 'fa' }, api: { setChains: async (l) => { saved.push(plain(l)); } } },
+    usageLabel: () => '', connect() {}, pingServer() {}, shareRouting() {}, renderGroups() {}, renderPicker() {}, renderAdvanced() {}, renderPool() {},
+    revealServer() {}, String, Array, Object, Number, Math, JSON, Set
+  });
+  vm.runInContext(PRELUDE + PAGE_PRELUDE + ['renderChains', 'persistChains', 'srvById', 'grpCountText', 'warpNum', 'pingResultLabel', 'fmtMs', 'pingClass', 'connectGlyph',
+    'chainMembers', 'chainReady', 'grpById', 'grpAddrText', 'edNode', 'appendSome', ...PAGE_FNS].map(fnSource).join('\n'), ctx);
+  ctx.renderChains();
+  const hops = (i) => kids(kids(page.get('chainsWrap'))[i].querySelector('.chain-nodes')).filter((n) => hasClass(n, 'chain-node'));
+  /** A drag as the browser carries it: what dragstart set is what the drop reads (and only that). */
+  const dataTransfer = () => {
+    const data = {};
+    return { data, setData(k, v) { data[k] = String(v); }, getData(k) { return k in data ? data[k] : ''; }, get types() { return Object.keys(data); } };
+  };
+  const drag = (from, to) => {
+    const dt = dataTransfer();
+    from.listeners.dragstart({ dataTransfer: dt });
+    let allowed = false;
+    to.listeners.dragover({ dataTransfer: dt, preventDefault() { allowed = true; } });
+    to.listeners.drop({ dataTransfer: dt, preventDefault() {} });
+    return allowed;
+  };
+  // A's first hop dropped on B's second: B is as it was, nothing is saved
+  drag(hops(0)[0], hops(1)[1]);
+  await tick();
+  assert.deepEqual(saved, [], 'nothing saved');
+  assert.deepEqual(plain(state.chains.map((c) => c.members)), [['s1', 's2', 's3'], ['s3', 's2', 's1']], 'neither chain moved');
+  // within B: its first hop to its last place
+  assert.equal(drag(hops(1)[0], hops(1)[2]), true, 'a hop may be dropped on a hop');
+  await tick();
+  assert.deepEqual(saved.pop().map((c) => c.members), [['s1', 's2', 's3'], ['s2', 's1', 's3']]);
+  // text dragged in from elsewhere is no hop: not accepted, and nothing moves
+  const text = { data: { 'text/plain': '0' }, getData: (k) => (k === 'text/plain' ? '0' : ''), types: ['text/plain'] };
+  let allowed = false;
+  hops(0)[1].listeners.dragover({ dataTransfer: text, preventDefault() { allowed = true; } });
+  hops(0)[1].listeners.drop({ dataTransfer: text, preventDefault() {} });
+  await tick();
+  assert.equal(allowed, false);
+  assert.deepEqual(saved, []);
+  // the card's buttons in Persian, not "ping" / "connect" / "delete" / "remove"
+  const card = kids(page.get('chainsWrap'))[0];
+  assert.match(card.innerHTML, new RegExp(`class="icon-btn ch-ping" title="${fa('chain.ping')}"`));
+  assert.match(card.innerHTML, new RegExp(`class="icon-btn ch-del" title="${fa('chain.delete')}"`));
+  assert.match(hops(0)[0].innerHTML, new RegExp(`class="cn-remove" title="${fa('chain.removeHop')}"`));
+});
+
+test('no action button is titled with an English placeholder: each title is t(…) as it is built, in both languages', () => {
+  assert.doesNotMatch(APP, /title="(ping|copy|QR|edit|connect|delete|remove|auto)"/);
+  for (const key of ['chain.ping', 'chain.delete', 'chain.removeHop', 'pool.delete', 'adv.removeRule', 'sub.delete', 'srv.delete', 'picker.search']) {
+    assert.equal(I18N.split(`'${key}':`).length - 1, 2, `'${key}' is not defined once in each of fa and en`);
+    assert.ok(fa(key) && en(key) && fa(key) !== en(key), key);
+  }
+  for (const [fn, key] of [['renderPool', 'pool.delete'], ['renderAdvanced', 'adv.removeRule'], ['renderSubs', 'sub.delete'], ['renderSubs', 'srv.subRefresh'],
+    ['renderSubs', 'autoupdate.title'], ['renderPicker', 'btn.quickPing']]) {
+    assert.ok(fnSource(fn).includes(`title="\${escapeHtml(t('${key}'))}"`), `${fn}: ${key}`);
+  }
+});
+
 /* ------------------------------------ the rest of the wiring ------------------------------------ */
 
 test('init loads the groups before the chains (a chain keeps a group hop); a backup, the WARP chains and an import keep one too', () => {
@@ -827,4 +897,28 @@ test('the stylesheet has the group pieces', () => {
     '.grp-member', '.grp-mname', '.grp-tools', '.grp-panel', '.grp-pool', '.grp-ipnote', '.modal.grp-modal', '.grp-chip.missing']) {
     assert.ok(LISTS.includes(sel + ' ') || LISTS.includes(sel + '{') || LISTS.includes(sel + ','), `lists.css has no ${sel}`);
   }
+});
+
+test('the fallback: «the first member» by default, any saved server by subscription; the pick is saved as `fallback`, and none leaves no field', async () => {
+  const h = harness({ setGroups: (list) => plain(list) });
+  h.ctx.openGroupEditor(null);
+  byId(h.body(), 'grpAddServer').onclick();
+  all(h.body(), (e) => e.dataset.srv === 's1')[0].onclick();
+  const sel = () => byId(h.body(), 'grp-fallback');
+  assert.equal(sel().tagName, 'SELECT');
+  assert.equal(sel().children[0].attrs.value, '', 'the first member first');
+  assert.ok(sel().children.slice(1).every((g) => g.tagName === 'OPTGROUP'), 'the servers under their piles');
+  assert.ok(all(sel(), (o) => o.tagName === 'OPTION').some((o) => o.attrs.value === 's3'));
+  sel().value = 's3';
+  sel().onchange();
+  assert.equal(await h.ctx.saveGroupEditor(), true);
+  const g = h.sent[0][h.sent[0].length - 1];
+  assert.equal(g.fallback, 's3');
+  // edited again: the pick is shown; back to «the first member» leaves no field
+  h.ctx.openGroupEditor(g.id);
+  assert.equal(sel().value, 's3');
+  sel().value = '';
+  sel().onchange();
+  assert.equal(await h.ctx.saveGroupEditor(), true);
+  assert.equal('fallback' in h.sent[1][h.sent[1].length - 1], false);
 });

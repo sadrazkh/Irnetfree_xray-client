@@ -76,8 +76,9 @@ function fakeEl(tag) {
       },
       contains: (c) => el.className.split(/\s+/).includes(c)
     },
-    appendChild(c) { el.children.push(c); return c; },
+    appendChild(c) { el.children.push(c); c.parentNode = el; return c; },
     get firstChild() { return el.children[0] || null; },
+    focus() { el.focused = true; },
     setAttribute(k, v) { el.attrs[k] = String(v); },
     getAttribute(k) { return k in el.attrs ? el.attrs[k] : null; },
     // innerHTML is only ever a template here; the parts it names are looked up by class
@@ -197,17 +198,20 @@ const PICKER_TEXT = {
 const srv = (id, subId) => Object.assign({ id, name: id.toUpperCase(), protocol: 'vless', address: '192.0.2.1', port: 443 }, subId ? { subId } : {});
 const SUBS = [{ id: 'sa', name: 'Sub A' }, { id: 'sb', name: 'Sub B' }, { id: 'sc', name: 'Sub C' }];
 
-function pickerHarness({ servers, subscriptions = SUBS, connecting = false }) {
+function pickerHarness({ servers, subscriptions = SUBS, connecting = false, folded = null, selected }) {
   const calls = [];
   const els = new Map();
   const $ = (sel) => { if (!els.has(sel)) els.set(sel, fakeEl('div')); return els.get(sel); };
   const menu = $('#pickerMenu');
-  // `menu.innerHTML = ''` clears the menu, as it does in a browser
-  Object.defineProperty(menu, 'innerHTML', { configurable: true, get: () => menu.html, set: (v) => { menu.html = v; menu.children.length = 0; } });
+  // `menu.innerHTML = ''` clears the menu — and its scroll goes back to the top — as it does in a browser
+  Object.defineProperty(menu, 'innerHTML', { configurable: true, get: () => menu.html, set: (v) => { menu.html = v; menu.children.length = 0; menu.scrollTop = 0; } });
+  const store = folded ? { 'irnf.pileFold': JSON.stringify(folded) } : null;
+  const document = { createElement: fakeEl, activeElement: null };
   const ctx = compile(['renderPicker', 'serverGroups', 'groupKey', 'pileFolds', 'setPileFold', 'pileHead'], {
-    state: { servers, subscriptions, chains: [], pool: [], settings: {}, pings: {}, selectedServerId: servers[0] && servers[0].id, connecting },
+    state: { servers, subscriptions, chains: [], pool: [], settings: {}, pings: {}, selectedServerId: selected === undefined ? servers[0] && servers[0].id : selected, connecting },
     $,
-    document: { createElement: fakeEl },
+    document,
+    ...(store ? { localStorage: { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } }, JSON, Set } : {}),
     t: (k) => PICKER_TEXT[k] || k,
     escapeHtml: (s) => String(s),
     keepSelectionValid: () => {},
@@ -217,10 +221,15 @@ function pickerHarness({ servers, subscriptions = SUBS, connecting = false }) {
     connectAuto: (scope) => calls.push(['connectAuto', scope === undefined ? undefined : plain(scope)]),
     selectServer: () => {}, pingServer: () => {}, pingAllVisible: () => {}
   }, "const ADV_ID = '__advanced__';\nconst POOL_ID = '__pool__';");
-  return { ctx, menu, calls };
+  return { ctx, menu, calls, store, document, folds: () => JSON.parse(store['irnf.pileFold']) };
 }
 const subRows = (menu) => menu.children.filter((c) => hasClass(c, 'picker-auto-sub'));
 const subRowName = (row) => row.querySelector('.pi-name').textContent;
+/** What the menu shows, top to bottom: a pile's head as «# name», a row by its name, the search and the empty note by their class. */
+const shownRows = (menu) => menu.children.map((c) => (hasClass(c, 'picker-head') ? null : hasClass(c, 'picker-search') ? 'search'
+  : hasClass(c, 'ss-empty') ? 'none: ' + c.textContent
+    : hasClass(c, 'picker-pile') ? '# ' + c.querySelector('.pile-name').textContent
+      : (c.html.match(/<span class="pi-name">([^<]+)<\/span>/) || [])[1] || subRowName(c))).filter(Boolean);
 
 const MIXED = [srv('m1'), srv('m2'), srv('a1', 'sa'), srv('a2', 'sa'), srv('b1', 'sb'), srv('b2', 'sb'), srv('b3', 'sb'), srv('c1', 'sc')];
 
@@ -234,9 +243,9 @@ test('the picker adds one “Fastest — <subscription>” row per subscription 
     assert.equal(hasClass(row, 'picker-item') && hasClass(row, 'picker-special') && hasClass(row, 'picker-auto'), true, 'looks like the Auto row it sits under');
     assert.match(row.html, /<span class="proto-badge proto-auto">⚡<\/span>/);
   }
-  // the Auto row first, the Fastest rows right after it, then the servers — each pile under its own head
-  const order = h.menu.children.map((c) => (hasClass(c, 'picker-head') ? 'head' : hasClass(c, 'picker-pile') ? 'pile' : hasClass(c, 'picker-auto-sub') ? 'sub' : hasClass(c, 'picker-auto') ? 'auto' : 'server'));
-  assert.deepEqual(order, ['head', 'auto', 'sub', 'sub', 'pile', 'server', 'server', 'pile', 'server', 'server', 'pile', 'server', 'server', 'server', 'pile', 'server']);
+  // the search under the head, the Auto row first, the Fastest rows right after it, then the servers — each pile under its own head
+  const order = h.menu.children.map((c) => (hasClass(c, 'picker-head') ? 'head' : hasClass(c, 'picker-search') ? 'search' : hasClass(c, 'picker-pile') ? 'pile' : hasClass(c, 'picker-auto-sub') ? 'sub' : hasClass(c, 'picker-auto') ? 'auto' : 'server'));
+  assert.deepEqual(order, ['head', 'search', 'auto', 'sub', 'sub', 'pile', 'server', 'server', 'pile', 'server', 'server', 'pile', 'server', 'server', 'server', 'pile', 'server']);
 });
 
 test('the rows appear only when there is something to tell apart, and never for the hand-added pile or a single config', () => {
@@ -294,6 +303,80 @@ test('a row closes the picker and runs ⚡ on its group; the global Auto row is 
   const busy = pickerHarness({ servers: MIXED, connecting: true });
   busy.ctx.renderPicker();
   assert.match(busy.menu.children.find((c) => hasClass(c, 'picker-auto')).html, /<span class="pi-name">Cancel connecting<\/span>/);
+});
+
+test('the picker’s search: under its head, filters by a config’s name or its pile’s, opens the folded piles that match, Esc clears it', () => {
+  const h = pickerHarness({ servers: MIXED, folded: ['sub:sa', 'sub:sb'], selected: 'm1' });
+  h.ctx.renderPicker();
+  const search = () => h.menu.children.find((c) => hasClass(c, 'picker-search'));
+  assert.equal(h.menu.children.indexOf(search()), 1, 'right under the head');
+  assert.deepEqual([search().tagName, search().placeholder, search().attrs['aria-label'], search().value], ['INPUT', 'picker.search', 'picker.search', '']);
+  assert.match(search().className, /\binput ss-search\b/, 'the search-select look');
+  assert.deepEqual(shownRows(h.menu), ['search', 'Auto', 'Fastest — Sub A', 'Fastest — Sub B', '# Added by hand', 'M1', 'M2', '# Sub A', '# Sub B', '# Sub C', 'C1']);
+  // a server's name: only it, in its pile (folded, opened while searching) — the global Auto stays:
+  // it is an action over everything, and the first .picker-auto refreshConnectControls rewrites
+  search().value = 'a2';
+  search().oninput();
+  assert.equal(h.ctx.state.pickerQuery, 'a2');
+  assert.deepEqual(shownRows(h.menu), ['search', 'Auto', '# Sub A', 'A2']);
+  assert.equal(search().value, 'a2', 'the box drawn again keeps the text');
+  assert.equal(h.menu.children.find((c) => hasClass(c, 'picker-pile')).onclick, null, 'no head folds while searching');
+  // a pile's name: the pile and its own ⚡ row
+  search().value = 'SUB B';
+  search().oninput();
+  assert.deepEqual(shownRows(h.menu), ['search', 'Auto', 'Fastest — Sub B', '# Sub B', 'B1', 'B2', 'B3']);
+  assert.deepEqual(h.folds(), ['sub:sa', 'sub:sb'], 'the folds are kept for after the search');
+  // nothing: said
+  search().value = 'zzz';
+  search().oninput();
+  assert.deepEqual(shownRows(h.menu), ['search', 'Auto', 'none: ss.none']);
+  // Esc clears it; on an empty box it closes the menu
+  search().onkeydown({ key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  assert.equal(h.ctx.state.pickerQuery, '');
+  assert.equal(search().value, '');
+  assert.equal(shownRows(h.menu).length, 11);
+  assert.deepEqual(h.calls, []);
+  search().onkeydown({ key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  assert.deepEqual(h.calls, [['closePicker']]);
+  // the box had the focus: the new one gets it, with the caret where it was
+  search().value = 'b';
+  search().selectionStart = search().selectionEnd = 1;
+  h.document.activeElement = search();
+  search().oninput();
+  assert.equal(search().focused, true);
+  // (the fake has no setSelectionRange: a caret is only a nicety, and its absence is not an error)
+  // a picker with nothing in it has no search
+  const empty = pickerHarness({ servers: [] });
+  empty.ctx.renderPicker();
+  assert.equal(empty.menu.children.some((c) => hasClass(c, 'picker-search')), false);
+});
+
+test('the picker’s pile heads: one that cannot fold (the selection’s) writes nothing; the others fold from a click or Enter / Space and keep the scroll', () => {
+  const h = pickerHarness({ servers: MIXED, folded: ['sub:sa', 'sub:sb'], selected: 'a1' });
+  h.ctx.renderPicker();
+  const head = (name) => h.menu.children.find((c) => hasClass(c, 'picker-pile') && c.querySelector('.pile-name').textContent === name);
+  // Sub A holds the selection: open, and no toggle — a click wrote a fold every other picker then showed
+  assert.deepEqual([hasClass(head('Sub A'), 'pile-fixed'), hasClass(head('Sub A'), 'folded'), head('Sub A').onclick, head('Sub A').attrs.tabindex], [true, false, null, undefined]);
+  assert.deepEqual(shownRows(h.menu).slice(4), ['# Added by hand', 'M1', 'M2', '# Sub A', 'A1', 'A2', '# Sub B', '# Sub C', 'C1']);
+  // Sub B: a button reached by Tab; a click opens it, the menu stays where it was scrolled to
+  assert.deepEqual([head('Sub B').attrs.role, head('Sub B').attrs.tabindex, head('Sub B').attrs['aria-expanded']], ['button', '0', 'false']);
+  h.menu.scrollTop = 200;
+  head('Sub B').onclick({ stopPropagation() {} });
+  assert.deepEqual(h.folds(), ['sub:sa']);
+  assert.equal(h.menu.scrollTop, 200, 'the scroll did not jump to the top');
+  assert.ok(shownRows(h.menu).includes('B3'));
+  // Enter folds it again and the focus is on its new head; Space opens it
+  const before = head('Sub B');
+  before.onkeydown({ key: 'Enter', preventDefault() {}, stopPropagation() {} });
+  assert.deepEqual(h.folds(), ['sub:sa', 'sub:sb']);
+  assert.notEqual(head('Sub B'), before);
+  assert.equal(head('Sub B').focused, true);
+  head('Sub B').onkeydown({ key: ' ', preventDefault() {}, stopPropagation() {} });
+  assert.deepEqual(h.folds(), ['sub:sa']);
+  // one pile: no head at all, as before
+  const one = pickerHarness({ servers: [srv('a1', 'sa'), srv('a2', 'sa')], folded: ['sub:sa'] });
+  one.ctx.renderPicker();
+  assert.deepEqual(shownRows(one.menu), ['search', 'Auto', 'A1', 'A2']);
 });
 
 test('refreshConnectControls still rewrites the global Auto row, by the selector it always used', () => {

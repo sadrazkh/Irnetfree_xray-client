@@ -101,6 +101,32 @@ function fetchOnce(pathname = '/') {
   });
 }
 
+/**
+ * Until the core's health check has judged every member of every group
+ * (vars.observatory: `T~gm<i>` alive, or dead), each judged alive except the
+ * one called `dead`: true; false once `ms` have passed.
+ */
+async function waitVerdicts(apiPort, map, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const vars = await new Promise((resolve) => {
+      http.get({ host: '127.0.0.1', port: apiPort, path: '/debug/vars' }, (res) => {
+        let b = '';
+        res.on('data', (d) => { b += d; });
+        res.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } });
+      }).on('error', () => resolve(null));
+    });
+    const obs = (vars && vars.observatory) || {};
+    const ok = (map || []).every((g) => g.members.every((m, i) => {
+      const o = obs[`${g.tag}~gm${i}`];
+      return o && (m.id === 'dead' ? o.alive !== true : o.alive === true);
+    }));
+    if (ok) return true;
+    await sleep(500);
+  }
+  return false;
+}
+
 /** A VLESS+ws server on 127.0.0.1:port; with `to`, every connection is handed to that local page. */
 function serverConfig(port, to) {
   return {
@@ -195,8 +221,11 @@ async function main() {
     let note;
     try {
       if (!await waitPort(P.socks)) throw new Error('the client never opened its SOCKS port');
-      // the health check's first rounds: the dead member found dead (through a hop, H, its probe takes longer to fail)
-      await sleep(9000);
+      // the health check's first rounds: every member judged, the dead one dead — read from the core
+      // itself rather than a fixed wait: through a hop (H) its probe takes longer to fail, and on a
+      // slow CI runner 9 s was sometimes not yet the verdict, one fetch going to the dead member
+      const verdicts = await waitVerdicts(settings.apiPort, cfg.groupTags, 30000);
+      if (!verdicts) throw new Error('the health check gave no verdict on every member within 30 s');
       const seen = [];
       for (let i = 0; i < 9; i++) {
         try { seen.push(await fetchOnce()); } catch (e) { seen.push('ERR:' + e.message); }

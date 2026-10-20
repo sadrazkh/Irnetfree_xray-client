@@ -563,7 +563,8 @@ data class LanShare(
  */
 sealed class ConnectionPlan {
     data class Single(val server: ServerConfig) : ConnectionPlan()
-    data class Chain(val name: String, val members: List<ServerConfig>) : ConnectionPlan()
+    /** [id]: the stored chain's (Store.buildPlan) — what SettingsApply follows it by; "" for one built elsewhere. */
+    data class Chain(val name: String, val members: List<ServerConfig>, val id: String = "") : ConnectionPlan()
     data class Pool(
         val entries: List<PoolEntry>, val primary: String,
         val serversById: Map<String, ServerConfig>, val chainsById: Map<String, List<ServerConfig>>
@@ -597,7 +598,7 @@ sealed class ConnectionPlan {
         val p: ConnectionPlan = this
         return when (p) {
             is Single -> Single(f(p.server))
-            is Chain -> Chain(p.name, p.members.map { s: ServerConfig -> f(s) })
+            is Chain -> p.copy(members = p.members.map { s: ServerConfig -> f(s) })
             is Pool -> p.copy(serversById = servers(p.serversById), chainsById = chains(p.chainsById))
             is Advanced -> p.copy(serversById = servers(p.serversById), chainsById = chains(p.chainsById))
         }

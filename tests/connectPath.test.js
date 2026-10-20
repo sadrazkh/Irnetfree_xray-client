@@ -371,12 +371,13 @@ test('both mirrors plan a routing profile the same way, line for line: either se
     // the migration at start, beside the other store migrations
     assert.match(source, /migrateSettingsStore\(\);\n[\s\S]{0,1200}getRoutingProfiles\(\);   \/\/ today's advanced routing becomes profile rp-default, once/, label);
     // process rules: the connect's own profile's, resolved per connect and per reload
-    assert.equal((source.match(/let settings = await effectiveSettings\(serverId\);/g) || []).length, 2, `${label}: the connect and the process-route reload`);
+    assert.equal((source.match(/let settings = await effectiveSettings\(serverId\);/g) || []).length, 1, `${label}: the connect`);
+    assert.equal((source.match(/let settings = await effectiveSettings\(serverId, base\);/g) || []).length, 1, `${label}: the reload, from what the connection was built with`);
     assert.match(source, /for \(const n of names\) procIps\[n\] = ipsByName\[n\] \|\| \(cache\[n\] && cache\[n\]\.ips\) \|\| \[\];\n\s*return Object\.assign\(\{\}, s, \{ procIps \}\);/, label);
     // the geo warning reads the plan's rules, not the settings'
     assert.match(source, /plan\.mode === 'advanced' &&\s*\(\(plan\.rules \|\| \[\]\)\.some\(r => r && \/\^\(geoip\|geosite\):\/i/, label);
     // the reconnect state: the profile and the chains the live connection was built from
-    assert.match(source, /liveMux = mux\.ids\.length \? mux : null;\n\s*liveRouting = liveRoutingOf\(\{ serverId, plan, profiles: getRoutingProfiles\(\), chains: getChains\(\) \}\);/, label);
+    assert.match(source, /liveMux = mux\.ids\.length \? mux : null;\n\s*liveRouting = liveRoutingOf\(\{ serverId, plan, profiles: getRoutingProfiles\(\), chains: getChains\(\), groups: getGroups\(\) \}\);/, label);
     // the old settings path mirrors into rp-default
     assert.match(source, /if \(\['routeRules', 'routeDefault', 'advancedUseMode'\]\.some\(k => k in partial\)\) \{\n\s*const profiles = getRoutingProfiles\(\);\n\s*const synced = mirrorFromSettings\(profiles, next\);\n\s*if \(synced !== profiles\) store\.set\('routingProfiles', synced\);/, label);
     // the backup carries and restores them

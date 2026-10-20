@@ -5,6 +5,13 @@
  * core is never swapped under a running connection: the attempt is deferred
  * to the next tick), and a failure is a log line, not a stuck timer.
  *
+ * One exception, and only where the owner of the updater asks for it
+ * (`liveWindow`): a router is connected day and night, so "never while a
+ * tunnel is up" was never at all there. In the window it names the run goes
+ * ahead under the live connection, and `applyLive` then makes that connection
+ * use what was downloaded (the router reloads its core). The desktop passes
+ * neither and behaves exactly as before.
+ *
  * The default is the geo files only. They are data — a fresh geoip.dat cannot
  * make a config stop working — while a new core release can change behaviour
  * under a config that works today, so cores update automatically only when
@@ -74,6 +81,11 @@ class AssetUpdater {
    *   currentVersion(id)   → Promise<string> (any string; the version is extracted)
    *   latestVersion(id)    → Promise<string>
    *   busy()               → boolean: a tunnel is up, do nothing now
+   *   liveWindow(nowMs)    → boolean, optional: busy, yet this run may go ahead
+   *                          under the live connection (the router's quiet hours)
+   *   applyLive(done)      → Promise, optional: after such a run changed something
+   *                          (`done`: the components updated), make the live
+   *                          connection use it; a throw is a log line
    *   onLog(line, level)
    *   now()                → ms epoch (injectable)
    */
@@ -106,11 +118,18 @@ class AssetUpdater {
   async tick() {
     const nowMs = this.now();
     if (!this.due(nowMs)) return { ran: false };
-    if (this.o.busy()) return { ran: false, deferred: true };
+    // A tunnel is up: not now — unless the owner says the live connection may
+    // take it at this hour (liveWindow), and then it is applied to it below.
+    const live = !!this.o.busy();
+    if (live && !(typeof this.o.liveWindow === 'function' && this.o.liveWindow(nowMs))) return { ran: false, deferred: true };
     const done = [];
     try { await this.o.download('geo'); done.push('geo'); }
     catch (e) { this.o.onLog('Geo update failed: ' + e.message, 'warn'); }
-    if (this.mode() === 'all') {
+    // A new core under a live connection — at night, with nobody to see it
+    // misbehave — is not a refresh of data: the cores wait for a time the
+    // connection is down (or the owner's Update); only the geo files go live.
+    if (this.mode() === 'all' && live) this.o.onLog('Cores are not updated under a live connection — they update when it is down, or by hand', 'info');
+    if (this.mode() === 'all' && !live) {
       for (const id of CORES) {
         if (!this.o.installed(id)) continue;
         try {
@@ -135,7 +154,14 @@ class AssetUpdater {
     }
     this.o.setCheckedAt(nowMs);
     if (done.length) this.o.onLog('Updated automatically: ' + done.join(', '), 'info');
-    return { ran: true, done };
+    if (!live) return { ran: true, done };
+    // Under the live connection: what changed is used only once it is applied
+    // (Xray reads the geo files when it starts). Nothing changed, nothing to do.
+    if (done.length && typeof this.o.applyLive === 'function') {
+      try { await this.o.applyLive(done.slice()); }
+      catch (e) { this.o.onLog(`Updated (${done.join(', ')}), but the running connection could not take it: ${e.message} — its next start does`, 'warn'); }
+    }
+    return { ran: true, done, live: true };
   }
 
   /** Every `everyMs`, plus once shortly after launch. Timers never keep the process alive. */

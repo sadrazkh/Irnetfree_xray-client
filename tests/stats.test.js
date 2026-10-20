@@ -11,12 +11,15 @@ const { sumOutbounds, SilenceWatch, byOutbound, StatsPoller } = require('../src/
 
 const vars = (outbound) => ({ stats: { outbound } });
 
-test('sums every proxying outbound, whatever its tag', () => {
+test('sums every proxying outbound, whatever its tag — a chain’s hops and a base’s own outbounds once, through their exit', () => {
   assert.deepEqual(sumOutbounds(vars({
     'out-sv-a': { uplink: 100, downlink: 900 },
     'out-chain-c1': { uplink: 5, downlink: 50 },
-    'out-chain-c1-h0': { uplink: 7, downlink: 70 }
-  })), { up: 112, down: 1020 });
+    'out-chain-c1-h0': { uplink: 7, downlink: 70 },
+    'out-wg@grp-b': { uplink: 3, downlink: 30 },
+    'base-grp-b': { uplink: 4, downlink: 40 },
+    'proxy-h1': { uplink: 9, downlink: 90 }
+  })), { up: 108, down: 980 });
 });
 
 test('single-server and chain plans still work (tag "proxy")', () => {

@@ -57,12 +57,14 @@ function normalizeMember(m) {
 function normalizeGroup(g, now) {
   if (!isObj(g)) return null;
   const strategy = STRATEGIES.includes(g.strategy) ? g.strategy : DEFAULT_STRATEGY;
-  return {
+  // the config the group's traffic takes when no member answers (a WARP, say); a server's id, never a group's
+  const fallback = str(g.fallback);
+  return Object.assign({
     id: isGroupId(g.id) ? g.id : newGroupId(now),
     name: str(g.name) || 'Group',
     strategy,
     members: (Array.isArray(g.members) ? g.members : []).map(normalizeMember).filter(Boolean)
-  };
+  }, fallback && !isGroupId(fallback) ? { fallback } : {});
 }
 
 /** groups:set — the list as it is saved: each normalized, a repeated id dropped. */
@@ -91,8 +93,9 @@ function memberRecord(server, m) {
 /**
  * The record a group is in a plan — null when none of its members is left:
  *   { id, name, protocol: 'group', address: '', port: 0, group: { strategy, size },
- *     outbound: { protocol: 'loopback', settings: {}, _group: { id, name, strategy, members: [records] } } }
- * `serversById`: the saved servers (never other groups).
+ *     outbound: { protocol: 'loopback', settings: {}, _group: { id, name, strategy, members: [records], fallback: record | null } } }
+ * `serversById`: the saved servers (never other groups). The fallback — the
+ * config taken when no member answers — is there only while it is saved.
  */
 function groupRecord(group, serversById) {
   const g = normalizeGroup(group);
@@ -106,6 +109,8 @@ function groupRecord(group, serversById) {
     if (rec) members.push(rec);
   }
   if (!members.length) return null;
+  const f = g.fallback ? byId[g.fallback] : null;
+  const fallback = f && isObj(f.outbound) && f.protocol !== 'group' ? f : null;
   return {
     id: g.id,
     name: g.name,
@@ -113,7 +118,7 @@ function groupRecord(group, serversById) {
     address: '',
     port: 0,
     group: { strategy: g.strategy, size: members.length },
-    outbound: { protocol: 'loopback', settings: {}, _group: { id: g.id, name: g.name, strategy: g.strategy, members } }
+    outbound: { protocol: 'loopback', settings: {}, _group: { id: g.id, name: g.name, strategy: g.strategy, members, fallback } }
   };
 }
 
@@ -122,10 +127,12 @@ function isGroupRecord(s) {
   return !!(s && s.outbound && s.outbound.protocol === 'loopback' && isObj(s.outbound._group));
 }
 
-/** The servers a record stands for: a group's members, else the record itself. */
+/** The servers a record stands for: a group's members (and its fallback, which it dials too), else the record itself. */
 function serversOf(s) {
   if (!s) return [];
-  return isGroupRecord(s) ? s.outbound._group.members.slice() : [s];
+  if (!isGroupRecord(s)) return [s];
+  const g = s.outbound._group;
+  return g.fallback ? g.members.concat(g.fallback) : g.members.slice();
 }
 
 /** Every saved group as a record, keyed by id — what main.js and service.js add to a plan's serversById. */

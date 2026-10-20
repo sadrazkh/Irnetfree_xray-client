@@ -1203,7 +1203,8 @@ function buildConfig(planArg, settings) {
     inbounds: localInbounds(s, listen, sniffing),
     outbounds,
     routing: withBalancers({ domainStrategy: routingStrategy(s), rules }, grp),
-    ...(grp.observatory ? { observatory: grp.observatory } : {})
+    ...(grp.observatory ? { observatory: grp.observatory } : {}),
+    ...groupApi(grp, s)
   }, grp);
 }
 
@@ -1277,20 +1278,40 @@ function expandGroups(outbounds, skip) {
       out.push(ob, ...helpersFor(m, ob, `${T}~gh${i}`));
     });
     if (!members.length) continue;
+    // The fallback (a WARP, say): `T~fb`, outside the members' prefix — never
+    // probed, never picked while a member answers; taken when none does. Not
+    // for a group of chain variants (each would need its own chain).
+    const fb = g.fallback && g.fallback.outbound && !members.some(m => Array.isArray(m.chain)) ? g.fallback : null;
+    if (fb) {
+      const tag = `${T}~fb`;
+      if (via) out.push(behind(fb, tag, via));
+      else { const ob = cloneOut(fb.outbound, tag, fb); out.push(ob, ...helpersFor(fb, ob, `${T}~fh`)); }
+    }
     balancers.push({
       tag: T + '~bal', selector: [T + '~gm'],
       strategy: { type: GROUP_STRATEGIES.includes(g.strategy) ? g.strategy : 'roundRobin' },
-      fallbackTag: T + '~gm0'
+      fallbackTag: fb ? T + '~fb' : T + '~gm0'
     });
     rules.push({ type: 'field', inboundTag: [T + '~in'], balancerTag: T + '~bal' });
     subjects.push(T + '~gm');
     map.push({ tag: T, groupId: g.id || '', name: g.name || '', strategy: GROUP_STRATEGIES.includes(g.strategy) ? g.strategy : 'roundRobin', direct: !via,
+      fallback: fb ? { id: fb.id || '', name: fb.name || '' } : null,
       members: members.map(m => Object.assign(who(m), { direct: !via && !Array.isArray(m.chain) })) });
   }
   const observatory = subjects.length
     ? { subjectSelector: subjects, probeUrl: GROUP_PROBE.url, probeInterval: GROUP_PROBE.interval, enableConcurrency: true }
     : null;
   return { outbounds: out, rules, balancers, observatory, map };
+}
+
+/**
+ * The core's control API (HandlerService) when a group runs and the connect
+ * gave it a port: what groupLive.js reaches to take a dead member out of the
+ * running core, and to put it back, without a restart. Loopback only.
+ */
+function groupApi(grp, s) {
+  if (!grp || !grp.observatory || !s || !s.apiCtlPort) return {};
+  return { api: { tag: 'api', listen: `127.0.0.1:${s.apiCtlPort}`, services: ['HandlerService'] } };
 }
 
 /** A group member as the app names it to set it aside: its group, the server dialled and the address it dials. */
@@ -1546,7 +1567,8 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     // bypass), and on demand every entry's hostname connections would wait on
     // the PRIMARY's DoH — a dead primary costing the others ~8 s per new name.
     routing: withBalancers({ domainStrategy: 'IPIfNonMatch', rules }, grp),
-    ...(grp.observatory ? { observatory: grp.observatory } : {})
+    ...(grp.observatory ? { observatory: grp.observatory } : {}),
+    ...groupApi(grp, s)
   }, grp);
 }
 

@@ -61,6 +61,42 @@ test('a desktop service: no repair, the desktop DNS block, no open-files lines',
   assert.ok(!syslog.some(l => /Router settings repaired/.test(l)));
 });
 
+// The router's upkeep (routerUpkeep.test.js) stays on the router: no tunnel
+// watchdog, and the weekly asset update never runs under a live connection —
+// not in the router's quiet hours either.
+test('a desktop service: no tunnel watchdog, and no asset update under a live connection at 03:30 either', { skip: isOpenwrt() && 'this machine is a router' }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'irnf-desk-'));
+  const afternoon = new Date(2026, 9, 20, 14, 0).getTime();
+  fs.writeFileSync(path.join(dir, 'store.json'), JSON.stringify({ servers: [SERVER], assetsCheckedAt: afternoon, settings: Object.assign({}, DESKTOP, { autoUpdateAssets: 'geo' }) }));
+  const state = fakes.makeState();
+  let now = afternoon;
+  let probes = 0;
+  const downloads = [];
+  const service = createService({ dataDir: dir, deps: fakes.deps(state, {
+    readProc, listProc,
+    now: () => now,
+    probeTunnel: async () => { probes++; return false; },
+    downloader: () => ({ download: async (c) => { downloads.push(c); return { ok: true }; }, latestVersion: async () => '99.0.0' }),
+    timing: Object.assign({}, fakes.deps(state).timing, { tunnelWatchMs: 20, tunnelRecheckMs: 5, assetFirstMs: 10, assetEveryMs: 20 })
+  }) });
+  const logs = [];
+  service.onEvent((ch, p) => { if (ch === 'log') logs.push(p); });
+  t.after(async () => { await service.shutdown(); fs.rmSync(dir, { recursive: true, force: true }); });
+
+  await service.invoke('connect', SERVER.id);
+  now = new Date(2026, 9, 28, 3, 30).getTime();   // a week on, in the router's quiet hours
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(downloads, [], 'never under a live connection on a desktop');
+  assert.equal(probes, 0, 'no watchdog');
+  assert.equal(state.xray.starts.length, 1);
+  assert.ok(!logs.some((l) => /Tunnel watchdog|quiet hours/.test(l.line)), logs.map((l) => l.line).join('\n'));
+  // disconnected: the weekly run as it always was
+  await service.invoke('disconnect');
+  const deadline = Date.now() + 4000;
+  while (!downloads.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(downloads, ['geo']);
+});
+
 test('main.js (the Electron app) carries none of it', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'main.js'), 'utf8');
   for (const s of ['routerRepair', 'routerDnsTuning', 'udpTimeout', 'openFiles', 'ROUTER_UDP_TIMEOUT_S']) assert.ok(!main.includes(s), s);

@@ -671,19 +671,32 @@ test('a Reconnect by hand that fails while the drop’s own recovery brings the 
   const reconnect = s.service.invoke('vpn:reconnect');
   await until(() => gatewayStarts(s) === 2, 'the Reconnect’s gateway start, held');
   await until(() => s.logs.some(l => /^The core exited on its own .* while connecting/.test(l.line)), 'its core’s death');
+  // …and the drop taken up, behind the Reconnect still in flight: the service
+  // does that on a timer of its own (setTimeout 0, armed with the line above).
+  // Under load the poll that saw the line ran in the same timers pass, before
+  // it — the gateway then failed first, the hand-over armed its retry and the
+  // drop deferred to it: another scenario (7 failures in 30 runs beside the full suite).
+  // A timer of the same delay armed after it fires after it (not setImmediate,
+  // which runs before the next timers pass).
+  await sleep(0);
   s.state.gatewayFails = true;   // …and then that gateway fails too
   s.state.gatewayGate = null;
   open();
   assert.equal((await reconnect).ok, false);
   s.state.gatewayFails = false;  // the recovery's core is still waiting for its port
-  await until(() => connectedCount(s) === 2, 'the drop’s recovery bringing it back', 5000);
-  await sleep(1300);             // past the hand-over's 1 s: nothing rebuilds what is up
   const lines = () => s.logs.map(l => l.line).slice(-10).join(' / ');
+  // the recovery ended — and with it the hand-over it queued, asked again (handToRecovery)
+  await until(() => s.logs.some(l => l.line === 'Connection restored'), 'the drop’s recovery bringing it back', RETRIES_MS);
+  assert.ok(s.logs.some(l => /^The connection dropped \(core-exited\) — rebuilding the connection/.test(l.line)), 'the drop’s own recovery: ' + lines());
+  assert.equal(connectedCount(s), 2);
+  const restored = s.statuses.length;
+  await sleep(1300);             // past the hand-over's 1 s: nothing rebuilds what is up
   assert.equal(connectedCount(s), 2, 'the restored connection is not rebuilt again: ' + lines());
+  assert.deepEqual(s.statuses.slice(restored).map(x => x.state), [], 'nothing even starts to: ' + lines());
   assert.ok(!s.logs.some(l => /Reconnect failed — retrying/.test(l.line)), 'one chain, the recovery’s: ' + lines());
   const n = s.state.xray.starts.length;
   s.state.xray.crash();
-  await until(() => connectedCount(s) === 3, 'the next crash rebuilt', 5000);
+  await until(() => connectedCount(s) === 3, 'the next crash rebuilt', RETRIES_MS);
   assert.ok(s.state.xray.starts.length > n);
 });
 
