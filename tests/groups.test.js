@@ -303,7 +303,7 @@ test('the traffic meter: a group\'s members count as the group (the core counts 
 test('the live view: each group in the config with who T~gm<i> is (a chain variant by the member it takes) — beside the config, never in what is written', () => {
   const g = groupOf([{ id: 'cdn', address: '104.16.1.1' }, 'de']);
   const cfg = B.buildConfig({ mode: 'single', server: g }, SETTINGS);
-  assert.deepEqual(cfg.groupTags, [{ tag: 'proxy', groupId: 'grp-g', name: 'G', strategy: 'roundRobin', direct: true, members: [
+  assert.deepEqual(cfg.groupTags, [{ tag: 'proxy', groupId: 'grp-g', name: 'G', strategy: 'roundRobin', direct: true, fallback: null, members: [
     { id: 'cdn', name: 'CDN', address: '104.16.1.1', port: 443, direct: true }, { id: 'de', name: 'DE', address: 'de.example.net', port: 8443, direct: true }] }]);
   assert.equal(JSON.stringify(cfg).includes('groupTags'), false);
   assert.equal(Object.keys(cfg).includes('groupTags'), false);
@@ -370,4 +370,39 @@ test('the log says when a member leaves the rotation and when it rejoins — onl
     assert.match(src, /for \(const l of groupHealth\.update\(s\.groups\)\) send\('log', l\);/);
     assert.match(src, /stats\.groupMap = config\.groupTags \|\| null;\n\s*groupHealth\.reset\(\);/);
   }
+});
+
+test('a group’s fallback (a WARP, say): kept as a server id, dialled as T~fb outside the members’ prefix, the balancer’s fallbackTag; never probed; folded into the group on the meter', () => {
+  const WARP = srv('warp', `wireguard://${encodeURIComponent('cGVla2V5c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0MDA=')}@162.159.192.1:2408?publickey=${encodeURIComponent('bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=')}&address=172.16.0.2%2F32#WARP`);
+  const all = Object.assign({}, byId, { warp: WARP });
+  // stored: a server id only — a group's id, or nothing, leaves no field
+  assert.equal(G.normalizeGroup({ id: 'grp-f', name: 'F', members: ['cdn'], fallback: ' warp ' }).fallback, 'warp');
+  assert.equal('fallback' in G.normalizeGroup({ id: 'grp-f', name: 'F', members: ['cdn'], fallback: 'grp-x' }), false);
+  assert.equal('fallback' in G.normalizeGroup({ id: 'grp-f', name: 'F', members: ['cdn'] }), false);
+  const g = G.groupRecord({ id: 'grp-f', name: 'F', members: [{ id: 'cdn' }, { id: 'de' }], fallback: 'warp' }, all);
+  assert.equal(g.outbound._group.fallback, WARP);
+  assert.deepEqual(G.serversOf(g).map((s) => s.id), ['cdn', 'de', 'warp'], 'it is dialled too: endpoints, pins, the engine see it');
+  assert.equal(G.groupRecord({ id: 'grp-f', name: 'F', members: [{ id: 'cdn' }], fallback: 'gone' }, all).outbound._group.fallback, null, 'a fallback deleted since: none');
+  const cfg = B.buildConfig({ mode: 'single', server: g }, SETTINGS);
+  assert.equal(cfg.routing.balancers[0].fallbackTag, 'proxy~fb');
+  assert.deepEqual(cfg.routing.balancers[0].selector, ['proxy~gm']);
+  assert.deepEqual(cfg.observatory.subjectSelector, ['proxy~gm'], 'never probed');
+  assert.equal(cfg.outbounds.find((o) => o.tag === 'proxy~fb').protocol, 'wireguard');
+  assert.deepEqual(cfg.groupTags[0].fallback, { id: 'warp', name: 'WARP' });
+  // without one: the first member, as before
+  const plain = B.buildConfig({ mode: 'single', server: G.groupRecord({ id: 'grp-f', name: 'F', members: [{ id: 'cdn' }, { id: 'de' }] }, all) }, SETTINGS);
+  assert.equal(plain.routing.balancers[0].fallbackTag, 'proxy~gm0');
+  assert.equal(plain.outbounds.some((o) => o.tag === 'proxy~fb'), false);
+  // a group behind a hop: its fallback rides the same hop
+  const behind = B.buildConfig({ mode: 'chain', chain: [NL, g] }, SETTINGS);
+  const fbOut = behind.outbounds.find((o) => /~fb$/.test(o.tag));
+  assert.ok(!fbOut || (fbOut.streamSettings && fbOut.streamSettings.sockopt && fbOut.streamSettings.sockopt.dialerProxy), 'through the hop, never straight out');
+  // the meter: the fallback's bytes are the group's
+  const S = require('../src/main/stats');
+  assert.deepEqual(S.foldGroups({ proxy: { uplink: 0, downlink: 0 }, 'proxy~gm0': { uplink: 1, downlink: 10 }, 'proxy~fb': { uplink: 2, downlink: 20 } }), { proxy: { uplink: 3, downlink: 30 } });
+  // the log names it when no member answers
+  const w = new S.GroupHealthWatch();
+  w.update([{ tag: 'proxy', name: 'F', fallback: { id: 'warp', name: 'WARP' }, members: [{ alive: true }, { alive: true }] }]);
+  const lines = w.update([{ tag: 'proxy', name: 'F', fallback: { id: 'warp', name: 'WARP' }, members: [{ alive: false }, { alive: false }] }]);
+  assert.ok(lines.some((l) => /its traffic goes through its fallback, WARP, until one does/.test(l.line)));
 });

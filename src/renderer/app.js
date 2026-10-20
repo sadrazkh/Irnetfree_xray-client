@@ -6945,7 +6945,9 @@ function normalizeUiGroup(g) {
     id: String(g.id),
     name: String(g.name == null ? '' : g.name),
     strategy: GROUP_STRATEGIES.includes(g.strategy) ? g.strategy : 'roundRobin',
-    members: (Array.isArray(g.members) ? g.members : []).filter(m => m && typeof m === 'object' && m.id).map(grpMember)
+    members: (Array.isArray(g.members) ? g.members : []).filter(m => m && typeof m === 'object' && m.id).map(grpMember),
+    // the config its traffic takes when no member answers (a WARP, say); none: the first member
+    ...(g.fallback ? { fallback: String(g.fallback) } : {})
   };
 }
 
@@ -7129,6 +7131,7 @@ function openGroupEditor(id) {
     name: g ? g.name : t('grp.newName').replace('{n}', () => warpNum((state.groups || []).length + 1)),
     strategy: g ? g.strategy : 'roundRobin',
     members: g ? g.members.map(m => Object.assign({}, m)) : [],
+    fallback: g ? g.fallback || '' : '',
     panel: null, search: '', ipServer: '', ipText: '', ipNote: '', error: ''
   };
   $('#grpModal').hidden = false;
@@ -7221,6 +7224,27 @@ function grpStrategyNode(f) {
   }
   return edNode('div', { class: 'grp-field' }, [edNode('span', { class: 'field-label' }, [edNode('span', { text: t('grp.strategy') }), ' ',
     edNode('span', { class: 'ed-key', dir: 'ltr', text: 'strategy' })]), box]);
+}
+
+/**
+ * When no member answers: the first member (the core waits on it), or a
+ * config of its own — a WARP above all — that is never probed nor picked
+ * while a member answers. Listed by subscription like every config picker; a
+ * fallback that is gone is said so, and kept until another is chosen.
+ */
+function grpFallbackNode(f) {
+  const sel = edNode('select', { class: 'select', id: 'grp-fallback' });
+  sel.appendChild(edNode('option', { value: '', selected: !f.fallback, text: t('grp.fallbackFirst') }));
+  if (f.fallback && !state.servers.some(s => s.id === f.fallback)) sel.appendChild(edNode('option', { value: f.fallback, selected: true, text: '⚠ —' }));
+  for (const g of serverGroups()) {
+    sel.appendChild(edNode('optgroup', { label: (g.id ? '🔗 ' : '✎ ') + g.name },
+      g.items.map(s => edNode('option', { value: s.id, selected: s.id === f.fallback, text: s.name }))));
+  }
+  sel.value = f.fallback || '';
+  sel.onchange = () => { f.fallback = sel.value; };
+  return edNode('div', { class: 'grp-field' }, [
+    edNode('label', { class: 'field-label', for: 'grp-fallback' }, [edNode('span', { text: t('grp.fallback') }), ' ', edNode('span', { class: 'ed-key', dir: 'ltr', text: 'fallback' })]),
+    sel, edNode('p', { class: 'hint', text: t('grp.fallbackHint') })]);
 }
 
 /** The configs in it: each its server's name and the address it is dialled at, one that is gone said so (and kept until removed), a remove each. */
@@ -7318,6 +7342,7 @@ function renderGroupEditor() {
   body.textContent = '';
   appendSome(body, grpNameNode(f), grpStrategyNode(f), grpMembersNode(f),
     f.panel === 'server' ? grpServerPanel(f) : f.panel === 'ips' ? grpIpPanel(f) : null,
+    grpFallbackNode(f),
     edNode('p', { class: 'hint grp-hint', text: t('grp.hint') }),
     f.error ? edNode('p', { class: 'warp-error', role: 'alert', text: f.error }) : null);
   foot.textContent = '';
@@ -7339,7 +7364,7 @@ async function saveGroupEditor() {
   }
   const old = f.id ? grpById(f.id) : null;
   const name = String(f.name || '').trim() || (old && old.name) || t('grp.newName').replace('{n}', () => warpNum((state.groups || []).length + 1));
-  const next = normalizeUiGroup({ id: f.id || newGroupId(), name, strategy: f.strategy, members: f.members });
+  const next = normalizeUiGroup({ id: f.id || newGroupId(), name, strategy: f.strategy, members: f.members, fallback: f.fallback || '' });
   const list = old ? state.groups.map(g => (g.id === next.id ? next : g)) : [...(state.groups || []), next];
   f.error = '';
   if (!(await persistGroups(list))) return false;
