@@ -416,7 +416,17 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         }
         if (pinging) return
         pinging = true
+        val app = ctx.applicationContext
         scope.launch {
+            // a UDP-only server (Fastest.udpOnly) has no TCP port to knock on: a real
+            // round trip through a throwaway core instead, as ⚡ measures it
+            if (Fastest.udpOnly(srv)) {
+                val real = realDelayThrough(app, srv, Fastest.UDP_TIMEOUT_MS)
+                AppWork.putReal(srv.id, real)
+                pinging = false
+                if (real < 0) AppWork.snack("${srv.name}: no answer through it")
+                return@launch
+            }
             val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(srv.address, srv.port) }
             AppWork.putPing(srv.id, ms)
             pinging = false
@@ -426,8 +436,9 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     // The last TCP ping of the selected server (a chain: its first hop), from
     // wherever it was measured — a tap here, a test on Servers, ⚡. Never
     // measured on its own: pinging a server nobody asked about, every time the
-    // app opens, is not ours to do.
-    val selTest = selectedServer()?.let { AppWork.tests[it.id] }
+    // app opens, is not ours to do. A UDP-only server's is its real round trip.
+    val selUdp = selectedServer()?.let { s: ServerConfig -> Fastest.udpOnly(s) } == true
+    val selTest = selectedServer()?.let { AppWork.tests[it.id] }?.let { t: TestState -> if (selUdp) t.copy(tcp = t.down) else t }
 
     /**
      * Choose the server instead of being told which one, then connect to it —
@@ -577,7 +588,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             }
             Spacer(Modifier.height(10.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric(Modifier.weight(1f), "TCP PING", if (pinging) "…" else fmtLat(selTest?.tcp), "to the server", if (pinging) AMBER else latColor(selTest?.tcp))
+                Metric(Modifier.weight(1f), if (selUdp) "UDP PING" else "TCP PING", if (pinging) "…" else fmtLat(selTest?.tcp), if (selUdp) "through a test core" else "to the server", if (pinging) AMBER else latColor(selTest?.tcp))
                 Metric(Modifier.weight(1f), "REAL DELAY", if (measuring == "delay") "…" else fmtLat(latency), "through the tunnel", if (measuring == "delay") AMBER else latColor(latency))
             }
 
@@ -1030,8 +1041,8 @@ private suspend fun realDelayThrough(ctx: Context, s: ServerConfig, timeout: Int
 private object AppWork {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    /** One throwaway core at a time (XrayTester's rule), whoever asks: a test, ⚡, a subscription fetch. */
-    val coreLock = Mutex()
+    /** One throwaway core at a time (XrayTester's rule), whoever asks: a test, ⚡, a subscription fetch — and the tunnel service's group tests. */
+    val coreLock = XrayTester.coreLock
 
     /** Subscription fetches, one at a time. */
     private val subLock = Mutex()
@@ -1110,15 +1121,20 @@ private object AppWork {
      * coroutine never runs, and the start sat outside the try: the core kept
      * running. A blocking call is not interrupted by a cancel, so this stop
      * always runs. Stopped half way, the row is left without its "…".
+     *
+     * A UDP-only server (Fastest.udpOnly) has no TCP port a handshake could
+     * time: no TCP figure for it (the row shows its real round trip, × only
+     * when that failed), as ⚡ measures it.
      */
     private suspend fun testOne(ctx: Context, s: ServerConfig) {
+        val udp = Fastest.udpOnly(s)
         try {
             coreLock.withLock {
-                tests[s.id] = TestState(phase = "tcp")
+                tests[s.id] = TestState(phase = if (udp) "down" else "tcp")
                 val result = withContext(Dispatchers.IO) {
                     val h = XrayTester.start(ctx, s)
                     if (h == null) TestState(error = "core error") else try {
-                        val ping = Diagnostics.tcpPing(s.address, s.port)
+                        val ping: Long? = if (udp) null else Diagnostics.tcpPing(s.address, s.port)
                         tests[s.id] = TestState(tcp = ping, phase = "down")
                         val down = Diagnostics.httpLatency(h.port)
                         tests[s.id] = TestState(tcp = ping, down = down, phase = "up")

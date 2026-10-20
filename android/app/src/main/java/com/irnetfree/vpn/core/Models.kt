@@ -196,16 +196,21 @@ data class GroupMember(val id: String, val address: String? = null, val port: In
  * config — each new connection through one member, the [strategy] deciding
  * which (roundRobin | leastPing | random). Used wherever a server is; its id
  * (`grp-…`) is the target, the selection, the base, the chain hop.
+ * [fallback]: a saved server's id the group falls back to when no member
+ * answers (the balancer's fallbackTag) — "" for none, the first member then.
+ * Written only when set.
  */
 data class GroupConfig(
     val id: String,
     val name: String,
     val strategy: String = Groups.DEFAULT_STRATEGY,
-    val members: List<GroupMember> = emptyList()
+    val members: List<GroupMember> = emptyList(),
+    val fallback: String = ""
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("name", name); put("strategy", strategy)
         put("members", JSONArray().apply { members.forEach { m: GroupMember -> put(m.toJson()) } })
+        if (fallback.isNotEmpty()) put("fallback", fallback)
     }
     companion object {
         /** A stored group read back, normalized as groups.js does (Groups.normalizeGroup); null when [o] is none. */
