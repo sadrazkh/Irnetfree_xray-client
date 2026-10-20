@@ -483,7 +483,7 @@ function createService(opts = {}) {
   })();
 
   let isQuitting = false;
-  let xrayReloading = false;
+  let xrayReloading = 0;   // > 0 while the core is restarted on purpose; a count — the sections that do it can overlap
   let userDisconnecting = false;
   let procWatcher = null;
   let netWatcher = null;
@@ -666,6 +666,7 @@ function createService(opts = {}) {
   const groupEvict = new GroupEvictor();
   let groupEvictAt = 0;
   let groupEvictBusy = false;
+  let groupEvictWaitSaid = false;
   const xrayOpts = {
     binPath: store.get('xrayPath', null),
     dataDir,
@@ -776,6 +777,8 @@ function createService(opts = {}) {
     apiPort: getSettings().apiPort,
     onStats: (s) => {
       lastStats = s;
+      // what the app has set aside (groupEvict.js), for the live groups view
+      if (s.groups) s.setAside = groupEvict.list();
       send('stats', s);
       // a group's members leaving and rejoining the rotation, said in the log
       for (const l of groupHealth.update(s.groups)) send('log', l);
@@ -1203,8 +1206,8 @@ function createService(opts = {}) {
   const saveProcCache = (c) => store.setLazy('procIpCache', c);
 
   /** See main.js: the settings with `procIps` — what each process the connect's rules name uses now. */
-  async function effectiveSettings(serverId) {
-    const s = getSettings();
+  async function effectiveSettings(serverId, base) {
+    const s = base || getSettings();
     const names = activeProcNames(s, serverId);
     if (!names.length) return s;
     const cache = loadProcCache();
@@ -1806,6 +1809,8 @@ function createService(opts = {}) {
     // keeps the tunnel, whose bypass was cut for exactly these addresses.
     livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
 
+    // a group member set aside lately for not answering stays out (groupEvict.js: kept across a reconnect)
+    settings = Object.assign({}, settings, { groupSkip: groupEvict.skip() });
     let active;
     try { active = buildActive(serverId, settings); } catch (e) { throw refusal(e); }   // a target gone, a chain short of a member
     const { plan, label, entryAddrs, config, geoWarn, engine } = active;
@@ -1938,11 +1943,10 @@ function createService(opts = {}) {
       }
     }
 
-    // save/restore rather than clear — reapplyConnection() wraps the whole
+    // counted rather than set and cleared — reapplyConnection() wraps the whole
     // teardown+reconnect in the same flag
     let ownCore = null;   // the core this call started, while it is still the one running
-    const prevReloading = xrayReloading;
-    xrayReloading = true;
+    xrayReloading++;
     try {
       if (await xray.start(config, runEngine)) ownCore = xray.proc;
       if (!stale()) liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));
@@ -1956,7 +1960,7 @@ function createService(opts = {}) {
       // error: answer like every other gate below.
       if (stale()) return abandoned;
       throw e;
-    } finally { xrayReloading = prevReloading; }
+    } finally { xrayReloading--; }
     // A disconnect that overtook this call (a Cancel while connecting) tore down
     // what it found — but this call can have started its core AFTER that
     // teardown: in a server switch start() stops the old core first, and the
@@ -1987,7 +1991,7 @@ function createService(opts = {}) {
     liveServerIds = planServerIds(plan);
     serverEditPending = false;
     liveMux = mux.ids.length ? mux : null;
-    liveRouting = liveRoutingOf({ serverId, plan, profiles: getRoutingProfiles(), chains: getChains() });
+    liveRouting = liveRoutingOf({ serverId, plan, profiles: getRoutingProfiles(), chains: getChains(), groups: getGroups() });
 
     if (settings.systemProxy) {
       try {
@@ -2373,7 +2377,7 @@ function createService(opts = {}) {
   function pendingKeys() {
     const keys = pendingReconnectKeys(appliedSettings, getSettings());
     if (appliedSettings && serverEditPending) keys.push('servers');
-    if (appliedSettings) for (const k of routingPendingKeys(liveRouting, getRoutingProfiles(), getChains())) if (!keys.includes(k)) keys.push(k);
+    if (appliedSettings) for (const k of routingPendingKeys(liveRouting, getRoutingProfiles(), getChains(), getGroups())) if (!keys.includes(k)) keys.push(k);
     return keys;
   }
 
@@ -2427,8 +2431,7 @@ function createService(opts = {}) {
 
     send('status', { state: 'connecting', serverId, cause });
 
-    const prevReloading = xrayReloading;
-    xrayReloading = true;              // intentional restart, not a drop
+    xrayReloading++;              // intentional restart, not a drop
     try {
       stopProcWatcher();
       if (stats) stats.stop();
@@ -2464,7 +2467,7 @@ function createService(opts = {}) {
       if (!getSettings().systemProxy) { try { await setProxy(false, {}); } catch {} }
       if (xray) await xray.stop();
     } finally {
-      xrayReloading = prevReloading;
+      xrayReloading--;
     }
 
     // A disconnect (or a newer connect) overtook the teardown. Everything this
@@ -2593,10 +2596,23 @@ function createService(opts = {}) {
     recoverQueued = null;
   }
 
+  /**
+   * Rebuild + restart only the core for the active target (mirrors main.js):
+   * the process-route watcher and the group set-aside, through queueReload
+   * only. Built from what the live connection was built with — a change still
+   * waiting for Apply (a port above all: the gateway forwards to the old one)
+   * stays pending. A connect, a disconnect or a recovery that came meanwhile
+   * owns the core: nothing is started. A start that left no core is a drop,
+   * rebuilt like one ('reload-failed') — before v1.28.3 the LAN stayed behind a
+   * gateway forwarding into a closed port while the status said connected.
+   * → true when the core was restarted.
+   */
   async function rebuildActiveConfig(why) {
     const serverId = store.get('activeServerId', null);
-    if (!serverId || !xray.running) return;
-    let settings = await effectiveSettings(serverId);
+    if (!serverId || !xray.running) return false;
+    const gen = connGen;
+    const base = appliedSettings ? Object.assign({}, getSettings(), appliedSettings) : getSettings();
+    let settings = await effectiveSettings(serverId, base);
     // Keep the binding the live connection was built with (see doConnect): the
     // tunnel stays up across this reload, and asking the OS now would name it.
     if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
@@ -2609,11 +2625,12 @@ function createService(opts = {}) {
     settings = Object.assign({}, settings, { groupSkip: groupEvict.skip() });
     // `plan` too: the usage meter needs it to attribute the new core's bytes
     const { plan, config, engine } = buildActive(serverId, settings);
-    const prevReloading = xrayReloading;
-    xrayReloading = true;
+    xrayReloading++;
+    let lostCore = false;
     try {
       const check = await xray.validateWithFallback(config, engine);
       if (!check.ok) throw new Error(check.error);
+      if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
       await xray.start(config, check.engine);
       liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first
       watchWgSilence(config);   // the plan may have changed under the live tunnel
@@ -2622,9 +2639,29 @@ function createService(opts = {}) {
       stats.groupMap = config.groupTags || null;
       groupHealth.reset();
       if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
-    } finally { xrayReloading = prevReloading; }
+    } catch (e) {
+      // start() stops the old core before it launches the new one, and the
+      // count above swallowed both stops: no core may be left at all
+      lostCore = !xray.running;
+      throw e;
+    } finally {
+      xrayReloading--;
+      if (lostCore) {
+        send('log', { line: `The core did not come back after a reload${memLine()} — rebuilding the connection`, level: 'error' });
+        setTimeout(() => recoverFromDrop('reload-failed'), 0);
+      }
+    }
     stats.setBin(xray.anyBin());
     send('log', { line: why || 'Process routes applied (xray reloaded)', level: 'info' });
+    return true;
+  }
+
+  /** Reloads one at a time (mirrors main.js): two starts at once left the first core running, owned by nobody. */
+  let reloadChain = Promise.resolve();
+  function queueReload(why) {
+    const run = reloadChain.then(() => rebuildActiveConfig(why));
+    reloadChain = run.catch(() => {});
+    return run;
   }
 
   /** A server record measured the way a ping is: a throwaway core on a free port, one request through it (mirrors main.js). */
@@ -2647,15 +2684,25 @@ function createService(opts = {}) {
     const now = Date.now();
     if (groupEvictBusy || now - groupEvictAt < 15000) return;
     groupEvictAt = now;
-    if (!xray.running || connectsInFlight.size) return;
+    const quiet = () => xray.running && !connectsInFlight.size && !recovering && !recoverTimer && !userDisconnecting && !isQuitting;
+    if (!quiet()) return;
     groupEvictBusy = true;
     (async () => {
       for (const d of groupEvict.due()) {
-        if (!xray.running) return;
+        if (!quiet()) return;
         const r = await testRecordDelay(d.record);
         for (const l of groupEvict.tested(d.key, r.ok, r.ok ? r.ms : null)) send('log', l);
       }
-      if (xray.running && !connectsInFlight.size && groupEvict.takeReload()) await rebuildActiveConfig('Groups: the core reloaded with the members that answer');
+      if (!quiet() || !groupEvict.wantsReload()) return;
+      // a change waiting for Apply would go live with the reload: the set-aside waits for it
+      if (pendingKeys().length) {
+        if (!groupEvictWaitSaid) { groupEvictWaitSaid = true; send('log', { line: 'Groups: a member to set aside or bring back waits for your pending settings — apply them (or reconnect) and the core reloads', level: 'info' }); }
+        return;
+      }
+      groupEvictWaitSaid = false;
+      if (!groupEvict.takeReload()) return;
+      let done = false;
+      try { done = await queueReload('Groups: the core reloaded with the members that answer'); } finally { if (!done) groupEvict.reloadFailed(); }
     })().catch((e) => send('log', { line: 'Groups: ' + ((e && e.message) || e), level: 'warn' })).finally(() => { groupEvictBusy = false; });
   }
 
@@ -2666,7 +2713,7 @@ function createService(opts = {}) {
     procWatcher = new ProcWatcher({
       getNames: () => activeProcNames(getSettings()),
       loadCache: loadProcCache, saveCache: saveProcCache,
-      onGrow: () => rebuildActiveConfig(),
+      onGrow: () => queueReload(),
       onLog: (line, level) => send('log', { line, level }),
       intervalMs: 20000
     });
@@ -2675,7 +2722,7 @@ function createService(opts = {}) {
   function stopProcWatcher() { if (procWatcher) { procWatcher.stop(); procWatcher = null; } }
 
   /** The connection dropped by itself (a core or the gateway died), not because the network moved. */
-  const DROP_REASONS = new Set(['tunnel-exited', 'core-exited', 'gateway-failed']);
+  const DROP_REASONS = new Set(['tunnel-exited', 'core-exited', 'gateway-failed', 'reload-failed']);
   /** The wait before attempt `i + 1` after attempt `i` did not hold; null: the desktop gives up. */
   function backoffAfter(i) {
     return OPENWRT ? T.routerBackoffMs[Math.min(i, T.routerBackoffMs.length - 1)] : RECOVER_BACKOFF_MS[i];
@@ -2724,7 +2771,7 @@ function createService(opts = {}) {
     if (connectsInFlight.size) {
       Promise.allSettled([...connectsInFlight]).then(() => {
         if (userDisconnecting || isQuitting) return;
-        if (reason === 'core-exited' ? !!(xray && xray.running) : !!(tun && tun.active)) return;
+        if ((reason === 'core-exited' || reason === 'reload-failed') ? !!(xray && xray.running) : !!(tun && tun.active)) return;
         recoverFromDrop(reason, seq);
       }).catch(fail);
       return;

@@ -930,6 +930,7 @@ const I18N = {
     'rp.importFailed': 'این لینک روتینگ وارد نشد: {reason}',
     'set.routingProfiles': 'روتینگ‌ها',
     'set.chains': 'زنجیره‌ها',
+    'set.groups': 'گروه‌ها',
     // the server editor (serverFields.js)
     'sf.protocol': 'پروتکل',
     'sf.name': 'نام',
@@ -2068,6 +2069,7 @@ const I18N = {
     'rp.importFailed': 'This routing link was not imported: {reason}',
     'set.routingProfiles': 'Routing profiles',
     'set.chains': 'Chains',
+    'set.groups': 'Groups',
     // the server editor (serverFields.js)
     'sf.protocol': 'Protocol',
     'sf.name': 'Name',
