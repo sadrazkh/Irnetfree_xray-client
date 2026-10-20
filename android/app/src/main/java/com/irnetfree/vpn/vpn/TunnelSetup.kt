@@ -5,6 +5,7 @@ import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.CoreCompat
 import com.irnetfree.vpn.core.EngineChoice
+import com.irnetfree.vpn.core.GroupEvict
 import com.irnetfree.vpn.core.Groups
 import com.irnetfree.vpn.core.JsonImport
 import com.irnetfree.vpn.core.LanShare
@@ -58,8 +59,8 @@ object TunnelSetup {
         append("misc:\n  task-stack-size: 20480\n  connect-timeout: 5000\n  read-write-timeout: 60000\n  log-level: warn\n")
     }
 
-    /** The core a connect really runs, and its config. */
-    class CoreConfig(val engine: String, val json: String)
+    /** The core a connect really runs, its config, and the groups that config runs (ConfigBuilder.Built; empty: none). */
+    class CoreConfig(val engine: String, val json: String, val groups: List<GroupEvict.Group> = emptyList())
 
     /**
      * A JSON server set to run raw (exactly as written) — which the desktop
@@ -104,10 +105,15 @@ object TunnelSetup {
      *
      * [muxIds]: the servers whose outbounds carry Xray's mux (Mux.choose) — in
      * the Xray format only; sing-box's config never has it.
+     *
+     * [groupSkip], [metricsPort]: the group members set aside, and where a
+     * config that runs a group opens its metrics listener (ConfigBuilder.build).
      */
     fun coreConfig(
         engine: String, plan: ConnectionPlan, s: AppSettings, geo: Boolean, wgIps: Map<String, String>,
-        auth: LocalAuth?, lan: LanShare?, muxIds: Set<String> = emptySet(), coreVersion: (String) -> String = { "" }, log: (String) -> Unit
+        auth: LocalAuth?, lan: LanShare?, muxIds: Set<String> = emptySet(),
+        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0,
+        coreVersion: (String) -> String = { "" }, log: (String) -> Unit
     ): CoreConfig {
         val single = plan as? ConnectionPlan.Single
         // Raw (exactly as written) runs on the desktop in proxy mode; Android's
@@ -123,11 +129,13 @@ object TunnelSetup {
             }
         }
         val e = if (engine == EngineChoice.SINGBOX) EngineChoice.XRAY else engine
-        val config = ConfigBuilder.build(plan, s, geoAssets = geo, wgEndpointIps = wgIps, inboundAuth = auth, lan = lan, muxIds = muxIds)
+        val built = ConfigBuilder.buildWithGroups(plan, s, geoAssets = geo, wgEndpointIps = wgIps, inboundAuth = auth, lan = lan, muxIds = muxIds,
+            groupSkip = groupSkip, metricsPort = metricsPort)
+        val config = built.config
         // mKCP's and Hysteria's settings, in the form THIS core's version takes
         // (CoreCompat) — its version is asked only for a config that has them
         val adapted = if (CoreCompat.needsCoreVersion(config)) CoreCompat.adaptForCore(config, coreVersion(e)) else config
-        return CoreConfig(e, adapted.toString())
+        return CoreConfig(e, adapted.toString(), built.groups)
     }
 
     /**

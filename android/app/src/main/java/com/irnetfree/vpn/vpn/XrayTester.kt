@@ -12,6 +12,7 @@ import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.SingboxConfig
 import com.irnetfree.vpn.core.TrustedDns
 import com.irnetfree.vpn.net.Diagnostics
+import kotlinx.coroutines.sync.Mutex
 import org.json.JSONObject
 import java.net.ServerSocket
 import java.util.concurrent.Callable
@@ -40,6 +41,24 @@ import java.util.concurrent.TimeUnit
  * core.
  */
 object XrayTester {
+    /**
+     * One throwaway core at a time, app-wide: the screens' tests and ⚡
+     * (MainActivity's AppWork.coreLock is this one) and the tunnel service's
+     * tests of a group's set-aside members (GroupEvict), which only try it.
+     */
+    val coreLock = Mutex()
+
+    /**
+     * One real round trip through a throwaway core for [server] (Diagnostics,
+     * the measurement every test here makes), in ms; -1 when the core did not
+     * start or the request failed within [timeoutMs]. Start, measure and stop
+     * in one blocking unit: the stop always runs. The caller holds [coreLock].
+     */
+    fun realDelay(ctx: Context, server: ServerConfig, timeoutMs: Int = 5000): Long {
+        val h = start(ctx, server) ?: return -1L
+        return try { Diagnostics.httpLatency(h.port, timeout = timeoutMs) } finally { h.stop() }
+    }
+
     /** One throwaway core, whichever kind it turned out to be. */
     class Handle(val port: Int, private val xray: XrayCore?, private val pattn: XrayPattnCore?, private val singbox: SingboxCore? = null) {
         fun stop() { runCatching { xray?.stop() }; runCatching { pattn?.stop() }; runCatching { singbox?.stop() } }
