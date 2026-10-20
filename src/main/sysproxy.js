@@ -288,7 +288,7 @@ async function disableLinux() {
  * for good after. setSystemProxy(false) ran on every disconnect, quit and exit
  * — even in a TUN-only session that never set the proxy — which killed that
  * same corporate proxy. And an app that died connected (a crash, Task Manager,
- * the update installer closing it) left the machine aimed at 127.0.0.1:10809
+ * the update installer closing it) left the machine aimed at 127.0.0.1:30809
  * with nothing listening: the UI said disconnected, every browser failed, and
  * nothing repaired it at launch.
  *
@@ -427,7 +427,7 @@ function probeListener(server) {
  *    client has taken it since and it is theirs.
  *  - `launch`: no core of ours runs, so the port itself answers. Nothing
  *    listening on it: our dead leftover, whatever list it carries (restored).
- *    A listener: another client (v2rayN uses 10809 too) — left alone, even
+ *    A listener: another client (v2rayN on 10809, say) — left alone, even
  *    under our list. When the probe cannot tell, our exact list decides.
  *    Switched off (a restore that died after its first step, say), nobody is
  *    using it and the record is finished.
@@ -547,8 +547,8 @@ async function restoreJournaled(platform, { exec, journal, when = 'session', pro
  */
 async function setSystemProxy(enabled, opts = {}) {
   const host = opts.host || '127.0.0.1';
-  const httpPort = opts.httpPort || 10809;
-  const socksPort = opts.socksPort || 10808;
+  const httpPort = opts.httpPort || 30809;
+  const socksPort = opts.socksPort || 30808;
   const platform = opts.platform || os.platform();
   const exec = opts.exec || run;
   const journal = opts.journal !== undefined ? opts.journal : journalFile;

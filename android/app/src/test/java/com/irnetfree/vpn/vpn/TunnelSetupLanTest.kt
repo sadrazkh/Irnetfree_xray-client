@@ -155,11 +155,11 @@ class TunnelSetupLanTest {
     }
 
     @Test fun theUrlsCarryTheCredentialsOnlyWhenAskedAndEncodeThem() {
-        assertEquals("socks5://irnf-ab12:k7p2m9x4q3w8@192.168.1.23:10810", LanAddresses.socksUrl("192.168.1.23", share))
-        assertEquals("http://192.168.1.23:10811", LanAddresses.httpUrl("192.168.1.23", share))
-        assertEquals("socks5://192.168.1.23:10810", LanAddresses.socksUrl("192.168.1.23", share.copy(auth = false)))
+        assertEquals("socks5://irnf-ab12:k7p2m9x4q3w8@192.168.1.23:30810", LanAddresses.socksUrl("192.168.1.23", share))
+        assertEquals("http://192.168.1.23:30811", LanAddresses.httpUrl("192.168.1.23", share))
+        assertEquals("socks5://192.168.1.23:30810", LanAddresses.socksUrl("192.168.1.23", share.copy(auth = false)))
         // a typed password with URL characters in it stays one password
-        assertEquals("socks5://me:p%40ss%3Aw%2Frd%25@10.0.0.2:10810", LanAddresses.socksUrl("10.0.0.2", share.copy(user = "me", pass = "p@ss:w/rd%")))
+        assertEquals("socks5://me:p%40ss%3Aw%2Frd%25@10.0.0.2:30810", LanAddresses.socksUrl("10.0.0.2", share.copy(user = "me", pass = "p@ss:w/rd%")))
         assertEquals("a-b.c_d~", LanAddresses.pct("a-b.c_d~"))
     }
 }
