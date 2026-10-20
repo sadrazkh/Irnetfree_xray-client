@@ -1433,6 +1433,14 @@ async function connectOnce(serverId, opts = {}) {
         ? `This MASQUE server needs Xray ${check.need} or newer — update it under Settings → Required files`
         : `این سرور MASQUE است و به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
     }
+    // An ECH outbound on a core older than 26.10.10 and no other core new
+    // enough (xrayManager.validateWithFallback): the query's certificate check
+    // would fail and the server never get its ECH key.
+    if (check.echOutboundUnsupported) {
+      throw new Error(settings.lang === 'en'
+        ? `This server's ECH outbound needs Xray ${check.need} or newer — update it under Settings → Required files`
+        : `خروجی ECH این سرور به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
+    }
     // The official core refuses plaintext VLESS/Trojan to public addresses and the
     // fork that accepts them is not installed — say so, the renderer offers the download.
     const hint = check.plaintextRejected

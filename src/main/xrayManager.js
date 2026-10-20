@@ -87,6 +87,23 @@ function usesEch(config) {
 const MASQUE_SINCE = '26.9.30';
 const MASQUE_WARP_SINCE = '26.10.10';
 
+/**
+ * An ECH outbound (configBuilder.applyEchOutbounds: the ECH query dialled
+ * through `echSockopt.dialerProxy`): `h2c://` and the redirect under TLS are
+ * older, but only 26.10.10 hands the query's host to that outbound — before
+ * it `fromMitM` names nothing, the certificate check fails and the server
+ * never gets its key. Asked of the core that would run it, as MASQUE is.
+ */
+const ECH_OUTBOUND_SINCE = '26.10.10';
+
+/** Does any outbound dial its ECH query through an outbound of its own? */
+function usesEchOutbound(config) {
+  return ((config && config.outbounds) || []).some((o) => {
+    const tls = o && o.streamSettings && o.streamSettings.tlsSettings;
+    return !!tls && !!tls.echSockopt && typeof tls.echSockopt.dialerProxy === 'string' && tls.echSockopt.dialerProxy !== '';
+  });
+}
+
 const masqueOutbounds = (config) => ((config && config.outbounds) || []).filter((o) => o && o.protocol === 'masque');
 
 /** Does any outbound dial MASQUE? */
@@ -497,6 +514,23 @@ class XrayManager {
           error: `${first.id} ${v} does not know MASQUE${need === MASQUE_WARP_SINCE ? ' with a WARP account' : ''} (${need} and newer do)` };
       }
     }
+    // An ECH outbound on a core older than ECH_OUTBOUND_SINCE: the same way —
+    // the other Xray core when it is new enough, else refused in plain words.
+    if (usesEchOutbound(config) && engineFormat(first.id) === 'xray') {
+      const v = await this.version(first.id);
+      if (versionBelow(v, ECH_OUTBOUND_SINCE)) {
+        const other = first.id === 'xray' ? 'xray-pattn' : 'xray';
+        const ov = this.resolveBin(other) ? await this.version(other) : '';
+        if (/\d+\.\d+\.\d+/.test(ov) && !versionBelow(ov, ECH_OUTBOUND_SINCE)) {
+          const onOther = await this.validate(config, other);
+          if (!onOther.ok) return { ok: false, engine: other, error: onOther.error, plaintextRejected: false, ...killedOf(onOther) };
+          this.onLog(`This server's ECH outbound needs Xray ${ECH_OUTBOUND_SINCE} or newer and ${engineLabel(first.id)} is ${v} — running it on ${engineLabel(other)} ${ov}`, 'info');
+          return { ok: true, engine: other, fellBack: true };
+        }
+        return { ok: false, engine: first.id, echOutboundUnsupported: true, coreVersion: v, need: ECH_OUTBOUND_SINCE, plaintextRejected: false,
+          error: `${first.id} ${v} cannot dial the ECH query through its own outbound (${ECH_OUTBOUND_SINCE} and newer can)` };
+      }
+    }
     // A config carrying the fork's `finalmask` runs on the fork when it is
     // there, and the official core is not asked: one older than 26.3.27
     // PASSES it (an unknown key) and runs the server unmasked; a newer one
@@ -769,5 +803,5 @@ function getFreePorts(n) {
 
 module.exports = {
   XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, ECH_SINCE, usesEch,
-  MASQUE_SINCE, MASQUE_WARP_SINCE, usesMasque, usesMasqueWarp, versionBelow, floodGate, floodKey
+  MASQUE_SINCE, MASQUE_WARP_SINCE, usesMasque, usesMasqueWarp, ECH_OUTBOUND_SINCE, usesEchOutbound, versionBelow, floodGate, floodKey
 };

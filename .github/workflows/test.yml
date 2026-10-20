@@ -118,6 +118,20 @@ jobs:
           IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-masque.js || rc=1
           IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=40000 node scripts/probe-masque.js || rc=1
           exit $rc
+      - name: An ECH outbound fetches the ECH key through fronted DoH (Cloudflare, the real network)
+        # scripts/probe-ech-outbound.js: the key of cloudflare-ech.com asked over
+        # h2c of 1.1.1.1 through the editor's Example outbound (TLS to 1.1.1.1:443
+        # as www.microsoft.com, the certificate checked as the resolver's own),
+        # the config through the app's own applyEchOutbounds — then
+        # cloudflare-ech.com/cdn-cgi/trace must say sni=encrypted. The same query
+        # without the outbound is the control: it must get no key. Both cores.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          rc=0
+          IRNF_PROBE_LOG=info IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-ech-outbound.js || rc=1
+          IRNF_PROBE_LOG=info IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=40810 node scripts/probe-ech-outbound.js || rc=1
+          exit $rc
 
   tun-dns:
     # The real TUN, which `sing-box check` cannot speak for: does a name asked
