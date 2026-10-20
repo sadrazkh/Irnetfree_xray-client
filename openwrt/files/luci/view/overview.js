@@ -11,7 +11,8 @@
  * Services → IRNetFree → Overview: the state of the tunnel and the VPN switch,
  * whether every device behind the router goes through it, the config picker
  * with Connect / Reconnect / Test connection / Update subscriptions, the kill
- * switch and remote-access states, and the link to the full web UI. Every control acts at once — there is no Save. The status is
+ * switch and remote-access states, and the link to the full web UI (for a
+ * login that may change IRNetFree: the link carries the token). Every control acts at once — there is no Save. The status is
  * read every 3 s, the config list every 30 s and soon after a subscription
  * update. Text from the service (config names, errors) only ever goes in as
  * text nodes, never as HTML.
@@ -28,19 +29,34 @@ function button(cls, label, handler) {
 	return E('button', { 'class': 'btn cbi-button ' + cls, 'click': handler }, [ label ]);
 }
 
+/* The web UI's token, for its link. The token is full control of IRNetFree,
+ * so only the write half of luci-app-irnetfree may read the file (acl.json):
+ * a read-only login gets null — not even asked when LuCI already says this
+ * page is read-only for it, else from rpcd's refusal. '' when the service has
+ * not written one yet (the file is not there). */
+function readToken() {
+	if (typeof L.hasViewPermission == 'function' && L.hasViewPermission() === false)
+		return Promise.resolve(null);
+	return fs.read('/etc/irnetfree/token').then(function (s) {
+		return String(s || '').trim();
+	}, function (e) {
+		return common.accessDenied(e) ? null : '';
+	});
+}
+
 return view.extend({
 	load: function () {
 		return Promise.all([
 			common.status(),
 			common.configs(),
-			L.resolveDefault(fs.read('/etc/irnetfree/token'), ''),
+			readToken(),
 			L.resolveDefault(uci.load('irnetfree'), null)
 		]);
 	},
 
 	render: function (data) {
 		var el = this.el = {};
-		var token = String(data[2] || '').trim();
+		var token = data[2];   // null: this login may not read it (readToken)
 		var port = uci.get('irnetfree', 'main', 'port') || '6969';
 		this.tick = 0;
 		this.cfgDue = 10;
@@ -106,7 +122,8 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ common.t('Web UI') ]),
 				E('p', {}, [ common.t('The full IRNetFree web UI has everything else: servers, subscriptions, routing, chains and logs.') ]),
-				E('p', {}, [
+				// a read-only login: no link (the page asks for the token it may not have), and why
+				(token === null) ? E('p', { 'class': 'alert-message warning' }, [ common.t('The full web UI needs write access to luci-app-irnetfree: its link carries the key to every setting, and your LuCI login can only look.') ]) : E('p', {}, [
 					E('a', {
 						'class': 'btn cbi-button cbi-button-action',
 						'href': common.webUiUrl(window.location.hostname, port, token),
@@ -114,7 +131,7 @@ return view.extend({
 						'rel': 'noopener'
 					}, [ common.t('Open full web UI') ])
 				]),
-				token ? '' : E('p', { 'class': 'alert-message warning' }, [ common.t('No token yet: start the service and reload this page.') ])
+				(token === null || token) ? '' : E('p', { 'class': 'alert-message warning' }, [ common.t('No token yet: start the service and reload this page.') ])
 			])
 		]);
 

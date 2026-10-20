@@ -160,7 +160,9 @@ const DEFAULT_SETTINGS = {
   // OpenWrt gateway: refuse QUIC (UDP 443) from the LAN so browsers use TCP,
   // which every proxy carries. Applied live. The router turns it on by default.
   lanBlockQuic: false,
-  // weekly refresh of the downloaded files, never under a live tunnel:
+  // weekly refresh of the downloaded files, never under a live tunnel — but a
+  // router, connected day and night, takes it in its quiet hours (03:00-05:00)
+  // and reloads its core on the new files (see assetUpdater below):
   // 'off' | 'geo' (the data files only — the default) | 'all' (the cores too)
   autoUpdateAssets: 'geo',
   // which surfaces the window shows: 'simple' hides chains, the pool, the log
@@ -223,13 +225,21 @@ function createService(opts = {}) {
     outOfFilesQuietMs: 60000,    // a core's "too many open files": one line with the numbers per this (watchOpenFiles)
     // the router's WAN watcher (wanWatch.js): the poll, how long a change must hold still, the gap between the two probes
     wanIntervalMs: 5000, wanSettleMs: 10000, wanProbeGapMs: 5000,
-    ksVerifyMs: 30000            // while the kill switch should be armed: how often the kernel is asked for its table
+    ksVerifyMs: 30000,           // while the kill switch should be armed: how often the kernel is asked for its table
+    // the router's tunnel watchdog (startTunnelWatch): how often the live tunnel is asked,
+    // how soon a miss is asked again, and the least time between two rebuilds it starts
+    tunnelWatchMs: 180000, tunnelRecheckMs: 60000, tunnelRebuildGapMs: 600000,
+    // the weekly asset update's first look after start, and its interval (0: the
+    // platform's own — hourly on a router, whose quiet hours are two hours wide)
+    assetFirstMs: 30000, assetEveryMs: 0
   }, deps.timing || {});
   // "does the tunnel answer" — an HTTP 204 through the local SOCKS inbound, 5 s (a test hands in an answer)
   const probeTunnel = deps.probeTunnel || (async () => {
     const r = await httpThroughProxy(getSettings().socksPort, { host: 'cp.cloudflare.com', port: 80, path: '/generate_204', timeout: 5000 });
     return !!(r && r.ok);
   });
+  // the wall clock, ms epoch — the router's quiet hours are read from it (a test hands in its own)
+  const clock = deps.now || (() => Date.now());
 
   const dataDir = opts.dataDir || defaultDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
@@ -852,7 +862,20 @@ function createService(opts = {}) {
     pendingKeys
   });
 
-  // The weekly refresh of what the downloader put in place — same as main.js.
+  // The weekly refresh of what the downloader put in place — same as main.js,
+  // except on a router. "Never under a live tunnel" meant never there: a router
+  // is connected day and night, so its geoip/geosite never moved and
+  // bypass-Iran went stale with nothing said. In its quiet hours (local time,
+  // ASSET_QUIET_HOURS) the run goes ahead under the live connection, downloads
+  // as it always does, and the core is then reloaded on the new files
+  // (applyAssetsLive). Hourly there: every 6 h could step over a two-hour window
+  // for good (a router started at 11:30 looks at 05:30, 11:30, 17:30, 23:30).
+  /** The router's quiet hours, local time: [from, to) — when a house is asleep and a reload of the core costs nobody anything. */
+  const ASSET_QUIET_HOURS = [3, 5];
+  function inQuietHours(ms) {
+    const h = new Date(ms).getHours();
+    return h >= ASSET_QUIET_HOURS[0] && h < ASSET_QUIET_HOURS[1];
+  }
   const assetUpdater = new AssetUpdater({
     getSettings,
     getCheckedAt: () => store.get('assetsCheckedAt', 0),
@@ -865,9 +888,31 @@ function createService(opts = {}) {
     currentVersion: (id) => xray.version(id),
     latestVersion: (id) => downloader.latestVersion(id),
     busy: () => !!(xray.running || (tun && tun.active)),
-    onLog: (line, level) => send('log', { line, level })
+    liveWindow: (ms) => OPENWRT && inQuietHours(ms),
+    applyLive: (done) => applyAssetsLive(done),
+    onLog: (line, level) => send('log', { line, level }),
+    now: clock
   });
-  assetUpdater.start();
+  assetUpdater.start(T.assetEveryMs || (OPENWRT ? 3600 * 1000 : 6 * 3600 * 1000), T.assetFirstMs);
+
+  /**
+   * After the weekly run took the files under the live connection (the router's
+   * quiet hours): the core is reloaded on them — Xray reads geoip/geosite only
+   * when it starts, and a core binary that was replaced runs only from its next
+   * start. The tunnel stays up; only the core restarts. A connection that is
+   * changing right now (a connect, a recovery, a disconnect) is left alone:
+   * whatever core it starts reads the new files anyway. The gateway's sing-box,
+   * when it was among them, runs the new version from the gateway's next start.
+   */
+  async function applyAssetsLive(done) {
+    const what = done.join(', ');
+    if (!store.get('activeServerId', null) || !(xray && xray.running) || connectsInFlight.size || recovering || recoverTimer || userDisconnecting || isQuitting || xrayReloading) {
+      send('log', { line: `Updated in the quiet hours (${what}) — the connection is changing, so the core is not reloaded now; its next start uses the new files`, level: 'info' });
+      return;
+    }
+    // through the queue like every reload (one at a time; built from what the connection was built with)
+    await queueReload(`Updated in the quiet hours (${what}) — the core reloaded on the new files`);
+  }
 
   // A proxy journal a dead run left is restored now, as the desktop does at
   // launch (proxy operations run one at a time, so a boot connect waits for
@@ -1398,6 +1443,17 @@ function createService(opts = {}) {
     // connect and every rebuild get it and a desktop's config never does —
     // nor a raw config, whose DNS runs as written.
     if (OPENWRT && !rawServer && engineFormat(engine) === 'xray' && config.dns) config.dns = routerDnsTuning(config.dns);
+    // A router carries a house: one access-log line per connection, through the
+    // service's stdout into syslog, is real CPU on a Cortex-A7 (the AC-1304 log
+    // was a wall of `accepted udp:…`). Kept when the user asks for a verbose
+    // level — that is how today's two faults were read. Here, not in the
+    // connect, so every config the router builds has it: a reload (process
+    // routes, a group's member set aside, the quiet-hours update) used to
+    // bring the access log back — a line per LAN connection, flooding the
+    // 500-line log ring and every events stream.
+    if (OPENWRT && !/^(info|debug)$/i.test(String(settings.logLevel || ''))) {
+      config.log = Object.assign({}, config.log, { access: 'none' });
+    }
     return { plan, label, entryAddrs, config, geoWarn, engine };
   }
 
@@ -1817,13 +1873,7 @@ function createService(opts = {}) {
     // A JSON server set to run raw, said once per connect: run as written, or —
     // in a chain, advanced routing or the pool — used in its full form.
     for (const note of rawModeNotes(plan, settings, RAW_OPTS)) send('log', note);
-    // A router carries a house: one access-log line per connection, through the
-    // service's stdout into syslog, is real CPU on a Cortex-A7 (the AC-1304 log
-    // was a wall of `accepted udp:…`). Kept when the user asks for a verbose
-    // level — that is how today's two faults were read.
-    if (OPENWRT && !/^(info|debug)$/i.test(String(settings.logLevel || ''))) {
-      config.log = Object.assign({}, config.log, { access: 'none' });
-    }
+    // (a router's config comes without the access log: buildActive)
     // Managed DNS off drops every resolver a routing target brings — a
     // corporate WireGuard's own DNS above all. The names inside that network
     // then never resolve, and nothing else in the log says why.
@@ -2248,6 +2298,8 @@ function createService(opts = {}) {
     // replacing it here would adopt the NEW network as normal and leave a tunnel
     // built for the old one with nothing left to notice.
     if (!netWatcher) startNetWatcher();
+    // …and, on a router, for a tunnel that is up with nothing passing (a fresh count per connection)
+    startTunnelWatch();
 
     // The network moved while we were building for the old one. The watcher just
     // adopted the NEW network as normal, so it will never fire for this; say so
@@ -2356,6 +2408,7 @@ function createService(opts = {}) {
     if (!keep) {
       stopProcWatcher();
       stopNetWatcher();
+      stopTunnelWatch();
       if (stats) stats.stop();
       liveDirectInterface = null;
       if (prevActive) send('status', { state: 'disconnected', cause: 'abort' });
@@ -2721,8 +2774,12 @@ function createService(opts = {}) {
   }
   function stopProcWatcher() { if (procWatcher) { procWatcher.stop(); procWatcher = null; } }
 
-  /** The connection dropped by itself (a core or the gateway died), not because the network moved. */
-  const DROP_REASONS = new Set(['tunnel-exited', 'core-exited', 'gateway-failed', 'reload-failed']);
+  /**
+   * The connection dropped by itself (a core or the gateway died, a reload left
+   * no core, or — the router's tunnel watchdog — both alive and nothing
+   * passing), not because the network moved.
+   */
+  const DROP_REASONS = new Set(['tunnel-exited', 'core-exited', 'gateway-failed', 'reload-failed', 'tunnel-stalled']);
   /** The wait before attempt `i + 1` after attempt `i` did not hold; null: the desktop gives up. */
   function backoffAfter(i) {
     return OPENWRT ? T.routerBackoffMs[Math.min(i, T.routerBackoffMs.length - 1)] : RECOVER_BACKOFF_MS[i];
@@ -3002,6 +3059,105 @@ function createService(opts = {}) {
     });
   }
 
+  /* ----------------------------- the router's tunnel watchdog ----------------------------- */
+  // A gateway can be up with nothing passing through it: the core and sing-box
+  // both alive, so neither exit reaches recoverFromDrop, the WAN unchanged, so
+  // the WAN judge never asks — and the whole LAN offline behind a router that
+  // says "connected" until somebody presses Reconnect. So while the connection
+  // is up and settled, the tunnel is asked the WAN judge's question
+  // (probeTunnel) every T.tunnelWatchMs; a miss is asked again
+  // T.tunnelRecheckMs later, and a second miss in a row hands the connection to
+  // the drop recovery as 'tunnel-stalled' — a DROP_REASON, so it runs whatever
+  // autoReconnectOnNetworkChange says (nobody is there to do it by hand). At
+  // most one such rebuild per T.tunnelRebuildGapMs: a server that is down for
+  // an hour must not cost the LAN a 20-40 s rebuild every few minutes on top.
+  // Armed by every connect that came up (a recovery's too: a fresh connection
+  // starts a fresh count), stopped by a disconnect, a connect undone and the
+  // shutdown; the timer never holds the process.
+  let tunnelWatchTimer = null;
+  let tunnelWatchMisses = 0;
+  let tunnelWatchRebuiltAt = -Infinity;
+  // bumped by every start and stop: a probe that was in flight then arms nothing
+  let tunnelWatchGen = 0;
+
+  /** Up, settled and nothing in flight: the only state a probe's answer says anything about. */
+  function tunnelWatchSettled() {
+    return OPENWRT && !isQuitting && !userDisconnecting && !xrayReloading && !recovering && !recoverTimer
+      && !connectsInFlight.size && conn.state === 'connected' && !!store.get('activeServerId', null) && !!(tun && tun.active);
+  }
+
+  function armTunnelWatch(ms) {
+    clearTimeout(tunnelWatchTimer);
+    tunnelWatchTimer = null;
+    if (!OPENWRT || isQuitting) return;
+    tunnelWatchTimer = setTimeout(() => {
+      tunnelWatchTimer = null;
+      tunnelWatchTick().catch((e) => send('log', { line: 'Tunnel watchdog: ' + ((e && e.message) || e), level: 'warn' }));
+    }, ms);
+    if (tunnelWatchTimer.unref) tunnelWatchTimer.unref();
+  }
+
+  function startTunnelWatch() {
+    if (!OPENWRT) return;
+    tunnelWatchGen++;
+    tunnelWatchMisses = 0;
+    armTunnelWatch(T.tunnelWatchMs);
+  }
+
+  function stopTunnelWatch() {
+    tunnelWatchGen++;
+    clearTimeout(tunnelWatchTimer);
+    tunnelWatchTimer = null;
+    tunnelWatchMisses = 0;
+  }
+
+  async function tunnelWatchTick() {
+    // a connect, a reload, a recovery under way: not asked now, and a miss
+    // counted before it says nothing about what it leaves behind. Looked at
+    // again later while the intent stands (a disconnect stops it outright).
+    if (!tunnelWatchSettled()) {
+      tunnelWatchMisses = 0;
+      if (store.get('activeServerId', null)) armTunnelWatch(T.tunnelWatchMs);
+      return;
+    }
+    const watch = tunnelWatchGen;
+    const gen = connGen;   // the connection this answer is about (as judgeWanChange)
+    let ok;
+    try { ok = !!(await probeTunnel()); } catch { ok = false; }
+    // stopped, or started afresh by a connect, while it was asked: that one owns the timer
+    if (watch !== tunnelWatchGen) return;
+    if (gen !== connGen || !tunnelWatchSettled()) {
+      // the connection moved, or started moving, while it was asked: not counted
+      tunnelWatchMisses = 0;
+      if (store.get('activeServerId', null)) armTunnelWatch(T.tunnelWatchMs);
+      return;
+    }
+    if (ok) {
+      if (tunnelWatchMisses) send('log', { line: 'Tunnel watchdog: the tunnel answers again — kept', level: 'info' });
+      tunnelWatchMisses = 0;
+      armTunnelWatch(T.tunnelWatchMs);
+      return;
+    }
+    tunnelWatchMisses++;
+    if (tunnelWatchMisses < 2) {
+      send('log', { line: `Tunnel watchdog: the tunnel did not answer — asking again in ${inWords(T.tunnelRecheckMs)}`, level: 'warn' });
+      armTunnelWatch(T.tunnelRecheckMs);
+      return;
+    }
+    tunnelWatchMisses = 0;
+    const since = Date.now() - tunnelWatchRebuiltAt;
+    if (since < T.tunnelRebuildGapMs) {
+      send('log', { line: `Tunnel watchdog: the tunnel did not answer twice in a row — not rebuilt again, the last watchdog rebuild was ${inWords(Math.round(since / 1000) * 1000)} ago (at most one per ${inWords(T.tunnelRebuildGapMs)})`, level: 'warn' });
+      armTunnelWatch(T.tunnelWatchMs);
+      return;
+    }
+    tunnelWatchRebuiltAt = Date.now();
+    send('log', { line: `Tunnel watchdog: the tunnel did not answer twice in a row — the gateway is up but nothing passes through it; rebuilding the connection${memLine()}`, level: 'warn' });
+    // the rebuild's connect arms it afresh; this keeps it going if the recovery ends without one
+    armTunnelWatch(T.tunnelWatchMs);
+    recoverFromDrop('tunnel-stalled');
+  }
+
   function startNetWatcher() {
     stopNetWatcher();
     if (OPENWRT) {
@@ -3089,6 +3245,7 @@ function createService(opts = {}) {
       lastRebuilt = null;              // a connection made afresh starts with no crash history
       stopProcWatcher();
       stopNetWatcher();                // nothing live to recover any more
+      stopTunnelWatch();               // …nor a tunnel to watch
       if (stats) stats.stop();
       // Flush before the counters go away, then reset: the next core starts at
       // zero and must not be read as growth on this one.
@@ -3899,6 +4056,7 @@ function createService(opts = {}) {
     try { store.flush(); } catch {}   // whatever setLazy() still holds
     try { assetUpdater.stop(); } catch {}
     try { stopNetWatcher(); } catch {}
+    try { stopTunnelWatch(); } catch {}
     try { if (stats) stats.stop(); } catch {}
     try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
     if (process.platform === 'darwin') {

@@ -123,6 +123,7 @@ var FA = {
 	'The full IRNetFree web UI has everything else: servers, subscriptions, routing, chains and logs.': 'رابط وب کامل IRNetFree بقیهٔ امکانات را دارد: سرورها، ساب‌ها، روتینگ، زنجیره‌ها و لاگ‌ها.',
 	'Open full web UI': 'باز کردن رابط وب کامل',
 	'No token yet: start the service and reload this page.': 'هنوز توکنی ساخته نشده: سرویس را اجرا کن و این صفحه را دوباره باز کن.',
+	'The full web UI needs write access to luci-app-irnetfree: its link carries the key to every setting, and your LuCI login can only look.': 'رابط وب کامل دسترسی نوشتن luci-app-irnetfree لازم دارد: لینکش کلید همهٔ تنظیمات را با خود دارد و کاربر LuCI شما فقط اجازهٔ دیدن دارد.',
 
 	// Settings
 	'IRNetFree settings': 'تنظیمات IRNetFree',
@@ -300,6 +301,14 @@ function rpcError(e) {
 
 function failed(e) {
 	return notify(rpcError(e), 'danger');
+}
+
+/* The router refused this LuCI login (rpcd's ACL): a file outside its grants
+ * answers PermissionError ("Permission denied"), a ubus method outside them
+ * "Access denied" (-32002). A file that is not there (NotFoundError) is not this. */
+function accessDenied(e) {
+	var m = String((e && e.message) || e || '');
+	return !!e && (e.name === 'PermissionError' || /Permission denied|Access denied|-32002/.test(m));
 }
 
 /* A list reply: the plugin wraps the service's arrays as {result: […]}. */
@@ -594,6 +603,7 @@ return baseclass.extend({
 	notify: notify,
 	rpcError: rpcError,
 	failed: failed,
+	accessDenied: accessDenied,
 	problemBox: problemBox,
 	waitUntilUp: waitUntilUp,
 	reloadWhenUp: reloadWhenUp,

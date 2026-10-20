@@ -368,8 +368,19 @@ function fakeLuci(opts = {}) {
   };
   env.poll = { added: [], add: (fn, interval) => { env.poll.added.push({ fn, interval }); return true; } };
   env.fsCalls = [];
-  const fsMod = { read: (p) => { env.fsCalls.push(p); return (p === '/etc/irnetfree/token' && env.token != null) ? Promise.resolve(env.token) : Promise.reject(new Error('Permission denied')); } };
+  // LuCI's fs.read, as rpcd's file plugin answers it: the ACL refusing this
+  // login is a PermissionError (status 6), a file that is not there a
+  // NotFoundError (status 4) — `tokenDenied` / `token: null`
+  const named = (name, message) => Object.assign(new Error(message), { name });
+  const fsMod = { read: (p) => {
+    env.fsCalls.push(p);
+    if (env.tokenDenied) return Promise.reject(named('PermissionError', 'Permission denied'));
+    return (p === '/etc/irnetfree/token' && env.token != null) ? Promise.resolve(env.token) : Promise.reject(named('NotFoundError', 'Resource not found'));
+  } };
   env.token = opts.token === undefined ? 'abc123' : opts.token;
+  env.tokenDenied = !!opts.tokenDenied;
+  // L.hasViewPermission(): false for a login with only the read half of the page's ACL (a LuCI without it: `readOnly` unset)
+  if (opts.readOnly !== undefined) env.L.hasViewPermission = () => !opts.readOnly;
   const uci = {
     load: (c) => Promise.resolve([c]),
     get: (c, s, o) => env.uciData.get(c, s, o),
@@ -845,6 +856,46 @@ test('Settings and Remote access: after Start, the page reloads once the service
   const n = callsOf(down, 'status').length;
   assert.ok(n >= 10 && n <= 30, `asked ${n} times, then gave up`);
   assert.match(down.ui.notes.pop().textContent, /has not answered yet/);
+});
+
+test('Overview: a read-only LuCI login is not given the token — no web UI link, and the page says it needs write access', async () => {
+  // LuCI says the page is read-only for this login: the file is not even asked for
+  const ro = fakeLuci({ replies: healthy(), readOnly: true });
+  const a = await openView('overview', ro);
+  assert.deepEqual(ro.fsCalls, [], 'the token file is not read');
+  assert.ok(!a.page.byTag('a').some((x) => x.textContent === 'Open full web UI'), 'no link to the web UI');
+  assert.match(a.page.textContent, /The full web UI needs write access to luci-app-irnetfree/);
+  assert.doesNotMatch(a.page.textContent, /No token yet/, 'not "start the service": it is running, the login is the reason');
+  assert.doesNotMatch(a.page.textContent, /abc123/);
+  // the status and the configs still show: reading them is what the read half is for
+  assert.equal(a.v.el.config.textContent, 'ci-upstream (xray)');
+  assert.equal(a.v.el.body.style.display, '');
+
+  // a LuCI that does not say it (no hasViewPermission): rpcd refuses the read — the same page
+  const old = fakeLuci({ replies: healthy(), tokenDenied: true });
+  const b = await openView('overview', old);
+  assert.deepEqual(old.fsCalls, ['/etc/irnetfree/token']);
+  assert.ok(!b.page.byTag('a').some((x) => x.textContent === 'Open full web UI'));
+  assert.match(b.page.textContent, /needs write access/);
+  assert.doesNotMatch(b.page.textContent, /No token yet/);
+
+  // a login with write access: the link with the token, as before
+  const rw = fakeLuci({ replies: healthy(), readOnly: false });
+  const c = await openView('overview', rw);
+  assert.equal(c.page.byTag('a').find((x) => x.textContent === 'Open full web UI').getAttribute('href'), 'http://192.168.1.1:6969/?token=abc123');
+  assert.doesNotMatch(c.page.textContent, /needs write access/);
+
+  // in Persian
+  const fa = fakeLuci({ lang: 'fa', replies: healthy(), readOnly: true });
+  const d = await openView('overview', fa);
+  assert.match(d.page.textContent, /فقط اجازهٔ دیدن دارد/);
+
+  // the helper: rpcd's two refusals, and a missing file is not one
+  const cm = ro.common;
+  assert.equal(cm.accessDenied(Object.assign(new Error('Permission denied'), { name: 'PermissionError' })), true);
+  assert.equal(cm.accessDenied(new Error('RPC call to luci.irnetfree/connect failed with error -32002: Access denied')), true);
+  assert.equal(cm.accessDenied(Object.assign(new Error('Resource not found'), { name: 'NotFoundError' })), false);
+  assert.equal(cm.accessDenied(null), false);
 });
 
 test('Overview in Persian', async () => {
