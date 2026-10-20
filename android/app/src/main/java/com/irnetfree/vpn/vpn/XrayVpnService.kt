@@ -1045,7 +1045,7 @@ class XrayVpnService : VpnService() {
 
             // What this connect is built from: the screens name every change made
             // after it that the running tunnel does not carry (SettingsApply).
-            VpnState.setApplied(SettingsApply.Applied(s, fresh.profile))
+            VpnState.setApplied(SettingsApply.Applied(s, fresh.profile, SettingsApply.muxRead(store.muxMode, plan, engine), SettingsApply.chainsOf(plan)))
             // ...and what of the routing would not do what the screen says
             TunnelSetup.routingNotes(plan, s, engine, geo, privateDnsName(ctx)).forEach { line: String -> VpnState.addLog(line) }
 
