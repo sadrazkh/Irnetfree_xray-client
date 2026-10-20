@@ -18,10 +18,12 @@ import android.os.SystemClock
 import android.util.Log
 import com.irnetfree.vpn.core.AppSettings
 import com.irnetfree.vpn.core.CertPin
+import com.irnetfree.vpn.core.ChainConfig
 import com.irnetfree.vpn.core.ConfigBuilder
 import com.irnetfree.vpn.core.ConnectionPlan
 import com.irnetfree.vpn.core.DnsPlan
 import com.irnetfree.vpn.core.EngineChoice
+import com.irnetfree.vpn.core.GroupEvict
 import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.LocalAuth
 import com.irnetfree.vpn.core.LocalProxyAuth
@@ -46,6 +48,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
+import java.net.ServerSocket
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
@@ -117,6 +120,8 @@ class XrayVpnService : VpnService() {
     private var statsJob: Job? = null
     /** The running session's self-check; cancelled with it, so a verdict never lands on the next one. */
     private var checkJob: Job? = null
+    /** The running session's group watch (watchGroups) — only while its config runs a group; cancelled with it. */
+    private var groupJob: Job? = null
     private val main = Handler(Looper.getMainLooper())
     /** The newest start id: a teardown for an older command must not stop what a newer one started. */
     @Volatile private var lastStartId = 0
@@ -142,8 +147,13 @@ class XrayVpnService : VpnService() {
      * [muxTested]: the fingerprints of the servers auto mode put mux on by their verdict (Mux.Pick.onDrop) —
      * marked for a recheck when this session drops (markMuxRecheck), so the next connect that may test, tests
      * them again; their ok is kept meanwhile.
+     * [metricsPort] / [groups]: a config that runs a group — where its core's health check is read, and who
+     * each `T~gm<i>` is (GroupEvict); 0 / empty: no group, nothing watched.
      */
-    private class Launch(val engine: String, val config: String, val socksPort: Int, val gen: Long, val startId: Int, val lan: LanShare?, val muxTested: List<String> = emptyList()) {
+    private class Launch(
+        val engine: String, val config: String, val socksPort: Int, val gen: Long, val startId: Int, val lan: LanShare?,
+        val muxTested: List<String> = emptyList(), val metricsPort: Int = 0, val groups: List<GroupEvict.Group> = emptyList()
+    ) {
         /** Its mux verdicts have been marked: one drop, one log line. */
         val muxMarked = AtomicBoolean(false)
     }
@@ -281,9 +291,10 @@ class XrayVpnService : VpnService() {
     /**
      * The stored selection, through the same prepare() as the Connect button — off the main thread.
      * [recovery]: a reconnect of the service's own (a START_STICKY restart, the network watcher's
-     * rebuild) — no mux test.
+     * rebuild, a group reload) — no mux test. [groupReload]: the reload a group's set-aside asked
+     * for (watchGroups).
      */
-    private fun autoStart(gen: Long, startId: Int, why: String, recovery: Boolean) {
+    private fun autoStart(gen: Long, startId: Int, why: String, recovery: Boolean, groupReload: Boolean = false) {
         Thread {
             val intent = try {
                 // The process's one Store, the screens' own (Store.get): a second
@@ -298,7 +309,7 @@ class XrayVpnService : VpnService() {
                 // that nothing would clear (checked and set under one lock, Generation).
                 if (!generation.ifCurrent(gen) { VpnState.set(ConnState.CONNECTING, label) }) { worker.execute { finishIfIdle(startId) }; return@Thread }
                 VpnState.addLog("Connecting by itself ($why): $label")
-                prepare(this@XrayVpnService, store, plan, label, wanted = { gen == generation.get() }, recovery = recovery)
+                prepare(this@XrayVpnService, store, plan, label, wanted = { gen == generation.get() }, recovery = recovery, groupReload = groupReload)
             } catch (e: Throwable) {
                 Log.e(TAG, "auto start failed", e)
                 val msg = "Could not connect by itself ($why): ${e.message ?: "nothing to connect to"}"
@@ -326,6 +337,9 @@ class XrayVpnService : VpnService() {
         val sessionAuth = if (!user.isNullOrEmpty() && !pass.isNullOrEmpty()) LocalAuth(user, pass) else null
         val lan0: LanShare? = intent.getStringExtra(EXTRA_LAN)?.let { j -> runCatching { LanShare.fromJson(JSONObject(j)) }.getOrNull() }
         val muxTested: List<String> = intent.getStringArrayListExtra(EXTRA_MUX)?.toList() ?: emptyList()
+        val metricsPort = intent.getIntExtra(EXTRA_METRICS, 0)
+        val groups: List<GroupEvict.Group> = GroupEvict.mapFromJson(intent.getStringExtra(EXTRA_GROUPS))
+        val groupReload = intent.getBooleanExtra(EXTRA_GROUP_RELOAD, false)
 
         // A connect onto a live service: the old core and hev go first.
         // Otherwise the new core cannot bind the port, hev ignores a second
@@ -372,7 +386,7 @@ class XrayVpnService : VpnService() {
             // 1) Proxy core with a local SOCKS inbound (no internal tun).
             //    EngineChoice already decided which, and prepare() already checked
             //    it is bundled for this ABI; anything else here is a real failure.
-            val first = Launch(engine, config, socksPort, gen, startId, lan, muxTested)
+            val first = Launch(engine, config, socksPort, gen, startId, lan, muxTested, metricsPort, groups)
             val firstErr = startCore(first)
             val launch: Launch
             if (firstErr != null && lan != null && gen == generation.get()) {
@@ -384,7 +398,7 @@ class XrayVpnService : VpnService() {
                 val held = LocalPort.takenNow(listOf(lan.socksPort, lan.httpPort), LocalPort.ANY, graceMs = 0L)
                 val why = if (held.isNotEmpty()) "port ${held.joinToString(" and ")} is in use by another app" else "the core would not start with it ($firstErr)"
                 VpnState.addLog("⚠ LAN sharing skipped: $why — connecting without it; choose other ports under Settings → LAN sharing")
-                launch = Launch(engine, TunnelSetup.withoutLan(config), socksPort, gen, startId, null, muxTested)
+                launch = Launch(engine, TunnelSetup.withoutLan(config), socksPort, gen, startId, null, muxTested, metricsPort, groups)
                 startCore(launch)?.let { err -> return fail(gen, startId, err, unattended) }
             } else {
                 launch = first
@@ -448,11 +462,13 @@ class XrayVpnService : VpnService() {
                 return
             }
             VpnState.addLog("Connected")
+            if (groupReload) VpnState.addLog("Groups: the core reloaded with the members that answer")
             updateNotification(label, true)
             launch.lan?.let { l: LanShare -> logLan(l) }
             startStatsLoop()
             selfCheck(launch)
             watchNetwork(launch)
+            watchGroups(launch)
             Log.i(TAG, "tunnel up: $label")
         } catch (e: Throwable) {
             Log.e(TAG, "startTunnel failed", e)
@@ -697,6 +713,114 @@ class XrayVpnService : VpnService() {
     }
 
     /**
+     * A group's member that stays dead, set aside (GroupEvict; the desktop's
+     * main.js groupEvictTick). While this session's config runs a group — and
+     * only then (battery: one loopback read every GroupEvict.TICK_MS, nothing
+     * per second, screen on or off) — the core's own health check is read from
+     * its metrics listener and fed to the evictor. The set-aside members whose
+     * test is due are asked through a throwaway core, one at a time and at most
+     * GroupEvict.TESTS_PER_TICK a tick, and only when no test of the screens
+     * holds the one test core (XrayTester.coreLock). A reload the evictor wants
+     * is a connect of the stored selection onto this live tunnel (a switch,
+     * without a gap), without a mux test, the set-aside members left out by
+     * prepare(). Nothing happens while a connect or a disconnect is on its way
+     * (the generation); no reload while a setting waits for Apply or another
+     * selection was made since — said once. Runs on IO; cancelled with the session.
+     */
+    private fun watchGroups(l: Launch) {
+        groupJob?.cancel(); groupJob = null
+        if (l.metricsPort <= 0 || l.groups.isEmpty()) return
+        VpnState.addLog("Groups: the core's health check is read every ${GroupEvict.TICK_MS / 1000} s — a member that stays dead ${GroupEvict.EVICT_AFTER_MS / 1000} s while another answers is set aside and tested by the app")
+        groupJob = scope.launch {
+            var waitSaid = false
+            var unread = 0
+            while (isActive && running === l) {
+                delay(GroupEvict.TICK_MS)
+                if (!groupQuiet(l)) continue
+                val vars = GroupEvict.readVars(l.metricsPort)
+                if (vars == null) {
+                    unread++
+                    if (unread == 3) VpnState.addLog("⚠ Groups: the core's health check could not be read (127.0.0.1:${l.metricsPort}) — a member that stops answering is left to the core's own check")
+                    continue
+                }
+                unread = 0
+                if (!groupQuiet(l)) continue
+                for (x in groupEvict.update(GroupEvict.liveOf(l.groups, GroupEvict.healthOf(vars)))) logGroup(x)
+                var tested = 0
+                for (d in groupEvict.due()) {
+                    if (tested >= GroupEvict.TESTS_PER_TICK || !groupQuiet(l)) break
+                    // the one test core is busy (a test or ⚡ on screen): the next tick
+                    if (!XrayTester.coreLock.tryLock()) break
+                    val ms: Long = try { XrayTester.realDelay(this@XrayVpnService, d.record) } finally { XrayTester.coreLock.unlock() }
+                    tested++
+                    for (x in groupEvict.tested(d.key, ms >= 0, if (ms >= 0) ms else null)) logGroup(x)
+                }
+                if (!groupQuiet(l)) continue
+                // The desktop takes these out of (and back into) its running core
+                // without a restart (groupLive.js, `xray api rmo|ado`); the phone's
+                // in-process core has no such way in, so each is a reload here.
+                groupEvict.takeChanges()
+                if (!groupEvict.wantsReload()) continue
+                // a change waiting for Apply would go live with the reload, as would another selection
+                val wait = groupReloadWait(l)
+                if (wait != null) {
+                    if (!waitSaid) { waitSaid = true; VpnState.addLog(wait) }
+                    continue
+                }
+                waitSaid = false
+                if (!groupEvict.takeReload()) continue
+                main.post { reloadForGroups(l) }
+            }
+        }
+    }
+
+    /** This session is the one up, and no connect or disconnect has been asked for since. Any thread. */
+    private fun groupQuiet(l: Launch): Boolean = running === l && tunnelRunning && l.gen == generation.get()
+
+    /** One of the evictor's lines, a warning marked as every warning here. */
+    private fun logGroup(x: GroupEvict.Line) { VpnState.addLog(if (x.level == "warn") "⚠ ${x.line}" else x.line) }
+
+    /**
+     * Why a group reload has to wait (said once), or null: it may go now. It
+     * is a connect of the stored selection, so it waits while that is no
+     * longer this session's (another was picked since), and while a setting
+     * waits for Apply (SettingsApply) — the reload would apply it unasked.
+     * Blocking: the store is read on the main thread. Never on the main thread.
+     */
+    private fun groupReloadWait(l: Launch): String? = try {
+        onMain {
+            val store = Store.get(this@XrayVpnService)
+            val a = asked
+            val applied = VpnState.applied.value
+            val pending = SettingsApply.pending(applied, store.settings, applied?.profile?.let { p: RoutingProfile -> store.profileById(p.id) }, store.muxMode) { id: String ->
+                store.chainById(id)?.let { c: ChainConfig -> SettingsApply.ChainNow(c.name, store.chainMembers(c).map { m: ServerConfig -> m.id }) }
+            }
+            when {
+                a == null || a.gen != l.gen || a.selection != store.selection ->
+                    "Groups: a member to set aside or bring back waits — another selection was made since this connection; connect it (or reconnect) and the core reloads"
+                pending.isNotEmpty() ->
+                    "Groups: a member to set aside or bring back waits for your pending settings — apply them (or reconnect) and the core reloads"
+                else -> null
+            }
+        }
+    } catch (e: Throwable) {
+        "Groups: a member to set aside or bring back waits — ${e.message ?: "the selection could not be read"}"
+    }
+
+    /**
+     * The reload the evictor took: the stored selection connected onto this
+     * live tunnel — a switch, so no app goes around the VPN meanwhile — with
+     * the set-aside members left out (prepare) and no mux test. Overtaken by a
+     * connect or a disconnect before it got here: asked for again (that
+     * connect starts the evictor afresh anyway). Main thread.
+     */
+    private fun reloadForGroups(l: Launch) {
+        if (!groupQuiet(l)) { groupEvict.reloadFailed(); return }
+        val gen = generation.next()
+        autoStart(gen, lastStartId, "Groups: a member was set aside or answers again — the core reloads with the members that answer", recovery = true, groupReload = true)
+    }
+
+    /**
      * Watch the phone's own network under the session [l] now Connected
      * (NetWatch has the why): Android's default-network callback, delivered on
      * the main thread — nothing is polled. Let go with the session (teardown).
@@ -869,6 +993,7 @@ class XrayVpnService : VpnService() {
         unwatchNetwork()
         statsJob?.cancel(); statsJob = null
         checkJob?.cancel(); checkJob = null
+        groupJob?.cancel(); groupJob = null
         running = null
         VpnState.setLanShared(null)
         if (tunnelRunning) { runCatching { TProxyService.TProxyStopService() }; tunnelRunning = false }
@@ -1082,6 +1207,18 @@ class XrayVpnService : VpnService() {
         const val EXTRA_LAN = "lan"
         /** The fingerprints a drop of this session marks for a mux recheck (Mux.Pick.onDrop); absent = none. */
         const val EXTRA_MUX = "muxTested"
+        /** A config that runs a group: its metrics listener's port, and its groups (GroupEvict.mapToJson); absent = none. */
+        const val EXTRA_METRICS = "metricsPort"; const val EXTRA_GROUPS = "groups"
+        /** This connect is the reload a group's set-aside asked for (watchGroups). */
+        const val EXTRA_GROUP_RELOAD = "groupReload"
+
+        /**
+         * A group's member that stays dead: out of the running config, tested by
+         * the app instead (GroupEvict). Process-wide: every connect's prepare()
+         * starts it on its plan and reads what stays out; the session's
+         * watchGroups feeds it. On elapsed real time — a clock set by hand moves nothing.
+         */
+        private val groupEvict = GroupEvict.Evictor(now = { SystemClock.elapsedRealtime() })
 
         /** Moved on by every connect and disconnect: a prepare or a start carrying an older value was overtaken. */
         private val generation = Generation()
@@ -1216,8 +1353,10 @@ class XrayVpnService : VpnService() {
          * [wanted]: false once this connect has been overtaken — the mux test then starts nothing more.
          * [recovery]: a reconnect of the service's own after a drop (not the user's Connect, nor
          * connect-on-open, nor always-on) — it never runs a mux test, it uses what is kept (Mux.choose).
+         * [groupReload]: the reload a group's set-aside asked for (watchGroups) — the gap between such
+         * reloads keeps counting (GroupEvict.Evictor.reset).
          */
-        fun prepare(ctx: Context, store: Store, plan0: ConnectionPlan, label: String, wanted: () -> Boolean = { true }, recovery: Boolean = false): Intent {
+        fun prepare(ctx: Context, store: Store, plan0: ConnectionPlan, label: String, wanted: () -> Boolean = { true }, recovery: Boolean = false, groupReload: Boolean = false): Intent {
             // Certificate pinning on first use (CertPin.kt): a server whose link
             // asked for allowInsecure is dialled once, its leaf certificate hashed
             // and stored; the config then pins it. The core refuses allowInsecure
@@ -1242,6 +1381,13 @@ class XrayVpnService : VpnService() {
             }
             val plan = fresh.plan
             val s = fresh.settings
+
+            // A group member set aside lately for not answering stays out
+            // (GroupEvict: kept across a reconnect of the same plan): the evictor
+            // follows this plan from here — what it no longer holds is forgotten
+            // first, so nothing is left out that nobody tests any more.
+            groupEvict.reset(plan, reload = groupReload)
+            val groupSkip: Set<String> = groupEvict.skip().toSet()
 
             // Which core, exactly as the desktop decides it (EngineChoice.kt):
             // a single server takes its own choice, and a chain/pool/advanced plan
@@ -1302,10 +1448,18 @@ class XrayVpnService : VpnService() {
             // LAN sharing, when on and when it fits beside this connection's own
             // ports (the tunnel's may have been moved onto it since it was set).
             val lan = lanShareFor(ctx, s, fresh.pool)
+            // A config that runs a group opens the core's metrics listener on a
+            // loopback port picked free now: the session reads its groups' health
+            // check there (watchGroups). Without a group the config opens none.
+            val metricsPort = if (engine == EngineChoice.SINGBOX) 0 else freeLocalPort(setOf(s.socksPort, s.httpPort))
             val built = TunnelSetup.coreConfig(engine, plan, s, geo, wgIps, auth, lan, muxIds = mux.ids,
+                groupSkip = groupSkip, metricsPort = metricsPort,
                 coreVersion = { e -> if (e == EngineChoice.PATTN) XrayPattnCore.version(ctx) else XrayCore.version() }) { line -> VpnState.addLog(line) }
             engine = built.engine
             val config = built.json
+            val watched = built.groups.isNotEmpty() && metricsPort > 0 && engine != EngineChoice.SINGBOX
+            if (watched && groupSkip.isNotEmpty() && !groupReload)
+                VpnState.addLog("Groups: ${groupSkip.size} member(s) set aside lately for not answering stay out of this connection — the app tests them and brings each back when it answers")
 
             // What the OS resolves at: the tunnel peer under managed DNS (every
             // query enters the TUN and dns-out answers it), the user's own public
@@ -1333,7 +1487,22 @@ class XrayVpnService : VpnService() {
                 putStringArrayListExtra(EXTRA_PERAPPS, ArrayList(s.perApps))
                 if (lan != null) putExtra(EXTRA_LAN, lan.toJson().toString())
                 if (mux.onDrop.isNotEmpty() && built.engine != EngineChoice.SINGBOX) putStringArrayListExtra(EXTRA_MUX, ArrayList(mux.onDrop))
+                if (watched) { putExtra(EXTRA_METRICS, metricsPort); putExtra(EXTRA_GROUPS, GroupEvict.mapToJson(built.groups)) }
+                if (groupReload) putExtra(EXTRA_GROUP_RELOAD, true)
             }
+        }
+
+        /**
+         * A loopback port free right now, none of [avoid] (the tunnel's own
+         * inbounds); 0 when none could be had — the config then opens no
+         * metrics listener and no group is watched.
+         */
+        private fun freeLocalPort(avoid: Set<Int>): Int {
+            repeat(3) {
+                val p = try { ServerSocket(0).use { ss: ServerSocket -> ss.localPort } } catch (e: Exception) { 0 }
+                if (p > 0 && p !in avoid) return p
+            }
+            return 0
         }
 
         /** The LAN share this connection opens: null when it is off, or when it no longer fits (said in the log). */

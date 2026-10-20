@@ -14,9 +14,12 @@ import java.security.SecureRandom
  *
  * Stored under `groups` ([GroupConfig]):
  *   { id: 'grp-…', name, strategy: 'roundRobin' | 'leastPing' | 'random',
- *     members: [{ id: '<serverId>', address?: '<ip or host>', port?: <n> }] }
+ *     members: [{ id: '<serverId>', address?: '<ip or host>', port?: <n> }],
+ *     fallback?: '<serverId>' }
  * A member is a server, dialled as it is or at an address of its own (a clean
  * CDN IP — AddressSwap.withTarget keeps its SNI and Host on the original name).
+ * The fallback is a saved server (never a group) the group's traffic takes
+ * when no member answers; without one it waits on the first member.
  *
  * The plan carries a group as a RECORD beside the servers ([groupRecord]): a
  * ServerConfig whose outbound is a `loopback` marked `_group` with its member
@@ -70,8 +73,12 @@ object Groups {
         return GroupMember(id, if (keepAddress) address else null, port)
     }
 
-    /** A group with only its own fields, each of its type; an id that is not `grp-…` a new one; not an object → null. */
-    fun normalizeGroup(g: Any?, now: () -> Long = { System.currentTimeMillis() }): GroupConfig? {
+    /**
+     * A group with only its own fields, each of its type; an id that is not `grp-…` a new one; not an object → null.
+     * Its fallback: a server's id, kept — "" when it is none, a group's, or (with [known], the saved servers' ids)
+     * a server that is not there. Without [known] an id is kept as it is: [groupRecord] leaves out one that is gone.
+     */
+    fun normalizeGroup(g: Any?, now: () -> Long = { System.currentTimeMillis() }, known: Set<String>? = null): GroupConfig? {
         val src: JSONObject = when (g) {
             is GroupConfig -> g.toJson()
             is JSONObject -> g
@@ -84,7 +91,10 @@ object Groups {
         val list = src.optJSONArray("members")
         val members = ArrayList<GroupMember>()
         if (list != null) for (i in 0 until list.length()) normalizeMember(list.opt(i))?.let { x: GroupMember -> members.add(x) }
-        return GroupConfig(id, str(src, "name").ifEmpty { "Group" }, strategy, members)
+        // the config the group's traffic takes when no member answers (a WARP, say); a server's id, never a group's
+        val fallback = str(src, "fallback")
+        val keepFallback = fallback.isNotEmpty() && !isGroupId(fallback) && (known == null || fallback in known)
+        return GroupConfig(id, str(src, "name").ifEmpty { "Group" }, strategy, members, if (keepFallback) fallback else "")
     }
 
     /** The list as it is saved: each normalized, a repeated id dropped. [list]: a JSONArray or a List. */
@@ -117,9 +127,10 @@ object Groups {
     /**
      * The record a group is in a plan — null when none of its members is left:
      * a ServerConfig { id, name, protocol "group", address "", port 0 } whose
-     * outbound is `{ protocol: loopback, settings: {}, _group: { strategy,
-     * members: [server records] } }`. [serversById]: the saved servers (never
-     * other groups — a group never holds a group).
+     * outbound is `{ protocol: loopback, settings: {}, _group: { id, name,
+     * strategy, members: [server records], fallback?: server record } }`.
+     * [serversById]: the saved servers (never other groups — a group never
+     * holds a group, nor falls back to one). A fallback that is gone is left out.
      */
     fun groupRecord(group: GroupConfig, serversById: Map<String, ServerConfig>): ServerConfig? {
         val g = normalizeGroup(group) ?: return null
@@ -134,8 +145,10 @@ object Groups {
         // copies: the record shares nothing with the stored servers
         val arr = JSONArray()
         for (rec in members) arr.put(JSONObject(rec.toJson().toString()))
-        val outbound = JSONObject().put("protocol", "loopback").put("settings", JSONObject())
-            .put(MARK, JSONObject().put("strategy", g.strategy).put("members", arr))
+        val mark = JSONObject().put("id", g.id).put("name", g.name).put("strategy", g.strategy).put("members", arr)
+        val fb = if (g.fallback.isEmpty()) null else serversById[g.fallback]
+        if (fb != null && fb.outbound.length() > 0 && fb.protocol != PROTOCOL && !isGroupRecord(fb)) mark.put("fallback", JSONObject(fb.toJson().toString()))
+        val outbound = JSONObject().put("protocol", "loopback").put("settings", JSONObject()).put(MARK, mark)
         return ServerConfig(id = g.id, name = g.name, protocol = PROTOCOL, address = "", port = 0, outbound = outbound)
     }
 
@@ -169,9 +182,10 @@ object Groups {
      * One member a `_group` marker carries, as ConfigBuilder.expandGroups
      * reads it: a server ([server]), or a whole chain ([chain]) — a chain
      * through a group becomes a group of chains (ConfigBuilder.groupOfChains),
-     * one variant per member in the group's place.
+     * one variant per member in the group's place; [at]: the hops of the
+     * variant that stand in a group's place (what names the variant).
      */
-    class Member(val server: ServerConfig?, val chain: List<ServerConfig>?)
+    class Member(val server: ServerConfig?, val chain: List<ServerConfig>?, val at: List<Int> = emptyList())
 
     /** Every member a `_group` marker carries — servers and chain variants — in order; nothing else. */
     fun entriesOf(mark: JSONObject?): List<Member> {
@@ -186,7 +200,10 @@ object Groups {
                     val h = c.optJSONObject(j) ?: continue
                     hops.add(ServerConfig.fromJson(h))
                 }
-                out.add(Member(null, hops))
+                val atArr = o.optJSONArray("at")
+                val at = ArrayList<Int>()
+                if (atArr != null) for (k in 0 until atArr.length()) { val x = atArr.optInt(k, -1); if (x >= 0) at.add(x) }
+                out.add(Member(null, hops, at))
                 continue
             }
             val s = ServerConfig.fromJson(o)
@@ -201,10 +218,23 @@ object Groups {
         return if (st is String && st in STRATEGIES) st else DEFAULT_STRATEGY
     }
 
-    /** The servers a record stands for: a group's members, else the record itself. */
+    /** The server a `_group` marker falls back to when no member answers, or null: none (the first member then). */
+    fun fallbackOf(mark: JSONObject?): ServerConfig? {
+        val o = mark?.optJSONObject("fallback") ?: return null
+        val s = ServerConfig.fromJson(o)
+        return if (s.outbound.length() > 0) s else null
+    }
+
+    /**
+     * The servers a record stands for — everything it may dial: a group's
+     * members and its fallback, else the record itself. (What the group's
+     * balancer picks among is [membersOf].)
+     */
     fun serversOf(s: ServerConfig?): List<ServerConfig> {
         if (s == null) return emptyList()
-        return if (isGroupRecord(s)) membersOf(s.outbound.optJSONObject(MARK)) else listOf(s)
+        if (!isGroupRecord(s)) return listOf(s)
+        val mark = s.outbound.optJSONObject(MARK)
+        return membersOf(mark) + listOfNotNull(fallbackOf(mark))
     }
 
     /** How many members a group record carries (0 for anything else). */
