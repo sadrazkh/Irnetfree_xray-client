@@ -133,6 +133,7 @@ function fakeEl(tag) {
     append(...c) { c.forEach((x) => el.appendChild(x)); },
     replaceChildren(...c) { el.children = []; c.forEach((x) => el.appendChild(x)); },
     remove() { if (el.parentNode) el.parentNode.children = el.parentNode.children.filter((x) => x !== el); },
+    contains(n) { for (let x = n; x; x = x.parentNode) if (x === el) return true; return false; },
     setAttribute(k, v) { el.attrs[k] = String(v); },
     getAttribute(k) { return k in el.attrs ? el.attrs[k] : null; },
     insertAdjacentElement() {},
@@ -989,6 +990,142 @@ test('the home picker without profiles: today’s single “Advanced routing” 
   assert.deepEqual(h.picked, ['__advanced__']);
 });
 
+/* ------------------------------------ the searchable select ------------------------------------ */
+
+const SS_A = { key: 'sub:a', name: 'Sub A', ico: '🔗' };
+const SS_B = { key: 'sub:b', name: 'Sub B', ico: '🔗' };
+const SS_OPTS = [{ value: 'direct', label: 'Direct' }, { value: 'a1', label: 'DE-1', pile: SS_A }, { value: 'a2', label: 'DE-2', pile: SS_A },
+  { value: 'b1', label: 'NL-1', pile: SS_B }, { value: 'b2', label: 'FI-1', pile: SS_B }];
+
+/** makeSearchSelect over a page that counts its document listeners and keeps the folds in a store. */
+function ssHarness(folded = []) {
+  const listeners = [];
+  const store = { 'irnf.pileFold': JSON.stringify(folded) };
+  const document = {
+    createElement: fakeEl,
+    addEventListener: (type, fn) => { if (!listeners.some((l) => l.type === type && l.fn === fn)) listeners.push({ type, fn }); },
+    removeEventListener: (type, fn) => { const i = listeners.findIndex((l) => l.type === type && l.fn === fn); if (i > -1) listeners.splice(i, 1); }
+  };
+  const ctx = compile(['makeSearchSelect', 'pileHead', 'pileFolds', 'setPileFold'], {
+    document, t: en, escapeHtml: (x) => String(x), setTimeout: (fn) => fn(),
+    localStorage: { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } },
+    JSON, Set, Math, String, Array
+  });
+  const make = (value = 'a1') => {
+    const changed = [];
+    const wrap = ctx.makeSearchSelect({ options: SS_OPTS, value, onChange: (v) => changed.push(v) });
+    const [cur, menu] = wrap.children;
+    const [search, list] = menu.children;
+    // a browser puts the scroll back to the top when a list is emptied
+    Object.defineProperty(list, 'innerHTML', { configurable: true, get: () => list.html, set: (v) => { list.html = String(v); list.children = []; list.scrollTop = 0; } });
+    const items = () => list.children.filter((c) => hasClass(c, 'ss-item'));
+    const heads = () => list.children.filter((c) => hasClass(c, 'ss-pile'));
+    const hi = () => items().filter((c) => hasClass(c, 'hi')).map((c) => c.textContent);
+    const key = (k) => search.onkeydown({ key: k, preventDefault() {}, stopPropagation() {} });
+    return { wrap, cur, menu, search, list, items, heads, hi, key, changed, open: () => cur.onclick({ stopPropagation() {} }) };
+  };
+  const outside = () => listeners.filter((l) => l.type === 'click').forEach((l) => l.fn({ target: fakeEl('div') }));
+  return { make, listeners, store, outside, folds: () => JSON.parse(store['irnf.pileFold']) };
+}
+
+test('the searchable select listens for the outside click only while it is open — rebuilt ones no longer pile listeners up', () => {
+  const h = ssHarness();
+  const a = h.make();
+  h.make(); h.make();
+  assert.equal(h.listeners.length, 0, 'three built, none open: no document listener');
+  a.open();
+  assert.equal(a.menu.hidden, false);
+  assert.equal(h.listeners.length, 1);
+  a.search.onclick({ stopPropagation() {} });
+  h.listeners.forEach((l) => l.fn({ target: a.search }));
+  assert.equal(a.menu.hidden, false, 'a click inside keeps it open');
+  h.outside();
+  assert.equal(a.menu.hidden, true, 'a click outside closes it');
+  assert.equal(h.listeners.length, 0, 'and its listener goes with it');
+  a.open();
+  a.items().find((c) => c.textContent === 'NL-1').onclick();
+  assert.deepEqual(a.changed, ['b1']);
+  assert.equal(a.menu.hidden, true);
+  assert.equal(h.listeners.length, 0, 'a pick closes it the same way');
+  a.open(); a.cur.onclick({ stopPropagation() {} });
+  assert.equal(h.listeners.length, 0, 'closed by its own button too');
+});
+
+test('the searchable select from the keyboard: ↑ ↓ move a highlight from the current choice (a search: from the first match), Enter picks, Esc closes', () => {
+  const h = ssHarness();
+  const s = h.make('a1');
+  s.open();
+  assert.deepEqual(s.hi(), ['DE-1'], 'it starts on the current choice');
+  s.key('ArrowDown');
+  assert.deepEqual(s.hi(), ['DE-2']);
+  for (let i = 0; i < 6; i++) s.key('ArrowDown');
+  assert.deepEqual(s.hi(), ['FI-1'], 'it stops at the end');
+  s.key('ArrowUp');
+  assert.deepEqual(s.hi(), ['NL-1']);
+  assert.equal(s.items().find((c) => c.textContent === 'NL-1').scrolled.block, 'nearest', 'kept in view');
+  s.key('Enter');
+  assert.deepEqual(s.changed, ['b1']);
+  assert.equal(s.menu.hidden, true);
+  assert.equal(h.listeners.length, 0);
+
+  s.open();
+  s.search.value = 'fi';
+  s.search.oninput();
+  assert.deepEqual(s.items().map((c) => c.textContent), ['FI-1']);
+  assert.deepEqual(s.hi(), ['FI-1'], 'a search starts on its first match');
+  s.key('Enter');
+  assert.deepEqual(s.changed, ['b1', 'b2']);
+
+  s.open();
+  s.key('Escape');
+  assert.equal(s.menu.hidden, true);
+  assert.equal(s.cur.focused, true, 'the focus goes back to the button');
+  assert.equal(h.listeners.length, 0);
+  // nothing matched: the keys do nothing
+  s.open();
+  s.search.value = 'zz';
+  s.search.oninput();
+  s.key('ArrowDown'); s.key('Enter');
+  assert.deepEqual(s.changed, ['b1', 'b2']);
+  assert.equal(s.menu.hidden, false);
+});
+
+test('a pile head folds from the mouse or the keyboard and keeps the scroll; one that cannot fold (the current choice’s, or any while searching) writes nothing', () => {
+  const h = ssHarness(['sub:a', 'sub:b']);
+  const s = h.make('a1');
+  s.open();
+  const [a, b] = s.heads();
+  // the current choice's pile stays open, and its head is no toggle at all
+  assert.deepEqual([hasClass(a, 'folded'), hasClass(a, 'pile-fixed'), a.onclick, !a.onkeydown, a.attrs.tabindex, a.attrs.role], [false, true, null, true, undefined, undefined]);
+  assert.deepEqual(s.items().map((c) => c.textContent), ['Direct', 'DE-1', 'DE-2'], 'B folded');
+  // B: a button, reached by Tab, Enter opens it
+  assert.deepEqual([hasClass(b, 'folded'), b.attrs.role, b.attrs.tabindex, b.attrs['aria-expanded'], b.dataset.pile], [true, 'button', '0', 'false', 'sub:b']);
+  s.list.scrollTop = 120;
+  b.onkeydown({ key: 'Enter', preventDefault() {}, stopPropagation() {} });
+  assert.deepEqual(h.folds(), ['sub:a'], 'remembered for the pickers');
+  assert.deepEqual(s.items().map((c) => c.textContent), ['Direct', 'DE-1', 'DE-2', 'NL-1', 'FI-1']);
+  assert.equal(s.list.scrollTop, 120, 'the list stays where it was scrolled to');
+  const b2 = s.heads()[1];
+  assert.notEqual(b2, b, 'drawn again');
+  assert.equal(b2.focused, true, 'the focus on the new head of the same pile');
+  // Space folds it again, a click opens it — the scroll kept each time
+  b2.onkeydown({ key: ' ', preventDefault() {}, stopPropagation() {} });
+  assert.deepEqual(h.folds(), ['sub:a', 'sub:b']);
+  s.list.scrollTop = 40;
+  s.heads()[1].onclick({ stopPropagation() {} });
+  assert.deepEqual(h.folds(), ['sub:a']);
+  assert.equal(s.list.scrollTop, 40);
+  // other keys do nothing
+  s.heads()[1].onkeydown({ key: 'a', preventDefault() {}, stopPropagation() {} });
+  assert.deepEqual(h.folds(), ['sub:a']);
+  // while searching every head is open and none folds
+  h.store['irnf.pileFold'] = JSON.stringify(['sub:b']);
+  s.search.value = 'sub';
+  s.search.oninput();
+  assert.ok(s.heads().every((x) => hasClass(x, 'pile-fixed') && !hasClass(x, 'folded') && x.onclick === null), 'a search shows every match');
+  assert.deepEqual(h.folds(), ['sub:b'], 'nothing written');
+});
+
 test('the rest of the window knows a profile selection: no ping for it, its name on Home, its plan in the live check', () => {
   assert.match(fnSource('quickPing'), /if \(!id \|\| id === ADV_ID \|\| id === POOL_ID \|\| String\(id\)\.startsWith\(ADV_ID \+ ':'\)\) return;/);
   assert.match(fnSource('selectServer'), /!String\(id\)\.startsWith\(ADV_ID \+ ':'\)/);
@@ -1455,4 +1592,9 @@ test('the flows’ arrows follow the reading direction: → in English, ← in P
   const run = (dir) => compile(['flowArrow'], { document: { documentElement: { dir } } }, '').flowArrow();
   assert.equal(run('ltr'), '→');
   assert.equal(run('rtl'), '←');
+  // a chain's hops on Home — the line under the power button, a target's tooltip in the flow — as the chain card writes them
+  assert.match(fnSource('setConnUI'), /names\.join\(' ' \+ flowArrow\(\) \+ ' '\)/);
+  assert.match(fnSource('buildHomeFlow'), /x\.name\)\.join\(' ' \+ flowArrow\(\) \+ ' '\)/);
+  assert.match(fnSource('cgChainSum'), /el\.append\(' ' \+ flowArrow\(\) \+ ' '\)/);
+  for (const fn of ['setConnUI', 'buildHomeFlow']) assert.doesNotMatch(fnSource(fn), /join\(' → '\)/, `${fn}: a fixed → points backwards in Persian`);
 });

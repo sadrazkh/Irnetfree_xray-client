@@ -12,6 +12,7 @@ const state = {
   activeServerId: null,   // currently connected server
   activeEngine: '',       // core the live connection runs on
   selectedServerId: null, // chosen in the picker (target for connect)
+  pickerQuery: '',        // the Home picker's search (its menu is drawn again with every change)
   savedSelection: null,   // what main last stored as the selection (keepSelectionValid)
   lastServerId: null,     // the last connection made — a selection that is gone falls back to it
   connected: false,
@@ -717,8 +718,14 @@ function readTunApps() {
  *
  * `silent: true` skips the prompt (the caller shows its own), but the pending
  * state is still recorded so the banner stays accurate.
+ *
+ * The prompt is for what THIS save changed: a key it made pending, or a pending
+ * key it changed again. Asking whenever anything is pending brought the dialog
+ * back after "Later" on every unrelated save — the theme, the skin, the language.
  */
 async function saveSettings(partial = {}, { silent = false } = {}) {
+  const before = (state.pendingReconnect || []).slice();
+  const prev = state.settings || {};
   const res = await window.api.setSettings(partial);
   // main returns { settings, pendingReconnect, error? }; tolerate the older bare shape
   state.settings = (res && res.settings) ? res.settings : res;
@@ -731,7 +738,9 @@ async function saveSettings(partial = {}, { silent = false } = {}) {
   renderTrafficPath(state.connected ? 'connected' : state.connecting ? 'connecting' : 'disconnected');
   renderInspector();
 
-  if (!silent && state.pendingReconnect.length) await promptApplySettings();
+  const now = state.settings || {};
+  const changed = (k) => Object.prototype.hasOwnProperty.call(partial, k) && JSON.stringify(prev[k]) !== JSON.stringify(now[k]);
+  if (!silent && state.pendingReconnect.some(k => !before.includes(k) || changed(k))) await promptApplySettings();
   return state.pendingReconnect;
 }
 
@@ -1299,17 +1308,42 @@ function setPileFold(key, folded) {
   try { localStorage.setItem('irnf.pileFold', JSON.stringify([...s])); } catch { /* only costs the memory */ }
 }
 
-/** A pile's head in a picker: chevron, icon, name, count — a click folds or opens it. */
+/**
+ * A pile's head in a picker: chevron, icon, name, count — a click, or Enter / Space
+ * on it, folds or opens it. Without `onToggle` it only names the pile: one that
+ * cannot fold now (it holds the current choice, or a search shows every match).
+ *
+ * `onToggle` draws the list again, which is the head's parent and its scroller:
+ * the scroll stays where it was (it jumped to the top), and a toggle from the
+ * keyboard puts the focus on the new head of the same pile.
+ */
 function pileHead(cls, pile, count, folded, onToggle) {
   const head = document.createElement('div');
-  head.className = cls + (folded ? ' folded' : '');
-  head.setAttribute('role', 'button');
-  head.setAttribute('aria-expanded', String(!folded));
+  head.className = cls + (folded ? ' folded' : '') + (onToggle ? '' : ' pile-fixed');
+  head.dataset.pile = pile.key;
   head.innerHTML = '<span class="srv-group-chev" aria-hidden="true">▾</span><span class="pile-ico" aria-hidden="true"></span><span class="pile-name"></span><span class="srv-group-count"></span>';
   head.querySelector('.pile-ico').textContent = pile.ico;
   head.querySelector('.pile-name').textContent = pile.name;
   head.querySelector('.srv-group-count').textContent = String(count);
-  head.onclick = (e) => { e.stopPropagation(); onToggle(); };
+  if (!onToggle) return head;
+  head.setAttribute('role', 'button');
+  head.setAttribute('tabindex', '0');
+  head.setAttribute('aria-expanded', String(!folded));
+  const toggle = (byKey) => {
+    const box = head.parentNode;
+    const top = box ? box.scrollTop : 0;
+    onToggle();
+    if (!box) return;
+    box.scrollTop = top;
+    if (byKey) for (const c of box.children) if (c !== head && c.dataset && c.dataset.pile === pile.key) { c.focus(); break; }
+  };
+  head.onclick = (e) => { e.stopPropagation(); toggle(false); };
+  head.onkeydown = (e) => {
+    if (!e || (e.key !== 'Enter' && e.key !== ' ')) return;
+    if (e.preventDefault) e.preventDefault();
+    if (e.stopPropagation) e.stopPropagation();
+    toggle(true);
+  };
   return head;
 }
 
@@ -1523,8 +1557,9 @@ function serverCard(s) {
   // which for MASQUE is its one-line JSON too (no client has a standard link for it)
   const isMasque = s.protocol === 'masque';
   const copyKey = isJson ? 'ed.jsonCopy' : isMasque ? 'srv.copyJson' : 'btn.copy';
-  const copyTitle = isJson || isMasque ? escapeHtml(t(copyKey)) : 'copy';
   const qrKey = isMasque ? 'btn.qrJson' : 'btn.qr';
+  // (the buttons' titles are t(…) as the card is built: applyI18n ran before it, so
+  // data-i18n-title alone left an English placeholder until the next language switch)
   // what the record is, beside its name: WARP (WARP+), and the HTTP version (MASQUE)
   const tags = srvTags(s);
   const tagsHtml = tags.length
@@ -1545,12 +1580,12 @@ function serverCard(s) {
     </div>
     <span class="srv-usage" data-usage="${escapeHtml(s.id)}" title="${escapeHtml(t('srv.usage'))} — ${escapeHtml(t('srv.usageClick'))}">${usageLabel(s.id)}</span>
     <div class="srv-actions">
-      <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="ping">⚡</button>
-      <button class="icon-btn copy-srv" data-i18n-title="${copyKey}" title="${copyTitle}">⧉</button>
-      <button class="icon-btn qr-srv" data-i18n-title="${qrKey}" title="${isMasque ? escapeHtml(t(qrKey)) : 'QR'}">▦</button>
-      <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="edit">✎</button>
+      <button class="icon-btn ping-srv" data-i18n-title="btn.quickPing" title="${escapeHtml(t('btn.quickPing'))}">⚡</button>
+      <button class="icon-btn copy-srv" data-i18n-title="${copyKey}" title="${escapeHtml(t(copyKey))}">⧉</button>
+      <button class="icon-btn qr-srv" data-i18n-title="${qrKey}" title="${escapeHtml(t(qrKey))}">▦</button>
+      <button class="icon-btn edit-srv" data-i18n-title="btn.edit" title="${escapeHtml(t('btn.edit'))}">✎</button>
       <button class="icon-btn connect-srv" title="▶">▶</button>
-      <button class="icon-btn del-srv" title="🗑">🗑</button>
+      <button class="icon-btn del-srv" data-i18n-title="srv.delete" title="${escapeHtml(t('srv.delete'))}">🗑</button>
     </div>`;
 
   // clicking the card body selects the server (syncs with the home picker)
@@ -1822,7 +1857,12 @@ function renderPicker() {
     btnPing.textContent = '';
   }
 
-  // build menu — header (ping all) + special targets + servers
+  // build menu — header (ping all) + the search + special targets + servers.
+  // The menu is drawn again on every change (each letter typed, a refresh, a selection): a search
+  // box that had the focus gets it back on the new one, with its caret where it was
+  const ae = document.activeElement;
+  const typing = !!ae && ae.parentNode === menu && ae.classList.contains('picker-search');
+  const caret = typing ? [ae.selectionStart, ae.selectionEnd] : null;
   menu.innerHTML = '';
   const header = document.createElement('div');
   header.className = 'picker-head';
@@ -1831,6 +1871,30 @@ function renderPicker() {
     <button class="picker-pingall">⚡ ${escapeHtml(t('btn.pingAll'))}</button>`;
   header.querySelector('.picker-pingall').onclick = (e) => { e.stopPropagation(); pingAllVisible(); };
   menu.appendChild(header);
+
+  // the search (makeSearchSelect's look): a row is kept when its name — or, for a server, its
+  // pile's — holds the text; while it is set every pile with a match is open
+  const q = String(state.pickerQuery || '').trim().toLowerCase();
+  const hit = (...words) => !q || words.some(w => String(w || '').toLowerCase().includes(q));
+  let search = null;
+  if (hasAny) {
+    search = document.createElement('input');
+    search.className = 'input ss-search picker-search';
+    search.setAttribute('dir', 'auto');
+    search.setAttribute('aria-label', t('picker.search'));
+    search.placeholder = t('picker.search');
+    search.value = state.pickerQuery || '';
+    search.oninput = () => { state.pickerQuery = search.value; renderPicker(); };
+    // Esc clears the search; on an empty one it closes the menu
+    search.onkeydown = (e) => {
+      if (!e || e.key !== 'Escape') return;
+      if (e.preventDefault) e.preventDefault();
+      if (e.stopPropagation) e.stopPropagation();
+      if (search.value) { state.pickerQuery = ''; renderPicker(); } else closePicker();
+    };
+    menu.appendChild(search);
+  }
+  let shown = 0;
 
   const addRow = (id, badgeHtml, name, pingId, isSpecial) => {
     const tl = pingId ? pingResultLabel((state.pings[pingId] || {}).tcp) : null;
@@ -1844,7 +1908,7 @@ function renderPicker() {
           `<span class="stat" title="${escapeHtml(t('ping.real'))}"><i>↓</i><b class="stat-v ${rl.cls}" data-pbase="stat-v" data-ping-real="${escapeHtml(id)}">${rl.txt}</b></span>` +
           `<span class="stat" title="${escapeHtml(t('ping.upload'))}"><i>↑</i><b class="stat-v ${ul.cls}" data-pbase="stat-v" data-ping-up="${escapeHtml(id)}">${ul.txt}</b></span>` +
         `</span>` +
-        `<button class="pi-ping-btn" title="ping">⚡</button>`
+        `<button class="pi-ping-btn" title="${escapeHtml(t('btn.quickPing'))}">⚡</button>`
       : '';
     const dot = pingId ? `<span class="q-dot ${tl.cls}" data-ping-dot="${escapeHtml(id)}"></span>` : '<span class="q-dot"></span>';
     row.innerHTML = `${dot}${badgeHtml}<span class="pi-name">${escapeHtml(name)}</span>${pingPart}`;
@@ -1852,11 +1916,14 @@ function renderPicker() {
     const pb = row.querySelector('.pi-ping-btn');
     if (pb) pb.onclick = (e) => { e.stopPropagation(); pingServer(id); };
     menu.appendChild(row);
+    shown++;
   };
 
   // "Auto": with two or more servers there is something to choose between.
   // Not a selection (the selected target stays what it was) — a click tests
-  // and connects, and the picker then shows the server that won.
+  // and connects, and the picker then shows the server that won. A search
+  // leaves it in place: it is an action over every config, not one of them —
+  // and refreshConnectControls rewrites the first .picker-auto, which must be it.
   if (state.servers.length >= 2) {
     const row = document.createElement('div');
     row.className = 'picker-item picker-special picker-auto';
@@ -1870,45 +1937,66 @@ function renderPicker() {
   if (groups.length >= 2) {
     for (const g of groups) {
       if (!g.id || g.items.length < 2) continue;
+      const name = t('picker.autoSub').replace('{name}', () => g.name);
+      if (!hit(name)) continue;
       const row = document.createElement('div');
       row.className = 'picker-item picker-special picker-auto picker-auto-sub';
       row.innerHTML = '<span class="q-dot"></span><span class="proto-badge proto-auto">⚡</span><span class="pi-name"></span>';
-      row.querySelector('.pi-name').textContent = t('picker.autoSub').replace('{name}', () => g.name);
+      row.querySelector('.pi-name').textContent = name;
       row.onclick = () => { closePicker(); connectAuto({ ids: g.items.map(s => s.id), name: g.name }); };
       menu.appendChild(row);
+      shown++;
     }
   }
-  if (poolReady()) addRow(POOL_ID, '<span class="proto-badge proto-pool">🧩</span>', t('picker.pool') + ' (' + poolEnabledValid().length + ')', null, true);
+  const poolName = t('picker.pool') + ' (' + poolEnabledValid().length + ')';
+  if (poolReady() && hit(poolName)) addRow(POOL_ID, '<span class="proto-badge proto-pool">🧩</span>', poolName, null, true);
   if (Array.isArray(state.profiles)) {
     // one 🧭 row per routing profile that has rules or a default
     if (state.settings.advancedRouting) {
       for (const p of state.profiles) {
-        if (profileReady(p)) addRow(ADV_ID + ':' + p.id, '<span class="proto-badge proto-advanced">🧭</span>', p.name || t('picker.advanced'), null, true);
+        const name = p.name || t('picker.advanced');
+        if (profileReady(p) && hit(name)) addRow(ADV_ID + ':' + p.id, '<span class="proto-badge proto-advanced">🧭</span>', name, null, true);
       }
     }
-  } else if (advancedReady()) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
+  } else if (advancedReady() && hit(t('picker.advanced'))) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
   for (const c of state.chains) {
-    if (chainReady(c)) addRow(c.id, '<span class="proto-badge proto-chain">⛓</span>', c.name, c.id, true);
+    if (chainReady(c) && hit(c.name)) addRow(c.id, '<span class="proto-badge proto-chain">⛓</span>', c.name, c.id, true);
   }
   // groups (v1.27): «⧉ name · n configs», while a member of it is still here
   for (const g of state.groups || []) {
     const rec = srvById(g.id);
-    if (rec) addRow(g.id, '<span class="proto-badge proto-group">⧉</span>', g.name + ' · ' + grpCountText(rec.group.size), g.id, true);
+    if (rec && hit(g.name)) addRow(g.id, '<span class="proto-badge proto-group">⧉</span>', g.name + ' · ' + grpCountText(rec.group.size), g.id, true);
   }
   // the servers under the pile they come from (the hand-added ones, each subscription), folded
-  // as the pickers remember — the pile of the selected server stays open; one pile needs no head
+  // as the pickers remember — the pile of the selected server stays open; one pile needs no head.
+  // A head that cannot fold now (that pile, or any while searching) is drawn without a toggle:
+  // a click on it wrote a fold this menu did not show, and every other picker did
   const piles = serverGroups();
   const folds = pileFolds();
   for (const g of piles) {
     const key = groupKey(g.id);
-    const folded = piles.length > 1 && folds.has(key) && !g.items.some(s => s.id === selId);
+    const items = hit(g.name) ? g.items : g.items.filter(s => hit(s.name));
+    if (!items.length) continue;
+    const canFold = piles.length > 1 && !q && !g.items.some(s => s.id === selId);
+    const folded = canFold && folds.has(key);
     if (piles.length > 1) {
-      menu.appendChild(pileHead('picker-pile', { key, name: g.name, ico: g.id ? '🔗' : '✎' }, g.items.length, folded, () => { setPileFold(key, !folded); renderPicker(); }));
+      menu.appendChild(pileHead('picker-pile', { key, name: g.name, ico: g.id ? '🔗' : '✎' }, items.length, folded,
+        canFold ? () => { setPileFold(key, !folded); renderPicker(); } : null));
     }
     if (folded) continue;
-    for (const s of g.items) {
+    for (const s of items) {
       addRow(s.id, `<span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(s.protocol)}</span>`, s.name, s.id, false);
     }
+  }
+  if (q && !shown) {
+    const none = document.createElement('div');
+    none.className = 'ss-empty';
+    none.textContent = t('ss.none');
+    menu.appendChild(none);
+  }
+  if (search && typing) {
+    search.focus();
+    try { search.setSelectionRange(caret[0], caret[1]); } catch { /* a caret is only a nicety */ }
   }
 }
 
@@ -1918,7 +2006,17 @@ async function pingAllVisible() {
     ...(state.groups || []).filter(g => srvById(g.id)).map(g => g.id)]);
 }
 
-function openPicker() { if (state.servers.length || anyChainReady() || advancedReady() || poolReady()) $('#pickerMenu').hidden = false; }
+function openPicker() {
+  if (!(state.servers.length || anyChainReady() || advancedReady() || poolReady())) return;
+  // it opens on everything: a search left from the last time is not kept
+  if (state.pickerQuery) { state.pickerQuery = ''; renderPicker(); }
+  const menu = $('#pickerMenu');
+  menu.hidden = false;
+  // ready to type into — but not on a touch screen (the router's page), where the keyboard would cover the list
+  const search = menu.querySelector('.picker-search');
+  const touch = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+  if (search && !touch) setTimeout(() => search.focus(), 0);
+}
 function closePicker() { $('#pickerMenu').hidden = true; }
 $('#pickerBtn').onclick = (e) => {
   e.stopPropagation();
@@ -2306,7 +2404,7 @@ function setConnUI(stateStr, id) {
   const effChain = chainById(effId);
   if (effChain) {
     const names = chainMembers(effChain).map(s => (s.protocol === 'group' ? '⧉ ' : '') + s.name);
-    srv.textContent = '⛓ ' + effChain.name + (names.length ? ' (' + names.join(' → ') + ')' : '');
+    srv.textContent = '⛓ ' + effChain.name + (names.length ? ' (' + names.join(' ' + flowArrow() + ' ') + ')' : '');
   } else if (effId === ADV_ID || String(effId).startsWith(ADV_ID + ':')) {
     srv.textContent = '🧭 ' + advSelName(effId);
   } else if (effId === POOL_ID) {
@@ -2962,7 +3060,7 @@ function buildHomeFlow(m, { live, ip, mode }) {
     paintLane(el, tg);
     // a chain says its hops when asked, a group (v1.27) its configs; a target behind a base, which one
     const ch = tg.chain || (String(tg.ref).startsWith('chain:') ? chainById(String(tg.ref).slice(6)) : null);
-    const hops = ch ? chainMembers(ch).map(x => (x.protocol === 'group' ? '⧉ ' : '') + x.name).join(' → ')
+    const hops = ch ? chainMembers(ch).map(x => (x.protocol === 'group' ? '⧉ ' : '') + x.name).join(' ' + flowArrow() + ' ')
       : tg.kind === 'group' ? grpMemberNames(tg.ref) : '';
     el.title = [label, hops, tg.via ? t('rp.viaBase').replace('{base}', () => refName(tg.via)) : '', tg.why ? t(tg.why) : ''].filter(Boolean).join(' — ');
     // block carries nothing worth counting
@@ -3882,11 +3980,11 @@ function renderSubs() {
         ${subUsageHtml(sub)}
       </div>
       <div class="sub-actions">
-        <label class="switch" data-i18n-title="autoupdate.title" title="auto">
+        <label class="switch" data-i18n-title="autoupdate.title" title="${escapeHtml(t('autoupdate.title'))}">
           <input type="checkbox" class="sub-auto" ${sub.autoUpdate ? 'checked' : ''} /><span class="slider"></span>
         </label>
-        <button class="icon-btn sub-refresh" title="⟳">⟳</button>
-        <button class="icon-btn del-srv sub-del" title="🗑">🗑</button>
+        <button class="icon-btn sub-refresh" title="${escapeHtml(t('srv.subRefresh'))}">⟳</button>
+        <button class="icon-btn del-srv sub-del" title="${escapeHtml(t('sub.delete'))}">🗑</button>
       </div>`;
 
     card.querySelector('.sub-refresh').onclick = () => refreshSub(sub.id);
@@ -5731,7 +5829,9 @@ function warpCount(w) {
 /**
  * What a WireGuard WARP can ride for a Chain: the servers but an HTTP proxy
  * (it carries no UDP), then the chains whose last hop — the one WARP rides —
- * is not one, as 'chain:<id>' and marked as a chain.
+ * is not one, as 'chain:<id>' and marked as a chain. A chain is offered only
+ * when every hop is a saved server: main's resolveHop (warp.js) refuses a group
+ * hop or one that is gone, so a chain with one would only fail at Create.
  */
 function warpHops() {
   const servers = state.servers || [];
@@ -5743,8 +5843,8 @@ function warpHops() {
   }
   const chainPile = { key: 'chains', name: t('pile.chains'), ico: '⛓' };
   for (const c of state.chains || []) {
-    const members = (c.members || []).map((id) => servers.find((s) => s.id === id)).filter(Boolean);
-    if (members.length && members[members.length - 1].protocol !== 'http') opts.push({ value: 'chain:' + c.id, label: '⛓ ' + (c.name || c.id), pile: chainPile });
+    const members = (c.members || []).filter(Boolean).map((id) => servers.find((s) => s.id === id));
+    if (members.length && members.every(Boolean) && members[members.length - 1].protocol !== 'http') opts.push({ value: 'chain:' + c.id, label: '⛓ ' + (c.name || c.id), pile: chainPile });
   }
   return opts;
 }
@@ -6448,10 +6548,10 @@ function renderChains() {
         </span>
         <span class="srv-usage" data-usage="chain:${escapeHtml(chain.id)}" title="${escapeHtml(t('srv.usage'))}">${usageLabel('chain:' + chain.id)}</span>
         <div class="chain-card-actions">
-          <button class="icon-btn ch-ping" title="ping">⚡</button>
-          <button class="icon-btn ch-connect" title="connect"${ready ? '' : ' disabled'}>▶</button>
+          <button class="icon-btn ch-ping" title="${escapeHtml(t('chain.ping'))}">⚡</button>
+          <button class="icon-btn ch-connect" title="${escapeHtml(t('power.connect'))}"${ready ? '' : ' disabled'}>▶</button>
           ${share}
-          <button class="icon-btn ch-del" title="delete">🗑</button>
+          <button class="icon-btn ch-del" title="${escapeHtml(t('chain.delete'))}">🗑</button>
         </div>
       </div>
       <div class="cg-body">
@@ -6501,15 +6601,25 @@ function renderChains() {
       node.innerHTML = `
         <span class="proto-badge proto-${escapeHtml(s.protocol)}">${escapeHtml(grp ? '⧉' : s.protocol)}</span>
         <span class="cn-name">${escapeHtml(s.name)}</span>
-        <button class="cn-remove" title="remove">✕</button>`;
+        <button class="cn-remove" title="${escapeHtml(t('chain.removeHop'))}">✕</button>`;
       node.querySelector('.cn-remove').onclick = (e) => { e.stopPropagation(); chain.members.splice(idx, 1); persistChains(); };
-      node.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', String(idx)); node.classList.add('dragging'); });
+      // the hop carries its chain: one dropped on another chain's card must not reorder that chain
+      // (the bare index did — it was spliced out of whichever chain it landed on)
+      node.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('application/x-irnetfree-hop', JSON.stringify({ chain: chain.id, idx }));
+        e.dataTransfer.effectAllowed = 'move';
+        node.classList.add('dragging');
+      });
       node.addEventListener('dragend', () => node.classList.remove('dragging'));
-      node.addEventListener('dragover', (e) => e.preventDefault());
+      // only a hop may be dropped here (text dragged in from elsewhere is not)
+      node.addEventListener('dragover', (e) => { if (Array.from(e.dataTransfer.types || []).includes('application/x-irnetfree-hop')) e.preventDefault(); });
       node.addEventListener('drop', (e) => {
         e.preventDefault();
-        const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
-        if (Number.isNaN(from) || from === idx) return;
+        let hop = null;
+        try { hop = JSON.parse(e.dataTransfer.getData('application/x-irnetfree-hop') || 'null'); } catch { hop = null; }
+        if (!hop || hop.chain !== chain.id) return;
+        const from = Number(hop.idx);
+        if (!Number.isInteger(from) || from < 0 || from >= chain.members.length || from === idx) return;
         const [moved] = chain.members.splice(from, 1);
         chain.members.splice(idx, 0, moved);
         persistChains();
@@ -7328,7 +7438,7 @@ function renderPool() {
           <input type="checkbox" class="pool-enable" ${entry.enabled ? 'checked' : ''} /><span class="slider"></span>
         </label>
         <span class="srv-usage" data-usage="${escapeHtml(entry.target || '')}" title="${escapeHtml(t('srv.usage'))}">${usageLabel(entry.target)}</span>
-        <button class="icon-btn pool-del" title="delete">🗑</button>
+        <button class="icon-btn pool-del" title="${escapeHtml(t('pool.delete'))}">🗑</button>
       </div>
       <div class="pool-card-body">
         <div class="pool-field pool-target-field">
@@ -7403,23 +7513,6 @@ function processOptions(selected, opts = {}) {
   return out.join('');
 }
 
-function targetOptions(selected) {
-  // <option>s — direct/block, then every config under its pile (<optgroup>)
-  const opt = (o) => `<option value="${escapeHtml(o.value)}"${o.value === selected ? ' selected' : ''}>${escapeHtml(o.label)}</option>`;
-  const out = [opt({ value: 'direct', label: t('adv.direct') }), opt({ value: 'block', label: t('adv.block') })];
-  let pile = null;
-  for (const o of configOptions()) {
-    if (!pile || pile.key !== o.pile.key) {
-      if (pile) out.push('</optgroup>');
-      pile = o.pile;
-      out.push(`<optgroup label="${escapeHtml(pile.ico + ' ' + pile.name)}">`);
-    }
-    out.push(opt(o));
-  }
-  if (pile) out.push('</optgroup>');
-  return out.join('');
-}
-
 /** [{value,label,pile?}] of routing targets — direct/block first, then every config by its pile (configOptions). */
 function targetOptionList() {
   return [
@@ -7447,6 +7540,12 @@ let advDefaultSel = null;
 /**
  * A searchable, scrollable dropdown (same feel as the home picker) for choosing
  * a routing target. Returns the element; call .getValue() to read the choice.
+ * In its search box ↑ / ↓ move a highlight over the rows, Enter picks it, Esc closes.
+ *
+ * The click that closes it from outside is listened for only while it is open:
+ * renderAdvanced, renderProfileExtras and renderPool build these again on every
+ * subscription update, and a listener added per select for its whole life kept
+ * every one ever built — its menu and its options — for as long as the window ran.
  */
 function makeSearchSelect({ options, value, onChange }) {
   const wrap = document.createElement('div');
@@ -7473,15 +7572,31 @@ function makeSearchSelect({ options, value, onChange }) {
     const p = pileOf(current);
     cur.innerHTML = `<span class="ss-cur-label">${escapeHtml(labelFor(current))}${p ? `<span class="ss-cur-pile"> · ${escapeHtml(p)}</span>` : ''}</span><span class="ss-caret">▾</span>`;
   };
-  const close = () => { menu.hidden = true; };
+  const onOutside = (e) => { if (!wrap.contains(e.target)) close(); };
+  const close = () => { menu.hidden = true; document.removeEventListener('click', onOutside); };
+  const pick = (o) => { current = o.value; renderCur(); close(); if (onChange) onChange(current); };
+  // the rows drawn, in order, and the one the arrow keys are on (-1: none)
+  let rows = [];
+  let hi = -1;
+  const mark = (i, scroll) => {
+    if (rows[hi]) rows[hi].el.classList.remove('hi');
+    hi = i >= 0 && i < rows.length ? i : -1;
+    const r = rows[hi];
+    if (!r) return;
+    r.el.classList.add('hi');
+    if (scroll && r.el.scrollIntoView) r.el.scrollIntoView({ block: 'nearest' });
+  };
   const renderList = (f) => {
     f = (f || '').toLowerCase();
     list.innerHTML = '';
+    rows = [];
+    hi = -1;
     const items = options.filter(o => o.label.toLowerCase().includes(f) || String(o.value).toLowerCase().includes(f)
       || (o.pile && o.pile.name.toLowerCase().includes(f)));
     if (!items.length) { list.innerHTML = `<div class="ss-empty">${escapeHtml(t('ss.none'))}</div>`; return; }
     // configs under the pile they come from (configOptions): a head per pile, folded as the
-    // pickers remember — a search shows every match, the pile of the current choice stays open
+    // pickers remember — a search shows every match, the pile of the current choice stays open;
+    // a head that cannot fold now has no toggle (a click on it wrote a fold every other picker showed)
     const folds = pileFolds();
     const curOpt = options.find(x => x.value === current);
     const curPile = curOpt && curOpt.pile ? curOpt.pile.key : null;
@@ -7492,24 +7607,51 @@ function makeSearchSelect({ options, value, onChange }) {
     for (const o of items) {
       if (o.pile && (!pile || pile.key !== o.pile.key)) {
         pile = o.pile;
-        folded = !f && folds.has(pile.key) && pile.key !== curPile;
         const key = pile.key;
+        const canFold = !f && key !== curPile;
+        folded = canFold && folds.has(key);
         const was = folded;
-        list.appendChild(pileHead('ss-pile', pile, count[key], folded, () => { setPileFold(key, !was); renderList(search.value); }));
+        list.appendChild(pileHead('ss-pile', pile, count[key], folded, canFold ? () => { setPileFold(key, !was); renderList(search.value); } : null));
       }
       if (o.pile && folded) continue;
       const it = document.createElement('div');
       it.className = 'ss-item' + (o.value === current ? ' active' : '') + (o.pile ? ' in-pile' : '');
       it.textContent = o.label;
-      it.onclick = () => { current = o.value; renderCur(); close(); if (onChange) onChange(current); };
+      it.onclick = () => pick(o);
       list.appendChild(it);
+      rows.push({ el: it, o });
     }
+    // the keys start from the current choice — while searching, from the first match
+    mark(f ? 0 : rows.findIndex(r => r.o.value === current), false);
   };
-  const open = () => { menu.hidden = false; search.value = ''; renderList(''); setTimeout(() => search.focus(), 0); };
+  const open = () => {
+    menu.hidden = false;
+    document.addEventListener('click', onOutside);
+    search.value = '';
+    renderList('');
+    setTimeout(() => search.focus(), 0);
+  };
   cur.onclick = (e) => { e.stopPropagation(); menu.hidden ? open() : close(); };
   search.oninput = () => renderList(search.value);
   search.onclick = (e) => e.stopPropagation();
-  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) close(); });
+  search.onkeydown = (e) => {
+    if (!e) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!rows.length) return;
+      const down = e.key === 'ArrowDown';
+      // from none: the first (↓) or the last (↑); then one step, stopping at either end
+      mark(hi < 0 ? (down ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, hi + (down ? 1 : -1))), true);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (rows[hi]) pick(rows[hi].o);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      cur.focus();
+    }
+  };
   renderCur();
   wrap.getValue = () => current;
   return wrap;
@@ -7673,7 +7815,7 @@ function renderAdvanced() {
       <span class="adv-arrow">→</span>
       <span class="adv-target-mount"></span>
       ${viaCell}
-      <button class="icon-btn adv-del" title="remove">🗑</button>`;
+      <button class="icon-btn adv-del" title="${escapeHtml(t('adv.removeRule'))}">🗑</button>`;
     row.querySelector('.adv-type').onchange = (e) => {
       rules[idx].type = e.target.value;
       if (e.target.value === 'process' && !state.procList.length) loadProcList();
@@ -8039,8 +8181,10 @@ function refName(ref, prof) {
 
 /**
  * [{value,label}] for a via picker: the profile's base (inherit, named), none,
- * then every server and ready chain but the target itself — and the current
- * choice when it is gone, so the picker shows it rather than a blank.
+ * the current choice when it is gone (so the picker shows it rather than a
+ * blank), then every server and ready chain but the target itself. The gone
+ * one has no pile: after the piles it would sit under the last head, folded
+ * or not, as if it were one of that pile's configs.
  */
 function viaOptionList(prof, target, current) {
   const base = prof && prof.base;
@@ -8048,16 +8192,17 @@ function viaOptionList(prof, target, current) {
     { value: 'inherit', label: base ? t('rp.viaInherit').replace('{base}', () => targetLabel(base)) : t('rp.viaInheritNone') },
     { value: 'none', label: t('rp.viaNone') }
   ];
-  for (const o of poolTargetOptions()) if (o.value !== target) opts.push(o);
-  if (current && !opts.some(o => o.value === current)) opts.push({ value: current, label: '⚠ ' + targetLabel(current) });
-  return opts;
+  const piled = poolTargetOptions().filter(o => o.value !== target);
+  if (current && !opts.some(o => o.value === current) && !piled.some(o => o.value === current)) opts.push({ value: current, label: '⚠ ' + targetLabel(current) });
+  return opts.concat(piled);
 }
 
-/** [{value,label}] for the base picker: none, then every server and ready chain (and a gone current one). */
+/** [{value,label}] for the base picker: none, a gone current one (before the piles, as in viaOptionList), then every server and ready chain. */
 function baseOptionList(current) {
-  const opts = [{ value: '', label: t('rp.baseNone') }, ...poolTargetOptions()];
-  if (current && !opts.some(o => o.value === current)) opts.push({ value: current, label: '⚠ ' + targetLabel(current) });
-  return opts;
+  const opts = [{ value: '', label: t('rp.baseNone') }];
+  const piled = poolTargetOptions();
+  if (current && !piled.some(o => o.value === current)) opts.push({ value: current, label: '⚠ ' + targetLabel(current) });
+  return opts.concat(piled);
 }
 
 /**

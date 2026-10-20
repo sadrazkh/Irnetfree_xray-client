@@ -219,7 +219,8 @@ test('a JSON server’s card carries a JSON badge (a proto-badge) beside its add
 
   const plainCard = ctx.serverCard(linkServer);
   assert.doesNotMatch(plainCard.innerHTML, /json/i, 'a link server’s card is as it was');
-  assert.match(plainCard.innerHTML, /data-i18n-title="btn\.copy" title="copy"/);
+  // its title in the window's language as the card is built (applyI18n ran before it)
+  assert.match(plainCard.innerHTML, new RegExp(`data-i18n-title="btn\\.copy" title="${en('btn.copy')}"`));
 });
 
 test('a JSON server’s Copy button says it copies JSON; the protocol badge stays first', () => {
