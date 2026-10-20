@@ -9,6 +9,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -212,5 +213,13 @@ class TunnelSetupTest {
         assertEquals(Traffic(), VpnState.traffic.value)
         assertNull(VpnState.health.value)
         VpnState.set(ConnState.DISCONNECTED, "")
+    }
+
+    @Test fun aSingboxCoreHasAConfigFileOfItsOwnPort() {
+        // The tunnel's sing-box and a latency test's throwaway one (XrayTester)
+        // wrote the same singbox.json: the one started second could hand the
+        // first its config before that core had read its own.
+        assertEquals("singbox-10808.json", SingboxCore.configName(10808))
+        assertNotEquals(SingboxCore.configName(10808), SingboxCore.configName(41234))
     }
 }

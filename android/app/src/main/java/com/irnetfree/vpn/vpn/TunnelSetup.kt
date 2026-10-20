@@ -304,6 +304,32 @@ object StickyRestart {
 }
 
 /**
+ * Android starts the service for always-on VPN at boot, but also whenever
+ * always-on is switched on — or asks again — while this app is already
+ * connected or connecting. That start used to rebuild the tunnel regardless:
+ * seconds of a tunnel torn down and built again for the very same selection,
+ * and a connect still being prepared was overtaken and started over.
+ */
+object AlwaysOnStart {
+    /**
+     * Leave the tunnel alone: the latest move is a connect ([askedIsLatest])
+     * made for [asked], the selection always-on would connect ([stored]) — and
+     * that connect is up ([state] CONNECTED with the tunnel really up,
+     * [tunnelUp]) or still on its way (CONNECTING). Anything else — a
+     * disconnect last, a failed connect (ERROR), a tunnel for another
+     * selection — is connected exactly as before.
+     */
+    fun leaveAlone(state: ConnState, tunnelUp: Boolean, askedIsLatest: Boolean, asked: String?, stored: String?): Boolean {
+        if (!askedIsLatest || asked.isNullOrEmpty() || asked != stored) return false
+        return when (state) {
+            ConnState.CONNECTED -> tunnelUp
+            ConnState.CONNECTING -> true
+            else -> false
+        }
+    }
+}
+
+/**
  * Is a loopback port free for a core to bind? A subprocess core's "ready" is
  * "the port answers" — which another app, or an orphan of ours, satisfies just
  * as well — so the port is checked BEFORE the launch, bound exactly as the core

@@ -1053,8 +1053,6 @@ private object AppWork {
     /** The ⚡ run in flight, and its number: a cancelled run's last words are not shown. */
     private var fastestJob: Job? = null
     private var fastestRun = 0
-    /** The second half of a reconnect, waiting its 0.6 s — a Cancel meanwhile drops it. */
-    private var pendingConnect: Job? = null
 
     /** What the app's snackbar is to say; App collects it. */
     class Snack(val text: String, val action: String? = null, val onAction: (() -> Unit)? = null)
@@ -1155,14 +1153,13 @@ private object AppWork {
     fun stopTests() { testAllJob?.cancel(); testAllJob = null; testingAll.value = false }
 
     /**
-     * The user's Disconnect — and Cancel, while a connect is on its way. The
-     * service's own path (generation moved on at once, so a connect still being
-     * prepared is dropped before its service starts); a reconnect's pending
-     * second half goes too, and connect-on-open steps aside.
+     * The user's Disconnect — and Cancel, while a connect is on its way (a
+     * Reconnect's too). The service's own path (generation moved on at once,
+     * so a connect still being prepared is dropped before its service starts),
+     * and connect-on-open steps aside.
      */
     fun disconnect(ctx: Context) {
         AutoConnectOnce.manual = true
-        pendingConnect?.cancel(); pendingConnect = null
         runCatching { XrayVpnService.disconnect(ctx.applicationContext) }
             .onFailure { e -> snack("Disconnect failed: ${e.message ?: e.javaClass.simpleName}") }
     }
@@ -1322,12 +1319,17 @@ private object AppWork {
         }
     }
 
-    /** Down, then up again on the current selection — the second half no longer dies with the screen. */
+    /**
+     * Up again on the current selection: one connect onto the live tunnel,
+     * which the service makes as a switch (XrayVpnService.connect) — the new
+     * tunnel replaces the old one in place. It used to be a disconnect, 0.6 s,
+     * then a connect: for that pause and the new core's start the phone had no
+     * VPN, every app straight out over the ISP. A Cancel meanwhile is the
+     * user's Disconnect (disconnect below): its move overtakes this connect
+     * wherever it is — in prepare(), queued for the service, or starting.
+     */
     fun reconnect(ctx: Context, store: Store) {
-        val app = ctx.applicationContext
-        runCatching { XrayVpnService.disconnect(app) }
-        pendingConnect?.cancel()
-        pendingConnect = scope.launch { delay(600); pendingConnect = null; doConnect(app, store) }
+        doConnect(ctx.applicationContext, store)
     }
 
     /** A newer IRNetFree than this one, for the card on Home ("" = none, or put off with Later). */
