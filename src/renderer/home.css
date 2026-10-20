@@ -508,6 +508,8 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
   transition: background 140ms ease-out;
 }
 .ss-item:hover { background: var(--soft); color: var(--ink); }
+/* the row the arrow keys are on (makeSearchSelect): the hover look; the current choice keeps its own */
+.ss-item.hi { background: var(--soft); color: var(--ink); }
 /* a pile's head (configOptions): where the configs under it come from — the Servers page's
    look, folding on a click; its configs sit one step in */
 .ss-pile, .picker-pile {
@@ -519,6 +521,11 @@ button.readout:hover { background: var(--soft); border-color: var(--softline); }
 }
 .ss-pile:first-child, .picker-pile:first-child { margin-block-start: 0; border-block-start: 0; }
 .ss-pile:hover, .picker-pile:hover { color: var(--ink); }
+/* reached by Tab too: the outline inside the head, where the list's scroll does not clip it */
+.ss-pile:focus-visible, .picker-pile:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--r3); }
+/* a head that cannot fold now (the current choice's pile, or while searching) */
+.ss-pile.pile-fixed, .picker-pile.pile-fixed { cursor: default; }
+.ss-pile.pile-fixed:hover, .picker-pile.pile-fixed:hover { color: var(--ink3); }
 .ss-pile .pile-name, .picker-pile .pile-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-pile .pile-ico, .picker-pile .pile-ico { font-size: 12px; }
 .ss-pile.folded .srv-group-chev, .picker-pile.folded .srv-group-chev { transform: rotate(-90deg); }

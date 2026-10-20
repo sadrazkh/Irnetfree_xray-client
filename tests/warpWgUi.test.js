@@ -270,6 +270,25 @@ test('the Chain’s first hop: the servers but an HTTP proxy, the chains (marked
   assert.equal(plain(gone.ctx.warpArgs(gone.form())).chainWith, 's3');
 });
 
+test('a chain is offered only when main would take it: every hop a saved server (no group, none gone), the last not an HTTP proxy', () => {
+  const chains = CHAINS.concat([
+    { id: 'c4', name: 'Ends on a group', members: ['s1', 'grp-a'] },
+    { id: 'c5', name: 'A group first', members: ['grp-a', 's2'] },
+    { id: 'c6', name: 'A hop deleted', members: ['deleted', 's3'] }
+  ]);
+  const h = dialogHarness({ chains, selected: 's1' });
+  h.ctx.openWarp();
+  assert.deepEqual(all(byId(h.body(), 'warp-chainWith'), (e) => e.tagName === 'OPTION').map((o) => o.attrs.value), ['s1', 's2', 's3', 'chain:c1'],
+    'resolveHop (warp.js) refuses each of c4–c6: “A server of that chain is no longer there”');
+  // the same answer main's own resolveHop gives, chain by chain
+  const { resolveHop } = require('../src/main/warp.js');
+  for (const c of chains) {
+    let ok = true;
+    try { resolveHop('chain:' + c.id, SERVERS, chains); } catch { ok = false; }
+    assert.equal(plain(h.ctx.warpHops()).some((o) => o.value === 'chain:' + c.id), ok, c.name);
+  }
+});
+
 test('nothing to chain through (only an HTTP proxy): said, the Chain choice off, and direct — its endpoint and the noise switch', () => {
   const h = dialogHarness({ servers: [{ id: 'px', name: 'P', protocol: 'http' }], chains: [] });
   h.ctx.openWarp();
