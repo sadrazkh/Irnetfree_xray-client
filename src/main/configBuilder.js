@@ -982,8 +982,8 @@ function routingStrategy(s) {
 
 
 const SETTINGS_DEFAULTS = {
-  socksPort: 10808,
-  httpPort: 10809,
+  socksPort: 30808,
+  httpPort: 30809,
   allowLan: false,
   routingMode: 'global',
   advancedUseMode: false,   // advanced routing also applies routingMode
@@ -994,7 +994,7 @@ const SETTINGS_DEFAULTS = {
   dnsDirect: ['178.22.122.100', '185.51.200.2'],
   ipv6: false,
   logLevel: 'warning',
-  apiPort: 10085,
+  apiPort: 30085,
   customRules: [],
   geoAssets: true   // geoip.dat/geosite.dat present? false -> skip geo rules
 };

@@ -327,7 +327,7 @@ class XrayVpnService : VpnService() {
         // Overtaken while prepare() ran: a disconnect, or a newer connect.
         if (gen != generation.get()) { VpnState.addLog("Connect superseded — not started"); finishIfIdle(startId); return }
         val config0 = intent.getStringExtra(EXTRA_CONFIG) ?: return fail(gen, startId, "empty config", unattended)
-        val socksPort = intent.getIntExtra(EXTRA_SOCKS, 10808)
+        val socksPort = intent.getIntExtra(EXTRA_SOCKS, 30808)
         val dns = intent.getStringArrayListExtra(EXTRA_DNS) ?: arrayListOf("1.1.1.1", "8.8.8.8")
         val label = intent.getStringExtra(EXTRA_LABEL) ?: "IRNetFree"
         val ipv6 = intent.getBooleanExtra(EXTRA_IPV6, false)

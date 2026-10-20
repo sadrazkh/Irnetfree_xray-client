@@ -23,7 +23,7 @@ const { ssPluginOf } = require('./parser');
 class UnsupportedEngineConfig extends Error {}
 
 function buildSingboxConfig(server, settings) {
-  const s = Object.assign({ socksPort: 10808, httpPort: 10809, allowLan: false, logLevel: 'warning' }, settings || {});
+  const s = Object.assign({ socksPort: 30808, httpPort: 30809, allowLan: false, logLevel: 'warning' }, settings || {});
   const listen = s.allowLan ? '0.0.0.0' : '127.0.0.1';
 
   const outbound = translateOutbound(server, 'proxy');

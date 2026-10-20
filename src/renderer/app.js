@@ -445,8 +445,8 @@ async function refreshXrayVersion() {
 /* ----------------------------- settings UI ----------------------------- */
 function applySettingsToUI() {
   const s = state.settings;
-  $('#socksPort').value = s.socksPort ?? 10808;
-  $('#httpPort').value = s.httpPort ?? 10809;
+  $('#socksPort').value = s.socksPort ?? 30808;
+  $('#httpPort').value = s.httpPort ?? 30809;
   $('#dnsRemoteInput').value = (s.dnsRemote || []).join(', ');
   $('#dnsDirectInput').value = (s.dnsDirect || []).join(', ');
   $('#optDnsManaged').checked = s.dnsManaged !== false;
@@ -663,8 +663,8 @@ function textToCustomRules(text) {
 /** The Settings page form → settings partial. Only the "Save settings" button uses it. */
 function readSettingsForm() {
   return {
-    socksPort: parseInt($('#socksPort').value, 10) || 10808,
-    httpPort: parseInt($('#httpPort').value, 10) || 10809,
+    socksPort: parseInt($('#socksPort').value, 10) || 30808,
+    httpPort: parseInt($('#httpPort').value, 10) || 30809,
     dnsRemote: listFromInput('#dnsRemoteInput'),
     dnsDirect: listFromInput('#dnsDirectInput'),
     dnsManaged: $('#optDnsManaged').checked,

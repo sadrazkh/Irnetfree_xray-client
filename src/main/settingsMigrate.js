@@ -1,6 +1,9 @@
 'use strict';
 /**
- * One-time settings migration for the resolver rework (phase 2).
+ * One-time settings migrations: the resolver rework (phase 2) and the local
+ * ports' move to the 30000s (migratePorts, below).
+ *
+ * The resolver rework:
  *
  * The old store held a single `dns` list of plain-UDP resolvers. The new model
  * has two lists with different jobs: `dnsRemote` (the world, over DoH through
@@ -30,7 +33,7 @@ const IRANIAN = new Set([
 
 const DEFAULT_REMOTE = ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query'];
 
-function migrateSettings(raw) {
+function migrateDns(raw) {
   if (!raw || typeof raw !== 'object' || !('dns' in raw)) return { settings: raw, changed: false };
 
   const next = Object.assign({}, raw);
@@ -50,4 +53,34 @@ function migrateSettings(raw) {
   return { settings: next, changed: true };
 }
 
-module.exports = { migrateSettings };
+/**
+ * The local ports left 10808/10809/10085 — what v2rayN, v2rayNG, Nekoray and
+ * most Xray clients take too, so two of them on one machine fought over the
+ * same ports — for 30808/30809/30085. A store from before moves once
+ * (`portsMoved` marks it, and the defaults carry it so a new store never
+ * runs this): only a port still on its OLD DEFAULT moves, a port the user
+ * chose stays. With LAN sharing on (`allowLan`) the SOCKS and HTTP ports are
+ * what the other devices on the network were pointed at, so they stay too;
+ * the stats port is loopback-only and moves either way.
+ */
+const OLD_PORTS = { socksPort: 10808, httpPort: 10809, apiPort: 10085 };
+const NEW_PORTS = { socksPort: 30808, httpPort: 30809, apiPort: 30085 };
+const LAN_FACING = new Set(['socksPort', 'httpPort']);
+
+function migratePorts(raw) {
+  if (!raw || typeof raw !== 'object' || raw.portsMoved === true) return { settings: raw, changed: false };
+  const next = Object.assign({}, raw, { portsMoved: true });
+  for (const k of Object.keys(OLD_PORTS)) {
+    if (raw.allowLan && LAN_FACING.has(k)) continue;
+    if (Number(raw[k]) === OLD_PORTS[k]) next[k] = NEW_PORTS[k];
+  }
+  return { settings: next, changed: true };
+}
+
+function migrateSettings(raw) {
+  const a = migrateDns(raw);
+  const b = migratePorts(a.settings);
+  return { settings: b.settings, changed: a.changed || b.changed };
+}
+
+module.exports = { migrateSettings, migratePorts, OLD_PORTS, NEW_PORTS };

@@ -43,7 +43,7 @@ class LanShareTest {
     @Test fun offByDefault_onItsOwnPorts_withAPassword() {
         val d = LanShare()
         assertFalse(d.enabled)
-        assertEquals(10810, d.socksPort); assertEquals(10811, d.httpPort)
+        assertEquals(30810, d.socksPort); assertEquals(30811, d.httpPort)
         assertTrue(d.auth)
         // A store that never had it reads as the defaults.
         assertEquals(d, LanShare.fromJson(JSONObject()))
@@ -57,7 +57,7 @@ class LanShareTest {
     @Test fun aHandEditedStoreFallsBackFieldByField() {
         val v = LanShare.fromJson(JSONObject().put("enabled", "yes").put("socksPort", "abc").put("httpPort", 20001).put("auth", JSONObject.NULL))
         assertFalse(v.enabled)
-        assertEquals(10810, v.socksPort)
+        assertEquals(30810, v.socksPort)
         assertEquals(20001, v.httpPort)
         assertTrue("a password unless it was turned off", v.auth)
     }
@@ -76,21 +76,21 @@ class LanShareTest {
     }
 
     @Test fun portsAreCheckedAgainstTheRange_eachOther_theTunnel_andThePool() {
-        val s = AppSettings()                       // 10808 / 10809 / api 10085
+        val s = AppSettings()                       // 30808 / 30809 / api 30085
         val pool = listOf(PoolEntry("p1", "Work", "a", 20000, 20001, true))
         assertNull(share.problem(s, pool))
         assertNull(share.copy(socksPort = 1024, httpPort = 65535).problem(s, pool))
         assertEquals("The LAN SOCKS port must be between 1024 and 65535", share.copy(socksPort = 1023).problem(s, pool))
         assertEquals("The LAN HTTP port must be between 1024 and 65535", share.copy(httpPort = 65536).problem(s, pool))
         assertNotNull(share.copy(socksPort = 0).problem(s, pool))           // an emptied field
-        assertEquals("The LAN SOCKS and HTTP ports must differ", share.copy(httpPort = 10810).problem(s, pool))
-        assertEquals("Port 10808 is the tunnel's own SOCKS port", share.copy(socksPort = 10808).problem(s, pool))
-        assertEquals("Port 10809 is the tunnel's own HTTP port", share.copy(httpPort = 10809).problem(s, pool))
-        assertTrue(share.copy(httpPort = 10085).problem(s, pool)!!.contains("API"))
+        assertEquals("The LAN SOCKS and HTTP ports must differ", share.copy(httpPort = 30810).problem(s, pool))
+        assertEquals("Port 30808 is the tunnel's own SOCKS port", share.copy(socksPort = 30808).problem(s, pool))
+        assertEquals("Port 30809 is the tunnel's own HTTP port", share.copy(httpPort = 30809).problem(s, pool))
+        assertTrue(share.copy(httpPort = 30085).problem(s, pool)!!.contains("API"))
         assertEquals("Port 20001 belongs to the proxy pool (Work)", share.copy(httpPort = 20001).problem(s, pool))
         // The tunnel's own port moved onto the share's since it was set: the
         // connect leaves sharing out and says so (prepare → lanShareFor).
-        assertEquals("Port 10810 is the tunnel's own SOCKS port", share.problem(s.copy(socksPort = 10810), pool))
+        assertEquals("Port 30810 is the tunnel's own SOCKS port", share.problem(s.copy(socksPort = 30810), pool))
     }
 
     @Test fun credentialsAreCheckedOnlyWhenAPasswordIsAskedFor() {
@@ -123,13 +123,13 @@ class LanShareTest {
         val c = ConfigBuilder.build(ConnectionPlan.Single(a), settings(), geoAssets = true, inboundAuth = session, lan = share)
         val socks = inbound(c, "lan-socks")
         assertEquals("socks", socks.getString("protocol"))
-        assertEquals("0.0.0.0", socks.getString("listen")); assertEquals(10810, socks.getInt("port"))
+        assertEquals("0.0.0.0", socks.getString("listen")); assertEquals(30810, socks.getInt("port"))
         assertEquals("password", socks.getJSONObject("settings").getString("auth"))
         assertEquals("""[{"pass":"k7p2m9x4q3w8","user":"irnf-ab12"}]""", Canon.of(socks.getJSONObject("settings").getJSONArray("accounts")))
         assertTrue("UDP too, as the tunnel's", socks.getJSONObject("settings").getBoolean("udp"))
         val http = inbound(c, "lan-http")
         assertEquals("http", http.getString("protocol"))
-        assertEquals("0.0.0.0", http.getString("listen")); assertEquals(10811, http.getInt("port"))
+        assertEquals("0.0.0.0", http.getString("listen")); assertEquals(30811, http.getInt("port"))
         assertEquals("""[{"pass":"k7p2m9x4q3w8","user":"irnf-ab12"}]""", Canon.of(http.getJSONObject("settings").getJSONArray("accounts")))
         // sniffed exactly as the tunnel's own traffic is
         assertEquals(Canon.of(inbound(c, "socks-in").getJSONObject("sniffing")), Canon.of(socks.getJSONObject("sniffing")))
@@ -189,12 +189,12 @@ class LanShareTest {
     @Test fun xray_aPortTheConfigAlreadyHoldsIsNeverWrittenTwice() {
         // prepare() refuses such a share; the builder still never writes a
         // config the core would reject whole
-        val c = ConfigBuilder.build(ConnectionPlan.Single(a), settings(), geoAssets = true, lan = share.copy(socksPort = 10808))
+        val c = ConfigBuilder.build(ConnectionPlan.Single(a), settings(), geoAssets = true, lan = share.copy(socksPort = 30808))
         assertFalse(has(c, "lan-socks")); assertTrue(has(c, "lan-http"))
         assertEquals(listOf("lan-http"), tags(rules(c)[0]))
-        val pool = ConnectionPlan.Pool(listOf(PoolEntry("p1", "P", "b", 10810, 0, true)), "a", mapOf("a" to a, "b" to b), emptyMap())
+        val pool = ConnectionPlan.Pool(listOf(PoolEntry("p1", "P", "b", 30810, 0, true)), "a", mapOf("a" to a, "b" to b), emptyMap())
         val p = ConfigBuilder.build(pool, settings(), geoAssets = true, lan = share)
-        assertEquals(1, inbounds(p).count { it.getInt("port") == 10810 })
+        assertEquals(1, inbounds(p).count { it.getInt("port") == 30810 })
     }
 
     /* ---------------- sing-box ---------------- */
@@ -203,10 +203,10 @@ class LanShareTest {
         val c = SingboxConfig.build(a, settings(), session, share)
         val socks = inbound(c, "lan-socks")
         assertEquals("socks", socks.getString("type"))
-        assertEquals("0.0.0.0", socks.getString("listen")); assertEquals(10810, socks.getInt("listen_port"))
+        assertEquals("0.0.0.0", socks.getString("listen")); assertEquals(30810, socks.getInt("listen_port"))
         assertEquals("""[{"password":"k7p2m9x4q3w8","username":"irnf-ab12"}]""", Canon.of(socks.getJSONArray("users")))
         val http = inbound(c, "lan-http")
-        assertEquals("http", http.getString("type")); assertEquals(10811, http.getInt("listen_port"))
+        assertEquals("http", http.getString("type")); assertEquals(30811, http.getInt("listen_port"))
         assertEquals("""[{"password":"k7p2m9x4q3w8","username":"irnf-ab12"}]""", Canon.of(http.getJSONArray("users")))
         // the tunnel's route, which names no inbound, carries them as it is
         val route = c.getJSONObject("route")

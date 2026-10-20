@@ -29,7 +29,7 @@ test('a mixed list splits by role', () => {
 });
 
 test('already migrated: nothing changes, same object back', () => {
-  const input = { dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: [] };
+  const input = { dnsRemote: ['https://1.1.1.1/dns-query'], dnsDirect: [], portsMoved: true };
   const r = migrateSettings(input);
   assert.equal(r.changed, false);
   assert.equal(r.settings, input);
@@ -47,4 +47,65 @@ test('odd shapes never throw', () => {
     assert.doesNotThrow(() => migrateSettings(raw), JSON.stringify(raw));
   }
   assert.deepEqual(migrateSettings({ dns: [null, 3, ''] }).settings.dnsRemote, ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']);
+});
+
+/* ------------- the local ports' move to the 30000s (migratePorts) ------------- */
+
+test('ports: a store on the old defaults moves to 30808/30809/30085, once', () => {
+  const { settings, changed } = migrateSettings({ socksPort: 10808, httpPort: 10809, apiPort: 10085, routingMode: 'bypass-ir' });
+  assert.equal(changed, true);
+  assert.equal(settings.socksPort, 30808);
+  assert.equal(settings.httpPort, 30809);
+  assert.equal(settings.apiPort, 30085);
+  assert.equal(settings.portsMoved, true);
+  assert.equal(settings.routingMode, 'bypass-ir', 'other keys untouched');
+  // the second launch: nothing to do, the same object back
+  const again = migrateSettings(settings);
+  assert.equal(again.changed, false);
+  assert.equal(again.settings, settings);
+});
+
+test('ports: a port the user chose stays; each port on its own', () => {
+  const { settings } = migrateSettings({ socksPort: 1080, httpPort: 10809, apiPort: 12345 });
+  assert.equal(settings.socksPort, 1080);
+  assert.equal(settings.httpPort, 30809);
+  assert.equal(settings.apiPort, 12345);
+});
+
+test('ports: after the move, a user who picks 10808 again keeps it', () => {
+  const { settings, changed } = migrateSettings({ socksPort: 10808, httpPort: 10809, apiPort: 10085, portsMoved: true });
+  assert.equal(changed, false);
+  assert.equal(settings.socksPort, 10808);
+});
+
+test('ports: with LAN sharing on, SOCKS and HTTP stay (other devices point at them), the stats port moves', () => {
+  const { settings } = migrateSettings({ allowLan: true, socksPort: 10808, httpPort: 10809, apiPort: 10085 });
+  assert.equal(settings.socksPort, 10808);
+  assert.equal(settings.httpPort, 10809);
+  assert.equal(settings.apiPort, 30085);
+  assert.equal(settings.portsMoved, true);
+});
+
+test('ports: a store without ports only gets the mark; the old dns list and the ports move together', () => {
+  assert.deepEqual(migrateSettings({ blockAds: false }).settings, { blockAds: false, portsMoved: true });
+  const { settings } = migrateSettings({ dns: ['1.1.1.1'], socksPort: 10808 });
+  assert.deepEqual(settings.dnsRemote, ['https://1.1.1.1/dns-query']);
+  assert.equal(settings.socksPort, 30808);
+});
+
+test('ports: the defaults are the new ports and carry the mark, desktop and router alike', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const { NEW_PORTS } = require('../src/main/settingsMigrate');
+  const blockOf = (f, head) => {
+    const src = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    const at = src.indexOf(head);
+    assert.ok(at >= 0, f + ': ' + head);
+    return src.slice(at, at + src.slice(at).search(/\r?\n\};/));
+  };
+  for (const [f, head, mark] of [['src/main/main.js', 'const DEFAULT_SETTINGS = {', true], ['src/server/service.js', 'const DEFAULT_SETTINGS = {', true], ['src/main/configBuilder.js', 'const SETTINGS_DEFAULTS = {', false]]) {
+    const block = blockOf(f, head);
+    for (const k of Object.keys(NEW_PORTS)) assert.match(block, new RegExp(k + ': ' + NEW_PORTS[k] + ','), f + ' ' + k);
+    if (mark) assert.match(block, /portsMoved: true,/, f);
+  }
 });

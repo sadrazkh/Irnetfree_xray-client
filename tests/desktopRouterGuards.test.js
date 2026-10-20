@@ -46,7 +46,8 @@ test('a desktop service: no repair, the desktop DNS block, no open-files lines',
   // the store: not one of the router's repairs, not its marker
   const disk = JSON.parse(fs.readFileSync(path.join(dir, 'store.json'), 'utf8'));
   assert.equal('routerRepair' in disk, false);
-  assert.deepEqual(disk.settings, DESKTOP, 'the settings as they were');
+  // the desktop's own one-time port mark (settingsMigrate.js), nothing of the router's
+  assert.deepEqual(disk.settings, Object.assign({}, DESKTOP, { portsMoved: true }), 'the settings as they were');
 
   await service.invoke('connect', SERVER.id);
   const dns = state.xray.starts[0].config.dns;
