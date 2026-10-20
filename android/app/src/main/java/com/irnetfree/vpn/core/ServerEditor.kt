@@ -27,6 +27,8 @@ object ServerEditor {
         // newer TLS / REALITY knobs: Encrypted Client Hello, a certificate pin, the
         // name to verify it against, REALITY's ML-DSA-65 key (parser.js tlsExtras)
         var ech: String = "", var pcs: String = "", var vcn: String = "", var pqv: String = "",
+        // PattN's ECH outbound (tlsSettings.echOutbound), as indented JSON; "" = none
+        var echOutbound: String = "",
         // Hysteria2: the salamander password and the hopping ports
         var hy2Obfs: String = "", var hy2Ports: String = "",
         var engine: String = "xray",                // 'xray' (default) | 'sing-box'
@@ -103,7 +105,10 @@ object ServerEditor {
         st.optJSONObject("tlsSettings")?.let { f.sni = it.optString("serverName"); f.allowInsecure = it.optBoolean("allowInsecure"); f.fp = it.optString("fingerprint", "chrome"); f.alpn = arr(it.optJSONArray("alpn")).joinToString(",") }
         st.optJSONObject("realitySettings")?.let { f.sni = it.optString("serverName"); f.fp = it.optString("fingerprint", "chrome"); f.pbk = it.optString("publicKey"); f.sid = it.optString("shortId"); f.spx = it.optString("spiderX") }
         st.optJSONObject("tlsSettings")?.optString("cipherSuites")?.takeIf { it.isNotBlank() }?.let { f.cipherSuites = it }
-        st.optJSONObject("tlsSettings")?.let { f.ech = it.optString("echConfigList"); f.pcs = it.optString("pinnedPeerCertSha256"); f.vcn = it.optString("verifyPeerCertByName") }
+        st.optJSONObject("tlsSettings")?.let {
+            f.ech = it.optString("echConfigList"); f.pcs = it.optString("pinnedPeerCertSha256"); f.vcn = it.optString("verifyPeerCertByName")
+            f.echOutbound = LinkParser.echOutboundText(it.optJSONObject("echOutbound"))
+        }
         st.optJSONObject("realitySettings")?.let { f.pqv = it.optString("mldsa65Verify") }
         // Hysteria2's masks are its obfs and hopping fields (hy2Obfs / hy2Ports), not text to edit
         if (s.protocol != "hysteria2") st.optJSONObject("finalmask")?.let { f.finalMask = it.toString() }
@@ -257,7 +262,7 @@ object ServerEditor {
         "wgPub" to Fields::wgPub, "wgAddr" to Fields::wgAddr, "wgPsk" to Fields::wgPsk, "wgMtu" to Fields::wgMtu,
         "wgReserved" to Fields::wgReserved, "wgAllowed" to Fields::wgAllowed, "wgDns" to Fields::wgDns,
         "cipherSuites" to Fields::cipherSuites, "finalMask" to Fields::finalMask,
-        "ech" to Fields::ech, "pcs" to Fields::pcs, "vcn" to Fields::vcn, "pqv" to Fields::pqv,
+        "ech" to Fields::ech, "pcs" to Fields::pcs, "vcn" to Fields::vcn, "pqv" to Fields::pqv, "echOutbound" to Fields::echOutbound,
         "hy2Obfs" to Fields::hy2Obfs, "hy2Ports" to Fields::hy2Ports,
         // the Pro view's
         "tcpHeader" to Fields::tcpHeader, "hy2Hop" to Fields::hy2Hop, "hy2Up" to Fields::hy2Up, "hy2Down" to Fields::hy2Down,
@@ -278,6 +283,8 @@ object ServerEditor {
         "fragment" -> f.fragment.trim()
         "noise" -> noiseKey(f.noise)
         "engine" -> f.engine.trim().takeIf { it.isNotBlank() && it != "xray" } ?: ""
+        // the object it is written as, key order aside: re-indented or reordered is no change
+        "echOutbound" -> LinkParser.echOutboundOf(f.echOutbound)?.let { o: JSONObject -> JsonText.canonical(o) } ?: ""
         else -> EDITABLE.firstOrNull { it.first == name }?.second?.get(f)?.trim() ?: (f.pro[name]?.trim() ?: "")
     }
 
@@ -324,7 +331,7 @@ object ServerEditor {
         val changed = f.network != was.network || f.security != was.security || f.sni != was.sni || f.host != was.host ||
             f.path != was.path || f.fp != was.fp || f.pbk != was.pbk || f.sid != was.sid ||
             f.allowInsecure != was.allowInsecure || f.cipherSuites != was.cipherSuites || f.finalMask != was.finalMask ||
-            f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn || f.pqv != was.pqv
+            f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn || f.pqv != was.pqv || f.echOutbound != was.echOutbound
         if (!changed) return
         // What the form says, built as a link would be — the old transport's
         // passthroughs (mode, seed, header type) mean nothing to a new one.
@@ -351,7 +358,7 @@ object ServerEditor {
             fresh.optJSONObject("realitySettings")?.let { cur.put("realitySettings", it) }
         } else if (secWas == "tls") {
             if (f.sni != was.sni || f.fp != was.fp || f.allowInsecure != was.allowInsecure || f.cipherSuites != was.cipherSuites ||
-                f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn) {
+                f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn || f.echOutbound != was.echOutbound) {
                 val tls = child(cur, "tlsSettings")
                 if (f.sni != was.sni) tls.put("serverName", f.sni.trim().ifEmpty { f.host.trim() })
                 if (f.fp != was.fp) tls.put("fingerprint", f.fp.trim().ifEmpty { "chrome" })
@@ -430,6 +437,7 @@ object ServerEditor {
         if (f.ech != was.ech) put("echConfigList", f.ech.trim())
         if (f.pcs != was.pcs) put("pinnedPeerCertSha256", LinkParser.pinList(f.pcs))
         if (f.vcn != was.vcn) put("verifyPeerCertByName", list(f.vcn).joinToString(","))
+        if (f.echOutbound != was.echOutbound) putEchOutbound(tls, f.echOutbound)
         val http = f.masqueHttp.trim().lowercase()
         if ((http == "h2" || http == "h3") && http != Masque.httpOf(tls)) {
             if (http == "h2") tls.put("alpn", JSONArray().put("h2")) else tls.remove("alpn")
@@ -519,7 +527,7 @@ object ServerEditor {
         d["publicKey"] = f.wgPub; d["localAddress"] = f.wgAddr; d["presharedKey"] = f.wgPsk; d["mtu"] = f.wgMtu
         d["reserved"] = f.wgReserved; d["allowedIPs"] = f.wgAllowed; d["dns"] = f.wgDns
         d["fragment"] = f.fragment; d["noise"] = f.noise; d["cipherSuites"] = f.cipherSuites; d["finalMask"] = f.finalMask
-        d["ech"] = f.ech; d["pcs"] = f.pcs; d["vcn"] = f.vcn; d["pqv"] = f.pqv; d["engine"] = f.engine.ifBlank { "xray" }
+        d["ech"] = f.ech; d["pcs"] = f.pcs; d["vcn"] = f.vcn; d["pqv"] = f.pqv; d["echOutbound"] = f.echOutbound; d["engine"] = f.engine.ifBlank { "xray" }
         d["obfsPassword"] = f.hy2Obfs; d["mport"] = f.hy2Ports; d["hopInterval"] = f.hy2Hop; d["up"] = f.hy2Up; d["down"] = f.hy2Down; d["plugin"] = f.plugin
         d["headerType"] = f.tcpHeader; d["kcpHeader"] = f.headerType.ifBlank { "none" }; d["kcpSeed"] = f.seed; d["spx"] = f.spx
         d["grpcMode"] = if (f.xmode == "multi") "multi" else "gun"
@@ -552,6 +560,7 @@ object ServerEditor {
         f.wgReserved = v("reserved", f.wgReserved); f.wgAllowed = v("allowedIPs", f.wgAllowed); f.wgDns = v("dns", f.wgDns)
         f.fragment = v("fragment", f.fragment); f.noise = v("noise", f.noise); f.cipherSuites = v("cipherSuites", f.cipherSuites); f.finalMask = v("finalMask", f.finalMask)
         f.ech = v("ech", f.ech); f.pcs = v("pcs", f.pcs); f.vcn = v("vcn", f.vcn); f.pqv = v("pqv", f.pqv); f.engine = v("engine", f.engine)
+        f.echOutbound = v("echOutbound", f.echOutbound)
         f.hy2Obfs = v("obfsPassword", f.hy2Obfs); f.hy2Ports = v("mport", f.hy2Ports); f.hy2Hop = v("hopInterval", f.hy2Hop)
         f.hy2Up = v("up", f.hy2Up); f.hy2Down = v("down", f.hy2Down); f.plugin = v("plugin", f.plugin)
         f.tcpHeader = v("headerType", f.tcpHeader); f.headerType = v("kcpHeader", f.headerType); f.seed = v("kcpSeed", f.seed); f.spx = v("spx", f.spx)
@@ -623,11 +632,53 @@ object ServerEditor {
         return null
     }
 
-    /** ECH, the pin and the verify-name the sheet changed, in the core's own fields (an emptied one clears). */
+    /**
+     * ECH, the pin and the verify-name the sheet changed, in the core's own fields (an emptied one clears);
+     * the ECH outbound in tlsSettings, where the builder takes it from.
+     */
     private fun patchTlsExtras(tls: JSONObject, was: Fields, f: Fields) {
         if (f.ech != was.ech) { val v = f.ech.trim(); if (v.isEmpty()) tls.remove("echConfigList") else tls.put("echConfigList", v) }
         if (f.pcs != was.pcs) { val v = LinkParser.pinList(f.pcs); if (v.isEmpty()) tls.remove("pinnedPeerCertSha256") else tls.put("pinnedPeerCertSha256", v) }
         if (f.vcn != was.vcn) { val v = list(f.vcn).joinToString(","); if (v.isEmpty()) tls.remove("verifyPeerCertByName") else tls.put("verifyPeerCertByName", v) }
+        if (f.echOutbound != was.echOutbound) putEchOutbound(tls, f.echOutbound)
+    }
+
+    /**
+     * The form's ECH outbound into [tls]: the object it names (LinkParser.echOutboundOf —
+     * comments and trailing commas read), or no key at all when it is empty or names no
+     * protocol (parser.js applyServerEdits). Invalid JSON never gets here: [problem] refuses it.
+     */
+    private fun putEchOutbound(tls: JSONObject, text: String) {
+        val eo = LinkParser.echOutboundOf(text)
+        if (eo != null) tls.put("echOutbound", eo) else tls.remove("echOutbound")
+    }
+
+    /** What the Example button under the ECH outbound writes: the ECH value and the outbound, as the form shows them. */
+    data class EchExample(val ech: String, val echOutbound: String)
+
+    /**
+     * The ECH outbound patterniha published on 2026-10-20 (PattN P34 / PattNG
+     * P67): the plain-DNS answer no longer carries the key and DoH to 1.1.1.1 is
+     * reset on its SNI, so the query is sent h2c to 1.1.1.1/dns-query and this
+     * outbound carries it to 1.1.1.1:443 under TLS with another name, the
+     * certificate checked against the resolver's own (`fromMitM`).
+     * serverFields.js ECH_OUTBOUND_EXAMPLE.
+     */
+    const val ECH_OUTBOUND_EXAMPLE = """{"tag":"tls-repack-dns","protocol":"direct","settings":{"redirect":"1.1.1.1:443"},"streamSettings":{"security":"tls","tlsSettings":{"serverName":"www.microsoft.com","verifyPeerCertByName":"fromMitM,www.microsoft.com","alpn":["fromMitM"],"fingerprint":"chrome"}}}"""
+
+    /**
+     * The editor's Example for the ECH outbound: the outbound above, and the ECH
+     * value it goes with — asked over h2c of 1.1.1.1, under the name the field
+     * already asks for (a query without one asks for the SNI, as before); an
+     * empty field or a base64 list gets cloudflare-ech.com, the post's.
+     * serverFields.js echOutboundExample.
+     */
+    fun echOutboundExample(ech: String?): EchExample {
+        val s = (ech ?: "").trim()
+        val sep = s.indexOf("://")
+        val plus = s.indexOf('+')
+        val name = if (sep > -1) (if (plus > -1 && plus < sep) s.substring(0, plus) else "") else "cloudflare-ech.com"
+        return EchExample((if (name.isNotEmpty()) "$name+" else "") + "h2c://1.1.1.1/dns-query", JsonText.pretty(JSONObject(ECH_OUTBOUND_EXAMPLE)))
     }
 
     /**
@@ -638,7 +689,7 @@ object ServerEditor {
     private fun patchHysteria2(ob: JSONObject, was: Fields, f: Fields, addr: String, port: Int, moved: Boolean) {
         val touched = moved || f.cred != was.cred || f.sni != was.sni || f.allowInsecure != was.allowInsecure ||
             f.ech != was.ech || f.pcs != was.pcs || f.vcn != was.vcn || f.hy2Obfs != was.hy2Obfs || f.hy2Ports != was.hy2Ports ||
-            f.hy2Hop != was.hy2Hop || f.hy2Up != was.hy2Up || f.hy2Down != was.hy2Down
+            f.hy2Hop != was.hy2Hop || f.hy2Up != was.hy2Up || f.hy2Down != was.hy2Down || f.echOutbound != was.echOutbound
         if (!touched) return
         val h = LinkParser.hy2Values(ob)
         h["address"] = addr; h["port"] = port.toString()
@@ -648,6 +699,7 @@ object ServerEditor {
         if (f.ech != was.ech) h["ech"] = f.ech.trim()
         if (f.pcs != was.pcs) h["pcs"] = f.pcs.trim()
         if (f.vcn != was.vcn) h["vcn"] = f.vcn.trim()
+        if (f.echOutbound != was.echOutbound) h["echOutbound"] = f.echOutbound
         if (f.hy2Obfs != was.hy2Obfs) h["obfs-password"] = f.hy2Obfs.trim()
         if (f.hy2Ports != was.hy2Ports) h["mport"] = f.hy2Ports.trim()
         if (f.hy2Hop != was.hy2Hop) h["hopInterval"] = f.hy2Hop.trim()
@@ -777,7 +829,7 @@ object ServerEditor {
         "path" to f.path, "serviceName" to f.path, "fp" to f.fp, "pbk" to f.pbk, "sid" to f.sid,
         "alpn" to f.alpn, "allowInsecure" to if (f.allowInsecure) "1" else "0",
         "cipherSuites" to f.cipherSuites, "finalMask" to f.finalMask,
-        "ech" to f.ech, "pcs" to f.pcs, "vcn" to f.vcn, "pqv" to f.pqv,
+        "ech" to f.ech, "pcs" to f.pcs, "vcn" to f.vcn, "pqv" to f.pqv, "echOutbound" to f.echOutbound,
         "authority" to if (normNet(f.network) == "grpc") f.host else "",
         // preserved passthroughs (see Fields)
         "spx" to f.spx,
