@@ -7,6 +7,7 @@ import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import com.irnetfree.vpn.core.Store
+import com.irnetfree.vpn.core.t
 import com.irnetfree.vpn.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -110,10 +111,10 @@ internal object TileLook {
     data class Look(val active: Boolean, val subtitle: String)
 
     fun of(state: ConnState, label: String): Look = when (state) {
-        ConnState.CONNECTED -> Look(true, label.ifBlank { "Connected" })
-        ConnState.CONNECTING -> Look(true, "Connecting…")
-        ConnState.ERROR -> Look(false, "Not connected")
-        ConnState.DISCONNECTED -> Look(false, "Off")
+        ConnState.CONNECTED -> Look(true, label.ifBlank { t("qs.connected") })
+        ConnState.CONNECTING -> Look(true, t("qs.connecting"))
+        ConnState.ERROR -> Look(false, t("qs.notConnected"))
+        ConnState.DISCONNECTED -> Look(false, t("qs.off"))
     }
 
     /** Connected or on its way: a tap disconnects (a connect still being prepared stops there). Otherwise it connects. */
