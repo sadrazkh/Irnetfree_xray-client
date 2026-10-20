@@ -169,8 +169,12 @@ let cleanupFailed = false;
 const GITHUB_REPO = 'sadrazkh/Irnetfree_xray-client';
 
 const DEFAULT_SETTINGS = {
-  socksPort: 10808,
-  httpPort: 10809,
+  // the 30000s, away from the 10808/10809/10085 every other Xray client takes
+  // (v2rayN, v2rayNG, Nekoray…): two clients on one machine fought over them.
+  // A store from before keeps its own choices — settingsMigrate.js moves only
+  // the old defaults, once (`portsMoved`).
+  socksPort: 30808,
+  httpPort: 30809,
   allowLan: false,
   routingMode: 'global',
   blockAds: true,
@@ -183,7 +187,8 @@ const DEFAULT_SETTINGS = {
   dnsDirect: ['178.22.122.100', '185.51.200.2'],
   ipv6: false,
   logLevel: 'warning',
-  apiPort: 10085,
+  apiPort: 30085,
+  portsMoved: true,
   systemProxy: true,
   // Whole-system tunnelling is the point of the app, so it is the default.
   // It needs a backend (sing-box, or the legacy tun2socks) and admin rights;

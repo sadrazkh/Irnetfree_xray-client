@@ -328,9 +328,11 @@ data class RoutingProfile(
 
 /** App settings (superset the Android client needs). */
 data class AppSettings(
-    val socksPort: Int = 10808,
-    val httpPort: Int = 10809,
-    val apiPort: Int = 10085,
+    // the 30000s, away from the 10808/10809/10085 every other Xray client takes
+    // (v2rayNG, NekoBox…); a store from before moves on read (fromJson)
+    val socksPort: Int = 30808,
+    val httpPort: Int = 30809,
+    val apiPort: Int = 30085,
     // Name resolution (see DnsPlan.kt / desktop dnsBuilder.js): remote over DoH
     // through the tunnel, an in-country resolver for bypass modes, every
     // port-53 packet answered by the core. `dnsManaged:false` restores the old
@@ -370,7 +372,7 @@ data class AppSettings(
     val lang: String = "fa"
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
-        put("socksPort", socksPort); put("httpPort", httpPort); put("apiPort", apiPort)
+        put("socksPort", socksPort); put("httpPort", httpPort); put("apiPort", apiPort); put("portsMoved", true)
         put("dnsManaged", dnsManaged); put("dnsRemote", JSONArray(dnsRemote)); put("dnsDirect", JSONArray(dnsDirect))
         put("routingMode", routingMode)
         put("blockAds", blockAds); put("enableSniffing", enableSniffing); put("logLevel", logLevel)
@@ -401,6 +403,18 @@ data class AppSettings(
             "10.202.10.10", "10.202.10.11"         // 403.online
         )
 
+        /**
+         * The local ports moved to the 30000s. A store from before (no `portsMoved`)
+         * still holding an old default reads as the new one — the desktop's
+         * settingsMigrate.js; a port the user chose is kept. These are the phone's
+         * own loopback ports, never another device's, so every old default moves
+         * (LAN sharing's are stored apart and kept).
+         */
+        internal fun movedPort(o: JSONObject, key: String, old: Int, now: Int): Int {
+            val v = o.optInt(key, now)
+            return if (v == old && !o.optBoolean("portsMoved", false)) now else v
+        }
+
         fun fromJson(o: JSONObject): AppSettings {
             fun strList(a: JSONArray?): List<String> = ServerConfig.strList(a)
             fun ruleList(a: JSONArray?): List<RouteRule> = if (a == null) emptyList() else (0 until a.length()).map { RouteRule.fromJson(a.getJSONObject(it)) }
@@ -418,9 +432,9 @@ data class AppSettings(
                 if (direct.isEmpty() && d.isNotEmpty()) direct = d
             }
             return AppSettings(
-                socksPort = o.optInt("socksPort", 10808),
-                httpPort = o.optInt("httpPort", 10809),
-                apiPort = o.optInt("apiPort", 10085),
+                socksPort = movedPort(o, "socksPort", 10808, 30808),
+                httpPort = movedPort(o, "httpPort", 10809, 30809),
+                apiPort = movedPort(o, "apiPort", 10085, 30085),
                 dnsManaged = o.optBoolean("dnsManaged", true),
                 dnsRemote = remote.ifEmpty { DnsPlan.DEFAULT_REMOTE },
                 dnsDirect = direct.ifEmpty { DnsPlan.DEFAULT_DIRECT_IR },
@@ -502,8 +516,8 @@ data class LanShare(
         else copy(user = user.ifEmpty { newUser() }, pass = pass.ifEmpty { newPass() })
 
     companion object {
-        const val DEFAULT_SOCKS = 10810
-        const val DEFAULT_HTTP = 10811
+        const val DEFAULT_SOCKS = 30810
+        const val DEFAULT_HTTP = 30811
         const val MIN_PORT = 1024
         const val MAX_PORT = 65535
         /** The inbound tags, in both config formats: TunnelSetup.withoutLan finds them by these. */
