@@ -2,6 +2,8 @@ package com.irnetfree.vpn.ui
 
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.Subscription
+import com.irnetfree.vpn.core.t
+import com.irnetfree.vpn.core.tf
 
 /**
  * The Servers list as groups: what the user added by hand ("Manual"), then one
@@ -9,9 +11,10 @@ import com.irnetfree.vpn.core.Subscription
  * subscription was deleted. Each group folds away under its header, and what
  * is folded is remembered across restarts (Store.collapsedGroups).
  *
- * Pure — no Compose, no Android — so the grouping, the folding, the keys the
- * lazy list is given and the line under a header are tested off a device. The
- * screen only draws [ListEntry]s, in order.
+ * Pure — no composables, no Android — so the grouping, the folding, the keys
+ * the lazy list is given and the line under a header are tested off a device
+ * (its words are I18n's, in the app's language). The screen only draws
+ * [ListEntry]s, in order.
  */
 object ServerGroups {
     const val MANUAL = "manual"
@@ -54,10 +57,10 @@ object ServerGroups {
             if (shown.isEmpty() && (searching || !showEmpty)) return
             out.add(Group(key, title, sub, shown, all.size, searching || key !in collapsed, all.any { s -> s.id == selectedId }, all))
         }
-        add(MANUAL, "Manual", null, bySub[null] ?: emptyList(), false)
-        for (sub in subs) add(subKey(sub.id), sub.name.ifBlank { "Subscription" }, sub, bySub[sub.id] ?: emptyList(), true)
+        add(MANUAL, t("srv.manual"), null, bySub[null] ?: emptyList(), false)
+        for (sub in subs) add(subKey(sub.id), sub.name.ifBlank { t("srv.subscription") }, sub, bySub[sub.id] ?: emptyList(), true)
         val orphans = servers.filter { s -> val id = s.subId; id != null && id !in subIds }
-        add(ORPHAN, "From a removed subscription", null, orphans, false)
+        add(ORPHAN, t("srv.subGone"), null, orphans, false)
         return out
     }
 
@@ -136,19 +139,19 @@ object ServerGroups {
         if (sub.expire > 0) {
             val msLeft = sub.expire * 1000L - now
             if (msLeft < 0) {
-                parts.add("expired")
+                parts.add(t("subs.expiredLower"))
                 level = LEVEL_BAD
             } else {
                 val days = msLeft / 86_400_000L
-                parts.add(if (days == 1L) "1 day left" else "$days days left")
+                parts.add(if (days == 1L) t("subs.oneDayLeft") else tf("subs.daysLeft", "n" to days))
                 if (days <= 3) level = maxOf(level, LEVEL_WARN)
             }
         }
         if (sub.lastError.isNotEmpty() && sub.lastTried > 0) {
-            parts.add("last try failed ${fmtAgo(now - sub.lastTried)}")
+            parts.add(tf("subs.lastTryFailed", "ago" to fmtAgo(now - sub.lastTried)))
             level = maxOf(level, LEVEL_WARN)
         } else {
-            parts.add(if (sub.lastUpdated > 0) "updated ${fmtAgo(now - sub.lastUpdated)}" else "never updated")
+            parts.add(if (sub.lastUpdated > 0) tf("subs.updated", "ago" to fmtAgo(now - sub.lastUpdated)) else t("subs.never"))
         }
         return Summary(parts.joinToString(" · "), level)
     }
