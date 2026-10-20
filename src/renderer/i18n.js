@@ -119,6 +119,7 @@ const I18N = {
 
     'picker.choose': 'سرور را انتخاب کن', 'picker.none': 'سروری موجود نیست',
     'picker.listLabel': 'سرورها، زنجیره‌ها و گروه‌ها',
+    'picker.search': 'جستجوی کانفیگ یا ساب…',
 
     'servers.title': 'سرورها',
     'btn.pingAll': 'تست همه', 'btn.clearAll': 'حذف همه', 'btn.add': '+ افزودن',
@@ -126,6 +127,7 @@ const I18N = {
     'btn.import': 'وارد کردن', 'btn.cancel': 'انصراف',
     'servers.empty': 'هنوز سروری اضافه نشده. روی «افزودن» بزن.',
     'srv.selected': 'انتخاب‌شده',
+    'srv.delete': 'حذف سرور',
     'btn.edit': 'ویرایش', 'btn.addWg': '+ وایرگارد', 'btn.addWgGo': 'افزودن',
     'btn.copy': 'کپی لینک', 'btn.qr': 'کد QR',
     'qr.title': 'اشتراک کانفیگ', 'qr.copy': 'کپی لینک', 'qr.tooBig': 'لینک برای QR خیلی بلند است — از کپی استفاده کن.',
@@ -383,6 +385,7 @@ const I18N = {
     'chain.wgHint': 'برای رسیدن به دیتابیس وقتی WireGuard مستقیم کار نمی‌کند: یک کانفیگ را اولِ زنجیره و WireGuard را آخرِ زنجیره بگذار؛ بعد در «روتینگ ویژه» رنج IP دیتابیس را به این زنجیره بفرست (اول از کانفیگ رد می‌شود، بعد روی آن رنج از WireGuard).',
     'chain.noneYet': 'هنوز زنجیره‌ای ساخته نشده. روی «زنجیره جدید» بزن.',
     'chain.addFromBelow': 'از پایین سرور اضافه کن…',
+    'chain.ping': 'تست این زنجیره', 'chain.delete': 'حذف زنجیره', 'chain.removeHop': 'حذف از زنجیره',
 
     // groups (v1.27): several configs used together as one
     'grp.title': 'گروه‌ها',
@@ -392,6 +395,9 @@ const I18N = {
     'grp.countOne': '۱ کانفیگ',
     'grp.count': '{n} کانفیگ',
     'grp.strategy': 'پخش اتصال‌ها',
+    'grp.fallback': 'وقتی هیچ عضوی جواب نمی‌دهد',
+    'grp.fallbackFirst': 'عضو اول (پیش‌فرض)',
+    'grp.fallbackHint': 'مثلاً یک WARP: تا وقتی عضوی جواب می‌دهد هرگز استفاده نمی‌شود و امتحانش هم نمی‌کنند؛ وقتی همه از کار افتادند، ترافیک گروه از این می‌رود.',
     'grp.st.roundRobin': 'پخش بین همه',
     'grp.stLine.roundRobin': 'سرعت جمعی: هر اتصال تازه از یکی',
     'grp.st.leastPing': 'سریع‌ترین',
@@ -463,6 +469,7 @@ const I18N = {
     'pool.socksPort': 'پورت SOCKS', 'pool.httpPort': 'پورت HTTP (اختیاری)',
     'pool.invalidTarget': '⚠ خروجی انتخاب‌شده معتبر نیست — یک کانفیگ یا زنجیرهٔ آماده انتخاب کن.',
     'pool.needOne': 'حداقل یک پروکسیِ معتبر را در استخر فعال کن',
+    'pool.delete': 'حذف این پروکسی',
 
     'proxy.title': 'افزودن پروکسی SOCKS / HTTP', 'proxy.type': 'نوع', 'proxy.name': 'نام',
     'proxy.host': 'آدرس (host)', 'proxy.port': 'پورت',
@@ -481,6 +488,7 @@ const I18N = {
     'autoupdate.title': 'به‌روزرسانی خودکار', 'autoupdate.sub': 'ساب‌ها در فاصله‌ی مشخص خودکار تازه می‌شن',
     'interval.label': 'فاصله (دقیقه)', 'subs.empty': 'هنوز ساب‌اسکریپشنی اضافه نشده.',
     'sub.servers': 'سرور', 'sub.lastUpdate': 'آخرین به‌روزرسانی',
+    'sub.delete': 'حذف ساب',
 
     'routing.title': 'روتینگ', 'routing.modeLabel': 'حالت روتینگ',
     'routing.global': 'گلوبال (همه از پروکسی)', 'routing.bypassIr': 'دور زدن ایران',
@@ -702,6 +710,7 @@ const I18N = {
     'adv.useMode.hint': 'قانون‌های خودت همیشه اول بررسی می‌شوند؛ این گزینه فقط زیرِ آن‌ها اضافه می‌شود. یعنی مثلا رنج شرکت از وایرگارد می‌رود و در همان حال سایت‌های ایرانی مستقیم می‌شوند. اگر حالت را روی «گلوبال» بگذاری چیزی اضافه نمی‌شود.',
     'adv.useMode.now': 'الان: {mode}',
     'adv.empty': 'هنوز قانونی نیست. «افزودن قانون» را بزن.',
+    'adv.removeRule': 'حذف قانون',
     'adv.valuePh': 'مثلا 1.2.3.0/24 یا example.com یا 443',
     'adv.type.ip': 'IP', 'adv.type.domain': 'دامنه', 'adv.type.port': 'پورت',
     'adv.geoBad': 'این کدها در فایل‌های geo نیستند و کل کانفیگ را باطل می‌کنند: {codes} — فایل‌ها سالم‌اند، کد اشتباه است (فهرست دامنه‌های ایران geosite:category-ir است).',
@@ -930,6 +939,7 @@ const I18N = {
     'rp.importFailed': 'این لینک روتینگ وارد نشد: {reason}',
     'set.routingProfiles': 'روتینگ‌ها',
     'set.chains': 'زنجیره‌ها',
+    'set.groups': 'گروه‌ها',
     // the server editor (serverFields.js)
     'sf.protocol': 'پروتکل',
     'sf.name': 'نام',
@@ -1261,6 +1271,7 @@ const I18N = {
 
     'picker.choose': 'Choose a server', 'picker.none': 'No servers',
     'picker.listLabel': 'Servers, chains & groups',
+    'picker.search': 'Search configs or subscriptions…',
 
     'servers.title': 'Servers',
     'btn.pingAll': 'Ping all', 'btn.clearAll': 'Clear all', 'btn.add': '+ Add',
@@ -1268,6 +1279,7 @@ const I18N = {
     'btn.import': 'Import', 'btn.cancel': 'Cancel',
     'servers.empty': 'No servers yet. Click “Add”.',
     'srv.selected': 'Selected',
+    'srv.delete': 'Delete server',
     'btn.edit': 'Edit', 'btn.addWg': '+ WireGuard', 'btn.addWgGo': 'Add',
     'btn.copy': 'Copy link', 'btn.qr': 'QR code',
     'qr.title': 'Share config', 'qr.copy': 'Copy link', 'qr.tooBig': 'Link too long for a QR — use Copy.',
@@ -1521,6 +1533,7 @@ const I18N = {
     'chain.wgHint': 'To reach a database when WireGuard does not work directly: put a config first and WireGuard last in the chain; then in Advanced routing send the database IP range to this chain (it goes through the config first, then over WireGuard for that range).',
     'chain.noneYet': 'No chains yet. Click “New chain”.',
     'chain.addFromBelow': 'Add a server from below…',
+    'chain.ping': 'Test this chain', 'chain.delete': 'Delete chain', 'chain.removeHop': 'Remove from the chain',
 
     // groups (v1.27): several configs used together as one
     'grp.title': 'Groups',
@@ -1530,6 +1543,9 @@ const I18N = {
     'grp.countOne': '1 config',
     'grp.count': '{n} configs',
     'grp.strategy': 'How connections are spread',
+    'grp.fallback': 'When no member answers',
+    'grp.fallbackFirst': 'The first member (default)',
+    'grp.fallbackHint': 'A WARP, say: never used — nor probed — while a member answers; when every member is down, the group’s traffic goes through it.',
     'grp.st.roundRobin': 'Spread over all',
     'grp.stLine.roundRobin': 'Combined speed: each new connection through the next one',
     'grp.st.leastPing': 'Fastest',
@@ -1601,6 +1617,7 @@ const I18N = {
     'pool.socksPort': 'SOCKS port', 'pool.httpPort': 'HTTP port (optional)',
     'pool.invalidTarget': '⚠ The selected exit is not valid — pick a config or a ready chain.',
     'pool.needOne': 'Enable at least one valid proxy in the pool',
+    'pool.delete': 'Delete this proxy',
 
     'proxy.title': 'Add SOCKS / HTTP proxy', 'proxy.type': 'Type', 'proxy.name': 'Name',
     'proxy.host': 'Host', 'proxy.port': 'Port',
@@ -1619,6 +1636,7 @@ const I18N = {
     'autoupdate.title': 'Auto update', 'autoupdate.sub': 'Subscriptions refresh automatically on an interval',
     'interval.label': 'Interval (min)', 'subs.empty': 'No subscriptions yet.',
     'sub.servers': 'servers', 'sub.lastUpdate': 'Last update',
+    'sub.delete': 'Delete subscription',
 
     'routing.title': 'Routing', 'routing.modeLabel': 'Routing mode',
     'routing.global': 'Global (all via proxy)', 'routing.bypassIr': 'Bypass Iran',
@@ -1840,6 +1858,7 @@ const I18N = {
     'adv.useMode.hint': 'Your own rules are still matched first; this only adds the mode underneath them. So a corporate range can go through WireGuard while Iranian sites still go direct. With the mode on “Global” nothing is added.',
     'adv.useMode.now': 'Currently: {mode}',
     'adv.empty': 'No rules yet. Click “Add rule”.',
+    'adv.removeRule': 'Remove rule',
     'adv.valuePh': 'e.g. 1.2.3.0/24 or example.com or 443',
     'adv.type.ip': 'IP', 'adv.type.domain': 'Domain', 'adv.type.port': 'Port',
     'adv.geoBad': 'These codes are not in the geo files and make the core refuse the whole config: {codes} — the files are fine, the code is wrong (the Iranian domain list is geosite:category-ir).',
@@ -2068,6 +2087,7 @@ const I18N = {
     'rp.importFailed': 'This routing link was not imported: {reason}',
     'set.routingProfiles': 'Routing profiles',
     'set.chains': 'Chains',
+    'set.groups': 'Groups',
     // the server editor (serverFields.js)
     'sf.protocol': 'Protocol',
     'sf.name': 'Name',

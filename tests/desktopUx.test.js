@@ -365,3 +365,50 @@ test('D4: the app’s version sits small under the logo, from app:init, left-to-
   assert.match(CSS, /\.tb-ver:empty \{ display: none; \}/, 'nothing reserved before app:init answers');
   assert.match(CSS, /\.tb-logo \{ width: 18px; height: 18px;/);
 });
+
+/* --------------------------- the apply-now dialog asks about this save --------------------------- */
+
+test('a save asks to apply now only for what IT changed — after “Later” the theme, the skin or the language do not ask again', async () => {
+  const applied = { mux: 'off', routingMode: 'global', theme: 'light' };
+  const RECONNECT = ['mux', 'routingMode'];
+  let current = Object.assign({}, applied);
+  const asked = [];
+  const ctx = compile(['saveSettings', 'setPending'], {
+    state: { connected: true, connecting: false, settings: Object.assign({}, current), pendingReconnect: [], pendingDismissed: false },
+    window: {
+      api: {
+        // main's answer: the settings, and which reconnect keys now differ from what the tunnel was built from
+        setSettings: async (partial) => {
+          current = Object.assign({}, current, partial);
+          return { settings: Object.assign({}, current), pendingReconnect: RECONNECT.filter((k) => current[k] !== applied[k]) };
+        }
+      }
+    },
+    renderPendingBanner() {}, renderTrafficPath() {}, renderInspector() {},
+    promptApplySettings: async () => { asked.push([...ctx.state.pendingReconnect]); return false; },
+    JSON, Object, Array
+  });
+  await ctx.saveSettings({ mux: 'on' });
+  assert.deepEqual(asked, [['mux']], 'a key it made pending: asked');
+  // “Later”: the key stays pending, and unrelated saves follow
+  await ctx.saveSettings({ theme: 'dark' });
+  await ctx.saveSettings({ skin: 'ocean' });
+  await ctx.saveSettings({ lang: 'en' });
+  assert.equal(asked.length, 1, 'the theme, the skin and the language do not bring the dialog back');
+  assert.deepEqual([...ctx.state.pendingReconnect], ['mux'], 'the banner still knows');
+  // the same pending key changed again (the tunnel has neither value): asked
+  await ctx.saveSettings({ mux: 'xudp' });
+  assert.deepEqual(asked[1], ['mux']);
+  // the whole form saved with that key as it is: not asked; a second key made pending: asked, both listed
+  await ctx.saveSettings({ mux: 'xudp', theme: 'dark' });
+  assert.equal(asked.length, 2);
+  await ctx.saveSettings({ routingMode: 'bypass' });
+  assert.deepEqual(asked[2], ['mux', 'routingMode']);
+  // silent: never asks (the caller shows its own), the pending state is still kept
+  await ctx.saveSettings({ routingMode: 'rule' }, { silent: true });
+  assert.equal(asked.length, 3);
+  // back to what is live: nothing pending is new — not asked
+  await ctx.saveSettings({ routingMode: 'global' });
+  assert.equal(asked.length, 3);
+  assert.deepEqual([...ctx.state.pendingReconnect], ['mux']);
+});

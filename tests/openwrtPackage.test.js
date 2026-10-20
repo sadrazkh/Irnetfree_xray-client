@@ -586,7 +586,7 @@ test('LuCI: Services → IRNetFree with four tabs, behind its own ACL', () => {
   ]);
 });
 
-test('LuCI ACL: reading and changing are split method by method, one file (the token) is readable, nothing else', () => {
+test('LuCI ACL: reading and changing are split method by method, one file (the token) is readable — by the write half only, nothing else', () => {
   const acl = JSON.parse(data['./usr/share/rpcd/acl.d/luci-app-irnetfree.json'].data.toString());
   assert.deepEqual(Object.keys(acl), ['luci-app-irnetfree']);
   const a = acl['luci-app-irnetfree'];
@@ -596,8 +596,11 @@ test('LuCI ACL: reading and changing are split method by method, one file (the t
     'cloudflared_install', 'service'];
   assert.deepEqual(a.read.ubus, { 'luci.irnetfree': READ });
   assert.deepEqual(a.write.ubus, { 'luci.irnetfree': WRITE });
-  assert.deepEqual(a.read.file, { '/etc/irnetfree/token': ['read'] }, 'the token file (the web UI link) and no other file');
-  assert.equal(a.write.file, undefined, 'no file is writable');
+  // The token is full control of IRNetFree (the web UI and its API): a login
+  // with only the read half got it here and with it everything the read half
+  // keeps from it. Readable by the write half only — and only readable.
+  assert.equal(a.read.file, undefined, 'the read half reads no file — not the token');
+  assert.deepEqual(a.write.file, { '/etc/irnetfree/token': ['read'] }, 'the token file (the web UI link), read, and no other file; nothing writable');
   assert.deepEqual(a.read.uci, ['irnetfree']);
   assert.deepEqual(a.write.uci, ['irnetfree'], 'the web UI port and listen address');
   // every method the rpcd plugin declares is granted exactly once — as reading or as changing

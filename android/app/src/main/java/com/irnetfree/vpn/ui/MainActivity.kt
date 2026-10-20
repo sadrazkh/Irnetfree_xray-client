@@ -938,6 +938,12 @@ private fun doConnect(ctx: Context, store: Store) {
  * ([Fastest.walk]) — a round trip measured as failing disqualifies, so ⚡ never
  * connects to a server it has just seen fail.
  *
+ * A UDP-only server (WireGuard, Hysteria2, MASQUE over HTTP/3 — [Fastest.udpOnly])
+ * has no TCP port to knock on: a handshake failed for every one, so ⚡ could
+ * never pick one. Its first stage is a real round trip instead, through a
+ * throwaway core one at a time, bounded like the handshake batch
+ * ([Fastest.measureUdp]); it is then ranked beside the TCP servers' round trips.
+ *
  * `onPhase` runs on the caller's dispatcher (the UI's), so it may write state.
  */
 private suspend fun pickFastest(
@@ -945,10 +951,11 @@ private suspend fun pickFastest(
     servers: List<ServerConfig>,
     onPhase: (String) -> Unit
 ): FastestResult {
+    val (udpServers, tcpServers) = servers.partition { s: ServerConfig -> Fastest.udpOnly(s) }
     val measured = LinkedHashMap<String, Fastest.Measured>()
     var done = 0
     onPhase("testing 0/${servers.size}…")
-    for (batch in servers.chunked(8)) {
+    for (batch in tcpServers.chunked(8)) {
         val part = withContext(Dispatchers.IO) {
             batch.map { s -> async { Fastest.Measured(s.id, tcp = Diagnostics.tcpPing(s.address, s.port, timeout = 3000)) } }.awaitAll()
         }
@@ -956,20 +963,34 @@ private suspend fun pickFastest(
         done += batch.size
         onPhase("testing $done/${servers.size}…")
     }
-    val answered = Fastest.shortlist(measured.values.toList(), Int.MAX_VALUE).size
-    if (answered == 0) return FastestResult(null, 0, 0)
     val byId = servers.associateBy { it.id }
-    val tried = Fastest.walk(measured.values.toList()) { i, m ->
+    val udp = Fastest.measureUdp(udpServers.map { s: ServerConfig -> s.id }, now = { System.nanoTime() / 1_000_000L }) { i: Int, id: String ->
+        val s = byId[id]
+        if (s == null) -1L else {
+            onPhase("testing ${done + i + 1}/${servers.size} · ${s.name.take(16)} (UDP)")
+            val ms = realDelayThrough(ctx, s, Fastest.UDP_TIMEOUT_MS)
+            AppWork.putReal(s.id, ms)   // the list shows it too
+            ms
+        }
+    }
+    if (udp.size < udpServers.size)
+        VpnState.addLog("Auto (fastest): ${udp.size} of the ${udpServers.size} UDP-only servers measured (a throwaway core each, at most ${Fastest.UDP_MAX} or ${Fastest.UDP_BUDGET_MS / 1000} s) — the rest were not candidates")
+    val udpCarried = udp.count { m: Fastest.Measured -> (m.real ?: -1L) >= 0L }
+    val answered = Fastest.shortlist(measured.values.toList(), Int.MAX_VALUE).size + udpCarried
+    if (answered == 0) return FastestResult(null, 0, udp.size)
+    // a UDP-only server already carried traffic: the quickest handshakes are
+    // still tried, but no further cores are spent looking for a TCP one that does
+    val tried = Fastest.walk(measured.values.toList(), maxTries = if (udpCarried > 0) Fastest.SHORTLIST else Fastest.MAX_TRIES) { i, m ->
         val s = byId[m.id]
         if (s == null) -1L else {
             onPhase("checking ${i + 1} · ${s.name.take(16)}")
             realDelayThrough(ctx, s)
         }
     }
-    return FastestResult(Fastest.pick(tried), answered, tried.size)
+    return FastestResult(Fastest.pick(tried + udp), answered, tried.size + udp.size)
 }
 
-/** ⚡'s answer: the winner (null = none), how many shook hands, how many were really tried. */
+/** ⚡'s answer: the winner (null = none), how many answered (a handshake, or a UDP-only server's round trip), how many were really tried. */
 private class FastestResult(val best: Fastest.Measured?, val answered: Int, val tried: Int)
 
 /**
@@ -981,11 +1002,11 @@ private class FastestResult(val best: Fastest.Measured?, val answered: Int, val 
  * that went away mid-test left the throwaway core running. Blocking calls are
  * not interrupted by a cancel, so this stop always runs.
  */
-private suspend fun realDelayThrough(ctx: Context, s: ServerConfig): Long {
+private suspend fun realDelayThrough(ctx: Context, s: ServerConfig, timeout: Int = 5000): Long {
     return AppWork.coreLock.withLock {
         withContext(Dispatchers.IO) {
             val h = XrayTester.start(ctx, s)
-            if (h == null) -1L else try { Diagnostics.httpLatency(h.port, timeout = 5000) } finally { XrayTester.stop(h) }
+            if (h == null) -1L else try { Diagnostics.httpLatency(h.port, timeout = timeout) } finally { XrayTester.stop(h) }
         }
     }
 }
@@ -1032,8 +1053,6 @@ private object AppWork {
     /** The ⚡ run in flight, and its number: a cancelled run's last words are not shown. */
     private var fastestJob: Job? = null
     private var fastestRun = 0
-    /** The second half of a reconnect, waiting its 0.6 s — a Cancel meanwhile drops it. */
-    private var pendingConnect: Job? = null
 
     /** What the app's snackbar is to say; App collects it. */
     class Snack(val text: String, val action: String? = null, val onAction: (() -> Unit)? = null)
@@ -1054,6 +1073,16 @@ private object AppWork {
     fun putPing(id: String, ms: Long) {
         val t = tests[id]
         if (t == null || t.phase.isEmpty()) tests[id] = (t ?: TestState()).copy(tcp = ms, error = null)
+    }
+
+    /**
+     * ⚡'s real round trip through a UDP-only server (-1 = it carried nothing),
+     * unless a full test of it is running. No TCP figure beside it: the server
+     * has no TCP port a handshake could time (Fastest.udpOnly).
+     */
+    fun putReal(id: String, ms: Long) {
+        val t = tests[id]
+        if (t == null || t.phase.isEmpty()) tests[id] = (t ?: TestState()).copy(tcp = null, down = ms, error = null)
     }
 
     /**
@@ -1124,14 +1153,13 @@ private object AppWork {
     fun stopTests() { testAllJob?.cancel(); testAllJob = null; testingAll.value = false }
 
     /**
-     * The user's Disconnect — and Cancel, while a connect is on its way. The
-     * service's own path (generation moved on at once, so a connect still being
-     * prepared is dropped before its service starts); a reconnect's pending
-     * second half goes too, and connect-on-open steps aside.
+     * The user's Disconnect — and Cancel, while a connect is on its way (a
+     * Reconnect's too). The service's own path (generation moved on at once,
+     * so a connect still being prepared is dropped before its service starts),
+     * and connect-on-open steps aside.
      */
     fun disconnect(ctx: Context) {
         AutoConnectOnce.manual = true
-        pendingConnect?.cancel(); pendingConnect = null
         runCatching { XrayVpnService.disconnect(ctx.applicationContext) }
             .onFailure { e -> snack("Disconnect failed: ${e.message ?: e.javaClass.simpleName}") }
     }
@@ -1291,12 +1319,17 @@ private object AppWork {
         }
     }
 
-    /** Down, then up again on the current selection — the second half no longer dies with the screen. */
+    /**
+     * Up again on the current selection: one connect onto the live tunnel,
+     * which the service makes as a switch (XrayVpnService.connect) — the new
+     * tunnel replaces the old one in place. It used to be a disconnect, 0.6 s,
+     * then a connect: for that pause and the new core's start the phone had no
+     * VPN, every app straight out over the ISP. A Cancel meanwhile is the
+     * user's Disconnect (disconnect below): its move overtakes this connect
+     * wherever it is — in prepare(), queued for the service, or starting.
+     */
     fun reconnect(ctx: Context, store: Store) {
-        val app = ctx.applicationContext
-        runCatching { XrayVpnService.disconnect(app) }
-        pendingConnect?.cancel()
-        pendingConnect = scope.launch { delay(600); pendingConnect = null; doConnect(app, store) }
+        doConnect(ctx.applicationContext, store)
     }
 
     /** A newer IRNetFree than this one, for the card on Home ("" = none, or put off with Later). */
@@ -1474,7 +1507,8 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
                 }
                 items(g.servers) { s ->
                     val (flag, label) = ServerLabel.split(s.name)
-                    PickRow(label, flag, s.protocol, s.address, store.selection == s.id, AppWork.tests[s.id]?.tcp) { pick(s.id) }
+                    // a UDP-only server ⚡ measured shows its real round trip (no handshake to time)
+                    PickRow(label, flag, s.protocol, s.address, store.selection == s.id, AppWork.tests[s.id]?.let { t: TestState -> t.tcp ?: t.down }) { pick(s.id) }
                 }
             }
         }
@@ -2085,6 +2119,8 @@ private fun latColor(ms: Long?): Color = when {
                 r?.phase?.isNotEmpty() == true -> Text("…", color = AMBER, fontSize = 12.sp, fontFamily = MONO)
                 r?.error != null -> Text("×", color = BAD, fontSize = 12.sp, fontFamily = MONO)
                 r?.tcp != null -> Text(fmtLat(r.tcp) + (if (r.tcp in 0L..999L) " ms" else ""), color = latColor(r.tcp), fontSize = 12.sp, fontFamily = MONO, maxLines = 1)
+                // a UDP-only server ⚡ measured: its real round trip (no handshake to time)
+                r?.down != null -> Text(fmtLat(r.down) + (if (r.down in 0L..999L) " ms" else ""), color = latColor(r.down), fontSize = 12.sp, fontFamily = MONO, maxLines = 1)
                 else -> Text("—", color = SUBTLE, fontSize = 12.sp, fontFamily = MONO)
             }
             // The one affordance that says there is more in here, and opens it
@@ -3258,6 +3294,8 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     var editing by remember { mutableStateOf<GroupConfig?>(null) }
     var editingNew by remember { mutableStateOf(false) }
     Screen("Chains & groups", back, { IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), "Chain ${store.chains.size + 1}", emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, "add a chain", tint = PRIMARY) } }) {
+        // a hop added to or removed from a chain the connection runs waits for a reconnect
+        ApplyBar(store, store.settings)
         Text("CHAINS", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
         if (store.chains.isEmpty()) EmptyHint("No chains yet.")
         store.chains.toList().forEachIndexed { idx, c ->
@@ -4169,7 +4207,8 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         // Mux (Mux.kt, spec §4). Its own key, like LAN sharing — not in this
         // screen's copy of AppSettings; read by the next connect.
         var mux by remember { mutableStateOf(store.muxMode) }
-        fun pickMux(v: String) { store.muxMode = v; mux = v }
+        // touch(): the bar above names a mode the running connection does not carry (SettingsApply)
+        fun pickMux(v: String) { store.muxMode = v; mux = v; AppWork.touch() }
         Text("Mux (multiplexing)", color = TXT, modifier = Modifier.padding(top = 10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             listOf(Mux.AUTO to "Auto", Mux.ON to "On", Mux.OFF to "Off").forEach { (v, l) ->
@@ -4355,7 +4394,8 @@ private fun routingModeLabel(mode: String): String = when (mode) {
  * Connected, and the settings changed since the connect in ways the running
  * tunnel does not carry (SettingsApply — the core has no hot reload): what
  * changed, said by name, and a Reconnect. [now]: the settings as the screen
- * holds them (each screen saves its own copy).
+ * holds them (each screen saves its own copy); the Mux mode, the profile and
+ * the chains the connection runs are read from the store as it is now.
  */
 @Composable private fun ApplyBar(store: Store, now: AppSettings) {
     val ctx = LocalContext.current
@@ -4363,7 +4403,9 @@ private fun routingModeLabel(mode: String): String = when (mode) {
     val state by VpnState.state.collectAsState()
     val applied by VpnState.applied.collectAsState()
     if (state != ConnState.CONNECTED) return
-    val keys = SettingsApply.pending(applied, now, applied?.profile?.let { p: RoutingProfile -> store.profileById(p.id) })
+    val keys = SettingsApply.pending(applied, now, applied?.profile?.let { p: RoutingProfile -> store.profileById(p.id) }, store.muxMode) { id: String ->
+        store.chainById(id)?.let { c: ChainConfig -> SettingsApply.ChainNow(c.name, store.chainMembers(c).map { m: ServerConfig -> m.id }) }
+    }
     if (keys.isEmpty()) return
     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(10.dp)).background(CARD2).padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically) {

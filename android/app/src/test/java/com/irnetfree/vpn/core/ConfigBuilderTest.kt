@@ -155,6 +155,20 @@ class ConfigBuilderTest {
         assertTrue(c.getJSONObject("dns").getJSONArray("servers").get(0) is String)   // no in-country resolver for a pool
     }
 
+    @Test fun pool_ipIfNonMatchEvenUnderManagedDns_theOthersStayOnDemand() {
+        // configBuilder.js: on demand, every entry's hostname would wait on the
+        // PRIMARY's DoH — a dead primary costing the other entries ~8 s per new name.
+        val managed = ConfigBuilder.build(pool(), settings(), geoAssets = true)
+        assertEquals("dns-internal", managed.getJSONObject("dns").getString("tag"))   // managed DNS really is on
+        assertEquals("IPIfNonMatch", managed.getJSONObject("routing").getString("domainStrategy"))
+        assertEquals("IPIfNonMatch", ConfigBuilder.build(pool(), settings { it.copy(dnsManaged = false) }, geoAssets = true)
+            .getJSONObject("routing").getString("domainStrategy"))
+        // a single server and an advanced plan keep asking their resolver on demand
+        assertEquals("IPOnDemand", ConfigBuilder.build(ConnectionPlan.Single(a), settings(), geoAssets = true).getJSONObject("routing").getString("domainStrategy"))
+        assertEquals("IPOnDemand", ConfigBuilder.build(advanced(listOf(RouteRule("domain", "x.com", "a")), "a"), settings(), geoAssets = true)
+            .getJSONObject("routing").getString("domainStrategy"))
+    }
+
     @Test fun testConfigCarriesTheResolvedWireGuardEndpoint() {
         // A throwaway core that has to resolve a WireGuard endpoint itself can
         // panic (`close of closed channel`) and take the live tunnel's process

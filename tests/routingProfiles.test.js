@@ -197,6 +197,27 @@ test('reconnect state: an edit of the live profile or of a chain the live connec
   assert.deepEqual(routingPendingKeys(null, [], []), []);
 });
 
+test('reconnect state: a group the live connection dials (a target, a base, a selection, a chain hop) edited or deleted is pending; a rename is not', () => {
+  const groups = [{ id: 'grp-a', name: 'A', strategy: 'roundRobin', members: [{ id: 'sv-a' }, { id: 'sv-b', address: '104.16.1.1', port: 443 }] },
+    { id: 'grp-b', name: 'B', strategy: 'leastPing', members: [{ id: 'sv-c' }] }, { id: 'grp-z', name: 'Z', strategy: 'random', members: [{ id: 'sv-d' }] }];
+  const edit = (id, f) => groups.map((g) => (g.id === id ? f(Object.assign({}, g)) : g));
+  // advanced: one rule to a group, the base a group
+  const profile = { id: 'p1', name: 'Work', rules: [{ type: 'ip', value: '1.1.1.1', target: 'grp-a' }], def: 'sv-a', defVia: 'inherit', useMode: false, base: 'grp-b' };
+  const live = liveRoutingOf({ serverId: '__advanced__:p1', plan: Object.assign({ mode: 'advanced', profileId: 'p1', chainsById: {} }, profile), profiles: [profile], chains: [], groups });
+  assert.deepEqual(routingPendingKeys(live, [profile], [], groups), []);
+  assert.deepEqual(routingPendingKeys(live, [profile], [], edit('grp-a', (g) => Object.assign(g, { name: 'Renamed' }))), [], 'a rename');
+  assert.deepEqual(routingPendingKeys(live, [profile], [], edit('grp-a', (g) => Object.assign(g, { members: [{ id: 'sv-a' }] }))), ['groups'], 'a target group');
+  assert.deepEqual(routingPendingKeys(live, [profile], [], edit('grp-b', (g) => Object.assign(g, { strategy: 'random' }))), ['groups'], 'the base group');
+  assert.deepEqual(routingPendingKeys(live, [profile], [], groups.filter((g) => g.id !== 'grp-a')), ['groups'], 'deleted');
+  assert.deepEqual(routingPendingKeys(live, [profile], [], edit('grp-z', (g) => Object.assign(g, { members: [] }))), [], 'a group it does not dial');
+  // a group selected on its own, and one in a chain
+  const rec = (g) => ({ id: g.id, name: g.name, protocol: 'group', outbound: { protocol: 'loopback', _group: { id: g.id } } });
+  const sel = liveRoutingOf({ serverId: 'grp-z', plan: { mode: 'single', server: rec(groups[2]) }, profiles: [], chains: [], groups });
+  assert.deepEqual(routingPendingKeys(sel, [], [], edit('grp-z', (g) => Object.assign(g, { strategy: 'roundRobin' }))), ['groups']);
+  const ch = liveRoutingOf({ serverId: 'c1', plan: { mode: 'chain', chain: [{ id: 'sv-a' }, rec(groups[1])] }, profiles: [], chains: [{ id: 'c1', members: ['sv-a', 'grp-b'] }], groups });
+  assert.deepEqual(routingPendingKeys(ch, [], [{ id: 'c1', members: ['sv-a', 'grp-b'] }], edit('grp-b', (g) => Object.assign(g, { members: [{ id: 'sv-d' }] }))), ['groups']);
+});
+
 test('"exit at the base": the target “base” rides on nothing, is never a base itself, and becomes the base at connect — dialled directly', () => {
   assert.equal(TARGET_BASE, 'base');
   const prof = { base: 's1', def: 'base', defVia: 'chain:c9', rules: [] };

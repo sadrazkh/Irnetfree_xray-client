@@ -26,6 +26,7 @@ class SingboxCore {
     private var proc: Process? = null
     @Volatile private var reader: Thread? = null
     @Volatile private var tail: String = ""   // most recent sing-box output, for error reports
+    @Volatile private var cfgFile: File? = null
     /** Set by stop(): an exit after it is ours, not the core's. */
     @Volatile private var stopping = false
 
@@ -51,7 +52,14 @@ class SingboxCore {
         }
         return try {
             onLog("sing-box: launching ${bin.name} (${bin.length() / 1024 / 1024} MB)")
-            val cfg = File(ctx.filesDir, "singbox.json").apply { writeText(configJson) }
+            // Named for the port, not fixed (as PattN's is): a latency test of a
+            // server on sing-box runs its own sing-box on a port of its own
+            // (XrayTester) while the tunnel may be starting one, and with one
+            // shared file the second write could land before the first core
+            // had read it: that core came up with the other's config — the
+            // tunnel on the tested server, or the test measuring the tunnel's.
+            val cfg = File(ctx.filesDir, configName(socksPort)).apply { writeText(configJson) }
+            cfgFile = cfg
             val pb = ProcessBuilder(bin.absolutePath, "run", "-c", cfg.absolutePath, "-D", ctx.filesDir.absolutePath)
                 .directory(ctx.filesDir)
                 .redirectErrorStream(true)
@@ -110,6 +118,9 @@ class SingboxCore {
 
     fun stop() {
         stopping = true
+        // A test's random port leaves a file per run otherwise — and each holds
+        // its session's local SOCKS credentials. The process read it at launch.
+        runCatching { cfgFile?.delete() }; cfgFile = null
         runCatching { proc?.destroy() }
         runCatching {
             val p = proc
@@ -124,6 +135,9 @@ class SingboxCore {
 
     companion object {
         private const val TAG = "SingboxCore"
+
+        /** The config file of a sing-box on [socksPort], in filesDir: one per port, so two cores never share one. */
+        fun configName(socksPort: Int): String = "singbox-$socksPort.json"
 
         /** The executable shipped as a jniLib, or null if not bundled/executable. */
         fun binary(ctx: Context): File? {

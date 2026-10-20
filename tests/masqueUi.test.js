@@ -458,7 +458,10 @@ test('a MASQUE server’s card: WARP and its HTTP version beside the name, deriv
   assert.match(card, new RegExp(`class="icon-btn qr-srv" data-i18n-title="btn\\.qrJson" title="${en('btn.qrJson').replace(/[()]/g, '\\$&')}"`));
   const vless = ctx.serverCard({ id: 'v', name: 'V', protocol: 'vless', address: 'a', port: 1, outbound: {} }).innerHTML;
   assert.doesNotMatch(vless, /srv-tags/);
-  assert.match(vless, /data-i18n-title="btn\.copy" title="copy"/);
+  assert.match(vless, new RegExp(`data-i18n-title="btn\\.copy" title="${en('btn.copy')}"`), 'in the window’s language as it is built, not an English placeholder');
+  for (const [cls, key] of [['ping-srv', 'btn.quickPing'], ['qr-srv', 'btn.qr'], ['edit-srv', 'btn.edit'], ['del-srv', 'srv.delete']]) {
+    assert.match(vless, new RegExp(`class="icon-btn ${cls}" data-i18n-title="${key.replace('.', '\\.')}" title="${en(key)}"`), cls);
+  }
   // the QR of a MASQUE server takes the JSON path (ASCII escapes, the size limit), as a JSON server's
   assert.match(fnSource('showServerQr'), /const isJson = !!srv && \(srv\.source === 'json' \|\| srv\.protocol === 'masque'\);/);
   // the badge: in styles.css beside the others, the same in the picker, chains and the pool (they all write proto-<protocol>)

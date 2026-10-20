@@ -255,10 +255,19 @@ const chainState = (c) => (c ? JSON.stringify(Array.isArray(c.members) ? c.membe
  * was connected to directly (a chain plan carries no id: the connect's id is
  * it). Names are left out: a rename changes no config.
  */
-function liveRoutingOf({ serverId, plan, profiles, chains } = {}) {
+function liveRoutingOf({ serverId, plan, profiles, chains, groups } = {}) {
   const p = isObj(plan) ? plan : {};
   const ids = new Set();
-  const visit = (tg) => { if (typeof tg === 'string' && tg.indexOf('chain:') === 0) ids.add(tg.slice('chain:'.length)); };
+  const groupIds = new Set();
+  // a group the plan dials: by its id as a target or a base, or as a record (a selection, a chain's hop)
+  const groupRec = (r) => { const g = r && r.outbound && r.outbound._group; if (g && g.id) groupIds.add(g.id); };
+  const visit = (tg) => {
+    if (typeof tg !== 'string') return;
+    if (tg.indexOf('chain:') === 0) {
+      ids.add(tg.slice('chain:'.length));
+      for (const r of (p.chainsById || {})[tg.slice('chain:'.length)] || []) groupRec(r);
+    } else if (/^grp-/.test(tg)) groupIds.add(tg);
+  };
   let profileId = null;
   if (p.mode === 'advanced') {
     profileId = p.profileId || null;
@@ -270,20 +279,32 @@ function liveRoutingOf({ serverId, plan, profiles, chains } = {}) {
     visit(p.primary);
   } else if (p.mode === 'chain' && typeof serverId === 'string' && serverId) {
     ids.add(serverId);
+    for (const r of p.chain || []) groupRec(r);
+  } else if (p.mode === 'single') {
+    groupRec(p.server);
   }
   const byId = new Map((Array.isArray(chains) ? chains : []).filter((c) => c && c.id).map((c) => [c.id, c]));
   const state = {};
   for (const id of ids) state[id] = chainState(byId.get(id));
+  const gById = new Map((Array.isArray(groups) ? groups : []).filter((g) => g && g.id).map((g) => [g.id, g]));
+  const gState = {};
+  for (const id of groupIds) gState[id] = groupState(gById.get(id));
   const profile = profileId ? (Array.isArray(profiles) ? profiles : []).find((x) => x && x.id === profileId) : null;
-  return { profileId, profile: profileState(profile), chains: state };
+  return { profileId, profile: profileState(profile), chains: state, groups: gState };
+}
+
+/** A group as the core dials it: its strategy and members (a rename changes nothing). */
+function groupState(g) {
+  if (!isObj(g)) return null;
+  return JSON.stringify({ s: g.strategy || '', m: (Array.isArray(g.members) ? g.members : []).map((m) => (isObj(m) ? [m.id || '', m.address || '', m.port || 0] : [String(m), '', 0])) });
 }
 
 /**
  * The pending-reconnect keys an edit since `live` (liveRoutingOf) raises:
  * 'routingProfiles' — the live profile changed or is gone; 'chains' — a chain the
- * connection uses changed or is gone.
+ * connection uses changed or is gone; 'groups' — a group it dials changed or is gone.
  */
-function routingPendingKeys(live, profiles, chains) {
+function routingPendingKeys(live, profiles, chains, groups) {
   if (!isObj(live)) return [];
   const keys = [];
   if (live.profileId) {
@@ -292,6 +313,8 @@ function routingPendingKeys(live, profiles, chains) {
   }
   const byId = new Map((Array.isArray(chains) ? chains : []).filter((c) => c && c.id).map((c) => [c.id, c]));
   if (Object.keys(live.chains || {}).some((id) => chainState(byId.get(id)) !== live.chains[id])) keys.push('chains');
+  const gById = new Map((Array.isArray(groups) ? groups : []).filter((g) => g && g.id).map((g) => [g.id, g]));
+  if (Object.keys(live.groups || {}).some((id) => groupState(gById.get(id)) !== live.groups[id])) keys.push('groups');
   return keys;
 }
 
