@@ -2800,6 +2800,8 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
     var finalMask by remember { mutableStateOf(f.finalMask) }
     var ech by remember { mutableStateOf(f.ech) }; var pcs by remember { mutableStateOf(f.pcs) }
     var vcn by remember { mutableStateOf(f.vcn) }; var pqv by remember { mutableStateOf(f.pqv) }
+    // the ECH outbound: the Pro view's field only — the Simple view carries it through untouched
+    var echOutbound by remember { mutableStateOf(f.echOutbound) }
     var hy2Obfs by remember { mutableStateOf(f.hy2Obfs) }; var hy2Ports by remember { mutableStateOf(f.hy2Ports) }
     var engine by remember { mutableStateOf(f.engine) }
     var masqueHttp by remember { mutableStateOf(f.masqueHttp) }
@@ -2821,7 +2823,7 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
         method = method, proxyUser = pUser, proxyPass = pPass,
         wgPub = wgPub, wgAddr = wgAddr, wgPsk = wgPsk, wgMtu = wgMtu, wgReserved = wgReserved, wgAllowed = wgAllowed, wgDns = wgDns,
         fragment = fragment, noise = effectiveNoise, cipherSuites = cipherSuites, finalMask = finalMask,
-        ech = ech, pcs = pcs, vcn = vcn, pqv = pqv, hy2Obfs = hy2Obfs, hy2Ports = hy2Ports,
+        ech = ech, pcs = pcs, vcn = vcn, pqv = pqv, echOutbound = echOutbound, hy2Obfs = hy2Obfs, hy2Ports = hy2Ports,
         engine = engine, spx = f.spx, xmode = f.xmode, seed = f.seed, headerType = f.headerType, xhttpExtra = f.xhttpExtra,
         tcpHeader = f.tcpHeader, hy2Hop = f.hy2Hop, hy2Up = f.hy2Up, hy2Down = f.hy2Down, plugin = f.plugin,
         masqueHttp = masqueHttp, pro = HashMap(pro))
@@ -2831,7 +2833,7 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
         sni = nf.sni; host = nf.host; path = nf.path; fp = nf.fp; pbk = nf.pbk; sid = nf.sid; allowInsecure = nf.allowInsecure; method = nf.method
         pUser = nf.proxyUser; pPass = nf.proxyPass; wgPub = nf.wgPub; wgAddr = nf.wgAddr; wgPsk = nf.wgPsk; wgMtu = nf.wgMtu
         wgReserved = nf.wgReserved; wgAllowed = nf.wgAllowed; wgDns = nf.wgDns; fragment = nf.fragment
-        cipherSuites = nf.cipherSuites; finalMask = nf.finalMask; ech = nf.ech; pcs = nf.pcs; vcn = nf.vcn; pqv = nf.pqv
+        cipherSuites = nf.cipherSuites; finalMask = nf.finalMask; ech = nf.ech; pcs = nf.pcs; vcn = nf.vcn; pqv = nf.pqv; echOutbound = nf.echOutbound
         hy2Obfs = nf.hy2Obfs; hy2Ports = nf.hy2Ports; engine = nf.engine; masqueHttp = nf.masqueHttp
         noisePreset = when { nf.noise.isBlank() -> "off"; nf.noise.lowercase() in noisePresetKeys -> if (nf.noise.lowercase() == "fakehello") "faketls" else nf.noise.lowercase(); else -> "custom" }
         noiseCustom = if (noisePreset == "custom") nf.noise else ""
@@ -3120,9 +3122,33 @@ private fun proOption(fld: SfField, o: String): String {
             Fld(label, v) { x: String -> d[fld.id] = x }
             TextButton(onClick = { d[fld.id] = java.util.UUID.randomUUID().toString() }) { Text(t("edit.genUuid"), color = PRIMARY, fontSize = 12.sp) }
         }
+        "json" -> if (fld.id == "echOutbound") EchOutboundField(label, fld.placeholder, d) else Fld(label, v) { x: String -> d[fld.id] = x }
         else -> Fld(label, v) { x: String -> d[fld.id] = x }
     }
     if (fld.hint) Text(t("sf.${fld.id}.hint"), color = MUTED, fontSize = 11.sp)
+}
+
+/**
+ * The ECH outbound (PattN's echOutbound): its JSON over several lines, left to
+ * right in either language, and the Example button under it — patterniha's
+ * fronted DoH query and the ECH value it goes with
+ * (ServerEditor.echOutboundExample), both written into the draft.
+ */
+@Composable private fun EchOutboundField(label: String, placeholder: String, d: SnapshotStateMap<String, String>) {
+    Text(label, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+        OutlinedTextField(
+            d["echOutbound"] ?: "", { x: String -> d["echOutbound"] = x }, Modifier.fillMaxWidth().padding(vertical = 3.dp),
+            textStyle = TextStyle(fontFamily = MONO, fontSize = 11.sp, color = TXT),
+            placeholder = { Text(placeholder, fontSize = 11.sp, fontFamily = MONO) },
+            minLines = 3, maxLines = 14, colors = tfColors()
+        )
+    }
+    TextButton(onClick = {
+        val ex = ServerEditor.echOutboundExample(d["ech"])
+        d["ech"] = ex.ech
+        d["echOutbound"] = ex.echOutbound
+    }) { Text(t("sf.echOutbound.example"), color = PRIMARY, fontSize = 12.sp) }
 }
 
 /**

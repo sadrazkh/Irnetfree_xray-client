@@ -207,6 +207,8 @@ object LinkParser {
             "ech" to v.optString("ech"),
             "pcs" to v.optString("pcs"),
             "vcn" to v.optString("vcn"),
+            // PattN's ECH outbound: one line of JSON in a string (an object as it is)
+            "echOutbound" to jsOr(v, "echOutbound"),
             // `cs` / `fm` are the standard short keys; the long ones are the form we used to emit
             "cipherSuites" to v.optString("cs").ifBlank { v.optString("cipherSuites") },
             "finalMask" to v.optString("fm").ifBlank { v.optString("finalMask").ifBlank { v.optString("finalmask") } }
@@ -426,8 +428,9 @@ object LinkParser {
 
     /**
      * The hysteria outbound from a link's (or the edit sheet's) values: `address`,
-     * `port`, `auth`, `sni`, `insecure`, `alpn`, `ech`, `pcs`/`pinSHA256`, `vcn`,
-     * `obfs` + `obfs-password`, `mport` (+ `hopInterval`), `up`/`down`.
+     * `port`, `auth`, `sni`, `insecure`, `alpn`, `ech`, `echOutbound`,
+     * `pcs`/`pinSHA256`, `vcn`, `obfs` + `obfs-password`, `mport` (+
+     * `hopInterval`), `up`/`down`.
      */
     fun buildHysteria2Outbound(f: Map<String, String?>): JSONObject {
         val address = (f["address"] ?: "").trim()
@@ -491,6 +494,7 @@ object LinkParser {
             "sni" to tls.optString("serverName"), "insecure" to if (tls.optBoolean("allowInsecure")) "1" else "",
             "alpn" to jarr(tls.optJSONArray("alpn")).joinToString(","),
             "ech" to tls.optString("echConfigList"), "pcs" to tls.optString("pinnedPeerCertSha256"), "vcn" to tls.optString("verifyPeerCertByName"),
+            "echOutbound" to echOutboundText(tls.optJSONObject("echOutbound")),
             "obfs" to if (sal != null) "salamander" else "",
             "obfs-password" to (sal?.optJSONObject("settings")?.optString("password") ?: ""),
             "mport" to (hop?.optJSONObject("settings")?.opt("remotePorts")?.toString() ?: ""),
@@ -713,16 +717,77 @@ object LinkParser {
      * `cloudflare-ech.com+udp://1.1.1.1`, kept verbatim (the `+` is no space);
      * `pcs` (pinnedPeerCertSha256) — the certificate to accept; `vcn`
      * (verifyPeerCertByName) — the name(s) to check it against. parser.js tlsExtras.
+     * `echOutbound` (PattN's, not a core key): the outbound the ECH query is
+     * dialled through — kept in tlsSettings as an object, taken out and wired
+     * up as `echSockopt.dialerProxy` by ConfigBuilder.applyEchOutbounds.
      */
     internal fun tlsExtras(tls: JSONObject, q: Map<String, String?>): JSONObject {
         val ech = (q["ech"]?.takeIf { it.isNotBlank() } ?: q["echConfigList"] ?: "").trim()
         if (ech.isNotEmpty()) tls.put("echConfigList", ech)
+        echOutboundOf(q["echOutbound"])?.let { eo: JSONObject -> tls.put("echOutbound", eo) }
         val pcs = pinList(q["pcs"]?.takeIf { it.isNotBlank() } ?: q["pinnedPeerCertSha256"]?.takeIf { it.isNotBlank() } ?: q["pinSHA256"])
         if (pcs.isNotEmpty()) tls.put("pinnedPeerCertSha256", pcs)
         val vcn = (q["vcn"]?.takeIf { it.isNotBlank() } ?: q["verifyPeerCertByName"] ?: "").split(",").map { it.trim() }.filter { it.isNotEmpty() }.joinToString(",")
         if (vcn.isNotEmpty()) tls.put("verifyPeerCertByName", vcn)
         return tls
     }
+
+    /**
+     * An ECH outbound (PattN's `echOutbound`): an Xray outbound object, from the
+     * link's one-line JSON or the editor's text — PattN writes it with comments
+     * and trailing commas allowed, so those are read too ([looseJson]). null for
+     * anything that is not an object naming a protocol; a deep copy otherwise.
+     * Its `tag` is the builder's to give. parser.js echOutboundOf.
+     */
+    fun echOutboundOf(raw: Any?): JSONObject? {
+        val o: JSONObject = when (raw) {
+            null -> return null
+            is JSONObject -> raw
+            else -> {
+                val s = raw.toString().trim()
+                if (s.isEmpty()) return null
+                jsonObjectOf(s) ?: jsonObjectOf(looseJson(s)) ?: return null
+            }
+        }
+        val p = o.opt("protocol")
+        if (p !is String || p.isBlank()) return null
+        return jsonObjectOf(o.toString())
+    }
+
+    private fun jsonObjectOf(s: String): JSONObject? = try { JSONObject(s) } catch (e: Exception) { null }
+
+    /** JSON with line (`//`) and block comments and trailing commas, as plain JSON (strings left alone). parser.js looseJson. */
+    internal fun looseJson(s: String): String {
+        val out = StringBuilder(s.length)
+        var i = 0
+        var inStr = false
+        while (i < s.length) {
+            val c = s[i]
+            if (inStr) {
+                out.append(c)
+                if (c == '\\') { if (i + 1 < s.length) out.append(s[i + 1]); i += 2; continue }
+                if (c == '"') inStr = false
+                i++
+                continue
+            }
+            if (c == '"') { inStr = true; out.append(c); i++; continue }
+            if (c == '/' && i + 1 < s.length && s[i + 1] == '/') { while (i < s.length && s[i] != '\n') i++; continue }
+            if (c == '/' && i + 1 < s.length && s[i + 1] == '*') { val end = s.indexOf("*/", i + 2); i = if (end == -1) s.length else end + 2; continue }
+            out.append(c)
+            i++
+        }
+        return out.toString().replace(Regex(",(\\s*[}\\]])"), "$1")
+    }
+
+    /** An ECH outbound as a share link carries it: one line, with a tag — PattN refuses one without (an existing tag wins). parser.js echOutboundShare. */
+    fun echOutboundShare(o: JSONObject): String {
+        val out = JSONObject().put("tag", if (o.has("tag")) o.get("tag") else "ech-out")
+        for (k in o.keys().asSequence().toList()) if (k != "tag") out.put(k, o.get(k))
+        return JsonText.minify(out)
+    }
+
+    /** An ECH outbound as the edit form shows it: indented JSON, "" for none. parser.js echOutboundText. */
+    fun echOutboundText(o: JSONObject?): String = if (o == null) "" else JsonText.pretty(o)
 
     /** The xhttp `extra` query value as an object; null when absent or not one. */
     fun parseXhttpExtra(raw: String?): JSONObject? {
@@ -1011,6 +1076,7 @@ object LinkParser {
             jarr(it.optJSONArray("alpn")).joinToString(",").takeIf { a -> a.isNotBlank() }?.let { a -> q["alpn"] = a }
             it.optString("cipherSuites").takeIf { c -> c.isNotBlank() }?.let { c -> q["cs"] = c }
             it.optString("echConfigList").takeIf { x -> x.isNotBlank() }?.let { x -> q["ech"] = x }
+            it.optJSONObject("echOutbound")?.let { x: JSONObject -> q["echOutbound"] = echOutboundShare(x) }
             it.optString("pinnedPeerCertSha256").takeIf { x -> x.isNotBlank() }?.let { x -> q["pcs"] = x }
             it.optString("verifyPeerCertByName").takeIf { x -> x.isNotBlank() }?.let { x -> q["vcn"] = x }
         }
@@ -1067,7 +1133,8 @@ object LinkParser {
                     "kcp" -> p["seed"]?.let { v.put("path", it) }
                 }
                 if (p["allowInsecure"] == "1") v.put("insecure", "1")
-                p["ech"]?.let { v.put("ech", it) }; p["pcs"]?.let { v.put("pcs", it) }; p["vcn"]?.let { v.put("vcn", it) }
+                p["ech"]?.let { v.put("ech", it) }; p["echOutbound"]?.let { v.put("echOutbound", it) }
+                p["pcs"]?.let { v.put("pcs", it) }; p["vcn"]?.let { v.put("vcn", it) }
                 p["cs"]?.let { v.put("cs", it) }; p["fm"]?.let { v.put("fm", it) }
                 extras["fragment"]?.let { v.put("fragment", it) }; extras["noise"]?.let { v.put("noise", it) }
                 extras["engine"]?.let { v.put("engine", it) }
@@ -1084,6 +1151,7 @@ object LinkParser {
                 val q = LinkedHashMap<String, String>()
                 q["sni"] = h["sni"] ?: ""; q["insecure"] = h["insecure"] ?: ""; q["alpn"] = h["alpn"] ?: ""
                 q["pinSHA256"] = h["pcs"] ?: ""; q["ech"] = h["ech"] ?: ""; q["vcn"] = h["vcn"] ?: ""
+                q["echOutbound"] = st.optJSONObject("tlsSettings")?.optJSONObject("echOutbound")?.let { x: JSONObject -> echOutboundShare(x) } ?: ""
                 q["obfs"] = h["obfs"] ?: ""; q["obfs-password"] = h["obfs-password"] ?: ""; q["mport"] = h["mport"] ?: ""
                 q["hopInterval"] = (h["hopInterval"] ?: "").takeIf { it.isNotEmpty() && (h["mport"] ?: "").isNotEmpty() && it != HOP_INTERVAL } ?: ""
                 q["up"] = (h["up"] ?: "").replace(Regex("\\s*mbps$", RegexOption.IGNORE_CASE), "")

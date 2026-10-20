@@ -873,7 +873,7 @@ object ConfigBuilder {
             val o = grp.outbounds.getJSONObject(i)
             widenWgAllowedIps(o); sanitizeWgAddress(o); applyWgEndpointIps(o, wgEndpointIps)
         }
-        val outbounds = applyFragments(grp.outbounds)
+        val outbounds = applyEchOutbounds(applyFragments(grp.outbounds))
         // xray resolves a hostname destination under IPIfNonMatch only when NO
         // rule matched on the first pass — and every plan ends with a catch-all
         // that always matches — so an `ip:` rule never fires for a name. With
@@ -1057,7 +1057,8 @@ object ConfigBuilder {
             widenWgAllowedIps(o); sanitizeWgAddress(o); applyWgEndpointIps(o, wgEndpointIps)
             all.put(o)
         }
-        val outs = applyFragments(all)
+        // a server's own ECH outbound too: without it the test would ask for the key directly and fail where the connect works
+        val outs = applyEchOutbounds(applyFragments(all))
         outs.put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
         val config = JSONObject()
             .put("log", JSONObject().put("loglevel", "none"))
@@ -1109,6 +1110,70 @@ object ConfigBuilder {
         for (i in 0 until extra.length()) outbounds.put(extra.getJSONObject(i))
         return outbounds
     }
+
+    /**
+     * A server's own ECH outbound (PattN's `echOutbound`, the link's
+     * `echOutbound=`): the outbound the core dials its ECH config query through —
+     * `echSockopt.dialerProxy` (configBuilder.js applyEchOutbounds). What it is
+     * for (patterniha, 2026-10-20): the plain-DNS answer no longer carries the
+     * key and DoH to 1.1.1.1 is reset on its SNI, so the query goes
+     * `h2c://1.1.1.1/dns-query` through a `direct` outbound that redirects to
+     * 1.1.1.1:443 under TLS with another name (`www.microsoft.com`) and checks
+     * the certificate against the resolver's own (`fromMitM`; the core hands the
+     * query's host over from 26.10.10).
+     *
+     * The record keeps it in tlsSettings (`echOutbound`, never a core key): taken
+     * out here, given a tag of ours — `ech-<n>`, one per distinct outbound (by
+     * its canonical JSON without its tag), so twenty servers with the same one
+     * share it and the user's own tag can clash with nothing — and appended
+     * after everything else. Without a list fetched from DNS (a base64 one is not
+     * fetched) it means nothing and is dropped. Every builder runs it, the
+     * tests' too, right after [applyFragments].
+     */
+    internal fun applyEchOutbounds(outbounds: JSONArray): JSONArray {
+        val byKey = HashMap<String, String>()
+        val extra = ArrayList<JSONObject>()
+        for (i in 0 until outbounds.length()) {
+            val tls = outbounds.optJSONObject(i)?.optJSONObject("streamSettings")?.optJSONObject("tlsSettings") ?: continue
+            if (!tls.has("echOutbound")) continue
+            val ob = tls.opt("echOutbound")
+            tls.remove("echOutbound")
+            if (ob !is JSONObject || !isEchQuery(tls.optString("echConfigList"))) continue
+            val protocol = ob.opt("protocol")
+            if (protocol !is String || protocol.isEmpty()) continue
+            val body = JSONObject(ob.toString())
+            body.remove("tag")
+            val key = JsonText.canonical(body)
+            var tag = byKey[key]
+            if (tag == null) {
+                tag = "ech-" + (byKey.size + 1)
+                byKey[key] = tag
+                val o = JSONObject().put("tag", tag)
+                for (k in body.keys().asSequence().toList()) o.put(k, body.get(k))
+                extra.add(o)
+            }
+            val so = tls.optJSONObject("echSockopt")?.let { x: JSONObject -> JSONObject(x.toString()) } ?: JSONObject()
+            tls.put("echSockopt", so.put("dialerProxy", tag))
+        }
+        for (o in extra) outbounds.put(o)
+        return outbounds
+    }
+
+    private val ECH_QUERY = Regex("^([a-z0-9]+)://(\\[[^\\]]+\\]|[^/:?#]+)(?::(\\d+))?", RegexOption.IGNORE_CASE)
+
+    /**
+     * Is this echConfigList fetched from DNS — `[name+]scheme://server[:port]…`
+     * — rather than given as a base64 list? (configBuilder.js echQueryOf is not null)
+     */
+    internal fun isEchQuery(list: String?): Boolean {
+        val s = (list ?: "").trim()
+        val sep = s.indexOf("://")
+        if (sep == -1) return false
+        val plus = s.indexOf('+')
+        val server = if (plus > -1 && plus < sep) s.substring(plus + 1) else s
+        return ECH_QUERY.containsMatchIn(server)
+    }
+
     private fun makeFragmentOutbound(tag: String, fragStr: String, noiseStr: String): JSONObject {
         val settings = JSONObject().put("domainStrategy", "AsIs")
         if (fragStr.isNotEmpty()) {
