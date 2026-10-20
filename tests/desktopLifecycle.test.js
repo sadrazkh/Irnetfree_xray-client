@@ -440,8 +440,13 @@ test('the window says a DROP when it was one, and says the kill switch closed th
   const APP = R('app.js');
   const I18N = R('i18n.js');
   // the reasons main.js calls a drop (DROP_REASONS) are the ones the window knows
-  const mainReasons = /const DROP_REASONS = new Set\(\[([^\]]*)\]\)/.exec(MAIN)[1];
-  assert.match(APP, new RegExp(`const DROP_REASONS = \\[${mainReasons.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\];`));
+  // — and the router's (service.js), whose web UI is the same window
+  const SVC = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'service.js'), 'utf8').replace(/\r\n/g, '\n');
+  const reasons = (src, re) => (re.exec(src) || [, ''])[1].split(',').map((x) => x.trim()).filter(Boolean);
+  const inApp = reasons(APP, /const DROP_REASONS = \[([^\]]*)\];/);
+  for (const r of [...reasons(MAIN, /const DROP_REASONS = new Set\(\[([^\]]*)\]\)/), ...reasons(SVC, /const DROP_REASONS = new Set\(\[([^\]]*)\]\)/)]) {
+    assert.ok(inApp.includes(r), `the window knows ${r} as a drop`);
+  }
   assert.match(APP, /toast\(t\(failedKey\(d\.reason\)\), 'err', 8000\);/);
   assert.match(APP, /function failedKey\(reason\) \{\n\s*if \(reason === 'shutdown-cancelled'\) return 'net\.shutdownCancelled';\n\s*if \(reason === 'shutdown-cancelled-partial'\) return 'net\.shutdownCancelledPartial';\n\s*return DROP_REASONS\.includes\(reason\) \? 'net\.dropFailed' : 'net\.failed';/);
   assert.match(APP, /DROP_REASONS\.includes\(state\.reconnectReason\) \? 'state\.reconnectingDrop' : 'state\.reconnecting'/);

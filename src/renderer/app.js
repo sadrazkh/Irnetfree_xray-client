@@ -3102,9 +3102,9 @@ function renderInspector() {
 }
 
 /* status events from main */
-// The recovery reasons main.js calls a drop (DROP_REASONS there) rather than
+// The recovery reasons main.js and the router call a drop (DROP_REASONS there) rather than
 // the network moving: the window says which of the two it was.
-const DROP_REASONS = ['core-exited', 'tunnel-exited', 'reload-failed'];
+const DROP_REASONS = ['core-exited', 'tunnel-exited', 'reload-failed', 'gateway-failed', 'tunnel-stalled'];
 function reconnectingKey() {
   return DROP_REASONS.includes(state.reconnectReason) ? 'state.reconnectingDrop' : 'state.reconnecting';
 }

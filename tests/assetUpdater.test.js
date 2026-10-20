@@ -1,7 +1,9 @@
 'use strict';
 /**
  * The weekly asset update. What must hold: nothing happens while a tunnel is
- * up; the geo files are refreshed by default and cores only when asked; a core
+ * up — unless its owner opens a live window (the router's quiet hours), and
+ * then what changed is applied to the live connection; the geo files are
+ * refreshed by default and cores only when asked; a core
  * is downloaded only when the release is genuinely newer than the installed
  * one; a failed download is a log line and the week still counts.
  */
@@ -90,6 +92,68 @@ test('off: never; busy (a tunnel is up): deferred without moving the stamp', asy
   assert.deepEqual(await b.u.tick(), { ran: false, deferred: true });
   assert.equal(b.checked(), 0, 'the next tick tries again');
   assert.deepEqual(b.dl, []);
+});
+
+// A router is connected day and night: "never while a tunnel is up" was never
+// at all there, and its geoip/geosite went stale. The service opens a live
+// window (its quiet hours) and reloads the core on what was downloaded.
+test('a live window (the router\'s quiet hours): busy, yet the run goes ahead and is applied to the live connection', async () => {
+  const applied = [];
+  let inWindow = false;
+  const asked = [];
+  const h = make({
+    busy: () => true,
+    getSettings: () => ({ autoUpdateAssets: 'geo' }),
+    liveWindow: (ms) => { asked.push(ms); return inWindow; },
+    applyLive: async (done) => { applied.push(done); }
+  });
+  assert.deepEqual(await h.u.tick(), { ran: false, deferred: true }, 'outside the window: deferred, as before');
+  assert.deepEqual(h.dl, []);
+  assert.equal(h.checked(), 0);
+  assert.deepEqual(asked, [10 * WEEK_MS], 'asked with the clock the updater runs on');
+  inWindow = true;
+  assert.deepEqual(await h.u.tick(), { ran: true, done: ['geo'], live: true });
+  assert.deepEqual(h.dl, ['geo'], 'downloaded as usual');
+  assert.deepEqual(applied, [['geo']], 'and handed to the live connection');
+  assert.equal(h.checked(), 10 * WEEK_MS);
+  assert.ok(h.log.some((l) => /Updated automatically: geo/.test(l)));
+  assert.deepEqual(await h.u.tick(), { ran: false }, 'not due again');
+  assert.deepEqual(applied, [['geo']]);
+});
+
+test('a live window with every asset on: only the geo files go live — a new core waits for the connection to be down', async () => {
+  const applied = [];
+  const h = make({ busy: () => true, getSettings: () => ({ autoUpdateAssets: 'all' }), liveWindow: () => true, applyLive: async (done) => { applied.push(done); } });
+  assert.deepEqual(await h.u.tick(), { ran: true, done: ['geo'], live: true });
+  assert.deepEqual(h.dl, ['geo'], 'no core downloaded under the live connection');
+  assert.deepEqual(applied, [['geo']]);
+  assert.ok(h.log.some((l) => /Cores are not updated under a live connection/.test(l)));
+});
+
+test('a live run that changed nothing applies nothing; one the connection could not take is a log line, and the week counts', async () => {
+  const applied = [];
+  const none = make({ busy: () => true, getSettings: () => ({ autoUpdateAssets: 'geo' }), liveWindow: () => true, applyLive: async (d) => { applied.push(d); } });
+  none.u.o.download = async () => { throw new Error('net'); };
+  assert.deepEqual(await none.u.tick(), { ran: true, done: [], live: true });
+  assert.deepEqual(applied, [], 'nothing new: the core is not reloaded for nothing');
+  assert.equal(none.checked(), 10 * WEEK_MS);
+  const bad = make({ busy: () => true, getSettings: () => ({ autoUpdateAssets: 'geo' }), liveWindow: () => true, applyLive: async () => { throw new Error('the core refused the config'); } });
+  assert.deepEqual(await bad.u.tick(), { ran: true, done: ['geo'], live: true }, 'resolves: a failed apply does not throw out of the timer');
+  assert.ok(bad.log.some((l) => /^\[warn\] Updated \(geo\), but the running connection could not take it: the core refused the config/.test(l)), JSON.stringify(bad.log));
+  assert.equal(bad.checked(), 10 * WEEK_MS, 'the files are in place: the week counts');
+});
+
+test('not busy: the window is not asked and nothing is applied; busy without a window (main.js passes none): deferred as before', async () => {
+  let asked = 0;
+  const applied = [];
+  const idle = make({ liveWindow: () => { asked++; return true; }, applyLive: async (d) => { applied.push(d); } });
+  assert.deepEqual(await idle.u.tick(), { ran: true, done: ['geo', 'xray'] }, 'the same answer as ever');
+  assert.equal(asked, 0);
+  assert.deepEqual(applied, [], 'no live connection to apply it to');
+  const desk = make({ busy: () => true, applyLive: async (d) => { applied.push(d); } });
+  assert.deepEqual(await desk.u.tick(), { ran: false, deferred: true });
+  assert.deepEqual(desk.dl, []);
+  assert.deepEqual(applied, []);
 });
 
 test('a failing download or an unreadable version is a log line, not a stuck week', async () => {
