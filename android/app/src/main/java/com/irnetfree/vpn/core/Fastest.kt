@@ -13,7 +13,9 @@ package com.irnetfree.vpn.core
  * desktop's version of it: Windows measures a real round trip through every
  * server at once, while here each one costs a throwaway core. So the UI measures
  * the handshake to all of them in parallel and a real round trip through only
- * the few that answered fastest, and hands both numbers to [pick].
+ * the few that answered fastest, and hands both numbers to [pick]. A server
+ * with no TCP port to time ([udpOnly]) gets a real round trip straight away
+ * ([measureUdp]) — a handshake would rule every one of them out.
  */
 object Fastest {
     /** How many of the quickest-to-answer servers are then really tried. */
@@ -25,6 +27,32 @@ object Fastest {
      * a throwaway core, before ⚡ gives up and says so.
      */
     const val MAX_TRIES = 6
+
+    /**
+     * A UDP-only server ([udpOnly]) has no handshake to time, so its first
+     * measurement is already a real round trip through a throwaway core
+     * ([measureUdp]) — one core at a time, like every test here. Bounded like
+     * the handshake batch: each round trip is given [UDP_TIMEOUT_MS] (the
+     * batch's handshake timeout), at most [UDP_MAX] of them are run, and none
+     * is started once [UDP_BUDGET_MS] has gone by.
+     */
+    const val UDP_MAX = 6
+    const val UDP_TIMEOUT_MS = 3000
+    const val UDP_BUDGET_MS = 15_000L
+
+    /**
+     * A server a TCP connect says nothing about (the desktop's latencyTest.js
+     * udpOnly): WireGuard and Hysteria2 listen on UDP only — a TCP ping of them
+     * fails for every one — and MASQUE over HTTP/3 (QUIC); MASQUE over HTTP/2
+     * is TCP like any other. The outbound's protocol wins over the record's
+     * (a Hysteria2 server's outbound is "hysteria").
+     */
+    fun udpOnly(server: ServerConfig): Boolean {
+        val ob = server.outbound
+        val p = ob.optString("protocol").ifEmpty { server.protocol }.lowercase()
+        if (p == Masque.PROTOCOL) return Masque.httpOf(ob.optJSONObject("streamSettings")?.optJSONObject("tlsSettings")) != "h2"
+        return p == "wireguard" || p == "hysteria" || p == "hysteria2"
+    }
 
     /**
      * One server's measurements, in milliseconds. `tcp` is the handshake to the
@@ -87,5 +115,26 @@ object Fastest {
             if (ms >= 0) carried++
         }
         return tried
+    }
+
+    /**
+     * The UDP-only servers' first stage ([udpOnly]): a real round trip through
+     * each of [ids], in the order given — at most [max] of them, and none
+     * started once [budgetMs] has gone by since the first ([now], in ms).
+     * Returns every server it MEASURED with its `real` filled in (a failure
+     * negative), ranked by [pick] beside the TCP servers' round trips; one left
+     * unmeasured is not in it, and so is never a candidate.
+     *
+     * `real` measures one server; inline, so the caller's measuring may suspend.
+     */
+    inline fun measureUdp(ids: List<String>, max: Int = UDP_MAX, budgetMs: Long = UDP_BUDGET_MS, now: () -> Long, real: (index: Int, id: String) -> Long): List<Measured> {
+        val out = ArrayList<Measured>()
+        val start = now()
+        for (id in ids) {
+            if (out.size >= max || now() - start >= budgetMs) break
+            val ms = real(out.size, id)
+            out.add(Measured(id, real = ms))
+        }
+        return out
     }
 }

@@ -271,7 +271,12 @@ object ConfigBuilder {
         // Pool emits no bypass rules, so an in-country resolver would only hand
         // the primary exit an Iranian IP to dial from abroad — routingMode is not its.
         val dnsSettings = s.copy(advancedRouting = false, routingMode = "global")
-        return assemble(s, inbounds, JSONArray(reg.outs), rules, geo, primaryTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags)
+        // IPIfNonMatch on purpose, managed DNS or not (configBuilder.js): the pool
+        // has no user ip rule (only the private bypass), and on demand every
+        // entry's hostname connections would wait on the PRIMARY's DoH — a dead
+        // primary costing the other entries ~8 s per new name.
+        return assemble(s, inbounds, JSONArray(reg.outs), rules, geo, primaryTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
+            domainStrategy = "IPIfNonMatch")
     }
 
     /* ----------------------------- chain / registry ----------------------------- */
@@ -811,11 +816,12 @@ object ConfigBuilder {
         if (pins.isNotEmpty()) tls.put("pinnedPeerCertSha256", pins.joinToString(",")) else tls.remove("pinnedPeerCertSha256")
     }
 
+    /** [domainStrategy]: the router's; null = IPOnDemand under managed DNS, IPIfNonMatch without it (a pool always sets its own). */
     private fun assemble(
         s: AppSettings, inbounds: JSONArray, outboundsIn: JSONArray, rules: JSONArray,
         geoAssets: Boolean, exitTag: String, dnsSettings: AppSettings,
         targetResolvers: List<DnsPlan.TargetResolver>, wgEndpointIps: Map<String, String>,
-        lanTags: List<String> = emptyList()
+        lanTags: List<String> = emptyList(), domainStrategy: String? = null
     ): JSONObject {
         // Name resolution (see DnsPlan.kt). Its rules go FIRST: the port-53 hijack
         // must beat the private-IP bypass, or a query to the tunnel resolver would
@@ -842,8 +848,9 @@ object ConfigBuilder {
         // xray resolves a hostname destination under IPIfNonMatch only when NO
         // rule matched on the first pass — and every plan ends with a catch-all
         // that always matches — so an `ip:` rule never fires for a name. With
-        // managed DNS the router asks the plan's own resolver on demand.
-        val routing = JSONObject().put("domainStrategy", if (s.dnsManaged) "IPOnDemand" else "IPIfNonMatch").put("rules", allRules)
+        // managed DNS the router asks the plan's own resolver on demand — except
+        // in a pool, which has no ip rule of the user's to serve (buildPool).
+        val routing = JSONObject().put("domainStrategy", domainStrategy ?: if (s.dnsManaged) "IPOnDemand" else "IPIfNonMatch").put("rules", allRules)
         if (grp.balancers.length() > 0) routing.put("balancers", grp.balancers)
 
         // No `bufferSize: 0` for a chained WireGuard any more (Xray-core #2850):

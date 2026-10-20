@@ -1,7 +1,11 @@
 package com.irnetfree.vpn.core
 
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -117,5 +121,57 @@ class FastestTest {
         // nothing. The second measurement is the one that is true.
         assertNull(Fastest.score(m("a", tcp = 40, real = -1)))
         assertNull(Fastest.pick(listOf(m("a", tcp = 40, real = -1), m("b", tcp = 55, real = -1))))
+    }
+
+    /* ---------------- UDP-only servers: a real round trip in place of a handshake ---------------- */
+
+    private fun rec(protocol: String, outbound: JSONObject) = ServerConfig("x", "x", protocol, "x.example", 443, outbound)
+    private fun masque(vararg alpn: String): JSONObject {
+        val tls = JSONObject()
+        if (alpn.isNotEmpty()) tls.put("alpn", JSONArray(alpn.toList()))
+        return JSONObject().put("protocol", "masque").put("streamSettings", JSONObject().put("tlsSettings", tls))
+    }
+
+    @Test fun udpOnly_asTheDesktopDecidesIt() {
+        // latencyTest.js udpOnly: WireGuard and Hysteria2 have no TCP port at all
+        assertTrue(Fastest.udpOnly(rec("wireguard", JSONObject().put("protocol", "wireguard"))))
+        // a Hysteria2 record's outbound is "hysteria" (LinkParser); the outbound's protocol wins, the record's fills in
+        assertTrue(Fastest.udpOnly(rec("hysteria2", JSONObject().put("protocol", "hysteria"))))
+        assertTrue(Fastest.udpOnly(rec("hysteria2", JSONObject())))
+        assertFalse(Fastest.udpOnly(rec("hysteria2", JSONObject().put("protocol", "vless"))))
+        // MASQUE over HTTP/3 (no ALPN, or h3 named) is QUIC; over HTTP/2 alone it is TCP like any other
+        assertTrue(Fastest.udpOnly(rec("masque", masque())))
+        assertTrue(Fastest.udpOnly(rec("masque", masque("h2", "h3"))))
+        assertFalse(Fastest.udpOnly(rec("masque", masque("h2"))))
+        for (p in listOf("vless", "vmess", "trojan", "shadowsocks", "socks", "http"))
+            assertFalse(p, Fastest.udpOnly(rec(p, JSONObject().put("protocol", p))))
+    }
+
+    @Test fun udpOnlyServersAreMeasuredInOrder_boundedInNumberAndTime() {
+        var clock = 0L
+        val ids = (1..10).map { n: Int -> "u$n" }
+        // at most UDP_MAX throwaway cores, in the order given; a failure is kept as measured
+        val out = Fastest.measureUdp(ids, now = { clock }) { _: Int, id: String -> clock += 1000; if (id == "u2") -1L else 400L }
+        assertEquals(ids.take(Fastest.UDP_MAX), out.map { it.id })
+        assertEquals(-1L, out[1].real)
+        assertTrue(out.all { it.tcp == null })
+        // none is started once the time is spent
+        clock = 0L
+        val slow = Fastest.measureUdp(ids, max = 100, budgetMs = 5000, now = { clock }) { _: Int, _: String -> clock += 2000; 300L }
+        assertEquals(listOf("u1", "u2", "u3"), slow.map { it.id })
+        assertEquals(emptyList<String>(), Fastest.measureUdp(emptyList(), now = { 0L }) { _: Int, _: String -> 1L }.map { it.id })
+    }
+
+    @Test fun aUdpOnlyServerThatCarriedCompetesWithTheTcpRoundTrips() {
+        // what pickFastest hands pick(): the walk's TCP round trips and the UDP-only servers' together
+        val tried = listOf(m("a", tcp = 40, real = 700), m("b", tcp = 55, real = -1))
+        val udp = listOf(m("wg", real = 300), m("hy2", real = -1))
+        assertEquals("wg", Fastest.pick(tried + udp)?.id)
+        assertEquals("a", Fastest.pick(tried + listOf(m("wg", real = 900)))?.id)
+        // nothing over TCP carried: the UDP-only one that did is the answer, never the one that failed
+        assertEquals("wg", Fastest.pick(listOf(m("a", tcp = 40, real = -1)) + udp)?.id)
+        assertNull(Fastest.pick(listOf(m("a", tcp = 40, real = -1), m("hy2", real = -1))))
+        // it never shook hands, so the walk never spends a second core on it
+        assertEquals(emptyList<String>(), Fastest.shortlist(udp).map { it.id })
     }
 }

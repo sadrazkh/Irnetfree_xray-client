@@ -354,7 +354,7 @@ class Store(context: Context) {
                 val c = chainById(sel.substring(6)) ?: throw IllegalStateException("Chain not found")
                 val members = chainMembers(c)
                 if (members.size < 2) throw IllegalStateException("This chain needs at least 2 servers")
-                ConnectionPlan.Chain(c.name, members)
+                ConnectionPlan.Chain(c.name, members, c.id)
             }
             else -> {
                 val server = serverById(sel)
