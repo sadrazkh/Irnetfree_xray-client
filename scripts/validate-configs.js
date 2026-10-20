@@ -220,7 +220,8 @@ function echConfigListB64(publicName) {
 // Shadowsocks' obfs and v2ray plugins, REALITY with ML-DSA-65 (pqv). Each one
 // plain, under TUN (every dial bound to the NIC — the ECH query too:
 // echSockopt) and under TUN with the strict leak guard (an ECH query over UDP
-// asked over DoH instead).
+// asked over DoH instead). And v1.31's ECH outbound (PattN's echOutbound, the
+// editor's Example): the query over h2c through an outbound of its own.
 const NEW_FORMS = [
   'vless://11111111-2222-3333-4444-555555555555@104.21.44.18:2087?encryption=none&type=ws&host=h.example&path=/&security=tls&fp=firefox&sni=h.example&ech=cloudflare-ech.com+udp://1.1.1.1#ech-udp',
   'vless://11111111-2222-3333-4444-555555555555@a.example:443?security=tls&sni=a.example&ech=cloudflare-ech.com%2Bhttps%3A%2F%2F1.1.1.1%2Fdns-query#ech-doh',
@@ -232,7 +233,10 @@ const NEW_FORMS = [
   'ss://' + Buffer.from('chacha20-ietf-poly1305:pw').toString('base64') + '@s.example:443?plugin=v2ray-plugin%3Bmode%3Dwebsocket%3Btls%3Bhost%3Dws.example%3Bpath%3D%2Fws#ss-v2ray',
   'vless://11111111-2222-3333-4444-555555555555@r.example:443?encryption=none&flow=xtls-rprx-vision&type=tcp&security=reality&sni=www.example.com&fp=chrome' +
     '&pbk=' + Buffer.alloc(32, 9).toString('base64url') + '&sid=ab12&pqv=' + Buffer.alloc(1952, 7).toString('base64url') + '#reality-pqv',
-  'vless://11111111-2222-3333-4444-555555555555@a.example:443?security=tls&sni=a.example&ech=' + encodeURIComponent(echConfigListB64('cloudflare-ech.com')) + '#ech-b64'
+  'vless://11111111-2222-3333-4444-555555555555@a.example:443?security=tls&sni=a.example&ech=' + encodeURIComponent(echConfigListB64('cloudflare-ech.com')) + '#ech-b64',
+  'vless://11111111-2222-3333-4444-555555555555@104.21.44.18:2087?encryption=none&type=ws&host=h.example&path=/&security=tls&fp=chrome&sni=h.example' +
+    '&ech=' + encodeURIComponent('cloudflare-ech.com+h2c://1.1.1.1/dns-query') +
+    '&echOutbound=' + encodeURIComponent(JSON.stringify(require('../src/renderer/serverFields').ECH_OUTBOUND_EXAMPLE)) + '#ech-outbound'
 ];
 const LINK_SETTINGS = {
   plain: {},

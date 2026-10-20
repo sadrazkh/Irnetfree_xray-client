@@ -882,3 +882,42 @@ test('what was held is said before the core’s exit is', async () => {
     } finally { fakeSpawn = null; }
   });
 });
+
+/* ------- v1.31: an ECH outbound asked of a core too old to hand it the query's host ------- */
+
+const { ECH_OUTBOUND_SINCE, usesEchOutbound } = require('../src/main/xrayManager');
+const ECH_OUT_CONFIG = { outbounds: [
+  { tag: 'proxy', protocol: 'vless', streamSettings: { network: 'ws', security: 'tls',
+    tlsSettings: { serverName: 'a.example', echConfigList: 'cloudflare-ech.com+h2c://1.1.1.1/dns-query', echSockopt: { dialerProxy: 'ech-1' } } } },
+  { tag: 'ech-1', protocol: 'direct', settings: { redirect: '1.1.1.1:443' }, streamSettings: { security: 'tls', tlsSettings: { serverName: 'www.microsoft.com' } } }
+] };
+
+test('an ECH outbound on an official core older than 26.10.10, no other core: refused with the version it needs', async () => {
+  assert.equal(ECH_OUTBOUND_SINCE, '26.10.10');
+  for (const v of ['26.3.27', '26.9.30']) {
+    const m = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    const r = await m.validateWithFallback(ECH_OUT_CONFIG, 'xray');
+    assert.deepEqual(r, { ok: false, engine: 'xray', echOutboundUnsupported: true, coreVersion: v, need: '26.10.10', plaintextRejected: false,
+      error: `xray ${v} cannot dial the ECH query through its own outbound (26.10.10 and newer can)` });
+    assert.deepEqual(m.calls, []);
+  }
+  for (const v of ['26.10.10', '26.10.17', '']) {
+    const ok = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    assert.deepEqual(await ok.validateWithFallback(ECH_OUT_CONFIG, 'xray'), { ok: true, engine: 'xray' }, v || 'no version read: the ordinary path');
+  }
+});
+
+test('an ECH outbound on a core too old for it runs on the other Xray core when that one is new enough', async () => {
+  const m = managerWith({ versions: { xray: '26.9.30', 'xray-pattn': '26.10.13' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await m.validateWithFallback(ECH_OUT_CONFIG, 'xray'), { ok: true, engine: 'xray-pattn', fellBack: true });
+  assert.match(m.logs.at(-1), /ECH outbound needs Xray 26\.10\.10 or newer and Xray \(official\) is 26\.9\.30 — running it on Xray-PattN \(patterniha\) 26\.10\.13/);
+  const o = managerWith({ versions: { xray: '26.9.30', 'xray-pattn': '26.9.22' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.equal((await o.validateWithFallback(ECH_OUT_CONFIG, 'xray')).echOutboundUnsupported, true);
+});
+
+test('usesEchOutbound: only an echSockopt that dials through an outbound counts', () => {
+  assert.equal(usesEchOutbound(ECH_OUT_CONFIG), true);
+  assert.equal(usesEchOutbound(ECH_CONFIG), false);
+  assert.equal(usesEchOutbound({ outbounds: [{ streamSettings: { tlsSettings: { echSockopt: { interface: 'Wi-Fi' } } } }] }), false);
+  for (const none of [null, undefined, {}, { outbounds: null }]) assert.equal(usesEchOutbound(none), false);
+});
