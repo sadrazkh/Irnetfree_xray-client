@@ -41,10 +41,13 @@ const groupHealth = new GroupHealthWatch();
 const wgHops = new WgHopWatch();
 // a group's member that stays dead: out of the running config, tested by the app instead (groupEvict.js)
 const { GroupEvictor } = require('./groupEvict');
+const { applyLive } = require('./groupLive');
 const groupEvict = new GroupEvictor();
 let groupEvictAt = 0;
 let groupEvictBusy = false;
 let groupEvictWaitSaid = false;
+// the running core's control API (groupLive.js): { port, engine }; null without a group
+let liveApi = null;
 const { UsageMeter, grandTotal } = require('./usage');
 const { Downloader, downloadFile } = require('./downloader');
 const { pickUpdateAsset, parseSha256Sums, sha256File } = require('./appUpdate');
@@ -1378,7 +1381,7 @@ async function connectOnce(serverId, opts = {}) {
   livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
 
   // a group member set aside lately for not answering stays out (groupEvict.js: kept across a reconnect)
-  settings = Object.assign({}, settings, { groupSkip: groupEvict.skip() });
+  settings = Object.assign({}, settings, { groupSkip: groupEvict.skip(), apiCtlPort: await getFreePort() });
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
   // A JSON server set to run raw, said once per connect: run as written, or —
   // in a chain, advanced routing or the pool — used in its full form.
@@ -1450,6 +1453,8 @@ async function connectOnce(serverId, opts = {}) {
   xrayReloading++;
   try {
     if (await xray.start(config, runEngine)) ownCore = xray.proc;
+    // where its control API listens, for a member set aside without a restart (groupLive.js)
+    liveApi = config.api ? { port: settings.apiCtlPort, engine: runEngine } : null;
     if (!stale()) liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));
   } catch (e) {
     // start() watches for 1.2 s to catch a config that crashes the core on
@@ -2076,7 +2081,7 @@ async function rebuildActiveConfig(why) {
   const base = appliedSettings ? Object.assign({}, getSettings(), appliedSettings) : getSettings();
   let settings = await effectiveSettings(serverId, base);
   // the group members set aside for not answering stay out (groupEvict.js)
-  settings = Object.assign({}, settings, { groupSkip: groupEvict.skip() });
+  settings = Object.assign({}, settings, { groupSkip: groupEvict.skip(), apiCtlPort: liveApi ? liveApi.port : await getFreePort() });
   // Keep the binding the live connection was built with (see doConnect): the
   // tunnel stays up across this reload, and asking the OS now would name it.
   if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
@@ -2097,6 +2102,7 @@ async function rebuildActiveConfig(why) {
     // a connect, a disconnect or a recovery came meanwhile: it owns the core now
     if (gen !== connGen || userDisconnecting || recovering || !xray.running) return false;
     await xray.start(config, check.engine);
+    liveApi = config.api ? { port: settings.apiCtlPort, engine: check.engine } : null;
     liveDiagnostics = JSON.parse(JSON.stringify({ config, plan, socksPort: settings.socksPort, tunRequested: !!settings.tunMode }));   // start() stops the old instance first
     watchWgSilence(config);   // the plan may have changed under the live tunnel
     wgHops.reset(plan);
@@ -2172,7 +2178,23 @@ function groupEvictTick() {
       const r = await testRecordDelay(d.record);
       for (const l of groupEvict.tested(d.key, r.ok, r.ok ? r.ms : null)) send('log', l);
     }
-    if (!quiet() || !groupEvict.wantsReload()) return;
+    if (!quiet()) return;
+    // set aside / put back in the running core, without a restart (groupLive.js) —
+    // a reload only for what cannot be done there
+    const ch = groupEvict.takeChanges();
+    if (ch.out.length || ch.back.length) {
+      const live = await applyLive({
+        changes: ch, map: stats.groupMap,
+        outbounds: liveDiagnostics && liveDiagnostics.config && liveDiagnostics.config.outbounds,
+        bin: liveApi && xray.resolveEngine(liveApi.engine).bin, port: liveApi && liveApi.port
+      });
+      if (live.ok) {
+        groupEvict.liveApplied();
+        send('log', { line: `Groups: done in the running core, no restart — ${live.done.map((d) => (d.how === 'out' ? 'out ' : 'back ') + d.tag).join(', ')}`, level: 'info' });
+        return;
+      }
+    }
+    if (!groupEvict.wantsReload()) return;
     // a change waiting for Apply would go live with the reload: the set-aside waits for it
     if (pendingKeys().length) {
       if (!groupEvictWaitSaid) { groupEvictWaitSaid = true; send('log', { line: 'Groups: a member to set aside or bring back waits for your pending settings — apply them (or reconnect) and the core reloads', level: 'info' }); }

@@ -41,7 +41,7 @@ const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
  * group is one config to the meter, to usage and to the silence watch, as a
  * server is. Anything else is passed through as it was.
  */
-const GROUP_MEMBER = /^(.+)~gm\d+$/;
+const GROUP_MEMBER = /^(.+)~(?:gm\d+|fb)$/;   // a member, or the group's fallback (`T~fb`)
 function foldGroups(out) {
   const res = {};
   const add = (tag, c) => {
@@ -292,7 +292,7 @@ class GroupHealthWatch {
       });
       const checked = g.members.filter((m) => m && (m.alive === true || m.alive === false));
       const none = checked.length > 0 && checked.length === g.members.length && checked.every((m) => m.alive === false);
-      if (none && !this.allDown.has(g.tag)) { this.allDown.add(g.tag); out.push({ line: `Group ${label}: no member answers — its traffic waits on the first until one does`, level: 'warn' }); }
+      if (none && !this.allDown.has(g.tag)) { this.allDown.add(g.tag); out.push({ line: `Group ${label}: no member answers — ${g.fallback && g.fallback.name ? `its traffic goes through its fallback, ${g.fallback.name}, until one does` : 'its traffic waits on the first until one does'}`, level: 'warn' }); }
       if (!none) this.allDown.delete(g.tag);
     }
     return out;
@@ -367,7 +367,7 @@ class WgHopWatch {
  */
 function groupsLive(map, members, lastMembers, health, dt) {
   return map.map((g) => ({
-    tag: g.tag, groupId: g.groupId, name: g.name, strategy: g.strategy, direct: g.direct !== false,
+    tag: g.tag, groupId: g.groupId, name: g.name, strategy: g.strategy, direct: g.direct !== false, fallback: g.fallback || null,
     members: (g.members || []).map((m, i) => {
       const tag = `${g.tag}~gm${i}`;
       const c = members[tag] || { up: 0, down: 0 };

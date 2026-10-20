@@ -40,6 +40,9 @@
  *   takeReload()       a reload wanted and allowed now? (then it is taken)
  *   reloadFailed()     the reload taken did not happen: ask for it again
  *   skip()             the keys the next config leaves out (settings.groupSkip)
+ *   takeChanges()      the members set aside / put back since the last ask → { out, back }
+ *                      (groupLive.applyLive does them in the running core)
+ *   liveApplied()      they were done there: no reload is needed for them
  *   list()             what is set aside, for the window: [{ key, groupId, group, label, since, nextTest }]
  */
 const { groupMemberKey } = require('./configBuilder');
@@ -92,6 +95,7 @@ class GroupEvictor {
     this.deadSince = new Map();
     this.wantReload = false;
     this.lastReload = 0;
+    this.changes = { out: [], back: [] };
   }
 
   skip() { return [...this.out.keys()]; }
@@ -120,6 +124,7 @@ class GroupEvictor {
         this.deadSince.delete(key);
         this.out.set(key, { groupId: g.groupId, group: g.name || g.groupId, label: who(m), since: now, nextTest: now + this.retest, misses: 0, passes: 0, touched: now });
         this.wantReload = true;
+        this.changes.out.push(key);
         lines.push({ line: `Group ${g.name || g.groupId}: ${who(m)} has not answered for ${mins(this.evictAfter)} — taken out of the running config (the core's own check would keep knocking on it); tested again in ${mins(this.retest)}`, level: 'warn' });
       }
     }
@@ -155,10 +160,19 @@ class GroupEvictor {
     }
     this.out.delete(key);
     this.wantReload = true;
+    this.changes.back.push(key);
     return [{ line: `Group ${e.group}: ${e.label} answers again${ms != null ? ` (${ms} ms)` : ''} — back in the running config`, level: 'info' }];
   }
 
   wantsReload() { return this.wantReload; }
+
+  takeChanges() {
+    const c = this.changes;
+    this.changes = { out: [], back: [] };
+    return c;
+  }
+
+  liveApplied() { this.wantReload = false; }
 
   takeReload() {
     const now = this.now();

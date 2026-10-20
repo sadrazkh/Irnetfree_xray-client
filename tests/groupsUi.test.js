@@ -200,7 +200,7 @@ const PAGE_PRELUDE = constSource('CG_KEY') + constSource('cgState') + constSourc
 const GROUP_FNS = ['srvById', 'grpMember', 'normalizeUiGroup', 'loadGroups', 'newGroupId', 'grpById', 'grpCountText', 'grpLive', 'grpAddrText',
   'grpMemberNames', 'grpConnText', 'renderGroups', 'groupCard', 'openGroupCard', 'afterGroupsChanged', 'persistGroups', 'deleteGroup', 'grpShown',
   'openGroupEditor', 'closeGroupEditor', 'grpIsV4', 'grpIsV6', 'grpIsHost', 'grpParseAddress', 'grpParseAddresses', 'grpAddIps', 'grpNameNode',
-  'grpStrategyNode', 'grpMembersNode', 'grpServerPanel', 'grpIpPanel', 'renderGroupEditor', 'saveGroupEditor', 'edNode', 'appendSome', 'richLine', 'warpNum',
+  'grpStrategyNode', 'grpFallbackNode', 'grpMembersNode', 'grpServerPanel', 'grpIpPanel', 'renderGroupEditor', 'saveGroupEditor', 'edNode', 'appendSome', 'richLine', 'warpNum',
   'pingResultLabel', 'fmtMs', 'pingClass', 'connectGlyph', ...PAGE_FNS];
 
 function harness({ lang = 'en', groups = GROUPS, servers = SERVERS, chains = CHAINS, setGroups, api = {}, confirm = () => true } = {}) {
@@ -897,4 +897,28 @@ test('the stylesheet has the group pieces', () => {
     '.grp-member', '.grp-mname', '.grp-tools', '.grp-panel', '.grp-pool', '.grp-ipnote', '.modal.grp-modal', '.grp-chip.missing']) {
     assert.ok(LISTS.includes(sel + ' ') || LISTS.includes(sel + '{') || LISTS.includes(sel + ','), `lists.css has no ${sel}`);
   }
+});
+
+test('the fallback: «the first member» by default, any saved server by subscription; the pick is saved as `fallback`, and none leaves no field', async () => {
+  const h = harness({ setGroups: (list) => plain(list) });
+  h.ctx.openGroupEditor(null);
+  byId(h.body(), 'grpAddServer').onclick();
+  all(h.body(), (e) => e.dataset.srv === 's1')[0].onclick();
+  const sel = () => byId(h.body(), 'grp-fallback');
+  assert.equal(sel().tagName, 'SELECT');
+  assert.equal(sel().children[0].attrs.value, '', 'the first member first');
+  assert.ok(sel().children.slice(1).every((g) => g.tagName === 'OPTGROUP'), 'the servers under their piles');
+  assert.ok(all(sel(), (o) => o.tagName === 'OPTION').some((o) => o.attrs.value === 's3'));
+  sel().value = 's3';
+  sel().onchange();
+  assert.equal(await h.ctx.saveGroupEditor(), true);
+  const g = h.sent[0][h.sent[0].length - 1];
+  assert.equal(g.fallback, 's3');
+  // edited again: the pick is shown; back to «the first member» leaves no field
+  h.ctx.openGroupEditor(g.id);
+  assert.equal(sel().value, 's3');
+  sel().value = '';
+  sel().onchange();
+  assert.equal(await h.ctx.saveGroupEditor(), true);
+  assert.equal('fallback' in h.sent[1][h.sent[1].length - 1], false);
 });
