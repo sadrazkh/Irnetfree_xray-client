@@ -5097,7 +5097,8 @@ function fieldNode(fld) {
           if (editView === 'pro') renderEditPro(); else renderSimpleExtras();
         };
       }
-      appendSome(wrap, fieldHead(fld, id), ta, ex, hint);
+      // one cell for the two: the field is a three-row subgrid (label, control, hint)
+      appendSome(wrap, fieldHead(fld, id), ex ? edNode('div', { class: 'ed-json' }, [ta, ex]) : ta, hint);
       return wrap;
     }
     case 'chips': {
