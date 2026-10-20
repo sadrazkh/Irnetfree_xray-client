@@ -4,6 +4,7 @@ import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.SettingsApply
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 
 enum class ConnState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
@@ -84,7 +85,13 @@ object VpnState {
     private val _lockdown = MutableStateFlow(false)
     val lockdown: StateFlow<Boolean> = _lockdown
     fun setLockdown(v: Boolean) { _lockdown.value = v }
-    fun addLog(line: String) { _log.value = (_log.value + line).takeLast(300) }
+    /**
+     * One line more, the oldest beyond 300 dropped. Written from every thread
+     * there is (the tunnel's worker, the connect threads, the cores' output
+     * readers, the self-check, the network watcher): one atomic update. As a
+     * read-then-write, two lines written at the same moment lost one of them.
+     */
+    fun addLog(line: String) { _log.update { l: List<String> -> (l + line).takeLast(300) } }
     fun clearLog() { _log.value = emptyList() }
 
     val isActive: Boolean get() = _state.value == ConnState.CONNECTED || _state.value == ConnState.CONNECTING
