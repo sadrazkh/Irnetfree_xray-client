@@ -193,6 +193,10 @@
     { id: 'useSystemCA', tab: 'security', group: 'certificate', kind: 'switch', path: TL + 'useSystemCA', key: 'useSystemCA', when: on(TLS_ANY, null, ['tls']), local: true, span: 2, hint: true },
     { id: 'ech', tab: 'security', group: 'ech', kind: 'text', special: true, key: 'echConfigList', when: on(TLS_ANY, null, ['tls']), simple: true, span: 2, hint: true,
       placeholder: 'cloudflare-ech.com+udp://1.1.1.1' },
+    // PattN's: the outbound the core dials the ECH query through (configBuilder.applyEchOutbounds);
+    // its Example button writes echOutboundExample's pair
+    { id: 'echOutbound', tab: 'security', group: 'ech', kind: 'json', special: true, key: 'echOutbound', when: on(TLS_ANY, null, ['tls']), span: 2, hint: true,
+      placeholder: '{"protocol":"direct","settings":{"redirect":"1.1.1.1:443"},"streamSettings":{"security":"tls","tlsSettings":{…}}}' },
     { id: 'echForceQuery', tab: 'security', group: 'ech', kind: 'select', path: TL + 'echForceQuery', key: 'echForceQuery', when: on(TLS_ANY, null, ['tls']), local: true,
       options: ['', 'none', 'half', 'full'], optionLabels: true },
     { id: 'minVersion', tab: 'security', group: 'ech', kind: 'select', path: TL + 'minVersion', key: 'minVersion', when: on(TLS_ANY, null, ['tls']), local: true,
@@ -468,9 +472,36 @@
     }
   }
 
+  /**
+   * The ECH outbound patterniha published on 2026-10-20 (PattN P34 / PattNG
+   * P67): the plain-DNS answer no longer carries the key and DoH to 1.1.1.1 is
+   * reset on its SNI, so the query is sent h2c to 1.1.1.1/dns-query and this
+   * outbound carries it to 1.1.1.1:443 under TLS with another name, the
+   * certificate checked against the resolver's own (`fromMitM`).
+   */
+  const ECH_OUTBOUND_EXAMPLE = {
+    tag: 'tls-repack-dns', protocol: 'direct', settings: { redirect: '1.1.1.1:443' },
+    streamSettings: { security: 'tls', tlsSettings: { serverName: 'www.microsoft.com', verifyPeerCertByName: 'fromMitM,www.microsoft.com', alpn: ['fromMitM'], fingerprint: 'chrome' } }
+  };
+
+  /**
+   * The editor's Example for the ECH outbound: the outbound above, and the ECH
+   * value it goes with — asked over h2c of 1.1.1.1, under the name the field
+   * already asks for (a query without one asks for the SNI, as before); an
+   * empty field or a base64 list gets cloudflare-ech.com, the post's.
+   */
+  function echOutboundExample(ech) {
+    const s = String(ech == null ? '' : ech).trim();
+    const sep = s.indexOf('://');
+    const plus = s.indexOf('+');
+    const name = sep > -1 ? (plus > -1 && plus < sep ? s.slice(0, plus) : '') : 'cloudflare-ech.com';
+    return { ech: (name ? name + '+' : '') + 'h2c://1.1.1.1/dns-query', echOutbound: JSON.stringify(ECH_OUTBOUND_EXAMPLE, null, 2) };
+  }
+
   return {
     FIELDS, TABS, PROTOCOLS, NETWORKS, FINGERPRINTS, SS_METHODS, PATH_FIELDS,
     securitiesOf, hasTransport, masqueHttpOf, contextOf, fieldApplies,
-    getPath, setPath, toForm, fromForm, validate, readEncryption, readPathFields, applyPathFields, specialsOf, ssPluginOf
+    getPath, setPath, toForm, fromForm, validate, readEncryption, readPathFields, applyPathFields, specialsOf, ssPluginOf,
+    ECH_OUTBOUND_EXAMPLE, echOutboundExample
   };
 }));
