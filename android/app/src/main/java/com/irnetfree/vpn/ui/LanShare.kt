@@ -41,6 +41,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.irnetfree.vpn.core.LanShare
 import com.irnetfree.vpn.core.Store
+import com.irnetfree.vpn.core.t
+import com.irnetfree.vpn.core.tf
 import com.irnetfree.vpn.vpn.ConnState
 import com.irnetfree.vpn.vpn.LanAddresses
 import com.irnetfree.vpn.vpn.LanShareStore
@@ -108,15 +110,14 @@ fun LanShareSection(store: Store) {
     fun copyText(text: String) {
         clipboard.setText(AnnotatedString(text))
         // Android 13+ confirms a copy itself.
-        if (Build.VERSION.SDK_INT < 33) Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+        if (Build.VERSION.SDK_INT < 33) Toast.makeText(ctx, t("toast.copiedShort"), Toast.LENGTH_SHORT).show()
     }
 
     HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
-    Text("LAN sharing", color = TXT, fontWeight = FontWeight.Bold)
-    LanSwitchRow("Share this connection with other devices", lan.enabled) { v: Boolean -> save(lan.copy(enabled = v)) }
+    Text(t("lan.title"), color = TXT, fontWeight = FontWeight.Bold)
+    LanSwitchRow(t("lan.switch"), lan.enabled) { v: Boolean -> save(lan.copy(enabled = v)) }
     Text(
-        "While connected, devices on the same Wi-Fi — or on this phone's hotspot — can use the phone as a SOCKS5 or HTTP proxy. " +
-            "Their traffic leaves through the same server, with the same routing and DNS, as the phone's own.",
+        t("lan.intro"),
         color = MUTED, fontSize = 11.sp
     )
     if (!lan.enabled) return
@@ -125,41 +126,40 @@ fun LanShareSection(store: Store) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             socksText, { v: String -> socksText = v.filter { c -> c.isDigit() }.take(5); commitFields() },
-            Modifier.weight(1f), label = { Text("SOCKS5 port") }, singleLine = true,
+            Modifier.weight(1f), label = { Text(t("lan.socksPort")) }, singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = lanTfColors()
         )
         OutlinedTextField(
             httpText, { v: String -> httpText = v.filter { c -> c.isDigit() }.take(5); commitFields() },
-            Modifier.weight(1f), label = { Text("HTTP port") }, singleLine = true,
+            Modifier.weight(1f), label = { Text(t("lan.httpPort")) }, singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = lanTfColors()
         )
     }
 
-    LanSwitchRow("Require a username and password", lan.auth) { v: Boolean -> save(lan.copy(auth = v)) }
+    LanSwitchRow(t("lan.auth"), lan.auth) { v: Boolean -> save(lan.copy(auth = v)) }
     if (lan.auth) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 userText, { v: String -> userText = v; commitFields() },
-                Modifier.weight(1f), label = { Text("Username") }, singleLine = true, colors = lanTfColors()
+                Modifier.weight(1f), label = { Text(t("lan.user")) }, singleLine = true, colors = lanTfColors()
             )
-            IconButton(onClick = { copyText(userText) }) { Icon(Icons.Filled.ContentCopy, "copy the username", tint = PRIMARY) }
+            IconButton(onClick = { copyText(userText) }) { Icon(Icons.Filled.ContentCopy, t("lan.copyUser"), tint = PRIMARY) }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 passText, { v: String -> passText = v; commitFields() },
-                Modifier.weight(1f), label = { Text("Password") }, singleLine = true, colors = lanTfColors()
+                Modifier.weight(1f), label = { Text(t("f.password")) }, singleLine = true, colors = lanTfColors()
             )
-            IconButton(onClick = { copyText(passText) }) { Icon(Icons.Filled.ContentCopy, "copy the password", tint = PRIMARY) }
+            IconButton(onClick = { copyText(passText) }) { Icon(Icons.Filled.ContentCopy, t("lan.copyPass"), tint = PRIMARY) }
         }
         TextButton(onClick = { userText = LanShare.newUser(); passText = LanShare.newPass(); commitFields() }) {
             Icon(Icons.Filled.Refresh, null, tint = PRIMARY, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
-            Text("New username and password", color = PRIMARY, fontSize = 13.sp)
+            Text(t("lan.newCreds"), color = PRIMARY, fontSize = 13.sp)
         }
     } else {
         Text(
-            "⚠ Without a password, anyone on this network can use your connection — and your server's traffic — without asking. " +
-                "Only on a network where you trust everyone.",
+            t("lan.noAuthWarn"),
             color = AMBER, fontSize = 11.sp
         )
     }
@@ -167,7 +167,7 @@ fun LanShareSection(store: Store) {
     val problem = draftProblem ?: lan.problem(store.settings, store.pool)
     if (problem != null) {
         Spacer(Modifier.height(4.dp))
-        Text("⚠ $problem — sharing does not open until this is fixed.", color = BAD, fontSize = 11.sp)
+        Text(tf("lan.problem", "problem" to problem), color = BAD, fontSize = 11.sp)
     }
 
     // Is what is set here what the running tunnel opened?
@@ -175,34 +175,34 @@ fun LanShareSection(store: Store) {
     val same = LanShare.same(lan, applied)
     Spacer(Modifier.height(6.dp))
     when {
-        connected && applied != null && same -> Text("Sharing now.", color = PRIMARY, fontSize = 12.sp)
+        connected && applied != null && same -> Text(t("lan.sharing"), color = PRIMARY, fontSize = 12.sp)
         connected && !same -> Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Connected — this applies on the next connect.", color = AMBER, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Text(t("lan.nextConnect"), color = AMBER, fontSize = 12.sp, modifier = Modifier.weight(1f))
             TextButton(onClick = {
                 try { XrayVpnService.connect(ctx, store) }
                 catch (e: Exception) { VpnState.set(ConnState.ERROR, error = e.message ?: "connect failed") }
-            }) { Text("Reconnect now", color = PRIMARY) }
+            }) { Text(t("apply.reconnect"), color = PRIMARY) }
         }
-        else -> Text("Opens when you connect.", color = MUTED, fontSize = 12.sp)
+        else -> Text(t("lan.opensOnConnect"), color = MUTED, fontSize = 12.sp)
     }
 
     Spacer(Modifier.height(8.dp))
-    Text("Point the other device's proxy settings at:", color = TXT2, fontSize = 12.sp)
+    Text(t("lan.pointAt"), color = TXT2, fontSize = 12.sp)
     if (addrs.isEmpty()) {
-        Text("No Wi-Fi or hotspot address on this phone right now — join a Wi-Fi network or turn the hotspot on.", color = MUTED, fontSize = 11.sp)
+        Text(t("lan.noAddr"), color = MUTED, fontSize = 11.sp)
     }
     for (a in addrs) {
         Text("${a.kind} · ${a.iface}", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
         CopyLine(LanAddresses.socksUrl(a.ip, lan)) { t: String -> copyText(t) }
         CopyLine(LanAddresses.httpUrl(a.ip, lan)) { t: String -> copyText(t) }
     }
-    if (lan.auth && addrs.isNotEmpty()) Text("The HTTP proxy asks for the same username and password.", color = MUTED, fontSize = 11.sp)
+    if (lan.auth && addrs.isNotEmpty()) Text(t("lan.httpAuth"), color = MUTED, fontSize = 11.sp)
 }
 
 @Composable private fun CopyLine(text: String, onCopy: (String) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(text, color = TXT2, fontSize = 12.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
-        IconButton(onClick = { onCopy(text) }) { Icon(Icons.Filled.ContentCopy, "copy", tint = PRIMARY) }
+        IconButton(onClick = { onCopy(text) }) { Icon(Icons.Filled.ContentCopy, t("card.copy"), tint = PRIMARY) }
     }
 }
 

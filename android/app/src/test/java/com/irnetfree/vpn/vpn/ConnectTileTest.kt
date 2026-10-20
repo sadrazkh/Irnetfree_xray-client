@@ -1,12 +1,17 @@
 package com.irnetfree.vpn.vpn
 
+import com.irnetfree.vpn.core.I18n
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /** The Quick Settings tile (ConnectTile): what it shows for each state, and what a tap does. */
 class ConnectTileTest {
+    // the words in English here; I18nTest checks every key has its Persian
+    @Before fun english() { I18n.setLang("en") }
+
     @Test fun litWhileConnectedOrOnItsWay() {
         assertEquals(TileLook.Look(true, "🇩🇪 Berlin"), TileLook.of(ConnState.CONNECTED, "🇩🇪 Berlin"))
         assertEquals(TileLook.Look(true, "Connected"), TileLook.of(ConnState.CONNECTED, ""))
