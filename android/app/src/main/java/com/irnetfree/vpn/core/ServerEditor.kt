@@ -187,7 +187,7 @@ object ServerEditor {
                     true
                 }
             }
-            "wireguard" -> patchWireguard(ob, was, f, if (moved) "$addr:$port" else null)
+            "wireguard" -> patchWireguard(ob, was, f, if (moved) LinkParser.joinHostPort(addr, port) else null)
             "hysteria2" -> { patchHysteria2(ob, was, f, addr, port, moved); true }
             "masque" -> { patchMasque(ob, was, f, addr, port); true }
             else -> true
@@ -480,7 +480,7 @@ object ServerEditor {
                     .put("method", f.method.trim().ifEmpty { ServerFields.SS_METHODS[0] }).put("password", f.cred.trim()).put("uot", true))))
                 .put("streamSettings", JSONObject().put("network", "tcp"))
             "hysteria2" -> LinkParser.buildHysteria2Outbound(mapOf("address" to addr, "port" to port.toString(), "auth" to f.cred.trim(), "sni" to f.sni.trim()))
-            "wireguard" -> LinkParser.buildWireguardOutbound(f.cred.trim(), f.wgPub.trim(), "$addr:$port", f.wgAddr.trim(), f.wgPsk.trim(), f.wgMtu, f.wgReserved, f.wgAllowed)
+            "wireguard" -> LinkParser.buildWireguardOutbound(f.cred.trim(), f.wgPub.trim(), LinkParser.joinHostPort(addr, port), f.wgAddr.trim(), f.wgPsk.trim(), f.wgMtu, f.wgReserved, f.wgAllowed)
             // the bare outbound: apply below writes every field into it and checks it (Masque.check);
             // nothing is required beyond the address — its user and password are optional, a WARP
             // account's three fields all-or-none
@@ -739,7 +739,7 @@ object ServerEditor {
         if (f.wgAddr != was.wgAddr) set.put("address", JSONArray(LinkParser.normalizeWgAddresses(LinkParser.splitCommas(f.wgAddr)).ifEmpty { listOf("10.0.0.2/32") }))
         if (f.wgMtu != was.wgMtu) set.put("mtu", f.wgMtu.trim().toIntOrNull() ?: set.optInt("mtu", 1420))
         if (f.wgReserved != was.wgReserved) {
-            val r = LinkParser.splitCommas(f.wgReserved).mapNotNull { it.toIntOrNull() }
+            val r = LinkParser.wgReserved(f.wgReserved)
             if (r.isEmpty()) set.remove("reserved") else set.put("reserved", JSONArray(r))
         }
         return true
@@ -763,7 +763,7 @@ object ServerEditor {
                 .put("settings", JSONObject().put("servers", JSONArray().put(JSONObject().put("address", addr).put("port", port).put("method", f.method.trim()).put("password", f.cred.trim()).put("uot", true))))
                 .put("streamSettings", JSONObject().put("network", "tcp"))
             "socks", "http" -> LinkParser.proxyOutbound(s.protocol, addr, port, f.proxyUser.trim(), f.proxyPass.trim())
-            "wireguard" -> LinkParser.buildWireguardOutbound(f.cred.trim(), f.wgPub.trim(), "$addr:$port", f.wgAddr.trim(), f.wgPsk.trim(), f.wgMtu, f.wgReserved, f.wgAllowed)
+            "wireguard" -> LinkParser.buildWireguardOutbound(f.cred.trim(), f.wgPub.trim(), LinkParser.joinHostPort(addr, port), f.wgAddr.trim(), f.wgPsk.trim(), f.wgMtu, f.wgReserved, f.wgAllowed)
             else -> JSONObject(s.outbound.toString())
         }
         // carry over xhttp `extra` (padding / post-bytes / method) the builder doesn't model
