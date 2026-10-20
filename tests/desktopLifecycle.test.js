@@ -457,7 +457,7 @@ test('a tunnel backend dying and a reload that leaves no core take the same path
   assert.match(mk, /onConnectionDrop\('tunnel-exited'\)/);
   const reload = slice('async function rebuildActiveConfig(why) {', '\n}');
   assert.match(reload, /catch \(e\) \{[\s\S]*?lostCore = !xray\.running;[\s\S]*?throw e;/, 'a failed start() leaves no core — say so');
-  assert.match(reload, /finally \{\n\s*xrayReloading = prevReloading;\n\s*if \(lostCore\) onConnectionDrop\('reload-failed'\)/,
+  assert.match(reload, /finally \{\n\s*xrayReloading--;\n\s*if \(lostCore\) onConnectionDrop\('reload-failed'\)/,
     'and only after the reload flag is down, so the drop is not swallowed like the stop was');
 });
 

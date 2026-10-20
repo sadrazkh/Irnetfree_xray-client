@@ -6984,6 +6984,10 @@ async function persistGroups(list) {
   const saved = Array.isArray(res) ? res : res && Array.isArray(res.groups) ? res.groups : payload;
   state.groups = saved.map(normalizeUiGroup).filter(Boolean);
   afterGroupsChanged();
+  // a group the live connection dials, edited: the banner says it waits for a reconnect ('groups')
+  if (state.connected && window.api.pendingReconnect) {
+    try { const keys = await window.api.pendingReconnect(); if (Array.isArray(keys)) setPending(keys); } catch { /* the banner stays as it was */ }
+  }
   return true;
 }
 
