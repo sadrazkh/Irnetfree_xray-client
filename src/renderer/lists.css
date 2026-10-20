@@ -211,6 +211,9 @@
   border: 1px dashed var(--softline); border-radius: 999px; padding: 0 6px; line-height: 16px;
 }
 .ed-f .hint { margin-top: 5px; }
+/* a JSON field with a button under it (the ECH outbound's Example): one cell of the subgrid */
+.ed-json { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
+.ed-json .textarea { align-self: stretch; }
 .ed-f.is-bad .input, .ed-f.is-bad .select, .ed-f.is-bad .textarea { border-color: var(--danger); }
 .ed-sub {
   margin: 4px 0 -2px; padding-top: 14px;

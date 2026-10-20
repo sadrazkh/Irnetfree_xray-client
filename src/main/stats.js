@@ -30,7 +30,9 @@ const isHelperTag = (tag) => tag.includes('~');
  * counted them (idForTag); the live meter now agrees.
  */
 const isRelayTag = (tag) => /-h\d+$/.test(tag) || tag.startsWith('base-');
-const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-') && !isHelperTag(tag) && !isRelayTag(tag);
+/** The ECH outbounds (`ech-<n>`, configBuilder.applyEchOutbounds) carry the ECH config query, never the user's traffic. */
+const isEchTag = (tag) => /^ech-\d+$/.test(tag);
+const isProxyTag = (tag) => !NOT_PROXY.has(tag) && !tag.startsWith('dpi-') && !isEchTag(tag) && !isHelperTag(tag) && !isRelayTag(tag);
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
@@ -400,7 +402,7 @@ function byOutbound(vars, skip) {
   const out = foldGroups(raw);
   const res = {};
   for (const tag of Object.keys(out)) {
-    if (tag === 'block' || tag === 'dns-out' || tag.startsWith('dpi-') || isHelperTag(tag) || (skip && skip.has(tag))) continue;
+    if (tag === 'block' || tag === 'dns-out' || tag.startsWith('dpi-') || isEchTag(tag) || isHelperTag(tag) || (skip && skip.has(tag))) continue;
     const c = out[tag] || {};
     res[tag] = { up: num(c.uplink), down: num(c.downlink) };
   }

@@ -210,6 +210,8 @@ object SingboxConfig {
             val r = ss.optJSONObject("realitySettings") ?: JSONObject()
             tls.put("reality", JSONObject().put("enabled", true).put("public_key", r.optString("publicKey")).put("short_id", r.optString("shortId")))
         }
+        // PattN's ECH outbound (tlsSettings.echOutbound) has no sing-box counterpart:
+        // nothing here copies a key it does not name, so it never reaches this config
         if (security == "tls") ech(t.optString("echConfigList"))?.let { tls.put("ech", it) }
         return tls
     }

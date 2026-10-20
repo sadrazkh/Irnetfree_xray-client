@@ -4083,7 +4083,7 @@ function readServerFields(s) {
     finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
     engine: s.engine || 'xray',
     certPin: s.certPin || '',
-    ech: '', pcs: '', vcn: '', pqv: '', hy2Obfs: '', hy2Ports: ''
+    ech: '', echOutbound: '', pcs: '', vcn: '', pqv: '', hy2Obfs: '', hy2Ports: ''
   };
 
   if (s.protocol === 'vless' || s.protocol === 'vmess') {
@@ -4148,6 +4148,7 @@ function readServerFields(s) {
     f.alpn = (st.tlsSettings.alpn || []).join(',');
     if (!f.host && st.tlsSettings.serverName) f.host = '';
     f.ech = st.tlsSettings.echConfigList || '';
+    f.echOutbound = st.tlsSettings.echOutbound ? JSON.stringify(st.tlsSettings.echOutbound, null, 2) : '';
     f.pcs = st.tlsSettings.pinnedPeerCertSha256 || '';
     f.vcn = st.tlsSettings.verifyPeerCertByName || '';
   } else if (st.realitySettings) {
@@ -4858,7 +4859,7 @@ function draftOf(s) {
     network: f.network || 'tcp', security: p === 'hysteria2' || p === 'masque' ? 'tls' : (f.security || 'none'),
     // MASQUE writes the fingerprint where the form says one (parser.applyServerEdits): none stays none
     sni: f.sni || '', host: f.host || '', path: f.path || '', fp: f.fp || (p === 'masque' ? '' : 'chrome'), pbk: f.pbk || '', sid: f.sid || '',
-    alpn: f.alpn || '', allowInsecure: !!f.allowInsecure, ech: f.ech || '', pcs: f.pcs || '', vcn: f.vcn || '', pqv: f.pqv || ''
+    alpn: f.alpn || '', allowInsecure: !!f.allowInsecure, ech: f.ech || '', echOutbound: f.echOutbound || '', pcs: f.pcs || '', vcn: f.vcn || '', pqv: f.pqv || ''
   };
   if (p === 'vless' || p === 'vmess') d.uuid = f.cred || '';
   if (p === 'trojan' || p === 'shadowsocks' || p === 'hysteria2') d.password = f.cred || '';
@@ -4882,7 +4883,7 @@ function newDraft(protocol, keep) {
   const d = {
     protocol, name: '', address: '', port: '443', engine: 'xray', fragment: '', noise: '', cipherSuites: '', finalMask: '',
     network: 'tcp', security: protocol === 'hysteria2' ? 'tls' : 'none', sni: '', host: '', path: '', fp: 'chrome', pbk: '', sid: '',
-    alpn: '', allowInsecure: false, ech: '', pcs: '', vcn: '', pqv: '', uuid: '', password: '', username: '',
+    alpn: '', allowInsecure: false, ech: '', echOutbound: '', pcs: '', vcn: '', pqv: '', uuid: '', password: '', username: '',
     flow: '', encryption: 'none', vmessSecurity: 'auto', alterId: '0', method: F.SS_METHODS[0], uot: protocol === 'shadowsocks',
     plugin: '', headerType: 'none', grpcMode: 'gun', xhttpMode: 'auto', kcpHeader: 'none', kcpSeed: '', spx: '',
     privateKey: '', publicKey: '', localAddress: '', presharedKey: '', allowedIPs: '0.0.0.0/0, ::/0', reserved: '', mtu: '1420', dns: '',
@@ -5084,10 +5085,20 @@ function fieldNode(fld) {
       return wrap;
     }
     case 'json': {
-      const ta = edNode('textarea', { class: 'textarea', id, dir: 'ltr', rows: '3', spellcheck: 'false', placeholder: fld.placeholder || null });
+      const ta = edNode('textarea', { class: 'textarea', id, dir: 'ltr', rows: fld.id === 'echOutbound' && String(val).trim() ? '8' : '3', spellcheck: 'false', placeholder: fld.placeholder || null });
       ta.value = String(val);
       ta.oninput = () => { d[fld.id] = ta.value; };
-      appendSome(wrap, fieldHead(fld, id), ta, hint);
+      // the ECH outbound's Example: patterniha's fronted DoH query, and the ECH value it goes with
+      let ex = null;
+      if (fld.id === 'echOutbound') {
+        ex = edNode('button', { type: 'button', class: 'btn ghost small ed-example', text: t('sf.echOutbound.example') });
+        ex.onclick = () => {
+          Object.assign(d, sfTable().echOutboundExample(d.ech));
+          if (editView === 'pro') renderEditPro(); else renderSimpleExtras();
+        };
+      }
+      // one cell for the two: the field is a three-row subgrid (label, control, hint)
+      appendSome(wrap, fieldHead(fld, id), ex ? edNode('div', { class: 'ed-json' }, [ta, ex]) : ta, hint);
       return wrap;
     }
     case 'chips': {

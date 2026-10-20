@@ -371,6 +371,8 @@ internal object I18nWords {
         "ed.pcs", "SHA-256 گواهی (pcs)",
         "ed.vcn", "بررسی گواهی با نام (vcn)",
         "ed.pcsHint", "pcs: فقط همین گواهی پذیرفته می‌شود (حتی خودامضا) — جایگزینِ Allow Insecure. vcn: گواهی به‌جای SNI با این نام بررسی می‌شود.",
+        // the Pro view's Example under the ECH outbound (its label and hint are the table's)
+        "sf.echOutbound.example", "نمونه",
         // subscriptions, the proxy pool, chains & groups, the group editor
         "subs.title", "ساب‌اسکریپشن‌ها",
         "subs.refreshAll", "به‌روزرسانی همه",
@@ -1033,6 +1035,8 @@ internal object I18nWords {
         "ed.pcs", "Certificate SHA-256 (pcs)",
         "ed.vcn", "Verify certificate as (vcn)",
         "ed.pcsHint", "pcs: accept exactly this certificate (a self-signed one too) — what replaced Allow Insecure. vcn: check the certificate against this name instead of the SNI.",
+        // the Pro view's Example under the ECH outbound (its label and hint are the table's)
+        "sf.echOutbound.example", "Example",
         // subscriptions, the proxy pool, chains & groups, the group editor
         "subs.title", "Subscriptions",
         "subs.refreshAll", "refresh all",

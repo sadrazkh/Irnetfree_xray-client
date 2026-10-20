@@ -181,16 +181,66 @@ function echOverDoh(outbounds) {
 }
 
 /**
+ * A server's own ECH outbound (PattN's `echOutbound`, the link's
+ * `echOutbound=`): the outbound the core dials its ECH config query through —
+ * `echSockopt.dialerProxy`. What it is for (patterniha, 2026-10-20): the
+ * plain-DNS answer no longer carries the key and DoH to 1.1.1.1 is reset on
+ * its SNI, so the query goes `h2c://1.1.1.1/dns-query` through a `direct`
+ * outbound that redirects to 1.1.1.1:443 under TLS with another name
+ * (`www.microsoft.com`) and checks the certificate against the resolver's
+ * own (`fromMitM`; the core hands the query's host over from 26.10.10).
+ *
+ * The record keeps it in tlsSettings (`echOutbound`, never a core key): taken
+ * out here, given a tag of ours — `ech-<n>`, one per distinct outbound, so
+ * twenty servers with the same one share it and the user's own tag can clash
+ * with nothing — and appended after everything else. Without a list fetched
+ * from DNS (a base64 one is not fetched) it means nothing and is dropped.
+ * Every builder runs it, the pings' too: a test without it would ask for the
+ * key directly and fail where the connect works. Before bindDirectDials,
+ * which binds it to the NIC under TUN like any dial the core makes itself.
+ */
+function applyEchOutbounds(outbounds) {
+  const byKey = new Map();
+  const extra = [];
+  for (const o of outbounds) {
+    const tls = o && o.streamSettings && o.streamSettings.tlsSettings;
+    if (!tls || !Object.prototype.hasOwnProperty.call(tls, 'echOutbound')) continue;
+    const ob = tls.echOutbound;
+    delete tls.echOutbound;
+    if (!ob || typeof ob !== 'object' || Array.isArray(ob) || !ob.protocol || !echQueryOf(tls.echConfigList)) continue;
+    const body = JSON.parse(JSON.stringify(ob));
+    delete body.tag;
+    const key = JSON.stringify(body);
+    let tag = byKey.get(key);
+    if (!tag) {
+      tag = 'ech-' + (byKey.size + 1);
+      byKey.set(key, tag);
+      extra.push(Object.assign({ tag }, body));
+    }
+    tls.echSockopt = Object.assign({}, tls.echSockopt, { dialerProxy: tag });
+  }
+  return extra.length ? outbounds.concat(extra) : outbounds;
+}
+
+/**
  * The resolver addresses the running config fetches ECH configs from — what
  * the strict leak guard has to leave a hole for (the query is the core's own,
  * from the physical adapter). A resolver given by name is resolved before the
- * connect (entryHosts) and its addresses travel with the entry servers'.
+ * connect (entryHosts) and its addresses travel with the entry servers'. A
+ * query dialled through an ECH outbound (applyEchOutbounds) leaves for the
+ * address that outbound redirects to.
  */
 function echResolverIpsOf(config) {
   const out = [];
-  for (const tls of echQueryTls(config && config.outbounds)) {
+  const outbounds = (config && config.outbounds) || [];
+  const add = (ip) => { if (ip && net.isIP(ip) && !out.includes(ip)) out.push(ip); };
+  for (const tls of echQueryTls(outbounds)) {
     const q = echQueryOf(tls.echConfigList);
-    if (q && net.isIP(q.host) && !out.includes(q.host)) out.push(q.host);
+    if (q) add(q.host);
+    const via = tls.echSockopt && tls.echSockopt.dialerProxy;
+    const ob = via ? outbounds.find(x => x && x.tag === via) : null;
+    const to = ob && ob.settings && splitEndpoint(ob.settings.redirect);
+    if (to) add(to.host);
   }
   return out;
 }
@@ -1172,7 +1222,7 @@ function buildConfig(planArg, settings) {
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
   outbounds = (outbounds || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outbounds, s.entryHostIps, s.ipv6);
-  outbounds = applyFragments(outbounds);
+  outbounds = applyEchOutbounds(applyFragments(outbounds));
   if (dropsUdpDirect(s)) echOverDoh(outbounds);
   bindDirectDials(outbounds, s.directInterface);
 
@@ -1534,7 +1584,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const grp = expandGroups(reg.outs, s.groupSkip);   // see buildConfig
   const outs = grp.outbounds.map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outs, s.entryHostIps, s.ipv6);   // see buildConfig
-  const outbounds = applyFragments(outs);
+  const outbounds = applyEchOutbounds(applyFragments(outs));
   if (dropsUdpDirect(s)) echOverDoh(outbounds);
   bindDirectDials(outbounds, s.directInterface);
 
@@ -1590,7 +1640,7 @@ function buildTestConfig(target, socksPort, opts) {
   const proxyOutbounds = grp.outbounds;
   const hosts = opts ? pinEntryHosts(proxyOutbounds, opts.entryHostIps, opts.ipv6) : null;
   // apply TLS fragment (if the config carries one) so the test matches reality
-  const outbounds = applyFragments(proxyOutbounds).concat([{ tag: 'direct', protocol: 'freedom' }]);
+  const outbounds = applyEchOutbounds(applyFragments(proxyOutbounds)).concat([{ tag: 'direct', protocol: 'freedom' }]);
   return {
     log: { loglevel: 'none' },
     ...(hosts ? { dns: { hosts } } : {}),
@@ -1630,7 +1680,7 @@ function buildMultiTestConfig(targets, ports) {
   return {
     log: { loglevel: 'none' },
     inbounds,
-    outbounds: applyFragments(grp.outbounds).concat([{ tag: 'direct', protocol: 'freedom' }]),
+    outbounds: applyEchOutbounds(applyFragments(grp.outbounds)).concat([{ tag: 'direct', protocol: 'freedom' }]),
     routing: withBalancers({ rules: [...grp.rules, ...rules] }, grp)
   };
 }
@@ -1749,8 +1799,10 @@ function bindDirectDials(outbounds, name) {
   // An ECH config fetched from DNS is fetched by the core itself, with its own
   // socket options (echSockopt), for a hop behind another hop as much as for
   // the first: bound to the NIC like any direct dial, or the query enters the
-  // tunnel that cannot come up without its answer.
+  // tunnel that cannot come up without its answer. One dialled through an
+  // ECH outbound (applyEchOutbounds) is that outbound's dial, bound above.
   for (const tls of echQueryTls(outbounds)) {
+    if (tls.echSockopt && tls.echSockopt.dialerProxy) continue;
     tls.echSockopt = Object.assign({}, tls.echSockopt, { interface: name });
   }
   return outbounds;
@@ -1818,4 +1870,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { expandGroups, groupMemberKey, buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };
+module.exports = { applyEchOutbounds, expandGroups, groupMemberKey, buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };

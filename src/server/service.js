@@ -1929,6 +1929,13 @@ function createService(opts = {}) {
           ? `This MASQUE server needs Xray ${check.need} or newer — update it under Settings → Required files`
           : `این سرور MASQUE است و به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
       }
+      // An ECH outbound on a core older than 26.10.10 and no other core new
+      // enough: a refusal like MASQUE's — updating the core is the answer.
+      if (check.echOutboundUnsupported) {
+        throw refusal(settings.lang === 'en'
+          ? `This server's ECH outbound needs Xray ${check.need} or newer — update it under Settings → Required files`
+          : `خروجی ECH این سرور به Xray نسخهٔ ≥ ${check.need} نیاز دارد — از تنظیمات ← فایل‌های موردنیاز به‌روزش کن`);
+      }
       // The fork's finalmask, refused by the official core, and no fork to
       // fall back to (xrayManager.validateWithFallback): what to install is
       // the message — the renderer offers the download on the product name.
