@@ -94,10 +94,15 @@ function mldsaKey(v) {
  *    allowInsecure in the core; see pinList.
  *  - `vcn` (verifyPeerCertByName): the name(s) to verify the certificate
  *    against instead of the SNI (a fronted server's own name).
+ *  - `echOutbound` (PattN's, not a core key): the outbound the ECH query is
+ *    dialled through — kept in tlsSettings as an object, taken out and wired
+ *    up as `echSockopt.dialerProxy` by configBuilder.applyEchOutbounds.
  */
 function tlsExtras(tls, q) {
   const ech = String(q.ech || q.echConfigList || '').trim();
   if (ech) tls.echConfigList = ech;
+  const eo = echOutboundOf(q.echOutbound);
+  if (eo) tls.echOutbound = eo;
   const pcs = pinList(q.pcs || q.pinnedPeerCertSha256 || q.pinSHA256 || '');
   if (pcs) tls.pinnedPeerCertSha256 = pcs;
   const vcn = String(q.vcn || q.verifyPeerCertByName || '').split(',').map(x => x.trim()).filter(Boolean).join(',');
@@ -229,6 +234,55 @@ function buildStreamSettings(q) {
   return stream;
 }
 
+/**
+ * An ECH outbound (PattN's `echOutbound`): an Xray outbound object, from the
+ * link's one-line JSON or the editor's text — PattN writes it with comments
+ * and trailing commas allowed, so those are read too. null for anything that
+ * is not an object naming a protocol. Its `tag` is the builder's to give.
+ */
+function echOutboundOf(raw) {
+  if (raw == null || raw === '') return null;
+  let o = raw;
+  if (typeof raw !== 'object') {
+    const s = String(raw).trim();
+    if (!s) return null;
+    try { o = JSON.parse(s); } catch {
+      try { o = JSON.parse(looseJson(s)); } catch { return null; }
+    }
+  }
+  if (!o || typeof o !== 'object' || Array.isArray(o) || typeof o.protocol !== 'string' || !o.protocol.trim()) return null;
+  return JSON.parse(JSON.stringify(o));
+}
+
+/** JSON with // and /* *\/ comments and trailing commas, as plain JSON (strings left alone). */
+function looseJson(s) {
+  let out = '', i = 0, inStr = false;
+  while (i < s.length) {
+    const c = s[i];
+    if (inStr) {
+      out += c;
+      if (c === '\\') { out += s[i + 1] || ''; i += 2; continue; }
+      if (c === '"') inStr = false;
+      i++; continue;
+    }
+    if (c === '"') { inStr = true; out += c; i++; continue; }
+    if (c === '/' && s[i + 1] === '/') { while (i < s.length && s[i] !== '\n') i++; continue; }
+    if (c === '/' && s[i + 1] === '*') { const end = s.indexOf('*/', i + 2); i = end === -1 ? s.length : end + 2; continue; }
+    out += c; i++;
+  }
+  return out.replace(/,(\s*[}\]])/g, '$1');
+}
+
+/** An ECH outbound as a share link carries it: one line, with a tag — PattN refuses one without. */
+function echOutboundShare(o) {
+  return JSON.stringify(Object.assign({ tag: 'ech-out' }, o));
+}
+
+/** An ECH outbound as the edit form shows it: indented JSON, '' for none. */
+function echOutboundText(o) {
+  return o && typeof o === 'object' ? JSON.stringify(o, null, 2) : '';
+}
+
 /** Parse a finalMask value (JSON string or object). Returns null when unusable. */
 function parseFinalMask(raw) {
   if (raw && typeof raw === 'object') return raw;
@@ -321,6 +375,7 @@ function parseVmess(link) {
     ech: v.ech || '',
     pcs: v.pcs || '',
     vcn: v.vcn || '',
+    echOutbound: v.echOutbound || '',
     cipherSuites: v.cs || v.cipherSuites || '',
     finalMask: v.fm || v.finalMask || v.finalmask || ''
   };
@@ -1203,6 +1258,10 @@ function applyServerEdits(server, f) {
     put('echConfigList', text('ech'));
     put('pinnedPeerCertSha256', f.pcs == null ? null : pinList(f.pcs));
     put('verifyPeerCertByName', f.vcn == null ? null : String(f.vcn).split(',').map(x => x.trim()).filter(Boolean).join(','));
+    if (f.echOutbound != null) {
+      const eo = echOutboundOf(f.echOutbound);
+      if (eo) tls.echOutbound = eo; else delete tls.echOutbound;
+    }
     // HTTP/2 is ALPN h2; HTTP/3 is the core's default, no ALPN at all — an
     // ALPN that already says the version asked for is left as it is
     const http = (text('masqueHttp') || '').toLowerCase();
@@ -1322,7 +1381,7 @@ function applyServerEdits(server, f) {
 
 /** What a Shadowsocks stream is rebuilt from, when one of them changed (applyServerEdits). */
 const SS_STREAM_KEYS = ['network', 'security', 'sni', 'host', 'path', 'fp', 'pbk', 'sid', 'alpn', 'allowInsecure',
-  'ech', 'pcs', 'vcn', 'pqv', 'headerType', 'grpcMode', 'xhttpMode', 'kcpHeader', 'kcpSeed', 'spx', 'cipherSuites', 'finalMask'];
+  'ech', 'echOutbound', 'pcs', 'vcn', 'pqv', 'headerType', 'grpcMode', 'xhttpMode', 'kcpHeader', 'kcpSeed', 'spx', 'cipherSuites', 'finalMask'];
 
 /** Fields of the view that follow another one (serviceName is the path) or have no input (alpn). */
 const DERIVED_FIELDS = ['serviceName', 'alpn'];
@@ -1392,7 +1451,8 @@ function editFields(s) {
     const ts = st.tlsSettings || {};
     Object.assign(v, {
       sni: ts.serverName || '', fp: ts.fingerprint || '', ech: ts.echConfigList || '', pcs: ts.pinnedPeerCertSha256 || '',
-      vcn: ts.verifyPeerCertByName || '', finalMask: st.finalmask ? JSON.stringify(st.finalmask) : ''
+      vcn: ts.verifyPeerCertByName || '', finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
+      echOutbound: echOutboundText(ts.echOutbound)
     });
   }
   if (proto === 'vless' || proto === 'vmess' || proto === 'trojan' || proto === 'shadowsocks') {
@@ -1419,6 +1479,7 @@ function editFields(s) {
       cipherSuites: (st.tlsSettings && st.tlsSettings.cipherSuites) || '',
       finalMask: st.finalmask ? JSON.stringify(st.finalmask) : '',
       ech: ts.echConfigList || '', pcs: ts.pinnedPeerCertSha256 || '', vcn: ts.verifyPeerCertByName || '',
+      echOutbound: echOutboundText(ts.echOutbound),
       pqv: rs.mldsa65Verify || ''
     });
   }
@@ -1452,6 +1513,7 @@ function hy2Values(ob) {
     sni: tls.serverName || '', insecure: tls.allowInsecure ? '1' : '',
     alpn: Array.isArray(tls.alpn) ? tls.alpn.join(',') : (tls.alpn || ''),
     ech: tls.echConfigList || '', pcs: tls.pinnedPeerCertSha256 || '', vcn: tls.verifyPeerCertByName || '',
+    echOutbound: echOutboundText(tls.echOutbound),
     obfs: sal ? 'salamander' : '', 'obfs-password': (sal && sal.settings && sal.settings.password) || '',
     mport: hop && hop.settings ? String(hop.settings.remotePorts || '') : '',
     hopInterval: hop && hop.settings && hop.settings.interval != null ? String(hop.settings.interval) : '',
@@ -1465,7 +1527,7 @@ function rebuildStream(ob, f) {
   const cur = ob.streamSettings;
   // Only rebuild if the user touched transport/security fields.
   const touched = ['network', 'security', 'sni', 'path', 'host', 'allowInsecure', 'fp', 'pbk', 'sid', 'serviceName', 'alpn', 'cipherSuites', 'finalMask',
-    'ech', 'pcs', 'vcn', 'pqv', 'headerType', 'grpcMode', 'xhttpMode', 'kcpHeader', 'kcpSeed', 'spx']
+    'ech', 'echOutbound', 'pcs', 'vcn', 'pqv', 'headerType', 'grpcMode', 'xhttpMode', 'kcpHeader', 'kcpSeed', 'spx']
     .some(k => f[k] != null && f[k] !== '');
   if (!touched) return;
 
@@ -1522,6 +1584,7 @@ function rebuildStream(ob, f) {
     finalMask: f.finalMask != null ? f.finalMask : (cur.finalmask ? JSON.stringify(cur.finalmask) : ''),
     // newer TLS / REALITY knobs: the form's value, else what the record had
     ech: f.ech != null ? f.ech : (ts.echConfigList || ''),
+    echOutbound: f.echOutbound != null ? f.echOutbound : echOutboundText(ts.echOutbound),
     pcs: f.pcs != null ? f.pcs : (ts.pinnedPeerCertSha256 || ''),
     vcn: f.vcn != null ? f.vcn : (ts.verifyPeerCertByName || ''),
     pqv: f.pqv != null ? f.pqv : (rs.mldsa65Verify || ''),
@@ -1712,6 +1775,7 @@ function streamToQuery(st) {
     if (tls.alpn) q.alpn = Array.isArray(tls.alpn) ? tls.alpn.join(',') : tls.alpn;
     if (tls.cipherSuites) q.cs = tls.cipherSuites;
     if (tls.echConfigList) q.ech = tls.echConfigList;
+    if (tls.echOutbound) q.echOutbound = echOutboundShare(tls.echOutbound);
     if (tls.pinnedPeerCertSha256) q.pcs = tls.pinnedPeerCertSha256;
     if (tls.verifyPeerCertByName) q.vcn = tls.verifyPeerCertByName;
   }
@@ -1763,6 +1827,7 @@ function buildShareLink(server) {
     if (p.type === 'xhttp' && p.extra) v.extra = p.extra;
     if (p.allowInsecure) v.insecure = '1';
     if (p.ech) v.ech = p.ech;
+    if (p.echOutbound) v.echOutbound = p.echOutbound;
     if (p.pcs) v.pcs = p.pcs;
     if (p.vcn) v.vcn = p.vcn;
     if (p.cs) v.cs = p.cs;
@@ -1791,6 +1856,7 @@ function buildShareLink(server) {
       alpn: Array.isArray(tls.alpn) ? tls.alpn.join(',') : (tls.alpn || ''),
       pinSHA256: tls.pinnedPeerCertSha256 || '',
       ech: tls.echConfigList || '',
+      echOutbound: tls.echOutbound ? echOutboundShare(tls.echOutbound) : '',
       vcn: tls.verifyPeerCertByName || '',
       obfs: salamander ? 'salamander' : '',
       'obfs-password': salamander && salamander.settings ? salamander.settings.password || '' : '',
