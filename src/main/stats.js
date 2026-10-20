@@ -112,7 +112,7 @@ class StatsPoller {
    */
   constructor(opts) {
     this.binPath = opts.binPath;
-    this.apiPort = opts.apiPort || 10085;
+    this.apiPort = opts.apiPort || 30085;
     // a raw JSON config's dialers (configBuilder.dialerTagsOf), set per connect; null: none
     this.skipTags = null;
     // the running config's groups (configBuilder's groupTags), set per connect; null: none

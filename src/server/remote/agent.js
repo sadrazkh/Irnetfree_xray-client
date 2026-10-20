@@ -227,7 +227,7 @@ function createRemoteAgent(o) {
     try {
       let socket;
       if (useVpn) {
-        const socksPort = Number(typeof service.getSettings === 'function' && service.getSettings().socksPort) || 10808;
+        const socksPort = Number(typeof service.getSettings === 'function' && service.getSettings().socksPort) || 30808;
         log(`remote: dialing ${host}:${port} through the tunnel (SOCKS 127.0.0.1:${socksPort})`);
         socket = await netImpl.socks({ proxyPort: socksPort, host, port });
       } else {

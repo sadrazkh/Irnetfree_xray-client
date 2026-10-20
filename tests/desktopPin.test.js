@@ -80,7 +80,8 @@ test('desktop xray configs are byte-identical to v1.16.1 — no timeoutMs, paral
 });
 
 test('the desktop sing-box core config and the DNS plan are byte-identical to v1.16.1', () => {
-  assert.equal(sha(buildSingboxConfig(VLESS_WS_TLS, Object.assign({ routingMode: 'bypass-ir' }, MANAGED))), PINNED.singbox);
+  // v1.16.1's ports, given: the default ones moved to the 30000s since (settingsMigrate.js)
+  assert.equal(sha(buildSingboxConfig(VLESS_WS_TLS, Object.assign({ routingMode: 'bypass-ir', socksPort: 10808, httpPort: 10809 }, MANAGED))), PINNED.singbox);
   assert.equal(sha(buildDnsPlan(Object.assign({ routingMode: 'bypass-ir' }, MANAGED), { geoAssets: true })), PINNED.dnsPlan);
 });
 

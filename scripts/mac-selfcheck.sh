@@ -336,7 +336,7 @@ else
     # ------------------------------------------------------------------------
     # THE SHAPE BELOW IS A LITERAL COPY of what buildTunConfig() produces in
     #   src/main/tunSingbox.js
-    # for macOS: socksPort 10808 (the app default — `check` validates the shape,
+    # for macOS: socksPort 10808 (the app default until v1.30.1 — `check` validates the shape,
     # not the port), no exclusions, ipv6 off, strict off.
     #
     # Keep these in sync with the constants at the top of that file:
