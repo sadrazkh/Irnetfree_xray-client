@@ -50,14 +50,28 @@ object ConfigBuilder {
      * Only a non-chain target's outbound, and only one that can carry it
      * (Mux.eligible); a chain's hops never. Empty: the config of before, byte
      * for byte.
+     *
+     * `groupSkip`: the group members the app has set aside for not answering
+     * (GroupEvict.Evictor.skip — GroupEvict.memberKey each), left out of their
+     * group unless that would leave it empty. `metricsPort`: when the config
+     * runs a group, the core's metrics listener on 127.0.0.1 at this port —
+     * where the app reads the groups' health check (GroupEvict.readVars); 0,
+     * or no group: none.
      */
-    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet()): JSONObject {
+    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0): JSONObject =
+        buildWithGroups(plan, s, geoAssets, wgEndpointIps, inboundAuth, lan, muxIds, groupSkip, metricsPort).config
+
+    /** A config, and the groups it runs ([GroupEvict.Group] — member i of group T is `T~gm<i>`; empty: none). */
+    class Built(val config: JSONObject, val groups: List<GroupEvict.Group>)
+
+    /** [build], with the groups the config runs beside it (configBuilder.js `groupTags`). */
+    fun buildWithGroups(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0): Built {
         val listen = "127.0.0.1"
         val sniffing = sniffingFor(s)
         val share = lan?.takeIf { it.enabled }
 
-        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds)
-        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds)
+        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort)
+        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort)
 
         val outbounds = JSONArray()
         // Every target the plan routes to, with its outbound tag — the resolver a
@@ -100,7 +114,8 @@ object ConfigBuilder {
         val inbounds = standardInbounds(s, listen, sniffing, inboundAuth)
         val lanTags = addLanInbounds(inbounds, share, sniffing, setOf(s.socksPort, s.httpPort))
         return assemble(s, inbounds, outbounds, rules,
-            geoAssets, catchAllTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags)
+            geoAssets, catchAllTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
+            groupSkip = groupSkip, metricsPort = metricsPort)
     }
 
     /**
@@ -139,7 +154,7 @@ object ConfigBuilder {
      * target is gone is left out — its traffic follows the default, as on the
      * desktop; Android used to send it `direct` without a word.
      */
-    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s0: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>): JSONObject {
+    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s0: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int): Built {
         // the profile's own "routing mode under these rules"; a plan without one uses the settings'
         val um = plan.useMode
         val s = if (um != null && um != s0.advancedUseMode) s0.copy(advancedUseMode = um) else s0
@@ -216,12 +231,13 @@ object ConfigBuilder {
         val inbounds = standardInbounds(s, listen, sniffing, auth)
         val lanTags = addLanInbounds(inbounds, lan, sniffing, setOf(s.socksPort, s.httpPort))
         return assemble(s, inbounds, JSONArray(reg.outs), rules,
-            geo, exitTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags)
+            geo, exitTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
+            groupSkip = groupSkip, metricsPort = metricsPort)
     }
 
     /* ----------------------------- pool ----------------------------- */
 
-    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>): JSONObject {
+    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int): Built {
         val reg = Registry(plan.serversById, plan.chainsById, muxIds)
         val inbounds = JSONArray()
         // apiPort stays reserved although this config no longer opens the
@@ -276,7 +292,7 @@ object ConfigBuilder {
         // entry's hostname connections would wait on the PRIMARY's DoH — a dead
         // primary costing the other entries ~8 s per new name.
         return assemble(s, inbounds, JSONArray(reg.outs), rules, geo, primaryTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
-            domainStrategy = "IPIfNonMatch")
+            domainStrategy = "IPIfNonMatch", groupSkip = groupSkip, metricsPort = metricsPort)
     }
 
     /* ----------------------------- chain / registry ----------------------------- */
@@ -347,23 +363,29 @@ object ConfigBuilder {
      * now and then on both cores (the desktop's probe-group.js, 2026-10-19),
      * while a loopback as a route's target never did. Only a WireGuard does
      * ([buildChainOutbounds]), its UDP never ending with a response. The
-     * variants take the first group's strategy.
+     * variants take the first group's strategy, id and name; each is known by
+     * the hops it takes from the group(s) (`at`). A group's fallback is not
+     * carried into its chain variants: they fall back to the first.
      */
     private fun groupOfChains(list: List<ServerConfig>, exitTag: String, viaTag: String?): JSONObject {
         var variants: List<List<ServerConfig>> = listOf(emptyList())
         for (s in list) {
-            val opts: List<ServerConfig> = if (Groups.isGroupRecord(s)) Groups.serversOf(s) else listOf(s)
+            val opts: List<ServerConfig> = if (Groups.isGroupRecord(s)) Groups.membersOf(s.outbound.optJSONObject(Groups.MARK)) else listOf(s)
             variants = variants.flatMap { v: List<ServerConfig> -> opts.map { o: ServerConfig -> v + o } }.take(MAX_CHAIN_VARIANTS)
         }
         val first = list.first { s: ServerConfig -> Groups.isGroupRecord(s) }
+        val firstMark = first.outbound.optJSONObject(Groups.MARK)
+        val at = JSONArray(list.indices.filter { i: Int -> Groups.isGroupRecord(list[i]) })
         val members = JSONArray()
         for (v in variants) {
             val chain = JSONArray()
             for (hop in v) chain.put(JSONObject(hop.toJson().toString()))
-            members.put(JSONObject().put("chain", chain))
+            members.put(JSONObject().put("chain", chain).put("at", at))
         }
+        val mark = JSONObject().put("id", firstMark?.optString("id", "") ?: "").put("name", firstMark?.optString("name", "") ?: "")
+            .put("strategy", Groups.strategyOf(firstMark)).put("members", members)
         val o = JSONObject().put("tag", exitTag).put("protocol", "loopback").put("settings", JSONObject())
-            .put(Groups.MARK, JSONObject().put("strategy", Groups.strategyOf(first.outbound.optJSONObject(Groups.MARK))).put("members", members))
+            .put(Groups.MARK, mark)
         if (viaTag != null) o.put("streamSettings", JSONObject().put("sockopt", JSONObject().put("dialerProxy", viaTag)))
         return o
     }
@@ -765,9 +787,11 @@ object ConfigBuilder {
         fieldRule().put("inboundTag", JSONArray(tags)).put("ip", JSONArray(LOOPBACK)).put("outboundTag", "block"),
         fieldRule().put("inboundTag", JSONArray(tags)).put("domain", JSONArray().put("domain:localhost")).put("outboundTag", "block"))
 
-    // No metrics listener (the desktop's GET /debug/vars on apiPort): nothing on
-    // Android reads it — the traffic figures come from hev — and it answered any
-    // app on 127.0.0.1 with this tunnel's outbound tags and byte counts.
+    // No metrics listener (the desktop's GET /debug/vars on apiPort) for the
+    // traffic figures — they come from hev — since it answers any app on
+    // 127.0.0.1 with this tunnel's outbound tags and byte counts. Only a config
+    // that runs a group opens one ([assemble]'s metricsPort, a port picked free
+    // at connect): the groups' health check is read there (GroupEvict).
 
     /**
      * What a WireGuard peer in the CONFIG may carry: everything. `allowedIPs` is
@@ -816,13 +840,17 @@ object ConfigBuilder {
         if (pins.isNotEmpty()) tls.put("pinnedPeerCertSha256", pins.joinToString(",")) else tls.remove("pinnedPeerCertSha256")
     }
 
-    /** [domainStrategy]: the router's; null = IPOnDemand under managed DNS, IPIfNonMatch without it (a pool always sets its own). */
+    /**
+     * [domainStrategy]: the router's; null = IPOnDemand under managed DNS, IPIfNonMatch without it (a pool always sets its own).
+     * [groupSkip], [metricsPort]: as in [build].
+     */
     private fun assemble(
         s: AppSettings, inbounds: JSONArray, outboundsIn: JSONArray, rules: JSONArray,
         geoAssets: Boolean, exitTag: String, dnsSettings: AppSettings,
         targetResolvers: List<DnsPlan.TargetResolver>, wgEndpointIps: Map<String, String>,
-        lanTags: List<String> = emptyList(), domainStrategy: String? = null
-    ): JSONObject {
+        lanTags: List<String> = emptyList(), domainStrategy: String? = null,
+        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0
+    ): Built {
         // Name resolution (see DnsPlan.kt). Its rules go FIRST: the port-53 hijack
         // must beat the private-IP bypass, or a query to the tunnel resolver would
         // be sent "direct" into nowhere instead of being answered. Only LAN
@@ -832,8 +860,9 @@ object ConfigBuilder {
         // Groups (Groups.kt): their members, balancers, rules and health check —
         // expanded here, before every pass below, so the members get them all
         // (configBuilder.js expandGroups). A group's rule comes FIRST of all:
-        // what loops back must meet its balancer before any other rule.
-        val grp = expandGroups(outboundsIn)
+        // what loops back must meet its balancer before any other rule. A
+        // member the app has set aside for not answering stays out (GroupEvict).
+        val grp = expandGroups(outboundsIn, groupSkip)
         val allRules = JSONArray()
         grp.rules.forEach { r: JSONObject -> allRules.put(r) }
         lanGuardRules(lanTags).forEach { allRules.put(it) }
@@ -874,7 +903,10 @@ object ConfigBuilder {
             .put("routing", routing)
         // one health check for every group's members; none without a group
         grp.observatory?.let { ob: JSONObject -> config.put("observatory", ob) }
-        return config
+        // ...and where the app reads it (GET /debug/vars): only with a group, on loopback
+        if (grp.balancers.length() > 0 && metricsPort in 1..65535)
+            config.put("metrics", JSONObject().put("tag", "metrics").put("listen", "127.0.0.1:$metricsPort"))
+        return Built(config, grp.map)
     }
 
     /* ----------------------------- groups ----------------------------- */
@@ -883,8 +915,12 @@ object ConfigBuilder {
     private const val GROUP_PROBE_URL = "http://cp.cloudflare.com/"
     private const val GROUP_PROBE_INTERVAL = "30s"
 
-    /** What [expandGroups] made of an outbound list. [observatory]: null when there is no group. */
-    class GroupParts(val outbounds: JSONArray, val rules: List<JSONObject>, val balancers: JSONArray, val observatory: JSONObject?)
+    /**
+     * What [expandGroups] made of an outbound list. [observatory]: null when
+     * there is no group. [map]: each group in the config — who `T~gm<i>` is,
+     * and which members the app could test on its own (GroupEvict.Group).
+     */
+    class GroupParts(val outbounds: JSONArray, val rules: List<JSONObject>, val balancers: JSONArray, val observatory: JSONObject?, val map: List<GroupEvict.Group> = emptyList())
 
     /**
      * Groups (Groups.kt): every outbound a group record became — a `loopback`
@@ -897,22 +933,28 @@ object ConfigBuilder {
      *    outside the balancer's prefix; a chain variant ([groupOfChains]) has
      *    its exit as `T~gm<i>` and its hops `T~gh<i>-h<j>`, its first hop
      *    dialling T's via;
+     *  - its fallback, when the group names one (Groups.fallbackOf), as `T~fb`
+     *    (its helpers `T~fh~<tag>`), dialling like a member — outside the
+     *    prefix, so never probed and never picked while a member answers;
      *  - T itself: `{ protocol: loopback, settings: { inboundTag: 'T~in' } }` —
      *    what is routed to T comes back in on T~in;
-     *  - the balancer `T~bal` over the `T~gm` prefix, its fallback the first
-     *    member: Xray's roundRobin and random leave out a member the health
-     *    check found dead only when a fallback is set;
+     *  - the balancer `T~bal` over the `T~gm` prefix, its fallback `T~fb` or
+     *    else the first member: Xray's roundRobin and random leave out a member
+     *    the health check found dead only when a fallback is set;
      *  - the rule T~in → T~bal, which the caller puts FIRST in routing: what
      *    loops back must meet its balancer before any other rule — a hop to a
      *    bridge in Iran, say, before `geoip:ir → direct`;
      *  - one observatory over every group's members.
+     * [skip]: the member keys (GroupEvict.memberKey) the app has set aside —
+     * left out, unless that would leave the group empty.
      * Without a group: the very same list, no rule, no balancer, no observatory.
      */
-    internal fun expandGroups(outbounds: JSONArray): GroupParts {
+    internal fun expandGroups(outbounds: JSONArray, skip: Set<String> = emptySet()): GroupParts {
         val out = JSONArray()
         val rules = ArrayList<JSONObject>()
         val balancers = JSONArray()
         val subjects = JSONArray()
+        val map = ArrayList<GroupEvict.Group>()
         for (i in 0 until outbounds.length()) {
             val o = outbounds.optJSONObject(i) ?: continue
             val mark: JSONObject? = if (o.optString("protocol") == "loopback") o.optJSONObject(Groups.MARK) else null
@@ -921,8 +963,11 @@ object ConfigBuilder {
             val via = o.optJSONObject("streamSettings")?.optJSONObject("sockopt")?.let { so: JSONObject ->
                 if (so.isNull("dialerProxy")) "" else so.opt("dialerProxy").toString()
             } ?: ""
+            val gid = if (mark.isNull("id")) "" else mark.optString("id", "")
             out.put(JSONObject().put("tag", t).put("protocol", "loopback").put("settings", JSONObject().put("inboundTag", "$t~in")))
-            val members = Groups.entriesOf(mark)
+            val all = Groups.entriesOf(mark)
+            val kept = if (skip.isEmpty()) all else all.filter { m: Groups.Member -> GroupEvict.memberKey(gid, whoOf(m)) !in skip }
+            val members = if (kept.isNotEmpty()) kept else all
             for ((idx, m) in members.withIndex()) {
                 val tag = "$t~gm$idx"
                 // a chain variant (groupOfChains): its exit is the member, its hops `T~gh<i>-h<j>`,
@@ -941,16 +986,50 @@ object ConfigBuilder {
                 for (x in withHelpers(cloneOut(srv.outbound, tag, srv), srv, "$t~gh$idx")) out.put(x)
             }
             if (members.isEmpty()) continue
+            // Where the group's traffic goes when no member answers: its own fallback
+            // (a WARP, say) as `T~fb`, outside the members' prefix — never probed, never
+            // picked while a member answers — else the first member. Not for a group
+            // of chain variants (each would need its own chain).
+            var fallbackTag = "$t~gm0"
+            val fb: ServerConfig? = if (members.any { m: Groups.Member -> m.chain != null }) null else Groups.fallbackOf(mark)
+            if (fb != null) {
+                fallbackTag = "$t~fb"
+                if (via.isNotEmpty()) {
+                    out.put(throughBase(fb, fallbackTag, via))
+                } else {
+                    for (x in withHelpers(cloneOut(fb.outbound, fallbackTag, fb), fb, "$t~fh")) out.put(x)
+                }
+            }
+            val strategy = Groups.strategyOf(mark)
             balancers.put(JSONObject().put("tag", "$t~bal").put("selector", JSONArray().put("$t~gm"))
-                .put("strategy", JSONObject().put("type", Groups.strategyOf(mark)))
-                .put("fallbackTag", "$t~gm0"))
+                .put("strategy", JSONObject().put("type", strategy))
+                .put("fallbackTag", fallbackTag))
             rules.add(fieldRule().put("inboundTag", JSONArray().put("$t~in")).put("balancerTag", "$t~bal"))
             subjects.put("$t~gm")
+            // who `T~gm<i>` is, and whether the app can test it as the core dials it:
+            // not through a hop, not a chain variant
+            val name = if (mark.isNull("name")) "" else mark.optString("name", "")
+            map.add(GroupEvict.Group(t, gid, name, strategy, via.isEmpty(),
+                members.map { m: Groups.Member -> whoOf(m).copy(direct = via.isEmpty() && m.chain == null) },
+                if (fb == null) null else GroupEvict.Fallback(fb.id, fb.name)))
         }
         val observatory = if (subjects.length() == 0) null else JSONObject()
             .put("subjectSelector", subjects).put("probeUrl", GROUP_PROBE_URL)
             .put("probeInterval", GROUP_PROBE_INTERVAL).put("enableConcurrency", true)
-        return GroupParts(out, rules, balancers, observatory)
+        return GroupParts(out, rules, balancers, observatory, map)
+    }
+
+    /**
+     * A group member as the live map names it (configBuilder.js expandGroups'
+     * `who`): the server dialled — a chain variant by the hop(s) it takes from
+     * the group(s), their names joined.
+     */
+    private fun whoOf(m: Groups.Member): GroupEvict.Member {
+        val chain = m.chain
+        val recs: List<ServerConfig> = if (chain != null) m.at.mapNotNull { k: Int -> chain.getOrNull(k) } else listOfNotNull(m.server)
+        val r = recs.firstOrNull()
+        val name = recs.map { s: ServerConfig -> s.name }.filter { n: String -> n.isNotEmpty() }.joinToString(" + ")
+        return GroupEvict.Member(r?.id ?: "", name, r?.address ?: "", r?.port ?: 0)
     }
 
     /**
