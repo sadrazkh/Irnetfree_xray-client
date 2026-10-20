@@ -33,6 +33,8 @@ import com.irnetfree.vpn.core.RoutingProfile
 import com.irnetfree.vpn.core.SettingsApply
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.TrustedDns
+import com.irnetfree.vpn.core.t
+import com.irnetfree.vpn.core.tf
 import com.irnetfree.vpn.net.Diagnostics
 import com.irnetfree.vpn.core.Store
 import com.irnetfree.vpn.ui.MainActivity
@@ -234,7 +236,7 @@ class XrayVpnService : VpnService() {
                     // connect or a disconnect meanwhile moves the generation on
                     // and this attempt is dropped.
                     val msg = "IRNetFree stopped unexpectedly again — it reconnects by itself in ${wait / 1000} s"
-                    goForeground(msg, action = "Stop")
+                    goForeground(tf("notif.restartIn", "s" to wait / 1000), action = "Stop")
                     VpnState.set(ConnState.ERROR, error = msg)
                     // Counted in elapsed real time, deep sleep included, and looked
                     // at every few seconds (StickyRestart.tick): a postDelayed of
@@ -664,7 +666,7 @@ class XrayVpnService : VpnService() {
             if (running !== l) return@launch
             if (ms < 0) {
                 VpnState.addLog("✗ Self-check: the core could NOT reach the internet — the server/config is the problem (not the tunnel).")
-                VpnState.setHealth(false, "Server unreachable — try another config")
+                VpnState.setHealth(false, t("health.unreachable"))
                 markMuxRecheck(l, "the connection carried nothing")
                 return@launch
             }
@@ -672,7 +674,7 @@ class XrayVpnService : VpnService() {
             if (running !== l) return@launch
             val where = ip?.takeIf { it.ok }?.let { " · exit ${it.ip} ${it.country}" } ?: ""
             VpnState.addLog("✓ Self-check: core reaches the internet (${ms}ms)$where")
-            VpnState.setHealth(true, "Working${if (where.isBlank()) "" else " ·"} ${ip?.takeIf { it.ok }?.let { "${it.country} ${it.ip}" } ?: "${ms}ms"}")
+            VpnState.setHealth(true, t("health.working") + "${if (where.isBlank()) "" else " ·"} ${ip?.takeIf { it.ok }?.let { "${it.country} ${it.ip}" } ?: "${ms}ms"}")
             delay(12_000)
             if (!tunnelRunning || running !== l) return@launch
             val st = runCatching { TProxyService.TProxyGetStats() }.getOrNull()
@@ -680,8 +682,8 @@ class XrayVpnService : VpnService() {
             val rx = if (st != null && st.size >= 4) st[3] else -1
             when {
                 tx < 0 -> VpnState.addLog("? Tunnel stats unavailable (tun2socks may not be running).")
-                tx == 0L -> { VpnState.addLog("✗ Tunnel: no packets entered the TUN in 12s — other apps aren't being routed into the VPN."); VpnState.setHealth(false, "Apps aren't reaching the tunnel") }
-                rx == 0L -> { VpnState.addLog("✗ Tunnel: sent $tx B but received 0 — packets enter the TUN but nothing returns."); VpnState.setHealth(false, "Tunnel stalled — no data returning"); markMuxRecheck(l, "the connection stalled") }
+                tx == 0L -> { VpnState.addLog("✗ Tunnel: no packets entered the TUN in 12s — other apps aren't being routed into the VPN."); VpnState.setHealth(false, t("health.noApps")) }
+                rx == 0L -> { VpnState.addLog("✗ Tunnel: sent $tx B but received 0 — packets enter the TUN but nothing returns."); VpnState.setHealth(false, t("health.stalled")); markMuxRecheck(l, "the connection stalled") }
                 else -> VpnState.addLog("✓ Tunnel carrying traffic (↑$tx B ↓$rx B).")
             }
         }
@@ -1137,11 +1139,11 @@ class XrayVpnService : VpnService() {
     private fun notifyError(msg: String) {
         runCatching {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "VPN status", NotificationManager.IMPORTANCE_LOW))
+            nm.createNotificationChannel(NotificationChannel(CHANNEL, t("notif.channel"), NotificationManager.IMPORTANCE_LOW))
             val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             nm.notify(NOTIF_ERR_ID, Notification.Builder(this, CHANNEL)
-                .setContentTitle("IRNetFree • Not connected")
+                .setContentTitle("IRNetFree • " + t("state.notConnected"))
                 .setContentText(msg)
                 .setStyle(Notification.BigTextStyle().bigText(msg))
                 .setSmallIcon(com.irnetfree.vpn.R.drawable.ic_stat_vpn)
@@ -1158,21 +1160,23 @@ class XrayVpnService : VpnService() {
     private fun buildNotification(text: String, connected: Boolean, action: String? = if (connected) "Disconnect" else null): Notification {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "VPN status", NotificationManager.IMPORTANCE_LOW))
+            nm.createNotificationChannel(NotificationChannel(CHANNEL, t("notif.channel"), NotificationManager.IMPORTANCE_LOW))
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val disconnect = PendingIntent.getService(this, 1,
             Intent(this, XrayVpnService::class.java).setAction(ACTION_DISCONNECT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val b = Notification.Builder(this, CHANNEL)
-            .setContentTitle("IRNetFree" + if (connected) " • Connected" else "")
+            .setContentTitle("IRNetFree" + if (connected) " • " + t("state.connected") else "")
             .setContentText(text)
             .setSmallIcon(com.irnetfree.vpn.R.drawable.ic_stat_vpn)
             .setOngoing(true)
             .setContentIntent(open)
         if (action != null) {
             val icon = android.graphics.drawable.Icon.createWithResource(this, com.irnetfree.vpn.R.drawable.ic_stat_vpn)
-            b.addAction(Notification.Action.Builder(icon, action, disconnect).build())
+            // the action is kept by its English name (shown.action); the button says it in the app's language
+            val word = when (action) { "Disconnect" -> t("notif.disconnect"); "Cancel" -> t("notif.cancel"); "Stop" -> t("notif.stop"); else -> action }
+            b.addAction(Notification.Action.Builder(icon, word, disconnect).build())
         }
         return b.build()
     }

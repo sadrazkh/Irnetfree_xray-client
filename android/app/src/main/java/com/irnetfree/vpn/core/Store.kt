@@ -30,7 +30,7 @@ class Store(context: Context) {
     // The selection is checked on every start as well: one saved before ids
     // were stable, or naming a server removed while the app was not running,
     // comes back as the choice before it (or the first server), not as "—".
-    init { migrateServers(); migrateProfiles(); repairSelection() }
+    init { migrateServers(); migrateProfiles(); repairSelection(); I18n.setLang(settings.lang) }
 
     /**
      * The routing profiles at start (RoutingProfiles.migrate): the first start
@@ -90,6 +90,7 @@ class Store(context: Context) {
     fun saveSettings(sNew: AppSettings) {
         val s = RoutingProfiles.mirrorToSettings(profiles, sNew)
         settings = s; prefs.edit().putString("settings", s.toJson().toString()).apply()
+        I18n.setLang(s.lang)   // the app's language: every screen redraws in it at once
     }
 
     /** Write the routing profiles, and `rp-default` into the settings keys (an older app and an old backup read those). */

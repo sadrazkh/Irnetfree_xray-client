@@ -1,15 +1,22 @@
 package com.irnetfree.vpn.ui
 
+import com.irnetfree.vpn.core.I18n
 import com.irnetfree.vpn.core.ServerConfig
 import com.irnetfree.vpn.core.Subscription
 import org.json.JSONObject
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /** The Servers list as collapsible groups (ServerGroups). */
 class ServerGroupsTest {
+    // the titles and the line under a header are words of the app's: read here in English
+    @Before fun english() { I18n.setLang(I18n.EN) }
+    @After fun backToTheDefault() { I18n.setLang(I18n.FA) }
+
     private fun srv(id: String, name: String, subId: String? = null, address: String = "$id.example") =
         ServerConfig(id, name, "vless", address, 443, JSONObject(), subId = subId)
 
@@ -106,6 +113,13 @@ class ServerGroupsTest {
         assertEquals("g:sub:w", shut[ServerGroups.scrollTarget(shut, "w1")].key)
         assertEquals(-1, ServerGroups.scrollTarget(open, ""))
         assertEquals(-1, ServerGroups.scrollTarget(open, "chain:c1"))
+    }
+
+    @Test fun inPersianTheGroupsSayItInPersian() {
+        I18n.setLang(I18n.FA)
+        val g = ServerGroups.build(servers, listOf(panel, work, empty), "", emptySet(), "")
+        assertEquals(listOf("کانفیگ‌های دستی", "Panel", "Work", "ساب", "ساب حذف‌شده"), g.map { it.title })
+        assertEquals("هرگز به‌روز نشده", ServerGroups.summary(empty, 1_800_000_000_000L).text)
     }
 
     @Test fun foldedKeysOfDeletedSubscriptionsAreForgotten() {

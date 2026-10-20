@@ -150,18 +150,23 @@ class MainActivity : ComponentActivity() {
 private fun AppTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = darkColorScheme(primary = PRIMARY, secondary = PRIMARY, background = BG, surface = CARD,
         onPrimary = ON_PRIMARY, onBackground = TXT, onSurface = TXT, surfaceVariant = CARD2, outline = STROKE)) {
-        Surface(Modifier.fillMaxSize(), color = BG) { content() }
+        // Persian reads right to left: the whole app is laid out that way, and a
+        // language switch (I18n.rtl is a Compose state) turns it at once.
+        CompositionLocalProvider(LocalLayoutDirection provides (if (I18n.rtl) LayoutDirection.Rtl else LayoutDirection.Ltr)) {
+            Surface(Modifier.fillMaxSize(), color = BG) { content() }
+        }
     }
 }
 
 @Composable
 private fun CrashScreen(text: String, onClear: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(16.dp)) {
-        Text("App error (please send me this text)", color = BAD, fontWeight = FontWeight.Bold)
+        Text(t("crash.title"), color = BAD, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
-        SelectionContainer { Text(text, color = TXT, fontSize = 11.sp, modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) }
+        // a stack trace reads left to right in either language
+        LtrBlock { SelectionContainer { Text(text, color = TXT, fontSize = 11.sp, modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) } }
         Spacer(Modifier.height(8.dp))
-        Button(onClick = onClear, modifier = Modifier.fillMaxWidth()) { Text("Clear & retry") }
+        Button(onClick = onClear, modifier = Modifier.fillMaxWidth()) { Text(t("crash.retry")) }
     }
 }
 
@@ -169,11 +174,11 @@ private fun CrashScreen(text: String, onClear: () -> Unit) {
 // A phone carries four; the desktop's Chain, Proxy Pool, Routing, Logs and
 // Settings live behind More (the design doc: "8 sidebar sections, a phone can
 // carry 4").
-private enum class Tab(val label: String, val icon: ImageVector) {
-    HOME("CONNECT", Icons.Filled.PowerSettingsNew),
-    SERVERS("SERVERS", Icons.Filled.Dns),
-    SUBS("SUBS", Icons.Filled.CloudDownload),
-    MORE("MORE", Icons.Filled.Menu)
+private enum class Tab(val labelKey: String, val icon: ImageVector) {
+    HOME("nav.home", Icons.Filled.PowerSettingsNew),
+    SERVERS("nav.servers", Icons.Filled.Dns),
+    SUBS("nav.subs", Icons.Filled.CloudDownload),
+    MORE("nav.more", Icons.Filled.Menu)
 }
 
 @Composable
@@ -211,7 +216,7 @@ private fun App(store: Store) {
                 Tab.values().forEach { tb ->
                     NavigationBarItem(selected = tab == tb, onClick = { tab = tb; more = null },
                         icon = { Icon(tb.icon, null, Modifier.size(20.dp)) },
-                        label = { Text(tb.label, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em) },
+                        label = { Text(t(tb.labelKey), fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em) },
                         colors = NavigationBarItemDefaults.colors(selectedIconColor = PRIMARY, selectedTextColor = PRIMARY,
                             indicatorColor = PRIMARY_TINT, unselectedIconColor = MUTED2, unselectedTextColor = MUTED2))
                 }
@@ -275,12 +280,12 @@ private fun App(store: Store) {
         if (plan.isFailure) {
             val why = plan.exceptionOrNull()?.message ?: "nothing to connect to"
             VpnState.addLog("Connect on open: $why")
-            AppWork.snack("Connect on open skipped: $why")
+            AppWork.snack(tf("auto.skipped", "why" to why))
             return@LaunchedEffect
         }
         if (VpnService.prepare(ctx) != null) {
             VpnState.addLog("Connect on open: Android has not been given VPN permission yet — connect once by hand and it will be automatic after that.")
-            AppWork.snack("Connect on open needs one connect by hand first (Android’s VPN permission)")
+            AppWork.snack(t("auto.needsHand"))
             return@LaunchedEffect
         }
         // Let the first frame land before a foreground service and a core
@@ -294,6 +299,10 @@ private fun App(store: Store) {
         doConnect(ctx, store)
     }
 }
+
+/** Store.selectionLabel on screen: the pool's row in the app's language, any other selection by its name. */
+private fun selectionWord(store: Store): String =
+    if (store.selection == Store.POOL_ID) "🧩 " + tf("pick.pool", "n" to store.poolEnabledValid().size) else store.selectionLabel()
 
 /** Survives recomposition; dies with the process. [manual]: a connect, cancel or disconnect was made by hand. */
 private object AutoConnectOnce { @Volatile var done = false; @Volatile var manual = false }
@@ -387,8 +396,8 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         if (state == ConnState.CONNECTED) { AppWork.disconnect(ctx); return }
         // Nothing to connect to: say how to get something, instead of an error.
         if (!store.selectionResolves()) {
-            if (store.servers.isEmpty()) { homeSheet = "import"; AppWork.snack("Add a server first — a link, a QR code or a subscription") }
-            else { pickerOpen = true; AppWork.snack("Pick a server to connect to") }
+            if (store.servers.isEmpty()) { homeSheet = "import"; AppWork.snack(t("home.addFirst")) }
+            else { pickerOpen = true; AppWork.snack(t("home.pickFirst")) }
             return
         }
         withConsent("connect")
@@ -411,7 +420,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         val srv = selectedServer()
         if (srv == null) {
             // a group has no one address to knock on (the desktop's ping:tcp says the same)
-            AppWork.snack(if (selectedViaGroup()) "A group has no one address to ping — test it under More → Chains & groups" else "Nothing to ping — select a server first")
+            AppWork.snack(if (selectedViaGroup()) t("home.groupNoPing") else t("home.nothingToPing"))
             return
         }
         if (pinging) return
@@ -430,7 +439,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             val ms = withContext(Dispatchers.IO) { Diagnostics.tcpPing(srv.address, srv.port) }
             AppWork.putPing(srv.id, ms)
             pinging = false
-            if (ms < 0) AppWork.snack("${srv.name}: no answer on port ${srv.port}")
+            if (ms < 0) AppWork.snack(tf("home.noAnswer", "name" to srv.name, "port" to srv.port))
         }
     }
     // The last TCP ping of the selected server (a chain: its first hop), from
@@ -467,7 +476,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         /* ---- header: brand (and the version under it), mode, uptime ---- */
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column {
+            LtrBlock { Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(18.dp).clip(RoundedCornerShape(5.dp)).background(PRIMARY))
                     Spacer(Modifier.width(8.dp))
@@ -479,15 +488,15 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                     "v$version", color = MUTED2, fontSize = 9.sp, fontFamily = MONO,
                     modifier = Modifier.padding(start = 26.dp)
                 )
-            }
+            } }
             Spacer(Modifier.weight(1f))
             Text(
-                if (settings.advancedMode) "ADVANCED" else "SIMPLE",
+                if (settings.advancedMode) t("mode.advancedBadge") else t("mode.simpleBadge"),
                 color = MUTED, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em,
                 modifier = Modifier.clip(RoundedCornerShape(50)).border(1.dp, STROKE, RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 4.dp)
             )
             if (connectedSince > 0) { Spacer(Modifier.width(8.dp)); Text(fmtDuration(elapsed), color = MUTED, fontSize = 10.sp, fontFamily = MONO) }
-            IconButton(onClick = { homeSheet = "import" }) { Icon(Icons.Filled.AddCircle, "add config", tint = PRIMARY) }
+            IconButton(onClick = { homeSheet = "import" }) { Icon(Icons.Filled.AddCircle, t("home.addConfig"), tint = PRIMARY) }
         }
         HorizontalDivider(color = STROKE)
 
@@ -504,12 +513,12 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     when {
-                        busy && cancelAsked -> "Cancelling…"
-                        state == ConnState.CONNECTED -> "Connected"
-                        state == ConnState.CONNECTING -> "Connecting…"
-                        autoPhase.isNotEmpty() -> "Finding the fastest…"
-                        state == ConnState.ERROR -> "Not connected"
-                        else -> "Not protected"
+                        busy && cancelAsked -> t("state.cancelling")
+                        state == ConnState.CONNECTED -> t("state.connected")
+                        state == ConnState.CONNECTING -> t("state.connecting")
+                        autoPhase.isNotEmpty() -> t("home.findingFastest")
+                        state == ConnState.ERROR -> t("state.notConnected")
+                        else -> t("state.notProtected")
                     },
                     color = TXT, fontSize = 19.sp, fontWeight = FontWeight.SemiBold
                 )
@@ -517,13 +526,13 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 Text(
                     when {
                         // ⚡ says what it is measuring, even over a tunnel still up
-                        autoPhase.isNotEmpty() -> "$autoPhase · tap the ring to cancel"
+                        autoPhase.isNotEmpty() -> tf("home.phaseCancel", "phase" to autoPhase)
                         // the server carrying traffic; picking another one only
                         // changes what the NEXT connect uses
-                        state == ConnState.CONNECTED -> connectedLabel.ifBlank { store.selectionLabel() }
-                        state == ConnState.CONNECTING -> "starting the core and the tunnel · tap the ring to cancel"
-                        state == ConnState.ERROR -> err.ifBlank { "see More → Logs" }
-                        else -> "tap the ring to connect"
+                        state == ConnState.CONNECTED -> connectedLabel.ifBlank { selectionWord(store) }
+                        state == ConnState.CONNECTING -> t("home.starting")
+                        state == ConnState.ERROR -> err.ifBlank { t("home.seeLogs") }
+                        else -> t("home.tapToConnect")
                     },
                     color = if (state == ConnState.ERROR && !busy) BAD else MUTED,
                     fontSize = 11.sp, fontFamily = MONO, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis
@@ -555,14 +564,14 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                         Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(50))
                             .border(1.dp, if (running) AMBER.copy(alpha = 0.5f) else PRIMARY_DIM, RoundedCornerShape(50))
                             // while it runs the same chip stops it
-                            .clickable(onClickLabel = if (running) "cancel" else "connect to the fastest") {
+                            .clickable(onClickLabel = if (running) t("power.cancel") else t("home.fastestA11y")) {
                                 if (running) { cancelAsked = true; AppWork.cancelFastest() } else connectFastest()
                             }
                             .padding(horizontal = 18.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            if (running) "✕ stop testing" else "⚡ connect to the fastest",
+                            if (running) t("home.stopTesting") else t("home.fastest"),
                             color = if (running) AMBER else PRIMARY,
                             fontSize = 13.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
@@ -583,13 +592,13 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             if (settings.advancedMode) {
             Spacer(Modifier.height(12.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric(Modifier.weight(1f), "DOWNLOAD", fmtSpeed(traffic.rxSpeed), fmtBytes(traffic.rxBytes) + " total", PRIMARY)
-                Metric(Modifier.weight(1f), "UPLOAD", fmtSpeed(traffic.txSpeed), fmtBytes(traffic.txBytes) + " total", TXT)
+                Metric(Modifier.weight(1f), t("metric.down"), fmtSpeed(traffic.rxSpeed), tf("metric.total", "v" to fmtBytes(traffic.rxBytes)), PRIMARY)
+                Metric(Modifier.weight(1f), t("metric.up"), fmtSpeed(traffic.txSpeed), tf("metric.total", "v" to fmtBytes(traffic.txBytes)), TXT)
             }
             Spacer(Modifier.height(10.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric(Modifier.weight(1f), if (selUdp) "UDP PING" else "TCP PING", if (pinging) "…" else fmtLat(selTest?.tcp), if (selUdp) "through a test core" else "to the server", if (pinging) AMBER else latColor(selTest?.tcp))
-                Metric(Modifier.weight(1f), "REAL DELAY", if (measuring == "delay") "…" else fmtLat(latency), "through the tunnel", if (measuring == "delay") AMBER else latColor(latency))
+                Metric(Modifier.weight(1f), if (selUdp) t("metric.udp") else t("metric.tcp"), if (pinging) "…" else fmtLat(selTest?.tcp), if (selUdp) t("metric.throughTestCore") else t("metric.toServer"), if (pinging) AMBER else latColor(selTest?.tcp))
+                Metric(Modifier.weight(1f), t("metric.real"), if (measuring == "delay") "…" else fmtLat(latency), t("metric.throughTunnel"), if (measuring == "delay") AMBER else latColor(latency))
             }
 
             /* ---- transfer speed ---- */
@@ -597,16 +606,19 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                 Column(Modifier.padding(14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Transfer speed", color = TXT, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                        Text("— down", color = PRIMARY, fontSize = 9.sp, fontFamily = MONO)
+                        Text(t("chart.title"), color = TXT, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        Text(t("chart.down"), color = PRIMARY, fontSize = 9.sp, fontFamily = MONO)
                         Spacer(Modifier.width(8.dp))
-                        Text("-- up", color = MUTED, fontSize = 9.sp, fontFamily = MONO)
+                        Text(t("chart.up"), color = MUTED, fontSize = 9.sp, fontFamily = MONO)
                     }
                     Spacer(Modifier.height(10.dp))
                     Sparkline(spark, Modifier.fillMaxWidth().height(64.dp))
-                    Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
-                        Text("last ${spark.size}s", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
-                        Text("now", color = MUTED2, fontSize = 9.sp, fontFamily = MONO)
+                    // the chart runs left to right (newest on the right) in either language, and so do its ends
+                    LtrBlock {
+                        Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                            Text(tf("chart.last", "n" to spark.size), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
+                            Text(t("chart.now"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO)
+                        }
                     }
                 }
             }
@@ -617,13 +629,13 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                 Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("VPN tunnel", color = TXT, fontSize = 13.sp)
+                        Text(t("home.tunnel"), color = TXT, fontSize = 13.sp)
                         Text(
                             // as the VPN takes it: "only these" with none of them left is the whole device (TunnelSetup.perApp)
                             when {
-                                settings.perAppMode == "allow" && settings.perApps.isNotEmpty() -> "only ${settings.perApps.size} app(s) go through it"
-                                settings.perAppMode == "disallow" && settings.perApps.isNotEmpty() -> "every app except ${settings.perApps.size}"
-                                else -> "whole system"
+                                settings.perAppMode == "allow" && settings.perApps.isNotEmpty() -> tf("home.onlyApps", "n" to settings.perApps.size)
+                                settings.perAppMode == "disallow" && settings.perApps.isNotEmpty() -> tf("home.allAppsBut", "n" to settings.perApps.size)
+                                else -> t("home.wholeSystem")
                             },
                             color = MUTED, fontSize = 11.sp, fontFamily = MONO
                         )
@@ -635,7 +647,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
 
             /* ---- protection strip ---- */
             Spacer(Modifier.height(16.dp))
-            Text("PROTECTION", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+            Text(t("home.protection"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
             Spacer(Modifier.height(8.dp))
             val geo = remember { GeoAssets.available(ctx) }
             // The core a plan would actually run on, asked the same way the service
@@ -644,11 +656,11 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 EngineChoice.chooseEngine(runCatching { store.buildPlan() }.getOrNull(), settings.defaultEngine)
             }
             FlowChips(listOf(
-                Pair("DNS · " + (if (settings.dnsManaged) "managed" else "as given"), settings.dnsManaged),
-                Pair("routing · " + routingModeLabel(settings.routingMode), settings.routingMode != "global"),
-                Pair("geo data · " + (if (geo) "on device" else "missing"), geo),
-                Pair("IPv6 · " + (if (settings.ipv6) "on" else "off"), settings.ipv6),
-                Pair("core · " + core, true)
+                Pair(if (settings.dnsManaged) t("chip.dnsManaged") else t("chip.dnsGiven"), settings.dnsManaged),
+                Pair(tf("chip.routing", "mode" to routingModeLabel(settings.routingMode)), settings.routingMode != "global"),
+                Pair(if (geo) t("chip.geoOn") else t("chip.geoMissing"), geo),
+                Pair(if (settings.ipv6) t("chip.ipv6On") else t("chip.ipv6Off"), settings.ipv6),
+                Pair(tf("chip.core", "core" to core), true)
             ))
 
             /* ---- quick actions ---- */
@@ -658,7 +670,7 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                     onClick = { pingSelected() },
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = TXT2), border = BorderStroke(1.dp, STROKE)
-                ) { Text("ping test", fontSize = 12.sp) }
+                ) { Text(t("home.pingTest"), fontSize = 12.sp) }
                 OutlinedButton(
                     onClick = {
                         val sp = if (state == ConnState.CONNECTED) store.settings.socksPort else null
@@ -667,24 +679,24 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                             val ms = withContext(Dispatchers.IO) { Diagnostics.httpLatency(sp) }
                             latency = if (ms >= 0) ms else null
                             val r = withContext(Dispatchers.IO) { Diagnostics.ipInfo(sp) }
-                            ip = if (r.ok) "${flag(r.countryCode)} ${r.ip}" else "fail"
+                            ip = if (r.ok) "${flag(r.countryCode)} ${r.ip}" else t("home.ipFail")
                             measuring = ""
-                            if (!r.ok) AppWork.snack("IP check failed" + if (r.error.isNotBlank()) ": ${r.error}" else "")
+                            if (!r.ok) AppWork.snack(t("home.ipCheckFailed") + if (r.error.isNotBlank()) ": ${r.error}" else "")
                         }
                     },
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = TXT2), border = BorderStroke(1.dp, STROKE)
-                ) { Text("check IP", fontSize = 12.sp) }
+                ) { Text(t("home.checkIp"), fontSize = 12.sp) }
                 OutlinedButton(
                     onClick = { if (state == ConnState.CONNECTED) AppWork.reconnect(ctx, store) },
                     enabled = state == ConnState.CONNECTED,
                     modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = TXT2), border = BorderStroke(1.dp, STROKE)
-                ) { Text("reconnect", fontSize = 12.sp) }
+                ) { Text(t("home.reconnect"), fontSize = 12.sp) }
             }
             if (ip != "—") {
                 Spacer(Modifier.height(8.dp))
-                Text("egress $ip", color = MUTED, fontSize = 11.sp, fontFamily = MONO)
+                Text(tf("home.egress", "ip" to ip), color = MUTED, fontSize = 11.sp, fontFamily = MONO)
             }
             Spacer(Modifier.height(20.dp))
         }
@@ -697,9 +709,9 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             if (store.servers.isEmpty()) {
                 // Nothing to connect to yet: one thing to do about it.
                 EmptyState(
-                    "No server yet",
-                    "Add a config link, a QR code or your subscription link.",
-                    "Add a server or subscription"
+                    t("home.noServer"),
+                    t("home.noServerHint"),
+                    t("home.addServerOrSub")
                 ) { homeSheet = "import" }
             } else Row(verticalAlignment = Alignment.CenterVertically) {
                 ExitChip(store, selTest, pinging, Modifier.weight(1f), onPick = { pickerOpen = true }, onPing = { pingSelected() })
@@ -740,12 +752,12 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
                 Modifier.size(170.dp).clip(CircleShape)
                     .background(if (on) PRIMARY else Color(0xFF101B19))
                     .border(if (on) 0.dp else 1.dp, if (on) Color.Transparent else Color(0xFF21302D), CircleShape)
-                    .clickable(onClickLabel = if (busy) "cancel" else if (on) "disconnect" else "connect") { onPower() },
+                    .clickable(onClickLabel = if (busy) t("power.cancel") else if (on) t("power.disconnect") else t("power.connect")) { onPower() },
                 contentAlignment = Alignment.Center
             ) {
                 if (busy) Box(contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = if (on) ON_PRIMARY else PRIMARY, strokeWidth = 4.dp, modifier = Modifier.size(64.dp))
-                    Icon(Icons.Filled.Close, "cancel", tint = if (on) ON_PRIMARY else TXT2, modifier = Modifier.size(26.dp))
+                    Icon(Icons.Filled.Close, t("power.cancel"), tint = if (on) ON_PRIMARY else TXT2, modifier = Modifier.size(26.dp))
                 } else PowerGlyph(if (on) ON_PRIMARY else Color(0xFF486B63))
             }
         }
@@ -764,15 +776,15 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         busy -> OutlinedButton(
             onClick = onPower, modifier = mod, shape = shape, contentPadding = pad, border = BorderStroke(1.dp, AMBER.copy(alpha = 0.6f)),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = AMBER)
-        ) { Text("Cancel", fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+        ) { Text(t("power.cancel"), fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
         state == ConnState.CONNECTED -> OutlinedButton(
             onClick = onPower, modifier = mod, shape = shape, contentPadding = pad, border = BorderStroke(1.dp, STROKE),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = TXT)
-        ) { Text("Disconnect", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1) }
+        ) { Text(t("power.disconnect"), fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1) }
         else -> Button(
             onClick = onPower, modifier = mod, shape = shape, contentPadding = pad,
             colors = ButtonDefaults.buttonColors(containerColor = PRIMARY, contentColor = ON_PRIMARY)
-        ) { Text("Connect", fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+        ) { Text(t("power.connect"), fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
     }
 }
 
@@ -802,14 +814,14 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
  */
 @Composable private fun ExitChip(store: Store, result: TestState?, pinging: Boolean, modifier: Modifier, onPick: () -> Unit, onPing: () -> Unit) {
     val srv = store.serverById(store.selection)
-    val (flag, label) = if (srv != null) ServerLabel.split(srv.name) else null to store.selectionLabel()
+    val (flag, label) = if (srv != null) ServerLabel.split(srv.name) else null to selectionWord(store)
     // a routing profile whose traffic rides on a base says which (spec §3: the small path's "via <base>")
     val viaBase = if (srv != null) null else store.selectedProfile()?.let { p: RoutingProfile -> RoutingProfiles.effectiveDefVia(p) ?: p.base }
     // a group (Groups.kt) says how many configs it spreads over, and how
     val grp = if (srv != null) null else store.groupById(store.selection)
     Row(
         modifier.heightIn(min = 56.dp).clip(RoundedCornerShape(14.dp)).background(CARD)
-            .border(1.dp, STROKE, RoundedCornerShape(14.dp)).clickable(onClickLabel = "choose a server") { onPick() }
+            .border(1.dp, STROKE, RoundedCornerShape(14.dp)).clickable(onClickLabel = t("exit.choose")) { onPick() }
             .padding(start = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -819,24 +831,24 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
             Text(label, color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 when {
-                    srv != null -> badge(srv.protocol) + " · tap to change"
-                    grp != null -> configsWord(Groups.sizeOf(store.groupRecord(grp.id))) + " · " + Groups.strategyLabel(grp.strategy).lowercase() + " · tap to change"
-                    viaBase != null -> "via ${store.targetLabel(viaBase)} · tap to change"
-                    else -> "tap to change"
+                    srv != null -> badge(srv.protocol) + " · " + t("exit.tapChange")
+                    grp != null -> configsWord(Groups.sizeOf(store.groupRecord(grp.id))) + " · " + strategyWord(grp.strategy).lowercase() + " · " + t("exit.tapChange")
+                    viaBase != null -> tf("exit.via", "name" to targetWord(store, viaBase)) + " · " + t("exit.tapChange")
+                    else -> t("exit.tapChange")
                 },
                 color = MUTED2, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
         // The ping: its own 48 dp target, so measuring never opens the picker.
         Box(
-            Modifier.heightIn(min = 48.dp).widthIn(min = 52.dp).clickable(onClickLabel = "ping") { onPing() }.padding(horizontal = 8.dp),
+            Modifier.heightIn(min = 48.dp).widthIn(min = 52.dp).clickable(onClickLabel = t("exit.ping")) { onPing() }.padding(horizontal = 8.dp),
             contentAlignment = Alignment.Center
         ) {
             val ms = result?.tcp
             when {
                 pinging -> Text("…", color = AMBER, fontSize = 13.sp, fontFamily = MONO)
                 ms != null -> Text(if (ms >= 0) "$ms ms" else "×", color = latColor(ms), fontSize = 12.sp, fontFamily = MONO, maxLines = 1)
-                else -> Text("ping", color = MUTED, fontSize = 11.sp, fontFamily = MONO)
+                else -> Text(t("exit.ping"), color = MUTED, fontSize = 11.sp, fontFamily = MONO)
             }
         }
     }
@@ -907,10 +919,10 @@ private fun HomeScreen(store: Store, bump: () -> Unit) {
         colors = CardDefaults.cardColors(containerColor = CARD), border = BorderStroke(1.dp, PRIMARY_DIM)
     ) {
         Column(Modifier.padding(start = 14.dp, end = 6.dp, top = 12.dp)) {
-            Text("IRNetFree $v is out — the cores and fixes come with the app", color = TXT, fontSize = 13.sp, modifier = Modifier.padding(end = 8.dp))
+            Text(tf("upd.out", "v" to v), color = TXT, fontSize = 13.sp, modifier = Modifier.padding(end = 8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onLater) { Text("Later", color = MUTED, fontSize = 13.sp) }
-                TextButton(onClick = onDownload) { Text("Download", color = PRIMARY, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
+                TextButton(onClick = onLater) { Text(t("btn.later"), color = MUTED, fontSize = 13.sp) }
+                TextButton(onClick = onDownload) { Text(t("btn.download"), color = PRIMARY, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
             }
         }
     }
@@ -923,7 +935,7 @@ private const val RELEASES_PAGE = "https://github.com/sadrazkh/Irnetfree_xray-cl
 private fun openUpdate(ctx: Context, store: Store) {
     val url = store.updateUrl.ifBlank { RELEASES_PAGE }
     runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-        .onFailure { AppWork.snack("Nothing on this phone can open $url") }
+        .onFailure { AppWork.snack(tf("upd.noOpener", "url" to url)) }
 }
 
 private fun doConnect(ctx: Context, store: Store) {
@@ -965,20 +977,20 @@ private suspend fun pickFastest(
     val (udpServers, tcpServers) = servers.partition { s: ServerConfig -> Fastest.udpOnly(s) }
     val measured = LinkedHashMap<String, Fastest.Measured>()
     var done = 0
-    onPhase("testing 0/${servers.size}…")
+    onPhase(tf("fast.testing", "progress" to "0/${servers.size}"))
     for (batch in tcpServers.chunked(8)) {
         val part = withContext(Dispatchers.IO) {
             batch.map { s -> async { Fastest.Measured(s.id, tcp = Diagnostics.tcpPing(s.address, s.port, timeout = 3000)) } }.awaitAll()
         }
         part.forEach { measured[it.id] = it; AppWork.putPing(it.id, it.tcp ?: -1L) }   // the list shows them too
         done += batch.size
-        onPhase("testing $done/${servers.size}…")
+        onPhase(tf("fast.testing", "progress" to "$done/${servers.size}"))
     }
     val byId = servers.associateBy { it.id }
     val udp = Fastest.measureUdp(udpServers.map { s: ServerConfig -> s.id }, now = { System.nanoTime() / 1_000_000L }) { i: Int, id: String ->
         val s = byId[id]
         if (s == null) -1L else {
-            onPhase("testing ${done + i + 1}/${servers.size} · ${s.name.take(16)} (UDP)")
+            onPhase(tf("fast.testing", "progress" to "${done + i + 1}/${servers.size} · ${s.name.take(16)} (UDP)"))
             val ms = realDelayThrough(ctx, s, Fastest.UDP_TIMEOUT_MS)
             AppWork.putReal(s.id, ms)   // the list shows it too
             ms
@@ -994,7 +1006,7 @@ private suspend fun pickFastest(
     val tried = Fastest.walk(measured.values.toList(), maxTries = if (udpCarried > 0) Fastest.SHORTLIST else Fastest.MAX_TRIES) { i, m ->
         val s = byId[m.id]
         if (s == null) -1L else {
-            onPhase("checking ${i + 1} · ${s.name.take(16)}")
+            onPhase(tf("fast.checking", "i" to i + 1, "name" to s.name.take(16)))
             realDelayThrough(ctx, s)
         }
     }
@@ -1133,7 +1145,7 @@ private object AppWork {
                 tests[s.id] = TestState(phase = if (udp) "down" else "tcp")
                 val result = withContext(Dispatchers.IO) {
                     val h = XrayTester.start(ctx, s)
-                    if (h == null) TestState(error = "core error") else try {
+                    if (h == null) TestState(error = t("test.coreError")) else try {
                         val ping: Long? = if (udp) null else Diagnostics.tcpPing(s.address, s.port)
                         tests[s.id] = TestState(tcp = ping, phase = "down")
                         val down = Diagnostics.httpLatency(h.port)
@@ -1177,7 +1189,7 @@ private object AppWork {
     fun disconnect(ctx: Context) {
         AutoConnectOnce.manual = true
         runCatching { XrayVpnService.disconnect(ctx.applicationContext) }
-            .onFailure { e -> snack("Disconnect failed: ${e.message ?: e.javaClass.simpleName}") }
+            .onFailure { e -> snack(tf("err.disconnect", "msg" to (e.message ?: e.javaClass.simpleName))) }
     }
 
     /** Stop ⚡ where it is. A tunnel already up stays up; the selection is whatever it was when stopped. */
@@ -1186,7 +1198,7 @@ private object AppWork {
         fastestJob?.cancel(); fastestJob = null
         fastestRun++
         fastestPhase.value = ""
-        fastestNote.value = "⚡ stopped"
+        fastestNote.value = t("fast.stopped")
         VpnState.addLog("Auto (fastest): stopped by hand")
     }
 
@@ -1210,7 +1222,7 @@ private object AppWork {
 
     private suspend fun refreshNow(ctx: Context, store: Store, subId: String, announce: Boolean) {
         val url = store.subs.firstOrNull { it.id == subId }?.url ?: return   // deleted while it waited
-        subsNote.value = "Fetching…" to false
+        subsNote.value = t("subs.fetching") to false
         var error = ""
         val fetched = try {
             coreLock.withLock { withContext(Dispatchers.IO) { SubFetch.fetch(ctx, store, url) { s -> VpnState.addLog(s) } } }
@@ -1239,7 +1251,7 @@ private object AppWork {
             val list = applied.servers
             val m = applied.merged
             if (list == null || m == null) {
-                note = "${sub.name}: ${applied.sub.lastError} — kept its ${sub.serverCount} servers"
+                note = tf("subs.keptServers", "name" to sub.name, "error" to applied.sub.lastError, "n" to sub.serverCount)
                 VpnState.addLog("Subscription ${sub.url}: ${applied.sub.lastError}; the ${sub.serverCount} servers it had are kept")
             } else {
                 store.servers.clear(); store.servers.addAll(list); store.saveServers()
@@ -1248,9 +1260,9 @@ private object AppWork {
                 // the choice before it, and that is said, not discovered later.
                 var moved = ""
                 if (store.selection.isEmpty()) m.servers.firstOrNull()?.let { store.saveSelection(it.id) }
-                else if (store.repairSelection()) moved = " · your server is gone from it, now using ${store.selectionLabel()}"
-                val change = if (m.added == 0 && m.dropped == 0) "" else " · ${m.added} new, ${m.dropped} gone"
-                note = "${sub.name}: ${m.servers.size} servers$change$moved"
+                else if (store.repairSelection()) moved = " · " + tf("subs.selMoved", "name" to selectionWord(store))
+                val change = if (m.added == 0 && m.dropped == 0) "" else " · " + tf("subs.change", "added" to m.added, "dropped" to m.dropped)
+                note = tf("subs.countNote", "name" to sub.name, "n" to m.servers.size) + change + moved
                 bad = false
                 VpnState.addLog("Subscription ${sub.url}: ${m.kept} kept (same ids), ${m.added} new, ${m.dropped} gone")
                 if (moved.isNotEmpty()) VpnState.addLog("Selection: the selected server left ${sub.name}; now ${store.selectionLabel()}")
@@ -1260,7 +1272,7 @@ private object AppWork {
         subsNote.value = note to bad
         storeRev.value = storeRev.value + 1
         if (announce) {
-            if (bad) snack(note, "Retry") { refreshSub(ctx, store, subId, announce = true) } else snack(note)
+            if (bad) snack(note, t("btn.retry")) { refreshSub(ctx, store, subId, announce = true) } else snack(note)
         }
     }
 
@@ -1281,7 +1293,7 @@ private object AppWork {
         // Only this run's words reach the screen: one cancelled a moment ago
         // may still be unwinding (a handshake is not interrupted mid-way).
         val phase: (String) -> Unit = { p -> if (run == fastestRun) fastestPhase.value = p }
-        phase("testing 0/${list.size}…")
+        phase(tf("fast.testing", "progress" to "0/${list.size}"))
         fastestNote.value = ""
         // A connect or a disconnect asked for while ⚡ measures (it takes seconds)
         // is the user's newer word: ⚡ then applies nothing at its end.
@@ -1291,7 +1303,7 @@ private object AppWork {
             try {
                 val out = pickFastest(app, list, phase)
                 if (XrayVpnService.moves != ticket) {
-                    fastestNote.value = "a connect or disconnect was asked for meanwhile — not applied"
+                    fastestNote.value = t("fast.overtaken")
                     VpnState.addLog("Auto (fastest): a connect or disconnect was asked for meanwhile — result not applied")
                     return@launch
                 }
@@ -1306,24 +1318,34 @@ private object AppWork {
                         out.answered == 0 -> "no server$inScope answered"
                         else -> "none of the ${out.tried} quickest$inScope carried traffic"
                     }
-                    fastestNote.value = "$why — the selection was left alone"
+                    // the same, in the app's language (the log above stays English)
+                    val group = scopeName ?: ""
+                    val whyUi = when {
+                        gone != null -> tf("fast.goneWinner", "name" to (best?.let { b -> list.firstOrNull { it.id == b.id }?.name } ?: t("fast.theWinner")))
+                        out.answered == 0 -> if (inScope.isEmpty()) t("fast.noneAnswered") else tf("fast.noneAnsweredIn", "group" to group)
+                        else -> if (inScope.isEmpty()) tf("fast.noneCarried", "n" to out.tried) else tf("fast.noneCarriedIn", "n" to out.tried, "group" to group)
+                    }
+                    fastestNote.value = tf("fast.leftAlone", "why" to whyUi)
                     VpnState.addLog("Auto (fastest): $why; kept ${store.selectionLabel()}")
-                    snack(why.replaceFirstChar { it.uppercase() })
+                    snack(whyUi.replaceFirstChar { it.uppercase() })
                     return@launch
                 }
                 val real = best.real ?: -1L
                 val how = if (real >= 0) "$real ms through it" else "${best.tcp ?: -1L} ms handshake"
                 store.saveSelection(best.id)
                 storeRev.value = storeRev.value + 1
-                fastestNote.value = "⚡ fastest of ${list.size}$inScope: ${srv.name} · $how"
+                val howUi = if (real >= 0) tf("fast.howReal", "ms" to "$real ms") else tf("fast.howTcp", "ms" to "${best.tcp ?: -1L} ms")
+                fastestNote.value = if (inScope.isEmpty()) tf("fast.picked", "n" to list.size, "name" to srv.name, "how" to howUi)
+                    else tf("fast.pickedIn", "n" to list.size, "group" to (scopeName ?: ""), "name" to srv.name, "how" to howUi)
                 VpnState.addLog("Auto (fastest): ${srv.name} — $how, out of ${list.size} servers$inScope")
-                snack("Fastest$inScope: ${srv.name} · $how")
+                snack(if (inScope.isEmpty()) tf("fast.snack", "name" to srv.name, "how" to howUi)
+                    else tf("fast.snackIn", "group" to (scopeName ?: ""), "name" to srv.name, "how" to howUi))
                 // Already up on something else: the service switches a live tunnel
                 // onto the new choice itself (one tunnel, no gap without the VPN),
                 // so there is no disconnect first any more.
                 if (VpnService.prepare(app) != null) {
                     VpnState.addLog("Auto (fastest): Android has not given VPN permission — tap the ring to connect")
-                    snack("Android has not given VPN permission yet — tap Connect")
+                    snack(t("fast.noPermission"))
                     return@launch
                 }
                 phase("")
@@ -1446,7 +1468,7 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
     var afterConsent by rememberSaveable { mutableStateOf("connect") }
     val vpnPrepare = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         if (res.resultCode == android.app.Activity.RESULT_OK) proceed(afterConsent)
-        else AppWork.snack("Android’s VPN permission was not given — nothing was connected")
+        else AppWork.snack(t("consent.denied"))
     }
     fun vpnConsentThenProceed() {
         val prep: Intent? = VpnService.prepare(ctx)
@@ -1476,7 +1498,7 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
         observeStore()
         val modes = buildList {
-            if (store.poolEnabledValid().isNotEmpty()) add(Store.POOL_ID to "🧩 Proxy Pool (${store.poolEnabledValid().size})")
+            if (store.poolEnabledValid().isNotEmpty()) add(Store.POOL_ID to "🧩 " + tf("pick.pool", "n" to store.poolEnabledValid().size))
             // one row per routing profile that has rules or a default (spec §1)
             store.profiles.filter { p: RoutingProfile -> store.profileReady(p) }.forEach { p: RoutingProfile -> add(Selection.forProfile(p.id) to "🧭 ${p.name}") }
             store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }
@@ -1491,7 +1513,7 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
         val groups = ServerGroups.build(store.servers, store.subs, "", emptySet(), store.selection)
         val pick: (String) -> Unit = { id -> store.saveSelection(id); onPick() }
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
-            item { Text("Select an exit", color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp)) }
+            item { Text(t("pick.title"), color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp)) }
             if (store.servers.size >= 2) item {
                 Column {
                     Row(
@@ -1501,9 +1523,9 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
                         Text("⚡", fontSize = 15.sp)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("Auto (fastest)", color = PRIMARY, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(t("pick.auto"), color = PRIMARY, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                             Text(
-                                "tests every server, then connects to the one that answers fastest",
+                                t("pick.autoHint"),
                                 color = MUTED, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -1511,7 +1533,7 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
                     HorizontalDivider(color = STROKE)
                 }
             }
-            if (modes.isEmpty() && store.servers.isEmpty()) item { Text("No servers yet", color = MUTED, modifier = Modifier.padding(16.dp)) }
+            if (modes.isEmpty() && store.servers.isEmpty()) item { Text(t("pick.noServers"), color = MUTED, modifier = Modifier.padding(16.dp)) }
             items(modes) { (id, lbl) -> PickRow(lbl, null, null, null, selKey == id, null) { pick(id) } }
             for (g in groups) {
                 if (g.servers.isEmpty()) continue
@@ -1550,7 +1572,7 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
             )
         }
         if (ping != null) { Spacer(Modifier.width(8.dp)); Text(fmtLat(ping), color = latColor(ping), fontSize = 12.sp, fontFamily = MONO) }
-        if (selected) { Spacer(Modifier.width(10.dp)); Icon(Icons.Filled.CheckCircle, "selected", tint = PRIMARY) }
+        if (selected) { Spacer(Modifier.width(10.dp)); Icon(Icons.Filled.CheckCircle, t("a11y.selected"), tint = PRIMARY) }
     }
 }
 
@@ -1614,7 +1636,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     val groupFastest = rememberConsent(store) { then: String ->
         val key = then.removePrefix("group:")
         val g = ServerGroups.build(store.servers, store.subs, "", emptySet(), "").firstOrNull { it.key == key }
-        if (g == null || g.all.size < 2) AppWork.snack("That group no longer has two servers to choose from")
+        if (g == null || g.all.size < 2) AppWork.snack(t("srv.groupTooSmall"))
         else { fastestKey = g.key; AppWork.connectFastest(ctx, store, g.all, g.title) }
     }
     // The row whose actions are showing. Only ever one, and nothing to begin
@@ -1638,7 +1660,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
         pull.endRefresh()
     }
     val clearSearch: @Composable (() -> Unit)? = if (q.isEmpty()) null else ({
-        IconButton(onClick = { q = "" }) { Icon(Icons.Filled.Close, "clear the search", tint = MUTED) }
+        IconButton(onClick = { q = "" }) { Icon(Icons.Filled.Close, t("a11y.clearSearch"), tint = MUTED) }
     })
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -1647,17 +1669,17 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Servers", color = TXT, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text(t("servers.title"), color = TXT, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             if (store.servers.isNotEmpty()) Box(
                 Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(50))
-                    .clickable(onClickLabel = if (testingAll) "stop testing" else "test every server") {
+                    .clickable(onClickLabel = if (testingAll) t("srv.stopTesting") else t("srv.testAll")) {
                         if (testingAll) AppWork.stopTests() else { testKey = ""; AppWork.testAll(ctx, store.servers.toList()) }
                     }
                     .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    if (testingAll) "stop testing" else "ping all",
+                    if (testingAll) t("srv.stopTesting") else t("srv.pingAll"),
                     color = if (testingAll) AMBER else PRIMARY, fontSize = 12.sp, fontFamily = MONO,
                     modifier = Modifier.clip(RoundedCornerShape(50))
                         .border(1.dp, if (testingAll) AMBER.copy(alpha = 0.5f) else PRIMARY_DIM, RoundedCornerShape(50))
@@ -1669,15 +1691,15 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     Box(
                         Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(PRIMARY),
                         contentAlignment = Alignment.Center
-                    ) { Icon(Icons.Filled.Add, "add a server", tint = ON_PRIMARY, modifier = Modifier.size(22.dp)) }
+                    ) { Icon(Icons.Filled.Add, t("srv.addA11y"), tint = ON_PRIMARY, modifier = Modifier.size(22.dp)) }
                 }
                 DropdownMenu(addMenu, { addMenu = false }, modifier = Modifier.background(CARD)) {
                     listOf(
-                        "import" to "Link or subscription",
+                        "import" to t("srv.addLink"),
                         "wg" to "WireGuard",
-                        "warp" to "WARP (WireGuard or MASQUE)",
+                        "warp" to t("srv.addWarp"),
                         "proxy" to "SOCKS / HTTP",
-                        "manual" to "Manual (any protocol)"
+                        "manual" to t("srv.addManual")
                     ).forEach { (key, label) ->
                         DropdownMenuItem(
                             text = { Text(label, color = TXT, fontSize = 14.sp) },
@@ -1690,7 +1712,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
         HorizontalDivider(color = BG2)
         if (store.servers.isNotEmpty()) OutlinedTextField(
             q, { q = it }, Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
-            placeholder = { Text("Search name or address…", fontSize = 13.sp) },
+            placeholder = { Text(t("srv.search"), fontSize = 13.sp) },
             leadingIcon = { Icon(Icons.Filled.Search, null, Modifier.size(18.dp)) },
             trailingIcon = clearSearch,
             singleLine = true, shape = RoundedCornerShape(14.dp), colors = tfColors()
@@ -1704,13 +1726,13 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                 if (store.servers.isEmpty() && store.subs.isEmpty()) item(key = "empty") {
                     Box(Modifier.padding(top = 32.dp)) {
                         EmptyState(
-                            "No servers yet",
-                            "Paste a config link or your subscription link, scan a QR code, or add a WireGuard or SOCKS server by hand.",
-                            "Add a server or subscription"
+                            t("pick.noServers"),
+                            t("srv.emptyHint"),
+                            t("home.addServerOrSub")
                         ) { sheet = "import" }
                     }
                 }
-                if (searching && entries.isEmpty()) item(key = "nomatch") { EmptyHint("Nothing matches “${q.trim()}”.") }
+                if (searching && entries.isEmpty()) item(key = "nomatch") { EmptyHint(tf("srv.noMatch", "q" to q.trim())) }
                 items(entries, key = { it.key }) { e ->
                     when (e) {
                         is ServerGroups.ListEntry.Head -> {
@@ -1750,8 +1772,8 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                             }
                         }
                         is ServerGroups.ListEntry.Empty -> Text(
-                            if (e.group.sub?.lastError?.isNotEmpty() == true) "no servers — the last fetch failed; tap ⟳ or pull down to try again"
-                            else "no servers yet — tap ⟳ or pull down to fetch them",
+                            if (e.group.sub?.lastError?.isNotEmpty() == true) t("srv.groupFailed")
+                            else t("srv.groupEmpty"),
                             color = MUTED, fontSize = 12.sp, modifier = Modifier.padding(start = 30.dp, bottom = 10.dp)
                         )
                     }
@@ -1766,7 +1788,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
             containerColor = CARD,
-            title = { Text("Delete this config?", color = TXT, fontSize = 16.sp) },
+            title = { Text(t("srv.deleteTitle"), color = TXT, fontSize = 16.sp) },
             text = { Text(victim.name, color = MUTED, fontSize = 13.sp, fontFamily = MONO) },
             confirmButton = {
                 TextButton(onClick = {
@@ -1775,14 +1797,14 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     confirmDelete = null
                     AppWork.touch()                 // not bump(): the list keeps its place
                     AppWork.snack(
-                        if (wasSelected && store.selection.isNotEmpty()) "Deleted ${victim.name} — now using ${store.selectionLabel()}"
-                        else "Deleted ${victim.name}"
+                        if (wasSelected && store.selection.isNotEmpty()) tf("srv.deletedNow", "name" to victim.name, "now" to selectionWord(store))
+                        else tf("srv.deleted", "name" to victim.name)
                     )
                 }) {
-                    Text("Delete", color = BAD)
+                    Text(t("btn.delete"), color = BAD)
                 }
             },
-            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel", color = MUTED) } }
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text(t("btn.cancel"), color = MUTED) } }
         )
     }
     AddConfigSheets(store, sheet, { sheet = it }, bump)
@@ -1807,7 +1829,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
  */
 private suspend fun refreshAllSubs(ctx: Context, store: Store) {
     val subs = store.subs.toList()
-    if (subs.isEmpty()) { AppWork.snack("No subscriptions to refresh — add one on the SUBS tab"); return }
+    if (subs.isEmpty()) { AppWork.snack(t("subs.noneToRefresh")); return }
     val started = System.currentTimeMillis()
     subs.forEach { AppWork.refreshSub(ctx, store, it.id) }
     AppWork.subsBusy.first { it.isEmpty() }
@@ -1816,8 +1838,8 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
     AppWork.snack(
         when {
             subs.size == 1 -> AppWork.subsNote.value.first
-            failed == 0 -> "${subs.size} subscriptions refreshed"
-            else -> "$failed of ${subs.size} subscriptions failed — their servers are kept"
+            failed == 0 -> tf("subs.refreshedN", "n" to subs.size)
+            else -> tf("subs.failedN", "failed" to failed, "n" to subs.size)
         }
     )
 }
@@ -1852,8 +1874,8 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
     val line = when {
         fastestPhase.isNotEmpty() -> "⚡ $fastestPhase"
         summary != null -> summary.text
-        g.key == ServerGroups.MANUAL -> "added by hand"
-        else -> "their subscription was deleted"
+        g.key == ServerGroups.MANUAL -> t("srv.byHand")
+        else -> t("srv.subDeleted")
     }
     val tint = when {
         fastestPhase.isNotEmpty() -> AMBER
@@ -1864,13 +1886,13 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
     val actions = g.total >= 2
     Row(
         Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp).heightIn(min = 52.dp).clip(RoundedCornerShape(12.dp))
-            .clickable(enabled = foldable, onClickLabel = if (g.open) "fold" else "unfold") { onToggle() }
+            .clickable(enabled = foldable, onClickLabel = if (g.open) t("a11y.fold") else t("a11y.unfold")) { onToggle() }
             .padding(start = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             if (g.open) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
-            null, tint = MUTED, modifier = Modifier.size(22.dp)
+            null, tint = MUTED, modifier = Modifier.size(22.dp).mirrorRtl()
         )
         Spacer(Modifier.width(6.dp))
         Column(Modifier.weight(1f)) {
@@ -1889,7 +1911,7 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
                 if (!g.open && g.hasSelected) {
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "IN USE", color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold,
+                        t("srv.inUse"), color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold,
                         letterSpacing = 0.1.em, maxLines = 1,
                         modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(PRIMARY).padding(horizontal = 5.dp, vertical = 2.dp)
                     )
@@ -1898,11 +1920,11 @@ private suspend fun refreshAllSubs(ctx: Context, store: Store) {
             // two lines: with 📶 and ⚡ beside it a phone leaves the line half its width
             Text(line, color = tint, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
-        if (actions && onTest != null) GroupAction("📶", "test every server in ${g.title}", enabled = !testBusy, running = testingHere, onClick = onTest)
-        if (actions && onFastest != null) GroupAction("⚡", "connect to the fastest in ${g.title}", enabled = !fastestBusy, running = fastestPhase.isNotEmpty(), onClick = onFastest)
+        if (actions && onTest != null) GroupAction("📶", tf("srv.groupTest", "group" to g.title), enabled = !testBusy, running = testingHere, onClick = onTest)
+        if (actions && onFastest != null) GroupAction("⚡", tf("srv.groupFastest", "group" to g.title), enabled = !fastestBusy, running = fastestPhase.isNotEmpty(), onClick = onFastest)
         if (onRefresh != null) IconButton(onClick = onRefresh, enabled = !refreshing) {
             if (refreshing) CircularProgressIndicator(color = PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-            else Icon(Icons.Filled.Refresh, "refresh ${g.title}", tint = MUTED)
+            else Icon(Icons.Filled.Refresh, tf("srv.groupRefresh", "group" to g.title), tint = MUTED)
         }
     }
 }
@@ -1949,7 +1971,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
     fun addSubAndFetch(url: String) {
         val sub = Subscription(newId("sub"), url.trim().take(30), url.trim())
         store.subs.add(sub); store.saveSubs()
-        AppWork.snack("Fetching the subscription…")
+        AppWork.snack(t("imp.fetchingSub"))
         AppWork.refreshSub(ctx, store, sub.id, announce = true)
     }
     // Auto-detect: http(s) lines -> subscriptions (fetched); the rest -> config(s).
@@ -1960,8 +1982,8 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         if (parsed.isNotEmpty() && store.selection.isEmpty()) store.saveSelection(store.servers.first().id)
         if (quiet) return
         // nothing came of it: say why (a Clash YAML, an unsupported sing-box type…), not "0 added"
-        if (parsed.isEmpty() && errs.isNotEmpty()) AppWork.snack("Nothing added — " + errs.first())
-        else AppWork.snack("${parsed.size} config(s) added" + if (errs.isNotEmpty()) " · ${errs.size} line(s) not recognised" else "")
+        if (parsed.isEmpty() && errs.isNotEmpty()) AppWork.snack(t("imp.nothingAdded") + " — " + errs.first())
+        else AppWork.snack(tf("imp.added", "n" to parsed.size) + if (errs.isNotEmpty()) " · " + tf("imp.notRecognised", "n" to errs.size) else "")
     }
     fun smartImport(text: String) {
         // A whole JSON config (one, an array, several) is one text, not lines
@@ -1980,7 +2002,7 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
         if (rest.isNotBlank()) {
             val (parsed, errs) = LinkParser.parseMany(rest)
             addParsed(parsed, errs, quiet = urls.isNotEmpty())
-        } else if (urls.isEmpty()) AppWork.snack("Nothing recognised — paste a vless/vmess/trojan/ss/wireguard link, a JSON config or a subscription URL")
+        } else if (urls.isEmpty()) AppWork.snack(t("imp.nothingRecognised"))
         bump()
     }
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { res ->
@@ -1990,16 +2012,16 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             else { smartImport(t); setSheet(null); bump() }
         }
     }
-    fun launchQr() = qrLauncher.launch(ScanOptions().setOrientationLocked(false).setBeepEnabled(false).setPrompt("Point the camera at the config QR"))
+    fun launchQr() = qrLauncher.launch(ScanOptions().setOrientationLocked(false).setBeepEnabled(false).setPrompt(t("imp.qrPrompt")))
     fun pasteClip() {
         val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val t = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString()
-        if (!t.isNullOrBlank()) importText = t else Toast.makeText(ctx, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+        val clip = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString()
+        if (!clip.isNullOrBlank()) importText = clip else Toast.makeText(ctx, t("imp.clipEmpty"), Toast.LENGTH_SHORT).show()
     }
     when (sheet) {
         "import" -> AddLinkSheet(importText, { importText = it }, { pasteClip() }, { launchQr() }, { setSheet(null) }) {
             // An empty Add used to close the sheet as if something had been added.
-            if (importText.isBlank()) Toast.makeText(ctx, "Paste a link first, or scan a QR code", Toast.LENGTH_SHORT).show()
+            if (importText.isBlank()) Toast.makeText(ctx, t("imp.pasteFirst"), Toast.LENGTH_SHORT).show()
             else if (RouteShare.looksLikeShare(importText)) { routeLink = importText.trim(); importText = ""; setSheet(null) }
             else { smartImport(importText); importText = ""; setSheet(null); bump() }
         }
@@ -2017,17 +2039,17 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
 @Composable private fun AddLinkSheet(value: String, onValue: (String) -> Unit, onPaste: () -> Unit, onScan: () -> Unit, onDismiss: () -> Unit, onSubmit: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().imePadding().padding(16.dp).padding(bottom = 16.dp)) {
-            Text("Add config", color = TXT, fontWeight = FontWeight.Bold)
+            Text(t("imp.title"), color = TXT, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
-            Text("vless/vmess/trojan/ss/hysteria2/socks/wireguard link, an Xray or sing-box JSON config, a subscription URL / base64, or an irnetfree://routing/ link (a routing profile or a chain)", color = MUTED, fontSize = 11.sp)
+            Text(t("imp.hint"), color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(10.dp))
-            OutlinedTextField(value, onValue, Modifier.fillMaxWidth(), placeholder = { Text("Paste or type here…", fontSize = 12.sp) }, minLines = 3, maxLines = 8, shape = RoundedCornerShape(14.dp), colors = tfColors())
+            OutlinedTextField(value, onValue, Modifier.fillMaxWidth(), placeholder = { Text(t("imp.placeholder"), fontSize = 12.sp) }, minLines = 3, maxLines = 8, shape = RoundedCornerShape(14.dp), colors = tfColors())
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onPaste, modifier = Modifier.weight(1f)) { Icon(Icons.Filled.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Paste") }
-                OutlinedButton(onClick = onScan, modifier = Modifier.weight(1f)) { Icon(Icons.Filled.QrCodeScanner, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Scan QR") }
+                OutlinedButton(onClick = onPaste, modifier = Modifier.weight(1f)) { Icon(Icons.Filled.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(t("btn.paste")) }
+                OutlinedButton(onClick = onScan, modifier = Modifier.weight(1f)) { Icon(Icons.Filled.QrCodeScanner, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(t("btn.scanQr")) }
             }
-            Spacer(Modifier.height(10.dp)); Button(onClick = onSubmit, modifier = Modifier.fillMaxWidth()) { Text("Add") }
+            Spacer(Modifier.height(10.dp)); Button(onClick = onSubmit, modifier = Modifier.fillMaxWidth()) { Text(t("btn.add")) }
         }
     }
 }
@@ -2119,7 +2141,7 @@ private fun latColor(ms: Long?): Color = when {
                     if (selected) {
                         Spacer(Modifier.width(7.dp))
                         Text(
-                            "IN USE", color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO,
+                            t("srv.inUse"), color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO,
                             fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.em, maxLines = 1,
                             modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(PRIMARY)
                                 .padding(horizontal = 5.dp, vertical = 3.dp)
@@ -2144,7 +2166,7 @@ private fun latColor(ms: Long?): Color = when {
             IconButton(onClick = onToggle, modifier = Modifier.size(48.dp)) {
                 Icon(
                     if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                    if (open) "close" else "actions",
+                    if (open) t("a11y.close") else t("a11y.actions"),
                     tint = if (selected) PRIMARY else MUTED2,
                     modifier = Modifier.size(20.dp)
                 )
@@ -2158,9 +2180,9 @@ private fun latColor(ms: Long?): Color = when {
         // a tile that can only ever say "—" is worth less than the upload figure,
         // which is the side that actually goes bad.
         Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Tile(Modifier.weight(1f), "TCP", result?.tcp, result?.phase == "tcp", latColor(result?.tcp))
-            Tile(Modifier.weight(1f), "REAL", result?.down, result?.phase == "down", latColor(result?.down))
-            Tile(Modifier.weight(1f), "UP", result?.up, result?.phase == "up", latColor(result?.up))
+            Tile(Modifier.weight(1f), t("tile.tcp"), result?.tcp, result?.phase == "tcp", latColor(result?.tcp))
+            Tile(Modifier.weight(1f), t("tile.real"), result?.down, result?.phase == "down", latColor(result?.down))
+            Tile(Modifier.weight(1f), t("tile.up"), result?.up, result?.phase == "up", latColor(result?.up))
         }
         result?.error?.let {
             Text(it, color = BAD, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp))
@@ -2170,15 +2192,15 @@ private fun latColor(ms: Long?): Color = when {
         HorizontalDivider(color = if (selected) STROKE_SEL else STROKE)
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             val rule = if (selected) STROKE_SEL else STROKE
-            CardAction("test", PRIMARY, Modifier.weight(1f), onTest)
+            CardAction(t("card.test"), PRIMARY, Modifier.weight(1f), onTest)
             ActionRule(rule)
-            CardAction("copy", TXT2, Modifier.weight(1f), onCopy)
+            CardAction(t("card.copy"), TXT2, Modifier.weight(1f), onCopy)
             ActionRule(rule)
-            CardAction("qr", TXT2, Modifier.weight(1f), onQr)
+            CardAction(t("card.qr"), TXT2, Modifier.weight(1f), onQr)
             ActionRule(rule)
-            CardAction("edit", TXT2, Modifier.weight(1f), onEdit)
+            CardAction(t("card.edit"), TXT2, Modifier.weight(1f), onEdit)
             ActionRule(rule)
-            CardAction("del", BAD, Modifier.weight(1f), onDelete)
+            CardAction(t("card.del"), BAD, Modifier.weight(1f), onDelete)
         }
     }
 }
@@ -2230,7 +2252,7 @@ private fun latColor(ms: Long?): Color = when {
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(16.dp), color = CARD) {
             Column(Modifier.padding(18.dp).widthIn(max = 320.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Share config", color = TXT, fontWeight = FontWeight.Bold)
+                Text(t("qr.title"), color = TXT, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(12.dp))
                 // FilterQuality.None: the bitmap is one pixel per module, so nearest
                 // neighbour turns each into a crisp square. The default (bilinear) blurs
@@ -2240,11 +2262,11 @@ private fun latColor(ms: Long?): Color = when {
                     Modifier.size(248.dp).clip(RoundedCornerShape(10.dp)).background(Color.White).padding(6.dp),
                     filterQuality = FilterQuality.None
                 )
-                else Text(if (isJson) "Too large for a QR — use Copy." else "Link too long for a QR — use Copy.", color = MUTED, fontSize = 12.sp)
+                else Text(if (isJson) t("qr.tooLarge") else t("qr.tooLong"), color = MUTED, fontSize = 12.sp)
                 Spacer(Modifier.height(10.dp))
                 Text(link, color = MUTED, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = { copyLink(ctx, s); onDismiss() }, modifier = Modifier.fillMaxWidth()) { Text(if (isJson) "Copy JSON" else "Copy link") }
+                Button(onClick = { copyLink(ctx, s); onDismiss() }, modifier = Modifier.fillMaxWidth()) { Text(if (isJson) t("btn.copyJson") else t("btn.copyLink")) }
             }
         }
     }
@@ -2287,7 +2309,7 @@ private fun copyLink(ctx: android.content.Context, s: ServerConfig) {
 private fun copyConfigText(ctx: android.content.Context, text: String) {
     val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
     cm.setPrimaryClip(android.content.ClipData.newPlainText("config", text))
-    android.widget.Toast.makeText(ctx, "Copied ✓", android.widget.Toast.LENGTH_SHORT).show()
+    android.widget.Toast.makeText(ctx, t("toast.copied"), android.widget.Toast.LENGTH_SHORT).show()
 }
 
 
@@ -2362,115 +2384,115 @@ private fun protoTags(s: ServerConfig): String {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
-            Text("Add WARP", color = TXT, fontWeight = FontWeight.Bold)
+            Text(t("warp.title"), color = TXT, fontWeight = FontWeight.Bold)
             val res = result
             if (res != null && res.ok) {
                 WarpDone(res, kind, done)
             } else {
                 Text(
-                    if (kind == Warp.KIND_WIREGUARD) "Cloudflare WARP on WireGuard — best as the exit of a chain over a config you already have: the network sees your config, the sites see WARP."
-                    else "Cloudflare WARP over MASQUE (HTTP/3 or HTTP/2) — it runs on Xray or Xray-PattN, never sing-box.",
+                    if (kind == Warp.KIND_WIREGUARD) t("warp.ledeWg")
+                    else t("warp.ledeMasque"),
                     color = MUTED, fontSize = 11.sp
                 )
                 Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(kind == Warp.KIND_WIREGUARD, { kind = Warp.KIND_WIREGUARD; error = "" }, { Text("WireGuard — for a Chain") })
+                    FilterChip(kind == Warp.KIND_WIREGUARD, { kind = Warp.KIND_WIREGUARD; error = "" }, { Text(t("warp.kindWg")) })
                     FilterChip(kind == Warp.KIND_MASQUE, { kind = Warp.KIND_MASQUE; error = "" }, { Text("MASQUE") })
                 }
 
-                Text("1 · Account", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
+                Text(t("warp.step1"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(mode == "new", { mode = "new" }, { Text("New account") })
-                    FilterChip(mode == "import", { mode = "import" }, { Text("Import existing") })
+                    FilterChip(mode == "new", { mode = "new" }, { Text(t("warp.wayNew")) })
+                    FilterChip(mode == "import", { mode = "import" }, { Text(t("warp.wayImport")) })
                 }
                 if (mode == "new") {
-                    Text("Sign up", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                    Text(t("warp.signUp"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(via == "direct", { via = "direct" }, { Text("Direct") })
-                        FilterChip(via == "proxy", { via = "proxy" }, { Text("Through the app’s connection") })
+                        FilterChip(via == "direct", { via = "direct" }, { Text(t("warp.direct")) })
+                        FilterChip(via == "proxy", { via = "proxy" }, { Text(t("warp.routeProxy")) })
                     }
                     Text(
-                        if (via == "proxy") "Through the running connection — for when api.cloudflareclient.com is blocked on this network."
-                        else "From this phone’s own network (the app is outside its own VPN, so even while connected).",
+                        if (via == "proxy") t("warp.routeProxyHint")
+                        else t("warp.routeDirectHint"),
                         color = MUTED, fontSize = 11.sp
                     )
-                    if (via == "proxy" && !connected) Text("Connect to a server first.", color = AMBER, fontSize = 11.sp)
+                    if (via == "proxy" && !connected) Text(t("warp.connectFirst"), color = AMBER, fontSize = 11.sp)
                     OutlinedTextField(
                         count, { v: String -> count = v.filter { c: Char -> c.isDigit() }.take(2); error = "" },
-                        Modifier.fillMaxWidth().padding(vertical = 3.dp), label = { Text("Accounts (1–${Warp.MAX_ACCOUNTS})") }, singleLine = true,
+                        Modifier.fillMaxWidth().padding(vertical = 3.dp), label = { Text(tf("warp.accounts", "max" to Warp.MAX_ACCOUNTS)) }, singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = tfColors()
                     )
                     OutlinedTextField(
                         keysText, { v: String -> keysText = v; error = "" }, Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        label = { Text("WARP+ keys (optional, one per line)") },
+                        label = { Text(t("warp.keys")) },
                         placeholder = { Text("xxxxxxxx-xxxxxxxx-xxxxxxxx", fontSize = 12.sp) },
                         textStyle = TextStyle(fontFamily = MONO, fontSize = 12.sp, color = TXT),
                         minLines = 2, maxLines = 10, shape = RoundedCornerShape(10.dp), colors = tfColors()
                     )
                     // read back as it is typed: how many accounts, how many with WARP+ — a bad key named by its number, never shown
-                    val readBack = Warp.licenseReadBack(keysText, count.toIntOrNull() ?: 1)
-                    Text(readBack.text, color = if (readBack.ok) TXT2 else AMBER, fontSize = 12.sp)
-                    Text("One key goes on every account; several go one each, in order, and the accounts past them are free. Accounts are made one after another, a pause between.",
+                    val readBack = warpReadBack(keysText, count.toIntOrNull() ?: 1)
+                    Text(readBack.second, color = if (readBack.first) TXT2 else AMBER, fontSize = 12.sp)
+                    Text(t("warp.keysHint"),
                         color = MUTED, fontSize = 11.sp)
-                    Text("Creating an account accepts Cloudflare’s terms of service for WARP.", color = MUTED, fontSize = 11.sp)
+                    Text(t("warp.tos"), color = MUTED, fontSize = 11.sp)
                 } else {
                     OutlinedTextField(
                         importText, { v: String -> importText = v; error = "" }, Modifier.fillMaxWidth().padding(vertical = 4.dp),
                         placeholder = {
-                            Text(if (kind == Warp.KIND_WIREGUARD) "A WireGuard .conf ([Interface] and [Peer]) or a wireguard:// link"
-                                 else "usque’s config.json, or an Xray WARP outbound / its share JSON", fontSize = 12.sp)
+                            Text(if (kind == Warp.KIND_WIREGUARD) t("warp.importWg")
+                                 else t("warp.importMasque"), fontSize = 12.sp)
                         },
                         textStyle = TextStyle(fontFamily = MONO, fontSize = 11.sp, color = TXT),
                         minLines = 4, maxLines = 10, shape = RoundedCornerShape(10.dp), colors = tfColors()
                     )
                     OutlinedButton(onClick = {
                         val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val t = cm.primaryClip?.takeIf { c: android.content.ClipData -> c.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString()
-                        if (!t.isNullOrBlank()) importText = t else Toast.makeText(ctx, "Clipboard is empty", Toast.LENGTH_SHORT).show()
-                    }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Filled.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Paste") }
+                        val clip = cm.primaryClip?.takeIf { c: android.content.ClipData -> c.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString()
+                        if (!clip.isNullOrBlank()) importText = clip else Toast.makeText(ctx, t("imp.clipEmpty"), Toast.LENGTH_SHORT).show()
+                    }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Filled.ContentPaste, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(t("btn.paste")) }
                 }
 
-                Text("2 · Servers", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
+                Text(t("warp.step2"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
                 if (kind == Warp.KIND_WIREGUARD) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(use == "chain", { use = "chain"; error = "" }, { Text("Chain over a config") })
-                        FilterChip(use == "direct", { use = "direct"; error = "" }, { Text("Direct") })
+                        FilterChip(use == "chain", { use = "chain"; error = "" }, { Text(t("warp.useChain")) })
+                        FilterChip(use == "direct", { use = "direct"; error = "" }, { Text(t("warp.direct")) })
                     }
                     if (use == "chain") {
                         if (hops.isEmpty()) {
-                            Text("Add a config first — WARP rides inside it. An HTTP proxy cannot carry WireGuard (no UDP).", color = AMBER, fontSize = 11.sp)
+                            Text(t("warp.noHop"), color = AMBER, fontSize = 11.sp)
                         } else {
-                            DropPick("Choose the config WARP goes through", hops, chainWith) { v: String -> chainWith = v; error = "" }
+                            DropPick(t("warp.pickHop"), hops, chainWith) { v: String -> chainWith = v; error = "" }
                         }
-                        Text("Your config’s server dials Cloudflare and WARP is the chain’s exit: a ⛓ chain is made for each account — connect it to use WARP.",
+                        Text(t("warp.chainHint"),
                             color = MUTED, fontSize = 11.sp)
                     } else {
-                        Text("Endpoint", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                        Text(t("warp.endpoint"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(wgEndpoint == "auto", { wgEndpoint = "auto" }, { Text("Auto") })
+                            FilterChip(wgEndpoint == "auto", { wgEndpoint = "auto" }, { Text(t("warp.epAuto")) })
                             FilterChip(wgEndpoint == "v6", { wgEndpoint = "v6" }, { Text("IPv6") })
-                            FilterChip(wgEndpoint == "custom", { wgEndpoint = "custom" }, { Text("My clean IP") })
+                            FilterChip(wgEndpoint == "custom", { wgEndpoint = "custom" }, { Text(t("warp.epCustom")) })
                         }
-                        if (wgEndpoint == "custom") Fld("IP, optional :port (e.g. 162.159.192.7 — port ${Warp.WG_PORT})", wgAddress) { wgAddress = it }
-                        SwitchRow("Anti-DPI (noise)", wgAntiDpi) { wgAntiDpi = it }
+                        if (wgEndpoint == "custom") Fld(tf("warp.wgIp", "port" to Warp.WG_PORT), wgAddress) { wgAddress = it }
+                        SwitchRow(t("warp.antiDpiWg"), wgAntiDpi) { wgAntiDpi = it }
                     }
                 } else {
-                    Text("HTTP version", color = MUTED, fontSize = 11.sp)
+                    Text(t("warp.http"), color = MUTED, fontSize = 11.sp)
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(http == "both", { http = "both" }, { Text("Both") })
+                        FilterChip(http == "both", { http = "both" }, { Text(t("warp.httpBoth")) })
                         FilterChip(http == "h3", { http = "h3" }, { Text("HTTP/3") })
                         FilterChip(http == "h2", { http = "h2" }, { Text("HTTP/2") })
                     }
-                    Text("Both: one server for each — HTTP/3 runs over QUIC (UDP), HTTP/2 over TCP.", color = MUTED, fontSize = 11.sp)
-                    Text("Endpoint", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                    Text(t("warp.httpBothHint"), color = MUTED, fontSize = 11.sp)
+                    Text(t("warp.endpoint"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(endpoint == "auto", { endpoint = "auto" }, { Text("Auto") })
+                        FilterChip(endpoint == "auto", { endpoint = "auto" }, { Text(t("warp.epAuto")) })
                         FilterChip(endpoint == "v6", { endpoint = "v6" }, { Text("IPv6") })
-                        FilterChip(endpoint == "custom", { endpoint = "custom" }, { Text("My clean IP") })
+                        FilterChip(endpoint == "custom", { endpoint = "custom" }, { Text(t("warp.epCustom")) })
                     }
-                    if (endpoint == "custom") Fld("IP or domain, optional :port (e.g. 162.159.198.2)", address) { address = it }
-                    Fld("Cover domain (optional)", cover) { cover = it }
-                    Text("A domain behind Cloudflare, sent as the SNI instead of WARP’s own name; the server’s IP must still be WARP’s.", color = MUTED, fontSize = 11.sp)
-                    SwitchRow("Anti-DPI (noise for HTTP/3, a fragment for HTTP/2)", antiDpi) { antiDpi = it }
+                    if (endpoint == "custom") Fld(t("warp.address"), address) { address = it }
+                    Fld(t("warp.cover"), cover) { cover = it }
+                    Text(t("warp.coverHint"), color = MUTED, fontSize = 11.sp)
+                    SwitchRow(t("warp.antiDpi"), antiDpi) { antiDpi = it }
                 }
 
                 if (progress.isNotEmpty()) {
@@ -2512,17 +2534,17 @@ private fun protoTags(s: ServerConfig): String {
                             if (store.selection.isEmpty() && pick != null) store.saveSelection(pick)
                             AppWork.touch()
                             val st = r.stopped
-                            val note = if (st != null) " — stopped after ${st.made} of ${st.wanted}" else ""
-                            AppWork.snack("WARP: " + r.added.joinToString(", ") { s: ServerConfig -> s.name } + " added" + note)
+                            val note = if (st != null) " — " + tf("warp.stoppedAfter", "made" to st.made, "wanted" to st.wanted) else ""
+                            AppWork.snack(tf("warp.addedSnack", "names" to r.added.joinToString(t("sep.list")) { s: ServerConfig -> s.name }) + note)
                         } else {
-                            error = Warp.messageFor(r.code, r.detail)
+                            error = warpMessage(r.code, r.detail)
                         }
                         result = r
                         running = false
                     }
                 }, modifier = Modifier.fillMaxWidth()) {
                     if (running) CircularProgressIndicator(color = ON_PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
-                    else Text(if (mode == "import") "Import" else "Create")
+                    else Text(if (mode == "import") t("warp.import") else t("warp.create"))
                 }
             }
         }
@@ -2549,25 +2571,86 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
     return if (hops.any { p: Pair<String, String> -> p.first == sel }) sel else (hops.firstOrNull()?.first ?: "")
 }
 
+/**
+ * Warp.messageFor in the app's language: the same codes as the desktop's
+ * warp.err.* (Warp.kt keeps the English its tests and the log read). A bad key
+ * of several is named by its number; "At most N keys" is Warp.kt's own line.
+ */
+private fun warpMessage(code: String, detail: String): String {
+    if (code == "badLicense") {
+        val m = Regex("^Key (\\d+) ").find(detail)
+        if (m != null) return tf("warp.keyN", "n" to m.groupValues[1]) + " " + t("warp.err.badLicense")
+        if (detail.startsWith("At most")) return detail
+    }
+    val key = "warp.err.$code"
+    return if (I18n.has(key)) tf(key, "msg" to detail) else tf("warp.err.failed", "msg" to detail)
+}
+
+/** Warp.warningText in the app's language; a code the dictionary does not know keeps Warp.kt's words. */
+private fun warpWarning(w: Warp.Warning): String {
+    val key = "warp.warn." + w.code
+    return if (I18n.has(key)) tf(key, "msg" to w.message) else Warp.warningText(w)
+}
+
+/**
+ * Warp.licenseReadBack in the app's language: (ok, the line). A bad key keeps
+ * Warp.kt's words (it names the key by its number); a good list is counted the
+ * same way (one key on every account, several one each, the rest free).
+ */
+private fun warpReadBack(keysText: String, count: Int): Pair<Boolean, String> {
+    val rb = Warp.licenseReadBack(keysText, count)
+    if (!rb.ok) return Pair(false, rb.text)
+    val keys = keysText.split(Regex("\\r?\\n")).count { l: String -> l.isNotBlank() }
+    val n = minOf(Warp.MAX_ACCOUNTS, maxOf(1, count, keys))
+    val plus = if (keys == 1) n else minOf(keys, n)
+    val free = n - plus
+    val parts = ArrayList<String>()
+    if (plus > 0) parts.add(tf("warp.rbPlus", "n" to plus))
+    if (free > 0) parts.add(tf("warp.rbFree", "n" to free))
+    return Pair(true, tf("warp.rb", "n" to n, "parts" to parts.joinToString(t("sep.list"))))
+}
+
+/** Warp.accountLines in the app's language; premium_data / quota / usage stay Cloudflare's own names. */
+private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
+    if (info.imported) return listOf(t("warp.acctImported"))
+    val out = ArrayList<String>()
+    val type = if (info.type in listOf("free", "limited", "unlimited", "team")) info.type else "unknown"
+    out.add(tf("warp.acctType", "type" to t("warp.type.$type")))
+    val tail = if (info.licenseTail.isNotEmpty()) " …${info.licenseTail}" else ""
+    when (info.license) {
+        "applied" -> {
+            out.add(tf("warp.keyApplied", "tail" to tail))
+            if (info.type == "free") out.add(t("warp.keyStillFree"))
+        }
+        "refused" -> out.add(tf("warp.keyRefused", "tail" to tail) + (if (info.licenseError.isNotEmpty()) " — ${info.licenseError}" else ""))
+        else -> out.add(t("warp.noKey"))
+    }
+    out.add(listOf("premium_data" to info.premiumData, "quota" to info.quota, "usage" to info.usage)
+        .joinToString(" · ") { p: Pair<String, Long?> -> p.first + " " + (p.second?.let { v: Long -> Warp.humanBytes(v) } ?: "—") })
+    val d = info.devices
+    if (d != null) out.add(tf("warp.devices", "n" to d))
+    return out
+}
+
 /** The WARP sheet's answer: a batch stopped part-way, one box per account, and what to do next. */
 @Composable private fun WarpDone(res: Warp.AddResult, kind: String, done: () -> Unit) {
-    Text("Added ✓", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+    Text(t("warp.added"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
     val st = res.stopped
     if (st != null) {
-        Text("${st.made} of ${st.wanted} accounts made — " + Warp.messageFor(st.code, st.detail), color = AMBER, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
+        Text(tf("warp.madeOf", "made" to st.made, "wanted" to st.wanted) + " — " + warpMessage(st.code, st.detail), color = AMBER, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
     }
     val byId = res.added.associateBy { s: ServerConfig -> s.id }
     for (acct in res.accounts) {
         WarpAccountBox(acct.name, acct.info, acct.serverIds.mapNotNull { id: String -> byId[id] }, acct.chainName, acct.warnings)
     }
     val hint = when {
-        res.addedChains.isNotEmpty() -> "Connect the new ⛓ chain (Chains, or pick it on Home): your config carries WARP, and the sites see WARP’s address."
-        kind == Warp.KIND_WIREGUARD -> "Pick it in the list and connect."
-        else -> "Pick one in the list and connect. If HTTP/3 does not connect on this network, try the HTTP/2 one."
+        res.addedChains.isNotEmpty() -> t("warp.doneChain")
+        kind == Warp.KIND_WIREGUARD -> t("warp.doneOne")
+        else -> t("warp.doneMasque")
     }
     Text(hint, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
     Spacer(Modifier.height(10.dp))
-    Button(onClick = done, modifier = Modifier.fillMaxWidth()) { Text("See them in the list") }
+    Button(onClick = done, modifier = Modifier.fillMaxWidth()) { Text(t("warp.see")) }
 }
 
 /**
@@ -2580,12 +2663,12 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
     Column(Modifier.fillMaxWidth().padding(top = 8.dp).border(1.dp, STROKE, RoundedCornerShape(10.dp)).padding(10.dp)) {
         if (name.isNotEmpty()) Text(name, color = TXT, fontWeight = FontWeight.Bold, fontSize = 13.sp)
         for (s in servers) Text("• ${s.name} — ${s.address}:${s.port}", color = TXT2, fontSize = 12.sp, fontFamily = MONO)
-        for (line in Warp.accountLines(info)) Text(line, color = MUTED, fontSize = 11.sp)
+        for (line in warpAccountLines(info)) Text(line, color = MUTED, fontSize = 11.sp)
         if (!info.imported && info.checkedAt.isNotEmpty()) {
-            Text("As Cloudflare said on " + info.checkedAt.replace('T', ' ').take(16) + " UTC", color = MUTED, fontSize = 10.sp)
+            Text(tf("warp.asOf", "when" to info.checkedAt.replace('T', ' ').take(16) + " UTC"), color = MUTED, fontSize = 10.sp)
         }
         if (chainName != null) Text("⛓ $chainName", color = PRIMARY, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
-        for (w in warnings) Text("⚠ " + Warp.warningText(w), color = AMBER, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
+        for (w in warnings) Text("⚠ " + warpWarning(w), color = AMBER, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
     }
 }
 
@@ -2598,16 +2681,16 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
     val wgSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = wgSheetState, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
-            Text("Add WireGuard", color = TXT, fontWeight = FontWeight.Bold)
-            Fld("Name", name) { name = it }; Fld("Endpoint (host:port)", ep) { ep = it }; Fld("Private Key", priv) { priv = it }; Fld("Peer Public Key", pub) { pub = it }
-            Fld("Address (local /32)", addr) { addr = it }; Fld("Allowed IPs", allowed) { allowed = it }; Fld("PSK (optional)", psk) { psk = it }; Fld("MTU", mtu) { mtu = it }; Fld("Reserved (optional)", reserved) { reserved = it }
-            Fld("DNS (optional) — the .conf's DNS line: resolver and search domains", dnsLine) { dnsLine = it }
-            Text("e.g. 192.168.60.1, corp.example — names under corp.example are asked of that resolver through this tunnel (needs DNS managed by the app).", color = MUTED, fontSize = 11.sp)
+            Text(t("wg.title"), color = TXT, fontWeight = FontWeight.Bold)
+            Fld(t("f.name"), name) { name = it }; Fld(t("f.endpoint"), ep) { ep = it }; Fld(t("f.privKey"), priv) { priv = it }; Fld(t("f.peerPub"), pub) { pub = it }
+            Fld(t("f.wgAddr"), addr) { addr = it }; Fld(t("f.allowed"), allowed) { allowed = it }; Fld(t("f.pskOpt"), psk) { psk = it }; Fld("MTU", mtu) { mtu = it }; Fld(t("f.reservedOpt"), reserved) { reserved = it }
+            Fld(t("wg.dnsLine"), dnsLine) { dnsLine = it }
+            Text(t("wg.dnsHint"), color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
                 if (ep.isNotBlank() && priv.isNotBlank() && pub.isNotBlank()) { val s = LinkParser.makeWireguardServer(name, ep, priv, pub, addr, allowed, psk, mtu, reserved, dnsLine); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() }
-                else Toast.makeText(ctx, "Endpoint, private key and peer public key are needed", Toast.LENGTH_SHORT).show()
-            }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
+                else Toast.makeText(ctx, t("wg.missing"), Toast.LENGTH_SHORT).show()
+            }, modifier = Modifier.fillMaxWidth()) { Text(t("btn.add")) }
         }
     }
 }
@@ -2618,14 +2701,14 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
     var type by remember { mutableStateOf("socks") }; var name by remember { mutableStateOf("") }; var host by remember { mutableStateOf("") }; var port by remember { mutableStateOf("") }; var user by remember { mutableStateOf("") }; var pass by remember { mutableStateOf("") }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 16.dp)) {
-            Text("Add SOCKS / HTTP", color = TXT, fontWeight = FontWeight.Bold)
+            Text(t("proxy.title"), color = TXT, fontWeight = FontWeight.Bold)
             Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { FilterChip(type == "socks", { type = "socks" }, { Text("SOCKS5") }); FilterChip(type == "http", { type = "http" }, { Text("HTTP") }) }
-            Fld("Name", name) { name = it }; Fld("Host", host) { host = it }; Fld("Port", port) { port = it }; Fld("Username (optional)", user) { user = it }; Fld("Password (optional)", pass) { pass = it }
+            Fld(t("f.name"), name) { name = it }; Fld(t("f.host"), host) { host = it }; Fld(t("f.port"), port) { port = it }; Fld(t("f.userOpt"), user) { user = it }; Fld(t("f.passOpt"), pass) { pass = it }
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
                 if (host.isNotBlank() && port.isNotBlank()) { val s = LinkParser.makeProxyServer(type, name, host, port.toIntOrNull() ?: 1080, user, pass); store.servers.add(s); store.saveServers(); if (store.selection.isEmpty()) store.saveSelection(s.id); done() }
-                else Toast.makeText(ctx, "Host and port are needed", Toast.LENGTH_SHORT).show()
-            }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
+                else Toast.makeText(ctx, t("proxy.missing"), Toast.LENGTH_SHORT).show()
+            }, modifier = Modifier.fillMaxWidth()) { Text(t("btn.add")) }
         }
     }
 }
@@ -2649,12 +2732,12 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
-            Text("Edit · JSON · ${badge(server.protocol)}", color = TXT, fontWeight = FontWeight.Bold)
-            Fld("Name", name) { name = it }
+            Text(tf("json.title", "proto" to badge(server.protocol)), color = TXT, fontWeight = FontWeight.Bold)
+            Fld(t("f.name"), name) { name = it }
             // The mode is a note here, not a switch: it is kept as stored, so a backup round-trips.
-            Text("Mode: " + (if (mode == JsonImport.MODE_RAW) "Raw" else "Full"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
-            Text("Raw (exactly as written) runs on Windows/macOS/Linux in proxy mode; here the full form runs.", color = MUTED, fontSize = 11.sp)
-            Text("Config (JSON)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 4.dp))
+            Text(if (mode == JsonImport.MODE_RAW) t("json.modeRaw") else t("json.modeFull"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+            Text(t("json.rawNote"), color = MUTED, fontSize = 11.sp)
+            Text(t("json.config"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 4.dp))
             // JSON reads left to right in either language
             CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
                 OutlinedTextField(
@@ -2665,19 +2748,19 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
             }
             Spacer(Modifier.height(6.dp))
             OutlinedButton(onClick = { copyConfigText(ctx, text) }, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Filled.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Copy JSON")
+                Icon(Icons.Filled.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text(t("btn.copyJson"))
             }
             // the full form is what runs here, raw or not: what it leaves out is always worth saying
             if (info != null) {
-                Text("Not used in full mode — the app's own apply instead", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
-                Text("Its own routing: ${info.rules.size} rule" + (if (info.rules.size == 1) "" else "s"), color = TXT2, fontSize = 11.sp)
+                Text(t("json.notUsed"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                Text(tf("json.rules", "n" to info.rules.size), color = TXT2, fontSize = 11.sp)
                 // the record's neutral tokens (`*`, `balancer:<tag>`, "") in words
                 info.rules.forEach { r: JsonRule ->
-                    Text("   ${JsonImport.matchInWords(r.match)} → ${JsonImport.targetInWords(r.to)}", color = MUTED, fontSize = 11.sp, fontFamily = MONO)
+                    LtrBlock { Text("   ${JsonImport.matchInWords(r.match)} → ${JsonImport.targetInWords(r.to)}", color = MUTED, fontSize = 11.sp, fontFamily = MONO) }
                 }
-                if (info.dns) Text("Its own DNS servers", color = TXT2, fontSize = 11.sp)
-                if (info.balancers > 0) Text("${info.balancers} balancer" + (if (info.balancers == 1) "" else "s") + " — each member is its own server here", color = TXT2, fontSize = 11.sp)
-                if (info.observatory) Text("Its observatory", color = TXT2, fontSize = 11.sp)
+                if (info.dns) Text(t("json.dns"), color = TXT2, fontSize = 11.sp)
+                if (info.balancers > 0) Text(tf("json.balancers", "n" to info.balancers), color = TXT2, fontSize = 11.sp)
+                if (info.observatory) Text(t("json.observatory"), color = TXT2, fontSize = 11.sp)
             }
             if (error.isNotEmpty()) Text(error, color = BAD, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
             Spacer(Modifier.height(10.dp))
@@ -2686,9 +2769,9 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
                 try {
                     onSave(JsonImport.applyEdits(server, name, mode, text))
                 } catch (e: Exception) {
-                    error = "Not saved — " + (e.message ?: "the config is not valid")
+                    error = tf("json.notSaved", "why" to (e.message ?: t("json.invalid")))
                 }
-            }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
+            }, modifier = Modifier.fillMaxWidth()) { Text(t("btn.save")) }
         }
     }
 }
@@ -2765,7 +2848,7 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Edit · ${badge(server.protocol)}", color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text(tf("ed.title", "proto" to badge(server.protocol)), color = TXT, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 ViewSwitch(proView) { toPro: Boolean ->
                     if (toPro && !proView) { draft.clear(); draft.putAll(ServerEditor.toDraft(server.protocol, simpleFields())) }
                     if (!toPro && proView) loadSimple(ServerEditor.fromDraft(server.protocol, draft, simpleFields()))
@@ -2775,148 +2858,145 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
             }
             // a WARP server's account as Cloudflare told it when it was made — read-only
             val warpInfo = server.warp
-            if (warpInfo != null) WarpAccountBox("WARP account", warpInfo, emptyList(), null, emptyList())
+            if (warpInfo != null) WarpAccountBox(t("warp.acctTitle"), warpInfo, emptyList(), null, emptyList())
             if (proView) ProFields(server.protocol, draft, false, {}, tab, encOn) else {
-            Fld("Name", name) { name = it }; Fld("Address — real server/IP (connection goes here)", address) { address = it }; Fld("Port", port) { port = it }
+            Fld(t("f.name"), name) { name = it }; Fld(t("ed.address"), address) { address = it }; Fld(t("f.port"), port) { port = it }
             when (server.protocol) {
-                "vless", "vmess" -> Fld("UUID", cred) { cred = it }
-                "trojan" -> Fld("Password", cred) { cred = it }
+                "vless", "vmess" -> Fld(t("ed.uuid"), cred) { cred = it }
+                "trojan" -> Fld(t("f.password"), cred) { cred = it }
                 "shadowsocks" -> {
-                    Fld("Password", cred) { cred = it }
-                    val methods = ServerFields.SS_METHODS.map { m: String -> m to "Method: $m" } + (if (method.isNotBlank() && method !in ServerFields.SS_METHODS) listOf(method to "Method: $method") else emptyList())
-                    DropPick("Method", methods, method) { m: String -> method = m }
+                    Fld(t("f.password"), cred) { cred = it }
+                    val methods = ServerFields.SS_METHODS.map { m: String -> m to tf("ed.methodOpt", "m" to m) } + (if (method.isNotBlank() && method !in ServerFields.SS_METHODS) listOf(method to tf("ed.methodOpt", "m" to method)) else emptyList())
+                    DropPick(t("ed.method"), methods, method) { m: String -> method = m }
                 }
-                "socks", "http" -> { Fld("Username (optional)", pUser) { pUser = it }; Fld("Password (optional)", pPass) { pPass = it } }
-                "wireguard" -> Fld("Private Key", cred) { cred = it }
-                "hysteria2" -> Fld("Password (auth)", cred) { cred = it }
+                "socks", "http" -> { Fld(t("f.userOpt"), pUser) { pUser = it }; Fld(t("f.passOpt"), pPass) { pPass = it } }
+                "wireguard" -> Fld(t("f.privKey"), cred) { cred = it }
+                "hysteria2" -> Fld(t("ed.passAuth"), cred) { cred = it }
             }
             // what the sheet lacked (the full editor's table): VLESS flow and Encryption, the VMess cipher
             when (server.protocol) {
                 "vless" -> {
-                    DropPick("Flow", listOf("" to "Flow: — none —", "xtls-rprx-vision" to "Flow: xtls-rprx-vision", "xtls-rprx-vision-udp443" to "Flow: xtls-rprx-vision-udp443"), pro["flow"] ?: "") { x: String -> pro["flow"] = x }
+                    DropPick(t("ed.flow"), listOf("" to t("ed.flowNone"), "xtls-rprx-vision" to "Flow: xtls-rprx-vision", "xtls-rprx-vision-udp443" to "Flow: xtls-rprx-vision-udp443"), pro["flow"] ?: "") { x: String -> pro["flow"] = x }
                     EncryptionField(pro["encryption"] ?: "none", encOn) { x: String -> pro["encryption"] = x }
                 }
                 "vmess" -> {
-                    DropPick("Cipher", listOf("auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero").map { c: String -> c to "Cipher: $c" }, pro["vmessSecurity"] ?: "auto") { x: String -> pro["vmessSecurity"] = x }
-                    Fld("Alter ID (0 = VMess AEAD)", pro["alterId"] ?: "0") { x: String -> pro["alterId"] = x }
+                    DropPick(t("ed.cipher"), listOf("auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero").map { c: String -> c to tf("ed.cipherOpt", "c" to c) }, pro["vmessSecurity"] ?: "auto") { x: String -> pro["vmessSecurity"] = x }
+                    Fld(t("ed.alterId"), pro["alterId"] ?: "0") { x: String -> pro["alterId"] = x }
                 }
                 else -> {}
             }
             if (isHy2) {
-                Text("🛡  TLS (over QUIC)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
-                Fld("SNI — must match the server certificate", sni) { sni = it }
+                Text(t("ed.tlsQuic"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                Fld(t("ed.sniCert"), sni) { sni = it }
                 // QUIC: no first-use pin. Allow insecure without a pin runs on sing-box (EngineChoice.needsInsecureCore).
-                SwitchRow("Allow insecure (runs on sing-box unless a pcs is set)", allowInsecure) { allowInsecure = it }
-                Text("The Xray cores can no longer skip the certificate check, and pinning on first use cannot work over QUIC — so a Hysteria2 with this on and no pcs runs on sing-box. Put the certificate's SHA-256 in pcs to run it on Xray.", color = MUTED, fontSize = 11.sp)
-                Fld("Obfs password (salamander)", hy2Obfs) { hy2Obfs = it }
-                Fld("Port hopping (e.g. 20000-50000)", hy2Ports) { hy2Ports = it }
+                SwitchRow(t("ed.insecureHy2"), allowInsecure) { allowInsecure = it }
+                Text(t("ed.insecureHy2Hint"), color = MUTED, fontSize = 11.sp)
+                Fld(t("ed.obfs"), hy2Obfs) { hy2Obfs = it }
+                Fld(t("ed.hops"), hy2Ports) { hy2Ports = it }
                 TlsExtraFields(ech, { ech = it }, pcs, { pcs = it }, vcn, { vcn = it })
             }
             if (isStd) {
-                DropPick("Transport", listOf("tcp" to "tcp", "ws" to "ws", "grpc" to "grpc", "h2" to "h2", "xhttp" to "xhttp", "httpupgrade" to "httpupgrade", "kcp" to "kcp"), network) { network = it }
-                DropPick("Security", listOf("none" to "none", "tls" to "tls", "reality" to "reality"), security) { security = it }
+                DropPick(t("ed.transport"), listOf("tcp" to "tcp", "ws" to "ws", "grpc" to "grpc", "h2" to "h2", "xhttp" to "xhttp", "httpupgrade" to "httpupgrade", "kcp" to "kcp"), network) { network = it }
+                DropPick(t("ed.security"), listOf("none" to "none", "tls" to "tls", "reality" to "reality"), security) { security = it }
                 // Context-aware SNI section: it means different things for
                 // reality / CDN-fronting / plain-TLS, so say the right thing.
                 val frontable = network in listOf("ws", "grpc", "xhttp", "splithttp", "h2", "http", "httpupgrade")
                 if (security == "tls" || security == "reality") {
-                    val head = if (security == "reality") "🛡  REALITY (mimic a real site)" else "🛡  TLS / CDN — SNI & bypass"
-                    val sniLabel = when { security == "reality" -> "SNI — must match server's serverNames"; frontable -> "SNI — real domain (CDN reads this; = Host)"; else -> "SNI — must match the server certificate" }
+                    val head = if (security == "reality") t("ed.headReality") else t("ed.headTls")
+                    val sniLabel = when { security == "reality" -> t("ed.sniReality"); frontable -> t("ed.sniFront"); else -> t("ed.sniCert") }
                     val sniHint = when {
-                        security == "reality" -> "REALITY is not fronting: the SNI must be the exact site your server mimics (serverNames), e.g. www.google.com. Connection still goes to Address."
-                        frontable -> "SNI and Host are your real domain; the CDN routes by the SNI, so they must match (a different fake SNI here won't connect). To bypass DPI, turn on Hide SNI below."
-                        else -> "Connection goes to Address; the SNI is sent in the handshake and must match the server certificate (or Allow Insecure)."
+                        security == "reality" -> t("ed.hintReality")
+                        frontable -> t("ed.hintFront")
+                        else -> t("ed.hintTls")
                     }
                     Text(head, color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
                     Fld(sniLabel, sni) { sni = it }
-                    if (security == "tls" && frontable) Fld("Host — same as SNI", host) { host = it }
+                    if (security == "tls" && frontable) Fld(t("ed.hostSni"), host) { host = it }
                     Text(sniHint, color = MUTED, fontSize = 11.sp)
                     // Working bypass: fragment the ClientHello so DPI can't read the SNI.
-                    SwitchRow("🕵 Hide SNI from DPI (fragment / patterniha)", fragment.isNotBlank()) {
+                    SwitchRow(t("ed.hideSni"), fragment.isNotBlank()) {
                         fragment = if (it) (if (fragment.isBlank()) "tlshello,100-200,10-20" else fragment) else ""
                     }
                 }
                 Fld("Path / ServiceName", path) { path = it }
-                DropPick("Fake ClientHello (browser fingerprint / uTLS)", listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized", "unsafe" to "unsafe (custom cipherSuites)"), fp) { fp = it }
+                DropPick(t("ed.fp"), listOf("chrome" to "chrome", "firefox" to "firefox", "safari" to "safari", "ios" to "ios", "android" to "android", "edge" to "edge", "random" to "random", "randomized" to "randomized", "unsafe" to t("ed.fpUnsafe")), fp) { fp = it }
                 if (security == "reality") {
                     Fld("Public Key (pbk)", pbk) { pbk = it }; Fld("Short ID (sid)", sid) { sid = it }
-                    Fld("ML-DSA-65 verify key (pqv)", pqv) { pqv = it }
+                    Fld(t("ed.pqv"), pqv) { pqv = it }
                 }
                 if (security == "tls") TlsExtraFields(ech, { ech = it }, pcs, { pcs = it }, vcn, { vcn = it })
                 // The core no longer accepts allowInsecure: the switch means "pin the
                 // certificate this server presents on first use" (CertPin.kt).
-                SwitchRow("Allow insecure — pin the server's certificate on first use", allowInsecure) { allowInsecure = it }
+                SwitchRow(t("ed.insecurePin"), allowInsecure) { allowInsecure = it }
                 // patterniha custom-TLS
-                Text("🧩  patterniha — finalMask / cipherSuites", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
-                Fld("cipherSuites (use with fingerprint = unsafe)", cipherSuites) { cipherSuites = it }
+                Text(t("ed.pattn"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                Fld(t("ed.cipherSuites"), cipherSuites) { cipherSuites = it }
                 Fld("finalMask (JSON)", finalMask) { finalMask = it }
-                Text("Address = a clean Cloudflare IP, fingerprint = unsafe, paste cipherSuites + finalMask. Paste the JSON exactly; the app does not rewrite it.", color = MUTED, fontSize = 11.sp)
+                Text(t("ed.pattnHint"), color = MUTED, fontSize = 11.sp)
             }
             if (server.protocol == "wireguard") {
-                Fld("Peer Public Key", wgPub) { wgPub = it }; Fld("Address (/32)", wgAddr) { wgAddr = it }; Fld("PSK", wgPsk) { wgPsk = it }
-                Fld("MTU", wgMtu) { wgMtu = it }; Fld("Reserved", wgReserved) { wgReserved = it }; Fld("Allowed IPs", wgAllowed) { wgAllowed = it }
-                Fld("DNS — resolver and search domains (e.g. 192.168.60.1, corp.example)", wgDns) { wgDns = it }
+                Fld(t("f.peerPub"), wgPub) { wgPub = it }; Fld("Address (/32)", wgAddr) { wgAddr = it }; Fld(t("ed.psk"), wgPsk) { wgPsk = it }
+                Fld("MTU", wgMtu) { wgMtu = it }; Fld("Reserved", wgReserved) { wgReserved = it }; Fld(t("f.allowed"), wgAllowed) { wgAllowed = it }
+                Fld(t("ed.wgDns"), wgDns) { wgDns = it }
             }
             if (isMasque) {
                 // MASQUE: its HTTP version, the SNI, a user and password or the WARP account's
                 // summary (its keys live in the Pro view), the certificate knobs; then anti-DPI by
                 // HTTP version and the core — Xray or Xray-PattN only
-                Text("🛡  MASQUE — IP over HTTP/3 or HTTP/2", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
-                DropPick(ServerFields.str("sf.masqueHttp"), listOf("h3" to ServerFields.str("sfo.masqueHttp.h3"), "h2" to ServerFields.str("sfo.masqueHttp.h2")), masqueHttp) { x: String -> masqueHttp = x }
-                Text(ServerFields.str("sf.masqueHttp.hint"), color = MUTED, fontSize = 11.sp)
+                Text(t("ed.masqueHead"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                DropPick(t("sf.masqueHttp"), listOf("h3" to t("sfo.masqueHttp.h3"), "h2" to t("sfo.masqueHttp.h2")), masqueHttp) { x: String -> masqueHttp = x }
+                Text(t("sf.masqueHttp.hint"), color = MUTED, fontSize = 11.sp)
                 Fld("SNI", sni) { sni = it }
                 val warpAddr = pro["warpAddress"] ?: ""
                 if ((pro["warpPrivateKey"] ?: "").isNotBlank()) {
-                    Text(ServerFields.str("sfg.warp"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
-                    Text("Addresses: " + warpAddr.ifBlank { "—" }, color = TXT2, fontSize = 11.sp, fontFamily = MONO)
-                    Text("Device key and endpoint key: set — they are kept with this server (a copy of it carries them); change them in the Pro view.", color = MUTED, fontSize = 11.sp)
+                    Text(t("sfg.warp"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
+                    Text(tf("ed.warpAddrs", "a" to warpAddr.ifBlank { "—" }), color = TXT2, fontSize = 11.sp, fontFamily = MONO)
+                    Text(t("ed.warpKeys"), color = MUTED, fontSize = 11.sp)
                 } else {
-                    Fld("Username (optional)", pro["masqueUser"] ?: "") { x: String -> pro["masqueUser"] = x }
-                    Fld("Password (optional)", pro["masquePass"] ?: "") { x: String -> pro["masquePass"] = x }
+                    Fld(t("f.userOpt"), pro["masqueUser"] ?: "") { x: String -> pro["masqueUser"] = x }
+                    Fld(t("f.passOpt"), pro["masquePass"] ?: "") { x: String -> pro["masquePass"] = x }
                 }
                 if (masqueHttp == "h2") {
-                    val fps = listOf("" to "Browser fingerprint: — none —") + listOf("chrome", "firefox", "safari", "ios", "android", "edge", "random", "randomized").map { x: String -> x to "Browser fingerprint: $x" }
-                    DropPick(ServerFields.str("sf.fp.masque"), fps, fp) { x: String -> fp = x }
+                    val fps = listOf("" to t("ed.fpNone")) + listOf("chrome", "firefox", "safari", "ios", "android", "edge", "random", "randomized").map { x: String -> x to tf("ed.fpOpt", "x" to x) }
+                    DropPick(t("sf.fp.masque"), fps, fp) { x: String -> fp = x }
                 }
                 TlsExtraFields(ech, { ech = it }, pcs, { pcs = it }, vcn, { vcn = it })
                 HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
-                Text("⚙  Anti-DPI and core", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
+                Text(t("ed.antiDpiCore"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
                 if (masqueHttp == "h2") {
-                    SwitchRow("🕵 Fragment the TLS hello (HTTP/2 runs over TCP)", fragment.isNotBlank()) { on: Boolean ->
+                    SwitchRow(t("ed.fragH2"), fragment.isNotBlank()) { on: Boolean ->
                         fragment = if (on) (if (fragment.isBlank()) "tlshello,100-200,10-20" else fragment) else ""
                     }
                 } else {
-                    SwitchRow("🕵 Noise before QUIC (HTTP/3 runs over UDP)", noisePreset != "off") { on: Boolean -> noisePreset = if (on) "random" else "off" }
+                    SwitchRow(t("ed.noiseH3"), noisePreset != "off") { on: Boolean -> noisePreset = if (on) "random" else "off" }
                 }
-                DropPick("Core / Engine", listOf("xray" to "Xray (default)", "xray-pattn" to "Xray-PattN"), if (engine == "xray-pattn") "xray-pattn" else "xray") { x: String -> engine = x }
-                Text("MASQUE runs on an Xray core only — sing-box has none.", color = MUTED, fontSize = 11.sp)
+                DropPick(t("ed.engine"), listOf("xray" to t("ed.xrayDefault"), "xray-pattn" to "Xray-PattN"), if (engine == "xray-pattn") "xray-pattn" else "xray") { x: String -> engine = x }
+                Text(t("ed.masqueXrayOnly"), color = MUTED, fontSize = 11.sp)
             }
             if (!isMasque) {
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
-            Text("⚙  Advanced — DPI evasion (optional)", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
+            Text(t("ed.advanced"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
             DropPick(
-                "Core / Engine",
+                t("ed.engine"),
                 listOf(
-                    "xray" to "Xray (default)",
-                    "xray-pattn" to "Xray-PattN (accepts plaintext VLESS/Trojan)",
-                    "sing-box" to "sing-box (fake ClientHello / uTLS)"
+                    "xray" to t("ed.xrayDefault"),
+                    "xray-pattn" to t("ed.pattnOpt"),
+                    "sing-box" to t("ed.singboxOpt")
                 ),
                 engine
             ) { engine = it }
             Text(
-                "Only this config runs on the chosen core. Pick Xray-PattN when a config has no TLS " +
-                    "and the official core refuses it outright; a chain runs on PattN as soon as ONE of " +
-                    "its hops asks for it. Both extra cores are bundled for arm64 only — elsewhere the " +
-                    "config falls back to the in-process core.",
+                t("ed.engineHint"),
                 color = MUTED, fontSize = 11.sp
             )
             Spacer(Modifier.height(8.dp))
-            Fld("Fragment (packets,length,interval — empty = off)", fragment) { fragment = it }
-            Text("e.g. tlshello,100-200,10-20", color = MUTED, fontSize = 11.sp)
+            Fld(t("ed.fragment"), fragment) { fragment = it }
+            Text(t("ed.fragmentEg"), color = MUTED, fontSize = 11.sp)
             Spacer(Modifier.height(8.dp))
-            DropPick("Noise (decoy packets before handshake)", listOf("off" to "Off", "random" to "Random", "faketls" to "Fake ClientHello", "custom" to "Custom…"), noisePreset) { noisePreset = it }
+            DropPick(t("ed.noise"), listOf("off" to t("ed.noiseOff"), "random" to t("ed.noiseRandom"), "faketls" to t("ed.noiseFake"), "custom" to t("ed.noiseCustom")), noisePreset) { noisePreset = it }
             if (noisePreset == "custom") {
-                Fld("Noise spec (type:packet:delay; …)", noiseCustom) { noiseCustom = it }
-                Text("Decoy packets before the real handshake. type = rand/str/base64/hex.", color = MUTED, fontSize = 11.sp)
+                Fld(t("ed.noiseSpec"), noiseCustom) { noiseCustom = it }
+                Text(t("ed.noiseHint"), color = MUTED, fontSize = 11.sp)
             }
             }
             }
@@ -2926,18 +3006,25 @@ private fun defaultWarpHop(store: Store, hops: List<Pair<String, String>>): Stri
                 val nf = if (proView) ServerEditor.fromDraft(server.protocol, draft, simpleFields()) else simpleFields()
                 val p = ServerEditor.problem(server.protocol, if (proView) HashMap<String, String>(draft) else ServerEditor.toDraft(server.protocol, nf), false, encOn.value)
                 if (p != null) {
-                    Toast.makeText(ctx, ServerEditor.problemText(server.protocol, p), Toast.LENGTH_LONG).show()
+                    Toast.makeText(ctx, problemTextUi(server.protocol, p), Toast.LENGTH_LONG).show()
                     if (proView) tab.value = p.second
                 } else {
                     try { onSave(ServerEditor.apply(server, nf)) }
-                    catch (e: Exception) { Toast.makeText(ctx, e.message ?: "Could not save", Toast.LENGTH_LONG).show() }
+                    catch (e: Exception) { Toast.makeText(ctx, e.message ?: t("ed.saveFailed"), Toast.LENGTH_LONG).show() }
                 }
-            }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
+            }, modifier = Modifier.fillMaxWidth()) { Text(t("btn.save")) }
         }
     }
 }
 
 /* ---------- the full server editor: the Pro view and a server made by hand (ServerFields) ---------- */
+
+/** ServerEditor.problemText in the app's language: the table's strings through t() (ServerEditor keeps the English). */
+private fun problemTextUi(protocol: String, p: Triple<String, String, String>): String {
+    val label = t("sf.${p.first}.$protocol").takeIf { x: String -> !x.startsWith("sf.") } ?: t("sf.${p.first}")
+    return if (p.third == "edit.err.required") t(p.third).replace("{field}", label)
+    else t("edit.err.in").replace("{field}", label).replace("{why}", t(p.third))
+}
 
 /** The editor's view, remembered while the app runs: the sheet opens in the one used last. */
 private object EditView { var pro: Boolean = false }
@@ -2945,15 +3032,15 @@ private object EditView { var pro: Boolean = false }
 /** A field's label: by protocol or transport where it reads differently, its key, "this device only". */
 private fun proLabel(protocol: String, d: Map<String, String>, fld: SfField): String {
     val net = d["network"] ?: "tcp"
-    val own = listOf("sf.${fld.id}.$protocol", "sf.${fld.id}.$net", "sf.${fld.id}").map { k: String -> ServerFields.str(k) }.firstOrNull { v: String -> !v.startsWith("sf.") } ?: fld.id
-    return if (fld.local) "$own · ${fld.key} · ${ServerFields.str("edit.local")}" else "$own · ${fld.key}"
+    val own = listOf("sf.${fld.id}.$protocol", "sf.${fld.id}.$net", "sf.${fld.id}").map { k: String -> t(k) }.firstOrNull { v: String -> !v.startsWith("sf.") } ?: fld.id
+    return if (fld.local) "$own · ${fld.key} · ${t("edit.local")}" else "$own · ${fld.key}"
 }
 
 /** An option's label: its own string where it has one (the empty one, Mux, the core), else the value. */
 private fun proOption(fld: SfField, o: String): String {
     if (fld.optionLabels.isEmpty() || (fld.optionLabels != "all" && o.isNotEmpty())) return o
     val k = "sfo.${fld.id}.${o.ifEmpty { "_" }}"
-    val v = ServerFields.str(k)
+    val v = t(k)
     return if (v == k) o.ifEmpty { "—" } else v
 }
 
@@ -2963,7 +3050,7 @@ private fun proOption(fld: SfField, o: String): String {
         for (p in listOf(false, true)) {
             val on = p == pro
             Text(
-                ServerFields.str(if (p) "edit.view.pro" else "edit.view.simple"),
+                t(if (p) "edit.view.pro" else "edit.view.simple"),
                 color = if (on) ON_PRIMARY else MUTED, fontSize = 12.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.background(if (on) PRIMARY else Color.Transparent).clickable { onPick(p) }.padding(horizontal = 12.dp, vertical = 6.dp)
             )
@@ -2973,10 +3060,10 @@ private fun proOption(fld: SfField, o: String): String {
 
 /** VLESS Encryption: none, or the panel's value — read back (auth, mode, RTT) or why it is not one. */
 @Composable private fun EncryptionField(value: String, encOn: MutableState<Boolean>, onChange: (String) -> Unit) {
-    Text("${ServerFields.str("sf.encryption")} · encryption", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+    Text("${t("sf.encryption")} · encryption", color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
     DropPick(
-        ServerFields.str("sf.encryption"),
-        listOf("none" to ServerFields.str("sfo.encMode.none"), "mlkem" to ServerFields.str("sfo.encMode.mlkem")),
+        t("sf.encryption"),
+        listOf("none" to t("sfo.encMode.none"), "mlkem" to t("sfo.encMode.mlkem")),
         if (encOn.value) "mlkem" else "none"
     ) { m: String ->
         encOn.value = m == "mlkem"
@@ -2985,19 +3072,19 @@ private fun proOption(fld: SfField, o: String): String {
     if (encOn.value) {
         OutlinedTextField(
             if (value == "none") "" else value, { x: String -> onChange(x.trim()) },
-            Modifier.fillMaxWidth().padding(vertical = 3.dp), label = { Text(ServerFields.str("sf.encryptionValue")) }, colors = tfColors()
+            Modifier.fillMaxWidth().padding(vertical = 3.dp), label = { Text(t("sf.encryptionValue")) }, colors = tfColors()
         )
         val r = ServerFields.readEncryption(value)
         if (r != null) {
             val bad = r.bad
-            if (bad != null) Text("✗ " + ServerFields.str(bad), color = BAD, fontSize = 11.sp)
+            if (bad != null) Text("✗ " + t(bad), color = BAD, fontSize = 11.sp)
             else {
-                val auth = ServerFields.str("edit.enc.auth").replace("{v}", r.auth + if (r.auth == "ML-KEM-768") " — " + ServerFields.str("edit.enc.pq") else "")
-                val mode = ServerFields.str("edit.enc.mode").replace("{v}", r.mode)
+                val auth = t("edit.enc.auth").replace("{v}", r.auth + if (r.auth == "ML-KEM-768") " — " + t("edit.enc.pq") else "")
+                val mode = t("edit.enc.mode").replace("{v}", r.mode)
                 Text("$auth · $mode · ${if (r.rtt == "0rtt") "0-RTT" else "1-RTT"}", color = PRIMARY, fontSize = 11.sp)
             }
         }
-        Text(ServerFields.str("sf.encryption.hint"), color = MUTED, fontSize = 11.sp)
+        Text(t("sf.encryption.hint"), color = MUTED, fontSize = 11.sp)
     }
 }
 
@@ -3021,21 +3108,21 @@ private fun proOption(fld: SfField, o: String): String {
         }
         "network" -> {
             Text(label, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-            val opts = ServerFields.NETWORKS.map { n: String -> n to ServerFields.str("sfo.network.$n") } + (if (v.isNotEmpty() && v !in ServerFields.NETWORKS) listOf(v to v) else emptyList())
+            val opts = ServerFields.NETWORKS.map { n: String -> n to t("sfo.network.$n") } + (if (v.isNotEmpty() && v !in ServerFields.NETWORKS) listOf(v to v) else emptyList())
             DropPick(label, opts, v) { x: String -> d[fld.id] = x }
         }
         "security" -> {
             Text(label, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-            DropPick(label, ServerFields.securitiesOf(protocol).map { s: String -> s to ServerFields.str("sfo.security.$s") }, v) { x: String -> d[fld.id] = x }
+            DropPick(label, ServerFields.securitiesOf(protocol).map { s: String -> s to t("sfo.security.$s") }, v) { x: String -> d[fld.id] = x }
         }
         "encryption" -> EncryptionField(v.ifEmpty { "none" }, encOn) { x: String -> d[fld.id] = x }
         "uuid" -> {
             Fld(label, v) { x: String -> d[fld.id] = x }
-            TextButton(onClick = { d[fld.id] = java.util.UUID.randomUUID().toString() }) { Text(ServerFields.str("edit.genUuid"), color = PRIMARY, fontSize = 12.sp) }
+            TextButton(onClick = { d[fld.id] = java.util.UUID.randomUUID().toString() }) { Text(t("edit.genUuid"), color = PRIMARY, fontSize = 12.sp) }
         }
         else -> Fld(label, v) { x: String -> d[fld.id] = x }
     }
-    if (fld.hint) Text(ServerFields.str("sf.${fld.id}.hint"), color = MUTED, fontSize = 11.sp)
+    if (fld.hint) Text(t("sf.${fld.id}.hint"), color = MUTED, fontSize = 11.sp)
 }
 
 /**
@@ -3049,42 +3136,42 @@ private fun proOption(fld: SfField, o: String): String {
     // a tab this protocol has none of shows the Protocol tab (never written to the state while composing)
     val cur = if ((tab.value == "transport" && noTransport) || (tab.value == "security" && noSecurity)) "protocol" else tab.value
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-        for (t in ServerFields.TABS) {
-            val off = (t == "transport" && noTransport) || (t == "security" && noSecurity)
-            val on = t == cur
+        for (tb in ServerFields.TABS) {
+            val off = (tb == "transport" && noTransport) || (tb == "security" && noSecurity)
+            val on = tb == cur
             Text(
-                ServerFields.str("edit.tab.$t"),
+                t("edit.tab.$tb"),
                 color = when { off -> STROKE; on -> PRIMARY; else -> MUTED }, fontSize = 13.sp,
                 fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
-                modifier = Modifier.clickable(enabled = !off) { tab.value = t }.padding(horizontal = 10.dp, vertical = 8.dp)
+                modifier = Modifier.clickable(enabled = !off) { tab.value = tb }.padding(horizontal = 10.dp, vertical = 8.dp)
             )
         }
     }
     HorizontalDivider(color = STROKE)
     if (cur == "basics") {
         if (isNew) {
-            Text(ServerFields.str("sf.protocol"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-            DropPick(ServerFields.str("sf.protocol"), ServerFields.PROTOCOLS.map { p: String -> p to "${badge(p)} — ${ServerFields.str("sfp.$p")}" }, protocol) { p: String -> onProtocol(p) }
-            Text(ServerFields.str("edit.protoPick"), color = MUTED, fontSize = 11.sp)
-        } else Text(ServerFields.str("edit.protoFixed"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            Text(t("sf.protocol"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+            DropPick(t("sf.protocol"), ServerFields.PROTOCOLS.map { p: String -> p to "${badge(p)} — ${t("sfp.$p")}" }, protocol) { p: String -> onProtocol(p) }
+            Text(t("edit.protoPick"), color = MUTED, fontSize = 11.sp)
+        } else Text(t("edit.protoFixed"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
     }
     val name = badge(protocol)
     when {
-        cur == "transport" && noTransport -> Text(ServerFields.str("edit.noTransport").replace("{proto}", name), color = MUTED, fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
-        cur == "security" && noSecurity -> Text(ServerFields.str("edit.noSecurity").replace("{proto}", name), color = MUTED, fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
+        cur == "transport" && noTransport -> Text(t("edit.noTransport").replace("{proto}", name), color = MUTED, fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
+        cur == "security" && noSecurity -> Text(t("edit.noSecurity").replace("{proto}", name), color = MUTED, fontSize = 12.sp, modifier = Modifier.padding(vertical = 16.dp))
         else -> {
             var group: String? = null
             for (fld in ServerFields.FIELDS) {
                 if (fld.tab != cur || fld.kind == "protocol" || !ServerEditor.shown(protocol, d, fld)) continue
                 val g = fld.group
-                if (g != null && g != group) Text(ServerFields.str("sfg.$g"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
+                if (g != null && g != group) Text(t("sfg.$g"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
                 group = g
                 ProField(protocol, fld, d, encOn)
             }
         }
     }
-    if (cur == "security" && !noSecurity && (d["security"] ?: "none") == "none") Text(ServerFields.str("edit.noTls"), color = AMBER, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-    Text(ServerFields.str("edit.localNote"), color = MUTED, fontSize = 10.sp, modifier = Modifier.padding(top = 10.dp))
+    if (cur == "security" && !noSecurity && (d["security"] ?: "none") == "none") Text(t("edit.noTls"), color = AMBER, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+    Text(t("edit.localNote"), color = MUTED, fontSize = 10.sp, modifier = Modifier.padding(top = 10.dp))
 }
 
 /** A server made by hand: the Pro view on Basics, its protocol picked first (ServerEditor.create). */
@@ -3098,7 +3185,7 @@ private fun proOption(fld: SfField, o: String): String {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
-            Text(ServerFields.str("edit.newTitle") + " · " + badge(protocol), color = TXT, fontWeight = FontWeight.Bold)
+            Text(t("edit.newTitle") + " · " + badge(protocol), color = TXT, fontWeight = FontWeight.Bold)
             ProFields(protocol, draft, true, { p: String ->
                 val keep = HashMap<String, String>(draft)
                 draft.clear(); draft.putAll(ServerEditor.newDraft(p, keep))
@@ -3109,20 +3196,20 @@ private fun proOption(fld: SfField, o: String): String {
             Button(onClick = {
                 val p = ServerEditor.problem(protocol, draft, true, encOn.value)
                 if (p != null) {
-                    Toast.makeText(ctx, ServerEditor.problemText(protocol, p), Toast.LENGTH_LONG).show()
+                    Toast.makeText(ctx, problemTextUi(protocol, p), Toast.LENGTH_LONG).show()
                     tab.value = p.second
                 } else {
                     try {
                         val s = ServerEditor.create(protocol, ServerEditor.fromDraft(protocol, draft, ServerEditor.Fields()))
                         store.servers.add(s); store.saveServers()
                         if (store.selection.isEmpty()) store.saveSelection(s.id)
-                        Toast.makeText(ctx, ServerFields.str("t.serverCreated").replace("{name}", s.name), Toast.LENGTH_SHORT).show()
+                        Toast.makeText(ctx, t("t.serverCreated").replace("{name}", s.name), Toast.LENGTH_SHORT).show()
                         done()
                     } catch (e: Exception) {
-                        Toast.makeText(ctx, e.message ?: "Could not add the server", Toast.LENGTH_LONG).show()
+                        Toast.makeText(ctx, e.message ?: t("ed.addFailed"), Toast.LENGTH_LONG).show()
                     }
                 }
-            }, modifier = Modifier.fillMaxWidth()) { Text("Add") }
+            }, modifier = Modifier.fillMaxWidth()) { Text(t("btn.add")) }
         }
     }
 }
@@ -3134,11 +3221,11 @@ private fun proOption(fld: SfField, o: String): String {
 @Composable private fun TlsExtraFields(
     ech: String, onEch: (String) -> Unit, pcs: String, onPcs: (String) -> Unit, vcn: String, onVcn: (String) -> Unit
 ) {
-    Fld("ECH — Encrypted Client Hello (e.g. cloudflare-ech.com+udp://1.1.1.1)", ech, onEch)
-    Text("Hides the real SNI inside an encrypted ClientHello: the ECH config itself (base64) or where to fetch it — name+udp://resolver or name+https://resolver/dns-query. Empty = off.", color = MUTED, fontSize = 11.sp)
-    Fld("Certificate SHA-256 (pcs)", pcs, onPcs)
-    Fld("Verify certificate as (vcn)", vcn, onVcn)
-    Text("pcs: accept exactly this certificate (a self-signed one too) — what replaced Allow Insecure. vcn: check the certificate against this name instead of the SNI.", color = MUTED, fontSize = 11.sp)
+    Fld(t("ed.ech"), ech, onEch)
+    Text(t("ed.echHint"), color = MUTED, fontSize = 11.sp)
+    Fld(t("ed.pcs"), pcs, onPcs)
+    Fld(t("ed.vcn"), vcn, onVcn)
+    Text(t("ed.pcsHint"), color = MUTED, fontSize = 11.sp)
 }
 
 /* ================================ SUBS ================================ */
@@ -3169,30 +3256,30 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
         store.subs.toList().forEach { sub -> if (SubRefresh.due(sub, now, maxAge)) refresh(sub) }
     }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        TopBar("Subscriptions") {
+        TopBar(t("subs.title")) {
             IconButton(onClick = { store.subs.toList().forEach { refresh(it) } }, enabled = store.subs.any { it.id !in busy }) {
-                Icon(Icons.Filled.Refresh, "refresh all", tint = PRIMARY)
+                Icon(Icons.Filled.Refresh, t("subs.refreshAll"), tint = PRIMARY)
             }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp)) {
             Card(Modifier.fillMaxWidth().padding(bottom = 10.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                 Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("Auto update", color = TXT, fontSize = 13.sp)
-                        Text("when this screen opens, every ${settings.autoUpdateInterval} min", color = MUTED, fontSize = 11.sp, fontFamily = MONO)
+                        Text(t("subs.auto"), color = TXT, fontSize = 13.sp)
+                        Text(tf("subs.autoLine", "n" to settings.autoUpdateInterval), color = MUTED, fontSize = 11.sp, fontFamily = MONO)
                     }
                     Switch(settings.autoUpdateSubs, { v -> settings = settings.copy(autoUpdateSubs = v); store.saveSettings(settings) },
                         colors = SwitchDefaults.colors(checkedThumbColor = ON_PRIMARY, checkedTrackColor = PRIMARY, uncheckedThumbColor = MUTED, uncheckedTrackColor = CARD2, uncheckedBorderColor = STROKE))
                 }
             }
-            Fld("Subscription URL (https://…)", url) { url = it }; Fld("Name (optional)", name) { name = it }
+            Fld(t("subs.url"), url) { url = it }; Fld(t("subs.nameOpt"), name) { name = it }
             Button(onClick = {
-                if (url.isBlank()) AppWork.snack("Paste your subscription link (https://…) first")
+                if (url.isBlank()) AppWork.snack(t("subs.pasteFirst"))
                 else { val sub = Subscription(newId("sub"), name.ifBlank { url.take(24) }, url.trim()); store.subs.add(sub); store.saveSubs(); url = ""; name = ""; AppWork.refreshSub(ctx, store, sub.id, announce = true) }
-            }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Add & fetch") }
+            }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(t("subs.addFetch")) }
             if (note.first.isNotEmpty()) Text(note.first, color = if (note.second) BAD else PRIMARY, fontSize = 12.sp)
             Spacer(Modifier.height(8.dp))
-            if (store.subs.isEmpty()) EmptyHint("No subscriptions yet — paste your subscription link above. Its servers appear on SERVERS, in a group of their own.")
+            if (store.subs.isEmpty()) EmptyHint(t("subs.empty"))
             store.subs.forEach { sub ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -3201,12 +3288,12 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
                             Text(sub.name, color = TXT, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(sub.url, color = MUTED2, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(
-                                "${sub.serverCount} servers" + if (sub.lastUpdated > 0) " · updated ${fmtAgo(System.currentTimeMillis() - sub.lastUpdated)}" else " · never updated",
+                                tf("subs.servers", "n" to sub.serverCount) + " · " + if (sub.lastUpdated > 0) tf("subs.updated", "ago" to fmtAgo(System.currentTimeMillis() - sub.lastUpdated)) else t("subs.never"),
                                 color = MUTED, fontSize = 11.sp, fontFamily = MONO
                             )
                             // The last attempt failed (its servers were kept): say when and why.
                             if (sub.lastError.isNotEmpty() && sub.lastTried > 0) Text(
-                                "last try ${fmtAgo(System.currentTimeMillis() - sub.lastTried)}: ${sub.lastError}",
+                                tf("subs.lastTry", "ago" to fmtAgo(System.currentTimeMillis() - sub.lastTried), "error" to sub.lastError),
                                 color = BAD, fontSize = 11.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis
                             )
                             if (sub.total > 0) {
@@ -3219,14 +3306,14 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
                             }
                             if (sub.expire > 0) {
                                 val daysLeft = (sub.expire * 1000L - System.currentTimeMillis()) / 86_400_000L
-                                Text(if (daysLeft >= 0) "$daysLeft days left" else "Expired", color = if (daysLeft < 0) BAD else if (daysLeft <= 3) AMBER else MUTED, fontSize = 11.sp)
+                                Text(if (daysLeft >= 0) tf("subs.daysLeft", "n" to daysLeft) else t("subs.expired"), color = if (daysLeft < 0) BAD else if (daysLeft <= 3) AMBER else MUTED, fontSize = 11.sp)
                             }
                         }
                         IconButton(onClick = { AppWork.refreshSub(ctx, store, sub.id, announce = true) }, enabled = sub.id !in busy) {
                             if (sub.id in busy) CircularProgressIndicator(color = PRIMARY, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-                            else Icon(Icons.Filled.Refresh, "refresh", tint = MUTED)
+                            else Icon(Icons.Filled.Refresh, t("a11y.refresh"), tint = MUTED)
                         }
-                        IconButton(onClick = { confirmDelete = sub }) { Icon(Icons.Filled.DeleteOutline, "delete", tint = BAD) }
+                        IconButton(onClick = { confirmDelete = sub }) { Icon(Icons.Filled.DeleteOutline, t("a11y.delete"), tint = BAD) }
                     }
                 }
             }
@@ -3240,21 +3327,21 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
             containerColor = CARD,
-            title = { Text("Delete this subscription?", color = TXT, fontSize = 16.sp) },
-            text = { Text("${victim.name} and its $count server(s)", color = MUTED, fontSize = 13.sp, fontFamily = MONO) },
+            title = { Text(t("subs.deleteTitle"), color = TXT, fontSize = 16.sp) },
+            text = { Text(tf("subs.deleteBody", "name" to victim.name, "n" to count), color = MUTED, fontSize = 13.sp, fontFamily = MONO) },
             confirmButton = {
                 TextButton(onClick = {
                     val wasIn = store.serverById(store.selection)?.subId == victim.id
                     store.deleteSubscription(victim.id)   // a selection among its servers falls back
                     confirmDelete = null
                     AppWork.snack(
-                        if (wasIn && store.selection.isNotEmpty()) "Deleted ${victim.name} — now using ${store.selectionLabel()}"
-                        else "Deleted ${victim.name}"
+                        if (wasIn && store.selection.isNotEmpty()) tf("srv.deletedNow", "name" to victim.name, "now" to selectionWord(store))
+                        else tf("srv.deleted", "name" to victim.name)
                     )
                     bump()
-                }) { Text("Delete", color = BAD) }
+                }) { Text(t("btn.delete"), color = BAD) }
             },
-            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel", color = MUTED) } }
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text(t("btn.cancel"), color = MUTED) } }
         )
     }
 }
@@ -3264,14 +3351,14 @@ private fun SubsScreen(store: Store, bump: () -> Unit) {
 private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     observeStore()
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        TopBar("Proxy Pool", back) {
+        TopBar(t("pool.title"), back) {
             IconButton(onClick = { val used = usedPorts(store); var sp = 60001; while (used.contains(sp)) sp++; var hp = sp + 1; while (used.contains(hp)) hp++
-                store.pool.add(PoolEntry(newId("px"), "Proxy ${store.pool.size + 1}", store.servers.firstOrNull()?.id ?: "", sp, hp, true)); store.savePool(); bump() }) { Icon(Icons.Filled.Add, "add", tint = PRIMARY) }
+                store.pool.add(PoolEntry(newId("px"), tf("pool.newName", "n" to store.pool.size + 1), store.servers.firstOrNull()?.id ?: "", sp, hp, true)); store.savePool(); bump() }) { Icon(Icons.Filled.Add, t("a11y.add"), tint = PRIMARY) }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp)) {
-            Text("Run several exits at once, each on its own local port (first enabled = primary tunnel exit).", color = MUTED, fontSize = 12.sp)
-            Button(onClick = { store.saveSelection(Store.POOL_ID); bump() }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Text("Select pool for connection") }
-            if (store.pool.isEmpty()) EmptyHint("No proxies yet.")
+            Text(t("pool.intro"), color = MUTED, fontSize = 12.sp)
+            Button(onClick = { store.saveSelection(Store.POOL_ID); bump() }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) { Text(t("pool.select")) }
+            if (store.pool.isEmpty()) EmptyHint(t("pool.empty"))
             store.pool.toList().forEachIndexed { idx, e ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                     Column(Modifier.padding(14.dp)) {
@@ -3279,12 +3366,12 @@ private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
                             Text(e.name, color = TXT, modifier = Modifier.weight(1f)); Switch(e.enabled, { store.pool[idx] = e.copy(enabled = it); store.savePool(); bump() })
                             IconButton(onClick = { store.pool.removeAt(idx); store.savePool(); bump() }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
                         }
-                        DropPick("Exit", targetOptions(store), e.target) { store.pool[idx] = e.copy(target = it); store.savePool(); bump() }
+                        DropPick(t("pool.exit"), targetOptions(store), e.target) { store.pool[idx] = e.copy(target = it); store.savePool(); bump() }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            NumFld("SOCKS", e.socksPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(socksPort = it); store.savePool() }
-                            NumFld("HTTP", e.httpPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(httpPort = it); store.savePool() }
+                            NumFld(t("set.socks"), e.socksPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(socksPort = it); store.savePool() }
+                            NumFld(t("set.http"), e.httpPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(httpPort = it); store.savePool() }
                         }
-                        if (!store.poolTargetValid(e.target)) Text("⚠ invalid exit", color = AMBER, fontSize = 12.sp)
+                        if (!store.poolTargetValid(e.target)) Text(t("pool.invalid"), color = AMBER, fontSize = 12.sp)
                     }
                 }
             }
@@ -3309,50 +3396,51 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     // the group open in the editor (null = none), and whether it is a new one
     var editing by remember { mutableStateOf<GroupConfig?>(null) }
     var editingNew by remember { mutableStateOf(false) }
-    Screen("Chains & groups", back, { IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), "Chain ${store.chains.size + 1}", emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, "add a chain", tint = PRIMARY) } }) {
+    Screen(t("chain.screen"), back, { IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), tf("chain.newName", "n" to store.chains.size + 1), emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, t("chain.add"), tint = PRIMARY) } }) {
         // a hop added to or removed from a chain the connection runs waits for a reconnect
         ApplyBar(store, store.settings)
-        Text("CHAINS", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
-        if (store.chains.isEmpty()) EmptyHint("No chains yet.")
+        Text(t("chain.section"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+        if (store.chains.isEmpty()) EmptyHint(t("chain.empty"))
         store.chains.toList().forEachIndexed { idx, c ->
             val members = store.chainMembers(c)
             Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                 Column(Modifier.padding(14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("⛓ ${c.name}", color = TXT, modifier = Modifier.weight(1f))
-                        if (members.isNotEmpty()) IconButton(onClick = { shared = chainShare(store, c) }) { Icon(Icons.Filled.Share, "share this chain", tint = TXT2) }
+                        if (members.isNotEmpty()) IconButton(onClick = { shared = chainShare(store, c) }) { Icon(Icons.Filled.Share, t("chain.share"), tint = TXT2) }
                         if (store.chainReady(c)) IconButton(onClick = { store.saveSelection("chain:${c.id}"); bump() }) { Icon(Icons.Filled.CheckCircle, null, tint = if (store.selection == "chain:${c.id}") PRIMARY else MUTED) }
                         IconButton(onClick = {
                             val wasSelected = store.selection == "chain:${c.id}"
                             store.deleteChain(c.id)   // a selection that named it falls back
-                            if (wasSelected && store.selection.isNotEmpty()) AppWork.snack("Deleted ${c.name} — now using ${store.selectionLabel()}")
+                            if (wasSelected && store.selection.isNotEmpty()) AppWork.snack(tf("srv.deletedNow", "name" to c.name, "now" to selectionWord(store)))
                             bump()
-                        }) { Icon(Icons.Filled.DeleteOutline, "delete chain", tint = BAD) }
+                        }) { Icon(Icons.Filled.DeleteOutline, t("chain.delete"), tint = BAD) }
                     }
-                    Text("Path: " + (members.joinToString(" → ") { s: ServerConfig -> hopName(s) }.ifEmpty { "empty — add at least 2 servers" }), color = MUTED, fontSize = 12.sp)
+                    // the hops in reading order: → in English, ← in Persian (I18n.flow)
+                    Text(tf("chain.path", "path" to (if (members.isEmpty()) t("chain.pathEmpty") else I18n.flow(members.map { s: ServerConfig -> hopName(s) }))), color = MUTED, fontSize = 12.sp)
                     c.members.forEachIndexed { mi: Int, id: String ->
                         val hop = chainHopLabel(store, id)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("${mi + 1}. ${hop.first}", color = if (hop.second) TXT else BAD, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                            IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filterIndexed { x: Int, _: String -> x != mi }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, "remove this hop", tint = BAD) }
+                            IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filterIndexed { x: Int, _: String -> x != mi }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, t("chain.removeHop"), tint = BAD) }
                         }
                     }
-                    DropPick("+ add server or group", chainHopOptions(store, c), "") { id: String -> if (id.isNotEmpty()) { store.chains[idx] = c.copy(members = c.members + id); store.saveChains(); bump() } }
+                    DropPick(t("chain.addHop"), chainHopOptions(store, c), "") { id: String -> if (id.isNotEmpty()) { store.chains[idx] = c.copy(members = c.members + id); store.saveChains(); bump() } }
                 }
             }
         }
 
         Spacer(Modifier.height(14.dp))
-        Text("GROUPS", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+        Text(t("grp.section"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
         Text(
-            "Several configs used as one: every new connection goes out through one member, and a member that stops answering is left out until it answers again. Use a group wherever a server goes — Connect, routing, a base, the pool, a chain hop.",
+            t("grp.intro"),
             color = MUTED, fontSize = 12.sp
         )
         OutlinedButton(
-            onClick = { editingNew = true; editing = GroupConfig(Groups.newGroupId(), "Group ${store.groups.size + 1}") },
+            onClick = { editingNew = true; editing = GroupConfig(Groups.newGroupId(), tf("grp.newName", "n" to store.groups.size + 1)) },
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
-        ) { Text("+ New group") }
-        if (store.groups.isEmpty()) EmptyHint("No groups yet.")
+        ) { Text(t("grp.new")) }
+        if (store.groups.isEmpty()) EmptyHint(t("grp.empty"))
         store.groups.toList().forEach { g: GroupConfig ->
             GroupCard(store, g, onEdit = { editingNew = false; editing = g }, bump = bump)
         }
@@ -3365,7 +3453,7 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
             if (i >= 0) { store.groups[i] = saved } else { store.groups.add(saved) }
             store.saveGroups()
             editing = null
-            AppWork.snack("Saved ⧉ ${saved.name}")
+            AppWork.snack(tf("grp.savedName", "name" to saved.name))
             bump()
         })
     }
@@ -3378,8 +3466,8 @@ private fun hopName(s: ServerConfig): String = if (Groups.isGroupRecord(s)) "⧉
 private fun chainHopLabel(store: Store, id: String): Pair<String, Boolean> {
     val s = store.serverById(id)
     if (s != null) return Pair(s.name, true)
-    val g = store.groupById(id) ?: return Pair(if (Groups.isGroupId(id)) "missing group" else "missing server", false)
-    return if (store.groupRecord(id) != null) Pair("⧉ ${g.name}", true) else Pair("⧉ ${g.name} — no server left", false)
+    val g = store.groupById(id) ?: return Pair(if (Groups.isGroupId(id)) t("chain.missingGroup") else t("chain.missingServer"), false)
+    return if (store.groupRecord(id) != null) Pair("⧉ ${g.name}", true) else Pair("⧉ " + tf("chain.groupEmpty", "name" to g.name), false)
 }
 
 /** What can be added to [c]: every server and every group with a server left, not already in it. */
@@ -3393,7 +3481,19 @@ private fun groupOptions(store: Store): List<Pair<String, String>> =
     store.groups.filter { g: GroupConfig -> store.groupRecord(g.id) != null }.map { g: GroupConfig -> g.id to "⧉ ${g.name}" }
 
 /** "1 config" / "3 configs". */
-private fun configsWord(n: Int): String = if (n == 1) "1 config" else "$n configs"
+private fun configsWord(n: Int): String = if (n == 1) t("cfg.one") else tf("cfg.many", "n" to n)
+
+/** A group's strategy in words (Groups.strategyLabel, in the app's language). */
+private fun strategyWord(strategy: String): String {
+    val key = "grp.st.$strategy"
+    return if (I18n.has(key)) t(key) else Groups.strategyLabel(strategy)
+}
+
+/** What a strategy does, one line (Groups.strategyHelp, in the app's language). */
+private fun strategyHelpWord(strategy: String): String {
+    val key = "grp.stLine.$strategy"
+    return if (I18n.has(key)) t(key) else Groups.strategyHelp(strategy)
+}
 
 /**
  * One group on the chains screen: its name, how many configs it has (and how
@@ -3412,34 +3512,34 @@ private fun configsWord(n: Int): String = if (n == 1) "1 config" else "$n config
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("⧉ ${g.name}", color = TXT, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 if (rec != null) IconButton(onClick = { store.saveSelection(g.id); bump() }) {
-                    Icon(Icons.Filled.CheckCircle, "use this group for Connect", tint = if (selected) PRIMARY else MUTED)
+                    Icon(Icons.Filled.CheckCircle, t("grp.use"), tint = if (selected) PRIMARY else MUTED)
                 }
-                IconButton(onClick = onEdit) { Icon(Icons.Filled.Edit, "edit this group", tint = TXT2) }
+                IconButton(onClick = onEdit) { Icon(Icons.Filled.Edit, t("grp.edit"), tint = TXT2) }
                 IconButton(onClick = {
                     store.deleteGroup(g.id)   // a selection that named it falls back; chains lose it as a hop
-                    if (selected && store.selection.isNotEmpty()) AppWork.snack("Deleted ${g.name} — now using ${store.selectionLabel()}")
+                    if (selected && store.selection.isNotEmpty()) AppWork.snack(tf("srv.deletedNow", "name" to g.name, "now" to selectionWord(store)))
                     bump()
-                }) { Icon(Icons.Filled.DeleteOutline, "delete this group", tint = BAD) }
+                }) { Icon(Icons.Filled.DeleteOutline, t("grp.delete"), tint = BAD) }
             }
             Text(
-                configsWord(size) + " · " + Groups.strategyLabel(g.strategy) + (if (gone > 0) " · $gone missing" else ""),
+                configsWord(size) + " · " + strategyWord(g.strategy) + (if (gone > 0) " · " + tf("grp.missingN", "n" to gone) else ""),
                 color = MUTED, fontSize = 12.sp, fontFamily = MONO
             )
             if (rec == null) {
-                Text("⚠ None of its servers is left — edit it to add some.", color = BAD, fontSize = 11.sp)
+                Text(t("grp.noneLeft"), color = BAD, fontSize = 11.sp)
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     val down = test?.down
                     Text(
                         when {
-                            test != null && test.phase.isNotEmpty() -> "measuring through the group…"
-                            down != null && down >= 0 -> "real delay ${down} ms"
-                            down != null -> "no answer through the group"
-                            else -> "real delay not measured"
+                            test != null && test.phase.isNotEmpty() -> t("grp.measuring")
+                            down != null && down >= 0 -> tf("grp.realDelay", "ms" to "$down ms")
+                            down != null -> t("grp.noAnswer")
+                            else -> t("grp.notMeasured")
                         },
                         color = if (down != null && down < 0) BAD else MUTED2, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f)
                     )
-                    TextButton(onClick = { AppWork.testGroup(ctx, rec) }) { Text("test", color = PRIMARY, fontSize = 12.sp) }
+                    TextButton(onClick = { AppWork.testGroup(ctx, rec) }) { Text(t("card.test"), color = PRIMARY, fontSize = 12.sp) }
                 }
             }
         }
@@ -3468,49 +3568,49 @@ private fun configsWord(n: Int): String = if (n == 1) "1 config" else "$n config
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = CARD) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f).verticalScroll(rememberScrollState()).imePadding().padding(16.dp).padding(bottom = 24.dp)) {
-            Text(if (isNew) "New group" else "Edit group", color = TXT, fontWeight = FontWeight.Bold)
-            Fld("Name", name) { v: String -> name = v }
+            Text(if (isNew) t("grp.newTitle") else t("grp.editTitle"), color = TXT, fontWeight = FontWeight.Bold)
+            Fld(t("f.name"), name) { v: String -> name = v }
 
-            Text("Strategy", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+            Text(t("grp.strategy"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
             Groups.STRATEGIES.forEach { st: String ->
                 Row(Modifier.fillMaxWidth().clickable { strategy = st }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(strategy == st, { strategy = st })
                     Column(Modifier.weight(1f)) {
-                        Text(Groups.strategyLabel(st) + (if (st == Groups.DEFAULT_STRATEGY) " (default)" else ""), color = TXT, fontSize = 14.sp)
-                        Text(Groups.strategyHelp(st), color = MUTED, fontSize = 11.sp)
+                        Text(if (st == Groups.DEFAULT_STRATEGY) tf("grp.stDefault", "name" to strategyWord(st)) else strategyWord(st), color = TXT, fontSize = 14.sp)
+                        Text(strategyHelpWord(st), color = MUTED, fontSize = 11.sp)
                     }
                 }
             }
 
-            Text("Members", color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
-            if (members.isEmpty()) Text("No configs yet — add servers below.", color = MUTED, fontSize = 12.sp)
+            Text(t("grp.members"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+            if (members.isEmpty()) Text(t("grp.noMembers"), color = MUTED, fontSize = 12.sp)
             members.forEachIndexed { i: Int, m: GroupMember ->
                 val srv = store.serverById(m.id)
                 val at = Groups.memberAddress(m)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(
-                            "${i + 1}. " + (srv?.name ?: "missing server"), color = if (srv == null) BAD else TXT,
+                            "${i + 1}. " + (srv?.name ?: t("chain.missingServer")), color = if (srv == null) BAD else TXT,
                             fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
-                        if (at.isNotEmpty()) Text("at $at", color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
-                        if (srv == null) Text("removed, or replaced by a subscription update — left out when connecting", color = BAD, fontSize = 10.sp)
+                        if (at.isNotEmpty()) Text(tf("grp.at", "addr" to at), color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
+                        if (srv == null) Text(t("grp.memberGone"), color = BAD, fontSize = 10.sp)
                     }
                     IconButton(onClick = { members = members.filterIndexed { x: Int, _: GroupMember -> x != i } }) {
-                        Icon(Icons.Filled.Close, "remove this member", tint = BAD)
+                        Icon(Icons.Filled.Close, t("grp.removeMember"), tint = BAD)
                     }
                 }
             }
-            DropPick("+ add server", serverOptions, "") { id: String -> if (id.isNotEmpty()) { members = members + GroupMember(id) } }
+            DropPick(t("grp.addServer"), serverOptions, "") { id: String -> if (id.isNotEmpty()) { members = members + GroupMember(id) } }
             OutlinedButton(onClick = { cleanOpen = !cleanOpen; cleanError = "" }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (cleanOpen) "Close clean IPs" else "+ clean IPs")
+                Text(if (cleanOpen) t("grp.closeIps") else t("grp.addIps"))
             }
             if (cleanOpen) {
                 Text(
-                    "One server at several addresses — clean CDN IPs, say. Each address becomes a member; its SNI and Host stay on the server's own name.",
+                    t("grp.ipsIntro"),
                     color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp)
                 )
-                DropPick("Pick the server", serverOptions, cleanServer) { id: String -> cleanServer = id; cleanError = "" }
+                DropPick(t("grp.pickServer"), serverOptions, cleanServer) { id: String -> cleanServer = id; cleanError = "" }
                 // addresses read left to right in either language
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
                     OutlinedTextField(
@@ -3526,23 +3626,23 @@ private fun configsWord(n: Int): String = if (n == 1) "1 config" else "$n config
                     val parsed = Groups.parseCleanIps(cleanText)
                     val why = Groups.cleanIpProblem(srv, parsed)
                     if (why != null || srv == null) {
-                        cleanError = why ?: "Pick the server these addresses are for"
+                        cleanError = why ?: t("grp.pickServerFor")
                     } else {
                         members = members + parsed.targets.map { t: Pair<String, Int?> -> GroupMember(srv.id, t.first, t.second) }
                         cleanText = ""
                         cleanOpen = false
                     }
-                }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) { Text("Add these addresses") }
+                }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) { Text(t("grp.ipsAdd")) }
             }
 
             Spacer(Modifier.height(12.dp))
             Button(onClick = {
                 if (members.isEmpty()) {
-                    Toast.makeText(ctx, "Add at least one server", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, t("grp.needOne"), Toast.LENGTH_SHORT).show()
                 } else {
-                    onSave(initial.copy(name = name.trim().ifEmpty { "Group" }, strategy = strategy, members = members))
+                    onSave(initial.copy(name = name.trim().ifEmpty { t("grp.defaultName") }, strategy = strategy, members = members))
                 }
-            }, modifier = Modifier.fillMaxWidth()) { Text("Save") }
+            }, modifier = Modifier.fillMaxWidth()) { Text(t("btn.save")) }
         }
     }
 }
@@ -3613,26 +3713,26 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
         if (store.serverById(t) != null) editServerId = t
     }
 
-    Screen("Routing", back, {}) {
+    Screen(t("rt.title"), back, {}) {
         ApplyBar(store, s)
-        Text("Routing mode", color = TXT, fontWeight = FontWeight.Bold)
-        listOf(Triple("global", "Global (all via proxy)", false), Triple("bypass-ir", "Bypass Iran", true),
-            Triple("bypass-cn", "Bypass China", true), Triple("direct", "Direct", false)).forEach { (v, l, needsGeo) ->
+        Text(t("rt.mode"), color = TXT, fontWeight = FontWeight.Bold)
+        listOf(Triple("global", t("rt.global"), false), Triple("bypass-ir", t("rt.bypassIr"), true),
+            Triple("bypass-cn", t("rt.bypassCn"), true), Triple("direct", t("rt.direct"), false)).forEach { (v, l, needsGeo) ->
             val on = geo || !needsGeo
             Row(Modifier.fillMaxWidth().clickable(enabled = on) { save(s.copy(routingMode = v)) }, verticalAlignment = Alignment.CenterVertically) {
                 RadioButton(s.routingMode == v, { save(s.copy(routingMode = v)) }, enabled = on)
-                Text(if (on) l else "$l — unavailable", color = if (on) TXT else MUTED)
+                Text(if (on) l else tf("rt.unavailable", "what" to l), color = if (on) TXT else MUTED)
             }
         }
-        if (!geo) Text("Bypass Iran, Bypass China and Block ads need the routing data files (geoip.dat / geosite.dat), which this build doesn't include — those rules would be dropped and the traffic would go through the proxy anyway.", color = MUTED, fontSize = 12.sp)
-        SwitchRow("Block ads" + (if (geo) "" else " — unavailable"), s.blockAds && geo, enabled = geo) { v: Boolean -> save(s.copy(blockAds = v)) }
-        SwitchRow("Sniffing", s.enableSniffing) { v: Boolean -> save(s.copy(enableSniffing = v)) }
+        if (!geo) Text(t("rt.noGeo"), color = MUTED, fontSize = 12.sp)
+        SwitchRow(if (geo) t("rt.blockAds") else tf("rt.unavailable", "what" to t("rt.blockAds")), s.blockAds && geo, enabled = geo) { v: Boolean -> save(s.copy(blockAds = v)) }
+        SwitchRow(t("rt.sniffing"), s.enableSniffing) { v: Boolean -> save(s.copy(enableSniffing = v)) }
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
-        SwitchRow("Advanced routing", s.advancedRouting) { v: Boolean -> save(s.copy(advancedRouting = v)) }
+        SwitchRow(t("rt.advanced"), s.advancedRouting) { v: Boolean -> save(s.copy(advancedRouting = v)) }
         if (s.advancedRouting && prof != null) {
-            Text("Each profile is a set of rules of its own. Pick 🧭 and its name on the Home screen to connect with it.", color = MUTED, fontSize = 12.sp)
+            Text(t("rt.profilesIntro"), color = MUTED, fontSize = 12.sp)
             Spacer(Modifier.height(10.dp))
-            Text("PROFILES", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+            Text(t("rt.profiles"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
             Spacer(Modifier.height(4.dp))
             val inUseId = store.selectedProfile()?.id
             store.profiles.toList().forEach { p: RoutingProfile ->
@@ -3642,7 +3742,7 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
                     onUse = {
                         store.saveSelection(Selection.forProfile(p.id))
                         AppWork.touch()
-                        AppWork.snack("Connect now uses 🧭 ${p.name}")
+                        AppWork.snack(tf("rt.useSnack", "name" to p.name))
                     },
                     onShare = { shared = profileShare(store, p) },
                     onDuplicate = {
@@ -3659,41 +3759,41 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
                 OutlinedButton(onClick = {
                     val np = RoutingProfile(
                         RoutingProfiles.newProfileId(),
-                        RoutingProfiles.uniqueName("Routing", store.profiles.map { x: RoutingProfile -> x.name }),
+                        RoutingProfiles.uniqueName(t("rt.defaultName"), store.profiles.map { x: RoutingProfile -> x.name }),
                         def = store.servers.firstOrNull()?.id ?: "direct"
                     )
                     store.profiles.add(np); store.saveProfiles()
                     editId = np.id
                     AppWork.touch()
-                }, modifier = Modifier.weight(1f)) { Text("+ New profile", fontSize = 13.sp) }
-                OutlinedButton(onClick = { sheet = "import" }, modifier = Modifier.weight(1f)) { Text("Import a link", fontSize = 13.sp) }
+                }, modifier = Modifier.weight(1f)) { Text(t("rt.newProfile"), fontSize = 13.sp) }
+                OutlinedButton(onClick = { sheet = "import" }, modifier = Modifier.weight(1f)) { Text(t("rt.importLink"), fontSize = 13.sp) }
             }
 
             HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
             // edits to the profile the tunnel is running on reach it at the next connect: ApplyBar, at the top, says so
             key(prof.id, prof.name) {
-                DraftField(prof.name, Modifier.fillMaxWidth(), label = { Text("Profile name") }) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(name = v) } }
+                DraftField(prof.name, Modifier.fillMaxWidth(), label = { Text(t("rt.profileName")) }) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(name = v) } }
             }
             // The simple routing mode UNDER the profile's rules: an explicit corporate
             // rule still wins over a country bypass (configBuilder.js advancedUseMode).
-            SwitchRow("Apply the routing mode (Bypass Iran/China) under these rules" + (if (geo) "" else " — needs the geo files"), prof.useMode && geo, enabled = geo) { v: Boolean ->
+            SwitchRow(if (geo) t("rt.useMode") else tf("rt.needsGeo", "what" to t("rt.useMode")), prof.useMode && geo, enabled = geo) { v: Boolean ->
                 update(prof.id) { cur: RoutingProfile -> cur.copy(useMode = v) }
             }
             // the switch adds the mode chosen at the top — with Global there, it adds nothing
             if (prof.useMode && geo && !s.routingMode.startsWith("bypass"))
-                Text("The Routing mode at the top is “${routingModeLabel(s.routingMode)}” — this switch adds nothing until it is Bypass Iran or Bypass China.", color = AMBER, fontSize = 11.sp)
+                Text(tf("rt.useModeNothing", "mode" to routingModeLabel(s.routingMode)), color = AMBER, fontSize = 11.sp)
 
             Spacer(Modifier.height(6.dp))
-            Text("Base", color = TXT, fontWeight = FontWeight.Bold)
-            Text("A config the targets below ride on, unless a rule says otherwise — for example two chains that both leave through one server. A rule or the default can also leave from the base itself: ⚓ Exit at the base.", color = MUTED, fontSize = 11.sp)
+            Text(t("rt.base"), color = TXT, fontWeight = FontWeight.Bold)
+            Text(t("rt.baseHint"), color = MUTED, fontSize = 11.sp)
             val base = prof.base
-            DropPick(if (base == null) "No base" else "⚠ ${store.targetLabel(base)}", listOf("" to "No base") + targetOptions(store), base ?: "") { b: String ->
+            DropPick(if (base == null) t("rt.noBase") else "⚠ ${targetWord(store, base)}", listOf("" to t("rt.noBase")) + targetOptions(store), base ?: "") { b: String ->
                 update(prof.id) { cur: RoutingProfile -> cur.copy(base = b.ifEmpty { null }) }
             }
-            if (base != null && !store.targetExists(base)) Text("⚠ The base is gone — connecting is refused while something rides on it. Pick another.", color = BAD, fontSize = 11.sp)
+            if (base != null && !store.targetExists(base)) Text(t("rt.baseGone"), color = BAD, fontSize = 11.sp)
 
             Spacer(Modifier.height(6.dp))
-            Text("Rules", color = TXT, fontWeight = FontWeight.Bold)
+            Text(t("rt.rules"), color = TXT, fontWeight = FontWeight.Bold)
             prof.rules.forEachIndexed { i: Int, r: RouteRule ->
                 key(prof.id, i, r) {
                     Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
@@ -3707,20 +3807,20 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
             }
             Button(onClick = {
                 update(prof.id) { cur: RoutingProfile -> cur.copy(rules = cur.rules + RouteRule("domain", "", store.servers.firstOrNull()?.id ?: "direct")) }
-            }, modifier = Modifier.fillMaxWidth()) { Text("+ Add rule") }
+            }, modifier = Modifier.fillMaxWidth()) { Text(t("rt.addRule")) }
 
-            Spacer(Modifier.height(8.dp)); Text("Rest of traffic via:", color = MUTED)
+            Spacer(Modifier.height(8.dp)); Text(t("rt.restVia"), color = MUTED)
             val defAtBase = prof.def == RoutingProfiles.TARGET_BASE
-            DropPick(if (defAtBase) store.targetLabel(prof.def, prof) else "Default", targetOptionsFor(store, prof), prof.def) { t: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(def = t) } }
+            DropPick(if (defAtBase) targetWord(store, prof.def, prof) else t("rt.default"), targetOptionsFor(store, prof), prof.def) { t: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(def = t) } }
             when {
-                defAtBase && prof.base == null -> Text("⚠ This routing has no base — connecting is refused until you choose a base above or another default.", color = BAD, fontSize = 11.sp)
-                !store.targetExists(prof.def, prof) -> Text("⚠ The default is gone — connecting is refused until you pick another.", color = BAD, fontSize = 11.sp)
+                defAtBase && prof.base == null -> Text(t("rt.noBaseDefault"), color = BAD, fontSize = 11.sp)
+                !store.targetExists(prof.def, prof) -> Text(t("rt.defaultGone"), color = BAD, fontSize = 11.sp)
             }
             // "exit at the base" IS the base: nothing to ride on
             if (RoutingProfiles.takesVia(prof.def)) {
-                DropPick("Base", viaOptions(store, prof, prof.def), prof.defVia) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(defVia = v) } }
+                DropPick(t("rt.base"), viaOptions(store, prof, prof.def), prof.defVia) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(defVia = v) } }
                 val dv = RoutingProfiles.effectiveDefVia(prof)
-                if (dv != null && !store.targetExists(dv)) Text("⚠ Its base is gone — connecting is refused until you pick another.", color = BAD, fontSize = 11.sp)
+                if (dv != null && !store.targetExists(dv)) Text(t("rt.itsBaseGone"), color = BAD, fontSize = 11.sp)
             }
 
             HorizontalDivider(Modifier.padding(vertical = 12.dp), color = STROKE)
@@ -3736,14 +3836,14 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
         Dialog(onDismissRequest = { ruleDialog = -1 }) {
             Surface(shape = RoundedCornerShape(16.dp), color = CARD) {
                 Column(Modifier.padding(16.dp).widthIn(max = 360.dp)) {
-                    Text("Rule ${rd + 1}", color = TXT, fontWeight = FontWeight.Bold)
+                    Text(tf("rt.ruleN", "n" to rd + 1), color = TXT, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(6.dp))
                     key(prof.id, rd, r) {
                         RuleEditor(store, prof, r,
                             onChange = { nr: RouteRule -> setRule(prof.id, rd, r, nr) },
                             onDelete = { deleteRule(prof.id, rd, r); ruleDialog = -1 })
                     }
-                    TextButton(onClick = { ruleDialog = -1 }, modifier = Modifier.align(Alignment.End)) { Text("Done", color = PRIMARY) }
+                    TextButton(onClick = { ruleDialog = -1 }, modifier = Modifier.align(Alignment.End)) { Text(t("btn.done"), color = PRIMARY) }
                 }
             }
         }
@@ -3752,8 +3852,8 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
             containerColor = CARD,
-            title = { Text("Delete this routing profile?", color = TXT, fontSize = 16.sp) },
-            text = { Text("${victim.name} · ${victim.rules.size} rule(s)", color = MUTED, fontSize = 13.sp, fontFamily = MONO) },
+            title = { Text(t("rt.deleteTitle"), color = TXT, fontSize = 16.sp) },
+            text = { Text(victim.name + " · " + tf("rt.rulesN", "n" to victim.rules.size), color = MUTED, fontSize = 13.sp, fontFamily = MONO) },
             confirmButton = {
                 TextButton(onClick = {
                     store.profiles.removeAll { x: RoutingProfile -> x.id == victim.id }
@@ -3762,10 +3862,10 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
                     if (editId == victim.id) editId = store.profiles.firstOrNull()?.id ?: ""
                     confirmDelete = null
                     AppWork.touch()
-                    AppWork.snack(if (moved && store.selection.isNotEmpty()) "Deleted ${victim.name} — now using ${store.selectionLabel()}" else "Deleted ${victim.name}")
-                }) { Text("Delete", color = BAD) }
+                    AppWork.snack(if (moved && store.selection.isNotEmpty()) tf("srv.deletedNow", "name" to victim.name, "now" to selectionWord(store)) else tf("srv.deleted", "name" to victim.name))
+                }) { Text(t("btn.delete"), color = BAD) }
             },
-            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel", color = MUTED) } }
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text(t("btn.cancel"), color = MUTED) } }
         )
     }
     shared?.let { st: SharedText -> RouteShareDialog(st) { shared = null } }
@@ -3798,7 +3898,7 @@ private object RoutingUi { @Volatile var focus = "" }
         Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(12.dp))
             .background(if (editing) CARD_SEL else CARD)
             .border(if (editing) 1.5.dp else 1.dp, if (editing) PRIMARY else STROKE, RoundedCornerShape(12.dp))
-            .clickable(onClickLabel = "edit this profile") { onEdit() }
+            .clickable(onClickLabel = t("rt.editProfile")) { onEdit() }
             .padding(start = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -3811,25 +3911,25 @@ private object RoutingUi { @Volatile var focus = "" }
                 if (inUse) {
                     Spacer(Modifier.width(7.dp))
                     Text(
-                        "IN USE", color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO,
+                        t("srv.inUse"), color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO,
                         fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.em, maxLines = 1,
                         modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(PRIMARY).padding(horizontal = 5.dp, vertical = 3.dp)
                     )
                 }
             }
             Text(
-                "${p.rules.size} rule(s) · rest → ${store.targetLabel(p.def, p)}" + (if (dv != null) " via ${store.targetLabel(dv)}" else ""),
+                tf("rt.rulesN", "n" to p.rules.size) + " · " + tf("rt.rest", "to" to targetWord(store, p.def, p)) + (if (dv != null) " " + tf("exit.via", "name" to targetWord(store, dv)) else ""),
                 color = MUTED2, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
-        IconButton(onClick = onUse) { Icon(Icons.Filled.CheckCircle, "use this profile for Connect", tint = if (inUse) PRIMARY else MUTED) }
-        IconButton(onClick = onShare) { Icon(Icons.Filled.Share, "share this profile", tint = TXT2) }
+        IconButton(onClick = onUse) { Icon(Icons.Filled.CheckCircle, t("rt.useProfile"), tint = if (inUse) PRIMARY else MUTED) }
+        IconButton(onClick = onShare) { Icon(Icons.Filled.Share, t("rt.shareProfile"), tint = TXT2) }
         Box {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "more", tint = MUTED) }
+            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, t("a11y.more"), tint = MUTED) }
             DropdownMenu(menu, { menu = false }, modifier = Modifier.background(CARD)) {
-                DropdownMenuItem(text = { Text("Duplicate", color = TXT) }, onClick = { menu = false; onDuplicate() })
+                DropdownMenuItem(text = { Text(t("rt.duplicate"), color = TXT) }, onClick = { menu = false; onDuplicate() })
                 if (onDelete != null) {
-                    DropdownMenuItem(text = { Text("Delete", color = BAD) }, onClick = { menu = false; onDelete() })
+                    DropdownMenuItem(text = { Text(t("btn.delete"), color = BAD) }, onClick = { menu = false; onDelete() })
                 }
             }
         }
@@ -3839,25 +3939,54 @@ private object RoutingUi { @Volatile var focus = "" }
 /** One rule's editor row: type, value, target, and — for a target that can take one — the base it rides on. */
 @Composable private fun RuleEditor(store: Store, p: RoutingProfile, r: RouteRule, onChange: (RouteRule) -> Unit, onDelete: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        DropPick("Type", listOf("domain" to "Domain", "ip" to "IP", "port" to "Port"), r.type) { nt: String -> onChange(r.copy(type = nt)) }
+        DropPick(t("rt.type"), listOf("domain" to t("rt.typeDomain"), "ip" to "IP", "port" to t("rt.typePort")), r.type) { nt: String -> onChange(r.copy(type = nt)) }
         Spacer(Modifier.weight(1f))
-        IconButton(onClick = onDelete) { Icon(Icons.Filled.DeleteOutline, "delete this rule", tint = BAD) }
+        IconButton(onClick = onDelete) { Icon(Icons.Filled.DeleteOutline, t("rt.deleteRule"), tint = BAD) }
     }
     // Saved when editing ends, not per keystroke (DraftField).
-    DraftField(r.value, Modifier.fillMaxWidth(), placeholder = { Text("value (geosite:google / 1.2.3.0/24 / 443)", fontSize = 11.sp) }) { nv: String -> onChange(r.copy(value = nv)) }
-    DropPick("⚠ ${store.targetLabel(r.target, p)}", targetOptionsFor(store, p), r.target) { t: String -> onChange(r.copy(target = t)) }
+    DraftField(r.value, Modifier.fillMaxWidth(), placeholder = { Text(t("rt.valuePh"), fontSize = 11.sp) }) { nv: String -> onChange(r.copy(value = nv)) }
+    DropPick("⚠ ${targetWord(store, r.target, p)}", targetOptionsFor(store, p), r.target) { t: String -> onChange(r.copy(target = t)) }
     when {
-        r.target == RoutingProfiles.TARGET_BASE && p.base == null -> Text("⚠ This routing has no base — the rule is skipped (its traffic follows the default) until you choose a base or another target.", color = BAD, fontSize = 11.sp)
+        r.target == RoutingProfiles.TARGET_BASE && p.base == null -> Text(t("rt.ruleNoBase"), color = BAD, fontSize = 11.sp)
         // left out, its traffic would follow the default — perhaps direct (RoutingProfiles.planRoutes)
-        r.target == RoutingProfiles.TARGET_BASE && !store.targetExists(r.target, p) -> Text("⚠ Its base is gone — connecting is refused until you pick another base.", color = BAD, fontSize = 11.sp)
-        !store.targetExists(r.target, p) -> Text("⚠ This target is gone — the rule is skipped (its traffic follows the default) until you pick another.", color = BAD, fontSize = 11.sp)
+        r.target == RoutingProfiles.TARGET_BASE && !store.targetExists(r.target, p) -> Text(t("rt.ruleBaseGone"), color = BAD, fontSize = 11.sp)
+        !store.targetExists(r.target, p) -> Text(t("rt.targetGone"), color = BAD, fontSize = 11.sp)
     }
     // "exit at the base" IS the base: no via picker
     if (RoutingProfiles.takesVia(r.target)) {
-        DropPick("⚠ via ${store.targetLabel(r.via)}", viaOptions(store, p, r.target), r.via.ifEmpty { RoutingProfiles.VIA_INHERIT }) { v: String -> onChange(r.copy(via = v)) }
+        DropPick("⚠ " + tf("exit.via", "name" to targetWord(store, r.via)), viaOptions(store, p, r.target), r.via.ifEmpty { RoutingProfiles.VIA_INHERIT }) { v: String -> onChange(r.copy(via = v)) }
         val eff = RoutingProfiles.effectiveVia(r, p)
-        if (eff != null && !store.targetExists(eff)) Text("⚠ Its base is gone — connecting is refused until you pick another.", color = BAD, fontSize = 11.sp)
+        if (eff != null && !store.targetExists(eff)) Text(t("rt.itsBaseGone"), color = BAD, fontSize = 11.sp)
     }
+}
+
+/**
+ * Store.targetLabel in the app's language: the fixed words (direct, block, the
+ * first server, exit at the base, a missing one) translated, a name as it is.
+ * The parameter is not `t`: that is the dictionary.
+ */
+private fun targetWord(store: Store, target: String): String = when {
+    target.isEmpty() -> t("tgt.first")
+    target == "direct" -> t("tgt.direct")
+    target == "block" -> t("tgt.block")
+    target == "proxy" -> t("tgt.proxy")
+    target == RoutingProfiles.TARGET_BASE -> "⚓ " + t("tgt.exitBase")
+    else -> {
+        val w = store.targetLabel(target)
+        when (w) {
+            "missing chain" -> t("tgt.missingChain")
+            "missing group" -> t("chain.missingGroup")
+            "missing server" -> t("chain.missingServer")
+            else -> w
+        }
+    }
+}
+
+/** [target] as a target of [p]: "exit at the base" names the base it stands for (Store.targetLabel(t, p)). */
+private fun targetWord(store: Store, target: String, p: RoutingProfile): String {
+    if (target != RoutingProfiles.TARGET_BASE) return targetWord(store, target)
+    val b = p.base ?: return "⚓ " + tf("tgt.exitBaseOf", "base" to t("tgt.noBase"))
+    return "⚓ " + tf("tgt.exitBaseOf", "base" to targetWord(store, b))
 }
 
 /** A rule's or the default's targets in [p]: every target, and — while [p] has a base — "exit at the base" (it follows the base). */
@@ -3865,15 +3994,15 @@ private fun targetOptionsFor(store: Store, p: RoutingProfile): List<Pair<String,
     val all = targetOptionsFull(store)
     val base = p.base ?: return all
     // after Direct and Block: the words, then the servers and chains
-    return all.take(3) + (RoutingProfiles.TARGET_BASE to "⚓ Exit at the base (${store.targetLabel(base)})") + all.drop(3)
+    return all.take(3) + (RoutingProfiles.TARGET_BASE to "⚓ " + tf("tgt.exitBaseOf", "base" to targetWord(store, base))) + all.drop(3)
 }
 
 /** What a target can ride on: the profile's base, nothing, or any server or chain but itself. */
 private fun viaOptions(store: Store, p: RoutingProfile, target: String): List<Pair<String, String>> = buildList {
     val base = p.base
-    add(RoutingProfiles.VIA_INHERIT to (if (base != null) "via the profile’s base (${store.targetLabel(base)})" else "via the profile’s base (none set)"))
-    add(RoutingProfiles.VIA_NONE to "No base — dial it directly")
-    targetOptions(store).filter { o: Pair<String, String> -> o.first != target }.forEach { o: Pair<String, String> -> add(o.first to "via ${o.second}") }
+    add(RoutingProfiles.VIA_INHERIT to (if (base != null) tf("rt.viaInherit", "base" to targetWord(store, base)) else t("rt.viaInheritNone")))
+    add(RoutingProfiles.VIA_NONE to t("rt.viaNone"))
+    targetOptions(store).filter { o: Pair<String, String> -> o.first != target }.forEach { o: Pair<String, String> -> add(o.first to tf("exit.via", "name" to o.second)) }
 }
 
 /** One step of the flow: a glyph, what it is, and why it is red when it is. */
@@ -3899,9 +4028,9 @@ private fun viaOptions(store: Store, p: RoutingProfile, target: String): List<Pa
 /** The rule's values, short: the first two and how many more. */
 private fun ruleSummary(r: RouteRule): String {
     val vals = r.value.split(Regex("[|,]")).map { v: String -> v.trim() }.filter { v: String -> v.isNotEmpty() }
-    if (vals.isEmpty()) return "(no value — skipped)"
+    if (vals.isEmpty()) return t("rt.noValue")
     // an app rule from a Windows profile: Android never says which app opened a connection (TunnelSetup.routingNotes)
-    if (r.type == "process") return "app " + vals.take(2).joinToString(", ") + " — Windows only, skipped here"
+    if (r.type == "process") return tf("rt.appRule", "apps" to vals.take(2).joinToString(", "))
     return vals.take(2).joinToString(", ") + (if (vals.size > 2) " +${vals.size - 2}" else "")
 }
 
@@ -3914,7 +4043,7 @@ private fun ruleGlyph(type: String): String = when (type) {
 }
 
 private fun targetGlyph(t: String): String = when {
-    t == "direct" -> "→"
+    t == "direct" -> flowArrow()
     t == "block" -> "⛔"
     t.startsWith("chain:") -> "⛓"
     Groups.isGroupId(t) -> "⧉"
@@ -3935,29 +4064,29 @@ private fun targetGlyph(t: String): String = when {
  */
 @Composable private fun FlowList(store: Store, p: RoutingProfile, s: AppSettings, geo: Boolean, onRule: (Int) -> Unit, onNode: (String) -> Unit) {
     val lanes = RoutingProfiles.lanes(p) { t: String -> store.targetExists(t) }
-    Text("FLOW", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
-    Text("Top to bottom, as the connection applies them: the first rule that matches decides. A base (⚓) sits between you and the target. Dimmed rows are the app’s own.", color = MUTED, fontSize = 11.sp)
+    Text(t("rt.flow"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+    Text(t("rt.flowHint"), color = MUTED, fontSize = 11.sp)
     Spacer(Modifier.height(6.dp))
     // without the geo files the config has no geo rule at all (ConfigBuilder's `&& geo`)
-    if (s.blockAds && geo) FlowAppRow("🚫", "Ads", "Block", "app")
+    if (s.blockAds && geo) FlowAppRow("🚫", t("rt.ads"), t("tgt.block"), t("rt.tagApp"))
     lanes.filter { l: RoutingProfiles.Lane -> !l.isDefault }.forEach { l: RoutingProfiles.Lane -> FlowLane(store, p, l, onRule, onNode) }
-    FlowAppRow("🏠", "Local network", "Direct", "app")
+    FlowAppRow("🏠", t("rt.lan"), t("tgt.direct"), t("rt.tagApp"))
     // the simple routing mode under the rules, when the profile applies it (its useMode)
-    if (p.useMode && geo && s.routingMode == "bypass-ir") FlowAppRow("🇮🇷", "Iran (routing mode)", "Direct", "mode")
-    if (p.useMode && geo && s.routingMode == "bypass-cn") FlowAppRow("🇨🇳", "China (routing mode)", "Direct", "mode")
+    if (p.useMode && geo && s.routingMode == "bypass-ir") FlowAppRow("🇮🇷", t("rt.iranMode"), t("tgt.direct"), t("rt.tagMode"))
+    if (p.useMode && geo && s.routingMode == "bypass-cn") FlowAppRow("🇨🇳", t("rt.chinaMode"), t("tgt.direct"), t("rt.tagMode"))
     lanes.filter { l: RoutingProfiles.Lane -> l.isDefault }.forEach { l: RoutingProfiles.Lane -> FlowLane(store, p, l, onRule, onNode) }
     val bases = RoutingProfiles.lanesByBase(lanes)
     if (bases.isNotEmpty()) {
         Spacer(Modifier.height(8.dp))
-        Text("BASES", color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+        Text(t("rt.bases"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
         bases.forEach { e: Pair<String, List<RoutingProfiles.Lane>> ->
             val base = e.first
             Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
                 Column(Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
-                    FlowNode("⚓", store.targetLabel(base), AMBER, if (store.targetExists(base)) null else "gone — connecting is refused", 0.dp) { onNode(base) }
+                    FlowNode("⚓", targetWord(store, base), AMBER, if (store.targetExists(base)) null else t("rt.goneRefused"), 0.dp) { onNode(base) }
                     e.second.forEach { l: RoutingProfiles.Lane ->
                         Text(
-                            "→ " + store.targetLabel(l.target) + (if (l.isDefault) " (everything else)" else ""),
+                            tf("rt.toTarget", "to" to targetWord(store, l.target)) + (if (l.isDefault) " " + t("rt.everythingElseParen") else ""),
                             color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(start = 34.dp, top = 2.dp, bottom = 2.dp)
                         )
@@ -3978,7 +4107,7 @@ private fun targetGlyph(t: String): String = when {
     Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(12.dp)) {
         Column(Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
             if (lane.isDefault) {
-                FlowNode("★", "Everything else", TXT2, null, 0.dp, null)
+                FlowNode("★", t("rt.everythingElse"), TXT2, null, 0.dp, null)
             } else {
                 lane.rules.forEach { i: Int ->
                     val r = p.rules[i]
@@ -3986,28 +4115,28 @@ private fun targetGlyph(t: String): String = when {
                 }
             }
             // what connecting does about a step whose target is not there
-            val missing = if (lane.isDefault) "connecting is refused" else "skipped, its traffic follows the default"
+            val missing = if (lane.isDefault) t("rt.missingRefused") else t("rt.missingSkipped")
             if (lane.target == RoutingProfiles.TARGET_BASE) {
                 val base = p.base
                 FlowArrow("↓", 12.dp)
                 if (base == null) {
-                    FlowNode("⚓", "Exit at the base", BAD, "This routing has no base — $missing", 12.dp, null)
+                    FlowNode("⚓", t("tgt.exitBase"), BAD, tf("rt.noBaseLane", "what" to missing), 12.dp, null)
                 } else {
-                    FlowNode("⚓", store.targetLabel(base), AMBER, if (lane.targetMissing) "base gone — $missing" else null, 12.dp) { onNode(base) }
+                    FlowNode("⚓", targetWord(store, base), AMBER, if (lane.targetMissing) tf("rt.baseGoneLane", "what" to missing) else null, 12.dp) { onNode(base) }
                     FlowArrow("↓", 24.dp)
-                    FlowNode("🌐", "leaves here", PRIMARY, null, 24.dp, null)
+                    FlowNode("🌐", t("rt.leavesHere"), PRIMARY, null, 24.dp, null)
                 }
             } else {
                 // the base first: the phone dials it, and it dials the target
                 val via = lane.via
                 if (via != null) {
-                    FlowArrow("↓ through", 12.dp)
-                    FlowNode("⚓", store.targetLabel(via), AMBER, if (lane.viaMissing) "base gone — connecting is refused" else null, 12.dp) { onNode(via) }
+                    FlowArrow(t("rt.through"), 12.dp)
+                    FlowNode("⚓", targetWord(store, via), AMBER, if (lane.viaMissing) tf("rt.baseGoneLane", "what" to t("rt.missingRefused")) else null, 12.dp) { onNode(via) }
                 }
                 val indent = if (via != null) 24.dp else 12.dp
                 FlowArrow("↓", indent)
                 val target = if (lane.target.isEmpty() && lane.isDefault) (store.servers.firstOrNull()?.id ?: "direct") else lane.target
-                FlowNode(targetGlyph(target), store.targetLabel(target), PRIMARY, if (lane.targetMissing) "gone — $missing" else null, indent) { onNode(target) }
+                FlowNode(targetGlyph(target), targetWord(store, target), PRIMARY, if (lane.targetMissing) tf("rt.goneLane", "what" to missing) else null, indent) { onNode(target) }
             }
         }
     }
@@ -4021,7 +4150,7 @@ private fun targetGlyph(t: String): String = when {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(glyph, fontSize = 13.sp, modifier = Modifier.width(24.dp))
-        Text("$what → $target", color = TXT2, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Text(what + " " + flowArrow() + " " + target, color = TXT2, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         Text(
             tag.uppercase(), color = MUTED, fontSize = 8.sp, fontFamily = MONO, letterSpacing = 0.1.em, maxLines = 1,
             modifier = Modifier.border(1.dp, STROKE, RoundedCornerShape(4.dp)).padding(horizontal = 5.dp, vertical = 2.dp)
@@ -4035,18 +4164,18 @@ private class SharedText(val title: String, val text: String, val servers: Int)
 /** A profile's share link (RouteShare), or null after saying why there is none. */
 private fun profileShare(store: Store, p: RoutingProfile): SharedText? = try {
     val payload = RouteShare.profilePayload(p, store.servers.toList(), store.chains.toList()) { srv: ServerConfig -> LinkParser.buildShareLink(srv) }
-    SharedText("Share “${p.name}”", RouteShare.encode(payload), payload.getJSONArray("servers").length())
+    SharedText(tf("share.profile", "name" to p.name), RouteShare.encode(payload), payload.getJSONArray("servers").length())
 } catch (e: Exception) {
-    AppWork.snack("Can’t share ${p.name}: ${e.message ?: "error"}")
+    AppWork.snack(tf("share.cant", "name" to p.name, "msg" to (e.message ?: t("share.error"))))
     null
 }
 
 /** A chain's share link, or null after saying why there is none. */
 private fun chainShare(store: Store, c: ChainConfig): SharedText? = try {
     val payload = RouteShare.chainPayload(c, store.servers.toList()) { srv: ServerConfig -> LinkParser.buildShareLink(srv) }
-    SharedText("Share ⛓ ${c.name}", RouteShare.encode(payload), payload.getJSONArray("servers").length())
+    SharedText(tf("share.chain", "name" to c.name), RouteShare.encode(payload), payload.getJSONArray("servers").length())
 } catch (e: Exception) {
-    AppWork.snack("Can’t share ${c.name}: ${e.message ?: "error"}")
+    AppWork.snack(tf("share.cant", "name" to c.name, "msg" to (e.message ?: t("share.error"))))
     null
 }
 
@@ -4065,7 +4194,7 @@ private fun chainShare(store: Store, c: ChainConfig): SharedText? = try {
                 Text(st.title, color = TXT, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "⚠ This link carries everything needed to connect — ${st.servers} server(s), with their addresses and keys. Give it only to someone you would give those servers to.",
+                    tf("share.warn", "n" to st.servers),
                     color = AMBER, fontSize = 12.sp
                 )
                 Spacer(Modifier.height(12.dp))
@@ -4074,11 +4203,11 @@ private fun chainShare(store: Store, c: ChainConfig): SharedText? = try {
                     Modifier.size(248.dp).clip(RoundedCornerShape(10.dp)).background(Color.White).padding(6.dp),
                     filterQuality = FilterQuality.None
                 )
-                else Text("Too large for a QR — use Copy.", color = MUTED, fontSize = 12.sp)
+                else Text(t("qr.tooLarge"), color = MUTED, fontSize = 12.sp)
                 Spacer(Modifier.height(8.dp))
-                Text("${st.text.toByteArray(Charsets.UTF_8).size} bytes", color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
+                Text(tf("share.bytes", "n" to st.text.toByteArray(Charsets.UTF_8).size), color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = { copyConfigText(ctx, st.text); onDismiss() }, modifier = Modifier.fillMaxWidth()) { Text("Copy link") }
+                Button(onClick = { copyConfigText(ctx, st.text); onDismiss() }, modifier = Modifier.fillMaxWidth()) { Text(t("btn.copyLink")) }
             }
         }
     }
@@ -4101,16 +4230,16 @@ private fun chainShare(store: Store, c: ChainConfig): SharedText? = try {
             }.getOrNull()
         }
     }
-    val why = decoded.exceptionOrNull()?.message ?: "This link could not be read."
+    val why = decoded.exceptionOrNull()?.message ?: t("imp.cantRead")
     AlertDialog(
         onDismissRequest = onClose,
         containerColor = CARD,
         title = {
             Text(
                 when {
-                    summary == null -> "Can’t import this link"
-                    summary.kind == RouteShare.KIND_CHAIN -> "Import chain “${summary.name}”"
-                    else -> "Import routing “${summary.name}”"
+                    summary == null -> t("imp.cantImport")
+                    summary.kind == RouteShare.KIND_CHAIN -> tf("imp.chainTitle", "name" to summary.name)
+                    else -> tf("imp.profileTitle", "name" to summary.name)
                 },
                 color = TXT, fontSize = 16.sp
             )
@@ -4120,17 +4249,17 @@ private fun chainShare(store: Store, c: ChainConfig): SharedText? = try {
                 if (summary == null) {
                     Text(why, color = BAD, fontSize = 13.sp)
                 } else {
-                    if (summary.kind == RouteShare.KIND_PROFILE) Text("${summary.rules} rule(s) — added as a new profile", color = TXT, fontSize = 13.sp)
-                    Text("${summary.chains} chain(s)", color = TXT, fontSize = 13.sp)
-                    Text("${summary.serversNew} new server(s) · ${summary.serversExisting} already here", color = TXT, fontSize = 13.sp)
+                    if (summary.kind == RouteShare.KIND_PROFILE) Text(tf("imp.rulesNew", "n" to summary.rules), color = TXT, fontSize = 13.sp)
+                    Text(tf("imp.chainsN", "n" to summary.chains), color = TXT, fontSize = 13.sp)
+                    Text(tf("imp.serversN", "new" to summary.serversNew, "old" to summary.serversExisting), color = TXT, fontSize = 13.sp)
                     if (summary.unreadable.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
-                        Text("Not readable here — what names them is marked missing:", color = AMBER, fontSize = 12.sp)
+                        Text(t("imp.unreadable"), color = AMBER, fontSize = 12.sp)
                         summary.unreadable.forEach { u: String -> Text("· $u", color = AMBER, fontSize = 11.sp) }
                     }
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "New servers are added by hand, not to a subscription. Of the settings only “routing mode under these rules” comes with it — your routing mode, DNS and the rest stay yours.",
+                        t("imp.note"),
                         color = MUTED, fontSize = 11.sp
                     )
                 }
@@ -4138,10 +4267,10 @@ private fun chainShare(store: Store, c: ChainConfig): SharedText? = try {
         },
         confirmButton = {
             if (summary != null && payload != null) {
-                TextButton(onClick = { importRouting(store, payload); onClose() }) { Text("Import", color = PRIMARY) }
+                TextButton(onClick = { importRouting(store, payload); onClose() }) { Text(t("imp.import"), color = PRIMARY) }
             }
         },
-        dismissButton = { TextButton(onClick = onClose) { Text(if (summary == null) "Close" else "Cancel", color = MUTED) } }
+        dismissButton = { TextButton(onClick = onClose) { Text(if (summary == null) t("btn.close") else t("btn.cancel"), color = MUTED) } }
     )
 }
 
@@ -4151,16 +4280,16 @@ private fun importRouting(store: Store, payload: JSONObject) {
         RouteShare.applyImport(payload, store.servers.toList(), store.chains.toList(), store.profiles.toList(),
             { l: String -> RouteShare.parseServer(l) }, { srv: ServerConfig -> SubRefresh.strictIdentity(srv) }, { prefix: String -> newId(prefix) })
     } catch (e: Exception) {
-        AppWork.snack("Nothing imported — ${e.message ?: "the link could not be read"}")
+        AppWork.snack(tf("imp.nothing", "why" to (e.message ?: t("imp.linkUnread"))))
         return
     }
     store.applyImported(r)
     if (store.selection.isEmpty()) r.servers.firstOrNull()?.let { srv: ServerConfig -> store.saveSelection(srv.id) }
     val pid = r.profileId
     if (pid != null) RoutingUi.focus = pid
-    val what = if (pid != null) "🧭 ${store.profileById(pid)?.name ?: "the profile"}" else "the chain"
-    val hint = if (pid != null && !store.settings.advancedRouting) " — turn on Routing → Advanced routing to use it" else ""
-    AppWork.snack("Imported $what: ${r.addedServers} new server(s), ${r.addedChains} new chain(s)$hint")
+    val what = if (pid != null) "🧭 ${store.profileById(pid)?.name ?: t("imp.theProfile")}" else t("imp.theChain")
+    val hint = if (pid != null && !store.settings.advancedRouting) " — " + t("imp.turnOn") else ""
+    AppWork.snack(tf("imp.done", "what" to what, "servers" to r.addedServers, "chains" to r.addedChains) + hint)
     AppWork.touch()
 }
 
@@ -4170,64 +4299,77 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     val ctx = LocalContext.current
     var s by remember { mutableStateOf(store.settings) }
     fun save(n: AppSettings) { s = n; store.saveSettings(n); bump() }
-    Screen("Settings", back, {}) {
+    Screen(t("set.title"), back, {}) {
         ApplyBar(store, s)
-        Text("Ports & DNS", color = TXT, fontWeight = FontWeight.Bold)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { NumFld("SOCKS", s.socksPort, Modifier.weight(1f)) { save(s.copy(socksPort = it)) }; NumFld("HTTP", s.httpPort, Modifier.weight(1f)) { save(s.copy(httpPort = it)) } }
+        // The app's language: Persian (right to left, the default) or English.
+        // Saved with the settings; Store.saveSettings hands it to I18n, whose
+        // Compose state redraws every screen at once.
+        Text(t("set.lang"), color = TXT, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            listOf(I18n.FA to "فارسی", I18n.EN to "English").forEach { (v, l) ->
+                Row(Modifier.clickable { save(s.copy(lang = v)) }.padding(end = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(I18n.norm(s.lang) == v, { save(s.copy(lang = v)) }); Text(l, color = TXT)
+                }
+            }
+        }
+        Text(t("set.langHint"), color = MUTED, fontSize = 11.sp)
+        HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
+        Text(t("set.portsDns"), color = TXT, fontWeight = FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { NumFld(t("set.socks"), s.socksPort, Modifier.weight(1f)) { save(s.copy(socksPort = it)) }; NumFld(t("set.http"), s.httpPort, Modifier.weight(1f)) { save(s.copy(httpPort = it)) } }
         // The managed resolver plan (DnsPlan.kt, the desktop's dnsBuilder.js).
         // Typed freely, parsed only when the user leaves the field: parsing per
         // keystroke ate the comma (and the focus) after the first server.
-        SwitchRow("DNS managed by the app", s.dnsManaged) { save(s.copy(dnsManaged = it)) }
-        Text(if (s.dnsManaged) "On: every DNS query that reaches the core is answered here — the world over DoH through the tunnel, Iranian names by the in-country resolver, nothing in plain text off the tunnel. Needed for a corporate WireGuard's own resolver."
-             else "Off: the remote list is used as given, nothing is intercepted, and a corporate WireGuard's resolver is not in the config.", color = MUTED, fontSize = 11.sp)
-        DraftField(s.dnsRemote.joinToString(","), Modifier.fillMaxWidth(), label = { Text("Remote DNS — through the tunnel (DoH URLs, comma-separated)") }) { raw ->
+        SwitchRow(t("set.dnsManaged"), s.dnsManaged) { save(s.copy(dnsManaged = it)) }
+        Text(if (s.dnsManaged) t("set.dnsOn")
+             else t("set.dnsOff"), color = MUTED, fontSize = 11.sp)
+        DraftField(s.dnsRemote.joinToString(","), Modifier.fillMaxWidth(), label = { Text(t("set.dnsRemote")) }) { raw ->
             val list = raw.split(",").map { d -> d.trim() }.filter { d -> d.isNotEmpty() }
             save(s.copy(dnsRemote = list.ifEmpty { DnsPlan.DEFAULT_REMOTE }))   // empty field = keep the defaults
         }
-        DraftField(s.dnsDirect.joinToString(","), Modifier.fillMaxWidth(), label = { Text("In-country DNS — for Bypass Iran (comma-separated)") }) { raw ->
+        DraftField(s.dnsDirect.joinToString(","), Modifier.fillMaxWidth(), label = { Text(t("set.dnsDirect")) }) { raw ->
             val list = raw.split(",").map { d -> d.trim() }.filter { d -> d.isNotEmpty() }
             save(s.copy(dnsDirect = list.ifEmpty { DnsPlan.DEFAULT_DIRECT_IR }))
         }
-        DropPick("Log level", listOf("none", "error", "warning", "info", "debug").map { it to it }, s.logLevel) { save(s.copy(logLevel = it)) }
+        DropPick(t("set.logLevel"), listOf("none", "error", "warning", "info", "debug").map { it to it }, s.logLevel) { save(s.copy(logLevel = it)) }
         SwitchRow("IPv6", s.ipv6) { save(s.copy(ipv6 = it)) }
-        SwitchRow("Connect on open", s.autoConnect) { save(s.copy(autoConnect = it)) }
+        SwitchRow(t("set.autoConnect"), s.autoConnect) { save(s.copy(autoConnect = it)) }
         Text(
-            if (s.autoConnect) "When the app is opened it connects to the config in use, without asking. Android needs VPN permission first — connect once by hand and it is silent from then on."
-            else "The app opens without connecting; the ring waits for you.",
+            if (s.autoConnect) t("set.autoConnectOn")
+            else t("set.autoConnectOff"),
             color = MUTED, fontSize = 11.sp
         )
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
-        Text("Core", color = TXT, fontWeight = FontWeight.Bold)
+        Text(t("set.core"), color = TXT, fontWeight = FontWeight.Bold)
         // The default for configs that do not name a core of their own. A chain,
         // pool or advanced plan has no single owner, so this is what decides it —
         // unless one of its servers asks for PattN, which wins (EngineChoice.kt).
         val pattnHere = remember { XrayPattnCore.available(ctx) }
         DropPick(
-            "Default core",
-            listOf("xray" to "Xray (in-process, default)", "xray-pattn" to "Xray-PattN (bundled binary)"),
+            t("set.defaultCore"),
+            listOf("xray" to t("set.coreXray"), "xray-pattn" to t("set.corePattn")),
             s.defaultEngine
         ) { save(s.copy(defaultEngine = it)) }
         Text(
-            if (!pattnHere) "Xray-PattN is not bundled for this device (arm64 only) — configs asking for it run on the in-process core instead."
-            else "PattN is upstream Xray plus one thing: it does not refuse a plaintext VLESS/Trojan config to a public address, which the official core rejects at load. Everything else behaves identically.",
+            if (!pattnHere) t("set.noPattn")
+            else t("set.pattnHint"),
             color = MUTED, fontSize = 11.sp
         )
         // What this APK carries, as the cores themselves say it — off the main
         // thread, since PattN is asked by running it. Android runs no core an
         // app downloads, so these change only with a newer IRNetFree.
-        val cores by produceState(coresKnown.ifEmpty { "Cores in this app: …" }) {
+        val cores by produceState(coresKnown.ifEmpty { "…" }) {
             if (coresKnown.isEmpty()) coresKnown = withContext(Dispatchers.IO) { coresLine(ctx) }
             value = coresKnown
         }
-        Text(cores, color = MUTED, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.padding(top = 6.dp))
+        Text(tf("set.cores", "list" to cores), color = MUTED, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.padding(top = 6.dp))
         // Mux (Mux.kt, spec §4). Its own key, like LAN sharing — not in this
         // screen's copy of AppSettings; read by the next connect.
         var mux by remember { mutableStateOf(store.muxMode) }
         // touch(): the bar above names a mode the running connection does not carry (SettingsApply)
         fun pickMux(v: String) { store.muxMode = v; mux = v; AppWork.touch() }
-        Text("Mux (multiplexing)", color = TXT, modifier = Modifier.padding(top = 10.dp))
+        Text(t("set.mux"), color = TXT, modifier = Modifier.padding(top = 10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            listOf(Mux.AUTO to "Auto", Mux.ON to "On", Mux.OFF to "Off").forEach { (v, l) ->
+            listOf(Mux.AUTO to t("mux.auto"), Mux.ON to t("mux.on"), Mux.OFF to t("mux.off")).forEach { (v, l) ->
                 Row(Modifier.clickable { pickMux(v) }.padding(end = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(mux == v, { pickMux(v) }); Text(l, color = TXT)
                 }
@@ -4235,25 +4377,25 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         }
         Text(muxHelp(mux), color = MUTED, fontSize = 11.sp)
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
-        Text("Per-app routing", color = TXT, fontWeight = FontWeight.Bold)
-        listOf("off" to "Off (whole system)", "allow" to "Only these apps", "disallow" to "All except these").forEach { (v, l) ->
+        Text(t("set.perApp"), color = TXT, fontWeight = FontWeight.Bold)
+        listOf("off" to t("set.perAppOff"), "allow" to t("set.perAppAllow"), "disallow" to t("set.perAppDisallow")).forEach { (v, l) ->
             Row(Modifier.fillMaxWidth().clickable { save(s.copy(perAppMode = v)) }, verticalAlignment = Alignment.CenterVertically) { RadioButton(s.perAppMode == v, { save(s.copy(perAppMode = v)) }); Text(l, color = TXT) }
         }
         if (s.perAppMode != "off") AppPicker(s.perApps) { save(s.copy(perApps = it)) }
-        Text("Android lets a VPN choose which apps use it, but never tells it which app opened a connection — so here an app is either in the VPN (and follows the routing) or out of it (direct). App rules made on Windows are left out on the phone.",
+        Text(t("set.perAppNote"),
             color = MUTED, fontSize = 11.sp)
         val lockdown by VpnState.lockdown.collectAsState()
         if (lockdown && s.perAppMode != "off")
-            Text("Android's “Block connections without VPN” is on: the apps left out of the VPN have no internet at all instead of going direct. Turn it off under Android Settings → VPN → IRNetFree (⚙).", color = AMBER, fontSize = 11.sp)
+            Text(t("set.lockdown"), color = AMBER, fontSize = 11.sp)
         LanShareSection(store)
     }
 }
 
 /** Settings → Mux: one line of help, for the choice it is on (Off is the default). */
 private fun muxHelp(mode: String): String = when (mode) {
-    Mux.AUTO -> "Auto: each WebSocket / HTTPUpgrade server is tested once and uses mux where it works — far fewer handshakes, less battery."
-    Mux.ON -> "On: every VLESS (without flow), VMess and Trojan server over WebSocket or HTTPUpgrade uses mux, untested."
-    else -> "Off (the default): every connection makes its own handshake with the server, as before."
+    Mux.AUTO -> t("mux.helpAuto")
+    Mux.ON -> t("mux.helpOn")
+    else -> t("mux.helpOff")
 }
 
 /**
@@ -4273,7 +4415,7 @@ private fun coresLine(ctx: Context): String {
     val num = Regex("""\d+\.\d+\.\d+""")
     val xray = XrayCore.version().let { v -> num.find(v)?.value ?: v.ifBlank { "—" } }
     val pattn = XrayPattnCore.version(ctx).ifBlank { "—" }
-    return "Cores in this app: Xray $xray · Xray-PattN $pattn · sing-box —"
+    return "Xray $xray · Xray-PattN $pattn · sing-box —"
 }
 
 @Composable private fun AppPicker(selected: List<String>, onChange: (List<String>) -> Unit) {
@@ -4285,7 +4427,7 @@ private fun coresLine(ctx: Context): String {
     // ...and a list saved before it was hidden here loses it, since it can no longer be unticked
     LaunchedEffect(Unit) { if (ctx.packageName in selected) onChange(selected - ctx.packageName) }
     var q by remember { mutableStateOf("") }
-    OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("Search apps") }, singleLine = true, colors = tfColors())
+    OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text(t("set.searchApps")) }, singleLine = true, colors = tfColors())
     Column {
         apps.filter { it.second.contains(q, true) || it.first.contains(q, true) }.take(150).forEach { (pkg, label) ->
             Row(Modifier.fillMaxWidth().clickable { onChange(if (selected.contains(pkg)) selected - pkg else selected + pkg) }, verticalAlignment = Alignment.CenterVertically) {
@@ -4298,9 +4440,10 @@ private fun coresLine(ctx: Context): String {
 /* ================================ LOGS / MORE ================================ */
 @Composable private fun LogsScreen(back: () -> Unit) {
     val log by VpnState.log.collectAsState()
-    Screen("Logs", back, { IconButton(onClick = { VpnState.clearLog() }) { Icon(Icons.Filled.DeleteSweep, "clear", tint = MUTED) } }) {
-        if (log.isEmpty()) EmptyHint("No logs yet.")
-        SelectionContainer { Column { log.forEach { Text(it, color = Color(0xFFB6C2D4), fontSize = 11.sp) } } }
+    Screen(t("logs.title"), back, { IconButton(onClick = { VpnState.clearLog() }) { Icon(Icons.Filled.DeleteSweep, t("logs.clear"), tint = MUTED) } }) {
+        if (log.isEmpty()) EmptyHint(t("logs.empty"))
+        // the log is English and reads left to right in either language
+        LtrBlock { SelectionContainer { Column { log.forEach { Text(it, color = Color(0xFFB6C2D4), fontSize = 11.sp) } } } }
     }
 }
 
@@ -4326,13 +4469,13 @@ private fun coresLine(ctx: Context): String {
         elapsed = 0L
     }
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        TopBar("More") {}
+        TopBar(t("more.title")) {}
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
             Card(Modifier.fillMaxWidth().padding(bottom = 10.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("Advanced mode", color = TXT, fontWeight = FontWeight.Medium)
-                        Text("chains, routing rules, proxy pool, logs", color = MUTED, fontSize = 11.sp)
+                        Text(t("more.advanced"), color = TXT, fontWeight = FontWeight.Medium)
+                        Text(t("more.advancedSub"), color = MUTED, fontSize = 11.sp)
                     }
                     Switch(s.advancedMode, { v -> s = s.copy(advancedMode = v); store.saveSettings(s); bump() },
                         colors = SwitchDefaults.colors(checkedThumbColor = ON_PRIMARY, checkedTrackColor = PRIMARY, uncheckedThumbColor = MUTED, uncheckedTrackColor = CARD2, uncheckedBorderColor = STROKE))
@@ -4340,12 +4483,12 @@ private fun coresLine(ctx: Context): String {
             }
             val rows = buildList {
                 if (s.advancedMode) {
-                    add(MoreRow("chains", "Chains & groups", "several hops in order, or several configs as one", "${store.chains.size} · ${store.groups.size}", Icons.Filled.Link))
-                    add(MoreRow("pool", "Proxy Pool", "several exits, each on its own port", "${store.pool.size}", Icons.Filled.Hub))
-                    add(MoreRow("routing", "Routing", if (s.advancedRouting) "advanced routing profiles" else routingModeLabel(s.routingMode), if (s.advancedRouting) "${store.profiles.size} profile(s)" else "", Icons.Filled.CallSplit))
+                    add(MoreRow("chains", t("chain.screen"), t("more.chainsSub"), "${store.chains.size} · ${store.groups.size}", Icons.Filled.Link))
+                    add(MoreRow("pool", t("pool.title"), t("more.poolSub"), "${store.pool.size}", Icons.Filled.Hub))
+                    add(MoreRow("routing", t("rt.title"), if (s.advancedRouting) t("more.routingAdvanced") else routingModeLabel(s.routingMode), if (s.advancedRouting) tf("more.profiles", "n" to store.profiles.size) else "", Icons.Filled.CallSplit))
                 }
-                add(MoreRow("settings", "Settings", "ports, DNS, core, mux, per-app", "", Icons.Filled.Settings))
-                if (s.advancedMode) add(MoreRow("logs", "Logs", "what the core actually said", "", Icons.Filled.Article))
+                add(MoreRow("settings", t("set.title"), t("more.settingsSub"), "", Icons.Filled.Settings))
+                if (s.advancedMode) add(MoreRow("logs", t("logs.title"), t("more.logsSub"), "", Icons.Filled.Article))
             }
             rows.forEach { r ->
                 Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { open(r.key) }, colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
@@ -4358,7 +4501,7 @@ private fun coresLine(ctx: Context): String {
                         }
                         if (r.meta.isNotEmpty()) Text(r.meta, color = MUTED, fontSize = 11.sp, fontFamily = MONO)
                         Spacer(Modifier.width(8.dp))
-                        Icon(Icons.Filled.ChevronRight, null, tint = MUTED2)
+                        Icon(Icons.Filled.ChevronRight, null, tint = MUTED2, modifier = Modifier.mirrorRtl())
                     }
                 }
             }
@@ -4374,8 +4517,8 @@ private fun coresLine(ctx: Context): String {
                     if (SingboxCore.available(ctx)) add("sing-box")
                 }
             }
-            Text(cores.joinToString(" · ").ifEmpty { "no core bundled" }, color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
-            if (connectedSince > 0) Text("uptime " + fmtDuration(elapsed), color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
+            Text(cores.joinToString(" · ").ifEmpty { t("more.noCore") }, color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
+            if (connectedSince > 0) Text(tf("more.uptime", "time" to fmtDuration(elapsed)), color = MUTED2, fontSize = 10.sp, fontFamily = MONO)
             Spacer(Modifier.height(16.dp))
         }
     }
@@ -4384,23 +4527,23 @@ private fun coresLine(ctx: Context): String {
 private class MoreRow(val key: String, val title: String, val sub: String, val meta: String, val icon: ImageVector)
 
 private fun routingModeLabel(mode: String): String = when (mode) {
-    "bypass-ir" -> "bypass Iran"
-    "bypass-cn" -> "bypass China"
-    "direct" -> "everything direct"
-    else -> "everything through the tunnel"
+    "bypass-ir" -> t("mode.bypassIr")
+    "bypass-cn" -> t("mode.bypassCn")
+    "direct" -> t("mode.direct")
+    else -> t("mode.global")
 }
 
 /* ================================ shared ================================ */
 @Composable private fun TopBar(title: String, back: (() -> Unit)? = null, actions: @Composable RowScope.() -> Unit) {
     Row(Modifier.fillMaxWidth().padding(horizontal = if (back == null) 16.dp else 8.dp, vertical = if (back == null) 12.dp else 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (back != null) IconButton(onClick = back) { Icon(Icons.Filled.ArrowBack, "back", tint = TXT) }
+        if (back != null) IconButton(onClick = back) { Icon(Icons.Filled.ArrowBack, t("a11y.back"), tint = TXT, modifier = Modifier.mirrorRtl()) }
         Text(title, color = TXT, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); actions()
     }
 }
 @Composable private fun Screen(title: String, back: () -> Unit, actions: @Composable RowScope.() -> Unit, content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = back) { Icon(Icons.Filled.ArrowBack, "back", tint = TXT) }
+            IconButton(onClick = back) { Icon(Icons.Filled.ArrowBack, t("a11y.back"), tint = TXT, modifier = Modifier.mirrorRtl()) }
             Text(title, color = TXT, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); actions()
         }
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp), content = content)
@@ -4425,10 +4568,49 @@ private fun routingModeLabel(mode: String): String = when (mode) {
     if (keys.isEmpty()) return
     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(10.dp)).background(CARD2).padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Text("Not in the running connection yet: ${keys.joinToString(", ")}", color = AMBER, fontSize = 12.sp, modifier = Modifier.weight(1f))
-        TextButton(onClick = { AppWork.reconnect(ctx, store) }) { Text("Reconnect now", color = PRIMARY) }
+        Text(tf("apply.pending", "list" to keys.joinToString(t("sep.list")) { k: String -> applyName(k) }), color = AMBER, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        TextButton(onClick = { AppWork.reconnect(ctx, store) }) { Text(t("apply.reconnect"), color = PRIMARY) }
     }
 }
+
+/** SettingsApply.pending's English names, in the app's language (SettingsApply keeps the English its tests read). */
+private val APPLY_NAMES: Map<String, String> = mapOf(
+    "Routing mode" to "rt.mode",
+    "Block ads" to "rt.blockAds",
+    "Sniffing" to "rt.sniffing",
+    "Custom rules" to "apply.customRules",
+    "Advanced routing" to "rt.advanced",
+    "Routing mode under the rules" to "apply.useMode",
+    "Per-app routing" to "set.perApp",
+    "DNS" to "apply.dns",
+    "IPv6" to "apply.ipv6",
+    "Log level" to "set.logLevel",
+    "Default core" to "set.defaultCore",
+    "Local ports" to "apply.localPorts",
+    "Mux" to "set.mux"
+)
+
+/** One of SettingsApply.pending's names on screen; a name this table does not know stays as it is. */
+private fun applyName(name: String): String {
+    val key = APPLY_NAMES[name]
+    if (key != null) return t(key)
+    if (name == "Routing profile (deleted)") return t("apply.profileDeleted")
+    if (name == "Chain (deleted)") return t("apply.chainDeleted")
+    if (name.startsWith("Chain “") && name.endsWith("”")) return tf("apply.chain", "name" to name.removePrefix("Chain “").removeSuffix("”"))
+    if (name.startsWith("Routing profile “") && name.endsWith("”")) {
+        return tf("apply.profile", "name" to name.removePrefix("Routing profile “").removeSuffix("”"))
+    }
+    return name
+}
+
+/** Left to right whatever the language: addresses, keys, links, JSON, logs and the brand read that way. */
+@Composable private fun LtrBlock(content: @Composable () -> Unit) {
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr, content = content)
+}
+
+/** Flips a directional icon (an arrow, a chevron) when the layout runs right to left. */
+@Composable private fun Modifier.mirrorRtl(): Modifier =
+    if (LocalLayoutDirection.current == LayoutDirection.Rtl) this.scale(scaleX = -1f, scaleY = 1f) else this
 
 @Composable private fun SwitchRow(label: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { Text(label, color = if (enabled) TXT else MUTED, modifier = Modifier.weight(1f)); Switch(checked, onChange, enabled = enabled) }
@@ -4474,7 +4656,7 @@ private fun routingModeLabel(mode: String): String = when (mode) {
 
 /** Every server, chain and group a picker offers — a routing target, a base, a pool exit: a group by its bare id, "⧉ name" (Groups.kt). */
 private fun targetOptions(store: Store): List<Pair<String, String>> = buildList { store.servers.forEach { add(it.id to it.name) }; store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }; addAll(groupOptions(store)) }
-private fun targetOptionsFull(store: Store): List<Pair<String, String>> = buildList { add("proxy" to "Proxy (first server)"); add("direct" to "Direct"); add("block" to "Block"); addAll(targetOptions(store)) }
+private fun targetOptionsFull(store: Store): List<Pair<String, String>> = buildList { add("proxy" to t("tgt.proxy")); add("direct" to t("tgt.direct")); add("block" to t("tgt.block")); addAll(targetOptions(store)) }
 // apiPort belongs here too: it is the core's own metrics/API listener, and a
 // pool entry handed that port makes the config fail to build.
 private fun usedPorts(store: Store): Set<Int> { val s = HashSet<Int>(); s.add(store.settings.socksPort); s.add(store.settings.httpPort); s.add(store.settings.apiPort); store.pool.forEach { if (it.socksPort > 0) s.add(it.socksPort); if (it.httpPort > 0) s.add(it.httpPort) }; return s }
