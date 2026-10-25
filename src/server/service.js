@@ -58,6 +58,10 @@ const { AssetUpdater } = require('../main/assetUpdater');
 const { CORE_IDS, createCoreVersionsApi } = require('../main/coreVersions');
 const { warpHandler } = require('../main/warp');
 const { normalizeGroups, groupRecordsById, isGroupRecord, serversOf } = require('../main/groups');
+// several internets used together: the settings' shape, the machine's internets, and each one's data cap
+const { normalizeMultiWan } = require('../main/multiWan');
+const netLinks = require('../main/netLinks');
+const { createMultiWanQuota, mergeLinks } = require('../main/multiWanMeter');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
 // list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
 // deliberately NOT given this: Electron never runs on a router.
@@ -179,6 +183,15 @@ const DEFAULT_SETTINGS = {
   skin: 'console',
   theme: 'dark',
   defaultEngine: 'xray',
+  // several internets used together (multiWan.js): off, no links, until the
+  // user turns it on in Settings. Written into the config: a reconnect key
+  // (its data caps excepted — settingsMeta.js). The desktop's is the same.
+  multiWan: {
+    enabled: false,
+    mode: 'balance',
+    links: [],
+    split: { up: '', down: '' }
+  },
   // mux on the servers' own outbounds (mux.js): 'auto' tests each ws /
   // httpupgrade server once and muxes it where it works, 'on' every such
   // server untested, 'off' never — the default: nothing changes unless the
@@ -237,8 +250,13 @@ function createService(opts = {}) {
     tunnelWatchMs: 180000, tunnelRecheckMs: 60000, tunnelRebuildGapMs: 600000,
     // the weekly asset update's first look after start, and its interval (0: the
     // platform's own — hourly on a router, whose quiet hours are two hours wide)
-    assetFirstMs: 30000, assetEveryMs: 0
+    assetFirstMs: 30000, assetEveryMs: 0,
+    // how often a router polls the core's counters (see doConnect's stats.start)
+    routerStatsMs: 3000
   }, deps.timing || {});
+  // the machine's internets and their speed tests (netLinks.js) — a test hands in its own
+  const listNetLinksRaw = deps.listLinks || ((o) => netLinks.listLinks(o));
+  const testLinks = deps.testAll || ((o) => netLinks.testAll(o));
   // "does the tunnel answer" — an HTTP 204 through the local SOCKS inbound, 5 s (a test hands in an answer)
   const probeTunnel = deps.probeTunnel || (async () => {
     const r = await httpThroughProxy(getSettings().socksPort, { host: 'cp.cloudflare.com', port: 80, path: '/generate_204', timeout: 5000 });
@@ -636,6 +654,42 @@ function createService(opts = {}) {
   const usageStore = new Store(path.join(dataDir, 'usage.json'), { totals: {} });
   const usage = new UsageMeter({ totals: usageStore.get('totals', {}) });
   let lastUsageSend = 0;
+  // Several internets: each one's bytes this period, its cap, the ones set
+  // aside for it (multiWanMeter.js), saved beside the totals (mirrors main.js).
+  // A reload it asks for waits like the group set-aside's.
+  const mwQuota = createMultiWanQuota({
+    usage: usageStore.get('multiWanUsage', {}),
+    settings: () => normalizeMultiWan(getSettings().multiWan),
+    live: () => (appliedSettings && store.get('activeServerId', null) ? normalizeMultiWan(appliedSettings.multiWan) : null),
+    canReload: () => !!(xray && xray.running) && !connectsInFlight.size && !recovering && !recoverTimer && !userDisconnecting && !isQuitting,
+    pending: () => pendingKeys(),
+    reload: (why) => queueReload(why),
+    log: (l) => send('log', l),
+    now: clock
+  });
+  // The running config's split list (config.multiWanSplit), kept beside
+  // stats.groupMap: not enumerable, so the liveDiagnostics copy lacks it (mirrors main.js).
+  let liveMwSplit = null;
+  /** The internets' bytes into the usage file, lazily: the totals' write that follows carries them (mirrors main.js). */
+  function flushMultiWan() {
+    if (!mwQuota.dirty) return;
+    usageStore.setLazy('multiWanUsage', mwQuota.saved());
+    mwQuota.markSaved();
+  }
+  /**
+   * The machine's internets now (netLinks.js; it finds out on its own that this
+   * is a router); none when they cannot be read — said in the log. A speed test
+   * takes the list multiwan:get read moments ago (mirrors main.js).
+   */
+  let netLinksRead = { at: 0, list: [] };
+  async function listNetLinks({ fresh = true } = {}) {
+    if (!fresh && clock() - netLinksRead.at < 60000) return netLinksRead.list;
+    let list = [];
+    try { list = await listNetLinksRaw({}); }
+    catch (err) { send('log', { line: 'Multi-internet: the network interfaces could not be read — ' + ((err && err.message) || err), level: 'warn' }); }
+    netLinksRead = { at: clock(), list: Array.isArray(list) ? list : [] };
+    return netLinksRead.list;
+  }
 
   function binDirs() { return [userBinDir, bundledBinDir, ...systemBinDirs]; }
   function assetStatus() {
@@ -797,12 +851,17 @@ function createService(opts = {}) {
       lastStats = s;
       // what the app has set aside (groupEvict.js), for the live groups view
       if (s.groups) s.setAside = groupEvict.list();
+      // each internet's speed and its period's bytes, while several carry the connection (multiWanMeter.js)
+      const mwLive = mwQuota.rates();
+      if (Object.keys(mwLive).length) s.multiWan = { live: mwLive, usage: mwQuota.usage() };
       send('stats', s);
       // a group's members leaving and rejoining the rotation, said in the log
       for (const l of groupHealth.update(s.groups)) send('log', l);
       // ...and one that stays dead set aside, tested by the app until it answers (groupEvict.js)
       for (const l of groupEvict.update(s.groups)) send('log', l);
       groupEvictTick();
+      // the internets' bytes into the usage file, lazily: the totals' write below carries them when both are due
+      if (mwQuota.dueForSave()) flushMultiWan();
       if (!usage) return;
       usage.tick(s.per);
       // the live figures ride `s.per`; the lifetime total needs neither that
@@ -811,7 +870,12 @@ function createService(opts = {}) {
       if (usage.dirty && now - lastUsageSend >= 5000) { lastUsageSend = now; send('usage', { totals: usage.totals }); }
       if (usage.dueForSave(now)) { usageStore.set('totals', usage.totals); usage.markSaved(now); }
     },
-    onRaw: (vars) => reportSilentTunnels(vars)
+    onRaw: (vars) => {
+      reportSilentTunnels(vars);
+      // each internet's bytes, from the counters before the groups are folded (multiWanMeter.js) —
+      // a cap reached here sets that internet aside and asks for the reload
+      mwQuota.tick(vars, stats.groupMap, liveMwSplit);
+    }
   });
 
   const downloaderOpts = {
@@ -1875,6 +1939,9 @@ function createService(opts = {}) {
 
     // a group member set aside lately for not answering stays out (groupEvict.js: kept across a reconnect)
     settings = Object.assign({}, settings, { groupSkip: groupEvict.skip(), apiCtlPort: await getFreePort() });
+    // …and an internet over its data cap this period (multiWanMeter.js; a new period has cleared it by now)
+    const mwSkip = mwQuota.skip();
+    settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
     let active;
     try { active = buildActive(serverId, settings); } catch (e) { throw refusal(e); }   // a target gone, a chain short of a member
     const { plan, label, entryAddrs, config, geoWarn, engine } = active;
@@ -2297,15 +2364,18 @@ function createService(opts = {}) {
     // the groups it runs, member by member, for the window's live view (groups-ui/design.md §3)
     stats.groupMap = config.groupTags || null;
     groupHealth.reset();
+    liveMwSplit = config.multiWanSplit || null;   // …and its split outbounds, for each internet's bytes
     groupEvict.reset(plan);
     wgHops.reset(plan);
     watchWgSilence(config);
     // a fresh core counts from zero — tell the meter, or the first poll of the
     // new session reads as growth on the old one (see main.js)
     if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
+    // the same for each internet's bytes, and the caps are held to what this core was built without
+    mwQuota.reset(mwSkip);
     // a router polls the core's counters every 3 s, not every second: the
     // sparkline is not worth a Cortex-A7's time while it is forwarding a house
-    stats.start(OPENWRT ? 3000 : 1000);
+    stats.start(OPENWRT ? T.routerStatsMs : 1000);
 
     startProcWatcher();
     // Watch for the machine's network moving under the live tunnel. Every reconnect
@@ -2427,6 +2497,8 @@ function createService(opts = {}) {
       stopNetWatcher();
       stopTunnelWatch();
       if (stats) stats.stop();
+      flushMultiWan();
+      mwQuota.stop();
       liveDirectInterface = null;
       if (prevActive) send('status', { state: 'disconnected', cause: 'abort' });
       else if (!boot) tell('status', { state: 'error', message, serverId, cause: 'abort' });
@@ -2693,6 +2765,9 @@ function createService(opts = {}) {
     if (liveMux) settings = Object.assign({}, settings, { muxServerIds: liveMux.ids });
     // the group members set aside for not answering stay out (groupEvict.js)
     settings = Object.assign({}, settings, { groupSkip: groupEvict.skip(), apiCtlPort: liveApi ? liveApi.port : await getFreePort() });
+    // …and the internets over their data cap this period (multiWanMeter.js) — the reload it asks for is this one
+    const mwSkip = mwQuota.skip();
+    settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
     // `plan` too: the usage meter needs it to attribute the new core's bytes
     const { plan, config, engine } = buildActive(serverId, settings);
     xrayReloading++;
@@ -2709,7 +2784,9 @@ function createService(opts = {}) {
       // the groups it runs now, member by member (a member set aside is no longer one of them)
       stats.groupMap = config.groupTags || null;
       groupHealth.reset();
+      liveMwSplit = config.multiWanSplit || null;
       if (usage) { usage.reset(); usage.setPlan(plan, serverId); }
+      mwQuota.reset(mwSkip);
     } catch (e) {
       // start() stops the old core before it launches the new one, and the
       // count above swallowed both stops: no core may be left at all
@@ -3283,6 +3360,8 @@ function createService(opts = {}) {
       if (stats) stats.stop();
       // Flush before the counters go away, then reset: the next core starts at
       // zero and must not be read as growth on this one.
+      flushMultiWan();   // first: the totals' own write below carries it
+      mwQuota.stop();
       if (usage) { usage.tick(null); if (usage.dirty) { usageStore.set('totals', usage.totals); usage.markSaved(); } usage.reset(); }
       if (usage) send('usage', { totals: usage.totals });   // settle the UI on the final figure
       // The adapters point at real resolvers again BEFORE the tunnel goes: in
@@ -3631,6 +3710,57 @@ function createService(opts = {}) {
     },
     'settings:pending': () => pendingKeys(),
     'settings:apply': () => reapplyByHand(),
+
+    // Several internets (multiWan.js) — the same three channels and shapes as main.js:
+    // → { settings, links, usage, live }
+    'multiwan:get': async () => {
+      const mw = normalizeMultiWan(getSettings().multiWan);
+      const links = mergeLinks(await listNetLinks(), mw, store.get('multiWanTests', {}));
+      const live = xray.running && store.get('activeServerId', null) ? mwQuota.rates() : {};
+      return { settings: mw, links, usage: mwQuota.usage(), live };
+    },
+    // a part of the settings → saved whole and normalized; answered like settings:set
+    'multiwan:set': (partial) => {
+      const p = partial && typeof partial === 'object' ? partial : {};
+      const cur = normalizeMultiWan(getSettings().multiWan);
+      const multiWan = normalizeMultiWan(Object.assign({}, cur, p, { split: Object.assign({}, cur.split, p.split && typeof p.split === 'object' ? p.split : {}) }));
+      const next = Object.assign({}, getSettings(), { multiWan });
+      store.set('settings', next);
+      return { settings: Object.assign({}, next, ROUTER_FORCED), multiWan, pendingReconnect: pendingKeys() };
+    },
+    // [linkId] → [speed test result], in that order: one internet after another, through the selected config
+    'multiwan:test': async (ids) => {
+      const want = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean).map(String))];
+      const s = getSettings();
+      const links = mergeLinks(await listNetLinks({ fresh: false }), normalizeMultiWan(s.multiWan));
+      const { server, chain } = resolveTarget(store.get('activeServerId', null) || store.get('selectedServerId', null) || store.get('lastServerId', null));
+      const target = chain && chain.length >= 2 ? chain : server;
+      const byId = {};
+      const runnable = [];
+      for (const id of want) {
+        const link = links.find((l) => l.id === id);
+        const blank = { id, ok: false, rttMs: null, downMbps: null, upMbps: null };
+        if (!link) byId[id] = Object.assign(blank, { code: 'unknown', error: 'no such internet' });
+        else if (!link.present) byId[id] = Object.assign(blank, { code: 'absent', error: 'not connected now' });
+        else if (!target) byId[id] = Object.assign(blank, { code: 'noServer', error: 'select a server first' });
+        else runnable.push(link);
+      }
+      if (runnable.length) {
+        const engine = testEngineFor(chooseEngine(Array.isArray(target) ? { mode: 'chain', chain: target } : { mode: 'single', server: target }, s.defaultEngine));
+        let res;
+        try {
+          // the throwaway core the pings use: its version adaptation, and on a router the orphan sweep knows it
+          res = await testLinks({ links: runnable, server: target, buildTestConfig, startTest: (cfg) => xray.startTest(cfg, engine), dataDir });
+        } catch (err) { res = runnable.map((l) => ({ id: l.id, ok: false, error: (err && err.message) || String(err) })); }
+        const tests = Object.assign({}, store.get('multiWanTests', {}));
+        for (const l of runnable) {
+          const got = (Array.isArray(res) ? res : []).find((x) => x && x.id === l.id) || { error: 'no result' };
+          byId[l.id] = tests[l.id] = Object.assign({ id: l.id, ok: false, rttMs: null, downMbps: null, upMbps: null }, got, { id: l.id, at: clock() });
+        }
+        store.set('multiWanTests', tests);
+      }
+      return want.map((id) => byId[id]);
+    },
 
     'ping:tcp': async (id) => {
       const { server } = resolveTarget(id);
@@ -4092,6 +4222,7 @@ function createService(opts = {}) {
     try { stopNetWatcher(); } catch {}
     try { stopTunnelWatch(); } catch {}
     try { if (stats) stats.stop(); } catch {}
+    try { flushMultiWan(); } catch {}   // first: the totals' own write below carries it
     try { if (usage) { usage.tick(null); usageStore.set('totals', usage.totals); usage.markSaved(); } } catch {}
     if (process.platform === 'darwin') {
       try { await stopAllTuns(); await releaseGuardChecked(leakGuard); }

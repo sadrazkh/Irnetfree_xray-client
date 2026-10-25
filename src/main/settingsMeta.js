@@ -20,6 +20,7 @@
  *   autoUpdateSubs/Interval — the subscription timer is re-armed in settings:set
  *   lang, theme         — renderer only
  */
+const { normalizeMultiWan } = require('./multiWan');
 
 /** Settings the running tunnel was built from; changing one needs a reconnect. */
 const RECONNECT_KEYS = [
@@ -45,8 +46,34 @@ const RECONNECT_KEYS = [
   // which core the config is validated on and started with
   'defaultEngine',
   // mux on the servers' own outbounds (mux.js) — written into the config
-  'mux'
+  'mux',
+  // several internets at once (multiWan.js): which interface each outbound
+  // binds is written into the config. Its data caps are not — see VIEWS.
+  'multiWan'
 ];
+
+/**
+ * The part of a key's value the running config is actually built from, where
+ * that is not the whole value. multiWan is compared as the builder reads it —
+ * normalized, so a value saved before its defaults were filled in is not a
+ * "change" — and without a link's cap (quotaGb, quotaPeriod): the quota
+ * (multiWanMeter.js) reads caps live, sets a link aside and reloads the core
+ * itself, so changing only a cap while connected must not ask for a reconnect.
+ */
+const VIEWS = {
+  multiWan: (v) => {
+    const n = normalizeMultiWan(v);
+    return Object.assign({}, n, {
+      links: n.links.map((l) => {
+        const built = Object.assign({}, l);
+        delete built.quotaGb;
+        delete built.quotaPeriod;
+        return built;
+      })
+    });
+  }
+};
+const viewOf = (k, v) => (VIEWS[k] ? VIEWS[k](v) : v);
 
 /**
  * Every key above has a human-readable name in the renderer under the i18n key
@@ -85,7 +112,7 @@ function sameValue(a, b) {
  */
 function pendingReconnectKeys(applied, current) {
   if (!applied || !current) return [];
-  return RECONNECT_KEYS.filter(k => !sameValue(applied[k], current[k]));
+  return RECONNECT_KEYS.filter(k => !sameValue(viewOf(k, applied[k]), viewOf(k, current[k])));
 }
 
 /** Snapshot the reconnect-relevant slice of a settings object (deep-copied). */
@@ -98,4 +125,4 @@ function snapshotApplied(settings) {
   return out;
 }
 
-module.exports = { RECONNECT_KEYS, pendingReconnectKeys, snapshotApplied, sameValue };
+module.exports = { RECONNECT_KEYS, VIEWS, pendingReconnectKeys, snapshotApplied, sameValue };

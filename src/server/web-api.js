@@ -99,6 +99,11 @@
     checkGeoRules: (rules) => invoke('routing:checkGeo', rules),
     applySettings: () => invoke('settings:apply'),
 
+    // several internets used together (multiWan.js) — the same three calls as the preload
+    multiWanGet: () => invoke('multiwan:get'),
+    multiWanSet: (partial) => invoke('multiwan:set', partial),
+    multiWanTest: (ids) => invoke('multiwan:test', ids),
+
     connectionDiagnostics: (probe) => invoke('diagnostics:connection', probe),
     repairNetwork: () => invoke('network:repair'),
     nativeService: (command) => invoke('native:service', command),
