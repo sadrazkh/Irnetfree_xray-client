@@ -78,6 +78,16 @@ const SRV_IP = '10.20.0.1';
 const TARGET = '198.51.100.7';
 const PROBE_URL = `http://${TARGET}/ok`;
 const UUID = '7d2f0c3b-1e4a-4b6d-9c8e-0a1b2c3d4e5f';
+/**
+ * The XHTTP server's certificate, made by the core under test (`xray tls cert`) and pinned by the client
+ * (`pcs`, pinnedPeerCertSha256): XHTTP over TLS and HTTP/2, as users' servers run it. Over plain HTTP/1.1
+ * packet-up an upload POST was now and then reset by the client mid-body (both cores, about one gate in ten,
+ * either way round) and the session waited for the missing piece for ever — XHTTP's HTTP/1.1 path, not the
+ * split. Made in inside(); null before (the tests' configs are plain).
+ */
+const XHTTP_SNI = 'mw.test';
+let CERT = null;
+let PIN = '';
 const BASE = Number(process.env.IRNF_PROBE_PORT || 41200);
 const P = { tcp: BASE + 1, xhttp: BASE + 2, web: BASE + 3, socks: BASE + 10, http: BASE + 11, api: BASE + 12 };
 /** The app's own ports (the owner's IRNetFree runs on them): never these. */
@@ -121,7 +131,9 @@ function probeServers() {
   const { parseLink } = require('../src/main/parser');
   return {
     tcp: parseLink(`vless://${UUID}@${SRV_IP}:${P.tcp}?type=tcp&security=none&encryption=none#mw-tcp`),
-    xhttp: parseLink(`vless://${UUID}@${SRV_IP}:${P.xhttp}?type=xhttp&security=none&encryption=none&path=%2Fmw&mode=packet-up#mw-xhttp`)
+    xhttp: parseLink(PIN
+      ? `vless://${UUID}@${SRV_IP}:${P.xhttp}?type=xhttp&security=tls&sni=${XHTTP_SNI}&alpn=h2&fp=chrome&pcs=${PIN}&encryption=none&path=%2Fmw&mode=packet-up#mw-xhttp`
+      : `vless://${UUID}@${SRV_IP}:${P.xhttp}?type=xhttp&security=none&encryption=none&path=%2Fmw&mode=packet-up#mw-xhttp`)
   };
 }
 
@@ -157,7 +169,9 @@ function serverConfig() {
     log: { loglevel: 'info' },
     inbounds: [
       { tag: 'vless-tcp', listen: SRV_IP, port: P.tcp, protocol: 'vless', settings: users, streamSettings: { network: 'tcp', security: 'none' } },
-      { tag: 'vless-xhttp', listen: SRV_IP, port: P.xhttp, protocol: 'vless', settings: users, streamSettings: { network: 'xhttp', security: 'none', xhttpSettings: { path: '/mw' } } }
+      { tag: 'vless-xhttp', listen: SRV_IP, port: P.xhttp, protocol: 'vless', settings: users, streamSettings: CERT
+        ? { network: 'xhttp', security: 'tls', tlsSettings: { alpn: ['h2'], certificates: [{ certificate: CERT.certificate, key: CERT.key }] }, xhttpSettings: { path: '/mw' } }
+        : { network: 'xhttp', security: 'none', xhttpSettings: { path: '/mw' } } }
     ],
     outbounds: [{ tag: 'page', protocol: 'freedom', settings: { redirect: '127.0.0.1:' + P.web, finalRules: [{ action: 'allow' }] } }]
   };
@@ -690,6 +704,12 @@ async function inside() {
     // the far side: the page, then the server core, both in mwsrv
     const page = spawnKid('page', 'ip', ['netns', 'exec', NS_SRV, process.execPath, __filename, '--serve', String(P.web)]);
     if (!await waitText(page, /^ready/m, 10000)) throw new Error(`the page never listened in ${NS_SRV}\n${tail(page, 10)}`);
+    // the XHTTP server's certificate (see CERT), the pin the client's link carries
+    const made = spawnSync(SERVER_XRAY, ['tls', 'cert', '--domain=' + XHTTP_SNI, '--json'], { encoding: 'utf8', timeout: 20000 });
+    try { CERT = JSON.parse(made.stdout); } catch { CERT = null; }
+    if (!CERT || !Array.isArray(CERT.certificate) || !Array.isArray(CERT.key)) throw new Error('`xray tls cert` gave no certificate — ' + lastLine(made));
+    PIN = new crypto.X509Certificate(CERT.certificate.join('\n') + '\n').fingerprint256.replace(/:/g, '').toLowerCase();
+    info('XHTTP', `TLS + HTTP/2, the core's own certificate for ${XHTTP_SNI}, pinned ${PIN.slice(0, 16)}…`);
     const sFile = path.join(process.env.IRNF_MW_WORK, 'server.json');
     fs.writeFileSync(sFile, JSON.stringify(serverConfig(), null, 1));
     const st = spawnSync(SERVER_XRAY, ['run', '-test', '-c', sFile], { encoding: 'utf8', timeout: 20000 });
