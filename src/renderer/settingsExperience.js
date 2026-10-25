@@ -3,7 +3,10 @@
  * live here: section changes and search only affect presentation. */
 (() => {
   const page = document.getElementById('view-settings');
-  const original = Array.from(page.querySelectorAll(':scope > .card'));
+  // The multi-internet card (multiWan.js) is set apart by its id, so the
+  // positional names below keep naming the cards they always did.
+  const multiWan = document.getElementById('multiWanCard');
+  const original = Array.from(page.querySelectorAll(':scope > .card')).filter(card => card !== multiWan);
   const [network, components, protection, core, save, about] = original;
   const tr = key => window.i18n.t(key);
   function translated(tag, key, className) {
@@ -15,13 +18,14 @@
   const automation = document.createElement('div'); automation.className = 'card';
   for (const id of ['optNetAuto','optNotify','optLaunchAtLogin','optAutoConnect']) automation.append(document.getElementById(id).closest('.switch-row'));
   const sections = [
-    [network,'network'],[protection,'protection'],[appearance,'appearance'],
+    [network,'network'],[multiWan,'network'],[protection,'protection'],[appearance,'appearance'],
     [automation,'automation'],[components,'components'],[core,'components'],[about,'about']
-  ];
+  ].filter(([card]) => card);
   for (const [card, category] of sections) {
     card.dataset.settingsCategory = category;
-    // Existing component/core/about labels already provide descriptive headings.
-    if (![components,core,about].includes(card)) card.prepend(translated('h3','settings.'+category,'settings-section-title'));
+    // Existing component/core/about labels already provide descriptive headings;
+    // the multi-internet card's own switch title is its heading.
+    if (![components,core,about,multiWan].includes(card)) card.prepend(translated('h3','settings.'+category,'settings-section-title'));
     page.append(card);
   }
   page.append(save); save.classList.add('settings-save');

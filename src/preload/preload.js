@@ -67,6 +67,12 @@ contextBridge.exposeInMainWorld('api', {
   checkGeoRules: (rules) => ipcRenderer.invoke('routing:checkGeo', rules),
   applySettings: () => ipcRenderer.invoke('settings:apply'),
 
+  // several internets used together (multiWan.js): { settings, links, usage, live };
+  // a part of the settings → { settings, multiWan, pendingReconnect }; [linkId] → [speed test]
+  multiWanGet: () => ipcRenderer.invoke('multiwan:get'),
+  multiWanSet: (partial) => ipcRenderer.invoke('multiwan:set', partial),
+  multiWanTest: (ids) => ipcRenderer.invoke('multiwan:test', ids),
+
   connectionDiagnostics: (probe) => ipcRenderer.invoke('diagnostics:connection', probe),
   repairNetwork: () => ipcRenderer.invoke('network:repair'),
   nativeService: (command) => ipcRenderer.invoke('native:service', command),

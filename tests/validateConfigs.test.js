@@ -245,6 +245,36 @@ test('the core gate hands the cores every "via a base" shape (routing profiles):
   assert.deepEqual(outs('via-json-through-base-tun').find((o) => o.tag === 'out-jc@sv-vless').mux, { enabled: true, concurrency: 8 });
 });
 
+test('the core gate hands the cores every multi-internet shape (v1.32.0): balance with a backup link, failover, split over XHTTP TLS and REALITY, a group, the pool, advanced, the dialer per interface — plain and under TUN', { timeout: 60000 }, (t) => {
+  const run = dryRun(t);
+  assert.equal(run.status, 0, run.out);
+  const names = ['balance', 'balance-fragment', 'failover', 'split-xhttp-tls', 'split-xhttp-reality', 'split-not-xhttp', 'group-balance', 'pool-balance', 'advanced-balance'];
+  for (const n of names) for (const v of ['plain', 'tun']) assert.ok(run.built.includes(`multiwan-${n}-${v}.json`), `multiwan-${n}-${v}`);
+  const outs = (name) => run.read(name).outbounds;
+  const iface = (o) => ((o && o.streamSettings && o.streamSettings.sockopt) || {}).interface;
+  const at = (name, tag) => outs(name).find((o) => o.tag === tag);
+  // balance: a copy per link at its weight, the backup the fallback
+  assert.deepEqual(outs('multiwan-balance-plain').filter((o) => /^proxy~(gm\d+|fb)$/.test(o.tag)).map((o) => [o.tag, iface(o)]),
+    [['proxy~gm0', 'eth0'], ['proxy~gm1', 'eth1'], ['proxy~gm2', 'eth0'], ['proxy~fb', 'eth2']]);
+  assert.equal(run.read('multiwan-balance-plain').routing.balancers[0].fallbackTag, 'proxy~fb');
+  assert.deepEqual(outs('multiwan-failover-tun').filter((o) => /^proxy~/.test(o.tag)).map(iface), ['eth0', 'eth1']);
+  // under TUN: the rest bound to the NIC, the links their own
+  assert.equal(iface(at('multiwan-balance-tun', 'direct')), 'eth0');
+  assert.equal(iface(at('multiwan-balance-tun', 'proxy~gm1')), 'eth1');
+  // the dialer per interface
+  assert.deepEqual(outs('multiwan-balance-fragment-tun').filter((o) => /^dpi-/.test(o.tag)).map(iface), ['eth0', 'eth1', 'eth2']);
+  // split: one outbound, its two legs bound; the download leg answered from the config like the upload
+  for (const [name, sec] of [['split-xhttp-tls', 'tls'], ['split-xhttp-reality', 'reality']]) {
+    const p = run.proxy(`multiwan-${name}-tun`);
+    const ds = p.streamSettings.xhttpSettings.extra.downloadSettings;
+    assert.deepEqual([iface(p), ds.security, ds.sockopt.interface, ds.sockopt.domainStrategy], ['eth0', sec, 'eth1', 'UseIPv4'], name);
+  }
+  assert.equal(run.proxy('multiwan-split-not-xhttp-plain').protocol, 'loopback', 'not XHTTP: balanced over up and down');
+  assert.equal(at('multiwan-pool-balance-plain', 'out-sv-trojan').protocol, 'loopback');
+  assert.equal(at('multiwan-advanced-balance-plain', 'out-chain-c1-h0').protocol, 'vless', 'a chain hop stays');
+  for (const n of names) for (const v of ['plain', 'tun']) assert.equal(JSON.stringify(run.read(`multiwan-${n}-${v}`)).includes('_mwSplit'), false);
+});
+
 test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every config — the versions read from coreVersions.js, the gate never dry', () => {
   const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8').replace(/\r\n/g, '\n');
   const at = yml.indexOf('\n  cores:\n');

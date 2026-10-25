@@ -168,6 +168,50 @@ jobs:
       - name: A name asked through the TUN reaches Xray and never the ISP resolver
         run: sudo IRNF_TUN_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" "$(command -v node)" scripts/tun-dns-probe.js
 
+  multiwan:
+    # Two internets at once (settings.multiWan) on real links: WHICH link
+    # carried the bytes is what no config check can say. Two network
+    # namespaces of their own (the runner's network is not touched): the
+    # client's, with two veth links to the server's — A (mwa0, the route the
+    # OS prefers) and B (mwb0, behind it) — and one server address reached
+    # over both. The client config is the app's own buildConfig with multiWan
+    # (links mwa0 and mwb0), and the links' byte counters must say: balance
+    # spreads 8 parallel downloads over both links; failover rides its primary
+    # B though the OS would pick A, moves to A when B goes down and comes back
+    # to B when it returns; split (XHTTP) sends an upload by one link and its
+    # download by the other, both ways round; and a control with multiWan off
+    # rides A alone, or the counters could not tell (scripts/probe-multiwan.js).
+    # The suggested Xray, then the suggested Xray-PattN; both always run.
+    name: two internets at once (real links, network namespaces)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch the suggested Xray and Xray-PattN
+        run: |
+          set -euo pipefail
+          XV=$(node -p "require('./src/main/coreVersions').SUGGESTED.xray")
+          PV=$(node -p "require('./src/main/coreVersions').SUGGESTED['xray-pattn']")
+          echo "xray $XV · xray-pattn $PV"
+          mkdir -p "$RUNNER_TEMP/x" "$RUNNER_TEMP/p"
+          curl -fsSL --retry 3 -o x.zip "https://github.com/XTLS/Xray-core/releases/download/v$XV/Xray-linux-64.zip"
+          unzip -q x.zip -d "$RUNNER_TEMP/x"
+          curl -fsSL --retry 3 -o p.zip "https://github.com/patterniha/Xray-core/releases/download/v$PV/Xray-linux-64.zip"
+          unzip -q p.zip -d "$RUNNER_TEMP/p"
+          chmod +x "$RUNNER_TEMP/x/xray" "$RUNNER_TEMP/p/xray"
+      - name: Xray (suggested) balances, fails over and splits over two links
+        # the probe stops itself at 4 minutes and removes its namespaces whatever happened
+        timeout-minutes: 5
+        run: sudo IRNF_MW_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" "$(command -v node)" scripts/probe-multiwan.js
+      - name: Xray-PattN (suggested) balances, fails over and splits over two links
+        # also when the official core failed: one run says it for both
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: sudo IRNF_MW_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=41300 "$(command -v node)" scripts/probe-multiwan.js
+
   android:
     # The Android app is a hand-written port of src/main/parser.js and
     # configBuilder.js, and nobody working on it can compile Kotlin locally

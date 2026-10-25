@@ -126,8 +126,13 @@ async function resolveServerIps(serverAddress, opts = {}) {
 /**
  * Every IPv4 default route in the ACTIVE store, with the state and metric of
  * its interface. The pick happens in pickDefaultRouteWin, where it is tested.
+ *
+ * DEFAULT_ROUTE_ROWS_PS only collects the rows into `$out`; DEFAULT_ROUTES_PS
+ * prints them. The split exists so netLinks.js can print the very same rows
+ * next to the adapters in ONE PowerShell (each start costs half a second) —
+ * DEFAULT_ROUTES_PS itself is the same text it always was.
  */
-const DEFAULT_ROUTES_PS = [
+const DEFAULT_ROUTE_ROWS_PS = [
   "$ErrorActionPreference = 'SilentlyContinue'",
   '$ifs = @{}',
   'foreach ($i in @(Get-NetIPInterface -AddressFamily IPv4)) { $ifs[[int]$i.ifIndex] = $i }',
@@ -137,9 +142,9 @@ const DEFAULT_ROUTES_PS = [
   '$out += [pscustomobject]@{ nextHop = [string]$r.NextHop; ifIndex = [int]$r.ifIndex; alias = [string]$r.InterfaceAlias;'
     + ' routeMetric = [int]$r.RouteMetric; ifMetric = $(if ($i) { [int]$i.InterfaceMetric } else { $null });'
     + " state = $(if ($i) { [string]$i.ConnectionState } else { '' }) }",
-  '}',
-  'ConvertTo-Json -InputObject @($out) -Compress'
+  '}'
 ].join('\n');
+const DEFAULT_ROUTES_PS = DEFAULT_ROUTE_ROWS_PS + '\n' + 'ConvertTo-Json -InputObject @($out) -Compress';
 
 /**
  * The default route Windows itself routes by, out of that query's rows:
@@ -164,8 +169,24 @@ const DEFAULT_ROUTES_PS = [
  * want of a fact the old query never had either.
  */
 function pickDefaultRouteWin(rows) {
+  const best = liveDefaultRoutesWin(rows)[0];
+  return best ? { nextHop: String(best.nextHop), ifIndex: String(best.ifIndex) } : { nextHop: '', ifIndex: '' };
+}
+
+/**
+ * Every row pickDefaultRouteWin chooses from, best first — the pick is the
+ * first of them. netLinks.js lists them all: each is an internet the machine
+ * could leave by.
+ *
+ * `onLink` also keeps a default route with no next hop (0.0.0.0): a PPPoE
+ * dial-up or a mobile-broadband adapter routes that way, and binding a socket
+ * to it (sockopt.interface) works. The pick never wants one — tun2socks pins
+ * the server's /32 to a next hop — so it stays off by default.
+ */
+function liveDefaultRoutesWin(rows, { onLink = false } = {}) {
   const list = (Array.isArray(rows) ? rows : [rows]).filter(r => r && typeof r === 'object');
-  const usable = list.filter(r => net.isIPv4(String(r.nextHop || '')) && r.nextHop !== '0.0.0.0'
+  const hopOk = (r) => (net.isIPv4(String(r.nextHop || '')) && r.nextHop !== '0.0.0.0') || (onLink && r.nextHop === '0.0.0.0');
+  const usable = list.filter(r => hopOk(r)
     && /^\d+$/.test(String(r.ifIndex == null ? '' : r.ifIndex)) && !isOwnTunInterface(r.alias));
   const known = usable.some(r => r.state);
   // the enum's name, or its value should it ever arrive unnamed (Connected = 1)
@@ -173,8 +194,7 @@ function pickDefaultRouteWin(rows) {
   const num = (v) => Number(v) || 0;
   live.sort((a, b) => (num(a.routeMetric) + num(a.ifMetric)) - (num(b.routeMetric) + num(b.ifMetric))
     || num(a.ifMetric) - num(b.ifMetric) || num(a.ifIndex) - num(b.ifIndex));
-  const best = live[0];
-  return best ? { nextHop: String(best.nextHop), ifIndex: String(best.ifIndex) } : { nextHop: '', ifIndex: '' };
+  return live;
 }
 
 /** Discover the current default gateway + interface index (Windows). */
@@ -293,6 +313,6 @@ async function physicalInterface(plat = os.platform()) {
 module.exports = {
   TUN2SOCKS_ADAPTER, SINGBOX_ADAPTER,
   isOwnTunInterface, run, psArgs, delay, sh, isElevated, resolveServerIps,
-  getDefaultGatewayWin, pickDefaultRouteWin, DEFAULT_ROUTES_PS, getTunIfIndex, waitForAdapter, runScriptPrivileged,
+  getDefaultGatewayWin, pickDefaultRouteWin, liveDefaultRoutesWin, DEFAULT_ROUTES_PS, DEFAULT_ROUTE_ROWS_PS, getTunIfIndex, waitForAdapter, runScriptPrivileged,
   getDefaultRouteMac, serviceForDeviceMac, getServiceDnsMac, physicalInterface
 };
