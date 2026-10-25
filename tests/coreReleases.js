@@ -3,7 +3,8 @@
  * GitHub release lists for the three cores, shaped like
  * `GET /repos/<repo>/releases?per_page=30` answers — tags, order, the
  * pre-release flags and the asset names as the three release pages had them on
- * 2026-10-03, plus the Xray and Xray-PattN releases up to 2026-10-14 (XTLS/Xray-core: every 2026 build after 26.3.27 is a pre-release;
+ * 2026-10-03, plus the Xray and Xray-PattN releases up to 2026-10-14 (their newest
+ * renamed to the suggested 26.10.21 / 26.10.22 when XTLS withdrew 26.10.10 on 2026-10-21) (XTLS/Xray-core: every 2026 build after 26.3.27 is a pre-release;
  * patterniha/Xray-core: all stable; SagerNet/sing-box: alphas, betas and rcs
  * between the stables). Not a test file itself (no `.test.js`).
  */
@@ -53,7 +54,7 @@ function releases(repo, rows, assetsOf) {
 }
 
 const XTLS_ROWS = [
-  ['v26.10.10', '2026-10-10', true], ['v26.9.30', '2026-09-30', true], ['v26.9.9', '2026-09-08', true], ['v26.9.8', '2026-09-08', true],
+  ['v26.10.21', '2026-10-21', true], ['v26.9.30', '2026-09-30', true], ['v26.9.9', '2026-09-08', true], ['v26.9.8', '2026-09-08', true],
   ['v26.7.28', '2026-07-28', true], ['v26.7.11', '2026-07-11', true], ['v26.6.27', '2026-06-27', true],
   ['v26.6.22', '2026-06-22', true], ['v26.6.1', '2026-06-01', true], ['v26.5.9', '2026-05-09', true],
   ['v26.5.3', '2026-05-03', true], ['v26.4.25', '2026-04-25', true], ['v26.4.17', '2026-04-17', true],
@@ -66,7 +67,7 @@ const XTLS_ROWS = [
 ];
 
 const PATTN_ROWS = [
-  ['v26.10.13', '2026-10-13'], ['v26.10.9', '2026-10-08'], ['v26.10.8', '2026-10-08'], ['v26.10.7', '2026-10-07'],
+  ['v26.10.22', '2026-10-22'], ['v26.10.9', '2026-10-08'], ['v26.10.8', '2026-10-08'], ['v26.10.7', '2026-10-07'],
   ['v26.10.3', '2026-10-03'], ['v26.9.27', '2026-09-27'], ['v26.9.26', '2026-09-26'], ['v26.9.24', '2026-09-24'],
   ['v26.9.22', '2026-09-22'], ['v26.9.13', '2026-09-13'], ['v26.9.9', '2026-09-09'], ['v26.9.8', '2026-09-08'],
   ['v26.9.7', '2026-09-06'], ['v26.9.1', '2026-09-01'], ['v26.8.28', '2026-08-28']

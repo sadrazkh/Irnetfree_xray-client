@@ -27,8 +27,8 @@ test('one suggested version per core, each a plain x.y.z, for exactly the three 
   assert.deepEqual(CORE_IDS, ['xray', 'xray-pattn', 'sing-box']);
   assert.deepEqual(Object.keys(SUGGESTED).sort(), [...CORE_IDS].sort());
   for (const id of CORE_IDS) assert.match(SUGGESTED[id], /^\d+\.\d+\.\d+$/, id);
-  assert.equal(SUGGESTED.xray, '26.10.10');
-  assert.equal(SUGGESTED['xray-pattn'], '26.10.13');
+  assert.equal(SUGGESTED.xray, '26.10.21');
+  assert.equal(SUGGESTED['xray-pattn'], '26.10.22');
   assert.equal(SUGGESTED['sing-box'], '1.14.3');
   assert.equal(STABLE_COUNT, 6);
   assert.equal(PRERELEASE_COUNT, 4);
@@ -77,28 +77,28 @@ test('a pre-release is GitHub’s flag, or a semver pre-release tag GitHub was n
 /* ------------------------------ the cards ------------------------------ */
 
 test('Xray-PattN, stable: the 6 newest with this platform’s build, newest first, each with its action', () => {
-  // the suggested 26.10.13 installed — GitHub's latest too: one card with all three marks
-  const cards = buildCards({ releases: rel.pattn(), matchAsset: xrayWin, installed: '26.10.13', latestTag: 'v26.10.13', suggested: SUGGESTED['xray-pattn'], prerelease: false });
-  assert.deepEqual(versions(cards), ['26.10.13', '26.10.9', '26.10.8', '26.10.7', '26.10.3', '26.9.27']);
+  // the suggested 26.10.22 installed — GitHub's latest too: one card with all three marks
+  const cards = buildCards({ releases: rel.pattn(), matchAsset: xrayWin, installed: '26.10.22', latestTag: 'v26.10.22', suggested: SUGGESTED['xray-pattn'], prerelease: false });
+  assert.deepEqual(versions(cards), ['26.10.22', '26.10.9', '26.10.8', '26.10.7', '26.10.3', '26.9.27']);
   assert.deepEqual(cards.map((c) => c.action), ['reinstall', 'downgrade', 'downgrade', 'downgrade', 'downgrade', 'downgrade']);
   const [here, , , , , older] = cards;
   assert.deepEqual(here, {
-    version: '26.10.13', tag: 'v26.10.13', date: '2026-10-13T09:30:00Z', size: 20594290, asset: 'Xray-windows-64.zip',
+    version: '26.10.22', tag: 'v26.10.22', date: '2026-10-22T09:30:00Z', size: 20594290, asset: 'Xray-windows-64.zip',
     prerelease: false, isInstalled: true, isSuggested: true, isLatest: true, action: 'reinstall', olderThanSuggested: false
   });
-  assert.equal(older.olderThanSuggested, true, 'older than the suggested 26.10.13');
+  assert.equal(older.olderThanSuggested, true, 'older than the suggested 26.10.22');
   assert.equal(cards.filter((c) => c.isLatest).length, 1);
   // the previous suggested, 26.9.22, installed: listed below the six, every newer card an upgrade
-  const prev = buildCards({ releases: rel.pattn(), matchAsset: xrayWin, installed: '26.9.22', latestTag: 'v26.10.13', suggested: SUGGESTED['xray-pattn'], prerelease: false });
-  assert.deepEqual(versions(prev), ['26.10.13', '26.10.9', '26.10.8', '26.10.7', '26.10.3', '26.9.27', '26.9.22']);
+  const prev = buildCards({ releases: rel.pattn(), matchAsset: xrayWin, installed: '26.9.22', latestTag: 'v26.10.22', suggested: SUGGESTED['xray-pattn'], prerelease: false });
+  assert.deepEqual(versions(prev), ['26.10.22', '26.10.9', '26.10.8', '26.10.7', '26.10.3', '26.9.27', '26.9.22']);
   assert.deepEqual(prev.map((c) => c.action), ['upgrade', 'upgrade', 'upgrade', 'upgrade', 'upgrade', 'upgrade', 'reinstall']);
   assert.deepEqual([prev[0].isSuggested, prev[0].isLatest, prev[0].isInstalled], [true, true, false]);
   assert.equal(prev.at(-1).isInstalled && !prev.at(-1).isSuggested && prev.at(-1).olderThanSuggested, true);
 });
 
-test('Xray (official), stable: 26.3.27 is GitHub’s latest, the suggested 26.10.10 is offered though XTLS calls it a pre-release; the other 2026 pre-releases stay out', () => {
+test('Xray (official), stable: 26.3.27 is GitHub’s latest, the suggested 26.10.21 is offered though XTLS calls it a pre-release; the other 2026 pre-releases stay out', () => {
   const cards = buildCards({ releases: rel.xtls(), matchAsset: xrayRouter, installed: '26.3.27', latestTag: 'v26.3.27', suggested: SUGGESTED.xray, prerelease: false });
-  assert.deepEqual(versions(cards), ['26.10.10', '26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
+  assert.deepEqual(versions(cards), ['26.10.21', '26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
   const [suggested, latest] = cards;
   assert.deepEqual([suggested.isSuggested, suggested.prerelease, suggested.isLatest, suggested.isInstalled, suggested.action], [true, true, false, false, 'upgrade']);
   assert.deepEqual([latest.isLatest, latest.isInstalled, latest.isSuggested, latest.olderThanSuggested, latest.action], [true, true, false, true, 'reinstall']);
@@ -108,7 +108,7 @@ test('Xray (official), stable: 26.3.27 is GitHub’s latest, the suggested 26.10
 
 test('with pre-releases: the 4 newest pre-releases join the stables, ordered by version', () => {
   const cards = buildCards({ releases: rel.xtls(), matchAsset: xrayWin, installed: '26.3.27', latestTag: 'v26.3.27', suggested: SUGGESTED.xray, prerelease: true });
-  assert.deepEqual(versions(cards), ['26.10.10', '26.9.30', '26.9.9', '26.9.8', '26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
+  assert.deepEqual(versions(cards), ['26.10.21', '26.9.30', '26.9.9', '26.9.8', '26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
   assert.deepEqual(cards.slice(0, 4).map((c) => [c.prerelease, c.action, c.isLatest]), Array(4).fill([true, 'upgrade', false]));
 });
 
@@ -137,9 +137,9 @@ test('sing-box: the suggested 1.14.3 is GitHub’s latest stable — the first c
 
 test('the installed version is always a card — a pre-release in the stable list, marked as one', () => {
   const cards = buildCards({ releases: rel.xtls(), matchAsset: xrayWin, installed: '26.9.9', latestTag: 'v26.3.27', suggested: SUGGESTED.xray, prerelease: false });
-  assert.deepEqual(versions(cards), ['26.10.10', '26.9.9', '26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
+  assert.deepEqual(versions(cards), ['26.10.21', '26.9.9', '26.3.27', '26.2.6', '26.1.23', '25.12.8', '25.10.15', '25.9.11']);
   assert.deepEqual([cards[1].isInstalled, cards[1].prerelease, cards[1].action], [true, true, 'reinstall']);
-  assert.deepEqual([cards[0].isSuggested, cards[0].action], [true, 'upgrade'], 'the suggested 26.10.10, a pre-release too');
+  assert.deepEqual([cards[0].isSuggested, cards[0].action], [true, 'upgrade'], 'the suggested 26.10.21, a pre-release too');
   assert.equal(cards[2].action, 'downgrade');
   // a pre-release sing-box reads its suffix from the core's own output, not just x.y.z
   const sb = buildCards({ releases: rel.singbox(), matchAsset: sbWin, installed: fullVersion('sing-box version 1.15.0-alpha.9'), latestTag: 'v1.14.2', suggested: SUGGESTED['sing-box'], prerelease: true });
@@ -149,7 +149,7 @@ test('the installed version is always a card — a pre-release in the stable lis
 
 test('nothing installed (or a version that cannot be read): every card installs', () => {
   for (const installed of ['', null, undefined]) {
-    const cards = buildCards({ releases: rel.pattn(), matchAsset: xrayWin, installed, latestTag: 'v26.10.13', suggested: SUGGESTED['xray-pattn'], prerelease: false });
+    const cards = buildCards({ releases: rel.pattn(), matchAsset: xrayWin, installed, latestTag: 'v26.10.22', suggested: SUGGESTED['xray-pattn'], prerelease: false });
     assert.equal(cards.length, STABLE_COUNT);
     assert.ok(cards.every((c) => c.action === 'install' && !c.isInstalled), String(installed));
   }
@@ -157,7 +157,7 @@ test('nothing installed (or a version that cannot be read): every card installs'
 
 test('never a draft, never a release without this platform’s build, never a tag with no version', () => {
   const releases = rel.pattn();
-  releases[0].draft = true;                                                         // 26.10.13
+  releases[0].draft = true;                                                         // 26.10.22
   releases[1].assets = releases[1].assets.filter((a) => !/windows/.test(a.name));  // 26.10.9: no Windows build
   releases.push({ tag_name: 'nightly', prerelease: false, draft: false, published_at: '2026-10-01T00:00:00Z', assets: rel.xrayAssets('patterniha/Xray-core', 'nightly') });
   releases.push(Object.assign({}, releases.find((r) => r.tag_name === 'v26.9.22'), { tag_name: '26.9.22' }));   // the same version twice
@@ -186,7 +186,7 @@ function fakeDownloader(over = {}) {
     calls,
     target: (id) => ({ platform: 'linux', arch: 'arm', asset: id === 'sing-box' ? 'sing-box-*-linux-armv7.tar.gz' : 'Xray-linux-arm32-v7a.zip' }),
     assetMatcher: () => xrayRouter,
-    listReleases: async (id, opts) => { calls.push(['list', id, opts]); return { releases: rel.pattn(), latestTag: 'v26.10.13' }; },
+    listReleases: async (id, opts) => { calls.push(['list', id, opts]); return { releases: rel.pattn(), latestTag: 'v26.10.22' }; },
     installVersion: async (id, tag, opts) => { calls.push(['install', id, tag]); if (opts && opts.beforePlace) await opts.beforePlace(); return { ok: true, component: id, tag, version: tag.replace(/^v/, '') }; }
   }, over);
   return d;
@@ -214,13 +214,13 @@ test('cores:versions — the installed, suggested and latest versions, the platf
   assert.equal(res.ok, true);
   assert.equal(res.component, 'xray-pattn');
   assert.equal(res.installed, '26.9.22', 'read out of `xray-pattn version`');
-  assert.equal(res.suggested, '26.10.13');
-  assert.equal(res.latest, '26.10.13');
+  assert.equal(res.suggested, '26.10.22');
+  assert.equal(res.latest, '26.10.22');
   assert.deepEqual(res.platform, { platform: 'linux', arch: 'arm', asset: 'Xray-linux-arm32-v7a.zip' });
   assert.equal(res.busy, false);
   assert.equal(res.installing, null);
   // the 6 newest, and the installed 26.9.22 below them
-  assert.deepEqual(versions(res.cards), ['26.10.13', '26.10.9', '26.10.8', '26.10.7', '26.10.3', '26.9.27', '26.9.22']);
+  assert.deepEqual(versions(res.cards), ['26.10.22', '26.10.9', '26.10.8', '26.10.7', '26.10.3', '26.9.27', '26.9.22']);
   assert.deepEqual(h.downloader.calls, [['list', 'xray-pattn', { force: false }]]);
   // Retry asks GitHub again
   await h.api.versions({ component: 'xray-pattn', prerelease: true, force: true });

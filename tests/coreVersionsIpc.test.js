@@ -73,11 +73,11 @@ test('router: cores:versions answers with the installed, suggested and latest ve
   const res = await s.service.invoke('cores:versions', { component: 'xray-pattn', prerelease: false });
   assert.equal(res.ok, true, JSON.stringify(res));
   assert.equal(res.installed, '26.9.1', 'what the core says (the fake answers 26.9.1 for the fork)');
-  assert.equal(res.suggested, '26.10.13');
-  assert.equal(res.latest, '26.10.13');
+  assert.equal(res.suggested, '26.10.22');
+  assert.equal(res.latest, '26.10.22');
   assert.deepEqual(res.platform, { platform: 'linux', arch: 'arm', asset: 'Xray-linux-arm32-v7a.zip' });
   assert.equal(res.busy, false);
-  assert.deepEqual(res.cards.map((c) => c.version), ['26.10.13', '26.10.9', '26.10.8', '26.10.7', '26.10.3', '26.9.27', '26.9.1']);
+  assert.deepEqual(res.cards.map((c) => c.version), ['26.10.22', '26.10.9', '26.10.8', '26.10.7', '26.10.3', '26.9.27', '26.9.1']);
   assert.ok(res.cards.every((c) => c.asset === 'Xray-linux-arm32-v7a.zip'));
   assert.deepEqual(s.seen.sort(), [
     'api:https://api.github.com/repos/patterniha/Xray-core/releases/latest',

@@ -137,7 +137,7 @@ test('listReleases: the 30 newest and GitHub’s latest, from the core’s own r
     'https://api.github.com/repos/patterniha/Xray-core/releases/latest',
     'https://api.github.com/repos/patterniha/Xray-core/releases?per_page=30'
   ]);
-  assert.equal(got.latestTag, 'v26.10.13');
+  assert.equal(got.latestTag, 'v26.10.22');
   assert.equal(got.releases.length, rel.pattn().length);
   assert.deepEqual(got.releases[8], {
     tag_name: 'v26.9.22', name: 'v26.9.22', prerelease: false, draft: false, published_at: '2026-09-22T09:30:00Z',
@@ -228,15 +228,15 @@ test('a plain download installs the suggested Xray when it is newer than GitHub�
   const d = makeDownloader({ fetchJSON: async (url) => {
     asked.push(url);
     if (url.endsWith('/releases/latest')) return { tag_name: 'v26.3.27', assets: [] };
-    if (url.endsWith('/releases/tags/v26.10.10')) return { tag_name: 'v26.10.10', assets: [] };
+    if (url.endsWith('/releases/tags/v26.10.21')) return { tag_name: 'v26.10.21', assets: [] };
     throw new Error('unexpected ' + url);
   } });
   const rel = await d.defaultRelease('xray');
-  assert.equal(rel.tag_name, 'v26.10.10');
-  assert.ok(asked.some(u => u.endsWith('/tags/v26.10.10')));
+  assert.equal(rel.tag_name, 'v26.10.21');
+  assert.ok(asked.some(u => u.endsWith('/tags/v26.10.21')));
   assert.deepEqual(asked, [
     'https://api.github.com/repos/XTLS/Xray-core/releases/latest',
-    'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.10.10'
+    'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.10.21'
   ], 'the official core’s own repo');
 });
 
@@ -249,10 +249,10 @@ test('a newer stable than the suggested one wins, and the suggested tag is not e
   assert.deepEqual(d.logs, [], 'nothing else asked: no fallback said');
   // the same release as the suggested one: nothing more to ask either
   const same = makeDownloader({ fetchJSON: async (url) => {
-    if (url.endsWith('/releases/latest')) return { tag_name: 'v26.10.10', assets: [] };
+    if (url.endsWith('/releases/latest')) return { tag_name: 'v26.10.21', assets: [] };
     throw new Error('should not ask ' + url);
   } });
-  assert.equal((await same.defaultRelease('xray')).tag_name, 'v26.10.10');
+  assert.equal((await same.defaultRelease('xray')).tag_name, 'v26.10.21');
   // (a tag fetched anyway would throw and fall back to the same latest — only its warning tells)
   assert.deepEqual(same.logs, [], 'nothing else asked: no fallback said');
 });
@@ -263,7 +263,7 @@ test('the suggested release that cannot be fetched falls back to the latest stab
     throw new Error('HTTP 404');
   } });
   assert.equal((await d.defaultRelease('xray')).tag_name, 'v26.3.27');
-  assert.ok(d.logs.some(([level, line]) => level === 'warn' && /Xray 26\.10\.10 could not be fetched \(HTTP 404\).*v26\.3\.27/.test(line)), JSON.stringify(d.logs));
+  assert.ok(d.logs.some(([level, line]) => level === 'warn' && /Xray 26\.10\.21 could not be fetched \(HTTP 404\).*v26\.3\.27/.test(line)), JSON.stringify(d.logs));
   // an answer that is no release (no assets list) is the same miss
   const odd = makeDownloader({ fetchJSON: async (url) => (url.endsWith('/releases/latest') ? { tag_name: 'v26.3.27', assets: [] } : { message: 'Not Found' }) });
   assert.equal((await odd.defaultRelease('xray')).tag_name, 'v26.3.27');
@@ -271,10 +271,10 @@ test('the suggested release that cannot be fetched falls back to the latest stab
 
 test('Xray-PattN and sing-box: their latest stable is newer than the suggested one — installed as today, from their own repos', async () => {
   for (const [id, url, tag] of [
-    ['xray-pattn', 'https://api.github.com/repos/patterniha/Xray-core/releases/latest', 'v26.10.20'],
+    ['xray-pattn', 'https://api.github.com/repos/patterniha/Xray-core/releases/latest', 'v26.10.24'],
     ['sing-box', 'https://api.github.com/repos/SagerNet/sing-box/releases/latest', 'v1.14.4'],
     // the same as the suggested one: nothing more to ask
-    ['xray-pattn', 'https://api.github.com/repos/patterniha/Xray-core/releases/latest', 'v26.10.13'],
+    ['xray-pattn', 'https://api.github.com/repos/patterniha/Xray-core/releases/latest', 'v26.10.22'],
     ['sing-box', 'https://api.github.com/repos/SagerNet/sing-box/releases/latest', 'v1.14.3']
   ]) {
     const asked = [];
@@ -284,9 +284,9 @@ test('Xray-PattN and sing-box: their latest stable is newer than the suggested o
   }
 });
 
-test('latestVersion names the default target: the weekly updater moves 26.3.27 to 26.10.10, never below', async () => {
+test('latestVersion names the default target: the weekly updater moves 26.3.27 to 26.10.21, never below', async () => {
   const d = makeDownloader({ fetchJSON: async () => ({ tag_name: 'v26.3.27', assets: [] }) });
-  assert.equal(await d.latestVersion('xray'), '26.10.10');
+  assert.equal(await d.latestVersion('xray'), '26.10.21');
   const e = makeDownloader({ fetchJSON: async () => ({ tag_name: 'v1.14.4', assets: [] }) });
   assert.equal(await e.latestVersion('sing-box'), '1.14.4');   // latest stable above ⭐ 1.14.3
   const older = makeDownloader({ fetchJSON: async (u) => ({ tag_name: /\/tags\//.test(u) ? 'v1.14.3' : 'v1.14.2', assets: [] }) });
@@ -307,7 +307,7 @@ test('Update (download) of a core goes through the default target: the suggested
   const asked = [];
   const answers = {
     'https://api.github.com/repos/XTLS/Xray-core/releases/latest': 'v26.3.27',
-    'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.10.10': 'v26.10.10',
+    'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.10.21': 'v26.10.21',
     'https://api.github.com/repos/SagerNet/sing-box/releases/latest': 'v1.14.3'
   };
   const d = makeDownloader({ fetchJSON: async (url) => {
@@ -318,7 +318,7 @@ test('Update (download) of a core goes through the default target: the suggested
   await assert.rejects(d.download('xray'), /asset not found/);
   assert.deepEqual(asked, [
     'https://api.github.com/repos/XTLS/Xray-core/releases/latest',
-    'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.10.10'
+    'https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.10.21'
   ]);
   assert.ok(d.logs.some(([, line]) => line === '[download] Fetching Xray (official) release info…'), JSON.stringify(d.logs));
   asked.length = 0;
