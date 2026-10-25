@@ -441,6 +441,46 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
   if (masqueMade < 7) throw new Error('the editor’s MASQUE configs: only ' + masqueMade);
 }
 
+// Multi-internet (v1.32.0, src/main/multiWan.js): a server over two links as
+// a group — balance with a weight and a backup link (the fallback), failover —
+// and split: an XHTTP server uploading on one link and downloading on the
+// other, over TLS and over REALITY, the download leg written by the app
+// (xhttpSettings.extra.downloadSettings with its own sockopt.interface). Also
+// a group's members over the links, the pool and advanced routing, and the
+// anti-DPI dialer bound per interface. Each plain and under TUN — everything
+// else that dials itself bound to the NIC, the links keeping their own, the
+// entry names answered from the config (the download leg's too).
+{
+  const { groupRecord } = require('../src/main/groups');
+  const XH = '11111111-2222-3333-4444-555555555555';
+  const xhTls = parseLink(`vless://${XH}@x.example.com:443?encryption=none&type=xhttp&security=tls&sni=x.example.com&fp=chrome&path=%2Fxh&host=x.example.com&mode=auto#mw-xhttp-tls`);
+  const xhReality = parseLink(`vless://${XH}@r.example.com:443?encryption=none&type=xhttp&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${Buffer.alloc(32, 9).toString('base64url')}&sid=ab12&path=%2Fxr&mode=auto#mw-xhttp-reality`);
+  const MW_LINKS = [{ id: 'eth0', name: 'A', weight: 2 }, { id: 'eth1', name: 'B', weight: 1 }, { id: 'eth2', name: 'C', role: 'backup' }];
+  const mwOf = (mode) => ({ enabled: true, mode, links: MW_LINKS, split: { up: 'eth0', down: 'eth1' } });
+  const mwGroup = groupRecord({ id: 'grp-ci', name: 'CI', members: [{ id: 'sv-vless' }, { id: 'sv-trojan' }] }, { 'sv-vless': F.VLESS_WS_TLS, 'sv-trojan': F.TROJAN_TCP_TLS });
+  const MW_SHAPES = {
+    balance: [single, 'balance'],
+    'balance-fragment': [{ mode: 'single', server: F.vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' }) }, 'balance'],
+    failover: [single, 'failover'],
+    'split-xhttp-tls': [{ mode: 'single', server: xhTls }, 'split'],
+    'split-xhttp-reality': [{ mode: 'single', server: xhReality }, 'split'],
+    'split-not-xhttp': [single, 'split'],
+    'group-balance': [{ mode: 'single', server: mwGroup }, 'balance'],
+    'pool-balance': [pool, 'balance'],
+    'advanced-balance': [advanced, 'balance']
+  };
+  const MW_SETTINGS = {
+    plain: managed,
+    tun: Object.assign({ routingMode: 'bypass-ir', tunMode: true, leakGuard: 'standard', directInterface: 'eth0',
+      entryHostIps: Object.assign({ 'x.example.com': ['203.0.113.50'], 'r.example.com': ['203.0.113.51'] }, PINS) }, managed)
+  };
+  for (const [name, [plan, mode]] of Object.entries(MW_SHAPES)) {
+    for (const [variant, over] of Object.entries(MW_SETTINGS)) {
+      check(`multiwan-${name}-${variant}`, buildConfig(plan, F.settings(Object.assign({ multiWan: mwOf(mode) }, over))));
+    }
+  }
+}
+
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
 // sing-tun there only accepts utun<N> and names the device itself — plus the
