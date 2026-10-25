@@ -264,6 +264,8 @@ function showView(view) {
   $$('.view').forEach(v => v.classList.remove('active'));
   const v = $('#view-' + view);
   if (v) v.classList.add('active');
+  // the multi-internet card asks for the machine's internets the first time Settings opens (multiWan.js)
+  if (view === 'settings' && window.multiWanCard && !window.multiWanCard.loaded()) window.multiWanCard.refresh();
 }
 $$('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => showView(btn.dataset.view));
@@ -319,6 +321,7 @@ function setLang(lang) {
   refreshConnLabels();
   renderAutostartBanner();
   renderSettingCards();   // option labels are translated strings
+  if (window.multiWanCard) window.multiWanCard.render();   // the multi-internet card is drawn with t()
   // the chrome carries three strings that are not data-i18n nodes: the mode
   // badge, the path diagram's own labels and the inspector's on/off words
   applyUiMode(state.settings.uiMode || defaultUiMode());
@@ -384,6 +387,7 @@ async function init() {
   applyUiMode(state.settings.uiMode || defaultUiMode());
 
   applySettingsToUI();
+  mountMultiWan();
   renderServers();
   renderPicker();
   renderSubs();
@@ -742,6 +746,36 @@ async function saveSettings(partial = {}, { silent = false } = {}) {
   const changed = (k) => Object.prototype.hasOwnProperty.call(partial, k) && JSON.stringify(prev[k]) !== JSON.stringify(now[k]);
   if (!silent && state.pendingReconnect.some(k => !before.includes(k) || changed(k))) await promptApplySettings();
   return state.pendingReconnect;
+}
+
+/* ------------------- several internets (multiWan.js) ------------------- */
+
+/**
+ * The multi-internet card's save: multiwan:set, then what a settings save
+ * does — the stored settings, the pending banner, and the offer to reconnect
+ * when this change made something pending the live connection was built
+ * without. A second edit of a key already pending asks no more (the card is a
+ * dozen small controls; one question per change would be a question a click).
+ * A data cap alone is never pending: the service applies it itself.
+ */
+async function saveMultiWan(partial) {
+  const before = (state.pendingReconnect || []).slice();
+  const res = await window.api.multiWanSet(partial);
+  if (res && res.settings) state.settings = res.settings;
+  if (res && Array.isArray(res.pendingReconnect)) setPending(res.pendingReconnect);
+  if (state.connected && (state.pendingReconnect || []).some(k => !before.includes(k))) await promptApplySettings();
+  return res;
+}
+
+/** The card's box and its hooks; it loads its internets when Settings first opens (showView). */
+function mountMultiWan() {
+  if (!window.multiWanCard) return;
+  window.multiWanCard.mount($('#multiWanCard'), {
+    save: saveMultiWan,
+    connected: () => !!state.connected,
+    settings: () => (state.settings || {}).multiWan,
+    toast: (msg, kind) => toast(msg, kind)
+  });
 }
 
 /* ------------------- settings that need a reconnect ------------------- */
@@ -2849,6 +2883,8 @@ function renderTrafficPath(stateStr) {
   applyPathTraffic(lastPerOutbound);
   // the routing page's flow tree is live only while its profile is the one up
   applyFlowTraffic(lastPerOutbound);
+  // the multi-internet card's live share bars go with the connection (multiWan.js)
+  if (window.multiWanCard) window.multiWanCard.connection(live);
   drawHomeFlowSoon();
   // the running groups (v1.28): none unless connected (the next tick says which); a node
   // carrying one gets its share bar, its count and its box; the card of what connected opens
@@ -3750,6 +3786,7 @@ $('#backupFile').onchange = async () => {
   state.usage = data.usage || {};
   state.pendingReconnect = data.pendingReconnect || [];
   applySettingsToUI(); renderServers(); renderPicker(); renderSubs(); renderChains(); renderPool(); renderAdvanced(); renderPendingBanner();
+  if (window.multiWanCard && window.multiWanCard.loaded()) window.multiWanCard.refresh();   // its settings came with the backup
   const n = res.added;
   toast(`${t('backup.done')}: ${n.servers} / ${n.subscriptions} / ${n.chains} / ${n.pool}`, 'ok');
 };
@@ -9570,6 +9607,8 @@ window.api.onStats((s) => {
   $('#sessDown').textContent = fmtBytes(s.totalDown);
   $('#sessUp').textContent = fmtBytes(s.totalUp);
   $('#sessSum').textContent = fmtBytes((Number(s.totalDown) || 0) + (Number(s.totalUp) || 0));
+  // each internet's share and its period's bytes, while several carry the connection (multiWan.js)
+  if (window.multiWanCard) window.multiWanCard.live(state.connected ? s.multiWan : null);
   // the throughput caption floating over the path's first link. One textContent
   // write per second onto a node the path already built — the diagram itself is
   // never rebuilt here.

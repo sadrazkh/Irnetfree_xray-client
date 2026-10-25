@@ -637,6 +637,13 @@
           </div>
         </div>
 
+        <!-- Several internets used together (src/main/multiWan.js): the card is
+             drawn by multiWan.js — the switch, the modes, one row per internet
+             with its role, share and data cap, the live share bars — and saves
+             each change at once (multiwan:set). settingsExperience.js files it
+             under "Connection and DNS". -->
+        <div class="card" id="multiWanCard"></div>
+
         <!-- Required runtime files -->
         <div class="card">
           <label class="field-label" data-i18n="comp.title">فایل‌های موردنیاز</label>
@@ -1393,6 +1400,7 @@
   <script src="diagnostics.js"></script>
   <script src="settingsExperience.js"></script>
   <script src="corePicker.js"></script>
+  <script src="multiWan.js"></script>
   <script src="serverFields.js"></script>
   <script src="app.js"></script>
 </body>

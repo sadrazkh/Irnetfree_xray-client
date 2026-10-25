@@ -50,6 +50,7 @@ function baseSettings(over) {
     theme: 'dark',
     defaultEngine: 'xray',
     mux: 'off',
+    multiWan: { enabled: false, mode: 'balance', links: [], split: { up: '', down: '' } },
     lang: 'fa'
   }, over || {});
 }
@@ -105,7 +106,8 @@ test('every reconnect-relevant key is detected when it changes', () => {
     tunBackend: 'tun2socks', leakGuard: 'strict', blockUdpInProxyMode: true, singboxDns: 'core',
     tunAppMode: 'exclude', tunApps: ['chrome.exe'],
     defaultEngine: 'xray-pattn',
-    mux: 'auto'
+    mux: 'auto',
+    multiWan: { enabled: true, mode: 'balance', links: [], split: { up: '', down: '' } }
   };
   // the fixture must cover the whole list, or this test silently stops guarding
   assert.deepEqual(Object.keys(changes).sort(), [...RECONNECT_KEYS].sort());
