@@ -137,16 +137,16 @@ test.after(() => { try { fs.rmSync(dl.destDir, { recursive: true, force: true })
 /**
  * What main answers to cores:versions — built by the real card builder. The
  * fork's default install is the previous suggested, 26.9.22: the suggested
- * 26.10.13 (GitHub's latest too) is then an upgrade that never asks, and every
+ * 26.10.22 (GitHub's latest too) is then an upgrade that never asks, and every
  * other card is older than the suggested one (it asks first).
  */
 function answer({ component = 'xray-pattn', installed = '26.9.22', prerelease = false, busy = false, releases, installing = null } = {}) {
   const list = releases || (component === 'sing-box' ? rel.singbox() : component === 'xray' ? rel.xtls() : rel.pattn());
-  const cards = buildCards({ releases: list, matchAsset: dl.assetMatcher(component), installed, latestTag: component === 'xray' ? 'v26.3.27' : component === 'sing-box' ? 'v1.14.3' : 'v26.10.13', suggested: SUGGESTED[component], prerelease });
-  return { ok: true, component, installed, suggested: SUGGESTED[component], latest: component === 'xray-pattn' ? '26.10.13' : '', platform: dl.target(component), prerelease, busy, installing, cards };
+  const cards = buildCards({ releases: list, matchAsset: dl.assetMatcher(component), installed, latestTag: component === 'xray' ? 'v26.3.27' : component === 'sing-box' ? 'v1.14.3' : 'v26.10.22', suggested: SUGGESTED[component], prerelease });
+  return { ok: true, component, installed, suggested: SUGGESTED[component], latest: component === 'xray-pattn' ? '26.10.22' : '', platform: dl.target(component), prerelease, busy, installing, cards };
 }
-/** The fork with the suggested 26.10.13 installed: every other card is a downgrade, older than the suggested one. */
-const ON_SUGGESTED = { answer: { installed: '26.10.13' } };
+/** The fork with the suggested 26.10.22 installed: every other card is a downgrade, older than the suggested one. */
+const ON_SUGGESTED = { answer: { installed: '26.10.22' } };
 
 /** What t() answers in the vm: the key, or for a key with {fields} the key and its fields, so a filled-in string can be checked. */
 const TEMPLATES = {
@@ -255,24 +255,24 @@ test('the header says what is installed and what this device downloads', async (
 /* ------------------------------ the cards ------------------------------ */
 
 test('the stable list: one card per version, newest first, with its badges, age, size and action', async () => {
-  // the suggested 26.10.13 installed — GitHub's latest too: one card with three badges
+  // the suggested 26.10.22 installed — GitHub's latest too: one card with three badges
   const h = await opened('xray-pattn', ON_SUGGESTED);
   assert.equal(h.modal().byClass('cv-skel').length, 0);
   assert.equal(h.modal().one('cv-list').getAttribute('aria-busy'), 'false');
-  assert.deepEqual(h.cards().map((c) => c.one('cv-ver').textContent), ['v26.10.13', 'v26.10.9', 'v26.10.8', 'v26.10.7', 'v26.10.3', 'v26.9.27']);
+  assert.deepEqual(h.cards().map((c) => c.one('cv-ver').textContent), ['v26.10.22', 'v26.10.9', 'v26.10.8', 'v26.10.7', 'v26.10.3', 'v26.9.27']);
   const badges = (c) => c.byClass('cv-badge').map((b) => b.textContent);
-  assert.deepEqual(badges(h.card('26.10.13')), ['cv.badge.suggested', 'cv.badge.latest', 'cv.badge.installed']);
+  assert.deepEqual(badges(h.card('26.10.22')), ['cv.badge.suggested', 'cv.badge.latest', 'cv.badge.installed']);
   assert.deepEqual(badges(h.card('26.10.9')), []);
-  assert.ok(h.card('26.10.13').classList.contains('is-installed') && h.card('26.10.13').classList.contains('is-suggested'));
+  assert.ok(h.card('26.10.22').classList.contains('is-installed') && h.card('26.10.22').classList.contains('is-suggested'));
   const act = (x, v) => { const b = x.actionOf(x.card(v)); return [b.textContent, b.className]; };
-  assert.deepEqual(act(h, '26.10.13'), ['cv.act.reinstall', 'btn small cv-btn ghost']);
+  assert.deepEqual(act(h, '26.10.22'), ['cv.act.reinstall', 'btn small cv-btn ghost']);
   assert.deepEqual(act(h, '26.9.27'), ['cv.act.downgrade', 'btn small cv-btn cv-amber']);
   // the previous suggested, 26.9.22, installed: its own card below the six, and the suggested one an upgrade
   const o = await opened('xray-pattn');
-  assert.deepEqual(o.cards().map((c) => c.one('cv-ver').textContent), ['v26.10.13', 'v26.10.9', 'v26.10.8', 'v26.10.7', 'v26.10.3', 'v26.9.27', 'v26.9.22']);
-  assert.deepEqual(badges(o.card('26.10.13')), ['cv.badge.suggested', 'cv.badge.latest']);
+  assert.deepEqual(o.cards().map((c) => c.one('cv-ver').textContent), ['v26.10.22', 'v26.10.9', 'v26.10.8', 'v26.10.7', 'v26.10.3', 'v26.9.27', 'v26.9.22']);
+  assert.deepEqual(badges(o.card('26.10.22')), ['cv.badge.suggested', 'cv.badge.latest']);
   assert.deepEqual(badges(o.card('26.9.22')), ['cv.badge.installed']);
-  assert.deepEqual(act(o, '26.10.13'), ['cv.act.upgrade', 'btn small cv-btn cv-tonal']);
+  assert.deepEqual(act(o, '26.10.22'), ['cv.act.upgrade', 'btn small cv-btn cv-tonal']);
   assert.deepEqual(act(o, '26.9.22'), ['cv.act.reinstall', 'btn small cv-btn ghost']);
   const c = o.card('26.10.8');
   assert.equal(c.one('cv-size').textContent, '19.6 MB');
@@ -296,8 +296,8 @@ test('With pre-releases asks again with prerelease, marks the pre-releases, and 
   assert.equal(h.modal().byClass('cv-skel').length, 0, 'switching keeps the cards on screen while it asks');
   await h.answerVersions(answer({ component: 'xray', installed: '26.3.27', prerelease: true }));
   assert.equal(h.cards().length, 10);
-  assert.deepEqual(h.cards().filter((c) => c.classList.contains('is-pre')).map((c) => c.one('cv-ver').textContent), ['v26.10.10', 'v26.9.30', 'v26.9.9', 'v26.9.8']);
-  assert.ok(h.card('26.10.10').byClass('cv-badge').some((b) => b.textContent === 'cv.badge.pre'));
+  assert.deepEqual(h.cards().filter((c) => c.classList.contains('is-pre')).map((c) => c.one('cv-ver').textContent), ['v26.10.21', 'v26.9.30', 'v26.9.9', 'v26.9.8']);
+  assert.ok(h.card('26.10.21').byClass('cv-badge').some((b) => b.textContent === 'cv.badge.pre'));
   stable.click();
   await flush();
   assert.deepEqual(h.calls.at(-1), ['versions', 'xray', { prerelease: false }]);
@@ -313,12 +313,12 @@ test('With pre-releases asks again with prerelease, marks the pre-releases, and 
 /* ------------------------------ installing ------------------------------ */
 
 test('Upgrade: installs that tag with progress in its card, then says so and refreshes the list and the page', async () => {
-  const h = await opened('xray-pattn');   // 26.9.22 installed: the suggested 26.10.13 is the upgrade
+  const h = await opened('xray-pattn');   // 26.9.22 installed: the suggested 26.10.22 is the upgrade
   assert.equal(h.actionOf(h.card('26.10.9')).textContent, 'cv.act.upgrade');
-  h.actionOf(h.card('26.10.13')).click();
+  h.actionOf(h.card('26.10.22')).click();
   await flush();
-  assert.deepEqual(h.calls.at(-1), ['install', 'xray-pattn', 'v26.10.13']);
-  const c = h.card('26.10.13');
+  assert.deepEqual(h.calls.at(-1), ['install', 'xray-pattn', 'v26.10.22']);
+  const c = h.card('26.10.22');
   assert.ok(c.classList.contains('is-busy'));
   assert.equal(c.visible('cv-progress').length, 1);
   assert.equal(c.one('cv-track').getAttribute('role'), 'progressbar');
@@ -328,21 +328,21 @@ test('Upgrade: installs that tag with progress in its card, then says so and ref
   assert.ok(h.modal().one('cv-seg').children.every((b) => b.disabled));
   // the existing asset-progress event: the picker takes its own, nobody else's
   assert.equal(h.picker.progress({ component: 'xray-pattn', pct: 42 }), true);
-  assert.equal(h.card('26.10.13').one('cv-progress-text').textContent, 'cv.downloading 42%');
-  assert.equal(h.card('26.10.13').one('cv-track').getAttribute('aria-valuenow'), '42');
-  assert.equal(h.card('26.10.13').one('cv-fill').style.width, '42%');
+  assert.equal(h.card('26.10.22').one('cv-progress-text').textContent, 'cv.downloading 42%');
+  assert.equal(h.card('26.10.22').one('cv-track').getAttribute('aria-valuenow'), '42');
+  assert.equal(h.card('26.10.22').one('cv-fill').style.width, '42%');
   assert.equal(h.picker.progress({ component: 'geo', pct: 10 }), false);
   assert.equal(h.picker.progress({ component: 'app', pct: 10 }), false);
   h.picker.progress({ component: 'xray-pattn', pct: 100 });
-  assert.equal(h.card('26.10.13').one('cv-progress-text').textContent, 'cv.verifying', 'extracting and running it after the download');
+  assert.equal(h.card('26.10.22').one('cv-progress-text').textContent, 'cv.verifying', 'extracting and running it after the download');
   // done
-  const res = { ok: true, component: 'xray-pattn', tag: 'v26.10.13', version: '26.10.13', assets: { 'xray-pattn': true }, tunAvailable: true, xrayReady: true };
+  const res = { ok: true, component: 'xray-pattn', tag: 'v26.10.22', version: '26.10.22', assets: { 'xray-pattn': true }, tunAvailable: true, xrayReady: true };
   h.pending.install.shift().resolve(res);
   await flush();
   assert.deepEqual(h.installed, [res], 'the page refreshes its rows and versions');
   assert.deepEqual(h.calls.at(-1), ['versions', 'xray-pattn', { prerelease: false }], 'and the list its badges');
-  await h.answerVersions(answer({ installed: '26.10.13' }));
-  const done = h.card('26.10.13');
+  await h.answerVersions(answer({ installed: '26.10.22' }));
+  const done = h.card('26.10.22');
   assert.ok(done.classList.contains('is-done'));
   assert.equal(done.one('cv-done').textContent, 'cv.done');
   assert.ok(done.byClass('cv-badge').some((b) => b.textContent === 'cv.badge.installed'));
@@ -363,7 +363,7 @@ test('a version older than the suggested one asks first, inside its card — Can
   let c = h.card('26.9.27');
   assert.ok(c.classList.contains('is-confirm'));
   assert.equal(c.one('cv-warn').getAttribute('role'), 'alert');
-  assert.equal(c.one('cv-warn-text').textContent, tt('cv.older', { v: 'v26.10.13' }));
+  assert.equal(c.one('cv-warn-text').textContent, tt('cv.older', { v: 'v26.10.22' }));
   assert.equal(h.document.activeElement, c.one('cv-go'), 'the focus is on the choice');
   c.one('cv-cancel').click();
   await flush();
@@ -378,9 +378,9 @@ test('a version older than the suggested one asks first, inside its card — Can
   assert.ok(h.card('26.9.27').classList.contains('is-busy'));
   // one that is not older never asks — the suggested itself, an upgrade from 26.9.22
   const g = await opened('xray-pattn');
-  g.actionOf(g.card('26.10.13')).click();
+  g.actionOf(g.card('26.10.22')).click();
   await flush();
-  assert.deepEqual(g.calls.at(-1), ['install', 'xray-pattn', 'v26.10.13']);
+  assert.deepEqual(g.calls.at(-1), ['install', 'xray-pattn', 'v26.10.22']);
 });
 
 test('a failed install says why in its card — the core that was there is untouched — and Retry tries again without asking', async () => {
@@ -415,7 +415,7 @@ test('connected or connecting: the list shows, every action is off, and the moda
   assert.equal(note.hidden, false);
   assert.equal(note.textContent, 'cv.busy');
   assert.ok(h.cards().length > 0 && h.cards().every((c) => h.actionOf(c).disabled));
-  h.actionOf(h.card('26.10.13')).click();   // when free, an install without a question
+  h.actionOf(h.card('26.10.22')).click();   // when free, an install without a question
   await flush();
   assert.equal(h.calls.filter((c) => c[0] === 'install').length, 0);
   // disconnecting while it is open frees them
@@ -431,20 +431,20 @@ test('connected or connecting: the list shows, every action is off, and the moda
 
 test('refused because a connection started meanwhile: the card is back and the modal says to disconnect first', async () => {
   const h = await opened('xray-pattn');
-  h.actionOf(h.card('26.10.13')).click();
+  h.actionOf(h.card('26.10.22')).click();
   await flush();
-  h.pending.install.shift().resolve({ ok: false, refused: 'connected', component: 'xray-pattn', tag: 'v26.10.13' });
+  h.pending.install.shift().resolve({ ok: false, refused: 'connected', component: 'xray-pattn', tag: 'v26.10.22' });
   await flush();
   assert.equal(h.modal().one('cv-busy').hidden, false);
-  assert.equal(h.card('26.10.13').has('cv-progress'), false);
+  assert.equal(h.card('26.10.22').has('cv-progress'), false);
   assert.ok(h.cards().every((c) => h.actionOf(c).disabled));
   // another install somewhere else (the router's other tab) is said in the card
   const g = await opened('xray-pattn');
-  g.actionOf(g.card('26.10.13')).click();
+  g.actionOf(g.card('26.10.22')).click();
   await flush();
-  g.pending.install.shift().resolve({ ok: false, refused: 'installing', component: 'xray-pattn', tag: 'v26.10.13', installing: { component: 'sing-box', tag: 'v1.13.14' } });
+  g.pending.install.shift().resolve({ ok: false, refused: 'installing', component: 'xray-pattn', tag: 'v26.10.22', installing: { component: 'sing-box', tag: 'v1.13.14' } });
   await flush();
-  assert.equal(g.card('26.10.13').one('cv-fail-text').textContent, 'cv.oneAtATime');
+  assert.equal(g.card('26.10.22').one('cv-fail-text').textContent, 'cv.oneAtATime');
 });
 
 /* ------------------------------ the list could not be read ------------------------------ */
@@ -537,69 +537,69 @@ test('closed during an install: it goes on, its progress stays out of the toasts
   assert.deepEqual(h.toasts, [[tt('cv.installedToast', { core: 'sing-box', v: 'v1.14.3' }), 'ok']]);
   // reopened while another install runs: the card shows it
   const g = await opened('xray-pattn');
-  g.actionOf(g.card('26.10.13')).click();
+  g.actionOf(g.card('26.10.22')).click();
   await flush();
   g.picker.close();
   g.runTimers();
   g.picker.open('xray-pattn', g.hooks);
   await flush();
   await g.answerVersions(answer());
-  assert.ok(g.card('26.10.13').classList.contains('is-busy'));
+  assert.ok(g.card('26.10.22').classList.contains('is-busy'));
   g.pending.install.shift().resolve({ ok: false, error: 'HTTP 404' });
   await flush();
-  assert.ok(g.card('26.10.13').classList.contains('is-failed'));
+  assert.ok(g.card('26.10.22').classList.contains('is-failed'));
   // a failure while closed is a toast
   const f = await opened('xray-pattn');
-  f.actionOf(f.card('26.10.13')).click();
+  f.actionOf(f.card('26.10.22')).click();
   await flush();
   f.picker.close();
   f.pending.install.shift().resolve({ ok: false, error: 'the download was cut off' });
   await flush();
-  assert.deepEqual(f.toasts, [[tt('cv.failedToast', { core: 'Xray-PattN', v: 'v26.10.13' }) + ': the download was cut off', 'err']]);
+  assert.deepEqual(f.toasts, [[tt('cv.failedToast', { core: 'Xray-PattN', v: 'v26.10.22' }) + ': the download was cut off', 'err']]);
 });
 
 /* ------------------------------ review fixes (I1, M1, M2, M3) ------------------------------ */
 
 test('I1: a lost answer (the relay’s 504, a dropped call) is never “untouched” — the card asks the service until it knows how the install ended', async () => {
   const h = await opened('xray-pattn');
-  h.actionOf(h.card('26.10.13')).click();
+  h.actionOf(h.card('26.10.22')).click();
   await flush();
   h.pending.install.shift().reject(new Error('Gateway Timeout'));
   await flush();
-  let c = h.card('26.10.13');
+  let c = h.card('26.10.22');
   assert.ok(c.classList.contains('is-busy') && !c.classList.contains('is-failed'), 'still going, not failed');
   assert.equal(c.one('cv-progress-text').textContent, 'cv.checking');
   assert.equal(c.has('cv-fail'), false);
   assert.ok(h.cards().filter((x) => x !== c).every((x) => h.actionOf(x).disabled), 'nothing else starts meanwhile');
   assert.equal(h.picker.progress({ component: 'xray-pattn', pct: 80 }), true, 'its progress is still its own');
-  assert.equal(h.card('26.10.13').one('cv-progress-text').textContent, 'cv.checking');
+  assert.equal(h.card('26.10.22').one('cv-progress-text').textContent, 'cv.checking');
   // it asks the service: that tag is still being installed
   h.runTimers();
   await flush();
   assert.deepEqual(h.calls.at(-1), ['versions', 'xray-pattn', { prerelease: false }]);
-  await h.answerVersions(answer({ installing: { component: 'xray-pattn', tag: 'v26.10.13' } }));
-  assert.equal(h.card('26.10.13').one('cv-progress-text').textContent, 'cv.checking');
+  await h.answerVersions(answer({ installing: { component: 'xray-pattn', tag: 'v26.10.22' } }));
+  assert.equal(h.card('26.10.22').one('cv-progress-text').textContent, 'cv.checking');
   assert.deepEqual(h.installed, []);
   // …then the installed version is the chosen one: done, and the page refreshes
   h.runTimers();
   await flush();
-  await h.answerVersions(answer({ installed: '26.10.13' }));
-  c = h.card('26.10.13');
+  await h.answerVersions(answer({ installed: '26.10.22' }));
+  c = h.card('26.10.22');
   assert.ok(c.classList.contains('is-done'));
   assert.equal(c.one('cv-done').textContent, 'cv.done');
   assert.ok(c.byClass('cv-badge').some((b) => b.textContent === 'cv.badge.installed'), 'the answer it asked for is the list now');
   assert.equal(h.installed.length, 1);
-  assert.equal(h.installed[0].version, '26.10.13');
+  assert.equal(h.installed[0].version, '26.10.22');
   assert.ok(h.cards().every((x) => !h.actionOf(x).disabled));
 });
 
 test('I1: lost, and the service then shows another version installed — said as what is installed now, with Retry; an answer with no ok is lost too', async () => {
   const h = await opened('xray-pattn');
-  h.actionOf(h.card('26.10.13')).click();
+  h.actionOf(h.card('26.10.22')).click();
   await flush();
   h.pending.install.shift().resolve(null);
   await flush();
-  assert.equal(h.card('26.10.13').one('cv-progress-text').textContent, 'cv.checking');
+  assert.equal(h.card('26.10.22').one('cv-progress-text').textContent, 'cv.checking');
   h.runTimers();
   await flush();
   h.pending.versions.shift().reject(new Error('Failed to fetch'));   // the router out of reach for a moment: asked again
@@ -607,7 +607,7 @@ test('I1: lost, and the service then shows another version installed — said as
   h.runTimers();
   await flush();
   await h.answerVersions(answer({ installed: '26.9.22' }));
-  const c = h.card('26.10.13');
+  const c = h.card('26.10.22');
   assert.ok(c.classList.contains('is-failed'));
   assert.equal(c.one('cv-fail-text').textContent, tt('cv.lostNot', { v: 'v26.9.22' }));
   assert.equal(c.has('cv-fail-why'), false);
@@ -615,33 +615,33 @@ test('I1: lost, and the service then shows another version installed — said as
   assert.deepEqual(h.installed, []);
   // a service that reports a failure is still the "untouched" one
   const g = await opened('xray-pattn');
-  g.actionOf(g.card('26.10.13')).click();
+  g.actionOf(g.card('26.10.22')).click();
   await flush();
-  g.pending.install.shift().resolve({ ok: false, component: 'xray-pattn', tag: 'v26.10.13', error: 'HTTP 404', assets: {} });
+  g.pending.install.shift().resolve({ ok: false, component: 'xray-pattn', tag: 'v26.10.22', error: 'HTTP 404', assets: {} });
   await flush();
-  assert.equal(g.card('26.10.13').one('cv-fail-text').textContent, 'cv.failed');
+  assert.equal(g.card('26.10.22').one('cv-fail-text').textContent, 'cv.failed');
   assert.equal(g.timers.length, 0, 'nothing to ask: the service said it');
 });
 
 test('M1/M2: the service’s own reasons read in the user’s language — another download of this core, the core file in use', async () => {
   const h = await opened('xray-pattn');
-  h.actionOf(h.card('26.10.13')).click();
+  h.actionOf(h.card('26.10.22')).click();
   await flush();
-  h.pending.install.shift().resolve({ ok: false, refused: 'core-busy', component: 'xray-pattn', tag: 'v26.10.13' });
+  h.pending.install.shift().resolve({ ok: false, refused: 'core-busy', component: 'xray-pattn', tag: 'v26.10.22' });
   await flush();
-  assert.equal(h.card('26.10.13').one('cv-fail-text').textContent, 'cv.coreBusy');
-  assert.equal(h.card('26.10.13').has('cv-fail-why'), false);
-  h.card('26.10.13').one('cv-retry').click();
+  assert.equal(h.card('26.10.22').one('cv-fail-text').textContent, 'cv.coreBusy');
+  assert.equal(h.card('26.10.22').has('cv-fail-why'), false);
+  h.card('26.10.22').one('cv-retry').click();
   await flush();
-  h.pending.install.shift().resolve({ ok: false, component: 'xray-pattn', tag: 'v26.10.13', reason: 'in-use', error: 'the core file is in use — nothing was replaced', assets: {} });
+  h.pending.install.shift().resolve({ ok: false, component: 'xray-pattn', tag: 'v26.10.22', reason: 'in-use', error: 'the core file is in use — nothing was replaced', assets: {} });
   await flush();
-  assert.equal(h.card('26.10.13').one('cv-fail-text').textContent, 'cv.inUse');
-  assert.equal(h.card('26.10.13').has('cv-fail-why'), false, 'no raw EPERM on screen');
+  assert.equal(h.card('26.10.22').one('cv-fail-text').textContent, 'cv.inUse');
+  assert.equal(h.card('26.10.22').has('cv-fail-why'), false, 'no raw EPERM on screen');
 });
 
 test('M3: while another install runs — another core in this window, or another client of the router — the modal says so and waits', async () => {
   const h = await opened('xray-pattn');
-  h.actionOf(h.card('26.10.13')).click();
+  h.actionOf(h.card('26.10.22')).click();
   await flush();
   h.picker.close();
   h.runTimers();
@@ -650,9 +650,9 @@ test('M3: while another install runs — another core in this window, or another
   await h.answerVersions(answer({ component: 'sing-box', installed: '1.14.2' }));
   const note = h.modal().one('cv-other');
   assert.equal(note.hidden, false);
-  assert.equal(note.textContent, tt('cv.otherInstall', { core: 'Xray-PattN', v: 'v26.10.13' }));
+  assert.equal(note.textContent, tt('cv.otherInstall', { core: 'Xray-PattN', v: 'v26.10.22' }));
   assert.ok(h.cards().every((c) => h.actionOf(c).disabled));
-  h.pending.install.shift().resolve({ ok: true, component: 'xray-pattn', tag: 'v26.10.13', version: '26.10.13', assets: {}, tunAvailable: true, xrayReady: true });
+  h.pending.install.shift().resolve({ ok: true, component: 'xray-pattn', tag: 'v26.10.22', version: '26.10.22', assets: {}, tunAvailable: true, xrayReady: true });
   await flush();
   assert.equal(h.modal().one('cv-other').hidden, true, 'free once it ended');
   assert.ok(h.cards().every((c) => !h.actionOf(c).disabled));
