@@ -28,7 +28,13 @@ const CORE_NAMES = { xray: 'Xray', 'xray-pattn': 'Xray-PattN', 'sing-box': 'sing
  * with. One value per core; each comment says where it was verified.
  */
 const SUGGESTED = Object.freeze({
-  // XTLS/Xray-core 26.10.10, verified in CI: the `cores` job (.github/workflows/
+  // XTLS/Xray-core 26.10.21 — an emergency security release: the private keys of
+  // eight intermediate certificates (India) were cracked, and the root store the
+  // core carries since 26.10.10 (#7105) still trusted their three roots. 26.10.21
+  // drops them (#7212) and is built with Go 1.27.3, which filters the bad
+  // certificates even where the OS store is old; XTLS withdrew 26.10.10 and
+  // 26.10.17 (their release pages are gone) and made 26.10.21 the latest stable.
+  // Verified in CI exactly as 26.10.10 was before it: the `cores` job (.github/workflows/
   // test.yml) hands it every config shape this app writes — the plans, the DNS
   // modes, TUN, the v1.18 link forms, the server editor's every field
   // (scripts/validate-configs.js) — through `xray run -test`, the version read
@@ -37,16 +43,18 @@ const SUGGESTED = Object.freeze({
   // redialled after a lost connection (XTLS/Xray-core#6876), two Mux client bugs
   // (#6870, #6822) and Hysteria's QUIC clients outliving the core (#7100); TLS
   // now checks certificates against its own root store, not the OS's (#7105).
-  // XTLS has marked every release after 26.3.27 a pre-release, so 26.3.27 is
-  // still the newest one it calls stable. A plain download installs the newer of
-  // the two (Downloader.defaultRelease). The oldest official core each part was
+  // A plain download installs the newer of GitHub's latest stable and this
+  // (Downloader.defaultRelease); until 26.10.21 XTLS called nothing after 26.3.27
+  // stable. The oldest official core each part was
   // checked on stays 26.3.27: the DNS block's server objects and the REFUSED
   // hijack rules (dnsBuilder.js), the certificate pins (certPin.js), the
   // finalmask line (xrayManager.js FINALMASK_SINCE), the router's LAN DNS
   // (service.js CORE_DNS_VERIFIED, openwrt/install.sh).
-  xray: '26.10.10',
+  xray: '26.10.21',
 
-  // patterniha/Xray-core 26.10.13, verified in CI like the official core (every
+  // patterniha/Xray-core 26.10.22 — upstream 26.10.21's root store (#7212, the
+  // same security release) on top of 26.10.19; 26.10.13 still trusted the three
+  // roots. Verified in CI like the official core (every
   // config through `xray run -test`) and as the client of the real-peer
   // WireGuard probe, which 26.9.22 failed: from XTLS/Xray-core#6771 until #6804
   // (in the fork from 26.9.24) a WireGuard endpoint that is an IP went to
@@ -56,7 +64,7 @@ const SUGGESTED = Object.freeze({
   // 26.9.1 is where the desktop's DNS hijack rules, certificate pins and chained
   // WireGuard were first verified (dnsBuilder.js, certPin.js,
   // docs/releases/v1.7.2.md).
-  'xray-pattn': '26.10.13',
+  'xray-pattn': '26.10.22',
 
   // SagerNet/sing-box 1.14.3, verified on a REAL TUN in CI (test.yml `tun-dns`,
   // scripts/tun-dns-probe.js): with the dns_mode "disabled" tunSingbox writes
