@@ -22,6 +22,7 @@ const { MUX, muxEligible } = require('./mux');
 const { effectiveVia, advancedTargets } = require('./routingProfiles');
 const { masqueHttpOf } = require('../renderer/serverFields');
 const { isGroupRecord, serversOf, STRATEGIES: GROUP_STRATEGIES } = require('./groups');
+const { applies: multiWanApplies, applyMultiWan, finishSplit } = require('./multiWan');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -1213,6 +1214,13 @@ function buildConfig(planArg, settings) {
   if (dnsPlan.hijackOutbound) outbounds.push(dnsPlan.hijackOutbound);
   rules = [...dnsPlan.rules, ...rules];
 
+  // multi-internet (multiWan.js): a server that dials by itself becomes a
+  // group over the connected internets, a group's members are multiplied over
+  // them — before expandGroups, which writes every group out. Off, or with
+  // nothing to combine, the outbounds are not touched at all.
+  const mw = multiWanApplies(s.multiWan, s.multiWanSkip);
+  if (mw) outbounds = applyMultiWan(outbounds, s.multiWan, s.multiWanSkip, { servers: serversByTag(plan), groupSkip: s.groupSkip });
+
   // groups: their members, balancers, rules (first of all) and health check —
   // less any member the app has set aside for not answering (groupEvict.js)
   const grp = expandGroups(outbounds, s.groupSkip);
@@ -1222,6 +1230,8 @@ function buildConfig(planArg, settings) {
   // Safety net: fix any WireGuard interface address that isn't /32 (/128).
   outbounds = (outbounds || []).map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outbounds, s.entryHostIps, s.ipv6);
+  // a split's download leg pinned like its upload; the split outbounds, for the per-link meter
+  const mwSplit = mw ? finishSplit(outbounds) : null;
   outbounds = applyEchOutbounds(applyFragments(outbounds));
   if (dropsUdpDirect(s)) echOverDoh(outbounds);
   bindDirectDials(outbounds, s.directInterface);
@@ -1255,7 +1265,30 @@ function buildConfig(planArg, settings) {
     routing: withBalancers({ domainStrategy: routingStrategy(s), rules }, grp),
     ...(grp.observatory ? { observatory: grp.observatory } : {}),
     ...groupApi(grp, s)
-  }, grp);
+  }, grp, mwSplit);
+}
+
+/**
+ * The server record behind each outbound tag a plan gives a server of its
+ * own — what multi-internet names a link's copy after (its id and name, the
+ * address it dials): the selection's `proxy`, a target's `out-<id>`, a base's
+ * `base-<id>`; a chain of one is its member. (A base is never copied — the
+ * targets through it dial it — but naming it costs nothing.)
+ */
+function serversByTag(plan) {
+  const out = {};
+  const one = (list) => { const l = (list || []).filter(s => s && s.outbound); return l.length === 1 ? l[0] : null; };
+  if (plan.mode === 'single' && plan.server) out.proxy = plan.server;
+  if (plan.mode === 'chain' && one(plan.chain)) out.proxy = one(plan.chain);
+  for (const [id, s] of Object.entries(plan.serversById || {})) {
+    if (s) { out['out-' + id] = s; out['base-' + id] = s; }
+  }
+  for (const [cid, list] of Object.entries(plan.chainsById || {})) {
+    const s = one(list);
+    if (s) { out['out-chain-' + cid] = s; out['base-chain-' + cid] = s; }
+  }
+  if (one(plan.chain)) { out['out-chain'] = one(plan.chain); out['base-chain'] = one(plan.chain); }
+  return out;
 }
 
 /* ----------------------------------- groups ----------------------------------- */
@@ -1369,9 +1402,15 @@ function groupMemberKey(groupId, m) {
   return [groupId || '', (m && m.id) || '', (m && m.address) || '', (m && m.port) || 0].join('|');
 }
 
-/** The config, with the running groups (expandGroups' map) beside it — never written to disk: not enumerable. */
-function withGroupTags(config, grp) {
+/**
+ * The config, with the running groups (expandGroups' map) beside it — never
+ * written to disk: not enumerable. And `multiWanSplit`: the outbounds that
+ * upload on one internet and download on another ([{ tag, up, down }], or
+ * null; multiWan.finishSplit) — what multiWan.linkUsage counts them by.
+ */
+function withGroupTags(config, grp, mwSplit) {
   Object.defineProperty(config, 'groupTags', { value: grp && grp.map && grp.map.length ? grp.map : null, enumerable: false });
+  Object.defineProperty(config, 'multiWanSplit', { value: mwSplit && mwSplit.length ? mwSplit : null, enumerable: false });
   return config;
 }
 
@@ -1581,9 +1620,12 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
     { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
-  const grp = expandGroups(reg.outs, s.groupSkip);   // see buildConfig
+  // multi-internet, then groups — see buildConfig
+  const mw = multiWanApplies(s.multiWan, s.multiWanSkip);
+  const grp = expandGroups(mw ? applyMultiWan(reg.outs, s.multiWan, s.multiWanSkip, { servers: serversByTag(plan), groupSkip: s.groupSkip }) : reg.outs, s.groupSkip);
   const outs = grp.outbounds.map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outs, s.entryHostIps, s.ipv6);   // see buildConfig
+  const mwSplit = mw ? finishSplit(outs) : null;
   const outbounds = applyEchOutbounds(applyFragments(outs));
   if (dropsUdpDirect(s)) echOverDoh(outbounds);
   bindDirectDials(outbounds, s.directInterface);
@@ -1619,7 +1661,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     routing: withBalancers({ domainStrategy: 'IPIfNonMatch', rules }, grp),
     ...(grp.observatory ? { observatory: grp.observatory } : {}),
     ...groupApi(grp, s)
-  }, grp);
+  }, grp, mwSplit);
 }
 
 /**
@@ -1758,13 +1800,18 @@ function applyFragments(outbounds) {
     // one shared with an unpinned name would send that name to xray's DNS,
     // which sits behind the very proxy being dialled.
     const strategy = sockopt.domainStrategy || '';
-    const key = frag + '|' + noise + '|' + strategy;
+    // An outbound bound to an interface (a multi-internet copy, multiWan.js)
+    // leaves by that internet: its dialer is the one that opens the socket,
+    // so the binding moves onto the dialer — one dialer per interface.
+    const iface = sockopt.interface || '';
+    const key = frag + '|' + noise + '|' + strategy + (iface ? '|' + iface : '');
     let tag = byKey[key];
     if (!tag) {
       tag = 'dpi-' + (Object.keys(byKey).length + 1);
       byKey[key] = tag;
-      extra.push(makeFragmentOutbound(tag, frag, noise, strategy));
+      extra.push(makeFragmentOutbound(tag, frag, noise, strategy, iface));
     }
+    if (iface) delete sockopt.interface;
     sockopt.dialerProxy = tag;
   }
   return extra.length ? outbounds.concat(extra) : outbounds;
@@ -1787,13 +1834,17 @@ function applyFragments(outbounds) {
  * up, only under tunMode); anything but a non-blank string leaves every
  * outbound exactly as it was, which the golden tests pin. Not applied to
  * buildTestConfig — a ping runs without TUN.
+ *
+ * One already bound to an interface keeps it: a multi-internet copy (and
+ * its dpi dialer) leaves by its own internet (multiWan.js), a raw config
+ * that names one by the one it names — both a physical NIC, never the tunnel.
  */
 function bindDirectDials(outbounds, name) {
   if (typeof name !== 'string' || !name.trim()) return outbounds;
   for (const o of outbounds) {
     if (!o || o.protocol === 'dns' || o.protocol === 'blackhole') continue;
     const ss = o.streamSettings || (o.streamSettings = {});
-    if (ss.sockopt && ss.sockopt.dialerProxy) continue;
+    if (ss.sockopt && (ss.sockopt.dialerProxy || ss.sockopt.interface)) continue;
     ss.sockopt = Object.assign({}, ss.sockopt, { interface: name });
   }
   // An ECH config fetched from DNS is fetched by the core itself, with its own
@@ -1808,7 +1859,7 @@ function bindDirectDials(outbounds, name) {
   return outbounds;
 }
 
-function makeFragmentOutbound(tag, fragStr, noiseStr, strategy) {
+function makeFragmentOutbound(tag, fragStr, noiseStr, strategy, iface) {
   const settings = { domainStrategy: strategy || 'AsIs' };
   if (fragStr) {
     const p = String(fragStr).split(',').map(s => s.trim());
@@ -1821,7 +1872,10 @@ function makeFragmentOutbound(tag, fragStr, noiseStr, strategy) {
   }
   const noises = noiseStr ? parseNoises(noiseStr) : [];
   if (noises.length) settings.noises = noises;
-  return { tag, protocol: 'freedom', settings };
+  const o = { tag, protocol: 'freedom', settings };
+  // the interface the outbound dialling through it was bound to (applyFragments)
+  if (iface) o.streamSettings = { sockopt: { interface: iface } };
+  return o;
 }
 
 // Named presets (also accepted from the link's &noise= value).
