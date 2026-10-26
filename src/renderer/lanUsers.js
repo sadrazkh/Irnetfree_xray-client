@@ -13,7 +13,10 @@
  *      device), what a device nobody is assigned to gets (the sign-in page, the
  *      current connection, or nothing) and how long a sign-in lasts; on Windows
  *      the Mobile Hotspot note — people on the PC's hotspot use the same proxy
- *      with their username and password, the transparent mode is the router's;
+ *      with their username and password, the transparent mode is the router's
+ *      — its address marked, and said when it is missing (the hotspot is off);
+ *      above it all, when there are users and no way in for any of them, a
+ *      line that says so with the button that turns the proxy on;
  *   2. a box per user: who, whether they can connect now (on / off / expired /
  *      at the cap), their live rate while connected, the password (hidden; show,
  *      copy, a new one), the config they ride (the app's own picker — every
@@ -22,6 +25,8 @@
  *      the expiry (its date in the Persian calendar in Persian), on the router
  *      how many devices, and the on/off switch; one dialog adds and edits a
  *      user and says where the username and password rules are broken;
+ *      another gives a phone the user's account as a socks:// link and its QR
+ *      (shareLink) — imported in IRNetFree or v2rayNG, every app rides it;
  *   3. on the router the devices — online first, each with its name, IP and MAC
  *      (left to right in Persian too), the user it belongs to, a block switch
  *      and its usage.
@@ -38,8 +43,10 @@
   const fill = (s, map) => String(s).replace(/\{(\w+)\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(map, k) ? map[k] : m));
   const lang = () => (window.i18n && window.i18n.lang) || document.documentElement.lang || 'fa';
   const PERIODS = ['month', 'day', 'none'];
+  const DAYS = Array.from({ length: 31 }, (_, i) => i + 1);   // the day a month renews on (capPeriods.js)
   const UNASSIGNED = ['login', 'allow', 'block'];
   const SPECIAL = ['', 'direct', 'block'];        // the targets that are not a config
+  const HOTSPOT_IP = '192.168.137.1';             // Windows' Mobile Hotspot address (ipc.js HOTSPOT_IP)
   const NEAR = 0.8;                               // from here the usage bar warns that the cap is close
   const REFRESH_MS = 5000;                        // while the page is open, a stats tick reads it again this often at most
   const USERNAME = /^[A-Za-z0-9._-]{1,32}$/;      // the contract's rule (model.js validateUser)
@@ -186,6 +193,8 @@
     form: null,       // the dialog's fields while it is open
     modal: null,      // the dialog's overlay
     opener: null,     // what had the focus when the dialog opened: it gets it back
+    share: null,      // the link dialog's overlay
+    shareOpener: null,
     dom: { usage: {}, rates: {}, devUse: {} }
   };
 
@@ -487,8 +496,9 @@
       d.right.textContent = over ? (map.date ? fill(t('lu.backOn'), map) : '') : ratio >= NEAR ? t('lu.atCap') : (map.date ? fill(t('lu.until'), map) : '');
     } else {
       d.left.textContent = fill(t('lu.used'), map);
+      // a day's key is 'YYYY-MM-DD'; a month's any other ('2026-10', 'j1405-08', '2026-10@15'); 'all' is neither
       const p = String((u && u.period) || '');
-      d.right.textContent = p.length === 10 ? t('lu.today') : p.length === 7 ? t('lu.thisMonth') : '';
+      d.right.textContent = /^\d{4}-\d{2}-\d{2}$/.test(p) ? t('lu.today') : p && p !== 'all' ? t('lu.thisMonth') : '';
     }
   }
   /** A live rate, while connected: '↓ 1.2 MB/s  ↑ 40.0 KB/s'. */
@@ -556,7 +566,10 @@
         b.setAttribute('aria-label', t('lu.copy') + ' — ' + proto + ' ' + text);
         b.dataset.lu = 'copy:' + proto + ':' + ip;
         b.addEventListener('click', () => copy(text));
-        row.append(el('span', 'lu-proto', proto), value, b);
+        row.append(el('span', 'lu-proto', proto), value);
+        // which of a Windows PC's addresses is its hotspot's: the one the phones on it use
+        if (isWin() && ip === HOTSPOT_IP) row.append(el('span', 'lu-tag lu-hs', t('lu.hotspotTag')));
+        row.append(b);
         box.append(row);
       }
     }
@@ -602,23 +615,78 @@
     } else {
       // a Windows PC's hotspot is the usual way a desktop shares: the same proxy, the same accounts
       card.append(el('p', 'lu-note' + (isWin() ? ' lu-hotspot' : ''), t(isWin() ? 'lu.hotspot' : 'lu.desktopNote')));
+      // the hotspot's address is not there: it is off, and the phones meant to join it see no network
+      if (isWin() && ui.data && c.proxy.enabled && !ui.data.lanAddresses.includes(HOTSPOT_IP)) {
+        card.append(el('p', 'hint lu-hint', t('lu.hotspotOff')));
+      }
     }
     return card;
   }
 
+  /**
+   * Users are there, and no way for any of them in: the proxy is off (and on
+   * the router the transparent mode too). The owner made a user, gave the
+   * phone the password — and nothing listened; the switch sat at the top,
+   * off, with nothing saying it mattered. Said above everything, with the
+   * switch's own action beside it.
+   */
+  function noWayIn() {
+    const c = cfg();
+    if (!ui.data || !users().length || c.proxy.enabled || (isRouter() && c.transparent.enabled)) return null;
+    const box = el('div', 'lu-alert');
+    box.setAttribute('role', 'status');
+    const on = button('btn primary small', t('lu.turnOn'));
+    on.dataset.lu = 'turnon';
+    on.addEventListener('click', () => saveConfig({ proxy: { enabled: true } }));
+    box.append(el('span', 'lu-alert-text', t(isRouter() ? 'lu.noWayInRouter' : 'lu.noWayIn')), on);
+    return box;
+  }
+
   /* ------------------------------ drawing: the users ------------------------------ */
+
+  /**
+   * The cap's period as its select offers it: the two months — 'month' the
+   * Gregorian one, 'jmonth' the Persian (quotaCalendar 'jalali') — the page's
+   * own calendar first, then a day, then none.
+   */
+  const periodChoices = () => (lang() === 'fa' ? ['jmonth', 'month'] : ['month', 'jmonth']).concat(['day', 'none']);
+  const choiceOf = (period, calendar) => (period === 'month' && calendar === 'jalali' ? 'jmonth' : (PERIODS.includes(period) ? period : 'none'));
+  /** A choice → the user's fields; a day or none leaves the month's calendar as it was. */
+  const fromChoice = (v) => (v === 'jmonth' ? { quotaPeriod: 'month', quotaCalendar: 'jalali' }
+    : v === 'month' ? { quotaPeriod: 'month', quotaCalendar: 'gregorian' } : { quotaPeriod: PERIODS.includes(v) ? v : 'none' });
+  const isMonth = (choice) => choice === 'month' || choice === 'jmonth';
+  /** The day a month renews on as a number 1–31 (1: the 1st, every cap before there was a choice). */
+  const dayOf = (v) => (DAYS.includes(Number(v)) ? Number(v) : 1);
+
+  /**
+   * A month's renew day: "Renews on day [15]" under the cap, shown for a
+   * month only; past the shortest month of its calendar (28, the Persian 29)
+   * the note that a month without that day renews on its last one.
+   */
+  function renewLine(day, choice, label, key, onChange) {
+    const line = el('div', 'lu-renew');
+    const note = el('div', 'lu-sub', t('lu.renewLast'));
+    const paint = (d, c) => { line.hidden = !isMonth(c); note.hidden = !isMonth(c) || d <= (c === 'jmonth' ? 29 : 28); };
+    const s = select(DAYS.map((d) => [d, String(d)]), dayOf(day), t('lu.renewDay') + (label ? ' — ' + label : ''), key, (v) => { paint(Number(v), line.dataset.choice); onChange(Number(v)); });
+    line.dataset.choice = choice;
+    line.append(el('span', null, t('lu.renewDay')), s);
+    paint(dayOf(day), choice);
+    // the period's select moves it: the line comes and goes, the note with it
+    return { nodes: [line, note], period: (c) => { line.dataset.choice = c; paint(Number(s.value), c); } };
+  }
 
   function capControls(u, label) {
     const box = el('div', 'lu-field');
     const pair = el('div', 'lu-cap');
-    const period = PERIODS.includes(u.quotaPeriod) ? u.quotaPeriod : 'none';
+    const choice = choiceOf(u.quotaPeriod, u.quotaCalendar);
     const num = numInput(u.quotaGb ? u.quotaGb : '', t('lu.capGb') + ' — ' + label, 'quota:' + u.id, { step: 'any', placeholder: '0' });
-    num.disabled = period === 'none';
+    num.disabled = choice === 'none';
     num.addEventListener('change', () => {
       const v = Number(num.value);
       saveUser(u.id, { quotaGb: Number.isFinite(v) && v > 0 ? v : 0 });
     });
-    pair.append(num, select(PERIODS.map((p) => [p, t('lu.period.' + p)]), period, t('lu.cap') + ' — ' + label, 'period:' + u.id, (v) => saveUser(u.id, { quotaPeriod: v })));
+    pair.append(num, select(periodChoices().map((p) => [p, t('lu.period.' + p)]), choice, t('lu.cap') + ' — ' + label, 'period:' + u.id, (v) => saveUser(u.id, fromChoice(v))));
+    const renew = renewLine(u.quotaResetDay, choice, label, 'renew:' + u.id, (d) => saveUser(u.id, { quotaResetDay: d }));
     const bar = el('div', 'lu-bar');
     bar.setAttribute('role', 'progressbar');
     bar.setAttribute('aria-valuemin', '0');
@@ -633,7 +701,7 @@
     const d = { bar, fill: fillEl, left, right };
     ui.dom.usage[u.id] = d;
     paintUsage(d, usageOf(u.id));
-    box.append(el('div', 'field-label', t('lu.cap')), pair, bar, q);
+    box.append(el('div', 'field-label', t('lu.cap')), pair, ...renew.nodes, bar, q);
     return box;
   }
 
@@ -704,6 +772,7 @@
     del.classList.add('danger');
     acts.append(
       switchEl(!!u.enabled, t('lu.enable') + ' — ' + label, 'enabled:' + u.id, (on) => saveUser(u.id, { enabled: on })),
+      iconButton('🔗', t('lu.share') + ' — ' + label, 'share:' + u.id, () => openShare(u.id)),
       iconButton('✎', t('lu.edit') + ' — ' + label, 'edit:' + u.id, () => openDialog(u.id)),
       del);
     head.append(acts);
@@ -755,6 +824,131 @@
       card.append(list);
     }
     return card;
+  }
+
+  /* ------------------------------ a user's link for a phone ------------------------------ */
+
+  /**
+   * A user's proxy account as a share link, `socks://<base64url(user:pass)>@ip:port#name`
+   * — the form v2rayN and v2rayNG write, and the one IRNetFree reads on both
+   * platforms (parser.js / LinkParser.kt parseProxyLink). Imported on a phone
+   * it is a VPN: every app rides the account, where a Wi-Fi proxy reaches the
+   * browser alone and Android's never asks for a password. The password goes
+   * percent-encoded inside the base64 (both IRNetFree parsers decode it; one
+   * of letters and digits, genPassword's, reads the same anywhere), and the
+   * base64 is the URL-safe kind: a '/' in the user part ends it for a URI parser.
+   */
+  function shareLink(u, ip, port) {
+    const cred = String(u.username || '') + ':' + encodeURIComponent(String(u.password == null ? '' : u.password));
+    const b64 = (typeof btoa === 'function' ? btoa(cred) : Buffer.from(cred, 'utf8').toString('base64'))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return 'socks://' + b64 + '@' + hostPort(ip, port) + '#' + encodeURIComponent(nameOf(u));
+  }
+
+  /**
+   * The QR of a link as an image (qrcode.js's own GIF: no markup goes into the
+   * page), or null — no qrcode.js, or a link too long for one.
+   */
+  function qrImage(text, label) {
+    if (typeof qrcode !== 'function') return null;
+    try {
+      const qr = qrcode(0, 'M');
+      qr.addData(text);
+      qr.make();
+      const img = el('img', 'lu-qrimg');
+      img.src = qr.createDataURL(6, 16);
+      img.alt = label;
+      return img;
+    } catch { return null; }
+  }
+
+  /** The link dialog of a user: the address to put in it (when there are several), its QR, the link and Copy. */
+  function openShare(id, ip) {
+    if (!ui.data) return false;
+    const u = users().find((x) => x.id === id);
+    if (!u) return false;
+    const ips = ui.data.lanAddresses.filter((a) => !a.includes(':'));
+    const at = ips.includes(ip) ? ip : ips[0] || '';
+    if (!ui.share) {
+      const overlay = el('div', 'modal-overlay lu-overlay');
+      overlay.id = 'luShare';
+      overlay.addEventListener('click', (e) => { if (e && e.target === overlay) closeShare(); });
+      overlay.addEventListener('keydown', (e) => { if (e && e.key === 'Escape') { if (e.preventDefault) e.preventDefault(); closeShare(); } });
+      ui.share = overlay;
+    }
+    if (!ui.share.parentNode) {
+      ui.shareOpener = document.activeElement || null;
+      document.body.appendChild(ui.share);
+    }
+    const c = cfg();
+    const modal = el('div', 'modal lu-modal lu-share');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'luShareTitle');
+    const head = el('div', 'modal-head');
+    const ico = el('span', 'lu-av', '🔗');
+    ico.setAttribute('aria-hidden', 'true');
+    const title = el('span', 'modal-title', fill(t('lu.shareTitle'), { name: nameOf(u) }));
+    title.id = 'luShareTitle';
+    const x = button('tb-btn', '✕');
+    x.setAttribute('aria-label', t('tb.close'));
+    x.title = t('tb.close');
+    x.dataset.lu = 's:close';
+    x.addEventListener('click', () => closeShare());
+    head.append(ico, title, x);
+
+    const body = el('div', 'modal-body lu-form');
+    if (!c.proxy.enabled) body.append(el('p', 'hint warn lu-hint', t('lu.shareOff')));
+    if (!at) {
+      body.append(el('p', 'hint warn lu-hint', t('lu.noAddress')));
+    } else {
+      if (ips.length > 1) {
+        const pick = el('div', 'lu-ips');
+        pick.setAttribute('role', 'group');
+        pick.setAttribute('aria-label', t('lu.shareAddr'));
+        for (const a of ips) {
+          const b = button('btn small ' + (a === at ? 'primary' : 'ghost'), a);
+          ltr(b);
+          b.dataset.lu = 's:ip:' + a;
+          b.setAttribute('aria-pressed', String(a === at));
+          if (isWin() && a === HOTSPOT_IP) b.textContent = a + ' · ' + t('lu.hotspotTag');
+          b.addEventListener('click', () => openShare(id, a));
+          pick.append(b);
+        }
+        body.append(el('div', 'field-label', t('lu.shareAddr')), pick);
+      }
+      const link = shareLink(u, at, c.proxy.port);
+      const img = qrImage(link, fill(t('lu.shareTitle'), { name: nameOf(u) }));
+      const qr = el('div', 'qr-image lu-qr');
+      qr.append(img || el('p', 'hint', t('qr.tooBig')));
+      const line = ltr(el('div', 'lu-mono lu-link', link));
+      line.dataset.lu = 's:link';
+      body.append(qr, line, el('p', 'hint lu-hint', t('lu.shareHow')), el('p', 'hint warn lu-hint', t('lu.shareWarn')));
+      const foot = el('div', 'modal-foot');
+      const cp = button('btn primary', t('lu.copyLink'));
+      cp.dataset.lu = 's:copy';
+      cp.addEventListener('click', () => copy(link));
+      foot.append(cp);
+      modal.append(head, body, foot);
+      ui.share.replaceChildren(modal);
+      const focus = findKey(ui.share, ip ? 's:ip:' + at : 's:copy');
+      if (focus && focus.focus) focus.focus();
+      return true;
+    }
+    modal.append(head, body);
+    ui.share.replaceChildren(modal);
+    if (x.focus) x.focus();
+    return true;
+  }
+
+  function closeShare() {
+    if (ui.share && ui.share.parentNode) ui.share.parentNode.removeChild(ui.share);
+    const back = ui.shareOpener;
+    ui.shareOpener = null;
+    if (back && back.dataset && back.dataset.lu && ui.host) {
+      const again = findKey(ui.host, back.dataset.lu);
+      if (again && again.focus) again.focus();
+    }
   }
 
   /* ------------------------------ drawing: the router's devices ------------------------------ */
@@ -849,7 +1043,7 @@
     const focusKey = active && active !== host && host.contains && host.contains(active) && active.dataset ? active.dataset.lu : null;
     ui.dom = { usage: {}, rates: {}, devUse: {} };
     ui.wasConnected = connected();
-    const parts = [el('p', 'hint lu-intro', t('lu.intro')), settingsCard(), usersCard()];
+    const parts = [el('p', 'hint lu-intro', t('lu.intro')), noWayIn(), settingsCard(), usersCard()].filter(Boolean);
     if (isRouter()) parts.push(devicesCard());
     host.replaceChildren(...parts);
     if (focusKey) {
@@ -885,13 +1079,13 @@
     const old = f.id ? users().find((u) => u.id === f.id) : null;
     const q = String(f.quotaGb == null ? '' : f.quotaGb).trim();
     const m = String(f.maxDevices == null ? '' : f.maxDevices).trim();
-    const user = Object.assign({}, old || {}, {
+    const user = Object.assign({}, old || {}, fromChoice(f.quotaPeriod), {
       username: String(f.username).trim(),
       password: String(f.password),
       name: String(f.name || '').trim(),
       target: f.target || '',
       quotaGb: q === '' ? 0 : Number(q),
-      quotaPeriod: PERIODS.includes(f.quotaPeriod) ? f.quotaPeriod : 'none',
+      quotaResetDay: dayOf(f.quotaResetDay),
       expiresAt: fromDayInput(f.expires),
       maxDevices: m === '' ? 0 : Number(m),
       enabled: !!f.enabled
@@ -905,14 +1099,16 @@
     const u = id ? users().find((x) => x.id === id) : null;
     if (id && !u) return false;
     ui.opener = document.activeElement || null;
+    // quotaPeriod here is the select's choice: 'jmonth' a Persian month (fromChoice turns it back)
     ui.form = u
       ? { id: u.id, name: u.name || '', username: u.username || '', password: u.password || '', target: u.target || '',
-        quotaGb: u.quotaGb ? String(u.quotaGb) : '', quotaPeriod: PERIODS.includes(u.quotaPeriod) ? u.quotaPeriod : 'none',
+        quotaGb: u.quotaGb ? String(u.quotaGb) : '', quotaPeriod: choiceOf(u.quotaPeriod, u.quotaCalendar), quotaResetDay: dayOf(u.quotaResetDay),
         expires: dayInput(u.expiresAt), maxDevices: u.maxDevices ? String(u.maxDevices) : '', enabled: u.enabled !== false,
         showPass: false, errors: {}, error: '', saving: false }
-      // a new user: a password ready (shown — the admin reads it out), the current connection, a monthly count
-      : { id: '', name: '', username: '', password: genPassword(), target: '', quotaGb: '', quotaPeriod: 'month', expires: '',
-        maxDevices: '', enabled: true, showPass: true, errors: {}, error: '', saving: false };
+      // a new user: a password ready (shown — the admin reads it out), the current connection, a monthly count —
+      // in Persian the Persian month from its 1st (only the form's default: a saved user changes only when saved)
+      : { id: '', name: '', username: '', password: genPassword(), target: '', quotaGb: '', quotaPeriod: lang() === 'fa' ? 'jmonth' : 'month',
+        quotaResetDay: 1, expires: '', maxDevices: '', enabled: true, showPass: true, errors: {}, error: '', saving: false };
     if (!ui.modal) {
       const overlay = el('div', 'modal-overlay lu-overlay');
       overlay.id = 'luModal';
@@ -1039,13 +1235,14 @@
     q.min = '0';
     q.step = 'any';
     q.disabled = f.quotaPeriod === 'none';
-    pair.append(q, select(PERIODS.map((p) => [p, t('lu.period.' + p)]), f.quotaPeriod, t('lu.cap'), 'f:period', (v) => { f.quotaPeriod = v; q.disabled = v === 'none'; }));
+    const renew = renewLine(f.quotaResetDay, f.quotaPeriod, '', 'f:renew', (d) => { f.quotaResetDay = d; });
+    pair.append(q, select(periodChoices().map((p) => [p, t('lu.period.' + p)]), f.quotaPeriod, t('lu.cap'), 'f:period', (v) => { f.quotaPeriod = v; q.disabled = v === 'none'; renew.period(v); }));
     const date = formInput('expires', t('lu.expires'), { type: 'date', dir: 'ltr' });
     date.classList.add('lu-date');
     const words = el('div', 'lu-sub', expiryWords(fromDayInput(f.expires)).text);
     date.addEventListener('change', () => { f.expires = date.value; words.textContent = expiryWords(fromDayInput(f.expires)).text; });
     date.addEventListener('input', () => { words.textContent = expiryWords(fromDayInput(date.value)).text; });
-    capRow.append(formField('quotaGb', t('lu.cap'), [pair]), formField('expires', t('lu.expires'), [date, words]));
+    capRow.append(formField('quotaGb', t('lu.cap'), [pair, ...renew.nodes]), formField('expires', t('lu.expires'), [date, words]));
     body.append(capRow);
 
     const last = el('div', 'lu-grid');
@@ -1173,6 +1370,9 @@
     connection,
     open: openDialog,
     close: closeDialog,
+    share: openShare,
+    closeShare,
+    shareLink,
     loaded: () => !!ui.data,
     validate,
     format: { bytesText, dateText, fullDate, dayInput, fromDayInput, hostPort },

@@ -27,8 +27,10 @@ connecting) a version change is refused with "disconnect first".
   failure leaves the installed binary untouched. The bundled geo files are NOT replaced by a version install.
 - Refused while connected/connecting (main and service): `{ ok:false, refused:'connected' }`; the modal disables the actions
   and says to disconnect first.
-- Releases list: GitHub API `GET /repos/<repo>/releases?per_page=30` through the existing downloader's HTTP helper, cached
-  10 minutes per core; a network error is a friendly message with Retry inside the modal.
+- Releases list: GitHub API `GET /repos/<repo>/releases?per_page=10&page=N` through the existing downloader's HTTP helper —
+  the next page only while fewer than six stables with this platform's build are in hand, three pages (the 30 newest) at
+  most (each Xray release object is ~130 KB with its ~70 assets; 30 at once were ~4 MB) — cached 10 minutes per core; a
+  network error is a friendly message with Retry inside the modal.
 
 ## Out of scope
 Android; changing what «به‌روزرسانی» or the weekly asset updater install; signature checks beyond running the binary.

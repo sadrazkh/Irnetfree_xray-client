@@ -208,6 +208,45 @@ test('desktop and router: the connect and the reload build with lanUsers after m
   assert.match(SVC, /platform: OPENWRT \? 'router' : 'server', run: lanRun,/);
 });
 
+test('the cap notice says the day it renews: 1 Azar for a Persian month, 10 Aban for the Gregorian 1 Nov (Persian); the date in English', () => {
+  const { registerLanUsers } = require('../src/modules/lanUsers/ipc');
+  const said = (lang, over) => {
+    let now = at(2026, 10, 26);
+    const data = { lanUsers: { users: [user('usr-a', 'ali', Object.assign({ quotaGb: 1 }, over))] } };
+    const texts = [];
+    const reg = registerLanUsers({
+      store: { get: (k, d) => (k in data ? data[k] : d), set: (k, v) => { data[k] = v; } },
+      getSettings: () => ({ lang, modules: { lanUsers: true } }),
+      platform: 'server', firewall: { sync() {} }, now: () => now, notify: (text) => texts.push(text)
+    });
+    reg.meter.built({ active: ['usr-a'], over: [], byName: { ali: 'usr-a' } });
+    reg.tick({ stats: { user: { ali: { uplink: 0, downlink: 0 } } } });
+    now += 1000;
+    reg.tick({ stats: { user: { ali: { uplink: 0, downlink: 2 * GIB } } } });
+    return texts;
+  };
+  assert.deepEqual(said('fa', { quotaCalendar: 'jalali' }), ['«ali» به سقف 1 گیگابایتِ ماهانه رسید — تا 1 آذر قطع است']);
+  assert.deepEqual(said('en', { quotaCalendar: 'jalali' }), ['“ali” reached their 1 GB monthly cap — off until 22 November (1 Azar)']);
+  assert.deepEqual(said('fa', {}), ['«ali» به سقف 1 گیگابایتِ ماهانه رسید — تا 10 آبان قطع است']);
+  assert.deepEqual(said('en', { quotaResetDay: 15 }), ['“ali” reached their 1 GB monthly cap — off until 15 November']);
+  assert.deepEqual(said('fa', { quotaPeriod: 'day' }), ['«ali» به سقف 1 گیگابایتِ روزانه رسید — تا فردا قطع است'], 'a day: tomorrow, as before');
+  assert.deepEqual(said('en', { quotaPeriod: 'none' }), ['“ali” reached their 1 GB cap — off until it is raised']);
+});
+
+test('lanusers:user refuses a calendar or renew day the model does not know, as a cap’s error; a good one is stored', async (t) => {
+  const s = start({ lanUsers: { users: [user('usr-a', 'ali')] } });
+  t.after(() => s.service.shutdown());
+  for (const [patch, detail] of [[{ quotaCalendar: 'lunar' }, 'quotaCalendar'], [{ quotaResetDay: 40 }, 'quotaResetDay']]) {
+    const r = await s.service.invoke('lanusers:user', { op: 'update', user: Object.assign({ id: 'usr-a' }, patch) });
+    assert.deepEqual([r.ok, r.error, r.detail], [false, 'quota', detail]);
+  }
+  const ok = await s.service.invoke('lanusers:user', { op: 'update', user: { id: 'usr-a', quotaCalendar: 'jalali', quotaResetDay: 15 } });
+  assert.deepEqual([ok.ok, ok.users[0].quotaCalendar, ok.users[0].quotaResetDay], [true, 'jalali', 15]);
+  assert.match(ok.usage['usr-a'].period, /^j\d{4}-\d{2}(@15)?$/);
+  const back = await s.service.invoke('lanusers:user', { op: 'update', user: { id: 'usr-a', quotaCalendar: 'gregorian', quotaResetDay: 1 } });
+  assert.equal('quotaCalendar' in back.users[0] || 'quotaResetDay' in back.users[0], false, 'the Gregorian 1st is stored as nothing, as before');
+});
+
 test('both bridges expose the same four calls', () => {
   const preload = R('src', 'preload', 'preload.js');
   const web = R('src', 'server', 'web-api.js');
@@ -216,4 +255,19 @@ test('both bridges expose the same four calls', () => {
     assert.ok(preload.includes(`${name}: (${arg}) => ipcRenderer.invoke(${call}),`), `preload ${name}`);
     assert.ok(web.includes(`${name}: (${arg}) => invoke(${call}),`), `web-api ${name}`);
   }
+});
+
+test('the addresses to give people: the Windows hotspot first; never the app’s own TUN adapters (sing-box’s 172.19.0.1 was offered)', () => {
+  const { lanCandidates, HOTSPOT_IP } = require('../src/modules/lanUsers/ipc');
+  assert.equal(HOTSPOT_IP, '192.168.137.1');
+  const v4 = (address) => ({ family: 'IPv4', address, internal: false });
+  const ifs = {
+    IRNetFree: [v4('172.19.0.1')],
+    XrayTun: [v4('10.255.0.2')],
+    Ethernet: [v4('10.0.0.5'), v4('169.254.52.192')],
+    'Wi-Fi': [v4('192.168.8.191')],
+    'Local Area Connection* 10': [v4('192.168.137.1')],
+    'Loopback Pseudo-Interface 1': [{ family: 'IPv4', address: '127.0.0.1', internal: true }]
+  };
+  assert.deepEqual(lanCandidates(ifs), ['192.168.137.1', '192.168.8.191', '10.0.0.5']);
 });

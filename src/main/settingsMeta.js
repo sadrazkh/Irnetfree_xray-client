@@ -60,9 +60,10 @@ const RECONNECT_KEYS = [
  * The part of a key's value the running config is actually built from, where
  * that is not the whole value. multiWan is compared as the builder reads it —
  * normalized, so a value saved before its defaults were filled in is not a
- * "change" — and without a link's cap (quotaGb, quotaPeriod): the quota
- * (multiWanMeter.js) reads caps live, sets a link aside and reloads the core
- * itself, so changing only a cap while connected must not ask for a reconnect.
+ * "change" — and without a link's cap (quotaGb, quotaPeriod, and the month's
+ * quotaCalendar and quotaResetDay): the quota (multiWanMeter.js) reads caps
+ * live, sets a link aside and reloads the core itself, so changing only a cap
+ * while connected must not ask for a reconnect.
  */
 const VIEWS = {
   multiWan: (v) => {
@@ -72,6 +73,8 @@ const VIEWS = {
         const built = Object.assign({}, l);
         delete built.quotaGb;
         delete built.quotaPeriod;
+        delete built.quotaCalendar;
+        delete built.quotaResetDay;
         return built;
       })
     });

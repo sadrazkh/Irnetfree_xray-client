@@ -2,7 +2,8 @@
 /**
  * The users module's transparent mode in the gateway's nft table, byte for
  * byte: off, the table is exactly the one before the module (the QEMU smoke
- * and tests/tunOpenwrt.test.js pin it); on, the blocked set, the gate for
+ * and tests/tunOpenwrt.test.js pin it); on, the blocked set, each user's
+ * device's addresses bound to its MAC, the gate for
  * unassigned devices, the sign-in page's redirect with the sessions'
  * timeouts, and a byte counter per device — and the gateway replacing them
  * live without touching sing-box. Only the kernel can say it accepts the
@@ -39,9 +40,10 @@ test('off: no `lanUsers`, null or undefined — the table of before, byte for by
   assert.equal(net.buildNftRuleset(Object.assign({ blockQuic: true, lanUsers: null }, base)), net.buildNftRuleset(Object.assign({ blockQuic: true }, base)));
 });
 
-test('allow mode: the blocked set drops, no gate, no redirect — and every device is counted', () => {
+test('allow mode: the blocked set drops, the assigned device\'s addresses are pinned to its MAC, no gate, no redirect — and every device is counted', () => {
   const text = net.buildNftRuleset({ lanIf: 'br-lan', macs: [], lanUsers: {
     unassigned: 'allow', blocked: [A], allowed: [B], authorized: [], direct: [],
+    ipmac: [{ mac: B, ips: ['192.168.1.40', '2001:db8::40'] }],
     counters: [{ mac: A, ips: ['192.168.1.23'] }, { mac: B, ips: ['192.168.1.40', '2001:db8::40'] }]
   } });
   assert.equal(text, [
@@ -52,6 +54,10 @@ test('allow mode: the blocked set drops, no gate, no redirect — and every devi
     `  set lu_blocked { type ether_addr; elements = { ${A} }; }`,
     `  set lu_allowed { type ether_addr; elements = { ${B} }; }`,
     '  set lu_authorized { type ether_addr; flags timeout; }',
+    '  set lu_bound4 { type ipv4_addr; elements = { 192.168.1.40 }; }',
+    `  set lu_ipmac4 { type ipv4_addr . ether_addr; elements = { 192.168.1.40 . ${B} }; }`,
+    '  set lu_bound6 { type ipv6_addr; elements = { 2001:db8::40 }; }',
+    `  set lu_ipmac6 { type ipv6_addr . ether_addr; elements = { 2001:db8::40 . ${B} }; }`,
     '  counter cu_aabbccddee01 { packets 0 bytes 0 }',
     '  counter cd_aabbccddee01 { packets 0 bytes 0 }',
     '  counter cu_aabbccddee02 { packets 0 bytes 0 }',
@@ -66,6 +72,8 @@ test('allow mode: the blocked set drops, no gate, no redirect — and every devi
     '  chain lu_fwd {',
     '    type filter hook forward priority filter - 5; policy accept;',
     '    iifname "br-lan" ether saddr @lu_blocked counter drop',
+    '    iifname "br-lan" ip saddr @lu_bound4 ip saddr . ether saddr != @lu_ipmac4 counter drop',
+    '    iifname "br-lan" ip6 saddr @lu_bound6 ip6 saddr . ether saddr != @lu_ipmac6 counter drop',
     '    iifname "br-lan" counter name ether saddr map @lu_up',
     '    oifname "br-lan" counter name ip daddr map @lu_dn4',
     '    oifname "br-lan" counter name ip6 daddr map @lu_dn6',
@@ -89,6 +97,8 @@ test('login mode: signed-in devices with their sessions\' remaining time, the ga
     '  chain lu_fwd {',
     '    type filter hook forward priority filter - 5; policy accept;',
     '    iifname "br-lan" ether saddr @lu_blocked counter drop',
+    '    iifname "br-lan" ip saddr @lu_bound4 ip saddr . ether saddr != @lu_ipmac4 counter drop',
+    '    iifname "br-lan" ip6 saddr @lu_bound6 ip6 saddr . ether saddr != @lu_ipmac6 counter drop',
     '    iifname "br-lan" ether saddr != @lu_allowed ether saddr != @lu_authorized ether saddr != @bypass_macs jump lu_gate',
     '    iifname "br-lan" counter name ether saddr map @lu_up',
     '    oifname "br-lan" counter name ip daddr map @lu_dn4',
@@ -140,6 +150,48 @@ test('nothing unsafe reaches the kernel: junk MACs, a port or address that is no
   assert.doesNotMatch(text, /flush|10\.0\.0\.1|fe80|dnat/);
   assert.equal(nft.cleanDesc({ portal: { ip: '192.168.1.1', port: 70000 } }).portal, null);
   assert.equal(nft.cleanDesc({ unassigned: 'allow', portal: { ip: '192.168.1.1', port: 30822 } }).portal, null, 'only login mode redirects');
+});
+
+test('the pins: each address of a user\'s device bound to its MAC — several per device, both families; dropped from any other MAC before the gate and the counters', () => {
+  const text = net.buildNftRuleset({ lanIf: 'br-lan', lanUsers: {
+    unassigned: 'login', allowed: [A], authorized: [{ mac: B, timeoutS: 600 }],
+    ipmac: [{ mac: A, ips: ['192.168.1.23', '2001:db8::23', '2001:db8::a:23'] }, { mac: B, ips: ['192.168.1.40'] }],
+    portal: { ip: '192.168.1.1', port: 30822 }
+  } });
+  assert.ok(text.includes([
+    '  set lu_bound4 { type ipv4_addr; elements = { 192.168.1.23, 192.168.1.40 }; }',
+    `  set lu_ipmac4 { type ipv4_addr . ether_addr; elements = { 192.168.1.23 . ${A}, 192.168.1.40 . ${B} }; }`,
+    '  set lu_bound6 { type ipv6_addr; elements = { 2001:db8::23, 2001:db8::a:23 }; }',
+    `  set lu_ipmac6 { type ipv6_addr . ether_addr; elements = { 2001:db8::23 . ${A}, 2001:db8::a:23 . ${A} }; }`,
+    ''
+  ].join('\n')), text);
+  // the order in the forward chain: the block, then the pins, then the gate's jump, then the counters
+  const at = (s) => { const i = text.indexOf(s); assert.ok(i > 0, s); return i; };
+  const pin4 = at('    iifname "br-lan" ip saddr @lu_bound4 ip saddr . ether saddr != @lu_ipmac4 counter drop\n');
+  const pin6 = at('    iifname "br-lan" ip6 saddr @lu_bound6 ip6 saddr . ether saddr != @lu_ipmac6 counter drop\n');
+  assert.ok(at('ether saddr @lu_blocked counter drop') < pin4 && pin4 < pin6 && pin6 < at('jump lu_gate') && at('jump lu_gate') < at('map @lu_up'));
+  assert.ok(at('set lu_ipmac6') < at('chain pre'), 'declared before a rule names them');
+  // the portal's redirect is the input path: no pin there (the router itself stays reachable from every device)
+  assert.doesNotMatch(text.slice(at('chain lu_portal')), /lu_bound|lu_ipmac/);
+  // no device is anyone's: the sets are there, empty, and the rules match nothing
+  const none = net.buildNftRuleset({ lanUsers: { unassigned: 'allow' } });
+  assert.ok(none.includes('  set lu_bound4 { type ipv4_addr; }\n  set lu_ipmac4 { type ipv4_addr . ether_addr; }\n  set lu_bound6 { type ipv6_addr; }\n  set lu_ipmac6 { type ipv6_addr . ether_addr; }\n'), none);
+  assert.match(none, /ip saddr @lu_bound4 ip saddr \. ether saddr != @lu_ipmac4 counter drop/);
+});
+
+test('the pins reach the kernel clean: one MAC per address (the first), valid MACs and addresses only, no link-local v6', () => {
+  const d = nft.cleanDesc({ ipmac: [
+    { mac: A.toUpperCase(), ips: ['192.168.1.23', '192.168.1.23', 'FE80::1', '2001:DB8::23', '1.2.3', null] },
+    { mac: B, ips: ['192.168.1.23', '192.168.1.40'] },
+    { mac: 'aa:bb:cc:dd:ee:ff . 192.168.1.9; flush ruleset', ips: ['192.168.1.9'] },
+    { mac: C, ips: 'not a list' },
+    null
+  ] });
+  assert.deepEqual(d.ipmac, [{ ip: '192.168.1.23', mac: A }, { ip: '2001:db8::23', mac: A }, { ip: '192.168.1.40', mac: B }],
+    'an address two devices claim stays the first one\'s: one address with two MACs would let both through');
+  assert.deepEqual(nft.cleanDesc({}).ipmac, []);
+  const text = net.buildNftRuleset({ lanUsers: { unassigned: 'allow', ipmac: [{ mac: 'junk', ips: ['10.0.0.9'] }, { mac: A, ips: ['10.0.0.1; flush ruleset'] }] } });
+  assert.doesNotMatch(text, /flush|10\.0\.0\.9|10\.0\.0\.1/);
 });
 
 test('parseCounters: the named counters of `nft -j list table` → bytes per device, up and down; the rules\' own counters and junk ignored', () => {

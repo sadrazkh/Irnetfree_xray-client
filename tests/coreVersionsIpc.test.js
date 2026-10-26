@@ -81,7 +81,7 @@ test('router: cores:versions answers with the installed, suggested and latest ve
   assert.ok(res.cards.every((c) => c.asset === 'Xray-linux-arm32-v7a.zip'));
   assert.deepEqual(s.seen.sort(), [
     'api:https://api.github.com/repos/patterniha/Xray-core/releases/latest',
-    'api:https://api.github.com/repos/patterniha/Xray-core/releases?per_page=30'
+    'api:https://api.github.com/repos/patterniha/Xray-core/releases?per_page=10&page=1'
   ]);
 });
 

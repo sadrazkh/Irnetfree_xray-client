@@ -102,7 +102,33 @@ test('the router probe’s devices: fixed, locally administered MACs, two addres
     assert.ok(d.ip.startsWith(L.LAN_IP.split('.').slice(0, 3).join('.') + '.') && d.ip !== L.LAN_IP);
   }
   for (const n of [L.LAN_IF, L.WAN.dev, L.WAN.peer, ...devs.flatMap((d) => [d.dev, d.port])]) assert.ok(n.length <= 15, n);
-  assert.equal(new Set(Object.values(L.NS)).size, 4, 'four namespaces of its own');
+  assert.equal(new Set(Object.values(L.NS)).size, 5, 'five namespaces of its own');
+  // the spoofer: a MAC of its own (locally administered), its own namespace and links, A's address to take — and no lease
+  const C = L.SPOOF;
+  assert.equal(normalizeMac(C.mac), C.mac);
+  assert.equal(parseInt(C.mac.slice(0, 2), 16) & 3, 2);
+  assert.ok(!devs.some((d) => d.mac === C.mac || d.ns === C.ns || d.dev === C.dev || d.port === C.port));
+  assert.ok(Object.values(L.NS).includes(C.ns), 'its namespace is cleared with the others');
+  assert.equal(C.ip, L.DEV.a.ip, 'it takes A\'s address');
+  assert.ok(!Object.values(L.DEV).includes(C), 'not one of the leased devices');
+  for (const n of [C.dev, C.port]) assert.ok(n.length <= 15, n);
+  // its stand-in owner, bob, is a user with a config of his own (not alice's)
+  const lu = L.probeLanUsers();
+  const bob = lu.users.find((u) => u.username === 'bob'), alice = lu.users.find((u) => u.username === 'alice');
+  assert.ok(bob && bob.id === 'usr-bob' && bob.target === 'srv-s2' && alice.target === 'srv-s1');
+});
+
+test('the router probe’s pin reader: what the rules naming lu_ipmac4 / lu_ipmac6 dropped, nothing else', () => {
+  const ref = (name) => ({ match: { op: '!=', left: { concat: [{ payload: { protocol: 'ip', field: 'saddr' } }, { payload: { protocol: 'ether', field: 'saddr' } }] }, right: name } });
+  const j = { nftables: [
+    { rule: { chain: 'lu_fwd', handle: 5, expr: [{ match: { op: '==', left: { payload: { protocol: 'ip', field: 'saddr' } }, right: '@lu_bound4' } }, ref('@lu_ipmac4'), { counter: { packets: 3, bytes: 180 } }, { drop: null }] } },
+    { rule: { chain: 'lu_fwd', handle: 6, expr: [ref('@lu_ipmac6'), { counter: { packets: 1, bytes: 80 } }, { drop: null }] } },
+    { rule: { chain: 'lu_fwd', handle: 4, expr: [{ match: { right: '@lu_blocked' } }, { counter: { packets: 9, bytes: 900 } }, { drop: null }] } },
+    { rule: { chain: 'lu_fwd', handle: 7, expr: [ref('@lu_ipmac40'), { counter: { packets: 50, bytes: 5000 } }] } },
+    { set: { name: 'lu_ipmac4', elem: [] } }
+  ] };
+  assert.deepEqual(L.pinDrops(j), { packets: 4, bytes: 260, rules: 2 });
+  assert.deepEqual(L.pinDrops(null), { packets: 0, bytes: 0, rules: 0 });
 });
 
 test('module off is inert in both probes’ configs: the config of before, byte for byte (the gate CI also runs)', () => {

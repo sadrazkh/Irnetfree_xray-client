@@ -199,7 +199,10 @@ test('the card as the mockup draws it, in Persian: the switch, three mode cards,
   assert.equal(host.byKey('quota:Wi-Fi').value, '100');
   assert.equal(host.byKey('quota:Wi-Fi').getAttribute('dir'), 'ltr');
   assert.equal(host.byKey('period:Wi-Fi').value, 'month');
-  assert.deepEqual(host.byKey('period:Wi-Fi').children.map((o) => o.textContent), ['GB در ماه', 'GB در روز', 'بدون سقف']);
+  assert.deepEqual(host.byKey('period:Wi-Fi').children.map((o) => o.textContent), ['GB در ماه شمسی', 'GB در ماه میلادی', 'GB در روز', 'بدون سقف'], 'the Persian month first in Persian');
+  assert.equal(host.byKey('renew:Wi-Fi').value, '1', 'a link saved before the calendar choice: the Gregorian month from the 1st');
+  assert.equal(host.byKey('renew:Wi-Fi').parentNode.hidden, false);
+  assert.equal(host.byKey('renew:usb').parentNode.hidden, true, 'a day: no renew day');
   assert.ok(wifi.byClass('field-label').map((l) => l.textContent).join('|').startsWith('نقش|سهم|سقف حجم'));
 
   // the period's usage against the cap, and when the period ends
@@ -326,6 +329,49 @@ test('a role, a share, a cap and its period each save the whole list with that o
   await flush();
   assert.equal(h.saves[4].links[1].quotaPeriod, 'none');
   assert.equal(h.host.byKey('quota:usb').disabled, true);
+});
+
+test('a link’s month: the Persian or the Gregorian one, its renew day under the cap — saved with the link, the other links as they were', async () => {
+  const res = answer({ settings: { links: [
+    { id: 'Wi-Fi', iface: 'Wi-Fi', name: 'Wi-Fi — Home', role: 'use', weight: 3, quotaGb: 100, quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 30 },
+    { id: 'usb', iface: 'Ethernet 3', name: 'Phone (USB)', role: 'use', weight: 2, quotaGb: 3, quotaPeriod: 'day' },
+    { id: 'eth0', iface: 'eth0', name: 'Office cable', role: 'off', weight: 2, quotaGb: 0, quotaPeriod: 'none' }
+  ] } });
+  const h = harness();
+  h.state.stored = res.settings;
+  await h.load(res);
+  const note = (id) => h.row(id).one('mi-renewnote');
+  assert.equal(h.host.byKey('period:Wi-Fi').value, 'jmonth');
+  assert.equal(h.host.byKey('renew:Wi-Fi').value, '30');
+  assert.equal(h.row('Wi-Fi').one('mi-renew').textContent.startsWith('روز تمدید'), true);
+  assert.equal(note('Wi-Fi').hidden, false, 'the Persian 30th: Esfand may have 29 — said');
+  assert.equal(note('usb').hidden, true);
+  assert.equal(h.host.byKey('renew:eth0').parentNode.hidden, true, 'no cap: no renew day');
+  const r = h.host.byKey('renew:Wi-Fi');
+  r.value = '12';
+  r.dispatch('change');
+  await flush();
+  assert.deepEqual(h.saves[0].links[0], { id: 'Wi-Fi', iface: 'Wi-Fi', name: 'Wi-Fi — Home', role: 'use', weight: 3, quotaGb: 100, quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 12 });
+  assert.deepEqual(h.saves[0].links[1], { id: 'usb', iface: 'Ethernet 3', name: 'Phone (USB)', role: 'use', weight: 2, quotaGb: 3, quotaPeriod: 'day' }, 'a link saved before the choice: as it was');
+  assert.equal(note('Wi-Fi').hidden, true, 'the 12th is in every month');
+  const per = h.host.byKey('period:Wi-Fi');
+  per.value = 'month';
+  per.dispatch('change');
+  await flush();
+  assert.deepEqual([h.saves[1].links[0].quotaPeriod, h.saves[1].links[0].quotaCalendar, h.saves[1].links[0].quotaResetDay], ['month', 'gregorian', 12]);
+  assert.equal('quotaCalendar' in h.state.stored.links[0], false, 'the service stores the Gregorian month as nothing');
+  assert.equal(h.host.byKey('period:Wi-Fi').value, 'month');
+  const usb = h.host.byKey('period:usb');
+  usb.value = 'jmonth';
+  usb.dispatch('change');
+  await flush();
+  assert.deepEqual([h.saves[2].links[1].quotaPeriod, h.saves[2].links[1].quotaCalendar], ['month', 'jalali']);
+  assert.equal(h.host.byKey('renew:usb').parentNode.hidden, false, 'a month now: its renew day');
+
+  const en = harness({ lang: 'en' });
+  await en.load();
+  assert.deepEqual(en.host.byKey('period:Wi-Fi').children.map((o) => o.textContent), ['GB a month', 'GB a Jalali month', 'GB a day', 'No cap']);
+  assert.equal(en.host.byKey('period:Wi-Fi').value, 'month');
 });
 
 test('a redraw after a save keeps the focus on the control in use', async () => {
@@ -482,7 +528,7 @@ test('every string the card can show is defined once in Persian and once in Engl
   for (const m of ['balance', 'failover', 'split']) { keys.add('mi.mode.' + m); keys.add('mi.mode.' + m + 'Sub'); }
   for (const r of ['use', 'backup', 'off']) keys.add('mi.role.' + r);
   for (const w of [1, 2, 3]) keys.add('mi.share.' + w);
-  for (const p of ['month', 'day', 'none']) keys.add('mi.period.' + p);
+  for (const p of ['month', 'jmonth', 'day', 'none']) keys.add('mi.period.' + p);
   for (const c of ['noServer', 'absent', 'unknown']) keys.add('mi.err.' + c);   // the codes multiwan:test answers
   assert.ok(keys.size > 45, `expected the whole card, found ${keys.size} keys`);
   const bad = [...keys].filter((k) => (I18N.split(`'${k}':`).length - 1) !== 2).sort();

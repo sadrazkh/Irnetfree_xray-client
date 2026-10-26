@@ -178,7 +178,7 @@ test('a link over its cap: in skip(), said in the log and a notification, and ON
   assert.equal(said.length, 1);
   assert.match(said[0].line, /“Phone \(USB\)” reached its cap \(3 GB today\) — set aside until tomorrow/);
   assert.equal(said[0].level, 'warn');
-  assert.deepEqual(h.notes, [{ name: 'Phone (USB)', capGb: 3, period: 'day' }]);
+  assert.deepEqual(h.notes, [{ name: 'Phone (USB)', capGb: 3, period: 'day', until: at(2026, 10, 26, 0), calendar: 'gregorian' }]);
   // the reload has not landed yet (its reset is what says so): later ticks ask nothing more meanwhile
   for (let i = 0; i < 5; i++) { h.t += 1000; h.q.tick(vars({ 'proxy~gm2': [5, big] }), MAP, null); }
   await h.flush();
@@ -208,6 +208,32 @@ test('a new period brings it back: the log says so, and one reload puts it in ag
   assert.equal(h.reloads.length, 1);
   assert.match(h.reloads[0], /every internet back/);
   assert.ok(h.logs.some((l) => /“Phone \(USB\)” is back in use/.test(l.line) && l.level === 'info'), JSON.stringify(h.logs));
+});
+
+test('a link capped by the Persian month from the 15th: its period, its renew day in the log and the notice, back on 15 Azar', async () => {
+  const persian = mw({ links: [mw().links[0], Object.assign({}, mw().links[1], { quotaGb: 3, quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 15 })] });
+  const h = harness({ t: at(2026, 11, 20), settings: persian, live: persian });   // 29 Aban 1405
+  assert.deepEqual(persian.links[1].quotaCalendar, 'jalali', 'normalized, the link keeps its month');
+  h.q.reset([]);
+  h.q.tick(vars({ 'proxy~gm2': [5, 3 * GIB] }), MAP, null);
+  const u = h.q.usage().usb;
+  assert.deepEqual([u.period, u.since, u.until], ['j1405-08@15', at(2026, 11, 6, 0), at(2026, 12, 6, 0)], '15 Aban – 15 Azar');
+  assert.deepEqual(h.q.skip(), ['usb']);
+  await h.flush();
+  const said = h.logs.filter((l) => /reached its cap/.test(l.line));
+  assert.equal(said[0].line, 'Multi-internet: “Phone (USB)” reached its cap (3 GB this month) — set aside until 6 December (15 Azar); the connection goes on the other internets');
+  assert.deepEqual(h.notes, [{ name: 'Phone (USB)', capGb: 3, period: 'month', until: at(2026, 12, 6, 0), calendar: 'jalali' }]);
+  h.q.reset(['usb']);
+  h.t = at(2026, 12, 1);   // the Gregorian month turned: not this cap's
+  h.q.tick(vars({ 'proxy~gm0': [1, 1] }), MAP, null);
+  assert.deepEqual(h.q.skip(), ['usb'], 'still set aside on 1 December');
+  h.t = at(2026, 12, 6, 0) + 1000;
+  h.q.tick(vars({ 'proxy~gm0': [1, 1] }), MAP, null);
+  await h.flush();
+  assert.deepEqual(h.q.skip(), []);
+  assert.equal(h.q.usage().usb.period, 'j1405-09@15');
+  assert.deepEqual(M.normalizeUsage({ usb: { period: 'j1405-08@15', bytes: 1 }, wan: { period: '2026-10@31', bytes: 2 }, bad: { period: 'all', bytes: 3 } }),
+    { usb: { period: 'j1405-08@15', bytes: 1 }, wan: { period: '2026-10@31', bytes: 2 } }, 'a link never counts for good');
 });
 
 test('a cap raised while set aside brings it back the same way — caps are read live', async () => {

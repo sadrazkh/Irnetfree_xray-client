@@ -305,6 +305,67 @@ test('the pool: each entry\'s exit and the primary over the links; the standard 
   assert.deepEqual(sp.multiWanSplit, [{ tag: 'out-sv-xtls', up: 'Wi-Fi', down: 'Ethernet 2' }]);
 });
 
+/* ------------------------------ the health check over the links ------------------------------ */
+test('a share is written as the fewest copies that give it — every copy is a probe on its link: 2:2 (the default) and 3:3 are one copy a link, 3:2 stays five', () => {
+  const at = (...weights) => members(build({ mode: 'single', server: VLESS },
+    { multiWan: mwOf({ links: weights.map((w, i) => ({ id: 'l' + i, role: 'use', weight: w })) }) }), 'proxy').map(iface);
+  assert.deepEqual(at(2, 2), ['l0', 'l1']);
+  assert.deepEqual(at(3, 3), ['l0', 'l1']);
+  assert.deepEqual(at(1, 1), ['l0', 'l1']);
+  assert.deepEqual(at(2, 2, 2), ['l0', 'l1', 'l2']);
+  assert.deepEqual(at(2, 1), ['l0', 'l1', 'l0'], 'no common factor: as before, interleaved');
+  assert.deepEqual(at(3, 1), ['l0', 'l1', 'l0', 'l0']);
+  assert.deepEqual(at(3, 2), ['l0', 'l1', 'l0', 'l1', 'l0']);
+  // no weight given: the default 2 on each link, one copy each
+  assert.deepEqual(members(build({ mode: 'single', server: VLESS }, { multiWan: mwOf({ links: [{ id: 'a' }, { id: 'b' }, { id: 'c', role: 'backup' }] }) }), 'proxy').map(iface), ['a', 'b']);
+  // a group the plan runs: one copy of each member a link
+  const g = build({ mode: 'single', server: groupOf(['sv-vless', 'sv-trojan']) }, { multiWan: mwOf({ links: [{ id: 'a', weight: 2 }, { id: 'b', weight: 2 }] }) });
+  assert.deepEqual(g.groupTags[0].members.map((m) => m.id), ['sv-vless#a', 'sv-vless#b', 'sv-trojan#a', 'sv-trojan#b']);
+  // split's fallback to balance over the up and the down: the same rule
+  const sp = build({ mode: 'single', server: XONE }, { multiWan: mwOf({ mode: 'split', links: [{ id: 'a', weight: 3 }, { id: 'b', weight: 3 }], split: { up: 'a', down: 'b' } }) });
+  assert.deepEqual(members(sp, 'proxy').map(iface), ['a', 'b']);
+});
+
+test('the health check over the links asks every 30 s — every 60 s while a probed copy rides a capped link; a capped backup (never probed) or a link set aside for its cap does not count; without multi-internet 10 s as before', () => {
+  const cap = (l, over) => Object.assign({}, l, { quotaGb: 5, quotaPeriod: 'month' }, over);
+  const every = (plan, mw, over) => {
+    const c = build(plan, Object.assign({ multiWan: mw }, over));
+    return c.observatory ? c.observatory.probeInterval : null;
+  };
+  const one = { mode: 'single', server: VLESS };
+  assert.deepEqual([M.PROBE_EVERY_S, M.PROBE_EVERY_CAPPED_S], [30, 60]);
+  assert.equal(every(one, mwOf()), '30s');
+  assert.equal(every(one, mwOf({ links: [LINKS[0], cap(LINKS[1]), LINKS[2]] })), '60s', 'a use link with a monthly cap');
+  assert.equal(every(one, mwOf({ links: [LINKS[0], cap(LINKS[1], { quotaGb: 1, quotaPeriod: 'day' })] })), '60s', 'a daily cap');
+  assert.equal(every(one, mwOf({ links: [LINKS[0], cap(LINKS[1], { quotaPeriod: 'none' })] })), '30s', 'GB with no period to count them in is no cap (the meter’s capBytes)');
+  assert.equal(every(one, mwOf({ links: [LINKS[0], LINKS[1], cap(LINKS[2])] })), '30s', 'the capped link is the backup: the fallback, never probed');
+  assert.equal(every(one, mwOf({ links: [LINKS[0], cap(LINKS[1])] }), { multiWanSkip: ['Ethernet 2'] }), '30s', 'over its cap and set aside: no copy rides it');
+  // failover: only the primary is probed
+  assert.equal(every(one, mwOf({ mode: 'failover', links: [cap(LINKS[0]), LINKS[1]] })), '60s');
+  assert.equal(every(one, mwOf({ mode: 'failover', links: [LINKS[0], cap(LINKS[1])] })), '30s');
+  // split: an XHTTP split in place is no group (nothing probed); one that cannot split is balanced over both legs
+  assert.equal(every({ mode: 'single', server: XTLS }, mwOf({ mode: 'split', links: [LINKS[0], cap(LINKS[1])] })), null);
+  assert.equal(every({ mode: 'single', server: XONE }, mwOf({ mode: 'split', links: [LINKS[0], cap(LINKS[1])] })), '60s');
+  // a group the plan runs, its members multiplied; the pool's groups
+  const g = groupOf(['sv-vless', 'sv-trojan']);
+  assert.equal(every({ mode: 'single', server: g }, mwOf()), '30s');
+  assert.equal(every({ mode: 'single', server: g }, mwOf({ links: [cap(LINKS[0]), LINKS[1]] })), '60s');
+  assert.equal(B.buildConfig({ mode: 'pool', entries: [{ id: 'e1', target: 'sv-trojan', socksPort: 41090, httpPort: 0 }], primary: 'sv-vless', serversById: byId, chainsById: {}, chain: [] },
+    F.settings({ multiWan: mwOf({ links: [cap(LINKS[0]), LINKS[1]] }), apiPort: 41099 })).observatory.probeInterval, '60s');
+  // one observatory for the config: a group the links leave alone (inside a chain) is asked as often as the rest
+  const adv = build({ mode: 'advanced', serversById: byId, chainsById: { c1: [g, TROJAN] }, chain: [], rules: [{ type: 'ip', value: '10.0.0.0/8', target: 'chain:c1' }], def: 'sv-vless' }, { multiWan: mwOf() });
+  assert.deepEqual(adv.observatory.subjectSelector, ['out-chain-c1~gm', 'out-sv-vless~gm']);
+  assert.deepEqual(adv.groupTags[0].members.map((m) => m.id), ['sv-vless', 'sv-trojan'], 'the chain’s group, not over the links');
+  assert.equal(adv.observatory.probeInterval, '30s');
+  // no multi-internet (off, or nothing to combine): the 10 s groups always had, and the marker never reaches the core
+  assert.equal(every({ mode: 'single', server: g }, undefined), '10s');
+  assert.equal(every({ mode: 'single', server: g }, mwOf({ enabled: false })), '10s');
+  assert.equal(every({ mode: 'single', server: g }, mwOf({ links: [LINKS[0]] })), '10s');
+  for (const c of [build(one, { multiWan: mwOf() }), build({ mode: 'single', server: g }, { multiWan: mwOf() }), adv]) {
+    assert.equal(json(c).includes('probeEvery'), false);
+  }
+});
+
 /* ------------------------------ dialers, TUN, WireGuard ------------------------------ */
 test('the anti-DPI dialer: each member dials one bound to its link\'s interface — one dialer per interface, the member itself unbound', () => {
   const frag = F.vlessWithMarkers('sv-frag', { _fragment: 'tlshello,100-200,10-20' });
@@ -377,6 +438,19 @@ test('linkOfMemberId: what follows the #, nothing for any other member', () => {
   assert.equal(M.linkOfMemberId(''), '');
   assert.equal(M.linkOfMemberId(undefined), '');
   assert.equal(M.linkOfMemberId('ab12#Ethernet #2'), 'Ethernet #2', 'an adapter renamed with a # in it');
+  // the id taken apart, the one way the meter and the window both read it
+  assert.deepEqual(M.memberIdParts('sv-vless#Wi-Fi'), { server: 'sv-vless', link: 'Wi-Fi' });
+  assert.deepEqual(M.memberIdParts('ab12#Ethernet #2'), { server: 'ab12', link: 'Ethernet #2' });
+  for (const id of ['sv-vless', '', undefined, null]) assert.equal(M.memberIdParts(id), null, String(id));
+});
+
+test('the live payload names a server’s copies on each internet — serverId and link, from the same reading of the id; an ordinary member as before', () => {
+  const cfg = build({ mode: 'single', server: VLESS }, { multiWan: mwOf() });
+  const live = S.groupsLive(cfg.groupTags, {}, {}, { 'proxy~gm1': { alive: true, delay: 80 } }, 1);
+  assert.deepEqual(live[0].members.map((m) => [m.id, m.serverId, m.link, m.alive]), [
+    ['sv-vless#Wi-Fi', 'sv-vless', 'Wi-Fi', null], ['sv-vless#Ethernet 2', 'sv-vless', 'Ethernet 2', true], ['sv-vless#Wi-Fi', 'sv-vless', 'Wi-Fi', null]]);
+  const g = build({ mode: 'single', server: groupOf(['sv-vless', 'sv-trojan']) }, {});
+  for (const m of S.groupsLive(g.groupTags, {}, {}, {}, 1)[0].members) assert.equal('serverId' in m || 'link' in m, false, m.id);
 });
 
 test('linkUsage: each link\'s bytes from the raw counters and the running groups — members by their #link, the fallback, a split\'s uplink on its up and downlink on its down; other groups and tags left out', () => {

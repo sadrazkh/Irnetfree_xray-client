@@ -8,12 +8,13 @@
  * sees the login page and nothing else, whether a blocked or capped one gets
  * nothing: what no config check can say. The gates are what a device sees.
  *
- * Four network namespaces of their own, made here and removed whatever
+ * Five network namespaces of their own, made here and removed whatever
  * happens — the runner's own network is never touched:
  *
  *   lpdeva  device A  02:1a:00:00:00:a1  192.168.77.11 ─┐
  *   lpdevb  device B  02:1a:00:00:00:b2  192.168.77.12 ─┤ br-lan 192.168.77.1/24
- *                                                         │
+ *   lpdevc  device C  02:1a:00:00:00:c3  (no address  ─┤
+ *           until it takes A's, in the spoof gates)     │
  *   lprtr   the router: the app's nft table, sing-box TUN (TunOpenwrt), Xray
  *           (buildConfig), the login portal on 192.168.77.1, a DNS on :53
  *           lpw0 10.31.0.1/30 ══ lpw1 10.31.0.2 ─┐
@@ -48,6 +49,12 @@
  *   login     after POST /login as bob, B rides S2 (within 25 s)
  *   blocked   A blocked: nothing on :80 or :8080 (not even the login page),
  *             B untouched; unblocked, A rides S1 again (within 15 s)
+ *   spoof     the kernel takes the module's pins of both families (nft -c);
+ *             C — bob's own device, let through by its MAC — takes A's
+ *             address while A is away: nothing it sends gets through (the
+ *             pin rule's counter dropped it), not alice's S1, and the address
+ *             is in no rule-set of bob's; A, back on its address, rides S1
+ *             again (within 15 s)
  *   cap       A's per-device counter counts its 4 MiB download (≥ 90 %), the
  *             meter makes alice over her cap (≈ 2 MiB) → A rides no server:
  *             :8080 gets nothing, :80 nothing or the portal saying why; B untouched
@@ -73,7 +80,7 @@ const os = require('os');
 const path = require('path');
 const { normalizeMac } = require('../src/main/openwrtNet');
 
-const NS = { rtr: 'lprtr', inet: 'lpnet', a: 'lpdeva', b: 'lpdevb' };
+const NS = { rtr: 'lprtr', inet: 'lpnet', a: 'lpdeva', b: 'lpdevb', c: 'lpdevc' };
 const LAN_IF = 'br-lan';
 const LAN_IP = '192.168.77.1', LAN_MASK = 24;
 /** The two devices: their namespace, their end of the link (and the router's), a fixed MAC, a fixed address. */
@@ -81,6 +88,11 @@ const DEV = {
   a: { key: 'a', name: 'A', ns: NS.a, dev: 'lpa0', port: 'lpa1', mac: '02:1a:00:00:00:a1', ip: '192.168.77.11', host: 'phone-a' },
   b: { key: 'b', name: 'B', ns: NS.b, dev: 'lpb0', port: 'lpb1', mac: '02:1a:00:00:00:b2', ip: '192.168.77.12', host: 'laptop-b' }
 };
+/**
+ * The spoofer: on the bridge from the start with its own MAC but no address
+ * and no lease (so no other gate meets it), until the spoof gates give it A's.
+ */
+const SPOOF = { key: 'c', name: 'C', ns: NS.c, dev: 'lpc0', port: 'lpc1', mac: '02:1a:00:00:00:c3', ip: DEV.a.ip, host: 'spoofer-c' };
 const WAN = { dev: 'lpw0', peer: 'lpw1', ip: '10.31.0.1', gw: '10.31.0.2' };
 const SRV_IP = '10.32.0.1';
 const TARGET = '198.51.100.7';
@@ -259,6 +271,23 @@ function nftSets(j) {
   return out;
 }
 
+/**
+ * What the pin rules dropped — the rules that name `lu_ipmac4` / `lu_ipmac6`
+ * (router/nft.js: a pinned address from a MAC that is not its own), from
+ * `nft -j list table`: { packets, bytes, rules } (rules: how many were found).
+ */
+function pinDrops(j) {
+  const out = { packets: 0, bytes: 0, rules: 0 };
+  for (const item of (j && j.nftables) || []) {
+    const r = item && item.rule;
+    if (!r || !Array.isArray(r.expr) || !/@lu_ipmac[46]\b/.test(JSON.stringify(r.expr))) continue;
+    out.rules++;
+    const c = r.expr.find((e) => e && e.counter && typeof e.counter === 'object');
+    if (c) { out.packets += Number(c.counter.packets) || 0; out.bytes += Number(c.counter.bytes) || 0; }
+  }
+  return out;
+}
+
 /* ------------------------------ the far side and the devices' tools (children) ------------------------------ */
 
 /** --serve <port> <name>: a page that says its name; /big?n= sends n bytes. In lpnet. */
@@ -365,7 +394,7 @@ function clearNet() {
     run('ip', ['netns', 'del', ns], { mayFail: true });
   }
   // only there when a run died between making a pair the old way and moving it (pair()'s fallback)
-  for (const l of [WAN.dev, DEV.a.dev, DEV.b.dev]) run('ip', ['link', 'del', l], { mayFail: true });
+  for (const l of [WAN.dev, DEV.a.dev, DEV.b.dev, SPOOF.dev]) run('ip', ['link', 'del', l], { mayFail: true });
 }
 
 /** A veth pair with one end in each namespace; an older ip makes it here and moves the ends. */
@@ -386,7 +415,7 @@ function netUp() {
     inNs(ns, ['sysctl', '-qw', 'net.ipv4.conf.all.rp_filter=0', 'net.ipv4.conf.default.rp_filter=0'], { mayFail: true });
   }
   // no IPv6 chatter from the devices and the internet side (the router keeps it: sing-box's TUN has a v6 address)
-  for (const ns of [NS.a, NS.b, NS.inet]) inNs(ns, ['sysctl', '-qw', 'net.ipv6.conf.all.disable_ipv6=1', 'net.ipv6.conf.default.disable_ipv6=1'], { mayFail: true });
+  for (const ns of [NS.a, NS.b, NS.c, NS.inet]) inNs(ns, ['sysctl', '-qw', 'net.ipv6.conf.all.disable_ipv6=1', 'net.ipv6.conf.default.disable_ipv6=1'], { mayFail: true });
   inNs(NS.rtr, ['sysctl', '-qw', 'net.ipv4.ip_forward=1']);
 
   // the WAN: the router's default route, the internet's address on its loopback
@@ -413,6 +442,12 @@ function netUp() {
     inNs(NS.rtr, ['ip', 'link', 'set', d.port, 'master', LAN_IF]);
     inNs(NS.rtr, ['ip', 'link', 'set', d.port, 'up']);
   }
+  // the spoofer: on the bridge with its own MAC, silent — no address (and no v6) until the spoof gates
+  pair(SPOOF.dev, SPOOF.ns, SPOOF.port, NS.rtr);
+  inNs(SPOOF.ns, ['ip', 'link', 'set', SPOOF.dev, 'address', SPOOF.mac]);
+  inNs(SPOOF.ns, ['ip', 'link', 'set', SPOOF.dev, 'up']);
+  inNs(NS.rtr, ['ip', 'link', 'set', SPOOF.port, 'master', LAN_IF]);
+  inNs(NS.rtr, ['ip', 'link', 'set', SPOOF.port, 'up']);
   // each device says hello, so the router's neighbour table knows its MAC (the portal reads it there)
   for (const d of Object.values(DEV)) {
     for (let i = 0; i < 10; i++) {
@@ -457,7 +492,7 @@ async function outside() {
   netUp();
   const leaseNote = writeLeases();
   console.log(`router ${versionOf(XRAY)} · sing-box ${versionOf(SINGBOX, /(\d+\.\d+\.\d+\S*)/)}${SERVER_XRAY !== XRAY ? ` · servers ${versionOf(SERVER_XRAY)}` : ''}`);
-  console.log(`LAN ${LAN_IF} ${LAN_IP}/${LAN_MASK}: A ${DEV.a.mac} ${DEV.a.ip} · B ${DEV.b.mac} ${DEV.b.ip} · WAN ${WAN.dev} ${WAN.ip} → ${SRV_IP} (S0 :${P.s0}, S1 :${P.s1}, S2 :${P.s2}) · ${leaseNote}`);
+  console.log(`LAN ${LAN_IF} ${LAN_IP}/${LAN_MASK}: A ${DEV.a.mac} ${DEV.a.ip} · B ${DEV.b.mac} ${DEV.b.ip} · C ${SPOOF.mac} (no address yet) · WAN ${WAN.dev} ${WAN.ip} → ${SRV_IP} (S0 :${P.s0}, S1 :${P.s1}, S2 :${P.s2}) · ${leaseNote}`);
   console.log(`ports ${BASE}+ · netns ${Object.values(NS).join(' / ')} · ${work}\n`);
 
   // the router runs INSIDE its namespace: its loopback is Xray's, its nft and rules the gateway's
@@ -627,6 +662,7 @@ const R = (name) => need(WHERE[name], name, WHERE[name].startsWith('router/') ? 
 
 const S = {
   servers: null, lu: null, module: false,
+  scan: [],            // the devices the last refresh saw (devices.scanDevices)
   sessions: {},        // the portal's sign-ins: { [mac]: { userId, until } } (plan.bindingsOf)
   usage: {},           // the meter's usage(): { [userId]: { bytes, period, since, until, quotaBytes, over } }
   meter: null, tp: [], decided: null, logins: [], tpBy: '',
@@ -656,6 +692,7 @@ async function refresh(why) {
   const scan = await R('scanDevices')({ run: tunRun, lanIf: LAN_IF });
   const d = R('decide')({ lu, sessions: S.sessions, scan, usage: S.usage, now: Date.now(), tp: S.tp, portal: { ip: LAN_IP, port: P.portal } });
   for (const t of S.tp) fs.writeFileSync(t.path, R('ruleSetText')(d.ruleSets[t.tag] || []));
+  S.scan = scan;
   S.decided = d;
   if (S.tun && S.tun.active) {
     if (typeof S.tun.setLanUsers === 'function') {
@@ -816,7 +853,8 @@ async function dumpRouter(why) {
   for (const l of S.portalLog.slice(-10)) console.log(`      [portal] ${l}`);
   for (const [cmd, args] of [['nft', ['list', 'table', 'inet', 'irnetfree']], ['ip', ['rule']], ['ip', ['neigh', 'show', 'dev', LAN_IF]]]) {
     const r = await runAsync(cmd, args, 5000);
-    for (const l of String(r.stdout || r.stderr || '').trim().split('\n').slice(0, 60)) console.log(`      [${cmd} ${args[0]}] ${l}`);
+    // the whole table: its sets, counters and maps come before the chains
+    for (const l of String(r.stdout || r.stderr || '').trim().split('\n').slice(0, 160)) console.log(`      [${cmd} ${args[0]}] ${l}`);
   }
   const sb = runningSingbox();
   if (sb) console.log(`      [sing-box] route ${JSON.stringify(sb.route)}`);
@@ -857,6 +895,96 @@ async function phaseOff(label) {
   } catch (e) { gate(false, label, 'stopped: ' + e.message); }
   if (failed > before) await dumpRouter(label);
   await disconnect();
+}
+
+/** A command in a namespace, without blocking the router's event loop (runAsync). */
+const nsRun = (ns, args, timeoutMs = 10000) => runAsync('ip', ['netns', 'exec', ns, ...args], timeoutMs);
+/** A device's hello to the router, a few times over: its ARP tells the router's neighbour table who has its address now. */
+async function hello(d, tries) {
+  for (let i = 0; i < tries; i++) if ((await nsRun(d.ns, ['ping', '-c', '1', '-W', '1', LAN_IP])).status === 0) return true;
+  return false;
+}
+/** A rule-set file the router wrote for a user's config, as one line (sing-box reads it from there). */
+function ruleSetLine(target) {
+  const t = S.tp.find((x) => x.target === target);
+  try { return t ? fs.readFileSync(t.path, 'utf8').replace(/\s+/g, '') : '(no inbound for ' + target + ')'; } catch { return '(no file)'; }
+}
+
+/**
+ * Spoof: sing-box picks a device's config by its source ADDRESS (a rule-set
+ * cannot match a MAC), so the module pins every address of a user's device to
+ * that device's MAC in the table (router/nft.js). C — bob's own device, which
+ * the gate lets through by its MAC — takes A's address while A is away (its
+ * link down: it answers for nothing) and says hello, so the router's replies
+ * to that address reach C: without the pin C rides alice's S1, and her cap.
+ * With it, the router drops what C sends from there — nothing gets through,
+ * the pin rule's counter shows it was that rule, and A's address is in no
+ * rule-set of bob's. Then C lets the address go, A comes back, and rides S1 as
+ * before: the pin is A's own MAC's way through.
+ */
+async function spoofGates() {
+  const A = DEV.a, C = SPOOF;
+  // the kernel's word on a pin of each family: the probe's devices speak v4 only, so the live table's v6 pins stay empty
+  const { buildNftRuleset, BYPASS_MARK } = require('../src/main/openwrtNet');
+  const check = buildNftRuleset({ lanIf: LAN_IF, macs: [], mark: BYPASS_MARK, lanUsers: {
+    unassigned: 'login', allowed: [A.mac], counters: [], portal: { ip: LAN_IP, port: P.portal },
+    ipmac: [{ mac: A.mac, ips: [A.ip, '2001:db8:77::11'] }, { mac: DEV.b.mac, ips: [DEV.b.ip, '2001:db8:77::12', '2001:db8:77:0:a::12'] }]
+  } });
+  const checkFile = path.join(WORK(), 'pins-check.nft');
+  fs.writeFileSync(checkFile, check);
+  // -c: checked by the kernel, nothing applied (and the refresh below loads the real table anyway)
+  const chk = await runAsync('nft', ['-c', '-f', checkFile], 10000);
+  gate(chk.status === 0, 'the kernel takes the module\'s pins of both families (nft -c: v4 and v6 addresses of two devices)',
+    chk.status === 0 ? '' : `${lastLine(chk)}\n    the text:\n${check}`);
+
+  S.lu.devices.push({ mac: C.mac, name: C.host, userId: 'usr-bob', blocked: false });
+  let reached = false, neigh = '', before = null, after = null, x = null;
+  try {
+    await nsRun(A.ns, ['ip', 'link', 'set', A.dev, 'down']);
+    await nsRun(C.ns, ['ip', 'addr', 'add', `${C.ip}/${LAN_MASK}`, 'dev', C.dev]);
+    await nsRun(C.ns, ['ip', 'route', 'replace', 'default', 'via', LAN_IP]);
+    reached = await hello(C, 5);
+    neigh = String((await runAsync('ip', ['neigh', 'show', C.ip, 'dev', LAN_IF], 5000)).stdout || '').trim() || '(none)';
+    await refresh('C on A\'s address');
+    before = pinDrops(await nftTable());
+    x = await both(C);
+    after = pinDrops(await nftTable());
+  } catch (e) {
+    gate(false, 'spoof: C takes A\'s address', 'stopped: ' + e.message);
+  }
+  if (x && before && after) {
+    const pins = (S.decided && S.decided.nft && S.decided.nft.ipmac) || [];
+    const aRow = S.scan.find((r) => r.mac === A.mac) || {};
+    const leased = Array.isArray(aRow.leased) && aRow.leased.includes(A.ip);
+    const pinnedToA = pins.some((p) => p.mac === A.mac && (p.ips || []).includes(A.ip));
+    const bob = ruleSetLine('srv-s2');
+    const rode = pageOf(x.r80) || pageOf(x.r8080);
+    const dropped = after.packets - before.packets;
+    const why = !reached ? `C never reached the router from ${C.ip} (no ping answer): with no replies coming back, C getting nothing proves nothing`
+      : !leased ? `A's address has no running lease in the router's scan (${LEASES} is not this probe's?) — then it is whoever answers for it now`
+      : rode === 'S1' ? 'C rode alice\'s S1 from A\'s address — the router routed it by address and nothing held the address to A\'s MAC'
+      : rode ? `C rode ${rode} from A's address — it got through, as someone`
+      : x.r80.ok || x.r8080.ok ? `C got an answer from A's address: ${x.line}`
+      : !after.rules ? 'no pin rule in the table (nothing names lu_ipmac4 / lu_ipmac6)'
+      : dropped <= 0 ? `C got nothing, but the pin rule dropped none of it (${before.packets} → ${after.packets} packets) — something else stopped it`
+      : !pinnedToA ? `the decision pins ${A.ip} to no one or to another MAC: ${JSON.stringify(pins)}`
+      : bob.includes(A.ip) ? `A's address went into bob's rule-set too: ${bob}`
+      : '';
+    gate(!why, `spoof: C (bob's device) on A's address gets nothing through — dropped by the pin, not alice's S1 (${S.applied.slice(-1)[0]})`,
+      `${why ? why + ' · ' : ''}C ${x.line} · pin rule dropped ${dropped} packet(s) · pins ${JSON.stringify(pins)} · bob's rule-set ${bob} · the router's neighbour entry: ${neigh}`);
+  }
+
+  // C lets the address go; A comes back — its link, its route, and a hello so the router's entry says A again
+  await nsRun(C.ns, ['ip', 'addr', 'flush', 'dev', C.dev]);
+  await nsRun(A.ns, ['ip', 'link', 'set', A.dev, 'up']);
+  await nsRun(A.ns, ['ip', 'route', 'replace', 'default', 'via', LAN_IP]);
+  await runAsync('ip', ['neigh', 'del', A.ip, 'dev', LAN_IF], 5000);
+  const aHello = await hello(A, 10);
+  S.lu.devices = S.lu.devices.filter((d) => normalizeMac(d.mac) !== C.mac);
+  await refresh('C gone, A back');
+  const back = await until(async () => { const r = await devGet(A, 80, 4000); return { ok: pageOf(r) === 'S1', r }; }, 15000);
+  gate(back.ok, `spoof: A, back on its own address, rides alice's S1 again — the pin is its own MAC's way through (${S.applied.slice(-1)[0]})`,
+    back.ok ? `after ${(back.ms / 1000).toFixed(1)} s` : `:80 ${said(back.last && back.last.r)}${aHello ? '' : ' · A\'s hello to the router got no answer'} · pins ${JSON.stringify((S.decided && S.decided.nft && S.decided.nft.ipmac) || [])}`);
 }
 
 /** Phase "on": transparent mode, unassigned devices to the login page. */
@@ -939,6 +1067,9 @@ async function phaseOn() {
     await refresh('unblock A');
     const back = await until(async () => { const r = await devGet(DEV.a, 80, 4000); return { ok: pageOf(r) === 'S1', r }; }, 15000);
     gate(back.ok, `unblocked, A rides S1 again (${S.applied.slice(-1)[0]})`, back.ok ? `after ${(back.ms / 1000).toFixed(1)} s` : `:80 ${said(back.last && back.last.r)}`);
+
+    // spoof: another device on A's address rides nothing — not alice's config, not her cap
+    await spoofGates();
 
     // the cap: A's download on its own counter, the meter makes alice over her cap, A rides nothing
     if (!S.meter) throw new Missing([...missing].find((m) => m.includes('meter.js')) || 'src/modules/lanUsers/meter.js (USERS-CORE): no createLanUsersMeter');
@@ -1071,4 +1202,4 @@ if (require.main === module) {
   else outside().catch((e) => { console.log(`FAIL ${e.message}`); teardown(); process.exit(1); });
 }
 
-module.exports = { buildPureConfigs, probeLanUsers, probeServers, routerSettings, routerPlan, macBytes, nftSets, tpInbounds, deviceRules, loginForm, usageOf, P, APP_PORTS, NS, DEV, WAN, LAN_IP, LAN_IF, SRV_IP, TARGET, CAP_GB, PUSH, BASE };
+module.exports = { buildPureConfigs, probeLanUsers, probeServers, routerSettings, routerPlan, macBytes, nftSets, pinDrops, tpInbounds, deviceRules, loginForm, usageOf, P, APP_PORTS, NS, DEV, SPOOF, WAN, LAN_IP, LAN_IF, SRV_IP, TARGET, CAP_GB, PUSH, BASE };
