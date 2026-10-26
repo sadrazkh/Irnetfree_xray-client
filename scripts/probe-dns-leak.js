@@ -28,7 +28,7 @@
  * two child processes, both killed on the way out.
  *
  *   IRNF_XRAY_EXE     extra core to run every scenario on (e.g. the PattN fork)
- *   IRNF_PROBE_PORT   base port, default 39800
+ *   IRNF_PROBE_PORT   base port, default 21600
  *   IRNF_PROBE_KEEP=1 keep the generated configs and print where they are
  *   IRNF_PROBE_BREAK   deliberately break the plan so the probe must FAIL:
  *                        scope    drop `domains`+`skipFallback` from the domestic and the
@@ -48,7 +48,7 @@ const dgram = require('dgram');
 const { spawn } = require('child_process');
 const { buildConfig } = require('../src/main/configBuilder');
 
-const BASE = Number(process.env.IRNF_PROBE_PORT || 39800);
+const BASE = Number(process.env.IRNF_PROBE_PORT || 21600);
 const P = { hop: BASE + 1, hop2: BASE + 2, socks: BASE + 10, http: BASE + 11, api: BASE + 12, ir: BASE + 20, world: BASE + 21, corp: BASE + 22 };
 /** Where the second hop listens: an address `localhost` never resolves to. */
 const PIN_HOST = '127.0.0.2';
