@@ -182,8 +182,9 @@ test('the markup names what each extension draws, and one CSS rule hides each wh
     multiWanCard: 'multiWan', lanInfo: 'lanShare', gwRemoteRow: 'remoteRelay'
   };
   for (const [id, mod] of Object.entries(want)) assert.match(tagOf(id), new RegExp(`data-module="${mod}"`), id);
-  assert.match(HTML, /<button class="nav-item pro-only" data-view="chain" data-module="chains groups"/);
-  assert.match(HTML, /<button class="nav-item pro-only" data-view="pool" data-module="pool"/);
+  // the extension decides, not the Simple/Pro view: one installed shows in either
+  assert.match(HTML, /<button class="nav-item" data-view="chain" data-module="chains groups"/);
+  assert.match(HTML, /<button class="nav-item" data-view="pool" data-module="pool"/);
   assert.match(HTML, /<div class="card" data-module="advancedRouting">\s*<div class="switch-row">\s*<div>\s*<div class="switch-title" data-i18n="adv\.title">/);
   assert.match(HTML, /<div class="switch-row" data-module="lanShare">\s*<div><div class="switch-title" data-i18n="lan\.title">/);
   // every data-module in the markup names extensions of the registry
