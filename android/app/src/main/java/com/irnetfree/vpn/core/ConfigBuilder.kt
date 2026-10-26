@@ -56,22 +56,24 @@ object ConfigBuilder {
      * group unless that would leave it empty. `metricsPort`: when the config
      * runs a group, the core's metrics listener on 127.0.0.1 at this port —
      * where the app reads the groups' health check (GroupEvict.readVars); 0,
-     * or no group: none.
+     * or no group: none. `relayPort`: the chain relay's loopback port (every
+     * TCP dial through a hop over a real socket — [relayHopDials]); 0, or no
+     * [inboundAuth] to lock it with: none.
      */
-    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0): JSONObject =
-        buildWithGroups(plan, s, geoAssets, wgEndpointIps, inboundAuth, lan, muxIds, groupSkip, metricsPort).config
+    fun build(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0): JSONObject =
+        buildWithGroups(plan, s, geoAssets, wgEndpointIps, inboundAuth, lan, muxIds, groupSkip, metricsPort, relayPort).config
 
     /** A config, and the groups it runs ([GroupEvict.Group] — member i of group T is `T~gm<i>`; empty: none). */
     class Built(val config: JSONObject, val groups: List<GroupEvict.Group>)
 
     /** [build], with the groups the config runs beside it (configBuilder.js `groupTags`). */
-    fun buildWithGroups(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0): Built {
+    fun buildWithGroups(plan: ConnectionPlan, s: AppSettings, geoAssets: Boolean = false, wgEndpointIps: Map<String, String> = emptyMap(), inboundAuth: LocalAuth? = null, lan: LanShare? = null, muxIds: Set<String> = emptySet(), groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0): Built {
         val listen = "127.0.0.1"
         val sniffing = sniffingFor(s)
         val share = lan?.takeIf { it.enabled }
 
-        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort)
-        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort)
+        if (plan is ConnectionPlan.Pool) return buildPool(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort, relayPort)
+        if (plan is ConnectionPlan.Advanced) return buildAdvanced(plan, s, listen, sniffing, geoAssets, wgEndpointIps, inboundAuth, share, muxIds, groupSkip, metricsPort, relayPort)
 
         val outbounds = JSONArray()
         // Every target the plan routes to, with its outbound tag — the resolver a
@@ -115,7 +117,7 @@ object ConfigBuilder {
         val lanTags = addLanInbounds(inbounds, share, sniffing, setOf(s.socksPort, s.httpPort))
         return assemble(s, inbounds, outbounds, rules,
             geoAssets, catchAllTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
-            groupSkip = groupSkip, metricsPort = metricsPort)
+            groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, relayPass = inboundAuth?.pass)
     }
 
     /**
@@ -154,7 +156,7 @@ object ConfigBuilder {
      * target is gone is left out — its traffic follows the default, as on the
      * desktop; Android used to send it `direct` without a word.
      */
-    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s0: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int): Built {
+    private fun buildAdvanced(plan: ConnectionPlan.Advanced, s0: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int, relayPort: Int): Built {
         // the profile's own "routing mode under these rules"; a plan without one uses the settings'
         val um = plan.useMode
         val s = if (um != null && um != s0.advancedUseMode) s0.copy(advancedUseMode = um) else s0
@@ -232,12 +234,12 @@ object ConfigBuilder {
         val lanTags = addLanInbounds(inbounds, lan, sniffing, setOf(s.socksPort, s.httpPort))
         return assemble(s, inbounds, JSONArray(reg.outs), rules,
             geo, exitTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
-            groupSkip = groupSkip, metricsPort = metricsPort)
+            groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, relayPass = auth?.pass)
     }
 
     /* ----------------------------- pool ----------------------------- */
 
-    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int): Built {
+    private fun buildPool(plan: ConnectionPlan.Pool, s: AppSettings, listen: String, sniffing: JSONObject, geo: Boolean, wgEndpointIps: Map<String, String>, auth: LocalAuth?, lan: LanShare?, muxIds: Set<String>, groupSkip: Set<String>, metricsPort: Int, relayPort: Int): Built {
         val reg = Registry(plan.serversById, plan.chainsById, muxIds)
         val inbounds = JSONArray()
         // apiPort stays reserved although this config no longer opens the
@@ -292,7 +294,7 @@ object ConfigBuilder {
         // entry's hostname connections would wait on the PRIMARY's DoH — a dead
         // primary costing the other entries ~8 s per new name.
         return assemble(s, inbounds, JSONArray(reg.outs), rules, geo, primaryTag, dnsSettings, targetResolversFor(targets), wgEndpointIps, lanTags,
-            domainStrategy = "IPIfNonMatch", groupSkip = groupSkip, metricsPort = metricsPort)
+            domainStrategy = "IPIfNonMatch", groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort, relayPass = auth?.pass)
     }
 
     /* ----------------------------- chain / registry ----------------------------- */
@@ -849,7 +851,7 @@ object ConfigBuilder {
         geoAssets: Boolean, exitTag: String, dnsSettings: AppSettings,
         targetResolvers: List<DnsPlan.TargetResolver>, wgEndpointIps: Map<String, String>,
         lanTags: List<String> = emptyList(), domainStrategy: String? = null,
-        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0
+        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0, relayPass: String? = null
     ): Built {
         // Name resolution (see DnsPlan.kt). Its rules go FIRST: the port-53 hijack
         // must beat the private-IP bypass, or a query to the tunnel resolver would
@@ -906,7 +908,101 @@ object ConfigBuilder {
         // ...and where the app reads it (GET /debug/vars): only with a group, on loopback
         if (grp.balancers.length() > 0 && metricsPort in 1..65535)
             config.put("metrics", JSONObject().put("tag", "metrics").put("listen", "127.0.0.1:$metricsPort"))
+        // every TCP dial through a hop over a loopback socket — last, so no pass above touches the relay's own dial
+        if (relayPass != null) relayHopDials(config, relayPort, relayPass)
         return Built(config, grp.map)
+    }
+
+    /* ----------------------------- the chain relay ----------------------------- */
+
+    /** The relay's inbound tag, and its outbounds' prefix: `chain-relay~<hop>` (configBuilder.js relayHopDials). */
+    const val RELAY_IN = "chain-relay"
+    private val RELAY_DIALS = setOf("vless", "vmess", "trojan", "http")
+    private val RELAY_HOPS = setOf("vless", "vmess", "trojan", "shadowsocks", "socks", "http", "hysteria", "masque")
+    private val TCP_NETWORKS = setOf("raw", "tcp", "ws", "websocket", "httpupgrade", "grpc", "gun", "h2", "http", "xhttp", "splithttp")
+    /** Not in the policy's levels: the core's defaults, no user counters. */
+    private const val RELAY_LEVEL = 1
+
+    /** Does this outbound carry everything it is given inside one TCP stream? XHTTP over HTTP/3 is QUIC. */
+    private fun dialsTcpOnly(o: JSONObject): Boolean {
+        if (o.optString("protocol") !in RELAY_DIALS) return false
+        val ss = o.optJSONObject("streamSettings") ?: JSONObject()
+        val network = ss.optString("network").ifEmpty { "raw" }.lowercase()
+        if (network !in TCP_NETWORKS) return false
+        if (network != "xhttp" && network != "splithttp") return true
+        val alpn = ArrayList<String>()
+        for (sec in listOf("tlsSettings", "realitySettings")) {
+            val a: Any? = ss.optJSONObject(sec)?.opt("alpn")
+            if (a is JSONArray) {
+                for (i in 0 until a.length()) alpn.add(a.optString(i).lowercase())
+            } else if (a is String) {
+                alpn.add(a.lowercase())
+            }
+        }
+        return "h3" !in alpn
+    }
+
+    /**
+     * A TCP dial through a hop rides a real loopback socket: a SOCKS inbound
+     * [RELAY_IN] on 127.0.0.1:[port], one account per hop (named after it,
+     * locked with this session's [pass] — another app on the phone can reach a
+     * loopback port), routed by that account to the hop; the dial's
+     * dialerProxy names `chain-relay~<hop>`, a SOCKS outbound to it.
+     *
+     * Straight through the hop, the end of a response the far side closed was
+     * lost, on both cores, group or not (desktop scripts/probe-chain-tail.js,
+     * 2026-10-26): a hop whose transport ends with an error instead of EOF —
+     * WebSocket's close frame always does — has the core interrupt the
+     * in-memory pipe to the next hop, which drops what that hop had not read
+     * yet. Half the 256 KB pages through a ws hop came back cut short on a
+     * 4-core runner; through the relay, none.
+     *
+     * Only a dial that carries everything in its TCP stream (vless, vmess,
+     * trojan, http over a TCP transport) through a proxy hop; a WireGuard, a
+     * UDP transport, a Shadowsocks or SOCKS exit and a hop that is a freedom,
+     * a loopback or a WireGuard keep their dialerProxy. The same as
+     * configBuilder.js relayHopDials.
+     */
+    internal fun relayHopDials(config: JSONObject, port: Int, pass: String) {
+        if (port !in 1..65535 || pass.isEmpty()) return
+        val outbounds = config.optJSONArray("outbounds") ?: return
+        val inbounds = config.optJSONArray("inbounds") ?: JSONArray().also { a: JSONArray -> config.put("inbounds", a) }
+        // a port the config already listens on would stop the core starting: no relay then
+        val taken = HashSet<Int>()
+        for (i in 0 until inbounds.length()) inbounds.optJSONObject(i)?.let { ib: JSONObject -> taken.add(ib.optInt("port")) }
+        config.optJSONObject("metrics")?.optString("listen")?.substringAfterLast(':')?.toIntOrNull()?.let { p: Int -> taken.add(p) }
+        if (port in taken) return
+        val byTag = HashMap<String, JSONObject>()
+        for (i in 0 until outbounds.length()) outbounds.optJSONObject(i)?.let { o: JSONObject -> byTag[o.optString("tag")] = o }
+        val hops = ArrayList<String>()
+        for (i in 0 until outbounds.length()) {
+            val o = outbounds.optJSONObject(i) ?: continue
+            val ss = o.optJSONObject("streamSettings") ?: continue
+            val so = ss.optJSONObject("sockopt") ?: continue
+            val via = so.optString("dialerProxy")
+            if (via.isEmpty()) continue
+            val hop = byTag[via] ?: continue
+            if (hop.optString("protocol") !in RELAY_HOPS || !dialsTcpOnly(o)) continue
+            if (via !in hops) hops.add(via)
+            ss.put("sockopt", JSONObject(so.toString()).put("dialerProxy", "$RELAY_IN~$via"))
+        }
+        if (hops.isEmpty()) return
+        val accounts = JSONArray()
+        for (h in hops) {
+            outbounds.put(JSONObject().put("tag", "$RELAY_IN~$h").put("protocol", "socks").put("settings", JSONObject()
+                .put("servers", JSONArray().put(JSONObject().put("address", "127.0.0.1").put("port", port)
+                    .put("users", JSONArray().put(JSONObject().put("user", h).put("pass", pass)))))))
+            accounts.put(JSONObject().put("user", h).put("pass", pass))
+        }
+        inbounds.put(JSONObject().put("tag", RELAY_IN).put("listen", "127.0.0.1").put("port", port).put("protocol", "socks")
+            .put("settings", JSONObject().put("auth", "password").put("accounts", accounts).put("udp", false).put("userLevel", RELAY_LEVEL)))
+        // first of all: what the relay hands over goes to its hop, whatever it is addressed to
+        val routing = config.optJSONObject("routing") ?: JSONObject().also { r: JSONObject -> config.put("routing", r) }
+        val old = routing.optJSONArray("rules") ?: JSONArray()
+        val rules = JSONArray()
+        for (h in hops) rules.put(fieldRule().put("inboundTag", JSONArray().put(RELAY_IN)).put("user", JSONArray().put(h)).put("outboundTag", h))
+        for (i in 0 until old.length()) rules.put(old.get(i))
+        routing.put("rules", rules)
     }
 
     /* ----------------------------- groups ----------------------------- */

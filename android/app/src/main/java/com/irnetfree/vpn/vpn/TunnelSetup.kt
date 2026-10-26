@@ -108,11 +108,13 @@ object TunnelSetup {
      *
      * [groupSkip], [metricsPort]: the group members set aside, and where a
      * config that runs a group opens its metrics listener (ConfigBuilder.build).
+     * [relayPort]: the chain relay's loopback port, locked with [auth]
+     * (ConfigBuilder.relayHopDials); 0: none.
      */
     fun coreConfig(
         engine: String, plan: ConnectionPlan, s: AppSettings, geo: Boolean, wgIps: Map<String, String>,
         auth: LocalAuth?, lan: LanShare?, muxIds: Set<String> = emptySet(),
-        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0,
+        groupSkip: Set<String> = emptySet(), metricsPort: Int = 0, relayPort: Int = 0,
         coreVersion: (String) -> String = { "" }, log: (String) -> Unit
     ): CoreConfig {
         val single = plan as? ConnectionPlan.Single
@@ -130,7 +132,7 @@ object TunnelSetup {
         }
         val e = if (engine == EngineChoice.SINGBOX) EngineChoice.XRAY else engine
         val built = ConfigBuilder.buildWithGroups(plan, s, geoAssets = geo, wgEndpointIps = wgIps, inboundAuth = auth, lan = lan, muxIds = muxIds,
-            groupSkip = groupSkip, metricsPort = metricsPort)
+            groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort)
         val config = built.config
         // mKCP's and Hysteria's settings, in the form THIS core's version takes
         // (CoreCompat) — its version is asked only for a config that has them

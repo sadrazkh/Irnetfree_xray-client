@@ -1422,8 +1422,10 @@ async function connectOnce(serverId, opts = {}) {
   // keeps the tunnel, whose bypass was cut for exactly these addresses.
   livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
 
-  // a group member set aside lately for not answering stays out (groupEvict.js: kept across a reconnect)
-  settings = Object.assign({}, settings, { groupSkip: groupEvict.skip(), apiCtlPort: await getFreePort() });
+  // a group member set aside lately for not answering stays out (groupEvict.js: kept across a reconnect);
+  // the chain relay's port: every TCP dial through a hop over a loopback socket (configBuilder.relayHopDials)
+  const [apiCtlPort, chainRelayPort] = await getFreePorts(2);
+  settings = Object.assign({}, settings, { groupSkip: groupEvict.skip(), apiCtlPort, chainRelayPort });
   // …and an internet over its data cap this period (multiWanMeter.js; a new period has cleared it by now)
   const mwSkip = mwQuota ? mwQuota.skip() : [];
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
@@ -2149,8 +2151,9 @@ async function rebuildActiveConfig(why) {
   // core here would leave the TUN, the system proxy and the poller on the old one.
   const base = appliedSettings ? Object.assign({}, getSettings(), appliedSettings) : getSettings();
   let settings = await effectiveSettings(serverId, base);
-  // the group members set aside for not answering stay out (groupEvict.js)
-  settings = Object.assign({}, settings, { groupSkip: groupEvict.skip(), apiCtlPort: liveApi ? liveApi.port : await getFreePort() });
+  // the group members set aside for not answering stay out (groupEvict.js); the chain relay's port (see doConnect)
+  const [freePort, chainRelayPort] = await getFreePorts(2);
+  settings = Object.assign({}, settings, { groupSkip: groupEvict.skip(), apiCtlPort: liveApi ? liveApi.port : freePort, chainRelayPort });
   // …and the internets over their data cap this period (multiWanMeter.js) — the reload it asks for is this one
   const mwSkip = mwQuota ? mwQuota.skip() : [];
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
