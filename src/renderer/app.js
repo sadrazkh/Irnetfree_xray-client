@@ -31,6 +31,8 @@ const state = {
   // (v1.27): several configs used together as one; a group id is a target like a server id
   groups: [],
   pool: [],                // [{ id, name, target, socksPort, httpPort, enabled }] — multi-proxy pool
+  // the extensions not installed here ({ id: true }, applyModules): what they draw is not drawn
+  modsOff: {},
   // [{ id, name, rules, def, defVia, useMode, base }] — routing profiles (several
   // advanced routings); null on a back end without them, which keeps the
   // routing page today's single advanced routing
@@ -259,6 +261,8 @@ function escapeHtml(s) {
 function showView(view) {
   const btn = document.querySelector(`.nav-item[data-view="${view}"]`);
   if (!btn) return;
+  // the page of an extension not installed (modules.js) is not opened — not by a link from elsewhere either
+  if (window.IRNF_MODULES && window.IRNF_MODULES.hiddenBy(btn.getAttribute('data-module'), state.modsOff)) return;
   $$('.nav-item').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   $$('.view').forEach(v => v.classList.remove('active'));
@@ -266,6 +270,10 @@ function showView(view) {
   if (v) v.classList.add('active');
   // the multi-internet card asks for the machine's internets the first time Settings opens (multiWan.js)
   if (view === 'settings' && window.multiWanCard && !window.multiWanCard.loaded()) window.multiWanCard.refresh();
+  // the Extensions page asks what is in use each time it opens (extensions.js)
+  if (view === 'modules' && window.extensionsPage) window.extensionsPage.refresh();
+  // the Users page reads its users, devices and usage each time it opens (lanUsers.js)
+  if (view === 'users' && window.lanUsersPage) window.lanUsersPage.refresh();
 }
 $$('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => showView(btn.dataset.view));
@@ -322,6 +330,8 @@ function setLang(lang) {
   renderAutostartBanner();
   renderSettingCards();   // option labels are translated strings
   if (window.multiWanCard) window.multiWanCard.render();   // the multi-internet card is drawn with t()
+  if (window.extensionsPage) window.extensionsPage.render();   // …and so is the Extensions page
+  if (window.lanUsersPage) window.lanUsersPage.render();   // …and so is the Users page
   // the chrome carries three strings that are not data-i18n nodes: the mode
   // badge, the path diagram's own labels and the inspector's on/off words
   applyUiMode(state.settings.uiMode || defaultUiMode());
@@ -385,9 +395,13 @@ async function init() {
   // the view preference, before anything paints, so a simple-mode user never
   // sees the pro surfaces flash past
   applyUiMode(state.settings.uiMode || defaultUiMode());
+  // …and the extensions not installed, for the same reason (modules.js)
+  applyModules();
 
   applySettingsToUI();
   mountMultiWan();
+  mountExtensions();
+  mountLanUsers();
   renderServers();
   renderPicker();
   renderSubs();
@@ -774,6 +788,94 @@ function mountMultiWan() {
     save: saveMultiWan,
     connected: () => !!state.connected,
     settings: () => (state.settings || {}).multiWan,
+    toast: (msg, kind) => toast(msg, kind)
+  });
+}
+
+/* ------------------------- extensions (modules.js) ------------------------- */
+
+/** Where this window runs, in the registry's words: the router's page, or a desktop's window (the headless service's too). */
+function modPlatform() { return state.flavor === 'openwrt' ? 'router' : 'desktop'; }
+
+/**
+ * The extensions not installed draw nothing. The body says, per extension,
+ * data-mod-<id> "off" (exists here, not installed) or "on" (installed, or no
+ * extension on this platform at all) — one rule in styles.css hides each
+ * [data-module] of an "off" one; the lists and pickers drawn here read
+ * state.modsOff. Hidden, never deleted: a chain, a group, a pool entry, a
+ * profile keep working, and a picker keeps the one already chosen.
+ */
+function applyModules() {
+  const M = window.IRNF_MODULES;
+  if (!M) return;
+  const off = {};
+  for (const m of M.MODULES) {
+    const hide = M.available(m.id, modPlatform()) && !M.isOn(state.settings, m.id);
+    if (hide) off[m.id] = true;
+    document.body.setAttribute(M.attrOf(m.id), hide ? 'off' : 'on');
+  }
+  state.modsOff = off;
+  // a view hidden now must never stay the visible one (as applyUiMode)
+  const cur = document.querySelector('.nav-item.active');
+  if (cur && M.hiddenBy(cur.getAttribute('data-module'), off)) showView('home');
+}
+
+/**
+ * One installed or removed (the Extensions page's modules:set answer): the
+ * body, every list and picker drawn again — and, like a settings save, the
+ * offer to reconnect when it changed what the live connection runs on.
+ */
+async function afterModulesChanged(res) {
+  const before = (state.pendingReconnect || []).slice();
+  state.settings = Object.assign({}, state.settings, { modules: res.modules });
+  applyModules();
+  renderServers(); renderPicker(); renderChains(); renderPool(); renderAdvanced();
+  if (Array.isArray(res.pendingReconnect)) setPending(res.pendingReconnect);
+  if (state.connected && (state.pendingReconnect || []).some(k => !before.includes(k))) await promptApplySettings();
+}
+
+/** The Extensions page's box and its hooks; it asks what is in use when it opens (showView). */
+function mountExtensions() {
+  if (!window.extensionsPage) return;
+  window.extensionsPage.mount($('#modList'), {
+    platform: modPlatform,
+    modules: () => (state.settings || {}).modules,
+    changed: afterModulesChanged,
+    showView: (v) => showView(v),
+    confirm: (msg) => window.confirm(msg),
+    toast: (msg, kind) => toast(msg, kind)
+  });
+}
+
+/* ------------------- users on this network (lanUsers.js) ------------------- */
+
+/**
+ * A lanusers:* answer: what a settings save does with it — the pending banner,
+ * and the offer to reconnect when the change made something pending the live
+ * connection was built without (a list of keys, as settings:set answers; a bare
+ * `true` names the users).
+ */
+async function lanUsersApplied(res) {
+  const before = (state.pendingReconnect || []).slice();
+  const p = res && res.pendingReconnect;
+  if (Array.isArray(p)) setPending(p);
+  else if (p === true) setPending([...new Set([...before, 'lanUsers'])]);
+  if (state.connected && (state.pendingReconnect || []).some(k => !before.includes(k))) await promptApplySettings();
+}
+
+/** The Users page's box and hooks: its config picker is the app's own (every config by its subscription). */
+function mountLanUsers() {
+  if (!window.lanUsersPage) return;
+  window.lanUsersPage.mount($('#lanUsersPage'), {
+    applied: lanUsersApplied,
+    connected: () => !!state.connected,
+    targets: () => configOptions(),
+    picker: (o) => makeSearchSelect(o),
+    platform: () => state.platform,
+    router: () => state.flavor === 'openwrt',
+    visible: () => $('#view-users').classList.contains('active'),
+    copy: (text) => copyText(text),
+    confirm: (msg) => window.confirm(msg),
     toast: (msg, kind) => toast(msg, kind)
   });
 }
@@ -1317,18 +1419,23 @@ function serverGroups() {
  * hand-added ones, each subscription by its name, then the ready chains and
  * the groups — so a choice always says where it comes from:
  * [{ value, label, pile: { key, name, ico } }]. `keep(server)`: which servers.
+ * The chains and the groups only with their extension installed (modules.js)
+ * — or the one a picker already holds (`current`: a value or a list of them),
+ * which must not turn into «—».
  */
-function configOptions(keep) {
+function configOptions(keep, current) {
   const out = [];
+  const off = state.modsOff || {};
+  const held = new Set([].concat(current == null ? [] : current).map(String));
   for (const g of serverGroups()) {
     const pile = { key: groupKey(g.id), name: g.name, ico: g.id ? '🔗' : '✎' };
     for (const s of g.items) if (!keep || keep(s)) out.push({ value: s.id, label: s.name, pile });
   }
   const chainPile = { key: 'chains', name: t('pile.chains'), ico: '⛓' };
-  for (const c of state.chains) if (chainReady(c)) out.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name, pile: chainPile });
+  for (const c of state.chains) if (chainReady(c) && (!off.chains || held.has('chain:' + c.id))) out.push({ value: 'chain:' + c.id, label: '⛓ ' + c.name, pile: chainPile });
   // a group (v1.27) by its bare id, like a server, while a member of it is here
   const groupPile = { key: 'groups', name: t('pile.groups'), ico: '⧉' };
-  for (const g of state.groups || []) if (srvById(g.id)) out.push({ value: g.id, label: '⧉ ' + g.name, pile: groupPile });
+  for (const g of state.groups || []) if (srvById(g.id) && (!off.groups || held.has(g.id))) out.push({ value: g.id, label: '⧉ ' + g.name, pile: groupPile });
   return out;
 }
 
@@ -1982,24 +2089,26 @@ function renderPicker() {
       shown++;
     }
   }
+  // an extension not installed (modules.js) offers no row — but the one selected stays
+  const off = state.modsOff || {};
   const poolName = t('picker.pool') + ' (' + poolEnabledValid().length + ')';
-  if (poolReady() && hit(poolName)) addRow(POOL_ID, '<span class="proto-badge proto-pool">🧩</span>', poolName, null, true);
+  if (poolReady() && hit(poolName) && (!off.pool || selId === POOL_ID)) addRow(POOL_ID, '<span class="proto-badge proto-pool">🧩</span>', poolName, null, true);
   if (Array.isArray(state.profiles)) {
     // one 🧭 row per routing profile that has rules or a default
     if (state.settings.advancedRouting) {
       for (const p of state.profiles) {
         const name = p.name || t('picker.advanced');
-        if (profileReady(p) && hit(name)) addRow(ADV_ID + ':' + p.id, '<span class="proto-badge proto-advanced">🧭</span>', name, null, true);
+        if (profileReady(p) && hit(name) && (!off.advancedRouting || selKey === ADV_ID + ':' + p.id)) addRow(ADV_ID + ':' + p.id, '<span class="proto-badge proto-advanced">🧭</span>', name, null, true);
       }
     }
-  } else if (advancedReady() && hit(t('picker.advanced'))) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
+  } else if (advancedReady() && hit(t('picker.advanced')) && (!off.advancedRouting || selId === ADV_ID)) addRow(ADV_ID, '<span class="proto-badge proto-advanced">🧭</span>', t('picker.advanced'), null, true);
   for (const c of state.chains) {
-    if (chainReady(c) && hit(c.name)) addRow(c.id, '<span class="proto-badge proto-chain">⛓</span>', c.name, c.id, true);
+    if (chainReady(c) && hit(c.name) && (!off.chains || c.id === selId)) addRow(c.id, '<span class="proto-badge proto-chain">⛓</span>', c.name, c.id, true);
   }
   // groups (v1.27): «⧉ name · n configs», while a member of it is still here
   for (const g of state.groups || []) {
     const rec = srvById(g.id);
-    if (rec && hit(g.name)) addRow(g.id, '<span class="proto-badge proto-group">⧉</span>', g.name + ' · ' + grpCountText(rec.group.size), g.id, true);
+    if (rec && hit(g.name) && (!off.groups || g.id === selId)) addRow(g.id, '<span class="proto-badge proto-group">⧉</span>', g.name + ' · ' + grpCountText(rec.group.size), g.id, true);
   }
   // the servers under the pile they come from (the hand-added ones, each subscription), folded
   // as the pickers remember — the pile of the selected server stays open; one pile needs no head.
@@ -2885,6 +2994,7 @@ function renderTrafficPath(stateStr) {
   applyFlowTraffic(lastPerOutbound);
   // the multi-internet card's live share bars go with the connection (multiWan.js)
   if (window.multiWanCard) window.multiWanCard.connection(live);
+  if (window.lanUsersPage) window.lanUsersPage.connection(live);   // …and the Users page's live rates
   drawHomeFlowSoon();
   // the running groups (v1.28): none unless connected (the next tick says which); a node
   // carrying one gets its share bar, its count and its box; the card of what connected opens
@@ -3785,8 +3895,10 @@ $('#backupFile').onchange = async () => {
   state.pool = (data.pool || []).map(e => ({ id: e.id, name: e.name || 'Proxy', target: e.target || '', socksPort: e.socksPort || 0, httpPort: e.httpPort || 0, enabled: e.enabled !== false }));
   state.usage = data.usage || {};
   state.pendingReconnect = data.pendingReconnect || [];
+  applyModules();   // what the backup brought in has its extension now (main installed it)
   applySettingsToUI(); renderServers(); renderPicker(); renderSubs(); renderChains(); renderPool(); renderAdvanced(); renderPendingBanner();
   if (window.multiWanCard && window.multiWanCard.loaded()) window.multiWanCard.refresh();   // its settings came with the backup
+  if (window.lanUsersPage && window.lanUsersPage.loaded()) window.lanUsersPage.refresh();   // …and so did the users
   const n = res.added;
   toast(`${t('backup.done')}: ${n.servers} / ${n.subscriptions} / ${n.chains} / ${n.pool}`, 'ok');
 };
@@ -4960,6 +5072,9 @@ function fieldShown(fld) {
   const F = sfTable();
   const ctx = draftCtx();
   if (!F.fieldApplies(fld, ctx)) return false;
+  // a field of an extension not installed (modules.js): not drawn — its value stays in the draft and is
+  // saved as it was. (The editor also runs without the page's state, in its tests: nothing hidden then.)
+  if (fld.module && typeof state === 'object' && (state.modsOff || {})[fld.module]) return false;
   if ((fld.id === 'host' || fld.id === 'path') && ctx.network === 'tcp') return editDraft.headerType === 'http';
   if (ctx.protocol === 'masque') {
     const h2 = editDraft.masqueHttp === 'h2';
@@ -5401,6 +5516,8 @@ function renderEditPro() {
     const picker = edNode('div', { class: 'ed-protos', role: 'radiogroup', 'aria-label': t('sf.protocol') });
     for (const p of F.PROTOCOLS) {
       const on = p === ctx.protocol;
+      // MASQUE is the WARP extension's (modules.js): offered only with it — a server that is one stays one
+      if (p === 'masque' && !on && typeof state === 'object' && (state.modsOff || {}).warp) continue;
       const fixed = !editNew && !on;
       // the name left-to-right in its own box, the «new» tag beside it, the line under it in the page's direction
       const b = edNode('button', { type: 'button', class: 'ed-proto' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on), 'aria-disabled': fixed ? 'true' : null, 'data-proto': p },
@@ -6740,8 +6857,12 @@ function saveCgState() {
 /** Groups need a back end that stores them (groups:set): without one there is no groups tab. */
 function cgCanGroups() { return !!(window.api && typeof window.api.setGroups === 'function'); }
 
-/** The tab on show. */
-function cgTab() { return cgState.tab === 'groups' && cgCanGroups() ? 'groups' : 'chains'; }
+/** The tab on show — the other one when an extension (modules.js) leaves only it. */
+function cgTab() {
+  const off = state.modsOff || {};
+  const groups = cgCanGroups() && !off.groups;
+  return groups && (cgState.tab === 'groups' || off.chains) ? 'groups' : 'chains';
+}
 
 /** The tabs (active, their counts — Persian digits in Persian), the pane of the one on show and its head button. */
 function cgApplyTab() {
@@ -6890,7 +7011,8 @@ function cgFillPicker(list, o) {
   list.textContent = '';
   const q = String(o.query || '').trim().toLowerCase();
   const piles = serverGroups().map(g => ({ key: groupKey(g.id), name: g.name, ico: g.id ? '🔗' : '✎', items: g.items }));
-  if (o.withGroups) piles.push({ key: 'groups', name: t('grp.title'), ico: '⧉', items: (state.groups || []).map(g => srvById(g && g.id)).filter(Boolean) });
+  // the groups only with their extension installed (modules.js); a hop already in stays in its chain
+  if (o.withGroups && !(state.modsOff || {}).groups) piles.push({ key: 'groups', name: t('grp.title'), ico: '⧉', items: (state.groups || []).map(g => srvById(g && g.id)).filter(Boolean) });
   const offer = piles.map(p => Object.assign(p, { items: p.items.filter(s => !(o.skip && o.skip(s.id))) })).filter(p => p.items.length);
   if (!offer.length) {
     list.appendChild(edNode('div', { class: 'empty small', text: o.empty || t('grp.noServers') }));
@@ -7455,9 +7577,9 @@ function nextPoolPort(start) {
   return p;
 }
 
-/** [{value,label,pile}] pool targets — servers by subscription + ready chains + groups (no direct/block). Also the via and base pickers. */
-function poolTargetOptions() {
-  return configOptions();
+/** [{value,label,pile}] pool targets — servers by subscription + ready chains + groups (no direct/block). Also the via and base pickers. `current`: configOptions'. */
+function poolTargetOptions(current) {
+  return configOptions(null, current);
 }
 
 async function persistPool() {
@@ -7496,7 +7618,7 @@ function renderPool() {
   wrap.innerHTML = '';
   const empty = $('#poolEmpty');
   if (empty) empty.hidden = state.pool.length > 0;
-  const opts = poolTargetOptions();
+  const opts = poolTargetOptions(state.pool.map(e => e.target));
 
   state.pool.forEach((entry) => {
     const card = document.createElement('div');
@@ -7586,12 +7708,12 @@ function processOptions(selected, opts = {}) {
   return out.join('');
 }
 
-/** [{value,label,pile?}] of routing targets — direct/block first, then every config by its pile (configOptions). */
-function targetOptionList() {
+/** [{value,label,pile?}] of routing targets — direct/block first, then every config by its pile (configOptions; `current` its). */
+function targetOptionList(current) {
   return [
     { value: 'direct', label: t('adv.direct') },
     { value: 'block', label: t('adv.block') },
-    ...configOptions()
+    ...configOptions(null, current)
   ];
 }
 
@@ -7601,7 +7723,7 @@ function targetOptionList() {
  * server, ready chain, direct and block.
  */
 function profileTargetOptions(prof, current) {
-  const opts = targetOptionList();
+  const opts = targetOptionList(current);
   if (!prof) return opts;
   if (prof.base) opts.unshift({ value: TARGET_BASE, label: '⚓ ' + t('rp.exitAtBase').replace('{base}', () => refName(prof.base)) });
   else if (current === TARGET_BASE) opts.unshift({ value: TARGET_BASE, label: '⚠ ' + t('rp.exitAtBaseNone') });
@@ -7911,7 +8033,7 @@ function renderAdvanced() {
     );
     if (viaOn) {
       row.querySelector('.adv-via-mount').appendChild(makeSearchSelect({
-        options: viaOptionList(prof, r.target), value: r.via || 'inherit',
+        options: viaOptionList(prof, r.target, r.via), value: r.via || 'inherit',
         onChange: (v) => { rules[idx].via = v; renderAdvanced(); }
       }));
     }
@@ -8265,7 +8387,7 @@ function viaOptionList(prof, target, current) {
     { value: 'inherit', label: base ? t('rp.viaInherit').replace('{base}', () => targetLabel(base)) : t('rp.viaInheritNone') },
     { value: 'none', label: t('rp.viaNone') }
   ];
-  const piled = poolTargetOptions().filter(o => o.value !== target);
+  const piled = poolTargetOptions(current).filter(o => o.value !== target);
   if (current && !opts.some(o => o.value === current) && !piled.some(o => o.value === current)) opts.push({ value: current, label: '⚠ ' + targetLabel(current) });
   return opts.concat(piled);
 }
@@ -8273,7 +8395,7 @@ function viaOptionList(prof, target, current) {
 /** [{value,label}] for the base picker: none, a gone current one (before the piles, as in viaOptionList), then every server and ready chain. */
 function baseOptionList(current) {
   const opts = [{ value: '', label: t('rp.baseNone') }];
-  const piled = poolTargetOptions();
+  const piled = poolTargetOptions(current);
   if (current && !piled.some(o => o.value === current)) opts.push({ value: current, label: '⚠ ' + targetLabel(current) });
   return opts.concat(piled);
 }
@@ -9609,6 +9731,8 @@ window.api.onStats((s) => {
   $('#sessSum').textContent = fmtBytes((Number(s.totalDown) || 0) + (Number(s.totalUp) || 0));
   // each internet's share and its period's bytes, while several carry the connection (multiWan.js)
   if (window.multiWanCard) window.multiWanCard.live(state.connected ? s.multiWan : null);
+  // each user's rate and usage, and while the Users page is open a quiet read of who is online (lanUsers.js)
+  if (window.lanUsersPage) window.lanUsersPage.tick(state.connected ? s.lanUsers : null);
   // the throughput caption floating over the path's first link. One textContent
   // write per second onto a node the path already built — the diagram itself is
   // never rebuilt here.

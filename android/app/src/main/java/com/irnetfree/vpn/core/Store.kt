@@ -1,6 +1,7 @@
 package com.irnetfree.vpn.core
 
 import android.content.Context
+import androidx.compose.runtime.mutableStateOf
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -27,10 +28,66 @@ class Store(context: Context) {
     var previousSelection: String = prefs.getString("selectionPrev", "") ?: ""
         private set
 
+    /**
+     * The installed extensions (Modules.kt): id → true. A Compose state, so a
+     * screen or menu that asked is redrawn the moment one is installed or removed.
+     */
+    private val modulesState = mutableStateOf<Map<String, Boolean>>(emptyMap())
+    val modules: Map<String, Boolean> get() = modulesState.value
+
     // The selection is checked on every start as well: one saved before ids
     // were stable, or naming a server removed while the app was not running,
     // comes back as the choice before it (or the first server), not as "—".
-    init { migrateServers(); migrateProfiles(); repairSelection(); I18n.setLang(settings.lang) }
+    // The extensions after the profiles: a store from before is migrated by what it uses.
+    init { migrateServers(); migrateProfiles(); repairSelection(); migrateModules(); I18n.setLang(settings.lang) }
+
+    /**
+     * The extensions at start: the stored set, or — the first start of this
+     * version — the ones the store uses (Modules.migrate), written once and
+     * marked, so a later start never migrates again. A fresh install uses
+     * nothing and starts with all of them off.
+     */
+    private fun migrateModules() {
+        if (prefs.getBoolean(Modules.MIGRATED_KEY, false)) {
+            modulesState.value = Modules.fromJson(prefs.getString(Modules.STORE_KEY, null))
+            return
+        }
+        val m = Modules.migrate(Modules.inUseOf(moduleData()))
+        modulesState.value = m
+        writeModules(m)
+    }
+    private fun writeModules(m: Map<String, Boolean>) =
+        prefs.edit().putString(Modules.STORE_KEY, Modules.toJson(m)).putBoolean(Modules.MIGRATED_KEY, true).apply()
+
+    /** Is extension [id] installed? */
+    fun moduleOn(id: String): Boolean = Modules.isOn(modules, id)
+
+    /** What Modules.inUseOf counts, as the store holds it now. */
+    fun moduleData(): Modules.Data = Modules.Data(
+        servers = servers.toList(), groups = groups.toList(), chains = chains.toList(), pool = pool.toList(),
+        profiles = profiles.toList(), settings = settings, selection = selection, lanShareEnabled = lanShareEnabled
+    )
+
+    /** How much of the store each extension holds (the Extensions screen's "in use: N"). */
+    fun modulesInUse(): Map<String, Int> = Modules.inUseOf(moduleData())
+
+    /**
+     * Install or remove extension [id] (Modules.set) and write it. A refused
+     * remove (another installed one needs it) writes nothing. Data is never
+     * touched: a removed extension's records stay, and work, only hidden.
+     */
+    fun setModule(id: String, on: Boolean): Modules.SetResult {
+        val r = Modules.set(modules, id, on)
+        if (r.blockedBy.isEmpty() && r.modules != modules) {
+            modulesState.value = r.modules
+            writeModules(r.modules)
+        }
+        return r
+    }
+
+    /** Is LAN sharing on (LanShareStore's key, in this same preferences file)? What the lanShare extension counts. */
+    val lanShareEnabled: Boolean
+        get() = try { LanShare.fromJson(JSONObject(prefs.getString("lanShare", null) ?: "{}")).enabled } catch (_: Exception) { false }
 
     /**
      * The routing profiles at start (RoutingProfiles.migrate): the first start

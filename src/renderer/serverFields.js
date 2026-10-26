@@ -25,6 +25,9 @@
  *            one is labelled `sfo.<id>._` — and with `optionLabels: 'all'`
  *            every one, `sfo.<id>.<value>`
  *   emptyAs  what an empty value is written as, instead of deleting the key
+ *   module   the extension it belongs to (src/renderer/modules.js): the editor
+ *            does not draw it while that one is not installed; its value is
+ *            read and written all the same
  *
  * Labels are `sf.<id>`, hints `sf.<id>.hint` (when `hint: true`), both
  * languages in i18n.js.
@@ -195,7 +198,7 @@
       placeholder: 'cloudflare-ech.com+udp://1.1.1.1' },
     // PattN's: the outbound the core dials the ECH query through (configBuilder.applyEchOutbounds);
     // its Example button writes echOutboundExample's pair
-    { id: 'echOutbound', tab: 'security', group: 'ech', kind: 'json', special: true, key: 'echOutbound', when: on(TLS_ANY, null, ['tls']), span: 2, hint: true,
+    { id: 'echOutbound', tab: 'security', group: 'ech', kind: 'json', special: true, key: 'echOutbound', module: 'echOutbound', when: on(TLS_ANY, null, ['tls']), span: 2, hint: true,
       placeholder: '{"protocol":"direct","settings":{"redirect":"1.1.1.1:443"},"streamSettings":{"security":"tls","tlsSettings":{…}}}' },
     { id: 'echForceQuery', tab: 'security', group: 'ech', kind: 'select', path: TL + 'echForceQuery', key: 'echForceQuery', when: on(TLS_ANY, null, ['tls']), local: true,
       options: ['', 'none', 'half', 'full'], optionLabels: true },
@@ -228,12 +231,12 @@
     // MASQUE: a fragment only over HTTP/2 (TCP), noise only over HTTP/3 (UDP) —
     // the `when` cannot say an HTTP version, so the parser drops the other one
     // and configBuilder.applyFragments never dials it
-    { id: 'fragment', tab: 'advanced', group: 'dpi', kind: 'text', special: true, key: 'fragment', simple: true, placeholder: 'tlshello,100-200,10-20', hint: true },
-    { id: 'noise', tab: 'advanced', group: 'dpi', kind: 'text', special: true, key: 'noise', simple: true, placeholder: 'rand:50-100:0;base64:FgMBAAA=:10-20', hint: true },
-    { id: 'cipherSuites', tab: 'advanced', group: 'pattn', kind: 'text', special: true, key: 'cipherSuites · cs', when: on(STREAM), simple: true, span: 2,
+    { id: 'fragment', tab: 'advanced', group: 'dpi', kind: 'text', special: true, key: 'fragment', module: 'antiDpi', simple: true, placeholder: 'tlshello,100-200,10-20', hint: true },
+    { id: 'noise', tab: 'advanced', group: 'dpi', kind: 'text', special: true, key: 'noise', module: 'antiDpi', simple: true, placeholder: 'rand:50-100:0;base64:FgMBAAA=:10-20', hint: true },
+    { id: 'cipherSuites', tab: 'advanced', group: 'pattn', kind: 'text', special: true, key: 'cipherSuites · cs', module: 'antiDpi', when: on(STREAM), simple: true, span: 2,
       placeholder: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256' },
     // MASQUE's is the official core's own: UDP masks and quicParams over HTTP/3, TCP masks over HTTP/2
-    { id: 'finalMask', tab: 'advanced', group: 'pattn', kind: 'json', special: true, key: 'finalmask · fm', when: on(STREAM.concat('masque')), simple: true, span: 2, hint: true,
+    { id: 'finalMask', tab: 'advanced', group: 'pattn', kind: 'json', special: true, key: 'finalmask · fm', module: 'antiDpi', when: on(STREAM.concat('masque')), simple: true, span: 2, hint: true,
       placeholder: '{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["3-5"],"delays":["10-20"]}}]}' }
   ];
 

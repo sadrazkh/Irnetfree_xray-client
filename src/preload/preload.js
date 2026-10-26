@@ -67,11 +67,23 @@ contextBridge.exposeInMainWorld('api', {
   checkGeoRules: (rules) => ipcRenderer.invoke('routing:checkGeo', rules),
   applySettings: () => ipcRenderer.invoke('settings:apply'),
 
+  // the extensions (modules.js): { modules, inUse, platform };
+  // { id, on } → { modules, inUse, pendingReconnect, blockedBy? }
+  modulesGet: () => ipcRenderer.invoke('modules:get'),
+  modulesSet: (arg) => ipcRenderer.invoke('modules:set', arg),
+
   // several internets used together (multiWan.js): { settings, links, usage, live };
   // a part of the settings → { settings, multiWan, pendingReconnect }; [linkId] → [speed test]
   multiWanGet: () => ipcRenderer.invoke('multiwan:get'),
   multiWanSet: (partial) => ipcRenderer.invoke('multiwan:set', partial),
   multiWanTest: (ids) => ipcRenderer.invoke('multiwan:test', ids),
+
+  // users and devices (src/modules/lanUsers/ipc.js): { config, users, devices, usage, live, online, platform,
+  // lanAddresses }; each change answers that + { pendingReconnect, error? }
+  lanUsersGet: () => ipcRenderer.invoke('lanusers:get'),
+  lanUsersConfig: (partial) => ipcRenderer.invoke('lanusers:config', partial),
+  lanUsersUser: (change) => ipcRenderer.invoke('lanusers:user', change),
+  lanUsersDevice: (change) => ipcRenderer.invoke('lanusers:device', change),
 
   connectionDiagnostics: (probe) => ipcRenderer.invoke('diagnostics:connection', probe),
   repairNetwork: () => ipcRenderer.invoke('network:repair'),

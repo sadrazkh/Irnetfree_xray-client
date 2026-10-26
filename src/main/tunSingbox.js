@@ -123,8 +123,20 @@ function normalizeAppNames(names) {
  * `dnsMode`: the inbound's `dns_mode` (sing-box 1.14+, tunDnsModeFor) after
  * every other key; null (the default, and every sing-box before 1.14) leaves
  * the key out — the output of before.
+ *
+ * `lanRoutes`: the router's alone, like udpTimeout (TunOpenwrt hands it down
+ * inside `opts.lanUsers`) — the users module's transparent mode,
+ * `{ targets: [{ tag: 'lu-tp-<n>', port, path }] }`: each user config the
+ * LAN's devices are routed to is a socks outbound to its own loopback Xray
+ * inbound, chosen by a rule over a LOCAL rule-set file of those devices'
+ * source addresses. sing-box reloads such a file by itself when it changes
+ * (route/rule/rule_set_local.go's fswatch, 1.11 through 1.14), so a sign-in
+ * or a device's new address never restarts the tunnel. By address, not MAC:
+ * `source_mac_address` exists only from 1.14.0 and never inside a rule-set
+ * (the header of src/modules/lanUsers/router/index.js). Absent, or no usable
+ * target: the output of before.
  */
-function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null, dnsMode = null } = {}) {
+function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null, dnsMode = null, lanRoutes = null } = {}) {
   void ipv6;
   const inbound = { type: 'tun', tag: 'tun-in' };
   if (interfaceName) inbound.interface_name = interfaceName;
@@ -158,12 +170,35 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
     ];
   }
 
+  const lan = lanRouteTargets(lanRoutes);
+  if (lan.length) {
+    for (const t of lan) outbounds.push({ type: 'socks', tag: t.tag, server: '127.0.0.1', server_port: t.port, version: '5' });
+    route.rules = [...(route.rules || []), ...lan.map(t => ({ rule_set: [t.tag], outbound: t.tag }))];
+    route.rule_set = lan.map(t => ({ type: 'local', tag: t.tag, format: 'source', path: t.path }));
+  }
+
   return {
     log: { level: 'warn', timestamp: false },
     inbounds: [inbound],
     outbounds,
     route
   };
+}
+
+/**
+ * buildTunConfig's `lanRoutes` cleaned: a tag of the users module's shape
+ * (`lu-tp-<n>`) once each, a port, an absolute path a rule-set file can be at
+ * — anything else is left out rather than written into sing-box's config.
+ */
+function lanRouteTargets(lanRoutes) {
+  const out = [];
+  for (const t of (lanRoutes && Array.isArray(lanRoutes.targets)) ? lanRoutes.targets : []) {
+    if (!t || typeof t.tag !== 'string' || !/^lu-tp-\d{1,4}$/.test(t.tag) || out.some(x => x.tag === t.tag)) continue;
+    if (!Number.isInteger(t.port) || t.port < 1 || t.port > 65535) continue;
+    if (typeof t.path !== 'string' || !t.path.startsWith('/') || /[\0\r\n]/.test(t.path)) continue;
+    out.push({ tag: t.tag, port: t.port, path: t.path });
+  }
+  return out;
 }
 
 /**
@@ -404,8 +439,10 @@ class TunSingbox {
     const cfgFile = path.join(work, 'sing-box.json');
     // udpTimeout is the router's (TunOpenwrt); a desktop caller cannot set it
     const udpTimeout = this.composedBy === 'openwrt' ? opts.udpTimeout : null;
+    // …and so are the users' per-device routes (src/modules/lanUsers/router)
+    const lanRoutes = this.composedBy === 'openwrt' && opts.lanUsers ? (opts.lanUsers.singbox || null) : null;
     const dnsMode = this.dnsModeFor(opts);
-    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout, dnsMode });
+    const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout, dnsMode, lanRoutes });
     fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
     this.work = work;
     return { work, cfgFile };

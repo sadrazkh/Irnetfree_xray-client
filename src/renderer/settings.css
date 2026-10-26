@@ -1080,3 +1080,210 @@
 @media (max-width: 680px) {
   .mi-modes, .mi-ctl, .mi-split, .mi-live { grid-template-columns: 1fr; }
 }
+
+/* ----------------------------- extensions (extensions.js) — MOD-DESK block -----------------------------
+   The Extensions page: a count, then a section per category with its cards in
+   a grid — on a phone (the router's page) one column. A card: the icon, the
+   name and its one line, "Installed", the chips (in use / needs / needed by),
+   and its one button at the foot. An installed card wears the accent's
+   hairline. Words wrap; nothing scrolls sideways. */
+.mod-list { display: flex; flex-direction: column; gap: 22px; margin-block-start: 14px; }
+.mod-count { margin: 0; font: 600 11px var(--mono); letter-spacing: .04em; color: var(--ink3); }
+.mod-cat-title { margin-block: 0 10px; margin-inline: 0; font-size: 13px; font-weight: 650; color: var(--ink2); }
+.mod-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: 12px; }
+.mod-card { display: flex; flex-direction: column; gap: 10px; margin: 0; min-inline-size: 0; }
+.mod-card.on { border-color: var(--accentLine); }
+.mod-head { display: flex; align-items: flex-start; gap: 12px; min-inline-size: 0; }
+.mod-ico {
+  flex: none;
+  inline-size: 38px; block-size: 38px;
+  display: grid;
+  place-items: center;
+  font-size: 19px;
+  line-height: 1;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.mod-card.on .mod-ico { background: var(--accentSoft); border-color: var(--accentLine); }
+.mod-titles { flex: 1; min-inline-size: 0; }
+.mod-name { font-size: 14px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.mod-desc { margin-block-start: 3px; font-size: 12px; line-height: 1.75; color: var(--ink3); overflow-wrap: anywhere; }
+.mod-badge {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ok);
+  background: var(--okSoft);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.mod-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.mod-chip { padding: 2px 8px; font-size: 11px; line-height: 1.7; color: var(--ink2); background: var(--soft); border: 1px solid var(--line); border-radius: 999px; overflow-wrap: anywhere; }
+.mod-chip.mod-use { color: var(--info); background: var(--infoSoft); border-color: transparent; }
+.mod-chip.mod-needs, .mod-chip.mod-by { color: var(--warn); background: var(--warnSoft); border-color: transparent; }
+.mod-actions { display: flex; justify-content: flex-end; margin-block-start: auto; }
+.mod-actions .btn { min-inline-size: 96px; justify-content: center; }
+/* Settings → one line to the page */
+#view-settings .mod-pointer {
+  margin-block: 0 16px;
+  margin-inline: 0;
+  padding-block: 8px;
+  padding-inline: 12px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--ink2);
+  background: var(--soft);
+  border-inline-start: 2px solid var(--accentLine);
+  border-radius: 8px;
+}
+#view-settings .mod-pointer .cg-link { color: var(--accentInk); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 560px) {
+  .mod-actions .btn { inline-size: 100%; }
+}
+
+/* ----------------------------- users on this network (lanUsers.js) -----------------------------
+   The Users page: the settings card (proxy accounts, the address to give people,
+   on the router the transparent mode), a box per user (who, the state, the live
+   rate, the password, the config, the cap with its usage bar, the expiry), on
+   the router the devices list, and the add / edit dialog. The same soft panels
+   as the multi-internet card. Usernames, passwords, addresses, IPs and MACs are
+   inline spans set left to right inside lines that keep the page's direction,
+   so in Persian they still sit on the start side. One column on a phone. */
+#view-users .lu-intro { margin: 0 0 14px; max-inline-size: 72ch; }
+.lu-card { display: flex; flex-direction: column; gap: 12px; }
+#view-users .lu-card .switch-row { padding-block: 6px 12px; }
+#view-users .input, #view-users .select, .lu-form .input, .lu-form .select { border-radius: 9px; min-block-size: 40px; }
+.lu-body { display: flex; flex-direction: column; gap: 12px; }
+.lu-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.lu-head-words { flex: 1 1 160px; min-width: 0; }
+.lu-title { font-size: 14px; font-weight: 650; color: var(--ink); }
+.lu-meta { margin-block-start: 2px; font-size: 11.5px; color: var(--ink3); }
+.lu-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.lu-field { min-width: 0; }
+#view-users .lu-field > .field-label, .lu-form .lu-field > .field-label { margin-block-end: 5px; font-size: 11.5px; }
+.lu-mono { font-family: var(--mono); unicode-bidi: isolate; overflow-wrap: anywhere; }
+#view-users .lu-hint { margin: 0; }
+#view-users .lu-note {
+  margin: 0;
+  padding-block: 2px;
+  padding-inline: 10px;
+  font-size: 11.5px;
+  line-height: 1.8;
+  color: var(--ink3);
+  border-inline-start: 2px solid var(--accentLine);
+}
+/* the Windows hotspot note is how-to, not a caveat: the info ink */
+#view-users .lu-note.lu-hotspot { color: var(--ink2); border-inline-start-color: var(--info); }
+/* the address to give people: one line per address and protocol */
+.lu-addr { padding: 12px 14px; background: var(--soft); border: 1px solid var(--line); border-radius: 12px; }
+.lu-addr > .field-label { margin-block-end: 4px; font-size: 11.5px; }
+.lu-addr > .hint { margin: 0; }
+.lu-addr-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; padding-block: 3px; }
+.lu-proto { flex: none; min-inline-size: 58px; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--ink3); }
+.lu-addr-row .lu-mono { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.lu-copy { margin-inline-start: auto; }
+/* a box per user */
+.lu-list { display: flex; flex-direction: column; gap: 10px; }
+.lu-user { padding: 12px 14px; background: var(--soft); border: 1px solid var(--line); border-radius: 12px; }
+.lu-user.lu-dim .lu-who, .lu-user.lu-dim .lu-av { opacity: .6; }
+.lu-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+.lu-av {
+  display: grid;
+  place-items: center;
+  flex: none;
+  inline-size: 30px;
+  block-size: 30px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accentInk);
+  background: var(--accentSoft);
+  border: 1px solid var(--accentLine);
+  border-radius: 50%;
+}
+.lu-who { min-width: 0; }
+.lu-name { font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.lu-uname { font-family: var(--mono); font-size: 11.5px; unicode-bidi: isolate; }
+.lu-state, .lu-tag { flex: none; padding-block: 2px; padding-inline: 8px; font-size: 11px; font-weight: 600; border: 1px solid var(--line); border-radius: 999px; }
+.lu-s-on { color: var(--ok); background: var(--okSoft); border-color: var(--okSoft); }
+.lu-s-off { color: var(--ink3); background: var(--panel); }
+.lu-s-expired { color: var(--warn); background: var(--warnSoft); border-color: var(--warnSoft); }
+.lu-s-over { color: var(--danger); background: var(--dangerSoft); border-color: var(--dangerSoft); }
+.lu-tag { font-weight: 500; color: var(--ink2); background: var(--panel); }
+.lu-acts { display: flex; align-items: center; gap: 4px; margin-inline-start: auto; }
+.lu-acts .switch { margin-inline: 4px 6px; }
+.lu-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; margin-block-start: 2px; }
+.lu-rate { font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--accentInk); unicode-bidi: isolate; white-space: nowrap; }
+.lu-ctl { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); align-items: start; gap: 12px; margin-block-start: 11px; }
+.lu-pass { display: flex; align-items: center; gap: 2px; min-block-size: 40px; padding-inline: 11px 4px; background: var(--panel); border: 1px solid var(--softline); border-radius: 9px; }
+.lu-secret { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; color: var(--ink); unicode-bidi: isolate; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu-pass .icon-btn { flex: none; font-size: 13px; }
+.lu-target .ss { display: block; width: 100%; min-width: 0; }
+.lu-cap { display: flex; gap: 6px; }
+#view-users .lu-cap > .input, .lu-form .lu-cap > .input { flex: none; inline-size: 80px; }
+.lu-cap > .select { flex: 1; min-width: 0; }
+.lu-bar { block-size: 6px; margin-block-start: 6px; overflow: hidden; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.lu-bar > i { display: block; block-size: 100%; background: var(--accent); }
+.lu-bar > i.warn { background: var(--warn); }
+.lu-bar > i.over { background: var(--danger); }
+.lu-quota { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; margin-block-start: 5px; font-size: 11.5px; color: var(--ink3); }
+.lu-exp { display: flex; align-items: center; gap: 4px; }
+.lu-exp > .input { flex: 1; min-width: 0; }
+/* the date box's own calendar button in the theme's ink */
+[data-theme="dark"] .lu-date { color-scheme: dark; }
+[data-theme="light"] .lu-date { color-scheme: light; }
+.lu-sub { margin-block-start: 4px; font-size: 11.5px; color: var(--ink3); overflow-wrap: anywhere; }
+.lu-sub.lu-bad { color: var(--warn); }
+/* the router's devices: dot, who, user, block, usage — two lines on a phone */
+.lu-devs { display: flex; flex-direction: column; gap: 8px; }
+.lu-dev {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1.3fr) minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.lu-dev.lu-gone .lu-who { opacity: .6; }
+.lu-dot { inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--dim); }
+.lu-dot.on { background: var(--ok); }
+#view-users .lu-devname { min-block-size: 32px; padding-block: 5px; font-weight: 600; }
+.lu-addrs { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 11px; }
+.lu-ip { color: var(--ink2); }
+.lu-mac { color: var(--ink3); }
+.lu-dcell { min-width: 0; }
+.lu-block { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--ink3); }
+/* its bytes over its rate, at the row's end edge */
+.lu-use { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 11.5px; }
+.lu-use > span { white-space: nowrap; }
+.lu-bytes { color: var(--ink2); }
+.lu-devrate { color: var(--accentInk); }
+/* the add / edit dialog */
+.modal.lu-modal { width: min(580px, 100%); }
+.lu-modal .modal-head .tb-btn { margin-inline-start: auto; }
+.lu-modal .modal-title { flex: 0 1 auto; }
+.lu-pwrow { display: flex; align-items: center; gap: 4px; }
+.lu-pwrow > .input { flex: 1; min-width: 0; font-family: var(--mono); }
+.lu-form .input[aria-invalid="true"] { border-color: var(--danger); }
+.lu-err { margin-block-start: 5px; font-size: 11.5px; color: var(--danger); }
+.lu-err:empty { display: none; }
+.lu-formerr { margin: 0; padding-block: 9px; padding-inline: 12px; font-size: 12px; color: var(--danger); background: var(--dangerSoft); border-radius: var(--r5); }
+.lu-switchline { display: flex; align-items: center; gap: 10px; align-self: end; min-block-size: 40px; font-size: 12.5px; color: var(--ink2); }
+.lu-modal .modal-foot .lu-del { margin-inline-end: auto; }
+@media (max-width: 680px) {
+  .lu-grid, .lu-ctl { grid-template-columns: 1fr; }
+  /* a phone's column is narrow: the avatar keeps its name beside it, the boxes give back their padding */
+  #view-users .lu-card { padding: 14px; }
+  .lu-user { padding: 10px; }
+  .lu-who { flex: 1 1 110px; }
+  #view-users .lu-cap > .input { inline-size: 64px; }
+  .lu-dev { grid-template-columns: 10px minmax(0, 1fr); }
+  .lu-dev > .lu-dcell { grid-column: 2 / -1; }
+  .lu-use { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+  /* the dialog nearly edge to edge on a phone, its foot still on screen */
+  .lu-overlay { padding: 10px; }
+  .lu-overlay .lu-modal { max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); }
+}

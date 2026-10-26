@@ -239,7 +239,7 @@ test('6/17: on the router Settings drop the desktop TUN controls, explain the wh
   assert.match(HTML, /<p class="hint" id="tunRouterNote" data-i18n="mode\.routerNote" hidden><\/p>/);
   const afterTun = HTML.slice(HTML.indexOf('id="optTun"'), HTML.indexOf('id="tunStatus"'));
   assert.ok(afterTun.includes('id="tunRouterNote"'), 'the explanation replaces the TUN switch, above the status line');
-  assert.match(HTML, /id="gwRemoteRow" hidden/);
+  assert.match(HTML, /id="gwRemoteRow" data-module="remoteRelay" hidden/);
   const remote = HTML.slice(HTML.indexOf('id="gwRemoteRow"'), HTML.indexOf('id="optKillSwitch"'));
   assert.ok(remote.includes('data-i18n="gw.remote"'), 'the pointer is in the router block, before the kill switch');
 
@@ -567,7 +567,7 @@ test('18 (review): a save takes the service’s word — its "live" verdict and 
 /* ------------------------------ 19: Hide SNI tells the truth ------------------------------ */
 
 test('19: a server that already fragments with finalmask says so under the Hide SNI switch', () => {
-  assert.match(HTML, /<p class="hint warn" id="edHideSniFmNote" data-i18n="spoof\.hideSniFinalmask" hidden><\/p>/);
+  assert.match(HTML, /<p class="hint warn" id="edHideSniFmNote" data-module="antiDpi" data-i18n="spoof\.hideSniFinalmask" hidden><\/p>/);
   const after = HTML.slice(HTML.indexOf('id="edHideSniRow"'), HTML.indexOf('id="edPathRow"'));
   assert.ok(after.includes('id="edHideSniFmNote"'), 'the note sits right under the switch');
   assert.match(APP, /\$\('#edFinalMask'\)\.oninput = updateHideSniNote/, 'it follows the finalmask field as it is typed');
