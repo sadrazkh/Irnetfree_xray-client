@@ -12,7 +12,8 @@
  *     or left to the unassigned-device policy (the gate: the sign-in page, or
  *     nothing);
  *   - which per-user config its packets ride (the rule-set of that config's
- *     loopback inbound, by the device's addresses).
+ *     loopback inbound, by the device's addresses — each one pinned to the
+ *     device's MAC in the gateway's table, so no other device can borrow it).
  *
  * A user is ACTIVE when enabled, not expired and not over its cap this period
  * — the contract's definition (model.js activeUsers), restated here because
@@ -105,6 +106,28 @@ function hostCidr(ip) {
 }
 
 /**
+ * Whose each address is, from a scan (devices.js rows): Map ip → mac. An
+ * address a running lease names is the lease's device's — the router handed
+ * it out, and dnsmasq hands no address to two devices at once — however the
+ * neighbour table reads now: that table says only who answered for the
+ * address last, and a device that takes another's address answers for it. An
+ * address no lease names (a static one, a v6) is the device's the neighbour
+ * table has at it — it keeps one entry per address. Two rows claiming one
+ * address the same way: the first in the scan's order.
+ *
+ * One owner per address, read by everything that goes by address: the
+ * rule-sets (which config), the down counters (whose bytes) and the pins in
+ * the gateway's table (router/nft.js: whose MAC may send from it).
+ */
+function addressOwners(scan) {
+  const out = new Map();
+  const rows = Array.isArray(scan) ? scan.filter(r => r && r.mac) : [];
+  for (const r of rows) for (const ip of Array.isArray(r.leased) ? r.leased : []) if (!out.has(ip)) out.set(ip, r.mac);
+  for (const r of rows) for (const ip of Array.isArray(r.ips) ? r.ips : []) if (!out.has(ip)) out.set(ip, r.mac);
+  return out;
+}
+
+/**
  * Whom each MAC belongs to: { [mac]: { userId, via: 'admin' | 'login', until? } }.
  * The admin's choice wins over a sign-in; a sign-in counts while its session
  * runs and its user still exists.
@@ -123,7 +146,8 @@ function bindingsOf(lu, sessions, now) {
 /**
  * Everything the gateway needs for this moment:
  *   nft      — router/nft.js's description (blocked, allowed, authorized with
- *              its remaining seconds, direct, counters, the portal);
+ *              its remaining seconds, direct, the pinned addresses, counters,
+ *              the portal);
  *   ruleSets — { [tag]: [cidr…] } for every entry of `tp` (the inbounds the
  *              running gateway has: [{ tag, target }]), empty lists included,
  *              so a file that had devices is emptied when they go;
@@ -132,6 +156,16 @@ function bindingsOf(lu, sessions, now) {
  * `scan`: devices.js rows; `portal`: the LAN address and port the sign-in
  * page listens on, or null. (The gateway's own exclusions need nothing here:
  * the gate lets `bypass_macs` through in the table itself.)
+ *
+ * The pins (`nft.ipmac`: [{ mac, ips }]): every address of every device that
+ * belongs to a user — whatever the table then does with it (let through,
+ * around the tunnel, held, blocked) — bound to that device's MAC. The
+ * rule-sets pick a device's config by its source address and the down
+ * counters charge its user by its address, so without them a device the gate
+ * lets through by its own MAC could take another's address and ride that
+ * user's config and cap. From the same addresses as the rule-sets, in the
+ * same decision: a new lease moves both at once. A device that is nobody's is
+ * pinned to nothing — nothing changes for it.
  */
 function decide({ lu, sessions = {}, scan = [], usage = {}, now = Date.now(), tp = [], portal = null } = {}) {
   const users = new Map(((lu && lu.users) || []).map(u => [u.id, u]));
@@ -146,7 +180,9 @@ function decide({ lu, sessions = {}, scan = [], usage = {}, now = Date.now(), tp
     ruleSets[t.tag] = [];
     if (!tagOf.has(t.target)) tagOf.set(t.target, t.tag);
   }
-  const ipsOf = new Map((scan || []).map(r => [r.mac, Array.isArray(r.ips) ? r.ips : []]));
+  // a device's addresses: those it uses that are its own (an address another device holds the lease of is not)
+  const owner = addressOwners(scan);
+  const ipsOf = new Map((scan || []).map(r => [r.mac, (Array.isArray(r.ips) ? r.ips : []).filter(ip => owner.get(ip) === r.mac)]));
   const blocked = [], allowed = [], authorized = [], direct = [];
   const held = {};
   const macs = [...new Set([...recs.keys(), ...Object.keys(bound)])].sort();
@@ -170,10 +206,12 @@ function decide({ lu, sessions = {}, scan = [], usage = {}, now = Date.now(), tp
       if (c && !ruleSets[tag].includes(c)) ruleSets[tag].push(c);
     }
   }
+  // every address of a user's device pinned to its MAC (`macs` is sorted, and every bound MAC is in it)
+  const ipmac = macs.filter(mac => bound[mac] && (ipsOf.get(mac) || []).length).map(mac => ({ mac, ips: ipsOf.get(mac).slice() }));
   // a counter for every device the router knows: assigned, signed in, or just here
   const known = [...new Set([...macs, ...(scan || []).map(r => r.mac).filter(Boolean)])].sort();
   const counters = known.map(mac => ({ mac, ips: (ipsOf.get(mac) || []).slice() }));
-  const nft = { unassigned, blocked, allowed, authorized, direct, counters, portal: login && portal ? portal : null };
+  const nft = { unassigned, blocked, allowed, authorized, direct, ipmac, counters, portal: login && portal ? portal : null };
   return { nft, ruleSets, bound, held };
 }
 
@@ -222,5 +260,5 @@ function judgeSignIn({ lu, sessions = {}, usage = {}, now = Date.now(), mac, use
 
 module.exports = {
   DEFAULT_TRANSPARENT, OWN_TARGETS,
-  readLanUsers, transparentWanted, inactiveReason, routedTargets, bindingsOf, decide, nftKey, ruleSetText, hostCidr, judgeSignIn
+  readLanUsers, transparentWanted, inactiveReason, routedTargets, addressOwners, bindingsOf, decide, nftKey, ruleSetText, hostCidr, judgeSignIn
 };
