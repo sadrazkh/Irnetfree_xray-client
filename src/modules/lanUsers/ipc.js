@@ -18,8 +18,9 @@
  * elsewhere; `lanAddresses`: where people point their proxy at.
  *
  * A refusal saves nothing and answers `ok: false` and `error`, a code the page
- * words as 'lu.err.<code>': a user's (model.validateUser — quotaPeriod comes
- * as quota), port (bad, clashing or one the app already uses; `detail` says
+ * words as 'lu.err.<code>': a user's (model.validateUser — quotaPeriod,
+ * quotaCalendar and quotaResetDay come as quota, `detail` says which), port
+ * (bad, clashing or one the app already uses; `detail` says
  * which), hours, unassigned, notFound, op, mac, user, maxDevices.
  *
  * `pendingReconnect`: [] — the running core already lets in, and routes, what
@@ -44,6 +45,7 @@ const { groupRecordsById } = require('../../main/groups');
 const { wgEndpointHosts } = require('../../main/configBuilder');
 const { lanStatus } = require('../../main/openwrtNet');
 const { isOwnTunInterface } = require('../../main/tunPlatform');
+const { dayText } = require('../../main/jalali');
 
 const CHANNELS = ['lanusers:get', 'lanusers:config', 'lanusers:user', 'lanusers:device'];
 /** A run of edits (a user added, then another) is one reload this long after the last. */
@@ -163,12 +165,15 @@ function registerLanUsers(o) {
     });
   }
 
+  /** The cap notice: a monthly cap says the day it renews, as their month has it — '1 آذر' in Persian. */
   const noticeText = (n) => {
     const day = n.period === 'day';
     const all = n.period === 'none';
-    return isEn()
-      ? `“${n.name}” reached their ${n.capGb} GB${day ? ' daily' : (all ? '' : ' monthly')} cap — off ${day ? 'until tomorrow' : (all ? 'until it is raised' : 'until next month')}`
-      : `«${n.name}» به سقف ${n.capGb} گیگابایتِ ${day ? 'روزانه' : (all ? 'کل' : 'ماهانه')} رسید — ${day ? 'تا فردا' : (all ? 'تا وقتی سقف بالا برود' : 'تا ماه بعد')} قطع است`;
+    const en = isEn();
+    const date = day || all ? '' : dayText(n.until, en ? 'en' : 'fa', n.calendar);
+    return en
+      ? `“${n.name}” reached their ${n.capGb} GB${day ? ' daily' : (all ? '' : ' monthly')} cap — off ${day ? 'until tomorrow' : (all ? 'until it is raised' : (date ? 'until ' + date : 'until next month'))}`
+      : `«${n.name}» به سقف ${n.capGb} گیگابایتِ ${day ? 'روزانه' : (all ? 'کل' : 'ماهانه')} رسید — ${day ? 'تا فردا' : (all ? 'تا وقتی سقف بالا برود' : (date ? 'تا ' + date : 'تا ماه بعد'))} قطع است`;
   };
 
   const meter = createLanUsersMeter({
@@ -393,8 +398,8 @@ function registerLanUsers(o) {
     }
     return payload(Object.assign({ pendingReconnect: catchUp() }, extra || {}));
   }
-  /** The window's codes are the page's 'lu.err.<code>' strings: a period is part of the cap, a port clash a port. */
-  const CODE = { quotaPeriod: 'quota', sessionHours: 'hours', portClash: 'port', portInUse: 'port' };
+  /** The window's codes are the page's 'lu.err.<code>' strings: a period (its calendar, its renew day) is part of the cap, a port clash a port. */
+  const CODE = { quotaPeriod: 'quota', quotaCalendar: 'quota', quotaResetDay: 'quota', sessionHours: 'hours', portClash: 'port', portInUse: 'port' };
   const refused = (error) => payload({ ok: false, pendingReconnect: [], error: CODE[error] || error, ...(CODE[error] ? { detail: error } : {}) });
 
   /** A config about to be saved → the first thing wrong with it, or null. */

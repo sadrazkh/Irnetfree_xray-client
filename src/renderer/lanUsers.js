@@ -43,6 +43,7 @@
   const fill = (s, map) => String(s).replace(/\{(\w+)\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(map, k) ? map[k] : m));
   const lang = () => (window.i18n && window.i18n.lang) || document.documentElement.lang || 'fa';
   const PERIODS = ['month', 'day', 'none'];
+  const DAYS = Array.from({ length: 31 }, (_, i) => i + 1);   // the day a month renews on (capPeriods.js)
   const UNASSIGNED = ['login', 'allow', 'block'];
   const SPECIAL = ['', 'direct', 'block'];        // the targets that are not a config
   const HOTSPOT_IP = '192.168.137.1';             // Windows' Mobile Hotspot address (ipc.js HOTSPOT_IP)
@@ -495,8 +496,9 @@
       d.right.textContent = over ? (map.date ? fill(t('lu.backOn'), map) : '') : ratio >= NEAR ? t('lu.atCap') : (map.date ? fill(t('lu.until'), map) : '');
     } else {
       d.left.textContent = fill(t('lu.used'), map);
+      // a day's key is 'YYYY-MM-DD'; a month's any other ('2026-10', 'j1405-08', '2026-10@15'); 'all' is neither
       const p = String((u && u.period) || '');
-      d.right.textContent = p.length === 10 ? t('lu.today') : p.length === 7 ? t('lu.thisMonth') : '';
+      d.right.textContent = /^\d{4}-\d{2}-\d{2}$/.test(p) ? t('lu.today') : p && p !== 'all' ? t('lu.thisMonth') : '';
     }
   }
   /** A live rate, while connected: '↓ 1.2 MB/s  ↑ 40.0 KB/s'. */
@@ -642,17 +644,49 @@
 
   /* ------------------------------ drawing: the users ------------------------------ */
 
+  /**
+   * The cap's period as its select offers it: the two months — 'month' the
+   * Gregorian one, 'jmonth' the Persian (quotaCalendar 'jalali') — the page's
+   * own calendar first, then a day, then none.
+   */
+  const periodChoices = () => (lang() === 'fa' ? ['jmonth', 'month'] : ['month', 'jmonth']).concat(['day', 'none']);
+  const choiceOf = (period, calendar) => (period === 'month' && calendar === 'jalali' ? 'jmonth' : (PERIODS.includes(period) ? period : 'none'));
+  /** A choice → the user's fields; a day or none leaves the month's calendar as it was. */
+  const fromChoice = (v) => (v === 'jmonth' ? { quotaPeriod: 'month', quotaCalendar: 'jalali' }
+    : v === 'month' ? { quotaPeriod: 'month', quotaCalendar: 'gregorian' } : { quotaPeriod: PERIODS.includes(v) ? v : 'none' });
+  const isMonth = (choice) => choice === 'month' || choice === 'jmonth';
+  /** The day a month renews on as a number 1–31 (1: the 1st, every cap before there was a choice). */
+  const dayOf = (v) => (DAYS.includes(Number(v)) ? Number(v) : 1);
+
+  /**
+   * A month's renew day: "Renews on day [15]" under the cap, shown for a
+   * month only; past the shortest month of its calendar (28, the Persian 29)
+   * the note that a month without that day renews on its last one.
+   */
+  function renewLine(day, choice, label, key, onChange) {
+    const line = el('div', 'lu-renew');
+    const note = el('div', 'lu-sub', t('lu.renewLast'));
+    const paint = (d, c) => { line.hidden = !isMonth(c); note.hidden = !isMonth(c) || d <= (c === 'jmonth' ? 29 : 28); };
+    const s = select(DAYS.map((d) => [d, String(d)]), dayOf(day), t('lu.renewDay') + (label ? ' — ' + label : ''), key, (v) => { paint(Number(v), line.dataset.choice); onChange(Number(v)); });
+    line.dataset.choice = choice;
+    line.append(el('span', null, t('lu.renewDay')), s);
+    paint(dayOf(day), choice);
+    // the period's select moves it: the line comes and goes, the note with it
+    return { nodes: [line, note], period: (c) => { line.dataset.choice = c; paint(Number(s.value), c); } };
+  }
+
   function capControls(u, label) {
     const box = el('div', 'lu-field');
     const pair = el('div', 'lu-cap');
-    const period = PERIODS.includes(u.quotaPeriod) ? u.quotaPeriod : 'none';
+    const choice = choiceOf(u.quotaPeriod, u.quotaCalendar);
     const num = numInput(u.quotaGb ? u.quotaGb : '', t('lu.capGb') + ' — ' + label, 'quota:' + u.id, { step: 'any', placeholder: '0' });
-    num.disabled = period === 'none';
+    num.disabled = choice === 'none';
     num.addEventListener('change', () => {
       const v = Number(num.value);
       saveUser(u.id, { quotaGb: Number.isFinite(v) && v > 0 ? v : 0 });
     });
-    pair.append(num, select(PERIODS.map((p) => [p, t('lu.period.' + p)]), period, t('lu.cap') + ' — ' + label, 'period:' + u.id, (v) => saveUser(u.id, { quotaPeriod: v })));
+    pair.append(num, select(periodChoices().map((p) => [p, t('lu.period.' + p)]), choice, t('lu.cap') + ' — ' + label, 'period:' + u.id, (v) => saveUser(u.id, fromChoice(v))));
+    const renew = renewLine(u.quotaResetDay, choice, label, 'renew:' + u.id, (d) => saveUser(u.id, { quotaResetDay: d }));
     const bar = el('div', 'lu-bar');
     bar.setAttribute('role', 'progressbar');
     bar.setAttribute('aria-valuemin', '0');
@@ -667,7 +701,7 @@
     const d = { bar, fill: fillEl, left, right };
     ui.dom.usage[u.id] = d;
     paintUsage(d, usageOf(u.id));
-    box.append(el('div', 'field-label', t('lu.cap')), pair, bar, q);
+    box.append(el('div', 'field-label', t('lu.cap')), pair, ...renew.nodes, bar, q);
     return box;
   }
 
@@ -1045,13 +1079,13 @@
     const old = f.id ? users().find((u) => u.id === f.id) : null;
     const q = String(f.quotaGb == null ? '' : f.quotaGb).trim();
     const m = String(f.maxDevices == null ? '' : f.maxDevices).trim();
-    const user = Object.assign({}, old || {}, {
+    const user = Object.assign({}, old || {}, fromChoice(f.quotaPeriod), {
       username: String(f.username).trim(),
       password: String(f.password),
       name: String(f.name || '').trim(),
       target: f.target || '',
       quotaGb: q === '' ? 0 : Number(q),
-      quotaPeriod: PERIODS.includes(f.quotaPeriod) ? f.quotaPeriod : 'none',
+      quotaResetDay: dayOf(f.quotaResetDay),
       expiresAt: fromDayInput(f.expires),
       maxDevices: m === '' ? 0 : Number(m),
       enabled: !!f.enabled
@@ -1065,14 +1099,16 @@
     const u = id ? users().find((x) => x.id === id) : null;
     if (id && !u) return false;
     ui.opener = document.activeElement || null;
+    // quotaPeriod here is the select's choice: 'jmonth' a Persian month (fromChoice turns it back)
     ui.form = u
       ? { id: u.id, name: u.name || '', username: u.username || '', password: u.password || '', target: u.target || '',
-        quotaGb: u.quotaGb ? String(u.quotaGb) : '', quotaPeriod: PERIODS.includes(u.quotaPeriod) ? u.quotaPeriod : 'none',
+        quotaGb: u.quotaGb ? String(u.quotaGb) : '', quotaPeriod: choiceOf(u.quotaPeriod, u.quotaCalendar), quotaResetDay: dayOf(u.quotaResetDay),
         expires: dayInput(u.expiresAt), maxDevices: u.maxDevices ? String(u.maxDevices) : '', enabled: u.enabled !== false,
         showPass: false, errors: {}, error: '', saving: false }
-      // a new user: a password ready (shown — the admin reads it out), the current connection, a monthly count
-      : { id: '', name: '', username: '', password: genPassword(), target: '', quotaGb: '', quotaPeriod: 'month', expires: '',
-        maxDevices: '', enabled: true, showPass: true, errors: {}, error: '', saving: false };
+      // a new user: a password ready (shown — the admin reads it out), the current connection, a monthly count —
+      // in Persian the Persian month from its 1st (only the form's default: a saved user changes only when saved)
+      : { id: '', name: '', username: '', password: genPassword(), target: '', quotaGb: '', quotaPeriod: lang() === 'fa' ? 'jmonth' : 'month',
+        quotaResetDay: 1, expires: '', maxDevices: '', enabled: true, showPass: true, errors: {}, error: '', saving: false };
     if (!ui.modal) {
       const overlay = el('div', 'modal-overlay lu-overlay');
       overlay.id = 'luModal';
@@ -1199,13 +1235,14 @@
     q.min = '0';
     q.step = 'any';
     q.disabled = f.quotaPeriod === 'none';
-    pair.append(q, select(PERIODS.map((p) => [p, t('lu.period.' + p)]), f.quotaPeriod, t('lu.cap'), 'f:period', (v) => { f.quotaPeriod = v; q.disabled = v === 'none'; }));
+    const renew = renewLine(f.quotaResetDay, f.quotaPeriod, '', 'f:renew', (d) => { f.quotaResetDay = d; });
+    pair.append(q, select(periodChoices().map((p) => [p, t('lu.period.' + p)]), f.quotaPeriod, t('lu.cap'), 'f:period', (v) => { f.quotaPeriod = v; q.disabled = v === 'none'; renew.period(v); }));
     const date = formInput('expires', t('lu.expires'), { type: 'date', dir: 'ltr' });
     date.classList.add('lu-date');
     const words = el('div', 'lu-sub', expiryWords(fromDayInput(f.expires)).text);
     date.addEventListener('change', () => { f.expires = date.value; words.textContent = expiryWords(fromDayInput(f.expires)).text; });
     date.addEventListener('input', () => { words.textContent = expiryWords(fromDayInput(date.value)).text; });
-    capRow.append(formField('quotaGb', t('lu.cap'), [pair]), formField('expires', t('lu.expires'), [date, words]));
+    capRow.append(formField('quotaGb', t('lu.cap'), [pair, ...renew.nodes]), formField('expires', t('lu.expires'), [date, words]));
     body.append(capRow);
 
     const last = el('div', 'lu-grid');

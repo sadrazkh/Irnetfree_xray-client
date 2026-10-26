@@ -14,9 +14,11 @@
  *
  * The bytes are kept per link per period — `{ [linkId]: { period, bytes } }`,
  * the period being '2026-10' for a month and '2026-10-25' for a day, local
- * time — and saved by the caller in the usage file beside the per-config
- * totals: a save rewrites its whole file, and the main store holds every
- * server (main.js, the `usage` declaration says why that matters).
+ * time (a month that follows the Persian calendar, or renews on another day
+ * than the 1st, has a key of its own: capPeriods.js) — and saved by the caller
+ * in the usage file beside the per-config totals: a save rewrites its whole
+ * file, and the main store holds every server (main.js, the `usage`
+ * declaration says why that matters).
  *
  * A link over its cap this period is in skip(): the connect and every rebuild
  * put that list into `settings.multiWanSkip`, and the builder leaves the link
@@ -29,6 +31,8 @@
  * Electron — the caller hands in its own.
  */
 const { linkUsage } = require('./multiWan');
+const { PERIOD_KEY, cycleOf, periodKey, periodStart, periodEnd, rollEntry } = require('./capPeriods');
+const { dayText } = require('./jalali');
 
 /** The app writes GB as fmtBytes does — binary — so a cap in GB means the same everywhere on screen. */
 const GIB = 1024 * 1024 * 1024;
@@ -39,32 +43,15 @@ const RETRY_MS = 15000;
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
-const pad = (n) => String(n).padStart(2, '0');
 
 /* ------------------------------ periods ------------------------------ */
 
-/**
- * The period a link's bytes count in at `now`: 'YYYY-MM-DD' for a daily cap,
- * 'YYYY-MM' otherwise. A link with no cap is counted by the month too, so a
- * monthly cap set later starts from what this month already carried.
- */
-function periodKey(period, now) {
-  const d = new Date(now);
-  const month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
-  return period === 'day' ? `${month}-${pad(d.getDate())}` : month;
-}
-
-/** When that period began, ms epoch (local midnight). */
-function periodStart(period, now) {
-  const d = new Date(now);
-  return (period === 'day' ? new Date(d.getFullYear(), d.getMonth(), d.getDate()) : new Date(d.getFullYear(), d.getMonth(), 1)).getTime();
-}
-
-/** When it ends — the next one's start, ms epoch (local midnight). */
-function periodEnd(period, now) {
-  const d = new Date(now);
-  return (period === 'day' ? new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1) : new Date(d.getFullYear(), d.getMonth() + 1, 1)).getTime();
-}
+// periodKey / periodStart / periodEnd / rollEntry are capPeriods.js's — the
+// users' meter counts by the same ones. A link is counted by its day for a
+// daily cap and by its month otherwise (as the link says: the Gregorian month
+// from the 1st unless it names a calendar or a renew day); a link with no cap
+// is counted by the month too, so a monthly cap set later starts from what
+// this month already carried.
 
 /** A link's cap in bytes; 0 = none (no GB, or no period to count it in). */
 function capBytes(link) {
@@ -73,24 +60,12 @@ function capBytes(link) {
   return Number.isFinite(gb) && gb > 0 ? Math.round(gb * GIB) : 0;
 }
 
-/**
- * An entry moved to the period `key`: the same one as it was; a day of the
- * month it now counts by keeps its bytes (they were this month's too); any
- * other period starts from nothing.
- */
-function rollEntry(entry, key) {
-  if (!entry) return { period: key, bytes: 0 };
-  if (entry.period === key) return entry;
-  if (String(entry.period).startsWith(key + '-')) return { period: key, bytes: entry.bytes };
-  return { period: key, bytes: 0 };
-}
-
 /** What was saved, each entry of its type; junk dropped. */
 function normalizeUsage(raw) {
   const out = {};
   if (!isObj(raw)) return out;
   for (const [id, e] of Object.entries(raw)) {
-    if (!id || !isObj(e) || typeof e.period !== 'string' || !/^\d{4}-\d{2}(-\d{2})?$/.test(e.period)) continue;
+    if (!id || !isObj(e) || typeof e.period !== 'string' || !PERIOD_KEY.test(e.period)) continue;
     const bytes = Number(e.bytes);
     out[id] = { period: e.period, bytes: Number.isFinite(bytes) && bytes > 0 ? Math.round(bytes) : 0 };
   }
@@ -134,7 +109,8 @@ const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
  *               live behind the user's back, so the set-aside waits for them
  *               (the group set-aside does the same)
  *   reload(why) → Promise<boolean>: the caller's queueReload
- *   log({ line, level }), notify({ name, capGb, period }) (optional)
+ *   log({ line, level }), notify({ name, capGb, period, until, calendar }) (optional;
+ *               `until` the day the cap renews, ms; `calendar` the month's)
  *   now()       ms epoch (a test hands in its own clock)
  */
 function createMultiWanQuota(o) {
@@ -158,7 +134,7 @@ function createMultiWanQuota(o) {
   function roll(m, t) {
     for (const l of m.links) {
       const was = usage[l.id];
-      const next = rollEntry(was, periodKey(l.quotaPeriod, t));
+      const next = rollEntry(was, periodKey(l.quotaPeriod, t, l));
       if (next === was) continue;
       usage[l.id] = next;
       if (was) dirty = true;   // a period that ended is worth a write; a new empty entry is not
@@ -181,10 +157,13 @@ function createMultiWanQuota(o) {
       if (built.includes(id) || said.has('out:' + id)) continue;
       said.add('out:' + id);
       const l = m.links.find((x) => x.id === id) || {};
-      const when = l.quotaPeriod === 'day' ? 'today' : 'this month';
-      const until = l.quotaPeriod === 'day' ? 'tomorrow' : 'the 1st of next month';
-      log({ line: `Multi-internet: “${name(id)}” reached its cap (${l.quotaGb} GB ${when}) — set aside until ${until}; the connection goes on the other internets`, level: 'warn' });
-      if (typeof o.notify === 'function') { try { o.notify({ name: name(id), capGb: l.quotaGb, period: l.quotaPeriod }); } catch { /* a notification is never worth an error */ } }
+      const day = l.quotaPeriod === 'day';
+      // the day it renews, in words: the 1st of next month, or the day and calendar the link names
+      const renews = periodEnd(l.quotaPeriod, t, l);
+      const calendar = cycleOf(l).calendar;
+      const until = day ? 'tomorrow' : dayText(renews, 'en', calendar);
+      log({ line: `Multi-internet: “${name(id)}” reached its cap (${l.quotaGb} GB ${day ? 'today' : 'this month'}) — set aside until ${until}; the connection goes on the other internets`, level: 'warn' });
+      if (typeof o.notify === 'function') { try { o.notify({ name: name(id), capGb: l.quotaGb, period: l.quotaPeriod, until: renews, calendar }); } catch { /* a notification is never worth an error */ } }
     }
     for (const id of built) {
       if (want.includes(id) || said.has('back:' + id)) continue;
@@ -234,7 +213,7 @@ function createMultiWanQuota(o) {
         nextRates[id] = dt > 0 ? { up: dUp / dt, down: dDown / dt } : { up: 0, down: 0 };
         if (dUp + dDown <= 0) continue;
         const l = m.links.find((x) => x.id === id);
-        const e = rollEntry(usage[id], periodKey(l ? l.quotaPeriod : 'month', t));
+        const e = rollEntry(usage[id], periodKey(l ? l.quotaPeriod : 'month', t, l));
         usage[id] = { period: e.period, bytes: e.bytes + dUp + dDown };
         dirty = true;
       }
@@ -271,7 +250,8 @@ function createMultiWanQuota(o) {
 
     /**
      * Each configured link's period as the window shows it:
-     * { [linkId]: { bytes, period, since, until, quotaBytes, over } }
+     * { [linkId]: { bytes, period, since, until, quotaBytes, over } } —
+     * `until` the day the cap renews (local midnight).
      */
     usage() {
       const t = now();
@@ -283,9 +263,9 @@ function createMultiWanQuota(o) {
         const quotaBytes = capBytes(l);
         out[l.id] = {
           bytes: e ? e.bytes : 0,
-          period: e ? e.period : periodKey(l.quotaPeriod, t),
-          since: periodStart(l.quotaPeriod, t),
-          until: periodEnd(l.quotaPeriod, t),
+          period: e ? e.period : periodKey(l.quotaPeriod, t, l),
+          since: periodStart(l.quotaPeriod, t, l),
+          until: periodEnd(l.quotaPeriod, t, l),
           quotaBytes,
           over: quotaBytes > 0 && !!e && e.bytes >= quotaBytes
         };
