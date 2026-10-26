@@ -104,6 +104,29 @@ function usesEchOutbound(config) {
   });
 }
 
+/**
+ * A group (configBuilder.expandGroups: its tag a `loopback` into the
+ * balancer's inbound `T~in`) on an official core before 26.4.25: the loopback
+ * outbound copied through a pipe of its own (`dispatcher.Dispatch`) until
+ * XTLS/Xray-core#6005 (454c930) handed the link on (`DispatchLink`), and that
+ * pipe drops the end of a response the far side closed when the members ride
+ * WebSocket — on 26.3.27, 1 of 100 256 KB pages through a plain group and 40
+ * of 40 through [hop → group], the chain relay or not
+ * (scripts/probe-chain-tail.js, 2026-10-26; on Windows with GOMAXPROCS=1,
+ * 0 of 40 whole through [hop → group] and [group → hop] alike, where
+ * Xray-PattN 26.10.19 carried all 40). Xray-PattN is built from
+ * upstream after April. The other Xray core when it is new enough; else the
+ * group runs where it was asked and the connect log says what to update
+ * (owner, 2026-10-26): it still carries nearly everything, and a refusal
+ * would leave a router on its opkg core (24.12.31, 25.1.30) with no group.
+ */
+const GROUP_LOOPBACK_SINCE = '26.4.25';
+
+/** Does the config run a group (configBuilder's non-enumerable `groupTags`)? */
+function runsGroup(config) {
+  return !!config && Array.isArray(config.groupTags) && config.groupTags.length > 0;
+}
+
 const masqueOutbounds = (config) => ((config && config.outbounds) || []).filter((o) => o && o.protocol === 'masque');
 
 /** Does any outbound dial MASQUE? */
@@ -489,9 +512,21 @@ class XrayManager {
    * `finalmaskIgnored`, one it is too old to know and would drop) or to update
    * the official core (`echUnsupported`: ECH on a core older than ECH_SINCE,
    * no fork to run it; `masqueUnsupported`: MASQUE on a core older than
-   * `need`, no other core new enough to run it).
+   * `need`, no other core new enough to run it). An answer that passed may
+   * carry `groupCoreOld` (with `coreVersion`, `need`): the config runs a group
+   * on a core older than GROUP_LOOPBACK_SINCE, none newer to move it to — it
+   * runs, and the connect says what to update.
    */
   async validateWithFallback(config, engineId) {
+    const r = await this._validateWithFallback(config, engineId);
+    if (r.ok && runsGroup(config) && engineFormat(r.engine) === 'xray') {
+      const v = await this.version(r.engine);
+      if (versionBelow(v, GROUP_LOOPBACK_SINCE)) return Object.assign({}, r, { groupCoreOld: true, coreVersion: v, need: GROUP_LOOPBACK_SINCE });
+    }
+    return r;
+  }
+
+  async _validateWithFallback(config, engineId) {
     const first = this.resolveEngine(engineId);
     // MASQUE on a core older than it (MASQUE_SINCE; a WARP account
     // MASQUE_WARP_SINCE): the other Xray core when it is installed and says
@@ -529,6 +564,25 @@ class XrayManager {
         }
         return { ok: false, engine: first.id, echOutboundUnsupported: true, coreVersion: v, need: ECH_OUTBOUND_SINCE, plaintextRejected: false,
           error: `${first.id} ${v} cannot dial the ECH query through its own outbound (${ECH_OUTBOUND_SINCE} and newer can)` };
+      }
+    }
+    // A group on a core older than GROUP_LOOPBACK_SINCE: the other Xray core
+    // when it is new enough and takes the config. Not a refusal when it does
+    // not — the old core runs it (validateWithFallback marks the answer
+    // groupCoreOld), so nothing moves to the official core that it would
+    // refuse or drop: the fork's finalmask, a plaintext server.
+    if (runsGroup(config) && engineFormat(first.id) === 'xray') {
+      const v = await this.version(first.id);
+      if (versionBelow(v, GROUP_LOOPBACK_SINCE)) {
+        const other = first.id === 'xray' ? 'xray-pattn' : 'xray';
+        const ov = this.resolveBin(other) && !(other === 'xray' && usesFinalmask(config)) ? await this.version(other) : '';
+        if (/\d+\.\d+\.\d+/.test(ov) && !versionBelow(ov, GROUP_LOOPBACK_SINCE)) {
+          const onOther = await this.validate(config, other);
+          if (onOther.ok) {
+            this.onLog(`This config runs a group, and ${engineLabel(first.id)} ${v} can cut short the end of a download through it (fixed in Xray ${GROUP_LOOPBACK_SINCE}) — running it on ${engineLabel(other)} ${ov}`, 'info');
+            return { ok: true, engine: other, fellBack: true };
+          }
+        }
       }
     }
     // A config carrying the fork's `finalmask` runs on the fork when it is
@@ -803,5 +857,6 @@ function getFreePorts(n) {
 
 module.exports = {
   XrayManager, getFreePort, getFreePorts, PLAINTEXT_REJECT, FINALMASK_SINCE, ECH_SINCE, usesEch,
-  MASQUE_SINCE, MASQUE_WARP_SINCE, usesMasque, usesMasqueWarp, ECH_OUTBOUND_SINCE, usesEchOutbound, versionBelow, floodGate, floodKey
+  MASQUE_SINCE, MASQUE_WARP_SINCE, usesMasque, usesMasqueWarp, ECH_OUTBOUND_SINCE, usesEchOutbound,
+  GROUP_LOOPBACK_SINCE, runsGroup, versionBelow, floodGate, floodKey
 };

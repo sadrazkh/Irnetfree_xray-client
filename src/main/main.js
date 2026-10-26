@@ -1501,6 +1501,17 @@ async function connectOnce(serverId, opts = {}) {
     throw new Error((settings.lang === 'en' ? 'Config error: ' : 'خطای کانفیگ: ') + check.error + hint);
   }
   const runEngine = check.engine;
+  // A group on a core older than 26.4.25 and none newer installed
+  // (xrayManager.validateWithFallback): it runs, but that core's loopback can
+  // drop the end of a download through the group — what to update is said.
+  if (check.groupCoreOld) {
+    send('log', {
+      line: settings.lang === 'en'
+        ? `This config runs a group, and Xray ${check.coreVersion} can cut short the end of a download through it (fixed in ${check.need}) — update Xray under Settings → Required files`
+        : `این کانفیگ گروه دارد و Xray ${check.coreVersion} ممکن است انتهای دانلودی را که از گروه می‌گذرد ببُرد (از ${check.need} درست شده) — از تنظیمات ← فایل‌های موردنیاز، Xray را به‌روز کن`,
+      level: 'warn'
+    });
+  }
 
   // Suppress the old instance's 'stopped' while switching servers so it isn't
   // mistaken for an unexpected drop (which would trip the kill switch) or flash

@@ -799,6 +799,16 @@ test('a boot connect of a MASQUE server on a core too old for it is refused like
   assert.equal(s.service.connSnapshot().state, 'error');
 });
 
+test('a group on a feed core older than 26.4.25 (none newer installed) connects — no refusal — and the log says what to update', async (t) => {
+  const s = start({}, withTiming({}), (st) => { st.check = { ok: true, groupCoreOld: true, coreVersion: '25.1.30', need: '26.4.25' }; });
+  t.after(() => s.service.shutdown());
+  await s.service.invoke('connect', SERVER.id);
+  assert.equal(s.state.xray.starts.length, 1, 'started on the core it was checked on');
+  assert.equal(s.service.connSnapshot().state, 'connected');
+  const warn = s.logs.filter(l => l.level === 'warn' && /runs a group/.test(l.line));
+  assert.deepEqual(warn.map(l => l.line), ['This config runs a group, and Xray 25.1.30 can cut short the end of a download through it (fixed in 26.4.25) — update Xray under Settings → Required files']);
+});
+
 test('a rebuild the core refuses (the store changed under the live connection) stops the quick retries and says why; the rare retry brings it back', async (t) => {
   const s = start({}, withTiming({ refusedRetryMs: 700 }));
   t.after(() => s.service.shutdown());
