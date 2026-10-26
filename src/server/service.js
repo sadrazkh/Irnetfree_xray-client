@@ -71,6 +71,8 @@ const { registerLanUsers } = require('../modules/lanUsers/ipc');
 // deliberately NOT given this: Electron never runs on a router.
 const { isOpenwrt, lanInterface, lanDevices, validMacs, ownOrphanCores, normalizeCidrs } = require('../main/openwrtNet');
 const { TunOpenwrt } = require('../main/tunOpenwrt');
+// the users module's transparent mode around that gateway: sign-in page, per-user configs, caps by MAC
+const { createLanRouter } = require('../modules/lanUsers/router');
 const { createKillSwitch } = require('../main/killSwitchOpenwrt');
 const { createLogRing } = require('./logRing');
 const tcpNet = require('net');
@@ -815,6 +817,16 @@ function createService(opts = {}) {
    * sweep this set, so no tunnel can outlive the process.
    */
   const startedTuns = new Set();
+  // Users (module lanUsers), transparent mode — the router only, and only with
+  // the module installed and the mode on (src/modules/lanUsers/router): off, its
+  // every call below answers "nothing" and the gateway is built as before.
+  // (deps.lanRouter: a test's, over a fake file system and LAN)
+  const lanRouter = (deps.lanRouter || createLanRouter)({
+    openwrt: OPENWRT, dataDir, run: lanRun, getSettings, getFreePorts,
+    getLanUsers: () => store.get('lanUsers', null),
+    records: () => ({ servers: store.get('servers', []), groups: getGroups(), chains: getChains() }),
+    log: (line, level) => send('log', { line, level })
+  });
 
   /**
    * Arm the "this tunnel is talking to nobody" watch for the WireGuard
@@ -1560,6 +1572,8 @@ function createService(opts = {}) {
     // connect and every rebuild get it and a desktop's config never does —
     // nor a raw config, whose DNS runs as written.
     if (OPENWRT && !rawServer && engineFormat(engine) === 'xray' && config.dns) config.dns = routerDnsTuning(config.dns);
+    // the users' transparent mode: their configs' loopback inbounds — the connect's own, or a reload's running ones (lanUsers/router)
+    if (OPENWRT && engineFormat(engine) === 'xray') lanRouter.applyXray(config, { serverId, plan, settings, raw: !!rawServer });
     // A router carries a house: one access-log line per connection, through the
     // service's stdout into syslog, is real CPU on a Cortex-A7 (the AC-1304 log
     // was a wall of `accepted udp:…`). Kept when the user asks for a verbose
@@ -1978,6 +1992,11 @@ function createService(opts = {}) {
     } else {
       liveDirectInterface = null;
     }
+    // the users' transparent mode: a loopback port per user config the gateway will route devices to ([] when off)
+    if (OPENWRT) {
+      settings = Object.assign({}, settings, { lanUsersTp: await lanRouter.prepare() });
+      if (stale()) return abandoned;
+    }
     // What this connect pinned: a process-route reload (rebuildActiveConfig)
     // keeps the tunnel, whose bypass was cut for exactly these addresses.
     livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
@@ -2283,10 +2302,14 @@ function createService(opts = {}) {
           // the remote way in must not need the VPN.
           // Likewise the resolver an ECH config is fetched from: bound, so a
           // hole only where the strict guard firewalls a desktop's adapter.
+          // the users' transparent mode (lanUsers/router): its nft sets, sing-box routes and the
+          // entry servers of its configs (kept off the tunnel by the gateway) — null when off, and then no key at all
+          const lanUsersGw = OPENWRT ? await lanRouter.gatewayOptions(settings.lanUsersTp) : null;
           const resolverHoles = OPENWRT ? [] : [...resolverBypassIpsOf(config), ...(settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [])];
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverHoles, ...pinnedIps],
             tunAdapterDns,
-            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] });   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect
+            Object.assign({ ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] }, lanUsersGw ? { lanUsers: lanUsersGw } : {}));   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect/lanUsers
+          if (OPENWRT) await lanRouter.gatewayUp(myTun);
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
           noteOpenFiles();   // the router's descriptor budget, now that sing-box runs (v1.16.2)
           if (tunApps) {
@@ -3571,9 +3594,19 @@ function createService(opts = {}) {
     pending: () => pendingKeys(),
     queueReload: (why) => queueReload(why),
     resolveHost: resolveName,
-    devices: deps.lanDevices,
+    // the router's transparent mode (src/modules/lanUsers/router): its devices with their rates, its own count
+    // per device, and a fresh look at the devices after every change (nft, the rule sets, the portal)
+    devices: deps.lanDevices || (OPENWRT ? () => lanRouter.online() : undefined),
+    deviceUsage: OPENWRT ? () => lanRouter.deviceUsage() : undefined,
+    onChange: OPENWRT ? () => lanRouter.refresh() : undefined,
     log: (l) => send('log', l),
     now: clock
+  });
+  // the devices' bytes count against their users' caps: the router hands each tick's per-user deltas over,
+  // and reads back who is over (usage()) to hold their devices
+  lanRouter.setMeter({
+    feedDevices: (byUser) => { for (const [id, v] of Object.entries(byUser || {})) lanUsers.addBytes(id, Number(v && v.bytes) || 0); },
+    usage: () => lanUsers.meter.usage()
   });
 
   const handlers = {
