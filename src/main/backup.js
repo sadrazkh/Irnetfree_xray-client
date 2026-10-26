@@ -12,6 +12,7 @@
 
 const { DEFAULT_PROFILE_ID, normalizeProfile, mirrorToSettings, mirrorFromSettings } = require('./routingProfiles');
 const { normalizeGroup } = require('./groups');
+const { normalizeLanUsers, credentialsOk } = require('../modules/lanUsers/model');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -102,6 +103,41 @@ function cleanProfile(p) {
   return n;
 }
 
+/**
+ * Users and devices (module lanUsers — src/modules/lanUsers/model.js), merged
+ * like the rest and held to the shapes that module writes: a user by an id
+ * already here is kept as it is, a new one is added — unless their username
+ * (case aside) is taken here, or their password is one the proxy refuses; a
+ * target naming a server this import left out becomes `block`, never "the
+ * current connection". A device by a MAC already here is kept, a new one added,
+ * bound only to a user who is here after the merge. The config (the proxy's
+ * ports, on or off) is this machine's when it has one, else the backup's.
+ * → { value, n } — `n` users added.
+ */
+function mergeLanUsers(have, incoming, refused) {
+  const theirs = normalizeLanUsers(incoming);
+  const base = isObj(have) ? normalizeLanUsers(have) : { config: theirs.config, users: [], devices: [] };
+  const ids = new Set(base.users.map(u => u.id));
+  const names = new Set(base.users.map(u => u.username.toLowerCase()));
+  const users = base.users.slice();
+  let n = 0;
+  for (const u of theirs.users) {
+    if (ids.has(u.id) || names.has(u.username.toLowerCase()) || !credentialsOk(u)) continue;
+    users.push(refused.has(u.target) ? Object.assign({}, u, { target: 'block' }) : u);
+    ids.add(u.id);
+    names.add(u.username.toLowerCase());
+    n++;
+  }
+  const macs = new Set(base.devices.map(d => d.mac));
+  const devices = base.devices.slice();
+  for (const d of theirs.devices) {
+    if (macs.has(d.mac)) continue;
+    macs.add(d.mac);
+    devices.push(Object.assign({}, d, { userId: ids.has(d.userId) ? d.userId : '' }));
+  }
+  return { value: { config: base.config, users, devices }, n };
+}
+
 /** The settings overlay, with its ports as integers; a bad one leaves the current value. */
 function cleanSettings(s) {
   const out = Object.assign({}, s);
@@ -135,6 +171,8 @@ function exportBundle({ version, store, usage, flavor }) {
     ...(Array.isArray(s.routingProfiles) ? { routingProfiles: s.routingProfiles } : {}),
     // the groups (groups.js), when there are any
     ...(Array.isArray(s.groups) && s.groups.length ? { groups: s.groups } : {}),
+    // users and devices (module lanUsers), when the store has them — their passwords as stored
+    ...(isObj(s.lanUsers) ? { lanUsers: s.lanUsers } : {}),
     settings: isObj(s.settings) ? s.settings : {},
     usage: isObj(usage) ? usage : {}
   };
@@ -151,7 +189,8 @@ const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  * another value, so the caller can say so.
  *
  * @returns {{ next: object, added: { servers, subscriptions, chains, pool, routingProfiles, groups }, kept: string[] }}
- *   `next.routingProfiles` only when the machine or the backup has them.
+ *   `next.routingProfiles` only when the machine or the backup has them;
+ *   `next.lanUsers` and `added.lanUsers` only when the backup has them.
  * @throws when the bundle is not an IRNetFree backup
  */
 function importBundle(bundle, current, opts = {}) {
@@ -201,6 +240,8 @@ function importBundle(bundle, current, opts = {}) {
     if (restored) routingProfiles = routingProfiles.map((p) => (p && p.id === DEFAULT_PROFILE_ID ? restored : p));
     settings = mirrorToSettings(routingProfiles, settings);
   } else routingProfiles = mirrorFromSettings(routingProfiles, settings);
+  // users and devices: only when the backup carries them — a store without them stays without
+  const lan = isObj(bundle.lanUsers) ? mergeLanUsers(c.lanUsers, bundle.lanUsers, servers.refused) : null;
   return {
     next: {
       servers: servers.list,
@@ -210,9 +251,10 @@ function importBundle(bundle, current, opts = {}) {
       groups: groups.list,
       settings,
       ...(Array.isArray(c.routingProfiles) || Array.isArray(bundle.routingProfiles) ? { routingProfiles } : {}),
+      ...(lan ? { lanUsers: lan.value } : {}),
       usage: Object.assign({}, isObj(c.usage) ? c.usage : {}, isObj(bundle.usage) ? bundle.usage : {})
     },
-    added: { servers: servers.n, subscriptions: subscriptions.n, chains: chains.n, pool: pool.n, routingProfiles: profiles.n, groups: groups.n },
+    added: { servers: servers.n, subscriptions: subscriptions.n, chains: chains.n, pool: pool.n, routingProfiles: profiles.n, groups: groups.n, ...(lan ? { lanUsers: lan.n } : {}) },
     kept
   };
 }

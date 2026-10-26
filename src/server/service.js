@@ -64,6 +64,8 @@ const { normalizeGroups, groupRecordsById, isGroupRecord, serversOf } = require(
 const { normalizeMultiWan } = require('../main/multiWan');
 const netLinks = require('../main/netLinks');
 const { createMultiWanQuota, mergeLinks } = require('../main/multiWanMeter');
+// users and devices on the LAN (module lanUsers): its channels, the build's input and its usage meter
+const { registerLanUsers } = require('../modules/lanUsers/ipc');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
 // list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
 // deliberately NOT given this: Electron never runs on a router.
@@ -862,6 +864,9 @@ function createService(opts = {}) {
       // each internet's speed and its period's bytes, while several carry the connection (multiWanMeter.js)
       const mwLive = mwQuota.rates();
       if (Object.keys(mwLive).length) s.multiWan = { live: mwLive, usage: mwQuota.usage() };
+      // …and each LAN user's, while the core carries them (src/modules/lanUsers/ipc.js)
+      const luLive = lanUsers.statsLive();
+      if (luLive) s.lanUsers = luLive;
       send('stats', s);
       // a group's members leaving and rejoining the rotation, said in the log
       for (const l of groupHealth.update(s.groups)) send('log', l);
@@ -883,6 +888,8 @@ function createService(opts = {}) {
       // each internet's bytes, from the counters before the groups are folded (multiWanMeter.js) —
       // a cap reached here sets that internet aside and asks for the reload
       mwQuota.tick(vars, stats.groupMap, liveMwSplit);
+      // each LAN user's bytes (src/modules/lanUsers/meter.js) — a cap reached here turns them off with one reload
+      lanUsers.tick(vars);
     }
   });
 
@@ -1980,6 +1987,8 @@ function createService(opts = {}) {
     // …and an internet over its data cap this period (multiWanMeter.js; a new period has cleared it by now)
     const mwSkip = mwQuota.skip();
     settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
+    // …and the users on the LAN, as the running app knows them (src/modules/lanUsers/ipc.js; null: off)
+    settings = Object.assign({}, settings, { lanUsers: await lanUsers.forBuild(settings) });
     let active;
     try { active = buildActive(serverId, settings); } catch (e) { throw refusal(e); }   // a target gone, a chain short of a member
     const { plan, label, entryAddrs, config, geoWarn, engine } = active;
@@ -2806,6 +2815,8 @@ function createService(opts = {}) {
     // …and the internets over their data cap this period (multiWanMeter.js) — the reload it asks for is this one
     const mwSkip = mwQuota.skip();
     settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
+    // …and the users on the LAN as they are now (src/modules/lanUsers/ipc.js) — a reload they ask for is this one
+    settings = Object.assign({}, settings, { lanUsers: await lanUsers.forBuild(settings) });
     // `plan` too: the usage meter needs it to attribute the new core's bytes
     const { plan, config, engine } = buildActive(serverId, settings);
     xrayReloading++;
@@ -3550,6 +3561,21 @@ function createService(opts = {}) {
     log: (line, level) => send('log', { line, level: level || 'info' })
   }, deps.warp || {}));
 
+  // Users and devices (src/modules/lanUsers/): the same four channels as main.js, spread into
+  // the table right after multiwan:test. On a router the proxy binds its LAN address (ubus).
+  // deps.lanDevices: a test's fake list of the devices answering now.
+  const lanUsers = registerLanUsers({
+    store, getSettings, usageStore, platform: OPENWRT ? 'router' : 'server', run: lanRun,
+    running: () => !!(xray && xray.running) && !!store.get('activeServerId', null),
+    canReload: () => !!(xray && xray.running) && !connectsInFlight.size && !recovering && !recoverTimer && !userDisconnecting && !isQuitting,
+    pending: () => pendingKeys(),
+    queueReload: (why) => queueReload(why),
+    resolveHost: resolveName,
+    devices: deps.lanDevices,
+    log: (l) => send('log', l),
+    now: clock
+  });
+
   const handlers = {
     'diagnostics:connection': connectionDiagnostics,
     'network:repair': repairNetwork,
@@ -3816,6 +3842,8 @@ function createService(opts = {}) {
       }
       return want.map((id) => byId[id]);
     },
+    // users and devices — lanusers:get / config / user / device (src/modules/lanUsers/ipc.js)
+    ...lanUsers.handlers,
 
     'ping:tcp': async (id) => {
       const { server } = resolveTarget(id);
@@ -3986,7 +4014,7 @@ function createService(opts = {}) {
     // Backup and restore — see backup.js; the same merge-by-id the desktop does.
     'backup:export': () => JSON.stringify(exportBundle({
       version: appVersion,
-      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings() },
+      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), lanUsers: store.get('lanUsers', undefined) },
       usage: usage ? usage.totals : {},
       flavor: OPENWRT ? 'openwrt' : null   // a router's own backup brings its router-only settings back (backup:import)
     }), null, 2),
@@ -3997,13 +4025,15 @@ function createService(opts = {}) {
       try {
         r = importBundle(bundle, {
           servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
-          chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {}
+          chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {},
+          lanUsers: store.get('lanUsers', undefined)
         // the keep list is for a backup made elsewhere (a desktop's, or one
         // from before the mark): the router's own, restored after a reset or
         // a re-flash, is exactly what should bring its kill switch back
         }, { keep: OPENWRT && !(bundle && bundle.flavor === 'openwrt') ? ROUTER_KEEPS_ON_IMPORT : [] });
       } catch (err) { return { ok: false, error: err.message }; }
       store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, groups: r.next.groups, settings: r.next.settings });
+      if (r.next.lanUsers) store.set('lanUsers', r.next.lanUsers);   // users and devices, when the backup had them (backup.js)
       installModulesInUse();   // what the backup brought in shows (modules.js)
       if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
       send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles, ${r.added.groups} groups added`, level: 'info' });

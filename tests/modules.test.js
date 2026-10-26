@@ -255,7 +255,8 @@ test('both DEFAULT_SETTINGS: no extension installed, migrated already (a new sto
 test('main.js: the migration where the others run, a backup brings its extensions, modules:get / modules:set as the router answers them', () => {
   for (const [f, src] of [['main.js', MAIN], ['service.js', SVC]]) {
     assert.match(src, /getRoutingProfiles\(\);\s+\/\/ today's advanced routing becomes profile rp-default, once\n\s*migrateModulesStore\(\);/, `${f}: after the profiles are in`);
-    assert.match(src, /groups: r\.next\.groups, settings: r\.next\.settings \}\);\n\s*installModulesInUse\(\);/, `${f}: after a backup restore`);
+    // (the users, when the backup had them, land first — what they use counts)
+    assert.match(src, /groups: r\.next\.groups, settings: r\.next\.settings \}\);\r?\n(?:\s*if \(r\.next\.lanUsers\)[^\n]*\n)?\s*installModulesInUse\(\);/, `${f}: after a backup restore`);
     assert.match(src, /const fresh = !raw \|\| raw === DEFAULT_SETTINGS;\n\s*if \(!fresh && raw\.modulesMigrated === true\) return;/, `${f}: once`);
   }
   assert.match(MAIN, /ipcMain\.handle\('modules:get', \(\) => \{/);

@@ -108,11 +108,11 @@
     multiWanSet: (partial) => invoke('multiwan:set', partial),
     multiWanTest: (ids) => invoke('multiwan:test', ids),
 
-    // users on this network (lanUsers.js) — USERS-UI's four lines, the same as the preload's; one copy if USERS-CORE adds them too
+    // users and devices (src/modules/lanUsers/ipc.js) — the same four calls as the preload
     lanUsersGet: () => invoke('lanusers:get'),
     lanUsersConfig: (partial) => invoke('lanusers:config', partial),
-    lanUsersUser: (arg) => invoke('lanusers:user', arg),
-    lanUsersDevice: (arg) => invoke('lanusers:device', arg),
+    lanUsersUser: (change) => invoke('lanusers:user', change),
+    lanUsersDevice: (change) => invoke('lanusers:device', change),
 
     connectionDiagnostics: (probe) => invoke('diagnostics:connection', probe),
     repairNetwork: () => invoke('network:repair'),

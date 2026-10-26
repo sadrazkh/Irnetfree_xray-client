@@ -74,6 +74,9 @@ const { normalizeGroups, groupRecordsById, isGroupRecord, serversOf } = require(
 const { normalizeMultiWan } = require('./multiWan');
 const netLinks = require('./netLinks');
 const { createMultiWanQuota, mergeLinks } = require('./multiWanMeter');
+// users and devices on the LAN (module lanUsers): its channels, the build's input and its usage meter
+const { registerLanUsers } = require('../modules/lanUsers/ipc');
+let lanUsers = null;
 const https = require('https');
 
 let mainWindow = null;
@@ -1418,6 +1421,8 @@ async function connectOnce(serverId, opts = {}) {
   // …and an internet over its data cap this period (multiWanMeter.js; a new period has cleared it by now)
   const mwSkip = mwQuota ? mwQuota.skip() : [];
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
+  // …and the users on the LAN, as the running app knows them (src/modules/lanUsers/ipc.js; null: off)
+  settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings) : null });
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
   // A JSON server set to run raw, said once per connect: run as written, or —
   // in a chain, advanced routing or the pool — used in its full form.
@@ -2143,6 +2148,8 @@ async function rebuildActiveConfig(why) {
   // …and the internets over their data cap this period (multiWanMeter.js) — the reload it asks for is this one
   const mwSkip = mwQuota ? mwQuota.skip() : [];
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
+  // …and the users on the LAN as they are now (src/modules/lanUsers/ipc.js) — a reload they ask for is this one
+  settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings) : null });
   // Keep the binding the live connection was built with (see doConnect): the
   // tunnel stays up across this reload, and asking the OS now would name it.
   if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
@@ -3425,6 +3432,21 @@ function registerIpc() {
     return want.map((id) => byId[id]);
   });
 
+  /* ------------------------- users and devices (src/modules/lanUsers/) ------------------------- */
+  // lanusers:get / config / user / device — the router's service answers the same channels.
+  // A change the running core must take is one reload, through the one queue (as the multi-internet caps').
+  lanUsers = registerLanUsers({
+    handle: (channel, fn) => ipcMain.handle(channel, (e, arg) => fn(arg)),
+    store, getSettings, usageStore, platform: 'desktop',
+    running: () => !!(xray && xray.running) && !!store.get('activeServerId', null),
+    canReload: () => !!(xray && xray.running) && !connectsInFlight.size && !recovering && !userDisconnecting,
+    pending: () => pendingKeys(),
+    queueReload: (why) => queueReload(why),
+    resolveHost,
+    log: (l) => send('log', l),
+    notify: (text) => notify('IRNetFree', text)
+  });
+
   // Resolve a ping/test target: a single server OR a named chain's entry hop.
   // What latencyTest needs to know about this machine: a server that runs on
   // sing-box is measured on it, when it is installed.
@@ -3743,7 +3765,7 @@ function registerIpc() {
   // Backup: everything the user has, as one JSON string the renderer saves.
   ipcMain.handle('backup:export', () => JSON.stringify(exportBundle({
     version: app.getVersion(),
-    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings() },
+    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), lanUsers: store.get('lanUsers', undefined) },
     usage: usage ? usage.totals : {}
   }), null, 2));
   // Restore: a merge by id (backup.js) — nothing on this machine is lost, and
@@ -3755,10 +3777,12 @@ function registerIpc() {
     try {
       r = importBundle(bundle, {
         servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
-        chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {}
+        chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {},
+        lanUsers: store.get('lanUsers', undefined)
       });
     } catch (err) { return { ok: false, error: err.message }; }
     store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, groups: r.next.groups, settings: r.next.settings });
+    if (r.next.lanUsers) store.set('lanUsers', r.next.lanUsers);   // users and devices, when the backup had them (backup.js)
     installModulesInUse();   // what the backup brought in shows (modules.js)
     if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
     refreshTray();
@@ -3974,6 +3998,9 @@ app.whenReady().then(() => {
       // each internet's speed and its period's bytes, while several carry the connection (multiWanMeter.js)
       const mwLive = mwQuota ? mwQuota.rates() : {};
       if (Object.keys(mwLive).length) s.multiWan = { live: mwLive, usage: mwQuota.usage() };
+      // …and each LAN user's, while the core carries them (src/modules/lanUsers/ipc.js)
+      const luLive = lanUsers ? lanUsers.statsLive() : null;
+      if (luLive) s.lanUsers = luLive;
       send('stats', s);
       // a group's members leaving and rejoining the rotation, said in the log
       for (const l of groupHealth.update(s.groups)) send('log', l);
@@ -3996,6 +4023,8 @@ app.whenReady().then(() => {
       // each internet's bytes, from the counters before the groups are folded (multiWanMeter.js) —
       // a cap reached here sets that internet aside and asks for the reload
       if (mwQuota) mwQuota.tick(vars, stats.groupMap, liveMwSplit);
+      // each LAN user's bytes (src/modules/lanUsers/meter.js) — a cap reached here turns them off with one reload
+      if (lanUsers) lanUsers.tick(vars);
     }
   });
 

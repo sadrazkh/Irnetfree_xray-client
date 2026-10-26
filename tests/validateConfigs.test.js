@@ -293,3 +293,16 @@ test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every
   assert.match(job, /IRNF_XRAY_EXE="\$RUNNER_TEMP\/p\/xray" node scripts\/validate-configs\.js/);
   assert.doesNotMatch(job, /IRNF_VALIDATE_DRY/, 'a dry run checks nothing');
 });
+
+test('the core gate carries the users’ configs (module lanUsers): their inbounds, accounts and per-user rules, on a router’s LAN address too', { timeout: 60000 }, (t) => {
+  const run = dryRun(t);
+  for (const name of ['single-desktop', 'single-router', 'single-socks-only', 'transparent-only', 'chain', 'advanced', 'pool']) {
+    for (const v of ['plain', 'tun']) assert.ok(run.built.includes(`lanusers-${name}-${v}.json`), `lanusers-${name}-${v}`);
+  }
+  const router = run.read('lanusers-single-router-tun');
+  const socks = router.inbounds.find((i) => i.tag === 'lu-socks');
+  assert.deepEqual([socks.listen, socks.settings.auth, socks.settings.accounts.length], ['192.168.1.1', 'password', 6]);
+  assert.ok(router.inbounds.some((i) => i.tag === 'lu-tp-0' && i.listen === '127.0.0.1'));
+  assert.ok(router.routing.rules.some((r) => Array.isArray(r.user) && r.user[0] === 'mina' && r.outboundTag === 'lu-out-grp-lu'));
+  assert.equal(router.outbounds.find((o) => o.tag === 'lu-out-sv-trojan').streamSettings.sockopt.interface, 'eth0', 'bound to the NIC under TUN');
+});

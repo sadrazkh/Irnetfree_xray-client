@@ -25,6 +25,8 @@ const { isGroupRecord, serversOf, STRATEGIES: GROUP_STRATEGIES } = require('./gr
 const { applies: multiWanApplies, applyMultiWan, finishSplit } = require('./multiWan');
 // the extensions (src/renderer/modules.js): multiWan not installed is multiWan disabled
 const { isOn: moduleOn } = require('../renderer/modules');
+// users and devices on the LAN (module lanUsers): their proxy, accounts and rules — only when installed and on
+const lanUsers = require('../modules/lanUsers/xray');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -1218,6 +1220,12 @@ function buildConfig(planArg, settings) {
     rules = [...base, ...normalizeCustomRules(s.customRules, geo), tail];
   }
 
+  // LAN users (src/modules/lanUsers/xray.js): each user's config as an outbound
+  // here, beside the plan's, so every pass below reaches it too; their inbounds
+  // and rules at the end. Not installed, or its proxy off: nothing changes.
+  const lu = lanUsers.applies(s) ? lanUsers.lanUsersOutbounds(s.lanUsers, lanUsersCtx(s, plan, exitTag, outbounds)) : null;
+  if (lu) outbounds = outbounds.concat(lu.outbounds);
+
   // Name resolution (see dnsBuilder.js). Its rules go FIRST: the port-53 hijack
   // must beat the private-IP bypass, or a query to the tunnel peer 10.255.0.1
   // would be sent "direct" into nowhere instead of being answered.
@@ -1259,7 +1267,7 @@ function buildConfig(planArg, settings) {
   // line back for a comparison.
   const level0 = { statsUserUplink: true, statsUserDownlink: true };
 
-  return withGroupTags({
+  const config = {
     log: { loglevel: s.logLevel },
     // Live traffic counters over HTTP (GET /debug/vars) instead of the gRPC-only
     // StatsService: one cheap request per second instead of spawning `xray api
@@ -1277,7 +1285,52 @@ function buildConfig(planArg, settings) {
     routing: withBalancers({ domainStrategy: routingStrategy(s), rules }, grp),
     ...(grp.observatory ? { observatory: grp.observatory } : {}),
     ...groupApi(grp, s)
-  }, grp, mwSplit);
+  };
+  // the users' inbounds and rules — after the groups' and the DNS rules, ahead of the plan's
+  if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag });
+  return withGroupTags(config, grp, mwSplit);
+}
+
+/**
+ * What lanUsers.lanUsersOutbounds needs from the builder: the records the
+ * users' targets name (the plan's, and those ipc.js looked up — a single or
+ * chain plan carries none of its own), the outbound the plan already has for
+ * exactly that target, and the builder's own way to make a server's or a
+ * chain's outbounds — as the pool makes a target's (makeRegistry): mux on a
+ * server's own outbound, its JSON helpers beside it.
+ * `outs`: the plan's outbounds so far, before any pass.
+ */
+function lanUsersCtx(s, plan, exitTag, outs) {
+  const lu = s.lanUsers || {};
+  const have = new Set((outs || []).map(o => o && o.tag));
+  const serversById = Object.assign({}, plan.serversById, lu.serversById);
+  const chainsById = Object.assign({}, plan.chainsById, lu.chainsById);
+  const ids = (list) => (Array.isArray(list) ? list : []).filter(x => x && x.outbound).map(x => x.id);
+  const mine = plan.mode === 'chain' ? ids(plan.chain) : (plan.mode === 'single' && plan.server ? [plan.server.id] : []);
+  const wgIps = Object.assign({}, lu.wgEndpointIps, s.wgEndpointIps);
+  return {
+    exitTag, serversById, chainsById,
+    // the selection itself (its exit is `proxy`), or a target / base the plan dials as that very target
+    existingTag(target) {
+      if (target.indexOf('chain:') === 0) {
+        const cid = target.slice('chain:'.length);
+        const theirs = ids(chainsById[cid]);
+        if (plan.mode === 'chain' && theirs.length && theirs.join('\n') === mine.join('\n')) return 'proxy';
+        return ['out-chain-' + cid, 'base-chain-' + cid].find(t => have.has(t)) || null;
+      }
+      if (mine.length && mine[mine.length - 1] === target) return 'proxy';
+      return ['out-' + target, 'base-' + target].find(t => have.has(t)) || null;
+    },
+    server: (srv, tag) => withHelpers(applyMux(cloneOut(srv.outbound, tag, srv), srv, s.muxServerIds), srv).map(o => applyWgEndpointIps(o, wgIps)),
+    chain: (list, tag) => (list.length >= 2 ? buildChainOutbounds(list, tag) : withHelpers(cloneOut(list[0].outbound, tag, list[0]), list[0])).map(o => applyWgEndpointIps(o, wgIps)),
+    // A WireGuard endpoint by name that nobody resolved: never handed to the
+    // core (see lanUsersOutbounds). A group's members are written out later, by
+    // expandGroups, and only the connect's own names reach them there.
+    unsafe: (rec) => {
+      const known = isGroupRecord(rec) ? (s.wgEndpointIps || {}) : wgIps;
+      return wgEndpointHosts({ mode: 'single', server: rec }).some(h => !known[h]);
+    }
+  };
 }
 
 /**
@@ -1632,6 +1685,9 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   const dnsPlan = buildDnsPlan(dnsSettingsFor(s, plan),
     { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
+  // LAN users — see buildConfig (a target an entry already dials shares its outbound)
+  const lu = lanUsers.applies(s) ? lanUsers.lanUsersOutbounds(s.lanUsers, lanUsersCtx(s, plan, primaryTag, reg.outs)) : null;
+  if (lu) lu.outbounds.forEach(o => reg.add(o));
   // multi-internet, then groups — see buildConfig
   const mw = multiWanAllowed(s) && multiWanApplies(s.multiWan, s.multiWanSkip);
   const grp = expandGroups(mw ? applyMultiWan(reg.outs, s.multiWan, s.multiWanSkip, { servers: serversByTag(plan), groupSkip: s.groupSkip }) : reg.outs, s.groupSkip);
@@ -1654,7 +1710,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   // See buildConfig: no per-connection buffer cap for a chained WireGuard.
   const level0 = { statsUserUplink: true, statsUserDownlink: true };
 
-  return withGroupTags({
+  const config = {
     log: { loglevel: s.logLevel },
     // See buildConfig: the metrics endpoint reports every outbound tag, which is
     // what makes the traffic meter work for a pool (exits are 'out-<serverId>').
@@ -1673,7 +1729,10 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     routing: withBalancers({ domainStrategy: 'IPIfNonMatch', rules }, grp),
     ...(grp.observatory ? { observatory: grp.observatory } : {}),
     ...groupApi(grp, s)
-  }, grp, mwSplit);
+  };
+  // the users' inbounds and rules — after the groups' and the DNS rules, ahead of the private bypass and the entries
+  if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag: primaryTag });
+  return withGroupTags(config, grp, mwSplit);
 }
 
 /**
