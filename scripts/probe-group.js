@@ -23,7 +23,11 @@
  * groupTags): every member's health as the core's check found it, the dead
  * member dead and the others alive.
  * The health check asks a local page here instead of cp.cloudflare.com (the
- * only change made to what the builder wrote), so it needs no internet.
+ * only change made to what the builder wrote), so it needs no internet. The
+ * builder is handed a chain relay port, as every connect is: in rounds 3 and 4
+ * a dial through a hop rides it (configBuilder.relayHopDials) — straight
+ * through the ws hop the core cut a page short now and then, which is what
+ * made those two rounds fail 3 fetches in 9 on CI (scripts/probe-chain-tail.js).
  *
  *   IRNF_XRAY_EXE     the client core (default bin/xray)
  *   IRNF_HOP_EXE      the core the servers run (default: the client core)
@@ -42,7 +46,7 @@ const { sumOutbounds, StatsPoller } = require('../src/main/stats');
 
 const BASE = Number(process.env.IRNF_PROBE_PORT || 22400);
 const P = { s1: BASE + 1, s2: BASE + 2, s3: BASE + 3, h: BASE + 4, s1b: BASE + 5, s2b: BASE + 6, wg: BASE + 7, dead: BASE + 9,
-  page1: BASE + 11, page2: BASE + 12, page3: BASE + 13, probe: BASE + 14, pageWg: BASE + 15, socks: BASE + 20 };
+  page1: BASE + 11, page2: BASE + 12, page3: BASE + 13, probe: BASE + 14, pageWg: BASE + 15, socks: BASE + 20, relay: BASE + 23 };
 const UUID = '7d2f0c3b-1e4a-4b6d-9c8e-0a1b2c3d4e5f';
 const TARGET = '203.0.113.9';
 const exeName = (n) => (process.platform === 'win32' ? n + '.exe' : n);
@@ -189,7 +193,7 @@ async function main() {
   const live = groupRecord({ id: 'grp-live', name: 'S1+S2', members: [{ id: 's1' }, { id: 's2' }, { id: 'dead' }] }, byId);
   const plainGroup = groupRecord({ id: 'grp-hop', name: 'S1b+S2b', members: [{ id: 's1b' }, { id: 's2b' }, { id: 'dead' }] }, byId);
   const settings = { socksPort: P.socks, httpPort: P.socks + 1, apiPort: P.socks + 2, routingMode: 'global', blockAds: false,
-    geoAssets: false, dnsManaged: false, logLevel: 'warning', enableSniffing: false };
+    geoAssets: false, dnsManaged: false, logLevel: 'warning', enableSniffing: false, chainRelayPort: P.relay };
   const rounds = [
     ['the group selected', { mode: 'single', server: live }, (seen) => seen.includes('S1') && seen.includes('S2') && seen.every((x) => x === 'S1' || x === 'S2')],
     ['advanced routing: 203.0.113.0/24 → the group', {

@@ -69,7 +69,9 @@ test('the router runs a full-mode JSON server inside its own config: the helpers
   const tags = config.outbounds.map((o) => o.tag);
   assert.deepEqual(tags.slice(0, 3), ['proxy', 'proxy~hop1', 'proxy~frag']);
   assert.ok(tags.includes('dns-out'), 'the app’s hijack is there');
-  assert.deepEqual(config.outbounds[0].streamSettings.sockopt.dialerProxy, 'proxy~hop1', 'its hop as the dialerProxy the cores take');
+  // its own hop as the dialerProxy the cores take — over the chain relay (configBuilder.relayHopDials)
+  assert.deepEqual(config.outbounds[0].streamSettings.sockopt.dialerProxy, 'chain-relay~proxy~hop1');
+  assert.deepEqual(config.routing.rules[0], { type: 'field', inboundTag: ['chain-relay'], user: ['proxy~hop1'], outboundTag: 'proxy~hop1' });
   assert.equal(config.outbounds[0].proxySettings, undefined);
   assert.equal(s.logs.some((l) => /raw/.test(l.line)), false, 'nothing to say about raw');
   await s.service.invoke('disconnect');
@@ -82,7 +84,7 @@ test('a raw server in a chain is used in its full form, and the log says so once
   await s.service.invoke('connect', 'c1');
   const { config } = s.state.xray.starts[0];
   assert.deepEqual(config.outbounds.slice(0, 2).map((o) => o.tag), ['proxy-h0', 'proxy']);
-  assert.equal(config.outbounds[1].streamSettings.sockopt.dialerProxy, 'proxy-h0');
+  assert.equal(config.outbounds[1].streamSettings.sockopt.dialerProxy, 'chain-relay~proxy-h0');
   assert.deepEqual(s.logs.filter((l) => /set to run raw/.test(l.line)).map((l) => l.line), ['"R" is set to run raw, but a chain/routing target uses its full form']);
   await s.service.invoke('disconnect');
 });
