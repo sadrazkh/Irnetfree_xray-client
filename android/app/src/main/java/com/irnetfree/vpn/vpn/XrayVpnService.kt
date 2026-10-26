@@ -1456,8 +1456,10 @@ class XrayVpnService : VpnService() {
             // loopback port picked free now: the session reads its groups' health
             // check there (watchGroups). Without a group the config opens none.
             val metricsPort = if (engine == EngineChoice.SINGBOX) 0 else freeLocalPort(setOf(s.socksPort, s.httpPort))
+            // ...and every TCP dial through a hop rides a loopback socket on another (ConfigBuilder.relayHopDials)
+            val relayPort = if (engine == EngineChoice.SINGBOX) 0 else freeLocalPort(setOf(s.socksPort, s.httpPort, metricsPort))
             val built = TunnelSetup.coreConfig(engine, plan, s, geo, wgIps, auth, lan, muxIds = mux.ids,
-                groupSkip = groupSkip, metricsPort = metricsPort,
+                groupSkip = groupSkip, metricsPort = metricsPort, relayPort = relayPort,
                 coreVersion = { e -> if (e == EngineChoice.PATTN) XrayPattnCore.version(ctx) else XrayCore.version() }) { line -> VpnState.addLog(line) }
             engine = built.engine
             val config = built.json
