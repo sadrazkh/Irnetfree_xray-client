@@ -217,3 +217,18 @@ test('both bridges expose the same four calls', () => {
     assert.ok(web.includes(`${name}: (${arg}) => invoke(${call}),`), `web-api ${name}`);
   }
 });
+
+test('the addresses to give people: the Windows hotspot first; never the app’s own TUN adapters (sing-box’s 172.19.0.1 was offered)', () => {
+  const { lanCandidates, HOTSPOT_IP } = require('../src/modules/lanUsers/ipc');
+  assert.equal(HOTSPOT_IP, '192.168.137.1');
+  const v4 = (address) => ({ family: 'IPv4', address, internal: false });
+  const ifs = {
+    IRNetFree: [v4('172.19.0.1')],
+    XrayTun: [v4('10.255.0.2')],
+    Ethernet: [v4('10.0.0.5'), v4('169.254.52.192')],
+    'Wi-Fi': [v4('192.168.8.191')],
+    'Local Area Connection* 10': [v4('192.168.137.1')],
+    'Loopback Pseudo-Interface 1': [{ family: 'IPv4', address: '127.0.0.1', internal: true }]
+  };
+  assert.deepEqual(lanCandidates(ifs), ['192.168.137.1', '192.168.8.191', '10.0.0.5']);
+});

@@ -1187,6 +1187,26 @@
 .lu-proto { flex: none; min-inline-size: 58px; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--ink3); }
 .lu-addr-row .lu-mono { font-size: 13.5px; font-weight: 600; color: var(--ink); }
 .lu-copy { margin-inline-start: auto; }
+.lu-addr-row .lu-hs { color: var(--info); border-color: var(--info); }
+/* users there and no way in for any of them: above everything, with the switch's own action */
+.lu-alert {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  background: var(--soft);
+  border: 1px solid var(--warn);
+  border-inline-start-width: 3px;
+  border-radius: 12px;
+}
+.lu-alert-text { flex: 1 1 220px; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+/* a user's link for a phone: the QR in the app's own white box (.qr-image — a scanner needs it on the dark skins), the link under it */
+.modal.lu-share { width: min(440px, 100%); }
+.lu-share .lu-qr { align-self: center; inline-size: min(260px, 100%); }
+.lu-qrimg { display: block; inline-size: 100%; block-size: auto; image-rendering: pixelated; }
+.lu-share .lu-link { padding: 8px 10px; font-size: 11.5px; background: var(--soft); border: 1px solid var(--line); border-radius: 9px; user-select: all; }
+.lu-ips { display: flex; flex-wrap: wrap; gap: 6px; }
 /* a box per user */
 .lu-list { display: flex; flex-direction: column; gap: 10px; }
 .lu-user { padding: 12px 14px; background: var(--soft); border: 1px solid var(--line); border-radius: 12px; }

@@ -298,10 +298,18 @@ button { cursor: pointer; background: none; border: 0; color: inherit; }
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding-block: 14px;
+  gap: calc(8px * var(--navz, 1));
+  padding-block: calc(14px * var(--navz, 1));
   overflow: visible;
 }
+/* every item shrinks together when they would not fit the rail's height
+   (app.js fitNav sets --navz below 1; unset, they are their own size); a
+   labelled skin's labels go first where they would be too small to read, and
+   past the smallest zoom the rail scrolls. Never squeezed by the flex column
+   itself: that pressed a button down to its icon, and a label ran off the end */
+.sidebar > :not(.sidebar-spacer) { zoom: var(--navz, 1); flex-shrink: 0; }
+.sidebar[data-nav-compact] .nav-item > span:not(.nav-ico) { display: none; }
+.sidebar[data-nav-scroll] { overflow-y: auto; scrollbar-width: none; }
 .nav-item {
   width: 40px; height: 40px;
   display: grid;

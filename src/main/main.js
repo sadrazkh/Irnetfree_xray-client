@@ -531,11 +531,16 @@ async function addLanFirewall(socksPort, httpPort) {
 
 const TUN_LOCAL_IP = '10.255.0.2';   // our own TUN adapter address — never a LAN IP
 
-/** Candidate LAN IPv4 addresses (skips loopback, our TUN adapter, APIPA). */
+/**
+ * Candidate LAN IPv4 addresses (skips loopback, our TUN adapters, APIPA).
+ * sing-box's adapter (172.19.0.1, named IRNetFree) went unskipped: on a 10.x
+ * LAN its 172.16/12 address outranked the real one in lanIp.
+ */
 function lanCandidates() {
   const ifs = os.networkInterfaces();
   const out = [];
   for (const name of Object.keys(ifs)) {
+    if (isOwnTunInterface(name)) continue;
     for (const ni of ifs[name] || []) {
       if (ni.family !== 'IPv4' || ni.internal) continue;
       if (ni.address === TUN_LOCAL_IP) continue;
