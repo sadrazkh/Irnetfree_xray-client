@@ -481,6 +481,37 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
   }
 }
 
+// Users and devices (module lanUsers, src/modules/lanUsers/xray.js): the users'
+// SOCKS5 (password, UDP) and HTTP inbounds with their accounts, the loopback
+// guard and one rule per username (`user`), each user's target its own
+// outbound — a server, a chain, a group, the current connection, direct,
+// block — and the router's transparent loopback inbounds; the desktop's
+// every-address listen (a config only: `run -test` binds nothing) and a
+// router's LAN address; plain and under TUN; single, chain, advanced and pool.
+{
+  const { groupRecord } = require('../src/main/groups');
+  const luGroup = groupRecord({ id: 'grp-lu', name: 'LU', members: [{ id: 'sv-trojan' }, { id: 'sv-ss' }] }, { 'sv-trojan': F.TROJAN_TCP_TLS, 'sv-ss': F.SS_TCP });
+  const u = (id, username, target) => ({ id, username, password: 'pw-' + username, name: '', target, quotaGb: 0, quotaPeriod: 'month', expiresAt: 0, maxDevices: 0, enabled: true });
+  const LU_USERS = [u('usr-a', 'ali', ''), u('usr-b', 'sara', 'sv-trojan'), u('usr-c', 'reza', 'chain:c1'), u('usr-d', 'mina', 'grp-lu'), u('usr-e', 'dir', 'direct'), u('usr-f', 'blk', 'block')];
+  const luOf = (over) => ({ modules: { lanUsers: true }, lanUsers: Object.assign({
+    config: { proxy: { enabled: true, port: 30820, httpPort: 30821 } }, users: LU_USERS, devices: [], over: [], now: Date.now(),
+    serversById: { 'sv-trojan': F.TROJAN_TCP_TLS, 'sv-ss': F.SS_TCP, 'grp-lu': luGroup }, chainsById: { c1: [F.SS_TCP, F.TROJAN_TCP_TLS] }
+  }, over) });
+  const LU_SHAPES = {
+    'single-desktop': [single, luOf({})],
+    'single-router': [single, luOf({ listen: '192.168.1.1', tp: [{ n: 0, port: 41200, target: 'sv-trojan' }, { n: 1, port: 41201, target: '' }] })],
+    'single-socks-only': [single, luOf({ config: { proxy: { enabled: true, port: 30820, httpPort: 0 } } })],
+    'transparent-only': [single, luOf({ config: { proxy: { enabled: false } }, tp: [{ n: 0, port: 41200, target: 'grp-lu' }] })],
+    chain: [chain, luOf({})],
+    advanced: [advanced, luOf({})],
+    pool: [pool, luOf({})]
+  };
+  const LU_SETTINGS = { plain: managed, tun: Object.assign({ routingMode: 'bypass-ir', tunMode: true, leakGuard: 'standard', directInterface: 'eth0' }, managed) };
+  for (const [name, [plan, over]] of Object.entries(LU_SHAPES)) {
+    for (const [variant, s] of Object.entries(LU_SETTINGS)) check(`lanusers-${name}-${variant}`, buildConfig(plan, F.settings(Object.assign({}, s, over))));
+  }
+}
+
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
 // sing-tun there only accepts utun<N> and names the device itself — plus the

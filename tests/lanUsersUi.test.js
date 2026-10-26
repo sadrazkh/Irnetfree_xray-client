@@ -861,7 +861,7 @@ test('the markup: a nav item and a view for module lanUsers, the page box, the s
 test('the wiring: the four calls in the preload and the router’s bridge; app.js mounts, reads on open, redraws, ticks', () => {
   const preload = R('src', 'preload', 'preload.js');
   const web = R('src', 'server', 'web-api.js');
-  for (const [name, channel, arg] of [['lanUsersGet', 'lanusers:get', ''], ['lanUsersConfig', 'lanusers:config', 'partial'], ['lanUsersUser', 'lanusers:user', 'arg'], ['lanUsersDevice', 'lanusers:device', 'arg']]) {
+  for (const [name, channel, arg] of [['lanUsersGet', 'lanusers:get', ''], ['lanUsersConfig', 'lanusers:config', 'partial'], ['lanUsersUser', 'lanusers:user', 'change'], ['lanUsersDevice', 'lanusers:device', 'change']]) {
     const call = arg ? `\\('${channel}', ${arg}\\)` : `\\('${channel}'\\)`;
     assert.match(preload, new RegExp(`${name}: \\(${arg}\\) => ipcRenderer\\.invoke${call},`), name);
     assert.match(web, new RegExp(`${name}: \\(${arg}\\) => invoke${call},`), name);

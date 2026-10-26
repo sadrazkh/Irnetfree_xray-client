@@ -78,13 +78,12 @@ contextBridge.exposeInMainWorld('api', {
   multiWanSet: (partial) => ipcRenderer.invoke('multiwan:set', partial),
   multiWanTest: (ids) => ipcRenderer.invoke('multiwan:test', ids),
 
-  // users on this network (lanUsers.js) — USERS-UI's four lines; the integrator keeps one copy if USERS-CORE adds them too.
-  // Each answers the whole lanusers:get payload ({ config, users, devices, usage, live, online, platform, lanAddresses }),
-  // the three writes with pendingReconnect when the running connection has to be rebuilt.
+  // users and devices (src/modules/lanUsers/ipc.js): { config, users, devices, usage, live, online, platform,
+  // lanAddresses }; each change answers that + { pendingReconnect, error? }
   lanUsersGet: () => ipcRenderer.invoke('lanusers:get'),
   lanUsersConfig: (partial) => ipcRenderer.invoke('lanusers:config', partial),
-  lanUsersUser: (arg) => ipcRenderer.invoke('lanusers:user', arg),          // { op: 'add' | 'update' | 'delete', user }
-  lanUsersDevice: (arg) => ipcRenderer.invoke('lanusers:device', arg),      // { mac, userId?, blocked?, name? }
+  lanUsersUser: (change) => ipcRenderer.invoke('lanusers:user', change),
+  lanUsersDevice: (change) => ipcRenderer.invoke('lanusers:device', change),
 
   connectionDiagnostics: (probe) => ipcRenderer.invoke('diagnostics:connection', probe),
   repairNetwork: () => ipcRenderer.invoke('network:repair'),
