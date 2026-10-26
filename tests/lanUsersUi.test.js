@@ -302,8 +302,11 @@ test('with users, in Persian: the address to give people left to right with copy
   assert.deepEqual(sara.one('lu-quota').children.map((c) => c.textContent), ['6.5 GB از 20.0 GB', 'تا ' + persian(MONTH_END, SHORT)]);
   assert.equal(host.byKey('quota:usr-a1').value, '20');
   assert.equal(host.byKey('quota:usr-a1').getAttribute('dir'), 'ltr');
-  assert.equal(host.byKey('period:usr-a1').value, 'month');
-  assert.deepEqual(host.byKey('period:usr-a1').children.map((o) => o.textContent), ['GB در ماه', 'GB در روز', 'بدون سقف']);
+  assert.equal(host.byKey('period:usr-a1').value, 'month', 'a user saved before the calendar choice: the Gregorian month');
+  assert.deepEqual(host.byKey('period:usr-a1').children.map((o) => o.textContent), ['GB در ماه شمسی', 'GB در ماه میلادی', 'GB در روز', 'بدون سقف'], 'the Persian month first in Persian');
+  assert.equal(host.byKey('renew:usr-a1').value, '1', 'renewing on the 1st');
+  assert.equal(host.byKey('renew:usr-a1').parentNode.hidden, false, 'a month: its renew day shown');
+  assert.equal(host.byKey('renew:usr-b2').parentNode.hidden, true, 'a day: no renew day');
   // near its daily cap: amber, and what happens at it
   const reza = h.user('usr-b2');
   assert.equal(reza.one('lu-bar').children[0].className, 'warn');
@@ -571,6 +574,94 @@ test('the switch, a cap, its period, an expiry and its removal each save the who
   assert.ok(h.applied.length >= 5, 'every answer goes to app.js (the reconnect question)');
 });
 
+test('a month of the admin’s choosing: the Persian or the Gregorian month, its renew day under it, saved as the two fields', async () => {
+  const data = payload();
+  data.users[0] = Object.assign({}, data.users[0], { quotaCalendar: 'jalali', quotaResetDay: 30 });
+  data.usage['usr-a1'] = Object.assign({}, data.usage['usr-a1'], { period: 'j1405-07@30', until: new Date(2026, 10, 20).getTime() });
+  data.usage['usr-c3'] = Object.assign({}, data.usage['usr-c3'], { period: '2026-10@15' });
+  const h = harness({ data });
+  await h.load();
+  const note = (id) => h.user(id).all((n) => n.classList.contains('lu-sub') && n.textContent === h.t('lu.renewLast'))[0];
+  assert.equal(h.host.byKey('period:usr-a1').value, 'jmonth');
+  assert.equal(h.host.byKey('renew:usr-a1').value, '30');
+  assert.deepEqual(h.host.byKey('renew:usr-a1').children.map((o) => o.textContent), Array.from({ length: 31 }, (_, i) => String(i + 1)));
+  assert.equal(h.user('usr-a1').one('lu-renew').textContent.startsWith('روز تمدید'), true);
+  assert.equal(note('usr-a1').hidden, false, 'the 30th: Esfand of a common year has 29 — said');
+  assert.deepEqual(h.user('usr-a1').one('lu-quota').children.map((c) => c.textContent), ['6.5 GB از 20.0 GB', 'تا ' + persian(new Date(2026, 10, 20).getTime(), SHORT)], 'when it renews: 30 Aban');
+  assert.equal(h.user('usr-c3').one('lu-quota').children[1].textContent, 'این ماه', 'a month renewing on the 15th is a month, not today');
+  assert.equal(note('usr-d4').hidden, true, 'the 1st: nothing to say');
+
+  const renew = h.host.byKey('renew:usr-a1');
+  renew.value = '15';
+  renew.dispatch('change');
+  await flush();
+  assert.deepEqual(['quotaPeriod', 'quotaCalendar', 'quotaResetDay'].map((k) => h.calls.at(-1)[2][k]), ['month', 'jalali', 15]);
+  const per = h.host.byKey('period:usr-a1');
+  per.value = 'month';
+  per.dispatch('change');
+  await flush();
+  assert.deepEqual(['quotaPeriod', 'quotaCalendar', 'quotaResetDay'].map((k) => h.calls.at(-1)[2][k]), ['month', 'gregorian', 15], 'the Gregorian month, the same day');
+  assert.equal(h.host.byKey('period:usr-a1').value, 'month');
+  const per2 = h.host.byKey('period:usr-a1');
+  per2.value = 'day';
+  per2.dispatch('change');
+  await flush();
+  assert.equal(h.calls.at(-1)[2].quotaPeriod, 'day');
+  assert.equal(h.host.byKey('renew:usr-a1').parentNode.hidden, true, 'a day has no renew day');
+  // the Gregorian 29th: February has 28 — said; the Persian 29th is in every month — not
+  const per3 = h.host.byKey('period:usr-a1');
+  per3.value = 'month';
+  per3.dispatch('change');
+  await flush();
+  const r29 = h.host.byKey('renew:usr-a1');
+  r29.value = '29';
+  r29.dispatch('change');
+  await flush();
+  assert.equal(note('usr-a1').hidden, false);
+  const per4 = h.host.byKey('period:usr-a1');
+  per4.value = 'jmonth';
+  per4.dispatch('change');
+  await flush();
+  assert.equal(note('usr-a1').hidden, true);
+});
+
+test('the dialog: a month and its renew day — the line comes and goes with the period; an existing Persian-month user opens as one; English lists the Gregorian month first', async () => {
+  const data = payload();
+  data.users[1] = Object.assign({}, data.users[1], { quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 12 });
+  const h = harness({ data });
+  await h.load();
+  h.host.byKey('edit:usr-b2').click();
+  let dlg = h.dialog();
+  assert.equal(dlg.byKey('f:period').value, 'jmonth');
+  assert.equal(dlg.byKey('f:renew').value, '12');
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, false);
+  const per = dlg.byKey('f:period');
+  per.value = 'none';
+  per.dispatch('change');
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, true, 'no cap: no renew day');
+  assert.equal(dlg.byKey('f:quotaGb').disabled, true);
+  per.value = 'month';
+  per.dispatch('change');
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, false);
+  const r = dlg.byKey('f:renew');
+  r.value = '31';
+  r.dispatch('change');
+  assert.equal(dlg.all((n) => n.classList.contains('lu-sub') && n.textContent === h.t('lu.renewLast'))[0].hidden, false);
+  dlg.byKey('f:save').click();
+  await flush();
+  const saved = h.calls.at(-1)[2];
+  assert.deepEqual([saved.quotaPeriod, saved.quotaCalendar, saved.quotaResetDay], ['month', 'gregorian', 31]);
+
+  const en = harness({ lang: 'en' });
+  await en.load();
+  assert.deepEqual(en.host.byKey('period:usr-a1').children.map((o) => o.textContent), ['GB a month', 'GB a Jalali month', 'GB a day', 'No cap']);
+  en.host.byKey('add').click();
+  dlg = en.dialog();
+  assert.equal(dlg.byKey('f:period').value, 'month', 'in English a new user’s month is the Gregorian one');
+  assert.equal(dlg.byKey('f:renew').value, '1');
+  assert.equal(en.user('usr-a1').one('lu-renew').textContent.startsWith('Renews on day'), true);
+});
+
 test('a save that fails says so and the page goes back to what was saved', async () => {
   const h = harness({ api: { lanUsersUser: async () => { throw new Error('disk full'); } } });
   await h.load();
@@ -629,7 +720,8 @@ test('add: the dialog says each broken rule under its field — username, taken 
   assert.equal(pass.getAttribute('dir'), 'ltr');
   assert.equal(dlg.byKey('f:username').getAttribute('dir'), 'ltr');
   assert.equal(dlg.byKey('f:username').getAttribute('autocapitalize'), 'none');
-  assert.equal(dlg.byKey('f:period').value, 'month');
+  assert.equal(dlg.byKey('f:period').value, 'jmonth', 'in Persian a new user’s cap follows the Persian month…');
+  assert.equal(dlg.byKey('f:renew').value, '1', '…from its 1st');
   assert.equal(dlg.byKey('f:enabled').checked, true);
   assert.equal(dlg.hasKey('f:maxDevices'), false, 'not on a PC');
   assert.equal(dlg.hasKey('f:delete'), false, 'nothing to delete yet');
@@ -670,7 +762,7 @@ test('add: the dialog says each broken rule under its field — username, taken 
   const [kind, op, user] = h.calls.at(-1);
   assert.deepEqual([kind, op], ['user', 'add']);
   assert.deepEqual(user, {
-    username: 'mina.k_2-x', password: ' 1234 ', name: 'مینا', target: 'srv-2', quotaGb: 15, quotaPeriod: 'month',
+    username: 'mina.k_2-x', password: ' 1234 ', name: 'مینا', target: 'srv-2', quotaGb: 15, quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 1,
     expiresAt: new Date(2027, 2, 20, 23, 59, 59, 999).getTime(), maxDevices: 0, enabled: true
   }, 'the password as typed; no id — the service gives one');
   assert.equal(h.dialog(), null, 'closed');
@@ -904,7 +996,7 @@ test('a read that fails says so; a back end without the channels hides the page 
 test('every string the page can show is defined once in Persian and once in English, right after mi.note', () => {
   const keys = new Set([...PAGE.matchAll(/t\('((?:lu|nav|set)\.[A-Za-z0-9.]+)'\)/g)].map((m) => m[1]));
   for (const s of ['on', 'off', 'expired', 'over']) keys.add('lu.state.' + s);
-  for (const p of ['month', 'day', 'none']) keys.add('lu.period.' + p);
+  for (const p of ['month', 'jmonth', 'day', 'none']) keys.add('lu.period.' + p);
   for (const p of ['login', 'allow', 'block']) { keys.add('lu.unassigned.' + p); keys.add('lu.unassignedHint.' + p); }
   for (const k of ['username', 'usernameTaken', 'password', 'quota', 'maxDevices']) keys.add('lu.err.' + k);
   for (const k of ['nav.users', 'set.lanUsers', 'lu.title']) keys.add(k);

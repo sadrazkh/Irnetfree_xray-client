@@ -304,6 +304,29 @@ test('the pins follow the devices: a new lease moves the rule-set file and the t
   assert.deepEqual(file(), []);
 });
 
+test('the devices list counts each device in its user’s month — a Persian-month user’s under j1405-08, the running month’s count carried', async () => {
+  const lan = fakeLan({ neigh: `192.168.1.23 lladdr ${A} REACHABLE\n` });
+  const files = memFs();
+  // saved before the user's cap followed the Persian month: October's count
+  files.writeFileSync('/etc/irnetfree/lan-device-usage.json', JSON.stringify({ [A]: { period: '2026-10', bytes: 1000 }, [C]: { period: '2026-10', bytes: 50 }, [D]: { period: '2026-09', bytes: 70 } }));
+  const store = { config: { transparent: { enabled: true, unassigned: 'allow' } }, users: [{ id: 'u-ali', name: 'Ali', target: 'srv-2', enabled: true, quotaPeriod: 'month', quotaCalendar: 'jalali' }], devices: [{ mac: A, userId: 'u-ali' }] };
+  const r = createLanRouter({
+    openwrt: true, dataDir: '/etc/irnetfree', tmpDir: '/tmp', fs: files, run: lan.run, readFile: lan.readFile,
+    getSettings: () => ({ modules: { lanUsers: true } }), getLanUsers: () => store, records: () => ({ servers: [SRV1, SRV2], groups: [], chains: [] }),
+    getFreePorts: async (n) => Array.from({ length: n }, (_, i) => 41001 + i), log: () => {}, now: () => NOW, meter: fakeMeter(), tickMs: 3600000
+  });
+  assert.deepEqual(r.deviceUsage(), { [A]: 1000, [C]: 50 }, 'October overlaps Aban: carried; an unbound device by the Gregorian month; September is over');
+  await r.gatewayOptions(await r.prepare());
+  const gw = fakeGateway();
+  gw.tableGen = 1;
+  await r.gatewayUp(gw);
+  lan.counters = { [A]: { up: 100, down: 200 } };
+  await r.tick();
+  assert.deepEqual(r.deviceUsage(), { [A]: 1300, [C]: 50 });
+  await r.stop();
+  assert.deepEqual(JSON.parse(files.get('/etc/irnetfree/lan-device-usage.json'))[A], { period: 'j1405-08', bytes: 1300 });
+});
+
 /* ------------------------------ the service on a "router" ------------------------------ */
 
 test('the service: with the module and the mode on, the core gets the inbound and the gateway the users\' sets; off, neither', async () => {

@@ -14,9 +14,11 @@
  * addBytes() / tickDevices().
  *
  * Bytes are kept per user per period — `{ [userId]: { period, bytes } }`, the
- * period 'YYYY-MM' for a month, 'YYYY-MM-DD' for a day, local time, and 'all'
- * for a cap that never renews (quotaPeriod 'none') — saved by the caller in the
- * usage file beside the per-config totals, lazily (ipc.js).
+ * period 'YYYY-MM' for a month, 'YYYY-MM-DD' for a day, local time (a month
+ * that follows the Persian calendar or renews on another day than the 1st has
+ * a key of its own: src/main/capPeriods.js), and 'all' for a cap that never
+ * renews (quotaPeriod 'none') — saved by the caller in the usage file beside
+ * the per-config totals, lazily (ipc.js).
  *
  * A user over their cap is in overIds(): the build leaves them out of the
  * accounts (and the router's transparent mode blocks their devices). When the
@@ -29,7 +31,9 @@
  * Desktop (main.js) and router (service.js) alike: no store, no timers, no
  * Electron — the caller hands in its own.
  */
-const { GIB, periodKey, periodStart, periodEnd } = require('../../main/multiWanMeter');
+const { GIB } = require('../../main/multiWanMeter');
+const { PERIOD_KEY, cycleOf, periodKey, periodStart, periodEnd, rollEntry } = require('../../main/capPeriods');
+const { dayText } = require('../../main/jalali');
 const { normalizeLanUsers, isActive, isExpired, normalizeMac } = require('./model');
 
 const SAVE_EVERY_MS = 30000;
@@ -39,11 +43,17 @@ const GAP_MS = 20000;
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+/** A saved period: a key capPeriods writes, or 'all'. */
+const periodOk = (p) => typeof p === 'string' && (p === 'all' || PERIOD_KEY.test(p));
 
-/** The period a user's bytes count in at `now`: by the day, by the month, or — a cap that never renews — 'all'. */
+/**
+ * The period a user's bytes count in at `now`: by the day, by the month — the
+ * user's own (capPeriods.js: its calendar and renew day) — or, a cap that
+ * never renews, 'all'.
+ */
 function userPeriod(u, now) {
   if (u && u.quotaPeriod === 'none' && u.quotaGb > 0) return 'all';
-  return periodKey(u && u.quotaPeriod === 'day' ? 'day' : 'month', now);
+  return periodKey(u && u.quotaPeriod === 'day' ? 'day' : 'month', now, u);
 }
 
 /** A user's cap in bytes; 0 = none. A cap with no period ('none') is one amount for good. */
@@ -52,25 +62,18 @@ function capBytes(u) {
   return Number.isFinite(gb) && gb > 0 ? Math.round(gb * GIB) : 0;
 }
 
-/**
- * An entry moved to the period `key`: the same one as it was; a day of the
- * month it now counts by keeps its bytes (they were this month's too); a cap
- * made one for good keeps what was counted so far; anything else starts from
- * nothing.
- */
-function rollEntry(entry, key) {
-  if (!entry) return { period: key, bytes: 0 };
-  if (entry.period === key) return entry;
-  if (key === 'all' || String(entry.period).startsWith(key + '-')) return { period: key, bytes: entry.bytes };
-  return { period: key, bytes: 0 };
-}
+// rollEntry is capPeriods.js's, the internets' rule too: the same period keeps
+// its entry; a cap made one for good ('all') keeps what was counted; a month
+// keeps the bytes of a period that overlaps it (a day of it, or the running
+// month of a calendar or renew day just changed); anything else starts from
+// nothing — a daily cap never takes a month's bytes as one day's.
 
 /** What was saved, each entry of its type; junk dropped. */
 function normalizeUsage(raw) {
   const out = {};
   if (!isObj(raw)) return out;
   for (const [id, e] of Object.entries(raw)) {
-    if (!/^[\w-]+$/.test(id) || !isObj(e) || typeof e.period !== 'string' || !/^(\d{4}-\d{2}(-\d{2})?|all)$/.test(e.period)) continue;
+    if (!/^[\w-]+$/.test(id) || !isObj(e) || !periodOk(e.period)) continue;
     const bytes = Number(e.bytes);
     out[id] = { period: e.period, bytes: Number.isFinite(bytes) && bytes > 0 ? Math.round(bytes) : 0 };
   }
@@ -83,7 +86,7 @@ function normalizeDeviceUsage(raw) {
   if (!isObj(raw)) return out;
   for (const [k, e] of Object.entries(raw)) {
     const mac = normalizeMac(k);
-    if (!mac || !isObj(e) || typeof e.period !== 'string' || !/^(\d{4}-\d{2}(-\d{2})?|all)$/.test(e.period)) continue;
+    if (!mac || !isObj(e) || !periodOk(e.period)) continue;
     const bytes = Number(e.bytes);
     out[mac] = { period: e.period, bytes: Number.isFinite(bytes) && bytes > 0 ? Math.round(bytes) : 0 };
   }
@@ -124,7 +127,8 @@ const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
  *   pending()    the keys waiting for Apply (a reload would take some of them
  *                live behind the user's back — the cap waits, as multiWan's does)
  *   reload(why)  → Promise: the caller's reload (one queue)
- *   log({ line, level }), notify({ name, capGb, period }) (optional)
+ *   log({ line, level }), notify({ name, capGb, period, until, calendar }) (optional;
+ *                `until` the day the cap renews, ms — 0 for one that never does)
  *   now()        ms epoch (a test hands in its own clock)
  */
 function createLanUsersMeter(o) {
@@ -198,9 +202,12 @@ function createLanUsersMeter(o) {
         if (said.has('cap:' + id)) continue;
         said.add('cap:' + id);
         const when = u.quotaPeriod === 'day' ? 'today' : (u.quotaPeriod === 'none' ? 'in all' : 'this month');
-        const until = u.quotaPeriod === 'day' ? 'until tomorrow' : (u.quotaPeriod === 'none' ? 'until the cap is raised' : 'until the 1st of next month');
+        // the day it comes back: tomorrow, never, or the day their month renews — in its calendar too
+        const renews = u.quotaPeriod === 'none' ? 0 : periodEnd(u.quotaPeriod === 'day' ? 'day' : 'month', t, u);
+        const calendar = cycleOf(u).calendar;
+        const until = u.quotaPeriod === 'day' ? 'until tomorrow' : (u.quotaPeriod === 'none' ? 'until the cap is raised' : 'until ' + dayText(renews, 'en', calendar));
         log({ line: `Users: “${label(u)}” reached their cap (${u.quotaGb} GB ${when}) — off ${until}`, level: 'warn' });
-        if (typeof o.notify === 'function') { try { o.notify({ name: label(u), capGb: u.quotaGb, period: u.quotaPeriod }); } catch { /* a notification is never worth an error */ } }
+        if (typeof o.notify === 'function') { try { o.notify({ name: label(u), capGb: u.quotaGb, period: u.quotaPeriod, until: renews, calendar }); } catch { /* a notification is never worth an error */ } }
       } else if (isExpired(u, t)) {
         ours = true;
         if (said.has('exp:' + id)) continue;
@@ -351,7 +358,11 @@ function createLanUsersMeter(o) {
     /** bytes/s per user from the last tick: { [userId]: { up, down } }. */
     rates() { return Object.assign({}, rates); },
 
-    /** Each user's period as the window shows it: { [userId]: { bytes, period, since, until, quotaBytes, over } }. */
+    /**
+     * Each user's period as the window shows it: { [userId]: { bytes, period,
+     * since, until, quotaBytes, over } } — `until` the day the cap renews
+     * (local midnight; 0 for one that never does).
+     */
     usage() {
       const t = now();
       const lu = current();
@@ -365,8 +376,8 @@ function createLanUsersMeter(o) {
         out[u.id] = {
           bytes: e ? e.bytes : 0,
           period: e ? e.period : period,
-          since: period === 'all' ? 0 : periodStart(unit, t),
-          until: period === 'all' ? 0 : periodEnd(unit, t),
+          since: period === 'all' ? 0 : periodStart(unit, t, u),
+          until: period === 'all' ? 0 : periodEnd(unit, t, u),
           quotaBytes,
           over: quotaBytes > 0 && !!e && e.bytes >= quotaBytes
         };

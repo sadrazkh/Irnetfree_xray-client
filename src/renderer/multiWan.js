@@ -29,6 +29,7 @@
   const ROLES = ['use', 'backup', 'off'];
   const SHARES = [3, 2, 1];
   const PERIODS = ['month', 'day', 'none'];
+  const DAYS = Array.from({ length: 31 }, (_, i) => i + 1);   // the day a month renews on (capPeriods.js)
   const ICONS = { wifi: '📶', ethernet: '🔌', cellular: '📱', usb: '📱', other: '🌐' };
   const COLORS = 4;     // .mi-c0 … .mi-c3 (settings.css): the share bars' segments, in order
   const NEAR = 0.8;     // from here the usage bar warns that the cap is close
@@ -114,16 +115,35 @@
     return Object.assign({}, EMPTY, s && typeof s === 'object' ? s : {}, { links: (s && Array.isArray(s.links)) ? s.links : [], split: Object.assign({}, EMPTY.split, s && s.split) });
   }
   const rows = () => (ui.data && Array.isArray(ui.data.links) ? ui.data.links : []);
-  /** A row's configured values — a link found but never configured is in the mix, normal share, no cap. */
+  /**
+   * A row's configured values — a link found but never configured is in the
+   * mix, normal share, no cap. A month's calendar and renew day ride along
+   * only when the link has them (none: the Gregorian month from the 1st).
+   */
   function cfgOf(row) {
     const c = settings().links.find((l) => l.id === row.id);
-    return {
+    const out = {
       role: c ? c.role : 'use',
       weight: c ? c.weight : 2,
       quotaGb: c ? c.quotaGb : 0,
       quotaPeriod: c ? c.quotaPeriod : 'none'
     };
+    if (c && c.quotaCalendar) out.quotaCalendar = c.quotaCalendar;
+    if (c && c.quotaResetDay) out.quotaResetDay = c.quotaResetDay;
+    return out;
   }
+
+  /**
+   * The cap's period as its select offers it: the two months — 'month' the
+   * Gregorian one, 'jmonth' the Persian (quotaCalendar 'jalali') — the page's
+   * own calendar first, then a day, then none (a found internet's: no cap yet).
+   */
+  const periodChoices = () => (lang() === 'fa' ? ['jmonth', 'month'] : ['month', 'jmonth']).concat(['day', 'none']);
+  const choiceOf = (period, calendar) => (period === 'month' && calendar === 'jalali' ? 'jmonth' : (PERIODS.includes(period) ? period : 'none'));
+  /** A choice → the link's fields; a day or none leaves the month's calendar as it was. */
+  const fromChoice = (v) => (v === 'jmonth' ? { quotaPeriod: 'month', quotaCalendar: 'jalali' }
+    : v === 'month' ? { quotaPeriod: 'month', quotaCalendar: 'gregorian' } : { quotaPeriod: PERIODS.includes(v) ? v : 'none' });
+  const dayOf = (v) => (DAYS.includes(Number(v)) ? Number(v) : 1);
   /**
    * Every row as a configured link, one of them patched: what is saved. The
    * builder knows only the configured links, so the card's rows — found or
@@ -274,7 +294,8 @@
       d.right.textContent = ratio >= 1 ? fill(t('mi.backOn'), map) : ratio >= NEAR ? t('mi.atCap') : fill(t('mi.until'), map);
     } else {
       d.left.textContent = fill(t('mi.used'), { used });
-      d.right.textContent = t(u && String(u.period || '').length === 10 ? 'mi.today' : 'mi.thisMonth');
+      // a day's key is 'YYYY-MM-DD'; a month's any other ('2026-10', 'j1405-08', '2026-10@15')
+      d.right.textContent = t(u && /^\d{4}-\d{2}-\d{2}$/.test(String(u.period || '')) ? 'mi.today' : 'mi.thisMonth');
     }
   }
 
@@ -312,13 +333,24 @@
     num.setAttribute('dir', 'ltr');
     num.setAttribute('aria-label', t('mi.capGb') + ' — ' + row.name);
     num.dataset.mi = 'quota:' + row.id;
-    num.disabled = cfg.quotaPeriod === 'none';
+    const choice = choiceOf(cfg.quotaPeriod, cfg.quotaCalendar);
+    num.disabled = choice === 'none';
     num.addEventListener('change', () => {
       const v = Number(num.value);
       editLink(row.id, { quotaGb: Number.isFinite(v) && v > 0 ? v : 0 });
     });
-    const per = select(PERIODS.map((p) => [p, t('mi.period.' + p)]), cfg.quotaPeriod, t('mi.cap') + ' — ' + row.name, 'period:' + row.id, (v) => editLink(row.id, { quotaPeriod: v }));
+    const per = select(periodChoices().map((p) => [p, t('mi.period.' + p)]), choice, t('mi.cap') + ' — ' + row.name, 'period:' + row.id, (v) => editLink(row.id, fromChoice(v)));
     pair.append(num, per);
+    // a month's renew day under it (a save redraws the card: the line comes and goes with the period)
+    const month = choice === 'month' || choice === 'jmonth';
+    const day = dayOf(cfg.quotaResetDay);
+    const renew = el('div', 'mi-renew');
+    renew.hidden = !month;
+    renew.append(el('span', null, t('mi.renewDay')),
+      select(DAYS.map((n) => [n, String(n)]), day, t('mi.renewDay') + ' — ' + row.name, 'renew:' + row.id, (v) => editLink(row.id, { quotaResetDay: Number(v) })));
+    // past the shortest month of its calendar (28, the Persian 29): a month without that day renews on its last
+    const note = el('div', 'mi-renewnote', t('mi.renewLast'));
+    note.hidden = !month || day <= (choice === 'jmonth' ? 29 : 28);
     const bar = el('div', 'mi-bar');
     bar.setAttribute('role', 'progressbar');
     bar.setAttribute('aria-valuemin', '0');
@@ -333,7 +365,7 @@
     const d = { bar, fill: fillEl, left, right };
     ui.dom.usage[row.id] = d;
     paintUsage(d, ((ui.live && ui.live.usage) || (ui.data && ui.data.usage) || {})[row.id]);
-    capBox.append(el('div', 'field-label', t('mi.cap')), pair, bar, q);
+    capBox.append(el('div', 'field-label', t('mi.cap')), pair, renew, note, bar, q);
     ctl.append(capBox);
 
     box.append(head, ctl);

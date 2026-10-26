@@ -23,7 +23,8 @@
  *
  * Settings (`settings.multiWan`, persisted; normalizeMultiWan):
  *   { enabled, mode: 'balance'|'failover'|'split',
- *     links: [{ id, iface, name, role: 'use'|'backup'|'off', weight: 1..3, quotaGb, quotaPeriod: 'day'|'month'|'none' }],
+ *     links: [{ id, iface, name, role: 'use'|'backup'|'off', weight: 1..3, quotaGb, quotaPeriod: 'day'|'month'|'none',
+ *               quotaCalendar?: 'jalali', quotaResetDay?: 2..31 }],   // a month's calendar and renew day (capPeriods.js)
  *     split: { up: <link id>, down: <link id> } }
  * `settings.multiWanSkip` (runtime only): the ids of the links over their cap,
  * left out of the build.
@@ -40,6 +41,8 @@
  *
  * Pure: no store, no electron — main.js and the router's service.js both use it.
  */
+
+const { cycleFields } = require('./capPeriods');
 
 const MODES = ['balance', 'failover', 'split'];
 const ROLES = ['use', 'backup', 'off'];
@@ -114,7 +117,9 @@ function normalizeLink(raw) {
     role: ROLES.includes(raw.role) ? raw.role : 'use',
     weight: Number.isFinite(w) ? Math.min(WEIGHT_MAX, Math.max(WEIGHT_MIN, w)) : WEIGHT_DEFAULT,
     quotaGb: Number.isFinite(q) && q > 0 ? q : 0,
-    quotaPeriod: PERIODS.includes(raw.quotaPeriod) ? raw.quotaPeriod : 'none'
+    quotaPeriod: PERIODS.includes(raw.quotaPeriod) ? raw.quotaPeriod : 'none',
+    // a monthly cap's calendar and renew day, only when not the Gregorian 1st (capPeriods.js)
+    ...cycleFields(raw)
   };
 }
 

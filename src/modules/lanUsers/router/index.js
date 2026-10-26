@@ -77,6 +77,9 @@ const plan = require('./plan');
 const { parseCounters } = require('./nft');
 const { applyTransparentTargets } = require('./xrayTargets');
 const { createPortal, checkPassword } = require('./portal');
+// the period a device's bytes count in is its user's (their day, their month — its calendar and renew day — or
+// 'all'), by the users' meter's own rules; an unbound device counts by the Gregorian month
+const { userPeriod, rollEntry } = require('../meter');
 
 /** How often the counters, the devices and the caps are looked at. */
 const TICK_MS = 10000;
@@ -84,14 +87,6 @@ const SESSIONS_FILE = 'lan-sessions.json';
 /** Each device's bytes this period, beside the sign-ins — written at most this often (flash). */
 const DEVICE_USAGE_FILE = 'lan-device-usage.json';
 const DEVICE_USAGE_SAVE_MS = 5 * 60 * 1000;
-
-const pad = (n) => String(n).padStart(2, '0');
-/** The period a byte counts in: 'YYYY-MM-DD' for a daily cap, 'YYYY-MM' otherwise (multiWanMeter's periods, local time). */
-function periodKey(period, at) {
-  const d = new Date(at);
-  const month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
-  return period === 'day' ? `${month}-${pad(d.getDate())}` : month;
-}
 
 function createLanRouter(o = {}) {
   const openwrt = !!o.openwrt;
@@ -401,9 +396,8 @@ function createLanRouter(o = {}) {
       db.up += up; db.down += down;
       const b = bound[mac];
       // this period's bytes per device (its user's period: a daily cap counts by the day), for the devices list
-      const key = periodKey(b && users.get(b.userId) ? users.get(b.userId).quotaPeriod : 'month', t);
-      const pu = devUsage[mac] && devUsage[mac].period === key ? devUsage[mac] : (devUsage[mac] = { period: key, bytes: 0 });
-      pu.bytes += up + down;
+      const e = rollEntry(devUsage[mac], userPeriod(b ? users.get(b.userId) : null, t));
+      devUsage[mac] = { period: e.period, bytes: e.bytes + up + down };
       devUsageDirty = true;
       if (!b) continue;
       const u = byUser[b.userId] || (byUser[b.userId] = { up: 0, down: 0, bytes: 0 });
@@ -568,7 +562,8 @@ function createLanRouter(o = {}) {
   /**
    * `{ [mac]: bytes this period }` for the devices list (lanusers:get's
    * `deviceUsage`): each device in its user's period, a past period's count
-   * left out — it is a new period's zero.
+   * left out — it is a new period's zero (what a period that overlaps this
+   * one counted is this one's, as the meter rolls it).
    */
   function deviceUsage() {
     const users = new Map(lu().users.map(u => [u.id, u]));
@@ -576,8 +571,8 @@ function createLanRouter(o = {}) {
     const out = {};
     for (const [mac, v] of Object.entries(devUsage)) {
       const b = bound[mac];
-      const key = periodKey(b && users.get(b.userId) ? users.get(b.userId).quotaPeriod : 'month', now());
-      if (v.period === key) out[mac] = v.bytes;
+      const r = rollEntry(v, userPeriod(b ? users.get(b.userId) : null, now()));
+      if (r === v || r.bytes > 0) out[mac] = r.bytes;
     }
     return out;
   }

@@ -1037,6 +1037,11 @@
 .mi-cap { display: flex; gap: 6px; }
 #view-settings .mi-cap > .input { flex: none; inline-size: 76px; }
 .mi-cap > .select { flex: 1; min-width: 0; }
+/* a month's renew day: a small line under the cap, its number box narrow */
+.mi-renew { display: flex; align-items: center; gap: 6px; margin-block-start: 6px; font-size: 11.5px; color: var(--ink3); }
+.mi-renew[hidden], .mi-renewnote[hidden] { display: none; }
+#view-settings .mi-renew > .select { flex: none; inline-size: 70px; min-block-size: 30px; padding-block: 3px; }
+.mi-renewnote { margin-block-start: 4px; font-size: 11.5px; color: var(--ink3); }
 .mi-bar { block-size: 6px; margin-block-start: 6px; overflow: hidden; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
 .mi-bar[hidden] { display: none; }
 .mi-bar > i { display: block; block-size: 100%; background: var(--accent); }
@@ -1238,14 +1243,21 @@
 .lu-acts .switch { margin-inline: 4px 6px; }
 .lu-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; margin-block-start: 2px; }
 .lu-rate { font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--accentInk); unicode-bidi: isolate; white-space: nowrap; }
-.lu-ctl { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); align-items: start; gap: 12px; margin-block-start: 11px; }
+/* 212 px at the least: the cap's GB box and its period ("GB a Jalali month") side by side, unclipped */
+.lu-ctl { display: grid; grid-template-columns: repeat(auto-fill, minmax(212px, 1fr)); align-items: start; gap: 12px; margin-block-start: 11px; }
 .lu-pass { display: flex; align-items: center; gap: 2px; min-block-size: 40px; padding-inline: 11px 4px; background: var(--panel); border: 1px solid var(--softline); border-radius: 9px; }
 .lu-secret { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; color: var(--ink); unicode-bidi: isolate; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lu-pass .icon-btn { flex: none; font-size: 13px; }
 .lu-target .ss { display: block; width: 100%; min-width: 0; }
 .lu-cap { display: flex; gap: 6px; }
-#view-users .lu-cap > .input, .lu-form .lu-cap > .input { flex: none; inline-size: 80px; }
+/* a user's box is a column of ~220 px beside three others: the GB box narrow, so the period's words fit beside it */
+#view-users .lu-cap > .input { flex: none; inline-size: 64px; }
+.lu-form .lu-cap > .input { flex: none; inline-size: 80px; }
 .lu-cap > .select { flex: 1; min-width: 0; }
+/* a month's renew day: a small line under the cap, its number box narrow */
+.lu-renew { display: flex; align-items: center; gap: 6px; margin-block-start: 6px; font-size: 11.5px; color: var(--ink3); }
+.lu-renew[hidden] { display: none; }
+#view-users .lu-renew > .select, .lu-form .lu-renew > .select { flex: none; inline-size: 70px; min-block-size: 32px; padding-block: 4px; }
 .lu-bar { block-size: 6px; margin-block-start: 6px; overflow: hidden; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
 .lu-bar > i { display: block; block-size: 100%; background: var(--accent); }
 .lu-bar > i.warn { background: var(--warn); }
@@ -1302,7 +1314,6 @@
   #view-users .lu-card { padding: 14px; }
   .lu-user { padding: 10px; }
   .lu-who { flex: 1 1 110px; }
-  #view-users .lu-cap > .input { inline-size: 64px; }
   .lu-dev { grid-template-columns: 10px minmax(0, 1fr); }
   .lu-dev > .lu-dcell { grid-column: 2 / -1; }
   .lu-use { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
