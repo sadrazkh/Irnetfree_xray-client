@@ -9346,25 +9346,64 @@ function gmShares(members) {
   return out;
 }
 
-/** One group's running members, summed over every place it runs (a rule's target and a chain's hop are two): null while it does not run. */
+/**
+ * Member `m`'s figures added into `into`, a row that stands for several:
+ * bytes and speeds summed; alive where any of them answers, dead where none
+ * does and one said so; the best delay of those that have one.
+ */
+function gmAddInto(into, m) {
+  for (const k of ['up', 'down', 'upSpeed', 'downSpeed']) into[k] += gmNum(m[k]);
+  if (m.alive === true) into.alive = true;
+  else if (m.alive === false && into.alive !== true) into.alive = false;
+  if (typeof m.delay === 'number' && Number.isFinite(m.delay)) into.delay = into.delay == null ? m.delay : Math.min(into.delay, m.delay);
+}
+
+/**
+ * A group's running members as the flow shows them: one row per internet a
+ * server rides. Multi-internet writes a server once per link — as many copies
+ * of it as the link's share, each a member of its own with one id
+ * (multiWan.js); the stats event says which members those are (`serverId`,
+ * `link`). They are one row, summed (gmAddInto), `weight` the copies it stands
+ * for. Every other member is its own row, as given.
+ */
+function gmByLink(members) {
+  const out = [];
+  const rows = new Map();
+  for (const m of members || []) {
+    if (!m || !m.link) { out.push(m); continue; }
+    const key = [m.id, m.address || '', m.port || ''].join('|');
+    let row = rows.get(key);
+    if (!row) {
+      row = Object.assign({}, m, { up: 0, down: 0, upSpeed: 0, downSpeed: 0, alive: null, delay: null, weight: 0 });
+      rows.set(key, row);
+      out.push(row);
+    }
+    row.weight++;
+    gmAddInto(row, m);
+  }
+  return out;
+}
+
+/**
+ * One group's running members, summed over every place it runs (a rule's
+ * target and a chain's hop are two) — and, over the internets, a config the
+ * links ride is its one row (its `serverId`): null while it does not run.
+ */
 function gmAggregate(groupId) {
   const inst = gmLive.filter(g => g && g.groupId === groupId && Array.isArray(g.members));
   if (!inst.length) return null;
-  const key = (m) => [m.id, m.address || '', m.port || ''].join('|');
+  const own = (m) => m.serverId || m.id;
+  const key = (m) => [own(m), m.address || '', m.port || ''].join('|');
   const out = [];
   for (const g of inst) {
     g.members.forEach((m, i) => {
       if (!m || !m.id) return;
       let into = out[i] && key(out[i]) === key(m) ? out[i] : out.find(x => key(x) === key(m));
       if (!into) {
-        into = { id: m.id, name: m.name, address: m.address, port: m.port, up: 0, down: 0, upSpeed: 0, downSpeed: 0, alive: null, delay: null };
+        into = { id: own(m), name: m.name, address: m.address, port: m.port, up: 0, down: 0, upSpeed: 0, downSpeed: 0, alive: null, delay: null };
         out.push(into);
       }
-      for (const k of ['up', 'down', 'upSpeed', 'downSpeed']) into[k] += gmNum(m[k]);
-      // alive where any of its places answers; dead where none does and one said so
-      if (m.alive === true) into.alive = true;
-      else if (m.alive === false && into.alive !== true) into.alive = false;
-      if (typeof m.delay === 'number' && Number.isFinite(m.delay)) into.delay = into.delay == null ? m.delay : Math.min(into.delay, m.delay);
+      gmAddInto(into, m);
     });
   }
   return Object.assign(gmSum(out), { members: out });
@@ -9532,12 +9571,13 @@ function gmMark(el, grps, hue) {
     }
   }
   el._gm = { groups: grps, hue: hue == null ? 212 : hue };
-  const members = [].concat(...grps.map(g => g.members.filter(Boolean)));
+  // an internet's copies of a server count once, as the box shows them (gmByLink)
+  const members = [].concat(...grps.map(g => gmByLink(g.members).filter(Boolean)));
   const alive = members.filter(m => m.alive !== false).length;
   const health = el.querySelector('.gm-health');
   health.textContent = warpNum(alive) + '/' + warpNum(members.length);
   health.title = t('gm.health').replace('{alive}', () => warpNum(alive)).replace('{total}', () => warpNum(members.length));
-  gmBarInto(el.querySelector('.gm-node-bar'), gmShares(grps[0].members), el._gm.hue);
+  gmBarInto(el.querySelector('.gm-node-bar'), gmShares(gmByLink(grps[0].members)), el._gm.hue);
 }
 
 /** One flow's nodes (`sel` in `host`), each marked by the running groups its model node (`nodes`, by key) carries. */
@@ -9631,11 +9671,11 @@ function gmToggle(node) {
   gmOpen(node, true);
 }
 
-/** A row of the box: dot, name and address, ↓ speed, share — its parts, filled by gmFillPopRow; one whose server is here goes to it. */
+/** A row of the box: dot, name (an internet's share, ×N) and address, ↓ speed, share — its parts, filled by gmFillPopRow; one whose server is here goes to it. */
 function gmPopRow() {
   const row = edNode('div', { class: 'gm-row' }, [
     edNode('span', { class: 'gm-dot' }),
-    edNode('span', { class: 'gm-who' }, [edNode('span', { class: 'cn-name' }), edNode('bdi', { dir: 'ltr' })]),
+    edNode('span', { class: 'gm-who' }, [edNode('span', { class: 'cn-name' }), edNode('span', { class: 'gm-x', dir: 'ltr' }), edNode('bdi', { dir: 'ltr' })]),
     edNode('span', { class: 'gm-rate', dir: 'ltr' }, [edNode('span', { class: 'dn' })]),
     edNode('span', { class: 'gm-share', dir: 'ltr' }, [edNode('span', {}, [edNode('i')]), edNode('b')]),
     edNode('span', { class: 'gm-why', text: t('gm.dead') })]);
@@ -9649,13 +9689,19 @@ function gmPopRow() {
   return row;
 }
 
-/** Fill a row of the box from a running member. */
+/** Fill a row of the box from a running member — or an internet's copies of one (gmByLink): its server is the one it goes to, its share ×N. */
 function gmFillPopRow(row, m, share) {
   const dead = m.alive === false;
-  const here = state.servers.some(s => s.id === m.id);
-  row.dataset.id = m.id;
+  const id = m.serverId || m.id;
+  const here = state.servers.some(s => s.id === id);
+  row.dataset.id = id;
   row.className = 'gm-row' + (dead ? ' dead' : m.alive === true ? '' : ' unknown') + (here ? '' : ' gone');
   row.querySelector('.cn-name').textContent = m.name || '—';
+  const turns = m.weight > 1 ? m.weight : 0;
+  const x = row.querySelector('.gm-x');
+  x.hidden = !turns;
+  x.textContent = turns ? '×' + warpNum(turns) : '';
+  x.title = turns ? t('gm.weight').replace('{n}', () => warpNum(turns)) : '';
   row.querySelector('bdi').textContent = grpAddrText({ address: m.address, port: m.port }, null);
   row.querySelector('.gm-rate').hidden = dead;
   row.querySelector('.gm-share').hidden = dead;
@@ -9669,29 +9715,31 @@ function gmFillPopRow(row, m, share) {
 
 /**
  * The box's content for its node: per group its name, strategy and speed, a
- * row per member; the foot says a row goes to its config and opens the group's
- * card. Drawn whole when its shape changes, else only its figures (a row with
- * the keyboard on it keeps it).
+ * row per member — an internet's copies of a server one row (gmByLink); the
+ * foot says a row goes to its config and opens the group's card. Drawn whole
+ * when its shape changes, else only its figures (a row with the keyboard on
+ * it keeps it).
  */
 function gmRenderPop() {
   const p = gmPop;
   if (!p || !p.node || !p.node._gm) return;
   const groups = p.node._gm.groups;
-  const sig = groups.map(g => g.tag + '#' + g.groupId + '#' + g.members.length).join('|') + '|' + t('gm.popHint');
+  const lists = groups.map(g => gmByLink(g.members));
+  const sig = groups.map((g, k) => g.tag + '#' + g.groupId + '#' + lists[k].length).join('|') + '|' + t('gm.popHint');
   if (sig !== p.sig) {
     p.sig = sig;
     p.el.textContent = '';
     p.parts = [];
-    for (const g of groups) {
+    groups.forEach((g, k) => {
       const dn = edNode('span', { class: 'dn' });
       const up = edNode('span', { class: 'up' });
       p.el.appendChild(edNode('div', { class: 'gm-pop-head' }, [
         edNode('b', { text: '⧉ ' + (g.name || '—') }),
         edNode('span', { class: 'grp-meta', text: GROUP_STRATEGIES.includes(g.strategy) ? t('grp.st.' + g.strategy) : '' }),
         edNode('span', { class: 'gm-live', dir: 'ltr' }, [dn, up])]));
-      const rows = g.members.map(() => p.el.appendChild(gmPopRow()));
+      const rows = lists[k].map(() => p.el.appendChild(gmPopRow()));
       p.parts.push({ dn, up, rows });
-    }
+    });
     const foot = edNode('div', { class: 'gm-pop-foot' }, [edNode('span', { text: t('gm.popHint') })]);
     for (const g of groups) {
       if (!grpById(g.groupId)) continue;
@@ -9707,8 +9755,8 @@ function gmRenderPop() {
     const sum = gmSum(g.members);
     part.dn.textContent = '↓ ' + fmtSpeed(sum.downSpeed);
     part.up.textContent = '↑ ' + fmtSpeed(sum.upSpeed);
-    const shares = gmShares(g.members);
-    g.members.forEach((m, i) => { if (m && part.rows[i]) gmFillPopRow(part.rows[i], m, shares[i]); });
+    const shares = gmShares(lists[k]);
+    lists[k].forEach((m, i) => { if (m && part.rows[i]) gmFillPopRow(part.rows[i], m, shares[i]); });
   });
 }
 

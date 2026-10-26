@@ -27,7 +27,7 @@ const os = require('os');
 const { execFile, execFileSync } = require('child_process');
 const { engine, engineExe } = require('./engines');
 const { versionNumber, cmpVersion } = require('./assetUpdater');
-const { CORE_IDS, CORE_NAMES, SUGGESTED, TAG_RE, fullVersion } = require('./coreVersions');
+const { CORE_IDS, CORE_NAMES, SUGGESTED, TAG_RE, STABLE_COUNT, PRERELEASE_COUNT, fullVersion, isPrerelease } = require('./coreVersions');
 
 const GEO_BASE = 'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download';
 const SINGBOX_LATEST = 'https://api.github.com/repos/SagerNet/sing-box/releases/latest';
@@ -35,15 +35,24 @@ const WINTUN_URL = 'https://www.wintun.net/builds/wintun-0.14.1.zip';
 
 /** The picker's release list per core is kept this long (spec: ten minutes). */
 const RELEASES_TTL_MS = 10 * 60 * 1000;
-/** How many releases one listing asks GitHub for. */
-const RELEASES_PER_PAGE = 30;
+/**
+ * How many releases one page of the picker's listing asks GitHub for: as many
+ * cards as it shows with pre-releases on (coreVersions STABLE_COUNT +
+ * PRERELEASE_COUNT), so the newest page alone is enough whenever its releases
+ * carry six stables. Every release object comes with every asset of it, each
+ * with its uploader — an Xray release ~70 of them, ~130 KB of JSON — so a page
+ * is ~1.3 MB, where the 30 one listing used to ask for at once were ~4 MB.
+ */
+const RELEASES_PER_PAGE = STABLE_COUNT + PRERELEASE_COUNT;
+/** The most pages one listing reads: the 30 newest, all a listing ever asked for before it paged. */
+const RELEASES_MAX_PAGES = 3;
 /** GitHub's API silent this long is an error the picker can show, not a spinner for ever. */
 const API_IDLE_MS = 30000;
 /** A version install's download with no data for this long is given up. */
 const DOWNLOAD_IDLE_MS = 60000;
 /** `<bin> version` of a freshly downloaded core: a router's Cortex-A7 included. */
 const VERSION_RUN_MS = 20000;
-/** The most JSON read in one answer: the 30 newest Xray releases are ~4 MB with every asset of each. */
+/** The most JSON read in one answer: a page of Xray releases is ~1.3 MB with every asset of each (30 of them ~4 MB). */
 const JSON_MAX_BYTES = 32 * 1024 * 1024;
 
 function getJSON(url) {
@@ -226,6 +235,11 @@ function trimRelease(r, match) {
       .filter((a) => a && typeof a.name === 'string' && match(a.name))
       .map((a) => ({ name: a.name, size: Number(a.size) || 0, browser_download_url: String(a.browser_download_url || '') }))
   };
+}
+
+/** Do trimmed releases hold what the picker offers — STABLE_COUNT stable ones carrying this platform's archive (buildCards' own test)? */
+function enoughStables(releases) {
+  return releases.filter((r) => r.assets.length && fullVersion(r.tag_name) && !isPrerelease(r)).length >= STABLE_COUNT;
 }
 
 /** A core the picker knows, or an error. */
@@ -501,8 +515,8 @@ class Downloader {
 
   /**
    * A core's releases for the picker: { releases, latestTag, fetchedAt } — the
-   * RELEASES_PER_PAGE newest (trimRelease: this platform's archive only) and
-   * GitHub's latest stable tag ('' if that request failed). The suggested
+   * newest, a page at a time (fetchReleases; trimRelease: this platform's
+   * archive only) and GitHub's latest stable tag ('' if that request failed). The suggested
    * release (coreVersions.js) is fetched by its tag when it is older than those
    * — sing-box publishes alphas, betas and rcs between its stables, and the ⭐
    * card must be there to go back to. Cached RELEASES_TTL_MS per core; `force`
@@ -526,18 +540,50 @@ class Downloader {
     }
   }
 
+  /**
+   * The listing behind listReleases, newest first: RELEASES_PER_PAGE releases
+   * a page, the next page asked for only while those in hand carry fewer than
+   * STABLE_COUNT stables with this platform's archive (and the page was full:
+   * a shorter one is the last there is), RELEASES_MAX_PAGES at most. Six
+   * stables are what the picker offers; every pre-release newer than the
+   * sixth is in hand by then too (GitHub lists the newest first), so with
+   * pre-releases on the cards are the same four — fewer only where fewer than
+   * four came out since that sixth stable, and the older ones are not worth a
+   * page. On the release pages of October 2026: Xray-PattN (all stable) is
+   * one page; sing-box, a stable every few alphas, two; Xray, every build
+   * from 26.3.27 to 26.10.21 a pre-release, three — as many releases as the
+   * one listing of 30 had, until its stables come closer together. /latest is asked
+   * beside the first page, as before. A later page failing (the rate limit,
+   * say) costs only its cards: the pages before it are the listing; the first
+   * failing is the listing's error.
+   */
   async fetchReleases(id) {
     const base = Downloader.releasesUrl(id);
-    const [list, latest] = await Promise.all([
-      this.fetchJSON(`${base}?per_page=${RELEASES_PER_PAGE}`),
-      Promise.resolve().then(() => this.fetchJSON(`${base}/latest`)).catch(() => null)
-    ]);
-    if (!Array.isArray(list)) {
-      const said = list && typeof list === 'object' && list.message ? ` (${String(list.message).slice(0, 200)})` : '';
-      throw new Error('GitHub did not answer with a list of releases' + said);
-    }
+    const latestAsked = Promise.resolve().then(() => this.fetchJSON(`${base}/latest`)).catch(() => null);
     const match = this.assetMatcher(id);
-    const releases = list.map((r) => trimRelease(r, match)).filter(Boolean);
+    const releases = [];
+    const seen = new Set();
+    for (let page = 1; page <= RELEASES_MAX_PAGES; page++) {
+      let list;
+      try {
+        list = await this.fetchJSON(`${base}?per_page=${RELEASES_PER_PAGE}&page=${page}`);
+      } catch (e) {
+        if (page === 1) throw e;
+        break;
+      }
+      if (!Array.isArray(list)) {
+        if (page > 1) break;
+        const said = list && typeof list === 'object' && list.message ? ` (${String(list.message).slice(0, 200)})` : '';
+        throw new Error('GitHub did not answer with a list of releases' + said);
+      }
+      // a release published between two pages moves the next page by one: what is in hand already is not taken twice
+      for (const r of list) {
+        const t = trimRelease(r, match);
+        if (t && !seen.has(t.tag_name)) { seen.add(t.tag_name); releases.push(t); }
+      }
+      if (list.length < RELEASES_PER_PAGE || enoughStables(releases)) break;
+    }
+    const latest = await latestAsked;
     const suggested = SUGGESTED[id];
     if (suggested && !releases.some((r) => versionNumber(r.tag_name) === suggested && !/-/.test(fullVersion(r.tag_name)))) {
       const extra = await Promise.resolve().then(() => this.fetchJSON(`${base}/tags/v${suggested}`)).catch(() => null);
@@ -738,4 +784,4 @@ class Downloader {
   cleanup(dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
 }
 
-module.exports = { Downloader, downloadFile, fetchJSON, runVersion, RELEASES_TTL_MS };
+module.exports = { Downloader, downloadFile, fetchJSON, runVersion, RELEASES_TTL_MS, RELEASES_PER_PAGE, RELEASES_MAX_PAGES };

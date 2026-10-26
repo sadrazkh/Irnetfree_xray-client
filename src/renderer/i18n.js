@@ -455,6 +455,7 @@ const I18N = {
     'gm.unknown': 'هنوز بررسی نشده',
     'gm.delay': 'تأخیرِ بررسی سلامت',
     'gm.share': 'سهم از ترافیک گروه',
+    'gm.weight': 'سهم این اینترنت از اتصال‌های تازه: {n} نوبت در هر دور',
 
     'nav.pool': 'استخر پروکسی', 'picker.pool': 'استخر پروکسی',
     'picker.auto': 'خودکار (سریع‌ترین)', 't.autoNone': 'هیچ سروری جواب نداد',
@@ -1789,6 +1790,7 @@ const I18N = {
     'gm.unknown': 'Not checked yet',
     'gm.delay': 'Health-check delay',
     'gm.share': 'Share of the group’s traffic',
+    'gm.weight': 'This internet’s share of the new connections: {n} turns in each round',
 
     'nav.pool': 'Proxy Pool', 'picker.pool': 'Proxy Pool',
     'picker.auto': 'Auto (fastest)', 't.autoNone': 'No server answered',
