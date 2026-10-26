@@ -92,6 +92,7 @@ import com.irnetfree.vpn.core.*
 import com.irnetfree.vpn.core.Selection
 // by name too: the extended icons' star import has a `Groups` of its own (Icons.Filled.Groups)
 import com.irnetfree.vpn.core.Groups
+import com.irnetfree.vpn.core.Modules
 import com.irnetfree.vpn.core.GroupConfig
 import com.irnetfree.vpn.core.GroupMember
 import com.irnetfree.vpn.net.Diagnostics
@@ -233,7 +234,8 @@ private fun App(store: Store) {
                         "chains" -> ChainsScreen(store, bump) { more = null }
                         "pool" -> PoolScreen(store, bump) { more = null }
                         "routing" -> RoutingScreen(store, back = { more = null }, openChains = { more = "chains" })
-                        "settings" -> SettingsScreen(store, bump) { more = null }
+                        "settings" -> SettingsScreen(store, bump, back = { more = null }, openModules = { more = "modules" })
+                        "modules" -> ModulesScreen(store) { more = null }
                         "logs" -> LogsScreen { more = null }
                         else -> MoreMenu(store, bump) { more = it }
                     }
@@ -1497,19 +1499,24 @@ private fun needsNotificationAsk(ctx: Context, store: Store): Boolean =
 @Composable private fun SelectionSheet(store: Store, onAuto: () -> Unit, onDismiss: () -> Unit, onPick: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = CARD) {
         observeStore()
+        // an old plain "__advanced__" selection is the first profile's row
+        val selKey = store.selectedProfile()?.let { p: RoutingProfile -> Selection.forProfile(p.id) } ?: store.selection
+        // an extension that is not installed has no rows here — but the selected one
+        // keeps its row whatever its extension (Modules.pickerShows)
+        val mods = store.modules
         val modes = buildList {
-            if (store.poolEnabledValid().isNotEmpty()) add(Store.POOL_ID to "🧩 " + tf("pick.pool", "n" to store.poolEnabledValid().size))
+            if (store.poolEnabledValid().isNotEmpty() && Modules.pickerShows(mods, Modules.POOL, Store.POOL_ID, selKey)) add(Store.POOL_ID to "🧩 " + tf("pick.pool", "n" to store.poolEnabledValid().size))
             // one row per routing profile that has rules or a default (spec §1)
-            store.profiles.filter { p: RoutingProfile -> store.profileReady(p) }.forEach { p: RoutingProfile -> add(Selection.forProfile(p.id) to "🧭 ${p.name}") }
-            store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }
+            store.profiles.filter { p: RoutingProfile -> store.profileReady(p) && Modules.pickerShows(mods, Modules.ADVANCED_ROUTING, Selection.forProfile(p.id), selKey) }
+                .forEach { p: RoutingProfile -> add(Selection.forProfile(p.id) to "🧭 ${p.name}") }
+            store.chains.filter { c: ChainConfig -> store.chainReady(c) && Modules.pickerShows(mods, Modules.CHAINS, "chain:${c.id}", selKey) }
+                .forEach { c: ChainConfig -> add("chain:${c.id}" to "⛓ ${c.name}") }
             // a group (Groups.kt) is selected by its bare id, like a server
             store.groups.forEach { g: GroupConfig ->
                 val n = Groups.sizeOf(store.groupRecord(g.id))
-                if (n > 0) add(g.id to "⧉ ${g.name} · ${configsWord(n)}")
+                if (n > 0 && Modules.pickerShows(mods, Modules.GROUPS, g.id, selKey)) add(g.id to "⧉ ${g.name} · ${configsWord(n)}")
             }
         }
-        // an old plain "__advanced__" selection is the first profile's row
-        val selKey = store.selectedProfile()?.let { p: RoutingProfile -> Selection.forProfile(p.id) } ?: store.selection
         val groups = ServerGroups.build(store.servers, store.subs, "", emptySet(), store.selection)
         val pick: (String) -> Unit = { id -> store.saveSelection(id); onPick() }
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -1694,13 +1701,15 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
                     ) { Icon(Icons.Filled.Add, t("srv.addA11y"), tint = ON_PRIMARY, modifier = Modifier.size(22.dp)) }
                 }
                 DropdownMenu(addMenu, { addMenu = false }, modifier = Modifier.background(CARD)) {
-                    listOf(
+                    // + WARP is the warp extension's (Modules.kt)
+                    val addRows: List<Pair<String, String>> = listOfNotNull(
                         "import" to t("srv.addLink"),
                         "wg" to "WireGuard",
-                        "warp" to t("srv.addWarp"),
+                        if (store.moduleOn(Modules.WARP)) ("warp" to t("srv.addWarp")) else null,
                         "proxy" to "SOCKS / HTTP",
                         "manual" to t("srv.addManual")
-                    ).forEach { (key, label) ->
+                    )
+                    addRows.forEach { (key, label) ->
                         DropdownMenuItem(
                             text = { Text(label, color = TXT, fontSize = 14.sp) },
                             onClick = { addMenu = false; sheet = key }
@@ -1818,7 +1827,7 @@ private fun ServersScreen(store: Store, bump: () -> Unit) {
     if (editing != null) {
         // a JSON server is edited as its config, never through link fields
         if (editing.isJson) EditJsonSheet(editing, onDismiss = { editId = null }, onSave = saveEdit)
-        else EditConfigSheet(editing, onDismiss = { editId = null }, onSave = saveEdit)
+        else EditConfigSheet(editing, store.modules, onDismiss = { editId = null }, onSave = saveEdit)
     }
 }
 
@@ -2026,7 +2035,8 @@ private fun AddConfigSheets(store: Store, sheet: String?, setSheet: (String?) ->
             else { smartImport(importText); importText = ""; setSheet(null); bump() }
         }
         "wg" -> WgSheet(store, { setSheet(null) }) { setSheet(null); bump() }
-        "warp" -> WarpSheet(store, { setSheet(null) }) { setSheet(null); bump() }
+        // the warp extension's (Modules.kt): its menu row is not there either while it is not installed
+        "warp" -> { if (store.moduleOn(Modules.WARP)) WarpSheet(store, { setSheet(null) }) { setSheet(null); bump() } }
         "proxy" -> ProxySheet(store, { setSheet(null) }) { setSheet(null); bump() }
         "manual" -> NewServerSheet(store, { setSheet(null) }) { setSheet(null); bump() }
         else -> {}
@@ -2362,9 +2372,11 @@ private fun protoTags(s: ServerConfig): String {
     var count by remember { mutableStateOf("1") }
     var keysText by remember { mutableStateOf("") }
     var importText by remember { mutableStateOf("") }
-    // WireGuard: chained over a config of mine (the default), or dialled from here
+    // WireGuard: chained over a config of mine (the default), or dialled from here.
+    // The chain it makes is the chains extension's: without it, dialled from here.
+    val chainsOn = store.moduleOn(Modules.CHAINS)
     val hops = remember { warpHopOptions(store) }
-    var use by remember { mutableStateOf("chain") }
+    var use by remember { mutableStateOf(if (chainsOn) "chain" else "direct") }
     var chainWith by remember { mutableStateOf(defaultWarpHop(store, hops)) }
     var wgEndpoint by remember { mutableStateOf("auto") }
     var wgAddress by remember { mutableStateOf("") }
@@ -2454,9 +2466,10 @@ private fun protoTags(s: ServerConfig): String {
                 Text(t("warp.step2"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
                 if (kind == Warp.KIND_WIREGUARD) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(use == "chain", { use = "chain"; error = "" }, { Text(t("warp.useChain")) })
+                        if (chainsOn) FilterChip(use == "chain", { use = "chain"; error = "" }, { Text(t("warp.useChain")) })
                         FilterChip(use == "direct", { use = "direct"; error = "" }, { Text(t("warp.direct")) })
                     }
+                    if (!chainsOn) Text(tf("mod.warpChain", "name" to t(Modules.nameKey(Modules.CHAINS))), color = MUTED, fontSize = 11.sp)
                     if (use == "chain") {
                         if (hops.isEmpty()) {
                             Text(t("warp.noHop"), color = AMBER, fontSize = 11.sp)
@@ -2776,8 +2789,14 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
     }
 }
 
+/**
+ * A server's edit sheet, Simple or Pro. [mods]: the installed extensions — the
+ * anti-DPI inputs and the ECH outbound are theirs (Modules.fieldModule) and
+ * are not shown without them; a value the server already has is kept as it is.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun EditConfigSheet(server: ServerConfig, onDismiss: () -> Unit, onSave: (ServerConfig) -> Unit) {
+@Composable private fun EditConfigSheet(server: ServerConfig, mods: Map<String, Boolean>, onDismiss: () -> Unit, onSave: (ServerConfig) -> Unit) {
+    val antiDpiOn = Modules.isOn(mods, Modules.ANTI_DPI)
     val f = remember(server.id) { ServerEditor.read(server) }
     var name by remember { mutableStateOf(f.name) }; var address by remember { mutableStateOf(f.address) }; var port by remember { mutableStateOf(f.port) }
     var cred by remember { mutableStateOf(f.cred) }; var network by remember { mutableStateOf(f.network) }; var security by remember { mutableStateOf(f.security) }
@@ -2861,7 +2880,7 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
             // a WARP server's account as Cloudflare told it when it was made — read-only
             val warpInfo = server.warp
             if (warpInfo != null) WarpAccountBox(t("warp.acctTitle"), warpInfo, emptyList(), null, emptyList())
-            if (proView) ProFields(server.protocol, draft, false, {}, tab, encOn) else {
+            if (proView) ProFields(server.protocol, draft, false, {}, tab, encOn, mods) else {
             Fld(t("f.name"), name) { name = it }; Fld(t("ed.address"), address) { address = it }; Fld(t("f.port"), port) { port = it }
             when (server.protocol) {
                 "vless", "vmess" -> Fld(t("ed.uuid"), cred) { cred = it }
@@ -2915,8 +2934,8 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                     Fld(sniLabel, sni) { sni = it }
                     if (security == "tls" && frontable) Fld(t("ed.hostSni"), host) { host = it }
                     Text(sniHint, color = MUTED, fontSize = 11.sp)
-                    // Working bypass: fragment the ClientHello so DPI can't read the SNI.
-                    SwitchRow(t("ed.hideSni"), fragment.isNotBlank()) {
+                    // Working bypass: fragment the ClientHello so DPI can't read the SNI (the anti-DPI extension's).
+                    if (antiDpiOn) SwitchRow(t("ed.hideSni"), fragment.isNotBlank()) {
                         fragment = if (it) (if (fragment.isBlank()) "tlshello,100-200,10-20" else fragment) else ""
                     }
                 }
@@ -2930,11 +2949,13 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                 // The core no longer accepts allowInsecure: the switch means "pin the
                 // certificate this server presents on first use" (CertPin.kt).
                 SwitchRow(t("ed.insecurePin"), allowInsecure) { allowInsecure = it }
-                // patterniha custom-TLS
-                Text(t("ed.pattn"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
-                Fld(t("ed.cipherSuites"), cipherSuites) { cipherSuites = it }
-                Fld("finalMask (JSON)", finalMask) { finalMask = it }
-                Text(t("ed.pattnHint"), color = MUTED, fontSize = 11.sp)
+                // patterniha custom-TLS (the anti-DPI extension's)
+                if (antiDpiOn) {
+                    Text(t("ed.pattn"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                    Fld(t("ed.cipherSuites"), cipherSuites) { cipherSuites = it }
+                    Fld("finalMask (JSON)", finalMask) { finalMask = it }
+                    Text(t("ed.pattnHint"), color = MUTED, fontSize = 11.sp)
+                }
             }
             if (server.protocol == "wireguard") {
                 Fld(t("f.peerPub"), wgPub) { wgPub = it }; Fld("Address (/32)", wgAddr) { wgAddr = it }; Fld(t("ed.psk"), wgPsk) { wgPsk = it }
@@ -2964,12 +2985,13 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                 }
                 TlsExtraFields(ech, { ech = it }, pcs, { pcs = it }, vcn, { vcn = it })
                 HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
-                Text(t("ed.antiDpiCore"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
-                if (masqueHttp == "h2") {
+                // the fragment / noise switch is the anti-DPI extension's; the core picker is everyone's
+                Text(if (antiDpiOn) t("ed.antiDpiCore") else t("edit.tab.advanced"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
+                if (antiDpiOn && masqueHttp == "h2") {
                     SwitchRow(t("ed.fragH2"), fragment.isNotBlank()) { on: Boolean ->
                         fragment = if (on) (if (fragment.isBlank()) "tlshello,100-200,10-20" else fragment) else ""
                     }
-                } else {
+                } else if (antiDpiOn) {
                     SwitchRow(t("ed.noiseH3"), noisePreset != "off") { on: Boolean -> noisePreset = if (on) "random" else "off" }
                 }
                 DropPick(t("ed.engine"), listOf("xray" to t("ed.xrayDefault"), "xray-pattn" to "Xray-PattN"), if (engine == "xray-pattn") "xray-pattn" else "xray") { x: String -> engine = x }
@@ -2977,7 +2999,7 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
             }
             if (!isMasque) {
             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = STROKE)
-            Text(t("ed.advanced"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
+            Text(if (antiDpiOn) t("ed.advanced") else t("edit.tab.advanced"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp))
             DropPick(
                 t("ed.engine"),
                 listOf(
@@ -2991,14 +3013,17 @@ private fun warpAccountLines(info: Warp.AccountInfo): List<String> {
                 t("ed.engineHint"),
                 color = MUTED, fontSize = 11.sp
             )
-            Spacer(Modifier.height(8.dp))
-            Fld(t("ed.fragment"), fragment) { fragment = it }
-            Text(t("ed.fragmentEg"), color = MUTED, fontSize = 11.sp)
-            Spacer(Modifier.height(8.dp))
-            DropPick(t("ed.noise"), listOf("off" to t("ed.noiseOff"), "random" to t("ed.noiseRandom"), "faketls" to t("ed.noiseFake"), "custom" to t("ed.noiseCustom")), noisePreset) { noisePreset = it }
-            if (noisePreset == "custom") {
-                Fld(t("ed.noiseSpec"), noiseCustom) { noiseCustom = it }
-                Text(t("ed.noiseHint"), color = MUTED, fontSize = 11.sp)
+            // fragment and noise: the anti-DPI extension's
+            if (antiDpiOn) {
+                Spacer(Modifier.height(8.dp))
+                Fld(t("ed.fragment"), fragment) { fragment = it }
+                Text(t("ed.fragmentEg"), color = MUTED, fontSize = 11.sp)
+                Spacer(Modifier.height(8.dp))
+                DropPick(t("ed.noise"), listOf("off" to t("ed.noiseOff"), "random" to t("ed.noiseRandom"), "faketls" to t("ed.noiseFake"), "custom" to t("ed.noiseCustom")), noisePreset) { noisePreset = it }
+                if (noisePreset == "custom") {
+                    Fld(t("ed.noiseSpec"), noiseCustom) { noiseCustom = it }
+                    Text(t("ed.noiseHint"), color = MUTED, fontSize = 11.sp)
+                }
             }
             }
             }
@@ -3154,9 +3179,12 @@ private fun proOption(fld: SfField, o: String): String {
 /**
  * The Pro view: the five tabs and the open tab's fields, from the table
  * (ServerFields). [isNew]: a server made by hand — its protocol is picked on
- * Basics; an edited server keeps the one it has.
+ * Basics; an edited server keeps the one it has. [mods]: the installed
+ * extensions — a field of one that is not installed is not drawn (by its id,
+ * Modules.fieldModule: the generated table carries no module), and MASQUE is
+ * the warp extension's protocol; what the draft holds for them is kept.
  */
-@Composable private fun ProFields(protocol: String, d: SnapshotStateMap<String, String>, isNew: Boolean, onProtocol: (String) -> Unit, tab: MutableState<String>, encOn: MutableState<Boolean>) {
+@Composable private fun ProFields(protocol: String, d: SnapshotStateMap<String, String>, isNew: Boolean, onProtocol: (String) -> Unit, tab: MutableState<String>, encOn: MutableState<Boolean>, mods: Map<String, Boolean>) {
     val noTransport = !ServerFields.hasTransport(protocol)
     val noSecurity = ServerFields.securitiesOf(protocol).isEmpty()
     // a tab this protocol has none of shows the Protocol tab (never written to the state while composing)
@@ -3177,7 +3205,8 @@ private fun proOption(fld: SfField, o: String): String {
     if (cur == "basics") {
         if (isNew) {
             Text(t("sf.protocol"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-            DropPick(t("sf.protocol"), ServerFields.PROTOCOLS.map { p: String -> p to "${badge(p)} — ${t("sfp.$p")}" }, protocol) { p: String -> onProtocol(p) }
+            val protocols = ServerFields.PROTOCOLS.filter { p: String -> p != Masque.PROTOCOL || p == protocol || Modules.isOn(mods, Modules.WARP) }
+            DropPick(t("sf.protocol"), protocols.map { p: String -> p to "${badge(p)} — ${t("sfp.$p")}" }, protocol) { p: String -> onProtocol(p) }
             Text(t("edit.protoPick"), color = MUTED, fontSize = 11.sp)
         } else Text(t("edit.protoFixed"), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
     }
@@ -3188,7 +3217,7 @@ private fun proOption(fld: SfField, o: String): String {
         else -> {
             var group: String? = null
             for (fld in ServerFields.FIELDS) {
-                if (fld.tab != cur || fld.kind == "protocol" || !ServerEditor.shown(protocol, d, fld)) continue
+                if (fld.tab != cur || fld.kind == "protocol" || !ServerEditor.shown(protocol, d, fld) || !Modules.fieldShown(mods, fld.id)) continue
                 val g = fld.group
                 if (g != null && g != group) Text(t("sfg.$g"), color = PRIMARY, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp, bottom = 2.dp))
                 group = g
@@ -3217,7 +3246,7 @@ private fun proOption(fld: SfField, o: String): String {
                 draft.clear(); draft.putAll(ServerEditor.newDraft(p, keep))
                 encOn.value = false
                 protocol = p
-            }, tab, encOn)
+            }, tab, encOn, store.modules)
             Spacer(Modifier.height(10.dp))
             Button(onClick = {
                 val p = ServerEditor.problem(protocol, draft, true, encOn.value)
@@ -3392,7 +3421,7 @@ private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
                             Text(e.name, color = TXT, modifier = Modifier.weight(1f)); Switch(e.enabled, { store.pool[idx] = e.copy(enabled = it); store.savePool(); bump() })
                             IconButton(onClick = { store.pool.removeAt(idx); store.savePool(); bump() }) { Icon(Icons.Filled.DeleteOutline, null, tint = BAD) }
                         }
-                        DropPick(t("pool.exit"), targetOptions(store), e.target) { store.pool[idx] = e.copy(target = it); store.savePool(); bump() }
+                        DropPick(t("pool.exit"), targetOptions(store, e.target), e.target) { store.pool[idx] = e.copy(target = it); store.savePool(); bump() }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             NumFld(t("set.socks"), e.socksPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(socksPort = it); store.savePool() }
                             NumFld(t("set.http"), e.httpPort, Modifier.weight(1f)) { store.pool[idx] = e.copy(httpPort = it); store.savePool() }
@@ -3413,6 +3442,10 @@ private fun PoolScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
  * offers them too. A chain's rows come from its ids, so a hop that is gone (a
  * group with no server left, say) is shown — and can be removed — instead of
  * silently missing from the list.
+ *
+ * Two extensions (Modules.kt): the chains section is the chains one's, the
+ * groups section the groups one's; More shows this screen while either is
+ * installed, titled after what it holds.
  */
 @Composable
 private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
@@ -3422,53 +3455,34 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     // the group open in the editor (null = none), and whether it is a new one
     var editing by remember { mutableStateOf<GroupConfig?>(null) }
     var editingNew by remember { mutableStateOf(false) }
-    Screen(t("chain.screen"), back, { IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), tf("chain.newName", "n" to store.chains.size + 1), emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, t("chain.add"), tint = PRIMARY) } }) {
+    val chainsOn = store.moduleOn(Modules.CHAINS)
+    val groupsOn = store.moduleOn(Modules.GROUPS)
+    val title = when {
+        chainsOn && !groupsOn -> t(Modules.nameKey(Modules.CHAINS))
+        groupsOn && !chainsOn -> t(Modules.nameKey(Modules.GROUPS))
+        else -> t("chain.screen")
+    }
+    Screen(title, back, {
+        if (chainsOn) IconButton(onClick = { store.chains.add(ChainConfig(newId("chain"), tf("chain.newName", "n" to store.chains.size + 1), emptyList())); store.saveChains(); bump() }) { Icon(Icons.Filled.Add, t("chain.add"), tint = PRIMARY) }
+    }) {
         // a hop added to or removed from a chain the connection runs waits for a reconnect
         ApplyBar(store, store.settings)
-        Text(t("chain.section"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
-        if (store.chains.isEmpty()) EmptyHint(t("chain.empty"))
-        store.chains.toList().forEachIndexed { idx, c ->
-            val members = store.chainMembers(c)
-            Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
-                Column(Modifier.padding(14.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("⛓ ${c.name}", color = TXT, modifier = Modifier.weight(1f))
-                        if (members.isNotEmpty()) IconButton(onClick = { shared = chainShare(store, c) }) { Icon(Icons.Filled.Share, t("chain.share"), tint = TXT2) }
-                        if (store.chainReady(c)) IconButton(onClick = { store.saveSelection("chain:${c.id}"); bump() }) { Icon(Icons.Filled.CheckCircle, null, tint = if (store.selection == "chain:${c.id}") PRIMARY else MUTED) }
-                        IconButton(onClick = {
-                            val wasSelected = store.selection == "chain:${c.id}"
-                            store.deleteChain(c.id)   // a selection that named it falls back
-                            if (wasSelected && store.selection.isNotEmpty()) AppWork.snack(tf("srv.deletedNow", "name" to c.name, "now" to selectionWord(store)))
-                            bump()
-                        }) { Icon(Icons.Filled.DeleteOutline, t("chain.delete"), tint = BAD) }
-                    }
-                    // the hops in reading order: → in English, ← in Persian (I18n.flow)
-                    Text(tf("chain.path", "path" to (if (members.isEmpty()) t("chain.pathEmpty") else I18n.flow(members.map { s: ServerConfig -> hopName(s) }))), color = MUTED, fontSize = 12.sp)
-                    c.members.forEachIndexed { mi: Int, id: String ->
-                        val hop = chainHopLabel(store, id)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("${mi + 1}. ${hop.first}", color = if (hop.second) TXT else BAD, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                            IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filterIndexed { x: Int, _: String -> x != mi }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, t("chain.removeHop"), tint = BAD) }
-                        }
-                    }
-                    DropPick(t("chain.addHop"), chainHopOptions(store, c), "") { id: String -> if (id.isNotEmpty()) { store.chains[idx] = c.copy(members = c.members + id); store.saveChains(); bump() } }
-                }
+        if (chainsOn) ChainsSection(store, bump) { c: ChainConfig -> shared = chainShare(store, c) }
+        if (groupsOn) {
+            if (chainsOn) Spacer(Modifier.height(14.dp))
+            Text(t("grp.section"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+            Text(
+                t("grp.intro"),
+                color = MUTED, fontSize = 12.sp
+            )
+            OutlinedButton(
+                onClick = { editingNew = true; editing = GroupConfig(Groups.newGroupId(), tf("grp.newName", "n" to store.groups.size + 1)) },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+            ) { Text(t("grp.new")) }
+            if (store.groups.isEmpty()) EmptyHint(t("grp.empty"))
+            store.groups.toList().forEach { g: GroupConfig ->
+                GroupCard(store, g, onEdit = { editingNew = false; editing = g }, bump = bump)
             }
-        }
-
-        Spacer(Modifier.height(14.dp))
-        Text(t("grp.section"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
-        Text(
-            t("grp.intro"),
-            color = MUTED, fontSize = 12.sp
-        )
-        OutlinedButton(
-            onClick = { editingNew = true; editing = GroupConfig(Groups.newGroupId(), tf("grp.newName", "n" to store.groups.size + 1)) },
-            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
-        ) { Text(t("grp.new")) }
-        if (store.groups.isEmpty()) EmptyHint(t("grp.empty"))
-        store.groups.toList().forEach { g: GroupConfig ->
-            GroupCard(store, g, onEdit = { editingNew = false; editing = g }, bump = bump)
         }
         Spacer(Modifier.height(16.dp))
     }
@@ -3485,6 +3499,40 @@ private fun ChainsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
     }
 }
 
+/** The chains extension's half of the chains & groups screen: every chain, its hops, share, select, delete. */
+@Composable private fun ChainsSection(store: Store, bump: () -> Unit, onShare: (ChainConfig) -> Unit) {
+    Text(t("chain.section"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+    if (store.chains.isEmpty()) EmptyHint(t("chain.empty"))
+    store.chains.toList().forEachIndexed { idx: Int, c: ChainConfig ->
+        val members = store.chainMembers(c)
+        Card(Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = CARD), shape = RoundedCornerShape(14.dp)) {
+            Column(Modifier.padding(14.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("⛓ ${c.name}", color = TXT, modifier = Modifier.weight(1f))
+                    if (members.isNotEmpty()) IconButton(onClick = { onShare(c) }) { Icon(Icons.Filled.Share, t("chain.share"), tint = TXT2) }
+                    if (store.chainReady(c)) IconButton(onClick = { store.saveSelection("chain:${c.id}"); bump() }) { Icon(Icons.Filled.CheckCircle, null, tint = if (store.selection == "chain:${c.id}") PRIMARY else MUTED) }
+                    IconButton(onClick = {
+                        val wasSelected = store.selection == "chain:${c.id}"
+                        store.deleteChain(c.id)   // a selection that named it falls back
+                        if (wasSelected && store.selection.isNotEmpty()) AppWork.snack(tf("srv.deletedNow", "name" to c.name, "now" to selectionWord(store)))
+                        bump()
+                    }) { Icon(Icons.Filled.DeleteOutline, t("chain.delete"), tint = BAD) }
+                }
+                // the hops in reading order: → in English, ← in Persian (I18n.flow)
+                Text(tf("chain.path", "path" to (if (members.isEmpty()) t("chain.pathEmpty") else I18n.flow(members.map { s: ServerConfig -> hopName(s) }))), color = MUTED, fontSize = 12.sp)
+                c.members.forEachIndexed { mi: Int, id: String ->
+                    val hop = chainHopLabel(store, id)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${mi + 1}. ${hop.first}", color = if (hop.second) TXT else BAD, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { store.chains[idx] = c.copy(members = c.members.filterIndexed { x: Int, _: String -> x != mi }); store.saveChains(); bump() }) { Icon(Icons.Filled.Close, t("chain.removeHop"), tint = BAD) }
+                    }
+                }
+                DropPick(t("chain.addHop"), chainHopOptions(store, c), "") { id: String -> if (id.isNotEmpty()) { store.chains[idx] = c.copy(members = c.members + id); store.saveChains(); bump() } }
+            }
+        }
+    }
+}
+
 /** A chain hop's name: a group's with its mark. */
 private fun hopName(s: ServerConfig): String = if (Groups.isGroupRecord(s)) "⧉ ${s.name}" else s.name
 
@@ -3496,15 +3544,22 @@ private fun chainHopLabel(store: Store, id: String): Pair<String, Boolean> {
     return if (store.groupRecord(id) != null) Pair("⧉ ${g.name}", true) else Pair("⧉ " + tf("chain.groupEmpty", "name" to g.name), false)
 }
 
-/** What can be added to [c]: every server and every group with a server left, not already in it. */
+/** What can be added to [c]: every server and every group with a server left, not already in it (groups while their extension is installed). */
 private fun chainHopOptions(store: Store, c: ChainConfig): List<Pair<String, String>> = buildList {
     store.servers.filter { s: ServerConfig -> !c.members.contains(s.id) }.forEach { s: ServerConfig -> add(s.id to s.name) }
     groupOptions(store).filter { o: Pair<String, String> -> !c.members.contains(o.first) }.forEach { o: Pair<String, String> -> add(o) }
 }
 
-/** Every group that has a server left, as a picker option: its bare id, "⧉ name". */
-private fun groupOptions(store: Store): List<Pair<String, String>> =
-    store.groups.filter { g: GroupConfig -> store.groupRecord(g.id) != null }.map { g: GroupConfig -> g.id to "⧉ ${g.name}" }
+/**
+ * Every group that has a server left, as a picker option: its bare id, "⧉ name".
+ * Groups are an extension (Modules.kt): without it none — but [keep], the one
+ * the picker holds now, stays (Modules.pickerShows).
+ */
+private fun groupOptions(store: Store, keep: String = ""): List<Pair<String, String>> {
+    val mods = store.modules
+    return store.groups.filter { g: GroupConfig -> store.groupRecord(g.id) != null && Modules.pickerShows(mods, Modules.GROUPS, g.id, keep) }
+        .map { g: GroupConfig -> g.id to "⧉ ${g.name}" }
+}
 
 /** "1 config" / "3 configs". */
 private fun configsWord(n: Int): String = if (n == 1) t("cfg.one") else tf("cfg.many", "n" to n)
@@ -3733,9 +3788,12 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
     fun deleteRule(id: String, i: Int, old: RouteRule) = update(id) { cur: RoutingProfile ->
         if (i < cur.rules.size && cur.rules[i] == old) cur.copy(rules = cur.rules.filterIndexed { x: Int, _: RouteRule -> x != i }) else cur
     }
-    // a chain or a group opens the chains & groups screen, a server its edit sheet; direct/block are nothing to open
+    // a chain or a group opens the chains & groups screen (while its extension is installed), a server
+    // its edit sheet; direct/block are nothing to open
     val onNode: (String) -> Unit = { t: String ->
-        if (t.startsWith("chain:") || store.groupById(t) != null) openChains()
+        val chainNode = t.startsWith("chain:") && store.moduleOn(Modules.CHAINS)
+        val groupNode = store.groupById(t) != null && store.moduleOn(Modules.GROUPS)
+        if (chainNode || groupNode) openChains()
         if (store.serverById(t) != null) editServerId = t
     }
 
@@ -3754,8 +3812,12 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
         SwitchRow(if (geo) t("rt.blockAds") else tf("rt.unavailable", "what" to t("rt.blockAds")), s.blockAds && geo, enabled = geo) { v: Boolean -> save(s.copy(blockAds = v)) }
         SwitchRow(t("rt.sniffing"), s.enableSniffing) { v: Boolean -> save(s.copy(enableSniffing = v)) }
         HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
-        SwitchRow(t("rt.advanced"), s.advancedRouting) { v: Boolean -> save(s.copy(advancedRouting = v)) }
-        if (s.advancedRouting && prof != null) {
+        // Advanced routing — the profiles, their rules, the flow — is an extension (Modules.kt).
+        // Not installed, it is hidden, never switched off: a profile in use still connects.
+        val advOn = store.moduleOn(Modules.ADVANCED_ROUTING)
+        if (!advOn) Text(tf("mod.offHint", "name" to t(Modules.nameKey(Modules.ADVANCED_ROUTING))), color = MUTED, fontSize = 12.sp)
+        if (advOn) SwitchRow(t("rt.advanced"), s.advancedRouting) { v: Boolean -> save(s.copy(advancedRouting = v)) }
+        if (advOn && s.advancedRouting && prof != null) {
             Text(t("rt.profilesIntro"), color = MUTED, fontSize = 12.sp)
             Spacer(Modifier.height(10.dp))
             Text(t("rt.profiles"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
@@ -3813,7 +3875,7 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
             Text(t("rt.base"), color = TXT, fontWeight = FontWeight.Bold)
             Text(t("rt.baseHint"), color = MUTED, fontSize = 11.sp)
             val base = prof.base
-            DropPick(if (base == null) t("rt.noBase") else "⚠ ${targetWord(store, base)}", listOf("" to t("rt.noBase")) + targetOptions(store), base ?: "") { b: String ->
+            DropPick(if (base == null) t("rt.noBase") else "⚠ ${targetWord(store, base)}", listOf("" to t("rt.noBase")) + targetOptions(store, base ?: ""), base ?: "") { b: String ->
                 update(prof.id) { cur: RoutingProfile -> cur.copy(base = b.ifEmpty { null }) }
             }
             if (base != null && !store.targetExists(base)) Text(t("rt.baseGone"), color = BAD, fontSize = 11.sp)
@@ -3837,14 +3899,14 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
 
             Spacer(Modifier.height(8.dp)); Text(t("rt.restVia"), color = MUTED)
             val defAtBase = prof.def == RoutingProfiles.TARGET_BASE
-            DropPick(if (defAtBase) targetWord(store, prof.def, prof) else t("rt.default"), targetOptionsFor(store, prof), prof.def) { t: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(def = t) } }
+            DropPick(if (defAtBase) targetWord(store, prof.def, prof) else t("rt.default"), targetOptionsFor(store, prof, prof.def), prof.def) { t: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(def = t) } }
             when {
                 defAtBase && prof.base == null -> Text(t("rt.noBaseDefault"), color = BAD, fontSize = 11.sp)
                 !store.targetExists(prof.def, prof) -> Text(t("rt.defaultGone"), color = BAD, fontSize = 11.sp)
             }
             // "exit at the base" IS the base: nothing to ride on
             if (RoutingProfiles.takesVia(prof.def)) {
-                DropPick(t("rt.base"), viaOptions(store, prof, prof.def), prof.defVia) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(defVia = v) } }
+                DropPick(t("rt.base"), viaOptions(store, prof, prof.def, prof.defVia), prof.defVia) { v: String -> update(prof.id) { cur: RoutingProfile -> cur.copy(defVia = v) } }
                 val dv = RoutingProfiles.effectiveDefVia(prof)
                 if (dv != null && !store.targetExists(dv)) Text(t("rt.itsBaseGone"), color = BAD, fontSize = 11.sp)
             }
@@ -3905,7 +3967,7 @@ private fun RoutingScreen(store: Store, back: () -> Unit, openChains: () -> Unit
             AppWork.touch()
         }
         if (editing.isJson) EditJsonSheet(editing, onDismiss = { editServerId = null }, onSave = saveEdit)
-        else EditConfigSheet(editing, onDismiss = { editServerId = null }, onSave = saveEdit)
+        else EditConfigSheet(editing, store.modules, onDismiss = { editServerId = null }, onSave = saveEdit)
     }
     AddConfigSheets(store, sheet, { v: String? -> sheet = v }, { AppWork.touch() })
 }
@@ -3971,7 +4033,7 @@ private object RoutingUi { @Volatile var focus = "" }
     }
     // Saved when editing ends, not per keystroke (DraftField).
     DraftField(r.value, Modifier.fillMaxWidth(), placeholder = { Text(t("rt.valuePh"), fontSize = 11.sp) }) { nv: String -> onChange(r.copy(value = nv)) }
-    DropPick("⚠ ${targetWord(store, r.target, p)}", targetOptionsFor(store, p), r.target) { t: String -> onChange(r.copy(target = t)) }
+    DropPick("⚠ ${targetWord(store, r.target, p)}", targetOptionsFor(store, p, r.target), r.target) { t: String -> onChange(r.copy(target = t)) }
     when {
         r.target == RoutingProfiles.TARGET_BASE && p.base == null -> Text(t("rt.ruleNoBase"), color = BAD, fontSize = 11.sp)
         // left out, its traffic would follow the default — perhaps direct (RoutingProfiles.planRoutes)
@@ -3980,7 +4042,7 @@ private object RoutingUi { @Volatile var focus = "" }
     }
     // "exit at the base" IS the base: no via picker
     if (RoutingProfiles.takesVia(r.target)) {
-        DropPick("⚠ " + tf("exit.via", "name" to targetWord(store, r.via)), viaOptions(store, p, r.target), r.via.ifEmpty { RoutingProfiles.VIA_INHERIT }) { v: String -> onChange(r.copy(via = v)) }
+        DropPick("⚠ " + tf("exit.via", "name" to targetWord(store, r.via)), viaOptions(store, p, r.target, r.via), r.via.ifEmpty { RoutingProfiles.VIA_INHERIT }) { v: String -> onChange(r.copy(via = v)) }
         val eff = RoutingProfiles.effectiveVia(r, p)
         if (eff != null && !store.targetExists(eff)) Text(t("rt.itsBaseGone"), color = BAD, fontSize = 11.sp)
     }
@@ -4015,20 +4077,20 @@ private fun targetWord(store: Store, target: String, p: RoutingProfile): String 
     return "⚓ " + tf("tgt.exitBaseOf", "base" to targetWord(store, b))
 }
 
-/** A rule's or the default's targets in [p]: every target, and — while [p] has a base — "exit at the base" (it follows the base). */
-private fun targetOptionsFor(store: Store, p: RoutingProfile): List<Pair<String, String>> {
-    val all = targetOptionsFull(store)
+/** A rule's or the default's targets in [p]: every target, and — while [p] has a base — "exit at the base" (it follows the base). [keep]: the one it holds now. */
+private fun targetOptionsFor(store: Store, p: RoutingProfile, keep: String = ""): List<Pair<String, String>> {
+    val all = targetOptionsFull(store, keep)
     val base = p.base ?: return all
     // after Direct and Block: the words, then the servers and chains
     return all.take(3) + (RoutingProfiles.TARGET_BASE to "⚓ " + tf("tgt.exitBaseOf", "base" to targetWord(store, base))) + all.drop(3)
 }
 
-/** What a target can ride on: the profile's base, nothing, or any server or chain but itself. */
-private fun viaOptions(store: Store, p: RoutingProfile, target: String): List<Pair<String, String>> = buildList {
+/** What a target can ride on: the profile's base, nothing, or any server or chain but itself. [keep]: the one it rides on now. */
+private fun viaOptions(store: Store, p: RoutingProfile, target: String, keep: String = ""): List<Pair<String, String>> = buildList {
     val base = p.base
     add(RoutingProfiles.VIA_INHERIT to (if (base != null) tf("rt.viaInherit", "base" to targetWord(store, base)) else t("rt.viaInheritNone")))
     add(RoutingProfiles.VIA_NONE to t("rt.viaNone"))
-    targetOptions(store).filter { o: Pair<String, String> -> o.first != target }.forEach { o: Pair<String, String> -> add(o.first to tf("exit.via", "name" to o.second)) }
+    targetOptions(store, keep).filter { o: Pair<String, String> -> o.first != target }.forEach { o: Pair<String, String> -> add(o.first to tf("exit.via", "name" to o.second)) }
 }
 
 /** One step of the flow: a glyph, what it is, and why it is red when it is. */
@@ -4283,6 +4345,13 @@ private fun chainShare(store: Store, c: ChainConfig): SharedText? = try {
                         Text(t("imp.unreadable"), color = AMBER, fontSize = 12.sp)
                         summary.unreadable.forEach { u: String -> Text("· $u", color = AMBER, fontSize = 11.sp) }
                     }
+                    // a chain's link is the chains extension's, a profile's advanced routing's:
+                    // imported either way, seen once that one is installed
+                    val owner = if (summary.kind == RouteShare.KIND_CHAIN) Modules.CHAINS else Modules.ADVANCED_ROUTING
+                    if (!store.moduleOn(owner)) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(tf("mod.importHidden", "name" to t(Modules.nameKey(owner))), color = AMBER, fontSize = 12.sp)
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text(
                         t("imp.note"),
@@ -4321,7 +4390,7 @@ private fun importRouting(store: Store, payload: JSONObject) {
 
 /* ================================ SETTINGS ================================ */
 @Composable
-private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
+private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit, openModules: () -> Unit) {
     val ctx = LocalContext.current
     var s by remember { mutableStateOf(store.settings) }
     fun save(n: AppSettings) { s = n; store.saveSettings(n); bump() }
@@ -4413,7 +4482,20 @@ private fun SettingsScreen(store: Store, bump: () -> Unit, back: () -> Unit) {
         val lockdown by VpnState.lockdown.collectAsState()
         if (lockdown && s.perAppMode != "off")
             Text(t("set.lockdown"), color = AMBER, fontSize = 11.sp)
-        LanShareSection(store)
+        // LAN sharing is an extension (Modules.kt): not installed, its section is
+        // hidden — a share that is on stays on (the extension's card says so)
+        if (store.moduleOn(Modules.LAN_SHARE)) LanShareSection(store)
+        // the extensions themselves, one line away
+        HorizontalDivider(Modifier.padding(vertical = 10.dp), color = STROKE)
+        val installed = Modules.IDS.count { id: String -> store.moduleOn(id) }
+        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp)).clickable { openModules() }.padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Extension, null, tint = PRIMARY, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(10.dp))
+            Text(tf("mod.settingsLine", "n" to installed, "total" to Modules.IDS.size), color = TXT2, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            Icon(Icons.Filled.ChevronRight, null, tint = MUTED2, modifier = Modifier.mirrorRtl())
+        }
+        Spacer(Modifier.height(16.dp))
     }
 }
 
@@ -4463,6 +4545,119 @@ private fun coresLine(ctx: Context): String {
     }
 }
 
+/* ================================ EXTENSIONS ================================ */
+/**
+ * Extensions (افزونه‌ها, Modules.kt): the advanced features, each a card in its
+ * section — its icon, name and one line on what it is, Installed or Install,
+ * Remove, how much of the store it holds ("in use: N"), and what it needs.
+ * Built in, nothing downloaded: installing one shows its screens and fields,
+ * removing one hides them again. A remove of one in use asks first, saying
+ * what goes out of sight — nothing is deleted, and what it made keeps
+ * working. A remove another installed one needs is refused, by name.
+ */
+@Composable
+private fun ModulesScreen(store: Store, back: () -> Unit) {
+    observeStore()
+    // a Compose state (Store.modules): an install or a remove redraws this at once
+    val mods = store.modules
+    val inUse = store.modulesInUse()
+    var confirm by remember { mutableStateOf<String?>(null) }
+    fun nameOf(id: String): String = t(Modules.nameKey(id))
+    fun change(id: String, on: Boolean) {
+        val r = store.setModule(id, on)
+        if (r.blockedBy.isNotEmpty()) {
+            AppWork.snack(tf("mod.blocked", "name" to nameOf(id), "by" to r.blockedBy.joinToString(t("sep.list")) { b: String -> nameOf(b) }))
+            return
+        }
+        AppWork.touch()
+        if (!on) AppWork.snack(tf("mod.removedSnack", "name" to nameOf(id)))
+        else if (r.added.isNotEmpty()) AppWork.snack(tf("mod.alsoInstalled", "name" to nameOf(id), "also" to r.added.joinToString(t("sep.list")) { a: String -> nameOf(a) }))
+        else AppWork.snack(tf("mod.installedSnack", "name" to nameOf(id)))
+    }
+    Screen(t("mod.title"), back, {}) {
+        Text(t("mod.intro"), color = MUTED, fontSize = 12.sp)
+        Modules.CATEGORIES.forEach { cat: String ->
+            val list = Modules.MODULES.filter { m: Modules.Module -> m.category == cat }
+            if (list.isNotEmpty()) {
+                Spacer(Modifier.height(14.dp))
+                Text(t("mod.cat.$cat"), color = MUTED2, fontSize = 9.sp, fontFamily = MONO, letterSpacing = 0.1.em)
+                list.forEach { m: Modules.Module ->
+                    val used = inUse[m.id] ?: 0
+                    ModuleCard(
+                        m, on = Modules.isOn(mods, m.id), used = used,
+                        needs = Modules.missingRequires(mods, m.id).map { r: String -> nameOf(r) },
+                        onInstall = { change(m.id, true) },
+                        // one in use asks first, saying what goes out of sight
+                        onRemove = { if (used > 0) { confirm = m.id } else { change(m.id, false) } }
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+    }
+    val pending = confirm
+    if (pending != null) {
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            containerColor = CARD,
+            title = { Text(tf("mod.removeTitle", "name" to nameOf(pending)), color = TXT, fontSize = 16.sp) },
+            text = {
+                Column {
+                    Text(tf("mod.removeAsk", "n" to (inUse[pending] ?: 0)), color = TXT2, fontSize = 13.sp)
+                    Spacer(Modifier.height(6.dp))
+                    Text("• " + t("mod.$pending.hides"), color = MUTED, fontSize = 13.sp)
+                }
+            },
+            confirmButton = { TextButton(onClick = { confirm = null; change(pending, false) }) { Text(t("mod.remove"), color = BAD) } },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text(t("btn.cancel"), color = MUTED) } }
+        )
+    }
+}
+
+/** One extension's card: icon, name (and INSTALLED), what it is, "in use: N", "needs …", Install or Remove. */
+@Composable private fun ModuleCard(m: Modules.Module, on: Boolean, used: Int, needs: List<String>, onInstall: () -> Unit, onRemove: () -> Unit) {
+    Card(
+        Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.cardColors(containerColor = if (on) CARD_SEL else CARD),
+        shape = RoundedCornerShape(14.dp), border = BorderStroke(1.dp, if (on) PRIMARY_DIM else STROKE)
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(m.icon, fontSize = 22.sp, modifier = Modifier.clearAndSetSemantics {})
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        t(m.nameKey), color = TXT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (on) {
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            t("mod.installed"), color = ON_PRIMARY, fontSize = 8.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 0.1.em, maxLines = 1,
+                            modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(PRIMARY).padding(horizontal = 5.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+                Text(t(m.descKey), color = MUTED, fontSize = 11.sp)
+                if (used > 0) Text(tf("mod.inUse", "n" to used), color = TXT2, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.padding(top = 2.dp))
+                if (needs.isNotEmpty()) Text(tf("mod.needs", "names" to needs.joinToString(t("sep.list"))), color = AMBER, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp))
+            }
+            Spacer(Modifier.width(10.dp))
+            if (on) {
+                OutlinedButton(
+                    onClick = onRemove, shape = RoundedCornerShape(10.dp), border = BorderStroke(1.dp, STROKE),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TXT2)
+                ) { Text(t("mod.remove"), fontSize = 12.sp) }
+            } else {
+                Button(
+                    onClick = onInstall, shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = PRIMARY, contentColor = ON_PRIMARY)
+                ) { Text(t("mod.install"), fontSize = 12.sp) }
+            }
+        }
+    }
+}
+
 /* ================================ LOGS / MORE ================================ */
 @Composable private fun LogsScreen(back: () -> Unit) {
     val log by VpnState.log.collectAsState()
@@ -4507,12 +4702,21 @@ private fun coresLine(ctx: Context): String {
                         colors = SwitchDefaults.colors(checkedThumbColor = ON_PRIMARY, checkedTrackColor = PRIMARY, uncheckedThumbColor = MUTED, uncheckedTrackColor = CARD2, uncheckedBorderColor = STROKE))
                 }
             }
+            // chains & groups, the pool and advanced routing are extensions (Modules.kt):
+            // a row for each one installed; Extensions itself is always there
+            val chainsOn = store.moduleOn(Modules.CHAINS)
+            val groupsOn = store.moduleOn(Modules.GROUPS)
+            val advOn = store.moduleOn(Modules.ADVANCED_ROUTING) && s.advancedRouting
             val rows = buildList {
                 if (s.advancedMode) {
-                    add(MoreRow("chains", t("chain.screen"), t("more.chainsSub"), "${store.chains.size} · ${store.groups.size}", Icons.Filled.Link))
-                    add(MoreRow("pool", t("pool.title"), t("more.poolSub"), "${store.pool.size}", Icons.Filled.Hub))
-                    add(MoreRow("routing", t("rt.title"), if (s.advancedRouting) t("more.routingAdvanced") else routingModeLabel(s.routingMode), if (s.advancedRouting) tf("more.profiles", "n" to store.profiles.size) else "", Icons.Filled.CallSplit))
+                    if (chainsOn && groupsOn) add(MoreRow("chains", t("chain.screen"), t("more.chainsSub"), "${store.chains.size} · ${store.groups.size}", Icons.Filled.Link))
+                    else if (chainsOn) add(MoreRow("chains", t(Modules.nameKey(Modules.CHAINS)), t("mod.chains.desc"), "${store.chains.size}", Icons.Filled.Link))
+                    else if (groupsOn) add(MoreRow("chains", t(Modules.nameKey(Modules.GROUPS)), t("mod.groups.desc"), "${store.groups.size}", Icons.Filled.Link))
+                    if (store.moduleOn(Modules.POOL)) add(MoreRow("pool", t("pool.title"), t("more.poolSub"), "${store.pool.size}", Icons.Filled.Hub))
+                    add(MoreRow("routing", t("rt.title"), if (advOn) t("more.routingAdvanced") else routingModeLabel(s.routingMode), if (advOn) tf("more.profiles", "n" to store.profiles.size) else "", Icons.Filled.CallSplit))
                 }
+                val installed = Modules.IDS.count { id: String -> store.moduleOn(id) }
+                add(MoreRow("modules", t("mod.title"), t("mod.moreSub"), "$installed/${Modules.IDS.size}", Icons.Filled.Extension))
                 add(MoreRow("settings", t("set.title"), t("more.settingsSub"), "", Icons.Filled.Settings))
                 if (s.advancedMode) add(MoreRow("logs", t("logs.title"), t("more.logsSub"), "", Icons.Filled.Article))
             }
@@ -4680,9 +4884,18 @@ private fun applyName(name: String): String {
 @Composable private fun EmptyHint(text: String) { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { Text(text, color = MUTED) } }
 @Composable private fun tfColors() = OutlinedTextFieldDefaults.colors(focusedBorderColor = PRIMARY, unfocusedBorderColor = STROKE, focusedTextColor = TXT, unfocusedTextColor = TXT, cursorColor = PRIMARY)
 
-/** Every server, chain and group a picker offers — a routing target, a base, a pool exit: a group by its bare id, "⧉ name" (Groups.kt). */
-private fun targetOptions(store: Store): List<Pair<String, String>> = buildList { store.servers.forEach { add(it.id to it.name) }; store.chains.filter { store.chainReady(it) }.forEach { add("chain:${it.id}" to "⛓ ${it.name}") }; addAll(groupOptions(store)) }
-private fun targetOptionsFull(store: Store): List<Pair<String, String>> = buildList { add("proxy" to t("tgt.proxy")); add("direct" to t("tgt.direct")); add("block" to t("tgt.block")); addAll(targetOptions(store)) }
+/**
+ * Every server, chain and group a picker offers — a routing target, a base, a pool exit: a group by its bare id, "⧉ name" (Groups.kt).
+ * Chains and groups are extensions (Modules.kt): offered while theirs is installed, and [keep] — what the picker holds now — always.
+ */
+private fun targetOptions(store: Store, keep: String = ""): List<Pair<String, String>> = buildList {
+    store.servers.forEach { add(it.id to it.name) }
+    val mods = store.modules
+    store.chains.filter { c: ChainConfig -> store.chainReady(c) && Modules.pickerShows(mods, Modules.CHAINS, "chain:${c.id}", keep) }
+        .forEach { c: ChainConfig -> add("chain:${c.id}" to "⛓ ${c.name}") }
+    addAll(groupOptions(store, keep))
+}
+private fun targetOptionsFull(store: Store, keep: String = ""): List<Pair<String, String>> = buildList { add("proxy" to t("tgt.proxy")); add("direct" to t("tgt.direct")); add("block" to t("tgt.block")); addAll(targetOptions(store, keep)) }
 // apiPort belongs here too: it is the core's own metrics/API listener, and a
 // pool entry handed that port makes the config fail to build.
 private fun usedPorts(store: Store): Set<Int> { val s = HashSet<Int>(); s.add(store.settings.socksPort); s.add(store.settings.httpPort); s.add(store.settings.apiPort); store.pool.forEach { if (it.socksPort > 0) s.add(it.socksPort); if (it.httpPort > 0) s.add(it.httpPort) }; return s }
