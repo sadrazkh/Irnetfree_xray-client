@@ -16,7 +16,8 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 
-const { Downloader, downloadFile, fetchJSON, runVersion, RELEASES_TTL_MS } = require('../src/main/downloader');
+const { Downloader, downloadFile, fetchJSON, runVersion, RELEASES_TTL_MS, RELEASES_PER_PAGE, RELEASES_MAX_PAGES } = require('../src/main/downloader');
+const { SUGGESTED, STABLE_COUNT, PRERELEASE_COUNT, buildCards } = require('../src/main/coreVersions');
 const rel = require('./coreReleases');
 
 const tmpDirs = [];
@@ -130,12 +131,12 @@ function lister(answers, over = {}) {
   return { d, asked, tick: (ms) => { now += ms; } };
 }
 
-test('listReleases: the 30 newest and GitHub’s latest, from the core’s own repo — trimmed to what the picker uses', async () => {
+test('listReleases: the newest page and GitHub’s latest, from the core’s own repo — trimmed to what the picker uses', async () => {
   const h = lister((url) => (url.endsWith('/latest') ? rel.pattn()[0] : rel.pattn()));
   const got = await h.d.listReleases('xray-pattn');
   assert.deepEqual(h.asked.sort(), [
     'https://api.github.com/repos/patterniha/Xray-core/releases/latest',
-    'https://api.github.com/repos/patterniha/Xray-core/releases?per_page=30'
+    'https://api.github.com/repos/patterniha/Xray-core/releases?per_page=10&page=1'
   ]);
   assert.equal(got.latestTag, 'v26.10.22');
   assert.equal(got.releases.length, rel.pattn().length);
@@ -211,6 +212,100 @@ test('listReleases: anything but a list (GitHub’s error object, null) is an er
   const h = lister((url) => (url.endsWith('/latest') ? null : { message: 'Bad credentials' }));
   await assert.rejects(h.d.listReleases('xray'), /did not answer with a list/);
   await assert.rejects(h.d.listReleases('geo'), /unknown core/);
+});
+
+/* ------------------------------ the release list, a page at a time ------------------------------ */
+
+/** GitHub's list endpoint as it pages: `per_page` and `page` read from the URL, `list` sliced (/latest and /tags/ as `other` says). */
+function pagedGithub(list, other = () => null) {
+  return (url) => {
+    if (!/\/releases\?/.test(url)) return other(url);
+    const q = new URL(url).searchParams;
+    const per = Number(q.get('per_page')), page = Number(q.get('page') || 1);
+    return list.slice((page - 1) * per, page * per);
+  };
+}
+const pagesAsked = (asked) => asked.filter((u) => /\/releases\?/.test(u)).map((u) => Number(new URL(u).searchParams.get('page')));
+/** The picker's cards (its versions) for a listing, pre-releases off and on — Windows x64, as the lister runs. */
+function cardsOf(d, id, releases) {
+  const of = (prerelease) => buildCards({ releases, matchAsset: d.assetMatcher(id), installed: '', latestTag: '', suggested: SUGGESTED[id], prerelease }).map((c) => c.version);
+  return { stable: of(false), all: of(true) };
+}
+
+test('listReleases pages: ten releases a page — the cards with pre-releases on — the next page only while fewer than six stables with this platform’s build are in hand', async () => {
+  assert.deepEqual([RELEASES_PER_PAGE, RELEASES_MAX_PAGES, STABLE_COUNT, PRERELEASE_COUNT], [10, 3, 6, 4]);
+  // Xray-PattN, every release stable: the first page has six and more — one request for the list
+  const p = lister(pagedGithub(rel.pattn(), () => rel.pattn()[0]));
+  const pl = await p.d.listReleases('xray-pattn');
+  assert.deepEqual(pagesAsked(p.asked), [1]);
+  assert.equal(pl.releases.length, 10);
+  assert.deepEqual(p.asked.filter((u) => /\/releases\?/.test(u)), ['https://api.github.com/repos/patterniha/Xray-core/releases?per_page=10&page=1']);
+  // sing-box, a stable every few alphas: its sixth stable (1.13.20) is the 18th release — two pages
+  const s = lister(pagedGithub(rel.singbox(), () => rel.singbox()[0]));
+  const sl = await s.d.listReleases('sing-box');
+  assert.deepEqual(pagesAsked(s.asked), [1, 2]);
+  assert.equal(sl.releases.length, 20);
+  // Xray, a pre-release after another since 26.3.27: its sixth stable is the 29th — three pages, the 30 newest as before
+  const x = lister(pagedGithub(rel.xtls(), (u) => (u.endsWith('/latest') ? rel.xtls().find((r) => !r.prerelease) : null)));
+  const xl = await x.d.listReleases('xray');
+  assert.deepEqual(pagesAsked(x.asked), [1, 2, 3]);
+  assert.equal(xl.releases.length, 30);
+  // what the picker shows is what the one listing of 30 showed — pre-releases off and on
+  for (const [h, id, got, list] of [[p, 'xray-pattn', pl, rel.pattn()], [s, 'sing-box', sl, rel.singbox()], [x, 'xray', xl, rel.xtls()]]) {
+    assert.deepEqual(cardsOf(h.d, id, got.releases), cardsOf(h.d, id, list.slice(0, 30)), id);
+  }
+  // cached as one listing: within ten minutes no page is asked again
+  const before = s.asked.length;
+  await s.d.listReleases('sing-box');
+  assert.equal(s.asked.length, before);
+});
+
+test('listReleases pages: a release without this platform’s build does not count; a short page is the last; three pages at most; a page twice over is not taken twice', async () => {
+  // the five newest PattN releases without a Windows x64 build: five stables in the first page that count — so a second
+  const stripped = rel.pattn().map((r, i) => (i < 5 ? Object.assign(r, { assets: r.assets.filter((a) => !/windows-64/.test(a.name)) }) : r));
+  const a = lister(pagedGithub(stripped));
+  const al = await a.d.listReleases('xray-pattn');
+  assert.deepEqual(pagesAsked(a.asked), [1, 2]);
+  assert.equal(al.releases.length, 15, 'the second page is short: the end of the list');
+  assert.deepEqual(cardsOf(a.d, 'xray-pattn', al.releases).stable.length, 6);
+  // eight releases in all: one short page, though only four of them are stable
+  const short = rel.singbox().slice(0, 8);
+  const b = lister(pagedGithub(short));
+  assert.equal((await b.d.listReleases('sing-box')).releases.length, 8);
+  assert.deepEqual(pagesAsked(b.asked), [1]);
+  // nothing stable at all: three pages, never a fourth
+  const pre = rel.xtls().map((r) => Object.assign(r, { prerelease: true }));
+  const c = lister(pagedGithub(pre));
+  assert.equal((await c.d.listReleases('xray')).releases.length, 30);
+  assert.deepEqual(pagesAsked(c.asked), [1, 2, 3]);
+  // a release published between two pages: the second starts with the first's last — kept once
+  const list = rel.singbox();
+  const d = lister((url) => {
+    if (!/\/releases\?/.test(url)) return null;
+    const page = Number(new URL(url).searchParams.get('page'));
+    return page === 1 ? list.slice(0, 10) : list.slice((page - 1) * 10 - 1, page * 10 - 1);
+  });
+  const tags = (await d.d.listReleases('sing-box')).releases.map((r) => r.tag_name);
+  assert.equal(new Set(tags).size, tags.length, tags.join(' '));
+  assert.equal(tags.length, 19);
+});
+
+test('listReleases pages: a later page failing (the rate limit, an error object) costs only its cards — the first failing is the listing’s error; the suggested release still fetched by its tag', async () => {
+  const limited = Object.assign(new Error('GitHub: HTTP 403 — API rate limit exceeded'), { status: 403, rateLimited: true });
+  const second = (answer) => lister((url) => (/[?&]page=2/.test(url) ? answer : pagedGithub(rel.singbox(), () => null)(url)));
+  for (const answer of [limited, { message: 'Server Error' }, null]) {
+    const h = second(answer);
+    const got = await h.d.listReleases('sing-box');
+    assert.equal(got.releases.length, 10, String(answer && answer.message));
+    assert.deepEqual(pagesAsked(h.asked), [1, 2], 'no third page after a failed second');
+  }
+  const first = lister((url) => (/[?&]page=1/.test(url) ? limited : null));
+  await assert.rejects(first.d.listReleases('sing-box'), (e) => e.rateLimited === true);
+  // the list of 2026-10-03, before 1.14.3: three pages hold no 1.14.3 — asked by its tag, as before
+  const old = lister(pagedGithub(rel.singbox().slice(1), (url) => (url.endsWith('/releases/tags/v1.14.3') ? rel.singboxTag('v1.14.3') : null)));
+  const ol = await old.d.listReleases('sing-box');
+  assert.ok(old.asked.includes('https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.3'), old.asked.join('\n'));
+  assert.equal(ol.releases.at(-1).tag_name, 'v1.14.3');
 });
 
 /* ------------------------------ the default target: what a plain download installs ------------------------------ */

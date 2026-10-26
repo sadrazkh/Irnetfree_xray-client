@@ -55,6 +55,67 @@ test('decide: per device — the admin\'s binding for good, a sign-in for its ho
   assert.equal(allow.nft.portal, null);
 });
 
+test('addressOwners: a running lease\'s address is its holder\'s whoever the neighbour table has at it; an address no lease names, the neighbour table\'s', () => {
+  const X = 'aa:bb:cc:dd:ee:0c';
+  const owners = plan.addressOwners([
+    // X took .23 (A's lease) and answers for it; it comes first in the scan's order (online, A is not)
+    { mac: X, ips: ['192.168.1.23', '192.168.1.77'], leased: [] },
+    { mac: A, ips: ['192.168.1.23', '2001:db8::23'], leased: ['192.168.1.23'] },
+    { mac: B, ips: ['192.168.1.77'], leased: [] },
+    null, { ips: ['10.0.0.1'] }
+  ]);
+  assert.deepEqual([...owners], [['192.168.1.23', A], ['192.168.1.77', X], ['2001:db8::23', A]],
+    'the lease wins; two unleased claims: the first in the scan\'s order; a row with no MAC is no claim');
+  assert.deepEqual([...plan.addressOwners(undefined)], []);
+  assert.deepEqual([...plan.addressOwners([{ mac: A, ips: ['192.168.1.23'] }])], [['192.168.1.23', A]], 'a row with no `leased` (an older scan): its addresses by the neighbour table');
+});
+
+test('decide: the pins — every address of every device that belongs to a user, bound to its MAC; a borrowed address in nobody else\'s rule-set or counter', () => {
+  const X = 'aa:bb:cc:dd:ee:0c', Y = 'aa:bb:cc:dd:ee:0d', F = 'aa:bb:cc:dd:ee:0f', E = 'aa:bb:cc:dd:ee:0e';
+  const lu = plan.readLanUsers({
+    config: { transparent: { enabled: true, unassigned: 'login' } },
+    users: [
+      { id: 'u-ali', target: 'srv-2' }, { id: 'u-bob', target: 'srv-3' }, { id: 'u-net', target: 'direct' },
+      { id: 'u-cap', target: 'srv-2' }, { id: 'u-here', target: '' }
+    ],
+    devices: [
+      { mac: A, userId: 'u-ali' }, { mac: X, userId: 'u-bob' }, { mac: B, userId: 'u-net' }, { mac: C, userId: 'u-cap' },
+      { mac: D, userId: 'u-here' }, { mac: E, userId: 'u-ali', blocked: true }
+    ]
+  });
+  const sessions = { [F]: { userId: 'u-ali', until: NOW + 3600000 } };
+  const scan = [
+    // bob's X took alice's A's leased address (A is away) and answers for it
+    { mac: X, ips: ['192.168.1.23', '192.168.1.24'], leased: ['192.168.1.24'] },
+    { mac: A, ips: ['192.168.1.23', '2001:db8::23', '2001:db8::a:23'], leased: ['192.168.1.23'] },
+    { mac: B, ips: ['192.168.1.40'], leased: ['192.168.1.40'] },
+    { mac: C, ips: ['192.168.1.30'], leased: [] },
+    { mac: D, ips: ['192.168.1.50'], leased: [] },
+    { mac: E, ips: ['192.168.1.60'], leased: [] },
+    { mac: F, ips: ['192.168.1.66'], leased: [] },
+    { mac: Y, ips: ['192.168.1.99'], leased: [] }      // nobody's: pinned to nothing
+  ];
+  const d = plan.decide({ lu, sessions, scan, usage: { 'u-cap': { over: true } }, now: NOW,
+    tp: [{ tag: 'lu-tp-1', target: 'srv-2' }, { tag: 'lu-tp-2', target: 'srv-3' }], portal: { ip: '192.168.1.1', port: 30822 } });
+  assert.deepEqual(d.nft.ipmac, [
+    { mac: A, ips: ['192.168.1.23', '2001:db8::23', '2001:db8::a:23'] },   // routed: every address, both families
+    { mac: B, ips: ['192.168.1.40'] },                                     // direct: around the tunnel, still charged by address
+    { mac: C, ips: ['192.168.1.30'] },                                     // held: meets the gate as itself
+    { mac: D, ips: ['192.168.1.50'] },                                     // the router's own connection: still someone's cap
+    { mac: X, ips: ['192.168.1.24'] },                                     // only its own: .23 is A's lease
+    { mac: E, ips: ['192.168.1.60'] },                                     // blocked, but someone's: no one rides its address either
+    { mac: F, ips: ['192.168.1.66'] }                                      // signed in
+  ]);
+  assert.deepEqual(d.ruleSets, { 'lu-tp-1': ['192.168.1.23/32', '2001:db8::23/128', '2001:db8::a:23/128', '192.168.1.66/32'], 'lu-tp-2': ['192.168.1.24/32'] },
+    'A\'s address is in alice\'s rule-set only — not in bob\'s for the device that took it');
+  const ctr = Object.fromEntries(d.nft.counters.map(c => [c.mac, c.ips]));
+  assert.deepEqual([ctr[A], ctr[X], ctr[Y]], [['192.168.1.23', '2001:db8::23', '2001:db8::a:23'], ['192.168.1.24'], ['192.168.1.99']], 'the down counter of an address is its owner\'s');
+  // the text that reaches the kernel: X's MAC is not A's, so X sending from .23 is dropped
+  const text = require('../src/main/openwrtNet').buildNftRuleset({ lanUsers: d.nft });
+  assert.ok(text.includes(`192.168.1.23 . ${A}`) && !text.includes(`192.168.1.23 . ${X}`), text);
+  assert.ok(!/192\.168\.1\.99 \./.test(text), 'nobody\'s device: no pin');
+});
+
 test('ruleSetText: sing-box\'s source format, version 1 — every sing-box from 1.8 reads it; no device is an empty list, not an invalid rule', () => {
   assert.equal(plan.ruleSetText(['192.168.1.23/32']), '{\n  "version": 1,\n  "rules": [\n    {\n      "source_ip_cidr": [\n        "192.168.1.23/32"\n      ]\n    }\n  ]\n}\n');
   assert.deepEqual(JSON.parse(plan.ruleSetText([])), { version: 1, rules: [] });
@@ -201,6 +262,69 @@ test('caps: the table\'s counters feed the meter per user; over the cap its devi
   await c.r.tick();
   assert.equal(c.r.pendingReconnect(), false, 'the gateway gone: nothing to reconnect');
   assert.ok(c.files.get('/etc/irnetfree/lan-device-usage.json'), 'the devices\' usage saved when the gateway went');
+});
+
+test('the pins follow the devices: a new lease moves the rule-set file and the table\'s pin in the same tick; a device taking an assigned one\'s address moves neither', async () => {
+  const X = 'aa:bb:cc:dd:ee:0c';
+  const until = NOW / 1000 + 86400;
+  const lan = fakeLan({ leases: `${until} ${A} 192.168.1.23 phone *\n`, neigh: `192.168.1.23 lladdr ${A} REACHABLE\n` });
+  const store = { config: { transparent: { enabled: true, unassigned: 'allow' } }, users: [{ id: 'u-ali', name: 'Ali', target: 'srv-2', enabled: true }], devices: [{ mac: A, userId: 'u-ali' }] };
+  const c = controller({ store, lan });
+  const tp = await c.r.prepare();
+  const config = buildConfig({ mode: 'single', server: SRV1 }, { socksPort: 30808, httpPort: 30809, apiPort: 30085 });
+  c.r.applyXray(config, { serverId: 'srv-1', plan: { mode: 'single', server: SRV1 }, settings: { lanUsersTp: tp } });
+  const opts = await c.r.gatewayOptions(tp);
+  assert.deepEqual(opts.nft.ipmac, [{ mac: A, ips: ['192.168.1.23'] }], 'the gateway starts with the pin in its first table');
+  const file = () => JSON.parse(c.files.get('/tmp/irnetfree-lu/lu-tp-1.json')).rules;
+  assert.deepEqual(file(), [{ source_ip_cidr: ['192.168.1.23/32'] }]);
+  const gw = fakeGateway();
+  await c.r.gatewayUp(gw);
+  const table = () => (gw.loads.length ? gw.loads[gw.loads.length - 1] : opts.nft);
+
+  // A away, X (nobody's — allow mode lets it through by its own MAC) took .23 and answers for it
+  lan.neigh = `192.168.1.23 lladdr ${X} REACHABLE\n`;
+  await c.r.tick();
+  assert.deepEqual(table().ipmac, [{ mac: A, ips: ['192.168.1.23'] }], 'the address stays A\'s (its lease): X\'s packets from it are dropped');
+  assert.deepEqual(file(), [{ source_ip_cidr: ['192.168.1.23/32'] }]);
+  assert.deepEqual(table().counters.find(x => x.mac === X), { mac: X, ips: [] }, 'X is counted, but .23\'s bytes are A\'s');
+
+  // a DHCP renewal hands A another address: the file and the pin move together, in one tick
+  lan.leases = `${until} ${A} 192.168.1.50 phone *\n`;
+  lan.neigh = `192.168.1.50 lladdr ${A} REACHABLE\n`;
+  const loads = gw.loads.length;
+  await c.r.tick();
+  assert.equal(gw.loads.length, loads + 1, 'one table load');
+  assert.deepEqual(table().ipmac, [{ mac: A, ips: ['192.168.1.50'] }]);
+  assert.deepEqual(file(), [{ source_ip_cidr: ['192.168.1.50/32'] }]);
+
+  // A unassigned: nobody's device, pinned to nothing — the table as it is for any device of no one
+  store.devices = [];
+  await c.r.tick();
+  assert.deepEqual(table().ipmac, []);
+  assert.deepEqual(file(), []);
+});
+
+test('the devices list counts each device in its user’s month — a Persian-month user’s under j1405-08, the running month’s count carried', async () => {
+  const lan = fakeLan({ neigh: `192.168.1.23 lladdr ${A} REACHABLE\n` });
+  const files = memFs();
+  // saved before the user's cap followed the Persian month: October's count
+  files.writeFileSync('/etc/irnetfree/lan-device-usage.json', JSON.stringify({ [A]: { period: '2026-10', bytes: 1000 }, [C]: { period: '2026-10', bytes: 50 }, [D]: { period: '2026-09', bytes: 70 } }));
+  const store = { config: { transparent: { enabled: true, unassigned: 'allow' } }, users: [{ id: 'u-ali', name: 'Ali', target: 'srv-2', enabled: true, quotaPeriod: 'month', quotaCalendar: 'jalali' }], devices: [{ mac: A, userId: 'u-ali' }] };
+  const r = createLanRouter({
+    openwrt: true, dataDir: '/etc/irnetfree', tmpDir: '/tmp', fs: files, run: lan.run, readFile: lan.readFile,
+    getSettings: () => ({ modules: { lanUsers: true } }), getLanUsers: () => store, records: () => ({ servers: [SRV1, SRV2], groups: [], chains: [] }),
+    getFreePorts: async (n) => Array.from({ length: n }, (_, i) => 41001 + i), log: () => {}, now: () => NOW, meter: fakeMeter(), tickMs: 3600000
+  });
+  assert.deepEqual(r.deviceUsage(), { [A]: 1000, [C]: 50 }, 'October overlaps Aban: carried; an unbound device by the Gregorian month; September is over');
+  await r.gatewayOptions(await r.prepare());
+  const gw = fakeGateway();
+  gw.tableGen = 1;
+  await r.gatewayUp(gw);
+  lan.counters = { [A]: { up: 100, down: 200 } };
+  await r.tick();
+  assert.deepEqual(r.deviceUsage(), { [A]: 1300, [C]: 50 });
+  await r.stop();
+  assert.deepEqual(JSON.parse(files.get('/etc/irnetfree/lan-device-usage.json'))[A], { period: 'j1405-08', bytes: 1300 });
 });
 
 /* ------------------------------ the service on a "router" ------------------------------ */

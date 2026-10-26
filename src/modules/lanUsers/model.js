@@ -12,7 +12,8 @@
  *
  *   { config: { proxy: { enabled, port, httpPort },
  *               transparent: { enabled, unassigned, sessionHours, portalPort } },   // router only
- *     users: [{ id, username, password, name, target, quotaGb, quotaPeriod, expiresAt, maxDevices, enabled }],
+ *     users: [{ id, username, password, name, target, quotaGb, quotaPeriod, quotaCalendar?, quotaResetDay?,
+ *               expiresAt, maxDevices, enabled }],
  *     devices: [{ mac, name, userId, blocked }] }                                    // router only
  *
  * `password` is stored as given: the core's SOCKS/HTTP accounts need it in its
@@ -20,10 +21,13 @@
  * It is never logged. `target`: '' = whatever this machine is connected through
  * now; a server or group id; `chain:<id>`; 'direct'; 'block'. `quotaGb` 0 = no
  * cap; `quotaPeriod` 'day' | 'month' | 'none' — 'none' with a cap is one amount
- * that never renews ("10 GB, then stop"); `expiresAt` ms, 0 = never;
- * `maxDevices` 0 = any.
+ * that never renews ("10 GB, then stop"); a month is the Gregorian one from the
+ * 1st unless `quotaCalendar` 'jalali' (the Persian month) or `quotaResetDay`
+ * 2–31 (the day it renews on) says otherwise — each written only when it does
+ * (src/main/capPeriods.js); `expiresAt` ms, 0 = never; `maxDevices` 0 = any.
  */
 const crypto = require('crypto');
+const { CALENDARS, cycleFields, resetDayOf } = require('../../main/capPeriods');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -106,7 +110,9 @@ function count(v, max, def) {
 }
 
 /**
- * One user as stored: every field of its type. A record with no id we would
+ * One user as stored: every field of its type — the month's calendar and
+ * renew day only when they are not the Gregorian 1st, so a user saved before
+ * they existed is stored exactly as it was. A record with no id we would
  * write is not a user (null). A target in a shape the app never writes is
  * `block` — a damaged record never widens anyone's way out.
  */
@@ -122,6 +128,7 @@ function normalizeUser(u) {
     target: targetOk(u.target == null ? '' : u.target) ? (u.target == null ? '' : u.target) : 'block',
     quotaGb: Number.isFinite(gb) && gb > 0 ? Math.min(Math.round(gb * 1000) / 1000, QUOTA_MAX_GB) : 0,
     quotaPeriod: PERIODS.includes(u.quotaPeriod) ? u.quotaPeriod : 'month',
+    ...cycleFields(u),
     expiresAt: Number.isFinite(expires) && expires > 0 ? Math.round(expires) : 0,
     maxDevices: count(u.maxDevices, DEVICES_MAX, 0),
     enabled: u.enabled !== false
@@ -180,7 +187,8 @@ function newUserId() {
  * One user as it is about to be saved (the raw input, before normalizing),
  * against the others → the first thing wrong with it as a key the window words
  * in its own language, or null:
- *   username | usernameTaken | password | name | target | quota | quotaPeriod | expiresAt | maxDevices
+ *   username | usernameTaken | password | name | target | quota | quotaPeriod | quotaCalendar |
+ *   quotaResetDay | expiresAt | maxDevices
  */
 function validateUser(user, others) {
   const u = isObj(user) ? user : {};
@@ -196,6 +204,8 @@ function validateUser(user, others) {
     if (!Number.isFinite(gb) || gb < 0 || gb > QUOTA_MAX_GB) return 'quota';
   }
   if (u.quotaPeriod != null && !PERIODS.includes(u.quotaPeriod)) return 'quotaPeriod';
+  if (u.quotaCalendar != null && !CALENDARS.includes(u.quotaCalendar)) return 'quotaCalendar';
+  if (u.quotaResetDay != null && u.quotaResetDay !== '' && resetDayOf(u.quotaResetDay) === null) return 'quotaResetDay';
   if (u.expiresAt != null && u.expiresAt !== '') {
     const e = Number(u.expiresAt);
     if (!Number.isInteger(e) || e < 0) return 'expiresAt';
@@ -246,7 +256,7 @@ function targetsOf(lu) {
 }
 
 module.exports = {
-  DEFAULT_CONFIG, USERNAME, PASSWORD, PERIODS, UNASSIGNED, ID,
+  DEFAULT_CONFIG, USERNAME, PASSWORD, PERIODS, CALENDARS, UNASSIGNED, ID,
   normalizeLanUsers, normalizeConfig, normalizeUser, normalizeDevice, normalizeMac, portOf, targetOk,
   newUserId, validateUser, credentialsOk, isExpired, isOver, isActive, activeUsers, targetsOf
 };

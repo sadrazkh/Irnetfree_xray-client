@@ -11,6 +11,16 @@
  *
  *   - `lu_blocked`: dropped, whatever else is true (the admin's block, a user
  *     whose config is "block", a user held for its cap outside login mode);
+ *   - the pins: an address that belongs to a user's device (`lu_bound4` /
+ *     `lu_bound6`) is that device's alone — a packet from it whose source MAC
+ *     is not the device's (the pair is not in `lu_ipmac4` / `lu_ipmac6`) is
+ *     dropped. sing-box picks a device's config by its source ADDRESS (a
+ *     rule-set cannot match a MAC — router/index.js), and the down counters
+ *     charge a user by it, so without them any device the rest of this table
+ *     lets through by its own MAC could set its address to another's and ride
+ *     that user's config and cap. Before the gate and the counters: a borrowed
+ *     address gets nothing at all — not the gate's DNS, not a byte on anyone's
+ *     counter. An address that is nobody's is in no set: nothing changes for it;
  *   - the gate, when unassigned devices are not simply let through: every MAC
  *     that is neither assigned by the admin (`lu_allowed`), signed in on the
  *     portal (`lu_authorized`, each element with its session's remaining time
@@ -82,7 +92,9 @@ const elements = (items) => (items.length ? ` elements = { ${items.join(', ')} }
  * The description (router/plan.js decide → nft) cleaned to what may reach the
  * kernel: MACs by their one shape, an address claimed by two devices kept by
  * the first (a map key twice would fail the whole table — and with it the
- * gateway), timeouts whole seconds in range, the portal a v4 address and a port.
+ * gateway; a pinned address twice would be one address with two MACs, so
+ * neither pin would hold), timeouts whole seconds in range, the portal a v4
+ * address and a port. The pins come out as one { ip, mac } per address.
  */
 function cleanDesc(desc) {
   const d = desc && typeof desc === 'object' ? desc : {};
@@ -109,11 +121,24 @@ function cleanDesc(desc) {
     }
     counters.push({ mac, ips });
   }
+  const ipmac = [];
+  const pinned = new Set();
+  for (const p of Array.isArray(d.ipmac) ? d.ipmac : []) {
+    const mac = macOf(p && p.mac);
+    if (!mac) continue;
+    for (const raw of Array.isArray(p.ips) ? p.ips : []) {
+      // the same addresses a counter keys on: a link-local v6 is never forwarded, so never borrowed through here
+      const ip = countable(raw);
+      if (!ip || pinned.has(ip)) continue;
+      pinned.add(ip);
+      ipmac.push({ ip, mac });
+    }
+  }
   let portal = null;
   const p = d.portal;
   if (unassigned === 'login' && p && /^\d+\.\d+\.\d+\.\d+$/.test(String(p.ip || '')) && nodeNet.isIP(p.ip) === 4 &&
       Number.isInteger(p.port) && p.port > 0 && p.port < 65536) portal = { ip: p.ip, port: p.port };
-  return { unassigned, blocked: macList(d.blocked), allowed: macList(d.allowed), authorized, counters, portal };
+  return { unassigned, blocked: macList(d.blocked), allowed: macList(d.allowed), authorized, ipmac, counters, portal };
 }
 
 /**
@@ -128,6 +153,13 @@ function lanUsersNftLines(desc, { ifName = 'br-lan' } = {}) {
     `  set lu_allowed { type ether_addr;${elements(d.allowed)} }`,
     `  set lu_authorized { type ether_addr; flags timeout;${elements(d.authorized.map(a => `${a.mac} timeout ${a.timeoutS}s`))} }`
   ];
+  // the pins, per family: the addresses, and each one with the one MAC that may send from it
+  for (const [fam, v6] of [['4', false], ['6', true]]) {
+    const pins = d.ipmac.filter(p => p.ip.includes(':') === v6);
+    const type = v6 ? 'ipv6_addr' : 'ipv4_addr';
+    sets.push(`  set lu_bound${fam} { type ${type};${elements(pins.map(p => p.ip))} }`);
+    sets.push(`  set lu_ipmac${fam} { type ${type} . ether_addr;${elements(pins.map(p => `${p.ip} . ${p.mac}`))} }`);
+  }
   // the named counters, then the maps that pick one per packet
   for (const c of d.counters) {
     sets.push(`  counter ${counterName(c.mac, 'up')} { packets 0 bytes 0 }`);
@@ -159,7 +191,10 @@ function lanUsersNftLines(desc, { ifName = 'br-lan' } = {}) {
   chains.push(
     '  chain lu_fwd {',
     `    type filter hook forward priority ${FWD_PRIORITY}; policy accept;`,
-    `    ${lan} ether saddr @lu_blocked counter drop`
+    `    ${lan} ether saddr @lu_blocked counter drop`,
+    // a pinned address from any MAC but its own: nothing — before the gate (whose DNS would pass) and the counters
+    `    ${lan} ip saddr @lu_bound4 ip saddr . ether saddr != @lu_ipmac4 counter drop`,
+    `    ${lan} ip6 saddr @lu_bound6 ip6 saddr . ether saddr != @lu_ipmac6 counter drop`
   );
   if (gated) chains.push(`    ${lan} ${notLet} jump lu_gate`);
   chains.push(

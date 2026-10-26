@@ -146,7 +146,7 @@ function routerPayload(over = {}) {
 
 const flush = () => new Promise((r) => setImmediate(r));
 
-function harness({ lang = 'fa', platform = 'win32', router = false, connected = false, data = null, api = {}, confirm = true, visible = true, picker = null } = {}) {
+function harness({ lang = 'fa', platform = 'win32', router = false, connected = false, data = null, api = {}, confirm = true, visible = true, picker = null, qrcode = null } = {}) {
   const document = fakeDocument();
   const store = { data: clone(data || (router ? routerPayload() : payload())) };
   const calls = [];
@@ -185,7 +185,7 @@ function harness({ lang = 'fa', platform = 'win32', router = false, connected = 
       }
     }, api)
   };
-  const ctx = vm.createContext({ window, document, console, setTimeout, clearTimeout, Uint32Array });
+  const ctx = vm.createContext(Object.assign({ window, document, console, setTimeout, clearTimeout, Uint32Array, btoa }, qrcode ? { qrcode } : {}));
   vm.runInContext(I18N, ctx, { filename: 'i18n.js' });
   vm.runInContext(PAGE, ctx, { filename: 'lanUsers.js' });
   window.i18n.applyI18n(lang);
@@ -264,7 +264,10 @@ test('with users, in Persian: the address to give people left to right with copy
   await flush();
   assert.deepEqual(h.copies, ['192.168.1.20:30820']);
   assert.deepEqual(h.toasts.at(-1), ['کپی شد', 'ok']);
-  assert.equal(host.one('lu-hint').textContent, t('lu.whileConnected'), 'disconnected: the accounts need the connection');
+  assert.deepEqual(host.byClass('lu-hint').map((n) => n.textContent), [t('lu.whileConnected'), t('lu.hotspotOff')],
+    'disconnected: the accounts need the connection; no 192.168.137.1 among the addresses: the hotspot is off');
+  assert.equal(host.byClass('lu-hs').length, 0, 'no address marked as the hotspot’s');
+  assert.equal(host.byClass('lu-alert').length, 0, 'proxy accounts on: nothing to warn about');
 
   assert.equal(host.byClass('lu-user').length, 4);
   assert.equal(host.one('lu-users').one('lu-meta').textContent, '4 کاربر');
@@ -299,8 +302,11 @@ test('with users, in Persian: the address to give people left to right with copy
   assert.deepEqual(sara.one('lu-quota').children.map((c) => c.textContent), ['6.5 GB از 20.0 GB', 'تا ' + persian(MONTH_END, SHORT)]);
   assert.equal(host.byKey('quota:usr-a1').value, '20');
   assert.equal(host.byKey('quota:usr-a1').getAttribute('dir'), 'ltr');
-  assert.equal(host.byKey('period:usr-a1').value, 'month');
-  assert.deepEqual(host.byKey('period:usr-a1').children.map((o) => o.textContent), ['GB در ماه', 'GB در روز', 'بدون سقف']);
+  assert.equal(host.byKey('period:usr-a1').value, 'month', 'a user saved before the calendar choice: the Gregorian month');
+  assert.deepEqual(host.byKey('period:usr-a1').children.map((o) => o.textContent), ['GB در ماه شمسی', 'GB در ماه میلادی', 'GB در روز', 'بدون سقف'], 'the Persian month first in Persian');
+  assert.equal(host.byKey('renew:usr-a1').value, '1', 'renewing on the 1st');
+  assert.equal(host.byKey('renew:usr-a1').parentNode.hidden, false, 'a month: its renew day shown');
+  assert.equal(host.byKey('renew:usr-b2').parentNode.hidden, true, 'a day: no renew day');
   // near its daily cap: amber, and what happens at it
   const reza = h.user('usr-b2');
   assert.equal(reza.one('lu-bar').children[0].className, 'warn');
@@ -329,6 +335,90 @@ test('with users, in Persian: the address to give people left to right with copy
   const gone = guest.byClass('lu-sub').at(-1);
   assert.equal(gone.textContent, 'منقضی شد — ' + persian(h.store.data.users[2].expiresAt, FULL));
   assert.ok(gone.classList.contains('lu-bad'));
+});
+
+test('users there and no way in: said above everything, with the button that turns the proxy on — and gone once it is', async () => {
+  const off = { proxy: { enabled: false, port: 30820, httpPort: 30821 }, transparent: { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 } };
+  const h = harness({ data: payload({ config: clone(off) }) });
+  await h.load();
+  const alert = h.host.one('lu-alert');
+  assert.equal(alert.getAttribute('role'), 'status');
+  assert.equal(alert.one('lu-alert-text').textContent, 'هنوز کسی نمی‌تواند وصل شود: حساب‌های پروکسی خاموش است.');
+  assert.equal(h.host.children[1], alert, 'right under the intro, above the settings');
+  h.host.byKey('turnon').click();
+  await flush();
+  assert.deepEqual(h.calls.find((c) => c[0] === 'config'), ['config', { proxy: { enabled: true } }]);
+  assert.equal(h.host.byClass('lu-alert').length, 0);
+  assert.equal(h.host.byKey('proxy').checked, true);
+
+  const none = harness({ data: payload({ users: [], usage: {}, config: clone(off) }) });
+  await none.load();
+  assert.equal(none.host.byClass('lu-alert').length, 0, 'no users: nobody to warn for');
+
+  const router = harness({ router: true, lang: 'en', data: routerPayload() });
+  await router.load();
+  assert.equal(router.host.byClass('lu-alert').length, 0, 'the router with its transparent mode on: a way in');
+  const both = harness({ router: true, lang: 'en', data: routerPayload({ config: clone(off) }) });
+  await both.load();
+  assert.equal(both.host.one('lu-alert-text').textContent, 'Nobody can connect yet: proxy accounts and transparent mode are both off.');
+});
+
+test('the Windows hotspot’s address: first, marked as the hotspot’s; a Mac gets no mark', async () => {
+  const h = harness({ data: payload({ lanAddresses: ['192.168.137.1', '192.168.1.20'] }) });
+  await h.load();
+  const rows = h.host.one('lu-addr').byClass('lu-addr-row');
+  assert.deepEqual(rows.map((r) => [r.one('lu-mono').textContent, r.byClass('lu-hs').map((x) => x.textContent).join('')]), [
+    ['192.168.137.1:30820', 'هات‌اسپات'], ['192.168.137.1:30821', 'هات‌اسپات'], ['192.168.1.20:30820', ''], ['192.168.1.20:30821', '']
+  ]);
+  assert.deepEqual(h.host.byClass('lu-hint').map((n) => n.textContent), [h.t('lu.whileConnected')], 'the hotspot is on: nothing said about it');
+  const mac = harness({ platform: 'darwin', data: payload({ platform: 'darwin', lanAddresses: ['192.168.137.1'] }) });
+  await mac.load();
+  assert.equal(mac.host.byClass('lu-hs').length, 0);
+  assert.equal(mac.host.byClass('lu-hotspot').length, 0);
+});
+
+test('a user’s link for a phone: socks:// with the account, its QR, the address picked, copied — and read back by the app’s own parser', async () => {
+  const made = [];
+  const qrcode = (type, level) => {
+    const q = { data: '', addData(s) { q.data = s; }, make() {}, createDataURL(cell, margin) { made.push([q.data, type, level, cell, margin]); return 'data:image/gif;base64,R0lGOD'; } };
+    return q;
+  };
+  const h = harness({ lang: 'en', qrcode, data: payload({ lanAddresses: ['192.168.137.1', '192.168.1.20', 'fd00::20'] }) });
+  await h.load();
+  h.user('usr-a1').byKey('share:usr-a1').click();
+  const box = h.document.body.children.find((c) => c.id === 'luShare');
+  assert.ok(box, 'the link dialog is open');
+  assert.equal(box.one('modal-title').textContent, 'Connect “سارا”');
+  const link = box.byKey('s:link').textContent;
+  assert.equal(box.byKey('s:link').getAttribute('dir'), 'ltr');
+  assert.match(link, /^socks:\/\/[A-Za-z0-9_-]+@192\.168\.137\.1:30820#/, 'the hotspot’s address first; the SOCKS port; base64url, no padding');
+  assert.equal(Buffer.from(link.slice(8, link.indexOf('@')), 'base64url').toString(), 'sara:pa55-Sara');
+  const { parseLink } = require('../src/main/parser');
+  const s = parseLink(link);
+  assert.equal(s.name, 'سارا');
+  assert.deepEqual(s.outbound.settings.servers, [{ address: '192.168.137.1', port: 30820, users: [{ user: 'sara', pass: 'pa55-Sara' }] }]);
+  assert.deepEqual(made.at(-1), [link, 0, 'M', 6, 16], 'the QR is of the link itself');
+  assert.equal(box.one('lu-qrimg').src, 'data:image/gif;base64,R0lGOD');
+  assert.deepEqual(box.byClass('lu-ips')[0].children.map((b) => [b.textContent, b.getAttribute('aria-pressed')]),
+    [['192.168.137.1 · Hotspot', 'true'], ['192.168.1.20', 'false']], 'IPv4 only: a phone types and scans those');
+  box.byKey('s:ip:192.168.1.20').click();
+  assert.match(box.byKey('s:link').textContent, /@192\.168\.1\.20:30820#/);
+  box.byKey('s:copy').click();
+  await flush();
+  assert.equal(h.copies.at(-1), box.byKey('s:link').textContent);
+  assert.equal(box.byClass('warn').length, 1, 'only the password warning');
+  box.dispatch('keydown', { key: 'Escape' });
+  assert.equal(h.document.body.children.some((c) => c.id === 'luShare'), false, 'Escape closes it');
+
+  // a password with characters a URL holds apart: still read back as typed
+  const odd = harness({ lang: 'en', data: payload({ users: [{ id: 'usr-x', username: 'ali', password: 'a@b:c/d%e f', name: '', target: '', quotaGb: 0, quotaPeriod: 'none', expiresAt: 0, maxDevices: 0, enabled: true }], usage: {}, config: { proxy: { enabled: false, port: 30820, httpPort: 30821 } } }) });
+  await odd.load();
+  odd.page.share('usr-x');
+  const ob = odd.document.body.children.find((c) => c.id === 'luShare');
+  assert.equal(parseLink(ob.byKey('s:link').textContent).outbound.settings.servers[0].users[0].pass, 'a@b:c/d%e f');
+  assert.equal(ob.byClass('lu-qrimg').length, 0, 'no qrcode.js: the link alone');
+  assert.ok(ob.textContent.includes(odd.t('qr.tooBig')));
+  assert.ok(ob.textContent.includes(odd.t('lu.shareOff')), 'proxy accounts off: said in the dialog');
 });
 
 test('the config picker: the app’s configs by subscription, after the current connection, direct and blocked; a gone one said as gone', async () => {
@@ -484,6 +574,94 @@ test('the switch, a cap, its period, an expiry and its removal each save the who
   assert.ok(h.applied.length >= 5, 'every answer goes to app.js (the reconnect question)');
 });
 
+test('a month of the admin’s choosing: the Persian or the Gregorian month, its renew day under it, saved as the two fields', async () => {
+  const data = payload();
+  data.users[0] = Object.assign({}, data.users[0], { quotaCalendar: 'jalali', quotaResetDay: 30 });
+  data.usage['usr-a1'] = Object.assign({}, data.usage['usr-a1'], { period: 'j1405-07@30', until: new Date(2026, 10, 20).getTime() });
+  data.usage['usr-c3'] = Object.assign({}, data.usage['usr-c3'], { period: '2026-10@15' });
+  const h = harness({ data });
+  await h.load();
+  const note = (id) => h.user(id).all((n) => n.classList.contains('lu-sub') && n.textContent === h.t('lu.renewLast'))[0];
+  assert.equal(h.host.byKey('period:usr-a1').value, 'jmonth');
+  assert.equal(h.host.byKey('renew:usr-a1').value, '30');
+  assert.deepEqual(h.host.byKey('renew:usr-a1').children.map((o) => o.textContent), Array.from({ length: 31 }, (_, i) => String(i + 1)));
+  assert.equal(h.user('usr-a1').one('lu-renew').textContent.startsWith('روز تمدید'), true);
+  assert.equal(note('usr-a1').hidden, false, 'the 30th: Esfand of a common year has 29 — said');
+  assert.deepEqual(h.user('usr-a1').one('lu-quota').children.map((c) => c.textContent), ['6.5 GB از 20.0 GB', 'تا ' + persian(new Date(2026, 10, 20).getTime(), SHORT)], 'when it renews: 30 Aban');
+  assert.equal(h.user('usr-c3').one('lu-quota').children[1].textContent, 'این ماه', 'a month renewing on the 15th is a month, not today');
+  assert.equal(note('usr-d4').hidden, true, 'the 1st: nothing to say');
+
+  const renew = h.host.byKey('renew:usr-a1');
+  renew.value = '15';
+  renew.dispatch('change');
+  await flush();
+  assert.deepEqual(['quotaPeriod', 'quotaCalendar', 'quotaResetDay'].map((k) => h.calls.at(-1)[2][k]), ['month', 'jalali', 15]);
+  const per = h.host.byKey('period:usr-a1');
+  per.value = 'month';
+  per.dispatch('change');
+  await flush();
+  assert.deepEqual(['quotaPeriod', 'quotaCalendar', 'quotaResetDay'].map((k) => h.calls.at(-1)[2][k]), ['month', 'gregorian', 15], 'the Gregorian month, the same day');
+  assert.equal(h.host.byKey('period:usr-a1').value, 'month');
+  const per2 = h.host.byKey('period:usr-a1');
+  per2.value = 'day';
+  per2.dispatch('change');
+  await flush();
+  assert.equal(h.calls.at(-1)[2].quotaPeriod, 'day');
+  assert.equal(h.host.byKey('renew:usr-a1').parentNode.hidden, true, 'a day has no renew day');
+  // the Gregorian 29th: February has 28 — said; the Persian 29th is in every month — not
+  const per3 = h.host.byKey('period:usr-a1');
+  per3.value = 'month';
+  per3.dispatch('change');
+  await flush();
+  const r29 = h.host.byKey('renew:usr-a1');
+  r29.value = '29';
+  r29.dispatch('change');
+  await flush();
+  assert.equal(note('usr-a1').hidden, false);
+  const per4 = h.host.byKey('period:usr-a1');
+  per4.value = 'jmonth';
+  per4.dispatch('change');
+  await flush();
+  assert.equal(note('usr-a1').hidden, true);
+});
+
+test('the dialog: a month and its renew day — the line comes and goes with the period; an existing Persian-month user opens as one; English lists the Gregorian month first', async () => {
+  const data = payload();
+  data.users[1] = Object.assign({}, data.users[1], { quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 12 });
+  const h = harness({ data });
+  await h.load();
+  h.host.byKey('edit:usr-b2').click();
+  let dlg = h.dialog();
+  assert.equal(dlg.byKey('f:period').value, 'jmonth');
+  assert.equal(dlg.byKey('f:renew').value, '12');
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, false);
+  const per = dlg.byKey('f:period');
+  per.value = 'none';
+  per.dispatch('change');
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, true, 'no cap: no renew day');
+  assert.equal(dlg.byKey('f:quotaGb').disabled, true);
+  per.value = 'month';
+  per.dispatch('change');
+  assert.equal(dlg.byKey('f:renew').parentNode.hidden, false);
+  const r = dlg.byKey('f:renew');
+  r.value = '31';
+  r.dispatch('change');
+  assert.equal(dlg.all((n) => n.classList.contains('lu-sub') && n.textContent === h.t('lu.renewLast'))[0].hidden, false);
+  dlg.byKey('f:save').click();
+  await flush();
+  const saved = h.calls.at(-1)[2];
+  assert.deepEqual([saved.quotaPeriod, saved.quotaCalendar, saved.quotaResetDay], ['month', 'gregorian', 31]);
+
+  const en = harness({ lang: 'en' });
+  await en.load();
+  assert.deepEqual(en.host.byKey('period:usr-a1').children.map((o) => o.textContent), ['GB a month', 'GB a Jalali month', 'GB a day', 'No cap']);
+  en.host.byKey('add').click();
+  dlg = en.dialog();
+  assert.equal(dlg.byKey('f:period').value, 'month', 'in English a new user’s month is the Gregorian one');
+  assert.equal(dlg.byKey('f:renew').value, '1');
+  assert.equal(en.user('usr-a1').one('lu-renew').textContent.startsWith('Renews on day'), true);
+});
+
 test('a save that fails says so and the page goes back to what was saved', async () => {
   const h = harness({ api: { lanUsersUser: async () => { throw new Error('disk full'); } } });
   await h.load();
@@ -542,7 +720,8 @@ test('add: the dialog says each broken rule under its field — username, taken 
   assert.equal(pass.getAttribute('dir'), 'ltr');
   assert.equal(dlg.byKey('f:username').getAttribute('dir'), 'ltr');
   assert.equal(dlg.byKey('f:username').getAttribute('autocapitalize'), 'none');
-  assert.equal(dlg.byKey('f:period').value, 'month');
+  assert.equal(dlg.byKey('f:period').value, 'jmonth', 'in Persian a new user’s cap follows the Persian month…');
+  assert.equal(dlg.byKey('f:renew').value, '1', '…from its 1st');
   assert.equal(dlg.byKey('f:enabled').checked, true);
   assert.equal(dlg.hasKey('f:maxDevices'), false, 'not on a PC');
   assert.equal(dlg.hasKey('f:delete'), false, 'nothing to delete yet');
@@ -583,7 +762,7 @@ test('add: the dialog says each broken rule under its field — username, taken 
   const [kind, op, user] = h.calls.at(-1);
   assert.deepEqual([kind, op], ['user', 'add']);
   assert.deepEqual(user, {
-    username: 'mina.k_2-x', password: ' 1234 ', name: 'مینا', target: 'srv-2', quotaGb: 15, quotaPeriod: 'month',
+    username: 'mina.k_2-x', password: ' 1234 ', name: 'مینا', target: 'srv-2', quotaGb: 15, quotaPeriod: 'month', quotaCalendar: 'jalali', quotaResetDay: 1,
     expiresAt: new Date(2027, 2, 20, 23, 59, 59, 999).getTime(), maxDevices: 0, enabled: true
   }, 'the password as typed; no id — the service gives one');
   assert.equal(h.dialog(), null, 'closed');
@@ -817,7 +996,7 @@ test('a read that fails says so; a back end without the channels hides the page 
 test('every string the page can show is defined once in Persian and once in English, right after mi.note', () => {
   const keys = new Set([...PAGE.matchAll(/t\('((?:lu|nav|set)\.[A-Za-z0-9.]+)'\)/g)].map((m) => m[1]));
   for (const s of ['on', 'off', 'expired', 'over']) keys.add('lu.state.' + s);
-  for (const p of ['month', 'day', 'none']) keys.add('lu.period.' + p);
+  for (const p of ['month', 'jmonth', 'day', 'none']) keys.add('lu.period.' + p);
   for (const p of ['login', 'allow', 'block']) { keys.add('lu.unassigned.' + p); keys.add('lu.unassignedHint.' + p); }
   for (const k of ['username', 'usernameTaken', 'password', 'quota', 'maxDevices']) keys.add('lu.err.' + k);
   for (const k of ['nav.users', 'set.lanUsers', 'lu.title']) keys.add(k);

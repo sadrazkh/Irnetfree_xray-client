@@ -14,6 +14,7 @@
  * We compute per-second deltas to show live speed.
  */
 const http = require('http');
+const { memberIdParts } = require('./multiWan');
 
 /** Outbound tags that exist but never carry user traffic through the proxy. */
 const NOT_PROXY = new Set(['direct', 'block', 'dns-out']);
@@ -365,7 +366,10 @@ class WgHopWatch {
 /**
  * The running groups as the window shows them, one tick: each group of the
  * map with its members' bytes, bytes per second and health — member i is
- * `<tag>~gm<i>`. (groups-ui/design.md §3)
+ * `<tag>~gm<i>`. (groups-ui/design.md §3) A member that is a server's copy on
+ * one internet (multiWan.js, `<server id>#<link id>`) also says which:
+ * `serverId` and `link` — the window shows a link's copies as one row and
+ * goes to the server, without taking the id apart a second way.
  */
 function groupsLive(map, members, lastMembers, health, dt) {
   return map.map((g) => ({
@@ -375,7 +379,8 @@ function groupsLive(map, members, lastMembers, health, dt) {
       const c = members[tag] || { up: 0, down: 0 };
       const p = lastMembers[tag] || { up: c.up, down: c.down };
       const h = health[tag];
-      return Object.assign({}, m, {
+      const copy = memberIdParts(m && m.id);
+      return Object.assign({}, m, copy ? { serverId: copy.server, link: copy.link } : {}, {
         up: c.up, down: c.down,
         upSpeed: Math.max(0, (c.up - p.up) / dt),
         downSpeed: Math.max(0, (c.down - p.down) / dt),

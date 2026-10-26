@@ -74,6 +74,7 @@ const { normalizeGroups, groupRecordsById, isGroupRecord, serversOf } = require(
 const { normalizeMultiWan } = require('./multiWan');
 const netLinks = require('./netLinks');
 const { createMultiWanQuota, mergeLinks } = require('./multiWanMeter');
+const { dayText } = require('./jalali');
 // users and devices on the LAN (module lanUsers): its channels, the build's input and its usage meter
 const { registerLanUsers } = require('../modules/lanUsers/ipc');
 let lanUsers = null;
@@ -531,11 +532,16 @@ async function addLanFirewall(socksPort, httpPort) {
 
 const TUN_LOCAL_IP = '10.255.0.2';   // our own TUN adapter address — never a LAN IP
 
-/** Candidate LAN IPv4 addresses (skips loopback, our TUN adapter, APIPA). */
+/**
+ * Candidate LAN IPv4 addresses (skips loopback, our TUN adapters, APIPA).
+ * sing-box's adapter (172.19.0.1, named IRNetFree) went unskipped: on a 10.x
+ * LAN its 172.16/12 address outranked the real one in lanIp.
+ */
 function lanCandidates() {
   const ifs = os.networkInterfaces();
   const out = [];
   for (const name of Object.keys(ifs)) {
+    if (isOwnTunInterface(name)) continue;
     for (const ni of ifs[name] || []) {
       if (ni.family !== 'IPv4' || ni.internal) continue;
       if (ni.address === TUN_LOCAL_IP) continue;
@@ -3942,9 +3948,10 @@ app.whenReady().then(() => {
     pending: () => pendingKeys(),
     reload: (why) => queueReload(why),
     log: (l) => send('log', l),
-    notify: ({ name, capGb, period }) => notify('IRNetFree', isEn()
-      ? `“${name}” reached its ${capGb} GB ${period === 'day' ? 'daily' : 'monthly'} cap — set aside until ${period === 'day' ? 'tomorrow' : 'next month'}`
-      : `«${name}» به سقف ${capGb} گیگابایتِ ${period === 'day' ? 'روزانه' : 'ماهانه'} رسید — تا ${period === 'day' ? 'فردا' : 'ماه بعد'} کنار گذاشته شد`)
+    // the day a monthly cap renews, as the link's month has it: '1 آذر' in Persian
+    notify: ({ name, capGb, period, until, calendar }) => notify('IRNetFree', isEn()
+      ? `“${name}” reached its ${capGb} GB ${period === 'day' ? 'daily' : 'monthly'} cap — set aside until ${period === 'day' ? 'tomorrow' : (dayText(until, 'en', calendar) || 'next month')}`
+      : `«${name}» به سقف ${capGb} گیگابایتِ ${period === 'day' ? 'روزانه' : 'ماهانه'} رسید — تا ${period === 'day' ? 'فردا' : (dayText(until, 'fa') || 'ماه بعد')} کنار گذاشته شد`)
   });
 
   const ubin = userBin();

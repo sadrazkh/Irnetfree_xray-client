@@ -81,6 +81,32 @@ test('validateUser: the first thing wrong, as a key — username, usernameTaken 
   assert.equal(M.validateUser(user({ quotaGb: '', expiresAt: '', maxDevices: '' }), []), null, 'blank numbers are "none"');
 });
 
+test('a monthly cap’s calendar and renew day: kept when they say something, not written for the Gregorian 1st, junk dropped', () => {
+  const lu = M.normalizeLanUsers({ users: [
+    user({ id: 'usr-j', username: 'j', quotaCalendar: 'jalali', quotaResetDay: 15 }),
+    user({ id: 'usr-g', username: 'g', quotaCalendar: 'gregorian', quotaResetDay: 1 }),
+    user({ id: 'usr-x', username: 'x', quotaCalendar: 'lunar', quotaResetDay: 32 }),
+    user({ id: 'usr-o', username: 'o' })
+  ] });
+  assert.equal(lu.users[0].quotaCalendar, 'jalali');
+  assert.equal(lu.users[0].quotaResetDay, 15);
+  for (const u of lu.users.slice(1)) {
+    assert.equal('quotaCalendar' in u, false, u.id);
+    assert.equal('quotaResetDay' in u, false, u.id);
+  }
+  // a user saved before the two fields existed comes out exactly as it went in
+  assert.deepEqual(M.normalizeUser(user()), user());
+  assert.deepEqual(M.CALENDARS, ['gregorian', 'jalali']);
+});
+
+test('validateUser: a calendar that is not one of the two, or a renew day outside 1–31, is refused', () => {
+  assert.equal(M.validateUser(user({ quotaCalendar: 'jalali', quotaResetDay: 31 }), []), null);
+  assert.equal(M.validateUser(user({ quotaCalendar: 'gregorian', quotaResetDay: '15' }), []), null, 'a form’s number as text');
+  assert.equal(M.validateUser(user({ quotaResetDay: '' }), []), null, 'blank is the 1st');
+  for (const bad of ['julian', '', 'Jalali', 1]) assert.equal(M.validateUser(user({ quotaCalendar: bad }), []), 'quotaCalendar', JSON.stringify(bad));
+  for (const bad of [0, 32, 1.5, -1, 'x', '3a', true]) assert.equal(M.validateUser(user({ quotaResetDay: bad }), []), 'quotaResetDay', JSON.stringify(bad));
+});
+
 test('active: enabled, credentials the core takes, not expired, not over the cap — by the meter’s usage or the build’s over list', () => {
   const now = 1_800_000_000_000;
   const lu = { users: [

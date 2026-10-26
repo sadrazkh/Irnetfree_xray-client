@@ -1361,9 +1361,13 @@ function serversByTag(plan) {
  * How a group's health check asks: the page every ping here asks, all members
  * at once, every 10 s — a member that stops answering is out of the rotation
  * within seconds, and one that answers again is back as fast (one tiny request
- * per member each time).
+ * per member each time). A group the links make (multiWan.js) asks for longer
+ * (`_group.probeEvery`, in seconds): each probe is a whole handshake on a link
+ * that may be a capped mobile one — multiWan.js PROBE_EVERY_S has the bytes.
+ * The core has one observatory for the whole config, so the longest interval
+ * a group asks for is everyone's.
  */
-const GROUP_PROBE = { url: 'http://cp.cloudflare.com/', interval: '10s' };
+const GROUP_PROBE = { url: 'http://cp.cloudflare.com/', seconds: 10 };
 
 /**
  * Groups (groups.js): every outbound a group record became — a `loopback`
@@ -1381,7 +1385,8 @@ const GROUP_PROBE = { url: 'http://cp.cloudflare.com/', interval: '10s' };
  *  - the rule T~in → T~bal, which the caller puts FIRST in routing: what
  *    loops back must meet its balancer before any other rule — a hop to a
  *    bridge in Iran, say, before `geoip:ir → direct`;
- *  - one observatory over every group's members.
+ *  - one observatory over every group's members, at the longest interval a
+ *    group asks for (GROUP_PROBE: 10 s, a multi-internet group's longer).
  * Runs before every pass that reads the outbounds (pinEntryHosts,
  * applyFragments, bindDirectDials …) so the members get them all.
  * `map`: each group in the config — its tag, its id and name, its strategy,
@@ -1400,6 +1405,7 @@ function expandGroups(outbounds, skip) {
   const balancers = [];
   const subjects = [];
   const map = [];
+  let every = GROUP_PROBE.seconds;
   const who = (m) => {
     const recs = Array.isArray(m.label) && m.label.length ? m.label : [m];
     const r = recs[0] || {};
@@ -1442,12 +1448,14 @@ function expandGroups(outbounds, skip) {
     });
     rules.push({ type: 'field', inboundTag: [T + '~in'], balancerTag: T + '~bal' });
     subjects.push(T + '~gm');
+    const asks = Number(g.probeEvery);
+    if (Number.isInteger(asks) && asks > every) every = asks;
     map.push({ tag: T, groupId: g.id || '', name: g.name || '', strategy: GROUP_STRATEGIES.includes(g.strategy) ? g.strategy : 'roundRobin', direct: !via,
       fallback: fb ? { id: fb.id || '', name: fb.name || '' } : null,
       members: members.map(m => Object.assign(who(m), { direct: !via && !Array.isArray(m.chain) })) });
   }
   const observatory = subjects.length
-    ? { subjectSelector: subjects, probeUrl: GROUP_PROBE.url, probeInterval: GROUP_PROBE.interval, enableConcurrency: true }
+    ? { subjectSelector: subjects, probeUrl: GROUP_PROBE.url, probeInterval: every + 's', enableConcurrency: true }
     : null;
   return { outbounds: out, rules, balancers, observatory, map };
 }

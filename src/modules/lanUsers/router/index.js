@@ -7,7 +7,8 @@
  * runs and the gateway is exactly what it was.
  *
  * What it adds around the whole-LAN tunnel (src/main/tunOpenwrt.js):
- *   - in the gateway's nft table (router/nft.js): blocked devices, the gate
+ *   - in the gateway's nft table (router/nft.js): blocked devices, the
+ *     addresses of users' devices pinned to their MACs, the gate
  *     for unassigned ones (the sign-in page, or nothing), the portal's
  *     redirect, a byte counter per device — replaced live by an atomic load of
  *     the table (TunOpenwrt.setLanUsers), never touching the tunnel;
@@ -44,6 +45,15 @@
  *   path, so a write-and-rename lands). So: by source address, from the leases
  *   and the neighbour table, one file per config, rewritten when a device signs
  *   in or changes address — and the gate itself stays by MAC, in nft.
+ *   An address is a device's own say-so, though: one the gate lets through by
+ *   its MAC could take another device's address and ride that user's config
+ *   and cap. So the same decision that writes the files pins each address of a
+ *   user's device to that device's MAC in the table (router/nft.js, `lu_bound*`
+ *   / `lu_ipmac*`): a packet from it with any other source MAC is dropped. One
+ *   owner per address (plan.addressOwners: a running lease's address is its
+ *   holder's, whoever answers for it now), read by the files, the pins and the
+ *   counters alike; a tick applies them together (applyDecision), so a new
+ *   lease moves the file and the pin at once.
  *
  * Who belongs to whom (plan.js): the admin's choice in the devices list for
  * good; a sign-in on the portal for its session's hours (kept in
@@ -67,6 +77,9 @@ const plan = require('./plan');
 const { parseCounters } = require('./nft');
 const { applyTransparentTargets } = require('./xrayTargets');
 const { createPortal, checkPassword } = require('./portal');
+// the period a device's bytes count in is its user's (their day, their month — its calendar and renew day — or
+// 'all'), by the users' meter's own rules; an unbound device counts by the Gregorian month
+const { userPeriod, rollEntry } = require('../meter');
 
 /** How often the counters, the devices and the caps are looked at. */
 const TICK_MS = 10000;
@@ -74,14 +87,6 @@ const SESSIONS_FILE = 'lan-sessions.json';
 /** Each device's bytes this period, beside the sign-ins — written at most this often (flash). */
 const DEVICE_USAGE_FILE = 'lan-device-usage.json';
 const DEVICE_USAGE_SAVE_MS = 5 * 60 * 1000;
-
-const pad = (n) => String(n).padStart(2, '0');
-/** The period a byte counts in: 'YYYY-MM-DD' for a daily cap, 'YYYY-MM' otherwise (multiWanMeter's periods, local time). */
-function periodKey(period, at) {
-  const d = new Date(at);
-  const month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
-  return period === 'day' ? `${month}-${pad(d.getDate())}` : month;
-}
 
 function createLanRouter(o = {}) {
   const openwrt = !!o.openwrt;
@@ -391,9 +396,8 @@ function createLanRouter(o = {}) {
       db.up += up; db.down += down;
       const b = bound[mac];
       // this period's bytes per device (its user's period: a daily cap counts by the day), for the devices list
-      const key = periodKey(b && users.get(b.userId) ? users.get(b.userId).quotaPeriod : 'month', t);
-      const pu = devUsage[mac] && devUsage[mac].period === key ? devUsage[mac] : (devUsage[mac] = { period: key, bytes: 0 });
-      pu.bytes += up + down;
+      const e = rollEntry(devUsage[mac], userPeriod(b ? users.get(b.userId) : null, t));
+      devUsage[mac] = { period: e.period, bytes: e.bytes + up + down };
       devUsageDirty = true;
       if (!b) continue;
       const u = byUser[b.userId] || (byUser[b.userId] = { up: 0, down: 0, bytes: 0 });
@@ -499,13 +503,10 @@ function createLanRouter(o = {}) {
 
   const portalApi = {
     async macOf(ip) {
-      let mac = macOfIp(scan, ip);
-      if (!mac) {
-        // a device that arrived since the last tick: asked again before it is called unknown
-        scan = await scanDevices({ readFile, run, lanIf: lan.device, now: now() });
-        mac = macOfIp(scan, ip);
-      }
-      return mac;
+      // read now, not the last tick's: a device that arrived since, or one that took another's
+      // address since — the neighbour table names who is asking only as it is at this moment
+      try { scan = await scanDevices({ readFile, run, lanIf: lan.device, now: now() }); } catch { /* the last tick's, then */ }
+      return macOfIp(scan, ip);
     },
     async statusOf(mac) { return statusOf(mac); },
     signIn({ mac, username, password }) {
@@ -561,7 +562,8 @@ function createLanRouter(o = {}) {
   /**
    * `{ [mac]: bytes this period }` for the devices list (lanusers:get's
    * `deviceUsage`): each device in its user's period, a past period's count
-   * left out — it is a new period's zero.
+   * left out — it is a new period's zero (what a period that overlaps this
+   * one counted is this one's, as the meter rolls it).
    */
   function deviceUsage() {
     const users = new Map(lu().users.map(u => [u.id, u]));
@@ -569,8 +571,8 @@ function createLanRouter(o = {}) {
     const out = {};
     for (const [mac, v] of Object.entries(devUsage)) {
       const b = bound[mac];
-      const key = periodKey(b && users.get(b.userId) ? users.get(b.userId).quotaPeriod : 'month', now());
-      if (v.period === key) out[mac] = v.bytes;
+      const r = rollEntry(v, userPeriod(b ? users.get(b.userId) : null, now()));
+      if (r === v || r.bytes > 0) out[mac] = r.bytes;
     }
     return out;
   }

@@ -3,7 +3,8 @@
  * The devices behind the router, for the users module's transparent mode:
  * by MAC, with EVERY address each one uses now — the per-device routes in
  * sing-box match by source address (see index.js for why not by MAC), and a
- * phone speaking v4 and v6 needs both in its user's rule-set.
+ * phone speaking v4 and v6 needs both in its user's rule-set (and both pinned
+ * to its MAC in the gateway's table, router/nft.js).
  *
  * Two sources, as the gateway's own device list (openwrtNet.lanDevices):
  * dnsmasq's /tmp/dhcp.leases (the name, the v4 address it handed out) and the
@@ -38,26 +39,32 @@ function routableIp(ip) {
 }
 
 /**
- * One row per MAC: { mac, ip, ips, hostname, online }. `ips`: the lease's
- * address while its lease runs (`expires` 0 is "never") and every address the
- * neighbour table has for the MAC in a live state — v4 first, then v6, each
- * once. `ip`: the one to show (its first v4, else its first). `online`: the
- * neighbour table saw it lately. Sorted as openwrtNet.mergeDevices sorts.
+ * One row per MAC: { mac, ip, ips, leased, hostname, online }. `ips`: the
+ * lease's address while its lease runs (`expires` 0 is "never") and every
+ * address the neighbour table has for the MAC in a live state — v4 first,
+ * then v6, each once. `leased`: those of them a running lease names — the
+ * router's own word on whose an address is, where the neighbour table only
+ * says who answered for it last (plan.addressOwners). `ip`: the one to show
+ * (its first v4, else its first). `online`: the neighbour table saw it
+ * lately. Sorted as openwrtNet.mergeDevices sorts.
  */
 function mergeAll(leases, neigh, { now = Date.now() } = {}) {
   const byMac = new Map();
   const row = (mac) => {
     let r = byMac.get(mac);
-    if (!r) { r = { mac, ip: '', ips: [], hostname: '', online: false }; byMac.set(mac, r); }
+    if (!r) { r = { mac, ip: '', ips: [], leased: [], hostname: '', online: false }; byMac.set(mac, r); }
     return r;
   };
-  const add = (r, ip) => { const a = routableIp(ip); if (a && !r.ips.includes(a)) r.ips.push(a); };
+  const add = (r, ip) => { const a = routableIp(ip); if (a && !r.ips.includes(a)) r.ips.push(a); return a; };
   for (const l of leases || []) {
     const mac = normalizeMac(l && l.mac);
     if (!mac) continue;
     const r = row(mac);
     if (l.name && !r.hostname) r.hostname = String(l.name);
-    if (!l.expires || l.expires * 1000 > now) add(r, l.ip);
+    if (!l.expires || l.expires * 1000 > now) {
+      const a = add(r, l.ip);
+      if (a && !r.leased.includes(a)) r.leased.push(a);
+    }
   }
   for (const n of neigh || []) {
     const mac = normalizeMac(n && n.mac);
@@ -89,11 +96,22 @@ async function scanDevices({ readFile = (p) => fs.promises.readFile(p, 'utf8'), 
   return mergeAll(leases, neigh, { now });
 }
 
-/** The MAC an address belongs to in a scan, or null. */
+/**
+ * The MAC an address belongs to in a scan, or null — for the sign-in page,
+ * which must know who is ASKING: the device the neighbour table has at the
+ * address now. A row that has the address only by its lease (the table names
+ * another MAC there) is the address's holder, not the sender: a device that
+ * took a signed-in one's address would otherwise read that one's status on
+ * the page, and could sign it out. (The pins in the gateway's table keep it
+ * from riding anyone's config: router/nft.js.)
+ */
 function macOfIp(rows, ip) {
   const a = plainIp(ip);
-  for (const r of rows || []) if (r && Array.isArray(r.ips) && r.ips.includes(a)) return r.mac;
-  return null;
+  const has = (r) => r && Array.isArray(r.ips) && r.ips.includes(a);
+  const answering = (rows || []).find((r) => has(r) && !(Array.isArray(r.leased) && r.leased.includes(a)));
+  if (answering) return answering.mac;
+  const holder = (rows || []).find(has);
+  return holder ? holder.mac : null;
 }
 
 module.exports = { plainIp, routableIp, mergeAll, scanDevices, macOfIp };

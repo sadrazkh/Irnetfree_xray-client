@@ -1,7 +1,8 @@
 'use strict';
 /**
  * GitHub release lists for the three cores, shaped like
- * `GET /repos/<repo>/releases?per_page=30` answers — tags, order, the
+ * `GET /repos/<repo>/releases?per_page=30` answers (the picker now asks for
+ * them ten a page: tests/downloader.versions.test.js pagedGithub) — tags, order, the
  * pre-release flags and the asset names as the three release pages had them on
  * 2026-10-03, plus the Xray and Xray-PattN releases up to 2026-10-14 (their newest
  * renamed to the suggested 26.10.21 / 26.10.22 when XTLS withdrew 26.10.10 on 2026-10-21) (XTLS/Xray-core: every 2026 build after 26.3.27 is a pre-release;

@@ -258,7 +258,7 @@ function euRun(tag = 'out-chain-c9-h1') {
 const PAGE_FNS = ['loadCgState', 'saveCgState', 'cgCanGroups', 'cgTab', 'cgApplyTab', 'cgSetTab', 'cgIsOpen', 'cgCardOf', 'cgPaintCard', 'cgPaintAll',
   'cgSetOpen', 'cgAll', 'cgReveal', 'cgPrune', 'cgAutoOpen', 'cgWireHead', 'cgChainSum', 'cgFillPicker', 'cgPile', 'cgPickRow', 'revealServer',
   'renderChains', 'renderGroups', 'groupCard', 'openGroupCard', 'openChainCard', 'grpServerPanel'];
-const GM_FNS = ['gmNum', 'groupsForTags', 'gmSum', 'gmShares', 'gmAggregate', 'gmPair', 'gmShade', 'gmBarInto', 'gmMs', 'gmCardRow', 'gmFillRow',
+const GM_FNS = ['gmNum', 'groupsForTags', 'gmSum', 'gmShares', 'gmAddInto', 'gmByLink', 'gmAggregate', 'gmPair', 'gmShade', 'gmBarInto', 'gmMs', 'gmCardRow', 'gmFillRow',
   'gmFillCard', 'gmApplyCards', 'gmMark', 'gmDecorate', 'gmDecorateFlows', 'gmPopEl', 'gmHover', 'gmOpen', 'gmClose', 'gmToggle', 'gmPopRow',
   'gmFillPopRow', 'gmRenderPop', 'gmPlace', 'gmOnStats', 'gmOnStatus'];
 const HELPERS = ['edNode', 'appendSome', 'warpNum', 'srvById', 'grpById', 'grpLive', 'grpCountText', 'grpAddrText', 'chainMembers', 'fmtBytes', 'fmtSpeed',
@@ -936,6 +936,90 @@ test('the box’s content: per group its name, strategy and speed, a row per mem
   assert.deepEqual(byCls(p.el, 'gm-pop-head').map((x) => one(x, 'grp-meta').textContent), [en('grp.st.roundRobin'), en('grp.st.leastPing')]);
   assert.deepEqual(kids(one(p.el, 'gm-pop-foot')).slice(1).map((b) => b.textContent), ['⧉ CDN x3 →', '⧉ EU mix →']);
   assert.equal(p.el.attrs['aria-label'], 'CDN x3 · EU mix');
+});
+
+/**
+ * Multi-internet (multiWan.js): a server's copies as the stats event names them — one id per server
+ * and internet (`<server>#<link>`), `serverId` and `link` beside it (stats.groupsLive).
+ */
+const mwCopy = (server, link, name, over) => Object.assign({ id: server.id + '#' + link, serverId: server.id, link, name: server.name + ' · ' + name,
+  address: server.address, port: server.port, up: 0, down: 0, upSpeed: 0, downSpeed: 0, alive: null, delay: null }, over);
+
+test('multi-internet: a server’s copies on one internet are one row in the box — ×N its share, alive where any copy answers, the best delay, the speeds summed; the node counts internets; the row goes to the server', () => {
+  const h = harness();
+  const n = homeFlow(h);
+  connect(h, '__advanced__:rp');
+  const uk = SERVERS[0];
+  // Home at a share of 2 (two copies, interleaved as the builder writes them), Phone at 1
+  const run = () => ({ tag: 'out-g-cdn', groupId: 'mw:out-g-cdn', name: 'UK', strategy: 'roundRobin', members: [
+    mwCopy(uk, 'Wi-Fi', 'Home', { down: 5000, downSpeed: 1000, alive: true, delay: 120 }),
+    mwCopy(uk, 'Ethernet 2', 'Phone', { down: 1000, downSpeed: 1000, alive: true, delay: 80 }),
+    mwCopy(uk, 'Wi-Fi', 'Home', { down: 9000, downSpeed: 3000, alive: false })] });
+  assert.deepEqual(plain(h.ctx.gmByLink(run().members)).map((m) => [m.id, m.serverId, m.link, m.weight, m.alive, m.delay, m.downSpeed, m.down]), [
+    ['m1#Wi-Fi', 'm1', 'Wi-Fi', 2, true, 120, 4000, 14000],
+    ['m1#Ethernet 2', 'm1', 'Ethernet 2', 1, true, 80, 1000, 1000]]);
+  const both = run();
+  Object.assign(both.members[2], { alive: true, delay: 95 });
+  assert.equal(plain(h.ctx.gmByLink(both.members))[0].delay, 95, 'the best delay of the copies');
+  // members of no internet: each its own row, as given
+  const plainRun = cdnRun().members;
+  assert.deepEqual(plain(h.ctx.gmByLink(plainRun)), plain(plainRun));
+  assert.equal(h.ctx.gmByLink(plainRun)[0], plainRun[0]);
+
+  tick(h, [run()]);
+  assert.equal(one(n.cdn, 'gm-health').textContent, '2/2', 'two internets answering — not three members');
+  assert.deepEqual(kids(one(n.cdn, 'gm-node-bar')).map((i) => i.style.width), ['80%', '20%'], 'a segment per internet');
+  n.cdn.onclick();
+  const p = h.ctx.gmPop;
+  const r = byCls(p.el, 'gm-row');
+  assert.deepEqual(r.map((x) => [x.className, x.dataset.id, one(x, 'cn-name').textContent, one(x, 'gm-x').textContent, shown(one(x, 'gm-x')),
+    one(x, 'dn').textContent, one(x, 'gm-share').children[1].textContent]), [
+    ['gm-row', 'm1', 'UK · Home', '×2', true, '↓ ' + h.ctx.fmtSpeed(4000), '80%'],
+    ['gm-row', 'm1', 'UK · Phone', '', false, '↓ ' + h.ctx.fmtSpeed(1000), '20%']]);
+  assert.deepEqual([one(r[0], 'gm-x').title, one(r[0], 'gm-x').dir, one(r[1], 'gm-x').title], [en('gm.weight').replace('{n}', '2'), 'ltr', '']);
+  // no copy on Home answering: its row is dead — the same rows, refilled
+  const down = run();
+  down.members[0].alive = false;
+  tick(h, [down]);
+  assert.equal(byCls(p.el, 'gm-row')[0], r[0]);
+  assert.deepEqual([r[0].className, shown(one(r[0], 'gm-why'))], ['gm-row dead', true]);
+  assert.equal(one(n.cdn, 'gm-health').textContent, '1/2');
+  // a row goes to the server the copies are of
+  const srvCard = fakeEl('div');
+  srvCard.className = 'server-card';
+  srvCard.dataset.srvId = 'm1';
+  h.page.get('serverList').appendChild(srvCard);
+  assert.equal(r[1].attrs.role, 'button');
+  r[1].onclick();
+  assert.deepEqual(h.calls.slice(-2), [['view', 'servers'], ['flash', 'm1', '']]);
+  // in Persian: its digits
+  const f = harness({ lang: 'fa' });
+  const nf = homeFlow(f);
+  connect(f, '__advanced__:rp');
+  tick(f, [run()]);
+  nf.cdn.onclick();
+  const x = one(byCls(f.ctx.gmPop.el, 'gm-row')[0], 'gm-x');
+  assert.deepEqual([x.textContent, x.title], ['×۲', fa('gm.weight').replace('{n}', '۲')]);
+});
+
+test('multi-internet: a group card’s config is one row over the internets — live, its speeds summed over its copies, alive where one answers', () => {
+  const h = harness();
+  h.ctx.renderGroups();
+  connect(h, '__advanced__:rp');
+  const [, , a1, a2, b1] = SERVERS;
+  tick(h, [{ tag: 'out-g-eu', groupId: 'g-eu', name: 'EU mix', strategy: 'leastPing', members: [
+    mwCopy(a1, 'Wi-Fi', 'Home', { downSpeed: 1000, down: 1000, alive: true, delay: 70 }),
+    mwCopy(a1, 'Ethernet 2', 'Phone', { downSpeed: 3000, down: 3000, alive: false }),
+    mwCopy(a2, 'Wi-Fi', 'Home', { alive: true, delay: 90 }),
+    mwCopy(a2, 'Ethernet 2', 'Phone', { alive: true, delay: 88 }),
+    mwCopy(b1, 'Wi-Fi', 'Home', { alive: false }),
+    mwCopy(b1, 'Ethernet 2', 'Phone', { alive: false })] }]);
+  assert.deepEqual(plain(h.ctx.gmAggregate('g-eu').members).map((m) => [m.id, m.downSpeed, m.alive, m.delay]),
+    [['a1', 4000, true, 70], ['a2', 0, true, 88], ['b1', 0, false, null]]);
+  const e = rowsOf(card(h, 'g', 'g-eu'));
+  assert.deepEqual(e.map((x) => x.className), ['gm-row', 'gm-row missing', 'gm-row', 'gm-row dead'], 'running, not idle');
+  assert.deepEqual([one(e[0], 'dn').textContent, one(e[0], 'gm-ms').textContent, byCls(e[0], 'gm-share')[0].children[1].textContent],
+    ['↓ ' + h.ctx.fmtSpeed(4000), '70 ms', '100%']);
 });
 
 test('the box sits under its node — its reading edge — inside the window; above it when there is no room below; it follows a redrawn flow and closes when its node is gone', () => {

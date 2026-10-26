@@ -18,8 +18,9 @@
  * elsewhere; `lanAddresses`: where people point their proxy at.
  *
  * A refusal saves nothing and answers `ok: false` and `error`, a code the page
- * words as 'lu.err.<code>': a user's (model.validateUser — quotaPeriod comes
- * as quota), port (bad, clashing or one the app already uses; `detail` says
+ * words as 'lu.err.<code>': a user's (model.validateUser — quotaPeriod,
+ * quotaCalendar and quotaResetDay come as quota, `detail` says which), port
+ * (bad, clashing or one the app already uses; `detail` says
  * which), hours, unassigned, notFound, op, mac, user, maxDevices.
  *
  * `pendingReconnect`: [] — the running core already lets in, and routes, what
@@ -43,6 +44,8 @@ const { createFirewall } = require('./firewall');
 const { groupRecordsById } = require('../../main/groups');
 const { wgEndpointHosts } = require('../../main/configBuilder');
 const { lanStatus } = require('../../main/openwrtNet');
+const { isOwnTunInterface } = require('../../main/tunPlatform');
+const { dayText } = require('../../main/jalali');
 
 const CHANNELS = ['lanusers:get', 'lanusers:config', 'lanusers:user', 'lanusers:device'];
 /** A run of edits (a user added, then another) is one reload this long after the last. */
@@ -54,19 +57,28 @@ const LAN_TTL_MS = 60000;
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const TUN_LOCAL_IP = '10.255.0.2';   // the app's own TUN adapter — never a LAN address
+/** The address Windows gives its Mobile Hotspot (Internet Connection Sharing's): where the people the accounts are for connect. */
+const HOTSPOT_IP = '192.168.137.1';
 
-/** This machine's LAN IPv4 addresses, the usual home/office ranges first (as main.js lanIp ranks them). */
+/**
+ * This machine's LAN IPv4 addresses: the Windows hotspot's first, then the
+ * usual home/office ranges (as main.js lanIp ranks them). Never one of the
+ * app's own TUN adapters: sing-box's (172.19.0.1, on the adapter it names
+ * IRNetFree) was offered as an address to give people, and no device can
+ * reach it.
+ */
 function lanCandidates(ifs) {
   const all = ifs || os.networkInterfaces();
   const out = [];
   for (const name of Object.keys(all || {})) {
+    if (isOwnTunInterface(name)) continue;
     for (const ni of all[name] || []) {
       if (!ni || (ni.family !== 'IPv4' && ni.family !== 4) || ni.internal) continue;
       if (ni.address === TUN_LOCAL_IP || ni.address.startsWith('169.254.')) continue;
       if (!out.includes(ni.address)) out.push(ni.address);
     }
   }
-  const score = (a) => (a.startsWith('192.168.') ? 3 : /^172\.(1[6-9]|2\d|3[01])\./.test(a) ? 2 : a.startsWith('10.') ? 1 : 0);
+  const score = (a) => (a === HOTSPOT_IP ? 4 : a.startsWith('192.168.') ? 3 : /^172\.(1[6-9]|2\d|3[01])\./.test(a) ? 2 : a.startsWith('10.') ? 1 : 0);
   return out.sort((x, y) => score(y) - score(x));
 }
 const isPrivate = (a) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(a);
@@ -153,12 +165,15 @@ function registerLanUsers(o) {
     });
   }
 
+  /** The cap notice: a monthly cap says the day it renews, as their month has it — '1 آذر' in Persian. */
   const noticeText = (n) => {
     const day = n.period === 'day';
     const all = n.period === 'none';
-    return isEn()
-      ? `“${n.name}” reached their ${n.capGb} GB${day ? ' daily' : (all ? '' : ' monthly')} cap — off ${day ? 'until tomorrow' : (all ? 'until it is raised' : 'until next month')}`
-      : `«${n.name}» به سقف ${n.capGb} گیگابایتِ ${day ? 'روزانه' : (all ? 'کل' : 'ماهانه')} رسید — ${day ? 'تا فردا' : (all ? 'تا وقتی سقف بالا برود' : 'تا ماه بعد')} قطع است`;
+    const en = isEn();
+    const date = day || all ? '' : dayText(n.until, en ? 'en' : 'fa', n.calendar);
+    return en
+      ? `“${n.name}” reached their ${n.capGb} GB${day ? ' daily' : (all ? '' : ' monthly')} cap — off ${day ? 'until tomorrow' : (all ? 'until it is raised' : (date ? 'until ' + date : 'until next month'))}`
+      : `«${n.name}» به سقف ${n.capGb} گیگابایتِ ${day ? 'روزانه' : (all ? 'کل' : 'ماهانه')} رسید — ${day ? 'تا فردا' : (all ? 'تا وقتی سقف بالا برود' : (date ? 'تا ' + date : 'تا ماه بعد'))} قطع است`;
   };
 
   const meter = createLanUsersMeter({
@@ -383,8 +398,8 @@ function registerLanUsers(o) {
     }
     return payload(Object.assign({ pendingReconnect: catchUp() }, extra || {}));
   }
-  /** The window's codes are the page's 'lu.err.<code>' strings: a period is part of the cap, a port clash a port. */
-  const CODE = { quotaPeriod: 'quota', sessionHours: 'hours', portClash: 'port', portInUse: 'port' };
+  /** The window's codes are the page's 'lu.err.<code>' strings: a period (its calendar, its renew day) is part of the cap, a port clash a port. */
+  const CODE = { quotaPeriod: 'quota', quotaCalendar: 'quota', quotaResetDay: 'quota', sessionHours: 'hours', portClash: 'port', portInUse: 'port' };
   const refused = (error) => payload({ ok: false, pendingReconnect: [], error: CODE[error] || error, ...(CODE[error] ? { detail: error } : {}) });
 
   /** A config about to be saved → the first thing wrong with it, or null. */
@@ -528,4 +543,4 @@ function registerLanUsers(o) {
   };
 }
 
-module.exports = { CHANNELS, RELOAD_DELAY_MS, RETRY_MS, registerLanUsers, lanCandidates, onlineMap };
+module.exports = { CHANNELS, RELOAD_DELAY_MS, RETRY_MS, HOTSPOT_IP, registerLanUsers, lanCandidates, onlineMap };
