@@ -34,6 +34,11 @@ const { adaptForCore } = require('../src/main/coreCompat');
 const { parseLink } = require('../src/main/parser');
 const { SUGGESTED } = require('../src/main/coreVersions');
 const F = require('../tests/fixtures');
+// Every connect hands the builder a chain relay port (configBuilder.relayHopDials:
+// a TCP dial through a hop over a loopback SOCKS inbound) — so does every config
+// here, and each core sees the relay wherever a plan has a hop.
+const fixtureSettings = F.settings;
+F.settings = (over) => fixtureSettings(Object.assign({ chainRelayPort: 10900 }, over));
 
 const DRY = process.env.IRNF_VALIDATE_DRY === '1';
 // IRNF_XRAY_EXE points the run at another core (e.g. the PattN fork in the

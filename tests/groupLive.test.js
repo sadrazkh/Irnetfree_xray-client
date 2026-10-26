@@ -94,8 +94,9 @@ test('the evictor hands over what changed since the last ask; done live, no relo
 test('main.js and the router: a port for the API at connect, kept by a reload; the live attempt first, the reload for the rest', () => {
   for (const f of ['src/main/main.js', 'src/server/service.js']) {
     const s = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
-    assert.match(s, /groupSkip: groupEvict\.skip\(\), apiCtlPort: await getFreePort\(\) \}\);/, f + ': the connect');
-    assert.match(s, /groupSkip: groupEvict\.skip\(\), apiCtlPort: liveApi \? liveApi\.port : await getFreePort\(\) \}\);/, f + ': the reload');
+    // beside it the chain relay's port (configBuilder.relayHopDials), never the same one: getFreePorts holds both open
+    assert.match(s, /const \[apiCtlPort, chainRelayPort\] = await getFreePorts\(2\);\n\s*settings = Object\.assign\(\{\}, settings, \{ groupSkip: groupEvict\.skip\(\), apiCtlPort, chainRelayPort \}\);/, f + ': the connect');
+    assert.match(s, /const \[freePort, chainRelayPort\] = await getFreePorts\(2\);\n\s*settings = Object\.assign\(\{\}, settings, \{ groupSkip: groupEvict\.skip\(\), apiCtlPort: liveApi \? liveApi\.port : freePort, chainRelayPort \}\);/, f + ': the reload');
     assert.match(s, /const ch = groupEvict\.takeChanges\(\);\n\s*if \(ch\.out\.length \|\| ch\.back\.length\) \{\n\s*const live = await applyLive\(\{/, f);
     assert.match(s, /if \(live\.ok\) \{\n\s*groupEvict\.liveApplied\(\);/, f);
   }

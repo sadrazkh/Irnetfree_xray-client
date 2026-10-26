@@ -1288,6 +1288,8 @@ function buildConfig(planArg, settings) {
   };
   // the users' inbounds and rules — after the groups' and the DNS rules, ahead of the plan's
   if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag });
+  // every TCP dial through a hop over a loopback socket — last, see relayHopDials
+  relayHopDials(config, s.chainRelayPort);
   return withGroupTags(config, grp, mwSplit);
 }
 
@@ -1473,6 +1475,84 @@ function groupApi(grp, s) {
 /** A group member as the app names it to set it aside: its group, the server dialled and the address it dials. */
 function groupMemberKey(groupId, m) {
   return [groupId || '', (m && m.id) || '', (m && m.address) || '', (m && m.port) || 0].join('|');
+}
+
+/* --------------------------------- the chain relay --------------------------------- */
+/**
+ * A TCP dial through a hop rides a real loopback socket: a SOCKS inbound
+ * `chain-relay` on 127.0.0.1:<s.chainRelayPort>, one account per hop (named
+ * after it), routed by that account to the hop — the dial's dialerProxy names
+ * `chain-relay~<hop>`, a SOCKS outbound to that inbound.
+ *
+ * Straight through the hop (dialerProxy), the end of a response the far side
+ * closed was lost — on both cores, every Xray since at least 26.3.27, group or
+ * not (scripts/probe-chain-tail.js, 2026-10-26): a hop whose transport ends
+ * with an error instead of EOF — WebSocket's close frame always does — has
+ * the core interrupt the in-memory pipe to the next hop
+ * (app/proxyman/outbound/handler.go), and an interrupted pipe drops whatever
+ * that hop had not read yet (transport/pipe/impl.go). On a 4-core Linux
+ * runner, 1–4 % of small pages and half the 256 KB ones through a ws hop came
+ * back cut short, many with nothing at all; through the relay the bytes are
+ * in the kernel before the hop's error, and none of 2,400 was.
+ *
+ * Only a dial that carries everything in its TCP stream (vless, vmess, trojan,
+ * http over a TCP transport) through a proxy hop. A WireGuard or a UDP
+ * transport dialling the hop, a Shadowsocks or SOCKS exit (their UDP is UDP)
+ * and a hop that is a freedom (a fragment or interface dialer), a loopback or
+ * a WireGuard keep their dialerProxy. The accounts' level has no user
+ * counters: a LAN user may be called `proxy-h0` too (lanUsers/meter.js reads
+ * the core's user counters by name). Runs last, so no pass binds, pins or
+ * fragments the relay's own dial. No port (a test config, an older caller):
+ * nothing changes.
+ */
+const RELAY_IN = 'chain-relay';
+const RELAY_DIALS = new Set(['vless', 'vmess', 'trojan', 'http']);
+const TCP_NETWORKS = new Set(['raw', 'tcp', 'ws', 'websocket', 'httpupgrade', 'grpc', 'gun', 'h2', 'http', 'xhttp', 'splithttp']);
+const RELAY_LEVEL = 1;   // not in the policy's levels: the core's defaults, no user counters
+
+/** Does this outbound carry everything it is given inside one TCP stream? */
+function dialsTcpOnly(o) {
+  if (!o || !RELAY_DIALS.has(o.protocol)) return false;
+  const ss = o.streamSettings || {};
+  const network = String(ss.network || 'raw').toLowerCase();
+  if (!TCP_NETWORKS.has(network)) return false;
+  // XHTTP over HTTP/3 is QUIC
+  const alpn = [].concat((ss.tlsSettings && ss.tlsSettings.alpn) || [], (ss.realitySettings && ss.realitySettings.alpn) || []);
+  return !((network === 'xhttp' || network === 'splithttp') && alpn.some(a => String(a).toLowerCase() === 'h3'));
+}
+
+function relayHopDials(config, port) {
+  port = parseInt(port, 10);
+  if (!config || !Array.isArray(config.outbounds) || !Number.isInteger(port) || port < 1 || port > 65535) return config;
+  // a port the config already listens on (a caller's mistake) would stop the core starting: no relay then
+  const taken = new Set((config.inbounds || []).map(i => parseInt(i && i.port, 10)));
+  for (const at of [config.metrics && config.metrics.listen, config.api && config.api.listen]) {
+    const m = /:(\d+)$/.exec(String(at || ''));
+    if (m) taken.add(Number(m[1]));
+  }
+  if (taken.has(port)) return config;
+  const byTag = new Map(config.outbounds.filter(Boolean).map(o => [o.tag, o]));
+  const hops = [];
+  for (const o of config.outbounds) {
+    const so = o && o.streamSettings && o.streamSettings.sockopt;
+    const hop = so && so.dialerProxy ? byTag.get(so.dialerProxy) : null;
+    if (!hop || hop.protocol === 'wireguard' || !PROXY_OUT.has(hop.protocol) || !dialsTcpOnly(o)) continue;
+    if (!hops.includes(hop.tag)) hops.push(hop.tag);
+    o.streamSettings.sockopt = Object.assign({}, so, { dialerProxy: `${RELAY_IN}~${hop.tag}` });
+  }
+  if (!hops.length) return config;
+  const pass = RELAY_IN;   // loopback only, and the app's own SOCKS port asks for none
+  for (const h of hops) {
+    config.outbounds.push({ tag: `${RELAY_IN}~${h}`, protocol: 'socks', settings: { servers: [{ address: '127.0.0.1', port, users: [{ user: h, pass }] }] } });
+  }
+  (config.inbounds || (config.inbounds = [])).push({
+    tag: RELAY_IN, listen: '127.0.0.1', port, protocol: 'socks',
+    settings: { auth: 'password', accounts: hops.map(h => ({ user: h, pass })), udp: false, userLevel: RELAY_LEVEL }
+  });
+  // first of all: what the relay hands over goes to its hop, whatever it is addressed to
+  const routing = config.routing || (config.routing = {});
+  routing.rules = [...hops.map(h => ({ type: 'field', inboundTag: [RELAY_IN], user: [h], outboundTag: h })), ...(routing.rules || [])];
+  return config;
 }
 
 /**
@@ -1740,6 +1820,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   };
   // the users' inbounds and rules — after the groups' and the DNS rules, ahead of the private bypass and the entries
   if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag: primaryTag });
+  relayHopDials(config, s.chainRelayPort);   // see buildConfig
   return withGroupTags(config, grp, mwSplit);
 }
 
@@ -2003,4 +2084,4 @@ function fragRange(v, def, floor) {
   return min + '-' + max;
 }
 
-module.exports = { applyEchOutbounds, expandGroups, groupMemberKey, buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };
+module.exports = { applyEchOutbounds, expandGroups, groupMemberKey, relayHopDials, buildConfig, buildPoolConfig, buildTestConfig, buildMultiTestConfig, buildRoutingRules, buildChainOutbounds, resolverBypassIps, resolverBypassIpsOf, echResolverIpsOf, echQueryOf, wgResolvers, wgEndpointHosts, wgResolverAddresses, entryHosts, withHosts, serverAddressOf, buildRawConfig, rawServerOf, rawModeNotes, entryAddressesOf, isRawJson, rawApplies, dialerTagsOf };

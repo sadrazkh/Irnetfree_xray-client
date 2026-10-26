@@ -102,6 +102,20 @@ jobs:
           set -euo pipefail
           IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-group.js
           IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=22500 node scripts/probe-group.js
+      - name: A chain carries a closed connection to its last byte, a group in it or not (real servers, loopback)
+        # scripts/probe-chain-tail.js: 256 KB pages that close when sent, through a ws hop
+        # — [H → S1], [H → group], [group → S3] as the app builds them, every page whole
+        # and through the chain relay (configBuilder.relayHopDials). Straight through the
+        # hop the core cut about half of them short; the probe says how many it still
+        # does, for the record. The servers run 26.3.27, the client the suggested Xray,
+        # then the suggested Xray-PattN; both always run.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 6
+        run: |
+          rc=0
+          IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" node scripts/probe-chain-tail.js || rc=1
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_PROBE_PORT=22700 node scripts/probe-chain-tail.js || rc=1
+          exit $rc
       - name: MASQUE carries TCP and UDP over HTTP/3 and HTTP/2 (a real server, loopback)
         # scripts/probe-masque.js: a MASQUE server (Xray's masque inbound, IETF
         # CONNECT-IP, RFC 9484) and a client through it, both the core under test,

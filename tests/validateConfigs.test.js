@@ -221,15 +221,17 @@ test('the core gate hands the cores every "via a base" shape (routing profiles):
   // one base, every target through it dialing its exit
   assert.deepEqual(outs('via-server-base-managed').map((o) => o.tag).filter((x) => /^(base-|out-)/.test(x)),
     ['base-sv-vless', 'out-sv-trojan@sv-vless', 'out-sv-ss@sv-vless', 'out-chain-c2@sv-vless-h0', 'out-chain-c2@sv-vless', 'out-sv-vless']);
-  assert.equal(dialer('via-server-base-managed', 'out-sv-trojan@sv-vless'), 'base-sv-vless');
-  assert.equal(dialer('via-server-base-managed', 'out-chain-c2@sv-vless-h0'), 'base-sv-vless');
-  assert.equal(dialer('via-chain-base-managed', 'base-chain-c1'), 'base-chain-c1-h0');
-  assert.equal(dialer('via-chain-base-managed', 'out-sv-trojan@chain-c1'), 'base-chain-c1');
-  assert.equal(dialer('via-explicit-and-none-managed', 'out-sv-trojan@chain-c1'), 'base-chain-c1');
+  // a TCP dial through a base rides the chain relay to it (configBuilder.relayHopDials), routed there first
+  assert.equal(dialer('via-server-base-managed', 'out-sv-trojan@sv-vless'), 'chain-relay~base-sv-vless');
+  assert.equal(dialer('via-server-base-managed', 'out-chain-c2@sv-vless-h0'), 'base-sv-vless', 'a Shadowsocks hop keeps it: its UDP is UDP');
+  assert.deepEqual(run.read('via-server-base-managed').routing.rules[0], { type: 'field', inboundTag: ['chain-relay'], user: ['base-sv-vless'], outboundTag: 'base-sv-vless' });
+  assert.equal(dialer('via-chain-base-managed', 'base-chain-c1'), 'chain-relay~base-chain-c1-h0');
+  assert.equal(dialer('via-chain-base-managed', 'out-sv-trojan@chain-c1'), 'chain-relay~base-chain-c1');
+  assert.equal(dialer('via-explicit-and-none-managed', 'out-sv-trojan@chain-c1'), 'chain-relay~base-chain-c1');
   assert.equal(dialer('via-explicit-and-none-managed', 'out-sv-trojan'), null);
   assert.equal(dialer('via-wg-through-base-tun', 'out-sv-wgcorp@sv-vless'), 'base-sv-vless');
-  assert.equal(dialer('via-json-through-base-managed', 'out-jf@sv-vless'), 'base-sv-vless');
-  assert.equal(outs('via-json-through-base-managed').some((o) => o.tag.includes('~')), false, 'a JSON server behind a base brings no helper');
+  assert.equal(dialer('via-json-through-base-managed', 'out-jf@sv-vless'), 'chain-relay~base-sv-vless');
+  assert.equal(outs('via-json-through-base-managed').some((o) => o.tag.includes('~') && !o.tag.startsWith('chain-relay~')), false, 'a JSON server behind a base brings no helper');
   assert.equal(dialer('via-json-as-base-managed', 'base-jf'), 'base-jf~fragment');
   // under TUN: only what dials by itself is bound and pinned; mux only on the direct server target
   const tun = outs('via-server-base-tun');
