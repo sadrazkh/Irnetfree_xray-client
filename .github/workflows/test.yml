@@ -231,14 +231,16 @@ jobs:
     # People behind the router as users (settings.modules.lanUsers, transparent
     # mode): WHICH server a device's bytes reached, whether a device nobody owns
     # sees the login page and nothing else, whether a blocked or capped one gets
-    # nothing — what a device sees, which no config check can say. Four network
-    # namespaces of their own (the runner's network is not touched): two devices
+    # nothing — what a device sees, which no config check can say. Five network
+    # namespaces of their own (the runner's network is not touched): three devices
     # with fixed MACs on a bridge; the router — the app's nft table and sing-box
     # TUN through TunOpenwrt, Xray from buildConfig, the login portal; and the
     # internet with three servers. An assigned device rides its user's server,
     # an unassigned one gets the login page on http and nothing else until it
     # logs in, then its user's server; a blocked device and one whose user is
-    # over its cap get nothing; the module off is today's gateway, byte for byte
+    # over its cap get nothing; a device that takes an assigned one's address
+    # gets nothing (each user's device's address is pinned to its MAC in nft);
+    # the module off is today's gateway, byte for byte
     # (scripts/probe-lan-portal.js). Both sing-box lines the app runs — a rule by
     # source MAC exists only from 1.14 — and on each the suggested Xray, then the
     # suggested Xray-PattN; both always run.

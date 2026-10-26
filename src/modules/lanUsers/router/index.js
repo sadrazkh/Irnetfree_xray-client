@@ -7,7 +7,8 @@
  * runs and the gateway is exactly what it was.
  *
  * What it adds around the whole-LAN tunnel (src/main/tunOpenwrt.js):
- *   - in the gateway's nft table (router/nft.js): blocked devices, the gate
+ *   - in the gateway's nft table (router/nft.js): blocked devices, the
+ *     addresses of users' devices pinned to their MACs, the gate
  *     for unassigned ones (the sign-in page, or nothing), the portal's
  *     redirect, a byte counter per device — replaced live by an atomic load of
  *     the table (TunOpenwrt.setLanUsers), never touching the tunnel;
@@ -44,6 +45,15 @@
  *   path, so a write-and-rename lands). So: by source address, from the leases
  *   and the neighbour table, one file per config, rewritten when a device signs
  *   in or changes address — and the gate itself stays by MAC, in nft.
+ *   An address is a device's own say-so, though: one the gate lets through by
+ *   its MAC could take another device's address and ride that user's config
+ *   and cap. So the same decision that writes the files pins each address of a
+ *   user's device to that device's MAC in the table (router/nft.js, `lu_bound*`
+ *   / `lu_ipmac*`): a packet from it with any other source MAC is dropped. One
+ *   owner per address (plan.addressOwners: a running lease's address is its
+ *   holder's, whoever answers for it now), read by the files, the pins and the
+ *   counters alike; a tick applies them together (applyDecision), so a new
+ *   lease moves the file and the pin at once.
  *
  * Who belongs to whom (plan.js): the admin's choice in the devices list for
  * good; a sign-in on the portal for its session's hours (kept in
@@ -499,13 +509,10 @@ function createLanRouter(o = {}) {
 
   const portalApi = {
     async macOf(ip) {
-      let mac = macOfIp(scan, ip);
-      if (!mac) {
-        // a device that arrived since the last tick: asked again before it is called unknown
-        scan = await scanDevices({ readFile, run, lanIf: lan.device, now: now() });
-        mac = macOfIp(scan, ip);
-      }
-      return mac;
+      // read now, not the last tick's: a device that arrived since, or one that took another's
+      // address since — the neighbour table names who is asking only as it is at this moment
+      try { scan = await scanDevices({ readFile, run, lanIf: lan.device, now: now() }); } catch { /* the last tick's, then */ }
+      return macOfIp(scan, ip);
     },
     async statusOf(mac) { return statusOf(mac); },
     signIn({ mac, username, password }) {
