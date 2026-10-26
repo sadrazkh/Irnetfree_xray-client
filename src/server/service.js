@@ -2109,6 +2109,17 @@ function createService(opts = {}) {
       throw /binary not found|\bE(NOENT|TXTBSY|NOMEM|AGAIN|MFILE|NFILE)\b/.test(String(check.error || '')) ? refused : refusal(refused);
     }
     const runEngine = check.engine;
+    // A group on a core older than 26.4.25 — the opkg feed's are — and none
+    // newer installed (validateWithFallback): it runs, not a refusal, but that
+    // core's loopback can drop the end of a download through the group.
+    if (check.groupCoreOld) {
+      send('log', {
+        line: settings.lang === 'en'
+          ? `This config runs a group, and Xray ${check.coreVersion} can cut short the end of a download through it (fixed in ${check.need}) — update Xray under Settings → Required files`
+          : `این کانفیگ گروه دارد و Xray ${check.coreVersion} ممکن است انتهای دانلودی را که از گروه می‌گذرد ببُرد (از ${check.need} درست شده) — از تنظیمات ← فایل‌های موردنیاز، Xray را به‌روز کن`,
+        level: 'warn'
+      });
+    }
     // The LAN's DNS plan (the hijack's `rules` form, `expectedIPs`) is verified
     // on the official core from 26.3.27 (dnsBuilder.js); an older one — the
     // 23.05 feed's xray-core is 24.12.31 — leaves HTTPS/SVCB queries with no

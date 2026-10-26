@@ -921,3 +921,77 @@ test('usesEchOutbound: only an echSockopt that dials through an outbound counts'
   assert.equal(usesEchOutbound({ outbounds: [{ streamSettings: { tlsSettings: { echSockopt: { interface: 'Wi-Fi' } } } }] }), false);
   for (const none of [null, undefined, {}, { outbounds: null }]) assert.equal(usesEchOutbound(none), false);
 });
+
+/* ------- a group asked of a core whose loopback still copies through a pipe of its own (before 26.4.25) ------- */
+
+const { GROUP_LOOPBACK_SINCE, runsGroup } = require('../src/main/xrayManager');
+/** A config that runs a group: the builder's map beside it, never in what is written (configBuilder.expandGroups). */
+function groupConfig(extra = {}) {
+  const cfg = { inbounds: [], outbounds: [{ tag: 'proxy', protocol: 'loopback', settings: { inboundTag: 'proxy~in' } },
+    { tag: 'proxy~gm0', protocol: 'vless', streamSettings: { network: 'ws', security: 'tls' } }, { tag: 'direct', protocol: 'freedom' }], ...extra };
+  Object.defineProperty(cfg, 'groupTags', { value: [{ tag: 'proxy', groupId: 'grp-g', name: 'G', members: [{ id: 'a' }] }], enumerable: false });
+  return cfg;
+}
+const OLD_GROUP = (v) => ({ ok: true, engine: 'xray', groupCoreOld: true, coreVersion: v, need: '26.4.25' });
+
+test('a group on an official core older than 26.4.25, no other core: it runs there, and the answer says which version it needs', async () => {
+  assert.equal(GROUP_LOOPBACK_SINCE, '26.4.25');
+  for (const v of ['26.3.27', '25.1.30', '24.12.31']) {
+    const m = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    assert.deepEqual(await m.validateWithFallback(groupConfig(), 'xray'), OLD_GROUP(v), v);
+    assert.deepEqual(m.calls, ['xray'], 'checked on the core it runs on — a group is no refusal');
+  }
+  for (const v of ['26.4.25', '26.10.21', '']) {
+    const ok = managerWith({ versions: { xray: v }, bins: ['xray'], validOn: ['xray'] });
+    assert.deepEqual(await ok.validateWithFallback(groupConfig(), 'xray'), { ok: true, engine: 'xray' }, v || 'no version read: the ordinary path');
+  }
+  // no group, the same old core: nothing to say
+  const plain = managerWith({ versions: { xray: '26.3.27' }, bins: ['xray'], validOn: ['xray'] });
+  assert.deepEqual(await plain.validateWithFallback({ outbounds: [{ tag: 'proxy', protocol: 'vless' }] }, 'xray'), { ok: true, engine: 'xray' });
+  // a refusal stays the refusal it was
+  const no = managerWith({ versions: { xray: '26.3.27' }, bins: ['xray'], validOn: [] });
+  assert.deepEqual(await no.validateWithFallback(groupConfig(), 'xray'), { ok: false, engine: 'xray', error: 'infra/conf: refused by xray', plaintextRejected: false });
+});
+
+test('a group on a core too old for it runs on the other Xray core when that one is new enough, said in the log', async () => {
+  const m = managerWith({ versions: { xray: '26.3.27', 'xray-pattn': '26.10.22' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await m.validateWithFallback(groupConfig(), 'xray'), { ok: true, engine: 'xray-pattn', fellBack: true });
+  assert.deepEqual(m.calls, ['xray-pattn']);
+  assert.match(m.logs.at(-1), /runs a group, and Xray \(official\) 26\.3\.27 can cut short the end of a download through it \(fixed in Xray 26\.4\.25\) — running it on Xray-PattN \(patterniha\) 26\.10\.22/);
+  // the other one as old: stays, said
+  const o = managerWith({ versions: { xray: '26.3.27', 'xray-pattn': '26.3.1' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await o.validateWithFallback(groupConfig(), 'xray'), OLD_GROUP('26.3.27'));
+  assert.deepEqual(o.calls, ['xray']);
+  // the other one refuses the config: the old core runs it rather than nothing
+  const r = managerWith({ versions: { xray: '26.3.27', 'xray-pattn': '26.10.22' }, bins: ['xray', 'xray-pattn'], validOn: ['xray'] });
+  assert.deepEqual(await r.validateWithFallback(groupConfig(), 'xray'), OLD_GROUP('26.3.27'));
+  assert.deepEqual(r.calls, ['xray-pattn', 'xray']);
+  // the other one installed with no version read: not moved
+  const u = managerWith({ versions: { xray: '26.3.27' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await u.validateWithFallback(groupConfig(), 'xray'), OLD_GROUP('26.3.27'));
+});
+
+test('a group on an old Xray-PattN moves to a new official core — but never a config carrying the fork’s finalmask', async () => {
+  const m = managerWith({ versions: { xray: '26.10.21', 'xray-pattn': '26.3.1' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await m.validateWithFallback(groupConfig(), 'xray-pattn'), { ok: true, engine: 'xray', fellBack: true });
+  const fm = groupConfig({ outbounds: [...groupConfig().outbounds, FINALMASK_CFG.outbounds[0]] });
+  const f = managerWith({ versions: { xray: '26.10.21', 'xray-pattn': '26.3.1' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await f.validateWithFallback(fm, 'xray-pattn'), { ok: true, engine: 'xray-pattn', groupCoreOld: true, coreVersion: '26.3.1', need: '26.4.25' });
+  assert.deepEqual(f.calls, ['xray-pattn'], 'the official core is not asked: it refuses the fork’s values');
+});
+
+test('the core another gate moved the run to is the one a group is judged on', async () => {
+  // the plaintext server the official core refuses runs on the fork: judged by the fork's version
+  const m = managerWith({ versions: { xray: '26.3.27', 'xray-pattn': '26.3.1' }, bins: ['xray', 'xray-pattn'], validOn: ['xray-pattn'] });
+  m.validate = async (cfg, id) => { m.calls.push(id); return id === 'xray' ? { ok: false, error: 'VLESS without TLS is prohibited' } : { ok: true }; };
+  assert.deepEqual(await m.validateWithFallback(groupConfig(), 'xray'), { ok: true, engine: 'xray-pattn', fellBack: true, groupCoreOld: true, coreVersion: '26.3.1', need: '26.4.25' });
+  // an ECH outbound moved it to a fork new enough for both: nothing to say
+  const n = managerWith({ versions: { xray: '26.3.27', 'xray-pattn': '26.10.22' }, bins: ['xray', 'xray-pattn'], validOn: ['xray', 'xray-pattn'] });
+  assert.deepEqual(await n.validateWithFallback(groupConfig({ outbounds: [...groupConfig().outbounds, ...ECH_OUT_CONFIG.outbounds] }), 'xray'), { ok: true, engine: 'xray-pattn', fellBack: true });
+  assert.match(n.logs.at(-1), /ECH outbound needs Xray 26\.10\.10/);
+});
+
+test('runsGroup: only the builder’s map of groups counts', () => {
+  assert.equal(runsGroup(groupConfig()), true);
+  for (const none of [null, undefined, {}, { groupTags: null }, { groupTags: [] }, { outbounds: [{ protocol: 'loopback' }] }]) assert.equal(runsGroup(none), false);
+});
