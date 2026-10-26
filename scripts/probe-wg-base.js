@@ -24,7 +24,7 @@
  *   IRNF_XRAY_EXE      the core under test (default bin/xray)
  *   IRNF_HOP_EXE       the core the two hops run (default: the core under test)
  *   IRNF_SINGBOX_EXE   the WireGuard peer (default bin/sing-box)
- *   IRNF_PROBE_PORT    base port, default 39800
+ *   IRNF_PROBE_PORT    base port, default 21800
  *   IRNF_PROBE_ROUNDS  requests per line, default 10
  *   IRNF_PROBE_WG_HOST the address the WireGuard dials its peer at (default 127.0.0.1)
  */
@@ -38,7 +38,7 @@ const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const { buildConfig } = require('../src/main/configBuilder');
 
-const BASE = Number(process.env.IRNF_PROBE_PORT || 39800);
+const BASE = Number(process.env.IRNF_PROBE_PORT || 21800);
 const P = { hop: BASE + 1, wg: BASE + 2, front: BASE + 3, socks: BASE + 10, dns: BASE + 20, web: BASE + 21, web2: BASE + 22 };
 const ROUNDS = Number(process.env.IRNF_PROBE_ROUNDS || 10);
 const WG_HOST = process.env.IRNF_PROBE_WG_HOST || '127.0.0.1';

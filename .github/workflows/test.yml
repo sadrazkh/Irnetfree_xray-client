@@ -74,7 +74,7 @@ jobs:
           curl -fsSL --retry 3 -o h.zip "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
           unzip -q h.zip -d "$RUNNER_TEMP/h" && chmod +x "$RUNNER_TEMP/h/xray"
           IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-wg-base.js
-          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=39900 IRNF_PROBE_ROUNDS=3 node scripts/probe-wg-base.js
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=21900 IRNF_PROBE_ROUNDS=3 node scripts/probe-wg-base.js
       - name: A WARP on WireGuard rides a config, as + WARP chains it (a real peer, loopback)
         # scripts/probe-warp-chain.js: the WireGuard server warp.js writes for a chained
         # account (reserved, MTU 1280, no noise) behind a VLESS hop, against a sing-box
@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-warp-chain.js
-          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=40200 node scripts/probe-warp-chain.js
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=22200 node scripts/probe-warp-chain.js
       - name: A group spreads connections over its live members, wherever it is used (real servers, loopback)
         # scripts/probe-group.js: the app's own builder (groups.groupRecord → configBuilder)
         # against local VLESS servers — the group selected, as an advanced-routing target,
@@ -101,7 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-group.js
-          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=40500 node scripts/probe-group.js
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_HOP_EXE="$RUNNER_TEMP/h/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=22500 node scripts/probe-group.js
       - name: MASQUE carries TCP and UDP over HTTP/3 and HTTP/2 (a real server, loopback)
         # scripts/probe-masque.js: a MASQUE server (Xray's masque inbound, IETF
         # CONNECT-IP, RFC 9484) and a client through it, both the core under test,
@@ -116,7 +116,7 @@ jobs:
         run: |
           rc=0
           IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-masque.js || rc=1
-          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=40000 node scripts/probe-masque.js || rc=1
+          IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=22000 node scripts/probe-masque.js || rc=1
           exit $rc
       - name: An ECH outbound fetches the ECH key through fronted DoH (Cloudflare, the real network)
         # scripts/probe-ech-outbound.js: the key of cloudflare-ech.com asked over
@@ -130,7 +130,7 @@ jobs:
         run: |
           rc=0
           IRNF_PROBE_LOG=info IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-ech-outbound.js || rc=1
-          IRNF_PROBE_LOG=info IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=40810 node scripts/probe-ech-outbound.js || rc=1
+          IRNF_PROBE_LOG=info IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=22810 node scripts/probe-ech-outbound.js || rc=1
           exit $rc
       - name: LAN users ride their own configs by username and password (real servers, loopback)
         # scripts/probe-lan-users.js: the app's own buildConfig with settings.modules.lanUsers
@@ -145,7 +145,7 @@ jobs:
         run: |
           rc=0
           IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-lan-users.js || rc=1
-          IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=41600 node scripts/probe-lan-users.js || rc=1
+          IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=23600 node scripts/probe-lan-users.js || rc=1
           exit $rc
 
   tun-dns:
@@ -225,7 +225,7 @@ jobs:
         # also when the official core failed: one run says it for both
         if: ${{ !cancelled() }}
         timeout-minutes: 5
-        run: sudo IRNF_MW_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=41300 "$(command -v node)" scripts/probe-multiwan.js
+        run: sudo IRNF_MW_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=23300 "$(command -v node)" scripts/probe-multiwan.js
 
   lan-users:
     # People behind the router as users (settings.modules.lanUsers, transparent
@@ -279,7 +279,7 @@ jobs:
         # also when the official core failed: one run says it for both
         if: ${{ !cancelled() }}
         timeout-minutes: 6
-        run: sudo IRNF_LP_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=41900 "$(command -v node)" scripts/probe-lan-portal.js
+        run: sudo IRNF_LP_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=23900 "$(command -v node)" scripts/probe-lan-portal.js
 
   android:
     # The Android app is a hand-written port of src/main/parser.js and
