@@ -62,7 +62,7 @@
  *   IRNF_XRAY_EXE     the router's core (default bin/xray)
  *   IRNF_HOP_EXE      the servers' core (default: the router's core)
  *   IRNF_SINGBOX_EXE  the gateway's sing-box (a file named sing-box)
- *   IRNF_PROBE_PORT   base port, default 41800 (never the app's own)
+ *   IRNF_PROBE_PORT   base port, default 23800 (never the app's own)
  */
 const { spawn, spawnSync } = require('child_process');
 const dgram = require('dgram');
@@ -85,7 +85,7 @@ const WAN = { dev: 'lpw0', peer: 'lpw1', ip: '10.31.0.1', gw: '10.31.0.2' };
 const SRV_IP = '10.32.0.1';
 const TARGET = '198.51.100.7';
 const UUID = '7d2f0c3b-1e4a-4b6d-9c8e-0a1b2c3d4e5f';
-const BASE = Number(process.env.IRNF_PROBE_PORT || 41800);
+const BASE = Number(process.env.IRNF_PROBE_PORT || 23800);
 const P = {
   socks: BASE + 1, http: BASE + 2, api: BASE + 3, luSocks: BASE + 5, luHttp: BASE + 6, portal: BASE + 10,
   // free loopback ports for the per-target SOCKS inbounds (lu-tp-<n>), as the service would pick them

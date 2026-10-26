@@ -28,7 +28,7 @@
  *   IRNF_XRAY_EXE     the client core (default bin/xray)
  *   IRNF_HOP_EXE      the core the servers run (default: the client core)
  *   IRNF_SINGBOX_EXE  the WireGuard peer for round 5 (default bin/sing-box; absent → round 5 is skipped)
- *   IRNF_PROBE_PORT   base port, default 40400
+ *   IRNF_PROBE_PORT   base port, default 22400
  */
 const fs = require('fs');
 const os = require('os');
@@ -40,7 +40,7 @@ const { buildConfig } = require('../src/main/configBuilder');
 const { groupRecord } = require('../src/main/groups');
 const { sumOutbounds, StatsPoller } = require('../src/main/stats');
 
-const BASE = Number(process.env.IRNF_PROBE_PORT || 40400);
+const BASE = Number(process.env.IRNF_PROBE_PORT || 22400);
 const P = { s1: BASE + 1, s2: BASE + 2, s3: BASE + 3, h: BASE + 4, s1b: BASE + 5, s2b: BASE + 6, wg: BASE + 7, dead: BASE + 9,
   page1: BASE + 11, page2: BASE + 12, page3: BASE + 13, probe: BASE + 14, pageWg: BASE + 15, socks: BASE + 20 };
 const UUID = '7d2f0c3b-1e4a-4b6d-9c8e-0a1b2c3d4e5f';
