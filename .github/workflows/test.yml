@@ -132,6 +132,21 @@ jobs:
           IRNF_PROBE_LOG=info IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-ech-outbound.js || rc=1
           IRNF_PROBE_LOG=info IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=40810 node scripts/probe-ech-outbound.js || rc=1
           exit $rc
+      - name: LAN users ride their own configs by username and password (real servers, loopback)
+        # scripts/probe-lan-users.js: the app's own buildConfig with settings.modules.lanUsers
+        # and the store's lanUsers (the users module) — users on local VLESS servers, each
+        # account riding its own server over the users' SOCKS5 and HTTP inbounds while the
+        # app's own port keeps the main connection; a wrong password, a disabled and an
+        # expired user refused; each user's bytes in /debug/vars; the module off writes the
+        # config of before. Nothing reaches the internet. The suggested Xray, then the
+        # suggested Xray-PattN; both always run.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          rc=0
+          IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-lan-users.js || rc=1
+          IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=41600 node scripts/probe-lan-users.js || rc=1
+          exit $rc
 
   tun-dns:
     # The real TUN, which `sing-box check` cannot speak for: does a name asked
@@ -211,6 +226,60 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: sudo IRNF_MW_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=41300 "$(command -v node)" scripts/probe-multiwan.js
+
+  lan-users:
+    # People behind the router as users (settings.modules.lanUsers, transparent
+    # mode): WHICH server a device's bytes reached, whether a device nobody owns
+    # sees the login page and nothing else, whether a blocked or capped one gets
+    # nothing — what a device sees, which no config check can say. Four network
+    # namespaces of their own (the runner's network is not touched): two devices
+    # with fixed MACs on a bridge; the router — the app's nft table and sing-box
+    # TUN through TunOpenwrt, Xray from buildConfig, the login portal; and the
+    # internet with three servers. An assigned device rides its user's server,
+    # an unassigned one gets the login page on http and nothing else until it
+    # logs in, then its user's server; a blocked device and one whose user is
+    # over its cap get nothing; the module off is today's gateway, byte for byte
+    # (scripts/probe-lan-portal.js). Both sing-box lines the app runs — a rule by
+    # source MAC exists only from 1.14 — and on each the suggested Xray, then the
+    # suggested Xray-PattN; both always run.
+    name: LAN users on the router (sing-box ${{ matrix.singbox }}, network namespaces)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        singbox: ['1.13.14', '1.14.3']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch the suggested Xray and Xray-PattN, and sing-box ${{ matrix.singbox }}
+        run: |
+          set -euo pipefail
+          XV=$(node -p "require('./src/main/coreVersions').SUGGESTED.xray")
+          PV=$(node -p "require('./src/main/coreVersions').SUGGESTED['xray-pattn']")
+          SV='${{ matrix.singbox }}'
+          echo "xray $XV · xray-pattn $PV · sing-box $SV"
+          mkdir -p "$RUNNER_TEMP/x" "$RUNNER_TEMP/p" "$RUNNER_TEMP/s"
+          curl -fsSL --retry 3 -o x.zip "https://github.com/XTLS/Xray-core/releases/download/v$XV/Xray-linux-64.zip"
+          unzip -q x.zip -d "$RUNNER_TEMP/x"
+          curl -fsSL --retry 3 -o p.zip "https://github.com/patterniha/Xray-core/releases/download/v$PV/Xray-linux-64.zip"
+          unzip -q p.zip -d "$RUNNER_TEMP/p"
+          curl -fsSL --retry 3 -o s.tgz "https://github.com/SagerNet/sing-box/releases/download/v$SV/sing-box-$SV-linux-amd64.tar.gz"
+          tar -xzf s.tgz -C "$RUNNER_TEMP/s" --strip-components=1
+          chmod +x "$RUNNER_TEMP/x/xray" "$RUNNER_TEMP/p/xray" "$RUNNER_TEMP/s/sing-box"
+      - name: nft for the router's table
+        run: command -v nft >/dev/null || { sudo apt-get update && sudo apt-get install -y nftables; }
+      - name: Xray (suggested) — devices ride their users' servers, the login page, blocks and caps
+        # the probe stops itself at 4.5 minutes and removes its namespaces whatever happened
+        timeout-minutes: 6
+        run: sudo IRNF_LP_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" "$(command -v node)" scripts/probe-lan-portal.js
+      - name: Xray-PattN (suggested) — devices ride their users' servers, the login page, blocks and caps
+        # also when the official core failed: one run says it for both
+        if: ${{ !cancelled() }}
+        timeout-minutes: 6
+        run: sudo IRNF_LP_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" IRNF_PROBE_PORT=41900 "$(command -v node)" scripts/probe-lan-portal.js
 
   android:
     # The Android app is a hand-written port of src/main/parser.js and
