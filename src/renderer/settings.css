@@ -867,8 +867,11 @@
    order and from any label association. */
 .vis-hidden {
   position: absolute;
-  width: 1px;
-  height: 1px;
+  /* !important: a narrow window's `.select { width: 100% }` once won, and the
+     four TUN selects pushed the Settings page sideways on a phone (537 px of 390) */
+  width: 1px !important;
+  height: 1px !important;
+  min-width: 0 !important;
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;

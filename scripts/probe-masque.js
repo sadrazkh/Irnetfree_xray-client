@@ -31,7 +31,7 @@
  * MASQUE, allowInsecure is a hard error at load).
  *
  *   IRNF_XRAY_EXE      the core under test, server and client (default bin/xray)
- *   IRNF_PROBE_PORT    base port, default 39950 (never 10808/10085: the app's own)
+ *   IRNF_PROBE_PORT    base port, default 21950 (never 10808/10085: the app's own)
  *   IRNF_PROBE_ROUNDS  requests per line, default 10
  */
 const fs = require('fs');
@@ -45,7 +45,7 @@ const { spawn, spawnSync } = require('child_process');
 const { createServer } = require('../src/main/parser');
 const { buildConfig } = require('../src/main/configBuilder');
 
-const BASE = Number(process.env.IRNF_PROBE_PORT || 39950);
+const BASE = Number(process.env.IRNF_PROBE_PORT || 21950);
 const P = { masque: BASE, socks: BASE + 10, web: BASE + 20, echo: BASE + 21 };
 const ROUNDS = Number(process.env.IRNF_PROBE_ROUNDS || 10);
 /** The whole run, whatever hangs: CI must never wait out its own step timeout. */

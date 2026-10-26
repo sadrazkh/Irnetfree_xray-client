@@ -24,7 +24,7 @@
  * runner abroad it works, in Iran it no longer does — the reason for all this).
  *
  *   IRNF_XRAY_EXE      the core under test (default bin/xray)
- *   IRNF_PROBE_PORT    base port, default 40800 (never the app's own)
+ *   IRNF_PROBE_PORT    base port, default 22800 (never the app's own)
  *   IRNF_PROBE_LOG     the core's log level, default warning (debug says why a key query failed)
  */
 const fs = require('fs');
@@ -35,7 +35,7 @@ const { spawn, spawnSync } = require('child_process');
 const { applyEchOutbounds } = require('../src/main/configBuilder');
 const SF = require('../src/renderer/serverFields');
 
-const BASE = Number(process.env.IRNF_PROBE_PORT || 40800);
+const BASE = Number(process.env.IRNF_PROBE_PORT || 22800);
 const XRAY = process.env.IRNF_XRAY_EXE || path.join(__dirname, '..', 'bin', process.platform === 'win32' ? 'xray.exe' : 'xray');
 const HOST = 'cloudflare-ech.com';
 const HARD_LIMIT_MS = 120000;

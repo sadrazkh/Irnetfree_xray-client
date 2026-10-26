@@ -47,7 +47,7 @@
  * Runs only where it is meant to: IRNF_LU_PROBE=1 (CI's `cores` job).
  *   IRNF_XRAY_EXE    the core under test (default bin/xray)
  *   IRNF_HOP_EXE     the servers' core (default: the core under test)
- *   IRNF_PROBE_PORT  base port, default 41500 (never the app's own)
+ *   IRNF_PROBE_PORT  base port, default 23500 (never the app's own)
  */
 const fs = require('fs');
 const os = require('os');
@@ -56,7 +56,7 @@ const path = require('path');
 const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 
-const BASE = Number(process.env.IRNF_PROBE_PORT || 41500);
+const BASE = Number(process.env.IRNF_PROBE_PORT || 23500);
 const P = {
   s0: BASE + 1, s1: BASE + 2, s2: BASE + 3,
   page0: BASE + 11, page1: BASE + 12, page2: BASE + 13,

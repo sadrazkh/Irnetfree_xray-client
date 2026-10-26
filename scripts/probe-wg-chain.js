@@ -23,7 +23,7 @@
  *
  *   IRNF_XRAY_EXE     extra core to test (e.g. the patterniha fork)
  *   IRNF_SINGBOX_EXE  the WireGuard peer (required)
- *   IRNF_PROBE_PORT   base port, default 39700
+ *   IRNF_PROBE_PORT   base port, default 21700
  *   IRNF_PROBE_TLS=1  the hop speaks TLS on a pinned self-signed certificate
  *   IRNF_PROBE_MASK=1 add the patterniha fork's finalmask fragmenter to the hop
  *   IRNF_PROBE_DELAY  one-way ms in front of the hop, so the chain has a round trip
@@ -39,7 +39,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { buildConfig } = require('../src/main/configBuilder');
 
-const BASE = Number(process.env.IRNF_PROBE_PORT || 39700);
+const BASE = Number(process.env.IRNF_PROBE_PORT || 21700);
 const P = { hop: BASE + 1, wg: BASE + 2, socks: BASE + 10, dns: BASE + 20, web: BASE + 21, webTls: BASE + 22, relay: BASE + 30 };
 // IRNF_PROBE_DELAY puts a one-way delay in front of the hop, so the chain has
 // the round trip a real link has. IRNF_PROBE_BUF0 puts back the bufferSize:0 the
