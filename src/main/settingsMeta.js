@@ -49,7 +49,11 @@ const RECONNECT_KEYS = [
   'mux',
   // several internets at once (multiWan.js): which interface each outbound
   // binds is written into the config. Its data caps are not — see VIEWS.
-  'multiWan'
+  'multiWan',
+  // the extensions (src/renderer/modules.js): only two of them reach a config
+  // — multiWan (off, the builder treats it as disabled) and lanUsers (off, no
+  // inbound) — so only those two are compared; see VIEWS
+  'modules'
 ];
 
 /**
@@ -71,9 +75,17 @@ const VIEWS = {
         return built;
       })
     });
+  },
+  // An extension removed or installed changes the running config only where
+  // it is one of these two — and multiWan only while several internets are on
+  // at all (`all`: the whole settings it came from): chains, groups, WARP… off
+  // hide their pages, the connection runs on as it was.
+  modules: (v, all) => {
+    const m = v && typeof v === 'object' ? v : {};
+    return { multiWan: m.multiWan === true && normalizeMultiWan(all && all.multiWan).enabled, lanUsers: m.lanUsers === true };
   }
 };
-const viewOf = (k, v) => (VIEWS[k] ? VIEWS[k](v) : v);
+const viewOf = (k, v, all) => (VIEWS[k] ? VIEWS[k](v, all) : v);
 
 /**
  * Every key above has a human-readable name in the renderer under the i18n key
@@ -112,7 +124,7 @@ function sameValue(a, b) {
  */
 function pendingReconnectKeys(applied, current) {
   if (!applied || !current) return [];
-  return RECONNECT_KEYS.filter(k => !sameValue(viewOf(k, applied[k]), viewOf(k, current[k])));
+  return RECONNECT_KEYS.filter(k => !sameValue(viewOf(k, applied[k], applied), viewOf(k, current[k], current)));
 }
 
 /** Snapshot the reconnect-relevant slice of a settings object (deep-copied). */

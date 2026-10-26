@@ -23,6 +23,8 @@ const { effectiveVia, advancedTargets } = require('./routingProfiles');
 const { masqueHttpOf } = require('../renderer/serverFields');
 const { isGroupRecord, serversOf, STRATEGIES: GROUP_STRATEGIES } = require('./groups');
 const { applies: multiWanApplies, applyMultiWan, finishSplit } = require('./multiWan');
+// the extensions (src/renderer/modules.js): multiWan not installed is multiWan disabled
+const { isOn: moduleOn } = require('../renderer/modules');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -1051,6 +1053,16 @@ const SETTINGS_DEFAULTS = {
 };
 
 /**
+ * Several internets only with their extension installed (modules.js): settings
+ * that carry `modules` — main.js's and service.js's always do — build multiWan
+ * as disabled while it is not, byte for byte the config of multiWan off;
+ * settings with none (the tests, a builder called by hand) are not asked.
+ */
+function multiWanAllowed(s) {
+  return !(s && s.modules && typeof s.modules === 'object') || moduleOn(s, 'multiWan');
+}
+
+/**
  * The resolver addresses the TUN layer must route past the tunnel. Under TUN
  * every `direct` dial to a public address matches the split routes and
  * re-enters the tunnel, so the in-country resolver's UDP query would loop into
@@ -1218,7 +1230,7 @@ function buildConfig(planArg, settings) {
   // group over the connected internets, a group's members are multiplied over
   // them — before expandGroups, which writes every group out. Off, or with
   // nothing to combine, the outbounds are not touched at all.
-  const mw = multiWanApplies(s.multiWan, s.multiWanSkip);
+  const mw = multiWanAllowed(s) && multiWanApplies(s.multiWan, s.multiWanSkip);
   if (mw) outbounds = applyMultiWan(outbounds, s.multiWan, s.multiWanSkip, { servers: serversByTag(plan), groupSkip: s.groupSkip });
 
   // groups: their members, balancers, rules (first of all) and health check —
@@ -1621,7 +1633,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
     { geoAssets: s.geoAssets !== false, exitTag: primaryTag, dropUdpDirect: dropsUdpDirect(s) });
   if (dnsPlan.hijackOutbound) reg.add(dnsPlan.hijackOutbound);
   // multi-internet, then groups — see buildConfig
-  const mw = multiWanApplies(s.multiWan, s.multiWanSkip);
+  const mw = multiWanAllowed(s) && multiWanApplies(s.multiWan, s.multiWanSkip);
   const grp = expandGroups(mw ? applyMultiWan(reg.outs, s.multiWan, s.multiWanSkip, { servers: serversByTag(plan), groupSkip: s.groupSkip }) : reg.outs, s.groupSkip);
   const outs = grp.outbounds.map(sanitizeWgOutbound).map(o => applyWgEndpointIps(o, s.wgEndpointIps));
   const hosts = pinEntryHosts(outs, s.entryHostIps, s.ipv6);   // see buildConfig

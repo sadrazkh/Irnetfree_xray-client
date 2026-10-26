@@ -49,6 +49,8 @@ const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 const { migrateSettings } = require('../main/settingsMigrate');
+// the extensions (installed or not, in use or not) — the renderer's own registry
+const MODS = require('../renderer/modules');
 const { migrateProfiles, mirrorToSettings, mirrorFromSettings, isAdvancedSelection, profileIdOf, selectionIdOf, resolveBaseTargets, advancedTargets, resolveProcessRules, liveRoutingOf, routingPendingKeys } = require('../main/routingProfiles');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
 const { createWanWatcher, decide: decideWanChange } = require('../main/wanWatch');
@@ -192,6 +194,11 @@ const DEFAULT_SETTINGS = {
     links: [],
     split: { up: '', down: '' }
   },
+  // the extensions installed (src/renderer/modules.js): id → true. A new
+  // store has none and is migrated already; a store from before gets what it
+  // uses, once (migrateModulesStore). The desktop's is the same.
+  modules: {},
+  modulesMigrated: true,
   // mux on the servers' own outbounds (mux.js): 'auto' tests each ws /
   // httpupgrade server once and muxes it where it works, 'on' every such
   // server untested, 'off' never — the default: nothing changes unless the
@@ -630,6 +637,7 @@ function createService(opts = {}) {
   }
   if (OPENWRT && !(store.get('routerRepair', 0) >= 1)) repairRouterSettings();
   getRoutingProfiles();   // today's advanced routing becomes profile rp-default, once
+  migrateModulesStore();   // the extensions an older store uses are installed, once
   // A new process has no live connection. `activeServerId` means "connected
   // to this, in THIS process" and lives in the store — only a disconnect ever
   // cleared it, so after a reboot, a power cut or a crash it was still there,
@@ -1211,6 +1219,36 @@ function createService(opts = {}) {
     const raw = store.get('settings', null);
     const { settings, changed } = migrateSettings(raw);
     if (changed) store.set('settings', settings);
+  }
+
+  /**
+   * What the extensions count as in use (modules.inUseOf): the store as it is
+   * now, and the relay's own file (remote/api.js keeps it apart, read-only here).
+   */
+  function modulesData(settings) {
+    let remote = null;
+    try { remote = JSON.parse(fs.readFileSync(path.join(dataDir, 'remote.json'), 'utf8')); } catch { /* none, or not JSON */ }
+    return { servers: store.get('servers', []), groups: getGroups(), chains: getChains(), pool: getPool(),
+      routingProfiles: store.get('routingProfiles', []), settings: settings || getSettings(), lanUsers: store.get('lanUsers', null), remote };
+  }
+
+  /** The extensions (modules.js), once — as main.js migrateModulesStore. */
+  function migrateModulesStore() {
+    const raw = store.get('settings', null);
+    const fresh = !raw || raw === DEFAULT_SETTINGS;
+    if (!fresh && raw.modulesMigrated === true) return;
+    const from = fresh ? {} : raw;
+    const modules = MODS.migrateModules(from, modulesData(Object.assign({}, DEFAULT_SETTINGS, from)));
+    if (fresh && !Object.keys(modules).length) return;
+    store.set('settings', Object.assign({}, fresh ? DEFAULT_SETTINGS : raw, { modules, modulesMigrated: true }));
+  }
+
+  /** After a backup restore: what it brought that this store now uses gets its extension too. */
+  function installModulesInUse() {
+    const s = getSettings();
+    const modules = MODS.installInUse(s.modules, MODS.inUseOf(modulesData(s)));
+    // installInUse only ever adds: a longer list is a change
+    if (Object.keys(modules).length > Object.keys(MODS.normalizeModules(s.modules)).length) store.set('settings', Object.assign({}, store.get('settings', {}), { modules }));
   }
 
   /**
@@ -3711,6 +3749,23 @@ function createService(opts = {}) {
     'settings:pending': () => pendingKeys(),
     'settings:apply': () => reapplyByHand(),
 
+    // The extensions (src/renderer/modules.js) — the same two channels and shapes as main.js;
+    // a router is 'router', the headless service anywhere else the desktop's.
+    'modules:get': () => {
+      const s = getSettings();
+      return { modules: MODS.normalizeModules(s.modules), inUse: MODS.inUseOf(modulesData(s)), platform: OPENWRT ? 'router' : 'desktop' };
+    },
+    'modules:set': (arg) => {
+      const a = arg && typeof arg === 'object' ? arg : {};
+      const s = getSettings();
+      const r = MODS.setModule(s.modules, a.id, !!a.on, OPENWRT ? 'router' : 'desktop');
+      if (!r.error && !r.blockedBy) store.set('settings', Object.assign({}, store.get('settings', {}), { modules: r.modules }));
+      const out = { modules: r.modules, inUse: MODS.inUseOf(modulesData()), pendingReconnect: pendingKeys() };
+      if (r.blockedBy) out.blockedBy = r.blockedBy;
+      if (r.error) out.error = r.error;
+      return out;
+    },
+
     // Several internets (multiWan.js) — the same three channels and shapes as main.js:
     // → { settings, links, usage, live }
     'multiwan:get': async () => {
@@ -3949,6 +4004,7 @@ function createService(opts = {}) {
         }, { keep: OPENWRT && !(bundle && bundle.flavor === 'openwrt') ? ROUTER_KEEPS_ON_IMPORT : [] });
       } catch (err) { return { ok: false, error: err.message }; }
       store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, groups: r.next.groups, settings: r.next.settings });
+      installModulesInUse();   // what the backup brought in shows (modules.js)
       if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
       send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles, ${r.added.groups} groups added`, level: 'info' });
       // `kept`: the router-only keys the backup wanted changed — for the renderer's own words

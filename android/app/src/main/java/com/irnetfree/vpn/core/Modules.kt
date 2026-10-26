@@ -55,7 +55,8 @@ object Modules {
     val MODULES: List<Module> = listOf(
         Module(CHAINS, "⛓", "connection"),
         Module(GROUPS, "⧉", "connection"),
-        Module(WARP, "☁", "connection"),
+        // as on the desktop (src/renderer/modules.js): a WARP account on WireGuard is made as a chain's exit
+        Module(WARP, "☁", "connection", listOf(CHAINS)),
         Module(ADVANCED_ROUTING, "🧭", "routing"),
         Module(POOL, "🧩", "routing"),
         Module(LAN_SHARE, "📡", "network"),

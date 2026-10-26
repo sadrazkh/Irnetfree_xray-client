@@ -284,15 +284,15 @@ test('v1.27 strings: once in fa and once in en, one clean literal each (no strai
 /* ------------------------------------ the markup ------------------------------------ */
 
 test('the markup: the Chain page is «زنجیره و گروه», its groups section after the chains, and the editor dialog starts hidden', () => {
-  const view = HTML.slice(HTML.indexOf('<section class="view" id="view-chain">'), HTML.indexOf('</section>', HTML.indexOf('id="view-chain"')));
+  const view = HTML.slice(HTML.indexOf('<section class="view" id="view-chain" data-module="chains groups">'), HTML.indexOf('</section>', HTML.indexOf('id="view-chain"')));
   assert.match(view, /<h2 data-i18n="chain\.title">زنجیره و گروه<\/h2>/);
   assert.match(HTML, /<span data-i18n="nav\.chain">زنجیره و گروه<\/span>/);
   for (const id of ['groupsSection', 'btnAddGroup', 'groupsWrap', 'groupsEmpty']) assert.ok(view.includes(`id="${id}"`), `#${id} inside #view-chain`);
   assert.ok(view.indexOf('id="chainsWrap"') < view.indexOf('id="groupsSection"'), 'the groups below the chains');
   // v1.28: «گروه‌ها» is the second tab (tests/groupsUi2.test.js), its button in the page's head
   assert.match(view, /id="cgTabGroups"[^\n]*<span data-i18n="grp\.title">گروه‌ها<\/span>/);
-  assert.match(view, /id="btnAddGroup" data-i18n="grp\.new">\+ گروه تازه<\/button>/);
-  assert.match(HTML, /<div class="modal-overlay" id="grpModal" hidden>\s*<div class="modal grp-modal" role="dialog" aria-modal="true" aria-labelledby="grpTitle">/);
+  assert.match(view, /id="btnAddGroup" data-module="groups" data-i18n="grp\.new">\+ گروه تازه<\/button>/);
+  assert.match(HTML, /<div class="modal-overlay" id="grpModal" data-module="groups" hidden>\s*<div class="modal grp-modal" role="dialog" aria-modal="true" aria-labelledby="grpTitle">/);
   for (const id of ['grpTitle', 'grpClose', 'grpBody', 'grpFoot']) assert.ok(HTML.includes(`id="${id}"`), `#${id}`);
   // the wiring
   assert.match(APP, /\$\('#btnAddGroup'\)\.onclick = \(\) => openGroupEditor\(null\);/);
