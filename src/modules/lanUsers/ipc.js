@@ -106,6 +106,7 @@ function onlineMap(list) {
  *   devices()             → the devices answering now (default: router/devices.js) — a test's fake
  *   transparentInbounds(lu) → [{ tag | n, port, target }]: the router's transparent mode (USERS-ROUTER)
  *   onChange(lu, what)    after every saved change ('config' | 'user' | 'device') — the router's nft
+ *   deviceUsage()         → { [mac]: bytes this period } — the router's own count (default: this meter's)
  *   firewall              { sync(ports | null) } (default: firewall.js on Windows' desktop)
  *   log({ line, level }), notify(text), now()
  * → { handlers, forBuild(buildSettings), tick(vars), statsLive, addBytes, tickDevices, overIds, activeUsers, payload, flush, meter }
@@ -369,7 +370,7 @@ function registerLanUsers(o) {
       usage: meter.usage(),
       live: running() ? meter.rates() : {},
       online: on,
-      deviceUsage: platform === 'router' ? meter.deviceUsage() : {},
+      deviceUsage: platform === 'router' ? (typeof opts.deviceUsage === 'function' ? opts.deviceUsage() : meter.deviceUsage()) : {},
       // the window's name for where it runs: the router's build, or the desktop's (a headless service too)
       platform: platform === 'router' ? 'openwrt' : 'desktop',
       lanAddresses: lans
