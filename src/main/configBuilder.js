@@ -1485,15 +1485,18 @@ function groupMemberKey(groupId, m) {
  * `chain-relay~<hop>`, a SOCKS outbound to that inbound.
  *
  * Straight through the hop (dialerProxy), the end of a response the far side
- * closed was lost — on both cores, every Xray since at least 26.3.27, group or
- * not (scripts/probe-chain-tail.js, 2026-10-26): a hop whose transport ends
+ * closed was lost — on Xray 26.3.27 and 26.10.21 and Xray-PattN 26.10.22
+ * alike, group or not (scripts/probe-chain-tail.js, 2026-10-26): a hop whose transport ends
  * with an error instead of EOF — WebSocket's close frame always does — has
  * the core interrupt the in-memory pipe to the next hop
  * (app/proxyman/outbound/handler.go), and an interrupted pipe drops whatever
  * that hop had not read yet (transport/pipe/impl.go). On a 4-core Linux
  * runner, 1–4 % of small pages and half the 256 KB ones through a ws hop came
  * back cut short, many with nothing at all; through the relay the bytes are
- * in the kernel before the hop's error, and none of 2,400 was.
+ * in the kernel before the hop's error, and none of 2,400 was. A group's
+ * loopback on an official core before 26.4.25 copies through a pipe of its own
+ * (XTLS/Xray-core#6005 made it hand the link on) and loses the same way, the
+ * relay or not: 26.3.27 cut every 256 KB page short through [H → group].
  *
  * Only a dial that carries everything in its TCP stream (vless, vmess, trojan,
  * http over a TCP transport) through a proxy hop. A WireGuard or a UDP
