@@ -32,9 +32,10 @@
  * config buildConfig({ mode: 'single', server }, settings) writes, settings
  * from tests/fixtures with `multiWan` (links A = mwa0, B = mwb0). Two things
  * differ from the app: the health check asks the page here instead of
- * cp.cloudflare.com (no internet in there; its 10 s interval is kept) and the
- * client logs at info (which member each connection took, printed on a
- * failure). The target is 198.51.100.7:80 — a documentation address, outside
+ * cp.cloudflare.com (no internet in there; its interval is kept — 30 s over
+ * uncapped links, multiWan.js PROBE_EVERY_S, which is why failover is given
+ * FAILOVER_WAIT_MS each way) and the client logs at info (which member each
+ * connection took, printed on a failure). The target is 198.51.100.7:80 — a documentation address, outside
  * the builder's private bypass; the server's freedom hands every flow to the
  * page. Plaintext VLESS is fine: the server's address is private.
  *
@@ -45,9 +46,9 @@
  *   balance       8 parallel downloads ride both links, each ≥ 20 % of the bytes
  *   failover      the primary is B — the link the OS would NOT pick, so riding
  *                 it is the binding's doing, not the routing table's:
- *                 (1) downloads ride B (≥ 90 %); (2) B down → within 40 s new
- *                 downloads succeed, on A; (3) B up again → within 40 s they
- *                 ride B again
+ *                 (1) downloads ride B (≥ 90 %); (2) B down → within 60 s new
+ *                 downloads succeed, on A; (3) B up again → within 60 s they
+ *                 ride B again (the health check's 30 s, twice over)
  *   split         XHTTP, both ways round — the leg on B is the one the OS would
  *                 not pick, so up B proves the upload's binding and down B the
  *                 download's: a 20 MB upload leaves by `up` (≥ 90 % of it out on
@@ -97,7 +98,11 @@ const HARD_LIMIT_MS = 240000;
 const INNER_LIMIT_MS = HARD_LIMIT_MS - 15000;   // the tests stop first, with the core logs; then the teardown
 const MB = 1048576;
 const PAR = 8, EACH = 4 * MB, SPLIT = 20 * MB, POLL = 1 * MB;
-const VERDICT_WAIT_MS = 25000, FAILOVER_WAIT_MS = 40000;
+/**
+ * The health check judges every member as the core starts, so the verdicts come at once; a link
+ * that went down or came back is seen at the next probe, up to its interval later (30 s here).
+ */
+const VERDICT_WAIT_MS = 25000, FAILOVER_WAIT_MS = 60000;
 const exeName = (n) => (process.platform === 'win32' ? n + '.exe' : n);
 const XRAY = process.env.IRNF_XRAY_EXE || path.join(__dirname, '..', 'bin', exeName('xray'));
 const SERVER_XRAY = process.env.IRNF_HOP_EXE || XRAY;
@@ -191,6 +196,7 @@ function bindings(cfg) {
   for (const b of ((cfg && cfg.routing) || {}).balancers || []) {
     out.push(`${b.tag}: ${(b.strategy && b.strategy.type) || '?'} over ${(b.selector || []).join(',')}, fallback ${b.fallbackTag || '-'}`);
   }
+  if (cfg && cfg.observatory) out.push(`health check every ${cfg.observatory.probeInterval}`);
   return out.join('; ') || 'no outbound bound to a link, no balancer';
 }
 
@@ -755,4 +761,4 @@ if (require.main === module) {
   else outside().catch((e) => { console.log(`FAIL ${e.message}`); teardown(); process.exit(1); });
 }
 
-module.exports = { buildProbeConfigs, probeServers, probeSettings, serverConfig, bindings, MW, A, B, SRV_IP, TARGET, P, APP_PORTS };
+module.exports = { buildProbeConfigs, probeServers, probeSettings, serverConfig, bindings, MW, A, B, SRV_IP, TARGET, P, APP_PORTS, VERDICT_WAIT_MS, FAILOVER_WAIT_MS };

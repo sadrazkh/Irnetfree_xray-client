@@ -34,6 +34,15 @@ test('the probe’s ports and links: never the app’s own ports; failover’s p
   }
 });
 
+test('the probe’s waits outlast the health check the builder writes for its links: failover is seen at the next probe, up to one interval later — twice that is given each way', () => {
+  const M = require('../scripts/probe-multiwan');
+  const cfgs = M.buildProbeConfigs();
+  const secs = (cfg) => Number(/^(\d+)s$/.exec(cfg.observatory.probeInterval)[1]);
+  for (const k of ['balance', 'failover']) assert.ok(cfgs[k].observatory, `${k} runs a health check`);
+  assert.ok(M.FAILOVER_WAIT_MS >= 2 * secs(cfgs.failover) * 1000, `${M.FAILOVER_WAIT_MS} ms against ${cfgs.failover.observatory.probeInterval}`);
+  assert.match(M.bindings(cfgs.failover), /health check every \d+s/);
+});
+
 test('CI’s `multiwan` job runs the probe with sudo on the suggested Xray and Xray-PattN, each on its own ports, the second whatever the first did', () => {
   const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8').replace(/\r\n/g, '\n');
   const at = yml.indexOf('\n  multiwan:\n');

@@ -194,7 +194,7 @@ const PRELUDE = constSource('ADV_ID') + constSource('POOL_ID') + constSource('TA
 // v1.28 (tests/groupsUi2.test.js): the page's tabs and folding cards, the pick list in piles, a group's members live
 const PAGE_FNS = ['loadCgState', 'saveCgState', 'cgCanGroups', 'cgTab', 'cgApplyTab', 'cgSetTab', 'cgIsOpen', 'cgCardOf', 'cgPaintCard', 'cgPaintAll',
   'cgSetOpen', 'cgAll', 'cgReveal', 'cgPrune', 'cgAutoOpen', 'cgWireHead', 'cgChainSum', 'cgFillPicker', 'cgPile', 'cgPickRow', 'serverGroups', 'groupKey',
-  'gmNum', 'gmSum', 'gmShares', 'gmAggregate', 'gmPair', 'gmShade', 'gmBarInto', 'gmMs', 'gmCardRow', 'gmFillRow', 'gmFillCard', 'gmApplyCards',
+  'gmNum', 'gmSum', 'gmShares', 'gmAddInto', 'gmAggregate', 'gmPair', 'gmShade', 'gmBarInto', 'gmMs', 'gmCardRow', 'gmFillRow', 'gmFillCard', 'gmApplyCards',
   'fmtBytes', 'fmtSpeed', 'flowArrow'];
 const PAGE_PRELUDE = constSource('CG_KEY') + constSource('cgState') + constSource('cgSearch') + 'let cgConnKey = null; const cgOpened = new Set(); let gmLive = [];\n';
 const GROUP_FNS = ['srvById', 'grpMember', 'normalizeUiGroup', 'loadGroups', 'newGroupId', 'grpById', 'grpCountText', 'grpLive', 'grpAddrText',

@@ -9,9 +9,10 @@
  * very field bindDirectDials uses under TUN), so a server dialled once per
  * link is a server reachable over each of them. What this module writes on
  * top of that is an ordinary group (groups.js, configBuilder.expandGroups):
- *  - balance: a copy of the server per 'use' link — `weight` copies, so the
- *    round robin hands a link a share of the new connections; a 'backup' link
- *    is the group's fallback, taken only when no 'use' link answers;
+ *  - balance: a copy of the server per 'use' link — as many copies as its
+ *    `weight` is of the others' (2:1 two and one, 2:2 one each), so the round
+ *    robin hands a link a share of the new connections; a 'backup' link is the
+ *    group's fallback, taken only when no 'use' link answers;
  *  - failover: the first link alone, the next one as the fallback;
  *  - split: an XHTTP server uploads on one link and downloads on the other
  *    (xhttpSettings.extra.downloadSettings, a full stream config with its own
@@ -47,6 +48,50 @@ const WEIGHT_MIN = 1, WEIGHT_MAX = 3, WEIGHT_DEFAULT = 2;
 
 /** The protocols a link can carry a copy of. Not WireGuard (see above), not freedom/blackhole/dns/loopback. */
 const LINKABLE = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'socks', 'http', 'hysteria', 'masque']);
+
+/*
+ * The health check over the links, and what it costs a capped link.
+ *
+ * The core's observatory asks every member (`T~gm<i>`) for
+ * http://cp.cloudflare.com/ through the member itself each round, over a
+ * fresh connection every time (Xray builds its HTTP client per probe — nothing
+ * is reused), so one probe is the member's whole handshake with its server, on
+ * the member's link:
+ *   TCP open and close, and the ACKs                                ~0.8 KB
+ *   TLS 1.3 with the server: a Chrome ClientHello with its
+ *   post-quantum key share ~1.8 KB up; ServerHello, the
+ *   certificate chain and Finished ~3–4 KB down                     ~5.5 KB
+ *   the proxy's header, the GET and the 204 answering it (in TLS)   ~0.5 KB
+ * ≈ 6 KB a probe over TLS (REALITY ~3 KB less — no certificate chain; plain
+ * TCP ~1.5 KB). Estimated from the protocols' sizes, not measured on a link.
+ *
+ * Before: every member every 10 s (configBuilder GROUP_PROBE), 8,640 probes a
+ * day each — and a link's share was that many copies of the server, each
+ * probed: the default share (2) on two links wrote two copies per link, 17,280
+ * probes ≈ 100 MB a day on EACH link (~3 GB a month).
+ * Now: a share is written as the fewest copies that give it (2:2 is 1:1, 3:3
+ * is 1:1; linkSpec), and a multi-internet build asks every PROBE_EVERY_S
+ * (2,880 probes a day ≈ 17 MB a day a link) — every PROBE_EVERY_CAPPED_S while
+ * a link a probed copy rides has a cap (1,440 ≈ 8.5 MB a day, ~260 MB a month).
+ * A 2:1 share keeps its two copies on the first link: ≈ 17 MB a day there at 60 s.
+ *
+ * What the longer interval costs: a link that drops is skipped once the next
+ * probe through it fails — up to one interval later (+ the probe's own 5 s
+ * timeout when the link swallows packets instead of refusing them): ~35 s, or
+ * ~65 s capped, of new connections half on the dead link in balance (none at
+ * all in failover, when its primary is the one) where 10 s made it ~15 s; and
+ * a link back is used again up to one interval after it answers. The backup
+ * link (the fallback, `T~fb`) is never probed, so a capped link kept as the
+ * backup costs nothing at all and leaves the 30 s.
+ *
+ * What cannot be done: probe one copy of a link for all of them. Xray's
+ * roundRobin and random take a member the observatory has no verdict on as
+ * alive (app/router/strategy_roundrobin.go; groupLive.js: "a re-added member
+ * counts as alive until its first probe"), so an unprobed copy would keep
+ * getting connections on a link that is gone.
+ */
+const PROBE_EVERY_S = 30;
+const PROBE_EVERY_CAPPED_S = 60;
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v) => (v == null ? '' : String(v).trim());
@@ -199,9 +244,11 @@ function memberOn(rec, link) {
   }, rec.certPin ? { certPin: rec.certPin } : {});
 }
 
+const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+
 /**
  * The links of one group, in the order its members are written:
- * { members: [link…] (a link repeated `weight` times, interleaved), fallback: link | null }.
+ * { members: [link…] (a link repeated by its share, interleaved), fallback: link | null }.
  * `split`: the up and the down, both used (a server that cannot split is balanced over the two).
  */
 function linkSpec(p) {
@@ -212,11 +259,29 @@ function linkSpec(p) {
     return { members: [order[0]], fallback: order[1] || null };
   }
   if (!uses.length) return { members: [backups[0]], fallback: backups[1] || null };
+  // The round robin's share is the ratio of the copies, not their number: two
+  // links at 2 and 2 are 1:1, written as one copy each — every copy is one more
+  // health probe on its link (see PROBE_EVERY_S), and two of the same say nothing more.
+  const d = uses.reduce((g, l) => gcd(g, l.weight), 0) || 1;
+  const turns = (l) => l.weight / d;
   // interleaved, so a 2:1 share is A B A rather than A A B: the next few connections already spread
   const members = [];
-  const most = Math.max(...uses.map((l) => l.weight));
-  for (let r = 0; r < most; r++) for (const l of uses) if (l.weight > r) members.push(l);
+  const most = Math.max(...uses.map(turns));
+  for (let r = 0; r < most; r++) for (const l of uses) if (turns(l) > r) members.push(l);
   return { members, fallback: backups[0] || null };
+}
+
+/** A link with a data cap (multiWanMeter's capBytes > 0): a day or a month to count it in, and some GB. */
+const capped = (l) => !!l && (l.quotaPeriod === 'day' || l.quotaPeriod === 'month') && l.quotaGb > 0;
+
+/**
+ * How often the health check asks through a group the links make, in seconds
+ * (expandGroups writes the observatory's probeInterval from it): PROBE_EVERY_S,
+ * or PROBE_EVERY_CAPPED_S when a probed copy rides a capped link — the members,
+ * never the fallback, which is not probed.
+ */
+function probeEvery(p) {
+  return linkSpec(p).members.some(capped) ? PROBE_EVERY_CAPPED_S : PROBE_EVERY_S;
 }
 
 /* ------------------------------------ split ------------------------------------ */
@@ -346,7 +411,8 @@ function serverOnLinks(o, rec, p) {
     _group: {
       id: 'mw:' + T, name: me.name, strategy: 'roundRobin',
       members: spec.members.map((l) => memberOn(me, l)),
-      fallback: spec.fallback ? memberOn(me, spec.fallback) : null
+      fallback: spec.fallback ? memberOn(me, spec.fallback) : null,
+      probeEvery: probeEvery(p)
     }
   };
 }
@@ -397,7 +463,7 @@ function groupOnLinks(o, p, dialed, groupSkip) {
   let fallback = g.fallback || null;
   const first = members.find(linkableMember);
   if (!fallback && spec.fallback && first) fallback = memberOn(memberBase(first), spec.fallback);
-  return Object.assign({}, o, { _group: Object.assign({}, g, { members: next, fallback }) });
+  return Object.assign({}, o, { _group: Object.assign({}, g, { members: next, fallback, probeEvery: probeEvery(p) }) });
 }
 
 /**
@@ -430,15 +496,23 @@ function applyMultiWan(outbounds, mw, skip, opts) {
 /* ------------------------------------ counting ------------------------------------ */
 
 /**
- * The link a member's id names: what follows the `#` ('' for any other
- * member). The FIRST `#`: a server's id never holds one (hex, `grp-…`, a tag),
- * while an adapter may be renamed "Ethernet #2" — with one `#` it is the last
- * one as well.
+ * A member id as memberOn writes it, taken apart: { server, link } — the id of
+ * the server it is a copy of and the link it rides — or null for any other
+ * member. At the FIRST `#`: a server's id never holds one (hex, `grp-…`, a
+ * tag), while an adapter may be renamed "Ethernet #2" — with one `#` it is the
+ * last one as well. Every copy of a server on one link has the same id, its
+ * share's copies included (linkSpec), so the id alone says which ones are one.
  */
-function linkOfMemberId(id) {
+function memberIdParts(id) {
   const s = id == null ? '' : String(id);
   const i = s.indexOf('#');
-  return i < 0 ? '' : s.slice(i + 1);
+  return i < 0 ? null : { server: s.slice(0, i), link: s.slice(i + 1) };
+}
+
+/** The link a member's id names: what follows the `#` ('' for any other member). */
+function linkOfMemberId(id) {
+  const p = memberIdParts(id);
+  return p ? p.link : '';
 }
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
@@ -477,6 +551,6 @@ function linkUsage(rawOutboundCounters, groupMap, split) {
 }
 
 module.exports = {
-  MODES, ROLES, PERIODS, WEIGHT_MIN, WEIGHT_MAX, WEIGHT_DEFAULT,
-  normalizeMultiWan, usableLinks, applies, applyMultiWan, finishSplit, linkOfMemberId, linkUsage, splittable
+  MODES, ROLES, PERIODS, WEIGHT_MIN, WEIGHT_MAX, WEIGHT_DEFAULT, PROBE_EVERY_S, PROBE_EVERY_CAPPED_S,
+  normalizeMultiWan, usableLinks, applies, applyMultiWan, finishSplit, memberIdParts, linkOfMemberId, linkUsage, splittable
 };

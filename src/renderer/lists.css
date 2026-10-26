@@ -892,6 +892,8 @@ button.pool-item:hover .pool-add { color: var(--accent); }
 /* the name first: the address takes what room is left and ellipsises */
 .gm-who .cn-name { font-weight: 600; color: var(--ink); white-space: nowrap; flex: 0 1 auto; }
 .gm-who bdi { font: 11px var(--mono); color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 0; }
+/* an internet's share in a multi-internet group: its copies as one row, ×N */
+.gm-who .gm-x { font: 11px var(--mono); color: var(--ink2); white-space: nowrap; flex: none; }
 .gm-rate { font: 11.5px var(--mono); white-space: nowrap; }
 .gm-rate .dn { color: var(--ok); }
 .gm-rate .up { color: var(--accentInk); margin-inline-start: 8px; }
