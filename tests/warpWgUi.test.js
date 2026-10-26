@@ -651,7 +651,7 @@ function editorHarness(lang = 'en') {
 }
 
 test('the editor’s «WARP account»: read-only above both views, from server.warp with the time it was read; an imported one says its details are unknown; any other server, none', () => {
-  assert.match(HTML, /<div class="modal-body" id="editBody">\s*<!--[^>]*-->\s*<div class="ed-card ed-warp-acct" id="edWarpAcct" hidden><\/div>\s*<div class="ed-simple" id="edSimple">/);
+  assert.match(HTML, /<div class="modal-body" id="editBody">\s*<!--[^>]*-->\s*<div class="ed-card ed-warp-acct" id="edWarpAcct" data-module="warp" hidden><\/div>\s*<div class="ed-simple" id="edSimple">/);
   assert.match(fnSource('openEdit'), /renderWarpAccount\(s\.source === 'json' \? null : s\);/);
   assert.match(fnSource('openNewServer'), /renderWarpAccount\(null\);/);
   const h = editorHarness();

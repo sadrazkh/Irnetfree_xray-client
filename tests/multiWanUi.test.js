@@ -505,7 +505,7 @@ test('every class the card builds is styled in settings.css — tokens only, log
 
 test('the markup hosts the card in Settings, loads it before app.js, and the settings sections file it under Connection', () => {
   const html = R('src', 'renderer', 'index.html');
-  assert.match(html, /<div class="card" id="multiWanCard"><\/div>/);
+  assert.match(html, /<div class="card" id="multiWanCard" data-module="multiWan"><\/div>/);
   const settings = html.slice(html.indexOf('id="view-settings"'), html.indexOf('<!-- LOGS -->'));
   assert.ok(settings.includes('id="multiWanCard"'), 'inside the Settings view');
   assert.ok(html.indexOf('<script src="multiWan.js"></script>') > html.indexOf('<script src="i18n.js"></script>'));

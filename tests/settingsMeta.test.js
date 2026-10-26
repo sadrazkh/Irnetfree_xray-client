@@ -107,7 +107,9 @@ test('every reconnect-relevant key is detected when it changes', () => {
     tunAppMode: 'exclude', tunApps: ['chrome.exe'],
     defaultEngine: 'xray-pattn',
     mux: 'auto',
-    multiWan: { enabled: true, mode: 'balance', links: [], split: { up: '', down: '' } }
+    multiWan: { enabled: true, mode: 'balance', links: [], split: { up: '', down: '' } },
+    // the users extension installed: its inbound is written into the config (modules.js)
+    modules: { lanUsers: true }
   };
   // the fixture must cover the whole list, or this test silently stops guarding
   assert.deepEqual(Object.keys(changes).sort(), [...RECONNECT_KEYS].sort());

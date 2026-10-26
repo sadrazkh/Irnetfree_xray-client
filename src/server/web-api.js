@@ -99,10 +99,20 @@
     checkGeoRules: (rules) => invoke('routing:checkGeo', rules),
     applySettings: () => invoke('settings:apply'),
 
+    // the extensions (modules.js) — the same two calls as the preload
+    modulesGet: () => invoke('modules:get'),
+    modulesSet: (arg) => invoke('modules:set', arg),
+
     // several internets used together (multiWan.js) — the same three calls as the preload
     multiWanGet: () => invoke('multiwan:get'),
     multiWanSet: (partial) => invoke('multiwan:set', partial),
     multiWanTest: (ids) => invoke('multiwan:test', ids),
+
+    // users on this network (lanUsers.js) — USERS-UI's four lines, the same as the preload's; one copy if USERS-CORE adds them too
+    lanUsersGet: () => invoke('lanusers:get'),
+    lanUsersConfig: (partial) => invoke('lanusers:config', partial),
+    lanUsersUser: (arg) => invoke('lanusers:user', arg),
+    lanUsersDevice: (arg) => invoke('lanusers:device', arg),
 
     connectionDiagnostics: (probe) => invoke('diagnostics:connection', probe),
     repairNetwork: () => invoke('network:repair'),
