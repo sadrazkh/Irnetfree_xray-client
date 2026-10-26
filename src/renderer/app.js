@@ -279,6 +279,70 @@ $$('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => showView(btn.dataset.view));
 });
 
+/*
+ * The rail keeps every item in view. Its items at their own size used to run
+ * past the rail's end on a short window — more extensions installed, a
+ * labelled skin, a phone held sideways on the router's page — and the last of
+ * them (Extensions, Settings: under the spacer) were simply not there. Now
+ * they shrink together instead: --navz (styles.css) zooms every item, the
+ * gaps and the padding as one, to what fits, and back up to their own size —
+ * never past it — as the window grows. In steps: a labelled skin's labels
+ * would be unreadable below NAV_LABEL_ZOOM, so there the icons go alone first
+ * (data-nav-compact; the tooltip still names each); below NAV_MIN_ZOOM a tap
+ * target is too small, so there the rail scrolls instead (data-nav-scroll).
+ * Measured at their own size each time: on a resize of the rail (the window's
+ * height), and whenever what it shows changes (an extension installed or
+ * removed, Simple / Pro, the skin, the language).
+ */
+const NAV_MIN_ZOOM = 0.55;
+const NAV_LABEL_ZOOM = 0.75;
+let navFitQueued = false;
+/** The zoom that fits the rail's items in its height at their size now: 1 when they fit. */
+function navZoom(rail) {
+  const shown = [...rail.children].filter(n => n.getClientRects().length);
+  const cs = getComputedStyle(rail);
+  const gaps = (parseFloat(cs.rowGap) || 0) * Math.max(0, shown.length - 1);
+  const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  const need = shown.reduce((s, n) => s + (n.classList.contains('sidebar-spacer') ? 0 : n.getBoundingClientRect().height), 0) + gaps + pad;
+  return need > rail.clientHeight ? Math.floor(rail.clientHeight / need * 100) / 100 : 1;
+}
+function fitNav() {
+  navFitQueued = false;
+  const rail = document.querySelector('.sidebar');
+  if (!rail || !rail.clientHeight) return;
+  rail.style.setProperty('--navz', '1');
+  delete rail.dataset.navCompact;
+  delete rail.dataset.navScroll;
+  let z = navZoom(rail);
+  const label = rail.querySelector('.nav-item > span:not(.nav-ico)');
+  if (z < NAV_LABEL_ZOOM && label && label.getBoundingClientRect().width > 2) {
+    rail.dataset.navCompact = '';
+    z = navZoom(rail);
+  }
+  if (z < NAV_MIN_ZOOM) {
+    z = NAV_MIN_ZOOM;
+    rail.dataset.navScroll = '';
+  }
+  if (z < 1) rail.style.setProperty('--navz', String(z));
+  else rail.style.removeProperty('--navz');
+}
+function fitNavSoon() {
+  if (navFitQueued) return;
+  navFitQueued = true;
+  requestAnimationFrame(fitNav);
+}
+if (document.querySelector('.sidebar')) {
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(fitNavSoon).observe(document.querySelector('.sidebar'));
+  if (typeof MutationObserver !== 'undefined') {
+    const watch = new MutationObserver(fitNavSoon);
+    // body/html: data-mod-*, data-ui-mode, data-skin, lang; the rail: an item hidden or shown, a label's text
+    watch.observe(document.body, { attributes: true });
+    watch.observe(document.documentElement, { attributes: true });
+    watch.observe(document.querySelector('.sidebar'), { subtree: true, childList: true, characterData: true, attributeFilter: ['hidden', 'class'] });
+  }
+  fitNavSoon();
+}
+
 /* window controls */
 $('#btnMin').onclick = () => window.api.minimize();
 $('#btnMax').onclick = () => window.api.maximize();   // maximize/restore (was wrongly hiding the app)

@@ -43,6 +43,7 @@ const { createFirewall } = require('./firewall');
 const { groupRecordsById } = require('../../main/groups');
 const { wgEndpointHosts } = require('../../main/configBuilder');
 const { lanStatus } = require('../../main/openwrtNet');
+const { isOwnTunInterface } = require('../../main/tunPlatform');
 
 const CHANNELS = ['lanusers:get', 'lanusers:config', 'lanusers:user', 'lanusers:device'];
 /** A run of edits (a user added, then another) is one reload this long after the last. */
@@ -54,19 +55,28 @@ const LAN_TTL_MS = 60000;
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const TUN_LOCAL_IP = '10.255.0.2';   // the app's own TUN adapter — never a LAN address
+/** The address Windows gives its Mobile Hotspot (Internet Connection Sharing's): where the people the accounts are for connect. */
+const HOTSPOT_IP = '192.168.137.1';
 
-/** This machine's LAN IPv4 addresses, the usual home/office ranges first (as main.js lanIp ranks them). */
+/**
+ * This machine's LAN IPv4 addresses: the Windows hotspot's first, then the
+ * usual home/office ranges (as main.js lanIp ranks them). Never one of the
+ * app's own TUN adapters: sing-box's (172.19.0.1, on the adapter it names
+ * IRNetFree) was offered as an address to give people, and no device can
+ * reach it.
+ */
 function lanCandidates(ifs) {
   const all = ifs || os.networkInterfaces();
   const out = [];
   for (const name of Object.keys(all || {})) {
+    if (isOwnTunInterface(name)) continue;
     for (const ni of all[name] || []) {
       if (!ni || (ni.family !== 'IPv4' && ni.family !== 4) || ni.internal) continue;
       if (ni.address === TUN_LOCAL_IP || ni.address.startsWith('169.254.')) continue;
       if (!out.includes(ni.address)) out.push(ni.address);
     }
   }
-  const score = (a) => (a.startsWith('192.168.') ? 3 : /^172\.(1[6-9]|2\d|3[01])\./.test(a) ? 2 : a.startsWith('10.') ? 1 : 0);
+  const score = (a) => (a === HOTSPOT_IP ? 4 : a.startsWith('192.168.') ? 3 : /^172\.(1[6-9]|2\d|3[01])\./.test(a) ? 2 : a.startsWith('10.') ? 1 : 0);
   return out.sort((x, y) => score(y) - score(x));
 }
 const isPrivate = (a) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(a);
@@ -528,4 +538,4 @@ function registerLanUsers(o) {
   };
 }
 
-module.exports = { CHANNELS, RELOAD_DELAY_MS, RETRY_MS, registerLanUsers, lanCandidates, onlineMap };
+module.exports = { CHANNELS, RELOAD_DELAY_MS, RETRY_MS, HOTSPOT_IP, registerLanUsers, lanCandidates, onlineMap };

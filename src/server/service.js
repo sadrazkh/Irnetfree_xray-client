@@ -3472,6 +3472,7 @@ function createService(opts = {}) {
     const ifs = os.networkInterfaces();
     const out = [];
     for (const name of Object.keys(ifs)) {
+      if (isOwnTunInterface(name)) continue;   // our TUN adapters (sing-box's 172.19.0.1 too): no device reaches them
       for (const ni of ifs[name] || []) {
         if (ni.family !== 'IPv4' || ni.internal) continue;
         if (ni.address === '10.255.0.2') continue;
