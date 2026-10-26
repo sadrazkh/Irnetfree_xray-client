@@ -49,6 +49,8 @@ const { Downloader } = require('../main/downloader');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('../main/procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('../main/settingsMeta');
 const { migrateSettings } = require('../main/settingsMigrate');
+// the extensions (installed or not, in use or not) — the renderer's own registry
+const MODS = require('../renderer/modules');
 const { migrateProfiles, mirrorToSettings, mirrorFromSettings, isAdvancedSelection, profileIdOf, selectionIdOf, resolveBaseTargets, advancedTargets, resolveProcessRules, liveRoutingOf, routingPendingKeys } = require('../main/routingProfiles');
 const { NetWatcher, fingerprint } = require('../main/netWatcher');
 const { createWanWatcher, decide: decideWanChange } = require('../main/wanWatch');
@@ -62,11 +64,15 @@ const { normalizeGroups, groupRecordsById, isGroupRecord, serversOf } = require(
 const { normalizeMultiWan } = require('../main/multiWan');
 const netLinks = require('../main/netLinks');
 const { createMultiWanQuota, mergeLinks } = require('../main/multiWanMeter');
+// users and devices on the LAN (module lanUsers): its channels, the build's input and its usage meter
+const { registerLanUsers } = require('../modules/lanUsers/ipc');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
 // list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
 // deliberately NOT given this: Electron never runs on a router.
 const { isOpenwrt, lanInterface, lanDevices, validMacs, ownOrphanCores, normalizeCidrs } = require('../main/openwrtNet');
 const { TunOpenwrt } = require('../main/tunOpenwrt');
+// the users module's transparent mode around that gateway: sign-in page, per-user configs, caps by MAC
+const { createLanRouter } = require('../modules/lanUsers/router');
 const { createKillSwitch } = require('../main/killSwitchOpenwrt');
 const { createLogRing } = require('./logRing');
 const tcpNet = require('net');
@@ -192,6 +198,11 @@ const DEFAULT_SETTINGS = {
     links: [],
     split: { up: '', down: '' }
   },
+  // the extensions installed (src/renderer/modules.js): id → true. A new
+  // store has none and is migrated already; a store from before gets what it
+  // uses, once (migrateModulesStore). The desktop's is the same.
+  modules: {},
+  modulesMigrated: true,
   // mux on the servers' own outbounds (mux.js): 'auto' tests each ws /
   // httpupgrade server once and muxes it where it works, 'on' every such
   // server untested, 'off' never — the default: nothing changes unless the
@@ -630,6 +641,7 @@ function createService(opts = {}) {
   }
   if (OPENWRT && !(store.get('routerRepair', 0) >= 1)) repairRouterSettings();
   getRoutingProfiles();   // today's advanced routing becomes profile rp-default, once
+  migrateModulesStore();   // the extensions an older store uses are installed, once
   // A new process has no live connection. `activeServerId` means "connected
   // to this, in THIS process" and lives in the store — only a disconnect ever
   // cleared it, so after a reboot, a power cut or a crash it was still there,
@@ -805,6 +817,16 @@ function createService(opts = {}) {
    * sweep this set, so no tunnel can outlive the process.
    */
   const startedTuns = new Set();
+  // Users (module lanUsers), transparent mode — the router only, and only with
+  // the module installed and the mode on (src/modules/lanUsers/router): off, its
+  // every call below answers "nothing" and the gateway is built as before.
+  // (deps.lanRouter: a test's, over a fake file system and LAN)
+  const lanRouter = (deps.lanRouter || createLanRouter)({
+    openwrt: OPENWRT, dataDir, run: lanRun, getSettings, getFreePorts,
+    getLanUsers: () => store.get('lanUsers', null),
+    records: () => ({ servers: store.get('servers', []), groups: getGroups(), chains: getChains() }),
+    log: (line, level) => send('log', { line, level })
+  });
 
   /**
    * Arm the "this tunnel is talking to nobody" watch for the WireGuard
@@ -854,6 +876,9 @@ function createService(opts = {}) {
       // each internet's speed and its period's bytes, while several carry the connection (multiWanMeter.js)
       const mwLive = mwQuota.rates();
       if (Object.keys(mwLive).length) s.multiWan = { live: mwLive, usage: mwQuota.usage() };
+      // …and each LAN user's, while the core carries them (src/modules/lanUsers/ipc.js)
+      const luLive = lanUsers.statsLive();
+      if (luLive) s.lanUsers = luLive;
       send('stats', s);
       // a group's members leaving and rejoining the rotation, said in the log
       for (const l of groupHealth.update(s.groups)) send('log', l);
@@ -875,6 +900,8 @@ function createService(opts = {}) {
       // each internet's bytes, from the counters before the groups are folded (multiWanMeter.js) —
       // a cap reached here sets that internet aside and asks for the reload
       mwQuota.tick(vars, stats.groupMap, liveMwSplit);
+      // each LAN user's bytes (src/modules/lanUsers/meter.js) — a cap reached here turns them off with one reload
+      lanUsers.tick(vars);
     }
   });
 
@@ -1214,6 +1241,36 @@ function createService(opts = {}) {
   }
 
   /**
+   * What the extensions count as in use (modules.inUseOf): the store as it is
+   * now, and the relay's own file (remote/api.js keeps it apart, read-only here).
+   */
+  function modulesData(settings) {
+    let remote = null;
+    try { remote = JSON.parse(fs.readFileSync(path.join(dataDir, 'remote.json'), 'utf8')); } catch { /* none, or not JSON */ }
+    return { servers: store.get('servers', []), groups: getGroups(), chains: getChains(), pool: getPool(),
+      routingProfiles: store.get('routingProfiles', []), settings: settings || getSettings(), lanUsers: store.get('lanUsers', null), remote };
+  }
+
+  /** The extensions (modules.js), once — as main.js migrateModulesStore. */
+  function migrateModulesStore() {
+    const raw = store.get('settings', null);
+    const fresh = !raw || raw === DEFAULT_SETTINGS;
+    if (!fresh && raw.modulesMigrated === true) return;
+    const from = fresh ? {} : raw;
+    const modules = MODS.migrateModules(from, modulesData(Object.assign({}, DEFAULT_SETTINGS, from)));
+    if (fresh && !Object.keys(modules).length) return;
+    store.set('settings', Object.assign({}, fresh ? DEFAULT_SETTINGS : raw, { modules, modulesMigrated: true }));
+  }
+
+  /** After a backup restore: what it brought that this store now uses gets its extension too. */
+  function installModulesInUse() {
+    const s = getSettings();
+    const modules = MODS.installInUse(s.modules, MODS.inUseOf(modulesData(s)));
+    // installInUse only ever adds: a longer list is a change
+    if (Object.keys(modules).length > Object.keys(MODS.normalizeModules(s.modules)).length) store.set('settings', Object.assign({}, store.get('settings', {}), { modules }));
+  }
+
+  /**
    * v1.16.2, once per router (`routerRepair`): what a desktop backup restored
    * before v1.16.1 overwrote — the restore kept nothing of the router's then
    * (fix 9 came later). The owner's AC-1304 connected with bypass-ir's
@@ -1515,6 +1572,8 @@ function createService(opts = {}) {
     // connect and every rebuild get it and a desktop's config never does —
     // nor a raw config, whose DNS runs as written.
     if (OPENWRT && !rawServer && engineFormat(engine) === 'xray' && config.dns) config.dns = routerDnsTuning(config.dns);
+    // the users' transparent mode: their configs' loopback inbounds — the connect's own, or a reload's running ones (lanUsers/router)
+    if (OPENWRT && engineFormat(engine) === 'xray') lanRouter.applyXray(config, { serverId, plan, settings, raw: !!rawServer });
     // A router carries a house: one access-log line per connection, through the
     // service's stdout into syslog, is real CPU on a Cortex-A7 (the AC-1304 log
     // was a wall of `accepted udp:…`). Kept when the user asks for a verbose
@@ -1933,6 +1992,11 @@ function createService(opts = {}) {
     } else {
       liveDirectInterface = null;
     }
+    // the users' transparent mode: a loopback port per user config the gateway will route devices to ([] when off)
+    if (OPENWRT) {
+      settings = Object.assign({}, settings, { lanUsersTp: await lanRouter.prepare() });
+      if (stale()) return abandoned;
+    }
     // What this connect pinned: a process-route reload (rebuildActiveConfig)
     // keeps the tunnel, whose bypass was cut for exactly these addresses.
     livePins = { wgEndpointIps: settings.wgEndpointIps, entryHostIps: settings.entryHostIps };
@@ -1942,6 +2006,8 @@ function createService(opts = {}) {
     // …and an internet over its data cap this period (multiWanMeter.js; a new period has cleared it by now)
     const mwSkip = mwQuota.skip();
     settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
+    // …and the users on the LAN, as the running app knows them (src/modules/lanUsers/ipc.js; null: off)
+    settings = Object.assign({}, settings, { lanUsers: await lanUsers.forBuild(settings) });
     let active;
     try { active = buildActive(serverId, settings); } catch (e) { throw refusal(e); }   // a target gone, a chain short of a member
     const { plan, label, entryAddrs, config, geoWarn, engine } = active;
@@ -2236,10 +2302,14 @@ function createService(opts = {}) {
           // the remote way in must not need the VPN.
           // Likewise the resolver an ECH config is fetched from: bound, so a
           // hole only where the strict guard firewalls a desktop's adapter.
+          // the users' transparent mode (lanUsers/router): its nft sets, sing-box routes and the
+          // entry servers of its configs (kept off the tunnel by the gateway) — null when off, and then no key at all
+          const lanUsersGw = OPENWRT ? await lanRouter.gatewayOptions(settings.lanUsersTp) : null;
           const resolverHoles = OPENWRT ? [] : [...resolverBypassIpsOf(config), ...(settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [])];
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverHoles, ...pinnedIps],
             tunAdapterDns,
-            { ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] });   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect
+            Object.assign({ ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] }, lanUsersGw ? { lanUsers: lanUsersGw } : {}));   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect/lanUsers
+          if (OPENWRT) await lanRouter.gatewayUp(myTun);
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
           noteOpenFiles();   // the router's descriptor budget, now that sing-box runs (v1.16.2)
           if (tunApps) {
@@ -2768,6 +2838,8 @@ function createService(opts = {}) {
     // …and the internets over their data cap this period (multiWanMeter.js) — the reload it asks for is this one
     const mwSkip = mwQuota.skip();
     settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
+    // …and the users on the LAN as they are now (src/modules/lanUsers/ipc.js) — a reload they ask for is this one
+    settings = Object.assign({}, settings, { lanUsers: await lanUsers.forBuild(settings) });
     // `plan` too: the usage meter needs it to attribute the new core's bytes
     const { plan, config, engine } = buildActive(serverId, settings);
     xrayReloading++;
@@ -3512,6 +3584,31 @@ function createService(opts = {}) {
     log: (line, level) => send('log', { line, level: level || 'info' })
   }, deps.warp || {}));
 
+  // Users and devices (src/modules/lanUsers/): the same four channels as main.js, spread into
+  // the table right after multiwan:test. On a router the proxy binds its LAN address (ubus).
+  // deps.lanDevices: a test's fake list of the devices answering now.
+  const lanUsers = registerLanUsers({
+    store, getSettings, usageStore, platform: OPENWRT ? 'router' : 'server', run: lanRun,
+    running: () => !!(xray && xray.running) && !!store.get('activeServerId', null),
+    canReload: () => !!(xray && xray.running) && !connectsInFlight.size && !recovering && !recoverTimer && !userDisconnecting && !isQuitting,
+    pending: () => pendingKeys(),
+    queueReload: (why) => queueReload(why),
+    resolveHost: resolveName,
+    // the router's transparent mode (src/modules/lanUsers/router): its devices with their rates, its own count
+    // per device, and a fresh look at the devices after every change (nft, the rule sets, the portal)
+    devices: deps.lanDevices || (OPENWRT ? () => lanRouter.online() : undefined),
+    deviceUsage: OPENWRT ? () => lanRouter.deviceUsage() : undefined,
+    onChange: OPENWRT ? () => lanRouter.refresh() : undefined,
+    log: (l) => send('log', l),
+    now: clock
+  });
+  // the devices' bytes count against their users' caps: the router hands each tick's per-user deltas over,
+  // and reads back who is over (usage()) to hold their devices
+  lanRouter.setMeter({
+    feedDevices: (byUser) => { for (const [id, v] of Object.entries(byUser || {})) lanUsers.addBytes(id, Number(v && v.bytes) || 0); },
+    usage: () => lanUsers.meter.usage()
+  });
+
   const handlers = {
     'diagnostics:connection': connectionDiagnostics,
     'network:repair': repairNetwork,
@@ -3711,6 +3808,23 @@ function createService(opts = {}) {
     'settings:pending': () => pendingKeys(),
     'settings:apply': () => reapplyByHand(),
 
+    // The extensions (src/renderer/modules.js) — the same two channels and shapes as main.js;
+    // a router is 'router', the headless service anywhere else the desktop's.
+    'modules:get': () => {
+      const s = getSettings();
+      return { modules: MODS.normalizeModules(s.modules), inUse: MODS.inUseOf(modulesData(s)), platform: OPENWRT ? 'router' : 'desktop' };
+    },
+    'modules:set': (arg) => {
+      const a = arg && typeof arg === 'object' ? arg : {};
+      const s = getSettings();
+      const r = MODS.setModule(s.modules, a.id, !!a.on, OPENWRT ? 'router' : 'desktop');
+      if (!r.error && !r.blockedBy) store.set('settings', Object.assign({}, store.get('settings', {}), { modules: r.modules }));
+      const out = { modules: r.modules, inUse: MODS.inUseOf(modulesData()), pendingReconnect: pendingKeys() };
+      if (r.blockedBy) out.blockedBy = r.blockedBy;
+      if (r.error) out.error = r.error;
+      return out;
+    },
+
     // Several internets (multiWan.js) — the same three channels and shapes as main.js:
     // → { settings, links, usage, live }
     'multiwan:get': async () => {
@@ -3761,6 +3875,8 @@ function createService(opts = {}) {
       }
       return want.map((id) => byId[id]);
     },
+    // users and devices — lanusers:get / config / user / device (src/modules/lanUsers/ipc.js)
+    ...lanUsers.handlers,
 
     'ping:tcp': async (id) => {
       const { server } = resolveTarget(id);
@@ -3931,7 +4047,7 @@ function createService(opts = {}) {
     // Backup and restore — see backup.js; the same merge-by-id the desktop does.
     'backup:export': () => JSON.stringify(exportBundle({
       version: appVersion,
-      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings() },
+      store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), lanUsers: store.get('lanUsers', undefined) },
       usage: usage ? usage.totals : {},
       flavor: OPENWRT ? 'openwrt' : null   // a router's own backup brings its router-only settings back (backup:import)
     }), null, 2),
@@ -3942,13 +4058,16 @@ function createService(opts = {}) {
       try {
         r = importBundle(bundle, {
           servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
-          chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {}
+          chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {},
+          lanUsers: store.get('lanUsers', undefined)
         // the keep list is for a backup made elsewhere (a desktop's, or one
         // from before the mark): the router's own, restored after a reset or
         // a re-flash, is exactly what should bring its kill switch back
         }, { keep: OPENWRT && !(bundle && bundle.flavor === 'openwrt') ? ROUTER_KEEPS_ON_IMPORT : [] });
       } catch (err) { return { ok: false, error: err.message }; }
       store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, groups: r.next.groups, settings: r.next.settings });
+      if (r.next.lanUsers) store.set('lanUsers', r.next.lanUsers);   // users and devices, when the backup had them (backup.js)
+      installModulesInUse();   // what the backup brought in shows (modules.js)
       if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
       send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles, ${r.added.groups} groups added`, level: 'info' });
       // `kept`: the router-only keys the backup wanted changed — for the renderer's own words

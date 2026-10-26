@@ -134,17 +134,26 @@ function mergeDevices(leases, neigh) {
  * old contents, and the block recreates it — one transaction, no window with
  * no table. An empty exclusion list still declares the set, so a later
  * `add element` has something to add to.
+ *
+ * `lanUsers`: the users module's transparent mode (src/modules/lanUsers/router
+ * — its sets, counters and chains, router/nft.js), or null: then the text is
+ * exactly what it was before the module existed. Its users whose config is
+ * "direct" join the bypass set — the same way around the tunnel.
  */
-function buildNftRuleset({ lanIf = 'br-lan', macs = [], mark = BYPASS_MARK, blockQuic = false } = {}) {
-  const list = validMacs(macs);
+function buildNftRuleset({ lanIf = 'br-lan', macs = [], mark = BYPASS_MARK, blockQuic = false, lanUsers = null } = {}) {
+  const users = lanUsers && typeof lanUsers === 'object' ? lanUsers : null;
+  const list = validMacs(users ? [...(Array.isArray(macs) ? macs : []), ...(Array.isArray(users.direct) ? users.direct : [])] : macs);
   const ifName = String(lanIf == null ? '' : lanIf).replace(/[^A-Za-z0-9_.-]/g, '') || 'br-lan';
   const hex = '0x' + Number(mark).toString(16);
   const elements = list.length ? ` elements = { ${list.join(', ')} };` : '';
+  // required only when asked for: the gateway's own table needs nothing of the module
+  const extra = users ? require('../modules/lanUsers/router/nft').lanUsersNftLines(users, { ifName }) : null;
   const lines = [
     `table ${NFT_TABLE}`,
     `delete table ${NFT_TABLE}`,
     `table ${NFT_TABLE} {`,
     `  set bypass_macs { type ether_addr;${elements} }`,
+    ...(extra ? extra.sets : []),
     '  chain pre {',
     '    type filter hook prerouting priority mangle; policy accept;',
     `    iifname "${ifName}" ether saddr @bypass_macs meta mark set ${hex} counter`,
@@ -162,6 +171,7 @@ function buildNftRuleset({ lanIf = 'br-lan', macs = [], mark = BYPASS_MARK, bloc
       '  }'
     );
   }
+  if (extra) lines.push(...extra.chains);
   lines.push('}', '');
   return lines.join('\n');
 }

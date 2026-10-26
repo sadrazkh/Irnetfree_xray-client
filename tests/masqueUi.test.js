@@ -207,8 +207,8 @@ function dialogHarness({ lang = 'en', connected = false, addWarp, servers = [] }
 const buttonsOf = (el) => all(el, (e) => e.tagName === 'BUTTON');
 
 test('+ WARP: the button sits beside + WireGuard; the dialog is a modal of its own; opening it closes the other add boxes and the «new» dot', () => {
-  assert.match(HTML, /id="btnWgOpen" data-i18n="btn\.addWg">\+ WireGuard<\/button>\s*<button class="btn ghost" id="btnWarpOpen" data-i18n="btn\.addWarp">\+ WARP<\/button>/);
-  assert.match(HTML, /<div class="modal-overlay" id="warpModal" hidden>\s*<div class="modal warp-modal" role="dialog"/);
+  assert.match(HTML, /id="btnWgOpen" data-i18n="btn\.addWg">\+ WireGuard<\/button>\s*<button class="btn ghost" id="btnWarpOpen" data-module="warp" data-i18n="btn\.addWarp">\+ WARP<\/button>/);
+  assert.match(HTML, /<div class="modal-overlay" id="warpModal" data-module="warp" hidden>\s*<div class="modal warp-modal" role="dialog"/);
   for (const id of ['warpTitle', 'warpClose', 'warpBody', 'warpFoot']) assert.match(HTML, new RegExp(`id="${id}"`));
   assert.match(APP, /\$\('#btnWarpOpen'\)\.onclick = openWarp;/);
   assert.match(APP, /\$\('#warpClose'\)\.onclick = closeWarp;/);

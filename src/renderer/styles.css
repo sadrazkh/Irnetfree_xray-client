@@ -863,6 +863,26 @@ button.ins-row:hover .ins-label { color: var(--accentInk); }
 body[data-ui-mode="simple"] .pro-only { display: none !important; }
 body[data-ui-mode="simple"] .inspector { display: none; }
 
+/* ----------------------------- extensions ----------------------------- */
+
+/* An extension that is not installed (modules.js) draws nothing: the markup
+   names what is its own with data-module, app.js applyModules() says on the
+   body which are off (data-mod-<id>="off"; "on" where installed, or where it
+   is no extension at all). Hidden, never removed — the data stays. "chains
+   groups" is the page that holds both: it goes when both do. */
+body[data-mod-chains="off"] [data-module="chains"],
+body[data-mod-groups="off"] [data-module="groups"],
+body[data-mod-chains="off"][data-mod-groups="off"] [data-module="chains groups"],
+body[data-mod-warp="off"] [data-module="warp"],
+body[data-mod-pool="off"] [data-module="pool"],
+body[data-mod-advanced-routing="off"] [data-module="advancedRouting"],
+body[data-mod-ech-outbound="off"] [data-module="echOutbound"],
+body[data-mod-anti-dpi="off"] [data-module="antiDpi"],
+body[data-mod-lan-share="off"] [data-module="lanShare"],
+body[data-mod-multi-wan="off"] [data-module="multiWan"],
+body[data-mod-remote-relay="off"] [data-module="remoteRelay"],
+body[data-mod-lan-users="off"] [data-module="lanUsers"] { display: none !important; }
+
 .logo-dot { display: none; }
 .open { display: block; }
 .show { display: block; }

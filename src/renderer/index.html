@@ -64,11 +64,15 @@
       <button class="nav-item" data-view="subs" data-i18n-title="nav.subs">
         <span class="nav-ico">🔗</span><span data-i18n="nav.subs">ساب‌ها</span>
       </button>
-      <button class="nav-item pro-only" data-view="chain" data-i18n-title="nav.chain">
+      <!-- data-module: the extension (modules.js) that draws it — hidden while it is not installed (styles.css) -->
+      <button class="nav-item" data-view="chain" data-module="chains groups" data-i18n-title="nav.chain">
         <span class="nav-ico">⛓</span><span data-i18n="nav.chain">زنجیره و گروه</span>
       </button>
-      <button class="nav-item pro-only" data-view="pool" data-i18n-title="nav.pool">
+      <button class="nav-item" data-view="pool" data-module="pool" data-i18n-title="nav.pool">
         <span class="nav-ico">🧩</span><span data-i18n="nav.pool">استخر پروکسی</span>
+      </button>
+      <button class="nav-item" data-view="users" data-module="lanUsers" data-i18n-title="nav.users">
+        <span class="nav-ico">👥</span><span data-i18n="nav.users">کاربران</span>
       </button>
       <button class="nav-item" data-view="routing" data-i18n-title="nav.routing">
         <span class="nav-ico">🧭</span><span data-i18n="nav.routing">روتینگ</span>
@@ -77,6 +81,10 @@
         <span class="nav-ico">📜</span><span data-i18n="nav.logs">لاگ‌ها</span>
       </button>
       <div class="sidebar-spacer"></div>
+      <!-- the extensions (modules.js): installed or removed here; never hidden itself -->
+      <button class="nav-item" data-view="modules" data-i18n-title="nav.modules">
+        <span class="nav-ico">⊞</span><span data-i18n="nav.modules">افزونه‌ها</span>
+      </button>
       <button class="nav-item" data-view="settings" data-i18n-title="nav.settings">
         <span class="nav-ico">⚙</span><span data-i18n="nav.settings">تنظیمات</span>
       </button>
@@ -203,7 +211,7 @@
             <button class="btn ghost" id="btnClearUsage" data-i18n="btn.clearUsage">پاک‌کردن مصرف</button>
             <button class="btn ghost" id="btnClearServers" data-i18n="btn.clearAll">حذف همه</button>
             <button class="btn ghost" id="btnWgOpen" data-i18n="btn.addWg">+ WireGuard</button>
-            <button class="btn ghost" id="btnWarpOpen" data-i18n="btn.addWarp">+ WARP</button>
+            <button class="btn ghost" id="btnWarpOpen" data-module="warp" data-i18n="btn.addWarp">+ WARP</button>
             <button class="btn ghost" id="btnProxyOpen" data-i18n="btn.addProxy">+ SOCKS/HTTP</button>
             <button class="btn ghost" id="btnManualOpen" data-i18n="btn.addManual">+ دستی</button>
             <button class="btn primary" id="btnAddOpen" data-i18n="btn.add">+ افزودن</button>
@@ -338,21 +346,21 @@
       </section>
 
       <!-- CHAINS & GROUPS -->
-      <section class="view" id="view-chain">
+      <section class="view" id="view-chain" data-module="chains groups">
         <div class="view-head">
           <h2 data-i18n="chain.title">زنجیره و گروه</h2>
           <div class="head-actions">
             <!-- the head button follows the tab (app.js cgApplyTab) -->
-            <button class="btn primary" id="btnAddChain" data-i18n="chain.new">+ زنجیره جدید</button>
-            <button class="btn primary" hidden id="btnAddGroup" data-i18n="grp.new">+ گروه تازه</button>
+            <button class="btn primary" id="btnAddChain" data-module="chains" data-i18n="chain.new">+ زنجیره جدید</button>
+            <button class="btn primary" hidden id="btnAddGroup" data-module="groups" data-i18n="grp.new">+ گروه تازه</button>
           </div>
         </div>
 
         <!-- v1.28: two tabs with their counts, open / close all; every card folds to its head (app.js cgApplyTab, cgSetOpen) -->
         <div class="cg-tabs">
           <div class="seg" role="tablist" id="cgTabs">
-            <button class="seg-btn active" type="button" role="tab" id="cgTabChains" aria-selected="true" aria-controls="cgPaneChains"><span aria-hidden="true">⛓</span> <span data-i18n="chain.sec">زنجیره‌ها</span> <span class="cg-count" id="cgCountChains">۰</span></button>
-            <button class="seg-btn" type="button" role="tab" id="cgTabGroups" aria-selected="false" aria-controls="cgPaneGroups"><span aria-hidden="true">⧉</span> <span data-i18n="grp.title">گروه‌ها</span> <span class="cg-count" id="cgCountGroups">۰</span></button>
+            <button class="seg-btn active" type="button" role="tab" id="cgTabChains" data-module="chains" aria-selected="true" aria-controls="cgPaneChains"><span aria-hidden="true">⛓</span> <span data-i18n="chain.sec">زنجیره‌ها</span> <span class="cg-count" id="cgCountChains">۰</span></button>
+            <button class="seg-btn" type="button" role="tab" id="cgTabGroups" data-module="groups" aria-selected="false" aria-controls="cgPaneGroups"><span aria-hidden="true">⧉</span> <span data-i18n="grp.title">گروه‌ها</span> <span class="cg-count" id="cgCountGroups">۰</span></button>
           </div>
           <div class="cg-tools">
             <button class="cg-link" type="button" id="cgOpenAll" data-i18n="cg.openAll">همه را باز کن</button>
@@ -360,7 +368,7 @@
           </div>
         </div>
 
-        <div class="cg-pane" id="cgPaneChains" role="tabpanel" aria-labelledby="cgTabChains">
+        <div class="cg-pane" id="cgPaneChains" data-module="chains" role="tabpanel" aria-labelledby="cgTabChains">
           <p class="hint" data-i18n="chain.intro">هر زنجیره یک کانفیگ است: سرورها پشت سر هم. روی هر کارت بزن تا باز شود و حلقه‌هایش را عوض کنی.</p>
           <p class="hint" data-i18n="chain.wgHint">برای دسترسی به دیتابیس وقتی WireGuard مستقیم کار نمی‌کند: یک کانفیگ را اول بگذار و WireGuard را آخرِ زنجیره؛ سپس در «روتینگ ویژه» رنج IP دیتابیس را به این زنجیره بفرست.</p>
 
@@ -368,7 +376,7 @@
           <div class="empty" id="chainsEmpty" data-i18n="chain.noneYet">هنوز زنجیره‌ای ساخته نشده. روی «زنجیره جدید» بزن.</div>
         </div>
 
-        <div class="cg-pane" id="cgPaneGroups" role="tabpanel" aria-labelledby="cgTabGroups" hidden>
+        <div class="cg-pane" id="cgPaneGroups" data-module="groups" role="tabpanel" aria-labelledby="cgTabGroups" hidden>
           <!-- groups (v1.27): several configs used together as one — app.js renderGroups draws the cards; hidden on a back end without groups:set -->
           <div class="grp-section" id="groupsSection">
             <p class="hint" data-i18n="grp.intro">هر گروه چند کانفیگ است که مثل یک کانفیگ کار می‌کنند. وقتی وصلی، سهم هرکدام از ترافیک همین‌جا دیده می‌شود.</p>
@@ -379,7 +387,7 @@
       </section>
 
       <!-- PROXY POOL (multi-config) -->
-      <section class="view" id="view-pool">
+      <section class="view" id="view-pool" data-module="pool">
         <div class="view-head">
           <h2 data-i18n="pool.title">استخر پروکسی</h2>
           <div class="head-actions">
@@ -393,6 +401,13 @@
 
         <div id="poolWrap"></div>
         <div class="empty" id="poolEmpty" data-i18n="pool.noneYet">هنوز پروکسی‌ای در استخر نیست. روی «پروکسی جدید» بزن.</div>
+      </section>
+
+      <!-- USERS (lanUsers.js draws #lanUsersPage): people on this network with their own username and password,
+           config and data cap; on the router its transparent mode and devices -->
+      <section class="view" id="view-users" data-module="lanUsers">
+        <div class="view-head"><h2 data-i18n="lu.title">کاربران</h2></div>
+        <div id="lanUsersPage"></div>
       </section>
 
       <!-- ROUTING -->
@@ -417,7 +432,7 @@
         <div class="routing-main">
 
         <!-- Advanced graphical routing -->
-        <div class="card">
+        <div class="card" data-module="advancedRouting">
           <div class="switch-row">
             <div>
               <div class="switch-title" data-i18n="adv.title">روتینگ پیشرفته (گرافیکی)</div>
@@ -536,6 +551,8 @@
       <!-- SETTINGS -->
       <section class="view" id="view-settings">
         <div class="view-head"><h2 data-i18n="settings.title">تنظیمات</h2></div>
+        <!-- the advanced parts are extensions: one line to the page that installs them (not a .card: settingsExperience.js files the cards) -->
+        <p class="mod-pointer" id="modPointer"><span data-i18n="mod.pointer">بخش‌های پیشرفته (زنجیره، گروه، WARP، روتینگ پیشرفته و …) افزونه‌اند و در صفحهٔ افزونه‌ها نصب یا حذف می‌شوند.</span> <button type="button" class="cg-link" id="btnOpenModules" data-i18n="mod.open">باز کردن افزونه‌ها</button></p>
 
         <div class="card">
           <div class="grid2">
@@ -642,7 +659,7 @@
              with its role, share and data cap, the live share bars — and saves
              each change at once (multiwan:set). settingsExperience.js files it
              under "Connection and DNS". -->
-        <div class="card" id="multiWanCard"></div>
+        <div class="card" id="multiWanCard" data-module="multiWan"></div>
 
         <!-- Required runtime files -->
         <div class="card">
@@ -762,12 +779,12 @@
               <div class="hint warn" id="udpBlockNote" data-i18n="udpblock.needsProxy" hidden></div></div>
             <label class="switch"><input type="checkbox" id="optBlockUdpProxy" /><span class="slider"></span></label>
           </div>
-          <div class="switch-row">
+          <div class="switch-row" data-module="lanShare">
             <div><div class="switch-title" data-i18n="lan.title">اجازه به شبکه محلی (LAN)</div>
               <div class="switch-sub" data-i18n="lan.sub">دستگاه‌های دیگه هم بتونن وصل بشن</div></div>
             <label class="switch"><input type="checkbox" id="optAllowLan" /><span class="slider"></span></label>
           </div>
-          <div class="tun-status" id="lanInfo"></div>
+          <div class="tun-status" id="lanInfo" data-module="lanShare"></div>
           <!-- OpenWrt only (state.flavor === 'openwrt'): the devices behind the
                router and which of them go around the tunnel. Filled by
                renderLanDevices(); a tick saves lanBypassMacs and applies live. -->
@@ -790,7 +807,7 @@
           </div>
           <!-- OpenWrt only: remote access lives in LuCI, not on this page — the
                LuCI page and the guide are links (renderRemotePointer) -->
-          <div class="setting-row" id="gwRemoteRow" hidden>
+          <div class="setting-row" id="gwRemoteRow" data-module="remoteRelay" hidden>
             <p class="hint" id="gwRemote" data-i18n="gw.remote"></p>
           </div>
           <!-- mux on the servers' own outbounds (src/main/mux.js): auto tests each
@@ -879,6 +896,14 @@
         <pre class="logbox" id="logBox"></pre>
       </section>
 
+      <!-- EXTENSIONS: the advanced parts, installed or removed (modules.js the
+           registry, extensions.js draws the cards from it; nothing is downloaded) -->
+      <section class="view" id="view-modules">
+        <div class="view-head"><h2 data-i18n="mod.title">افزونه‌ها</h2></div>
+        <p class="hint" data-i18n="mod.intro">بخش‌های پیشرفتهٔ برنامه افزونه‌اند: همه داخل خودِ برنامه‌اند و چیزی دانلود نمی‌شود، و تا نصبشان نکنی دیده نمی‌شوند. حذف فقط پنهان می‌کند — داده‌ها و اتصال‌هایت سر جایشان می‌مانند.</p>
+        <div class="mod-list" id="modList"></div>
+      </section>
+
     </main>
 
     <!-- Inspector: what the tunnel is doing right now, always in view. Every
@@ -932,7 +957,7 @@
       </div>
       <div class="modal-body" id="editBody">
         <!-- the WARP account a server was made from, read-only, above both views (app.js renderWarpAccount) -->
-        <div class="ed-card ed-warp-acct" id="edWarpAcct" hidden></div>
+        <div class="ed-card ed-warp-acct" id="edWarpAcct" data-module="warp" hidden></div>
         <div class="ed-simple" id="edSimple">
         <div class="grid2" id="edNameRow">
           <div><label class="field-label" data-i18n="edit.name">نام</label>
@@ -1019,12 +1044,12 @@
           </div>
         </div>
         <p class="hint" id="edSpoofHint">The SNI is the domain sent in the TLS handshake.</p>
-        <label class="switch-row inline-switch" id="edHideSniRow">
+        <label class="switch-row inline-switch" id="edHideSniRow" data-module="antiDpi">
           <span class="switch-title" id="edHideSniLabel">🕵 Hide SNI from DPI (TLS fragment)</span>
           <span class="switch"><input type="checkbox" id="edHideSni" /><span class="slider"></span></span>
         </label>
         <!-- the server's finalmask already fragments the ClientHello: this switch would add a second fragmenter -->
-        <p class="hint warn" id="edHideSniFmNote" data-i18n="spoof.hideSniFinalmask" hidden></p>
+        <p class="hint warn" id="edHideSniFmNote" data-module="antiDpi" data-i18n="spoof.hideSniFinalmask" hidden></p>
         <div class="grid2" id="edPathRow">
           <div><label class="field-label" data-i18n="edit.path">Path / ServiceName</label>
             <input type="text" id="edPath" class="input" dir="ltr" /></div>
@@ -1129,7 +1154,7 @@
             <p class="hint" id="edEngineHintMasque" data-i18n="sf.engine.hint.masque" hidden>sing-box MASQUE ندارد.</p></div>
         </div>
         <!-- TLS fragmentation (all protocols); MASQUE shows one of the two: a fragment over HTTP/2, noise over HTTP/3 -->
-        <div class="grid2" id="edFragmentRow">
+        <div class="grid2" id="edFragmentRow" data-module="antiDpi">
           <div id="edFragmentWrap"><label class="field-label" data-i18n="edit.fragment">Fragment (packets,length,interval — خالی = خاموش)</label>
             <input type="text" id="edFragment" class="input" dir="ltr" placeholder="tlshello,100-200,10-20" /></div>
           <div id="edNoiseWrap"><label class="field-label" data-i18n="edit.noise">Noise (anti-DPI / fake ClientHello)</label>
@@ -1140,13 +1165,13 @@
               <option value="custom" data-i18n="noise.custom">Custom…</option>
             </select></div>
         </div>
-        <div id="edNoiseCustomRow" hidden>
+        <div id="edNoiseCustomRow" data-module="antiDpi" hidden>
           <label class="field-label" data-i18n="edit.noiseCustom">Noise spec (type:packet:delay; …)</label>
           <input type="text" id="edNoiseCustom" class="input" dir="ltr" placeholder="rand:50-100:0;base64:FgMBAAA=:10-20" />
           <p class="hint" data-i18n="edit.noiseHint">Decoy packets sent before the real TLS handshake to confuse DPI. type = rand/str/base64/hex.</p>
         </div>
         <!-- patterniha custom-TLS (only meaningful for TLS configs) -->
-        <div id="edPattWrap">
+        <div id="edPattWrap" data-module="antiDpi">
           <div class="edit-section"><span data-i18n="edit.pattTitle">🧩 finalmask / cipherSuites</span></div>
           <label class="field-label" data-i18n="edit.cipherSuites">cipherSuites (با fingerprint = unsafe)</label>
           <input type="text" id="edCipherSuites" class="input" dir="ltr" placeholder="TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256" />
@@ -1173,7 +1198,7 @@
   </div>
 
   <!-- + WARP: WARP accounts, made here or imported, as WireGuard servers (for a Chain) or MASQUE ones (app.js renderWarp draws the title, body and foot) -->
-  <div class="modal-overlay" id="warpModal" hidden>
+  <div class="modal-overlay" id="warpModal" data-module="warp" hidden>
     <div class="modal warp-modal" role="dialog" aria-modal="true" aria-labelledby="warpTitle">
       <div class="modal-head">
         <span class="warp-ico" aria-hidden="true">☁</span>
@@ -1186,7 +1211,7 @@
   </div>
 
   <!-- a group (v1.27): several configs used together as one — app.js renderGroupEditor draws the title, body and foot -->
-  <div class="modal-overlay" id="grpModal" hidden>
+  <div class="modal-overlay" id="grpModal" data-module="groups" hidden>
     <div class="modal grp-modal" role="dialog" aria-modal="true" aria-labelledby="grpTitle">
       <div class="modal-head">
         <span class="warp-ico" aria-hidden="true">⧉</span>
@@ -1401,6 +1426,9 @@
   <script src="settingsExperience.js"></script>
   <script src="corePicker.js"></script>
   <script src="multiWan.js"></script>
+  <script src="modules.js"></script>
+  <script src="extensions.js"></script>
+  <script src="lanUsers.js"></script>
   <script src="serverFields.js"></script>
   <script src="app.js"></script>
 </body>

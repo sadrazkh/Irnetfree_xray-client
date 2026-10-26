@@ -240,3 +240,40 @@ test('an imported routing profile holds only shapes the app writes: a bad id is 
     def: '', defVia: 'inherit', useMode: false, base: null
   }]);
 });
+
+/* ---------------- users and devices (module lanUsers, src/modules/lanUsers/model.js) ---------------- */
+
+const LU_USER = (id, username, over) => Object.assign({ id, username, password: 'pw-' + username, name: '', target: '', quotaGb: 0, quotaPeriod: 'month', expiresAt: 0, maxDevices: 0, enabled: true }, over);
+const LU_ON = { proxy: { enabled: true, port: 30820, httpPort: 30821 }, transparent: { enabled: false, unassigned: 'login', sessionHours: 24, portalPort: 30822 } };
+
+test('users and devices travel in the backup, passwords as stored — and only when the store has them', () => {
+  const lanUsers = { config: LU_ON, users: [LU_USER('usr-a', 'ali')], devices: [{ mac: 'aa:bb:cc:dd:ee:01', name: 'Phone', userId: 'usr-a', blocked: false }] };
+  assert.deepEqual(exportBundle({ store: Object.assign({}, current, { lanUsers }) }).lanUsers, lanUsers);
+  assert.equal('lanUsers' in exportBundle({ store: current }), false, 'a store without them exports as before');
+  const r = importBundle(exportBundle({ store: current }), Object.assign({}, current, { lanUsers }));
+  assert.equal('lanUsers' in r.next, false, 'a backup without them leaves this machine’s as they are');
+  assert.equal('lanUsers' in r.added, false);
+});
+
+test('users merge by id: this machine’s kept, the new added unless their username (case aside) is taken here or their password is one the proxy refuses; devices by MAC; the config stays this machine’s', () => {
+  const here = Object.assign({}, current, { lanUsers: { config: LU_ON, users: [LU_USER('usr-a', 'ali', { name: 'here' })], devices: [{ mac: 'aa:bb:cc:dd:ee:01', userId: 'usr-a' }] } });
+  const theirs = exportBundle({ store: { lanUsers: {
+    config: { proxy: { enabled: false, port: 40000 } },
+    users: [LU_USER('usr-a', 'ali', { name: 'theirs' }), LU_USER('usr-b', 'ALI'), LU_USER('usr-c', 'sara', { target: 'chain:c1' }), LU_USER('usr-d', 'weak', { password: 'abc' }), LU_USER('"><x>', 'x')],
+    devices: [{ mac: 'AA:BB:CC:DD:EE:01', userId: 'usr-c' }, { mac: 'aa:bb:cc:dd:ee:02', userId: 'usr-c' }, { mac: 'aa:bb:cc:dd:ee:03', userId: 'usr-b' }]
+  } } });
+  const r = importBundle(theirs, here);
+  assert.deepEqual(r.next.lanUsers.users.map((u) => [u.id, u.username, u.name]), [['usr-a', 'ali', 'here'], ['usr-c', 'sara', '']]);
+  assert.equal(r.added.lanUsers, 1);
+  assert.deepEqual(r.next.lanUsers.config.proxy, LU_ON.proxy, 'the ports and on/off of this machine');
+  assert.deepEqual(r.next.lanUsers.devices.map((d) => [d.mac, d.userId]), [['aa:bb:cc:dd:ee:01', 'usr-a'], ['aa:bb:cc:dd:ee:02', 'usr-c'], ['aa:bb:cc:dd:ee:03', '']], 'a device bound to a user left out comes unbound');
+  assert.deepEqual(importBundle(theirs, r.next).next.lanUsers, r.next.lanUsers, 'restoring twice is restoring once');
+  // a fresh machine takes the backup's config too
+  assert.equal(importBundle(theirs, current).next.lanUsers.config.proxy.port, 40000);
+});
+
+test('an imported user’s target naming a server this import left out becomes block — never "the current connection"', () => {
+  const b = exportBundle({ store: { servers: [{ id: 'bad', protocol: 'nope', port: 443, outbound: {} }], lanUsers: { users: [LU_USER('usr-a', 'ali', { target: 'bad' }), LU_USER('usr-b', 'sara', { target: '"><img>' })] } } });
+  const r = importBundle(b, { servers: [] });
+  assert.deepEqual(r.next.lanUsers.users.map((u) => u.target), ['block', 'block']);
+});

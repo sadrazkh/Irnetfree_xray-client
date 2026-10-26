@@ -54,6 +54,8 @@ const { pickUpdateAsset, parseSha256Sums, sha256File } = require('./appUpdate');
 const { listProcesses, collectProcessIps, pruneProcCache, ProcWatcher } = require('./procRouter');
 const { pendingReconnectKeys, snapshotApplied } = require('./settingsMeta');
 const { migrateSettings } = require('./settingsMigrate');
+// the extensions (installed or not, in use or not) — the renderer's own registry
+const MODS = require('../renderer/modules');
 const { migrateProfiles, mirrorToSettings, mirrorFromSettings, isAdvancedSelection, profileIdOf, resolveBaseTargets, advancedTargets, resolveProcessRules, liveRoutingOf, routingPendingKeys } = require('./routingProfiles');
 const { NetWatcher, fingerprint } = require('./netWatcher');
 const { DropBudget } = require('./dropBudget');
@@ -72,6 +74,9 @@ const { normalizeGroups, groupRecordsById, isGroupRecord, serversOf } = require(
 const { normalizeMultiWan } = require('./multiWan');
 const netLinks = require('./netLinks');
 const { createMultiWanQuota, mergeLinks } = require('./multiWanMeter');
+// users and devices on the LAN (module lanUsers): its channels, the build's input and its usage meter
+const { registerLanUsers } = require('../modules/lanUsers/ipc');
+let lanUsers = null;
 const https = require('https');
 
 let mainWindow = null;
@@ -277,6 +282,11 @@ const DEFAULT_SETTINGS = {
     links: [],
     split: { up: '', down: '' }
   },
+  // the extensions installed (src/renderer/modules.js): id → true. A new
+  // store has none and is migrated already; a store from before gets what it
+  // uses, once (migrateModulesStore). The router's is the same.
+  modules: {},
+  modulesMigrated: true,
   // mux on the servers' own outbounds (mux.js): 'auto' tests each ws /
   // httpupgrade server once and muxes it where it works, 'on' every such
   // server untested, 'off' never — the default: nothing changes unless the
@@ -1411,6 +1421,8 @@ async function connectOnce(serverId, opts = {}) {
   // …and an internet over its data cap this period (multiWanMeter.js; a new period has cleared it by now)
   const mwSkip = mwQuota ? mwQuota.skip() : [];
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
+  // …and the users on the LAN, as the running app knows them (src/modules/lanUsers/ipc.js; null: off)
+  settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings) : null });
   const { plan, label, entryAddrs, config, geoWarn, engine } = buildActive(serverId, settings);
   // A JSON server set to run raw, said once per connect: run as written, or —
   // in a chain, advanced routing or the pool — used in its full form.
@@ -2136,6 +2148,8 @@ async function rebuildActiveConfig(why) {
   // …and the internets over their data cap this period (multiWanMeter.js) — the reload it asks for is this one
   const mwSkip = mwQuota ? mwQuota.skip() : [];
   settings = Object.assign({}, settings, { multiWanSkip: mwSkip });
+  // …and the users on the LAN as they are now (src/modules/lanUsers/ipc.js) — a reload they ask for is this one
+  settings = Object.assign({}, settings, { lanUsers: lanUsers ? await lanUsers.forBuild(settings) : null });
   // Keep the binding the live connection was built with (see doConnect): the
   // tunnel stays up across this reload, and asking the OS now would name it.
   if (liveDirectInterface) settings = Object.assign({}, settings, { directInterface: liveDirectInterface });
@@ -2838,6 +2852,36 @@ function migrateSettingsStore() {
   if (changed) store.set('settings', settings);
 }
 
+/** What the extensions count as in use (modules.inUseOf): the store as it is now. */
+function modulesData(settings) {
+  return { servers: store.get('servers', []), groups: getGroups(), chains: getChains(), pool: getPool(),
+    routingProfiles: store.get('routingProfiles', []), settings: settings || getSettings(), lanUsers: store.get('lanUsers', null) };
+}
+
+/**
+ * The extensions (modules.js), once: a store from before them gets every one
+ * it USES installed — an update must not hide what someone set up — and the
+ * rest stay off. A store that never saved its settings answers DEFAULT_SETTINGS
+ * itself (marked migrated): it is from before only when it holds something.
+ */
+function migrateModulesStore() {
+  const raw = store.get('settings', null);
+  const fresh = !raw || raw === DEFAULT_SETTINGS;
+  if (!fresh && raw.modulesMigrated === true) return;
+  const from = fresh ? {} : raw;
+  const modules = MODS.migrateModules(from, modulesData(Object.assign({}, DEFAULT_SETTINGS, from)));
+  if (fresh && !Object.keys(modules).length) return;
+  store.set('settings', Object.assign({}, fresh ? DEFAULT_SETTINGS : raw, { modules, modulesMigrated: true }));
+}
+
+/** After a backup restore: what it brought that this store now uses gets its extension too. */
+function installModulesInUse() {
+  const s = getSettings();
+  const modules = MODS.installInUse(s.modules, MODS.inUseOf(modulesData(s)));
+  // installInUse only ever adds: a longer list is a change
+  if (Object.keys(modules).length > Object.keys(MODS.normalizeModules(s.modules)).length) store.set('settings', Object.assign({}, store.get('settings', {}), { modules }));
+}
+
 /** Groups (groups.js): [{ id, name, strategy, members: [{ id, address?, port? }] }] — several configs used as one. */
 function getGroups() {
   const groups = store.get('groups', []);
@@ -3289,6 +3333,27 @@ function registerIpc() {
   ipcMain.handle('settings:pending', () => pendingKeys());
   ipcMain.handle('settings:apply', () => reapplyConnection());
 
+  /* ------------------------- extensions (src/renderer/modules.js) ------------------------- */
+  // The Extensions page. The router's service answers the same two channels
+  // with the same shapes (service.js). → { modules, inUse, platform }
+  ipcMain.handle('modules:get', () => {
+    const s = getSettings();
+    return { modules: MODS.normalizeModules(s.modules), inUse: MODS.inUseOf(modulesData(s)), platform: 'desktop' };
+  });
+  // { id, on } → { modules, inUse, pendingReconnect, blockedBy? }: one installed
+  // (with what it needs) or removed — refused while another installed one needs
+  // it. A removal keeps the data; only multiWan and lanUsers change a config.
+  ipcMain.handle('modules:set', (e, arg) => {
+    const a = arg && typeof arg === 'object' ? arg : {};
+    const s = getSettings();
+    const r = MODS.setModule(s.modules, a.id, !!a.on, 'desktop');
+    if (!r.error && !r.blockedBy) store.set('settings', Object.assign({}, s, { modules: r.modules }));
+    const out = { modules: r.modules, inUse: MODS.inUseOf(modulesData()), pendingReconnect: pendingKeys() };
+    if (r.blockedBy) out.blockedBy = r.blockedBy;
+    if (r.error) out.error = r.error;
+    return out;
+  });
+
   /* ------------------------- several internets (multiWan.js) ------------------------- */
   // Settings → «ترکیب اینترنت‌ها». The router's service answers the same three
   // channels with the same shapes (service.js).
@@ -3365,6 +3430,21 @@ function registerIpc() {
       store.set('multiWanTests', tests);
     }
     return want.map((id) => byId[id]);
+  });
+
+  /* ------------------------- users and devices (src/modules/lanUsers/) ------------------------- */
+  // lanusers:get / config / user / device — the router's service answers the same channels.
+  // A change the running core must take is one reload, through the one queue (as the multi-internet caps').
+  lanUsers = registerLanUsers({
+    handle: (channel, fn) => ipcMain.handle(channel, (e, arg) => fn(arg)),
+    store, getSettings, usageStore, platform: 'desktop',
+    running: () => !!(xray && xray.running) && !!store.get('activeServerId', null),
+    canReload: () => !!(xray && xray.running) && !connectsInFlight.size && !recovering && !userDisconnecting,
+    pending: () => pendingKeys(),
+    queueReload: (why) => queueReload(why),
+    resolveHost,
+    log: (l) => send('log', l),
+    notify: (text) => notify('IRNetFree', text)
   });
 
   // Resolve a ping/test target: a single server OR a named chain's entry hop.
@@ -3685,7 +3765,7 @@ function registerIpc() {
   // Backup: everything the user has, as one JSON string the renderer saves.
   ipcMain.handle('backup:export', () => JSON.stringify(exportBundle({
     version: app.getVersion(),
-    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings() },
+    store: { servers: store.get('servers', []), subscriptions: store.get('subscriptions', []), chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), lanUsers: store.get('lanUsers', undefined) },
     usage: usage ? usage.totals : {}
   }), null, 2));
   // Restore: a merge by id (backup.js) — nothing on this machine is lost, and
@@ -3697,10 +3777,13 @@ function registerIpc() {
     try {
       r = importBundle(bundle, {
         servers: store.get('servers', []), subscriptions: store.get('subscriptions', []),
-        chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {}
+        chains: getChains(), pool: getPool(), routingProfiles: getRoutingProfiles(), groups: getGroups(), settings: getSettings(), usage: usage ? usage.totals : {},
+        lanUsers: store.get('lanUsers', undefined)
       });
     } catch (err) { return { ok: false, error: err.message }; }
     store.assign({ servers: r.next.servers.map(migrateStoredServer), subscriptions: r.next.subscriptions, chains: r.next.chains, pool: r.next.pool, routingProfiles: r.next.routingProfiles, groups: r.next.groups, settings: r.next.settings });
+    if (r.next.lanUsers) store.set('lanUsers', r.next.lanUsers);   // users and devices, when the backup had them (backup.js)
+    installModulesInUse();   // what the backup brought in shows (modules.js)
     if (usage) { usage.totals = r.next.usage; usage.dirty = true; usageStore.set('totals', usage.totals); usage.markSaved(); }
     refreshTray();
     send('log', { line: `Backup restored: ${r.added.servers} servers, ${r.added.subscriptions} subscriptions, ${r.added.chains} chains, ${r.added.pool} pool entries, ${r.added.routingProfiles} routing profiles, ${r.added.groups} groups added`, level: 'info' });
@@ -3829,6 +3912,7 @@ app.whenReady().then(() => {
   migrateServers();
   migrateSettingsStore();
   getRoutingProfiles();   // today's advanced routing becomes profile rp-default, once
+  migrateModulesStore();   // the extensions an older store uses are installed, once
   // A new process has no live connection. An activeServerId still in the store
   // is what a crash or a kill left: the tray marked it "●", and a network change
   // at launch would "recover" a connection nobody asked for. Connect-on-launch
@@ -3914,6 +3998,9 @@ app.whenReady().then(() => {
       // each internet's speed and its period's bytes, while several carry the connection (multiWanMeter.js)
       const mwLive = mwQuota ? mwQuota.rates() : {};
       if (Object.keys(mwLive).length) s.multiWan = { live: mwLive, usage: mwQuota.usage() };
+      // …and each LAN user's, while the core carries them (src/modules/lanUsers/ipc.js)
+      const luLive = lanUsers ? lanUsers.statsLive() : null;
+      if (luLive) s.lanUsers = luLive;
       send('stats', s);
       // a group's members leaving and rejoining the rotation, said in the log
       for (const l of groupHealth.update(s.groups)) send('log', l);
@@ -3936,6 +4023,8 @@ app.whenReady().then(() => {
       // each internet's bytes, from the counters before the groups are folded (multiWanMeter.js) —
       // a cap reached here sets that internet aside and asks for the reload
       if (mwQuota) mwQuota.tick(vars, stats.groupMap, liveMwSplit);
+      // each LAN user's bytes (src/modules/lanUsers/meter.js) — a cap reached here turns them off with one reload
+      if (lanUsers) lanUsers.tick(vars);
     }
   });
 

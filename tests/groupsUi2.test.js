@@ -348,17 +348,17 @@ test('v1.28 strings: once in fa and once in en, one clean literal each (no strai
 });
 
 test('the markup: two tabs with their counts, open / close all, a pane each, the head button of each tab — the groups’ hidden until its tab is on', () => {
-  const view = HTML.slice(HTML.indexOf('<section class="view" id="view-chain">'), HTML.indexOf('</section>', HTML.indexOf('id="view-chain"')));
+  const view = HTML.slice(HTML.indexOf('<section class="view" id="view-chain" data-module="chains groups">'), HTML.indexOf('</section>', HTML.indexOf('id="view-chain"')));
   const head = view.slice(0, view.indexOf('</div>\n        </div>'));
-  assert.match(head, /id="btnAddChain" data-i18n="chain\.new">/);
-  assert.match(head, /<button class="btn primary" hidden id="btnAddGroup" data-i18n="grp\.new">\+ گروه تازه<\/button>/, 'in the page’s head, hidden until its tab');
+  assert.match(head, /id="btnAddChain" data-module="chains" data-i18n="chain\.new">/);
+  assert.match(head, /<button class="btn primary" hidden id="btnAddGroup" data-module="groups" data-i18n="grp\.new">\+ گروه تازه<\/button>/, 'in the page’s head, hidden until its tab');
   assert.match(view, /<div class="seg" role="tablist" id="cgTabs">/);
-  assert.match(view, /<button class="seg-btn active" type="button" role="tab" id="cgTabChains" aria-selected="true" aria-controls="cgPaneChains">[^\n]*<span data-i18n="chain\.sec">زنجیره‌ها<\/span> <span class="cg-count" id="cgCountChains">/);
-  assert.match(view, /<button class="seg-btn" type="button" role="tab" id="cgTabGroups" aria-selected="false" aria-controls="cgPaneGroups">[^\n]*<span class="cg-count" id="cgCountGroups">/);
+  assert.match(view, /<button class="seg-btn active" type="button" role="tab" id="cgTabChains" data-module="chains" aria-selected="true" aria-controls="cgPaneChains">[^\n]*<span data-i18n="chain\.sec">زنجیره‌ها<\/span> <span class="cg-count" id="cgCountChains">/);
+  assert.match(view, /<button class="seg-btn" type="button" role="tab" id="cgTabGroups" data-module="groups" aria-selected="false" aria-controls="cgPaneGroups">[^\n]*<span class="cg-count" id="cgCountGroups">/);
   assert.match(view, /id="cgOpenAll" data-i18n="cg\.openAll">همه را باز کن</);
   assert.match(view, /id="cgCloseAll" data-i18n="cg\.closeAll">همه را ببند</);
-  assert.match(view, /<div class="cg-pane" id="cgPaneChains" role="tabpanel" aria-labelledby="cgTabChains">/);
-  assert.match(view, /<div class="cg-pane" id="cgPaneGroups" role="tabpanel" aria-labelledby="cgTabGroups" hidden>/);
+  assert.match(view, /<div class="cg-pane" id="cgPaneChains" data-module="chains" role="tabpanel" aria-labelledby="cgTabChains">/);
+  assert.match(view, /<div class="cg-pane" id="cgPaneGroups" data-module="groups" role="tabpanel" aria-labelledby="cgTabGroups" hidden>/);
   const chains = view.slice(view.indexOf('id="cgPaneChains"'), view.indexOf('id="cgPaneGroups"'));
   for (const id of ['chainsWrap', 'chainsEmpty']) assert.ok(chains.includes(`id="${id}"`), id);
   assert.ok(view.slice(view.indexOf('id="cgPaneGroups"')).includes('id="groupsSection"'), 'the groups’ section inside its pane');

@@ -23,7 +23,8 @@
  *
  * Order on start: table → rules → sing-box → verify; any failure rolls back
  * in reverse and the error names the step. The exclusion list is replaced
- * LIVE (atomic nft reload) without touching the tunnel.
+ * LIVE (atomic nft reload) without touching the tunnel — and so are the users
+ * module's sets and counters (setLanUsers, src/modules/lanUsers/router).
  *
  * `managesDns = true`: the service then leaves the leak guard out. The guard
  * rewrites adapter resolvers; on a router the resolver is dnsmasq, which must
@@ -170,6 +171,10 @@ class TunOpenwrt {
     this.excludeIps = [];
     this.macs = [];
     this.blockQuic = false;    // refuse UDP 443 from the LAN (settings.lanBlockQuic)
+    // the users module's transparent mode: its sets, counters and chains in our
+    // table (src/modules/lanUsers/router/nft.js), or null — the table of before
+    this.lanUsers = null;
+    this.tableGen = 0;         // bumped by every load of our table: its counters start again from zero
     this.lanIf = 'br-lan';
     this.probe = null;         // a LAN client address for the route check in verify()
     this.mark = net.BYPASS_MARK;
@@ -191,7 +196,10 @@ class TunOpenwrt {
   async applyTable(macs) {
     // a router path is a POSIX path, whatever the tests run on
     const file = path.posix.join(this.tmpDir, 'irnetfree-nft.conf');
-    this.writeFile(file, net.buildNftRuleset({ lanIf: this.lanIf, macs, mark: this.mark, blockQuic: this.blockQuic }));
+    const opts = { lanIf: this.lanIf, macs, mark: this.mark, blockQuic: this.blockQuic };
+    if (this.lanUsers) opts.lanUsers = this.lanUsers;
+    this.writeFile(file, net.buildNftRuleset(opts));
+    this.tableGen++;
     await this.run('nft', ['-f', file]);
   }
 
@@ -358,6 +366,9 @@ class TunOpenwrt {
     this.probe = net.lanProbeAddress(lan.address, lan.mask);
     this.macs = net.validMacs(o.bypassMacs);
     this.blockQuic = !!o.blockQuic;
+    // the users' sets and chains go into the table with it; their sing-box
+    // routes ride `o` down to the inner backend (tunSingbox writeConfig)
+    this.lanUsers = (o.lanUsers && o.lanUsers.nft) || null;
     let step = 'nft';
     this.laid = true;
     try {
@@ -369,7 +380,9 @@ class TunOpenwrt {
       // sing-box ≥ 1.11 turns on by itself on Linux; the option that once asked
       // for it is refused by 1.12, which CI found out for us.)
       // udpTimeout: the router's UDP session lifetime (ROUTER_UDP_TIMEOUT_S)
-      await this.inner.start(socksPort, bypassAddrs, dnsServers, Object.assign({}, o, { udpTimeout: ROUTER_UDP_TIMEOUT_S }));
+      // (the users' configs dial their own entry servers: off the tunnel like the connection's — only when the module gives any)
+      const exclude = o.lanUsers && Array.isArray(o.lanUsers.exclude) ? o.lanUsers.exclude.filter(Boolean) : [];
+      await this.inner.start(socksPort, exclude.length ? [...bypassAddrs, ...exclude] : bypassAddrs, dnsServers, Object.assign({}, o, { udpTimeout: ROUTER_UDP_TIMEOUT_S }));
       step = 'verify';
       await this.verify();
     } catch (e) {
@@ -451,6 +464,19 @@ class TunOpenwrt {
     if (!this.active) return;
     await this.applyTable(this.macs);
     this.onLog(`Gateway: ${this.macs.length} device(s) excluded by MAC`, 'info');
+  }
+
+  /**
+   * The users' sets and counters (who is blocked, assigned, signed in — and
+   * the portal's redirect) replaced under a live tunnel, like the exclusions:
+   * one atomic load of our table, sing-box untouched. Off (null) while the
+   * gateway was built with them leaves the table of before. Inactive: only
+   * remembered for nothing — the next start takes its own from its options.
+   */
+  async setLanUsers(desc) {
+    this.lanUsers = desc && typeof desc === 'object' ? desc : null;
+    if (!this.active) return;
+    await this.applyTable(this.macs);
   }
 
   /** Turn the QUIC refusal on or off under a live tunnel; the tunnel is not touched. */
