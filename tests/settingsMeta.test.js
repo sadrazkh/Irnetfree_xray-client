@@ -37,7 +37,9 @@ function baseSettings(over) {
     leakGuard: 'standard',
     blockUdpInProxyMode: false,
     tunAppMode: 'off',
-    tunApps: [],
+    // one app listed: a target only counts for an app on the list (VIEWS.tunAppTargets)
+    tunApps: ['Telegram.exe'],
+    tunAppTargets: {},
     autoUpdateSubs: true,
     autoUpdateInterval: 60,
     customRules: [],
@@ -105,6 +107,7 @@ test('every reconnect-relevant key is detected when it changes', () => {
     systemProxy: false, tunMode: true,
     tunBackend: 'tun2socks', leakGuard: 'strict', blockUdpInProxyMode: true, singboxDns: 'core',
     tunAppMode: 'exclude', tunApps: ['chrome.exe'],
+    tunAppTargets: { 'Telegram.exe': 'srv-1' },
     defaultEngine: 'xray-pattn',
     mux: 'auto',
     multiWan: { enabled: true, mode: 'balance', links: [], split: { up: '', down: '' } },
@@ -187,6 +190,25 @@ test('mux defaults to off in both processes (the owner: nothing changes unless h
   assert.match(block.slice(0, block.indexOf('\n};')), /^ {2}mux: 'off'$/m, 'main.js DEFAULT_SETTINGS has the same default');
   assert.ok(RECONNECT_KEYS.includes('mux'));
   for (const to of ['auto', 'on']) assert.deepEqual(pendingReconnectKeys(applied(), baseSettings({ mux: to })), ['mux'], `off → ${to}`);
+});
+
+/* ------------------------------ per-app targets ------------------------------ */
+
+test('a per-app target is a reconnect only for an app on the list, as the decision reads it', () => {
+  const a = snapshotApplied(baseSettings({ tunAppMode: 'exclude', tunApps: ['Telegram.exe', 'chrome.exe'], tunAppTargets: { 'Telegram.exe': 'srv-1' } }));
+  const now = (over) => baseSettings(Object.assign({ tunAppMode: 'exclude', tunApps: ['Telegram.exe', 'chrome.exe'], tunAppTargets: { 'Telegram.exe': 'srv-1' } }, over));
+  // a listed app's config changed, picked, or set back to its mode's default by removing it
+  assert.deepEqual(pendingReconnectKeys(a, now({ tunAppTargets: { 'Telegram.exe': 'srv-2' } })), ['tunAppTargets']);
+  assert.deepEqual(pendingReconnectKeys(a, now({ tunAppTargets: { 'Telegram.exe': 'srv-1', 'chrome.exe': 'block' } })), ['tunAppTargets']);
+  assert.deepEqual(pendingReconnectKeys(a, now({ tunAppTargets: {} })), ['tunAppTargets']);
+  // an entry for an app that is not listed builds nothing; nor does junk the decision drops
+  assert.deepEqual(pendingReconnectKeys(a, now({ tunAppTargets: { 'Telegram.exe': 'srv-1', 'gone.exe': 'srv-9' } })), []);
+  assert.deepEqual(pendingReconnectKeys(a, now({ tunAppTargets: { 'Telegram.exe': 'srv-1', 'chrome.exe': 42 } })), []);
+  // the key order of the map is no change
+  const b = snapshotApplied(now({ tunAppTargets: { 'Telegram.exe': 'srv-1', 'chrome.exe': '' } }));
+  assert.deepEqual(pendingReconnectKeys(b, now({ tunAppTargets: { 'chrome.exe': '', 'Telegram.exe': 'srv-1' } })), []);
+  // a store from before the map is the same as an empty one
+  assert.deepEqual(pendingReconnectKeys(snapshotApplied(now({ tunAppTargets: undefined })), now({ tunAppTargets: {} })), []);
 });
 
 /* ------------------------------ i18n drift ------------------------------ */

@@ -183,6 +183,49 @@
   display: grid;
   gap: 8px;
 }
+/* The per-app list (app.js renderTunAppList): a row per app — its process
+   name, the config it rides, ✕. A process name is Latin in either language,
+   so it keeps its own direction and is the part that gives way (ellipsis, the
+   whole name in its title); the picker takes the rest and never drops below a
+   readable 150. Narrow (a phone, the router's page): the picker goes under
+   the name, the full width of the row. */
+.tunapp-list { display: grid; gap: 6px; }
+.tunapp-list:empty { display: none; }
+.tunapp-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 1.4fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding-block: 6px;
+  padding-inline: 10px 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r5);
+}
+.tunapp-name {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+  unicode-bidi: isolate;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* its own direction is LTR (a Latin name stays in order), but it sits where the page starts */
+[dir="rtl"] .tunapp-name { text-align: right; }
+.tunapp-target { min-width: 0; }
+.tunapp-target .ss { display: block; width: 100%; min-width: 0; }
+.tunapp-del { justify-self: end; }
+.tunapp-add { display: flex; gap: 8px; }
+.tunapp-add > .input { flex: 1; min-width: 0; }
+/* a process name is Latin: typed, it reads left to right; empty, the placeholder reads in the page's direction */
+.tunapp-add > .input:not(:placeholder-shown) { direction: ltr; font-family: var(--mono); }
+.tunapp-add > .btn { flex: none; }
+@media (max-width: 560px) {
+  .tunapp-item { grid-template-columns: minmax(0, 1fr) auto; }
+  .tunapp-target { grid-column: 1 / -1; grid-row: 2; }
+}
 #view-settings .setting-row:last-child { border-block-end: 0; }
 #view-settings .setting-row.disabled > .field-label,
 #view-settings .setting-row.disabled > .select { opacity: .5; }
