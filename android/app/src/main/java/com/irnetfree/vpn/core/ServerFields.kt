@@ -24,7 +24,7 @@ object ServerFields {
     val FIELDS: List<SfField> get() = ServerFieldsTable.FIELDS
     val PATH_FIELDS: List<SfField> by lazy { ServerFieldsTable.FIELDS.filter { f: SfField -> f.path != null } }
     val TABS = listOf("basics", "protocol", "transport", "security", "advanced")
-    val PROTOCOLS = listOf("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "masque", "wireguard", "socks", "http")
+    val PROTOCOLS = listOf("vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "anytls", "masque", "wireguard", "socks", "http")
     val NETWORKS = listOf("tcp", "ws", "grpc", "httpupgrade", "xhttp", "kcp")
     val SS_METHODS = listOf("2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
         "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305", "none")
@@ -40,12 +40,12 @@ object ServerFields {
     fun securitiesOf(protocol: String): List<String> = when (protocol) {
         "vless", "trojan" -> listOf("none", "tls", "reality")
         "vmess", "shadowsocks" -> listOf("none", "tls")
-        "hysteria2", "masque" -> listOf("tls")
+        "hysteria2", "masque", "tuic", "anytls" -> listOf("tls")
         else -> emptyList()
     }
 
-    /** Hysteria2 and MASQUE speak TLS and nothing else, whatever a hand-written stream says. */
-    fun tlsOnly(protocol: String): Boolean = protocol == "hysteria2" || protocol == "masque"
+    /** Hysteria2, MASQUE, TUIC and AnyTLS speak TLS and nothing else, whatever a hand-written stream says. */
+    fun tlsOnly(protocol: String): Boolean = protocol == "hysteria2" || protocol == "masque" || protocol == "tuic" || protocol == "anytls"
 
     /** The HTTP version a MASQUE outbound dials (serverFields.js masqueHttpOf): "h2" or "h3". */
     fun masqueHttpOf(tls: JSONObject?): String = Masque.httpOf(tls)
