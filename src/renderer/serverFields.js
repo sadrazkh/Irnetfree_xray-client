@@ -42,9 +42,18 @@
 }(typeof self !== 'undefined' ? self : this, function () {
 
   const STREAM = ['vless', 'vmess', 'trojan', 'shadowsocks'];
-  const PROTOCOLS = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'masque', 'wireguard', 'socks', 'http'];
-  /** Every protocol that can speak TLS: Hysteria2 and MASQUE never speak anything else. */
+  const PROTOCOLS = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic', 'anytls', 'masque', 'wireguard', 'socks', 'http'];
+  /** Every protocol that can speak TLS on an Xray core: Hysteria2 and MASQUE never speak anything else. */
   const TLS_ANY = STREAM.concat('hysteria2', 'masque');
+  /**
+   * TUIC (QUIC) and AnyTLS (TLS over TCP): sing-box's alone, always over TLS.
+   * They take the TLS basics sing-box has — SNI, ALPN, allow insecure, ECH, and
+   * the pins shown so they can be cleared (sing-box keeps none: a pinned one
+   * does not connect) — never the Xray-only TLS knobs (the ECH outbound, the
+   * TLS versions and curves, the system CA store).
+   */
+  const SINGBOX_ONLY = ['tuic', 'anytls'];
+  const TLS_BASICS = TLS_ANY.concat(SINGBOX_ONLY);
   /** The transports the editor offers, in the core's own names (`tcp` is RAW). */
   const NETWORKS = ['tcp', 'ws', 'grpc', 'httpupgrade', 'xhttp', 'kcp'];
   const FINGERPRINTS = ['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized', 'unsafe'];
@@ -55,9 +64,11 @@
   function securitiesOf(protocol) {
     if (protocol === 'vless' || protocol === 'trojan') return ['none', 'tls', 'reality'];
     if (protocol === 'vmess' || protocol === 'shadowsocks') return ['none', 'tls'];
-    if (protocol === 'hysteria2' || protocol === 'masque') return ['tls'];
+    if (protocol === 'hysteria2' || protocol === 'masque' || SINGBOX_ONLY.includes(protocol)) return ['tls'];
     return [];
   }
+  /** A protocol only sing-box runs (TUIC, AnyTLS): no core to pick, never in a chain, a group or a rule. */
+  const singboxOnly = (protocol) => SINGBOX_ONLY.includes(protocol);
   const hasTransport = (protocol) => STREAM.includes(protocol);
 
   /**
@@ -77,6 +88,7 @@
   const SO = 'streamSettings.sockopt.';
   const U0 = 'settings.vnext.0.users.0.';
   const MQ = 'streamSettings.masqueSettings.';
+  const S0 = 'settings.servers.0.';
 
   const on = (protocols, networks, securities) => {
     const w = {};
@@ -95,7 +107,7 @@
     { id: 'port', tab: 'basics', kind: 'number', special: true, key: 'port', simple: true },
 
     /* ------------------------------- protocol ------------------------------- */
-    { id: 'uuid', tab: 'protocol', kind: 'uuid', special: true, key: 'id', when: on(['vless', 'vmess']), simple: true, span: 2 },
+    { id: 'uuid', tab: 'protocol', kind: 'uuid', special: true, key: 'id', when: on(['vless', 'vmess', 'tuic']), simple: true, span: 2 },
     { id: 'flow', tab: 'protocol', kind: 'select', path: U0 + 'flow', key: 'flow', when: on(['vless']), simple: true,
       options: ['', 'xtls-rprx-vision', 'xtls-rprx-vision-udp443'], optionLabels: true, hint: true },
     { id: 'encryption', tab: 'protocol', kind: 'encryption', path: U0 + 'encryption', key: 'encryption', when: on(['vless']),
@@ -104,7 +116,7 @@
       simple: true, emptyAs: 'auto', options: ['auto', 'aes-128-gcm', 'chacha20-poly1305', 'none', 'zero'] },
     { id: 'alterId', tab: 'protocol', kind: 'number', path: U0 + 'alterId', key: 'alterId', when: on(['vmess']), simple: true, emptyAs: 0, hint: true },
     { id: 'username', tab: 'protocol', kind: 'text', special: true, key: 'user', when: on(['socks', 'http']), simple: true },
-    { id: 'password', tab: 'protocol', kind: 'text', special: true, key: 'password', when: on(['trojan', 'shadowsocks', 'hysteria2', 'socks', 'http']), simple: true, span: 2 },
+    { id: 'password', tab: 'protocol', kind: 'text', special: true, key: 'password', when: on(['trojan', 'shadowsocks', 'hysteria2', 'tuic', 'anytls', 'socks', 'http']), simple: true, span: 2 },
     { id: 'method', tab: 'protocol', kind: 'select', path: 'settings.servers.0.method', key: 'method', when: on(['shadowsocks']),
       simple: true, options: SS_METHODS },
     { id: 'uot', tab: 'protocol', kind: 'switch', path: 'settings.servers.0.uot', key: 'uot', when: on(['shadowsocks']), local: true },
@@ -115,6 +127,14 @@
     { id: 'hopInterval', tab: 'protocol', kind: RANGE, special: true, key: 'hopInterval', when: on(['hysteria2']), placeholder: '30' },
     { id: 'up', tab: 'protocol', kind: 'text', special: true, key: 'up', when: on(['hysteria2']), placeholder: '50 mbps' },
     { id: 'down', tab: 'protocol', kind: 'text', special: true, key: 'down', when: on(['hysteria2']), placeholder: '200 mbps' },
+    // TUIC's own knobs, in sing-box's names; empty = sing-box's default (cubic,
+    // native, its 10 s heartbeat) — the record keeps '' / false, never a missing key
+    { id: 'tuicCongestion', tab: 'protocol', kind: 'select', path: S0 + 'congestionControl', key: 'congestion_control', when: on(['tuic']), simple: true,
+      options: ['', 'bbr', 'cubic', 'new_reno'], optionLabels: true, emptyAs: '' },
+    { id: 'tuicUdpRelay', tab: 'protocol', kind: 'select', path: S0 + 'udpRelayMode', key: 'udp_relay_mode', when: on(['tuic']), simple: true,
+      options: ['', 'native', 'quic'], optionLabels: true, emptyAs: '', hint: true },
+    { id: 'tuicZeroRtt', tab: 'protocol', kind: 'switch', path: S0 + 'zeroRtt', key: 'zero_rtt_handshake', when: on(['tuic']), simple: true, hint: true },
+    { id: 'tuicHeartbeat', tab: 'protocol', kind: 'text', path: S0 + 'heartbeat', key: 'heartbeat', when: on(['tuic']), emptyAs: '', placeholder: '10s' },
     { id: 'privateKey', tab: 'protocol', kind: 'text', special: true, key: 'secretKey', when: on(['wireguard']), simple: true, span: 2 },
     { id: 'localAddress', tab: 'protocol', kind: 'list', special: true, key: 'address', when: on(['wireguard']), simple: true },
     { id: 'publicKey', tab: 'protocol', kind: 'text', special: true, key: 'publicKey', when: on(['wireguard']), simple: true },
@@ -184,17 +204,20 @@
 
     /* ------------------------------- security ------------------------------- */
     { id: 'security', tab: 'security', kind: 'security', special: true, key: 'security', when: on(STREAM), simple: true, span: 2 },
-    { id: 'sni', tab: 'security', kind: 'text', special: true, key: 'serverName', when: on(TLS_ANY, null, ['tls', 'reality']), simple: true },
-    // MASQUE uses it over HTTP/2 only (uTLS); HTTP/3 is Go's own TLS
-    { id: 'fp', tab: 'security', kind: 'select', special: true, key: 'fingerprint', when: on(STREAM.concat('masque'), null, ['tls', 'reality']), simple: true, options: FINGERPRINTS },
-    { id: 'alpn', tab: 'security', kind: 'chips', special: true, key: 'alpn', when: on(STREAM.concat('hysteria2'), null, ['tls']), options: ['h3', 'h2', 'http/1.1'], span: 2, hint: true },
-    { id: 'pcs', tab: 'security', group: 'certificate', kind: 'text', special: true, key: 'pinnedPeerCertSha256', when: on(TLS_ANY, null, ['tls']), simple: true, placeholder: 'e3b0c442…, …' },
-    { id: 'vcn', tab: 'security', group: 'certificate', kind: 'text', special: true, key: 'verifyPeerCertByName', when: on(TLS_ANY, null, ['tls']), simple: true, placeholder: 'real.example.com' },
-    // never MASQUE's: the core refuses allowInsecure there outright (a pin is the way)
-    { id: 'allowInsecure', tab: 'security', group: 'certificate', kind: 'switch', special: true, key: 'allowInsecure', when: on(STREAM.concat('hysteria2'), null, ['tls']), simple: true, span: 2, hint: true },
+    { id: 'sni', tab: 'security', kind: 'text', special: true, key: 'serverName', when: on(TLS_BASICS, null, ['tls', 'reality']), simple: true },
+    // TUIC only: no SNI in its ClientHello at all (sing-box's disable_sni)
+    { id: 'tuicDisableSni', tab: 'security', kind: 'switch', path: TL + 'disableSni', key: 'disable_sni', when: on(['tuic']) },
+    // MASQUE uses it over HTTP/2 only (uTLS); HTTP/3 is Go's own TLS — and so is TUIC's QUIC
+    { id: 'fp', tab: 'security', kind: 'select', special: true, key: 'fingerprint', when: on(STREAM.concat('masque', 'anytls'), null, ['tls', 'reality']), simple: true, options: FINGERPRINTS },
+    { id: 'alpn', tab: 'security', kind: 'chips', special: true, key: 'alpn', when: on(STREAM.concat('hysteria2', SINGBOX_ONLY), null, ['tls']), options: ['h3', 'h2', 'http/1.1'], span: 2, hint: true },
+    { id: 'pcs', tab: 'security', group: 'certificate', kind: 'text', special: true, key: 'pinnedPeerCertSha256', when: on(TLS_BASICS, null, ['tls']), simple: true, placeholder: 'e3b0c442…, …' },
+    { id: 'vcn', tab: 'security', group: 'certificate', kind: 'text', special: true, key: 'verifyPeerCertByName', when: on(TLS_BASICS, null, ['tls']), simple: true, placeholder: 'real.example.com' },
+    // never MASQUE's: the core refuses allowInsecure there outright (a pin is the way);
+    // TUIC's and AnyTLS's is sing-box's `insecure` — no pin is learnt for them
+    { id: 'allowInsecure', tab: 'security', group: 'certificate', kind: 'switch', special: true, key: 'allowInsecure', when: on(STREAM.concat('hysteria2', SINGBOX_ONLY), null, ['tls']), simple: true, span: 2, hint: true },
     // the OS's CA store beside the core's own Mozilla roots (Xray 26.10.10+): a server with a private CA
     { id: 'useSystemCA', tab: 'security', group: 'certificate', kind: 'switch', path: TL + 'useSystemCA', key: 'useSystemCA', when: on(TLS_ANY, null, ['tls']), local: true, span: 2, hint: true },
-    { id: 'ech', tab: 'security', group: 'ech', kind: 'text', special: true, key: 'echConfigList', when: on(TLS_ANY, null, ['tls']), simple: true, span: 2, hint: true,
+    { id: 'ech', tab: 'security', group: 'ech', kind: 'text', special: true, key: 'echConfigList', when: on(TLS_BASICS, null, ['tls']), simple: true, span: 2, hint: true,
       placeholder: 'cloudflare-ech.com+udp://1.1.1.1' },
     // PattN's: the outbound the core dials the ECH query through (configBuilder.applyEchOutbounds);
     // its Example button writes echOutboundExample's pair
@@ -214,7 +237,8 @@
     { id: 'pqv', tab: 'security', kind: 'text', special: true, key: 'mldsa65Verify · pqv', when: on(STREAM, null, ['reality']), simple: true, span: 2 },
 
     /* ------------------------------- advanced ------------------------------- */
-    // (MASQUE runs on an Xray core only: the parser never stores sing-box for it, engineChoice never picks it)
+    // (MASQUE runs on an Xray core only: the parser never stores sing-box for it, engineChoice never picks it;
+    // TUIC and AnyTLS on sing-box only — the parser stores no engine for them, the editor shows sing-box alone)
     { id: 'engine', tab: 'advanced', kind: 'select', special: true, key: 'engine', simple: true, options: ['xray', 'xray-pattn', 'sing-box'], optionLabels: 'all', hint: true },
     { id: 'remoteDNS', tab: 'advanced', kind: 'list', path: 'settings.remoteDNS', key: 'remoteDNS', when: on(['masque']), local: true, span: 2, hint: true,
       placeholder: '1.1.1.1, 1.0.0.1' },
@@ -263,7 +287,7 @@
     if (w.protocols && !w.protocols.includes(c.protocol)) return false;
     if (w.networks && !(hasTransport(c.protocol) && w.networks.includes(c.network))) return false;
     if (w.securities) {
-      const sec = c.protocol === 'hysteria2' || c.protocol === 'masque' ? 'tls' : c.security;
+      const sec = c.protocol === 'hysteria2' || c.protocol === 'masque' || singboxOnly(c.protocol) ? 'tls' : c.security;
       if (!w.securities.includes(sec)) return false;
     }
     return true;
@@ -502,8 +526,8 @@
   }
 
   return {
-    FIELDS, TABS, PROTOCOLS, NETWORKS, FINGERPRINTS, SS_METHODS, PATH_FIELDS,
-    securitiesOf, hasTransport, masqueHttpOf, contextOf, fieldApplies,
+    FIELDS, TABS, PROTOCOLS, NETWORKS, FINGERPRINTS, SS_METHODS, PATH_FIELDS, SINGBOX_ONLY,
+    securitiesOf, hasTransport, singboxOnly, masqueHttpOf, contextOf, fieldApplies,
     getPath, setPath, toForm, fromForm, validate, readEncryption, readPathFields, applyPathFields, specialsOf, ssPluginOf,
     ECH_OUTBOUND_EXAMPLE, echOutboundExample
   };

@@ -27,7 +27,8 @@ jobs:
   cores:
     # The only place a core is handed what this app writes: every config shape
     # (plans, DNS modes, TUN, the v1.18 link forms) through `xray run -test` on
-    # the suggested Xray and Xray-PattN, the TUN configs through `sing-box check`.
+    # the suggested Xray and Xray-PattN, the TUN configs and every TUIC / AnyTLS
+    # config (sing-box's alone) through `sing-box check`.
     # The versions come from src/main/coreVersions.js, so a bump is checked here.
     name: cores accept the configs (suggested versions)
     runs-on: ubuntu-latest
@@ -51,7 +52,7 @@ jobs:
           curl -fsSL --retry 3 -o s.tgz "https://github.com/SagerNet/sing-box/releases/download/v$SV/sing-box-$SV-linux-amd64.tar.gz"
           tar -xzf s.tgz -C "$RUNNER_TEMP/s" --strip-components=1
           chmod +x "$RUNNER_TEMP/x/xray" "$RUNNER_TEMP/p/xray" "$RUNNER_TEMP/s/sing-box"
-      - name: Xray (suggested) accepts every config, sing-box every TUN config
+      - name: Xray (suggested) accepts every config, sing-box every TUN and TUIC / AnyTLS config
         run: IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/validate-configs.js
       - name: Xray-PattN (suggested) accepts every config
         # also when the official core refused something: one run says it for both
@@ -161,6 +162,18 @@ jobs:
           IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/x/xray" node scripts/probe-lan-users.js || rc=1
           IRNF_LU_PROBE=1 IRNF_XRAY_EXE="$RUNNER_TEMP/p/xray" IRNF_PROBE_PORT=23600 node scripts/probe-lan-users.js || rc=1
           exit $rc
+      - name: TUIC and AnyTLS carry TCP and UDP as the app writes them, on sing-box (real servers, loopback)
+        # scripts/probe-tuic-anytls.js: the app's own sing-box config (a server parsed
+        # from a share link, singboxBuilder.buildSingboxConfig) against sing-box's own
+        # tuic and anytls inbounds, on a certificate sing-box made, the links asking for
+        # allow insecure as such links do. TUIC in both UDP relay modes (one with no ALPN
+        # in its link, the builder's h3), AnyTLS over its TCP stream: a page every round,
+        # 1 MB in one piece, UDP echoed through SOCKS5 UDP ASSOCIATE — and a wrong
+        # password gets nothing. No Xray core has either protocol: sing-box is the only
+        # place the app's TUIC and AnyTLS are ever run. Nothing reaches the internet.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 4
+        run: IRNF_SINGBOX_EXE="$RUNNER_TEMP/s/sing-box" node scripts/probe-tuic-anytls.js
 
   tun-dns:
     # The real TUN, which `sing-box check` cannot speak for: does a name asked

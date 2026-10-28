@@ -151,12 +151,12 @@ test('helperClosure follows dialerProxy and proxySettings.tag recursively, each 
 
 /* ------------------------------ sing-box JSON ------------------------------ */
 
-test('a sing-box config: one ordinary server per supported outbound, the detour in the name, tuic reported by name', () => {
+test('a sing-box config: one ordinary server per supported outbound, the detour in the name, tuic imported too', () => {
   const r = J.importJson(fixture('singbox.json'));
-  assert.deepEqual(r.errors, [{ line: 'tuic', error: 'unsupported protocol: tuic' }]);
+  assert.deepEqual(r.errors, []);
   assert.deepEqual(r.servers.map((s) => [s.name, s.protocol]), [
     ['vless-reality', 'vless'], ['vmess-ws', 'vmess'], ['trojan-grpc', 'trojan'], ['ss', 'shadowsocks'], ['hy2', 'hysteria2'],
-    ['wg', 'wireguard'], ['socks-up', 'socks'], ['http-up', 'http'], ['vless-detour (via trojan-grpc)', 'vless']
+    ['wg', 'wireguard'], ['socks-up', 'socks'], ['http-up', 'http'], ['vless-detour (via trojan-grpc)', 'vless'], ['tuic', 'tuic']
   ]);
   for (const s of r.servers) {
     assert.equal(s.source, undefined, 'an ordinary server, not a JSON one');
@@ -214,12 +214,33 @@ test('sing-box: selector, urltest, direct, block and dns are skipped silently; a
   const r = J.serversFromSingbox({ outbounds: [
     { type: 'selector', tag: 's', outbounds: [] }, { type: 'urltest', tag: 'u' }, { type: 'direct', tag: 'd' }, { type: 'block', tag: 'b' }, { type: 'dns', tag: 'x' },
     { type: 'vless', tag: 'q', server: 'q.example', server_port: 443, uuid: 'u', tls: { enabled: true, server_name: 'q.example' }, transport: { type: 'quic' } },
-    { type: 'anytls', tag: 'any', server: 'a.example', server_port: 443 }
+    { type: 'naive', tag: 'nv', server: 'n.example', server_port: 443 }
   ] });
   assert.deepEqual(r.servers, []);
-  assert.deepEqual(r.errors.map((e) => e.line), ['q', 'any']);
+  assert.deepEqual(r.errors.map((e) => e.line), ['q', 'nv']);
   assert.match(r.errors[0].error, /quic/);
-  assert.equal(r.errors[1].error, 'unsupported protocol: anytls');
+  assert.equal(r.errors[1].error, 'unsupported protocol: naive');
+});
+
+test('sing-box: TUIC and AnyTLS outbounds are the servers their share links parse to — every knob the record keeps', () => {
+  const U = '00000000-0000-4000-8000-0000000000d1';
+  const r = J.serversFromSingbox({ outbounds: [
+    { type: 'tuic', tag: 'tu', server: 't.example.com', server_port: 8443, uuid: U, password: 'p:w', congestion_control: 'bbr',
+      udp_relay_mode: 'quic', zero_rtt_handshake: true, heartbeat: '15s',
+      tls: { enabled: true, server_name: 's.example.com', alpn: ['h3'], insecure: true, disable_sni: true } },
+    { type: 'anytls', tag: 'at', server: 'a.example.com', server_port: 443, password: 'apw', idle_session_timeout: '30s',
+      tls: { enabled: true, server_name: 'a.example.com', utls: { enabled: true, fingerprint: 'firefox' } } },
+    // no password at all: imported, with an empty one (the server will say whether it takes that)
+    { type: 'anytls', tag: 'bare', server: 'b.example.com', server_port: 443 }
+  ] });
+  assert.deepEqual(r.errors, []);
+  const [tu, at, bare] = r.servers;
+  assert.deepEqual(tu.outbound, parseLink(`tuic://${U}:p%3Aw@t.example.com:8443?sni=s.example.com&alpn=h3&congestion_control=bbr&udp_relay_mode=quic&reduce_rtt=1&heartbeat=15s&allow_insecure=1&disable_sni=1`).outbound);
+  assert.deepEqual(tu.outbound.settings.servers[0], { address: 't.example.com', port: 8443, uuid: U, password: 'p:w', congestionControl: 'bbr', udpRelayMode: 'quic', zeroRtt: true, heartbeat: '15s' });
+  assert.equal(tu.outbound.streamSettings.tlsSettings.disableSni, true);
+  assert.deepEqual([at.protocol, at.outbound.settings.servers[0].password, at.outbound.streamSettings.tlsSettings.fingerprint], ['anytls', 'apw', 'firefox']);
+  assert.equal(bare.outbound.settings.servers[0].password, '');
+  for (const s of r.servers) assert.deepEqual(parseLink(s.raw).outbound, s.outbound, s.name + ': raw is the link it was imported as');
 });
 
 /* ------------------------------ detection ------------------------------ */
@@ -262,11 +283,11 @@ test('parseMany of links is what it was: links, base64 links and a .conf never m
   const links = [
     'vless://11111111-2222-3333-4444-555555555555@a.example:443?encryption=none&type=ws&host=h.example&path=%2Fws&security=tls#ws',
     'trojan://pw@t.example:443?security=tls&sni=t.example&type=grpc&serviceName=svc#tg',
-    'tuic://x@y:1#t'
+    'juicity://x@y:1#t'
   ].join('\n');
   const r = parseMany(links);
   assert.deepEqual(r.servers.map((s) => s.name), ['ws', 'tg']);
-  assert.deepEqual(r.errors, [{ line: 'tuic://x@y:1#t', error: 'unsupported protocol: tuic' }]);
+  assert.deepEqual(r.errors, [{ line: 'juicity://x@y:1#t', error: 'unsupported protocol: juicity' }]);
   assert.deepEqual(parseMany(Buffer.from(links).toString('base64')).servers.map(noId), r.servers.map(noId));
   for (const s of r.servers) assert.equal(s.source, undefined);
 });

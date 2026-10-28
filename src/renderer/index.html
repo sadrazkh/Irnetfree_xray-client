@@ -1097,7 +1097,7 @@
             <div><label class="field-label" data-i18n="edit.vcn">Verify certificate as (vcn)</label>
               <input type="text" id="edVcn" class="input" dir="ltr" spellcheck="false" placeholder="real.example.com" /></div>
           </div>
-          <p class="hint" data-i18n="edit.pcsHint">pcs: accept exactly this certificate (a self-signed one too) — what replaced Allow Insecure. vcn: check the certificate against this name instead of the SNI.</p>
+          <p class="hint" id="edPcsHint" data-i18n="edit.pcsHint">pcs: accept exactly this certificate (a self-signed one too) — what replaced Allow Insecure. vcn: check the certificate against this name instead of the SNI.</p>
         </div>
         <label class="switch-row inline-switch" id="edInsecureRow">
           <span class="switch-title" data-i18n="edit.allowInsecure">Allow Insecure</span>
@@ -1153,7 +1153,10 @@
             </select></div>
           <div class="engine-hint"><p class="hint" id="edEngineHint" data-i18n="edit.engineHint">Only this config runs on the chosen core. sing-box needs its binary in bin/; falls back to Xray if missing.</p>
             <!-- MASQUE runs on Xray or Xray-PattN only (app.js hides the sing-box option for it) -->
-            <p class="hint" id="edEngineHintMasque" data-i18n="sf.engine.hint.masque" hidden>sing-box MASQUE ندارد.</p></div>
+            <p class="hint" id="edEngineHintMasque" data-i18n="sf.engine.hint.masque" hidden>sing-box MASQUE ندارد.</p>
+            <!-- TUIC and AnyTLS run on sing-box only (app.js leaves the select that one option) -->
+            <p class="hint" id="edEngineHintTuic" data-i18n="sf.engine.hint.tuic" hidden>TUIC فقط با sing-box اجرا می‌شود.</p>
+            <p class="hint" id="edEngineHintAnytls" data-i18n="sf.engine.hint.anytls" hidden>AnyTLS فقط با sing-box اجرا می‌شود.</p></div>
         </div>
         <!-- TLS fragmentation (all protocols); MASQUE shows one of the two: a fragment over HTTP/2, noise over HTTP/3 -->
         <div class="grid2" id="edFragmentRow" data-module="antiDpi">

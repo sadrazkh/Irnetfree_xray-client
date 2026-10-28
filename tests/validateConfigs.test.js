@@ -55,7 +55,7 @@ test('the core gate builds every config without a core — the v1.18 link forms 
   const run = dryRun(t);
   assert.equal(run.status, 0, run.out);
   assert.equal(fs.readdirSync(run.dir).length, run.built.length, 'every config it names is on disk');
-  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(14 of them sing-box TUN configs\\)`, 'm'));
+  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(14 of them sing-box TUN configs, \\d+ sing-box TUIC / AnyTLS configs\\)`, 'm'));
   assert.ok(run.built.length > 200, `the plans × DNS modes matrix and the shapes are still there: ${run.built.length}`);
   for (const form of FORMS) {
     for (const v of ['plain', 'tun', 'strict']) assert.ok(run.built.includes(`link-${form}-${v}.json`), `link-${form}-${v}`);
@@ -136,6 +136,11 @@ test('the core gate hands the cores every JSON shape: each fixture server in ful
     const servers = importJson(fs.readFileSync(path.join(__dirname, 'fixtures', 'json', `${f}.json`), 'utf8')).servers;
     assert.ok(servers.length > 0, f);
     servers.forEach((s, i) => {
+      // the sing-box fixture's TUIC: no Xray takes it — sing-box checks it (singbox-json-singbox-<i>-…)
+      if (s.protocol === 'tuic' || s.protocol === 'anytls') {
+        assert.ok(run.built.includes(`singbox-json-${f}-${i}-connect.json`) && !run.built.includes(`json-${f}-${i}-full-plain.json`), `json-${f}-${i}: sing-box's`);
+        return;
+      }
       for (const v of ['plain', 'tun']) assert.ok(run.built.includes(`json-${f}-${i}-full-${v}.json`), `json-${f}-${i}-full-${v}`);
       for (const v of ['plain', 'tun']) {
         assert.equal(run.built.includes(`json-${f}-${i}-raw-${v}.json`), s.source === 'json', `json-${f}-${i}-raw-${v}: raw is for Xray JSON only`);
@@ -275,6 +280,25 @@ test('the core gate hands the cores every multi-internet shape (v1.32.0): balanc
   assert.equal(at('multiwan-pool-balance-plain', 'out-sv-trojan').protocol, 'loopback');
   assert.equal(at('multiwan-advanced-balance-plain', 'out-chain-c1-h0').protocol, 'vless', 'a chain hop stays');
   for (const n of names) for (const v of ['plain', 'tun']) assert.equal(JSON.stringify(run.read(`multiwan-${n}-${v}`)).includes('_mwSplit'), false);
+});
+
+test('the core gate hands sing-box every TUIC / AnyTLS config — links, the editor, the sing-box JSON fixture; the connect’s, a LAN’s and a latency test’s — and Xray none of them', { timeout: 60000 }, (t) => {
+  const run = dryRun(t);
+  const names = ['json-singbox-9', 'editor-tuic', 'editor-anytls', 'link-tuic-all', 'link-tuic-v6', 'link-tuic-ech-dns', 'link-anytls-all', 'link-anytls-ech-b64', 'link-anytls-fragment'];
+  for (const n of names) for (const v of ['connect', 'lan', 'test']) assert.ok(run.built.includes(`singbox-${n}-${v}.json`), `singbox-${n}-${v}`);
+  const out = (name) => run.read(name).outbounds.find((o) => o.tag === 'proxy');
+  assert.deepEqual(out('singbox-editor-tuic-connect'), {
+    type: 'tuic', tag: 'proxy', server: 'ed.example.com', server_port: 443, uuid: '2c0f0d9a-6b3a-4f0e-9a1f-8c2b4d6e7a10', password: 'irnf-ci-secret',
+    congestion_control: 'bbr', udp_relay_mode: 'quic', zero_rtt_handshake: true, heartbeat: '10s',
+    tls: { enabled: true, server_name: 'ed.example.com', insecure: true, alpn: ['h3'], disable_sni: true }
+  });
+  assert.equal(out('singbox-link-tuic-v6-connect').tls.alpn[0], 'h3', 'no ALPN in the link: h3');
+  assert.equal(out('singbox-link-tuic-v6-connect').tls.utls, undefined, 'QUIC: no uTLS');
+  assert.deepEqual(out('singbox-link-anytls-fragment-test').tls.utls, { enabled: true, fingerprint: 'firefox' });
+  assert.equal(out('singbox-link-anytls-fragment-test').tls.fragment, true);
+  assert.deepEqual(run.read('singbox-link-anytls-all-test').inbounds.map((i) => i.type), ['socks'], 'a test: SOCKS alone');
+  // none of them ever reached an Xray config
+  assert.equal(run.built.some((n) => /^(json-singbox-9|editor-(tuic|anytls)|link-(tuic|anytls))/.test(n)), false);
 });
 
 test('CI’s `cores` job hands the suggested Xray, Xray-PattN and sing-box every config — the versions read from coreVersions.js, the gate never dry', () => {
