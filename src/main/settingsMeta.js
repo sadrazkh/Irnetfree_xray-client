@@ -21,6 +21,7 @@
  *   lang, theme         — renderer only
  */
 const { normalizeMultiWan } = require('./multiWan');
+const { normalizeAppNames, normalizeAppTargets } = require('./tunApps');
 
 /** Settings the running tunnel was built from; changing one needs a reconnect. */
 const RECONNECT_KEYS = [
@@ -43,6 +44,9 @@ const RECONNECT_KEYS = [
   // reconnect — deliberate: the list is the user's own order, and a comparison
   // that ignored it would have to sort a copy on every settings save.
   'tunAppMode', 'tunApps',
+  // …and the config each listed app rides (tunAppTargets.js): a process rule to
+  // a loopback inbound the core opens at connect — see VIEWS
+  'tunAppTargets',
   // which core the config is validated on and started with
   'defaultEngine',
   // mux on the servers' own outbounds (mux.js) — written into the config
@@ -86,6 +90,16 @@ const VIEWS = {
   modules: (v, all) => {
     const m = v && typeof v === 'object' ? v : {};
     return { multiWan: m.multiWan === true && normalizeMultiWan(all && all.multiWan).enabled, lanUsers: m.lanUsers === true };
+  },
+  // The per-app targets as the decision reads them (tunApps.js): cleaned, and
+  // only the apps on the list — an entry for an app no longer listed builds
+  // nothing, so dropping or keeping it is no change; removing the app itself
+  // already is one (`tunApps`).
+  tunAppTargets: (v, all) => {
+    const map = normalizeAppTargets(v);
+    const out = {};
+    for (const name of normalizeAppNames(all && all.tunApps)) if (Object.prototype.hasOwnProperty.call(map, name)) out[name] = map[name];
+    return out;
   }
 };
 const viewOf = (k, v, all) => (VIEWS[k] ? VIEWS[k](v, all) : v);

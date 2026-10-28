@@ -27,6 +27,8 @@ const { applies: multiWanApplies, applyMultiWan, finishSplit } = require('./mult
 const { isOn: moduleOn } = require('../renderer/modules');
 // users and devices on the LAN (module lanUsers): their proxy, accounts and rules — only when installed and on
 const lanUsers = require('../modules/lanUsers/xray');
+// per-app configs under the sing-box TUN: a loopback inbound per app's config (main.js builds `appRoutes`)
+const appTargets = require('./tunAppTargets');
 
 /**
  * Private / reserved IPv4+IPv6 ranges. Used INSTEAD of `geoip:private` so that
@@ -1242,6 +1244,9 @@ function buildConfig(planArg, settings) {
   // and rules at the end. Not installed, or its proxy off: nothing changes.
   const lu = lanUsers.applies(s) ? lanUsers.lanUsersOutbounds(s.lanUsers, lanUsersCtx(s, plan, exitTag, outbounds)) : null;
   if (lu) outbounds = outbounds.concat(lu.outbounds);
+  // …and each per-app config's (tunAppTargets.js) the same way. None: nothing changes.
+  const pa = appTargets.applies(s) ? appTargets.appRouteOutbounds(s.appRoutes, appRoutesCtx(s, plan, exitTag, outbounds, lu)) : null;
+  if (pa) outbounds = outbounds.concat(pa.outbounds);
 
   // Name resolution (see dnsBuilder.js). Its rules go FIRST: the port-53 hijack
   // must beat the private-IP bypass, or a query to the tunnel peer 10.255.0.1
@@ -1305,6 +1310,8 @@ function buildConfig(planArg, settings) {
   };
   // the users' inbounds and rules — after the groups' and the DNS rules, ahead of the plan's
   if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag });
+  // the apps' loopback inbounds and rules — in the same place, beside the users'
+  if (pa) appTargets.applyAppRoutes(config, s.appRoutes, { tags: pa.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing });
   // every TCP dial through a hop over a loopback socket — last, see relayHopDials
   relayHopDials(config, s.chainRelayPort);
   return withGroupTags(config, grp, mwSplit);
@@ -1320,7 +1327,26 @@ function buildConfig(planArg, settings) {
  * `outs`: the plan's outbounds so far, before any pass.
  */
 function lanUsersCtx(s, plan, exitTag, outs) {
-  const lu = s.lanUsers || {};
+  return targetCtx(s, plan, exitTag, outs, s.lanUsers || {}, null);
+}
+
+/**
+ * The same for the per-app configs (tunAppTargets.js), whose records main.js
+ * looked up (`s.appRoutes`). A target the users already ride (`lu`, their
+ * lanUsersOutbounds answer) shares that outbound too — one WireGuard session
+ * per key, whoever rides it. `outs`: every outbound so far, the users' too.
+ */
+function appRoutesCtx(s, plan, exitTag, outs, lu) {
+  return targetCtx(s, plan, exitTag, outs, s.appRoutes || {}, lu && lu.tags ? lu.tags : null);
+}
+
+/**
+ * targetOutbounds.js's ctx over a plan: `recs` the records the targets name
+ * beyond the plan's ({ serversById, chainsById, wgEndpointIps }), `shared` the
+ * tags another rider already made for a target ({ [target]: tag }, or null).
+ */
+function targetCtx(s, plan, exitTag, outs, recs, shared) {
+  const lu = recs || {};
   const have = new Set((outs || []).map(o => o && o.tag));
   const serversById = Object.assign({}, plan.serversById, lu.serversById);
   const chainsById = Object.assign({}, plan.chainsById, lu.chainsById);
@@ -1331,6 +1357,8 @@ function lanUsersCtx(s, plan, exitTag, outs) {
     exitTag, serversById, chainsById,
     // the selection itself (its exit is `proxy`), or a target / base the plan dials as that very target
     existingTag(target) {
+      // (never another rider's 'block': whether a target can be dialled is this rider's own records' to say)
+      if (shared && Object.prototype.hasOwnProperty.call(shared, target) && shared[target] && shared[target] !== 'block') return shared[target];
       if (target.indexOf('chain:') === 0) {
         const cid = target.slice('chain:'.length);
         const theirs = ids(chainsById[cid]);
@@ -1799,6 +1827,9 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   // LAN users — see buildConfig (a target an entry already dials shares its outbound)
   const lu = lanUsers.applies(s) ? lanUsers.lanUsersOutbounds(s.lanUsers, lanUsersCtx(s, plan, primaryTag, reg.outs)) : null;
   if (lu) lu.outbounds.forEach(o => reg.add(o));
+  // …and the per-app configs — see buildConfig
+  const pa = appTargets.applies(s) ? appTargets.appRouteOutbounds(s.appRoutes, appRoutesCtx(s, plan, primaryTag, reg.outs, lu)) : null;
+  if (pa) pa.outbounds.forEach(o => reg.add(o));
   // multi-internet, then groups — see buildConfig
   const mw = multiWanAllowed(s) && multiWanApplies(s.multiWan, s.multiWanSkip);
   const grp = expandGroups(mw ? applyMultiWan(reg.outs, s.multiWan, s.multiWanSkip, { servers: serversByTag(plan), groupSkip: s.groupSkip }) : reg.outs, s.groupSkip);
@@ -1843,6 +1874,7 @@ function buildPoolConfig(plan, s, listen, sniffing) {
   };
   // the users' inbounds and rules — after the groups' and the DNS rules, ahead of the private bypass and the entries
   if (lu) lanUsers.applyLanUsers(config, s.lanUsers, { tags: lu.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing, exitTag: primaryTag });
+  if (pa) appTargets.applyAppRoutes(config, s.appRoutes, { tags: pa.tags, ruleAt: grp.rules.length + dnsPlan.rules.length, sniffing });
   relayHopDials(config, s.chainRelayPort);   // see buildConfig
   return withGroupTags(config, grp, mwSplit);
 }

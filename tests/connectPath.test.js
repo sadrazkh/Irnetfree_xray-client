@@ -82,15 +82,21 @@ test('the connect resolves both kinds of name BEFORE the tunnel and the guard, a
     // the router keeps the in-country resolvers IN its whole-LAN tunnel (field
     // report D3, driven in routerFieldFixes.test.js); everywhere else they are a hole
     if (label === 'main.js') {
-      // (and, under the strict guard only, the resolver an ECH config is fetched from)
-      assert.match(body, /const echHoles = settings\.leakGuard === 'strict' \? echResolverIpsOf\(config\) : \[\];\n\s*await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverBypassIpsOf\(config\), \.\.\.echHoles, \.\.\.pinnedIps\],/,
+      // (and, under the strict guard only, the resolver an ECH config is fetched from;
+      // and the entry servers of the apps' own configs — tunAppTargets.js)
+      assert.match(body, /const echHoles = settings\.leakGuard === 'strict' \? echResolverIpsOf\(config\) : \[\];\n\s*await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverBypassIpsOf\(config\), \.\.\.echHoles, \.\.\.pinnedIps, \.\.\.appHoles\],/,
         `${label}: the tunnel must keep every pinned address off itself`);
     } else {
-      assert.match(body, /const resolverHoles = OPENWRT \? \[\] : \[\.\.\.resolverBypassIpsOf\(config\), \.\.\.\(settings\.leakGuard === 'strict' \? echResolverIpsOf\(config\) : \[\]\)\];\n\s*await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverHoles, \.\.\.pinnedIps\],/,
+      assert.match(body, /const resolverHoles = OPENWRT \? \[\] : \[\.\.\.resolverBypassIpsOf\(config\), \.\.\.\(settings\.leakGuard === 'strict' \? echResolverIpsOf\(config\) : \[\]\)\];\n\s*await myTun\.start\(settings\.socksPort, \[\.\.\.entryAddrs, \.\.\.resolverHoles, \.\.\.pinnedIps, \.\.\.appHoles\],/,
         `${label}: the tunnel must keep every pinned address off itself — and, off a router, the direct resolvers`);
     }
-    assert.match(body, /excludes: await tunPlatform\.resolveServerIps\(\[\.\.\.entryAddrs, \.\.\.pinnedIps\], \{ ipv6: true \}\)/,
+    assert.match(body, /excludes: await tunPlatform\.resolveServerIps\(\[\.\.\.entryAddrs, \.\.\.pinnedIps, \.\.\.\(perApp \? perApp\.bypass : \[\]\)\], \{ ipv6: true \}\)/,
       `${label}: a held rebuild's firewall holes must cover the addresses the new core will dial`);
+    // the apps' own configs: decided and bound before the build (their inbounds are in it), then their holes
+    const decided = body.indexOf('await perAppStep.forConnect(settings, myTun)');
+    assert.ok(decided > -1 && decided < body.indexOf('buildActive(serverId, settings)'), `${label}: the per-app step comes before the build`);
+    assert.match(body, /const appHoles = perApp && unserved\.length < \(perApp\.appRoutes \? perApp\.appRoutes\.inbounds\.length : 0\) \? perApp\.bypass : \[\];/,
+      `${label}: the apps' configs are dialled directly — their entry servers stay off the tunnel`);
     assert.doesNotMatch(body, /wgEndpoints/, `${label}: the WireGuard endpoints travel inside pinnedIps now`);
   }
 });

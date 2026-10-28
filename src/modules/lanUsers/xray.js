@@ -53,6 +53,8 @@
  */
 const net = require('net');
 const { normalizeLanUsers, normalizeConfig, activeUsers, portOf, targetOk } = require('./model');
+// a target's outbounds and its loopback inbound: shared with the per-app configs (src/main/tunAppTargets.js)
+const { targetOutbounds, loopbackSocksInbound } = require('../../main/targetOutbounds');
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -119,54 +121,17 @@ function neededTargets(lu) {
  * the builder's passes — the caller puts them beside those.
  *
  * `ctx` (configBuilder makes it): { exitTag, serversById, chainsById,
- *   existingTag(target) → a tag the plan already has for exactly that target,
- *   server(record, tag) → outbounds, chain(records, tag) → outbounds,
- *   unsafe(record) → true when the core must not be handed it (a WireGuard
- *   endpoint name nobody resolved: a core left to resolve one can go down with
- *   it, taking the owner's own connection along) }.
- *
- *  - ''  → the plan's exit (whatever this machine is connected through now);
- *  - 'direct' / 'block' → those;
- *  - the server, chain or group the plan already dials as that very target →
- *    its outbound, shared: a WireGuard dialled twice is two sessions on one
- *    key, and the peer keeps only the newest — each would cut the other off;
- *  - else its own `lu-out-<id>` (`lu-out-chain-<cid>` for a chain);
- *  - a target that is gone, a chain that lost a member, an unsafe one →
- *    'block'. A user's traffic is never sent out unprotected because their
- *    config disappeared.
+ *   existingTag(target), server(record, tag), chain(records, tag), unsafe(record) }
+ * — src/main/targetOutbounds.js says what each is for, and what each target
+ * becomes: '' the plan's exit, 'direct' / 'block' those, the server, chain or
+ * group the plan already dials as that very target its outbound (shared: a
+ * WireGuard dialled twice is two sessions on one key), else its own
+ * `lu-out-<id>` (`lu-out-chain-<cid>` for a chain); a target that is gone, a
+ * chain that lost a member, an unsafe one 'block'. A user's traffic is never
+ * sent out unprotected because their config disappeared.
  */
 function lanUsersOutbounds(lu, ctx) {
-  const c = ctx || {};
-  const servers = isObj(c.serversById) ? c.serversById : {};
-  const chains = isObj(c.chainsById) ? c.chainsById : {};
-  const unsafe = (recs) => typeof c.unsafe === 'function' && recs.some((r) => c.unsafe(r));
-  const outbounds = [];
-  const seen = new Set();
-  const push = (list) => { for (const o of list || []) if (o && o.tag && !seen.has(o.tag)) { seen.add(o.tag); outbounds.push(o); } };
-
-  function tagOf(target) {
-    if (!target) return c.exitTag || 'direct';
-    if (target === 'direct' || target === 'block') return target;
-    const reuse = typeof c.existingTag === 'function' ? c.existingTag(target) : null;
-    if (reuse) return reuse;
-    if (target.indexOf('chain:') === 0) {
-      const cid = target.slice('chain:'.length);
-      const list = chains[cid];
-      if (!Array.isArray(list) || !list.length || list.some((x) => !x || !x.outbound) || unsafe(list) || typeof c.chain !== 'function') return 'block';
-      const tag = OUT_PREFIX + 'chain-' + cid;
-      push(c.chain(list, tag));
-      return tag;
-    }
-    const srv = servers[target];
-    if (!srv || !srv.outbound || unsafe([srv]) || typeof c.server !== 'function') return 'block';
-    const tag = OUT_PREFIX + target;
-    push(c.server(srv, tag));
-    return tag;
-  }
-
-  const tags = {};
-  for (const t of neededTargets(lu)) tags[t] = tagOf(t);
-  return { outbounds, tags };
+  return targetOutbounds(neededTargets(lu), ctx, OUT_PREFIX);
 }
 
 /** The ports a config already holds: its inbounds', and the metrics and control API listeners'. */
@@ -246,7 +211,7 @@ function applyLanUsers(config, lu, ctx) {
   }
   for (const e of tpOf(lu)) {
     if (!take(e.port)) continue;
-    inbounds.push({ tag: e.tag, port: e.port, listen: '127.0.0.1', protocol: 'socks', settings: { auth: 'noauth', udp: true }, sniffing });
+    inbounds.push(loopbackSocksInbound(e.tag, e.port, sniffing));
     guarded.push(e.tag);
     userRules.push({ type: 'field', inboundTag: [e.tag], outboundTag: tagOf(e.target) });
   }
