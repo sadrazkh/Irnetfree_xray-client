@@ -170,12 +170,17 @@ object CertPin {
      * Hysteria is QUIC: a TCP handshake to its port reaches some other service,
      * or nothing (EngineChoice runs it on sing-box). MASQUE never asks: the core
      * refuses allowInsecure there outright (a JSON config that carries it anyway
-     * is refused by the core, not pinned).
+     * is refused by the core, not pinned). Nor do TUIC and AnyTLS: sing-box is
+     * their only core, and it can keep no learnt pin (SingboxConfig refuses
+     * one) — their allowInsecure is sing-box's own insecure, on purpose, as a
+     * Hysteria2's without a pin is (EngineChoice.needsInsecureCore). TUIC is
+     * QUIC besides, where this TCP handshake reaches nothing.
      */
     fun wantsPin(server: ServerConfig?): Boolean {
         val st = server?.outbound?.optJSONObject("streamSettings") ?: return false
         val tls = st.optJSONObject("tlsSettings") ?: return false
         if (st.optString("security") != "tls" || !tls.optBoolean("allowInsecure")) return false
+        if (EngineChoice.isSingboxOnly(server)) return false
         val net = st.optString("network")
         if (net == "hysteria" || net == "masque") return false
         return tls.optString("pinnedPeerCertSha256").isBlank() && tls.optString("verifyPeerCertByName").isBlank()
@@ -201,9 +206,11 @@ object CertPin {
      * nothing to re-check. A MASQUE server over HTTP/3 listens on QUIC: the
      * probe's TCP handshake reaches some other service on that port, or
      * nothing — never the certificate it pinned (certPin.js staleCertPins).
+     * A TUIC or AnyTLS record never learns one ([wantsPin]); one it carries
+     * anyway is not checked here — sing-box refuses it whatever it says.
      */
     fun recheckDue(server: ServerConfig, now: Long = System.currentTimeMillis(), maxAgeMs: Long = RECHECK_AFTER_MS): Boolean {
-        if (normalizePin(server.certPin).isEmpty() || Masque.isQuic(server)) return false
+        if (normalizePin(server.certPin).isEmpty() || Masque.isQuic(server) || EngineChoice.isSingboxOnly(server)) return false
         return now - server.certPinCheckedAt >= maxAgeMs
     }
 

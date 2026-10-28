@@ -84,13 +84,25 @@ object XrayTester {
         // A server whose connection runs on sing-box — its own choice, or a
         // Hysteria2 with a certificate only sing-box can accept
         // (EngineChoice.needsInsecureCore) — is measured on sing-box when it is
-        // bundled: on Xray it would fail while connecting to it works.
+        // bundled: on Xray it would fail while connecting to it works. TUIC and
+        // AnyTLS are measured there or not at all: no Xray core takes them.
+        val singboxOnly = EngineChoice.isSingboxOnly(server)
         if (mux == null && EngineChoice.chooseEngine(ConnectionPlan.Single(server), s.defaultEngine) == EngineChoice.SINGBOX && SingboxCore.available(ctx)) {
-            val sb = try { SingboxConfig.build(server, s.copy(socksPort = port, httpPort = 0)).toString() } catch (e: Throwable) { null }
+            var why = ""
+            val sb = try { SingboxConfig.build(server, s.copy(socksPort = port, httpPort = 0)).toString() } catch (e: Throwable) { why = e.message ?: "error"; null }
             if (sb != null) {
                 val core = SingboxCore()
                 return if (core.start(ctx, sb, port, onLog = {})) Handle(port, null, null, core) else { core.stop(); null }
             }
+            if (singboxOnly) {
+                VpnState.addLog("Test not started — " + if (SingboxConfig.isPinned(server)) EngineChoice.singboxOnlyError(server, EngineChoice.PIN)
+                    else "\"${server.name}\": $why (${EngineChoice.protocolName(server)} runs on sing-box only)")
+                return null
+            }
+        }
+        if (singboxOnly) {
+            if (mux == null) VpnState.addLog("Test not started — " + EngineChoice.singboxOnlyError(server, EngineChoice.MISSING))
+            return null
         }
         val withMux = mux == true
         val built = try { ConfigBuilder.buildTestConfig(server, port, wgIps, withMux) } catch (e: Throwable) { return null }

@@ -113,7 +113,8 @@ class ServerFieldsTest {
             d["name"] = "T"; d["address"] = "de.example.com"
             when (p) {
                 "vless", "vmess" -> d["uuid"] = uuid
-                "trojan", "shadowsocks", "hysteria2" -> d["password"] = "secret-1"
+                "trojan", "shadowsocks", "hysteria2", "anytls" -> d["password"] = "secret-1"
+                "tuic" -> { d["uuid"] = uuid; d["password"] = "secret-1" }
                 "wireguard" -> { d["privateKey"] = "aGVsbG8gd29ybGQgdGhpcyBpcyBhIGtleSAzMiBi"; d["publicKey"] = "cGVlciBrZXkgdGhpcyBpcyBhIGtleSAzMiBieXRlcw==" }
                 else -> {}
             }
@@ -135,7 +136,9 @@ class ServerFieldsTest {
             }
         }
         assertThrows(IllegalArgumentException::class.java) { ServerEditor.create("vless", ServerEditor.Fields(address = "a.example", port = "443")) }
-        assertThrows(IllegalArgumentException::class.java) { ServerEditor.create("tuic", ServerEditor.Fields(address = "a.example", port = "443")) }
+        assertThrows(IllegalArgumentException::class.java) { ServerEditor.create("naive", ServerEditor.Fields(address = "a.example", port = "443")) }
+        // TUIC takes a UUID and a password: either missing is said
+        assertThrows(IllegalArgumentException::class.java) { ServerEditor.create("tuic", ServerEditor.Fields(address = "a.example", port = "443", cred = uuid)) }
     }
 
     @Test fun mux_aServersOwnSetting_beforeTheApps() {

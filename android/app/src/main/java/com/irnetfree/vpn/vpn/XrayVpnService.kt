@@ -1399,6 +1399,10 @@ class XrayVpnService : VpnService() {
             // that core is bundled for this ABI is asked separately below.
             var engine = EngineChoice.chooseEngine(plan, s.defaultEngine)
             val single = plan as? ConnectionPlan.Single
+            // A TUIC / AnyTLS server where sing-box cannot go (a chain, a group, a pool, a
+            // profile) is refused now, before a mux test or a DNS lookup for a config that
+            // could never be built (TunnelSetup.coreConfig refuses it as well)
+            EngineChoice.singboxOnlyInside(plan).firstOrNull()?.let { srv: ServerConfig -> throw IllegalStateException(EngineChoice.singboxOnlyError(srv, EngineChoice.PLAN)) }
 
             // Geo rules only work when the core can read geoip.dat/geosite.dat.
             // Ask reality instead of hardcoding a flag, so the day those files
@@ -1422,6 +1426,9 @@ class XrayVpnService : VpnService() {
             // server; PattN takes the very same JSON as the in-process core, so
             // it needs nothing here beyond being present.
             if (engine == EngineChoice.SINGBOX && (single == null || !SingboxCore.available(ctx))) {
+                // TUIC / AnyTLS have no other core: said, not handed to one that refuses them
+                if (single != null && EngineChoice.isSingboxOnly(single.server))
+                    throw IllegalStateException(EngineChoice.singboxOnlyError(single.server, EngineChoice.MISSING))
                 if (single != null) VpnState.addLog("sing-box is not bundled for this device — using the in-process core.")
                 else VpnState.addLog("sing-box cannot run a chain, pool or advanced plan — using the in-process core.")
                 engine = EngineChoice.XRAY

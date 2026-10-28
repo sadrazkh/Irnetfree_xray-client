@@ -11,14 +11,15 @@ import java.nio.charset.CodingErrorAction
 /**
  * Share-link parser: converts vless:// vmess:// trojan:// ss:// socks:// links
  * into Xray outbound JSON (+ a normalized ServerConfig). Ported from the desktop
- * parser.js so both clients produce identical outbounds.
+ * parser.js so both clients produce identical outbounds. tuic:// and anytls://
+ * become Xray-shaped records too, though only sing-box runs them.
  */
 object LinkParser {
 
     /** A URI scheme at the start of a line; at the start of ANY line; the ones this app imports (parser.js). */
     private val SCHEME = Regex("^([a-z][a-z0-9+.-]*)://", RegexOption.IGNORE_CASE)
     private val SCHEME_LINE = Regex("^[a-z][a-z0-9+.-]*://", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE))
-    private val SUPPORTED = Regex("^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg|hysteria2|hy2)://", RegexOption.IGNORE_CASE)
+    private val SUPPORTED = Regex("^(vless|vmess|trojan|ss|socks|socks5|wireguard|wg|hysteria2|hy2|tuic|anytls)://", RegexOption.IGNORE_CASE)
 
     /**
      * v2rayN shares an HTTP proxy exactly like a SOCKS one —
@@ -75,9 +76,9 @@ object LinkParser {
                 }
                 continue
             }
-            // tuic / anytls / … are proxy links this app cannot import: said, rather
-            // than a subscription that seems to have fewer servers. http(s) lines (a
-            // channel or subscription URL) and comments (no scheme) stay skipped.
+            // hysteria (v1) / ssh / … are proxy links this app cannot import: said,
+            // rather than a subscription that seems to have fewer servers. http(s)
+            // lines (a channel or subscription URL) and comments (no scheme) stay skipped.
             val scheme = SCHEME.find(line)?.groupValues?.get(1)?.lowercase() ?: continue
             if (scheme != "http" && scheme != "https") errors.add(line.take(24) + "… : unsupported protocol: " + scheme)
         }
@@ -108,6 +109,8 @@ object LinkParser {
             l.startsWith("socks://", true) || l.startsWith("socks5://", true) -> parseProxyLink(l, "socks")
             l.startsWith("wireguard://", true) || l.startsWith("wg://", true) -> parseWireguard(l)
             l.startsWith("hysteria2://", true) || l.startsWith("hy2://", true) -> parseHysteria2(l)
+            l.startsWith("tuic://", true) -> parseTuic(l)
+            l.startsWith("anytls://", true) -> parseAnytls(l)
             // case-insensitive to match HTTP_PROXY_LINK (and parseMany's line filter),
             // so an uppercase scheme imports instead of being reported as an error
             l.startsWith("http://", true) && isHttpProxyLink(l) -> parseProxyLink(l, "http")
@@ -502,6 +505,145 @@ object LinkParser {
             "hopInterval" to (hop?.optJSONObject("settings")?.opt("interval")?.toString() ?: ""),
             "up" to qp.optString("brutalUp"), "down" to qp.optString("brutalDown")
         )
+    }
+
+    /* ------------------------- TUIC / AnyTLS (sing-box only) ------------------------- */
+
+    /** TUIC's congestion controls, in sing-box's names. */
+    private val TUIC_CC = setOf("bbr", "cubic", "new_reno")
+
+    /** A TUIC congestion control as sing-box names it; "" (its default, cubic) for anything else (parser.js tuicCongestion). */
+    internal fun tuicCongestion(v: String?): String {
+        val s = (v ?: "").trim().lowercase().replace('-', '_')
+        val name = if (s == "newreno" || s == "reno") "new_reno" else s
+        return if (name in TUIC_CC) name else ""
+    }
+
+    /** TUIC's UDP relay mode: native or quic; "" (sing-box's default, native) for anything else (parser.js tuicUdpMode). */
+    internal fun tuicUdpMode(v: String?): String {
+        val s = (v ?: "").trim().lowercase()
+        return if (s == "native" || s == "quic") s else ""
+    }
+
+    /**
+     * A TUIC heartbeat as sing-box reads a duration ("10s", "500ms", "1m"); a
+     * bare number is seconds. "" for none (a bare 0 too), null for what is no
+     * duration at all — sing-box would refuse the whole config over it
+     * (parser.js tuicHeartbeat).
+     */
+    internal fun tuicHeartbeat(v: String?): String? {
+        val s = (v ?: "").trim().lowercase()
+        if (s.isEmpty()) return ""
+        if (Regex("^\\d+$").matches(s)) return if (s.trimStart('0').isNotEmpty()) s + "s" else ""
+        return if (Regex("^\\d+(\\.\\d+)?(ms|s|m|h)$").matches(s)) s else null
+    }
+
+    /** A UUID as sing-box parses one — dashed, or 32 hex digits; anything else it refuses at start (parser.js isUuid). */
+    internal fun isUuid(v: String?): Boolean =
+        Regex("^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$", RegexOption.IGNORE_CASE).matches((v ?: "").trim())
+
+    /**
+     * tuic://<uuid>:<password>@host:port?sni=…&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1&reduce_rtt=1#name
+     * — parser.js parseTuic. TUIC v5 rides QUIC, and no Xray core speaks it:
+     * sing-box alone runs it (EngineChoice.isSingboxOnly). The record is still
+     * the Xray-SHAPED outbound every other kind has — `settings.servers[0]`
+     * and a TLS stream on network "udp" — so lists, chains and the editor read
+     * it as they read any server; only SingboxConfig ever translates it. The
+     * userinfo splits at its FIRST ':', each part decoded — a UUID holds none,
+     * a password may; a userinfo encoded whole (`uuid%3Apassword`) is decoded
+     * once, then split. The UUID must be one: sing-box refuses anything else.
+     */
+    private fun parseTuic(link: String): ServerConfig {
+        val (main, name) = splitHash(link.substring("tuic://".length))
+        val (beforeQ, q) = splitQuery(main)
+        val at = beforeQ.lastIndexOf('@')
+        val (address, portStr) = splitHostPort(if (at == -1) beforeQ else beforeQ.substring(at + 1))
+        if (address.isBlank()) throw IllegalArgumentException("tuic: no server address in the link")
+        val userinfo = if (at == -1) "" else beforeQ.substring(0, at)
+        val whole = !userinfo.contains(':')
+        val raw = if (whole) dec(userinfo) else userinfo
+        val ci = raw.indexOf(':')
+        fun part(x: String): String = if (whole) x else dec(x)
+        val uuid = part(if (ci == -1) raw else raw.substring(0, ci)).trim()
+        val password = if (ci == -1) "" else part(raw.substring(ci + 1))
+        if (uuid.isEmpty()) throw IllegalArgumentException("TUIC: no uuid in the link")
+        if (!isUuid(uuid)) throw IllegalArgumentException("TUIC: the uuid in the link is not a UUID")
+        val port = portOf(portStr, 443)
+        val f = HashMap<String, String>(q); f["address"] = address; f["port"] = port.toString(); f["uuid"] = uuid; f["password"] = password
+        return ServerConfig(newId("s"), name.ifBlank { address }, "tuic", address, port, buildTuicOutbound(f), link)
+    }
+
+    /**
+     * The TUIC record's outbound from a link's (or the editor's) values
+     * (parser.js buildTuicOutbound): `address`, `port`, `uuid`, `password`,
+     * `congestion_control`, `udp_relay_mode`, `zero_rtt_handshake` /
+     * `reduce_rtt`, `heartbeat`, and the TLS ([singboxOnlyTls]). Every server
+     * key is written — "" / false where sing-box's own default applies — so
+     * the record has one shape.
+     */
+    fun buildTuicOutbound(f: Map<String, String?>): JSONObject {
+        val server = JSONObject()
+            .put("address", (f["address"] ?: "").trim()).put("port", portOf(f["port"] ?: "", 443))
+            .put("uuid", (f["uuid"] ?: "").trim()).put("password", f["password"] ?: "")
+            .put("congestionControl", tuicCongestion(f["congestion_control"]))
+            .put("udpRelayMode", tuicUdpMode(f["udp_relay_mode"]))
+            .put("zeroRtt", isTrue(f["zero_rtt_handshake"]) || isTrue(f["reduce_rtt"]) || isTrue(f["zeroRtt"]))
+            .put("heartbeat", tuicHeartbeat(f["heartbeat"]) ?: "")
+        return JSONObject().put("protocol", "tuic")
+            .put("settings", JSONObject().put("servers", JSONArray().put(server)))
+            .put("streamSettings", JSONObject().put("network", "udp").put("security", "tls").put("tlsSettings", singboxOnlyTls(f, "tuic")))
+    }
+
+    /**
+     * anytls://<password>@host:port?sni=…&fp=chrome&alpn=…&insecure=1#name —
+     * parser.js parseAnytls. AnyTLS (sing-box 1.12+) is TLS over TCP with
+     * padding of its own; as with TUIC, sing-box alone runs it. Its userinfo
+     * is the password whole.
+     */
+    private fun parseAnytls(link: String): ServerConfig {
+        val (main, name) = splitHash(link.substring("anytls://".length))
+        val (beforeQ, q) = splitQuery(main)
+        val at = beforeQ.lastIndexOf('@')
+        val (address, portStr) = splitHostPort(if (at == -1) beforeQ else beforeQ.substring(at + 1))
+        if (address.isBlank()) throw IllegalArgumentException("anytls: no server address in the link")
+        val password = if (at == -1) "" else dec(beforeQ.substring(0, at))
+        val port = portOf(portStr, 443)
+        val f = HashMap<String, String>(q); f["address"] = address; f["port"] = port.toString(); f["password"] = password
+        return ServerConfig(newId("s"), name.ifBlank { address }, "anytls", address, port, buildAnytlsOutbound(f), link)
+    }
+
+    /** The AnyTLS record's outbound (parser.js buildAnytlsOutbound): `address`, `port`, `password` and the TLS ([singboxOnlyTls]). */
+    fun buildAnytlsOutbound(f: Map<String, String?>): JSONObject {
+        val server = JSONObject()
+            .put("address", (f["address"] ?: "").trim()).put("port", portOf(f["port"] ?: "", 443))
+            .put("password", f["password"] ?: "")
+        return JSONObject().put("protocol", "anytls")
+            .put("settings", JSONObject().put("servers", JSONArray().put(server)))
+            .put("streamSettings", JSONObject().put("network", "tcp").put("security", "tls").put("tlsSettings", singboxOnlyTls(f, "anytls")))
+    }
+
+    /**
+     * The TLS of a TUIC or AnyTLS record (parser.js singboxOnlyTls): the SNI
+     * (the address when none is named, unless that is an IP), "allow insecure"
+     * in any of its spellings — sing-box's own insecure for these, as no pin is
+     * learnt for them (CertPin.wantsPin) — the ALPN; AnyTLS' uTLS fingerprint
+     * (chrome by default; TUIC is QUIC, Go's own TLS, and has none), TUIC's
+     * `disable_sni`; then ECH and the pins ([tlsExtras], which SingboxConfig
+     * refuses to weaken). PattN's ECH outbound is an Xray outbound, nothing
+     * sing-box can dial through: dropped.
+     */
+    private fun singboxOnlyTls(f: Map<String, String?>, protocol: String): JSONObject {
+        val address = (f["address"] ?: "").trim()
+        val tls = JSONObject()
+            .put("serverName", (f.given("sni") ?: f.given("serverName") ?: "").trim().ifEmpty { if (DnsPlan.isIp(address)) "" else address })
+            .put("allowInsecure", isTrue(f["insecure"]) || isTrue(f["allowInsecure"]) || isTrue(f["allow_insecure"]))
+        val alpn = (f["alpn"] ?: "").split(",").map { a: String -> a.trim() }.filter { a: String -> a.isNotEmpty() }
+        if (alpn.isNotEmpty()) tls.put("alpn", JSONArray(alpn))
+        if (protocol == "anytls") tls.put("fingerprint", (f.given("fp") ?: f.given("fingerprint") ?: "").trim().ifEmpty { "chrome" })
+        if (protocol == "tuic" && isTrue(f["disable_sni"])) tls.put("disableSni", true)
+        tlsExtras(tls, f)
+        tls.remove("echOutbound")
+        return tls
     }
 
     /**
@@ -1061,6 +1203,15 @@ object LinkParser {
     private fun jarr(a: JSONArray?): List<String> = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
     private fun b64e(s: String) = Base64.encodeToString(s.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
     private fun qstr(m: Map<String, String>) = m.filterValues { it.isNotBlank() }.entries.joinToString("&") { "${it.key}=${enc(it.value)}" }
+    /** [qstr] behind its `?`, or nothing at all when every value is empty. */
+    private fun query(m: Map<String, String>): String { val x = qstr(m); return if (x.isEmpty()) "" else "?$x" }
+
+    /** ECH and the pins of a TUIC / AnyTLS record, under the names [tlsExtras] reads. */
+    private fun tlsExtrasToQuery(tls: JSONObject, q: MutableMap<String, String>) {
+        q["ech"] = tls.optString("echConfigList")
+        q["pcs"] = tls.optString("pinnedPeerCertSha256")
+        q["vcn"] = tls.optString("verifyPeerCertByName")
+    }
 
     /** streamSettings -> flat query params (inverse of buildStream). */
     private fun streamToQuery(st: JSONObject, q: MutableMap<String, String>) {
@@ -1161,6 +1312,30 @@ object LinkParser {
                 q["down"] = (h["down"] ?: "").replace(Regex("\\s*mbps$", RegexOption.IGNORE_CASE), "")
                 extras["engine"]?.let { q["engine"] = it }
                 "hysteria2://${enc(h["auth"] ?: "")}@${joinHostPort(s.address, s.port)}/?${qstr(q)}$name"
+            }
+            // sing-box only, in the spellings parseTuic / parseAnytls read (NekoBox's for
+            // TUIC's own keys), as parser.js writes them; no `engine=` — they have one core
+            "tuic" -> {
+                val srv = srv0(ob); val tls = st.optJSONObject("tlsSettings") ?: JSONObject()
+                val q = LinkedHashMap<String, String>()
+                q["sni"] = tls.optString("serverName"); q["alpn"] = jarr(tls.optJSONArray("alpn")).joinToString(",")
+                q["congestion_control"] = srv.optString("congestionControl"); q["udp_relay_mode"] = srv.optString("udpRelayMode")
+                q["reduce_rtt"] = if (srv.optBoolean("zeroRtt")) "1" else ""
+                q["heartbeat"] = srv.optString("heartbeat")
+                q["allow_insecure"] = if (tls.optBoolean("allowInsecure")) "1" else ""
+                q["disable_sni"] = if (tls.optBoolean("disableSni")) "1" else ""
+                tlsExtrasToQuery(tls, q)
+                val pw = srv.optString("password")
+                "tuic://${enc(srv.optString("uuid"))}${if (pw.isNotEmpty()) ":" + enc(pw) else ""}@${joinHostPort(s.address, s.port)}${query(q)}$name"
+            }
+            "anytls" -> {
+                val srv = srv0(ob); val tls = st.optJSONObject("tlsSettings") ?: JSONObject()
+                val q = LinkedHashMap<String, String>()
+                q["sni"] = tls.optString("serverName"); q["fp"] = tls.optString("fingerprint")
+                q["alpn"] = jarr(tls.optJSONArray("alpn")).joinToString(",")
+                q["insecure"] = if (tls.optBoolean("allowInsecure")) "1" else ""
+                tlsExtrasToQuery(tls, q)
+                "anytls://${enc(srv.optString("password"))}@${joinHostPort(s.address, s.port)}${query(q)}$name"
             }
             "socks", "http" -> {
                 val srv = srv0(ob); val c = srv.optJSONArray("users")?.optJSONObject(0)
