@@ -515,7 +515,12 @@ function createLanRouter(o = {}) {
         if (!builtOn || l.transparent.unassigned !== 'login') return { ok: false, code: 'off' };
         const r = plan.judgeSignIn({ lu: l, sessions, usage: usageNow(), now: now(), mac, username, password, checkPassword });
         if (!r.ok) {
-          log(`Users: a sign-in from ${mac} was refused (${r.code})`, 'info');
+          // which of the two it was, for the admin alone (the page says the same for both); never the password
+          const who = plan.typed(username).replace(/[\x00-\x1f\x7f"]/g, '').trim().slice(0, 64);
+          const why = r.why === 'user'
+            ? `no user "${who}" on this router — users are made on the router's own Users page; the desktop app's are not here`
+            : r.why === 'password' ? `the password does not match "${who}"'s` : r.code;
+          log(`Users: a sign-in from ${mac} was refused (${why})`, 'info');
           return r;
         }
         sessions[mac] = { userId: r.user.id, until: now() + l.transparent.sessionHours * 3600000, at: now() };
