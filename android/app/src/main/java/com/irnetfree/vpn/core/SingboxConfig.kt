@@ -145,7 +145,7 @@ object SingboxConfig {
             else -> throw Unsupported("sing-box: protocol '$proto' not supported (use Xray)")
         }
 
-        translateTls(ss, server.address)?.let {
+        translateTls(ss, server.address, server.certPin)?.let {
             // sing-box (1.12+) splits the ClientHello itself: the link's fragment
             // setting asks for exactly that (its sizes and delays are Xray's knobs).
             if (ob.optString("_fragment").isNotBlank()) it.put("fragment", true)
@@ -186,23 +186,35 @@ object SingboxConfig {
         fun mbps(v: String?): Int = Regex("^(\\d+(?:\\.\\d+)?)\\s*m", RegexOption.IGNORE_CASE).find(v ?: "")?.groupValues?.get(1)?.toDouble()?.let { Math.round(it).toInt() } ?: 0
         mbps(h["up"]).takeIf { it > 0 }?.let { out.put("up_mbps", it) }
         mbps(h["down"]).takeIf { it > 0 }?.let { out.put("down_mbps", it) }
-        val tls = translateTls(ss, server.address) ?: JSONObject().put("enabled", true).put("server_name", server.address)
+        val tls = translateTls(ss, server.address, server.certPin) ?: JSONObject().put("enabled", true).put("server_name", server.address)
         tls.remove("utls")   // QUIC: no uTLS fingerprint
         out.put("tls", tls)
         return out
     }
 
-    private fun translateTls(ss: JSONObject, addr: String): JSONObject? {
+    /**
+     * A certificate pin — the link's `pcs` or `vcn`, or the one learnt on first
+     * use (ServerConfig.certPin) — is a promise that no other certificate is
+     * taken, and sing-box can keep none of them: it pins a public key, not a
+     * certificate, and has nothing like `vcn`. Skipping its check instead (as
+     * this did until v1.35.1) accepted ANY certificate on a pinned server. So
+     * such a server throws here and TunnelSetup runs it on the in-process Xray
+     * core, which keeps all three, saying why (singboxBuilder.js pinnedTls).
+     * `allowInsecure` alone is not a pin.
+     */
+    private fun pinnedTls(t: JSONObject, certPin: String): Boolean =
+        t.optString("pinnedPeerCertSha256").isNotBlank() || t.optString("verifyPeerCertByName").isNotBlank() || certPin.isNotBlank()
+
+    private fun translateTls(ss: JSONObject, addr: String, certPin: String = ""): JSONObject? {
         val security = ss.optString("security", "none").lowercase()
         if (security != "tls" && security != "reality") return null
         val t = ss.optJSONObject("tlsSettings") ?: ss.optJSONObject("realitySettings") ?: JSONObject()
+        if (security == "tls" && pinnedTls(t, certPin)) {
+            throw Unsupported("this server's certificate is pinned (pcs, vcn or pinned on first use), and sing-box could only check it by accepting any certificate")
+        }
         val tls = JSONObject().put("enabled", true)
         tls.put("server_name", t.optString("serverName").ifBlank { addr })
-        // sing-box can pin neither a certificate's hash (`pcs`: it pins a public
-        // key) nor verify it against another name (`vcn`): a link that carries one
-        // has a certificate the usual check refuses, so — as allowInsecure did —
-        // the check is skipped. The Xray cores keep both checks.
-        if (t.optBoolean("allowInsecure") || (security == "tls" && (t.optString("pinnedPeerCertSha256").isNotBlank() || t.optString("verifyPeerCertByName").isNotBlank()))) tls.put("insecure", true)
+        if (t.optBoolean("allowInsecure")) tls.put("insecure", true)
         val alpn = normalizeAlpn(t.opt("alpn"))
         if (alpn.length() > 0) tls.put("alpn", alpn)
         tls.put("utls", JSONObject().put("enabled", true).put("fingerprint", t.optString("fingerprint", "chrome")))

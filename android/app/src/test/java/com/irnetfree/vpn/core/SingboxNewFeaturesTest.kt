@@ -24,10 +24,21 @@ class SingboxNewFeaturesTest {
         assertFalse(out("trojan://pw@a.example.com:443").getJSONObject("tls").has("ech"))
     }
 
-    @Test fun pcsAndVcnSkipTheCheckOnSingbox() {
-        assertTrue(out("trojan://pw@a.example.com:443?pcs=" + "ab".repeat(32)).getJSONObject("tls").getBoolean("insecure"))
-        assertTrue(out("trojan://pw@a.example.com:443?vcn=real.example").getJSONObject("tls").getBoolean("insecure"))
+    // v1.35.1: a pin is never "accept any certificate" on sing-box — such a server is not sing-box's, and
+    // TunnelSetup runs it on the in-process Xray core (singboxBuilder.test.js holds the desktop's)
+    @Test fun aPinnedCertificateIsNotSingboxs() {
+        val pinned = { server: ServerConfig ->
+            try { SingboxConfig.build(server, s); fail("a pinned server translated for sing-box") }
+            catch (e: SingboxConfig.Unsupported) { assertTrue(e.message!!.contains("certificate is pinned")) }
+        }
+        pinned(LinkParser.parseLink("trojan://pw@a.example.com:443?pcs=" + "ab".repeat(32)))
+        pinned(LinkParser.parseLink("trojan://pw@a.example.com:443?vcn=real.example"))
+        // the pin learnt on first use, on a link that asked for allowInsecure
+        pinned(LinkParser.parseLink("trojan://pw@a.example.com:443?allowInsecure=1").copy(certPin = "aa".repeat(32)))
+        pinned(LinkParser.parseLink("hysteria2://pw@h.example.com:443/?insecure=1").copy(certPin = "aa".repeat(32)))
+        // no pin: as before
         assertFalse(out("trojan://pw@a.example.com:443").getJSONObject("tls").has("insecure"))
+        assertTrue(out("trojan://pw@a.example.com:443?allowInsecure=1").getJSONObject("tls").getBoolean("insecure"))
     }
 
     @Test fun hysteria2() {
