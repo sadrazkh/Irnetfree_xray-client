@@ -55,7 +55,7 @@ test('the core gate builds every config without a core — the v1.18 link forms 
   const run = dryRun(t);
   assert.equal(run.status, 0, run.out);
   assert.equal(fs.readdirSync(run.dir).length, run.built.length, 'every config it names is on disk');
-  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(13 of them sing-box TUN configs\\)`, 'm'));
+  assert.match(run.out, new RegExp(`^${run.built.length} configs built for xray ${SUGGESTED.xray.replace(/\./g, '\\.')} \\(14 of them sing-box TUN configs\\)`, 'm'));
   assert.ok(run.built.length > 200, `the plans × DNS modes matrix and the shapes are still there: ${run.built.length}`);
   for (const form of FORMS) {
     for (const v of ['plain', 'tun', 'strict']) assert.ok(run.built.includes(`link-${form}-${v}.json`), `link-${form}-${v}`);

@@ -421,6 +421,52 @@ test('a user’s link for a phone: socks:// with the account, its QR, the addres
   assert.ok(ob.textContent.includes(odd.t('lu.shareOff')), 'proxy accounts off: said in the dialog');
 });
 
+test('the hotspot check (Windows): each device on the hotspot, whether the tunnel saw it, and what the test means; nothing on the router or without the payload\'s hotspot', async () => {
+  const hotspot = { on: true, tun: true, error: '', devices: [
+    { ip: '192.168.137.45', mac: 'a2:4b:11:0c:9e:07', seen: true, lastSeen: 1, open: 3, bytes: 5 * 1024 * 1024 },
+    { ip: '192.168.137.88', mac: '3c:22:fb:9a:10:7e', seen: false, lastSeen: 0, open: 0, bytes: 0 }
+  ] };
+  const h = harness({ data: payload({ hotspot }) });
+  await h.load();
+  const card = h.host.one('lu-hscard');
+  assert.equal(card.one('lu-title').textContent, 'دستگاه‌های هات‌اسپات');
+  const rows = card.byClass('lu-hsrow');
+  assert.deepEqual(rows.map((r) => [r.dataset.ip, r.one('lu-ip').textContent, r.one('lu-ip').getAttribute('dir'), r.one('lu-mac').textContent]), [
+    ['192.168.137.45', '192.168.137.45', 'ltr', 'a2:4b:11:0c:9e:07'], ['192.168.137.88', '192.168.137.88', 'ltr', '3c:22:fb:9a:10:7e']
+  ]);
+  assert.equal(rows[0].one('lu-hs-yes').textContent, 'از VPN می‌رود ✓');
+  assert.match(rows[0].one('lu-hsuse').textContent, /^3 اتصالِ باز · 5(\.0)? MB$/);
+  assert.equal(rows[1].one('lu-hs-no').textContent, 'هنوز از VPN دیده نشده');
+  assert.equal(rows[1].byClass('lu-hsuse').length, 0);
+  assert.equal(card.one('lu-hotspot').textContent, h.t('lu.hs.how'));
+  assert.equal(card.byClass('warn').length, 0);
+  h.host.byKey('hsrefresh').click();
+  await flush();
+  assert.equal(h.calls.filter((c) => c[0] === 'get').length, 2, 'refresh reads again');
+
+  // TUN off: said, and the devices are "unknown"
+  const off = harness({ lang: 'en', data: payload({ hotspot: Object.assign({}, hotspot, { tun: false, devices: [Object.assign({}, hotspot.devices[1])] }) }) });
+  await off.load();
+  assert.equal(off.host.one('lu-hscard').one('warn').textContent, 'For this test, TUN mode must be on and the app connected.');
+  assert.equal(off.host.one('lu-hs-no').textContent, 'Unknown (TUN off)');
+  // the hotspot off; the API refused
+  const down = harness({ lang: 'en', data: payload({ hotspot: { on: false, tun: true, error: '', devices: [] } }) });
+  await down.load();
+  assert.equal(down.host.one('lu-hscard').one('warn').textContent, 'The Windows hotspot is off — turn it on and connect a phone to it.');
+  assert.equal(down.host.one('lu-hscard').byClass('empty').length, 0);
+  const err = harness({ lang: 'en', data: payload({ hotspot: { on: true, tun: true, error: 'HTTP 401', devices: [] } }) });
+  await err.load();
+  assert.equal(err.host.one('lu-hscard').one('warn').textContent, 'The tunnel did not answer: HTTP 401');
+  assert.equal(err.host.one('lu-hscard').one('empty').textContent, 'No device is on the hotspot yet.');
+  // no hotspot in the payload (a Mac, Linux, an older service): no card; the router: its devices, not this
+  const none = harness({ data: payload() });
+  await none.load();
+  assert.equal(none.host.byClass('lu-hscard').length, 0);
+  const router = harness({ router: true, data: routerPayload({ hotspot }) });
+  await router.load();
+  assert.equal(router.host.byClass('lu-hscard').length, 0);
+});
+
 test('the config picker: the app’s configs by subscription, after the current connection, direct and blocked; a gone one said as gone', async () => {
   const h = harness();
   await h.load();
