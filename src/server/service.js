@@ -66,6 +66,8 @@ const netLinks = require('../main/netLinks');
 const { createMultiWanQuota, mergeLinks } = require('../main/multiWanMeter');
 // users and devices on the LAN (module lanUsers): its channels, the build's input and its usage meter
 const { registerLanUsers } = require('../modules/lanUsers/ipc');
+// the tunnel's live connections by program (the Logs page's Connections tab)
+const { createConnectionsWatch } = require('../main/connectionsWatch');
 // OpenWrt: the router as the LAN's tunnel — the gateway backend and the device
 // list (docs/superpowers/specs/2026-09-23-openwrt-port-design.md). main.js is
 // deliberately NOT given this: Electron never runs on a router.
@@ -2335,10 +2337,14 @@ function createService(opts = {}) {
           // the users' transparent mode (lanUsers/router): its nft sets, sing-box routes and the
           // entry servers of its configs (kept off the tunnel by the gateway) — null when off, and then no key at all
           const lanUsersGw = OPENWRT ? await lanRouter.gatewayOptions(settings.lanUsersTp) : null;
+          // a headless desktop's sing-box TUN: its loopback API, a fresh secret per tunnel — the
+          // Connections tab reads it (connectionsWatch.js; main.js says the rest). Never the router's.
+          const tunWatch = !OPENWRT && myTun.backendId === 'sing-box' && !myTun.native
+            ? { port: (await getFreePorts(1))[0], secret: require('crypto').randomBytes(16).toString('hex') } : null;
           const resolverHoles = OPENWRT ? [] : [...resolverBypassIpsOf(config), ...(settings.leakGuard === 'strict' ? echResolverIpsOf(config) : [])];
           await myTun.start(settings.socksPort, [...entryAddrs, ...resolverHoles, ...pinnedIps],
             tunAdapterDns,
-            Object.assign({ ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] }, lanUsersGw ? { lanUsers: lanUsersGw } : {}));   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect/lanUsers
+            Object.assign({ ipv6: !!settings.ipv6, strict: settings.leakGuard === 'strict', apps: tunApps, bypassMacs: settings.lanBypassMacs, blockQuic: !!settings.lanBlockQuic, ownDirect: OPENWRT ? resolverBypassIpsOf(config) : [] }, lanUsersGw ? { lanUsers: lanUsersGw } : {}, tunWatch ? { watch: tunWatch } : {}));   // tun2socks ignores the 4th; only the router reads bypassMacs/blockQuic/ownDirect/lanUsers
           if (OPENWRT) await lanRouter.gatewayUp(myTun);
           send('log', { line: 'TUN mode active (whole system)', level: 'info' });
           noteOpenFiles();   // the router's descriptor budget, now that sing-box runs (v1.16.2)
@@ -3642,6 +3648,14 @@ function createService(opts = {}) {
     usage: () => lanUsers.meter.usage()
   });
 
+  // the Connections tab (connectionsWatch.js): read only when the page asks; nothing on a router
+  const connsWatch = createConnectionsWatch({
+    router: OPENWRT,
+    connected: () => !!(xray && xray.running) && !!store.get('activeServerId', null),
+    tun: () => (tun && tun.active ? tun : null),
+    request: deps.connsRequest
+  });
+
   const handlers = {
     'diagnostics:connection': connectionDiagnostics,
     'network:repair': repairNetwork,
@@ -3911,6 +3925,11 @@ function createService(opts = {}) {
     },
     // users and devices — lanusers:get / config / user / device (src/modules/lanUsers/ipc.js)
     ...lanUsers.handlers,
+
+    // The tunnel's live connections by program (connectionsWatch.js) — the same two channels and
+    // shapes as main.js. A headless desktop's sing-box TUN answers them; a router says `router`.
+    'conns:get': () => connsWatch.read(),
+    'conns:close': (id) => connsWatch.close(id),
 
     'ping:tcp': async (id) => {
       const { server } = resolveTarget(id);

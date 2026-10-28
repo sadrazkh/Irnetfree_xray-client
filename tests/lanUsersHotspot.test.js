@@ -101,21 +101,32 @@ test('the watch: no tunnel (TUN off) says so and reads only the devices; an API 
   assert.ok(!state.asked.some((a) => a[0] === 'arp'), 'the hotspot off: no arp run');
 });
 
-test('the tunnel\'s API in its config: on 127.0.0.1 with the secret; absent or malformed — the output of before', () => {
+test('the tunnel\'s API in its config: on 127.0.0.1 with the secret, and every connection\'s program looked up; absent or malformed — the output of before', () => {
   const base = buildTunConfig({ socksPort: 10808 });
   assert.equal(base.experimental, undefined);
+  assert.equal(base.route.find_process, undefined);
   const w = buildTunConfig({ socksPort: 10808, watch: { port: 30860, secret: '0123456789abcdef0123456789abcdef' } });
   assert.deepEqual(w.experimental, { clash_api: { external_controller: '127.0.0.1:30860', secret: '0123456789abcdef0123456789abcdef' } });
-  assert.deepEqual(Object.assign({}, w, { experimental: undefined }), Object.assign({}, base, { experimental: undefined }), 'nothing else changes');
+  assert.equal(w.route.find_process, true, 'the Connections tab names each connection\'s program');
+  assert.deepEqual(Object.assign({}, w, { experimental: undefined, route: Object.assign({}, w.route, { find_process: undefined }) }),
+    Object.assign({}, base, { experimental: undefined, route: Object.assign({}, base.route, { find_process: undefined }) }), 'nothing else changes');
   for (const bad of [{ port: 0, secret: 'a'.repeat(32) }, { port: 30860, secret: 'short' }, { port: 30860, secret: 'a'.repeat(31) + '"' }, { port: '30860', secret: 'a'.repeat(32) }, null]) {
     assert.equal(watchOf(bad), null, JSON.stringify(bad));
     assert.equal(buildTunConfig({ socksPort: 10808, watch: bad }).experimental, undefined);
+    assert.equal(buildTunConfig({ socksPort: 10808, watch: bad }).route.find_process, undefined);
   }
+  // beside the per-app split: its rules and outbounds as before, the lookup added
+  const apps = { mode: 'exclude', names: ['steam.exe'] };
+  const a = buildTunConfig({ socksPort: 10808, apps, watch: { port: 30860, secret: 'b'.repeat(32) } });
+  assert.deepEqual(a.route.rules, buildTunConfig({ socksPort: 10808, apps }).route.rules);
+  assert.deepEqual(a.outbounds, buildTunConfig({ socksPort: 10808, apps }).outbounds);
+  assert.equal(a.route.find_process, true);
 });
 
-test('writeConfig: the API only on a Windows desktop — not on the router, not on a Mac; the tunnel says what it runs (tun.watch)', () => {
+test('writeConfig: the API (with find_process) on every desktop sing-box can name a program on — Windows, Linux, a Mac\'s compatibility backend — never on the router; the tunnel says what it runs (tun.watch)', () => {
   const fs = require('node:fs');
-  const { TunSingbox } = require('../src/main/tunSingbox');
+  const { TunSingbox, WATCH_PLATFORMS } = require('../src/main/tunSingbox');
+  assert.deepEqual(WATCH_PLATFORMS, ['win32', 'linux', 'darwin']);
   const watch = { port: 30860, secret: 'c'.repeat(32) };
   const read = (t) => {
     const { cfgFile } = t.writeConfig(10808, [], { watch }, 'IRNetFree');
@@ -123,12 +134,27 @@ test('writeConfig: the API only on a Windows desktop — not on the router, not 
     t.removeWork();
     return cfg;
   };
-  const win = new TunSingbox({ platform: 'win32' });
-  assert.deepEqual(read(win).experimental, { clash_api: { external_controller: '127.0.0.1:30860', secret: 'c'.repeat(32) } });
-  assert.deepEqual(win.watch, watch);
+  const API = { clash_api: { external_controller: '127.0.0.1:30860', secret: 'c'.repeat(32) } };
+  for (const platform of WATCH_PLATFORMS) {
+    const t = new TunSingbox({ platform });
+    const cfg = read(t);
+    assert.deepEqual(cfg.experimental, API, platform);
+    assert.equal(cfg.route.find_process, true, platform);
+    assert.deepEqual(t.watch, watch, platform);
+  }
   const router = new TunSingbox({ platform: 'linux', composedBy: 'openwrt' });
-  assert.equal(read(router).experimental, undefined);
+  const rc = read(router);
+  assert.equal(rc.experimental, undefined);
+  assert.equal(rc.route.find_process, undefined, 'the router\'s config as before');
   assert.equal(router.watch, null);
-  const linux = new TunSingbox({ platform: 'linux' });
-  assert.equal(read(linux).experimental, undefined);
+  const other = new TunSingbox({ platform: 'freebsd' });
+  assert.equal(read(other).experimental, undefined, 'a platform sing-box cannot name programs on');
+  // no watch handed in (tun2socks' caller, an older one): the output of before
+  const plain = new TunSingbox({ platform: 'win32' });
+  const { cfgFile } = plain.writeConfig(10808, [], {}, 'IRNetFree');
+  const pc = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+  plain.removeWork();
+  assert.equal(pc.experimental, undefined);
+  assert.equal(pc.route.find_process, undefined);
+  assert.equal(plain.watch, null);
 });
