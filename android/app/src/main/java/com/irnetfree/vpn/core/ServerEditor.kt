@@ -57,11 +57,16 @@ object ServerEditor {
         f.network = st.optString("network", "tcp"); f.security = st.optString("security", "none")
         f.fragment = ob.optString("_fragment", "")
         f.noise = ob.optString("_noise", "")
-        f.engine = s.engine ?: "xray"
+        // TUIC / AnyTLS: sing-box, whatever the record says (EngineChoice.isSingboxOnly)
+        f.engine = if (EngineChoice.isSingboxOnly(s)) EngineChoice.SINGBOX else (s.engine ?: "xray")
 
         when (s.protocol) {
             "vless", "vmess" -> vnextUser(ob)?.let { f.cred = it.optString("id") }
             "trojan" -> serverObj(ob)?.let { f.cred = it.optString("password") }
+            // TUIC: its UUID is the credential and its password the second one (the table's
+            // uuid / password); AnyTLS: one password. Their TLS is read below, like any.
+            "tuic" -> serverObj(ob)?.let { f.cred = it.optString("uuid"); f.proxyPass = it.optString("password") }
+            "anytls" -> serverObj(ob)?.let { f.cred = it.optString("password") }
             "shadowsocks" -> serverObj(ob)?.let { f.cred = it.optString("password"); f.method = it.optString("method") }
             "socks", "http" -> serverObj(ob)?.optJSONArray("users")?.optJSONObject(0)?.let { f.proxyUser = it.optString("user"); f.proxyPass = it.optString("pass") }
             "hysteria2" -> {
@@ -195,6 +200,7 @@ object ServerEditor {
             "wireguard" -> patchWireguard(ob, was, f, if (moved) LinkParser.joinHostPort(addr, port) else null)
             "hysteria2" -> { patchHysteria2(ob, was, f, addr, port, moved); true }
             "masque" -> { patchMasque(ob, was, f, addr, port); true }
+            "tuic", "anytls" -> patchSingboxOnly(ob, was, f, s.protocol, addr, port, moved)
             else -> true
         }
         val out = if (patched) ob else rebuilt(s, f, addr, port)
@@ -214,19 +220,25 @@ object ServerEditor {
             ServerFields.setPath(out, p, ServerFields.fromForm(fld, now))
         }
         // the record's own (Mux for this server): the form's where it holds one —
-        // never MASQUE's (the core refuses a MASQUE outbound with Mux)
+        // never MASQUE's (the core refuses a MASQUE outbound with Mux), nor a
+        // TUIC / AnyTLS server's (sing-box runs it, and carries no Xray mux)
         val masque = s.protocol == "masque"
-        val muxNow = if (masque) "" else f.pro["mux"]?.let { v: String -> if (v == "on" || v == "off") v else "" } ?: s.mux
-        val muxC = if (masque) null else recordNumber(f, "muxConcurrency", s.muxConcurrency)
-        val xudpC = if (masque) null else recordNumber(f, "xudpConcurrency", s.xudpConcurrency)
+        val sbOnly = EngineChoice.isSingboxOnly(s)
+        val noMux = masque || sbOnly
+        val muxNow = if (noMux) "" else f.pro["mux"]?.let { v: String -> if (v == "on" || v == "off") v else "" } ?: s.mux
+        val muxC = if (noMux) null else recordNumber(f, "muxConcurrency", s.muxConcurrency)
+        val xudpC = if (noMux) null else recordNumber(f, "xudpConcurrency", s.xudpConcurrency)
         // TLS fragmentation / noise: an emptied field clears it.
         if (!patched || f.fragment != was.fragment) { if (f.fragment.isBlank()) out.remove("_fragment") else out.put("_fragment", f.fragment.trim()) }
         if (!patched || f.noise != was.noise) { if (f.noise.isBlank()) out.remove("_noise") else out.put("_noise", f.noise.trim()) }
         // what the core would refuse a MASQUE server for, said now — or put right
         // (a WARP key's PEM made one line, anti-DPI for the HTTP version it has)
         if (masque) Masque.check(out)
-        // sing-box has no MASQUE (EngineChoice runs it on Xray): never stored for it
-        val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" && !(masque && it == EngineChoice.SINGBOX) }
+        // ...and what sing-box would refuse a TUIC / AnyTLS server for, said now
+        if (sbOnly) checkSingboxOnly(out, s.protocol)
+        // sing-box has no MASQUE (EngineChoice runs it on Xray): never stored for it;
+        // TUIC / AnyTLS have sing-box alone, which no stored choice changes: none stored
+        val engine = f.engine.trim().takeIf { it.isNotBlank() && it != "xray" && !(masque && it == EngineChoice.SINGBOX) && !sbOnly }
         val (dns, dnsDomains) = if (s.protocol == "wireguard") LinkParser.splitDnsField(f.wgDns) else (s.dns to s.dnsDomains)
         val saved = s.copy(name = f.name.trim().ifEmpty { s.name }, address = addr, port = port, outbound = out, engine = engine, dns = dns, dnsDomains = dnsDomains,
             mux = muxNow, muxConcurrency = muxC, xudpConcurrency = xudpC)
@@ -448,6 +460,58 @@ object ServerEditor {
         }
     }
 
+    /**
+     * TUIC / AnyTLS (parser.js applyServerEdits): the credentials in
+     * `settings.servers[0]` — TUIC's UUID and password, AnyTLS' password — and
+     * the TLS basics the sheet changed, always TLS on the protocol's own
+     * network (QUIC's "udp" for TUIC, "tcp" for AnyTLS). An emptied SNI clears
+     * it (sing-box then sends the address), an emptied ALPN drops the key; a
+     * fingerprint is AnyTLS' alone — QUIC has no uTLS. TUIC's congestion
+     * control, relay mode, 0-RTT and heartbeat are the table's path fields,
+     * written by [apply] like any. False when the record has no server to
+     * patch: it is rebuilt from the form.
+     */
+    private fun patchSingboxOnly(ob: JSONObject, was: Fields, f: Fields, protocol: String, addr: String, port: Int, moved: Boolean): Boolean {
+        val srv = serverObj(ob) ?: return false
+        if (moved) srv.put("address", addr).put("port", port)
+        if (protocol == "tuic") {
+            if (f.cred != was.cred && f.cred.isNotBlank()) srv.put("uuid", f.cred.trim())
+            if (f.proxyPass != was.proxyPass && f.proxyPass.isNotBlank()) srv.put("password", f.proxyPass.trim())
+        } else if (f.cred != was.cred && f.cred.isNotBlank()) srv.put("password", f.cred.trim())
+        val st = child(ob, "streamSettings")
+        st.put("network", if (protocol == "tuic") "udp" else "tcp").put("security", "tls")
+        st.remove("realitySettings")
+        val tls = child(st, "tlsSettings")
+        // an emptied SNI is the address again, as a link without one reads (LinkParser.singboxOnlyTls)
+        if (f.sni != was.sni) tls.put("serverName", f.sni.trim().ifEmpty { if (DnsPlan.isIp(addr)) "" else addr })
+        if (f.allowInsecure != was.allowInsecure) tls.put("allowInsecure", f.allowInsecure)
+        if (f.alpn != was.alpn) { val a = list(f.alpn); if (a.isEmpty()) tls.remove("alpn") else tls.put("alpn", JSONArray(a)) }
+        if (protocol == "anytls" && f.fp != was.fp) tls.put("fingerprint", f.fp.trim().ifEmpty { "chrome" })
+        patchTlsExtras(tls, was, f)
+        tls.remove("echOutbound")   // PattN's, an Xray outbound: nothing sing-box can dial through
+        return true
+    }
+
+    /**
+     * A TUIC / AnyTLS record brought to the shape sing-box takes, in place, or
+     * an IllegalArgumentException naming the field it would refuse — said at
+     * the save instead of at a connect (parser.js checkSingboxOnly). Never
+     * Xray's noise (sing-box has no noise dialer), and TUIC no fragment either:
+     * QUIC has no TCP ClientHello to split (AnyTLS' is sing-box's own). TUIC's
+     * server entry carries every key, its switch's "off" as false.
+     */
+    internal fun checkSingboxOnly(ob: JSONObject, protocol: String) {
+        ob.remove("_noise")
+        if (protocol == "tuic") ob.remove("_fragment")
+        val srv = serverObj(ob) ?: throw IllegalArgumentException("the server has no address")
+        if (protocol != "tuic") return
+        if (!LinkParser.isUuid(srv.optString("uuid"))) throw IllegalArgumentException("uuid: not a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)")
+        srv.put("congestionControl", LinkParser.tuicCongestion(srv.optString("congestionControl")))
+        srv.put("udpRelayMode", LinkParser.tuicUdpMode(srv.optString("udpRelayMode")))
+        srv.put("zeroRtt", srv.optBoolean("zeroRtt"))
+        srv.put("heartbeat", LinkParser.tuicHeartbeat(srv.optString("heartbeat")) ?: throw IllegalArgumentException("tuicHeartbeat: a duration, like 10s"))
+    }
+
     /** A record number of the form ([Fields.pro]): its value when the form holds the key ("" clears it), else [was]. */
     private fun recordNumber(f: Fields, key: String, was: Int?): Int? =
         if (f.pro.containsKey(key)) f.pro[key]?.trim()?.toIntOrNull()?.takeIf { n: Int -> n > 0 } else was
@@ -466,7 +530,8 @@ object ServerEditor {
         require(port in 1..65535) { "The port must be between 1 and 65535" }
         val needs: List<Pair<String, String>> = when (protocol) {
             "vless", "vmess" -> listOf("uuid" to f.cred)
-            "trojan", "shadowsocks", "hysteria2" -> listOf("password" to f.cred)
+            "trojan", "shadowsocks", "hysteria2", "anytls" -> listOf("password" to f.cred)
+            "tuic" -> listOf("uuid" to f.cred, "password" to f.proxyPass)
             "wireguard" -> listOf("privateKey" to f.cred, "publicKey" to f.wgPub)
             else -> emptyList()
         }
@@ -488,6 +553,9 @@ object ServerEditor {
                     .put("method", f.method.trim().ifEmpty { ServerFields.SS_METHODS[0] }).put("password", f.cred.trim()).put("uot", true))))
                 .put("streamSettings", JSONObject().put("network", "tcp"))
             "hysteria2" -> LinkParser.buildHysteria2Outbound(mapOf("address" to addr, "port" to port.toString(), "auth" to f.cred.trim(), "sni" to f.sni.trim()))
+            // the bare record a link of the credentials would give; apply writes the rest
+            "tuic" -> LinkParser.buildTuicOutbound(mapOf("address" to addr, "port" to port.toString(), "uuid" to f.cred.trim(), "password" to f.proxyPass.trim(), "sni" to f.sni.trim()))
+            "anytls" -> LinkParser.buildAnytlsOutbound(mapOf("address" to addr, "port" to port.toString(), "password" to f.cred.trim(), "sni" to f.sni.trim()))
             "wireguard" -> LinkParser.buildWireguardOutbound(f.cred.trim(), f.wgPub.trim(), LinkParser.joinHostPort(addr, port), f.wgAddr.trim(), f.wgPsk.trim(), f.wgMtu, f.wgReserved, f.wgAllowed)
             // the bare outbound: apply below writes every field into it and checks it (Masque.check);
             // nothing is required beyond the address — its user and password are optional, a WARP
@@ -512,7 +580,8 @@ object ServerEditor {
         d["name"] = f.name; d["address"] = f.address; d["port"] = f.port
         when (protocol) {
             "vless", "vmess" -> d["uuid"] = f.cred
-            "trojan", "shadowsocks", "hysteria2" -> d["password"] = f.cred
+            "trojan", "shadowsocks", "hysteria2", "anytls" -> d["password"] = f.cred
+            "tuic" -> { d["uuid"] = f.cred; d["password"] = f.proxyPass }
             "wireguard" -> d["privateKey"] = f.cred
             "socks", "http" -> { d["username"] = f.proxyUser; d["password"] = f.proxyPass }
             else -> {}
@@ -542,7 +611,8 @@ object ServerEditor {
         f.name = v("name", f.name); f.address = v("address", f.address); f.port = v("port", f.port)
         when (protocol) {
             "vless", "vmess" -> f.cred = v("uuid", f.cred)
-            "trojan", "shadowsocks", "hysteria2" -> f.cred = v("password", f.cred)
+            "trojan", "shadowsocks", "hysteria2", "anytls" -> f.cred = v("password", f.cred)
+            "tuic" -> { f.cred = v("uuid", f.cred); f.proxyPass = v("password", f.proxyPass) }
             "wireguard" -> f.cred = v("privateKey", f.cred)
             "socks", "http" -> { f.proxyUser = v("username", f.proxyUser); f.proxyPass = v("password", f.proxyPass) }
             else -> {}
@@ -579,7 +649,8 @@ object ServerEditor {
         val d = toDraft(protocol, Fields(port = port, method = ServerFields.SS_METHODS[0]))
         d["encryption"] = "none"; d["flow"] = ""; d["vmessSecurity"] = "auto"; d["alterId"] = "0"
         d["uot"] = if (protocol == "shadowsocks") "true" else ""
-        d["engine"] = "xray"
+        // TUIC / AnyTLS: sing-box is their only core (engineOptions)
+        d["engine"] = if (protocol in EngineChoice.SINGBOX_ONLY) EngineChoice.SINGBOX else "xray"
         // MASQUE: HTTP/3 by default, and no browser fingerprint (HTTP/3 has none; HTTP/2 may take one)
         if (protocol == "masque") { d["masqueHttp"] = "h3"; d["fp"] = "" }
         if (keep != null) for (k in listOf("name", "address")) { val v = keep[k]; if (!v.isNullOrBlank()) d[k] = v }
@@ -597,6 +668,9 @@ object ServerEditor {
      * Is this field part of the form for draft [d]? The table says, and TCP's
      * Host and path only with its HTTP header; MASQUE's anti-DPI only where it
      * does anything — a fragment over HTTP/2 (TCP), noise over HTTP/3 (UDP).
+     * TUIC and AnyTLS take no noise — sing-box has no noise dialer — and TUIC
+     * no fragment either: QUIC has no TCP ClientHello to split (AnyTLS' is
+     * sing-box's own split; serverFields / app.js the same).
      */
     fun shown(protocol: String, d: Map<String, String>, fld: SfField): Boolean {
         val net = if (protocol == "masque") "masque" else (d["network"] ?: "tcp")
@@ -605,12 +679,19 @@ object ServerEditor {
         if ((fld.id == "host" || fld.id == "path") && ctx.network == "tcp") return d["headerType"] == "http"
         if (protocol == "masque" && fld.id == "fragment") return d["masqueHttp"] == "h2"
         if (protocol == "masque" && fld.id == "noise") return d["masqueHttp"] != "h2"
+        if (protocol in EngineChoice.SINGBOX_ONLY && (fld.id == "noise" || (fld.id == "fragment" && protocol == "tuic"))) return false
         return true
     }
 
-    /** The cores a server of [protocol] may ask for: sing-box has no MASQUE (EngineChoice runs it on Xray). */
-    fun engineOptions(protocol: String): List<String> =
-        if (protocol == "masque") listOf(EngineChoice.XRAY, EngineChoice.PATTN) else listOf(EngineChoice.XRAY, EngineChoice.PATTN, EngineChoice.SINGBOX)
+    /**
+     * The cores a server of [protocol] may ask for: sing-box has no MASQUE
+     * (EngineChoice runs it on Xray), and TUIC / AnyTLS have sing-box alone.
+     */
+    fun engineOptions(protocol: String): List<String> = when {
+        protocol == "masque" -> listOf(EngineChoice.XRAY, EngineChoice.PATTN)
+        protocol in EngineChoice.SINGBOX_ONLY -> listOf(EngineChoice.SINGBOX)
+        else -> listOf(EngineChoice.XRAY, EngineChoice.PATTN, EngineChoice.SINGBOX)
+    }
 
     /** What a save of draft [d] cannot send: (field id, tab, i18n key), or null (the desktop's draftProblem). */
     fun problem(protocol: String, d: Map<String, String>, isNew: Boolean, encryptionOn: Boolean): Triple<String, String, String>? {
@@ -623,7 +704,8 @@ object ServerEditor {
         if (isNew) {
             val need = listOf("address", "port") + when (protocol) {
                 "vless", "vmess" -> listOf("uuid")
-                "trojan", "shadowsocks", "hysteria2" -> listOf("password")
+                "trojan", "shadowsocks", "hysteria2", "anytls" -> listOf("password")
+                "tuic" -> listOf("uuid", "password")
                 "wireguard" -> listOf("privateKey", "publicKey")
                 else -> emptyList()
             }
@@ -816,6 +898,10 @@ object ServerEditor {
                 .put("streamSettings", JSONObject().put("network", "tcp"))
             "socks", "http" -> LinkParser.proxyOutbound(s.protocol, addr, port, f.proxyUser.trim(), f.proxyPass.trim())
             "wireguard" -> LinkParser.buildWireguardOutbound(f.cred.trim(), f.wgPub.trim(), LinkParser.joinHostPort(addr, port), f.wgAddr.trim(), f.wgPsk.trim(), f.wgMtu, f.wgReserved, f.wgAllowed)
+            "tuic" -> LinkParser.buildTuicOutbound(mapOf("address" to addr, "port" to port.toString(), "uuid" to f.cred.trim(), "password" to f.proxyPass.trim(),
+                "sni" to f.sni.trim(), "alpn" to f.alpn, "insecure" to if (f.allowInsecure) "1" else "", "ech" to f.ech, "pcs" to f.pcs, "vcn" to f.vcn))
+            "anytls" -> LinkParser.buildAnytlsOutbound(mapOf("address" to addr, "port" to port.toString(), "password" to f.cred.trim(),
+                "sni" to f.sni.trim(), "fp" to f.fp, "alpn" to f.alpn, "insecure" to if (f.allowInsecure) "1" else "", "ech" to f.ech, "pcs" to f.pcs, "vcn" to f.vcn))
             else -> JSONObject(s.outbound.toString())
         }
         // carry over xhttp `extra` (padding / post-bytes / method) the builder doesn't model

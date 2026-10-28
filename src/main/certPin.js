@@ -14,7 +14,7 @@
 const tls = require('tls');
 const net = require('net');
 const crypto = require('crypto');
-const { planServers } = require('./engineChoice');
+const { planServers, isSingboxOnly } = require('./engineChoice');
 const { advancedTargets } = require('./routingProfiles');
 const { masqueHttpOf } = require('../renderer/serverFields');
 
@@ -111,12 +111,15 @@ function directServers(plan) {
  * QUIC: a TCP handshake to its port reaches some other service, or nothing,
  * and would pin the wrong certificate (engineChoice runs it on sing-box).
  * MASQUE never asks: the core refuses allowInsecure there outright (a JSON
- * config that carries it anyway is refused by the core, not pinned).
+ * config that carries it anyway is refused by the core, not pinned). TUIC and
+ * AnyTLS never either: they run on sing-box alone, which keeps no pin
+ * (singboxBuilder.pinnedTls) — a pin learnt here would leave them nothing to
+ * run on; their allowInsecure is sing-box's `insecure`, on purpose.
  */
 function wantsPin(server) {
   const st = server && server.outbound && server.outbound.streamSettings;
   if (!st || st.security !== 'tls' || !st.tlsSettings || !st.tlsSettings.allowInsecure) return false;
-  if (st.network === 'hysteria' || st.network === 'masque') return false;
+  if (st.network === 'hysteria' || st.network === 'masque' || isSingboxOnly(server)) return false;
   const tls = st.tlsSettings;
   return !String(tls.pinnedPeerCertSha256 || '').trim() && !String(tls.verifyPeerCertByName || '').trim();
 }

@@ -53,9 +53,13 @@ test('a pinned server set to sing-box is connected and pinged on Xray, the conne
   const fs = require('node:fs');
   const path = require('node:path');
   const R = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8');
+  // (a TUIC / AnyTLS has no Xray: refused by name first — the one line before the fallback)
+  const sbOnlyFirst = String.raw`(?:\/\/[^\n]*\n\s*if \(sbOnly\) throw new Error\(singboxOnlyError\(sbOnly, 'pin', settings\.lang\)\);\s*)?`;
+  const fallback = new RegExp(String.raw`config = buildSingboxConfig\(plan\.server, settings\);\s*\} catch \(e\) \{\s*` + sbOnlyFirst +
+    String.raw`send\('log', \{ line: ` + '`sing-box: \\$\\{e\\.message\\} — using Xray`' + String.raw`, level: 'warn' \}\);\s*engine = 'xray';`);
   for (const [file, re] of [
-    ['src/main/main.js', /config = buildSingboxConfig\(plan\.server, settings\);\s*\} catch \(e\) \{\s*send\('log', \{ line: `sing-box: \$\{e\.message\} — using Xray`, level: 'warn' \}\);\s*engine = 'xray';/],
-    ['src/server/service.js', /config = buildSingboxConfig\(plan\.server, settings\);\s*\} catch \(e\) \{\s*send\('log', \{ line: `sing-box: \$\{e\.message\} — using Xray`, level: 'warn' \}\);\s*engine = 'xray';/],
+    ['src/main/main.js', fallback],
+    ['src/server/service.js', fallback],
     ['src/main/latencyTest.js', /buildSingboxConfig\(target, [^\n]+\n[^\n]+\n\s*\} catch \{ \/\* a server sing-box cannot carry is measured on Xray \*\/ \}/],
     ['android/app/src/main/java/com/irnetfree/vpn/vpn/TunnelSetup.kt', /SingboxConfig\.build\(single\.server, s, auth, lan\)\.toString\(\)\)\s*\} catch \(t: Throwable\) \{\s*log\("sing-box: \$\{t\.message\} — using the in-process core"\)/]
   ]) assert.match(R(file), re, file);

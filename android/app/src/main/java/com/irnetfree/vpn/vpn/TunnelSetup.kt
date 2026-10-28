@@ -101,7 +101,9 @@ object TunnelSetup {
      * sing-box cannot express (WireGuard, an exotic transport) falls back to
      * the Xray format on the in-process core, and says so through [log].
      * (XrayVpnService.prepare has already moved a non-single plan, or a
-     * sing-box that is not bundled, onto the in-process core.)
+     * sing-box that is not bundled, onto the in-process core.) A TUIC or
+     * AnyTLS server has no such fallback: one this cannot run is thrown
+     * (IllegalStateException, a message for the user naming it).
      *
      * [muxIds]: the servers whose outbounds carry Xray's mux (Mux.choose) — in
      * the Xray format only; sing-box's config never has it.
@@ -123,6 +125,20 @@ object TunnelSetup {
         // here, wherever the plan uses it — said once per connect.
         planTargets(plan).filter { srv: ServerConfig -> setToRaw(srv) }.distinctBy { srv: ServerConfig -> srv.id }
             .forEach { srv: ServerConfig -> log("\"${srv.name}\" is set to run raw — on Android its full form runs, so the app's DNS and tunnel rules apply") }
+        // TUIC and AnyTLS: sing-box or nothing (EngineChoice.isSingboxOnly). Inside a
+        // chain, a group, a pool or a profile they cannot run, and alone what sing-box
+        // cannot express (a pinned certificate) has no Xray to fall back to: refused,
+        // naming the server, rather than an outbound the Xray core rejects at load.
+        EngineChoice.singboxOnlyInside(plan).firstOrNull()?.let { srv: ServerConfig -> throw IllegalStateException(EngineChoice.singboxOnlyError(srv, EngineChoice.PLAN)) }
+        val only = single?.server?.takeIf { srv: ServerConfig -> EngineChoice.isSingboxOnly(srv) }
+        if (only != null) {
+            if (engine != EngineChoice.SINGBOX) throw IllegalStateException(EngineChoice.singboxOnlyError(only, EngineChoice.ENGINE))
+            val sb = try { SingboxConfig.build(only, s, auth, lan) } catch (e: Exception) {
+                throw IllegalStateException(if (SingboxConfig.isPinned(only)) EngineChoice.singboxOnlyError(only, EngineChoice.PIN)
+                    else "\"${only.name}\": ${e.message} — and ${EngineChoice.protocolName(only)} runs on sing-box only, so it cannot connect")
+            }
+            return CoreConfig(engine, sb.toString())
+        }
         if (engine == EngineChoice.SINGBOX && single != null) {
             try {
                 return CoreConfig(engine, SingboxConfig.build(single.server, s, auth, lan).toString())

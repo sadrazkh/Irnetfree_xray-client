@@ -15,7 +15,9 @@ import org.json.JSONObject
  *
  * Supports vless/vmess/trojan/shadowsocks/socks/http and hysteria2 over
  * tcp/ws/grpc/http/httpupgrade with tls/reality (and ECH). WireGuard, kcp and
- * xhttp throw so the caller falls back to Xray.
+ * xhttp throw so the caller falls back to Xray. TUIC and AnyTLS are sing-box's
+ * alone (EngineChoice.isSingboxOnly): what throws for one of them has no core
+ * to fall back to, and the caller says so instead.
  */
 object SingboxConfig {
 
@@ -130,6 +132,8 @@ object SingboxConfig {
                 return out
             }
             "hysteria2" -> return translateHysteria2(server)
+            "tuic" -> return translateTuic(server)
+            "anytls" -> return translateAnytls(server)
             "socks" -> {
                 out.put("type", "socks").put("version", "5")
                 serverObj(ob).optJSONArray("users")?.optJSONObject(0)?.let {
@@ -190,6 +194,68 @@ object SingboxConfig {
         tls.remove("utls")   // QUIC: no uTLS fingerprint
         out.put("tls", tls)
         return out
+    }
+
+    /** [ss] as a TLS stream, whatever it says: TUIC and AnyTLS speak nothing else (a copy; the record is untouched). */
+    private fun asTls(ss: JSONObject): JSONObject = JSONObject(ss.toString()).put("security", "tls")
+
+    /**
+     * TUIC v5 (singboxBuilder.js translateTuic) — sing-box's alone
+     * (EngineChoice.isSingboxOnly). The record keeps Xray's shape
+     * (LinkParser.buildTuicOutbound): `settings.servers[0]` carries the uuid,
+     * the password and TUIC's own knobs, "" / false where sing-box's default
+     * applies (cubic, native, no 0-RTT, its 10 s heartbeat) — so only what is
+     * set is written. QUIC: no uTLS, and the ALPN is h3 unless the link named
+     * one — what a TUIC server expects. A pinned certificate throws, as
+     * everywhere here (translateTls), and there is no Xray to run it on
+     * instead: TunnelSetup refuses the connect, naming why.
+     */
+    private fun translateTuic(server: ServerConfig): JSONObject {
+        val ss = server.outbound.optJSONObject("streamSettings") ?: JSONObject()
+        val srv = serverObj(server.outbound)
+        val out = JSONObject().put("type", "tuic").put("tag", "proxy").put("server", server.address).put("server_port", server.port)
+            .put("uuid", srv.optString("uuid")).put("password", srv.optString("password"))
+        val cc = srv.optString("congestionControl")
+        if (cc == "bbr" || cc == "cubic" || cc == "new_reno") out.put("congestion_control", cc)
+        val relay = srv.optString("udpRelayMode")
+        if (relay == "native" || relay == "quic") out.put("udp_relay_mode", relay)
+        if (srv.optBoolean("zeroRtt")) out.put("zero_rtt_handshake", true)
+        val hb = srv.optString("heartbeat")
+        if (Regex("^\\d+(\\.\\d+)?(ms|s|m|h)$").matches(hb)) out.put("heartbeat", hb)
+        val tls = translateTls(asTls(ss), server.address, server.certPin) ?: JSONObject().put("enabled", true).put("server_name", server.address)
+        tls.remove("utls")   // QUIC: no uTLS fingerprint
+        if (!tls.has("alpn")) tls.put("alpn", JSONArray().put("h3"))
+        if (ss.optJSONObject("tlsSettings")?.optBoolean("disableSni") == true) tls.put("disable_sni", true)
+        out.put("tls", tls)
+        return out
+    }
+
+    /**
+     * AnyTLS (sing-box 1.12+; singboxBuilder.js translateAnytls) — TLS over
+     * TCP, so uTLS as for any TLS outbound here (the record's fingerprint,
+     * chrome by default), and the record's fragment as sing-box's own
+     * ClientHello split. Its idle-session knobs stay sing-box's defaults. A
+     * pinned certificate throws, as for TUIC.
+     */
+    private fun translateAnytls(server: ServerConfig): JSONObject {
+        val ob = server.outbound
+        val ss = ob.optJSONObject("streamSettings") ?: JSONObject()
+        val out = JSONObject().put("type", "anytls").put("tag", "proxy").put("server", server.address).put("server_port", server.port)
+            .put("password", serverObj(ob).optString("password"))
+        val tls = translateTls(asTls(ss), server.address, server.certPin) ?: JSONObject().put("enabled", true).put("server_name", server.address)
+        if (ob.optString("_fragment").isNotBlank()) tls.put("fragment", true)
+        out.put("tls", tls)
+        return out
+    }
+
+    /**
+     * Does [server] carry a certificate pin sing-box cannot keep — the link's
+     * `pcs` or `vcn`, or the one learnt on first use ([pinnedTls])? What a
+     * TUIC / AnyTLS connect is refused for, by name (TunnelSetup).
+     */
+    fun isPinned(server: ServerConfig): Boolean {
+        val t = server.outbound.optJSONObject("streamSettings")?.optJSONObject("tlsSettings") ?: JSONObject()
+        return pinnedTls(t, server.certPin)
     }
 
     /**

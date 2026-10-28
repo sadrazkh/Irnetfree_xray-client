@@ -355,7 +355,7 @@ function reservedText(v) {
 /**
  * The share link a sing-box outbound stands for — the server is then exactly
  * what an import of that link gives. Throws, naming it, for what has no link
- * here (tuic, anytls, a QUIC transport…).
+ * here (shadowtls, naive, a QUIC transport…).
  */
 function singboxLink(o, type) {
   const name = (o.tag ? String(o.tag) : type) + (o.detour ? ` (via ${o.detour})` : '');
@@ -376,7 +376,7 @@ function singboxLink(o, type) {
     };
     return `wireguard://${enc(o.private_key || '')}@${joinHostPort(host, port || 51820)}?${qs(q)}${frag}`;
   }
-  if (!['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'socks', 'http'].includes(type)) throw new Error('unsupported protocol: ' + type);
+  if (!['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic', 'anytls', 'socks', 'http'].includes(type)) throw new Error('unsupported protocol: ' + type);
   if (!o.server) throw new Error(type + ': no server address');
   const hp = joinHostPort(o.server, o.server_port);
   if (type === 'vless') {
@@ -408,6 +408,26 @@ function singboxLink(o, type) {
       hopInterval: o.hop_interval, up: o.up_mbps, down: o.down_mbps
     };
     return `hysteria2://${enc(o.password || '')}@${hp}/?${qs(q)}${frag}`;
+  }
+  // TUIC and AnyTLS: sing-box's own (parser.js's TUIC / AnyTLS section) — the
+  // link parseTuic / parseAnytls read back. A TUIC outbound's `udp_over_stream`
+  // and AnyTLS's idle-session knobs have no place in the record: left at
+  // sing-box's defaults.
+  if (type === 'tuic' || type === 'anytls') {
+    const tls = isObj(o.tls) ? o.tls : {};
+    const q = {
+      sni: tls.server_name, alpn: [].concat(tls.alpn || []).join(','), ech: echOf(tls),
+      insecure: tls.insecure ? '1' : ''
+    };
+    if (type === 'anytls') {
+      q.fp = isObj(tls.utls) && tls.utls.enabled !== false && tls.utls.fingerprint ? String(tls.utls.fingerprint) : '';
+      return `anytls://${enc(o.password || '')}@${hp}?${qs(q)}${frag}`;
+    }
+    Object.assign(q, {
+      congestion_control: o.congestion_control, udp_relay_mode: o.udp_relay_mode,
+      reduce_rtt: o.zero_rtt_handshake ? '1' : '', heartbeat: o.heartbeat, disable_sni: tls.disable_sni ? '1' : ''
+    });
+    return `tuic://${enc(o.uuid || '')}:${enc(o.password || '')}@${hp}?${qs(q)}${frag}`;
   }
   // socks / http: the proxy link's base64 user:pass
   if (isObj(o.tls) && o.tls.enabled) throw new Error(`unsupported protocol: ${type} over TLS`);

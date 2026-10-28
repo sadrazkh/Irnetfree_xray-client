@@ -16,7 +16,9 @@
  *
  * With IRNF_SINGBOX_EXE set, every TUN config tunSingbox.buildTunConfig can
  * emit is run through `sing-box check` as well (parse + build only — `check`
- * never creates an adapter) and counted into the same total.
+ * never creates an adapter) and counted into the same total — and so is every
+ * TUIC / AnyTLS config singboxBuilder writes (links, the editor, the sing-box
+ * JSON fixture): no Xray core takes those two, sing-box is their only gate.
  *
  * IRNF_VALIDATE_DRY=1 runs no core at all: every config is built, adapted (for
  * IRNF_CORE_VERSION, else the suggested Xray) and written — into
@@ -33,6 +35,16 @@ const { MUX } = require('../src/main/mux');
 const { adaptForCore } = require('../src/main/coreCompat');
 const { parseLink } = require('../src/main/parser');
 const { SUGGESTED } = require('../src/main/coreVersions');
+const { isSingboxOnly } = require('../src/main/engineChoice');
+const { buildSingboxConfig } = require('../src/main/singboxBuilder');
+/**
+ * TUIC and AnyTLS servers (engineChoice.isSingboxOnly): no Xray core takes
+ * them, so they are gathered here — from links, the editor and the sing-box
+ * JSON fixture — and their configs (singboxBuilder.buildSingboxConfig, what a
+ * connect and a latency test run) go through `sing-box check` at the end,
+ * beside the TUN configs. [name, server]
+ */
+const SB_SERVERS = [];
 const F = require('../tests/fixtures');
 // Every connect hands the builder a chain relay port (configBuilder.relayHopDials:
 // a TCP dial through a hop over a loopback SOCKS inbound) — so does every config
@@ -279,6 +291,8 @@ const jsonServers = {};
 for (const f of JSON_FIXTURES) {
   jsonServers[f] = importJson(fs.readFileSync(path.join(__dirname, '..', 'tests', 'fixtures', 'json', `${f}.json`), 'utf8')).servers;
   jsonServers[f].forEach((server, i) => {
+    // the sing-box fixture's TUIC: sing-box's alone (checked with the sing-box configs below)
+    if (isSingboxOnly(server)) { SB_SERVERS.push([`json-${f}-${i}`, server]); return; }
     for (const [variant, over] of Object.entries(JSON_SETTINGS)) {
       check(`json-${f}-${i}-full-${variant}`, buildConfig({ mode: 'single', server }, F.settings(over)));
       if (server.source === 'json') check(`json-${f}-${i}-raw-${variant}`, buildRawConfig(server, F.settings(over)));
@@ -367,12 +381,15 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
     tcpFastOpen: true, tcpMptcp: true, tcpKeepAliveInterval: '15', tcpKeepAliveIdle: '300', tcpCongestion: 'bbr',
     // MASQUE's, bar the WARP account (all-or-none: its own cases below)
     masqueUser: 'irnf-ci', masquePass: 'irnf-ci-pass', masqueHost: 'ed.example.com', masquePath: '/.well-known/masque/ip/{target}/{ipproto}/',
-    masqueHeaders: '{"User-Agent":"chrome"}', remoteDNS: '1.1.1.1, 2606:4700:4700::1111'
+    masqueHeaders: '{"User-Agent":"chrome"}', remoteDNS: '1.1.1.1, 2606:4700:4700::1111',
+    // TUIC's (sing-box's names), checked by sing-box below
+    tuicCongestion: 'bbr', tuicUdpRelay: 'quic', tuicZeroRtt: true, tuicHeartbeat: '10s', tuicDisableSni: true
   };
   const base = (protocol) => {
     const f = { protocol, name: 'editor-' + protocol, address: 'ed.example.com', port: '443' };
-    if (protocol === 'vless' || protocol === 'vmess') f.uuid = '2c0f0d9a-6b3a-4f0e-9a1f-8c2b4d6e7a10';
-    if (['trojan', 'shadowsocks', 'hysteria2'].includes(protocol)) f.password = 'irnf-ci-secret';
+    if (protocol === 'vless' || protocol === 'vmess' || protocol === 'tuic') f.uuid = '2c0f0d9a-6b3a-4f0e-9a1f-8c2b4d6e7a10';
+    if (['trojan', 'shadowsocks', 'hysteria2', 'tuic', 'anytls'].includes(protocol)) f.password = 'irnf-ci-secret';
+    if (protocol === 'tuic' || protocol === 'anytls') Object.assign(f, { sni: 'ed.example.com', alpn: protocol === 'tuic' ? 'h3' : 'h2,http/1.1', allowInsecure: true });
     if (protocol === 'wireguard') Object.assign(f, { privateKey: '2K2GILDj0FUWeLh2MhyzOfVm3cpC7evzkWZGRNL7yUA=', publicKey: 'HtCo1A5bqv1JjSdv4ynUqF1ZVCXDpPtd4292Md+AIko=' });
     if (protocol === 'hysteria2') Object.assign(f, { sni: 'ed.example.com', mport: '20000-30000', hopInterval: '45', up: '50 mbps', down: '200 mbps' });
     return f;
@@ -409,6 +426,7 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
     }
     const server = createServer(fields);
     made++;
+    if (isSingboxOnly(server)) { SB_SERVERS.push([`editor-${name}`, server]); continue; }
     check(`editor-${name}`, buildConfig({ mode: 'single', server }, F.settings({ routingMode: 'bypass-ir', muxServerIds: [server.id] })));
   }
   if (made < 20) throw new Error('the editor’s configs: only ' + made);
@@ -517,12 +535,31 @@ for (const [name, plan] of Object.entries(VIA_SHAPES)) {
   }
 }
 
+// TUIC and AnyTLS links (parser.js's TUIC / AnyTLS section), as an import
+// parses them: every knob TUIC's link carries, both relay modes, an IPv6
+// server, no ALPN (the builder's h3), ECH both ways, AnyTLS with its uTLS
+// fingerprint and the link's fragment (sing-box's own ClientHello split).
+{
+  const U = '2c0f0d9a-6b3a-4f0e-9a1f-8c2b4d6e7a10';
+  const SB_LINKS = [
+    `tuic://${U}:p%40ss@t.example.com:443?sni=t.example.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1&reduce_rtt=1&heartbeat=15s#tuic-all`,
+    `tuic://${U}:pw@[2001:db8::1]:8443?congestion_control=new_reno&udp_relay_mode=quic&disable_sni=1#tuic-v6`,
+    `tuic://${U}:pw@t.example.com:443?sni=t.example.com&ech=cloudflare-ech.com%2Budp%3A%2F%2F1.1.1.1#tuic-ech-dns`,
+    `anytls://p%3Aw@a.example.com:8443?sni=a.example.com&fp=firefox&alpn=h2,http/1.1&insecure=1#anytls-all`,
+    `anytls://pw@203.0.113.9:443?sni=a.example.com&ech=${encodeURIComponent(echConfigListB64('cloudflare-ech.com'))}#anytls-ech-b64`
+  ];
+  for (const link of SB_LINKS) { const s = parseLink(link); SB_SERVERS.push([`link-${s.name}`, s]); }
+  const frag = parseLink(SB_LINKS[3]);
+  frag.outbound._fragment = 'tlshello,100-200,10-20';
+  SB_SERVERS.push(['link-anytls-fragment', frag]);
+}
+
 // sing-box TUN configs (phase 3): ipv6 × strict × exclusions (a v4 and a v6
 // entry → /32 and /128), plus the darwin shape — no interface_name, because
 // sing-tun there only accepts utun<N> and names the device itself — plus the
 // per-app split (task 10a): exclude, only, and exclude combined with
 // strict+v6+excludeIps to prove `apps` and everything else are independent.
-let sbTotal = 0, sbFailed = 0;
+let sbTotal = 0, sbFailed = 0, sbOutTotal = 0, sbOutFailed = 0;
 const sb = process.env.IRNF_SINGBOX_EXE;
 if (sb || DRY) {
   if (!DRY && !fs.existsSync(sb)) { console.error('no sing-box at ' + sb); process.exit(2); }
@@ -549,23 +586,43 @@ if (sb || DRY) {
   const sbVersion = DRY ? '' : ((/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(String(spawnSync(sb, ['version'], { encoding: 'utf8', timeout: 15000, windowsHide: true }).stdout || '')) || [])[1] || '');
   const sbMode = tunDnsModeFor(sbVersion, 'app');
   if (sbMode) cases.push(['tun-dns-mode', { socksPort: 10808, strict: true, excludeIps: ['1.2.3.4'], apps: { mode: 'exclude', names: ['steam.exe'] }, dnsMode: sbMode }]);
-  for (const [name, args] of cases) {
-    total++; sbTotal++;
+  /** One sing-box config: written, then `sing-box check` (dry: only written). */
+  const sbCheck = (name, cfg) => {
+    total++;
     const file = path.join(work, `${name}.json`);
-    fs.writeFileSync(file, JSON.stringify(buildTunConfig(args), null, 2));
-    if (DRY) { console.log('built ' + path.basename(file)); continue; }
+    fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+    if (DRY) { console.log('built ' + path.basename(file)); return true; }
     const r = spawnSync(sb, ['check', '-c', file], { encoding: 'utf8', timeout: 15000, windowsHide: true });
-    if (r.status === 0) { console.log('ok   ' + path.basename(file)); continue; }
-    failed++; sbFailed++;
+    if (r.status === 0) { console.log('ok   ' + path.basename(file)); return true; }
+    failed++;
     console.log('FAIL ' + path.basename(file));
     console.log('     ' + ((r.stdout || '') + (r.stderr || '')).trim().split(/\r?\n/).slice(-3).join('\n     '));
+    return false;
+  };
+  for (const [name, args] of cases) {
+    sbTotal++;
+    if (!sbCheck(name, buildTunConfig(args))) sbFailed++;
+  }
+  // TUIC / AnyTLS (SB_SERVERS): the connect's config — its SOCKS and HTTP
+  // ports, the managed DNS's first resolver, IPv6 or not — and the latency
+  // test's (SOCKS alone), as main.js / latencyTest.js build them
+  const SB_SETTINGS = {
+    connect: { socksPort: 10808, httpPort: 10809, dnsRemote: managed.dnsRemote, logLevel: 'warning' },
+    lan: { socksPort: 10808, httpPort: 10809, allowLan: true, dnsRemote: ['1.1.1.1'], logLevel: 'info' },
+    test: { socksPort: 41030, httpPort: 0, dnsRemote: managed.dnsRemote, logLevel: 'error' }
+  };
+  for (const [name, server] of SB_SERVERS) {
+    for (const [variant, s] of Object.entries(SB_SETTINGS)) {
+      sbOutTotal++;
+      if (!sbCheck(`singbox-${name}-${variant}`, buildSingboxConfig(server, s))) sbOutFailed++;
+    }
   }
 }
 
 if (DRY) {
-  console.log(`\n${total} configs built for xray ${version} (${sbTotal} of them sing-box TUN configs) in ${work} — no core was run`);
+  console.log(`\n${total} configs built for xray ${version} (${sbTotal} of them sing-box TUN configs, ${sbOutTotal} sing-box TUIC / AnyTLS configs) in ${work} — no core was run`);
   process.exit(0);
 }
-const by = `${path.basename(exe)} ${version}` + (sb ? ` + ${path.basename(sb)} (${sbTotal - sbFailed}/${sbTotal} TUN configs)` : '');
+const by = `${path.basename(exe)} ${version}` + (sb ? ` + ${path.basename(sb)} (${sbTotal - sbFailed}/${sbTotal} TUN configs, ${sbOutTotal - sbOutFailed}/${sbOutTotal} TUIC / AnyTLS configs)` : '');
 console.log(`\n${total - failed}/${total} configs accepted by ${by}`);
 process.exit(failed ? 1 : 0);

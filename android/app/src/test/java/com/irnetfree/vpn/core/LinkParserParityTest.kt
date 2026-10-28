@@ -44,14 +44,19 @@ class LinkParserParityTest {
         assertTrue(errors.toString(), errors.isEmpty())
     }
 
-    /* tuic / anytls lines are said (parser.js parseMany), not dropped; http(s) lines and comments stay skipped. */
+    /*
+     * hysteria (v1) / ssh lines are said (parser.js parseMany), not dropped; http(s) lines and
+     * comments stay skipped. tuic / anytls, once in this list, are imported now (sing-box runs them).
+     */
     @Test fun aLinkOfAProtocolThisAppDoesNotSpeakIsSaidNotSkipped() {
-        val text = "vless://u@a.example:443?security=none#A\ntuic://uuid:pw@t.example:443#T\nANYTLS://pw@n.example:443#N\n" +
+        val text = "vless://u@a.example:443?security=none#A\nhysteria://auth@t.example:443#H\nSSH://u@n.example:22#S\n" +
+            "tuic://00000000-0000-4000-8000-0000000000c4:pw@t.example:443#T\nANYTLS://pw@n.example:443#N\n" +
             "https://t.me/channel\nhttp://sub.example/path\n# a comment\nnot a link"
         val (servers, errors) = LinkParser.parseMany(text)
-        assertEquals(listOf("A"), servers.map { s: ServerConfig -> s.name })
-        assertEquals(listOf("unsupported protocol: tuic", "unsupported protocol: anytls"), why(errors))
-        assertEquals("tuic://uuid:pw@t.example… : unsupported protocol: tuic", errors[0])
+        assertEquals(listOf("A", "T", "N"), servers.map { s: ServerConfig -> s.name })
+        assertEquals(listOf("vless", "tuic", "anytls"), servers.map { s: ServerConfig -> s.protocol })
+        assertEquals(listOf("unsupported protocol: hysteria", "unsupported protocol: ssh"), why(errors))
+        assertEquals("hysteria://auth@t.exampl… : unsupported protocol: hysteria", errors[0])
     }
 
     /* `raw` is tcp (parser.js buildStreamSettings): its HTTP header was dropped. */
