@@ -112,9 +112,9 @@ function loginPage(msg) {
     `<p>${both('intro')}</p>`,
     '<form method="post" action="/login">',
     `<label for="u">${both('username')}</label>`,
-    '<input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="64" required>',
+    '<input id="u" name="username" dir="ltr" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" required>',
     `<label for="p">${both('password')}</label>`,
-    '<input id="p" name="password" type="password" autocomplete="current-password" maxlength="256" required>',
+    '<input id="p" name="password" type="password" dir="ltr" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="256" required>',
     `<button type="submit">${esc(T.signIn[0])} · ${esc(T.signIn[1])}</button>`,
     '</form>',
     msg || ''
