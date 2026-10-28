@@ -93,7 +93,10 @@ function mldsaKey(v) {
  *  - `pcs` (pinnedPeerCertSha256): the certificate to accept — what replaced
  *    allowInsecure in the core; see pinList.
  *  - `vcn` (verifyPeerCertByName): the name(s) to verify the certificate
- *    against instead of the SNI (a fronted server's own name).
+ *    against instead of the SNI (a fronted server's own name). `pcn` is the
+ *    same thing under another panel's name — Fastly-fronted links carry
+ *    `sni=firefox.com&pcn=default.ssl.fastly.net`; dropped, the certificate was
+ *    checked against the SNI and the server never connected. Shared as `vcn`.
  *  - `echOutbound` (PattN's, not a core key): the outbound the ECH query is
  *    dialled through — kept in tlsSettings as an object, taken out and wired
  *    up as `echSockopt.dialerProxy` by configBuilder.applyEchOutbounds.
@@ -105,7 +108,7 @@ function tlsExtras(tls, q) {
   if (eo) tls.echOutbound = eo;
   const pcs = pinList(q.pcs || q.pinnedPeerCertSha256 || q.pinSHA256 || '');
   if (pcs) tls.pinnedPeerCertSha256 = pcs;
-  const vcn = String(q.vcn || q.verifyPeerCertByName || '').split(',').map(x => x.trim()).filter(Boolean).join(',');
+  const vcn = String(q.vcn || q.verifyPeerCertByName || q.pcn || '').split(',').map(x => x.trim()).filter(Boolean).join(',');
   if (vcn) tls.verifyPeerCertByName = vcn;
   return tls;
 }
@@ -194,12 +197,13 @@ function buildStreamSettings(q) {
 
   // --- security specific ---
   if (security === 'tls') {
+    // `serverName` / `fingerprint`: the core's own key names, which some generators put in the link instead of sni / fp
     stream.tlsSettings = {
-      serverName: q.sni || q.host || '',
+      serverName: q.sni || q.serverName || q.host || '',
       // `insecure` / `allow_insecure`: the spelling of hysteria2, anytls and tuic
       // links, which some panels put on every link they make
       allowInsecure: isTrue(q.allowInsecure) || isTrue(q.insecure) || isTrue(q.allow_insecure),
-      fingerprint: q.fp || 'chrome'
+      fingerprint: q.fp || q.fingerprint || 'chrome'
     };
     if (q.alpn) stream.tlsSettings.alpn = q.alpn.split(',');
     // patterniha-style custom TLS: `unsafe` fingerprint lets you pin cipherSuites.
@@ -208,8 +212,8 @@ function buildStreamSettings(q) {
     tlsExtras(stream.tlsSettings, q);
   } else if (security === 'reality') {
     stream.realitySettings = {
-      serverName: q.sni || '',
-      fingerprint: q.fp || 'chrome',
+      serverName: q.sni || q.serverName || '',
+      fingerprint: q.fp || q.fingerprint || 'chrome',
       publicKey: q.pbk || '',
       shortId: q.sid || '',
       spiderX: q.spx || ''
@@ -374,7 +378,7 @@ function parseVmess(link) {
     allowInsecure: v.allowInsecure || v.insecure || '',
     ech: v.ech || '',
     pcs: v.pcs || '',
-    vcn: v.vcn || '',
+    vcn: v.vcn || v.pcn || '',
     echOutbound: v.echOutbound || '',
     cipherSuites: v.cs || v.cipherSuites || '',
     finalMask: v.fm || v.finalMask || v.finalmask || ''
@@ -1682,6 +1686,53 @@ function parseLink(link) {
   throw new Error('Unsupported or invalid link: ' + l.slice(0, 12) + '...');
 }
 
+/* ------------------ what a link carries that is not read ------------------ */
+
+/**
+ * The query keys each kind of link is read for — every key the parsers above
+ * look at. Anything else in a link was dropped without a word: `pcn`, one
+ * panel's name for vcn, sat in Fastly-fronted links until v1.35.2 while their
+ * certificate was checked against the SNI, and the servers never connected.
+ * unreadLinkKeys names such keys so the import says so (main.js, service.js,
+ * a subscription's refresh) and the next one is found by its log line. VLESS,
+ * Trojan and Hysteria2 — the kinds whose settings travel as query keys; a
+ * vmess link is JSON, Shadowsocks, WireGuard and the proxies carry little.
+ */
+const TLS_LINK_KEYS = ['sni', 'serverName', 'fp', 'fingerprint', 'alpn', 'allowInsecure', 'insecure', 'allow_insecure',
+  'ech', 'echConfigList', 'echOutbound', 'pcs', 'pinnedPeerCertSha256', 'pinSHA256', 'vcn', 'verifyPeerCertByName', 'pcn'];
+const STREAM_LINK_KEYS = [...TLS_LINK_KEYS, 'type', 'network', 'security', 'path', 'host', 'serviceName', 'mode', 'authority',
+  'headerType', 'seed', 'mtu', 'extra', 'cs', 'cipherSuites', 'pbk', 'sid', 'spx', 'pqv', 'mldsa65Verify', 'fm', 'finalMask',
+  'fragment', 'noise', 'engine'];
+const LINK_KEYS = {
+  vless: new Set([...STREAM_LINK_KEYS, 'encryption', 'flow']),
+  trojan: new Set(STREAM_LINK_KEYS),
+  hysteria2: new Set([...TLS_LINK_KEYS, 'auth', 'peer', 'obfs', 'obfs-password', 'obfsPassword', 'mport', 'ports',
+    'hopInterval', 'hop_interval', 'up', 'down', 'upmbps', 'downmbps', 'engine'])
+};
+/** Written by other clients, needed by none: VLESS's UDP is xudp anyway; a remark is the name after `#`. */
+const HARMLESS_LINK_KEYS = new Set(['packetEncoding', 'remarks', 'remark']);
+
+/** A link's query keys this app does not read — [] for a kind it does not list, or a link with none. */
+function unreadLinkKeys(link) {
+  const l = String(link || '').trim();
+  const m = SCHEME.exec(l);
+  if (!m) return [];
+  const scheme = m[1].toLowerCase() === 'hy2' ? 'hysteria2' : m[1].toLowerCase();
+  const known = LINK_KEYS[scheme];
+  if (!known) return [];
+  const body = l.slice(m[0].length);
+  const hash = body.indexOf('#');
+  const main = hash === -1 ? body : body.slice(0, hash);
+  const qi = main.indexOf('?');
+  if (qi === -1) return [];
+  return Object.keys(parseQuery(main.slice(qi + 1))).filter((k) => k && !known.has(k) && !HARMLESS_LINK_KEYS.has(k));
+}
+
+/** `{ key: how many links }` as one line for a log: «pcn ×12, foo ×1». */
+function unreadText(unread) {
+  return Object.entries(unread || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([k, n]) => `${k} ×${n}`).join(', ');
+}
+
 /**
  * Parse multiple links / a subscription blob. Accepts:
  *  - newline separated links
@@ -1715,10 +1766,12 @@ function parseMany(text) {
   const lines = body.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const servers = [];
   const errors = [];
+  const unread = {};   // a key this app does not read → in how many of the links (unreadLinkKeys)
   for (const line of lines) {
     if (SUPPORTED.test(line) || isHttpProxyLink(line)) {
       try {
         servers.push(parseLink(line));
+        for (const k of unreadLinkKeys(line)) unread[k] = (unread[k] || 0) + 1;
       } catch (e) {
         errors.push({ line, error: e.message });
       }
@@ -1731,7 +1784,7 @@ function parseMany(text) {
     const m = line.match(SCHEME);
     if (m && !/^https?$/i.test(m[1])) errors.push({ line, error: 'unsupported protocol: ' + m[1].toLowerCase() });
   }
-  return { servers, errors };
+  return { servers, errors, unread };
 }
 
 /* ===================== build share link (export) ===================== */
@@ -2067,7 +2120,7 @@ function migrateStoredServer(server) {
 }
 
 module.exports = {
-  parseLink, parseMany, b64decode, isHttpProxyLink,
+  parseLink, parseMany, unreadLinkKeys, unreadText, b64decode, isHttpProxyLink,
   buildStreamSettings, buildWireguardOutbound, makeWireguardServer, makeProxyServer, applyServerEdits, editFields, createServer,
   parseWireguardConf, isWireguardConf, splitDnsField, masqueServer,
   buildShareLink, migrateStoredServer, ssPluginOf

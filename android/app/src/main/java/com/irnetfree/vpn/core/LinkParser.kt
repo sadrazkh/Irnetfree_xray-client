@@ -206,7 +206,8 @@ object LinkParser {
             "allowInsecure" to jsOr(v, "allowInsecure", "insecure"),
             "ech" to v.optString("ech"),
             "pcs" to v.optString("pcs"),
-            "vcn" to v.optString("vcn"),
+            // `pcn`: one panel's name for vcn (parser.js tlsExtras)
+            "vcn" to v.optString("vcn").ifBlank { v.optString("pcn") },
             // PattN's ECH outbound: one line of JSON in a string (an object as it is)
             "echOutbound" to jsOr(v, "echOutbound"),
             // `cs` / `fm` are the standard short keys; the long ones are the form we used to emit
@@ -727,7 +728,8 @@ object LinkParser {
         echOutboundOf(q["echOutbound"])?.let { eo: JSONObject -> tls.put("echOutbound", eo) }
         val pcs = pinList(q["pcs"]?.takeIf { it.isNotBlank() } ?: q["pinnedPeerCertSha256"]?.takeIf { it.isNotBlank() } ?: q["pinSHA256"])
         if (pcs.isNotEmpty()) tls.put("pinnedPeerCertSha256", pcs)
-        val vcn = (q["vcn"]?.takeIf { it.isNotBlank() } ?: q["verifyPeerCertByName"] ?: "").split(",").map { it.trim() }.filter { it.isNotEmpty() }.joinToString(",")
+        // `pcn`: one panel's name for vcn — Fastly-fronted links carry sni=firefox.com&pcn=default.ssl.fastly.net
+        val vcn = (q["vcn"]?.takeIf { it.isNotBlank() } ?: q["verifyPeerCertByName"]?.takeIf { it.isNotBlank() } ?: q["pcn"] ?: "").split(",").map { it.trim() }.filter { it.isNotEmpty() }.joinToString(",")
         if (vcn.isNotEmpty()) tls.put("verifyPeerCertByName", vcn)
         return tls
     }
@@ -881,10 +883,11 @@ object LinkParser {
 
         if (security == "tls") {
             val tls = JSONObject()
-                .put("serverName", q.given("sni") ?: q.given("host") ?: "")
+                // `serverName` / `fingerprint`: the core's own key names, which some generators put in the link
+                .put("serverName", q.given("sni") ?: q.given("serverName") ?: q.given("host") ?: "")
                 // `insecure` / `allow_insecure`: hysteria2's, anytls' and tuic's spelling
                 .put("allowInsecure", isTrue(q["allowInsecure"]) || isTrue(q["insecure"]) || isTrue(q["allow_insecure"]))
-                .put("fingerprint", q.given("fp") ?: "chrome")
+                .put("fingerprint", q.given("fp") ?: q.given("fingerprint") ?: "chrome")
             q["alpn"]?.takeIf { it.isNotEmpty() }?.let { tls.put("alpn", JSONArray().apply { it.split(",").forEach { a -> put(a) } }) }
             // patterniha custom TLS: `unsafe` fingerprint + pinned cipherSuites.
             // `cs` is the standard share-link name, `cipherSuites` the long legacy one.
@@ -894,8 +897,8 @@ object LinkParser {
             stream.put("tlsSettings", tls)
         } else if (security == "reality") {
             stream.put("realitySettings", JSONObject()
-                .put("serverName", q.given("sni") ?: "")
-                .put("fingerprint", q.given("fp") ?: "chrome")
+                .put("serverName", q.given("sni") ?: q.given("serverName") ?: "")
+                .put("fingerprint", q.given("fp") ?: q.given("fingerprint") ?: "chrome")
                 .put("publicKey", q.given("pbk") ?: "")
                 .put("shortId", q.given("sid") ?: "")
                 .put("spiderX", q.given("spx") ?: "")
