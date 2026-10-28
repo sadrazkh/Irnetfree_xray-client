@@ -238,13 +238,42 @@ function ruleSetText(cidrs) {
  * password — one answer for both), 'disabled' | 'expired' | 'over',
  * 'assigned' (the admin gave this device to another user), 'maxDevices'.
  */
+/**
+ * What a phone types, as the stored account reads it. A sign-in on the
+ * router's page is typed on a phone (the owner's was refused with the
+ * username and password he had set): a keyboard capitalises the first letter (the
+ * page asks it not to — not every keyboard or captive-portal browser
+ * listens), a Persian keyboard's number row types ۰–۹ (some Arabic-Indic
+ * ٠–٩), and one may slip in a zero-width joiner or a direction mark. None is
+ * what the admin meant, and in a password box none of them shows. Both sides
+ * go through the same fold (NFKC, those digits as 0–9, the invisible marks
+ * gone), so a password typed exactly as stored still matches; a username is
+ * matched with its case aside too — model.js already keeps «Ali» and «ali»
+ * from being two users.
+ */
+const INVISIBLE = /[​-‏‪-‮⁦-⁩﻿]/g;
+function typed(s) {
+  return String(s == null ? '' : s).normalize('NFKC')
+    .replace(/[۰-۹]/g, d => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/[٠-٩]/g, d => String(d.charCodeAt(0) - 0x0660))
+    .replace(INVISIBLE, '');
+}
+const nameKey = (s) => typed(s).trim().toLowerCase();
+
+/**
+ * A sign-in on the portal: { ok: true, user } or { ok: false, code } — the
+ * page's message. A refusal for the name or the password carries `why`
+ * ('user' | 'password') for the router's own log alone: the page says the
+ * same for both.
+ */
 function judgeSignIn({ lu, sessions = {}, usage = {}, now = Date.now(), mac, username, password, checkPassword }) {
-  const name = str(username);
+  const name = nameKey(username);
   const users = (lu && lu.users) || [];
-  const user = users.find(u => str(u.username) === name && name) || null;
+  const user = users.find(u => name && nameKey(u.username) === name) || null;
   // the compare runs whether or not the name exists: its time says nothing about which it was
-  const match = checkPassword(String(password == null ? '' : password), user ? String(user.password == null ? '' : user.password) : '\0no-such-user\0');
-  if (!user || !match) return { ok: false, code: 'bad' };
+  const match = checkPassword(typed(password), user ? typed(user.password) : '\0no-such-user\0');
+  if (!user) return { ok: false, code: 'bad', why: 'user' };
+  if (!match) return { ok: false, code: 'bad', why: 'password' };
   const why = inactiveReason(user, { now, usage });
   if (why) return { ok: false, code: why };
   const bound = bindingsOf(lu, sessions, now);
@@ -260,5 +289,5 @@ function judgeSignIn({ lu, sessions = {}, usage = {}, now = Date.now(), mac, use
 
 module.exports = {
   DEFAULT_TRANSPARENT, OWN_TARGETS,
-  readLanUsers, transparentWanted, inactiveReason, routedTargets, addressOwners, bindingsOf, decide, nftKey, ruleSetText, hostCidr, judgeSignIn
+  readLanUsers, transparentWanted, inactiveReason, routedTargets, addressOwners, bindingsOf, decide, nftKey, ruleSetText, hostCidr, typed, judgeSignIn
 };
