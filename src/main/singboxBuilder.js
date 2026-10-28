@@ -121,7 +121,7 @@ function translateOutbound(server, tag) {
     throw new UnsupportedEngineConfig(`sing-box: protocol '${proto}' not supported (use Xray)`);
   }
 
-  const tls = translateTls(ss, server_addr);
+  const tls = translateTls(ss, server_addr, server.certPin);
   if (tls) {
     // sing-box (1.12+) splits the ClientHello itself: the link's fragment
     // setting asks for exactly that. Its sizes and delays are Xray's knobs;
@@ -180,25 +180,44 @@ function translateHysteria2(server, tag) {
   const mbps = (v) => { const m = /^(\d+(?:\.\d+)?)\s*m/i.exec(String(v || '')); return m ? Math.round(Number(m[1])) : 0; };
   if (mbps(qp.brutalUp)) out.up_mbps = mbps(qp.brutalUp);
   if (mbps(qp.brutalDown)) out.down_mbps = mbps(qp.brutalDown);
-  const tls = translateTls(ss, server.address) || { enabled: true, server_name: server.address };
+  const tls = translateTls(ss, server.address, server.certPin) || { enabled: true, server_name: server.address };
   // QUIC: no uTLS fingerprint, and the ALPN is Hysteria's own unless the link named one
   delete tls.utls;
   out.tls = tls;
   return prune(out);
 }
 
-function translateTls(ss, addr) {
+/**
+ * A certificate pin is a promise that no other certificate is taken: the
+ * link's `pcs` (pinnedPeerCertSha256: the SHA-256 of the certificate) or `vcn`
+ * (verifyPeerCertByName: the certificate checked against another name), or
+ * the one learnt on first use (server.certPin, certPin.js — the Xray config
+ * merges it into pinnedPeerCertSha256). sing-box can keep none of them: it
+ * pins a PUBLIC KEY (certificate_public_key_sha256), not a certificate, and
+ * has nothing like `vcn`. Skipping its check instead — as this did until
+ * v1.35.1 — accepted ANY certificate on a pinned server: a man in the middle
+ * unnoticed. So such a server is not sing-box's: this throws, and the caller
+ * runs it on Xray, which keeps all three, and says why in the connect log
+ * (main.js / service.js "— using Xray"; a ping measures it on Xray too).
+ * Every protocol this file translates runs on Xray, so nothing pinned has to
+ * stay here. Not a pin: `allowInsecure` alone (the Hysteria2 that asked for
+ * it with no pin is sing-box's on purpose — engineChoice.needsInsecureCore).
+ */
+function pinnedTls(t, certPin) {
+  return !!(String(t.pinnedPeerCertSha256 || '').trim() || String(t.verifyPeerCertByName || '').trim() || String(certPin || '').trim());
+}
+
+function translateTls(ss, addr, certPin) {
   const security = (ss.security || 'none').toLowerCase();
   if (security !== 'tls' && security !== 'reality') return null;
 
   const t = ss.tlsSettings || ss.realitySettings || {};
+  if (security === 'tls' && pinnedTls(t, certPin)) {
+    throw new UnsupportedEngineConfig('this server\'s certificate is pinned (pcs, vcn or pinned on first use), and sing-box could only check it by accepting any certificate');
+  }
   const tls = { enabled: true };
   tls.server_name = t.serverName || addr;
-  // sing-box can pin neither a certificate's hash (`pcs`: it pins a public
-  // key) nor verify it against another name (`vcn`): a link that carries one
-  // has a certificate the usual check refuses, so — as allowInsecure did —
-  // the check is skipped. The Xray cores keep both checks.
-  if (t.allowInsecure || (security === 'tls' && (t.pinnedPeerCertSha256 || t.verifyPeerCertByName))) tls.insecure = true;
+  if (t.allowInsecure) tls.insecure = true;
   const alpn = normalizeAlpn(t.alpn);
   if (alpn.length) tls.alpn = alpn;
 
