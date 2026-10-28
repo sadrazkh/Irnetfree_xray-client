@@ -180,7 +180,7 @@ test('the diagnostics dialog uses the shared controls and no hard-coded strings'
  */
 test('the TUN card carries the per-app routing controls, in both languages', () => {
   for (const id of ['tunAppRow', 'optTunAppMode', 'tunAppModeCards', 'tunAppsBlock',
-    'optTunApps', 'tunAppsPick', 'btnTunAppsPick', 'tunAppStrictNote', 'tunAppNeedsSingbox']) {
+    'tunAppsList', 'tunAppsEmpty', 'tunAppAdd', 'btnTunAppAdd', 'tunAppsPick', 'btnTunAppsPick', 'tunAppStrictNote', 'tunAppNeedsSingbox']) {
     assert.ok(htmlIds.has(id), `#${id} is missing from the TUN card`);
   }
 

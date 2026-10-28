@@ -196,6 +196,106 @@ test('writeConfig: opts.apps rides into buildTunConfig — rules present when se
   tun.removeWork();
 });
 
+/* ------------------------------ buildTunConfig: per-app configs (tunAppTargets.js) ------------------------------ */
+
+const PER_APP = {
+  mode: 'exclude',
+  names: ['Telegram.exe', 'chrome.exe', 'steam.exe', 'firefox.exe', 'code.exe', 'Discord.exe'],
+  to: { 'Telegram.exe': 'pa-0', 'steam.exe': 'block', 'firefox.exe': 'pa-1', 'code.exe': 'tunnel', 'Discord.exe': 'pa-0' },
+  loopbacks: [{ tag: 'pa-0', port: 41300 }, { tag: 'pa-1', port: 41301 }]
+};
+
+test('buildTunConfig: per-app configs — DNS first, then one rule per route in the order the apps first reach it', () => {
+  const cfg = buildTunConfig({ socksPort: 10808, apps: PER_APP });
+  assert.deepEqual(cfg.route.rules, [
+    // every app's lookup still goes to the tunnel's resolver first — the adapter's resolver is the peer
+    { port: 53, outbound: 'socks-out' },
+    { process_name: ['Telegram.exe', 'Discord.exe'], outbound: 'pa-0' },
+    { process_name: ['chrome.exe'], outbound: 'direct' },          // not in `to`: exclude's own route
+    { process_name: ['steam.exe'], action: 'reject' },
+    { process_name: ['firefox.exe'], outbound: 'pa-1' },
+    { process_name: ['code.exe'], outbound: 'socks-out' }
+  ]);
+  assert.equal(cfg.route.final, 'socks-out', 'every unlisted app rides the connection');
+  // each loopback once, after direct, pointing at its port; nothing else
+  assert.deepEqual(cfg.outbounds, [
+    { type: 'socks', tag: 'socks-out', server: '127.0.0.1', server_port: 10808, version: '5' },
+    { type: 'direct', tag: 'direct' },
+    { type: 'socks', tag: 'pa-0', server: '127.0.0.1', server_port: 41300, version: '5' },
+    { type: 'socks', tag: 'pa-1', server: '127.0.0.1', server_port: 41301, version: '5' }
+  ]);
+});
+
+test('buildTunConfig: per-app in "only" mode — an app the map does not name rides the connection; the rest goes direct', () => {
+  const cfg = buildTunConfig({ socksPort: 10808, apps: { mode: 'only', names: ['a.exe', 'b.exe', 'c.exe'], to: { 'b.exe': 'pa-0', 'c.exe': 'direct' }, loopbacks: [{ tag: 'pa-0', port: 41300 }] } });
+  assert.deepEqual(cfg.route.rules, [
+    { port: 53, outbound: 'socks-out' },
+    { process_name: ['a.exe'], outbound: 'socks-out' },
+    { process_name: ['b.exe'], outbound: 'pa-0' },
+    { process_name: ['c.exe'], outbound: 'direct' }
+  ]);
+  assert.equal(cfg.route.final, 'direct');
+});
+
+test('buildTunConfig: a `pa-<n>` with no usable loopback is blocked — never the connection, never a port nobody named', () => {
+  for (const loopbacks of [undefined, [], [{ tag: 'pa-1', port: 41301 }], [{ tag: 'pa-0', port: 0 }], [{ tag: 'pa-0', port: '41300' }], [{ tag: 'lu-tp-0', port: 41300 }], 'pa-0']) {
+    const cfg = buildTunConfig({ socksPort: 10808, apps: { mode: 'exclude', names: ['a.exe'], to: { 'a.exe': 'pa-0' }, loopbacks } });
+    assert.deepEqual(cfg.route.rules[1], { process_name: ['a.exe'], action: 'reject' }, JSON.stringify(loopbacks));
+    assert.ok(!cfg.outbounds.some(o => o.tag === 'pa-0'), JSON.stringify(loopbacks));
+  }
+  // a route word the builder does not know is blocked the same way
+  const odd = buildTunConfig({ socksPort: 10808, apps: { mode: 'exclude', names: ['a.exe'], to: { 'a.exe': 'srv-1' } } });
+  assert.deepEqual(odd.route.rules[1], { process_name: ['a.exe'], action: 'reject' });
+});
+
+test('buildTunConfig: legacyBlock (a sing-box older than 1.11) blocks with the `block` outbound instead of the reject action', () => {
+  const cfg = buildTunConfig({ socksPort: 10808, apps: PER_APP, legacyBlock: true });
+  assert.deepEqual(cfg.route.rules[3], { process_name: ['steam.exe'], outbound: 'block' });
+  assert.deepEqual(cfg.outbounds[cfg.outbounds.length - 1], { type: 'block', tag: 'block' });
+  // without a blocked app there is no block outbound at all
+  const none = buildTunConfig({ socksPort: 10808, apps: { mode: 'exclude', names: ['a.exe'], to: { 'a.exe': 'tunnel' } }, legacyBlock: true });
+  assert.ok(!none.outbounds.some(o => o.type === 'block'));
+});
+
+test('buildTunConfig: `to` absent — the per-app output of before, byte for byte, whatever loopbacks or legacyBlock say', () => {
+  for (const mode of ['exclude', 'only']) {
+    const before = JSON.stringify(buildTunConfig({ socksPort: 10808, apps: { mode, names: ['chrome.exe', 'Telegram.exe'] } }));
+    assert.equal(JSON.stringify(buildTunConfig({ socksPort: 10808, apps: { mode, names: ['chrome.exe', 'Telegram.exe'], loopbacks: [{ tag: 'pa-0', port: 41300 }] }, legacyBlock: true })), before, mode);
+    for (const to of [null, [], 'pa-0']) {
+      assert.equal(JSON.stringify(buildTunConfig({ socksPort: 10808, apps: { mode, names: ['chrome.exe', 'Telegram.exe'], to } })), before, `${mode} to=${JSON.stringify(to)}`);
+    }
+  }
+});
+
+test('singboxBefore: only a version read off the binary and older than the mark is "before"', () => {
+  const { singboxBefore } = require('../src/main/tunSingbox');
+  assert.equal(singboxBefore('1.10.7', [1, 11]), true);
+  assert.equal(singboxBefore('sing-box version 1.9.0', [1, 11]), true);
+  assert.equal(singboxBefore('0.9.9', [1, 11]), true);
+  for (const v of ['1.11.0', '1.13.14', '1.14.4', '2.0.0', '1.15.0-alpha.10']) assert.equal(singboxBefore(v, [1, 11]), false, v);
+  for (const v of ['', null, undefined, 'unknown']) assert.equal(singboxBefore(v, [1, 11]), false, String(v));
+});
+
+test('writeConfig: per-app routes ride into the config; the binary is asked its version only when there are any', () => {
+  const tun = new TunSingbox({ extraDirs: [], onLog: () => {} });
+  const asked = [];
+  tun.singboxVersion = (bin) => { asked.push(bin); return '1.14.4'; };
+  const { cfgFile } = tun.writeConfig(10808, [], { apps: PER_APP }, 'IRNetFree');
+  const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+  assert.deepEqual(cfg.route.rules[3], { process_name: ['steam.exe'], action: 'reject' });
+  assert.ok(cfg.outbounds.some(o => o.tag === 'pa-1' && o.server_port === 41301));
+  tun.removeWork();
+  const n = asked.length;
+  tun.writeConfig(10808, [], { apps: { mode: 'exclude', names: ['a.exe'] } }, 'IRNetFree');
+  tun.removeWork();
+  // dnsModeFor asks once per config; the per-app part asks nothing more without routes
+  assert.equal(asked.length - n, 1);
+  tun.singboxVersion = () => '1.10.7';
+  const { cfgFile: oldFile } = tun.writeConfig(10808, [], { apps: PER_APP }, 'IRNetFree');
+  assert.deepEqual(JSON.parse(fs.readFileSync(oldFile, 'utf8')).route.rules[3], { process_name: ['steam.exe'], outbound: 'block' });
+  tun.removeWork();
+});
+
 /* ------------------------------ udp_timeout: the router's UDP session lifetime (v1.16.2) ------------------------------ */
 
 test('buildTunConfig: udpTimeout (whole seconds) becomes the TUN inbound\'s udp_timeout, a JSON number, after every other key', () => {

@@ -41,7 +41,7 @@ const os = require('os');
 const model = require('./model');
 const { createLanUsersMeter } = require('./meter');
 const { createFirewall } = require('./firewall');
-const { groupRecordsById } = require('../../main/groups');
+const { recordsForTargets } = require('../../main/targetOutbounds');
 const { wgEndpointHosts } = require('../../main/configBuilder');
 const { lanStatus } = require('../../main/openwrtNet');
 const { isOwnTunInterface } = require('../../main/tunPlatform');
@@ -225,28 +225,9 @@ function registerLanUsers(o) {
   const saidOnce = new Set();
   const once = (key, line, level) => { if (saidOnce.has(key)) return; saidOnce.add(key); log({ line, level: level || 'warn' }); };
 
-  /** The records the targets name, as buildPlan makes them: groups as records beside the servers; a chain that lost a member is null. */
+  /** The records the targets name, as buildPlan makes them: groups as records beside the servers; a chain that lost a member is null (targetOutbounds.js). */
   function recordsFor(targets) {
-    const servers = store.get('servers', []);
-    const all = {};
-    for (const s of Array.isArray(servers) ? servers : []) if (s && s.id) all[s.id] = s;
-    const groups = store.get('groups', []);
-    Object.assign(all, groupRecordsById(Array.isArray(groups) ? groups : [], Object.assign({}, all)));
-    const chains = store.get('chains', []);
-    const serversById = {};
-    const chainsById = {};
-    for (const t of targets) {
-      if (!t || t === 'direct' || t === 'block') continue;
-      if (t.indexOf('chain:') === 0) {
-        const cid = t.slice('chain:'.length);
-        const c = (Array.isArray(chains) ? chains : []).find((x) => x && x.id === cid);
-        const ids = c && Array.isArray(c.members) ? c.members : [];
-        chainsById[cid] = ids.length && ids.every((id) => all[id]) ? ids.map((id) => all[id]) : null;
-        continue;
-      }
-      if (all[t]) serversById[t] = all[t];
-    }
-    return { serversById, chainsById };
+    return recordsForTargets(targets, { servers: store.get('servers', []), groups: store.get('groups', []), chains: store.get('chains', []) });
   }
 
   /** The WireGuard endpoint names of those records, resolved — a name that does not resolve is left out (xray.js then blocks that user rather than risk the core). */
