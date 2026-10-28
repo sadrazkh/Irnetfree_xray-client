@@ -79,6 +79,8 @@ const { dayText } = require('./jalali');
 const { registerLanUsers, lanCandidates: lanUsersCandidates } = require('../modules/lanUsers/ipc');
 const { createHotspotWatch } = require('../modules/lanUsers/hotspot');
 let lanUsers = null;
+// the tunnel's live connections by program (the Logs page's Connections tab)
+const { createConnectionsWatch } = require('./connectionsWatch');
 const https = require('https');
 
 let mainWindow = null;
@@ -1696,9 +1698,11 @@ async function connectOnce(serverId, opts = {}) {
         // does) — a hole in the exclusions either way, and wrong entirely for a
         // sing-box-format config, whose plan is not the one running.
         tunAdapterDns = adapterDnsServers(settings, hijacks ? dnsPeer : null);
-        // a Windows PC with the users module: the tunnel's loopback API (127.0.0.1, a secret), so the
-        // Users page can tell whether a device on the hotspot rides the tunnel (src/modules/lanUsers/hotspot.js)
-        const tunWatch = process.platform === 'win32' && settings.modules && settings.modules.lanUsers
+        // Every sing-box TUN of ours: its loopback API (127.0.0.1, a fresh secret per tunnel), read by the
+        // Logs page's Connections tab (connectionsWatch.js) and the Users page's hotspot check
+        // (src/modules/lanUsers/hotspot.js). The backend keeps it where sing-box can name a connection's
+        // program (tunSingbox.js WATCH_PLATFORMS); tun2socks and the native macOS service have no such API.
+        const tunWatch = myTun.backendId === 'sing-box' && !myTun.native
           ? { port: (await getFreePorts(1))[0], secret: require('crypto').randomBytes(16).toString('hex') } : null;
         // The addresses this connect resolved itself (pinnedIps: the WireGuard
         // endpoints, the entry servers' names) are what the core will dial
@@ -3496,6 +3500,18 @@ function registerIpc() {
       lanAddresses: () => lanUsersCandidates()
     }) : undefined
   });
+
+  /* ------------------------- the tunnel's live connections (connectionsWatch.js) ------------------------- */
+  // The Logs page's Connections tab: conns:get → the tunnel's open connections by program, with
+  // their bytes, rates and outbound, or why there are none to show; conns:close (id) → { ok }.
+  // Read only when the page asks (every ~1.5 s while the tab is open); the router's service
+  // answers the same two channels (service.js).
+  const connsWatch = createConnectionsWatch({
+    connected: () => !!(xray && xray.running) && !!store.get('activeServerId', null),
+    tun: () => (tun && tun.active ? tun : null)
+  });
+  ipcMain.handle('conns:get', () => connsWatch.read());
+  ipcMain.handle('conns:close', (e, id) => connsWatch.close(id));
 
   // Resolve a ping/test target: a single server OR a named chain's entry hop.
   // What latencyTest needs to know about this machine: a server that runs on

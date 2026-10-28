@@ -258,6 +258,7 @@ function escapeHtml(s) {
 }
 
 /* ----------------------------- navigation ----------------------------- */
+let logsTabNow = 'log';   // the Logs page's tab on show: 'log' | 'conns' (logsTab)
 function showView(view) {
   const btn = document.querySelector(`.nav-item[data-view="${view}"]`);
   if (!btn) return;
@@ -274,6 +275,8 @@ function showView(view) {
   if (view === 'modules' && window.extensionsPage) window.extensionsPage.refresh();
   // the Users page reads its users, devices and usage each time it opens (lanUsers.js)
   if (view === 'users' && window.lanUsersPage) window.lanUsersPage.refresh();
+  // the Logs page's Connections tab reads while it is on screen (connections.js stops by itself once it is not)
+  if (view === 'logs' && logsTabNow === 'conns' && window.connsPage) window.connsPage.open();
 }
 $$('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => showView(btn.dataset.view));
@@ -396,6 +399,7 @@ function setLang(lang) {
   if (window.multiWanCard) window.multiWanCard.render();   // the multi-internet card is drawn with t()
   if (window.extensionsPage) window.extensionsPage.render();   // …and so is the Extensions page
   if (window.lanUsersPage) window.lanUsersPage.render();   // …and so is the Users page
+  if (window.connsPage) window.connsPage.render();   // …and the Logs page's Connections tab
   // the chrome carries three strings that are not data-i18n nodes: the mode
   // badge, the path diagram's own labels and the inspector's on/off words
   applyUiMode(state.settings.uiMode || defaultUiMode());
@@ -466,6 +470,7 @@ async function init() {
   mountMultiWan();
   mountExtensions();
   mountLanUsers();
+  mountConns();
   renderServers();
   renderPicker();
   renderSubs();
@@ -925,6 +930,38 @@ async function lanUsersApplied(res) {
   if (Array.isArray(p)) setPending(p);
   else if (p === true) setPending([...new Set([...before, 'lanUsers'])]);
   if (state.connected && (state.pendingReconnect || []).some(k => !before.includes(k))) await promptApplySettings();
+}
+
+/* ------------------- the tunnel's live connections (connections.js) ------------------- */
+
+// The Logs page's two tabs: the log, and the tunnel's connections app by app
+// (logsTabNow, declared with showView). The second reads only while it is on
+// screen (visible), every 1.5 s.
+function logsTab(name) {
+  logsTabNow = name === 'conns' && window.connsPage && !$('#logsTabs').hidden ? 'conns' : 'log';
+  const conns = logsTabNow === 'conns';
+  for (const [id, on] of [['#logsTabLog', !conns], ['#logsTabConns', conns]]) {
+    $(id).classList.toggle('active', on);
+    $(id).setAttribute('aria-selected', String(on));
+  }
+  $('#logBox').hidden = conns;
+  $('#connsPage').hidden = !conns;
+  $('#btnClearLogs').hidden = conns;   // it clears the log, not the connections
+  if (conns && $('#view-logs').classList.contains('active')) window.connsPage.open();
+}
+$('#logsTabLog').onclick = () => logsTab('log');
+$('#logsTabConns').onclick = () => logsTab('conns');
+
+/** The Connections tab's box and hooks; on a back end without conns:get, and on the router, the tabs go. */
+function mountConns() {
+  const on = !!window.connsPage && window.connsPage.mount($('#connsPage'), {
+    connected: () => !!state.connected,
+    visible: () => logsTabNow === 'conns' && $('#view-logs').classList.contains('active'),
+    router: () => state.flavor === 'openwrt',
+    toast: (msg, kind) => toast(msg, kind)
+  });
+  $('#logsTabs').hidden = !on;
+  if (!on) logsTab('log');
 }
 
 /** The Users page's box and hooks: its config picker is the app's own (every config by its subscription). */
@@ -3059,6 +3096,7 @@ function renderTrafficPath(stateStr) {
   // the multi-internet card's live share bars go with the connection (multiWan.js)
   if (window.multiWanCard) window.multiWanCard.connection(live);
   if (window.lanUsersPage) window.lanUsersPage.connection(live);   // …and the Users page's live rates
+  if (window.connsPage) window.connsPage.connection(live);   // …and the tunnel's connections, app by app
   drawHomeFlowSoon();
   // the running groups (v1.28): none unless connected (the next tick says which); a node
   // carrying one gets its share bar, its count and its box; the card of what connected opens

@@ -891,11 +891,18 @@
 
       <!-- LOGS -->
       <section class="view" id="view-logs">
+        <!-- two tabs: the log, and the tunnel's live connections app by app (connections.js;
+             app.js logsTab — hidden on a back end without conns:get and on the router) -->
         <div class="view-head">
           <h2 data-i18n="logs.title">لاگ‌ها</h2>
+          <div class="seg logs-tabs" role="tablist" id="logsTabs">
+            <button class="seg-btn active" type="button" role="tab" id="logsTabLog" aria-selected="true" aria-controls="logBox" data-i18n="logs.tabLog">لاگ</button>
+            <button class="seg-btn" type="button" role="tab" id="logsTabConns" aria-selected="false" aria-controls="connsPage" data-i18n="logs.tabConns">اتصال‌ها</button>
+          </div>
           <button class="btn ghost" id="btnClearLogs" data-i18n="btn.clearLogs">پاک کردن</button>
         </div>
-        <pre class="logbox" id="logBox"></pre>
+        <pre class="logbox" id="logBox" role="tabpanel" aria-labelledby="logsTabLog"></pre>
+        <div class="conns" id="connsPage" role="tabpanel" aria-labelledby="logsTabConns" hidden></div>
       </section>
 
       <!-- EXTENSIONS: the advanced parts, installed or removed (modules.js the
@@ -1434,6 +1441,7 @@
   <script src="modules.js"></script>
   <script src="extensions.js"></script>
   <script src="lanUsers.js"></script>
+  <script src="connections.js"></script>
   <script src="serverFields.js"></script>
   <script src="app.js"></script>
 </body>

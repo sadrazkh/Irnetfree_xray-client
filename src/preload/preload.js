@@ -85,6 +85,11 @@ contextBridge.exposeInMainWorld('api', {
   lanUsersUser: (change) => ipcRenderer.invoke('lanusers:user', change),
   lanUsersDevice: (change) => ipcRenderer.invoke('lanusers:device', change),
 
+  // the tunnel's live connections by program (src/main/connectionsWatch.js): { available, apps, totals, … }
+  // or { available: false, reason }; a connection's id → { ok, error? } once it is closed
+  connsGet: () => ipcRenderer.invoke('conns:get'),
+  connsClose: (id) => ipcRenderer.invoke('conns:close', id),
+
   connectionDiagnostics: (probe) => ipcRenderer.invoke('diagnostics:connection', probe),
   repairNetwork: () => ipcRenderer.invoke('network:repair'),
   nativeService: (command) => ipcRenderer.invoke('native:service', command),

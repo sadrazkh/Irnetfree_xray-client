@@ -136,10 +136,14 @@ function normalizeAppNames(names) {
  * (the header of src/modules/lanUsers/router/index.js). Absent, or no usable
  * target: the output of before.
  *
- * `watch`: a Windows desktop's alone (writeConfig) — `{ port, secret }` of the
- * loopback API (`experimental.clash_api`) the users module reads the tunnel's
- * live connections from, to tell whether a device on the PC's hotspot rides
- * the tunnel (src/modules/lanUsers/hotspot.js). Absent: the output of before.
+ * `watch`: a desktop's alone (writeConfig, WATCH_PLATFORMS) — `{ port, secret }`
+ * of the loopback API (`experimental.clash_api`) the tunnel's live connections
+ * are read from: the Logs page's Connections tab (connectionsWatch.js — which
+ * program is connected where) and the users module's hotspot check (does a
+ * device on a Windows PC's hotspot ride the tunnel: src/modules/lanUsers/
+ * hotspot.js). With it `route.find_process`: sing-box looks up the program of
+ * every connection, not only where a `process_name` rule asks, so each one
+ * the API lists names it (`metadata.processPath`). Absent: the output of before.
  */
 function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = false, stack = 'system', mtu = 1500, interfaceName = TUN_IF, apps = null, udpTimeout = null, dnsMode = null, lanRoutes = null, watch = null } = {}) {
   void ipv6;
@@ -189,16 +193,31 @@ function buildTunConfig({ socksPort, excludeIps = [], ipv6 = false, strict = fal
     route
   };
   const w = watchOf(watch);
-  if (w) cfg.experimental = { clash_api: { external_controller: `127.0.0.1:${w.port}`, secret: w.secret } };
+  if (w) {
+    cfg.experimental = { clash_api: { external_controller: `127.0.0.1:${w.port}`, secret: w.secret } };
+    // every connection names its program (the API's processPath); `sing-box check` holds the key (scripts/validate-configs.js)
+    route.find_process = true;
+  }
   return cfg;
 }
 
 /**
+ * Where sing-box can name the program behind a connection, and so where a
+ * desktop's TUN gets the loopback API (writeConfig): Windows (the TCP / UDP
+ * tables), Linux (netlink and /proc — the TUN runs as root) and macOS's
+ * compatibility backend (the kernel's socket list; sing-box runs as root
+ * there too). Not the router (composed by tunOpenwrt.js: its tunnel carries
+ * the LAN's devices, not programs), and not the native macOS backend, whose
+ * config is the daemon's own (nativeMacTun.js never comes here).
+ */
+const WATCH_PLATFORMS = ['win32', 'linux', 'darwin'];
+
+/**
  * buildTunConfig's `watch` cleaned: { port, secret } of the loopback API the
- * users module reads the tunnel's live connections from (their source
- * addresses: does a device on the PC's Windows hotspot ride the tunnel? —
- * src/modules/lanUsers/hotspot.js), or null. The API listens on 127.0.0.1
- * alone and asks for the secret; absent, the output of before.
+ * tunnel's live connections are read from (connectionsWatch.js, and the users
+ * module's hotspot check — src/modules/lanUsers/hotspot.js), or null. The API
+ * listens on 127.0.0.1 alone and asks for the secret; absent, the output of
+ * before.
  */
 function watchOf(watch) {
   if (!watch || !Number.isInteger(watch.port) || watch.port < 1 || watch.port > 65535) return null;
@@ -463,8 +482,9 @@ class TunSingbox {
     // …and so are the users' per-device routes (src/modules/lanUsers/router)
     const lanRoutes = this.composedBy === 'openwrt' && opts.lanUsers ? (opts.lanUsers.singbox || null) : null;
     const dnsMode = this.dnsModeFor(opts);
-    // the desktop's look at the tunnel's connections (the users module's hotspot check): a Windows PC's alone
-    const watch = this.composedBy !== 'openwrt' && this.platform === 'win32' ? watchOf(opts.watch) : null;
+    // the desktop's look at the tunnel's connections, each with its program (the Connections tab, the
+    // users module's hotspot check): every desktop sing-box can name a program on — never the router
+    const watch = this.composedBy !== 'openwrt' && WATCH_PLATFORMS.includes(this.platform) ? watchOf(opts.watch) : null;
     this.watch = watch;
     const cfg = buildTunConfig({ socksPort, excludeIps, ipv6: !!opts.ipv6, strict: !!opts.strict, interfaceName, apps: opts.apps || null, udpTimeout, dnsMode, lanRoutes, watch });
     fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
@@ -963,6 +983,6 @@ class TunSingbox {
 }
 
 module.exports = {
-  TunSingbox, buildTunConfig, watchOf, tunDnsModeFor, buildMacSetupScript, buildMacTeardownScript, cidrOf,
+  TunSingbox, buildTunConfig, watchOf, WATCH_PLATFORMS, tunDnsModeFor, buildMacSetupScript, buildMacTeardownScript, cidrOf,
   TUN_IF, TUN_ADDR4, TUN_PEER4, TUN_ADDR6, TUN_PEER6
 };
